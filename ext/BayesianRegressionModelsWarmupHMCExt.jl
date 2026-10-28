@@ -546,6 +546,250 @@ function _adaptive_hsgp_centering_reparametrizer(blocks)
     state, WarmupHMC.IndexedReparametrization(pairs)
 end
 
+# Grouped HSGP weights mapped across their levels
+# (`BRM._HSGPLevelAdaptiveCenteringBlock`: `cor = Omega`, a known level
+# correlation, or per-level scales). Basis column `b`'s levels are one
+# correlated block with factor `C_b = diag(s_b) * L`, and level `k` is mapped
+# exactly like margin `k` of one group of a correlated random-effect block
+# (`_block_location`): centred on its conditional mean given levels `1..k-1`,
+# with scale `C_b[k, k]`. Independent levels (`L = I`) have location 0. Pairs
+# are term-major, then basis-major, then level-major, so a column's levels are
+# contiguous and in the inverse's dependency order. The cells join only the
+# joint wrapper, and their accessors follow `_block_location`'s Julia 1.10
+# rules: innovations in an `NTuple{N}` (`N` shared with the joint state's
+# random-effect capacity), per-pair data in flat vectors, and a term's
+# constants in one isbits `_HSGPLevelTerm` read once per call; nothing reads a
+# block struct inside the differentiated loops.
+struct _HSGPLevelTerm
+    correlated::Bool
+    # Known partial correlations (`cpc_value`) or sampled coordinates
+    # (`cpc_index`), from offset `cpc`.
+    known::Bool
+    cpc::Int
+    # The marginal SD: shared (`sigma`, coordinate 0 a known value at both
+    # bounds) or predicted per level (`intercept + sd * z[g]` on the log scale,
+    # `z[g]` the pair's `pair_sigma_z`).
+    sigma_predicted::Bool
+    sigma::Int
+    sigma_lower::Float64
+    sigma_upper::Float64
+    sigma_intercept::Int
+    sigma_sd::Int
+    sigma_sd_lower::Float64
+    sigma_sd_upper::Float64
+    # The length scale: shared (`n_rho` coordinates from offset `rho` of
+    # `rho_index`/`rho_lower`/`rho_upper`) or predicted per level and floored.
+    rho_predicted::Bool
+    rho::Int
+    n_rho::Int
+    rho_intercept::Int
+    rho_sd::Int
+    rho_sd_lower::Float64
+    rho_sd_upper::Float64
+    rho_floor::Float64
+    # Basis `b`'s frequency on axis `a` is `omega2[omega2_offset + (b-1)*n_axes + a]`.
+    n_axes::Int
+    omega2_offset::Int
+end
+
+mutable struct BRMHSGPLevelCenteringState{N}
+    blocks::Vector{BRM._HSGPLevelAdaptiveCenteringBlock}
+    terms::Vector{_HSGPLevelTerm}
+    pair_blocks::Vector{Int}
+    pair_level::Vector{Int}
+    pair_basis::Vector{Int}
+    pair_index::Vector{Int}
+    pair_sigma_z::Vector{Int}
+    pair_rho_z::Vector{Int}
+    cpc_index::Vector{Int}
+    cpc_value::Vector{Float64}
+    rho_index::Vector{Int}
+    rho_lower::Vector{Float64}
+    rho_upper::Vector{Float64}
+    omega2::Vector{Float64}
+    sources::Vector{Float64}
+    effect_indices::BitSet
+end
+
+_level_capacity(blocks) = max(1, maximum((size(b.effects, 1) for b in blocks); init=1) - 1)
+
+function BRMHSGPLevelCenteringState{N}(blocks) where {N}
+    _level_capacity(blocks) <= N || throw(ArgumentError(
+        "BRM HSGP level cells need innovation capacity $(_level_capacity(blocks)), got $N"))
+    terms = _HSGPLevelTerm[]
+    pair_blocks, pair_level, pair_basis, pair_index = Int[], Int[], Int[], Int[]
+    pair_sigma_z, pair_rho_z = Int[], Int[]
+    cpc_index, cpc_value = Int[], Float64[]
+    rho_index, rho_lower, rho_upper, omega2 = Int[], Float64[], Float64[], Float64[]
+    for (bi, block) in enumerate(blocks)
+        G, B = size(block.effects)
+        s, r = block.sigma, block.rho
+        push!(terms, _HSGPLevelTerm(
+            block.correlation !== :none, block.correlation === :data,
+            block.correlation === :data ? length(cpc_value) : length(cpc_index),
+            s.predicted, s.predicted ? 0 : only(s.coordinates),
+            s.predicted ? 0.0 : only(s.lower), s.predicted ? 0.0 : only(s.upper),
+            s.intercept, s.sd, s.sd_lower, s.sd_upper,
+            r.predicted, length(rho_index), length(r.coordinates),
+            r.intercept, r.sd, r.sd_lower, r.sd_upper, block.rho_floor,
+            size(block.omega2, 2), length(omega2)))
+        append!(cpc_index, block.cholesky_free)
+        append!(cpc_value, block.cholesky_cpc)
+        append!(rho_index, r.coordinates)
+        append!(rho_lower, r.lower)
+        append!(rho_upper, r.upper)
+        append!(omega2, vec(permutedims(block.omega2)))
+        for b in 1:B, g in 1:G
+            push!(pair_blocks, bi)
+            push!(pair_level, g)
+            push!(pair_basis, b)
+            push!(pair_index, block.effects[g, b])
+            push!(pair_sigma_z, s.sd == 0 ? 0 : s.z[g])
+            push!(pair_rho_z, r.sd == 0 ? 0 : r.z[g])
+        end
+    end
+    BRMHSGPLevelCenteringState{N}(collect(blocks), terms, pair_blocks, pair_level,
+        pair_basis, pair_index, pair_sigma_z, pair_rho_z, cpc_index, cpc_value,
+        rho_index, rho_lower, rho_upper, omega2, zeros(length(pair_index)),
+        BitSet(pair_index))
+end
+
+BRMHSGPLevelCenteringState(blocks) =
+    BRMHSGPLevelCenteringState{_level_capacity(blocks)}(blocks)
+
+# Partial correlation `j` of a term's level factor: known, or `tanh` of its
+# Stan `cholesky_factor_corr` coordinate.
+@inline _level_cpc(x, state, term, j) = term.known ?
+    convert(eltype(x), state.cpc_value[term.cpc + j]) :
+    tanh(x[state.cpc_index[term.cpc + j]])
+
+# Pair `q`'s level scale `s_b[g]` on the log scale (`BRM._adaptive_hsgp_level_log_scale`).
+@inline function _level_log_scale(x, state, term, b, q)
+    value = term.sigma_predicted ?
+        BRM._adaptive_hsgp_predicted_log(x, term.sigma_intercept, term.sigma_sd,
+            term.sigma_sd_lower, term.sigma_sd_upper, state.pair_sigma_z[q]) :
+        log(BRM._adaptive_hsgp_hyper(x, term.sigma, term.sigma_lower, term.sigma_upper))
+    base = term.omega2_offset + (b - 1) * term.n_axes
+    for axis in 1:term.n_axes
+        rho = if term.rho_predicted
+            max(exp(BRM._adaptive_hsgp_predicted_log(x, term.rho_intercept, term.rho_sd,
+                term.rho_sd_lower, term.rho_sd_upper, state.pair_rho_z[q])), term.rho_floor)
+        else
+            j = term.rho + (term.n_rho == 1 ? 1 : axis)
+            BRM._adaptive_hsgp_hyper(x, state.rho_index[j], state.rho_lower[j],
+                                     state.rho_upper[j])
+        end
+        value = BRM._adaptive_hsgp_axis_log_scale(value, rho, state.omega2[base + axis])
+    end
+    BRM._adaptive_hsgp_floor(value)
+end
+
+# Pair `p`'s source-frame location: `sum(C_b[k, l] * z[l] for l < k)`, with
+# the column's earlier innovations recovered from their source coordinates in
+# `u` (their source controls in `sources`) exactly as `_block_location`
+# recovers a group's earlier margins. Every other coordinate is read from `x`;
+# the joint wrapper passes the source vector as both, and the learned-order
+# inverse passes the source being rebuilt as `u`.
+@inline function _level_location(x, u, state::BRMHSGPLevelCenteringState{N}, p) where {N}
+    T = eltype(x)
+    k = state.pair_level[p]
+    term = state.terms[state.pair_blocks[p]]
+    (k == 1 || !term.correlated) && return zero(T)
+    b = state.pair_basis[p]
+    first = p - k
+    innovations = ntuple(_ -> zero(T), Val(N))
+    m = zero(T)
+    for i in 1:k
+        q = first + i
+        tau = exp(_level_log_scale(x, state, term, b, q))
+        m = zero(T)
+        stick = one(T)
+        offset = (i - 1) * (i - 2) ÷ 2
+        for l in 1:i-1
+            z = _level_cpc(x, state, term, offset + l)
+            m += (tau * (stick * z)) * innovations[l]
+            stick *= sqrt(one(T) - z * z)
+        end
+        if i < k
+            c = state.sources[q]
+            s = tau * stick
+            innovations = _tset(innovations, (u[state.pair_index[q]] - c * m) / s^c, i)
+        end
+    end
+    m
+end
+
+# Pair `p`'s log scale `log C_b[k, k]`: the level's log spectral scale plus
+# the log of its row's stick.
+@inline function _level_pair_log_scale(x, state::BRMHSGPLevelCenteringState, p)
+    T = eltype(x)
+    k = state.pair_level[p]
+    term = state.terms[state.pair_blocks[p]]
+    value = _level_log_scale(x, state, term, state.pair_basis[p], p)
+    term.correlated || return value
+    stick = one(T)
+    offset = (k - 1) * (k - 2) ÷ 2
+    for l in 1:k-1
+        z = _level_cpc(x, state, term, offset + l)
+        stick *= sqrt(one(T) - z * z)
+    end
+    value + log(stick)
+end
+
+_level_pair_index(state, p) = state.pair_index[p]
+
+# Every level cell's frame, column by column: the same triangular frame as one
+# group of a correlated random-effect block (`_centering_frame` above) with
+# `C_b` as the group's factor. A floored level scale scores every candidate in
+# the non-centred frame (scale 1, location 0), as a floored HSGP basis weight
+# does (`BRMHSGPAdaptiveCenteringState`), so a level scored only on the floor
+# keeps `c = 0`; its innovation and gradient keep the floored scale.
+function _centering_frame(state::BRMHSGPLevelCenteringState, position, gradient)
+    T = promote_type(eltype(position), eltype(gradient), Float64)
+    n = length(state.sources)
+    source = T.(state.sources)
+    location = Vector{T}(undef, n)
+    scale = Vector{T}(undef, n)
+    innovation = Vector{T}(undef, n)
+    invariant_gradient = Vector{T}(undef, n)
+    p = 0
+    for block in state.blocks
+        G, B = size(block.effects)
+        L = BRM._adaptive_hsgp_level_correlation_factor(position, block)
+        A = zeros(T, G, G)
+        z = Vector{T}(undef, G)
+        gu = Vector{T}(undef, G)
+        h = Vector{T}(undef, G)
+        for b in 1:B
+            for j in 1:G
+                q = p + j
+                log_s = BRM._adaptive_hsgp_level_log_scale(position, block, j, b)
+                tau = exp(log_s)
+                c = source[q]
+                m = zero(T)
+                for l in 1:j-1
+                    m += tau * L[j, l] * z[l]
+                    A[j, l] = c * tau * L[j, l]
+                end
+                s = tau * L[j, j]
+                z[j] = (position[block.effects[j, b]] - c * m) / s^c
+                A[j, j] = s^c
+                floored = log_s <= BRM._ADAPTIVE_HSGP_LOG_SCALE_EXACT
+                location[q] = floored ? zero(T) : m
+                scale[q] = floored ? one(T) : s
+                innovation[q] = z[j]
+                gu[j] = gradient[block.effects[j, b]]
+            end
+            BRM.LinearAlgebra.mul!(h, transpose(A), gu)
+            invariant_gradient[p .+ (1:G)] .= h
+            p += G
+        end
+    end
+    BRMAdaptiveCenteringFrame(source, location, scale, innovation, invariant_gradient)
+end
+
+const _NO_LEVEL_BLOCKS = BRM._HSGPLevelAdaptiveCenteringBlock[]
+
 # Scalar cells with a constant location and a raw log-scale coordinate: exact
 # totals (location = prior total, compiled at c = 1) and S2Z free contrasts
 # (location 0, compiled at c = 0 or 1). Cells enumerate totals first, then S2Z
@@ -1065,9 +1309,10 @@ end
 # joint pair therefore carries the same `BRMJointAdaptiveCenteringArgument`,
 # which selects by pair-number range: pairs `1:n_ranef` are ordinary cells, the
 # next `n_r2d2` are R2D2 cells, then `n_hsgp` HSGP basis-weight cells, then
-# `n_scalar` scalar total/S2Z cells, and the rest are car cells. A model without
-# R2D2 blocks has `n_r2d2 = 0` and one without scalar or car cells has none, so
-# each keeps the historical ordinary-then-HSGP pair order.
+# `n_level` HSGP level cells, then `n_scalar` scalar total/S2Z cells, and the
+# rest are car cells. A model without R2D2 blocks has `n_r2d2 = 0` and one
+# without level, scalar or car cells has none, so each keeps the historical
+# ordinary-then-HSGP pair order.
 #
 # Ordinary and R2D2 cells share one derived-scale state: an ordinary block
 # joins it in derived-scale form (`BRM._adaptive_derived_block`), whose `tau` is
@@ -1080,11 +1325,13 @@ end
 struct BRMJointAdaptiveCenteringState{N}
     ranef::BRMR2D2AdaptiveCenteringState{N}
     hsgp::BRMHSGPAdaptiveCenteringState
+    level::BRMHSGPLevelCenteringState{N}
     scalar::BRMScalarCenteringState
     car::BRMCARAdaptiveCenteringState
     n_ranef::Int
     n_r2d2::Int
     n_hsgp::Int
+    n_level::Int
     n_scalar::Int
 end
 
@@ -1107,9 +1354,11 @@ function (arg::BRMJointAdaptiveCenteringArgument{:location})(x)
     s = arg.state
     p <= s.n_ranef + s.n_r2d2 && return _block_location(x, s.ranef, p)
     q = p - s.n_ranef - s.n_r2d2 - s.n_hsgp
+    q <= 0 && return zero(eltype(x))
+    q <= s.n_level && return _level_location(x, x, s.level, q)
+    q -= s.n_level
     q > s.n_scalar && return _car_location(x, s.car, q - s.n_scalar)
-    q > 0 && return convert(eltype(x), s.scalar.locations[q])
-    zero(eltype(x))
+    convert(eltype(x), s.scalar.locations[q])
 end
 
 function (arg::BRMJointAdaptiveCenteringArgument{:log_scale})(x)
@@ -1122,10 +1371,13 @@ function (arg::BRMJointAdaptiveCenteringArgument{:log_scale})(x)
     elseif p <= s.n_ranef + s.n_r2d2 + s.n_hsgp
         bi, basis = _hsgp_pair_location(s.hsgp, p - s.n_ranef - s.n_r2d2)
         BRM._adaptive_hsgp_log_scale(x, s.hsgp.blocks[bi], basis)
-    elseif p <= s.n_ranef + s.n_r2d2 + s.n_hsgp + s.n_scalar
-        x[s.scalar.scales[p - s.n_ranef - s.n_r2d2 - s.n_hsgp]]
+    elseif p <= s.n_ranef + s.n_r2d2 + s.n_hsgp + s.n_level
+        _level_pair_log_scale(x, s.level, p - s.n_ranef - s.n_r2d2 - s.n_hsgp)
+    elseif p <= s.n_ranef + s.n_r2d2 + s.n_hsgp + s.n_level + s.n_scalar
+        x[s.scalar.scales[p - s.n_ranef - s.n_r2d2 - s.n_hsgp - s.n_level]]
     else
-        _car_log_scale(x, s.car, p - s.n_ranef - s.n_r2d2 - s.n_hsgp - s.n_scalar)
+        _car_log_scale(x, s.car,
+                       p - s.n_ranef - s.n_r2d2 - s.n_hsgp - s.n_level - s.n_scalar)
     end
 end
 
@@ -1135,18 +1387,21 @@ function _joint_pair_family(state::BRMJointAdaptiveCenteringState, i)
     i -= state.n_ranef + state.n_r2d2
     i <= state.n_hsgp && return (:hsgp, i)
     i -= state.n_hsgp
+    i <= state.n_level && return (:level, i)
+    i -= state.n_level
     i <= state.n_scalar && return (:scalar, i)
     (:car, i - state.n_scalar)
 end
 
 _joint_pair_index(state, family, j) =
     family === :hsgp ? _hsgp_pair_index(state.hsgp, j) :
+    family === :level ? _level_pair_index(state.level, j) :
     family === :scalar ? state.scalar.indices[j] :
     family === :car ? _car_pair_index(state.car, j) : _pair_index(state.ranef, j)
 
 function _sync_sources!(state::BRMJointAdaptiveCenteringState, ir)
-    n_cells = state.n_ranef + state.n_r2d2 + state.n_hsgp + state.n_scalar +
-              length(state.car.sources)
+    n_cells = state.n_ranef + state.n_r2d2 + state.n_hsgp + state.n_level +
+              state.n_scalar + length(state.car.sources)
     length(ir.pairs) == n_cells || throw(DimensionMismatch(
         "BRM joint adaptive-centering plan has $n_cells cells but the " *
         "WarmupHMC reparametrizer has $(length(ir.pairs)) pairs",
@@ -1172,6 +1427,7 @@ function _centering_frame(state::BRMJointAdaptiveCenteringState, position, gradi
                           ordered=nothing)
     frames = (_centering_frame(state.ranef, position, gradient, ordered),
               _centering_frame(state.hsgp, position, gradient),
+              _centering_frame(state.level, position, gradient),
               _centering_frame(state.scalar, position, gradient),
               _centering_frame(state.car, position, gradient))
     # Field by field: a splatted generator over `fieldnames` does not infer, and
@@ -1195,19 +1451,33 @@ const _NO_CAR_BLOCKS = BRM._CARAdaptiveCenteringBlock[]
 # per-pair wrapper below and the learned-order wrapper
 # (`_adaptive_ordered_centering_reparametrizer`).
 function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
-                                car_blocks=_NO_CAR_BLOCKS; locations=nothing)
+                                car_blocks=_NO_CAR_BLOCKS; locations=nothing,
+                                level_blocks=_NO_LEVEL_BLOCKS)
+    # One innovation capacity for the random-effect and HSGP level cells, so
+    # the joint state keeps one type parameter; it is the random-effect one
+    # whenever there are no level cells.
+    N = max(_innovation_capacity(vcat(BRM.AbstractAdaptiveCenteringBlock[], blocks,
+                                      r2d2_blocks)),
+            isempty(level_blocks) ? 1 : _level_capacity(level_blocks))
     hsgp_state = BRMHSGPAdaptiveCenteringState(hsgp_blocks)
+    level_state = BRMHSGPLevelCenteringState{N}(level_blocks)
     scalar_state = _scalar_centering_state(scalar_cells)
     car_state = BRMCARAdaptiveCenteringState(car_blocks)
     block_effects(bs) = BitSet(Iterators.flatten(vec(b.effects) for b in bs))
     effects = (block_effects(blocks), block_effects(r2d2_blocks),
-               hsgp_state.effect_indices, BitSet(scalar_state.indices),
-               car_state.effect_indices)
+               hsgp_state.effect_indices, level_state.effect_indices,
+               BitSet(scalar_state.indices), car_state.effect_indices)
     sum(length, effects) == length(union(effects...)) || error(
         "BRM joint adaptive centering: ordinary, R2D2, HSGP, total/S2Z and car " *
         "cells claim overlapping unconstrained coordinates; refusing an " *
         "ambiguous transform.",
     )
+    for block in level_blocks
+        isdisjoint(BRM._adaptive_read_coordinates(block), union(effects...)) || error(
+            "BRM joint adaptive centering: grouped HSGP `$(block.term)` reads its " *
+            "level correlation or scales from a coordinate another cell rewrites; " *
+            "refusing an inexact transform.")
+    end
     for block in car_blocks
         reads = filter(!=(0), vcat(block.sigma, block.rho, block.intercept,
                                    block.bym2 ? block.structured : Int[]))
@@ -1240,20 +1510,24 @@ function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
     # Block order fixes pair order, which is load-bearing across
     # checkpoint/resume (positional restore): ordinary cells first, then R2D2
     # cells, each in the family's own block/group/term order, then HSGP
-    # basis-weight cells, then scalar total and S2Z cells
+    # basis-weight cells, then HSGP level cells (term, basis, level), then
+    # scalar total and S2Z cells
     # (`_scalar_centering_cells` order), then car cells (per block, in
     # `_adaptive_car_cell` order).
-    ranef_state = BRMR2D2AdaptiveCenteringState(vcat(
+    ranef_blocks = vcat(
         BRM.R2D2AdaptiveCenteringBlock[BRM._adaptive_derived_block(b) for b in blocks],
-        r2d2_blocks,
-    ), isnothing(locations) ? nothing :
-        vcat(_block_locations(blocks, locations), _block_locations(r2d2_blocks, locations)))
+        r2d2_blocks)
+    ranef_state = BRMR2D2AdaptiveCenteringState{N}(ranef_blocks,
+        _ranef_pair_layout(ranef_blocks, isnothing(locations) ? nothing :
+            vcat(_block_locations(blocks, locations),
+                 _block_locations(r2d2_blocks, locations)))...)
     _check_locations_read_only(ranef_state, union(effects...))
     n_ranef = sum(b -> b.ranef.n_terms * b.ranef.n_groups, blocks; init=0)
     n_r2d2 = length(ranef_state.sources) - n_ranef
     n_hsgp = length(hsgp_state.sources)
-    BRMJointAdaptiveCenteringState(ranef_state, hsgp_state, scalar_state, car_state,
-                                   n_ranef, n_r2d2, n_hsgp,
+    BRMJointAdaptiveCenteringState(ranef_state, hsgp_state, level_state, scalar_state,
+                                   car_state, n_ranef, n_r2d2, n_hsgp,
+                                   length(level_state.sources),
                                    length(scalar_state.sources))
 end
 
@@ -1264,7 +1538,9 @@ function _joint_targets(state::BRMJointAdaptiveCenteringState, scalar_cells)
              for p in eachindex(state.ranef.sources)]
     hsgp = [state.hsgp.blocks[bi].target_c[basis]
             for (bi, basis) in zip(state.hsgp.pair_blocks, state.hsgp.pair_basis)]
-    vcat(ranef, hsgp, Float64.(scalar_cells.targets), zeros(length(state.car.sources)))
+    # Grouped HSGP weights are emitted standardized (`c=0`).
+    vcat(ranef, hsgp, zeros(state.n_level), Float64.(scalar_cells.targets),
+         zeros(length(state.car.sources)))
 end
 
 _joint_cell_index(state::BRMJointAdaptiveCenteringState, p) =
@@ -1272,9 +1548,10 @@ _joint_cell_index(state::BRMJointAdaptiveCenteringState, p) =
 
 function _adaptive_joint_centering_reparametrizer(
         blocks, hsgp_blocks, r2d2_blocks=BRM.R2D2AdaptiveCenteringBlock[],
-        scalar_cells=_NO_SCALAR_CELLS, car_blocks=_NO_CAR_BLOCKS; locations=nothing)
+        scalar_cells=_NO_SCALAR_CELLS, car_blocks=_NO_CAR_BLOCKS; locations=nothing,
+        level_blocks=_NO_LEVEL_BLOCKS)
     state = _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
-                                   car_blocks; locations)
+                                   car_blocks; locations, level_blocks)
     pairs = [_joint_cell_index(state, p) => WarmupHMC.Reparametrization(
                  WarmupHMC.PartiallyCentered(c), WarmupHMC.PartiallyCentered(c),
                  BRMJointAdaptiveCenteringArgument(state, p, :location),
@@ -1528,9 +1805,10 @@ end
 
 function _adaptive_ordered_centering_reparametrizer(
         blocks, hsgp_blocks, r2d2_blocks=BRM.R2D2AdaptiveCenteringBlock[],
-        scalar_cells=_NO_SCALAR_CELLS, car_blocks=_NO_CAR_BLOCKS; locations=nothing)
+        scalar_cells=_NO_SCALAR_CELLS, car_blocks=_NO_CAR_BLOCKS; locations=nothing,
+        level_blocks=_NO_LEVEL_BLOCKS)
     state = _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
-                                   car_blocks; locations)
+                                   car_blocks; locations, level_blocks)
     n = length(state.ranef.blocks)
     matrices() = [Matrix{Int}(undef, 0, 0) for _ in 1:n]
     vectors() = [Int[] for _ in 1:n]
@@ -1720,6 +1998,8 @@ function WarmupHMC.with_logabsdet_jacobian!(y::AbstractVector,
             s.hsgp.sources[p], ir.direction)
     end
     offset += s.n_hsgp
+    ljac += _ordered_level_map!(y, x, s.level, ir.targets, offset, ir.direction)
+    offset += s.n_level
     for p in eachindex(s.scalar.sources)
         ljac += _cell_map!(y, x, s.scalar.indices[p], s.scalar.locations[p],
             x[s.scalar.scales[p]], ir.targets[offset + p], s.scalar.sources[p],
@@ -1728,6 +2008,26 @@ function WarmupHMC.with_logabsdet_jacobian!(y::AbstractVector,
     offset += s.n_scalar
     ljac += _ordered_car_map!(y, x, s.car, ir.targets, offset, ir.direction)
     ljac, y
+end
+
+# HSGP level cells inside the learned-order wrapper; `targets[offset + p]` is
+# level pair `p`'s compiled frame. A level's location reads the earlier levels
+# of its column in the source frame. Source -> compiled reads them from `x`,
+# walking the pairs backwards so that `y === x` still holds them unwritten;
+# compiled -> source reads them from the source being rebuilt in `y`, walking
+# forwards (WarmupHMC's inverse order). Scales and correlations read
+# coordinates no cell rewrites, from `x`.
+function _ordered_level_map!(y, x, state::BRMHSGPLevelCenteringState, targets, offset,
+                             direction)
+    ljac = zero(eltype(x))
+    n = length(state.sources)
+    for p in (direction > 0 ? (n:-1:1) : (1:n))
+        ljac += _cell_map!(y, x, state.pair_index[p],
+            _level_location(x, direction > 0 ? x : y, state, p),
+            _level_pair_log_scale(x, state, p), targets[offset + p], state.sources[p],
+            direction)
+    end
+    ljac
 end
 
 # Car cells inside the learned-order wrapper; `targets[offset + p]` is car pair
@@ -1750,13 +2050,14 @@ WarmupHMC.InverseFunctions.inverse(ir::BRMOrderedCenteringReparametrization) =
         -ir.direction)
 
 WarmupHMC.reparam_controls(ir::BRMOrderedCenteringReparametrization) =
-    vcat(ir.state.ranef.sources, ir.state.hsgp.sources, ir.state.scalar.sources,
-         ir.state.car.sources)
+    vcat(ir.state.ranef.sources, ir.state.hsgp.sources, ir.state.level.sources,
+         ir.state.scalar.sources, ir.state.car.sources)
 
 function WarmupHMC.restore_reparam_controls!(ir::BRMOrderedCenteringReparametrization,
                                              controls)
     s = ir.state
-    sources = (s.ranef.sources, s.hsgp.sources, s.scalar.sources, s.car.sources)
+    sources = (s.ranef.sources, s.hsgp.sources, s.level.sources, s.scalar.sources,
+               s.car.sources)
     n = sum(length, sources)
     controls isa AbstractVector && length(controls) == n || throw(ArgumentError(
         "BRM learned-order centering controls must be one value per adaptive " *
@@ -1825,8 +2126,8 @@ end
 # over all cells), so the map applies both, the log-Jacobian is their sum, and
 # each selects its controls from the same window evidence. A per-pair primary
 # then adapts at restarting windows too, with the scores its online plan uses.
-# Controls keep the joint pair order: ordinary, R2D2 and HSGP cells (`split`),
-# then totals, then the primary's S2Z and car cells.
+# Controls keep the joint pair order: ordinary, R2D2, HSGP and HSGP level cells
+# (`split`), then totals, then the primary's S2Z and car cells.
 struct BRMTotalsBesideCenteringReparametrization{P,T} <: WarmupHMC.AbstractReparametrization
     primary::P
     totals::T
@@ -1892,7 +2193,8 @@ function WarmupHMC.restore_reparam_controls!(ir::BRMTotalsBesideCenteringReparam
     np, nt = length(_primary_controls(ir.primary)), length(ir.totals.state.sources)
     controls isa AbstractVector && length(controls) == np + nt || throw(ArgumentError(
         "BRM centering controls must be one value per adaptive cell ($(np + nt)), in " *
-        "the joint pair order: ordinary, R2D2 and HSGP cells, totals, S2Z, car"))
+        "the joint pair order: ordinary, R2D2, HSGP and HSGP level cells, totals, " *
+        "S2Z, car"))
     all(c -> c isa Real && isfinite(c) && 0 <= c <= 1, controls) ||
         throw(ArgumentError("centeredness values must lie in [0,1]"))
     WarmupHMC.restore_reparam_controls!(ir.totals, controls[ir.split .+ (1:nt)])
@@ -1908,22 +2210,26 @@ _totals_beside_synchronize!(ir) = (_primary_synchronize!(ir.primary); ir)
 
 function _totals_beside_centering_problem(model, problem, ad_backend, names, centeredness,
                                           ordinary, hsgp_blocks, r2d2_blocks, car_blocks,
-                                          learned; locations=nothing)
+                                          learned; locations=nothing,
+                                          level_blocks=_NO_LEVEL_BLOCKS)
     # Refuses overlapping or cross-reading coordinates over every cell, totals
     # included, as the single wrapper did; a population location read from a
     # total cell is refused here too.
     _joint_centering_state(ordinary, hsgp_blocks, r2d2_blocks,
-                           _scalar_centering_cells(model, names), car_blocks; locations)
+                           _scalar_centering_cells(model, names), car_blocks; locations,
+                           level_blocks)
     s2z = BRM._s2z_centering_cells(model, names)
     primary = last(learned ?
         _adaptive_ordered_centering_reparametrizer(ordinary, hsgp_blocks, r2d2_blocks,
-                                                   s2z, car_blocks; locations) :
+                                                   s2z, car_blocks; locations,
+                                                   level_blocks) :
         _adaptive_joint_centering_reparametrizer(ordinary, hsgp_blocks, r2d2_blocks,
-                                                 s2z, car_blocks; locations))
+                                                 s2z, car_blocks; locations,
+                                                 level_blocks))
     state = _primary_state(primary)
     ir = BRMTotalsBesideCenteringReparametrization(primary,
         _mean_totals_reparametrizer(model, names; s2z=false),
-        state.n_ranef + state.n_r2d2 + state.n_hsgp)
+        state.n_ranef + state.n_r2d2 + state.n_hsgp + state.n_level)
     # Random-effect pairs lead both the joint order and this wrapper's, so
     # `:midpoint` moves exactly them; totals keep their compiled start.
     controls = _initial_controls(
@@ -2405,11 +2711,27 @@ literal spectral/model-scale coefficient. A compiled fixed-partial model
 starts at its declared per-basis `centeredness` values, not at zero. Grouped
 HSGPs adapt one cell per (group, basis) weight around the same shared
 per-basis frame; periodic terms contribute one cell per cosine/sine weight
-and join the same HSGP pair order. Ordinary random-effect cells, R2D2 cells
-and HSGP basis-weight cells adapt together in one wrapper: pairs enumerate
-ordinary cells first, then R2D2 cells, then HSGP cells, then total and S2Z
-cells, then car cells, each in the family's own deterministic order (that
-order is load-bearing across checkpoint/resume; a model without R2D2 blocks,
+and join the same HSGP pair order.
+
+A grouped HSGP whose levels are correlated (`hsgp(x...; by=g, cor=Omega)`,
+with `Omega` a sampled `LKJCholesky` or a known correlation matrix) or scaled
+per level (a hyper-predictor such as `log(sd(hsgp(x))) ~ 1 + (1 | g)`) is
+mapped per basis function across its levels instead: basis column `b`'s
+weights are `w_b = diag(s_b) * L * z_b`, `s_b[g]` level `g`'s spectral scale
+and `L` the level correlation's factor (`I` without `cor=`), so the column is
+one correlated block with factor `C_b = diag(s_b) * L`. Level `k` is centred on
+its conditional mean given levels `1..k-1` in the grouping's level order, with
+scale `C_b[k, k]`, exactly as a margin of a correlated random-effect block:
+`c=0` is the emitted standardized weight and `c=1` the level weight `w_b[k]`.
+`ranef_order=:learned` reorders random-effect blocks only; level cells keep
+the level order. A multigroup `cor=` is refused.
+
+Ordinary random-effect cells, R2D2 cells, HSGP basis-weight cells and HSGP
+level cells adapt together in one wrapper: pairs enumerate ordinary cells
+first, then R2D2 cells, then HSGP cells, then HSGP level cells (term by term,
+basis by basis, level by level), then total and S2Z cells, then car cells,
+each in the family's own deterministic order (that order is load-bearing
+across checkpoint/resume; a model without R2D2 blocks, level-mapped HSGPs,
 total/S2Z cells or car fields keeps the historical ordinary-then-HSGP order).
 
 An R2D2 block (`sd(...) ~ r2d2(...)` in any of its block-wide, per-margin ICC
@@ -2496,6 +2818,7 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
         isempty(BRM._total_blocks_by_placement(model).sampled) &&
             isempty(BRM.adaptive_centering_blocks(model, names)) &&
             isempty(BRM._adaptive_hsgp_centering_blocks(model, names)) &&
+            isempty(BRM._adaptive_hsgp_level_centering_blocks(model, names)) &&
             isempty(BRM._adaptive_cdar_centering_blocks(model, names)) &&
             isempty(BRM._adaptive_car_centering_blocks(model, names)) ||
             throw(ArgumentError("s2z_rule=:fisher cannot yet be combined with " *
@@ -2511,6 +2834,7 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
     # Hierarchical centring: each eligible cell's population coefficient.
     locations = BRM._adaptive_ranef_locations(model, blocks, names)
     hsgp_blocks = BRM._adaptive_hsgp_centering_blocks(model, names)
+    level_blocks = BRM._adaptive_hsgp_level_centering_blocks(model, names)
     cdar_blocks = BRM._adaptive_cdar_centering_blocks(model, names)
     car_blocks = BRM._adaptive_car_centering_blocks(model, names)
     total_blocks = BRM._total_blocks_by_placement(model).sampled
@@ -2520,7 +2844,8 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
         isempty(cdar_blocks) || throw(ArgumentError(
             "adaptive total coefficients and S2Z contrasts cannot yet be mixed with cdar blocks; use total_groups=() and s2z_groups=() for the conventional model"))
     end
-    if scalar && isempty(blocks) && isempty(hsgp_blocks) && isempty(car_blocks)
+    if scalar && isempty(blocks) && isempty(hsgp_blocks) && isempty(car_blocks) &&
+            isempty(level_blocks)
         isempty(total_blocks) || return _mean_totals_centering_problem(
             model, problem, ad_backend, names, centeredness)
         state,ir = _adaptive_scalar_centering_reparametrizer(model,names)
@@ -2529,7 +2854,7 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
                                                scoring_plan=_candidate_scoring_plan(state))
     end
     if isempty(blocks) && isempty(hsgp_blocks) && isempty(cdar_blocks) &&
-            isempty(car_blocks)
+            isempty(car_blocks) && isempty(level_blocks)
         generated = BRM._adaptive_generated_labels(model)
         error("BRM adaptive centering: this model has no supported random-effect " *
             "blocks (ordinary or R2D2), squared-exponential or periodic HSGPs, " *
@@ -2548,18 +2873,20 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
     # other cells would have without them.
     isempty(total_blocks) || return _totals_beside_centering_problem(model, problem,
         ad_backend, names, centeredness, ordinary, hsgp_blocks, r2d2_blocks, car_blocks,
-        ranef_order === :learned && any(b -> b.ranef.n_terms > 1, blocks); locations)
+        ranef_order === :learned && any(b -> b.ranef.n_terms > 1, blocks); locations,
+        level_blocks)
     # cdar cells never share a wrapper; the branch below refuses the mix.
     if ranef_order === :learned && isempty(cdar_blocks) &&
             any(b -> b.ranef.n_terms > 1, blocks)
         _, ir = _adaptive_ordered_centering_reparametrizer(ordinary, hsgp_blocks,
             r2d2_blocks, scalar ? _scalar_centering_cells(model, names) : _NO_SCALAR_CELLS,
-            car_blocks; locations)
+            car_blocks; locations, level_blocks)
         return _ordered_centering_problem(ir, problem, ad_backend,
             _start_controls(centeredness, ir.state, WarmupHMC.reparam_controls(ir)))
     end
     state, ir = if !isempty(cdar_blocks)
-        (isempty(blocks) && isempty(hsgp_blocks) && isempty(car_blocks)) || error(
+        (isempty(blocks) && isempty(hsgp_blocks) && isempty(car_blocks) &&
+         isempty(level_blocks)) || error(
             "BRM adaptive centering: a single online plan cannot yet mix " *
             "cdar walk cells with random-effect, HSGP or car cells. Build a " *
             "model with one supported adaptive geometry family.",
@@ -2567,15 +2894,19 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
         _adaptive_cdar_centering_reparametrizer(cdar_blocks)
     elseif scalar
         _adaptive_joint_centering_reparametrizer(ordinary, hsgp_blocks, r2d2_blocks,
-            _scalar_centering_cells(model, names), car_blocks; locations)
+            _scalar_centering_cells(model, names), car_blocks; locations, level_blocks)
     elseif !isempty(r2d2_blocks)
         _adaptive_joint_centering_reparametrizer(ordinary, hsgp_blocks, r2d2_blocks,
-            _NO_SCALAR_CELLS, car_blocks; locations)
-    elseif !isempty(car_blocks) && isempty(ordinary) && isempty(hsgp_blocks)
+            _NO_SCALAR_CELLS, car_blocks; locations, level_blocks)
+    elseif !isempty(car_blocks) && isempty(ordinary) && isempty(hsgp_blocks) &&
+            isempty(level_blocks)
         _adaptive_car_centering_reparametrizer(car_blocks)
-    elseif !isempty(car_blocks) || (!isempty(ordinary) && !isempty(hsgp_blocks))
+    elseif !isempty(car_blocks) || !isempty(level_blocks) ||
+            (!isempty(ordinary) && !isempty(hsgp_blocks))
+        # HSGP level cells exist only in the joint wrapper.
         _adaptive_joint_centering_reparametrizer(ordinary, hsgp_blocks,
-            BRM.R2D2AdaptiveCenteringBlock[], _NO_SCALAR_CELLS, car_blocks; locations)
+            BRM.R2D2AdaptiveCenteringBlock[], _NO_SCALAR_CELLS, car_blocks; locations,
+            level_blocks)
     elseif !isempty(hsgp_blocks)
         _adaptive_hsgp_centering_reparametrizer(hsgp_blocks)
     else
@@ -2655,6 +2986,23 @@ function _control_rows!(rows, state::BRMHSGPAdaptiveCenteringState, _, offset, v
     offset + length(state.sources)
 end
 
+# A level cell's `term` is its basis function and `rank` its level's position in
+# the column's triangular map (the grouping's level order).
+function _control_rows!(rows, state::BRMHSGPLevelCenteringState, _, offset, values,
+                        names, _)
+    controls, targets = values
+    for p in eachindex(state.sources)
+        block = state.blocks[state.pair_blocks[p]]
+        g = state.pair_level[p]
+        push!(rows, _control_row(offset + p, state.pair_index[p], names, :hsgp;
+            binding=block.logical, group=block.group,
+            margin=(; predictor=block.logical, coefficient=block.term),
+            level=block.levels[g], term=state.pair_basis[p], rank=g,
+            c=controls[offset + p], target=targets[offset + p]))
+    end
+    offset + length(state.sources)
+end
+
 function _control_rows!(rows, state::BRMScalarCenteringState, _, offset, values,
                         names, _)
     controls, targets = values
@@ -2699,6 +3047,7 @@ function _control_rows!(rows, state::BRMJointAdaptiveCenteringState, orders, off
                         values, names, margins)
     offset = _control_rows!(rows, state.ranef, orders, offset, values, names, margins)
     offset = _control_rows!(rows, state.hsgp, nothing, offset, values, names, margins)
+    offset = _control_rows!(rows, state.level, nothing, offset, values, names, margins)
     offset = _control_rows!(rows, state.scalar, nothing, offset, values, names, margins)
     _control_rows!(rows, state.car, nothing, offset, values, names, margins)
 end
@@ -2708,6 +3057,7 @@ function _control_rows!(rows, ir::BRMTotalsBesideCenteringReparametrization, ord
     s = _primary_state(ir.primary)
     offset = _control_rows!(rows, s.ranef, orders, offset, values, names, margins)
     offset = _control_rows!(rows, s.hsgp, nothing, offset, values, names, margins)
+    offset = _control_rows!(rows, s.level, nothing, offset, values, names, margins)
     offset = _control_rows!(rows, ir.totals.state, nothing, offset, values, names, margins)
     offset = _control_rows!(rows, s.scalar, nothing, offset, values, names, margins)
     _control_rows!(rows, s.car, nothing, offset, values, names, margins)

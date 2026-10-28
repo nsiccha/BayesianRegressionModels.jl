@@ -174,7 +174,8 @@ end
 # walks it, reverses in one pass: 0.7 MiB there.
 #
 # It covers an ordinary plan wider than K<=2, and a joint plan whose cells are
-# all random-effect pairs (no HSGP, total, S2Z or car cells) of Gaussian blocks.
+# all random-effect pairs (no HSGP, HSGP level, total, S2Z or car cells) of
+# Gaussian blocks.
 # Every other plan keeps WarmupHMC's generic path. The log density is
 # WarmupHMC's own transform; the gradient equals the generic one to rounding,
 # not bitwise (the reverse pass sums the same terms in another order).
@@ -206,7 +207,7 @@ function LogDensityProblems.logdensity_and_gradient(
     x::AbstractVector,
 ) where {N,P,B}
     state = first(problem.reparametrizer.pairs).second.args[1].state
-    if state.n_hsgp + state.n_scalar + length(state.car.sources) == 0 &&
+    if state.n_hsgp + state.n_level + state.n_scalar + length(state.car.sources) == 0 &&
             !any(AC_EXT._block_mixed, state.ranef.blocks)
         return _blockwise_logdensity_and_gradient(problem, state.ranef, x)
     end

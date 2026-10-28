@@ -1301,7 +1301,9 @@ per group level; all of them share the term's spectral scales, so each
 level's basis weights adapt as independent scalar cells around the same
 per-basis frame. A periodic term contributes one block whose `harmonics`
 carry the cosine/sine spectrum; its cells join the same HSGP pair order as
-squared-exponential cells.
+squared-exponential cells. A grouped term whose levels are correlated
+(`cor=`) or scaled per level (a hyper-predictor) is resolved by
+[`_adaptive_hsgp_level_centering_blocks`](@ref) instead.
 
 This is the backend-internal companion to [`adaptive_centering_blocks`](@ref).
 It follows BRM's formula-term descriptor to declaration-owned parameter roles,
@@ -1530,15 +1532,9 @@ end
 # addresses frequency `b` in level `g`.
 function _adaptive_grouped_hsgp_blocks!(
         out, descriptor, plan, pos, unc_names, logical, entry, kw)
-    # `cor=` correlates the levels' weights (or, for a coordinate multigroup
-    # coherence, draws them on an inducing grid), so no block is one level's.
-    haskey(kw, :cor) && error(
-        "BRM adaptive centering: grouped HSGP `$(entry.term)` on predictor ",
-        "`$logical` correlates the levels of `$(name(kw[:by]))` with each other ",
-        "(`cor=`), so its standardized weights are not per-level weights; ",
-        "per-level centering of such a term is not implemented, and it is not ",
-        "silently left fixed either.",
-    )
+    # A term whose levels are correlated or scaled per level is mapped across
+    # its levels (`_adaptive_hsgp_level_centering_blocks`), not here.
+    _adaptive_hsgp_level_mapped(plan, logical, entry, kw) && return out
     K, _ = _sb_hsgp_options(kw, length(getargs(entry.value)))
     B = prod(K)
     gname = name(kw[:by])
@@ -1581,6 +1577,320 @@ function _adaptive_grouped_hsgp_blocks!(
         ))
     end
     out
+end
+
+# ---- Grouped HSGPs mapped across their levels ------------------------------
+#
+# `hsgp(x...; by=g, cor=Omega)` draws basis column `b` of its levels x basis
+# weights as `w_b = diag(s_b) * L * z_b`: `z_b` the column's standardized
+# coordinates (one per level), `L` the lower Cholesky factor of the level
+# correlation and `s_b[g]` level `g`'s spectral scale `sqrt(S_g(omega_b))`
+# (snag adaptive-centeri-11062238). Per basis function that is a correlated
+# block whose margins are the levels, with factor `C_b = diag(s_b) * L`, so the
+# levels of one column adapt exactly like the margins of one group of a
+# correlated random-effect block: level `k` is centred on its conditional mean
+# given levels `1..k-1` (the grouping's level order). A hyper-predictor
+# (`log(sd(hsgp(x))) ~ 1 + (1 | g)`, or the length scale's) gives each level
+# its own amplitude or length scale, so `s_b[g]` is per level; without `cor=`
+# the levels are independent (`L = I`) and each weight is a scalar cell around
+# 0 with its own level's scale. A grouped term with neither keeps the shared
+# per-level blocks of `_adaptive_grouped_hsgp_blocks!`.
+
+# One spectral hyperparameter of such a term (its marginal SD or length
+# scale): shared, one coordinate per axis or exactly one (coordinate `0` a
+# known value, both bounds at it), or predicted per level, where level `g`'s
+# log value is `intercept + sd * z[g]` (each piece absent as `0`/empty).
+struct _HSGPLevelScale
+    predicted::Bool
+    coordinates::Vector{Int}
+    lower::Vector{Float64}
+    upper::Vector{Float64}
+    intercept::Int
+    sd::Int
+    sd_lower::Float64
+    sd_upper::Float64
+    z::Vector{Int}
+end
+
+_HSGPLevelScale(shared::NamedTuple) = _HSGPLevelScale(false, shared.coordinates,
+    shared.lower, shared.upper, 0, 0, 0.0, Inf, Int[])
+
+struct _HSGPLevelAdaptiveCenteringBlock
+    logical::Symbol
+    term::Symbol
+    group::Symbol
+    # The grouping's labels in its index order, which is the order of the
+    # triangular map.
+    levels::Vector{Any}
+    # `effects[g, b]`: the standardized weight of level `g`, basis `b`
+    # (flat carrier position `(g - 1) * n_basis + b`).
+    effects::Matrix{Int}
+    # `:none` (independent levels), `:parameter` (a sampled `LKJCholesky`,
+    # whose Stan `cholesky_factor_corr` coordinates are `cholesky_free`) or
+    # `:data` (a known correlation, its canonical partial correlations in
+    # `cholesky_cpc`).
+    correlation::Symbol
+    cholesky_free::Vector{Int}
+    cholesky_cpc::Vector{Float64}
+    sigma::_HSGPLevelScale
+    rho::_HSGPLevelScale
+    # A predicted length scale's validity floor, `fmax(rho[g], rho_lower)` in
+    # the compiled spectrum; unused for a shared one, whose bound carries it.
+    rho_floor::Float64
+    omega2::Matrix{Float64}
+end
+
+Base.show(io::IO, b::_HSGPLevelAdaptiveCenteringBlock) = print(
+    io,
+    "HSGPLevelAdaptiveCenteringBlock(", b.logical, ", ", b.term, ", ",
+    size(b.effects, 1), " levels of ", b.group, " × ", size(b.effects, 2),
+    " basis weights, correlation=", b.correlation, ")",
+)
+
+# Whether a grouped exp-quad term is mapped across its levels: its `cor=` is a
+# constant level correlation, or a hyper-predictor scales its levels. A
+# multigroup coherence is refused: its level correlation depends on the basis
+# frequency and the length scale, or its rows are an inducing grid.
+function _adaptive_hsgp_level_mapped(plan, logical, entry, kw)
+    haskey(kw, :by) || return false
+    predicted = !isempty(_brm_term_hyper_plans(plan, logical, entry.value))
+    haskey(kw, :cor) || return predicted
+    lc = _adaptive_hsgp_level_correlation(logical, entry, kw)
+    lc isa _BRMLevelCorrelation && return true
+    error("BRM adaptive centering: grouped HSGP `$(entry.term)` on predictor ",
+          "`$logical` correlates the levels of `$(name(kw[:by]))` through ",
+          "`cor = multigroup(...)`, whose level correlation changes with each ",
+          "basis frequency (or whose weights sit on a shared grid of inducing ",
+          "rows), so a per-basis level map with one correlation factor does not ",
+          "describe it; adaptive centering of such a term is not implemented, ",
+          "and it is not silently left fixed either. `cor = Omega` (a sampled ",
+          "`LKJCholesky`) and a known correlation matrix are supported.")
+end
+
+_adaptive_hsgp_level_correlation(logical, entry, kw) = _brm_level_correlation(
+    kw[:cor]; what="hsgp(...; by=$(name(kw[:by])), cor=...) on `$logical`",
+    prefix="BRM adaptive centering")
+
+"""
+    _adaptive_hsgp_level_centering_blocks(model, unc_names)
+
+Resolve every grouped squared-exponential HSGP whose levels are correlated
+(`cor = Omega` or a known correlation matrix) or scaled per level (a
+hyper-predictor on its `sd` or `length_scale`) in an `SBBRMI` or
+`GenerativePlan`: one `_HSGPLevelAdaptiveCenteringBlock` per term, read from
+the descriptor's term roles, the emitter's weight-block plan and the term
+declaration's compiler data (`omega2`, `rho_lower`, `L_level`), never from a
+parsed name. The companion of [`_adaptive_hsgp_centering_blocks`](@ref), which
+resolves every other HSGP; together they cover each term exactly once. A term
+emitted in generated quantities is skipped, and a multigroup coherence, a
+non-zero compiled `centeredness` and declaration drift raise.
+"""
+function _adaptive_hsgp_level_centering_blocks(model, unc_names)
+    descriptor = brm_descriptor(model)
+    plan = descriptor.plan
+    pos = _ranef_name_positions(unc_names)
+    out = _HSGPLevelAdaptiveCenteringBlock[]
+    for predictor in linear_predictors(plan.parent)
+        logical = predictor.name
+        for entry in _brm_term_coordinate_entries(plan.parent, logical)
+            getf(entry.value) === hsgp || continue
+            _adaptive_term_generated(hsgp, descriptor, logical, entry) && continue
+            kw = getkwargs(entry.value)
+            _sb_gp_cov(kw, :hsgp) === :exp_quad || continue
+            _adaptive_hsgp_level_mapped(plan, logical, entry, kw) || continue
+            push!(out, _adaptive_hsgp_level_block(
+                descriptor, plan, pos, unc_names, logical, entry, kw))
+        end
+    end
+    claimed = Int[]
+    for block in out
+        append!(claimed, vec(block.effects))
+    end
+    allunique(claimed) || error(
+        "BRM adaptive centering: emitted HSGP level blocks claim overlapping " *
+        "unconstrained coordinates; refusing an ambiguous transform.")
+    out
+end
+
+function _adaptive_hsgp_level_block(descriptor, plan, pos, unc_names, logical,
+                                    entry, kw)
+    what = "BRM adaptive centering: grouped HSGP `$(entry.term)` on predictor `$logical`"
+    K, _ = _sb_hsgp_options(kw, length(getargs(entry.value)))
+    B = prod(K)
+    gname = name(kw[:by])
+    G = get(plan.data, Symbol(:n_, gname), nothing)
+    G isa Integer || error(
+        "$what has no integer group count under `n_$gname`; refusing an " *
+        "ambiguous weight layout.")
+    block, flat_name = _adaptive_grouped_hsgp_weights(plan.parent, logical, entry)
+    flat = _adaptive_named_indices(pos, ["$(flat_name).$i" for i in 1:(G*B)],
+        entry.term, "grouped HSGP basis weights")
+    owner = _brm_term_owner_output(descriptor, logical, entry).declaration
+    get(owner.keywords, :beta, nothing) === block || error(
+        "$what declaration does not carry the expected per-group weight " *
+        "block; refusing crossed term metadata.")
+    all(iszero, _brm_hsgp_centeredness(kw, B)) || error(
+        "$what carries a non-zero compiled `centeredness`; the grouped weights " *
+        "are emitted standardized.")
+
+    plans = _brm_term_hyper_plans(plan, logical, entry.value)
+    sigma_plan = _sb_hyper_plan_for(plans, :sd)
+    rho_plan = _sb_hyper_plan_for(plans, :length_scale)
+    sigma = isnothing(sigma_plan) ?
+        _HSGPLevelScale(_adaptive_hsgp_hyper_coordinates(descriptor, logical,
+            unc_names, entry, owner, :sd, "marginal SD")) :
+        _adaptive_hsgp_level_predicted(descriptor, logical, unc_names, entry, owner,
+            sigma_plan, :sd, G)
+    rho = isnothing(rho_plan) ?
+        _HSGPLevelScale(_adaptive_hsgp_hyper_coordinates(descriptor, logical,
+            unc_names, entry, owner, :length_scale, "length scale")) :
+        _adaptive_hsgp_level_predicted(descriptor, logical, unc_names, entry, owner,
+            rho_plan, :length_scale, G)
+    sigma.predicted || length(sigma.coordinates) == 1 || error(
+        "$what must have one marginal-SD coordinate.")
+    rho.predicted || !isempty(rho.coordinates) || error(
+        "$what has no length-scale coordinate.")
+    omega2 = _brm_hsgp_omega2(plan, owner, what, B,
+        rho.predicted ? 1 : length(rho.coordinates))
+    rho_floor = 0.0
+    if rho.predicted
+        floor_key = get(owner.keywords, :rho_lower, nothing)
+        floor = floor_key isa Symbol ? get(plan.data, floor_key, nothing) : floor_key
+        floor isa Real || error(
+            "$what declaration does not expose its predicted length scales' " *
+            "scalar `rho_lower` floor.")
+        rho_floor = Float64(floor)
+    end
+
+    correlation, cholesky_free, cholesky_cpc = :none, Int[], Float64[]
+    if haskey(kw, :cor)
+        lc = _adaptive_hsgp_level_correlation(logical, entry, kw)
+        lc.K == G || error("$what correlates $(lc.K) levels, but `$gname` has $G.")
+        factor = get(owner.keywords, :L_level, nothing)
+        if lc.kind === :parameter
+            factor === lc.name || error(
+                "$what declaration does not read the level correlation " *
+                "`$(lc.name)`; refusing crossed term metadata.")
+            correlation = :parameter
+            cholesky_free = _adaptive_named_indices(pos,
+                ["$(lc.name).$i" for i in 1:(G*(G-1)÷2)], lc.name, "Cholesky")
+        else
+            L = factor isa Symbol ? get(plan.data, factor, nothing) : nothing
+            L isa AbstractMatrix{<:Real} && size(L) == (G, G) || error(
+                "$what declaration does not expose its known level correlation " *
+                "factor as a $G × $G data matrix.")
+            correlation = :data
+            cholesky_cpc = _adaptive_cholesky_cpc(Matrix{Float64}(L))
+        end
+    end
+    _HSGPLevelAdaptiveCenteringBlock(logical, entry.term, gname,
+        _grouped_hsgp_levels(plan, plan.parent, gname),
+        permutedims(reshape(flat, B, G)), correlation, cholesky_free, cholesky_cpc,
+        sigma, rho, rho_floor, omega2)
+end
+
+# A hyper-predicted SD or length scale: level `g`'s log value is
+# `intercept + sd * z[g]` (`_sb_hyper_param_stmts!`), each piece the plan's,
+# read through the term's hyper roles (`:sd_intercept`, `:sd_ranef_sd`,
+# `:sd_ranef_z`, and the `length_scale_` ones).
+function _adaptive_hsgp_level_predicted(descriptor, logical, unc_names, entry, owner,
+                                        hyper_plan, hyper, G)
+    prefix = hyper === :sd ? "sd" : "length_scale"
+    what = hyper === :sd ? "marginal-SD" : "length-scale"
+    resolve(role) = _adaptive_same_hsgp_owner(brm_term_coordinates(descriptor,
+        logical, unc_names; term=entry.term, parameter=Symbol(prefix, :_, role)),
+        owner, "$what $role")
+    intercept = 0
+    if hyper_plan.intercept
+        r = resolve(:intercept)
+        isempty(r.output.constraints) || error(
+            "BRM adaptive centering: HSGP `$(entry.term)` $what intercept is " *
+            "constrained; it is read as the log value's unconstrained intercept.")
+        intercept = only(r.coordinates)
+    end
+    sd, sd_lower, sd_upper, z = 0, 0.0, Inf, Int[]
+    if !isempty(hyper_plan.ranefs)
+        r = resolve(:ranef_sd)
+        lower, upper = _adaptive_bounds(descriptor, r.output, 1, entry.term,
+                                        "$what level-effect SD")
+        sd, sd_lower, sd_upper = only(r.coordinates), only(lower), only(upper)
+        zr = resolve(:ranef_z)
+        isempty(zr.output.constraints) && length(zr.coordinates) == G || error(
+            "BRM adaptive centering: HSGP `$(entry.term)` $what level effects " *
+            "resolve to $(length(zr.coordinates)) constrained coordinates for " *
+            "$G levels.")
+        z = collect(zr.coordinates)
+    end
+    _HSGPLevelScale(true, Int[], Float64[], Float64[], intercept, sd, sd_lower,
+                    sd_upper, z)
+end
+
+# A predicted hyper's log value at one level, `intercept + sd * x[z]`, each
+# piece absent as `0` (`_sb_hyper_param_stmts!`). Shared by the reference
+# below and the WarmupHMC extension's level cells.
+@inline function _adaptive_hsgp_predicted_log(x, intercept, sd, sd_lower, sd_upper, z)
+    v = intercept == 0 ? zero(eltype(x)) : x[intercept]
+    sd == 0 && return v
+    v + _adaptive_constrain(x[sd], sd_lower, sd_upper) * x[z]
+end
+
+# Level `g`'s marginal SD (on the log scale) and length scale on `axis` at the
+# unconstrained point `x`. A predicted length scale is floored at `rho_lower`,
+# as `brm_hsgp_by_hyper_sqrt_spd` floors it.
+function _adaptive_hsgp_level_log_sigma(x, block::_HSGPLevelAdaptiveCenteringBlock, g)
+    s = block.sigma
+    s.predicted || return log(_adaptive_hsgp_hyper(x, only(s.coordinates),
+                                                   only(s.lower), only(s.upper)))
+    _adaptive_hsgp_predicted_log(x, s.intercept, s.sd, s.sd_lower, s.sd_upper,
+                                 s.sd == 0 ? 0 : s.z[g])
+end
+
+function _adaptive_hsgp_level_rho(x, block::_HSGPLevelAdaptiveCenteringBlock, g, axis)
+    s = block.rho
+    s.predicted && return max(exp(_adaptive_hsgp_predicted_log(x, s.intercept, s.sd,
+        s.sd_lower, s.sd_upper, s.sd == 0 ? 0 : s.z[g])), block.rho_floor)
+    j = length(s.coordinates) == 1 ? 1 : axis
+    _adaptive_hsgp_hyper(x, s.coordinates[j], s.lower[j], s.upper[j])
+end
+
+# Level `g`'s log spectral scale `log sqrt(S_g(omega_b))` for basis `b`, as
+# `brm_hsgp_sqrt_spd` (`brm_hsgp_by_hyper_sqrt_spd` under a hyper-predictor)
+# computes it, with the adaptive log-scale floor of `_adaptive_hsgp_log_scale`.
+function _adaptive_hsgp_level_log_scale(x::AbstractVector,
+                                        block::_HSGPLevelAdaptiveCenteringBlock, g, b)
+    value = _adaptive_hsgp_level_log_sigma(x, block, g)
+    for axis in axes(block.omega2, 2)
+        value = _adaptive_hsgp_axis_log_scale(value,
+            _adaptive_hsgp_level_rho(x, block, g, axis), block.omega2[b, axis])
+    end
+    _adaptive_hsgp_floor(value)
+end
+
+# Every coordinate a level block reads without rewriting it: its correlation,
+# scales and their predictors.
+_adaptive_read_coordinates(block::_HSGPLevelAdaptiveCenteringBlock) = filter(!iszero,
+    vcat(block.cholesky_free,
+         (vcat(s.coordinates, s.intercept, s.sd, s.z) for s in (block.sigma, block.rho))...))
+
+# The level correlation's lower Cholesky factor at `x`: Stan's
+# `cholesky_factor_corr` of the sampled coordinates, a known factor rebuilt
+# from its partial correlations, or the identity for independent levels.
+function _adaptive_hsgp_level_correlation_factor(x::AbstractVector,
+                                                 block::_HSGPLevelAdaptiveCenteringBlock)
+    G = size(block.effects, 1)
+    block.correlation === :parameter &&
+        return _adaptive_cholesky_corr(x[block.cholesky_free], G)
+    block.correlation === :data &&
+        return _adaptive_cholesky_from_cpc(identity, block.cholesky_cpc, G)
+    Matrix{eltype(x)}(I, G, G)
+end
+
+# Basis `b`'s factor `C_b = diag(s_b) * L` over the levels at `x`.
+function _adaptive_hsgp_level_factor(x::AbstractVector,
+                                     block::_HSGPLevelAdaptiveCenteringBlock, b)
+    L = _adaptive_hsgp_level_correlation_factor(x, block)
+    s = [exp(_adaptive_hsgp_level_log_scale(x, block, g, b)) for g in axes(L, 1)]
+    s .* L
 end
 
 # The compiler-owned squared-exponential frequencies of an ungrouped or
@@ -1653,11 +1963,16 @@ function _adaptive_hsgp_log_scale(x::AbstractVector,
         j = iso ? 1 : axis
         rho = _adaptive_hsgp_hyper(x, block.length_scales[j],
             block.length_scale_lower[j], block.length_scale_upper[j])
-        value += 0.5 * log(rho * 2.5066282746310002)
-        value -= 0.25 * rho * rho * block.omega2[basis, axis]
+        value = _adaptive_hsgp_axis_log_scale(value, rho, block.omega2[basis, axis])
     end
     _adaptive_hsgp_floor(value)
 end
+
+# One axis's term of an exp-quad HSGP's log spectral scale, `log(sqrt(2 pi) *
+# rho) / 2 - rho^2 * omega2 / 4` (`brm_hsgp_log_sqrt_spd`), added to `value`
+# one summand at a time. Shared by the per-basis and the per-level HSGP cells.
+@inline _adaptive_hsgp_axis_log_scale(value, rho, omega2) =
+    (value + 0.5 * log(rho * 2.5066282746310002)) - 0.25 * rho * rho * omega2
 
 # The cdar path has its own metadata type for the same reason the HSGP path
 # does: `AdaptiveCenteringBlock` feeds the small-block Enzyme specialization
@@ -2271,7 +2586,13 @@ end
 # is mapped with tanh and multiplied by the remaining row stick.  This exact
 # spelling is checked against BridgeStan in the adaptive-centering acceptance
 # probe, including a nonzero K=3 discriminator.
-function _adaptive_cholesky_corr(raw::AbstractVector, K::Int)
+_adaptive_cholesky_corr(raw::AbstractVector, K::Int) =
+    _adaptive_cholesky_from_cpc(tanh, raw, K)
+
+# The same factor from values that `partial` maps to the canonical partial
+# correlations: `tanh` of Stan's free coordinates, or `identity` of known ones
+# (`_adaptive_cholesky_cpc`).
+function _adaptive_cholesky_from_cpc(partial, raw::AbstractVector, K::Int)
     length(raw) == K * (K - 1) ÷ 2 || throw(DimensionMismatch(
         "cholesky_factor_corr[$K] needs $(K * (K - 1) ÷ 2) free values, got $(length(raw))",
     ))
@@ -2282,7 +2603,7 @@ function _adaptive_cholesky_corr(raw::AbstractVector, K::Int)
     for i in 2:K
         stick = one(T)
         for j in 1:i-1
-            z = tanh(raw[p])
+            z = partial(raw[p])
             p += 1
             L[i, j] = stick * z
             stick *= sqrt(one(T) - z * z)
@@ -2371,7 +2692,9 @@ and `location`, the unconstrained name of the population coefficient the cell
 is centred on (so its `c=1` coordinate is the level's total), or `nothing` for
 a cell centred on 0 (see [`adaptive_centering_problem`](@ref)).
 HSGP and cdar rows carry `binding`, `margin = (; predictor, coefficient=term)`
-and `term` (the basis or walk cell). Car rows carry `binding`, `margin`, `level`
+and `term` (the basis or walk cell); a grouped HSGP mapped across its levels
+also carries `group`, `level` (the level's label) and `rank` (its position in
+the basis column's triangular map). Car rows carry `binding`, `margin`, `level`
 (the area's label) and `term`: 1 for an `:icar` area's structured `phi` cell, 2
 for a `:bym2` area's unstructured `theta` cell. Fields that do not apply are
 `nothing`.
