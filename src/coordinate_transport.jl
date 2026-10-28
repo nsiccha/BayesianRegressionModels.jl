@@ -113,14 +113,17 @@ of the same [`BRMI`](@ref):
   coordinate of a simplex block; see below), `:centered` (one standardized
   draw of a centered random-effect block; see below), or `:shares` (one
   coordinate of a `T::shares(total)` cell latent: the same coordinate on both
-  sides, whose latent's values are compared cell by cell);
+  sides, whose latent's values are compared cell by cell), or
+  `:grouped_shares` (one coordinate of the grouped entries of a
+  `mi(x)::shares(total, rows)` completion: the same coordinate on both sides,
+  whose missing entries are compared);
 - `stan_value` — the Stan constrained parameter name holding the physical
   value this coordinate parameterizes. It equals `stan` except inside a Stan
   array of vectors, whose unconstrained values BridgeStan stores array-major
   while `param_unc_names` lists the same block first-index-fastest, so the
   name at a position can belong to another element.
 
-In the `:identity`, `:exp`, `:cholesky` and `:shares` relations the two
+In the `:identity`, `:exp`, `:cholesky`, `:shares` and `:grouped_shares` relations the two
 UNCONSTRAINED values are equal, so those coordinates move by a permutation. A `:simplex`
 block has the same physical simplex on both sides but different free
 coordinates: RK samples stick-breaking fractions `σ(u[j] + log(K-j))`, while
@@ -1095,7 +1098,7 @@ end
 # any RK declaration without a matching sampled SB output.
 function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         kind::Symbol, target::Symbol, rk, d, stan, stan_pos;
-        only_declaration::Union{Nothing,Symbol}=nothing)
+        only_declaration::Union{Nothing,Symbol}=nothing, relation::Symbol=:identity)
     owned = Dict{String,BRMOutput}(String(o.name) => o for o in d.outputs
         if !isnothing(o.declaration) && o.declaration.target === target &&
             o.kind === :parameter)
@@ -1147,7 +1150,7 @@ function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
                     string(carrier, ".", join(element.index, "."))
                 get(stan_pos, stan_name, 0) in positions || continue
                 push!(pairs, BRMCoordinatePair((; address..., index=element.index),
-                    element.name, stan_name, declaration, element.index, :identity))
+                    element.name, stan_name, declaration, element.index, relation))
             end
         end
     end
@@ -1171,9 +1174,12 @@ _brm_transport_pairs!(pairs, correlations, simplexes, centered,
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:missing_value}, record, rk, d, stan, stan_pos)
     record.noncentered && return nothing
+    # The grouped entries of `mi(x)::shares(total, rows)`: RK's joint latent
+    # holds the entries, SB's carrier the same coordinates.
+    relation = get(record, :bijection, nothing) === :shares ? :grouped_shares : :identity
     _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         :missing_value, record.target, rk, d, stan, stan_pos;
-        only_declaration=record.declaration)
+        only_declaration=record.declaration, relation)
 end
 
 # The Stan declaration type and RK layout transform of each vector family the
@@ -1693,7 +1699,7 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
     end
     checked = 0
     for pair in t.pairs
-        pair.relation in (:cholesky, :simplex, :centered, :shares) && continue
+        pair.relation in (:cholesky, :simplex, :centered, :shares, :grouped_shares) && continue
         value = _brm_rk_declaration_value(rk_values, pair.rk_declaration)
         rk_value = isempty(pair.rk_index) ? value : _brm_rk_value_entry(value, pair.rk_index)
         compare("$(pair.address) (`$(pair.rk)` / `$(pair.stan_value)`)", rk_value,
@@ -1717,6 +1723,33 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
                 "$(length(rk_T)) RK values and $(length(stan_T)) Stan values `$stem`")
             for (k, (a, b)) in enumerate(zip(rk_T, stan_T))
                 compare("cell latent `$declaration` value $k (`$stem`)", a, b)
+                checked += 1
+            end
+        end
+    end
+    # A `mi(x)::shares(total, rows)` completion: its free and grouped entries
+    # on RK against Stan's missing entries `<column>_y_mis`, in that order.
+    completions = unique((pair.rk_declaration, first(split(pair.stan_value, ".")))
+        for pair in t.pairs if pair.relation === :grouped_shares)
+    if !isempty(completions)
+        tp_values = BridgeStan.param_constrain(stan_model, stan_u; include_tp=true)
+        tp_names = String.(BridgeStan.param_names(stan_model; include_tp=true))
+        for (declaration, carrier) in completions
+            stem = chopsuffix(carrier, "_y_shares") * "_y_mis"
+            stan_mis = tp_values[findall(n -> startswith(n, stem * "."), tp_names)]
+            # Nothing reads the completion: Stan draws its missing entries in
+            # generated quantities, and the shared coordinates are all there is.
+            isempty(stan_mis) && continue
+            scope = chopsuffix(String(declaration), ".y_shares")
+            free = Symbol(scope, ".y_free")
+            rk_mis = vcat((any(p -> p.rk_declaration === free, t.pairs) ?
+                    _brm_rk_declaration_value(rk_values, free) : Float64[]),
+                _brm_rk_declaration_value(rk_values, declaration))
+            length(rk_mis) == length(stan_mis) || error(
+                "brm_check_coordinate_transport: completion `$scope` has " *
+                "$(length(rk_mis)) RK and $(length(stan_mis)) Stan missing entries `$stem`")
+            for (k, (a, b)) in enumerate(zip(rk_mis, stan_mis))
+                compare("completion `$scope` missing entry $k (`$stem`)", a, b)
                 checked += 1
             end
         end

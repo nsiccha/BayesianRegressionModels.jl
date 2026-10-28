@@ -12,6 +12,44 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.31
+
+- `mi(x)::shares(total, rows) ~ Law(…)` with `rows = groups(g => labels)`
+  declares a completion whose missing entries have known group sums: the
+  completed `x[rows[k]]` sums to `total[k]`, the group's whole total, observed
+  entries included. Per group the missing entries are the residual times
+  shares (the bijection of a `T::shares(total)` cell latent), with the law's
+  density at the entries plus `sum(log.(x)) - log(residual)`: the exact
+  conditional of the law given the sum. A group with one missing entry holds
+  its residual; missing entries of no listed group stay free. Positive laws
+  only. Every formula reads the completed column as before.
+  - SBBRMI: coordinates `x_y_free` and `x_y_shares`. The residuals are
+    observed (`x_shares_residuals`), so they inform the law even when nothing
+    reads the completion, with a pointwise density per group and a predictive
+    draw of each group's sum.
+  - RKBRMI: the same coordinates (`x.y_free`, `x.y_shares`, the grouped
+    entries one joint latent), paired by `brm_coordinate_transport` (relation
+    `:grouped_shares`).
+  - A frozen `reprocess` keeps the groups and reads new totals.
+  - Refused: `resample_covariates` of such a column, RKBRMI
+    `completions = :noncentered`, real-valued laws.
+  - The scientific description states the constraint.
+  - Snag `mi-completion-wi-54222432`, design decision `0guq37f`.
+
+## 0.2.30
+
+- A data column that only a `name = constant(expr)` reads may hold `missing`.
+  `expr` takes the column whole (`c = constant(mean(skipmissing(y_data)))`)
+  and the model reads only the constant. `SBBRMI` and `RKBRMI` built such a
+  model, but `brm_descriptor`, and with it `brm_start` on `SBBRMI`,
+  `brm_description`, `prune_responses` and `modeled_covariates`, collected the
+  column as model data and refused it ("data column `y_data` contains
+  `missing` values"). They now collect the columns the backend does. A column
+  the model itself reads still refuses its missing cells. Likewise, a
+  `rows=`-masked HSGP axis that a constant also reads keeps its mask on those
+  paths, and an `mm(...)` grouping that a constant also reads stays
+  Julia-side.
+
 ## 0.2.29
 
 - `brm_svi_fit` fits units whose own rows pin them far more tightly than the

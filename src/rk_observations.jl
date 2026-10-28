@@ -98,6 +98,10 @@ function _rk_noncentered_completions(plan::_RKStructuralPlan)
 end
 const _RK_NONCENTERED_LAWS = (Normal, LogNormal)
 function _rk_noncentered_completion(c::_RKMissingValueSpec)
+    c.totals === nothing || error(
+        "RK backend: completions=:noncentered is not built for " *
+        "`mi($(c.source))::shares(total, rows)`: its grouped entries are shares of " *
+        "their residuals, not location-scale draws")
     d = c.distribution
     d.callable in _RK_NONCENTERED_LAWS && isempty(d.kwargs) && length(d.args) == 2 ||
         error("RK backend: completions=:noncentered needs a location-scale law " *
@@ -226,7 +230,12 @@ end
 # The coordinate records the emission filed for a removed declaration leave
 # with it (`_rk_drop_unfitted_records!`), so the semantic inventory describes
 # the fitted program's packed coordinates and nothing else.
-function _rk_fitted_source(emitted, conditioned; retained=(), coordinates=nothing)
+#
+# A statement defining one of `densities` stays whether or not a response
+# reads it: the grouped entries of `mi(x)::shares(total, rows)`, whose density
+# carries what their residuals say about the law.
+function _rk_fitted_source(emitted, conditioned; retained=(), coordinates=nothing,
+        densities=())
     isempty(conditioned) && return emitted
     statements = emitted.main.args
     outputs = [_rk_source_outputs!(Set{Symbol}(), statement) for statement in statements]
@@ -242,7 +251,8 @@ function _rk_fitted_source(emitted, conditioned; retained=(), coordinates=nothin
             end
         end
     end
-    kept = [_rk_source_observes(statement, conditioned) for statement in statements]
+    kept = [_rk_source_observes(statement, conditioned) ||
+        !isdisjoint(outputs[i], densities) for (i, statement) in enumerate(statements)]
     needed = Set{Symbol}()
     for i in eachindex(statements)
         kept[i] && union!(needed, references[i])

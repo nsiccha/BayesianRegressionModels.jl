@@ -788,6 +788,8 @@ function _brm_builder_code(x::Expr; df=nothing)
     captures = Set{Symbol}()
     groupings = _brm_plate_groupings(x)
     grouped_reads = Set{Symbol}()
+    # `mi(x)::shares(total, rows) ~ Law(…)` (cell_total_coordinates.jl).
+    x = _brm_desugar_mi_totals(x, groupings, grouped_reads)
     inventory = _brm_inventory()
     info = (;alllocals, jointkeys, captures, groupings, grouped_reads, inventory)
     x = parse!(x; info)
@@ -950,9 +952,13 @@ elseif isxcall(x, :~)
     rhs = rewrite_ranef_ids(rhs)
     read_before = hasproperty(info, :inventory) ? copy(info.inventory.reads) : nothing
     parselocals!(rhs; info, val=:nonlocal)
-    parselocals!(lhs; info, val=:maybelocal)
+    # A completion with group totals reads its keywords' columns as data.
+    totals = _brm_mi_totals_lhs(lhs)
+    response = totals === nothing ? lhs : Expr(:call, :mi, totals.inner)
+    totals === nothing || foreach(r -> parselocals!(r; info, val=:nonlocal), totals.reads)
+    parselocals!(response; info, val=:maybelocal)
     hasproperty(info, :inventory) &&
-        _brm_inventory_statement!(info.inventory, lhs, rhs, legacy_kernel_doblock, read_before)
+        _brm_inventory_statement!(info.inventory, response, rhs, legacy_kernel_doblock, read_before)
     parsed = :(@n $lhs = @x $(Expr(:call, :~, lhs, rhs)))
     legacy_kernel_doblock ?
         Expr(:block, :($_brm_depwarn_kernel_doblock()), parsed) : parsed
@@ -2371,6 +2377,10 @@ xassignable(x::Expr) = if Meta.isexpr(x, (:tuple, :vect))
 elseif x.head == :call
     if length(x.args) == 2
         xassignable(x.args[2])
+    elseif length(x.args) == 3 && Meta.isexpr(x.args[2], :parameters)
+        # A wrapper with keywords binds its one positional column
+        # (`mi(x; _brm_shares_… = …)`, cell_total_coordinates.jl).
+        xassignable(x.args[3])
     else
         @warn "Don't know how to handle xassignable($x)!"
         Symbol(x)

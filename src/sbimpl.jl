@@ -6190,20 +6190,30 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
            e.kind === :center || e.kind === :protect
         replay_and_bind(_sb_rematerialize_vec(e.raw_ref, df), :primary => key)
     elseif e.kind === :missing_response
-        plan = _brm_missing_response_plan(e.raw_ref, _sb_df_column(df, e.raw_ref);
-                                          prefix="sbimpl: reprocess")
         fitted = e.const_
+        fitted_totals = get(fitted, :totals, nothing)
+        plan = _brm_missing_response_plan(e.raw_ref, _sb_df_column(df, e.raw_ref);
+                                          prefix="sbimpl: reprocess",
+                                          totals=_sb_mi_replay_totals(fitted_totals, df))
         if freeze && (plan.observed_indices != fitted.observed_indices ||
-                      plan.missing_indices != fitted.missing_indices)
+                      plan.missing_indices != fitted.missing_indices ||
+                      _sb_mi_totals_layout(plan.totals) != _sb_mi_totals_layout(fitted_totals))
             throw(ArgumentError("sbimpl: reprocess: `mi($(e.raw_ref))` needs the " *
                 "same fitted missing-row positions when freeze_constants=true; " *
                 "reordering or changing the mask would reassign fitted missing " *
                 "coordinates. Rebuild for a new fit or use freeze_constants=false."))
         end
+        _brm_mi_grouped(plan.totals) == _brm_mi_grouped(fitted_totals) || throw(ArgumentError(
+            "sbimpl: reprocess: `mi($(e.raw_ref))::shares(…)`: the fit's groups " *
+            (_brm_mi_grouped(fitted_totals) ? "had" : "had no") * " missing entries and " *
+            "the replay's " * (_brm_mi_grouped(plan.totals) ? "have" : "have none") *
+            "; that is another program: rebuild the model on this data"))
         new_data[key] = plan.observed_values
         new_data[fitted.observed_key] = plan.observed_indices
         new_data[fitted.missing_key] = plan.missing_indices
         union!(handled, (fitted.observed_key, fitted.missing_key))
+        _brm_mi_grouped(plan.totals) &&
+            union!(handled, Base.values(_sb_bind_mi_totals!(new_data, e.raw_ref, plan)))
         new_preproc[key] = _sb_missing_preproc(plan, fitted.observed_key, fitted.missing_key)
     elseif e.kind === :missing_center || e.kind === :missing_standardize ||
            e.kind === :missing_zscale
@@ -9020,9 +9030,20 @@ function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
     arg_names = ntuple(i -> Symbol(:mi_arg_, i), length(lowered))
     sliced(indices) = Expr(:call, stan_name,
         (Expr(:call, :maybe_index, arg, indices) for arg in arg_names)...)
-    submodel = Base.merge(_sb_mi_response,
-        Expr(:call, :~, :y_mis, sliced(:Jmis)),
-        Expr(:call, :~, :y_obs, sliced(:Jobs)))
+    # `mi(x)::shares(total, rows)` with a group that has missing entries
+    # (cell_total_coordinates.jl): those entries are its residual times shares.
+    grouped = _brm_mi_grouped(plan.totals)
+    grouped && _brm_check_shares_family(getf(rhs_e), :(mi($inner_name)))
+    submodel = grouped ?
+        Base.merge(_sb_mi_shares_response,
+            Expr(:call, :~, :y_free, sliced(:Jfree)),
+            Expr(:call, :~, :residuals, Expr(:call, brm_group_residuals, :y_shares,
+                _sb_stan_family(stan_name), :ends, :Jgrp,
+                (Expr(:call, :maybe_index, arg, :Jgrp) for arg in arg_names)...)),
+            Expr(:call, :~, :y_obs, sliced(:Jobs))) :
+        Base.merge(_sb_mi_response,
+            Expr(:call, :~, :y_mis, sliced(:Jmis)),
+            Expr(:call, :~, :y_obs, sliced(:Jobs)))
 
     obs_key = Symbol(inner_name, :_obs)
     Jobs_key = Symbol(:Jobs_, inner_name)
@@ -9030,11 +9051,14 @@ function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
     data[obs_key] = plan.observed_values
     data[Jobs_key] = plan.observed_indices
     data[Jmis_key] = plan.missing_indices
+    totals_keys = grouped ? _sb_bind_mi_totals!(data, inner_name, plan) : nothing
     _sb_record_preproc!(data, obs_key, _sb_missing_preproc(plan, Jobs_key, Jmis_key))
     call_kwargs = Expr(:parameters,
         Expr(:kw, :y_obs, obs_key),
         Expr(:kw, :Jobs, Jobs_key),
         Expr(:kw, :Jmis, Jmis_key),
+        (grouped ? (Expr(:kw, :Jfree, totals_keys.free), Expr(:kw, :Jgrp, totals_keys.grouped),
+            Expr(:kw, :ends, totals_keys.ends), Expr(:kw, :residuals, totals_keys.residuals)) : ())...,
         (Expr(:kw, arg, value) for (arg, value) in zip(arg_names, lowered))...)
     push!(stmts, Expr(:call, :~, inner_name,
                      Expr(:call, submodel, call_kwargs)))
@@ -9043,7 +9067,22 @@ end
 _sb_missing_preproc(plan, observed_key, missing_key) = PreprocEntry(
     :missing_response,
     (; observed_indices=copy(plan.observed_indices), missing_indices=copy(plan.missing_indices),
-       observed_key, missing_key), plan.source, true)
+       observed_key, missing_key, totals=plan.totals), plan.source, true)
+
+# A completion's group totals on a replay read the same three data columns.
+_sb_mi_replay_totals(::Nothing, _df) = nothing
+_sb_mi_replay_totals(t, df) = (; group=(; name=t.group, values=_sb_df_column(df, t.group)),
+    cells=(; name=t.cells, values=_sb_df_column(df, t.cells)),
+    total=(; name=t.total, values=_sb_df_column(df, t.total)))
+# What a frozen replay must keep: which missing entries are free and how the
+# others are grouped (the residuals may change with the data).
+_sb_mi_totals_layout(::Nothing) = nothing
+_sb_mi_totals_layout(t) = (t.nfree, t.ends)
+
+# A Stan family token as a value a higher-order family takes (`brm_group_residuals`).
+_sb_stan_family(name::Symbol) = isdefined(StanBlocks, name) ? getfield(StanBlocks, name) :
+    error("sbimpl: internal: `$name` is no StanBlocks family token")
+_sb_stan_family(family) = family
 
 # Map a Julia function (typically the result of `InverseFunctions.inverse(...)`
 # for a link transform) to the Stan-side function name: the kernel cells'
