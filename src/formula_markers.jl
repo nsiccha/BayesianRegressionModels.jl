@@ -87,17 +87,18 @@ share a time (several groups per day get one shared walk). It is a direct
 predictor summand: a formula intercept supplies the initial level and no
 additional population coefficient multiplies the path. `sd(lp, rw(time))`
 addresses `sigma`; the term has no persistence, so `ar(lp, rw(time))` is
-refused. On replay the grid may gain new times (a forecast). Dispatch tag —
-see `_sb_rw1`.
+refused. On replay, times after the last fitted one are appended (a forecast):
+their innovations are drawn in generated quantities, so the walk continues
+from its fitted end. Dispatch tag — see `_sb_rw1`.
 """
 function rw end
 
 """
     cdar(step; by=group, cor=C)
 
-Grouped, correlated, damped random-walk deviation marker. For every level `g`
+Grouped, correlated, stationary AR(1) deviation marker. For every level `g`
 of the `by` group column and every distinct value `w` of the `step` column
-(sorted), the StanBlocks backend emits
+(sorted, shared by every level), the StanBlocks backend emits
 
 `delta[:, 1] = sigma * L * eta[:, 1]`,
 `delta[:, w] = rho * delta[:, w-1] + sigma * sqrt(1 - rho^2) * L * eta[:, w]`,
@@ -105,11 +106,16 @@ of the `by` group column and every distinct value `w` of the `step` column
 with `L L' = C` the Cholesky factor of the group correlation (or covariance)
 matrix `C` — a `P × P` matrix given as a data field or a literal, `P` the number
 of group levels — `0 <= rho <= 1`, `sigma > 0`, and standardized innovations
-`eta`. Each row contributes `delta[group(row), step(row)]` directly, with no
-additional population coefficient. `sd(lp, cdar(step))` addresses `sigma` and
-`ar(lp, cdar(step))` addresses `rho`. On replay the group levels and `C` are
-frozen from the fit while the step grid may grow (a forecast). Dispatch tag —
-see `_sb_cdar`.
+`eta`. Every level starts at its stationary law, so `sigma * sqrt(C[g, g])` is
+the marginal SD of each deviation and `sigma * sqrt(1 - rho^2)` scales the
+innovations; `C = I` gives independent levels. Each row contributes
+`delta[group(row), step(row)]` directly, with no additional population
+coefficient, and a level-step without rows is a latent state on the grid.
+`sd(lp, cdar(step))` addresses `sigma` and `ar(lp, cdar(step))` addresses
+`rho`. On replay the group levels and `C` are frozen from the fit, and steps
+after the last fitted one are appended (a forecast): their innovations are drawn
+in generated quantities, so each level continues from its fitted state. Dispatch
+tag — see `_sb_cdar`.
 """
 function cdar end
 

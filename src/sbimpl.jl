@@ -2413,10 +2413,15 @@ StanBlocks.@deffun begin
     end
 end
 
+# `z_new` holds the innovations of the steps a forecast appends past the fitted
+# grid: none in a fit, and on a replay that appends steps `reprocess` marks
+# their count `maybecv`, so StanBlocks draws them in generated quantities from
+# their prior while `z` keeps the fit's coordinates.
 _sb_rw1 = StanBlocks.@slic begin
     sigma ~ normal(0., 0.2; lower=0.)
     z ~ std_normal(; n=n_steps - 1)
-    return random_walk_rows(sigma, z, time_idx)
+    z_new ~ std_normal(; n=n_new_steps)
+    return random_walk_rows(sigma, append_row(z, z_new), time_idx)
 end
 
 # Grouped correlated damped walk: per-group deviations over W steps whose
@@ -2444,11 +2449,15 @@ StanBlocks.@deffun begin
     end
 end
 
+# `eta_new` are the appended steps' innovations, as `z_new` of `_sb_rw1`; the
+# column-major layout puts them after the fitted steps' `eta`.
 _sb_cdar = StanBlocks.@slic begin
     sigma ~ normal(0., 0.2; lower=0.)
     rho ~ normal(0.5, 0.2; lower=0., upper=1.)
     eta ~ std_normal(; n=n_groups * n_steps)
-    return correlated_damped_walk(sigma, rho, eta, L, n_steps, group_idx, step_idx)
+    eta_new ~ std_normal(; n=n_groups * n_new_steps)
+    return correlated_damped_walk(sigma, rho, append_row(eta, eta_new), L,
+                                  n_steps + n_new_steps, group_idx, step_idx)
 end
 
 # Areal `car(area; edges=..., type=...)`. `phi` lives on the STRUCTURED nodes
@@ -6107,6 +6116,32 @@ function _sb_reprocess_column_length(df, column, what)
     length(col)
 end
 
+# The step grid of a walk replay (`_sb_rw1`, `_sb_cdar`) and how many steps it
+# appends past the fitted one. A prediction replay (`freeze_constants=true`)
+# keeps the fitted grid and appends the later steps, a forecast; a fresh-fit
+# replay samples every step, so the new rows' steps join the grid as
+# parameters, wherever they fall.
+_sb_walk_replay_grid(fitted, raw, term, freeze::Bool) = freeze ?
+    _brm_walk_replay_steps(fitted, raw, term; prefix="sbimpl: reprocess") :
+    (_brm_cdar_levels(vcat(fitted, collect(raw))), 0)
+
+# The steps a walk replay appends past the fitted grid (`_sb_rw1`, `_sb_cdar`):
+# their count is marked `maybecv`, so StanBlocks draws their innovations in
+# generated quantities and the replay keeps the fit's unconstrained
+# coordinates; a replay on the fitted grid binds 0, the fit's own program.
+function _sb_walk_new_steps!(new_data, handled, keys, n_new::Int, term::Symbol)
+    if !haskey(keys, :n_new_steps)
+        n_new == 0 || error(
+            "sbimpl: reprocess: this `$term` term was built by a BRM that cannot ",
+            "forecast steps past its fitted grid (no innovations for appended ",
+            "steps); rebuild the SBBRMI with the current BRM and refit.")
+        return
+    end
+    new_data[keys.n_new_steps] = n_new == 0 ? 0 : StanBlocks.stan.maybecv(keys.n_new_steps, n_new)
+    push!(handled, keys.n_new_steps)
+    nothing
+end
+
 # Recompute one transform-output data key against `df`. `freeze=true` applies
 # the stored training constant (prediction-replay); `freeze=false` re-derives
 # the constant from `df`, then applies (fresh-fit semantics). Writes the
@@ -6458,17 +6493,21 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             "570403f6; this model was built by an older BRM. Rebuild it with the " *
             "observation in its `@plate` cell (`y[rows[i]] ~ …`) and refit.")
     elseif e.kind === :rw
-        # `rw(time)`: the grid may gain new steps; each row reads its own point.
+        # `rw(time)`: a forecast appends steps past the fitted grid; each row
+        # reads its own point.
         raw = _sb_df_column(df, e.raw_ref)
         raw isa AbstractVector || error("sbimpl: reprocess: `rw` time column must be a vector")
         all(isfinite, raw) || error("sbimpl: reprocess: `rw` time axis must be finite")
-        steps = _brm_cdar_levels(vcat(e.const_.steps, collect(Float64, raw)))
+        steps, n_new = _sb_walk_replay_grid(e.const_.steps, collect(Float64, raw), :rw, freeze)
         time_idx = [searchsortedfirst(steps, Float64(v)) for v in raw]
         k = e.const_.keys
-        new_data[k.n_steps] = length(steps)
+        new_data[k.n_steps] = length(steps) - n_new
+        _sb_walk_new_steps!(new_data, handled, k, n_new, :rw)
         new_data[k.time_idx] = time_idx
         push!(handled, k.n_steps)
-        new_preproc[key] = PreprocEntry(:rw, merge(e.const_, (; steps)), e.raw_ref, true)
+        # a forecast's record keeps the fitted grid: its parameters stay the fit's
+        new_preproc[key] = freeze ? e :
+            PreprocEntry(:rw, merge(e.const_, (; steps)), e.raw_ref, true)
     elseif e.kind === :car
         # `car(area; edges=..., type=...)`: frozen, the graph and its numbering are
         # constants of the fit and each row must name a fitted area; fresh, the
@@ -6490,26 +6529,29 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     elseif e.kind === :cdar
         # `cdar(step; by=group, cor=C)`: levels and `L` are frozen from the fit (the
         # correlation is a hyperparameter of the term — rebuild the model to change
-        # it or the level set); the step grid may gain new steps.
+        # it or the level set); a forecast appends steps past the fitted grid.
         step_col, group_col = e.raw_ref
         step_raw = _sb_df_column(df, step_col)
         group_raw = _sb_df_column(df, group_col)
         (step_raw isa AbstractVector && group_raw isa AbstractVector) || error(
             "sbimpl: reprocess: `cdar` step and group columns must be vectors")
         all(isfinite, step_raw) || error("sbimpl: reprocess: `cdar` step axis must be finite")
-        steps = _brm_cdar_levels(vcat(e.const_.steps, collect(step_raw)))
+        steps, n_new = _sb_walk_replay_grid(e.const_.steps, step_raw, :cdar, freeze)
         step_idx, group_idx = _brm_cdar_indices(step_raw, steps, group_raw, e.const_.groups;
                                                 prefix="sbimpl: reprocess")
         k = e.const_.keys
         new_data[k.n_groups] = length(e.const_.groups)
-        new_data[k.n_steps] = length(steps)
+        new_data[k.n_steps] = length(steps) - n_new
+        _sb_walk_new_steps!(new_data, handled, k, n_new, :cdar)
         new_data[k.L] = e.const_.L
         new_data[k.group_idx] = group_idx
         new_data[k.step_idx] = step_idx
         for other in (k.n_groups, k.n_steps, k.L, k.group_idx)
             push!(handled, other)
         end
-        new_preproc[key] = PreprocEntry(:cdar, merge(e.const_, (; steps)), e.raw_ref, true)
+        # a forecast's record keeps the fitted grid: its parameters stay the fit's
+        new_preproc[key] = freeze ? e :
+            PreprocEntry(:cdar, merge(e.const_, (; steps)), e.raw_ref, true)
     else
         error("sbimpl: reprocess: unknown preproc kind `$(e.kind)` for key `$key`")
     end
@@ -15051,13 +15093,15 @@ _sb_predictor_term!(stmts, data, ::typeof(rw), t;
         (; data=Dict{Symbol,Any}(xname => raw)))
     st = prepared.state
     col_name = Symbol(:rw_, target, :_, xname)
-    keys_ = (; n_steps=Symbol(col_name, :_n_steps), time_idx=Symbol(col_name, :_time_idx))
+    keys_ = (; n_steps=Symbol(col_name, :_n_steps), n_new_steps=Symbol(col_name, :_n_new_steps),
+               time_idx=Symbol(col_name, :_time_idx))
     for key in values(keys_)
         haskey(data, key) && error("sbimpl: `rw` reserves data key `$key`, but that name is already used")
     end
     data[keys_.n_steps] = st.n_steps
+    data[keys_.n_new_steps] = 0
     data[keys_.time_idx] = st.time_idx
-    # replay: the grid may grow (a forecast appends steps); recorded on the index key
+    # replay: a forecast appends steps past the fitted grid; recorded on the index key
     _sb_record_preproc!(data, keys_.time_idx, PreprocEntry(:rw, (; steps=st.steps, keys=keys_), xname, true))
     submodel = _sb_rw_submodel_expr(term_overrides, t)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
@@ -15087,6 +15131,7 @@ _sb_predictor_term!(stmts, data, ::typeof(cdar), t;
     st = prepared.state
     col_name = Symbol(:cdar_, target, :_, xname)
     keys_ = (; n_groups=Symbol(col_name, :_n_groups), n_steps=Symbol(col_name, :_n_steps),
+               n_new_steps=Symbol(col_name, :_n_new_steps),
                L=Symbol(col_name, :_L), group_idx=Symbol(col_name, :_group_idx),
                step_idx=Symbol(col_name, :_step_idx))
     for key in values(keys_)
@@ -15094,11 +15139,13 @@ _sb_predictor_term!(stmts, data, ::typeof(cdar), t;
     end
     data[keys_.n_groups] = st.n_groups
     data[keys_.n_steps] = st.n_steps
+    data[keys_.n_new_steps] = 0
     data[keys_.L] = st.L
     data[keys_.group_idx] = st.group_idx
     data[keys_.step_idx] = st.step_idx
-    # replay: the group levels and the factor are constants of the fitted term; the step
-    # grid may grow (a forecast). Recorded on the step-index key; the other keys ride along.
+    # replay: the group levels and the factor are constants of the fitted term; a
+    # forecast appends steps past the fitted grid. Recorded on the step-index key; the
+    # other keys ride along.
     _sb_record_preproc!(data, keys_.step_idx, PreprocEntry(:cdar,
         (; steps=st.steps, groups=st.groups, L=st.L, keys=keys_), (xname, gname), true))
     submodel = _sb_cdar_submodel_expr(term_overrides, t)

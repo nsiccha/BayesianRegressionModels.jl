@@ -1303,16 +1303,46 @@ function _adaptive_car_centering_reparametrizer(blocks)
     state, WarmupHMC.IndexedReparametrization(pairs)
 end
 
+# cdar walk cells are scalar zero-location cells like HSGP basis weights, so
+# they reuse that frame shape one-to-one: per-cell marginal spread, diagonal
+# transport, linear cost. They keep their own state/argument types for the same
+# reason — the ordinary-block exact small-block dispatch must not see them. A
+# model whose only cells are walk cells keeps its own plan (its pair order and
+# checkpoints are unchanged); beside other cells they join the joint wrapper,
+# after its car cells.
+mutable struct BRMCDARAdaptiveCenteringState
+    blocks::Vector{BRM._CDARAdaptiveCenteringBlock}
+    pair_blocks::Vector{Int}
+    pair_cells::Vector{Int}
+    sources::Vector{Float64}
+    effect_indices::BitSet
+end
+
+function BRMCDARAdaptiveCenteringState(blocks)
+    pair_blocks = Int[]
+    pair_cells = Int[]
+    sources = Float64[]
+    for (bi, block) in enumerate(blocks), cell in eachindex(block.effects)
+        push!(pair_blocks, bi)
+        push!(pair_cells, cell)
+        push!(sources, 0.0)
+    end
+    effect_indices = BitSet(Iterators.flatten(b.effects for b in blocks))
+    BRMCDARAdaptiveCenteringState(
+        collect(blocks), pair_blocks, pair_cells, sources, effect_indices,
+    )
+end
+
 # Joint ordinary + R2D2 + HSGP + scalar (totals/S2Z) + car adaptation.
 # `IndexedReparametrization` requires one concrete pair element type, so the
 # families cannot contribute their own accessor closures to one vector. Every
 # joint pair therefore carries the same `BRMJointAdaptiveCenteringArgument`,
 # which selects by pair-number range: pairs `1:n_ranef` are ordinary cells, the
 # next `n_r2d2` are R2D2 cells, then `n_hsgp` HSGP basis-weight cells, then
-# `n_level` HSGP level cells, then `n_scalar` scalar total/S2Z cells, and the
-# rest are car cells. A model without R2D2 blocks has `n_r2d2 = 0` and one
-# without level, scalar or car cells has none, so each keeps the historical
-# ordinary-then-HSGP pair order.
+# `n_level` HSGP level cells, then `n_scalar` scalar total/S2Z cells, then
+# `n_car` car cells, and the rest are cdar walk cells. A model without R2D2
+# blocks has `n_r2d2 = 0` and one without level, scalar, car or cdar cells has
+# none, so each keeps the historical ordinary-then-HSGP pair order.
 #
 # Ordinary and R2D2 cells share one derived-scale state: an ordinary block
 # joins it in derived-scale form (`BRM._adaptive_derived_block`), whose `tau` is
@@ -1328,11 +1358,13 @@ struct BRMJointAdaptiveCenteringState{N}
     level::BRMHSGPLevelCenteringState{N}
     scalar::BRMScalarCenteringState
     car::BRMCARAdaptiveCenteringState
+    cdar::BRMCDARAdaptiveCenteringState
     n_ranef::Int
     n_r2d2::Int
     n_hsgp::Int
     n_level::Int
     n_scalar::Int
+    n_car::Int
 end
 
 struct BRMJointAdaptiveCenteringArgument{KIND,N} <: Function
@@ -1357,8 +1389,10 @@ function (arg::BRMJointAdaptiveCenteringArgument{:location})(x)
     q <= 0 && return zero(eltype(x))
     q <= s.n_level && return _level_location(x, x, s.level, q)
     q -= s.n_level
-    q > s.n_scalar && return _car_location(x, s.car, q - s.n_scalar)
-    convert(eltype(x), s.scalar.locations[q])
+    q <= s.n_scalar && return convert(eltype(x), s.scalar.locations[q])
+    q -= s.n_scalar
+    q <= s.n_car && return _car_location(x, s.car, q)
+    zero(eltype(x))
 end
 
 function (arg::BRMJointAdaptiveCenteringArgument{:log_scale})(x)
@@ -1375,9 +1409,13 @@ function (arg::BRMJointAdaptiveCenteringArgument{:log_scale})(x)
         _level_pair_log_scale(x, s.level, p - s.n_ranef - s.n_r2d2 - s.n_hsgp)
     elseif p <= s.n_ranef + s.n_r2d2 + s.n_hsgp + s.n_level + s.n_scalar
         x[s.scalar.scales[p - s.n_ranef - s.n_r2d2 - s.n_hsgp - s.n_level]]
-    else
+    elseif p <= s.n_ranef + s.n_r2d2 + s.n_hsgp + s.n_level + s.n_scalar + s.n_car
         _car_log_scale(x, s.car,
                        p - s.n_ranef - s.n_r2d2 - s.n_hsgp - s.n_level - s.n_scalar)
+    else
+        bi, cell = _cdar_pair_location(s.cdar, p - s.n_ranef - s.n_r2d2 - s.n_hsgp -
+                                                 s.n_level - s.n_scalar - s.n_car)
+        BRM._adaptive_cdar_log_scale(x, s.cdar.blocks[bi], cell)
     end
 end
 
@@ -1390,18 +1428,21 @@ function _joint_pair_family(state::BRMJointAdaptiveCenteringState, i)
     i <= state.n_level && return (:level, i)
     i -= state.n_level
     i <= state.n_scalar && return (:scalar, i)
-    (:car, i - state.n_scalar)
+    i -= state.n_scalar
+    i <= state.n_car && return (:car, i)
+    (:cdar, i - state.n_car)
 end
 
 _joint_pair_index(state, family, j) =
     family === :hsgp ? _hsgp_pair_index(state.hsgp, j) :
     family === :level ? _level_pair_index(state.level, j) :
     family === :scalar ? state.scalar.indices[j] :
-    family === :car ? _car_pair_index(state.car, j) : _pair_index(state.ranef, j)
+    family === :car ? _car_pair_index(state.car, j) :
+    family === :cdar ? _cdar_pair_index(state.cdar, j) : _pair_index(state.ranef, j)
 
 function _sync_sources!(state::BRMJointAdaptiveCenteringState, ir)
     n_cells = state.n_ranef + state.n_r2d2 + state.n_hsgp + state.n_level +
-              state.n_scalar + length(state.car.sources)
+              state.n_scalar + state.n_car + length(state.cdar.sources)
     length(ir.pairs) == n_cells || throw(DimensionMismatch(
         "BRM joint adaptive-centering plan has $n_cells cells but the " *
         "WarmupHMC reparametrizer has $(length(ir.pairs)) pairs",
@@ -1429,7 +1470,8 @@ function _centering_frame(state::BRMJointAdaptiveCenteringState, position, gradi
               _centering_frame(state.hsgp, position, gradient),
               _centering_frame(state.level, position, gradient),
               _centering_frame(state.scalar, position, gradient),
-              _centering_frame(state.car, position, gradient))
+              _centering_frame(state.car, position, gradient),
+              _centering_frame(state.cdar, position, gradient))
     # Field by field: a splatted generator over `fieldnames` does not infer, and
     # an uninferred frame makes every candidate score a dynamic dispatch.
     BRMAdaptiveCenteringFrame(
@@ -1446,13 +1488,16 @@ const _NO_SCALAR_CELLS = (; indices=Int[], scales=Int[], locations=Float64[],
 
 const _NO_CAR_BLOCKS = BRM._CARAdaptiveCenteringBlock[]
 
-# The joint state of ordinary, R2D2, HSGP, scalar and car cells, after refusing
-# every coordinate overlap that would make the transform inexact. Shared by the
-# per-pair wrapper below and the learned-order wrapper
+const _NO_CDAR_BLOCKS = BRM._CDARAdaptiveCenteringBlock[]
+
+# The joint state of ordinary, R2D2, HSGP, scalar, car and cdar cells, after
+# refusing every coordinate overlap that would make the transform inexact.
+# Shared by the per-pair wrapper below and the learned-order wrapper
 # (`_adaptive_ordered_centering_reparametrizer`).
 function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
                                 car_blocks=_NO_CAR_BLOCKS; locations=nothing,
-                                level_blocks=_NO_LEVEL_BLOCKS)
+                                level_blocks=_NO_LEVEL_BLOCKS,
+                                cdar_blocks=_NO_CDAR_BLOCKS)
     # One innovation capacity for the random-effect and HSGP level cells, so
     # the joint state keeps one type parameter; it is the random-effect one
     # whenever there are no level cells.
@@ -1463,13 +1508,15 @@ function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
     level_state = BRMHSGPLevelCenteringState{N}(level_blocks)
     scalar_state = _scalar_centering_state(scalar_cells)
     car_state = BRMCARAdaptiveCenteringState(car_blocks)
+    cdar_state = BRMCDARAdaptiveCenteringState(cdar_blocks)
     block_effects(bs) = BitSet(Iterators.flatten(vec(b.effects) for b in bs))
     effects = (block_effects(blocks), block_effects(r2d2_blocks),
                hsgp_state.effect_indices, level_state.effect_indices,
-               BitSet(scalar_state.indices), car_state.effect_indices)
+               BitSet(scalar_state.indices), car_state.effect_indices,
+               cdar_state.effect_indices)
     sum(length, effects) == length(union(effects...)) || error(
-        "BRM joint adaptive centering: ordinary, R2D2, HSGP, total/S2Z and car " *
-        "cells claim overlapping unconstrained coordinates; refusing an " *
+        "BRM joint adaptive centering: ordinary, R2D2, HSGP, total/S2Z, car and " *
+        "cdar cells claim overlapping unconstrained coordinates; refusing an " *
         "ambiguous transform.",
     )
     for block in level_blocks
@@ -1486,12 +1533,23 @@ function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
             "intercept or `phi` from a coordinate another cell rewrites; refusing " *
             "an inexact transform.")
     end
+    for block in cdar_blocks
+        isdisjoint((block.sigma, block.rho), union(effects...)) || error(
+            "BRM joint adaptive centering: cdar `$(block.term)` reads its marginal " *
+            "SD or persistence from a coordinate another cell rewrites; refusing " *
+            "an inexact transform.")
+    end
     for block in r2d2_blocks
         read = BRM._adaptive_read_coordinates(block)
         isdisjoint(read, car_state.effect_indices) ||
             error("BRM joint adaptive centering: block " *
                   "`$(block.ranef.binding)` derives its scale from a car field " *
                   "coordinate this transform rewrites; refusing an inexact " *
+                  "transform.")
+        isdisjoint(read, cdar_state.effect_indices) ||
+            error("BRM joint adaptive centering: block " *
+                  "`$(block.ranef.binding)` derives its scale from a cdar walk " *
+                  "innovation this transform rewrites; refusing an inexact " *
                   "transform.")
         isdisjoint(read, hsgp_state.effect_indices) ||
             error("BRM joint adaptive centering: block " *
@@ -1513,7 +1571,8 @@ function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
     # basis-weight cells, then HSGP level cells (term, basis, level), then
     # scalar total and S2Z cells
     # (`_scalar_centering_cells` order), then car cells (per block, in
-    # `_adaptive_car_cell` order).
+    # `_adaptive_car_cell` order), then cdar walk cells (per block, its `eta`
+    # in column-major group-by-step order).
     ranef_blocks = vcat(
         BRM.R2D2AdaptiveCenteringBlock[BRM._adaptive_derived_block(b) for b in blocks],
         r2d2_blocks)
@@ -1526,13 +1585,14 @@ function _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
     n_r2d2 = length(ranef_state.sources) - n_ranef
     n_hsgp = length(hsgp_state.sources)
     BRMJointAdaptiveCenteringState(ranef_state, hsgp_state, level_state, scalar_state,
-                                   car_state, n_ranef, n_r2d2, n_hsgp,
+                                   car_state, cdar_state, n_ranef, n_r2d2, n_hsgp,
                                    length(level_state.sources),
-                                   length(scalar_state.sources))
+                                   length(scalar_state.sources),
+                                   length(car_state.sources))
 end
 
-# The compiled frame of every joint cell, in pair order. Car fields are always
-# emitted standardized (`c=0`).
+# The compiled frame of every joint cell, in pair order. Car fields and cdar
+# innovations are always emitted standardized (`c=0`).
 function _joint_targets(state::BRMJointAdaptiveCenteringState, scalar_cells)
     ranef = [state.ranef.blocks[state.ranef.pair_blocks[p]].target_c
              for p in eachindex(state.ranef.sources)]
@@ -1540,7 +1600,7 @@ function _joint_targets(state::BRMJointAdaptiveCenteringState, scalar_cells)
             for (bi, basis) in zip(state.hsgp.pair_blocks, state.hsgp.pair_basis)]
     # Grouped HSGP weights are emitted standardized (`c=0`).
     vcat(ranef, hsgp, zeros(state.n_level), Float64.(scalar_cells.targets),
-         zeros(length(state.car.sources)))
+         zeros(state.n_car), zeros(length(state.cdar.sources)))
 end
 
 _joint_cell_index(state::BRMJointAdaptiveCenteringState, p) =
@@ -1549,9 +1609,9 @@ _joint_cell_index(state::BRMJointAdaptiveCenteringState, p) =
 function _adaptive_joint_centering_reparametrizer(
         blocks, hsgp_blocks, r2d2_blocks=BRM.R2D2AdaptiveCenteringBlock[],
         scalar_cells=_NO_SCALAR_CELLS, car_blocks=_NO_CAR_BLOCKS; locations=nothing,
-        level_blocks=_NO_LEVEL_BLOCKS)
+        level_blocks=_NO_LEVEL_BLOCKS, cdar_blocks=_NO_CDAR_BLOCKS)
     state = _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
-                                   car_blocks; locations, level_blocks)
+                                   car_blocks; locations, level_blocks, cdar_blocks)
     pairs = [_joint_cell_index(state, p) => WarmupHMC.Reparametrization(
                  WarmupHMC.PartiallyCentered(c), WarmupHMC.PartiallyCentered(c),
                  BRMJointAdaptiveCenteringArgument(state, p, :location),
@@ -1806,9 +1866,9 @@ end
 function _adaptive_ordered_centering_reparametrizer(
         blocks, hsgp_blocks, r2d2_blocks=BRM.R2D2AdaptiveCenteringBlock[],
         scalar_cells=_NO_SCALAR_CELLS, car_blocks=_NO_CAR_BLOCKS; locations=nothing,
-        level_blocks=_NO_LEVEL_BLOCKS)
+        level_blocks=_NO_LEVEL_BLOCKS, cdar_blocks=_NO_CDAR_BLOCKS)
     state = _joint_centering_state(blocks, hsgp_blocks, r2d2_blocks, scalar_cells,
-                                   car_blocks; locations, level_blocks)
+                                   car_blocks; locations, level_blocks, cdar_blocks)
     n = length(state.ranef.blocks)
     matrices() = [Matrix{Int}(undef, 0, 0) for _ in 1:n]
     vectors() = [Int[] for _ in 1:n]
@@ -2007,6 +2067,8 @@ function WarmupHMC.with_logabsdet_jacobian!(y::AbstractVector,
     end
     offset += s.n_scalar
     ljac += _ordered_car_map!(y, x, s.car, ir.targets, offset, ir.direction)
+    offset += s.n_car
+    ljac += _ordered_cdar_map!(y, x, s.cdar, ir.targets, offset, ir.direction)
     ljac, y
 end
 
@@ -2044,6 +2106,20 @@ function _ordered_car_map!(y, x, state::BRMCARAdaptiveCenteringState, targets,
     ljac
 end
 
+# cdar walk cells inside the learned-order wrapper, as car cells: every scale
+# reads the walk's marginal SD and persistence, which no cell rewrites.
+function _ordered_cdar_map!(y, x, state::BRMCDARAdaptiveCenteringState, targets,
+                            offset, direction)
+    ljac = zero(eltype(x))
+    for p in eachindex(state.sources)
+        bi, cell = _cdar_pair_location(state, p)
+        ljac += _cell_map!(y, x, state.blocks[bi].effects[cell], zero(eltype(x)),
+            BRM._adaptive_cdar_log_scale(x, state.blocks[bi], cell), targets[offset + p],
+            state.sources[p], direction)
+    end
+    ljac
+end
+
 WarmupHMC.InverseFunctions.inverse(ir::BRMOrderedCenteringReparametrization) =
     BRMOrderedCenteringReparametrization(ir.state, ir.targets, ir.orders, ir.perms,
         ir.starts, ir.groups, ir.block_orders, ir.positions, ir.rows, ir.kinds,
@@ -2051,13 +2127,13 @@ WarmupHMC.InverseFunctions.inverse(ir::BRMOrderedCenteringReparametrization) =
 
 WarmupHMC.reparam_controls(ir::BRMOrderedCenteringReparametrization) =
     vcat(ir.state.ranef.sources, ir.state.hsgp.sources, ir.state.level.sources,
-         ir.state.scalar.sources, ir.state.car.sources)
+         ir.state.scalar.sources, ir.state.car.sources, ir.state.cdar.sources)
 
 function WarmupHMC.restore_reparam_controls!(ir::BRMOrderedCenteringReparametrization,
                                              controls)
     s = ir.state
     sources = (s.ranef.sources, s.hsgp.sources, s.level.sources, s.scalar.sources,
-               s.car.sources)
+               s.car.sources, s.cdar.sources)
     n = sum(length, sources)
     controls isa AbstractVector && length(controls) == n || throw(ArgumentError(
         "BRM learned-order centering controls must be one value per adaptive " *
@@ -2241,34 +2317,6 @@ function _totals_beside_centering_problem(model, problem, ad_backend, names, cen
             synchronize! = _totals_beside_synchronize!))
 end
 
-# cdar walk cells are scalar zero-location cells like HSGP basis weights, so
-# they reuse that frame shape one-to-one: per-cell marginal spread, diagonal
-# transport, linear cost. They keep their own state/argument types for the same
-# reason — the ordinary-block exact small-block dispatch must not see them —
-# and they form their own plan rather than joining the joint ordinary+HSGP
-# wrapper, whose pair order and checkpoint contract are already settled.
-mutable struct BRMCDARAdaptiveCenteringState
-    blocks::Vector{BRM._CDARAdaptiveCenteringBlock}
-    pair_blocks::Vector{Int}
-    pair_cells::Vector{Int}
-    sources::Vector{Float64}
-    effect_indices::BitSet
-end
-
-function BRMCDARAdaptiveCenteringState(blocks)
-    pair_blocks = Int[]
-    pair_cells = Int[]
-    sources = Float64[]
-    for (bi, block) in enumerate(blocks), cell in eachindex(block.effects)
-        push!(pair_blocks, bi)
-        push!(pair_cells, cell)
-        push!(sources, 0.0)
-    end
-    effect_indices = BitSet(Iterators.flatten(b.effects for b in blocks))
-    BRMCDARAdaptiveCenteringState(
-        collect(blocks), pair_blocks, pair_cells, sources, effect_indices,
-    )
-end
 
 struct BRMCDARAdaptiveCenteringArgument{KIND} <: Function
     state::BRMCDARAdaptiveCenteringState
@@ -2619,7 +2667,8 @@ scalar or correlated random-effect blocks, R2D2-scaled random-effect blocks,
 HSGP basis weights (squared-exponential ungrouped or grouped, or ungrouped
 periodic), areal `car` fields (`:icar` or `:bym2`), or `cdar` correlated-walk
 cells. Ordinary, R2D2, HSGP, total, S2Z contrast and car cells adapt together
-in one wrapper; `cdar` cells form a separate plan and mix with none of them.
+in one wrapper; `cdar` cells join it after the car cells, except beside total
+or S2Z cells, and a walk-only model keeps a plan of its own.
 
 `model` is the `SBBRMI` or `GenerativePlan` that emitted `problem`. When
 `problem` is StanBlocks' `StanProblem`, unconstrained names are read from its
@@ -2760,9 +2809,10 @@ order: `:icar` cells in emitted `phi` order, `:bym2` cells in sorted area order.
 For a `cdar` walk, each of the `P * W` innovations is one scalar cell with
 zero location and its marginal prior spread
 `sigma * sqrt(C[p, p] * (1 - rho^(2w)) / (1 - rho^2))`; `c=0` is the emitted
-`eta` frame. Walk cells form their own plan rather than joining the joint
-wrapper, whose pair order and checkpoint contract are already settled: a model
-mixing cdar cells with ordinary or HSGP cells fails before construction.
+`eta` frame. Walk cells alone form their own plan. Beside ordinary, R2D2, HSGP or car cells
+they join the joint wrapper (and the learned-order wrapper) after its car cells,
+so the pair order and checkpoints of a model without walk cells are unchanged.
+Walk cells beside exact totals or S2Z contrasts are still refused.
 
 A correlated block's triangular map centres each margin on its conditional mean
 given the margins before it. With the default `ranef_order=:declared`, that order
@@ -2875,23 +2925,20 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
         ad_backend, names, centeredness, ordinary, hsgp_blocks, r2d2_blocks, car_blocks,
         ranef_order === :learned && any(b -> b.ranef.n_terms > 1, blocks); locations,
         level_blocks)
-    # cdar cells never share a wrapper; the branch below refuses the mix.
-    if ranef_order === :learned && isempty(cdar_blocks) &&
-            any(b -> b.ranef.n_terms > 1, blocks)
+    if ranef_order === :learned && any(b -> b.ranef.n_terms > 1, blocks)
         _, ir = _adaptive_ordered_centering_reparametrizer(ordinary, hsgp_blocks,
             r2d2_blocks, scalar ? _scalar_centering_cells(model, names) : _NO_SCALAR_CELLS,
-            car_blocks; locations, level_blocks)
+            car_blocks; locations, level_blocks, cdar_blocks)
         return _ordered_centering_problem(ir, problem, ad_backend,
             _start_controls(centeredness, ir.state, WarmupHMC.reparam_controls(ir)))
     end
     state, ir = if !isempty(cdar_blocks)
-        (isempty(blocks) && isempty(hsgp_blocks) && isempty(car_blocks) &&
-         isempty(level_blocks)) || error(
-            "BRM adaptive centering: a single online plan cannot yet mix " *
-            "cdar walk cells with random-effect, HSGP or car cells. Build a " *
-            "model with one supported adaptive geometry family.",
-        )
-        _adaptive_cdar_centering_reparametrizer(cdar_blocks)
+        # Walk cells alone keep their own plan; beside other cells they follow
+        # the joint wrapper's car cells (totals and S2Z were refused above).
+        isempty(blocks) && isempty(hsgp_blocks) && isempty(car_blocks) &&
+            isempty(level_blocks) ? _adaptive_cdar_centering_reparametrizer(cdar_blocks) :
+            _adaptive_joint_centering_reparametrizer(ordinary, hsgp_blocks, r2d2_blocks,
+                _NO_SCALAR_CELLS, car_blocks; locations, level_blocks, cdar_blocks)
     elseif scalar
         _adaptive_joint_centering_reparametrizer(ordinary, hsgp_blocks, r2d2_blocks,
             _scalar_centering_cells(model, names), car_blocks; locations, level_blocks)
@@ -3049,7 +3096,8 @@ function _control_rows!(rows, state::BRMJointAdaptiveCenteringState, orders, off
     offset = _control_rows!(rows, state.hsgp, nothing, offset, values, names, margins)
     offset = _control_rows!(rows, state.level, nothing, offset, values, names, margins)
     offset = _control_rows!(rows, state.scalar, nothing, offset, values, names, margins)
-    _control_rows!(rows, state.car, nothing, offset, values, names, margins)
+    offset = _control_rows!(rows, state.car, nothing, offset, values, names, margins)
+    _control_rows!(rows, state.cdar, nothing, offset, values, names, margins)
 end
 
 function _control_rows!(rows, ir::BRMTotalsBesideCenteringReparametrization, orders,
@@ -3060,7 +3108,8 @@ function _control_rows!(rows, ir::BRMTotalsBesideCenteringReparametrization, ord
     offset = _control_rows!(rows, s.level, nothing, offset, values, names, margins)
     offset = _control_rows!(rows, ir.totals.state, nothing, offset, values, names, margins)
     offset = _control_rows!(rows, s.scalar, nothing, offset, values, names, margins)
-    _control_rows!(rows, s.car, nothing, offset, values, names, margins)
+    offset = _control_rows!(rows, s.car, nothing, offset, values, names, margins)
+    _control_rows!(rows, s.cdar, nothing, offset, values, names, margins)
 end
 
 _control_margins(model::Union{BRM.GenerativePlan,BRM.SBBRMI}) =

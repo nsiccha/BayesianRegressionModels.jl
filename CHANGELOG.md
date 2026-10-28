@@ -12,6 +12,35 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.27
+
+- A forecast continues an `rw(time)` or `cdar(step; by = g, cor = C)` walk.
+  `reprocess(fit, rows)` (the default `freeze_constants = true`) keeps the
+  fitted grid and appends the steps after its last one; their innovations are
+  drawn in generated quantities from their `N(0, 1)` prior, so every level
+  continues from its fitted state (`delta[g, new] = rho * delta[g, last] +
+  sigma * sqrt(1 - rho^2) * (L * eta_new)[g]`). The forecast program keeps the
+  fit's unconstrained coordinates, so the fit's draws feed it and `:predict`
+  runs. Before, the replay grew the walk's innovations as parameters, and
+  `:predict` with the fit's draws failed with a `DimensionMismatch`. A replay
+  on the fitted grid is the fit's own program. **Breaking:** a prediction
+  replay with a step inside the fitted grid that the fit did not have, or
+  before it, is refused (it would have shifted every later innovation onto the
+  wrong step); `freeze_constants = false` still samples every step of the
+  replay's grid. Every `rw`/`cdar` program gains the data
+  `<term>_n_new_steps` (0 in a fit) and an empty `<term>_z_new` /
+  `<term>_eta_new` (descriptor component `:auxiliary`), so its Stan source and
+  descriptor id change; the density and coordinates do not.
+- `adaptive_centering_problem` adapts `cdar` walk cells beside ordinary, R2D2,
+  HSGP and car cells in one wrapper, and in the `ranef_order = :learned`
+  wrapper, after the car cells. A model without walk cells keeps its pair
+  order and checkpoints, and a walk-only model keeps its own plan. Before,
+  such a model was refused ("cannot yet mix cdar walk cells"). Walk cells
+  beside exact totals or S2Z contrasts are still refused.
+- The `cdar` docstrings call `sigma` what the program makes it, the marginal
+  (stationary) SD of each deviation; its innovation SD is
+  `sigma * sqrt(1 - rho^2)`. Snag `per-group-statio-059ae6f6`.
+
 ## 0.2.26
 
 - A `@plate` cell reads a linear predictor none of whose random-effect

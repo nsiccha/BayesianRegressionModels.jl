@@ -101,8 +101,9 @@ end
     @test !isempty(shared) && all(o -> o.predictors == (:mu, :scale), shared)
     @test one_output(d; role=:random_effect, component=:scale) in brm_outputs(d; predictor=:scale)
     @test one_output(d; role=:random_effect, component=:scale) in brm_outputs(d; predictor=:mu)
+    # `:auxiliary` is the walk's (empty in a fit) forecast innovations, `z_new`
     @test Set(o.component for o in brm_outputs(d; predictor=:mu, term=:rw_mu_t)) ==
-          Set([:sd, :innovations, :value])
+          Set([:sd, :innovations, :value, :auxiliary])
 end
 
 @testset "every structured term family" begin
@@ -132,7 +133,7 @@ end
         @test any(o -> o.kind === :parameter, brm_outputs(d; predictor=:mu, term))
     end
     @test Set(o.component for o in brm_outputs(d; term=:cdar_mu_week, kind=:parameter)) ==
-          Set([:ar, :sd, :innovations])
+          Set([:ar, :sd, :innovations, :auxiliary])          # `:auxiliary`: `eta_new`
     @test all(o -> o.predictors == (:mu,), sampled(d))
 
     # A grouped hsgp's basis weights live in a per-group block beside the term;

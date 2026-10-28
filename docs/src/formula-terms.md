@@ -87,8 +87,9 @@ first. Each row reads the point of its own time value, so a long frame whose
 rows share times (several groups per day) gets one shared walk — with unique
 times it is the plain path. Address the scale as `sd(:, rw(time))`; there is
 no persistence to address, so `ar(:, rw(time))` is refused with a message
-saying so. The time column must be nonempty and finite; on replay the grid may
-gain new times (a forecast extends the walk with prior innovations). This is
+saying so. The time column must be nonempty and finite; on replay, times after
+the last fitted one are appended (a forecast draws their innovations in
+generated quantities, so the walk continues from its fitted end). This is
 the log-reproduction-number walk of a renewal model
 ([Epidemic renewal models](renewal.md)), stated as one formula line.
 
@@ -108,10 +109,10 @@ end)((;
 
 ### Grouped correlated damped walks
 
-`cdar(step; by=group, cor=C)` gives every level of `group` its own deviation
-path over the sorted distinct values of `step`, damped with a shared
-persistence `rho` and driven by innovations that are correlated **across
-groups** through the Cholesky factor `L` of `C` (`L L' = C`):
+`cdar(step; by=group, cor=C)` gives every level of `group` its own stationary
+AR(1) deviation over the sorted distinct values of `step`, with a shared
+persistence `rho` and innovations that are correlated **across groups** through
+the Cholesky factor `L` of `C` (`L L' = C`; `C = I` for independent groups):
 
 ```
 delta[:, 1] = sigma * L * eta[:, 1]
@@ -125,12 +126,15 @@ plus spatially correlated weekly patch deviations — the six-patch model of
 symmetric positive-definite matrix, `P` the number of group levels, supplied as
 a data field (a matrix-valued field is accepted) or a literal; it is a fixed
 hyperparameter, not a sampled covariance. The term samples `sigma > 0`
-(default `Normal(0, 0.2)` truncated at zero), `rho` on `[0, 1]` (default
-`Normal(0.5, 0.2)` truncated), and `P·W` standardized innovations `eta`;
-address them as `sd(:, cdar(step))` and `ar(:, cdar(step))`. On replay the
-group levels and `L` are frozen from the fit while the step grid may grow — a
-forecast extends the walk with prior innovations — and an unseen group level is
-refused.
+(default `Normal(0, 0.2)` truncated at zero), the marginal SD of each
+deviation (its innovations scale with `sigma * sqrt(1 - rho^2)`), `rho` on
+`[0, 1]` (default `Normal(0.5, 0.2)` truncated), and `P·W` standardized
+innovations `eta`; address them as `sd(:, cdar(step))` and `ar(:, cdar(step))`.
+On replay the group levels and `L` are frozen from the fit, and steps after the
+last fitted one are appended: a forecast draws their innovations in generated
+quantities, so each group continues from its fitted state and the fit's draws
+feed the forecast program. A step inside the fitted grid that the fit did not
+have, and an unseen group level, are refused.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
@@ -566,8 +570,8 @@ unsupported group raises an error.
 Automatic selection retains the conventional representation for the whole model
 if some ordinary group blocks require it; request the eligible blocks with
 `group => predictors` to mix the two. One adaptive wrapper combines totals and S2Z contrasts
-with ordinary and R2D2 random effects and HSGP weights; only `cdar` cells need
-a wrapper of their own.
+with ordinary and R2D2 random effects and HSGP weights; `cdar` walk cells join
+ordinary, R2D2, HSGP and car cells in it, but not totals or S2Z contrasts.
 
 **Group-level predictors.** A population column that is identical on every row
 of each group (a group-level predictor such as a per-subject covariate) shifts

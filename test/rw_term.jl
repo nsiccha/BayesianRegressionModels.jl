@@ -63,10 +63,15 @@ end
     sb = SBBRMI(rw_model(); mod=@__MODULE__)
     @test sb.data[:rw_mu_t_n_steps] == 4
     @test sb.data[:rw_mu_t_time_idx] == [1, 2, 3, 4]
-    replay = reprocess(sb, rw_df(7))                       # the grid grows: a forecast
-    @test replay.data[:rw_mu_t_n_steps] == 7
+    # appended times are a forecast: the fitted grid keeps its innovations and the
+    # new ones are drawn in generated quantities (test/walk_forecast.jl)
+    replay = reprocess(sb, rw_df(7))
+    @test replay.data[:rw_mu_t_n_steps] == 4
+    @test StanBlocks.getvalue(replay.data[:rw_mu_t_n_new_steps]) == 3
     @test replay.data[:rw_mu_t_time_idx] == collect(1:7)
-    @test StanBlocks.stan_code(replay.model) == StanBlocks.stan_code(sb.model)
+    same = reprocess(sb, rw_df(3))                         # on the fitted grid
+    @test same.data[:rw_mu_t_n_new_steps] == 0
+    @test StanBlocks.stan_code(same.model) == StanBlocks.stan_code(sb.model)
 
     d = brm_descriptor(sb)
     @test any(o -> o.logical === :rw_mu_t, d.outputs)

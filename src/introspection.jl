@@ -427,7 +427,7 @@ Which parameter each class reaches:
 | `length_scale(lp, gp(x))` / `length_scale(lp, hsgp(x))` | the GP length scale `rho` |
 | `ar(lp, dar(time))` | the differenced-AR persistence coefficient `beta` |
 | `sd(lp, rw(time))` | the random walk's innovation scale `sigma` |
-| `sd(lp, cdar(step))` / `ar(lp, cdar(step))` | the grouped damped walk's innovation scale `sigma` / persistence `rho` |
+| `sd(lp, cdar(step))` / `ar(lp, cdar(step))` | the grouped stationary AR(1) walk's marginal SD `sigma` (its innovation SD is `sigma * sqrt(1 - rho^2)`) / persistence `rho` |
 | `sd(lp, car(area))` / `mixing(lp, car(area))` | the areal effect's scale `sigma` / BYM2 spatial share `rho` |
 
 Standardized raw innovations (`b_pen_raw`, `z`, `beta_raw`, `epsilon`, and
