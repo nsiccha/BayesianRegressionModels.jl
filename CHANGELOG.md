@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.22
+
+- A model description covers the comparisons `==`, `!=`, `<`, `<=`, `>` and
+  `>=`, so a model deriving numeric indicators the documented way
+  (`bottle = 1.0 * (vessel == 2) + 1.0 * (vessel == 3)`) is complete instead of
+  listing each comparison as a coverage gap. A comparison used as a value is
+  written as the indicator `\mathbf 1\{\mathrm{vessel} = 2\}`, the notation
+  `factor` dummies already use, instead of `\mathrm{==}\left(\mathrm{vessel}, 2\right)`.
+  `|` and `&` joining comparisons (in a `@plate` cell) are one indicator of
+  their logical or/and, `\mathbf 1\{v_{i} = 2 \lor v_{i} = 3\}`, a nested
+  connective in parentheses. A formula's `(1 | g)` and `a & b` are unchanged.
+  Snag `description-cove-e12e9953`.
+
 ## 0.2.21
 
 - **Breaking:** on RKBRMI, a predictor written with a link is its
