@@ -305,6 +305,32 @@ end
     end
 end
 
+# Crossed coarse groupings in cells a binding labels, one block shared with
+# the unit predictor (co-report of snag `cell-lp-with-a-c-3d6db673`: a cell
+# predictor with Kreis and kind effects beside a Gemeinde predictor sharing the
+# Kreis block).
+const CROSSED = let regions = ["R1", "R2"]
+    cell_region = [regions[1 + (k ÷ 3) % 2] for k in 1:NCELL]
+    merge(COARSE, (; cell_region,
+        unit_region=[cell_region[findfirst(==(c), COARSE.cells)] for c in COARSE.unit_cell]))
+end
+crossed_cells_model(data) = @brm data begin
+    log_mu ~ 1 + x_u + (1 | r | unit_region)
+    log_p ~ 1 + (1 | cls | cell_class) + (1 | r | cell_region)
+    rows = groups(unit_cell => cells)
+    @plate for k in eachindex(y)
+        y[k] ~ Poisson(exp(log_p[k]) * sum(exp.(log_mu[rows[k]])))
+    end
+end
+
+@stestset "crossed coarse groupings of a cell predictor, one block shared with the units" begin
+    sb = SBBRMI(crossed_cells_model(CROSSED); mod=@__MODULE__, total_groups=())
+    @test sb.data[:kernel_nsub_y_cell] == NCELL
+    @test StanBlocks.stanc_check(StanBlocks.stan_code(sb.model); warn_pedantic=false).ok
+    check_rk_stan(crossed_cells_model(CROSSED),
+        consumer_stan(crossed_cells_model(CROSSED), "plate-crossed-cells"))
+end
+
 # A per-row predictor beside one with an outer grouping only: the per-row
 # grouping labels the cells, and the outer predictor rides on them.
 outer_beside_model(data) = @brm data begin
