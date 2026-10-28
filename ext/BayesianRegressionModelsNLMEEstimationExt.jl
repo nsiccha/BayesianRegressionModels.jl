@@ -39,9 +39,16 @@ function NE.fixed_omega(m::BRM.BRMNLMEModel)
     isempty(pairs) ? nothing : pairs
 end
 # Only a prepared compact subject-cell sampler differentiates one subject's
-# population coordinates; every other model uses the lockstep batch.
+# population coordinates. An elementwise observation (a flat grouped response,
+# a completed covariate's observed values) has one cell, and so one compact
+# call, per row; when a subject has several, one lockstep sweep costs less
+# (80 subjects × 8 flat PK rows, 60 online SAEM iterations: 0.26 s batched
+# against 0.71 s per subject, with the same first fit). Those models, and
+# models without compact cells, use the lockstep batch.
 NE.saem_population_gradient_style(m::BRM.BRMNLMEModel) =
-    m.cell_gradient === nothing ? NE.BatchedEvaluation() : NE.PerSubjectEvaluation()
+    m.cell_gradient === nothing || any(m.cell_query) do cell
+        cell.elementwise && any(p -> length(p) > 1, cell.positions)
+    end ? NE.BatchedEvaluation() : NE.PerSubjectEvaluation()
 NE.saem_population_gradient_style(m::BRM.BRMNLMEModel, ::Val{:online}) =
     NE.saem_population_gradient_style(m)
 NE.saem_population_gradient_style(::BRM.BRMNLMEModel, ::Val{:mixture}) =

@@ -510,17 +510,50 @@ end
     θ = fill(0.1, length(m.theta)); σ = [log(2.0)]
     H = 0.1 .* reshape(collect(1:2n), 2, n) ./ n
     u = BRM._brm_nlme_point(m, θ, σ, H)
-    values = brm_nlme_loglikelihoods(m, θ, σ, H)
+    values, G = brm_nlme_loglikelihoods_and_gradients(m, θ, σ, H)
     @test sum(values) ≈ Base.invokelatest(likelihood_query(backend), u) rtol=1e-12
     pointwise = Base.invokelatest(pointwise_query(backend), u).y
     for i in 1:n
         @test values[i] ≈ sum(pointwise[m.view.rows[i]]) rtol=1e-13
     end
-    # Decision 110evqv requires O(n_i) single-subject calls. Flat rows have no
-    # subject cell, so the lockstep path is the supported evaluation here.
-    err = try brm_nlme_loglikelihood(m, 1, θ, σ, H[:, 1]); nothing catch e; e end
-    @test err isa BRMNLMEViewError
-    @test occursin("flat-row grouped", err.message)
+    # Decision 110evqv requires O(n_i) single-subject calls: each flat row is a
+    # cell of its subject, so a subject is evaluated on its own rows.
+    @test only(m.cell_query).positions == m.view.rows
+    for i in 1:n
+        @test brm_nlme_loglikelihood(m, i, θ, σ, H[:, i]) ≈ values[i] rtol=1e-12
+        value, gradient = brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, H[:, i])
+        @test value ≈ values[i] rtol=1e-12
+        @test gradient ≈ G[:, i] rtol=1e-10 atol=1e-12
+    end
+end
+
+@stestset "one subject's flat-row work stays flat as other subjects are added" begin
+    # The interleaved rows of 4 subjects, then `k - 1` relabelled copies of
+    # them as further subjects: subject `s1` keeps exactly its rows.
+    measured = map((3, 9, 27)) do k
+        d = NLME_DATA
+        data = (; subject=[j == 1 ? s : "$s.$j" for j in 1:k for s in d.subject],
+            t=repeat(d.t, k), dose=repeat(d.dose, k), wt=repeat(d.wt, k),
+            y=repeat(d.y, k))
+        m = brm_nlme_model(RKBRMI(nlme_pk(data)); ad_backend=NLME_AD)
+        θ = fill(0.1, length(m.theta))
+        σ = [log(2.0)]
+        η = [0.05, -0.1]
+        i = findfirst(==("s1"), m.view.levels)
+        value() = brm_nlme_loglikelihood(m, i, θ, σ, η)
+        gradient() = brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, η)
+        value(); gradient()
+        primal_bytes = minimum(@allocated(value()) for _ in 1:3)
+        gradient_bytes = minimum(@allocated(gradient()) for _ in 1:3)
+        (; result=gradient(), primal_bytes, gradient_bytes)
+    end
+    @test all(x -> isapprox(x.result[1], measured[1].result[1]; rtol=1e-12), measured)
+    @test all(x -> isapprox(x.result[2], measured[1].result[2]; rtol=1e-10), measured)
+    # A row's RK cell computes the predictor at that row only.
+    @test maximum(x.primal_bytes for x in measured) <=
+        1.2minimum(x.primal_bytes for x in measured)
+    @test maximum(x.gradient_bytes for x in measured) <=
+        1.2minimum(x.gradient_bytes for x in measured)
 end
 
 @stestset "a grouped observation over interleaved rows is attributed by subject" begin

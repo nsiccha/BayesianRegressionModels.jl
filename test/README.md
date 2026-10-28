@@ -519,9 +519,13 @@ gradient, and each subject's term equals `brm_nlme_unit_problem`'s density.
 On synthetic Gaussian (intercept and slope) and Poisson (intercept) models
 it compares the fitted draws with four NUTS chains: posterior means agree, and
 the global coordinates' sds may be narrower, as variational approximations
-are, but not wider. Starts (prior medians, a packed point, `inits`) and their
-refusals are covered too, and a flat-row grouped model is a `@test_broken`
-capability gap. It runs in the test environment above.
+are, but not wider. The split is also checked on a flat-row grouped model
+(each row a cell of its subject), a nested model whose subject blocks have
+three different lengths, and the regional panel of `nlme_panel_fixture.jl`
+(nested units, non-centred completions and totals cells); the nested model's
+fit is compared with NUTS too. Starts (prior medians, a packed point,
+`inits`) and their refusals are covered as well. It runs in the test
+environment above.
 
 `nlme_laplace.jl` checks the per-unit Laplace marginal (`brm_laplace_problem`,
 `brm_laplace_draws`) against oracles written from the model equations: Gaussian

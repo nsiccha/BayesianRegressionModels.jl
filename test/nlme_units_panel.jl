@@ -120,3 +120,39 @@ end
         @test gradient ≈ full_gradient[v.subject_coordinates[i]] atol=1e-8
     end
 end
+
+# `k` copies of the panel's regions, each with its own districts,
+# municipalities and district-years: region 1 keeps exactly its data.
+function replicate_panel(d, k)
+    shift(x, n) = reduce(vcat, [x .+ (j - 1) * n for j in 1:k])
+    years = maximum(d.district_year)
+    (; region=shift(d.region, maximum(d.region)),
+       district=shift(d.district, maximum(d.district)),
+       muni=shift(d.muni, maximum(d.muni)), sclass=repeat(d.sclass, k),
+       district_year=shift(d.district_year, years), year=repeat(d.year, k),
+       z=repeat(d.z, k), x1=repeat(d.x1, k), c0=d.c0,
+       dy_obs=shift(d.dy_obs, years), total=repeat(d.total, k))
+end
+
+@stestset "one unit's work stays flat as regions are added" begin
+    # A region's value and gradient are its own, however many regions there
+    # are. Its gradient still evaluates the whole model: the totals and
+    # completed-covariate cells each compute whole-cohort values, so per-cell
+    # compact gradients would cost more. Capability gap, todo
+    # BayesianRegressionModels:scaling-svi/todos/2026-10-25T22-21-35-231-182pl0l.
+    measured = map((1, 3)) do k
+        rk = RKBRMI(panel(replicate_panel(PANEL, k)); completions=:noncentered)
+        m = brm_nlme_model(rk; ad_backend=NLME_AD, subject_group=:region,
+            nested_groups=PANEL_NESTED)
+        @test length(m.view.levels) == 3k
+        θ = fill(0.1, length(m.theta))
+        σ = fill(-0.5, length(m.sigma))
+        η = 0.1 .* sin.(1:length(m.view.subject_coordinates[1]))
+        gradient() = brm_nlme_loglikelihood_and_gradient(m, 1, θ, σ, η)
+        gradient(); gradient()
+        (; result=gradient(), bytes=minimum(@allocated(gradient()) for _ in 1:3))
+    end
+    @test measured[2].result[1] ≈ measured[1].result[1] rtol=1e-12
+    @test measured[2].result[2] ≈ measured[1].result[2] rtol=1e-10
+    @test_broken measured[2].bytes <= 1.5measured[1].bytes
+end
