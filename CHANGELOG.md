@@ -12,6 +12,27 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.34
+
+- A statement may read a name declared below it, in every position a read can
+  stand. `mu ~ 1 + c_key` above `c_key = log(1 + x + exp(log_w) * z)` is the
+  model with the two lines swapped, so a covariate computed from parameters,
+  an `mi()` completion or data alone is a formula term, a grouping or a
+  `standardize(...)` input wherever it is declared, and `effect(mu, c_key)`
+  addresses its coefficient. Before, such a term failed on SBBRMI
+  (`` expected data-backed NamedColumn for `c_key`, got MissingColumn ``) and
+  RKBRMI (`` term `c_key` is not a data column ``) unless the declaration came
+  first. A read of a column that a later `mi(y) ~ …` completes reads the
+  completion, as a read below it does; before, it read the raw column with its
+  missing entries and failed. A read of any other data column stays data, as a
+  statement above `x = log(x)` reads the raw `x`. Snag
+  `formula-covariat-5673c470`.
+- `merge(a::BRMI, b::BRMI)` resolves the same way: a fragment that reads a name
+  another fragment declares refers to that declaration, in either order. A
+  fragment's binding of a data column it only reads (`m ~ 1 + y`) no longer
+  replaces another fragment's likelihood of that column: `merge(likelihood,
+  reader)` used to drop `y`'s likelihood from the model without an error.
+
 ## 0.2.33
 
 - Groupings crossed with the NLME units. `brm_nlme_view`, `brm_nlme_model`,

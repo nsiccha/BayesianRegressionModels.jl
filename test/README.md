@@ -62,6 +62,16 @@ rows, the others observed only through group sums (suppressed cells of a count
 table): SBBRMI against an independent density for Poisson and NB2 cells, a
 frozen replay, and RKBRMI against SBBRMI. Snag `mi-completion-wi-54222432`.
 
+`forward_reads.jl` checks that a statement may read a name declared below it:
+a formula term computed from a parameter (with an `effect(...)` prior on its
+coefficient), from an `mi()` completion or from data alone, a grouping, a chain
+of assignments and the completed `mi()` column itself, each with the
+declaration moved below its readers, give the same Stan program and the same
+RK density and gradient as in source order; `merge` composes fragments that
+read each other in either order, builders and built `BRMI`s alike; and a
+fragment that only reads a data column no longer replaces another fragment's
+likelihood of it. Snag `formula-covariat-5673c470`.
+
 `plate_gathered_predictor.jl` checks a predictor on its own rows that reads
 another part's values through model-scope gathers (`c2 = c[pos2]` of an `mi()`
 completion, `z2 = z[pos2]` where `z` reads part-1 data columns), read by a
