@@ -70,6 +70,24 @@ end
     check_lockstep(m, Xoshiro(1))
 end
 
+@stestset "an uncorrelated block is one shared block per margin" begin
+    nocor(data) = @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | subject) + (1 + x || class)
+        y ~ Normal(mu, sigma)
+    end
+    rk = RKBRMI(nocor(CR_FLAT))
+    v = brm_nlme_view(rk; shared_groups=(:class,))
+    @test !any(==(:unclaimed), v.role)
+    @test count(r -> r.kind === :ranef && r.group === :class,
+        BRM._brm_nlme_records(rk.plan)) == 2
+    class = class_coordinates(v, rk)
+    @test length(class) == 3 * 2 + 2 && all(i -> v.role[i] === :shared_latent, class)
+    @test count(==(:shared_latent), v.role) == length(class)
+    check_lockstep(brm_nlme_model(rk; ad_backend=NLME_AD, shared_groups=(:class,)),
+        Xoshiro(9))
+end
+
 @stestset "every grouping is named once; the refusal names the rest" begin
     rk = RKBRMI(crossed_flat(CR_FLAT))
     # refused: a grouping owned by no subject and named nowhere has no reading
@@ -95,7 +113,7 @@ end
     v = brm_nlme_view(rk; shared_groups=(:class,))
     @test !any(==(:unclaimed), v.role)
     class = class_coordinates(v, rk)
-    @test length(class) == 3 * 2 + 2 && all(i -> v.role[i] === :shared_latent, class)
+    @test length(class) == 3 + 1 && all(i -> v.role[i] === :shared_latent, class)
     m = brm_nlme_model(rk; ad_backend=NLME_AD, shared_groups=(:class,))
     θ, σ, H, values = check_lockstep(m, Xoshiro(2))
     _, G = brm_nlme_loglikelihoods_and_gradients(m, θ, σ, H)

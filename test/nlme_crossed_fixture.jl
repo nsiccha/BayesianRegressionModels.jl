@@ -28,14 +28,16 @@ end
 
 # Subjects on their own axis; observation rows labelled by `obs_subject`, read
 # in each subject's plate cell through a `groups` binding. The rows' predictor
-# carries an uncorrelated class block.
+# carries a class intercept: with a class slope the RK model's own static
+# Reverse gradient is rejected by Enzyme, NLME or not (BRM todo
+# 2026-10-28T14-26-47-032-1ltq3fp).
 const CR_PLATE = (; subject=CR_SUBJECTS, obs_subject=CR_FLAT.subject,
     class=CR_FLAT.class, x=CR_FLAT.x, y=CR_FLAT.y)
 
 crossed_plate(data) = @brm data begin
     sigma ~ Exponential(1)
     base ~ 1 + (1 | subject)
-    row ~ 0 + x + (1 + x || class)
+    row ~ 0 + x + (1 | class)
     obs = groups(obs_subject => subject)
     @plate for i in eachindex(base)
         y[obs[i]] ~ Normal(base[i] .+ row[obs[i]], sigma)
