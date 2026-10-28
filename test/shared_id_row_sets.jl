@@ -284,6 +284,20 @@ end
     @test names == [n for n in BridgeStan.param_unc_names(fitted.model) if n in names]
     @test length(names) == length(BridgeStan.param_unc_names(fitted.model)) - 2
     @test any(startswith("ya_y_mis"), names)
+    # so the fit's draws feed it through transport_draws, which selects the
+    # forecast's coordinates by name; each keeps the fit draw's parameter values
+    # (snag reprocess-resamp-cedeba79)
+    unc_fit = BridgeStan.param_unc_names(fitted.model)
+    draws = [0.37sin(i + 5k) for k in 1:3, i in eachindex(unc_fit)]
+    moved = transport_draws(fit, forecast, draws, unc_fit, names)
+    @test moved == draws[:, [findfirst(==(n), unc_fit) for n in names]]
+    fit_params = BridgeStan.param_names(fitted.model)
+    kept = [findfirst(==(n), fit_params) for n in BridgeStan.param_names(problem.model)]
+    @test kept isa Vector{Int}
+    for k in axes(draws, 1)
+        @test BridgeStan.param_constrain(problem.model, moved[k, :]) ≈
+              BridgeStan.param_constrain(fitted.model, draws[k, :])[kept]
+    end
     q = collect(range(-0.3, 0.4; length=length(names)))
     all_names = BridgeStan.param_names(problem.model; include_tp=true, include_gq=true)
     values = BridgeStan.param_constrain(problem.model, q; include_tp=true, include_gq=true,
