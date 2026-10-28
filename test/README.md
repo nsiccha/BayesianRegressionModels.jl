@@ -74,7 +74,11 @@ units: the centred reading refused, the non-centered grouped coordinates as
 unit draws of the region owning each group (free entries beside them), the
 group terms attributed to it, a group spanning two regions refused, lockstep
 and unit-problem densities against the full RK density, and per-unit Laplace
-and SVI. Snag `nlme-view-shares-f1cfaa71`.
+and SVI. Its panel lives in `nlme_shares_fixture.jl`.
+`nlme_shares_units_fit.jl` runs NLMEEstimation on that panel: the grouped
+coordinates' family in `NLMEEstimation.fixed_omega`, `check_protocol` (with
+the η Hessian blocks) and a short SAEM fit. Run it in the NLMEEstimation
+scratch environment described below. Snag `nlme-view-shares-f1cfaa71`.
 
 `plate_subset_response_sums.jl` checks a response on some of a predictor's
 rows, the others observed only through group sums (suppressed cells of a count

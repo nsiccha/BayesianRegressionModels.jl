@@ -25,8 +25,9 @@ instead of failing at run time.
   observation of one placeholder per group (`x_shares_weights`).
 - `brm_nlme_view` reads those coordinates as unit draws: each is an instance
   of a size-1 family fixed at 1 in the subject owning its group's rows, and
-  the group's term belongs to that subject, so `brm_nlme_model`, SAEM, the
-  two-stage fit, SVI and the Laplace paths run. A group whose missing
+  the group's term belongs to that subject, so `brm_nlme_model`, SAEM, SVI
+  and the per-unit Laplace problem run, and the two-stage fit's unit problems
+  differ from the full RK density by their unit alone. A group whose missing
   entries lie on rows of several subjects is refused by name. A centred
   shares completion is refused, naming the non-centered lowering: its
   density is a prior term reading the law, whose arguments may read the
