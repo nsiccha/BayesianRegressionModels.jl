@@ -137,6 +137,16 @@ alone binds the distributions a model writes, and importing Distributions.jl as
 well stays unambiguous. A Distributions.jl family outside that set has no
 StanBlocks lowering.
 
+The functions BRM spells as Stan builtins, and the links whose inverse is one
+of them, are re-exported unchanged as well: `logit`, `logistic`, `log1pexp`,
+`logexpm1`, `log1mexp` and `logsumexp` from LogExpFunctions.jl, and `normcdf`
+and `norminvcdf` from StatsFuns.jl. So `logit(mu) ~ 1 + x`, the probit link
+`norminvcdf(p) ~ 1 + x`, the softplus link `logexpm1(s) ~ 1 + x` and an
+argument such as `Binomial(n, logistic(eta))` need no further import, and
+importing LogExpFunctions.jl or StatsFuns.jl as well stays unambiguous. Any
+other function a block names, a link included, resolves in the model's module:
+import or define it there.
+
 ## Backends
 
 ```@docs

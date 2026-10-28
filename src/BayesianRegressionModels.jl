@@ -24,6 +24,7 @@ using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
                  aweights, fweights, pweights, uweights, weights
 import CategoricalArrays as CA
 import StatsFuns
+using StatsFuns: normcdf, norminvcdf
 include("likelihood_distributions.jl")
 include("preparation_basis.jl")
 include("preparation_hsgp.jl")
@@ -204,6 +205,14 @@ export Arcsine, Beta, Binomial, Categorical, Cauchy, Chisq, Dirichlet, Erlang,
        NegativeBinomial, NormalCanon, Pareto, Rayleigh, SkewNormal,
        SkewedExponentialPower, TDist, Uniform, VonMises, Weibull
 export product_distribution, logpdf
+# Re-export the functions SBBRMI spells as Stan builtins (`_sb_julia_stan_name`,
+# sb_cell_julia.jl) and the links whose `InverseFunctions.inverse` is one of
+# them, so `logit(mu) ~ 1 + x` or `Binomial(n, logistic(eta))` needs no
+# `using LogExpFunctions` either (snag `logit-link-needs-91302d71`). These are
+# the LogExpFunctions/StatsFuns functions verbatim. test/exported_link_functions.jl
+# pins that every one is exported: a new spelling is added here with it.
+export logit, logistic, logexpm1, log1pexp, log1mexp, logsumexp,
+       normcdf, norminvcdf
 # Logit-form Bernoulli/Binomial -- prefer these over `Bernoulli(logistic(eta))`
 # / `Binomial(N, logistic(eta))`. Both backends lower to a logit-native log-pmf
 # (Stan's `bernoulli_logit_lpmf` / `binomial_logit_lpmf`; LogExpFunctions'
