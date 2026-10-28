@@ -79,6 +79,16 @@ read each other in either order, builders and built `BRMI`s alike; and a
 fragment that only reads a data column no longer replaces another fragment's
 likelihood of it. Snag `formula-covariat-5673c470`.
 
+`rk_inline_response_location.jl` checks a response whose location is computed
+inline from model values (`y ~ NegativeBinomial2(exp(dev) * (…), phi)`) against
+the same location assigned first: SBBRMI gives both spellings one density, and
+RKBRMI agrees with SBBRMI (value and Enzyme gradient) on the assigned spelling
+and, for a Normal location and scale and a Bernoulli probability, on the inline
+one. The inline Poisson and NegativeBinomial2 cases are `@test_broken` until
+the test environment's ReactiveKernels pin carries an RKPPL that lowers an
+inline count rate (RK `4e2ed1c5a`, ReactiveKernels snag
+`rkppl-logistic-a-b6e04821`). Snag `rkbrmi-on-a-resp-017c6f44`.
+
 `plate_gathered_predictor.jl` checks a predictor on its own rows that reads
 another part's values through model-scope gathers (`c2 = c[pos2]` of an `mi()`
 completion, `z2 = z[pos2]` where `z` reads part-1 data columns), read by a

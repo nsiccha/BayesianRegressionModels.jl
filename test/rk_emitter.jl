@@ -53,6 +53,16 @@ probit(p) = quantile(Normal(), p)
 cloglog(p) = log(-log1p(-p))
 dfp = merge(df, (; prop=[0.2, 0.7, 0.4, 0.6, 0.3, 0.8]))
 
+# The response statement of a model the value route plans. A response argument
+# computed from model values is the value it would be assigned, so the formula
+# route hands it to the value route (snag rkbrmi-on-a-resp-017c6f44).
+function value_observation(brmi)
+    plan = BRM._brm_rk_plan(brmi)
+    plan isa BRM._RKValuePlan || error("expected the value route, got $(typeof(plan))")
+    only(string(s) for s in BRM._rk_emit_ast(plan).main.args
+        if s isa Expr && s.head === :call && s.args[1] === :.~)
+end
+
 # The indicator design a factor's level gather is equivalent to: coefficient
 # `k` reads index position `k`, after the reference under treatment coding.
 factor_design(plan,term) = let offset = term.options.coding === :fullrank ? 0 : 1
@@ -2950,20 +2960,19 @@ end
     # logit(zi) submodel shape (model B) are admitted — see "group-C
     # ZIP plan shapes" above.
     # Group C: InverseGaussian (wald_only.jl) is admitted — see
-    # "group-C wald plan shapes" above. The `exp` spelling stays
-    # closed (positive response, so the throw is the spelling).
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # "group-C wald plan shapes" above. The inline `exp` spelling is a
+    # computed mean, which the value route lowers as RKPPL's link spelling.
+    @test value_observation(@brm df begin
         eta ~ 1 + x
         lam ~ LogNormal(-0.3, 1.0)
         z ~ InverseGaussian(exp(eta), lam)
-    end)
+    end) == "z .~ InverseGaussian.(exp.(eta), lam)"
     # Group C: Exponential is admitted — see "group-C exponential
-    # plan shapes" above. The `exp` spelling stays closed
-    # (positive response, so the throw is the spelling).
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # plan shapes" above. The inline `exp` spelling: as InverseGaussian.
+    @test value_observation(@brm df begin
         eta ~ 1 + x
         z ~ Exponential(exp(eta))
-    end)
+    end) == "z .~ Exponential.(exp.(eta))"
     # Group C: SkewDoubleExponential (quantile.jl).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
@@ -2975,11 +2984,11 @@ end
     # "group-C von-Mises plan shapes" above.
 end
 
-# Slice-2 group-A scope edges (per the rk:brm scoping answer): no
-# weights/evidence on the new triples, logit-only Beta mu, log-only Beta
-# kappa predictor, no inline cloglog, identical kappa in both Beta
-# positions, and no identity-predictor `Bernoulli(probit(eta))` spelling
-# (LHS-link form only — the thin-layer link words are peel-and-discard).
+# Slice-2 group-A scope edges of the formula route (per the rk:brm scoping
+# answer): no weights/evidence on the new triples, logit-only Beta mu,
+# log-only Beta kappa predictor, and identical kappa in both Beta positions.
+# An inline computed probability or shape (an inline cloglog, `probit(eta)`,
+# `mu + kappa`) is a model value the value route plans, as its assigned twin.
 @stestset "fail closed: group-A scope edges" begin
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         probit(p) ~ 1 + x
@@ -2999,30 +3008,39 @@ end
         kappa ~ Gamma(2.0, 1000.0)
         prop ~ Beta(mu * kappa, (1 - mu) * kappa)
     end)
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # An inline inverse cloglog is a computed probability: the value route.
+    @test value_observation(@brm df begin
         eta ~ 1 + x
         b ~ Bernoulli(1 - exp(-exp(eta)))
-    end)
+    end) == "b .~ Bernoulli.(1 .- exp.((.-)(exp.(eta))))"
     @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
         logit(mu) ~ 1 + x
         kappa ~ Gamma(2.0, 1000.0)
         kappa2 ~ Gamma(2.0, 1000.0)
         prop ~ Beta(mu * kappa, (1 - mu) * kappa2)
     end)
-    @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
+    # Shapes that are not the mean-concentration form are ordinary values.
+    @test value_observation(@brm dfp begin
         logit(mu) ~ 1 + x
         kappa ~ Gamma(2.0, 1000.0)
         prop ~ Beta(mu + kappa, (1 - mu) * kappa)
-    end)
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    end) == "prop .~ Beta.(mu .+ kappa, (1 .- mu) .* kappa)"
+    # A use-site `probit(eta)` is the caller's function, as in its assigned
+    # twin `p = probit(eta)`: a renamed callable, never RKPPL's peeled
+    # `probit.` link word.
+    probit_inline = value_observation(@brm df begin
         eta ~ 1 + x
         b ~ Bernoulli(probit(eta))
     end)
-    @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
+    @test startswith(probit_inline, "b .~ Bernoulli.(")
+    @test !occursin("probit.(", probit_inline)
+    # Planned as a value; RKPPL refuses its undotted `logistic` over the
+    # vector `mu` until todo 0xjnj3k.
+    @test value_observation(@brm dfp begin
         logit(mu) ~ 1 + x
         kappa ~ Gamma(2.0, 1000.0)
         prop ~ Beta(logistic(mu) * kappa, (1 - logistic(mu)) * kappa)
-    end)
+    end) == "prop .~ Beta.(logistic(mu) .* kappa, (1 .- logistic(mu)) .* kappa)"
     # Kappa submodel must be log-link (only log inverts into (0, Inf)).
     @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
         logit(mu) ~ 1 + x
@@ -3390,12 +3408,11 @@ end
         logit(mu) ~ 1 + x
         z ~ Exponential(mu)
     end)
-    # The `exp` spelling stays closed (Poisson precedent — the
-    # demand-battery entry below pins it too).
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # The inline `exp` spelling is a computed mean: the value route.
+    @test value_observation(@brm df begin
         eta ~ 1 + x
         z ~ Exponential(exp(eta))
-    end)
+    end) == "z .~ Exponential.(exp.(eta))"
     # Arity: the 0- and 2-argument spellings stay closed.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         log(mu) ~ 1 + x
@@ -3971,12 +3988,13 @@ end
         mu ~ 1 + x
         y ~ Normal(mu, mu)
     end)
-    # Deterministic wrappers spell as an LP link, not at the use-site.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # A deterministic wrapper at the use site is a computed scale: the value
+    # route.
+    @test value_observation(@brm df begin
         mu ~ 1 + x
         log_sigma ~ 1 + z
         y ~ Normal(mu, exp(log_sigma))
-    end)
+    end) == "y .~ Normal.(mu, exp.(log_sigma))"
     # A third predictor behind the two slots stays out.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + tau

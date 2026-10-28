@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.39
+
+- `RKBRMI` lowers a response location or scale computed inline from model
+  values as it lowers the same value assigned first:
+  `y ~ NegativeBinomial2(exp(dev) * (exp(w) * x + z), phi)` and
+  `mu = exp(dev) * (exp(w) * x + z); y ~ NegativeBinomial2(mu, phi)` are one
+  model on both backends. Before, a model whose other statements kept it on the
+  formula route refused it ("mean must be the linear predictor `dev` itself").
+  A predictor read bare, or bare inside `logistic(eta)`, `TDist(nu)`, Gamma's
+  `mu/alpha` or Beta's `mu*kappa` / `(1-mu)*kappa`, keeps its formula
+  spelling. An inline count rate or mean (`Poisson`, `NegativeBinomial2`, …)
+  also needs a ReactiveKernelsPPL that lowers it (0.1.2, RK `4e2ed1c5a`);
+  earlier RKPPL refuses it with `broadcast the link`.
+
 ## 0.2.38
 
 - `RKBRMI` lowers `cdar(step; by=group, cor=C)`, the per-group stationary
