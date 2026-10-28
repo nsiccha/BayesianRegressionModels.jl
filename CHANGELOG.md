@@ -12,6 +12,26 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.21
+
+- **Breaking:** on RKBRMI, a predictor written with a link is its
+  response-scale value under the name you wrote, and its linear predictor
+  carries the link: `log(mu) ~ 1 + x + (1 | g)` is `log_mu = …` and
+  `mu = exp.(log_mu)`, `logit(p) ~ …` is `p = logistic.(logit_p)`. So
+  `want=(:mu,)` and `rk_draw_values(rk, draws, (:mu,))` answer μ, and
+  `log_mu` answers log μ. Before, a model of formulas and their responses
+  (RK's structural route) named the linear predictor `mu`, which then held
+  log μ; a model with computed values already followed this rule. To read the
+  linear predictor, ask for `log_mu` (`logit_p`, …). The responses still read
+  it through their link-scale families (`NegativeBinomial2Log.(log_mu, …)`),
+  so densities and gradients are unchanged (snag `rk-node-of-a-lin-d8216a61`),
+  with one exception on registered Enzyme. For a lone linked intercept with
+  a literal `BetaBinomial2` precision
+  (`logit(mu) ~ 1; c ~ BetaBinomial2(n, mu, 5.0)`), the plain Enzyme Reverse
+  gradient now raises `EnzymeMutabilityException` ("cannot be proven
+  readonly") on Enzyme 0.13.216. Enzyme's dogfood line from `9d920e1f`
+  differentiates it exactly (Enzyme snag `readonly-proof-h-bcbe23d3`).
+
 ## 0.2.20
 
 - Long-format data with a plate over each subject's rows,

@@ -1015,6 +1015,21 @@ _rk_ast_observed_slice(value::Expr, jobs, rows) =
 _rk_ast_linked_target(predictor) = predictor.link === :identity ?
     string(predictor.name) : string(predictor.link, "_", predictor.name)
 
+# Each linked predictor's linear predictor, by the name its responses read it
+# under: `log_v` of `log(v) ~ …`, whose authored name is the response-scale
+# value `v = exp.(log_v)`. A reader of link-scale values reads these.
+function _rk_link_scale_names(plan, predictors)
+    linked = Set(p.name for p in predictors if p.link !== :identity)
+    names = Dict{Symbol,Symbol}()
+    for statement in _rk_emit_ast(plan).main.args
+        Meta.isexpr(statement, :(=), 2) && first(statement.args) in linked || continue
+        value = last(statement.args)
+        Meta.isexpr(value, :., 2) && Meta.isexpr(value.args[2], :tuple, 1) || continue
+        names[first(statement.args)] = only(value.args[2].args)
+    end
+    names
+end
+
 # A monotonic component is named as SBBRMI names its carrier: the first
 # `mo(c)` is `mo_c`, and a repeat of the column, in another predictor or
 # twice in one, is `mo_<target>_c` with a serial if needed. `mo1` likewise.
@@ -1451,11 +1466,12 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     # response uses) is alpha-renamed. Unreachable via `@brm`
     # (observation discovery claims `P ~ …` as a likelihood whenever `P`
     # is observed data), but programmatic plans can still overlap.
-    # As a value, a linked predictor `log(v) ~ …` is `v`; its linear
-    # predictor is named as authored, `log_v`.
+    # A linked predictor `log(v) ~ …` is `v` on the response scale, on both
+    # routes; its linear predictor is named as authored, `log_v`, and the
+    # responses read that link-scale value (`PoissonLog.(log_v)`).
     rename = Dict{Symbol,Symbol}()
     for predictor in plan.predictors
-        if values && predictor.link !== :identity
+        if predictor.link !== :identity
             rename[predictor.name] =
                 _rk_ast_fresh_name(_rk_ast_linked_target(predictor), taken)
             continue
@@ -1819,7 +1835,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             affine = Expr(:call, :fill, affine, Expr(:call, :length, predictor.row_source))
         end
         push!(stmts, Expr(:(=), lhs, affine))
-        if values && (lhs !== predictor.name || predictor.link !== :identity)
+        if predictor.link !== :identity || values && lhs !== predictor.name
             value = _rk_value_link!(bindings, predictor.link, lhs, taken)
             push!(stmts, Expr(:(=), predictor.name, value))
         end
@@ -1906,8 +1922,11 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 fused_heads, union(Set(keys(plan.columns)), Set(Base.values(rename)),
                     Set(p.name for p in plan.predictors)), effects_name))
     end
+    # A linked predictor's response-scale value is read by no response, and
+    # stays a graph value a query can ask for by its authored name.
+    authored = Set(p.name for p in plan.predictors if p.link !== :identity)
     emitted = _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
-        _rk_observed_names(plan); coordinates)
+        _rk_observed_names(plan); retained=authored, coordinates)
     # A value plan resolves lone intercepts once its own readers are emitted.
     values ? emitted : _rk_scalar_lone_intercepts(emitted, lone_intercepts)
 end

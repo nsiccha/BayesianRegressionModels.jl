@@ -58,7 +58,7 @@ dfp = merge(df, (; prop=[0.2, 0.7, 0.4, 0.6, 0.3, 0.8]))
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :b,
         Expr(:., :Bernoulli, Expr(:tuple,
-            Expr(:., :logistic, Expr(:tuple, :p)))))
+            Expr(:., :logistic, Expr(:tuple, :logit_p)))))
     brmi = @brm df begin
         log(mu) ~ 1 + x
         c ~ Poisson(mu)
@@ -66,7 +66,7 @@ dfp = merge(df, (; prop=[0.2, 0.7, 0.4, 0.6, 0.3, 0.8]))
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :Poisson, Expr(:tuple,
-            Expr(:., :exp, Expr(:tuple, :mu)))))
+            Expr(:., :exp, Expr(:tuple, :log_mu)))))
 end
 
 @stestset "slice-1 response AST shapes" begin
@@ -77,7 +77,7 @@ end
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :b,
         Expr(:., :Binomial, Expr(:tuple, :h,
-            Expr(:., :logistic, Expr(:tuple, :p)))))
+            Expr(:., :logistic, Expr(:tuple, :logit_p)))))
     brmi = @brm df begin
         log(mu) ~ 1 + x
         phi ~ Exponential(1)
@@ -86,7 +86,7 @@ end
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :NegativeBinomial2, Expr(:tuple,
-            Expr(:., :exp, Expr(:tuple, :mu)), :phi)))
+            Expr(:., :exp, Expr(:tuple, :log_mu)), :phi)))
     brmi = @brm df begin
         log(mu) ~ 1 + x
         alpha ~ Exponential(1)
@@ -95,7 +95,7 @@ end
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :z,
         Expr(:., :Gamma, Expr(:tuple, :alpha,
-            Expr(:call, :./, Expr(:., :exp, Expr(:tuple, :mu)),
+            Expr(:call, :./, Expr(:., :exp, Expr(:tuple, :log_mu)),
                 :alpha))))
 end
 
@@ -107,7 +107,7 @@ end
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :b,
         Expr(:., :Bernoulli, Expr(:tuple,
-            Expr(:., :brm_invprobit, Expr(:tuple, :p)))))
+            Expr(:., :brm_invprobit, Expr(:tuple, :probit_p)))))
     brmi = @brm df begin
         cloglog(p) ~ 1 + x
         b ~ Binomial(h, p)
@@ -115,14 +115,14 @@ end
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :b,
         Expr(:., :Binomial, Expr(:tuple, :h,
-            Expr(:., :brm_invcloglog, Expr(:tuple, :p)))))
+            Expr(:., :brm_invcloglog, Expr(:tuple, :cloglog_p)))))
     brmi = @brm dfp begin
         logit(mu) ~ 1 + x
         kappa ~ Gamma(2.0, 1000.0)
         prop ~ Beta(mu * kappa, (1 - mu) * kappa)
     end
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
-    mu_log = Expr(:., :logistic, Expr(:tuple, :mu))
+    mu_log = Expr(:., :logistic, Expr(:tuple, :logit_mu))
     @test prog.main.args[end] == Expr(:call, :.~, :prop,
         Expr(:., :Beta, Expr(:tuple,
             Expr(:call, :.*, mu_log, :kappa),
@@ -163,7 +163,7 @@ end
     plan = BRM._brm_rk_plan(brmi)
     want = Expr(:call, :.~, :y,
         Expr(:., :StudentT, Expr(:tuple,
-            Expr(:., :exp, Expr(:tuple, :nu)), :mu, 2.0)))
+            Expr(:., :exp, Expr(:tuple, :log_nu)), :mu, 2.0)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
@@ -181,8 +181,8 @@ end
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :HurdlePoisson, Expr(:tuple,
-            Expr(:., :exp, Expr(:tuple, :lambda)),
-            Expr(:., :logistic, Expr(:tuple, :p_zero)))))
+            Expr(:., :exp, Expr(:tuple, :log_lambda)),
+            Expr(:., :logistic, Expr(:tuple, :logit_p_zero)))))
     # Scalar p_zero inlines bare; the fused-heads flag changes nothing
     # (one head either way).
     brmi = @brm df begin
@@ -193,7 +193,7 @@ end
     plan = BRM._brm_rk_plan(brmi)
     want = Expr(:call, :.~, :c,
         Expr(:., :HurdlePoisson, Expr(:tuple,
-            Expr(:., :exp, Expr(:tuple, :lambda)), :p0)))
+            Expr(:., :exp, Expr(:tuple, :log_lambda)), :p0)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
@@ -211,7 +211,7 @@ end
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :ZeroInflatedPoisson, Expr(:tuple,
-            Expr(:., :exp, Expr(:tuple, :lambda)), :zi)))
+            Expr(:., :exp, Expr(:tuple, :log_lambda)), :zi)))
     # Modeled zi (zip.jl model B): the `logit(zi)` submodel inverts
     # under `logistic.` (the hurdle hu precedent).
     brmi = @brm df begin
@@ -222,8 +222,8 @@ end
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :ZeroInflatedPoisson, Expr(:tuple,
-            Expr(:., :exp, Expr(:tuple, :lambda)),
-            Expr(:., :logistic, Expr(:tuple, :zi)))))
+            Expr(:., :exp, Expr(:tuple, :log_lambda)),
+            Expr(:., :logistic, Expr(:tuple, :logit_zi)))))
     # Literals inline; the fused-heads flag changes nothing (one head
     # either way).
     brmi = @brm df begin
@@ -233,7 +233,7 @@ end
     plan = BRM._brm_rk_plan(brmi)
     want = Expr(:call, :.~, :c,
         Expr(:., :ZeroInflatedPoisson, Expr(:tuple,
-            Expr(:., :exp, Expr(:tuple, :lambda)), 0.25)))
+            Expr(:., :exp, Expr(:tuple, :log_lambda)), 0.25)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
@@ -250,7 +250,7 @@ end
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :c,
         Expr(:., :NegativeBinomial, Expr(:tuple,
-            Expr(:., :exp, Expr(:tuple, :r)), :p)))
+            Expr(:., :exp, Expr(:tuple, :log_r)), :p)))
     # Literals inline; the fused-heads flag changes nothing (one head
     # either way).
     brmi = @brm df begin
@@ -260,7 +260,7 @@ end
     plan = BRM._brm_rk_plan(brmi)
     want = Expr(:call, :.~, :c,
         Expr(:., :NegativeBinomial, Expr(:tuple,
-            Expr(:., :exp, Expr(:tuple, :r)), 0.4)))
+            Expr(:., :exp, Expr(:tuple, :log_r)), 0.4)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
     # Modeled p: the `logit(p)` submodel rides the scale slot under
@@ -273,8 +273,8 @@ end
     plan = BRM._brm_rk_plan(brmi)
     want = Expr(:call, :.~, :c,
         Expr(:., :NegativeBinomial, Expr(:tuple,
-            Expr(:., :exp, Expr(:tuple, :r)),
-            Expr(:., :logistic, Expr(:tuple, :p)))))
+            Expr(:., :exp, Expr(:tuple, :log_r)),
+            Expr(:., :logistic, Expr(:tuple, :logit_p)))))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
@@ -292,7 +292,7 @@ end
     plan = BRM._brm_rk_plan(brmi)
     want = Expr(:call, :.~, :z,
         Expr(:., :Weibull, Expr(:tuple, :k,
-            Expr(:., :exp, Expr(:tuple, :mu)))))
+            Expr(:., :exp, Expr(:tuple, :log_mu)))))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
     # Literal shape inlines; the fused-heads flag changes nothing
@@ -304,7 +304,7 @@ end
     plan = BRM._brm_rk_plan(brmi)
     want = Expr(:call, :.~, :z,
         Expr(:., :Weibull, Expr(:tuple, 2.0,
-            Expr(:., :exp, Expr(:tuple, :mu)))))
+            Expr(:., :exp, Expr(:tuple, :log_mu)))))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
@@ -321,7 +321,7 @@ end
     plan = BRM._brm_rk_plan(brmi)
     want = Expr(:call, :.~, :z,
         Expr(:., :InverseGaussian, Expr(:tuple,
-            Expr(:., :exp, Expr(:tuple, :mu)), :lam)))
+            Expr(:., :exp, Expr(:tuple, :log_mu)), :lam)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
     # Literal shape inlines; the fused-heads flag changes nothing
@@ -333,7 +333,7 @@ end
     plan = BRM._brm_rk_plan(brmi)
     want = Expr(:call, :.~, :z,
         Expr(:., :InverseGaussian, Expr(:tuple,
-            Expr(:., :exp, Expr(:tuple, :mu)), 2.0)))
+            Expr(:., :exp, Expr(:tuple, :log_mu)), 2.0)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
     # Modeled lambda (pair nuisance-lam): the `log(lam)` scale
@@ -348,8 +348,8 @@ end
     plan = BRM._brm_rk_plan(brmi)
     want = Expr(:call, :.~, :z,
         Expr(:., :InverseGaussian, Expr(:tuple,
-            Expr(:., :exp, Expr(:tuple, :mu)),
-            Expr(:., :exp, Expr(:tuple, :lam)))))
+            Expr(:., :exp, Expr(:tuple, :log_mu)),
+            Expr(:., :exp, Expr(:tuple, :log_lam)))))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
@@ -365,7 +365,7 @@ end
     plan = BRM._brm_rk_plan(brmi)
     want = Expr(:call, :.~, :z,
         Expr(:., :Exponential, Expr(:tuple,
-            Expr(:., :exp, Expr(:tuple, :mu)))))
+            Expr(:., :exp, Expr(:tuple, :log_mu)))))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
 end
@@ -384,7 +384,7 @@ end
     @test prog.main.args[end] == Expr(:call, :.~, :b,
         Expr(:., :BetaBinomial2, Expr(:tuple,
             :h,
-            Expr(:., :logistic, Expr(:tuple, :mu)),
+            Expr(:., :logistic, Expr(:tuple, :logit_mu)),
             :phi)))
     # Literal trials + literal precision inline bare; the fused-heads
     # flag changes nothing (one head either way).
@@ -396,7 +396,7 @@ end
     want = Expr(:call, :.~, :c,
         Expr(:., :BetaBinomial2, Expr(:tuple,
             10,
-            Expr(:., :logistic, Expr(:tuple, :mu)),
+            Expr(:., :logistic, Expr(:tuple, :logit_mu)),
             5.0)))
     @test BRM._rk_emit_ast(plan, false).main.args[end] == want
     @test BRM._rk_emit_ast(plan, true).main.args[end] == want
@@ -411,8 +411,8 @@ end
     @test prog.main.args[end] == Expr(:call, :.~, :b,
         Expr(:., :BetaBinomial2, Expr(:tuple,
             :h,
-            Expr(:., :logistic, Expr(:tuple, :mu)),
-            Expr(:., :exp, Expr(:tuple, :precision)))))
+            Expr(:., :logistic, Expr(:tuple, :logit_mu)),
+            Expr(:., :exp, Expr(:tuple, :log_precision)))))
 end
 
 @stestset "group-C von-Mises AST shape" begin
@@ -428,7 +428,7 @@ end
     prog = BRM._rk_emit_ast(BRM._brm_rk_plan(brmi), false)
     @test prog.main.args[end] == Expr(:call, :.~, :y,
         Expr(:., :VonMises, Expr(:tuple, :mu,
-            Expr(:., :exp, Expr(:tuple, :kappa)))))
+            Expr(:., :exp, Expr(:tuple, :log_kappa)))))
     # `CircularVonMises` appends the literal principal interval;
     # literals inline, and the fused-heads flag changes nothing (one
     # head either way).

@@ -5,10 +5,11 @@
 # positions are computed once under that grouping's name, a monotonic column
 # repeated across predictors is one joint block that each predictor reads by
 # column (decision `1pj2p5j`), and the linear predictor of `log(v) ~ …` is
-# `log_v`.
+# `log_v`, with `v = exp.(log_v)` its response-scale value on both routes.
 #
 #     julia --project=test test/rk_emitted_names.jl
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
+using LogExpFunctions: logit
 
 const NAMES_DATA = (;
     subject=repeat(["s1", "s2", "s3", "s4", "s5"]; inner=3),
@@ -135,4 +136,58 @@ end
     @test :(pop_mu = pop_Intercept_x1_x2[:, 1]) in stmts
     @test :(pop_nu = pop_Intercept_x1_x2[:, 2]) in stmts
     @test :(subject_level = brm_level_indices(subject, subject_fit_levels)) in stmts
+end
+
+@stestset "structural route: a linked predictor is its response-scale value" begin
+    data = (; subject=NAMES_DATA.subject, x1=NAMES_DATA.x1, x2=NAMES_DATA.x2,
+        count=[mod(3j, 7) for j in 1:15], hit=[isodd(j) ? 1 : 0 for j in 1:15],
+        w=[mod(2j, 5) for j in 1:15])
+    before = deepcopy(data)
+    brmi = @brm data begin
+        log(mu) ~ 1 + x1 + (1 + x1 | subject)
+        log(shape) ~ 1 + x2
+        count ~ NegativeBinomial2(mu, shape)
+        logit(p) ~ 1 + x2
+        hit ~ Bernoulli(p)
+        log(lam) ~ 1
+        w ~ Poisson(lam)
+    end
+    stmts = main_statements(brmi)
+    main = string(emitted_main(brmi))
+    # The linear predictors carry their link, as authored; the responses read
+    # them through their link-scale families, and the authored names are the
+    # response-scale values (snag `rk-node-of-a-lin-d8216a61`).
+    @test :(log_mu = pop_log_mu .+ ranef_mu_subject) in stmts
+    @test :(mu = exp.(log_mu)) in stmts
+    @test :(shape = exp.(log_shape)) in stmts
+    @test :(p = logistic.(logit_p)) in stmts
+    @test :(log_lam = lam_Intercept) in stmts
+    @test :(lam = exp.(log_lam)) in stmts
+    @test occursin("count .~ NegativeBinomial2Log.(log_mu, exp.(log_shape))", main)
+    @test occursin("hit .~ BernoulliLogit.(logit_p)", main)
+    @test occursin("w .~ PoissonLog.(log_lam)", main)
+
+    # Queried by the authored names, the values are on the response scale, and
+    # they are the values the likelihood reads.
+    backend, problem = consumer_problem(brmi)
+    names = coordinate_names(backend.model.layout)
+    likelihood = BRM._rk_likelihood_reader(backend)
+    for u in ([0.3 * sin(3j) for j in eachindex(names)],
+            collect(range(-0.6, 0.7; length=length(names))))
+        v = map(only, rk_draw_values(backend, reshape(u, :, 1),
+            (:mu, :log_mu, :shape, :log_shape, :p, :logit_p, :lam, :log_lam)))
+        @test v.mu ≈ exp.(v.log_mu)
+        @test v.shape ≈ exp.(v.log_shape)
+        @test v.p ≈ LogExpFunctions.logistic.(v.logit_p)
+        @test v.lam ≈ exp(v.log_lam)
+        @test all(>(0), v.mu)
+        oracle = sum(logpdf.(NegativeBinomial.(v.shape, v.shape ./ (v.mu .+ v.shape)),
+                data.count)) +
+            sum(logpdf.(Bernoulli.(v.p), data.hit)) + sum(logpdf.(Poisson(v.lam), data.w))
+        @test likelihood(u) ≈ oracle atol=1e-10 rtol=1e-12
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+        @test isfinite(value)
+        @test all(isfinite, gradient)
+    end
+    @test isequal(data, before)
 end

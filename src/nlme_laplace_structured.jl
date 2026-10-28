@@ -141,8 +141,9 @@ function _brm_lap_constant(f::Int8, y::Float64, n::Float64)
     -0.5 * log(2π)
 end
 
-# An RK value's link-scale parameter, and its derivative: linear predictors
-# are link-scale values already (RK's families take them, `PoissonLog`,
+# An RK value's link-scale parameter, and its derivative: a predictor's slot
+# reads its linear predictor, a link-scale value already (`log_mu` of
+# `log(mu) ~ …`, which RK's families take, `PoissonLog`,
 # `NegativeBinomial2Log`, …, and a scale predictor's link inverts at its use),
 # a sampled scale is its natural value.
 _brm_lap_link(transform::Symbol, θ) = transform === :log ? log(θ) : θ
@@ -280,7 +281,13 @@ function _brm_structured_laplace_problem(backend::RKBRMI, view::BRMNLMEView; ad_
     omega = findall(r -> r === :subject_scale || r === :subject_correlation, view.role)
     records = [r for r in _rk_coordinate_records(backend.plan) if r.kind === :ranef]
     effects = Tuple(Symbol(chopsuffix(String(r.z), ".z")) for r in records)
-    families = map(_brm_slap_family, responses)
+    # A linked predictor's slots read its linear predictor, by the name the
+    # responses read it under; its authored name is the response-scale value.
+    linked = _rk_link_scale_names(backend.plan, _brm_slap_predictors(backend.plan))
+    families = map(responses) do spec
+        f, link, slots = _brm_slap_family(spec)
+        f, link, map(((name, l),) -> (get(linked, name, name), l), slots)
+    end
     ports = unique(Symbol[name for (_, _, slots) in families for (name, _) in slots
         if name isa Symbol])
     data = rk_bound_data(backend)
