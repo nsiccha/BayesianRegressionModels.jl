@@ -275,7 +275,7 @@ end
 struct _RKTermSpec
     kind::Symbol # :intercept | :continuous | :factor | :offset |
                 # :ranef_gather | :spline | :gp | :hsgp | :ar |
-                # :monotonic | :monotonic_summand | :dar | :me | :car
+                # :monotonic | :monotonic_summand | :dar | :me | :car | :cdar
     columns::Vector{Symbol}
     # factor: (coding=:fullrank, levels=:observed) over every observed level,
     # or (coding=:subset, drop::Int, levels=:observed) over every observed
@@ -5023,6 +5023,76 @@ function _rk_plan_car_term!(prepared::_BRMPreparedTerm{typeof(car)},
         value, value)
 end
 
+# ---- grouped stationary AR(1) walks (cdar; mirrors `_sb_cdar`) ----
+#
+# A `:cdar` term carries the walk's fitted grid: its sorted group levels and
+# steps, which the program looks each row's group and step up in, and as
+# generated data columns the step lags `max(w - v, 0)` and the mask `w >= v` of
+# the `W × W` decay matrix, the first-step indicator and, unless `cor = I`, the
+# flattened Cholesky factor of `cor`. The priors follow the SB declarations:
+# the marginal SD `sigma` keeps its `lower=0` kernel
+# (`restricted(Normal(0, s), 0, Inf)`), the persistence `rho` its
+# `lower=0, upper=1` one. A replay is refused (`_rk_check_replay_terms`).
+function _rk_cdar_rho_prior(prior, target::Symbol, source::Symbol)
+    prefix = "RK backend"
+    where = "predictor `$target` `cdar($source)` persistence"
+    prior isa ExprColumn && getf(prior) isa Type || error(
+        "$prefix: $where prior is not a distribution call")
+    name = nameof(getf(prior))
+    name in (:Normal, :Beta, :Uniform) || error(
+        "$prefix: $where prior `$name` is out of slice 1 (admitted: Normal, Beta, Uniform)")
+    isempty(getkwargs(prior)) || error(
+        "$prefix: $where prior cannot have keywords in slice 1")
+    args = getargs(prior)
+    length(args) == 2 && all(a -> a isa Number && isfinite(Float64(a)), args) || error(
+        "$prefix: $where prior `$name` needs two finite literal arguments")
+    a, b = Float64.(args)
+    # SB declares `rho` on [0, 1] beside the plain kernel
+    name === :Normal && return (:Normal, (a, b), (:restricted, 0.0, 1.0))
+    name === :Uniform && !(0 <= a < b <= 1) && error(
+        "$prefix: $where prior `Uniform($a, $b)` must stay inside [0, 1]")
+    (name, (a, b), nothing)
+end
+
+function _rk_plan_cdar_term!(prepared::_BRMPreparedTerm{typeof(cdar)},
+        target::Symbol, data::AbstractDict, columns::Dict{Symbol,AbstractVector},
+        taken::Set{Symbol})
+    state = prepared.state
+    source, group = prepared.source
+    for name in (source, group)
+        columns[name] = get(columns, name, data[name])
+    end
+    stem = "cdar_$(target)_$(source)"
+    column(field, value) = begin
+        name = _rk_mint_generated!(taken, columns, string(stem, "_", field))
+        columns[name] = value
+        name
+    end
+    P, W = state.n_groups, state.n_steps
+    lags = [w - v for v in 1:W, w in 1:W]
+    grid = (; lag=column(:lag, Float64.(vec(max.(lags, 0)))),
+        mask=column(:mask, Float64.(vec(lags .>= 0))),
+        first=column(:first, Float64.((1:W) .== 1)))
+    # `cor = I` couples no groups: the walk reads its innovations as they are
+    factor = state.L == LinearAlgebra.I ? nothing : column(:L, vec(state.L))
+    value = _rk_mint_generated!(taken, columns, stem)
+    sigma_param = _rk_term_parameter(state.sd_prior) do prior
+        family, args, support = _rk_gp_hyper_prior(prior, "marginal scale", target, source;
+            term="cdar")
+        support === :positive && (support = (:restricted, 0.0, Inf))
+        _RKSampledParameter(:sigma, family, args, support, :sigma)
+    end
+    rho_param = _rk_term_parameter(state.ar_prior) do prior
+        _RKSampledParameter(:rho, _rk_cdar_rho_prior(prior, target, source)..., :rho)
+    end
+    _RKTermSpec(:cdar, Symbol[],
+        (; value, source, group, levels=state.groups, steps=state.steps, n_groups=P,
+         n_steps=W, grid..., factor, L=state.L,
+         inputs=Tuple(n for n in (grid.lag, grid.mask, grid.first, factor) if n !== nothing),
+         sigma_param, rho_param),
+        value, value)
+end
+
 function _rk_plan_gp_term!(prepared::_BRMPreparedTerm{typeof(gp)},
         target::Symbol, data::AbstractDict,
         columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
@@ -6177,6 +6247,8 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
         elseif prepared.callable === car
             push!(terms, _rk_plan_car_term!(
                 prepared, target, context.data, columns, taken))
+        elseif prepared.callable === cdar
+            push!(terms, _rk_plan_cdar_term!(prepared, target, context.data, columns, taken))
         else
             haskey(prepared.state, :fields) || error(
                 "$prefix: predictor `$target` structured term `$(nameof(prepared.callable))` " *
@@ -8864,9 +8936,11 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     end
     statistical_inputs = Set{Symbol}(t.options.metadata for p in predictor_specs
         for t in p.terms if t.kind === :structured)
-    # An areal field's graph columns are read whole (edges, areas).
+    # An areal field's graph columns are read whole (edges, areas), and so
+    # are a walk's decay grid and correlation factor.
     union!(statistical_inputs, (input for p in predictor_specs
-        for t in p.terms if t.kind === :car for input in t.options.inputs))
+        for t in p.terms if t.kind === :car || t.kind === :cdar
+        for input in t.options.inputs))
     union!(statistical_inputs, (spec.expression.args[2] for spec in derived
         if spec.expression.head === :_rk_data_preparation &&
             first(spec.expression.args) === :brm_matrix_column))

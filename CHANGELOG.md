@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.38
+
+- `RKBRMI` lowers `cdar(step; by=group, cor=C)`, the per-group stationary
+  AR(1) walk, with SBBRMI's law: the marginal SD `sigma` and persistence `rho`
+  (their stated priors and known values included), standardized innovations
+  on the group × step grid, and the walk read at each row's group and step.
+  `brm_coordinate_transport` pairs its coordinates with SBBRMI's. A frozen
+  `reprocess` of an RK model with a `cdar` term (forecasts) is still refused.
+- `brm_nlme_view` reads a `cdar` walk whose groups are the units, or nest in
+  them, as unit draws: each group's innovations are one block of its
+  subject, in a family fixed at the identity, and `sigma` and `rho` are
+  shared latents. `brm_nlme_model`, `brm_laplace_problem`, `brm_svi_fit` and
+  `brm_nlme_fit` (SAEM, empirical Bayes) take such models, and
+  `brm_nlme_estimates` reads the walk's values by its term name. A `cor=` that
+  couples groups of different units keeps the walk shared as a whole.
+- `nested_groups` may also name the `by` grouping of a `cdar(...)` or grouped
+  `hsgp(...)` term that no random effect uses, and `shared_groups` may name a
+  `cdar` walk's `by` grouping, which keeps the walk shared.
+
 ## 0.2.37
 
 - `using BayesianRegressionModels` binds the link and special functions BRM

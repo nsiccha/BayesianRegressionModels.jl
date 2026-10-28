@@ -123,11 +123,10 @@ const CASES = [
         end, (; total_groups=())),
 ]
 
-# `cdar(step; by=g, cor=C)`, whose `C` has one row and column per level of `g`.
-# RKBRMI does not lower `cdar` yet (todo `1hq7nm0`, snag
-# `rkbrmi-cdar-lowe-d39fc042`), so these run on SBBRMI only and are
-# `@test_broken` on RKBRMI; once RKBRMI builds them, move them into `CASES`.
-const SB_CASES = [
+# `cdar(step; by=g, cor=C)`, whose `C` has one row and column per level of `g`
+# (on RKBRMI since BRM 0.2.33, snag `rkbrmi-cdar-lowe-d39fc042`). Kept apart
+# from `CASES`, whose last entry the exact-total set below reads.
+const CDAR_CASES = [
     "cdar with a known cor = C" => (
         quote
             st ~ 0 + cdar(t; by=g, cor=C)
@@ -185,7 +184,7 @@ end
 
 @testset "RKBRMI: each plate model equals its plate-free twin" begin
     df = level_data()
-    for (label, (plate, twin, _)) in CASES
+    for (label, (plate, twin, _)) in vcat(CASES, CDAR_CASES)
         @testset "$label" begin
             rk, rk_twin = RKBRMI(build(plate, df)), RKBRMI(build(twin, df))
             names = String.(coordinate_names(rk.model.layout))
@@ -218,18 +217,6 @@ catch err
     sprint(showerror, err)
 end
 
-@testset "RKBRMI: the cdar cases pass the plate's row check" begin
-    # The row check is shared preparation; RKBRMI then stops at `cdar` itself.
-    df = level_data()
-    for (label, (plate, _, _)) in SB_CASES
-        @testset "$label" begin
-            text = refusal(() -> RKBRMI(build(plate, df)))
-            @test !occursin("read through", text)
-            @test_broken isempty(text)
-        end
-    end
-end
-
 function compiled(sb, tag)
     mkpath(CACHE)
     code = BRM.stan_code(sb)
@@ -239,7 +226,7 @@ end
 @testset "SBBRMI: each plate model equals its plate-free twin" begin
     df = level_data()
     if RUNTIME
-        for (i, (label, (plate, twin, sb_keywords))) in enumerate(vcat(CASES, SB_CASES))
+        for (i, (label, (plate, twin, sb_keywords))) in enumerate(vcat(CASES, CDAR_CASES))
             @testset "$label" begin
                 stan = compiled(SBBRMI(build(plate, df); mod=@__MODULE__, sb_keywords...), "plate$i")
                 stan_twin = compiled(SBBRMI(build(twin, df); mod=@__MODULE__, sb_keywords...), "twin$i")
@@ -270,7 +257,7 @@ end
             end
         end
     else
-        for (label, (plate, _, _)) in vcat(CASES, SB_CASES)
+        for (label, (plate, _, _)) in vcat(CASES, CDAR_CASES)
             @test occursin("model", BRM.stan_code(SBBRMI(build(plate, df); mod=@__MODULE__)))
         end
         @info "Skipping the compiled SB sets (BRM_PLATE_LEVEL_AXIS_RUNTIME=0)"
