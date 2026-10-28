@@ -172,9 +172,33 @@ function brm_description_math(c::BRMDescriptionContext, x::BRMDescriptionCompone
         (value isa Number || value isa BRMDescriptionReference && value.axis===:scalar) &&
             return brm_description_math(c,value)
     end
+    _brmd_predicate(x) && return "\\mathbf 1\\{"*_brmd_proposition_math(c,x)*"\\}"
     args = map(a -> brm_description_math(c,a), x.arguments)
     _brmd_call_math(x.callable,args,x.keywords,c)
 end
+# A comparison is a predicate, and so are `|` and `&` joining one. As a value
+# it is the indicator 1{P}: 1 when P holds and 0 otherwise, which is Julia's
+# arithmetic on a Bool. A predicate nested in another is its bare proposition,
+# so `(v == 2) | (v == 3)` reads 1{v = 2 ∨ v = 3}.
+const _BRMD_COMPARISONS = ((==)=>"=",(!=)=>"\\ne",(<)=>"<",(<=)=>"\\le",(>)=>">",(>=)=>"\\ge")
+_brmd_predicate(_x) = false
+_brmd_predicate(x::BRMDescriptionComponent) = x.kind===:call && _brmd_predicate_call(x.callable,x)
+_brmd_predicate_call(_f,_x) = false
+_brmd_predicate_call(::Union{typeof(|),typeof(&)},x) = any(_brmd_predicate,x.arguments)
+_brmd_proposition_math(c,x) = _brmd_predicate(x) ? _brmd_proposition_call_math(x.callable,c,x) :
+    brm_description_math(c,x)
+for (f,op) in _BRMD_COMPARISONS
+    @eval _brmd_predicate_call(::$(typeof(f)),_x) = true
+    @eval _brmd_proposition_call_math(::$(typeof(f)),c,x) =
+        join((brm_description_math(c,a) for a in x.arguments),$(" "*op*" "))
+end
+for (f,op) in ((|)=>"\\lor",(&)=>"\\land")
+    @eval _brmd_proposition_call_math(::$(typeof(f)),c,x) =
+        join((_brmd_connective_operand_math(c,a) for a in x.arguments),$(" "*op*" "))
+end
+# A connective inside another is parenthesized; no precedence is implied.
+_brmd_connective_operand_math(c,a) = _brmd_predicate(a) && a.callable in (|,&) ?
+    "\\left("*_brmd_proposition_math(c,a)*"\\right)" : _brmd_proposition_math(c,a)
 _brmd_call_math(f, args, kwargs, c) = _brmd_identifier(_brmd_callable_name(f)) *
     "\\left(" * join((args..., (string(k) * "=" * brm_description_math(c,v)
          for (k,v) in pairs(kwargs))...), ", ") * "\\right)"
@@ -440,7 +464,7 @@ _brmd_coordinatewise_fragment(c)=BRMDescriptionFragment(
     covers=(c.id,))
 for f in (+,-,*,/,^,exp,log,sqrt,logistic,log1pexp,abs,sum,cumsum,maximum,minimum,
           getindex,getproperty,identity,|,doublepipe,&,gr,offset,protect,factor,ragged,
-          center,zscale,standardize)
+          center,zscale,standardize,==,!=,<,<=,>,>=)
     @eval _brmd_builtin_call(::$(typeof(f)),c) = BRMDescriptionFragment(covers=(c.id,))
 end
 _brmd_builtin_call(::StanBlocks.SlicModel,c)=BRMDescriptionFragment(covers=(c.id,))

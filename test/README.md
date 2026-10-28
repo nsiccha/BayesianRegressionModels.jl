@@ -727,6 +727,17 @@ StanBlocks' `reshape(v, m, n)` as the column-major fill, and StatsFuns'
 julia --startup-file=no --project=test test/description_cell_functions.jl
 ```
 
+`description_comparisons.jl` describes comparisons: model-scope numeric
+indicators `1.0 * (vessel == 2)` with each of `==`, `!=`, `<`, `<=`, `>` and
+`>=` written as the indicator `\mathbf 1\{…\}`, in both languages, and `|`
+and `&` of comparisons in a `@plate` cell as one indicator of their logical
+or/and, a nested connective parenthesized. A formula's `(1 | g)` keeps its
+group term. It runs under the test project:
+
+```sh
+julia --startup-file=no --project=test test/description_comparisons.jl
+```
+
 `description_plate_cells.jl` checks that a `@plate for` cell is described as
 written, in its own index. It covers:
 
