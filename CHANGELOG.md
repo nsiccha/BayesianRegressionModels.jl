@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.26
+
+- A `@plate` cell reads a linear predictor none of whose random-effect
+  groupings lists one label per row, such as a class over the cells
+  (`log(cv) ~ 1 + (1 | cell_class)` read as `cv[k]`), on SBBRMI and RKBRMI.
+  Each grouping is an ordinary random effect of its row, as in brms, and the
+  predictor rides on the cells the plate's other inputs define (a predictor
+  whose grouping labels the rows, a `groups(g => labels)` binding's labels, or
+  the pre-grouped data columns), or on its own rows when nothing else defines
+  them. Its data vectors, grouping columns included, need one entry per cell.
+  Before, beside a binding SBBRMI refused it ("... already labels them by
+  `cell_class`"), and elsewhere both backends refused it as long-format data
+  ("needs pre-grouped per-subject data"). A binding's cell label vector with
+  repeated labels is still refused. Snag `cell-lp-with-a-c-3d6db673`.
+
 ## 0.2.25
 
 - `brm_start` sets the scales and correlation of a stratified

@@ -7234,9 +7234,10 @@ function _sb_kernel_lp_groupings(lp_col)
 end
 
 # The grouping of each of a kernel's per-subject LP positionals, `nothing` for
-# an LP without a random effect. Those LPs are checked against the subject
-# count by `_brm_kernel_check_subject_frame_lp` once it is known; with no
-# grouping at all the kernel is a no-random-effects panel.
+# an LP without a random effect or whose groupings label no row. Those LPs are
+# checked against the subject count by `_brm_kernel_check_subject_frame_lp`
+# once it is known; with no grouping at all the kernel is a no-random-effects
+# panel.
 #
 # The plate's cells are the rows of the LPs' frame, one per subject. An LP
 # whose random effects span several groupings — Kreise nested in Länder, `(1 |
@@ -7247,18 +7248,18 @@ end
 # cell reads name one, otherwise the first in the formula serves, except where
 # the cell's `ragged(...)` inputs join its rows to cells by label. LPs that
 # share no grouping keep their own, and the callers refuse the disagreement.
+#
+# An LP none of whose groupings lists one label per row — a size class over
+# the cells, `log(cv) ~ 1 + (1 | class)` — labels no cell: each grouping is an
+# ordinary random effect added into its row's value, as in brms, and the LP
+# rides on the frame like one without a random effect (`nothing`), one row
+# per cell.
 function _sb_kernel_lp_buckets(lp_cols; ragged_cols=())
     per_lp = map(_sb_kernel_lp_groupings, lp_cols)
-    candidates = map(zip(lp_cols, per_lp)) do (lp_col, groupings)
-        (groupings === nothing || length(groupings) == 1) && return groupings
+    candidates = map(per_lp) do groupings
+        groupings === nothing && return nothing
         labelling = filter(g -> _brm_kernel_labels_rows(parent(parent(g.column))), groupings)
-        isempty(labelling) && error(
-            "sbimpl: kernel(...) needs pre-grouped per-subject data — one of the ",
-            "grouping columns ", join(("`$(name(g.column))`" for g in groupings), ", "),
-            " of per-subject linear predictor `$(name(lp_col))` must list one ",
-            "non-missing unique subject per row. Repeated levels indicate ",
-            "long-format data.")
-        labelling
+        isempty(labelling) ? nothing : labelling
     end
     grouped = filter(!isnothing, candidates)
     isempty(grouped) && return candidates
@@ -7612,8 +7613,9 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # no group column, so `ragged(...)` (which joins a secondary event axis onto
     # subject LABELS) has nothing to join against and is rejected in this mode.
     nsub_sym = Symbol("kernel_nsub_", target)
-    # Only an LP with a random-effect term names the subjects. One without
-    # rides on the subject frame the others, or the pre-grouped columns, define.
+    # Only an LP with a random effect whose grouping lists one label per row
+    # names the subjects. Any other rides on the subject frame the others, the
+    # cell labels, or the pre-grouped columns define.
     lp_buckets = _sb_kernel_lp_buckets(lp_cols; ragged_cols)
     grouped = [b for b in lp_buckets if b !== nothing]
     # Cells that are the distinct labels of the plate's one grouping column

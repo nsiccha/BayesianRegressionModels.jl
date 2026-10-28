@@ -88,8 +88,11 @@ kernel_schedule(n; subject=collect(1:n)) = (;
     @test only(filter(d -> d.role === :observation, rebuilt.declarations)).data_source === :dv
     @test !haskey(rebuilt.data, :subject)
 
-    repeated = kernel_schedule(4; subject=[10_001, 10_001, 10_002, 10_002])
-    @test_throws "pre-grouped per-subject data" generative_plan(plan, repeated)
+    # Two series of one subject are two cells sharing its effects: a repeated
+    # label labels no cell (snag `cell-lp-with-a-c-3d6db673`).
+    repeated = generative_plan(plan,
+        kernel_schedule(4; subject=[10_001, 10_001, 10_002, 10_002]))
+    @test repeated.data[:kernel_nsub_pred] == 4
 end
 
 @testset "generative plan — structured RHS parameters, dimension, constraints" begin

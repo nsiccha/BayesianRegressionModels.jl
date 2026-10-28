@@ -5120,7 +5120,13 @@ end
         end
         y ~ Normal(pred, sigma)
     end
-    @test_throws "pre-grouped per-subject data" BRM._brm_rk_plan(gbrmi(df))
+    # A grouping that repeats its levels over the rows labels no cell: each row
+    # is a cell, and the group effect an ordinary term of its row (snag
+    # `cell-lp-with-a-c-3d6db673`).
+    rows_plan = BRM._brm_rk_plan(gbrmi(df))
+    rows_cell = only(a for a in rows_plan.assignments if a.name === :pred)
+    @test rows_cell.group_values === nothing
+    @test length(rows_plan.regression.ranef_buckets) == 1
     grouped_data = (; g=[1,2,3], x=[[-1.0,-0.5],[0.0,0.5],[1.0,1.5]],
         y=[[0.5,-0.2],[0.1,0.9],[1.4,1.1]])
     grouped = BRM._brm_rk_plan(gbrmi(grouped_data))
