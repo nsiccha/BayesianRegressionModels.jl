@@ -32,9 +32,10 @@ _brm_collect_data_columns!(acc, x::ExprColumn{typeof(getindex)}) =
 # A term keyword whose data lives on another axis than the term's rows names
 # no row axis: a level correlation (`cor = Omega`, a known `cor = C`, or the
 # levels' coordinates in `cor = multigroup((x, y))`) is one entry per level of
-# the term's grouping, and an areal term's `edges = (from, to)` one per edge.
+# the term's grouping (`cdar`'s `C` one row and column per level of `by`), and
+# an areal term's `edges = (from, to)` one per edge.
 _brm_row_keyword(_f, ::Val) = true
-_brm_row_keyword(::Union{typeof(gr),typeof(hsgp)}, ::Val{:cor}) = false
+_brm_row_keyword(::Union{typeof(gr),typeof(hsgp),typeof(cdar)}, ::Val{:cor}) = false
 _brm_row_keyword(::typeof(car), ::Val{:edges}) = false
 _brm_collect_data_columns!(acc, x::Union{Tuple,AbstractVector}) = begin
     for a in x; _brm_collect_data_columns!(acc, a); end
