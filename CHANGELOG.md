@@ -28,6 +28,11 @@ instead of failing at run time.
   cells); a totals cell's gradient reads its `hcat` design from views, which
   needs the Enzyme `dogfood` line, so on registered Enzyme such a model's unit
   gradient raises `IllegalTypeAnalysisException` where it was slow before.
+  Each compact cell call costs about 7 µs, so a unit gradient is cheaper than
+  the whole-model one only while the unit holds less than about a twelfth of
+  the model: 18.4 ms against 26.7 ms for 12 units of 2,795 cells, but 0.23 ms
+  against 0.035 ms for 3 small regions (ReactiveKernels snag
+  `compact-cell-sam-7b0032c9` asks for one call per unit).
 
 ## 0.2.43
 
