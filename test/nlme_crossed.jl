@@ -252,7 +252,7 @@ end
 @stestset "every block form over a crossed grouping is shared; estimates read it" begin
     shared = (:class, :region)
     rng = Xoshiro(8)
-    for build in (crossed_stratified, crossed_known)
+    for build in (crossed_stratified, crossed_declared, crossed_known)
         rk = RKBRMI(build(CR_FORMS))
         v = brm_nlme_view(rk; shared_groups=shared)
         @test !any(==(:unclaimed), v.role)
@@ -278,7 +278,11 @@ end
         β = values.pop_mu.beta_pop
         subject = point.var"mu|subject"
         @test subject.sd ≈ [0.5]
-        blocks = (point.var"mu|class", point.var"mu|region")
+        # A block addressed by a prior on its grouping lowers under a generated
+        # `|ID|` (`mu__region` for `ranef(mu, region)`), so find each by group.
+        block(g) = only(b for b in Base.values(point) if b isa NamedTuple &&
+            get(b, :group, nothing) === g)
+        blocks = (block(:class), block(:region))
         @test all(b -> b.crossed, blocks)
         level_effect(b, level) = only(last(b.effects[findfirst(p -> first(p) == level, b.effects)]))
         zsubject = BRM._brm_rk_declaration_value(values, only(r.z for r in
@@ -294,7 +298,7 @@ end
         end
         if build === crossed_stratified
             @test blocks[1].by === :size && first.(blocks[1].strata) == ["large", "small"]
-        else
+        elseif build === crossed_known
             @test blocks[1].sd ≈ [0.4]
         end
     end

@@ -68,7 +68,8 @@ class_coordinates(v, rk) = sort!(reduce(vcat, (owned(v, BRM._brm_nlme_ranef_decl
 
 # Other block forms over crossed groupings: a stratified class block (classes
 # k1 and k2 small, k3 large) and a Student-t region block; a block whose
-# region levels are correlated by a known matrix, and a known class scale.
+# region levels are correlated by a declared LKJ factor; one whose region
+# levels are correlated by a known matrix, and a known class scale.
 const CR_FORMS = merge(CR_FLAT, (;
     size=[c == "k3" ? "large" : "small" for c in CR_FLAT.class],
     region=["n", "s", "n", "s", "s", "n", "s", "n", "s", "n", "n", "s",
@@ -79,6 +80,13 @@ crossed_stratified(data) = @brm data begin
     sigma ~ Exponential(1)
     mu ~ 1 + x + (1 | subject) + (1 | gr(class, by = size)) + (1 | region)
     ranef(mu, region) ~ TDist(4.0)
+    y ~ Normal(mu, sigma)
+end
+
+crossed_declared(data) = @brm data begin
+    sigma ~ Exponential(1)
+    Omega ~ LKJCholesky(2, 2.0)
+    mu ~ 1 + x + (1 | subject) + (1 | gr(region; cor = Omega)) + (1 | class)
     y ~ Normal(mu, sigma)
 end
 

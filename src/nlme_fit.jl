@@ -129,8 +129,9 @@ function _brm_nlme_crossed_block(record, values, backend)
     mixing = get(record, :mixing, nothing)
     mixing === nothing || (effects = sqrt.(_brm_rk_declaration_value(values, mixing)) .* effects)
     if haskey(record, :level_correlation)
-        factor = something(record.level_factor,
-            _brm_rk_declaration_value(values, record.level_correlation))
+        # A known correlation's factor is data; a declared one is a value.
+        factor = record.level_factor !== nothing ? record.level_factor :
+            _brm_rk_declaration_value(values, record.level_correlation)
         effects = factor * effects
     end
     (; group=record.group, crossed=true, margins, _brm_nlme_covariance(A * A')...,
