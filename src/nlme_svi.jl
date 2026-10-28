@@ -402,7 +402,7 @@ _brm_svi_model(x::RKBRMI, phase; ad_backend, shared_point, subject_group,
         nested_groups, shared_groups) =
     _brm_run_phase(phase) do node
         _brm_nlme_model(x, node; ad_backend=ad_backend === nothing ?
-            _brm_svi_default_ad(x) : ad_backend, observation_ad_backend=nothing,
+            _brm_rk_default_ad("brm_svi_fit", x) : ad_backend, observation_ad_backend=nothing,
             shared_point, subject_group, nested_groups, shared_groups)
     end
 function _brm_svi_model(m::BRMNLMEModel, phase; ad_backend, shared_point,
@@ -416,9 +416,10 @@ function _brm_svi_model(m::BRMNLMEModel, phase; ad_backend, shared_point,
 end
 
 # Implemented by `BayesianRegressionModelsReactiveKernelsEnzymeExt`: reverse-mode
-# `AutoEnzyme`, the backend `brm_nlme_model` requires.
-_brm_svi_default_ad(x) = throw(ArgumentError(
-    "brm_svi_fit: pass `ad_backend` (reverse-mode AutoEnzyme), or load Enzyme " *
+# `AutoEnzyme`, the backend `brm_nlme_model` requires. `caller` names the entry
+# point in the error when that extension is not loaded.
+_brm_rk_default_ad(caller, x) = throw(ArgumentError(
+    "$caller: pass `ad_backend` (reverse-mode AutoEnzyme), or load Enzyme " *
     "and DifferentiationInterface for that default"))
 
 # The packed point the globals' means start from: the prior medians, a full

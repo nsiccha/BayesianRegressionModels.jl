@@ -353,6 +353,22 @@ _brm_nlme_groupings(records) = unique(Symbol[
 
 _brm_nlme_ticked(names) = join(string.("`", names, "`"), ", ")
 
+# A nested grouping's parent labels, one per row of the grouping: a column the
+# model reads, by name, or the labels themselves. The backend keeps only the
+# columns its formulas read, so a column no formula reads is passed as labels.
+_brm_nlme_parent_labels(columns, nested, parent::Symbol) = get(columns, parent) do
+    _brm_nlme_error("brm_nlme_view: the parent column `$parent` of `$nested` " *
+        "is not a column the model reads, and the backend keeps no other data. " *
+        "Pass its labels instead, row-aligned with `$nested`: " *
+        "`nested_groups = ($nested = data.$parent,)`")
+end
+_brm_nlme_parent_labels(columns, nested, parent::AbstractVector) = parent
+_brm_nlme_parent_labels(columns, nested, parent) = _brm_nlme_error(
+    "brm_nlme_view: the parent of `$nested` must be a column name (a Symbol) " *
+    "or a vector of subject labels, got $(typeof(parent))")
+_brm_nlme_parent_name(parent::Symbol) = " (`$parent`)"
+_brm_nlme_parent_name(parent) = ""
+
 function _brm_nlme_check_shared_groups(records, shared_groups, subject_group,
         nested_groups)
     known = _brm_nlme_groupings(records)
@@ -395,7 +411,8 @@ function _brm_nlme_check_nested_groups(records, group, groups, nested_groups,
     _brm_nlme_error(string(
         "brm_nlme_view: every grouping except the subject grouping `$group` must be ",
         "named once, in nested_groups (each level owned by one subject: ",
-        "`<grouping> = <row-aligned subject column>`) or in shared_groups (crossed ",
+        "`<grouping> = :<subject column>` or `<grouping> = <subject labels>`, ",
+        "row-aligned with the grouping) or in shared_groups (crossed ",
         "with the subjects, read as shared latents).",
         isempty(missing_groups) ? "" :
             " Named in neither: $(_brm_nlme_ticked(missing_groups)).",
@@ -415,13 +432,17 @@ Read the nonlinear-mixed-effects partition of an RK-lowered model: population
 coordinates, subject-level covariance coordinates, other scalars, and one
 compact random-effect block per subject. For several grouping columns, supply
 the top-level `subject_group` and name every other grouping once: in
-`nested_groups`, a NamedTuple mapping each nested grouping to its row-aligned
-parent-subject column (every nested level must belong to exactly one
-subject), or in `shared_groups`, a tuple of groupings crossed with the
-subjects. Every coordinate of a random-effect block over a shared grouping
-(its standardized draws, scales, correlation factor and Student-t mixing
-weights, for any block form) is a `:shared_latent`, and so is a grouped
-`hsgp(x; by = g)` or a `cdar(step; by = g)` walk with `g` in `shared_groups`.
+`nested_groups`, a NamedTuple mapping each nested grouping to its parent
+subject labels, row-aligned with the grouping (every nested level must belong
+to exactly one subject), or in `shared_groups`, a tuple of groupings crossed
+with the subjects. The parent labels are the name of a column the model reads
+(`nested_groups = (g = :region,)`) or the labels themselves, a vector
+(`nested_groups = (g = data.g_region,)`): the backend keeps only the columns
+its formulas read, so a column no formula reads is passed as a vector. Every
+coordinate of a random-effect block over a shared grouping (its standardized
+draws, scales, correlation factor and Student-t mixing weights, for any block
+form) is a `:shared_latent`, and so is a grouped `hsgp(x; by = g)` or a
+`cdar(step; by = g)` walk with `g` in `shared_groups`.
 `nested_groups` may also name the `by` grouping of a `cdar` or grouped `hsgp`
 term that no random effect uses, so that its levels are units. A `car(...)`
 field is always shared: its edges couple its areas. The grouped entries of
@@ -494,16 +515,15 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
     owner = Dict{Symbol,Vector{Int}}(group => collect(1:n))
     group_levels = Dict{Symbol,Vector{Any}}(group => levels)
     subject_index = Dict(_brm_transport_level(level) => i for (i, level) in enumerate(levels))
-    for (nested, parent_column) in pairs(nested_groups)
-        parent_column isa Symbol || _brm_nlme_error(
-            "brm_nlme_view: parent column for `$nested` must be a Symbol")
-        haskey(backend.plan.columns, nested) &&
-            haskey(backend.plan.columns, parent_column) || _brm_nlme_error(
-            "brm_nlme_view: nested group `$nested` or parent column `$parent_column` is absent")
-        children = backend.plan.columns[nested]
-        parents = backend.plan.columns[parent_column]
+    for (nested, labels) in pairs(nested_groups)
+        children = get(backend.plan.columns, nested) do
+            _brm_nlme_error("brm_nlme_view: nested group `$nested` is not a " *
+                "grouping column of the model")
+        end
+        parents = _brm_nlme_parent_labels(backend.plan.columns, nested, labels)
         length(children) == length(parents) || _brm_nlme_error(
-            "brm_nlme_view: `$nested` and `$parent_column` have different row counts")
+            "brm_nlme_view: `$nested` has $(length(children)) rows but its parent " *
+            "labels$(_brm_nlme_parent_name(labels)) have $(length(parents))")
         nested_levels = Any[_rk_grouping_levels(children)...]
         parent_of = Dict{Any,Int}()
         for (child, parent) in zip(children, parents)

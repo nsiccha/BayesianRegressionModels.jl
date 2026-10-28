@@ -4494,7 +4494,20 @@ function _sb_effect_prior_arg(x::ExprColumn)
         end
         value isa Real && return value
     end
-    call = Expr(:call, getf(x), args...)
+    _sb_prior_call(getf(x), args, kwargs)
+end
+
+# The Stan call for a lowered prior argument. A Julia callable Stan spells
+# differently (`logistic` -> `inv_logit`, `vcat` -> nested `append_row`, ...)
+# takes the spelling likelihood arguments (`_sb_scalar_expr`) and kernel cells
+# use, so an omitted response's law, which lowers here, reads its arguments as
+# its bound twin does.
+function _sb_prior_call(f, args, kwargs)
+    if isempty(kwargs)
+        stan = _sb_julia_stan_call(f, Any[args...])
+        stan === nothing || return stan
+    end
+    call = Expr(:call, f, args...)
     isempty(kwargs) || insert!(call.args, 2,
         Expr(:parameters, (Expr(:kw, key, value) for (key, value) in pairs(kwargs))...))
     call
@@ -7208,20 +7221,32 @@ function _sb_emit_sampled_declaration!(stmts, data, key, callable, rhs)
     # grouped per subject) declares no parameter: no parameter has a ragged
     # shape. It observes a model-scope response with its column omitted, so it
     # emits the bound response's likelihood statement, per-subject argument
-    # plates included (`_sb_grouped_argument!`).
-    _sb_reads_grouped_value(rhs) && return _sb_likelihood!(stmts, key, rhs, data)
+    # plates included (`_sb_grouped_argument!`). So does a law no parameter can
+    # be sampled from (`_sb_observation_only_law`).
+    (_sb_reads_grouped_value(rhs) || _sb_observation_only_law(callable, rhs)) &&
+        return _sb_likelihood!(stmts, key, rhs, data)
     _sb_emit_vector_prior!(stmts, data, key, callable, rhs) && return
     _sb_emit_prior!(stmts, key, callable, rhs) && return
     error("sbimpl: sampled declaration `$key` has no Stan prior translation for `$callable`")
 end
-# `weighted` and `censored` wrap only observations (a censored law puts mass on
-# its bounds, which no parameter can be sampled from), so a sampled declaration
-# of either is an observation with its response omitted: it emits the
-# likelihood statement, which StanBlocks forward-simulates from the fitted
-# predictive law.
-_sb_emit_sampled_declaration!(stmts, data, key,
-                              ::Union{typeof(weighted),typeof(censored)}, rhs) =
-    _sb_likelihood!(stmts, key, rhs, data)
+# A law no parameter can be sampled from makes its sampled declaration an
+# observation with its response omitted. It emits the bound response's
+# likelihood statement, arguments and family spelling included, which
+# StanBlocks forward-simulates from the fitted predictive law. `weighted` and
+# `censored` wrap only observations (a censored law puts mass on its bounds),
+# and Stan has no discrete parameters, so a discrete law (`Poisson`,
+# `Binomial`, `BetaBinomial2`, ..., also under `truncated`) is one too. The
+# families whose outcome structure is read from response values keep their
+# refusal (`_SBValueStructuredFamily`).
+_sb_observation_only_law(_callable, _rhs) = false
+_sb_observation_only_law(::Union{typeof(weighted),typeof(censored)}, _rhs) = true
+_sb_observation_only_law(::Type{D}, _rhs) where {D<:Distribution} =
+    D <: Distribution{<:Distributions.VariateForm,Distributions.Discrete} &&
+    !(D <: _SBValueStructuredFamily)
+function _sb_observation_only_law(::typeof(truncated), rhs)
+    law = first(getargs(rhs))
+    law isa ExprColumn && _sb_observation_only_law(getf(law), law)
+end
 function _sb_emit_prepared!(stmts, data, node::_BRMPreparedAssignment, key, source; kwargs...)
     _, rhs = getargs(source, 2)
     push!(stmts, :($key = $(_sb_scalar_expr(rhs, data))))
@@ -8795,13 +8820,8 @@ _sb_prior_arg_named(x, d) = error(
 _sb_prior_arg_backing_error(x, d) = string(
     "sbimpl: prior arg `$(name(x))` is backed by $(typeof(d)); ",
     "prior args must be literals, data, or already-declared model values.")
-function _sb_prior_arg(x::ExprColumn)
-    call = Expr(:call, getf(x), map(_sb_prior_arg, getargs(x))...)
-    isempty(getkwargs(x)) || insert!(call.args, 2,
-        Expr(:parameters, (Expr(:kw, key, _sb_prior_arg(value))
-                           for (key, value) in pairs(getkwargs(x)))...))
-    call
-end
+_sb_prior_arg(x::ExprColumn) = _sb_prior_call(getf(x),
+    map(_sb_prior_arg, getargs(x)), map(_sb_prior_arg, getkwargs(x)))
 _sb_prior_arg(x::AbstractVector) = Expr(:vect, map(_sb_prior_arg, x)...)
 _sb_prior_arg(x) = error("sbimpl: unsupported prior-arg shape $(typeof(x))")
 
@@ -16236,12 +16256,15 @@ _sb_lik_family!(stmts, target, ::Type{<:NegativeBinomial2},
 function _sb_lik_family!(stmts, target, ::Type{<:BinomialLogit},
                          args::Tuple{Any,Any}, data)
     response = get(data, target, nothing)
-    response isa AbstractVector || error(
-        "sbimpl: `BinomialLogit` expects an observed vector for `$target`")
-    trials = _brm_materialize_count_argument(
-        first(args), length(response), "BinomialLogit trial count";
-        prefix="sbimpl")
-    _brm_validate_binomial_response(response, trials, target; prefix="sbimpl")
+    # An omitted response has no values to validate against its trials.
+    if !isnothing(response)
+        response isa AbstractVector || error(
+            "sbimpl: `BinomialLogit` expects an observed vector for `$target`")
+        trials = _brm_materialize_count_argument(
+            first(args), length(response), "BinomialLogit trial count";
+            prefix="sbimpl")
+        _brm_validate_binomial_response(response, trials, target; prefix="sbimpl")
+    end
     _sb_lik_stan!(stmts, target, :binomial_logit, args, data)
 end
 
@@ -16260,6 +16283,8 @@ _sb_is_bernoulli_value(v::Real) = v == 0 || v == 1
 _sb_is_bernoulli_value(_) = false
 function _sb_coerce_bernoulli_response!(data, target, family::AbstractString)
     response = get(data, target, nothing)
+    # An omitted response has no values to coerce or validate.
+    isnothing(response) && return nothing
     response isa AbstractVector || error(
         "sbimpl: `$family` expects an observed vector for `$target`, got " *
         "$(typeof(response))")
@@ -16524,15 +16549,19 @@ are separate and are not passed as constructor keywords.
 """
 # Outcome structure derived from observed data: these families read the
 # response VALUES at lowering time (outcome levels for `Ordinal` /
-# `OrderedLogistic` / `CategoricalLogit`, per-row counts for `Multinomial`,
-# the trials/mean/precision rewrite for `BetaBinomial2`), so they cannot lower
-# for an unconditioned observation (response omitted) — or as a prior, which
-# reaches the same seam. Fail here with guidance instead of the generic
-# "no Stan translation" error or a downstream stanc type error. Their fitted
-# likelihoods use dedicated `_sb_lik_family!` methods and never reach this.
+# `OrderedLogistic` / `CategoricalLogit`, per-row counts for `Multinomial`),
+# so they cannot lower for an unconditioned observation (response omitted) —
+# or as a prior, which reaches the same seam. Fail here with guidance instead
+# of the generic "no Stan translation" error or a downstream stanc type error.
+# Their fitted likelihoods use dedicated `_sb_lik_family!` methods and never
+# reach this. `BetaBinomial2` is not one of them: its outcome structure is its
+# trials argument, so an omitted response, a `@plate` cell's law and a
+# combinator's family take the generic translation below
+# (`beta_binomial(n, mean .* precision, (1 - mean) .* precision)`).
+const _SBValueStructuredFamily =
+    Union{OrderedLogistic,Ordinal,CategoricalLogit,Multinomial}
 _sb_stan_distribution_call(::Type{T}, args, kwargs) where
-        {T<:Union{OrderedLogistic,Ordinal,CategoricalLogit,Multinomial,
-                  BetaBinomial2}} =
+        {T<:_SBValueStructuredFamily} =
     error("sbimpl: `$(nameof(T))` derives outcome structure from observed " *
           "response values and cannot lower for an unconditioned observation " *
           "(response omitted from the data). Bind the response column to fit " *

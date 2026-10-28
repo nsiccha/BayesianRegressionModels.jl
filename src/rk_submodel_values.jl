@@ -17,7 +17,11 @@ holds preparation-only inputs, and `bindings` holds exact callable identities.
 All declarations, priors and observations must be visible
 in this source; the extension never receives a lowered PPL plan or derivative.
 An emitted entry owns its callable name: bind its existing leaf functions under
-separate names, or bind an existing entry without defining it again. Defining
+separate names, or bind an existing entry without defining it again. The
+source is evaluated in the build's own module with only the names
+`_rk_observation_source!` lists, so a function any of it calls is bound the
+same way; an `@rkppl` body and main statements also read RKPPL's vocabulary by
+name. Defining
 and binding the same name is rejected before any definitions are evaluated.
 Hook calls sharing a helper may each append it: an equal definition (source
 locations aside) under one name is emitted once, while different definitions
