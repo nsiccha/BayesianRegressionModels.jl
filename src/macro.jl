@@ -1589,6 +1589,9 @@ end
 # Julia's printer for any other syntax.
 _brm_print_source(io::IO, x, outer::Int=0; left::Bool=false) = show(io, x)
 _brm_print_source(io::IO, x::Symbol, outer::Int=0; left::Bool=false) = print(io, x)
+# A negative literal is a prefix minus to the reader: `(-1) ^ k`.
+_brm_print_source(io::IO, x::Real, outer::Int=0; left::Bool=false) =
+    _brm_show_number(io, x, outer, left)
 # A quoted literal prints as written (`:clamp`); `show` would print the
 # `QuoteNode` itself, `:(:clamp)`.
 _brm_print_source(io::IO, x::QuoteNode, outer::Int=0; left::Bool=false) = print(io, x)
@@ -1603,12 +1606,22 @@ function _brm_print_source(io::IO, x::Expr, outer::Int=0; left::Bool=false)
         for (i, arg) in enumerate(operands)
             # A range is written `2:T`, as Julia prints it.
             i == 1 || print(io, op === :(:) ? ":" : " $op ")
-            _brm_print_source(io, arg, precedence; left=i == 1)
+            if op in (:~, Symbol(".~")) && _brm_source_bar(arg)
+                # A statement side that is a bar keeps its parentheses (`_show_bare`).
+                print(io, "(")
+                _brm_print_source(io, arg)
+                print(io, ")")
+            else
+                _brm_print_source(io, arg, precedence; left=i == 1)
+            end
         end
         parens && print(io, ")")
     elseif Meta.isexpr(x, :call, 2) && x.args[1] in (:-, :+, :!)
+        parens = _brm_prefix_parens(outer, left)
+        parens && print(io, "(")
         print(io, x.args[1])
-        _brm_print_source(io, x.args[2], Base.operator_precedence(:^))
+        _brm_print_source(io, x.args[2], typemax(Int))
+        parens && print(io, ")")
     elseif Meta.isexpr(x, :call)
         _brm_print_source(io, x.args[1], typemax(Int))
         _brm_print_arguments(io, x.args[2:end], "(", ")")
@@ -1640,6 +1653,8 @@ function _brm_source_infix(x::Expr)
         !any(a -> Meta.isexpr(a, :parameters), x.args) &&
         _brm_is_infix_operator(x.args[1]) ? x.args[1] : nothing
 end
+_brm_source_bar(x) = false
+_brm_source_bar(x::Expr) = (op = _brm_source_infix(x); !isnothing(op) && _brm_bar_side(op))
 # `Base.isbinaryoperator` answers false for `.~`, which a vector parameter or an
 # elementwise prior is written with (`phi[1:n] .~ Normal.(0, 1)`).
 _brm_is_infix_operator(op::Symbol) = Base.isbinaryoperator(op) || op === Symbol(".~")
@@ -3267,14 +3282,18 @@ _show_top(io::IO, key, op::ExprColumn{<:Union{typeof(~),typeof(assign)}}) = begi
     end
 end
 # Print one statement side without the outermost grouping parentheses, so a
-# top-level `loc ~ (1 + x)` reads `loc ~ 1 + x`. Only `*`/`+` sides are
-# unwrapped: `~` binds tighter than `|`/`||`/`&&` in Julia, so unwrapping a
-# top-level `y ~ (a | g)` would print the misleading `y ~ a | g`.
+# top-level `loc ~ (1 + x)` reads `loc ~ 1 + x` and `m = (a - b)` reads
+# `m = a - b`. A random-effect bar keeps them, as written: `y ~ (1 | g)`.
+# Julia parses `y ~ 1 | g` the same way (`~` binds loosest), but it reads as
+# a conditioning bar (`_brm_bar_side`).
 _show_bare(io::IO, x) = show(io, x)
 # The name an `=` statement assigns, as written (`m = mu + b`, not `:m = …`).
 _show_bare(io::IO, x::Symbol) = print(io, x)
-_show_bare(io::IO, x::ExprColumn{<:Union{typeof(*),typeof(+)}}) =
-    _brm_show_infix(io, x, _brm_infix_symbol(x), 0)
+function _show_bare(io::IO, x::ExprColumn)
+    op = _brm_infix_symbol(x)
+    isnothing(op) || _brm_bar_side(op) ? show(io, x) : _brm_show_infix(io, x, op, 0)
+end
+_brm_bar_side(op::Symbol) = op in (:|, :||, :&&)
 Base.show(io::IO, d::DataColumn) = begin
     print(io, "data (eltype=", eltype(parent(d)), ", n=", length(parent(d)), ")")
 end
@@ -3292,7 +3311,8 @@ function _brm_infix_symbol(x::ExprColumn)
     f = getf(x)
     f === doublepipe && return :||
     f isa Function && length(getargs(x)) >= 2 && isempty(getkwargs(x)) || return nothing
-    op = nameof(f)
+    # A range `1:n` lowers to a call of `Colon()`, whose name is `Colon`.
+    op = f isa Colon ? :(:) : nameof(f)
     Base.isbinaryoperator(op) ? op : nothing
 end
 function _brm_show_infix(io::IO, x, op::Symbol, outer::Int; left::Bool=false)
@@ -3300,17 +3320,47 @@ function _brm_show_infix(io::IO, x, op::Symbol, outer::Int; left::Bool=false)
     parens = precedence < outer || (precedence == outer && !left)
     parens && print(io, "(")
     for (i, arg) in enumerate(getargs(x))
-        i == 1 || print(io, " ", op, " ")
+        # A range is written `2:T`, as Julia prints it.
+        i == 1 || print(io, op === :(:) ? ":" : " $op ")
         _brm_show_operand(io, arg, precedence; left=i == 1)
     end
     parens && print(io, ")")
 end
+# A one-operand `-x`, `+x` or `!x` prints prefix, as written, parenthesized
+# where Julia needs it (`_brm_prefix_parens`).
+_brm_prefix_symbol(_) = nothing
+_brm_prefix_symbol(x::ExprColumn) =
+    any(op -> getf(x) === op, (-, +, !)) && length(getargs(x)) == 1 &&
+        isempty(getkwargs(x)) ? nameof(getf(x)) : nothing
+function _brm_show_prefix(io::IO, x, op::Symbol, outer::Int; left::Bool=false)
+    parens = _brm_prefix_parens(outer, left)
+    parens && print(io, "(")
+    print(io, op)
+    _brm_show_operand(io, only(getargs(x)), typemax(Int))
+    parens && print(io, ")")
+end
+# A prefix operator binds tighter than `*` and looser than `^`: `(-k) ^ 2` and
+# `(-x)[i]` need the parentheses, `t ^ -k` and `a * -b` do not. Its own
+# operand is parenthesized unless it is a name, a call or an index, as Julia
+# prints `-(k ^ 2)` and `-(-k)`.
+_brm_prefix_parens(outer::Int, left::Bool) =
+    outer > Base.operator_precedence(:^) || (outer == Base.operator_precedence(:^) && left)
 function _brm_show_operand(io::IO, x, outer::Int; left::Bool=false)
     op = _brm_infix_symbol(x)
-    isnothing(op) ? show(io, x) : _brm_show_infix(io, x, op, outer; left)
+    isnothing(op) || return _brm_show_infix(io, x, op, outer; left)
+    prefix = _brm_prefix_symbol(x)
+    isnothing(prefix) ? show(io, x) : _brm_show_prefix(io, x, prefix, outer; left)
 end
 # A bare symbol argument is a name as written (a `|ID|`, an address slot).
 _brm_show_operand(io::IO, x::Symbol, _outer::Int; left::Bool=false) = print(io, x)
+_brm_show_operand(io::IO, x::Real, outer::Int; left::Bool=false) =
+    _brm_show_number(io, x, outer, left)
+function _brm_show_number(io::IO, x::Real, outer::Int, left::Bool)
+    parens = x < 0 && _brm_prefix_parens(outer, left)
+    parens && print(io, "(")
+    show(io, x)
+    parens && print(io, ")")
+end
 # A dot call in a formula, `f.(x)`, runs while the builder binds the data and
 # would broadcast over the formula column itself, which has no elements.
 Base.Broadcast.broadcastable(x::Union{NamedColumn,ExprColumn}) = error(
@@ -3323,9 +3373,28 @@ Base.Broadcast.broadcastable(x::Union{NamedColumn,ExprColumn}) = error(
 # detail of `constant(expr)`.
 Base.show(io::IO, x::ExprColumn{typeof(constant)}) =
     print(io, "constant(", first(getargs(x)).expression, ")")
+# Index and field access on a model value print as written, `field[sk]` and
+# `state.total`, not as the calls they lower to (`getindex(field, sk)`).
+Base.show(io::IO, x::ExprColumn{typeof(getindex)}) = begin
+    value, indices... = getargs(x)
+    _brm_show_operand(io, value, typemax(Int))
+    print(io, "[")
+    for (i, index) in enumerate(indices)
+        i == 1 || print(io, ", ")
+        _brm_show_operand(io, index, 0)
+    end
+    print(io, "]")
+end
+Base.show(io::IO, x::ExprColumn{typeof(getproperty)}) = begin
+    value, field = getargs(x)
+    _brm_show_operand(io, value, typemax(Int))
+    print(io, ".", field.value)
+end
 Base.show(io::IO, x::ExprColumn) = begin
     op = _brm_infix_symbol(x)
     isnothing(op) || return _brm_show_infix(io, x, op, typemax(Int))
+    prefix = _brm_prefix_symbol(x)
+    isnothing(prefix) || return _brm_show_prefix(io, x, prefix, 0)
     _show_call_head(io, getf(x))
     print(io, "(", )
     for (i, arg) in enumerate(getargs(x))
@@ -3376,8 +3445,21 @@ end
 # prefix is noise, not information — print the bare name.
 _show_call_head(io::IO, f) = print(io, f)
 _show_call_head(io::IO, f::Union{Function,DataType,UnionAll}) =
-    print(io, Base.nameof(f))
+    print(io, _brm_exported_name(f))
 _show_call_head(io::IO, g::GlobalRef) = print(io, g.name)
+# Julia names a value by its own name, so a family BRM exports under an alias
+# would print as a name the model never wrote and BRM does not export:
+# `LocationScale` is Distributions' `AffineDistribution`, `Categorical` its
+# `DiscreteNonParametric`. A value prints as the name BRM exports it by.
+function _brm_exported_name(f)
+    exports = names(@__MODULE__)
+    own = Base.nameof(f)
+    own in exports && return own
+    for name in exports
+        isdefined(@__MODULE__, name) && getfield(@__MODULE__, name) === f && return name
+    end
+    own
+end
 # A prior address prints the way it is written: the parameter head with its
 # slots (`sd(:, p)`, `cor(:, p)`, `simplex(mu, mo1(x))`, `effect(mu, a & b)`),
 # inverting `_prior_address`, and wrapped in `optional(...)` when marked.
