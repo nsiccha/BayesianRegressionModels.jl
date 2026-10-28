@@ -155,10 +155,11 @@ end
     g = u[t.globals]
     @test sort(vcat(t.globals, reduce(vcat, t.units))) == eachindex(u)
     P, gP = BRM._brm_svi_global_term(t, g)
-    gg, gz = zeros(length(g)), zeros(t.d)
+    gg = zeros(length(g))
     terms = map(eachindex(t.units)) do i
+        gz = zeros(length(t.units[i]))
         value = BRM._brm_svi_unit_term!(gg, gz, t, i, g, u[t.units[i]])
-        (; value, gg=copy(gg), gz=copy(gz))
+        (; value, gg=copy(gg), gz)
     end
     full = rk_logdensity_problem(rk; ad_backend=NLME_AD)
     value, gradient = LogDensityProblems.logdensity_and_gradient(full, u)
