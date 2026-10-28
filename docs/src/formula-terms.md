@@ -134,7 +134,13 @@ On replay the group levels and `L` are frozen from the fit, and steps after the
 last fitted one are appended: a forecast draws their innovations in generated
 quantities, so each group continues from its fitted state and the fit's draws
 feed the forecast program. A step inside the fitted grid that the fit did not
-have, and an unseen group level, are refused.
+have is refused, and so is an unseen group level unless the replay redraws it:
+`reprocess(fit, rows; resample_groups=[:group])` redraws every level of `group`
+that `rows` names, unseen levels included, drawing each level's whole path in
+generated quantities from the fitted `sigma` and `rho`, given the fitted levels
+`rows` does not name (independent levels for `C = I`). A level the fit did not
+see reads `C` over the sorted union of the fitted and the replay's levels from
+the replay data.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
