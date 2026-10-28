@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.37
+
+- `using BayesianRegressionModels` binds the link and special functions BRM
+  lowers: `logit`, `logistic`, `log1pexp`, `logexpm1`, `log1mexp` and
+  `logsumexp` (re-exported unchanged from LogExpFunctions.jl) and `normcdf` and
+  `norminvcdf` (from StatsFuns.jl). A model module needs no
+  `using LogExpFunctions: logit` for a `logit(mu) ~ 1 + x` link any more; before,
+  calling the builder raised `UndefVarError: logit not defined`. They are the
+  functions SBBRMI spells as Stan builtins and the links whose inverse is one of
+  them, kept complete by `test/exported_link_functions.jl`. Importing
+  LogExpFunctions.jl or StatsFuns.jl as well stays unambiguous. A module that
+  defines its own function of one of these names keeps it, provided it defines
+  it before reading the name.
+
 ## 0.2.36
 
 - `reprocess(sb, rows; resample_groups=[:g])` on an SBBRMI accepts the `by`
