@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.17
+
+- `adaptive_centering_problem` adapts a grouped HSGP whose levels are
+  correlated, `hsgp(x...; by=g, cor=Omega)` with `Omega ~ LKJCholesky(K, eta)`
+  or a known correlation matrix, and one whose levels have their own scales
+  through a hyper-predictor (`log(sd(hsgp(x))) ~ 1 + (1 | g)`, or the length
+  scale's), with or without `cor=`. Before, the first was refused at
+  construction and the second failed resolving the term's marginal SD. Basis
+  function `b`'s level weights `diag(s_b) * L * z_b` adapt like one group of a
+  correlated random-effect block: each level is centred on its conditional mean
+  given the levels before it (the grouping's level order), so `c=1` is the
+  level weight. The cells follow the HSGP cells in the pair order and
+  `adaptive_centering_controls` reports them as `:hsgp` rows with `group`,
+  `level` and `rank`. A multigroup `cor=` is still refused. Models without such
+  a term keep their pair order and arithmetic. Snag `adaptive-centeri-11062238`.
+
 ## 0.2.16
 
 - The model reads every indexed output of an `@plate for` cell by its name, not
