@@ -249,8 +249,10 @@ end
 # `m`'s unit point with its prior-median coordinates set, and the positions of
 # those coordinates. Every other coordinate keeps the unit point's exact value,
 # the fixed values of a fixed-shared model included.
-function _brm_nlme_prior_median_point(m::BRMNLMEModel)
-    view, backend = m.view, m.backend
+_brm_nlme_prior_median_point(m::BRMNLMEModel) =
+    _brm_nlme_prior_median_point(m.backend, m.view, m.unit)
+function _brm_nlme_prior_median_point(backend::RKBRMI, view::BRMNLMEView,
+        unit::AbstractVector)
     records = _brm_nlme_records(backend.plan)
     scalars = Dict(r.declaration => r for r in records if r.kind === :scalar)
     medians = Dict{Symbol,Union{Nothing,Float64}}()
@@ -266,7 +268,7 @@ function _brm_nlme_prior_median_point(m::BRMNLMEModel)
         delete!(pending, name)
         medians[name] = x
     end
-    values = _rk_constrained_values(backend, m.unit)
+    values = _rk_constrained_values(backend, unit)
     writes = Tuple{Symbol,Tuple,Any}[]
     for record in records
         _brm_nlme_prior_writes!(writes, Val(record.kind), record, values, value)
@@ -275,7 +277,7 @@ function _brm_nlme_prior_median_point(m::BRMNLMEModel)
     position = Dict(n => i for (i, n) in enumerate(view.coordinates))
     chosen = sort!(unique!([position[n] for (declaration, index, _) in writes
         for n in _brm_nlme_element_names(view, declaration, index)]))
-    u = copy(m.unit)
+    u = copy(unit)
     u[chosen] = point[chosen]
     u, chosen
 end

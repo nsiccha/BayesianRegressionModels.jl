@@ -12,6 +12,37 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.43
+
+- `brm_start(rk)` and `brm_start(sb, stan_model)`, with no initial values,
+  compute a start from the data. Pathfinder runs over the population
+  coordinates with every unit's random effects integrated out by a Laplace
+  approximation (`brm_laplace_problem`), from a point drawn within one unit
+  of their prior medians (unconstrained scale); a start is a draw from its
+  Gaussian fit, with each unit's effects drawn from its own Laplace Gaussian
+  (`brm_laplace_draws`). Each group starts near its own value and each
+  block's SD near the groups' spread, with no values written by hand.
+  `chains = n` returns `n` independent draws from that fit for a sampler's
+  per-chain `init`; a failed Pathfinder run raises. The units are
+  `brm_nlme_view`'s (`subject_group`, `nested_groups`, `shared_groups`).
+  Its cost is the Laplace problem's: a few model gradients per evaluation for
+  regression-shaped models (the row-structured Laplace), many more for the
+  whole-model Laplace. Initial
+  values go on top of a start through `base`:
+  `brm_start(sb, model, inits; base = brm_start(sb, model))`;
+  `brm_start(x, inits)` without `base` keeps its zero base. Needs Pathfinder
+  loaded (a new weak dependency; WarmupHMC loads it) and, for the default
+  `ad_backend`, Enzyme and DifferentiationInterface. A model `brm_nlme_view`
+  does not partition into units, and an SBBRMI with exact total-coefficient
+  blocks, are refused with the reason.
+- `brm_laplace_problem(rk; structured = :auto)` no longer gives the
+  row-structured Laplace to a model with observations that are not regression
+  responses: a `@plate` cell's, or one whose distribution reads a model value
+  (`y ~ Normal(m, sigma)` with `m = …`). The row structure has no terms for
+  them, so it was built without them, a marginal that left those observations
+  out. Such models take the whole-model Laplace; `structured = true` refuses
+  them with the reason.
+
 ## 0.2.42
 
 - An omitted response whose law is discrete (`Poisson`, `Binomial`,
