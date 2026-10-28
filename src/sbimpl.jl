@@ -2429,16 +2429,22 @@ end
 # (data, from the term's `cor=`), damped by `rho` with the stationary scaling
 # `sigma * sqrt(1 - rho^2)`; each row reads the deviation of its own group at
 # its own step. `eta` is column-major `P × W`.
+# The Q levels a replay redraws (`resample_groups` naming the `by` column) follow
+# the fitted ones, rows `P + 1:P + Q`: their innovations are those of the fitted
+# levels mapped by `A` plus `Lc` times their own `eta_lev` (column-major `Q × W`),
+# the conditional law given the fitted levels the replay keeps. A fit has Q = 0.
 StanBlocks.@deffun begin
-    correlated_damped_walk(sigma::real, rho::real, eta::vector[PW], L::matrix[P, P], W::int,
+    correlated_damped_walk(sigma::real, rho::real, eta::vector[PW], eta_lev::vector[QW],
+                           L::matrix[P, P], A::matrix[Q, P], Lc::matrix[Q, Q], W::int,
                            group_idx::int[N], step_idx::int[N])::vector[N] = begin
-        E = to_matrix(eta, P, W)
-        delta::matrix[P, W]
-        prev = sigma * (L * col(E, 1))
+        V = L * to_matrix(eta, P, W)
+        U = append_row(V, A * V + Lc * to_matrix(eta_lev, Q, W))
+        delta::matrix[P + Q, W]
+        prev = sigma * col(U, 1)
         delta[:, 1] = prev
         scale = sigma * sqrt(1.0 - rho * rho)
         for w in 2:W
-            prev = rho * prev + scale * (L * col(E, w))
+            prev = rho * prev + scale * col(U, w)
             delta[:, w] = prev
         end
         out::vector[N]
@@ -2450,14 +2456,18 @@ StanBlocks.@deffun begin
 end
 
 # `eta_new` are the appended steps' innovations, as `z_new` of `_sb_rw1`; the
-# column-major layout puts them after the fitted steps' `eta`.
+# column-major layout puts them after the fitted steps' `eta`. `eta_lev` are the
+# innovations of the levels a replay redraws, over every step: none in a fit, and
+# on a resample replay `reprocess` marks their count `maybecv`, so StanBlocks
+# draws them in generated quantities while `eta` keeps the fit's coordinates.
 _sb_cdar = StanBlocks.@slic begin
     sigma ~ normal(0., 0.2; lower=0.)
     rho ~ normal(0.5, 0.2; lower=0., upper=1.)
     eta ~ std_normal(; n=n_groups * n_steps)
     eta_new ~ std_normal(; n=n_groups * n_new_steps)
-    return correlated_damped_walk(sigma, rho, append_row(eta, eta_new), L,
-                                  n_steps + n_new_steps, group_idx, step_idx)
+    eta_lev ~ std_normal(; n=n_new_groups * (n_steps + n_new_steps))
+    return correlated_damped_walk(sigma, rho, append_row(eta, eta_new), eta_lev, L, A_new,
+                                  L_new, n_steps + n_new_steps, group_idx, step_idx)
 end
 
 # Areal `car(area; edges=..., type=...)`. `phi` lives on the STRUCTURED nodes
@@ -5926,14 +5936,28 @@ function _sb_resample_preproc(training, template, groups, new_df)
             "$(old.kind)/$(repr(old.raw_ref)) to " *
             "$(new.kind)/$(repr(new.raw_ref)); the re-emission is not the " *
             "fitted model.")
-        out[key] = old.kind === :group_index && old.raw_ref in groups ?
-            _sb_resampled_group_index(old, new_df) : old
+        out[key] = _sb_resampled_record(old, groups, new_df)
     end
     for (key, e) in template
         e.kind === :submodel_hook && (out[key] = e)
     end
     out
 end
+
+# A replay record of a fitted one: a resampled group's `:group_index` record is
+# over the levels `new_df` names, and a `cdar` term whose `by` column is resampled
+# redraws the levels its rows name (`_sb_cdar_redraw!`); every other record is the fit's.
+function _sb_resampled_record(e::PreprocEntry, groups, new_df)
+    e.kind === :group_index && e.raw_ref in groups &&
+        return _sb_resampled_group_index(e, new_df)
+    e.kind === :cdar && e.raw_ref[2] in groups && return PreprocEntry(
+        :cdar, merge(e.const_, (; resample=true)), e.raw_ref, e.dim_coupled)
+    e
+end
+
+# The `by` columns of a model's `cdar` terms, which `resample_groups` may name.
+_sb_cdar_by_columns(preproc) =
+    Set{Symbol}(e.raw_ref[2] for e in values(preproc) if e.kind === :cdar)
 
 # A resampled group's `:group_index` record over the levels `df` names; the
 # replay codes its rows into them, and its effects are drawn for each.
@@ -5948,6 +5972,7 @@ end
 
 function _sb_assert_cv_reemission(sb::SBBRMI, groups)
     plan = generative_plan(sb)
+    cdar_by = _sb_cdar_by_columns(sb.preproc)
     for group in groups
         hits = GenerativeDeclaration[]
         for d in plan.declarations
@@ -5967,10 +5992,10 @@ function _sb_assert_cv_reemission(sb::SBBRMI, groups)
                 "supported by this new-population emission.")
             push!(hits, d)
         end
-        isempty(hits) && error(
+        isempty(hits) && !(group in cdar_by) && error(
             "sbimpl: `resample_groups` names `$group`, but the model has no " *
             "ordinary random-effect block with a tracked group index on that " *
-            "column.")
+            "column, and no `cdar(...; by=$group)` term.")
         for d in hits
             expected = Symbol(d.target, :_n_g)
             get(d.keywords, :n_groups, nothing) === expected && continue
@@ -6006,6 +6031,8 @@ function _sb_mark_resample_groups(sb::SBBRMI, groups)
         marked[key] = StanBlocks.stan.maybecv(key, marked[key])
         push!(seen, entry.raw_ref)
     end
+    # a resampled `cdar` term marked its redrawn-level count itself
+    union!(seen, intersect(groups, _sb_cdar_by_columns(sb.preproc)))
     seen == groups || error(
         "sbimpl: resample replay: failed to mark group index provenance for " *
         "$(sort!(collect(setdiff(groups, seen))))")
@@ -6015,6 +6042,17 @@ end
 
 function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool, held_out)
     _brm_refuse_joint_resample(sb.parent, groups; prefix="sbimpl: reprocess")
+    # A fresh template prepares each `cdar` term on the replay rows alone (their
+    # levels, a `cor` over them), so there are no fitted levels to draw the redrawn
+    # ones given, and the redraw reads the fitted record; not built (todo `1ym8kho`
+    # asks how a fresh replay treats a known correlation).
+    fresh_cdar = freeze ? Symbol[] :
+        sort!(collect(intersect(groups, _sb_cdar_by_columns(sb.preproc))))
+    isempty(fresh_cdar) || error(
+        "sbimpl: reprocess: `resample_groups` names the `cdar` group column(s) `",
+        join(fresh_cdar, "`, `"), "` with `freeze_constants=false`, which rebuilds the ",
+        "term on the replay's levels alone; redrawing `cdar` levels is supported with ",
+        "the default `freeze_constants=true`.")
     isempty(total_effect_blocks(sb)) || throw(ArgumentError(
         "total-coefficient prediction uses generative_plan(plan,new_df) and transport_draws(...;resample=groups) to share one recovered population draw across new groups; resample_groups does not perform this recovery"))
     isempty(s2z_effect_blocks(sb)) || throw(ArgumentError(
@@ -6140,6 +6178,101 @@ function _sb_walk_new_steps!(new_data, handled, keys, n_new::Int, term::Symbol)
     new_data[keys.n_new_steps] = n_new == 0 ? 0 : StanBlocks.stan.maybecv(keys.n_new_steps, n_new)
     push!(handled, keys.n_new_steps)
     nothing
+end
+
+# A `cdar` replay that redraws no level binds the fit's own empty new-level data.
+# A term built before redrawn levels existed has no such keys and needs none.
+function _sb_cdar_redraw_none!(new_data, handled, keys, n_groups::Int)
+    haskey(keys, :n_new_groups) || return
+    new_data[keys.n_new_groups] = 0
+    new_data[keys.A_new] = zeros(0, n_groups)
+    new_data[keys.L_new] = zeros(0, 0)
+    push!(handled, keys.n_new_groups, keys.A_new, keys.L_new)
+    nothing
+end
+
+# A resample replay naming a `cdar` term's `by` column redraws every level its rows
+# name (R), as `resample_groups` redraws the levels of a random-effect grouping: each
+# level's whole path, every step of the grid, comes from the fitted law in generated
+# quantities (their count `maybecv`-marked), and the fitted levels' coordinates stay
+# the fit's. The fitted levels the replay does not name (K) keep their fitted paths,
+# and with `C` the level correlation the redrawn innovations are drawn given theirs:
+# `v_R = A v_F + Lc u_R` with `A = C[R, K] C[K, K]^{-1}` (zero on redrawn fitted
+# levels), `Lc = chol(C[R, R] - A C[K, R])` and `u_R ~ N(0, I)`, the exact
+# conditional of the joint stationary walk; `C = I` gives independent levels. A level
+# the fit did not see needs `C` over the sorted union of fitted and replay levels,
+# read from the replay's `cor` field, whose fitted block must be the fit's `C`.
+# Rows index the redrawn levels after the P fitted ones.
+function _sb_cdar_redraw!(new_data, handled, e::PreprocEntry, df, step_raw, steps, group_raw)
+    k = e.const_.keys
+    group_col = e.raw_ref[2]
+    haskey(k, :n_new_groups) || error(
+        "sbimpl: reprocess: `resample_groups=[:$group_col]` redraws the levels of a ",
+        "`cdar(...; by=$group_col)` term, but this term was built by a BRM that cannot ",
+        "(no innovations for redrawn levels); rebuild the SBBRMI with the current BRM ",
+        "and refit.")
+    fitted = e.const_.groups
+    redrawn = _brm_cdar_levels(group_raw)
+    A, Lc = _sb_cdar_redraw_factors(e, df, fitted, redrawn)
+    n_lev = length(redrawn)
+    new_data[k.n_new_groups] = n_lev == 0 ? 0 : StanBlocks.stan.maybecv(k.n_new_groups, n_lev)
+    new_data[k.A_new] = A
+    new_data[k.L_new] = Lc
+    push!(handled, k.n_new_groups, k.A_new, k.L_new)
+    step_idx, lev_idx = _brm_cdar_indices(step_raw, steps, group_raw, redrawn;
+                                          prefix="sbimpl: reprocess")
+    step_idx, lev_idx .+ length(fitted)
+end
+
+function _sb_cdar_redraw_factors(e::PreprocEntry, df, fitted, redrawn)
+    group_col = e.raw_ref[2]
+    isempty(redrawn) && return zeros(0, length(fitted)), zeros(0, 0)
+    Cfit = e.const_.L * e.const_.L'
+    unseen = setdiff(redrawn, fitted)
+    levels, C = if isempty(unseen)
+        fitted, Cfit
+    else
+        key = get(e.const_, :cor_key, nothing)
+        isnothing(key) && error(
+            "sbimpl: reprocess: `resample_groups=[:$group_col]` draws `cdar` levels the ",
+            "fit did not see ($(join(unseen, ", "))), whose correlation to the fitted ",
+            "levels needs `cor` over all of them, but the term's `cor=` is not a data ",
+            "field the replay can supply. Write `cor=` as a data field.")
+        _sb_df_has_column(df, key) || error(
+            "sbimpl: reprocess: `resample_groups=[:$group_col]` draws `cdar` levels the ",
+            "fit did not see ($(join(unseen, ", "))); their correlation to the fitted ",
+            "levels needs the replay data to carry `$key` over the sorted union of the ",
+            "fitted and the replay's `$group_col` levels.")
+        all_levels = _brm_cdar_levels(vcat(fitted, redrawn))
+        Cu = _brm_cdar_cor_matrix(_sb_df_column(df, key))
+        size(Cu) == (length(all_levels), length(all_levels)) || error(
+            "sbimpl: reprocess: `$key` is $(size(Cu)), but a replay that draws `cdar` ",
+            "levels the fit did not see reads it over the sorted union of the fitted and ",
+            "the replay's `$group_col` levels, $(length(all_levels)) of them.")
+        _brm_cdar_factor(Cu)
+        at = [findfirst(==(g), all_levels) for g in fitted]
+        maximum(abs.(Cu[at, at] .- Cfit); init=0.0) <= 1e-8 || error(
+            "sbimpl: reprocess: `$key` over the fitted `$group_col` levels differs from ",
+            "the fitted `cor`; its rows and columns follow the sorted union of the ",
+            "fitted and the replay's levels, and its fitted block must be the fit's.")
+        all_levels, Cu
+    end
+    r = [findfirst(==(g), levels) for g in redrawn]
+    kept = findall(g -> !(g in redrawn), fitted)
+    kk = [findfirst(==(fitted[j]), levels) for j in kept]
+    A = zeros(length(redrawn), length(fitted))
+    S = C[r, r]
+    if !isempty(kept)
+        B = C[r, kk] / LinearAlgebra.cholesky(LinearAlgebra.Symmetric(C[kk, kk]))
+        A[:, kept] = B
+        S = S - B * C[kk, r]
+    end
+    F = LinearAlgebra.cholesky(LinearAlgebra.Symmetric(S); check=false)
+    LinearAlgebra.issuccess(F) || error(
+        "sbimpl: reprocess: the redrawn `$group_col` levels' correlation given the ",
+        "fitted levels the replay keeps is not positive definite: a redrawn level is ",
+        "determined by the kept ones under `cor`.")
+    A, Matrix{Float64}(F.L)
 end
 
 # Recompute one transform-output data key against `df`. `freeze=true` applies
@@ -6539,7 +6672,9 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
     elseif e.kind === :cdar
         # `cdar(step; by=group, cor=C)`: levels and `L` are frozen from the fit (the
         # correlation is a hyperparameter of the term — rebuild the model to change
-        # it or the level set); a forecast appends steps past the fitted grid.
+        # it or the level set); a forecast appends steps past the fitted grid, and a
+        # resample replay (`resample_groups` naming the `by` column) redraws every
+        # level its rows name, fitted or not (`_sb_cdar_redraw!`).
         step_col, group_col = e.raw_ref
         step_raw = _sb_df_column(df, step_col)
         group_raw = _sb_df_column(df, group_col)
@@ -6547,9 +6682,16 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             "sbimpl: reprocess: `cdar` step and group columns must be vectors")
         all(isfinite, step_raw) || error("sbimpl: reprocess: `cdar` step axis must be finite")
         steps, n_new = _sb_walk_replay_grid(e.const_.steps, step_raw, :cdar, freeze)
-        step_idx, group_idx = _brm_cdar_indices(step_raw, steps, group_raw, e.const_.groups;
-                                                prefix="sbimpl: reprocess")
         k = e.const_.keys
+        step_idx, group_idx = if get(e.const_, :resample, false)
+            _sb_cdar_redraw!(new_data, handled, e, df, step_raw, steps, group_raw)
+        else
+            # the fitted levels' coordinates are the replay's; a level the fit did
+            # not see has none, and `resample_groups` draws it
+            _sb_cdar_redraw_none!(new_data, handled, k, length(e.const_.groups))
+            _brm_cdar_indices(step_raw, steps, group_raw, e.const_.groups;
+                              prefix="sbimpl: reprocess", by=group_col)
+        end
         new_data[k.n_groups] = length(e.const_.groups)
         new_data[k.n_steps] = length(steps) - n_new
         _sb_walk_new_steps!(new_data, handled, k, n_new, :cdar)
@@ -6747,6 +6889,15 @@ of a naive per-column `sb.model(; col=…)` rebind is avoided. Returns a NEW
   requested.
   This changes Stan source by construction; it is the new-population/CV twin
   of the default same-group replay.
+  Naming the `by` column of a `cdar(step; by=g, cor=C)` term redraws every
+  level of `g` that `new_df` names, a level the fit did not see included: its
+  whole path over the step grid (and any appended forecast steps) is drawn in
+  generated quantities from the fitted `sigma`, `rho`, given the fitted levels
+  `new_df` does not name, which keep their fitted paths (with `C = I` the levels
+  are independent). The fitted coordinates stay the fit's. A level the fit did
+  not see needs `C` over the sorted union of the fitted and `new_df`'s levels in
+  `new_df` (its fitted block equal to the fit's); this needs the default
+  `freeze_constants=true`.
 - `resample_covariates=()` (default): retain fitted covariate completions.
   Select logical modeled continuous members to redraw all their rows inside
   the emitted program, conditional on retained posterior hyperparameters.
@@ -15159,6 +15310,7 @@ _sb_predictor_term!(stmts, data, ::typeof(cdar), t;
     xname, raw = _sb_inner_data(:cdar, only(args))
     gname, graw = _sb_inner_data(:cdar, kw.by)
     ctx = Dict{Symbol,Any}(xname => raw, gname => graw)
+    cname = nothing
     if kw.cor isa NamedColumn
         cname, craw = _sb_inner_data(:cdar, kw.cor)
         ctx[cname] = craw
@@ -15171,7 +15323,9 @@ _sb_predictor_term!(stmts, data, ::typeof(cdar), t;
     col_name = Symbol(:cdar_, target, :_, xname)
     keys_ = (; n_groups=Symbol(col_name, :_n_groups), n_steps=Symbol(col_name, :_n_steps),
                n_new_steps=Symbol(col_name, :_n_new_steps),
-               L=Symbol(col_name, :_L), group_idx=Symbol(col_name, :_group_idx),
+               n_new_groups=Symbol(col_name, :_n_new_groups),
+               L=Symbol(col_name, :_L), A_new=Symbol(col_name, :_A_new),
+               L_new=Symbol(col_name, :_L_new), group_idx=Symbol(col_name, :_group_idx),
                step_idx=Symbol(col_name, :_step_idx))
     for key in values(keys_)
         haskey(data, key) && error("sbimpl: `cdar` reserves data key `$key`, but that name is already used")
@@ -15180,13 +15334,18 @@ _sb_predictor_term!(stmts, data, ::typeof(cdar), t;
     data[keys_.n_steps] = st.n_steps
     data[keys_.n_new_steps] = 0
     data[keys_.L] = st.L
+    data[keys_.n_new_groups] = 0
+    data[keys_.A_new] = zeros(0, st.n_groups)
+    data[keys_.L_new] = zeros(0, 0)
     data[keys_.group_idx] = st.group_idx
     data[keys_.step_idx] = st.step_idx
     # replay: the group levels and the factor are constants of the fitted term; a
-    # forecast appends steps past the fitted grid. Recorded on the step-index key; the
-    # other keys ride along.
+    # forecast appends steps past the fitted grid, and a resample replay redraws the
+    # levels its rows name, reading `cor` over the fitted and new levels from the
+    # replay's `cor_key` field. Recorded on the step-index key; the other keys ride along.
     _sb_record_preproc!(data, keys_.step_idx, PreprocEntry(:cdar,
-        (; steps=st.steps, groups=st.groups, L=st.L, keys=keys_), (xname, gname), true))
+        (; steps=st.steps, groups=st.groups, L=st.L, keys=keys_, cor_key=cname),
+        (xname, gname), true))
     submodel = _sb_cdar_submodel_expr(term_overrides, t)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
         submodel, term_overrides, t; data, stem=col_name, keys_...)))

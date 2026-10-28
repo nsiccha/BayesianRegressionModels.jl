@@ -42,7 +42,14 @@ exact recurrence per draw, `N(0, I)` innovations, the one-step covariance
 `sigma^2 (1 - rho^2) C`), also through `resample_groups`; a step inside the
 fitted grid is refused, and `freeze_constants=false` samples every step. Set
 `BRM_WALK_FORECAST_RUNTIME=0` to skip the compiled-model sets. Snag
-`per-group-statio-059ae6f6`.
+`per-group-statio-059ae6f6`. It also checks `resample_groups` naming a `cdar`
+term's `by` column: the levels the replay rows name, unseen ones included, are
+redrawn in generated quantities (the exact recurrence per draw, `N(0, I)`
+innovations, the stationary marginal SD), given the fitted levels the rows do
+not name for a correlated `C` (the conditional factors and the first state's
+conditional mean and SD); the fit's coordinates stay, `C` over the union of
+levels is read from the replay data and checked against the fit, and it
+composes with a resampled random effect. Snag `cdar-replay-new-57df8982`.
 
 `changelog.jl` checks that `CHANGELOG.md`'s newest heading is the
 `Project.toml` version (`dev` §7.5).

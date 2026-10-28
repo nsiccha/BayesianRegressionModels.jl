@@ -114,8 +114,11 @@ coefficient, and a level-step without rows is a latent state on the grid.
 `sd(lp, cdar(step))` addresses `sigma` and `ar(lp, cdar(step))` addresses
 `rho`. On replay the group levels and `C` are frozen from the fit, and steps
 after the last fitted one are appended (a forecast): their innovations are drawn
-in generated quantities, so each level continues from its fitted state. Dispatch
-tag — see `_sb_cdar`.
+in generated quantities, so each level continues from its fitted state. A replay
+with `resample_groups=[:<by column>]` redraws the levels its rows name, also
+levels the fit did not see, given the fitted levels it does not name (`C` over
+the union of levels comes from the replay data); see [`reprocess`](@ref).
+Dispatch tag — see `_sb_cdar`.
 """
 function cdar end
 

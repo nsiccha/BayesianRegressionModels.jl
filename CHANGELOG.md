@@ -12,6 +12,26 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.36
+
+- `reprocess(sb, rows; resample_groups=[:g])` on an SBBRMI accepts the `by`
+  column of a `cdar(step; by=g, cor=C)` term. It redraws every level of `g` the
+  rows name, also levels the fit did not see, so a model with `cdar` can forecast
+  whole held-out groups. Each redrawn level's path over the whole step grid (and
+  any appended forecast steps) is drawn in generated quantities from the fitted
+  `sigma` and `rho`, starting from the stationary law. The draw is conditional
+  on the fitted levels the rows do not name, which keep their fitted paths;
+  with `C = I` the levels are independent. The fit's unconstrained coordinates
+  stay the replay's. A level the fit did not see needs `C` over the sorted union
+  of the fitted and the rows' levels, read from the `cor=` data field of the
+  replay data; its fitted block must equal the fitted `C`. A plain `reprocess`
+  still refuses an unseen level, and its error now names `resample_groups`.
+  With `freeze_constants=false` the redraw is refused (the fresh template
+  rebuilds the term on the replay's levels alone). Every `cdar` program gains
+  one data integer, two data matrices and one empty parameter vector
+  (`eta_lev`), so its source and descriptor id change; its density and
+  unconstrained coordinates do not. Snag `cdar-replay-new-57df8982`.
+
 ## 0.2.35
 
 - `adaptive_centering_problem` centres a random-effect cell on the total of

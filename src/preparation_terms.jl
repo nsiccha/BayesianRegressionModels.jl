@@ -347,7 +347,9 @@ function _brm_correlation_factor(C::AbstractMatrix{<:Real}; what)
         "BRM term preparation: `$what` must be positive definite")
     Matrix{Float64}(F.L)
 end
-function _brm_cdar_indices(step_raw, steps, group_raw, groups; prefix="BRM term preparation")
+# `by` names a replay's group column: its unseen levels are drawn by `resample_groups`.
+function _brm_cdar_indices(step_raw, steps, group_raw, groups; prefix="BRM term preparation",
+                           by=nothing)
     step_idx = Vector{Int}(undef, length(step_raw))
     for (i, s) in enumerate(step_raw)
         j = searchsortedfirst(steps, s)
@@ -358,7 +360,9 @@ function _brm_cdar_indices(step_raw, steps, group_raw, groups; prefix="BRM term 
     group_idx = Vector{Int}(undef, length(group_raw))
     for (i, g) in enumerate(group_raw)
         j = findfirst(==(g), groups)
-        isnothing(j) && error("$prefix: `cdar` group `$g` is not a fitted group level")
+        isnothing(j) && error("$prefix: `cdar` group `$g` is not a fitted group level",
+            isnothing(by) ? "" : "; `resample_groups=[:$by]` draws the levels of " *
+            "`$by` from the fitted law, a level the fit did not see included")
         group_idx[i] = j
     end
     step_idx, group_idx
