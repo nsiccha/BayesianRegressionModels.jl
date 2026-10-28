@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.29
+
+- `brm_svi_fit` fits units whose own rows pin them far more tightly than the
+  N(0, I) start of their factors, such as a probe's year of daily rows (40
+  probes x 366 days with five random-effect margins each). Its per-unit
+  natural-gradient step used to multiply such a unit's precision by up to 1e8
+  in one visit and then throw `PosDefException`. Each unit in the batch is now
+  evaluated at an antithetic pair of draws, `m ± U⁻ᵀε`. Their half difference
+  gives the curvature estimate, which cancels the gradient at the mean. The
+  step is shortened per unit so that the unit's precision changes at most
+  2.5-fold along any direction and its mean moves at most one sd of its factor
+  per visit. The precision update is computed in square-root form, so it is
+  positive definite in floating point too. An iteration evaluates each batch
+  unit twice, so it costs about twice as much as before. Snag
+  `brm-svi-fit-posd-0fcb769c`, todo `15id1zs`.
+
 ## 0.2.28
 
 - A flat grouped response (`y ~ Normal(m, sigma)` over interleaved rows, no

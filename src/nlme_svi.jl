@@ -25,9 +25,12 @@
 # minibatch ELBO gradient. A subject's factor moves only when the subject is in
 # the batch, by a natural-gradient step: the improved Bayesian learning rule of
 # Lin, Schmidt and Khan (2020), whose curvature estimate comes from the same
-# reparameterized draw (Stein's lemma) and whose precision update stays
-# positive definite. That step is Newton-like, so a subject's factor settles in
-# a few visits, where plain gradient steps on its mean and scale need hundreds.
+# antithetic pair of reparameterized draws (Stein's lemma) and whose precision
+# update stays positive definite, inside a per-subject trust region on the
+# precision's relative change and the mean's move (as Theis and Hoffman (2015)
+# bound SVI's natural-gradient steps). That step is Newton-like, so a subject's
+# factor settles in tens of visits, where plain gradient steps on its mean and
+# scale need hundreds.
 
 """
     MeanFieldGlobal()
@@ -127,7 +130,8 @@ _brm_svi_global_covariance(q) = Diagonal(exp.(2 .* q.ρ)) + q.Β * q.Β'
 _brm_svi_draw_global(q, ε, η) = q.μ .+ exp.(q.ρ) .* ε .+ q.Β * η
 # A draw of subject i from ε_i: m_i + U_i⁻ᵀ ε_i, with U_i the lower Cholesky
 # factor of the precision Λ_i.
-_brm_svi_draw_unit(q, i, εi) = q.M[i] .+ LowerTriangular(q.U[i])' \ εi
+_brm_svi_unit_offset(q, i, εi) = LowerTriangular(q.U[i])' \ εi
+_brm_svi_draw_unit(q, i, εi) = q.M[i] .+ _brm_svi_unit_offset(q, i, εi)
 
 # The entropy of q, up to the constant (D + Σ d_i)(1 + log 2π)/2.
 _brm_svi_entropy(q) = logdet(_brm_svi_global_covariance(q)) / 2 -
@@ -196,31 +200,63 @@ end
 
 # ── A subject's factor: one natural-gradient step ───────────────────────────
 
+# The largest relative change of a subject's precision in one step: no
+# eigenvalue of U⁻¹ β G U⁻ᵀ exceeds it in magnitude, so along every direction
+# the precision changes by a factor between ½ and 1 + τ + τ²/2 (2.5).
+const _BRM_SVI_UNIT_TRUST = 1.0
+# The longest step of a subject's mean, in sds of its factor before the step.
+const _BRM_SVI_UNIT_MEAN_TRUST = 1.0
+
 # The improved Bayesian learning rule step of size β for subject i, from the
-# gradient `gz` of log p at its draw z = m + U⁻ᵀ ε. Stein's lemma gives
-# E[∇ log p εᵀ] = E[∇² log p] U⁻ᵀ, so -sym(gz εᵀ Uᵀ) estimates the negative
-# Hessian; with G = that estimate - Λ the precision moves to
+# gradients of log p at the antithetic draws z± = m ± U⁻ᵀ ε: `gz` their mean,
+# which estimates E_q ∇ log p, and `gd` half their difference. Stein's lemma
+# gives E[∇ log p εᵀ] = E[∇² log p] U⁻ᵀ, so -sym(gd εᵀ Uᵀ) estimates the
+# negative Hessian; the difference cancels the gradient at the mean, which
+# otherwise dominates a single draw's estimate whenever m is many posterior sds
+# from the subject's mode. With G = that estimate - Λ the precision moves to
 # Λ + β G + β²/2 G Λ⁻¹ G = ½(Λ + (Λ + βG) Λ⁻¹ (Λ + βG)), positive definite for
 # any G, and the mean to m + β Λ_new⁻¹ gz.
-function _brm_svi_unit_step!(q, i, gz, εi, β)
-    Λ = Symmetric(q.Λ[i])
+#
+# A subject whose observations pin it far more tightly than its factor's
+# start (hundreds of rows against the unit start) has a gradient of 1e4 and
+# more, and an unbounded step multiplied its precision by up to 1e8 in one
+# visit (β²/2 G Λ⁻¹ G dominates) and then lost positive definiteness in
+# floating point. Besides the antithetic draws, two changes keep the step
+# sound there:
+# - a trust region: β shrinks for this step until ‖U⁻¹ β G U⁻ᵀ‖ ≤ τ
+#   (`_BRM_SVI_UNIT_TRUST`), so the precision grows by at most 2.5× per visit
+#   along the drawn direction, and the mean moves at most one sd of the
+#   factor before the step (`_BRM_SVI_UNIT_MEAN_TRUST`): while the precision
+#   is still far below the subject's, Λ_new⁻¹ gz is a Newton step with too
+#   little curvature, which overshot by hundreds of sds where a log-scale
+#   random effect makes the density steep. A subject's step never shortens
+#   another subject's.
+# - the square-root form: with Λ = U Uᵀ and A = Λ + βG,
+#   Λ_new = ½ (Uᵀ; U⁻¹A)ᵀ (Uᵀ; U⁻¹A), so the R of that stacked matrix's QR
+#   factorization is √2 times the new Cholesky factor, which is positive
+#   definite in floating point too.
+function _brm_svi_unit_step!(q, i, gz, gd, εi, β)
     U = LowerTriangular(q.U[i])
-    H = gz * (U * εi)'
-    G = -(H + H') ./ 2 .- Λ
-    Λnew = Symmetric(Λ .+ β .* G .+ (β^2 / 2) .* (G * (Λ \ G)))
-    F = cholesky(Λnew)
-    q.Λ[i] .= Λnew
-    q.U[i] .= F.L
-    q.M[i] .+= β .* (F \ gz)
+    H = gd * (U * εi)'
+    G = Symmetric(-(H + H') ./ 2 .- q.Λ[i])
+    r = maximum(abs, eigvals(Symmetric(U \ (U \ G)')))
+    β = min(β, _BRM_SVI_UNIT_TRUST / r)
+    R = qr(vcat(Matrix(U'), U \ (q.Λ[i] .+ β .* G))).R
+    L = LowerTriangular(R' * Diagonal(sign.(diag(R))) ./ sqrt(2))
+    Δ = β .* (L' \ (L \ gz))
+    Δ .*= min(1.0, _BRM_SVI_UNIT_MEAN_TRUST / norm(U' * Δ))
+    q.U[i] .= L
+    q.Λ[i] .= L * L'
+    q.M[i] .+= Δ
     q
 end
 
 # ── One minibatch iteration ──────────────────────────────────────────────────
 
-# One draw of the globals, one draw per batch subject, the minibatch ELBO
-# gradient, an Adam step of the globals and a natural-gradient step of each
-# batch subject. Returns the minibatch estimate of E_q log p (without the
-# entropy).
+# One draw of the globals, an antithetic pair of draws per batch subject, the
+# minibatch ELBO gradient, an Adam step of the globals and a natural-gradient
+# step of each batch subject. Returns the minibatch estimate of E_q log p
+# (without the entropy).
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false)
     D, N = length(t.globals), length(t.units)
@@ -229,15 +265,17 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     g = _brm_svi_draw_global(q, ε, η)
     P, gP = _brm_svi_global_term(t, g)
     w = copy(gP)
-    gg = zeros(D)
+    gg₊, gg₋ = zeros(D), zeros(D)
     batch_value = 0.0
-    steps = Vector{Tuple{Vector{Float64},Vector{Float64}}}(undef, length(batch))
+    steps = Vector{NTuple{3,Vector{Float64}}}(undef, length(batch))
     for (k, i) in enumerate(batch)
         εi = randn(rng, length(t.units[i]))
-        gz = zeros(length(εi))
-        batch_value += _brm_svi_unit_term!(gg, gz, t, i, g, _brm_svi_draw_unit(q, i, εi))
-        w .+= s .* gg
-        steps[k] = (gz, εi)
+        gz₊, gz₋ = zeros(length(εi)), zeros(length(εi))
+        m, δ = q.M[i], _brm_svi_unit_offset(q, i, εi)
+        batch_value += (_brm_svi_unit_term!(gg₊, gz₊, t, i, g, m .+ δ) +
+            _brm_svi_unit_term!(gg₋, gz₋, t, i, g, m .- δ)) / 2
+        w .+= (s / 2) .* (gg₊ .+ gg₋)
+        steps[k] = ((gz₊ .+ gz₋) ./ 2, (gz₊ .- gz₋) ./ 2, εi)
     end
     x = _brm_svi_global_vector(q)
     grad = _brm_svi_global_gradient(q, w, ε, η)
@@ -406,9 +444,10 @@ end
 Minibatch stochastic variational inference for a model whose subjects are
 conditionally independent given the population (the subjects of
 [`brm_nlme_view`](@ref)), over the RK backend's packed unconstrained
-coordinates. Each iteration evaluates `batch_size` subjects, through their own
-observation cells, and scales them to all subjects, so its cost follows the
-batch size, not the number of subjects.
+coordinates. Each iteration evaluates `batch_size` subjects, each at an
+antithetic pair of draws through their own observation cells, and scales them
+to all subjects, so its cost follows the batch size, not the number of
+subjects.
 
 - `x` — a `@brm` model ([`BRMI`](@ref)), its [`RKBRMI`](@ref), or a prepared
   [`BRMNLMEModel`](@ref). For a BRMI or RKBRMI the model is prepared with
@@ -431,7 +470,10 @@ batch size, not the number of subjects.
   message names the window, iteration and ELBO) and Draws from q. An interrupt raises `Treebars.ProgressInterrupted` at the
   next window.
 - Optimizer controls: `max_iterations`, `lr_global` (Adam on the globals),
-  `unit_step` (the subjects' natural-gradient step), `polish_lr`, `window`,
+  `unit_step` (the subjects' natural-gradient step; a step that would change a
+  subject's precision more than 2.5-fold along some direction, or move its
+  mean more than one sd of its factor, is shortened for that subject),
+  `polish_lr`, `window`,
   `patience`, `min_windows`, `polish_windows`, `global_scale` and `unit_scale`
   (initial factor scales).
 

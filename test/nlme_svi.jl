@@ -121,6 +121,44 @@ end
     end
 end
 
+@stestset "a unit step far from its data's scale stays positive definite and converges" begin
+    # A unit whose rows pin it 30 to 3e5 times more tightly than its N(0, 1)
+    # start, as a probe's year of daily rows does (snag
+    # brm-svi-fit-posd-0fcb769c): the unbounded step multiplied the precision
+    # by up to 1e8 in one visit and lost positive definiteness within the
+    # first visits. On a Gaussian unit target the conditional posterior is
+    # exact: precision P, mode P \ H z★.
+    rng = Xoshiro(11)
+    d = 5
+    Q = Matrix(qr(randn(rng, d, d)).Q)
+    H = Symmetric(Q * Diagonal(1e4 .* exp10.(range(-1.5, 1.5; length=d))) * Q')
+    zstar = 0.5 .* randn(rng, d)
+    P = Symmetric(Matrix(H) + I)
+    mode = P \ (H * zstar)
+    grad(z) = -(H * (z .- zstar)) .- z
+    q = (; M=[zeros(d)], Λ=[Matrix(1.0I, d, d)], U=[Matrix(1.0I, d, d)])
+    positive = Bool[]
+    # At a constant step a single draw pair leaves the precision fluctuating
+    # around its fixed point (a few percent of runs leave [0.25, 4] at any one
+    # visit), so the precision is checked as the fit returns it: averaged over
+    # the last visits, as polishing averages q.
+    average = zeros(d, d)
+    for k in 1:150
+        ε = randn(rng, d)
+        δ = BRM._brm_svi_unit_offset(q, 1, ε)
+        g₊, g₋ = grad(q.M[1] .+ δ), grad(q.M[1] .- δ)
+        BRM._brm_svi_unit_step!(q, 1, (g₊ .+ g₋) ./ 2, (g₊ .- g₋) ./ 2, ε, 0.1)
+        push!(positive, isposdef(Symmetric(q.Λ[1])))
+        k > 100 && (average .+= (q.Λ[1] .- average) ./ (k - 100))
+    end
+    @test all(positive)
+    @test q.U[1] * q.U[1]' ≈ q.Λ[1]
+    λ = eigvals(Symmetric(average), P)
+    @test 0.25 < minimum(λ) && maximum(λ) < 4
+    e = q.M[1] .- mode
+    @test sqrt(dot(e, P * e)) < 0.1
+end
+
 @stestset "Gaussian random effects: SVI means match NUTS" begin
     rk = RKBRMI(svi_gauss_model(svi_gauss_data(Xoshiro(2), 40)))
     m = brm_nlme_model(rk; ad_backend=NLME_AD)
