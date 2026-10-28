@@ -65,6 +65,11 @@ function brm_multigroup_field(d::BRMDescriptor, draws::AbstractMatrix,
                           _brm_multigroup_locations(term, coordinates))
 end
 
+# The term's own spatial scale (`multigroup((x, y); k)`, `lambda` left out):
+# the `lambda` the `_lambda` family twin declares (`_sb_multigroup_own_lambda`),
+# which StanBlocks inlines under the term's binding.
+_brm_multigroup_own_lambda(target::Symbol) = Symbol(target, :_lambda)
+
 # The emitted grouped-HSGP declaration of a coordinate multigroup term and the
 # data it reads: one per model, or the one on `predictor`. Each family has a
 # `_lambda` twin that declares the term's own spatial scale.
@@ -97,7 +102,7 @@ function _brm_multigroup_coordinate_term(d::BRMDescriptor, predictor)
         fits=d.plan.preproc[k.PHI].const_.fits, K=d.plan.preproc[k.PHI].const_.K,
         coordinates, block=k.beta, n_basis=size(data[k.omega2], 1),
         # a declared or constant `lambda`, or the term's own (`<term>_lambda`)
-        lambda=haskey(k, :lambda_level) ? k.lambda_level : Symbol(x.target, :_lambda))
+        lambda=haskey(k, :lambda_level) ? k.lambda_level : _brm_multigroup_own_lambda(x.target))
     if _brm_multigroup_free(x)
         n_points = _brm_multigroup_position_rows(k.positions_level, data)
         return (; common..., free=true, positions=k.positions_level, data, n_points,

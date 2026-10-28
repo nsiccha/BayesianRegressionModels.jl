@@ -260,7 +260,13 @@ plain random-effect blocks (`(1 | g)`, `(0 + x | g)`, `(1 + x | g)`,
 `(… | id | g)`) with sampled scales, non-centered or centered on the SB side
 (see below), ungrouped HSGP terms
 (isotropic or per-axis length scales, marginal scale and basis weights, paired
-by their formula axes and parameter roles), monotonic `mo`/`mo1` terms (the
+by their formula axes and parameter roles), grouped HSGP terms
+`hsgp(x...; by = g)` (the length scale and amplitude, or a hyper-predicted
+one's intercept, level-effect scale and level effects by level label; a
+`multigroup((x, y))` term's own spatial scale; the standardized weights by
+level label and basis function, or by inducing point and basis function for
+`cor = multigroup((x, y), …)`; a level correlation `cor = Omega` and the
+declared inputs of `multigroup` pair as their own declarations), monotonic `mo`/`mo1` terms (the
 coefficient as a population coefficient, the increments as a `:simplex`
 block), and the declarations a downstream submodel provider scopes under its
 target (`_rk_submodel_rhs!` / `_sb_submodel_rhs!`). A provider declaration
@@ -397,11 +403,11 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
               "`Dirichlet` simplexes, ordinary-prior " *
               "population and categorical coefficients, plain non-centered or " *
               "centered random-effect " *
-              "blocks with sampled scales, ungrouped HSGP terms, monotonic " *
+              "blocks with sampled scales, HSGP terms (grouped by `by=` too), monotonic " *
               "terms, submodel provider declarations, and missing-value " *
               "completions (RK `<column>.y_mis` with SB `<column>_y_mis`). Other " *
-              "constructs (R2D2/horseshoe priors, smooths, GP, grouped or " *
-              "hyper-predicted HSGP, AR, measurement error, multi-membership " *
+              "constructs (R2D2/horseshoe priors, smooths, GP, hyper-predicted " *
+              "HSGP without `by=`, AR, measurement error, multi-membership " *
               "and stratified groups, exact-total SB emissions) " *
               "are not paired yet.")
     end
@@ -905,16 +911,16 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     end
 end
 
-# An ungrouped HSGP component, paired by its formula axes and parameter roles.
-# A grouped or hyper-predicted one is not paired yet; validation names its
-# coordinates.
+# An HSGP component, paired by its formula axes and parameter roles. A grouped
+# one (`by = g`) pairs below.
+_brm_transport_hsgp_axes(t) = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:hsgp}, record, rk, d, stan, stan_pos)
-    record.grouped && return nothing
-    term_axes(t) = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))
+    record.grouped && return _brm_transport_grouped_hsgp!(pairs, record, rk, d, stan,
+        stan_pos)
     entry = _brm_term_entry(d, record.predictor,
         e -> getf(e.value) === hsgp && !haskey(getkwargs(e.value), :by) &&
-            term_axes(e.value) == record.axes,
+            _brm_transport_hsgp_axes(e.value) == record.axes,
         "ungrouped `hsgp$(record.axes)`")
     base = (; kind=:hsgp, predictor=record.predictor, term=entry.term)
     role_names(parameter) = _brm_transport_elements(
@@ -945,6 +951,129 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         push!(pairs, BRMCoordinatePair((; base..., parameter=:basis_weights, index=j),
             Symbol(weights, ".", j), stan_name, weights, (j,), :identity))
     end
+end
+
+# A grouped HSGP `hsgp(x...; by = g)`, paired by its term, parameter roles and
+# level labels: the length scale and amplitude, or, for a hyper-predicted one,
+# its intercept, level-effect scale and level effects; a multigroup coordinate
+# field's own spatial scale; and the standardized weights by (level, basis
+# function). SB draws the weights as the flat `zflat_<suffix>`, level-major
+# (`_grouped_hsgp_blocks`). The weights of `cor = multigroup((x, y), …)` sit
+# on an inducing grid or at inducing positions shared by every level, which
+# both backends build from the same level coordinates, so they pair by (grid
+# point, basis function). A hyper-predicted term without `by` has no SB block;
+# validation names its coordinates.
+function _brm_transport_grouped_hsgp!(pairs, record, rk, d, stan, stan_pos)
+    isnothing(record.group) && return nothing
+    entry = _brm_term_entry(d, record.predictor,
+        e -> getf(e.value) === hsgp && haskey(getkwargs(e.value), :by) &&
+            _brm_structured_group_name((; kwarg=:by), e.value) === record.group &&
+            _brm_transport_hsgp_axes(e.value) == record.axes,
+        "`hsgp$(record.axes)` grouped by `$(record.group)`")
+    base = (; kind=:hsgp, predictor=record.predictor, term=entry.term)
+    owner = _brm_stan_name(_brm_term_owner_output(d, record.predictor, entry).declaration)
+    blocks = [b for b in _grouped_hsgp_blocks(d) if b.term === owner]
+    length(blocks) == 1 || error(
+        "brm_coordinate_transport: grouped HSGP $(base) reads $(length(blocks)) SB " *
+        "weight blocks; expected one")
+    block = only(blocks)
+    locals = record.locals
+    declaration = record.declaration
+    # SB's level position of each RK level, by label.
+    sb_level = map(record.levels) do level
+        h = findall(l -> isequal(_brm_transport_level(l), _brm_transport_level(level)),
+            block.levels)
+        length(h) == 1 || error(
+            "brm_coordinate_transport: level $(repr(level)) of grouped HSGP $(base) " *
+            "matches $(length(h)) SB levels")
+        only(h)
+    end
+    role_names(parameter) = _brm_transport_elements(
+        _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
+        (; base..., parameter))
+    function pair_local!(parameter, rk_local)
+        rk_names = _brm_transport_local_elements(rk, declaration, rk_local)
+        stan_names = role_names(parameter)
+        length(rk_names) == length(stan_names) || error(
+            "brm_coordinate_transport: grouped HSGP $(base) `$parameter` has " *
+            "$(length(rk_names)) RK and $(length(stan_names)) SB coordinates")
+        for (j, (rk_name, stan_name)) in enumerate(zip(rk_names, stan_names))
+            push!(pairs, BRMCoordinatePair((; base..., parameter, index=j), rk_name,
+                stan_name, Symbol(declaration, ".", rk_local),
+                last(_brm_transport_scoped(rk_name)), :identity))
+        end
+    end
+    plans = _brm_term_hyper_plans(d.plan, record.predictor, entry.value)
+    for parameter in (:length_scale, :sd)
+        sampled = getproperty(locals.scales, parameter)
+        if !any(p -> p.hyper === parameter, plans)
+            # A known length scale or amplitude is a constant on both backends.
+            isnothing(sampled) || pair_local!(parameter, sampled)
+            continue
+        end
+        isnothing(sampled) || pair_local!(Symbol(parameter, :_intercept), sampled)
+        effects = getproperty(locals.hypers, parameter)
+        isnothing(effects) && continue
+        pair_local!(Symbol(parameter, :_ranef_sd), effects.scale)
+        # Level effects: one per level, by label.
+        stan_z = role_names(Symbol(parameter, :_ranef_z))
+        length(stan_z) == length(record.levels) || error(
+            "brm_coordinate_transport: grouped HSGP $(base) has " *
+            "$(length(record.levels)) RK levels and $(length(stan_z)) SB " *
+            "`$(parameter)` level effects")
+        z = Symbol(declaration, ".", effects.z)
+        for (g, level) in enumerate(record.levels)
+            push!(pairs, BRMCoordinatePair(
+                (; base..., parameter=Symbol(parameter, :_ranef_z),
+                   level=_brm_transport_level(level)),
+                Symbol(z, ".", g), stan_z[sb_level[g]], z, (g,), :identity))
+        end
+    end
+    lambda = get(locals, :lambda, nothing)
+    if !isnothing(lambda)
+        address = (; base..., parameter=:spatial_scale, index=1)
+        rk_name = only(_brm_transport_local_elements(rk, declaration, lambda))
+        push!(pairs, BRMCoordinatePair(address, rk_name,
+            _brm_stan_name(stan_pos, String(_brm_multigroup_own_lambda(owner)), address),
+            rk_name, (), :identity))
+    end
+    block.generated && return nothing
+    # Weights: an `n_rows × n_basis` matrix of Stan positions, one row per level
+    # (by label) or per inducing point (in order).
+    positions = _grouped_hsgp_weight_coordinates(block, stan)
+    weights = Symbol(declaration, ".", locals.weights)
+    rk_weights = _brm_transport_local_elements(rk, declaration, locals.weights)
+    length(rk_weights) == length(positions) || error(
+        "brm_coordinate_transport: grouped HSGP $(base) has $(length(rk_weights)) " *
+        "RK and $(length(positions)) SB weights")
+    for rk_name in rk_weights
+        r, j = last(_brm_transport_scoped(rk_name))
+        row = block.per_level ? sb_level[r] : r
+        row <= size(positions, 1) && j <= size(positions, 2) || error(
+            "brm_coordinate_transport: grouped HSGP $(base) weight `$rk_name` lies " *
+            "outside SB's $(size(positions, 1)) × $(size(positions, 2)) weights")
+        address = block.per_level ?
+            (; base..., parameter=:basis_weights,
+               level=_brm_transport_level(record.levels[r]), index=j) :
+            (; base..., parameter=:basis_weights, point=r, index=j)
+        push!(pairs, BRMCoordinatePair(address, rk_name, stan[positions[row, j]],
+            weights, (r, j), :identity))
+    end
+    nothing
+end
+
+# The RK coordinates of a block local, `<declaration>.<local>[.<index>...]`, in
+# column-major element order.
+function _brm_transport_local_elements(rk, declaration::Symbol, rk_local::Symbol)
+    stem = Symbol(declaration, ".", rk_local)
+    found = Tuple{Tuple,Symbol}[]
+    for rk_name in _rk_layout_coordinate_names(rk)
+        scoped = _brm_transport_scoped(rk_name)
+        !isnothing(scoped) && first(scoped) === stem || continue
+        push!(found, (last(scoped), rk_name))
+    end
+    sort!(found; by=x -> reverse(first(x)))
+    Symbol[last(x) for x in found]
 end
 
 # The RK coordinate `<target>.<path>[.<index>...]` split into its declaration
@@ -1051,15 +1180,20 @@ end
 # shared emitter declares. Within a family both backends use the same
 # transform (an ordered vector's first element, then log increments), so
 # its free coordinates are equal; a simplex moves as a `:simplex` block.
+# A declared vector (`x[1:n] .~ law`) samples each element under its scalar
+# law, with the transform an authored scalar of that law has on both
+# backends; `nothing` asks only that every element shares it.
 const _BRM_TRANSPORT_VECTOR_FAMILIES = Dict(
     :ordered_normal => ("ordered", :ordered),
     :vector_normal => ("vector", :identity),
+    :elementwise => ("vector", nothing),
     :simplex_dirichlet => ("simplex", :simplex))
 
-# A vector parameter — a response's cutpoints or thresholds, or an authored
-# `Dirichlet` simplex — keeps its declaration name on both backends, like a
-# scalar, and pairs element by element with the same-named SB draw carrier.
-# A declaration with no such carrier stays unpaired, so the validator names it.
+# A vector parameter — a response's cutpoints or thresholds, an authored
+# `Dirichlet` simplex, or a declared `x[1:n] .~ law` vector — keeps its
+# declaration name on both backends, like a scalar, and pairs element by
+# element with the same-named SB draw carrier. A declaration with no such
+# carrier stays unpaired, so the validator names it.
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:vector}, record, rk, d, stan, stan_pos)
     declaration = record.declaration
@@ -1071,6 +1205,11 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         "brm_coordinate_transport: vector `$declaration` matches $(length(idxs)) " *
         "SB draw carriers; expected one")
     output = d.outputs[only(idxs)]
+    haskey(_BRM_TRANSPORT_VECTOR_FAMILIES, record.family) ||
+        _brm_transport_error(:unsupported_coverage,
+            "brm_coordinate_transport: RK `$(record.family)` vector `$declaration` " *
+            "is not paired yet; covered are " *
+            join(("`$f`" for f in sort!(collect(keys(_BRM_TRANSPORT_VECTOR_FAMILIES)))), ", "))
     stan_type, transform = _BRM_TRANSPORT_VECTOR_FAMILIES[record.family]
     address = (; kind=:vector, declaration)
     string(output.type) == stan_type || _brm_transport_error(:parameterization_mismatch,
@@ -1083,6 +1222,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         scoped = _brm_transport_scoped(rk_name)
         !isnothing(scoped) && first(scoped) === declaration &&
             length(last(scoped)) == 1 || continue
+        isnothing(transform) && (transform = rk_transform)
         rk_transform === transform || error(
             "brm_coordinate_transport: internal: RK `$(record.family)` vector " *
             "`$declaration` has layout transform `$rk_transform`")

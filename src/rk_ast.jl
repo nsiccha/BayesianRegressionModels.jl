@@ -1774,8 +1774,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             # An HSGP component owns its hyperparameters and basis weights
             # under its id. A grouped or hyper-predicted term (`grouped`) also
             # names its `by` column, levels and sampled block locals, which
-            # the NLME view reads; `level_correlation` marks a `cor=` that
-            # couples its levels. The Stan transport pairs ungrouped terms.
+            # the NLME view and the Stan transport read; `level_correlation`
+            # marks a `cor=` that couples its levels.
             _rk_coordinate_record!(coordinates, (; kind=:hsgp,
                 declaration=term.options.id, predictor=predictor.name,
                 axes=Tuple(term.columns),
