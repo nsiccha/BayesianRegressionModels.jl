@@ -384,7 +384,10 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                 column = _rk_kernel_scan_response(name, value, observed)
                 columns[column] = _rk_gather_rows(parent(parent(value)), partition.rows)
                 push!(inputs, (; source=column, kind=:element, rows=nothing, column))
-                push!(scan_observed, (; param=params[i], source=column))
+                # Its series' rows on the `group` axis attribute each cell's
+                # density to the subject owning them (`brm_nlme_view`).
+                push!(scan_observed, (; param=params[i], source=column,
+                    rows=partition.rows, group=_rk_kernel_column_name(group)))
                 continue
             end
             rows = Symbol(name, :_rows_, i)
@@ -401,6 +404,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                 columns[source] = parent(parent(value))
             end
             push!(inputs, (; source, kind=:gather, rows, column=nothing,
+                group=_rk_kernel_column_name(group),
                 partition=_rk_kernel_partition_source!(columns, value, group,
                     cell_column, order, partition.is_lp, column in observed)))
         elseif argument isa NamedColumn && parent(argument) isa DataColumn

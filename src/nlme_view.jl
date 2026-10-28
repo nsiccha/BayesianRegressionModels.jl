@@ -634,10 +634,14 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
     end
     unclaimed = names[role .=== :unclaimed]
     isempty(unclaimed) || _brm_nlme_error(
-        "brm_nlme_view: $(length(unclaimed)) coordinate(s) are not covered by the " *
-        "semantic inventory: $(join(string.(unclaimed), ", ")). Random effects " *
-        "must use a plain `(... | group)` grouping or a stratified " *
-        "`gr(group, by=stratum)`, not `mm(...)`.")
+        "brm_nlme_view: $(length(unclaimed)) coordinate(s) of " *
+        join(("`$root`" for root in unique(_rk_record_root.(unclaimed))), ", ") *
+        " are not covered by the semantic inventory: " *
+        "$(join(string.(unclaimed), ", ")). The view reads population " *
+        "coefficients, scalars and vectors, random-effect blocks on a plain " *
+        "`(... | group)` or stratified `gr(group, by=stratum)` grouping, HSGP " *
+        "terms, missing-value completions and submodels; other terms, such as " *
+        "`mm(...)` blocks, file no coordinate record.")
     labels = map(_brm_transport_level, backend.plan.columns[group])
     rows = [findall(x -> isequal(x, _brm_transport_level(level)), labels) for level in levels]
     # Subjects of a stratified block, or with completion draws, hold different
@@ -700,14 +704,15 @@ _brm_nlme_gaussian_plan(plan::_RKHeldOutPlan) =
 _brm_nlme_gaussian_plan(plan::_RKStructuralPlan) =
     !isempty(plan.responses) && all(o -> o.family === :gaussian && o.weights === nothing &&
         o.interval === nothing && o.mi_jobs === nothing, plan.responses)
-function _brm_nlme_gaussian_plan(plan::_RKValuePlan)
-    !isempty(plan.observations) && all(o -> begin
-        o.distribution.callable in (Normal, StanBlocks.normal) &&
-            o.modifier === nothing && o.weight === nothing &&
-            o.missing_response === nothing
-    end, plan.observations)
-end
+_brm_nlme_gaussian_plan(plan::_RKValuePlan) =
+    !isempty(plan.observations) && all(_brm_nlme_gaussian_observation, plan.observations)
 _brm_nlme_gaussian_plan(plan) = false
+_brm_nlme_gaussian_observation(o) =
+    o.distribution.callable in (Normal, StanBlocks.normal) &&
+        o.modifier === nothing && o.weight === nothing && o.missing_response === nothing
+# A `@scan` observes its series jointly (`AR1Normal`'s AR(1) residuals), not
+# as independent Normal entries.
+_brm_nlme_gaussian_observation(::_RKScanObservation) = false
 
 function _brm_nlme_observed(backend::RKBRMI, attribution, nsubjects)
     observed = [Float64[] for _ in 1:nsubjects]
@@ -844,17 +849,23 @@ function _brm_nlme_completion_rows(plan::_RKValuePlan, name, nrows)
 end
 
 # The grouping-axis rows each cell of a plate observation reads, through the
-# ragged joins (`groups(g => cells)`, `ragged(x, g => cells)`) of the plate
-# that observes `name`: per cell, the union over the joins whose row labels lie
-# on the `nrows`-row grouping axis. `nothing` when no such join exists.
-_brm_nlme_cell_rows(_plan, _name, _nrows) = nothing
-function _brm_nlme_cell_rows(plan::_RKValuePlan, name, nrows)
+# ragged joins of the plate that observes `name` (`groups(g => cells)`,
+# `ragged(x, g => cells)`, and each group's rows in a `groups(g)` plate,
+# including the series a `@scan` observes in place): per cell, the union over
+# the joins whose group column is the subject grouping `group` or another
+# column on its `nrows`-row axis. `nothing` when no such join exists.
+_brm_nlme_cell_rows(_plan, _name, _group, _nrows) = nothing
+function _brm_nlme_cell_rows(plan::_RKValuePlan, name, group, nrows)
     for a in plan.assignments
         a isa _RKPreparedKernelAssignment || continue
-        any(o -> o.source === name, a.observations) || continue
-        joins = [a.columns[input.rows] for input in a.inputs
-            if input.kind === :gather && get(input, :partition, nothing) !== nothing &&
-                length(a.columns[input.partition.group]) == nrows]
+        scanned = [o for o in a.scan_observed if o.source === name]
+        any(o -> o.source === name, a.observations) || !isempty(scanned) || continue
+        on_axis(g) = g === group ||
+            length(get(a.columns, g, get(plan.columns, g, ()))) == nrows
+        joins = Any[a.columns[input.rows] for input in a.inputs
+            if input.kind === :gather && on_axis(input.group)]
+        append!(joins, (o.rows for o in scanned
+            if get(o, :group, nothing) !== nothing && on_axis(o.group)))
         isempty(joins) && return nothing
         ncells = length(first(joins))
         all(rows -> length(rows) == ncells, joins) || return nothing
@@ -886,7 +897,7 @@ function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, fields)
         # One density per cell of a ragged join over the grouping axis (a
         # district total over its rows): the subject owning every one of the
         # cell's rows.
-        cell_rows = _brm_nlme_cell_rows(backend.plan, name, L)
+        cell_rows = _brm_nlme_cell_rows(backend.plan, name, view.group, L)
         if cell_rows !== nothing && length(cell_rows) == m
             push!(attribution, name => map(enumerate(cell_rows)) do (k, rows)
                 owners = unique(row_subject[rows])
@@ -973,21 +984,35 @@ function _brm_nlme_subject_cells(backend::RKBRMI, view::BRMNLMEView, attribution
     plan = backend.plan
     isempty(attribution) && return nothing
     plan isa _RKValuePlan || return nothing
-    all(rows -> length(rows) == 1, view.rows) || return nothing
     plate_observations = Set(o.source for a in plan.assignments
-        if a isa _RKPreparedKernelAssignment for o in a.observations)
+        if a isa _RKPreparedKernelAssignment for o in (a.observations..., a.scan_observed...))
     union!(plate_observations,
         (o.name for o in plan.observations if o isa _RKNestedObservation))
     n = length(view.levels)
-    rows = [only(group_rows) for group_rows in view.rows]
+    L = sum(length, view.rows)
     plate = [entry for entry in attribution if first(entry) in plate_observations]
     isempty(plate) && return nothing
-    all(subjects -> length(subjects) == n && all(i -> subjects[rows[i]] == i, 1:n),
-        last.(plate)) || return nothing
-    groups = Any[(; names=Tuple(first.(plate)), positions=[[row] for row in rows])]
+    positions = if all(rows -> length(rows) == 1, view.rows)
+        # One grouping row per subject: the plate's cells are the subjects.
+        rows = [only(group_rows) for group_rows in view.rows]
+        all(subjects -> length(subjects) == n && all(i -> subjects[rows[i]] == i, 1:n),
+            last.(plate)) || return nothing
+        [[row] for row in rows]
+    else
+        # Several rows per subject (long-format data): every plate observation
+        # has one density per cell of a plate over the subjects' rows, such as
+        # `groups(g; order = t)`, and attributes its cells alike.
+        cells = last(first(plate))
+        all(plate) do (name, subjects)
+            cell_rows = _brm_nlme_cell_rows(plan, name, view.group, L)
+            subjects == cells && cell_rows !== nothing && length(cell_rows) == length(cells)
+        end || return nothing
+        [findall(==(i), cells) for i in 1:n]
+    end
+    groups = Any[(; names=Tuple(first.(plate)), positions)]
     for (name, subjects) in attribution
         name in plate_observations && continue
-        _brm_nlme_completion_rows(plan, name, n) === nothing && return nothing
+        _brm_nlme_completion_rows(plan, name, L) === nothing && return nothing
         push!(groups, (; names=(name,),
             positions=[findall(==(i), subjects) for i in 1:n]))
     end

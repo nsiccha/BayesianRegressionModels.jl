@@ -152,6 +152,96 @@ end
     end
 end
 
+# Daily rows of `G` probes, interleaved, with per-probe positions: a space-time
+# panel (snag brm-svi-fit-refu-be4efadf).
+function svi_spacetime_data(rng; G=6, T=12)
+    probe = String[]; day = Float64[]; c1 = Float64[]; trend = Float64[]
+    for d in 1:T, g in 1:G
+        push!(probe, "p$g"); push!(day, d); push!(c1, cos(2pi * d / 7)); push!(trend, d / T)
+    end
+    (; probe, day, c1, trend, y=3.0 .+ 0.5 .* c1 .+ 0.3 .* randn(rng, length(day)),
+       probe_x=[100.0 * cos(g) for g in 1:G], probe_y=[100.0 * sin(g) for g in 1:G])
+end
+
+# Per-probe random effects, a grouped HSGP over days and AR(1) noise in a
+# per-probe cell; `field` is the HSGP term and `extra` the declarations it reads.
+svi_spacetime_model(field, extra...) = BRM.brm(quote
+    $(extra...)
+    mu ~ 1 + c1 + (1 | lv | probe) + (0 + c1 | cc | probe) + $field
+    tr ~ 0 + trend + (0 + trend | tt | probe)
+    log(sigma) ~ 1 + (1 | ns | probe)
+    phi ~ Uniform(-1.0, 1.0)
+    @plate for p in groups(probe; order = day)
+        m = mu[p] .+ tr[p]
+        y[p] ~ AR1Normal(m, sigma[p], phi; time = day[p])
+    end
+end; mod=@__MODULE__)
+
+@stestset "a space-time panel with a grouped HSGP fits by minibatch SVI" begin
+    # Long-format rows with a plate over each probe's rows: one AR(1) series
+    # per probe is that probe's cell (snag brm-svi-fit-refu-be4efadf; before,
+    # its density could not be attributed and no subject cell existed).
+    rng = Xoshiro(8)
+    data = svi_spacetime_data(rng)
+    omega = :(Omega ~ LKJCholesky(6, 2.0))
+    variants = [
+        "multigroup coordinates" => svi_spacetime_model(
+            :(hsgp(day; k=4, by=probe, cor=multigroup((probe_x, probe_y); k=3)))),
+        "per level" => svi_spacetime_model(:(hsgp(day; k=4, by=probe))),
+        "cor = Omega" => svi_spacetime_model(:(hsgp(day; k=4, by=probe, cor=Omega)), omega),
+        "multigroup(Omega, tau)" => svi_spacetime_model(
+            :(hsgp(day; k=4, by=probe, cor=multigroup(Omega, 1.0))), omega),
+    ]
+    for (tag, builder) in variants
+        @testset "$tag" begin
+            rk = RKBRMI(builder(data))
+            m = brm_nlme_model(rk; ad_backend=NLME_AD)
+            names = String.(m.view.coordinates)
+            field = findall(n -> startswith(n, "hsgp_day."), names)
+            @test !isempty(field)
+            # A `cor=` couples the levels, so the whole term is shared; without
+            # one each probe's weights are its own unit draws (BRM 0.2.11).
+            shared = filter(i -> m.view.role[i] === :shared_latent, field)
+            @test all(r -> r in (:shared_latent, :subject_effect), m.view.role[field])
+            @test (length(shared) == length(field)) == (tag != "per level")
+            @test all(==(:shared_latent),
+                m.view.role[findall(n -> startswith(n, "Omega."), names)])
+            @test shared ⊆ m.theta
+            @test length(m.view.levels) == 6
+            t = BRM._brm_svi_target(m)
+            full = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+            u = m.unit .+ 0.3 .* randn(rng, length(m.unit))
+            g = u[t.globals]
+            @test shared ⊆ t.globals
+            P, gP = BRM._brm_svi_global_term(t, g)
+            gg, gz = zeros(length(g)), zeros(t.d)
+            terms = map(eachindex(t.units)) do i
+                value = BRM._brm_svi_unit_term!(gg, gz, t, i, g, u[t.units[i]])
+                (; value, gg=copy(gg), gz=copy(gz))
+            end
+            value, gradient = LogDensityProblems.logdensity_and_gradient(full, u)
+            @test P + sum(x -> x.value, terms) ≈ value rtol = 1e-12
+            @test gP .+ sum(x -> x.gg, terms) ≈ gradient[t.globals] rtol = 1e-10
+            for (i, block) in enumerate(t.units)
+                @test terms[i].gz ≈ gradient[block] rtol = 1e-10
+            end
+            # Each probe's cell is its share of the lockstep likelihoods: one
+            # AR(1) series per probe, attributed to the probe owning its rows.
+            @test [only(c) for c in only(m.cell_query).positions] == 1:6
+            θ, σ = u[m.theta], u[m.sigma]
+            H = reduce(hcat, [u[b] for b in m.view.subject_coordinates])
+            @test [brm_nlme_loglikelihood(m, i, θ, σ, H[:, i]) for i in axes(H, 2)] ≈
+                brm_nlme_loglikelihoods(m, θ, σ, H) rtol = 1e-12
+        end
+    end
+    rk = RKBRMI(last(first(variants))(data))
+    result = brm_svi_fit(rk; rng=Xoshiro(9), batch_size=2, ndraws=10,
+        max_iterations=200, min_windows=1)
+    @test result.coordinates == brm_nlme_view(rk).coordinates
+    @test size(result.draws, 2) == 10
+    @test all(isfinite, result.draws)
+end
+
 @stestset "starts: prior medians, a packed point, or address-keyed inits" begin
     rk = RKBRMI(svi_pois_model(svi_pois_data(Xoshiro(6), 12)))
     m = brm_nlme_model(rk; ad_backend=NLME_AD)
