@@ -288,31 +288,18 @@ points(n) = (zeros(n), collect(range(-0.43, 0.51; length=n)), [0.37sin(i) for i 
             rk = RKBRMI(m)
             sb = SBBRMI(m; mod=@__MODULE__)
             stan = compiled(sb, tag)
-            rk_names = String.(coordinate_names(rk.model.layout))
-            stan_names = BS.param_unc_names(stan.model)
-            M = size(sb.data[:PHI_hsgp_t_by_g], 2)
-            function stan_name(n)
-                (startswith(n, "Omega.") || n == "tau") && return n
-                n == "hsgp_t.rho" && return "hsgp_t_by_g_rho_iso"
-                n == "hsgp_t.sigma" && return "hsgp_t_by_g_sigma"
-                n == "mu_Intercept" && return "pop_mu_beta_pop.1"
-                x = match(r"^hsgp_t\.z\.(\d+)\.(\d+)$", n)
-                x === nothing || return "zflat_hsgpw_t_g.$((parse(Int, x[1]) - 1) * M + parse(Int, x[2]))"
-                x = match(r"^pop_mu\.beta_pop\.(\d+)$", n)
-                x === nothing || return "pop_mu_beta_pop.$(x[1])"
-                error("unmapped RK coordinate $n")
-            end
-            perm = [only(findall(==(stan_name(n)), stan_names)) for n in rk_names]
-            @test sort(perm) == collect(eachindex(stan_names))
+            transport = brm_coordinate_transport(rk, sb, BS.param_unc_names(stan.model))
+            @test length(transport) == length(coordinate_names(rk.model.layout))
             problem = rk_problem(rk)
-            for u in points(length(rk_names))
-                stan_u = zeros(length(u)); stan_u[perm] .= u
+            for u in points(length(transport))
+                stan_u = brm_rk_point_to_stan(transport, u)
                 value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
                 g = similar(stan_u)
                 stan_value, _ = BS.log_density_gradient!(stan.model, stan_u, g;
                                                         propto=false, jacobian=true)
-                @test value ≈ stan_value atol=1e-10 rtol=1e-12
-                @test gradient ≈ g[perm] atol=1e-10 rtol=1e-10
+                @test value ≈ brm_stan_logdensity_to_rk(transport, u, stan_value) atol=1e-10 rtol=1e-12
+                @test gradient ≈ brm_stan_gradient_to_rk(transport, u, g) atol=1e-10 rtol=1e-10
+                @test brm_check_coordinate_transport(transport, rk, stan.model, u).max_error <= 1e-12
             end
         end
     else

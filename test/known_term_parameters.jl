@@ -450,7 +450,7 @@ end
 
 KNOWN_RUNTIME && @stestset "RKBRMI: the same law as SBBRMI" begin
     for (name, known, _, _) in DENSITY_CASES
-        name in ("field", "both", "aniso", "periodic") || continue
+        name in ("field", "both", "aniso", "grouped", "periodic") || continue
         brmi = known(DF)
         rk, problem = consumer_problem(brmi)
         sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())

@@ -125,12 +125,23 @@ Set `BRM_HSGP_PROJECTION_RUNTIME=0` to skip the compiled parity sets.
 - refusals of wrong shapes;
 - the SB density against a hand-written raw-Stan intrinsic-coregionalisation
   program;
-- RK density and gradient equal to SB, through `brm_coordinate_transport` and
-  an explicit map for the grouped HSGP;
+- RK density and gradient equal to SB, through `brm_coordinate_transport`,
+  the grouped HSGP included;
 - `brm_ranef_draws`' `level_cor`, and replay.
 
 Combinations not implemented yet are `@test_broken`. Set
 `BRM_LEVEL_CORRELATION_RUNTIME=0` to skip the compiled-model sets.
+
+`grouped_hsgp_transport_readers.jl` checks that an RKBRMI fit of a grouped
+multigroup HSGP, `hsgp(day; by = site, cor = multigroup((site_x, site_y); k))`,
+is read by the multigroup readers through `brm_coordinate_transport`: a daily
+panel with `|ID|` random effects, a per-site residual SD and AR(1) residuals in
+a `groups(site; order = day)` plate. The transport pairs every coordinate
+(RK density, gradient and physical values equal to BridgeStan's), and
+`brm_svi_fit` draws mapped to Stan's constrained names give
+`brm_multigroup_coherence` ranges and `brm_multigroup_field` values equal to
+RK's own length scale, spatial scale and term value. Snag
+`read-brm-svi-fit-bb7a9be0`.
 
 `level_correlation_hyper.jl` checks per-level amplitudes and length scales
 (the hyper-predictors `log(sd(hsgp(x))) ~ 1 + (1 | g)` and
