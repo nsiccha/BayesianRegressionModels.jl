@@ -27,6 +27,12 @@ instead of failing at run time.
   Omega`, `multigroup(Omega, tau)` and declared `lambda` or inducing positions
   pair as their own declarations. `brm_nlme_joint_map` and the Stan subject-draw
   targets still refuse such a model. Snag `read-brm-svi-fit-bb7a9be0`.
+- `brm_coordinate_transport` pairs a declared vector, `x[1:n] .~ law` (for
+  example the free inducing positions of `multigroup((x, y), lambda; method =
+  :inducing, inducing = (px, py))`), element by element, each element under its
+  scalar law as an authored scalar pairs. A vector family the transport does
+  not pair is refused as `:unsupported_coverage` instead of failing with a
+  `KeyError`.
 
 ## 0.2.22
 

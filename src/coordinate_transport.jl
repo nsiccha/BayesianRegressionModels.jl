@@ -1180,15 +1180,20 @@ end
 # shared emitter declares. Within a family both backends use the same
 # transform (an ordered vector's first element, then log increments), so
 # its free coordinates are equal; a simplex moves as a `:simplex` block.
+# A declared vector (`x[1:n] .~ law`) samples each element under its scalar
+# law, with the transform an authored scalar of that law has on both
+# backends; `nothing` asks only that every element shares it.
 const _BRM_TRANSPORT_VECTOR_FAMILIES = Dict(
     :ordered_normal => ("ordered", :ordered),
     :vector_normal => ("vector", :identity),
+    :elementwise => ("vector", nothing),
     :simplex_dirichlet => ("simplex", :simplex))
 
-# A vector parameter — a response's cutpoints or thresholds, or an authored
-# `Dirichlet` simplex — keeps its declaration name on both backends, like a
-# scalar, and pairs element by element with the same-named SB draw carrier.
-# A declaration with no such carrier stays unpaired, so the validator names it.
+# A vector parameter — a response's cutpoints or thresholds, an authored
+# `Dirichlet` simplex, or a declared `x[1:n] .~ law` vector — keeps its
+# declaration name on both backends, like a scalar, and pairs element by
+# element with the same-named SB draw carrier. A declaration with no such
+# carrier stays unpaired, so the validator names it.
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:vector}, record, rk, d, stan, stan_pos)
     declaration = record.declaration
@@ -1200,6 +1205,11 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         "brm_coordinate_transport: vector `$declaration` matches $(length(idxs)) " *
         "SB draw carriers; expected one")
     output = d.outputs[only(idxs)]
+    haskey(_BRM_TRANSPORT_VECTOR_FAMILIES, record.family) ||
+        _brm_transport_error(:unsupported_coverage,
+            "brm_coordinate_transport: RK `$(record.family)` vector `$declaration` " *
+            "is not paired yet; covered are " *
+            join(("`$f`" for f in sort!(collect(keys(_BRM_TRANSPORT_VECTOR_FAMILIES)))), ", "))
     stan_type, transform = _BRM_TRANSPORT_VECTOR_FAMILIES[record.family]
     address = (; kind=:vector, declaration)
     string(output.type) == stan_type || _brm_transport_error(:parameterization_mismatch,
@@ -1212,6 +1222,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         scoped = _brm_transport_scoped(rk_name)
         !isnothing(scoped) && first(scoped) === declaration &&
             length(last(scoped)) == 1 || continue
+        isnothing(transform) && (transform = rk_transform)
         rk_transform === transform || error(
             "brm_coordinate_transport: internal: RK `$(record.family)` vector " *
             "`$declaration` has layout transform `$rk_transform`")
