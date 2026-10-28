@@ -7,13 +7,15 @@ using Pathfinder
 const BRM = BayesianRegressionModels
 
 # The problem supplies its own gradient, so Optimization must not synthesize
-# another one (`NoAD`), as WarmupHMC's initializer does; one try, so a failed
-# run raises instead of restarting from a random point.
+# another one (`NoAD`), and the ELBO along the path takes one draw per iterate,
+# as WarmupHMC's initializer does: a Laplace evaluation can cost many model
+# gradients. One try, so a failed run raises instead of restarting from a
+# random point.
 function BRM._brm_pathfinder_draws(
         p::Union{BRM.BRMLaplaceProblem,BRM.BRMStructuredLaplaceProblem},
         φ0::AbstractVector; ndraws, rng)
     result = Pathfinder.pathfinder(p; init=collect(Float64, φ0), rng, ndraws,
-        ntries=1, adtype=Pathfinder.SciMLBase.NoAD())
+        ndraws_elbo=1, ntries=1, adtype=Pathfinder.SciMLBase.NoAD())
     # Pathfinder warns and returns draws from its starting Gaussian when its
     # run fails (no L-BFGS step taken, or no fit with a finite ELBO).
     steps = length(result.optim_trace) - 1
