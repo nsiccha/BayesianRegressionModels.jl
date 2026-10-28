@@ -12,6 +12,24 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.43
+
+- `brm_start(rk)` and `brm_start(sb, stan_model)`, with no initial values,
+  compute a start from the data. Pathfinder runs over the population
+  coordinates with every unit's random effects integrated out by a Laplace
+  approximation (`brm_laplace_problem`), from their prior medians; the start
+  is a draw from its Gaussian fit, with each unit's effects drawn from its own
+  Laplace Gaussian (`brm_laplace_draws`). Each group starts near its own
+  value and each block's SD near the groups' spread, with no values written
+  by hand. `chains = n` returns `n` independent starts for a sampler's
+  per-chain `init`. Initial values go on top of a start through `base`:
+  `brm_start(sb, model, inits; base = brm_start(sb, model))`. `brm_start(x,
+  inits)` without `base` keeps its zero base. Needs Pathfinder loaded (a new
+  weak dependency; WarmupHMC loads it) and, for the default `ad_backend`,
+  Enzyme and DifferentiationInterface. Models `brm_nlme_view` does not
+  partition into units, and an SBBRMI with exact total-coefficient blocks,
+  are refused with the reason.
+
 ## 0.2.42
 
 - An omitted response whose law is discrete (`Poisson`, `Binomial`,
@@ -265,6 +283,7 @@ instead of failing at run time.
   positive definite in floating point too. An iteration evaluates each batch
   unit twice, so it costs about twice as much as before. Snag
   `brm-svi-fit-posd-0fcb769c`, todo `15id1zs`.
+
 
 ## 0.2.28
 
