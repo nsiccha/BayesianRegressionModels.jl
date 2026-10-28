@@ -2545,7 +2545,7 @@ function _adaptive_ranef_locations(model, blocks, unc_names)
     out = IdDict{Any,_AdaptiveRanefLocations}()
     isempty(blocks) && return out
     d = model isa BRMDescriptor ? model : brm_descriptor(model)
-    margins = Dict(m.block.binding => m.margins for m in _brmd_ranef_metadata(d))
+    margins = _adaptive_block_margins(d)
     rows = _adaptive_group_rows(d.plan, blocks)
     nested = _adaptive_nested_bindings(d.plan, blocks, margins)
     for block in blocks
@@ -2587,6 +2587,22 @@ function _adaptive_ranef_locations(model, blocks, unc_names)
             end
         end
         out[block] = _AdaptiveRanefLocations(locs, factors, containers)
+    end
+    out
+end
+
+# Margin labels by block binding, for the adaptive-centring readers. The sampled
+# active margins of a marginalized `|ID|` block (src/sb_marginal_ranef.jl) have
+# no metadata entry of their own: they are the bucket's margins at the active
+# positions its binding records (`margins`), so they are labelled, located and
+# reported like the ordinary block a model without the omitted response has.
+function _adaptive_block_margins(d)
+    out = Dict{Symbol,Any}(m.block.binding => m.margins for m in _brmd_ranef_metadata(d))
+    for (name, binding) in pairs(d.plan.bindings)
+        (hasproperty(binding, :marginal_of) && hasproperty(binding, :margins)) || continue
+        bucket = get(out, binding.marginal_of, nothing)
+        isnothing(bucket) && continue
+        out[name] = Tuple(bucket[i] for i in binding.margins)
     end
     out
 end

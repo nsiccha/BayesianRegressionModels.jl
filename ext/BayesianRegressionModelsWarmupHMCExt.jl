@@ -3290,8 +3290,7 @@ function _control_rows!(rows, ir::BRMTotalsBesideCenteringReparametrization, ord
 end
 
 _control_margins(model::Union{BRM.GenerativePlan,BRM.SBBRMI}) =
-    Dict(m.block.binding => m.margins
-         for m in BRM._brmd_ranef_metadata(BRM.brm_descriptor(model)))
+    BRM._adaptive_block_margins(BRM.brm_descriptor(model))
 _control_margins(_) = Dict{Symbol,Tuple}()
 
 function BRM.adaptive_centering_controls(adaptive::WarmupHMC.ReparametrizedProblem,

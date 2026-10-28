@@ -38,6 +38,11 @@ instead of failing at run time.
     and a per-cell `centeredness=` vector, in that order.
   - `adaptive_centering_controls` names every coordinate a cell's location
     reads in `location`, joined by ` + `.
+  - The sampled active margins of a shared `|ID|` block whose other response
+    is omitted (`<bucket>_active`) now carry their margin labels. They are
+    located like the ordinary block of a model without the omitted response,
+    and `adaptive_centering_controls` labels them. Before, they were always
+    centred on 0.
 
   Snag `brm-zone-8-adapt-1b407672`, decision `1wxltaq`; closes owner todo
   `137ptwv`.
