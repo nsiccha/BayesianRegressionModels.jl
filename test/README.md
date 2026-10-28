@@ -530,6 +530,23 @@ subjects. Its data and models live in `nlme_grouped_hsgp_fixture.jl`.
 family in `NLMEEstimation.fixed_omega`, `check_protocol` on flat and ragged
 layouts, the population prior's ω gradient beside the fixed family, and short
 SAEM, FOCE(I) and empirical-Bayes fits read back by name. Run it in the
+NLMEEstimation scratch environment described below. The lockstep and
+unit-problem checks live in `nlme_unit_checks.jl`, shared with `rk_cdar.jl`.
+
+`rk_cdar.jl` (test environment) checks `cdar(step; by=g, cor=C)` on RKBRMI:
+RK density and gradient equal SBBRMI's at transported coordinates for
+`cor = I`, a correlated `cor`, stated and known priors and a walk grouped by
+the units, the RK walk equals an independent stationary recurrence, and the
+printed source replays. Its NLME half reads districts nested in region units
+(`nested_groups=(kreis=:region,)`): each district's innovations are a fixed
+identity family in its region's block, `sigma` and `rho` stay shared, a `cor=`
+within the units keeps that reading and one across the units keeps the walk
+shared, lockstep and unit-problem densities match the full RK density, and
+`brm_laplace_problem` and `brm_svi_fit` take the model. A frozen RK replay is
+`@test_broken`. Its data and models live in `rk_cdar_fixture.jl`.
+`rk_cdar_fit.jl` runs NLMEEstimation on the nested model: the innovation
+family in `NLMEEstimation.fixed_omega`, `check_protocol` on the ragged layout,
+and short SAEM and empirical-Bayes fits read back by name. Run it in the
 NLMEEstimation scratch environment described below.
 
 `nlme_crossed.jl` (test environment) reads a random-effect block over a

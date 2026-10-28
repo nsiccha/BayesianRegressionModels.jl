@@ -1740,7 +1740,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     declaration=term.options.value, predictor=predictor.name,
                     step=term.options.source, group=term.options.group,
                     levels=term.options.levels, steps=term.options.steps,
-                    L=term.options.L, locals))
+                    cor_factor=term.options.L, locals))
             elseif kind === :ranef_gather
                 refactual[index] = ranef_effects[(predictor.name,
                     term.options.bucket_group, term.options.bucket_id)]

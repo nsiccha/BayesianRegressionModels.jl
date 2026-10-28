@@ -23,9 +23,10 @@ instead of failing at run time.
 - `brm_nlme_view` reads a `cdar` walk whose groups are the units, or nest in
   them, as unit draws: each group's innovations are one block of its
   subject, in a family fixed at the identity, and `sigma` and `rho` are
-  shared latents. `brm_nlme_model`, `brm_laplace_problem` and `brm_svi_fit`
-  take such models. A `cor=` that couples groups of different units keeps the
-  walk shared as a whole.
+  shared latents. `brm_nlme_model`, `brm_laplace_problem`, `brm_svi_fit` and
+  `brm_nlme_fit` (SAEM, empirical Bayes) take such models, and
+  `brm_nlme_estimates` reads the walk's values by its term name. A `cor=` that
+  couples groups of different units keeps the walk shared as a whole.
 - `nested_groups` may also name the `by` grouping of a `cdar(...)` or grouped
   `hsgp(...)` term that no random effect uses, and `shared_groups` may name a
   `cdar` walk's `by` grouping, which keeps the walk shared.
