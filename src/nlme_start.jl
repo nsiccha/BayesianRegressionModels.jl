@@ -127,7 +127,8 @@ function brm_nlme_start(m::BRMNLMEModel, map::BRMNLMEJointMap, stan_u::AbstractV
         a.subject_coordinates == b.subject_coordinates &&
         a.block_margins == b.block_margins && a.family_sizes == b.family_sizes &&
         a.subject_families == b.subject_families &&
-        a.nested_groups == b.nested_groups || _brm_nlme_error(
+        a.nested_groups == b.nested_groups && a.shared_groups == b.shared_groups ||
+        _brm_nlme_error(
         "brm_nlme_start: the joint map's NLME partition differs from the model's")
     length(stan_u) == length(map.transport.stan_names) || throw(DimensionMismatch(
         "brm_nlme_start: $(length(stan_u)) Stan coordinates for " *

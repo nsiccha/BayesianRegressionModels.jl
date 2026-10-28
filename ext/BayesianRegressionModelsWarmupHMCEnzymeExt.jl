@@ -36,11 +36,15 @@ function LogDensityProblems.logdensity_and_gradient(
     },
     x::AbstractVector,
 ) where {P,B}
+    state = first(problem.reparametrizer.pairs).second.args[1].state
+    # A location that reads factor levels or containing cells (snag
+    # brm-zone-8-adapt-1b407672) is outside this hand-written pass.
+    state.extended && return invoke(LogDensityProblems.logdensity_and_gradient,
+        Tuple{WarmupHMC.ReparametrizedProblem,AbstractVector}, problem, x)
     ljac, y = problem.reparametrizer(x)
     ld, model_gradient =
         LogDensityProblems.logdensity_and_gradient(problem.problem, y)
     gradient = zeros(eltype(model_gradient), length(model_gradient))
-    state = first(problem.reparametrizer.pairs).second.args[1].state
     T = eltype(x)
     # Pair construction is block-major, then group-major, then term-major.
     # Reverse that exact order, cache only values that the frozen forward graph

@@ -237,6 +237,37 @@ brm_covariate_missing_rows(values) = begin
     return rows
 end
     ),
+    # The missing entries of `mi(x)::shares(total, rows)` (cell_total_coordinates.jl).
+    brm_covariate_total_rows = :(
+brm_covariate_total_rows(values, group, cells, totals) = begin
+    rows = BayesianRegressionModels._brm_totals_layout(values, group, cells, totals).ordered
+    return rows
+end
+    ),
+    brm_covariate_total_free_rows = :(
+brm_covariate_total_free_rows(values, group, cells, totals) = begin
+    rows = BayesianRegressionModels._brm_totals_layout(values, group, cells, totals).free
+    return rows
+end
+    ),
+    brm_covariate_total_grouped_rows = :(
+brm_covariate_total_grouped_rows(values, group, cells, totals) = begin
+    rows = BayesianRegressionModels._brm_totals_layout(values, group, cells, totals).grouped
+    return rows
+end
+    ),
+    brm_covariate_total_ends = :(
+brm_covariate_total_ends(values, group, cells, totals) = begin
+    ends = BayesianRegressionModels._brm_totals_layout(values, group, cells, totals).ends
+    return ends
+end
+    ),
+    brm_covariate_total_residuals = :(
+brm_covariate_total_residuals(values, group, cells, totals) = begin
+    residuals = BayesianRegressionModels._brm_totals_layout(values, group, cells, totals).residuals
+    return residuals
+end
+    ),
     brm_structured_inputs = :(
 function brm_structured_inputs(prepared_inputs, indices)
     prepared = only(prepared_inputs)

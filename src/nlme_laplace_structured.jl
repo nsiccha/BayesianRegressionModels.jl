@@ -279,8 +279,11 @@ function _brm_structured_laplace_problem(backend::RKBRMI, view::BRMNLMEView; ad_
     all(b -> length(b) == d, blocks) || _brm_nlme_error(
         "brm_laplace_problem: units have effect blocks of different sizes")
     omega = findall(r -> r === :subject_scale || r === :subject_correlation, view.role)
-    records = [r for r in _rk_coordinate_records(backend.plan) if r.kind === :ranef]
-    effects = Tuple(Symbol(chopsuffix(String(r.z), ".z")) for r in records)
+    # The units' blocks only: a block over a grouping in `shared_groups` is
+    # population coordinates.
+    records = [r for r in _rk_coordinate_records(backend.plan)
+        if r.kind === :ranef && r.group ∉ view.shared_groups]
+    effects = Tuple(_brm_nlme_ranef_declaration(r) for r in records)
     # A linked predictor's slots read its linear predictor, by the name the
     # responses read it under; its authored name is the response-scale value.
     linked = _rk_link_scale_names(backend.plan, _brm_slap_predictors(backend.plan))

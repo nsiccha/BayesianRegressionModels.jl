@@ -328,6 +328,9 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
         elseif term.kind === :car
             # Each row's area effect, returned by the term's areal block.
             push!(summands, refref[index])
+        elseif term.kind === :cdar
+            # Each row's walk deviation, returned by the term's walk block.
+            push!(summands, refref[index])
         elseif term.kind === :offset
             push!(summands, colref[index])
         elseif term.kind === :structured
@@ -1397,6 +1400,62 @@ function _rk_ast_car_names(plan::_RKStructuralPlan)
         for term in predictor.terms if term.kind === :car)
 end
 
+# A grouped stationary AR(1) walk, as StanBlocks' `_sb_cdar`: the marginal SD
+# `sigma`, the persistence `rho` and standardized innovations `eta` (groups ×
+# steps). SB's recurrence `delta[:, 1] = sigma L eta[:, 1]`,
+# `delta[:, w] = rho delta[:, w-1] + sigma sqrt(1 - rho^2) L eta[:, w]` is
+# written in closed form, `delta = sigma (L eta) T` with
+# `T[v, w] = c_v rho^(w - v)` for `v <= w` (`c_1 = 1`, else `sqrt(1 - rho^2)`),
+# so the whole walk is one matrix product. Each row reads its own group and
+# step (their positions `group_rows`, `step_rows` in the fitted grid) at its
+# column-major cell.
+function _rk_ast_cdar_block!(definitions, taken, term, group_rows, step_rows)
+    options = term.options
+    sigma_prior = _rk_ast_param_law(options.sigma_param)
+    rho_prior = _rk_ast_param_law(options.rho_param)
+    block = _rk_block_body(sigma_prior, rho_prior)
+    group_position = _rk_block_argument!(block, :group, group_rows)
+    step_position = _rk_block_argument!(block, :step, step_rows)
+    lag_values = _rk_block_argument!(block, :lag_values, options.lag)
+    mask_values = _rk_block_argument!(block, :mask_values, options.mask)
+    first_step = _rk_block_argument!(block, :first_step, options.first)
+    factor_values = options.factor === nothing ? nothing :
+        _rk_block_argument!(block, :factor_values, options.factor)
+    P = _rk_block_argument!(block, :P, options.n_groups)
+    W = _rk_block_argument!(block, :W, options.n_steps)
+    sigma, rho = _rk_block_local!(block, :sigma), _rk_block_local!(block, :rho)
+    eta, lag, mask = _rk_block_local!(block, :eta), _rk_block_local!(block, :lag),
+        _rk_block_local!(block, :mask)
+    scale, decay = _rk_block_local!(block, :scale), _rk_block_local!(block, :decay)
+    walk, cell = _rk_block_local!(block, :walk), _rk_block_local!(block, :cell)
+    push!(block.statements, _rk_ast_hyper_statement(sigma, sigma_prior),
+        _rk_ast_hyper_statement(rho, rho_prior),
+        Expr(:call, :.~, Expr(:ref, eta, Expr(:call, :(:), 1, P), Expr(:call, :(:), 1, W)),
+            _rk_ast_dotted(:Normal, 0, 1)),
+        Expr(:(=), lag, Expr(:call, :reshape, lag_values, W, W)),
+        Expr(:(=), mask, Expr(:call, :reshape, mask_values, W, W)),
+        Expr(:(=), scale, Expr(:call, :sqrt, Expr(:call, :-, 1.0, Expr(:call, :^, rho, 2)))),
+        Expr(:(=), decay, Expr(:call, :.*, mask, Expr(:call, :.^, rho, lag),
+            Expr(:call, :.+, scale, Expr(:call, :.*, Expr(:call, :-, 1.0, scale), first_step)))))
+    innovations = eta
+    if factor_values !== nothing
+        L = _rk_block_local!(block, :L)
+        push!(block.statements, Expr(:(=), L, Expr(:call, :reshape, factor_values, P, P)))
+        innovations = Expr(:call, :*, L, eta)
+    end
+    push!(block.statements, Expr(:(=), walk,
+            Expr(:call, :.*, sigma, Expr(:call, :*, innovations, decay))),
+        Expr(:(=), cell, Expr(:call, :.+, Expr(:call, :.*,
+            Expr(:call, :.-, step_position, 1), P), group_position)))
+    call = _rk_ast_block_call!(definitions, taken, "brm_cdar", block, Expr(:ref, walk, cell))
+    call, (; sigma, rho, eta)
+end
+
+function _rk_ast_cdar_names(plan::_RKStructuralPlan)
+    Set{Symbol}(term.options.value for predictor in plan.predictors
+        for term in predictor.terms if term.kind === :cdar)
+end
+
 function _rk_ast_dar_names(plan::_RKStructuralPlan)
     names = Set{Symbol}()
     for predictor in plan.predictors, term in predictor.terms
@@ -1453,6 +1512,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         _rk_ast_gp_names(plan),
         _rk_ast_dar_names(plan),
         _rk_ast_car_names(plan),
+        _rk_ast_cdar_names(plan),
         _rk_ast_ar_names(plan),
         _rk_ast_me_names(plan))
     union!(taken, (t.options.id for p in plan.predictors for t in p.terms
@@ -1663,6 +1723,24 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 _rk_coordinate_record!(coordinates, (; kind=:car,
                     declaration=term.options.value, predictor=predictor.name,
                     area=term.options.source, type=term.options.type, locals))
+            elseif kind === :cdar
+                # rows find their group and step by the fitted labels
+                rows = map((term.options.group => term.options.levels,
+                        term.options.source => term.options.steps)) do (column, labels)
+                    positions = _rk_ast_fresh_name(string(term.label, "_", column), taken)
+                    push!(stmts, Expr(:(=), positions, _rk_ast_statistical_call!(defs,
+                        taken, :brm_prepared_indices, column, _rk_ast_level_values(labels);
+                        kernel=true)))
+                    positions
+                end
+                call, locals = _rk_ast_cdar_block!(defs, taken, term, rows...)
+                refactual[index] = term.options.value
+                push!(stmts, Expr(:call, :~, term.options.value, call))
+                _rk_coordinate_record!(coordinates, (; kind=:cdar,
+                    declaration=term.options.value, predictor=predictor.name,
+                    step=term.options.source, group=term.options.group,
+                    levels=term.options.levels, steps=term.options.steps,
+                    cor_factor=term.options.L, locals))
             elseif kind === :ranef_gather
                 refactual[index] = ranef_effects[(predictor.name,
                     term.options.bucket_group, term.options.bucket_id)]
@@ -1670,7 +1748,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             (kind === :offset || kind === :ranef_gather ||
                 kind === :spline || kind === :hsgp ||
                 kind === :structured ||
-                kind === :gp || kind === :dar || kind === :car ||
+                kind === :gp || kind === :dar || kind === :car || kind === :cdar ||
                 kind === :monotonic_summand) && continue
             hs_spec = get(hs_priors, (predictor.name, term.addressee),
                 nothing)

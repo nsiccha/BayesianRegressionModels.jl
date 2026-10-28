@@ -43,32 +43,27 @@
 # --no-sb skips the Stan leg (RK sections + numbers without sb_*).
 # --print-coords compiles the Stan model and prints RK layout names +
 # Stan unconstrained names for sb_map authoring, then exits 0 writing no
-# case outputs (Stan build files only). --no-token skips the worker's
-# own token gating for driver-wrapped invocation (the driver holds the
-# token across the worker run instead) — exactly one side gates, never
-# both (double hold) and never neither. The heavy Stan legs (SB numbers,
-# --print-coords) hold one of
-# the 3 fleet compute tokens (self-gated; the driver/shell must NOT hold
-# a token across worker invocation).
+# case outputs (Stan build files only).
+#
+# COMPUTE TOKEN: every run holds one fleet compute token for its whole
+# length (dev §11.3). Without --no-token the worker re-runs itself under
+# `kb-acquire-compute-token` (standard lane: the helper's queue, CPU cap,
+# thread pools and KB hold report), with a `--why` naming the case and
+# mode unless the caller set KB_COMPUTE_WHY. That check runs before the
+# heavy `using`s, so the parent process only waits on the helper.
+# --no-token means the caller already holds the token across the worker
+# run (the driver wraps it in the helper) — exactly one side gates, never
+# both (double hold) and never neither.
 #
 # Includable for unit tests: including this file defines the worker
 # functions without running (main() runs only as a script).
 
-using BayesianRegressionModels
-using DifferentiationInterface: AutoEnzyme
-using Enzyme
-using LogDensityProblems: LogDensityProblems
-using Pkg
-using ReactiveKernelsPPL: build_kernel, coordinate_names, prepare_query
-import ReactiveKernelsPPL # bind the module name for pathof (selective using does not)
 using TOML
-using UUIDs: UUID
 
-const BRM = BayesianRegressionModels
 const _BRM_ROOT = dirname(@__DIR__)
 const _LAYER1_BEGIN = "# APPEND-LAYER1-BEGIN"
 const _LAYER1_END = "# APPEND-LAYER1-END"
-const _TOKEN_DIR = "/tmp/rk-compute-tokens"
+const _TOKEN_HELPER = "kb-acquire-compute-token"
 
 # ------------------------------------------------------------------ argv/spec
 
@@ -154,6 +149,82 @@ end
 function _check_u_probes(u_raw, path)
     error("worker: spec `$path`: u_probes must be a list of float lists")
 end
+
+# ------------------------------------------------------------- compute token
+
+# The run's `--why` (rule v44): the case and what this mode produces.
+function _token_why(opts, case_id::AbstractString)
+    what = opts.print_coords ? "Stan coordinate names for sb_map authoring" :
+        opts.no_sb ? "RK sections and numbers" :
+        "RK sections and numbers with the SB reference"
+    return "BRM fusion-append worker, case $case_id: $what"
+end
+
+# Pure argv builder, factored for token-free tests: this script with the
+# same argv plus --no-token, under the helper. The helper reads a caller's
+# KB_COMPUTE_WHY when no --why is passed, so that reason wins.
+function _token_cmd(argv::Vector{String}, opts, case_id::AbstractString;
+        helper::AbstractString, env::AbstractDict=ENV)
+    why = isempty(get(env, "KB_COMPUTE_WHY", "")) ?
+        ["--why", _token_why(opts, case_id)] : String[]
+    # julia_cmd() keeps the image and flags but not the thread count.
+    threads = Threads.nthreads(:interactive) == 0 ?
+        "$(Threads.nthreads(:default))" :
+        "$(Threads.nthreads(:default)),$(Threads.nthreads(:interactive))"
+    julia = `$(Base.julia_cmd()) --threads=$threads`
+    project = Base.active_project()
+    project === nothing || (julia = `$julia --project=$project`)
+    return `$helper $why -- $julia $(@__FILE__) $argv --no-token`
+end
+
+# Script gate: nothing when this process runs the case itself (--no-token),
+# else the exit status of the re-run under the helper (128 + signal when a
+# signal ended it). The helper owns the queue and the token; never take a
+# token lock by hand (`dispatch-reference` §Fleet compute tokens).
+function _token_gate(argv::Vector{String};
+        helper::Union{Nothing,AbstractString}=Sys.which(_TOKEN_HELPER))
+    opts = _parse_argv(argv)
+    opts.no_token && return nothing
+    spec = _read_spec(opts.spec)
+    helper === nothing && error(
+        "worker: `$_TOKEN_HELPER` is not on PATH, so this run cannot take " *
+        "a fleet compute token; run it under the helper yourself and pass " *
+        "--no-token")
+    println(stderr, "worker: re-running under $_TOKEN_HELPER " *
+        "(pass --no-token when the caller already holds a token)")
+    proc = run(ignorestatus(_token_cmd(argv, opts, spec.id; helper)))
+    return proc.termsignal == 0 ? proc.exitcode : 128 + proc.termsignal
+end
+
+function _worker_error(e)
+    println(stderr, "worker: ERROR: $(sprint(showerror, e))")
+    Base.show_backtrace(stderr, catch_backtrace())
+    println(stderr)
+    return 1
+end
+
+# Script entry, part 1 — before the heavy `using`s below, so a parent that
+# only waits on the helper never loads BRM, RK or Enzyme.
+if abspath(PROGRAM_FILE) == @__FILE__
+    let rc = try
+            _token_gate(ARGS)
+        catch e
+            _worker_error(e)
+        end
+        rc === nothing || exit(rc)
+    end
+end
+
+using BayesianRegressionModels
+using DifferentiationInterface: AutoEnzyme
+using Enzyme
+using LogDensityProblems: LogDensityProblems
+using Pkg
+using ReactiveKernelsPPL: build_kernel, coordinate_names, prepare_query
+import ReactiveKernelsPPL # bind the module name for pathof (selective using does not)
+using UUIDs: UUID
+
+const BRM = BayesianRegressionModels
 
 # --------------------------------------------------------------------- probe
 
@@ -245,72 +316,6 @@ function _worker_pins()
     return pins
 end
 
-# Fleet compute token (mirrors `kb-acquire-compute-token` rule v7):
-# one fast non-blocking race over all tokens (a free token grants
-# immediately), else a BLOCKING flock on the queue lock — the kernel
-# grants blocked waiters FIFO, so the head scans all tokens and takes
-# the next freed one whichever it is. Linux-only. Returns the held
-# token fd; the caller closes it in a finally (close releases the
-# lock). Never sleep-polls and never parks on one token (the v3 poll
-# race and the v4 tok1-block both starved under load).
-function _acquire_compute_token()
-    Sys.islinux() || error(
-        "worker: compute-token gating is Linux-only (flock)")
-    for i in 1:3
-        fd = _try_token(i)
-        fd === nothing || begin
-            println(stderr, "worker: holding compute token $i")
-            return fd
-        end
-    end
-    qpath = joinpath(_TOKEN_DIR, "queue.lock")
-    isfile(qpath) || error("worker: queue lock `$qpath` missing")
-    println(stderr, "worker: all tokens held; joining the queue lock...")
-    qfd = ccall(:open, Cint, (Cstring, Cint), qpath, 0)
-    qfd < 0 && error("worker: cannot open queue lock `$qpath`")
-    if ccall(:flock, Cint, (Cint, Cint), qfd, 2) != 0
-        err = Libc.errno()
-        ccall(:close, Cint, (Cint,), qfd)
-        error("worker: blocking flock on `$qpath` failed, errno $err")
-    end
-    try
-        println(stderr, "worker: queue head; awaiting a free token...")
-        while true
-            for i in 1:3
-                fd = _try_token(i)
-                fd === nothing || begin
-                    println(stderr, "worker: holding compute token $i")
-                    return fd
-                end
-            end
-            sleep(1)
-        end
-    finally
-        ccall(:close, Cint, (Cint,), qfd)
-    end
-end
-
-# One non-blocking attempt on token `i`: the held fd, or nothing when a
-# peer holds it. Real flock errors fail closed (never mistaken for busy).
-function _try_token(i::Int)
-    path = joinpath(_TOKEN_DIR, "tok$i.lock")
-    isfile(path) || error("worker: compute token `$path` missing")
-    fd = ccall(:open, Cint, (Cstring, Cint), path, 0)
-    fd < 0 && error("worker: cannot open token `$path`")
-    if ccall(:flock, Cint, (Cint, Cint), fd, 2 | 4) == 0
-        return fd
-    end
-    err = Libc.errno()
-    ccall(:close, Cint, (Cint,), fd)
-    err == 11 || error("worker: flock on `$path` failed, errno $err")
-    return nothing
-end
-
-function _release_compute_token(fd::Cint)
-    ccall(:close, Cint, (Cint,), fd)
-    return nothing
-end
-
 # Twin reporter v2 seam: include the loaded ReactiveKernelsPPL's
 # report/transpile_report.jl and resolve transpile_report_v2. Fails
 # closed while the twin's piece is unlanded — the worker never
@@ -394,18 +399,18 @@ end
 # ---------------------------------------------------------------------- main
 
 function _run_case(spec_path::AbstractString, outdir::AbstractString;
-        no_sb::Bool, print_coords::Bool, no_token::Bool=false)
+        no_sb::Bool, print_coords::Bool)
     spec = _read_spec(spec_path)
     probe = _load_probe(spec.probe)
     # World age: the probe include() defined builder methods newer than this
     # running frame. Everything downstream (kernels, reporter, oracle) runs
     # at latest world so generated-model calls resolve.
     return Base.invokelatest(_run_case_loaded, spec, probe, outdir;
-        no_sb, print_coords, no_token)
+        no_sb, print_coords)
 end
 
 function _run_case_loaded(spec, probe, outdir::AbstractString;
-        no_sb::Bool, print_coords::Bool, no_token::Bool)
+        no_sb::Bool, print_coords::Bool)
     case_id = spec.id
     brmi = probe.builder(probe.data)
     brmi isa BRM.BRMI || error(
@@ -437,17 +442,12 @@ function _run_case_loaded(spec, probe, outdir::AbstractString;
     end
     mkpath(outdir)
     if print_coords
-        fd = no_token ? nothing : _acquire_compute_token()
-        try
-            prepared = Base.invokelatest(BRM.sb_prepare_model, brmi;
-                mod=Main, case_id, stan_path=joinpath(outdir, "coords.stan"))
-            println("rk_names = $(repr(rk_names))")
-            println("stan_names = $(repr(prepared.stan_names))")
-            println("dim = $dim")
-            return 0
-        finally
-            fd === nothing || _release_compute_token(fd)
-        end
+        prepared = Base.invokelatest(BRM.sb_prepare_model, brmi;
+            mod=Main, case_id, stan_path=joinpath(outdir, "coords.stan"))
+        println("rk_names = $(repr(rk_names))")
+        println("stan_names = $(repr(prepared.stan_names))")
+        println("dim = $dim")
+        return 0
     end
     BRM.write_rk_artifact(joinpath(outdir, "artifact.jls"), artifact)
     reporter_v2 = _resolve_reporter_v2()
@@ -461,13 +461,8 @@ function _run_case_loaded(spec, probe, outdir::AbstractString;
             sb_fd_maxdiff=nothing, oracle=nothing) for _ in u_probes],
             nothing)
     else
-        fd = no_token ? nothing : _acquire_compute_token()
-        try
-            sb_out = _run_sb(case_id, brmi, probe, rk_names, u_probes, outdir)
-            (sb_out.rows, sb_out.prepared)
-        finally
-            fd === nothing || _release_compute_token(fd)
-        end
+        sb_out = _run_sb(case_id, brmi, probe, rk_names, u_probes, outdir)
+        (sb_out.rows, sb_out.prepared)
     end
     # RK Enzyme gradients for the SB comparison come from BRM's own
     # LDP shim over the live backend (the reporter rows carry no
@@ -590,17 +585,15 @@ function _run_sb(case_id, brmi, probe, rk_names, u_probes, outdir)
     return (; rows=out, prepared)
 end
 
+# Script entry, part 2: runs the case in this process. As a script it is
+# reached only with --no-token (the gate above re-ran everything else).
 function main(argv::Vector{String}=ARGS)
     try
         opts = _parse_argv(argv)
         return _run_case(opts.spec, opts.out;
-            no_sb=opts.no_sb, print_coords=opts.print_coords,
-            no_token=opts.no_token)
+            no_sb=opts.no_sb, print_coords=opts.print_coords)
     catch e
-        println(stderr, "worker: ERROR: $(sprint(showerror, e))")
-        Base.show_backtrace(stderr, catch_backtrace())
-        println(stderr)
-        return 1
+        return _worker_error(e)
     end
 end
 

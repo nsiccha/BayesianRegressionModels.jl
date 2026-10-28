@@ -12,6 +12,184 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.38
+
+- `RKBRMI` lowers `cdar(step; by=group, cor=C)`, the per-group stationary
+  AR(1) walk, with SBBRMI's law: the marginal SD `sigma` and persistence `rho`
+  (their stated priors and known values included), standardized innovations
+  on the group × step grid, and the walk read at each row's group and step.
+  `brm_coordinate_transport` pairs its coordinates with SBBRMI's. A frozen
+  `reprocess` of an RK model with a `cdar` term (forecasts) is still refused.
+- `brm_nlme_view` reads a `cdar` walk whose groups are the units, or nest in
+  them, as unit draws: each group's innovations are one block of its
+  subject, in a family fixed at the identity, and `sigma` and `rho` are
+  shared latents. `brm_nlme_model`, `brm_laplace_problem`, `brm_svi_fit` and
+  `brm_nlme_fit` (SAEM, empirical Bayes) take such models, and
+  `brm_nlme_estimates` reads the walk's values by its term name. A `cor=` that
+  couples groups of different units keeps the walk shared as a whole.
+- `nested_groups` may also name the `by` grouping of a `cdar(...)` or grouped
+  `hsgp(...)` term that no random effect uses, and `shared_groups` may name a
+  `cdar` walk's `by` grouping, which keeps the walk shared.
+
+## 0.2.37
+
+- `using BayesianRegressionModels` binds the link and special functions BRM
+  lowers: `logit`, `logistic`, `log1pexp`, `logexpm1`, `log1mexp` and
+  `logsumexp` (re-exported unchanged from LogExpFunctions.jl) and `normcdf` and
+  `norminvcdf` (from StatsFuns.jl). A model module needs no
+  `using LogExpFunctions: logit` for a `logit(mu) ~ 1 + x` link any more; before,
+  calling the builder raised `UndefVarError: logit not defined`. They are the
+  functions SBBRMI spells as Stan builtins and the links whose inverse is one of
+  them, kept complete by `test/exported_link_functions.jl`. Importing
+  LogExpFunctions.jl or StatsFuns.jl as well stays unambiguous. A module that
+  defines its own function of one of these names keeps it, provided it defines
+  it before reading the name.
+
+## 0.2.36
+
+- `reprocess(sb, rows; resample_groups=[:g])` on an SBBRMI accepts the `by`
+  column of a `cdar(step; by=g, cor=C)` term. It redraws every level of `g` the
+  rows name, also levels the fit did not see, so a model with `cdar` can forecast
+  whole held-out groups. Each redrawn level's path over the whole step grid (and
+  any appended forecast steps) is drawn in generated quantities from the fitted
+  `sigma` and `rho`, starting from the stationary law. The draw is conditional
+  on the fitted levels the rows do not name, which keep their fitted paths;
+  with `C = I` the levels are independent. The fit's unconstrained coordinates
+  stay the replay's. A level the fit did not see needs `C` over the sorted union
+  of the fitted and the rows' levels, read from the `cor=` data field of the
+  replay data; its fitted block must equal the fitted `C`. A plain `reprocess`
+  still refuses an unseen level, and its error now names `resample_groups`.
+  With `freeze_constants=false` the redraw is refused (the fresh template
+  rebuilds the term on the replay's levels alone). Every `cdar` program gains
+  one data integer, two data matrices and one empty parameter vector
+  (`eta_lev`), so its source and descriptor id change; its density and
+  unconstrained coordinates do not. Snag `cdar-replay-new-57df8982`.
+
+## 0.2.35
+
+- `adaptive_centering_problem` centres a random-effect cell on the total of
+  every term its level sits in, so its `c = 1` coordinate is that total:
+  - the intercept or slope coefficient (as since `303dafff`);
+  - for an intercept cell, the level of each `factor(f)` population term the
+    level sits in (its cell mean or treatment contrast);
+  - the effect of each coarser grouping of the same predictor that holds the
+    level, nested or crossed, when that grouping's cell for the term is a
+    scalar one.
+
+  For example, `log(w) ~ 0 + factor(cov) + (1 | sec) + (1 | pair)`, with each
+  `pair` inside one `cov` level and one `sec` level, centres a pair on
+  `beta[cov] + b_sec[sec]`. Before, such a cell was centred on 0 (no intercept,
+  and nested), which left the factor level, the section and the pair on a
+  ridge only the priors pin.
+  - **Behaviour change:** a nested grouping's cells (`(1 | g)` inside
+    `(1 | band)`) are no longer centred on 0. They are centred on the intercept
+    plus the enclosing level's effect.
+  - **Unchanged:** a level inside a correlated grouping's cell keeps location 0.
+    So do blocks compiled centred.
+  - **Pair order:** containing blocks now come before the blocks they contain.
+    A model declaring a nested grouping before its container sees its cells,
+    and a per-cell `centeredness=` vector, in that order.
+  - `adaptive_centering_controls` names every coordinate a cell's location
+    reads in `location`, joined by ` + `.
+  - The sampled active margins of a shared `|ID|` block whose other response
+    is omitted (`<bucket>_active`) now carry their margin labels. They are
+    located like the ordinary block of a model without the omitted response,
+    and `adaptive_centering_controls` labels them. Before, they were always
+    centred on 0.
+
+  Snag `brm-zone-8-adapt-1b407672`, decision `1wxltaq`; closes owner todo
+  `137ptwv`.
+## 0.2.34
+
+- A statement may read a name declared below it, in every position a read can
+  stand. `mu ~ 1 + c_key` above `c_key = log(1 + x + exp(log_w) * z)` is the
+  model with the two lines swapped, so a covariate computed from parameters,
+  an `mi()` completion or data alone is a formula term, a grouping or a
+  `standardize(...)` input wherever it is declared, and `effect(mu, c_key)`
+  addresses its coefficient. Before, such a term failed on SBBRMI
+  (`` expected data-backed NamedColumn for `c_key`, got MissingColumn ``) and
+  RKBRMI (`` term `c_key` is not a data column ``) unless the declaration came
+  first. A read of a column that a later `mi(y) ~ …` completes reads the
+  completion, as a read below it does; before, it read the raw column with its
+  missing entries and failed. A read of any other data column stays data, as a
+  statement above `x = log(x)` reads the raw `x`. Snag
+  `formula-covariat-5673c470`.
+- `merge(a::BRMI, b::BRMI)` resolves the same way: a fragment that reads a name
+  another fragment declares refers to that declaration, in either order. A
+  fragment's binding of a data column it only reads (`m ~ 1 + y`) no longer
+  replaces another fragment's likelihood of that column: `merge(likelihood,
+  reader)` used to drop `y`'s likelihood from the model without an error.
+
+## 0.2.33
+
+- Groupings crossed with the NLME units. `brm_nlme_view`, `brm_nlme_model`,
+  `brm_nlme_fit` (and so `brm_two_stage_fit`), `brm_laplace_problem`,
+  `brm_svi_fit` and `brm_nlme_joint_map` take `shared_groups = (:g, …)`: a
+  random-effect block over a grouping whose levels occur in several subjects
+  (`(1 + x || class)` with every class in every subject) is read as shared
+  latents, every coordinate of it (standardized draws, scales, correlation
+  factor, Student-t mixing; plain, stratified, level-correlated and
+  known-value blocks alike) in θ beside the population coefficients, and the
+  subjects stay independent given θ. Every grouping except the subject
+  grouping is named once, in `nested_groups` or `shared_groups`; the refusal
+  now names the groupings named nowhere and the `nested_groups` keys that are
+  no grouping (a column of a joined `|ID|` block among them). A `car(...)`
+  field is read as shared latents too (its edges couple its areas), where it
+  was refused. `brm_nlme_estimates` names a crossed block with `crossed =
+  true` and its levels' `effects`. Before, `brm_nlme_view` refused any such
+  model (``nested_groups must name every grouping except `lgroup` ``). Snag
+  `crossed-grouping-39d39fcc`.
+
+## 0.2.32
+
+- A predictor holding `cdar(step; by = g, cor = C)` may be read through a
+  `@plate` grouping, as in `rows = groups(cell => cells)` with
+  `tot[k] ~ Normal(sum(exp.(lp[rows[k]])), sigma)`. `C` has one row and column
+  per level of `g`, not one entry per row of the predictor. Before, SBBRMI and
+  RKBRMI counted its `P × P` entries as rows and refused the predictor with
+  "`lp` read through `cell`: `lp` has 160000 entries (data vector `C`) …",
+  whether `C` was a data field or computed by `constant(...)`. `cdar`'s `cor`
+  is now skipped like `cor` on `gr` and `hsgp` (0.2.5). Snag
+  `cdar-cor-matrix-c8278be6`.
+
+## 0.2.31
+
+- `mi(x)::shares(total, rows) ~ Law(…)` with `rows = groups(g => labels)`
+  declares a completion whose missing entries have known group sums: the
+  completed `x[rows[k]]` sums to `total[k]`, the group's whole total, observed
+  entries included. Per group the missing entries are the residual times
+  shares (the bijection of a `T::shares(total)` cell latent), with the law's
+  density at the entries plus `sum(log.(x)) - log(residual)`: the exact
+  conditional of the law given the sum. A group with one missing entry holds
+  its residual; missing entries of no listed group stay free. Positive laws
+  only. Every formula reads the completed column as before.
+  - SBBRMI: coordinates `x_y_free` and `x_y_shares`. The residuals are
+    observed (`x_shares_residuals`), so they inform the law even when nothing
+    reads the completion, with a pointwise density per group and a predictive
+    draw of each group's sum.
+  - RKBRMI: the same coordinates (`x.y_free`, `x.y_shares`, the grouped
+    entries one joint latent), paired by `brm_coordinate_transport` (relation
+    `:grouped_shares`).
+  - A frozen `reprocess` keeps the groups and reads new totals.
+  - Refused: `resample_covariates` of such a column, RKBRMI
+    `completions = :noncentered`, real-valued laws.
+  - The scientific description states the constraint.
+  - Snag `mi-completion-wi-54222432`, design decision `0guq37f`.
+
+## 0.2.30
+
+- A data column that only a `name = constant(expr)` reads may hold `missing`.
+  `expr` takes the column whole (`c = constant(mean(skipmissing(y_data)))`)
+  and the model reads only the constant. `SBBRMI` and `RKBRMI` built such a
+  model, but `brm_descriptor`, and with it `brm_start` on `SBBRMI`,
+  `brm_description`, `prune_responses` and `modeled_covariates`, collected the
+  column as model data and refused it ("data column `y_data` contains
+  `missing` values"). They now collect the columns the backend does. A column
+  the model itself reads still refuses its missing cells. Likewise, a
+  `rows=`-masked HSGP axis that a constant also reads keeps its mask on those
+  paths, and an `mm(...)` grouping that a constant also reads stays
+  Julia-side.
+
 ## 0.2.29
 
 - `brm_svi_fit` fits units whose own rows pin them far more tightly than the

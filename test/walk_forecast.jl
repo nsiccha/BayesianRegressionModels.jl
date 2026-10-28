@@ -5,6 +5,9 @@
 # every new step continues the fitted path from its last fitted state.
 # A replay step inside the fitted grid that the fit did not see has no
 # innovation and is refused. Snag per-group-statio-059ae6f6.
+# `resample_groups` naming a cdar term's `by` column redraws the levels the
+# replay names, also unseen ones, given the fitted levels it keeps. Snag
+# cdar-replay-new-57df8982.
 
 using Test
 using BayesianRegressionModels
@@ -208,6 +211,189 @@ end
             @test path[2] ≈ last_point + sigma * z_new[1] atol=1e-10
             @test path[3] ≈ last_point + sigma * (z_new[1] + z_new[2]) atol=1e-10
         end
+    end
+end
+
+# `resample_groups` naming a cdar term's `by` column redraws every level the
+# replay rows name, also levels the fit did not see: each level's whole path is
+# drawn in generated quantities from the fitted law, given the fitted levels the
+# replay does not name, and the fit's coordinates stay. Snag
+# cdar-replay-new-57df8982.
+
+# Rows of the given (level, step) pairs, without the response.
+cdar_level_rows(levels, years, C) = (; year=collect(years), kreis=collect(levels),
+                                     gem=string.(levels, 1), C)
+
+# The paths of the redrawn levels given one draw, from the emitted pieces: the
+# fitted innovations `V = L E` (fitted and appended steps), the redrawn ones
+# `A V + Lc E_lev`, and the stationary recurrence.
+function redrawn_paths(cn, cv, L, A, Lc, P, Q, W)
+    sigma = only(pick(cn, cv, "cdar_mu_year_sigma"))
+    rho = only(pick(cn, cv, "cdar_mu_year_rho"))
+    E = reshape(vcat(pick(cn, cv, "cdar_mu_year_eta"), pick(cn, cv, "cdar_mu_year_eta_new")), P, W)
+    E_lev = reshape(pick(cn, cv, "cdar_mu_year_eta_lev"), Q, W)
+    U = A * (L * E) .+ Lc * E_lev
+    delta = similar(U)
+    delta[:, 1] = sigma .* U[:, 1]
+    for w in 2:W
+        delta[:, w] = rho .* delta[:, w-1] .+ sigma * sqrt(1 - rho^2) .* U[:, w]
+    end
+    delta, sigma, rho, E_lev
+end
+
+@testset "cdar resample draws levels the fit did not see (C = I)" begin
+    fit_rows = cdar_rows(2018:2021)
+    sb = SBBRMI(CDAR_BUILDER(fit_rows); mod=@__MODULE__)
+    @test sb.data[:cdar_mu_year_n_new_groups] == 0
+    @test size(sb.data[:cdar_mu_year_A_new]) == (0, 3)
+    # REUSE replay keeps the fitted coordinates; an unseen level has none
+    # (the `resample_groups` contract for random effects, too)
+    rows = cdar_level_rows(["d", "e", "d"], [2019, 2021, 2022], Matrix(1.0I, 5, 5))
+    @test_throws "resample_groups=[:kreis]" reprocess(sb, rows)
+
+    fc = reprocess(sb, rows; resample_groups=[:kreis])
+    @test fc.data[:cdar_mu_year_n_groups] == 3
+    @test fc.data[:cdar_mu_year_n_steps] == 4
+    @test n_new(fc, :cdar_mu_year_n_new_steps) == 1
+    @test n_new(fc, :cdar_mu_year_n_new_groups) == 2
+    @test fc.data[:cdar_mu_year_A_new] == zeros(2, 3)
+    @test fc.data[:cdar_mu_year_L_new] ≈ Matrix(1.0I, 2, 2)
+    # rows index the redrawn levels after the three fitted ones
+    @test fc.data[:cdar_mu_year_group_idx] == [4, 5, 4]
+    @test fc.data[:cdar_mu_year_step_idx] == [2, 4, 5]
+    @test StanBlocks.stanc_check(stan(fc); warn_pedantic=false).ok
+    # a replay that redraws nothing is still the fit's own program
+    @test stan(reprocess(sb, cdar_rows(2020:2021))) == stan(sb)
+
+    if WF_RUNTIME
+        fit_problem, fc_problem = instantiate(sb), instantiate(fc)
+        D = LogDensityProblems.dimension(fit_problem)
+        @test LogDensityProblems.dimension(fc_problem) == D
+        @test String.(BS.param_unc_names(fc_problem.model)) ==
+              String.(BS.param_unc_names(fit_problem.model))
+        L = Matrix(1.0I, 3, 3)
+        q = 0.4 .* randn(Xoshiro(21), D)
+        lev = Vector{Float64}[]
+        vals = Vector{Float64}[]
+        sigma = 0.0
+        for seed in 1:2000
+            cn, cv = constrained(fc_problem, q; seed)
+            delta, sigma, _, E_lev = redrawn_paths(cn, cv, L, zeros(2, 3),
+                                                   Matrix(1.0I, 2, 2), 3, 2, 5)
+            term = pick(cn, cv, "cdar_mu_year")
+            # exactly the recurrence, given the generated innovations
+            @test term ≈ [delta[1, 2], delta[2, 4], delta[1, 5]] atol=1e-10
+            push!(lev, vec(E_lev))
+            push!(vals, term)
+        end
+        H = reduce(hcat, lev)
+        @test maximum(abs.(mean(H; dims=2))) < 5 / sqrt(2000)
+        @test maximum(abs.(var(H; dims=2) .- 1)) < 5 * sqrt(2 / 2000)
+        # stationary: every redrawn state has marginal SD sigma, levels independent
+        T = reduce(hcat, vals)
+        @test maximum(abs.(mean(T; dims=2))) < 5 * sigma / sqrt(2000)
+        @test var(T; dims=2) ≈ fill(sigma^2, 3) rtol=0.15
+        @test abs(cor(T[1, :], T[2, :])) < 5 / sqrt(2000)
+
+        d = brm_descriptor(fc)
+        out = brm_execute(d, :predict; problem=fc_problem,
+                          draws=0.4 .* randn(Xoshiro(3), D, 4), seed=1234)
+        @test haskey(out, :y_gen) || haskey(out, :y)
+    end
+end
+
+@testset "cdar resample with a correlated C draws given the kept fitted levels" begin
+    C3 = [1.0 0.5 0.2; 0.5 1.0 0.3; 0.2 0.3 1.0]
+    c = [0.4, 0.1, 0.3]
+    C4 = [C3 c; c' 1.0]                      # levels a, b, c, d (sorted)
+    sb = SBBRMI(CDAR_BUILDER(cdar_rows(2018:2021; C=C3)); mod=@__MODULE__)
+    rows = cdar_level_rows(["d", "d"], [2018, 2021], C4)
+    fc = reprocess(sb, rows; resample_groups=[:kreis])
+    A = c' / cholesky(Symmetric(C3))
+    Lc = sqrt(1.0 - only(A * c))
+    @test fc.data[:cdar_mu_year_A_new] ≈ A atol=1e-12
+    @test fc.data[:cdar_mu_year_L_new] ≈ fill(Lc, 1, 1) atol=1e-12
+    @test n_new(fc, :cdar_mu_year_n_new_groups) == 1
+    @test fc.data[:cdar_mu_year_group_idx] == [4, 4]
+
+    # a fitted level redrawn: its own fitted innovations drop out of `A`, the
+    # kept levels' stay, and C over the fitted levels is the fit's
+    fa = reprocess(sb, cdar_level_rows(["a"], [2020], C3); resample_groups=[:kreis])
+    Aa = C3[1:1, 2:3] / cholesky(Symmetric(C3[2:3, 2:3]))
+    @test fa.data[:cdar_mu_year_A_new] ≈ [0.0 Aa] atol=1e-12
+    @test fa.data[:cdar_mu_year_L_new] ≈
+          fill(sqrt(1.0 - only(Aa * C3[2:3, 1])), 1, 1) atol=1e-12
+    @test fa.data[:cdar_mu_year_group_idx] == [4]
+    # every level redrawn: none kept, the joint stationary law
+    fall = reprocess(sb, cdar_level_rows(["a", "b", "c"], [2019, 2019, 2019], C3);
+                     resample_groups=[:kreis])
+    @test fall.data[:cdar_mu_year_A_new] == zeros(3, 3)
+    @test fall.data[:cdar_mu_year_L_new] ≈ Matrix(cholesky(Symmetric(C3)).L) atol=1e-12
+
+    # an unseen level needs C over the sorted union, its fitted block the fit's
+    @test_throws "over the sorted union" reprocess(sb, (; year=[2019], kreis=["d"],
+        gem=["d1"]); resample_groups=[:kreis])
+    @test_throws "4 of them" reprocess(sb, cdar_level_rows(["d"], [2019], C3);
+                                       resample_groups=[:kreis])
+    C4bad = copy(C4); C4bad[1, 2] = C4bad[2, 1] = 0.1
+    @test_throws "differs from the fitted `cor`" reprocess(sb,
+        cdar_level_rows(["d"], [2019], C4bad); resample_groups=[:kreis])
+
+    if WF_RUNTIME
+        fit_problem, fc_problem = instantiate(sb), instantiate(fc)
+        D = LogDensityProblems.dimension(fit_problem)
+        @test String.(BS.param_unc_names(fc_problem.model)) ==
+              String.(BS.param_unc_names(fit_problem.model))
+        L = Matrix(cholesky(Symmetric(C3)).L)
+        q = 0.4 .* randn(Xoshiro(17), D)
+        fn, fv = constrained(fit_problem, q)
+        sigma = only(pick(fn, fv, "cdar_mu_year_sigma"))
+        V1 = L * pick(fn, fv, "cdar_mu_year_eta")[1:3]   # fitted 2018 innovations
+        first = Float64[]
+        for seed in 1:2000
+            cn, cv = constrained(fc_problem, q; seed)
+            delta, _, _, _ = redrawn_paths(cn, cv, L, A, fill(Lc, 1, 1), 3, 1, 4)
+            term = pick(cn, cv, "cdar_mu_year")
+            @test term ≈ [delta[1, 1], delta[1, 4]] atol=1e-10
+            push!(first, term[1])
+        end
+        # the first state given the fitted levels: mean sigma A v_F, SD sigma Lc
+        @test abs(mean(first) - sigma * only(A * V1)) < 5 * sigma * Lc / sqrt(2000)
+        @test std(first) ≈ sigma * Lc rtol=0.1
+    end
+end
+
+@testset "cdar resample beside a random effect: new groups of both" begin
+    builder = @brm begin
+        mu ~ 1 + (1 | gem) + cdar(year; by = kreis, cor = C)
+        y ~ Normal(mu, 0.3)
+    end
+    sb = SBBRMI(builder(cdar_rows(2018:2021)); mod=@__MODULE__)
+    rows = (; year=[2020, 2021, 2022], kreis=["d", "d", "e"], gem=["d1", "d2", "e1"],
+            C=Matrix(1.0I, 5, 5))
+    fc = reprocess(sb, rows; resample_groups=[:gem, :kreis])
+    @test n_new(fc, :cdar_mu_year_n_new_groups) == 2
+    @test StanBlocks.stanc_check(stan(fc); warn_pedantic=false).ok
+    # a fresh template rebuilds the term on the replay's levels alone
+    @test_broken (reprocess(sb, merge(rows, (; y=[0.1, 0.2, 0.3]));
+                            freeze_constants=false, resample_groups=[:kreis]); true)
+    if WF_RUNTIME
+        walk(problem) = filter(startswith("cdar_mu_year_"),
+                               String.(BS.param_unc_names(problem.model)))
+        fit_problem, fc_problem = instantiate(sb), instantiate(fc)
+        @test walk(fc_problem) == walk(fit_problem)
+        # the resampled `gem` effects are generated, so the replay is the fit
+        # minus them; the fit's draws reach it through transport_draws
+        unc_fit = BS.param_unc_names(fit_problem.model)
+        unc_fc = BS.param_unc_names(fc_problem.model)
+        @test unc_fc == [n for n in unc_fit if n in unc_fc]
+        @test length(unc_fc) < length(unc_fit)
+        draws = [0.37sin(i + 5k) for k in 1:3, i in eachindex(unc_fit)]
+        moved = transport_draws(sb, fc, draws, unc_fit, unc_fc)
+        @test moved == draws[:, [findfirst(==(n), unc_fit) for n in unc_fc]]
+        cn, cv = constrained(fc_problem, moved[1, :])
+        @test all(isfinite, pick(cn, cv, "cdar_mu_year"))
+        @test length(pick(cn, cv, "cdar_mu_year_eta_lev")) == 2 * 5
     end
 end
 

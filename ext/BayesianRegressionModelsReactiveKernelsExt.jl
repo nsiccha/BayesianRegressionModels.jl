@@ -67,6 +67,48 @@ end
     total
 end
 
+# The grouped entries of `mi(x)::shares(total, rows)`
+# (src/cell_total_coordinates.jl) are one joint latent of the completion,
+# `y_shares[axes(rows, 1)] ~ _BRMGroupedShares{Law}(ends, residuals, args…)`:
+# each group of K entries packs its shares' K - 1 coordinates, group after
+# group (SBBRMI's `y_shares`), and BRM's maps put the entries on their
+# residuals. The log-Jacobian is each group's `sum(log.(x)) - log(residual)`,
+# as on SBBRMI. The packed extent is the entries less one per group.
+ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMGroupedShares}, args, shape) =
+    ReactiveKernelsPPL.ParameterGeometry(shape,
+        :(last($(args[1])) - length($(args[1]))); support=:positive,
+        constrain=(u, shape, ends, residuals, rest...) ->
+            BRM._brm_grouped_shares_values(u, ends, residuals),
+        unconstrain=(x, shape, ends, residuals, rest...) ->
+            _brm_grouped_shares_unconstrain(x, ends, residuals),
+        logjac=(u, shape, ends, residuals, rest...) ->
+            sum(log, BRM._brm_grouped_shares_values(u, ends, residuals)) - sum(log, residuals))
+
+# Values whose groups do not sum to their residuals are no point of the
+# latent: refused, never rescaled.
+function _brm_grouped_shares_unconstrain(x, ends, residuals)
+    start = 1
+    for (k, stop) in enumerate(ends)
+        isapprox(sum(view(x, start:stop)), residuals[k]; rtol=1e-8) || throw(ArgumentError(
+            "the grouped missing entries of a `mi(x)::shares(total, rows)` completion " *
+            "must sum to their residuals: group $k sums to $(sum(view(x, start:stop))), " *
+            "its residual is $(residuals[k])"))
+        start = stop + 1
+    end
+    BRM._brm_grouped_shares_coordinates(x, ends)
+end
+
+# The law's density at the entries, one entry at a time; inlined, since it
+# reads data beside sampled values (rkppl-use §13, "One joint latent per index").
+@inline function ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMGroupedShares{F}, x) where {F}
+    BRM._brm_shares_check_lengths(d.args, x)
+    total = zero(eltype(x))
+    for k in 1:length(x)
+        total += BRM.Distributions.logpdf(F(BRM._brm_shares_entries(d.args, k)...), x[k])
+    end
+    total
+end
+
 # The emitted source is the executable contract. Every statistical prior and
 # observation role lowers through the public RKPPL surface; binding supplies
 # the data, with no ordinal or missing-response plan mutations.
