@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.24
+
+- A gather `x[idx]` lies on the rows of its index. A predictor on its own rows
+  that reads another part's values through a model-scope gather
+  (`c_b = c[pos_b]`, `z_b = z[pos_b]`) is sized by the gather's index, so a
+  `@plate` cell may read it through a grouping over those rows
+  (`rows = groups(g_b => cells)`, `log_b[rows[k]]`). Before, when the gathered
+  value read data columns of its own rows (`z = w * (v - log(y)) / 2` with
+  `mi(y)`), both SBBRMI and RKBRMI took those columns for the predictor's rows
+  and refused the grouping (`` `log_b` has 6 entries (data vector `w`) but
+  `g_b` has 5 ``). RKBRMI also takes a gathered model value (`c[pos_b]` of an
+  `mi()` completion) as a predictor term, as SBBRMI did, instead of refusing it
+  as not a data column. Snag `rk-backend-predi-9a0c2121`.
+
 ## 0.2.23
 
 - `brm_coordinate_transport` pairs grouped HSGP terms, `hsgp(x...; by = g)`,

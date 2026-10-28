@@ -37,6 +37,14 @@ the refusal of a name two cells write. Snag `model-scope-read-3649ae8a`.
 `changelog.jl` checks that `CHANGELOG.md`'s newest heading is the
 `Project.toml` version (`dev` §7.5).
 
+`plate_gathered_predictor.jl` checks a predictor on its own rows that reads
+another part's values through model-scope gathers (`c2 = c[pos2]` of an `mi()`
+completion, `z2 = z[pos2]` where `z` reads part-1 data columns), read by a
+`@plate` over a grouping of those rows: the gather is sized by its index, both
+backends equal the twin with the part-1 columns gathered by hand (RK centered
+and non-centered completions), RK equals Stan, and a part-1 column read directly
+is still refused. Snag `rk-backend-predi-9a0c2121`.
+
 `plate_grouping.jl` checks model-scope `rows = groups(group => labels)`
 bindings that `@plate for` cells read as `x[rows[i]]`: `groups` itself,
 identical Stan source, descriptor outputs and RK log density to the legacy
