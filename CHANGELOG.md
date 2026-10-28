@@ -25,8 +25,9 @@ instead of failing at run time.
   `chains = n` returns `n` independent draws from that fit for a sampler's
   per-chain `init`; a failed Pathfinder run raises. The units are
   `brm_nlme_view`'s (`subject_group`, `nested_groups`, `shared_groups`).
-  Its cost is the Laplace problem's: seconds for regression-shaped models,
-  many model gradients per evaluation for the whole-model Laplace. Initial
+  Its cost is the Laplace problem's: a few model gradients per evaluation for
+  regression-shaped models (the row-structured Laplace), many more for the
+  whole-model Laplace. Initial
   values go on top of a start through `base`:
   `brm_start(sb, model, inits; base = brm_start(sb, model))`;
   `brm_start(x, inits)` without `base` keeps its zero base. Needs Pathfinder
