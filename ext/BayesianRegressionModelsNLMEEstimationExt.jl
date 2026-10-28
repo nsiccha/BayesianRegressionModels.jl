@@ -689,7 +689,8 @@ function BRM.brm_two_stage_fit(sampler, x; minibatch_size=nothing, options=nothi
     unit_draws = Vector{Matrix{Float64}}(undef, n)
     # One task per worker model drains a shared queue of units; a failing
     # sampler surfaces through `wait` as a TaskFailedException.
-    # A nested model's units evaluate through its one whole-model sampler.
+    # A nested model without subject cells evaluates its units through its one
+    # whole-model sampler.
     nworkers = m.cell_gradient === nothing ? 1 : min(threads, n)
     workers = [m; [BRM._brm_nlme_worker_model(m) for _ in 2:nworkers]]
     queue = Channel{Int}(n)

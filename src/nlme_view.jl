@@ -1145,13 +1145,14 @@ the model has nested effects. Its NLME layout then has one shared covariance
 family per random-effect declaration and one compact η vector per subject.
 
 When every observed density belongs to one subject's cells, the model also
-prepares cell queries for [`brm_nlme_loglikelihood`](@ref) and, for a flat
-model, compact cell gradients for
-[`brm_nlme_loglikelihood_and_gradient`](@ref). A cell is one iteration of a
-`@plate for` (or the deprecated closure-style `kernel(...) do`) over the
-subjects or over their rows, or one row of a flat grouped response or of a
-completed covariate's observed values; each belongs to the subject of its
-rows. A subject's work then depends on its own cells, not on other subjects.
+prepares cell queries for [`brm_nlme_loglikelihood`](@ref) and compact cell
+gradients for [`brm_nlme_loglikelihood_and_gradient`](@ref), one sampler set
+per distinct subject block length (a flat model has one). A cell is one
+iteration of a `@plate for` (or the deprecated closure-style `kernel(...) do`)
+over the subjects or over their rows, one row of a flat grouped response or
+of a completed covariate's observed values, or one totals cell; each belongs
+to the subject of its rows. A subject's work then depends on its own cells,
+not on other subjects, as far as RK computes each cell's reads at its rows.
 
 `progress` reports the preparation through Treebars: pass a Treebars node and
 the call builds a `Prepare NLME model` node under it, with one phase per step
@@ -1225,15 +1226,10 @@ function _brm_nlme_model(backend::RKBRMI, node; ad_backend, observation_ad_backe
             (shared_point === nothing && r === :shared_latent), view.role)
         sigma = findall(==(:scalar), view.role)
         cells = _brm_nlme_subject_cells(backend, view, attribution)
-        # A nested subject keeps the whole-model η gradient. It owns many
-        # cells (its nested levels' rows, totals), and a cell can compute
-        # whole-cohort values (on the regional panel each costs about one
-        # full gradient), so per-cell gradients would multiply that cost.
-        # Todo BayesianRegressionModels:scaling-svi/todos/2026-10-25T22-21-35-231-182pl0l.
         cell_query, cell_gradient = cells === nothing ? (nothing, nothing) :
             _brm_run_phase(phases.cells) do _
-                _brm_nlme_cell_queries(backend, cells), _brm_nlme_ragged(view) ?
-                    nothing : (; _brm_nlme_cell_samplers(backend, cells, unit,
+                _brm_nlme_cell_queries(backend, cells),
+                    (; _brm_nlme_cell_samplers(backend, cells, unit,
                         sort!(vcat(theta, sigma)), view.subject_coordinates)...,
                         lock=ReentrantLock())
             end
@@ -1320,6 +1316,7 @@ compact cell sampler differentiates selected coordinates in one fused call,
 without a packed gradient buffer.
 """
 function brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i::Integer, θ, σ, η)
+    # A nested model without subject cells evaluates the whole model.
     if m.cell_gradient === nothing && _brm_nlme_ragged(m.view)
         1 <= i <= length(m.view.levels) || throw(BoundsError(m.view.levels, i))
         H = [zeros(Float64, length(block)) for block in m.view.subject_coordinates]

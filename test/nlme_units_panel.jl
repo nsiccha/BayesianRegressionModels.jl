@@ -136,9 +136,11 @@ end
 
 @stestset "one unit's work stays flat as regions are added" begin
     # A region's value and gradient are its own, however many regions there
-    # are. Its gradient still evaluates the whole model: the totals and
-    # completed-covariate cells each compute whole-cohort values, so per-cell
-    # compact gradients would cost more. Capability gap, todo
+    # are. Its gradient takes the region's compact cell samplers, but RK
+    # computes the completed-covariate cells' reads at their rows only from
+    # RK 0.1.6, and a totals cell costs its own rows only once BRM emits it as
+    # one scalar cell: capability gap, todos
+    # BayesianRegressionModels/todos/2026-10-28T13-48-41-875-0ww46pb and
     # BayesianRegressionModels:scaling-svi/todos/2026-10-25T22-21-35-231-182pl0l.
     measured = map((1, 3)) do k
         rk = RKBRMI(panel(replicate_panel(PANEL, k)); completions=:noncentered)
