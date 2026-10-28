@@ -1265,6 +1265,21 @@ the partial-coordinate Jacobian, Turing/Enzyme versus StanBlocks/BridgeStan
 density and gradient parity, physical constrained quantities, and the
 distributional model's two distinct zero-mean HSGP bindings.
 
+`adaptive_hsgp_level_centering.jl` checks online adaptive centering of a
+grouped HSGP mapped across its levels: `hsgp(x...; by=g, cor=Omega)` (sampled
+`LKJCholesky`), a known correlation matrix, per-level amplitudes and length
+scales through hyper-predictors, independent levels with per-level
+amplitudes, an anisotropic term, and the term beside a correlated
+random-effect block and an ungrouped HSGP (snag `adaptive-centeri-11062238`).
+Per compiled model: the metadata (one level block per term, weight layout,
+correlation, scale roles), the reference factor `C_b = diag(s_b) * L` against
+the compiled model's own level weights (`<term>_beta_scaled`), the wrapper's
+map against a materialized triangular reference, `log|J|` by central
+differences, the inverse, the density identity, the Enzyme gradient against
+finite differences, and that `c = 1` samples the level weights themselves. It
+also checks the learned-order wrapper, the controls report, the multigroup
+refusal and a short `adaptive_warmup_mcmc` run on the two-axis shape.
+
 `adaptive_bounded_scales.jl` checks that online adaptive centering reads
 `Uniform(a, b)`-bounded HSGP length scales and SDs, and cdar SDs and
 persistences, through Stan's own `lb`/`lub` transform. It also reads the
@@ -1295,7 +1310,9 @@ generated-field skip, and runs one short online warmup on a data-rich lattice.
 `adaptive_centering_threads.jl` differentiates the ordinary, joint (ordinary +
 R2D2 + HSGP), learned-order (`ranef_order=:learned` over the joint cells),
 S2Z, HSGP-only, cdar, scalar (total / S2Z cell) and car wrappers, car
-cells inside the joint and learned-order wrappers, and a Student-t block (each
+cells and grouped HSGP level cells (a sampled and a known level correlation,
+per-level amplitudes and length scales) inside the joint and learned-order
+wrappers, and a Student-t block (each
 level's factor scaled by its mixing weight) inside both, on
 three concurrent tasks while a fourth forces collections, in a child Julia
 started with four threads; the child must exit cleanly and every gradient must

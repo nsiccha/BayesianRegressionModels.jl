@@ -11,7 +11,7 @@
 #     julia --project=test test/adaptive_centering_threads.jl
 #
 # Synthetic toy blocks only; no compiled Stan model is involved.
-using BayesianRegressionModels, WarmupHMC, Enzyme, LogDensityProblems, Random
+using BayesianRegressionModels, WarmupHMC, Enzyme, LogDensityProblems, Random, LinearAlgebra
 using DifferentiationInterface: AutoEnzyme
 include("threaded_gradient_stress.jl")
 
@@ -173,6 +173,52 @@ function _joint_car_problem(; learned=false)
                    d)
 end
 
+# Grouped HSGP level cells (`BRM._HSGPLevelAdaptiveCenteringBlock`) after
+# ordinary and HSGP cells in the joint wrapper: a sampled level correlation
+# over four levels with per-level amplitudes (`intercept + sd * z[g]`), and a
+# known correlation over three levels with per-level, floored length scales.
+function _level_blocks(offset)
+    o = offset
+    G, B = 4, 6
+    effects = reshape(collect(o .+ (1:G*B)), G, B)
+    o += G * B
+    free = collect(o .+ (1:G * (G - 1) ÷ 2))
+    o = last(free)
+    sigma = BRM._HSGPLevelScale(true, Int[], Float64[], Float64[], o + 1, o + 2, 0.0,
+                                Inf, collect(o + 3:o + 2 + G))
+    o += 2 + G
+    rho = BRM._HSGPLevelScale(false, [o + 1], [0.1], [Inf], 0, 0, 0.0, Inf, Int[])
+    o += 1
+    sampled = BRM._HSGPLevelAdaptiveCenteringBlock(:mu, :gp_xy, :g, collect(Any, 1:G),
+        effects, :parameter, free, Float64[], sigma, rho, 0.0,
+        hcat([(pi * j / 8)^2 for j in 1:B], [(pi * j / 5)^2 for j in 1:B]))
+    G, B = 3, 5
+    effects = reshape(collect(o .+ (1:G*B)), G, B)
+    o += G * B
+    L = cholesky([1.0 0.5 0.2; 0.5 1.0 0.3; 0.2 0.3 1.0]).L
+    sigma = BRM._HSGPLevelScale(false, [o + 1], [0.0], [Inf], 0, 0, 0.0, Inf, Int[])
+    o += 1
+    rho = BRM._HSGPLevelScale(true, Int[], Float64[], Float64[], o + 1, o + 2, 0.0,
+                              Inf, collect(o + 3:o + 2 + G))
+    o += 2 + G
+    known = BRM._HSGPLevelAdaptiveCenteringBlock(:mu, :gp_t, :h, collect(Any, 1:G),
+        effects, :data, Int[], BRM._adaptive_cholesky_cpc(Matrix(L)), sigma, rho, 0.3,
+        reshape([(pi * j / 6)^2 for j in 1:B], B, 1))
+    [sampled, known], o
+end
+
+function _joint_level_problem(; learned=false)
+    blocks, o = _ordinary_blocks()
+    M = 12
+    hsgp = BRM._HSGPAdaptiveCenteringBlock(:hsgp, :gp_x, zeros(M), collect(o .+ (1:M)),
+        [o + M + 1], [0.0], [Inf], o + M + 2, 0.0, Inf,
+        reshape([(pi * j / 8)^2 for j in 1:M], M, 1), Float64[])
+    level, d = _level_blocks(o + M + 2)
+    build = learned ? AC_EXT._adaptive_ordered_centering_reparametrizer :
+        AC_EXT._adaptive_joint_centering_reparametrizer
+    _with_controls(build(blocks, [hsgp]; level_blocks=level)..., d)
+end
+
 # Scalar total / S2Z cells: twelve cells sharing three log-scale coordinates.
 function _scalar_problem()
     n = 12
@@ -189,6 +235,8 @@ const _CASES = ("ordinary" => _ordinary_problem, "joint" => _joint_problem,
                 "s2z" => _s2z_problem, "hsgp" => _hsgp_problem,
                 "cdar" => _cdar_problem, "scalar" => _scalar_problem,
                 "car" => _car_problem, "joint_car" => _joint_car_problem,
-                "learned_order_car" => () -> _joint_car_problem(; learned=true))
+                "learned_order_car" => () -> _joint_car_problem(; learned=true),
+                "joint_hsgp_levels" => _joint_level_problem,
+                "learned_order_hsgp_levels" => () -> _joint_level_problem(; learned=true))
 
 run_threaded_gradient_gate(@__FILE__, _CASES, _GRADIENTS_PER_WORKER)
