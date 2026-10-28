@@ -12,6 +12,30 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.42
+
+- An omitted response whose law is discrete (`Poisson`, `Binomial`,
+  `BetaBinomial2`, `NegativeBinomial2`, `Bernoulli`, `BernoulliLogit`,
+  `BinomialLogit`, also under `truncated`) is drawn from the law its fitted
+  twin's predictive draw uses: with `c` omitted, `c ~ Poisson(exp(eta) * w)`
+  draws `poisson_int_rng(…, exp(eta) .* w)`, as `c_gen` does when `c` is bound.
+  Stan has no discrete parameters, so such a statement is always an observation.
+  Before, it was lowered like a prior, and the prior program failed to build:
+  `logistic(...)` reached StanBlocks untranslated ("`tracetype` not defined for
+  logistic(::real)"), vector products stayed `*` and failed stanc, and
+  `truncated` over a discrete family was refused ("a sampled truncated prior
+  requires a continuous scalar value").
+- `BetaBinomial2(trials, mean, precision)` lowers with its response omitted and
+  in a `@plate` cell, bound or omitted, as
+  `beta_binomial(trials, mean .* precision, (1 - mean) .* precision)`. Before,
+  each was refused: "`BetaBinomial2` derives outcome structure from observed
+  response values …". Its outcome structure is its trials argument. `Ordinal`,
+  `OrderedLogistic`, `CategoricalLogit` and `Multinomial` keep that refusal.
+- A prior's arguments, and so an omitted continuous response's, spell Julia
+  callables as likelihood arguments do: `logistic` as `inv_logit`, `normcdf` as
+  `Phi`, `vcat` as `append_row`, `fill` as `rep_vector`, and so on. Snag
+  `prior-draws-refu-aeb3b1e0`.
+
 ## 0.2.41
 
 - `brm_nlme_view` (and `brm_nlme_model`, `brm_nlme_fit`, `brm_svi_fit`,

@@ -375,6 +375,16 @@ lower=lloq)` with `y` omitted: the warning, the observation role, the
 at `lloq`, and a fitted response beside it whose density equals the
 uncensored twin's.
 
+`omitted_discrete_response.jl` checks omitted responses with a discrete law.
+A `BetaBinomial2` and a `Binomial` count with data trials and a `logistic`
+mean give a `fixed_param` program drawing the fitted twin's law, within the
+trials; an omitted literal `BetaBinomial2` matches its mean/precision pmf; a
+fitted `Binomial` beside an omitted `BetaBinomial2` has the binomial-only
+density. Products, `logistic`, `truncated` and the `Bernoulli`-type families
+draw their bound twin's law, a continuous omitted response spells
+`logistic` as `inv_logit`, and a `@plate` cell's `BetaBinomial2` has the
+density of its `beta_binomial` spelling and lowers omitted.
+
 `adaptive_multiaxis_hsgp_centering.jl` checks online adaptive centering of
 two-axis squared-exponential HSGPs: isotropic (one length scale every axis
 reads) and `iso=false`, ungrouped and grouped, beside a shared random-effect
