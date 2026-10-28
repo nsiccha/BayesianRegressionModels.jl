@@ -101,7 +101,7 @@ BRM adds:
   | `:random_effect` | a `ranef_*` block and its internals |
   | `:group_block` | a `kernel(...)` / `plate` result and everything declared per cell |
   | `:parameter` | an ordinary declared prior (`sigma ~ Exponential(1)`) |
-  | `:linear_predictor` | a formula linear predictor (`mu ~ 1 + x + (1\\|g)`) — an assignment, so no `~` declaration binds it |
+  | `:linear_predictor` | a formula linear predictor (`mu ~ 1 + x + (1\\|g)`) — an assignment, so no `~` declaration binds it. A linked declaration `f(x) ~ …` (`log(CL) ~ …`, `logit(p) ~ …`) gives the bare `x` on the response scale, `x = inverse(f)(η)`, not the link-scale η: apply the link to its draws (`log.(CL)`) for η |
   | `:posterior_predictive` | a predictive draw of an observation |
   | `:covariate_draw` | the selected modeled covariate value consumed by later operations |
   | `:pointwise_loglik` | an observation's per-element log-likelihood |
