@@ -271,7 +271,7 @@ end
 function _brm_replay_rw(training, raw)
     time = collect(Float64, raw)
     all(isfinite, time) || error("BRM term replay: `rw` time axis must be finite")
-    steps = _brm_cdar_levels(vcat(training.state.steps, time))
+    steps, _ = _brm_walk_replay_steps(training.state.steps, time, :rw)
     time_idx = [searchsortedfirst(steps, v) for v in time]
     _BRMPreparedTerm(rw, training.source,
         merge(training.state, (; time, steps, n_steps=length(steps), time_idx)),
@@ -292,6 +292,23 @@ _brm_replay_term(::typeof(rw), training, fresh::_BRMPreparedTerm, context) =
 _brm_cdar_levels(values) = sort!(unique(collect(values)))
 function _brm_cdar_levels(values::AbstractVector{<:AbstractString})
     sort!(unique(collect(String, values)))
+end
+# A replay of a walk term (`rw`, `cdar`) keeps the fitted grid, whose steps own
+# the fitted innovations, and may append steps after its last one (a forecast).
+# A step the fit did not have inside or before the fitted grid would shift every
+# later innovation onto the wrong step, so it is refused. Returns the fitted
+# grid followed by the appended steps and how many were appended.
+function _brm_walk_replay_steps(fitted, raw, term::Symbol; prefix="BRM term replay")
+    fresh = setdiff(_brm_cdar_levels(raw), fitted)
+    for s in fresh
+        s > last(fitted) || error(
+            "$prefix: `$term` step value $s is not on the fitted grid ",
+            "($(first(fitted)) to $(last(fitted))) and lies inside the fitted grid or ",
+            "before it. A replay appends steps only after the last fitted one (a ",
+            "forecast): a step inside the fitted grid has no fitted innovation. Refit ",
+            "with that step.")
+    end
+    vcat(fitted, fresh), length(fresh)
 end
 function _brm_cdar_cor(value, context)
     if value isa NamedColumn
@@ -683,10 +700,11 @@ function _brm_replay_term(callable::Union{typeof(ar),typeof(dar)}, training,
 end
 
 # cdar replay: group levels and the correlation factor are frozen from the fit;
-# the step grid may grow (new steps append), which is how a forecast extends it.
+# a replay may append steps after the last fitted one (`_brm_walk_replay_steps`),
+# which is how a forecast extends it.
 function _brm_replay_cdar(training, step_raw, group_raw)
     all(isfinite, step_raw) || error("BRM term replay: `cdar` step axis must be finite")
-    steps = _brm_cdar_levels(vcat(training.state.steps, collect(step_raw)))
+    steps, _ = _brm_walk_replay_steps(training.state.steps, step_raw, :cdar)
     step_idx, group_idx = _brm_cdar_indices(step_raw, steps, group_raw,
                                             training.state.groups; prefix="BRM term replay")
     _BRMPreparedTerm(cdar, training.source,

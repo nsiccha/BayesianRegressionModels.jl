@@ -77,15 +77,30 @@ end
     @test occursin("real<lower=0.0, upper=1.0> cdar_mu_week_rho", code)
     @test occursin("cdar_mu_week_rho ~ normal(0.8, 0.1)", code)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    # a Beta persistence prior keeps the [0, 1] declaration (brm-use formulas.md)
+    beta_prior = @brm df begin
+        mu ~ 1 + cdar(week; by=patch, cor=C)
+        ar(:, cdar(week)) ~ Beta(2, 2)
+        y ~ Normal(mu, 1.0)
+    end
+    code = stan(beta_prior)
+    @test occursin("real<lower=0.0, upper=1.0> cdar_mu_week_rho", code)
+    @test occursin("cdar_mu_week_rho ~ beta(", code)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
 end
 
 @testset "cdar replay: frozen groups and factor, a growing step grid" begin
     sb = SBBRMI(cdar_model(); mod=@__MODULE__)
+    # an appended step is a forecast: the fitted grid keeps its innovations and the
+    # new step's are drawn in generated quantities (test/walk_forecast.jl)
     longer = reprocess(sb, cdar_df(; steps=3))
-    @test longer.data[:cdar_mu_week_n_steps] == 3
+    @test longer.data[:cdar_mu_week_n_steps] == 2
+    @test StanBlocks.getvalue(longer.data[:cdar_mu_week_n_new_steps]) == 1
     @test longer.data[:cdar_mu_week_step_idx] == [1, 1, 2, 2, 3, 3]
     @test longer.data[:cdar_mu_week_L] == sb.data[:cdar_mu_week_L]
-    @test StanBlocks.stan_code(longer.model) == StanBlocks.stan_code(sb.model)
+    same = reprocess(sb, cdar_df())
+    @test same.data[:cdar_mu_week_n_new_steps] == 0
+    @test StanBlocks.stan_code(same.model) == StanBlocks.stan_code(sb.model)
     unseen = (; week=[1, 1], patch=["a", "c"], y=zeros(2), C=[1.0 0.0; 0.0 1.0])
     @test_throws "not a fitted group level" reprocess(sb, unseen)
     d = brm_descriptor(sb)

@@ -34,6 +34,16 @@ collected last (the RK gradient of vector-cell reads is `@test_broken`, todo
 `1svm4l1`). It also covers the omitted response, `reprocess`, and
 the refusal of a name two cells write. Snag `model-scope-read-3649ae8a`.
 
+`walk_forecast.jl` checks forecasts of the walk terms `rw(time)` and
+`cdar(step; by=g, cor=C)`: a replay whose rows reach past the fitted grid keeps
+the fit's unconstrained coordinates and draws the appended steps' innovations
+in generated quantities, so each level continues from its fitted state (the
+exact recurrence per draw, `N(0, I)` innovations, the one-step covariance
+`sigma^2 (1 - rho^2) C`), also through `resample_groups`; a step inside the
+fitted grid is refused, and `freeze_constants=false` samples every step. Set
+`BRM_WALK_FORECAST_RUNTIME=0` to skip the compiled-model sets. Snag
+`per-group-statio-059ae6f6`.
+
 `changelog.jl` checks that `CHANGELOG.md`'s newest heading is the
 `Project.toml` version (`dev` §7.5).
 

@@ -424,16 +424,35 @@ end
     @test length(frame.source) == length(ir.pairs)
 end
 
-@testset "car fields refuse cdar plans; generated fields are skipped" begin
-    @test_throws "cdar walk cells with random-effect, HSGP or car cells" begin
-        cdar_df = merge(CAR_AC_DF, (; week=repeat(1:3; outer=3),
-            patch=repeat(["p", "q", "r"]; inner=3), C=[1.0 0.0 0.0; 0.0 1.0 0.0; 0.0 0.0 1.0]))
-        mixed = SBBRMI(@brm(cdar_df, begin
-            mu ~ 1 + car(area; edges=(from, to), type=:icar) + cdar(week; by=patch, cor=C)
-            y ~ Normal(mu, 1.0)
-        end); mod=@__MODULE__)
-        adaptive_centering_problem(mixed, car_ac_instantiate(mixed), DI.AutoEnzyme())
-    end
+@testset "car fields adapt beside cdar walks; generated fields are skipped" begin
+    # Car cells then walk cells in one joint wrapper (refused before snag
+    # per-group-statio-059ae6f6); test/adaptive_cdar_centering.jl checks the
+    # walk cells beside a random-effect block in full.
+    cdar_df = merge(CAR_AC_DF, (; week=repeat(1:3; outer=3),
+        patch=repeat(["p", "q", "r"]; inner=3), C=[1.0 0.0 0.0; 0.0 1.0 0.0; 0.0 0.0 1.0]))
+    mixed = SBBRMI(@brm(cdar_df, begin
+        mu ~ 1 + car(area; edges=(from, to), type=:icar) + cdar(week; by=patch, cor=C)
+        y ~ Normal(mu, 1.0)
+    end); mod=@__MODULE__)
+    mixed_problem = car_ac_instantiate(mixed)
+    mixed_names = BS.param_unc_names(mixed_problem.model)
+    walk = BRM._adaptive_cdar_centering_blocks(mixed, mixed_names)
+    wrapped = adaptive_centering_problem(mixed, mixed_problem, DI.AutoEnzyme())
+    ir = WarmupHMC.reparametrizer(wrapped)
+    @test ir.pairs[1][2].args[1].state isa CAR_AC_EXT.BRMJointAdaptiveCenteringState
+    @test first.(ir.pairs) ==
+          vcat(CAR_AC_EXT._car_pair_index.(Ref(ir.pairs[1][2].args[1].state.car),
+                                           1:length(ir.pairs) - 9), only(walk).effects)
+    x = 0.3 .* randn(Xoshiro(17), length(mixed_names))
+    @test LogDensityProblems.logdensity(wrapped, x) ≈
+          LogDensityProblems.logdensity(mixed_problem, x) atol=1e-10
+    set_car_sources!(ir.pairs[1][2].args[1].state, ir,
+                     collect(range(0.1, 0.9; length=length(ir.pairs))))
+    ljac, mapped = ir(x)
+    @test LogDensityProblems.logdensity(wrapped, x) ≈
+          ljac + LogDensityProblems.logdensity(mixed_problem, mapped) atol=1e-10
+    @test [r.family for r in adaptive_centering_controls(wrapped, mixed)] ==
+          vcat(fill(:car, length(ir.pairs) - 9), fill(:cdar, 9))
     # A car field that only an omitted response reads is emitted in generated
     # quantities: it has no cell, and a model left without cells names it.
     omitted = SBBRMI(@brm(begin

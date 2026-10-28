@@ -173,6 +173,25 @@ function _joint_car_problem(; learned=false)
                    d)
 end
 
+# cdar walk cells after ordinary, HSGP and car cells in the joint wrapper (the
+# dispatcher refuses walks beside total/S2Z cells, so there are none here).
+function _joint_cdar_problem(; learned=false)
+    blocks, o = _ordinary_blocks()
+    M = 12
+    hsgp = BRM._HSGPAdaptiveCenteringBlock(:hsgp, :gp_x, zeros(M), collect(o .+ (1:M)),
+        [o + M + 1], [0.0], [Inf], o + M + 2, 0.0, Inf,
+        reshape([(pi * j / 8)^2 for j in 1:M], M, 1), Float64[])
+    car, d = _car_blocks(o + M + 2)
+    P, W = 4, 6
+    walk = BRM._CDARAdaptiveCenteringBlock(:mu, :cdar_t, P, W, collect(d .+ (1:P*W)),
+        d + P * W + 1, 0.0, Inf, d + P * W + 2, 0.0, 1.0, [1.0, 1.5, 0.7, 1.2])
+    build = learned ? AC_EXT._adaptive_ordered_centering_reparametrizer :
+        AC_EXT._adaptive_joint_centering_reparametrizer
+    _with_controls(build(blocks, [hsgp], BRM.R2D2AdaptiveCenteringBlock[],
+                         AC_EXT._NO_SCALAR_CELLS, car; cdar_blocks=[walk])...,
+                   d + P * W + 2)
+end
+
 # Grouped HSGP level cells (`BRM._HSGPLevelAdaptiveCenteringBlock`) after
 # ordinary and HSGP cells in the joint wrapper: a sampled level correlation
 # over four levels with per-level amplitudes (`intercept + sd * z[g]`), and a
@@ -236,6 +255,8 @@ const _CASES = ("ordinary" => _ordinary_problem, "joint" => _joint_problem,
                 "cdar" => _cdar_problem, "scalar" => _scalar_problem,
                 "car" => _car_problem, "joint_car" => _joint_car_problem,
                 "learned_order_car" => () -> _joint_car_problem(; learned=true),
+                "joint_cdar" => _joint_cdar_problem,
+                "learned_order_cdar" => () -> _joint_cdar_problem(; learned=true),
                 "joint_hsgp_levels" => _joint_level_problem,
                 "learned_order_hsgp_levels" => () -> _joint_level_problem(; learned=true))
 

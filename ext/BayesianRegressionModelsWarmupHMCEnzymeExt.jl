@@ -207,7 +207,8 @@ function LogDensityProblems.logdensity_and_gradient(
     x::AbstractVector,
 ) where {N,P,B}
     state = first(problem.reparametrizer.pairs).second.args[1].state
-    if state.n_hsgp + state.n_level + state.n_scalar + length(state.car.sources) == 0 &&
+    if state.n_hsgp + state.n_level + state.n_scalar + state.n_car +
+            length(state.cdar.sources) == 0 &&
             !any(AC_EXT._block_mixed, state.ranef.blocks)
         return _blockwise_logdensity_and_gradient(problem, state.ranef, x)
     end
