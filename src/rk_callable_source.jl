@@ -23,7 +23,9 @@ of the emission module. Closures, anonymous functions and callable objects
 receive the generic `brm_value_function`.
 
 The provider receives no values, lowered plan or derivative. It supplies its
-own native mathematics under the caller's source namespace. An entry cannot
+own native mathematics, evaluated in the build's own module with only the
+names `_rk_observation_source!` lists; bind any other function it calls as a
+separately named leaf. An entry cannot
 also be bound, and rebinding the original callable as its own leaf is refused.
 Providers sharing a helper may each append it: an equal definition (source
 locations aside) under one name is emitted once, at its first position, while
