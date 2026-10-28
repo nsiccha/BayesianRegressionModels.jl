@@ -256,7 +256,8 @@ end
     d = brm_descriptor(sb)
     # The completed column, its free entry and the grouped entries' coordinates.
     @test !isnothing(brm_output(d, :v))
-    @test !isempty(brm_outputs(d; logical=:v_y_shares))
+    @test any(o -> o.name === :v_y_shares && o.kind === :parameter, d.outputs)
+    @test any(o -> o.name === :v_y_free && o.kind === :parameter, d.outputs)
     r = brm_description(d)
     @test r.complete
     @test any(p -> occursin("known total", p), r.prose)
