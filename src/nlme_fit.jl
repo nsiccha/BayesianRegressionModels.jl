@@ -113,8 +113,9 @@ function _brm_nlme_crossed_block(record, values, backend)
     margins = _brm_nlme_margins(record)
     if record.kind === :stratified_ranef
         strata = Any[_rk_grouping_levels(backend.plan.columns[record.by])...]
-        stratum = _brm_nlme_level_strata(backend.plan.columns[record.group],
-            backend.plan.columns[record.by], levels, strata, record)
+        stratum = _brm_level_strata(backend.plan.columns[record.group],
+            backend.plan.columns[record.by], levels, strata, record;
+            caller="brm_nlme_estimates")
         factors = [_brm_nlme_natural_factor(values, record, K, s) for s in eachindex(strata)]
         effects = reduce(vcat, (z[g:g, :] * factors[stratum[g]]' for g in eachindex(levels));
             init=zeros(0, K))
