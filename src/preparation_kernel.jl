@@ -100,25 +100,23 @@ end
 # entry no cell observes would be an observation carried into the fit
 # unconditioned (`_brm_kernel_unobserved_entries`). Each cell holds its rows
 # ascending. The RK graph computes this on every call of a reader whose design
-# is a runtime input, so it finds each row's cell once and sizes every cell
-# before filling it.
+# is a runtime input, so it builds the label lookup once, counts every cell's
+# rows and then fills each cell, allocating nothing per row beyond the cells.
 function _brm_kernel_ragged_partition(a_name::Symbol, grp_name::Symbol,
                                      ev_vals::AbstractVector,
                                      subject_vals::AbstractVector;
                                      prefix="BRM kernel preparation", observed::Bool=false)
     _brm_kernel_check_missing_labels(a_name, grp_name, ev_vals; prefix)
-    cell = _brm_label_positions(ev_vals, subject_vals)
+    lookup = _brm_label_lookup(ev_vals, subject_vals)
     counts = zeros(Int, length(subject_vals))
-    for i in cell
-        i == 0 || (counts[i] += 1)
-    end
-    observed && sum(counts) != length(cell) &&
-        _brm_kernel_unobserved_entries(a_name, grp_name, ev_vals, cell; prefix)
+    _brm_each_label_position((_, i) -> i == 0 || (counts[i] += 1), ev_vals, lookup)
+    observed && sum(counts) != length(ev_vals) &&
+        _brm_kernel_unobserved_entries(a_name, grp_name, ev_vals,
+            _brm_label_positions(ev_vals, subject_vals); prefix)
     rows = [Vector{Int}(undef, n) for n in counts]
     fill!(counts, 0)
-    for (r, i) in enumerate(cell)
-        i == 0 || (rows[i][counts[i] += 1] = r)
-    end
+    _brm_each_label_position((r, i) -> i == 0 || (rows[i][counts[i] += 1] = r),
+        ev_vals, lookup)
     rows
 end
 
@@ -169,37 +167,53 @@ function _brm_labels_name_cells(values::AbstractVector, labels::AbstractVector)
     !unknown[]
 end
 
-# Calls `f(row, position)` for each value. Machine-integer labels over a
-# compact range index a dense table; any others a hash table keyed by the
-# labels' own element type.
-function _brm_each_label_position(f, values::AbstractVector{<:Base.BitInteger},
-                                  labels::AbstractVector{<:Base.BitInteger})
-    if isempty(labels)
-        for r in eachindex(values)
-            f(r, 0)
-        end
-        return
-    end
+# Where each label sits in `labels`, built once for every walk over the
+# values. Machine-integer labels over a compact range index a dense table; any
+# others a hash table keyed by the labels' own element type.
+struct _BRMDenseLabels{T}
+    table::Vector{Int}
+    lo::T
+    hi::T
+end
+struct _BRMHashedLabels{K}
+    position::Dict{K,Int}
+end
+function _brm_label_lookup(values::AbstractVector{<:Base.BitInteger},
+                           labels::AbstractVector{<:Base.BitInteger})
+    T = eltype(labels)
+    # No label: every value lies outside the empty range.
+    isempty(labels) && return _BRMDenseLabels{T}(Int[], one(T), zero(T))
     lo, hi = extrema(labels)
     span = Int128(hi) - Int128(lo) + 1
-    span <= 4 * length(labels) + 64 || return _brm_each_label_position_hashed(f, values, labels)
+    span <= 4 * length(labels) + 64 || return _brm_hashed_labels(labels)
     table = zeros(Int, Int(span))
     for (i, v) in enumerate(labels)
         table[Int(Int128(v) - lo) + 1] = i
     end
-    for (r, v) in enumerate(values)
-        f(r, lo <= v <= hi ? table[Int(Int128(v) - lo) + 1] : 0)
-    end
+    _BRMDenseLabels{T}(table, lo, hi)
 end
-_brm_each_label_position(f, values::AbstractVector, labels::AbstractVector) =
-    _brm_each_label_position_hashed(f, values, labels)
-# Rows usually arrive grouped by label, so a row repeating the previous row's
-# label reuses its lookup.
-function _brm_each_label_position_hashed(f, values, labels)
+_brm_label_lookup(values::AbstractVector, labels::AbstractVector) = _brm_hashed_labels(labels)
+function _brm_hashed_labels(labels)
     position = Dict{eltype(labels),Int}()
     for (i, v) in enumerate(labels)
         position[v] = i
     end
+    _BRMHashedLabels(position)
+end
+
+# Calls `f(row, position)` for each value.
+_brm_each_label_position(f, values::AbstractVector, labels::AbstractVector) =
+    _brm_each_label_position(f, values, _brm_label_lookup(values, labels))
+function _brm_each_label_position(f, values, lookup::_BRMDenseLabels)
+    (; table, lo, hi) = lookup
+    for (r, v) in enumerate(values)
+        f(r, lo <= v <= hi ? table[Int(Int128(v) - lo) + 1] : 0)
+    end
+end
+# Rows usually arrive grouped by label, so a row repeating the previous row's
+# label reuses its lookup.
+function _brm_each_label_position(f, values, lookup::_BRMHashedLabels)
+    position = lookup.position
     isempty(values) && return
     previous = first(values)
     at = get(position, previous, 0)
@@ -385,6 +399,18 @@ end
 function _brm_ragged_rows_graph(x, group, groups, cell, cells, axis_names, axes)
     ev_vals, labels = _brm_ragged_rows_labels(x, group, groups, cell, cells, axis_names, axes)
     _brm_kernel_ragged_partition(x, group, ev_vals, labels; prefix="RK backend")
+end
+# Another column read through a join whose partition `rows` an earlier graph
+# statement computed (`brm_ragged_rows` or `brm_ragged_rows_ordered` over the
+# same group, cell and order columns). `names` is `[x, group, axes...]`; `x`'s
+# axes are checked against `groups` as `brm_ragged_rows` checks them, and the
+# partition is returned as it is, so the graph partitions each join once
+# however many columns its cells read through it.
+function brm_ragged_rows_shared(rows, names, groups, axes...)
+    _brm_kernel_check_ragged_axis(names[1], names[2],
+        ((names[k + 2], length(axes[k])) for k in eachindex(axes)), length(groups);
+        prefix="RK backend")
+    rows
 end
 # Refuses what `brm_ragged_rows` refuses (`brm_ragged_rows_ordered` given
 # `order` and its `times`), with the same messages, without building the

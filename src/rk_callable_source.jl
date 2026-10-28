@@ -92,7 +92,7 @@ const _RK_SOURCE_IMPORTS = (
         :brm_level_indices, :brm_dummy,
         :brm_t2_fit, :brm_tps_fit, :brm_tps_apply,
         :brm_panel_slice, :brm_flatten_cells, :brm_invprobit, :brm_invcloglog,
-        :brm_ragged_rows, :brm_ragged_rows_ordered))
+        :brm_ragged_rows, :brm_ragged_rows_ordered, :brm_ragged_rows_shared))
 
 # RKPPL vocabulary that Base, Core, Distributions and LogExpFunctions do not
 # define. RKPPL reads these heads by name whatever the model module binds

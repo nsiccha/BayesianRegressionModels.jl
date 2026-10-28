@@ -1265,7 +1265,7 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     # a bound input.
     graph_partition(input) = input.kind === :gather &&
         get(input, :partition, nothing) !== nothing
-    for input in values(inputs)
+    for input in slice.inputs
         graph_partition(input) && _rk_emit_kernel_partition!(statements, input)
     end
     range = axis.kind !== :gather ? axis.source :
@@ -1371,19 +1371,46 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
 end
 
 # `<rows> = brm_ragged_rows([x, group, cell, axes...], group, cell, axes...)`
-# (`brm_ragged_rows_ordered` with `order=`), once per program. A partition
-# without a graph source stays a planned input.
+# (`brm_ragged_rows_ordered` with `order=`), once per join: a column read
+# through a join (its group, cell and order columns) that an earlier statement
+# of the program already partitions reads that partition,
+# `<rows> = brm_ragged_rows_shared(<earlier rows>, [x, group, axes...], group, axes...)`,
+# which checks only its own axes. A cell reading several columns through one
+# `groups(g => labels)` binding thus computes the partition once per
+# evaluation, not once per column. A partition without a graph source stays a
+# planned input.
 function _rk_emit_kernel_partition!(statements, input)
     source = get(input, :partition, nothing)
     source === nothing && return
     any(s -> Meta.isexpr(s, :(=)) && first(s.args) === input.rows, statements) && return
     ordered = source.order !== nothing
+    key = (source.group, source.cell, source.order)
+    earlier = findfirst(s -> _rk_partition_join(s) == key, statements)
+    if earlier !== nothing
+        push!(statements, Expr(:(=), input.rows, Expr(:call, :brm_ragged_rows_shared,
+            first(statements[earlier].args),
+            Expr(:vect, QuoteNode.(Symbol[source.x, source.group, source.axes...])...),
+            source.group, source.axes...)))
+        return
+    end
     names = Symbol[source.x, source.group, source.cell,
         (ordered ? (source.order,) : ())..., source.axes...]
     push!(statements, Expr(:(=), input.rows, Expr(:call,
         ordered ? :brm_ragged_rows_ordered : :brm_ragged_rows,
         Expr(:vect, QuoteNode.(names)...), source.group, source.cell,
         (ordered ? (source.order,) : ())..., source.axes...)))
+end
+
+# The join `(group, cell, order)` a partition statement computes, `nothing`
+# for any other statement (and for a shared read, which computes none).
+function _rk_partition_join(statement)
+    Meta.isexpr(statement, :(=), 2) && Meta.isexpr(statement.args[2], :call) ||
+        return nothing
+    call = statement.args[2]
+    head = first(call.args)
+    head === :brm_ragged_rows && return (call.args[3], call.args[4], nothing)
+    head === :brm_ragged_rows_ordered && return (call.args[3], call.args[4], call.args[5])
+    nothing
 end
 
 # A cell statement as the plate reads it: each name in `reads` (a per-subject
