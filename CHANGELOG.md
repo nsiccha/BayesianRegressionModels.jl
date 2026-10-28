@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.23
+
+- `brm_coordinate_transport` pairs grouped HSGP terms, `hsgp(x...; by = g)`,
+  so an RKBRMI fit's draws (`brm_svi_fit`, `brm_two_stage_fit`, a cut fit, …)
+  reach SBBRMI's constrained names and every reader that takes them:
+  `brm_multigroup_coherence` and `brm_multigroup_field` for
+  `cor = multigroup((x, y); k)`, `brm_ranef_draws`, `population_draws`. Paired:
+  the length scale and amplitude, or a hyper-predicted one's intercept,
+  level-effect scale and level effects (`log(sd(hsgp(x))) ~ 1 + (1 | g)`) by
+  level label; the term's own spatial scale under `multigroup((x, y); k)`; and
+  the standardized weights by level label and basis function, or, under
+  `cor = multigroup((x, y), …)`, by inducing point and basis function. `cor =
+  Omega`, `multigroup(Omega, tau)` and declared `lambda` or inducing positions
+  pair as their own declarations. `brm_nlme_joint_map` and the Stan subject-draw
+  targets still refuse such a model. Snag `read-brm-svi-fit-bb7a9be0`.
+
 ## 0.2.22
 
 - A model description covers the comparisons `==`, `!=`, `<`, `<=`, `>` and

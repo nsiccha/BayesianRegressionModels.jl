@@ -52,8 +52,10 @@ function _rk_ast_hsgp_hyper_prior(options, hyper, bindings, taken)
         _rk_ast_declared_prior(prior, bindings, taken) : nothing
 end
 
-# The hyperparameter's value, and its per-group effects `(; scale, z)` when
-# its authored predictor has a `(1 | g)` term (`nothing` otherwise).
+# The hyperparameter's value, its per-group effects `(; scale, z)` when its
+# authored predictor has a `(1 | g)` term (`nothing` otherwise), and the local
+# it is sampled as: the hyperparameter itself, or its hyper-predictor's
+# intercept (`nothing` for a known value or an intercept-free predictor).
 function _rk_ast_hsgp_hyper!(block, options, hyper, prior, floor, G)
     stated = hyper === :length_scale ? options.rho_stated : options.sigma_stated
     plans = options.hyper_plans
@@ -63,11 +65,13 @@ function _rk_ast_hsgp_hyper!(block, options, hyper, prior, floor, G)
         value = _rk_block_local!(block, stem)
         hyper === :length_scale && options.rho_truncated &&
             (prior = Expr(:call, :restricted, prior, floor, Inf))
-        push!(block.statements, _rk_ast_hyper_statement(value, prior))
-        return value, nothing
+        statement = _rk_ast_hyper_statement(value, prior)
+        push!(block.statements, statement)
+        return value, nothing, Meta.isexpr(statement, :call) ? value : nothing
     end
     plan = plans[position]
     parts = Any[]
+    beta = nothing
     if plan.intercept
         beta = _rk_block_local!(block, string(stem, "_Intercept"))
         push!(block.statements, Expr(:call, :~, beta,
@@ -92,14 +96,16 @@ function _rk_ast_hsgp_hyper!(block, options, hyper, prior, floor, G)
     expression = _rk_ast_dotted(:exp, eta)
     hyper === :length_scale && (expression = _rk_ast_dotted(:max, expression, floor))
     push!(block.statements, Expr(:(=), value, expression))
-    value, ranef
+    value, ranef, beta
 end
 
 # Grouped or hyper-predicted HSGP: one block allocating the hyperparameters,
 # their group-level effects and the basis weights, returning the summand. Also
 # returns the block's sampled locals that its coordinate record names: the
 # standardized weights `z` (one row per level, or per point of a multigroup
-# coordinate field) and each hyperparameter's group effects (`hypers`).
+# coordinate field), each hyperparameter's group effects (`hypers`), the local
+# each hyperparameter is sampled as (`scales`: itself, or its hyper-predictor's
+# intercept) and a multigroup coordinate field's own spatial scale (`lambda`).
 function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, bindings)
     options = term.options
     G = get(options, :n_groups, 1)
@@ -117,9 +123,10 @@ function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, 
         _rk_block_argument!(block, :floor, floors)
     group_index = grouped ? _rk_block_argument!(block, :group_index, options.group_index) :
         nothing
-    rho, rho_effects = _rk_ast_hsgp_hyper!(block, options, :length_scale, rho_prior,
-        floor, G)
-    sigma, sigma_effects = _rk_ast_hsgp_hyper!(block, options, :sd, sigma_prior, floor, G)
+    rho, rho_effects, rho_sampled = _rk_ast_hsgp_hyper!(block, options, :length_scale,
+        rho_prior, floor, G)
+    sigma, sigma_effects, sigma_sampled = _rk_ast_hsgp_hyper!(block, options, :sd,
+        sigma_prior, floor, G)
     z = _rk_block_local!(block, :z)
     # A periodic extent reads its prepared basis argument.
     extent = _rk_ast_hsgp_substitute(extent, Dict(arguments))
@@ -133,7 +140,9 @@ function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, 
     push!(block.statements, Expr(:(=), value, _rk_ast_hsgp_value_graph!(definitions,
         term, taken, arguments, sigma, rho, weights_value; group_index, multigroup)))
     _rk_ast_block_call!(definitions, taken, "brm_grouped_hsgp", block, value),
-        (; weights=z, hypers=(length_scale=rho_effects, sd=sigma_effects))
+        (; weights=z, hypers=(length_scale=rho_effects, sd=sigma_effects),
+           scales=(length_scale=rho_sampled, sd=sigma_sampled),
+           lambda=isnothing(multigroup) ? nothing : get(multigroup, :lambda, nothing))
 end
 
 # The level weights of a grouped HSGP's `cor=` (src/level_correlation.jl).
@@ -162,8 +171,11 @@ function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMMultigroupCoordinates, op
                   for (j, column) in enumerate(options.coordinate_columns)]
     positions = Any[_rk_block_argument!(block, Symbol(:position_, j), column)
                     for (j, column) in enumerate(get(options, :position_columns, ()))]
-    lambda = isnothing(lc.lambda) ? _rk_multigroup_own_lambda!(block, lc) :
+    own = isnothing(lc.lambda)
+    lambda = own ? _rk_multigroup_own_lambda!(block, lc) :
         _rk_block_argument!(block, :lambda_level, lc.lambda)
+    # The term's own spatial scale is a sampled local of the block.
+    own_lambda = own ? (; lambda) : (;)
     formals = [Symbol(:coordinate_, j) for j in eachindex(columns)]
     if !isempty(lc.positions)
         position_formals = [Symbol(:position_, j) for j in eachindex(positions)]
@@ -174,7 +186,7 @@ function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMMultigroupCoordinates, op
                 positions_level, lambda_level)
         end
         return (z, (; weights, formals=[formals; position_formals; :lambda_level],
-                    values=Any[columns; positions; lambda]))
+                    values=Any[columns; positions; lambda], own_lambda...))
     end
     method = _brm_multigroup_method_code(lc.method)
     weights = quote
@@ -183,7 +195,8 @@ function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMMultigroupCoordinates, op
         brm_hsgp_multigroup_coordinate_weights(z, omega2, rho, coordinates_level,
             grid_level, lambda_level, $method)
     end
-    (z, (; weights, formals=[formals; :lambda_level], values=Any[columns; lambda]))
+    (z, (; weights, formals=[formals; :lambda_level], values=Any[columns; lambda],
+           own_lambda...))
 end
 
 # `multigroup((x, y); k)`: the term's own spatial scale, with SBBRMI's prior
