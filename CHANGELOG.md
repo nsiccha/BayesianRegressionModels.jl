@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.20
+
+- Long-format data with a plate over each subject's rows,
+  `@plate for p in groups(subject; order = t)`, have per-subject cells:
+  `brm_nlme_loglikelihood`, `brm_nlme_loglikelihood_and_gradient` and
+  `brm_svi_fit` evaluate one subject's cell. The cell's densities (its `Normal`
+  entries, or an `AR1Normal` series) belong to the subject owning the cell's
+  rows. Before, per-subject cells needed one row of the grouping column per
+  subject, and an `AR1Normal` cell was refused as having densities that cannot
+  be attributed to subjects. An `AR1Normal` observation is not an independent
+  Normal one, so such a model declares no Gaussian observations.
+- The refusal for coordinates without an NLME role names the declarations that
+  own them instead of pointing at `mm(...)`. Snag `brm-svi-fit-refu-be4efadf`.
+
 ## 0.2.19
 
 - On RKBRMI, the graph partitions each ragged join of an `@plate for` cell

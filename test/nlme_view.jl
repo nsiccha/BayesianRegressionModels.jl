@@ -405,6 +405,26 @@ end
     @test occursin("2 grouping columns", err.message)
 end
 
+@stestset "an uncovered declaration is named in the refusal" begin
+    # The refusal used to blame `mm(...)` for any coordinate without a record
+    # (snag brm-svi-fit-refu-be4efadf); it names the owning declarations.
+    data = (; subject=repeat(["a", "b", "c"], 4), x=collect(range(-0.9, 0.9; length=12)),
+        y=[0.1, -0.25, 0.4, 0.8, 0.3, -0.1, 0.2, 0.5, -0.4, 0.0, 0.6, -0.2])
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + s(x) + (1 | subject)
+        y ~ Normal(mu, sigma)
+    end
+    err = try brm_nlme_view(RKBRMI(brmi)); nothing catch e; e end
+    @test err isa BRMNLMEViewError
+    msg = err.message
+    roots = strip.(split(match(r"coordinate\(s\) of (.*?) are not covered", msg)[1], ", "), '`')
+    coordinates = split(match(r"inventory: (.*?)\. The view reads", msg)[1], ", ")
+    @test !isempty(coordinates)
+    @test Set(first.(split.(coordinates, '.'))) == Set(roots)
+    @test !occursin("must use a plain", msg)
+end
+
 @stestset "lockstep per-subject log-likelihoods and gradients match an oracle" begin
     backend = RKBRMI(nlme_plate_pk(NLME_PLATE_DATA))
     m = brm_nlme_model(backend; ad_backend=NLME_AD)
