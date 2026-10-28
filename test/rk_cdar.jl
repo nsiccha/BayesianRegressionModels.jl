@@ -124,14 +124,23 @@ end
     check_unit_problems(m, Xoshiro(4))
 end
 
-@stestset "NLME view: a cor= across the units keeps the walk shared" begin
+@stestset "NLME view: a cor= across the units, or shared_groups, keeps the walk shared" begin
     rk = RKBRMI(across_model())
     v = brm_nlme_view(rk; NESTED...)
     @test cdar_family(v) === nothing
     walk = findall(n -> startswith(String(n), "cdar_mu_year."), v.coordinates)
     @test length(walk) == 2 + 24 && all(i -> v.role[i] === :shared_latent, walk)
-    # Without `nested_groups` the districts name no subject: shared too.
+    # Without `nested_groups` the districts name no subject: shared too, and
+    # so when `shared_groups` names them.
     @test cdar_family(brm_nlme_view(RKBRMI(walk_model()))) === nothing
+    v = brm_nlme_view(RKBRMI(walk_model()); subject_group=:region, shared_groups=(:kreis,))
+    @test cdar_family(v) === nothing
+    walk = findall(n -> startswith(String(n), "cdar_mu_year."), v.coordinates)
+    @test length(walk) == 2 + 24 && all(i -> v.role[i] === :shared_latent, walk)
+    # refused: a grouping is owned by one subject or crossed with the subjects,
+    # never both (the `shared_groups` contract, snag crossed-grouping-39d39fcc).
+    @test_throws "name it in one" brm_nlme_view(RKBRMI(walk_model());
+        subject_group=:region, nested_groups=(kreis=:region,), shared_groups=(:kreis,))
 end
 
 @stestset "NLME view: a walk grouped by the units" begin
