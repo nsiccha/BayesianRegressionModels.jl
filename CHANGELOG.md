@@ -29,6 +29,13 @@ instead of failing at run time.
   Enzyme and DifferentiationInterface. Models `brm_nlme_view` does not
   partition into units, and an SBBRMI with exact total-coefficient blocks,
   are refused with the reason.
+- `brm_laplace_problem(rk; structured = :auto)` no longer gives the
+  row-structured Laplace to a model with observations that are not regression
+  responses: a `@plate` cell's, or one whose distribution reads a model value
+  (`y ~ Normal(m, sigma)` with `m = …`). The row structure has no terms for
+  them, so it was built without them, a marginal that left those observations
+  out. Such models take the whole-model Laplace; `structured = true` refuses
+  them with the reason.
 
 ## 0.2.42
 
