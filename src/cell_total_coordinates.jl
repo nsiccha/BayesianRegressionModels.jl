@@ -460,6 +460,23 @@ function _brm_missing_totals(source, raw, missing_indices, spec; prefix)
         length(free), ends, residuals))
 end
 
+# Whether a completion's totals constrain any missing entry.
+_brm_mi_grouped(::Nothing) = false
+_brm_mi_grouped(t::_BRMMissingTotals) = !isempty(t.ends)
+
+# The layout of a completion's missing entries from the four data vectors,
+# as RKBRMI's data preparations compute it in the graph
+# (`brm_covariate_total_*`, statistical_models.jl): free and grouped row
+# indices, all of them in the plan's order, the groups' ends and residuals.
+function _brm_totals_layout(values, group, cells, totals)
+    spec = (; group=(; name=:group, values=group), cells=(; name=:cells, values=cells),
+        total=(; name=:total, values=totals))
+    ordered, t = _brm_missing_totals(:x, values, findall(ismissing, values), spec;
+        prefix="RK backend")
+    (; ordered, free=ordered[1:t.nfree], grouped=ordered[t.nfree+1:end],
+        ends=t.ends, residuals=t.residuals)
+end
+
 # The values of the grouped entries from their coordinates (`K - 1` per group
 # of `K`), and back (brm_start, the RK geometry, tests).
 function _brm_grouped_shares_values(y::AbstractVector{<:Real}, ends, residuals)
@@ -583,3 +600,18 @@ function _sb_bind_mi_totals!(data, source, plan)
     data[keys.residuals] = totals.residuals
     keys
 end
+
+# ---- RKBRMI: the law of the grouped entries ------------------------------------
+#
+# RKBRMI declares the grouped entries as one joint latent of the completion,
+# `y_shares[axes(rows, 1)] ~ _BRMGroupedShares{Family}(ends, residuals, args…)`
+# (rk_missing_values.jl): its packed coordinates are SBBRMI's `y_shares`, the
+# geometry maps them onto the entries (the ReactiveKernels extension), and the
+# density is the law at the entries. The family is a type parameter, as RKPPL
+# needs for an inferable density. RKPPL keeps a latent's density whether or
+# not anything reads it, so the residuals inform the law either way.
+struct _BRMGroupedShares{F,A<:Tuple}
+    args::A
+end
+(::Type{_BRMGroupedShares{F}})(ends, residuals, args...) where {F} =
+    _BRMGroupedShares{F,typeof(args)}(args)

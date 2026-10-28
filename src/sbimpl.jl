@@ -6203,16 +6203,16 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
                 "reordering or changing the mask would reassign fitted missing " *
                 "coordinates. Rebuild for a new fit or use freeze_constants=false."))
         end
-        _sb_mi_grouped(plan.totals) == _sb_mi_grouped(fitted_totals) || throw(ArgumentError(
+        _brm_mi_grouped(plan.totals) == _brm_mi_grouped(fitted_totals) || throw(ArgumentError(
             "sbimpl: reprocess: `mi($(e.raw_ref))::shares(…)`: the fit's groups " *
-            (_sb_mi_grouped(fitted_totals) ? "had" : "had no") * " missing entries and " *
-            "the replay's " * (_sb_mi_grouped(plan.totals) ? "have" : "have none") *
+            (_brm_mi_grouped(fitted_totals) ? "had" : "had no") * " missing entries and " *
+            "the replay's " * (_brm_mi_grouped(plan.totals) ? "have" : "have none") *
             "; that is another program: rebuild the model on this data"))
         new_data[key] = plan.observed_values
         new_data[fitted.observed_key] = plan.observed_indices
         new_data[fitted.missing_key] = plan.missing_indices
         union!(handled, (fitted.observed_key, fitted.missing_key))
-        _sb_mi_grouped(plan.totals) &&
+        _brm_mi_grouped(plan.totals) &&
             union!(handled, Base.values(_sb_bind_mi_totals!(new_data, e.raw_ref, plan)))
         new_preproc[key] = _sb_missing_preproc(plan, fitted.observed_key, fitted.missing_key)
     elseif e.kind === :missing_center || e.kind === :missing_standardize ||
@@ -9032,7 +9032,7 @@ function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
         (Expr(:call, :maybe_index, arg, indices) for arg in arg_names)...)
     # `mi(x)::shares(total, rows)` with a group that has missing entries
     # (cell_total_coordinates.jl): those entries are its residual times shares.
-    grouped = !isnothing(plan.totals) && !isempty(plan.totals.ends)
+    grouped = _brm_mi_grouped(plan.totals)
     grouped && _brm_check_shares_family(getf(rhs_e), :(mi($inner_name)))
     submodel = grouped ?
         Base.merge(_sb_mi_shares_response,
@@ -9078,7 +9078,6 @@ _sb_mi_replay_totals(t, df) = (; group=(; name=t.group, values=_sb_df_column(df,
 # others are grouped (the residuals may change with the data).
 _sb_mi_totals_layout(::Nothing) = nothing
 _sb_mi_totals_layout(t) = (t.nfree, t.ends)
-_sb_mi_grouped(t) = !isnothing(t) && !isempty(t.ends)
 
 # A Stan family token as a value a higher-order family takes (`brm_group_residuals`).
 _sb_stan_family(name::Symbol) = isdefined(StanBlocks, name) ? getfield(StanBlocks, name) :

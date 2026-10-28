@@ -40,6 +40,18 @@ totals_model(data) = @brm columns(data) begin
     m ~ 1 + log(v)
     y ~ Normal(m, 0.5)
 end
+# The same model with the completion's log as an assignment, the spelling
+# RKBRMI takes (a formula transform of a completed column is refused there,
+# todo `2026-10-28T12-58-58-902-1m9civj`).
+totals_assigned(data) = @brm columns(data) begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x
+    rows = groups(g => cells)
+    mi(v)::shares(tot, rows) ~ LogNormal(mu, sigma)
+    lv = log(v)
+    m ~ 1 + lv
+    y ~ Normal(m, 0.5)
+end
 # The same model with the rows written in place.
 totals_inline(data) = @brm columns(data) begin
     sigma ~ Exponential(1)
@@ -53,8 +65,19 @@ totals_gamma(data) = @brm columns(data) begin
     mu ~ 1 + x
     rows = groups(g => cells)
     mi(v)::shares(tot, rows) ~ Gamma(4.0, exp(mu) / 4.0)
-    m ~ 1 + log(v)
+    lv = log(v)
+    m ~ 1 + lv
     y ~ Normal(m, 0.5)
+end
+
+# Nothing reads the completion: the free entry integrates out and is a
+# generated draw, while the grouped entries still carry what the residuals say
+# about the law.
+unread_model(data) = @brm columns(data) begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x
+    rows = groups(g => cells)
+    mi(v)::shares(tot, rows) ~ LogNormal(mu, sigma)
 end
 
 const FOLDER = joinpath(tempdir(), "brm-mi-group-totals")
@@ -172,6 +195,7 @@ end
 @stestset "SBBRMI: the density at the constrained values, every group at its total" begin
     data = totals_data()
     for (model, label, law) in ((totals_model, "lognormal", (m, s) -> LogNormal(m, s)),
+            (totals_assigned, "assigned", (m, s) -> LogNormal(m, s)),
             (totals_inline, "inline", (m, s) -> LogNormal(m, s)),
             (totals_gamma, "gamma", (m, _) -> Gamma(4.0, exp(m) / 4.0)))
         c = compiled(model(data), label)
@@ -191,16 +215,6 @@ end
             @test all(isfinite, gradient)
         end
     end
-end
-
-# Nothing reads the completion: the free entry integrates out and is a
-# generated draw, while the grouped entries still carry what the residuals say
-# about the law.
-unread_model(data) = @brm columns(data) begin
-    sigma ~ Exponential(1)
-    mu ~ 1 + x
-    rows = groups(g => cells)
-    mi(v)::shares(tot, rows) ~ LogNormal(mu, sigma)
 end
 
 @stestset "SBBRMI: an unread completion keeps the residuals in the density" begin
@@ -235,6 +249,36 @@ end
     end
 end
 
+@stestset "descriptor, description and brm_start" begin
+    data = totals_data()
+    m = totals_assigned(data)
+    sb = SBBRMI(m; mod=@__MODULE__, total_groups=())
+    d = brm_descriptor(sb)
+    # The completed column, its free entry and the grouped entries' coordinates.
+    @test !isnothing(brm_output(d, :v))
+    @test !isempty(brm_outputs(d; logical=:v_y_shares))
+    r = brm_description(d)
+    @test r.complete
+    @test any(p -> occursin("known total", p), r.prose)
+    @test brm_description(d; texts=description_texts(:de)).complete
+    # The grouped entries keep their base coordinates: zero, equal shares of each residual.
+    stan = BRM.stan_instantiate(sb; path=joinpath(FOLDER, "start_" * string(hash(BRM.stan_code(sb)); base=16) * ".stan"))
+    names = BridgeStan.param_unc_names(stan.model)
+    u = brm_start(sb, stan.model, (; sigma = 0.5))
+    @test u[findfirst(==("sigma"), names)] ≈ log(0.5)
+    @test all(iszero, u[findall(n -> startswith(n, "v_y_shares"), names)])
+    rk = RKBRMI(m)
+    urk = brm_start(rk, (; sigma = 0.5))
+    rk_names = String.(coordinate_names(rk.model.layout))
+    @test length(urk) == length(rk_names)
+    @test all(iszero, urk[findall(n -> startswith(n, "v.y_shares"), rk_names)])
+end
+
+@stestset "VBRMI does not lower a completion with group totals" begin
+    # A backend without the lowering must refuse rather than drop the totals.
+    @test_throws Exception VBRMI(totals_model(totals_data()))
+end
+
 @stestset "SBBRMI: a real-valued law is refused" begin
     data = totals_data()
     message(f) = try f(); "" catch e; sprint(showerror, e) end
@@ -261,4 +305,53 @@ end
     other = copy(data.v); other[3] = missing
     @test occursin("same fitted missing-row positions",
         message(() -> reprocess(c.sb, merge(columns(data), (; v=other)))))
+end
+
+# RKBRMI's value and native Enzyme gradient against SBBRMI's through the
+# coordinate transport, and the printed RK source replays.
+function check_against_stan(brmi, label; points=3, scale=0.3, gradient=true)
+    rk = RKBRMI(brmi)
+    problem = rk_logdensity_problem(check_rk_source_roundtrip(rk);
+        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    c = compiled(brmi, label)
+    t = brm_coordinate_transport(rk, c.sb, String.(c.names))
+    rng = Xoshiro(17)
+    n = LogDensityProblems.dimension(problem)
+    @test n == length(c.names)
+    for _ in 1:points
+        u = scale .* randn(rng, n)
+        stan_value, stan_gradient = BridgeStan.log_density_gradient(c.stan.model,
+            brm_rk_to_stan(t, u); propto=false, jacobian=true)
+        if gradient
+            value, g = LogDensityProblems.logdensity_and_gradient(problem, u)
+            @test g ≈ brm_stan_to_rk(t, stan_gradient) atol=1e-9 rtol=1e-10
+        else
+            value = LogDensityProblems.logdensity(problem, u)
+        end
+        @test value ≈ stan_value atol=1e-10 rtol=1e-11
+        @test brm_check_coordinate_transport(t, rk, c.stan.model, u) isa NamedTuple
+    end
+    (; rk, c, t, problem)
+end
+
+@stestset "RKBRMI agrees with SBBRMI: value, gradient, transport" begin
+    data = totals_data()
+    for (model, label) in ((totals_assigned, "rk_lognormal"), (unread_model, "rk_unread"))
+        check_against_stan(model(data), label)
+    end
+    # A Gamma law: the value agrees, but its native Reverse gradient fails
+    # Enzyme's readonly proof (EnzymeMutabilityException), as it does for a plain
+    # `mi(v) ~ Gamma(…)` completion without totals: Enzyme snag
+    # `rkbrmi-gradient-519ec090`.
+    gamma = check_against_stan(totals_gamma(data), "rk_gamma"; gradient=false)
+    u = 0.3 .* randn(Xoshiro(19), length(gamma.c.names))
+    @test_broken try
+        LogDensityProblems.logdensity_and_gradient(gamma.problem, u)
+        true
+    catch
+        false
+    end
+    message(f) = try f(); "" catch e; sprint(showerror, e) end
+    @test occursin("is not built for", message(() ->
+        RKBRMI(totals_assigned(data); completions=:noncentered)))
 end

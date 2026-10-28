@@ -535,6 +535,8 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
     for observation in observations
         plan = _brm_missing_response_plan(observation.lhs; prefix="RK backend")
         plan === nothing && continue
+        # Grouped totals keep their completion in the density (`mi(x)::shares`).
+        _brm_mi_grouped(plan.totals) && return true
         _rk_mi_downstream(program, observation.key, plan.source) && return true
     end
     assignments = Set(op.name for op in program.operations if op.role === :assignment)
@@ -1018,11 +1020,16 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     for completion in plan.completions
         sampled = _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)
         # `declaration` holds the completion's sampled coordinates: the missing
-        # values, or their standardized draws when non-centered.
-        sampled === nothing || _rk_coordinate_record!(coordinates,
-            (; kind=:missing_value, target=completion.source,
-               declaration=Symbol(completion.source, ".", sampled),
-               noncentered=completion.noncentered))
+        # values, or their standardized draws when non-centered; with group
+        # totals, the free entries and the grouped entries' shares.
+        for local_name in something(sampled, ())
+            shares = completion.totals !== nothing && local_name === last(sampled)
+            _rk_coordinate_record!(coordinates,
+                (; kind=:missing_value, target=completion.source,
+                   declaration=Symbol(completion.source, ".", local_name),
+                   noncentered=completion.noncentered,
+                   bijection=shares ? :shares : nothing))
+        end
     end
     for observation in plan.observations
         # Observed in its kernel's plate cell.
@@ -1063,5 +1070,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         Iterators.flatten(values(kernel_outputs)))
     _rk_scalar_lone_intercepts(
         _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
-            _rk_observed_names(plan); retained=authored, coordinates), lone_intercepts)
+            _rk_observed_names(plan); retained=authored, coordinates,
+            densities=Set(c.source for c in plan.completions if c.totals !== nothing)),
+        lone_intercepts)
 end
