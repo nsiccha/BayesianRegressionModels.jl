@@ -182,15 +182,15 @@ function _level_blocks(offset)
     G, B = 4, 6
     effects = reshape(collect(o .+ (1:G*B)), G, B)
     o += G * B
-    cholesky = collect(o .+ (1:G * (G - 1) ÷ 2))
-    o = last(cholesky)
+    free = collect(o .+ (1:G * (G - 1) ÷ 2))
+    o = last(free)
     sigma = BRM._HSGPLevelScale(true, Int[], Float64[], Float64[], o + 1, o + 2, 0.0,
                                 Inf, collect(o + 3:o + 2 + G))
     o += 2 + G
     rho = BRM._HSGPLevelScale(false, [o + 1], [0.1], [Inf], 0, 0, 0.0, Inf, Int[])
     o += 1
     sampled = BRM._HSGPLevelAdaptiveCenteringBlock(:mu, :gp_xy, :g, collect(Any, 1:G),
-        effects, :parameter, cholesky, Float64[], sigma, rho, 0.0,
+        effects, :parameter, free, Float64[], sigma, rho, 0.0,
         hcat([(pi * j / 8)^2 for j in 1:B], [(pi * j / 5)^2 for j in 1:B]))
     G, B = 3, 5
     effects = reshape(collect(o .+ (1:G*B)), G, B)
