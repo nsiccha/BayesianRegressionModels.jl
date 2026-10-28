@@ -1354,9 +1354,13 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
     positionals = Any[]
     params = Symbol[]
     keys = Any[]
-    param_sources = Dict{Symbol,Any}()
+    # The names the cell binds itself, which no input name may take.
+    cell_locals = Set{Symbol}(stmt.args[1] for stmt in _brm_plate_flat_statements(stmts)
+        if Meta.isexpr(stmt, :(=), 2) && stmt.args[1] isa Symbol)
 
-    function add_input(source)
+    # `alias` names a second read of the same vector, `x[other[i]]` beside
+    # `x[rows[i]]`: each is its own gather, bound to its own cell name.
+    function add_input(source, alias=nothing)
         key = _brm_plate_input_key(source)
         found = findfirst(isequal(key), keys)
         found === nothing || return params[found]
@@ -1364,16 +1368,15 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
         param in output_set && error(
             "@brm: kernel `@plate` output `$param[$i]` also names a sliced input; " *
             "use a distinct output name")
-        if haskey(param_sources, param)
-            error(
-                "@brm: kernel `@plate` inputs `$(repr(param_sources[param]))` and " *
-                "`$(repr(source))` would both bind cell name `$param`; rename one " *
-                "source before the plate")
+        if param in params
+            param = something(alias, Symbol(param, :_, length(params) + 1))
+            while param in params || param in cell_locals || param in output_set
+                param = Symbol(param, :_)
+            end
         end
         push!(keys, key)
         push!(positionals, source)
         push!(params, param)
-        param_sources[param] = source
         param
     end
 
@@ -1439,14 +1442,15 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
                 "@brm: `$(sprint(Base.show_unquoted, ex))` reads the plate output " *
                 "`$name` at indices; a plate output has one value per cell, `$name[$i]`")
             read_grouping!(rows)
-            return add_input(_brm_plate_grouping_input(name, groupings[rows]))
+            return add_input(_brm_plate_grouping_input(name, groupings[rows]), Symbol(name, :_, rows))
         elseif indexed !== nothing
             idx, rows, target, zero = indexed
             read_grouping!(rows)
             read_grouping!(target)
             shown = sprint(Base.show_unquoted, ex)
             zero || push!(checks, :($_brm_check_indexin_zero($shown, $idx)))
-            return add_input(_brm_plate_indexin_input(idx, rows, target, groupings, shown))
+            return add_input(_brm_plate_indexin_input(idx, rows, target, groupings, shown),
+                Symbol(idx, :_, rows, :_, target))
         end
         if _brm_plate_indexed(ex, i)
             source = ex.args[1]
@@ -1470,6 +1474,25 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
     rewritten = Any[]
     bare_bindings = Dict{Symbol,Any}() # cell local => authored right-hand side
 
+    # A response observed through a binding has every entry in a cell
+    # (`0q8hcwq`), so a second binding observing it would observe every entry
+    # again. Reads through several bindings are independent gathers.
+    observed_through = Dict{Symbol,Symbol}() # response => the binding observing it
+    function observe!(lhs)
+        while Meta.isexpr(lhs, :ref, 2) && _brm_plate_binding_read(lhs, i, groupings) === nothing
+            lhs = lhs.args[1]
+        end
+        read = _brm_plate_binding_read(lhs, i, groupings)
+        read === nothing && return
+        name, rows = read
+        seen = get!(observed_through, name, rows)
+        seen === rows || error(
+            "@brm: kernel `@plate` cell observes `$name` through both `$seen` and " *
+            "`$rows`; a binding that observes a response places every entry in a " *
+            "cell, so the second would observe every entry of `$name` again. " *
+            "Observe `$name` through one binding.")
+    end
+
     # A `@scan` block keeps its shape: seeds, then one `for` loop of steps. Its
     # slice reads are rewritten like every other cell read; its `=`/`~` targets
     # are the scan's carried arrays and step locals, or (`y[i][t] ~ …`) entries
@@ -1490,6 +1513,7 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
             return Expr(:(=), rewrite(stmt.args[1]), rewrite(stmt.args[2]))
         elseif isxcall(stmt, :~)
             _brm_plate_check_observed(stmt.args[2], i, bare_bindings, output_set)
+            observe!(stmt.args[2])
             return Expr(:call, :~, rewrite(stmt.args[2]), rewrite(stmt.args[3]))
         end
         error(
@@ -1513,6 +1537,7 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
             end
         elseif isxcall(stmt, :~)
             _brm_plate_check_observed(stmt.args[2], i, bare_bindings, output_set)
+            observe!(stmt.args[2])
             push!(rewritten, Expr(:call, :~, rewrite(stmt.args[2]), rewrite(stmt.args[3])))
         elseif _is_brm_scan(stmt)
             push!(rewritten, Expr(:macrocall, stmt.args[1:end-1]..., rewrite_scan(stmt.args[end])))

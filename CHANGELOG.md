@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.40
+
+- A `@plate` cell may read one vector through several `groups` bindings:
+  `eta[rows1[k]]` and `eta[rows2[k]]` read the same formula predictor or data
+  column at two row sets, each an independent gather, for example one sum per
+  class with a coefficient each. Before, `@brm` refused the second read
+  (`` would both bind cell name `eta`; rename one source before the plate ``),
+  and that rename was not reachable for a predictor. On SBBRMI each read now
+  gathers into its own data name, so a frozen `reprocess` replays both.
+  Snag `reading-one-form-4a7413e7`.
+
 ## 0.2.39
 
 - `RKBRMI` lowers a response location or scale computed inline from model
