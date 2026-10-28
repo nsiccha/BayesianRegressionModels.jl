@@ -486,7 +486,14 @@ end
 #
 # `y` holds every constrained group's coordinates, group after group; `ends`
 # are the groups' inclusive ends among the entries; the law's arguments are
-# already gathered onto the entries (or scalars).
+# already gathered onto the entries (or scalars). The coordinates carry no
+# density of their own (`flat()`): the groups' residuals are observed, and
+# their density given the coordinates is the law at the entries plus each
+# group's `sum(log.(x)) - log(residual)`, so the pair has the joint density of
+# the entries and their sums. Written as a latent with that density instead,
+# the coordinates would read as a prior no likelihood reaches whenever nothing
+# reads the completion, and StanBlocks would re-draw them, dropping what the
+# residuals say about the law.
 StanBlocks.@deffun begin
     brm_grouped_shares_values(y::vector[m], ends::int[G], totals::vector[G])::vector[m + G] = begin
         x = rep_vector(0., m + G)
@@ -508,29 +515,55 @@ StanBlocks.@deffun begin
         return x
     end
 
-    # The law at the entries plus each group's `sum(log.(x)) - log(total)`.
-    @lpxf brm_grouped_shares_lpdf(y::vector[m], family, ends::int[G], totals::vector[G], args...)::real = begin
-        x = brm_grouped_shares_values(y, ends, totals)
-        density(family, x, args...) + sum(log(x)) - sum(log(totals))
+    @lpxf brm_group_residuals_lpdf(r::vector[G], y::vector[m], family, ends::int[G],
+                                   rows::int[N], args...)::real = begin
+        x = brm_grouped_shares_values(y, ends, r)
+        density(family, x, args...) + sum(log(x)) - sum(log(r))
     end
-    brm_grouped_shares_lpdfs(y::vector[m], family, args...)::vector[m] =
-        rep_vector(brm_grouped_shares_lpdf(y, family, args...) / max(m, 1), m)
-    # The law conditioned on its group sums has no draw in closed form.
-    brm_grouped_shares_rng(family, ends::int[G], totals::vector[G], args...)::vector[ends[G] - G] = begin
-        @stan_assert false "brm_grouped_shares_rng: a draw of a `mi(x)::shares(total, rows)` completion is not built"
-        rep_vector(0.0, ends[G] - G)
+    # Group by group.
+    brm_group_residuals_lpdfs(r::vector[G], y::vector[m], family, ends::int[G],
+                              rows::int[N], args...)::vector[G] = begin
+        x = brm_grouped_shares_values(y, ends, r)
+        lp = pointwise(family, x, args...)
+        out = rep_vector(0., G)
+        start = 1
+        for k in 1:G
+            for j in start:ends[k]
+                out[k] = out[k] + lp[j] + log(x[j])
+            end
+            out[k] = out[k] - log(r[k])
+            start = ends[k] + 1
+        end
+        return out
+    end
+    # A new draw of the residuals: the groups' sums of new entries drawn from
+    # the law (`rows`, the entries' row indices, sizes the draw).
+    brm_group_residuals_rng(vector[G], y::vector[m], family, ends::int[G],
+                            rows::int[N], args...)::vector[G] = begin
+        draws = predictive(family, vector[N], args...)
+        out = rep_vector(0., G)
+        start = 1
+        for k in 1:G
+            for j in start:ends[k]
+                out[k] = out[k] + draws[j]
+            end
+            start = ends[k] + 1
+        end
+        return out
     end
 end
 
 # SBBRMI's completion with group totals: `_sb_mi_response` with the missing
 # entries split into free ones (`y_free`, the law as written) and the grouped
-# ones' coordinates (`y_shares`, `brm_grouped_shares`). Their values, free
-# first, are the completion's missing entries `y_mis` in `Jmis` order.
+# ones' coordinates (`y_shares`), whose law the observed `residuals` carry
+# (`brm_group_residuals`). Their values, free first, are the completion's
+# missing entries `y_mis` in `Jmis` order.
 _sb_mi_shares_response = StanBlocks.@slic begin
     n_free = num_elements(Jfree)
     n_shares = num_elements(Jgrp) - num_elements(residuals)
     y_free :: vector[n_free] ~ dummy()
-    y_shares :: vector[n_shares] ~ dummy()
+    y_shares :: vector[n_shares] ~ flat()
+    residuals ~ dummy()
     y_obs ~ dummy()
     y_mis = append_row(y_free, brm_grouped_shares_values(y_shares, ends, residuals))
     return mi_merge(y_obs, y_mis, Jobs, Jmis, num_elements(Jobs) + num_elements(Jmis))

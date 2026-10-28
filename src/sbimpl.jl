@@ -9037,8 +9037,8 @@ function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
     submodel = grouped ?
         Base.merge(_sb_mi_shares_response,
             Expr(:call, :~, :y_free, sliced(:Jfree)),
-            Expr(:call, :~, :y_shares, Expr(:call, brm_grouped_shares,
-                _sb_stan_family(stan_name), :ends, :residuals,
+            Expr(:call, :~, :residuals, Expr(:call, brm_group_residuals, :y_shares,
+                _sb_stan_family(stan_name), :ends, :Jgrp,
                 (Expr(:call, :maybe_index, arg, :Jgrp) for arg in arg_names)...)),
             Expr(:call, :~, :y_obs, sliced(:Jobs))) :
         Base.merge(_sb_mi_response,
@@ -9080,7 +9080,7 @@ _sb_mi_totals_layout(::Nothing) = nothing
 _sb_mi_totals_layout(t) = (t.nfree, t.ends)
 _sb_mi_grouped(t) = !isnothing(t) && !isempty(t.ends)
 
-# A Stan family token as a value a higher-order family takes (`brm_grouped_shares`).
+# A Stan family token as a value a higher-order family takes (`brm_group_residuals`).
 _sb_stan_family(name::Symbol) = isdefined(StanBlocks, name) ? getfield(StanBlocks, name) :
     error("sbimpl: internal: `$name` is no StanBlocks family token")
 _sb_stan_family(family) = family

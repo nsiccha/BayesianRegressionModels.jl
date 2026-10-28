@@ -193,6 +193,48 @@ end
     end
 end
 
+# Nothing reads the completion: the free entry integrates out and is a
+# generated draw, while the grouped entries still carry what the residuals say
+# about the law.
+unread_model(data) = @brm columns(data) begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x
+    rows = groups(g => cells)
+    mi(v)::shares(tot, rows) ~ LogNormal(mu, sigma)
+end
+
+@stestset "SBBRMI: an unread completion keeps the residuals in the density" begin
+    data = totals_data()
+    c = compiled(unread_model(data), "unread")
+    @test !any(n -> startswith(n, "v_y_free"), c.names)
+    @test count(n -> startswith(n, "v_y_shares"), c.names) == 3
+    rng = Xoshiro(7)
+    for _ in 1:4
+        u = 0.4 .* randn(rng, length(c.names))
+        values = constrained(c, u)
+        sigma = values["sigma"]
+        mu = values["pop_mu_beta_pop.1"] .+ values["pop_mu_beta_pop.2"] .* data.x
+        shares = [values["v_y_shares.$i"] for i in 1:3]
+        residuals = BRM.stan_data(c.sb)[:v_shares_residuals]
+        grouped = BRM._brm_grouped_shares_values(shares, [2, 5, 6], residuals)
+        rows = [1, 2, 6, 7, 8, 13]
+        observed = findall(.!data.gap)
+        expected = logpdf(Exponential(1), sigma) + log(sigma) +
+            sum(logpdf.(Normal(), [values["pop_mu_beta_pop.1"], values["pop_mu_beta_pop.2"]])) +
+            sum(logpdf.(LogNormal.(mu[observed], sigma), data.v[observed])) +
+            sum(logpdf.(LogNormal.(mu[rows], sigma), grouped)) + sum(log.(grouped)) - sum(log.(residuals))
+        @test BridgeStan.log_density(c.stan.model, u; propto=false) ≈ expected atol=1e-8 rtol=1e-12
+        # A predictive draw of the residuals, and of the completion with its free entry.
+        draw = Dict(zip(BridgeStan.param_names(c.stan.model; include_tp=true, include_gq=true),
+            BridgeStan.param_constrain(c.stan.model, u; include_tp=true, include_gq=true,
+                rng=BridgeStan.StanRNG(c.stan.model, 11))))
+        @test all(k -> draw["v_shares_residuals_gen.$k"] > 0, 1:3)
+        v = vector_of(draw, "v", length(data.v))
+        @test v[22] > 0
+        @test [sum(v[data.g .== k]) for k in data.cells] ≈ data.tot rtol=1e-12
+    end
+end
+
 @stestset "SBBRMI: a real-valued law is refused" begin
     data = totals_data()
     message(f) = try f(); "" catch e; sprint(showerror, e) end
