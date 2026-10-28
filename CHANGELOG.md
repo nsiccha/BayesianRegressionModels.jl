@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.39
+
+- A nested NLME model (`brm_nlme_model` with `subject_group` /
+  `nested_groups`) whose observations have subject cells now evaluates one
+  unit on its own cells: `brm_nlme_loglikelihood_and_gradient`,
+  `brm_nlme_unit_problem` and SAEM's per-subject population gradient take one
+  compact cell sampler set per distinct subject block length, as flat models
+  do, instead of a whole-model gradient with the other units' effects at zero.
+  `brm_two_stage_fit` therefore samples nested units on `threads` tasks (each
+  with its own samplers); before, a nested model sampled on one thread. Only
+  a nested model without subject cells keeps the whole-model route and one
+  thread. A unit's cost is its own cells' only as far as RK computes each
+  cell's reads at its rows (ReactiveKernels 0.1.6 with BRM's scalar totals
+  cells); a totals cell's gradient reads its `hcat` design from views, which
+  needs the Enzyme `dogfood` line, so on registered Enzyme such a model's unit
+  gradient raises `IllegalTypeAnalysisException` where it was slow before.
+
 ## 0.2.38
 
 - `RKBRMI` lowers `cdar(step; by=group, cor=C)`, the per-group stationary
