@@ -136,9 +136,12 @@ end
 
 @stestset "one unit's work stays flat as regions are added" begin
     # A region's value and gradient are its own, however many regions there
-    # are. Its gradient still evaluates the whole model: the totals and
-    # completed-covariate cells each compute whole-cohort values, so per-cell
-    # compact gradients would cost more. Capability gap, todo
+    # are. Its compact cell gradients (the ones `brm_svi_fit` takes) cost its
+    # own rows: a totals cell observes its one value per cell directly and RK
+    # computes the cell's reads at its rows (BRM todo 0ww46pb, ReactiveKernels
+    # 0.1.6, Enzyme dogfood for the `hcat` design read from views). The
+    # singular call still evaluates the whole model for a nested subject:
+    # capability gap, todo
     # BayesianRegressionModels:scaling-svi/todos/2026-10-25T22-21-35-231-182pl0l.
     measured = map((1, 3)) do k
         rk = RKBRMI(panel(replicate_panel(PANEL, k)); completions=:noncentered)
@@ -150,9 +153,35 @@ end
         η = 0.1 .* sin.(1:length(m.view.subject_coordinates[1]))
         gradient() = brm_nlme_loglikelihood_and_gradient(m, 1, θ, σ, η)
         gradient(); gradient()
-        (; result=gradient(), bytes=minimum(@allocated(gradient()) for _ in 1:3))
+        # Region 1's compact cell gradients, one cell group at a time.
+        t = BRM._brm_svi_target(m)
+        g = first(BRM._brm_nlme_prior_median_point(m))[t.globals]
+        w = t.work[t.of[1]]
+        w.active .= vcat(g, η)[t.order[1]]
+        cells = map(m.cell_query, t.samplers[t.of[1]]) do cell, sampler
+            run() = for p in cell.positions[1]
+                BRM._rk_nlme_compact_cell_value_and_gradient!(sampler,
+                    w.cell_gradient, m.unit, w.active, t.indices[1], p)
+            end
+            run(); run()
+            cell.names => minimum(@allocated(run()) for _ in 1:3)
+        end
+        gg, gz = zeros(length(t.globals)), zeros(length(η))
+        (; result=gradient(), bytes=minimum(@allocated(gradient()) for _ in 1:3),
+           cells, unit=(BRM._brm_svi_unit_term!(gg, gz, t, 1, g, η), copy(gg), copy(gz)))
     end
     @test measured[2].result[1] ≈ measured[1].result[1] rtol=1e-12
     @test measured[2].result[2] ≈ measured[1].result[2] rtol=1e-10
     @test_broken measured[2].bytes <= 1.5measured[1].bytes
+    # Every cell group, the totals included, costs the same at 3 and 9 regions.
+    # With the totals' former emission (`ones(length(total[i])) .* s` cells,
+    # observed through `flatten_cells`) the totals group grew 632,016 B ->
+    # 1,624,032 B from 3 to 9 regions; now it is 141,888 B at both.
+    @test first.(measured[2].cells) == first.(measured[1].cells) ==
+        ((:total,), (:x1_obs,))
+    for ((_, b1), (_, b3)) in zip(measured[1].cells, measured[2].cells)
+        @test b3 <= 1.1b1
+    end
+    @test measured[2].unit[1] ≈ measured[1].unit[1] rtol=1e-12
+    @test measured[2].unit[3] ≈ measured[1].unit[3] rtol=1e-10
 end
