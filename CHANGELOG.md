@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.41
+
+- `brm_nlme_view` (and `brm_nlme_model`, `brm_nlme_fit`, `brm_svi_fit`,
+  `brm_laplace_problem` and the other NLME entry points, which pass it on) take
+  a nested grouping's parent labels as a vector as well as by column name:
+  `nested_groups = (g = data.g_region,)`, row-aligned with `g`. A backend keeps
+  only the columns its formulas read, so a parent column no formula reads was
+  refused as absent; it is now passed as labels, which are checked as a column
+  is. By name, such a column is refused as unread, and the refusal shows the
+  labels spelling.
+
 ## 0.2.40
 
 - A `@plate` cell may read one vector through several `groups` bindings:

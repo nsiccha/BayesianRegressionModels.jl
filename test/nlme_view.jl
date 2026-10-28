@@ -744,3 +744,60 @@ end
         @test all(c -> view.subject[c] == i, block)
     end
 end
+
+@stestset "a nested grouping's parent labels need not be a column the model reads" begin
+    # `g_region` holds the labels of `region`, but no formula reads it, so the
+    # backend does not keep it: it is passed as labels, not by name (snag
+    # brm-nlme-view-ne-9971da9c).
+    g = repeat(["a", "b", "c", "d", "e", "f"], 3)
+    region_of = Dict("a" => "r1", "b" => "r1", "c" => "r2", "d" => "r2",
+        "e" => "r3", "f" => "r3")
+    data = (; y=collect(range(-1, 1; length=length(g))), g,
+        region=[region_of[x] for x in g], g_region=[region_of[x] for x in g])
+    backend = RKBRMI(@brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + (1 | region) + (1 | g)
+        y ~ Normal(mu, sigma)
+    end)
+    by_name = brm_nlme_view(backend; subject_group=:region, nested_groups=(g=:region,))
+    by_labels = brm_nlme_view(backend; subject_group=:region,
+        nested_groups=(g=data.g_region,))
+    @test by_labels.levels == ["r1", "r2", "r3"]
+    for field in (:levels, :coordinates, :role, :subject, :subject_coordinates,
+            :rows, :family_sizes, :subject_families, :subject_margins)
+        @test getfield(by_labels, field) == getfield(by_name, field)
+    end
+    # Every NLME entry point passes `nested_groups` to the view unchanged.
+    m_name = brm_nlme_model(backend; ad_backend=NLME_AD, subject_group=:region,
+        nested_groups=(g=:region,))
+    m_labels = brm_nlme_model(backend; ad_backend=NLME_AD, subject_group=:region,
+        nested_groups=(g=data.g_region,))
+    θ = fill(0.1, length(m_name.theta))
+    σ = fill(-0.5, length(m_name.sigma))
+    H = [collect(range(-0.3, 0.4; length=length(block))) .* i
+        for (i, block) in enumerate(m_name.view.subject_coordinates)]
+    values, gradients = brm_nlme_loglikelihoods_and_gradients(m_name, θ, σ, H)
+    @test brm_nlme_loglikelihoods_and_gradients(m_labels, θ, σ, H) ==
+        (values, gradients)
+    @test all(isfinite, values)
+    # refused: by name, the unread column resolves to nothing, because a model
+    # holds only the values it reads, not a data frame (user principle: BRM
+    # does not assume tabular data). The refusal says so and shows the labels
+    # spelling.
+    unread() = brm_nlme_view(backend; subject_group=:region,
+        nested_groups=(g=:g_region,))
+    @test_throws "`g_region` of `g` is not a column the model reads" unread()
+    @test_throws "nested_groups = (g = data.g_region,)" unread()
+    # Labels are checked as a column is. Refused: labels misaligned with `g`'s
+    # rows, naming no subject, or placing one level in two subjects are no
+    # ownership of `g`'s levels by the subjects.
+    nested_view(labels) = brm_nlme_view(backend; subject_group=:region,
+        nested_groups=(g=labels,))
+    @test_throws BRMNLMEViewError nested_view(data.g_region[2:end])
+    @test_throws BRMNLMEViewError nested_view(replace(data.g_region, "r3" => "r9"))
+    split = copy(data.g_region)
+    split[7] = "r2" # row 7 is level "a" of region "r1"
+    @test_throws BRMNLMEViewError nested_view(split)
+    # Refused: a String is neither a column name nor labels.
+    @test_throws BRMNLMEViewError nested_view("region")
+end
