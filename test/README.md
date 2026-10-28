@@ -100,15 +100,19 @@ and `binding-a-per-ce-e16efa8d`).
 
 `plate_level_axis_keywords.jl` checks a predictor read through a `@plate`
 grouping whose term keeps data off its rows: the levels' coordinates in
-`cor = multigroup((x, y))`, a known `cor = C` on `hsgp` and on `gr`, and
-`car(area; edges = (from, to))`. Each plate model's RKBRMI and SBBRMI
-(BridgeStan) density and gradient equal its plate-free twin's, the term as a
+`cor = multigroup((x, y))`, a known `cor = C` on `hsgp`, on `gr` and on
+`cdar`, and `car(area; edges = (from, to))`. Each plate model's RKBRMI and
+SBBRMI (BridgeStan) density and gradient equal its plate-free twin's (the
+`cdar` cases on SBBRMI only, since RKBRMI does not lower `cdar` yet; there
+RKBRMI is only checked to pass the row check), `cdar` summed per step through a
+`groups(t => steps)` binding equals the same `C` given by `constant(...)`, the term as a
 predictor of its own beside a random-effect predictor equals the term inside
 that predictor (on SBBRMI with `total_groups=()`, since under
 `total_groups=:auto` only the first keeps an exact-total block; that program
 is checked to evaluate), an RK
 replay keeps the density, and a covariate with one value per level is still
-refused as a row column (snag `rkbrmi-on-a-mode-0bd31c04`). Set
+refused as a row column (snags `rkbrmi-on-a-mode-0bd31c04`,
+`cdar-cor-matrix-c8278be6`). Set
 `BRM_PLATE_LEVEL_AXIS_RUNTIME=0` to skip the compiled-model sets.
 
 `fixed_ranef_scales.jl` checks random-effect scales and correlations held at

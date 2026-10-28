@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.32
+
+- A predictor holding `cdar(step; by = g, cor = C)` may be read through a
+  `@plate` grouping, as in `rows = groups(cell => cells)` with
+  `tot[k] ~ Normal(sum(exp.(lp[rows[k]])), sigma)`. `C` has one row and column
+  per level of `g`, not one entry per row of the predictor. Before, SBBRMI and
+  RKBRMI counted its `P × P` entries as rows and refused the predictor with
+  "`lp` read through `cell`: `lp` has 160000 entries (data vector `C`) …",
+  whether `C` was a data field or computed by `constant(...)`. `cdar`'s `cor`
+  is now skipped like `cor` on `gr` and `hsgp` (0.2.5). Snag
+  `cdar-cor-matrix-c8278be6`.
+
 ## 0.2.31
 
 - `mi(x)::shares(total, rows) ~ Law(…)` with `rows = groups(g => labels)`
