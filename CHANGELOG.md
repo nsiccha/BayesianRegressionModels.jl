@@ -284,7 +284,6 @@ instead of failing at run time.
   unit twice, so it costs about twice as much as before. Snag
   `brm-svi-fit-posd-0fcb769c`, todo `15id1zs`.
 
-
 ## 0.2.28
 
 - A flat grouped response (`y ~ Normal(m, sigma)` over interleaved rows, no
