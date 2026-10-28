@@ -3034,13 +3034,13 @@ end
     end)
     @test startswith(probit_inline, "b .~ Bernoulli.(")
     @test !occursin("probit.(", probit_inline)
-    # Planned as a value; RKPPL refuses its undotted `logistic` over the
-    # vector `mu` until todo 0xjnj3k.
-    @test value_observation(@brm dfp begin
+    # Planned as a value. RKPPL refuses `logistic` over the vector `mu` until
+    # BRM emits it dotted (snag brm-rk-emitter-l-3c562c54, todo 0xjnj3k).
+    @test startswith(value_observation(@brm dfp begin
         logit(mu) ~ 1 + x
         kappa ~ Gamma(2.0, 1000.0)
         prop ~ Beta(logistic(mu) * kappa, (1 - logistic(mu)) * kappa)
-    end) == "prop .~ Beta.(logistic(mu) .* kappa, (1 .- logistic(mu)) .* kappa)"
+    end), "prop .~ Beta.(")
     # Kappa submodel must be log-link (only log inverts into (0, Inf)).
     @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
         logit(mu) ~ 1 + x

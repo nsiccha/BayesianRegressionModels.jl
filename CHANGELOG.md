@@ -23,7 +23,7 @@ instead of failing at run time.
   A predictor read bare, or bare inside `logistic(eta)`, `TDist(nu)`, Gamma's
   `mu/alpha` or Beta's `mu*kappa` / `(1-mu)*kappa`, keeps its formula
   spelling. An inline count rate or mean (`Poisson`, `NegativeBinomial2`, …)
-  also needs a ReactiveKernelsPPL that lowers it (0.1.2, RK `4e2ed1c5a`);
+  also needs ReactiveKernelsPPL 0.1.2 (RK main `f9a5c9c41`) or later;
   earlier RKPPL refuses it with `broadcast the link`.
 
 ## 0.2.38

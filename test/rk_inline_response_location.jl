@@ -6,13 +6,12 @@
 # Both spellings are one model: SBBRMI emits the same density for them. RKBRMI
 # lowers an inline computed location on its value route, as it lowers an
 # assigned one; the formula route reads a linear predictor only bare or inside
-# its own link and shape spellings. ReactiveKernelsPPL still refuses an inline
+# its own link and shape spellings. ReactiveKernelsPPL before 0.1.2 (RK main
+# `f9a5c9c41`, ReactiveKernels snag rkppl-logistic-a-b6e04821) refuses an inline
 # expression in a count family's location slot (`SurfaceLoweringError: response
-# y: broadcast the link`) while it takes the named twin and any expression in
-# the Bernoulli/Binomial probability slot; those checks are `@test_broken` until
-# RKPPL lowers the inline spelling as it does the named one (snag
-# rkbrmi-on-a-resp-017c6f44; upstream ReactiveKernels snag
-# rkppl-inline-cou-92a4d84b).
+# y: broadcast the link`) while it takes the named twin; those checks are
+# `@test_broken` until the test environment's RK pin carries that release (snag
+# rkbrmi-on-a-resp-017c6f44).
 #
 # Run: julia --startup-file=no --project=test test/rk_inline_response_location.jl
 
@@ -222,8 +221,8 @@ end
     for p in COUNT
         brmi = p.inline(d)
         c = compiled(brmi, p.name * "_inline")
-        # RKPPL refuses an inline expression in a count family's location slot
-        # (`broadcast the link`); this becomes @test with the RKPPL fix.
+        # RKPPL before 0.1.2 refuses an inline expression in a count family's
+        # location slot (`broadcast the link`); @test once the RK pin has 0.1.2.
         @test_broken rk_agrees(brmi, c)
     end
 end

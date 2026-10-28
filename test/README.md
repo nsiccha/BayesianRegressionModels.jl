@@ -86,8 +86,8 @@ RKBRMI agrees with SBBRMI (value and Enzyme gradient) on the assigned spelling
 and, for a Normal location and scale and a Bernoulli probability, on the inline
 one. The inline Poisson and NegativeBinomial2 cases are `@test_broken` until
 the test environment's ReactiveKernels pin carries an RKPPL that lowers an
-inline count rate (RK `4e2ed1c5a`, ReactiveKernels snag
-`rkppl-logistic-a-b6e04821`). Snag `rkbrmi-on-a-resp-017c6f44`.
+inline count rate (ReactiveKernelsPPL 0.1.2, RK main `f9a5c9c41`, ReactiveKernels
+snag `rkppl-logistic-a-b6e04821`). Snag `rkbrmi-on-a-resp-017c6f44`.
 
 `plate_gathered_predictor.jl` checks a predictor on its own rows that reads
 another part's values through model-scope gathers (`c2 = c[pos2]` of an `mi()`
