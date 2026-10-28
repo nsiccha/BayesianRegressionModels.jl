@@ -12,6 +12,12 @@
 # partitions (snag `rk-design-binder-9d6b7561`): `_brm_check_ragged_rows`
 # refuses exactly what `brm_ragged_rows` refuses, with the same message.
 #
+# The graph partitions each join once however many columns its cells read
+# through it, and a partition allocates its cells and no per-row lookup (snag
+# `ragged-partition-4ef21f93`): `brm_ragged_rows_shared` returns an earlier
+# statement's partition after checking its own column's axes, as
+# `brm_ragged_rows` checks them.
+#
 # Run: julia --startup-file=no --project=test test/ragged_partition.jl
 using Test
 using BayesianRegressionModels
@@ -150,4 +156,36 @@ outcome(f) = try f(); :ok catch e; sprint(showerror, e) end
         check(); build()
         @test @allocated(check()) < 8 * length(groups) < @allocated(build())
     end
+end
+
+shared_bytes(rows, names, groups, axis) =
+    @allocated BRM.brm_ragged_rows_shared(rows, names, groups, axis)
+
+@testset "a partition allocates its cells, and a shared read only checks its axes" begin
+    # One integer per row (the cells) plus per-cell and lookup overhead: no
+    # per-row position buffer beside the cells.
+    for (groups, cells) in ((fill(7, 24_000), [7]), (repeat(1:400; inner=60), collect(1:400)),
+            (repeat(["n$(j)" for j in 1:400]; inner=60), ["n$(j)" for j in 1:400]))
+        build() = BRM.brm_ragged_rows([:x, :g, :c], groups, cells)
+        build()
+        @test @allocated(build()) < 12 * length(groups)
+    end
+    # `brm_ragged_rows_shared` returns the partition it is given, unchanged,
+    # and refuses a column off the join's axis with `brm_ragged_rows`'s message.
+    groups, cells = [3, 1, 3, 2], [1, 2, 3]
+    rows = BRM.brm_ragged_rows([:x, :g, :c, :x], groups, cells, [0.1, 0.2, 0.3, 0.4])
+    shared(axes...) = BRM.brm_ragged_rows_shared(rows, [:z, :g, (:a for _ in axes)...],
+        groups, axes...)
+    @test shared([1, 2, 3, 4]) === rows
+    @test shared() === rows
+    @test shared(zeros(4), ones(4)) === rows
+    for axes in (([1, 2, 3],), (zeros(4), ones(5)))
+        @test outcome(() -> shared(axes...)) == outcome(() -> BRM.brm_ragged_rows(
+            [:z, :g, :c, (:a for _ in axes)...], groups, cells, axes...))
+    end
+    @test occursin("`z` read through `g`: `z` has 3 entries (data vector `a`) but `g` has 4",
+        outcome(() -> shared([1, 2, 3])))
+    names, axis = [:z, :g, :a], zeros(4)
+    shared_bytes(rows, names, groups, axis)
+    @test shared_bytes(rows, names, groups, axis) == 0
 end

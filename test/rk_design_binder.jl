@@ -91,6 +91,26 @@ flat_pk(d) = @brm d begin
         y[obs[i]] ~ normal(loc[i], sigma)
     end
 end
+# `flat_pk` reading two columns through each binding: the dose amounts and the
+# event-axis `log_F`, the observation times and scales.
+flat_pk_two(d) = @brm d begin
+    sigma ~ Exponential(1)
+    log_CL ~ 1 + weight + (1 | p | subject)
+    log_V ~ 1 + (1 | p | subject)
+    log_F ~ 0 + log_dose
+    effect(log_CL, Intercept) ~ Normal(0, 1)
+    effect(log_V, Intercept) ~ Normal(0, 1)
+    effect(log_F, :) ~ Normal(0, 0.5)
+    sd(:, p) ~ Exponential(1)
+    doses = groups(dose_subject => subject)
+    obs = groups(obs_subject => subject)
+    @plate for i in eachindex(log_CL)
+        dose = sum(dose_amount[doses[i]] .* exp.(log_F[doses[i]]))
+        loc[i] = dose / exp(log_V[i]) .* exp.(-exp(log_CL[i]) .* obs_time[obs[i]]) .*
+            obs_scale[obs[i]]
+        y[obs[i]] ~ normal(loc[i], sigma)
+    end
+end
 # A flat model: a string factor, an automatic HSGP interval and a zscale.
 flat(d) = @brm d begin
     sigma ~ Exponential(1)
@@ -492,6 +512,58 @@ end
         for labels in (["s2", "s5"], ["s1", "s4"])]
     binder = check_binder(rk, observed; want=:loc)
     @test_broken !occursin("replayed in full", sprint(show, binder))
+end
+
+# The graph partitions each join once per evaluation, however many columns
+# the cell reads through it: the other columns read that partition through
+# `brm_ragged_rows_shared`, which checks their own axes (snag
+# `ragged-partition-4ef21f93`). Oracle: each subject's `loc` from the graph's
+# `log_CL`, `log_V` and `log_F` and the design's rows found by label.
+@stestset "a join read by several columns is partitioned once per evaluation" begin
+    rng = Xoshiro(23)
+    two_data(n; kwargs...) = merge(flat_pk_data(rng, n; kwargs...),
+        (; dose_amount=1 .+ rand(rng, 2n), obs_scale=0.5 .+ rand(rng, 3n)))
+    rk = RKBRMI(BM.flat_pk_two(two_data(6)))
+    main = sprint(Base.show_unquoted, BRM._rk_emit_ast(rk.plan).main)
+    @test count("brm_ragged_rows(", main) == 2
+    @test count("brm_ragged_rows_shared(", main) == 2
+    binder = rk_design_binder(rk; resample_groups=[:subject])
+    design = two_data(3; labels=["n1", "n2", "n3"], responses=false)
+    inputs = binder(design)
+    effects = subject_effects(design)
+    query = ReactiveKernels.prepare(rk.model.spec;
+        have=(:unconstrained, first.(effects)..., keys(inputs)...),
+        want=(:log_CL, :log_V, :log_F, :loc))
+    read(inputs) = Base.invokelatest(query, point(rk), last.(effects)..., values(inputs)...)
+    # `loc` is the collected value, the cells' values one after another.
+    log_CL, log_V, log_F, loc = read(inputs)
+    expected = mapreduce(vcat, enumerate(design.subject)) do (k, s)
+        d, o = findall(==(s), design.dose_subject), findall(==(s), design.obs_subject)
+        dose = sum(design.dose_amount[d] .* exp.(log_F[d]))
+        dose / exp(log_V[k]) .* exp.(-exp(log_CL[k]) .* design.obs_time[o]) .*
+            design.obs_scale[o]
+    end
+    @test loc ≈ expected rtol=1e-12
+    @test loc == graph_value(rk, inputs, :loc, effects...)
+    # A column off its join's axis is refused in the graph, naming that column,
+    # whichever read computes the partition.
+    for column in (:obs_time, :obs_scale, :dose_amount)
+        short = merge(inputs, NamedTuple{(column,)}((inputs[column][1:end-1],)))
+        @test_throws "`$column` read through" read(short)
+    end
+    # A reader vectorized over draws reads each draw as the scalar graph does.
+    cut = ReactiveKernels.prepare(rk.model.spec;
+        have=(:unconstrained, first.(effects)..., keys(inputs)...), want=(:loc,))
+    reader = Base.invokelatest(ReactiveKernels.vectorize, cut;
+        batched=(:unconstrained, first.(effects)...), reuse=true)
+    U = hcat(point(rk), 0.5 .* point(rk))
+    B = cat(last(only(effects)), -last(only(effects)); dims=3)
+    stacked = Base.invokelatest(reader, U, B, values(inputs)...)
+    stacked = stacked isa Tuple ? only(stacked) : stacked
+    for p in 1:2
+        single = Base.invokelatest(cut, U[:, p], B[:, :, p], values(inputs)...)
+        @test stacked[:, p] == (single isa Tuple ? only(single) : single)
+    end
 end
 
 @stestset "a masked HSGP binds its raw mask and axis" begin

@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.19
+
+- On RKBRMI, the graph partitions each ragged join of an `@plate for` cell
+  once per evaluation, however many columns the cell reads through it. With
+  `ops = groups(op_subject => subject)`, a cell reading `op_time[ops[i]]`,
+  `op_amount[ops[i]]` and `log_F[ops[i]]` computed the `op_subject` partition
+  three times on every call of a reader whose design is a runtime input; the
+  further columns now read the first one's partition through
+  `brm_ragged_rows_shared`, which checks only their own length against the
+  grouping column, with the same message. A join is its grouping, cell label
+  and `order=` columns. Each partition also allocates only its cells, with no
+  per-row position buffer beside them. Values, densities and refusals are
+  unchanged. A program printed by this version names `brm_ragged_rows_shared`,
+  so replaying it needs 0.2.19 or later. Snag `ragged-partition-4ef21f93`.
+
 ## 0.2.18
 
 - `adaptive_centering_problem` adapts a grouped HSGP whose levels are
