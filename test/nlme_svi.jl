@@ -138,16 +138,22 @@ end
     grad(z) = -(H * (z .- zstar)) .- z
     q = (; M=[zeros(d)], Λ=[Matrix(1.0I, d, d)], U=[Matrix(1.0I, d, d)])
     positive = Bool[]
-    for _ in 1:150
+    # At a constant step a single draw pair leaves the precision fluctuating
+    # around its fixed point (a few percent of runs leave [0.25, 4] at any one
+    # visit), so the precision is checked as the fit returns it: averaged over
+    # the last visits, as polishing averages q.
+    average = zeros(d, d)
+    for k in 1:150
         ε = randn(rng, d)
         δ = BRM._brm_svi_unit_offset(q, 1, ε)
         g₊, g₋ = grad(q.M[1] .+ δ), grad(q.M[1] .- δ)
         BRM._brm_svi_unit_step!(q, 1, (g₊ .+ g₋) ./ 2, (g₊ .- g₋) ./ 2, ε, 0.1)
         push!(positive, isposdef(Symmetric(q.Λ[1])))
+        k > 100 && (average .+= (q.Λ[1] .- average) ./ (k - 100))
     end
     @test all(positive)
     @test q.U[1] * q.U[1]' ≈ q.Λ[1]
-    λ = eigvals(Symmetric(q.Λ[1]), P)
+    λ = eigvals(Symmetric(average), P)
     @test 0.25 < minimum(λ) && maximum(λ) < 4
     e = q.M[1] .- mode
     @test sqrt(dot(e, P * e)) < 0.1
