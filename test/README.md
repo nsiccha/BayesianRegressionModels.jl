@@ -515,6 +515,24 @@ layouts, the population prior's ω gradient beside the fixed family, and short
 SAEM, FOCE(I) and empirical-Bayes fits read back by name. Run it in the
 NLMEEstimation scratch environment described below.
 
+`nlme_crossed.jl` (test environment) reads a random-effect block over a
+grouping crossed with the subjects (`shared_groups = (:class,)`, every class
+in several subjects) as shared latents in θ: roles, the refusal naming a
+grouping named in neither `nested_groups` nor `shared_groups` and the
+refusals of a bad `shared_groups`, lockstep, single-subject and unit-problem
+densities against the full RK density, the per-unit Laplace (row-structured
+and whole-model) against the analytic Gaussian marginal, the minibatch SVI
+split against the full RK target, `brm_nlme_estimates` naming the block for
+every block form (plain, stratified, Student-t, level-correlated, known
+scale) against the model's own predictor values, and a `car(...)` field,
+whose edges cross the subjects, read as shared latents. Its data and models
+live in `nlme_crossed_fixture.jl`. `nlme_crossed_fit.jl` runs NLMEEstimation
+on them: the population prior against RK's prior and log-Jacobian queries,
+prior-median starts of the crossed scales, a short `brm_nlme_fit(saem)` naming
+the block, and a two-stage fit holding it at its stage-1 estimate. Run it in
+the NLMEEstimation scratch environment described below. Snag
+`crossed-grouping-39d39fcc`.
+
 `population_grouped_hsgp.jl` checks the population and transport routes on a
 grouped HSGP, `hsgp(t; by = g)`, whose weights `ranef_blocks` does not list.
 It runs a shared trend, per-subject deviations with a per-subject amplitude

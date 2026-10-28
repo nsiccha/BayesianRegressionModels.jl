@@ -81,6 +81,14 @@ _rk_coordinate_records(plan) = _brm_transport_error(:unsupported_coverage,
     "brm_coordinate_transport: an RK plan of kind `$(nameof(typeof(plan)))` has " *
     "no cross-backend coordinate inventory")
 
+# The levels of a random-effect record's grouping, the rows of its
+# standardized draws `z`. A joined `|ID|` block's levels are its columns'
+# joint levels.
+_rk_ranef_record_levels(rk, record) = _rk_grouping_levels(
+    haskey(record, :joint_columns) ?
+        brm_joint_fit_levels((rk.plan.columns[c] for c in record.joint_columns)...) :
+        rk.plan.columns[record.group])
+
 # Implemented by `BayesianRegressionModelsReactiveKernelsExt`: the built
 # layout's coordinate names, each coordinate's layout transform and the
 # constrained lower bound of a `:floored` one, and the named constrained values
@@ -709,10 +717,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     end
     # Standardized draws: one per (level, margin), paired by level label. A
     # centered block pairs each with the effect of the same (level, margin).
-    # A joined `|ID|` block's levels are its columns' joint levels.
-    rk_levels = _rk_grouping_levels(haskey(record, :joint_columns) ?
-        brm_joint_fit_levels((rk.plan.columns[c] for c in record.joint_columns)...) :
-        rk.plan.columns[record.group])
+    rk_levels = _rk_ranef_record_levels(rk, record)
     G = length(rk_levels)
     G == block.n_groups || error(
         "brm_coordinate_transport: grouping `$(record.group)` has " *

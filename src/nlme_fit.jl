@@ -99,6 +99,63 @@ function _brm_nlme_add_block!(blocks, record, stratum::Int, Ω, backend)
     blocks
 end
 
+# A block over a grouping in `shared_groups` has no Ω: its scales, correlation
+# and level effects are θ coordinates, read from the constrained values.
+# `(; group, crossed=true, margins, covariance, sd, cor, effects)`, a stratified
+# one `(; group, by, crossed=true, margins, strata, effects)`; `effects` pairs
+# each level with its effect on the margins, as the model adds it to the rows
+# (`diag(sd) L z`, times √w for a Student-t block, the levels mixed by a
+# `gr(g; cor=...)` factor).
+function _brm_nlme_crossed_block(record, values, backend)
+    K = length(record.margins)
+    levels = _rk_ranef_record_levels(backend, record)
+    z = reshape(_brm_rk_declaration_value(values, record.z), length(levels), K)
+    margins = _brm_nlme_margins(record)
+    if record.kind === :stratified_ranef
+        strata = Any[_rk_grouping_levels(backend.plan.columns[record.by])...]
+        stratum = _brm_nlme_level_strata(backend.plan.columns[record.group],
+            backend.plan.columns[record.by], levels, strata, record)
+        factors = [_brm_nlme_natural_factor(values, record, K, s) for s in eachindex(strata)]
+        effects = reduce(vcat, (z[g:g, :] * factors[stratum[g]]' for g in eachindex(levels));
+            init=zeros(0, K))
+        return (; group=record.group, by=record.by, crossed=true, margins,
+            strata=Pair{Any,Any}[level => _brm_nlme_covariance(A * A')
+                for (level, A) in zip(strata, factors)],
+            effects=_brm_nlme_level_effects(levels, effects))
+    end
+    A = _brm_nlme_crossed_factor(values, record, K)
+    effects = z * A'
+    mixing = get(record, :mixing, nothing)
+    mixing === nothing || (effects = sqrt.(_brm_rk_declaration_value(values, mixing)) .* effects)
+    if haskey(record, :level_correlation)
+        factor = something(record.level_factor,
+            _brm_rk_declaration_value(values, record.level_correlation))
+        effects = factor * effects
+    end
+    (; group=record.group, crossed=true, margins, _brm_nlme_covariance(A * A')...,
+        effects=_brm_nlme_level_effects(levels, effects))
+end
+
+_brm_nlme_level_effects(levels, effects) =
+    Pair{Any,Vector{Float64}}[level => effects[g, :] for (g, level) in enumerate(levels)]
+
+# `diag(scale) L` of a plain block, its known scales and correlation included
+# (a known margin's scale is its number; a known correlation's factor is the
+# Cholesky factor of the matrix).
+function _brm_nlme_crossed_factor(values, record, K)
+    known = get(record, :known_scales, nothing)
+    known === nothing && record.L !== nothing && return _brm_nlme_natural_factor(
+        values, record, K, nothing)
+    scale = known === nothing ? _brm_nlme_joint_scale(values, record, K) :
+        Float64[k === nothing ? _brm_rk_declaration_value(values, record.scales[j]) : k
+            for (j, k) in enumerate(known)]
+    cor = get(record, :known_cor, nothing)
+    L = record.L !== nothing ? Matrix{Float64}(_brm_rk_declaration_value(values, record.L)) :
+        cor !== nothing ? Matrix{Float64}(cholesky(Symmetric(cor)).L) :
+        Matrix{Float64}(I, K, K)
+    Diagonal(scale) * L
+end
+
 """
     brm_nlme_estimates(m::BRMNLMEModel, θ, σ, Ω[, ebes])
     brm_nlme_estimates(m::BRMNLMEModel, result[, ebes])
@@ -123,7 +180,11 @@ Returns `(; point, eta)`:
     `var"<predictor>|<group>"` for a block without one, as
     `(; group, margins, covariance, sd, cor)` on the η scale; a stratified
     `gr(g, by=b)` block as `(; group, by, margins, strata)`, whose `strata`
-    pairs each level of `b` with its stratum's `(; covariance, sd, cor)`;
+    pairs each level of `b` with its stratum's `(; covariance, sd, cor)`. A
+    block over a grouping in `shared_groups` (its coordinates are θ) adds
+    `crossed = true` and `effects`, one `level => effects` pair per level of
+    the grouping: the block's effect on its margins, as the model adds it to
+    the rows;
   - `other` — the constrained values of estimated or fixed declarations that
     have no BRM address (shared HSGP and imputation latents, simplexes,
     thresholds), under their program names; empty when there are none.
@@ -154,6 +215,12 @@ function brm_nlme_estimates(m::BRMNLMEModel, θ::AbstractVector, σ::AbstractVec
         fixed === nothing || continue
         _brm_nlme_add_block!(blocks, record, stratum,
             _brm_nlme_ragged(view) ? Ω[family] : Ω[indices, indices], backend)
+    end
+    for record in _brm_nlme_records(backend.plan)
+        record.kind in (:ranef, :stratified_ranef) && record.group in view.shared_groups ||
+            continue
+        push!(blocks, _brm_nlme_block_key(record) =>
+            _brm_nlme_crossed_block(record, values, backend))
     end
     # Predictors and their coefficients in formula order; records arrive in
     # emission order.
@@ -187,7 +254,7 @@ end
 """
     brm_nlme_fit(x, estimator; start=nothing, inits=nothing, ebes=true,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple(), progress=nothing, kwargs...)
+        nested_groups=NamedTuple(), shared_groups=(), progress=nothing, kwargs...)
 
 Fit an NLME model through the RK backend with one of NLMEEstimation's own
 estimators and read the result in the model's names and natural units.
@@ -196,8 +263,8 @@ Requires NLMEEstimation and Enzyme to be loaded.
 - `x` — a `@brm` model ([`BRMI`](@ref)), its [`RKBRMI`](@ref), or a prepared
   [`BRMNLMEModel`](@ref). For a BRMI or RKBRMI the model is prepared with
   `ad_backend` (default reverse-mode `AutoEnzyme`) and the `shared_point`,
-  `subject_group` and `nested_groups` of [`brm_nlme_model`](@ref); passing
-  those to a prepared model is refused.
+  `subject_group`, `nested_groups` and `shared_groups` of
+  [`brm_nlme_model`](@ref); passing those to a prepared model is refused.
 - `estimator` — `NLMEEstimation.saem`, `NLMEEstimation.focei`, or
   `NLMEEstimation.empirical_bayes` (equivalently `posthoc`, which estimates
   the subject effects at the start's population values). `kwargs` pass

@@ -502,17 +502,18 @@ _fit_lowered(x, phase) = throw(ArgumentError(
     "brm_nlme_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
     "got $(typeof(x))"))
 _fit_model(x::BRM.RKBRMI, phase; ad_backend, shared_point, subject_group,
-        nested_groups) = BRM._brm_run_phase(phase) do node
+        nested_groups, shared_groups) = BRM._brm_run_phase(phase) do node
     BRM._brm_nlme_model(x, node;
         ad_backend=ad_backend === nothing ? AutoEnzyme(; mode=Enzyme.Reverse) : ad_backend,
-        observation_ad_backend=nothing, shared_point, subject_group, nested_groups)
+        observation_ad_backend=nothing, shared_point, subject_group, nested_groups,
+        shared_groups)
 end
 function _fit_model(m::BRM.BRMNLMEModel, phase; ad_backend, shared_point,
-        subject_group, nested_groups)
+        subject_group, nested_groups, shared_groups)
     ad_backend === nothing && shared_point === nothing && subject_group === nothing &&
-        isempty(nested_groups) || throw(ArgumentError(
+        isempty(nested_groups) && isempty(shared_groups) || throw(ArgumentError(
         "brm_nlme_fit: a prepared BRMNLMEModel already fixes its ad_backend, " *
-        "shared_point and subject grouping; pass them to brm_nlme_model instead"))
+        "shared_point and groupings; pass them to brm_nlme_model instead"))
     BRM._brm_reuse_phase!(phase)
     m
 end
@@ -708,13 +709,13 @@ end
 
 function BRM.brm_nlme_fit(x, estimator; start=nothing, inits=nothing, ebes=true,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple(), progress=nothing, kwargs...)
+        nested_groups=NamedTuple(), shared_groups=(), progress=nothing, kwargs...)
     name = _fit_estimator_name(estimator)
     ebe_kwargs = _ebe_keywords(estimator, ebes) # refuse a bad `ebes` before fitting
     BRM._brm_with_progress(progress; description="BRM NLME fit") do node
         BRM._brm_with_phases(node, _fit_phases(name, ebe_kwargs)) do phases
             model = _fit_model(_fit_lowered(x, phases.lower), phases.prepare;
-                ad_backend, shared_point, subject_group, nested_groups)
+                ad_backend, shared_point, subject_group, nested_groups, shared_groups)
             s = BRM._brm_run_phase(_ -> _fit_start(model, start, inits), phases.start)
             result, ebe, estimates = _fit_run(estimator, model, s, ebe_kwargs, phases;
                 kwargs...)
