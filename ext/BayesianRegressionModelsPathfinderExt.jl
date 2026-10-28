@@ -14,6 +14,14 @@ function BRM._brm_pathfinder_draws(
         φ0::AbstractVector; ndraws, rng)
     result = Pathfinder.pathfinder(p; init=collect(Float64, φ0), rng, ndraws,
         ntries=1, adtype=Pathfinder.SciMLBase.NoAD())
+    # Pathfinder warns and returns draws from its starting Gaussian when its
+    # run fails (no L-BFGS step taken, or no fit with a finite ELBO).
+    steps = length(result.optim_trace) - 1
+    elbos = [e.value for e in result.elbo_estimates]
+    steps > 0 && !isempty(elbos) && isfinite(elbos[result.fit_iteration]) ||
+        BRM._brm_nlme_error("brm_start: Pathfinder over the Laplace marginal failed " *
+            "($steps L-BFGS steps; ELBO estimates $(elbos)); the Laplace problem " *
+            "counted $(p.nonfinite) nonfinite and $(p.unconverged) unconverged points")
     Matrix{Float64}(result.draws)
 end
 

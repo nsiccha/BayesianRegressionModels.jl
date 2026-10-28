@@ -19,15 +19,16 @@
 A start computed from the data, with no initial values to give. Pathfinder
 runs over the model's population coordinates with every unit's random effects
 integrated out by a Laplace approximation ([`brm_laplace_problem`](@ref)),
-starting from the population coordinates' prior medians. Each start is one
-draw from Pathfinder's Gaussian fit there, with every unit's random effects
-drawn from its own Laplace Gaussian at that point ([`brm_laplace_draws`](@ref)):
-each group starts near its own value, and the scales near what the groups'
-spread supports.
+from a point drawn uniformly within one unit of the population coordinates'
+prior medians (unconstrained scale). The start is one draw from Pathfinder's
+Gaussian fit, with every unit's random effects drawn from its own Laplace
+Gaussian at that point ([`brm_laplace_draws`](@ref)): each group starts near
+its own value, and the scales near what the groups' spread supports.
 
-`chains = n` returns `n` such starts, independent draws, for a sampler's
-per-chain `init` (`completion_warmup_mcmc(rngs, lpdf; init = brm_start(sb,
-model; chains = n))`); without it, one start. The first form returns RK packed
+`chains = n` returns `n` such starts, one independent Pathfinder run each, for
+a sampler's per-chain `init` (`completion_warmup_mcmc(rngs, lpdf; init =
+brm_start(sb, model; chains = n))`); without it, one start. A Pathfinder run
+that fails (no L-BFGS step, or no fit with a finite ELBO) raises. The first form returns RK packed
 unconstrained points; the second, the Stan model's unconstrained points,
 through [`brm_coordinate_transport`](@ref) from `rk`. Pass `rk` to reuse an
 RKBRMI built from `parent(sb)`.
@@ -82,8 +83,13 @@ function _brm_laplace_start_draws(rk::RKBRMI, n; rng, ad_backend, subject_group,
             "does not admit; give initial values instead (`brm_start(x, inits)`). " *
             sprint(showerror, err))
     end
-    P = _brm_pathfinder_draws(p, _brm_laplace_prior_median(p); ndraws=n, rng)
-    brm_laplace_draws(p, P; rng).draws
+    φ0 = _brm_laplace_prior_median(p)
+    # One Pathfinder run per start, each from its own point near the medians,
+    # so the starts are independent; chain k's draws do not depend on `n`.
+    reduce(hcat, map(1:n) do _
+        init = φ0 .+ (2 .* rand(rng, length(φ0)) .- 1)
+        brm_laplace_draws(p, _brm_pathfinder_draws(p, init; ndraws=1, rng); rng).draws
+    end)
 end
 
 # The population coordinates' prior medians, every other population coordinate
@@ -98,7 +104,7 @@ _brm_laplace_parts(p::BRMStructuredLaplaceProblem) = (p.backend, p.view,
 
 # Implemented by `BayesianRegressionModelsPathfinderExt`: Pathfinder over the
 # Laplace problem `p` from `φ0`, `ndraws` draws (coordinates × draws) from its
-# Gaussian fit.
+# Gaussian fit; a failed run raises.
 _brm_pathfinder_draws(p, φ0; ndraws, rng) = throw(ArgumentError(
     "brm_start: the start from the data runs Pathfinder; load it (`using " *
     "Pathfinder`, or `using WarmupHMC`, which loads it)"))
