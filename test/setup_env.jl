@@ -185,8 +185,10 @@ const MIRRORS = Dict(
     "Enzyme" => joinpath(homedir(), ".local", "state", "kb-agents", "git-mirrors", "Enzyme.jl.git"),
 )
 
-# The KB resolver's dogfood-libEnzyme step (`_dogfood_libenzyme_fragment` in
-# Claude's `lib-resolve.sh`, the one implementation): it reads the developed
+# The KB resolver's dogfood-libEnzyme step, printed by the public
+# `dogfood_libenzyme_program` of Claude's `lib-resolve.sh` (the one
+# implementation; skill enzyme-use, "Bringing dogfood into an environment"
+# step 4, whose LOCKSTEP note names this consumer): it reads the developed
 # Enzyme's `deps/dogfood_libenzyme.toml`, checks this host's build against its
 # SHA256SUMS, writes `Enzyme_jll`'s library paths into the ignored
 # `test/LocalPreferences.toml`, and errors where the build is missing.
@@ -199,7 +201,7 @@ function apply_dogfood_libenzyme()
         Set BRM_TEST_KB_RESOLVER to Claude's lib-resolve.sh, or run on a KB
         fleet host that has the build (skill enzyme-use).""")
     step = read(Cmd(["bash", "-c",
-        "source \"\$1\" >/dev/null && _dogfood_libenzyme_fragment resolve", "_", lib]), String)
+        "source \"\$1\" >/dev/null && dogfood_libenzyme_program resolve", "_", lib]), String)
     include_string(Main, step, "dogfood_libenzyme")
     return nothing
 end
