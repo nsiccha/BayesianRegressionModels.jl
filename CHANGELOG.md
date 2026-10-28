@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.25
+
+- `brm_start` sets the scales and correlation of a stratified
+  `(… | ID | gr(g, by = b))` block, each stratum (level of `b`) having its own.
+  `ID = (; sd)`, `(; cor)` and `ID = Σ` set every stratum; `stratum => value`
+  pairs set the listed strata, `sd = ["small" => 0.4, "large" => [0.6, 0.2]]`,
+  `cor = ["small" => C]`, `ID = ["small" => Σ]`, and unlisted strata keep their
+  values at `base`. Before, SBBRMI refused `sd` and `cor` (`` expects Stan
+  value `b_…_log_scale` ``, a name the block does not emit); `effects` alone
+  already worked. RKBRMI now takes a
+  stratified block's `sd`, `cor` and `effects` as SBBRMI does, instead of
+  refusing the block, so `brm_nlme_start(m, inits)` takes them too. Pairs on a
+  block that is not stratified are refused. Snag `stratified-block-73231199`.
+
 ## 0.2.24
 
 - A gather `x[idx]` lies on the rows of its index. A predictor on its own rows

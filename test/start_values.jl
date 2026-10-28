@@ -609,6 +609,140 @@ end
     @test level("c") ≈ [-0.5, 0.4] rtol=1e-10
 end
 
+# Each stratum of a stratified block has its own scales and correlation. Stan's
+# are read through `brm_ranef_draws`, RK's from its constrained values; strata
+# are compared by label. Snag `stratified-block-73231199`.
+const STRATA_DATA = (; subject=repeat(["a", "b", "c", "d", "e", "f"], 3),
+    arm=repeat(["p", "p", "q", "q", "r", "r"], 3),
+    x=collect(range(-1, 1; length=18)), y=sin.(1:18))
+
+function stan_strata(sb, model, s; id)
+    names = String.(BridgeStan.param_names(model; include_tp=true))
+    draws = permutedims(BridgeStan.param_constrain(model, s; include_tp=true))
+    Dict(BRM._brm_transport_level(e.stratum) => (; sd=e.sd[1, :], cor=e.cor[1, :, :],
+            effects=Dict(BRM._brm_transport_level(l) => e.effects[1, i, :]
+                for (i, l) in enumerate(e.levels)))
+        for e in brm_ranef_draws(brm_descriptor(sb), draws, names; id))
+end
+
+function rk_strata(rk, u; id)
+    record = only(BRM._brm_rk_start_record(rk, r) for r in BRM._rk_coordinate_records(rk.plan)
+        if r.kind === :stratified_ranef && r.id === id)
+    values = BRM._rk_constrained_values(rk, u)
+    K = length(record.margins)
+    tau = isnothing(record.scales) ? BRM._brm_rk_declaration_value(values, record.scale) :
+        reduce(hcat, [BRM._brm_rk_declaration_value(values, n) for n in record.scales])
+    L = isnothing(record.L) ? nothing : BRM._brm_rk_declaration_value(values, record.L)
+    E = BRM._brm_rk_block_effects(values, record, K)
+    levels = BRM._rk_grouping_levels(rk.plan.columns[record.group])
+    Dict(BRM._brm_transport_level(stratum) => (; sd=collect(tau[s, :]),
+            cor=isnothing(L) ? ones(1, 1) : L[s] * L[s]',
+            effects=Dict(BRM._brm_transport_level(levels[g]) => E[g, :]
+                for g in eachindex(levels) if record.level_strata[g] == s))
+        for (s, stratum) in enumerate(record.strata))
+end
+
+@stestset "scales and correlation of a stratified block, per stratum" begin
+    brmi = @brm STRATA_DATA begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | p | gr(subject, by = arm))
+        y ~ Normal(mu, sigma)
+    end
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+    model = compiled(sb, "stratified_scales")
+    rk = RKBRMI(brmi)
+    base = 0.3 .* randn(Xoshiro(23), BridgeStan.param_unc_num(model))
+    rk_base = 0.3 .* randn(Xoshiro(23), length(BRM._rk_layout_coordinate_names(rk)))
+    C = [1.0 0.4; 0.4 1.0]
+    C_r = [1.0 -0.3; -0.3 1.0]
+    Σ_q = [0.25 0.03; 0.03 0.09]
+    at_base = stan_strata(sb, model, base; id=:p)
+    rk_at_base = rk_strata(rk, rk_base; id=:p)
+
+    # `sd` and `cor` set every stratum, on both backends.
+    inits = (; p=(; sd=[0.6, 0.3], cor=C))
+    stan, rk_values = stan_strata(sb, model, brm_start(sb, model, inits; base); id=:p),
+        rk_strata(rk, brm_start(rk, inits; base=rk_base); id=:p)
+    @test sort!(collect(keys(stan))) == sort!(collect(keys(rk_values))) == ["p", "q", "r"]
+    for x in (stan, rk_values), st in ("p", "q", "r")
+        @test x[st].sd ≈ [0.6, 0.3] rtol=1e-10
+        @test x[st].cor ≈ C rtol=1e-10
+    end
+    # One value for all margins of all strata (the snag's `sd = 0.4`).
+    stan = stan_strata(sb, model, brm_start(sb, model, (; p=(; sd=0.4)); base); id=:p)
+    @test all(stan[st].sd ≈ [0.4, 0.4] for st in ("p", "q", "r"))
+
+    # `stratum => value` pairs set the listed strata; the others keep the base.
+    inits = (; p=(; sd=["q" => [0.5, 0.2], "p" => 0.7], cor=["r" => C_r],
+        effects=["c" => [0.3, -0.2], "a" => [-0.1, 0.4]]))
+    saved = deepcopy(inits)
+    s, u = brm_start(sb, model, inits; base), brm_start(rk, inits; base=rk_base)
+    @test inits == saved
+    for (x, x0) in ((stan_strata(sb, model, s; id=:p), at_base),
+                    (rk_strata(rk, u; id=:p), rk_at_base))
+        @test x["p"].sd ≈ [0.7, 0.7] rtol=1e-10
+        @test x["q"].sd ≈ [0.5, 0.2] rtol=1e-10
+        @test x["r"].sd ≈ x0["r"].sd rtol=1e-10
+        @test x["r"].cor ≈ C_r rtol=1e-10
+        @test x["p"].cor ≈ x0["p"].cor rtol=1e-10
+        @test x["q"].cor ≈ x0["q"].cor rtol=1e-10
+        # Each listed level's effects hold under its own stratum's values.
+        @test x["q"].effects["c"] ≈ [0.3, -0.2] rtol=1e-10
+        @test x["p"].effects["a"] ≈ [-0.1, 0.4] rtol=1e-10
+    end
+    # A covariance per stratum sets that stratum's scales and correlation.
+    for (x, x0) in (
+            (stan_strata(sb, model, brm_start(sb, model, (; p=["q" => Σ_q]); base); id=:p),
+                at_base),
+            (rk_strata(rk, brm_start(rk, (; p=["q" => Σ_q]); base=rk_base); id=:p),
+                rk_at_base))
+        @test x["q"].sd ≈ sqrt.(diag(Σ_q)) rtol=1e-10
+        @test x["q"].cor .* (x["q"].sd * x["q"].sd') ≈ Σ_q rtol=1e-10
+        @test x["p"].sd ≈ x0["p"].sd rtol=1e-10
+    end
+
+    # refused: a stratum the block does not have, and a repeated one.
+    for f in (i -> brm_start(sb, model, i), i -> brm_start(rk, i))
+        @test_throws "not a stratum of this block" f((; p=(; sd=["z" => 0.5])))
+        @test_throws "repeats a stratum" f((; p=(; sd=["q" => 0.5, "q" => 0.6])))
+    end
+    # refused: strata of a block that has none.
+    plain = @brm STRATA_DATA begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | p | subject)
+        y ~ Normal(mu, sigma)
+    end
+    plain_sb = SBBRMI(plain; mod=@__MODULE__, total_groups=())
+    plain_model = compiled(plain_sb, "unstratified_scales")
+    @test_throws "is not a stratified" brm_start(plain_sb, plain_model, (; p=(; sd=["q" => 0.5])))
+    @test_throws "is not a stratified" brm_start(RKBRMI(plain), (; p=(; cor=["q" => C])))
+end
+
+@stestset "a one-margin stratified block with a configured scale prior" begin
+    # The snag's shape: `sd(lp, ID) ~ …` selects the generic stratified family.
+    brmi = @brm STRATA_DATA begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | p | gr(subject, by = arm))
+        sd(mu, p) ~ LogNormal(-1, 0.75)
+        y ~ Normal(mu, sigma)
+    end
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+    @test only(ranef_blocks(brm_descriptor(sb))).family === :ranef_correlated_by_draws_generic
+    model = compiled(sb, "stratified_one_margin")
+    rk = RKBRMI(brmi)
+    inits = (; p=(; sd=0.4, effects=["b" => 0.3, "e" => -0.2]))
+    for x in (stan_strata(sb, model, brm_start(sb, model, inits); id=:p),
+              rk_strata(rk, brm_start(rk, inits); id=:p))
+        @test all(x[st].sd ≈ [0.4] for st in ("p", "q", "r"))
+        @test x["p"].effects["b"] ≈ [0.3] rtol=1e-10
+        @test x["r"].effects["e"] ≈ [-0.2] rtol=1e-10
+    end
+    inits = (; p=(; sd=["r" => 0.25]))
+    stan = stan_strata(sb, model, brm_start(sb, model, inits); id=:p)
+    @test stan["r"].sd ≈ [0.25] rtol=1e-12
+    @test stan["p"].sd ≈ [1.0] rtol=1e-12
+end
+
 @stestset "per-level effects place exact totals" begin
     brmi = lone_eta_pk(NLME_PLATE_DATA)
     sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=:auto)

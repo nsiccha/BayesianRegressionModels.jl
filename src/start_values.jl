@@ -46,6 +46,13 @@ the value a sampler takes as its initial position.
   mixing weights at `base`, so each listed group starts at its own value
   instead of the population value. Unlisted levels keep their coordinates at
   `base`: their standardized draws, or their effects in a centred block.
+- A stratified `(… | ID | gr(g, by = b))` block has its own scales and
+  correlation in each stratum (level of `b`). `sd`, `cor` and `ID = Σ` set
+  every stratum; `stratum => value` pairs set the listed ones,
+  `sd = ["small" => 0.4, "large" => [0.6, 0.2]]` (one value for all margins,
+  or one per margin), `cor = ["small" => C]`, `ID = ["small" => Σ]`. Unlisted
+  strata keep their values at `base`. Each listed level's `effects` hold
+  under its own stratum's scales and correlation.
 - `name = value` sets a scalar parameter (`sigma ~ Exponential(1)`) or a vector
   parameter (cutpoints, a `Dirichlet` simplex) on its constrained scale.
 - `name = values` sets a latent declared in a `@plate` cell (`log_T ~
@@ -169,7 +176,46 @@ function _brm_start_flat_values(name, output, value::AbstractVector{<:AbstractVe
     reduce(vcat, value; init=Float64[])
 end
 
+# `sd`/`cor` set every stratum of a stratified `gr(g, by = b)` block;
+# `stratum_sd`/`stratum_cor` (`(; levels, values)`, from `stratum => value`
+# pairs) set the listed strata only.
+_brm_start_ranef_target(id, margins; sd=nothing, cor=nothing, effects=nothing,
+        stratum_sd=nothing, stratum_cor=nothing) =
+    (; kind=:ranef, id, margins, sd, cor=length(margins) == 1 ? nothing : cor, effects,
+       stratum_sd, stratum_cor=length(margins) == 1 ? nothing : stratum_cor)
 function _brm_start_ranef_target(id, margins, Σ::AbstractMatrix)
+    sd, cor = _brm_start_covariance_parts(id, margins, Σ)
+    _brm_start_ranef_target(id, margins; sd, cor)
+end
+# One covariance per listed stratum of a stratified `gr(g, by = b)` block.
+function _brm_start_ranef_target(id, margins, value::Union{AbstractDict,
+        AbstractVector{<:Pair}})
+    _, strata = _brm_start_block_part(id, "covariance", value,
+        Σ -> _brm_start_covariance_parts(id, margins, Σ))
+    _brm_start_ranef_target(id, margins;
+        stratum_sd=(; strata.levels, values=first.(strata.values)),
+        stratum_cor=(; strata.levels, values=last.(strata.values)))
+end
+function _brm_start_ranef_target(id, margins, value::NamedTuple)
+    extra = setdiff(keys(value), (:sd, :cor, :effects))
+    isempty(extra) || error(
+        "brm_start: `|$id|` takes a covariance matrix or `(; sd, cor, effects)`; " *
+        "unknown field(s) $(Tuple(extra))")
+    K = length(margins)
+    sd, stratum_sd = _brm_start_block_part(id, "sd", get(value, :sd, nothing),
+        x -> _brm_start_block_sd(id, K, x))
+    cor, stratum_cor = _brm_start_block_part(id, "cor", get(value, :cor, nothing),
+        x -> _brm_start_block_cor(id, margins, x))
+    effects = haskey(value, :effects) ?
+        _brm_start_block_effects(id, margins, value.effects) : nothing
+    _brm_start_ranef_target(id, margins; sd, cor, effects, stratum_sd, stratum_cor)
+end
+_brm_start_ranef_target(id, margins, value) = error(
+    "brm_start: `|$id|` takes a covariance matrix or `(; sd, cor, effects)`, got " *
+    "$(repr(value))")
+
+# The scales and correlation of a covariance in `ranefcoefnames` order.
+function _brm_start_covariance_parts(id, margins, Σ::AbstractMatrix)
     K = length(margins)
     size(Σ) == (K, K) || throw(DimensionMismatch(
         "brm_start: covariance of `|$id|` has size $(size(Σ)); its $K margins are " *
@@ -181,23 +227,48 @@ function _brm_start_ranef_target(id, margins, Σ::AbstractMatrix)
     sd = sqrt.(Float64.(diag(Σ)))
     cor = Matrix{Float64}(Σ) ./ (sd * sd')
     cor[diagind(cor)] .= 1
-    (; kind=:ranef, id, margins, sd, cor=K == 1 ? nothing : cor, effects=nothing)
+    sd, cor
 end
-function _brm_start_ranef_target(id, margins, value::NamedTuple)
-    extra = setdiff(keys(value), (:sd, :cor, :effects))
-    isempty(extra) || error(
-        "brm_start: `|$id|` takes a covariance matrix or `(; sd, cor, effects)`; " *
-        "unknown field(s) $(Tuple(extra))")
-    K = length(margins)
-    sd = haskey(value, :sd) ? _brm_start_block_sd(id, K, value.sd) : nothing
-    cor = haskey(value, :cor) ? _brm_start_block_cor(id, margins, value.cor) : nothing
-    effects = haskey(value, :effects) ?
-        _brm_start_block_effects(id, margins, value.effects) : nothing
-    (; kind=:ranef, id, margins, sd, cor=K == 1 ? nothing : cor, effects)
+_brm_start_covariance_parts(id, margins, Σ) = error(
+    "brm_start: the covariance of a stratum of `|$id|` must be a matrix, got $(repr(Σ))")
+
+# A block part given for every stratum, `(parse(value), nothing)`, or per
+# stratum of a stratified `gr(g, by = b)` block as `stratum => value` pairs,
+# `(nothing, (; levels, values))` with each value parsed.
+_brm_start_block_part(id, part, ::Nothing, parse) = (nothing, nothing)
+_brm_start_block_part(id, part, value, parse) = (parse(value), nothing)
+_brm_start_block_part(id, part, value::AbstractDict, parse) =
+    _brm_start_block_part(id, part, collect(pairs(value)), parse)
+function _brm_start_block_part(id, part, value::AbstractVector{<:Pair}, parse)
+    isempty(value) && error("brm_start: `|$id|` $part lists no stratum")
+    levels = _brm_transport_level.(first.(value))
+    allunique(levels) || error("brm_start: `|$id|` $part repeats a stratum")
+    (nothing, (; levels, values=[parse(v) for v in last.(value)]))
 end
-_brm_start_ranef_target(id, margins, value) = error(
-    "brm_start: `|$id|` takes a covariance matrix or `(; sd, cor, effects)`, got " *
-    "$(repr(value))")
+
+# `stratum => value` parts address the strata of a `gr(g, by = b)` block only.
+function _brm_start_check_unstratified(t)
+    isnothing(t.stratum_sd) && isnothing(t.stratum_cor) && return nothing
+    error("brm_start: `|$(t.id)|` is not a stratified `gr(g, by = b)` block, so " *
+        "its scales and correlation take no `stratum => value` pairs; give `sd` " *
+        "per margin (or one value for all) and `cor` as one matrix")
+end
+
+# `(s, value)` for each stratum `s` (a position in `strata`, the block's stratum
+# labels in index order) that `all` (every stratum) or `by` (the listed ones)
+# sets.
+function _brm_start_stratum_values(t, part, all, by, strata)
+    isnothing(all) || return [(s, all) for s in eachindex(strata)]
+    isnothing(by) && return Tuple{Int,Any}[]
+    normalized = _brm_transport_level.(strata)
+    map(zip(by.levels, by.values)) do (level, value)
+        s = findall(l -> isequal(l, level), normalized)
+        isempty(s) && error("brm_start: `|$(t.id)|` $part names stratum " *
+            "$(repr(level)), which is not a stratum of this block; its strata are " *
+            "$(repr(normalized))")
+        (only(s), value)
+    end
+end
 
 # Per-level natural effects of an `|ID|` block, keyed by level label: one
 # number per level for a one-margin block, one vector in `ranefcoefnames` order
@@ -307,7 +378,7 @@ function _rk_unconstrained_point end
 function brm_start(rk::RKBRMI, inits::NamedTuple;
         base=zeros(Float64, length(_rk_layout_coordinate_names(rk))))
     u0 = _brm_start_base(base, length(_rk_layout_coordinate_names(rk)), "RK layout")
-    records = _rk_coordinate_records(rk.plan)
+    records = [_brm_rk_start_record(rk, r) for r in _rk_coordinate_records(rk.plan)]
     values = _rk_constrained_values(rk, u0)
     writes = Tuple{Symbol,Tuple,Any}[]
     effects = NamedTuple[]
@@ -474,16 +545,54 @@ _brm_rk_cell_latent_value(name, current, value) = error(
     "brm_start: cell latent `$name` holds $(typeof(current)) values; only " *
     "scalar and vector cell latents take a start")
 
+# A coordinate record as the writes read it. A stratified block's
+# (`gr(g, by = b)`) also carries its stratum labels in `levels(by)` order and
+# the stratum of each level of its grouping.
+_brm_rk_start_record(rk, r) = _brm_rk_start_record(rk, Val(r.kind), r)
+_brm_rk_start_record(rk, ::Val, r) = r
+function _brm_rk_start_record(rk, ::Val{:stratified_ranef}, r)
+    columns = rk.plan.columns
+    strata = _rk_grouping_levels(columns[r.by])
+    level_strata = _brm_level_strata(columns[r.group], columns[r.by],
+        _rk_grouping_levels(columns[r.group]), strata, r; caller="brm_start", fail=error)
+    merge(r, (; strata, level_strata))
+end
+
 function _brm_rk_ranef_record(t, records)
-    blocks = [r for r in records if r.kind === :ranef && isequal(r.id, t.id)]
+    blocks = [r for r in records if r.kind in (:ranef, :stratified_ranef) &&
+        isequal(r.id, t.id)]
     length(blocks) == 1 || error(
         "brm_start: `|$(t.id)|` has $(length(blocks)) RK random-effect records; " *
-        "expected one plain block")
+        "expected one block")
     only(blocks)
 end
 
 function _brm_rk_start_writes!(writes, ::Val{:ranef}, t, records, values)
     r = _brm_rk_ranef_record(t, records)
+    _brm_rk_ranef_writes!(writes, Val(r.kind), t, r, values)
+end
+
+# Each stratum `s` of a stratified block has its own scales, row `s` of `tau`
+# (strata × margins), or entry `s` of each margin's `tau_k` when the margins'
+# laws differ, and its own correlation factor `L[s]`
+# (`_rk_ast_stratified_group_component!`). `sd` and `cor` set every stratum,
+# `stratum => value` pairs the listed ones.
+function _brm_rk_ranef_writes!(writes, ::Val{:stratified_ranef}, t, r, values)
+    P = _brm_start_margin_positions(t, r.margins)
+    for (s, sd) in _brm_start_stratum_values(t, "sd", t.sd, t.stratum_sd, r.strata),
+            (k, j) in enumerate(P)
+        push!(writes, isnothing(r.scales) ? (r.scale, (s, k), sd[j]) :
+            (r.scales[k], (s,), sd[j]))
+    end
+    isnothing(r.L) && return writes
+    for (s, C) in _brm_start_stratum_values(t, "cor", t.cor, t.stratum_cor, r.strata)
+        push!(writes, (r.L, (s,), _brm_start_lower_factor(C[P, P])))
+    end
+    writes
+end
+
+function _brm_rk_ranef_writes!(writes, ::Val{:ranef}, t, r, values)
+    _brm_start_check_unstratified(t)
     P = _brm_start_margin_positions(t, r.margins)
     known = get(r, :known_scales, nothing)
     if !isnothing(t.sd)
@@ -524,8 +633,7 @@ function _brm_rk_effect_writes!(writes, rk, values, t, r)
     Z = z isa AbstractMatrix ? z : reshape(z, :, 1)
     size(Z, 2) == K || error(
         "brm_start: internal: RK draws `$(r.z)` have $(size(Z, 2)) margins, `|$(t.id)|` $K")
-    (; A, w) = _brm_rk_effect_factor(values, r, K)
-    level_A(g) = isnothing(w) ? A : sqrt(w[g]) * A
+    level_A = _brm_rk_level_factor(values, r, K)
     level = _brm_rk_level_correlation(values, r)
     # A level-correlated block's effects are `level * B`, where row `g` of `B`
     # is `level_A(g) * Z[g, :]`; the unaddressed levels keep their draws.
@@ -548,19 +656,41 @@ end
 # An RK block's effects at constrained `values`, levels × margins, as the
 # emitted group component and gather compute them (`_rk_ast_group_component!`
 # in src/rk_components.jl, the level-correlated gather in src/rk_values.jl):
-# row `g` is `sqrt(w[g]) diag(tau) L z[g, :]` (`w` only for a Student-t block),
-# multiplied on the left by the levels' Cholesky factor in a level-correlated
-# block.
+# row `g` is `level_A(g) * z[g, :]` (`_brm_rk_level_factor`), multiplied on
+# the left by the levels' Cholesky factor in a level-correlated block.
 function _brm_rk_block_effects(values, r, K)
     z = _brm_rk_declaration_value(values, r.z)
     Z = z isa AbstractMatrix ? z : reshape(z, :, 1)
-    (; A, w) = _brm_rk_effect_factor(values, r, K)
+    level_A = _brm_rk_level_factor(values, r, K)
     B = Matrix{Float64}(undef, size(Z)...)
     for g in axes(Z, 1)
-        B[g, :] = (isnothing(w) ? A : sqrt(w[g]) * A) * Z[g, :]
+        B[g, :] = level_A(g) * Z[g, :]
     end
     level = _brm_rk_level_correlation(values, r)
     isnothing(level) ? B : level * B
+end
+
+# The factor `level_A(g)` that takes level `g`'s standardized draws to its
+# effects at constrained `values`: `sqrt(w[g]) diag(tau) L` (`w` only for a
+# Student-t block), or, in a stratified block, its stratum's
+# `diag(tau[s, :]) L[s]`.
+_brm_rk_level_factor(values, r, K) = _brm_rk_level_factor(values, Val(r.kind), r, K)
+function _brm_rk_level_factor(values, ::Val, r, K)
+    (; A, w) = _brm_rk_effect_factor(values, r, K)
+    g -> isnothing(w) ? A : sqrt(w[g]) * A
+end
+function _brm_rk_level_factor(values, ::Val{:stratified_ranef}, r, K)
+    tau = isnothing(r.scales) ?
+        Matrix{Float64}(_brm_rk_declaration_value(values, r.scale)) :
+        reduce(hcat, [collect(Float64, _brm_rk_declaration_value(values, name))
+            for name in r.scales])
+    size(tau) == (length(r.strata), K) || error(
+        "brm_start: internal: RK stratum scales of `$(r.z)` have size $(size(tau)), " *
+        "expected $((length(r.strata), K))")
+    L = isnothing(r.L) ? nothing : _brm_rk_declaration_value(values, r.L)
+    factors = [Diagonal(tau[s, :]) * (isnothing(L) ? I : Matrix{Float64}(L[s]))
+        for s in axes(tau, 1)]
+    g -> factors[r.level_strata[g]]
 end
 
 # `diag(tau) L` of a plain RK block at constrained `values`, and its per-level
@@ -804,6 +934,9 @@ function _brm_sb_start_writes!(writes, deferred, ::Val{:ranef}, t, d, names, tot
     # The effects are the block's draws under its scales and correlation as
     # written, solved for once the point holds them.
     isnothing(t.effects) || push!(deferred.blocks, (; t, block, P))
+    isnothing(block.by) || return _brm_sb_start_stratified_writes!(writes, t, d, block,
+        P, names)
+    _brm_start_check_unstratified(t)
     pos = Dict(n => i for (i, n) in enumerate(names))
     lookup(name) = get(pos, name) do
         error("brm_start: `|$(t.id)|` expects Stan value `$name`, which the compiled " *
@@ -834,6 +967,38 @@ function _brm_sb_start_writes!(writes, deferred, ::Val{:ranef}, t, d, names, tot
         carrier = _sb_ranef_correlation_carrier(block)
         for i in 1:K, j in 1:K
             push!(writes, (lookup(string(carrier, ".", i, ".", j)), L[i, j]))
+        end
+    end
+end
+
+# A stratified `gr(g, by = b)` block has no block-wide scale or correlation:
+# each stratum has its own scales, a column of `<binding>_tau_s` (margins ×
+# strata), and its own correlation factor `<binding>_L_s[s]` (strata × margins
+# × margins), as `brm_ranef_draws` reads them (`_RANEF_FAMILIES`). `sd` and
+# `cor` set every stratum, `stratum => value` pairs the listed ones; the others
+# keep their base values.
+function _brm_sb_start_stratified_writes!(writes, t, d, block, P, names)
+    spec = _RANEF_FAMILIES[block.family]
+    (; strata) = _brm_ranef_strata(d, block, "brm_start")
+    S, K = length(strata), length(P)
+    coordinates(carrier, n) = let output = _brm_ranef_carrier_output(d, block,
+            Symbol(block.binding, :_, carrier), "brm_start")
+        c = _brm_element_coordinates(output, names)
+        length(c) == n || error("brm_start: internal: `$(output.name)` of `|$(t.id)|` " *
+            "has $(length(c)) Stan values, expected $n")
+        c
+    end
+    values(part, all, by) = _brm_start_stratum_values(t, part, all, by, strata)
+    tau = reshape(coordinates(spec.stratum_tau, K * S), K, S)
+    for (s, sd) in values("sd", t.sd, t.stratum_sd), (k, j) in enumerate(P)
+        push!(writes, (tau[k, s], sd[j]))
+    end
+    K == 1 && return nothing
+    L = reshape(coordinates(spec.stratum_L, S * K * K), S, K, K)
+    for (s, C) in values("cor", t.cor, t.stratum_cor)
+        F = _brm_start_lower_factor(C[P, P])
+        for i in 1:K, j in 1:K
+            push!(writes, (L[s, i, j], F[i, j]))
         end
     end
 end
@@ -927,6 +1092,7 @@ end
 # `_brm_sb_start_s2z!`). The claimed margins are independent, so a correlation
 # other than the identity has no coordinate.
 function _brm_sb_start_total_scales!(writes, deferred, t, scales, names)
+    _brm_start_check_unstratified(t)
     P = _brm_start_margin_positions(t, [s.margin for s in scales])
     length(P) == length(t.margins) || error(
         "brm_start: internal: $(length(P)) of the $(length(t.margins)) margins " *
