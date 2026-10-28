@@ -582,6 +582,11 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
             reachable = _brm_reachable_operations(program,
                 _brm_prepared_references(_brm_prepare_expr(family)))
             isempty(intersect(predictors, reachable)) && return true
+            # A location or scale computed inline from model values
+            # (`NegativeBinomial2(exp(dev) * s, phi)`) is the value it would be
+            # assigned first (`mu = exp(dev) * s`), which this route lowers.
+            any(arg -> _rk_computed_argument(program, head, arg, collect(predictors)),
+                getargs(family)) && return true
         end
         # A formula response may put a shape before its location (Weibull,
         # Student-t, binomial trials). An assignment in that slot does not
@@ -673,6 +678,29 @@ function _rk_ast_value_threshold_effects!(statements, response,
     push!(statements, Expr(:(=), effects, Expr(:call, :*, design, beta)))
     (location, (Expr(:call, :eachrow, effects),))
 end
+
+# A response argument computed from model values. The formula route reads a
+# linear predictor bare, or bare inside its own link and shape spellings:
+# `logistic(eta)`, `TDist(nu)`, Gamma's `mu/alpha` and Beta's `mu*kappa` /
+# `(1-mu)*kappa`. Any other expression over a predictor, parameter or
+# assignment is an ordinary model value.
+function _rk_computed_argument(program, head, arg, predictors::Vector{Symbol})
+    arg isa ExprColumn || return false
+    _rk_strip_logistic(arg, predictors) === nothing || return false
+    _rk_formula_shape_argument(head, arg, predictors) && return false
+    reachable = _brm_reachable_operations(program,
+        _brm_prepared_references(_brm_prepare_expr(arg)))
+    any(op -> op.name in reachable, program.operations)
+end
+_rk_formula_shape_argument(_head, _arg, _predictors) = false
+_rk_formula_shape_argument(::Type{<:LocationScale}, arg, _predictors) = getf(arg) === TDist
+_rk_formula_shape_argument(::Type{<:Gamma}, arg, predictors) =
+    getf(arg) === (/) && _rk_is_predictor_ref(first(getargs(arg)), predictors)
+_rk_formula_shape_argument(::Type{<:Beta}, arg, predictors) =
+    getf(arg) === (*) && any(getargs(arg)) do factor
+        _rk_is_predictor_ref(factor, predictors) ||
+            any(p -> _rk_beta_is_complement(factor, p), predictors)
+    end
 
 _rk_has_value_call(_) = false
 function _rk_has_value_call(expression::_BRMPreparedExpr)
