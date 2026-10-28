@@ -7752,6 +7752,11 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
                 "got a bare $(typeof(arg_col)).",
                 _sb_kernel_link_advice(arg_col))
             gath_sym = Symbol("kernel_", target, "_", name(arg_col), "_ragged")
+            # A vector read through a second grouping is a second gather
+            # (`x[rows[i]]` beside `x[other[i]]`), named after its cell name.
+            gath_sym in dcol_names && i <= length(params) &&
+                (gath_sym = Symbol("kernel_", target, "_", params[i], "_ragged"))
+            gath_sym in dcol_names && (gath_sym = Symbol("kernel_", target, "_", name(arg_col), "_", i, "_ragged"))
             (; into, order) = _brm_kernel_ragged_options(c; prefix="sbimpl")
             push!(ragged_specs, (i, arg_col, grp_arg, gath_sym, into, order))
             push!(dcol_names, gath_sym)
