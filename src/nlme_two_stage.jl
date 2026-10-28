@@ -43,11 +43,11 @@ Base.show(io::IO, p::BRMNLMEUnitProblem) = print(io, "BRMNLMEUnitProblem(subject
 Unit `i`'s conditional posterior at fixed population values `θ`, `σ` and `Ω`:
 Ω is the natural-effect covariance as [`brm_nlme_estimates`](@ref) takes it, one
 matrix for a flat model or one per covariance family for a nested one. The unit
-is evaluated on its own observation cells, so a flat model needs a
-subject-indexed cell (`@plate for`, or exact totals and random-effect blocks
-whose observations RK attributes to cells); a flat-row grouped model is
-refused with the reason. A nested model's unit gradient evaluates the whole
-model (`brm_nlme_loglikelihoods_and_gradients`), so its cost grows with the
+is evaluated on its own observation cells (see [`brm_nlme_model`](@ref)), so
+its cost does not grow with the number of units. A flat model whose
+observations have no subject cells is refused with the reason. A nested
+model's unit gradient evaluates the whole model
+(`brm_nlme_loglikelihoods_and_gradients`), at a cost that grows with the
 number of units.
 """
 function brm_nlme_unit_problem(m::BRMNLMEModel, i::Integer, θ, σ, Ω)
@@ -55,8 +55,8 @@ function brm_nlme_unit_problem(m::BRMNLMEModel, i::Integer, θ, σ, Ω)
     1 <= i <= length(m.view.levels) || throw(BoundsError(m.view.levels, i))
     m.cell_query === nothing && !_brm_nlme_ragged(m.view) && _brm_nlme_error(
         "brm_nlme_unit_problem: a unit is evaluated on its own observation " *
-        "cells, but this model's observations are flat grouped rows with no " *
-        "subject-indexed cell")
+        "cells, but this model's observations have no cells that each belong " *
+        "to one subject")
     block = _brm_nlme_unit_omega(m, Ω, i)
     factor = Matrix{Float64}(cholesky(Symmetric(block)).L)
     BRMNLMEUnitProblem(m, Int(i), Vector{Float64}(θ), Vector{Float64}(σ), factor)
@@ -96,19 +96,16 @@ end
 
 # A copy of `m` with its own prepared subject-cell queries and compact gradient
 # samplers, so units evaluate concurrently on another thread; everything else
-# is shared read-only. A nested (ragged) model evaluates subjects through the
+# is shared read-only. A nested model evaluates subject gradients through the
 # whole-model sampler and has no per-cell workspace to copy.
 function _brm_nlme_worker_model(m::BRMNLMEModel)
     m.cell_gradient === nothing && _brm_nlme_error(
         "brm_two_stage_fit: units of a nested model evaluate through the " *
         "whole-model sampler, which one thread owns; use `threads = 1`")
-    cell_query = map(m.cell_query) do cell
-        (; cell.names, cell.positions,
-           query=_rk_nlme_cell_query(m.backend, cell.names))
-    end
-    selected = sort!(vcat(m.theta, m.sigma, first(m.view.subject_coordinates)))
-    cell_gradient = (samplers=map(cell -> _rk_nlme_compact_cell_sampler(m.backend,
-        cell.names, m.unit, selected), m.cell_query), lock=ReentrantLock())
+    cell_query = _brm_nlme_cell_queries(m.backend, m.cell_query)
+    cell_gradient = (; _brm_nlme_cell_samplers(m.backend, m.cell_query, m.unit,
+        sort!(vcat(m.theta, m.sigma)), m.view.subject_coordinates)...,
+        lock=ReentrantLock())
     BRMNLMEModel(m.view, m.backend, m.sampler, m.pointwise, m.eta_hvp, m.attribution,
         m.theta, m.sigma, m.eta_blocks, m.unit, m.observations_query,
         m.observations_pushforward, m.observed, m.observation_attribution,

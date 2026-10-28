@@ -497,10 +497,10 @@ end
 end
 
 @stestset "flat grouped rows take SAEM's batched population gradient" begin
-    # Only a prepared subject cell differentiates one subject's population
-    # coordinates; flat grouped rows have none, so SAEM uses the lockstep batch.
+    # Each flat row is a cell of its subject, one compact call per row, so with
+    # several rows per subject the lockstep batch is cheaper and SAEM uses it.
     m = brm_nlme_model(RKBRMI(nlme_pk(NLME_DATA)); ad_backend=NLME_AD)
-    @test m.cell_gradient === nothing
+    @test m.cell_gradient !== nothing && only(m.cell_query).elementwise
     for mode in (Val(:online), Val(:mixture))
         @test saem_population_gradient_style(m, mode) isa BatchedEvaluation
     end

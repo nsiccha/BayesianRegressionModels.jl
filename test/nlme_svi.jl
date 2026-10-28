@@ -10,6 +10,7 @@
 #
 # RUN: julia --project=test test/nlme_svi.jl [testset-filter...]
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
+include(joinpath(@__DIR__, "nlme_panel_fixture.jl"))
 using LinearAlgebra, LogDensityProblems, Random, Statistics, WarmupHMC
 
 # Correlated random intercept and slope, `nobs` Normal observations per subject.
@@ -70,29 +71,38 @@ function svi_moments(draws, reference, idx)
        sd_ratio=vec(std(draws[idx, :]; dims=2)) ./ sd)
 end
 
-@stestset "the minibatch split equals the RK target and the unit density" begin
-    rng = Xoshiro(1)
-    rk = RKBRMI(svi_gauss_model(svi_gauss_data(rng, 12)))
-    m = brm_nlme_model(rk; ad_backend=NLME_AD)
+# The minibatch split of `m` at the packed point `u`: the global term plus
+# every subject's term equals the full RK target in value, in the globals'
+# gradient and in each subject's gradient. Returns the terms.
+function check_svi_split(rk, m, u)
     t = BRM._brm_svi_target(m)
-    full = rk_logdensity_problem(rk; ad_backend=NLME_AD)
-    # A point with non-unit scales and correlation, so the cells' gradients
-    # in those coordinates are exercised.
-    u = m.unit .+ 0.4 .* randn(rng, length(m.unit))
-    g = u[t.globals]
     @test sort(vcat(t.globals, reduce(vcat, t.units))) == eachindex(u)
+    g = u[t.globals]
     P, gP = BRM._brm_svi_global_term(t, g)
-    gg, gz = zeros(length(g)), zeros(t.d)
+    gg = zeros(length(g))
     terms = map(eachindex(t.units)) do i
+        gz = zeros(length(t.units[i]))
         value = BRM._brm_svi_unit_term!(gg, gz, t, i, g, u[t.units[i]])
-        (; value, gg=copy(gg), gz=copy(gz))
+        (; value, gg=copy(gg), gz)
     end
+    full = rk_logdensity_problem(rk; ad_backend=NLME_AD)
     value, gradient = LogDensityProblems.logdensity_and_gradient(full, u)
     @test P + sum(x -> x.value, terms) ≈ value rtol = 1e-12
     @test gP .+ sum(x -> x.gg, terms) ≈ gradient[t.globals] rtol = 1e-10
     for (i, block) in enumerate(t.units)
         @test terms[i].gz ≈ gradient[block] rtol = 1e-10
     end
+    (; t, P, gP, terms, value, gradient)
+end
+
+@stestset "the minibatch split equals the RK target and the unit density" begin
+    rng = Xoshiro(1)
+    rk = RKBRMI(svi_gauss_model(svi_gauss_data(rng, 12)))
+    m = brm_nlme_model(rk; ad_backend=NLME_AD)
+    # A point with non-unit scales and correlation, so the cells' gradients
+    # in those coordinates are exercised.
+    u = m.unit .+ 0.4 .* randn(rng, length(m.unit))
+    (; t, P, gP, terms, value, gradient) = check_svi_split(rk, m, u)
     # Batches of a partition of the subjects, each scaled by N/B, average to
     # the full density and gradient.
     N, B = length(t.units), 4
@@ -208,23 +218,8 @@ end; mod=@__MODULE__)
                 m.view.role[findall(n -> startswith(n, "Omega."), names)])
             @test shared ⊆ m.theta
             @test length(m.view.levels) == 6
-            t = BRM._brm_svi_target(m)
-            full = rk_logdensity_problem(rk; ad_backend=NLME_AD)
             u = m.unit .+ 0.3 .* randn(rng, length(m.unit))
-            g = u[t.globals]
-            @test shared ⊆ t.globals
-            P, gP = BRM._brm_svi_global_term(t, g)
-            gg, gz = zeros(length(g)), zeros(t.d)
-            terms = map(eachindex(t.units)) do i
-                value = BRM._brm_svi_unit_term!(gg, gz, t, i, g, u[t.units[i]])
-                (; value, gg=copy(gg), gz=copy(gz))
-            end
-            value, gradient = LogDensityProblems.logdensity_and_gradient(full, u)
-            @test P + sum(x -> x.value, terms) ≈ value rtol = 1e-12
-            @test gP .+ sum(x -> x.gg, terms) ≈ gradient[t.globals] rtol = 1e-10
-            for (i, block) in enumerate(t.units)
-                @test terms[i].gz ≈ gradient[block] rtol = 1e-10
-            end
+            @test shared ⊆ check_svi_split(rk, m, u).t.globals
             # Each probe's cell is its share of the lockstep likelihoods: one
             # AR(1) series per probe, attributed to the probe owning its rows.
             @test [only(c) for c in only(m.cell_query).positions] == 1:6
@@ -266,11 +261,66 @@ end
     @test_throws ArgumentError LowRankGlobal(0)
 end
 
-@stestset "minibatch SVI needs subject cells and flat subject blocks" begin
-    # Flat-row grouped observations have no per-subject cell, and nested
-    # subject blocks no compact cell gradient yet: capability gaps, todo
-    # BayesianRegressionModels:scaling-svi/todos/2026-10-25T22-52-28-193-1mbshme.
-    flat = brm_nlme_model(RKBRMI(nlme_pk(NLME_DATA)); ad_backend=NLME_AD)
-    @test_broken brm_svi_fit(flat; rng=Xoshiro(1), max_iterations=10, ndraws=5) isa
-        NamedTuple
+@stestset "flat-row grouped observations: each row is a cell of its subject" begin
+    # No `@plate`: the response is observed elementwise on interleaved rows of
+    # unequal count, and every row's density belongs to its row's subject.
+    rng = Xoshiro(11)
+    rk = RKBRMI(nlme_pk(NLME_DATA))
+    m = brm_nlme_model(rk; ad_backend=NLME_AD)
+    @test only(m.cell_query).names == (:y,)
+    check_svi_split(rk, m, m.unit .+ 0.3 .* randn(rng, length(m.unit)))
+    result = brm_svi_fit(rk; rng=Xoshiro(12), batch_size=2, ndraws=10,
+        max_iterations=200, min_windows=1)
+    @test size(result.draws) == (length(m.view.coordinates), 10)
+    @test all(isfinite, result.draws)
+end
+
+# Subjects owning 1 to 3 nested units with 2 or 3 rows each, interleaved:
+# subject blocks of different lengths.
+function svi_nested_data(rng, N; mu=0.5, sp=0.6, su=0.4, sigma=0.3)
+    subject = ["s$i" for i in 1:N]
+    rows = [(i, "u$i.$k") for i in 1:N for k in 1:mod1(i, 3) for _ in 1:(2 + i % 2)]
+    rows = rows[randperm(rng, length(rows))]
+    p = Dict(s => sp * randn(rng) for s in subject)
+    units = Dict(unit => su * randn(rng) for unit in unique(last.(rows)))
+    obs_subject = ["s$(first(r))" for r in rows]
+    unit = last.(rows)
+    y = [mu + p[s] + units[v] + sigma * randn(rng) for (s, v) in zip(obs_subject, unit)]
+    (; subject, obs_subject, unit, y)
+end
+
+const SVI_NESTED = (; subject_group=:subject, nested_groups=(unit=:obs_subject,))
+
+@stestset "nested units: subject blocks of different lengths" begin
+    rng = Xoshiro(13)
+    rk = RKBRMI(nested_model(NESTED_DATA))
+    m = brm_nlme_model(rk; ad_backend=NLME_AD, SVI_NESTED...)
+    @test sort(unique(length.(m.view.subject_coordinates))) == [2, 3, 4]
+    # SVI prepares one compact sampler set per block length.
+    @test length(BRM._brm_svi_target(m).samplers) == 3
+    check_svi_split(rk, m, m.unit .+ 0.3 .* randn(rng, length(m.unit)))
+    # A regional panel: nested districts, municipalities and district-years,
+    # completed (non-centred) covariate values, and district-year totals.
+    panel_rk = RKBRMI(panel(PANEL); completions=:noncentered)
+    panel_m = brm_nlme_model(panel_rk; ad_backend=NLME_AD, subject_group=:region,
+        nested_groups=PANEL_NESTED)
+    check_svi_split(panel_rk, panel_m,
+        panel_m.unit .+ 0.1 .* randn(rng, length(panel_m.unit)))
+
+    # The fit against NUTS: unit factors of every length settle.
+    rk = RKBRMI(nested_model(svi_nested_data(Xoshiro(14), 30)))
+    m = brm_nlme_model(rk; ad_backend=NLME_AD, SVI_NESTED...)
+    reference = svi_nuts_reference(rk, m; seed=30)
+    result = brm_svi_fit(rk; SVI_NESTED..., rng=Xoshiro(15), batch_size=6, ndraws=2000)
+    @test result.diagnostics.converged
+    @test [length(M) for M in result.diagnostics.q.M] == length.(m.view.subject_coordinates)
+    globals = svi_moments(result.draws, reference, result.diagnostics.globals)
+    subjects = svi_moments(result.draws, reference,
+        setdiff(axes(reference, 1), result.diagnostics.globals))
+    @test maximum(globals.mean_error) < 1.0
+    @test all(<(1.2), globals.sd_ratio)
+    @test mean(subjects.mean_error) < 0.25
+    @test 0.75 < mean(subjects.sd_ratio) < 1.25
+    # refused: a prepared model already fixes its subject groupings.
+    @test_throws ArgumentError brm_svi_fit(m; SVI_NESTED..., max_iterations=1)
 end

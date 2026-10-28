@@ -123,9 +123,12 @@ end
     m = brm_nlme_model(rk; ad_backend=NLME_AD)
     @test length(m.theta) == count(==(:population), v.role) + 2
     @test m.eta_blocks == [1, 3]
-    # A flat-row model has no subject cell, so it has lockstep evaluation only
-    # (no `brm_nlme_unit_problem`); the plate models below check unit problems.
+    # Each flat row is a cell of its subject, so the units evaluate on their
+    # own rows as the plate models below do.
+    @test only(m.cell_query).positions == [findall(==(level), GH_FLAT.subject)
+        for level in m.view.levels]
     check_lockstep(m, Xoshiro(1))
+    check_unit_problems(m, Xoshiro(2))
 end
 
 @stestset "subject plate: weights labelled by subjects join their cells" begin

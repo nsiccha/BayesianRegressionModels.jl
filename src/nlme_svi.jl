@@ -56,30 +56,26 @@ _brm_svi_globals(m::BRMNLMEModel) = sort!(vcat(m.theta, m.sigma,
 
 function _brm_svi_target(m::BRMNLMEModel)
     m.cell_query === nothing && _brm_nlme_error(
-        "brm_svi: minibatch SVI evaluates one subject at a time, which needs a " *
-        "subject-indexed observation cell (`@plate for` over the subjects); " *
-        "flat-row grouped observations have none")
-    _brm_nlme_ragged(m.view) && _brm_nlme_error(
-        "brm_svi: nested (ragged) subject blocks are not covered yet")
+        "brm_svi: minibatch SVI evaluates one subject at a time, on the " *
+        "subject's own observation cells, and this model's observations have " *
+        "no cells attributable to single subjects")
     globals = _brm_svi_globals(m)
     units = m.view.subject_coordinates
-    d = length(first(units))
-    all(u -> length(u) == d, units) || error(
-        "brm_svi: internal: flat subject blocks differ in length")
-    # One prepared compact cell gradient per cell group, selecting the globals
-    # and one subject's draws; the subject's positions change per call.
-    selected = sort!(vcat(globals, first(units)))
-    samplers = map(m.cell_query) do cell
-        _rk_nlme_compact_cell_sampler(m.backend, cell.names, m.unit, selected)
+    # Compact cell gradients selecting the globals and one subject's draws; the
+    # subject's positions change per call. Subjects with blocks of one length
+    # (all subjects of a flat model) share a sampler set and its workspace.
+    (; samplers, of) = _brm_nlme_cell_samplers(m.backend, m.cell_query, m.unit,
+        globals, units)
+    work = map(eachindex(samplers)) do k
+        n = length(globals) + length(units[findfirst(==(k), of)])
+        (; active=zeros(n), cell_gradient=zeros(n), gradient=zeros(n))
     end
     # For subject i, `order[i]` sorts [globals; units[i]] into packed order.
     order = [sortperm(vcat(globals, block)) for block in units]
     indices = [vcat(globals, block)[o] for (block, o) in zip(units, order)]
     nz = count(==(:subject_effect), m.view.role)
-    (; m, globals, units, d, samplers, order, indices,
-       z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit),
-       active=zeros(length(selected)), cell_gradient=zeros(length(selected)),
-       gradient=zeros(length(selected)))
+    (; m, globals, units, samplers, of, work, order, indices,
+       z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
 end
 
 # P(g) and its gradient: the RK prior and log-Jacobian at the packed point with
@@ -95,17 +91,19 @@ end
 function _brm_svi_unit_term!(gg, gz, t, i, g, z)
     D = length(t.globals)
     order = t.order[i]
+    w = t.work[t.of[i]]
     joint = vcat(g, z)
-    t.active .= joint[order]
+    w.active .= joint[order]
     value = 0.0
-    fill!(t.gradient, 0.0)
-    for (cell, sampler) in zip(t.m.cell_query, t.samplers), p in cell.positions[i]
+    fill!(w.gradient, 0.0)
+    for (cell, sampler) in zip(t.m.cell_query, t.samplers[t.of[i]]),
+            p in cell.positions[i]
         value += first(_rk_nlme_compact_cell_value_and_gradient!(sampler,
-            t.cell_gradient, t.m.unit, t.active, t.indices[i], p))
-        t.gradient .+= t.cell_gradient
+            w.cell_gradient, t.m.unit, w.active, t.indices[i], p))
+        w.gradient .+= w.cell_gradient
     end
     joint_gradient = similar(joint)
-    joint_gradient[order] .= t.gradient
+    joint_gradient[order] .= w.gradient
     gg .= view(joint_gradient, 1:D)
     gz .= view(joint_gradient, D+1:length(joint)) .- z
     value - sum(abs2, z) / 2 - length(z) * log(2π) / 2
@@ -113,12 +111,14 @@ end
 
 # ── Variational parameters ───────────────────────────────────────────────────
 
+# Subject i's factor is `M[i]`, `Λ[i]` and `U[i]`, sized by its own block.
 function _brm_svi_params(t, μ, family::BRMSVIFamily; global_scale, unit_scale)
-    D, d, N = length(t.globals), t.d, length(t.units)
-    Λ = repeat(Matrix{Float64}(I, d, d) ./ unit_scale^2, 1, 1, N)
+    D = length(t.globals)
+    eye(block) = Matrix{Float64}(I, length(block), length(block))
     (; family, μ=Vector{Float64}(μ), ρ=fill(log(global_scale), D),
-       Β=zeros(D, _brm_svi_rank(family)), M=zeros(d, N), Λ,
-       U=repeat(Matrix{Float64}(I, d, d) ./ unit_scale, 1, 1, N))
+       Β=zeros(D, _brm_svi_rank(family)), M=[zeros(length(b)) for b in t.units],
+       Λ=[eye(b) ./ unit_scale^2 for b in t.units],
+       U=[eye(b) ./ unit_scale for b in t.units])
 end
 
 _brm_svi_global_covariance(q) = Diagonal(exp.(2 .* q.ρ)) + q.Β * q.Β'
@@ -127,12 +127,11 @@ _brm_svi_global_covariance(q) = Diagonal(exp.(2 .* q.ρ)) + q.Β * q.Β'
 _brm_svi_draw_global(q, ε, η) = q.μ .+ exp.(q.ρ) .* ε .+ q.Β * η
 # A draw of subject i from ε_i: m_i + U_i⁻ᵀ ε_i, with U_i the lower Cholesky
 # factor of the precision Λ_i.
-_brm_svi_draw_unit(q, i, εi) =
-    view(q.M, :, i) .+ LowerTriangular(view(q.U, :, :, i))' \ εi
+_brm_svi_draw_unit(q, i, εi) = q.M[i] .+ LowerTriangular(q.U[i])' \ εi
 
-# The entropy of q, up to the constant (D + N d)(1 + log 2π)/2.
+# The entropy of q, up to the constant (D + Σ d_i)(1 + log 2π)/2.
 _brm_svi_entropy(q) = logdet(_brm_svi_global_covariance(q)) / 2 -
-    sum(log, (q.U[k, k, i] for k in axes(q.U, 1), i in axes(q.U, 3)))
+    sum(U -> sum(log, diag(U)), q.U; init=0.0)
 
 # ── The global factor: Adam ──────────────────────────────────────────────────
 
@@ -204,15 +203,15 @@ end
 # Λ + β G + β²/2 G Λ⁻¹ G = ½(Λ + (Λ + βG) Λ⁻¹ (Λ + βG)), positive definite for
 # any G, and the mean to m + β Λ_new⁻¹ gz.
 function _brm_svi_unit_step!(q, i, gz, εi, β)
-    Λ = Symmetric(q.Λ[:, :, i])
-    U = LowerTriangular(view(q.U, :, :, i))
+    Λ = Symmetric(q.Λ[i])
+    U = LowerTriangular(q.U[i])
     H = gz * (U * εi)'
     G = -(H + H') ./ 2 .- Λ
     Λnew = Symmetric(Λ .+ β .* G .+ (β^2 / 2) .* (G * (Λ \ G)))
     F = cholesky(Λnew)
-    q.Λ[:, :, i] .= Λnew
-    q.U[:, :, i] .= F.L
-    q.M[:, i] .+= β .* (F \ gz)
+    q.Λ[i] .= Λnew
+    q.U[i] .= F.L
+    q.M[i] .+= β .* (F \ gz)
     q
 end
 
@@ -224,20 +223,21 @@ end
 # entropy).
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false)
-    D, d, N = length(t.globals), t.d, length(t.units)
+    D, N = length(t.globals), length(t.units)
     s = N / length(batch)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
     P, gP = _brm_svi_global_term(t, g)
     w = copy(gP)
-    gg, gz = zeros(D), zeros(d)
+    gg = zeros(D)
     batch_value = 0.0
     steps = Vector{Tuple{Vector{Float64},Vector{Float64}}}(undef, length(batch))
     for (k, i) in enumerate(batch)
-        εi = randn(rng, d)
+        εi = randn(rng, length(t.units[i]))
+        gz = zeros(length(εi))
         batch_value += _brm_svi_unit_term!(gg, gz, t, i, g, _brm_svi_draw_unit(q, i, εi))
         w .+= s .* gg
-        steps[k] = (copy(gz), εi)
+        steps[k] = (gz, εi)
     end
     x = _brm_svi_global_vector(q)
     grad = _brm_svi_global_gradient(q, w, ε, η)
@@ -297,8 +297,7 @@ function _brm_svi_fit!(rng, t, q; batch_size, max_iterations, lr_global, unit_st
         if polishing
             k = it - polish_start
             for name in (:μ, :ρ, :Β, :M, :Λ)
-                a, x = getfield(average, name), getfield(q, name)
-                @. a += (x - a) / k
+                _brm_svi_average!(getfield(average, name), getfield(q, name), k)
             end
             k >= polish_windows * W && return (; q=_brm_svi_factor!(average),
                 elbo=trace, elbo_windows=first.(windows), converged=true,
@@ -326,10 +325,16 @@ function _brm_svi_fit!(rng, t, q; batch_size, max_iterations, lr_global, unit_st
        elbo_windows=first.(windows), converged=false, iterations=max_iterations)
 end
 
+# The running mean `a` of iterates `x`, at the k-th: an array, or one array
+# per subject.
+_brm_svi_average!(a::AbstractArray{<:Real}, x, k) = (@. a += (x - a) / k; a)
+_brm_svi_average!(a::AbstractVector{<:AbstractArray}, x, k) =
+    (foreach((ai, xi) -> _brm_svi_average!(ai, xi, k), a, x); a)
+
 # The subjects' Cholesky factors of an averaged precision.
 function _brm_svi_factor!(q)
-    for i in axes(q.Λ, 3)
-        q.U[:, :, i] .= cholesky(Symmetric(q.Λ[:, :, i])).L
+    for i in eachindex(q.Λ)
+        q.U[i] .= cholesky(Symmetric(q.Λ[i])).L
     end
     q
 end
@@ -341,7 +346,7 @@ function _brm_svi_draws(rng, t, q, n)
         U[t.globals, j] .= _brm_svi_draw_global(q, randn(rng, length(q.μ)),
             randn(rng, size(q.Β, 2)))
         for (i, block) in enumerate(t.units)
-            U[block, j] .= _brm_svi_draw_unit(q, i, randn(rng, t.d))
+            U[block, j] .= _brm_svi_draw_unit(q, i, randn(rng, length(block)))
         end
     end
     U
@@ -355,16 +360,19 @@ _brm_svi_lowered(x, phase) = throw(ArgumentError(
     "brm_svi_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
     "got $(typeof(x))"))
 
-_brm_svi_model(x::RKBRMI, phase; ad_backend, shared_point) =
+_brm_svi_model(x::RKBRMI, phase; ad_backend, shared_point, subject_group,
+        nested_groups) =
     _brm_run_phase(phase) do node
         _brm_nlme_model(x, node; ad_backend=ad_backend === nothing ?
             _brm_svi_default_ad(x) : ad_backend, observation_ad_backend=nothing,
-            shared_point, subject_group=nothing, nested_groups=NamedTuple())
+            shared_point, subject_group, nested_groups)
     end
-function _brm_svi_model(m::BRMNLMEModel, phase; ad_backend, shared_point)
-    ad_backend === nothing && shared_point === nothing || throw(ArgumentError(
-        "brm_svi_fit: a prepared BRMNLMEModel already fixes its ad_backend and " *
-        "shared_point; pass them to brm_nlme_model instead"))
+function _brm_svi_model(m::BRMNLMEModel, phase; ad_backend, shared_point,
+        subject_group, nested_groups)
+    ad_backend === nothing && shared_point === nothing && subject_group === nothing &&
+        isempty(nested_groups) || throw(ArgumentError(
+        "brm_svi_fit: a prepared BRMNLMEModel already fixes its ad_backend, " *
+        "shared_point and subject groupings; pass them to brm_nlme_model instead"))
     _brm_reuse_phase!(phase)
     m
 end
@@ -391,7 +399,8 @@ end
 """
     brm_svi_fit(x; batch_size=32, rng=Random.default_rng(),
         family=MeanFieldGlobal(), ndraws=1000, start=nothing, inits=nothing,
-        ad_backend=nothing, shared_point=nothing, progress=nothing, kwargs...)
+        ad_backend=nothing, shared_point=nothing, subject_group=nothing,
+        nested_groups=NamedTuple(), progress=nothing, kwargs...)
         -> (; draws, coordinates, diagnostics)
 
 Minibatch stochastic variational inference for a model whose subjects are
@@ -403,13 +412,16 @@ batch size, not the number of subjects.
 
 - `x` — a `@brm` model ([`BRMI`](@ref)), its [`RKBRMI`](@ref), or a prepared
   [`BRMNLMEModel`](@ref). For a BRMI or RKBRMI the model is prepared with
-  `ad_backend` (default reverse-mode `AutoEnzyme`, which needs Enzyme loaded)
-  and `shared_point`, as [`brm_nlme_model`](@ref) takes them. The observations
-  must lie in subject-indexed cells (`@plate for` over the subjects) with flat
-  (not nested) subject blocks.
+  `ad_backend` (default reverse-mode `AutoEnzyme`, which needs Enzyme loaded),
+  `shared_point`, `subject_group` and `nested_groups`, as
+  [`brm_nlme_model`](@ref) takes them; a nested model passes the last two.
+  Every observation must belong to one subject's cells: a cell of a
+  `@plate for` over the subjects or over their rows, or a row of a flat-row
+  response grouped by the subjects.
 - `family` — the global factor: `MeanFieldGlobal()` (diagonal) or
   `LowRankGlobal(r)` (diagonal plus rank `r`). Each subject has its own
-  full-covariance Gaussian factor.
+  full-covariance Gaussian factor over its block, whose length can differ
+  between the subjects of a nested model.
 - `start` / `inits` — where the globals' means start: the prior medians by
   default, a full RK packed point, or initial values keyed by prior address as
   [`brm_start`](@ref) takes them (the rest at the prior medians).
@@ -435,13 +447,14 @@ the spread of the population, scale and correlation coordinates is too narrow.
 function brm_svi_fit(x; rng=Random.default_rng(), batch_size=32,
         max_iterations=100_000, family::BRMSVIFamily=MeanFieldGlobal(),
         lr_global=0.01, unit_step=0.1, start=nothing, inits=nothing,
-        ad_backend=nothing, shared_point=nothing, global_scale=0.1, unit_scale=1.0,
+        ad_backend=nothing, shared_point=nothing, subject_group=nothing,
+        nested_groups=NamedTuple(), global_scale=0.1, unit_scale=1.0,
         ndraws=1000, polish_lr=0.05, window=nothing, patience=10, min_windows=40,
         polish_windows=20, progress=nothing)
     _brm_with_progress(progress; description="BRM SVI fit") do node
         _brm_with_phases(node, _BRM_SVI_PHASES) do phases
             m = _brm_svi_model(_brm_svi_lowered(x, phases.lower), phases.prepare;
-                ad_backend, shared_point)
+                ad_backend, shared_point, subject_group, nested_groups)
             t, μ = _brm_run_phase(phases.target) do _
                 t = _brm_svi_target(m)
                 t, _brm_svi_start(m, start, inits)[t.globals]

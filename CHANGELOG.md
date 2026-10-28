@@ -12,6 +12,27 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.28
+
+- A flat grouped response (`y ~ Normal(m, sigma)` over interleaved rows, no
+  `@plate`) is now evaluated one subject at a time: each row is an RK cell of
+  its row's subject. `brm_nlme_loglikelihood[_and_gradient]`,
+  `brm_nlme_unit_problem`, `brm_two_stage_fit` and `brm_svi_fit` accept such
+  models instead of refusing them. When RK computes the row's predictor at
+  that row only (a population-PK model, a regression), one subject's work
+  does not grow with the number of subjects. Online SAEM keeps the batched
+  population gradient for them, since one call per row costs more than a
+  lockstep sweep.
+- `brm_svi_fit` fits flat-row grouped and nested models. It takes
+  `subject_group` and `nested_groups`, as `brm_nlme_model` does; a nested
+  model's units are evaluated through one compact cell gradient set per
+  distinct block length, and each unit's variational factor has its block's
+  own length:
+  `diagnostics.q.M`, `.Λ` and `.U` are vectors with one entry per subject
+  (they were a `d × N` matrix and `d × d × N` arrays). An iteration costs its
+  batch's cells: a cell that computes whole-cohort values (the regional
+  panel's totals and completed-covariate rows) costs about one full gradient.
+
 ## 0.2.27
 
 - A forecast continues an `rw(time)` or `cdar(step; by = g, cor = C)` walk.
