@@ -574,9 +574,9 @@ end
 
 # Each stratum `s` of a stratified block has its own scales, row `s` of `tau`
 # (strata × margins), or entry `s` of each margin's `tau_k` when the margins'
-# laws differ, and its own correlation factor `L[s]`
-# (`_rk_ast_stratified_group_component!`). `sd` and `cor` set every stratum,
-# `stratum => value` pairs the listed ones.
+# laws differ, and its own correlation factor `L[:, :, s]` (margins × margins ×
+# strata; `_rk_ast_stratified_group_component!`). `sd` and `cor` set every
+# stratum, `stratum => value` pairs the listed ones.
 function _brm_rk_ranef_writes!(writes, ::Val{:stratified_ranef}, t, r, values)
     P = _brm_start_margin_positions(t, r.margins)
     for (s, sd) in _brm_start_stratum_values(t, "sd", t.sd, t.stratum_sd, r.strata),
@@ -586,7 +586,7 @@ function _brm_rk_ranef_writes!(writes, ::Val{:stratified_ranef}, t, r, values)
     end
     isnothing(r.L) && return writes
     for (s, C) in _brm_start_stratum_values(t, "cor", t.cor, t.stratum_cor, r.strata)
-        push!(writes, (r.L, (s,), _brm_start_lower_factor(C[P, P])))
+        push!(writes, (r.L, (:, :, s), _brm_start_lower_factor(C[P, P])))
     end
     writes
 end
@@ -673,23 +673,14 @@ end
 # The factor `level_A(g)` that takes level `g`'s standardized draws to its
 # effects at constrained `values`: `sqrt(w[g]) diag(tau) L` (`w` only for a
 # Student-t block), or, in a stratified block, its stratum's
-# `diag(tau[s, :]) L[s]`.
+# `diag(tau[s, :]) L[:, :, s]`.
 _brm_rk_level_factor(values, r, K) = _brm_rk_level_factor(values, Val(r.kind), r, K)
 function _brm_rk_level_factor(values, ::Val, r, K)
     (; A, w) = _brm_rk_effect_factor(values, r, K)
     g -> isnothing(w) ? A : sqrt(w[g]) * A
 end
 function _brm_rk_level_factor(values, ::Val{:stratified_ranef}, r, K)
-    tau = isnothing(r.scales) ?
-        Matrix{Float64}(_brm_rk_declaration_value(values, r.scale)) :
-        reduce(hcat, [collect(Float64, _brm_rk_declaration_value(values, name))
-            for name in r.scales])
-    size(tau) == (length(r.strata), K) || error(
-        "brm_start: internal: RK stratum scales of `$(r.z)` have size $(size(tau)), " *
-        "expected $((length(r.strata), K))")
-    L = isnothing(r.L) ? nothing : _brm_rk_declaration_value(values, r.L)
-    factors = [Diagonal(tau[s, :]) * (isnothing(L) ? I : Matrix{Float64}(L[s]))
-        for s in axes(tau, 1)]
+    factors = [_brm_nlme_natural_factor(values, r, K, s) for s in eachindex(r.strata)]
     g -> factors[r.level_strata[g]]
 end
 
@@ -972,29 +963,33 @@ function _brm_sb_start_writes!(writes, deferred, ::Val{:ranef}, t, d, names, tot
 end
 
 # A stratified `gr(g, by = b)` block has no block-wide scale or correlation:
-# each stratum has its own scales, a column of `<binding>_tau_s` (margins ×
-# strata), and its own correlation factor `<binding>_L_s[s]` (strata × margins
-# × margins), as `brm_ranef_draws` reads them (`_RANEF_FAMILIES`). `sd` and
-# `cor` set every stratum, `stratum => value` pairs the listed ones; the others
-# keep their base values.
+# each stratum has its own scales and its own correlation factor. They are
+# sampled as the stratum plate cells' own parameters, the block's `:scale` and
+# `:correlation_cholesky` internals (`<binding>_tau_s_tau`, margins × strata,
+# and `<binding>_L_s_L`; `_RANEF_FAMILIES`), which the `tau_s`/`L_s` that
+# `brm_ranef_draws` reads collect as transformed parameters. `sd` and `cor` set
+# every stratum, `stratum => value` pairs the listed ones; the others keep their
+# base values.
 function _brm_sb_start_stratified_writes!(writes, t, d, block, P, names)
     spec = _RANEF_FAMILIES[block.family]
     (; strata) = _brm_ranef_strata(d, block, "brm_start")
     S, K = length(strata), length(P)
-    coordinates(carrier, n) = let output = _brm_ranef_carrier_output(d, block,
-            Symbol(block.binding, :_, carrier), "brm_start")
-        c = _brm_element_coordinates(output, names)
-        length(c) == n || error("brm_start: internal: `$(output.name)` of `|$(t.id)|` " *
+    function coordinates(component, n)
+        carrier = Symbol(block.binding, :_,
+            only(k for (k, v) in pairs(spec.internals) if v === component))
+        c = _brm_element_coordinates(
+            _brm_ranef_carrier_output(d, block, carrier, "brm_start"), names)
+        length(c) == n || error("brm_start: internal: `$carrier` of `|$(t.id)|` " *
             "has $(length(c)) Stan values, expected $n")
         c
     end
     values(part, all, by) = _brm_start_stratum_values(t, part, all, by, strata)
-    tau = reshape(coordinates(spec.stratum_tau, K * S), K, S)
+    tau = reshape(coordinates(:scale, K * S), K, S)
     for (s, sd) in values("sd", t.sd, t.stratum_sd), (k, j) in enumerate(P)
         push!(writes, (tau[k, s], sd[j]))
     end
     K == 1 && return nothing
-    L = reshape(coordinates(spec.stratum_L, S * K * K), S, K, K)
+    L = reshape(coordinates(:correlation_cholesky, S * K * K), S, K, K)
     for (s, C) in values("cor", t.cor, t.stratum_cor)
         F = _brm_start_lower_factor(C[P, P])
         for i in 1:K, j in 1:K

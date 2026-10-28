@@ -636,7 +636,7 @@ function rk_strata(rk, u; id)
     E = BRM._brm_rk_block_effects(values, record, K)
     levels = BRM._rk_grouping_levels(rk.plan.columns[record.group])
     Dict(BRM._brm_transport_level(stratum) => (; sd=collect(tau[s, :]),
-            cor=isnothing(L) ? ones(1, 1) : L[s] * L[s]',
+            cor=isnothing(L) ? ones(1, 1) : L[:, :, s] * L[:, :, s]',
             effects=Dict(BRM._brm_transport_level(levels[g]) => E[g, :]
                 for g in eachindex(levels) if record.level_strata[g] == s))
         for (s, stratum) in enumerate(record.strata))

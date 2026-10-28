@@ -149,12 +149,14 @@ end
 
 # A block's scale vector, or one stratum's row of a stratified block's
 # `levels(by) × K` scale matrix; a per-margin scale is a number, or one entry
-# per stratum.
+# per stratum, and a correlation factor one `K × K` slice of the
+# `K × K × levels(by)` array.
 _brm_nlme_stratum_scales(value::Number, ::Nothing) = [value]
 _brm_nlme_stratum_scales(value::AbstractVector, ::Nothing) = collect(value)
 _brm_nlme_stratum_scales(value::AbstractMatrix, stratum::Int) = collect(value[stratum, :])
 _brm_nlme_stratum_entry(value, ::Nothing) = value
 _brm_nlme_stratum_entry(value::AbstractVector, stratum::Int) = value[stratum]
+_brm_nlme_stratum_entry(value::AbstractArray{<:Any,3}, stratum::Int) = value[:, :, stratum]
 
 # `diag(scale) L` of an estimated family at the constrained values.
 function _brm_nlme_natural_factor(values, record, K, stratum)

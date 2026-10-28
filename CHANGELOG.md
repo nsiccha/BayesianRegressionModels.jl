@@ -19,12 +19,15 @@ instead of failing at run time.
   `ID = (; sd)`, `(; cor)` and `ID = Σ` set every stratum; `stratum => value`
   pairs set the listed strata, `sd = ["small" => 0.4, "large" => [0.6, 0.2]]`,
   `cor = ["small" => C]`, `ID = ["small" => Σ]`, and unlisted strata keep their
-  values at `base`. Before, SBBRMI refused `sd` and `cor` (`` expects Stan
-  value `b_…_log_scale` ``, a name the block does not emit); `effects` alone
-  already worked. RKBRMI now takes a
-  stratified block's `sd`, `cor` and `effects` as SBBRMI does, instead of
-  refusing the block, so `brm_nlme_start(m, inits)` takes them too. Pairs on a
-  block that is not stratified are refused. Snag `stratified-block-73231199`.
+  values at `base`. Pairs on a block that is not stratified are refused.
+  Before, SBBRMI refused `sd` (`` `|ID|` expects Stan value `b_…_log_scale`,
+  which the compiled model does not declare ``) and looked up `cor` under the
+  block-wide factor name, which a stratified block does not emit; `effects`
+  alone already worked. RKBRMI now takes a stratified block's `sd`, `cor` and
+  `effects` as SBBRMI does instead of refusing the block, so
+  `brm_nlme_start(m, inits)` takes them too for a one-margin block
+  (`brm_nlme_view` does not read a multi-margin stratified block yet, todo
+  `1srx3ud`). Snag `stratified-block-73231199`.
 
 ## 0.2.24
 
