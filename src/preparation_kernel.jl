@@ -58,10 +58,12 @@ end
 _brm_kernel_lp_data_lengths(lp_col) =
     Tuple{Symbol,Int}[(column, length(values)) for (column, values) in _brm_kernel_lp_data_columns(lp_col)]
 
-# A per-subject linear predictor without a random effect defines no grouping;
-# it rides on the subject frame a ranef LP — or, in a no-random-effects panel,
-# the pre-grouped columns — defines, sliced by the same row index. That is
-# sound only when every data column its terms name has exactly one row per
+# A per-subject linear predictor without a random effect, or whose random
+# effects group the rows coarser than one label per row (a class over the
+# cells), defines no grouping; it rides on the subject frame a ranef LP — or
+# the cell labels, or in a no-random-effects panel the pre-grouped columns —
+# defines, sliced by the same row index. That is sound only when every data
+# column its terms name, grouping columns included, has exactly one row per
 # subject. An LP with no data column has no rows at all.
 function _brm_kernel_check_subject_frame_lp(lp_col, nsub; prefix="BRM kernel preparation")
     lp = name(lp_col)
@@ -72,10 +74,11 @@ function _brm_kernel_check_subject_frame_lp(lp_col, nsub; prefix="BRM kernel pre
         "scalar as `$lp ~ <distribution>` and read it in the cell without `[i]`.")
     for (column, n) in lens
         n == nsub || error(
-            "$prefix: kernel(...) linear predictor `$lp` has no random-effect term, so " *
-            "it is read per subject (one entry per subject), but its data vector " *
-            "`$column` has $n rows for $nsub subjects. Read it at each subject's " *
-            "indices instead, `$lp[rows[i]]` with `rows = groups(group => labels)`.")
+            "$prefix: kernel(...) linear predictor `$lp` has no random effect whose " *
+            "grouping lists one label per row, so it is read per subject (one entry " *
+            "per subject), but its data vector `$column` has $n rows for $nsub " *
+            "subjects. Read it at each subject's indices instead, `$lp[rows[i]]` " *
+            "with `rows = groups(group => labels)`.")
     end
     nothing
 end
