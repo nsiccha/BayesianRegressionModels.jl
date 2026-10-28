@@ -9,9 +9,11 @@
 # value; `chains` gives distinct starts; the Stan start is the RK start moved
 # by the coordinate transport; initial values go on top of a start through
 # `base`; a plate-cell model (the whole-model Laplace) starts at a finite
-# point.
+# point; a grouping crossed with the units starts as a shared latent through
+# `shared_groups`.
 using WarmupHMC
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
+include(joinpath(@__DIR__, "nlme_crossed_fixture.jl"))
 using BridgeStan, LogDensityProblems, Random, Statistics
 import StanBlocks
 
@@ -104,6 +106,18 @@ end
     u = brm_start(rk; rng=Xoshiro(3))
     ℓ = rk_logdensity_problem(rk; ad_backend=NLME_AD)
     @test isfinite(LogDensityProblems.logdensity(ℓ, u))
+end
+
+@stestset "a grouping crossed with the units starts as a shared latent" begin
+    # `@plate` observations and a block over `class`, whose levels occur in
+    # several subjects: the atlas's shape. `shared_groups` passes through.
+    rk = RKBRMI(crossed_plate(CR_PLATE))
+    # The view does not guess which grouping is shared; its refusal names it.
+    @test_throws "class" brm_start(rk; rng=Xoshiro(5))
+    us = brm_start(rk; chains=2, rng=Xoshiro(5), shared_groups=(:class,))
+    ℓ = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+    @test all(u -> isfinite(LogDensityProblems.logdensity(ℓ, u)), us)
+    @test us[1] != us[2]
 end
 
 @stestset "a model without random-effect units" begin

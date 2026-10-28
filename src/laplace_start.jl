@@ -11,10 +11,10 @@
 
 """
     brm_start(rk::RKBRMI; chains=nothing, rng=Random.default_rng(), ad_backend,
-        subject_group=nothing, nested_groups=NamedTuple())
+        subject_group=nothing, nested_groups=NamedTuple(), shared_groups=())
     brm_start(sb::SBBRMI, stan_model; chains=nothing, rng=Random.default_rng(),
         rk=RKBRMI(parent(sb)), ad_backend, subject_group=nothing,
-        nested_groups=NamedTuple())
+        nested_groups=NamedTuple(), shared_groups=())
 
 A start computed from the data, with no initial values to give. Pathfinder
 runs over the model's population coordinates with every unit's random effects
@@ -39,24 +39,25 @@ Initial values for some addresses go on top of a start through `base`:
 Needs Pathfinder loaded (WarmupHMC loads it) and, for the default
 `ad_backend` (reverse-mode `AutoEnzyme`), Enzyme and DifferentiationInterface.
 The units are those of [`brm_nlme_view`](@ref) (`subject_group`,
-`nested_groups`); a model it does not partition into units, one with no
-random-effect block among them, is refused with the view's reason.
+`nested_groups`, `shared_groups`); a model it does not partition into units,
+one with no random-effect block among them, is refused with the view's
+reason.
 """
 function brm_start(rk::RKBRMI; chains::Union{Nothing,Integer}=nothing,
         rng::AbstractRNG=Random.default_rng(), ad_backend=nothing,
-        subject_group=nothing, nested_groups=NamedTuple())
+        subject_group=nothing, nested_groups=NamedTuple(), shared_groups=())
     U = _brm_laplace_start_draws(rk, _brm_start_count(chains); rng, ad_backend,
-        subject_group, nested_groups)
+        subject_group, nested_groups, shared_groups)
     _brm_start_result(U, chains)
 end
 
 function brm_start(sb::SBBRMI, stan_model; chains::Union{Nothing,Integer}=nothing,
         rng::AbstractRNG=Random.default_rng(), rk=nothing, ad_backend=nothing,
-        subject_group=nothing, nested_groups=NamedTuple())
+        subject_group=nothing, nested_groups=NamedTuple(), shared_groups=())
     rk = rk === nothing ? RKBRMI(parent(sb)) : rk
     t = brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan_model))
     U = _brm_laplace_start_draws(rk, _brm_start_count(chains); rng, ad_backend,
-        subject_group, nested_groups)
+        subject_group, nested_groups, shared_groups)
     S = reduce(hcat, [brm_rk_point_to_stan(t, view(U, :, k)) for k in axes(U, 2)])
     _brm_start_result(S, chains)
 end
@@ -72,10 +73,11 @@ _brm_start_result(U::AbstractMatrix, ::Integer) = [U[:, k] for k in axes(U, 2)]
 
 # `n` complete RK packed points (coordinates × n).
 function _brm_laplace_start_draws(rk::RKBRMI, n; rng, ad_backend, subject_group,
-        nested_groups)
+        nested_groups, shared_groups)
     ad = ad_backend === nothing ? _brm_rk_default_ad("brm_start", rk) : ad_backend
     p = try
-        brm_laplace_problem(rk; ad_backend=ad, subject_group, nested_groups)
+        brm_laplace_problem(rk; ad_backend=ad, subject_group, nested_groups,
+            shared_groups)
     catch err
         err isa BRMNLMEViewError || rethrow()
         _brm_nlme_error("brm_start: the start from the data integrates each " *
