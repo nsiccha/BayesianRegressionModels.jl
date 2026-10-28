@@ -123,6 +123,11 @@ function _sb_covariate_value(x::ExprColumn, selected)
         if lhs isa NamedColumn && name(lhs) in selected && parent(lhs) isa DataColumn
             args = (ExprColumn(mi,lhs;_brm_population_value=Val(:fresh_covariate)),rhs)
         elseif lhs isa ExprColumn && getf(lhs)===mi && name(only(getargs(lhs))) in selected
+            # The law given its group sums has no closed-form draw (todo filed
+            # with snag `mi-completion-wi-54222432`).
+            any(in(keys(getkwargs(lhs))), _BRM_MI_TOTAL_KEYS) && throw(ArgumentError(
+                "BRM resample_covariates: `mi($(name(only(getargs(lhs)))))::shares(total, rows)` " *
+                "has no fresh draw: its law given the group sums is not built"))
             args = (ExprColumn(mi,only(getargs(lhs));_brm_population_value=Val(:fresh_covariate)),rhs)
         end
     end

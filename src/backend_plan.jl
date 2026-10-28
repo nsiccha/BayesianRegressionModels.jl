@@ -758,17 +758,25 @@ Concrete backends decide how missing rows become latent variables and how the
 merged response is exposed.
 """
 struct _BRMMissingResponsePlan{Y<:AbstractVector,O<:AbstractVector{Int},
-                               M<:AbstractVector{Int},V<:AbstractVector}
+                               M<:AbstractVector{Int},V<:AbstractVector,T}
     source::Symbol
     values::Y
     observed_indices::O
     missing_indices::M
     observed_values::V
+    # `nothing`, or the group totals of `mi(x)::shares(total, rows)`
+    # (`_BRMMissingTotals`): the missing entries are then ordered with the free
+    # ones first and each group's after them.
+    totals::T
 end
+_BRMMissingResponsePlan(source, values, observed_indices, missing_indices, observed_values) =
+    _BRMMissingResponsePlan(source, values, observed_indices, missing_indices,
+                            observed_values, nothing)
 
 function _brm_missing_response_plan(lhs; prefix="BRM backend lowering")
     lhs isa ExprColumn && getf(lhs) === mi || return nothing
-    kwargs = getkwargs(lhs)
+    totals = _brm_mi_totals_spec(lhs; prefix)
+    kwargs = Base.structdiff(getkwargs(lhs), NamedTuple{_BRM_MI_TOTAL_KEYS})
     population_value = kwargs == (; _brm_population_value=Val(:fresh_covariate))
     (isempty(kwargs) || population_value) || error(
         "$prefix: `mi(response)` accepts no keywords")
@@ -787,10 +795,11 @@ function _brm_missing_response_plan(lhs; prefix="BRM backend lowering")
     # A complete real column has the same observed law and an empty missing
     # coordinate set. Reusing the declaration must not depend on its eltype
     # admitting Missing or force the caller to rewrite its scientific body.
-    _brm_missing_response_plan(name(inner), raw; prefix,allow_complete=true)
+    _brm_missing_response_plan(name(inner), raw; prefix,allow_complete=true, totals)
 end
 
-function _brm_missing_response_plan(source::Symbol, raw; prefix="BRM backend lowering",allow_complete=true)
+function _brm_missing_response_plan(source::Symbol, raw; prefix="BRM backend lowering",allow_complete=true,
+                                    totals=nothing)
     raw isa AbstractVector || error(
         "$prefix: `mi($source)` requires a vector response")
     (allow_complete || Missing <: eltype(raw)) || error(
@@ -805,9 +814,13 @@ function _brm_missing_response_plan(source::Symbol, raw; prefix="BRM backend low
     isempty(missing_indices) && !allow_complete && error(
         "$prefix: `mi($source)` found no missing values; drop the wrapper")
     observed_values = collect(value_type, raw[observed_indices])
-    _BRMMissingResponsePlan(
+    isnothing(totals) && return _BRMMissingResponsePlan(
         source, collect(raw), observed_indices, missing_indices,
         observed_values)
+    ordered, group_totals = _brm_missing_totals(source, raw, missing_indices, totals; prefix)
+    _BRMMissingResponsePlan(
+        source, collect(raw), observed_indices, ordered,
+        observed_values, group_totals)
 end
 
 _brm_observation_weight_kind(f) =

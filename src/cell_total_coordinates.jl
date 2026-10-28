@@ -316,3 +316,237 @@ end
 @noinline _brm_shares_length_error(m, n) = throw(DimensionMismatch(
     "a `shares(total)` cell latent has $n entries in this cell; its law has an " *
     "argument of length $m"))
+
+# ---- A completion with group totals: `mi(x)::shares(total, rows) ~ Law(…)` ---
+#
+# At model scope, with a binding `rows = groups(g => labels)` (or the call
+# written in place), `mi(x)::shares(total, rows) ~ Law(args…)` says that the
+# completed `x[rows[k]]` sums to `total[k]` for every entry `k` of `labels`
+# (snag `mi-completion-wi-54222432`, design decision `0guq37f`). Per group, the
+# missing entries are the group's residual, `total[k]` minus its observed
+# entries, times shares: the cell latent's bijection above, with the law's
+# density at the values plus `sum(log.(x[missing])) - log(residual)`. A group
+# with one missing entry sets it to the residual (no coordinate; the law's
+# density there still counts). Missing entries of no group stay free.
+#
+# The typed left-hand side is rewritten, before parsing, into internal `mi`
+# keywords naming the three data columns,
+# `mi(x; _brm_shares_group = g, _brm_shares_cells = labels, _brm_shares_total = total)`,
+# which `_brm_missing_response_plan` turns into `_BRMMissingTotals`.
+const _BRM_MI_TOTAL_KEYS = (:_brm_shares_group, :_brm_shares_cells, :_brm_shares_total)
+
+function _brm_desugar_mi_totals(x, groupings, grouped_reads)
+    Meta.isexpr(x, :block) && return Expr(:block,
+        map(s -> _brm_desugar_mi_totals(s, groupings, grouped_reads), x.args)...)
+    Meta.isexpr(x, :call, 3) && x.args[1] === :~ && Meta.isexpr(x.args[2], :(::), 2) &&
+        isxcall(x.args[2].args[1], :mi) || return x
+    shown = sprint(Base.show_unquoted, x.args[2])
+    completion, type = x.args[2].args
+    length(completion.args) == 2 && completion.args[2] isa Symbol || error(
+        "@brm: `$shown`: a completion with group totals names one data column, " *
+        "`mi(x)::shares(total, rows)`")
+    bijection = Meta.isexpr(type, :call) ? first(type.args) : type
+    bijection === :shares || error(
+        "@brm: `$shown` names no bijection of a completion; the typed left-hand side " *
+        "is `mi(x)::shares(total, rows)`: the completed `x[rows[k]]` sums to `total[k]`")
+    Meta.isexpr(type, :call, 3) && type.args[2] isa Symbol || error(
+        "@brm: `$shown`: `mi(x)::shares(total, rows)` takes the data vector of the " *
+        "groups' totals and their rows, a binding `rows = groups(g => labels)`")
+    total, rows = type.args[2], type.args[3]
+    binding = if rows isa Symbol
+        haskey(groupings, rows) || error(
+            "@brm: `$shown`: `$rows` is no model-scope binding `$rows = groups(g => labels)`")
+        push!(grouped_reads, rows)
+        groupings[rows]
+    else
+        call = isxcall(rows, :groups) ? _brm_plate_binding(rows) : nothing
+        call === nothing && error(
+            "@brm: `$shown`: the rows of `mi(x)::shares(total, rows)` are a binding " *
+            "`rows = groups(g => labels)` or that call with data names `g` and `labels`")
+        call
+    end
+    Expr(:call, :~, Expr(:call, :mi, Expr(:parameters,
+            Expr(:kw, :_brm_shares_group, binding.group),
+            Expr(:kw, :_brm_shares_cells, binding.cells),
+            Expr(:kw, :_brm_shares_total, total)), completion.args[2]),
+        x.args[3])
+end
+
+# The completion statement `mi(x; _brm_shares_… = …)`: its inner column and the
+# data names its keywords read, or `nothing` for any other left-hand side.
+function _brm_mi_totals_lhs(lhs)
+    isxcall(lhs, :mi) && length(lhs.args) == 3 && Meta.isexpr(lhs.args[2], :parameters) ||
+        return nothing
+    keywords = Dict(kw.args[1] => kw.args[2] for kw in lhs.args[2].args)
+    Set(keys(keywords)) == Set(_BRM_MI_TOTAL_KEYS) || return nothing
+    (; inner=lhs.args[3], reads=[keywords[k] for k in _BRM_MI_TOTAL_KEYS])
+end
+
+# The three data columns of a completion's group totals, or `nothing`.
+function _brm_mi_totals_spec(lhs::ExprColumn; prefix)
+    kwargs = getkwargs(lhs)
+    present = filter(in(keys(kwargs)), _BRM_MI_TOTAL_KEYS)
+    isempty(present) && return nothing
+    length(present) == length(_BRM_MI_TOTAL_KEYS) || error(
+        "$prefix: internal: a completion with group totals carries $present only")
+    columns = map(k -> _brm_mi_totals_column(kwargs[k], lhs; prefix), _BRM_MI_TOTAL_KEYS)
+    (; group=columns[1], cells=columns[2], total=columns[3])
+end
+function _brm_mi_totals_column(column, lhs; prefix)
+    column isa NamedColumn && parent(column) isa DataColumn || error(
+        "$prefix: `mi($(name(only(getargs(lhs)))))::shares(total, rows)` reads data " *
+        "columns for the totals and the grouping; got $(column isa NamedColumn ? "`$(name(column))`, which is no data column" : typeof(column))")
+    (; name=name(column), values=parent(parent(column)))
+end
+
+"""
+    _BRMMissingTotals
+
+The group totals of a completion `mi(x)::shares(total, rows)`: the three data
+columns (`group`, `cells`, `total`), the number of free missing entries (first
+in the plan's `missing_indices`), the inclusive ends of each constrained group
+among the entries after them, and each group's residual.
+"""
+struct _BRMMissingTotals
+    group::Symbol
+    cells::Symbol
+    total::Symbol
+    nfree::Int
+    ends::Vector{Int}
+    residuals::Vector{Float64}
+end
+
+# The plan's missing indices, free first and then group by group, and the
+# totals. Every group's residual must be positive where entries are missing;
+# a group without one must already sum to its total.
+function _brm_missing_totals(source, raw, missing_indices, spec; prefix)
+    group, cells, total = spec.group, spec.cells, spec.total
+    shown = "`mi($source)::shares($(total.name), groups($(group.name) => $(cells.name)))`"
+    length(group.values) == length(raw) || error(
+        "$prefix: $shown: `$(group.name)` has $(length(group.values)) entries for the " *
+        "$(length(raw)) of `$source`")
+    length(total.values) == length(cells.values) || error(
+        "$prefix: $shown: `$(total.name)` has $(length(total.values)) totals for the " *
+        "$(length(cells.values)) groups of `$(cells.name)`")
+    all(t -> t isa Real && isfinite(t), total.values) || error(
+        "$prefix: $shown: `$(total.name)` must hold finite numbers")
+    rows = groups(group.values => cells.values)
+    missing = falses(length(raw))
+    missing[missing_indices] .= true
+    grouped, ends, residuals = Int[], Int[], Float64[]
+    ingroup = falses(length(raw))
+    for (k, r) in enumerate(rows)
+        ingroup[r] .= true
+        observed = sum((Float64(raw[i]) for i in r if !missing[i]); init=0.0)
+        residual = Float64(total.values[k]) - observed
+        entries = filter(i -> missing[i], r)
+        label = repr(cells.values[k])
+        if isempty(entries)
+            isapprox(observed, total.values[k]; rtol=1e-8, atol=1e-8) || error(
+                "$prefix: $shown: group $label has no missing entry, and its entries sum " *
+                "to $observed, not to its total $(total.values[k])")
+            continue
+        end
+        residual > 0 || error(
+            "$prefix: $shown: the observed entries of group $label sum to $observed, " *
+            "which leaves $residual of its total $(total.values[k]) for its " *
+            "$(length(entries)) missing entries; their law is positive")
+        append!(grouped, entries)
+        push!(ends, length(grouped))
+        push!(residuals, residual)
+    end
+    free = filter(i -> !ingroup[i], missing_indices)
+    (vcat(free, grouped), _BRMMissingTotals(group.name, cells.name, total.name,
+        length(free), ends, residuals))
+end
+
+# The values of the grouped entries from their coordinates (`K - 1` per group
+# of `K`), and back (brm_start, the RK geometry, tests).
+function _brm_grouped_shares_values(y::AbstractVector{<:Real}, ends, residuals)
+    out = similar(y, ends[end])
+    start, coordinate = 1, 1
+    for (k, stop) in enumerate(ends)
+        K = stop - start + 1
+        out[start:stop] = _brm_shares_values(view(y, coordinate:coordinate+K-2), residuals[k])
+        start, coordinate = stop + 1, coordinate + K - 1
+    end
+    out
+end
+function _brm_grouped_shares_coordinates(x::AbstractVector{<:Real}, ends)
+    start = 1
+    coordinates = Float64[]
+    for stop in ends
+        append!(coordinates, _brm_shares_coordinates(x[start:stop]))
+        start = stop + 1
+    end
+    coordinates
+end
+
+# ---- StanBlocks families of the grouped entries ---------------------------------
+#
+# `y` holds every constrained group's coordinates, group after group; `ends`
+# are the groups' inclusive ends among the entries; the law's arguments are
+# already gathered onto the entries (or scalars).
+StanBlocks.@deffun begin
+    brm_grouped_shares_values(y::vector[m], ends::int[G], totals::vector[G])::vector[m + G] = begin
+        x = rep_vector(0., m + G)
+        start = 1
+        coordinate = 0
+        for k in 1:G
+            K = ends[k] - start + 1
+            coordinates = rep_vector(0., K - 1)
+            for j in 1:(K - 1)
+                coordinates[j] = y[coordinate + j]
+            end
+            values = brm_shares_values(coordinates, totals[k])
+            for j in 1:K
+                x[start + j - 1] = values[j]
+            end
+            start = ends[k] + 1
+            coordinate = coordinate + K - 1
+        end
+        return x
+    end
+
+    # The law at the entries plus each group's `sum(log.(x)) - log(total)`.
+    @lpxf brm_grouped_shares_lpdf(y::vector[m], family, ends::int[G], totals::vector[G], args...)::real = begin
+        x = brm_grouped_shares_values(y, ends, totals)
+        density(family, x, args...) + sum(log(x)) - sum(log(totals))
+    end
+    brm_grouped_shares_lpdfs(y::vector[m], family, args...)::vector[m] =
+        rep_vector(brm_grouped_shares_lpdf(y, family, args...) / max(m, 1), m)
+    # The law conditioned on its group sums has no draw in closed form.
+    brm_grouped_shares_rng(family, ends::int[G], totals::vector[G], args...)::vector[ends[G] - G] = begin
+        @stan_assert false "brm_grouped_shares_rng: a draw of a `mi(x)::shares(total, rows)` completion is not built"
+        rep_vector(0.0, ends[G] - G)
+    end
+end
+
+# SBBRMI's completion with group totals: `_sb_mi_response` with the missing
+# entries split into free ones (`y_free`, the law as written) and the grouped
+# ones' coordinates (`y_shares`, `brm_grouped_shares`). Their values, free
+# first, are the completion's missing entries `y_mis` in `Jmis` order.
+_sb_mi_shares_response = StanBlocks.@slic begin
+    n_free = num_elements(Jfree)
+    n_shares = num_elements(Jgrp) - num_elements(residuals)
+    y_free :: vector[n_free] ~ dummy()
+    y_shares :: vector[n_shares] ~ dummy()
+    y_obs ~ dummy()
+    y_mis = append_row(y_free, brm_grouped_shares_values(y_shares, ends, residuals))
+    return mi_merge(y_obs, y_mis, Jobs, Jmis, num_elements(Jobs) + num_elements(Jmis))
+end
+
+# The data keys of a completion's group totals.
+_sb_mi_totals_keys(source::Symbol) = (; free=Symbol(:Jfree_, source), grouped=Symbol(:Jgrp_, source),
+    ends=Symbol(source, :_shares_ends), residuals=Symbol(source, :_shares_residuals))
+
+# Binds the group totals' data and returns the submodel's extra keywords.
+function _sb_bind_mi_totals!(data, source, plan)
+    totals = plan.totals
+    keys = _sb_mi_totals_keys(source)
+    data[keys.free] = plan.missing_indices[1:totals.nfree]
+    data[keys.grouped] = plan.missing_indices[totals.nfree+1:end]
+    data[keys.ends] = totals.ends
+    data[keys.residuals] = totals.residuals
+    keys
+end
