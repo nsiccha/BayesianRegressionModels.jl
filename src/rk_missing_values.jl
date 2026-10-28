@@ -72,6 +72,15 @@ function _rk_model_value_axis(value::ExprColumn, context)
     shape = Base.Broadcast.broadcast_shape(((row.nrows,) for row in rows)...)
     rows[findfirst(row -> row.nrows == only(shape), rows)]
 end
+# A gather `x[idx]` of a value with a known axis lies on its index's rows
+# (`c_b = c[pos_b]`, part 1's completed value on part 2's rows).
+function _rk_model_value_axis(value::ExprColumn{typeof(getindex)}, context)
+    args = getargs(value)
+    length(args) == 2 && isempty(getkwargs(value)) || return nothing
+    source, index = args
+    _rk_model_value_axis(source, context) === nothing && return nothing
+    _rk_model_value_axis(index, context)
+end
 
 function _rk_named_model_population_column(term::NamedColumn, context)
     parent(term) isa DataColumn && return nothing

@@ -22,6 +22,13 @@ _brm_collect_data_columns!(acc, x::ExprColumn) = begin
     end
     nothing
 end
+# A gather `x[idx]` lies on its index's rows; `x` holds one value per entry of
+# its own axis (`c_b = c[pos_b]`, part 1's value on part 2's rows), so its data
+# columns name no row axis of the reader.
+_brm_collect_data_columns!(acc, x::ExprColumn{typeof(getindex)}) =
+    length(getargs(x)) == 2 && isempty(getkwargs(x)) ?
+        _brm_collect_data_columns!(acc, last(getargs(x))) :
+        invoke(_brm_collect_data_columns!, Tuple{Any,ExprColumn}, acc, x)
 # A term keyword whose data lives on another axis than the term's rows names
 # no row axis: a level correlation (`cor = Omega`, a known `cor = C`, or the
 # levels' coordinates in `cor = multigroup((x, y))`) is one entry per level of
