@@ -47,6 +47,21 @@ fitted grid is refused, and `freeze_constants=false` samples every step. Set
 `changelog.jl` checks that `CHANGELOG.md`'s newest heading is the
 `Project.toml` version (`dev` §7.5).
 
+`mi_group_totals.jl` checks `mi(x)::shares(total, rows)`, a completion whose
+missing entries have known group sums: the plan's residuals and its refusals;
+SBBRMI's density against an independent oracle (LogNormal, Gamma, the rows in
+place, a completion nothing reads); RKBRMI against SBBRMI through the coordinate
+transport, value and Enzyme gradient (the Gamma gradient is `@test_broken` on
+registered Enzyme, repaired on Enzyme dogfood from `4c73c40`, Enzyme snag
+`rkbrmi-gradient-519ec090`); frozen replay; the descriptor, the
+description, `brm_start`; and the refusals on VBRMI and of real-valued laws.
+Snag `mi-completion-wi-54222432`.
+
+`plate_subset_response_sums.jl` checks a response on some of a predictor's
+rows, the others observed only through group sums (suppressed cells of a count
+table): SBBRMI against an independent density for Poisson and NB2 cells, a
+frozen replay, and RKBRMI against SBBRMI. Snag `mi-completion-wi-54222432`.
+
 `plate_gathered_predictor.jl` checks a predictor on its own rows that reads
 another part's values through model-scope gathers (`c2 = c[pos2]` of an `mi()`
 completion, `z2 = z[pos2]` where `z` reads part-1 data columns), read by a

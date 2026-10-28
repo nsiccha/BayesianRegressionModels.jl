@@ -339,10 +339,12 @@ end
     for (model, label) in ((totals_assigned, "rk_lognormal"), (unread_model, "rk_unread"))
         check_against_stan(model(data), label)
     end
-    # A Gamma law: the value agrees, but its native Reverse gradient fails
-    # Enzyme's readonly proof (EnzymeMutabilityException), as it does for a plain
-    # `mi(v) ~ Gamma(…)` completion without totals: Enzyme snag
-    # `rkbrmi-gradient-519ec090`.
+    # A Gamma law: the value agrees, but with registered Enzyme (0.13.216) its
+    # native Reverse gradient fails Enzyme's readonly proof
+    # (EnzymeMutabilityException), as it does for a plain `mi(v) ~ Gamma(…)`
+    # completion without totals. Enzyme dogfood repairs it from `4c73c40`
+    # (Enzyme snag `rkbrmi-gradient-519ec090`, enzyme-use): drop this pin on a
+    # registered release that carries the repair.
     gamma = check_against_stan(totals_gamma(data), "rk_gamma"; gradient=false)
     u = 0.3 .* randn(Xoshiro(19), length(gamma.c.names))
     @test_broken try

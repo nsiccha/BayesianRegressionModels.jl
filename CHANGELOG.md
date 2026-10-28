@@ -12,6 +12,30 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.31
+
+- `mi(x)::shares(total, rows) ~ Law(…)` with `rows = groups(g => labels)`
+  declares a completion whose missing entries have known group sums: the
+  completed `x[rows[k]]` sums to `total[k]`, the group's whole total, observed
+  entries included. Per group the missing entries are the residual times
+  shares (the bijection of a `T::shares(total)` cell latent), with the law's
+  density at the entries plus `sum(log.(x)) - log(residual)`: the exact
+  conditional of the law given the sum. A group with one missing entry holds
+  its residual; missing entries of no listed group stay free. Positive laws
+  only. Every formula reads the completed column as before.
+  - SBBRMI: coordinates `x_y_free` and `x_y_shares`. The residuals are
+    observed (`x_shares_residuals`), so they inform the law even when nothing
+    reads the completion, with a pointwise density per group and a predictive
+    draw of each group's sum.
+  - RKBRMI: the same coordinates (`x.y_free`, `x.y_shares`, the grouped
+    entries one joint latent), paired by `brm_coordinate_transport` (relation
+    `:grouped_shares`).
+  - A frozen `reprocess` keeps the groups and reads new totals.
+  - Refused: `resample_covariates` of such a column, RKBRMI
+    `completions = :noncentered`, real-valued laws.
+  - The scientific description states the constraint.
+  - Snag `mi-completion-wi-54222432`, design decision `0guq37f`.
+
 ## 0.2.30
 
 - A data column that only a `name = constant(expr)` reads may hold `missing`.
