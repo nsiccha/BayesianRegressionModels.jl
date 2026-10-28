@@ -166,13 +166,8 @@ end
 function _brm_ranef_stratified_draws(d, block::RanefBlock, draws, names)
     spec = _RANEF_FAMILIES[block.family]
     n, K = size(draws, 1), block.n_terms
-    S, stratum = _ranef_stratum_index(d.plan, block, "brm_ranef_draws")
-    # The emitter's own coding of the `by` column (`_sb_ensure_group_data!`).
-    strata = collect(_sb_fit_levels(column_data(d.plan.parent, block.by)))
-    length(strata) == S || error(
-        "brm_ranef_draws: `by` column `$(block.by)` of block `$(block.binding)` ",
-        "has $(length(strata)) training levels but the block was emitted with ",
-        "$S strata.")
+    (; strata, stratum) = _brm_ranef_strata(d, block, "brm_ranef_draws")
+    S = length(strata)
     tau = reshape(_brm_ranef_carrier_draws(d, block,
         Symbol(block.binding, :_, spec.stratum_tau), K * S, draws, names), n, K, S)
     # A one-margin block emits no correlation factor (`_sb_single_margin_ranef`).
@@ -187,6 +182,20 @@ function _brm_ranef_stratified_draws(d, block::RanefBlock, draws, names)
     end
     (; strata, stratum, sd=permutedims(tau, (1, 3, 2)), cor,
        effects=_brm_ranef_effect_draws(d, block, spec, nothing, draws, names))
+end
+
+# A stratified `gr(g, by=b)` block's stratum labels in index order and the
+# stratum (a position among them) of each of its levels. `caller` prefixes the
+# error.
+function _brm_ranef_strata(d, block::RanefBlock, caller)
+    S, stratum = _ranef_stratum_index(d.plan, block, caller)
+    # The emitter's own coding of the `by` column (`_sb_ensure_group_data!`).
+    strata = collect(_sb_fit_levels(column_data(d.plan.parent, block.by)))
+    length(strata) == S || error(
+        "$caller: `by` column `$(block.by)` of block `$(block.binding)` ",
+        "has $(length(strata)) training levels but the block was emitted with ",
+        "$S strata.")
+    (; strata, stratum)
 end
 
 _brm_ranef_keywords(d, block) =
@@ -256,13 +265,23 @@ function _brm_ranef_carrier_draws(d, block, name::Symbol, n_elements::Int, draws
             "$(length(value)) values; expected $n_elements.")
         return repeat(permutedims(value), size(draws, 1), 1)
     end
-    output = only(outputs)
+    output = _brm_ranef_carrier_output(d, block, name, "brm_ranef_draws")
     coordinates = _brm_element_coordinates(output, names)
     length(coordinates) == n_elements || error(
         "brm_ranef_draws: carrier `$name` of block `$(block.binding)` has ",
         "$n_elements elements but resolves to $(length(coordinates)) of the ",
         "given names" * _brm_ranef_kind_hint(output) * ".")
     draws[:, coordinates]
+end
+
+# The descriptor output that a block's carrier `name` is.
+function _brm_ranef_carrier_output(d, block, name::Symbol, caller)
+    outputs = [o for o in d.outputs if o.name === name]
+    length(outputs) == 1 || error(
+        "$caller: carrier `$name` of block `$(block.binding)` owns ",
+        "$(length(outputs)) descriptor outputs; expected exactly one. Re-reflect ",
+        "the model that produced the posterior draws.")
+    only(outputs)
 end
 
 _brm_ranef_kind_hint(output) =

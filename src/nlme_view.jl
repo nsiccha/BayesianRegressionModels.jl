@@ -268,19 +268,21 @@ function _brm_nlme_hsgp_hyper_record(record, hyper, effects)
 end
 
 # The stratum position (into `strata`, the `by` column's levels) of each level
-# of a stratified block's grouping column. Every level lies in one stratum.
-function _brm_nlme_level_strata(groups, by, levels, strata, record)
+# of a stratified block's grouping column. Every level lies in one stratum;
+# `fail` throws the refusal of one that does not, prefixed by `caller`.
+function _brm_level_strata(groups, by, levels, strata, record;
+        caller="brm_nlme_view", fail=_brm_nlme_error)
     index = Dict(_brm_transport_level(level) => s for (s, level) in enumerate(strata))
     stratum = Dict{Any,Int}()
     for (g, b) in zip(groups, by)
         key, s = _brm_transport_level(g), index[_brm_transport_level(b)]
-        get!(stratum, key, s) == s || _brm_nlme_error(
-            "brm_nlme_view: level $(repr(g)) of `$(record.group)` lies in more than " *
+        get!(stratum, key, s) == s || fail(
+            "$caller: level $(repr(g)) of `$(record.group)` lies in more than " *
             "one stratum of `$(record.by)`, so the stratified block " *
-            "`gr($(record.group), by=$(record.by))` has no NLME reading")
+            "`gr($(record.group), by=$(record.by))` has no single stratum for it")
     end
     Int[get(stratum, _brm_transport_level(level)) do
-            error("brm_nlme_view: internal: level $(repr(level)) of " *
+            error("$caller: internal: level $(repr(level)) of " *
                 "`$(record.group)` has no row")
         end for level in levels]
 end
@@ -457,7 +459,7 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             # belongs to its stratum's family.
             K = length(record.margins)
             strata = Any[_rk_grouping_levels(backend.plan.columns[record.by])...]
-            stratum_of = _brm_nlme_level_strata(backend.plan.columns[record.group],
+            stratum_of = _brm_level_strata(backend.plan.columns[record.group],
                 backend.plan.columns[record.by], group_levels[record.group], strata, record)
             first_family = length(families) + 1
             for (s, level) in enumerate(strata)
