@@ -62,7 +62,19 @@ transport, value and Enzyme gradient (the Gamma gradient is `@test_broken` on
 registered Enzyme, repaired on Enzyme dogfood from `4c73c40`, Enzyme snag
 `rkbrmi-gradient-519ec090`); frozen replay; the descriptor, the
 description, `brm_start`; and the refusals on VBRMI and of real-valued laws.
-Snag `mi-completion-wi-54222432`.
+Snag `mi-completion-wi-54222432`. It also checks
+`RKBRMI(brmi; completions = :noncentered)` on such a completion: the same
+coordinates and density as the centred lowering, its group terms in
+`:pointwise`, SBBRMI agreement through the transport (LogNormal, an unread
+completion, Gamma's value), and the location-scale rule for free entries.
+Snag `nlme-view-shares-f1cfaa71`.
+
+`nlme_shares_units.jl` (test environment) reads such a completion with region
+units: the centred reading refused, the non-centered grouped coordinates as
+unit draws of the region owning each group (free entries beside them), the
+group terms attributed to it, a group spanning two regions refused, lockstep
+and unit-problem densities against the full RK density, and per-unit Laplace
+and SVI. Snag `nlme-view-shares-f1cfaa71`.
 
 `plate_subset_response_sums.jl` checks a response on some of a predictor's
 rows, the others observed only through group sums (suppressed cells of a count

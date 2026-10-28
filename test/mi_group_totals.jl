@@ -6,7 +6,10 @@
 # times shares, the bijection of a `T::shares(total)` cell latent: the law's
 # density at the values plus `sum(log.(x[missing])) - log(residual)`. A group
 # with one missing entry holds the residual; missing entries of no group stay
-# free (snag mi-completion-wi-54222432, design decision 0guq37f).
+# free (snag mi-completion-wi-54222432, design decision 0guq37f). On RKBRMI
+# with `completions = :noncentered`, the grouped coordinates are standard
+# normal draws and each group observes the rest of the density: the centred
+# coordinates and density (snag nlme-view-shares-f1cfaa71).
 #
 # Run: julia --startup-file=no --project=test test/mi_group_totals.jl
 
@@ -310,8 +313,9 @@ end
 
 # RKBRMI's value and native Enzyme gradient against SBBRMI's through the
 # coordinate transport, and the printed RK source replays.
-function check_against_stan(brmi, label; points=3, scale=0.3, gradient=true)
-    rk = RKBRMI(brmi)
+function check_against_stan(brmi, label; points=3, scale=0.3, gradient=true,
+        completions=:centered)
+    rk = RKBRMI(brmi; completions)
     problem = rk_logdensity_problem(check_rk_source_roundtrip(rk);
         ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
     c = compiled(brmi, label)
@@ -354,7 +358,45 @@ end
     catch
         false
     end
+end
+
+# Non-centered, the grouped entries' coordinates are standard-normal draws and
+# each group observes the rest of their density: the same coordinates and the
+# same density as the centred joint latent, so the transport pairs them with
+# Stan's `y_shares` (snag nlme-view-shares-f1cfaa71).
+@stestset "RKBRMI non-centered: the centred density, paired with SBBRMI" begin
+    data = totals_data()
+    # Every missing entry in a group with a total (row 22 observed).
+    v = copy(data.v); v[22] = data.truth[22]
+    grouped = merge(data, (; v))
+    for (model, label) in ((totals_assigned, "rk_nc_lognormal"), (unread_model, "rk_nc_unread"))
+        nc = check_against_stan(model(grouped), label; completions=:noncentered)
+        centred = rk_logdensity_problem(RKBRMI(model(grouped));
+            ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        names = BRM._rk_layout_coordinate_names(nc.rk)
+        @test replace.(String.(BRM._rk_layout_coordinate_names(RKBRMI(model(grouped)))),
+            "y_shares" => "z_shares") == String.(names)
+        # Groups of 2, 3 and 1 missing entries: 1 + 2 + 0 coordinates.
+        @test count(n -> startswith(String(n), "v.z_shares."), names) == 3
+        u = 0.3 .* randn(Xoshiro(23), length(names))
+        a, ga = LogDensityProblems.logdensity_and_gradient(centred, u)
+        b, gb = LogDensityProblems.logdensity_and_gradient(nc.problem, u)
+        @test a ≈ b rtol=1e-12
+        @test ga ≈ gb atol=1e-10
+        # One observed term per group, at the law's density plus the log
+        # Jacobian less the draws' standard normal density.
+        pointwise = BRM._rk_pointwise_values(BRM._rk_pointwise_query(nc.rk), u)
+        @test length(pointwise.v_shares_weights) == 3
+    end
+    # A Gamma law with every entry grouped (the value; the gradient as above).
+    check_against_stan(totals_gamma(grouped), "rk_nc_gamma"; gradient=false,
+        completions=:noncentered)
+    # Free entries are standardized by their law's location and scale, as for
+    # any non-centered completion: a Gamma law has none.
     message(f) = try f(); "" catch e; sprint(showerror, e) end
-    @test occursin("is not built for", message(() ->
-        RKBRMI(totals_assigned(data); completions=:noncentered)))
+    @test occursin("needs a location-scale law", message(() ->
+        RKBRMI(totals_gamma(data); completions=:noncentered)))
+    # With free entries the free draws `v.z_free` have no Stan counterpart.
+    rk = RKBRMI(totals_assigned(data); completions=:noncentered)
+    @test any(n -> startswith(String(n), "v.z_free."), BRM._rk_layout_coordinate_names(rk))
 end
