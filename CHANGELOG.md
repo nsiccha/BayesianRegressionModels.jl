@@ -12,6 +12,26 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.33
+
+- Groupings crossed with the NLME units. `brm_nlme_view`, `brm_nlme_model`,
+  `brm_nlme_fit` (and so `brm_two_stage_fit`), `brm_laplace_problem`,
+  `brm_svi_fit` and `brm_nlme_joint_map` take `shared_groups = (:g, …)`: a
+  random-effect block over a grouping whose levels occur in several subjects
+  (`(1 + x || class)` with every class in every subject) is read as shared
+  latents, every coordinate of it (standardized draws, scales, correlation
+  factor, Student-t mixing; plain, stratified, level-correlated and
+  known-value blocks alike) in θ beside the population coefficients, and the
+  subjects stay independent given θ. Every grouping except the subject
+  grouping is named once, in `nested_groups` or `shared_groups`; the refusal
+  now names the groupings named nowhere and the `nested_groups` keys that are
+  no grouping (a column of a joined `|ID|` block among them). A `car(...)`
+  field is read as shared latents too (its edges couple its areas), where it
+  was refused. `brm_nlme_estimates` names a crossed block with `crossed =
+  true` and its levels' `effects`. Before, `brm_nlme_view` refused any such
+  model (``nested_groups must name every grouping except `lgroup` ``). Snag
+  `crossed-grouping-39d39fcc`.
+
 ## 0.2.32
 
 - A predictor holding `cdar(step; by = g, cor = C)` may be read through a

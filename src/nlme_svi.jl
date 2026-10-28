@@ -399,16 +399,16 @@ _brm_svi_lowered(x, phase) = throw(ArgumentError(
     "got $(typeof(x))"))
 
 _brm_svi_model(x::RKBRMI, phase; ad_backend, shared_point, subject_group,
-        nested_groups) =
+        nested_groups, shared_groups) =
     _brm_run_phase(phase) do node
         _brm_nlme_model(x, node; ad_backend=ad_backend === nothing ?
             _brm_svi_default_ad(x) : ad_backend, observation_ad_backend=nothing,
-            shared_point, subject_group, nested_groups)
+            shared_point, subject_group, nested_groups, shared_groups)
     end
 function _brm_svi_model(m::BRMNLMEModel, phase; ad_backend, shared_point,
-        subject_group, nested_groups)
+        subject_group, nested_groups, shared_groups)
     ad_backend === nothing && shared_point === nothing && subject_group === nothing &&
-        isempty(nested_groups) || throw(ArgumentError(
+        isempty(nested_groups) && isempty(shared_groups) || throw(ArgumentError(
         "brm_svi_fit: a prepared BRMNLMEModel already fixes its ad_backend, " *
         "shared_point and subject groupings; pass them to brm_nlme_model instead"))
     _brm_reuse_phase!(phase)
@@ -438,7 +438,7 @@ end
     brm_svi_fit(x; batch_size=32, rng=Random.default_rng(),
         family=MeanFieldGlobal(), ndraws=1000, start=nothing, inits=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple(), progress=nothing, kwargs...)
+        nested_groups=NamedTuple(), shared_groups=(), progress=nothing, kwargs...)
         -> (; draws, coordinates, diagnostics)
 
 Minibatch stochastic variational inference for a model whose subjects are
@@ -452,11 +452,12 @@ subjects.
 - `x` — a `@brm` model ([`BRMI`](@ref)), its [`RKBRMI`](@ref), or a prepared
   [`BRMNLMEModel`](@ref). For a BRMI or RKBRMI the model is prepared with
   `ad_backend` (default reverse-mode `AutoEnzyme`, which needs Enzyme loaded),
-  `shared_point`, `subject_group` and `nested_groups`, as
-  [`brm_nlme_model`](@ref) takes them; a nested model passes the last two.
-  Every observation must belong to one subject's cells: a cell of a
-  `@plate for` over the subjects or over their rows, or a row of a flat-row
-  response grouped by the subjects.
+  `shared_point`, `subject_group`, `nested_groups` and `shared_groups`, as
+  [`brm_nlme_model`](@ref) takes them; a nested model passes `subject_group`
+  and `nested_groups`, a model with a grouping crossed with the subjects
+  `shared_groups`. Every observation must belong to one subject's cells: a
+  cell of a `@plate for` over the subjects or over their rows, or a row of a
+  flat-row response grouped by the subjects.
 - `family` — the global factor: `MeanFieldGlobal()` (diagonal) or
   `LowRankGlobal(r)` (diagonal plus rank `r`). Each subject has its own
   full-covariance Gaussian factor over its block, whose length can differ
@@ -490,13 +491,13 @@ function brm_svi_fit(x; rng=Random.default_rng(), batch_size=32,
         max_iterations=100_000, family::BRMSVIFamily=MeanFieldGlobal(),
         lr_global=0.01, unit_step=0.1, start=nothing, inits=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple(), global_scale=0.1, unit_scale=1.0,
+        nested_groups=NamedTuple(), shared_groups=(), global_scale=0.1, unit_scale=1.0,
         ndraws=1000, polish_lr=0.05, window=nothing, patience=10, min_windows=40,
         polish_windows=20, progress=nothing)
     _brm_with_progress(progress; description="BRM SVI fit") do node
         _brm_with_phases(node, _BRM_SVI_PHASES) do phases
             m = _brm_svi_model(_brm_svi_lowered(x, phases.lower), phases.prepare;
-                ad_backend, shared_point, subject_group, nested_groups)
+                ad_backend, shared_point, subject_group, nested_groups, shared_groups)
             t, μ = _brm_run_phase(phases.target) do _
                 t = _brm_svi_target(m)
                 t, _brm_svi_start(m, start, inits)[t.globals]

@@ -616,9 +616,7 @@ end
 # target's given levels are, and the block's margins as positions `P` in the
 # target's `ranefcoefnames` order.
 function _brm_rk_effect_rows(rk, t, r)
-    levels = _rk_grouping_levels(haskey(r, :joint_columns) ?
-        brm_joint_fit_levels((rk.plan.columns[c] for c in r.joint_columns)...) :
-        rk.plan.columns[r.group])
+    levels = _rk_ranef_record_levels(rk, r)
     (; rows=_brm_start_level_positions(t.id, t.effects.levels, levels),
        P=_brm_start_margin_positions(t, r.margins))
 end
