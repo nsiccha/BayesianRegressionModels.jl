@@ -14,6 +14,20 @@ instead of failing at run time.
 
 ## 0.2.58
 
+- A model whose observations have subject cells prepares its compact cell
+  samplers on first use (a cell gradient, a nested model's η Hessian patterns,
+  SVI's unit terms or a two-stage fit), two per group of cells, instead of one
+  per group and distinct subject block length while `brm_nlme_model` runs.
+  Measuring which η each cell reads takes one whole-block sampler per group,
+  prepared at the longest block (a shorter block is padded with the longest
+  block's η, held at the unit point) and dropped once the per-cell plan is
+  checked. On the whole ArbeitsplatzAtlas model (32 cell groups, 12 block
+  lengths) that is 64 samplers instead of 416. With ReactiveKernels 0.1.12 one
+  sampler's preparation takes about 1 s and 270 MiB at 139k packed
+  coordinates, whatever its selection width, after a first one per group that
+  compiles. Values and gradients are unchanged.
+- Preparing the per-cell plan no longer copies the packed point per subject or
+  scans a subject's whole block per cell.
 - BRM's compat floor is ReactiveKernels 0.1.12 (was 0.1.7). Before 0.1.12,
   preparing the reverse-over-forward Hessian-vector-product query that dense η
   Hessian blocks and the per-unit Laplace read holds 8n² bytes for the n packed
