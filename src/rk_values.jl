@@ -27,12 +27,19 @@ end
 
 # Arrays, rather than the retired structural varying/smooth summands, let
 # a named predictor be read by ordinary Julia functions on its own axis.
+# One lookup table per call, so the rows cost rows plus levels, not rows times
+# levels. Its keys compare with `isequal` (whose `hash` agrees with it), and the
+# first of equal levels wins, as `findfirst(isequal(label), levels)` did.
 function _rk_value_level_indices(labels, source)
     levels = _rk_grouping_levels(source)
-    Int[_rk_value_level_index(levels, label) for label in labels]
+    lookup = Dict{Any,Int}()
+    for (k, level) in enumerate(levels)
+        get!(lookup, level, k)
+    end
+    Int[_rk_value_level_index(lookup, levels, label) for label in labels]
 end
-function _rk_value_level_index(levels, label)
-    index = findfirst(isequal(label), levels)
+function _rk_value_level_index(lookup, levels, label)
+    index = get(lookup, label, nothing)
     index === nothing && error(
         "RK backend: group label `$label` is not one of the $(length(levels)) " *
         "fitted levels. A replay keeps the fitted levels of every grouping it " *
