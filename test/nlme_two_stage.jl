@@ -148,11 +148,15 @@ end
               for k in 1:d]
         @test gradient ≈ fd atol=1e-5 rtol=1e-5
     end
-    # A nested model samples on one worker, whatever `threads` says.
+    # Nested units evaluate on their own cells, so each worker gets its own
+    # copy of the per-length compact samplers and the draws match one thread.
+    @test m.cell_gradient !== nothing
     stage1 = brm_nlme_fit(rk, NE.saem; ebes=false, groups..., rng=Random.Xoshiro(2026),
         options=NE.SAEMOptions(iterations=3, burnin=1, mcmc_burnin=0,
             adapt_iterations=0, numeric_maxiter=2, mstep_interval=3, omega_floor=0.05))
+    serial = brm_two_stage_fit(warmup_sampler, rk; stage1, threads=1)
     fit = brm_two_stage_fit(warmup_sampler, rk; stage1, threads=3)
+    @test fit.draws == serial.draws
     @test size(fit.draws, 1) == length(m.view.coordinates)
     @test all(isfinite(LogDensityProblems.logdensity(full, fit.draws[:, k]))
               for k in 1:size(fit.draws, 2))
