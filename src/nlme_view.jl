@@ -1180,7 +1180,10 @@ function _brm_nlme_cell_rows(plan::_RKValuePlan, name, group, nrows)
     nothing
 end
 
-function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, fields)
+# Each pointwise density's subject, and the observations whose subjects were
+# measured (`_brm_nlme_measured_subjects`) rather than read from their rows.
+function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, query, unit)
+    fields = _rk_pointwise_values(query, unit)
     L = sum(length, view.rows)
     row_subject = zeros(Int, L)
     for (i, rows) in enumerate(view.rows), r in rows
@@ -1189,6 +1192,8 @@ function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, fields)
     any(iszero, row_subject) && error(
         "brm_nlme_model: internal: a row of `$(view.group)` belongs to no subject")
     attribution = Pair{Symbol,Vector{Int}}[]
+    measured = Symbol[]
+    probe = nothing
     for (name, values) in pairs(fields)
         m = length(values)
         # A non-centered `mi(x)::shares(total, rows)` completion's group terms:
@@ -1226,15 +1231,100 @@ function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, fields)
             continue
         end
         # One density element per row of the grouping column: flat rows on the
-        # grouping axis, or one in-cell array per plate cell. Anything else is
-        # refused rather than attributed by position.
-        m == L || _brm_nlme_error(
-            "brm_nlme_model: observation `$name` has $m pointwise densities, not " *
-            "one per row of `$(view.group)` ($L); its densities cannot be " *
-            "attributed to subjects")
-        push!(attribution, name => row_subject)
+        # grouping axis, or one in-cell array per plate cell.
+        if m == L
+            push!(attribution, name => row_subject)
+            continue
+        end
+        # Densities on rows of their own (a fragment's rows, read through an
+        # index or joined by its own plate): measured.
+        probe === nothing && (probe = _brm_nlme_dependence_probe(query, unit, view))
+        push!(attribution, name => _brm_nlme_measured_subjects(probe, view, name))
+        push!(measured, name)
     end
-    attribution
+    attribution, measured
+end
+
+# Which subjects' η each pointwise density reads, measured on the prepared
+# `:pointwise` query. Bit b of a subject's index (from 0) splits the subjects
+# in two halves; moving the η blocks of one half, then of the other, a density
+# that reads one subject's η changes in exactly the evaluation that moved that
+# subject, so its changes over the bits spell the subject's index: 2⌈log₂ n⌉
+# evaluations for every density at once. The probe's base point moves every
+# coordinate of the unit point too, by fixed random amounts, so that no
+# coefficient sits at zero there and hides a dependence (the unit point's
+# unconstrained coordinates are all zero); the η moves are fixed random
+# amounts as well, so that two η a density reads do not cancel.
+function _brm_nlme_dependence_probe(query, unit, view::BRMNLMEView)
+    rng = Random.Xoshiro(20261029)
+    amounts(lo) = (lo .+ lo .* rand(rng, length(unit))) .* rand(rng, (-1, 1), length(unit))
+    base = unit .+ amounts(0.1)
+    shift = amounts(0.2)
+    n = length(view.levels)
+    moved(subjects) = _brm_nlme_moved_values(query, base, shift, view, subjects)
+    bits = n == 1 ? 0 : ndigits(n - 1; base=2)
+    halves = [(moved(filter(i -> isodd((i - 1) >> b), 1:n)),
+        moved(filter(i -> iseven((i - 1) >> b), 1:n))) for b in 0:(bits - 1)]
+    (; query, base, shift, values=_rk_pointwise_values(query, base), halves)
+end
+
+function _brm_nlme_moved_values(query, base, shift, view::BRMNLMEView, subjects)
+    u = copy(base)
+    for i in subjects, c in view.subject_coordinates[i]
+        u[c] += shift[c]
+    end
+    _rk_pointwise_values(query, u)
+end
+
+function _brm_nlme_measured_subjects(probe, view::BRMNLMEView, name)
+    base = getproperty(probe.values, name)
+    halves = [(getproperty(odd, name), getproperty(even, name)) for (odd, even) in probe.halves]
+    Int[_brm_nlme_measured_subject(probe, view, name, base, halves, k)
+        for k in eachindex(base)]
+end
+
+function _brm_nlme_measured_subject(probe, view::BRMNLMEView, name, base, halves, k)
+    all(isfinite, base[k]) || _brm_nlme_error(
+        "brm_nlme_model: density $k of observation `$name` is $(base[k]) at the " *
+        "point that measures which subject of `$(view.group)` it belongs to " *
+        "(its rows are not those of `$(view.group)`)")
+    subject, still = 1, 0
+    for (b, (odd, even)) in enumerate(halves)
+        in_odd, in_even = !isequal(odd[k], base[k]), !isequal(even[k], base[k])
+        if in_odd && in_even
+            read = _brm_nlme_subjects_read(probe, view, name, k,
+                collect(eachindex(view.levels)))
+            _brm_nlme_error("brm_nlme_model: density $k of observation `$name` " *
+                "reads the random effects of $(length(read)) subjects of " *
+                "`$(view.group)` (" * join(repr.(view.levels[read]), ", ") *
+                "), so the subjects are not independent and the model has no " *
+                "NLME reading")
+        elseif in_odd
+            subject += 1 << (b - 1)
+        elseif !in_even
+            still += 1
+        end
+    end
+    # A density that reads no subject's η adds the same term to the summed
+    # objective wherever it counts: it counts toward the first subject.
+    still == length(halves) && return 1
+    still == 0 && subject <= length(view.levels) || _brm_nlme_error(
+        "brm_nlme_model: density $k of observation `$name` changed when the " *
+        "random effects of some halves of the subjects of `$(view.group)` moved " *
+        "but not others, so its subject cannot be measured")
+    subject
+end
+
+# The subjects whose η density `k` of `name` reads, among `candidates`, by
+# moving halves of them and following those that move it (a refusal's message).
+function _brm_nlme_subjects_read(probe, view::BRMNLMEView, name, k, candidates)
+    length(candidates) == 1 && return candidates
+    base = getproperty(probe.values, name)[k]
+    half = length(candidates) ÷ 2
+    reduce(vcat, (_brm_nlme_subjects_read(probe, view, name, k, part)
+        for part in (candidates[1:half], candidates[(half + 1):end])
+        if !isequal(getproperty(_brm_nlme_moved_values(probe.query, probe.base,
+            probe.shift, view, part), name)[k], base)); init=Int[])
 end
 
 # Implemented by `BayesianRegressionModelsReactiveKernelsExt`: the prepared
@@ -1295,14 +1385,17 @@ end
 # is observed elementwise with one density per row it was observed on: a flat
 # grouped response (one per row of the grouping column) or a completed
 # covariate's observed values. Each density is then a cell of its own, owned by
-# the subject of its row, and the observation forms one group. Returns
+# the subject of its row, and the observation forms one group. So does an
+# observation on rows of its own (`measured`), whose cells, plate iterations
+# included, belong to the subjects the attribution measured. Returns
 # `(; names, positions, elementwise)` per group, `positions[i]` being subject
 # `i`'s cells, or `nothing`.
-function _brm_nlme_subject_cells(backend::RKBRMI, view::BRMNLMEView, attribution)
+function _brm_nlme_subject_cells(backend::RKBRMI, view::BRMNLMEView, attribution,
+        measured)
     plan = backend.plan
     isempty(attribution) && return nothing
     _brm_nlme_cell_plan(plan) || return nothing
-    plate_observations = _brm_nlme_plate_observations(plan)
+    plate_observations = setdiff(_brm_nlme_plate_observations(plan), measured)
     n = length(view.levels)
     L = sum(length, view.rows)
     plate = [entry for entry in attribution if first(entry) in plate_observations]
@@ -1459,6 +1552,16 @@ NLME layout has one shared covariance family per random-effect declaration and
 one compact η vector per subject; the blocks over `shared_groups` are shared
 latents in θ (or fixed by `shared_point`).
 
+Each pointwise density belongs to one subject. A density on the subject
+column's rows (a flat grouped response, a completed covariate's observed
+values, a group term of `mi(x)::shares`, a plate cell joining those rows)
+belongs to the subject of its rows. Any other observation, on rows of its own
+(a fragment's rows read through an index, `exp(log_f[f_obs])`, or joined by a
+plate over the fragment's own groups), has its densities' subjects measured on
+the pointwise query: moving the η blocks of halves of the subjects,
+2⌈log₂ n⌉ evaluations for n subjects. A density that reads no subject's η
+counts toward the first subject.
+
 When every observed density belongs to one subject's cells, the model also
 prepares cell queries for [`brm_nlme_loglikelihood`](@ref) and, for a flat
 model, compact cell gradients for
@@ -1466,7 +1569,9 @@ model, compact cell gradients for
 `@plate for` (or the deprecated closure-style `kernel(...) do`) over the
 subjects or over their rows, or one row of a flat grouped response or of a
 completed covariate's observed values; each belongs to the subject of its
-rows. A subject's work then depends on its own cells, not on other subjects.
+rows. An observation on rows of its own has one cell per density, plate
+iterations included, each belonging to its measured subject. A subject's work
+then depends on its own cells, not on other subjects.
 
 `progress` reports the preparation through Treebars: pass a Treebars node and
 the call builds a `Prepare NLME model` node under it, with one phase per step
@@ -1479,7 +1584,16 @@ when the next step starts. `nothing` (the default) reports nothing.
 
 Refuses ([`BRMNLMEViewError`](@ref)) everything `brm_nlme_view` refuses, Student-t
 random-effect blocks (the estimators own a Gaussian η prior), and observed
-densities that cannot be attributed to subjects.
+densities that cannot be attributed to subjects: a plate cell joining rows of
+several subjects, and a measured density that reads several subjects' η (the
+message names them), is not finite at the measuring point, or changes with
+some of the moves but not all.
+
+The measurement is at one point. A density whose value stays bit-identical
+while the η it reads moves (dependence that is constant in pieces, such as
+`ifelse(η > c, a, b)`) has that dependence missed, so it is counted toward the
+first subject or refused; BRM's random effects enter through linear predictors
+and smooth links.
 """
 function brm_nlme_model(backend::RKBRMI; ad_backend,
         observation_ad_backend=nothing, shared_point=nothing,
@@ -1511,9 +1625,9 @@ function _brm_nlme_model(backend::RKBRMI, node; ad_backend, observation_ad_backe
         sampler = _brm_run_phase(phases.sampler) do _
             _rk_retained_pointwise_sampler(backend; ad_backend)
         end
-        pointwise, attribution = _brm_run_phase(phases.attribution) do _
+        pointwise, attribution, measured = _brm_run_phase(phases.attribution) do _
             query = _rk_pointwise_query(backend)
-            query, _brm_nlme_attribution(backend, view, _rk_pointwise_values(query, unit))
+            query, _brm_nlme_attribution(backend, view, query, unit)...
         end
         eta_hvp = _brm_run_phase(phases.eta_hvp) do _
             _rk_eta_hvp_query(backend, unit, ad_backend)
@@ -1540,7 +1654,7 @@ function _brm_nlme_model(backend::RKBRMI, node; ad_backend, observation_ad_backe
         theta = findall(r -> r === :population ||
             (shared_point === nothing && r === :shared_latent), view.role)
         sigma = findall(==(:scalar), view.role)
-        cells = _brm_nlme_subject_cells(backend, view, attribution)
+        cells = _brm_nlme_subject_cells(backend, view, attribution, measured)
         # A nested subject keeps the whole-model η gradient. It owns many
         # cells (its nested levels' rows, totals), and a cell can compute
         # whole-cohort values (on the regional panel each costs about one
