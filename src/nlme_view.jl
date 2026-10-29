@@ -1419,7 +1419,11 @@ _brm_nlme_forward_backend(ad_backend) = nothing
 # A cell query still addresses the original packed coordinate space. Overlay
 # only the shared coordinates and the selected subject's η onto the read-only
 # unit point; constructing a packed Vector would make each call scale with the
-# number of other subjects.
+# number of other subjects. A read is a binary search: the θ and σ positions
+# are sorted (the model's `findall`), and the subject's η positions, in block
+# order, are kept sorted beside it (`eta_sorted`, their places in `eta` in
+# `eta_order`), so a cell's reads cost a logarithm of the block each instead of
+# a scan of it.
 struct _BRMNLMEPoint{T,S,E} <: AbstractVector{Float64}
     unit::Vector{Float64}
     theta_positions::Vector{Int}
@@ -1428,16 +1432,29 @@ struct _BRMNLMEPoint{T,S,E} <: AbstractVector{Float64}
     sigma::S
     eta_positions::Vector{Int}
     eta::E
+    eta_sorted::Vector{Int}
+    eta_order::Vector{Int}
+end
+function _BRMNLMEPoint(unit, theta_positions, theta, sigma_positions, sigma,
+        eta_positions, eta)
+    order = sortperm(eta_positions)
+    _BRMNLMEPoint(unit, theta_positions, theta, sigma_positions, sigma,
+        eta_positions, eta, eta_positions[order], order)
 end
 Base.size(p::_BRMNLMEPoint) = size(p.unit)
 Base.IndexStyle(::Type{<:_BRMNLMEPoint}) = IndexLinear()
+# Where packed position `j` sits in the sorted `positions`, or 0.
+function _brm_sorted_slot(positions, j)
+    k = searchsortedfirst(positions, j)
+    k <= length(positions) && positions[k] == j ? k : 0
+end
 function Base.getindex(p::_BRMNLMEPoint, j::Int)
-    k = findfirst(==(j), p.theta_positions)
-    k === nothing || return p.theta[k]
-    k = findfirst(==(j), p.sigma_positions)
-    k === nothing || return p.sigma[k]
-    k = findfirst(==(j), p.eta_positions)
-    k === nothing || return p.eta[k]
+    k = _brm_sorted_slot(p.theta_positions, j)
+    k == 0 || return p.theta[k]
+    k = _brm_sorted_slot(p.sigma_positions, j)
+    k == 0 || return p.sigma[k]
+    k = _brm_sorted_slot(p.eta_sorted, j)
+    k == 0 || return p.eta[p.eta_order[k]]
     p.unit[j]
 end
 
