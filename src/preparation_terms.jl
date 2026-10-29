@@ -53,7 +53,8 @@ _brm_term_prior_expression(term, target, context, class; component=nothing,
 
 function _brm_term_data(term_name::Symbol, value, context)
     value isa NamedColumn || error(
-        "BRM term preparation: `$term_name` expects a data-column argument")
+        "BRM term preparation: `$term_name` expects a data-column argument",
+        _brm_inline_gather_hint(value))
     key = name(value)
     haskey(context.data, key) || error(
         "BRM term preparation: `$term_name` data column `$key` is unavailable")

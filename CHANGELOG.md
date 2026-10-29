@@ -12,6 +12,31 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.65
+
+- Labels read from a level table through each part's positions, the data
+  holding one table (each area's label, unit and Kreis) and each part only
+  its rows' positions: name the gather, `kreis_b = kreis[gem_b]`, and use
+  `kreis_b` as a grouping, in a shared `|ID|` block over parts, in
+  `gr(g, by = b)`, `(… || g)`, `cdar(…; by = g)`, as a `car(...)` area and as
+  a `car_units` / `nested_groups` key. `test/level_table_groupings.jl` checks
+  each against the same model given one copy of the labels per part: SBBRMI
+  emits the same program and data, RKBRMI has the same coordinates, density
+  and gradient, and binds the level table and positions instead of the
+  copies.
+- A gather written inline in a grouping or term (`(1 | kreis[gem_b])`,
+  `gr(g, by = unit[gem_b])`, `car(gem[gem_b]; …)`) is refused with the
+  assignment to write (`kreis_gem_b = kreis[gem_b]`): an inline gather has no
+  name for a prior, an NLME keyword or the descriptor to address.
+- BRM's compat floor is ReactiveKernelsPPL 0.1.15 (was 0.1.14). Before it,
+  RKBRMI's density of `gr(g, by = b)` raised `invalid index: "a" of type
+  String` (or a `BoundsError` for integer labels other than `1:n`) when `g` or
+  `b` was a data-only assignment: RKPPL looked a label up on a `levels(g)`
+  axis only for a bound data column (snag `rkppl-submodel-l-00ff0f27`).
+  **Breaking** for an environment that pins ReactiveKernels before
+  `4f7ef46a`: move that pin with BRM.
+- BRM's test environment pins ReactiveKernels `4f7ef46a` (0.1.13).
+
 ## 0.2.64
 
 - RKBRMI finds each row's random-effect level (`brm_level_indices`) through one

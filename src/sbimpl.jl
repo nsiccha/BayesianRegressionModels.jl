@@ -9272,7 +9272,8 @@ _sb_julia_to_stan_fn(f) = something(_sb_julia_stan_name(f), Symbol(nameof(f)))
 # message rather than a generic `isa` failure.
 _sb_named_inner(label::Symbol, x::NamedColumn) = x
 _sb_named_inner(label::Symbol, x) =
-    error("sbimpl: `$label(...)` expects a NamedColumn, got $(typeof(x))")
+    error("sbimpl: `$label(...)` expects a NamedColumn, got $(typeof(x))",
+        _brm_inline_gather_hint(x))
 
 _sb_data_backing(label::Symbol, n::Symbol, d::DataColumn) = parent(d)
 _sb_data_backing(label::Symbol, n::Symbol, d) =
@@ -11390,17 +11391,20 @@ _sb_id_sym(x) = error("sbimpl: `gr(...; id=...)` expects a Symbol or String, got
 _sb_normalize_group(g::NamedColumn) = (g, nothing)
 _sb_normalize_group(g::MultiMembershipTerm) = (g, nothing)
 _sb_normalize_group(g::ExprColumn) = begin
-    getf(g) === gr || error("sbimpl: expected NamedColumn or `gr(...)` on RHS of `|`, got `$(getf(g))`")
+    getf(g) === gr || error("sbimpl: expected NamedColumn or `gr(...)` on RHS of `|`, got `$(getf(g))`",
+        _brm_inline_gather_hint(g))
     args = getargs(g); kw = getkwargs(g)
     length(args) == 1 || error("sbimpl: `gr(...)` expects exactly one positional group, got $(length(args))")
     group_raw = args[1]
     group = _as_named_column(group_raw)
-    isnothing(group) && error("sbimpl: `gr(...)` expects a NamedColumn group, got $(typeof(group_raw))")
+    isnothing(group) && error("sbimpl: `gr(...)` expects a NamedColumn group, got $(typeof(group_raw))",
+        _brm_inline_gather_hint(group_raw))
     by_raw = get(kw, :by, nothing)
     id_sym = _sb_id_sym(get(kw, :id, nothing))
     by_raw === nothing && return (group, id_sym)
     by = _as_named_column(by_raw)
-    isnothing(by) && error("sbimpl: `gr(...; by=...)` expects a NamedColumn for `by`, got $(typeof(by_raw))")
+    isnothing(by) && error("sbimpl: `gr(...; by=...)` expects a NamedColumn for `by`, got $(typeof(by_raw))",
+        _brm_inline_gather_hint(by_raw))
     ((group, by), id_sym)
 end
 _sb_normalize_group(g) = error("sbimpl: expected NamedColumn or `gr(...)` on RHS of `|`, got $(typeof(g))")
