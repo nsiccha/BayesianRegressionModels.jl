@@ -109,6 +109,10 @@ end
     total
 end
 
+# A non-centered completion's group term (`BRM._BRMGroupedSharesWeights`): the
+# observed placeholder carries no information, the weight is the density.
+ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMLogWeight, _placeholder) = d.weight
+
 # The emitted source is the executable contract. Every statistical prior and
 # observation role lowers through the public RKPPL surface; binding supplies
 # the data, with no ordinal or missing-response plan mutations.

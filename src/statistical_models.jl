@@ -268,6 +268,12 @@ brm_covariate_total_residuals(values, group, cells, totals) = begin
     return residuals
 end
     ),
+    brm_covariate_total_coordinates = :(
+brm_covariate_total_coordinates(values, group, cells, totals) = begin
+    coordinates = BayesianRegressionModels._brm_totals_layout(values, group, cells, totals).coordinates
+    return coordinates
+end
+    ),
     brm_structured_inputs = :(
 function brm_structured_inputs(prepared_inputs, indices)
     prepared = only(prepared_inputs)

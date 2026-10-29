@@ -502,7 +502,13 @@ non-centered completion whose rows lie on the subject grouping axis is a unit
 draw of [`brm_nlme_view`](@ref) (two-stage, SVI, Laplace and the NLME
 estimators) instead of a shared latent; it has no Stan counterpart in
 [`brm_coordinate_transport`](@ref). [`reprocess`](@ref) keeps the backend's
-parametrization.
+parametrization. The grouped entries of `mi(x)::shares(total, rows)` take
+`:noncentered` under any law: their coordinates (the centred ones, which
+the transport pairs with Stan's) are standard-normal draws, and each group
+observes the rest of their density, the law at its entries and the shares'
+log-Jacobian less the draws' standard-normal density. The density is the
+centred one; `:pointwise` holds those group terms as the observation of a
+placeholder per group. The entries of no group need a location-scale law.
 
 The three-argument constructor wraps an existing artifact build without
 planning, translation, emitted-definition evaluation or kernel construction.

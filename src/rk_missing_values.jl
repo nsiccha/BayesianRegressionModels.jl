@@ -294,14 +294,19 @@ function _rk_prepare_missing_totals!(columns, taken, derived, observation, plan,
     names = map((free_rows=(:free, :brm_covariate_total_free_rows),
             grouped_rows=(:grouped, :brm_covariate_total_grouped_rows),
             ends=(:ends, :brm_covariate_total_ends),
-            residuals=(:residuals, :brm_covariate_total_residuals))) do (field, recipe)
+            residuals=(:residuals, :brm_covariate_total_residuals),
+            coordinates=(:coordinates, :brm_covariate_total_coordinates))) do (field, recipe)
         name = _rk_ast_fresh_name(string(plan.source, "_shares_", field), taken)
         columns[name] = getproperty(layout, field)
         push!(derived, _RKDerivedSpec(name,
             Expr(:_rk_data_preparation, recipe, raw, inputs...), name))
         name
     end
-    merge(names, (; inputs))
+    # The placeholder a non-centered completion's groups observe is bound data:
+    # a submodel observes only an argument bound to a data column.
+    weights = _rk_ast_fresh_name(string(plan.source, "_shares_weights"), taken)
+    columns[weights] = layout.weights
+    merge(names, (; weights, inputs))
 end
 
 # Emits the completion block and returns the names of the block locals that
@@ -370,29 +375,29 @@ end
 # free entries integrate out and are not emitted (a generated draw, as on
 # SBBRMI); the grouped ones stay, since their density says what the residuals
 # say about the law.
+#
+# Non-centered (`RKBRMI(brmi; completions = :noncentered)`), free entries are
+# standard normal draws standardized by the law's location and scale, as for
+# any completion, and the grouped entries' coordinates are standard normal
+# draws whose groups each observe the rest of the joint latent's density
+# (`_BRMGroupedSharesWeights`). The coordinates and the density are the
+# centred ones; only the prior/likelihood split differs.
 function _rk_emit_missing_totals!(definitions, statements, bindings, taken, completion)
     t = completion.totals
     t.downstream || return _rk_emit_missing_shares!(definitions, statements, bindings,
         taken, completion)
-    free_law = _rk_ast_value_distribution(
-        _rk_mi_gather(completion.distribution, t.free_rows), bindings, taken)
-    grouped = _rk_mi_gather(completion.distribution, t.grouped_rows)
-    family = _rk_value_callee!(bindings,
-        _BRMGroupedShares{completion.distribution.callable}, taken)
-    grouped_law = Expr(:call, family, t.ends, t.residuals,
-        map(arg -> _rk_value_expr!(bindings, arg, taken), grouped.args)...)
-    block = _rk_block_body(free_law, grouped_law)
+    free_part = _rk_mi_free_part(bindings, taken, completion)
+    grouped_part = _rk_mi_grouped_part(bindings, taken, completion)
+    block = _rk_block_body(free_part.reads, grouped_part.reads)
     observed = _rk_block_argument!(block, :observed, completion.observed_component)
     free_rows = _rk_block_argument!(block, :free_rows, t.free_rows)
     grouped_rows = _rk_block_argument!(block, :grouped_rows, t.grouped_rows)
     lookup = _rk_block_argument!(block, :lookup, completion.missing_lookup)
     mask = _rk_block_argument!(block, :mask, completion.missing_mask)
-    free = _rk_block_local!(block, :y_free)
-    push!(block.statements, Expr(:call, :.~,
-        Expr(:ref, free, Expr(:call, :axes, free_rows, 1)), free_law))
-    shares = _rk_block_local!(block, :y_shares)
-    push!(block.statements, Expr(:call, :~,
-        Expr(:ref, shares, Expr(:call, :axes, grouped_rows, 1)), grouped_law))
+    grouped_data = _rk_mi_grouped_arguments!(block, completion)
+    free_sampled, free = _rk_emit_mi_free!(block, free_part, free_rows)
+    shares_sampled, shares = _rk_emit_mi_grouped!(block, grouped_part, grouped_rows,
+        grouped_data)
     missing = _rk_block_local!(block, :y_mis)
     push!(block.statements, Expr(:(=), missing, Expr(:call, :vcat, free, shares)))
     completed = _rk_block_local!(block, :completed)
@@ -400,24 +405,103 @@ function _rk_emit_missing_totals!(definitions, statements, bindings, taken, comp
         taken, :brm_completed_covariate, observed, missing, lookup, mask; kernel=true)))
     push!(statements, Expr(:call, :~, completion.source,
         _rk_ast_block_call!(definitions, taken, "brm_missing_covariate", block, completed)))
-    (free, shares)
+    (free_sampled, shares_sampled)
 end
 
 function _rk_emit_missing_shares!(definitions, statements, bindings, taken, completion)
     t = completion.totals
-    grouped = _rk_mi_gather(completion.distribution, t.grouped_rows)
-    family = _rk_value_callee!(bindings,
-        _BRMGroupedShares{completion.distribution.callable}, taken)
-    grouped_law = Expr(:call, family, t.ends, t.residuals,
-        map(arg -> _rk_value_expr!(bindings, arg, taken), grouped.args)...)
-    block = _rk_block_body(grouped_law)
+    grouped_part = _rk_mi_grouped_part(bindings, taken, completion)
+    block = _rk_block_body(grouped_part.reads)
     grouped_rows = _rk_block_argument!(block, :grouped_rows, t.grouped_rows)
-    shares = _rk_block_local!(block, :y_shares)
-    push!(block.statements, Expr(:call, :~,
-        Expr(:ref, shares, Expr(:call, :axes, grouped_rows, 1)), grouped_law))
+    grouped_data = _rk_mi_grouped_arguments!(block, completion)
+    sampled, shares = _rk_emit_mi_grouped!(block, grouped_part, grouped_rows, grouped_data)
     push!(statements, Expr(:call, :~, completion.source,
         _rk_ast_block_call!(definitions, taken, "brm_missing_shares", block, shares)))
-    (shares,)
+    (sampled,)
+end
+
+# The free entries' law, gathered onto their rows: their law as written, or
+# its location and scale when non-centered. A non-centered completion with no
+# free entries may have any law (`_rk_noncentered_completion`); its empty free
+# entries stay under the law as written.
+function _rk_mi_free_part(bindings, taken, completion)
+    distribution = _rk_mi_gather(completion.distribution, completion.totals.free_rows)
+    if completion.noncentered && distribution.callable in _RK_NONCENTERED_LAWS
+        location, scale = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
+        return (; noncentered=true, callable=distribution.callable, location, scale,
+            reads=Expr(:tuple, location, scale))
+    end
+    law = _rk_ast_value_distribution(distribution, bindings, taken)
+    (; noncentered=false, law, reads=law)
+end
+
+function _rk_emit_mi_free!(block, part, free_rows)
+    if part.noncentered
+        sampled = _rk_block_local!(block, :z_free)
+        push!(block.statements, Expr(:call, :.~,
+            Expr(:ref, sampled, Expr(:call, :axes, free_rows, 1)), _rk_ast_dotted(:Normal, 0, 1)))
+        free = _rk_block_local!(block, :y_free)
+        value = Expr(:call, :.+, part.location, Expr(:call, :.*, part.scale, sampled))
+        push!(block.statements, Expr(:(=), free,
+            part.callable === LogNormal ? _rk_ast_dotted(:exp, value) : value))
+        return sampled, free
+    end
+    free = _rk_block_local!(block, :y_free)
+    push!(block.statements, Expr(:call, :.~,
+        Expr(:ref, free, Expr(:call, :axes, free_rows, 1)), part.law))
+    free, free
+end
+
+# The grouped entries' law: `_BRMGroupedShares`, or, non-centered, the callable
+# of their groups' weights and the shares' values. `arguments` are the law's
+# arguments gathered onto the grouped entries.
+function _rk_mi_grouped_part(bindings, taken, completion)
+    t = completion.totals
+    F = completion.distribution.callable
+    grouped = _rk_mi_gather(completion.distribution, t.grouped_rows)
+    if completion.noncentered
+        arguments = map(arg -> _rk_value_expr!(bindings, arg, taken), grouped.args)
+        return (; noncentered=true, ends=t.ends, residuals=t.residuals, arguments,
+            weights=_rk_value_callee!(bindings, _BRMGroupedSharesWeights{F}(), taken),
+            values=_rk_value_callee!(bindings, _brm_grouped_shares_values, taken),
+            weight=_rk_value_callee!(bindings, _BRMLogWeight, taken),
+            reads=Expr(:tuple, t.ends, t.residuals, arguments...))
+    end
+    family = _rk_value_callee!(bindings, _BRMGroupedShares{F}, taken)
+    law = Expr(:call, family, t.ends, t.residuals,
+        map(arg -> _rk_value_expr!(bindings, arg, taken), grouped.args)...)
+    (; noncentered=false, law, reads=law)
+end
+
+# A non-centered completion's grouped entries read the axis of their
+# coordinates and observe one placeholder per group.
+function _rk_mi_grouped_arguments!(block, completion)
+    completion.noncentered || return nothing
+    t = completion.totals
+    (; coordinates=_rk_block_argument!(block, :coordinates, t.coordinates),
+       weights=_rk_block_argument!(block, :weights, t.weights))
+end
+
+function _rk_emit_mi_grouped!(block, part, grouped_rows, data)
+    if part.noncentered
+        sampled = _rk_block_local!(block, :z_shares)
+        push!(block.statements, Expr(:call, :.~,
+            Expr(:ref, sampled, Expr(:call, :axes, data.coordinates, 1)),
+            _rk_ast_dotted(:Normal, 0, 1)))
+        shares = _rk_block_local!(block, :y_shares)
+        push!(block.statements, Expr(:(=), shares,
+            Expr(:call, part.values, sampled, part.ends, part.residuals)))
+        weights = _rk_block_local!(block, :group_weights)
+        push!(block.statements, Expr(:(=), weights, Expr(:call, part.weights,
+            sampled, shares, part.ends, part.residuals, part.arguments...)))
+        push!(block.statements, Expr(:call, :.~, data.weights,
+            Expr(:., part.weight, Expr(:tuple, weights))))
+        return sampled, shares
+    end
+    shares = _rk_block_local!(block, :y_shares)
+    push!(block.statements, Expr(:call, :~,
+        Expr(:ref, shares, Expr(:call, :axes, grouped_rows, 1)), part.law))
+    shares, shares
 end
 
 function _rk_source_loop_indices!(names, statement)
