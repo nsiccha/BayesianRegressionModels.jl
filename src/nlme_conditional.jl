@@ -12,9 +12,11 @@ Condition one backend's full target on the fixed coordinates of `start`, a
 value returned by [`brm_nlme_joint_start`](@ref) for the same map. The
 returned problem implements the LogDensityProblems interface over the free
 coordinates only: the standardized subject draws, including one block per
-nested unit. Population coefficients, scalar parameters, shared latent
-coordinates and the random-effect scales and correlation factors stay at
-`start`.
+nested unit. A non-centered completion's unit draws are free coordinates too:
+RK's standardized draws `x.z_mis` in the RK frame, the entries `x_y_mis`
+Stan samples in the Stan frame. Population coefficients, scalar parameters,
+shared latent coordinates and the random-effect scales and correlation
+factors stay at `start`.
 
 `backend` selects the evaluated target and its coordinate frame:
 - `map.sb` (default): `map.stan_problem`, the exact compiled Stan model, in

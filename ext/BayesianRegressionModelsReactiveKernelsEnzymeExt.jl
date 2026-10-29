@@ -115,6 +115,44 @@ BRM._rk_slap_values(k, u::Vector{Float64}) =
 
 _rk_slap_seed(cotangents) = length(cotangents) == 1 ? only(cotangents) : Tuple(cotangents)
 
+# The coordinate transport's standardized completions
+# (src/coordinate_transport.jl): one reverse pullback of the named values at a
+# packed point, taking one cotangent per name shaped as its value. A value the
+# bound data alone produce (a law of data columns) is a constant whose
+# pullback is zero, so only the values that read the point are differentiated.
+function BRM._rk_value_pullback(backend::BRM.RKBRMI, names::Tuple{Vararg{Symbol}},
+        u0::Vector{Float64})
+    bound = BRM.rk_bound_data(backend)
+    live = findall(name -> _rk_reads_point(backend, bound, name), collect(names))
+    isempty(live) && return (u::Vector{Float64}, cotangents::Tuple) -> zeros(Float64, length(u))
+    values = Base.invokelatest(ReactiveKernels.prepare, backend.model.spec;
+        have=(:unconstrained, keys(bound)...), want=names[live], bound)
+    v0 = _rk_slap_tuple(Base.invokelatest(values, u0), length(live))
+    seeds = map(value -> value isa Number ? 0.0 : zeros(Float64, length(value)), v0)
+    reverse = AutoEnzyme(; mode=Enzyme.Reverse)
+    prepared = Base.invokelatest(prepare_ad_pullback, values, reverse,
+        _rk_slap_seed(seeds), u0; active=:unconstrained)
+    function pullback(u::Vector{Float64}, cotangents::Tuple)
+        seed = map(i -> (c = cotangents[i]; c isa Number ? Float64(c) : Vector{Float64}(c)),
+            Tuple(live))
+        Base.invokelatest(ad_pullback, prepared, _rk_slap_seed(seed), u)
+    end
+end
+
+# Whether a graph value reads the packed point: planned from the bound data
+# alone, a value that needs the point is not producible (`PlanningError`); the
+# same value plans with the point, so no other cause remains.
+function _rk_reads_point(backend::BRM.RKBRMI, bound, name::Symbol)
+    try
+        Base.invokelatest(ReactiveKernels.plan, backend.model.spec;
+            have=Tuple(keys(bound)), want=(name,))
+        false
+    catch err
+        err isa PlanningError || rethrow()
+        true
+    end
+end
+
 function BRM._rk_slap_pullback(k, u::Vector{Float64}, cotangents)
     k.pullback[] === nothing && (k.pullback[] = k.prepare_pullback())
     Base.invokelatest(ad_pullback, k.pullback[], _rk_slap_seed(cotangents), u)

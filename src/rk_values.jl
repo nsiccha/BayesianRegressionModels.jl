@@ -1047,22 +1047,27 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
                 target=assignment.name))
     end
     for completion in plan.completions
-        sampled = _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)
+        parts = _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)
         # `declaration` holds the completion's sampled coordinates: the missing
         # values, or their standardized draws when non-centered; with group
         # totals, the free entries and the grouped entries' shares. A part that
         # holds no coordinate (no free entry, or only groups of one entry)
-        # files no record.
-        for local_name in something(sampled, ())
-            shares = completion.totals !== nothing && local_name === last(sampled)
+        # files no record. A standardized part names its location, scale and
+        # value (`standardized`), all scoped under the completion, and its law.
+        parts === nothing && continue
+        for (k, part) in enumerate(parts)
+            shares = completion.totals !== nothing && k == length(parts)
             t = completion.totals
             t === nothing || isempty(plan.columns[shares ? t.coordinates : t.free_rows]) &&
                 continue
+            scoped(name) = Symbol(completion.source, ".", name)
+            standardized = part.standardized === nothing ? nothing :
+                (; map(scoped, part.standardized)..., part.law)
             _rk_coordinate_record!(coordinates,
                 (; kind=:missing_value, target=completion.source,
-                   declaration=Symbol(completion.source, ".", local_name),
+                   declaration=scoped(part.sampled),
                    noncentered=completion.noncentered,
-                   bijection=shares ? :shares : nothing))
+                   bijection=shares ? :shares : nothing, standardized))
         end
     end
     for observation in plan.observations

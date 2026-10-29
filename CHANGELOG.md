@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.49
+## 0.2.50
 
 - BRM's compat floor for its RKBRMI extensions is ReactiveKernels 0.1.7 and
   ReactiveKernelsPPL 0.1.3 (was 0.1). A model-scope `logistic` value that
@@ -26,6 +26,41 @@ instead of failing at run time.
 - BRM's test environment pins ReactiveKernels `2a682926` (0.1.7). The three
   inline count-location parity checks in `test/rk_inline_response_location.jl`
   are ordinary tests now (they needed ReactiveKernelsPPL 0.1.2).
+
+## 0.2.49
+
+- `brm_coordinate_transport` pairs the completions of
+  `RKBRMI(brmi; completions = :noncentered)`: each standardized draw
+  `<column>.z_mis.<i>` (the free entries of `mi(x)::shares(total, rows)`:
+  `<column>.z_free.<i>`) pairs with SBBRMI's centred entry
+  `<column>_y_mis.<i>` (`<column>_y_free.<i>`) as a `:completion` pair, and
+  the part moves through `s = location .+ scale .* z` on Stan's unconstrained
+  entries (the values under `Normal`, their logs under `LogNormal`), with the
+  law's location and scale RK computes at the point; they may read any
+  coordinate, another completion's values included. `brm_rk_point_to_stan`,
+  `brm_stan_point_to_rk`, `brm_stan_gradient_to_rk` (the location and scale
+  pulled back by reverse-mode Enzyme) and `brm_stan_logdensity_to_rk` (plus
+  the log-Jacobian `sum(log, scale)`) move such points, gradients and
+  densities, so an NLME fit of the non-centered lowering reaches the same
+  BRMI's Stan program. Before, those draws stayed unpaired and the transport
+  refused the model. The transport records each part in its new field
+  `completions` (the struct gains `completions` and `completion_laws`; the
+  5-, 7- and 8-argument constructors are kept); reading
+  `logdensity_offset` from a transport with one is an error naming
+  `brm_stan_logdensity_to_rk`, and the permutation helpers `brm_rk_to_stan` /
+  `brm_stan_to_rk` refuse it. `brm_check_coordinate_transport` compares each
+  part's Stan entries with the values RK computes from its draws and returns
+  their count as `completions`. Snag `coordinate-trans-23993804`.
+- `brm_nlme_joint_map` and `brm_nlme_joint_start` accept non-centered
+  completions read as unit draws: their family of fixed unit variance has no
+  scale or factor, and the start maps their draws to Stan again once it has
+  written the covariance, since the law's location or scale may read it.
+- RKBRMI's non-centered completion block also binds its law's location and
+  scale to block locals (`<column>.y_mis_location`, `<column>.y_mis_scale`;
+  `y_free_location` / `y_free_scale` for free entries), which the transport
+  reads by name. No density reads them (the value still reads the law's
+  expressions), so the density, its gradient and the coordinates are
+  unchanged.
 
 ## 0.2.48
 
