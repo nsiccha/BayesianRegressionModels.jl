@@ -12,6 +12,31 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.44
+
+- `RKBRMI(brmi; completions = :noncentered)` lowers `mi(x)::shares(total, rows)`
+  (before, it refused it): the grouped entries' coordinates, the centred ones
+  that `brm_coordinate_transport` pairs with Stan's `y_shares`, are
+  standard-normal draws `x.z_shares`, and each group observes the rest of
+  their density (the law at its entries and the shares' log-Jacobian, less
+  the draws' standard-normal density), so the density is the centred one
+  under any law. The entries of no group need a location-scale law, as for
+  any non-centered completion. `:pointwise` holds the group terms as the
+  observation of one placeholder per group (`x_shares_weights`).
+- `brm_nlme_view` reads those coordinates as unit draws: each is an instance
+  of a size-1 family fixed at 1 in the subject owning its group's rows, and
+  the group's term belongs to that subject, so `brm_nlme_model`, SAEM, SVI
+  and the per-unit Laplace problem run, and the two-stage fit's unit problems
+  differ from the full RK density by their unit alone. A group whose missing
+  entries lie on rows of several subjects is refused by name. A centred
+  shares completion is refused, naming the non-centered lowering: its
+  density is a prior term reading the law, whose arguments may read the
+  units' random effects, and the NLME paths evaluate the population prior
+  with every random effect at zero. Before, a completion without free
+  entries failed with `internal: declaration x.y_free owns no packed
+  coordinate`, and one with them was read as shared coordinates in that
+  population prior. Snag `nlme-view-shares-f1cfaa71`.
+
 ## 0.2.43
 
 - `brm_start(rk)` and `brm_start(sb, stan_model)`, with no initial values,

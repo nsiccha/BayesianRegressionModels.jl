@@ -1140,7 +1140,8 @@ end
 # any RK declaration without a matching sampled SB output.
 function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         kind::Symbol, target::Symbol, rk, d, stan, stan_pos;
-        only_declaration::Union{Nothing,Symbol}=nothing, relation::Symbol=:identity)
+        only_declaration::Union{Nothing,Symbol}=nothing, relation::Symbol=:identity,
+        carrier::Union{Nothing,Symbol}=nothing)
     owned = Dict{String,BRMOutput}(String(o.name) => o for o in d.outputs
         if !isnothing(o.declaration) && o.declaration.target === target &&
             o.kind === :parameter)
@@ -1157,8 +1158,9 @@ function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         haskey(entries, declaration) || push!(declarations, declaration)
         push!(get!(entries, declaration, Any[]), (; name=rk_name, index, transform))
     end
+    stan_declaration = carrier
     for declaration in declarations
-        carrier = replace(String(declaration), '.' => '_')
+        carrier = replace(String(something(stan_declaration, declaration)), '.' => '_')
         output = get(owned, carrier, nothing)
         isnothing(output) && continue
         elements = sort(entries[declaration]; by=e -> reverse(e.index))
@@ -1215,13 +1217,15 @@ _brm_transport_pairs!(pairs, correlations, simplexes, centered,
 # names them.
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:missing_value}, record, rk, d, stan, stan_pos)
-    record.noncentered && return nothing
+    shares = get(record, :bijection, nothing) === :shares
+    record.noncentered && !shares && return nothing
     # The grouped entries of `mi(x)::shares(total, rows)`: RK's joint latent
-    # holds the entries, SB's carrier the same coordinates.
-    relation = get(record, :bijection, nothing) === :shares ? :grouped_shares : :identity
+    # holds the entries, SB's carrier the same coordinates. Non-centered, RK's
+    # standard normal draws `z_shares` are those coordinates too.
     _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         :missing_value, record.target, rk, d, stan, stan_pos;
-        only_declaration=record.declaration, relation)
+        only_declaration=record.declaration, relation=shares ? :grouped_shares : :identity,
+        carrier=shares ? Symbol(record.target, ".y_shares") : nothing)
 end
 
 # The Stan declaration type and RK layout transform of each vector family the
@@ -1714,6 +1718,14 @@ comparison must meet
 `atol + rtol * max(abs(rk_value), abs(stan_value))`. Any disagreement is an error
 naming the coordinate. Densities and gradients are not compared here.
 """
+# The grouped entries of a non-centered `mi(source)::shares(total, rows)` at
+# their coordinates `z`.
+function _brm_transport_shares_values(rk::RKBRMI, source::Symbol, z)
+    plan = rk.plan isa _RKHeldOutPlan ? rk.plan.parent : rk.plan
+    c = only(c for c in plan.completions if c.source === source)
+    _brm_grouped_shares_values(z, plan.columns[c.totals.ends], plan.columns[c.totals.residuals])
+end
+
 function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
         stan_model, u_rk::AbstractVector; atol::Real=1e-10, rtol::Real=1e-10)
     Vector{Symbol}(_rk_layout_coordinate_names(rk)) == t.rk_names || error(
@@ -1782,11 +1794,14 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
             # Nothing reads the completion: Stan draws its missing entries in
             # generated quantities, and the shared coordinates are all there is.
             isempty(stan_mis) && continue
-            scope = chopsuffix(String(declaration), ".y_shares")
+            scope, part = rsplit(String(declaration), '.'; limit=2)
             free = Symbol(scope, ".y_free")
+            grouped = _brm_rk_declaration_value(rk_values, declaration)
+            # Non-centered, the draws are the entries' coordinates.
+            part == "z_shares" && (grouped = _brm_transport_shares_values(rk,
+                Symbol(scope), grouped))
             rk_mis = vcat((any(p -> p.rk_declaration === free, t.pairs) ?
-                    _brm_rk_declaration_value(rk_values, free) : Float64[]),
-                _brm_rk_declaration_value(rk_values, declaration))
+                    _brm_rk_declaration_value(rk_values, free) : Float64[]), grouped)
             length(rk_mis) == length(stan_mis) || error(
                 "brm_check_coordinate_transport: completion `$scope` has " *
                 "$(length(rk_mis)) RK and $(length(stan_mis)) Stan missing entries `$stem`")
