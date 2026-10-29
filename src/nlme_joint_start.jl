@@ -16,8 +16,10 @@ Models with several groupings require the same explicit subject ownership
 arguments (`subject_group`, `nested_groups`, `shared_groups`) as
 `brm_nlme_view`.
 Shared latent variables may arrive in the fitted population vector or in an
-explicit full packed `shared_point` from the RK model. Student-t mixing weights,
-centered Stan random effects, and
+explicit full packed `shared_point` from the RK model. Non-centered completions
+read as unit draws (`RKBRMI(brmi; completions = :noncentered)`) are covered:
+the transport moves their draws to the entries Stan samples. Student-t mixing
+weights, centered Stan random effects, and
 other incomplete pairings are refused rather than silently initialized.
 """
 struct BRMNLMEJointMap{R<:RKBRMI,S<:SBBRMI,P,M}
@@ -56,10 +58,15 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
         "the standardized subject draws this map fills; build the SBBRMI " *
         "without `centered_groups`")
     blocks = NamedTuple[]
-    # The transport has refused non-centered completions (unpaired), so every
-    # family here is an estimated plain block or one stratum of a stratified
+    # An estimated family is a plain block or one stratum of a stratified
     # block, whose scales and factor the transport addresses by stratum label.
+    # A family of fixed covariance (a non-centered completion's unit draws)
+    # has neither; the transport moves its draws.
     for family in _brm_nlme_families(rk, view)
+        if family.fixed !== nothing
+            push!(blocks, (; family..., scales=BRMCoordinatePair[], factor=nothing))
+            continue
+        end
         record = family.record
         key = _brm_nlme_block_identity(record)
         stratum = isnothing(family.stratum) ? nothing : _brm_transport_level(
@@ -378,6 +385,16 @@ function brm_nlme_joint_start(map::BRMNLMEJointMap; theta, sigma, omega, eta,
         end
     end
     stan = BridgeStan.param_unconstrain(map.stan_model, constrained)
+    # A standardized completion's Stan entries were mapped from the unit
+    # covariance carriers; with the covariance written, map its draws again,
+    # since its location or scale may read the covariance.
+    if !isempty(t.completions)
+        written = brm_stan_point_to_rk(t, stan)
+        for block in t.completions
+            written[block.rk_positions] = u[block.rk_positions]
+        end
+        stan = brm_rk_point_to_stan(t, written)
+    end
     roundtrip = brm_nlme_joint_values(map, stan)
     same_omega = ragged ? all(isapprox(roundtrip.omega[f], Ω[f]; atol=1e-9, rtol=1e-9)
         for f in eachindex(Ω)) : isapprox(roundtrip.omega, Ω; atol=1e-9, rtol=1e-9)

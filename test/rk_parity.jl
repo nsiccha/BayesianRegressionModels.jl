@@ -1698,22 +1698,94 @@ end
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ 0.0
     @test _rk_query(backend, :posterior, u) ≈ ll + pr
-    # RK hoists the scalar location's `logbeta` rule call out of the
-    # observations, and registered Enzyme cannot prove that sampler readonly;
-    # Enzyme dogfood `9d920e1f` repairs it (Enzyme snag
-    # readonly-proof-h-bcbe23d3). Drop this branch once a registered Enzyme
-    # carries the repair.
-    outcome = try
-        _check_parity_gradient(backend, u)
-    catch err
-        err
+    # Registered Enzyme (0.13.216) cannot prove this model's prepared callable
+    # readonly (`EnzymeMutabilityException`); the test env's Enzyme dogfood
+    # carries the repairs (`9d920e1f`, `4c73c40`; enzyme-use, brm-use
+    # setup.md), so value and gradient are checked.
+    _check_parity_gradient(backend, u)
+end
+
+@stestset "rk parity beta lone linked intercept" begin
+    # A lone logit intercept read only through the Beta response, with a
+    # sampled and a literal precision. Registered Enzyme (0.13.216) raises
+    # `EnzymeMutabilityException` on the plain Reverse gradient of both (a
+    # store into the prepared callable's by-value `.innerparm` copy); the test
+    # env's Enzyme dogfood carries the repair (`4c73c40`, enzyme-use), so value
+    # and gradient are checked (snag registered-enzym-dab98569).
+    beta_cols = (; prop=[0.21, 0.34, 0.27, 0.19, 0.31, 0.25])
+    sampled = @brm beta_cols begin
+        logit(mu) ~ 1
+        effect(mu, Intercept) ~ Normal(0, 2.5)
+        kappa ~ Gamma(2.0, 1000.0)
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
     end
-    if outcome isa Enzyme.Compiler.EnzymeMutabilityException
-        @test occursin("cannot be proven readonly", sprint(showerror, outcome))
-        @test_broken false
-    elseif outcome isa Exception
-        throw(outcome)
+    backend = _parity_backend(sampled)
+    layout = backend.model.layout
+    @test layout.total == 2
+    u = [-1.0, 4.0943445622221]
+    nt = constrain(layout, u)
+    b = Vector(_parity_population(nt, backend, :mu))
+    mu = logistic(b[1])
+    ll = sum(logpdf.(Beta(mu * nt.kappa, (1 - mu) * nt.kappa), beta_cols.prop))
+    pr = logpdf(Normal(0, 2.5), b[1]) + logpdf(Gamma(2.0, 1000.0), nt.kappa)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: kappa's exp (the intercept rides identity).
+    @test logjac(layout, u) ≈ log(nt.kappa)
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + log(nt.kappa)
+    _check_parity_gradient(backend, u)
+
+    literal = @brm beta_cols begin
+        logit(mu) ~ 1
+        effect(mu, Intercept) ~ Normal(0, 2.5)
+        prop ~ Beta(mu * 60.0, (1 - mu) * 60.0)
     end
+    backend = _parity_backend(literal)
+    layout = backend.model.layout
+    @test layout.total == 1
+    u = [-1.0]
+    nt = constrain(layout, u)
+    b = Vector(_parity_population(nt, backend, :mu))
+    mu = logistic(b[1])
+    ll = sum(logpdf.(Beta(mu * 60.0, (1 - mu) * 60.0), beta_cols.prop))
+    pr = logpdf(Normal(0, 2.5), b[1])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
+end
+
+@stestset "rk parity gamma lone log intercept" begin
+    # A lone log intercept read through the Gamma response with a sampled
+    # shape (`GammaLog.(shape, log_mu)`). On Julia 1.10, registered Enzyme
+    # (0.13.216) fails to compile its Reverse gradient (`EnzymeInternalError`
+    # "Illegal cached pointer", with or without a `Const` callable; exact on
+    # Julia 1.12); the test env's Enzyme dogfood repairs it (nodecayed-phi
+    # fold, enzyme-use; upstream EnzymeAD/Enzyme.jl#3822; snags
+    # registered-enzym-dab98569, Enzyme registered-enzym-674dfbf3).
+    gamma_cols = (; y=[1.3, 2.1, 0.7, 1.8, 3.2, 1.1])
+    brmi = @brm gamma_cols begin
+        log(mu) ~ 1
+        effect(mu, Intercept) ~ Normal(0, 2.5)
+        shape ~ Gamma(2.0, 1.0)
+        y ~ Gamma(shape, mu / shape)
+    end
+    backend = _parity_backend(brmi)
+    layout = backend.model.layout
+    @test layout.total == 2
+    u = [0.7, 1.3]
+    nt = constrain(layout, u)
+    b = Vector(_parity_population(nt, backend, :mu))
+    mu = exp(b[1])
+    ll = sum(logpdf.(Gamma(nt.shape, mu / nt.shape), gamma_cols.y))
+    pr = logpdf(Normal(0, 2.5), b[1]) + logpdf(Gamma(2.0, 1.0), nt.shape)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: shape's exp (the intercept rides identity).
+    @test logjac(layout, u) ≈ log(nt.shape)
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + log(nt.shape)
+    _check_parity_gradient(backend, u)
 end
 
 @stestset "rk parity beta-binomial column trials literal precision" begin

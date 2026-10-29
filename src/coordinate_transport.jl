@@ -124,7 +124,9 @@ of the same [`BRMI`](@ref):
   sides, whose latent's values are compared cell by cell), or
   `:grouped_shares` (one coordinate of the grouped entries of a
   `mi(x)::shares(total, rows)` completion: the same coordinate on both sides,
-  whose missing entries are compared);
+  whose missing entries are compared), or `:completion` (one standardized
+  draw `z` of a non-centered missing-value completion against the Stan entry
+  `s = location + scale * z` of the same position; see below);
 - `stan_value` — the Stan constrained parameter name holding the physical
   value this coordinate parameterizes. It equals `stan` except inside a Stan
   array of vectors, whose unconstrained values BridgeStan stores array-major
@@ -144,6 +146,11 @@ the effect `b` of the same (level, margin) that a centered SB block
 (times `sqrt(w)` of the level's mixing weight for a Student-t block), with that
 point's scales `tau`, correlation factor `L` and weights, so the block moves
 through the map recorded in [`BRMCoordinateTransport`](@ref)`.centered`.
+A `:completion` pair joins RK's standardized draw `z` of one missing entry
+(`RKBRMI(brmi; completions = :noncentered)`) with Stan's unconstrained entry of
+the same position, `s = location + scale * z` at that point's location and
+scale (the value under `Normal`, its log under `LogNormal`), so the part moves
+through the map recorded in [`BRMCoordinateTransport`](@ref)`.completions`.
 """
 struct BRMCoordinatePair
     address::NamedTuple
@@ -157,6 +164,32 @@ end
 
 BRMCoordinatePair(address, rk, stan, rk_declaration, rk_index, relation) =
     BRMCoordinatePair(address, rk, stan, rk_declaration, rk_index, relation, stan)
+
+# Implemented by `BayesianRegressionModelsReactiveKernelsEnzymeExt`: a reverse
+# pullback of named graph values, `(u, cotangents) -> gradient`, with one
+# cotangent per name shaped as its value.
+function _rk_value_pullback end
+
+# The locations and scales of a transport's standardized completions: one
+# prepared value query reads them at an RK point, and their reverse pullback
+# (reverse-mode Enzyme, prepared on first use) moves cotangents back to it.
+struct _BRMCompletionLaws{R,F}
+    rk::R
+    names::Tuple{Vararg{Symbol}}
+    read::F
+    pullback::Base.RefValue{Any}
+end
+
+function _BRMCompletionLaws(rk::RKBRMI, blocks)
+    names = Tuple(unique(Iterators.flatten((b.location, b.scale) for b in blocks)))
+    _BRMCompletionLaws(rk, names, _rk_value_reader(rk, names), Ref{Any}(nothing))
+end
+
+function _brm_completion_pullback(laws::_BRMCompletionLaws, u, cotangents)
+    laws.pullback[] === nothing &&
+        (laws.pullback[] = _rk_value_pullback(laws.rk, laws.names, u))
+    laws.pullback[](u, Tuple(cotangents[name] for name in laws.names))
+end
 
 """
     BRMCoordinateTransport
@@ -203,8 +236,21 @@ log-Jacobian of `z -> b`; use
 [`brm_stan_logdensity_to_rk`](@ref). Reading `logdensity_offset` from a
 transport with a centered block is an error naming that function.
 
-With no simplex or centered block, `stan_u == rk_u[permutation]` for points
-and gradients alike ([`brm_rk_to_stan`](@ref), [`brm_stan_to_rk`](@ref)) and
+`completions` lists each standardized missing-value completion part (an
+`RKBRMI(brmi; completions = :noncentered)` completion, or the free entries of
+its `mi(x)::shares(total, rows)`): its `target` column, RK draw declaration
+`rk_declaration`, SB entries `stan_carrier`, `law` (`Normal` or `LogNormal`),
+the scoped RK names of its `location`, `scale` and `value`, and its RK draws
+`rk` / SB entries `stan` with their positions. At each point SB's
+unconstrained entries are `s = location .+ scale .* z` (the values under
+`Normal`, their logs under `LogNormal`) with that point's location and scale,
+which RK computes and may read any coordinate; at transported points the RK
+log density equals Stan's plus the log-Jacobian `sum(log, scale)` over the
+part's entries.
+
+With no simplex, centered block or standardized completion,
+`stan_u == rk_u[permutation]` for points and gradients alike
+([`brm_rk_to_stan`](@ref), [`brm_stan_to_rk`](@ref)) and
 `logdensity_offset == 0`. Otherwise points and gradients move differently:
 use [`brm_rk_point_to_stan`](@ref), [`brm_stan_point_to_rk`](@ref),
 [`brm_stan_gradient_to_rk`](@ref) and [`brm_stan_logdensity_to_rk`](@ref).
@@ -218,9 +264,11 @@ struct BRMCoordinateTransport
     simplexes::Vector{NamedTuple}
     logdensity_offset::Float64
     centered::Vector{NamedTuple}
+    completions::Vector{NamedTuple}
+    completion_laws::Union{Nothing,_BRMCompletionLaws}
 end
 
-# A transport without simplex or centered blocks is a pure permutation.
+# A transport without simplex, centered or completion blocks is a pure permutation.
 BRMCoordinateTransport(rk_names, stan_names, pairs, permutation, correlations) =
     BRMCoordinateTransport(rk_names, stan_names, pairs, permutation, correlations,
         NamedTuple[], 0.0)
@@ -228,14 +276,22 @@ BRMCoordinateTransport(rk_names, stan_names, pairs, permutation, correlations,
         simplexes, logdensity_offset) =
     BRMCoordinateTransport(rk_names, stan_names, pairs, permutation, correlations,
         simplexes, logdensity_offset, NamedTuple[])
+BRMCoordinateTransport(rk_names, stan_names, pairs, permutation, correlations,
+        simplexes, logdensity_offset, centered) =
+    BRMCoordinateTransport(rk_names, stan_names, pairs, permutation, correlations,
+        simplexes, logdensity_offset, centered, NamedTuple[], nothing)
 
-# A centered block's density offset depends on the point, so the constant
-# field alone would silently mis-state it.
+# A centered block's or standardized completion's density offset depends on
+# the point, so the constant field alone would silently mis-state it.
 function Base.getproperty(t::BRMCoordinateTransport, field::Symbol)
-    field === :logdensity_offset && !isempty(getfield(t, :centered)) && error(
-        "BRMCoordinateTransport: this transport maps $(length(getfield(t, :centered))) " *
-        "centered random-effect block(s), whose log-density offset depends on the " *
-        "point. Use `brm_stan_logdensity_to_rk(transport, rk_u, stan_value)`.")
+    if field === :logdensity_offset
+        centered, completions = getfield(t, :centered), getfield(t, :completions)
+        isempty(centered) && isempty(completions) || error(
+            "BRMCoordinateTransport: this transport maps $(length(centered)) " *
+            "centered random-effect block(s) and $(length(completions)) standardized " *
+            "completion(s), whose log-density offset depends on the point. Use " *
+            "`brm_stan_logdensity_to_rk(transport, rk_u, stan_value)`.")
+    end
     getfield(t, field)
 end
 
@@ -244,7 +300,8 @@ Base.show(io::IO, t::BRMCoordinateTransport) = print(io,
     "BRMCoordinateTransport(", length(t.pairs), " coordinates, ",
     length(t.correlations), " correlation factors, ",
     length(t.simplexes), " simplexes",
-    isempty(t.centered) ? "" : ", $(length(t.centered)) centered blocks", ")")
+    isempty(t.centered) ? "" : ", $(length(t.centered)) centered blocks",
+    isempty(t.completions) ? "" : ", $(length(t.completions)) standardized completions", ")")
 
 """
     brm_coordinate_transport(rk::RKBRMI, sb::SBBRMI, stan_names) -> BRMCoordinateTransport
@@ -292,7 +349,15 @@ segments joined by `_`), element by element; a simplex declaration pairs as a
 `:simplex` block and an LKJ Cholesky factor as a correlation factor. Name both
 providers' declarations identically for this pairing. Missing-value completions
 pair RK `<column>.y_mis.<i>` with Stan `<column>_y_mis.<i>` when the completed
-column feeds a downstream likelihood. Any coordinate outside
+column feeds a downstream likelihood. A completion RK samples non-centered
+(`RKBRMI(brmi; completions = :noncentered)`, a `Normal` or `LogNormal` law,
+and the free entries of `mi(x)::shares(total, rows)`) samples standard normal
+draws `<column>.z_mis.<i>` (`<column>.z_free.<i>`) where Stan samples the
+entries `<column>_y_mis.<i>` (`<column>_y_free.<i>`): each draw pairs with the
+entry of the same position as a `:completion` pair, and the part moves through
+`s = location .+ scale .* z` on Stan's unconstrained entries, with the
+location and scale RK computes at the point (`t.completions`); they may read
+any coordinate. Any coordinate outside
 that coverage — on either side — is an error naming it; there is no partial
 transport. An `SBBRMI` built with exact total-effect blocks has no sampled
 counterpart for the absorbed coordinates; build it with `total_groups=()` for
@@ -308,11 +373,12 @@ weights pair by level label as for a non-centered one, and its map is
 `b = sqrt(w) * diag(tau) * L * z` per level. Its SB margins must be in RK's
 margin order.
 
-Every non-simplex, non-centered pair has equal unconstrained values on both
-sides, and the log-Jacobian of each backend's transform is evaluated at the
-same physical point. Without simplex or centered blocks, points and gradients
-move by the same permutation ([`brm_rk_to_stan`](@ref),
-[`brm_stan_to_rk`](@ref)). With them, use [`brm_rk_point_to_stan`](@ref),
+Every non-simplex, non-centered, non-completion pair has equal unconstrained
+values on both sides, and the log-Jacobian of each backend's transform is
+evaluated at the same physical point. Without simplex, centered or completion
+blocks, points and gradients move by the same permutation
+([`brm_rk_to_stan`](@ref), [`brm_stan_to_rk`](@ref)). With them, use
+[`brm_rk_point_to_stan`](@ref),
 [`brm_stan_point_to_rk`](@ref) and [`brm_stan_gradient_to_rk`](@ref), and move
 the Stan density with [`brm_stan_logdensity_to_rk`](@ref). Confirm the
 physical agreement at concrete points with
@@ -349,8 +415,10 @@ function brm_coordinate_transport(rk::RKBRMI, sb::SBBRMI, stan_names::AbstractVe
         _brm_transport_pairs!(pairs, correlations, simplexes, centered,
             Val(record.kind), record, rk, d, stan, stan_pos)
     end
+    completions = _brm_transport_completions(records, pairs)
     t = _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
-        centered)
+        centered, completions,
+        isempty(completions) ? nothing : _BRMCompletionLaws(rk, completions))
     _brm_transport_centered_scales(rk, t)
     t
 end
@@ -375,7 +443,7 @@ function _brm_transport_centered_scales(rk, t)
 end
 
 function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
-        centered=NamedTuple[])
+        centered=NamedTuple[], completions=NamedTuple[], completion_laws=nothing)
     rk_pos = Dict{Symbol,Int}(n => i for (i, n) in enumerate(rk_names))
     length(rk_pos) == length(rk_names) || error(
         "brm_coordinate_transport: RK coordinate names are not unique")
@@ -422,7 +490,9 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
               "blocks with sampled scales, stratified `gr(g, by=b)` blocks, " *
               "HSGP terms (grouped by `by=` too), monotonic " *
               "terms, submodel provider declarations, and missing-value " *
-              "completions (RK `<column>.y_mis` with SB `<column>_y_mis`). Other " *
+              "completions (RK `<column>.y_mis` with SB `<column>_y_mis`, and " *
+              "non-centered RK draws `<column>.z_mis` / `.z_free` through their " *
+              "law's location and scale). Other " *
               "constructs (R2D2/horseshoe priors, smooths, GP, hyper-predicted " *
               "HSGP without `by=`, AR, measurement error, multi-membership " *
               "groups, exact-total SB emissions) " *
@@ -445,8 +515,12 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
             rk_positions=map(n -> rk_pos[n], block.rk),
             stan_positions=map(n -> stan_pos[n], block.stan))
         for block in centered]
+    completion_blocks = NamedTuple[(; block...,
+            rk_positions=[rk_pos[n] for n in block.rk],
+            stan_positions=[stan_pos[n] for n in block.stan])
+        for block in completions]
     BRMCoordinateTransport(rk_names, stan, ordered, permutation, correlations,
-        blocks, offset, centered_blocks)
+        blocks, offset, centered_blocks, completion_blocks, completion_laws)
 end
 
 _brm_stan_name(stan_pos, name, address) = begin
@@ -1301,20 +1375,71 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     end
 end
 
-# A non-centered completion's standardized draws have no SB counterpart (SB
-# samples the missing values); they stay unpaired, so the coverage check
-# names them.
+# A missing-value completion's sampled entries pair with SB's same-named
+# missing entries. A part RK standardizes by its law's location and scale
+# (`completions = :noncentered`) samples standard normal draws `z` where SB
+# samples the values; each draw pairs with SB's entry of the same position as a
+# `:completion` pair (`_brm_transport_completions`). The grouped entries of
+# `mi(x)::shares(total, rows)`: RK's joint latent holds the entries, SB's
+# carrier the same coordinates. Non-centered, RK's standard normal draws
+# `z_shares` are those coordinates too.
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:missing_value}, record, rk, d, stan, stan_pos)
     shares = get(record, :bijection, nothing) === :shares
-    record.noncentered && !shares && return nothing
-    # The grouped entries of `mi(x)::shares(total, rows)`: RK's joint latent
-    # holds the entries, SB's carrier the same coordinates. Non-centered, RK's
-    # standard normal draws `z_shares` are those coordinates too.
+    standardized = get(record, :standardized, nothing)
+    standardized === nothing ||
+        _brm_transport_completion_space(d, record.target, standardized)
     _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         :missing_value, record.target, rk, d, stan, stan_pos;
-        only_declaration=record.declaration, relation=shares ? :grouped_shares : :identity,
-        carrier=shares ? Symbol(record.target, ".y_shares") : nothing)
+        only_declaration=record.declaration,
+        relation=shares ? :grouped_shares : standardized === nothing ? :identity : :completion,
+        carrier=shares ? Symbol(record.target, ".y_shares") :
+            standardized === nothing ? nothing : standardized.value)
+end
+
+# A standardized part moves as `s = location .+ scale .* z`, where `s` is SB's
+# unconstrained entry: the value itself under a `Normal` law (an unbounded
+# vector), its log under `LogNormal` (`lower = 0`).
+function _brm_transport_completion_space(d, target, standardized)
+    carrier = Symbol(replace(String(standardized.value), '.' => '_'))
+    outputs = [o for o in d.outputs if o.name === carrier && o.kind === :parameter &&
+        !isnothing(o.declaration) && o.declaration.target === target]
+    # No sampled SB carrier: nothing pairs, so the validator names the draws.
+    isempty(outputs) && return nothing
+    constraints = only(outputs).constraints
+    expected = standardized.law === LogNormal ? (:lower,) : ()
+    keys(constraints) == expected && (isempty(expected) || iszero(constraints.lower)) ||
+        _brm_transport_error(:parameterization_mismatch,
+            "brm_coordinate_transport: completion `$target` draws " *
+            "`$(standardized.value)` under a `$(standardized.law)` law, but SB " *
+            "declares its entries `$carrier` with constraints $(constraints); its " *
+            "unconstrained entries are not `location .+ scale .* z`")
+    nothing
+end
+
+# Each standardized completion part, from its record and its `:completion`
+# pairs: its RK draws and SB entries in element order and the scoped names of
+# its location, scale and value, which `_BRMCompletionLaws` reads at a point.
+function _brm_transport_completions(records, pairs)
+    blocks = NamedTuple[]
+    for record in records
+        record.kind === :missing_value || continue
+        standardized = get(record, :standardized, nothing)
+        standardized === nothing && continue
+        members = sort([p for p in pairs if p.relation === :completion &&
+            p.rk_declaration === record.declaration]; by=p -> p.rk_index)
+        # Nothing paired: the validator names the draws.
+        isempty(members) && continue
+        [p.rk_index for p in members] == [(i,) for i in eachindex(members)] || error(
+            "brm_coordinate_transport: internal: completion `$(record.declaration)` " *
+            "pairs draws $(Tuple(p.rk for p in members)), not one per entry")
+        push!(blocks, (; target=record.target, rk_declaration=record.declaration,
+            stan_carrier=replace(String(standardized.value), '.' => '_'),
+            standardized.location, standardized.scale, standardized.value,
+            standardized.law, rk=[p.rk for p in members], stan=[p.stan for p in members],
+            stan_values=[p.stan_value for p in members]))
+    end
+    blocks
 end
 
 # The Stan declaration type and RK layout transform of each vector family the
@@ -1492,9 +1617,10 @@ function brm_stan_to_rk(t::BRMCoordinateTransport, v::AbstractVector)
 end
 
 _brm_transport_permutation_only(t, caller) =
-    isempty(t.simplexes) && isempty(t.centered) || error(
-    "$caller: this transport pairs $(length(t.simplexes)) simplex block(s) and " *
-    "$(length(t.centered)) centered block(s), whose points and gradients do not " *
+    isempty(t.simplexes) && isempty(t.centered) && isempty(t.completions) || error(
+    "$caller: this transport pairs $(length(t.simplexes)) simplex block(s), " *
+    "$(length(t.centered)) centered block(s) and $(length(t.completions)) " *
+    "standardized completion(s), whose points and gradients do not " *
     "move by one permutation. Use `brm_rk_point_to_stan` / " *
     "`brm_stan_point_to_rk` for points, `brm_stan_gradient_to_rk` for gradients " *
     "and `brm_stan_logdensity_to_rk` for log densities.")
@@ -1675,6 +1801,50 @@ function _brm_centered_pullback!(out, block, u::AbstractVector, g::AbstractVecto
     out
 end
 
+# A standardized completion's location and scale at a point, each a number or
+# one value per entry, and the scale broadcast over the part's entries.
+function _brm_completion_law(laws, block)
+    location, scale = laws[block.location], laws[block.scale]
+    n = length(block.rk_positions)
+    location isa Number || length(location) == n || error(
+        "brm_coordinate_transport: completion `$(block.target)` has $n entries " *
+        "but $(length(location)) location values")
+    scale isa Number || length(scale) == n || error(
+        "brm_coordinate_transport: completion `$(block.target)` has $n entries " *
+        "but $(length(scale)) scale values")
+    location, scale, scale .* ones(n)
+end
+
+# `log |det(d s / d z)|` of every standardized completion at RK coordinates `u`.
+_brm_completions_logjacobian(t, u) = isempty(t.completions) ? 0.0 :
+    let laws = t.completion_laws.read(u)
+        sum(sum(log, _brm_completion_law(laws, block)[3]) for block in t.completions)
+    end
+
+# Stan's entries `s` of each standardized completion become RK's draws
+# `z = (s - location) / scale`, at the location and scale of the point being
+# built. A location or scale may read the values of another completion (a
+# completed covariate in a later law), never of its own; the parts are solved
+# again at the updated point until no draw changes, at most once per part
+# beyond the first pass.
+function _brm_completions_to_rk!(out, t, y)
+    isempty(t.completions) && return out
+    for _ in 0:length(t.completions)
+        laws = t.completion_laws.read(out)
+        settled = true
+        for block in t.completions
+            location, _, scale = _brm_completion_law(laws, block)
+            z = (y[block.stan_positions] .- location) ./ scale
+            settled &= isequal(z, out[block.rk_positions])
+            out[block.rk_positions] = z
+        end
+        settled && return out
+    end
+    error("brm_stan_point_to_rk: the locations and scales of the standardized " *
+        "completions $(Tuple(b.target for b in t.completions)) read one another's " *
+        "draws in a cycle; the point has no unique RK draws")
+end
+
 """
     brm_rk_point_to_stan(t::BRMCoordinateTransport, u_rk) -> Vector
     brm_stan_point_to_rk(t::BRMCoordinateTransport, u_stan) -> Vector
@@ -1684,10 +1854,13 @@ coordinates move by `t.permutation`; each `t.simplexes` block goes through the
 physical simplex, from RK's stick-breaking coordinates to Stan's isometric
 log-ratio coordinates or back; each `t.centered` block's standardized draws
 `z` become the effects `b = diag(tau) * L * z` per level, or back, with the
-point's own scales `tau` and correlation factor `L`. The two functions are
-inverses and both describe the same physical parameter point. They equal
-[`brm_rk_to_stan`](@ref) / [`brm_stan_to_rk`](@ref) for a transport without
-simplex or centered blocks. Neither mutates its input. Use
+point's own scales `tau` and correlation factor `L`; each `t.completions`
+part's standardized draws `z` become Stan's entries
+`s = location .+ scale .* z`, or back, with the location and scale RK
+computes at that point. The two functions are inverses and both describe the
+same physical parameter point. They equal [`brm_rk_to_stan`](@ref) /
+[`brm_stan_to_rk`](@ref) for a transport without simplex, centered or
+completion blocks. Neither mutates its input. Use
 [`brm_stan_gradient_to_rk`](@ref) for gradients and
 [`brm_stan_logdensity_to_rk`](@ref) for log densities.
 """
@@ -1701,6 +1874,12 @@ function brm_rk_point_to_stan(t::BRMCoordinateTransport, u::AbstractVector)
         out[block.stan_positions] =
             first(_brm_centered_factor(block, u)) * u[block.rk_positions] .*
             transpose(_brm_centered_level_scales(block, u))
+    end
+    isempty(t.completions) && return out
+    laws = t.completion_laws.read(u)
+    for block in t.completions
+        location, _, scale = _brm_completion_law(laws, block)
+        out[block.stan_positions] = location .+ scale .* u[block.rk_positions]
     end
     out
 end
@@ -1717,7 +1896,7 @@ function brm_stan_point_to_rk(t::BRMCoordinateTransport, y::AbstractVector)
         out[block.rk_positions] = LowerTriangular(first(_brm_centered_factor(block, out))) \
             (y[block.stan_positions] ./ transpose(_brm_centered_level_scales(block, out)))
     end
-    out
+    _brm_completions_to_rk!(out, t, y)
 end
 
 """
@@ -1731,8 +1910,12 @@ transpose of the exact Jacobian of its stick-breaking-to-log-ratio map, whose
 log-Jacobian difference is the constant `t.logdensity_offset`. A centered
 block multiplies by the transpose of the Jacobian of `z -> b`, which also
 moves its scale and correlation coordinates, and adds the gradient of that
-map's log-Jacobian (see [`brm_stan_logdensity_to_rk`](@ref)). Neither input
-is mutated.
+map's log-Jacobian (see [`brm_stan_logdensity_to_rk`](@ref)). A standardized
+completion's entries `s = location .+ scale .* z` pull back to `scale .* g` on
+its draws and, through the location and scale, to every coordinate they read
+(a reverse-mode Enzyme pullback of RK's values, which needs Enzyme loaded),
+plus the gradient of the log-Jacobian `sum(log, scale)`. Neither input is
+mutated.
 """
 function brm_stan_gradient_to_rk(t::BRMCoordinateTransport, u::AbstractVector,
         g::AbstractVector)
@@ -1747,7 +1930,28 @@ function brm_stan_gradient_to_rk(t::BRMCoordinateTransport, u::AbstractVector,
     for block in t.centered
         _brm_centered_pullback!(out, block, u, g)
     end
-    out
+    _brm_completions_pullback!(out, t, u, g)
+end
+
+# Adds the standardized completions' pullback to `out`, the permuted Stan
+# gradient `g` with the other blocks' pullbacks: `scale .* g` on each part's
+# draws, and the cotangents `g` of its location and `g .* z .+ 1 ./ scale`
+# of its scale (the second term the log-Jacobian's gradient), summed for a
+# scalar location or scale, pulled back to every RK coordinate at once.
+function _brm_completions_pullback!(out, t, u, g)
+    isempty(t.completions) && return out
+    laws = t.completion_laws.read(u)
+    cotangents = Dict{Symbol,Any}()
+    for block in t.completions
+        location, scale, entries = _brm_completion_law(laws, block)
+        gs = g[block.stan_positions]
+        z = u[block.rk_positions]
+        out[block.rk_positions] = entries .* gs
+        cotangents[block.location] = location isa Number ? sum(gs) : gs
+        cs = gs .* z .+ 1 ./ entries
+        cotangents[block.scale] = scale isa Number ? sum(cs) : cs
+    end
+    out .+= _brm_completion_pullback(t.completion_laws, Vector{Float64}(u), cotangents)
 end
 
 """
@@ -1758,7 +1962,10 @@ RK's log density at `u_rk`, from Stan's normalized log density with Jacobian
 `brm_rk_point_to_stan(t, u_rk)`: `stan_value + t.logdensity_offset` (the
 constant simplex offset) plus, for each centered block, the log-Jacobian
 `G * log(det(diag(tau) * L))` of its map `z -> b` over its `G` levels at
-`u_rk` (plus `K/2 * sum(log, w)` over a Student-t block's mixing weights). Works for every transport; without centered blocks it equals
+`u_rk` (plus `K/2 * sum(log, w)` over a Student-t block's mixing weights), and,
+for each standardized completion, the log-Jacobian `sum(log, scale)` of its
+map `z -> location .+ scale .* z` over its entries at `u_rk`. Works for every
+transport; without centered blocks or standardized completions it equals
 `stan_value + t.logdensity_offset`.
 """
 function brm_stan_logdensity_to_rk(t::BRMCoordinateTransport, u::AbstractVector,
@@ -1767,7 +1974,8 @@ function brm_stan_logdensity_to_rk(t::BRMCoordinateTransport, u::AbstractVector,
         "brm_stan_logdensity_to_rk: got $(length(u)) point values for " *
         "$(length(t.rk_names)) RK coordinates")
     stan_value + getfield(t, :logdensity_offset) +
-        sum((_brm_centered_logjacobian(block, u) for block in t.centered); init=0.0)
+        sum((_brm_centered_logjacobian(block, u) for block in t.centered); init=0.0) +
+        _brm_completions_logjacobian(t, u)
 end
 
 # The Stan constrained name of entry `(i, j)` of a paired correlation factor;
@@ -1805,18 +2013,22 @@ Confirm at the RK unconstrained point `u_rk` that both backends describe the
 same physical parameter point: every paired constrained value agrees under its
 `relation`, every correlation factor agrees as a whole matrix, including
 its structurally fixed unit diagonal norm and zero upper triangle, every
-simplex agrees as a whole vector of `K` elements, and every centered block's
+simplex agrees as a whole vector of `K` elements, every centered block's
 Stan effects equal `diag(tau) * L * z` computed from RK's own constrained
 scales, correlation factor and standardized draws (times `sqrt(w)` of the
-level's own mixing weight for a Student-t block). The Stan point is
+level's own mixing weight for a Student-t block), and every standardized
+completion's Stan entries equal the values RK's own graph computes from its
+draws. The Stan point is
 `brm_rk_point_to_stan(t, u_rk)`. `stan_model` is the compiled
 `BridgeStan.StanModel` whose `param_unc_names` built `t`.
 Returns `(; pairs::Int, factors::Int, simplexes::Int, centered::Int,
-max_error::Float64)`: `pairs` counts checked elements outside correlation
-factors, simplexes and centered blocks, `factors` counts whole correlation
-matrices, `simplexes` whole simplexes, `centered` whole centered blocks (all
-`K × G` effects), and `max_error` is the largest absolute physical difference
-over these elements and every matrix, simplex and effect entry. Every
+completions::Int, max_error::Float64)`: `pairs` counts checked elements
+outside correlation factors, simplexes, centered blocks and standardized
+completions, `factors` counts whole correlation matrices, `simplexes` whole
+simplexes, `centered` whole centered blocks (all `K × G` effects),
+`completions` whole standardized completion parts (all entries), and
+`max_error` is the largest absolute physical difference over these elements
+and every matrix, simplex, effect and entry. Every
 comparison must meet
 `atol + rtol * max(abs(rk_value), abs(stan_value))`. Any disagreement is an error
 naming the coordinate. Densities and gradients are not compared here.
@@ -1830,6 +2042,9 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
         "do not match the transport")
     u = Vector{Float64}(u_rk)
     rk_values = _rk_constrained_values(rk, u)
+    # A standardized completion's values are RK graph values, not parameters.
+    completion_values = isempty(t.completions) ? (;) :
+        _rk_value_reader(rk, Tuple(b.value for b in t.completions))(u)
     stan_u = brm_rk_point_to_stan(t, u)
     stan_values = BridgeStan.param_constrain(stan_model, stan_u)
     stan_index = Dict{String,Int}(String(n) => i
@@ -1848,7 +2063,8 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
     end
     checked = 0
     for pair in t.pairs
-        pair.relation in (:cholesky, :simplex, :centered, :shares, :grouped_shares) && continue
+        pair.relation in (:cholesky, :simplex, :centered, :shares, :grouped_shares,
+            :completion) && continue
         value = _brm_rk_declaration_value(rk_values, pair.rk_declaration)
         rk_value = isempty(pair.rk_index) ? value : _brm_rk_value_entry(value, pair.rk_index)
         compare("$(pair.address) (`$(pair.rk)` / `$(pair.stan_value)`)", rk_value,
@@ -1895,8 +2111,12 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
             # Non-centered, the draws are the entries' coordinates.
             part == "z_shares" && (grouped = _brm_transport_shares_values(rk,
                 Symbol(scope), grouped))
-            rk_mis = vcat((any(p -> p.rk_declaration === free, t.pairs) ?
-                    _brm_rk_declaration_value(rk_values, free) : Float64[]), grouped)
+            # The free entries: sampled, standardized (RK computes their
+            # values from the draws), or none.
+            free_values = any(p -> p.rk_declaration === free, t.pairs) ?
+                _brm_rk_declaration_value(rk_values, free) :
+                haskey(completion_values, free) ? completion_values[free] : Float64[]
+            rk_mis = vcat(free_values, grouped)
             length(rk_mis) == length(stan_mis) || error(
                 "brm_check_coordinate_transport: completion `$scope` has " *
                 "$(length(rk_mis)) RK and $(length(stan_mis)) Stan missing entries `$stem`")
@@ -1947,6 +2167,19 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
                 stan_value(block.stan_values[k, h]))
         end
     end
+    # A standardized completion: the values RK computes from its draws against
+    # Stan's entries, every entry of every part.
+    for block in t.completions
+        y = completion_values[block.value]
+        length(y) == length(block.stan_values) || error(
+            "brm_check_coordinate_transport: completion `$(block.target)` has " *
+            "$(length(y)) RK values `$(block.value)` and $(length(block.stan_values)) " *
+            "Stan entries `$(block.stan_carrier)`")
+        for (k, name) in enumerate(block.stan_values)
+            compare("completion `$(block.target)` entry `$name`", y[k], stan_value(name))
+        end
+    end
     (; pairs=checked, factors=length(t.correlations),
-       simplexes=length(t.simplexes), centered=length(t.centered), max_error)
+       simplexes=length(t.simplexes), centered=length(t.centered),
+       completions=length(t.completions), max_error)
 end
