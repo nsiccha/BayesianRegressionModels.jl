@@ -257,6 +257,10 @@ end
 
 @stestset "batched protocol methods match the analytic oracle" begin
     m = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
+    # The η HVP query is prepared on first use, by the Hessian blocks below
+    # (before ReactiveKernels 0.1.12 its preparation held 8n² bytes for n
+    # packed coordinates).
+    @test m.eta_hvp.cached[] === nothing
     n = nsubjects(m)
     @test n == 3
     @test nlme_layout(m) == NLMELayout(; ntheta=3, nsigma=1, eta_blocks=[2])
@@ -281,6 +285,7 @@ end
         @test length(blocks) == length(subjects)
         @test all(isapprox.(blocks, oracle; rtol=1e-9, atol=1e-9))
     end
+    @test m.eta_hvp.cached[] !== nothing
     for subjects in ([3, 1], [1, 2, 3])
         H = 0.1 .* reshape(collect(1.0:(2length(subjects))), 2, :) .- 0.2
         value, gradient = NLMEEstimation._saem_population_value_gradient(
