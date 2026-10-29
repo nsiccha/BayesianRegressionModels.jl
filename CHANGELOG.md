@@ -12,6 +12,29 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.48
+
+- A nested NLME model (`brm_nlme_model` with `subject_group` /
+  `nested_groups`) whose observations have subject cells now evaluates one
+  unit on its own cells: `brm_nlme_loglikelihood_and_gradient`,
+  `brm_nlme_unit_problem` and SAEM's per-subject population gradient take one
+  compact cell sampler set per distinct subject block length, as flat models
+  do, instead of a whole-model gradient with the other units' effects at zero.
+  `brm_two_stage_fit` therefore samples nested units on `threads` tasks (each
+  with its own samplers); before, a nested model sampled on one thread. Only
+  a nested model without subject cells keeps the whole-model route and one
+  thread. A unit's cost is its own cells' only as far as RK computes each
+  cell's reads at its rows (ReactiveKernels 0.1.6 with the scalar totals
+  cells of 0.2.47); a totals cell's gradient reads its `hcat` design from
+  views, which needs the Enzyme `dogfood` line, so on registered Enzyme such a
+  model's unit gradient raises `IllegalTypeAnalysisException` where it was
+  slow before.
+  Each compact cell call costs about 7 µs, so a unit gradient is cheaper than
+  the whole-model one only while the unit holds less than about a twelfth of
+  the model: 18.4 ms against 26.7 ms for 12 units of 2,795 cells, but 0.23 ms
+  against 0.035 ms for 3 small regions (ReactiveKernels snag
+  `compact-cell-sam-7b0032c9` asks for one call per unit).
+
 ## 0.2.47
 
 - On RKBRMI, an in-cell observation whose response holds one value per cell

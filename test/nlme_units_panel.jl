@@ -136,12 +136,11 @@ end
 
 @stestset "one unit's work stays flat as regions are added" begin
     # A region's value and gradient are its own, however many regions there
-    # are. Its compact cell gradients (the ones `brm_svi_fit` takes) cost its
-    # own rows: a totals cell observes its one value per cell directly and RK
-    # computes the cell's reads at its rows (BRM todo 0ww46pb, ReactiveKernels
-    # 0.1.6, Enzyme dogfood for the `hcat` design read from views). The
-    # singular call still evaluates the whole model for a nested subject:
-    # capability gap, todo
+    # are, and so is its work. The singular call takes the region's compact
+    # cell samplers, and those cost its own rows: a totals cell observes its
+    # one value per cell directly and RK computes the cell's reads at its rows
+    # (BRM todo 0ww46pb, ReactiveKernels 0.1.6, Enzyme dogfood for the `hcat`
+    # design read from views). Todo
     # BayesianRegressionModels:scaling-svi/todos/2026-10-25T22-21-35-231-182pl0l.
     measured = map((1, 3)) do k
         rk = RKBRMI(panel(replicate_panel(PANEL, k)); completions=:noncentered)
@@ -172,7 +171,7 @@ end
     end
     @test measured[2].result[1] ≈ measured[1].result[1] rtol=1e-12
     @test measured[2].result[2] ≈ measured[1].result[2] rtol=1e-10
-    @test_broken measured[2].bytes <= 1.5measured[1].bytes
+    @test measured[2].bytes <= 1.5measured[1].bytes
     # Every cell group, the totals included, costs the same at 3 and 9 regions.
     # With the totals' former emission (`ones(length(total[i])) .* s` cells,
     # observed through `flatten_cells`) the totals group grew 632,016 B ->
