@@ -246,9 +246,10 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
             group, grouping.by, K, bucket.lkj_eta, priors)
         # One scale row and factor per stratum of `by`: `tau[levels(by), 1:K]`,
         # or one `tau_k[levels(by)]` per margin when the margins' laws differ
-        # (`_rk_ast_stratum_scales`), and `L[levels(by)]`. The NLME view reads
-        # one covariance family per stratum; the coordinate transport leaves
-        # the block unpaired.
+        # (`_rk_ast_stratum_scales`), and `L[levels(by)]`, one `K × K ×
+        # levels(by)` value (coordinates `L.<m>.<s>`). The NLME view reads one
+        # covariance family per stratum; the coordinate transport pairs each
+        # stratum's scales and factor by its `by` label.
         _rk_coordinate_record!(coordinates, (; kind=:stratified_ranef,
             group, by=grouping.by, id=bucket.id, bucket_kind=bucket.kind,
             margins=Tuple((m.predictor, m.coefficient) for m in bucket.margins),

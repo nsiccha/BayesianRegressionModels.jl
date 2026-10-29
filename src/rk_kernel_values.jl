@@ -1555,6 +1555,11 @@ function _rk_plate_cell_value!(statements, bindings, taken, read)
     _BRMPreparedRef(name, :whole)
 end
 
+# Whether a flattened in-cell observation's response holds one value per cell
+# (a totals cell's `total[i]`), read from the response's own port.
+_rk_kernel_scalar_response(kernel, observation) =
+    get(kernel.columns, observation.input.source, nothing) isa AbstractVector{<:Real}
+
 # The kernel's value is its subject cells; formula terms read them
 # concatenated, a per-subject observation reads them cell by cell. The cell's
 # plate also writes every in-cell observation argument the observations read
@@ -1590,6 +1595,13 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
                     push!(after, Expr(:(=), name,
                         _rk_kernel_bind_calls(argument, kernel.scope, bindings, taken)))
                 end
+                continue
+            end
+            if _rk_kernel_scalar_response(kernel, observation)
+                # One response value per cell: the cells are the argument's
+                # values, observed as they are, so RK attributes response row
+                # `j` to cell `j` and a cell query computes that cell alone.
+                push!(outputs, (name, argument))
                 continue
             end
             cells = _rk_ast_fresh_name(string(name, "_cells"), taken)

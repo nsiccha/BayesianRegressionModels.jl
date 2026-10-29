@@ -109,5 +109,6 @@ const _CASES = ("ranef" => _ranef_problem, "hsgp" => _hsgp_problem,
                 "nlme_cell" => _nlme_cell_problem,
                 "nlme_hessian" => _nlme_hessian_problem)
 
-run_threaded_gradient_gate(@__FILE__, _CASES, _SECONDS_PER_CASE;
-    known_broken=ENZYME_CONCURRENT_GC)
+# Known broken on registered Enzyme (Enzyme snag julia-1-10-concu-152a4415);
+# the test env's Enzyme dogfood repairs it (stressed: 22/22, BRM todo 0ww46pb).
+run_threaded_gradient_gate(@__FILE__, _CASES, _SECONDS_PER_CASE)
