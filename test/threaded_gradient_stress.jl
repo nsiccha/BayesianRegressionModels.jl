@@ -2,8 +2,10 @@
 # (`adaptive_centering_threads.jl`, `rk_enzyme_threads.jl`).
 #
 # Enzyme's reverse pass can turn a differentiated function into a use-after-free
-# once another thread runs GC — measured on Julia 1.10 and 1.12 (upstream,
-# unfixed; see `_block_location` in BayesianRegressionModelsWarmupHMCExt). WarmupHMC's
+# once another thread runs GC — measured on Julia 1.10 and 1.12 with registered
+# Enzyme (upstream, unfixed; see `_block_location` in
+# BayesianRegressionModelsWarmupHMCExt). The test env's Enzyme dogfood carries the
+# repair (`RestoreSafepointEffectsPass`, skill `enzyme-use`). WarmupHMC's
 # multi-chain and completion samplers differentiate one `deepcopy` of the density
 # per chain on `Threads.@threads`, and a regression kills the whole process — a
 # segfault or "GC error (probable corruption)" — so each gate runs its stress in a
@@ -24,10 +26,6 @@
 # reason instead of running, unless `BRM_STRESS_KNOWN_BROKEN=1` asks for the
 # stress (the acceptance check of the upstream fix).
 using LogDensityProblems, Random, Test
-
-# Why a path's gate is known broken when the cause is outside BRM.
-const ENZYME_CONCURRENT_GC = "Enzyme's reverse pass corrupts memory when another " *
-    "thread runs GC, on Julia 1.10 and 1.12 (Enzyme snag julia-1-10-concu-152a4415)."
 
 # Every worker differentiates its own copy, as the samplers' chains do, while
 # another task churns the allocator and forces collections.

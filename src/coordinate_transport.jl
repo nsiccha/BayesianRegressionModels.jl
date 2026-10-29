@@ -1998,6 +1998,14 @@ function _brm_rk_declaration_value(values, declaration::Symbol)
     values
 end
 
+# The grouped entries of a non-centered `mi(source)::shares(total, rows)` at
+# their coordinates `z`.
+function _brm_transport_shares_values(rk::RKBRMI, source::Symbol, z)
+    plan = rk.plan isa _RKHeldOutPlan ? rk.plan.parent : rk.plan
+    c = only(c for c in plan.completions if c.source === source)
+    _brm_grouped_shares_values(z, plan.columns[c.totals.ends], plan.columns[c.totals.residuals])
+end
+
 """
     brm_check_coordinate_transport(t, rk::RKBRMI, stan_model, u_rk; atol=1e-10, rtol=1e-10)
 
@@ -2025,14 +2033,6 @@ comparison must meet
 `atol + rtol * max(abs(rk_value), abs(stan_value))`. Any disagreement is an error
 naming the coordinate. Densities and gradients are not compared here.
 """
-# The grouped entries of a non-centered `mi(source)::shares(total, rows)` at
-# their coordinates `z`.
-function _brm_transport_shares_values(rk::RKBRMI, source::Symbol, z)
-    plan = rk.plan isa _RKHeldOutPlan ? rk.plan.parent : rk.plan
-    c = only(c for c in plan.completions if c.source === source)
-    _brm_grouped_shares_values(z, plan.columns[c.totals.ends], plan.columns[c.totals.residuals])
-end
-
 function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
         stan_model, u_rk::AbstractVector; atol::Real=1e-10, rtol::Real=1e-10)
     Vector{Symbol}(_rk_layout_coordinate_names(rk)) == t.rk_names || error(
