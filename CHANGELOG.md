@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.63
+
+- Preparing a model's compact cell gradients on first use costs each cell's own
+  reads. Which η a cell reads was measured from compact gradients over its
+  subject's whole block, at two probe points and a check, so a unit cost its
+  cells times its block. Now each cell's value query runs at the probe points
+  through a point that records what it reads; of those reads the plan keeps the
+  η its compact gradient touches, the same reads as before, and the check
+  compares every cell's value through the plan with its value query. No
+  whole-block sampler is prepared, so first use prepares one sampler per group
+  of cells (two when a group's width shrinks). On the two-region panel the
+  steady cost of the measurement went from 4.9 s to 2.0 s at 21,732 effects per
+  unit and from 32.8 s to 7.7 s at 69,473 (one CPU); reads, plans and η Hessian
+  patterns are unchanged.
+
 ## 0.2.62
 
 - `brm_nlme_loglikelihood` on a nested unit costs time linear in its cells'
