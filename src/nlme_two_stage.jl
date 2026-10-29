@@ -46,9 +46,9 @@ matrix for a flat model or one per covariance family for a nested one. The unit
 is evaluated on its own observation cells (see [`brm_nlme_model`](@ref)), so
 its cost does not grow with the number of units. A flat model whose
 observations have no subject cells is refused with the reason. A nested
-model's unit gradient evaluates the whole model
-(`brm_nlme_loglikelihoods_and_gradients`), at a cost that grows with the
-number of units.
+model without subject cells is accepted, but its unit gradient evaluates the
+whole model (`brm_nlme_loglikelihoods_and_gradients`), at a cost that grows
+with the number of units.
 """
 function brm_nlme_unit_problem(m::BRMNLMEModel, i::Integer, θ, σ, Ω)
     _brm_nlme_check_point(m, θ, σ, Ω)
@@ -96,12 +96,14 @@ end
 
 # A copy of `m` with its own prepared subject-cell queries and compact gradient
 # samplers, so units evaluate concurrently on another thread; everything else
-# is shared read-only. A nested model evaluates subject gradients through the
-# whole-model sampler and has no per-cell workspace to copy.
+# is shared read-only. A nested model without subject cells evaluates unit
+# gradients through the whole-model sampler and has no per-cell workspace to
+# copy.
 function _brm_nlme_worker_model(m::BRMNLMEModel)
     m.cell_gradient === nothing && _brm_nlme_error(
-        "brm_two_stage_fit: units of a nested model evaluate through the " *
-        "whole-model sampler, which one thread owns; use `threads = 1`")
+        "brm_two_stage_fit: units of a nested model without subject cells " *
+        "evaluate through the whole-model sampler, which one thread owns; " *
+        "use `threads = 1`")
     cell_query = _brm_nlme_cell_queries(m.backend, m.cell_query)
     cell_gradient = (; _brm_nlme_cell_samplers(m.backend, m.cell_query, m.unit,
         sort!(vcat(m.theta, m.sigma)), m.view.subject_coordinates)...,
@@ -157,8 +159,8 @@ units (the subjects of [`brm_nlme_view`](@ref)):
    unit returns the same number of draws. Units are sampled on `threads` tasks,
    each with its own prepared copy of the model's cells, so `sampler` must be
    safe to call concurrently (an independent RNG per unit, as below). A nested
-   model samples on one thread: its units evaluate through the whole-model
-   sampler.
+   model without subject cells samples on one thread: its units evaluate
+   through the whole-model sampler.
 
 Each unit's posterior is exact given the population estimates; the population
 uncertainty is not propagated (empirical Bayes). That is negligible with many
