@@ -5014,7 +5014,7 @@ function _rk_plan_car_term!(prepared::_BRMPreparedTerm{typeof(car)},
     # read as `Float64` codes still finds its node): the raw column when its
     # labels already are those, otherwise a normalised copy.
     raw = data[source]
-    labels = map(identity, _brm_car_labels(raw, "area"))
+    labels = _brm_car_labels(raw, "area")
     area = if all(isequal.(labels, raw)) && get(columns, source, raw) === raw
         columns[source] = raw
         source
