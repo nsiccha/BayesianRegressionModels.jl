@@ -413,8 +413,8 @@ function _rk_ast_group_component!(definitions, statements, taken, name, group, K
 end
 
 # The `levels(s) x K` scales of a stratified block: every stratum's scale of
-# margin `j` takes `priors[j]`. One shared law broadcasts over the whole matrix;
-# distinct laws are stated per margin and collected column by column.
+# margin `j` takes `priors[j]`. One shared law broadcasts over the whole matrix
+# `tau`; distinct laws are stated per margin, one `tau_<j>[levels(s)]` each.
 function _rk_ast_stratum_scales(priors, index)
     strata = Expr(:call, :levels, :s)
     if all(isequal(first(priors)), priors)
@@ -422,12 +422,19 @@ function _rk_ast_stratum_scales(priors, index)
         return Expr[Expr(:call, :.~, Expr(:ref, :tau, strata, index),
             _rk_ast_dotted(prior.args[1], prior.args[2:end]...))]
     end
-    scales = [Symbol(:tau_, j) for j in eachindex(priors)]
-    statements = Expr[Expr(:call, :.~, Expr(:ref, scale, strata),
+    Expr[Expr(:call, :.~, Expr(:ref, Symbol(:tau_, j), strata),
             _rk_ast_dotted(prior.args[1], prior.args[2:end]...))
-        for (scale, prior) in zip(scales, priors)]
-    push!(statements, Expr(:(=), :tau, Expr(:call, :hcat, scales...)))
-    statements
+        for (j, prior) in enumerate(priors)]
+end
+
+# Row `i`'s scales, read at its stratum's label `s[i]`: a row of the shared-law
+# matrix, or each margin's own vector. Only a declaration over `levels(s)`
+# reads by label; a matrix collected from the per-margin vectors (`hcat`) has
+# positional rows `1:S`, which a String label cannot index.
+function _rk_ast_stratum_row_scales(priors)
+    row = Expr(:ref, :s, :i)
+    all(isequal(first(priors)), priors) && return Expr(:ref, :tau, row, :(:))
+    Expr(:vect, (Expr(:ref, Symbol(:tau_, j), row) for j in eachindex(priors))...)
 end
 
 # Stratified group-level effects: one scale vector (and factor) per stratum.
@@ -445,7 +452,7 @@ function _rk_ast_stratified_group_component!(definitions, statements, taken, nam
     end
     push!(body.args, Expr(:call, :.~, Expr(:ref, :z, Expr(:call, :levels, :g), index),
         _rk_ast_dotted(:Normal, 0, 1)))
-    scale = Expr(:ref, :tau, Expr(:ref, :s, :i), :(:))
+    scale = _rk_ast_stratum_row_scales(priors)
     raw = Expr(:ref, :z, Expr(:ref, :g, :i), :(:))
     value = K == 1 ? Expr(:call, :.*, scale, raw) :
         Expr(:call, :*, Expr(:call, :.*, scale, Expr(:ref, :L, Expr(:ref, :s, :i))), raw)

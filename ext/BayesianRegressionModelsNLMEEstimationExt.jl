@@ -131,9 +131,13 @@ function _read_prior_structure(m::BRM.BRMNLMEModel)
                 "population prior: random-effect scale bounds must be fixed")
             entry
         end
+        # One stratum's factor of a stratified block is one level of RK's
+        # `:lkj_stack` (its P coordinates contiguous, each level under the
+        # single-factor LKJ transform), so it maps as an `:lkj` factor does.
         for position in family.factor_positions
             entry = _prior_entry(layout, position)
-            entry.kind === :cholesky_corr && entry.transform === :lkj ||
+            (entry.kind === :cholesky_corr && entry.transform === :lkj ||
+             entry.kind === :array && entry.transform === :lkj_stack) ||
                 BRM._brm_nlme_error("population prior: expected an LKJ correlation factor")
         end
         (; family..., scale_entries)

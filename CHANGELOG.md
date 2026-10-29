@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.45
+## 0.2.48
 
 - A nested NLME model (`brm_nlme_model` with `subject_group` /
   `nested_groups`) whose observations have subject cells now evaluates one
@@ -24,15 +24,79 @@ instead of failing at run time.
   with its own samplers); before, a nested model sampled on one thread. Only
   a nested model without subject cells keeps the whole-model route and one
   thread. A unit's cost is its own cells' only as far as RK computes each
-  cell's reads at its rows (ReactiveKernels 0.1.6 with BRM's scalar totals
-  cells); a totals cell's gradient reads its `hcat` design from views, which
-  needs the Enzyme `dogfood` line, so on registered Enzyme such a model's unit
-  gradient raises `IllegalTypeAnalysisException` where it was slow before.
+  cell's reads at its rows (ReactiveKernels 0.1.6 with the scalar totals
+  cells of 0.2.47); a totals cell's gradient reads its `hcat` design from
+  views, which needs the Enzyme `dogfood` line, so on registered Enzyme such a
+  model's unit gradient raises `IllegalTypeAnalysisException` where it was
+  slow before.
   Each compact cell call costs about 7 µs, so a unit gradient is cheaper than
   the whole-model one only while the unit holds less than about a twelfth of
   the model: 18.4 ms against 26.7 ms for 12 units of 2,795 cells, but 0.23 ms
   against 0.035 ms for 3 small regions (ReactiveKernels snag
   `compact-cell-sam-7b0032c9` asks for one call per unit).
+
+## 0.2.47
+
+- On RKBRMI, an in-cell observation whose response holds one value per cell
+  (a `@plate` totals cell's `total[k] ~ Normal(sum(exp.(log_w[rows[k]])), …)`)
+  emits its arguments as one scalar per cell and observes them as they are,
+  instead of `ones(length(total[k])) .* s` cells flattened by
+  `flatten_cells`. RK can then attribute response row `k` to cell `k`, so a
+  compact cell gradient (`brm_svi_fit`, the NLME cell queries) costs that
+  cell's own rows. On the regional panel of `test/nlme_panel_fixture.jl`, one
+  unit's totals cells cost 141,888 B per gradient at both 3 and 9 regions,
+  where they grew from 632,016 B to 1,624,032 B before. The emitted program
+  no longer reads such a response inside the cell, so its cell input port
+  (`<kernel>_input_<y>`) is gone from the RK inputs; densities are unchanged.
+  The totals' Reverse gradient differentiates an `hcat` design read from
+  views, which needs Enzyme dogfood `d37cb0b4` or later and ReactiveKernels
+  0.1.6; registered Enzyme raises `IllegalTypeAnalysisException` there.
+- BRM's test environment runs the Enzyme `dogfood` line (`test/setup_env.jl`,
+  user decision `0n0kgfh`) and ReactiveKernels 0.1.6, so it builds only on a
+  KB fleet host with the dogfood libEnzyme build (gordito). On it,
+  `test/rk_enzyme_threads.jl` (concurrent-GC gradients),
+  `test/plate_index_into.jl` and `test/rk_structured_consumer.jl` pass.
+
+## 0.2.46
+
+- `brm_coordinate_transport` pairs a stratified `gr(g, by = b)` random-effect
+  block: each stratum's scales by margin and its correlation factor, by the
+  `b` level, and the standardized draws by (level of `g`, margin). An RK point
+  or draw therefore reaches the same BRMI's Stan coordinates
+  (`brm_rk_point_to_stan`, `brm_stan_point_to_rk`), and `brm_nlme_joint_map`,
+  `brm_nlme_joint_start` and `brm_nlme_conditional_problem` accept such a
+  block: an NLME estimate's per-stratum covariance and each level's natural
+  effect become that stratum's Stan scale and the level's standardized draw.
+  Before, the block's coordinates stayed unpaired and both routes refused the
+  model. A stratified pair's address carries `by` and `stratum`, and a
+  stratum's factor in `transport.correlations` its `stratum`, `rk_index` and
+  `stan_index`. Snag `stratified-block-7a992e61`.
+- `brm_nlme_view` reads a stratified block with more than one margin,
+  `(1 + x | p | gr(g, by = b))`, as one covariance family per stratum with its
+  own correlation factor, as it reads a one-margin block. Before, it refused
+  the block (`declaration … .L.2 owns no packed coordinate`): it claimed
+  per-stratum declarations `L.<s>`, while RK packs every stratum's factor in
+  one `K × K × levels(b)` value with coordinates `L.<m>.<s>`. `brm_nlme_model`,
+  `brm_nlme_start` and the NLME fits then take such a block. BRM todo `1srx3ud`.
+- `RKBRMI` reads a stratified block's scales at each row's stratum label when
+  its margins' SD laws differ (`sd(mu, p, x) ~ …` on
+  `(1 + x | p | gr(g, by = b))`). Before, it collected the per-margin scale
+  vectors into a matrix with rows `1:S` and indexed that by the `b` label, so
+  a String label failed with `ArgumentError: invalid index`. Blocks whose
+  margins share one law, and `b` coded `1:S`, were unaffected.
+
+## 0.2.45
+
+- `RKBRMI` evaluates a model-scope `logistic` elementwise, as it does `exp`
+  and `log`, and as SBBRMI's `inv_logit` does: `p = logistic(lp + g[rows])`
+  over a vector, `e = logistic(b) * exp(r)` over a scalar and a `logistic`
+  inside a likelihood argument (`y ~ Normal(p + b * logistic(a), sigma)`) emit
+  `logistic.(...)`. Before, RKBRMI emitted an undotted `logistic(...)`, which
+  ReactiveKernelsPPL refuses as a value ("calls `logistic`, which only lowers
+  in `.~` responses"; from ReactiveKernelsPPL 0.1.2, "`logistic` over a vector
+  needs dots").
+- A data-only `q = logistic(x)` of a data column is a data field on both
+  backends, like `q = exp(x)`; before, it stayed a model value.
 
 ## 0.2.44
 

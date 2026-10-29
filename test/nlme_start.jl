@@ -172,6 +172,62 @@ end
     @test_throws BRMNLMEViewError brm_nlme_start(fixed, moved)
 end
 
+# A two-margin stratified block (BRM todo 1srx3ud, snag
+# stratified-block-7a992e61): one covariance family per arm. The subjects'
+# arms (r, r, p, q, q, p) are not in subject order.
+const STRATIFIED_DATA = (; subject=repeat(["a", "b", "c", "d", "e", "f"], inner=3),
+    arm=repeat(["r", "r", "p", "q", "q", "p"], inner=3),
+    x=collect(range(-1, 1; length=18)),
+    y=[0.1, 0.4, -0.2, 0.3, 0.7, 0.5, 0.2, -0.1, 0.6, -0.4, 0.8, 0.0,
+       0.3, 0.2, -0.5, 0.9, 1.1, -0.3])
+
+function stratified_model(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | p | gr(subject, by = arm))
+        y ~ Normal(mu, sigma)
+    end
+end
+
+@stestset "a multi-margin stratified block starts one covariance per stratum" begin
+    brmi = stratified_model(STRATIFIED_DATA)
+    backend = RKBRMI(brmi)
+    m = brm_nlme_model(backend; ad_backend=NLME_AD, subject_group=:subject)
+    view = m.view
+    @test !any(==(:unclaimed), view.role)
+    @test [f.block.stratum for f in view.families] == ["p", "q", "r"]
+    @test all(f -> f.size == 2 && length(f.factor) == 1, view.families)
+    @test all(i -> view.role[i] === :subject_correlation,
+        reduce(vcat, (f.factor for f in view.families)))
+    # Address-keyed: stratum q's SDs and correlation, the others at the base.
+    C = [1.0 0.3; 0.3 1.0]
+    sd = [0.5, 0.2]
+    keyed = brm_nlme_start(m, (; p=(; sd=["q" => sd], cor=["q" => C])))
+    q = findfirst(f -> f.block.stratum == "q", view.families)
+    @test keyed.omega_matrix[q] ≈ Diagonal(sd) * C * Diagonal(sd) rtol=1e-10
+    @test all(keyed.omega_matrix[f] ≈ I for f in eachindex(view.families) if f != q)
+    # A point with distinct per-stratum covariances reaches the same model's
+    # Stan coordinates and back.
+    u = spread_point(length(view.coordinates))
+    start = brm_nlme_start(m, u)
+    @test length(unique(start.omega_matrix)) == 3
+    @test all(!isdiag(Ω) for Ω in start.omega_matrix)
+    @test start.max_error <= 1e-10
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+    map = brm_nlme_joint_map(backend, sb;
+        path=joinpath(mktempdir(), "nlme_start_stratified.stan"), subject_group=:subject)
+    stan_u = brm_rk_point_to_stan(map.transport, u)
+    order = [4, 2, 6, 1, 5, 3]
+    forward = brm_nlme_joint_start(map; theta=start.theta, sigma=start.sigma,
+        omega=start.omega_matrix, eta=start.eta[order],
+        subjects=start.subjects[order])
+    @test forward.stan ≈ stan_u rtol=1e-9 atol=1e-10
+    from_stan = brm_nlme_start(m, map, stan_u)
+    @test from_stan.theta ≈ start.theta rtol=1e-12
+    @test from_stan.omega ≈ start.omega rtol=1e-10
+    @test all(from_stan.eta .≈ start.eta)
+end
+
 @stestset "address-keyed initial estimates become NLME and full Stan starts" begin
     brmi = nlme_plate_pk(NLME_PLATE_DATA)
     backend = RKBRMI(brmi)
