@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.64
+
+- RKBRMI finds each row's random-effect level (`brm_level_indices`) through one
+  lookup table per grouping instead of a search of every level per row, so a
+  grouping costs its rows plus its levels. On 174,912 rows over 10,932 levels
+  (ArbeitsplatzAtlas's Gemeinde blocks) that takes 4–9 ms, where the search
+  needed about 0.3–2.6 s depending on the label type; the indices are the same.
+
 ## 0.2.63
 
 - Preparing a model's compact cell gradients on first use costs each cell's own
