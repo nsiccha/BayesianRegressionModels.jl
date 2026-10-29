@@ -401,6 +401,13 @@ draw their bound twin's law, a continuous omitted response spells
 `logistic` as `inv_logit`, and a `@plate` cell's `BetaBinomial2` has the
 density of its `beta_binomial` spelling and lowers omitted.
 
+`truncated_low_mass_draws.jl` draws omitted `truncated` responses whose window
+holds almost none of the base law's mass: a two-sided `NegativeBinomial2`
+count class in [1, 9] and [250, 1e7] around a mean of 70, its one-sided tails,
+and a `Normal` above 6 sd. Every draw lies in its window and follows the exact
+truncated law (pmf and mean from Distributions). It needs StanBlocks 0.2.6 or
+later, whose `truncated` draws invert the base CDF on the window.
+
 `adaptive_multiaxis_hsgp_centering.jl` checks online adaptive centering of
 two-axis squared-exponential HSGPs: isotropic (one length scale every axis
 reads) and `iso=false`, ungrouped and grouped, beside a shared random-effect
