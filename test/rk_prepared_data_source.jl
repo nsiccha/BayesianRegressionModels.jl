@@ -26,10 +26,16 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
             ["b", "unused", "a"]) == [3, 1, 3]
         @test Base.invokelatest(prepare(dummy), ["a", "b", "a"], "a") == [1., 0., 1.]
         query = prepare(geometry)
-        raw = Union{Missing, Float64}[3., missing, 7., missing]
-        @test Base.invokelatest(prepare(getfield(mod, :brm_covariate_observed)), raw) == [3., 7.]
-        @test Base.invokelatest(prepare(getfield(mod, :brm_covariate_observed_rows)), raw) == [1, 3]
-        @test Base.invokelatest(prepare(getfield(mod, :brm_covariate_missing_rows)), raw) == [2, 4]
+        # An `mi()` column arrives as its values and presence mask
+        # (`_rk_presence_columns`), each concretely typed, so these recipes
+        # prepare under RK's type-stability check at its strictest setting
+        # (snag mi-raw-columns-r-2b85d8f9).
+        values, present = BRM._rk_presence_columns(Union{Missing, Float64}[3., missing, 7., missing])
+        @test values == [3., 1., 7., 1.] && present == [true, false, true, false]
+        strict(name) = prepare(getfield(mod, name); type_stability=:error, type_stability_level=:all)
+        @test Base.invokelatest(strict(:brm_covariate_observed), values, present) == [3., 7.]
+        @test Base.invokelatest(strict(:brm_covariate_observed_rows), present) == [1, 3]
+        @test Base.invokelatest(strict(:brm_covariate_missing_rows), present) == [2, 4]
         @test Base.invokelatest(prepare(getfield(mod, :brm_matrix_column)), [[1 2; 3 4]], 2) == [2, 4]
         # Both data-only response shapes emit direct definitions, without a
         # kernel wrapping the flatten or ragged row gather.

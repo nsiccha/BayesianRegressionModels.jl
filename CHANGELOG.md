@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.67
+
+- RKBRMI binds an `mi()` column (a completed covariate, an `mi(y)` response, a
+  completion with group totals) as two concretely typed inputs: its values
+  `<x>_raw`, with `one(T)` standing at each missing entry, and its presence
+  mask `<x>_present`, a `Vector{Bool}`. It used to bind `<x>_raw` as the
+  `Vector{Union{Missing,Float64}}` the data hold, which ReactiveKernels'
+  type-stability check cannot type, so the data-only kernel that binds the data
+  could not be audited. The observed values, the observed and missing rows and
+  a group-totals layout are still computed in the graph, from the pair; values
+  and densities are unchanged. `rk_bound_data(rk)` and `binder(design)` carry
+  the new `<x>_present` input, so a JAX module's `prepare_data` takes it too.
+  A masked `hsgp(x; rows = keep)` axis is still bound as the data hold it.
+
 ## 0.2.66
 
 - `restricted(D, lower, upper)` and `restricted(D; lower, upper)`: a prior law,
