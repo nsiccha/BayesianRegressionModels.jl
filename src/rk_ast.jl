@@ -1344,23 +1344,28 @@ end
 # factors a scalar definition, so each component's sum is its own scalar
 # `Normal(0, 0.001 n_c)` factor, unrolled from the fitted graph's components
 # (a replay keeps the graph). Islands read the zero padding slot of `phi`.
-function _rk_ast_car_block!(definitions, taken, term, positions)
+function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing)
     options = term.options
     bym2 = options.type === :bym2
+    separation = get(options, :separation, nothing)
     sigma_prior = _rk_ast_param_law(options.sigma_param)
     rho_prior = bym2 ? _rk_ast_param_law(options.rho_param) : nothing
     block = bym2 ? _rk_block_body(sigma_prior, rho_prior) : _rk_block_body(sigma_prior)
-    node1 = _rk_block_argument!(block, :node1, options.node1)
-    node2 = _rk_block_argument!(block, :node2, options.node2)
+    if separation === nothing
+        node1 = _rk_block_argument!(block, :node1, options.node1)
+        node2 = _rk_block_argument!(block, :node2, options.node2)
+    end
     struct_pos = _rk_block_argument!(block, :struct_pos, options.struct_pos)
     rows = _rk_block_argument!(block, :area, positions)
-    S = _rk_block_argument!(block, :S, options.n_struct)
+    separation === nothing && (S = _rk_block_argument!(block, :S, options.n_struct))
     if bym2
         inv_scale = _rk_block_argument!(block, :inv_scale, options.inv_scale)
         is_struct = _rk_block_argument!(block, :is_struct, options.is_struct)
     end
+    arguments = separation === nothing ? nothing :
+        _rk_ast_car_separation_arguments!(block, separation, indices)
     sigma, phi = _rk_block_local!(block, :sigma), _rk_block_local!(block, :phi)
-    cs, field = _rk_block_local!(block, :cs), _rk_block_local!(block, :phi_full)
+    field = _rk_block_local!(block, :phi_full)
     effects = _rk_block_local!(block, :effects)
     push!(block.statements, _rk_ast_hyper_statement(sigma, sigma_prior))
     if bym2
@@ -1369,16 +1374,22 @@ function _rk_ast_car_block!(definitions, taken, term, positions)
             Expr(:call, :.~, Expr(:ref, theta, Expr(:call, :axes, inv_scale, 1)),
                 _rk_ast_dotted(:Normal, 0, 1)))
     end
-    push!(block.statements,
-        Expr(:call, :~, Expr(:ref, phi, Expr(:call, :(:), 1, S)),
-            Expr(:call, :ICAR, node1, node2)),
-        Expr(:(=), cs, Expr(:call, :cumsum, Expr(:call, :vcat, 0.0, phi))))
-    for (c, (start, size)) in enumerate(options.components)
-        total = _rk_block_local!(block, Symbol(:phi_sum_, c))
+    if separation === nothing
+        cs = _rk_block_local!(block, :cs)
         push!(block.statements,
-            Expr(:(=), total, Expr(:call, :-, Expr(:ref, cs, start + size),
-                Expr(:ref, cs, start))),
-            Expr(:call, :~, total, Expr(:call, :Normal, 0.0, 0.001 * size)))
+            Expr(:call, :~, Expr(:ref, phi, Expr(:call, :(:), 1, S)),
+                Expr(:call, :ICAR, node1, node2)),
+            Expr(:(=), cs, Expr(:call, :cumsum, Expr(:call, :vcat, 0.0, phi))))
+        for (c, (start, size)) in enumerate(options.components)
+            total = _rk_block_local!(block, Symbol(:phi_sum_, c))
+            push!(block.statements,
+                Expr(:(=), total, Expr(:call, :-, Expr(:ref, cs, start + size),
+                    Expr(:ref, cs, start))),
+                Expr(:call, :~, total, Expr(:call, :Normal, 0.0, 0.001 * size)))
+        end
+        separated = (;)
+    else
+        separated = _rk_ast_car_separated!(block, separation, arguments, phi)
     end
     push!(block.statements,
         Expr(:(=), field, Expr(:ref, Expr(:call, :vcat, phi, 0.0), struct_pos)))
@@ -1391,8 +1402,82 @@ function _rk_ast_car_block!(definitions, taken, term, positions)
     push!(block.statements, Expr(:(=), effects, value))
     call = _rk_ast_block_call!(definitions, taken, bym2 ? "brm_car_bym2" : "brm_car_icar",
         block, Expr(:ref, effects, rows))
-    locals = bym2 ? (; sigma, rho, phi, theta) : (; sigma, phi)
+    locals = bym2 ? (; sigma, rho, phi, theta, separated...) : (; sigma, phi, separated...)
     call, locals
+end
+
+# A separated field's gathers (`x[x_phi]`, `x[cols]`, `vcat(…)[restore]`) read
+# model-level vectors, so their indices are positions a data-only call computes
+# (a gather by a data column would be an observation column). Returns each
+# index column's position name.
+function _rk_ast_car_separation_indices!(statements, definitions, taken, term)
+    separation = get(term.options, :separation, nothing)
+    separation === nothing && return nothing
+    indices = Dict{Symbol,Symbol}()
+    function index!(column, n)
+        column === nothing && return
+        name = _rk_ast_fresh_name(string(column, "_positions"), taken)
+        push!(statements, Expr(:(=), name, _rk_ast_statistical_call!(definitions, taken,
+            :brm_prepared_indices, column, _rk_ast_level_values(1:n); kernel=true)))
+        indices[column] = name
+    end
+    index!(separation.x_phi, separation.m)
+    index!(separation.restore, term.options.n_struct)
+    foreach(b -> index!(b.cols, separation.m), separation.blocks)
+    indices
+end
+
+# The data of a separated field (`RKBRMI(brmi; car_units)`, `_brm_car_separation`):
+# the shared factor `F`, the separator areas' entries of `x`, the graph-order
+# permutation, and each unit's `A`, read entries and `G`; the gathers' indices
+# are their computed positions (`indices`).
+function _rk_ast_car_separation_arguments!(block, separation, indices)
+    argument(base, value) = value === nothing ? nothing :
+        _rk_block_argument!(block, base, get(indices, value, value))
+    F = argument(:F, separation.F)
+    x_phi = argument(:x_phi, separation.x_phi)
+    restore = argument(:restore, separation.restore)
+    units = map(separation.blocks) do b
+        (; cols=argument(Symbol(:cols_, b.unit), b.cols),
+           A=argument(Symbol(:A_, b.unit), b.A), G=argument(Symbol(:G_, b.unit), b.G))
+    end
+    (; F, x_phi, restore, units)
+end
+
+# The separated field in graph order, `phi = vcat(x[x_phi], phi_I_1, …)[restore]`,
+# from the shared `x = F w` and each unit's `phi_I = A x[cols] + G z_u`, with
+# `w` and each unit's `z_u` standard normal (one declaration per unit: RKPPL
+# reads a declared array whole or at literal positions).
+function _rk_ast_car_separated!(block, separation, arguments, phi)
+    m = separation.m
+    w = m == 0 ? nothing : _rk_block_local!(block, :w)
+    x = m == 0 ? nothing : _rk_block_local!(block, :x)
+    m == 0 || push!(block.statements,
+        Expr(:call, :.~, Expr(:ref, w, Expr(:call, :(:), 1, m)), _rk_ast_dotted(:Normal, 0, 1)),
+        Expr(:(=), x, Expr(:call, :*, Expr(:call, :reshape, arguments.F, m, m), w)))
+    parts = Any[]
+    arguments.x_phi === nothing || push!(parts, Expr(:ref, x, arguments.x_phi))
+    z = map(zip(separation.blocks, arguments.units)) do (b, a)
+        interior = _rk_block_local!(block, Symbol(:phi_unit_, b.unit))
+        draws = b.ndraws == 0 ? nothing : _rk_block_local!(block, Symbol(:z_, b.unit))
+        summands = Any[]
+        a.A === nothing || push!(summands, Expr(:call, :*,
+            Expr(:call, :reshape, a.A, b.areas, b.ncols), Expr(:ref, x, a.cols)))
+        if draws !== nothing
+            push!(block.statements, Expr(:call, :.~,
+                Expr(:ref, draws, Expr(:call, :(:), 1, b.ndraws)), _rk_ast_dotted(:Normal, 0, 1)))
+            push!(summands, Expr(:call, :*,
+                Expr(:call, :reshape, a.G, b.areas, b.ndraws), draws))
+        end
+        push!(block.statements, Expr(:(=), interior,
+            length(summands) == 1 ? only(summands) : Expr(:call, :.+, summands...)))
+        push!(parts, interior)
+        draws
+    end
+    push!(block.statements, Expr(:(=), phi,
+        Expr(:ref, Expr(:call, :vcat, parts...), arguments.restore)))
+    # each block's draw declaration, aligned with `separation.blocks`
+    (; w, z=Tuple(z))
 end
 
 function _rk_ast_car_names(plan::_RKStructuralPlan)
@@ -1717,12 +1802,14 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 push!(stmts, Expr(:(=), positions, _rk_ast_statistical_call!(defs, taken,
                     :brm_prepared_indices, term.options.area,
                     _rk_ast_level_values(term.options.nodes); kernel=true)))
-                call, locals = _rk_ast_car_block!(defs, taken, term, positions)
+                indices = _rk_ast_car_separation_indices!(stmts, defs, taken, term)
+                call, locals = _rk_ast_car_block!(defs, taken, term, positions; indices)
                 refactual[index] = term.options.value
                 push!(stmts, Expr(:call, :~, term.options.value, call))
                 _rk_coordinate_record!(coordinates, (; kind=:car,
                     declaration=term.options.value, predictor=predictor.name,
-                    area=term.options.source, type=term.options.type, locals))
+                    area=term.options.source, type=term.options.type, locals,
+                    separation=get(term.options, :separation, nothing)))
             elseif kind === :cdar
                 # rows find their group and step by the fitted labels
                 rows = map((term.options.group => term.options.levels,
