@@ -69,6 +69,18 @@ coordinates and density as the centred lowering, its group terms in
 completion, Gamma's value), and the location-scale rule for free entries.
 Snag `nlme-view-shares-f1cfaa71`.
 
+`noncentered_completion_transport.jl` checks `brm_coordinate_transport` on
+completions `RKBRMI(brmi; completions = :noncentered)` samples as standardized
+draws: RK's `<column>.z_mis` against SBBRMI's centred `<column>_y_mis` through
+`s = location + scale * z`, with the law's location and scale at the point.
+Both point maps, the log density with the log-Jacobian `sum(log, scale)`, the
+native Enzyme gradient against the Stan gradient pulled back through the
+location and scale, and the physical check, for a law of data columns, a law
+of parameters, a LogNormal law (Stan's entries are the logs) and a law reading
+another completion. Snag `coordinate-trans-23993804`; the free entries of
+`mi(x)::shares(total, rows)` are covered in `mi_group_totals.jl`, and NLME
+unit draws reaching Stan in `nlme_joint_start.jl`.
+
 `nlme_shares_units.jl` (test environment) reads such a completion with region
 units: the centred reading refused, the non-centered grouped coordinates as
 unit draws of the region owning each group (free entries beside them), the

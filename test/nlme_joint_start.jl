@@ -144,3 +144,49 @@ end
     @test_throws BRMNLMEViewError brm_nlme_joint_start(map;
         theta=θ, sigma=σ, omega=coupled, eta=H, subjects=map.view.levels)
 end
+
+# A non-centered completion's unit draws reach Stan's centred entries through
+# the transport (snag coordinate-trans-23993804). Its law's location reads a
+# subject effect whose scale the start writes after mapping, so the entries are
+# mapped again at the written covariance.
+@stestset "non-centered completion unit draws become Stan's centred entries" begin
+    wt = Vector{Union{Missing,Float64}}(NLME_DATA.wt)
+    wt[[2, 7, 8]] .= missing
+    data = merge(NLME_DATA, (; wt))
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        sigma_w ~ Exponential(1)
+        mu_w ~ 1 + (1 | subject)
+        mi(wt) ~ Normal(mu_w, sigma_w)
+        cw = wt - 0.0
+        log(CL) ~ 1 + cw + (1 | pk | subject)
+        log(V) ~ 1 + (1 | pk | subject)
+        m = dose / V * exp(-CL / V * t)
+        y ~ Normal(m, sigma)
+    end
+    rk = RKBRMI(brmi; completions=:noncentered)
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+    mkpath(joinpath(tempdir(), "brm-nlme-joint-start"))
+    map = brm_nlme_joint_map(rk, sb;
+        path=joinpath(tempdir(), "brm-nlme-joint-start", "completion.stan"))
+    view = map.view
+    @test length(map.transport.completions) == 1
+    @test count(f -> f.fixed !== nothing, view.families) == 1
+    Ω = [f.fixed !== nothing ? copy(f.fixed) :
+        Matrix(0.2I + 0.05 * ones(view.family_sizes[k], view.family_sizes[k]))
+        for (k, f) in enumerate(view.families)]
+    H = [[(-1)^i * 0.07 * j for j in eachindex(c)]
+        for (i, c) in enumerate(view.subject_coordinates)]
+    θ = fill(0.2, count(==(:population), view.role))
+    σ = fill(-0.4, count(==(:scalar), view.role))
+    start = brm_nlme_joint_start(map; theta=θ, sigma=σ, omega=Ω, eta=H,
+        subjects=view.levels)
+    @test start.checked.completions == 1
+    @test start.checked.max_error <= 1e-9
+    @test count(n -> startswith(n, "wt_y_mis."), start.free.names) == 3
+    recovered = brm_nlme_joint_values(map, start.stan)
+    @test all(isapprox.(recovered.omega, Ω; atol=1e-10))
+    @test all(isapprox.(recovered.eta, H; atol=1e-10))
+    @test recovered.theta ≈ θ atol=1e-10
+    @test recovered.sigma ≈ σ atol=1e-10
+end
