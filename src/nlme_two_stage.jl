@@ -110,8 +110,7 @@ function _brm_nlme_worker_model(m::BRMNLMEModel)
     (; reads, patterns) = _brm_nlme_cell_state(m)
     plan = _brm_nlme_cell_plan(m.backend, m.cell_query, m.unit,
         sort!(vcat(m.theta, m.sigma)), m.view.subject_coordinates, reads)
-    cell_gradient = (; samplers=nothing, of=nothing,
-        state=Ref{Any}((; reads, plan, patterns)), lock=ReentrantLock())
+    cell_gradient = (; state=Ref{Any}((; reads, plan, patterns)), lock=ReentrantLock())
     BRMNLMEModel(m.view, m.backend, m.sampler, m.pointwise, m.eta_hvp, m.attribution,
         m.theta, m.sigma, m.eta_blocks, m.unit, m.observations_query,
         m.observations_pushforward, m.observed, m.observation_attribution,
