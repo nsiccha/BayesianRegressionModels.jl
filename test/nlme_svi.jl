@@ -334,6 +334,23 @@ const SVI_NESTED = (; subject_group=:subject, nested_groups=(unit=:obs_subject,)
     rk = RKBRMI(nested_model(NESTED_DATA))
     m = brm_nlme_model(rk; ad_backend=NLME_AD, SVI_NESTED...)
     @test sort(unique(length.(m.view.subject_coordinates))) == [2, 3, 4]
+    # The model prepares no compact sampler until a cell gradient is needed.
+    # Measuring the cells' reads then takes one whole-block sampler per cell
+    # group, whatever the block lengths: a shorter block is padded with η of
+    # the longest, another subject's.
+    @test m.cell_gradient.state[] === nothing
+    globals = sort!(vcat(m.theta, m.sigma))
+    blocks = m.view.subject_coordinates
+    discovery = BRM._brm_nlme_cell_discovery(m.backend, m.cell_query, m.unit, globals,
+        blocks)
+    @test length(discovery.samplers) == length(m.cell_query)
+    @test allequal(length.(discovery.selections))
+    padding = BRM._brm_nlme_padding(blocks)
+    @test all(zip(discovery.selections, blocks)) do (selection, block)
+        issorted(selection) && allunique(selection) &&
+            issubset(vcat(globals, block), selection) &&
+            issubset(setdiff(selection, globals, block), padding)
+    end
     # SVI prepares one compact sampler per cell group, selecting the globals
     # and the draws each cell reads, whatever the subject's block length.
     t = BRM._brm_svi_target(m)
