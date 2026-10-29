@@ -131,8 +131,9 @@ before scaling by a fresh β or wrapping in a likelihood. Add a method
 for a custom term to expose it under generic broadcast/arithmetic.
 """
 vbroadcasted(;kwargs...) = (args...)->vbroadcasted(args...; kwargs...)
-vbroadcasted(x::NamedColumn{<:Any,<:DataColumn}; meta) = parent(meta.materialized[name(x)])
-vbroadcasted(x::NamedColumn; meta) = meta.materialized[name(x)]
+vbroadcasted(x::NamedColumn; meta) = _vbroadcasted_named(parent(x), x; meta)
+_vbroadcasted_named(::DataColumn, x::NamedColumn; meta) = parent(meta.materialized[name(x)])
+_vbroadcasted_named(_parent, x::NamedColumn; meta) = meta.materialized[name(x)]
 vbroadcasted(x::ExprColumn; meta) = Base.broadcasted(getf(x), map(vbroadcasted(;meta), getargs(x))...)
 # `protect(expr)` is brms's `I()` literal-escape. In our DSL every call is
 # already a first-class `ExprColumn` node, so `protect` just needs to unwrap to
@@ -170,17 +171,19 @@ _std(xs, mu=_mean(xs)) = sqrt(sum(abs2, xs .- mu) / (length(xs) - 1))
 # Literals (Int, Float, etc.) inside formula expressions like `a^2` pass
 # through unchanged — they get broadcasted as scalars by Base.broadcasted.
 vbroadcasted(x::Number; meta) = x
-getinverse(x::ExprColumn{<:Any,<:Tuple{<:Any}}) = inverse(getf(x))
-getinverse(x::ExprColumn{<:Any,<:Tuple{<:ExprColumn}}) = inverse(getf(x)) ∘ getinverse(getargs(x, 1)[1]) 
+getinverse(x::ExprColumn) = _getinverse(getf(x), getargs(x))
+_getinverse(f, ::Tuple{Any}) = inverse(f)
+_getinverse(f, args::Tuple{ExprColumn}) = inverse(f) ∘ getinverse(only(args))
 vmeta_sampling(meta, lhs::ExprColumn, rhs) = begin
     meta, o = vmeta_sampling_rhs(meta, rhs; group=:__population__)
     meta, vmaterialize(Base.broadcasted(getinverse(lhs), o))
 end
-vmeta_sampling(meta, ::NamedColumn{<:Any,MissingColumn}, rhs) = begin
+vmeta_sampling(meta, lhs::NamedColumn, rhs) = _vmeta_sampling_named(meta, parent(lhs), lhs, rhs)
+_vmeta_sampling_named(meta, ::MissingColumn, _lhs::NamedColumn, rhs) = begin
     meta, o = vmeta_sampling_rhs(meta, rhs; group=:__population__)
     meta, vmaterialize(o)
 end
-vmeta_sampling(meta, lhs::NamedColumn{<:Any,<:DataColumn}, rhs) = begin
+_vmeta_sampling_named(meta, ::DataColumn, lhs::NamedColumn, rhs) = begin
     meta, o = vmeta_sampling_rhs(meta, rhs; group=:__population__)
     meta, LikelihoodColumn(parent(parent(lhs)), o)
 end
