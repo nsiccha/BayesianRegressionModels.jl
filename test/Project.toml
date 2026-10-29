@@ -68,7 +68,11 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # ffbaff09 (StanBlocks 0.2.2) selects several groups of a ragged value, `rv[idx]`,
 # and sums its groups elementwise, `sum(rv)` (snag selecting-severa-027a8191), which
 # BRM's model-scope reads of a ragged plate output pass through.
-rev = "ffbaff097bbbe2f5c7b8153d6033ce9b0387c248"
+# 9a4fb3a6 (StanBlocks 0.2.6) draws a `truncated` value whatever mass its window
+# holds: after 100 misses it inverts the base CDF on the window (snag
+# truncated-rng-re-bd555cae), which BRM's omitted truncated responses and `_gen`
+# draws call.
+rev = "9a4fb3a6ba0ec559eddaf5673afed107ac30a254"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
