@@ -167,8 +167,10 @@ const PINS = [
     # ReactiveKernels 0.1.6: a plate cell computes a value it reads at several
     # rows (an `hcat` design, a column read, a level block) at those rows only
     # (snag compact-cell-sam-d85d96ae), which BRM's nested-NLME totals cells
-    # need.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "b31d672faa820fe8bda46cf86d7cb2eb43cc8b20"),  # main
+    # need. 2a6829265 contains b31d672fa and is ReactiveKernels 0.1.7 /
+    # ReactiveKernelsPPL 0.1.3: a location summand computed from `logistic`
+    # binds (snag rkppl-leaf-colum-59c22941), as RKBRMI emits it from 0.2.45.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "2a68292653e9e9c250e0742d34b45b830d1f4a8d"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main

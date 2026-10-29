@@ -175,4 +175,7 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # compact-cell-sam-d85d96ae).
 # Enzyme has no `[sources]` entry: its pinned dogfood commit is only in the
 # KB host mirror, which test/setup_env.jl clones it from.
-rev = "b31d672faa820fe8bda46cf86d7cb2eb43cc8b20"
+# 2a6829265 (ReactiveKernels 0.1.7, ReactiveKernelsPPL 0.1.3) contains
+# b31d672fa: a location summand computed from `logistic` binds (snag
+# rkppl-leaf-colum-59c22941).
+rev = "2a68292653e9e9c250e0742d34b45b830d1f4a8d"

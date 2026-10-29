@@ -340,6 +340,20 @@ scope_logistic(data) = @brm data begin
     y ~ Normal(p + e + b * logistic(a), sigma)
 end
 
+# A location summand computed from `logistic` and multiplied by a parameter's
+# `exp`: RKBRMI emits `p .+ e .* exp.(a)`, which binds from ReactiveKernelsPPL
+# 0.1.3 (RK snag rkppl-leaf-colum-59c22941; before, `bind_data` raised `term
+# references missing column _rkppl_leaf_1`).
+scope_logistic_product(data) = @brm data begin
+    sigma ~ Exponential(1)
+    a ~ Normal(0, 1)
+    b ~ Normal(0, 1)
+    q = logistic(x)
+    p = logistic(a + q[rows])
+    e = logistic(b) * exp(a)
+    y ~ Normal(p + e * exp(a), sigma)
+end
+
 @stestset "model-scope logistic is elementwise on RKBRMI" begin
     brmi = scope_logistic((; x=[-0.6, 0.1, 0.8, 1.4], rows=[1, 3, 2, 4, 3],
         y=[0.9, 1.6, 1.1, 1.8, 1.4]))
@@ -353,6 +367,11 @@ end
     # `logistic` of a data column is data on both backends, like `exp(x)`.
     @test :q in map(a -> a.name, last(BRM._brm_resolve_data_assignments(brmi)))
     check_transported(brmi, "model-scope-logistic")
+    product = scope_logistic_product((; x=[-0.6, 0.1, 0.8, 1.4], rows=[1, 3, 2, 4, 3],
+        y=[0.9, 1.6, 1.1, 1.8, 1.4]))
+    main = sprint(Base.show_unquoted, BRM._rk_emit_ast(BRM._brm_rk_plan(product)).main)
+    @test occursin("y .~ Normal.(p .+ e .* exp.(a), sigma)", main)
+    check_transported(product, "model-scope-logistic-product")
 end
 
 @stestset "one helper name dispatches to each backend's implementation" begin
