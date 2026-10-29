@@ -408,6 +408,29 @@ end
     end
 end
 
+# RK compiles `prepare(...; bound)` over every bound column, typed by each
+# column's type: the graph's node labels were bound as a `Vector{Any}` (snag
+# car-separator-em-f5c71279).
+untyped_columns(bound) = [k for (k, v) in pairs(bound)
+    if v isa AbstractArray && !isconcretetype(eltype(v))]
+@testset "car on RKBRMI: every bound column has a concrete element type" begin
+    if CAR_RUNTIME
+        ints = car_df(; area=[1, 2, 3, 4, 5, 6, 7, 1, 5],
+                      from=Float64[1, 2, 3, 1, 4, 5], to=Float64[2, 3, 4, 3, 8, 6])
+        for (df, label) in ((car_df(), String), (ints, Int)), type in (:bym2, :icar)
+            rk = RKBRMI(car_model(df; type))
+            bound = rk_bound_data(rk)
+            @test eltype(bound.car_mu_area_nodes) === label
+            @test isempty(untyped_columns(bound))
+            replay = reprocess(rk, (; area=df.area[[1, 5]], y=zeros(2)))
+            @test isempty(untyped_columns(rk_bound_data(replay)))
+        end
+    else
+        @info "Skipping the RKBRMI car column type gate (BRM_CAR_RUNTIME=0)"
+        @test true
+    end
+end
+
 @testset "car optional priors drop on models without the term" begin
     df = car_df()
     plain = @brm df begin
