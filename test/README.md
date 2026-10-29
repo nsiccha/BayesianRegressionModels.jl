@@ -51,6 +51,14 @@ conditional mean and SD); the fit's coordinates stay, `C` over the union of
 levels is read from the replay data and checked against the fit, and it
 composes with a resampled random effect. Snag `cdar-replay-new-57df8982`.
 
+`column_type_size.jl` checks that a column's type does not spell its
+expression tree: a 60-deep chain of model-scope assignments gives `ExprColumn`
+/ `NamedColumn` types as small as a 3-deep one, and building, planning and
+emitting it compiles no signature holding a column or prepared-expression type
+longer than 4 KB. Types that spelled the tree made a 479-statement model's
+build and RK planning compile for about ten minutes. Snag
+`rkbrmi-start-up-8ed0a306`.
+
 `changelog.jl` checks that `CHANGELOG.md`'s newest heading is the
 `Project.toml` version (`dev` §7.5).
 

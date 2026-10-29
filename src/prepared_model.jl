@@ -15,11 +15,17 @@ struct _BRMPreparedRef
     end
 end
 
-"""A callable expression retained from an `ExprColumn`, including keywords."""
-struct _BRMPreparedExpr{F,A<:Tuple,K<:NamedTuple}
+"""A callable expression retained from an `ExprColumn`, including keywords.
+
+As for [`ExprColumn`](@ref), the arguments and keywords are not type
+parameters: they would spell the expression tree in the type of every
+prepared node above them, and planning would compile once per tree."""
+struct _BRMPreparedExpr{F}
     callable::F
-    args::A
-    kwargs::K
+    args::Tuple
+    kwargs::NamedTuple
+    _BRMPreparedExpr(@nospecialize(callable), @nospecialize(args::Tuple),
+        @nospecialize(kwargs::NamedTuple)) = new{typeof(callable)}(callable, args, kwargs)
 end
 
 _brm_has_row_ref(x) = false
