@@ -1767,6 +1767,13 @@ pointwise densities (first-order, reverse-mode Enzyme: `ad_backend` must be
 `AutoEnzyme(; mode=Enzyme.Reverse)`), a reverse-over-forward sampler HVP query,
 its pointwise densities, and the subject attribution of every observed density.
 
+The HVP query is prepared the first time it is used: by the dense η Hessian
+blocks (`NLMEEstimation.conditional_loglikelihood_hessian_blocks`) and by the
+per-unit Laplace. With ReactiveKernels before 0.1.12 its preparation holds 8n²
+bytes for the n packed coordinates (n one-hot basis vectors of length n), 200
+GB at 158,343 coordinates; from 0.1.12 it is linear in n. No step of the
+preparation copies the model per thread.
+
 `observation_ad_backend` selects the forward-mode backend for Gaussian moment
 Jacobians. With the NLMEEstimation/Enzyme extension loaded, an `AutoEnzyme`
 reverse backend automatically selects Enzyme forward mode. Other callers can

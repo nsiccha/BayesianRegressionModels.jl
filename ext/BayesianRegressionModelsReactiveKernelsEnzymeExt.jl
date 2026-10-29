@@ -15,20 +15,35 @@ const BRM = BayesianRegressionModels
 BRM._brm_enzyme_mode(mode, ad_backend::AutoEnzyme) = ad_backend.mode === nothing ?
     mode : Enzyme.set_runtime_activity(mode, ad_backend.mode)
 
-function BRM._rk_eta_hvp_query(backend::BRM.RKBRMI, unit::Vector{Float64}, ad_backend)
-    rkext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
-    second_order = SecondOrder(
-        AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend)),
-        AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend)))
-    prepare_query_ad(prepare_ad_hvp, backend.model,
-        rkext._rk_translated(backend), :sampler,
-        second_order, (zeros(Float64, length(unit)),), unit)
+# The sampler density's Hessian-vector products, prepared on first use. Only
+# dense η Hessian blocks (`_brm_nlme_sampler_hessian_blocks`) and the per-unit
+# Laplace read them, so an NLME fit whose estimators take the η curvature from
+# gradients never compiles or holds them. Before ReactiveKernels 0.1.12 the
+# preparation held 8n² bytes for n packed coordinates, 200 GB for a model of
+# 157,808 unit effects: DifferentiationInterface's reverse-over-forward
+# preparation also prepares a forward-mode gradient, whose basis is n one-hot
+# vectors of length n. From 0.1.12 RK prepares it in memory linear in n.
+BRM._rk_eta_hvp_query(backend::BRM.RKBRMI, unit::Vector{Float64}, ad_backend) =
+    (; backend, unit, ad_backend, cached=Ref{Any}(nothing), lock=ReentrantLock())
+
+function _rk_eta_hvp_prepared(state)
+    lock(state.lock) do
+        state.cached[] === nothing || return state.cached[]
+        backend, ad_backend = state.backend, state.ad_backend
+        rkext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+        second_order = SecondOrder(
+            AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend)),
+            AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend)))
+        state.cached[] = prepare_query_ad(prepare_ad_hvp, backend.model,
+            rkext._rk_translated(backend), :sampler,
+            second_order, (zeros(Float64, length(state.unit)),), state.unit)
+    end
 end
 
 BRM._brm_rk_default_ad(caller, ::BRM.RKBRMI) = AutoEnzyme(; mode=Enzyme.Reverse)
 
-BRM._rk_eta_hvp(query, direction::Vector{Float64}, u::Vector{Float64}) =
-    only(ad_hvp(query, (direction,), u))
+BRM._rk_eta_hvp(state, direction::Vector{Float64}, u::Vector{Float64}) =
+    only(ad_hvp(_rk_eta_hvp_prepared(state), (direction,), u))
 
 # The sampler density's third-order contractions `D³f(u)[v, v, ·] = ∇(vᵀ H v)`,
 # reverse over forward over forward, for the per-unit Laplace gradient
