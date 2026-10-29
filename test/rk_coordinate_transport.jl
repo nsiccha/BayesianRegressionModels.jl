@@ -416,7 +416,7 @@ function check_coordinate_transport(fixture)
         end
         @test isequal(u, saved)
         checked = brm_check_coordinate_transport(transport, rk, stan.model, u)
-        @test keys(checked) == (:pairs, :factors, :simplexes, :centered, :max_error)
+        @test keys(checked) == (:pairs, :factors, :simplexes, :centered, :completions, :fields, :max_error)
         @test checked.pairs == count(p -> p.relation ∉ (:cholesky, :simplex, :centered),
             transport.pairs)
         @test checked.factors == length(transport.correlations)

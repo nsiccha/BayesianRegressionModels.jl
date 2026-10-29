@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.58
+## 0.2.60
 
 - A model whose observations have subject cells prepares its compact cell
   samplers on first use (a cell gradient, a nested model's η Hessian patterns,
@@ -37,6 +37,49 @@ instead of failing at run time.
   still resolve such a version. **Breaking** for that environment: develop
   ReactiveKernels from `2d415b7e` or later (`3deb61ae`, the ReactiveKernelsPPL
   0.1.14 tip, qualifies).
+
+## 0.2.59
+
+- A `car(...)` field lowered by its unit border separator
+  (`RKBRMI(brmi; car_units)`) maps each unit's interior through a sparse
+  Cholesky factor of the unit's interior precision, applied by sparse
+  triangular solves, instead of dense `n_u × n_u` matrices: memory and every
+  gradient are linear in the factors' entries. The shared values (separator
+  areas and interior sums) are mapped the same way, through a sparse factor
+  of their precision without the sum-to-zero, whose total is its own draw,
+  instead of a dense `m × m` factor. On the 10,932 Gemeinden of Germany in 12
+  Ländergruppen a field's factors hold 2.2 MiB instead of 121.5 MiB (the
+  shared factor 36,970 entries instead of 453² = 205,209) and its separation
+  is built in 0.17 s instead of 6.3 s. With three such fields on 43,728 rows
+  a gradient takes 13.5 ms instead of 70–101 ms and the separation data
+  7.1 MiB instead of 365 MiB (gordito, one CPU). The
+  field and its density are unchanged; the unit draws parametrize each
+  unit's interior through another orthogonal rotation, so a point saved from
+  an earlier separated lowering does not carry over.
+- `brm_coordinate_transport` pairs such a field with SBBRMI's field: its
+  shared and unit draws pair with Stan's areas as block positions
+  (`:car_separated`), and `brm_rk_point_to_stan`, `brm_stan_point_to_rk`,
+  `brm_stan_gradient_to_rk` and `brm_stan_logdensity_to_rk` move it through
+  the separation's exact linear map (`t.fields`). So `brm_nlme_joint_map`,
+  `brm_nlme_joint_start` and `brm_nlme_start(m, map, stan_u)` take a
+  separated model, and SAEM points and stage-2 draws reach SBBRMI's readers.
+  `brm_check_coordinate_transport` compares the field area by area and
+  returns a `fields` count. A Stan-frame `brm_nlme_conditional_problem`
+  (`backend = map.sb`) of a separated model is not built (Stan samples the
+  areas, none of which is a unit draw) and says so; condition `map.rk`.
+- A `car(...)` graph's BYM2 scaling factors are computed exactly from sparse
+  factors: the selected inverse of the grounded Laplacian's sparse Cholesky
+  factor (new dependency `SelectedInversion = "0.2"`) instead of a dense
+  eigendecomposition of each connected component, which was cubic in its
+  areas and paid by every `car` field, ICAR included. For the 10,879
+  connected Gemeinden: 0.025 s instead of 147 s and 903 MiB per field on one
+  CPU; the factors agree to 1.4e-14. Lowering three ICAR fields over them
+  (`RKBRMI(brmi)`, compiled) takes 0.5 s instead of 370 s.
+- RKBRMI looks each row's area up among the graph's node labels as a data
+  column (`<term>_nodes`, one of the fitted graph inputs `rk_design_binder`
+  binds once) instead of a literal of every label in the program, and a
+  separated field's gathers read their positions without a literal of their
+  range: a literal of 10,932 labels cost about 14 s of compilation.
 
 ## 0.2.57
 

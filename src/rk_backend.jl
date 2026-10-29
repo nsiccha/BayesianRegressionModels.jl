@@ -5017,7 +5017,10 @@ function _rk_plan_car_term!(prepared::_BRMPreparedTerm{typeof(car)},
     else
         column(:area_labels, labels)
     end
-    graph = (; node1=column(:node1, state.node1), node2=column(:node2, state.node2),
+    # Each row's position is looked up among the node labels, data the graph
+    # reads whole (as a literal they would cost a compile per lowering).
+    graph = (; node_labels=column(:nodes, collect(state.nodes)),
+        node1=column(:node1, state.node1), node2=column(:node2, state.node2),
         # an island reads the padding slot `n_struct + 1`, which holds zero
         struct_pos=column(:struct_pos,
             [k == 0 ? state.n_struct + 1 : k for k in state.struct_idx]),
@@ -5040,8 +5043,8 @@ function _rk_plan_car_term!(prepared::_BRMPreparedTerm{typeof(car)},
         nothing
     _RKTermSpec(:car, Symbol[],
         (; value, area, source, type=state.type, n_struct=state.n_struct, nodes=state.nodes,
-         graph..., inputs=(graph.node1, graph.node2, graph.struct_pos, graph.inv_scale,
-                           graph.is_struct),
+         graph..., inputs=(graph.node_labels, graph.node1, graph.node2, graph.struct_pos,
+                           graph.inv_scale, graph.is_struct),
          sigma_param, rho_param),
         value, value)
 end
