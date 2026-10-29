@@ -340,20 +340,12 @@ end
     for (model, label) in ((totals_assigned, "rk_lognormal"), (unread_model, "rk_unread"))
         check_against_stan(model(data), label)
     end
-    # A Gamma law: the value agrees, but with registered Enzyme (0.13.216) its
-    # native Reverse gradient fails Enzyme's readonly proof
-    # (EnzymeMutabilityException), as it does for a plain `mi(v) ~ Gamma(…)`
-    # completion without totals. Enzyme dogfood repairs it from `4c73c40`
-    # (Enzyme snag `rkbrmi-gradient-519ec090`, enzyme-use): drop this pin on a
-    # registered release that carries the repair.
-    gamma = check_against_stan(totals_gamma(data), "rk_gamma"; gradient=false)
-    u = 0.3 .* randn(Xoshiro(19), length(gamma.c.names))
-    @test_broken try
-        LogDensityProblems.logdensity_and_gradient(gamma.problem, u)
-        true
-    catch
-        false
-    end
+    # A Gamma law. Registered Enzyme (0.13.216) fails its native Reverse
+    # gradient on Enzyme's readonly proof (EnzymeMutabilityException), as for a
+    # plain `mi(v) ~ Gamma(…)` completion without totals; the test env's Enzyme
+    # dogfood carries the repair (`4c73c40`, Enzyme snag
+    # `rkbrmi-gradient-519ec090`, enzyme-use), so value and gradient are checked.
+    check_against_stan(totals_gamma(data), "rk_gamma")
     message(f) = try f(); "" catch e; sprint(showerror, e) end
     @test occursin("is not built for", message(() ->
         RKBRMI(totals_assigned(data); completions=:noncentered)))
