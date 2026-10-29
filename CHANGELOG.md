@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.45
+
+- `RKBRMI` evaluates a model-scope `logistic` elementwise, as it does `exp`
+  and `log`, and as SBBRMI's `inv_logit` does: `p = logistic(lp + g[rows])`
+  over a vector, `e = logistic(b) * exp(r)` over a scalar and a `logistic`
+  inside a likelihood argument (`y ~ Normal(p + b * logistic(a), sigma)`) emit
+  `logistic.(...)`. Before, RKBRMI emitted an undotted `logistic(...)`, which
+  ReactiveKernelsPPL refuses as a value ("calls `logistic`, which only lowers
+  in `.~` responses"; from ReactiveKernelsPPL 0.1.2, "`logistic` over a vector
+  needs dots").
+- A data-only `q = logistic(x)` of a data column is a data field on both
+  backends, like `q = exp(x)`; before, it stayed a model value.
+
 ## 0.2.44
 
 - `RKBRMI(brmi; completions = :noncentered)` lowers `mi(x)::shares(total, rows)`
