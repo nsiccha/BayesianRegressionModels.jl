@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.61
+
+- `RKBRMI(brmi; car_units)` takes one entry per `car(...)` field, keyed by its
+  area column, for fields on different row sets:
+  `car_units = (gem_id = :lgroup, gem_id_etr = :lgroup_etr)`. Each entry is a
+  column name or a vector of unit labels, row-aligned with that field's rows.
+  A field without an entry keeps the default lowering, and a key that names no
+  `car(...)` area column is refused. One column or vector still labels every
+  field. Before this, a model whose `car` fields sit on different row sets
+  could not use the separator at all ("`car_units` has 43796 labels, but
+  `car(gem_id_etr)` has 32847 rows"). A rebuild replay
+  (`freeze_constants = false`) passes keyed column names again.
+
 ## 0.2.60
 
 - A model whose observations have subject cells prepares its compact cell
