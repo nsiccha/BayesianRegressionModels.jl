@@ -1698,22 +1698,62 @@ end
     @test _rk_query(backend, :prior, u) ≈ pr
     @test logjac(layout, u) ≈ 0.0
     @test _rk_query(backend, :posterior, u) ≈ ll + pr
-    # RK hoists the scalar location's `logbeta` rule call out of the
-    # observations, and registered Enzyme cannot prove that sampler readonly;
-    # Enzyme dogfood `9d920e1f` repairs it (Enzyme snag
-    # readonly-proof-h-bcbe23d3). Drop this branch once a registered Enzyme
-    # carries the repair.
-    outcome = try
-        _check_parity_gradient(backend, u)
-    catch err
-        err
+    # Registered Enzyme (0.13.216) cannot prove this model's prepared callable
+    # readonly (`EnzymeMutabilityException`); the test env's Enzyme dogfood
+    # carries the repairs (`9d920e1f`, `4c73c40`; enzyme-use, brm-use
+    # setup.md), so value and gradient are checked.
+    _check_parity_gradient(backend, u)
+end
+
+@stestset "rk parity beta lone linked intercept" begin
+    # A lone logit intercept read only through the Beta response, with a
+    # sampled and a literal precision. Registered Enzyme (0.13.216) raises
+    # `EnzymeMutabilityException` on the plain Reverse gradient of both (a
+    # store into the prepared callable's by-value `.innerparm` copy); the test
+    # env's Enzyme dogfood carries the repair (`4c73c40`, enzyme-use), so value
+    # and gradient are checked (snag registered-enzym-dab98569).
+    beta_cols = (; prop=[0.21, 0.34, 0.27, 0.19, 0.31, 0.25])
+    sampled = @brm beta_cols begin
+        logit(mu) ~ 1
+        effect(mu, Intercept) ~ Normal(0, 2.5)
+        kappa ~ Gamma(2.0, 1000.0)
+        prop ~ Beta(mu * kappa, (1 - mu) * kappa)
     end
-    if outcome isa Enzyme.Compiler.EnzymeMutabilityException
-        @test occursin("cannot be proven readonly", sprint(showerror, outcome))
-        @test_broken false
-    elseif outcome isa Exception
-        throw(outcome)
+    backend = _parity_backend(sampled)
+    layout = backend.model.layout
+    @test layout.total == 2
+    u = [-1.0, 4.0943445622221]
+    nt = constrain(layout, u)
+    b = Vector(_parity_population(nt, backend, :mu))
+    mu = logistic(b[1])
+    ll = sum(logpdf.(Beta(mu * nt.kappa, (1 - mu) * nt.kappa), beta_cols.prop))
+    pr = logpdf(Normal(0, 2.5), b[1]) + logpdf(Gamma(2.0, 1000.0), nt.kappa)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: kappa's exp (the intercept rides identity).
+    @test logjac(layout, u) ≈ log(nt.kappa)
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + log(nt.kappa)
+    _check_parity_gradient(backend, u)
+
+    literal = @brm beta_cols begin
+        logit(mu) ~ 1
+        effect(mu, Intercept) ~ Normal(0, 2.5)
+        prop ~ Beta(mu * 60.0, (1 - mu) * 60.0)
     end
+    backend = _parity_backend(literal)
+    layout = backend.model.layout
+    @test layout.total == 1
+    u = [-1.0]
+    nt = constrain(layout, u)
+    b = Vector(_parity_population(nt, backend, :mu))
+    mu = logistic(b[1])
+    ll = sum(logpdf.(Beta(mu * 60.0, (1 - mu) * 60.0), beta_cols.prop))
+    pr = logpdf(Normal(0, 2.5), b[1])
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    @test logjac(layout, u) ≈ 0.0
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr
+    _check_parity_gradient(backend, u)
 end
 
 @stestset "rk parity beta-binomial column trials literal precision" begin
