@@ -14,6 +14,14 @@
 #
 # The reference is the same model with the part-1 columns `z` reads gathered
 # onto part 2's rows by hand: equal Stan and RK densities and gradients.
+#
+# A second model offsets part 2 by part 1's PREDICTOR through a gather,
+# `f_off = 0.4 * mu[main]`, so `log_f` composes two predictors, and its
+# Poisson totals are read by a plate. Since 0.2.47 RKBRMI observes the totals
+# as the plate's one scalar per cell, and ReactiveKernelsPPL before 0.1.12
+# refused that column as a composition (snag rkbrmi-refuses-a-3f4d6828);
+# 0.2.46 lowered it, because a `flatten_cells` call hid the column. Its RK
+# density equals Stan's.
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 
 module PlateGatheredPredictor
@@ -78,6 +86,27 @@ misaligned(d) = @brm d begin
         tot[k] ~ Normal(sum(exp.(log_other[rows[k]])), sigma2 * scale[k])
     end
 end
+
+# Part 1 (`mu`) on 12 rows; part 2 (`log_f`) on 12 rows of its own, `main`
+# naming each one's part-1 row; `hid` puts part-2 rows into the totals' cells.
+const OFFSET = (; g=repeat(1:3, inner=4), z=collect(range(-1, 1; length=12)),
+    y=collect(range(0, 2; length=12)),
+    m=repeat(1:6, inner=2), main=repeat(1:2:12, inner=2),
+    hid=["a", "a", "", "", "b", "b", "", "", "c", "c", "", ""],
+    cells=["a", "b", "c"], resid=[5, 7, 3])
+
+predictor_offset(d) = @brm d begin
+    sigma ~ Exponential(0.5)
+    mu ~ 1 + z + (1 | g)
+    y ~ Normal(mu, sigma)
+    f_off = 0.4 * mu[main]
+    log_f ~ 0 + offset(f_off) + (1 | fg | m)
+    h = groups(hid => cells)
+    @plate for k in eachindex(resid)
+        lam = exp.(log_f[h[k]])
+        resid[k] ~ Poisson(sum(lam))
+    end
+end
 end
 
 const PG = PlateGatheredPredictor
@@ -140,5 +169,25 @@ end
         @test isfinite(value)
         @test rk_value ≈ value atol=1e-10 rtol=1e-10
         @test rk_gradient ≈ g[perm] atol=1e-10 rtol=1e-10
+    end
+end
+
+# Stan and RK parametrize the `(1 | g)` block differently, so the points move
+# through the coordinate transport.
+@stestset "RK equals Stan on totals over a predictor offset by another's gather" begin
+    brmi = PG.predictor_offset(PG.OFFSET)
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+    rk, problem = consumer_problem(brmi)
+    stan = consumer_stan(brmi, "plate_predictor_offset")
+    transport = brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan.model))
+    for u in probe_points(length(transport))
+        stan_u = brm_rk_point_to_stan(transport, u)
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+        stan_gradient = similar(stan_u)
+        stan_value, _ = BridgeStan.log_density_gradient!(stan.model, stan_u, stan_gradient;
+            propto=false, jacobian=true)
+        @test isfinite(value)
+        @test value ≈ stan_value + transport.logdensity_offset atol=1e-10 rtol=1e-10
+        @test gradient ≈ brm_stan_gradient_to_rk(transport, u, stan_gradient) atol=1e-9 rtol=1e-10
     end
 end
