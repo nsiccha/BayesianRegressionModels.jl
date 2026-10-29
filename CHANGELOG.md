@@ -40,10 +40,12 @@ instead of failing at run time.
   completions read as unit draws: their family of fixed unit variance has no
   scale or factor, and the start maps their draws to Stan again once it has
   written the covariance, since the law's location or scale may read it.
-- RKBRMI's non-centered completion block names its law's location and scale as
-  block locals (`<column>.y_mis_location`, `<column>.y_mis_scale`;
+- RKBRMI's non-centered completion block also binds its law's location and
+  scale to block locals (`<column>.y_mis_location`, `<column>.y_mis_scale`;
   `y_free_location` / `y_free_scale` for free entries), which the transport
-  reads by name. The density and the coordinates are unchanged.
+  reads by name. No density reads them (the value still reads the law's
+  expressions), so the density, its gradient and the coordinates are
+  unchanged.
 
 ## 0.2.47
 

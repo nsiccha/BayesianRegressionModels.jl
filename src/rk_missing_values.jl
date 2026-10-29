@@ -370,9 +370,11 @@ end
 # A location-scale law in standardized coordinates:
 # `draws[axes(rows, 1)] .~ Normal(0, 1)` and
 # `value = location .+ scale .* draws` (`exp.(…)` for LogNormal), the same law.
-# The location and scale are block locals of their own, so the coordinate
-# transport reads them by name to move the draws to the values a centred
-# lowering samples (`brm_coordinate_transport`).
+# The location and scale are also bound to block locals of their own, which
+# the coordinate transport reads by name to move the draws to the values a
+# centred lowering samples (`brm_coordinate_transport`). The value reads the
+# law's expressions, not those locals, so no density reads them: the graph
+# RK differentiates is the one without them.
 function _rk_emit_standardized!(block, part, rows, draws, value)
     location = _rk_block_local!(block, Symbol(value, "_location"))
     push!(block.statements, Expr(:(=), location, part.location))
@@ -382,7 +384,7 @@ function _rk_emit_standardized!(block, part, rows, draws, value)
     push!(block.statements, Expr(:call, :.~,
         Expr(:ref, sampled, Expr(:call, :axes, rows, 1)), _rk_ast_dotted(:Normal, 0, 1)))
     completed = _rk_block_local!(block, value)
-    affine = Expr(:call, :.+, location, Expr(:call, :.*, scale, sampled))
+    affine = Expr(:call, :.+, part.location, Expr(:call, :.*, part.scale, sampled))
     push!(block.statements, Expr(:(=), completed,
         part.callable === LogNormal ? _rk_ast_dotted(:exp, affine) : affine))
     (; sampled, standardized=(; location, scale, value=completed), law=part.callable)
