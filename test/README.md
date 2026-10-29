@@ -953,21 +953,20 @@ stanblocks-use §29 writes them (`rep_vector`, `to_array_1d`, `[:, 1]`,
 solve is checked against the closed-form model's density and Reverse gradient
 at the same coordinates, and the tolerance-controlled forms against the
 compiled Stan density and gradient. It needs ReactiveKernels with
-`rk_ode_rk45_tol` (`ce48fc77` or later) and the solver packages, which the
-test environment does not carry. Run it from a copy of this environment that
-develops such a ReactiveKernels checkout (its root and the three nested
-packages, as `setup_env.jl` does) and adds the solvers:
+`rk_ode_rk45_tol` (`ce48fc77` or later, which the test environment's pin
+contains) and the solver packages, which the test environment does not carry,
+so under `--project=test` it fails at its `using` line by design. Run it from a
+copy of this environment that adds the solvers:
 
 ```sh
-cp test/Project.toml test/Manifest.toml <scratch-env>/
-julia --project=<scratch-env> -e 'using Pkg; rk = "<ReactiveKernels checkout>"
-    Pkg.develop([PackageSpec(path=rk),
-        PackageSpec(path=joinpath(rk, "packages", "ReactiveKernelsPPL")),
-        PackageSpec(path=joinpath(rk, "packages", "ReactiveKernelsDistributionKernels")),
-        PackageSpec(path=joinpath(rk, "packages", "ReactiveKernelsPPLExamples"))])
+cp test/Project.toml test/Manifest.toml test/LocalPreferences.toml <scratch-env>/
+julia --project=<scratch-env> -e 'using Pkg
     Pkg.add(["OrdinaryDiffEqLowOrderRK", "OrdinaryDiffEqBDF", "SciMLBase", "SciMLSensitivity"])'
 julia --startup-file=no --project=<scratch-env> test/rk_kernel_ode_cell.jl
 ```
+
+On BRM 0.2.64 with ReactiveKernels `3deb61ae` that passes 171/171 (gordito,
+2026-10-29); adding the solvers precompiles 56 packages in about 9 minutes.
 
 `kernel_ode_cell.jl` remains
 the Stan-only gate for the closure-style `kernel(...) do` spelling.
