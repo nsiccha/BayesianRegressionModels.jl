@@ -126,14 +126,14 @@ end
     m = brm_nlme_model(rk; ad_backend=NLME_AD, subject_group=:region,
         nested_groups=PANEL_NESTED)
     v = m.view
-    @test length(m.eta_sparsity) == length(v.levels)
+    @test length(BRM._brm_nlme_eta_sparsity(m)) == length(v.levels)
     rng = Xoshiro(3)
     θ = 0.1 .* randn(rng, length(m.theta))
     σ = 0.1 .* randn(rng, length(m.sigma))
     H = [0.3 .* randn(rng, length(b)) for b in v.subject_coordinates]
     # The dense conditional blocks from one RK η-HVP per coordinate.
     blocks = BRM._brm_nlme_hessian_blocks(m, θ, σ, H)
-    for (i, P) in enumerate(m.eta_sparsity)
+    for (i, P) in enumerate(BRM._brm_nlme_eta_sparsity(m))
         n = length(v.subject_coordinates[i])
         @test size(P) == (n, n) && P == permutedims(P)
         @test all(I -> P[I] || I[1] == I[2], findall(x -> abs(x) > 1e-10, blocks[i]))
@@ -143,7 +143,7 @@ end
     end
     # A flat model's subjects are small: it declares no pattern.
     flat = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
-    @test flat.eta_sparsity === nothing
+    @test BRM._brm_nlme_eta_sparsity(flat) === nothing
 end
 
 # `k` copies of the panel's regions, each with its own districts,
@@ -180,16 +180,22 @@ end
         # Region 1's compact cell gradients, one cell group at a time.
         t = BRM._brm_svi_target(m)
         g = first(BRM._brm_nlme_prior_median_point(m))[t.globals]
-        w = t.work[t.of[1]]
-        w.active .= vcat(g, η)[t.order[1]]
-        cells = map(m.cell_query, t.samplers[t.of[1]]) do cell, sampler
-            run() = for p in cell.positions[1]
-                BRM._rk_nlme_compact_cell_value_and_gradient!(sampler,
-                    w.cell_gradient, m.unit, w.active, t.indices[1], p)
+        values = vcat(g, η)[t.order[1]]
+        cell_gradient = zeros(length(values))
+        cells = map(enumerate(m.cell_query)) do (k, cell)
+            run() = for (j, p) in enumerate(cell.positions[1])
+                BRM._brm_nlme_plan_cell!(cell_gradient, t.plan, m.unit, 1, k, j, p,
+                    values)
             end
             run(); run()
             cell.names => minimum(@allocated(run()) for _ in 1:3)
         end
+        # Each cell selects the globals and the draws it reads, not its
+        # region's whole block, so a call's work does not grow with the region.
+        for (k, cell) in enumerate(m.cell_query), j in eachindex(cell.positions[1])
+            @test length(t.plan.selections[1][k][j]) == length(t.plan.buffers[k].active)
+        end
+        @test all(b -> length(b.active) < length(t.indices[1]), t.plan.buffers)
         gg, gz = zeros(length(t.globals)), zeros(length(η))
         (; result=gradient(), bytes=minimum(@allocated(gradient()) for _ in 1:3),
            cells, unit=(BRM._brm_svi_unit_term!(gg, gz, t, 1, g, η), copy(gg), copy(gz)))
@@ -202,7 +208,7 @@ end
     # observed through `flatten_cells`) the totals group grew 632,016 B ->
     # 1,624,032 B from 3 to 9 regions; now it is 141,888 B at both.
     @test first.(measured[2].cells) == first.(measured[1].cells) ==
-        ((:total,), (:x1_obs,))
+        [(:total,), (:x1_obs,)]
     for ((_, b1), (_, b3)) in zip(measured[1].cells, measured[2].cells)
         @test b3 <= 1.1b1
     end

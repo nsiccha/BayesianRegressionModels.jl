@@ -181,7 +181,7 @@ end
         σ = 0.1 .* randn(rng, length(m.sigma))
         H = [0.3 .* randn(rng, length(b)) for b in m.view.subject_coordinates]
         blocks = BRM._brm_nlme_hessian_blocks(m, θ, σ, H)
-        for (P, block) in zip(m.eta_sparsity, blocks)
+        for (P, block) in zip(BRM._brm_nlme_eta_sparsity(m), blocks)
             @test all(I -> P[I] || I[1] == I[2], findall(x -> abs(x) > 1e-10, block))
         end
     end

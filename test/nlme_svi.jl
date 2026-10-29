@@ -334,8 +334,12 @@ const SVI_NESTED = (; subject_group=:subject, nested_groups=(unit=:obs_subject,)
     rk = RKBRMI(nested_model(NESTED_DATA))
     m = brm_nlme_model(rk; ad_backend=NLME_AD, SVI_NESTED...)
     @test sort(unique(length.(m.view.subject_coordinates))) == [2, 3, 4]
-    # SVI prepares one compact sampler set per block length.
-    @test length(BRM._brm_svi_target(m).samplers) == 3
+    # SVI prepares one compact sampler per cell group, selecting the globals
+    # and the draws each cell reads, whatever the subject's block length.
+    t = BRM._brm_svi_target(m)
+    @test length(t.plan.samplers) == length(m.cell_query)
+    @test all(i -> all(g -> all(sel -> length(sel) == length(t.plan.buffers[g].active),
+        t.plan.selections[i][g]), eachindex(m.cell_query)), eachindex(t.units))
     check_svi_split(rk, m, m.unit .+ 0.3 .* randn(rng, length(m.unit)))
     # A regional panel: nested districts, municipalities and district-years,
     # completed (non-centred) covariate values, and district-year totals.
