@@ -121,6 +121,31 @@ end
     end
 end
 
+@stestset "each unit's η Hessian pattern covers its curvature" begin
+    rk = RKBRMI(panel(PANEL); completions=:noncentered)
+    m = brm_nlme_model(rk; ad_backend=NLME_AD, subject_group=:region,
+        nested_groups=PANEL_NESTED)
+    v = m.view
+    @test length(m.eta_sparsity) == length(v.levels)
+    rng = Xoshiro(3)
+    θ = 0.1 .* randn(rng, length(m.theta))
+    σ = 0.1 .* randn(rng, length(m.sigma))
+    H = [0.3 .* randn(rng, length(b)) for b in v.subject_coordinates]
+    # The dense conditional blocks from one RK η-HVP per coordinate.
+    blocks = BRM._brm_nlme_hessian_blocks(m, θ, σ, H)
+    for (i, P) in enumerate(m.eta_sparsity)
+        n = length(v.subject_coordinates[i])
+        @test size(P) == (n, n) && P == permutedims(P)
+        @test all(I -> P[I] || I[1] == I[2], findall(x -> abs(x) > 1e-10, blocks[i]))
+        # Units couple only through the effects above them: the pattern
+        # leaves most pairs of a region's effects out.
+        @test count(P) < n^2 / 2
+    end
+    # A flat model's subjects are small: it declares no pattern.
+    flat = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
+    @test flat.eta_sparsity === nothing
+end
+
 # `k` copies of the panel's regions, each with its own districts,
 # municipalities and district-years: region 1 keeps exactly its data.
 function replicate_panel(d, k)

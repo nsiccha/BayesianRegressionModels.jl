@@ -1521,6 +1521,9 @@ struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J,C,G,P}
     # hold each covariance block's scales and correlation factor), built by
     # the NLMEEstimation extension on the first prior evaluation.
     prior_structure::Base.RefValue{Any}
+    # Each subject's η Hessian pattern (`_brm_nlme_eta_patterns`), or nothing
+    # when the model declares none.
+    eta_sparsity::Union{Nothing,Vector{SparseMatrixCSC{Bool,Int}}}
 end
 
 Base.show(io::IO, m::BRMNLMEModel) = print(io, "BRMNLMEModel(",
@@ -1670,11 +1673,14 @@ function _brm_nlme_model(backend::RKBRMI, node; ad_backend, observation_ad_backe
         population_prior = _brm_run_phase(phases.prior) do _
             _rk_nlme_population_prior(backend, unit, ad_backend)
         end
+        eta_sparsity = _brm_nlme_ragged(view) && cell_gradient !== nothing ?
+            _brm_nlme_eta_patterns(view, cell_query, cell_gradient, unit, theta, sigma) :
+            nothing
         BRMNLMEModel(view, backend, sampler, pointwise, eta_hvp, attribution,
             theta, sigma,
             eta_blocks, unit, observations_query, observations_pushforward,
             observed, observation_attribution, cell_query, cell_gradient,
-            population_prior, Ref{Any}(nothing))
+            population_prior, Ref{Any}(nothing), eta_sparsity)
     end
 end
 
@@ -1716,6 +1722,49 @@ function brm_nlme_loglikelihood(m::BRMNLMEModel, i::Integer, θ, σ, η)
     point = _brm_nlme_cell_point(m, i, θ, σ, η)
     sum(m.cell_query) do cell
         sum(p -> _rk_nlme_cell_value(cell.query, point, p), cell.positions[i]; init=0.0)
+    end
+end
+
+# Which of subject `i`'s η can enter one observation together, for each subject
+# of a nested model: entry (j, k) is true when η_j and η_k are both read by one
+# of the subject's observation cells. The subject's conditional log-likelihood is
+# the sum of its cells, so this covers every nonzero of its η Hessian. A cell's
+# reads are the η its compact gradient touches, at two points: θ and σ at the
+# unit point, and two η that hold no zero, so that a coordinate a cell reads
+# has a nonzero derivative at one of them. NLMEEstimation computes the
+# Hessian's values from these patterns (`eta_hessian_sparsity`); a nested
+# subject's units couple only through the effects above them, so the pattern
+# stays sparse where its dense block would grow with the square of its size.
+function _brm_nlme_eta_patterns(view::BRMNLMEView, cell_query, cell_gradient,
+        unit::Vector{Float64}, theta::Vector{Int}, sigma::Vector{Int})
+    map(eachindex(view.subject_coordinates)) do i
+        block = view.subject_coordinates[i]
+        n = length(block)
+        indices = sort!(vcat(theta, sigma, block))
+        slots = [searchsortedfirst(indices, j) for j in block]
+        samplers = cell_gradient.samplers[cell_gradient.of[i]]
+        gradient = zeros(length(indices))
+        rows, columns = Int[], Int[]
+        reads = falses(n)
+        for η in (0.05 .+ 0.1 .* sin.(1:n), -0.04 .+ 0.07 .* cos.(1.3 .* (1:n)))
+            point = copy(unit)
+            point[block] .= η
+            active = point[indices]
+            for (cell, sampler) in zip(cell_query, samplers), p in cell.positions[i]
+                _rk_nlme_compact_cell_value_and_gradient!(sampler, gradient, unit,
+                    active, indices, p)
+                fill!(reads, false)
+                for (k, slot) in enumerate(slots)
+                    iszero(gradient[slot]) || (reads[k] = true)
+                end
+                read = findall(reads)
+                for j in read, k in read
+                    push!(rows, j)
+                    push!(columns, k)
+                end
+            end
+        end
+        sparse(rows, columns, true, n, n, |)
     end
 end
 
