@@ -309,9 +309,14 @@ function _rk_prepare_missing_totals!(columns, taken, derived, observation, plan,
     merge(names, (; weights, inputs))
 end
 
-# Emits the completion block and returns the names of the block locals that
-# hold its sampled coordinates (`(y_mis,)`, `(z_mis,)` when non-centered,
-# `(y_free, y_shares)` with group totals), or `nothing` when nothing is missing.
+# Emits the completion block and returns one entry per part holding sampled
+# coordinates (the missing entries; with group totals the free entries, then
+# the grouped entries' shares), or `nothing` when nothing is missing. Each
+# entry is `(; sampled, standardized)`: the block local holding the part's
+# coordinates (`y_mis`, `z_mis` when non-centered, `y_free` / `y_shares` with
+# group totals), and, for a part standardized by its law's location and scale,
+# the locals of the location, the scale and the value
+# (`_rk_emit_standardized!`), else `nothing`.
 function _rk_emit_missing_value!(definitions, statements, bindings, taken, completion)
     geometry = _rk_ast_statistical_call!(definitions, taken,
         :brm_covariate_geometry, completion.observed, completion.observed_rows,
@@ -330,9 +335,8 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
     # declared dimensions belong to the missing-row axis; unlike an
     # observation broadcast, the statement samples that independent array.
     if completion.noncentered
-        # `y_mis = location .+ scale .* z_mis` (`exp.(…)` for LogNormal),
-        # `z_mis ~ N(0, 1)`: the same law, in standardized coordinates.
         location, scale = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
+        part = (; callable=distribution.callable, location, scale)
         block = _rk_block_body(location, scale)
     else
         law = _rk_ast_value_distribution(distribution, bindings, taken)
@@ -343,17 +347,13 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
     lookup = _rk_block_argument!(block, :lookup, completion.missing_lookup)
     mask = _rk_block_argument!(block, :mask, completion.missing_mask)
     if completion.noncentered
-        sampled = _rk_block_local!(block, :z_mis)
-        push!(block.statements, Expr(:call, :.~,
-            Expr(:ref, sampled, Expr(:call, :axes, rows, 1)), _rk_ast_dotted(:Normal, 0, 1)))
-        missing = _rk_block_local!(block, :y_mis)
-        value = Expr(:call, :.+, location, Expr(:call, :.*, scale, sampled))
-        push!(block.statements, Expr(:(=), missing,
-            distribution.callable === LogNormal ? _rk_ast_dotted(:exp, value) : value))
+        entry = _rk_emit_standardized!(block, part, rows, :z_mis, :y_mis)
+        missing = entry.standardized.value
     else
-        missing = sampled = _rk_block_local!(block, :y_mis)
+        missing = _rk_block_local!(block, :y_mis)
         push!(block.statements, Expr(:call, :.~,
             Expr(:ref, missing, Expr(:call, :axes, rows, 1)), law))
+        entry = (; sampled=missing, standardized=nothing)
     end
     # Completion is a whole covariate value on its original row axis. Keep
     # the gather and mask in an explicit graph when downstream likelihoods
@@ -364,7 +364,30 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
     push!(statements, Expr(:call, :~, completion.source,
         _rk_ast_block_call!(definitions, taken, "brm_missing_covariate", block,
             completed)))
-    (sampled,)
+    (entry,)
+end
+
+# A location-scale law in standardized coordinates:
+# `draws[axes(rows, 1)] .~ Normal(0, 1)` and
+# `value = location .+ scale .* draws` (`exp.(…)` for LogNormal), the same law.
+# The location and scale are also bound to block locals of their own, which
+# the coordinate transport reads by name to move the draws to the values a
+# centred lowering samples (`brm_coordinate_transport`). The value reads the
+# law's expressions, not those locals, so no density reads them: the graph
+# RK differentiates is the one without them.
+function _rk_emit_standardized!(block, part, rows, draws, value)
+    location = _rk_block_local!(block, Symbol(value, "_location"))
+    push!(block.statements, Expr(:(=), location, part.location))
+    scale = _rk_block_local!(block, Symbol(value, "_scale"))
+    push!(block.statements, Expr(:(=), scale, part.scale))
+    sampled = _rk_block_local!(block, draws)
+    push!(block.statements, Expr(:call, :.~,
+        Expr(:ref, sampled, Expr(:call, :axes, rows, 1)), _rk_ast_dotted(:Normal, 0, 1)))
+    completed = _rk_block_local!(block, value)
+    affine = Expr(:call, :.+, part.location, Expr(:call, :.*, part.scale, sampled))
+    push!(block.statements, Expr(:(=), completed,
+        part.callable === LogNormal ? _rk_ast_dotted(:exp, affine) : affine))
+    (; sampled, standardized=(; location, scale, value=completed), law=part.callable)
 end
 
 # The completion of `mi(x)::shares(total, rows)`, as StanBlocks'
@@ -395,7 +418,7 @@ function _rk_emit_missing_totals!(definitions, statements, bindings, taken, comp
     lookup = _rk_block_argument!(block, :lookup, completion.missing_lookup)
     mask = _rk_block_argument!(block, :mask, completion.missing_mask)
     grouped_data = _rk_mi_grouped_arguments!(block, completion)
-    free_sampled, free = _rk_emit_mi_free!(block, free_part, free_rows)
+    free_entry, free = _rk_emit_mi_free!(block, free_part, free_rows)
     shares_sampled, shares = _rk_emit_mi_grouped!(block, grouped_part, grouped_rows,
         grouped_data)
     missing = _rk_block_local!(block, :y_mis)
@@ -405,7 +428,7 @@ function _rk_emit_missing_totals!(definitions, statements, bindings, taken, comp
         taken, :brm_completed_covariate, observed, missing, lookup, mask; kernel=true)))
     push!(statements, Expr(:call, :~, completion.source,
         _rk_ast_block_call!(definitions, taken, "brm_missing_covariate", block, completed)))
-    (free_sampled, shares_sampled)
+    (free_entry, (; sampled=shares_sampled, standardized=nothing))
 end
 
 function _rk_emit_missing_shares!(definitions, statements, bindings, taken, completion)
@@ -417,7 +440,7 @@ function _rk_emit_missing_shares!(definitions, statements, bindings, taken, comp
     sampled, shares = _rk_emit_mi_grouped!(block, grouped_part, grouped_rows, grouped_data)
     push!(statements, Expr(:call, :~, completion.source,
         _rk_ast_block_call!(definitions, taken, "brm_missing_shares", block, shares)))
-    (sampled,)
+    ((; sampled, standardized=nothing),)
 end
 
 # The free entries' law, gathered onto their rows: their law as written, or
@@ -437,19 +460,13 @@ end
 
 function _rk_emit_mi_free!(block, part, free_rows)
     if part.noncentered
-        sampled = _rk_block_local!(block, :z_free)
-        push!(block.statements, Expr(:call, :.~,
-            Expr(:ref, sampled, Expr(:call, :axes, free_rows, 1)), _rk_ast_dotted(:Normal, 0, 1)))
-        free = _rk_block_local!(block, :y_free)
-        value = Expr(:call, :.+, part.location, Expr(:call, :.*, part.scale, sampled))
-        push!(block.statements, Expr(:(=), free,
-            part.callable === LogNormal ? _rk_ast_dotted(:exp, value) : value))
-        return sampled, free
+        entry = _rk_emit_standardized!(block, part, free_rows, :z_free, :y_free)
+        return entry, entry.standardized.value
     end
     free = _rk_block_local!(block, :y_free)
     push!(block.statements, Expr(:call, :.~,
         Expr(:ref, free, Expr(:call, :axes, free_rows, 1)), part.law))
-    free, free
+    (; sampled=free, standardized=nothing), free
 end
 
 # The grouped entries' law: `_BRMGroupedShares`, or, non-centered, the callable
