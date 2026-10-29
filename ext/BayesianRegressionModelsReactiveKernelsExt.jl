@@ -316,9 +316,10 @@ end
 # Planning and building read the model as syntax; only wrapping the retained
 # original `brmi` constructs a model-specific `RKBRMI` type.
 Base.@nospecializeinfer function BRM.RKBRMI(@nospecialize(source::BRM.BRMI); held_out=(),
-        completions::Symbol=:centered)
+        completions::Symbol=:centered, car_units=nothing)
     brmi = BRM._brm_resolve_optional_priors(source)
-    plan = BRM._rk_plan_completions(BRM._brm_rk_plan(brmi; held_out), completions)
+    plan = BRM._rk_plan_car_units(
+        BRM._rk_plan_completions(BRM._brm_rk_plan(brmi; held_out), completions), car_units)
     program = _RKProgram(BRM._rk_emit_ast(plan))
     bound = _rk_bind_program(program, plan)
     BRM.RKBRMI(brmi, plan, build_kernel(bound);
