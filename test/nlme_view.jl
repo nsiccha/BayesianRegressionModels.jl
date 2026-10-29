@@ -831,3 +831,13 @@ end
             for k in 1:3] atol=1e-8
     end
 end
+
+@stestset "the NLME point overlay reads θ, σ and an η block in any order" begin
+    # A nested subject's η positions are in block order, not packed order; a
+    # read is a binary search over them (todo 2026-10-29T19-05-07-346-1q2q2ka).
+    unit = collect(1.0:10.0)
+    p = BRM._BRMNLMEPoint(unit, [2, 5], [20.0, 50.0], [7], [70.0], [9, 3, 6],
+        [90.0, 30.0, 60.0])
+    @test collect(p) == [1.0, 20.0, 30.0, 4.0, 50.0, 60.0, 70.0, 8.0, 90.0, 10.0]
+    @test BRM._brm_nlme_point_values(p, [3, 6, 9]) == [30.0, 60.0, 90.0]
+end

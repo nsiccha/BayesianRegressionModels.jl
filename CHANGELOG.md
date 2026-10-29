@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.62
+
+- `brm_nlme_loglikelihood` on a nested unit costs time linear in its cells'
+  reads. The point it evaluates the unit's cell queries at looked each packed
+  coordinate up by a linear search over the subject's block, so a unit's value
+  cost its cells times its block, quadratic in the unit's size. NLMEEstimation's
+  per-subject `conditional_loglikelihood` and the two-stage unit problem's log
+  density take that path. On the two-region panel one unit's value took 1.04 s
+  at 21,732 effects and 14.1 s at 69,473; it now takes 0.053 s and 0.164 s
+  (one CPU), with values unchanged.
+- `test/fitted_constants.jl` expects rank-3 constants and supplied rank-3 data
+  to transpile: the pinned StanBlocks has the rank-3 array type, so the two
+  `@test_broken` checks had become unexpected passes.
+
 ## 0.2.61
 
 - `RKBRMI(brmi; car_units)` takes one entry per `car(...)` field, keyed by its
