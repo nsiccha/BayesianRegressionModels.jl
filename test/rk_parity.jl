@@ -1756,6 +1756,36 @@ end
     _check_parity_gradient(backend, u)
 end
 
+@stestset "rk parity gamma lone log intercept" begin
+    # A lone log intercept read through the Gamma response with a sampled
+    # shape (`GammaLog.(shape, log_mu)`). Registered Enzyme (0.13.216) fails to
+    # compile its Reverse gradient (`EnzymeInternalError`, with or without a
+    # `Const` callable); the test env's Enzyme dogfood differentiates it (snag
+    # registered-enzym-dab98569).
+    gamma_cols = (; y=[1.3, 2.1, 0.7, 1.8, 3.2, 1.1])
+    brmi = @brm gamma_cols begin
+        log(mu) ~ 1
+        effect(mu, Intercept) ~ Normal(0, 2.5)
+        shape ~ Gamma(2.0, 1.0)
+        y ~ Gamma(shape, mu / shape)
+    end
+    backend = _parity_backend(brmi)
+    layout = backend.model.layout
+    @test layout.total == 2
+    u = [0.7, 1.3]
+    nt = constrain(layout, u)
+    b = Vector(_parity_population(nt, backend, :mu))
+    mu = exp(b[1])
+    ll = sum(logpdf.(Gamma(nt.shape, mu / nt.shape), gamma_cols.y))
+    pr = logpdf(Normal(0, 2.5), b[1]) + logpdf(Gamma(2.0, 1.0), nt.shape)
+    @test _rk_query(backend, :likelihood, u) ≈ ll
+    @test _rk_query(backend, :prior, u) ≈ pr
+    # Jacobian: shape's exp (the intercept rides identity).
+    @test logjac(layout, u) ≈ log(nt.shape)
+    @test _rk_query(backend, :posterior, u) ≈ ll + pr + log(nt.shape)
+    _check_parity_gradient(backend, u)
+end
+
 @stestset "rk parity beta-binomial column trials literal precision" begin
     bb_cols = (;
         x=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5],
