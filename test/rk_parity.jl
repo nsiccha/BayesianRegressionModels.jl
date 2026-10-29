@@ -1758,10 +1758,12 @@ end
 
 @stestset "rk parity gamma lone log intercept" begin
     # A lone log intercept read through the Gamma response with a sampled
-    # shape (`GammaLog.(shape, log_mu)`). Registered Enzyme (0.13.216) fails to
-    # compile its Reverse gradient (`EnzymeInternalError`, with or without a
-    # `Const` callable); the test env's Enzyme dogfood differentiates it (snag
-    # registered-enzym-dab98569).
+    # shape (`GammaLog.(shape, log_mu)`). On Julia 1.10, registered Enzyme
+    # (0.13.216) fails to compile its Reverse gradient (`EnzymeInternalError`
+    # "Illegal cached pointer", with or without a `Const` callable; exact on
+    # Julia 1.12); the test env's Enzyme dogfood repairs it (nodecayed-phi
+    # fold, enzyme-use; upstream EnzymeAD/Enzyme.jl#3822; snags
+    # registered-enzym-dab98569, Enzyme registered-enzym-674dfbf3).
     gamma_cols = (; y=[1.3, 2.1, 0.7, 1.8, 3.2, 1.1])
     brmi = @brm gamma_cols begin
         log(mu) ~ 1
