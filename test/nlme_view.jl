@@ -801,3 +801,33 @@ end
     # Refused: a String is neither a column name nor labels.
     @test_throws BRMNLMEViewError nested_view("region")
 end
+
+@stestset "a three-margin block's cell gradient equals central differences" begin
+    # On ReactiveKernelsPPL before 0.1.14 this compact cell gradient raised
+    # Enzyme's EnzymeRuntimeException ("could not determine how to keep a
+    # pointer phi … rooted"); BRM's compat floor is 0.1.14.
+    data = (; subject=["a", "b", "c"],
+        ya=[0.2, -0.1, 0.5], yb=[-0.3, 0.4, 0.1], yc=[0.1, 0.0, -0.2])
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        a ~ 1 + (1 | pk | subject)
+        b ~ 1 + (1 | pk | subject)
+        c ~ 1 + (1 | pk | subject)
+        sd(:, pk) ~ Exponential(0.7)
+        cor(:, pk) ~ LKJCholesky(3, 2)
+        ya ~ Normal(a, sigma)
+        yb ~ Normal(b, sigma)
+        yc ~ Normal(c, sigma)
+    end
+    m = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
+    θ = fill(0.1, length(m.theta))
+    σ = fill(-0.5, length(m.sigma))
+    for i in 1:3, η in ([0.05, -0.04, 0.03], [0.1, 0.2, -0.3])
+        value, gradient = brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, η)
+        @test value ≈ brm_nlme_loglikelihood(m, i, θ, σ, η) rtol=1e-12
+        h = 1e-6
+        @test gradient ≈ [(brm_nlme_loglikelihood(m, i, θ, σ, η .+ h .* (1:3 .== k)) -
+            brm_nlme_loglikelihood(m, i, θ, σ, η .- h .* (1:3 .== k))) / 2h
+            for k in 1:3] atol=1e-8
+    end
+end

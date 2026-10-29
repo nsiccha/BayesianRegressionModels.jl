@@ -174,8 +174,13 @@ const PINS = [
     # ReactiveKernelsPPL 0.1.12: a plate column reading a composed predictor
     # is one value, not a composition (e33632cc4, snag
     # rkppl-plate-colu-99114109), so a totals plate over a predictor offset by
-    # another's gather lowers as RKBRMI emits it from 0.2.47.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "06f92402a2e7c1a4e73c3298f61fd95751a8c2cb"),  # main
+    # another's gather lowers as RKBRMI emits it from 0.2.47. 3deb61ae0 contains
+    # 06f92402a and is ReactiveKernels 0.1.12 / ReactiveKernelsPPL 0.1.14: a
+    # compact cell reads its selected coordinates in constant time (c384a3f3e,
+    # snag compact-cell-cal-58569833), and the compact cell gradient of a
+    # three-margin `(1 | pk | subject)` block no longer raises Enzyme's
+    # EnzymeRuntimeException there.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "3deb61ae04c1cefe36cde2b82c31d342936266be"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
