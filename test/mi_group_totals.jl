@@ -312,7 +312,10 @@ end
 end
 
 # RKBRMI's value and native Enzyme gradient against SBBRMI's through the
-# coordinate transport, and the printed RK source replays.
+# coordinate transport, and the printed RK source replays. Points, densities and
+# gradients move through the general maps, which a non-centered completion's
+# free entries need (`t.completions`) and which reduce to the permutation
+# otherwise.
 function check_against_stan(brmi, label; points=3, scale=0.3, gradient=true,
         completions=:centered)
     rk = RKBRMI(brmi; completions)
@@ -326,14 +329,14 @@ function check_against_stan(brmi, label; points=3, scale=0.3, gradient=true,
     for _ in 1:points
         u = scale .* randn(rng, n)
         stan_value, stan_gradient = BridgeStan.log_density_gradient(c.stan.model,
-            brm_rk_to_stan(t, u); propto=false, jacobian=true)
+            brm_rk_point_to_stan(t, u); propto=false, jacobian=true)
         if gradient
             value, g = LogDensityProblems.logdensity_and_gradient(problem, u)
-            @test g ≈ brm_stan_to_rk(t, stan_gradient) atol=1e-9 rtol=1e-10
+            @test g ≈ brm_stan_gradient_to_rk(t, u, stan_gradient) atol=1e-9 rtol=1e-10
         else
             value = LogDensityProblems.logdensity(problem, u)
         end
-        @test value ≈ stan_value atol=1e-10 rtol=1e-11
+        @test value ≈ brm_stan_logdensity_to_rk(t, u, stan_value) atol=1e-10 rtol=1e-11
         @test brm_check_coordinate_transport(t, rk, c.stan.model, u) isa NamedTuple
     end
     (; rk, c, t, problem)
@@ -388,7 +391,10 @@ end
     message(f) = try f(); "" catch e; sprint(showerror, e) end
     @test occursin("needs a location-scale law", message(() ->
         RKBRMI(totals_gamma(data); completions=:noncentered)))
-    # With free entries the free draws `v.z_free` have no Stan counterpart.
-    rk = RKBRMI(totals_assigned(data); completions=:noncentered)
-    @test any(n -> startswith(String(n), "v.z_free."), BRM._rk_layout_coordinate_names(rk))
+    # With free entries, the free draws `v.z_free` pair with Stan's entries
+    # `v_y_free` through their law's location and scale (snag
+    # coordinate-trans-23993804).
+    free = check_against_stan(totals_assigned(data), "rk_nc_free"; completions=:noncentered)
+    @test [b.rk for b in free.t.completions] == [[Symbol("v.z_free.1")]]
+    @test [b.stan for b in free.t.completions] == [["v_y_free.1"]]
 end
