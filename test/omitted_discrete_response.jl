@@ -173,8 +173,7 @@ const rates = (; x=[-1.0, 0.0, 1.0, 2.0], w=[1.0, 2.0, 0.5, 3.0],
         @test occursin(law, flat(omitted))
         @test occursin(law, flat(bound))
     end
-    # Draws stay in each row's window. A fixed mean keeps the truncated
-    # rejection sampler well inside its budget on the narrow windows.
+    # Draws stay in each row's window.
     bounded_draws = @brm begin
         phi ~ LogNormal(1.0, 0.5)
         c ~ truncated(NegativeBinomial2(2.0, phi); lower=lo, upper=hi)
