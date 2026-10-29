@@ -584,7 +584,7 @@ default keeps them shared, and a non-location-scale law is refused); that
 district-year totals cells are attributed to the region owning their rows;
 and that every region's unit problem differs from the full RK density by its
 own unit alone, in value and gradient. It also checks each region's η Hessian
-pattern (`m.eta_sparsity`, what `eta_hessian_sparsity` declares): it covers
+pattern (`BRM._brm_nlme_eta_sparsity(m)`, what `eta_hessian_sparsity` declares): it covers
 every nonzero of the region's dense η-HVP block and leaves most pairs of the
 region's effects out, and a flat model declares none.
 `nlme_units_panel_fit.jl` runs NLMEEstimation on the same panel: the fixed

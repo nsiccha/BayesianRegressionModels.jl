@@ -64,20 +64,17 @@ function _brm_svi_target(m::BRMNLMEModel)
         "no cells attributable to single subjects")
     globals = _brm_svi_globals(m)
     units = m.view.subject_coordinates
-    # Compact cell gradients selecting the globals and one subject's draws; the
-    # subject's positions change per call. Subjects with blocks of one length
-    # (all subjects of a flat model) share a sampler set and its workspace.
-    (; samplers, of) = _brm_nlme_cell_samplers(m.backend, m.cell_query, m.unit,
-        globals, units)
-    work = map(eachindex(samplers)) do k
-        n = length(globals) + length(units[findfirst(==(k), of)])
-        (; active=zeros(n), cell_gradient=zeros(n), gradient=zeros(n))
-    end
+    # Compact cell gradients selecting the globals and the draws each cell
+    # reads (`_brm_nlme_cell_plan` over the reads `m` measured), so a cell
+    # costs its own coordinates, not its subject's whole block.
+    plan = _brm_nlme_cell_plan(m.backend, m.cell_query, m.unit, globals, units,
+        _brm_nlme_cell_state(m).reads)
     # For subject i, `order[i]` sorts [globals; units[i]] into packed order.
     order = [sortperm(vcat(globals, block)) for block in units]
     indices = [vcat(globals, block)[o] for (block, o) in zip(units, order)]
+    work = [(; values=zeros(length(o)), gradient=zeros(length(o))) for o in order]
     nz = count(==(:subject_effect), m.view.role)
-    (; m, globals, units, samplers, of, work, order, indices,
+    (; m, globals, units, plan, work, order, indices,
        z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
 end
 
@@ -94,17 +91,12 @@ end
 function _brm_svi_unit_term!(gg, gz, t, i, g, z)
     D = length(t.globals)
     order = t.order[i]
-    w = t.work[t.of[i]]
+    w = t.work[i]
     joint = vcat(g, z)
-    w.active .= joint[order]
-    value = 0.0
+    w.values .= joint[order]
     fill!(w.gradient, 0.0)
-    for (cell, sampler) in zip(t.m.cell_query, t.samplers[t.of[i]]),
-            p in cell.positions[i]
-        value += first(_rk_nlme_compact_cell_value_and_gradient!(sampler,
-            w.cell_gradient, t.m.unit, w.active, t.indices[i], p))
-        w.gradient .+= w.cell_gradient
-    end
+    value = _brm_nlme_cell_plan_sum!(w.gradient, t.plan, t.m.cell_query, t.m.unit,
+        i, w.values)
     joint_gradient = similar(joint)
     joint_gradient[order] .= w.gradient
     gg .= view(joint_gradient, 1:D)

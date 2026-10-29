@@ -76,7 +76,7 @@ end
     m = panel_model()
     start = brm_nlme_start(m)
     θ, σ, ω = start.theta, start.sigma, start.omega
-    @test NE.eta_hessian_sparsity(m, 1) === m.eta_sparsity[1]
+    @test NE.eta_hessian_sparsity(m, 1) === BRM._brm_nlme_eta_sparsity(m)[1]
     @test NE.default_ebe_method(m) isa NE.NewtonEBE
     rng = Xoshiro(5)
     H = [0.2 .* randn(rng, length(b)) for b in m.view.subject_coordinates]
