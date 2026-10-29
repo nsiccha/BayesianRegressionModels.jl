@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.58
+
+- BRM's compat floor is ReactiveKernels 0.1.12 (was 0.1.7). Before 0.1.12,
+  preparing the reverse-over-forward Hessian-vector-product query that dense η
+  Hessian blocks and the per-unit Laplace read holds 8n² bytes for the n packed
+  coordinates (0.2.57); from 0.1.12 it is linear in n. ReactiveKernelsPPL 0.1.14,
+  BRM's floor since 0.2.56, admits ReactiveKernels from 0.1.9, so an environment
+  that develops the two packages from different ReactiveKernels checkouts could
+  still resolve such a version. **Breaking** for that environment: develop
+  ReactiveKernels from `2d415b7e` or later (`3deb61ae`, the ReactiveKernelsPPL
+  0.1.14 tip, qualifies).
+
 ## 0.2.57
 
 - `brm_nlme_model` prepares its sampler Hessian-vector-product query the first
