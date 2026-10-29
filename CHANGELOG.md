@@ -14,11 +14,11 @@ instead of failing at run time.
 
 ## 0.2.56
 
-- BRM's compat floor is ReactiveKernelsPPL 0.1.14 (was 0.1.12). With earlier
-  RKPPL, a nested or flat NLME model's compact cell gradient can raise Enzyme's
-  `EnzymeRuntimeException` ("could not determine how to keep a pointer phi …
-  rooted"); a three-margin `(1 | pk | subject)` block did, and
-  `test/nlme_view.jl` now checks its gradient against central differences.
+- BRM's compat floor is ReactiveKernelsPPL 0.1.14 (was 0.1.12). On 0.1.12, a
+  flat three-margin `(1 | pk | subject)` block's compact cell gradient raised
+  Enzyme's `EnzymeRuntimeException` ("could not determine how to keep a pointer
+  phi … rooted"); `test/nlme_view.jl` now checks its gradient against central
+  differences.
   ReactiveKernelsPPL 0.1.14 also reads a compact cell's selected coordinates in
   constant time. **Breaking** for an environment that pins ReactiveKernels
   before `3deb61ae`: move that pin with BRM.

@@ -803,7 +803,7 @@ end
 end
 
 @stestset "a three-margin block's cell gradient equals central differences" begin
-    # On ReactiveKernelsPPL before 0.1.14 this compact cell gradient raised
+    # On ReactiveKernelsPPL 0.1.12 this compact cell gradient raised
     # Enzyme's EnzymeRuntimeException ("could not determine how to keep a
     # pointer phi … rooted"); BRM's compat floor is 0.1.14.
     data = (; subject=["a", "b", "c"],
