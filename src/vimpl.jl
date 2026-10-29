@@ -171,9 +171,11 @@ _std(xs, mu=_mean(xs)) = sqrt(sum(abs2, xs .- mu) / (length(xs) - 1))
 # Literals (Int, Float, etc.) inside formula expressions like `a^2` pass
 # through unchanged — they get broadcasted as scalars by Base.broadcasted.
 vbroadcasted(x::Number; meta) = x
-getinverse(x::ExprColumn) = _getinverse(getf(x), getargs(x))
-_getinverse(f, ::Tuple{Any}) = inverse(f)
-_getinverse(f, args::Tuple{ExprColumn}) = inverse(f) ∘ getinverse(only(args))
+getinverse(x::ExprColumn) = _getinverse(x, getf(x), getargs(x))
+_getinverse(_x, f, ::Tuple{Any}) = inverse(f)
+_getinverse(_x, f, args::Tuple{ExprColumn}) = inverse(f) ∘ getinverse(only(args))
+# Any other arity has no inverse; refuse as `getinverse(x)` itself did.
+_getinverse(x, _f, _args) = throw(MethodError(getinverse, (x,)))
 vmeta_sampling(meta, lhs::ExprColumn, rhs) = begin
     meta, o = vmeta_sampling_rhs(meta, rhs; group=:__population__)
     meta, vmaterialize(Base.broadcasted(getinverse(lhs), o))
