@@ -335,21 +335,32 @@ const SVI_NESTED = (; subject_group=:subject, nested_groups=(unit=:obs_subject,)
     m = brm_nlme_model(rk; ad_backend=NLME_AD, SVI_NESTED...)
     @test sort(unique(length.(m.view.subject_coordinates))) == [2, 3, 4]
     # The model prepares no compact sampler until a cell gradient is needed.
-    # Measuring the cells' reads then takes one whole-block sampler per cell
-    # group, whatever the block lengths: a shorter block is padded with η of
-    # the longest, another subject's.
+    # Each cell's reads are then the η its value query reads, kept where its
+    # gradient touches them, without a whole-block selection (todo
+    # 2026-10-29T18-17-12-197-1xunf5b). They are the η a whole-block compact
+    # gradient touches at the same two probe points.
     @test m.cell_gradient.state[] === nothing
+    st = BRM._brm_nlme_cell_state(m)
     globals = sort!(vcat(m.theta, m.sigma))
-    blocks = m.view.subject_coordinates
-    discovery = BRM._brm_nlme_cell_discovery(m.backend, m.cell_query, m.unit, globals,
-        blocks)
-    @test length(discovery.samplers) == length(m.cell_query)
-    @test allequal(length.(discovery.selections))
-    padding = BRM._brm_nlme_padding(blocks)
-    @test all(zip(discovery.selections, blocks)) do (selection, block)
-        issorted(selection) && allunique(selection) &&
-            issubset(vcat(globals, block), selection) &&
-            issubset(setdiff(selection, globals, block), padding)
+    for (i, block) in enumerate(m.view.subject_coordinates)
+        selection = sort!(vcat(globals, block))
+        slots = [searchsortedfirst(selection, j) for j in block]
+        points = [BRM._brm_nlme_read_point(m.unit, globals, block, selection, phase)
+            for phase in (1, 2)]
+        gradient = zeros(length(selection))
+        for (g, cell) in enumerate(m.cell_query)
+            sampler = BRM._rk_nlme_compact_cell_sampler(m.backend, cell.names, m.unit,
+                selection)
+            for (k, p) in enumerate(cell.positions[i])
+                touched = falses(length(block))
+                for active in points
+                    BRM._rk_nlme_compact_cell_value_and_gradient!(sampler, gradient,
+                        m.unit, active, selection, p)
+                    touched .|= .!iszero.(gradient[slots])
+                end
+                @test st.reads[i][g][k] == block[touched]
+            end
+        end
     end
     # SVI prepares one compact sampler per cell group, selecting the globals
     # and the draws each cell reads, whatever the subject's block length.
