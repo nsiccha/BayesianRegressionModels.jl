@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.50
+
+- `brm_nlme_model` attributes an observation on rows other than the subject
+  column's to the subjects it reads (before, it refused one whose density
+  count was not one per subject-column row: "its densities cannot be
+  attributed to subjects"). This covers a fragment's rows read through an
+  index (`exp(log_f[f_obs])`), a plate over the fragment's own groups
+  (`groups(f_hid => f_ky)`) and an observation that reads no random effect.
+  Each density's subject is measured on the pointwise query, moving the η
+  blocks of halves of the subjects (2⌈log₂ n⌉ evaluations for n subjects),
+  so SAEM, SVI and the per-unit Laplace problem take such models. A density
+  that reads several subjects' random effects is refused, naming them; one
+  that reads none counts toward the first subject. Each measured
+  observation's densities are cells of their own subjects, so
+  `brm_nlme_loglikelihood` and the compact cell gradients evaluate one
+  subject's. Snag `nlme-model-obser-dd665aca`.
+
 ## 0.2.49
 
 - `brm_coordinate_transport` pairs the completions of

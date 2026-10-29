@@ -92,6 +92,20 @@ coordinates' family in `NLMEEstimation.fixed_omega`, `check_protocol` (with
 the η Hessian blocks) and a short SAEM fit. Run it in the NLMEEstimation
 scratch environment described below. Snag `nlme-view-shares-f1cfaa71`.
 
+`nlme_offaxis_observations.jl` (test environment) checks `brm_nlme_model`'s
+attribution of observations on rows other than the subject column's, on a
+regional panel with a fragment of its own (`nlme_offaxis_fixture.jl`): its
+published counts read through an index (`exp(log_f[f_obs])`), its suppressed
+counts' residuals as a plate over its own groups, and a count that reads no
+random effect. Each density's measured region is checked against the region
+of its rows in the data, and the per-region likelihoods against the
+pointwise densities summed by those regions; lockstep, per-subject cells and
+unit problems against the full RK density; a residual whose rows lie in two
+regions is refused, naming them; and per-unit Laplace and SVI run.
+`nlme_offaxis_observations_fit.jl` runs `check_protocol` and a short SAEM fit
+on that panel in the NLMEEstimation scratch environment described below.
+Snag `nlme-model-obser-dd665aca`.
+
 `plate_subset_response_sums.jl` checks a response on some of a predictor's
 rows, the others observed only through group sums (suppressed cells of a count
 table): SBBRMI against an independent density for Poisson and NB2 cells, a
