@@ -4,10 +4,12 @@
 # units' interior sums are shared. The field, its density (up to a constant
 # Jacobian) and its graph are those of the default lowering.
 #
-# The units are labels row-aligned with the model rows: the name of a column
-# the model reads, or the labels themselves. An area's unit is the unit of its
-# rows; an area with no rows, or with rows in several units, is a separator
-# area.
+# The units are labels row-aligned with a field's rows: the name of a column
+# the model reads, or the labels themselves, for every field; or one such entry
+# per field, keyed by its area column (`car_units = (area = :units, …)`), for
+# fields on different row sets; a field without an entry keeps the default
+# lowering. An area's unit is the unit of its rows; an area with no rows, or
+# with rows in several units, is a separator area.
 
 # A fit's separations, which a frozen replay reuses with its fitted graphs, by
 # each field's predictor and area column; `units` is the caller's `car_units`.
@@ -33,13 +35,17 @@ _rk_separate_car_fields(plan, _units) = error(
     "`car(...)` term")
 function _rk_separate_car_fields(plan::_RKStructuralPlan, units;
         labels_from=plan.columns, taken=_rk_plan_taken(plan), added=nothing)
-    any(t -> t.kind === :car, (t for p in plan.predictors for t in p.terms)) || error(
+    areas = unique!(Symbol[t.options.source for p in plan.predictors for t in p.terms
+        if t.kind === :car])
+    isempty(areas) && error(
         "RK backend: `car_units` samples `car(...)` fields by their unit border " *
         "separator, but this model has no `car(...)` term")
+    _rk_check_car_unit_keys(units, areas)
     columns = Dict{Symbol,AbstractVector}(plan.columns)
     predictors = map(plan.predictors) do predictor
         terms = map(predictor.terms) do term
-            term.kind === :car || return term
+            term.kind === :car &&
+                _rk_car_separates(units, predictor.name, term.options.source) || return term
             fit = _rk_car_unit_separation(units, predictor.name, term.options, labels_from)
             separated = _rk_car_separated_options(term.options, fit, columns, taken)
             _RKTermSpec(term.kind, term.columns, separated, term.addressee, term.label)
@@ -54,6 +60,23 @@ function _rk_separate_car_fields(plan::_RKStructuralPlan, units;
         plan.horseshoe_priors)
 end
 
+# Which fields `car_units` separates, and the units of each: one entry for
+# every field, or a field's own entry keyed by its area column.
+_rk_car_separates(_units, _predictor::Symbol, _area::Symbol) = true
+_rk_car_separates(units::NamedTuple, _predictor::Symbol, area::Symbol) = haskey(units, area)
+_rk_car_field_units(units, area::Symbol) = units
+_rk_car_field_units(units::NamedTuple, area::Symbol) = units[area]
+
+_rk_check_car_unit_keys(_units, _areas) = nothing
+function _rk_check_car_unit_keys(units::NamedTuple, areas)
+    unknown = setdiff(keys(units), areas)
+    isempty(unknown) || error(
+        "RK backend: `car_units` names $(join(("`$k`" for k in unknown), ", ")), which " *
+        "is no `car(...)` area column of this model; its `car` fields are over " *
+        "$(join(("`$a`" for a in areas), ", "))")
+    nothing
+end
+
 function _rk_car_unit_labels(units::Symbol, columns, area::Symbol)
     haskey(columns, units) || error(
         "RK backend: `car_units = :$units` names no column the model reads; pass " *
@@ -63,17 +86,27 @@ function _rk_car_unit_labels(units::Symbol, columns, area::Symbol)
 end
 _rk_car_unit_labels(units::AbstractVector, _columns, _area::Symbol) = units
 _rk_car_unit_labels(units, _columns, _area::Symbol) = throw(ArgumentError(
-    "car_units must name a column (a Symbol) or be a vector of unit labels, got " *
-    "$(typeof(units))"))
+    "car_units must name a column (a Symbol), be a vector of unit labels, or give " *
+    "each `car(...)` area column one of those (`car_units = (area = :units, …)`), " *
+    "got $(typeof(units))"))
+
+_rk_car_units_rows_error(_units, area::Symbol, nlabels, nrows) = error(
+    "RK backend: `car_units` has $nlabels labels, but `car($area)` has $nrows rows. " *
+    "Labels row-aligned with one row set cannot label a `car` field on another; " *
+    "give each field labels of its own rows, keyed by its area column: " *
+    "`car_units = ($area = <labels of its rows>, …)`")
+_rk_car_units_rows_error(_units::NamedTuple, area::Symbol, nlabels, nrows) = error(
+    "RK backend: `car_units.$area` has $nlabels labels, but `car($area)` has " *
+    "$nrows rows; give each field labels row-aligned with its own rows")
 
 # A field's separation over the caller's unit labels: the units in their level
 # order, each area's unit (`0`: none or several), and `_brm_car_separation`.
 function _rk_car_unit_separation(units, predictor::Symbol, options, labels_from)
     area_labels = labels_from[options.area]
-    labels = _rk_car_unit_labels(units, labels_from, options.source)
-    length(labels) == length(area_labels) || error(
-        "RK backend: `car_units` has $(length(labels)) labels, but `car($(options.source))` " *
-        "has $(length(area_labels)) rows")
+    labels = _rk_car_unit_labels(_rk_car_field_units(units, options.source),
+        labels_from, options.source)
+    length(labels) == length(area_labels) || _rk_car_units_rows_error(units,
+        options.source, length(labels), length(area_labels))
     levels = Any[_rk_grouping_levels(labels)...]
     unit_index = Dict(_brm_transport_level(l) => k for (k, l) in enumerate(levels))
     nodes = options.nodes
@@ -95,7 +128,10 @@ function _rk_car_unit_separation(units, predictor::Symbol, options, labels_from)
        separation=_brm_car_separation(graph, unit, length(levels)))
 end
 
-# A frozen replay keeps the fit's graph, and with it the fit's separation.
+# A frozen replay keeps the fit's graph, and with it the fit's separation; a
+# field the fit lowered without one keeps the default lowering.
+_rk_car_separates(fitted::_RKFittedCarUnits, predictor::Symbol, area::Symbol) =
+    haskey(fitted.separations, (predictor, area))
 function _rk_car_unit_separation(fitted::_RKFittedCarUnits, predictor::Symbol, options,
         _labels_from)
     fit = get(fitted.separations, (predictor, options.source), nothing)
@@ -159,12 +195,14 @@ function _rk_fitted_car_units(plan)
 end
 
 # The `car_units` a rebuild on new data (`freeze_constants=false`) passes again:
-# a column name; labels of the fit's rows do not label the new ones.
+# column names; labels of the fit's rows do not label the new ones.
 _rk_rebuilt_car_units(::Nothing) = nothing
 function _rk_rebuilt_car_units(fitted::_RKFittedCarUnits)
-    fitted.units isa Symbol && return fitted.units
+    units = fitted.units
+    units isa Symbol && return units
+    units isa NamedTuple && all(u -> u isa Symbol, values(units)) && return units
     error("RK reprocess: this backend was lowered with `car_units` labels for the " *
         "fit's rows, which do not label the new data's rows. Rebuild it with " *
         "`RKBRMI(brmi; car_units = <labels of the new rows>)`, or lower the fit " *
-        "with `car_units` naming a column.")
+        "with `car_units` naming columns.")
 end

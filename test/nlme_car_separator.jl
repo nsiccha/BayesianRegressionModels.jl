@@ -13,7 +13,10 @@
 # full RK density, for ICAR and BYM2; the coordinate transport to SBBRMI's field
 # (points both ways, densities, gradients) and a full Stan start from NLME
 # values; a unit label that is no subject, refused by name; frozen and rebuilt
-# replays. Snag `car-units-border-aa5e8712`.
+# replays. Snag `car-units-border-aa5e8712`. Fields on different row sets,
+# each with its own units keyed by its area column (`car_units = (area = …,
+# area_b = …)`), and a field without an entry, which keeps the default
+# lowering: snag `car-units-takes-28b61c9c`.
 #
 # Run: julia --project=test test/nlme_car_separator.jl [testset-filter...]
 
@@ -53,27 +56,53 @@ sep_bym2(data) = @brm data begin
     y ~ Normal(mu, sigma)
 end
 
-car_term(rk) = only(t for p in BRM._rk_replay_predictors(rk.plan) for t in p.terms
-    if t.kind === :car)
+# A second part of the model on a row set of its own over the same areas, as
+# a model's parts read the Gemeinden from different tables: one row per area
+# r1–r21, in reverse order, with its own unit labels `subject_b`, observed in
+# a plate cell per row (one observation axis holds only the model-scope
+# responses). No single labels vector is row-aligned with both fields.
+const SEP_TWO = let rng = Xoshiro(20261030)
+    area_b = ["r$j" for j in 21:-1:1]
+    subject_b = [SEP_DATA.subject[findfirst(==(a), SEP_DATA.area)] for a in area_b]
+    x_b = round.(randn(rng, length(area_b)); digits=2)
+    y_b = round.(-0.2 .+ 0.5 .* x_b .+ 0.4 .* randn(rng, length(area_b)); digits=2)
+    merge(SEP_DATA, (; area_b, subject_b, x_b, y_b))
+end
+sep_two(data) = @brm data begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | subject) + car(area; edges=(from, to), type=:icar)
+    mu_b ~ 1 + x_b + (1 | subject_b) + car(area_b; edges=(from, to), type=:icar)
+    y ~ Normal(mu, sigma)
+    @plate for i in eachindex(y_b)
+        y_b[i] ~ Normal(mu_b[i], sigma)
+    end
+end
+const SEP_TWO_UNITS = (; area=:subject, area_b=:subject_b)
+const SEP_TWO_GROUPS = (; subject_group=:subject, nested_groups=(subject_b=:subject_b,))
+
+car_terms(rk) = [t for p in BRM._rk_replay_predictors(rk.plan) for t in p.terms
+    if t.kind === :car]
+car_term(rk) = only(car_terms(rk))
+car_term(rk, area::Symbol) = only(t for t in car_terms(rk) if t.options.source === area)
 coordinate_names(rk) = Vector{Symbol}(BRM._rk_layout_coordinate_names(rk))
 message(f) = try f(); "" catch e; sprint(showerror, e) end
 
 # A separated field's shared draws, and its unit draws in draw order (unit by
 # unit, as `separation.draw_units` labels them).
-shared_names(rk) = (o = car_term(rk).options;
+shared_names(rk, term=car_term(rk)) = (o = term.options;
     [Symbol(o.value, ".w.", k) for k in 1:o.separation.m])
-draw_names(rk) = (o = car_term(rk).options;
+draw_names(rk, term=car_term(rk)) = (o = term.options;
     [Symbol(o.value, ".z_", b.unit, ".", j) for b in o.separation.blocks for j in 1:b.ndraws])
 
 # The field `phi` (graph order) of a separated backend at its packed point `u`,
 # from the emitted formula's data.
-function separated_phi(rk, u)
-    options = car_term(rk).options
+function separated_phi(rk, u, term=car_term(rk))
+    options = term.options
     s, columns = options.separation, rk.plan.columns
     names = coordinate_names(rk)
     at(name) = u[findfirst(==(name), names)]
-    w = at.(shared_names(rk))
-    z = at.(draw_names(rk))
+    w = at.(shared_names(rk, term))
+    z = at.(draw_names(rk, term))
     x = BRM._brm_car_shared_values(w, only(columns[s.F]))
     parts = Any[x[columns[s.x_phi]]]
     for b in s.blocks
@@ -333,6 +362,109 @@ end
     rebuilt = reprocess(rk, fresh; freeze_constants=false)
     @test coordinate_names(rebuilt) == coordinate_names(rk)
     labelled = RKBRMI(sep_icar(SEP_DATA); car_units=SEP_DATA.subject)
+    # refused: the labels name the fit's rows, not the new ones (todo
+    # 2026-10-28T13-18-22-697-0v882rf).
+    @test occursin("do not label the new data's rows",
+        message(() -> reprocess(labelled, fresh; freeze_constants=false)))
+end
+
+@stestset "car fields on different row sets take their own units" begin
+    # refused: one labels vector is row-aligned with one row set, so it cannot
+    # give the areas of a field on another their units (snag
+    # car-units-takes-28b61c9c); the error names the keyed form.
+    refusal = message(() -> RKBRMI(sep_two(SEP_TWO); car_units=:subject))
+    @test occursin("`car_units` has 32 labels, but `car(area_b)` has 21 rows", refusal)
+    @test occursin("`car_units = (area_b = <labels of its rows>, …)`", refusal)
+    rk = RKBRMI(sep_two(SEP_TWO); car_units=SEP_TWO_UNITS)
+    terms = car_terms(rk)
+    @test length(terms) == 2 && all(t -> haskey(t.options, :separation), terms)
+    # Both fields are over the same areas, each area in the unit of its rows,
+    # so both have the one-field model's separator.
+    columns = rk.plan.columns
+    separator(t) = (o = t.options; sort!([o.nodes[k] for (k, p) in
+        enumerate(columns[o.struct_pos]) if p <= o.n_struct && o.separation.shared[p]]))
+    @test separator(car_term(rk, :area)) == separator(car_term(rk, :area_b)) ==
+        sort(["r2", "r3", "r6", "r8", "r9", "r12", "r15", "r22"])
+    # The labels themselves, per field, lower the same program.
+    labelled = RKBRMI(sep_two(SEP_TWO);
+        car_units=(area=SEP_TWO.subject, area_b=SEP_TWO.subject_b))
+    @test coordinate_names(labelled) == coordinate_names(rk)
+    # Each field is the default lowering's at the same field: the densities
+    # differ by a constant.
+    default = RKBRMI(sep_two(SEP_TWO))
+    names, default_names = coordinate_names(rk), coordinate_names(default)
+    fields = [(string(d.options.value, ".phi."), car_term(rk, d.options.source))
+        for d in car_terms(default)]
+    full = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+    default_full = rk_logdensity_problem(default; ad_backend=NLME_AD)
+    rng = Xoshiro(21)
+    differences = map(1:3) do _
+        u = 0.5 .* randn(rng, length(names))
+        phis = [(prefix, separated_phi(rk, u, t)) for (prefix, t) in fields]
+        v = map(default_names) do name
+            text = String(name)
+            for (prefix, phi) in phis
+                startswith(text, prefix) && return phi[parse(Int, text[length(prefix)+1:end])]
+            end
+            u[findfirst(==(name), names)]
+        end
+        LogDensityProblems.logdensity(full, u) - LogDensityProblems.logdensity(default_full, v)
+    end
+    @test differences[2] ≈ differences[1] atol=1e-8
+    @test differences[3] ≈ differences[1] atol=1e-8
+    # Each field's interior draws are unit draws of their subject, on either
+    # row set; only the separator draws are shared.
+    v = brm_nlme_view(rk; SEP_TWO_GROUPS...)
+    @test !any(==(:unclaimed), v.role)
+    for t in terms
+        for (name, label) in zip(draw_names(rk, t), t.options.separation.draw_units)
+            c = findfirst(==(name), v.coordinates)
+            @test v.role[c] === :subject_effect && v.levels[v.subject[c]] == label
+        end
+        @test all(name -> v.role[findfirst(==(name), v.coordinates)] === :shared_latent,
+            shared_names(rk, t))
+    end
+    m = brm_nlme_model(rk; ad_backend=NLME_AD, SEP_TWO_GROUPS...)
+    check_lockstep(m, Xoshiro(22))
+    check_unit_problems(m, Xoshiro(23))
+end
+
+@stestset "a car_units entry per field, and a field without one" begin
+    rk = RKBRMI(sep_two(SEP_TWO); car_units=(area=:subject,))
+    @test haskey(car_term(rk, :area).options, :separation)
+    @test !haskey(car_term(rk, :area_b).options, :separation)
+    # The field without an entry is the default lowering's, shared whole.
+    v = brm_nlme_view(rk; SEP_TWO_GROUPS...)
+    @test !any(==(:unclaimed), v.role)
+    phi_b = string(car_term(rk, :area_b).options.value, ".phi.")
+    field_b = findall(name -> startswith(String(name), phi_b), v.coordinates)
+    @test length(field_b) == car_term(rk, :area_b).options.n_struct
+    @test all(c -> v.role[c] === :shared_latent, field_b)
+    # refused: a key that is no car field's area column separates nothing it
+    # names, most likely a misspelt area (snag car-units-takes-28b61c9c).
+    @test occursin("`car_units` names `area_c`, which is no `car(...)` area column",
+        message(() -> RKBRMI(sep_two(SEP_TWO); car_units=(area=:subject, area_c=:subject))))
+    # refused: an entry's labels must be row-aligned with its own field's rows
+    # (snag car-units-takes-28b61c9c).
+    @test occursin("`car_units.area_b` has 32 labels, but `car(area_b)` has 21 rows",
+        message(() -> RKBRMI(sep_two(SEP_TWO); car_units=(area=:subject, area_b=:subject))))
+end
+
+@stestset "a replay keeps per-field separations" begin
+    rk = RKBRMI(sep_two(SEP_TWO); car_units=SEP_TWO_UNITS)
+    fresh = merge(SEP_TWO, (; x=reverse(SEP_TWO.x), x_b=reverse(SEP_TWO.x_b)))
+    replay = reprocess(rk, fresh)
+    @test coordinate_names(replay) == coordinate_names(rk)
+    @test all(car_term(replay, a).options.separation.fit.separation ===
+        car_term(rk, a).options.separation.fit.separation for a in (:area, :area_b))
+    @test coordinate_names(reprocess(rk, fresh; freeze_constants=false)) ==
+        coordinate_names(rk)
+    # A field the fit lowered without an entry keeps the default lowering.
+    partial = RKBRMI(sep_two(SEP_TWO); car_units=(area=:subject,))
+    @test coordinate_names(reprocess(partial, fresh)) == coordinate_names(partial)
+    @test coordinate_names(reprocess(partial, fresh; freeze_constants=false)) ==
+        coordinate_names(partial)
+    labelled = RKBRMI(sep_two(SEP_TWO); car_units=(area=:subject, area_b=SEP_TWO.subject_b))
     # refused: the labels name the fit's rows, not the new ones (todo
     # 2026-10-28T13-18-22-697-0v882rf).
     @test occursin("do not label the new data's rows",

@@ -509,9 +509,12 @@ observes the rest of their density, the law at its entries and the shares'
 log-Jacobian less the draws' standard-normal density. The density is the
 centred one; `:pointwise` holds those group terms as the observation of a
 placeholder per group. The entries of no group need a location-scale law.
-`car_units` samples every `car(...)` field by its unit border separator: unit
-labels row-aligned with the model rows (the name of a column the model reads,
-or the labels themselves) give each area the unit of its rows. The separator
+`car_units` samples `car(...)` fields by their unit border separator: unit
+labels row-aligned with a field's rows (the name of a column the model reads,
+or the labels themselves) give each area the unit of its rows. One such entry
+labels every field; fields on different row sets each take their own, keyed by
+their area column (`car_units = (area = :units, area_b = :units_b)`), and a
+field without an entry keeps the default lowering. The separator
 holds the areas of no unit or of several units and, on each border between two
 units, the border areas of the side with fewer of them. Given the separator
 values and each unit's sum over its interior areas (per connected component),
@@ -522,10 +525,11 @@ lowering's field and density, up to a constant Jacobian, soft sum-to-zero
 included; a component inside one unit is all that unit's draws. [`brm_nlme_view`](@ref) then reads
 the interior draws (and a BYM2 field's per-area iid part) as unit draws, so θ
 holds the separator values and the sums instead of one coordinate per area.
-The per-unit factors are dense (`n_u²` per unit). [`reprocess`](@ref) keeps
-the fit's separation on a frozen replay and lowers a rebuild with the same
-`car_units` column; [`brm_coordinate_transport`](@ref) does not map a
-separated field yet.
+Each unit's interior, and the shared values, are mapped through sparse
+Cholesky factors, linear in the graph's edges. [`reprocess`](@ref) keeps the
+fit's separation on a frozen replay and lowers a rebuild with the same
+`car_units` columns; [`brm_coordinate_transport`](@ref) maps a separated field
+to SBBRMI's field through the separation's exact linear map.
 
 The three-argument constructor wraps an existing artifact build without
 planning, translation, emitted-definition evaluation or kernel construction.
