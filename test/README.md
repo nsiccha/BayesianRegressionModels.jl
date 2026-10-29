@@ -575,12 +575,18 @@ completion a unit draw in a family fixed at unit variance (and that the
 default keeps them shared, and a non-location-scale law is refused); that
 district-year totals cells are attributed to the region owning their rows;
 and that every region's unit problem differs from the full RK density by its
-own unit alone, in value and gradient.
+own unit alone, in value and gradient. It also checks each region's η Hessian
+pattern (`m.eta_sparsity`, what `eta_hessian_sparsity` declares): it covers
+every nonzero of the region's dense η-HVP block and leaves most pairs of the
+region's effects out, and a flat model declares none.
 `nlme_units_panel_fit.jl` runs NLMEEstimation on the same panel: the fixed
 completion family (`NLMEEstimation.fixed_omega`), prior-median starts in every
 stratum, the population prior's ω gradient against finite differences with a
-fixed family present, stratified estimates by stratum, and a timed
-`brm_two_stage_fit`. Run it in the NLMEEstimation scratch environment
+fixed family present, stratified estimates by stratum, sparse η Hessians from
+the declared patterns (`check_protocol` against η-gradient differences,
+`NewtonEBE` by default, and `empirical_bayes`'s sparse Hessians equal to the
+dense blocks less the prior precision; NLMEEstimation 0.1.3 or later), and a
+timed `brm_two_stage_fit`. Run it in the NLMEEstimation scratch environment
 described below; NLMEEstimation master needs Treebars `a2f9e41` or later,
 newer than this environment's pin.
 

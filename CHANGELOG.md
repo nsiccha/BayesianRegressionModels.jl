@@ -12,6 +12,24 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.52
+
+- A nested NLME model (`brm_nlme_model` with `subject_group` /
+  `nested_groups`) whose observations have subject cells declares each
+  subject's η Hessian pattern to NLMEEstimation (`eta_hessian_sparsity`):
+  which of the subject's effects enter one observation cell together. With it,
+  `empirical_bayes` (and so `brm_nlme_fit`'s EBE pass after `saem`),
+  `marginal_loglikelihood` and `covariance_step` compute sparse η Hessians
+  from batched η gradients, linear in a subject's number of effects, instead
+  of dense blocks from one η-HVP per coordinate (5.4 GB for one subject of
+  25,871 effects). On the regional panel at 12 regions of 2,856–2,930 effects,
+  the patterns take 1.6 s to build, hold 2.1% of each block, and
+  `empirical_bayes` from the prior-median start converges for all 12 regions
+  in 138 s. Flat models, and nested models without subject cells, declare
+  none and keep dense blocks.
+- `NLMEEstimation = "0.1.3"` is the compat floor (the version that adds
+  `eta_hessian_sparsity`); SparseArrays is a dependency.
+
 ## 0.2.51
 
 - BRM's compat floor for its RKBRMI extensions is ReactiveKernels 0.1.7 and
