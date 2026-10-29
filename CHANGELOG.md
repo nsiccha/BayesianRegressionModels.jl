@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.51
+
+- BRM's compat floor for its RKBRMI extensions is ReactiveKernels 0.1.7 and
+  ReactiveKernelsPPL 0.1.3 (was 0.1). A model-scope `logistic` value that
+  RKBRMI emits as `logistic.(...)` (0.2.45) can be a location summand scaled
+  by another value, `e = logistic(b) * exp(a)` then
+  `y ~ Normal(p + e * exp(a), sigma)`; ReactiveKernelsPPL before 0.1.3 fails
+  to bind it ("term references missing column `_rkppl_leaf_1`"). The floor
+  makes Pkg refuse such an environment when it resolves instead.
+  **Breaking** for an environment that pins ReactiveKernels before
+  `2a682926`: move that pin to `2a682926` or later together with BRM.
+- BRM's test environment pins ReactiveKernels `2a682926` (0.1.7). The three
+  inline count-location parity checks in `test/rk_inline_response_location.jl`
+  are ordinary tests now (they needed ReactiveKernelsPPL 0.1.2).
+
 ## 0.2.50
 
 - `brm_nlme_model` attributes an observation on rows other than the subject
