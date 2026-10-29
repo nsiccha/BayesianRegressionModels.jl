@@ -111,7 +111,8 @@ function _brm_nlme_worker_model(m::BRMNLMEModel)
     BRMNLMEModel(m.view, m.backend, m.sampler, m.pointwise, m.eta_hvp, m.attribution,
         m.theta, m.sigma, m.eta_blocks, m.unit, m.observations_query,
         m.observations_pushforward, m.observed, m.observation_attribution,
-        cell_query, cell_gradient, m.population_prior, m.prior_structure)
+        cell_query, cell_gradient, m.population_prior, m.prior_structure,
+        m.eta_sparsity)
 end
 
 """

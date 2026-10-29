@@ -173,6 +173,17 @@ end
         m = brm_nlme_model(rk; ad_backend=NLME_AD)
         check_lockstep(m, Xoshiro(5))
         check_unit_problems(m, Xoshiro(6))
+        # Each unit's declared η Hessian pattern covers its dense η-HVP block:
+        # an observation reading an interior area reads its unit's draws
+        # through that unit's interior map.
+        rng = Xoshiro(7)
+        θ = 0.1 .* randn(rng, length(m.theta))
+        σ = 0.1 .* randn(rng, length(m.sigma))
+        H = [0.3 .* randn(rng, length(b)) for b in m.view.subject_coordinates]
+        blocks = BRM._brm_nlme_hessian_blocks(m, θ, σ, H)
+        for (P, block) in zip(m.eta_sparsity, blocks)
+            @test all(I -> P[I] || I[1] == I[2], findall(x -> abs(x) > 1e-10, block))
+        end
     end
 end
 

@@ -54,6 +54,13 @@ NE.saem_population_gradient_style(m::BRM.BRMNLMEModel, ::Val{:online}) =
 NE.saem_population_gradient_style(::BRM.BRMNLMEModel, ::Val{:mixture}) =
     NE.BatchedEvaluation()
 NE.provides_eta_hessian(::BRM.BRMNLMEModel) = true
+
+# A nested model with subject cells declares each subject's η Hessian pattern
+# (`BRM._brm_nlme_eta_patterns`), so NLMEEstimation computes sparse η Hessians
+# from batched η gradients instead of asking for dense blocks; other models
+# declare none.
+NE.eta_hessian_sparsity(m::BRM.BRMNLMEModel, i::Integer) =
+    m.eta_sparsity === nothing ? nothing : m.eta_sparsity[i]
 # Other numerical derivatives still use Enzyme. The RK pointwise query mixes
 # active and constant overlay reads.
 NE.ad_backend(::BRM.BRMNLMEModel) =

@@ -72,6 +72,33 @@ function warmup_sampler(unit)
     Matrix(run.posterior_position)
 end
 
+@stestset "η Hessians are sparse from the declared patterns" begin
+    m = panel_model()
+    start = brm_nlme_start(m)
+    θ, σ, ω = start.theta, start.sigma, start.omega
+    @test NE.eta_hessian_sparsity(m, 1) === m.eta_sparsity[1]
+    @test NE.default_ebe_method(m) isa NE.NewtonEBE
+    rng = Xoshiro(5)
+    H = [0.2 .* randn(rng, length(b)) for b in m.view.subject_coordinates]
+    # check_protocol compares each pattern's sparse Hessian with η gradient
+    # differences along a random direction.
+    @test check_protocol(m, θ, σ, ω; η=H)
+    ebe = empirical_bayes(m, θ, σ, ω)
+    @test all(ebe.converged)
+    @test all(h -> h isa BRM.SparseMatrixCSC, ebe.hessians)
+    # The sparse complete-data Hessian at each mode equals BRM's dense
+    # conditional block there (one RK η-HVP per coordinate), less the
+    # random-effect prior's precision: one inverse family covariance per
+    # block instance of the subject.
+    layout = NE.nlme_layout(m)
+    Ωs = NE.omega_matrix(layout, ω)
+    dense = BRM._brm_nlme_hessian_blocks(m, θ, σ, ebe.modes)
+    for (k, i) in enumerate(ebe.subjects)
+        precision = cat((inv(Ωs[f]) for f in layout.subject_families[i])...; dims=(1, 2))
+        @test Matrix(ebe.hessians[k]) ≈ dense[i] - precision rtol=1e-4 atol=1e-4
+    end
+end
+
 @stestset "two-stage fit of the panel" begin
     rk = RKBRMI(panel(PANEL); completions=:noncentered)
     seconds = @elapsed fit = brm_two_stage_fit(warmup_sampler, rk; threads=1,
