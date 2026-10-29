@@ -222,7 +222,7 @@ end
         brmi = p.inline(d)
         c = compiled(brmi, p.name * "_inline")
         # RKPPL before 0.1.2 refuses an inline expression in a count family's
-        # location slot (`broadcast the link`); @test once the RK pin has 0.1.2.
-        @test_broken rk_agrees(brmi, c)
+        # location slot (`broadcast the link`); the test env's RK pin has it.
+        @test rk_agrees(brmi, c)
     end
 end
