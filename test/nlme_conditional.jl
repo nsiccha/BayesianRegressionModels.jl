@@ -302,3 +302,90 @@ end
     @test count(m -> m.block.group === :unit, r.margins) == 6
     check_rk_parity(c, r, c.position, x)
 end
+
+# Stratified blocks (snag stratified-block-7a992e61): a clearance block with
+# one SD per arm beside a plain volume block, and one clearance/volume block
+# with a covariance per arm (BRM todo 1srx3ud). The subjects' arms (b, a, b, a)
+# are not in subject order, so a positional stratum pairing would cross them.
+function nlme_stratified(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        log(CL) ~ 1 + wt + (1 | gr(subject, by = arm))
+        log(V) ~ 1 + (1 | subject)
+        m = dose / V * exp(-CL / V * t)
+        y ~ Normal(m, sigma)
+    end
+end
+
+function nlme_stratified_joint(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        log(CL) ~ 1 + wt + (1 | pk | gr(subject, by = arm))
+        log(V) ~ 1 + (1 | pk | gr(subject, by = arm))
+        m = dose / V * exp(-CL / V * t)
+        y ~ Normal(m, sigma)
+    end
+end
+
+@stestset "a stratified block's strata reach their own Stan coordinates" begin
+    arms = Dict("s1" => "b", "s2" => "a", "s3" => "b", "s4" => "a")
+    data = merge(NLME_DATA, (; arm=[arms[s] for s in NLME_DATA.subject]))
+    # One natural-effect covariance per family: arm a, arm b (and the volume
+    # block of the first model).
+    cases = ((nlme_stratified, 1, Dict("a" => fill(0.16, 1, 1),
+                  "b" => fill(0.49, 1, 1), nothing => fill(0.25, 1, 1))),
+             (nlme_stratified_joint, 2, Dict("a" => [0.16 0.05; 0.05 0.36],
+                  "b" => [0.49 -0.1; -0.1 0.25])))
+    for (model, K, covariance) in cases
+        brmi = model(data)
+        rk = RKBRMI(brmi)
+        sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+        map = brm_nlme_joint_map(rk, sb;
+            path=joinpath(CONDITIONAL_DIR, string(nameof(model), ".stan")))
+        view = map.view
+        strata = [f for f in view.families if f.stratum !== nothing]
+        @test [f.block.stratum for f in strata] == ["a", "b"]
+        @test all(f -> f.size == K && length(f.factor) == K * (K - 1) ÷ 2, strata)
+        @test all(i -> view.role[i] === :subject_correlation,
+            reduce(vcat, (f.factor for f in strata); init=Int[]))
+        @test length(view.families) == length(covariance)
+        Ω = [covariance[get(f.block, :stratum, nothing)] for f in view.families]
+        θ = collect(range(0.3, -0.2; length=count(==(:population), view.role)))
+        σ = [-0.61]
+        H = [[0.1i - 0.07k for k in eachindex(view.subject_coordinates[i])]
+             for i in eachindex(view.levels)]
+        start = brm_nlme_joint_start(map; theta=θ, sigma=σ, omega=Ω, eta=H,
+            subjects=view.levels)
+        @test start.checked.max_error <= 1e-9
+        @test start.checked.factors == (K == 1 ? 0 : 2)
+        recovered = brm_nlme_joint_values(map, start.stan)
+        @test all(recovered.omega[f] ≈ Ω[f] for f in eachindex(Ω))
+        @test all(recovered.eta[i] ≈ H[i] for i in eachindex(H))
+        # Each arm's SDs and correlation are Stan's of that arm, and each
+        # subject's stratified effects are its own natural effects.
+        constrained = BridgeStan.param_constrain(map.stan_model, start.stan;
+            include_tp=true)
+        entries = brm_ranef_draws(brm_descriptor(sb), reshape(constrained, 1, :),
+            BridgeStan.param_names(map.stan_model; include_tp=true); group=:subject)
+        stratified = [e for e in entries if e.by === :arm]
+        @test Set(e.stratum for e in stratified) == Set(["a", "b"])
+        for entry in stratified
+            C = covariance[entry.stratum]
+            sd = sqrt.(diag(C))
+            @test vec(entry.sd) ≈ sd atol=1e-10
+            @test entry.cor[1, :, :] ≈ C ./ (sd * sd') atol=1e-10
+            for (h, level) in enumerate(entry.levels)
+                i = findfirst(==(level), view.levels)
+                k = [j for (j, m) in enumerate(view.subject_margins[i])
+                    if get(m.block, :stratum, nothing) == entry.stratum]
+                @test arms[level] == entry.stratum
+                @test vec(entry.effects[1, h, :]) ≈ H[i][k] atol=1e-10
+            end
+        end
+        c = brm_nlme_conditional_problem(map, start)
+        r = brm_nlme_conditional_problem(map, start; backend=map.rk, ad_backend=NLME_AD)
+        x = c.position .+ range(-0.4, 0.5; length=length(c.position))
+        check_projection(c, x)
+        check_rk_parity(c, r, c.position, x)
+    end
+end

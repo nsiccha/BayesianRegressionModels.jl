@@ -634,8 +634,11 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
                         Symbol(record.scale, ".", s, ".", k) : Symbol(record.scales[k], ".", s))
                     for k in 1:K]
                 foreach(i -> claim!(i, :subject_scale), scales)
+                # RK packs every stratum's factor as one `K × K × levels(by)`
+                # value, coordinates `L.<m>.<s>` (`m` in LKJ packing order).
                 factor = isnothing(record.L) ? Int[] :
-                    claim_declaration!(Symbol(record.L, ".", s), :subject_correlation)
+                    Int[coordinate(Symbol(record.L, ".", m, ".", s)) for m in 1:(K * (K - 1)) ÷ 2]
+                foreach(i -> claim!(i, :subject_correlation), factor)
                 push!(families, (; block, record, stratum=s, size=K, scales, factor,
                     fixed=nothing))
                 for (predictor, coefficient) in record.margins
@@ -949,9 +952,10 @@ function _brm_nlme_unit_point(backend::RKBRMI, view::BRMNLMEView;
     u
 end
 
-# A block's factor, or a stratified block's factors (one per stratum).
+# A block's factor, or a stratified block's `K × K × levels(by)` factors.
 _brm_nlme_identity_factor(L::AbstractMatrix) = L == I
-_brm_nlme_identity_factor(L::AbstractVector) = all(_brm_nlme_identity_factor, L)
+_brm_nlme_identity_factor(L::AbstractArray{<:Any,3}) =
+    all(s -> _brm_nlme_identity_factor(L[:, :, s]), axes(L, 3))
 
 _brm_nlme_gaussian_plan(plan::_RKHeldOutPlan) =
     isempty(plan.held_out) && _brm_nlme_gaussian_plan(plan.parent)
