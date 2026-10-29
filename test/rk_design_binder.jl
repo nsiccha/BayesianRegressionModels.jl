@@ -610,7 +610,7 @@ end
     binder = check_binder(rk, designs; want=:mu)
     @test !occursin("replayed in full", sprint(show, binder))
     graph = (:car_mu_area_inv_scale, :car_mu_area_is_struct, :car_mu_area_node1,
-        :car_mu_area_node2, :car_mu_area_struct_pos)
+        :car_mu_area_node2, :car_mu_area_nodes, :car_mu_area_struct_pos)
     @test keys(binder.fitted) == graph
     # Designs that also list edges keep the fitted graph, as a replay does.
     check_binder(rk, [(; d..., edges...) for d in designs]; want=:mu)

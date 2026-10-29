@@ -299,6 +299,27 @@ brm_prepared_indices(values, level_values) = begin
     return indices
 end
     ),
+    # Each value's position among sorted levels (a `car` graph's node labels),
+    # by binary search: `O(n log m)`, where `brm_prepared_indices` compares
+    # every value with every level.
+    brm_sorted_positions = :(
+brm_sorted_positions(values, sorted_levels) = begin
+    positions = ReactiveKernels.plate(values) do value
+        BayesianRegressionModels._brm_sorted_position(sorted_levels, value)
+    end
+    return positions
+end
+    ),
+    # A generated column of positions, read as positions by a data-only call,
+    # so a gather by it reads a model-level vector; no literal of its range.
+    brm_positions = :(
+brm_positions(values) = begin
+    positions = ReactiveKernels.plate(values) do value
+        Int(value)
+    end
+    return positions
+end
+    ),
     # An HSGP `rows=` column as the 0/1 rows its basis carries.
     brm_hsgp_row_mask = :(
 brm_hsgp_row_mask(values) = begin
@@ -346,6 +367,29 @@ brm_completed_covariate(observed, missing, lookup, mask) = begin
     drawn = missing[lookup]
     completed = observed .+ mask .* drawn
     return completed
+end
+    ),
+    # A separated `car` field's unit interior from its draws and the shared
+    # values it reads, through its sparse factor (`car_separation.jl`): an
+    # ordinary function, so its loops stay Julia under the graph's AD.
+    brm_car_shared_values = :(
+function brm_car_shared_values(w, factor)
+    return BayesianRegressionModels._brm_car_shared_values(w, only(factor))
+end
+    ),
+    brm_car_unit_field = :(
+function brm_car_unit_field(z, shared, factor)
+    return BayesianRegressionModels._brm_car_unit_field(z, shared, only(factor))
+end
+    ),
+    brm_car_unit_field_draws = :(
+function brm_car_unit_field_draws(z, factor)
+    return BayesianRegressionModels._brm_car_unit_field(z, only(factor))
+end
+    ),
+    brm_car_unit_field_shared = :(
+function brm_car_unit_field_shared(shared, factor)
+    return BayesianRegressionModels._brm_car_unit_field_shared(shared, only(factor))
 end
     ),
     # An ordinary whole-value contrast composes with whole-value smooths.

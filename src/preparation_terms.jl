@@ -456,20 +456,28 @@ end
 # BYM2 scaling factor of one connected component: the geometric mean of the
 # diagonal of the generalized inverse of its ICAR precision `Q = D - W`, which
 # is the covariance of the field under its sum-to-zero constraint (Riebler et al.
-# 2016; Morris et al. 2019).
+# 2016; Morris et al. 2019). Exact and sparse, linear in the factor's entries
+# (snag `car-units-border-aa5e8712`): grounding the last area,
+# `G₀ = [Q_g⁻¹ 0; 0 0]` is a generalized inverse of `Q`, the Moore–Penrose one
+# is `(I - J) G₀ (I - J)` with `J = 11'/n`, so its diagonal is
+# `(Q_g⁻¹)_ii - 2 y_i / n + 1'y / n²` with `y = Q_g⁻¹1` (`1'y / n²` at the
+# ground), and `diag(Q_g⁻¹)` is the selected inverse of the grounded
+# Laplacian's sparse Cholesky factor.
 function _brm_car_scaling_factor(n::Int, pairs)
-    Q = zeros(n, n)
+    rows, cols = Int[], Int[]
     for (a, b) in pairs
-        Q[a, a] += 1; Q[b, b] += 1; Q[a, b] -= 1; Q[b, a] -= 1
+        append!(rows, (a, b, a, b))
+        append!(cols, (a, b, b, a))
     end
-    F = LinearAlgebra.eigen(LinearAlgebra.Symmetric(Q))
-    tol = 1e-9 * maximum(F.values)
-    keep = findall(>(tol), F.values)
-    length(keep) == n - 1 || error(
+    Q = sparse(rows, cols, repeat([1.0, 1.0, -1.0, -1.0], length(pairs)), n, n)
+    factor = LinearAlgebra.cholesky(Q[1:(n - 1), 1:(n - 1)])
+    y = factor \ ones(n - 1)
+    total = sum(y)
+    diagonal = vcat(selinv_diag(factor) .- 2 .* y ./ n .+ total / n^2, total / n^2)
+    all(>(0), diagonal) || error(
         "BRM term preparation: internal: a connected `car` component of $n areas " *
-        "has $(n - length(keep)) null directions")
-    V = F.vectors[:, keep]
-    exp(sum(log, vec(sum(abs2.(V) ./ permutedims(F.values[keep]); dims=2))) / n)
+        "has a non-positive generalized-inverse variance")
+    exp(sum(log, diagonal) / n)
 end
 
 function _brm_car_graph(area_labels, from_labels, to_labels)
@@ -544,6 +552,15 @@ function _brm_car_fitted_graph(names::NTuple{3,Symbol}, columns::NTuple{3,Any})
     _brm_frozen_fit(frozen, (:car_graph, first(names))) do
         fit(map((name, values) -> get(frozen.training, name, values), names, columns)...)
     end
+end
+
+# The position of `value` among sorted `levels` (an RK `car` field's node
+# labels, read per row in-graph by `brm_sorted_positions`).
+function _brm_sorted_position(levels::AbstractVector, value)
+    k = searchsortedfirst(levels, value)
+    k <= length(levels) && isequal(levels[k], value) || error(
+        "RK backend: `car` area $(repr(value)) is not an area of the fitted graph")
+    k
 end
 
 function _brm_car_row_idx(nodes, area_labels; prefix="BRM term preparation")

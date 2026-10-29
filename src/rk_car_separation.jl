@@ -119,18 +119,18 @@ function _rk_car_separated_options(options, fit, columns, taken)
     first_draw = 1
     for (k, u) in enumerate(sep.units)
         isempty(u.areas) && continue
-        draws = size(u.G, 2)
+        draws = u.factor.ndraws
+        # The unit's sparse interior map, read whole by its in-graph call.
         push!(blocks, (; unit=k, label=levels[k], areas=length(u.areas),
             ncols=length(u.cols), ndraws=draws,
             cols=isempty(u.cols) ? nothing : column(Symbol(:cols_, k), u.cols),
-            A=isempty(u.cols) ? nothing : column(Symbol(:A_, k), vec(u.A)),
-            G=draws == 0 ? nothing : column(Symbol(:G_, k), vec(u.G)),
+            factor=column(Symbol(:U_, k), [u.factor]),
             draw_range=first_draw:(first_draw + draws - 1)))
         first_draw += draws
     end
     x_phi = findall(>(0), sep.x_areas)
     separation = (; fit, levels, m=sep.m, ndraws=first_draw - 1,
-        F=sep.m == 0 ? nothing : column(:F, vec(sep.F)),
+        F=sep.m == 0 ? nothing : column(:F, [sep.F]),
         x_phi=isempty(x_phi) ? nothing : column(:x_phi, x_phi),
         # `phi` in graph order is `vcat(x[x_phi], phi_I_1, …)[restore]`
         restore=column(:restore, invperm(sep.order)), blocks=Tuple(blocks),
@@ -141,7 +141,7 @@ function _rk_car_separated_options(options, fit, columns, taken)
         shared=sep.shared)
     generated = Symbol[name for name in (separation.F, separation.x_phi,
         separation.restore) if name !== nothing]
-    for b in blocks, name in (b.cols, b.A, b.G)
+    for b in blocks, name in (b.cols, b.factor)
         name === nothing || push!(generated, name)
     end
     merge(options, (; separation, inputs=(options.inputs..., generated...)))

@@ -6,17 +6,24 @@
 #
 # Covered: the separation's algebra (the shared and unit draws whiten the
 # field's precision, interiors of different units share no edge, a unit's
-# draws move only its own areas); the separated density against the default
-# lowering's at the same field (a constant difference); the view's roles and
-# owners; lockstep and unit-problem densities against the full RK density, for
-# ICAR and BYM2; a unit label that is no subject, refused by name; frozen and
-# rebuilt replays. Not built: the coordinate transport of a separated field.
+# draws move only its own areas); each unit's sparse interior map, its inverse
+# and its transpose, and their size, linear in the areas; the separated density
+# against the default lowering's at the same field (a constant difference);
+# the view's roles and owners; lockstep and unit-problem densities against the
+# full RK density, for ICAR and BYM2; the coordinate transport to SBBRMI's field
+# (points both ways, densities, gradients) and a full Stan start from NLME
+# values; a unit label that is no subject, refused by name; frozen and rebuilt
+# replays. Snag `car-units-border-aa5e8712`.
 #
 # Run: julia --project=test test/nlme_car_separator.jl [testset-filter...]
 
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LogDensityProblems, LinearAlgebra, Random
 include(joinpath(@__DIR__, "nlme_unit_checks.jl"))
+using StanBlocks, BridgeStan
+using SparseArrays: spzeros
+
+const SEP_CACHE = mkpath(joinpath(tempdir(), "brm-nlme-car-separator"))
 
 # Six subjects, three areas each (subject a owns r1–r3, b r4–r6, …), on a
 # chain r1 – … – r18 with two more edges across subjects and one inside a, as
@@ -67,13 +74,11 @@ function separated_phi(rk, u)
     at(name) = u[findfirst(==(name), names)]
     w = at.(shared_names(rk))
     z = at.(draw_names(rk))
-    x = reshape(columns[s.F], s.m, s.m) * w
+    x = BRM._brm_car_shared_values(w, only(columns[s.F]))
     parts = Any[x[columns[s.x_phi]]]
     for b in s.blocks
-        phi = zeros(b.areas)
-        b.A === nothing || (phi .+= reshape(columns[b.A], b.areas, b.ncols) * x[columns[b.cols]])
-        b.G === nothing || (phi .+= reshape(columns[b.G], b.areas, b.ndraws) * z[b.draw_range])
-        push!(parts, phi)
+        xs = b.cols === nothing ? Float64[] : x[columns[b.cols]]
+        push!(parts, BRM._brm_car_unit_field(z[b.draw_range], xs, only(columns[b.factor])))
     end
     vcat(parts...)[columns[s.restore]]
 end
@@ -119,6 +124,83 @@ end
         if columns[options.struct_pos][k] <= n && s.shared[columns[options.struct_pos][k]]])
     @test separator == sort(["r2", "r3", "r6", "r8", "r9", "r12", "r15", "r22"])
     @test s.m == length(separator) + 6
+end
+
+@stestset "each unit's sparse interior map inverts and transposes exactly" begin
+    for build in (sep_icar, sep_bym2)
+        rk = RKBRMI(build(SEP_DATA); car_units=:subject)
+        s = car_term(rk).options.separation
+        rng = Xoshiro(11)
+        for b in s.blocks
+            f = only(rk.plan.columns[b.factor])
+            @test (f.nareas, f.ndraws) == (b.areas, b.ndraws)
+            z, xs = randn(rng, f.ndraws), randn(rng, f.ncols)
+            phi = BRM._brm_car_unit_field(z, xs, f)
+            @test BRM._brm_car_unit_draws(phi, xs, f) ≈ z atol=1e-12
+            g = randn(rng, f.nareas)
+            dz, dxs = BRM._brm_car_unit_pullback(g, f)
+            z0, x0 = randn(rng, f.ndraws), randn(rng, f.ncols)
+            @test dot(g, BRM._brm_car_unit_field(z0, x0, f)) ≈ dot(dz, z0) + dot(dxs, x0) rtol=1e-12
+        end
+    end
+end
+
+@stestset "a unit's interior map is linear in its areas, never n_u × n_u" begin
+    # A 60 × 60 grid in four quadrant units, with one unit's corner cut off
+    # as a component of its own: 3,600 areas, units of about 900.
+    side = 60
+    id(i, j) = (i - 1) * side + j
+    edges = [(id(i, j), id(i, j + 1)) for i in 1:side for j in 1:(side - 1)]
+    append!(edges, [(id(i, j), id(i + 1, j)) for i in 1:(side - 1) for j in 1:side])
+    corner = [id(i, j) for i in 1:3 for j in 1:3]
+    filter!(e -> (e[1] in corner) == (e[2] in corner), edges)
+    n = side^2
+    main = setdiff(1:n, corner)
+    order = vcat(main, corner)
+    position = invperm(order)
+    graph = (; n_struct=n, node1=[position[a] for (a, _) in edges],
+        node2=[position[b] for (_, b) in edges], comp_start=[1, length(main) + 1],
+        comp_size=[length(main), length(corner)])
+    quadrant(p) = 1 + (cld(p, side) > side ÷ 2) + 2 * (mod1(p, side) > side ÷ 2)
+    unit = [quadrant(p) for p in order]
+    s = BRM._brm_car_separation(graph, unit, 4)
+    entries = sum(length(piece.factor.nzval) for u in s.units for piece in u.factor.pieces)
+    @test entries <= 20 * n
+    @test s.m <= 4 * side
+    # The shared values' map is sparse too: one block per unit over the
+    # separator areas it borders, no dense `m × m` factor.
+    @test s.F isa BRM._BRMCarSharedFactor
+    @test sum(length(b.factor.nzval) for b in s.F.blocks) <= 10 * n
+    @test any(piece.kind === :component for u in s.units for piece in u.factor.pieces)
+    # The whitening holds at this size too, on random directions.
+    P = spzeros(n, n)
+    for (a, b) in zip(graph.node1, graph.node2)
+        P[a, a] += 1; P[b, b] += 1; P[a, b] -= 1; P[b, a] -= 1
+    end
+    for (start, size) in zip(graph.comp_start, graph.comp_size)
+        r = start:(start + size - 1)
+        P[r, r] .+= 1 / (0.001 * size)^2
+    end
+    ndraws = sum(u.factor.ndraws for u in s.units)
+    @test s.m + ndraws == n
+    function field(v)
+        x = BRM._brm_car_shared_values(v[1:s.m], s.F)
+        phi = zeros(n)
+        for (k, area) in enumerate(s.x_areas)
+            area > 0 && (phi[area] = x[k])
+        end
+        offset = s.m
+        for u in s.units
+            phi[u.areas] = BRM._brm_car_unit_field(v[offset .+ (1:u.factor.ndraws)],
+                x[u.cols], u.factor)
+            offset += u.factor.ndraws
+        end
+        phi
+    end
+    rng = Xoshiro(12)
+    a, b = randn(rng, n), randn(rng, n)
+    @test dot(field(a), P * field(b)) ≈ dot(a, b) rtol=1e-8
+    @test dot(field(a), P * field(a)) ≈ dot(a, a) rtol=1e-8
 end
 
 @stestset "the separated density is the default one at the same field" begin
@@ -184,6 +266,53 @@ end
         for (P, block) in zip(BRM._brm_nlme_eta_sparsity(m), blocks)
             @test all(I -> P[I] || I[1] == I[2], findall(x -> abs(x) > 1e-10, block))
         end
+    end
+end
+
+@stestset "a separated field moves through the coordinate transport to Stan's field" begin
+    for build in (sep_icar, sep_bym2)
+        brmi = build(SEP_DATA)
+        rk = RKBRMI(brmi; car_units=:subject)
+        sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+        stan = StanBlocks.stan_instantiate(sb.model;
+            path=joinpath(SEP_CACHE, string(nameof(build), ".stan")))
+        t = brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan.model))
+        @test length(t.fields) == 1
+        @test count(p -> p.relation === :car_separated, t.pairs) ==
+            car_term(rk).options.n_struct
+        problem = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+        rng = Xoshiro(13)
+        for u in (zeros(length(t)), 0.4 .* randn(rng, length(t)))
+            stan_u = brm_rk_point_to_stan(t, u)
+            @test brm_stan_point_to_rk(t, stan_u) ≈ u atol=1e-10
+            checked = brm_check_coordinate_transport(t, rk, stan.model, u)
+            @test checked.fields == 1 && checked.max_error <= 1e-9
+            value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+            stan_gradient = similar(stan_u)
+            stan_value, _ = BridgeStan.log_density_gradient!(stan.model, stan_u,
+                stan_gradient; propto=false, jacobian=true)
+            @test value ≈ brm_stan_logdensity_to_rk(t, u, stan_value) atol=1e-8 rtol=1e-12
+            @test gradient ≈ brm_stan_gradient_to_rk(t, u, stan_gradient) atol=1e-8 rtol=1e-10
+        end
+        # An NLME point of the separated model becomes a checked full Stan
+        # start of the same physical point.
+        map = brm_nlme_joint_map(rk, sb;
+            path=joinpath(SEP_CACHE, string(nameof(build), "_joint.stan")))
+        u = 0.3 .* randn(rng, length(t))
+        values = brm_nlme_joint_values(map, brm_rk_point_to_stan(map.transport, u))
+        role = map.view.role
+        estimated = sort!(vcat(findall(==(:population), role), findall(==(:shared_latent), role)))
+        start = brm_nlme_joint_start(map; theta=u[estimated], sigma=values.sigma,
+            omega=values.omega, eta=values.eta, subjects=values.subjects)
+        @test start.stan ≈ brm_rk_point_to_stan(map.transport, u) atol=1e-9
+        @test start.checked.fields == 1
+        # ... and back: that Stan point's NLME values are the RK point's (the
+        # map `brm_nlme_start(m, map, stan_u)` reads its point through).
+        back = brm_nlme_joint_values(map, start.stan)
+        @test back.theta ≈ u[findall(==(:population), role)] atol=1e-9
+        @test back.shared.values ≈ u[findall(==(:shared_latent), role)] atol=1e-9
+        conditional = brm_nlme_conditional_problem(map, start; backend=rk, ad_backend=NLME_AD)
+        @test isfinite(LogDensityProblems.logdensity(conditional, conditional.position))
     end
 end
 
