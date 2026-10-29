@@ -90,8 +90,8 @@ rev = "0194dce08e986ff17fd5a788bb315c6431b7858e"
 
 [sources.OutputSignatures]
 url = "https://github.com/nsiccha/OutputSignatures.jl"
-# ReactiveKernels' own `[sources]` revision (RK compat 0.1.5).
-rev = "d16c4efb72b963f45de9d6f632c38d46706c23e1"
+# ReactiveKernels' own `[sources]` revision (RK compat 0.1.6).
+rev = "f971381f760e91986b3a728a719341e7e7761f55"
 
 [sources.ReactiveKernels]
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
@@ -182,4 +182,7 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 2a6829265 (ReactiveKernels 0.1.7, ReactiveKernelsPPL 0.1.3) contains
 # b31d672fa: a location summand computed from `logistic` binds (snag
 # rkppl-leaf-colum-59c22941).
-rev = "2a68292653e9e9c250e0742d34b45b830d1f4a8d"
+# 06f92402a (ReactiveKernels 0.1.11, ReactiveKernelsPPL 0.1.12) contains
+# 2a6829265: a plate column reading a composed predictor is one value, not a
+# composition (snag rkppl-plate-colu-99114109).
+rev = "06f92402a2e7c1a4e73c3298f61fd95751a8c2cb"

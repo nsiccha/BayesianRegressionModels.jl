@@ -18,9 +18,10 @@
 # A second model offsets part 2 by part 1's PREDICTOR through a gather,
 # `f_off = 0.4 * mu[main]`, so `log_f` composes two predictors, and its
 # Poisson totals are read by a plate. Since 0.2.47 RKBRMI observes the totals
-# as the plate's one scalar per cell, and RKPPL refused that column as a
-# composition (snag rkbrmi-refuses-a-3f4d6828); 0.2.46 lowered it, because a
-# `flatten_cells` call hid the column. Its RK density equals Stan's.
+# as the plate's one scalar per cell, and ReactiveKernelsPPL before 0.1.12
+# refused that column as a composition (snag rkbrmi-refuses-a-3f4d6828);
+# 0.2.46 lowered it, because a `flatten_cells` call hid the column. Its RK
+# density equals Stan's.
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 
 module PlateGatheredPredictor

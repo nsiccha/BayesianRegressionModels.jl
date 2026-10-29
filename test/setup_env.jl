@@ -170,10 +170,15 @@ const PINS = [
     # need. 2a6829265 contains b31d672fa and is ReactiveKernels 0.1.7 /
     # ReactiveKernelsPPL 0.1.3: a location summand computed from `logistic`
     # binds (snag rkppl-leaf-colum-59c22941), as RKBRMI emits it from 0.2.45.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "2a68292653e9e9c250e0742d34b45b830d1f4a8d"),  # main
+    # 06f92402a contains 2a6829265 and is ReactiveKernels 0.1.11 /
+    # ReactiveKernelsPPL 0.1.12: a plate column reading a composed predictor
+    # is one value, not a composition (e33632cc4, snag
+    # rkppl-plate-colu-99114109), so a totals plate over a predictor offset by
+    # another's gather lowers as RKBRMI emits it from 0.2.47.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "06f92402a2e7c1a4e73c3298f61fd95751a8c2cb"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
-    # OutputSignatures dependency (RK compat 0.1.5); move it with the RK pin.
-    ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "d16c4efb72b963f45de9d6f632c38d46706c23e1"),  # main
+    # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
+    ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
     # d37cb0b4 (Enzyme 0.13.216 dogfood, libEnzyme build 4be29b19): contains
     # 93c452bd, Base concatenation of views, reshapes and transposes of Arrays
     # beside dense or Const arrays in Reverse and Forward (snag

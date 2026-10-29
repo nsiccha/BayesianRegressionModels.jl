@@ -12,6 +12,16 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.53
+
+- BRM's compat floor for its RKBRMI extensions is ReactiveKernelsPPL 0.1.12
+  (was 0.1.3). Since 0.2.47 RKBRMI observes a `@plate` totals response as the
+  plate's one value per cell. When the cell reads a predictor composed from
+  another predictor's values, e.g. `f_off = 0.4 * mu[main]` then
+  `log_f ~ 0 + offset(f_off) + (1 | fg | m)`, ReactiveKernelsPPL before 0.1.12
+  refuses that value ("applies `_ppl_plate_column` inside a composition"). The
+  floor makes Pkg refuse such an environment when it resolves instead.
+
 ## 0.2.52
 
 - `RKBRMI(brmi; car_units)` lowers every `car(...)` field by its unit border
