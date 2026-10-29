@@ -240,6 +240,37 @@ function centered_blocks(data)
     end
 end
 
+# Stratified `gr(subject, by=arm)` blocks (snag stratified-block-7a992e61): a
+# one-margin block with an `|ID|` and the default scale law, one without an
+# `|ID|` under a configured `sd(...)` law, and a three-margin block whose
+# margins' laws differ, so RK holds one scale vector per margin and each
+# stratum's factor has three packed coordinates.
+function stratified_one(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | p | gr(subject, by = arm))
+        y ~ Normal(mu, sigma)
+    end
+end
+
+function stratified_configured(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | gr(subject, by = arm))
+        sd(mu, subject) ~ LogNormal(-1, 0.75)
+        y ~ Normal(mu, sigma)
+    end
+end
+
+function stratified_three(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + w + (1 + x + w | p | gr(subject, by = arm))
+        sd(mu, p, x) ~ Exponential(0.8)
+        y ~ Normal(mu, sigma)
+    end
+end
+
 # `c` reaches only `z`, an in-cell response that binds no data column.
 function generated_cell_prior(data)
     @brm data begin
@@ -870,6 +901,74 @@ end
     # field would silently mis-state it.
     @test_throws "brm_stan_logdensity_to_rk" transport.logdensity_offset
     check_coordinate_transport(fixture)
+    @test isequal(data, saved)
+end
+
+@stestset "coordinate transport stratified random-effect blocks" begin
+    # Each subject lies in one arm. The subjects (a…f) are in another order
+    # than their arms (r, r, p, q, q, p), so pairing levels or strata by
+    # position instead of by label would cross them.
+    data = (; subject=repeat(["a", "b", "c", "d", "e", "f"], inner=3),
+        arm=repeat(["r", "r", "p", "q", "q", "p"], inner=3),
+        x=collect(range(-1, 1; length=18)),
+        w=[0.37sin(2.3i) for i in 1:18],
+        y=[0.1, 0.4, -0.2, 0.3, 0.7, 0.5, 0.2, -0.1, 0.6, -0.4, 0.8, 0.0,
+           0.3, 0.2, -0.5, 0.9, 1.1, -0.3])
+    saved = deepcopy(data)
+    # Integer arm codes that are not their positions among the arms (2, 5, 7):
+    # each arm's scales must be read by its code, not at row `code`.
+    coded = merge(data, (; arm=[Dict("p" => 2, "q" => 5, "r" => 7)[a] for a in data.arm]))
+    for (f, K, d, tag) in ((PublicCoordinateTransport.stratified_one, 1, data, "one"),
+            (PublicCoordinateTransport.stratified_configured, 1, data, "configured"),
+            (PublicCoordinateTransport.stratified_three, 3, data, "three"),
+            (PublicCoordinateTransport.stratified_three, 3, coded, "three_coded"))
+        labels = d === coded ? [2, 5, 7] : ["p", "q", "r"]
+        fixture = coordinate_transport_fixture(f(d), "stratified_" * tag)
+        (; rk, sb, transport) = fixture
+        block = only(ranef_blocks(sb))
+        @test block.by === :arm
+        scales = [p for p in transport.pairs if p.address.kind === :ranef_scale]
+        @test length(scales) == 3K
+        @test Set(p.address.stratum for p in scales) == Set(labels)
+        @test count(p -> p.address.kind === :ranef_z, transport.pairs) == 6K
+        @test length(transport.correlations) == (K == 1 ? 0 : 3)
+        @test Set(get(c, :stratum, nothing) for c in transport.correlations) ==
+            (K == 1 ? Set() : Set(labels))
+        # Each stratum's scale is Stan's `tau_s_tau` entry of that stratum.
+        strata = BRM._brm_ranef_strata(brm_descriptor(sb), block, "test").strata
+        for p in scales
+            s = findfirst(==(p.address.stratum), strata)
+            @test endswith(p.stan, ".$s")
+        end
+        check_coordinate_transport(fixture)
+        # Stan's per-stratum SDs and per-level effects (`brm_ranef_draws`)
+        # equal `diag(tau_s) L_s z_g` from RK's own values, matched by label.
+        model = fixture.stan.model
+        u = [0.37sin(i) for i in 1:length(transport)]
+        constrained = BridgeStan.param_constrain(model,
+            brm_rk_point_to_stan(transport, u); include_tp=true)
+        entries = brm_ranef_draws(brm_descriptor(sb), reshape(constrained, 1, :),
+            BridgeStan.param_names(model; include_tp=true))
+        record = only(r for r in BRM._rk_coordinate_records(rk.plan)
+            if r.kind === :stratified_ranef)
+        rk_values = BRM._rk_constrained_values(rk, u)
+        value(name) = BRM._brm_rk_declaration_value(rk_values, name)
+        rk_strata = BRM._rk_grouping_levels(rk.plan.columns[:arm])
+        rk_levels = BRM._rk_ranef_record_levels(rk, record)
+        z = value(record.z)
+        @test length(entries) == 3
+        for entry in entries
+            s = findfirst(==(entry.stratum), rk_strata)
+            tau = isnothing(record.scales) ? value(record.scale)[s, :] :
+                [value(name)[s] for name in record.scales]
+            L = K == 1 ? ones(1, 1) : value(record.L)[:, :, s]
+            @test vec(entry.sd) ≈ tau atol=1e-12 rtol=1e-12
+            for (h, level) in enumerate(entry.levels)
+                g = findfirst(==(level), rk_levels)
+                @test vec(entry.effects[1, h, :]) ≈ tau .* (L * z[g, :]) atol=1e-12 rtol=1e-12
+            end
+        end
+    end
     @test isequal(data, saved)
 end
 
