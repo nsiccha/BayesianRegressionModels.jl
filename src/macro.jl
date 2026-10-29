@@ -3332,7 +3332,57 @@ Base.@nospecializeinfer function _brm_finalize_operations(
         @nospecialize(operations::NamedTuple), @nospecialize(captures::NamedTuple),
         forward::Tuple{Vararg{Symbol}}=())
     isempty(captures) || (operations = Base.merge(operations, captures))
+    operations = _brm_restricted_operations(operations)
     _brm_resolve_forward_reads(_expand_nested_predictor_formulas(operations), forward)
+end
+
+# A prior `x ~ restricted(D(args...), lower, upper)` is the declaration-bound
+# form `x ~ D(args...; lower, upper)`, which every backend reads: the family's
+# density on the bounds, not renormalized. Those keywords written on a prior
+# directly are deprecated in favour of `restricted` (decision 0q18o98). A
+# response's bounds go through `truncated`/`censored`/`interval_censored`
+# (`_brm_response_modifier_plan`), never through the family's own keywords.
+Base.@nospecializeinfer function _brm_restricted_operations(
+        @nospecialize(operations::NamedTuple))
+    rewritten = map(_brm_restricted_operation, values(operations))
+    all(map(===, rewritten, values(operations))) && return operations
+    NamedTuple{keys(operations)}(rewritten)
+end
+
+function _brm_restricted_operation(@nospecialize(value))
+    value isa NamedColumn || return value
+    op = parent(value)
+    op isa ExprColumn && getf(op) === (~) || return value
+    lhs, rhs = getargs(op, 2)
+    rhs isa ExprColumn || return value
+    if getf(rhs) === restricted
+        return NamedColumn(name(value), ExprColumn(~, lhs, _brm_restricted_law(rhs)))
+    end
+    getf(rhs) in (truncated, censored, interval_censored) && return value
+    any(in((:lower, :upper)), keys(getkwargs(rhs))) && @warn(
+        "@brm: `lower`/`upper` keywords on a prior (`$(name(value)) ~ " *
+        "$(nameof(getf(rhs)))(...; lower, upper)`) are deprecated. Write " *
+        "`restricted(D, lower, upper)` for the same law (the density on the " *
+        "bounds, not renormalized, as in Stan) or `truncated(D, lower, upper)` " *
+        "for the normalized law.", maxlog=1, _id=:brm_prior_bound_keywords)
+    value
+end
+
+function _brm_restricted_law(rhs::ExprColumn)
+    args, kwargs = getargs(rhs), getkwargs(rhs)
+    base, bounds = if length(args) == 3 && isempty(kwargs)
+        args[1], (; lower=args[2], upper=args[3])
+    elseif length(args) == 1 && !isempty(kwargs) &&
+           all(in((:lower, :upper)), keys(kwargs))
+        args[1], kwargs
+    else
+        error("@brm: `restricted` takes a distribution and its bounds, " *
+              "`restricted(D, lower, upper)` or `restricted(D; lower, upper)`")
+    end
+    base isa ExprColumn && !any(in((:lower, :upper)), keys(getkwargs(base))) || error(
+        "@brm: `restricted(D, ...)` needs a distribution call `D(args...)` " *
+        "without `lower`/`upper` keywords of its own")
+    ExprColumn(getf(base), getargs(base)...; getkwargs(base)..., bounds...)
 end
 
 Base.@nospecializeinfer function _expand_nested_predictor_formulas(

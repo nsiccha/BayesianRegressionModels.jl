@@ -2,6 +2,28 @@
 # callable identities without owning the public formula vocabulary.
 
 """
+    restricted(D, lower, upper)
+    restricted(D; lower, upper)
+
+A prior law: the distribution `D`'s density on `[lower, upper]`, not
+renormalized. It is Stan's law for a bounded declaration,
+`real<lower=lo, upper=hi> x; x ~ D;`. Either keyword may be omitted for a
+one-sided bound. Write it in a prior position, `x ~ restricted(Normal(0, 1), a, b)`.
+
+When the bounds and `D`'s arguments are constants, `restricted` and
+[`truncated`](@ref) give the same posterior. They differ when the mass of `D`
+inside the bounds moves with sampled parameters:
+- `restricted` restricts the joint prior to the bounds, so learned arguments
+  feel how much mass lies inside, as in hand-written Stan;
+- `truncated` is the normalized law: draw the arguments, then draw from `D`
+  truncated to the bounds.
+
+`D(args...; lower, upper)` keywords on a prior meant `restricted`. They are
+deprecated in its favour (decision `0q18o98`).
+"""
+function restricted end
+
+"""
     me(x_obs, sd_x)
 
 brms-style measurement-error predictor marker. `me(x_obs, sd_x)` declares
