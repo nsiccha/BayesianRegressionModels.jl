@@ -46,6 +46,28 @@ operations(brmi) = sprint(show, getfield(brmi, :operations))
     @test_logs normalized(DATA)
 end
 
+@testset "restricted works on marker priors: sd, effect, me latent" begin
+    data = (; y=[0.1, -0.2, 0.4, 0.3], x=[0.5, -1.0, 0.2, 1.1], xo=[0.4, -0.9, 0.1, 1.0],
+        g=["a", "a", "b", "b"])
+    with_restricted = @brm begin
+        center ~ Normal(0, 1)
+        mu ~ 1 + x + me(xo, 0.3) + (1 | g)
+        sd(:, g) ~ restricted(Exponential(0.5); upper=2.0)
+        effect(mu, x) ~ restricted(Normal(0.75, 0.5), 0.0, 2.0)
+        latent(mu, me(xo)) ~ restricted(Cauchy(center, 1); lower=-0.5, upper=0.5)
+        y ~ Normal(mu, 1.0)
+    end
+    with_keywords = @brm begin
+        center ~ Normal(0, 1)
+        mu ~ 1 + x + me(xo, 0.3) + (1 | g)
+        sd(:, g) ~ Exponential(0.5; upper=2.0)
+        effect(mu, x) ~ Normal(0.75, 0.5; lower=0.0, upper=2.0)
+        latent(mu, me(xo)) ~ Cauchy(center, 1; lower=-0.5, upper=0.5)
+        y ~ Normal(mu, 1.0)
+    end
+    @test operations(@test_logs with_restricted(data)) == operations(with_keywords(data))
+end
+
 @testset "Turing evaluates the plain kernel" begin
     model = @brm begin
         location ~ Normal(0, 1)
