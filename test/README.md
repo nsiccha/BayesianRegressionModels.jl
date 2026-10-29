@@ -1644,9 +1644,26 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   binary without another edit; like Treebars, it is resolution plumbing, not a
   test dependency. A manifest resolved before this entry still holds 0.0.302:
   re-run `setup_env.jl`.
-- **All eight `develop` paths go in ONE `Pkg.develop` call.** Resolution has to
-  satisfy them together: the unregistered BRM root, the four external
-  source pins, and the three nested ReactiveKernels packages. Developing
+- **Enzyme is the ecosystem's `dogfood` line, so the suite runs on gordito
+  only.** BRM's RK cell gradients need repairs no registered Enzyme carries:
+  a nested-NLME totals cell reads an `hcat` design built from views at its
+  rows, which registered Enzyme rejects with `IllegalTypeAnalysisException`
+  and dogfood `d37cb0b4` differentiates (Enzyme snag
+  `native-reverse-t-6d51cae6`; user pick on BRM decision `0n0kgfh`).
+  `setup_env.jl` materializes the pinned dogfood commit from the KB host's
+  Enzyme mirror (it is not on GitHub), develops its nested `lib/EnzymeCore`
+  0.8.27 beside it (Pkg 1.10 ignores Enzyme's `[sources]`; registered
+  EnzymeCore lacks `set_atomic_add`), and runs the KB resolver's
+  dogfood-libEnzyme step: it points `Enzyme_jll` 0.0.301 at the declared
+  libEnzyme build through the ignored `test/LocalPreferences.toml` and
+  prints `KB-DOGFOOD-LIBENZYME <commit> llvm<M> <dir>`. That build exists
+  only where the Enzyme lane builds it (gordito, Julia 1.10 and 1.12);
+  elsewhere setup refuses rather than load the stock library, whose Reverse
+  gradients the build fixes (skill `enzyme-use`). Check a running process with
+  `Enzyme.Compiler.Enzyme_jll.libEnzyme_path`.
+- **All `develop` paths go in ONE `Pkg.develop` call.** Resolution has to
+  satisfy them together: the unregistered BRM root, the external source
+  pins, the nested ReactiveKernels packages and Enzyme's EnzymeCore. Developing
   StanBlocks by itself fails with `expected package
   BayesianRegressionModels to be registered`, while omitting a source-only or
   nested package produces the same error for that dependency.

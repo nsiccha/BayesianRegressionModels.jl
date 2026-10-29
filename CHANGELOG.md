@@ -12,6 +12,28 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.47
+
+- On RKBRMI, an in-cell observation whose response holds one value per cell
+  (a `@plate` totals cell's `total[k] ~ Normal(sum(exp.(log_w[rows[k]])), …)`)
+  emits its arguments as one scalar per cell and observes them as they are,
+  instead of `ones(length(total[k])) .* s` cells flattened by
+  `flatten_cells`. RK can then attribute response row `k` to cell `k`, so a
+  compact cell gradient (`brm_svi_fit`, the NLME cell queries) costs that
+  cell's own rows. On the regional panel of `test/nlme_panel_fixture.jl`, one
+  unit's totals cells cost 141,888 B per gradient at both 3 and 9 regions,
+  where they grew from 632,016 B to 1,624,032 B before. The emitted program
+  no longer reads such a response inside the cell, so its cell input port
+  (`<kernel>_input_<y>`) is gone from the RK inputs; densities are unchanged.
+  The totals' Reverse gradient differentiates an `hcat` design read from
+  views, which needs Enzyme dogfood `d37cb0b4` or later and ReactiveKernels
+  0.1.6; registered Enzyme raises `IllegalTypeAnalysisException` there.
+- BRM's test environment runs the Enzyme `dogfood` line (`test/setup_env.jl`,
+  user decision `0n0kgfh`) and ReactiveKernels 0.1.6, so it builds only on a
+  KB fleet host with the dogfood libEnzyme build (gordito). On it,
+  `test/rk_enzyme_threads.jl` (concurrent-GC gradients),
+  `test/plate_index_into.jl` and `test/rk_structured_consumer.jl` pass.
+
 ## 0.2.46
 
 - `brm_coordinate_transport` pairs a stratified `gr(g, by = b)` random-effect

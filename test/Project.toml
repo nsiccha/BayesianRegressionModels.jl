@@ -5,6 +5,7 @@ CategoricalArrays = "324d7699-5711-5eae-9e2f-1d82baa6b597"
 DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
+EnzymeCore = "f151be2c-9106-41f4-ab19-57ee4f262869"
 Enzyme_jll = "7cc45869-7501-5eee-bdea-0790c847d4ef"
 JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
@@ -34,6 +35,8 @@ BridgeStan = "2.9"
 Enzyme = "0.13"
 # Enzyme_jll 0.0.302 (required by Enzyme 0.13.211) segfaults native Reverse
 # gathers on Julia 1.10 (EnzymeAD/Enzyme.jl#3776); see test/README.md.
+# The pinned Enzyme dogfood (test/setup_env.jl) requires 0.0.301 and runs
+# against its own libEnzyme build instead of the jll's library.
 Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PSIS = "0.9"
 Treebars = "0.1"
@@ -167,4 +170,9 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # The nested ReactiveKernelsPPL / ReactiveKernelsDistributionKernels
 # packages have no standalone repos, so they stay develop-path-only via
 # test/setup_env.jl.
-rev = "e32d442c629af3889865a3611bef131cb91d2a0a"
+# b31d672fa (ReactiveKernels 0.1.6) contains e32d442c6: a plate cell computes
+# a value it reads at several rows at those rows only (snag
+# compact-cell-sam-d85d96ae).
+# Enzyme has no `[sources]` entry: its pinned dogfood commit is only in the
+# KB host mirror, which test/setup_env.jl clones it from.
+rev = "b31d672faa820fe8bda46cf86d7cb2eb43cc8b20"

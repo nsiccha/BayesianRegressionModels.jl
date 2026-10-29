@@ -1828,10 +1828,13 @@ end
     artifact = BRM.emit_rk_artifact(brmi; case_id="parity-kernel-scalar-cells")
     inputs = BRM.rk_artifact_inputs(artifact)
     @test !haskey(inputs, :pred_subject_count)
-    # Data inputs through their own columns; the observed `y` keeps one port.
+    # Data inputs through their own columns. The observed `y` needs no cell
+    # port: one value per cell, its cells' arguments are scalars observed as
+    # they are, so no cell reads the response (todo 0ww46pb).
     @test !haskey(inputs, :pred_input_x) && !haskey(inputs, :pred_input_intercept)
+    @test !haskey(inputs, :pred_input_y)
     for name in (:x, :intercept, :y)
-        column = inputs[name === :y ? :pred_input_y : name]
+        column = inputs[name]
         @test column == getproperty(_kernel_scalar_cols, name)
         @test length(column) == 4
         @test all(cell isa Real for cell in column)
