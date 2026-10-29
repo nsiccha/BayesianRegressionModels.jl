@@ -412,7 +412,11 @@ _brm_car_label(::Missing, what) = error(
 _brm_car_label(x, what) = error(
     "BRM term preparation: `car` $what label $(repr(x)) is neither an integer code " *
     "nor a string")
-_brm_car_labels(raw, what) = Any[_brm_car_label(x, what) for x in raw]
+# The comprehension keeps the labels' one type (`Vector{Int}` or
+# `Vector{String}`; mixed kinds widen and `_brm_car_graph` refuses them), so
+# the graph's node labels, which RK binds as the `<term>_nodes` data column,
+# are concretely typed (snag car-separator-em-f5c71279).
+_brm_car_labels(raw, what) = [_brm_car_label(x, what) for x in raw]
 
 function _brm_car_arguments(term)
     args, kw = getargs(term), getkwargs(term)

@@ -450,6 +450,21 @@ end
         message(() -> RKBRMI(sep_two(SEP_TWO); car_units=(area=:subject, area_b=:subject))))
 end
 
+# RK compiles `prepare(...; bound)` over every bound column, typed by each
+# column's type: the separated fields' node labels were bound as a
+# `Vector{Any}` (snag car-separator-em-f5c71279).
+@stestset "every bound column of a separated field has a concrete element type" begin
+    untyped(rk) = [k for (k, v) in pairs(rk_bound_data(rk))
+        if v isa AbstractArray && !isconcretetype(eltype(v))]
+    for rk in (RKBRMI(sep_icar(SEP_DATA); car_units=:subject),
+               RKBRMI(sep_bym2(SEP_DATA); car_units=:subject),
+               RKBRMI(sep_two(SEP_TWO); car_units=SEP_TWO_UNITS))
+        @test isempty(untyped(rk))
+        @test all(t -> eltype(rk.plan.columns[t.options.node_labels]) === String,
+            car_terms(rk))
+    end
+end
+
 @stestset "a replay keeps per-field separations" begin
     rk = RKBRMI(sep_two(SEP_TWO); car_units=SEP_TWO_UNITS)
     fresh = merge(SEP_TWO, (; x=reverse(SEP_TWO.x), x_b=reverse(SEP_TWO.x_b)))
