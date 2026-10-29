@@ -126,7 +126,10 @@ of the same [`BRMI`](@ref):
   `mi(x)::shares(total, rows)` completion: the same coordinate on both sides,
   whose missing entries are compared), or `:completion` (one standardized
   draw `z` of a non-centered missing-value completion against the Stan entry
-  `s = location + scale * z` of the same position; see below);
+  `s = location + scale * z` of the same position; see below), or
+  `:car_separated` (one coordinate of a `car(...)` field lowered by its unit
+  border separator, `RKBRMI(brmi; car_units)`: a shared or unit draw on RK
+  against one area of Stan's field; see below);
 - `stan_value` — the Stan constrained parameter name holding the physical
   value this coordinate parameterizes. It equals `stan` except inside a Stan
   array of vectors, whose unconstrained values BridgeStan stores array-major
@@ -151,6 +154,12 @@ A `:completion` pair joins RK's standardized draw `z` of one missing entry
 the same position, `s = location + scale * z` at that point's location and
 scale (the value under `Normal`, its log under `LogNormal`), so the part moves
 through the map recorded in [`BRMCoordinateTransport`](@ref)`.completions`.
+A `:car_separated` pair joins one of RK's standardized draws of a separated
+field (its shared draws `w`, then each unit's draws `z_u`) with one area of
+Stan's field `phi` (graph order), as block positions only: the whole field
+moves through the exact linear map the separation defines,
+`phi = vcat((F w)[x_phi], phi_I_1, …)[restore]` with each unit's interior
+from its draws and shared values (`t.fields`).
 """
 struct BRMCoordinatePair
     address::NamedTuple
@@ -248,7 +257,19 @@ which RK computes and may read any coordinate; at transported points the RK
 log density equals Stan's plus the log-Jacobian `sum(log, scale)` over the
 part's entries.
 
-With no simplex, centered block or standardized completion,
+`fields` lists each `car(...)` field lowered by its unit border separator
+(`RKBRMI(brmi; car_units)`): its `address`, area column `area`, RK
+declaration `rk_declaration` and field value `value`, its separation, and
+the RK draws `rk` (the shared draws, then each unit's) and Stan field
+entries `stan` (graph order) with their positions. Points move through the
+separation's linear map and its inverse, gradients through its transpose; the
+map's log-Jacobian is constant and in `logdensity_offset`, which adds, per
+field, `-(n/2) log(2π) + Σ_c (log(0.001 n_c) + log(2π)/2)` over its `n`
+areas in components of `n_c` (RK's draws are standard normals, Stan's field
+the unnormalized ICAR with a normalized `Normal(0, 0.001 n_c)` per
+component sum).
+
+With no simplex, centered block, standardized completion or separated field,
 `stan_u == rk_u[permutation]` for points and gradients alike
 ([`brm_rk_to_stan`](@ref), [`brm_stan_to_rk`](@ref)) and
 `logdensity_offset == 0`. Otherwise points and gradients move differently:
@@ -266,6 +287,7 @@ struct BRMCoordinateTransport
     centered::Vector{NamedTuple}
     completions::Vector{NamedTuple}
     completion_laws::Union{Nothing,_BRMCompletionLaws}
+    fields::Vector{NamedTuple}
 end
 
 # A transport without simplex, centered or completion blocks is a pure permutation.
@@ -280,6 +302,11 @@ BRMCoordinateTransport(rk_names, stan_names, pairs, permutation, correlations,
         simplexes, logdensity_offset, centered) =
     BRMCoordinateTransport(rk_names, stan_names, pairs, permutation, correlations,
         simplexes, logdensity_offset, centered, NamedTuple[], nothing)
+BRMCoordinateTransport(rk_names, stan_names, pairs, permutation, correlations,
+        simplexes, logdensity_offset, centered, completions, completion_laws) =
+    BRMCoordinateTransport(rk_names, stan_names, pairs, permutation, correlations,
+        simplexes, logdensity_offset, centered, completions, completion_laws,
+        NamedTuple[])
 
 # A centered block's or standardized completion's density offset depends on
 # the point, so the constant field alone would silently mis-state it.
@@ -301,7 +328,8 @@ Base.show(io::IO, t::BRMCoordinateTransport) = print(io,
     length(t.correlations), " correlation factors, ",
     length(t.simplexes), " simplexes",
     isempty(t.centered) ? "" : ", $(length(t.centered)) centered blocks",
-    isempty(t.completions) ? "" : ", $(length(t.completions)) standardized completions", ")")
+    isempty(t.completions) ? "" : ", $(length(t.completions)) standardized completions",
+    isempty(t.fields) ? "" : ", $(length(t.fields)) separated car fields", ")")
 
 """
     brm_coordinate_transport(rk::RKBRMI, sb::SBBRMI, stan_names) -> BRMCoordinateTransport
@@ -357,7 +385,12 @@ entries `<column>_y_mis.<i>` (`<column>_y_free.<i>`): each draw pairs with the
 entry of the same position as a `:completion` pair, and the part moves through
 `s = location .+ scale .* z` on Stan's unconstrained entries, with the
 location and scale RK computes at the point (`t.completions`); they may read
-any coordinate. Any coordinate outside
+any coordinate. A `car(...)` field pairs its scale and mixing share as
+scalars and its structured and unstructured parts area by area; lowered by
+its unit border separator (`RKBRMI(brmi; car_units)`), its shared and unit
+draws pair with Stan's areas as block positions (`:car_separated`), and the
+field moves through the separation's exact linear map (`t.fields`). Any
+coordinate outside
 that coverage — on either side — is an error naming it; there is no partial
 transport. An `SBBRMI` built with exact total-effect blocks has no sampled
 counterpart for the absorbed coordinates; build it with `total_groups=()` for
@@ -416,9 +449,10 @@ function brm_coordinate_transport(rk::RKBRMI, sb::SBBRMI, stan_names::AbstractVe
             Val(record.kind), record, rk, d, stan, stan_pos)
     end
     completions = _brm_transport_completions(records, pairs)
+    fields = _brm_transport_car_fields(records, pairs)
     t = _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
         centered, completions,
-        isempty(completions) ? nothing : _BRMCompletionLaws(rk, completions))
+        isempty(completions) ? nothing : _BRMCompletionLaws(rk, completions), fields)
     _brm_transport_centered_scales(rk, t)
     t
 end
@@ -443,7 +477,8 @@ function _brm_transport_centered_scales(rk, t)
 end
 
 function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
-        centered=NamedTuple[], completions=NamedTuple[], completion_laws=nothing)
+        centered=NamedTuple[], completions=NamedTuple[], completion_laws=nothing,
+        fields=NamedTuple[])
     rk_pos = Dict{Symbol,Int}(n => i for (i, n) in enumerate(rk_names))
     length(rk_pos) == length(rk_names) || error(
         "brm_coordinate_transport: RK coordinate names are not unique")
@@ -492,7 +527,8 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
               "terms, submodel provider declarations, and missing-value " *
               "completions (RK `<column>.y_mis` with SB `<column>_y_mis`, and " *
               "non-centered RK draws `<column>.z_mis` / `.z_free` through their " *
-              "law's location and scale). Other " *
+              "law's location and scale), and `car(...)` fields, also " *
+              "lowered by their unit border separator (`car_units`). Other " *
               "constructs (R2D2/horseshoe priors, smooths, GP, hyper-predicted " *
               "HSGP without `by=`, AR, measurement error, multi-membership " *
               "groups, exact-total SB emissions) " *
@@ -507,7 +543,12 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
             rk_positions=[rk_pos[n] for n in block.rk],
             stan_positions=[stan_pos[n] for n in block.stan])
         for block in simplexes]
-    offset = -sum((log(block.K) / 2 for block in blocks); init=0.0)
+    field_blocks = NamedTuple[(; block...,
+            rk_positions=[rk_pos[n] for n in block.rk],
+            stan_positions=[stan_pos[n] for n in block.stan])
+        for block in fields]
+    offset = -sum((log(block.K) / 2 for block in blocks); init=0.0) +
+        sum((block.logdensity_offset for block in field_blocks); init=0.0)
     centered_blocks = NamedTuple[(; block...,
             scale_positions=[rk_pos[n] for n in block.rk_scales],
             cholesky_positions=[rk_pos[n] for n in block.rk_cholesky],
@@ -520,7 +561,8 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
             stan_positions=[stan_pos[n] for n in block.stan])
         for block in completions]
     BRMCoordinateTransport(rk_names, stan, ordered, permutation, correlations,
-        blocks, offset, centered_blocks, completion_blocks, completion_laws)
+        blocks, offset, centered_blocks, completion_blocks, completion_laws,
+        field_blocks)
 end
 
 _brm_stan_name(stan_pos, name, address) = begin
@@ -985,19 +1027,18 @@ end
 
 # An areal field, paired by its area column and parameter roles: scale and
 # mixing share as scalars, the structured and unstructured fields elementwise
-# (both backends order them by the same fitted graph).
+# (both backends order them by the same fitted graph). A field lowered by its
+# unit border separator (`car_units`) pairs its RK draws, the shared ones and
+# then each unit's, with Stan's field entries as block positions
+# (`:car_separated`); the field moves through the separation's map
+# (`_brm_transport_car_fields`).
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:car}, record, rk, d, stan, stan_pos)
     entry = _brm_term_entry(d, record.predictor,
         e -> getf(e.value) === car &&
             name(_sb_named_inner(:car, first(getargs(e.value)))) === record.area,
         "`car($(record.area))`")
-    get(record, :separation, nothing) === nothing || _brm_transport_error(
-        :unsupported_coverage,
-        "brm_coordinate_transport: `car($(record.area))` was lowered by its unit " *
-        "border separator (`RKBRMI(brmi; car_units)`), whose coordinates are a " *
-        "linear map of Stan's field; that map is not built yet. Lower the RK " *
-        "backend without `car_units` to compare it with Stan.")
+    separation = get(record, :separation, nothing)
     base = (; kind=:car, predictor=record.predictor, term=entry.term)
     roles = record.type === :bym2 ?
         ((:sd, :sigma, false), (:mixing, :rho, false),
@@ -1011,7 +1052,17 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
             _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
             (; base..., parameter))
         declaration = Symbol(record.declaration, ".", getproperty(record.locals, local_name))
-        if elementwise
+        if parameter === :structured && separation !== nothing
+            draws = _brm_transport_car_draws(record)
+            length(draws) == length(stan_names) || error(
+                "brm_coordinate_transport: internal: separated `car($(record.area))` " *
+                "has $(length(draws)) RK draws for $(length(stan_names)) Stan areas")
+            for (j, ((rk_declaration, k), stan_name)) in enumerate(zip(draws, stan_names))
+                push!(pairs, BRMCoordinatePair((; base..., parameter, index=j),
+                    Symbol(rk_declaration, ".", k), stan_name, rk_declaration, (k,),
+                    :car_separated))
+            end
+        elseif elementwise
             for (j, stan_name) in enumerate(stan_names)
                 push!(pairs, BRMCoordinatePair((; base..., parameter, index=j),
                     Symbol(declaration, ".", j), stan_name, declaration, (j,), :identity))
@@ -1022,6 +1073,107 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         end
     end
 end
+
+# A separated field's RK draws in block order, each `(declaration, element)`:
+# the shared draws `w`, then each unit's draws `z_u` in draw order.
+function _brm_transport_car_draws(record)
+    separation = record.separation
+    draws = Tuple{Symbol,Int}[]
+    if record.locals.w !== nothing
+        w = Symbol(record.declaration, ".", record.locals.w)
+        append!(draws, ((w, k) for k in 1:separation.m))
+    end
+    for (b, z) in zip(separation.blocks, record.locals.z)
+        z === nothing && continue
+        declaration = Symbol(record.declaration, ".", z)
+        append!(draws, ((declaration, j) for j in 1:b.ndraws))
+    end
+    draws
+end
+
+# Each separated field's map: its separation, its units' draws and the
+# constant log-density offset (`BRMCoordinateTransport`), with the RK draws
+# and Stan areas of its `:car_separated` pairs in block order.
+function _brm_transport_car_fields(records, pairs)
+    fields = NamedTuple[]
+    for record in records
+        record.kind === :car && get(record, :separation, nothing) !== nothing || continue
+        paired = [pair for pair in pairs if pair.relation === :car_separated &&
+            pair.address.predictor === record.predictor &&
+            startswith(String(pair.rk), string(record.declaration, "."))]
+        sort!(paired; by=pair -> pair.address.index)
+        sep = record.separation.fit.separation
+        n = length(sep.order)
+        offset = -n / 2 * log(2pi) +
+            sum((log(0.001 * size) + log(2pi) / 2 for size in sep.comp_size); init=0.0)
+        push!(fields, (; address=first(paired).address[(:kind, :predictor, :term)],
+            area=record.area, rk_declaration=record.declaration,
+            value=Symbol(record.declaration, ".", record.locals.phi),
+            separation=sep, m=record.separation.m,
+            units=[(; unit=b.unit, draw_range=b.draw_range) for b in record.separation.blocks],
+            rk=[pair.rk for pair in paired], stan=[pair.stan for pair in paired],
+            logdensity_offset=offset))
+    end
+    fields
+end
+
+# A separated field in graph order from its shared draws `w` and unit draws `z`.
+function _brm_car_field_values(block, w::AbstractVector, z::AbstractVector)
+    sep = block.separation
+    x = _brm_car_shared_values(w, sep.F)
+    phi = Vector{eltype(x)}(undef, length(sep.order))
+    for (k, area) in enumerate(sep.x_areas)
+        area > 0 && (phi[area] = x[k])
+    end
+    for b in block.units
+        u = sep.units[b.unit]
+        phi[u.areas] = _brm_car_unit_field(z[b.draw_range], x[u.cols], u.factor)
+    end
+    phi
+end
+
+# Its inverse: the draws `(w, z)` of a field `phi` (graph order).
+function _brm_car_field_draws(block, phi::AbstractVector)
+    sep = block.separation
+    x = zeros(eltype(phi), block.m)
+    for (k, area) in enumerate(sep.x_areas)
+        area > 0 && (x[k] = phi[area])
+    end
+    # Each interior piece's sum is its `x` entry.
+    for b in block.units
+        u = sep.units[b.unit]
+        for piece in u.factor.pieces
+            piece.kind === :interior || continue
+            x[u.cols[piece.sum_col]] = sum(phi[u.areas[piece.first_area .+ (1:piece.n)]])
+        end
+    end
+    z = zeros(eltype(phi), length(block.rk) - block.m)
+    for b in block.units
+        u = sep.units[b.unit]
+        z[b.draw_range] = _brm_car_unit_draws(phi[u.areas], x[u.cols], u.factor)
+    end
+    _brm_car_shared_draws(x, sep.F), z
+end
+
+# Its transpose: the cotangents of `(w, z)` from those of `phi`.
+function _brm_car_field_pullback(block, g::AbstractVector)
+    sep = block.separation
+    gx = zeros(eltype(g), block.m)
+    for (k, area) in enumerate(sep.x_areas)
+        area > 0 && (gx[k] += g[area])
+    end
+    gz = zeros(eltype(g), length(block.rk) - block.m)
+    for b in block.units
+        u = sep.units[b.unit]
+        dz, dxs = _brm_car_unit_pullback(g[u.areas], u.factor)
+        gz[b.draw_range] = dz
+        gx[u.cols] .+= dxs
+    end
+    vcat(_brm_car_shared_pullback(gx, sep.F), gz)
+end
+
+_brm_car_field_split(block, u) =
+    (u[block.rk_positions[1:block.m]], u[block.rk_positions[(block.m + 1):end]])
 
 # A grouped stationary AR(1) walk, paired by its step axis and parameter roles:
 # marginal SD and persistence as scalars, and the innovations by (group, step).
@@ -1623,10 +1775,12 @@ function brm_stan_to_rk(t::BRMCoordinateTransport, v::AbstractVector)
 end
 
 _brm_transport_permutation_only(t, caller) =
-    isempty(t.simplexes) && isempty(t.centered) && isempty(t.completions) || error(
+    isempty(t.simplexes) && isempty(t.centered) && isempty(t.completions) &&
+        isempty(t.fields) || error(
     "$caller: this transport pairs $(length(t.simplexes)) simplex block(s), " *
-    "$(length(t.centered)) centered block(s) and $(length(t.completions)) " *
-    "standardized completion(s), whose points and gradients do not " *
+    "$(length(t.centered)) centered block(s), $(length(t.completions)) " *
+    "standardized completion(s) and $(length(t.fields)) separated car field(s), " *
+    "whose points and gradients do not " *
     "move by one permutation. Use `brm_rk_point_to_stan` / " *
     "`brm_stan_point_to_rk` for points, `brm_stan_gradient_to_rk` for gradients " *
     "and `brm_stan_logdensity_to_rk` for log densities.")
@@ -1863,8 +2017,9 @@ log-ratio coordinates or back; each `t.centered` block's standardized draws
 point's own scales `tau` and correlation factor `L`; each `t.completions`
 part's standardized draws `z` become Stan's entries
 `s = location .+ scale .* z`, or back, with the location and scale RK
-computes at that point. The two functions are inverses and both describe the
-same physical parameter point. They equal [`brm_rk_to_stan`](@ref) /
+computes at that point; each `t.fields` field's draws become Stan's field
+through its separation's linear map, or back through its inverse. The two
+functions are inverses and both describe the same physical parameter point. They equal [`brm_rk_to_stan`](@ref) /
 [`brm_stan_to_rk`](@ref) for a transport without simplex, centered or
 completion blocks. Neither mutates its input. Use
 [`brm_stan_gradient_to_rk`](@ref) for gradients and
@@ -1880,6 +2035,9 @@ function brm_rk_point_to_stan(t::BRMCoordinateTransport, u::AbstractVector)
         out[block.stan_positions] =
             first(_brm_centered_factor(block, u)) * u[block.rk_positions] .*
             transpose(_brm_centered_level_scales(block, u))
+    end
+    for block in t.fields
+        out[block.stan_positions] = _brm_car_field_values(block, _brm_car_field_split(block, u)...)
     end
     isempty(t.completions) && return out
     laws = t.completion_laws.read(u)
@@ -1902,6 +2060,9 @@ function brm_stan_point_to_rk(t::BRMCoordinateTransport, y::AbstractVector)
         out[block.rk_positions] = LowerTriangular(first(_brm_centered_factor(block, out))) \
             (y[block.stan_positions] ./ transpose(_brm_centered_level_scales(block, out)))
     end
+    for block in t.fields
+        out[block.rk_positions] = vcat(_brm_car_field_draws(block, y[block.stan_positions])...)
+    end
     _brm_completions_to_rk!(out, t, y)
 end
 
@@ -1920,7 +2081,9 @@ map's log-Jacobian (see [`brm_stan_logdensity_to_rk`](@ref)). A standardized
 completion's entries `s = location .+ scale .* z` pull back to `scale .* g` on
 its draws and, through the location and scale, to every coordinate they read
 (a reverse-mode Enzyme pullback of RK's values, which needs Enzyme loaded),
-plus the gradient of the log-Jacobian `sum(log, scale)`. Neither input is
+plus the gradient of the log-Jacobian `sum(log, scale)`. A separated
+`car(...)` field multiplies by the transpose of its linear map, whose
+log-Jacobian is in the constant `t.logdensity_offset`. Neither input is
 mutated.
 """
 function brm_stan_gradient_to_rk(t::BRMCoordinateTransport, u::AbstractVector,
@@ -1935,6 +2098,9 @@ function brm_stan_gradient_to_rk(t::BRMCoordinateTransport, u::AbstractVector,
     end
     for block in t.centered
         _brm_centered_pullback!(out, block, u, g)
+    end
+    for block in t.fields
+        out[block.rk_positions] = _brm_car_field_pullback(block, g[block.stan_positions])
     end
     _brm_completions_pullback!(out, t, u, g)
 end
@@ -2024,16 +2190,17 @@ Stan effects equal `diag(tau) * L * z` computed from RK's own constrained
 scales, correlation factor and standardized draws (times `sqrt(w)` of the
 level's own mixing weight for a Student-t block), and every standardized
 completion's Stan entries equal the values RK's own graph computes from its
-draws. The Stan point is
+draws, and every separated `car(...)` field's Stan areas equal the field RK's
+own graph computes from its draws. The Stan point is
 `brm_rk_point_to_stan(t, u_rk)`. `stan_model` is the compiled
 `BridgeStan.StanModel` whose `param_unc_names` built `t`.
 Returns `(; pairs::Int, factors::Int, simplexes::Int, centered::Int,
-completions::Int, max_error::Float64)`: `pairs` counts checked elements
+completions::Int, fields::Int, max_error::Float64)`: `pairs` counts checked elements
 outside correlation factors, simplexes, centered blocks and standardized
 completions, `factors` counts whole correlation matrices, `simplexes` whole
 simplexes, `centered` whole centered blocks (all `K × G` effects),
-`completions` whole standardized completion parts (all entries), and
-`max_error` is the largest absolute physical difference over these elements
+`completions` whole standardized completion parts (all entries), `fields`
+whole separated `car(...)` fields (all areas), and `max_error` is the largest absolute physical difference over these elements
 and every matrix, simplex, effect and entry. Every
 comparison must meet
 `atol + rtol * max(abs(rk_value), abs(stan_value))`. Any disagreement is an error
@@ -2048,9 +2215,12 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
         "do not match the transport")
     u = Vector{Float64}(u_rk)
     rk_values = _rk_constrained_values(rk, u)
-    # A standardized completion's values are RK graph values, not parameters.
+    # A standardized completion's values are RK graph values, not parameters,
+    # and so is a separated field.
     completion_values = isempty(t.completions) ? (;) :
         _rk_value_reader(rk, Tuple(b.value for b in t.completions))(u)
+    field_values = isempty(t.fields) ? (;) :
+        _rk_value_reader(rk, Tuple(b.value for b in t.fields))(u)
     stan_u = brm_rk_point_to_stan(t, u)
     stan_values = BridgeStan.param_constrain(stan_model, stan_u)
     stan_index = Dict{String,Int}(String(n) => i
@@ -2070,7 +2240,7 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
     checked = 0
     for pair in t.pairs
         pair.relation in (:cholesky, :simplex, :centered, :shares, :grouped_shares,
-            :completion) && continue
+            :completion, :car_separated) && continue
         value = _brm_rk_declaration_value(rk_values, pair.rk_declaration)
         rk_value = isempty(pair.rk_index) ? value : _brm_rk_value_entry(value, pair.rk_index)
         compare("$(pair.address) (`$(pair.rk)` / `$(pair.stan_value)`)", rk_value,
@@ -2185,7 +2355,18 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
             compare("completion `$(block.target)` entry `$name`", y[k], stan_value(name))
         end
     end
+    # A separated field: the field RK computes from its draws against Stan's
+    # field, area by area.
+    for block in t.fields
+        phi = field_values[block.value]
+        length(phi) == length(block.stan) || error(
+            "brm_check_coordinate_transport: separated `car($(block.area))` has " *
+            "$(length(phi)) RK areas `$(block.value)` and $(length(block.stan)) Stan areas")
+        for (j, name) in enumerate(block.stan)
+            compare("separated `car($(block.area))` area $j (`$name`)", phi[j], stan_value(name))
+        end
+    end
     (; pairs=checked, factors=length(t.correlations),
        simplexes=length(t.simplexes), centered=length(t.centered),
-       completions=length(t.completions), max_error)
+       completions=length(t.completions), fields=length(t.fields), max_error)
 end

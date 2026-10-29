@@ -117,6 +117,15 @@ end
 function _brm_nlme_conditional_frame(sb::SBBRMI, map::BRMNLMEJointMap, stan)
     sb === map.sb || _brm_nlme_error(
         "brm_nlme_conditional_problem: backend is not this map's SBBRMI")
+    # Not built: Stan samples a separated field's areas, each a combination of
+    # shared and unit draws, so no Stan coordinate is a unit draw; it would
+    # need SBBRMI to emit the separated parametrization too.
+    isempty(map.transport.fields) || _brm_nlme_error(
+        "brm_nlme_conditional_problem: `car(...)` fields lowered by their unit " *
+        "border separator ($(join(("`car($(b.area))`" for b in map.transport.fields), ", "))) " *
+        "are Stan areas that mix shared and unit draws, so the Stan frame has no " *
+        "unit draws to free (not built: SBBRMI does not emit the separated " *
+        "parametrization); condition the RK backend (`backend = map.rk`)")
     (; target=map.stan_problem, point=stan, rk=map.transport.permutation,
        names=map.transport.stan_names)
 end
