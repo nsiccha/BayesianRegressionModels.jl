@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.56
+
+- BRM's compat floor is ReactiveKernelsPPL 0.1.14 (was 0.1.12). On 0.1.12, a
+  flat three-margin `(1 | pk | subject)` block's compact cell gradient raised
+  Enzyme's `EnzymeRuntimeException` ("could not determine how to keep a pointer
+  phi … rooted"); `test/nlme_view.jl` now checks its gradient against central
+  differences.
+  ReactiveKernelsPPL 0.1.14 also reads a compact cell's selected coordinates in
+  constant time. **Breaking** for an environment that pins ReactiveKernels
+  before `3deb61ae`: move that pin with BRM.
+- BRM's test environment pins ReactiveKernels `3deb61ae` (0.1.12).
+
 ## 0.2.55
 
 - A nested NLME unit's value and η gradient through its subject cells
