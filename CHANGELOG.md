@@ -12,6 +12,24 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.55
+
+- A nested NLME unit's value and η gradient through its subject cells
+  (`brm_nlme_loglikelihood_and_gradient`, `brm_svi_fit`'s unit terms, SAEM's
+  per-subject population gradient, `brm_two_stage_fit`'s units) now cost each
+  cell's own coordinates: every compact cell call selects the population
+  coordinates and only the effects that cell reads, measured once from the
+  cell's gradient and checked against the whole-unit selection. Before, every
+  call worked over the unit's whole block of effects, so a unit cost the square
+  of its size. Unit 1 of the regional panel (`test/nlme_panel_fixture.jl`):
+  2,885 effects 21.5 → 18.3 ms; 21,732 effects 363 → 166 ms (7.7 → 6.55 and
+  17.1 → 7.81 µs per cell call).
+- `brm_nlme_model` no longer evaluates the cells when it prepares a model: the
+  cell reads, selections and η Hessian patterns are built on first use. A model
+  whose cell gradients are never taken (SAEM's batched path, a whole-model
+  fit) is not held up by them. The pattern 0.2.54 stored as `m.eta_sparsity` is
+  read through `NLMEEstimation.eta_hessian_sparsity(m, i)`; the field is gone.
+
 ## 0.2.54
 
 - A nested NLME model (`brm_nlme_model` with `subject_group` /
