@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.57
+
+- `brm_nlme_model` prepares its sampler Hessian-vector-product query the first
+  time it is used (by dense η Hessian blocks and the per-unit Laplace), not
+  during the preparation, so a fit whose estimators take the η curvature from
+  gradients never compiles or holds it. With ReactiveKernels before 0.1.12 that
+  preparation holds 8n² bytes for the n packed coordinates
+  (DifferentiationInterface's reverse-over-forward preparation also prepares a
+  forward-mode gradient, whose basis is n one-hot vectors of length n): 200 GB
+  for a model of 157,808 unit effects, which no `brm_nlme_model` survived.
+  ReactiveKernels 0.1.12 prepares it in memory linear in n.
+
 ## 0.2.56
 
 - BRM's compat floor is ReactiveKernelsPPL 0.1.14 (was 0.1.12). On 0.1.12, a
