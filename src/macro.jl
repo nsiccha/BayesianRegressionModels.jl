@@ -2761,10 +2761,17 @@ Base.parent(x::NestedPredictorFormula) = getfield(x, :parent)
 Assigns a formula-local symbol `name` to its `parent` column. Every
 `lhs ~ rhs` and `lhs = rhs` line produces a `NamedColumn` keyed by
 `lhs`. Access via [`name`](@ref) / `parent`.
+
+The parent's type is not a type parameter: a reference to a named value
+holds its whole definition, so a parameter would spell that definition's
+expression tree in the type of every column that reads the name, and every
+method that touches such a column would compile once per tree (see
+[`ExprColumn`](@ref)).
 """
-struct NamedColumn{N,P} <: AbstractColumn
+struct NamedColumn{N} <: AbstractColumn
     name::N
-    parent::P
+    parent::Any
+    NamedColumn(name::N, @nospecialize(parent)) where {N} = new{N}(name, parent)
 end
 
 """
@@ -2804,17 +2811,23 @@ Represents an `f(args...; kwargs...)` formula RHS — the leaves the
 
 Construction runs `_check_term_kwargs` so a term can reject a retired
 keyword at the `@brm` call site rather than in the backend.
+
+Only the function is a type parameter, so methods dispatch on the term
+(`ExprColumn{typeof(hsgp)}`). The arguments and keywords are not: as
+parameters they spelled the whole expression tree below a node in its type,
+and through [`NamedColumn`](@ref) references the trees of every value it
+reads, so a large model's columns had types of hundreds of kilobytes and its
+build and planning compiled each method that touches them once per tree
+(about ten minutes on a 479-statement model, snag `rkbrmi-start-up-8ed0a306`).
 """
-struct ExprColumn{F,A<:Tuple,K<:NamedTuple} <: AbstractColumn
+struct ExprColumn{F} <: AbstractColumn
     f::F
-    args::A
-    kwargs::K
-    ExprColumn(f, args...; kwargs...) =
-        (_check_term_kwargs(f, (;kwargs...));
-         new{typeof(f),typeof(args),typeof((;kwargs...))}(f,args,(;kwargs...)))
-    ExprColumn(f::Type, args...; kwargs...) =
-        (_check_term_kwargs(f, (;kwargs...));
-         new{Type{f},typeof(args),typeof((;kwargs...))}(f,args,(;kwargs...)))
+    args::Tuple
+    kwargs::NamedTuple
+    ExprColumn(@nospecialize(f), @nospecialize(args...); kwargs...) =
+        (kw = (;kwargs...); _check_term_kwargs(f, kw); new{typeof(f)}(f, args, kw))
+    ExprColumn(@nospecialize(f::Type), @nospecialize(args...); kwargs...) =
+        (kw = (;kwargs...); _check_term_kwargs(f, kw); new{Type{f}}(f, args, kw))
 end
 
 """

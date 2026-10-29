@@ -992,6 +992,12 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         e -> getf(e.value) === car &&
             name(_sb_named_inner(:car, first(getargs(e.value)))) === record.area,
         "`car($(record.area))`")
+    get(record, :separation, nothing) === nothing || _brm_transport_error(
+        :unsupported_coverage,
+        "brm_coordinate_transport: `car($(record.area))` was lowered by its unit " *
+        "border separator (`RKBRMI(brmi; car_units)`), whose coordinates are a " *
+        "linear map of Stan's field; that map is not built yet. Lower the RK " *
+        "backend without `car_units` to compare it with Stan.")
     base = (; kind=:car, predictor=record.predictor, term=entry.term)
     roles = record.type === :bym2 ?
         ((:sd, :sigma, false), (:mixing, :rho, false),

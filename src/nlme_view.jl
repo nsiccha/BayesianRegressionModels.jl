@@ -41,7 +41,8 @@ unconstrained coordinate vector (`coordinates`, in packed order).
 - `role[c]` — `:population` (population coefficients, categorical contrasts,
   monotonic simplexes, ordinal thresholds and vector parameters),
   `:shared_latent` (sampled coordinates shared by the units: HSGP components,
-  missing-value completions, submodels, `car(...)` fields, and every
+  missing-value completions, submodels, `car(...)` fields (only their separator
+  draws, scale and mixing share when lowered with `car_units`), and every
   coordinate of a random-effect block over a grouping in `shared_groups`; a
   grouped HSGP or `cdar` walk whose levels are the units shares only its
   hyperparameters),
@@ -89,7 +90,13 @@ unconstrained coordinate vector (`coordinates`, in packed order).
   fixed at the identity: each group's standardized innovations are an
   instance of it in the subject owning the group (its block identity carries
   `cdar`, the term's declaration; the margins are `cdar(step)[s]` for each
-  step value `s`). Its marginal SD and persistence are `:shared_latent`.
+  step value `s`). Its marginal SD and persistence are `:shared_latent`. A
+  `car(...)` field lowered with `RKBRMI(brmi; car_units)` over the subject
+  labels has a family of size 1 fixed at 1 for its interior draws, each draw an
+  instance in the subject that is its unit, and for a BYM2 field one more for
+  each area's iid part (block identity `car`, the term's declaration, and
+  `part`, `:draw` or `:iid`; margin `car(area)[part]`, level the draw's or
+  area's position).
 - `subject_margins[i]` — the compact coordinates' family margin and grouping
   level labels for subject `i`.
 - `mu_references` — one `(; predictor, coefficient, link, population, subject,
@@ -445,7 +452,12 @@ form) is a `:shared_latent`, and so is a grouped `hsgp(x; by = g)` or a
 `cdar(step; by = g)` walk with `g` in `shared_groups`.
 `nested_groups` may also name the `by` grouping of a `cdar` or grouped `hsgp`
 term that no random effect uses, so that its levels are units. A `car(...)`
-field is always shared: its edges couple its areas. The grouped entries of
+field is shared, since its edges couple its areas, unless the backend was
+lowered by the field's unit border separator with the subject labels
+(`RKBRMI(brmi; car_units = :subject)`): then only its separator draws, scale
+and mixing share are shared, and each subject's interior draws (and a BYM2
+field's iid part of each of its areas) are that subject's unit draws. The
+grouped entries of
 `mi(x)::shares(total, rows)` are unit draws of the subject owning each
 group's rows when the backend is non-centered
 (`RKBRMI(brmi; completions = :noncentered)`); centred they are refused, since
@@ -455,7 +467,8 @@ their density reads the law and with it the units' draws. See
 Refuses with [`BRMNLMEViewError`](@ref) when the model has no such reading:
 no random effects over the subjects, a grouping named in neither
 `nested_groups` nor `shared_groups` (the message names it), a subject-owned
-grouping that couples its levels, a centred `mi(x)::shares(total, rows)`
+grouping that couples its levels, a `car(...)` field lowered with `car_units`
+that are not the subjects, a centred `mi(x)::shares(total, rows)`
 completion or one with a group whose missing entries lie on rows of several
 subjects, or any coordinate the semantic inventory does not cover.
 """
@@ -878,10 +891,56 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             for (i, name) in enumerate(names)
                 _brm_nlme_owned(name, record.target) && claim!(i, :shared_latent)
             end
-        elseif kind === :car
+        elseif kind === :car && get(record, :separation, nothing) === nothing
             # An areal field couples its areas through its edges, so the
             # whole field is shared by the subjects, whatever its area column.
             claim_declaration!(record.declaration, :shared_latent)
+        elseif kind === :car
+            # A field lowered by its unit border separator
+            # (`RKBRMI(brmi; car_units)`): each unit's interior draws, and each
+            # area's BYM2 iid part, are unit draws of the subject the unit is,
+            # in size-1 families fixed at 1. The separator draws, the scale
+            # and the mixing share are shared.
+            separation = record.separation
+            unit_subject(label) = get(subject_index, _brm_transport_level(label)) do
+                _brm_nlme_error("brm_nlme_view: `car($(record.area))` was lowered with " *
+                    "`car_units` whose unit $(repr(label)) is not a level of the subject " *
+                    "grouping `$group`; lower it with the subject labels as `car_units`")
+            end
+            # Each unit's interior draws `<field>.<z_u>.<j>`, then each area's
+            # BYM2 iid part `<field>.<theta>.<area>`.
+            draws = [(Symbol(record.declaration, ".", z, ".", j), b.label)
+                for (b, z) in zip(separation.blocks, record.locals.z) if z !== nothing
+                for j in 1:b.ndraws]
+            parts = Any[(draws, :draw)]
+            record.type === :bym2 && push!(parts,
+                ([(Symbol(record.declaration, ".", record.locals.theta, ".", k), label)
+                    for (k, label) in enumerate(separation.node_units)], :iid))
+            for (coordinates, part) in parts
+                isempty(coordinates) && continue
+                family = length(families) + 1
+                block = (; group=record.area, id=nothing, predictor=record.predictor,
+                    car=record.declaration, part)
+                push!(families, (; block, record, stratum=nothing, size=1,
+                    scales=Int[], factor=Int[], fixed=fill(1.0, 1, 1)))
+                coefficient = Symbol("car(", record.area, ")[", part, "]")
+                push!(block_margins, (; block, predictor=record.predictor, coefficient))
+                for (k, (name, label)) in enumerate(coordinates)
+                    label === nothing && continue
+                    i = unit_subject(label)
+                    c = coordinate(name)
+                    claim!(c, :subject_effect)
+                    subject[c] = i
+                    push!(blocks[i], c)
+                    push!(subject_families[i], family)
+                    push!(subject_margins[i], (; block, predictor=record.predictor,
+                        coefficient, level=k))
+                end
+            end
+            for (i, name) in enumerate(names)
+                role[i] === :unclaimed && _brm_nlme_owned(name, record.declaration) &&
+                    claim!(i, :shared_latent)
+            end
         else
             _brm_nlme_error("brm_nlme_view: coordinate record kind `$kind` has no " *
                 "NLME role")

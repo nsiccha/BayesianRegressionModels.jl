@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.52
+## 0.2.53
 
 - A nested NLME model (`brm_nlme_model` with `subject_group` /
   `nested_groups`) whose observations have subject cells declares each
@@ -29,6 +29,34 @@ instead of failing at run time.
   none and keep dense blocks.
 - `NLMEEstimation = "0.1.3"` is the compat floor (the version that adds
   `eta_hessian_sparsity`); SparseArrays is a dependency.
+
+## 0.2.52
+
+- `RKBRMI(brmi; car_units)` lowers every `car(...)` field by its unit border
+  separator. `car_units` gives unit labels row-aligned with the model rows,
+  either the name of a column the model reads (`car_units = :region`) or the
+  labels themselves; each area takes the unit of its rows. The separator holds
+  the areas of no unit or of several units and, on each border between two
+  units, the border areas of the side with fewer of them. Given the separator
+  values and each unit's interior sum (per connected component), the units'
+  interiors are independent Gaussians. The field is then sampled from
+  standard-normal draws: shared ones for those values (`<field>.w`) and, per
+  unit `k`, ones for its interior (`<field>.z_k`). It is the default
+  lowering's field and density, up to a constant Jacobian, the soft
+  sum-to-zero included. A component inside one unit is all that unit's draws.
+- `brm_nlme_view` reads such a field lowered over the subject labels as unit
+  draws: each subject's interior draws, and a BYM2 field's per-area iid part,
+  are size-1 families fixed at 1. θ then holds the separator values and the
+  sums instead of one coordinate per area, which keeps the unit factorization
+  of SAEM, two-stage fits, SVI and per-unit Laplace for a field over
+  Gemeinden in Länder. Units that are not the subjects are refused by name.
+- The per-unit factors are dense (`n_u²` per unit, `m²` for the shared
+  values).
+- `reprocess` keeps the fit's separation on a frozen replay, and lowers a
+  rebuild (`freeze_constants=false`) with the same `car_units` column (labels
+  passed as a vector are refused there, since they label the fit's rows).
+  `brm_coordinate_transport` refuses a separated field by name: the linear map
+  to Stan's field is not built yet.
 
 ## 0.2.51
 
