@@ -131,7 +131,7 @@ const _RK_DERIVED_BINOPS = Dict{Function,Symbol}(
     (+) => :.+, (-) => :.-, (*) => :.*, (/) => :./, (^) => :.^, (%) => :.%)
 const _RK_DERIVED_MATH = Dict{Function,Symbol}(
     log => :log, log10 => :log10, log1p => :log1p, exp => :exp,
-    expm1 => :expm1, sqrt => :sqrt, abs => :abs)
+    expm1 => :expm1, sqrt => :sqrt, abs => :abs, logistic => :logistic)
 const _RK_DERIVED_CMP = Dict{Function,Symbol}(
     (==) => :.==, (!=) => :.!=, (<) => :.<, (>) => :.>,
     (<=) => :.<=, (>=) => :.>=)

@@ -327,6 +327,34 @@ end
     @test consumer_stan(scope_calls((; y=[0.3, -0.2, 0.5])), "model-scope-calls") !== nothing
 end
 
+# Model-scope `logistic` of a data column, of a value over rows, of a scalar
+# and in a likelihood argument: per-row shares `p = logistic(lp + g[rows])`
+# beside a scalar rate.
+scope_logistic(data) = @brm data begin
+    sigma ~ Exponential(1)
+    a ~ Normal(0, 1)
+    b ~ Normal(0, 1)
+    q = logistic(x)
+    p = logistic(a + q[rows])
+    e = logistic(b) * exp(a)
+    y ~ Normal(p + e + b * logistic(a), sigma)
+end
+
+@stestset "model-scope logistic is elementwise on RKBRMI" begin
+    brmi = scope_logistic((; x=[-0.6, 0.1, 0.8, 1.4], rows=[1, 3, 2, 4, 3],
+        y=[0.9, 1.6, 1.1, 1.8, 1.4]))
+    # RKPPL reads an undotted `logistic` as the inverse logit of a scalar, so
+    # the emitter dots it as it dots `exp` (snag brm-rk-emitter-l-3c562c54).
+    main = sprint(Base.show_unquoted, BRM._rk_emit_ast(BRM._brm_rk_plan(brmi)).main)
+    @test occursin("p = logistic.(a .+ q[rows])", main)
+    @test occursin("e = logistic.(b) .* exp.(a)", main)
+    @test occursin("y .~ Normal.(.+(p, e, b .* logistic.(a)), sigma)", main)
+    @test !occursin(r"(?<![\w.])logistic\(", main)
+    # `logistic` of a data column is data on both backends, like `exp(x)`.
+    @test :q in map(a -> a.name, last(BRM._brm_resolve_data_assignments(brmi)))
+    check_transported(brmi, "model-scope-logistic")
+end
+
 @stestset "one helper name dispatches to each backend's implementation" begin
     brmi = DualHelper.build(DATA)
     backend, problem = consumer_problem(brmi)
