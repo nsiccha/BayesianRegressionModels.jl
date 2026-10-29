@@ -56,16 +56,20 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
         "the standardized subject draws this map fills; build the SBBRMI " *
         "without `centered_groups`")
     blocks = NamedTuple[]
-    # The transport has refused stratified blocks and non-centered completions
-    # (both unpaired), so every family here is an estimated plain block.
+    # The transport has refused non-centered completions (unpaired), so every
+    # family here is an estimated plain block or one stratum of a stratified
+    # block, whose scales and factor the transport addresses by stratum label.
     for family in _brm_nlme_families(rk, view)
         record = family.record
         key = _brm_nlme_block_identity(record)
+        stratum = isnothing(family.stratum) ? nothing : _brm_transport_level(
+            _rk_grouping_levels(rk.plan.columns[record.by])[family.stratum])
         scales = BRMCoordinatePair[]
         for margin in record.margins
             matches = [p for p in transport.pairs
                 if p.address.kind === :ranef_scale &&
                    p.address.group === record.group && isequal(p.address.id, record.id) &&
+                   isequal(get(p.address, :stratum, nothing), stratum) &&
                    p.address.margin == margin]
             length(matches) == 1 || _brm_nlme_error(
                 "brm_nlme_joint_map: random-effect scale for $key / $margin " *
@@ -73,7 +77,8 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
             push!(scales, only(matches))
         end
         factors = [f for f in transport.correlations
-            if f.group === record.group && isequal(f.id, record.id)]
+            if f.group === record.group && isequal(f.id, record.id) &&
+               isequal(get(f, :stratum, nothing), stratum)]
         length(factors) == (isnothing(record.L) ? 0 : 1) || _brm_nlme_error(
             "brm_nlme_joint_map: correlation factor for $key is not paired")
         push!(blocks, (; family..., scales,
@@ -368,9 +373,8 @@ function brm_nlme_joint_start(map::BRMNLMEJointMap; theta, sigma, omega, eta,
             put!(pair.stan_value, pair.relation === :exp ? log(scale) : scale)
         end
         isnothing(block.factor) && continue
-        carrier = block.factor.stan_carrier
         for i in axes(Lcorr, 1), j in axes(Lcorr, 2)
-            put!(string(carrier, ".", i, ".", j), Lcorr[i, j])
+            put!(_brm_stan_factor_name(block.factor, i, j), Lcorr[i, j])
         end
     end
     stan = BridgeStan.param_unconstrain(map.stan_model, constrained)

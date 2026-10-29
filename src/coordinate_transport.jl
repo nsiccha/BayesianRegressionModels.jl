@@ -168,8 +168,11 @@ coordinate in RK order, and `permutation` matches positions:
 `stan_names[i]` is paired with `rk_names[permutation[i]]`. `correlations` lists
 each paired correlation factor (`rk_declaration`, `stan_carrier`, dimension
 `K`) for the whole-factor physical check. A random-effect factor also carries
-its `group`, `id` and ordered predictor/coefficient `margins`; a factor
-declared by a submodel provider carries its `target` and `declaration`.
+its `group`, `id` and ordered predictor/coefficient `margins`; one stratum's
+factor of a stratified `gr(g, by = b)` block adds `by`, the `stratum` label,
+its slice `rk_index` of the RK declaration and its index `stan_index` into the
+Stan carrier's array. A factor declared by a submodel provider carries its
+`target` and `declaration`.
 
 `simplexes` lists each `:simplex` block: its semantic `address`,
 `rk_declaration`, `stan_carrier`, simplex length `K`, and the block's
@@ -269,7 +272,9 @@ coefficients by (stage, term), ordinary-prior population
 coefficients (including shared-design and separate categorical blocks),
 plain random-effect blocks (`(1 | g)`, `(0 + x | g)`, `(1 + x | g)`,
 `(… | id | g)`) with sampled scales, non-centered or centered on the SB side
-(see below), ungrouped HSGP terms
+(see below), stratified blocks `gr(g, by = b)` (each stratum's scales by
+margin and its correlation factor, by the `b` level; the standardized draws by
+(level of `g`, margin)), ungrouped HSGP terms
 (isotropic or per-axis length scales, marginal scale and basis weights, paired
 by their formula axes and parameter roles), grouped HSGP terms
 `hsgp(x...; by = g)` (the length scale and amplitude, or a hyper-predicted
@@ -414,12 +419,13 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
               "`Dirichlet` simplexes, ordinary-prior " *
               "population and categorical coefficients, plain non-centered or " *
               "centered random-effect " *
-              "blocks with sampled scales, HSGP terms (grouped by `by=` too), monotonic " *
+              "blocks with sampled scales, stratified `gr(g, by=b)` blocks, " *
+              "HSGP terms (grouped by `by=` too), monotonic " *
               "terms, submodel provider declarations, and missing-value " *
               "completions (RK `<column>.y_mis` with SB `<column>_y_mis`). Other " *
               "constructs (R2D2/horseshoe priors, smooths, GP, hyper-predicted " *
               "HSGP without `by=`, AR, measurement error, multi-membership " *
-              "and stratified groups, exact-total SB emissions) " *
+              "groups, exact-total SB emissions) " *
               "are not paired yet.")
     end
     ordered = sort(pairs; by=pair -> rk_pos[pair.rk])
@@ -642,20 +648,49 @@ function _brm_transport_ranef_block(d, record)
     (; block, margins)
 end
 
-function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
-        ::Val{:ranef}, record, rk, d, stan, stan_pos)
-    (; block, margins) = _brm_transport_ranef_block(d, record)
+# The SB position of each RK margin of a random-effect record, among the SB
+# block's ordered `margins`.
+function _brm_transport_sb_margins(record, block, margins)
     K = length(record.margins)
     K == block.n_terms || error(
         "brm_coordinate_transport: random-effect block `$(block.binding)` has " *
         "$K RK and $(block.n_terms) SB margins")
-    sb_margin = map(collect(record.margins)) do margin
+    map(collect(record.margins)) do margin
         j = findall(==(margin), margins)
         length(j) == 1 || error(
             "brm_coordinate_transport: RK margin $margin of block " *
             "`$(block.binding)` matches $(length(j)) SB margins $(Tuple(margins))")
         only(j)
     end
+end
+
+# Calls `f(g, h, level)` for each level of a random-effect record's grouping,
+# with `g` its row of RK's standardized draws `z` and `h` the SB level of the
+# same label. Returns the RK levels and the RK row `rk_level[h]` of each SB
+# level.
+function _brm_transport_each_level(f, rk, record, block)
+    rk_levels = _rk_ranef_record_levels(rk, record)
+    G = length(rk_levels)
+    G == block.n_groups || error(
+        "brm_coordinate_transport: grouping `$(record.group)` has " *
+        "$G RK and $(block.n_groups) SB levels")
+    rk_level = Vector{Int}(undef, G)
+    for (g, level) in enumerate(rk_levels)
+        h = findall(l -> isequal(l, level), block.levels)
+        length(h) == 1 || error(
+            "brm_coordinate_transport: level $(repr(level)) of grouping " *
+            "`$(record.group)` matches $(length(h)) SB levels")
+        rk_level[only(h)] = g
+        f(g, only(h), level)
+    end
+    (; rk_levels, rk_level)
+end
+
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:ranef}, record, rk, d, stan, stan_pos)
+    (; block, margins) = _brm_transport_ranef_block(d, record)
+    K = length(record.margins)
+    sb_margin = _brm_transport_sb_margins(record, block, margins)
     # A centered block's effects are `diag(tau) * L * z` in SB margin order.
     block.noncentered || sb_margin == collect(1:K) || _brm_transport_error(
         :parameterization_mismatch,
@@ -717,24 +752,13 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     end
     # Standardized draws: one per (level, margin), paired by level label. A
     # centered block pairs each with the effect of the same (level, margin).
-    rk_levels = _rk_ranef_record_levels(rk, record)
-    G = length(rk_levels)
-    G == block.n_groups || error(
-        "brm_coordinate_transport: grouping `$(record.group)` has " *
-        "$G RK and $(block.n_groups) SB levels")
     positions = ranef_coordinates(block, stan)
     layout = spec.layout
+    G = block.n_groups
     rk_z = Matrix{Symbol}(undef, K, G)
     stan_b = Matrix{String}(undef, K, G)
     stan_values = Matrix{String}(undef, K, G)
-    rk_level = Vector{Int}(undef, G)
-    for (g, level) in enumerate(rk_levels)
-        h = findall(l -> isequal(l, level), block.levels)
-        length(h) == 1 || error(
-            "brm_coordinate_transport: level $(repr(level)) of grouping " *
-            "`$(record.group)` matches $(length(h)) SB levels")
-        h = only(h)
-        rk_level[h] = g
+    (; rk_levels, rk_level) = _brm_transport_each_level(rk, record, block) do g, h, level
         for (k, margin) in enumerate(record.margins)
             address = (; kind=:ranef_z, base..., level, margin)
             rk_name = Symbol(record.z, ".", g, ".", k)
@@ -1206,11 +1230,76 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         :submodel, record.target, rk, d, stan, stan_pos)
 end
 
-# A stratified `gr(g, by=b)` block is not paired with SB's
-# `ranef_correlated_by_draws` layout yet; its coordinates stay unpaired, so
-# the coverage check names them.
-_brm_transport_pairs!(pairs, correlations, simplexes, centered,
-    ::Val{:stratified_ranef}, record, rk, d, stan, stan_pos) = nothing
+# A stratified `gr(g, by=b)` block: each stratum's scales and correlation
+# factor, paired by stratum label and margin, and, as for a plain block, one
+# standardized draw per (level, margin), paired by level label. RK holds the
+# scales as the `levels(b) × K` matrix `tau` (or one `tau_<k>[levels(b)]` per
+# margin when the margins' laws differ) and the factors as the
+# `K × K × levels(b)` array `L` (`_rk_ast_stratified_group_component!`). SB
+# samples the `matrix<lower=0>[K, S]` scales `<binding>_tau_s_tau` and the
+# `array[S] cholesky_factor_corr[K]` factors `<binding>_L_s_L`, whose names do
+# not follow their storage order (`_adaptive_stratum_cholesky`); its
+# stratified families are always non-centered.
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:stratified_ranef}, record, rk, d, stan, stan_pos)
+    (; block, margins) = _brm_transport_ranef_block(d, record)
+    spec = _RANEF_FAMILIES[block.family]
+    K = length(record.margins)
+    sb_margin = _brm_transport_sb_margins(record, block, margins)
+    strata = _brm_ranef_strata(d, block, "brm_coordinate_transport").strata
+    rk_strata = _rk_grouping_levels(rk.plan.columns[record.by])
+    length(rk_strata) == length(strata) || error(
+        "brm_coordinate_transport: `by` column `$(record.by)` of block " *
+        "`$(block.binding)` has $(length(rk_strata)) RK and $(length(strata)) SB strata")
+    sb_stratum = map(rk_strata) do label
+        h = findall(l -> isequal(_brm_transport_level(l), _brm_transport_level(label)),
+            strata)
+        length(h) == 1 || error(
+            "brm_coordinate_transport: stratum $(repr(label)) of `$(record.by)` " *
+            "matches $(length(h)) SB strata")
+        only(h)
+    end
+    base = (; group=record.group, id=record.id, by=record.by)
+    tau = string(block.binding, "_", _adaptive_stratum_carrier(spec, :scale))
+    for (s, label) in enumerate(rk_strata), (k, margin) in enumerate(record.margins)
+        address = (; kind=:ranef_scale, base..., stratum=_brm_transport_level(label), margin)
+        rk_name, rk_decl, rk_index = isnothing(record.scales) ?
+            (Symbol(record.scale, ".", s, ".", k), record.scale, (s, k)) :
+            (Symbol(record.scales[k], ".", s), record.scales[k], (s,))
+        push!(pairs, BRMCoordinatePair(address, rk_name, _brm_stan_name(stan_pos,
+                string(tau, ".", sb_margin[k], ".", sb_stratum[s]), address),
+            rk_decl, rk_index, :identity))
+    end
+    positions = ranef_coordinates(block, stan)
+    _brm_transport_each_level(rk, record, block) do g, h, level
+        for (k, margin) in enumerate(record.margins)
+            push!(pairs, BRMCoordinatePair((; kind=:ranef_z, base..., level, margin),
+                Symbol(record.z, ".", g, ".", k), stan[positions[sb_margin[k], h]],
+                record.z, (g, k), :identity))
+        end
+    end
+    isnothing(record.L) && return
+    sb_margin == collect(1:K) || _brm_transport_error(:parameterization_mismatch,
+        "brm_coordinate_transport: block `$(block.binding)` orders its margins " *
+        "$(Tuple(margins)) on SB and $(record.margins) on RK; a reordered " *
+        "correlation factor is not a coordinate permutation")
+    carrier = _adaptive_stratum_carrier(spec, :correlation_cholesky)
+    stan_factor = _adaptive_stratum_cholesky(stan_pos, block.binding, carrier,
+        length(strata), K)
+    for (s, label) in enumerate(rk_strata)
+        stratum = _brm_transport_level(label)
+        for m in 1:(K * (K - 1)) ÷ 2
+            address = (; kind=:ranef_correlation, base..., stratum,
+                margins=record.margins, index=m)
+            push!(pairs, BRMCoordinatePair(address, Symbol(record.L, ".", m, ".", s),
+                stan[stan_factor[sb_stratum[s]][m]], record.L, (m, s), :cholesky))
+        end
+        push!(correlations, (; base..., stratum, margins=record.margins,
+            rk_declaration=record.L, rk_index=(:, :, s),
+            stan_carrier=string(block.binding, "_", carrier),
+            stan_index=(sb_stratum[s],), K))
+    end
+end
 
 # A non-centered completion's standardized draws have no SB counterpart (SB
 # samples the missing values); they stay unpaired, so the coverage check
@@ -1681,6 +1770,12 @@ function brm_stan_logdensity_to_rk(t::BRMCoordinateTransport, u::AbstractVector,
         sum((_brm_centered_logjacobian(block, u) for block in t.centered); init=0.0)
 end
 
+# The Stan constrained name of entry `(i, j)` of a paired correlation factor;
+# one stratum's factor of a stratified block sits at `stan_index` of its
+# carrier's array.
+_brm_stan_factor_name(factor, i, j) =
+    join((factor.stan_carrier, get(factor, :stan_index, ())..., i, j), ".")
+
 _brm_physical(::Val{:identity}, stan_value) = stan_value
 _brm_physical(::Val{:exp}, stan_value) = exp(stan_value)
 
@@ -1813,12 +1908,13 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
     end
     for factor in t.correlations
         L = _brm_rk_declaration_value(rk_values, factor.rk_declaration)
+        haskey(factor, :rk_index) && (L = L[factor.rk_index...])
         size(L) == (factor.K, factor.K) || error(
             "brm_check_coordinate_transport: RK factor `$(factor.rk_declaration)` " *
             "has size $(size(L)), expected $((factor.K, factor.K))")
         for i in 1:factor.K, j in 1:factor.K
-            compare("correlation factor $(factor.stan_carrier)[$i,$j]", L[i, j],
-                stan_value(string(factor.stan_carrier, ".", i, ".", j)))
+            name = _brm_stan_factor_name(factor, i, j)
+            compare("correlation factor $name", L[i, j], stan_value(name))
         end
     end
     for block in t.simplexes
