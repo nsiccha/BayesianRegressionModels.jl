@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.44
+## 0.2.45
 
 - A nested NLME model (`brm_nlme_model` with `subject_group` /
   `nested_groups`) whose observations have subject cells now evaluates one
@@ -33,6 +33,31 @@ instead of failing at run time.
   the model: 18.4 ms against 26.7 ms for 12 units of 2,795 cells, but 0.23 ms
   against 0.035 ms for 3 small regions (ReactiveKernels snag
   `compact-cell-sam-7b0032c9` asks for one call per unit).
+
+## 0.2.44
+
+- `RKBRMI(brmi; completions = :noncentered)` lowers `mi(x)::shares(total, rows)`
+  (before, it refused it): the grouped entries' coordinates, the centred ones
+  that `brm_coordinate_transport` pairs with Stan's `y_shares`, are
+  standard-normal draws `x.z_shares`, and each group observes the rest of
+  their density (the law at its entries and the shares' log-Jacobian, less
+  the draws' standard-normal density), so the density is the centred one
+  under any law. The entries of no group need a location-scale law, as for
+  any non-centered completion. `:pointwise` holds the group terms as the
+  observation of one placeholder per group (`x_shares_weights`).
+- `brm_nlme_view` reads those coordinates as unit draws: each is an instance
+  of a size-1 family fixed at 1 in the subject owning its group's rows, and
+  the group's term belongs to that subject, so `brm_nlme_model`, SAEM, SVI
+  and the per-unit Laplace problem run, and the two-stage fit's unit problems
+  differ from the full RK density by their unit alone. A group whose missing
+  entries lie on rows of several subjects is refused by name. A centred
+  shares completion is refused, naming the non-centered lowering: its
+  density is a prior term reading the law, whose arguments may read the
+  units' random effects, and the NLME paths evaluate the population prior
+  with every random effect at zero. Before, a completion without free
+  entries failed with `internal: declaration x.y_free owns no packed
+  coordinate`, and one with them was read as shared coordinates in that
+  population prior. Snag `nlme-view-shares-f1cfaa71`.
 
 ## 0.2.43
 

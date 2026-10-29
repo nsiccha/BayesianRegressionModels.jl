@@ -468,13 +468,18 @@ _brm_mi_grouped(t::_BRMMissingTotals) = !isempty(t.ends)
 # as RKBRMI's data preparations compute it in the graph
 # (`brm_covariate_total_*`, statistical_models.jl): free and grouped row
 # indices, all of them in the plan's order, the groups' ends and residuals.
+# A non-centered completion also reads the axis of the grouped entries'
+# coordinates and one placeholder per group, which its groups' weights
+# observe (`_rk_emit_missing_totals!`).
 function _brm_totals_layout(values, group, cells, totals)
     spec = (; group=(; name=:group, values=group), cells=(; name=:cells, values=cells),
         total=(; name=:total, values=totals))
     ordered, t = _brm_missing_totals(:x, values, findall(ismissing, values), spec;
         prefix="RK backend")
-    (; ordered, free=ordered[1:t.nfree], grouped=ordered[t.nfree+1:end],
-        ends=t.ends, residuals=t.residuals)
+    grouped = ordered[t.nfree+1:end]
+    (; ordered, free=ordered[1:t.nfree], grouped, ends=t.ends, residuals=t.residuals,
+        coordinates=collect(1:(length(grouped) - length(t.ends))),
+        weights=zeros(length(t.ends)))
 end
 
 # The values of the grouped entries from their coordinates (`K - 1` per group
@@ -615,3 +620,41 @@ struct _BRMGroupedShares{F,A<:Tuple}
 end
 (::Type{_BRMGroupedShares{F}})(ends, residuals, args...) where {F} =
     _BRMGroupedShares{F,typeof(args)}(args)
+
+# Non-centered (`RKBRMI(brmi; completions = :noncentered)`), the grouped
+# entries' coordinates `z` are standard normal draws, `x` their values
+# (`_brm_grouped_shares_values`), and each group observes the rest of the
+# joint latent's density: the law at its entries, the shares' log-Jacobian
+# `sum(log.(x)) - log(residual)`, less its coordinates' standard normal
+# density. The coordinates then have exactly the centred joint latent's
+# density, and every group's term belongs to the rows it completes, which the
+# NLME paths read as unit draws (`brm_nlme_view`). A group with one entry has
+# no coordinate; its term is the law at its residual.
+# `Vararg{Any,N}` specializes on the law's arguments: an unspecialized
+# varargs tuple holding an active vector needs Enzyme's runtime activity in
+# the NLME paths' forward-over-reverse η Hessians.
+struct _BRMGroupedSharesWeights{F} end
+function (::_BRMGroupedSharesWeights{F})(z, x, ends, residuals,
+        args::Vararg{Any,N}) where {F,N}
+    _brm_shares_check_lengths(args, x)
+    weights = similar(x, Base.promote_eltype(x, args...), length(ends))
+    start, coordinate = 1, 1
+    for (k, stop) in enumerate(ends)
+        weight = -log(residuals[k])
+        for j in start:stop
+            weight += logpdf(F(_brm_shares_entries(args, j)...), x[j]) + log(x[j])
+        end
+        for c in coordinate:(coordinate + stop - start - 1)
+            weight += z[c]^2 / 2 + log(2π) / 2
+        end
+        weights[k] = weight
+        start, coordinate = stop + 1, coordinate + stop - start
+    end
+    weights
+end
+
+# One group's observed term: its density is the weight, whatever the placeholder
+# it observes (the ReactiveKernels extension).
+struct _BRMLogWeight{T<:Real}
+    weight::T
+end
