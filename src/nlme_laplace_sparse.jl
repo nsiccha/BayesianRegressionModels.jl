@@ -116,6 +116,15 @@ mutable struct BRMSparseLaplaceProblem{K}
     prior_val::Vector{Float64}
     wcols::Vector{Vector{Int}}
     wλ::Vector{Float64}
+    # Step blocks inside the components (`_brm_spl_step_blocks!`): each
+    # effect's block (`sblock`), each block's effects and component, the blocks
+    # each term touches (`tsb[tsbptr[t]:tsbptr[t+1]-1]`) and each soft sum's.
+    sblock::Vector{Int}
+    sblocks::Vector{Vector{Int}}
+    sblock_component::Vector{Int}
+    tsbptr::Vector{Int}
+    tsb::Vector{Int}
+    wsblocks::Vector{Vector{Int}}
     omega::Vector{Int}
     affine::Bool
     φ0::Vector{Float64}
@@ -129,6 +138,10 @@ mutable struct BRMSparseLaplaceProblem{K}
     maxiter::Int
     nonfinite::Int
     unconverged::Int
+    # how often a component's full step failed and its blocks stepped on their
+    # own, and how often a block Gauss–Seidel sweep followed
+    blockwise::Int
+    sweeps::Int
 end
 
 Base.show(io::IO, p::BRMSparseLaplaceProblem) = print(io,
@@ -288,14 +301,15 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         fill(true, length(t.family)), t.port, t.index, t.link, t.fixed,
         Int[], Int[], Int[], Int[], Int[], Vector{Int}[], Int[], Int[], Int[], Int[], Int[],
         spzeros(0, 0), Int[], Int[], Vector{Int}[], Int[], Int[], Float64[], Vector{Int}[],
-        Float64[], omega, false,
+        Float64[], Int[], Vector{Int}[], Int[], Int[], Int[], Vector{Int}[], omega, false,
         u0[population], zeros(nψ), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
-        Float64(tol), Int(maxiter), 0, 0)
+        Float64(tol), Int(maxiter), 0, 0, 0, 0)
     _brm_spl_design!(p, u0)
     sampled || _brm_slap_population_design!(p, u0)
     _brm_slap_verify!(p, u0, t.response, t.row)
     _brm_spl_verify_prior(p, u0)
     _brm_spl_pattern!(p)
+    _brm_spl_step_blocks!(p)
     p
 end
 
@@ -610,8 +624,8 @@ end
 # (full values and third derivatives, see `_brm_lap_row`); `rows` and `crows`,
 # when given, keep each term's row and C rows.
 function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
-        derivatives::Bool, third::Bool=false, rows=nothing, crows=nothing)
-    _brm_spl_prior!(fc, derivatives ? g : nothing, derivatives ? hnz : nothing, p, z)
+        derivatives::Bool, third::Bool=false, rows=nothing, crows=nothing, fb=nothing)
+    _brm_spl_prior!(fc, derivatives ? g : nothing, derivatives ? hnz : nothing, p, z, fb)
     rest = 0.0
     mmax = maximum(t -> p.tptr[t + 1] - p.tptr[t], eachindex(p.family); init=0)
     c1 = zeros(mmax); c2 = zeros(mmax)
@@ -639,6 +653,11 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
             continue
         end
         fc[comp] += r.v
+        if fb !== nothing
+            for k in p.tsbptr[t]:(p.tsbptr[t + 1] - 1)
+                fb[p.tsb[k]] += r.v
+            end
+        end
         derivatives || continue
         for i in 1:m
             g[zs[i]] += c1[i] * r.g1 + (moving ? c2[i] * r.g2 : 0.0)
@@ -653,16 +672,81 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
     rest
 end
 
+# Step blocks: inside a component, the levels of the coarsest integrated
+# grouping its rows read (a Kreis with its Gemeinden and their field values),
+# so each takes its own step length (`per-unit-steps`). A term's key is the
+# level it reads of its coarsest block (fewest levels); an effect joins the
+# key most of its terms have; an effect no term reads joins a neighbour's
+# along the field's edges, or stays alone. A component whose effects share one
+# key is one block, as a unit of a nested model is.
+function _brm_spl_step_blocks!(p::BRMSparseLaplaceProblem)
+    n = length(p.integrated)
+    key = Vector{Tuple{Int,Int}}(undef, length(p.family))
+    for t in eachindex(p.family)
+        best = (0, 0); size_best = typemax(Int)
+        e = p.entry[t]
+        for e2 in e:(e + _brm_lap_width(p.family[t]) - 1), r in p.rptr[e2]:(p.rptr[e2 + 1] - 1)
+            m = size(p.blocks[p.rblock[r]].z, 1)
+            if m < size_best || (m == size_best && (p.rblock[r], p.rlevel[r]) < best)
+                best = (p.rblock[r], p.rlevel[r]); size_best = m
+            end
+        end
+        key[t] = best
+    end
+    counts = [Dict{Tuple{Int,Int},Int}() for _ in 1:n]
+    for t in eachindex(p.family), i in view(p.tz, p.tptr[t]:(p.tptr[t + 1] - 1))
+        counts[i][key[t]] = get(counts[i], key[t], 0) + 1
+    end
+    effect_key = Vector{Union{Nothing,Tuple{Int,Int}}}(nothing, n)
+    for i in 1:n
+        isempty(counts[i]) && continue
+        effect_key[i] = first(sort!(collect(counts[i]); by=kv -> (-kv[2], kv[1])))[1]
+    end
+    neighbours = [Int[] for _ in 1:n]
+    for b in p.blocks, e in axes(b.edges, 2)
+        i, j = b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]
+        push!(neighbours[i], j); push!(neighbours[j], i)
+    end
+    queue = [i for i in 1:n if effect_key[i] !== nothing]
+    while !isempty(queue)
+        i = popfirst!(queue)
+        for j in neighbours[i]
+            effect_key[j] === nothing || continue
+            effect_key[j] = effect_key[i]
+            push!(queue, j)
+        end
+    end
+    ids = Dict{Tuple{Int,Any},Int}()
+    p.sblock = [get!(ids, (p.component[i], something(effect_key[i], (-i, 0))),
+        length(ids) + 1) for i in 1:n]
+    p.sblocks = [Int[] for _ in 1:length(ids)]
+    p.sblock_component = zeros(Int, length(ids))
+    for i in 1:n
+        push!(p.sblocks[p.sblock[i]], i)
+        p.sblock_component[p.sblock[i]] = p.component[i]
+    end
+    p.tsbptr = [1]; p.tsb = Int[]
+    for t in eachindex(p.family)
+        append!(p.tsb, unique(p.sblock[i] for i in view(p.tz, p.tptr[t]:(p.tptr[t + 1] - 1))))
+        push!(p.tsbptr, length(p.tsb) + 1)
+    end
+    p.wsblocks = [unique(p.sblock[i] for i in cols) for cols in p.wcols]
+    p
+end
+
 # The integrated draws' prior −½ zᵀPz into `fc` per component, its gradient
 # −Pz into `g` and P's sparse part into h's nonzeros (the soft sums' rank-one
 # part stays out of h, see `_brm_spl_woodbury`).
-function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z)
+function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing)
     fill!(fc, 0.0)
     g === nothing || fill!(g, 0.0)
+    fb === nothing || fill!(fb, 0.0)
+    w = 0
     for b in p.blocks
         if _brm_spl_identity(b)
             for i in b.z
                 fc[p.component[i]] -= z[i]^2 / 2
+                fb === nothing || (fb[p.sblock[i]] -= z[i]^2 / 2)
                 g === nothing || (g[i] -= z[i])
             end
             continue
@@ -671,14 +755,24 @@ function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z)
             i, j = b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]
             d = z[i] - z[j]
             fc[p.component[i]] -= d^2 / 2
+            if fb !== nothing
+                fb[p.sblock[i]] -= d^2 / 2
+                p.sblock[j] == p.sblock[i] || (fb[p.sblock[j]] -= d^2 / 2)
+            end
             if g !== nothing
                 g[i] -= d
                 g[j] += d
             end
         end
         for (c, levels) in enumerate(b.sums)
+            w += 1
             total = sum(l -> z[b.z[l, 1]], levels)
             fc[p.component[b.z[first(levels), 1]]] -= b.λ[c] * total^2 / 2
+            if fb !== nothing
+                for k in p.wsblocks[w]
+                    fb[k] -= b.λ[c] * total^2 / 2
+                end
+            end
             if g !== nothing
                 for l in levels
                     g[b.z[l, 1]] -= b.λ[c] * total
@@ -786,7 +880,6 @@ function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     converged = falses(nc)
     previous = fill(Inf, nc)
     λ = zeros(nc)
-    ft = zeros(nc)
     iterations = 0
     while !all(converged)
         if iterations == p.maxiter
@@ -814,31 +907,8 @@ function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
             end
         end
         all(converged) && break
-        # Each moving component halves its own step until it gains.
-        t = [converged[c] ? 0.0 : 1.0 for c in 1:nc]
-        accepted = copy(converged)
-        trial = copy(z)
-        for _ in 1:60
-            for i in 1:n
-                c = p.component[i]
-                accepted[c] && continue
-                trial[i] = z[i] + t[c] * δ[i]
-            end
-            _brm_spl_assemble!(ft, g, h, p, pop.A, pop.C, trial; derivatives=false)
-            for c in 1:nc
-                accepted[c] && continue
-                if isfinite(ft[c]) && (λ[c] <= 1e-8 || ft[c] >= fc[c] + 1e-4 * t[c] * λ[c])
-                    accepted[c] = true
-                    for i in p.components[c]
-                        z[i] = trial[i]
-                    end
-                else
-                    t[c] /= 2
-                end
-            end
-            all(accepted) && break
-        end
-        all(accepted) || (p.nonfinite += 1; return (; finite=false, value=-Inf, iterations))
+        _brm_spl_step!(p, pop, z, δ, g, h, fc, converged) ||
+            (p.nonfinite += 1; return (; finite=false, value=-Inf, iterations))
         _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true)
     end
     F = _brm_spl_factor!(p, h)
@@ -848,6 +918,129 @@ function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     u = copy(pop.uA)
     u[p.integrated] .= z
     (; finite=true, pop..., z, u, h, F, W=_brm_spl_woodbury(p, F), iterations)
+end
+
+# One step along the Newton direction δ for the moving components, in place
+# in z. A component first tries the full step (Armijo on its density, or its
+# decrement at the rounding floor). Where that fails, each of its step blocks
+# halves its own step length until its own terms gain (Armijo on the terms and
+# prior pieces that touch it, with its share of the decrement); a component
+# whose density still did not rise then takes a block Gauss–Seidel sweep: each
+# block in turn its own Newton step on its own terms with the others fixed,
+# which can only raise it. False when a component finds no finite gain.
+function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, converged)
+    n = length(z)
+    nb = length(p.sblocks)
+    λc = zeros(length(fc))
+    for i in 1:n
+        λc[p.component[i]] += g[i] * δ[i]
+    end
+    ft = similar(fc)
+    trial = copy(z)
+    for i in 1:n
+        converged[p.component[i]] || (trial[i] = z[i] + δ[i])
+    end
+    _brm_spl_assemble!(ft, nothing, nothing, p, pop.A, pop.C, trial; derivatives=false)
+    converged = copy(converged)
+    for c in eachindex(fc)
+        converged[c] && continue
+        if isfinite(ft[c]) && (λc[c] <= 1e-8 || ft[c] >= fc[c] + 1e-4 * λc[c])
+            converged[c] = true
+            for i in p.components[c]
+                z[i] = trial[i]
+            end
+        end
+    end
+    all(converged) && return true
+    p.blockwise += 1
+    moving(k) = !converged[p.sblock_component[k]]
+    λb = zeros(nb)
+    for i in 1:n
+        λb[p.sblock[i]] += g[i] * δ[i]
+    end
+    fb = zeros(nb); fbt = zeros(nb)
+    _brm_spl_assemble!(similar(fc), nothing, nothing, p, pop.A, pop.C, z; derivatives=false,
+        fb)
+    t = [moving(k) ? 1.0 : 0.0 for k in 1:nb]
+    accepted = [!moving(k) for k in 1:nb]
+    trial = copy(z)
+    for _ in 1:60
+        for i in 1:n
+            k = p.sblock[i]
+            accepted[k] || (trial[i] = z[i] + t[k] * δ[i])
+        end
+        _brm_spl_assemble!(ft, nothing, nothing, p, pop.A, pop.C, trial; derivatives=false,
+            fb=fbt)
+        for k in 1:nb
+            accepted[k] && continue
+            if isfinite(fbt[k]) && (λb[k] <= 1e-8 || fbt[k] >= fb[k] + 1e-4 * t[k] * λb[k])
+                accepted[k] = true
+            else
+                t[k] /= 2
+            end
+        end
+        all(accepted) && break
+    end
+    for c in eachindex(fc)
+        converged[c] && continue
+        if all(accepted[k] for k in 1:nb if p.sblock_component[k] == c) && isfinite(ft[c]) &&
+                ft[c] >= fc[c] - 1e-12 * abs(fc[c])
+            for i in p.components[c]
+                z[i] = trial[i]
+            end
+        else
+            p.sweeps += 1
+            _brm_spl_sweep!(p, pop, z, c) || return false
+        end
+    end
+    true
+end
+
+# A block Gauss–Seidel sweep over component c's step blocks: each block's own
+# Newton step on its own terms (h's block, shifted where it is not positive
+# definite) with the other blocks fixed, halved until the component's density
+# rises. False when a block finds no finite gain.
+function _brm_spl_sweep!(p::BRMSparseLaplaceProblem, pop, z, c)
+    nc = length(p.components)
+    fc = zeros(nc); ft = zeros(nc); g = zeros(length(z)); h = copy(p.pattern)
+    for (k, members) in enumerate(p.sblocks)
+        p.sblock_component[k] == c || continue
+        _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true)
+        H = Matrix(h[members, members])
+        # the soft sums' rank-one part, which h leaves to Woodbury
+        for (w, cols) in enumerate(p.wcols)
+            inside = findall(in(Set(cols)), members)
+            isempty(inside) || (H[inside, inside] .+= p.wλ[w])
+        end
+        H = Symmetric(H)
+        gk = g[members]
+        F = cholesky(H; check=false)
+        μ = 1e-4
+        while !issuccess(F) && μ < 1e9
+            F = cholesky(H + μ * I; check=false)
+            μ *= 10
+        end
+        issuccess(F) || return false
+        δ = F \ gk
+        λ = dot(gk, δ)
+        λ <= 1e-8 && continue
+        trial = copy(z)
+        step = 1.0
+        gained = false
+        for _ in 1:60
+            trial[members] .= z[members] .+ step .* δ
+            _brm_spl_assemble!(ft, nothing, nothing, p, pop.A, pop.C, trial;
+                derivatives=false)
+            if isfinite(ft[c]) && ft[c] >= fc[c] + 1e-4 * step * λ
+                gained = true
+                break
+            end
+            step /= 2
+        end
+        gained || return false
+        z[members] .= trial[members]
+    end
+    true
 end
 
 function _brm_spl_value(p::BRMSparseLaplaceProblem, state)
