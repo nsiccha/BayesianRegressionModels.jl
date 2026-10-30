@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.76
+
+- Added: `brm_laplace_problem(rk; ad_backend, integrate = …)` also integrates
+  the `cdar(step; by=g)` walks over a named grouping (their standardized
+  innovations) and the `car(area; edges)` fields over a named area column (the
+  default lowering: the ICAR values under their graph precision and BYM2's iid
+  parts), together with the random-effect blocks over it. A field's
+  per-component soft sum-to-zero stays out of the sparse factor (Woodbury).
+  Refused: a field lowered with `car_units`, a field component that no row
+  reads, a walk correlated across groups (`cor=` with off-diagonal entries).
+
 ## 0.2.75
 
 - Added: `brm_laplace_problem(rk; ad_backend, integrate = (:g, …))`
