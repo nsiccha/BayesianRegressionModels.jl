@@ -5,14 +5,14 @@
 #
 # Covered: the spelling rewrites to the declaration-bound form the backends
 # read; the keyword form warns, `restricted` and `truncated` do not; Turing's
-# log joint is the plain kernel; RK emits RKPPL's `restricted`; malformed
-# spellings are refused. Not covered here: SBBRMI, whose plain kernel waits on
-# a StanBlocks spelling (todo 2026-10-29T23-49-53-197-18t54wh).
+# log joint is the plain kernel; RK emits RKPPL's `restricted`; SBBRMI declares
+# the bounds and keeps the plain statement (StanBlocks 0.2.7's `restricted`,
+# todo 2026-10-29T23-49-53-197-18t54wh); malformed spellings are refused.
 #
 # Run: julia --project=test test/restricted_prior.jl
 
 using Test
-using BayesianRegressionModels, Distributions, Turing
+using BayesianRegressionModels, Distributions, Turing, StanBlocks
 using ReactiveKernels, ReactiveKernelsPPL
 const BRM = BayesianRegressionModels
 
@@ -101,6 +101,41 @@ end
     end
     main = sprint(Base.show_unquoted, BRM._rk_emit_ast(BRM._brm_rk_plan(model(DATA))).main)
     @test occursin("bounded ~ restricted(Normal(location, 0.7), -1.0, 3.0)", main)
+end
+
+@testset "SBBRMI declares the bounds and keeps the plain statement" begin
+    model = @brm begin
+        location ~ Normal(0, 1)
+        bounded ~ restricted(Normal(0.2, 0.7), location, location + 2)
+        y ~ Normal(bounded, 1)
+    end
+    sb = SBBRMI(model(DATA); mod=@__MODULE__)
+    code = BRM.stan_code(sb)
+    @test occursin("real<lower=location, upper=(location + 2)> bounded;", code)
+    @test occursin("bounded ~ normal(0.2, 0.7);", code)
+    @test !occursin("conditioning", code)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    # The plan records the family and its bounds, as for the keyword spelling.
+    declaration = only(d for d in BRM.generative_plan(sb).declarations
+                       if d.target === :bounded)
+    @test declaration.family === :normal
+    @test keys(declaration.constraints) == (:lower, :upper)
+
+    # A margin of a vector prior over several families (StanBlocks' `vcat`)
+    # keeps its plain kernel when its argument is sampled.
+    blocks = @brm (; y=[0.1, -0.2, 0.3, 0.0, 0.5, -0.1], x=[-1.0, 0.0, 1.0, 0.5, -0.5, 0.2],
+                   g=[1, 1, 2, 2, 3, 3]) begin
+        h ~ Normal(0, 1)
+        mu ~ 1 + x + (1 + x | p | g)
+        sd(:, p) ~ Exponential(2)
+        sd(mu, p, x) ~ Normal(h, 0.5)
+        y ~ Normal(mu, 1)
+    end
+    vector_code = BRM.stan_code(SBBRMI(blocks; mod=@__MODULE__))
+    model_block = vector_code[first(findfirst(r"\nmodel \{", vector_code)):end]
+    @test occursin("b_p_g_tau[2] ~ normal(h, 0.5);", model_block)
+    @test !occursin("conditioning", model_block)
+    @test StanBlocks.stanc_check(vector_code; warn_pedantic=false).ok
 end
 
 @testset "malformed restricted spellings are refused by name" begin

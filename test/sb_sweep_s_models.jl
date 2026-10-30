@@ -883,7 +883,9 @@ function logistic_rhs_s()
 end
 
 # state_space: UK-drivers structural DLM. Level ~ rw_level (custom joint
-# family WITH data-directed decl bounds — kwargs compose with families),
+# family WITH data-directed decl bounds: `restricted` declares them and keeps
+# the family's plain kernel, as Stan's `vector<lower=, upper=>`; a bare
+# `lower=`/`upper=` would truncate and need `rw_level_lcdf`),
 # seasonal ~ seas_window, beta/lambda flat, sigma positive_ordered ~ t(4).
 # (lobnd/upbnd: `lower`/`upper` are Stan reserved words.)
 function state_space_s()
@@ -895,7 +897,7 @@ function state_space_s()
     lobnd, upbnd = ybar - 3 * ysd, ybar + 3 * ysd
     return @slic (; y=y, x=x, w=w, n=n, lobnd=lobnd, upbnd=upbnd) begin
         sg::positive_ordered[3] ~ student_t(4, 0, 1)
-        mu::vector[n] ~ rw_level(sg[2]; lower=lobnd, upper=upbnd)
+        mu::vector[n] ~ restricted(rw_level, sg[2]; lower=lobnd, upper=upbnd)
         seasonal::vector[n] ~ seas_window(sg[1])
         beta ~ flat()
         lambda ~ flat()

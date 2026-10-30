@@ -382,7 +382,7 @@ function _sb_direct_vector_prior(target::Symbol, prior, nvalue; positive::Bool)
     _, actuals, _, _ = _sb_vector_prior_parts((prior,); positive)
     dependencies = Set{Symbol}()
     foreach(arg -> _sb_vector_prior_dependencies!(dependencies, arg), actuals)
-    (; statement=stmt, dependencies=sort!(collect(dependencies)))
+    (; statement=_sb_restricted_prior!(stmt), dependencies=sort!(collect(dependencies)))
 end
 
 # Margins that are all StanBlocks builtin univariate families, as native
@@ -434,8 +434,13 @@ function _sb_native_vector_prior(target::Symbol, priors, nvalue; positive::Bool,
         isnothing(n) || push!(kws, Expr(:kw, :n, n))
         isnothing(reference.lower) || push!(kws, Expr(:kw, :lower, reference.lower))
         isnothing(reference.upper) || push!(kws, Expr(:kw, :upper, reference.upper))
+        # A bounded block is `restricted`: the family's plain kernel on the
+        # bounds, also inside StanBlocks' `vcat` (`_sb_restricted_prior!`).
         isempty(kws) ? Expr(:call, reference.dist, args...) :
-            Expr(:call, reference.dist, Expr(:parameters, kws...), args...)
+            isnothing(reference.lower) && isnothing(reference.upper) ?
+                Expr(:call, reference.dist, Expr(:parameters, kws...), args...) :
+                Expr(:call, StanBlocks.restricted, Expr(:parameters, kws...),
+                     reference.dist, args...)
     end
     rhs = length(blocks) == 1 ? only(blocks) : Expr(:call, :vcat, blocks...)
     dependencies = Set{Symbol}()
@@ -5425,7 +5430,19 @@ _sb_plan_lhs_name(x::Expr) =
         _sb_plan_lhs_name(x.args[1]) : nothing
 _sb_plan_lhs_name(_) = nothing
 
+# A prior `restricted(family, args...; lower, upper)` (`_sb_restricted_prior!`)
+# is planned as its family's call with the bounds as keywords, as before it
+# was wrapped: the family, its arguments and its declaration constraints.
+_sb_plan_unrestricted(x) = x
+function _sb_plan_unrestricted(x::Expr)
+    x.head === :call && length(x.args) >= 2 && x.args[1] === StanBlocks.restricted || return x
+    parameters = filter(a -> Meta.isexpr(a, :parameters), x.args[2:end])
+    rest = filter(a -> !Meta.isexpr(a, :parameters), x.args[2:end])
+    Expr(:call, first(rest), parameters..., rest[2:end]...)
+end
+
 _sb_plan_family(x::Expr) = begin
+    x = _sb_plan_unrestricted(x)
     if x.head === :call && !isempty(x.args)
         x.args[1]
     elseif x.head === :do && !isempty(x.args)
@@ -5467,6 +5484,7 @@ _sb_plan_as_kw(_) = nothing
 
 _sb_plan_call_parts(x) = ((), NamedTuple())
 function _sb_plan_call_parts(x::Expr)
+    x = _sb_plan_unrestricted(x)
     x.head === :do && !isempty(x.args) && return _sb_plan_call_parts(x.args[1])
     x.head === :call && !isempty(x.args) || return ((), NamedTuple())
     args, kws = Any[], Pair{Symbol,Any}[]
@@ -7348,7 +7366,7 @@ function _sb_emit_sampled_declaration!(stmts, data, key, callable, rhs)
     (_sb_reads_grouped_value(rhs) || _sb_observation_only_law(callable, rhs)) &&
         return _sb_likelihood!(stmts, key, rhs, data)
     _sb_emit_vector_prior!(stmts, data, key, callable, rhs) && return
-    _sb_emit_prior!(stmts, key, callable, rhs) && return
+    _sb_emit_prior!(stmts, key, callable, rhs) && (_sb_restricted_prior!(stmts[end]); return)
     error("sbimpl: sampled declaration `$key` has no Stan prior translation for `$callable`")
 end
 # A law no parameter can be sampled from makes its sampled declaration an
@@ -8475,6 +8493,29 @@ end
 _sb_apply_positive_prior_bounds!(stmt, prior::ExprColumn) =
     _sb_apply_prior_bounds!(stmt, prior; lower=0.0)
 
+# A prior's bounds restrict its declaration and keep the family's plain kernel
+# (user pick 0q18o98). StanBlocks reads `family(args...; lower, upper)` at a
+# sampling site as truncation, normalized whenever a bound or argument reads a
+# parameter; `restricted(family, args...; lower, upper)` is the plain kernel.
+# Applied once a site has assembled every keyword of `stmt`; a `truncated`
+# prior keeps its normalized conditioning call, and a value family, which
+# `restricted` does not take, keeps the keywords.
+function _sb_restricted_prior!(stmt)
+    rhs = stmt.args[3]
+    Meta.isexpr(rhs, :call) || return stmt
+    i = findfirst(a -> Meta.isexpr(a, :parameters), rhs.args)
+    isnothing(i) && return stmt
+    any(kw -> Meta.isexpr(kw, :kw) && kw.args[1] in (:lower, :upper), rhs.args[i].args) ||
+        return stmt
+    family = rhs.args[1]
+    family isa StanBlocks.ValueFamily && return stmt
+    family in (StanBlocks.lower_conditioning, StanBlocks.upper_conditioning,
+               StanBlocks.conditioning) && return stmt
+    stmt.args[3] = Expr(:call, StanBlocks.restricted, rhs.args[i], family,
+                        (a for (j, a) in enumerate(rhs.args) if j > 1 && j != i)...)
+    stmt
+end
+
 # `mod` is the SBBRMI caller's module: the correlated-draws generics are
 # BRM-owned, so their `base.mod` cannot see consumer-defined custom families.
 _sb_generic_ranef_submodel(priors, centered::Bool; mod::Module=@__MODULE__) =
@@ -8616,7 +8657,7 @@ function _sb_covariance_scale_statement(target, n, _constructor, prior)
     parameters = only(arg for arg in stmt.args[3].args
                       if arg isa Expr && arg.head === :parameters)
     pushfirst!(parameters.args, Expr(:kw, :n, n))
-    stmt
+    _sb_restricted_prior!(stmt)
 end
 
 # Retain the established emitted declaration (and hence descriptor/cache id)
@@ -8834,7 +8875,7 @@ function _sb_emit_vector_prior!(stmts, data, target, ::typeof(_brm_vector_prior)
             "sbimpl: `$target[1:n] .~ ...`: the element law `$f` has no Stan translation.")
     statement = only(scalar)
     statement.args[2] = Expr(:(::), target, Expr(:ref, :vector, n_key))
-    push!(stmts, statement)
+    push!(stmts, _sb_restricted_prior!(statement))
     true
 end
 function _sb_vector_prior_element(data, target, law::ExprColumn, n, counter)
@@ -9225,8 +9266,9 @@ _sb_sampling_backed!(stmts, data, key, backing::MissingColumn, rhs;
         # family's hyperparameters carry the declared size), so they cannot ride
         # the four-argument scalar seam below.
         _sb_emit_vector_prior!(stmts, data, key, f, rhs_e) && return
-        _sb_emit_prior!(stmts, key, f, rhs_e) && return
-        _sb_emit_custom_family_prior!(stmts, key, f, rhs_e) && return
+        (_sb_emit_prior!(stmts, key, f, rhs_e) ||
+         _sb_emit_custom_family_prior!(stmts, key, f, rhs_e)) &&
+            (_sb_restricted_prior!(stmts[end]); return)
     end
     _sb_linear_predictor!(stmts, data, key, rhs; id_lookup, brmi_key=key, obs_n,
                           cv_groups, centered_groups, group_block_lookup,
@@ -10729,6 +10771,7 @@ function _sb_me_submodel(term_overrides, t)
     end
     refs = _sb_prior_references(cfg.prior)
     stmt.args[3] = _sb_bind_prior_references(rhs, refs)
+    _sb_restricted_prior!(stmt)
     (; model=Base.merge(_sb_me, stmt),
        kwargs=(; (ref => ref for ref in refs)...))
 end
@@ -10902,7 +10945,7 @@ function _sb_gp_prior_stmt(lhs, cfg)
         "add a backend-local mapping or specialized `_sb_emit_prior!` method")
     stmt = _sb_apply_prior_bounds!(only(stmts), cfg.prior; lower=cfg.lower, upper=cfg.upper)
     stmt.args[3] = _sb_bind_prior_references(stmt.args[3], _sb_prior_references(cfg.prior))
-    stmt
+    _sb_restricted_prior!(stmt)
 end
 
 # Symbol in, Symbol out when nothing is configured: an unconfigured formula keeps
@@ -12607,7 +12650,7 @@ function _sb_r2d2_prior_statement(target, _constructor, prior)
     stmts = Any[]
     _sb_emit_prior!(stmts, target, getf(prior), prior) || error(
         "sbimpl: R2 prior for `$target` has no Stan translation")
-    _sb_apply_prior_bounds!(only(stmts), prior; lower=0.0, upper=1.0)
+    _sb_restricted_prior!(_sb_apply_prior_bounds!(only(stmts), prior; lower=0.0, upper=1.0))
 end
 function _sb_r2d2_prior_statement(target, ::Type{<:Beta}, prior)
     # Stan's beta declaration already has the required unit-interval support.
@@ -13034,7 +13077,7 @@ function _sb_horseshoe_popefs_model(specs, overrides)
             length(emitted) == 1 || error(
                 "sbimpl: internal: sibling prior `$(getf(expr))` " *
                 "emitted $(length(emitted)) statements, expected one")
-            push!(body, only(emitted))
+            push!(body, _sb_restricted_prior!(only(emitted)))
             push!(temps, temp)
         end
     end
