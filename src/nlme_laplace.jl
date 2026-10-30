@@ -24,7 +24,7 @@
     BRMLaplaceProblem
     brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), tol=1e-24, maxiter=50,
-        structured=:auto)
+        structured=:auto, integrate=nothing)
 
 Integrate every unit's standardized random effects out of an RK-lowered model
 by a Laplace approximation at their conditional mode, leaving the population
@@ -72,6 +72,21 @@ is one reverse sweep of the likelihood parameters. Otherwise it is a
 `BRMLaplaceProblem`, which differentiates the whole model. `structured=true`
 requires the first (refusing with the reason), `false` forces the second.
 
+`integrate = :g` or `integrate = (:g, :h, …)` instead integrates every level
+of the named groupings' random-effect blocks by one sparse Laplace, whatever
+their nesting: crossed groupings, nested ones with any number of levels per
+parent, groupings that cut across the NLME units. The problem is then a
+[`BRMSparseLaplaceProblem`](@ref) over every other coordinate, the random-effect
+draws of the other groupings included. It is built on the structured
+problem's rows and needs the same model shape (every observation a regression
+response of one of its four families). The integrated effects' negative
+Hessian `I + Cᵀ W C` is sparse and factored by CHOLMOD at every Newton step;
+the gradient reads the inverse's entries the likelihood terms couple from its
+selected inverse; each group of integrated effects that share likelihood terms
+(a unit, or the units a crossed grouping joins) takes its own Newton steps,
+backtracking and stop. `subject_group`, `nested_groups`, `shared_groups` and
+`structured` describe the per-unit Laplace and do not apply with it.
+
 `subject_group`, `nested_groups` and `shared_groups` are those of
 [`brm_nlme_view`](@ref); the shared latents (a block over a grouping in
 `shared_groups`, a `car(...)` field) are population coordinates.
@@ -99,7 +114,15 @@ Base.show(io::IO, p::BRMLaplaceProblem) = print(io, "BRMLaplaceProblem(",
 
 function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), tol=1e-24, maxiter=50,
-        structured=:auto)
+        structured=:auto, integrate=nothing)
+    if integrate !== nothing
+        subject_group === nothing && isempty(nested_groups) && isempty(shared_groups) &&
+            structured === :auto || throw(ArgumentError("brm_laplace_problem: " *
+            "integrate = $(repr(integrate)) chooses the integrated effects itself; " *
+            "subject_group, nested_groups, shared_groups and structured describe the " *
+            "per-unit Laplace and do not apply with it"))
+        return _brm_sparse_laplace_problem(backend, integrate; ad_backend, tol, maxiter)
+    end
     structured in (:auto, true, false) || throw(ArgumentError(
         "brm_laplace_problem: structured = $(repr(structured)); pass :auto, true or false"))
     if structured !== false
