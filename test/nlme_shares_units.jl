@@ -69,7 +69,7 @@ end
 
 @stestset "a cell reads the coordinates of one group at most" begin
     # Each grouped entry's value and each group's term are computed per entry
-    # and per group (BRM 0.2.75), so a cell reads its own group's coordinates,
+    # and per group (BRM 0.2.77), so a cell reads its own group's coordinates,
     # as recorded on the point. Before, both were whole-vector functions, which
     # every cell reading the completion or a group's term computed whole.
     data = shares_panel()

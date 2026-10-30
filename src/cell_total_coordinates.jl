@@ -636,7 +636,7 @@ end
 # `brm_grouped_share_weights`, statistical_models.jl), so a cell reading one
 # entry reads its group's coordinates only: an entry's value reads its group's
 # coordinates and total, a group's term its entries, their law's arguments and
-# its coordinates (snag saem-s-nuts-warm-28e5f1d9; before BRM 0.2.75 both were
+# its coordinates (snag saem-s-nuts-warm-28e5f1d9; before BRM 0.2.77 both were
 # whole-vector functions, which every cell computed whole).
 _brm_share_value(y::AbstractVector, slot::Integer, total::Real) =
     exp(_brm_shares_log_values(y, total)[slot])

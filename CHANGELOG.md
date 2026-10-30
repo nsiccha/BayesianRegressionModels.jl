@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.75
+## 0.2.77
 
 - A non-centered grouped completion (`mi(x)::shares(total, rows)` on
   `RKBRMI(brmi; completions = :noncentered)`) computes each grouped entry's
@@ -42,6 +42,34 @@ instead of failing at run time.
   reading an untyped numeric array at literal positions (an `amtlich_pub` cell
   read the whole `b_k_gem_kreis`, 7,200 coordinates). The test environment
   pins ReactiveKernels `0d3f92345`.
+
+## 0.2.76
+
+- Added: `brm_laplace_problem(rk; ad_backend, integrate = …)` also integrates
+  the `cdar(step; by=g)` walks over a named grouping (their standardized
+  innovations) and the `car(area; edges)` fields over a named area column (the
+  default lowering: the ICAR values under their graph precision and BYM2's iid
+  parts), together with the random-effect blocks over it. A field's
+  per-component soft sum-to-zero stays out of the sparse factor (Woodbury).
+  Refused: a field lowered with `car_units`, a field component that no row
+  reads, a walk correlated across groups (`cor=` with off-diagonal entries).
+
+## 0.2.75
+
+- Added: `brm_laplace_problem(rk; ad_backend, integrate = (:g, …))`
+  integrates every level of the named groupings' random-effect blocks by one
+  sparse Laplace, and returns a `BRMSparseLaplaceProblem` (exported) with the
+  interface and draws of the other two Laplace problems. The groupings may be
+  crossed, nested with any number of levels per parent, or cut across the NLME
+  units; blocks over other groupings stay sampled coordinates of the target.
+  The model needs the row-structured problem's shape (every observation a
+  Poisson-log, binomial-logit, `NegativeBinomial2` or Normal regression
+  response). The integrated effects' Hessian is one sparse matrix factored by
+  CHOLMOD; each set of effects that share likelihood terms takes its own Newton
+  steps; the gradient reads the factor's selected inverse.
+  `brm_laplace_draws(target, P; conditional = K)` resamples per component.
+- Changed: `[compat] SelectedInversion = "0.2.2"` (was `"0.2"`), for
+  `selinv_extract`.
 
 ## 0.2.74
 

@@ -116,7 +116,7 @@ end
 end
 
 @stestset "NLME view: a cell reads its own group's innovations" begin
-    # The walk's products are statements of their own (BRM 0.2.75), which
+    # The walk's products are statements of their own (BRM 0.2.77), which
     # ReactiveKernels (0.1.22) computes at a cell's rows: a cell reads its
     # district's innovations, recorded on the point. With a correlation factor
     # the walk couples the districts, and a cell reads the ones it couples.
