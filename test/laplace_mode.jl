@@ -29,6 +29,9 @@ end
 
 @stestset "loading WarmupHMC loads the Optim extension" begin
     @test Base.get_extension(BRM, :BayesianRegressionModelsOptimExt) !== nothing
+    # the extension adds its method beside the fallback: overwriting it is
+    # refused by precompilation, and the extension then loads uncompiled
+    @test length(methods(BRM._brm_laplace_mode)) == 2
 end
 
 @stestset "the mode of the sparse Laplace over crossed groupings" begin
