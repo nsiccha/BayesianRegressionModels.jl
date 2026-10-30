@@ -13,7 +13,7 @@
 #
 # RUN: julia --project=test test/nlme_laplace.jl [testset-filter...]
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
-using LinearAlgebra, LogDensityProblems, Random, Statistics
+using LinearAlgebra, LogDensityProblems, Random, Statistics, WarmupHMC
 using LogExpFunctions: logit
 
 const LAPLACE_STRUCTURED = (true, false)
@@ -226,6 +226,30 @@ end
         @test_throws ArgumentError brm_laplace_draws(p, repeat(φ, 1, 2); conditional=-1)
         @test_throws DimensionMismatch brm_laplace_draws(p, zeros(1, 2))
         @test_throws DimensionMismatch LogDensityProblems.logdensity(p, zeros(1))
+    end
+end
+
+@stestset "a Laplace problem copies per chain" begin
+    # A copy shares the backend's translated program and owns its modes and AD
+    # workspaces, so WarmupHMC's samplers that copy their density per chain run
+    # on one problem (BRM todo 08j6x4e: the copy raised `deepcopy of Modules`).
+    data = (; g=LAPLACE_G, x=LAPLACE_X, y=LAPLACE_Y)
+    rk = RKBRMI(laplace_intercept_model(data))
+    for structured in LAPLACE_STRUCTURED
+        p = laplace_problem(rk, structured)
+        φ = 0.3 .* randn(LAPLACE_RNG, length(p.population))
+        value, gradient = LogDensityProblems.logdensity_and_gradient(p, φ)
+        copied = deepcopy(p)
+        @test copied !== p
+        @test copied.u !== p.u
+        copied_value, copied_gradient = LogDensityProblems.logdensity_and_gradient(copied, φ)
+        @test copied_value == value
+        @test copied_gradient == gradient
+        # The chains sample copies: the problem passed keeps its modes.
+        modes = copy(p.u)
+        out = completion_warmup_mcmc([Xoshiro(1), Xoshiro(2)], p; n_draws=10)
+        @test length(out.results) == 2
+        @test p.u == modes
     end
 end
 
