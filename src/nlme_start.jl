@@ -251,8 +251,7 @@ end
 # the fixed values of a fixed-shared model included.
 _brm_nlme_prior_median_point(m::BRMNLMEModel) =
     _brm_nlme_prior_median_point(m.backend, m.view, m.unit)
-function _brm_nlme_prior_median_point(backend::RKBRMI, view::BRMNLMEView,
-        unit::AbstractVector)
+function _brm_nlme_prior_median_point(backend::RKBRMI, view, unit::AbstractVector)
     records = _brm_nlme_records(backend.plan)
     scalars = Dict(r.declaration => r for r in records if r.kind === :scalar)
     medians = Dict{Symbol,Union{Nothing,Float64}}()

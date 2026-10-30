@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.79
+
+- Added: `brm_start(rk; integrate = (:g, …))` and `brm_start(sb, model;
+  integrate)` compute the start from the data over the sparse Laplace of the
+  named groupings (`brm_laplace_problem`'s `integrate`), so a model without
+  NLME units (crossed groupings, a field across the units) gets a start
+  without initial values.
+
 ## 0.2.78
 
 - Changed: inside one component of a `BRMSparseLaplaceProblem` (a field
