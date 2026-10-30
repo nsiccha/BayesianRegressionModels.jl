@@ -5,8 +5,10 @@
 # data-only gather (`unit_b = reg_unit[pos_b]`), which every grouping and term
 # site reads as a data column (user decision `1tb1jrg`). Each model is checked
 # against the same model given the gathered labels as data columns (one copy
-# per part): SBBRMI emits the same program and data, RKBRMI has the same
-# coordinates, density and gradient and binds the level table, not the copies.
+# per part): SBBRMI emits the same program and data and its descriptor the same
+# outputs and random-effect blocks (snag `brm-descriptor-r-20f52245`), RKBRMI
+# has the same coordinates, density and gradient and binds the level table, not
+# the copies.
 # Covered: a shared `|ID|` block over two parts, `car(...)` areas, `car_units`
 # keyed by the gathered names, a nested grouping named in `nested_groups`,
 # `(… || g)`, `cdar(...; by = g)` and a stratified `gr(g, by = b)` block (on
@@ -52,10 +54,28 @@ const COPIES = copies(PARTS, LEVELS, (:area, :reg, :pos_a), (:unit, :reg_unit, :
     (:kreis, :reg_kreis, :pos_a), (:area_b, :reg, :pos_b),
     (:unit_b, :reg_unit, :pos_b), (:kreis_b, :reg_kreis, :pos_b))
 
+# A symbolic size (`num_elements(t)`) is a StanBlocks expression that compares
+# by identity, even between two builds of one model, so sizes compare printed.
+output_fields(o) = (o.name, o.kind, o.type, repr(o.size), o.generative, o.role,
+    o.logical, o.labels, o.component, o.dims, o.predictors, o.term)
+block_fields(b) = map(f -> getfield(b, f), fieldnames(RanefBlock))
+
+# The descriptor, and the prediction plan behind it, reads a gathered grouping
+# as the copied model's data column: the same outputs and random-effect blocks,
+# their levels included (snag `brm-descriptor-r-20f52245`).
+function descriptor_same(sg, sc)
+    dg, dc = brm_descriptor(sg), brm_descriptor(sc)
+    @test map(output_fields, dg.outputs) == map(output_fields, dc.outputs)
+    @test !isempty(ranef_blocks(dg))
+    @test map(block_fields, ranef_blocks(dg)) == map(block_fields, ranef_blocks(dc))
+    dg, dc
+end
+
 function sb_same(gathered, copied)
     sg, sc = SBBRMI(gathered; mod=@__MODULE__), SBBRMI(copied; mod=@__MODULE__)
     @test sprint(show, stan_code(sg)) == sprint(show, stan_code(sc))
     @test stan_data(sg) == stan_data(sc)
+    descriptor_same(sg, sc)
     sg
 end
 
@@ -215,8 +235,23 @@ end
     # `kreis[i]` / `unit[i]`; RKPPL looks them up for a data-only definition
     # from ReactiveKernelsPPL 0.1.15 (snag `rkppl-submodel-l-00ff0f27`). Before
     # it the density raised `invalid index: "a" of type String`.
-    sb_same(strata(merge(LEVELS, YEARS)), strata_copied(YEARS_COPIES))
+    sg = sb_same(strata(merge(LEVELS, YEARS)), strata_copied(YEARS_COPIES))
     rk_same(strata(merge(LEVELS, YEARS)), strata_copied(YEARS_COPIES))
+    # Its draws per stratum read the strata off the gathered `by` labels. Both
+    # models emit one program, so one compiled model serves both descriptors.
+    stan = consumer_stan(strata(merge(LEVELS, YEARS)), "level_table_strata")
+    names = BridgeStan.param_names(stan.model; include_tp=true)
+    rng = Xoshiro(3)
+    draws = reduce(vcat, permutedims(BridgeStan.param_constrain(stan.model,
+        0.4 .* randn(rng, BridgeStan.param_unc_num(stan.model)); include_tp=true))
+        for _ in 1:3)
+    by_stratum(sb) = brm_ranef_draws(brm_descriptor(sb), draws, names; group=:kreis)
+    gathered = by_stratum(sg)
+    copied = by_stratum(SBBRMI(strata_copied(YEARS_COPIES); mod=@__MODULE__))
+    @test [e.stratum for e in gathered] == [e.stratum for e in copied]
+    @test Set(e.stratum for e in gathered) == Set(LEVELS.reg_unit[YEARS.pos])
+    @test [(e.levels, e.sd, e.effects) for e in gathered] ==
+        [(e.levels, e.sd, e.effects) for e in copied]
 end
 
 inline_group(data) = @brm data begin

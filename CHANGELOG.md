@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.67
+## 0.2.70
 
 - Fixed: an inline lambda or `do`-block argument of a top-level assignment
   lowers on SBBRMI again (`cannot lift to Stan expression: _BRMInlineBody`
@@ -26,6 +26,54 @@ instead of failing at run time.
 - Fixed: on RKBRMI a Stan-only observation family whose constructor comes from
   a `_rk_callable_source!` provider keeps that constructor route instead of
   being refused for lacking an `_rk_observation_source!` provider.
+## 0.2.69
+
+- An NLME model's preparations are counted in its progress tree.
+  `brm_nlme_model`'s `Subject cells` step counts its cell queries, one per
+  group of cells (`Cell queries (k/n)`). The compact cell gradients a model
+  prepares on its first per-subject use (a cell gradient, the η Hessian
+  patterns, SVI's unit terms) report under the phase whose estimator needs them,
+  as `Subject cell gradients`: its steps `Cell reads`, `Cell reads by gradient`
+  and `Cell plan check` count each subject's groups of cells, and `Compact cell
+  samplers` (and `Narrowed compact cell samplers`) the groups. That phase is
+  `brm_nlme_fit`'s estimator or EBE pass, or `brm_svi_fit`'s target; a first use
+  from a direct estimator call reports nothing, as before. On ArbeitsplatzAtlas's
+  whole model this first use ran for hours inside SAEM's `NUTS warmup (0/12)`
+  with nothing counted. Values are unchanged.
+- BRM's compat floor is ReactiveKernelsPPL 0.1.16 (was 0.1.15). Before it,
+  every cell query and compact cell sampler BRM prepares regenerated the whole
+  program: on ArbeitsplatzAtlas's model (223,941 coordinates, 32 groups of
+  cells) about 45 s apiece whatever its cells, 24 of the 39 minutes of
+  `brm_nlme_model`'s `Subject cells` step and again for each sampler on first
+  use (RK snag `brm-s-nlme-cell-d70abd20`). From 0.1.16 a compiled cell query
+  prepares in 0.02 s and a second sampler in 0.1 s; a first preparation costs
+  its compilation. The test environment pins ReactiveKernels `452071f1b`.
+
+## 0.2.68
+
+- `brm_descriptor`, `ranef_blocks` and `brm_ranef_draws` read a grouping named
+  by a data-only assignment, such as a level-table gather
+  `kreis_b = kreis[gem_b]`, as they read a data column. They used to refuse it
+  ("grouping factor `kreis_b` (from `kreis_b_idx`) is not a raw data column of
+  this model") although SBBRMI and RKBRMI lowered the model (snag
+  `brm-descriptor-r-20f52245`). `column_data(brmi, name)` now returns a
+  data-only assignment's value, evaluated as the backends evaluate it, and
+  `nothing` only for a name that is neither a data column nor such an
+  assignment.
+
+## 0.2.67
+
+- RKBRMI binds an `mi()` column (a completed covariate, an `mi(y)` response, a
+  completion with group totals) as two concretely typed inputs: its values
+  `<x>_raw`, with `one(T)` standing at each missing entry, and its presence
+  mask `<x>_present`, a `Vector{Bool}`. It used to bind `<x>_raw` as the
+  `Vector{Union{Missing,Float64}}` the data hold, which ReactiveKernels'
+  type-stability check cannot type, so the data-only kernel that binds the data
+  could not be audited. The observed values, the observed and missing rows and
+  a group-totals layout are still computed in the graph, from the pair; values
+  and densities are unchanged. `rk_bound_data(rk)` and `binder(design)` carry
+  the new `<x>_present` input, so a JAX module's `prepare_data` takes it too.
+  A masked `hsgp(x; rows = keep)` axis is still bound as the data hold it.
 
 ## 0.2.66
 

@@ -192,4 +192,7 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 4f7ef46a4 (ReactiveKernels 0.1.13, ReactiveKernelsPPL 0.1.15) contains
 # 3deb61ae0: an array plate cell looks a label up on a `levels(g)` axis when
 # `g` is a data-only definition (snag rkppl-submodel-l-00ff0f27).
-rev = "4f7ef46a4b2aa62f05590a8a5d13ba4e0ca8da71"
+# 452071f1b (ReactiveKernelsPPL 0.1.16) contains 4f7ef46a4: a query
+# preparation checks its binding against a build once (snag
+# brm-s-nlme-cell-d70abd20).
+rev = "452071f1b1d7a2f3ab23550419b2d41c533a7767"

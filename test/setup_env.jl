@@ -184,8 +184,13 @@ const PINS = [
     # cell looks a label up on a `levels(g)` axis when `g` is a data-only
     # definition (06679067f, snag rkppl-submodel-l-00ff0f27), so RKBRMI's
     # stratified `gr(g, by = b)` block reads a grouping gathered from a level
-    # table (`test/level_table_groupings.jl`).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "4f7ef46a4b2aa62f05590a8a5d13ba4e0ca8da71"),  # main
+    # table (`test/level_table_groupings.jl`). 452071f1b contains 4f7ef46a4
+    # and is ReactiveKernelsPPL 0.1.16: a query preparation checks its binding
+    # against a build once and a cell query reads its plate from the build
+    # (1672820fb, RK snag brm-s-nlme-cell-d70abd20), so BRM's cell queries and
+    # compact cell samplers no longer regenerate the whole program each (about
+    # 45 s apiece on ArbeitsplatzAtlas's model).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "452071f1b1d7a2f3ab23550419b2d41c533a7767"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
