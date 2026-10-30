@@ -208,8 +208,12 @@ const PINS = [
     # ReactiveKernels 0.1.22: a cell computes a value two statements of one
     # `@plate for` read (each a plate of its own), and a dotted value reading an
     # untyped numeric array at literal positions, at its rows (RK snag
-    # form-value-compu-c1e0965c).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "0d3f92345bb719a81f00471aeb240ec897d9fa39"),  # main
+    # form-value-compu-c1e0965c). a959bef75 contains 0d3f92345 and brings
+    # ReactiveKernelsPPL 0.1.22: one cell's Hessian block and third-order
+    # products over a compact selection (`prepare_compact_cell_ad` with
+    # `prepare_ad_hvp` / `prepare_ad_third`, RK snag build-brm-s-spar-454be53f),
+    # which the sparse Laplace's `@plate` cells read.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a959bef75754e7c4666bdafd120ae0ab13343734"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
