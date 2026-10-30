@@ -112,6 +112,16 @@ Base.show(io::IO, p::BRMSparseLaplaceProblem) = print(io,
     " in ", length(p.components), " components, ", length(p.family),
     " likelihood terms)")
 
+# A copy (one per chain) gets its own factor: CHOLMOD's is a C object that a
+# plain deepcopy would share with the original, whose finalizer frees it.
+function Base.deepcopy_internal(p::BRMSparseLaplaceProblem, stackdict::IdDict)
+    haskey(stackdict, p) && return stackdict[p]
+    fields = map(fieldnames(typeof(p))) do f
+        f === :factor ? Ref{Any}(nothing) : Base.deepcopy_internal(getfield(p, f), stackdict)
+    end
+    stackdict[p] = typeof(p)(fields...)
+end
+
 function _brm_slap_zero_integrated!(u, p::BRMSparseLaplaceProblem)
     u[p.integrated] .= 0.0
     u

@@ -249,6 +249,28 @@ end
     @test all(e -> 1 <= e <= 16 + 1e-9, resampled.diagnostics.importance_ess)
 end
 
+@stestset "a sparse Laplace problem copies per chain" begin
+    data = SPL_CROSSED
+    rk = RKBRMI(@brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | a) + (1 | b)
+        y ~ Normal(mu, sigma)
+    end)
+    p = spl_problem(rk, (:a, :b))
+    φ = 0.3 .* randn(SPL_RNG, length(p.population))
+    expected = LogDensityProblems.logdensity_and_gradient(p, φ)
+    @test p.factor[] !== nothing
+    q = deepcopy(p)
+    @test q.factor[] === nothing
+    GC.gc()
+    for problem in (q, p, q)
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, φ .+ 0.01)
+        @test isfinite(value)
+    end
+    @test LogDensityProblems.logdensity_and_gradient(q, φ)[1] ≈ expected[1] rtol=1e-12
+    @test q.factor[] !== p.factor[]
+end
+
 @stestset "what integrate refuses" begin
     data = SPL_CROSSED
     rk = RKBRMI(@brm data begin
