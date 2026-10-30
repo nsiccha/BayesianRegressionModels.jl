@@ -103,7 +103,8 @@ function _grouped_hsgp_levels(plan, brmi, group::Symbol)
         return collect(entry.const_.levels)
     raw = column_data(brmi, group)
     isnothing(raw) && error(
-        "BRM prediction: grouped HSGP grouping `$group` is not a raw data column.")
+        "BRM prediction: grouped HSGP grouping `$group` is neither a data column ",
+        "nor a data-only assignment.")
     collect(_sb_fit_levels(raw))
 end
 

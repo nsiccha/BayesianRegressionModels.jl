@@ -950,12 +950,27 @@ _trace_expr!(_, _, _, _, _) = nothing
 """
     column_data(brmi::BRMI, name::Symbol)
 
-Underlying data vector for a NamedColumn-over-DataColumn entry.
-`nothing` if `name` doesn't resolve to a DataColumn.
+Underlying data vector for a NamedColumn-over-DataColumn entry, or the value of
+a data-only assignment (`kreis_b = kreis[gem_b]`, evaluated as the backends
+evaluate it). `nothing` if `name` is neither.
 """
 Base.@nospecializeinfer function column_data(@nospecialize(brmi::BRMI), n::Symbol)
     _brm_has_operation(brmi, n) || return nothing
-    _column_data_value(_brm_operation(brmi, n))
+    op = _brm_operation(brmi, n)
+    value = _column_data_value(op)
+    isnothing(value) ? _column_data_assignment(op) : value
+end
+# A data-only assignment is data at every site that reads a raw column (user
+# decision `1tb1jrg`), so its value is the column: the one
+# `_brm_resolve_data_assignments` binds in its place. One that reads a model
+# value, or no data at all, is not a column.
+function _column_data_assignment(op)
+    assignment = _brm_assignment_column(op)
+    isnothing(assignment) && return nothing
+    state = _BRMDataAssignments("BRM")
+    key = name(assignment)
+    value = _brm_data_assignment!(state, key, last(getargs(parent(assignment), 2)))
+    value isa AbstractArray && !isempty(state.inputs[key]) ? value : nothing
 end
 _column_data_value(v::NamedColumn) = _column_data_expr(parent(v))
 _column_data_expr(d::DataColumn) = _column_data_inner(d)

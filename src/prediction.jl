@@ -663,8 +663,8 @@ function _ranef_blocks(plan, stan)
             end
             raw = column_data(brmi, raw_group)
             isnothing(raw) && error(
-                "BRM prediction: grouping factor `$raw_group` (from `$(idx_key)`) is not ",
-                "a raw data column of this model.")
+                "BRM prediction: grouping factor `$raw_group` (from `$(idx_key)`) is ",
+                "neither a data column nor a data-only assignment of this model.")
             levels = collect(isnothing(recorded) ? _sb_fit_levels(raw) : recorded.levels)
             if idx_val isa StanBlocks.StanExpr
                 # RESAMPLE target: `resample_groups` marked this factor's index
