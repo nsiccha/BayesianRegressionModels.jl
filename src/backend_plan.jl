@@ -2386,6 +2386,13 @@ function _brm_joint_levels(columns::AbstractVector{<:Pair}; id::Symbol, prefix)
               "they cannot name levels of one factor. Give the blocks of different ",
               "grouping factors different IDs.")
     end
+    _brm_label_union(columns; id, prefix)
+end
+
+# The distinct labels of several grouping columns of one `|ID|` block, sorted:
+# the columns' common categorical levels when they all carry the same ones.
+function _brm_label_union(columns::AbstractVector{<:Pair}; id::Symbol, prefix)
+    length(columns) == 1 && return _brm_fit_levels(last(only(columns)))
     raws = [raw for (_, raw) in columns]
     if all(raw -> raw isa CA.CategoricalVector, raws) &&
        allequal(CA.levels(raw) for raw in raws)

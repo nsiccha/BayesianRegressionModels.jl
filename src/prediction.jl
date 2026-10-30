@@ -402,8 +402,9 @@ end
 # The `|ID|` bucket symbol for a binding, or `nothing`. Bucket bindings are
 # `b_<id>_<group>` / `b_<id>_<group>__by__<by>` (`_sb_id_bucket_suffix`); plain
 # per-target blocks are `r_<lhs>_<group>`. Structured-latent blocks
-# (`hsgp(x, by=g)`) also use the `b_` prefix but carry a field name rather than a
-# bucket id, so the id is only claimed when the trailing part matches the group.
+# (`hsgp(x, by=g)`, a consumer term's group-block field) also use the `b_`
+# prefix with a field name where the bucket id sits; `_ranef_blocks` excludes
+# those planned blocks before asking.
 function _ranef_id_of_binding(binding::Symbol, group::Symbol, by::Union{Nothing,Symbol})
     s = String(binding)
     startswith(s, "b_") || return nothing
@@ -594,6 +595,9 @@ function _ranef_blocks(plan, stan)
     out = RanefBlock[]
     seen = Set{Symbol}()
     output_kinds = nothing
+    # A structured term's group block `b_<suffix>` is never an `|ID|` bucket.
+    group_blocks = Set{Symbol}(Symbol(:b_, gb.suffix)
+        for gb in _sb_group_block_plan(_sb_collect_group_block_terms(brmi)))
     for d in plan.declarations
         d.role === :prior || continue
         fam = _ranef_declared_family(d, plan.bindings)
@@ -663,8 +667,8 @@ function _ranef_blocks(plan, stan)
             end
             raw = column_data(brmi, raw_group)
             isnothing(raw) && error(
-                "BRM prediction: grouping factor `$raw_group` (from `$(idx_key)`) is not ",
-                "a raw data column of this model.")
+                "BRM prediction: grouping factor `$raw_group` (from `$(idx_key)`) is ",
+                "neither a data column nor a data-only assignment of this model.")
             levels = collect(isnothing(recorded) ? _sb_fit_levels(raw) : recorded.levels)
             if idx_val isa StanBlocks.StanExpr
                 # RESAMPLE target: `resample_groups` marked this factor's index
@@ -720,8 +724,8 @@ function _ranef_blocks(plan, stan)
         push!(seen, d.target)
         binding = get(plan.bindings, d.target, nothing)
         population = !isnothing(binding) && get(binding, :population, false) === true
-        push!(out, RanefBlock(d.target, fam, raw_group,
-                              _ranef_id_of_binding(d.target, raw_group, by), by,
+        id = d.target in group_blocks ? nothing : _ranef_id_of_binding(d.target, raw_group, by)
+        push!(out, RanefBlock(d.target, fam, raw_group, id, by,
                               levels, n_terms, n_groups,
                               z, spec.noncentered, kind === :generated_quantity,
                               population))

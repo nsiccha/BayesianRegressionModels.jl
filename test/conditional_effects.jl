@@ -150,6 +150,8 @@ end
     grid_mi = brm_prediction_grid(dm; focal=:x, n=3)
     @test !haskey(grid_mi, :y)
     @test length(grid_mi.x) == 3
+    @test_throws ErrorException brm_prediction_grid(dm; focal=:y)
+    @test_throws ErrorException brm_prediction_grid(dm; focal=:x, fixed=(; y=0.2))
     unc_mi = zeros(2, 1)
     @test_throws ErrorException brm_conditional_draws(
         dm, unc_mi, grid_mi; response=:y)

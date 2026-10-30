@@ -388,9 +388,13 @@ end
     tainted = Dict{Symbol,Any}(cv_sb.data)
     tainted[:subject__by__arm_idx] =
         StanBlocks.stan.maybecv(:subject__by__arm_idx, tainted[:subject__by__arm_idx])
+    # A descriptor reads each block's predictor off the emission bindings, so
+    # the rebuild keeps them, as `_sb_mark_resample_groups` does.
     held_sb = SBBRMI(cv_sb.parent,
-                     StanBlocks.SlicModel(cv_sb.model.model, tainted, cv_sb.model.mod),
-                     tainted, cv_sb.preproc)
+                     StanBlocks.SlicModel(cv_sb.model.model, tainted, cv_sb.model.mod,
+                                          cv_sb.model.observations),
+                     tainted, cv_sb.preproc, copy(cv_sb.held_out), cv_sb.bindings,
+                     cv_sb.source)
     held = brm_descriptor(held_sb)
     offered = [op.name for op in held.operations]
     @test :predict in offered
@@ -445,10 +449,12 @@ end
     tainted[:subject_idx] = StanBlocks.stan.maybecv(:subject_idx, tainted[:subject_idx])
     # NOTE: the tainted dict must go in BOTH slots — `generative_plan` rebuilds
     # the SlicModel from `sb.data`, so passing it only in the model is silently
-    # discarded and the mark never reaches the trace.
+    # discarded and the mark never reaches the trace. The emission bindings
+    # name each block's predictor for the descriptor.
     held_sb = SBBRMI(sb.parent,
-                     StanBlocks.SlicModel(sb.model.model, tainted, sb.model.mod),
-                     tainted, sb.preproc)
+                     StanBlocks.SlicModel(sb.model.model, tainted, sb.model.mod,
+                                          sb.model.observations),
+                     tainted, sb.preproc, copy(sb.held_out), sb.bindings, sb.source)
     held_d = brm_descriptor(held_sb)
     offered = [op.name for op in held_d.operations]
     @test :predict in offered

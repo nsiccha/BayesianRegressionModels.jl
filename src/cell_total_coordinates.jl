@@ -464,17 +464,18 @@ end
 _brm_mi_grouped(::Nothing) = false
 _brm_mi_grouped(t::_BRMMissingTotals) = !isempty(t.ends)
 
-# The layout of a completion's missing entries from the four data vectors,
-# as RKBRMI's data preparations compute it in the graph
+# The layout of a completion's missing entries from the column's values and
+# presence mask (`_rk_presence_columns`) and the three group vectors, as
+# RKBRMI's data preparations compute it in the graph
 # (`brm_covariate_total_*`, statistical_models.jl): free and grouped row
 # indices, all of them in the plan's order, the groups' ends and residuals.
 # A non-centered completion also reads the axis of the grouped entries'
 # coordinates and one placeholder per group, which its groups' weights
 # observe (`_rk_emit_missing_totals!`).
-function _brm_totals_layout(values, group, cells, totals)
+function _brm_totals_layout(values, present, group, cells, totals)
     spec = (; group=(; name=:group, values=group), cells=(; name=:cells, values=cells),
         total=(; name=:total, values=totals))
-    ordered, t = _brm_missing_totals(:x, values, findall(ismissing, values), spec;
+    ordered, t = _brm_missing_totals(:x, values, findall(!, present), spec;
         prefix="RK backend")
     grouped = ordered[t.nfree+1:end]
     (; ordered, free=ordered[1:t.nfree], grouped, ends=t.ends, residuals=t.residuals,

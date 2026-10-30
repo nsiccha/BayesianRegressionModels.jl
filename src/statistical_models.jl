@@ -219,58 +219,60 @@ brm_matrix_column(inputs, column) = begin
     return values
 end
     ),
+    # A partly missing column arrives as its values and its presence mask
+    # (`_rk_presence_columns`): the entries are read only where it is `true`.
     brm_covariate_observed = :(
-brm_covariate_observed(values) = begin
-    observed = Float64.(collect(skipmissing(values)))
+brm_covariate_observed(values, present) = begin
+    observed = Float64.(values[present])
     return observed
 end
     ),
     brm_covariate_observed_rows = :(
-brm_covariate_observed_rows(values) = begin
-    rows = findall(!ismissing, values)
+brm_covariate_observed_rows(present) = begin
+    rows = findall(present)
     return rows
 end
     ),
     brm_covariate_missing_rows = :(
-brm_covariate_missing_rows(values) = begin
-    rows = findall(ismissing, values)
+brm_covariate_missing_rows(present) = begin
+    rows = findall(!, present)
     return rows
 end
     ),
     # The missing entries of `mi(x)::shares(total, rows)` (cell_total_coordinates.jl).
     brm_covariate_total_rows = :(
-brm_covariate_total_rows(values, group, cells, totals) = begin
-    rows = BayesianRegressionModels._brm_totals_layout(values, group, cells, totals).ordered
+brm_covariate_total_rows(values, present, group, cells, totals) = begin
+    rows = BayesianRegressionModels._brm_totals_layout(values, present, group, cells, totals).ordered
     return rows
 end
     ),
     brm_covariate_total_free_rows = :(
-brm_covariate_total_free_rows(values, group, cells, totals) = begin
-    rows = BayesianRegressionModels._brm_totals_layout(values, group, cells, totals).free
+brm_covariate_total_free_rows(values, present, group, cells, totals) = begin
+    rows = BayesianRegressionModels._brm_totals_layout(values, present, group, cells, totals).free
     return rows
 end
     ),
     brm_covariate_total_grouped_rows = :(
-brm_covariate_total_grouped_rows(values, group, cells, totals) = begin
-    rows = BayesianRegressionModels._brm_totals_layout(values, group, cells, totals).grouped
+brm_covariate_total_grouped_rows(values, present, group, cells, totals) = begin
+    rows = BayesianRegressionModels._brm_totals_layout(values, present, group, cells, totals).grouped
     return rows
 end
     ),
     brm_covariate_total_ends = :(
-brm_covariate_total_ends(values, group, cells, totals) = begin
-    ends = BayesianRegressionModels._brm_totals_layout(values, group, cells, totals).ends
+brm_covariate_total_ends(values, present, group, cells, totals) = begin
+    ends = BayesianRegressionModels._brm_totals_layout(values, present, group, cells, totals).ends
     return ends
 end
     ),
     brm_covariate_total_residuals = :(
-brm_covariate_total_residuals(values, group, cells, totals) = begin
-    residuals = BayesianRegressionModels._brm_totals_layout(values, group, cells, totals).residuals
+brm_covariate_total_residuals(values, present, group, cells, totals) = begin
+    residuals = BayesianRegressionModels._brm_totals_layout(values, present, group, cells, totals).residuals
     return residuals
 end
     ),
     brm_covariate_total_coordinates = :(
-brm_covariate_total_coordinates(values, group, cells, totals) = begin
-    coordinates = BayesianRegressionModels._brm_totals_layout(values, group, cells, totals).coordinates
+brm_covariate_total_coordinates(values, present, group, cells, totals) = begin
+    coordinates = BayesianRegressionModels._brm_totals_layout(values, present, group, cells, totals).coordinates
     return coordinates
 end
     ),

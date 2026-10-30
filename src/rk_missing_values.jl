@@ -236,6 +236,19 @@ function _rk_mi_gather(value::_BRMPreparedExpr, rows)
         map(argument -> _rk_mi_gather(argument, rows), value.kwargs))
 end
 
+# The two concretely typed columns an `mi()` column is bound as: its values,
+# with `one(T)` where an entry is missing, and its presence mask. RK types
+# every bound value, and a `Vector{Union{Missing,T}}` is not concretely typed
+# (snag mi-raw-columns-r-2b85d8f9). This is the binding RKPPL owns for a
+# missing observation (rkppl-use §1, "Missing observations"); the graph reads
+# an entry only where its mask is `true`, so the filled value is never read.
+function _rk_presence_columns(raw::AbstractVector)
+    T = nonmissingtype(eltype(raw))
+    # An all-`missing` column carries no numeric type.
+    T === Union{} && (T = Float64)
+    T[ismissing(x) ? one(T) : x for x in raw], Bool[!ismissing(x) for x in raw]
+end
+
 function _rk_prepare_missing_value!(columns, taken, observation, program, completions, derived)
     plan = observation.missing_response
     plan === nothing && return observation
@@ -244,12 +257,13 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
     observed = _rk_ast_fresh_name(string(plan.source, "_obs"), taken)
     jobs = _rk_ast_fresh_name(string("Jobs_", plan.source), taken)
     raw = _rk_ast_fresh_name(string(plan.source, "_raw"), taken)
-    columns[raw] = plan.values
+    present = _rk_ast_fresh_name(string(plan.source, "_present"), taken)
+    columns[raw], columns[present] = _rk_presence_columns(plan.values)
     columns[observed], columns[jobs] = plan.observed_values, plan.observed_indices
     push!(derived, _RKDerivedSpec(observed,
-        Expr(:_rk_data_preparation, :brm_covariate_observed, raw), observed))
+        Expr(:_rk_data_preparation, :brm_covariate_observed, raw, present), observed))
     push!(derived, _RKDerivedSpec(jobs,
-        Expr(:_rk_data_preparation, :brm_covariate_observed_rows, raw), jobs))
+        Expr(:_rk_data_preparation, :brm_covariate_observed_rows, present), jobs))
     delete!(columns, plan.source)
     delete!(columns, observation.name)
     # Grouped entries carry what their residuals say about the law whether or
@@ -264,11 +278,12 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
         # observed contribution, missing lookup and mask are graph values.
         columns[jmis] = plan.missing_indices
         totals = grouped ? merge(_rk_prepare_missing_totals!(columns, taken, derived,
-            observation, plan, raw),
+            observation, plan, (raw, present)),
             (; downstream=_rk_mi_downstream(program, observation.name, plan.source))) : nothing
         push!(derived, _RKDerivedSpec(jmis, grouped ?
-            Expr(:_rk_data_preparation, :brm_covariate_total_rows, raw, totals.inputs...) :
-            Expr(:_rk_data_preparation, :brm_covariate_missing_rows, raw), jmis))
+            Expr(:_rk_data_preparation, :brm_covariate_total_rows, raw, present,
+                totals.inputs...) :
+            Expr(:_rk_data_preparation, :brm_covariate_missing_rows, present), jmis))
         push!(completions, _RKMissingValueSpec(plan.source, observed,
             jobs, jmis, component, lookup, mask, length(plan.missing_indices),
             observation.distribution, false, totals))
@@ -280,17 +295,17 @@ end
 
 # The data of a completion's group totals: the three columns bound under
 # fresh names, and the free and grouped rows, ends and residuals as data
-# preparations from them (`brm_covariate_total_*`), so a replay recomputes
-# them from its own data.
-function _rk_prepare_missing_totals!(columns, taken, derived, observation, plan, raw)
+# preparations from them and the completed column's values and presence
+# (`brm_covariate_total_*`), so a replay recomputes them from its own data.
+function _rk_prepare_missing_totals!(columns, taken, derived, observation, plan, presence)
     spec = _brm_mi_totals_spec(observation.lhs; prefix="RK backend")
     inputs = map((:group, :cells, :total)) do key
         name = _rk_ast_fresh_name(string(plan.source, "_shares_", key), taken)
         columns[name] = getproperty(spec, key).values
         name
     end
-    layout = _brm_totals_layout(plan.values, spec.group.values, spec.cells.values,
-        spec.total.values)
+    layout = _brm_totals_layout(map(name -> columns[name], presence)...,
+        spec.group.values, spec.cells.values, spec.total.values)
     names = map((free_rows=(:free, :brm_covariate_total_free_rows),
             grouped_rows=(:grouped, :brm_covariate_total_grouped_rows),
             ends=(:ends, :brm_covariate_total_ends),
@@ -299,7 +314,7 @@ function _rk_prepare_missing_totals!(columns, taken, derived, observation, plan,
         name = _rk_ast_fresh_name(string(plan.source, "_shares_", field), taken)
         columns[name] = getproperty(layout, field)
         push!(derived, _RKDerivedSpec(name,
-            Expr(:_rk_data_preparation, recipe, raw, inputs...), name))
+            Expr(:_rk_data_preparation, recipe, presence..., inputs...), name))
         name
     end
     # The placeholder a non-centered completion's groups observe is bound data:

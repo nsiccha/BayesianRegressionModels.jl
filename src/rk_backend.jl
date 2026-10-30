@@ -8895,7 +8895,8 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
                 "$prefix: response `$(entry.key)` `mi()` index column " *
                 "`$mi_jobs` collides with existing data; rename it")
             raw = _rk_mint_generated!(taken, columns, string(entry.key, "_raw"))
-            columns[raw] = mi_plan.values
+            present = _rk_mint_generated!(taken, columns, string(entry.key, "_present"))
+            columns[raw], columns[present] = _rk_presence_columns(mi_plan.values)
             columns[entry.key] = mi_plan.observed_values
             for i in eachindex(predictor_specs)
                 spec = predictor_specs[i]
@@ -8904,10 +8905,11 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
                     spec.terms, spec.label, raw)
             end
             push!(derived, _RKDerivedSpec(entry.key,
-                Expr(:_rk_data_preparation, :brm_covariate_observed, raw), entry.key))
+                Expr(:_rk_data_preparation, :brm_covariate_observed, raw, present),
+                entry.key))
             columns[mi_jobs] = mi_plan.observed_indices
             push!(derived, _RKDerivedSpec(mi_jobs,
-                Expr(:_rk_data_preparation, :brm_covariate_observed_rows, raw), mi_jobs))
+                Expr(:_rk_data_preparation, :brm_covariate_observed_rows, present), mi_jobs))
         else
             # Mixture responses gate on the shared component family (the
             # same-family check ran at classification).
@@ -8956,13 +8958,14 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
             error("$prefix: internal: `mi()` packed columns for " *
                   "response `$(spec.response)` disagree on observed rows")
     end
+    # Each `mi()` source: its values and presence mask (`_rk_presence_columns`).
     mi_sources = Symbol[]
     for spec in derived
         spec.expression.head === :_rk_data_preparation &&
-            first(spec.expression.args) === :brm_covariate_observed_rows || continue
-        raw = spec.expression.args[2]
-        push!(mi_packed, raw)
-        push!(mi_sources, raw)
+            first(spec.expression.args) === :brm_covariate_observed || continue
+        source = spec.expression.args[2:3]
+        union!(mi_packed, source)
+        append!(mi_sources, source)
     end
     statistical_inputs = Set{Symbol}(t.options.metadata for p in predictor_specs
         for t in p.terms if t.kind === :structured)
