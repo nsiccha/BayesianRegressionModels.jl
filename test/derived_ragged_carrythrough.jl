@@ -17,6 +17,7 @@ using StanBlocks
         subject = subs,
         weight = collect(range(60.0, 90.0; length=length(subs))),
         tgi_bin = [[0.0, 1.0], [1.0], [0.0, 1.0, 1.0]],
+        y = collect(range(0.2, 0.9; length=length(subs))),
     )
     builder = @brm begin
         sigma ~ Exponential(1)
@@ -26,6 +27,9 @@ using StanBlocks
             ys ~ normal(mu, sigma)
             mu
         end
+        # A second, observed response: holding out `tgi_bin` must leave
+        # something to fit (refused since 413d201, snag sbbrmi-brmi-mod-a97bf761).
+        y ~ Normal(log_CL, sigma)
     end
     # `total_groups=()` pins the conventional GQ resample path, matching the
     # existing kernel replay tests.
@@ -48,7 +52,7 @@ using StanBlocks
     # `0soyu1b`), but this cell's prediction reads the response itself
     # (`sum(ys)`). Refused: without its values there is nothing to predict
     # from, so tracing the forecast program fails (stanblocks-use §34).
-    without_tgi = (; subject=train.subject, weight=train.weight)
+    without_tgi = (; subject=train.subject, weight=train.weight, y=train.y)
     @test_throws StanBlocks.StanBlocksError BayesianRegressionModels.stan_data(
         reprocess(sb, without_tgi))
 
