@@ -313,18 +313,21 @@ function _brm_spl_dpsi(p::BRMSparseLaplaceProblem, values, tangents)
 end
 
 # At a packed point with the integrated draws at zero: the entries' values A,
-# the parameter values behind them, and every read's C (its entry's change per
-# unit of each of the level's draws) with its derivative along each `omega`
-# coordinate. One parameter evaluation and pushforward per block margin, with
-# that margin's draw at one in every level: rows are affine in the draws
-# (checked at construction) and read one level of a block, so C is that
-# evaluation's difference from A. This serves every block kind alike (random
-# effects, areal fields, walks), whatever maps its draws to the rows.
+# the parameter values behind them (`nothing` when A is affine and comes from
+# its Jacobian), and every read's C (its entry's change per unit of each of
+# the level's draws) with its derivative along each `omega` coordinate of its
+# block. One parameter evaluation and pushforward along the block's own
+# coordinates per block margin, with that margin's draw at one in every level:
+# rows are affine in the draws and read one level of a block, and A does not
+# move with the blocks' coordinates (both checked at construction), so C is
+# that evaluation's difference from A and ∂C its tangent. This serves every
+# block kind alike (random effects, areal fields, walks), whatever maps its
+# draws to the rows.
 function _brm_spl_cmaps(p::BRMSparseLaplaceProblem, uA)
     nψ = length(p.port)
-    values, tangents = _rk_slap_values_and_tangents(p.kernels, uA)
-    A = _brm_slap_psi!(zeros(nψ), p, values)
-    dA = [_brm_spl_dpsi(p, values, t) for t in tangents]
+    values = p.affine ? nothing : _rk_slap_values(p.kernels, uA)
+    A = p.affine ? _brm_slap_affine_A(p, view(uA, p.population)) :
+        _brm_slap_psi!(zeros(nψ), p, values)
     nc = isempty(p.coff) ? 0 : p.coff[end] + p.blocks[p.rblock[end]].K
     C = zeros(nc)
     dC = [zeros(nc) for _ in p.omega]
@@ -333,14 +336,14 @@ function _brm_spl_cmaps(p::BRMSparseLaplaceProblem, uA)
         isempty(p.block_reads[j]) && continue
         probe = copy(uA)
         probe[p.integrated[view(b.z, :, k)]] .= 1.0
-        pv, pt = _rk_slap_values_and_tangents(p.kernels, probe)
+        pv, pt = _rk_slap_values_and_tangents(p.kernels, probe, b.omega)
         _brm_slap_psi!(ψ, p, pv)
-        dψ = Dict(o => _brm_spl_dpsi(p, pv, pt[o]) for o in b.omega)
+        dψ = [_brm_spl_dpsi(p, pv, t) for t in pt]
         for r in p.block_reads[j]
             e = p.rentry[r]
             C[p.coff[r] + k] = ψ[e] - A[e]
-            for o in b.omega
-                dC[o][p.coff[r] + k] = dψ[o][e] - dA[o][e]
+            for (i, o) in enumerate(b.omega)
+                dC[o][p.coff[r] + k] = dψ[i][e]
             end
         end
     end
@@ -413,6 +416,14 @@ function _brm_spl_design!(p::BRMSparseLaplaceProblem, u0)
             "brm_laplace_problem: likelihood parameter $e is $(exact[e]) in the model " *
             "and $predicted as affine in the integrated random effects, so the sparse " *
             "Laplace does not apply")
+    end
+    # A must not move with the blocks' coordinates (they act through C).
+    values, tangents = _rk_slap_values_and_tangents(p.kernels, uA, collect(eachindex(p.omega)))
+    for t in tangents
+        dA = _brm_spl_dpsi(p, values, t)
+        all(d -> abs(d) <= 1e-9, dA) || _brm_nlme_error("brm_laplace_problem: the " *
+            "likelihood parameters move with an integrated block's scale or correlation " *
+            "where its draws are zero, so the sparse Laplace does not apply")
     end
     # The gradient differentiates C along the blocks' own coordinates only.
     others = setdiff(p.population, p.omega)
