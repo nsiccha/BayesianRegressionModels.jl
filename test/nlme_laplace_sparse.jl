@@ -546,7 +546,54 @@ end
         @test LogDensityProblems.logdensity_and_gradient(q, φ .+ 0.01)[1] ≈
             LogDensityProblems.logdensity_and_gradient(sparse, φ .+ 0.01)[1] rtol=1e-12
         @test all(LogDensityProblems.logdensity_and_gradient(q, φ) .≈ expected)
+        # the units integrated, the subjects' draws sampled (population
+        # coordinates the rows' pullback does not reach: there are no rows)
+        partial = spl_problem(rk, :unit)
+        ψ = 0.3 .* randn(rng, length(partial.population))
+        @test last(LogDensityProblems.logdensity_and_gradient(partial, ψ)) ≈
+            spl_fd(partial, ψ) rtol=1e-5 atol=1e-5
     end
+end
+
+# Per-unit values and the gradient of a subset of units (the NLME protocol's
+# integrated families, ext/BayesianRegressionModelsNLMEEstimationExt.jl):
+# levels of `a` as the units, each with its rows and its integrated draws.
+@stestset "unit values and a subset of units' gradient" begin
+    c = SPL_CROSSED
+    rng = Xoshiro(41)
+    data = (; c.a, c.x, y=[rand(rng, Poisson(exp(0.2 + 0.4e))) for e in c.η])
+    rk = RKBRMI(@brm data begin
+        log(mu) ~ 1 + x + (1 + x | a)
+        y ~ Poisson(mu)
+    end)
+    p = spl_problem(rk, :a)
+    level = Dict(l => k for (k, l) in enumerate(unique(data.a)))
+    owners = BRM._brm_spl_term_owners((name, r) -> level[data.a[r]], p)
+    nunits = length(level)
+    @test length(owners) == length(p.family)
+    φ = 0.3 .* randn(rng, length(p.population))
+    state = BRM._brm_spl_mode!(p, φ)
+    units = BRM._brm_spl_unit_values(p, state, owners, nunits)
+    value, gradient = BRM._brm_spl_value_and_gradient(p, state)
+    @test sum(units) ≈ value - BRM._rk_slap_prior(p.kernels, state.uA) -
+        length(p.integrated) / 2 * log(2π) rtol=1e-10
+    # without the prior, the whole gradient is the units' sum's
+    _, g0 = BRM._brm_spl_value_and_gradient(p, state; prior=false)
+    unitsum(S) = ψ -> (st = BRM._brm_spl_mode!(p, ψ);
+        sum(BRM._brm_spl_unit_values(p, st, owners, nunits)[S]))
+    @test g0 ≈ spl_fd(unitsum(1:nunits), φ) rtol=1e-5 atol=1e-6
+    # a subset's gradient: its terms only
+    S = [2, 5]
+    _, gS = BRM._brm_spl_value_and_gradient(p, BRM._brm_spl_mode!(p, φ); prior=false,
+        active=owners .∈ Ref(S))
+    @test gS ≈ spl_fd(unitsum(S), φ) rtol=1e-5 atol=1e-6
+    @test !(gS ≈ g0)
+    # the blocks of h⁻¹ on each level's two margins
+    state = BRM._brm_spl_mode!(p, φ)
+    sets = [only(p.blocks).z[l, :] for l in axes(only(p.blocks).z, 1)]
+    blocks = BRM._brm_spl_inverse_blocks(p, state, sets)
+    hinv = inv(Matrix(Symmetric(state.h, :L)))
+    @test all(b ≈ hinv[set, set] for (b, set) in zip(blocks, sets))
 end
 
 @stestset "what integrate refuses" begin
