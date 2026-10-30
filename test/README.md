@@ -77,6 +77,14 @@ coordinates and density as the centred lowering, its group terms in
 completion, Gamma's value), and the location-scale rule for free entries.
 Snag `nlme-view-shares-f1cfaa71`.
 
+`rk_mi_bound_types.jl` checks that RKBRMI binds every `mi()` column as
+concretely typed values (`<x>_raw`) and a `Vector{Bool}` presence mask
+(`<x>_present`), never as a column of `Missing` unions: for a completed
+covariate, an unread one, an `mi(y)` response, a completion with group totals
+and a complete column, on the fit, on frozen `reprocess` replays and through
+`rk_design_binder`, with the values equal to the data at the observed rows and
+the mask equal to the data's presence. Snag `mi-raw-columns-r-2b85d8f9`.
+
 `noncentered_completion_transport.jl` checks `brm_coordinate_transport` on
 completions `RKBRMI(brmi; completions = :noncentered)` samples as standardized
 draws: RK's `<column>.z_mis` against SBBRMI's centred `<column>_y_mis` through

@@ -3860,7 +3860,10 @@ end
     @test spec.mi_jobs === :Jobs_y
     @test plan.n_obs == 6
     @test isequal(plan.columns[:y], collect(skipmissing(missing_df.y)))
-    @test isequal(plan.columns[:y_raw], missing_df.y)
+    # The raw column binds as concretely typed values and presence
+    # (snag mi-raw-columns-r-2b85d8f9): `one(T)` stands at the missing entry.
+    @test plan.columns[:y_raw] == [0.5, 1.0, 0.1, 0.9, 1.4, 1.1]
+    @test plan.columns[:y_present] == .!ismissing.(missing_df.y)
     @test plan.columns[:Jobs_y] == [1, 3, 4, 5, 6]
     @test plan.columns[:x] == df.x
     # Distributional scale takes the same packed route.
