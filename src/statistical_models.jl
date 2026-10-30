@@ -390,6 +390,25 @@ brm_completed_covariate(observed, missing, order) = begin
     return completed
 end
     ),
+    # One part of a non-centered completion's grouped-entry layout
+    # (`_brm_grouped_shares_layout`): data only, prepared once.
+    brm_grouped_shares_layout = :(
+function brm_grouped_shares_layout(ends, residuals, part)
+    return BayesianRegressionModels._brm_grouped_shares_layout(ends, residuals)[part]
+end
+    ),
+    # A non-centered completion's grouped entries, one per entry: each reads
+    # its group's coordinates through the shared index array `entry_coords`, so
+    # a cell reading an entry reads its group's (reactivekernels-use §4i).
+    brm_grouped_shares_local = :(
+brm_grouped_shares_local(z, entry_ids, entry_coords, entry_slot, entry_total) = begin
+    values = ReactiveKernels.plate(entry_ids) do e
+        BayesianRegressionModels._brm_share_value(z[entry_coords[e]], entry_slot[e],
+            entry_total[e])
+    end
+    return values
+end
+    ),
     # A separated `car` field's shared values from its shared coordinates
     # (`car_separation.jl`): an ordinary function, linear in their count.
     brm_car_shared_values = :(

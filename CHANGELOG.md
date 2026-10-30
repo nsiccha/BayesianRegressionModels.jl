@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.77
+## 0.2.78
 
 - Changed: inside one component of a `BRMSparseLaplaceProblem` (a field
   across the units, crossed groupings), the mode search no longer takes one
@@ -27,6 +27,37 @@ instead of failing at run time.
   coordinates only, and an affine population part comes from its Jacobian
   (about 23 % less time per value and gradient on a nested panel of 12 × 400
   units).
+
+## 0.2.77
+
+- A non-centered grouped completion (`mi(x)::shares(total, rows)` on
+  `RKBRMI(brmi; completions = :noncentered)`) computes each grouped entry's
+  value per entry and each group's term per group, each reading its group's
+  coordinates through an index array. A cell reading a completed entry or a
+  group's term then reads that group's coordinates only, as recorded on the
+  point. Before, both were whole-vector functions (`_brm_grouped_shares_values`,
+  `_BRMGroupedSharesWeights`), which every such cell computed whole: on
+  ArbeitsplatzAtlas an `osm_pub` cell read 5,232 coordinates (749 now) and a
+  `svb1_shares_weights` cell 33,909 (792 now). Values are unchanged. Computing
+  the whole model, each entry now recomputes its group's normalizer, so the
+  shares' cost grows with the group size.
+- A `cdar` walk's products are statements of their own (`steps = eta *
+  decay`, and `correlated = L * eta` with a factor), not a product inside a
+  dotted term, which ReactiveKernels computed whole in every cell. With
+  ReactiveKernels 0.1.22 a cell then reads its own group's innovations (4 of 24
+  in `test/rk_cdar.jl`; an ArbeitsplatzAtlas `ba_n` cell no longer reads the
+  1,600 of `cdar_log_nl_jahr_nl`); with a correlation factor, the groups it
+  couples. Values are unchanged.
+- BRM's compat floor is ReactiveKernels 0.1.22. Its 0.1.21 computes
+  `view(A, :, k)` (RKPPL's lowering of a column read) at a cell's rows: the
+  columns of a joint population effect (`pop[:, j]`, several responses sharing
+  one design) and their design are then computed at the rows a cell reads
+  (before, on ArbeitsplatzAtlas, a `selb_obs` cell read 148,963 coordinates,
+  the whole design and everything upstream of it). Its 0.1.22 does the same
+  for a value two statements of one `@plate for` read, and for a dotted value
+  reading an untyped numeric array at literal positions (an `amtlich_pub` cell
+  read the whole `b_k_gem_kreis`, 7,200 coordinates). The test environment
+  pins ReactiveKernels `0d3f92345`.
 
 ## 0.2.76
 

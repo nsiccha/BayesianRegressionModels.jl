@@ -67,6 +67,38 @@ end
     check_unit_problems(m, Xoshiro(6))
 end
 
+@stestset "a cell reads the coordinates of one group at most" begin
+    # Each grouped entry's value and each group's term are computed per entry
+    # and per group (BRM 0.2.77), so a cell reads its own group's coordinates,
+    # as recorded on the point. Before, both were whole-vector functions, which
+    # every cell reading the completion or a group's term computed whole.
+    data = shares_panel()
+    rk = RKBRMI(shares_model(data); completions=:noncentered)
+    m = brm_nlme_model(rk; ad_backend=NLME_AD, NESTED...)
+    names = BRM._rk_layout_coordinate_names(rk)
+    groups = [findall(i -> ismissing(data.x[i]) && data.dy[i] == c, eachindex(data.x))
+        for c in data.cells]
+    owned, next = Vector{Int}[], 0
+    for g in groups
+        push!(owned, [findfirst(==(Symbol("x.z_shares.", next + j)), names)
+            for j in 1:(length(g) - 1)])
+        next += length(g) - 1
+    end
+    shares = reduce(vcat, owned)
+    @test length(shares) == length(unique(shares)) > 1
+    names_read, wide = Set{Symbol}(), Tuple[]
+    for cell in m.cell_query, i in eachindex(cell.positions), p in cell.positions[i]
+        point = BRM._BRMNLMERecordingPoint(m.unit, Int[])
+        BRM._rk_nlme_cell_value(cell.query, point, p)
+        read = unique(intersect(point.seen, shares))
+        isempty(read) || push!(names_read, cell.names...)
+        any(o -> issubset(read, o), owned) || isempty(read) || push!(wide, (cell.names, p))
+    end
+    # The completion's readers and the groups' terms both read coordinates.
+    @test :x_shares_weights in names_read && length(names_read) >= 2
+    @test isempty(wide)
+end
+
 @stestset "free entries are unit draws beside the groups" begin
     data = shares_panel(; free=true)
     rk = RKBRMI(shares_model(data); completions=:noncentered)
