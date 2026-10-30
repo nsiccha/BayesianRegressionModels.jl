@@ -27,9 +27,11 @@ instead of failing at run time.
   shares' cost grows with the group size.
 - A `cdar` walk's products are statements of their own (`steps = eta *
   decay`, and `correlated = L * eta` with a factor), not a product inside a
-  dotted term. Values are unchanged. A cell still reads every group's
-  innovations: it reads the walk by linear index, which ReactiveKernels does
-  not map to the product's rows (RK todo `052ench`).
+  dotted term, which ReactiveKernels computed whole in every cell. With
+  ReactiveKernels 0.1.22 a cell then reads its own group's innovations (4 of 24
+  in `test/rk_cdar.jl`; an ArbeitsplatzAtlas `ba_n` cell no longer reads the
+  1,600 of `cdar_log_nl_jahr_nl`); with a correlation factor, the groups it
+  couples. Values are unchanged.
 - BRM's compat floor is ReactiveKernels 0.1.22. Its 0.1.21 computes
   `view(A, :, k)` (RKPPL's lowering of a column read) at a cell's rows: the
   columns of a joint population effect (`pop[:, j]`, several responses sharing
