@@ -120,6 +120,34 @@ end
     @test us[1] != us[2]
 end
 
+@stestset "crossed groupings start through the sparse Laplace (integrate)" begin
+    # Two crossed groupings: no units to partition, so only `integrate` starts
+    # it. Each start's draws for `a` follow the groups' own means.
+    rng = Xoshiro(20261030)
+    la = [string("a", lpad(i, 2, '0')) for i in 1:12]
+    lb = [string("b", i) for i in 1:6]
+    ma = Dict(l => 2 * randn(rng) for l in la)
+    mb = Dict(l => 0.5 * randn(rng) for l in lb)
+    a = repeat(la; inner=24)
+    b = repeat(repeat(lb; inner=4), 12)
+    y = [ma[ai] + mb[bi] + 0.3 * randn(rng) for (ai, bi) in zip(a, b)]
+    rk = RKBRMI(@brm (; a, b, y) begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + (1 | a) + (1 | b)
+        y ~ Normal(mu, sigma)
+    end)
+    us = brm_start(rk; chains=3, rng=Xoshiro(6), integrate=(:a, :b))
+    @test length(us) == 3 && allunique(us)
+    ℓ = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+    @test all(u -> isfinite(LogDensityProblems.logdensity(ℓ, u)), us)
+    names = BRM._rk_layout_coordinate_names(rk)
+    levels = BRM._rk_grouping_levels(rk.plan.columns[:a])
+    za(u) = [u[findfirst(==(Symbol("b_a.z.", l, ".1")), names)] for l in eachindex(levels)]
+    for u in us
+        @test cor(za(u), [ma[string(l)] for l in levels]) > 0.95
+    end
+end
+
 @stestset "a model without random-effect units" begin
     flat(data) = @brm data begin
         sigma ~ Exponential(1)
