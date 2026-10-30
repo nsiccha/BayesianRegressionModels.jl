@@ -11,6 +11,8 @@
 # RUN: julia --project=test test/nlme_laplace_sparse.jl [testset-filter...]
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LinearAlgebra, LogDensityProblems, Random, Statistics
+using SparseArrays: rowvals, nzrange, nonzeros
+include(joinpath(@__DIR__, "rk_cdar_fixture.jl"))
 
 const SPL_RNG = Xoshiro(20261030)
 
@@ -271,6 +273,170 @@ end
     @test q.factor[] !== p.factor[]
 end
 
+# Areas "a".."h" (test/car_term.jl's graph): component {a, b, c, d, h} with
+# a–b, b–c, c–d, a–c, d–h; component {e, f}; "g" an island with rows; "h" has
+# no rows. Three rows per area with rows, a covariate x.
+const SPL_EDGES = (["a", "b", "c", "a", "d", "e"], ["b", "c", "d", "c", "h", "f"])
+const SPL_CAR = let rng = Xoshiro(41)
+    area = repeat(["a", "b", "c", "d", "e", "f", "g"], inner=3)
+    x = randn(rng, length(area))
+    effect = Dict("a" => 0.4, "b" => 0.2, "c" => -0.1, "d" => -0.5, "e" => 0.3,
+        "f" => -0.3, "g" => 0.0)
+    η = [0.3 + 0.5x[i] + effect[area[i]] for i in eachindex(area)]
+    (; area, x, η, y=η .+ 0.3 .* randn(rng, length(area)), from=SPL_EDGES[1], to=SPL_EDGES[2])
+end
+
+# The field's covariance over the rows, P⁻¹ on the structured areas with P the
+# graph Laplacian plus 11ᵀ/(0.001 n)² per component, built from the labels.
+function spl_car_row_covariance(area, from, to)
+    nodes = sort(unique(vcat(from, to)))
+    k = Dict(l => i for (i, l) in enumerate(nodes))
+    L = zeros(length(nodes), length(nodes))
+    for (a, b) in zip(from, to)
+        i, j = k[a], k[b]
+        L[i, i] += 1; L[j, j] += 1; L[i, j] -= 1; L[j, i] -= 1
+    end
+    for comp in (["a", "b", "c", "d", "h"], ["e", "f"])
+        u = [l in comp ? 1.0 : 0.0 for l in nodes]
+        L .+= u * u' / (0.001 * length(comp))^2
+    end
+    A = [haskey(k, a) && n == a ? 1.0 : 0.0 for a in area, n in nodes]
+    A * inv(L) * A'
+end
+
+spl_block_values(rk, p, u, j) =
+    getproperty(BRM._rk_constrained_values(rk, u), p.blocks[j].declaration)
+
+function spl_icar_oracle(p, rk, data, φ)
+    u = spl_point(p, φ)
+    ψ = BRM._brm_slap_psi!(zeros(length(p.port)), p, BRM._rk_slap_values(p.kernels, u))
+    μ0 = [ψ[p.entry[t]] for t in eachindex(p.family)]
+    σ = [exp(ψ[p.entry[t] + 1]) for t in eachindex(p.family)]
+    τ = only(spl_block_values(rk, p, u, 1).sigma)
+    Σ = Diagonal(σ .^ 2) + τ^2 * spl_car_row_covariance(data.area, data.from, data.to)
+    plan = RKEXT._rk_translated_plan(rk.plan)
+    prior = Base.invokelatest(prepare_query(rk.model, plan, :prior), u) +
+        Base.invokelatest(prepare_query(rk.model, plan, :log_jacobian), u)
+    prior + logpdf(MvNormal(μ0, Symmetric(Σ)), data.y)
+end
+
+@stestset "car fields: the ICAR field's exact Gaussian marginal, BYM2 and counts" begin
+    data = SPL_CAR
+    rk = RKBRMI(@brm data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + car(area; edges=(from, to), type=:icar)
+        y ~ Normal(mu, sigma)
+    end)
+    p = spl_problem(rk, :area)
+    @test length(p.integrated) == 7
+    @test length(p.wcols) == 2
+    @test length(p.components) == 2
+    φs = [0.4 .* randn(SPL_RNG, length(p.population)) for _ in 1:3]
+    values = [LogDensityProblems.logdensity_and_gradient(p, φ) for φ in φs]
+    oracle = [spl_icar_oracle(p, rk, data, φ) for φ in φs]
+    # equal up to the field prior's normalizing constant, a constant of the graph
+    @test values[2][1] - values[1][1] ≈ oracle[2] - oracle[1] atol=1e-8
+    @test values[3][1] - values[1][1] ≈ oracle[3] - oracle[1] atol=1e-8
+    for (φ, (_, gradient)) in zip(φs, values)
+        @test gradient ≈ spl_fd(ψ -> spl_icar_oracle(p, rk, data, ψ), φ) rtol=1e-6 atol=1e-6
+    end
+    # Draws: the exact Gaussian conditional of the field's values (the soft
+    # sums' rank-one part enters through the kriging correction).
+    φ = φs[1]
+    u = spl_point(p, φ)
+    ψ = BRM._brm_slap_psi!(zeros(length(p.port)), p, BRM._rk_slap_values(p.kernels, u))
+    μ0 = [ψ[p.entry[t]] for t in eachindex(p.family)]
+    σ = exp(ψ[p.entry[1] + 1])
+    τ = only(spl_block_values(rk, p, u, 1).sigma)
+    C, _, _, _ = BRM._brm_spl_cmaps(p, BRM._brm_slap_zero_integrated!(copy(u), p))
+    Cm = zeros(length(data.y), length(p.integrated))
+    for e in eachindex(p.port), r in p.rptr[e]:(p.rptr[e + 1] - 1)
+        Cm[findfirst(==(e), p.entry), p.blocks[p.rblock[r]].z[p.rlevel[r], 1]] = C[p.coff[r] + 1]
+    end
+    @test all(c -> c == 0 || c ≈ τ, Cm)
+    h = zeros(length(p.integrated), length(p.integrated))
+    rows, vals = rowvals(p.pattern), zeros(length(nonzeros(p.pattern)))
+    for (k, v) in zip(p.prior_nz, p.prior_val)
+        vals[k] += v
+    end
+    for j in axes(h, 2), k in nzrange(p.pattern, j)
+        h[rows[k], j] += vals[k]
+    end
+    for (c, cols) in enumerate(p.wcols)
+        h[cols, cols] .+= p.wλ[c]
+    end
+    h .+= Cm' * Cm / σ^2
+    mean_z = h \ (Cm' * (data.y .- μ0) / σ^2)
+    sd_z = sqrt.(diag(inv(h)))
+    ndraws = 4000
+    z = brm_laplace_draws(p, repeat(φ, 1, ndraws); rng=Xoshiro(43)).draws[p.integrated, :]
+    @test all(abs.(vec(mean(z; dims=2)) .- mean_z) .< 4 .* sd_z ./ sqrt(ndraws))
+    @test vec(std(z; dims=2)) ≈ sd_z rtol=0.06
+    # BYM2 (structured and iid parts) and Poisson counts: the gradient of the
+    # Laplace marginal itself.
+    rng = Xoshiro(44)
+    counts = [rand(rng, Poisson(exp(e))) for e in data.η]
+    for (brmi, nint) in (
+            (@brm((; data.area, data.x, data.y, data.from, data.to), begin
+                sigma ~ Exponential(1)
+                mu ~ 1 + x + car(area; edges=(from, to), type=:bym2)
+                y ~ Normal(mu, sigma)
+            end), 7 + 8),
+            (@brm((; data.area, data.x, y=counts, data.from, data.to), begin
+                log(mu) ~ 1 + x + car(area; edges=(from, to), type=:icar)
+                y ~ Poisson(mu)
+            end), 7))
+        q = spl_problem(RKBRMI(brmi), :area)
+        @test length(q.integrated) == nint
+        φ = 0.3 .* randn(rng, length(q.population))
+        value, gradient = LogDensityProblems.logdensity_and_gradient(q, φ)
+        @test isfinite(value)
+        @test gradient ≈ spl_fd(q, φ) rtol=1e-6 atol=1e-6
+    end
+end
+
+@stestset "cdar walks: the exact Gaussian marginal of a stationary AR(1), and counts" begin
+    data = WALK_DF
+    rk = RKBRMI(walk_model(data))
+    p = spl_problem(rk, :kreis)
+    @test length(p.integrated) == 6 * 4
+    @test length(p.components) == 6
+    function oracle(φ)
+        u = spl_point(p, φ)
+        ψ = BRM._brm_slap_psi!(zeros(length(p.port)), p, BRM._rk_slap_values(p.kernels, u))
+        μ0 = [ψ[p.entry[t]] for t in eachindex(p.family)]
+        σ = [exp(ψ[p.entry[t] + 1]) for t in eachindex(p.family)]
+        walk = spl_block_values(rk, p, u, 1)
+        sw, ρ = only(walk.sigma), only(walk.rho)
+        Σ = Diagonal(σ .^ 2) + [k1 == k2 ? sw^2 * ρ^abs(t1 - t2) : 0.0
+            for (k1, t1) in zip(data.kreis, data.year), (k2, t2) in zip(data.kreis, data.year)]
+        plan = RKEXT._rk_translated_plan(rk.plan)
+        prior = Base.invokelatest(prepare_query(rk.model, plan, :prior), u) +
+            Base.invokelatest(prepare_query(rk.model, plan, :log_jacobian), u)
+        prior - sum(logpdf(Normal(), u[j]) for j in p.integrated; init=0.0) +
+            logpdf(MvNormal(μ0, Symmetric(Σ)), data.y)
+    end
+    for _ in 1:2
+        φ = 0.3 .* randn(SPL_RNG, length(p.population))
+        value, gradient = LogDensityProblems.logdensity_and_gradient(p, φ)
+        @test value ≈ oracle(φ) atol=1e-8
+        @test gradient ≈ spl_fd(oracle, φ) rtol=1e-6 atol=1e-6
+    end
+    rng = Xoshiro(45)
+    counts = [rand(rng, Poisson(exp(0.3 + 0.4x))) for x in data.x]
+    q = spl_problem(RKBRMI(@brm((; data.kreis, data.year, data.region, data.x, y=counts,
+            data.C), begin
+        log(mu) ~ 1 + x + (1 | region) + cdar(year; by=kreis, cor=C)
+        y ~ Poisson(mu)
+    end)), (:kreis, :region))
+    @test length(q.components) == 3
+    φ = 0.3 .* randn(rng, length(q.population))
+    _, gradient = LogDensityProblems.logdensity_and_gradient(q, φ)
+    @test gradient ≈ spl_fd(q, φ) rtol=1e-6 atol=1e-6
+    # A walk correlated across groups reads other groups' innovations.
+    @test_throws r"several levels" spl_problem(RKBRMI(across_model(data)), :kreis)
+end
+
 @stestset "what integrate refuses" begin
     data = SPL_CROSSED
     rk = RKBRMI(@brm data begin
@@ -279,5 +445,6 @@ end
         y ~ Normal(mu, sigma)
     end)
     @test_throws r"groups no random-effect block" spl_problem(rk, :b)
+    @test_throws r"groups no random-effect block, `cdar` walk or `car` field" spl_problem(rk, :x)
     @test_throws ArgumentError spl_problem(rk, ())
 end

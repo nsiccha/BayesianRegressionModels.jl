@@ -121,8 +121,30 @@ function BRM._rk_slap_kernels(backend::BRM.RKBRMI, ports::Tuple, effects::Tuple,
     end
     prior = BRM._rk_nlme_population_prior(backend, u0, ad_backend)
     pointwise = BRM._rk_pointwise_query(backend)
+    # The parameters' forward derivatives along every `omega` coordinate,
+    # prepared on first use (the sparse Laplace's draws maps, probed through
+    # the parameters themselves).
+    omega_directions = Tuple(begin
+        v = zeros(Float64, length(u0))
+        v[o] = 1.0
+        v
+    end for o in omega)
+    pushforward = Ref{Any}(nothing)
+    prepare_pushforward() = Base.invokelatest(prepare_ad_pushforward, values, forward,
+        omega_directions, u0; active=:unconstrained)
     (; values, nports=length(ports), pullback, prepare_pullback, blocks,
-        nomega=length(omega), prior, pointwise)
+        nomega=length(omega), prior, pointwise, omega_directions, pushforward,
+        prepare_pushforward)
+end
+
+# The parameters at a packed point and, per `omega` coordinate, their forward
+# derivative there (one tuple of ports per coordinate).
+function BRM._rk_slap_values_and_tangents(k, u::Vector{Float64})
+    isempty(k.omega_directions) && return BRM._rk_slap_values(k, u), ()
+    k.pushforward[] === nothing && (k.pushforward[] = k.prepare_pushforward())
+    value, tangents = Base.invokelatest(ad_value_and_pushforward, k.pushforward[],
+        k.omega_directions, u)
+    _rk_slap_tuple(value, k.nports), map(t -> _rk_slap_tuple(t, k.nports), tangents)
 end
 
 BRM._rk_slap_values(k, u::Vector{Float64}) =
