@@ -50,6 +50,13 @@ instead of failing at run time.
   `order`; before, a lookup and a mask, so every observed row looked drawn
   entry 1 up and masked it out, and a cell on it computed that entry and what
   it reads). Values are unchanged (RK snag `on-arbeitsplatza-6065a1ef`).
+- When a `brm_nlme_model` first prepares its compact cell gradients, it warns
+  about cell groups whose cells read far more of their unit's η than their
+  gradients touch (at least 64, and more than four times as many), naming each
+  group with its widest cell's counts. That is the signature of a value
+  computed whole in every cell, which makes a unit cost its cells times its
+  effects: on ArbeitsplatzAtlas an `osm_pub` cell read 8,220 of its unit's η
+  and its gradient touched 4 (decision `0dxkyy5`).
 - BRM's compat floors are ReactiveKernels 0.1.18 and ReactiveKernelsPPL 0.1.18,
   which compute `vcat` operands, multi-index gathers and group totals at the
   rows a cell reads, and evaluate a cell whose number two of its values read

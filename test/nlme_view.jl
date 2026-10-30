@@ -684,6 +684,26 @@ end
     end
 end
 
+@stestset "cells that read η their gradients never touch are named" begin
+    # `recorded[i][g][k]` / `reads[i][g][k]`: subject i, group g, cell k. The
+    # second group's cell reads 200 η and its gradient touches one: a value
+    # computed whole in each cell. The first group's untouched read (RK reading
+    # a vector it then indexes) stays below the floor.
+    cells = ((; names=(:local,)), (; names=(:whole,)))
+    recorded = [([[1, 2, 3], [4]], [collect(1:200)]), ([[1]], [[2, 3]])]
+    reads = [([[1, 2], [4]], [[7]]), ([[1]], [[2, 3]])]
+    flagged = BRM._brm_nlme_untouched_reads(cells, recorded, reads)
+    @test length(flagged) == 1
+    @test only(flagged).names == (:whole,)
+    @test (only(flagged).untouched, only(flagged).touched) == (199, 1)
+    @test_logs (:warn, r"read far more of their unit's η") BRM._brm_nlme_warn_untouched_reads(
+        cells, recorded, reads)
+    # A cell whose gradient touches most of what it reads is not flagged,
+    # however many it reads.
+    @test isempty(BRM._brm_nlme_untouched_reads(cells, recorded, recorded))
+    @test_logs BRM._brm_nlme_warn_untouched_reads(cells, recorded, recorded)
+end
+
 # A fixture's subjects repeated to `n`, each copy with its source subject's
 # per-subject values and rows.
 function replicated_cohort(d, n)
