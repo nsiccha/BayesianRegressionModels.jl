@@ -1851,6 +1851,9 @@ struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J,C,G,P}
     # hold each covariance block's scales and correlation factor), built by
     # the NLMEEstimation extension on the first prior evaluation.
     prior_structure::Base.RefValue{Any}
+    # The sparse Laplace problems of the integrated families, one per set of
+    # families, built by the NLMEEstimation extension on first use.
+    laplace::Dict{Vector{Int},Any}
 end
 
 Base.show(io::IO, m::BRMNLMEModel) = print(io, "BRMNLMEModel(",
@@ -2013,7 +2016,7 @@ function _brm_nlme_model(backend::RKBRMI, node; ad_backend, observation_ad_backe
             theta, sigma,
             eta_blocks, unit, observations_query, observations_pushforward,
             observed, observation_attribution, cell_query, cell_gradient,
-            population_prior, Ref{Any}(nothing))
+            population_prior, Ref{Any}(nothing), Dict{Vector{Int},Any}())
     end
 end
 

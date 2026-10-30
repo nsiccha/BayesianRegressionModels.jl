@@ -742,6 +742,18 @@ julia --project=<scratch-env> test/nlme_estimation_ext.jl
 Without NLMEEstimation the file stops with an error rather than skipping.
 Shared fixtures live in `nlme_fixtures.jl`.
 
+`nlme_integrated.jl` covers NLMEEstimation's integrated families on BRM
+models: SAEM integrates the chosen covariance families by BRM's sparse Laplace
+and samples the rest. `check_protocol` with each set of families integrated
+on a Normal and a Poisson nested model compares the values, modes and
+covariance blocks with NLMEEstimation's own Laplace and the gradients with
+central differences. Laplace-EM on a Gaussian nested panel reaches the direct
+L-BFGS maximum of the same objective, and SAEM sampling the subjects with the
+units integrated ends within half a log-likelihood unit of it. Run it in the
+same scratch environment. NLMEEstimation 0.2.4 needs WarmupHMC 0.2.8 and a
+Treebars with `ProgressInterrupted`, so develop those checkouts in the same
+`Pkg.develop` call as NLMEEstimation.
+
 ## Description PDF rendering
 
 `description_tex.jl` checks Student-t sampling equations for standard, affine,
