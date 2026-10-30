@@ -226,30 +226,28 @@ BRM._rk_slap_prior_gradient(k, u::Vector{Float64}) =
 
 # The sparse Laplace's `@plate` cells (src/nlme_laplace_sparse.jl): one cell
 # of `observations` differentiated over a compact selection of packed
-# coordinates (ReactiveKernelsPPL 0.1.22): its gradient and whole Hessian block
-# from the `m` unit directions, and one direction's HVP and third-order
-# product `D³ℓ[v, v, ·]`, each over the selection.
+# coordinates (ReactiveKernelsPPL 0.1.22): its gradient and HVPs along `K`
+# directions (the Hessian's columns at its integrated draws), and one
+# direction's HVP and third-order product `D³ℓ[v, v, ·]`, each over the
+# selection.
 function BRM._rk_spl_cell_ad(backend::BRM.RKBRMI, observations::Tuple,
-        base0::Vector{Float64}, indices0::Vector{Int}, ad_backend)
+        base0::Vector{Float64}, indices0::Vector{Int}, ad_backend, K::Int)
     rkext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     built, plan = backend.model, rkext._rk_translated(backend)
     m = length(indices0)
     forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
     second = SecondOrder(AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse,
         ad_backend)), forward)
-    units = ntuple(k -> (e = zeros(Float64, m); e[k] = 1.0; e), m)
     hvp = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_hvp, built, plan,
-        observations, base0, indices0, second, units)
+        observations, base0, indices0, second, ntuple(_ -> zeros(Float64, m), K))
     third = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_third, built, plan,
         observations, base0, indices0, SecondOrder(second, forward), (zeros(Float64, m),))
-    (; hvp, third, units)
+    (; hvp, third)
 end
 
-function BRM._rk_spl_cell_block(ad, base::Vector{Float64}, indices::Vector{Int}, i::Int)
-    gradient, columns = ad_gradient_and_hvp(ad.hvp, ad.units, base, base[indices],
-        indices, i)
-    gradient, reduce(hcat, columns)
-end
+BRM._rk_spl_cell_block(ad, directions::Tuple, base::Vector{Float64},
+    indices::Vector{Int}, i::Int) =
+    ad_gradient_and_hvp(ad.hvp, directions, base, base[indices], indices, i)
 
 function BRM._rk_spl_cell_third(ad, direction::Vector{Float64}, base::Vector{Float64},
         indices::Vector{Int}, i::Int)

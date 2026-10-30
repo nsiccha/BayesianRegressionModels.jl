@@ -568,7 +568,19 @@ function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend)
             term += 1
             (; i, sel, lz=first.(z), lpos=last.(z), pidx=first.(ps), ppos=last.(ps), term)
         end
-        ad = _rk_spl_cell_ad(p.backend, (name,), copy(u0), first(cells).sel, ad_backend)
+        # each cell's HVP directions: the units at its integrated draws (K of
+        # them, zero past a cell's own), whose results are the Hessian's
+        # columns there
+        K = max(1, maximum(c -> length(c.lz), cells))
+        cells = map(cells) do c
+            dirs = ntuple(K) do k
+                e = zeros(m)
+                k <= length(c.lpos) && (e[c.lpos[k]] = 1.0)
+                e
+            end
+            merge(c, (; dirs))
+        end
+        ad = _rk_spl_cell_ad(p.backend, (name,), copy(u0), first(cells).sel, ad_backend, K)
         push!(p.cells, (; name, query, ad, m, cells))
     end
     p
@@ -770,13 +782,13 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
             end
         end
         derivatives || continue
-        gsel, H = _rk_spl_cell_block(group.ad, u, c.sel, c.i)
+        gsel, columns = _rk_spl_cell_block(group.ad, c.dirs, u, c.sel, c.i)
         m = length(c.lz)
         base = p.nptr[c.term] - 1
         for a in 1:m
             g[c.lz[a]] += gsel[c.lpos[a]]
             for b in 1:m
-                nz[p.tnz[base + (b - 1) * m + a]] -= H[c.lpos[a], c.lpos[b]]
+                nz[p.tnz[base + (b - 1) * m + a]] -= columns[b][c.lpos[a]]
             end
         end
     end
@@ -1230,12 +1242,16 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state)
         end
     end
     # The cells: τ over each cell's selection, Σ_k D³ℓ_c[l_k, l_k, ·] along the
-    # columns of S's block on its integrated draws (S = h⁻¹ there, positive
-    # definite); its integrated part goes into s, its population part (with
-    # the cell's own gradient there) straight into the gradient.
+    # columns l_k of L, S's block on its integrated draws = L Lᵀ (S = h⁻¹
+    # there, positive definite); its integrated part goes into s, its
+    # population part (with the cell's own gradient there) straight into the
+    # gradient. The same calls' HVPs are H_c[:, z] L, which the implicit term
+    # below reads.
     gcell = zeros(length(p.population))
     u = copy(state.uA)
     u[p.integrated] .= state.z
+    implicit = Tuple{Vector{Int},Matrix{Float64},LowerTriangular{Float64,Matrix{Float64}},
+        Vector{Int}}[]
     for group in p.cells, c in group.cells
         m = length(c.lz)
         if m == 0
@@ -1247,25 +1263,24 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state)
         Sb = [S[p.tnz[base + (b - 1) * m + a]] for a in 1:m, b in 1:m]
         Lb = cholesky(Symmetric(Sb)).L
         τsel = zeros(group.m)
+        HL = zeros(length(c.ppos), m)
         gsel = nothing
         for k in 1:m
             direction = zeros(group.m)
             direction[c.lpos] .= view(Lb, :, k)
-            gsel, _, tv = _rk_spl_cell_third(group.ad, direction, u, c.sel, c.i)
+            gsel, hv, tv = _rk_spl_cell_third(group.ad, direction, u, c.sel, c.i)
             τsel .+= tv
+            HL[:, k] .= view(hv, c.ppos)
         end
         s[c.lz] .+= τsel[c.lpos] ./ 2
         gcell[c.pidx] .+= gsel[c.ppos] .+ τsel[c.ppos] ./ 2
+        push!(implicit, (c.pidx, HL, Lb, c.lz))
     end
     v = _brm_spl_solve(state.F, state.W, s)
-    # the cells' implicit term: v along each cell's integrated draws, through
-    # its mixed second derivatives
-    for group in p.cells, c in group.cells
-        isempty(c.lz) && continue
-        direction = zeros(group.m)
-        direction[c.lpos] .= v[c.lz]
-        _, hv, _ = _rk_spl_cell_third(group.ad, direction, u, c.sel, c.i)
-        gcell[c.pidx] .+= hv[c.ppos]
+    # the cells' implicit term: H_c[population, z] v_z = (H_c[:, z] L)[population, :]
+    # L⁻¹ v_z, through each cell's mixed second derivatives
+    for (pidx, HL, Lb, lz) in implicit
+        gcell[pidx] .+= HL * (Lb \ v[lz])
     end
     w = zeros(length(p.port))
     gω = zeros(length(p.omega))
