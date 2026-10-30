@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.68
+
+- `brm_descriptor`, `ranef_blocks` and `brm_ranef_draws` read a grouping named
+  by a data-only assignment, such as a level-table gather
+  `kreis_b = kreis[gem_b]`, as they read a data column. They used to refuse it
+  ("grouping factor `kreis_b` (from `kreis_b_idx`) is not a raw data column of
+  this model") although SBBRMI and RKBRMI lowered the model (snag
+  `brm-descriptor-r-20f52245`). `column_data(brmi, name)` now returns a
+  data-only assignment's value, evaluated as the backends evaluate it, and
+  `nothing` only for a name that is neither a data column nor such an
+  assignment.
+
 ## 0.2.67
 
 - RKBRMI binds an `mi()` column (a completed covariate, an `mi(y)` response, a
