@@ -631,27 +631,63 @@ end
 # density, and every group's term belongs to the rows it completes, which the
 # NLME paths read as unit draws (`brm_nlme_view`). A group with one entry has
 # no coordinate; its term is the law at its residual.
-# `Vararg{Any,N}` specializes on the law's arguments: an unspecialized
-# varargs tuple holding an active vector needs Enzyme's runtime activity in
-# the NLME paths' forward-over-reverse η Hessians.
-struct _BRMGroupedSharesWeights{F} end
-function (::_BRMGroupedSharesWeights{F})(z, x, ends, residuals,
-        args::Vararg{Any,N}) where {F,N}
+#
+# RKBRMI evaluates both per entry and per group (`brm_grouped_shares_local`,
+# `brm_grouped_share_weights`, statistical_models.jl), so a cell reading one
+# entry reads its group's coordinates only: an entry's value reads its group's
+# coordinates and total, a group's term its entries, their law's arguments and
+# its coordinates (snag saem-s-nuts-warm-28e5f1d9; before BRM 0.2.77 both were
+# whole-vector functions, which every cell computed whole).
+_brm_share_value(y::AbstractVector, slot::Integer, total::Real) =
+    exp(_brm_shares_log_values(y, total)[slot])
+
+# One group's term: `z` its coordinates, `x` its entries, `args` the law's
+# arguments at its entries (or numbers). `Vararg{Any,N}` specializes on the
+# law's arguments: an unspecialized varargs tuple holding an active vector
+# needs Enzyme's runtime activity in the NLME paths' forward-over-reverse η
+# Hessians.
+struct _BRMGroupShareWeight{F} end
+function (::_BRMGroupShareWeight{F})(z, x, total, args::Vararg{Any,N}) where {F,N}
     _brm_shares_check_lengths(args, x)
-    weights = similar(x, Base.promote_eltype(x, args...), length(ends))
+    weight = -log(total)
+    for j in eachindex(x)
+        weight += logpdf(F(_brm_shares_entries(args, j)...), x[j]) + log(x[j])
+    end
+    for c in eachindex(z)
+        weight += z[c]^2 / 2 + log(2π) / 2
+    end
+    weight
+end
+
+# Calls `weight` (a `_BRMGroupShareWeight`) through a global function, so the
+# per-group plate's body calls a constant callee (`_rk_grouped_share_weights_template`).
+_brm_group_share_weight(weight, z, x, total, args::Vararg{Any,N}) where {N} =
+    weight(z, x, total, args...)
+
+# The per-entry and per-group indices of grouped entries whose groups end at
+# `ends` (inclusive, among the entries), the `K - 1` coordinates of a group of
+# `K` following each other group after group: each entry's group coordinates,
+# its slot in its group and its group's total; each group's entries and
+# coordinates; a one per entry, which broadcasts the law's arguments onto the
+# entries; and the entries' and groups' indices, the plates' domains.
+function _brm_grouped_shares_layout(ends, residuals)
+    entry_coords, entry_slot, entry_total = Vector{Int}[], Int[], Float64[]
+    group_entries, group_coords = Vector{Int}[], Vector{Int}[]
     start, coordinate = 1, 1
     for (k, stop) in enumerate(ends)
-        weight = -log(residuals[k])
-        for j in start:stop
-            weight += logpdf(F(_brm_shares_entries(args, j)...), x[j]) + log(x[j])
+        K = stop - start + 1
+        coords = collect(coordinate:(coordinate + K - 2))
+        push!(group_entries, collect(start:stop))
+        push!(group_coords, coords)
+        for slot in 1:K
+            push!(entry_coords, coords)
+            push!(entry_slot, slot)
+            push!(entry_total, Float64(residuals[k]))
         end
-        for c in coordinate:(coordinate + stop - start - 1)
-            weight += z[c]^2 / 2 + log(2π) / 2
-        end
-        weights[k] = weight
-        start, coordinate = stop + 1, coordinate + stop - start
+        start, coordinate = stop + 1, coordinate + K - 1
     end
-    weights
+    (entry_coords, entry_slot, entry_total, ones(length(entry_slot)), group_entries,
+        group_coords, collect(eachindex(entry_slot)), collect(eachindex(group_entries)))
 end
 
 # One group's observed term: its density is the weight, whatever the placeholder

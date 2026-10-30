@@ -204,4 +204,11 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 5e288b439 (ReactiveKernels 0.1.18) contains 8009f3a95: a number a cell
 # computes that two of its values read at rows evaluates (snag
 # cell-take-rows-s-e48675d0).
-rev = "5e288b439f2c8e3bb6e267263cf4686a8ab699d3"
+# 51c8a1c4a (ReactiveKernels 0.1.21, ReactiveKernelsPPL 0.1.20) contains
+# 5e288b439: a cell computes `view(A, :, k)`, RKPPL's lowering of a column
+# read `A[:, k]`, at its rows (snag column-read-lowe-24508269).
+# 0d3f92345 (ReactiveKernels 0.1.22) contains 51c8a1c4a: a cell computes a
+# value read through several batched arguments, and a dotted value reading an
+# untyped numeric array at literal positions, at its rows (snag
+# form-value-compu-c1e0965c).
+rev = "0d3f92345bb719a81f00471aeb240ec897d9fa39"

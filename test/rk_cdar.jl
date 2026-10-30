@@ -115,6 +115,25 @@ end
     check_unit_problems(m, Xoshiro(2))
 end
 
+@stestset "NLME view: a cell reads its own group's innovations" begin
+    # The walk's products are statements of their own (BRM 0.2.77), which
+    # ReactiveKernels (0.1.22) computes at a cell's rows: a cell reads its
+    # district's innovations, recorded on the point. With a correlation factor
+    # the walk couples the districts, and a cell reads the ones it couples.
+    rk = RKBRMI(walk_model())
+    m = brm_nlme_model(rk; ad_backend=NLME_AD, NESTED...)
+    names = BRM._rk_layout_coordinate_names(rk)
+    eta = findall(c -> startswith(String(c), "cdar_mu_year.eta."), names)
+    @test length(eta) == length(KREIS) * 4
+    widest = 0
+    for cell in m.cell_query, i in eachindex(cell.positions), p in cell.positions[i]
+        point = BRM._BRMNLMERecordingPoint(m.unit, Int[])
+        BRM._rk_nlme_cell_value(cell.query, point, p)
+        widest = max(widest, length(unique(intersect(point.seen, eta))))
+    end
+    @test widest == 4
+end
+
 @stestset "NLME view: a walk nests in the units through labels no formula reads" begin
     # `kreis_region` repeats `region`, but no formula reads it, so the backend
     # does not keep it: it is passed as labels (snag brm-nlme-view-ne-9971da9c).
