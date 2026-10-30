@@ -434,8 +434,13 @@ function _sb_native_vector_prior(target::Symbol, priors, nvalue; positive::Bool,
         isnothing(n) || push!(kws, Expr(:kw, :n, n))
         isnothing(reference.lower) || push!(kws, Expr(:kw, :lower, reference.lower))
         isnothing(reference.upper) || push!(kws, Expr(:kw, :upper, reference.upper))
+        # A bounded block is `restricted`: the family's plain kernel on the
+        # bounds, also inside StanBlocks' `vcat` (`_sb_restricted_prior!`).
         isempty(kws) ? Expr(:call, reference.dist, args...) :
-            Expr(:call, reference.dist, Expr(:parameters, kws...), args...)
+            isnothing(reference.lower) && isnothing(reference.upper) ?
+                Expr(:call, reference.dist, Expr(:parameters, kws...), args...) :
+                Expr(:call, StanBlocks.restricted, Expr(:parameters, kws...),
+                     reference.dist, args...)
     end
     rhs = length(blocks) == 1 ? only(blocks) : Expr(:call, :vcat, blocks...)
     dependencies = Set{Symbol}()
