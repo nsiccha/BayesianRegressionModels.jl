@@ -119,7 +119,7 @@ ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMCarShared, w) =
     BRM._brm_car_shared_logdensity(w, d.last, d.scale, d.weight, d.first_entry,
         d.second_entry)
 
-# A non-centered completion's group term (`BRM._BRMGroupedSharesWeights`): the
+# A non-centered completion's group term (`BRM._BRMGroupShareWeight`): the
 # observed placeholder carries no information, the weight is the density.
 ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMLogWeight, _placeholder) = d.weight
 

@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.75
+
+- A non-centered grouped completion (`mi(x)::shares(total, rows)` on
+  `RKBRMI(brmi; completions = :noncentered)`) computes each grouped entry's
+  value per entry and each group's term per group, each reading its group's
+  coordinates through an index array. A cell reading a completed entry or a
+  group's term then reads that group's coordinates only, as recorded on the
+  point. Before, both were whole-vector functions (`_brm_grouped_shares_values`,
+  `_BRMGroupedSharesWeights`), which every such cell computed whole: on
+  ArbeitsplatzAtlas an `osm_pub` cell read 5,232 coordinates (749 now) and a
+  `svb1_shares_weights` cell 33,909 (792 now). Values are unchanged. Computing
+  the whole model, each entry now recomputes its group's normalizer, so the
+  shares' cost grows with the group size.
+- A `cdar` walk's products are statements of their own (`steps = eta *
+  decay`, and `correlated = L * eta` with a factor), not a product inside a
+  dotted term. Values are unchanged. A cell still reads every group's
+  innovations: it reads the walk by linear index, which ReactiveKernels does
+  not map to the product's rows (RK todo `052ench`).
+
 ## 0.2.74
 
 - **Breaking for saved points:** `RKBRMI(brmi; car_units)` lowers each `car`

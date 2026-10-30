@@ -417,7 +417,7 @@ end
 # standard normal draws standardized by the law's location and scale, as for
 # any completion, and the grouped entries' coordinates are standard normal
 # draws whose groups each observe the rest of the joint latent's density
-# (`_BRMGroupedSharesWeights`). The coordinates and the density are the
+# (`_BRMGroupShareWeight`). The coordinates and the density are the
 # centred ones; only the prior/likelihood split differs.
 function _rk_emit_missing_totals!(definitions, statements, bindings, taken, completion)
     t = completion.totals
@@ -432,8 +432,8 @@ function _rk_emit_missing_totals!(definitions, statements, bindings, taken, comp
     order = _rk_block_argument!(block, :order, completion.order)
     grouped_data = _rk_mi_grouped_arguments!(block, completion)
     free_entry, free = _rk_emit_mi_free!(block, free_part, free_rows)
-    shares_sampled, shares = _rk_emit_mi_grouped!(block, grouped_part, grouped_rows,
-        grouped_data)
+    shares_sampled, shares = _rk_emit_mi_grouped!(definitions, taken, block, grouped_part,
+        grouped_rows, grouped_data)
     missing = _rk_block_local!(block, :y_mis)
     push!(block.statements, Expr(:(=), missing, Expr(:call, :vcat, free, shares)))
     completed = _rk_block_local!(block, :completed)
@@ -450,7 +450,8 @@ function _rk_emit_missing_shares!(definitions, statements, bindings, taken, comp
     block = _rk_block_body(grouped_part.reads)
     grouped_rows = _rk_block_argument!(block, :grouped_rows, t.grouped_rows)
     grouped_data = _rk_mi_grouped_arguments!(block, completion)
-    sampled, shares = _rk_emit_mi_grouped!(block, grouped_part, grouped_rows, grouped_data)
+    sampled, shares = _rk_emit_mi_grouped!(definitions, taken, block, grouped_part,
+        grouped_rows, grouped_data)
     push!(statements, Expr(:call, :~, completion.source,
         _rk_ast_block_call!(definitions, taken, "brm_missing_shares", block, shares)))
     ((; sampled, standardized=nothing),)
@@ -492,8 +493,7 @@ function _rk_mi_grouped_part(bindings, taken, completion)
     if completion.noncentered
         arguments = map(arg -> _rk_value_expr!(bindings, arg, taken), grouped.args)
         return (; noncentered=true, ends=t.ends, residuals=t.residuals, arguments,
-            weights=_rk_value_callee!(bindings, _BRMGroupedSharesWeights{F}(), taken),
-            values=_rk_value_callee!(bindings, _brm_grouped_shares_values, taken),
+            weights=_rk_value_callee!(bindings, _BRMGroupShareWeight{F}(), taken),
             weight=_rk_value_callee!(bindings, _BRMLogWeight, taken),
             reads=Expr(:tuple, t.ends, t.residuals, arguments...))
     end
@@ -512,18 +512,57 @@ function _rk_mi_grouped_arguments!(block, completion)
        weights=_rk_block_argument!(block, :weights, t.weights))
 end
 
-function _rk_emit_mi_grouped!(block, part, grouped_rows, data)
+# A kernel computing each group's term (`_BRMGroupShareWeight`) from its
+# coordinates, its entries and the law's `n` arguments at them, one group per
+# plate iteration, each read through a shared index array (`group_coords[k]`,
+# `group_entries[k]`), so a cell reading a group's term reads that group's.
+function _rk_grouped_share_weights_template(n)
+    args = [Symbol(:argument_, j) for j in 1:n]
+    name = Symbol(:brm_grouped_share_weights_, n)
+    at = [:($a[group_entries[k]]) for a in args]
+    :($name(weight, z, x, $(args...), group_ids, group_entries, group_coords,
+            residuals) = begin
+        weights = ReactiveKernels.plate(group_ids) do k
+            BayesianRegressionModels._brm_group_share_weight(weight, z[group_coords[k]],
+                x[group_entries[k]], residuals[k], $(at...))
+        end
+        return weights
+    end)
+end
+
+function _rk_emit_mi_grouped!(definitions, taken, block, part, grouped_rows, data)
     if part.noncentered
         sampled = _rk_block_local!(block, :z_shares)
         push!(block.statements, Expr(:call, :.~,
             Expr(:ref, sampled, Expr(:call, :axes, data.coordinates, 1)),
             _rk_ast_dotted(:Normal, 0, 1)))
+        # Values per entry and terms per group (`_brm_grouped_shares_layout`),
+        # the law's arguments broadcast onto the entries by a named dotted value
+        # each, so every read is a gather at the cell's rows.
+        layout = map(enumerate((:entry_coords, :entry_slot, :entry_total, :entry_ones,
+                :group_entries, :group_coords, :entry_ids, :group_ids))) do (k, name)
+            value = _rk_block_local!(block, name)
+            push!(block.statements, Expr(:(=), value, _rk_ast_statistical_call!(definitions,
+                taken, :brm_grouped_shares_layout, part.ends, part.residuals, k)))
+            value
+        end
+        entry_coords, entry_slot, entry_total, entry_ones, group_entries, group_coords,
+            entry_ids, group_ids = layout
         shares = _rk_block_local!(block, :y_shares)
-        push!(block.statements, Expr(:(=), shares,
-            Expr(:call, part.values, sampled, part.ends, part.residuals)))
+        push!(block.statements, Expr(:(=), shares, _rk_ast_statistical_call!(definitions,
+            taken, :brm_grouped_shares_local, sampled, entry_ids, entry_coords, entry_slot,
+            entry_total; kernel=true)))
+        arguments = map(enumerate(part.arguments)) do (k, argument)
+            value = _rk_block_local!(block, Symbol(:share_argument_, k))
+            push!(block.statements, Expr(:(=), value, Expr(:call, :.*, argument, entry_ones)))
+            value
+        end
+        n = length(arguments)
         weights = _rk_block_local!(block, :group_weights)
-        push!(block.statements, Expr(:(=), weights, Expr(:call, part.weights,
-            sampled, shares, part.ends, part.residuals, part.arguments...)))
+        push!(block.statements, Expr(:(=), weights, _rk_ast_statistical_call!(definitions,
+            taken, Symbol(:brm_grouped_share_weights_, n), part.weights, sampled, shares,
+            arguments..., group_ids, group_entries, group_coords, part.residuals; kernel=true,
+            template=_rk_grouped_share_weights_template(n))))
         push!(block.statements, Expr(:call, :.~, data.weights,
             Expr(:., part.weight, Expr(:tuple, weights))))
         return sampled, shares
