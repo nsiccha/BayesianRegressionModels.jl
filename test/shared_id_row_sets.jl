@@ -10,9 +10,10 @@
 # SBBRMI silently built two uncorrelated blocks and RKBRMI refused the model.
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using WarmupHMC
+using LinearAlgebra, Random, Statistics
 
 module SharedIdRowSets
-using BayesianRegressionModels, Distributions
+using BayesianRegressionModels, Distributions, LinearAlgebra
 
 # `a` on 8 rows over Kreise A-D; `b` observed on rows 1, 3, 4, 7, 8 of them.
 const OBS = [1, 3, 4, 7, 8]
@@ -100,6 +101,39 @@ atlas(d) = @brm d begin
     @plate for j in eachindex(tb)
         tb[j] ~ Normal(sum(exp.(b[rows[j]])), st)
     end
+end
+
+# Snag reprocess-resamp-dab66282: `b`'s rows on Kreis C, which `a` observes and
+# `b` does not (`kreis_b` names A, B, D), and on E, which neither observes; no
+# `yb`, so `b` is predicted given the fit (a forecast).
+const REDRAW = (; kreis=KREIS, x=X, ya=YA, kreis_b=["C", "E", "C"], xb=[0.4, -0.6, 1.2])
+# The same block with Student-t levels.
+student(d) = @brm d begin
+    sa ~ Exponential(1)
+    sb_ ~ Exponential(1)
+    a ~ 1 + x + (1 + x | k | kreis)
+    b ~ 1 + xb + (1 | k | kreis_b)
+    sd(:, k) ~ Exponential(1)
+    cor(:, k) ~ LKJCholesky(3, 2.0)
+    ranef(:, k) ~ TDist(4)
+    ya ~ Normal(a, sa)
+    yb ~ Normal(b, sb_)
+end
+# The atlas's shape: `b` also walks per Kreis, `cdar(...; by = kreis_b)`, the
+# column it reads its margin of the joined block through.
+const WALK_FIT = merge(JOINT, (; year_b=[1, 1, 2, 1, 2], C=Matrix(1.0I, 3, 3)))
+const WALK_REPLAY = (; kreis=KREIS, x=X, ya=YA, kreis_b=["C", "C"], year_b=[1, 2],
+                     xb=[0.4, -0.6], C=Matrix(1.0I, 4, 4))
+walk(d) = @brm d begin
+    sa ~ Exponential(1)
+    sb_ ~ Exponential(1)
+    a ~ 1 + x + (1 + x | k | kreis)
+    b ~ 1 + xb + (1 | k | kreis_b) + cdar(year_b; by = kreis_b, cor = C)
+    sd(:, k) ~ Exponential(1)
+    cor(:, k) ~ LKJCholesky(3, 2.0)
+    sd(b, cdar(year_b)) ~ LogNormal(-1, 0.5)
+    ya ~ Normal(a, sa)
+    yb ~ Normal(b, sb_)
 end
 end
 
@@ -313,6 +347,202 @@ end
         (; kreis_b=["A", "C", "B", "B"])); resample_groups=[:ky_b])
 end
 
+# Constrained values (parameters, transformed parameters, generated quantities)
+# of one unconstrained draw, and the values of one name among them.
+function constrained(problem, q; seed=1)
+    sm = problem.model
+    names = String.(BridgeStan.param_names(sm; include_tp=true, include_gq=true))
+    names, BridgeStan.param_constrain(sm, q; include_tp=true, include_gq=true,
+                                      rng=BridgeStan.StanRNG(sm, seed))
+end
+pick(names, values, name) =
+    [v for (n, v) in zip(names, values) if n == name || startswith(n, name * ".")]
+
+# The redraw law written out (`joint_level_redraw`): in margin `order`, with `P`
+# the Cholesky factor of the block's covariance, a redrawn label that is fitted
+# joint level `pos` keeps its kept margins and draws the others given them, `P
+# [P_KK \ b_K; e_R]`; a new label draws all, `P e`. A level weight scales both.
+function redrawn_rows(b, tau, L, eta, pos, order, n_kept;
+                      w_fit=ones(size(b, 1)), w_new=ones(length(pos)))
+    T = length(tau)
+    S = Diagonal(tau) * L * L' * Diagonal(tau)
+    P = cholesky(Symmetric(S[order, order])).L
+    E = reshape(eta, T, length(pos))
+    out = zeros(length(pos), T)
+    for j in eachindex(pos)
+        z, w = E[:, j], w_new[j]
+        if pos[j] > 0
+            w = w_fit[pos[j]]
+            K = order[1:n_kept]
+            z[1:n_kept] = LowerTriangular(P[1:n_kept, 1:n_kept]) \ (b[pos[j], K] ./ sqrt(w))
+        end
+        out[j, order] = sqrt(w) .* (P * z)
+    end
+    out
+end
+
+@stestset "resample_groups redraws a joined column's margins given the kept ones" begin
+    # snag reprocess-resamp-dab66282: `b` never observed Kreis C, `a` did, so C
+    # is a fitted level of the joined block; E is new to both. Redrawing
+    # `kreis_b` draws `b`'s margin of C given its fitted `a` margins, and all
+    # of E's margins, while the fitted block stays a parameter `a` reads.
+    fit = SBBRMI(SR.joint(SR.JOINT); mod=SR, total_groups=())
+    @test_throws "unseen level `E`" reprocess(fit, SR.REDRAW)
+    replay = reprocess(fit, SR.REDRAW; resample_groups=[:kreis_b])
+    code = stan_code(replay)
+    @test occursin("b_k_kreis_z_flat", stan_block(code, "parameters"))
+    @test occursin("b_k_kreis_new = joint_level_redraw", stan_block(code, "generated quantities"))
+    @test occursin("ya ~ normal(a, sa)", stan_block(code, "model"))
+    data = BRM.stan_data(replay)
+    @test data[:kreis_idx] == [1, 1, 2, 2, 3, 3, 4, 4]   # `a` reads the fitted levels A-D
+    @test data[:n_kreis] == 4
+    @test data[:kreis_b_idx] == [1, 2, 1]                # among the redrawn labels C, E
+    @test data[:b_k_kreis_new_pos] == [3, 0]             # C is fitted level 3; E is new
+    @test data[:b_k_kreis_new_order] == [1, 2, 3]        # `a`'s two margins kept first
+    @test data[:b_k_kreis_new_n_kept] == 2
+
+    fitted = stan_problem(fit, "redraw_fit")
+    problem = stan_problem(replay, "redraw")
+    unc = BridgeStan.param_unc_names(fitted.model)
+    @test BridgeStan.param_unc_names(problem.model) == unc
+    draws = [0.37sin(i + 5k) for k in 1:3, i in eachindex(unc)]
+    @test transport_draws(fit, replay, draws, unc, unc) == draws
+
+    q = 0.4 .* randn(Xoshiro(7), length(unc))
+    kept_C, new_C, new_E = Float64[], Float64[], Vector{Float64}[]
+    local S, b
+    for seed in 1:2000
+        cn, cv = constrained(problem, q; seed)
+        tau = pick(cn, cv, "b_k_kreis_tau")
+        L = reshape(pick(cn, cv, "b_k_kreis_L"), 3, 3)
+        b = reshape(pick(cn, cv, "b_k_kreis"), 4, 3)
+        new = reshape(pick(cn, cv, "b_k_kreis_new"), 2, 3)
+        eta = pick(cn, cv, "b_k_kreis_new_eta")
+        S = Diagonal(tau) * L * L' * Diagonal(tau)
+        # exactly the law, given the generated draws
+        @test new ≈ redrawn_rows(b, tau, L, eta, [3, 0], [1, 2, 3], 2) atol=1e-10
+        @test new[1, 1:2] ≈ b[3, 1:2] atol=1e-10     # C keeps its fitted `a` margins
+        @test pick(cn, cv, "r_b_k_kreis") ≈ new[[1, 2, 1], 3] atol=1e-10
+        push!(new_C, new[1, 3])
+        push!(new_E, new[2, :])
+    end
+    # C's `b` margin is the conditional normal given C's fitted `a` margins
+    K, R = [1, 2], [3]
+    m = only(S[R, K] / S[K, K] * b[3, K])
+    v = only(S[R, R] - S[R, K] / S[K, K] * S[K, R])
+    @test abs(mean(new_C) - m) < 5sqrt(v / 2000)
+    @test var(new_C) ≈ v rtol=0.15
+    # E's margins are a fresh level of the block
+    H = reduce(hcat, new_E)
+    @test maximum(abs.(mean(H; dims=2)) ./ sqrt.(diag(S))) < 5 / sqrt(2000)
+    @test cov(H; dims=2) ≈ S rtol=0.2
+    d = brm_descriptor(replay)
+    out = brm_execute(d, :predict; problem, draws=permutedims(draws), seed=1234)
+    @test haskey(out, :yb_gen) || haskey(out, :yb)
+end
+
+@stestset "a redrawn first column, every column, Student-t levels, and what stays refused" begin
+    fit = SBBRMI(SR.joint(SR.JOINT); mod=SR, total_groups=())
+    # `kreis` is the block's first column: the fitted block is addressed
+    # through `kreis_b`, and `a`'s two margins follow `b`'s in the redraw order.
+    rows = (; kreis=["E", "C"], x=[0.1, 0.2], kreis_b=["A", "D"], xb=[0.3, 0.4])
+    first_col = reprocess(fit, rows; resample_groups=[:kreis])
+    data = BRM.stan_data(first_col)
+    @test data[:kreis_idx] == [2, 1]
+    @test data[:kreis_b_idx] == [1, 4]
+    @test data[:b_k_kreis_new_pos] == [3, 0]
+    @test data[:b_k_kreis_new_order] == [3, 1, 2]
+    @test data[:b_k_kreis_new_n_kept] == 1
+    problem = stan_problem(first_col, "redraw_first")
+    unc = BridgeStan.param_unc_names(problem.model)
+    @test unc == BridgeStan.param_unc_names(stan_problem(fit, "redraw_fit").model)
+    q = 0.4 .* randn(Xoshiro(8), length(unc))
+    for seed in 1:20
+        cn, cv = constrained(problem, q; seed)
+        tau = pick(cn, cv, "b_k_kreis_tau")
+        L = reshape(pick(cn, cv, "b_k_kreis_L"), 3, 3)
+        b = reshape(pick(cn, cv, "b_k_kreis"), 4, 3)
+        new = reshape(pick(cn, cv, "b_k_kreis_new"), 2, 3)
+        @test new ≈ redrawn_rows(b, tau, L, pick(cn, cv, "b_k_kreis_new_eta"),
+                                 [3, 0], [3, 1, 2], 1) atol=1e-10
+        @test new[1, 3] ≈ b[3, 3] atol=1e-10
+    end
+
+    # Every column: the whole block is drawn anew over the labels they name.
+    all_cols = reprocess(fit, SR.REDRAW; resample_groups=[:kreis, :kreis_b])
+    code = stan_code(all_cols)
+    @test occursin("b_k_kreis_n_g = max(max(kreis_idx), max(kreis_b_idx))", code)
+    @test occursin("b_k_kreis_z_flat", stan_block(code, "generated quantities"))
+    @test !occursin("b_k_kreis_new", code)
+    @test all_cols.data[:n_kreis] == 5                     # A-E
+    @test BRM.stan_data(all_cols)[:kreis_b_idx] == [3, 5, 3]
+    names = BridgeStan.param_unc_names(stan_problem(all_cols, "redraw_all").model)
+    @test names == [n for n in unc if !startswith(n, "b_k_kreis_z_flat")]
+    # the block's labels: the fitted ones while a kept column reads it, the
+    # replay's when every column is redrawn
+    partial = only(ranef_blocks(first_col))
+    @test (partial.levels, partial.generated) == (["A", "B", "C", "D"], false)
+    whole = only(ranef_blocks(all_cols))
+    @test (whole.levels, whole.generated) == (["A", "B", "C", "D", "E"], true)
+
+    # Student-t levels: a fitted level keeps its fitted weight, a new one draws one.
+    tfit = SBBRMI(SR.student(SR.JOINT); mod=SR, total_groups=())
+    treplay = reprocess(tfit, SR.REDRAW; resample_groups=[:kreis_b])
+    tproblem = stan_problem(treplay, "redraw_student")
+    tunc = BridgeStan.param_unc_names(tproblem.model)
+    @test tunc == BridgeStan.param_unc_names(stan_problem(tfit, "redraw_student_fit").model)
+    q = 0.4 .* randn(Xoshiro(9), length(tunc))
+    for seed in 1:20
+        cn, cv = constrained(tproblem, q; seed)
+        tau = pick(cn, cv, "b_k_kreis_tau")
+        L = reshape(pick(cn, cv, "b_k_kreis_L"), 3, 3)
+        b = reshape(pick(cn, cv, "b_k_kreis"), 4, 3)
+        new = reshape(pick(cn, cv, "b_k_kreis_new"), 2, 3)
+        @test new ≈ redrawn_rows(b, tau, L, pick(cn, cv, "b_k_kreis_new_eta"), [3, 0],
+            [1, 2, 3], 2; w_fit=pick(cn, cv, "b_k_kreis_w"),
+            w_new=pick(cn, cv, "b_k_kreis_new_w")) atol=1e-10
+        @test new[1, 1:2] ≈ b[3, 1:2] atol=1e-10
+    end
+
+    # refused: the redraw is given the fitted block, which a fresh template
+    # rebuilds on the replay rows (its coordinates are not the fit's)
+    @test_throws "use the default `freeze_constants=true`" reprocess(fit,
+        merge(SR.REDRAW, (; yb=[0.1, 0.2, 0.3])); resample_groups=[:kreis_b],
+        freeze_constants=false)
+    # not built on RKBRMI yet
+    @test_throws "drawing new levels of a joined block is not implemented" reprocess(
+        RKBRMI(SR.cells(SR.CELLS)), SR.CELLS; resample_groups=[:kreis_b])
+end
+
+@stestset "the atlas's ETR hold-out: a joined block and a cdar walk on one column" begin
+    # snag reprocess-resamp-dab66282 as the atlas has it: `b` walks per Kreis by
+    # the column it reads its margin of `|k|` through; Kreis C has no `b` rows
+    # in the fit. Its replay redraws C's walk from the fitted `sigma`, `rho` and
+    # C's `b` margin given its fitted `a` margins.
+    fit = SBBRMI(SR.walk(SR.WALK_FIT); mod=SR, total_groups=())
+    replay = reprocess(fit, SR.WALK_REPLAY; resample_groups=[:kreis_b])
+    data = BRM.stan_data(replay)
+    @test data[:b_k_kreis_new_pos] == [3]
+    @test StanBlocks.getvalue(replay.data[:cdar_b_year_b_n_new_groups]) == 1
+    fitted = stan_problem(fit, "walk_fit")
+    problem = stan_problem(replay, "walk")
+    unc = BridgeStan.param_unc_names(fitted.model)
+    @test BridgeStan.param_unc_names(problem.model) == unc
+    q = 0.4 .* randn(Xoshiro(10), length(unc))
+    for seed in 1:20
+        cn, cv = constrained(problem, q; seed)
+        b = reshape(pick(cn, cv, "b_k_kreis"), 4, 3)
+        new = reshape(pick(cn, cv, "b_k_kreis_new"), 1, 3)
+        @test new[1, 1:2] ≈ b[3, 1:2] atol=1e-10
+        @test pick(cn, cv, "b") ≈ pick(cn, cv, "pop_b") .+ new[1, 3] .+
+                                  pick(cn, cv, "cdar_b_year_b") atol=1e-10
+    end
+    d = brm_descriptor(replay)
+    out = brm_execute(d, :predict; problem, seed=1234,
+                      draws=permutedims([0.3sin(i + 2k) for k in 1:3, i in eachindex(unc)]))
+    @test haskey(out, :yb_gen) || haskey(out, :yb)
+end
+
 @stestset "descriptor, draws and adaptive centering read the joined block" begin
     sb = SBBRMI(SR.cells(SR.CELLS); mod=SR, total_groups=())
     stan = stan_problem(sb, "descriptor")
@@ -358,15 +588,7 @@ end
     @test_throws "shares no label" SBBRMI(SR.joint(disjoint); mod=SR, total_groups=())
     @test_throws "shares no label" RKBRMI(SR.cells(merge(SR.CELLS,
         (; kreis_b=["P", "Q", "Q", "R", "S"]))))
-    # Not implemented yet for a joined block (tracked on the snag handler's
-    # queue): cv re-draws, new levels of one column, level correlation.
-    @test_throws "cv re-drawing a joined block is not implemented" SBBRMI(
-        SR.joint(SR.JOINT); mod=SR, total_groups=(), cv_groups=[:kreis_b])
-    fit = SBBRMI(SR.cells(SR.CELLS); mod=SR, total_groups=())
-    @test_throws "drawing new levels of a joined block is not implemented" reprocess(
-        fit, SR.CELLS; resample_groups=[:kreis_b])
-    @test_throws "drawing new levels of a joined block is not implemented" reprocess(
-        RKBRMI(SR.cells(SR.CELLS)), SR.CELLS; resample_groups=[:kreis_b])
+    # Not implemented yet for a joined block (todo `089dnl4`): level correlation.
     levelcor = @brm SR.JOINT begin
         Omega ~ LKJCholesky(4, 2.0)
         a ~ 1 + (1 | k | gr(kreis; cor = Omega))
