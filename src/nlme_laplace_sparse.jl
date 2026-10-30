@@ -8,19 +8,21 @@
 # levels and rows per level. The rows are the structured path's
 # (`_brm_lap_row`, `_brm_slap_terms`): term t's link-scale parameters are
 #
-#     ψ_t = A_t(φ) + Σ_k Z_t,k b_k,ℓ,    b_k,ℓ = M_k,ℓ(φ) z_k,ℓ,
+#     ψ_t = A_t(φ) + Σ_k C_t,k(φ) z_k,ℓ,
 #
-# one level ℓ = ℓ_k(t) per integrated block k the row reads, Z_t,k the row's
-# design on that block (constant data) and M_k,ℓ the level's draws map
-# (diag(scales) L; per level, so a stratified block's strata differ). With
-# C = ∂ψ/∂z the negative Hessian in z is the sparse
+# one level ℓ = ℓ_k(t) per integrated block k the row reads, its draws z_k,ℓ
+# entering through C_t,k(φ) (a random-effect row's design times the block's
+# diag(scales) L). C is probed from the model's own parameters at every
+# population point (`_brm_spl_cmaps`), with its derivatives along the blocks'
+# scale and correlation coordinates, so whatever maps a block's draws to the
+# rows serves. The negative Hessian in z is the sparse
 #
 #     h = I + Cᵀ W C,    W = −ℓ″ (one 1 × 1 or 2 × 2 block per term),
 #
 # factored by CHOLMOD at every Newton step and at the mode. The value and
 # gradient are the structured path's (its header), with each unit's h_i⁻¹
 # replaced by the selected inverse of h on h's own pattern
-# (SelectedInversion.jl). That holds every entry τ and Γ read, because a term
+# (SelectedInversion.jl). That holds every entry the gradient reads, because a term
 # couples exactly the effects it reads.
 #
 # The mode search steps per connected component of h's graph: units that
@@ -28,9 +30,14 @@
 # take their own step length, stop and backtracking, as in the structured
 # path; a crossed grouping joins the units it crosses into one component.
 
-# An integrated random-effect block: its draws' indices in the integrated
-# vector z (levels × margins), and the `omega` entries (scales, correlation
-# factor) its draws map M reads.
+# Implemented by `BayesianRegressionModelsReactiveKernelsEnzymeExt`: the
+# likelihood parameters at a packed point with their forward derivatives along
+# the `omega` coordinates.
+function _rk_slap_values_and_tangents end
+
+# An integrated block: its draws' indices in the integrated vector z (levels ×
+# margins), and the `omega` entries (scales, correlation factor) that move how
+# its draws enter the rows.
 struct _BRMSlapBlock
     declaration::Symbol
     group::Symbol
@@ -71,12 +78,15 @@ mutable struct BRMSparseLaplaceProblem{K}
     link::Vector{Symbol}
     fixed::Vector{Float64}
     # The blocks each entry reads: reads `rptr[e]:rptr[e+1]-1`, read r of block
-    # `rblock[r]` at level `rlevel[r]` with design Z_e,k = `zval[zoff[r] .+ (1:K)]`.
+    # `rblock[r]` at level `rlevel[r]` by entry `rentry[r]`. At a population
+    # point its C over the level's K draws is `C[coff[r] .+ (1:K)]`
+    # (`_brm_spl_cmaps`); `block_reads[j]` lists block j's reads.
     rptr::Vector{Int}
     rblock::Vector{Int}
     rlevel::Vector{Int}
-    zoff::Vector{Int}
-    zval::Vector{Float64}
+    rentry::Vector{Int}
+    coff::Vector{Int}
+    block_reads::Vector{Vector{Int}}
     # Each term's effects (`tz[tptr[t]:tptr[t+1]-1]`, ascending), the local
     # position of read r's first effect (`rloc[r]`, its K effects consecutive
     # and in margin order) and h's nonzeros at the term's m × m effect pairs
@@ -199,8 +209,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         if r.kind in (:ranef, :stratified_ranef)))
     families, ports = _brm_slap_ports(backend, responses)
     u0 = zeros(Float64, length(names))
-    effects = Tuple(b.declaration for b in blocks)
-    kernels = _rk_slap_kernels(backend, Tuple(ports), effects, omega, u0, ad_backend)
+    kernels = _rk_slap_kernels(backend, Tuple(ports), (), omega, u0, ad_backend)
     nrows = length(rk_bound_data(backend)[first(responses).response])
     t = _brm_slap_terms(backend, responses, families, ports, _rk_slap_values(kernels, u0),
         (1:nrows,))
@@ -208,7 +217,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     p = BRMSparseLaplaceProblem(backend, population, names[population], integrate,
         integrated, blocks, kernels, t.family, t.y, t.trials, t.constant, t.entry,
         fill(true, length(t.family)), t.port, t.index, t.link, t.fixed,
-        Int[], Int[], Int[], Int[], Float64[], Int[], Int[], Int[], Int[], Int[],
+        Int[], Int[], Int[], Int[], Int[], Vector{Int}[], Int[], Int[], Int[], Int[], Int[],
         spzeros(0, 0), Int[], Int[], Vector{Int}[], Int[], omega, false,
         u0[population], zeros(nψ), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
         Float64(tol), Int(maxiter), 0, 0)
@@ -220,54 +229,65 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     p
 end
 
-# Every integrated level's draws map M (b = M z) at a packed point, block by
-# block as K × K × levels, and per `omega` coordinate its derivative (zero
-# for the blocks that coordinate does not move). Probe k sets every level's
-# draw k to one in every block with at least k margins.
-function _brm_spl_effect_maps(p::BRMSparseLaplaceProblem, u)
-    usyn = _brm_slap_zero_integrated!(copy(u), p)
-    M = [zeros(b.K, b.K, size(b.z, 1)) for b in p.blocks]
-    dM = [[zeros(b.K, b.K, size(b.z, 1)) for b in p.blocks] for _ in p.omega]
-    for k in 1:maximum(b -> b.K, p.blocks)
-        probe = copy(usyn)
-        for b in p.blocks
-            b.K >= k && (probe[p.integrated[view(b.z, :, k)]] .= 1.0)
-        end
-        value, tangents = _rk_slap_effects(p.kernels, probe)
-        for (j, b) in enumerate(p.blocks)
-            b.K >= k || continue
-            _brm_spl_store_column!(M[j], value[j], k, b)
+# Link-scale tangents of the entries, from their parameters' tangents.
+function _brm_spl_dpsi(p::BRMSparseLaplaceProblem, values, tangents)
+    dψ = zeros(length(p.port))
+    for e in eachindex(dψ)
+        k = p.port[e]
+        k == 0 && continue
+        θ, t = p.index[e] == 0 ? (values[k], tangents[k]) :
+            (values[k][p.index[e]], tangents[k][p.index[e]])
+        dψ[e] = _brm_lap_dlink(p.link[e], θ) * t
+    end
+    dψ
+end
+
+# At a packed point with the integrated draws at zero: the entries' values A,
+# the parameter values behind them, and every read's C (its entry's change per
+# unit of each of the level's draws) with its derivative along each `omega`
+# coordinate. One parameter evaluation and pushforward per block margin, with
+# that margin's draw at one in every level: rows are affine in the draws
+# (checked at construction) and read one level of a block, so C is that
+# evaluation's difference from A. This serves every block kind alike (random
+# effects, areal fields, walks), whatever maps its draws to the rows.
+function _brm_spl_cmaps(p::BRMSparseLaplaceProblem, uA)
+    nψ = length(p.port)
+    values, tangents = _rk_slap_values_and_tangents(p.kernels, uA)
+    A = _brm_slap_psi!(zeros(nψ), p, values)
+    dA = [_brm_spl_dpsi(p, values, t) for t in tangents]
+    nc = isempty(p.coff) ? 0 : p.coff[end] + p.blocks[p.rblock[end]].K
+    C = zeros(nc)
+    dC = [zeros(nc) for _ in p.omega]
+    ψ = zeros(nψ)
+    for (j, b) in enumerate(p.blocks), k in 1:b.K
+        isempty(p.block_reads[j]) && continue
+        probe = copy(uA)
+        probe[p.integrated[view(b.z, :, k)]] .= 1.0
+        pv, pt = _rk_slap_values_and_tangents(p.kernels, probe)
+        _brm_slap_psi!(ψ, p, pv)
+        dψ = Dict(o => _brm_spl_dpsi(p, pv, pt[o]) for o in b.omega)
+        for r in p.block_reads[j]
+            e = p.rentry[r]
+            C[p.coff[r] + k] = ψ[e] - A[e]
             for o in b.omega
-                _brm_spl_store_column!(dM[o][j], tangents[o][j], k, b)
+                dC[o][p.coff[r] + k] = dψ[o][e] - dA[o][e]
             end
         end
     end
-    M, dM
-end
-
-function _brm_spl_store_column!(dest, draws, k, b::_BRMSlapBlock)
-    size(draws, 1) == size(b.z, 1) || _brm_nlme_error("brm_laplace_problem: internal: " *
-        "block `$(b.declaration)` reads $(size(draws, 1)) levels, the layout $(size(b.z, 1))")
-    for l in axes(b.z, 1), a in 1:b.K
-        dest[a, k, l] = draws isa AbstractVector ? draws[l] : draws[l, a]
-    end
-    dest
+    C, dC, A, values
 end
 
 # The entries' reads: which level of which integrated block each entry reads,
-# and its design there, from unit steps of the draws at u0. Shifting draw k of
-# every level of a block by one moves each entry by its C there; shifting
-# level ℓ's by ℓ moves it by ℓ times that, which names the level. Then
-# Z = C M⁻¹ per read, and the structure is checked at another point.
+# from unit steps of the draws at u0. Shifting draw k of every level of a
+# block by one moves each entry by its C there; shifting level ℓ's by ℓ moves
+# it by ℓ times that, which names the level. The structure is then checked at
+# another point, and C must move with the blocks' own coordinates alone.
 function _brm_spl_design!(p::BRMSparseLaplaceProblem, u0)
     nψ = length(p.port)
     base = _brm_slap_zero_integrated!(copy(u0), p)
     ψ0 = _brm_slap_psi!(zeros(nψ), p, _rk_slap_values(p.kernels, base))
-    M0, _ = _brm_spl_effect_maps(p, base)
     ψ1 = zeros(nψ); ψ2 = zeros(nψ)
-    # Per entry and block: the level read (0 none) and C there (K numbers).
     level = [zeros(Int, nψ) for _ in p.blocks]
-    C = [zeros(b.K, nψ) for b in p.blocks]
     for (j, b) in enumerate(p.blocks), k in 1:b.K
         unit = copy(base); scaled = copy(base)
         for l in axes(b.z, 1)
@@ -283,26 +303,24 @@ function _brm_spl_design!(p::BRMSparseLaplaceProblem, u0)
             l = round(Int, ratio)
             (1 <= l <= size(b.z, 1) && abs(ratio - l) <= 1e-6 * max(1.0, abs(ratio))) ||
                 _brm_nlme_error("brm_laplace_problem: likelihood parameter $e reads " *
-                    "several levels of the random-effect block over `$(b.group)`, " *
+                    "several levels of the integrated block `$(b.declaration)`, " *
                     "which the sparse Laplace does not integrate")
             level[j][e] == 0 || level[j][e] == l || _brm_nlme_error(
                 "brm_laplace_problem: likelihood parameter $e reads two levels of the " *
-                "random-effect block over `$(b.group)`")
+                "integrated block `$(b.declaration)`")
             level[j][e] = l
-            C[j][k, e] = d1
         end
     end
-    p.rptr = [1]; p.rblock = Int[]; p.rlevel = Int[]; p.zoff = Int[]; p.zval = Float64[]
+    p.rptr = [1]; p.rblock = Int[]; p.rlevel = Int[]; p.rentry = Int[]; p.coff = Int[]
+    p.block_reads = [Int[] for _ in p.blocks]
+    nc = 0
     for e in 1:nψ
         for (j, b) in enumerate(p.blocks)
             l = level[j][e]
             l == 0 && continue
-            m = view(M0[j], :, :, l)
-            cond(m) < 1e10 || _brm_nlme_error("brm_laplace_problem: the draws map of " *
-                "the random-effect block over `$(b.group)` is singular at the zero " *
-                "unconstrained point")
-            push!(p.rblock, j); push!(p.rlevel, l); push!(p.zoff, length(p.zval))
-            append!(p.zval, m' \ view(C[j], :, e))
+            push!(p.rblock, j); push!(p.rlevel, l); push!(p.rentry, e); push!(p.coff, nc)
+            push!(p.block_reads[j], length(p.rblock))
+            nc += b.K
         end
         push!(p.rptr, length(p.rblock) + 1)
     end
@@ -317,28 +335,36 @@ function _brm_spl_design!(p::BRMSparseLaplaceProblem, u0)
     z1 = randn(rng, length(p.integrated))
     u1[p.integrated] .= z1
     uA = _brm_slap_zero_integrated!(copy(u1), p)
-    A1 = _brm_slap_psi!(zeros(nψ), p, _rk_slap_values(p.kernels, uA))
     exact = _brm_slap_psi!(zeros(nψ), p, _rk_slap_values(p.kernels, u1))
-    M1, _ = _brm_spl_effect_maps(p, uA)
+    C1, _, A1, _ = _brm_spl_cmaps(p, uA)
     for e in 1:nψ
-        predicted = A1[e] + _brm_spl_cdot(p, M1, e, z1)
+        predicted = A1[e] + _brm_spl_cdot(p, C1, e, z1)
         isapprox(predicted, exact[e]; rtol=1e-8, atol=1e-8) || _brm_nlme_error(
             "brm_laplace_problem: likelihood parameter $e is $(exact[e]) in the model " *
             "and $predicted as affine in the integrated random effects, so the sparse " *
             "Laplace does not apply")
     end
+    # The gradient differentiates C along the blocks' own coordinates only.
+    others = setdiff(p.population, p.omega)
+    if !isempty(others)
+        u2 = copy(uA)
+        u2[others] .+= 0.1 .* randn(rng, length(others))
+        C2, _, _, _ = _brm_spl_cmaps(p, u2)
+        isapprox(C2, C1; rtol=1e-9, atol=1e-9) || _brm_nlme_error(
+            "brm_laplace_problem: the integrated effects enter the likelihood scaled by " *
+            "population coordinates other than their own scales and correlations, " *
+            "which the sparse Laplace does not differentiate")
+    end
     p
 end
 
-# C_e z for an entry, over its reads: Σ_r Z_rᵀ M_r z_r.
-function _brm_spl_cdot(p::BRMSparseLaplaceProblem, M, e, z)
+# C_e z for an entry, over its reads.
+function _brm_spl_cdot(p::BRMSparseLaplaceProblem, C, e, z)
     s = 0.0
     @inbounds for r in p.rptr[e]:(p.rptr[e + 1] - 1)
         b = p.blocks[p.rblock[r]]
-        l = p.rlevel[r]
-        Mr = M[p.rblock[r]]
-        for a in 1:b.K, c in 1:b.K
-            s += p.zval[p.zoff[r] + a] * Mr[a, c, l] * z[b.z[l, c]]
+        for k in 1:b.K
+            s += C[p.coff[r] + k] * z[b.z[p.rlevel[r], k]]
         end
     end
     s
@@ -428,18 +454,16 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
 end
 
 # One term's C rows on its local effects (c1 for its first parameter, c2 for
-# its second), at the levels' draws maps M.
-function _brm_spl_crows!(c1, c2, p::BRMSparseLaplaceProblem, M, t)
+# its second).
+function _brm_spl_crows!(c1, c2, p::BRMSparseLaplaceProblem, C, t)
     fill!(c1, 0.0); fill!(c2, 0.0)
     e = p.entry[t]
     for (e2, c) in ((e, c1), (e + 1, c2))
         e2 == e || _brm_lap_width(p.family[t]) == 2 || break
         @inbounds for r in p.rptr[e2]:(p.rptr[e2 + 1] - 1)
             b = p.blocks[p.rblock[r]]
-            l = p.rlevel[r]
-            Mr = M[p.rblock[r]]
-            for col in 1:b.K, a in 1:b.K
-                c[p.rloc[r] + col - 1] += p.zval[p.zoff[r] + a] * Mr[a, col, l]
+            for k in 1:b.K
+                c[p.rloc[r] + k - 1] += C[p.coff[r] + k]
             end
         end
     end
@@ -452,7 +476,7 @@ end
 # z-gradient `g` and h's nonzeros `hnz`. `third` selects the gradient's rows
 # (full values and third derivatives, see `_brm_lap_row`); `rows` and `crows`,
 # when given, keep each term's row and C rows.
-function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, M, z;
+function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
         derivatives::Bool, third::Bool=false, rows=nothing, crows=nothing)
     for (c, members) in enumerate(p.components)
         fc[c] = -sum(i -> z[i]^2, members) / 2
@@ -475,7 +499,7 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, M, z;
         zs = view(p.tz, p.tptr[t]:(p.tptr[t + 1] - 1))
         two = _brm_lap_width(p.family[t]) == 2
         moving = p.moving[t]
-        _brm_spl_crows!(c1, c2, p, M, t)
+        _brm_spl_crows!(c1, c2, p, C, t)
         a = A[e]; bb = two ? A[e + 1] : 0.0
         for i in 1:m
             a += c1[i] * z[zs[i]]
@@ -528,8 +552,8 @@ function _brm_spl_direction(p::BRMSparseLaplaceProblem, h, g)
     nothing
 end
 
-# The population point's A (link-scale parameters at z = 0), draws maps and,
-# when A is not affine, the RK values behind it.
+# The population point's A (link-scale parameters at z = 0), the parameter
+# values behind it, and every read's C with its derivatives.
 function _brm_spl_population(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     length(φ) == length(p.population) || throw(DimensionMismatch(
         "the population point has length $(length(φ)), the problem has " *
@@ -537,10 +561,8 @@ function _brm_spl_population(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     uA = copy(p.u)
     uA[p.population] .= φ
     _brm_slap_zero_integrated!(uA, p)
-    values = p.affine ? nothing : _rk_slap_values(p.kernels, uA)
-    A = p.affine ? _brm_slap_affine_A(p, φ) : _brm_slap_psi!(zeros(length(p.port)), p, values)
-    M, dM = _brm_spl_effect_maps(p, uA)
-    (; uA, values, A, M, dM)
+    C, dC, A, values = _brm_spl_cmaps(p, uA)
+    (; uA, values, A, C, dC)
 end
 
 # Every component's mode at population point φ, from the previous modes: one
@@ -549,7 +571,7 @@ end
 # floor) and failure. Then h at the modes and its factor.
 function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     pop = _brm_spl_population(p, φ)
-    if !(all(isfinite, pop.A) && all(m -> all(isfinite, m), pop.M))
+    if !(all(isfinite, pop.A) && all(isfinite, pop.C))
         p.nonfinite += 1
         return (; finite=false, value=-Inf, iterations=0)
     end
@@ -557,10 +579,10 @@ function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     nc = length(p.components)
     z = p.u[p.integrated]
     fc = zeros(nc); g = zeros(n); h = copy(p.pattern)
-    _brm_spl_assemble!(fc, g, h, p, pop.A, pop.M, z; derivatives=true)
+    _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true)
     if !(all(isfinite, fc) && all(isfinite, g))
         z .= 0.0
-        _brm_spl_assemble!(fc, g, h, p, pop.A, pop.M, z; derivatives=true)
+        _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true)
         all(isfinite, fc) && all(isfinite, g) || (p.nonfinite += 1;
             return (; finite=false, value=-Inf, iterations=0))
     end
@@ -605,7 +627,7 @@ function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
                 accepted[c] && continue
                 trial[i] = z[i] + t[c] * δ[i]
             end
-            _brm_spl_assemble!(ft, g, h, p, pop.A, pop.M, trial; derivatives=false)
+            _brm_spl_assemble!(ft, g, h, p, pop.A, pop.C, trial; derivatives=false)
             for c in 1:nc
                 accepted[c] && continue
                 if isfinite(ft[c]) && (λ[c] <= 1e-8 || ft[c] >= fc[c] + 1e-4 * t[c] * λ[c])
@@ -620,7 +642,7 @@ function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
             all(accepted) && break
         end
         all(accepted) || (p.nonfinite += 1; return (; finite=false, value=-Inf, iterations))
-        _brm_spl_assemble!(fc, g, h, p, pop.A, pop.M, z; derivatives=true)
+        _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true)
     end
     F = _brm_spl_factor!(p, h)
     issuccess(F) || _brm_nlme_error("brm_laplace_problem: the integrated effects' " *
@@ -634,7 +656,7 @@ end
 function _brm_spl_value(p::BRMSparseLaplaceProblem, state)
     state.finite || return -Inf
     fc = zeros(length(p.components))
-    rest = _brm_spl_assemble!(fc, nothing, nothing, p, state.A, state.M, state.z;
+    rest = _brm_spl_assemble!(fc, nothing, nothing, p, state.A, state.C, state.z;
         derivatives=false, third=true)
     sum(p.constant) + sum(fc) + rest + length(p.integrated) / 2 * log(2π) -
         logdet(state.F) / 2 + _rk_slap_prior(p.kernels, state.uA)
@@ -643,15 +665,15 @@ end
 # Value and gradient over the population coordinates: the structured path's
 # (its header) with S = h⁻¹ on h's pattern for each unit's h_i⁻¹. Per term,
 # with local C rows c1, c2: m = cᵀ S c, τ from m and ℓ‴, s = ½ Σ Cᵀ τ, v =
-# h⁻¹ s, w = ℓ′ + ½ τ + ℓ″ C v; per integrated level, Γ = Σ Z (w ẑᵀ + ℓ′ vᵀ +
-# (ℓ″ C S)ᵀ) on its draws, contracted with ∂M.
+# h⁻¹ s, w = ℓ′ + ½ τ + ℓ″ C v; and per read and draw, (w ẑ + ℓ′ v + ℓ″ C S)
+# times C's derivative along each scale or correlation coordinate of the block.
 function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state)
     n = length(p.integrated)
     nterms = length(p.family)
     fc = zeros(length(p.components))
     rows = Vector{_BRMLapRow}(undef, nterms)
     crows = Vector{Tuple{Vector{Float64},Vector{Float64}}}(undef, nterms)
-    rest = _brm_spl_assemble!(fc, nothing, nothing, p, state.A, state.M, state.z;
+    rest = _brm_spl_assemble!(fc, nothing, nothing, p, state.A, state.C, state.z;
         derivatives=false, third=true, rows, crows)
     value = sum(p.constant) + sum(fc) + rest + n / 2 * log(2π) - logdet(state.F) / 2
     Z = selinv(state.F; depermute=true).Z
@@ -682,7 +704,7 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state)
     end
     v = state.F \ s
     w = zeros(length(p.port))
-    Γ = [zeros(b.K, b.K, size(b.z, 1)) for b in p.blocks]
+    gω = zeros(length(p.omega))
     LCS = Float64[]
     @inbounds for t in 1:nterms
         r = rows[t]
@@ -721,14 +743,12 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state)
             k == 2 && !moving && break
             for rr in p.rptr[e2]:(p.rptr[e2 + 1] - 1)
                 b = p.blocks[p.rblock[rr]]
-                l = p.rlevel[rr]
-                G = Γ[p.rblock[rr]]
                 loc = p.rloc[rr]
                 for c in 1:b.K
                     zc = zs[loc + c - 1]
                     rhs = wk * state.z[zc] + gk * v[zc] + LCS[(k - 1) * m + loc + c - 1]
-                    for a in 1:b.K
-                        G[a, c, l] += p.zval[p.zoff[rr] + a] * rhs
+                    for o in b.omega
+                        gω[o] += rhs * state.dC[o][p.coff[rr] + c]
                     end
                 end
             end
@@ -738,11 +758,7 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state)
         _rk_slap_pullback(p.kernels, state.uA,
             _brm_slap_cotangents(p, state.values, w))[p.population]
     for (j, o) in enumerate(p.omega)
-        k = findfirst(==(o), p.population)
-        for (bj, b) in enumerate(p.blocks)
-            j in b.omega || continue
-            gradient[k] += dot(Γ[bj], state.dM[j][bj])
-        end
+        gradient[findfirst(==(o), p.population)] += gω[j]
     end
     prior, prior_gradient = _rk_slap_prior_gradient(p.kernels, state.uA)
     value + prior, gradient .+ prior_gradient[p.population]
@@ -795,7 +811,7 @@ function brm_laplace_draws(p::BRMSparseLaplaceProblem, P::AbstractMatrix;
         for j in 1:conditional
             ε = randn(rng, n)
             proposals[:, j] .= state.z .+ UP \ ε
-            _brm_spl_assemble!(fc, nothing, nothing, p, state.A, state.M,
+            _brm_spl_assemble!(fc, nothing, nothing, p, state.A, state.C,
                 view(proposals, :, j); derivatives=false)
             logw[:, j] .= fc
             for q in 1:n
