@@ -189,4 +189,7 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 3deb61ae0 (ReactiveKernels 0.1.12, ReactiveKernelsPPL 0.1.14) contains
 # 06f92402a: a compact cell reads its selected coordinates in constant time
 # (snag compact-cell-cal-58569833).
-rev = "3deb61ae04c1cefe36cde2b82c31d342936266be"
+# 4f7ef46a4 (ReactiveKernels 0.1.13, ReactiveKernelsPPL 0.1.15) contains
+# 3deb61ae0: an array plate cell looks a label up on a `levels(g)` axis when
+# `g` is a data-only definition (snag rkppl-submodel-l-00ff0f27).
+rev = "4f7ef46a4b2aa62f05590a8a5d13ba4e0ca8da71"

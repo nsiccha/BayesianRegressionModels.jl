@@ -1650,13 +1650,30 @@ _brm_group_id(value) = error(
 _brm_is_grouping_column(x) = x isa NamedColumn &&
     (parent(x) isa DataColumn || parent(x) isa ExprColumn{typeof(assign)})
 
+# Labels read through positions (`kreis[gem_b]`, a level table's labels at a
+# part's rows) are a gather, which a grouping or term reads once it is named: a
+# data-only assignment `kreis_gem_b = kreis[gem_b]` is a data column at every
+# such site. Written inline it would have no name for a prior, an NLME keyword
+# or the descriptor to address (principle `1mwjios`), so the refusal names the
+# assignment to write (design decision `0mtr2eb`, snag
+# `groupings-over-a-cb504b6a`).
+_brm_inline_gather_hint(_x) = ""
+function _brm_inline_gather_hint(x::ExprColumn{typeof(getindex)})
+    args = getargs(x)
+    length(args) == 2 || return ""
+    gathered = Symbol(_brm_indexed_name(args[1]), :_, _brm_indexed_name(args[2]))
+    ". A gather is read once it has a name: write `$gathered = $(repr(x))` as " *
+        "its own statement and use `$gathered` here"
+end
+
 function _brm_random_effect_group(raw)
     if _brm_is_grouping_column(raw)
         return (; group=raw, by=nothing, id=nothing)
     end
     raw isa ExprColumn && getf(raw) === gr || error(
         "BRM backend lowering: random-effect group must be one raw data " *
-        "column or `gr(group; by=..., id=...)`; got `$(repr(raw))`")
+        "column or `gr(group; by=..., id=...)`; got `$(repr(raw))`",
+        _brm_inline_gather_hint(raw))
     args = getargs(raw)
     length(args) == 1 || error(
         "BRM backend lowering: `gr(...)` expects exactly one positional " *
@@ -1664,7 +1681,7 @@ function _brm_random_effect_group(raw)
     group = only(args)
     _brm_is_grouping_column(group) || error(
         "BRM backend lowering: `gr(...)` group must be one raw data column; " *
-        "got `$(repr(group))`")
+        "got `$(repr(group))`", _brm_inline_gather_hint(group))
     kwargs = getkwargs(raw)
     unknown = setdiff(Set(keys(kwargs)), Set((:by, :id, :cor)))
     isempty(unknown) || error(
@@ -1674,7 +1691,7 @@ function _brm_random_effect_group(raw)
     if !isnothing(by)
         _brm_is_grouping_column(by) || error(
             "BRM backend lowering: `gr(...; by=...)` must name one raw data " *
-            "column; got `$(repr(by))`")
+            "column; got `$(repr(by))`", _brm_inline_gather_hint(by))
     end
     # `cor=` correlates the levels of `group` (src/level_correlation.jl).
     cor = get(kwargs, :cor, nothing)

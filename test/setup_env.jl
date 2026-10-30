@@ -179,8 +179,13 @@ const PINS = [
     # compact cell reads its selected coordinates in constant time (c384a3f3e,
     # snag compact-cell-cal-58569833), and the compact cell gradient of a
     # three-margin `(1 | pk | subject)` block no longer raises Enzyme's
-    # EnzymeRuntimeException there.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "3deb61ae04c1cefe36cde2b82c31d342936266be"),  # main
+    # EnzymeRuntimeException there. 4f7ef46a4 contains 3deb61ae0 and is
+    # ReactiveKernels 0.1.13 / ReactiveKernelsPPL 0.1.15: an array `@plate`
+    # cell looks a label up on a `levels(g)` axis when `g` is a data-only
+    # definition (06679067f, snag rkppl-submodel-l-00ff0f27), so RKBRMI's
+    # stratified `gr(g, by = b)` block reads a grouping gathered from a level
+    # table (`test/level_table_groupings.jl`).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "4f7ef46a4b2aa62f05590a8a5d13ba4e0ca8da71"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
