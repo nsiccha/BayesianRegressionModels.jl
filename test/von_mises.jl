@@ -157,9 +157,11 @@ end
     @test_throws ErrorException SBBRMI(
         bad_arity_keyword((; y=[0.5])); mod=@__MODULE__)
 
+    # Every `@brm` needs an observation statement (refused since 413d201).
     prior = @brm begin
         theta ~ VonMises(0.0, 1.0)
+        y ~ Normal(theta, 1.0)
     end
-    prior_model = SBBRMI(prior((; dummy=[1.0])); mod=@__MODULE__)
+    prior_model = SBBRMI(prior((; y=[0.5])); mod=@__MODULE__)
     @test StanBlocks.stanc_check(BRM.stan_code(prior_model)).ok
 end
