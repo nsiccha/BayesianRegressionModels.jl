@@ -165,10 +165,12 @@ end
     end
     @test only(o.kind for o in replay_outputs if o.logical === :pred_location) ===
           :generated_quantity
-    for name in (:sigma_pk, :sigma_qt, :b_p_subject_L, :b_p_subject_tau,
-                 :pop_log_scale_beta_pop)
+    # The `|p|` block has one margin, so it declares no correlation factor
+    # (c98c058b): only its scale stays a sampled parameter.
+    for name in (:sigma_pk, :sigma_qt, :b_p_subject_tau, :pop_log_scale_beta_pop)
         @test replay_kinds[name] === :parameter
     end
+    @test !haskey(replay_kinds, :b_p_subject_L)
 end
 
 @testset "resampled plain block stays introspectable" begin

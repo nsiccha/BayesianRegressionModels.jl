@@ -188,8 +188,10 @@ end
     declaration = only(d for d in plan.declarations if d.target === :y)
     @test declaration.role === :observation
     @test declaration.draw === :y_gen
-    @test declaration.family isa Function
-    @test startswith(string(nameof(declaration.family)), "brm_mixture_")
+    # A generated family is a value since d10effe8 (concurrent model
+    # generation), not a module function.
+    @test declaration.family isa StanBlocks.ValueFamily
+    @test occursin("brm_mixture_", string(declaration.family))
 
     sb = SBBRMI(builder(data); mod=@__MODULE__)
     replayed = reprocess(sb, (; y=[0.1, 0.2]))
