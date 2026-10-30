@@ -57,7 +57,11 @@ natural_df = (;
     @test occursin("b_p_g_tau[1] ~ exponential(0.5);", heterogeneous_code)
     @test occursin("b_p_g_tau[2] ~ normal(0.0, 0.5);", heterogeneous_code)
     @test !occursin(r"brm_vector_prior_[0-9a-f]+", heterogeneous_code)
-    @test !occursin("negative_infinity()", heterogeneous_code)
+    # No density guard for a bound the declaration enforces. StanBlocks'
+    # truncated re-draw helper (functions block, since StanBlocks 9a4fb3a6)
+    # names `negative_infinity()` in its own floating-point guard.
+    model_block = heterogeneous_code[first(findfirst(r"\nmodel \{", heterogeneous_code)):end]
+    @test !occursin("negative_infinity()", model_block)
 
     # One family with margin-specific hyperparameters stays one native
     # vectorised statement: differing hyperparameters become a vector literal.

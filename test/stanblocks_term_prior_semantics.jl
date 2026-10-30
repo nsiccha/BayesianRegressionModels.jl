@@ -101,7 +101,10 @@ end
     @test BS.log_density(fitted_problem.model, raw;
         propto=false, jacobian=false) ≈ expected atol=1e-10
 
+    # A prior program keeps its observation statement with the response
+    # omitted from the data (a statement-free `@brm` is refused since 413d201).
     prior = @brm (; c=term_semantics_df.c) begin
+        y ~ Normal(mu, 1)
         mu ~ 0 + mo1(c)
         simplex(mu, mo1(c)) ~ asymmetric_simplex_prior(1, 2, 4)
     end

@@ -140,27 +140,32 @@ end
     @test_throws ErrorException SBBRMI(
         no_args((; y=[1.2, 0.8, 1.1])); mod=@__MODULE__)
 
+    # Every `@brm` needs an observation statement (refused since 413d201).
     prior = @brm begin
         sigma ~ InverseGaussian(1.0, 2.0)
+        y ~ Normal(0.0, sigma)
     end
-    prior_model = SBBRMI(prior((; dummy=[1.0])); mod=@__MODULE__)
+    prior_model = SBBRMI(prior((; y=[1.0])); mod=@__MODULE__)
     @test StanBlocks.stanc_check(BRM.stan_code(prior_model)).ok
 
     prior_short = @brm begin
         sigma ~ InverseGaussian(1.5)
+        y ~ Normal(0.0, sigma)
     end
     @test StanBlocks.stanc_check(
-        BRM.stan_code(SBBRMI(prior_short((; dummy=[1.0])); mod=@__MODULE__))).ok
+        BRM.stan_code(SBBRMI(prior_short((; y=[1.0])); mod=@__MODULE__))).ok
 
     prior_unit = @brm begin
         sigma ~ InverseGaussian()
+        y ~ Normal(0.0, sigma)
     end
     @test StanBlocks.stanc_check(
-        BRM.stan_code(SBBRMI(prior_unit((; dummy=[1.0])); mod=@__MODULE__))).ok
+        BRM.stan_code(SBBRMI(prior_unit((; y=[1.0])); mod=@__MODULE__))).ok
 
     prior_bad_arity = @brm begin
         sigma ~ InverseGaussian(1.0, 2.0, 3.0)
+        y ~ Normal(0.0, sigma)
     end
     @test_throws ErrorException SBBRMI(
-        prior_bad_arity((; dummy=[1.0])); mod=@__MODULE__)
+        prior_bad_arity((; y=[1.0])); mod=@__MODULE__)
 end

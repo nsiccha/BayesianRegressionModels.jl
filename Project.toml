@@ -1,7 +1,7 @@
 name = "BayesianRegressionModels"
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.2.72"
+version = "0.2.73"
 
 [deps]
 BridgeStan = "c88b6f0a-829e-4b0b-94b7-f06ab5908f5a"
@@ -64,6 +64,7 @@ ReactiveKernels = "0.1.12"
 ReactiveKernelsPPL = "0.1.16"
 RuntimeGeneratedFunctions = "0.5"
 SelectedInversion = "0.2"
+StanBlocks = "0.2.7"
 StaticArrays = "1"
 Treebars = "0.1"
 Turing = "0.46"

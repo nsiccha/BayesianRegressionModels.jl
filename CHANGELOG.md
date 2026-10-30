@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.72
+## 0.2.73
 
 - Fixed: `deepcopy` of an `RKBRMI`, a `BRMNLMEModel`, a `BRMLaplaceProblem`
   and a `BRMStructuredLaplaceProblem` works again (it raised `deepcopy of
@@ -21,6 +21,25 @@ instead of failing at run time.
   so WarmupHMC's samplers that copy their density per chain
   (`adaptive_warmup_mcmc(rngs, target)`, `completion_warmup_mcmc`) run on these
   targets.
+
+## 0.2.72
+
+- SBBRMI gives `restricted(D, lower, upper)`, and the deprecated keyword
+  bounds that mean it, `D`'s plain kernel, also where a bound or argument is
+  sampled. It emits StanBlocks 0.2.7's `restricted(family, args...; lower,
+  upper)`: the bounds go on the parameter declaration and the model block keeps
+  the family statement, `real<lower=location> x; x ~ normal(0.2, 0.7);`, as
+  TuringBRMI already did; RKBRMI still refuses a sampled bound (decision
+  `0q18o98`). Before, SBBRMI
+  normalized such a prior (the `truncated` law). This covers every prior site:
+  scalar, `.~` and vector priors (each margin of a several-family vector prior
+  too), `sd(...)`, `effect(...)`, `me()`'s latent, GP term and R2 priors. With
+  constant bounds and arguments the emitted Stan is unchanged. `truncated(...)`
+  keeps the normalized law.
+  - A prior-only program draws a restricted prior in generated quantities only
+    when its mass inside the bounds is constant; otherwise the prior stays a
+    sampled parameter (StanBlocks' rule).
+  - `[compat] StanBlocks = "0.2.7"`.
 
 ## 0.2.71
 
