@@ -204,8 +204,12 @@ const PINS = [
     # computes `view(A, :, k)`, RKPPL's lowering of a column read `A[:, k]`, at
     # its rows, so the columns of a joint population effect (`pop[:, j]`) and
     # their design are computed at the rows a cell reads (RK snag
-    # column-read-lowe-24508269).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "51c8a1c4a93fa0066025f749a536b2e0a75b8cec"),  # main
+    # column-read-lowe-24508269). 0d3f92345 contains 51c8a1c4a and is
+    # ReactiveKernels 0.1.22: a cell computes a value two statements of one
+    # `@plate for` read (each a plate of its own), and a dotted value reading an
+    # untyped numeric array at literal positions, at its rows (RK snag
+    # form-value-compu-c1e0965c).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "0d3f92345bb719a81f00471aeb240ec897d9fa39"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

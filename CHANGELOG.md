@@ -30,13 +30,16 @@ instead of failing at run time.
   dotted term. Values are unchanged. A cell still reads every group's
   innovations: it reads the walk by linear index, which ReactiveKernels does
   not map to the product's rows (RK todo `052ench`).
-- BRM's compat floor is ReactiveKernels 0.1.21, which computes `view(A, :, k)`
-  (RKPPL's lowering of a column read) at a cell's rows: the columns of a joint
-  population effect (`pop[:, j]`, several responses sharing one design) and
-  their design are then computed at the rows a cell reads (before, on
-  ArbeitsplatzAtlas, a `selb_obs` cell read 148,963 coordinates, the whole
-  design and everything upstream of it). The test environment pins
-  ReactiveKernels `51c8a1c4a`.
+- BRM's compat floor is ReactiveKernels 0.1.22. Its 0.1.21 computes
+  `view(A, :, k)` (RKPPL's lowering of a column read) at a cell's rows: the
+  columns of a joint population effect (`pop[:, j]`, several responses sharing
+  one design) and their design are then computed at the rows a cell reads
+  (before, on ArbeitsplatzAtlas, a `selb_obs` cell read 148,963 coordinates,
+  the whole design and everything upstream of it). Its 0.1.22 does the same
+  for a value two statements of one `@plate for` read, and for a dotted value
+  reading an untyped numeric array at literal positions (an `amtlich_pub` cell
+  read the whole `b_k_gem_kreis`, 7,200 coordinates). The test environment
+  pins ReactiveKernels `0d3f92345`.
 
 ## 0.2.74
 
