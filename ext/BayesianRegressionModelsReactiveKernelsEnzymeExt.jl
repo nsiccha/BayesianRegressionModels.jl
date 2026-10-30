@@ -191,6 +191,8 @@ function _rk_reads_point(backend::BRM.RKBRMI, bound, name::Symbol)
 end
 
 function BRM._rk_slap_pullback(k, u::Vector{Float64}, cotangents)
+    # no row parameters (every observation an `@plate` cell): nothing to pull back
+    k.values === nothing && return zeros(length(u))
     k.pullback[] === nothing && (k.pullback[] = k.prepare_pullback())
     Base.invokelatest(ad_pullback, k.pullback[], _rk_slap_seed(cotangents), u)
 end
