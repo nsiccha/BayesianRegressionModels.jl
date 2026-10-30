@@ -260,14 +260,15 @@ part's entries.
 `fields` lists each `car(...)` field lowered by its unit border separator
 (`RKBRMI(brmi; car_units)`): its `address`, area column `area`, RK
 declaration `rk_declaration` and field value `value`, its separation, and
-the RK draws `rk` (the shared draws, then each unit's) and Stan field
-entries `stan` (graph order) with their positions. Points move through the
-separation's linear map and its inverse, gradients through its transpose; the
-map's log-Jacobian is constant and in `logdensity_offset`, which adds, per
-field, `-(n/2) log(2π) + Σ_c (log(0.001 n_c) + log(2π)/2)` over its `n`
-areas in components of `n_c` (RK's draws are standard normals, Stan's field
-the unnormalized ICAR with a normalized `Normal(0, 0.001 n_c)` per
-component sum).
+the RK coordinates `rk` (the shared coordinates, then each unit's draws) and
+Stan field entries `stan` (graph order) with their positions. Points move
+through the separation's linear map and its inverse, gradients through its
+transpose; the map's log-Jacobian is constant and in `logdensity_offset`,
+which adds, per field, `-(n/2) log(2π) + Σ_c (log(0.001 n_c) + log(2π)/2)`
+over its components of `n_c` areas, `n` its unit draws and components with a
+separator (RK's draws and component totals are standard normals whose unit
+terms cancel the differences' densities, Stan's field the unnormalized ICAR
+with a normalized `Normal(0, 0.001 n_c)` per component sum).
 
 With no simplex, centered block, standardized completion or separated field,
 `stan_u == rk_u[permutation]` for points and gradients alike
@@ -1103,13 +1104,16 @@ function _brm_transport_car_fields(records, pairs)
             startswith(String(pair.rk), string(record.declaration, "."))]
         sort!(paired; by=pair -> pair.address.index)
         sep = record.separation.fit.separation
-        n = length(sep.order)
+        # RK's standard normals (each unit draw, each component's total) against
+        # Stan's unnormalized ICAR plus a normalized per-component sum.
+        n = sep.ndraws + length(sep.blocks)
         offset = -n / 2 * log(2pi) +
             sum((log(0.001 * size) + log(2pi) / 2 for size in sep.comp_size); init=0.0)
         push!(fields, (; address=first(paired).address[(:kind, :predictor, :term)],
             area=record.area, rk_declaration=record.declaration,
             value=Symbol(record.declaration, ".", record.locals.phi),
-            separation=sep, m=record.separation.m,
+            separation=sep, shared=_brm_car_shared_data(sep.blocks, sep.m),
+            m=record.separation.m,
             units=[(; unit=b.unit, draw_range=b.draw_range) for b in record.separation.blocks],
             rk=[pair.rk for pair in paired], stan=[pair.stan for pair in paired],
             logdensity_offset=offset))
@@ -1117,59 +1121,26 @@ function _brm_transport_car_fields(records, pairs)
     fields
 end
 
-# A separated field in graph order from its shared draws `w` and unit draws `z`.
+# A separated field in graph order from its shared coordinates `w` and unit
+# draws `z` (`_brm_car_field`).
 function _brm_car_field_values(block, w::AbstractVector, z::AbstractVector)
-    sep = block.separation
-    x = _brm_car_shared_values(w, sep.F)
-    phi = Vector{eltype(x)}(undef, length(sep.order))
-    for (k, area) in enumerate(sep.x_areas)
-        area > 0 && (phi[area] = x[k])
-    end
-    for b in block.units
-        u = sep.units[b.unit]
-        phi[u.areas] = _brm_car_unit_field(z[b.draw_range], x[u.cols], u.factor)
-    end
-    phi
+    d = block.shared
+    _brm_car_field(_brm_car_shared_values(w, d.last, d.scale, d.weight), z,
+        block.separation)
 end
 
-# Its inverse: the draws `(w, z)` of a field `phi` (graph order).
+# Its inverse: the coordinates `(w, z)` of a field `phi` (graph order).
 function _brm_car_field_draws(block, phi::AbstractVector)
-    sep = block.separation
-    x = zeros(eltype(phi), block.m)
-    for (k, area) in enumerate(sep.x_areas)
-        area > 0 && (x[k] = phi[area])
-    end
-    # Each interior piece's sum is its `x` entry.
-    for b in block.units
-        u = sep.units[b.unit]
-        for piece in u.factor.pieces
-            piece.kind === :interior || continue
-            x[u.cols[piece.sum_col]] = sum(phi[u.areas[piece.first_area .+ (1:piece.n)]])
-        end
-    end
-    z = zeros(eltype(phi), length(block.rk) - block.m)
-    for b in block.units
-        u = sep.units[b.unit]
-        z[b.draw_range] = _brm_car_unit_draws(phi[u.areas], x[u.cols], u.factor)
-    end
-    _brm_car_shared_draws(x, sep.F), z
+    d = block.shared
+    x, z = _brm_car_field_coordinates(phi, block.separation)
+    _brm_car_shared_draws(x, d.last, d.scale, d.weight), z
 end
 
 # Its transpose: the cotangents of `(w, z)` from those of `phi`.
 function _brm_car_field_pullback(block, g::AbstractVector)
-    sep = block.separation
-    gx = zeros(eltype(g), block.m)
-    for (k, area) in enumerate(sep.x_areas)
-        area > 0 && (gx[k] += g[area])
-    end
-    gz = zeros(eltype(g), length(block.rk) - block.m)
-    for b in block.units
-        u = sep.units[b.unit]
-        dz, dxs = _brm_car_unit_pullback(g[u.areas], u.factor)
-        gz[b.draw_range] = dz
-        gx[u.cols] .+= dxs
-    end
-    vcat(_brm_car_shared_pullback(gx, sep.F), gz)
+    d = block.shared
+    gx, gz = _brm_car_field_transpose(g, block.separation)
+    vcat(_brm_car_shared_pullback(gx, d.last, d.scale, d.weight), gz)
 end
 
 _brm_car_field_split(block, u) =

@@ -189,8 +189,19 @@ const PINS = [
     # against a build once and a cell query reads its plate from the build
     # (1672820fb, RK snag brm-s-nlme-cell-d70abd20), so BRM's cell queries and
     # compact cell samplers no longer regenerate the whole program each (about
-    # 45 s apiece on ArbeitsplatzAtlas's model).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "452071f1b1d7a2f3ab23550419b2d41c533a7767"),  # main
+    # 45 s apiece on ArbeitsplatzAtlas's model). 8009f3a95 contains 452071f1b
+    # and is ReactiveKernels 0.1.16 / ReactiveKernelsPPL 0.1.18: a cell query
+    # computes `vcat` operands, typed response-location aliases, a source
+    # gathered by several index vectors and group totals through an index
+    # array at the cell's rows, each value once (RK snag
+    # on-arbeitsplatza-6065a1ef), which the local `car_units` fields, grouped
+    # shares and completions RKBRMI emits from 0.2.74 rely on for cells that
+    # cost their own rows. 5e288b439 contains 8009f3a95 and is ReactiveKernels
+    # 0.1.18: a number a cell computes that two of its values read at rows
+    # evaluates instead of raising `MethodError` in `_cell_take_rows` (RK snag
+    # cell-take-rows-s-e48675d0; ArbeitsplatzAtlas's `beschaeftigte_eg_kg`
+    # cells).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "5e288b439f2c8e3bb6e267263cf4686a8ab699d3"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

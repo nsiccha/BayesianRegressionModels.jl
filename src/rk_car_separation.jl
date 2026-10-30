@@ -1,8 +1,8 @@
 # `RKBRMI(brmi; car_units)`: every `car(...)` field sampled by its unit border
 # separator (`_brm_car_separation`), so that each unit's interior areas are
-# that unit's standard-normal draws and only the separator values and the
-# units' interior sums are shared. The field, its density (up to a constant
-# Jacobian) and its graph are those of the default lowering.
+# read from that unit's standard-normal draws, `⌈log₂ n⌉` per area of a piece
+# of `n`, and only the separator values and the units' interior means are shared. The field, its
+# density (up to a constant) and its graph are those of the default lowering.
 #
 # The units are labels row-aligned with a field's rows: the name of a column
 # the model reads, or the labels themselves, for every field; or one such entry
@@ -151,35 +151,46 @@ function _rk_car_separated_options(options, fit, columns, taken)
         columns[name] = value
         name
     end
+    optional(field, value) = isempty(value) ? nothing : column(field, value)
     blocks = NamedTuple[]
     first_draw = 1
     for (k, u) in enumerate(sep.units)
         isempty(u.areas) && continue
-        draws = u.factor.ndraws
-        # The unit's sparse interior map, read whole by its in-graph call.
-        push!(blocks, (; unit=k, label=levels[k], areas=length(u.areas),
-            ncols=length(u.cols), ndraws=draws,
-            cols=isempty(u.cols) ? nothing : column(Symbol(:cols_, k), u.cols),
-            factor=column(Symbol(:U_, k), [u.factor]),
-            draw_range=first_draw:(first_draw + draws - 1)))
-        first_draw += draws
+        push!(blocks, (; unit=k, label=levels[k], areas=length(u.areas), ndraws=u.ndraws,
+            draw_range=first_draw:(first_draw + u.ndraws - 1)))
+        first_draw += u.ndraws
     end
-    x_phi = findall(>(0), sep.x_areas)
-    separation = (; fit, levels, m=sep.m, ndraws=first_draw - 1,
-        F=sep.m == 0 ? nothing : column(:F, [sep.F]),
-        x_phi=isempty(x_phi) ? nothing : column(:x_phi, x_phi),
-        # `phi` in graph order is `vcat(x[x_phi], phi_I_1, …)[restore]`
-        restore=column(:restore, invperm(sep.order)), blocks=Tuple(blocks),
-        x_areas=sep.x_areas, x_sums=sep.x_sums,
-        # the unit label of each draw, and of each area's BYM2 iid part
+    shared = sep.m == 0 ? (; last=nothing, scale=nothing, weight=nothing,
+            shared_first=nothing, shared_second=nothing) : begin
+        data = _brm_car_shared_data(sep.blocks, sep.m)
+        (; last=column(:last, data.last), scale=column(:scale, data.scale),
+           weight=column(:weight, data.weight),
+           shared_first=column(:shared_first, sep.shared_edges[1]),
+           shared_second=column(:shared_second, sep.shared_edges[2]))
+    end
+    edge_first, edge_second, edge_units = sep.unit_edges
+    nterms = length(edge_first) + length(sep.cancel)
+    separation = (; fit, levels, m=sep.m, ndraws=sep.ndraws, shared...,
+        msrc=column(:msrc, sep.msrc),
+        reads=Tuple(column(Symbol(:read_, l), r) for (l, r) in enumerate(sep.reads)),
+        left=sep.ndraws == 0 ? nothing : column(:left, sep.left),
+        right=sep.ndraws == 0 ? nothing : column(:right, sep.right),
+        edge_first=optional(:edge_first, edge_first),
+        edge_second=optional(:edge_second, edge_second),
+        cancel=optional(:cancel, sep.cancel),
+        # the units' terms observe one placeholder each
+        terms=nterms == 0 ? nothing : column(:terms, zeros(nterms)),
+        blocks=Tuple(blocks), x_areas=sep.x_areas, x_means=sep.x_means,
+        # the unit label of each draw, each unit term, and each area's BYM2 iid part
         draw_units=Any[levels[b.unit] for b in blocks for _ in b.draw_range],
+        term_units=Any[levels[u] for u in vcat(edge_units, sep.cancel_units)],
         node_units=Any[u == 0 ? nothing : levels[u] for u in fit.node_unit],
         shared=sep.shared)
-    generated = Symbol[name for name in (separation.F, separation.x_phi,
-        separation.restore) if name !== nothing]
-    for b in blocks, name in (b.cols, b.factor)
-        name === nothing || push!(generated, name)
-    end
+    generated = Symbol[name for name in (separation.last, separation.scale,
+        separation.weight, separation.shared_first, separation.shared_second,
+        separation.msrc, separation.reads..., separation.left, separation.right,
+        separation.edge_first, separation.edge_second, separation.cancel,
+        separation.terms) if name !== nothing]
     merge(options, (; separation, inputs=(options.inputs..., generated...)))
 end
 

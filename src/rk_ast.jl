@@ -1344,7 +1344,8 @@ end
 # factors a scalar definition, so each component's sum is its own scalar
 # `Normal(0, 0.001 n_c)` factor, unrolled from the fitted graph's components
 # (a replay keeps the graph). Islands read the zero padding slot of `phi`.
-function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing)
+function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing,
+        bindings=Pair{Symbol,Any}[])
     options = term.options
     bym2 = options.type === :bym2
     separation = get(options, :separation, nothing)
@@ -1389,8 +1390,8 @@ function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing
         end
         separated = (;)
     else
-        separated = _rk_ast_car_separated!(definitions, taken, block, separation,
-            arguments, phi)
+        separated = _rk_ast_car_separated!(definitions, taken, bindings, block,
+            separation, arguments, phi)
     end
     push!(block.statements,
         Expr(:(=), field, Expr(:ref, Expr(:call, :vcat, phi, 0.0), struct_pos)))
@@ -1407,81 +1408,136 @@ function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing
     call, locals
 end
 
-# A separated field's gathers (`x[x_phi]`, `x[cols]`, `vcat(…)[restore]`) read
-# model-level vectors, so their indices are positions a data-only call computes
-# (a gather by a data column would be an observation column). Returns each
-# index column's position name.
+# A separated field's gathers (`means[msrc]`, `scaled[read_1]`, `phi[first]`, …)
+# read model-level vectors, so their indices are positions a data-only call
+# computes (a gather by a data column would be an observation column), and its
+# coefficients are numbers one computes (a broadcast against a data column would
+# be one too). Returns each column's computed name.
 function _rk_ast_car_separation_indices!(statements, definitions, taken, term)
     separation = get(term.options, :separation, nothing)
     separation === nothing && return nothing
     indices = Dict{Symbol,Symbol}()
-    function index!(column)
-        column === nothing && return
-        name = _rk_ast_fresh_name(string(column, "_positions"), taken)
-        push!(statements, Expr(:(=), name, _rk_ast_statistical_call!(definitions, taken,
-            :brm_positions, column; kernel=true)))
-        indices[column] = name
+    function computed!(recipe, suffix, columns)
+        for column in columns
+            column === nothing && continue
+            name = _rk_ast_fresh_name(string(column, suffix), taken)
+            push!(statements, Expr(:(=), name, _rk_ast_statistical_call!(definitions,
+                taken, recipe, column; kernel=true)))
+            indices[column] = name
+        end
     end
-    index!(separation.x_phi)
-    index!(separation.restore)
-    foreach(b -> index!(b.cols), separation.blocks)
+    computed!(:brm_positions, "_positions", (separation.msrc, separation.reads...,
+        separation.edge_first, separation.edge_second, separation.cancel))
+    computed!(:brm_values, "_values", (separation.left, separation.right))
     indices
 end
 
 # The data of a separated field (`RKBRMI(brmi; car_units)`, `_brm_car_separation`):
-# the shared factor `F`, the separator areas' entries of `x`, the graph-order
-# permutation, and each unit's read entries and sparse interior map; the
-# gathers' indices are their computed positions (`indices`).
+# the shared coordinates' law and map, the field's map, and the units' terms;
+# the gathers' indices are their computed positions (`indices`).
 function _rk_ast_car_separation_arguments!(block, separation, indices)
     argument(base, value) = value === nothing ? nothing :
         _rk_block_argument!(block, base, get(indices, value, value))
-    F = argument(:F, separation.F)
-    x_phi = argument(:x_phi, separation.x_phi)
-    restore = argument(:restore, separation.restore)
-    units = map(separation.blocks) do b
-        (; cols=argument(Symbol(:cols_, b.unit), b.cols),
-           factor=argument(Symbol(:U_, b.unit), b.factor))
-    end
-    (; F, x_phi, restore, units)
+    (; last=argument(:last, separation.last), scale=argument(:scale, separation.scale),
+       weight=argument(:weight, separation.weight),
+       shared_first=argument(:shared_first, separation.shared_first),
+       shared_second=argument(:shared_second, separation.shared_second),
+       msrc=argument(:msrc, separation.msrc),
+       reads=Tuple(argument(Symbol(:read_, l), r) for (l, r) in enumerate(separation.reads)),
+       left=argument(:left, separation.left), right=argument(:right, separation.right),
+       edge_first=argument(:edge_first, separation.edge_first),
+       edge_second=argument(:edge_second, separation.edge_second),
+       cancel=argument(:cancel, separation.cancel),
+       terms=argument(:terms, separation.terms))
 end
 
-# The separated field in graph order, `phi = vcat(x[x_phi], phi_I_1, …)[restore]`,
-# from the shared `x = F w` and each unit's interior from its draws `z_u` and
-# `x[cols]`, both through sparse maps (`brm_car_shared_values`,
-# `brm_car_unit_field`), with `w` and each `z_u` standard normal (one declaration per unit: RKPPL reads a declared
-# array whole or at literal positions).
-function _rk_ast_car_separated!(definitions, taken, block, separation, arguments, phi)
+# The separated field in graph order (`_brm_car_field`): the shared values
+# `x` from the shared coordinates `w ~ _BRMCarShared(…)`, each unit's draws
+# `z_u` standard normal (one declaration per unit: RKPPL reads a declared array
+# whole or at literal positions), and
+#
+#     phi = vcat(x, 0.001 .* zext)[msrc] .+ scaled[read_1] .+ … .+ scaled[read_L],
+#
+# `zext = vcat(z_1, …, 0.0)`, `scaled = vcat(left .* zext, right .* zext)`, each
+# area from its mean and the Haar splits holding it, gathers ReactiveKernels
+# computes at the rows a cell reads. The units' terms (`_brm_car_unit_terms`: the
+# edges that read draws, and `+½ z²` for each plane draw) are observed as log
+# weights of their placeholders.
+function _rk_ast_car_separated!(definitions, taken, bindings, block, separation,
+        arguments, phi)
     m = separation.m
     w = m == 0 ? nothing : _rk_block_local!(block, :w)
     x = m == 0 ? nothing : _rk_block_local!(block, :x)
-    m == 0 || push!(block.statements,
-        Expr(:call, :.~, Expr(:ref, w, Expr(:call, :(:), 1, m)), _rk_ast_dotted(:Normal, 0, 1)),
-        Expr(:(=), x, _rk_ast_statistical_call!(definitions, taken, :brm_car_shared_values,
-            w, arguments.F)))
-    parts = Any[]
-    arguments.x_phi === nothing || push!(parts, Expr(:ref, x, arguments.x_phi))
-    z = map(zip(separation.blocks, arguments.units)) do (b, a)
-        interior = _rk_block_local!(block, Symbol(:phi_unit_, b.unit))
-        draws = b.ndraws == 0 ? nothing : _rk_block_local!(block, Symbol(:z_, b.unit))
-        draws === nothing || push!(block.statements, Expr(:call, :.~,
+    if m > 0
+        law = _rk_value_callee!(bindings, _BRMCarShared, taken)
+        push!(block.statements,
+            Expr(:call, :~, Expr(:ref, w, Expr(:call, :(:), 1, m)),
+                Expr(:call, law, arguments.last, arguments.scale, arguments.weight,
+                    arguments.shared_first, arguments.shared_second)),
+            Expr(:(=), x, _rk_ast_statistical_call!(definitions, taken,
+                :brm_car_shared_values, w, arguments.last, arguments.scale,
+                arguments.weight)))
+    end
+    z = map(separation.blocks) do b
+        b.ndraws == 0 && return nothing
+        draws = _rk_block_local!(block, Symbol(:z_, b.unit))
+        push!(block.statements, Expr(:call, :.~,
             Expr(:ref, draws, Expr(:call, :(:), 1, b.ndraws)), _rk_ast_dotted(:Normal, 0, 1)))
-        shared = a.cols === nothing ? nothing : Expr(:ref, x, a.cols)
-        call = if draws !== nothing && shared !== nothing
-            _rk_ast_statistical_call!(definitions, taken, :brm_car_unit_field,
-                draws, shared, a.factor)
-        elseif draws !== nothing
-            _rk_ast_statistical_call!(definitions, taken, :brm_car_unit_field_draws,
-                draws, a.factor)
-        else
-            _rk_ast_statistical_call!(definitions, taken, :brm_car_unit_field_shared,
-                shared, a.factor)
-        end
-        push!(block.statements, Expr(:(=), interior, call))
-        push!(parts, interior)
         draws
     end
-    push!(block.statements, Expr(:(=), phi,
-        Expr(:ref, Expr(:call, :vcat, parts...), arguments.restore)))
+    # Every `vcat` operand is a local of its own: ReactiveKernels computes a
+    # `vcat` of values at the rows a cell reads, but an inline call as an
+    # operand (`vcat(x, 0.001 .* zext)`) has no row form, and then the whole
+    # field, every draw, is computed in each cell.
+    zext = _rk_block_local!(block, :zext)
+    push!(block.statements, Expr(:(=), zext,
+        Expr(:call, :vcat, filter(!isnothing, collect(Any, z))..., 0.0)))
+    mean_draws = _rk_block_local!(block, m == 0 ? :means : :mean_draws)
+    push!(block.statements, Expr(:(=), mean_draws, Expr(:call, :.*, 0.001, zext)))
+    means = mean_draws
+    if m > 0
+        means = _rk_block_local!(block, :means)
+        push!(block.statements, Expr(:(=), means, Expr(:call, :vcat, x, mean_draws)))
+    end
+    field = Expr(:ref, means, arguments.msrc)
+    if !isempty(arguments.reads)
+        halves = map((:left_scaled => arguments.left, :right_scaled => arguments.right)) do (name, coefficients)
+            half = _rk_block_local!(block, name)
+            push!(block.statements, Expr(:(=), half, Expr(:call, :.*, coefficients, zext)))
+            half
+        end
+        scaled = _rk_block_local!(block, :scaled)
+        push!(block.statements, Expr(:(=), scaled, Expr(:call, :vcat, halves...)))
+        field = foldl((a, r) -> Expr(:call, :.+, a, Expr(:ref, scaled, r)), arguments.reads;
+            init=field)
+    end
+    push!(block.statements, Expr(:(=), phi, field))
+    if arguments.terms !== nothing
+        parts = Any[]
+        if arguments.edge_first !== nothing
+            edges = _rk_block_local!(block, :edge_terms)
+            push!(block.statements, Expr(:(=), edges, Expr(:call, :.*, -0.5,
+                Expr(:call, :.^, Expr(:call, :.-, Expr(:ref, phi, arguments.edge_first),
+                    Expr(:ref, phi, arguments.edge_second)), 2))))
+            push!(parts, edges)
+        end
+        if arguments.cancel !== nothing
+            # every draw's term, then the gather on its own: a gather feeding a
+            # dotted term becomes a plate argument computed whole, and with it
+            # every draw
+            squares = _rk_block_local!(block, :draw_squares)
+            cancels = _rk_block_local!(block, :cancel_terms)
+            push!(block.statements,
+                Expr(:(=), squares, Expr(:call, :.*, 0.5, Expr(:call, :.^, zext, 2))),
+                Expr(:(=), cancels, Expr(:ref, squares, arguments.cancel)))
+            push!(parts, cancels)
+        end
+        terms = length(parts) == 1 ? only(parts) : _rk_block_local!(block, :unit_terms)
+        length(parts) == 1 || push!(block.statements,
+            Expr(:(=), terms, Expr(:call, :vcat, parts...)))
+        push!(block.statements, Expr(:call, :.~, arguments.terms, Expr(:.,
+            _rk_value_callee!(bindings, _BRMLogWeight, taken), Expr(:tuple, terms))))
+    end
     # each block's draw declaration, aligned with `separation.blocks`
     (; w, z=Tuple(z))
 end
@@ -1809,7 +1865,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     :brm_sorted_positions, term.options.area, term.options.node_labels;
                     kernel=true)))
                 indices = _rk_ast_car_separation_indices!(stmts, defs, taken, term)
-                call, locals = _rk_ast_car_block!(defs, taken, term, positions; indices)
+                call, locals = _rk_ast_car_block!(defs, taken, term, positions; indices,
+                    bindings)
                 refactual[index] = term.options.value
                 push!(stmts, Expr(:call, :~, term.options.value, call))
                 _rk_coordinate_record!(coordinates, (; kind=:car,
@@ -2097,7 +2154,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     # stays a graph value a query can ask for by its authored name.
     authored = Set(p.name for p in plan.predictors if p.link !== :identity)
     emitted = _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
-        _rk_observed_names(plan); retained=authored, coordinates)
+        _rk_structural_responses(plan); retained=authored, coordinates)
     # A value plan resolves lone intercepts once its own readers are emitted.
     values ? emitted : _rk_scalar_lone_intercepts(emitted, lone_intercepts)
 end
