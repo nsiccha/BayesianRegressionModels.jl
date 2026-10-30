@@ -12,6 +12,8 @@ const BRM = BayesianRegressionModels
 
 BRM._brm_with_progress(f, progress::Union{ProgressNode,Symbol}; description) =
     Treebars.with_progress(f, progress; description)
+BRM._brm_with_counter(f, parent::ProgressNode, n::Integer; description) =
+    Treebars.with_progress(f, parent, n; description)
 BRM._brm_with_phases(f, node::ProgressNode, labels::NamedTuple) =
     Treebars.with_prepared_phases(f, node, labels)
 BRM._brm_enter_phase(f, phase::ProgressNode) = Treebars.with_prepared_progress(f, phase)

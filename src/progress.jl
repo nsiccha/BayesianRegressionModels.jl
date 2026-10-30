@@ -11,6 +11,19 @@ _brm_with_progress(f, progress; description) = throw(ArgumentError(
     "progress: expected nothing, a Treebars node, or a Treebars backend symbol " *
     "such as :state with Treebars loaded; got $(repr(progress))"))
 
+# `f(node)` under a new node `description` below `progress` that counts `n`
+# steps; `_brm_update_progress!(node, k)` reports the first `k` of them done.
+_brm_with_counter(f, ::Nothing, n; description) = f(nothing)
+
+# The node a model's preparations on first use report under
+# (`_brm_nlme_cell_state`): such a use happens deep inside an estimator, which
+# cannot pass a node along, so a fit sets the phase it runs the estimator in for
+# its task. A task the estimator spawns, or a direct estimator call, reports
+# nothing.
+_brm_cell_progress() = get(task_local_storage(), :brm_cell_progress, nothing)
+_brm_with_cell_progress(f, node) =
+    node === nothing ? f() : task_local_storage(f, :brm_cell_progress, node)
+
 # `f(phases)` with one pending phase per label of `labels`, a NamedTuple of
 # descriptions; `phases` has the same keys.
 _brm_with_phases(f, ::Nothing, labels::NamedTuple) = f(map(_ -> nothing, labels))

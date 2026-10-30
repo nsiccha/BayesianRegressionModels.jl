@@ -491,8 +491,9 @@ function brm_svi_fit(x; rng=Random.default_rng(), batch_size=32,
         _brm_with_phases(node, _BRM_SVI_PHASES) do phases
             m = _brm_svi_model(_brm_svi_lowered(x, phases.lower), phases.prepare;
                 ad_backend, shared_point, subject_group, nested_groups, shared_groups)
-            t, μ = _brm_run_phase(phases.target) do _
-                t = _brm_svi_target(m)
+            t, μ = _brm_run_phase(phases.target) do phase
+                # The model's compact cell gradients, on first use, report here.
+                t = _brm_with_cell_progress(() -> _brm_svi_target(m), phase)
                 t, _brm_svi_start(m, start, inits)[t.globals]
             end
             q = _brm_svi_params(t, μ, family; global_scale, unit_scale)
