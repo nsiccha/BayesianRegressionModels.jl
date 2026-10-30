@@ -2091,7 +2091,6 @@ function _brm_nlme_cell_state(m::BRMNLMEModel)
                 _brm_nlme_cell_reads(wide, recorded, cells, unit, globals, blocks;
                     progress=c)
             end
-            _brm_nlme_warn_untouched_reads(cells, recorded, reads)
             plan = reads == recorded ? wide : _brm_with_counter(node, length(cells);
                     description="Narrowed compact cell samplers") do c
                 _brm_nlme_cell_plan(m.backend, cells, unit, globals, blocks, reads;
@@ -2105,42 +2104,6 @@ function _brm_nlme_cell_state(m::BRMNLMEModel)
             g.state[] = (; reads, plan, patterns)
         end
     end
-end
-
-# The cell groups whose cells read η their gradients never touch, far beyond
-# the η they do: the signature of a value computed whole in each cell (an
-# emission ReactiveKernels gives no row form, or a pushdown gap), which makes a
-# unit cost its cells times its block. On ArbeitsplatzAtlas an `osm_pub` cell
-# read 8,220 of its unit's η and its gradient touched 4, until fixed at the
-# source (snag saem-s-nuts-warm-28e5f1d9, decision 0dxkyy5). RK reading a
-# vector it then indexes leaves a few untouched reads, below the threshold.
-# One entry per such group: its names and its widest cell's counts.
-function _brm_nlme_untouched_reads(cells, recorded, reads; floor=64, ratio=4)
-    flagged = []
-    for g in eachindex(cells)
-        worst = (; untouched=0, touched=0)
-        for i in eachindex(recorded), k in eachindex(recorded[i][g])
-            touched = length(reads[i][g][k])
-            untouched = length(recorded[i][g][k]) - touched
-            untouched > worst.untouched && (worst = (; untouched, touched))
-        end
-        worst.untouched >= floor && worst.untouched > ratio * worst.touched &&
-            push!(flagged, (; names=cells[g].names, worst...))
-    end
-    flagged
-end
-
-function _brm_nlme_warn_untouched_reads(cells, recorded, reads)
-    flagged = _brm_nlme_untouched_reads(cells, recorded, reads)
-    isempty(flagged) && return nothing
-    @warn("brm_nlme_model: some subject cells read far more of their unit's η " *
-        "than their gradients touch, so each cell computes a value whole and a " *
-        "unit costs its cells times its effects. Trace the named groups' cell " *
-        "queries to the value computed whole (brm-use nlme.md, \"What the " *
-        "preparation costs\").",
-        groups=[(f.names, "reads $(f.untouched + f.touched) η, gradient touches $(f.touched)")
-            for f in flagged])
-    nothing
 end
 
 # Each subject's η Hessian pattern for NLMEEstimation's `eta_hessian_sparsity`:
