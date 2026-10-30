@@ -3332,7 +3332,122 @@ Base.@nospecializeinfer function _brm_finalize_operations(
         @nospecialize(operations::NamedTuple), @nospecialize(captures::NamedTuple),
         forward::Tuple{Vararg{Symbol}}=())
     isempty(captures) || (operations = Base.merge(operations, captures))
+    operations = _brm_restricted_operations(operations)
     _brm_resolve_forward_reads(_expand_nested_predictor_formulas(operations), forward)
+end
+
+# A prior `x ~ restricted(D(args...), lower, upper)` is the declaration-bound
+# form `x ~ D(args...; lower, upper)`, which every backend reads: the family's
+# density on the bounds, not renormalized. Those keywords written on a prior
+# directly are deprecated in favour of `restricted` (decision 0q18o98).
+Base.@nospecializeinfer function _brm_restricted_operations(
+        @nospecialize(operations::NamedTuple))
+    rewritten = map(_brm_restricted_operation, values(operations))
+    _brm_warn_prior_bound_keywords(operations)
+    all(map(===, rewritten, values(operations))) && return operations
+    NamedTuple{keys(operations)}(rewritten)
+end
+
+function _brm_restricted_operation(@nospecialize(value))
+    value isa NamedColumn || return value
+    op = parent(value)
+    op isa ExprColumn && getf(op) === (~) || return value
+    lhs, rhs = getargs(op, 2)
+    rhs isa ExprColumn && getf(rhs) === restricted || return value
+    NamedColumn(name(value), ExprColumn(~, lhs, _brm_restricted_law(rhs)))
+end
+
+# The names a value reads, without entering the statements they name; returns
+# whether it reads a non-scalar data column (a row-varying value).
+function _brm_restricted_reads!(names, @nospecialize(x))
+    if x isa NamedColumn
+        p = parent(x)
+        p isa DataColumn && return !(parent(p) isa Real)
+        push!(names, name(x))
+        return false
+    elseif x isa ExprColumn
+        varying = false
+        foreach(arg -> (varying |= _brm_restricted_reads!(names, arg)), getargs(x))
+        foreach(arg -> (varying |= _brm_restricted_reads!(names, arg)), values(getkwargs(x)))
+        return varying
+    elseif x isa Union{Tuple,AbstractArray}
+        varying = false
+        foreach(arg -> (varying |= _brm_restricted_reads!(names, arg)), x)
+        return varying
+    end
+    false
+end
+
+# Warn once about `lower`/`upper` keywords on a statement that is surely a
+# prior. Whether an unbound `name ~ D(...)` is a prior or an omitted response
+# is decided later, by the backend (brm-use "Which unbound statements are
+# observations"; `_sb_plan_observation_keys`), and an omitted response's
+# keywords bound its draw. So this warns only where the documented rule cannot
+# make the statement an observation: a marker's prior (`sd(...)`, `effect(...)`,
+# `latent(...)`), or a name with no data column that another statement reads and
+# whose law reads no row-varying value. A missed warning is harmless; a
+# response's bounds through `truncated`/`censored`/`interval_censored` never warn.
+Base.@nospecializeinfer function _brm_warn_prior_bound_keywords(
+        @nospecialize(operations::NamedTuple))
+    # Which statements read each name, and which read data rows directly; the
+    # row-varying statements are those reachable from the latter (one pass).
+    readers = Dict{Symbol,Vector{Symbol}}()
+    read_elsewhere = Set{Symbol}()
+    varying = Set{Symbol}()
+    for (key, value) in pairs(operations)
+        names = Set{Symbol}()
+        _brm_restricted_reads!(names, value isa NamedColumn ? parent(value) : value) &&
+            push!(varying, key)
+        for read in names
+            read === key && continue
+            push!(read_elsewhere, read)
+            push!(get!(Vector{Symbol}, readers, read), key)
+        end
+    end
+    frontier = collect(varying)
+    while !isempty(frontier)
+        for reader in get(readers, pop!(frontier), Symbol[])
+            reader in varying && continue
+            push!(varying, reader)
+            push!(frontier, reader)
+        end
+    end
+    for (key, value) in pairs(operations)
+        value isa NamedColumn || continue
+        op = parent(value)
+        op isa ExprColumn && getf(op) === (~) || continue
+        lhs, rhs = getargs(op, 2)
+        rhs isa ExprColumn && any(in((:lower, :upper)), keys(getkwargs(rhs))) || continue
+        getf(rhs) in (truncated, censored, interval_censored, restricted) && continue
+        prior = (lhs isa ExprColumn && isnothing(_nested_observed_values(lhs))) ||
+            (lhs isa NamedColumn &&
+            !(parent(lhs) isa DataColumn) && !(key in varying) && key in read_elsewhere)
+        prior || continue
+        @warn("@brm: `lower`/`upper` keywords on a prior (`$key ~ " *
+              "$(nameof(getf(rhs)))(...; lower, upper)`) are deprecated. Write " *
+              "`restricted(D, lower, upper)` for the same law (the density on " *
+              "the bounds, not renormalized, as in Stan) or " *
+              "`truncated(D, lower, upper)` for the normalized law.",
+              maxlog=1, _id=:brm_prior_bound_keywords)
+        return
+    end
+end
+
+function _brm_restricted_law(rhs::ExprColumn)
+    args, kwargs = getargs(rhs), getkwargs(rhs)
+    base, bounds = if length(args) == 3 && isempty(kwargs)
+        args[1], (; lower=args[2], upper=args[3])
+    elseif length(args) == 1 && !isempty(kwargs) &&
+           all(in((:lower, :upper)), keys(kwargs))
+        args[1], kwargs
+    else
+        error("@brm: `restricted` takes a distribution and its bounds, " *
+              "`restricted(D, lower, upper)` or `restricted(D; lower, upper)`")
+    end
+    base isa ExprColumn && !any(in((:lower, :upper)), keys(getkwargs(base))) || error(
+        "@brm: `restricted(D, ...)` needs a distribution call `D(args...)` " *
+        "without `lower`/`upper` keywords of its own")
+    ExprColumn(getf(base), getargs(base)...; getkwargs(base)..., bounds...)
 end
 
 Base.@nospecializeinfer function _expand_nested_predictor_formulas(
