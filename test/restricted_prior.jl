@@ -19,6 +19,17 @@ const BRM = BayesianRegressionModels
 const DATA = (; y=[0.1, -0.2])
 operations(brmi) = sprint(show, getfield(brmi, :operations))
 
+# First, before anything warns in this process: an unbound statement over a data
+# vector is an omitted response (brm-use "Which unbound statements are
+# observations"), and its keywords bound its draw; they are not deprecated.
+@testset "an omitted response's lower/upper keywords do not warn" begin
+    omitted = @brm begin
+        a ~ Normal(0.0, ws; lower=0.0)
+        y ~ Normal(sum(a), 1.0)
+    end
+    @test_logs omitted((; ws=[0.5, 0.7, 0.9], y=[1.0]))
+end
+
 @testset "restricted rewrites to the declaration-bound form, without a warning" begin
     restricted_form = @test_logs @brm begin
         location ~ Normal(0, 1)
