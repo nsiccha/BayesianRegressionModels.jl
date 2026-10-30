@@ -1703,7 +1703,10 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   a nested-NLME totals cell reads an `hcat` design built from views at its
   rows, which registered Enzyme rejects with `IllegalTypeAnalysisException`
   and dogfood `d37cb0b4` differentiates (Enzyme snag
-  `native-reverse-t-6d51cae6`; user pick on BRM decision `0n0kgfh`).
+  `native-reverse-t-6d51cae6`; user pick on BRM decision `0n0kgfh`). The
+  sparse Laplace's `@plate` cells take their Hessian blocks through RKPPL's
+  compact-cell AD under plain Reverse, which needs dogfood from `7a886d9`
+  (Enzyme snag `static-reverse-s-f9483e9c`); the pin is `3e707d79`.
   `setup_env.jl` materializes the pinned dogfood commit from the KB host's
   Enzyme mirror (it is not on GitHub), develops its nested `lib/EnzymeCore`
   0.8.27 beside it (Pkg 1.10 ignores Enzyme's `[sources]`; registered
