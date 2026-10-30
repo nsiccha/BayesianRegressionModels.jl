@@ -780,6 +780,84 @@ ranef_correlated_draws_student_t =
 ranef_correlated_draws_generic_student_t =
     _sb_student_t_ranef(ranef_correlated_draws_generic, :ranef_correlated_draws_generic)
 
+# ---- Redrawn levels of a joined `|ID|` block --------------------------------
+#
+# A shared `|ID|` block whose predictors join several grouping columns by label
+# (`_sb_emit_joint_id_bucket!`) has one level per joint label and one margin per
+# predictor coefficient. `resample_groups` naming some of its columns redraws
+# the margins those columns' predictors read, for every label the replay rows
+# of those columns name, while the fitted block stays a parameter and the other
+# (kept) columns read it as fitted. The margins are reordered by `order` so the
+# `n_kept` margins the kept columns read come first; `P` is the lower Cholesky
+# factor of the block's covariance in that order. A redrawn label that is a
+# fitted joint level (`pos[j] > 0`) keeps its fitted kept margins `b_K` and draws
+# the redrawn ones given them: with `z_K = P_KK^-1 b_K`, `x = P [z_K; e_R]` has
+# `x_K = b_K` and `x_R = P_RK z_K + P_RR e_R ~ N(S_RK S_KK^-1 b_K, S_RR - S_RK
+# S_KK^-1 S_KR)`, the exact conditional. A label the fit did not see draws every
+# margin, `x = P e`. A Student-t block's level weight scales the Gaussian law:
+# the fitted weight of a fitted level, a fresh draw for a new one. Returns the
+# `Q x T` effects in the block's own margin order.
+StanBlocks.@deffun begin
+    joint_level_redraw(fitted::matrix[G, T], tau::vector[T], L::matrix[T, T],
+                       eta::vector[QT], w_fit::vector[G], w_new::vector[Q],
+                       pos::int[Q], order::int[T], n_kept::int)::matrix[Q, T] = begin
+        S = multiply_lower_tri_self_transpose(diag_pre_multiply(tau, L))
+        Sp::matrix[T, T]
+        for a in 1:T
+            for c in 1:T
+                Sp[a, c] = S[order[a], order[c]]
+            end
+        end
+        P = cholesky_decompose(Sp)
+        Pk::matrix[n_kept, n_kept]
+        for a in 1:n_kept
+            for c in 1:n_kept
+                Pk[a, c] = P[a, c]
+            end
+        end
+        out::matrix[Q, T]
+        z::vector[T]
+        bk::vector[n_kept]
+        w::vector[Q]
+        for j in 1:Q
+            for a in 1:T
+                z[a] = eta[(j - 1) * T + a]
+            end
+            w[j] = w_new[j]
+            if pos[j] > 0
+                w[j] = w_fit[pos[j]]
+                for a in 1:n_kept
+                    bk[a] = fitted[pos[j], order[a]] / sqrt(w[j])
+                end
+                zk = mdivide_left_tri_low(Pk, bk)
+                for a in 1:n_kept
+                    z[a] = zk[a]
+                end
+            end
+            x = sqrt(w[j]) * (P * z)
+            for a in 1:T
+                out[j, order[a]] = x[a]
+            end
+        end
+        out
+    end
+end
+
+# The redraw statement of a Gaussian block (`fitted` is the block's effects,
+# `n_fitted` its level count) and of a Student-t one (`w_fit` its level weights,
+# `nu` its degrees of freedom). `n_groups` is the replay's count of redrawn
+# labels, the cv-tainted size that moves `eta` (and `w`) to generated quantities.
+_sb_joint_level_redraw = StanBlocks.@slic begin
+    eta ~ std_normal(; n=n_terms * n_groups)
+    return joint_level_redraw(fitted, tau, L, eta, rep_vector(1.0, n_fitted),
+                              rep_vector(1.0, n_groups), fitted_pos, order, n_kept)
+end
+_sb_joint_level_redraw_student_t = StanBlocks.@slic begin
+    w ~ inv_gamma(0.5 * nu, 0.5 * nu; n=n_groups)
+    eta ~ std_normal(; n=n_terms * n_groups)
+    return joint_level_redraw(fitted, tau, L, eta, w_fit, w, fitted_pos, order, n_kept)
+end
+
 # ---- One-margin blocks: no correlation factor -------------------------------
 #
 # A block with one margin has no correlation: its 1x1 Cholesky factor is the
@@ -5949,7 +6027,7 @@ function _sb_resample_preproc(training, template, groups, new_df)
             "$(old.kind)/$(repr(old.raw_ref)) to " *
             "$(new.kind)/$(repr(new.raw_ref)); the re-emission is not the " *
             "fitted model.")
-        out[key] = _sb_resampled_record(old, groups, new_df)
+        out[key] = _sb_resampled_record(old, groups, new_df, new)
     end
     for (key, e) in template
         e.kind === :submodel_hook && (out[key] = e)
@@ -5960,7 +6038,17 @@ end
 # A replay record of a fitted one: a resampled group's `:group_index` record is
 # over the levels `new_df` names, and a `cdar` term whose `by` column is resampled
 # redraws the levels its rows name (`_sb_cdar_redraw!`); every other record is the fit's.
-function _sb_resampled_record(e::PreprocEntry, groups, new_df)
+# A column of a joined `|ID|` block is over the labels the block's resampled
+# columns name together: the re-emission `template` records which those are when
+# it redraws some of them, otherwise every column is resampled.
+function _sb_resampled_record(e::PreprocEntry, groups, new_df, template::PreprocEntry=e)
+    if e.kind === :group_index && e.raw_ref in groups && haskey(e.const_, :columns)
+        redraw = get(template.const_, :redraw,
+                     (; columns=e.const_.columns))
+        return PreprocEntry(:group_index, merge(template.const_,
+            (; levels=_sb_joint_redraw_levels(redraw, e.const_.id, new_df))),
+            e.raw_ref, true)
+    end
     e.kind === :group_index && e.raw_ref in groups &&
         return _sb_resampled_group_index(e, new_df)
     e.kind === :cdar && e.raw_ref[2] in groups && return PreprocEntry(
@@ -5996,7 +6084,7 @@ function _sb_assert_cv_reemission(sb::SBBRMI, groups)
             entry = get(plan.preproc, idx, nothing)
             entry isa PreprocEntry || continue
             entry.kind === :group_index || continue
-            entry.raw_ref === group || continue
+            _sb_index_redraws(entry, group, groups) || continue
             haskey(entry.const_, :by) && error(
                 "sbimpl: `resample_groups=[:$group]` reaches the stratified " *
                 "`gr($group, by=$(entry.const_.by))` random-effect block " *
@@ -6023,6 +6111,16 @@ function _sb_assert_cv_reemission(sb::SBBRMI, groups)
         end
     end
     nothing
+end
+
+# Whether the block a statement indexes by `entry`'s column redraws `group`'s
+# levels: its own column, or, for a joined `|ID|` block indexed by a resampled
+# column, any column the block redraws with it.
+function _sb_index_redraws(entry::PreprocEntry, group, groups)
+    entry.raw_ref === group && return true
+    haskey(entry.const_, :columns) && entry.raw_ref in groups || return false
+    group in (haskey(entry.const_, :redraw) ? entry.const_.redraw.columns :
+              entry.const_.columns)
 end
 
 # A grouped HSGP's per-level weights `beta` are a prepass-2.5 group block; for
@@ -6054,7 +6152,20 @@ function _sb_mark_resample_groups(sb::SBBRMI, groups)
 end
 
 function _sb_reprocess_resample(sb::SBBRMI, new_df, groups, freeze::Bool, held_out)
-    _brm_refuse_joint_resample(sb.parent, groups; prefix="sbimpl: reprocess")
+    # Redrawing some columns of a joined `|ID|` block conditions on the fitted
+    # block the other columns keep reading; a fresh template refits that block
+    # on the replay rows, whose coordinates are not the fit's.
+    freeze || for (key, bucket) in _sb_collect_id_buckets(sb.parent)
+        names = name.(_sb_bucket_group_columns(bucket))
+        hit = intersect(names, groups)
+        isempty(hit) || length(hit) == length(names) || error(
+            "sbimpl: reprocess: `resample_groups` names ", join(("`$c`" for c in hit), ", "),
+            " of the shared `|$(first(key))|` block, whose predictors join the columns ",
+            join(("`$c`" for c in names), ", "), " by label. Their margins are redrawn ",
+            "given the fitted block the other columns keep, which `freeze_constants=false` ",
+            "rebuilds on the replay rows; use the default `freeze_constants=true`, or name ",
+            "every column of the block.")
+    end
     # A fresh template prepares each `cdar` term on the replay rows alone (their
     # levels, a `cor` over them), so there are no fitted levels to draw the redrawn
     # ones given, and the redraw reads the fitted record; not built (todo `1ym8kho`
@@ -6389,16 +6500,27 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         raw isa AbstractVector || error(
             "sbimpl: reprocess: random-effects grouping column `$(e.raw_ref)` " *
             "must be a vector, got $(typeof(raw))")
-        # A joined `|ID|` block's columns refit their joint levels together.
+        # A joined `|ID|` block's columns refit their joint levels together; its
+        # redrawn columns, the labels they name together (`_sb_joint_redraw_data`).
         joint = haskey(e.const_, :columns) ?
             (; columns=e.const_.columns, id=e.const_.id) : (;)
+        redraw = get(e.const_, :redraw, nothing)
+        refit_joint() = _brm_joint_levels([c => _sb_df_column(df, c) for c in joint.columns];
+                                          id=joint.id, prefix="sbimpl: reprocess")
         levels = freeze ? e.const_.levels : isempty(joint) ? _sb_fit_levels(raw) :
-            _brm_joint_levels([c => _sb_df_column(df, c) for c in joint.columns];
-                              id=joint.id, prefix="sbimpl: reprocess")
+            isnothing(redraw) ? refit_joint() : _sb_joint_redraw_levels(redraw, joint.id, df)
         idx = _sb_apply_group_levels(levels, raw, e.raw_ref)
         new_data[key] = idx
         new_data[e.const_.n_groups_key] = length(levels)
         push!(handled, e.const_.n_groups_key)
+        if !isnothing(redraw)
+            freeze || (redraw = merge(redraw, (; joint_levels=refit_joint())))
+            for (k, v) in _sb_joint_redraw_data(redraw, levels)
+                new_data[k] = v
+                push!(handled, k)
+            end
+            joint = merge(joint, (; redraw))
+        end
         strata = haskey(e.const_, :by) ?
             _sb_reprocess_strata!(new_data, handled, e, idx, df, freeze) : (;)
         new_preproc[key] = PreprocEntry(
@@ -11861,9 +11983,10 @@ _sb_bucket_group_columns(bucket) =
                              if desc isa NamedColumn])
 _sb_bucket_joins_columns(bucket) = length(_sb_bucket_group_columns(bucket)) > 1
 
-# `resample_groups` naming a grouping column of a joined `|ID|` block. New
-# levels of one column would have to join the other columns' fitted levels,
-# which neither backend builds yet; refused rather than drawn wrongly.
+# `resample_groups` naming a grouping column of a joined `|ID|` block on RKBRMI.
+# New labels of one column draw their margins given the other columns' fitted
+# ones; SBBRMI builds that (`_sb_emit_joint_id_bucket!`), RKBRMI does not yet,
+# so it refuses rather than draws wrongly.
 function _brm_refuse_joint_resample(brmi::BRMI, groups; prefix)
     isempty(groups) && return nothing
     for (key, bucket) in _sb_collect_id_buckets(brmi)
@@ -13291,11 +13414,17 @@ end
 # index into them. A model option naming any of the columns (`centered_groups`)
 # applies to the whole block, the one block they share.
 #
-# Refused until designed: a level correlation (`gr(g; cor=...)`) and
-# `cv_groups` (the cv size is `maximum(<g>_idx)` of one column, which need not
-# reach every joint level). An omitted response keeps the whole block (no
-# marginal split; `src/sb_marginal_ranef.jl`): the full block's prior on the
-# unread margins is exact, so the fit is correct with the extra dimensions.
+# `cv_groups` (what `resample_groups` re-emits with) naming every column redraws
+# the whole block over the labels its columns name, sized by the largest index
+# of any column. Naming some of them redraws only the margins their predictors
+# read (`joint_level_redraw`): the block stays the fitted one, which the other
+# columns' predictors read, and `<block>_new` holds the redrawn labels' effects,
+# given their fitted kept margins where the label is a fitted joint level.
+#
+# Refused until designed: a level correlation (`gr(g; cor=...)`). An omitted
+# response keeps the whole block (no marginal split; `src/sb_marginal_ranef.jl`):
+# the full block's prior on the unread margins is exact, so the fit is correct
+# with the extra dimensions.
 function _sb_emit_joint_id_bucket!(stmts, data, lookup, k, bucket, bucket_name,
                                    n_terms_name, suffix, per_target_ranges;
                                    cv_groups, centered_groups, ranef_effect,
@@ -13303,31 +13432,92 @@ function _sb_emit_joint_id_bucket!(stmts, data, lookup, k, bucket, bucket_name,
     id_sym = first(k)
     columns = _sb_bucket_group_columns(bucket)
     names = Tuple(name.(columns))
-    what = "`|$id_sym|` joins the grouping columns $(join(("`$c`" for c in names), ", "))"
     isnothing(get(bucket, :level_cor, nothing)) || error(
-        "sbimpl: $what by label and correlates its levels (`gr(...; cor=...)`); a " *
-        "level correlation over joined columns is not implemented")
-    for c in names
-        c in cv_groups && error(
-            "sbimpl: $what by label, and `$c` is in `cv_groups`; cv re-drawing a " *
-            "joined block is not implemented")
-    end
-    desc = bucket.group_desc
-    centered = any(in(centered_groups), names) ?
-        union(centered_groups, (name(desc),)) : centered_groups
-    idx_names, n_name = _sb_ensure_joint_group_data!(data, columns, id_sym)
-    group_data = (idx_names[name(desc)], n_name)
-    _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, desc;
-        cv_groups, centered_groups=centered, id_sym, ranef_effect, r2d2_tau, mod,
-        r2d2_lkj_eta=(isnothing(ranef_effect) ? 1.0 : ranef_effect.lkj_eta),
-        group_data)
+        "sbimpl: `|$id_sym|` joins the grouping columns ",
+        join(("`$c`" for c in names), ", "), " by label and correlates its levels ",
+        "(`gr(...; cor=...)`); a level correlation over joined columns is not implemented")
     group_of = Dict{Symbol,Symbol}(predictor => name(desc)
                                    for (predictor, desc) in bucket.group_descs)
+    redrawn = Tuple(c for c in names if c in cv_groups)
+    kept = [c for c in columns if !(name(c) in redrawn)]
+    redraw = isempty(redrawn) || isempty(kept) ? nothing :
+        _sb_joint_redraw_spec(bucket_name, redrawn, group_of, per_target_ranges)
+    # The fitted block is addressed through a kept column, whose index codes
+    # the fitted joint levels.
+    desc = isnothing(redraw) || !(name(bucket.group_desc) in redrawn) ?
+        bucket.group_desc : first(kept)
+    centered = any(in(centered_groups), names) ?
+        union(centered_groups, (name(desc),)) : centered_groups
+    idx_names, n_name = _sb_ensure_joint_group_data!(data, columns, id_sym; redraw)
+    group_data = (idx_names[name(desc)], n_name)
+    cv_size = isempty(redrawn) || !isnothing(redraw) ? nothing :
+        _sb_max_index_expr([idx_names[c] for c in names])
+    _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, desc;
+        cv_groups=isnothing(redraw) ? cv_groups : setdiff(cv_groups, names),
+        centered_groups=centered, id_sym, ranef_effect, r2d2_tau, mod,
+        r2d2_lkj_eta=(isnothing(ranef_effect) ? 1.0 : ranef_effect.lkj_eta),
+        group_data, cv_size)
+    isnothing(redraw) || _sb_emit_joint_redraw!(stmts, bucket_name, n_terms_name,
+        n_name, redraw, [idx_names[c] for c in redrawn])
     for (brmi_key, cols) in per_target_ranges
         g = group_of[brmi_key]
+        carrier = !isnothing(redraw) && g in redrawn ? redraw.name : bucket_name
         lookup[(brmi_key, (id_sym, g))] =
-            (; bucket_name, cols, idx_name=idx_names[g], suffix)
+            (; bucket_name=carrier, cols, idx_name=idx_names[g], suffix)
     end
+    nothing
+end
+
+# `maximum` of one index, the larger of several.
+_sb_max_index_expr(idx_names) = foldl((a, b) -> :(max($a, $b)),
+    (:(maximum($i)) for i in idx_names))
+
+# What redrawing the `redrawn` columns of a joined block needs: the margins the
+# kept columns' predictors read come first in `order` (`n_kept` of them), and
+# the data keys the replay writes.
+function _sb_joint_redraw_spec(bucket_name, redrawn, group_of, per_target_ranges)
+    kept_cols, redrawn_cols = Int[], Int[]
+    for (brmi_key, cols) in per_target_ranges
+        append!(group_of[brmi_key] in redrawn ? redrawn_cols : kept_cols, cols)
+    end
+    redraw_name = Symbol(bucket_name, :_new)
+    (; name=redraw_name, columns=redrawn, order=vcat(kept_cols, redrawn_cols),
+       n_kept=length(kept_cols),
+       keys=(; n=Symbol(:n_, redraw_name), pos=Symbol(redraw_name, :_pos),
+             order=Symbol(redraw_name, :_order), n_kept=Symbol(redraw_name, :_n_kept)))
+end
+
+# `<block>_new ~ _sb_joint_level_redraw(...)` after the block's own statement,
+# reading its scales and correlation factor where the block's family has them:
+# a call input (a known value, an R2D2-derived scale) or its own declaration.
+function _sb_emit_joint_redraw!(stmts, bucket_name, n_terms_name, n_fitted, redraw,
+                                idx_names)
+    at = findlast(s -> Meta.isexpr(s, :call) && s.args[1] === :~ &&
+                       s.args[2] === bucket_name, stmts)
+    isnothing(at) && error(
+        "sbimpl: internal — no `$bucket_name ~ ...` statement to redraw levels of")
+    inputs = Dict{Symbol,Any}(kw.args[1] => kw.args[2] for kw in
+        only(a for a in stmts[at].args[3].args if Meta.isexpr(a, :parameters)).args
+        if Meta.isexpr(kw, :kw))
+    input(field) = get(inputs, field, Symbol(bucket_name, :_, field))
+    n_new = Symbol(redraw.name, :_n_g)
+    push!(stmts, :($n_new = $(_sb_max_index_expr(idx_names))))
+    kwargs = Any[Expr(:kw, :fitted, bucket_name), Expr(:kw, :tau, input(:tau)),
+                 Expr(:kw, :L, input(:L)), Expr(:kw, :n_fitted, n_fitted),
+                 Expr(:kw, :fitted_pos, redraw.keys.pos),
+                 Expr(:kw, :order, redraw.keys.order),
+                 Expr(:kw, :n_kept, redraw.keys.n_kept),
+                 Expr(:kw, :group_idx, first(idx_names)), Expr(:kw, :n_groups, n_new),
+                 Expr(:kw, :n_terms, n_terms_name)]
+    model = if haskey(inputs, :nu)
+        append!(kwargs, [Expr(:kw, :w_fit, Symbol(bucket_name, :_w)),
+                         Expr(:kw, :nu, inputs[:nu])])
+        :_sb_joint_level_redraw_student_t
+    else
+        :_sb_joint_level_redraw
+    end
+    push!(stmts, Expr(:call, :~, redraw.name, Expr(:call,
+        getfield(@__MODULE__, model), Expr(:parameters, kwargs...))))
     nothing
 end
 
@@ -13507,12 +13697,12 @@ function _sb_emit_student_t_id_bucket!(stmts, data, bucket_name, n_terms_name,
                                        gname, idx_name, n_name,
                                        dist::_BRMRanefStudentT;
                                        cv_groups, centered_groups, id_sym,
-                                       ranef_effect, mod::Module)
+                                       ranef_effect, mod::Module, cv_size=nothing)
     centered = gname in centered_groups
     n_groups = n_name
     if gname in cv_groups
         n_groups = Symbol(bucket_name, :_n_g)
-        push!(stmts, :($n_groups = maximum($idx_name)))
+        push!(stmts, :($n_groups = $(something(cv_size, :(maximum($idx_name))))))
     end
     nu = _sb_effect_prior_arg(dist.nu)
     nu isa Real || nu isa Symbol || error(
@@ -13569,13 +13759,13 @@ _sb_refuse_centered_student_t(gname, centered_groups, id_sym) =
 function _sb_emit_known_id_bucket!(stmts, data, bucket_name, n_terms_name,
                                    gname, idx_name, n_name; cv_groups,
                                    centered_groups, id_sym, ranef_effect,
-                                   mod::Module)
+                                   mod::Module, cv_size=nothing)
     dist = ranef_effect.dist
     isnothing(dist) || _sb_refuse_centered_student_t(gname, centered_groups, id_sym)
     n_groups = n_name
     if gname in cv_groups
         n_groups = Symbol(bucket_name, :_n_g)
-        push!(stmts, :($n_groups = maximum($idx_name)))
+        push!(stmts, :($n_groups = $(something(cv_size, :(maximum($idx_name))))))
     end
     priors = ranef_effect.sd_prior
     tau = _sb_emit_known_ranef_tau!(stmts, data, bucket_name, n_terms_name,
@@ -13666,12 +13856,16 @@ _sb_id_bucket_suffix(id_sym, g::Tuple{NamedColumn,NamedColumn}) =
 # sub-formula.
 # `group_data` is the `(idx_name, n_name)` a joined block's caller already coded
 # (`_sb_ensure_joint_group_data!`); by default the block codes `g` itself.
+# `cv_size` is a cv block's size expression, by default `maximum(<idx_name>)`
+# (a joined block's is the largest index of any of its columns).
 function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g::NamedColumn;
                                       cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(),
                                       id_sym=nothing, ranef_effect=nothing, r2d2_tau=nothing,
                                       mod::Module=@__MODULE__, r2d2_lkj_eta=1.0,
-                                      group_data=_sb_ensure_group_data!(data, g))
+                                      group_data=_sb_ensure_group_data!(data, g),
+                                      cv_size=nothing)
     idx_name, n_name = group_data
+    cv_size = something(cv_size, :(maximum($idx_name)))
     gname = name(g)
     K = data[n_terms_name]
     dist = isnothing(ranef_effect) ? nothing : ranef_effect.dist
@@ -13682,7 +13876,7 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
             "correlation is not implemented")
         _sb_emit_known_id_bucket!(stmts, data, bucket_name, n_terms_name,
                                   gname, idx_name, n_name; cv_groups,
-                                  centered_groups, id_sym, ranef_effect, mod)
+                                  centered_groups, id_sym, ranef_effect, mod, cv_size)
         return idx_name
     end
     if !isnothing(dist)
@@ -13693,7 +13887,7 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
         _sb_emit_student_t_id_bucket!(stmts, data, bucket_name, n_terms_name,
                                       gname, idx_name, n_name, dist;
                                       cv_groups, centered_groups, id_sym,
-                                      ranef_effect, mod)
+                                      ranef_effect, mod, cv_size)
         return idx_name
     end
     if !isnothing(r2d2_tau)
@@ -13713,7 +13907,7 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
             # quantities. R², phi, the reference scales and L stay fitted and
             # remain name-transportable.
             n_cv_name = Symbol(bucket_name, :_n_g)
-            push!(stmts, :($n_cv_name = maximum($idx_name)))
+            push!(stmts, :($n_cv_name = $cv_size))
             n_groups = n_cv_name
         end
         tau_name = Symbol(bucket_name, :_r2d2_tau)
@@ -13754,7 +13948,7 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
         # size appears once as `int <b>_n_g = max(<g>_idx);` instead of being
         # inlined into every declaration.
         n_groups = Symbol(bucket_name, :_n_g)
-        push!(stmts, :($n_groups = maximum($idx_name)))
+        push!(stmts, :($n_groups = $cv_size))
     end
     kwargs = Any[Expr(:kw, :group_idx, idx_name), Expr(:kw, :n_groups, n_groups),
                  Expr(:kw, :n_terms, n_terms_name)]
@@ -13922,7 +14116,13 @@ end
 # carries the joint levels and the columns they join, so a replay codes it into
 # the fitted levels and a refit (`freeze_constants=false`) re-joins the new
 # columns. Returns the per-column index names and the size name.
-function _sb_ensure_joint_group_data!(data, columns::Vector{NamedColumn}, id_sym::Symbol)
+#
+# `redraw` (`_sb_joint_redraw_spec`) names columns whose labels are redrawn:
+# each of those is coded into the labels they name together instead, and its
+# record keeps the block's joint levels and the redraw's data keys, which every
+# replay rewrites from its own labels (`_sb_joint_redraw_data`).
+function _sb_ensure_joint_group_data!(data, columns::Vector{NamedColumn}, id_sym::Symbol;
+                                      redraw=nothing)
     raws = map(columns) do g
         g_backing = _as_data_column(parent(g))
         isnothing(g_backing) && error("sbimpl: group `$(name(g))` must be a raw data column")
@@ -13933,20 +14133,49 @@ function _sb_ensure_joint_group_data!(data, columns::Vector{NamedColumn}, id_sym
     frozen = _sb_frozen_preproc(data)
     fitted = isnothing(frozen) ? nothing : get(frozen, Symbol(first(names), :_idx), nothing)
     levels = fitted isa PreprocEntry && fitted.kind === :group_index ?
-        fitted.const_.levels : _brm_joint_levels(raws; id=id_sym, prefix="sbimpl")
+        _sb_joint_fitted_levels(fitted) : _brm_joint_levels(raws; id=id_sym, prefix="sbimpl")
     _sb_set_group_index_datum!(data, n_name, length(levels), first(names))
+    redrawn = isnothing(redraw) ? () : redraw.columns
+    record = isnothing(redraw) ? nothing : (; columns=redrawn, joint_levels=levels,
+        redraw.keys, redraw.order, redraw.n_kept)
+    new_levels = isnothing(redraw) ? nothing :
+        _brm_label_union([c => raw for (c, raw) in raws if c in redrawn];
+                         id=id_sym, prefix="sbimpl")
     idx_names = Dict{Symbol,Symbol}()
     for (gname, raw) in raws
         idx_name = idx_names[gname] = Symbol(gname, :_idx)
         _sb_note_group_column!(data, gname)
+        const_ = gname in redrawn ?
+            (; levels=new_levels, n_groups_key=redraw.keys.n, columns=names, id=id_sym,
+               redraw=record) :
+            (; levels, n_groups_key=n_name, columns=names, id=id_sym)
         _sb_set_group_index_datum!(data, idx_name,
-            _sb_apply_group_levels(levels, raw, gname), gname)
-        _sb_record_preproc!(data, idx_name, PreprocEntry(
-            :group_index, (; levels, n_groups_key=n_name, columns=names, id=id_sym),
-            gname, true))
+            _sb_apply_group_levels(const_.levels, raw, gname), gname)
+        _sb_record_preproc!(data, idx_name, PreprocEntry(:group_index, const_, gname, true))
+    end
+    isnothing(redraw) || for (key, value) in _sb_joint_redraw_data(record, new_levels)
+        data[key] = value
     end
     idx_names, n_name
 end
+
+# A joined block's fitted joint levels, from any of its columns' records.
+_sb_joint_fitted_levels(e::PreprocEntry) =
+    haskey(e.const_, :redraw) ? e.const_.redraw.joint_levels : e.const_.levels
+
+# The data a joined block's redraw reads for redrawn `levels`: their count, each
+# one's position among the fitted joint levels (0 for a label the fit did not
+# see), and the margin order with its count of kept margins.
+_sb_joint_redraw_data(redraw, levels) = Dict{Symbol,Any}(
+    redraw.keys.n => length(levels),
+    redraw.keys.pos => Int[something(findfirst(isequal(l), redraw.joint_levels), 0)
+                           for l in levels],
+    redraw.keys.order => redraw.order,
+    redraw.keys.n_kept => redraw.n_kept)
+
+# The labels a replay's redrawn columns of a joined block name together.
+_sb_joint_redraw_levels(redraw, id, df) = _brm_label_union(
+    [c => _sb_df_column(df, c) for c in redraw.columns]; id, prefix="sbimpl: reprocess")
 
 # Ensure `group_idx` / `n_groups` for a plain-group ranef descriptor are stashed
 # in `data`. Idempotent — safe to call from both the ID pre-pass and the per-
