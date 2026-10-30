@@ -212,7 +212,10 @@ const PINS = [
     # ReactiveKernelsPPL 0.1.22: one cell's Hessian block and third-order
     # products over a compact selection (`prepare_compact_cell_ad` with
     # `prepare_ad_hvp` / `prepare_ad_third`, RK snag build-brm-s-spar-454be53f),
-    # which the sparse Laplace's `@plate` cells read.
+    # which the sparse Laplace's `@plate` cells read. It is ReactiveKernels
+    # 0.1.25 (it contains 0d5fb817c): a cell of one value of a shared `@plate
+    # for` cell computes nothing only its sibling values read (RK snag
+    # sibling-only-pla-2b3df69e), BRM's compat floor from 0.2.82.
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a959bef75754e7c4666bdafd120ae0ab13343734"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
