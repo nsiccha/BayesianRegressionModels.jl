@@ -90,8 +90,10 @@ function BRM._rk_slap_kernels(backend::BRM.RKBRMI, ports::Tuple, effects::Tuple,
     have = (:unconstrained, keys(bound)...)
     prepare_want(want) = Base.invokelatest(ReactiveKernels.prepare, spec;
         have, want, bound)
-    values = prepare_want(ports)
-    v0 = _rk_slap_tuple(Base.invokelatest(values, u0), length(ports))
+    # A model whose observations are all `@plate` cells has no row parameters.
+    values = isempty(ports) ? nothing : prepare_want(ports)
+    v0 = values === nothing ? () :
+        _rk_slap_tuple(Base.invokelatest(values, u0), length(ports))
     # One reverse pullback of every parameter, prepared on first use: a model
     # whose parameters are affine in the population coordinates never needs
     # it. Its seed holds one cotangent per port (untupled for a single port).
@@ -137,14 +139,15 @@ end
 # The parameters at a packed point and their forward derivative there along
 # each of the `omega` coordinates `js` (one tuple of ports per coordinate).
 function BRM._rk_slap_values_and_tangents(k, u::Vector{Float64}, js::Vector{Int})
-    isempty(js) && return BRM._rk_slap_values(k, u), ()
+    (isempty(js) || k.values === nothing) &&
+        return BRM._rk_slap_values(k, u), ntuple(_ -> (), length(js))
     prepared = get!(() -> k.prepare_pushforward(js), k.pushforwards, js)
     value, tangents = Base.invokelatest(ad_value_and_pushforward, prepared,
         Tuple(k.omega_directions[js]), u)
     _rk_slap_tuple(value, k.nports), map(t -> _rk_slap_tuple(t, k.nports), tangents)
 end
 
-BRM._rk_slap_values(k, u::Vector{Float64}) =
+BRM._rk_slap_values(k, u::Vector{Float64}) = k.values === nothing ? () :
     _rk_slap_tuple(Base.invokelatest(k.values, u), k.nports)
 
 _rk_slap_seed(cotangents) = length(cotangents) == 1 ? only(cotangents) : Tuple(cotangents)
@@ -220,5 +223,39 @@ BRM._rk_slap_prior(k, u::Vector{Float64}) =
     BRM._rk_nlme_population_prior_value(k.prior, u)
 BRM._rk_slap_prior_gradient(k, u::Vector{Float64}) =
     BRM._rk_nlme_population_prior_value_gradient(k.prior, u)
+
+# The sparse Laplace's `@plate` cells (src/nlme_laplace_sparse.jl): one cell
+# of `observations` differentiated over a compact selection of packed
+# coordinates (ReactiveKernelsPPL 0.1.22): its gradient and whole Hessian block
+# from the `m` unit directions, and one direction's HVP and third-order
+# product `D³ℓ[v, v, ·]`, each over the selection.
+function BRM._rk_spl_cell_ad(backend::BRM.RKBRMI, observations::Tuple,
+        base0::Vector{Float64}, indices0::Vector{Int}, ad_backend)
+    rkext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+    built, plan = backend.model, rkext._rk_translated(backend)
+    m = length(indices0)
+    forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
+    second = SecondOrder(AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse,
+        ad_backend)), forward)
+    units = ntuple(k -> (e = zeros(Float64, m); e[k] = 1.0; e), m)
+    hvp = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_hvp, built, plan,
+        observations, base0, indices0, second, units)
+    third = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_third, built, plan,
+        observations, base0, indices0, SecondOrder(second, forward), (zeros(Float64, m),))
+    (; hvp, third, units)
+end
+
+function BRM._rk_spl_cell_block(ad, base::Vector{Float64}, indices::Vector{Int}, i::Int)
+    gradient, columns = ad_gradient_and_hvp(ad.hvp, ad.units, base, base[indices],
+        indices, i)
+    gradient, reduce(hcat, columns)
+end
+
+function BRM._rk_spl_cell_third(ad, direction::Vector{Float64}, base::Vector{Float64},
+        indices::Vector{Int}, i::Int)
+    gradient, (hv,), (tv,) = ad_gradient_hvp_and_third(ad.third, (direction,), base,
+        base[indices], indices, i)
+    gradient, hv, tv
+end
 
 end

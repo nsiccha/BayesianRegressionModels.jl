@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.81
+
+- Added: `brm_laplace_problem(rk; integrate = (:g, …))` takes models whose
+  observations sit in `@plate` cells, beside regression rows. Each cell is one
+  term over the coordinates it reads; its gradient, Hessian block and third
+  derivatives come from Enzyme over that selection (ReactiveKernelsPPL 0.1.22's
+  compact-cell AD). Before, such a model was refused. It needs the Enzyme
+  dogfood line from `7a886d9`; registered Enzyme raises
+  `EnzymeRuntimeActivityError` on the cells.
+- Fixed: the Optim extension of 0.2.80 overwrote `brm_laplace_mode`'s
+  fallback method, which precompilation refuses, so it was compiled again in
+  every session that loaded it. It now adds its own method.
+
 ## 0.2.80
 
 - Added: `brm_laplace_mode(target; init, iterations, g_abstol)`, the mode of

@@ -82,10 +82,14 @@ of levels per parent, or cut across the NLME units. The problem is then a
 [`BRMSparseLaplaceProblem`](@ref) over every other coordinate, the latent
 draws of the other groupings included. A field's per-component soft
 sum-to-zero stays out of the sparse factor (Woodbury); every component must be
-read by some row. It is built on the structured
-problem's rows and needs the same model shape (every observation a regression
-response of one of its four families). The integrated effects' negative
-Hessian `I + Cᵀ W C` is sparse and factored by CHOLMOD at every Newton step;
+read by some row. Every observation is a regression response of one of the
+structured problem's four families, whose rows it shares, or sits in a
+`@plate` cell. A cell is one term over the coordinates it reads, its gradient,
+Hessian block and third derivatives by Enzyme over that selection
+(ReactiveKernelsPPL's compact-cell AD), which needs the Enzyme dogfood line
+from `7a886d9`. The integrated effects' negative
+Hessian `I + Cᵀ W C` (with the cells' blocks added) is sparse and factored by
+CHOLMOD at every Newton step;
 the gradient reads the inverse's entries the likelihood terms couple from its
 selected inverse; each group of integrated effects that share likelihood terms
 (a unit, or the units a crossed grouping joins) takes its own Newton steps,
