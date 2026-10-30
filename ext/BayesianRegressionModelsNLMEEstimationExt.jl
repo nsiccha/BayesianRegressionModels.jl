@@ -625,9 +625,14 @@ _ebe_keywords(estimator, ebes) = throw(ArgumentError(
 
 # Each estimator runs in `phases.fit` and builds its own node there; an
 # interrupt is the estimator's to honour (saem and focei return their last
-# point, the others raise Treebars' `ProgressInterrupted`).
+# point, the others raise Treebars' `ProgressInterrupted`). The model's
+# preparations on first use inside an estimator (its compact cell gradients)
+# report under the estimator's phase (`_estimator_phase`).
+_estimator_phase(f, phase) = BRM._brm_enter_phase(phase) do node
+    BRM._brm_with_cell_progress(() -> f(node), node)
+end
 function _fit_run(::typeof(NE.saem), m, start, ebe_kwargs, phases; kwargs...)
-    result = BRM._brm_enter_phase(phases.fit) do node
+    result = _estimator_phase(phases.fit) do node
         NE.saem(m, start.theta, start.sigma, start.omega; progress=node,
             _with_eta(m, start, kwargs)...)
     end
@@ -636,7 +641,7 @@ function _fit_run(::typeof(NE.saem), m, start, ebe_kwargs, phases; kwargs...)
     # over.
     ebe = ebe_kwargs === nothing || result.interrupted ||
         BRM._brm_interrupt_requested(phases.ebes) ? nothing :
-        BRM._brm_enter_phase(phases.ebes) do node
+        _estimator_phase(phases.ebes) do node
             NE.empirical_bayes(m, result.theta, result.sigma, result.omega;
                 subjects=result.subjects, η0=result.eta,
                 merge((; progress=node), ebe_kwargs)...)
@@ -644,13 +649,13 @@ function _fit_run(::typeof(NE.saem), m, start, ebe_kwargs, phases; kwargs...)
     result, ebe, BRM.brm_nlme_estimates(m, result, ebe)
 end
 function _fit_run(::typeof(NE.focei), m, start, _ebes, phases; kwargs...)
-    result = BRM._brm_enter_phase(phases.fit) do node
+    result = _estimator_phase(phases.fit) do node
         NE.focei(m, start.theta, start.sigma, start.omega; progress=node, kwargs...)
     end
     result, result.ebes, BRM.brm_nlme_estimates(m, result)
 end
 function _fit_run(::typeof(NE.empirical_bayes), m, start, _ebes, phases; kwargs...)
-    result = BRM._brm_enter_phase(phases.fit) do node
+    result = _estimator_phase(phases.fit) do node
         NE.empirical_bayes(m, start.theta, start.sigma, start.omega; progress=node,
             _with_eta(m, start, kwargs)...)
     end
