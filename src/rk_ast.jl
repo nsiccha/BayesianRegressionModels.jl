@@ -1584,14 +1584,20 @@ function _rk_ast_cdar_block!(definitions, taken, term, group_rows, step_rows)
         Expr(:(=), scale, Expr(:call, :sqrt, Expr(:call, :-, 1.0, Expr(:call, :^, rho, 2)))),
         Expr(:(=), decay, Expr(:call, :.*, mask, Expr(:call, :.^, rho, lag),
             Expr(:call, :.+, scale, Expr(:call, :.*, Expr(:call, :-, 1.0, scale), first_step)))))
+    # Each product is a statement of its own: ReactiveKernels computes a
+    # product inside a dotted term (`sigma .* (eta * decay)`) whole in every
+    # cell, and with it every group's innovations; named, `eta * decay` runs at
+    # the rows a cell reads, its group's.
     innovations = eta
     if factor_values !== nothing
         L = _rk_block_local!(block, :L)
         push!(block.statements, Expr(:(=), L, Expr(:call, :reshape, factor_values, P, P)))
-        innovations = Expr(:call, :*, L, eta)
+        innovations = _rk_block_local!(block, :correlated)
+        push!(block.statements, Expr(:(=), innovations, Expr(:call, :*, L, eta)))
     end
-    push!(block.statements, Expr(:(=), walk,
-            Expr(:call, :.*, sigma, Expr(:call, :*, innovations, decay))),
+    steps = _rk_block_local!(block, :steps)
+    push!(block.statements, Expr(:(=), steps, Expr(:call, :*, innovations, decay)),
+        Expr(:(=), walk, Expr(:call, :.*, sigma, steps)),
         Expr(:(=), cell, Expr(:call, :.+, Expr(:call, :.*,
             Expr(:call, :.-, step_position, 1), P), group_position)))
     call = _rk_ast_block_call!(definitions, taken, "brm_cdar", block, Expr(:ref, walk, cell))
