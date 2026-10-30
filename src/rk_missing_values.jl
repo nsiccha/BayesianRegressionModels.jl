@@ -7,8 +7,8 @@ struct _RKMissingValueSpec
     observed_rows::Symbol
     missing_rows::Symbol
     observed_component::Symbol
-    missing_lookup::Symbol
-    missing_mask::Symbol
+    # Each row's position in `vcat(observed_component, missing values)`.
+    order::Symbol
     nmissing::Int
     distribution::_BRMPreparedExpr
     # Sample a standard normal draw per missing value and compute the value
@@ -19,9 +19,9 @@ struct _RKMissingValueSpec
     totals::Union{Nothing,NamedTuple}
 end
 _RKMissingValueSpec(source, observed, observed_rows, missing_rows, observed_component,
-        missing_lookup, missing_mask, nmissing, distribution, noncentered=false) =
+        order, nmissing, distribution, noncentered=false) =
     _RKMissingValueSpec(source, observed, observed_rows, missing_rows, observed_component,
-        missing_lookup, missing_mask, nmissing, distribution, noncentered, nothing)
+        order, nmissing, distribution, noncentered, nothing)
 
 function _rk_mi_predictor_plan(term::NamedColumn)
     operation = parent(term)
@@ -272,10 +272,9 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
     if grouped || _rk_mi_downstream(program, observation.name, plan.source)
         jmis = _rk_ast_fresh_name(string("Jmis_", plan.source), taken)
         component = _rk_ast_fresh_name(string(plan.source, "_observed_component"), taken)
-        lookup = _rk_ast_fresh_name(string(plan.source, "_missing_lookup"), taken)
-        mask = _rk_ast_fresh_name(string(plan.source, "_missing_mask"), taken)
+        order = _rk_ast_fresh_name(string(plan.source, "_order"), taken)
         # Row partitions describe the declared covariate geometry. The
-        # observed contribution, missing lookup and mask are graph values.
+        # observed contribution and each row's position are graph values.
         columns[jmis] = plan.missing_indices
         totals = grouped ? merge(_rk_prepare_missing_totals!(columns, taken, derived,
             observation, plan, (raw, present)),
@@ -285,7 +284,7 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
                 totals.inputs...) :
             Expr(:_rk_data_preparation, :brm_covariate_missing_rows, present), jmis))
         push!(completions, _RKMissingValueSpec(plan.source, observed,
-            jobs, jmis, component, lookup, mask, length(plan.missing_indices),
+            jobs, jmis, component, order, length(plan.missing_indices),
             observation.distribution, false, totals))
     end
     _BRMPreparedObservation(observed, observation.lhs,
@@ -337,7 +336,7 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
         :brm_covariate_geometry, completion.observed, completion.observed_rows,
         completion.missing_rows; kernel=true)
     push!(statements, Expr(:(=), Expr(:tuple, completion.observed_component,
-        completion.missing_lookup, completion.missing_mask), geometry))
+        completion.order), geometry))
     if completion.nmissing == 0
         push!(statements, Expr(:(=), completion.source, completion.observed_component))
         return nothing
@@ -359,8 +358,7 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
     end
     observed = _rk_block_argument!(block, :observed, completion.observed_component)
     rows = _rk_block_argument!(block, :rows, completion.missing_rows)
-    lookup = _rk_block_argument!(block, :lookup, completion.missing_lookup)
-    mask = _rk_block_argument!(block, :mask, completion.missing_mask)
+    order = _rk_block_argument!(block, :order, completion.order)
     if completion.noncentered
         entry = _rk_emit_standardized!(block, part, rows, :z_mis, :y_mis)
         missing = entry.standardized.value
@@ -371,11 +369,12 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
         entry = (; sampled=missing, standardized=nothing)
     end
     # Completion is a whole covariate value on its original row axis. Keep
-    # the gather and mask in an explicit graph when downstream likelihoods
-    # have different observation axes, rather than inferring a scalar recipe.
+    # its gather in an explicit graph when downstream likelihoods have
+    # different observation axes, rather than inferring a scalar recipe; an
+    # observed row gathers its observed value and reads no drawn entry.
     completed = _rk_block_local!(block, :completed)
     push!(block.statements, Expr(:(=), completed, _rk_ast_statistical_call!(definitions,
-        taken, :brm_completed_covariate, observed, missing, lookup, mask; kernel=true)))
+        taken, :brm_completed_covariate, observed, missing, order; kernel=true)))
     push!(statements, Expr(:call, :~, completion.source,
         _rk_ast_block_call!(definitions, taken, "brm_missing_covariate", block,
             completed)))
@@ -430,8 +429,7 @@ function _rk_emit_missing_totals!(definitions, statements, bindings, taken, comp
     observed = _rk_block_argument!(block, :observed, completion.observed_component)
     free_rows = _rk_block_argument!(block, :free_rows, t.free_rows)
     grouped_rows = _rk_block_argument!(block, :grouped_rows, t.grouped_rows)
-    lookup = _rk_block_argument!(block, :lookup, completion.missing_lookup)
-    mask = _rk_block_argument!(block, :mask, completion.missing_mask)
+    order = _rk_block_argument!(block, :order, completion.order)
     grouped_data = _rk_mi_grouped_arguments!(block, completion)
     free_entry, free = _rk_emit_mi_free!(block, free_part, free_rows)
     shares_sampled, shares = _rk_emit_mi_grouped!(block, grouped_part, grouped_rows,
@@ -440,7 +438,7 @@ function _rk_emit_missing_totals!(definitions, statements, bindings, taken, comp
     push!(block.statements, Expr(:(=), missing, Expr(:call, :vcat, free, shares)))
     completed = _rk_block_local!(block, :completed)
     push!(block.statements, Expr(:(=), completed, _rk_ast_statistical_call!(definitions,
-        taken, :brm_completed_covariate, observed, missing, lookup, mask; kernel=true)))
+        taken, :brm_completed_covariate, observed, missing, order; kernel=true)))
     push!(statements, Expr(:call, :~, completion.source,
         _rk_ast_block_call!(definitions, taken, "brm_missing_covariate", block, completed)))
     (free_entry, (; sampled=shares_sampled, standardized=nothing))

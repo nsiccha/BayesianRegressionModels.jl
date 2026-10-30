@@ -21,7 +21,7 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
             if entry.kind !== :ordinary] == [:plate]
         @test [entry.kind for entry in recipe_inventory(dummy.graph)
             if entry.kind !== :ordinary] == [:plate]
-        @test count(entry -> entry.kind === :plate, recipe_inventory(geometry.graph)) == 3
+        @test count(entry -> entry.kind === :plate, recipe_inventory(geometry.graph)) == 2
         @test Base.invokelatest(prepare(indices), ["a", "b", "a"],
             ["b", "unused", "a"]) == [3, 1, 3]
         @test Base.invokelatest(prepare(dummy), ["a", "b", "a"], "a") == [1., 0., 1.]
@@ -56,10 +56,10 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
             @test isfinite(mean) && isfinite(sd)
         end
         for (observed, jobs, jmis, expected) in (
-                ([3., 7.], [1, 3], [2, 4], ([3., 0., 7., 0.], [1, 1, 1, 2], [0., 1., 0., 1.])),
-                ([3., 5., 7.], [1, 2, 3], Int[], ([3., 5., 7.], [1, 1, 1], zeros(3))),
-                (Float64[], Int[], [1, 2], (zeros(2), [1, 2], ones(2))),
-                (Float64[], Int[], Int[], (Float64[], Int[], Float64[])))
+                ([3., 7.], [1, 3], [2, 4], ([3., 0., 7., 0.], [1, 5, 3, 6])),
+                ([3., 5., 7.], [1, 2, 3], Int[], ([3., 5., 7.], [1, 2, 3])),
+                (Float64[], Int[], [1, 2], (zeros(2), [3, 4])),
+                (Float64[], Int[], Int[], (Float64[], Int[])))
             saved = deepcopy((observed, jobs, jmis))
             @test Base.invokelatest(query, observed, jobs, jmis) == expected
             @test isequal((observed, jobs, jmis), saved)

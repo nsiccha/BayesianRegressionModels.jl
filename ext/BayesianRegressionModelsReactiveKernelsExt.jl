@@ -109,6 +109,16 @@ end
     total
 end
 
+# The shared coordinates of a `car_units` field (src/car_separation.jl): real,
+# packed as themselves, with the density of their separator edges and totals.
+ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMCarShared}, args, shape) =
+    ReactiveKernelsPPL.ParameterGeometry(shape, :(length($(args[1]))); support=:real,
+        constrain=(u, shape, rest...) -> u, unconstrain=(w, shape, rest...) -> w,
+        logjac=(u, shape, rest...) -> zero(eltype(u)))
+ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMCarShared, w) =
+    BRM._brm_car_shared_logdensity(w, d.last, d.scale, d.weight, d.first_entry,
+        d.second_entry)
+
 # A non-centered completion's group term (`BRM._BRMGroupedSharesWeights`): the
 # observed placeholder carries no information, the weight is the density.
 ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMLogWeight, _placeholder) = d.weight

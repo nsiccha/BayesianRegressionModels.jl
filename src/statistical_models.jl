@@ -322,6 +322,16 @@ brm_positions(values) = begin
     return positions
 end
     ),
+    # A generated column of numbers, read by a data-only call, so a broadcast
+    # against a model-level vector reads a model-level vector.
+    brm_values = :(
+brm_values(values) = begin
+    numbers = ReactiveKernels.plate(values) do value
+        1.0 * value
+    end
+    return numbers
+end
+    ),
     # An HSGP `rows=` column as the 0/1 rows its basis carries.
     brm_hsgp_row_mask = :(
 brm_hsgp_row_mask(values) = begin
@@ -339,21 +349,25 @@ brm_hsgp_masked_axis(values) = begin
     return axis
 end
     ),
+    # A completed covariate's geometry: its observed values on the covariate's
+    # rows (0.0 at a missing row), and each row's position in
+    # `vcat(observed_component, missing)`: its own row when observed, else its
+    # missing entry's after the rows. The completion
+    # `vcat(observed_component, missing)[order]` reads a drawn entry only at a
+    # missing row.
     brm_covariate_geometry = :(
 brm_covariate_geometry(observed, observed_rows, missing_rows) = begin
-    rows = 1:(length(observed_rows) + length(missing_rows))
+    n = length(observed_rows) + length(missing_rows)
+    rows = 1:n
     observed_by_row = Dict(zip(observed_rows, observed))
     missing_by_row = Dict(zip(missing_rows, eachindex(missing_rows)))
     observed_component = ReactiveKernels.plate(rows) do row
         get(observed_by_row, row, 0.0)
     end
-    missing_lookup = ReactiveKernels.plate(rows) do row
-        get(missing_by_row, row, 1)
+    order = ReactiveKernels.plate(rows) do row
+        haskey(missing_by_row, row) ? n + missing_by_row[row] : row
     end
-    missing_mask = ReactiveKernels.plate(rows) do row
-        1.0 * haskey(missing_by_row, row)
-    end
-    return (observed_component, missing_lookup, missing_mask)
+    return (observed_component, order)
 end
     ),
     brm_r2d2m2_scale = :(
@@ -364,34 +378,23 @@ brm_r2d2m2_scale(reference, phi, r2, share, variance) = begin
     return reference * sqrt(ratio)
 end
     ),
+    # An observed row reads its observed value and a missing row its drawn
+    # entry: ReactiveKernels computes a gather at the rows read and a `vcat`
+    # operand by operand at the rows read, so a cell on an observed row reads
+    # no drawn entry. The `vcat` is its own statement: a gather whose source is
+    # an inline call has no row form and is computed whole.
     brm_completed_covariate = :(
-brm_completed_covariate(observed, missing, lookup, mask) = begin
-    drawn = missing[lookup]
-    completed = observed .+ mask .* drawn
+brm_completed_covariate(observed, missing, order) = begin
+    stacked = vcat(observed, missing)
+    completed = stacked[order]
     return completed
 end
     ),
-    # A separated `car` field's unit interior from its draws and the shared
-    # values it reads, through its sparse factor (`car_separation.jl`): an
-    # ordinary function, so its loops stay Julia under the graph's AD.
+    # A separated `car` field's shared values from its shared coordinates
+    # (`car_separation.jl`): an ordinary function, linear in their count.
     brm_car_shared_values = :(
-function brm_car_shared_values(w, factor)
-    return BayesianRegressionModels._brm_car_shared_values(w, only(factor))
-end
-    ),
-    brm_car_unit_field = :(
-function brm_car_unit_field(z, shared, factor)
-    return BayesianRegressionModels._brm_car_unit_field(z, shared, only(factor))
-end
-    ),
-    brm_car_unit_field_draws = :(
-function brm_car_unit_field_draws(z, factor)
-    return BayesianRegressionModels._brm_car_unit_field(z, only(factor))
-end
-    ),
-    brm_car_unit_field_shared = :(
-function brm_car_unit_field_shared(shared, factor)
-    return BayesianRegressionModels._brm_car_unit_field_shared(shared, only(factor))
+function brm_car_shared_values(w, last, scale, weight)
+    return BayesianRegressionModels._brm_car_shared_values(w, last, scale, weight)
 end
     ),
     # An ordinary whole-value contrast composes with whole-value smooths.

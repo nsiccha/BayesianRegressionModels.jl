@@ -666,6 +666,22 @@ end
         @test value ≈ values[i] rtol=1e-12
         @test gradient ≈ full[m.view.subject_coordinates[i]] .+ H[:, i] rtol=1e-10 atol=1e-12
     end
+    # A subject whose covariate is observed reads no drawn entry, and one whose
+    # covariate is missing reads its own drawn entry only: its row gathers its
+    # observed value or its entry (`vcat(observed_component, missing)[order]`,
+    # BRM 0.2.74). Before, every observed row looked a drawn entry up and
+    # masked it out, so its cell computed that entry and what it reads; and
+    # the gather read whole, so every cell read every drawn entry.
+    drawn = findall(c -> occursin("y_mis", String(c)),
+        BRM._rk_layout_coordinate_names(backend))
+    @test length(drawn) == count(ismissing, d.w)
+    plate = m.cell_query[1]
+    for i in 1:n
+        point = BRM._BRMNLMERecordingPoint(u, Int[])
+        foreach(k -> BRM._rk_nlme_cell_value(plate.query, point, k), plate.positions[i])
+        observed_here = !ismissing(d.w[findfirst(==(levels[i]), d.subject)])
+        @test length(unique(intersect(point.seen, drawn))) == (observed_here ? 0 : 1)
+    end
 end
 
 # A fixture's subjects repeated to `n`, each copy with its source subject's

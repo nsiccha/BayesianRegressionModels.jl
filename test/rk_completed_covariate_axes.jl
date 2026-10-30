@@ -118,15 +118,16 @@ end
     Core.eval(mod,:(using ReactiveKernels))
     graph = Core.eval(mod,definition)
     @test graph isa ReactiveKernels.KernelSpec
-    # These are named graph ports, rather than algebra hidden in a callback.
+    # These are named graph ports, rather than algebra hidden in a callback:
+    # each row's position in `vcat(observed, missing)` (BRM 0.2.74).
     query = Base.invokelatest(prepare,graph;
-        have=(:observed,:missing,:lookup,:mask),want=(:drawn,:completed))
+        have=(:observed,:missing,:order),want=(:stacked,:completed))
     observed, missing_values = [1.,0.,3.,0.], [5.,7.]
-    lookup, mask = [1,1,1,2], [0.,1.,0.,1.]
-    before = deepcopy((observed,missing_values,lookup,mask))
-    @test Base.invokelatest(query,observed,missing_values,lookup,mask) ==
-        ([5.,5.,5.,7.],[1.,5.,3.,7.])
-    @test isequal(before,(observed,missing_values,lookup,mask))
+    order = [1,5,3,6]
+    before = deepcopy((observed,missing_values,order))
+    @test Base.invokelatest(query,observed,missing_values,order) ==
+        ([1.,0.,3.,0.,5.,7.],[1.,5.,3.,7.])
+    @test isequal(before,(observed,missing_values,order))
     backend = check_rk_source_roundtrip(RKBRMI(brmi))
     @test count(n->occursin(".y_mis.",string(n)),coordinate_names(backend.model.layout)) == 4
 end

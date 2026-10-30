@@ -105,7 +105,7 @@ function _rk_noncentered_completion(c::_RKMissingValueSpec, columns)
     # Free entries are standardized by the law's location and scale.
     c.totals === nothing || !isempty(columns[c.totals.free_rows]) ||
         return _RKMissingValueSpec(c.source, c.observed, c.observed_rows, c.missing_rows,
-            c.observed_component, c.missing_lookup, c.missing_mask, c.nmissing, d, true,
+            c.observed_component, c.order, c.nmissing, d, true,
             c.totals)
     d.callable in _RK_NONCENTERED_LAWS && isempty(d.kwargs) && length(d.args) == 2 ||
         error("RK backend: completions=:noncentered needs a location-scale law " *
@@ -114,7 +114,7 @@ function _rk_noncentered_completion(c::_RKMissingValueSpec, columns)
                 "'s $(length(columns[c.totals.free_rows])) missing entries of no " *
                 "group with a total") * "; its law is `$(d.callable)`")
     _RKMissingValueSpec(c.source, c.observed, c.observed_rows, c.missing_rows,
-        c.observed_component, c.missing_lookup, c.missing_mask, c.nmissing, d, true,
+        c.observed_component, c.order, c.nmissing, d, true,
         c.totals)
 end
 # The completion parametrization of an existing plan, which a replay keeps.
@@ -317,13 +317,24 @@ function _rk_emit_ast(plan::_RKHeldOutPlan; coordinates=nothing)
     _RKEmittedProgram(emitted.defs, main, emitted.bindings)
 end
 
-_rk_observed_names(plan::_RKStructuralPlan) = Tuple(unique(
+_rk_observed_names(plan::_RKStructuralPlan) = (_rk_structural_responses(plan)...,
+    _rk_car_term_placeholders(plan)...)
+# The responses alone: what the fitted source keeps the statements of
+# (`_rk_fitted_source`). A regression inside a value plan has none, and is
+# then kept whole for the value plan to prune.
+_rk_structural_responses(plan::_RKStructuralPlan) = Tuple(unique(
     [name for response in plan.responses for name in
         (response.response, response.extra_responses...)]))
 # With the placeholders whose observation carries a non-centered
 # `mi(x)::shares(total, rows)` completion's group terms (`_rk_mi_grouped_arguments!`).
 _rk_observed_names(plan::_RKValuePlan) = (Tuple(o.name for o in plan.observations)...,
-    (c.totals.weights for c in plan.completions if c.noncentered && c.totals !== nothing)...)
+    (c.totals.weights for c in plan.completions if c.noncentered && c.totals !== nothing)...,
+    _rk_car_term_placeholders(plan)...)
+# The placeholders a `car_units` field's unit terms observe (`_rk_ast_car_separated!`).
+_rk_car_term_placeholders(plan) = Tuple(term.options.separation.terms
+    for predictor in _rk_replay_predictors(plan) for term in predictor.terms
+    if term.kind === :car && get(term.options, :separation, nothing) !== nothing &&
+        term.options.separation.terms !== nothing)
 _rk_observed_names(plan::_RKKernelPlan) = (plan.kernel.data_columns[
     findfirst(==(plan.kernel.obs_response), plan.kernel.slice_params)],)
 _rk_observed_names(plan::_RKHeldOutPlan) = Tuple(
