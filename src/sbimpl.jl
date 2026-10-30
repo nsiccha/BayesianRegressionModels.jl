@@ -17877,4 +17877,7 @@ end
 # the macro (`capturedata`), the same path a `kernel(...)` cell body uses.
 _sb_scalar_expr(x::Expr, _) = Meta.isexpr(x, :->) ? x :
     error("sbimpl: cannot lift to Stan expression: $(typeof(x)): $x")
+# `@brm` captures that lambda with its lexical module (macro.jl `_BRMInlineBody`);
+# StanBlocks traces the lambda itself.
+_sb_scalar_expr(x::_BRMInlineBody, data) = _sb_scalar_expr(_brm_inline_expr(x), data)
 _sb_scalar_expr(x, _) = error("sbimpl: cannot lift to Stan expression: $(typeof(x)): $x")

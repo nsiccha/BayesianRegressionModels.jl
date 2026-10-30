@@ -157,6 +157,12 @@ function _brm_grid_response_fill(brmi::BRMI, response::Symbol)
     values[first_present]
 end
 
+# An `mi()` column (a partly missing response or a completed covariate) is no
+# grid column: `brm_conditional_draws` refuses `mi` models, and a reprocess
+# keeps the fitted missing-row positions.
+_brm_grid_mi_column(brmi::BRMI, column::Symbol) =
+    _brm_has_operation(brmi, column) && _brm_is_completion(_brm_operation(brmi, column))
+
 """
     brm_prediction_grid(d::BRMDescriptor; focal, n=25, fixed=(;)) -> NamedTuple
 
@@ -181,7 +187,8 @@ onto the grid and evaluates it there.
 Response columns are filled with their first non-missing training value.
 That fill is never evaluated: means and predictive draws condition on
 fitted parameter draws, not on it. It only has to satisfy the Stan data
-constraints, which a genuinely observed value does by construction.
+constraints, which a genuinely observed value does by construction. An
+`mi()` column is left out of the grid: conditional draws refuse `mi` models.
 
 The returned `NamedTuple` of equal-length vectors feeds
 `brm_execute(d, :reprocess, grid)` directly. Responses cannot be focal;
@@ -211,10 +218,14 @@ function brm_prediction_grid(d::BRMDescriptor; focal, n::Integer=25,
             "conditional grid; condition one scalar outcome at a time.")
         push!(scalar_responses, outcome.response)
     end
+    gridded = Tuple(c for c in d.columns if !_brm_grid_mi_column(brmi, c))
     for name in names
         name in scalar_responses && error(
             "BRM prediction: response `$name` cannot be focal; condition on " *
             "predictors, not on the response.")
+        name in gridded || error(
+            "BRM prediction: `mi()` column `$name` cannot be focal; " *
+            "conditional grids have no `mi` columns.")
     end
     fixed_map = _brm_grid_fixed(fixed)
     for name in keys(fixed_map)
@@ -223,9 +234,12 @@ function brm_prediction_grid(d::BRMDescriptor; focal, n::Integer=25,
             "Model columns are $(Tuple(d.columns)).")
         name in names && error(
             "BRM prediction: `fixed=` column `$name` is also focal.")
+        name in gridded || error(
+            "BRM prediction: `fixed=` column `$name` is an `mi()` column; " *
+            "conditional grids have no `mi` columns.")
     end
     training = Dict{Symbol,Any}()
-    for column in d.columns
+    for column in gridded
         values = column_data(brmi, column)
         isnothing(values) && error(
             "BRM prediction: model column `$column` is not data-backed in " *
@@ -250,7 +264,7 @@ function brm_prediction_grid(d::BRMDescriptor; focal, n::Integer=25,
     combos = vec(collect(Iterators.product(
         (last(p) for p in focal_values)...)))
     n_grid = length(combos)
-    columns = map(d.columns) do column
+    columns = map(gridded) do column
         values = if any(p -> p.first === column, focal_values)
             axis = findfirst(p -> p.first === column, focal_values)
             [combo[axis] for combo in combos]
@@ -267,7 +281,7 @@ function brm_prediction_grid(d::BRMDescriptor; focal, n::Integer=25,
         end
         column => values
     end
-    NamedTuple{Tuple(d.columns)}(Tuple(last(c) for c in columns))
+    NamedTuple{gridded}(Tuple(last(c) for c in columns))
 end
 
 # ---- outcome-anchored response means ----------------------------------------

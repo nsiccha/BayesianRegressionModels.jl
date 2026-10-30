@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.71
+
+- Fixed: an inline lambda or `do`-block argument of a top-level assignment
+  lowers on SBBRMI again (`cannot lift to Stan expression: _BRMInlineBody`
+  since `33d9f4aa`).
+- Fixed: `brm_prediction_grid` builds for an `mi()` model again: an `mi()`
+  column is left out of the grid, as documented, and is refused by name as a
+  focal or `fixed=` column. Conditional draws still refuse `mi` models.
+- Fixed: `brm_descriptor` and `ranef_blocks` no longer read a structured
+  term's group block (`b_<field>_<group>`, for example a consumer term's
+  `:correlated_normal` field) as an `|ID|` bucket.
+- Fixed: on RKBRMI a Stan-only observation family whose constructor comes from
+  a `_rk_callable_source!` provider keeps that constructor route instead of
+  being refused for lacking an `_rk_observation_source!` provider.
+
 ## 0.2.70
 
 - SBBRMI: `reprocess(sb, rows; resample_groups = [:g])` accepts a grouping

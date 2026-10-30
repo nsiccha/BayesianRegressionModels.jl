@@ -128,7 +128,10 @@ end
     latent=only(filter(c->c.provenance.owner===:wide_parameter,r.components))
     @test latent.provenance.observation_role===:latent_parameter
     @test any(o->o.role===:parameter,latent.outputs)
-    @test any(p->startswith(p,"`wide_parameter` is an unobserved sampled parameter"),r.prose)
+    # A latent scalar whose law reads no row-varying value is a prior since
+    # 9c0e5985: the prior inventory describes it, with no observation component.
+    @test latent.kind===:parameter
+    @test !any(c->c.id==(:observation,:wide_parameter),r.components)
     index=only(findall(p->p.id==id,r.priors))
     md=brm_description_markdown(r;prefix="wide prior law")
     prior_rows=filter(row->startswith(row,"| <span id="),split(md,'\n'))
@@ -144,6 +147,20 @@ end
     @test stan_code(sb)==code && isequal(sb.data,frozen)
     explicit=brm_description(sb;labels=Dict(:y=>(;meaning="y",unit="mg/day")))
     @test occursin("Meaning: y\n",brm_description_markdown(explicit))
+end
+
+@testset "a row-varying latent mediator is an unobserved sampled parameter" begin
+    data=(;y=[.2,.4,.6],x=[1.,2.,3.])
+    model=@brm data begin
+        b ~ Normal(0,1)
+        m ~ Normal(b*x,1)
+        y ~ Normal(m,1)
+    end
+    r=brm_description(SBBRMI(model;mod=@__MODULE__,total_groups=()))
+    @test r.complete
+    latent=only(filter(c->c.id==(:observation,:m),r.components))
+    @test latent.provenance.observation_role===:latent_parameter
+    @test any(p->startswith(p,"`m` is an unobserved sampled parameter"),r.prose)
 end
 const combine_state=DescriptionWideCell.combine_state
 
