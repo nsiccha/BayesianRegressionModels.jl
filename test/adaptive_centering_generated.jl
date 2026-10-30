@@ -244,5 +244,6 @@ end
         y ~ Normal(mu, sigma)
         z ~ Normal(nu, sigma2)
     end
-    @test_throws "`total_nu`" nothing_sampled(totals)
+    # The exact-total path, which is no longer the default since 0.2.3.
+    @test_throws "`total_nu`" nothing_sampled(totals; total_groups = :auto)
 end

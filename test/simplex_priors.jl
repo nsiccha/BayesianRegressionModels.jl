@@ -212,8 +212,10 @@ end
     @test :diet_share in Symbol[x.name for x in linear_predictors(brmi)]
     @test BRM._sb_is_prior_declaration(brmi, :diet_share)
     @test BRM._sb_is_prior_declaration(brmi, :sigma)
-    @test_throws ErrorException popcoefnames(brmi, :diet_share)
-    @test_throws ErrorException popcoefnames(brmi, :sigma)
+    # A prior declaration is not a population formula: popcoefnames answers
+    # nothing for it (db935467).
+    @test isnothing(popcoefnames(brmi, :diet_share))
+    @test isnothing(popcoefnames(brmi, :sigma))
 end
 
 @testset "addressable inside a kernel(...) cell" begin

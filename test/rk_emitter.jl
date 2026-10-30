@@ -3998,13 +3998,15 @@ end
         log_sigma ~ 1 + z
         y ~ Normal(mu, exp(log_sigma))
     end) == "y .~ Normal.(mu, exp.(log_sigma))"
-    # A third predictor behind the two slots stays out.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # A third predictor read by the location is a modeled covariate: since
+    # e5d15510 the value route plans it, `tau` entering `mu`'s design as a
+    # computed column (todo 2026-10-28T21-25-42-464-1izsu69).
+    @test value_observation(@brm df begin
         mu ~ 1 + tau
         log(sigma) ~ 1 + z
         tau ~ 1 + x
         y ~ Normal(mu, sigma)
-    end)
+    end) == "y .~ Normal.(mu, sigma)"
     # Binomial trials cannot be a predictor.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         logit(p) ~ 1 + x
@@ -5117,7 +5119,10 @@ end
     # The cell is the authored subject plate in the model body, with no
     # separately defined reader graph (decision 1dsco4y).
     prog = BRM._rk_emit_ast(plan)
-    @test prog isa BRM._RKEmittedProgram && isempty(prog.defs)
+    # Its only definition is the `flatten_cells` @kernel that reads the plate's
+    # collected value without allocating it per position (e31a5e48).
+    @test prog isa BRM._RKEmittedProgram && length(prog.defs) == 1 &&
+        occursin("flatten_cells", string(only(prog.defs)))
     @test Meta.isexpr(prog.main, :block)
     stmts = filter(s -> !(s isa LineNumberNode), prog.main.args)
     @test any(s -> Meta.isexpr(s, :call) && s.args[1] === :~ && s.args[2] === :sigma,
