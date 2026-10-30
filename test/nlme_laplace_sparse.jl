@@ -504,6 +504,51 @@ end
     @test sum(f1) > sum(fc)
 end
 
+# `@plate` cells: subjects whose cells read their own effect and their rows'
+# nested unit effects (test/nlme_fixtures.jl's `nested_model`), with a
+# Gaussian cell and one whose mean is `exp.(pred)` (non-Gaussian in the
+# effects, so the cells' third derivatives matter).
+spl_plate_exp(data) = @brm data begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + (1 | p | subject)
+    unit_shift ~ 0 + (1 | u | unit)
+    obs = groups(obs_subject => subject)
+    @plate for i in eachindex(mu)
+        pred[i] = mu[i] .+ unit_shift[obs[i]]
+        y[obs[i]] ~ Normal(exp.(pred[i]), sigma)
+    end
+end
+
+@stestset "@plate cells: the sparse Laplace is the whole-model per-unit Laplace" begin
+    rng = Xoshiro(51)
+    for build in (nested_model, spl_plate_exp)
+        rk = RKBRMI(build(NESTED_DATA))
+        sparse = spl_problem(rk, (:subject, :unit))
+        whole = brm_laplace_problem(rk; ad_backend=NLME_AD, subject_group=:subject,
+            nested_groups=(unit=:obs_subject,))
+        @test whole isa BRMLaplaceProblem
+        @test sparse.names == whole.names
+        @test length(sparse.cells) == 1 && length(only(sparse.cells).cells) == 3
+        @test length(sparse.components) == 3
+        for _ in 1:3
+            φ = 0.3 .* randn(rng, length(sparse.population))
+            v1, g1 = LogDensityProblems.logdensity_and_gradient(sparse, φ)
+            v2, g2 = LogDensityProblems.logdensity_and_gradient(whole, φ)
+            @test v1 ≈ v2 rtol=1e-8 atol=1e-8
+            @test g1 ≈ g2 rtol=1e-6 atol=1e-6
+        end
+        φ = 0.3 .* randn(rng, length(sparse.population))
+        @test last(LogDensityProblems.logdensity_and_gradient(sparse, φ)) ≈
+            spl_fd(sparse, φ) rtol=1e-5 atol=1e-5
+        # a copy per chain carries its own cells' AD
+        expected = LogDensityProblems.logdensity_and_gradient(sparse, φ)
+        q = deepcopy(sparse)
+        @test LogDensityProblems.logdensity_and_gradient(q, φ .+ 0.01)[1] ≈
+            LogDensityProblems.logdensity_and_gradient(sparse, φ .+ 0.01)[1] rtol=1e-12
+        @test all(LogDensityProblems.logdensity_and_gradient(q, φ) .≈ expected)
+    end
+end
+
 @stestset "what integrate refuses" begin
     data = SPL_CROSSED
     rk = RKBRMI(@brm data begin

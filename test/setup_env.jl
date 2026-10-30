@@ -208,8 +208,12 @@ const PINS = [
     # ReactiveKernels 0.1.22: a cell computes a value two statements of one
     # `@plate for` read (each a plate of its own), and a dotted value reading an
     # untyped numeric array at literal positions, at its rows (RK snag
-    # form-value-compu-c1e0965c).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "0d3f92345bb719a81f00471aeb240ec897d9fa39"),  # main
+    # form-value-compu-c1e0965c). a959bef75 contains 0d3f92345 and brings
+    # ReactiveKernelsPPL 0.1.22: one cell's Hessian block and third-order
+    # products over a compact selection (`prepare_compact_cell_ad` with
+    # `prepare_ad_hvp` / `prepare_ad_third`, RK snag build-brm-s-spar-454be53f),
+    # which the sparse Laplace's `@plate` cells read.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a959bef75754e7c4666bdafd120ae0ab13343734"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
@@ -218,7 +222,12 @@ const PINS = [
     # beside dense or Const arrays in Reverse and Forward (snag
     # native-reverse-t-6d51cae6), which a totals cell's `hcat` design read at
     # its rows needs; EnzymeCore 0.8.27 comes from its `lib/EnzymeCore`.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "d37cb0b45df7bad731bdb218d50b8f49c35bc99d"),  # dogfood (KB mirror only)
+    # 3e707d79 (libEnzyme build 1797ad22) contains d37cb0b4 and 7a886d9, the
+    # static-activity Reverse repair (Enzyme snag static-reverse-s-f9483e9c):
+    # a load through a select or phi that merges Const data with active data,
+    # which RKPPL's compact-cell AD (`prepare_compact_cell_ad`) runs into under
+    # plain Reverse when the sparse Laplace differentiates an `@plate` cell.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "3e707d7954ed47fb0ca44ca7eea640bf9edf7213"),  # dogfood (KB mirror only)
 ]
 
 # Pins whose commits are not on GitHub: the KB host mirror they come from.

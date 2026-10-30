@@ -258,10 +258,12 @@ end
 
 # Why the model's observations are not all regression responses of a family
 # with closed-form rows, or `nothing` (shared with the sparse Laplace).
-function _brm_slap_response_refusal(backend::RKBRMI)
+function _brm_slap_response_refusal(backend::RKBRMI; cells::Bool=false)
     responses = _brm_slap_responses(backend.plan)
     responses === nothing && return "the RK plan has no likelihood specs"
     other = _brm_slap_other_observations(backend.plan)
+    # the sparse Laplace takes `@plate` cells as terms of their own
+    cells && setdiff!(other, _brm_nlme_plate_observations(backend.plan))
     isempty(other) || return "observation `$(first(other))` is not a regression " *
         "response (it reads a model value or sits in a `@plate` cell)"
     for spec in responses
@@ -455,14 +457,14 @@ end
 # Every term's log density at two points, against RK's own pointwise
 # densities: the families, their parametrization and constants are the
 # model's, or the row structure does not apply.
-function _brm_slap_verify!(p, u0, response, row)
+function _brm_slap_verify!(p, u0, response, row; cells=Set{Symbol}())
     rng = Random.Xoshiro(20261027)
     for u in (u0, u0 .+ 0.1 .* randn(rng, length(u0)))
         ψ = _brm_slap_psi!(zeros(length(p.port)), p, _rk_slap_values(p.kernels, u))
         pointwise = _rk_slap_pointwise(p.kernels, u)
         # Every observation of the model has its rows' terms here.
         for name in keys(pointwise)
-            name in response || _brm_nlme_error("brm_laplace_problem: observation " *
+            name in response || name in cells || _brm_nlme_error("brm_laplace_problem: observation " *
                 "`$name` has no term in the row-structured Laplace, which therefore " *
                 "does not apply")
         end
