@@ -437,6 +437,73 @@ end
     @test_throws r"several levels" spl_problem(RKBRMI(across_model(data)), :kreis)
 end
 
+@stestset "step blocks: the coarsest grouping's levels inside a component" begin
+    # Crossed groupings form one component; its steps go by the coarser
+    # grouping's levels (b, 4 levels).
+    rk = RKBRMI(@brm SPL_CROSSED begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | a) + (1 | b)
+        y ~ Normal(mu, sigma)
+    end)
+    p = spl_problem(rk, (:a, :b))
+    @test length(p.components) == 1
+    @test 1 < length(p.sblocks) <= 4
+    # Nested units: one block per unit, as before.
+    rk = RKBRMI(@brm SPL_NESTED begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | g) + (1 | h)
+        y ~ Normal(mu, sigma)
+    end)
+    q = spl_problem(rk, (:g, :h))
+    @test length(q.sblocks) == length(q.components) == 4
+    # An ICAR field alone: its areas step on their own; the area without rows
+    # ("h") joins its neighbour's block.
+    c = spl_problem(RKBRMI(@brm SPL_CAR begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + car(area; edges=(from, to), type=:icar)
+        y ~ Normal(mu, sigma)
+    end), :area)
+    @test length(c.sblocks) == 6
+    # A non-concave density over crossed groupings (a random effect on the
+    # negative-binomial shape): the blocks step on their own, and where the
+    # component's density does not rise a block Gauss–Seidel sweep follows;
+    # the search converges and the gradient is the marginal's.
+    rng = Xoshiro(47)
+    counts = [rand(rng, NegativeBinomial(2.0, 2.0 / (2.0 + exp(0.8 + e)))) for e in SPL_CROSSED.η]
+    r = spl_problem(RKBRMI(@brm (; SPL_CROSSED.a, SPL_CROSSED.b, SPL_CROSSED.x, y=counts) begin
+        log(mu) ~ 1 + x + (1 | a) + (1 | b)
+        log(shape) ~ 1 + (1 | b)
+        y ~ NegativeBinomial2(mu, shape)
+    end), (:a, :b))
+    scales = findall(m -> occursin(".tau.", String(m)), r.names)
+    for scale in (0.5, 1.5, 2.5)
+        φ = zeros(length(r.population))
+        φ[scales] .= scale
+        value, gradient = LogDensityProblems.logdensity_and_gradient(r, φ)
+        @test isfinite(value) && all(isfinite, gradient)
+        @test gradient ≈ spl_fd(r, φ; h=1e-4) rtol=1e-5 atol=1e-5
+    end
+    @test r.nonfinite == 0 && r.unconverged == 0
+    # Where the full step fails (here a Newton direction scaled by 100), the
+    # blocks step on their own and, where the component's density still does
+    # not rise, a Gauss–Seidel sweep follows; either way the density rises.
+    φ = zeros(length(r.population))
+    φ[scales] .= 1.0
+    pop = BRM._brm_spl_population(r, φ)
+    nz = length(r.integrated)
+    z = 0.3 .* randn(Xoshiro(48), nz)
+    fc = zeros(length(r.components)); g = zeros(nz); h = copy(r.pattern)
+    BRM._brm_spl_assemble!(fc, g, h, r, pop.A, pop.C, z; derivatives=true)
+    δ = 100 .* BRM._brm_spl_direction(r, h, g)
+    before = (r.blockwise, r.sweeps)
+    z1 = copy(z)
+    @test BRM._brm_spl_step!(r, pop, z1, δ, g, h, fc, falses(length(r.components)))
+    @test r.blockwise == before[1] + 1
+    f1 = zeros(length(r.components))
+    BRM._brm_spl_assemble!(f1, nothing, nothing, r, pop.A, pop.C, z1; derivatives=false)
+    @test sum(f1) > sum(fc)
+end
+
 @stestset "what integrate refuses" begin
     data = SPL_CROSSED
     rk = RKBRMI(@brm data begin

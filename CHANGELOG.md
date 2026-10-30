@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.78
+
+- Changed: inside one component of a `BRMSparseLaplaceProblem` (a field
+  across the units, crossed groupings), the mode search no longer takes one
+  step length for the whole component. It tries the full Newton step; where
+  that fails, the component's step blocks (`target.sblocks`, the levels of the
+  coarsest integrated grouping its rows read) each halve their own step until
+  their own terms gain, and a block Gauss–Seidel sweep follows where the
+  component's density still did not rise. `target.blockwise` and
+  `target.sweeps` count both. Modes, values and gradients are unchanged where
+  the search converged before.
+- Faster: each block's probes take derivatives along its own scale
+  coordinates only, and an affine population part comes from its Jacobian
+  (about 23 % less time per value and gradient on a nested panel of 12 × 400
+  units).
+
 ## 0.2.77
 
 - A non-centered grouped completion (`mi(x)::shares(total, rows)` on
