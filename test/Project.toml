@@ -76,7 +76,10 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # holds: after 100 misses it inverts the base CDF on the window (snag
 # truncated-rng-re-bd555cae), which BRM's omitted truncated responses and `_gen`
 # draws call.
-rev = "9a4fb3a6ba0ec559eddaf5673afed107ac30a254"
+# 566bbc0f (StanBlocks 0.2.7) adds `restricted(family, args...; lower, upper)`:
+# the bounds go on the declaration and the family keeps its plain kernel (snag
+# in-slic-declare-996328e0), which SBBRMI emits for every prior bound.
+rev = "566bbc0ffd6372a927876df2f298158957af3e51"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
