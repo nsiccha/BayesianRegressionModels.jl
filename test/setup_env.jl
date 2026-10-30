@@ -200,8 +200,12 @@ const PINS = [
     # 0.1.18: a number a cell computes that two of its values read at rows
     # evaluates instead of raising `MethodError` in `_cell_take_rows` (RK snag
     # cell-take-rows-s-e48675d0; ArbeitsplatzAtlas's `beschaeftigte_eg_kg`
-    # cells).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "5e288b439f2c8e3bb6e267263cf4686a8ab699d3"),  # main
+    # cells). 51c8a1c4a contains 5e288b439 and is ReactiveKernels 0.1.21: a cell
+    # computes `view(A, :, k)`, RKPPL's lowering of a column read `A[:, k]`, at
+    # its rows, so the columns of a joint population effect (`pop[:, j]`) and
+    # their design are computed at the rows a cell reads (RK snag
+    # column-read-lowe-24508269).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "51c8a1c4a93fa0066025f749a536b2e0a75b8cec"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
