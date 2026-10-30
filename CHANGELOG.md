@@ -12,6 +12,27 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.70
+
+- SBBRMI: `reprocess(sb, rows; resample_groups = [:g])` accepts a grouping
+  column `g` of a shared `|ID|` block whose predictors join several columns by
+  label (`(1 | k | kreis)` beside `(1 | k | kreis_b)`). Before, it was refused.
+  - Naming some of the block's columns redraws the margins their predictors
+    read, for every label those columns name in `rows`. A label that is a
+    fitted joint level (another column observes it) keeps its fitted margins
+    there and draws the redrawn ones from the block's law given them; a label
+    the fit never saw draws all of them. The fitted block stays a parameter,
+    which the other columns' predictors read as fitted, so the replay has the
+    fit's coordinates. Student-t levels keep their fitted weight or draw one.
+  - Naming every column redraws the whole block over the labels they name,
+    like an ordinary block.
+  - It composes with a `cdar(step; by = g, ...)` walk on the same column, whose
+    levels `resample_groups` already redraws (0.2.36).
+  - Refused: some columns of a joined block with `freeze_constants = false`
+    (the redraw is given the fitted block, which a fresh replay rebuilds), and
+    any joined column on RKBRMI.
+  - Snag `reprocess-resamp-dab66282`.
+
 ## 0.2.69
 
 - An NLME model's preparations are counted in its progress tree.
