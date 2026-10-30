@@ -36,21 +36,29 @@
 function _rk_slap_values_and_tangents end
 
 # An integrated block: its draws' indices in the integrated vector z (levels ×
-# margins), and the `omega` entries (scales, correlation factor) that move how
-# its draws enter the rows.
+# margins), the `omega` entries (scales, correlations, persistence) that move
+# how its draws enter the rows, and its prior precision: the identity
+# (standardized draws) or, for an areal field's draws (one margin), the graph
+# Laplacian of its `edges` (level pairs) plus λ 11ᵀ over each soft-sum
+# component's levels.
 struct _BRMSlapBlock
     declaration::Symbol
     group::Symbol
     K::Int
     z::Matrix{Int}
     omega::Vector{Int}
+    edges::Matrix{Int}
+    sums::Vector{Vector{Int}}
+    λ::Vector{Float64}
 end
+_brm_spl_identity(b::_BRMSlapBlock) = isempty(b.sums) && size(b.edges, 2) == 0
 
 """
     BRMSparseLaplaceProblem
 
 The Laplace of a regression-shaped RK model with every level of chosen
-random-effect groupings integrated by one sparse Laplace; see
+groupings' random-effect blocks, `cdar` walks and `car` fields integrated by
+one sparse Laplace; see
 [`brm_laplace_problem`](@ref)'s `integrate`. Same interface as
 [`BRMStructuredLaplaceProblem`](@ref): LogDensityProblems order 1 over `names`
 (packed positions `population`), [`brm_laplace_draws`](@ref), and the counters
@@ -101,6 +109,13 @@ mutable struct BRMSparseLaplaceProblem{K}
     component::Vector{Int}
     components::Vector{Vector{Int}}
     term_component::Vector{Int}
+    # The prior precision's sparse part on h's pattern (`prior_nz`, `prior_val`)
+    # and its soft sums' rank-one part U Λ Uᵀ, U's columns the effects of
+    # `wcols[c]`, Λ = diag(`wλ`), which stays out of the factor (Woodbury).
+    prior_nz::Vector{Int}
+    prior_val::Vector{Float64}
+    wcols::Vector{Vector{Int}}
+    wλ::Vector{Float64}
     omega::Vector{Int}
     affine::Bool
     φ0::Vector{Float64}
@@ -118,7 +133,7 @@ end
 
 Base.show(io::IO, p::BRMSparseLaplaceProblem) = print(io,
     "BRMSparseLaplaceProblem(", length(p.population), " population coordinates, ",
-    length(p.integrated), " integrated random effects of ", join(p.integrate, ", "),
+    length(p.integrated), " integrated effects of ", join(p.integrate, ", "),
     " in ", length(p.components), " components, ", length(p.family),
     " likelihood terms)")
 
@@ -137,26 +152,51 @@ function _brm_slap_zero_integrated!(u, p::BRMSparseLaplaceProblem)
     u
 end
 
-# The model's random-effect blocks over the named groupings.
+# The grouping column a latent block is integrated by: a random-effect block's
+# and a `cdar` walk's group, a `car` field's area column.
+_brm_spl_record_group(r) = r.kind === :car ? r.area : r.group
+const _BRM_SPL_LATENT = (:ranef, :stratified_ranef, :car, :cdar)
+
+# The model's latent blocks over the named grouping columns.
 function _brm_spl_records(backend::RKBRMI, integrate)
-    records = [r for r in _rk_coordinate_records(backend.plan)
-        if r.kind in (:ranef, :stratified_ranef)]
-    available = unique(Symbol[r.group for r in records])
+    records = [r for r in _rk_coordinate_records(backend.plan) if r.kind in _BRM_SPL_LATENT]
+    available = unique(Symbol[_brm_spl_record_group(r) for r in records])
     for g in integrate
         g in available || _brm_nlme_error("brm_laplace_problem: integrate names " *
-            "`$g`, which groups no random-effect block of the model; its random-effect " *
-            "groupings are $(isempty(available) ? "none" : join(repr.(available), ", "))")
+            "`$g`, which groups no random-effect block, `cdar` walk or `car` field of " *
+            "the model; its groupings are " *
+            "$(isempty(available) ? "none" : join(repr.(available), ", "))")
     end
-    chosen = [r for r in records if r.group in integrate]
+    chosen = [r for r in records if _brm_spl_record_group(r) in integrate]
     for r in chosen
-        r.kind === :ranef || _brm_nlme_error("brm_laplace_problem: the random-effect " *
-            "block over `$(r.group)` is stratified, which the sparse Laplace does not " *
-            "integrate yet")
-        get(r, :mixing, nothing) === nothing || _brm_nlme_error("brm_laplace_problem: " *
-            "the random-effect block over `$(r.group)` is Student-t, so its draws are " *
-            "not Gaussian and cannot be integrated by a Laplace")
+        r.kind === :stratified_ranef && _brm_nlme_error("brm_laplace_problem: the " *
+            "random-effect block over `$(r.group)` is stratified, which the sparse " *
+            "Laplace does not integrate yet")
+        r.kind === :ranef && get(r, :mixing, nothing) !== nothing &&
+            _brm_nlme_error("brm_laplace_problem: the random-effect block over " *
+                "`$(r.group)` is Student-t, so its draws are not Gaussian and cannot be " *
+                "integrated by a Laplace")
+        r.kind === :car && r.separation !== nothing && _brm_nlme_error(
+            "brm_laplace_problem: the `car($(r.area))` field is lowered with " *
+            "`car_units`, whose draws the sparse Laplace does not integrate; build the " *
+            "RKBRMI without `car_units` to integrate the field whole")
     end
     chosen
+end
+
+# A default-lowered `car` field's graph over its structured areas (its `phi`
+# draws): the edges, and per connected component its areas and the precision
+# λ = 1/(0.001 n)² of its soft sum-to-zero, from the plan's `car` term.
+function _brm_spl_car_graph(backend::RKBRMI, r)
+    terms = [t for predictor in _brm_slap_predictors(backend.plan) for t in predictor.terms
+        if t.kind === :car && t.options.value === r.declaration]
+    length(terms) == 1 || _brm_nlme_error("brm_laplace_problem: internal: " *
+        "$(length(terms)) `car` terms define `$(r.declaration)`")
+    options = only(terms).options
+    data = rk_bound_data(backend)
+    edges = permutedims(hcat(Int.(data[options.node1]), Int.(data[options.node2])))
+    sums = [collect(start:(start + size - 1)) for (start, size) in options.components]
+    (; S=sum(length, sums; init=0), edges, sums, λ=[1 / (0.001 * length(c))^2 for c in sums])
 end
 
 function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol,
@@ -177,36 +217,65 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     integrated = Int[]
     omega = Int[]
     blocks = _BRMSlapBlock[]
-    for r in records
-        K = length(r.margins)
-        nlevels = length(_rk_ranef_record_levels(backend, r))
-        z = Matrix{Int}(undef, nlevels, K)
-        for l in 1:nlevels, k in 1:K
-            push!(integrated, get(position, Symbol(r.z, ".", l, ".", k)) do
-                _brm_nlme_error("brm_laplace_problem: internal: draw `$(r.z).$l.$k` " *
+    function draws!(labels::AbstractMatrix{Symbol})
+        z = Matrix{Int}(undef, size(labels))
+        for l in axes(labels, 1), k in axes(labels, 2)
+            push!(integrated, get(position, labels[l, k]) do
+                _brm_nlme_error("brm_laplace_problem: internal: draw `$(labels[l, k])` " *
                     "is not packed")
             end)
             z[l, k] = length(integrated)
         end
-        own = Int[]
-        for declaration in (isnothing(r.scales) ? (r.scale,) : r.scales)
-            append!(own, owned(declaration))
-        end
-        isnothing(r.L) || append!(own, owned(r.L))
+        z
+    end
+    function block!(declaration, group, z, hyper; edges=zeros(Int, 2, 0),
+            sums=Vector{Int}[], λ=Float64[])
         js = Int[]
-        for i in own
+        for d in hyper, i in owned(d)
             j = findfirst(==(i), omega)
             j === nothing && (push!(omega, i); j = length(omega))
             push!(js, j)
         end
-        push!(blocks, _BRMSlapBlock(_brm_nlme_ranef_declaration(r), r.group, K, z, js))
+        push!(blocks, _BRMSlapBlock(declaration, group, size(z, 2), z, unique(js), edges,
+            sums, λ))
+    end
+    for r in records
+        if r.kind === :ranef
+            nlevels = length(_rk_ranef_record_levels(backend, r))
+            z = draws!([Symbol(r.z, ".", l, ".", k) for l in 1:nlevels, k in 1:length(r.margins)])
+            block!(_brm_nlme_ranef_declaration(r), r.group, z,
+                ((isnothing(r.scales) ? (r.scale,) : r.scales)...,
+                    (isnothing(r.L) ? () : (r.L,))...))
+        elseif r.kind === :cdar
+            # standardized innovations, groups × steps; scale and persistence
+            eta = Symbol(r.declaration, ".", r.locals.eta)
+            z = draws!([Symbol(eta, ".", g, ".", w) for g in 1:length(r.levels),
+                w in 1:length(r.steps)])
+            block!(r.declaration, r.group, z, (Symbol(r.declaration, ".", r.locals.sigma),
+                Symbol(r.declaration, ".", r.locals.rho)))
+        else
+            # an areal field's structured values under its ICAR prior and, for
+            # BYM2, each area's iid part
+            graph = _brm_spl_car_graph(backend, r)
+            hyper = (Symbol(r.declaration, ".", r.locals.sigma),
+                (r.type === :bym2 ? (Symbol(r.declaration, ".", r.locals.rho),) : ())...)
+            phi = Symbol(r.declaration, ".", r.locals.phi)
+            block!(r.declaration, r.area, draws!(reshape([Symbol(phi, ".", l)
+                for l in 1:graph.S], :, 1)), hyper; graph.edges, graph.sums, graph.λ)
+            if r.type === :bym2
+                theta = Symbol(r.declaration, ".", r.locals.theta)
+                ntheta = count(n -> _brm_nlme_owned(n, theta), names)
+                block!(theta, r.area, draws!(reshape([Symbol(theta, ".", l)
+                    for l in 1:ntheta], :, 1)), hyper)
+            end
+        end
     end
     allunique(integrated) || _brm_nlme_error("brm_laplace_problem: internal: a draw " *
         "belongs to two integrated blocks")
     population = setdiff(1:length(names), integrated)
-    # Random-effect draws left to the target make A bilinear in the population.
-    sampled = any(r -> r.group ∉ integrate, (r for r in _rk_coordinate_records(backend.plan)
-        if r.kind in (:ranef, :stratified_ranef)))
+    # Latent draws left to the target make A bilinear in the population.
+    sampled = any(r -> r.kind in _BRM_SPL_LATENT && _brm_spl_record_group(r) ∉ integrate,
+        _rk_coordinate_records(backend.plan))
     families, ports = _brm_slap_ports(backend, responses)
     u0 = zeros(Float64, length(names))
     kernels = _rk_slap_kernels(backend, Tuple(ports), (), omega, u0, ad_backend)
@@ -218,7 +287,8 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         integrated, blocks, kernels, t.family, t.y, t.trials, t.constant, t.entry,
         fill(true, length(t.family)), t.port, t.index, t.link, t.fixed,
         Int[], Int[], Int[], Int[], Int[], Vector{Int}[], Int[], Int[], Int[], Int[], Int[],
-        spzeros(0, 0), Int[], Int[], Vector{Int}[], Int[], omega, false,
+        spzeros(0, 0), Int[], Int[], Vector{Int}[], Int[], Int[], Float64[], Vector{Int}[],
+        Float64[], omega, false,
         u0[population], zeros(nψ), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
         Float64(tol), Int(maxiter), 0, 0)
     _brm_spl_design!(p, u0)
@@ -370,8 +440,26 @@ function _brm_spl_cdot(p::BRMSparseLaplaceProblem, C, e, z)
     s
 end
 
-# The integrated draws' prior must be N(0, I) and depend on nothing else:
-# the value adds −|ẑ|²/2 and the population prior is RK's at ẑ = 0.
+# zᵀ P z for the integrated draws' prior precision P.
+function _brm_spl_prior_quad(p::BRMSparseLaplaceProblem, z)
+    q = 0.0
+    for b in p.blocks
+        if _brm_spl_identity(b)
+            q += sum(i -> z[i]^2, b.z; init=0.0)
+            continue
+        end
+        for e in axes(b.edges, 2)
+            q += (z[b.z[b.edges[1, e], 1]] - z[b.z[b.edges[2, e], 1]])^2
+        end
+        for (c, levels) in enumerate(b.sums)
+            q += b.λ[c] * sum(l -> z[b.z[l, 1]], levels)^2
+        end
+    end
+    q
+end
+
+# The integrated draws' prior must be the blocks' Gaussian, −½ zᵀPz, and
+# depend on nothing else: the value adds that and RK's prior at z = 0.
 function _brm_spl_verify_prior(p::BRMSparseLaplaceProblem, u0)
     rng = Random.Xoshiro(20261031)
     for _ in 1:2
@@ -381,10 +469,10 @@ function _brm_spl_verify_prior(p::BRMSparseLaplaceProblem, u0)
         uA = _brm_slap_zero_integrated!(copy(u), p)
         u[p.integrated] .= z
         Δ = _rk_slap_prior(p.kernels, u) - _rk_slap_prior(p.kernels, uA)
-        isapprox(Δ, -sum(abs2, z) / 2; rtol=1e-9, atol=1e-9) || _brm_nlme_error(
-            "brm_laplace_problem: the integrated random effects' prior is not N(0, I) " *
-            "in their packed coordinates (adaptive centring or a constrained block), " *
-            "so the sparse Laplace does not apply")
+        isapprox(Δ, -_brm_spl_prior_quad(p, z) / 2; rtol=1e-9, atol=1e-9) ||
+            _brm_nlme_error("brm_laplace_problem: the integrated effects' prior is not " *
+                "the Gaussian of their blocks in their packed coordinates (adaptive " *
+                "centring or a constrained block), so the sparse Laplace does not apply")
     end
     nothing
 end
@@ -418,10 +506,30 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
             j in p.tptr[t]:(p.tptr[t + 1] - 1)
         push!(I, p.tz[i]); push!(J, p.tz[j])
     end
+    edges = [(b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]) for b in p.blocks
+        for e in axes(b.edges, 2)]
+    for (i, j) in edges
+        push!(I, i, j); push!(J, j, i)
+    end
     pattern = sparse(I, J, 1.0, n, n)
     nonzeros(pattern) .= 0.0
     index(i, j) = (r = nzrange(pattern, j); r[searchsortedfirst(view(rowvals(pattern), r), i)])
     p.diagonal = [index(i, i) for i in 1:n]
+    # The prior precision's sparse part: the identity, or a field's Laplacian.
+    prior = Dict{Int,Float64}()
+    for b in p.blocks
+        _brm_spl_identity(b) || continue
+        for i in b.z
+            prior[index(i, i)] = get(prior, index(i, i), 0.0) + 1.0
+        end
+    end
+    for (i, j) in edges, (a, c, v) in ((i, i, 1.0), (j, j, 1.0), (i, j, -1.0), (j, i, -1.0))
+        prior[index(a, c)] = get(prior, index(a, c), 0.0) + v
+    end
+    p.prior_nz = collect(keys(prior))
+    p.prior_val = [prior[k] for k in p.prior_nz]
+    p.wcols = [[b.z[l, 1] for l in levels] for b in p.blocks for levels in b.sums]
+    p.wλ = [λ for b in p.blocks for λ in b.λ]
     p.nptr = [1]; p.tnz = Int[]
     for t in eachindex(p.family)
         zs = view(p.tz, p.tptr[t]:(p.tptr[t + 1] - 1))
@@ -434,12 +542,18 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
     # Components by union-find over the terms' effects.
     parent = collect(1:n)
     root(i) = (while parent[i] != i; parent[i] = parent[parent[i]]; i = parent[i]; end; i)
+    join!(i, j) = (a = root(i); b = root(j); a == b || (parent[a] = b); nothing)
     for t in eachindex(p.family)
         zs = view(p.tz, p.tptr[t]:(p.tptr[t + 1] - 1))
         for i in Iterators.drop(zs, 1)
-            a, b = root(first(zs)), root(i)
-            a == b || (parent[a] = b)
+            join!(first(zs), i)
         end
+    end
+    for (i, j) in edges
+        join!(i, j)
+    end
+    for cols in p.wcols, i in Iterators.drop(cols, 1)
+        join!(first(cols), i)
     end
     roots = [root(i) for i in 1:n]
     labels = Dict{Int,Int}()
@@ -450,6 +564,14 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
     end
     p.term_component = [p.tptr[t + 1] > p.tptr[t] ? p.component[p.tz[p.tptr[t]]] : 0
         for t in eachindex(p.family)]
+    read = falses(n)
+    read[p.tz] .= true
+    for cols in p.wcols
+        any(i -> read[i], cols) || _brm_nlme_error("brm_laplace_problem: a component of " *
+            "$(length(cols)) areas of a `car` field is read by no row, so the field's " *
+            "level there is its prior's alone and h is singular; integrate a model whose " *
+            "rows read every component")
+    end
     p
 end
 
@@ -478,14 +600,7 @@ end
 # when given, keep each term's row and C rows.
 function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
         derivatives::Bool, third::Bool=false, rows=nothing, crows=nothing)
-    for (c, members) in enumerate(p.components)
-        fc[c] = -sum(i -> z[i]^2, members) / 2
-    end
-    if derivatives
-        g .= .-z
-        fill!(nonzeros(hnz), 0.0)
-        nonzeros(hnz)[p.diagonal] .= 1.0
-    end
+    _brm_spl_prior!(fc, derivatives ? g : nothing, derivatives ? hnz : nothing, p, z)
     rest = 0.0
     mmax = maximum(t -> p.tptr[t + 1] - p.tptr[t], eachindex(p.family); init=0)
     c1 = zeros(mmax); c2 = zeros(mmax)
@@ -527,6 +642,77 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
     rest
 end
 
+# The integrated draws' prior −½ zᵀPz into `fc` per component, its gradient
+# −Pz into `g` and P's sparse part into h's nonzeros (the soft sums' rank-one
+# part stays out of h, see `_brm_spl_woodbury`).
+function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z)
+    fill!(fc, 0.0)
+    g === nothing || fill!(g, 0.0)
+    for b in p.blocks
+        if _brm_spl_identity(b)
+            for i in b.z
+                fc[p.component[i]] -= z[i]^2 / 2
+                g === nothing || (g[i] -= z[i])
+            end
+            continue
+        end
+        for e in axes(b.edges, 2)
+            i, j = b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]
+            d = z[i] - z[j]
+            fc[p.component[i]] -= d^2 / 2
+            if g !== nothing
+                g[i] -= d
+                g[j] += d
+            end
+        end
+        for (c, levels) in enumerate(b.sums)
+            total = sum(l -> z[b.z[l, 1]], levels)
+            fc[p.component[b.z[first(levels), 1]]] -= b.λ[c] * total^2 / 2
+            if g !== nothing
+                for l in levels
+                    g[b.z[l, 1]] -= b.λ[c] * total
+                end
+            end
+        end
+    end
+    if hnz !== nothing
+        nz = nonzeros(hnz)
+        fill!(nz, 0.0)
+        for (k, v) in zip(p.prior_nz, p.prior_val)
+            nz[k] += v
+        end
+    end
+    nothing
+end
+
+# With the factor F of A = h − U Λ Uᵀ (h without the soft sums' rank-one
+# part): X = A⁻¹U and the Cholesky factor of G = Λ⁻¹ + UᵀX, or `nothing` when
+# no block has soft sums. Then h⁻¹ = A⁻¹ − X G⁻¹ Xᵀ and log det h = log det A +
+# log det G + Σ log λ, with k extra solves for k sums.
+function _brm_spl_woodbury(p::BRMSparseLaplaceProblem, F)
+    isempty(p.wcols) && return nothing
+    U = zeros(length(p.integrated), length(p.wcols))
+    for (c, cols) in enumerate(p.wcols)
+        U[cols, c] .= 1.0
+    end
+    X = F \ U
+    (; U, X, G=cholesky(Symmetric(Diagonal(1 ./ p.wλ) + U' * X)))
+end
+
+_brm_spl_solve(F, W, b) = (x = F \ b; W === nothing ? x : x .- W.X * (W.G \ (W.U' * x)))
+_brm_spl_logdet(p::BRMSparseLaplaceProblem, F, W) =
+    logdet(F) + (W === nothing ? 0.0 : logdet(W.G) + sum(log, p.wλ))
+
+# A draw from N(0, h⁻¹): x ~ N(0, A⁻¹) through A's factor, then for the soft
+# sums x − X G⁻¹ (Uᵀx + η), η ~ N(0, Λ⁻¹), whose covariance is
+# A⁻¹ − X G⁻¹ Xᵀ = h⁻¹.
+function _brm_spl_draw(p::BRMSparseLaplaceProblem, state, rng)
+    x = state.F.UP \ randn(rng, length(p.integrated))
+    W = state.W
+    W === nothing && return x
+    x .- W.X * (W.G \ (W.U' * x .+ randn(rng, length(p.wλ)) ./ sqrt.(p.wλ)))
+end
+
 # The factor of h + shift I, reusing the symbolic analysis.
 function _brm_spl_factor!(p::BRMSparseLaplaceProblem, h; shift=0.0)
     H = Hermitian(h, :L)
@@ -542,11 +728,11 @@ end
 # the mode, (h + μ I)⁻¹ g with the smallest μ = 10^k (k ≥ −4) that is.
 function _brm_spl_direction(p::BRMSparseLaplaceProblem, h, g)
     F = _brm_spl_factor!(p, h)
-    issuccess(F) && return F \ g
+    issuccess(F) && return _brm_spl_solve(F, _brm_spl_woodbury(p, F), g)
     μ = 1e-4
     for _ in 1:12
         F = _brm_spl_factor!(p, h; shift=μ)
-        issuccess(F) && return F \ g
+        issuccess(F) && return _brm_spl_solve(F, _brm_spl_woodbury(p, F), g)
         μ *= 10
     end
     nothing
@@ -650,7 +836,7 @@ function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     p.u[p.integrated] .= z
     u = copy(pop.uA)
     u[p.integrated] .= z
-    (; finite=true, pop..., z, u, h, F, iterations)
+    (; finite=true, pop..., z, u, h, F, W=_brm_spl_woodbury(p, F), iterations)
 end
 
 function _brm_spl_value(p::BRMSparseLaplaceProblem, state)
@@ -659,7 +845,7 @@ function _brm_spl_value(p::BRMSparseLaplaceProblem, state)
     rest = _brm_spl_assemble!(fc, nothing, nothing, p, state.A, state.C, state.z;
         derivatives=false, third=true)
     sum(p.constant) + sum(fc) + rest + length(p.integrated) / 2 * log(2π) -
-        logdet(state.F) / 2 + _rk_slap_prior(p.kernels, state.uA)
+        _brm_spl_logdet(p, state.F, state.W) / 2 + _rk_slap_prior(p.kernels, state.uA)
 end
 
 # Value and gradient over the population coordinates: the structured path's
@@ -675,9 +861,18 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state)
     crows = Vector{Tuple{Vector{Float64},Vector{Float64}}}(undef, nterms)
     rest = _brm_spl_assemble!(fc, nothing, nothing, p, state.A, state.C, state.z;
         derivatives=false, third=true, rows, crows)
-    value = sum(p.constant) + sum(fc) + rest + n / 2 * log(2π) - logdet(state.F) / 2
+    value = sum(p.constant) + sum(fc) + rest + n / 2 * log(2π) -
+        _brm_spl_logdet(p, state.F, state.W) / 2
     Z = selinv(state.F; depermute=true).Z
     S = nonzeros(selinv_extract(Z, p.pattern))
+    if state.W !== nothing
+        # h⁻¹ = A⁻¹ − X G⁻¹ Xᵀ on the pattern.
+        Y = (state.W.G \ state.W.X')'
+        prow = rowvals(p.pattern)
+        for j in axes(p.pattern, 2), k in nzrange(p.pattern, j)
+            S[k] -= dot(view(Y, prow[k], :), view(state.W.X, j, :))
+        end
+    end
     s = zeros(n)
     taus = zeros(2, nterms)
     @inbounds for t in 1:nterms
@@ -702,7 +897,7 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state)
             s[zs[i]] += (c1[i] * τ1 + (moving ? c2[i] * τ2 : 0.0)) / 2
         end
     end
-    v = state.F \ s
+    v = _brm_spl_solve(state.F, state.W, s)
     w = zeros(length(p.port))
     gω = zeros(length(p.omega))
     LCS = Float64[]
@@ -799,23 +994,27 @@ function brm_laplace_draws(p::BRMSparseLaplaceProblem, P::AbstractMatrix;
             "brm_laplace_draws: population draw $k has a nonfinite density")
         newton_steps[k] = state.iterations
         draws[:, k] .= state.u
-        UP = state.F.UP
         if conditional == 0
-            draws[p.integrated, k] .+= UP \ randn(rng, n)
+            draws[p.integrated, k] .+= _brm_spl_draw(p, state, rng)
             continue
         end
-        perm_component = p.component[state.F.p]
         fc = zeros(nc)
         logw = zeros(nc, conditional)
         proposals = Matrix{Float64}(undef, n, conditional)
         for j in 1:conditional
-            ε = randn(rng, n)
-            proposals[:, j] .= state.z .+ UP \ ε
+            d = _brm_spl_draw(p, state, rng)
+            proposals[:, j] .= state.z .+ d
             _brm_spl_assemble!(fc, nothing, nothing, p, state.A, state.C,
                 view(proposals, :, j); derivatives=false)
             logw[:, j] .= fc
-            for q in 1:n
-                logw[perm_component[q], j] += ε[q]^2 / 2
+            # less the proposal's log density, −½ dᵀ h d per component (h is
+            # block-diagonal over the components), up to its constant
+            hd = state.h * d
+            for i in 1:n
+                logw[p.component[i], j] += d[i] * hd[i] / 2
+            end
+            for (c, cols) in enumerate(p.wcols)
+                logw[p.component[first(cols)], j] += p.wλ[c] * sum(view(d, cols))^2 / 2
             end
         end
         for c in 1:nc

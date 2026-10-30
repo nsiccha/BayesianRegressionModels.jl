@@ -73,11 +73,16 @@ is one reverse sweep of the likelihood parameters. Otherwise it is a
 requires the first (refusing with the reason), `false` forces the second.
 
 `integrate = :g` or `integrate = (:g, :h, …)` instead integrates every level
-of the named groupings' random-effect blocks by one sparse Laplace, whatever
-their nesting: crossed groupings, nested ones with any number of levels per
-parent, groupings that cut across the NLME units. The problem is then a
-[`BRMSparseLaplaceProblem`](@ref) over every other coordinate, the random-effect
-draws of the other groupings included. It is built on the structured
+of the named grouping columns' latent blocks by one sparse Laplace, whatever
+their nesting: random-effect blocks over the grouping, `cdar(step; by=g)` walks
+(their standardized innovations) and `car(g; edges)` fields over an area column
+(ICAR values under their graph precision, BYM2's iid parts too; the default
+lowering, not `car_units`). Groupings may be crossed, nested with any number
+of levels per parent, or cut across the NLME units. The problem is then a
+[`BRMSparseLaplaceProblem`](@ref) over every other coordinate, the latent
+draws of the other groupings included. A field's per-component soft
+sum-to-zero stays out of the sparse factor (Woodbury); every component must be
+read by some row. It is built on the structured
 problem's rows and needs the same model shape (every observation a regression
 response of one of its four families). The integrated effects' negative
 Hessian `I + Cᵀ W C` is sparse and factored by CHOLMOD at every Newton step;
