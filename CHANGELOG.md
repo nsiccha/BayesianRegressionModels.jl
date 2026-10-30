@@ -12,6 +12,16 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.72
+
+- Fixed: `deepcopy` of an `RKBRMI`, a `BRMNLMEModel`, a `BRMLaplaceProblem`
+  and a `BRMStructuredLaplaceProblem` works again (it raised `deepcopy of
+  Modules not supported`). A copy shares the backend's translated program
+  (code, like a compiled function) and copies its data, model and workspaces,
+  so WarmupHMC's samplers that copy their density per chain
+  (`adaptive_warmup_mcmc(rngs, target)`, `completion_warmup_mcmc`) run on these
+  targets.
+
 ## 0.2.71
 
 - Fixed: an inline lambda or `do`-block argument of a top-level assignment

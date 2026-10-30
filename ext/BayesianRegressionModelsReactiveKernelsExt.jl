@@ -193,6 +193,10 @@ struct _RKProgram
     mod::Module
 end
 _RKProgram(emitted::BRM._RKEmittedProgram) = _RKProgram(emitted, _rk_emit_module(emitted))
+# A program is code, as a compiled function is: a copy of a backend (a
+# per-chain copy) shares it with the original, and its replays share it too.
+# Julia refuses to deepcopy the module it holds.
+Base.deepcopy_internal(program::_RKProgram, ::IdDict) = program
 
 # Lowering reads the data values' shapes (rkppl-use §1), so each binding
 # lowers; the definitions are evaluated once per program. A data-free plan
