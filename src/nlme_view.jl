@@ -899,8 +899,11 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             # A field lowered by its unit border separator
             # (`RKBRMI(brmi; car_units)`): each unit's interior draws, and each
             # area's BYM2 iid part, are unit draws of the subject the unit is,
-            # in size-1 families fixed at 1. The separator draws, the scale
-            # and the mixing share are shared.
+            # in size-1 families fixed at 1; the unit's terms (its edges and
+            # its draws' cancelled standard normals) are its observations
+            # (`_brm_nlme_car_term_units`). The shared coordinates (separator
+            # values, interior means, component totals), the scale and the
+            # mixing share are shared.
             separation = record.separation
             unit_subject(label) = get(subject_index, _brm_transport_level(label)) do
                 _brm_nlme_error("brm_nlme_view: `car($(record.area))` was lowered with " *
@@ -1190,6 +1193,17 @@ function _brm_nlme_completion_weights(plan::_RKValuePlan, name, nrows)
     (; target=c.source, groups)
 end
 
+# The unit label of each of a separated `car` field's unit terms, when `name`
+# is the placeholder they observe (`_rk_car_separated_options`), else `nothing`.
+function _brm_nlme_car_term_units(plan, name)
+    for predictor in _rk_replay_predictors(plan), term in predictor.terms
+        term.kind === :car || continue
+        separation = get(term.options, :separation, nothing)
+        separation === nothing || separation.terms !== name || return separation.term_units
+    end
+    nothing
+end
+
 # The subject owning every row of a completion's group `g`. The group's shares
 # couple its entries, so a group spanning subjects has no NLME reading.
 function _brm_nlme_group_subject(row_subject, rows, target, g, group)
@@ -1259,6 +1273,21 @@ function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, query, unit)
     probe = nothing
     for (name, values) in pairs(fields)
         m = length(values)
+        # A `car_units` field's unit terms (its edges that read a unit's draws,
+        # and their cancelled standard normals): each belongs to its unit.
+        units = _brm_nlme_car_term_units(backend.plan, name)
+        if units !== nothing
+            length(units) == m || error("brm_nlme_model: internal: `$name` has $m " *
+                "densities for $(length(units)) unit terms")
+            push!(attribution, name => map(units) do label
+                i = findfirst(l -> isequal(_brm_transport_level(l),
+                    _brm_transport_level(label)), view.levels)
+                i === nothing && _brm_nlme_error("brm_nlme_model: a `car_units` unit " *
+                    "$(repr(label)) is not a level of the subject grouping `$(view.group)`")
+                i
+            end)
+            continue
+        end
         # A non-centered `mi(x)::shares(total, rows)` completion's group terms:
         # each belongs to the subject owning its group's rows.
         weights = _brm_nlme_completion_weights(backend.plan, name, L)

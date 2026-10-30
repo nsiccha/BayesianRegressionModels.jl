@@ -12,6 +12,51 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.74
+
+- **Breaking for saved points:** `RKBRMI(brmi; car_units)` lowers each `car`
+  field so that every area reads its mean and `⌈log₂ n⌉` of its unit's draws.
+  A unit's interior in one component (a piece of `n` areas, in breadth-first
+  order over its edges) is its mean plus an orthonormal Haar basis of its
+  zero-sum plane; the shared coordinates `w` are the separator values and piece
+  means, each component's last one replaced by its total over `0.001 n_c`. The
+  density is the ICAR density with its normalized sums, up to a constant: the
+  shared law `_BRMCarShared` holds the components' totals and the edges between
+  shared values, and every other edge, with `+½ z²` for each plane draw, is a
+  term of its unit, observed as a log weight on a placeholder column and
+  attributed to that unit by `brm_nlme_model`. Before, each piece was whitened
+  through a sparse Cholesky factor of its precision, so every area depended on
+  all of its unit's draws: on ArbeitsplatzAtlas a Gemeinde cell's compact
+  gradient touched about 2,230–2,390 effects, a unit's η Hessian was dense in
+  each field's draws, and one unit's value and gradient through its compact
+  cells was estimated at 452–3,601 s, against 1.56 s measured for one
+  whole-model value and gradient over all 12 units (BRM 0.2.63). Now a cell
+  reads its own areas' splits (plus the field's shared values `w`, which an
+  opaque map computes whole, linear in their count) and a unit's η Hessian is
+  its edges' pattern in that basis; on a 16 × 16 grid in four units a cell
+  reads at most 47 of the model's 265 coordinates, 35 of them `w`. Field, density and the coordinate
+  transport to SBBRMI's field are unchanged up to that constant; points saved
+  from an earlier separated lowering do not carry over. The Haar draws are not
+  whitened but stay well conditioned under the diagonal metric SAEM's
+  `WarmupHMCNUTS` adapts: a unit's diagonally scaled condition number on the
+  atlas's graph is 13–133, against 9.4e4–2.7e7 for consecutive differences
+  (design decisions `1g11z26` and `1y5br8u`, snags `saem-s-nuts-warm-28e5f1d9`
+  and `car-units-local-67dc9162`).
+- A completed covariate's observed rows read no drawn entry, and a missing row
+  reads its own entry only: RKBRMI completes it as
+  `stacked = vcat(observed_component, missing)`, `completed = stacked[order]`,
+  `order` each row's position, which ReactiveKernels computes at the rows a
+  cell reads (`brm_covariate_geometry` returns the observed component and
+  `order`; before, a lookup and a mask, so every observed row looked drawn
+  entry 1 up and masked it out, and a cell on it computed that entry and what
+  it reads). Values are unchanged (RK snag `on-arbeitsplatza-6065a1ef`).
+- BRM's compat floors are ReactiveKernels 0.1.18 and ReactiveKernelsPPL 0.1.18,
+  which compute `vcat` operands, multi-index gathers and group totals at the
+  rows a cell reads, and evaluate a cell whose number two of its values read
+  (0.1.16–0.1.17 raised `MethodError` in `_cell_take_rows` there); the local
+  fields and completions rely on them for cells that cost their own rows. The
+  test environment pins ReactiveKernels `5e288b439`.
+
 ## 0.2.73
 
 - Fixed: `deepcopy` of an `RKBRMI`, a `BRMNLMEModel`, a `BRMLaplaceProblem`

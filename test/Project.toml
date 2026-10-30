@@ -198,4 +198,10 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 452071f1b (ReactiveKernelsPPL 0.1.16) contains 4f7ef46a4: a query
 # preparation checks its binding against a build once (snag
 # brm-s-nlme-cell-d70abd20).
-rev = "452071f1b1d7a2f3ab23550419b2d41c533a7767"
+# 8009f3a95 (ReactiveKernels 0.1.16, ReactiveKernelsPPL 0.1.18) contains
+# 452071f1b: a cell query computes `vcat` operands, multi-index gathers and
+# group totals at the cell's rows (snag on-arbeitsplatza-6065a1ef).
+# 5e288b439 (ReactiveKernels 0.1.18) contains 8009f3a95: a number a cell
+# computes that two of its values read at rows evaluates (snag
+# cell-take-rows-s-e48675d0).
+rev = "5e288b439f2c8e3bb6e267263cf4686a8ab699d3"
