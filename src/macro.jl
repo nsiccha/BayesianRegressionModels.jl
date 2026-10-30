@@ -3389,22 +3389,27 @@ end
 # response's bounds through `truncated`/`censored`/`interval_censored` never warn.
 Base.@nospecializeinfer function _brm_warn_prior_bound_keywords(
         @nospecialize(operations::NamedTuple))
-    reads = Dict{Symbol,Set{Symbol}}()
+    # Which statements read each name, and which read data rows directly; the
+    # row-varying statements are those reachable from the latter (one pass).
+    readers = Dict{Symbol,Vector{Symbol}}()
+    read_elsewhere = Set{Symbol}()
     varying = Set{Symbol}()
     for (key, value) in pairs(operations)
         names = Set{Symbol}()
         _brm_restricted_reads!(names, value isa NamedColumn ? parent(value) : value) &&
             push!(varying, key)
-        reads[key] = names
+        for read in names
+            read === key && continue
+            push!(read_elsewhere, read)
+            push!(get!(Vector{Symbol}, readers, read), key)
+        end
     end
-    changed = true
-    while changed
-        changed = false
-        for (key, names) in reads
-            key in varying && continue
-            any(in(varying), names) || continue
-            push!(varying, key)
-            changed = true
+    frontier = collect(varying)
+    while !isempty(frontier)
+        for reader in get(readers, pop!(frontier), Symbol[])
+            reader in varying && continue
+            push!(varying, reader)
+            push!(frontier, reader)
         end
     end
     for (key, value) in pairs(operations)
@@ -3416,8 +3421,7 @@ Base.@nospecializeinfer function _brm_warn_prior_bound_keywords(
         getf(rhs) in (truncated, censored, interval_censored, restricted) && continue
         prior = (lhs isa ExprColumn && isnothing(_nested_observed_values(lhs))) ||
             (lhs isa NamedColumn &&
-            !(parent(lhs) isa DataColumn) && !(key in varying) &&
-            any(other -> other !== key && key in reads[other], keys(reads)))
+            !(parent(lhs) isa DataColumn) && !(key in varying) && key in read_elsewhere)
         prior || continue
         @warn("@brm: `lower`/`upper` keywords on a prior (`$key ~ " *
               "$(nameof(getf(rhs)))(...; lower, upper)`) are deprecated. Write " *

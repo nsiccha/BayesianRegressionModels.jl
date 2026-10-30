@@ -12,6 +12,27 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.66
+
+- `restricted(D, lower, upper)` and `restricted(D; lower, upper)`: a prior law,
+  `D`'s density on the bounds, not renormalized: Stan's
+  `real<lower=lo, upper=hi> x; x ~ D;`. `truncated(D, lower, upper)` stays the
+  normalized law. With constant bounds and arguments the two give the same
+  posterior; where the mass inside the bounds moves with sampled parameters,
+  `restricted` restricts the joint prior and `truncated` draws the arguments,
+  then `D` truncated (decision `0q18o98`). Both work on any prior position,
+  including `sd(...)`, `effect(...)` and `me()`'s `latent(...)`.
+  - TuringBRMI evaluates `restricted` as the plain kernel.
+  - RKBRMI emits RKPPL's `restricted` (constant bounds; it refuses a sampled
+    bound, as before).
+  - SBBRMI currently normalizes when a bound or argument is sampled: its
+    StanBlocks pin has no plain-kernel spelling yet (StanBlocks snag
+    `in-slic-declare-996328e0`).
+- **Deprecated:** `D(args...; lower, upper)` keywords on a prior. They warn once
+  per session and keep meaning `restricted`. The warning fires only where the
+  statement is surely a prior: an unbound statement over a data vector is an
+  omitted response, and its keywords keep bounding its draw.
+
 ## 0.2.65
 
 - Labels read from a level table through each part's positions, the data
