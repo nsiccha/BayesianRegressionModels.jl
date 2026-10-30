@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.80
+
+- Added: `brm_laplace_mode(target; init, iterations, g_abstol)`, the mode of
+  the embedded-Laplace marginal of any `brm_laplace_problem` target, by L-BFGS
+  on its own value and gradient. It returns one complete packed point, the
+  population mode with every integrated effect at its conditional mode there,
+  and diagnostics. It needs Optim, a new weak dependency that `using
+  WarmupHMC` loads through Pathfinder.
+
 ## 0.2.79
 
 - Added: `brm_start(rk; integrate = (:g, …))` and `brm_start(sb, model;
