@@ -8,7 +8,12 @@ using LogDensityProblems
 using Optim
 const BRM = BayesianRegressionModels
 
-function BRM._brm_laplace_mode(p, φ0; iterations, g_abstol)
+# Typed, so it adds a method beside src's fallback instead of overwriting it,
+# which precompilation refuses.
+function BRM._brm_laplace_mode(
+        p::Union{BRM.BRMLaplaceProblem,BRM.BRMStructuredLaplaceProblem,
+            BRM.BRMSparseLaplaceProblem},
+        φ0::AbstractVector; iterations, g_abstol)
     nonfinite = p.nonfinite
     f(φ) = -LogDensityProblems.logdensity(p, φ)
     function fg!(G, φ)
