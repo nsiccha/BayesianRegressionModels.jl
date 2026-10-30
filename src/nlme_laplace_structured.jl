@@ -253,6 +253,12 @@ _brm_slap_other_observations(plan::_RKValuePlan) = sort!(collect(union(
 function _brm_slap_refusal(backend::RKBRMI, view::BRMNLMEView)
     _brm_nlme_ragged(view) && return "nested groupings give units ragged effect blocks"
     any(==(:subject_mixing), view.role) && return "a random-effect block is Student-t"
+    _brm_slap_response_refusal(backend)
+end
+
+# Why the model's observations are not all regression responses of a family
+# with closed-form rows, or `nothing` (shared with the sparse Laplace).
+function _brm_slap_response_refusal(backend::RKBRMI)
     responses = _brm_slap_responses(backend.plan)
     responses === nothing && return "the RK plan has no likelihood specs"
     other = _brm_slap_other_observations(backend.plan)
@@ -293,6 +299,34 @@ function _brm_structured_laplace_problem(backend::RKBRMI, view::BRMNLMEView; ad_
     records = [r for r in _rk_coordinate_records(backend.plan)
         if r.kind === :ranef && r.group ∉ view.shared_groups]
     effects = Tuple(_brm_nlme_ranef_declaration(r) for r in records)
+    families, ports = _brm_slap_ports(backend, responses)
+    u0 = _brm_nlme_unit_point(backend, view; shared_point=nothing)
+    kernels = _rk_slap_kernels(backend, Tuple(ports), effects, omega, u0, ad_backend)
+    L = sum(length, view.rows)
+    row_unit = zeros(Int, L)
+    for (i, rows) in enumerate(view.rows), r in rows
+        row_unit[r] = i
+    end
+    length(row_unit) == L && all(!iszero, row_unit) || _brm_nlme_error(
+        "brm_laplace_problem: internal: a row belongs to no unit")
+    t = _brm_slap_terms(backend, responses, families, ports,
+        _rk_slap_values(kernels, u0), view.rows)
+    p = BRMStructuredLaplaceProblem(backend, view, population, view.coordinates[population],
+        blocks, d, kernels, t.family, t.y, t.trials, t.constant, t.entry,
+        fill(true, length(t.family)), t.groups, t.port, t.index,
+        t.link, t.fixed, zeros(d, length(t.port)), Int[], Int[], Float64[], omega, false,
+        u0[population],
+        zeros(length(t.port)), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
+        Float64(tol), Int(maxiter), 0, 0)
+    _brm_slap_design!(p, u0)
+    _brm_slap_population_design!(p, u0)
+    _brm_slap_verify!(p, u0, t.response, t.row)
+    p
+end
+
+# Each response's row family, link and parameter slots, the slots reading a
+# linked predictor's link-scale node, and the RK values (`ports`) they read.
+function _brm_slap_ports(backend::RKBRMI, responses)
     # A linked predictor's slots read its linear predictor, by the name the
     # responses read it under; its authored name is the response-scale value.
     linked = _rk_link_scale_names(backend.plan, _brm_slap_predictors(backend.plan))
@@ -302,24 +336,22 @@ function _brm_structured_laplace_problem(backend::RKBRMI, view::BRMNLMEView; ad_
     end
     ports = unique(Symbol[name for (_, _, slots) in families for (name, _) in slots
         if name isa Symbol])
+    families, ports
+end
+
+# The likelihood terms, group of rows by group (`groups[i]` the terms of
+# `row_groups[i]`); each response contributes one per row. `values0` are the
+# ports' values at some point, which say whether a port is a scalar.
+function _brm_slap_terms(backend::RKBRMI, responses, families, ports, values0, row_groups)
     data = rk_bound_data(backend)
-    u0 = _brm_nlme_unit_point(backend, view; shared_point=nothing)
-    kernels = _rk_slap_kernels(backend, Tuple(ports), effects, omega, u0, ad_backend)
-    L = sum(length, view.rows)
-    row_unit = zeros(Int, L)
-    for (i, rows) in enumerate(view.rows), r in rows
-        row_unit[r] = i
-    end
-    # Terms, unit by unit; each response contributes one per row.
     family = Int8[]; ys = Float64[]; trials = Float64[]; entry = Int[]
     port = Int[]; index = Int[]; link = Symbol[]; fixed = Float64[]
-    unit_terms = UnitRange{Int}[]; term_response = Symbol[]; term_row = Int[]
-    values0 = _rk_slap_values(kernels, u0)
-    for (i, rows) in enumerate(view.rows)
+    groups = UnitRange{Int}[]; response = Symbol[]; row = Int[]
+    for rows in row_groups
         first_term = length(family) + 1
         for r in rows, (spec, (f, _, slots)) in zip(responses, families)
-            push!(term_response, spec.response)
-            push!(term_row, r)
+            push!(response, spec.response)
+            push!(row, r)
             push!(family, f)
             push!(ys, Float64(data[spec.response][r]))
             n = spec.trials === nothing ? 1.0 :
@@ -341,33 +373,26 @@ function _brm_structured_laplace_problem(backend::RKBRMI, view::BRMNLMEView; ad_
                 push!(link, l)
             end
         end
-        push!(unit_terms, first_term:length(family))
+        push!(groups, first_term:length(family))
     end
-    length(row_unit) == L && all(!iszero, row_unit) || _brm_nlme_error(
-        "brm_laplace_problem: internal: a row belongs to no unit")
-    constant = map(_brm_lap_constant, family, ys, trials)
-    p = BRMStructuredLaplaceProblem(backend, view, population, view.coordinates[population],
-        blocks, d, kernels, family, ys, trials, constant, entry, fill(true, length(family)),
-        unit_terms, port, index,
-        link, fixed, zeros(d, length(port)), Int[], Int[], Float64[], omega, false,
-        u0[population],
-        zeros(length(port)), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
-        Float64(tol), Int(maxiter), 0, 0)
-    _brm_slap_design!(p, u0)
-    _brm_slap_population_design!(p, u0)
-    _brm_slap_verify!(p, u0, term_response, term_row)
-    p
+    (; family, y=ys, trials, constant=map(_brm_lap_constant, family, ys, trials), entry,
+        port, index, link, fixed, groups, response, row)
+end
+
+# A packed point with the integrated coordinates (the units' draws) at zero.
+function _brm_slap_zero_integrated!(u, p::BRMStructuredLaplaceProblem)
+    for block in p.blocks
+        u[block] .= 0.0
+    end
+    u
 end
 
 # J = ∂A/∂φ by unit steps from u0 (exact for an affine A), kept when A is
 # affine at two other population points; the random-effect scales and
 # correlations move only M, so their columns must be zero.
-function _brm_slap_population_design!(p::BRMStructuredLaplaceProblem, u0)
+function _brm_slap_population_design!(p, u0)
     nψ = length(p.port)
-    base = copy(u0)
-    for block in p.blocks
-        base[block] .= 0.0
-    end
+    base = _brm_slap_zero_integrated!(copy(u0), p)
     A0 = _brm_slap_psi!(zeros(nψ), p, _rk_slap_values(p.kernels, base))
     columns = Vector{Vector{Float64}}(undef, length(p.population))
     ψ = zeros(nψ)
@@ -403,7 +428,7 @@ function _brm_slap_population_design!(p::BRMStructuredLaplaceProblem, u0)
     p
 end
 
-function _brm_slap_affine_A(p::BRMStructuredLaplaceProblem, φ)
+function _brm_slap_affine_A(p, φ)
     Δ = φ .- p.φ0
     A = copy(p.A0)
     @inbounds for e in eachindex(A)
@@ -415,7 +440,7 @@ function _brm_slap_affine_A(p::BRMStructuredLaplaceProblem, φ)
 end
 
 # Jᵀ w over the population coordinates.
-function _brm_slap_affine_pullback(p::BRMStructuredLaplaceProblem, w)
+function _brm_slap_affine_pullback(p, w)
     g = zeros(length(p.population))
     @inbounds for e in eachindex(w)
         we = w[e]
@@ -430,7 +455,7 @@ end
 # Every term's log density at two points, against RK's own pointwise
 # densities: the families, their parametrization and constants are the
 # model's, or the row structure does not apply.
-function _brm_slap_verify!(p::BRMStructuredLaplaceProblem, u0, response, row)
+function _brm_slap_verify!(p, u0, response, row)
     rng = Random.Xoshiro(20261027)
     for u in (u0, u0 .+ 0.1 .* randn(rng, length(u0)))
         ψ = _brm_slap_psi!(zeros(length(p.port)), p, _rk_slap_values(p.kernels, u))
@@ -457,7 +482,7 @@ function _brm_slap_verify!(p::BRMStructuredLaplaceProblem, u0, response, row)
 end
 
 # The link-scale parameters of every entry at a packed point.
-function _brm_slap_psi!(ψ, p::BRMStructuredLaplaceProblem, values)
+function _brm_slap_psi!(ψ, p, values)
     for e in eachindex(ψ)
         k = p.port[e]
         θ = k == 0 ? p.fixed[e] : p.index[e] == 0 ? values[k] : values[k][p.index[e]]
@@ -828,7 +853,7 @@ function _brm_slap_value_and_gradient(p::BRMStructuredLaplaceProblem, state,
 end
 
 # Per-port cotangents for the RK pullback from the entries' cotangents.
-function _brm_slap_cotangents(p::BRMStructuredLaplaceProblem, values, w)
+function _brm_slap_cotangents(p, values, w)
     cot = map(v -> v isa Number ? Ref(0.0) : zeros(length(v)), values)
     for e in eachindex(w)
         k = p.port[e]
