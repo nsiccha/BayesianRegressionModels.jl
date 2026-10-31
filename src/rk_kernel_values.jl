@@ -47,8 +47,9 @@ function Base.deepcopy_internal(x::_RKPreparedKernelAssignment, stack::IdDict)
 end
 _rk_kernel_column_name(column::NamedColumn) = name(column)
 
-# One observed array per subject. RKPPL observes it in nested subject and entry
-# plates: `cells` maps each value read per subject to the graph value holding
+# One observed array per subject. A multivariate law observes the whole array;
+# a scalar law observes its entries independently. `cells` maps each value
+# read per subject to the graph value holding
 # its per-subject cells; every other value is shared by all subjects.
 struct _RKNestedObservation{O}
     observation::O
@@ -66,16 +67,23 @@ struct _RKScanObservation{Y}
     response::Y
 end
 
-_rk_observation_statement(observation, base, taken) =
-    Expr(:call, :.~, observation.name, base)
-function _rk_observation_statement(observation::_RKNestedObservation, base, taken)
+function _rk_joint_observation(callable)
+    type = brm_distribution_type(callable)
+    type isa Type && (type <: Distribution{Multivariate} ||
+        type <: Distribution{Matrixvariate})
+end
+
+_rk_observation_statement(observation, base, taken; joint=false) =
+    Expr(:call, joint ? :~ : :.~, observation.name, base)
+function _rk_observation_statement(observation::_RKNestedObservation, base, taken;
+        joint=false)
     # Every plate reuses the authored loop name `i` unless the cell reads it.
     read = union!(_rk_source_symbols!(Set{Symbol}(), base), values(observation.cells))
     index = :i
     while index in taken || index in read
         index = Symbol(index, :_)
     end
-    cell = Expr(:call, :.~, Expr(:ref, observation.name, index),
+    cell = Expr(:call, joint ? :~ : :.~, Expr(:ref, observation.name, index),
         _rk_ast_index_cells(base, observation.cells, index))
     Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
         Expr(:for, Expr(:(=), index, Expr(:call, :eachindex, observation.name)),
