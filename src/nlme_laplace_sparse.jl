@@ -150,6 +150,9 @@ mutable struct BRMSparseLaplaceProblem{K}
     # own, and how often a block Gauss–Seidel sweep followed
     blockwise::Int
     sweeps::Int
+    # the `BRMLaplacePlan` it was built from (src/nlme_laplace_plan.jl), or
+    # `nothing` for groupings named directly
+    plan::Any
 end
 
 Base.show(io::IO, p::BRMSparseLaplaceProblem) = print(io,
@@ -316,7 +319,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         Float64[], Int[], Vector{Int}[], Int[], Int[], Int[], Vector{Int}[], Any[], omega,
         false,
         u0[population], zeros(nψ), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
-        Float64(tol), Int(maxiter), 0, 0, 0, 0)
+        Float64(tol), Int(maxiter), 0, 0, 0, 0, nothing)
     _brm_spl_design!(p, u0)
     sampled || _brm_slap_population_design!(p, u0)
     cells = _brm_nlme_plate_observations(backend.plan)
