@@ -170,15 +170,20 @@ by hand, bounds read through the binding (censored, scalar, truncated),
 invalid vectors, the refusal of the retired formula-level `ragged(y, group) ~ …`,
 and replay/resample regathering a grouped response and its bound.
 
-`dirichlet_multinomial.jl` checks RK joint count vectors in plate cells:
+`dirichlet_multinomial.jl` checks joint count vectors in plate cells:
 shared concentration, ragged category vectors, model-derived probabilities,
 normalized densities, Enzyme gradients, complete printed-source replay,
 one pointwise contribution per vector, and NLME subject likelihoods,
 gradients and Hessians. A multivariate Normal case checks the common whole-event path.
-The out-of-support count-total check is `@test_broken`: Distributions
-0.25.132 returns a finite density when `sum(y) != n` (ReactiveKernels snag
-`dirichlet-multin-457e95cf`). SBBRMI awaits StanBlocks' native family
-(`dirichlet-multin-91925143`).
+The support checks require `-Inf` for mismatched totals, negative counts and
+noninteger counts, both pointwise and in the model density, without changing
+caller data. The test bootstrap explicitly selects the public Distributions
+fix `83cec5e3a8a35167d54f19da9dc5afb54f59273e`; the registered 0.25.132
+release lacks that check, and an RKPPL version floor does not select the fix.
+SBBRMI uses StanBlocks 0.2.8's native family. Compiled BridgeStan checks
+compare normalized densities, gradients and pointwise units against RK;
+ragged predictive vectors must contain nonnegative integer counts summing
+to each declared total.
 
 `plate_matrix_data.jl` checks per-cell matrices in a `@plate for` cell:
 - per-cell matrix data, a pre-grouped `Vector{Matrix}` read as `X[i]`: RKBRMI
@@ -1597,7 +1602,7 @@ The script materializes every external dependency under the ignored
 contributes its monorepo root **and** the nested
 `ReactiveKernelsDistributionKernels` and `ReactiveKernelsPPL` packages from
 that same checkout; those nested packages have no standalone repositories. All
-ten develop paths enter one resolve on Julia 1.10, where `[sources]` in
+developed paths enter one resolve on Julia 1.10, where `[sources]` in
 `test/Project.toml` is ignored. A dirty shared checkout is never used as the
 source of truth: an exact revision is checked out deliberately, so the
 environment does not drift with local branches.

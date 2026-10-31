@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.89
+
+- Added: SBBRMI translates `DirichletMultinomial(N, alpha)` to the native
+  StanBlocks 0.2.8 family with its explicit total. Ragged plate observations
+  retain one normalized pointwise likelihood per count vector, and predictive
+  count vectors sum to their declared totals.
+- The test environment explicitly pins Distributions
+  `83cec5e3a8a35167d54f19da9dc5afb54f59273e`, whose Dirichlet-multinomial
+  density rejects invalid counts and mismatched totals with `-Inf`.
+  The RK regression now requires that behavior instead of marking it broken.
+  Consumers must select this unreleased Distributions fix explicitly in their
+  active environment; upgrading BRM or RKPPL alone does not install it.
+
 ## 0.2.88
 
 - Fixed: nested NLME SAEM fits require ReactiveKernels 0.1.29, whose plate

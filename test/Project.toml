@@ -45,6 +45,12 @@ Turing = "0.46"
 WarmupHMC = "0.2"
 julia = "1.10"
 
+[sources.Distributions]
+url = "https://github.com/nsiccha/Distributions.jl.git"
+# Unreleased DirichletMultinomial support correction; also selected on Julia
+# 1.10 by setup_env.jl, where [sources] is ignored.
+rev = "83cec5e3a8a35167d54f19da9dc5afb54f59273e"
+
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
 # Descriptor outputs carry their value shape as `dims`; non-finite literals render; `weighted`
@@ -79,7 +85,8 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # 566bbc0f (StanBlocks 0.2.7) adds `restricted(family, args...; lower, upper)`:
 # the bounds go on the declaration and the family keeps its plain kernel (snag
 # in-slic-declare-996328e0), which SBBRMI emits for every prior bound.
-rev = "566bbc0ffd6372a927876df2f298158957af3e51"
+# 359a4fae (StanBlocks 0.2.8): native explicit-total Dirichlet-multinomial.
+rev = "359a4fae88d865002616fca313aefc79fbc97c06"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
