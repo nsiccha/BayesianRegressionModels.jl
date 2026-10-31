@@ -18,6 +18,13 @@ differentiates with Enzyme only — every gradient in this suite goes through
 so there is nothing here to work around; do not add it back to make a new
 gradient site easier.
 
+`infinite_censoring_bounds.jl` checks exact `-Inf` and `Inf` response bounds
+through SBBRMI and BridgeStan: lower, upper and two-sided Normal and Student-t
+censoring, alongside interval-censored LogNormal evidence. Finite and infinite
+bound scenarios compare normalized densities and gradients against independent
+CDF, CCDF and density calculations. Run it with
+`julia --project=. test/infinite_censoring_bounds.jl` or the test environment.
+
 `kernel_ragged_broadcast.jl` checks Stan source emission and stanc acceptance
 for modeled secondary-axis arguments in plain and nested dotted calls. It
 covers interleaved rows, shared random effects, empty groups, raw-data controls
