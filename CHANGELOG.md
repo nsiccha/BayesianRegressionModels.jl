@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.83
+## 0.2.85
 
 - BRM's compat floor is ReactiveKernels 0.1.25. A cell of one observation of
   an `@plate for` loop that computes several observations' arguments (one
@@ -21,6 +21,26 @@ instead of failing at run time.
   `selb_obs` or `beamt_obs` cell read 147,766 coordinates (1,236 now; warm
   value 18 ms, now 0.02 ms). The test environment already pinned it
   (`a959bef75`, from 0.2.81).
+
+## 0.2.84
+
+- Fixed: the index vector of an in-cell `indexin(idx[rows[i]], target[i])`
+  may be a data-only assignment (`idx = f(columns...)` at model scope), as
+  `brm-use` documents for every vector a plate cell reads. Before, plain
+  `indexin` refused it at construction ("reads `idx` as indices; it must be a
+  data vector"); the zero check now reads the assignment's value. The model
+  equals the same model given that index as a data column, on SBBRMI and
+  RKBRMI.
+
+## 0.2.83
+
+- Fixed: a data-only assignment that indexes a matrix-valued one with a bare
+  `:` or a range (`m = mat(x)`, then `z = m[:, 2]` or `u = m[1:length(x), 1]`)
+  is data, as `z = second(m)` with `second(m) = m[:, 2]` already was. RKBRMI
+  reads it as a population term and both backends read it in a `@plate` cell.
+  Before, it stayed a model value: RKBRMI refused the term (`term `z` is not a
+  data column`) and both backends refused the cell read (`kernel(...)
+  positional arg `z` is not a formula statement`).
 
 ## 0.2.82
 

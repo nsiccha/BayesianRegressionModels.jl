@@ -276,6 +276,13 @@ _brm_is_data_value(_x) = false
 _brm_is_data_value(::Union{Real,AbstractString}) = true
 _brm_is_data_value(::AbstractArray) = true
 
+# A bare `:` index (`m[:, 2]`) reaches the IR as a read of a column named `:`
+# that no data field backs, because `parselocals!` registers every symbol of an
+# index; once a block reads `:` so, a range `1:n` calls that read too. Both
+# mean Julia's `Colon()`.
+_brm_is_colon(_x) = false
+_brm_is_colon(x::NamedColumn) = name(x) === _EFFECT_COLON && parent(x) isa MissingColumn
+
 # The value of a data-only node, or `nothing` when it reads a model value (a
 # parameter, a predictor, an assignment that is not data-only) or calls
 # something without a Julia method for its data. `inputs` collects the data
@@ -283,6 +290,7 @@ _brm_is_data_value(::AbstractArray) = true
 _brm_data_assignment_value(x::Real, _state, _inputs) = x
 _brm_data_assignment_value(_x, _state, _inputs) = nothing
 function _brm_data_assignment_value(x::NamedColumn, state, inputs)
+    _brm_is_colon(x) && return Colon()
     backing = parent(x)
     backing isa DataColumn && (push!(inputs, name(x)); return parent(backing))
     backing isa ExprColumn{typeof(assign)} || return nothing
@@ -291,7 +299,7 @@ function _brm_data_assignment_value(x::NamedColumn, state, inputs)
     value
 end
 function _brm_data_assignment_value(x::ExprColumn, state, inputs)
-    f = getf(x)
+    f = _brm_is_colon(getf(x)) ? Colon() : getf(x)
     (f === assign || f === (~) || _brm_is_term_head(f) ||
         (f isa Type && f <: Distributions.Distribution)) && return nothing
     args = map(arg -> _brm_data_assignment_value(arg, state, inputs), getargs(x))

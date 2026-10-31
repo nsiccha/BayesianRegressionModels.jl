@@ -1,8 +1,8 @@
 # test/derived_columns.jl — a data-only model-scope assignment is read where a
 # raw column is accepted (user decision `1tb1jrg`): population terms,
 # interactions, fitted transforms, factors, random-effect groupings, monotonic
-# effects, offsets, weights, grouped HSGPs and `groups(key => cells)` keys, on
-# SBBRMI and RKBRMI. Each derived model is the same model as one given that
+# effects, offsets, weights, grouped HSGPs, `groups(key => cells)` keys and the
+# index vector of an in-cell `indexin`, on SBBRMI and RKBRMI. Each derived model is the same model as one given that
 # column as data: SBBRMI emits the same program and data, and RKBRMI has the
 # same density, computing the column in its graph from its own inputs. A
 # `constant(...)` such an assignment reads is computed in the RK graph too and
@@ -269,6 +269,145 @@ end
     end
     sb_same_program(derived, host)
     rk_same_density(derived, host)
+end
+
+# Reads of several subjects on one interleaved axis, and observations that name
+# their read by subject and time; `op_time` is `0.0` where an operation reads
+# nothing. The row of the read with that subject and time, or `0`.
+derived_read_index(subject, time, read_subject, read_time) =
+    [something(findfirst(r -> read_subject[r] == s && read_time[r] == t,
+        eachindex(read_subject)), 0) for (s, t) in zip(subject, time)]
+schedule = (; subject=["b", "a", "c"], weight=[60.0, 75.0, 90.0],
+    read_subject=["a", "b", "a", "c", "b", "a", "c"],
+    read_time=[0.5, 0.25, 1.0, 0.5, 2.0, 3.0, 1.5],
+    obs_subject=["a", "c", "b", "a", "b", "c", "a"],
+    obs_time=[1.0, 0.5, 2.0, 0.5, 0.25, 1.5, 3.0],
+    y=[0.61, 0.52, 0.33, 0.81, 0.79, 0.41, 0.22],
+    op_subject=["b", "a", "a", "c", "b"], op_time=[0.0, 0.5, 3.0, 1.5, 2.0])
+
+@stestset "an indexin index vector is a data-only assignment" begin
+    raw = merge(schedule, (;
+        obs_read=derived_read_index(schedule.obs_subject, schedule.obs_time,
+            schedule.read_subject, schedule.read_time),
+        op_read=derived_read_index(schedule.op_subject, schedule.op_time,
+            schedule.read_subject, schedule.read_time)))
+    @test raw.obs_read == [3, 4, 5, 1, 2, 7, 6] && raw.op_read == [0, 1, 6, 7, 5]
+    derived = @brm schedule begin
+        sigma ~ Exponential(1)
+        log_CL ~ 1 + weight + (1 | p | subject)
+        obs_read = derived_read_index(obs_subject, obs_time, read_subject, read_time)
+        op_read = derived_read_index(op_subject, op_time, read_subject, read_time)
+        reads = groups(read_subject => subject)
+        ops = groups(op_subject => subject)
+        obs = groups(obs_subject => subject)
+        @plate for i in eachindex(log_CL)
+            conc = exp.(-exp(log_CL[i]) .* read_time[reads[i]]) .+
+                1e-3 * sum(something.(indexin(op_read[ops[i]], reads[i]), 0))
+            loc[i] = conc[indexin(obs_read[obs[i]], reads[i])]
+            y[obs[i]] ~ normal(loc[i], sigma)
+        end
+    end
+    host = @brm raw begin
+        sigma ~ Exponential(1)
+        log_CL ~ 1 + weight + (1 | p | subject)
+        reads = groups(read_subject => subject)
+        ops = groups(op_subject => subject)
+        obs = groups(obs_subject => subject)
+        @plate for i in eachindex(log_CL)
+            conc = exp.(-exp(log_CL[i]) .* read_time[reads[i]]) .+
+                1e-3 * sum(something.(indexin(op_read[ops[i]], reads[i]), 0))
+            loc[i] = conc[indexin(obs_read[obs[i]], reads[i])]
+            y[obs[i]] ~ normal(loc[i], sigma)
+        end
+    end
+    sb = sb_same_program(derived, host)
+    @test sb.data[:kernel_loc_obs_read_ragged] == [[2, 1], [2, 1, 3], [1, 2]]
+    @test sb.data[:kernel_loc_op_read_ragged] == [[0, 2], [1, 3], [2]]
+    rk, rkh = rk_same_density(derived, host)
+    # A replay computes the index again from its own data and rebases it: c's
+    # two observations swap times, so their positions swap too.
+    swapped = merge(schedule, (; obs_time=[1.0, 1.5, 2.0, 0.5, 0.25, 0.5, 3.0]))
+    host_swapped = merge(raw, (; obs_read=[3, 7, 5, 1, 2, 4, 6]))
+    replayed = reprocess(sb, swapped; freeze_constants=true)
+    @test replayed.data[:kernel_loc_obs_read_ragged] == [[2, 1], [2, 1, 3], [2, 1]]
+    @test stan_data(replayed) ==
+        stan_data(reprocess(SBBRMI(host; mod=@__MODULE__), host_swapped; freeze_constants=true))
+    # At the origin every clearance is 1, so the swapped reads change `conc`.
+    u = zeros(rk.model.layout.total)
+    density(backend) = LogDensityProblems.logdensity(
+        rk_logdensity_problem(backend; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse)), u)
+    @test density(reprocess(rk, swapped)) ≈ density(reprocess(rkh, host_swapped)) atol=1e-10
+    @test !isapprox(density(reprocess(rk, swapped)), density(rk); atol=1e-6)
+    # refused: in plain `indexin(…)` a 0 has no position, whether the index
+    # is a data column or an assignment that reads data alone.
+    @test_throws "`op_read[1]` is 0, which is no index" @brm schedule begin
+        log_CL ~ 1 + weight + (1 | p | subject)
+        op_read = derived_read_index(op_subject, op_time, read_subject, read_time)
+        reads = groups(read_subject => subject)
+        ops = groups(op_subject => subject)
+        @plate for i in eachindex(log_CL)
+            loc[i] = exp(log_CL[i]) .+ sum(indexin(op_read[ops[i]], reads[i]))
+        end
+    end
+    # refused: an index that reads a model value is no data, so it has no
+    # positions to read before the model is fitted.
+    @test_throws "reads `obs_read` as indices; it must be a data vector" @brm schedule begin
+        sigma ~ Exponential(1)
+        log_CL ~ 1 + weight + (1 | p | subject)
+        obs_read = sigma * derived_read_index(obs_subject, obs_time, read_subject, read_time)
+        reads = groups(read_subject => subject)
+        obs = groups(obs_subject => subject)
+        @plate for i in eachindex(log_CL)
+            loc[i] = exp(log_CL[i]) .+ sum(indexin(obs_read[obs[i]], reads[i]))
+        end
+    end
+end
+
+# A bare `:` and a range index a matrix-valued assignment as in Julia, so a
+# column taken out of it is data, as a named accessor of it is (snag
+# `a-data-only-colu-ede00967`).
+derived_design(t::AbstractVector) = hcat(t, 2 .* t)
+
+@stestset "a column indexed out of a matrix-valued data-only assignment" begin
+    host_data = merge(flat, (; z=2 .* flat.t, u=copy(flat.t)))
+    derived = @brm flat begin
+        sigma ~ Exponential(1)
+        d = derived_design(t)
+        z = d[:, 2]
+        u = d[1:length(t), 1]
+        mu ~ 1 + z + u
+        y ~ Normal(mu, sigma)
+    end
+    host = @brm host_data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + z + u
+        y ~ Normal(mu, sigma)
+    end
+    sb_same_program(derived, host)
+    rk, _ = rk_same_density(derived, host)
+    rk_in_graph(rk, :z, (:t,))
+    rk_in_graph(rk, :u, (:t,))
+    rows(r) = (; t=flat.t[r], x=flat.x[r], g=flat.g[r], y=flat.y[r])
+    rk_binds_raw(rk, rows(1:18), rows(7:24))
+
+    derived_plate = @brm flat begin
+        sigma ~ Exponential(1)
+        d = derived_design(t)
+        z = d[:, 2]
+        b ~ Normal(0, 1)
+        @plate for i in eachindex(y)
+            y[i] ~ Normal(b * z[i], sigma)
+        end
+    end
+    host_plate = @brm host_data begin
+        sigma ~ Exponential(1)
+        b ~ Normal(0, 1)
+        @plate for i in eachindex(y)
+            y[i] ~ Normal(b * z[i], sigma)
+        end
+    end
+    sb_same_program(derived_plate, host_plate)
+    rk_same_density(derived_plate, host_plate)
 end
 
 @stestset "constants a data-only assignment reads are computed in the graph" begin

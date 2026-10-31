@@ -215,7 +215,7 @@ const PINS = [
     # which the sparse Laplace's `@plate` cells read. It is ReactiveKernels
     # 0.1.25 (it contains 0d5fb817c): a cell of one value of a shared `@plate
     # for` cell computes nothing only its sibling values read (RK snag
-    # sibling-only-pla-2b3df69e), BRM's compat floor from 0.2.83.
+    # sibling-only-pla-2b3df69e), BRM's compat floor from 0.2.85.
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a959bef75754e7c4666bdafd120ae0ab13343734"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
