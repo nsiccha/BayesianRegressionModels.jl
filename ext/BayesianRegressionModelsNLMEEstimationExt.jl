@@ -467,6 +467,223 @@ function NE.conditional_loglikelihood_hessian_blocks(m::BRM.BRMNLMEModel, subjec
     blocks[subjects]
 end
 
+# ── Integrated families: the sparse Laplace (src/nlme_laplace_sparse.jl) ─────
+#
+# The model's packed point holds every block at unit scales and an identity
+# factor (`m.unit`), so its standardized draws are the natural η. For a set of
+# integrated families, their blocks' scale and correlation coordinates come
+# from ω instead (`_prior_omega_map`) and their draws are integrated by one
+# sparse Laplace over the same RK program; the sampled families stay at the
+# unit point, so their η enter as given. Each family's natural effects are
+# u = C z, with C its Cholesky factor from ω, and a Laplace is invariant under
+# that linear map: the sparse Laplace in z is the protocol's in u.
+
+# Each entry of subject `i`'s η: its family and the packed coordinate it sits at.
+function _eta_entries(m::BRM.BRMNLMEModel, i)
+    families = reduce(vcat, (fill(f, m.view.family_sizes[f])
+        for f in m.view.subject_families[i]); init=Int[])
+    length(families) == length(m.view.subject_coordinates[i]) || BRM._brm_nlme_error(
+        "integrated families: internal: subject $i has $(length(families)) η " *
+        "entries by family and $(length(m.view.subject_coordinates[i])) coordinates")
+    families, m.view.subject_coordinates[i]
+end
+
+# Each family's Cholesky factor at ω.
+function _family_cholesky(m::BRM.BRMNLMEModel, ω)
+    layout = NE.nlme_layout(m)
+    BRM._brm_nlme_ragged(m.view) && return [Matrix(L) for L in NE.omega_cholesky(layout, ω)]
+    L = Matrix(NE.omega_cholesky(layout, ω))
+    starts = cumsum(vcat(1, m.view.family_sizes))
+    [L[starts[f]:(starts[f + 1] - 1), starts[f]:(starts[f + 1] - 1)]
+        for f in eachindex(m.view.family_sizes)]
+end
+
+# The sparse Laplace problem of a set of families, built on first use: its
+# blocks are exactly those families' blocks, and each of its terms belongs to
+# the subject the model attributes its density to.
+function _laplace_problem(m::BRM.BRMNLMEModel, integrated)
+    key = sort!(unique(collect(Int, integrated)))
+    built = get!(() -> _build_laplace_problem(m, key), m.laplace, key)
+    built isa Exception && throw(built)
+    built
+end
+
+# A refusal is kept, so a model the sparse Laplace does not take is not
+# rebuilt at every call.
+function _build_laplace_problem(m::BRM.BRMNLMEModel, key)
+    try
+        _new_laplace_problem(m, key)
+    catch err
+        err isa BRM.BRMNLMEViewError || rethrow()
+        err
+    end
+end
+
+function _new_laplace_problem(m::BRM.BRMNLMEModel, key)
+    nf = length(m.view.families)
+    all(f -> 1 <= f <= nf, key) || throw(ArgumentError(
+        "integrated families $key are outside 1:$nf"))
+    isempty(key) && throw(ArgumentError("integrated families: the set is empty"))
+    families = m.view.families[key]
+    for (f, family) in zip(key, families)
+        family.fixed === nothing || BRM._brm_nlme_error("integrated families: " *
+            "family $f has a fixed covariance (a completion), which the sparse " *
+            "Laplace does not integrate")
+        family.stratum === nothing || BRM._brm_nlme_error("integrated families: " *
+            "family $f is one stratum of a stratified block, which the sparse " *
+            "Laplace does not integrate yet")
+    end
+    groups = unique(Symbol[BRM._brm_spl_record_group(f.record) for f in families])
+    declarations = Set(BRM._brm_spl_record_declaration(f.record) for f in families)
+    p = BRM._brm_sparse_laplace_problem(m.backend, groups;
+        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), tol=1e-24, maxiter=50,
+        declarations)
+    # its integrated draws are exactly the families' instances
+    mine = Int[]
+    for i in eachindex(m.view.levels)
+        fam, pos = _eta_entries(m, i)
+        append!(mine, pos[fam .∈ Ref(key)])
+    end
+    sort(mine) == sort(p.integrated) || BRM._brm_nlme_error("integrated families: " *
+        "internal: the sparse Laplace integrates other draws than families $key own")
+    attribution = Dict(m.attribution)
+    owners = BRM._brm_spl_term_owners(p) do name, k
+        haskey(attribution, name) || BRM._brm_nlme_error("integrated families: " *
+            "observation `$name` belongs to no subject")
+        attribution[name][k]
+    end
+    zof = zeros(Int, length(m.unit)); zof[p.integrated] .= eachindex(p.integrated)
+    pof = zeros(Int, length(m.unit)); pof[p.population] .= eachindex(p.population)
+    (; p, key, owners, zof, pof)
+end
+
+# NLMEEstimation 0.2.3's Laplace-gradient hook (`laplace_marginals_and_gradient`
+# is `laplace_conditionals_and_population_gradient` with every family
+# integrated), where the sparse Laplace integrates every family: none is a
+# fixed completion family or a stratum, and the model's shape is one it takes.
+function NE.provides_laplace_gradient(m::BRM.BRMNLMEModel)
+    all(f -> f.fixed === nothing && f.stratum === nothing, m.view.families) ||
+        return false
+    key = collect(eachindex(m.view.families))
+    get!(() -> _build_laplace_problem(m, key), m.laplace, key) isa Exception && return false
+    true
+end
+
+# The packed point of (θ, σ, ω, H) for a set of families, and the problem's
+# warm start from H's integrated entries (z = C⁻¹ u per instance). Subjects
+# outside `subjects` keep their sampled η at zero and their previous modes.
+function _laplace_point(m::BRM.BRMNLMEModel, L, subjects, θ, σ, ω, H)
+    _check_subjects(m, subjects)
+    mapping = _prior_omega_map(m, θ, σ, ω)
+    mapping.saturated && return nothing, mapping
+    u = copy(m.unit)
+    u[m.theta] .= θ
+    u[m.sigma] .= σ
+    for f in L.key
+        family = m.view.families[f]
+        u[family.scales] .= mapping.mapped[family.scales]
+        u[family.factor] .= mapping.mapped[family.factor]
+    end
+    chol = _family_cholesky(m, ω)
+    full = _batch_eta(m, subjects, H)
+    for i in subjects
+        η = BRM._brm_nlme_subject_eta(full, i)
+        _, pos = _eta_entries(m, i)
+        offset = 0
+        for f in m.view.subject_families[i]
+            K = m.view.family_sizes[f]
+            r = (offset + 1):(offset + K)
+            if f in L.key
+                L.p.u[pos[r]] .= LowerTriangular(chol[f]) \ Vector{Float64}(η[r])
+            else
+                u[pos[r]] .= η[r]
+            end
+            offset += K
+        end
+    end
+    u, mapping
+end
+
+function _laplace_state(m::BRM.BRMNLMEModel, integrated, subjects, θ, σ, ω, H)
+    L = _laplace_problem(m, integrated)
+    u, mapping = _laplace_point(m, L, subjects, θ, σ, ω, H)
+    u === nothing && return L, nothing, mapping
+    state = BRM._brm_spl_mode!(L.p, u[L.p.population])
+    L, (state.finite ? state : nothing), mapping
+end
+
+_laplace_values(m, L, state, subjects) =
+    BRM._brm_spl_unit_values(L.p, state, L.owners, length(m.view.levels))[subjects]
+
+function NE.laplace_conditionals_and_gradients(m::BRM.BRMNLMEModel, integrated, subjects,
+        θ, σ, ω, H)
+    L, state, _ = _laplace_state(m, integrated, subjects, θ, σ, ω, H)
+    G = H isa AbstractMatrix ? zeros(Float64, size(H)) :
+        [zeros(Float64, length(h)) for h in H]
+    state === nothing && return fill(-Inf, length(subjects)), G
+    ℓ = _laplace_values(m, L, state, subjects)
+    _, g = BRM._brm_spl_value_and_gradient(L.p, state; prior=false)
+    for (k, i) in enumerate(subjects)
+        fam, pos = _eta_entries(m, i)
+        for (e, (f, q)) in enumerate(zip(fam, pos))
+            f in L.key && continue
+            gk = g[L.pof[q]]
+            H isa AbstractMatrix ? (G[e, k] = gk) : (G[k][e] = gk)
+        end
+    end
+    ℓ, G
+end
+
+function NE.laplace_conditional_moments(m::BRM.BRMNLMEModel, integrated, subjects, θ, σ, ω, H)
+    L, state, _ = _laplace_state(m, integrated, subjects, θ, σ, ω, H)
+    M = H isa AbstractMatrix ? Matrix{Float64}(H) : [Vector{Float64}(h) for h in H]
+    state === nothing && return fill(-Inf, length(subjects)), M,
+        [Matrix{Float64}[] for _ in subjects]
+    ℓ = _laplace_values(m, L, state, subjects)
+    chol = _family_cholesky(m, ω)
+    sets = Vector{Int}[]; owners = Tuple{Int,Int,UnitRange{Int}}[]
+    for (k, i) in enumerate(subjects)
+        _, pos = _eta_entries(m, i)
+        offset = 0
+        for f in m.view.subject_families[i]
+            K = m.view.family_sizes[f]
+            r = (offset + 1):(offset + K)
+            if f in L.key
+                push!(sets, L.zof[pos[r]])
+                push!(owners, (k, f, r))
+            end
+            offset += K
+        end
+    end
+    blocks = BRM._brm_spl_inverse_blocks(L.p, state, sets)
+    C = [Matrix{Float64}[] for _ in subjects]
+    for ((k, f, r), set, S) in zip(owners, sets, blocks)
+        Lf = LowerTriangular(chol[f])
+        û = Lf * state.z[set]
+        H isa AbstractMatrix ? (M[r, k] .= û) : (M[k][r] .= û)
+        push!(C[k], Matrix(Symmetric(Lf * S * Lf')))
+    end
+    ℓ, M, C
+end
+
+function NE.laplace_conditionals_and_population_gradient(m::BRM.BRMNLMEModel, integrated,
+        subjects, θ, σ, ω, H)
+    L, state, mapping = _laplace_state(m, integrated, subjects, θ, σ, ω, H)
+    state === nothing && return fill(-Inf, length(subjects)), fill(NaN, length(θ)),
+        fill(NaN, length(σ)), fill(NaN, length(ω))
+    ℓ = _laplace_values(m, L, state, subjects)
+    chosen = falses(length(m.view.levels)); chosen[subjects] .= true
+    _, g = BRM._brm_spl_value_and_gradient(L.p, state; prior=false,
+        active=chosen[L.owners])
+    packed = zeros(length(m.unit))
+    packed[L.p.population] .= g
+    # ω moves only the integrated families' scale and correlation coordinates
+    integrated_positions = Set(q for f in L.key
+        for q in vcat(m.view.families[f].scales, m.view.families[f].factor))
+    gcoords = [q in integrated_positions ? packed[q] : 0.0 for q in mapping.omega_positions]
+    ℓ, packed[m.theta], packed[m.sigma], mapping.J' * gcoords
+end
+
 # The view records only population columns whose shift can be absorbed into a
 # random-effect margin on every row of each subject.
 function NE.mu_referencing(m::BRM.BRMNLMEModel)

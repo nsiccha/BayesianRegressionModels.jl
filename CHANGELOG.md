@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.82
+## 0.2.83
 
 - BRM's compat floor is ReactiveKernels 0.1.25. A cell of one observation of
   an `@plate for` loop that computes several observations' arguments (one
@@ -21,6 +21,29 @@ instead of failing at run time.
   `selb_obs` or `beamt_obs` cell read 147,766 coordinates (1,236 now; warm
   value 18 ms, now 0.02 ms). The test environment already pinned it
   (`a959bef75`, from 0.2.81).
+
+## 0.2.82
+
+- Added: NLMEEstimation's integrated families on `brm_nlme_model`'s models.
+  `saem(model, …; integrated = [f, …])` integrates those covariance families
+  by BRM's sparse Laplace and samples the rest; with every family integrated
+  it runs Laplace-EM. The model implements `laplace_conditionals_and_gradients`,
+  `laplace_conditional_moments` and
+  `laplace_conditionals_and_population_gradient`.
+- Added: `provides_laplace_gradient(model)` is true where the sparse Laplace
+  integrates every family. `covariance_step` with
+  `AdaptiveGaussHermite(nodes = 1)` (the ragged SAEM default) then takes
+  `2p + 1` Laplace-gradient calls instead of `2p² + 1` Laplace marginals, and
+  `check_protocol` checks that hook.
+- Changed: the NLMEEstimation extension needs NLMEEstimation 0.2.4
+  (`[compat]`; before, 0.1.3 or 0.2).
+- Changed: the sparse Laplace's `@plate` cells take their Newton-step HVPs
+  only along their integrated draws, and the gradient's implicit term from
+  the third-order products' own HVPs: 23.8 → 20.0 ms per value and gradient on
+  a nested panel of 200 subjects.
+- Fixed: the sparse Laplace's gradient on a model whose observations are all
+  `@plate` cells and which samples a random-effect block (0.2.81 raised a
+  `MethodError`).
 
 ## 0.2.81
 
