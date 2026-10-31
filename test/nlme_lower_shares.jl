@@ -25,7 +25,6 @@ end
     check_lockstep(m, Xoshiro(5))
     check_unit_problems(m, Xoshiro(6))
     start = brm_nlme_start(m)
-    @test NLMEEstimation.check_protocol(m, start.theta, start.sigma, start.omega)
     # The public unit model's cell queries may only read one group's shares.
     names = BRM._rk_layout_coordinate_names(rk)
     c = only(rk.plan.completions)
@@ -43,4 +42,5 @@ end
         read = unique(intersect(point.seen, shared))
         @test isempty(read) || any(o -> issubset(read, o), owned)
     end
+    @test NLMEEstimation.check_protocol(m, start.theta, start.sigma, start.omega)
 end

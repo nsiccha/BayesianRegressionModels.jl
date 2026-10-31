@@ -226,7 +226,9 @@ const PINS = [
     # 5f18f4b84 (ReactiveKernels 0.1.29, ReactiveKernelsPPL 0.1.23) fixes
     # plate buffer inference from older compiled worlds, including the
     # nested SAEM population gradient (RK snag brm-canonical-44-a1653c2a).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "5f18f4b849202af651d1de47c5b819cc1428ace5"),  # main
+    # 260d9a94 (RK 0.1.35 / RKPPL 0.1.29) preserves shape facts across
+    # visible grouped kernels, so strict NLME cells read their owning group.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "260d9a94541497284f0d53bef531e3cd8c469122"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

@@ -96,9 +96,10 @@ laws whose vector of lower bounds supplies their dimension.
 Run it directly in the test environment. `nlme_lower_shares.jl` runs in the
 NLMEEstimation scratch environment below and checks bounded groups' fixed
 unit variance, lockstep/unit densities and gradients, `check_protocol` and
-per-cell coordinate locality. On the current RK test pin, the latter two
-checks expose upstream snags `custom-geometry-8640cc9d` (native HVP) and
-`group-plate-desi-9ffa5d79` (computed-design locality); they remain required
+per-cell coordinate locality. The RK 0.1.35 / RKPPL 0.1.29 test pin fixes the
+standalone grouped-design case (`group-plate-desi-9ffa5d79`). The full fixture
+still exposes `prepare-a-strict-13a9e1b8` (data-computed entry axes) and
+`custom-geometry-8640cc9d` (native HVP). Locality and protocol remain required
 acceptance, with no fallback. Snag `atlas-shifted-co-e72a3041`.
 
 `rk_mi_bound_types.jl` checks that RKBRMI binds every `mi()` column as
