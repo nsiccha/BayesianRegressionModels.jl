@@ -3,6 +3,45 @@
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using LinearAlgebra
 
+struct LowerSharesRecordingVector <: AbstractVector{Float64}
+    values::Vector{Float64}
+    reads::Vector{Int}
+end
+Base.size(v::LowerSharesRecordingVector) = size(v.values)
+Base.IndexStyle(::Type{LowerSharesRecordingVector}) = IndexLinear()
+Base.getindex(v::LowerSharesRecordingVector, i::Int) = (push!(v.reads, i); v.values[i])
+
+@stestset "bounded grouped map has linear work and storage" begin
+    # Exercise the emitted plate composition: each group map must be shared
+    # by its entries, rather than recomputed once for every entry in the group.
+    body = BRM._BRM_STATISTICAL_VALUES.brm_lower_grouped_local
+    spec = Core.eval(@__MODULE__, :(ReactiveKernels.@kernel $body))
+    measurements = map((32, 64, 128)) do K
+        ends, residuals = collect(K:K:4K), fill(2.0K, 4)
+        layout = BRM._brm_grouped_shares_layout(ends, residuals)
+        _, entry_slot, _, _, group_entries, group_coords, entry_ids, group_ids, entry_group = layout
+        bound = (; entry_ids, entry_group, entry_slot, group_ids, group_coords,
+            group_entries, residuals, lo=ones(4K))
+        q = Base.invokelatest(ReactiveKernels.prepare, spec;
+            have=(:z, keys(bound)...), want=:values, bound)
+        point = LowerSharesRecordingVector(zeros(4(K-1)), Int[])
+        x = Base.invokelatest(q, point)
+        @test all(x .> 1.)
+        @test all(isapprox(sum(x[rows]), residuals[k]) for (k, rows) in enumerate(group_entries))
+        @test length(point.reads) <= 4length(point)
+        u = point.values
+        Base.invokelatest(q, u)
+        bytes = minimum(@allocated(Base.invokelatest(q, u)) for _ in 1:3)
+        (; K, reads=length(point.reads), bytes, layout_bytes=Base.summarysize(layout))
+    end
+    println("LOWER_SHARES_SCALING=", measurements)
+    for (small, large) in zip(measurements, measurements[2:end])
+        @test large.reads <= 2.2small.reads
+        @test large.bytes <= 2.5small.bytes
+        @test large.layout_bytes <= 2.5small.layout_bytes
+    end
+end
+
 lower_data() = (; x=Union{Missing,Float64}[missing, missing, 3, missing, missing, 2],
     lo=[1., 2., 1., 2., 1., 0.], total=[9., 2.],
     g=[1, 1, 1, 2, 3, 3], cells=[1, 2], y=[2., 4., 3., 2., 2.5, 2.])
@@ -31,6 +70,13 @@ lower_cells(data) = @brm data begin
         y[i] ~ Normal(T, 0.7)
     end
 end
+lower_support_cells(data) = @brm data begin
+    sigma ~ LogNormal(0, 0.3)
+    @plate for i in eachindex(total)
+        T::shares(total[i]) ~ truncated(Exponential(sigma); lower=lo[i])
+        y[i] ~ Normal(T, 0.7)
+    end
+end
 
 @stestset "bounded cell construction" begin
     m = lower_cells(LOWER_CELLS)
@@ -38,11 +84,12 @@ end
     @test RKBRMI(m) isa RKBRMI
 end
 
-@stestset "bounded cell density and start round trips" begin
+@stestset "bounded cell density and start round trips" for (build, label) in
+        ((lower_cells, "lognormal"), (lower_support_cells, "exponential"))
     data = LOWER_CELLS
-    m = lower_cells(data)
+    m = build(data)
     sb = SBBRMI(m; mod=@__MODULE__, total_groups=())
-    stan = consumer_stan(m, "lower_cells")
+    stan = consumer_stan(m, "lower_cells_$label")
     rk = check_rk_source_roundtrip(RKBRMI(m))
     p = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
     t = brm_coordinate_transport(rk, sb, String.(BridgeStan.param_unc_names(stan.model)))
@@ -52,7 +99,8 @@ end
         for k in eachindex(data.total)
             x, lo = v.T[k], data.lo[k]
             @test all(x .>= lo) && sum(x) ≈ data.total[k]
-            lp += sum(logpdf.(truncated.(LogNormal.(data.loc[k], v.sigma), lo, Inf), x))
+            law = build === lower_cells ? LogNormal.(data.loc[k], v.sigma) : Exponential(v.sigma)
+            lp += sum(logpdf.(truncated.(law, lo, Inf), x))
             lp += sum(logpdf.(Normal.(x, .7), data.y[k]))
             length(x) == 1 || (lp += sum(log.(x .- lo)) - log(data.total[k]-sum(lo)))
         end
@@ -134,6 +182,8 @@ end
     @test BRM._brm_lower_shares_logjac(z, total, lo) ≈
         2log(total-sum(lo)) + sum(log, w)
     @test BRM._brm_shares_values(Float64[], 2., 2.) == [2.]
+    @test BRM._brm_shares_coordinates([2.], [2.]) == Float64[]
+    @test_throws ArgumentError BRM._brm_shares_coordinates([1.], [2.])
     @test BRM._brm_lower_shares_logjac(Float64[], 2., 2.) == 0.
     @test BRM._brm_lower_shares_logjac([0.], 3., [1.,2.]) == -Inf
     @test BRM._brm_lower_shares_logjac([0.], 3., [Inf,2.]) == -Inf

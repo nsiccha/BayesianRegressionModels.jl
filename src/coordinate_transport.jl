@@ -2250,7 +2250,8 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
             # Non-centered, the draws are the entries' coordinates.
             if part == "z_shares"
                 value = Symbol(scope, ".y_shares")
-                grouped = Base.invokelatest(_rk_value_reader(rk, (value,)), u)[value]
+                reader = Base.invokelatest(_rk_value_reader, rk, (value,))
+                grouped = Base.invokelatest(reader, u)[value]
             end
             # The free entries: sampled, standardized (RK computes their
             # values from the draws), or none.

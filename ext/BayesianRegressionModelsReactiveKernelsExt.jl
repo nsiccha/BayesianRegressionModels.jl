@@ -499,10 +499,13 @@ function BRM._rk_layout_coordinate_transforms(backend::BRM.RKBRMI)
 end
 BRM._rk_bound_coordinate_names(backend::BRM.RKBRMI) =
     coordinate_names(assign_layout(_rk_translated(backend)))
+# Geometry arguments belong to this binding. A replay shares the executable
+# graph, but its bounds and totals may differ from the original layout's data.
+_rk_bound_layout(backend::BRM.RKBRMI) = assign_layout(_rk_translated(backend))
 # Each packed coordinate's constrained lower bound under a `:floored`
 # transform (`lo + exp(u)`); `NaN` for other transforms or an unresolved bound.
 function BRM._rk_layout_coordinate_floors(backend::BRM.RKBRMI)
-    layout = backend.model.layout
+    layout = _rk_bound_layout(backend)
     floors = fill(NaN, layout.total)
     for entry in layout.entries
         entry.transform === :floored && entry.lo isa Real &&
@@ -511,9 +514,9 @@ function BRM._rk_layout_coordinate_floors(backend::BRM.RKBRMI)
     floors
 end
 BRM._rk_constrained_values(backend::BRM.RKBRMI, u::AbstractVector) =
-    constrain(backend.model.layout, u)
+    constrain(_rk_bound_layout(backend), u)
 BRM._rk_unconstrained_point(backend::BRM.RKBRMI, values::NamedTuple) =
-    unconstrain(backend.model.layout, values)
+    unconstrain(_rk_bound_layout(backend), values)
 
 # NLME evaluation (src/nlme_view.jl): the prepared `:pointwise` query and its
 # evaluation at a packed unconstrained point, and the sampler query whose

@@ -85,7 +85,7 @@ function _rk_lower_completion_law(d::_BRMPreparedExpr)
     base isa _BRMPreparedExpr && isempty(base.kwargs) || error(
         "RK backend: a bounded completion needs a positional base distribution call")
     floor = _brm_lower_floor(base.callable)
-    lower = spec.lower isa Real ? max(spec.lower, floor) :
+    lower = floor == -Inf ? spec.lower : spec.lower isa Real ? max(spec.lower, floor) :
         _BRMPreparedExpr(_brm_effective_lower, (spec.lower, floor), (;))
     _BRMPreparedExpr(_BRMLowerLaw{base.callable,spec.normalized},
         (lower, base.args...), (;))
@@ -156,7 +156,11 @@ function _brm_lower_shares_logjac(y, total, lo)
     sum(_brm_shares_log_values(y, slack)) - log(slack)
 end
 function _brm_shares_coordinates(x, lo)
-    length(x) == 1 && return Float64[]
+    if length(x) == 1
+        x[1] >= _brm_lower_at(lo, 1) || throw(ArgumentError(
+            "a singleton shares value must respect its lower bound"))
+        return Float64[]
+    end
     all(>(0), x .- lo) || throw(ArgumentError(
         "shares values must be strictly above their row lower bounds"))
     _brm_shares_coordinates(x .- lo)
@@ -312,11 +316,15 @@ StanBlocks.@deffun begin
     end
     brm_lower_cell_lpdfs(y::vector[m], family, args...)::vector[m] =
         rep_vector(brm_lower_cell_lpdf(y, family, args...) / max(m, 1), m)
-    brm_lower_cell_rng(family, normalized::int, total::real, lo, a::vector[n], args...)::vector[n-1] = begin
+    brm_lower_cell_rng(family, normalized::int, total::real, lo::vector[n], args...)::vector[n-1] = begin
         @stan_assert false "shares: a conditional cell draw is not available"
         rep_vector(0., n-1)
     end
-    brm_lower_cell_rng(family, normalized::int, total::real, lo, a::real, b::vector[n], args...)::vector[n-1] = begin
+    brm_lower_cell_rng(family, normalized::int, total::real, lo::real, a::vector[n], args...)::vector[n-1] = begin
+        @stan_assert false "shares: a conditional cell draw is not available"
+        rep_vector(0., n-1)
+    end
+    brm_lower_cell_rng(family, normalized::int, total::real, lo::real, a::real, b::vector[n], args...)::vector[n-1] = begin
         @stan_assert false "shares: a conditional cell draw is not available"
         rep_vector(0., n-1)
     end

@@ -780,9 +780,10 @@ function _rk_kernel_cell_statement(statement, kernel, defs, bindings, taken)
     bounded = spec === nothing ? nothing : _brm_cell_lower_parts(plain, kernel.scope)
     if bounded !== nothing
         F = _brm_lower_base(callable)
+        floor = _brm_lower_floor(F)
+        lower = floor == -Inf ? bounded.lower : Expr(:., :max, Expr(:tuple, bounded.lower, floor))
         plain = Expr(:call, first(bounded.base.args),
-            Expr(:., :max, Expr(:tuple, bounded.lower, _brm_lower_floor(F))),
-            bounded.base.args[2:end]...)
+            lower, bounded.base.args[2:end]...)
     end
     args = Any[_rk_kernel_bind_calls(arg, kernel.scope, bindings, taken)
         for arg in plain.args[2:end]]

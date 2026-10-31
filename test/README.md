@@ -83,10 +83,16 @@ It compares the full Stan density, RK native Enzyme gradients and coordinate
 transport with independent LogNormal/Normal density and Jacobian oracles;
 covers scalar, row and live bounds, free rows, singleton boundaries, complete
 groups, invalid budgets, source/frozen replay, output descriptors and starts.
+The emitted group map is also checked for linear coordinate reads, allocation
+and layout storage as group size doubles. Cell checks include Exponential
+laws whose vector of lower bounds supplies their dimension.
 Run it directly in the test environment. `nlme_lower_shares.jl` runs in the
 NLMEEstimation scratch environment below and checks bounded groups' fixed
 unit variance, lockstep/unit densities and gradients, `check_protocol` and
-per-cell coordinate locality. Snag `atlas-shifted-co-e72a3041`.
+per-cell coordinate locality. On the current RK test pin, the latter two
+checks expose upstream snags `custom-geometry-8640cc9d` (native HVP) and
+`group-plate-desi-9ffa5d79` (computed-design locality); they remain required
+acceptance, with no fallback. Snag `atlas-shifted-co-e72a3041`.
 
 `rk_mi_bound_types.jl` checks that RKBRMI binds every `mi()` column as
 concretely typed values (`<x>_raw`) and a `Vector{Bool}` presence mask
