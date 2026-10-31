@@ -229,4 +229,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # (snag brm-canonical-44-a1653c2a).
 # 260d9a94 (RK 0.1.35 / RKPPL 0.1.29): visible grouped kernels retain
 # their shape facts for strict local observation queries.
-rev = "260d9a94541497284f0d53bef531e3cd8c469122"
+# f851e008 (RK 0.1.37 / RKPPL 0.1.31) binds data-computed entry axes
+# before shape inference, keeping the full completion's NLME cells local.
+rev = "f851e00834747570b8a0eb163295803615e37dc6"

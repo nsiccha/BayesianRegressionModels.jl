@@ -228,7 +228,9 @@ const PINS = [
     # nested SAEM population gradient (RK snag brm-canonical-44-a1653c2a).
     # 260d9a94 (RK 0.1.35 / RKPPL 0.1.29) preserves shape facts across
     # visible grouped kernels, so strict NLME cells read their owning group.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "260d9a94541497284f0d53bef531e3cd8c469122"),  # main
+    # f851e008 (RK 0.1.37 / RKPPL 0.1.31) also binds data-computed entry
+    # axes before shape inference (RK snag prepare-a-strict-13a9e1b8).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "f851e00834747570b8a0eb163295803615e37dc6"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

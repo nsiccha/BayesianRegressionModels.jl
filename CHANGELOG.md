@@ -12,6 +12,27 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.92
+
+- Added: `mi(x)::shares(total, rows)` accepts lower support declared by
+  `truncated(Law(...); lower=lo)` or `restricted(Law(...); lower=lo)` on
+  SBBRMI and RKBRMI. Scalar, row-specific and model-valued lower bounds
+  shift each group's simplex above its missing rows' lower bounds while
+  preserving the total. Truncation retains its normalizer; restriction
+  retains the base density kernel. The exact-sum density is not divided by
+  a marginal density for the total.
+- The same laws work for ordinary imputation and `T::shares(total)` cell
+  latents, including replay, output descriptors, starts and coordinate
+  transport. A singleton keeps its exact residual and density without
+  coordinates; a multi-entry group requires strictly positive remaining
+  slack. Finite upper bounds remain unsupported by this geometry.
+- RK noncentered grouped completions retain their law and Jacobian as
+  group weights for NLME unit attribution. Bounded free entries stay
+  centered shared latents, with their declared law. Group-local evaluation
+  requires ReactiveKernels 0.1.37 / ReactiveKernelsPPL 0.1.31. The test
+  environment pins Enzyme dogfood `0e251cfb` and its declared libEnzyme
+  `782c9d95` for native HVPs through the lower-support geometry on Julia 1.10.
+
 ## 0.2.91
 
 - Added: `brm_ladder_fit(rk; ad_backend, upto = 4, integrate = :auto, …)`, a
