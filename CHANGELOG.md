@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.118
+
+- Changed: NLME unit likelihoods and gradients use one strict RK plate
+  partition per unit. Preparation checks structural coordinate ownership,
+  including dormant branches, and names nonlocal producers or foreign unit
+  effects. Sparse curvature retains individual cell supports without numerical
+  probing or gradient-based pruning. Conditional subsets evaluate only their
+  requested units; full-cohort and population-gradient calls retain batching.
+- Changed: separated CAR fields expose their shared values through row-local
+  graph computations, preserving their law, coordinates, inverse and Jacobian.
+- Compatibility: retains ReactiveKernels 0.1.38 and ReactiveKernelsPPL 0.1.32.
+  Unit gradients use ordinary Enzyme Reverse. The test bootstrap selects
+  Enzyme dogfood `0e251cfb` with the compact-partition activity and nested
+  differentiation repairs.
+
 ## 0.2.120
 
 - Require ReactiveKernels 0.1.51 and ReactiveKernelsPPL 0.1.53 for selected-row
@@ -92,6 +107,7 @@ instead of failing at run time.
   axis, declared priors and bounds, and the grouping's sampled or known
   correlation. The same coordinates support Stan transport, term starts,
   shared value readers and frozen replay.
+
 
 ## 0.2.112
 
@@ -200,6 +216,7 @@ instead of failing at run time.
   `value`, optional `gradient`, `quantity`, `endpoint` and `temperature`.
   Rendering is compact, NaN/+Inf still fail fast, and `-Inf` retains its
   outside-support meaning. Requires RKPPL 0.1.37.
+
 
 ## 0.2.103
 

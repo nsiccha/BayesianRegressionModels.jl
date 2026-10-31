@@ -63,12 +63,12 @@ end
 BRM._rk_laplace_third(query, direction::Vector{Float64}, u::Vector{Float64}) =
     only(ad_third(query, (direction,), u))
 
-# The compact sampler overlays active values beside constant plan/index data,
-# so native Reverse requires runtime activity (rkppl-use §14).
+# The compact sampler uses ordinary Reverse with the repaired Enzyme dogfood
+# selected by the test bootstrap (rkppl-use §14).
 BRM._rk_nlme_partition_sampler(context, base::Vector{Float64}) =
     prepare_partition_sampler(context.built, context.bound, context.observations,
         base; by=context.by, locality=:error, compact=true,
-        backend=AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse)))
+        backend=AutoEnzyme(; mode=Enzyme.Reverse))
 BRM._rk_nlme_partition_footprint(sampler, label) =
     partition_footprint(sampler, label)
 BRM._rk_nlme_partition_value_and_gradient!(sampler, gradient, point, label) =

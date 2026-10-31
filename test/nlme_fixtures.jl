@@ -77,7 +77,7 @@ const NLME_AD = AutoEnzyme(; mode=Enzyme.Reverse)
 compact_cell_oracle(rk, observations, base, selected) =
     prepare_compact_cell_sampler(rk.model, rk_bound_plan(rk), observations,
         base, selected;
-        backend=AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse)))
+        backend=AutoEnzyme(; mode=Enzyme.Reverse))
 
 # Independent oracle for the @plate population-PK model: every subject's
 # conditional log-likelihood, η gradient, and η Hessian, written out from the model's

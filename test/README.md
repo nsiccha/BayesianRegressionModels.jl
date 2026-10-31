@@ -1000,7 +1000,10 @@ strict cell values and structural ownership independently of unit plans.
 The `strict car partitions` filter compares
 both shared and unit gradients with independent per-cell reverse passes for
 ICAR and BYM2, including CAR unit terms. Graph-visible identity geometry needs
-ReactiveKernels 0.1.33 / ReactiveKernelsPPL 0.1.27 or later.
+ReactiveKernels 0.1.33 / ReactiveKernelsPPL 0.1.27 or later; strict partition
+evaluation requires 0.1.36 / 0.1.30 for uniform empty/nonempty plans and
+scheduled-loop resets. Both partition fixtures use ordinary Enzyme Reverse
+with the repaired dogfood revision pinned by `setup_env.jl`.
 
 `nlme_integrated.jl` covers NLMEEstimation's integrated families on BRM
 models: SAEM integrates the chosen covariance families by BRM's sparse Laplace
@@ -1985,7 +1988,9 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   `native-reverse-t-6d51cae6`; user pick on BRM decision `0n0kgfh`). The
   sparse Laplace's `@plate` cells take their Hessian blocks through RKPPL's
   compact-cell AD under plain Reverse, which needs dogfood from `7a886d9`
-  (Enzyme snag `static-reverse-s-f9483e9c`). The current pin is `5325554c`
+  (Enzyme snag `static-reverse-s-f9483e9c`). Strict partition gradients need
+  `a6458e9c` for constant plans and compact overlays; the ordinary Reverse
+  fixtures do not enable runtime activity. The current pin is `5325554c`
   with its declared libEnzyme `782c9d95`; it includes `3a89b497`'s compact
   nested-AD overlay repairs for sum factors and the dynamic-call Hessian
   repair needed by lower-bounded completion geometry. It also repairs

@@ -237,6 +237,8 @@ const PINS = [
     # exemplars for a single sum, including empty reductions and selections.
     # 260d9a94 (RK 0.1.35 / RKPPL 0.1.29) preserves shape facts across
     # visible grouped kernels, so strict NLME cells read their owning group.
+    # 4925e53d (RK 0.1.36 / RKPPL 0.1.30) includes homogeneous
+    # empty/nonempty partition plans and scheduled-loop resets.
     # f851e008 (RK 0.1.37 / RKPPL 0.1.31) also binds data-computed entry
     # axes before shape inference (RK snag prepare-a-strict-13a9e1b8).
     # 81363978 (RK 0.1.38 / RKPPL 0.1.32) binds visible tuple-geometry
@@ -264,6 +266,8 @@ const PINS = [
     # plain Reverse when the sparse Laplace differentiates an `@plate` cell.
     # 3a89b497 includes the compact nested-AD overlay repairs; its declared
     # libEnzyme is 782c9d95, the sum-factor producer's tested native pair.
+    # a6458e9c (libEnzyme 782c9d95) repairs ordinary Reverse over
+    # constant plan fields and compact grouped overlays.
     # 0e251cfb (libEnzyme build 782c9d95) also fixes second derivatives
     # through dynamic calls on Julia 1.10 (Enzyme snag compute-an-ordin-902b6418),
     # including the lower-bounded completion's ParameterGeometry callbacks.
