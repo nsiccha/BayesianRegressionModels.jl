@@ -84,6 +84,28 @@ coordinates and density as the centred lowering, its group terms in
 completion, Gamma's value), and the location-scale rule for free entries.
 Snag `nlme-view-shares-f1cfaa71`.
 
+`mi_lower_totals.jl` checks lower support declared by `truncated` or
+`restricted` on shared completions, ordinary imputation and cell shares.
+It compares the full Stan density, RK native Enzyme gradients and coordinate
+transport with independent LogNormal/Normal density and Jacobian oracles;
+covers scalar, row and live bounds, free rows, singleton boundaries, complete
+groups, invalid budgets, source/frozen replay, output descriptors and starts.
+The emitted group map is also checked for linear coordinate reads, allocation
+and layout storage as group size doubles. Cell checks include Exponential
+laws whose vector of lower bounds supplies their dimension.
+Free-row checks require strict cell locality and compare native gradients with
+analytic scores for default Exponential, scaled Exponential and Normal laws.
+Run it directly in the test environment. `nlme_lower_shares.jl` runs in the
+NLMEEstimation scratch environment below and checks bounded groups' fixed
+unit variance, lockstep/unit densities and gradients, `check_protocol` and
+per-cell coordinate locality. The RK 0.1.38 / RKPPL 0.1.32 test pin preserves
+grouped-design shape facts (`group-plate-desi-9ffa5d79`) and binds data-computed
+entry axes and tuple-geometry metadata before shape inference
+(`prepare-a-strict-13a9e1b8`, `prepare-one-resp-b1f58f91`). Enzyme dogfood
+`0e251cfb` with its declared libEnzyme `782c9d95` repairs the native HVP
+(`custom-geometry-8640cc9d`). Both locality and `check_protocol` remain required
+acceptance in the full consumer fixture. Snag `atlas-shifted-co-e72a3041`.
+
 `rk_mi_bound_types.jl` checks that RKBRMI binds every `mi()` column as
 concretely typed values (`<x>_raw`) and a `Vector{Bool}` presence mask
 (`<x>_present`), never as a column of `Missing` unions: for a completed

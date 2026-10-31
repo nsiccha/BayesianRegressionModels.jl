@@ -175,9 +175,12 @@ end
     # A complete group must already sum to its total.
     wrong = copy(data.tot); wrong[3] += 1.0
     @test occursin("group 3 has no missing entry", message(() -> totals(spec(; tot=wrong))))
-    # A residual that is not positive.
+    # Planning preserves the residual; the declared law checks feasibility.
     low = copy(data.tot); low[1] = sum(data.truth[[3, 4]])
-    @test occursin("leaves 0.0 of its total", message(() -> totals(spec(; tot=low))))
+    @test first(last(totals(spec(; tot=low))).residuals) == 0.
+    invalid = totals_assigned(merge(data, (; tot=low)))
+    @test occursin("positive group residuals", message(() -> SBBRMI(invalid)))
+    @test occursin("positive group residuals", message(() -> RKBRMI(invalid)))
     @test occursin("has 4 totals for the 5 groups", message(() -> totals(spec(; tot=data.tot[1:4]))))
     @test occursin("has 23 entries for the 24", message(() -> totals(spec(; g=data.g[1:23]))))
     @test occursin("is listed twice", message(() -> totals(spec(; cells=[1, 2, 2, 4, 5]))))

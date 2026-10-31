@@ -123,6 +123,90 @@ ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMCarShared, w) =
 # observed placeholder carries no information, the weight is the density.
 ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMLogWeight, _placeholder) = d.weight
 
+ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMLowerLaw, x) = BRM.Distributions.logpdf(d, x)
+function ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMLowerLaw{F,N}, x::AbstractArray) where {F,N}
+    BRM._brm_shares_check_lengths(d.args, x)
+    result = zero(eltype(x))
+    for j in eachindex(x)
+        result += BRM.Distributions.logpdf(BRM._BRMLowerLaw{F,N}(BRM._brm_shares_entries(d.args, j)...), x[j])
+    end
+    result
+end
+# Completion columns are vectors. Expose their elementwise transform as a
+# graph, including an empty free vector beside grouped shares: an opaque
+# callback hides its row footprint when the completed column is gathered.
+# Registered base families take zero, one or two arguments. Keep the complete
+# endpoint signatures explicit; splatted endpoints retain opaque locality.
+ReactiveKernels.@kernel function _lower_constrain_0(u, shape, lo)
+    values = lo .+ exp.(u)
+    return values
+end
+ReactiveKernels.@kernel function _lower_constrain_1(u, shape, lo, argument_1)
+    return _lower_constrain_0(u, shape, lo)
+end
+ReactiveKernels.@kernel function _lower_constrain_2(u, shape, lo, argument_1, argument_2)
+    return _lower_constrain_0(u, shape, lo)
+end
+function ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMLowerLaw}, args, shape)
+    constrain = length(shape) == 1 ?
+        (_lower_constrain_0, _lower_constrain_1, _lower_constrain_2)[length(args)] :
+        ((u, shape, lo, rest...) -> isempty(shape) ? lo + exp(only(u)) : reshape(lo .+ exp.(u), shape))
+    ReactiveKernelsPPL.ParameterGeometry(shape,
+        isempty(shape) ? 1 : Expr(:call, :*, (:(length($axis)) for axis in shape)...); support=:real,
+        constrain,
+        unconstrain=(x, shape, lo, rest...) -> isempty(shape) ? [log(x - lo)] : vec(log.(x .- lo)),
+        logjac=(u, shape, rest...) -> sum(u))
+end
+
+ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMLowerShares}, args, shape) =
+    ReactiveKernelsPPL.ParameterGeometry((args[1],), :($(args[1]) - 1); support=:real,
+        constrain=(u, shape, n, total, lo, rest...) -> BRM._brm_shares_values(u, total, lo),
+        unconstrain=(x, shape, n, total, lo, rest...) -> _brm_lower_shares_unconstrain(x, total, lo),
+        logjac=(u, shape, n, total, lo, rest...) -> BRM._brm_lower_shares_logjac(u, total, lo))
+function _brm_lower_shares_unconstrain(x, total, lo)
+    isapprox(sum(x), total; rtol=1e-8) || throw(ArgumentError("shares values must sum to their total"))
+    all(j -> x[j] >= BRM._brm_lower_at(lo, j), eachindex(x)) ||
+        throw(ArgumentError("shares values must respect their row lower bounds"))
+    BRM._brm_shares_coordinates(x, lo)
+end
+@inline function ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMLowerShares{F}, x) where {F}
+    BRM._brm_shares_check_lengths((d.lower, d.args...), x)
+    BRM._brm_lower_shares_valid(d.total, d.lower, length(x)) || return -Inf
+    result = zero(eltype(x))
+    for j in eachindex(x)
+        result += BRM.Distributions.logpdf(F(BRM._brm_lower_at(d.lower, j),
+            BRM._brm_shares_entries(d.args, j)...), x[j])
+    end
+    result
+end
+ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMLowerGroupedShares}, args, shape) =
+    ReactiveKernelsPPL.ParameterGeometry(shape, :(last($(args[1])) - length($(args[1]))); support=:real,
+        constrain=(u, shape, ends, residuals, lo, rest...) -> BRM._brm_grouped_shares_values(u, ends, residuals, lo),
+        unconstrain=(x, shape, ends, residuals, lo, rest...) -> _brm_lower_grouped_unconstrain(x, ends, residuals, lo),
+        logjac=(u, shape, ends, residuals, lo, rest...) -> BRM._brm_lower_grouped_logjac(u, ends, residuals, lo))
+function _brm_lower_grouped_unconstrain(x, ends, residuals, lo)
+    start = 1
+    for (k, stop) in enumerate(ends)
+        _brm_lower_shares_unconstrain(view(x, start:stop), residuals[k], BRM._brm_lower_slice(lo, start:stop))
+        start = stop + 1
+    end
+    BRM._brm_grouped_shares_coordinates(x, ends, lo)
+end
+@inline function ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMLowerGroupedShares{F}, x) where {F}
+    BRM._brm_shares_check_lengths((d.lower, d.args...), x)
+    start = 1
+    for (k, stop) in enumerate(d.ends)
+        BRM._brm_lower_shares_valid(d.residuals[k], BRM._brm_lower_slice(d.lower, start:stop), stop-start+1) || return -Inf
+        start = stop + 1
+    end
+    result = zero(eltype(x))
+    for j in eachindex(x)
+        result += BRM.Distributions.logpdf(F(BRM._brm_lower_at(d.lower, j),
+            BRM._brm_shares_entries(d.args, j)...), x[j])
+    end
+    result
+end
+
 # The emitted source is the executable contract. Every statistical prior and
 # observation role lowers through the public RKPPL surface; binding supplies
 # the data, with no ordinal or missing-response plan mutations.
@@ -434,10 +518,13 @@ function BRM._rk_layout_coordinate_transforms(backend::BRM.RKBRMI)
 end
 BRM._rk_bound_coordinate_names(backend::BRM.RKBRMI) =
     coordinate_names(assign_layout(_rk_translated(backend)))
+# Geometry arguments belong to this binding. A replay shares the executable
+# graph, but its bounds and totals may differ from the original layout's data.
+_rk_bound_layout(backend::BRM.RKBRMI) = assign_layout(_rk_translated(backend))
 # Each packed coordinate's constrained lower bound under a `:floored`
 # transform (`lo + exp(u)`); `NaN` for other transforms or an unresolved bound.
 function BRM._rk_layout_coordinate_floors(backend::BRM.RKBRMI)
-    layout = backend.model.layout
+    layout = _rk_bound_layout(backend)
     floors = fill(NaN, layout.total)
     for entry in layout.entries
         entry.transform === :floored && entry.lo isa Real &&
@@ -446,9 +533,9 @@ function BRM._rk_layout_coordinate_floors(backend::BRM.RKBRMI)
     floors
 end
 BRM._rk_constrained_values(backend::BRM.RKBRMI, u::AbstractVector) =
-    constrain(backend.model.layout, u)
+    constrain(_rk_bound_layout(backend), u)
 BRM._rk_unconstrained_point(backend::BRM.RKBRMI, values::NamedTuple) =
-    unconstrain(backend.model.layout, values)
+    unconstrain(_rk_bound_layout(backend), values)
 
 # NLME evaluation (src/nlme_view.jl): the prepared `:pointwise` query and its
 # evaluation at a packed unconstrained point, and the sampler query whose

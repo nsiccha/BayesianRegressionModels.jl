@@ -10,6 +10,8 @@ _brm_parameter_reference_axis(::typeof(LKJCovarianceFactor), _prior) = :whole
 
 _brm_distribution_shape(::typeof(truncated), args) =
     _brm_distribution_shape(first(args))
+_brm_distribution_shape(::typeof(restricted), args) =
+    _brm_distribution_shape(first(args))
 _brm_distribution_shape(::typeof(censored), args) =
     _brm_distribution_shape(first(args))
 _brm_distribution_shape(::typeof(weighted), args) =

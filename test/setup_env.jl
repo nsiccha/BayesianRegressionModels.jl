@@ -226,7 +226,13 @@ const PINS = [
     # 5f18f4b84 (ReactiveKernels 0.1.29, ReactiveKernelsPPL 0.1.23) fixes
     # plate buffer inference from older compiled worlds, including the
     # nested SAEM population gradient (RK snag brm-canonical-44-a1653c2a).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "5f18f4b849202af651d1de47c5b819cc1428ace5"),  # main
+    # 260d9a94 (RK 0.1.35 / RKPPL 0.1.29) preserves shape facts across
+    # visible grouped kernels, so strict NLME cells read their owning group.
+    # f851e008 (RK 0.1.37 / RKPPL 0.1.31) also binds data-computed entry
+    # axes before shape inference (RK snag prepare-a-strict-13a9e1b8).
+    # 81363978 (RK 0.1.38 / RKPPL 0.1.32) binds visible tuple-geometry
+    # metadata operands before shape inference (prepare-one-resp-b1f58f91).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "81363978d419b4c1a978093d5dd7b82144e846c4"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
@@ -240,7 +246,10 @@ const PINS = [
     # a load through a select or phi that merges Const data with active data,
     # which RKPPL's compact-cell AD (`prepare_compact_cell_ad`) runs into under
     # plain Reverse when the sparse Laplace differentiates an `@plate` cell.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "3e707d7954ed47fb0ca44ca7eea640bf9edf7213"),  # dogfood (KB mirror only)
+    # 0e251cfb (libEnzyme build 782c9d95) also fixes second derivatives
+    # through dynamic calls on Julia 1.10 (Enzyme snag compute-an-ordin-902b6418),
+    # including the lower-bounded completion's ParameterGeometry callbacks.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "0e251cfbcb810ee4dc2120b51de0784d30140aef"),  # dogfood (KB mirror only)
 ]
 
 # Pins whose commits are not on GitHub: the KB host mirror they come from.

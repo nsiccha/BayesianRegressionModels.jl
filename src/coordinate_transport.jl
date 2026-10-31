@@ -2141,14 +2141,6 @@ function _brm_rk_declaration_value(values, declaration::Symbol)
     values
 end
 
-# The grouped entries of a non-centered `mi(source)::shares(total, rows)` at
-# their coordinates `z`.
-function _brm_transport_shares_values(rk::RKBRMI, source::Symbol, z)
-    plan = rk.plan isa _RKHeldOutPlan ? rk.plan.parent : rk.plan
-    c = only(c for c in plan.completions if c.source === source)
-    _brm_grouped_shares_values(z, plan.columns[c.totals.ends], plan.columns[c.totals.residuals])
-end
-
 """
     brm_check_coordinate_transport(t, rk::RKBRMI, stan_model, u_rk; atol=1e-10, rtol=1e-10)
 
@@ -2256,8 +2248,11 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
             free = Symbol(scope, ".y_free")
             grouped = _brm_rk_declaration_value(rk_values, declaration)
             # Non-centered, the draws are the entries' coordinates.
-            part == "z_shares" && (grouped = _brm_transport_shares_values(rk,
-                Symbol(scope), grouped))
+            if part == "z_shares"
+                value = Symbol(scope, ".y_shares")
+                reader = Base.invokelatest(_rk_value_reader, rk, (value,))
+                grouped = Base.invokelatest(reader, u)[value]
+            end
             # The free entries: sampled, standardized (RK computes their
             # values from the draws), or none.
             free_values = any(p -> p.rk_declaration === free, t.pairs) ?

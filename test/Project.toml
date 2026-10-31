@@ -227,4 +227,10 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 5f18f4b84 (ReactiveKernels 0.1.29, ReactiveKernelsPPL 0.1.23) fixes
 # plate buffer inference used by nested SAEM's population gradient
 # (snag brm-canonical-44-a1653c2a).
-rev = "5f18f4b849202af651d1de47c5b819cc1428ace5"
+# 260d9a94 (RK 0.1.35 / RKPPL 0.1.29): visible grouped kernels retain
+# their shape facts for strict local observation queries.
+# f851e008 (RK 0.1.37 / RKPPL 0.1.31) binds data-computed entry axes
+# before shape inference.
+# 81363978 (RK 0.1.38 / RKPPL 0.1.32) also binds visible tuple-geometry
+# metadata operands, keeping the full completion's NLME cells local.
+rev = "81363978d419b4c1a978093d5dd7b82144e846c4"

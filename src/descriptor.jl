@@ -968,6 +968,13 @@ function _brm_kernel_cell_values(brmi)
         for name in keys(_brm_cell_total_latents(stmts, _brm_inline_scope(first(args))))
             name in names || push!(names, name)
         end
+        # The shifted geometry's excess is a sampled-value transform used by
+        # the cell itself and by the inverse for `brm_start`. Its difference
+        # from the completed values gives the current bounds, even when live.
+        for name in keys(_brm_cell_total_latents(stmts, _brm_inline_scope(first(args));
+                lower_bounded_only=true))
+            push!(names, Symbol(name, :_shares_excess))
+        end
         isempty(names) || push!(cells, target => names)
     end
     cells

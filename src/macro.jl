@@ -3354,6 +3354,9 @@ function _brm_restricted_operation(@nospecialize(value))
     op isa ExprColumn && getf(op) === (~) || return value
     lhs, rhs = getargs(op, 2)
     rhs isa ExprColumn && getf(rhs) === restricted || return value
+    # A completion's observed and missing rows share this law. Keep the
+    # explicit wrapper so its lowering retains both support and kernel mass.
+    lhs isa ExprColumn && getf(lhs) === mi && return value
     NamedColumn(name(value), ExprColumn(~, lhs, _brm_restricted_law(rhs)))
 end
 
