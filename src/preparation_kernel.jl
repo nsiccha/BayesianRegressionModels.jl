@@ -335,12 +335,14 @@ function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
                                  observed::Bool=false)
     a_name = name(arg_col)
     decl = parent(arg_col)
-    is_lp = decl isa ExprColumn && getf(decl) === (~)
+    # `is_lp` selects a runtime gather of a model value. Assignments, like
+    # predictors and completions, must keep their dependencies and gradients.
+    is_lp = decl isa ExprColumn && getf(decl) in ((~), assign)
     is_unbound = decl isa MissingColumn && allow_unbound_observation
     is_lp || decl isa DataColumn || is_unbound || error(
         "$prefix: kernel(...) positional `ragged($a_name, …)`: `$a_name` must be either a ",
-        "linear predictor declared in this @brm block (`$a_name ~ <terms>`) or a raw ",
-        "data column; got $(typeof(decl)).")
+        "model value declared in this @brm block (a predictor, completion or ",
+        "assignment) or a raw data column; got $(typeof(decl)).")
     (grp_arg isa NamedColumn && parent(grp_arg) isa DataColumn) || error(
         "$prefix: kernel(...) `ragged($a_name, …)` needs a raw data column naming the ",
         "subject of every row of `$a_name`'s row axis; got $(typeof(grp_arg)).")
@@ -348,8 +350,9 @@ function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
     ev_vals = collect(_brm_group_values(parent(parent(grp_arg))))
     n_ev = length(ev_vals)
 
-    # The frame `$a_name` lives on must be the one `$grp_name` describes. For an
-    # LP that means every data column its terms name; for a raw column, itself.
+    # The frame `$a_name` lives on must be the one `$grp_name` describes. For a
+    # model expression that means its row-wise data dependencies (a gather
+    # follows its index's axis); for a raw column, itself.
     lens = Tuple{Symbol,Int}[]
     if is_lp
         append!(lens, _brm_kernel_lp_data_lengths(arg_col))

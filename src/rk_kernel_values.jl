@@ -382,10 +382,13 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             value, group = _brm_kernel_ragged_args(argument; prefix="RK backend")
             value isa NamedColumn || error("RK backend: ragged input must name a column or predictor")
             (; into, order) = _brm_kernel_ragged_options(argument; prefix="RK backend")
-            # A response the cell observes must have every entry in a cell.
+            # Coverage and raw-response ports belong to this cell's
+            # observations. Reading a completion or a response observed
+            # elsewhere must instead read its value, without observing it again.
+            cell_observed = _sb_cell_param_observed(raw_body, params[i])
             partition = _brm_kernel_ragged_rows(value, group, group_values;
                 prefix="RK backend", order,
-                observed=_rk_kernel_column_name(value) in observed)
+                observed=cell_observed)
             if params[i] in scanned && parent(value) isa DataColumn
                 # A response a scan observes is bound one series per subject
                 # and read in place, as RKPPL observes it.
@@ -402,7 +405,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             columns[rows] = partition.rows
             column = _rk_kernel_column_name(value)
             source = !isnothing(into) ? Symbol(name, :_index_, column) :
-                column in observed ? Symbol(name, :_input_, column) : column
+                cell_observed && column in observed ? Symbol(name, :_input_, column) : column
             if !isnothing(into)
                 # Rebased positions under their own port: the raw row numbers
                 # stay available to any other reader of the column.
@@ -414,7 +417,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             push!(inputs, (; source, kind=:gather, rows, column=nothing,
                 group=_rk_kernel_column_name(group),
                 partition=_rk_kernel_partition_source!(columns, value, group,
-                    cell_column, order, partition.is_lp, column in observed)))
+                    cell_column, order, partition.is_lp, cell_observed)))
         elseif argument isa NamedColumn && parent(argument) isa DataColumn
             # A data input is read through its own column. Only a response,
             # whose column is flattened for the likelihood under its own name,

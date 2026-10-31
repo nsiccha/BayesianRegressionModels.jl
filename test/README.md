@@ -18,6 +18,15 @@ differentiates with Enzyme only — every gradient in this suite goes through
 so there is nothing here to work around; do not add it back to make a new
 gradient site easier.
 
+`plate_completed_values.jl` checks direct and gathered plate reads of
+ordinary and total-constrained completions, including transformed gathers
+and forward assignment dependencies. Compiled Stan densities agree with an
+independent full-density calculation; RK values and reverse gradients agree
+with Stan under centered and noncentered completion coordinates. The script
+also checks replay, printed RK source, predictor gathers, row-axis validation
+and preservation of in-cell response coverage errors. Run it with the test
+environment above; its `@stestset` blocks accept substring filters.
+
 `infinite_censoring_bounds.jl` checks exact `-Inf` and `Inf` response bounds
 through SBBRMI and BridgeStan: lower, upper and two-sided Normal and Student-t
 censoring, alongside interval-censored LogNormal evidence. Finite and infinite
