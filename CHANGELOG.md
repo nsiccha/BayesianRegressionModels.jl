@@ -12,6 +12,16 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.84
+
+- Fixed: the index vector of an in-cell `indexin(idx[rows[i]], target[i])`
+  may be a data-only assignment (`idx = f(columns...)` at model scope), as
+  `brm-use` documents for every vector a plate cell reads. Before, plain
+  `indexin` refused it at construction ("reads `idx` as indices; it must be a
+  data vector"); the zero check now reads the assignment's value. The model
+  equals the same model given that index as a data column, on SBBRMI and
+  RKBRMI.
+
 ## 0.2.83
 
 - Fixed: a data-only assignment that indexes a matrix-valued one with a bare
