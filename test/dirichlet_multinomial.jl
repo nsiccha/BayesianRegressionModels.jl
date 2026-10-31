@@ -82,12 +82,19 @@ end
 end
 
 @stestset "Dirichlet-multinomial input support boundary" begin
-    data = (; y=[[2, 3, 1]], n=[5], p=[0.2, 0.5, 0.3])
-    backend = RKBRMI(dm_shared(data))
-    # Distributions 0.25.132's logpdf does not check insupport for this family.
-    # Keep the missing support check visible until the upstream law is fixed
-    # (ReactiveKernels snag dirichlet-multin-457e95cf).
-    @test_broken only(Base.invokelatest(dm_pointwise(backend), [0.0]).y) == -Inf
+    # The explicit Distributions source pin in setup_env.jl owns support
+    # checking; BRM and RKPPL delegate to that same public law.
+    for (n, y) in ((5, [2, 3, 1]), (7, [2, 3, 1]),
+            (6, [-1, 4, 3]), (6, [1.5, 3.5, 1.0]))
+        data = (; y=[y], n=[n], p=[0.2, 0.5, 0.3])
+        before = deepcopy(data)
+        backend = RKBRMI(dm_shared(data))
+        @test only(Base.invokelatest(dm_pointwise(backend), [0.0]).y) == -Inf
+        problem = rk_logdensity_problem(backend;
+            ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        @test LogDensityProblems.logdensity(problem, [0.0]) == -Inf
+        @test data == before
+    end
     # Distributions' constructor requires a strictly positive total.
     empty_data = (; y=[[0, 0, 0]], n=[0], p=[0.2, 0.5, 0.3])
     @test_throws DomainError Base.invokelatest(dm_pointwise(RKBRMI(dm_shared(empty_data))), [0.0])
@@ -134,5 +141,67 @@ end
         curvature = (subject_density(i, eta[1, i] + second_step) - 2expected[i] +
             subject_density(i, eta[1, i] - second_step)) / second_step^2
         @test only(hessians[i]) ≈ curvature atol=2e-6 rtol=2e-6
+    end
+end
+
+function check_dm_stan(model, data, label, points)
+    backend, problem = consumer_problem(model)
+    sb = SBBRMI(model; mod=@__MODULE__, total_groups=())
+    stan = BRM.stan_instantiate(sb;
+        path=joinpath(tempdir(), "brm-rk-consumer", label * ".stan"))
+    @test Symbol.(BridgeStan.param_unc_names(stan.model)) ==
+        coordinate_names(backend.model.layout)
+    descriptor = brm_descriptor(sb)
+    names = BridgeStan.param_names(stan.model; include_tp=true, include_gq=true)
+    likelihood = brm_output(descriptor, :y; role=:pointwise_loglik)
+    predictive = brm_output(descriptor, :y; role=:posterior_predictive)
+    likelihood_coordinates = brm_output_coordinates(likelihood, names)
+    predictive_coordinates = brm_output_coordinates(predictive, names)
+    @test length(likelihood_coordinates) == length(data.n)
+    @test predictive.segments == cumsum(length.(data.y))
+    pointwise = dm_pointwise(backend)
+    for (seed, u) in enumerate(points)
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+        stan_value, stan_gradient = BridgeStan.log_density_gradient(
+            stan.model, u; propto=false, jacobian=true)
+        @test stan_value ≈ value atol=2e-11 rtol=2e-11
+        @test stan_gradient ≈ gradient atol=2e-10 rtol=2e-10
+        values = BridgeStan.param_constrain(stan.model, u;
+            include_tp=true, include_gq=true,
+            rng=BridgeStan.StanRNG(stan.model, seed))
+        @test values[likelihood_coordinates] ≈
+            Base.invokelatest(pointwise, u).y atol=2e-11 rtol=2e-11
+        draws = values[predictive_coordinates]
+        @test all(isinteger, draws)
+        @test all(>=(0), draws)
+        offset = 0
+        for k in eachindex(data.n)
+            width = length(data.y[k])
+            @test sum(draws[offset+1:offset+width]) == data.n[k]
+            offset += width
+        end
+    end
+    stan
+end
+
+@stestset "Dirichlet-multinomial Stan shared concentration and predictions" begin
+    data = (; y=[[2, 3, 1], [0, 4, 0]], n=[6, 4], p=[0.2, 0.5, 0.3])
+    check_dm_stan(dm_shared(data), data, "dm_shared",
+        ([0.0], [1.2], [-0.7]))
+end
+
+@stestset "Dirichlet-multinomial Stan ragged live probabilities and predictions" begin
+    data = (; y=[[2, 3, 1], [1, 3], [4]], n=[6, 4, 4],
+        x=[[-0.8, 0.3, 1.1], [0.7, -0.2], [0.5]])
+    check_dm_stan(dm_intensities(data), data, "dm_intensities",
+        ([0.0, 0.0], [1.2, -0.4], [-0.7, 0.8]))
+end
+
+@stestset "Dirichlet-multinomial Stan rejects mismatched totals" begin
+    for total in (5, 7)
+        data = (; y=[[2, 3, 1], [0, 4, 0]], n=[total, 4], p=[0.2, 0.5, 0.3])
+        stan = consumer_stan(dm_shared(data), "dm_shared")
+        @test_throws ErrorException BridgeStan.log_density(stan.model, [0.0];
+            propto=false, jacobian=true)
     end
 end
