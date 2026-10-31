@@ -111,10 +111,20 @@ end
 
 # The shared coordinates of a `car_units` field (src/car_separation.jl): real,
 # packed as themselves, with the density of their separator edges and totals.
+# Explicit graph endpoints let strict partitions see the identity map. Keep
+# every positional argument in the boundary: splats use an opaque call path.
+@kernel _brm_car_shared_coordinates(u, shape, last, scale, weight, first_entry,
+        second_entry) = begin
+    return u
+end
+@kernel _brm_car_shared_logjac(u, shape, last, scale, weight, first_entry,
+        second_entry) = begin
+    return 0.0
+end
 ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMCarShared}, args, shape) =
     ReactiveKernelsPPL.ParameterGeometry(shape, :(length($(args[1]))); support=:real,
-        constrain=(u, shape, rest...) -> u, unconstrain=(w, shape, rest...) -> w,
-        logjac=(u, shape, rest...) -> zero(eltype(u)))
+        constrain=_brm_car_shared_coordinates, unconstrain=_brm_car_shared_coordinates,
+        logjac=_brm_car_shared_logjac)
 ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMCarShared, w) =
     BRM._brm_car_shared_logdensity(w, d.last, d.scale, d.weight, d.first_entry,
         d.second_entry)

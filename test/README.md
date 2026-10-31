@@ -994,6 +994,14 @@ scaling. The `nlme_svi.jl` filters `minibatch split` and
 `structural footprints and target split` check the wider SVI gradients without
 running its longer sampling comparisons.
 
+`nlme_car_separator.jl` checks the separated CAR law, coordinate transport,
+replays and sparse unit supports. Its `car identity geometry` filter checks
+strict cell values and structural ownership independently of unit plans.
+The `strict car partitions` filter compares
+both shared and unit gradients with independent per-cell reverse passes for
+ICAR and BYM2, including CAR unit terms. Graph-visible identity geometry needs
+ReactiveKernels 0.1.33 / ReactiveKernelsPPL 0.1.27 or later.
+
 `nlme_integrated.jl` covers NLMEEstimation's integrated families on BRM
 models: SAEM integrates the chosen covariance families by BRM's sparse Laplace
 and samples the rest. `check_protocol` with each set of families integrated
