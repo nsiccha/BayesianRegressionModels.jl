@@ -72,6 +72,12 @@ is one reverse sweep of the likelihood parameters. Otherwise it is a
 `BRMLaplaceProblem`, which differentiates the whole model. `structured=true`
 requires the first (refusing with the reason), `false` forces the second.
 
+`integrate = :auto` chooses the latent terms itself ([`brm_laplace_plan`](@ref)
+with its defaults): every term only Normal rows read, and every term read by
+counts, binomial rows or `@plate` cells whose per-block importance diagnostic
+admits it. `integrate = plan` takes a [`BRMLaplacePlan`](@ref) as given; the
+problem's `plan` field holds the plan it was built from.
+
 `integrate = :g` or `integrate = (:g, :h, …)` instead integrates every level
 of the named grouping columns' latent blocks by one sparse Laplace, whatever
 their nesting: random-effect blocks over the grouping, `cdar(step; by=g)` walks
@@ -130,6 +136,12 @@ function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
             "integrate = $(repr(integrate)) chooses the integrated effects itself; " *
             "subject_group, nested_groups, shared_groups and structured describe the " *
             "per-unit Laplace and do not apply with it"))
+        integrate === :auto && return _brm_sparse_laplace_problem_from_plan(backend,
+            _brm_laplace_plan(backend; ad_backend, integrate=:auto, sample=(),
+                ess_floor=0.5, draws=200, at=nothing, rng=Random.Xoshiro(20261031), tol,
+                maxiter); ad_backend, tol, maxiter)
+        integrate isa BRMLaplacePlan && return _brm_sparse_laplace_problem_from_plan(
+            backend, (; plan=integrate, problem=nothing); ad_backend, tol, maxiter)
         return _brm_sparse_laplace_problem(backend, integrate; ad_backend, tol, maxiter)
     end
     structured in (:auto, true, false) || throw(ArgumentError(

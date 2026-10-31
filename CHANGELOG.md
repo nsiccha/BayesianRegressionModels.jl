@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.87
+
+- Added: `brm_laplace_plan(rk; ad_backend, integrate = :auto, sample = (),
+  ess_floor, draws, at)` and `BRMLaplacePlan`: which latent terms the sparse
+  Laplace integrates. Terms only Normal rows read are integrated; terms read
+  by counts, binomial rows or `@plate` cells are gated by a per-block
+  importance diagnostic, measured after the factorization and reported per
+  term; Student-t, stratified and `car_units` terms and terms on a shape or
+  dispersion are not integrated unless named. `brm_laplace_problem(rk;
+  integrate = :auto)` builds the sparse problem from such a plan, and
+  `integrate = plan` takes one as given (`target.plan`).
+
 ## 0.2.86
 
 - Fixed: RKBRMI preserves a multivariate distribution's whole count or value

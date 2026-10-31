@@ -129,6 +129,7 @@ include("nlme_start.jl")
 include("nlme_laplace.jl")
 include("nlme_laplace_structured.jl")
 include("nlme_laplace_sparse.jl")
+include("nlme_laplace_plan.jl")
 include("start_values.jl")
 include("laplace_start.jl")
 include("laplace_mode.jl")
@@ -279,7 +280,7 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_nlme_loglikelihood_and_gradient, brm_nlme_loglikelihoods,
        brm_nlme_loglikelihoods_and_gradients,
        BRMLaplaceProblem, BRMStructuredLaplaceProblem, BRMSparseLaplaceProblem,
-       brm_laplace_problem, brm_laplace_mode,
+       brm_laplace_problem, brm_laplace_mode, brm_laplace_plan, BRMLaplacePlan,
        brm_laplace_draws,
        brm_operation, brm_execute, brm_columns, required_brm_inputs
 export brm_transform_constants
