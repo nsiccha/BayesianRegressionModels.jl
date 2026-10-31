@@ -71,7 +71,8 @@ Sort `rk`'s latent terms for the sparse Laplace ([`BRMLaplacePlan`](@ref)):
   at the mode, and weighs it by the exact density of the terms and prior pieces
   that touch it. A term is admitted when no block's importance ESS falls below
   `ess_floor × draws`. The diagnostic is measured at the population point `at`
-  (default: the population coordinates' prior medians);
+  (default: the population coordinates' prior medians; a whole packed point is
+  taken too);
 - **never:** the term moves a shape or dispersion, or is a Student-t,
   stratified or `car_units` block, which the sparse Laplace does not integrate;
 - **sampled:** named in `sample`, or gated and not admitted.
@@ -135,7 +136,9 @@ function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_f
         !named(t, forced)]
     ess = Dict{Symbol,Any}()
     if !isempty(measure)
-        φ = at === nothing ? _brm_laplace_prior_median(p) : collect(Float64, at)
+        # `at` over this problem's population coordinates, or a whole packed point
+        φ = at === nothing ? _brm_laplace_prior_median(p) :
+            length(at) == length(p.u) ? Float64.(at[p.population]) : collect(Float64, at)
         state = _brm_spl_mode!(p, φ)
         state.finite || _brm_nlme_error("brm_laplace_plan: the Laplace is not finite at " *
             "the diagnostic's population point")

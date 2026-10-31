@@ -133,6 +133,7 @@ include("nlme_laplace_plan.jl")
 include("start_values.jl")
 include("laplace_start.jl")
 include("laplace_mode.jl")
+include("laplace_ladder.jl")
 include("nlme_fit.jl")
 include("nlme_two_stage.jl")
 include("nlme_svi.jl")
@@ -281,6 +282,7 @@ export brm_descriptor, brm_output, brm_outputs, brm_output_coordinates,
        brm_nlme_loglikelihoods_and_gradients,
        BRMLaplaceProblem, BRMStructuredLaplaceProblem, BRMSparseLaplaceProblem,
        brm_laplace_problem, brm_laplace_mode, brm_laplace_plan, BRMLaplacePlan,
+       brm_ladder_fit,
        brm_laplace_draws,
        brm_operation, brm_execute, brm_columns, required_brm_inputs
 export brm_transform_constants

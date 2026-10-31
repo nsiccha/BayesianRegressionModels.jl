@@ -557,6 +557,37 @@ function _new_laplace_problem(m::BRM.BRMNLMEModel, key)
     (; p, key, owners, zof, pof)
 end
 
+# brm_ladder_fit's rung 3 (src/laplace_ladder.jl): SAEM on the units from a
+# packed point, integrating the families of the plan's admitted terms. Its
+# estimate goes back to a packed point with each unit's draws standardized
+# by its families' Cholesky factors (`brm_nlme_draws` takes them so).
+function BRM._brm_ladder_saem(backend::BRM.RKBRMI, u, admitted; ad_backend,
+        subject_group, nested_groups, shared_groups, rng, options)
+    m = BRM.brm_nlme_model(backend; ad_backend, subject_group, nested_groups,
+        shared_groups)
+    s = BRM.brm_nlme_start(m, u)
+    integrated = [f for (f, family) in enumerate(m.view.families)
+        if family.fixed === nothing && family.stratum === nothing &&
+            BRM._brm_spl_record_declaration(family.record) in admitted]
+    fit = options === nothing ?
+        NE.saem(m, s.theta, s.sigma, s.omega; integrated, η0=s.eta, rng) :
+        NE.saem(m, s.theta, s.sigma, s.omega; integrated, η0=s.eta, rng, options)
+    chol = _family_cholesky(m, fit.omega)
+    unit_draws = map(eachindex(m.view.levels)) do i
+        η = BRM._brm_nlme_subject_eta(fit.eta, i)
+        z = Vector{Float64}(undef, length(η))
+        offset = 0
+        for f in m.view.subject_families[i]
+            r = (offset + 1):(offset + m.view.family_sizes[f])
+            z[r] .= LowerTriangular(chol[f]) \ Vector{Float64}(η[r])
+            offset += length(r)
+        end
+        reshape(z, :, 1)
+    end
+    point = vec(BRM.brm_nlme_draws(m, fit.theta, fit.sigma, fit.omega, unit_draws))
+    (; point, fit, integrated)
+end
+
 # NLMEEstimation 0.2.3's Laplace-gradient hook (`laplace_marginals_and_gradient`
 # is `laplace_conditionals_and_population_gradient` with every family
 # integrated), where the sparse Laplace integrates every family: none is a
