@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.90
+
+- Fixed: SBBRMI accepts exact `-Inf` and `Inf` response-bound data through
+  BridgeStan, including mixed censored and detected Normal and Student-t
+  observations. Requires StanBlocks 0.2.10 for non-finite data serialization;
+  the existing `censored(...; lower=..., upper=...)` spelling is unchanged.
+
 ## 0.2.89
 
 - Added: SBBRMI translates `DirichletMultinomial(N, alpha)` to the native
