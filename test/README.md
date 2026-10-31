@@ -170,6 +170,16 @@ by hand, bounds read through the binding (censored, scalar, truncated),
 invalid vectors, the refusal of the retired formula-level `ragged(y, group) ~ …`,
 and replay/resample regathering a grouped response and its bound.
 
+`dirichlet_multinomial.jl` checks RK joint count vectors in plate cells:
+shared concentration, ragged category vectors, model-derived probabilities,
+normalized densities, Enzyme gradients, complete printed-source replay,
+one pointwise contribution per vector, and NLME subject likelihoods,
+gradients and Hessians. A multivariate Normal case checks the common whole-event path.
+The out-of-support count-total check is `@test_broken`: Distributions
+0.25.132 returns a finite density when `sum(y) != n` (ReactiveKernels snag
+`dirichlet-multin-457e95cf`). SBBRMI awaits StanBlocks' native family
+(`dirichlet-multin-91925143`).
+
 `plate_matrix_data.jl` checks per-cell matrices in a `@plate for` cell:
 - per-cell matrix data, a pre-grouped `Vector{Matrix}` read as `X[i]`: RKBRMI
   and SBBRMI (BridgeStan) density and gradient against an independent oracle

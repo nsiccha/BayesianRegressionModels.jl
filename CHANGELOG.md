@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.86
+
+- Fixed: RKBRMI preserves a multivariate distribution's whole count or value
+  vector inside a plate cell. `y[k] ~ DirichletMultinomial(n[k], alpha)` now
+  uses one normalized likelihood event per vector, including ragged cells and
+  model-derived concentration vectors. Constructor bindings survive emitted
+  source replay, including families outside RKPPL's built-in vocabulary.
+- Added: `DirichletMultinomial` re-exports the Distributions constructor.
+  Its supported contract requires a positive integer total and strictly
+  positive concentration entries. SBBRMI translation remains pending native
+  StanBlocks support (snag `dirichlet-multin-91925143`).
+
 ## 0.2.85
 
 - BRM's compat floor is ReactiveKernels 0.1.25. A cell of one observation of

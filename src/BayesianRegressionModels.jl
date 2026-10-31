@@ -207,7 +207,8 @@ export rkppl_model, rk_model
 # every family a lowering seam dispatches on is exported: a new family is
 # added here together with its lowering.
 export Normal, Exponential, Poisson, Bernoulli, LKJCholesky
-export Arcsine, Beta, Binomial, Categorical, Cauchy, Chisq, Dirichlet, Erlang,
+export Arcsine, Beta, Binomial, Categorical, Cauchy, Chisq, Dirichlet,
+       DirichletMultinomial, Erlang,
        Frechet, Gamma, Gumbel, InverseGamma, InverseGaussian, Laplace,
        LocationScale, LogNormal, Logistic, MixtureModel, Multinomial, MvNormal,
        NegativeBinomial, NormalCanon, Pareto, Rayleigh, SkewNormal,

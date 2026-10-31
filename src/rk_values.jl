@@ -626,10 +626,10 @@ end
 _rk_ast_value_distribution(callable, distribution, bindings, taken) =
     _rk_ast_value_call(callable, distribution, bindings, taken)
 
-function _rk_ast_value_call(callable, distribution, bindings, taken)
+function _rk_ast_value_call(callable, distribution, bindings, taken; joint=false)
     callee = _rk_value_callee!(bindings, callable, taken)
     args = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
-    _rk_ast_dotted(callee, args...)
+    joint ? Expr(:call, callee, args...) : _rk_ast_dotted(callee, args...)
 end
 
 # The prepared record's cutpoint vector is one value shared by every
@@ -947,11 +947,22 @@ end
 
 function _rk_value_callee!(bindings, callable, taken)
     # Surface-owned heads use the same canonical names as the GLM emitter.
-    if callable in _RK_ASSIGNMENT_CALLABLES || callable isa Type{<:Distribution}
+    # Distribution constructors also need an exact binding: a family outside
+    # RKPPL's built-in vocabulary is resolved in the emitted module.
+    if callable in _RK_ASSIGNMENT_CALLABLES
         return nameof(callable)
     end
     index = findfirst(pair -> last(pair) === callable, bindings)
     index === nothing || return first(bindings[index])
+    if callable isa Type{<:Distribution}
+        name = nameof(callable)
+        if !any(pair -> first(pair) === name, bindings)
+            # Keep native family spellings even when a prior uses the same
+            # name. The binding also lets RKPPL resolve any additional law.
+            push!(bindings, name => callable)
+            return name
+        end
+    end
     # Named once the whole program exists (`_rk_name_callable_bindings`).
     name = _rk_ast_fresh_name(_RK_CALLABLE_PLACEHOLDER, taken)
     push!(bindings, name => callable)
@@ -1095,8 +1106,12 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
             plan, observation, distribution)
         _rk_emit_observation_source!(defs, stmts, bindings, taken,
             observation, distribution, plan.columns[observation.name]) && continue
-        base = _rk_ast_value_distribution!(stmts, distribution.callable, observation,
-            distribution, bindings, taken; coordinates)
+        joint = observation isa _RKNestedObservation &&
+            _rk_joint_observation(distribution.callable)
+        base = joint ? _rk_ast_value_call(distribution.callable, distribution,
+            bindings, taken; joint=true) :
+            _rk_ast_value_distribution!(stmts, distribution.callable, observation,
+                distribution, bindings, taken; coordinates)
         if modifier !== nothing
             lower = modifier.lower === nothing ? -Inf :
                 _rk_value_expr!(bindings, _brm_prepare_expr(modifier.lower), taken)
@@ -1105,7 +1120,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
             base = _rk_ast_response_modifier(base, modifier.kind, lower, upper)
         end
         base = _rk_weighted_observation(base, observation.weight, bindings, taken)
-        push!(stmts, _rk_observation_statement(observation, base, taken))
+        push!(stmts, _rk_observation_statement(observation, base, taken; joint))
     end
     computed = Set{Symbol}()
     foreach(statement -> _rk_source_assignments!(computed, statement), stmts)
