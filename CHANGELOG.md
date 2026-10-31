@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.93
+
+- Fixed: `@plate` can read an `mi()` completion through a grouping that
+  lists only the cells it needs, including free missing entries alongside
+  `mi(v)::shares(total, rows)` groups. RK no longer treats this read as a
+  second observation requiring every completed row to belong to a cell.
+- Both backends accept grouped model-scope assignments such as
+  `v_part = v[pos_part]`, including gathered formula predictors. The
+  grouping column labels the assignment's rows; completed values and
+  their derivatives remain live. Coverage is still required for a response
+  actually observed inside the cell.
+
 ## 0.2.92
 
 - Added: `mi(x)::shares(total, rows)` accepts lower support declared by
