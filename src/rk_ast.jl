@@ -1488,10 +1488,22 @@ function _rk_ast_car_separated!(definitions, taken, bindings, block, separation,
         push!(block.statements,
             Expr(:call, :~, Expr(:ref, w, Expr(:call, :(:), 1, m)),
                 Expr(:call, law, arguments.last, arguments.scale, arguments.weight,
-                    arguments.shared_first, arguments.shared_second)),
+                    arguments.shared_first, arguments.shared_second)))
+        # Expose the linear shared-value map by row. Its integer lists and
+        # coefficients depend only on data and are computed at binding; a
+        # partition computes just the shared values its areas read.
+        rows = _rk_block_local!(block, :shared_rows)
+        coefficients = _rk_block_local!(block, :shared_coefficients)
+        row_ids = _rk_block_local!(block, :shared_ids)
+        push!(block.statements,
+            Expr(:(=), rows, _rk_ast_statistical_call!(definitions, taken,
+                :brm_car_shared_rows, arguments.last)),
+            Expr(:(=), coefficients, _rk_ast_statistical_call!(definitions, taken,
+                :brm_car_shared_coefficients, arguments.last, arguments.scale,
+                arguments.weight)),
+            Expr(:(=), row_ids, Expr(:call, :eachindex, arguments.last)),
             Expr(:(=), x, _rk_ast_statistical_call!(definitions, taken,
-                :brm_car_shared_values, w, arguments.last, arguments.scale,
-                arguments.weight)))
+                :brm_car_shared_local, w, rows, coefficients, row_ids; kernel=true)))
     end
     z = map(separation.blocks) do b
         b.ndraws == 0 && return nothing
