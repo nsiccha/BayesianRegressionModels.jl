@@ -16800,6 +16800,7 @@ _sb_stan_dist_name(::Type{<:NegativeBinomial})    = :neg_binomial
 # `multinomial(obs | probs, N)` (StanBlocks' 3-arg builtin; N explicit); the
 # per-row `int[n,K]` response form shares `probs` across rows.
 _sb_stan_dist_name(::Type{<:Multinomial})         = :multinomial
+_sb_stan_dist_name(::Type{<:DirichletMultinomial}) = :dirichlet_multinomial
 _sb_stan_dist_name(::Type{<:Categorical})         = :categorical
 _sb_stan_dist_name(::Type{<:NegativeBinomial2})   = :neg_binomial_2
 _sb_stan_dist_name(::Type{<:BetaBinomial2})      = :beta_binomial
@@ -17225,6 +17226,10 @@ _sb_stan_dist_args(::Type{<:InverseGaussian}, args::Tuple{Any}) = (args[1], 1.0)
 # reorder to (probs, N) so the emitted `obs ~ multinomial(probs, N)` matches the
 # builtin `multinomial_lpmf(obs, probs, N)`.
 _sb_stan_dist_args(::Type{<:Multinomial}, args::Tuple{Any,Any}) = (args[2], args[1])
+# The Dirichlet-multinomial shares the explicit-total convention: Julia's
+# (N, alpha) becomes StanBlocks' (alpha, N), including predictive draws.
+_sb_stan_dist_args(::Type{<:DirichletMultinomial}, args::Tuple{Any,Any}) =
+    (args[2], args[1])
 
 # Distributions.jl `NegativeBinomial(r, p)` counts failures before `r`
 # successes.  Native Stan `neg_binomial(alpha, beta)` uses shape and inverse
