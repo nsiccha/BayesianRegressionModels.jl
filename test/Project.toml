@@ -40,6 +40,7 @@ Enzyme = "0.13"
 # against its own libEnzyme build instead of the jll's library.
 Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PSIS = "0.9"
+StanBlocks = "0.2.10"
 Treebars = "0.1"
 Turing = "0.46"
 WarmupHMC = "0.2"
@@ -86,7 +87,9 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # the bounds go on the declaration and the family keeps its plain kernel (snag
 # in-slic-declare-996328e0), which SBBRMI emits for every prior bound.
 # 359a4fae (StanBlocks 0.2.8): native explicit-total Dirichlet-multinomial.
-rev = "359a4fae88d865002616fca313aefc79fbc97c06"
+# 02a93f48 (StanBlocks 0.2.10) serializes exact infinite bound data for
+# BridgeStan, including mixed censored and detected observations.
+rev = "02a93f48606bd1bf6b8bdf2d70a319e2b3139329"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

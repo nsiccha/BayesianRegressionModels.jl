@@ -6,7 +6,7 @@
 # covariance blocks against NLMEEstimation's own Laplace; gradients against
 # central differences); Laplace-EM on a Gaussian nested panel against the
 # direct maximum of the same objective; SAEM sampling the subjects with the
-# units integrated.
+# units integrated; brm_ladder_fit's rung 3 (SAEM from rung 2's point).
 #
 # NLMEEstimation.jl is not part of test/Project.toml. Run this file in the
 # NLMEEstimation scratch environment (test/README.md, "NLME estimators"):
@@ -131,4 +131,45 @@ end
     @test fit.integrated == [2] && fit.kernel != :laplace_em
     # within half a log-likelihood unit of the Laplace-EM maximum
     @test marginal(em) - marginal(fit) < 0.5
+end
+
+@stestset "brm_ladder_fit's rung 3: SAEM over the units from rung 2's point" begin
+    data = nested_panel(20)
+    rk = RKBRMI(nested_model(data))
+    fit = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=4, draws=20, rng=Xoshiro(5),
+        subject_group=:subject, nested_groups=(unit=:obs_subject,),
+        saem_options=(SAEMOptions(iterations=100), SAEMOptions(iterations=100)))
+    @test [r.rung for r in fit.rungs] == [1, 2, 3, 4]
+    c = fit.ladder[3]
+    # every family is Normal-read, so the plan integrates both and SAEM is
+    # Laplace-EM
+    @test c.kernel == :laplace_em && c.integrated == [1, 2]
+    # rung 2 is the Laplace target's maximum; rung 3's MAP, taken in
+    # NLMEEstimation's coordinates, sits at or below it
+    @test isfinite(c.gap) && c.gap >= -1e-6
+    @test fit.point == fit.rungs[3].point
+    @test all(fit.draws[fit.problem.population, k] == fit.point for k in 1:20)
+    phases = fit.rungs[3].phases
+    @test c.phases == length(phases) == 2 && c.iterations == 200
+    @test phases[1].start == vec(fit.rungs[2].draws)
+    @test phases[2].start == phases[1].point
+    @test phases[1].plan !== phases[2].plan && phases[2].plan === fit.plan
+    @test Set(b.declaration for b in fit.problem.blocks) ==
+        Set(t.declaration for t in fit.plan.terms if t.admitted)
+
+    # Explicit groupings have no automatic plan. They still tell SAEM which
+    # families to integrate, including when units are supplied on continuation.
+    first = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=4, draws=2,
+        integrate=(:subject, :unit), rng=Xoshiro(8))
+    @test first.plan === nothing && first.ladder[3].skipped
+    continued = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=4, draws=20,
+        continue_from=first, subject_group=:subject,
+        nested_groups=(unit=:obs_subject,), rng=Xoshiro(9),
+        saem_options=SAEMOptions(iterations=200))
+    @test continued.plan === nothing && !continued.automatic
+    @test continued.ladder[3].integrated == [1, 2]
+    @test continued.ladder[3].kernel == :laplace_em
+    @test continued.point == continued.rungs[3].point
+    @test all(continued.draws[continued.problem.population, k] == continued.point for k in 1:20)
+    @test first.ladder[3].skipped && size(first.draws, 2) == 2
 end
