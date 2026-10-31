@@ -723,7 +723,8 @@ end
 # integrated effect into the returned total), and with `derivatives` the
 # z-gradient `g` and h's nonzeros `hnz`. `third` selects the gradient's rows
 # (full values and third derivatives, see `_brm_lap_row`); `rows` and `crows`,
-# when given, keep each term's row and C rows, and `tv` each term's density
+# when given, keep each term's row and C rows (`crows = (c1, c2)`, flat
+# vectors indexed like `p.tz`), and `tv` each term's density
 # with its constant (rows, then cells; with `third`).
 function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
         derivatives::Bool, third::Bool=false, rows=nothing, crows=nothing, fb=nothing,
@@ -751,7 +752,12 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
         r = _brm_lap_row(p.family[t], p.y[t], p.trials[t], a, bb, third, moving)
         rows === nothing || (rows[t] = r)
         tv === nothing || (tv[t] = r.v + p.constant[t])
-        crows === nothing || (crows[t] = (c1[1:m], c2[1:m]))
+        if crows !== nothing
+            for i in 1:m
+                crows[1][p.tptr[t] + i - 1] = c1[i]
+                crows[2][p.tptr[t] + i - 1] = c2[i]
+            end
+        end
         if comp == 0
             rest += r.v
             continue
@@ -1298,7 +1304,7 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
     nterms = length(p.family)
     fc = zeros(length(p.components))
     rows = Vector{_BRMLapRow}(undef, nterms)
-    crows = Vector{Tuple{Vector{Float64},Vector{Float64}}}(undef, nterms)
+    crows = (zeros(length(p.tz)), zeros(length(p.tz)))
     rest = _brm_spl_assemble!(fc, nothing, nothing, p, state.A, state.C, state.z;
         derivatives=false, third=true, rows, crows, uA=state.uA)
     value = sum(p.constant) + sum(fc) + rest + n / 2 * log(2π) -
@@ -1319,8 +1325,9 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
     @inbounds for t in 1:nterms
         (p.term_component[t] == 0 || !on(t)) && continue
         r = rows[t]
-        c1, c2 = crows[t]
-        m = length(c1)
+        span = p.tptr[t]:(p.tptr[t + 1] - 1)
+        c1 = view(crows[1], span); c2 = view(crows[2], span)
+        m = length(span)
         base = p.nptr[t] - 1
         moving = p.moving[t]
         m11 = m12 = m22 = 0.0
@@ -1393,8 +1400,9 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
             two && (w[e + 1] = r.g2)
             continue
         end
-        c1, c2 = crows[t]
-        m = length(c1)
+        span = p.tptr[t]:(p.tptr[t + 1] - 1)
+        c1 = view(crows[1], span); c2 = view(crows[2], span)
+        m = length(span)
         zs = view(p.tz, p.tptr[t]:(p.tptr[t + 1] - 1))
         moving = p.moving[t]
         cv1 = cv2 = 0.0

@@ -12,6 +12,35 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.91
+
+- Added: `brm_ladder_fit(rk; ad_backend, upto = 4, integrate = :auto, …)`, a
+  staged fit over the sparse embedded Laplace. Each rung is a complete
+  result that starts the next, and each rung's check goes into
+  `fit.ladder`:
+  1. effect modes at the population start;
+  2. the mode of the embedded-Laplace marginal, with the plan measured again
+     there under `:auto`;
+  3. SAEM over the units the call names, integrating the plan's admitted
+     families (NLMEEstimation), with its gap to rung 2;
+  4. Laplace draws at the point;
+  5. 5a, the marginal's curvature at the point as a labelled diagnostic, and
+     5b, HMC over the Laplace marginal;
+  6. the exact model from rung 5.
+
+  Rungs 5b and 6 take the caller's `sampler`; a rung a call cannot run is
+  skipped and named. `continue_from` keeps the integration choice and runs a
+  skipped rung when its units or sampler are supplied. The curvature
+  diagnostic keeps the returned effect draws from rung 4.
+  Automatic plans are checked again after each SAEM phase; a tuple or vector
+  of `saem_options` runs successive phases with fresh averaging and the last
+  phase's point as the next start. Rung 5b reports its means and standard
+  deviations beside the curvature diagnostic, one entry per coordinate.
+- Faster: the sparse Laplace's gradient keeps each term's C rows in one flat
+  buffer instead of two new vectors per term. One warm value and gradient,
+  same load: a flat Poisson panel (1,126 × 10) 3.32 → 2.85 ms, a nested one
+  (12 × 400) 17.2 → 12.6 ms. Both are now below 0.2.75's 3.05 and 12.9 ms.
+
 ## 0.2.90
 
 - Fixed: SBBRMI accepts exact `-Inf` and `Inf` response-bound data through
