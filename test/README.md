@@ -969,8 +969,7 @@ environment above.
 
 `nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:
 batched and single-subject evaluation (including `check_protocol` and online
-SAEM on ragged joins, and SAEM's batched population gradient for flat grouped
-rows), subject-cell population gradients,
+SAEM on ragged joins and flat grouped rows), unit-partition population gradients,
 analytic η Hessian blocks, Gaussian observation moments
 and colored η Jacobians, `check_protocol`, and Newton posthoc against
 independent oracles. Its Gaussian checks include arrays observed within plate
@@ -986,6 +985,14 @@ julia --project=<scratch-env> test/nlme_estimation_ext.jl
 
 Without NLMEEstimation the file stops with an error rather than skipping.
 Shared fixtures live in `nlme_fixtures.jl`.
+
+`nlme_partition.jl` checks strict structural ownership before returning an
+NLME model, including a cross-unit dependency in a dormant branch, and a valid
+unit with no observations in one group. `nlme_units_panel.jl` covers nested
+partition likelihoods, gradients, cell-based Hessian sparsity and allocation
+scaling. The `nlme_svi.jl` filters `minibatch split` and
+`structural footprints and target split` check the wider SVI gradients without
+running its longer sampling comparisons.
 
 `nlme_integrated.jl` covers NLMEEstimation's integrated families on BRM
 models: SAEM integrates the chosen covariance families by BRM's sparse Laplace

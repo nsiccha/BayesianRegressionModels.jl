@@ -4,8 +4,8 @@ module BayesianRegressionModelsNLMEEstimationExt
 # (`BRMNLMEModel`, from `brm_nlme_model`). The model declares
 # `BatchedEvaluation`: the complete subject set uses one lockstep RK evaluation;
 # subsets and explicit per-subject calls evaluate the selected unit partitions.
-# Online SAEM uses those partitions for its population gradient. The retained
-# draw mixture keeps batched gradients to share work across all subjects.
+# Online SAEM keeps its existing population-gradient style selection. The
+# retained draw mixture shares batched gradients across all subjects.
 # Colored RK Hessian-vector products give all subjects' η Hessian
 # blocks in one pass per η coordinate, so `empirical_bayes` uses `NewtonEBE`.
 # Gaussian observations use one :observations query and colored forward
@@ -37,11 +37,14 @@ function NE.fixed_omega(m::BRM.BRMNLMEModel)
         for (f, family) in enumerate(m.view.families) if family.fixed !== nothing]
     isempty(pairs) ? nothing : pairs
 end
-# One partition differentiates a subject's population coordinates in a single
-# pass, including flat rows and completed covariates. Mixture updates retain
-# their joint population sweep; online updates can use the unit protocol.
+# Preserve SAEM's population-gradient selection. Partitions remove repeated
+# cell calls, but a full population pass still shares work: on 80 subjects ×
+# 8 flat PK rows, the partition loop takes 0.365 ms versus 0.083 ms batched.
+# This trait is separate from conditional subset routing below.
 NE.saem_population_gradient_style(m::BRM.BRMNLMEModel) =
-    m.cell_gradient === nothing ? NE.BatchedEvaluation() : NE.PerSubjectEvaluation()
+    m.cell_gradient === nothing || any(m.cell_query) do cell
+        cell.elementwise && any(p -> length(p) > 1, cell.positions)
+    end ? NE.BatchedEvaluation() : NE.PerSubjectEvaluation()
 NE.saem_population_gradient_style(m::BRM.BRMNLMEModel, ::Val{:online}) =
     NE.saem_population_gradient_style(m)
 NE.saem_population_gradient_style(::BRM.BRMNLMEModel, ::Val{:mixture}) =
@@ -439,7 +442,7 @@ end
 
 function NE.conditional_loglikelihoods(m::BRM.BRMNLMEModel, subjects, θ, σ, H)
     units = _partition_batch(m, subjects, θ, σ, H)
-    units === nothing || return [BRM.brm_nlme_loglikelihood(m, i, θ, σ, η)
+    units === nothing || return Float64[BRM.brm_nlme_loglikelihood(m, i, θ, σ, η)
         for (i, η) in units]
     values = BRM.brm_nlme_loglikelihoods(m, θ, σ, _batch_eta(m, subjects, H))
     values[subjects]
