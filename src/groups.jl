@@ -83,10 +83,14 @@ function _brm_groups(g, cells, order)
 end
 
 # Plain `indexin(idx[rows[i]], target[i])` has no position for an index `0`.
+# A data-only assignment is data here as at every raw-column site (decision
+# `1tb1jrg`): its value is the column a backend binds in its place.
 function _brm_check_indexin_zero(shown, idx::NamedColumn)
-    values = parent(idx) isa DataColumn ? parent(parent(idx)) : nothing
+    values = parent(idx) isa DataColumn ? parent(parent(idx)) :
+        _column_data_assignment(idx)
     values isa AbstractVector || error(
-        "@brm: `$shown` reads `$(name(idx))` as indices; it must be a data vector")
+        "@brm: `$shown` reads `$(name(idx))` as indices; it must be a data vector: " *
+        "a data column, or an assignment that reads data alone")
     at = findfirst(isequal(0), values)
     at === nothing || error(
         "@brm: `$shown`: `$(name(idx))[$at]` is 0, which is no index and has no " *
