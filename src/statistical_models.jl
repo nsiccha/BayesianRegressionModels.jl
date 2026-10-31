@@ -409,6 +409,21 @@ brm_grouped_shares_local(z, entry_ids, entry_coords, entry_slot, entry_total) = 
     return values
 end
     ),
+    brm_lower_grouped_local = :(
+brm_lower_grouped_local(z, entry_ids, entry_group, entry_slot,
+        group_ids, group_coords, group_entries, residuals, lo) = begin
+    group_values = ReactiveKernels.plate(group_ids) do k
+        BayesianRegressionModels._brm_shares_values(z[group_coords[k]],
+            residuals[k], lo[group_entries[k]])
+    end
+    values = ReactiveKernels.plate(entry_ids) do e
+        group_value = group_values[entry_group[e]]
+        entry::Float64 = group_value[entry_slot[e]]
+        entry
+    end
+    return values
+end
+    ),
     # A separated `car` field's shared values from its shared coordinates
     # (`car_separation.jl`): an ordinary function, linear in their count.
     brm_car_shared_values = :(

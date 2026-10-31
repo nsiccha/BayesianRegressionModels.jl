@@ -91,6 +91,7 @@ using Serialization
 include("rk_artifact.jl")
 include("sb_affine.jl")
 include("cell_total_coordinates.jl")
+include("lower_bounded_shares.jl")
 include("total_effects.jl")
 include("total_effects_plan.jl")
 

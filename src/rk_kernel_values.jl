@@ -734,6 +734,12 @@ end
 function _rk_kernel_latent_family(scope, law, kernel, lhs)
     spec = _brm_cell_bijection(law)
     spec === nothing || (law = spec.law)
+    bounded = spec === nothing ? nothing : _brm_cell_lower_parts(law, scope)
+    if bounded !== nothing
+        F = _sb_cell_binding(scope, first(bounded.base.args))
+        _brm_lower_floor(F)
+        return _BRMLowerLaw{F,bounded.normalized}
+    end
     callable = _rk_kernel_observation_callee(scope, law, kernel)
     callable === StanBlocks.normal && (callable = Normal)
     callable isa Type && callable <: UnivariateDistribution || error(
@@ -760,8 +766,16 @@ function _rk_kernel_cell_statement(statement, kernel, defs, bindings, taken)
     spec = _brm_cell_bijection(law)
     # A latent through `shares(total)` is drawn from `_BRMShares{Family}`, the
     # family a type parameter of the law (rkppl-use §13).
-    family = _rk_value_callee!(bindings, spec === nothing ? callable : _BRMShares{callable}, taken)
+    family = _rk_value_callee!(bindings, spec === nothing ? callable :
+        _brm_lower_family(callable) ? _BRMLowerShares{callable} : _BRMShares{callable}, taken)
     plain = spec === nothing ? law : spec.law
+    bounded = spec === nothing ? nothing : _brm_cell_lower_parts(plain, kernel.scope)
+    if bounded !== nothing
+        F = _brm_lower_base(callable)
+        plain = Expr(:call, first(bounded.base.args),
+            Expr(:., :max, Expr(:tuple, bounded.lower, _brm_lower_floor(F))),
+            bounded.base.args[2:end]...)
+    end
     args = Any[_rk_kernel_bind_calls(arg, kernel.scope, bindings, taken)
         for arg in plain.args[2:end]]
     # A latent through a bijection keeps it and its total on the marker for

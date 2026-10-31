@@ -102,6 +102,11 @@ end
 const _RK_NONCENTERED_LAWS = (Normal, LogNormal)
 function _rk_noncentered_completion(c::_RKMissingValueSpec, columns)
     d = c.distribution
+    # The shared coordinates may be non-centered while independent bounded
+    # entries retain their exact support geometry and authored law.
+    _brm_lower_family(d.callable) && return _RKMissingValueSpec(c.source, c.observed,
+        c.observed_rows, c.missing_rows, c.observed_component, c.order, c.nmissing,
+        d, true, c.totals)
     # Free entries are standardized by the law's location and scale.
     c.totals === nothing || !isempty(columns[c.totals.free_rows]) ||
         return _RKMissingValueSpec(c.source, c.observed, c.observed_rows, c.missing_rows,

@@ -123,6 +123,71 @@ ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMCarShared, w) =
 # observed placeholder carries no information, the weight is the density.
 ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMLogWeight, _placeholder) = d.weight
 
+ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMLowerLaw, x) = BRM.Distributions.logpdf(d, x)
+function ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMLowerLaw{F,N}, x::AbstractArray) where {F,N}
+    BRM._brm_shares_check_lengths(d.args, x)
+    result = zero(eltype(x))
+    for j in eachindex(x)
+        result += BRM.Distributions.logpdf(BRM._BRMLowerLaw{F,N}(BRM._brm_shares_entries(d.args, j)...), x[j])
+    end
+    result
+end
+ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMLowerLaw}, args, shape) =
+    ReactiveKernelsPPL.ParameterGeometry(shape,
+        isempty(shape) ? 1 : Expr(:call, :*, (:(length($axis)) for axis in shape)...); support=:real,
+        constrain=(u, shape, lo, rest...) -> isempty(shape) ? lo + exp(only(u)) : reshape(lo .+ exp.(u), shape),
+        unconstrain=(x, shape, lo, rest...) -> isempty(shape) ? [log(x - lo)] : vec(log.(x .- lo)),
+        logjac=(u, shape, rest...) -> sum(u))
+
+ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMLowerShares}, args, shape) =
+    ReactiveKernelsPPL.ParameterGeometry((args[1],), :($(args[1]) - 1); support=:real,
+        constrain=(u, shape, n, total, lo, rest...) -> BRM._brm_shares_values(u, total, lo),
+        unconstrain=(x, shape, n, total, lo, rest...) -> _brm_lower_shares_unconstrain(x, total, lo),
+        logjac=(u, shape, n, total, lo, rest...) -> BRM._brm_lower_shares_logjac(u, total, lo))
+function _brm_lower_shares_unconstrain(x, total, lo)
+    isapprox(sum(x), total; rtol=1e-8) || throw(ArgumentError("shares values must sum to their total"))
+    all(j -> x[j] >= BRM._brm_lower_at(lo, j), eachindex(x)) ||
+        throw(ArgumentError("shares values must respect their row lower bounds"))
+    BRM._brm_shares_coordinates(x, lo)
+end
+@inline function ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMLowerShares{F}, x) where {F}
+    BRM._brm_shares_check_lengths((d.lower, d.args...), x)
+    BRM._brm_lower_shares_valid(d.total, d.lower, length(x)) || return -Inf
+    result = zero(eltype(x))
+    for j in eachindex(x)
+        result += BRM.Distributions.logpdf(F(BRM._brm_lower_at(d.lower, j),
+            BRM._brm_shares_entries(d.args, j)...), x[j])
+    end
+    result
+end
+ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMLowerGroupedShares}, args, shape) =
+    ReactiveKernelsPPL.ParameterGeometry(shape, :(last($(args[1])) - length($(args[1]))); support=:real,
+        constrain=(u, shape, ends, residuals, lo, rest...) -> BRM._brm_grouped_shares_values(u, ends, residuals, lo),
+        unconstrain=(x, shape, ends, residuals, lo, rest...) -> _brm_lower_grouped_unconstrain(x, ends, residuals, lo),
+        logjac=(u, shape, ends, residuals, lo, rest...) -> BRM._brm_lower_grouped_logjac(u, ends, residuals, lo))
+function _brm_lower_grouped_unconstrain(x, ends, residuals, lo)
+    start = 1
+    for (k, stop) in enumerate(ends)
+        _brm_lower_shares_unconstrain(view(x, start:stop), residuals[k], BRM._brm_lower_slice(lo, start:stop))
+        start = stop + 1
+    end
+    BRM._brm_grouped_shares_coordinates(x, ends, lo)
+end
+@inline function ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMLowerGroupedShares{F}, x) where {F}
+    BRM._brm_shares_check_lengths((d.lower, d.args...), x)
+    start = 1
+    for (k, stop) in enumerate(d.ends)
+        BRM._brm_lower_shares_valid(d.residuals[k], BRM._brm_lower_slice(d.lower, start:stop), stop-start+1) || return -Inf
+        start = stop + 1
+    end
+    result = zero(eltype(x))
+    for j in eachindex(x)
+        result += BRM.Distributions.logpdf(F(BRM._brm_lower_at(d.lower, j),
+            BRM._brm_shares_entries(d.args, j)...), x[j])
+    end
+    result
+end
+
 # The emitted source is the executable contract. Every statistical prior and
 # observation role lowers through the public RKPPL surface; binding supplies
 # the data, with no ordinal or missing-response plan mutations.

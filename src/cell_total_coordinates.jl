@@ -12,9 +12,9 @@
 # coordinates. Write `T = total .* w`: the surface element of `y -> T` is
 # `total^(K - 1)` times that of `y -> w`, which Stan's simplex transform adds as
 # `sum(log.(w))` up to a constant; together `sum(log.(T)) - log(total)`. For a
-# total from data this is the exact conditional given the observed total (the
-# limit of an observation of `sum(T)` whose error goes to 0), and the last term
-# is a constant. For a total that is a model value, the law of `T` and the
+# total from data this retains the total's evidence about the law's parameters:
+# there is no division by the marginal density of that total. For a total
+# that is a model value, the law of `T` and the
 # total's own law both act on the total (snag `exact-sum-constr-7ba55c76`, user
 # decisions `18wcqyi`, `10kbiuy` and `1a5fvjo`).
 #
@@ -206,6 +206,8 @@ function _sb_cell_total_coordinates(x, scope)
     lhs = x.args[2]
     lhs isa Symbol || error(
         "@brm: internal: a `shares` latent `$lhs` is not a bare cell name")
+    bounded = _brm_cell_lower_parts(spec.law, scope)
+    bounded === nothing || return _sb_lower_cell_coordinates(lhs, spec, bounded, scope)
     _brm_check_shares_family(_sb_cell_binding(scope, first(spec.law.args)), lhs)
     call = _sb_cell_family(spec.law, scope)
     Meta.isexpr(call, :call) && first(call.args) isa Symbol &&
@@ -221,7 +223,7 @@ end
 
 # The cell latents a kernel body samples through a bijection, name =>
 # bijection. Shared by the backends' checks, the descriptor and `brm_start`.
-function _brm_cell_total_latents(body_stmts, scope)
+function _brm_cell_total_latents(body_stmts, scope; lower_bounded_only=false)
     found = Dict{Symbol,Symbol}()
     for x in body_stmts
         Meta.isexpr(x, :call, 3) && x.args[1] === :~ || continue
@@ -229,7 +231,11 @@ function _brm_cell_total_latents(body_stmts, scope)
         spec === nothing && continue
         lhs = x.args[2]
         lhs isa Symbol || continue
-        _brm_check_shares_family(_sb_cell_binding(scope, first(spec.law.args)), lhs)
+        bounded = _brm_cell_lower_parts(spec.law, scope)
+        lower_bounded_only && bounded === nothing && continue
+        bounded === nothing ?
+            _brm_check_shares_family(_sb_cell_binding(scope, first(spec.law.args)), lhs) :
+            _brm_lower_floor(_sb_cell_binding(scope, first(bounded.base.args)))
         found[lhs] = spec.bijection
     end
     found
@@ -417,8 +423,8 @@ struct _BRMMissingTotals
 end
 
 # The plan's missing indices, free first and then group by group, and the
-# totals. Every group's residual must be positive where entries are missing;
-# a group without one must already sum to its total.
+# totals. The declared law checks each missing group's residual budget;
+# a group without missing entries must already sum to its total.
 function _brm_missing_totals(source, raw, missing_indices, spec; prefix)
     group, cells, total = spec.group, spec.cells, spec.total
     shown = "`mi($source)::shares($(total.name), groups($(group.name) => $(cells.name)))`"
@@ -447,10 +453,8 @@ function _brm_missing_totals(source, raw, missing_indices, spec; prefix)
                 "to $observed, not to its total $(total.values[k])")
             continue
         end
-        residual > 0 || error(
-            "$prefix: $shown: the observed entries of group $label sum to $observed, " *
-            "which leaves $residual of its total $(total.values[k]) for its " *
-            "$(length(entries)) missing entries; their law is positive")
+        # Feasibility depends on the declared law's lower support. The
+        # completion lowering checks it after resolving that law.
         append!(grouped, entries)
         push!(ends, length(grouped))
         push!(residuals, residual)
@@ -672,6 +676,7 @@ _brm_group_share_weight(weight, z, x, total, args::Vararg{Any,N}) where {N} =
 # entries; and the entries' and groups' indices, the plates' domains.
 function _brm_grouped_shares_layout(ends, residuals)
     entry_coords, entry_slot, entry_total = Vector{Int}[], Int[], Float64[]
+    entry_group = Int[]
     group_entries, group_coords = Vector{Int}[], Vector{Int}[]
     start, coordinate = 1, 1
     for (k, stop) in enumerate(ends)
@@ -682,12 +687,13 @@ function _brm_grouped_shares_layout(ends, residuals)
         for slot in 1:K
             push!(entry_coords, coords)
             push!(entry_slot, slot)
+            push!(entry_group, k)
             push!(entry_total, Float64(residuals[k]))
         end
         start, coordinate = stop + 1, coordinate + K - 1
     end
     (entry_coords, entry_slot, entry_total, ones(length(entry_slot)), group_entries,
-        group_coords, collect(eachindex(entry_slot)), collect(eachindex(group_entries)))
+        group_coords, collect(eachindex(entry_slot)), collect(eachindex(group_entries)), entry_group)
 end
 
 # One group's observed term: its density is the weight, whatever the placeholder

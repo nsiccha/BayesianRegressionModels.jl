@@ -782,11 +782,16 @@ function brm_start(sb::SBBRMI, stan_model, inits::NamedTuple;
     # Values of a `T::shares(total)` cell latent, checked against the model's
     # once the point is built: they must sum to each cell's total.
     shares_values = Pair{Symbol,Vector{Float64}}[]
+    bounded_shares = NamedTuple[]
     for target in _brm_start_targets(parent(sb), inits)
         # A cell latent with a given total starts at its shares' coordinates.
         if target.kind === :parameter && haskey(total_latents, target.name)
             push!(shares_values, target.name =>
                 _brm_start_flat_values(target.name, brm_output(d, target.name), target.value))
+            if !isempty(brm_outputs(d; logical=Symbol(target.name, :_shares_excess)))
+                push!(bounded_shares, target)
+                continue
+            end
             target = _brm_total_start_target(target, total_latents[target.name], d)
         end
         _brm_sb_start_writes!(writes, deferred, Val(target.kind), target, d,
@@ -800,6 +805,22 @@ function brm_start(sb::SBBRMI, stan_model, inits::NamedTuple;
     writes = [writes; s2z_writes]
     _brm_sb_start_apply!(θ, writes, names)
     u = BridgeStan.param_unconstrain(stan_model, θ)
+    for target in bounded_shares
+        full = BridgeStan.param_constrain(stan_model, u; include_tp=true)
+        full_names = String.(BridgeStan.param_names(stan_model; include_tp=true))
+        present = full[_brm_element_coordinates(brm_output(d, target.name), full_names)]
+        excess = full[_brm_element_coordinates(brm_output(d, Symbol(target.name, :_shares_excess)), full_names)]
+        lower = present .- excess
+        values = _brm_start_flat_values(target.name, brm_output(d, target.name), target.value)
+        ends = something(brm_output(d, target.name).segments, [length(values)])
+        coordinates = _brm_grouped_shares_coordinates(values, ends, lower)
+        transformed = merge(target, (; name=_brm_total_coordinates_name(target.name), value=coordinates))
+        cell_writes = Tuple{Int,Float64}[]
+        _brm_sb_start_writes!(cell_writes, deferred, Val(transformed.kind), transformed, d, names, totals)
+        append!(writes, cell_writes)
+        _brm_sb_start_apply!(θ, cell_writes, names)
+        u = BridgeStan.param_unconstrain(stan_model, θ)
+    end
     all(isfinite, u) || error("brm_start: the Stan point is not finite")
     u = _brm_sb_start_block_effects(u, stan_model, d, deferred.blocks)
     check = BridgeStan.param_constrain(stan_model, u)

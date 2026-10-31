@@ -77,6 +77,17 @@ coordinates and density as the centred lowering, its group terms in
 completion, Gamma's value), and the location-scale rule for free entries.
 Snag `nlme-view-shares-f1cfaa71`.
 
+`mi_lower_totals.jl` checks lower support declared by `truncated` or
+`restricted` on shared completions, ordinary imputation and cell shares.
+It compares the full Stan density, RK native Enzyme gradients and coordinate
+transport with independent LogNormal/Normal density and Jacobian oracles;
+covers scalar, row and live bounds, free rows, singleton boundaries, complete
+groups, invalid budgets, source/frozen replay, output descriptors and starts.
+Run it directly in the test environment. `nlme_lower_shares.jl` runs in the
+NLMEEstimation scratch environment below and checks bounded groups' fixed
+unit variance, lockstep/unit densities and gradients, `check_protocol` and
+per-cell coordinate locality. Snag `atlas-shifted-co-e72a3041`.
+
 `rk_mi_bound_types.jl` checks that RKBRMI binds every `mi()` column as
 concretely typed values (`<x>_raw`) and a `Vector{Bool}` presence mask
 (`<x>_present`), never as a column of `Missing` unions: for a completed

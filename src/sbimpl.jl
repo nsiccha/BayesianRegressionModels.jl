@@ -6470,6 +6470,12 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         plan = _brm_missing_response_plan(e.raw_ref, _sb_df_column(df, e.raw_ref);
                                           prefix="sbimpl: reprocess",
                                           totals=_sb_mi_replay_totals(fitted_totals, df))
+        if haskey(fitted, :lower_bound)
+            _brm_validate_lower_completion(plan, _brm_effective_lower(
+                _sb_rematerialize_vec(fitted.lower_bound, df), fitted.lower_floor))
+        elseif !get(fitted, :lower_bounded, false)
+            _brm_validate_positive_residuals(plan)
+        end
         if freeze && (plan.observed_indices != fitted.observed_indices ||
                       plan.missing_indices != fitted.missing_indices ||
                       _sb_mi_totals_layout(plan.totals) != _sb_mi_totals_layout(fitted_totals))
@@ -6490,6 +6496,16 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         _brm_mi_grouped(plan.totals) &&
             union!(handled, Base.values(_sb_bind_mi_totals!(new_data, e.raw_ref, plan)))
         new_preproc[key] = _sb_missing_preproc(plan, fitted.observed_key, fitted.missing_key)
+        if get(fitted, :lower_bounded, false)
+            entry = new_preproc[key]
+            new_preproc[key] = PreprocEntry(entry.kind,
+                merge(entry.const_, (; lower_bounded=true)), entry.raw_ref, true)
+        end
+        if haskey(fitted, :lower_bound)
+            entry = new_preproc[key]
+            new_preproc[key] = PreprocEntry(entry.kind, merge(entry.const_,
+                (; fitted.lower_bound, fitted.lower_floor)), entry.raw_ref, true)
+        end
     elseif e.kind === :missing_center || e.kind === :missing_standardize ||
            e.kind === :missing_zscale
         fit = freeze ? e.const_.fit : _sb_mi_transform_constants(
@@ -9349,6 +9365,8 @@ function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
     rhs_e = _as_expr_column(rhs)
     isnothing(rhs_e) && error(
         "sbimpl: `mi($inner_name)` requires a distribution call")
+    bounded = _brm_lower_parts(rhs_e)
+    bounded === nothing || return _sb_emit_lower_mi!(stmts, data, plan, bounded)
     _brm_distribution_shape(rhs_e) == (Univariate, Continuous) || error(
         "sbimpl: `mi($inner_name)` needs an elementwise continuous distribution; " *
         "Stan cannot sample discrete missing values or split a joint density")
@@ -9374,6 +9392,7 @@ function _sb_emit_mi!(stmts, data, key, lhs::ExprColumn, rhs)
     # (cell_total_coordinates.jl): those entries are its residual times shares.
     grouped = _brm_mi_grouped(plan.totals)
     grouped && _brm_check_shares_family(getf(rhs_e), :(mi($inner_name)))
+    grouped && _brm_validate_positive_residuals(plan)
     submodel = grouped ?
         Base.merge(_sb_mi_shares_response,
             Expr(:call, :~, :y_free, sliced(:Jfree)),

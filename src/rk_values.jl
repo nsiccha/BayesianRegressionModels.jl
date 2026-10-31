@@ -545,6 +545,8 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
         plan === nothing && continue
         # Grouped totals keep their completion in the density (`mi(x)::shares`).
         _brm_mi_grouped(plan.totals) && return true
+        rhs = _as_expr_column(observation.rhs)
+        rhs === nothing || _brm_lower_parts(rhs) === nothing || return true
         _rk_mi_downstream(program, observation.key, plan.source) && return true
     end
     assignments = Set(op.name for op in program.operations if op.role === :assignment)
@@ -1073,7 +1075,8 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
             _rk_coordinate_record!(coordinates,
                 (; kind=:missing_value, target=completion.source,
                    declaration=scoped(part.sampled),
-                   noncentered=completion.noncentered,
+                   noncentered=completion.noncentered &&
+                       (shares || !_brm_lower_family(completion.distribution.callable)),
                    bijection=shares ? :shares : nothing, standardized))
         end
     end

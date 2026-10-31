@@ -252,7 +252,10 @@ end
 function _rk_prepare_missing_value!(columns, taken, observation, program, completions, derived)
     plan = observation.missing_response
     plan === nothing && return observation
-    observation.modifier === nothing || error(
+    distribution = _rk_lower_completion_law(observation.distribution)
+    _rk_validate_lower_completion(plan, distribution, columns)
+    _brm_lower_family(distribution.callable) || _brm_validate_positive_residuals(plan)
+    observation.modifier === nothing || _brm_lower_family(distribution.callable) || error(
         "RK backend: missing response `$(observation.name)` with response modifiers requires a supported completion law")
     observed = _rk_ast_fresh_name(string(plan.source, "_obs"), taken)
     jobs = _rk_ast_fresh_name(string("Jobs_", plan.source), taken)
@@ -269,7 +272,10 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
     # Grouped entries carry what their residuals say about the law whether or
     # not anything reads the completion.
     grouped = _brm_mi_grouped(plan.totals)
-    if grouped || _rk_mi_downstream(program, observation.name, plan.source)
+    retain_free = _brm_lower_family(distribution.callable) &&
+        !_brm_lower_normalized(distribution.callable)
+    downstream = _rk_mi_downstream(program, observation.name, plan.source)
+    if grouped || downstream || retain_free
         jmis = _rk_ast_fresh_name(string("Jmis_", plan.source), taken)
         component = _rk_ast_fresh_name(string(plan.source, "_observed_component"), taken)
         order = _rk_ast_fresh_name(string(plan.source, "_order"), taken)
@@ -278,17 +284,17 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
         columns[jmis] = plan.missing_indices
         totals = grouped ? merge(_rk_prepare_missing_totals!(columns, taken, derived,
             observation, plan, (raw, present)),
-            (; downstream=_rk_mi_downstream(program, observation.name, plan.source))) : nothing
+            (; downstream=downstream || retain_free)) : nothing
         push!(derived, _RKDerivedSpec(jmis, grouped ?
             Expr(:_rk_data_preparation, :brm_covariate_total_rows, raw, present,
                 totals.inputs...) :
             Expr(:_rk_data_preparation, :brm_covariate_missing_rows, present), jmis))
         push!(completions, _RKMissingValueSpec(plan.source, observed,
             jobs, jmis, component, order, length(plan.missing_indices),
-            observation.distribution, false, totals))
+            distribution, false, totals))
     end
     _BRMPreparedObservation(observed, observation.lhs,
-        _rk_mi_gather(observation.distribution, jobs), plan.observed_values,
+        _rk_mi_gather(distribution, jobs), plan.observed_values,
         nothing, observation.weight, nothing)
 end
 
@@ -348,7 +354,8 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
     # their law, completed onto the covariate's original row axis. The
     # declared dimensions belong to the missing-row axis; unlike an
     # observation broadcast, the statement samples that independent array.
-    if completion.noncentered
+    standardize = completion.noncentered && distribution.callable in _RK_NONCENTERED_LAWS
+    if standardize
         location, scale = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
         part = (; callable=distribution.callable, location, scale)
         block = _rk_block_body(location, scale)
@@ -359,7 +366,7 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
     observed = _rk_block_argument!(block, :observed, completion.observed_component)
     rows = _rk_block_argument!(block, :rows, completion.missing_rows)
     order = _rk_block_argument!(block, :order, completion.order)
-    if completion.noncentered
+    if standardize
         entry = _rk_emit_standardized!(block, part, rows, :z_mis, :y_mis)
         missing = entry.standardized.value
     else
@@ -492,12 +499,13 @@ function _rk_mi_grouped_part(bindings, taken, completion)
     grouped = _rk_mi_gather(completion.distribution, t.grouped_rows)
     if completion.noncentered
         arguments = map(arg -> _rk_value_expr!(bindings, arg, taken), grouped.args)
-        return (; noncentered=true, ends=t.ends, residuals=t.residuals, arguments,
+        return (; noncentered=true, bounded=_brm_lower_family(F), ends=t.ends, residuals=t.residuals, arguments,
             weights=_rk_value_callee!(bindings, _BRMGroupShareWeight{F}(), taken),
             weight=_rk_value_callee!(bindings, _BRMLogWeight, taken),
             reads=Expr(:tuple, t.ends, t.residuals, arguments...))
     end
-    family = _rk_value_callee!(bindings, _BRMGroupedShares{F}, taken)
+    family = _rk_value_callee!(bindings,
+        _brm_lower_family(F) ? _BRMLowerGroupedShares{F} : _BRMGroupedShares{F}, taken)
     law = Expr(:call, family, t.ends, t.residuals,
         map(arg -> _rk_value_expr!(bindings, arg, taken), grouped.args)...)
     (; noncentered=false, law, reads=law)
@@ -540,23 +548,27 @@ function _rk_emit_mi_grouped!(definitions, taken, block, part, grouped_rows, dat
         # the law's arguments broadcast onto the entries by a named dotted value
         # each, so every read is a gather at the cell's rows.
         layout = map(enumerate((:entry_coords, :entry_slot, :entry_total, :entry_ones,
-                :group_entries, :group_coords, :entry_ids, :group_ids))) do (k, name)
+                :group_entries, :group_coords, :entry_ids, :group_ids, :entry_group))) do (k, name)
             value = _rk_block_local!(block, name)
             push!(block.statements, Expr(:(=), value, _rk_ast_statistical_call!(definitions,
                 taken, :brm_grouped_shares_layout, part.ends, part.residuals, k)))
             value
         end
         entry_coords, entry_slot, entry_total, entry_ones, group_entries, group_coords,
-            entry_ids, group_ids = layout
+            entry_ids, group_ids, entry_group = layout
         shares = _rk_block_local!(block, :y_shares)
-        push!(block.statements, Expr(:(=), shares, _rk_ast_statistical_call!(definitions,
-            taken, :brm_grouped_shares_local, sampled, entry_ids, entry_coords, entry_slot,
-            entry_total; kernel=true)))
         arguments = map(enumerate(part.arguments)) do (k, argument)
             value = _rk_block_local!(block, Symbol(:share_argument_, k))
             push!(block.statements, Expr(:(=), value, Expr(:call, :.*, argument, entry_ones)))
             value
         end
+        value_call = part.bounded ?
+            _rk_ast_statistical_call!(definitions, taken, :brm_lower_grouped_local,
+                sampled, entry_ids, entry_group, entry_slot, group_ids, group_coords,
+                group_entries, part.residuals, first(arguments); kernel=true) :
+            _rk_ast_statistical_call!(definitions, taken, :brm_grouped_shares_local,
+                sampled, entry_ids, entry_coords, entry_slot, entry_total; kernel=true)
+        push!(block.statements, Expr(:(=), shares, value_call))
         n = length(arguments)
         weights = _rk_block_local!(block, :group_weights)
         push!(block.statements, Expr(:(=), weights, _rk_ast_statistical_call!(definitions,
