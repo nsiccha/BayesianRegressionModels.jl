@@ -91,6 +91,7 @@ end
 # data-only assignment is read by name; a scalar data field is its value.
 _rk_lower_data_assignment(x, _assignments, _constants, _raw, _used) = x
 function _rk_lower_data_assignment(x::NamedColumn, assignments, constants, raw, used)
+    _brm_is_colon(x) && return :(:)
     key = name(x)
     backing = parent(x)
     if backing isa DataColumn
@@ -109,7 +110,7 @@ function _rk_lower_data_assignment(x::NamedColumn, assignments, constants, raw, 
 end
 function _rk_lower_data_assignment(x::ExprColumn, assignments, constants, raw, used)
     lower(arg) = _rk_lower_data_assignment(arg, assignments, constants, raw, used)
-    f = getf(x)
+    f = _brm_is_colon(getf(x)) ? Colon() : getf(x)
     args = map(lower, getargs(x))
     kwargs = getkwargs(x)
     if isempty(kwargs)
