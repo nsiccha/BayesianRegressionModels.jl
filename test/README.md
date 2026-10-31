@@ -98,9 +98,10 @@ analytic scores for default Exponential, scaled Exponential and Normal laws.
 Run it directly in the test environment. `nlme_lower_shares.jl` runs in the
 NLMEEstimation scratch environment below and checks bounded groups' fixed
 unit variance, lockstep/unit densities and gradients, `check_protocol` and
-per-cell coordinate locality. The RK 0.1.37 / RKPPL 0.1.31 test pin preserves
+per-cell coordinate locality. The RK 0.1.38 / RKPPL 0.1.32 test pin preserves
 grouped-design shape facts (`group-plate-desi-9ffa5d79`) and binds data-computed
-entry axes before shape inference (`prepare-a-strict-13a9e1b8`). Enzyme dogfood
+entry axes and tuple-geometry metadata before shape inference
+(`prepare-a-strict-13a9e1b8`, `prepare-one-resp-b1f58f91`). Enzyme dogfood
 `0e251cfb` with its declared libEnzyme `782c9d95` repairs the native HVP
 (`custom-geometry-8640cc9d`). Both locality and `check_protocol` remain required
 acceptance in the full consumer fixture. Snag `atlas-shifted-co-e72a3041`.

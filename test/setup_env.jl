@@ -230,7 +230,9 @@ const PINS = [
     # visible grouped kernels, so strict NLME cells read their owning group.
     # f851e008 (RK 0.1.37 / RKPPL 0.1.31) also binds data-computed entry
     # axes before shape inference (RK snag prepare-a-strict-13a9e1b8).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "f851e00834747570b8a0eb163295803615e37dc6"),  # main
+    # 81363978 (RK 0.1.38 / RKPPL 0.1.32) binds visible tuple-geometry
+    # metadata operands before shape inference (prepare-one-resp-b1f58f91).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "81363978d419b4c1a978093d5dd7b82144e846c4"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

@@ -29,7 +29,7 @@ instead of failing at run time.
 - RK noncentered grouped completions retain their law and Jacobian as
   group weights for NLME unit attribution. Bounded free entries stay
   centered shared latents, with their declared law. Group-local evaluation
-  requires ReactiveKernels 0.1.37 / ReactiveKernelsPPL 0.1.31. The test
+  requires ReactiveKernels 0.1.38 / ReactiveKernelsPPL 0.1.32. The test
   environment pins Enzyme dogfood `0e251cfb` and its declared libEnzyme
   `782c9d95` for native HVPs through the lower-support geometry on Julia 1.10.
 
