@@ -242,7 +242,10 @@ const PINS = [
     # a load through a select or phi that merges Const data with active data,
     # which RKPPL's compact-cell AD (`prepare_compact_cell_ad`) runs into under
     # plain Reverse when the sparse Laplace differentiates an `@plate` cell.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "3e707d7954ed47fb0ca44ca7eea640bf9edf7213"),  # dogfood (KB mirror only)
+    # 0e251cfb (libEnzyme build 782c9d95) also fixes second derivatives
+    # through dynamic calls on Julia 1.10 (Enzyme snag compute-an-ordin-902b6418),
+    # including the lower-bounded completion's ParameterGeometry callbacks.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "0e251cfbcb810ee4dc2120b51de0784d30140aef"),  # dogfood (KB mirror only)
 ]
 
 # Pins whose commits are not on GitHub: the KB host mirror they come from.
