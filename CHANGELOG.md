@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.88
+
+- Fixed: nested NLME SAEM fits require ReactiveKernels 0.1.29, whose plate
+  buffer inference works from older compiled worlds. This repairs the
+  population-gradient compilation failure introduced by the test pin in
+  0.2.81. The test environment pins the published fix (`5f18f4b84`).
+
 ## 0.2.87
 
 - Added: `brm_laplace_plan(rk; ad_backend, integrate = :auto, sample = (),
