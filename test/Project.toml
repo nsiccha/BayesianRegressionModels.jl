@@ -211,4 +211,7 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # value read through several batched arguments, and a dotted value reading an
 # untyped numeric array at literal positions, at its rows (snag
 # form-value-compu-c1e0965c).
+# a959bef75 (ReactiveKernels 0.1.25, ReactiveKernelsPPL 0.1.22) contains
+# 0d5fb817c: a cell of one value of a shared `@plate for` cell computes nothing
+# only its sibling values read (snag sibling-only-pla-2b3df69e).
 rev = "a959bef75754e7c4666bdafd120ae0ab13343734"

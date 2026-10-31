@@ -12,6 +12,16 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.85
+
+- BRM's compat floor is ReactiveKernels 0.1.25. A cell of one observation of
+  an `@plate for` loop that computes several observations' arguments (one
+  plate returning a tuple) then computes only the values that observation
+  reads, not those only its sibling observations read. On ArbeitsplatzAtlas a
+  `selb_obs` or `beamt_obs` cell read 147,766 coordinates (1,236 now; warm
+  value 18 ms, now 0.02 ms). The test environment already pinned it
+  (`a959bef75`, from 0.2.81).
+
 ## 0.2.84
 
 - Fixed: the index vector of an in-cell `indexin(idx[rows[i]], target[i])`
