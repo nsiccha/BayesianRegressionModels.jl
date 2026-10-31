@@ -271,6 +271,53 @@ end
     rk_same_density(derived, host)
 end
 
+# A bare `:` and a range index a matrix-valued assignment as in Julia, so a
+# column taken out of it is data, as a named accessor of it is (snag
+# `a-data-only-colu-ede00967`).
+derived_design(t::AbstractVector) = hcat(t, 2 .* t)
+
+@stestset "a column indexed out of a matrix-valued data-only assignment" begin
+    host_data = merge(flat, (; z=2 .* flat.t, u=copy(flat.t)))
+    derived = @brm flat begin
+        sigma ~ Exponential(1)
+        d = derived_design(t)
+        z = d[:, 2]
+        u = d[1:length(t), 1]
+        mu ~ 1 + z + u
+        y ~ Normal(mu, sigma)
+    end
+    host = @brm host_data begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + z + u
+        y ~ Normal(mu, sigma)
+    end
+    sb_same_program(derived, host)
+    rk, _ = rk_same_density(derived, host)
+    rk_in_graph(rk, :z, (:t,))
+    rk_in_graph(rk, :u, (:t,))
+    rows(r) = (; t=flat.t[r], x=flat.x[r], g=flat.g[r], y=flat.y[r])
+    rk_binds_raw(rk, rows(1:18), rows(7:24))
+
+    derived_plate = @brm flat begin
+        sigma ~ Exponential(1)
+        d = derived_design(t)
+        z = d[:, 2]
+        b ~ Normal(0, 1)
+        @plate for i in eachindex(y)
+            y[i] ~ Normal(b * z[i], sigma)
+        end
+    end
+    host_plate = @brm host_data begin
+        sigma ~ Exponential(1)
+        b ~ Normal(0, 1)
+        @plate for i in eachindex(y)
+            y[i] ~ Normal(b * z[i], sigma)
+        end
+    end
+    sb_same_program(derived_plate, host_plate)
+    rk_same_density(derived_plate, host_plate)
+end
+
 @stestset "constants a data-only assignment reads are computed in the graph" begin
     covariate = [randn(rng, N - 2); NaN; NaN]
     data = merge(flat, (; z=covariate))
