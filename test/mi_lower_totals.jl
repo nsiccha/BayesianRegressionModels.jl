@@ -45,6 +45,41 @@ end
 lower_data() = (; x=Union{Missing,Float64}[missing, missing, 3, missing, missing, 2],
     lo=[1., 2., 1., 2., 1., 0.], total=[9., 2.],
     g=[1, 1, 1, 2, 3, 3], cells=[1, 2], y=[2., 4., 3., 2., 2.5, 2.])
+
+@stestset "bounded free rows retain strict locality and native gradients" begin
+    data = (; x=fill(missing, 3), lo=[0.5, 1., 2.], y=ones(3))
+    models = (
+        @brm(data, begin
+            mi(x) ~ truncated(Exponential(); lower=lo)
+            y ~ Normal(x, 1)
+        end),
+        @brm(data, begin
+            mi(x) ~ truncated(Exponential(2.); lower=lo)
+            y ~ Normal(x, 1)
+        end),
+        @brm(data, begin
+            mi(x) ~ truncated(Normal(0., 2.); lower=lo)
+            y ~ Normal(x, 1)
+        end))
+    # At u=0, x=lo+1. Add the authored law's score, the response's score
+    # (y-x), and the log-Jacobian derivative; the bounds are fixed data.
+    gradients = (-data.lo, 0.5 .- data.lo, 0.75 .- 1.25 .* data.lo)
+    for (model, expected_gradient) in zip(models, gradients)
+        rk = RKBRMI(model; completions=:noncentered)
+        @test length(coordinate_names(rk.model.layout)) == 3
+        q = prepare_cell_query(rk.model, rk_bound_plan(rk), :y; locality=:error)
+        for row in eachindex(data.y)
+            point = LowerSharesRecordingVector(zeros(3), Int[])
+            @test isfinite(q(point, row))
+            @test unique(point.reads) == [row]
+        end
+        problem = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, zeros(3))
+        @test isfinite(value)
+        @test gradient ≈ expected_gradient atol=1e-10
+    end
+end
+
 function lower_model(data; normalized=true)
     normalized ? (@brm data begin
         mu ~ Normal(0, 1)

@@ -132,12 +132,31 @@ function ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMLowerLaw{F,N}, x::Abs
     end
     result
 end
-ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMLowerLaw}, args, shape) =
+# Completion columns are vectors. Expose their elementwise transform as a
+# graph, including an empty free vector beside grouped shares: an opaque
+# callback hides its row footprint when the completed column is gathered.
+# Registered base families take zero, one or two arguments. Keep the complete
+# endpoint signatures explicit; splatted endpoints retain opaque locality.
+ReactiveKernels.@kernel function _lower_constrain_0(u, shape, lo)
+    values = lo .+ exp.(u)
+    return values
+end
+ReactiveKernels.@kernel function _lower_constrain_1(u, shape, lo, argument_1)
+    return _lower_constrain_0(u, shape, lo)
+end
+ReactiveKernels.@kernel function _lower_constrain_2(u, shape, lo, argument_1, argument_2)
+    return _lower_constrain_0(u, shape, lo)
+end
+function ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMLowerLaw}, args, shape)
+    constrain = length(shape) == 1 ?
+        (_lower_constrain_0, _lower_constrain_1, _lower_constrain_2)[length(args)] :
+        ((u, shape, lo, rest...) -> isempty(shape) ? lo + exp(only(u)) : reshape(lo .+ exp.(u), shape))
     ReactiveKernelsPPL.ParameterGeometry(shape,
         isempty(shape) ? 1 : Expr(:call, :*, (:(length($axis)) for axis in shape)...); support=:real,
-        constrain=(u, shape, lo, rest...) -> isempty(shape) ? lo + exp(only(u)) : reshape(lo .+ exp.(u), shape),
+        constrain,
         unconstrain=(x, shape, lo, rest...) -> isempty(shape) ? [log(x - lo)] : vec(log.(x .- lo)),
         logjac=(u, shape, rest...) -> sum(u))
+end
 
 ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMLowerShares}, args, shape) =
     ReactiveKernelsPPL.ParameterGeometry((args[1],), :($(args[1]) - 1); support=:real,

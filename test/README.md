@@ -93,6 +93,8 @@ groups, invalid budgets, source/frozen replay, output descriptors and starts.
 The emitted group map is also checked for linear coordinate reads, allocation
 and layout storage as group size doubles. Cell checks include Exponential
 laws whose vector of lower bounds supplies their dimension.
+Free-row checks require strict cell locality and compare native gradients with
+analytic scores for default Exponential, scaled Exponential and Normal laws.
 Run it directly in the test environment. `nlme_lower_shares.jl` runs in the
 NLMEEstimation scratch environment below and checks bounded groups' fixed
 unit variance, lockstep/unit densities and gradients, `check_protocol` and
