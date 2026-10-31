@@ -216,7 +216,10 @@ const PINS = [
     # 0.1.25 (it contains 0d5fb817c): a cell of one value of a shared `@plate
     # for` cell computes nothing only its sibling values read (RK snag
     # sibling-only-pla-2b3df69e), BRM's compat floor from 0.2.85.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a959bef75754e7c4666bdafd120ae0ab13343734"),  # main
+    # 5f18f4b84 (ReactiveKernels 0.1.29, ReactiveKernelsPPL 0.1.23) fixes
+    # plate buffer inference from older compiled worlds, including the
+    # nested SAEM population gradient (RK snag brm-canonical-44-a1653c2a).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "5f18f4b849202af651d1de47c5b819cc1428ace5"),  # main
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

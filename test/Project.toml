@@ -214,4 +214,7 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # a959bef75 (ReactiveKernels 0.1.25, ReactiveKernelsPPL 0.1.22) contains
 # 0d5fb817c: a cell of one value of a shared `@plate for` cell computes nothing
 # only its sibling values read (snag sibling-only-pla-2b3df69e).
-rev = "a959bef75754e7c4666bdafd120ae0ab13343734"
+# 5f18f4b84 (ReactiveKernels 0.1.29, ReactiveKernelsPPL 0.1.23) fixes
+# plate buffer inference used by nested SAEM's population gradient
+# (snag brm-canonical-44-a1653c2a).
+rev = "5f18f4b849202af651d1de47c5b819cc1428ace5"
