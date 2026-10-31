@@ -64,11 +64,9 @@ function _brm_svi_target(m::BRMNLMEModel)
         "no cells attributable to single subjects")
     globals = _brm_svi_globals(m)
     units = m.view.subject_coordinates
-    # Compact cell gradients selecting the globals and the draws each cell
-    # reads (`_brm_nlme_cell_plan` over the reads `m` measured), so a cell
-    # costs its own coordinates, not its subject's whole block.
-    plan = _brm_nlme_cell_plan(m.backend, m.cell_query, m.unit, globals, units,
-        _brm_nlme_cell_state(m).reads)
+    # SVI owns one partition sampler and includes covariance coordinates in
+    # its active globals. Fixed shared values remain at the read-only base.
+    plan = _brm_nlme_partition_plan(m.cell_gradient, m.unit, globals, m.view)
     # For subject i, `order[i]` sorts [globals; units[i]] into packed order.
     order = [sortperm(vcat(globals, block)) for block in units]
     indices = [vcat(globals, block)[o] for (block, o) in zip(units, order)]
@@ -96,8 +94,7 @@ function _brm_svi_unit_term!(gg, gz, t, i, g, z)
     joint = vcat(g, z)
     w.values .= joint[order]
     fill!(w.gradient, 0.0)
-    value = _brm_nlme_cell_plan_sum!(w.gradient, t.plan, t.m.cell_query, t.m.unit,
-        i, w.values)
+    value = _brm_nlme_partition_sum!(w.gradient, t.plan, t.m.unit, i, w.values)
     joint_gradient = similar(joint)
     joint_gradient[order] .= w.gradient
     gg .= view(joint_gradient, 1:D)
@@ -505,7 +502,7 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   [`brm_start`](@ref) takes them (the rest at the prior medians).
 - `progress` — a Treebars node or backend symbol: one `BRM SVI fit` node with
   the phases Lower to ReactiveKernels, Prepare NLME model, Minibatch target
-  (the subjects' cell gradients and the start), Stochastic optimization (its
+  (the unit partition gradient and the start), Stochastic optimization (its
   message names the window, iteration and ELBO) and Draws from q. An interrupt raises `Treebars.ProgressInterrupted` at the
   next window.
 - Optimizer controls: `max_iterations`, `lr_global` (Adam on the globals),
@@ -547,7 +544,7 @@ function _brm_svi_fit(x, previous; rng=Random.default_rng(), batch_size=32,
             m = _brm_svi_model(_brm_svi_lowered(x, phases.lower), phases.prepare;
                 ad_backend, shared_point, subject_group, nested_groups, shared_groups)
             t, q = _brm_run_phase(phases.target) do phase
-                # The model's compact cell gradients, on first use, report here.
+                # SVI's partition sampler and start report under this phase.
                 t = _brm_with_cell_progress(() -> _brm_svi_target(m), phase)
                 _brm_svi_initialize(t, previous, family; start, inits, global_scale, unit_scale)
             end

@@ -1548,8 +1548,16 @@ function _rk_observation_values end
 function _rk_observation_value_and_pushforward end
 function _rk_nlme_cell_query end
 function _rk_nlme_cell_value end
-function _rk_nlme_compact_cell_sampler end
-function _rk_nlme_compact_cell_value_and_gradient! end
+function _rk_nlme_partition_context end
+function _rk_nlme_partition_query end
+function _rk_nlme_partition_labels end
+function _rk_nlme_partition_value end
+function _rk_nlme_partition_query_footprint end
+function _rk_nlme_partition_sampler end
+function _rk_nlme_partition_footprint end
+function _rk_nlme_partition_value_and_gradient! end
+function _rk_nlme_cell_footprint_query end
+function _rk_nlme_cell_footprint end
 function _rk_nlme_population_prior end
 function _rk_nlme_population_prior_value end
 function _rk_nlme_population_prior_value_gradient end
@@ -1678,40 +1686,6 @@ _brm_nlme_cell_queries(backend::RKBRMI, cells, progress=nothing) =
         end
     end
 
-# The longest subject block. RK fixes a compact sampler's selection length when
-# preparing it and lets the selected positions change per call, so a selection
-# shorter than its sampler's is padded, and these η are the padding: they are
-# another subject's whenever the selection's own block is shorter, so the
-# subject's cells do not read them, and they stay at the unit point.
-_brm_nlme_padding(blocks) = blocks[argmax(length.(blocks))]
-
-# The values at the sorted packed positions `indices` of the points a cell's
-# reads are measured (`phase` 1 and 2) and checked (`phase` 3) at: the unit
-# point with every global and η moved by an offset that is never zero, so that
-# a coordinate a cell reads has a nonzero derivative at one of them. Moving the
-# globals matters: at the unit point a coefficient can be zero, and an η it
-# multiplies would then read as unread. `indices` holds `globals` and `block`.
-function _brm_nlme_read_point(unit, globals, block, indices, phase)
-    values = unit[indices]
-    offset(n) = phase == 1 ? 0.05 .+ 0.1 .* sin.(1:n) :
-        phase == 2 ? -0.04 .+ 0.07 .* cos.(1.3 .* (1:n)) :
-        0.03 .+ 0.11 .* sin.(2.1 .* (1:n) .+ 0.4)
-    for (j, o) in zip(globals, offset(length(globals)))
-        values[searchsortedfirst(indices, j)] += o
-    end
-    for (j, o) in zip(block, offset(length(block)))
-        values[searchsortedfirst(indices, j)] = o
-    end
-    values
-end
-
-# The point `_brm_nlme_read_point` describes, as an overlay on the unit point.
-function _brm_nlme_read_overlay(unit, globals, block, phase)
-    indices = sort!(vcat(globals, block))
-    _BRMNLMEPoint(unit, indices, _brm_nlme_read_point(unit, globals, block, indices,
-        phase), Int[], Float64[], Int[], Float64[])
-end
-
 # A point that notes each packed position read through it: evaluating a cell's
 # value at it records the coordinates that cell reads, for the cost of that one
 # evaluation.
@@ -1723,32 +1697,97 @@ Base.size(p::_BRMNLMERecordingPoint) = size(p.point)
 Base.IndexStyle(::Type{<:_BRMNLMERecordingPoint}) = IndexLinear()
 Base.getindex(p::_BRMNLMERecordingPoint, j::Int) = (push!(p.seen, j); p.point[j])
 
-# For each subject's cells, the η of its block that the cell's value query
-# reads at the two probe points (`_brm_nlme_read_point` 1 and 2; which entries
-# a cell reads can depend on the point, as in a branch), in block order. Each
-# cell costs its own evaluation, so a unit costs its cells' reads, not its
-# cells times its block. RK can read more than a cell's value depends on (a
-# vector it then indexes), so `_brm_nlme_cell_reads` keeps the η a gradient
-# touches. `progress` counts subject `i`'s group `g` as step
-# `(i - 1) * length(cells) + g`.
-function _brm_nlme_recorded_reads(cells, unit, globals, blocks; progress=nothing)
+
+# Each observation's cell positions map to exactly one NLME unit. These data
+# columns drive the compiled partition; they are not sampled coordinates.
+function _brm_nlme_partition_keys(cells)
+    map(cells) do cell
+        labels = zeros(Int, sum(length, cell.positions))
+        for (i, positions) in enumerate(cell.positions), p in positions
+            1 <= p <= length(labels) && iszero(labels[p]) || _brm_nlme_error(
+                "brm_nlme_model: observation cells $(cell.names) do not form a " *
+                "partition at cell $p")
+            labels[p] = i
+        end
+        all(!iszero, labels) || _brm_nlme_error(
+            "brm_nlme_model: observation cells $(cell.names) leave cells unattributed")
+        labels
+    end
+end
+
+# BRM owns the packed-coordinate attribution, including nested/ragged blocks.
+# Structural reads may include shared values and this unit's effects only.
+function _brm_nlme_check_partition_ownership(view::BRMNLMEView, i, footprint)
+    foreign = [j for j in footprint if view.subject[j] != 0 && view.subject[j] != i]
+    isempty(foreign) && return nothing
+    names = join(string.(view.coordinates[foreign]), ", ")
+    _brm_nlme_error("brm_nlme_model: subject $i's observation partition reads " *
+        "$(length(foreign)) effect coordinates owned by another subject: $names")
+end
+
+function _brm_nlme_partition_queries(backend, cells, view, unit)
+    context = _rk_nlme_partition_context(backend, cells, _brm_nlme_partition_keys(cells))
+    query = _rk_nlme_partition_query(context)
+    labels = Set(_rk_nlme_partition_labels(query))
+    footprints = map(eachindex(view.subject_coordinates)) do i
+        i in labels || return Int[]
+        footprint = _rk_nlme_partition_query_footprint(query, unit, i)
+        _brm_nlme_check_partition_ownership(view, i, footprint)
+        footprint
+    end
+    (; context, query, labels, footprints, state=Ref{Any}(nothing), lock=ReentrantLock())
+end
+
+# One compact sampler per owner of mutable AD workspace (model, SVI target or
+# worker). Its structural footprint also includes fixed population coordinates;
+# slots maps only the globals and unit effects requested by this consumer.
+function _brm_nlme_partition_plan(partition, unit, globals, view)
+    sampler = _rk_nlme_partition_sampler(partition.context, unit)
+    indices = [sort!(vcat(globals, block)) for block in view.subject_coordinates]
+    footprints = map(eachindex(indices)) do i
+        i in partition.labels || return Int[]
+        footprint = _rk_nlme_partition_footprint(sampler, i)
+        _brm_nlme_check_partition_ownership(view, i, footprint)
+        footprint == partition.footprints[i] || _brm_nlme_error(
+            "brm_nlme_model: subject $i's value and gradient partitions " *
+            "have different structural footprints")
+        footprint
+    end
+    slots = [[_brm_sorted_slot(indices[i], j) for j in footprint]
+        for (i, footprint) in enumerate(footprints)]
+    gradients = [zeros(length(footprint)) for footprint in footprints]
+    (; sampler, indices, footprints, slots, gradients, labels=partition.labels)
+end
+
+# Evaluate a unit in one compiled pass, with no packed point/gradient copy.
+# The caller owns this plan's workspace or holds its model's lock.
+function _brm_nlme_partition_sum!(gradient, plan, unit, i, values)
+    fill!(gradient, 0.0)
+    i in plan.labels || return 0.0
+    point = _BRMNLMEPoint(unit, plan.indices[i], values, Int[], Float64[],
+        Int[], Float64[])
+    value = first(_rk_nlme_partition_value_and_gradient!(plan.sampler,
+        plan.gradients[i], point, i))
+    for (k, slot) in enumerate(plan.slots[i])
+        slot == 0 || (gradient[slot] = plan.gradients[i][k])
+    end
+    value
+end
+
+# Individual cell supports preserve the sparse eta-Hessian pattern. One
+# footprint kernel per observation group is reused for all its cells, without
+# AD, numeric probes or a retained partition plan per cell. Keep block order.
+function _brm_nlme_structural_reads(cells, unit, view; progress=nothing)
+    queries = map(cell -> _rk_nlme_cell_footprint_query(cell.query), cells)
     place = zeros(Int, length(unit))
-    map(eachindex(blocks)) do i
-        block = blocks[i]
+    map(eachindex(view.subject_coordinates)) do i
+        block = view.subject_coordinates[i]
         place[block] .= eachindex(block)
-        points = [_BRMNLMERecordingPoint(_brm_nlme_read_overlay(unit, globals, block,
-            phase), Int[]) for phase in (1, 2)]
         reads = map(ntuple(identity, length(cells)), cells) do g, cell
             group = map(cell.positions[i]) do p
-                places = Int[]
-                for point in points
-                    empty!(point.seen)
-                    _rk_nlme_cell_value(cell.query, point, p)
-                    for j in point.seen
-                        place[j] == 0 || push!(places, place[j])
-                    end
-                end
-                block[sort!(unique!(places))]
+                footprint = _rk_nlme_cell_footprint(queries[g], unit, p)
+                _brm_nlme_check_partition_ownership(view, i, footprint)
+                block[sort!([place[j] for j in footprint if place[j] != 0])]
             end
             _brm_update_progress!(progress, (i - 1) * length(cells) + g)
             group
@@ -1756,161 +1795,6 @@ function _brm_nlme_recorded_reads(cells, unit, globals, blocks; progress=nothing
         place[block] .= 0
         reads
     end
-end
-
-# `reads[i][g][k]`: the packed positions of subject `i`'s block that its `k`-th
-# cell of group `g` reads, in block order — of its recorded reads
-# (`_brm_nlme_recorded_reads`), the η its compact gradient touches at one of the
-# two probe points, through `plan`, which selects the recorded reads. Only the
-# entries a call wrote are cleared after it, so each cell costs its own reads.
-# `progress` counts as in `_brm_nlme_recorded_reads`.
-function _brm_nlme_cell_reads(plan, recorded, cells, unit, globals, blocks;
-        progress=nothing)
-    map(eachindex(blocks)) do i
-        block = blocks[i]
-        indices = sort!(vcat(globals, block))
-        points = [_brm_nlme_read_point(unit, globals, block, indices, phase)
-            for phase in (1, 2)]
-        gradient = zeros(length(indices))
-        map(eachindex(cells)) do g
-            group = map(enumerate(cells[g].positions[i])) do (k, p)
-                read = recorded[i][g][k]
-                slots = [searchsortedfirst(indices, j) for j in read]
-                touched = falses(length(read))
-                for values in points
-                    _brm_nlme_plan_cell!(gradient, plan, unit, i, g, k, p, values)
-                    for (q, s) in enumerate(slots)
-                        iszero(gradient[s]) || (touched[q] = true)
-                    end
-                    for s in plan.slots[i][g][k]
-                        s == 0 || (gradient[s] = 0.0)
-                    end
-                end
-                read[touched]
-            end
-            _brm_update_progress!(progress, (i - 1) * length(cells) + g)
-            group
-        end
-    end
-end
-
-# Compact cell gradients that select, per cell, the packed positions `globals`
-# and only the η the cell reads (`reads`), so one call costs the cell's own
-# coordinates rather than its subject's whole block. RK fixes a sampler's
-# selection length when preparing it and lets the positions change per call:
-# each cell group gets one sampler at its widest selection, and a narrower cell
-# is padded with η of its subject it does not read (derivative zero), past
-# those with the longest block's η (`_brm_nlme_padding`) at the unit point.
-# `selections[i][g][k]` is that cell's selection; `slots[i][g][k]` maps each of
-# its positions to the subject's sorted `[globals; block]` (0 for a padding
-# position outside it). `buffers[g]` hold one call's active point and gradient.
-function _brm_nlme_cell_plan(backend::RKBRMI, cells, unit, globals, blocks, reads;
-        reuse=nothing, progress=nothing)
-    widths = map(eachindex(cells)) do g
-        length(globals) + maximum((length(read) for subject in reads
-            for read in subject[g]); init=0)
-    end
-    # A cell reads at most the longest block, so a subject whose own unread η
-    # are too few is shorter than it, and its padding is another subject's.
-    padding = _brm_nlme_padding(blocks)
-    selections = map(eachindex(blocks)) do i
-        map(eachindex(cells)) do g
-            map(reads[i][g]) do read
-                selection = sort!(vcat(globals, read))
-                pad = widths[g] - length(selection)
-                pad == 0 && return selection
-                # `read` is a subsequence of the block, so its unread η are
-                # found in the first `pad + length(read)` of it, not the whole.
-                extra, r = Int[], 1
-                for j in blocks[i]
-                    length(extra) == pad && break
-                    r <= length(read) && read[r] == j ? (r += 1) : push!(extra, j)
-                end
-                length(extra) < pad && append!(extra, padding[1:pad - length(extra)])
-                sort!(vcat(selection, extra))
-            end
-        end
-    end
-    slots = map(eachindex(blocks)) do i
-        indices = sort!(vcat(globals, blocks[i]))
-        map(subject -> map(subject) do selection
-            map(selection) do j
-                k = searchsortedfirst(indices, j)
-                k <= length(indices) && indices[k] == j ? k : 0
-            end
-        end, selections[i])
-    end
-    # `reuse`, an earlier plan: a group whose width is unchanged keeps its sampler.
-    # `progress` counts the groups.
-    samplers = map(eachindex(cells)) do g
-        sampler = if reuse !== nothing && length(reuse.buffers[g].active) == widths[g]
-            reuse.samplers[g]
-        else
-            i = findfirst(subject -> !isempty(subject[g]), selections)
-            i === nothing ? nothing :
-                _rk_nlme_compact_cell_sampler(backend, cells[g].names, unit,
-                    first(selections[i][g]))
-        end
-        _brm_update_progress!(progress, g)
-        sampler
-    end
-    buffers = [(; active=zeros(w), gradient=zeros(w)) for w in widths]
-    (; samplers, selections, slots, buffers)
-end
-
-# Subject `i`'s `k`-th cell of group `g` (at cell position `p`) through `plan`:
-# returns its value and adds its gradient into `gradient`, both aligned with
-# `values`, the point's values at the subject's sorted `[globals; block]`.
-function _brm_nlme_plan_cell!(gradient, plan, unit, i, g, k, p, values)
-    sampler, buffer = plan.samplers[g], plan.buffers[g]
-    selection, slots = plan.selections[i][g][k], plan.slots[i][g][k]
-    for (q, s) in enumerate(slots)
-        buffer.active[q] = s == 0 ? unit[selection[q]] : values[s]
-    end
-    value = first(_rk_nlme_compact_cell_value_and_gradient!(sampler,
-        buffer.gradient, unit, buffer.active, selection, p))
-    for (q, s) in enumerate(slots)
-        s == 0 || (gradient[s] += buffer.gradient[q])
-    end
-    value
-end
-
-# Subject `i`'s cells summed through `plan` (see `_brm_nlme_plan_cell!`).
-function _brm_nlme_cell_plan_sum!(gradient, plan, cells, unit, i, values)
-    total = 0.0
-    for (g, cell) in enumerate(cells), (k, p) in enumerate(cell.positions[i])
-        total += _brm_nlme_plan_cell!(gradient, plan, unit, i, g, k, p, values)
-    end
-    total
-end
-
-# The plan evaluates each cell as its value query does: at a third point
-# (`_brm_nlme_read_point` 3), every cell's value through the plan equals the
-# query's. A read the probe points missed would leave that η at the unit point
-# and show here; it is an error, never a silent fallback. `progress` counts as
-# in `_brm_nlme_recorded_reads`.
-function _brm_nlme_check_cell_plan(plan, cells, unit, globals, blocks; progress=nothing)
-    for (i, block) in enumerate(blocks)
-        indices = sort!(vcat(globals, block))
-        values = _brm_nlme_read_point(unit, globals, block, indices, 3)
-        point = _BRMNLMEPoint(unit, indices, values, Int[], Float64[], Int[], Float64[])
-        gradient = zeros(length(indices))
-        for (g, cell) in enumerate(cells)
-            for (k, p) in enumerate(cell.positions[i])
-                v = _rk_nlme_cell_value(cell.query, point, p)
-                w = _brm_nlme_plan_cell!(gradient, plan, unit, i, g, k, p, values)
-                for s in plan.slots[i][g][k]
-                    s == 0 || (gradient[s] = 0.0)
-                end
-                isapprox(v, w; rtol=1e-10, atol=1e-10) || _brm_nlme_error(
-                    "brm_nlme_model: subject $i's cell $p of $(cell.names) reads η the " *
-                    "probe points did not find (value $v from its query, $w through " *
-                    "the plan, which selects $(plan.selections[i][g][k]))")
-            end
-            _brm_update_progress!(progress, (i - 1) * length(cells) + g)
-        end
-    end
-    nothing
 end
 
 """
@@ -2019,21 +1903,19 @@ the pointwise query: moving the η blocks of halves of the subjects,
 2⌈log₂ n⌉ evaluations for n subjects. A density that reads no subject's η
 counts toward the first subject.
 
-When every observed density belongs to one subject's cells, the model also
-prepares cell queries for [`brm_nlme_loglikelihood`](@ref). Compact cell
-gradients for [`brm_nlme_loglikelihood_and_gradient`](@ref) are prepared on
-first use (that call, a nested model's η Hessian patterns, SVI's unit terms or
-a two-stage fit): one sampler per group of cells, over the globals and the η
-each cell reads. A cell's reads are those its value reads at two probe points,
-kept where its gradient touches them, so preparing them costs each cell's own
-reads. A cell is one
-iteration of a `@plate for` (or the deprecated closure-style `kernel(...) do`)
-over the subjects or over their rows, one row of a flat grouped response or
-of a completed covariate's observed values, or one totals cell; each belongs
-to the subject of its rows. An observation on rows of its own has one cell per
-density, plate iterations included, each belonging to its measured subject. A
-subject's work then depends on its own cells, not on other subjects, as far as
-RK computes each cell's reads at its rows.
+When every observed density belongs to one subject's cells, the model prepares
+one compiled observation partition per unit label. Each unit value or gradient
+runs all its cells in one pass. RK's strict locality check refuses a value that
+cannot be computed at the requested rows, naming its producer. BRM checks the
+structural packed-coordinate footprints against its unit ownership before
+returning the model, including for value-only use.
+
+One compact partition sampler is prepared on first gradient use. For nested
+models, value-only cell footprint kernels supply the individual supports whose
+cliques form each unit's sparse η Hessian pattern. These supports include both
+arms of branches and zero-weight coordinates; no numerical probes or gradient
+pruning determine the structure. Retained conditional captures can still have
+conservative supports; a structural read of another unit's effect is refused.
 
 `progress` reports the preparation through Treebars: pass a Treebars node and
 the call builds a `Prepare NLME model` node under it, with one phase per step
@@ -2051,11 +1933,10 @@ several subjects, and a measured density that reads several subjects' η (the
 message names them), is not finite at the measuring point, or changes with
 some of the moves but not all.
 
-The measurement is at one point. A density whose value stays bit-identical
-while the η it reads moves (dependence that is constant in pieces, such as
-`ifelse(η > c, a, b)`) has that dependence missed, so it is counted toward the
-first subject or refused; BRM's random effects enter through linear predictors
-and smooth links.
+Numerical attribution alone cannot detect every piecewise-constant dependence.
+For models with subject cells, the subsequent structural ownership check also
+includes dormant branches and refuses a partition that reads another subject's
+effects before returning the model.
 """
 function brm_nlme_model(backend::RKBRMI; ad_backend,
         observation_ad_backend=nothing, shared_point=nothing,
@@ -2119,8 +2000,8 @@ function _brm_nlme_model(backend::RKBRMI, node; ad_backend, observation_ad_backe
         cells = _brm_nlme_subject_cells(backend, view, attribution, measured)
         cell_query, cell_gradient = cells === nothing ? (nothing, nothing) :
             _brm_run_phase(phases.cells) do phase
-                _brm_nlme_cell_queries(backend, cells, phase),
-                    (; state=Ref{Any}(nothing), lock=ReentrantLock())
+                queries = _brm_nlme_cell_queries(backend, cells, phase)
+                queries, _brm_nlme_partition_queries(backend, queries, view, unit)
             end
         population_prior = _brm_run_phase(phases.prior) do _
             _rk_nlme_population_prior(backend, unit, ad_backend)
@@ -2169,19 +2050,16 @@ function brm_nlme_loglikelihood(m::BRMNLMEModel, i::Integer, θ, σ, η)
         return brm_nlme_loglikelihoods(m, θ, σ, H)[i]
     end
     point = _brm_nlme_cell_point(m, i, θ, σ, η)
-    sum(m.cell_query) do cell
-        sum(p -> _rk_nlme_cell_value(cell.query, point, p), cell.positions[i]; init=0.0)
+    partition = m.cell_gradient
+    i in partition.labels || return 0.0
+    lock(partition.lock) do
+        _rk_nlme_partition_value(partition.query, point, i)
     end
 end
 
-# The model's per-cell state, built on first use under its lock (not when the
-# model is prepared, so a model whose cell gradients are never taken never
-# prepares or evaluates them): each cell's reads (`_brm_nlme_cell_reads`), the
-# plan that selects them (`_brm_nlme_cell_plan`, checked against the
-# value queries) and, for a nested model, each subject's η Hessian pattern.
-# Building it costs each cell's own reads, never a subject's whole block. It
-# reports under the fit that needs it (`_brm_cell_progress`) as one node whose
-# steps count the subjects' cell groups and the compact samplers.
+# One unit-partition sampler, built on first gradient use under its lock.
+# Nested models also derive sparse Hessian patterns from each cell's structural
+# support; a whole-unit footprint is never turned into a clique.
 function _brm_nlme_cell_state(m::BRMNLMEModel)
     g = m.cell_gradient
     g === nothing && _brm_nlme_error(
@@ -2189,34 +2067,23 @@ function _brm_nlme_cell_state(m::BRMNLMEModel)
     lock(g.lock) do
         g.state[] === nothing || return g.state[]
         _brm_with_progress(_brm_cell_progress();
-                description="Subject cell gradients") do node
-            cells, unit = m.cell_query, m.unit
+                description="Unit partition gradients") do node
             globals = sort!(vcat(m.theta, m.sigma))
-            blocks = m.view.subject_coordinates
-            steps = length(blocks) * length(cells)
-            recorded = _brm_with_counter(node, steps; description="Cell reads") do c
-                _brm_nlme_recorded_reads(cells, unit, globals, blocks; progress=c)
+            plan = _brm_with_counter(node, 1; description="Partition sampler") do c
+                p = _brm_nlme_partition_plan(g, m.unit, globals, m.view)
+                _brm_update_progress!(c, 1)
+                p
             end
-            wide = _brm_with_counter(node, length(cells);
-                    description="Compact cell samplers") do c
-                _brm_nlme_cell_plan(m.backend, cells, unit, globals, blocks, recorded;
-                    progress=c)
-            end
-            reads = _brm_with_counter(node, steps;
-                    description="Cell reads by gradient") do c
-                _brm_nlme_cell_reads(wide, recorded, cells, unit, globals, blocks;
-                    progress=c)
-            end
-            plan = reads == recorded ? wide : _brm_with_counter(node, length(cells);
-                    description="Narrowed compact cell samplers") do c
-                _brm_nlme_cell_plan(m.backend, cells, unit, globals, blocks, reads;
-                    reuse=wide, progress=c)
-            end
-            _brm_with_counter(node, steps; description="Cell plan check") do c
-                _brm_nlme_check_cell_plan(plan, cells, unit, globals, blocks; progress=c)
-            end
-            patterns = _brm_nlme_ragged(m.view) ? _brm_nlme_eta_patterns(blocks, reads) :
+            reads = if _brm_nlme_ragged(m.view)
+                steps = length(m.view.subject_coordinates) * length(m.cell_query)
+                _brm_with_counter(node, steps; description="Cell structural footprints") do c
+                    _brm_nlme_structural_reads(m.cell_query, m.unit, m.view; progress=c)
+                end
+            else
                 nothing
+            end
+            patterns = reads === nothing ? nothing :
+                _brm_nlme_eta_patterns(m.view.subject_coordinates, reads)
             g.state[] = (; reads, plan, patterns)
         end
     end
@@ -2230,7 +2097,7 @@ _brm_nlme_eta_sparsity(m::BRMNLMEModel) =
 
 # Which of subject `i`'s η can enter one observation together, for each subject
 # of a nested model: entry (j, k) is true when η_j and η_k are both read by one
-# of the subject's observation cells (`_brm_nlme_cell_reads`). The subject's
+# of the subject's observation cells (`_brm_nlme_structural_reads`). The subject's
 # conditional log-likelihood is the sum of its cells, so this covers every
 # nonzero of its η Hessian. NLMEEstimation computes the Hessian's values from
 # these patterns (`eta_hessian_sparsity`); a nested subject's units couple only
@@ -2278,8 +2145,7 @@ function _brm_nlme_cell_value_and_selected_gradient(m::BRMNLMEModel, i::Integer,
     # model is shared across concurrent subject requests.
     state = _brm_nlme_cell_state(m)
     value = lock(m.cell_gradient.lock) do
-        _brm_nlme_cell_plan_sum!(selected_gradient, state.plan, m.cell_query,
-            m.unit, i, values)
+        _brm_nlme_partition_sum!(selected_gradient, state.plan, m.unit, i, values)
     end
     value, indices, selected_gradient, point.eta_positions
 end
@@ -2288,8 +2154,8 @@ end
     brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i, θ, σ, η_i)
 
 Return one subject's conditional log-likelihood and its η_i gradient. RK's
-compact cell sampler differentiates selected coordinates in one fused call,
-without a packed gradient buffer.
+compact partition sampler evaluates all that subject's cells in one fused
+call, without a packed point or gradient buffer.
 """
 function brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i::Integer, θ, σ, η)
     # A nested model without subject cells evaluates the whole model.

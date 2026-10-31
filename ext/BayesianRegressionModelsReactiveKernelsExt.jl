@@ -555,7 +555,7 @@ BRM._rk_pointwise_query(backend::BRM.RKBRMI) =
     prepare_query(backend.model, _rk_translated(backend), :pointwise)
 BRM._rk_pointwise_values(query, u::AbstractVector) = Base.invokelatest(query, u)
 BRM._rk_nlme_cell_query(backend::BRM.RKBRMI, observations::Tuple) =
-    prepare_cell_query(backend.model, _rk_translated(backend), observations)
+    prepare_cell_query(backend.model, _rk_translated(backend), observations; locality=:error)
 BRM._rk_nlme_cell_value(query::CellQuery, point::AbstractVector{Float64}, row::Int) =
     query(point, row)
 BRM._rk_spl_cell_footprint(query::CellQuery) = partition_footprint_kernel(query.kernel)
@@ -579,6 +579,54 @@ function BRM._rk_spl_factor_reads(q, u, args...)
     reads = Base.invokelatest(q.footprint, u, args...).unconstrained
     reads === :whole ? collect(eachindex(u)) : reads
 end
+# Supplied key columns extend the input program, so this binding needs its own
+# build. Lower the backend's existing emitted program and preserve frozen fit
+# values. Derived columns must not be rebound as supplied inputs.
+function BRM._rk_nlme_partition_context(backend::BRM.RKBRMI, cells, keys)
+    unbound, columns = _rk_lower_program(_rk_program(backend), backend.plan;
+        frozen=_rk_frozen(backend))
+    taken = Set(Symbol.(Base.keys(BRM.rk_bound_data(backend))))
+    key_columns = Dict{Symbol,Any}()
+    by = Pair{Symbol,Symbol}[]
+    observations = Symbol[]
+    for (g, cell) in enumerate(cells)
+        key = Symbol("brm_nlme_unit_", g)
+        while key in taken
+            key = Symbol(key, "_")
+        end
+        push!(taken, key)
+        key_columns[key] = keys[g]
+        append!(observations, cell.names)
+        append!(by, (name => key for name in cell.names))
+    end
+    bound = bind_data(unbound, merge(columns, key_columns))
+    built = build_kernel(bound)
+    coordinate_names(built.layout) == coordinate_names(backend.model.layout) ||
+        BRM._brm_nlme_error("brm_nlme_model: adding observation partition keys " *
+            "changed the packed parameter layout")
+    (; built, bound, observations=Tuple(observations), by=(; by...))
+end
+
+BRM._rk_nlme_partition_query(context) =
+    prepare_partition(context.built, context.bound, context.observations;
+        by=context.by, locality=:error)
+BRM._rk_nlme_partition_labels(query) = partition_labels(query)
+BRM._rk_nlme_partition_value(query, point, label) = query(point, label)
+
+_rk_nlme_footprint_indices(read, point) =
+    read === :whole ? collect(eachindex(point)) : read
+
+# Public value-query footprint contract (rkppl-use §14). The last argument
+# fills the planned partition's plan port; footprint lowering does its own
+# bookkeeping. It is not an inspection of the query's private plans.
+BRM._rk_nlme_partition_query_footprint(query, point, label) =
+    _rk_nlme_footprint_indices(
+        partition_footprint(query.kernel, point, label, nothing).unconstrained, point)
+BRM._rk_nlme_cell_footprint_query(query::CellQuery) =
+    partition_footprint_kernel(query.kernel)
+BRM._rk_nlme_cell_footprint(query, point, row) =
+    _rk_nlme_footprint_indices(Base.invokelatest(query, point, row).unconstrained, point)
+
 BRM._rk_retained_pointwise_sampler(backend::BRM.RKBRMI; ad_backend,
         u0=zeros(Float64, backend.model.layout.total)) =
     prepare_sampler(backend.model, _rk_translated(backend), u0;

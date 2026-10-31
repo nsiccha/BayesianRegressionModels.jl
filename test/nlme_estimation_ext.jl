@@ -501,14 +501,12 @@ end
     @test all(isfinite, (fit.theta..., fit.sigma..., fit.omega...))
 end
 
-@stestset "flat grouped rows take SAEM's batched population gradient" begin
-    # Each flat row is a cell of its subject, one compact call per row, so with
-    # several rows per subject the lockstep batch is cheaper and SAEM uses it.
+@stestset "flat grouped rows take SAEM's unit partition gradient" begin
+    # Each subject's flat rows now share one compiled partition pass.
     m = brm_nlme_model(RKBRMI(nlme_pk(NLME_DATA)); ad_backend=NLME_AD)
     @test m.cell_gradient !== nothing && only(m.cell_query).elementwise
-    for mode in (Val(:online), Val(:mixture))
-        @test saem_population_gradient_style(m, mode) isa BatchedEvaluation
-    end
+    @test saem_population_gradient_style(m, Val(:online)) isa PerSubjectEvaluation
+    @test saem_population_gradient_style(m, Val(:mixture)) isa BatchedEvaluation
     θ = fill(0.1, length(m.theta))
     σ = [log(2.0)]
     fit = saem(m, θ, σ, zeros(3); rng=Random.Xoshiro(1),
