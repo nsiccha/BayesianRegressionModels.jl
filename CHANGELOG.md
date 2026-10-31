@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.94
+
+- Added RK-only `brm_smc_fit` and `brm_smc_update`, using RKPPL's optional
+  SequentialMonteCarlo/WarmupHMC integration. Batch fits bridge a normalized
+  Gaussian reference to the full posterior; updates bridge to the posterior
+  for cumulative data with frozen preprocessing and unchanged coordinates.
+- Added bounded-stage continuation, progress reporting, and data-only
+  `brm_smc_checkpoint` / `brm_smc_resume` with model/data identity checks.
+  Updates replay full histories after parameter moves; they are not
+  constant-cost streaming. Requires ReactiveKernelsPPL 0.1.34 and WarmupHMC 0.2.8.
+- Raised the optional Treebars floor to 0.1.1 so progress reporting has the
+  cooperative interruption API its BRM hooks use.
+
 ## 0.2.93
 
 - Fixed: `@plate` can read an `mi()` completion through a grouping that

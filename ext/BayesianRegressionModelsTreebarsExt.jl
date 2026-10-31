@@ -1,9 +1,8 @@
 module BayesianRegressionModelsTreebarsExt
 
 # BRM's progress hooks (src/progress.jl) for Treebars nodes and backend symbols.
-# Treebars is read through its module, so the extension loads on every Treebars
-# 0.1 release; reporting needs `reuse_progress!` and the interrupt flag
-# (Treebars a2f9e41 or later), and an older Treebars fails only where they run.
+# The Treebars 0.1.1 compatibility floor includes `reuse_progress!` and the
+# cooperative interrupt flag used by these hooks.
 
 using BayesianRegressionModels
 import Treebars

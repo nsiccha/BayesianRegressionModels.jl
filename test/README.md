@@ -7,6 +7,12 @@ Run any one of them with:
 julia --project=test test/adaptive_centering_bridgestan.jl
 ```
 
+`smc.jl` checks RK-only batch and cumulative-data SMC against analytic
+Gaussian posteriors and evidence, deterministic continuation and checkpoint
+replay, unchanged caller RNG, frozen training preprocessing, incompatible
+groups and mutated-data refusals, and a synthetic deterministic recurrence.
+It uses the optional SequentialMonteCarlo and WarmupHMC extensions.
+
 `test/Project.toml` is a superset of the root project: it carries every package
 that any `test/*.jl` loads, so no test file fails at its own `using` line the way
 three of them do under `--project=.` (see below).
@@ -1716,7 +1722,7 @@ Every one of these was paid for by a failed resolve; none is stylistic.
 
 - **`WarmupHMC` must be a develop path, never a registry resolve.** The
   registry only carries WarmupHMC 0.1.x, and the root `Project.toml` bounds it
-  at `WarmupHMC = "0.2"` — so a registry resolve is unsatisfiable, not merely
+  at `WarmupHMC = "0.2.8"` — so a registry resolve is unsatisfiable, not merely
   stale. `[sources]` cannot fix this either: it is a Julia 1.11+ feature and is
   silently ignored on 1.10, which is this package's compat floor. The pinned
   revision must contain WarmupHMC `9c642178720d5c294b9cead86fc8c82da5a5db09`:
