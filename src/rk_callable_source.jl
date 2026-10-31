@@ -106,10 +106,12 @@ const _RK_SOURCE_VOCABULARY = Set{Symbol}([:ReactiveKernelsPPL,
     :CategoricalLogit, :OrderedLogistic, :MvNormalCholesky, :NormalIDGLM,
     :ZeroInflatedPoisson, :ZeroInflatedBinomial])
 
-# A named function keeps its own name. Closures, anonymous functions and
-# callable objects have none that source could read.
+# Named functions and distribution constructors keep their own names.
+# Closures, anonymous functions and callable objects have none that source
+# could read.
 function _rk_callable_own_name(@nospecialize(callable))
-    callable isa Function && Base.issingletontype(typeof(callable)) || return nothing
+    (callable isa Function && Base.issingletontype(typeof(callable))) ||
+        callable isa Type{<:Distribution} || return nothing
     name = nameof(callable)
     Base.isidentifier(name) && !Base.isoperator(name) ? name : nothing
 end
