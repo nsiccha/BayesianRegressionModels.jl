@@ -44,14 +44,15 @@ provider_model(d) = @brm d begin
 end
 end
 
-function check_captured_density(rk; frozen=nothing)
+source_inputs(rk) = BRM._rk_source_data_columns(rk.plan, BRM._rk_retained_program(rk))
+
+function check_captured_density(rk; columns=source_inputs(rk))
     captured = rkppl_model(rk)
     @test captured isa PPL.RKPPLModel
     @test rkppl_model(rk) === captured
-    columns = rk_bound_data(rk)
-    lowered = frozen === nothing ?
-        PPL.lower_rkppl(captured, columns; conditioned=(:y,)) :
-        PPL.lower_rkppl(captured, columns; conditioned=(:y,), frozen)
+    # Bound graph inputs can include derived definitions. Re-lower the captured
+    # source with its source inputs, leaving those definitions to the model.
+    lowered = PPL.lower_rkppl(captured, columns; conditioned=(:y,))
     plan = PPL.bind_data(lowered, columns)
     rebuilt = PPL.build_kernel(plan)
     @test PPL.coordinate_names(rebuilt.layout) == PPL.coordinate_names(rk.model.layout)
@@ -84,5 +85,8 @@ end
     check_captured_density(replay)
     fitted = brm_fitted_state(rk)
     datafree = RKBRMI(CapturedSourceModels.scaled_model(design), fitted)
-    check_captured_density(datafree; frozen=fitted.fitted)
+    # The captured model is unbound. Give this independent source rebuild the
+    # original fit-role inputs; its density must match the data-free backend,
+    # whose actual binding instead uses the frozen summaries.
+    check_captured_density(datafree; columns=source_inputs(replay))
 end
