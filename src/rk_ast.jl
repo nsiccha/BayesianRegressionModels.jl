@@ -1229,38 +1229,50 @@ function _rk_ast_gp_pair_calls(node, callee)
     Expr(node.head, args...)
 end
 
-function _rk_ast_gp_covariance!(definitions, taken, x, sigma, rho, period, jitter;
-        periodic=false)
+function _rk_ast_gp_covariance!(definitions, taken, axes, sigma, rho, period, jitter;
+        periodic=false, iso=true)
     templates = StatisticalPreparation._GP_FORMULA_COVARIANCE_MODELS
     pair = _rk_ast_statistical_call!(definitions, taken,
         :brm_gp_pair_locations, :x; kernel=true,
         template=templates.gp_pair_locations)
-    template = periodic ? templates.gp_periodic_cov : templates.gp_exp_quad_cov
+    template = periodic ? templates.gp_periodic_cov :
+        StatisticalPreparation._gp_exp_quad_cov_model(length(axes), iso; guarded=false)
     template = _rk_ast_gp_pair_calls(template, first(pair.args))
-    args = periodic ? (x, sigma, rho, period, jitter) : (x, sigma, rho, jitter)
+    args = periodic ? (only(axes), sigma, rho, period, jitter) : (axes..., sigma, rho, jitter)
     _rk_ast_statistical_call!(definitions, taken,
         periodic ? :brm_gp_periodic_cov : :brm_gp_exp_quad_cov, args...;
         kernel=true, template)
 end
 
-# An exact GP, as StanBlocks' `_sb_gp`/`_sb_gp_periodic`: the length-scale
+# An exact GP, as StanBlocks' `_sb_gp`/`_sb_gp_aniso`/`_sb_gp_periodic`: the length-scale
 # and marginal-scale priors with standardized innovations, returning the
 # Cholesky-scaled latent draw at each location. The covariance arguments are
-# (locations, sigma, rho, period, jitter); `period` is 0 for exp_quad.
+# (axes..., sigma, rho, period, jitter); `period` is 0 for exp_quad.
 function _rk_ast_gp_block!(definitions, taken, term)
     options = term.options
     rho_prior = _rk_ast_param_law(options.rho_param)
     sigma_prior = _rk_ast_param_law(options.sigma_param)
     block = _rk_block_body(rho_prior, sigma_prior)
-    x = _rk_block_argument!(block, :x, only(term.columns))
+    axes = [_rk_block_argument!(block, length(term.columns) == 1 ? :x : Symbol(:x_, j), column)
+        for (j, column) in enumerate(term.columns)]
     rho, sigma = _rk_block_local!(block, :rho), _rk_block_local!(block, :sigma)
     axis, z = _rk_block_local!(block, :axis), _rk_block_local!(block, :z)
-    push!(block.statements, _rk_ast_hyper_statement(rho, rho_prior),
+    rho_statement = if options.iso
+        _rk_ast_hyper_statement(rho, rho_prior)
+    elseif options.rho_param isa _BRMKnownTermValue
+        values = rho_prior isa Real ? fill(rho_prior, length(axes)) : rho_prior
+        Expr(:(=), rho, Expr(:vect, values...))
+    else
+        Expr(:call, :.~, Expr(:ref, rho, Expr(:call, :(:), 1, length(axes))),
+            _rk_ast_broadcast_law(rho_prior))
+    end
+    push!(block.statements, rho_statement,
         _rk_ast_hyper_statement(sigma, sigma_prior),
-        Expr(:(=), axis, Expr(:call, :eachindex, x)),
+        Expr(:(=), axis, Expr(:call, :eachindex, first(axes))),
         Expr(:call, :.~, Expr(:ref, z, axis), _rk_ast_dotted(:Normal, 0, 1)))
-    covariance = _rk_ast_gp_covariance!(definitions, taken, x, sigma, rho,
-        options.cov === :periodic ? options.period : 0.0, options.jitter; periodic=options.cov === :periodic)
+    covariance = _rk_ast_gp_covariance!(definitions, taken, axes, sigma, rho,
+        options.cov === :periodic ? options.period : 0.0, options.jitter;
+        periodic=options.cov === :periodic, iso=options.iso)
     _rk_ast_block_call!(definitions, taken, "brm_gp", block,
         Expr(:call, :brm_gp_latent, covariance, z))
 end
@@ -2023,7 +2035,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
         for term in predictor.terms
             term.kind === :gp || continue
-            isnothing(only(term.columns)) && error(
+            isempty(term.columns) && error(
                 "RK backend: internal: gp predictor `$(predictor.name)` " *
                 "feeds no response")
             push!(stmts, Expr(:call, :~, term.options.f, _rk_ast_gp_block!(defs, taken, term)))

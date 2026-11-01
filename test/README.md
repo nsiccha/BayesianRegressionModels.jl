@@ -1108,6 +1108,12 @@ against independent normalized densities and all 44 gradients at three points
 and four centeredness settings; it reuses the existing hashed public data.
 Both load the real ReactiveKernels extension.
 
+`rk_gp_multiaxis.jl` checks exact formula GPs with multiple isotropic axes
+and one or more anisotropic axes. It compares covariance, normalized density
+and every native Enzyme gradient coordinate with an independent oracle and
+generated Stan. It also checks printed-source replay, duplicate-location
+jitter, known per-axis scales, and two readers sharing a named latent draw.
+
 These focused scripts use RK's public `recipe_inventory` and
 `rk_cholesky_lower` APIs. Run them
 in an environment carrying RK `db4f16aa0f3d768e376269429ec613691c743b13`
@@ -1120,6 +1126,7 @@ packages share the same checkout. The standard
 julia --project=test test/setup_env.jl
 julia --project=test test/rk_dual_hsgp.jl
 julia --project=test test/rk_gp_covariance.jl
+julia --project=test test/rk_gp_multiaxis.jl
 ```
 
 ## Python/JAX modules

@@ -4890,10 +4890,10 @@ function _rk_plan_spline_term!(prepared::_BRMPreparedTerm{typeof(t2)},
         (; id, kind=:t2, k=prepared.state.fit.k, fit_columns), id, id)
 end
 
-# ---- exact-GP latent terms (iso single-axis; mirrors `_sb_gp`) ----
+# ---- exact-GP latent terms (mirrors `_sb_gp`/`_sb_gp_aniso`) ----
 #
 # A `:gp` term carries its thin-layer names + hyper priors in `options`:
-# `(; rho, sigma, z, f, cov, period, jitter, rho_param, sigma_param)`.
+# `(; rho, sigma, z, f, cov, iso, period, jitter, rho_param, sigma_param)`.
 # `cov` is `:exp_quad` or `:periodic` (1d-iso, Stan `gp_periodic_cov`
 # verbatim); `period` is the positive formula constant for `:periodic`
 # and `nothing` otherwise. The hypers are
@@ -5132,12 +5132,10 @@ function _rk_plan_gp_term!(prepared::_BRMPreparedTerm{typeof(gp)},
         "$prefix: predictor `$target` `gp(...; cov=$(repr(state.cov)))` " *
         "is out of slice 1 (the thin-layer surface is exp_quad + " *
         "1d-iso periodic)")
-    (state.iso && length(prepared.source) == 1) || error(
-        "$prefix: predictor `$target` anisotropic or multi-axis `gp(...)` " *
-        "is out of slice 1 (the thin-layer surface is iso single-axis; " *
-        "sequenced)")
-    axis = only(prepared.source)
-    _rk_plan_spline_axis!(axis, target, "gp", data, columns)
+    for axis in prepared.source
+        _rk_plan_spline_axis!(axis, target, "gp", data, columns)
+    end
+    axis = first(prepared.source)
     stem = _rk_mint_gp_stem!(taken, columns)
     rho = Symbol(:rho_gp, stem)
     sigma = Symbol(:sigma_gp, stem)
@@ -5151,8 +5149,8 @@ function _rk_plan_gp_term!(prepared::_BRMPreparedTerm{typeof(gp)},
         _RKSampledParameter(sigma, _rk_gp_hyper_prior(
             prior, "marginal-scale", target, axis)..., sigma)
     end
-    _RKTermSpec(:gp, [axis],
-        (; rho, sigma, z, f, cov=state.cov,
+    _RKTermSpec(:gp, collect(prepared.source),
+        (; rho, sigma, z, f, cov=state.cov, iso=state.iso,
          period=state.cov === :periodic ? Float64(state.period) : nothing,
          jitter=Float64(state.jitter), rho_param, sigma_param),
         f, f)

@@ -2623,31 +2623,37 @@ end
     @test [p.name for p in plan.parameters] == [:s]
 end
 
-@stestset "fail closed: exact gp sequenced spellings" begin
-    # Aniso, multi-axis, and Uniform hyper priors stay closed until the
-    # thin-layer surface sequences them. (Periodic 1d-iso is admitted;
-    # periodic aniso/multi-axis never reaches the planner — preparation
-    # rejects it at formula level.)
-    @test_throws "anisotropic or multi-axis" BRM._brm_rk_plan(@brm df begin
+@stestset "multi-axis exact gp plan shape" begin
+    anisotropic = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + gp(x, z; iso=false)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test_throws "anisotropic or multi-axis" BRM._brm_rk_plan(@brm df begin
+    isotropic = BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + gp(x, z)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    @test_throws "Uniform" BRM._brm_rk_plan(@brm df begin
-        mu ~ 1 + gp(x)
-        length_scale(:, gp(x)) ~ Uniform(0.5, 2.0)
+    for (plan, iso) in ((anisotropic, false), (isotropic, true))
+        term = only(t for t in only(plan.predictors).terms if t.kind === :gp)
+        @test term.columns == [:x, :z]
+        @test term.options.iso == iso
+        @test plan.columns[:x] == df.x
+        @test plan.columns[:z] == df.z
+    end
+    gp_only = BRM._brm_rk_plan(@brm df begin
+        mu ~ gp(x, z)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
-    # A gp-only sequenced spelling fails closed with RK attribution, not
-    # the offset-only internal error.
-    @test_throws "anisotropic or multi-axis" BRM._brm_rk_plan(@brm df begin
-        mu ~ gp(x, z)
+    @test [t.kind for t in only(gp_only.predictors).terms] == [:gp]
+end
+
+@stestset "fail closed: exact gp Uniform prior boundary" begin
+    # The prior-family boundary is independent of axis dimensionality.
+    @test_throws "Uniform" BRM._brm_rk_plan(@brm df begin
+        mu ~ 1 + gp(x)
+        length_scale(:, gp(x)) ~ Uniform(0.5, 2.0)
         s ~ Exponential(1)
         y ~ Normal(mu, s)
     end)
