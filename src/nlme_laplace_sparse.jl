@@ -180,7 +180,7 @@ end
 # and a `cdar` walk's group, a `car` field's area column.
 _brm_spl_record_group(r) = r.kind === :car ? r.area : r.group
 _brm_spl_record_declaration(r) =
-    r.kind === :ranef ? _brm_nlme_ranef_declaration(r) : r.declaration
+    r.kind in (:ranef, :stratified_ranef) ? _brm_nlme_ranef_declaration(r) : r.declaration
 const _BRM_SPL_LATENT = (:ranef, :stratified_ranef, :car, :cdar)
 
 # The model's latent blocks over the named grouping columns.
@@ -301,7 +301,9 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         "belongs to two integrated blocks")
     population = setdiff(1:length(names), integrated)
     # Latent draws left to the target make A bilinear in the population.
-    sampled = any(r -> r.kind in _BRM_SPL_LATENT && _brm_spl_record_group(r) ∉ integrate,
+    # The plan may integrate only some declarations over the same grouping.
+    selected = Set(_brm_spl_record_declaration(r) for r in records)
+    sampled = any(r -> r.kind in _BRM_SPL_LATENT && _brm_spl_record_declaration(r) ∉ selected,
         _rk_coordinate_records(backend.plan))
     families, ports = _brm_slap_ports(backend, responses)
     u0 = zeros(Float64, length(names))

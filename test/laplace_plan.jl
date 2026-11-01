@@ -25,6 +25,75 @@ end
 plan_of(rk; kwargs...) = brm_laplace_plan(rk; ad_backend=NLME_AD, kwargs...)
 entry(plan, name) = only(t for t in plan.terms if t.grouping === name)
 
+@stestset "stratified terms keep their identity and remain sampled" begin
+    d = (; g=repeat(["a", "b", "c", "d"], inner=2),
+        stratum=repeat(["small", "large"], inner=4),
+        x=[-0.8, 0.3, -0.2, 0.7, 0.4, -0.5, 0.9, -0.1],
+        y=[-0.2, 0.6, 0.1, 0.9, -0.4, 0.3, 0.7, -0.6])
+    stratified = RKBRMI(@brm d begin
+        mu ~ 1 + (1 + x | gr(g; by=stratum))
+        y ~ Normal(mu, 0.7)
+    end)
+    plan = plan_of(stratified)
+    t = only(plan.terms)
+    @test t.grouping === :g && t.kind === :ranef
+    @test t.class === :never && !t.admitted && t.importance_ess === nothing
+    @test occursin("stratified", t.reason)
+    @test occursin(string(t.declaration), sprint(show, MIME"text/plain"(), plan))
+    @test plan_of(stratified; sample=(t.declaration,)).terms == plan.terms
+    # These refusals are the documented explicit-integration boundary; the
+    # automatic planner must first return the complete term inventory.
+    for name in (:g, t.declaration)
+        @test_throws "stratified" plan_of(stratified; integrate=(name,))
+    end
+
+    # An ordinary block over the SAME grouping must still be integrated.
+    # Filtering by grouping alone would incorrectly select the stratified one.
+    mixed = RKBRMI(@brm d begin
+        mu ~ 1 + (1 | ordinary | g) + (0 + x | gr(g; by=stratum))
+        y ~ Normal(mu, 0.7)
+    end)
+    plan = plan_of(mixed)
+    @test length(plan.terms) == 2
+    @test length(unique(t.declaration for t in plan.terms)) == 2
+    sampled = only(t for t in plan.terms if !t.admitted)
+    integrated = only(t for t in plan.terms if t.admitted)
+    @test sampled.class === :never && occursin("stratified", sampled.reason)
+    @test integrated.class === :integrated && integrated.grouping === :g
+    p = brm_laplace_problem(mixed; ad_backend=NLME_AD, integrate=:auto)
+    @test p.plan.terms == plan.terms
+    @test length(p.integrated) == 4
+    # Sampled scales times sampled effects are nonlinear in the population;
+    # do not build a row-by-population design to rediscover that fact.
+    @test !p.affine && isempty(p.jptr)
+    names = BRM._rk_layout_coordinate_names(mixed)
+    @test all(i -> !BRM._brm_nlme_owned(names[i], sampled.declaration), p.integrated)
+    @test all(i -> BRM._brm_nlme_owned(names[i], integrated.declaration), p.integrated)
+    full = rk_logdensity_problem(mixed; ad_backend=NLME_AD)
+    # Conditional on the sampled stratum scales and slopes, the four ordinary
+    # intercepts have independent Gaussian conditionals. Integrate the full
+    # model's quadratic exactly, independently of the sparse planner.
+    for scale in (0.2, 0.5)
+        phi = scale .* randn(Xoshiro(15), length(p.population))
+        u = zeros(length(names))
+        u[p.population] = phi
+        f0 = LogDensityProblems.logdensity(full, u)
+        exact = f0
+        for i in p.integrated
+            u[i] = 1.0
+            plus = LogDensityProblems.logdensity(full, u)
+            u[i] = -1.0
+            minus = LogDensityProblems.logdensity(full, u)
+            u[i] = 0.0
+            g = (plus - minus) / 2
+            h = 2 * f0 - plus - minus
+            @test h > 0
+            exact += (g^2 / h + log(2pi) - log(h)) / 2
+        end
+        @test LogDensityProblems.logdensity(p, phi) ≈ exact atol=1e-9 rtol=1e-9
+    end
+end
+
 @stestset "Normal terms are integrated, count terms gated by their diagnostic" begin
     d = PLAN_DATA
     normal = RKBRMI(@brm (; d.a, d.b, d.x, d.y) begin
