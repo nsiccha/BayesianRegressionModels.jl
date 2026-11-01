@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.100
+
+- Both backends accept grouped reads of every indexed output of another
+  `@plate`, including outputs before its final assignment. Reads such as
+  `location[rows[k]]`, with `rows = groups(group => labels)`, retain their
+  model dependencies and gradients and support replay on new groups.
+
 ## 0.2.99
 
 - `RKBRMI` supports exact exponentiated-quadratic `gp(x...)` terms on

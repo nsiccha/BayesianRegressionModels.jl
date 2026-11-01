@@ -313,7 +313,7 @@ function _rk_kernel_partition_source!(columns, value, group, cell_column, order,
         is_lp::Bool, observed::Bool)
     cell_column === nothing && return nothing
     raw(column) = parent(parent(column))
-    axes = is_lp ? _brm_kernel_lp_data_columns(value) :
+    axes = is_lp && parent(value) isa ExprColumn ? _brm_kernel_lp_data_columns(value) :
         observed || !(parent(value) isa DataColumn) ? Tuple{Symbol,Any}[] :
         Tuple{Symbol,Any}[(name(value), raw(value))]
     order_name = order === nothing ? nothing : name(order)
@@ -388,7 +388,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             cell_observed = _sb_cell_param_observed(raw_body, params[i])
             partition = _brm_kernel_ragged_rows(value, group, group_values;
                 prefix="RK backend", order,
-                observed=cell_observed)
+                observed=cell_observed, output_reads=keys(output_reads))
             if params[i] in scanned && parent(value) isa DataColumn
                 # A response a scan observes is bound one series per subject
                 # and read in place, as RKPPL observes it.
