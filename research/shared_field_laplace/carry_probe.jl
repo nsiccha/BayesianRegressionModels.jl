@@ -92,4 +92,42 @@ end
     @test !isapprox(reset(0.7)-reset(0.0), batch(0.7)-batch(0.0); atol=1e-4)
 end
 
+@testset "field-unit dependence is lost by a product carry projection" begin
+    # Three bounded oracle coordinates: population g, unit eta, shared field z.
+    # After y1=1.7 under independent standard-normal priors and
+    # y1 ~ N(g+eta+z,1), use the collapsed mean-field optimum over (g,eta):
+    # both means .425, variances 2/3; z|(g,eta) ~ N((1.7-g-eta)/2,1/2).
+    # This IS the structured approximation returned by a perfect collapsed fit.
+    # The check isolates the EXTRA error of projecting it for the next window.
+    mean_before = fill(0.425,3)
+    structured = [2/3 0.0 -1/3; 0.0 2/3 -1/3; -1/3 -1/3 5/6]
+    projected = copy(structured)
+    projected[2,3] = projected[3,2] = 0.0
+    @test isposdef(Symmetric(structured)) && isposdef(Symmetric(projected))
+    @test diag(structured) == diag(projected)
+    @test structured[[1,3],[1,3]] == projected[[1,3],[1,3]]
+    # The global+field factor and the unit marginal are identical in both
+    # carries; only the field/unit dependence is discarded by the product.
+    # Next window observes the same unit through eta+z with unit noise.
+    direction = [0.0,1.0,1.0]
+    function update(C)
+        cross = C*direction
+        variance = 1+dot(direction,cross)
+        posterior_mean = mean_before+cross*((-0.4-dot(direction,mean_before))/variance)
+        posterior_covariance = C-cross*cross'/variance
+        (;variance,posterior_mean,posterior_covariance)
+    end
+    kept,dropped = update(structured),update(projected)
+    @test kept.variance ≈ 11/6
+    @test dropped.variance ≈ 5/2
+    @test kept.posterior_covariance[3,3] ≈ 23/33
+    @test dropped.posterior_covariance[3,3] ≈ 5/9
+    @test norm(kept.posterior_mean-dropped.posterior_mean) > 0.1
+    println((;scope="additional field/unit carry projection error, not Laplace error",
+        retained_predictive_variance=kept.variance,
+        projected_predictive_variance=dropped.variance,
+        retained_field_variance=kept.posterior_covariance[3,3],
+        projected_field_variance=dropped.posterior_covariance[3,3]))
+end
+
 println("Conditional-carry algebra verified; no posterior compression, SVI fit, or streaming API tested.")
