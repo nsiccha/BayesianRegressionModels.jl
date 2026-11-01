@@ -49,6 +49,15 @@ _brm_operation_role(@nospecialize(_op)) = :extension
 
 _brm_operation_references!(refs, @nospecialize(_node)) = refs
 _brm_operation_references!(refs, @nospecialize(node::NamedColumn)) = (push!(refs, name(node)); refs)
+function _brm_operation_references!(refs, body::_BRMInlineBody)
+    lambda = _brm_inline_expr(body)
+    # Whole model values captured by a cell are dependencies just like its
+    # sliced inputs. The lambda's formals, locals and scan state belong to the
+    # cell, even when a model declaration happens to have the same name.
+    captured = _brm_cell_value_refs!(Set{Symbol}(), lambda.args[2])
+    bound = _brm_cell_bound_names!(Set{Symbol}(), lambda)
+    union!(refs, setdiff(captured, bound))
+end
 function _brm_operation_references!(refs, @nospecialize(node::ExprColumn))
     _brm_foreach_child((@nospecialize(arg)) -> _brm_operation_references!(refs, arg), node)
     refs

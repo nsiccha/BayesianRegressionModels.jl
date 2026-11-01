@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.114
+
+- Plate cells retain dependencies on captured model values, including whole
+  vectors. Composed models emit those declarations before the cells that read
+  them, even when the captured values depend on later parameter declarations.
+  Cell-local bindings do not create dependencies on same-named model values.
+
 ## 0.2.113
 
 - RK grouped HSGPs accept `iso=false`, retaining one shared length scale per
