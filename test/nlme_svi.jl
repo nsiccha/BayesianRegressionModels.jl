@@ -265,6 +265,20 @@ end; mod=@__MODULE__)
             H = reduce(hcat, [u[b] for b in m.view.subject_coordinates])
             @test [brm_nlme_loglikelihood(m, i, θ, σ, H[:, i]) for i in axes(H, 2)] ≈
                 brm_nlme_loglikelihoods(m, θ, σ, H) rtol = 1e-12
+            # Reuse the same prepared queries across local moves, a shared
+            # move, and a return to the original point. Both value and AD
+            # paths must refresh shared intermediates without stale values.
+            for point in (u, u .+ 0.03, u)
+                θ, σ = point[m.theta], point[m.sigma]
+                H = reduce(hcat, [point[b] for b in m.view.subject_coordinates])
+                values, gradients = brm_nlme_loglikelihoods_and_gradients(m, θ, σ, H)
+                for i in (1, 4)
+                    value, gradient = brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, H[:, i])
+                    @test value ≈ values[i] rtol=1e-10
+                    @test gradient ≈ gradients[:, i] atol=1e-8 rtol=1e-9
+                    @test brm_nlme_loglikelihood(m, i, θ, σ, H[:, i]) ≈ values[i] rtol=1e-10
+                end
+            end
         end
     end
     rk = RKBRMI(last(first(variants))(data))

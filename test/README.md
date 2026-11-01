@@ -1008,7 +1008,11 @@ scheduled-loop resets. Lower-bounded shares completions evaluated
 through strict partitions (`nlme_lower_shares.jl`) require 0.1.42 / 0.1.39,
 which keeps shapes through nested data-only helpers inside sampled
 expressions. Scan-captured sigma rows and censored ragged factors need the
-current 0.1.47 / 0.1.43 floors. Both partition fixtures use ordinary Enzyme Reverse
+0.1.47 / 0.1.43 floors. Shared-prefix value queries and gradients need
+0.1.48 / 0.1.51; packed gathered-column shapes need the current
+0.1.50 / 0.1.52 floors. The grouped HSGP variants in `nlme_svi.jl` check
+value/gradient parity and shared-cache refresh across changed points.
+Both partition fixtures use ordinary Enzyme Reverse
 with the repaired dogfood revision pinned by `setup_env.jl`.
 
 `nlme_integrated.jl` covers NLMEEstimation's integrated families on BRM

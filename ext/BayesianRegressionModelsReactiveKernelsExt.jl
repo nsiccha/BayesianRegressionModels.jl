@@ -564,8 +564,9 @@ BRM._rk_unconstrained_point(backend::BRM.RKBRMI, values::NamedTuple) =
 BRM._rk_pointwise_query(backend::BRM.RKBRMI) =
     prepare_query(backend.model, _rk_translated(backend), :pointwise)
 BRM._rk_pointwise_values(query, u::AbstractVector) = Base.invokelatest(query, u)
-BRM._rk_nlme_cell_query(backend::BRM.RKBRMI, observations::Tuple) =
-    prepare_cell_query(backend.model, _rk_translated(backend), observations; locality=:error)
+BRM._rk_nlme_cell_query(backend::BRM.RKBRMI, observations::Tuple, partitioned, unit) =
+    prepare_cell_query(backend.model, _rk_translated(backend), observations;
+        locality=:error, partitioned, u0=unit)
 BRM._rk_nlme_cell_value(query::CellQuery, point::AbstractVector{Float64}, row::Int) =
     query(point, row)
 BRM._rk_spl_cell_footprint(query::CellQuery) = partition_footprint_kernel(query.kernel)
@@ -592,7 +593,7 @@ end
 # Supplied key columns extend the input program, so this binding needs its own
 # build. Lower the backend's existing emitted program and preserve frozen fit
 # values. Derived columns must not be rebound as supplied inputs.
-function BRM._rk_nlme_partition_context(backend::BRM.RKBRMI, cells, keys)
+function BRM._rk_nlme_partition_context(backend::BRM.RKBRMI, cells, keys, partitioned)
     unbound, columns = _rk_lower_program(_rk_program(backend), backend.plan;
         frozen=_rk_frozen(backend))
     taken = Set(Symbol.(Base.keys(BRM.rk_bound_data(backend))))
@@ -614,12 +615,38 @@ function BRM._rk_nlme_partition_context(backend::BRM.RKBRMI, cells, keys)
     coordinate_names(built.layout) == coordinate_names(backend.model.layout) ||
         BRM._brm_nlme_error("brm_nlme_model: adding observation partition keys " *
             "changed the packed parameter layout")
-    (; built, bound, observations=Tuple(observations), by=(; by...))
+    (; built, bound, observations=Tuple(observations), by=(; by...), partitioned)
 end
 
-BRM._rk_nlme_partition_query(context) =
-    prepare_partition(context.built, context.bound, context.observations;
-        by=context.by, locality=:error)
+# BRM supplies semantic ownership; the public RKPPL declaration assigns each
+# parameter's first axis to those same integer unit keys. Other axes repeat
+# that ownership in packed column-major order. Shared entries stay undeclared.
+function BRM._rk_nlme_partitioned(backend::BRM.RKBRMI, view::BRM.BRMNLMEView)
+    declarations = Pair{Symbol,Vector{Int}}[]
+    for entry in backend.model.layout.entries
+        positions = entry.offset:(entry.offset + entry.size - 1)
+        owners = @view view.subject[positions]
+        any(!iszero, owners) || continue
+        n = isempty(entry.dims) ? entry.size : first(entry.dims)
+        0 < n <= length(owners) && all(!iszero, owners) &&
+            all(j -> owners[j] == owners[mod1(j, n)], eachindex(owners)) ||
+            BRM._brm_nlme_error("brm_nlme_model: parameter `$(entry.name)` " *
+                "cannot represent its subject ownership on its first axis")
+        push!(declarations, entry.name => collect(owners[1:n]))
+    end
+    declarations
+end
+
+function BRM._rk_nlme_partition_query(context, unit)
+    try
+        prepare_partition(context.built, context.bound, context.observations;
+            by=context.by, locality=:error, partitioned=context.partitioned, u0=unit)
+    catch error
+        error isa ReactiveKernels.PartitionSeparabilityError || rethrow()
+        BRM._brm_nlme_error("brm_nlme_model: observation partition reads effect " *
+            "coordinates owned by another subject: " * sprint(showerror, error))
+    end
+end
 BRM._rk_nlme_partition_labels(query) = partition_labels(query)
 BRM._rk_nlme_partition_value(query, point, label) = query(point, label)
 

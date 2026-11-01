@@ -22,16 +22,20 @@ instead of failing at run time.
   during pattern assembly instead of accumulating duplicate coordinate pairs.
   Conditional subsets evaluate only their requested units; full-cohort and
   population-gradient calls retain batching.
+- Changed: NLME cell, partition and gradient queries declare their local
+  parameter ownership so RK/PPL can cache shared producers before strict
+  lowering. Correlated grouped HSGP values remain shared; local coordinates
+  retain their structural checks. Shared-coordinate changes refresh the cache.
 - Changed: separated CAR fields expose their shared values through row-local
   graph computations, preserving their law, coordinates, inverse and Jacobian.
-- Compatibility: requires ReactiveKernels 0.1.47 and ReactiveKernelsPPL 0.1.43.
+- Compatibility: requires ReactiveKernels 0.1.50 and ReactiveKernelsPPL 0.1.52.
   Scalar inference preserves ordinary indexed predictor expressions under
   strict partitioning, and nested data-only helpers inside sampled
   expressions, such as a lower-bounded shares completion's
   `lower=lo[x_shares_free]`, keep their shapes through strict cell and
   partition preparation. Strict queries also preserve local scan captures,
   grouped-field row reductions and censored ragged factors. Unit gradients
-  use ordinary Enzyme Reverse. The test bootstrap pins RK `94086f6f` and
+  use ordinary Enzyme Reverse. The test bootstrap pins RK `5b651e21` and
   Enzyme dogfood `68ed90fe` with libEnzyme `2063db12`, including the repair
   for matrix-window partition gradients on Julia 1.10.
 
@@ -115,7 +119,6 @@ instead of failing at run time.
   axis, declared priors and bounds, and the grouping's sampled or known
   correlation. The same coordinates support Stan transport, term starts,
   shared value readers and frozen replay.
-
 
 ## 0.2.112
 

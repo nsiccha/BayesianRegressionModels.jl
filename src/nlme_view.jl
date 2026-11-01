@@ -1548,6 +1548,7 @@ function _rk_observation_values end
 function _rk_observation_value_and_pushforward end
 function _rk_nlme_cell_query end
 function _rk_nlme_cell_value end
+function _rk_nlme_partitioned end
 function _rk_nlme_partition_context end
 function _rk_nlme_partition_query end
 function _rk_nlme_partition_labels end
@@ -1677,10 +1678,10 @@ end
 # One prepared cell query per group of `_brm_nlme_subject_cells`, counted under
 # `progress`: each one prepares a program of its own (on ArbeitsplatzAtlas's
 # model, 32 groups at 48–127 s each).
-_brm_nlme_cell_queries(backend::RKBRMI, cells, progress=nothing) =
+_brm_nlme_cell_queries(backend::RKBRMI, cells, partitioned, unit, progress=nothing) =
     _brm_with_counter(progress, length(cells); description="Cell queries") do node
         map(ntuple(identity, length(cells)), cells) do g, cell
-            query = _rk_nlme_cell_query(backend, cell.names)
+            query = _rk_nlme_cell_query(backend, cell.names, partitioned, unit)
             _brm_update_progress!(node, g)
             (; cell.names, cell.positions, cell.elementwise, query)
         end
@@ -1725,14 +1726,14 @@ function _brm_nlme_check_partition_ownership(view::BRMNLMEView, i, footprint)
         "$(length(foreign)) effect coordinates owned by another subject: $names")
 end
 
-function _brm_nlme_partition_queries(backend, cells, view, unit, progress=nothing)
+function _brm_nlme_partition_queries(backend, cells, view, unit, partitioned, progress=nothing)
     _brm_with_phases(progress, (context="Bind partition keys",
             query="Prepare partition kernel", footprints="Check coordinate ownership")) do phases
         context = _brm_run_phase(phases.context) do _
-            _rk_nlme_partition_context(backend, cells, _brm_nlme_partition_keys(cells))
+            _rk_nlme_partition_context(backend, cells, _brm_nlme_partition_keys(cells), partitioned)
         end
         query = _brm_run_phase(phases.query) do _
-            _rk_nlme_partition_query(context)
+            _rk_nlme_partition_query(context, unit)
         end
         labels = Set(_rk_nlme_partition_labels(query))
         footprints = _brm_run_phase(phases.footprints) do phase
@@ -2017,9 +2018,10 @@ function _brm_nlme_model(backend::RKBRMI, node; ad_backend, observation_ad_backe
         cells = _brm_nlme_subject_cells(backend, view, attribution, measured)
         cell_query, cell_gradient = cells === nothing ? (nothing, nothing) :
             _brm_run_phase(phases.cells) do phase
-                queries = _brm_nlme_cell_queries(backend, cells, phase)
+                partitioned = _rk_nlme_partitioned(backend, view)
+                queries = _brm_nlme_cell_queries(backend, cells, partitioned, unit, phase)
                 partition = _brm_with_progress(phase; description="Value partition") do node
-                    _brm_nlme_partition_queries(backend, queries, view, unit, node)
+                    _brm_nlme_partition_queries(backend, queries, view, unit, partitioned, node)
                 end
                 queries, partition
             end
