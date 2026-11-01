@@ -19,8 +19,10 @@ include("introspection.jl")
 using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays, Libdl,
       LogDensityProblems, LinearAlgebra, SpecialFunctions, Random, Statistics
 using StaticArrays: SMatrix, SVector, MMatrix, MVector
-using SparseArrays: SparseMatrixCSC, sparse, spzeros, nonzeros, rowvals, nzrange
+using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, nonzeros, rowvals, nzrange, blockdiag
 using SelectedInversion: selinv_diag, selinv, selinv_extract
+import SparseArrays, SelectedInversion, KLU, MUMPS
+import KrylovKit
 using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
                  ProbabilityWeights, UnitWeights, Weights,
                  aweights, fweights, pweights, uweights, weights
@@ -129,7 +131,9 @@ include("nlme_conditional.jl")
 include("nlme_start.jl")
 include("nlme_laplace.jl")
 include("nlme_laplace_structured.jl")
+include("nlme_laplace_factors.jl")
 include("nlme_laplace_sparse.jl")
+include("nlme_laplace_sum_solver.jl")
 include("nlme_laplace_plan.jl")
 include("start_values.jl")
 include("laplace_start.jl")

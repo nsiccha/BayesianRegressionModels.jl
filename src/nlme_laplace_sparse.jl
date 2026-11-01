@@ -546,6 +546,21 @@ function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend)
     for name in names
         query = _rk_nlme_cell_query(p.backend, (name,))
         expected = pointwise[name]
+        prepared = _brm_spl_prepare_factors(p.backend, name, u0, length(expected),
+            p.integrated, p.population)
+        if prepared !== nothing
+            prepared = _brm_spl_factor_operators(prepared, u0, ad_backend)
+            cells = map(prepared.cells) do c
+                value = _brm_spl_factor_values(prepared, u0, c).value
+                isapprox(value, sum(expected[c.i]); rtol=1e-9, atol=1e-9) ||
+                    _brm_nlme_error("sum-factor density does not match cell $(c.i) of `$name`")
+                term += 1
+                merge(c, (; term))
+            end
+            prepared = merge(prepared, (; cells))
+            push!(p.cells, _BRMSumCellGroup(name, query, cells, prepared))
+            continue
+        end
         reads = map(eachindex(expected)) do i
             seen = Int[]
             for u in probes
@@ -628,9 +643,18 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
     end
     nterms = _brm_spl_nterms(p)
     I = collect(1:n); J = collect(1:n)
-    for t in 1:nterms, i in p.tptr[t]:(p.tptr[t + 1] - 1),
-            j in p.tptr[t]:(p.tptr[t + 1] - 1)
-        push!(I, p.tz[i]); push!(J, p.tz[j])
+    sumterms = Set(c.term for group in p.cells if group isa _BRMSumCellGroup for c in group.cells)
+    for t in 1:nterms
+        t in sumterms && continue
+        for i in p.tptr[t]:(p.tptr[t + 1] - 1), j in p.tptr[t]:(p.tptr[t + 1] - 1)
+            push!(I, p.tz[i]); push!(J, p.tz[j])
+        end
+    end
+    for group in p.cells
+        group isa _BRMSumCellGroup || continue
+        for c in group.cells, reduction in c.terms, term in reduction, i in term.lz, j in term.lz
+            push!(I, i); push!(J, j)
+        end
     end
     edges = [(b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]) for b in p.blocks
         for e in axes(b.edges, 2)]
@@ -659,8 +683,10 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
     p.nptr = [1]; p.tnz = Int[]
     for t in 1:nterms
         zs = view(p.tz, p.tptr[t]:(p.tptr[t + 1] - 1))
-        for j in zs, i in zs
-            push!(p.tnz, index(i, j))
+        if t ∉ sumterms
+            for j in zs, i in zs
+                push!(p.tnz, index(i, j))
+            end
         end
         push!(p.nptr, length(p.tnz) + 1)
     end
@@ -785,6 +811,7 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
     u = copy(uA)
     u[p.integrated] .= z
     for group in p.cells, c in group.cells
+        group isa _BRMSumCellGroup && continue
         comp = p.term_component[c.term]
         comp == 0 && !third && continue
         value = _rk_nlme_cell_value(group.query, u, c.i)
@@ -810,7 +837,7 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
             end
         end
     end
-    rest
+    rest + _brm_spl_assemble_sums!(fc, g, hnz, p, u; derivatives, third, fb, tv)
 end
 
 # Step blocks: inside a component, the levels of the coarsest integrated
@@ -866,8 +893,10 @@ function _brm_spl_step_blocks!(p::BRMSparseLaplaceProblem)
         push!(neighbours[i], j); push!(neighbours[j], i)
     end
     queue = [i for i in 1:n if effect_key[i] !== nothing]
-    while !isempty(queue)
-        i = popfirst!(queue)
+    next = 1
+    while next <= length(queue)
+        i = queue[next]
+        next += 1
         for j in neighbours[i]
             effect_key[j] === nothing || continue
             effect_key[j] = effect_key[i]
@@ -983,6 +1012,7 @@ end
 # selected inverse where every pair of a set is on h's pattern (terms that
 # read a level read all its margins), else by solving for the set's columns.
 function _brm_spl_inverse_blocks(p::BRMSparseLaplaceProblem, state, sets)
+    state.F isa _BRMAugmentedFactor && return _brm_spl_sum_inverse_blocks(state.F, sets)
     state.W === nothing || _brm_nlme_error("brm_laplace_problem: internal: " *
         "covariance blocks of a problem with soft sums are not built")
     on_pattern(i, j) = any(k -> rowvals(p.pattern)[k] == i, nzrange(p.pattern, j))
@@ -1047,6 +1077,8 @@ end
 # sums x − X G⁻¹ (Uᵀx + η), η ~ N(0, Λ⁻¹), whose covariance is
 # A⁻¹ − X G⁻¹ Xᵀ = h⁻¹.
 function _brm_spl_draw(p::BRMSparseLaplaceProblem, state, rng)
+    state.F isa _BRMAugmentedFactor && return _brm_spl_covariance_root(
+        b -> state.F \ b, randn(rng, length(p.integrated))).draw
     x = state.F.UP \ randn(rng, length(p.integrated))
     W = state.W
     W === nothing && return x
@@ -1104,7 +1136,7 @@ function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     n = length(p.integrated)
     nc = length(p.components)
     z = p.u[p.integrated]
-    fc = zeros(nc); g = zeros(n); h = copy(p.pattern)
+    fc = zeros(nc); g = zeros(n); h = _brm_spl_precision(p)
     _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
     if !(all(isfinite, fc) && all(isfinite, g))
         z .= 0.0
@@ -1125,7 +1157,7 @@ function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
             return (; finite=false, value=-Inf, iterations)
         end
         iterations += 1
-        all(isfinite, nonzeros(h)) || (p.nonfinite += 1;
+        _brm_spl_finite(h) || (p.nonfinite += 1;
             return (; finite=false, value=-Inf, iterations))
         δ = _brm_spl_direction(p, h, g)
         δ === nothing && (p.nonfinite += 1; return (; finite=false, value=-Inf, iterations))
@@ -1237,26 +1269,13 @@ end
 # rises. False when a block finds no finite gain.
 function _brm_spl_sweep!(p::BRMSparseLaplaceProblem, pop, z, c)
     nc = length(p.components)
-    fc = zeros(nc); ft = zeros(nc); g = zeros(length(z)); h = copy(p.pattern)
+    fc = zeros(nc); ft = zeros(nc); g = zeros(length(z)); h = _brm_spl_precision(p)
     for (k, members) in enumerate(p.sblocks)
         p.sblock_component[k] == c || continue
         _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
-        H = Matrix(h[members, members])
-        # the soft sums' rank-one part, which h leaves to Woodbury
-        for (w, cols) in enumerate(p.wcols)
-            inside = findall(in(Set(cols)), members)
-            isempty(inside) || (H[inside, inside] .+= p.wλ[w])
-        end
-        H = Symmetric(H)
         gk = g[members]
-        F = cholesky(H; check=false)
-        μ = 1e-4
-        while !issuccess(F) && μ < 1e9
-            F = cholesky(H + μ * I; check=false)
-            μ *= 10
-        end
-        issuccess(F) || return false
-        δ = F \ gk
+        δ = _brm_spl_block_direction(p, h, members, gk)
+        δ === nothing && return false
         λ = dot(gk, δ)
         λ <= 1e-8 && continue
         trial = copy(z)
@@ -1309,8 +1328,7 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
         derivatives=false, third=true, rows, crows, uA=state.uA)
     value = sum(p.constant) + sum(fc) + rest + n / 2 * log(2π) -
         _brm_spl_logdet(p, state.F, state.W) / 2
-    Z = selinv(state.F; depermute=true).Z
-    S = nonzeros(selinv_extract(Z, p.pattern))
+    S = _brm_spl_selected_precision(p, state.F)
     if state.W !== nothing
         # h⁻¹ = A⁻¹ − X G⁻¹ Xᵀ on the pattern.
         Y = (state.W.G \ state.W.X')'
@@ -1357,6 +1375,7 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
     implicit = Tuple{Vector{Int},Matrix{Float64},LowerTriangular{Float64,Matrix{Float64}},
         Vector{Int}}[]
     for group in p.cells, c in group.cells
+        group isa _BRMSumCellGroup && continue
         on(c.term) || continue
         m = length(c.lz)
         if m == 0
@@ -1381,7 +1400,9 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
         gcell[c.pidx] .+= gsel[c.ppos] .+ τsel[c.ppos] ./ 2
         push!(implicit, (c.pidx, HL, Lb, c.lz))
     end
+    _brm_spl_sum_gradient!(s, gcell, p, state, u, on)
     v = _brm_spl_solve(state.F, state.W, s)
+    _brm_spl_sum_implicit!(gcell, p, state, v, on)
     # the cells' implicit term: H_c[population, z] v_z = (H_c[:, z] L)[population, :]
     # L⁻¹ v_z, through each cell's mixed second derivatives
     for (pidx, HL, Lb, lz) in implicit
@@ -1506,6 +1527,7 @@ function brm_laplace_draws(p::BRMSparseLaplaceProblem, P::AbstractMatrix;
                 logw[p.component[i], j] += d[i] * hd[i] / 2
             end
             for (c, cols) in enumerate(p.wcols)
+                state.h isa _BRMSumPrecision && continue
                 logw[p.component[first(cols)], j] += p.wλ[c] * sum(view(d, cols))^2 / 2
             end
         end

@@ -548,6 +548,22 @@ BRM._rk_nlme_cell_query(backend::BRM.RKBRMI, observations::Tuple) =
     prepare_cell_query(backend.model, _rk_translated(backend), observations)
 BRM._rk_nlme_cell_value(query::CellQuery, point::AbstractVector{Float64}, row::Int) =
     query(point, row)
+function BRM._rk_spl_factor_queries(backend::BRM.RKBRMI, observation::Symbol)
+    factors = prepare_cell_factors(backend.model, _rk_translated(backend), observation;
+        locality=:error)
+    function query(part)
+        value = prepare_cell_factor_query(factors, part)
+        footprint = partition_footprint_kernel(value.kernel)
+        (; value, footprint)
+    end
+    (; factors, outer=query(:outer),
+        terms=[query(j) for j in eachindex(cell_reductions(factors))])
+end
+BRM._rk_spl_factor_rows(q, j, i) = reduction_rows(q.factors, j, i)
+function BRM._rk_spl_factor_reads(q, u, args...)
+    reads = Base.invokelatest(q.footprint, u, args...).unconstrained
+    reads === :whole ? collect(eachindex(u)) : reads
+end
 BRM._rk_retained_pointwise_sampler(backend::BRM.RKBRMI; ad_backend,
         u0=zeros(Float64, backend.model.layout.total)) =
     prepare_sampler(backend.model, _rk_translated(backend), u0;

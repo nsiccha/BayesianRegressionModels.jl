@@ -248,21 +248,24 @@ function _brm_plan_ess(p::BRMSparseLaplaceProblem, state, declaration, draws, es
     u[p.integrated] .= state.z
     sets = [b.z[l, :] for b in p.blocks if _brm_nlme_owned(b.declaration, declaration)
         for l in axes(b.z, 1)]
+    cache = _brm_plan_local_cache(p, state)
+    z = copy(state.z)
     values = map(sets) do I
-        H = Matrix(Symmetric(state.h[I, I]))
-        for (w, cols) in enumerate(p.wcols)
-            inI = [i in cols for i in I]
-            any(inI) && (H .+= p.wλ[w] .* (inI * inI'))
+        H = _brm_spl_precision_block(state.h, I)
+        if !(state.h isa _BRMSumPrecision)
+            for w in unique(w for i in I for w in cache.soft_by_effect[i])
+                inI = [i in cache.soft_members[w] for i in I]
+                H .+= p.wλ[w] .* (inI * inI')
+            end
         end
         F = cholesky(Symmetric(H); check=false)
         issuccess(F) || return 0.0
         terms = unique(t for i in I for t in local_terms[i])
-        z = copy(state.z)
-        f0 = _brm_plan_local_value(p, state, terms, I, z, u)
+        f0 = _brm_plan_local_value(p, state, terms, I, z, u, cache)
         logw = map(1:draws) do _
             d = F.U \ randn(rng, length(I))
             z[I] .= state.z[I] .+ d
-            lw = _brm_plan_local_value(p, state, terms, I, z, u) - f0 + dot(d, H * d) / 2
+            lw = _brm_plan_local_value(p, state, terms, I, z, u, cache) - f0 + dot(d, H * d) / 2
             z[I] .= state.z[I]
             lw
         end
@@ -285,12 +288,12 @@ end
 
 # The density of `terms` and of the prior pieces touching the draws `I` at
 # integrated draws `z` (the population part of `state` held).
-function _brm_plan_local_value(p::BRMSparseLaplaceProblem, state, terms, I, z, u)
+function _brm_plan_local_value(p::BRMSparseLaplaceProblem, state, terms, I, z, u,
+        cache=_brm_plan_local_cache(p, state))
     total = 0.0
     nrows = length(p.family)
-    mmax = maximum(t -> p.tptr[t + 1] - p.tptr[t], eachindex(p.family); init=0)
+    mmax = cache.mmax
     c1 = zeros(mmax); c2 = zeros(mmax)
-    cells = nothing
     for t in terms
         if t <= nrows
             e = p.entry[t]
@@ -306,30 +309,22 @@ function _brm_plan_local_value(p::BRMSparseLaplaceProblem, state, terms, I, z, u
             total += _brm_lap_row(p.family[t], p.y[t], p.trials[t], a, bb, false,
                 p.moving[t]).v
         else
-            cells === nothing && (cells = Dict(c.term => (group, c)
-                for group in p.cells for c in group.cells))
-            group, c = cells[t]
+            group, c = cache.cells[t]
             u[p.integrated[I]] .= z[I]
-            total += _rk_nlme_cell_value(group.query, u, c.i)
+            total += _brm_plan_cell_value(group, c, I, u, cache.sums)
             u[p.integrated[I]] .= state.z[I]
         end
     end
-    for b in p.blocks
-        if _brm_spl_identity(b)
-            for i in I
-                any(==(i), b.z) && (total -= z[i]^2 / 2)
-            end
-            continue
-        end
-        mine = Set(I)
-        for e in axes(b.edges, 2)
-            i, j = b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]
-            (i in mine || j in mine) && (total -= (z[i] - z[j])^2 / 2)
-        end
-        for (c, levels) in enumerate(b.sums)
-            cols = [b.z[l, 1] for l in levels]
-            any(in(mine), cols) && (total -= b.λ[c] * sum(z[cols])^2 / 2)
-        end
+    for i in I
+        cache.identity[i] && (total -= z[i]^2 / 2)
+    end
+    for e in unique(e for i in I for e in cache.edges_by_effect[i])
+        i, j = cache.edges[e]
+        total -= (z[i] - z[j])^2 / 2
+    end
+    for c in unique(c for i in I for c in cache.soft_by_effect[i])
+        δ = sum(z[i] - state.z[i] for i in I if i in cache.soft_members[c])
+        total -= p.wλ[c] * (cache.soft_values[c] + δ)^2 / 2
     end
     total
 end
