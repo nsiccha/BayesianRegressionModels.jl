@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.117
+
+- `brm_svi_fit(...; laplace=GaussianBlockLaplace())` jointly integrates
+  Gaussian population coefficients, unit effects and shared coordinate
+  multigroup HSGP weights inside a variational target. Structural eligibility
+  currently requires affine Gaussian observations. RK/Enzyme derivatives and
+  capped Krylov operations avoid dense curvature over the growing latent
+  block. Each update evaluates the entire current window; optimization uses
+  a fixed update budget and explicitly leaves convergence unassessed.
+- `BRMSVILaplaceState` checkpoints retain frozen preprocessing and a fitted
+  common Gaussian factor across globals, fields and unit blocks. Continuation
+  supports new, absent and returning units with fixed coordinate identities.
+  The projection adds Monte Carlo, shrinkage and residual-dependence error;
+  checkpoint copying and serialization grow with retained units. Ordinary
+  SVI checkpoints cannot be converted to this representation.
+
 ## 0.2.116
 
 - A plate may select another plate's complete vector-valued output through

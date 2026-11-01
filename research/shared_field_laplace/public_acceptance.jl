@@ -1,6 +1,8 @@
 # Public fit against the already accepted exact Gaussian-marginal reference.
 # No reference resampling or post-hoc optimizer changes. Run twice in fresh
 # processes, first `fit`, then `reproduce`; artifacts are never overwritten.
+# `integrated` compares a later integrated candidate with the retained fit,
+# allowing the source identity to change while keeping all numerical checks.
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL,
     Enzyme, DifferentiationInterface, Random, LinearAlgebra, Statistics,
     Serialization, SHA, Test, Treebars, Distributions
@@ -32,7 +34,7 @@ function public_laplace_checkpoint_summary(state)
 end
 
 @testset "public conditional Gaussian SVI acceptance" begin
-    mode=only(ARGS);mode in ("fit","reproduce") || error("use fit or reproduce")
+    mode=only(ARGS);mode in ("fit","reproduce","integrated") || error("use fit, reproduce or integrated")
     base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
     reference=deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))
     reference.reference_ok || error("reference gate is not green")
@@ -41,9 +43,13 @@ end
     mkpath(directory)
     identity=public_laplace_identity(reference)
     serialize(joinpath(directory,"identity.jls"),identity)
-    previous=mode=="reproduce" ? deserialize(joinpath(base,"public-laplace-fit-v1/result.jls")) : nothing
-    previous===nothing || previous.identity.source_signature==identity.source_signature ||
+    previous=mode=="fit" ? nothing : deserialize(joinpath(base,"public-laplace-fit-v1/result.jls"))
+    mode!="reproduce" || previous.identity.source_signature==identity.source_signature ||
         error("public source/environment changed between fit and reproduction")
+    if mode=="integrated"
+        @test previous.identity.reference_signature==identity.reference_signature
+        @test success(`git merge-base --is-ancestor $(previous.identity.repository_commit) $(identity.repository_commit)`)
+    end
     fixture=public_laplace_fixture()
     seconds=@elapsed fit=with_progress(:state;description="Public conditional Gaussian SVI") do progress
         snapshot_progress(progress,joinpath(directory,"fit.progress")) do
