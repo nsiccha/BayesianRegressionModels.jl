@@ -1,6 +1,12 @@
 # Running the tests
 
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
+`plate_vector_parameters.jl` checks declared vector priors read by plate cells:
+literal and data-dependent extents, joint-normal and simplex axes, scalar
+hyperparameters, standalone parameter axes, replay, and extent validation.
+Downstream plates read complete vectors from earlier cells, including outputs
+followed by another assignment in their cell.
+Compiled Stan and native reverse gradients are compared with independent densities.
 `hypot.jl` checks stable elementwise formula norms on RK and Stan: scalar and
 vector operands, full densities and native gradients, replay, predictor terms,
 offsets, and overflow/underflow controls. It uses the StanBlocks 0.2.12 pin

@@ -1595,8 +1595,9 @@ _rk_kernel_scalar_response(kernel, observation) =
 # RKPPL runs it only in a query that reads it.
 function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         kernel::_RKPreparedKernelAssignment; arguments=nothing, coordinates=nothing,
-        graph_outputs=())
+        graph_outputs=(), cell_sources=Dict{Symbol,Symbol}())
     arguments === nothing || (kernel = _rk_kernel_with_arguments(kernel, arguments))
+    kernel = _rk_kernel_input_cells(kernel, cell_sources)
     # A cell without a collected value writes only what its observations read.
     outputs, after = kernel.collected === nothing ? (Any[], Any[]) : (
         Any[(kernel.cells, kernel.collected)],
@@ -1639,6 +1640,26 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
     _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
         rendered=arguments === nothing ? () : arguments.outputs, defs, coordinates)
     append!(statements, after)
+end
+
+# An indexed input from an earlier plate reads that plate's complete cell,
+# including its inner vector axis. The flattened name remains available to
+# formula expressions; it cannot stand in for `output[i]` in another cell.
+function _rk_kernel_input_cells(kernel::_RKPreparedKernelAssignment, cells)
+    inputs = map(kernel.inputs) do input
+        input.kind === :element && haskey(cells, input.source) ?
+            merge(input, (; source=cells[input.source])) : input
+    end
+    _RKPreparedKernelAssignment(kernel.name, kernel.params, kernel.body,
+        kernel.collected, kernel.scope, inputs, kernel.globals, kernel.columns,
+        kernel.group_values, kernel.observations, kernel.cells,
+        kernel.scan_observed, kernel.cell_column, kernel.outputs)
+end
+
+_rk_observation_input_cells(observation, cells) = observation
+function _rk_observation_input_cells(observation::_RKNestedObservation, cells)
+    _RKNestedObservation(observation.observation, Dict{Symbol,Symbol}(
+        name => get(cells, source, source) for (name, source) in observation.cells))
 end
 
 # A per-subject observation reads its kernel's cells entry by entry, and RK's

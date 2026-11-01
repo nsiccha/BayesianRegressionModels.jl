@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.111
+
+- Plate cells read declared vector parameters using their prior's extent on
+  both SBBRMI and RKBRMI. Literal and scalar-data lengths in
+  `x[1:n] .~ Family.(...)` work alongside formula predictors and sampled
+  hyperparameters; `MvNormal` and `Dirichlet` retain their vector axes too.
+  A direct indexed read checks that the vector has one entry per cell.
+- RK plate cells and their observations read a preceding plate's complete
+  vector at `output[i]`, preserving its inner axis instead of indexing the
+  concatenated formula value.
+
 ## 0.2.110
 
 - `brm_svi_fit(previous, new_window; ...)` continues on disjoint observations
@@ -29,6 +40,7 @@ instead of failing at run time.
   window. The one-argument calibration entry is unchanged.
 - Exporting constants from a data-free RK replay preserves the frozen values
   instead of fitting them again from the replay's new rows.
+
 
 ## 0.2.109
 
