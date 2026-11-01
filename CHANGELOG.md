@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.100
+
+- Fixed: `brm_laplace_plan(...; integrate=:auto)` reports stratified random
+  effects as sampled terms instead of failing while reading their declaration.
+  Ordinary Gaussian terms over the same grouping can still be integrated,
+  preserving the sampled stratified effects and their priors. Partial
+  integration over a grouping also skips the dense population-design probe
+  when latent terms in that grouping remain sampled.
+
 ## 0.2.99
 
 - `RKBRMI` supports exact exponentiated-quadratic `gp(x...)` terms on
