@@ -7751,7 +7751,8 @@ function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals;
                                 allow_unbound_observation=false, order=nothing,
                                 observed::Bool=false)
     prepared = _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
-        prefix="sbimpl", allow_unbound_observation, order, observed)
+        prefix="sbimpl", allow_unbound_observation, order, observed,
+        output_reads=get(data, _SB_KERNEL_OUTPUT_READS_KEY, ()))
     # Non-numeric labels only join rows in preparation; Stan consumes indices.
     all(v -> v isa Real, prepared.group_values) || pop!(data, prepared.group_name, nothing)
     (prepared.rows, prepared.is_lp, prepared.is_unbound)

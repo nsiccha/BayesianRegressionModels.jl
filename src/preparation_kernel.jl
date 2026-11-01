@@ -332,16 +332,20 @@ _brm_ragged_column_length!(lens, name, ::_BRMAbsentResponse) = lens
 function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
                                  prefix="BRM kernel preparation",
                                  allow_unbound_observation=false, order=nothing,
-                                 observed::Bool=false)
+                                 observed::Bool=false, output_reads=())
     a_name = name(arg_col)
     decl = parent(arg_col)
     # `is_lp` selects a runtime gather of a model value. Assignments, like
     # predictors and completions, must keep their dependencies and gradients.
-    is_lp = decl isa ExprColumn && getf(decl) in ((~), assign)
-    is_unbound = decl isa MissingColumn && allow_unbound_observation
+    # Non-last indexed plate outputs have no top-level declaration of their
+    # own. The program's validated output-reader map identifies their writer;
+    # they need the same runtime gather as the collected output.
+    is_output = decl isa MissingColumn && a_name in output_reads
+    is_lp = is_output || decl isa ExprColumn && getf(decl) in ((~), assign)
+    is_unbound = decl isa MissingColumn && allow_unbound_observation && !is_output
     is_lp || decl isa DataColumn || is_unbound || error(
         "$prefix: kernel(...) positional `ragged($a_name, …)`: `$a_name` must be either a ",
-        "model value declared in this @brm block (a predictor, completion or ",
+        "model value declared in this @brm block (a plate output, predictor, completion or ",
         "assignment) or a raw data column; got $(typeof(decl)).")
     (grp_arg isa NamedColumn && parent(grp_arg) isa DataColumn) || error(
         "$prefix: kernel(...) `ragged($a_name, …)` needs a raw data column naming the ",
@@ -354,7 +358,7 @@ function _brm_kernel_ragged_rows(arg_col, grp_arg, g_vals;
     # model expression that means its row-wise data dependencies (a gather
     # follows its index's axis); for a raw column, itself.
     lens = Tuple{Symbol,Int}[]
-    if is_lp
+    if is_lp && !is_output
         append!(lens, _brm_kernel_lp_data_lengths(arg_col))
     elseif decl isa DataColumn
         v = parent(decl)
