@@ -144,20 +144,25 @@ function grouped_bounded_plate(data)
     @brm data begin
         mu ~ 1 + (1 | subject)
         log_scale ~ Normal(0, 0.5)
-        @plate for i in eachindex(y)
+        obs = groups(obs_subject => subject)
+        @plate for i in eachindex(mu)
             sigma = scale[i] * exp(log_scale)
             m = mean(truncated(LogNormal(mu[i], sigma); lower=bound[i]))
             v = var(truncated(LogNormal(mu[i], sigma); lower=bound[i]))
             logmass = logccdf(LogNormal(mu[i], sigma), bound[i])
             logcomplement = logcdf(LogNormal(mu[i], sigma), bound[i])
-            y[i] ~ Normal(m, sqrt(v + noise[i]^2))
-            survived[i] ~ BernoulliLogit(logmass - logcomplement)
+            y[obs[i]] ~ Normal(m, sqrt(v + noise[i]^2))
+            survived[obs[i]] ~ BernoulliLogit(logmass - logcomplement)
         end
     end
 end
 
 @stestset "bounded moments and event evidence retain NLME unit attribution" begin
-    data = merge(MOMENT_DATA, (; subject=["b", "a", "b", "c"]))
+    # One cell per subject, with repeated, interleaved observations joined to
+    # that cell. Both the conditional response and the event density repeat.
+    data = (; subject=["b", "a", "c"], obs_subject=["b", "a", "b", "c"],
+        scale=[0.2, 0.8, 1.0], bound=[1.0, 0.7, 1.2], noise=[0.03, 0.05, 0.04],
+        y=[1.02, 1.05, 1.04, 1.24], survived=ones(Int, 4))
     rk = RKBRMI(grouped_bounded_plate(data))
     ad = AutoEnzyme(; mode=Enzyme.Reverse)
     model = brm_nlme_model(rk; ad_backend=ad, subject_group=:subject)
