@@ -74,13 +74,14 @@ function _brm_svi_target(m::BRMNLMEModel)
     indices = [vcat(globals, block)[o] for (block, o) in zip(units, order)]
     work = [(; values=zeros(length(o)), gradient=zeros(length(o))) for o in order]
     nz = count(==(:subject_effect), m.view.role)
-    (; m, globals, units, plan, work, order, indices,
+    (; m, globals, units, plan, work, order, indices, prior=nothing,
        z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
 end
 
 # P(g) and its gradient: the RK prior and log-Jacobian at the packed point with
 # every subject draw at zero, minus those draws' N(0, 1) constants.
-function _brm_svi_global_term(t, g)
+_brm_svi_global_term(t, g) = _brm_svi_global_term(t.prior, t, g)
+function _brm_svi_global_term(::Nothing, t, g)
     u = t.prior_point
     u[t.globals] .= g
     value, gradient = _rk_nlme_population_prior_value_gradient(t.m.population_prior, u)
@@ -100,8 +101,13 @@ function _brm_svi_unit_term!(gg, gz, t, i, g, z)
     joint_gradient = similar(joint)
     joint_gradient[order] .= w.gradient
     gg .= view(joint_gradient, 1:D)
-    gz .= view(joint_gradient, D+1:length(joint)) .- z
-    value - sum(abs2, z) / 2 - length(z) * log(2π) / 2
+    gz .= view(joint_gradient, D+1:length(joint))
+    value + _brm_svi_unit_prior!(gz, t.prior, i, z)
+end
+
+function _brm_svi_unit_prior!(gz, ::Nothing, i, z)
+    gz .-= z
+    -sum(abs2, z) / 2 - length(z) * log(2π) / 2
 end
 
 # ── Variational parameters ───────────────────────────────────────────────────
@@ -118,6 +124,36 @@ end
 
 _brm_svi_global_covariance(q) = Diagonal(exp.(2 .* q.ρ)) + q.Β * q.Β'
 
+# Work with the diagonal plus low-rank representation throughout optimization.
+# Only the r × r Gram matrix is dense; D may include thousands of field weights.
+function _brm_svi_global_geometry(q)
+    s = exp.(q.ρ)
+    V = q.Β ./ s
+    K = cholesky(Symmetric(Matrix{Float64}(I, size(V, 2), size(V, 2)) + V' * V))
+    (; s, V, K)
+end
+
+function _brm_svi_global_precision(h, x)
+    y = x ./ h.s
+    (y - h.V * (h.K \ (h.V' * y))) ./ h.s
+end
+
+_brm_svi_global_logdet(h) = 2sum(log, h.s) + logdet(h.K)
+
+# C = diag(s) (I + V A V'), C C' = diag(s²) + ΒΒ'. The stable divided
+# difference 1/(sqrt(1+λ)+1) also works when a rank column is initially zero.
+function _brm_svi_global_sqrt(h)
+    E = eigen(Symmetric(h.V' * h.V))
+    W = h.V * E.vectors
+    a = 1 ./ (sqrt.(1 .+ max.(E.values, 0)) .+ 1)
+    (; s=h.s, W, a)
+end
+_brm_svi_global_sqrt_mul(c, x) = c.s .* (x + c.W * (c.a .* (c.W' * x)))
+_brm_svi_global_sqrt_tmul(c, x) = begin
+    y = c.s .* x
+    y + c.W * (c.a .* (c.W' * y))
+end
+
 # A draw of the globals from its two standard normal parts.
 _brm_svi_draw_global(q, ε, η) = q.μ .+ exp.(q.ρ) .* ε .+ q.Β * η
 # A draw of subject i from ε_i: m_i + U_i⁻ᵀ ε_i, with U_i the lower Cholesky
@@ -126,7 +162,7 @@ _brm_svi_unit_offset(q, i, εi) = LowerTriangular(q.U[i])' \ εi
 _brm_svi_draw_unit(q, i, εi) = q.M[i] .+ _brm_svi_unit_offset(q, i, εi)
 
 # The entropy of q, up to the constant (D + Σ d_i)(1 + log 2π)/2.
-_brm_svi_entropy(q) = logdet(_brm_svi_global_covariance(q)) / 2 -
+_brm_svi_entropy(q) = _brm_svi_global_logdet(_brm_svi_global_geometry(q)) / 2 -
     sum(U -> sum(log, diag(U)), q.U; init=0.0)
 
 # ── The global factor: Adam ──────────────────────────────────────────────────
@@ -164,28 +200,29 @@ end
 # The gradient of the global vector from w, the ELBO's gradient in the global
 # coordinates, the draw's (ε, η), and the entropy's own gradient.
 function _brm_svi_global_gradient(q, w, ε, η)
-    Σinv = inv(Symmetric(Matrix(_brm_svi_global_covariance(q))))
-    s = exp.(q.ρ)
-    gρ = w .* ε .* s .+ diag(Σinv) .* s .^ 2
-    gΒ = w * η' .+ Σinv * q.Β
+    h = _brm_svi_global_geometry(q)
+    # diag(I - V (I + V'V)^-1 V') without a D × D intermediate.
+    diagonal = 1 .- vec(sum(abs2, h.V / h.K.U; dims=2))
+    gρ = w .* ε .* h.s .+ diagonal
+    gΒ = w * η' .+ _brm_svi_global_precision(h, q.Β)
     vcat(w, gρ, vec(gΒ))
 end
 
 # A scale-preconditioned ("whitened") global step for polishing: μ moves in
-# units of the global covariance's Cholesky factor and each Β row in units of
+# units of a square root of the global covariance and each Β row in units of
 # its scale, so Adam's step size means a fraction of the current posterior
 # scale, which stays meaningful when a global's posterior sd shrinks like 1/√N.
 function _brm_svi_whitened_global_step!(opt, q, x, grad, lr)
     D = length(q.μ)
-    C = Matrix(cholesky(Symmetric(Matrix(_brm_svi_global_covariance(q)))).L)
+    C = _brm_svi_global_sqrt(_brm_svi_global_geometry(q))
     scale = vcat(ones(D), vec(repeat(exp.(q.ρ), 1, size(q.Β, 2))))
     grad = copy(grad)
-    grad[1:D] .= C' * view(grad, 1:D)
+    grad[1:D] .= _brm_svi_global_sqrt_tmul(C, view(grad, 1:D))
     rest = D+1:length(x)
     grad[rest] .*= scale
     step = zeros(length(x))
     _brm_svi_step!(opt, step, grad, lr)
-    x[1:D] .+= C * view(step, 1:D)
+    x[1:D] .+= _brm_svi_global_sqrt_mul(C, view(step, 1:D))
     x[rest] .+= scale .* view(step, rest)
     x
 end
@@ -480,23 +517,29 @@ global coordinates (`globals`), `seconds` of optimization, and the prepared
 `model`. The approximation is variational: posterior means are close, and
 the spread of the population, scale and correlation coordinates is too narrow.
 """
-function brm_svi_fit(x; rng=Random.default_rng(), batch_size=32,
-        max_iterations=100_000, family::BRMSVIFamily=MeanFieldGlobal(),
+brm_svi_fit(x; kwargs...) = _brm_svi_fit(x, nothing; kwargs...)
+
+function _brm_svi_fit(x, previous; rng=Random.default_rng(), batch_size=32,
+        max_iterations=100_000, family=nothing,
         lr_global=0.01, unit_step=0.1, start=nothing, inits=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), global_scale=0.1, unit_scale=1.0,
         ndraws=1000, polish_lr=0.05, window=nothing, patience=10, min_windows=40,
         polish_windows=20, progress=nothing)
+    family = _brm_svi_family(previous, family)
+    batch_size >= 1 || throw(ArgumentError("brm_svi_fit: batch_size must be positive"))
+    max_iterations >= 0 || throw(ArgumentError("brm_svi_fit: max_iterations must be nonnegative"))
+    previous === nothing || (start === nothing && inits === nothing) || throw(ArgumentError(
+        "brm_svi_fit: a streaming update starts from the previous factors; omit start and inits"))
     _brm_with_progress(progress; description="BRM SVI fit") do node
         _brm_with_phases(node, _BRM_SVI_PHASES) do phases
             m = _brm_svi_model(_brm_svi_lowered(x, phases.lower), phases.prepare;
                 ad_backend, shared_point, subject_group, nested_groups, shared_groups)
-            t, μ = _brm_run_phase(phases.target) do phase
+            t, q = _brm_run_phase(phases.target) do phase
                 # The model's compact cell gradients, on first use, report here.
                 t = _brm_with_cell_progress(() -> _brm_svi_target(m), phase)
-                t, _brm_svi_start(m, start, inits)[t.globals]
+                _brm_svi_initialize(t, previous, family; start, inits, global_scale, unit_scale)
             end
-            q = _brm_svi_params(t, μ, family; global_scale, unit_scale)
             seconds = @elapsed fit = _brm_enter_phase(phases.fit) do phase
                 _brm_svi_fit!(rng, t, q; batch_size, max_iterations, lr_global,
                     unit_step, polish_lr, window, patience, min_windows,
@@ -506,7 +549,17 @@ function brm_svi_fit(x; rng=Random.default_rng(), batch_size=32,
                 phases.draws)
             (; draws, coordinates=copy(m.view.coordinates), diagnostics=(;
                 fit.elbo, fit.elbo_windows, fit.converged, fit.iterations, fit.q,
-                globals=t.globals, seconds, model=m))
+                globals=t.globals, seconds, model=m, source_id=_brm_svi_source_id(m.backend),
+                unit_gradient_calls=2min(batch_size, length(t.units)) * fit.iterations,
+                streaming=_brm_svi_carried_state(previous, m, fit.q)))
         end
     end
 end
+
+_brm_svi_family(::Nothing, ::Nothing) = MeanFieldGlobal()
+_brm_svi_family(::Nothing, family::BRMSVIFamily) = family
+function _brm_svi_initialize(t, ::Nothing, family; start, inits, global_scale, unit_scale)
+    μ = _brm_svi_start(t.m, start, inits)[t.globals]
+    t, _brm_svi_params(t, μ, family; global_scale, unit_scale)
+end
+_brm_svi_carried_state(::Nothing, m, q) = nothing
