@@ -30,6 +30,11 @@ It uses the optional SequentialMonteCarlo and WarmupHMC extensions.
 callable-provider densities, shares captured source across compatible replays,
 and keeps frozen preprocessing in the binding, including training-free replay.
 
+`filter.jl` checks the RK filtering adapter against deterministic recurrence
+scores and a Kalman recursion, calibrated ensemble warm-up, independent group
+updates, cooperative stream consumption, checkpoint recovery and bounded
+retention. `filter_models.jl` contains the shared public synthetic models.
+
 `test/Project.toml` is a superset of the root project: it carries every package
 that any `test/*.jl` loads, so no test file fails at its own `using` line the way
 three of them do under `--project=.` (see below).
