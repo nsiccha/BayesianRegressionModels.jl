@@ -154,7 +154,22 @@ end
     ),
 )
 
-"""Return a BRM-owned statistical RKPPL submodel after loading ReactiveKernelsPPL."""
+"""
+    rkppl_model(name::Symbol)
+    rkppl_model(rk::RKBRMI) -> ReactiveKernelsPPL.RKPPLModel
+
+Return a BRM-owned statistical submodel by name, or the captured RKPPL source
+of an existing RK backend. Load ReactiveKernels and ReactiveKernelsPPL first.
+
+The backend overload captures its retained emitted declarations in the same
+module as their submodels, callable bindings and kernel definitions. It is
+cached once per emitted program and shared by replays that share that program.
+Treat the returned model and its source as read-only.
+
+This is unbound source, not the backend's executable kernel or fitted binding.
+Use [`rk_bound_plan`](@ref) for observation roles, bound data and frozen
+preprocessing. Capturing the source neither binds data nor changes the fit.
+"""
 function rkppl_model end
 
 """

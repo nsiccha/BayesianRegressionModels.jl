@@ -1,7 +1,7 @@
 name = "BayesianRegressionModels"
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.2.97"
+version = "0.2.98"
 
 [deps]
 KLU = "ef3ab10e-7fda-4108-b977-705223b18434"

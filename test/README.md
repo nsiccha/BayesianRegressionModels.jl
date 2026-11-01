@@ -26,6 +26,10 @@ replay, unchanged caller RNG, frozen training preprocessing, incompatible
 groups and mutated-data refusals, and a synthetic deterministic recurrence.
 It uses the optional SequentialMonteCarlo and WarmupHMC extensions.
 
+`rk_captured_source.jl` checks that `rkppl_model(rk)` preserves submodel and
+callable-provider densities, shares captured source across compatible replays,
+and keeps frozen preprocessing in the binding, including training-free replay.
+
 `test/Project.toml` is a superset of the root project: it carries every package
 that any `test/*.jl` loads, so no test file fails at its own `using` line the way
 three of them do under `--project=.` (see below).

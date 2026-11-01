@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.98
+
+- Added `rkppl_model(rk::RKBRMI)` to expose the retained emitted declarations
+  as a cached, unbound RKPPL source model, including its submodels and callable
+  source providers. Observation roles and frozen preprocessing remain in
+  `rk_bound_plan(rk)`; capturing source does not change the executable fit.
+
 ## 0.2.97
 
 - Fixed: all three `brm_laplace_problem` engines start each conditional mode
