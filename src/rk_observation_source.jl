@@ -4,7 +4,7 @@
 
 Optional source provider for the exact scientific observation constructor
 `family`. Return `nothing` to retain its ordinary constructor route. To claim
-the scalar graph route, define a fresh explicit `ReactiveKernels.@kernel`
+the graph route, define a fresh explicit `ReactiveKernels.@kernel`
 `entry(value, args...)` returning the normalized scalar log density, append
 any preceding child graph definitions and separately named numerical leaves,
 and return a non-`nothing` value. `args` are the original constructor's
@@ -12,6 +12,15 @@ arguments on the observation cell's axis. A shared scalar broadcasts; grouped
 row arguments follow their response's subject partition. Original data ports
 remain available to other consumers. Prepare history-dependent row values
 before invoking this entry. The provider receives no model values or AD state.
+
+The original constructor's `brm_distribution_type` determines the event shape,
+as on the ordinary constructor route. A `Multivariate` or `Matrixvariate`
+distribution observes the complete value with `~`, passing its arguments
+whole. In a plate this is one event per cell. A caller-owned family can declare
+`brm_distribution_type(::typeof(family)) = ContinuousMultivariateDistribution`
+(or its concrete distribution type). Scalar families and families without a
+distribution type retain elementwise broadcasting. The scalar return value is
+a log density, not a declaration that the event itself is scalar.
 
 The appended definitions are evaluated in the build's own module, not in the
 module that defines this method, so a quoted body sees only Base and Core, the
@@ -33,8 +42,9 @@ count needs only that. A family with several argument counts (Stan overloads
 of one `@lpxf` name) defines one `::Val{N}` method per count, each emitting
 its own law. The entry must take exactly `N + 1` ports; a mismatch is an error.
 
-The emitted observation `y .~ LogDensity.(entry, args...)` composes this graph
-inside RKPPL's observation plate. It adds no sampled coordinates and keeps the
+The emitted observation `y .~ LogDensity.(entry, args...)`, or the whole-event
+`y ~ LogDensity(entry, args...)`, composes this graph inside RKPPL's observation
+plate. It adds no sampled coordinates and keeps the
 original observed response. Ordinary constructors and deterministic callable-source providers
 remain available; neither certifies expansion of a density callback's body.
 Extend with `import BayesianRegressionModels: _rk_observation_source!`.
@@ -94,13 +104,17 @@ function _rk_emit_observation_source!(defs, statements, bindings, taken,
     append!(bindings, supplied_bindings)
     union!(taken, (source.name for source in sources), first.(supplied_bindings))
 
-    # The scalar law is observed directly: RKPPL composes the explicit graph
-    # inside the observation plate, one cell per observed value, with the
-    # constructor's arguments broadcast on the response's axis.
+    # The provider replaces the density implementation, not its event shape.
+    # Use the same constructor trait as the ordinary observation route: a
+    # multivariate/matrixvariate law receives the complete event and arguments.
     arguments = Any[_rk_value_expr!(bindings, argument, taken) for argument in distribution.args]
     entry = _rk_weighted_observation_entry!(defs, arguments, bindings, taken,
         observation.weight, entry)
-    push!(statements, response isa AbstractVector ?
+    joint = _rk_joint_observation(distribution.callable)
+    push!(statements, joint ?
+        _rk_observation_statement(observation,
+            Expr(:call, :LogDensity, entry, arguments...), taken; joint=true) :
+        response isa AbstractVector ?
         _rk_observation_statement(observation,
             _rk_ast_dotted(:LogDensity, entry, arguments...), taken) :
         Expr(:call, :~, observation.name, Expr(:call, :LogDensity, entry, arguments...)))

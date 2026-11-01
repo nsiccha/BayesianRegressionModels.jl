@@ -516,7 +516,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             # (RKPPL nested plates).
             input = inputs[index]
             nested = input.kind === :gather || (input.kind === :element &&
-                get(columns, input.source, nothing) isa AbstractVector{<:AbstractVector})
+                get(columns, input.source, nothing) isa AbstractVector{<:AbstractArray})
             push!(observations, (; source, param=lhs, callable,
                 arguments=values, argument_names, weight, weight_name, nested,
                 modifier, bounds, input))
