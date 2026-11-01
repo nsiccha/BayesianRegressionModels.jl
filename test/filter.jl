@@ -145,7 +145,9 @@ end
     mktempdir() do folder
         path = joinpath(folder, "filter.jls")
         script = joinpath(@__DIR__, "filter_checkpoint_process.jl")
-        @test success(`$(Base.julia_cmd()) --startup-file=no --project=$(@__DIR__) $script write $path`)
-        @test success(`$(Base.julia_cmd()) --startup-file=no --project=$(@__DIR__) $script read $path`)
+        for mode in ("write", "read")
+            process = run(ignorestatus(`$(Base.julia_cmd()) --startup-file=no --project=$(@__DIR__) $script $mode $path`))
+            @test process.exitcode == 0
+        end
     end
 end

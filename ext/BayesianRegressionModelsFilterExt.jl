@@ -14,7 +14,10 @@ constrained(rk, point::AbstractVector) = BRM._rk_constrained_values(rk, point)
 constrained(rk, point) = point
 
 function frozen_values(rk)
-    BRM._rk_design_checked(rk.plan) && return BRM.brm_fitted_state(rk).fitted
+    if BRM._rk_design_checked(rk.plan)
+        names, _ = BRM._rk_fitted_value_names(rk; prefix="BRM filter")
+        return BRM._rk_frozen_values(rk, names)
+    end
     isempty(BRM._rk_plan_fit_inputs(rk.plan)) || throw(ArgumentError(
         "BRM filter: this model's fitted preprocessing cannot be exported"))
     PPL.FrozenValues()
