@@ -62,6 +62,15 @@ correlated `SMCReference` and mutation `metric` built with
 reprocesses cumulative data with frozen training preprocessing. They use the
 RKPPL 0.1.42 and WarmupHMC 0.2.9 pins from `setup_env.jl`.
 
+`smc_hierarchy_spread.jl` checks tuned SMC on a two-group hierarchy
+`mu ~ 1 + (1 | g)` against an exact grid oracle of the population intercept
+and log scale, with the group effects mixed analytically: the continuous pilot
+and the adaptive pilot with the standard-normal reference reproduce the
+oracle's spread, and a known-gap testset pinned to ReactiveKernels snag
+`learned-smc-refe-cc5677a1` records that the adaptive pilot's learned
+reference (`reference=:pilot`) is narrower than the posterior and leaves the
+population intercept under-dispersed while the group effects stay right.
+
 `rk_captured_source.jl` checks that `rkppl_model(rk)` preserves submodel and
 callable-provider densities, shares captured source across compatible replays,
 and keeps frozen preprocessing in the binding, including training-free replay.
