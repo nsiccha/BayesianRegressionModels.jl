@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.112
+
+- Added RK-only `brm_smc_compare` and `brm_smc_runs`: agreement statistics
+  between independent completed SMC fits of the same model and data, per
+  unconstrained coordinate (run means and SDs, pooled mean and SD, the largest
+  mean difference and the SD-ratio range in pooled-SD units, the worst
+  coordinate) and pooled log-evidence estimates with their spread, plus each
+  run's surviving lineages, stages, evaluations and divergences. Fits of
+  different identities or incomplete fits are refused. `brm_smc_runs` fits
+  one bridge per seed with shared settings and returns the fits with their
+  comparison. Descriptive, not an acceptance gate.
+
 ## 0.2.111
 
 - Plate cells read declared vector parameters using their prior's extent on

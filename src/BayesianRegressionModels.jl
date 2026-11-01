@@ -213,6 +213,7 @@ export rk_bound_data, rk_bound_plan, rk_design_binder, RKDesignBinder
 export brm_fitted_state, BRMFittedState
 export BRMSVIState, brm_svi_checkpoint
 export BRMSMCFit, brm_smc_fit, brm_smc_tune, brm_smc_update, brm_smc_checkpoint, brm_smc_resume
+export brm_smc_compare, brm_smc_runs
 export BRMFilter, brm_filter, brm_filter_step, brm_filter_stream,
     brm_filter_checkpoint, brm_filter_resume
 export BRMCutFamily, brm_cut_family, brm_cut_fit, brm_cut_point, brm_cut_propagate, rk_draw_values
