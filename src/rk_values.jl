@@ -1057,7 +1057,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         if assignment isa _RKPreparedKernelAssignment
             _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment;
                 arguments=get(hoisted.kernels, assignment.name, nothing), coordinates,
-                graph_outputs=kernel_outputs[assignment.name])
+                graph_outputs=kernel_outputs[assignment.name], cell_sources=cells)
             _rk_plate_output_cells!(cells, stmts, assignment, kernel_outputs[assignment.name])
         else
             _rk_emit_value_assignment!(defs, stmts, bindings, taken,
@@ -1108,6 +1108,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
             "RK backend: response `$(observation.name)` distribution keywords are unsupported")
         observation isa _RKNestedObservation && ((observation, distribution) =
             _rk_nested_observation_reads(observation, distribution, hoisted.reads))
+        observation = _rk_observation_input_cells(observation, cells)
         distribution = _rk_align_kernel_observation_arguments!(defs, stmts, bindings, taken,
             plan, observation, distribution)
         _rk_emit_observation_source!(defs, stmts, bindings, taken,

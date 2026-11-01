@@ -1275,9 +1275,9 @@ function _brm_transport_grouped_hsgp!(pairs, record, rk, d, stan, stan_pos)
             "brm_coordinate_transport: grouped HSGP $(base) `$parameter` has " *
             "$(length(rk_names)) RK and $(length(stan_names)) SB coordinates")
         for (j, (rk_name, stan_name)) in enumerate(zip(rk_names, stan_names))
+            local_declaration, index = _brm_transport_scoped(rk_name)
             push!(pairs, BRMCoordinatePair((; base..., parameter, index=j), rk_name,
-                stan_name, Symbol(declaration, ".", rk_local),
-                last(_brm_transport_scoped(rk_name)), :identity))
+                stan_name, local_declaration, index, :identity))
         end
     end
     plans = _brm_term_hyper_plans(d.plan, record.predictor, entry.value)
@@ -1341,6 +1341,10 @@ end
 
 # The RK coordinates of a block local, `<declaration>.<local>[.<index>...]`, in
 # column-major element order.
+_brm_transport_local_elements(rk, declaration::Symbol, locals::Tuple) =
+    reduce(vcat, (_brm_transport_local_elements(rk, declaration, local_name)
+                  for local_name in locals); init=Symbol[])
+
 function _brm_transport_local_elements(rk, declaration::Symbol, rk_local::Symbol)
     stem = Symbol(declaration, ".", rk_local)
     found = Tuple{Tuple,Symbol}[]

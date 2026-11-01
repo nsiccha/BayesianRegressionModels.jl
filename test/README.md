@@ -1,6 +1,20 @@
 # Running the tests
 
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
+`plate_capture_dependencies.jl` checks whole-value captures in composed plates:
+late parameter dependencies, cell-local name collisions, scan-local names,
+and compiled Stan/native density and gradient agreement with an independent oracle.
+`rk_grouped_anisotropic_hsgp.jl` checks per-axis length scales of grouped
+HSGPs: independent, sampled, known and multigroup correlations, default and
+explicit floor bounds, fixed scales, term starts, shared readers and frozen
+replay. Compiled Stan densities and gradients agree with native Enzyme and
+coordinate-wise finite differences.
+`plate_vector_parameters.jl` checks declared vector priors read by plate cells:
+literal and data-dependent extents, joint-normal and simplex axes, scalar
+hyperparameters, standalone parameter axes, replay, and extent validation.
+Downstream plates read complete vectors from earlier cells, including outputs
+followed by another assignment in their cell.
+Compiled Stan and native reverse gradients are compared with independent densities.
 `hypot.jl` checks stable elementwise formula norms on RK and Stan: scalar and
 vector operands, full densities and native gradients, replay, predictor terms,
 offsets, and overflow/underflow controls. It uses the StanBlocks 0.2.12 pin
@@ -47,6 +61,35 @@ It uses the optional SequentialMonteCarlo and WarmupHMC extensions.
 `SMCNonfiniteError` directly, including with Treebars progress, with the exact
 failing unconstrained point, compact rendering and serializable diagnostics.
 Failed updates preserve the input fit's complete checkpoint, including its RNG.
+
+`smc_tuning.jl` checks `brm_smc_tune` on the RK backend against the authored
+correlated Gaussian oracle in `smc_tuning_fixture.jl` (a narrow sum direction
+beside a wider difference direction, never supplied as a dense metric):
+independent continuous pilots, bridge identities of initial and
+cumulative-data schedules, exact continuation, and checkpoint replay across
+Julia processes through `smc_tuning_checkpoint_process.jl`. `smc_adaptive.jl`
+checks adaptive pilots with portable structured scales and an independently
+learned, frozen normalized reference, replayed in fresh processes through
+`smc_adaptive_checkpoint_process.jl`. `smc_correlated.jl` checks an explicit
+correlated `SMCReference` and mutation `metric` built with
+`WarmupHMC.scale_data`. `smc_tuning_frozen.jl` checks that update tuning
+reprocesses cumulative data with frozen training preprocessing. They use the
+RKPPL 0.1.42 and WarmupHMC 0.2.9 pins from `setup_env.jl`.
+
+`smc_hierarchy_spread.jl` checks tuned SMC on a two-group hierarchy
+`mu ~ 1 + (1 | g)` against an exact grid oracle of the population intercept
+and log scale, with the group effects mixed analytically: the continuous pilot
+and the adaptive pilot with the standard-normal reference reproduce the
+oracle's spread, and a known-gap testset pinned to ReactiveKernels snag
+`learned-smc-refe-cc5677a1` records that the adaptive pilot's learned
+reference (`reference=:pilot`) is narrower than the posterior and leaves the
+population intercept under-dispersed while the group effects stay right.
+
+`smc_compare.jl` checks `brm_smc_runs` and `brm_smc_compare`: independent
+bridges on an analytic Normal posterior and on the tuned correlated Gaussian
+oracle agree with the exact means, SDs and evidence; the comparison is
+deterministic for fixed seeds; fits of different data, of a different
+previous posterior, or incomplete fits are refused by name.
 
 `rk_captured_source.jl` checks that `rkppl_model(rk)` preserves submodel and
 callable-provider densities, shares captured source across compatible replays,

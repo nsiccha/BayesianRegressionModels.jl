@@ -12,6 +12,74 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.114
+
+- Plate cells retain dependencies on captured model values, including whole
+  vectors. Composed models emit those declarations before the cells that read
+  them, even when the captured values depend on later parameter declarations.
+  Cell-local bindings do not create dependencies on same-named model values.
+
+## 0.2.113
+
+- RK grouped HSGPs accept `iso=false`, retaining one shared length scale per
+  axis, declared priors and bounds, and the grouping's sampled or known
+  correlation. The same coordinates support Stan transport, term starts,
+  shared value readers and frozen replay.
+
+## 0.2.112
+
+- Added RK-only `brm_smc_compare` and `brm_smc_runs`: agreement statistics
+  between independent completed SMC fits of the same model and data, per
+  unconstrained coordinate (run means and SDs, pooled mean and SD, the largest
+  mean difference and the SD-ratio range in pooled-SD units, the worst
+  coordinate) and pooled log-evidence estimates with their spread, plus each
+  run's surviving lineages, stages, evaluations and divergences. Fits of
+  different identities or incomplete fits are refused. `brm_smc_runs` fits
+  one bridge per seed with shared settings and returns the fits with their
+  comparison. Descriptive, not an acceptance gate.
+
+## 0.2.111
+
+- Plate cells read declared vector parameters using their prior's extent on
+  both SBBRMI and RKBRMI. Literal and scalar-data lengths in
+  `x[1:n] .~ Family.(...)` work alongside formula predictors and sampled
+  hyperparameters; `MvNormal` and `Dirichlet` retain their vector axes too.
+  A direct indexed read checks that the vector has one entry per cell.
+- RK plate cells and their observations read a preceding plate's complete
+  vector at `output[i]`, preserving its inner axis instead of indexing the
+  concatenated formula value.
+
+## 0.2.110
+
+- `brm_svi_fit(previous, new_window; ...)` continues on disjoint observations
+  with the previous Gaussian factors as both initialization and prior.
+  `brm_svi_checkpoint(fit)` returns a data-only `BRMSVIState` for serialization
+  and fresh-process resume with the same model and frozen preprocessing.
+  Units match by label and coordinate identity: new units start from their
+  model prior, absent units retain their factors, and returning units recover
+  them. Changed preprocessing, global layouts, or existing unit coordinate
+  sets are refused. The history is approximated by the carried Gaussians;
+  sequential fits can depend on window order and need not equal a batch fit.
+- SVI global precision, entropy and covariance-root operations use
+  diagonal-plus-low-rank algebra without a dense global covariance matrix.
+  `diagnostics.unit_gradient_calls` reports optimization work on the current
+  window. The one-argument calibration entry is unchanged.
+- Exporting constants from a data-free RK replay preserves the frozen values
+  instead of fitting them again from the replay's new rows.
+
+
+## 0.2.109
+
+- Added RK-only `brm_smc_tune` for independent pilot tuning of initial and
+  cumulative-data SMC bridges. RKPPL's precomputed schedule chooses fixed
+  mutation kernels by temperature, preserves its normalized reference and
+  exact endpoint identities, and survives checkpoint restoration without
+  rerunning pilots. Adaptive pilots also support portable structured scales
+  and an independently learned, frozen normalized Gaussian reference.
+  Completed-stage history includes selected kernel settings, evaluation
+  counts, mean acceptance and unconstrained movement. Requires RKPPL 0.1.42
+  and WarmupHMC 0.2.9.
+
 ## 0.2.108
 
 - `car(area; edges=(from, to), nodes=all_areas, type=...)`: the optional

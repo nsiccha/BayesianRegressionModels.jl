@@ -151,17 +151,29 @@ function _brm_rk_start_terms!(writes, targets, records, values)
         binding = get(r.bindings, t.slot.name, nothing)
         binding === nothing && error(
             "brm_start: `$(t.spelling)` is predicted or has no sampled carrier; initialize its predictor instead")
-        declaration = isempty(string(binding)) ? r.declaration : Symbol(r.declaration, ".", binding)
-        current = _brm_rk_declaration_value(values, declaration)
-        if r.column !== nothing
-            xs = _brm_start_term_values(t, size(current, 1))
-            append!(writes, [(declaration, (i, r.column), x) for (i, x) in enumerate(xs)])
-        elseif current isa Real
-            push!(writes, (declaration, (), only(_brm_start_term_values(t, 1))))
-        else
-            xs = _brm_start_term_values(t, length(current))
-            append!(writes, [(declaration, Tuple(i), x) for (i, x) in zip(CartesianIndices(current), xs)])
-        end
+        _brm_rk_start_term_writes!(writes, r, t, values, binding)
     end
+    writes
+end
+
+function _brm_rk_start_term_writes!(writes, r, t, values, binding::Symbol)
+    declaration = isempty(string(binding)) ? r.declaration : Symbol(r.declaration, ".", binding)
+    current = _brm_rk_declaration_value(values, declaration)
+    if r.column !== nothing
+        xs = _brm_start_term_values(t, size(current, 1))
+        append!(writes, [(declaration, (i, r.column), x) for (i, x) in enumerate(xs)])
+    elseif current isa Real
+        push!(writes, (declaration, (), only(_brm_start_term_values(t, 1))))
+    else
+        xs = _brm_start_term_values(t, length(current))
+        append!(writes, [(declaration, Tuple(i), x) for (i, x) in zip(CartesianIndices(current), xs)])
+    end
+    writes
+end
+
+function _brm_rk_start_term_writes!(writes, r, t, _values, bindings::Tuple)
+    xs = _brm_start_term_values(t, length(bindings))
+    append!(writes, [(Symbol(r.declaration, ".", binding), (), x)
+                     for (binding, x) in zip(bindings, xs)])
     writes
 end

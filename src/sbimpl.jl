@@ -8064,9 +8064,16 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         # of these columns that frame carries — see the `:kernel_subject_count`
         # reprocess branch. A forecast replay's frame lacks the response.
         data[nsub_sym] = nsub
-        _sb_record_preproc!(data, nsub_sym, PreprocEntry(
-            :kernel_subject_count, (; from_data_length = true, columns = Tuple(first.(counted))),
-            first(first(counted)), false))
+        vector_names = Set(name(c) for c in lp_cols if !isnothing(_brm_parameter_length(c)))
+        columns = Tuple(k for (k, _) in counted if k ∉ vector_names)
+        if isempty(columns)
+            # Sampled vectors supply a fitted axis, never a raw-data column.
+            _sb_record_static!(data, nsub_sym)
+        else
+            _sb_record_preproc!(data, nsub_sym, PreprocEntry(
+                :kernel_subject_count, (; from_data_length = true, columns),
+                first(columns), false))
+        end
     else
         # ORDER: cells stay in ROW order, deliberately. `_sb_linear_predictor!`
         # returns `popefs(X) + rows_dot_product(Z, b[group_idx,:])`, i.e. a
@@ -8881,11 +8888,7 @@ function _sb_emit_vector_prior!(stmts, data, target, ::typeof(_brm_vector_prior)
     haskey(data, n_key) && error(
         "sbimpl: `$target[1:n] .~ ...` reserves data key `$n_key`, but that name is ",
         "already used. Rename the parameter.")
-    n = _brm_data_value(len)
-    n isa Real && isinteger(n) && n >= 0 || error(
-        "sbimpl: `$target[1:n] .~ ...` needs a nonnegative integer length `n` ",
-        "computed from literals and data; got `$len`.")
-    n = Int(n)
+    n = _brm_declared_vector_length(target, _brm_data_value(len); prefix="sbimpl")
     data[n_key] = n
     law isa ExprColumn || error(
         "sbimpl: `$target[1:n] .~ ...` needs a scalar distribution, got `$law`.")
