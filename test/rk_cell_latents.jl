@@ -71,9 +71,8 @@ predictor_law_latent(data) = @brm data begin
     end
 end
 
-# The law reads a top-level vector parameter at the cell, `b[i]`. RKPPL admits
-# it; BRM's RK preparation still refuses it as a per-subject linear predictor
-# (todo 2026-10-26T08-15-30-153-1n962h6).
+# The law reads a top-level vector parameter at the cell, `b[i]`; its
+# declared extent supplies the cell axis independently of predictor rows.
 vector_parameter_law_latent(data) = @brm data begin
     sigma ~ Exponential(1.0)
     b[1:2] .~ Normal(0.0, 1.0)
@@ -178,8 +177,9 @@ end
     @test count(n -> startswith(String(n), "log_T."), coordinate_names(c.rk.model.layout)) == 5
 end
 
-@stestset "known gap: the law reads a vector parameter at the cell" begin
-    @test_broken (RKBRMI(vector_parameter_law_latent(CELLS)).model; true)
+@stestset "the law reads a vector parameter at the cell" begin
+    c = check_against_stan(vector_parameter_law_latent(CELLS), "vector_parameter_law_latent")
+    @test count(n -> startswith(String(n), "b."), coordinate_names(c.rk.model.layout)) == 2
 end
 
 @stestset "a latent nothing observes is not sampled" begin

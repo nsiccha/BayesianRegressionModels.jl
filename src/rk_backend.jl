@@ -6865,10 +6865,7 @@ function _rk_vector_prior_length(name, len, data, consts)
     value = len isa Real ? len :
         len isa _BRMPreparedRef ? get(data, len.name, get(consts, len.name, nothing)) :
         len isa _BRMPreparedExpr ? _rk_data_only_value(len, data) : nothing
-    value isa Real && isinteger(value) && value >= 0 || error(
-        "RK backend: `$name[1:n] .~ ...` needs a nonnegative integer length " *
-        "`n` computed from literals and data; got `$len`")
-    Int(value)
+    _brm_declared_vector_length(name, value; prefix="RK backend")
 end
 
 # `name ~ MvNormal(...)` (decision `187g4va`), read by `_brm_mvnormal_parts`

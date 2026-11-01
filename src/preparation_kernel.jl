@@ -53,12 +53,16 @@ end
 # `(name, values)` of every row-wise raw data column a linear predictor's terms
 # read; scalar columns are skipped.
 function _brm_kernel_lp_data_columns(lp_col)
+    isnothing(_brm_parameter_length(lp_col)) || return Tuple{Symbol,Any}[]
     columns = Tuple{Symbol,Any}[]
     _brm_collect_data_columns!(columns, getargs(parent(lp_col))[2])
     columns
 end
-_brm_kernel_lp_data_lengths(lp_col) =
+function _brm_kernel_lp_data_lengths(lp_col)
+    n = _brm_parameter_length(lp_col)
+    isnothing(n) || return Tuple{Symbol,Int}[(name(lp_col), n)]
     Tuple{Symbol,Int}[(column, length(values)) for (column, values) in _brm_kernel_lp_data_columns(lp_col)]
+end
 
 # A per-subject linear predictor without a random effect, or whose random
 # effects group the rows coarser than one label per row (a class over the
@@ -69,6 +73,13 @@ _brm_kernel_lp_data_lengths(lp_col) =
 # subject. An LP with no data column has no rows at all.
 function _brm_kernel_check_subject_frame_lp(lp_col, nsub; prefix="BRM kernel preparation")
     lp = name(lp_col)
+    n = _brm_parameter_length(lp_col)
+    if !isnothing(n)
+        n == nsub || error(
+            "$prefix: kernel(...) vector parameter `$lp` has $n entries for $nsub " *
+            "plate cells; a direct `$lp[i]` read needs one entry per cell.")
+        return nothing
+    end
     lens = _brm_kernel_lp_data_lengths(lp_col)
     isempty(lens) && error(
         "$prefix: kernel(...) per-subject linear predictor `$lp` has no random-effect " *

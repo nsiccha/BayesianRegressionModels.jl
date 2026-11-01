@@ -56,6 +56,37 @@ function _brm_data_value(x::ExprColumn)
     getf(x)(args...; kwargs...)
 end
 
+# A vector prior owns its axis. Its constructor's data are hyperparameters,
+# not rows of a formula predictor (a covariance matrix has n² entries).
+function _brm_parameter_length(column::NamedColumn)
+    declaration = parent(column)
+    declaration isa ExprColumn{typeof(~)} || return nothing
+    lhs, prior = getargs(declaration, 2)
+    lhs isa NamedColumn && parent(lhs) isa MissingColumn && prior isa ExprColumn ||
+        return nothing
+    _brm_parameter_length(name(column), getf(prior), prior)
+end
+_brm_parameter_length(_target, _constructor, _prior) = nothing
+_brm_parameter_length(target, ::typeof(_brm_vector_prior), prior) =
+    _brm_declared_vector_length(target, _brm_data_value(first(getargs(prior))))
+_brm_parameter_length(target, ::Type{<:MvNormal}, prior) =
+    _brm_mvnormal_parts(target, prior; prefix="BRM preparation").n
+function _brm_parameter_length(target, ::Type{<:Dirichlet}, prior)
+    args = getargs(prior)
+    length(args) == 2 && return _brm_declared_vector_length(target, _brm_data_value(first(args)))
+    length(args) == 1 || return nothing
+    alpha = only(args)
+    alpha isa AbstractVector && return length(alpha)
+    value = _brm_data_value(alpha)
+    value isa AbstractVector ? length(value) : nothing
+end
+function _brm_declared_vector_length(target, value; prefix="BRM preparation")
+    value isa Real && isinteger(value) && value >= 0 || error(
+        "$prefix: `$target[1:n] .~ ...` needs a nonnegative integer length `n` " *
+        "computed from literals and data; got `$value`.")
+    Int(value)
+end
+
 # `x ~ MvNormal(...)` on a non-data LHS declares a VECTOR PARAMETER (decision `187g4va`,
 # 2026-09-16: the faithful Distributions.jl surface). The constructor shapes are
 # Distributions.jl's, nothing invented on top of them; every backend reads them here:
