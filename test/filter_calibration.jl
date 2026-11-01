@@ -69,4 +69,8 @@ end
     @test filter.state.parameter_mass ≈ fitted.state.weights
     @test filter.configuration.parameters.gain == fitted.state.positions[1, 1]
     @test length(filter.state.carries) == 4length(fitted.state.weights)
+    changed = reprocess(rk, (; data.x, y=data.y .+ 1))
+    mismatched = BRMSMCFit(fitted.template, changed, fitted.previous, fitted.state,
+        fitted.ad_backend, fitted.model_id, fitted.binding_id, fitted.previous_id)
+    @test_throws ArgumentError brm_filter(mismatched; inputs=(:x,), particles=4)
 end

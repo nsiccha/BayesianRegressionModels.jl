@@ -65,6 +65,7 @@ function BRM.brm_filter(model::Union{BRM.BRMI,BRM.RKBRMI}; parameters=nothing,
 end
 
 function BRM.brm_filter(fit::BRM.BRMSMCFit; kwargs...)
+    BRM._brm_validate_smc_fit(fit)
     fit.state.temperature == 1 || throw(ArgumentError(
         "BRM filter: complete the parameter posterior bridge before filtering"))
     BRM.brm_filter(fit.backend; ensemble=eachcol(fit.state.positions),
