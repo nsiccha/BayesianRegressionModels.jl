@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.101
+
+- Formula assignments, predictor terms and offsets apply `hypot(x, y)`
+  elementwise on the ReactiveKernels backend, including a scalar with a
+  vector. This preserves the stable norm without overflowing intermediate
+  squares. The formula editor accepts the same spelling. StanBlocks 0.2.12
+  supplies the matching Stan builtin; the test environment pins that release.
+
 ## 0.2.100
 
 - Fixed: `brm_laplace_plan(...; integrate=:auto)` reports stratified random

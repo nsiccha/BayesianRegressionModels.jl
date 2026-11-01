@@ -45,7 +45,7 @@ Enzyme = "0.13"
 Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PSIS = "0.9"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.10"
+StanBlocks = "0.2.12"
 Treebars = "0.1.1"
 Turing = "0.46"
 WarmupHMC = "0.2.8"
@@ -94,7 +94,8 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # 359a4fae (StanBlocks 0.2.8): native explicit-total Dirichlet-multinomial.
 # 02a93f48 (StanBlocks 0.2.10) serializes exact infinite bound data for
 # BridgeStan, including mixed censored and detected observations.
-rev = "02a93f48606bd1bf6b8bdf2d70a319e2b3139329"
+# ab3960bb (StanBlocks 0.2.12) registers stable hypot and its Base callable.
+rev = "ab3960bb4c3663ff9e5bb6f0c166c826fd7d9e3c"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

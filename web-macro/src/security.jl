@@ -16,7 +16,7 @@ _ALLOWED_CALLS = Set{Symbol}([
     :~, :(+), :(-), :(*), :(/), :(^), :(|), :(||), :(&),
     :(==), :(!=), :(<), :(>), :(<=), :(>=),
     :log, :log2, :log10, :log1p, :exp, :exp2, :expm1,
-    :sqrt, :cbrt, :abs, :abs2, :sign, :floor, :ceil, :round,
+    :sqrt, :hypot, :cbrt, :abs, :abs2, :sign, :floor, :ceil, :round,
     :sin, :cos, :tan, :asin, :acos, :atan,
     :min, :max, :clamp, :mod, :rem, :div,
     :logistic, :logit, :softmax, :logsumexp,

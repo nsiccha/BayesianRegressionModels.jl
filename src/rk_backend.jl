@@ -120,7 +120,7 @@ const _RK_SLICE1_PRIOR_ARITY = Dict{Symbol,Int}(
 # assignment refs): the thin-layer layout derives support from values.
 const _RK_SAMPLED_LITERAL_ARGS = Set{Symbol}([:Uniform])
 const _RK_ASSIGNMENT_CALLABLES = Set{Any}([+, -, *, /, ^, log, log10, log1p,
-    exp, expm1, sqrt, abs, sum, mean, std, var, minimum, maximum, length])
+    exp, expm1, sqrt, hypot, abs, sum, mean, std, var, minimum, maximum, length])
 const _RK_ASSIGNMENT_REDUCTIONS = Set{Any}(
     [sum, mean, std, var, minimum, maximum, length])
 
@@ -131,7 +131,7 @@ const _RK_DERIVED_BINOPS = Dict{Function,Symbol}(
     (+) => :.+, (-) => :.-, (*) => :.*, (/) => :./, (^) => :.^, (%) => :.%)
 const _RK_DERIVED_MATH = Dict{Function,Symbol}(
     log => :log, log10 => :log10, log1p => :log1p, exp => :exp,
-    expm1 => :expm1, sqrt => :sqrt, abs => :abs, logistic => :logistic)
+    expm1 => :expm1, sqrt => :sqrt, hypot => :hypot, abs => :abs, logistic => :logistic)
 const _RK_DERIVED_CMP = Dict{Function,Symbol}(
     (==) => :.==, (!=) => :.!=, (<) => :.<, (>) => :.>,
     (<=) => :.<=, (>=) => :.>=)
@@ -2752,12 +2752,11 @@ function _rk_lower_data_expr(node, target::Symbol, origin::String,
         return Expr(:call, _RK_DERIVED_REDNAME[f], staged), false
     end
     if isempty(kwargs) && f isa Function && haskey(_RK_DERIVED_MATH, f)
-        length(args) == 1 || error(
-            "$prefix: predictor `$target` $origin `$(nameof(f))` takes " *
-            "exactly one argument")
-        lowered, _ = _rk_lower_data_expr(only(args), target, origin,
-            data, columns, derived, taken)
-        return Expr(:., _RK_DERIVED_MATH[f], Expr(:tuple, lowered)), true
+        lowered = map(args) do arg
+            first(_rk_lower_data_expr(arg, target, origin,
+                data, columns, derived, taken))
+        end
+        return _rk_ast_dotted(_RK_DERIVED_MATH[f], lowered...), true
     end
     if isempty(kwargs) && f isa Function && haskey(_RK_DERIVED_BINOPS, f)
         if length(args) == 1
@@ -3161,8 +3160,8 @@ function _rk_model_offset_expr(node, target::Symbol, data::AbstractDict,
     args = map(arg -> _rk_model_offset_expr(arg, target, data, columns), getargs(node))
     haskey(_RK_DERIVED_BINOPS, f) && return Expr(:call, _RK_DERIVED_BINOPS[f], args...)
     haskey(_RK_DERIVED_CMP, f) && return Expr(:call, _RK_DERIVED_CMP[f], args...)
-    haskey(_RK_DERIVED_MATH, f) && length(args) == 1 &&
-        return _rk_ast_dotted(_RK_DERIVED_MATH[f], only(args))
+    haskey(_RK_DERIVED_MATH, f) &&
+        return _rk_ast_dotted(_RK_DERIVED_MATH[f], args...)
     error("$prefix: predictor `$target` `offset()` calls `$(repr(f))`; an " *
         "offset of a model value takes elementwise `+ - * / ^ %`, comparisons " *
         "and `$(join(sort!(string.(nameof.(collect(keys(_RK_DERIVED_MATH))))), "`, `"))`")
@@ -6396,7 +6395,7 @@ function _rk_walk_assignment_expr!(node, name::Symbol,
     callable = node.callable
     callable in _RK_ASSIGNMENT_CALLABLES || error(
         "$prefix: $origin calls `$callable`; slice 1 admits " *
-        "{+,-,*,/,^,log,log10,log1p,exp,expm1,sqrt,abs,sum,mean,std,var," *
+        "{+,-,*,/,^,log,log10,log1p,exp,expm1,sqrt,hypot,abs,sum,mean,std,var," *
         "minimum,maximum,length} only")
     isempty(node.kwargs) || error(
         "$prefix: $origin call keywords are out of slice 1")

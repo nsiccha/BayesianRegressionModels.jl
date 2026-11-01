@@ -1,6 +1,11 @@
 # Running the tests
 
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
+`hypot.jl` checks stable elementwise formula norms on RK and Stan: scalar and
+vector operands, full densities and native gradients, replay, predictor terms,
+offsets, and overflow/underflow controls. It uses the StanBlocks 0.2.12 pin
+from `setup_env.jl`.
+
 `nlme_laplace_sums.jl` checks sparse sum-cell integration against exact
 Gaussian marginals, conditional covariance and full-model derivatives, plus
 automatic selection, marginal optimization, independent copies and scalar
