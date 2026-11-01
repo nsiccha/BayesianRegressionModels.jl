@@ -48,6 +48,20 @@ It uses the optional SequentialMonteCarlo and WarmupHMC extensions.
 failing unconstrained point, compact rendering and serializable diagnostics.
 Failed updates preserve the input fit's complete checkpoint, including its RNG.
 
+`smc_tuning.jl` checks `brm_smc_tune` on the RK backend against the authored
+correlated Gaussian oracle in `smc_tuning_fixture.jl` (a narrow sum direction
+beside a wider difference direction, never supplied as a dense metric):
+independent continuous pilots, bridge identities of initial and
+cumulative-data schedules, exact continuation, and checkpoint replay across
+Julia processes through `smc_tuning_checkpoint_process.jl`. `smc_adaptive.jl`
+checks adaptive pilots with portable structured scales and an independently
+learned, frozen normalized reference, replayed in fresh processes through
+`smc_adaptive_checkpoint_process.jl`. `smc_correlated.jl` checks an explicit
+correlated `SMCReference` and mutation `metric` built with
+`WarmupHMC.scale_data`. `smc_tuning_frozen.jl` checks that update tuning
+reprocesses cumulative data with frozen training preprocessing. They use the
+RKPPL 0.1.42 and WarmupHMC 0.2.9 pins from `setup_env.jl`.
+
 `rk_captured_source.jl` checks that `rkppl_model(rk)` preserves submodel and
 callable-provider densities, shares captured source across compatible replays,
 and keeps frozen preprocessing in the binding, including training-free replay.

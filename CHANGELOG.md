@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.109
+
+- Added RK-only `brm_smc_tune` for independent pilot tuning of initial and
+  cumulative-data SMC bridges. RKPPL's precomputed schedule chooses fixed
+  mutation kernels by temperature, preserves its normalized reference and
+  exact endpoint identities, and survives checkpoint restoration without
+  rerunning pilots. Adaptive pilots also support portable structured scales
+  and an independently learned, frozen normalized Gaussian reference.
+  Completed-stage history includes selected kernel settings, evaluation
+  counts, mean acceptance and unconstrained movement. Requires RKPPL 0.1.42
+  and WarmupHMC 0.2.9.
 ## 0.2.108
 
 - `car(area; edges=(from, to), nodes=all_areas, type=...)`: the optional
