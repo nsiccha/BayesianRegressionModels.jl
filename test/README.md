@@ -851,6 +851,15 @@ each `|ID|`'s scale address, for `brm_start` and `brm_ranef_sd_coordinates`,
 including the generated-quantities block of its prior program. It runs in
 the test environment above.
 
+`start_effects_scaling.jl` checks that `brm_start`'s explicit random-effect
+solve on the Stan backend is linear in the model's size and in the given
+levels: it counts the points constrained (`margins + 2` for an independent
+block and `levels + margins + 1` for a level-correlated `gr(g; cor=...)`
+block, whatever the number of given levels) and checks that adding margins
+to a block costs less than one further constrained-plus-transformed vector,
+on models whose transformed parameters dwarf the block. It runs in the test
+environment above.
+
 `nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:
 batched and single-subject evaluation (including `check_protocol` and online
 SAEM on ragged joins, and SAEM's batched population gradient for flat grouped

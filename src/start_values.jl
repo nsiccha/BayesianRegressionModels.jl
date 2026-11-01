@@ -1219,54 +1219,109 @@ end
 # while its scales, correlation and mixing weights stay as they are at `u`. So
 # the carrier's response to each coordinate is measured at `u`, and the
 # coordinates that give the effects are solved for, whatever the block's
-# emission. Levels are independent cells, measured together; a level-correlated
-# block (`gr(g; cor=...)`) couples its levels, so its given levels form one
-# cell. Levels without given effects keep their coordinates.
+# emission. Levels without given effects keep their coordinates.
+#
+# Each measured point is constrained, transformed parameters included, into
+# ONE buffer that the next point overwrites, its carriers are located through
+# one name index built once, and only the given levels' effects are kept. So
+# the solve holds one such vector plus the given levels' effects, whatever the
+# model's size and the block's margins: the `n + 1` full vectors it used to
+# hold twice over took 50 GB on a 623k-parameter model with ~11,000 levels
+# (snag brm-start-explic-aaf34bf9).
 function _brm_sb_start_block_effects(u, stan_model, d, pending)
     isempty(pending) && return u
     unc = String.(BridgeStan.param_unc_names(stan_model))
-    tp = String.(BridgeStan.param_names(stan_model; include_tp=true))
+    index = _BRMNameIndex(BridgeStan.param_names(stan_model; include_tp=true))
+    full = Vector{Float64}(undef, length(index))
     u = copy(u)
+    probe = similar(u)
     for (; t, block, P) in pending
         rows = _brm_start_level_positions(t.id, t.effects.levels, block.levels)
         D = t.effects.values[:, P]
-        position = ranef_coordinates(block, unc)
-        cells = _ranef_level_correlated(block.family) ? [collect(eachindex(rows))] :
-            [[i] for i in eachindex(rows)]
-        # A cell's coordinates and effects, margin fastest, then level.
-        coordinates(c) = vec(position[:, rows[c]])
-        effects(E, c) = vec(permutedims(E[rows[c], :]))
-        n = maximum(c -> length(coordinates(c)), cells)
-        probes = [copy(u) for _ in 1:n]
-        for c in cells, (j, x) in enumerate(coordinates(c))
-            probes[j][x] += 1
+        # Margins × given levels: the coordinates to solve for.
+        position = ranef_coordinates(block, unc)[:, rows]
+        # The given levels' effects, levels × margins, at an unconstrained point.
+        effects(x) = _brm_sb_start_effects_at(stan_model, d, block, x, rows, index, full)
+        E0 = effects(u)
+        # Their response to a unit step of the given coordinates at `u`.
+        function response(coordinates)
+            copyto!(probe, u)
+            probe[coordinates] .+= 1
+            effects(probe) .- E0
         end
-        E = _brm_sb_start_effect_draws(stan_model, d, block, [[u]; probes], tp)
-        for c in cells
-            x = coordinates(c)
-            e0 = effects(E[1, :, :], c)
-            M = Matrix{Float64}(undef, length(e0), length(x))
-            for j in eachindex(x)
-                M[:, j] = effects(E[1 + j, :, :], c) .- e0
-            end
-            F = lu(M; check=false)
-            issuccess(F) || error(
-                "brm_start: the effects of `|$(t.id)|` do not determine the " *
-                "coordinates of its block `$(block.binding)` at this point")
-            u[x] .+= F \ (vec(permutedims(D[c, :])) .- e0)
-        end
+        solve! = _ranef_level_correlated(block.family) ?
+            _brm_sb_start_correlated_levels! : _brm_sb_start_independent_levels!
+        solve!(u, position, D .- E0, response, t, block)
         all(isfinite, u) || error("brm_start: the Stan point is not finite")
-        E = _brm_sb_start_effect_draws(stan_model, d, block, [u], tp)
-        _brm_start_check("effects of `|$(t.id)|`", E[1, rows, :], D)
+        _brm_start_check("effects of `|$(t.id)|`", effects(u), D)
     end
     u
 end
 
-# Draws × levels × margins effects of a conventional `block` at the
-# unconstrained points `us`, read through the carriers `brm_ranef_draws` reads.
-function _brm_sb_start_effect_draws(stan_model, d, block, us, names)
-    draws = permutedims(reduce(hcat, [BridgeStan.param_constrain(stan_model, x;
-        include_tp=true) for x in us]))
-    isnothing(block.by) ? _brm_ranef_block_draws(d, block, draws, names).effects :
-        _brm_ranef_stratified_draws(d, block, draws, names).effects
+# Independent levels: a level's effects respond to its own coordinates only,
+# so one probe per margin steps that coordinate of every given level at once
+# and each level's margins × margins response is solved on its own. K probes,
+# whatever the number of levels.
+function _brm_sb_start_independent_levels!(u, position, target, response, t, block)
+    K, r = size(position)
+    M = Array{Float64}(undef, r, K, K)
+    for k in 1:K
+        M[:, :, k] = response(position[k, :])
+    end
+    for j in 1:r
+        F = lu(M[j, :, :]; check=false)
+        issuccess(F) || _brm_sb_start_undetermined(t, block)
+        u[position[:, j]] .+= F \ target[j, :]
+    end
+    u
+end
+
+# Level-correlated levels (`gr(g; cor=...)`, `_sb_level_correlated_ranef`):
+# the emission multiplies the independent levels' effects on the left by the
+# levels' factor, so the given levels form one cell whose response to a unit
+# step of coordinate (level j, margin k) is the outer product `a_j * b_k'` of
+# a level response `a_j` (the same for every margin) and a margin response
+# `b_k` (the same for every level). K probes at the first given level measure
+# the `b_k`, one probe of each other level's first coordinate measures its
+# `a_j`, both up to one scale fixed at the largest entry of the first probe's
+# response, and the cell's effects `A Z B'` are solved through the two small
+# factors: r + K - 1 probes and an r × r factor instead of r K probes and an
+# r K × r K matrix. The read-back check after the solve holds for exactly a
+# separable response, so a non-separable emission fails loudly there.
+function _brm_sb_start_correlated_levels!(u, position, target, response, t, block)
+    K, r = size(position)
+    margin = [response(position[k:k, 1]) for k in 1:K]
+    i, m = Tuple(argmax(abs.(margin[1])))
+    scale = margin[1][i, m]
+    iszero(scale) && _brm_sb_start_undetermined(t, block)
+    B = Matrix{Float64}(undef, K, K)
+    for k in 1:K
+        B[:, k] = margin[k][i, :] ./ scale
+    end
+    A = Matrix{Float64}(undef, r, r)
+    A[:, 1] = margin[1][:, m]
+    for j in 2:r
+        A[:, j] = response(position[1:1, j])[:, m]
+    end
+    FA = lu(A; check=false)
+    FB = lu(B; check=false)
+    issuccess(FA) && issuccess(FB) || _brm_sb_start_undetermined(t, block)
+    Z = (FA \ target) / transpose(B)
+    for j in 1:r, k in 1:K
+        u[position[k, j]] += Z[j, k]
+    end
+    u
+end
+
+_brm_sb_start_undetermined(t, block) = error(
+    "brm_start: the effects of `|$(t.id)|` do not determine the " *
+    "coordinates of its block `$(block.binding)` at this point")
+
+# Given levels × margins effects of a conventional `block` at the unconstrained
+# point `x`, read through the carriers `brm_ranef_draws` reads from the
+# constrained and transformed parameters constrained into `full`, which the
+# next call overwrites.
+function _brm_sb_start_effects_at(stan_model, d, block, x, rows, index, full)
+    BridgeStan.param_constrain!(stan_model, x, full; include_tp=true)
+    _brm_ranef_block_effects(d, block, reshape(full, 1, :), index)[1, rows, :]
 end
