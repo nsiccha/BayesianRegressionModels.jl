@@ -215,13 +215,18 @@ function _brm_multigroup_locations(term, coordinates)
     lower, upper = vec(minimum(term.coordinates; dims=1)), vec(maximum(term.coordinates; dims=1))
     center, half = term.free ? ((lower .+ upper) ./ 2, (upper .- lower) ./ 2) :
         (term.center, term.method == 1 ? term.scale .* (term.grid_k - 1) ./ 2 : term.scale)
+    _brm_check_multigroup_region(C, center, half; prefix="brm_multigroup_field")
+    C
+end
+
+function _brm_check_multigroup_region(C, center, half; prefix)
     for i in axes(C, 1), a in axes(C, 2)
         abs(C[i, a] - center[a]) <= half[a] * (1 + 1e-12) || error(
-            "brm_multigroup_field: location $i lies outside the region the " *
+            "$prefix: location $i lies outside the region the " *
             "approximation covers on axis $a ([$(center[a] - half[a]), " *
             "$(center[a] + half[a])]); it would be an extrapolation")
     end
-    C
+    nothing
 end
 
 function _brm_multigroup_field(term, values, times, locations)

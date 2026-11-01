@@ -1,0 +1,94 @@
+# Planner summaries used to validate a coordinate field's frozen replay.
+# The graph fits and freezes its grid itself; this keeps only the level map,
+# covered region, never observation rows. The default spatial prior is fitted
+# in the graph alongside its grid.
+function _rk_multigroup_replay_fit(lc, source, id, data)
+    _brm_fitted_value(:multigroup, id) do
+        frozen = _brm_frozen_replay()
+        training = frozen === nothing ? Dict{Symbol,Any}() : frozen.training
+        fitted_levels = _brm_fit_levels(get(training, source, data[source]))
+        coordinates = hcat((get(training, axis, data[axis]) for axis in lc.axes)...)
+        lower, upper = vec(minimum(coordinates; dims=1)), vec(maximum(coordinates; dims=1))
+        center = (lower .+ upper) ./ 2
+        half = (upper .- lower) ./ 2
+        isempty(lc.positions) && lc.method === :hsgp && (half = lc.c .* half)
+        locations = Dict(label => Tuple(coordinates[i, :])
+            for (i, label) in enumerate(fitted_levels))
+        (; locations, center, half)
+    end
+end
+
+function _rk_check_multigroup_replay(fit, levels, coordinates; source)
+    size(coordinates, 1) == length(levels) || error(
+        "RK reprocess: coordinate multigroup `$source` needs one location per " *
+        "declared group level ($(length(levels))), got $(size(coordinates, 1))")
+    all(isfinite, coordinates) || error(
+        "RK reprocess: coordinate multigroup `$source` locations must be finite")
+    for (i, label) in enumerate(levels)
+        haskey(fit.locations, label) || continue
+        Tuple(coordinates[i, :]) == fit.locations[label] || error(
+            "RK reprocess: coordinate multigroup `$source` level `$label` has " *
+            "coordinates different from its fitted location $(fit.locations[label])")
+    end
+    _brm_check_multigroup_region(coordinates, fit.center, fit.half;
+        prefix="RK reprocess: coordinate multigroup `$source`")
+    nothing
+end
+
+# Emit summaries outside the parameter-dependent HSGP block so RKPPL can
+# partially evaluate them and fitted-state export can freeze them by value.
+function _rk_ast_multigroup_fit!(definitions, statements, taken, term)
+    options = term.options
+    lc = get(options, :level_cor, nothing)
+    lc isa _BRMMultigroupCoordinates || return
+    if isempty(lc.positions)
+        name = options.coordinate_grid
+        push!(taken, name)
+        coordinates = Expr(:call, :hcat, options.coordinate_fit_columns...)
+        call = Expr(:call, :brm_multigroup_coordinate_grid, coordinates,
+            lc.k, _brm_multigroup_method_code(lc.method), lc.c)
+        push!(statements, Expr(:(=), name, call))
+    end
+    if isnothing(lc.lambda)
+        name = options.coordinate_prior
+        push!(taken, name)
+        formals = [Symbol(:coordinate_, j) for j in eachindex(options.coordinate_fit_columns)]
+        method, n_points = _brm_multigroup_method_code(lc.method),
+            isempty(lc.positions) ? 0 : lc.n_points
+        # A data kernel materializes the prior's two numbers at binding, as
+        # the temporal rho-floor kernel does. Layout construction reads the
+        # frozen lower bound without traversing absent fit-role columns.
+        body = quote
+            coordinates = hcat($(formals...))
+            prior = brm_multigroup_coordinate_prior(coordinates, $(lc.k),
+                $method, $(lc.c), $n_points)
+            values = [prior[1], prior[2]]
+            return values
+        end
+        entry = _rk_ast_shared_definition!(definitions, taken,
+            "brm_multigroup_prior_graph", formals, body; kernel=true)
+        call = Expr(:call, entry, options.coordinate_fit_columns...)
+        push!(statements, Expr(:(=), name, call))
+    end
+    for (name, input) in zip(options.position_columns, options.position_fit_columns)
+        input === nothing && continue
+        push!(taken, name)
+        push!(statements, Expr(:(=), name, Expr(:call, :copy, input)))
+    end
+    nothing
+end
+
+function _rk_design_multigroup_check(term, groups)
+    options = term.options
+    source, fit = options.group_column, options.multigroup_fit
+    # Without group resampling, coordinate vectors still name all fitted
+    # levels in fitted order; with it they name this window's declared levels.
+    fixed_levels = options.group_levels
+    design -> begin
+        levels = source in groups ? _brm_fit_levels(_brm_df_column(design, source)) : fixed_levels
+        columns = [_brm_df_column(design, axis) for axis in options.level_cor.axes]
+        allequal(length.(columns)) || error(
+            "RK reprocess: coordinate multigroup `$source` axes have different lengths")
+        _rk_check_multigroup_replay(fit, levels, hcat(columns...); source)
+    end
+end
