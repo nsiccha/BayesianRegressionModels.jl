@@ -49,7 +49,7 @@ SequentialMonteCarlo = "0.7"
 StanBlocks = "0.2.14"
 Treebars = "0.1.1"
 Turing = "0.46"
-WarmupHMC = "0.2.8"
+WarmupHMC = "0.2.9"
 julia = "1.10"
 
 [sources.Distributions]
@@ -107,8 +107,9 @@ rev = "f071111945c165dbae097e94c5939b79103434ac"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
-# 0.2.8: fixed-kernel NUTS used by RKPPL SMC.
-rev = "81e3490e79d86a0e2f9b371485fe0b914a99284f"
+# 0.2.9: portable bounded-reflection scale data and shared fixed kernels for
+# RKPPL SMC.
+rev = "601267869b5f663987cde0d83b22336acd935d6e"
 
 [sources.SequentialMonteCarlo]
 url = "https://github.com/awllee/SequentialMonteCarlo.jl.git"
@@ -251,4 +252,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 23d26ca1 (RK 0.1.39 / RKPPL 0.1.33) keeps indexed direct predictor
 # reads beside reductions local (sum-factor-outer-ca5cc80e).
 # RKPPL 0.1.37: exact nonfinite SMC diagnostics across mutation tasks.
-rev = "44c9cd1533890e7ae2b0cbbc941caad3353b413d"
+# RKPPL 0.1.42 (RK 0.1.44): independent SMC pilot tuning, adaptive pilots and
+# portable correlated references.
+rev = "652c6a51a26b1f12c008f160b920b3dfa95916a9"

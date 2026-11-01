@@ -53,6 +53,40 @@ function finish(state, stages, node)
     state
 end
 
+function tuning_controls(; kwargs...)
+    # Leave optional defaults with the producer that implements each pilot.
+    (; (key => value for (key, value) in pairs(kwargs) if value !== nothing)...)
+end
+
+function BRM.brm_smc_tune(model::Union{BRM.BRMI,BRM.RKBRMI};
+        rng, init, reference=nothing,
+        temperatures=nothing, pilot_steps=64, pilot=nothing,
+        max_reflections=nothing, recording_target=nothing, pilot_evaluations=nothing,
+        options=PPL.SMCOptions(), ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    rk = model isa BRM.RKBRMI ? model : BRM.RKBRMI(model)
+    id = binding_identity(rk)
+    target = prepare(rk, ad_backend, id, id)
+    controls = tuning_controls(; temperatures, pilot, max_reflections,
+        recording_target, pilot_evaluations)
+    PPL.tune_smc(target; rng, init, reference, controls..., pilot_steps, options)
+end
+
+function BRM.brm_smc_tune(fit::BRM.BRMSMCFit, cumulative_data;
+        rng, init, temperatures=nothing, pilot_steps=64, pilot=nothing,
+        max_reflections=nothing, recording_target=nothing, pilot_evaluations=nothing,
+        options=PPL.SMCOptions())
+    BRM._brm_validate_smc_fit(fit)
+    fit.state.temperature == 1 || throw(ArgumentError(
+        "BRM SMC: finish the current bridge before tuning a data update"))
+    rk = BRM.reprocess(fit.template, cumulative_data; freeze_constants=true)
+    id = binding_identity(rk)
+    target = prepare(rk, fit.ad_backend, fit.model_id, id)
+    previous = prepare(fit.backend, fit.ad_backend, fit.model_id, fit.binding_id)
+    controls = tuning_controls(; temperatures, pilot, max_reflections,
+        recording_target, pilot_evaluations)
+    PPL.tune_smc(target; rng, init, previous, controls..., pilot_steps, options)
+end
+
 function BRM.brm_smc_fit(model::Union{BRM.BRMI,BRM.RKBRMI};
         rng=Xoshiro(), particles=1000, reference=nothing, options=PPL.SMCOptions(),
         ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), stages=typemax(Int), progress=nothing)
@@ -61,9 +95,9 @@ function BRM.brm_smc_fit(model::Union{BRM.BRMI,BRM.RKBRMI};
         rk = model isa BRM.RKBRMI ? model : BRM.RKBRMI(model)
         id = binding_identity(rk)
         target = prepare(rk, ad_backend, id, id)
-        ref = reference === nothing ? PPL.SMCReference(
-            zeros(rk.model.layout.total), ones(rk.model.layout.total)) : reference
-        state = PPL.initialize_smc(target; rng, particles, reference=ref, options)
+        state = reference === nothing ?
+            PPL.initialize_smc(target; rng, particles, options) :
+            PPL.initialize_smc(target; rng, particles, reference, options)
         state = finish(state, stages, node)
         BRM.BRMSMCFit(rk, rk, nothing, state, ad_backend, id, id, nothing)
     end

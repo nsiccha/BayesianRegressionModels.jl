@@ -26,6 +26,57 @@ end
 function _brm_validate_smc_fit end
 
 """
+    brm_smc_tune(model; rng, init, reference=nothing,
+        temperatures=nothing, pilot_steps=64, pilot=nothing,
+        max_reflections=nothing, recording_target=nothing, pilot_evaluations=nothing,
+        options=SMCOptions(), ad_backend=AutoEnzyme(mode=Enzyme.Reverse))
+    brm_smc_tune(completed_fit::BRMSMCFit, cumulative_data; rng, init,
+        temperatures=nothing, pilot_steps=64, pilot=nothing,
+        max_reflections=nothing, recording_target=nothing, pilot_evaluations=nothing,
+        options=SMCOptions())
+
+Prepare a bridge-specific RKPPL `SMCTuningSchedule` with independent pilots,
+before running production particles. Pass it to `SMCOptions(tuning=schedule)`
+in [`brm_smc_fit`](@ref) or [`brm_smc_update`](@ref). Load the same packages as
+for fitting. Both explicit `rng::Xoshiro` and unconstrained `init` are copied;
+choose them independently of the production cloud, including the retained
+cloud of a completed fit. BRM never derives pilot inputs from fitted particles.
+
+The default `pilot=:continuous` adapts diagonal scales and step size at each
+supplied temperature; `pilot_steps` counts transitions per knot.
+`pilot=:adaptive` uses WarmupHMC's adaptive warmup and retains the active
+portable scale together with its paired step size; `pilot_steps` is its
+retained-draw floor. Optional `max_reflections` and `recording_target` control
+geometry and the recording pool; `pilot_evaluations` sets the initial work
+window, not a hard total-work budget. `nothing` leaves these controls and
+`pilot` at RKPPL's defaults. Pilot draws are discarded; retained pilot
+evaluation counts exclude initialization and the first step-size search.
+
+Production uses the nearest frozen temperature knot,
+with ties selecting the higher knot. `temperatures` must increase strictly
+from zero to one; `nothing` uses RKPPL's default grid. Include small positive
+knots for bridges that change rapidly near zero; a generic default need not
+resolve a particular model's curvature. `options`
+supplies the starting kernel and production move/depth settings and must not
+already contain a schedule. Pilot draws are not posterior samples.
+
+For an initial fit, the normalized reference defaults to standard Normal and
+stays fixed. With `pilot=:adaptive, reference=:pilot`, a separate full-target
+pilot first estimates the reference mean and scale; that normalized Gaussian
+is then frozen before temperature-grid tuning and production. The scale is
+stored as copied plain data, with no dense metric. Omit `reference` in the
+subsequent fit to use the schedule's exact reference; an explicit conflicting
+reference rejects. For an update, supply
+the complete cumulative data. The original preprocessing is frozen and the
+previous posterior is the source; there is no initial-reference argument.
+Schedules belong to their exact endpoints and cannot silently transfer to new
+data. Checkpoints retain the schedule without rerunning its pilots on resume.
+The production temperature rule remains adaptive; this does not establish
+exactly unbiased evidence at finite particle counts.
+"""
+function brm_smc_tune end
+
+"""
     brm_smc_fit(model; rng=Xoshiro(), particles=1000, reference=nothing,
         options=SMCOptions(), ad_backend=AutoEnzyme(mode=Enzyme.Reverse),
         stages=typemax(Int), progress=nothing)
@@ -36,11 +87,18 @@ partial fit. Load ReactiveKernels, ReactiveKernelsPPL, SequentialMonteCarlo,
 WarmupHMC, Enzyme, ADTypes and DifferentiationInterface. The model is evaluated
 with its full prior, likelihood and unconstrained-coordinate Jacobian.
 
-`reference` is RKPPL's `SMCReference(location, scale)`: a normalized diagonal
-Gaussian in unconstrained coordinates, defaulting to standard Normal. These
+`reference` is RKPPL's `SMCReference(location, scale)`: a normalized Gaussian
+in unconstrained coordinates. `scale` accepts a vector of diagonal scales or
+a portable `WarmupHMC.scale_data(L)` record. The default is standard Normal or
+the exact reference retained by `options.tuning`. These
 are reference draws, not model-prior draws. Its actual density is included in
 the importance ratio. `options` is RKPPL's `SMCOptions`; mutation uses fixed
-diagonal-scale NUTS. The explicit `Random.Xoshiro` is copied, not advanced.
+NUTS, with diagonal scales or `metric=WarmupHMC.scale_data(L)`.
+With `options.tuning=brm_smc_tune(...)`, its settings vary
+between stages according to the precomputed schedule; they stay fixed during
+each stage. History retains the selected kernel, evaluation count, mean
+acceptance and mean squared unconstrained movement. These diagnostics do not prove adequate
+exploration. The explicit `Random.Xoshiro` is copied, not advanced.
 
 `stages` bounds the number of complete bridge stages in this call (zero only
 initializes). `progress` accepts the usual BRM Treebars node or backend symbol.
@@ -72,6 +130,11 @@ including deterministic recurrences. This is sequential parameter inference
 with full-history replay, not constant-cost streaming or latent-state filtering.
 Returns a new fit; its input remains usable. A partial update is continued with
 `brm_smc_fit`, not by starting another update.
+
+If the completed fit used tuning, its schedule belongs to the old bridge and
+the default `options` rejects. Supply a new `brm_smc_tune(fit, cumulative_data;
+rng, init, ...)` schedule in `SMCOptions(tuning=...)`, or explicitly choose
+untuned `SMCOptions()`.
 """
 function brm_smc_update end
 
