@@ -49,7 +49,7 @@ end
     previous=deserialize(checkpoint_file)
     @test previous.source_id==accepted.checkpoint.source_id
     @test previous.method==accepted.checkpoint.method && previous.q==accepted.q
-    directory=joinpath(base,"public-streaming-cost-v1")
+    directory=joinpath(base,"public-streaming-cost-v2")
     ispath(directory) && error("preserve existing retained-state cost evidence")
     mkpath(directory)
     root=normpath(joinpath(@__DIR__,"../.."))
@@ -64,9 +64,13 @@ end
         repetitions=5,draws=128,julia=string(VERSION),julia_threads=Threads.nthreads(),
         blas_threads=BLAS.get_num_threads())
     serialize(joinpath(directory,"identity.jls"),identity)
-    (;builder)=public_laplace_fixture()
+    fixture=public_laplace_fixture()
+    builder=fixture.builder
     labels=[3,4,5,6,7,8];rows=12
-    locations=Dict(i=>(cos(1.3i),sin(.7i)) for i in 1:6)
+    # Preserve the original fitted coordinates bit for bit. Recomputing the
+    # scalar trigonometric expressions differs from the range-based fixture
+    # by a few ulps at some levels; frozen replay correctly rejects that.
+    locations=Dict(i=>(fixture.data.sx[i],fixture.data.sy[i]) for i in 1:6)
     locations[7]=(0.,0.);locations[8]=(.1,.2)
     data=(;probe=repeat(labels;inner=rows),time=repeat(collect(range(.15,1.95;length=rows)),6),
         sx=[locations[i][1] for i in labels],sy=[locations[i][2] for i in labels],
