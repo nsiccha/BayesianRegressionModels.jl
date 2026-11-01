@@ -17927,6 +17927,8 @@ _sb_scalar_expr(x::ExprColumn, data) = begin
     # A Julia callable Stan spells differently (`vcat` -> nested `append_row`,
     # `cumsum` -> `cumulative_sum`, ...) takes the kernel cells' spelling.
     if isempty(getkwargs(x))
+        statistic = _sb_distribution_statistic(f, args, nothing)
+        statistic === nothing || return statistic
         stan = _sb_julia_stan_call(f, args)
         stan === nothing || return stan
     end

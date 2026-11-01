@@ -10,6 +10,9 @@
 #   builtin (`logistic` -> `inv_logit`, `normcdf` -> `Phi`, `cumsum` ->
 #   `cumulative_sum`, `fill`/`zeros`/`ones` -> `rep_vector`/`rep_matrix`,
 #   `vcat` -> `append_row`, ...);
+# - distribution statistics over an explicit constructor (`mean`/`var` of
+#   lower-truncated LogNormal, and its separate `logccdf`), using the numerical
+#   primitives in StanBlocks (`sb_distribution_statistics.jl`);
 # - an observation constructor from Distributions (`y ~ Normal(mu, s)`),
 #   through the `_sb_stan_distribution_call` table the top-level likelihoods
 #   use, also as the family of `censored`/`truncated`/`interval_censored`/
@@ -99,6 +102,8 @@ function _sb_cell_value(x::Expr, scope)
         args = Any[_sb_cell_argument(a, scope) for a in x.args[2:end]]
         if !any(_sb_cell_keyword_argument, args)
             callable = _sb_cell_binding(scope, head)
+            statistic = _sb_distribution_statistic(callable, args, scope)
+            statistic === nothing || return statistic
             rewritten = callable === nothing ? nothing : _sb_julia_stan_call(callable, args)
             rewritten === nothing || return rewritten
         end
