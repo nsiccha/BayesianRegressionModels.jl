@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.108
+
+- `car(area; edges=(from, to), nodes=all_areas, type=...)`: the optional
+  `nodes=` names one data vector holding every area of the graph, declared
+  apart from the observed rows, so an area with no rows and no neighbours (an
+  island whose every row a hold-out withholds) keeps its place and a frozen
+  `reprocess` onto its rows finds it. A row or edge naming an area outside
+  `nodes` is refused; the vector may repeat labels. Without `nodes=` the graph
+  stays every label in `edges` and in `area`. SBBRMI and RKBRMI alike; a
+  frozen replay needs neither the edge nor the node vectors, and
+  `freeze_constants=false` rebuilds the graph from all of them.
+
 ## 0.2.107
 
 - Added Stan lowering for ordinary `mean` and `var` expressions over a

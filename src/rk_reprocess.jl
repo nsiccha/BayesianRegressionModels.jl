@@ -281,9 +281,10 @@ function _brm_raise_replay_failure(d::_BRMReplayData, key::Symbol)
     nothing
 end
 
-# A frozen replay keeps each `car(area; edges=...)` term's fitted graph and reads
-# only `area`, so edge vectors the new data omits keep their fitted values. A
-# fresh replay rebuilds the graph from the new data and needs them.
+# A frozen replay keeps each `car(area; edges=..., nodes=...)` term's fitted
+# graph and reads only `area`, so edge vectors, and a declared `nodes=` vector,
+# the new data omits keep their fitted values. A fresh replay rebuilds the
+# graph from the new data and needs them.
 function _rk_car_fitted_edges(brmi::BRMI, new_data, training)
     edges = Dict{Symbol,Any}()
     for predictor in linear_predictors(brmi)
@@ -291,8 +292,9 @@ function _rk_car_fitted_edges(brmi::BRMI, new_data, training)
         isnothing(operation) && continue
         for term in _brm_additive_terms(last(getargs(operation, 2)))
             term isa ExprColumn && getf(term) === car || continue
-            for edge in getkwargs(term).edges
-                key = name(edge)
+            kw = getkwargs(term)
+            for column in (haskey(kw, :nodes) ? (kw.edges..., kw.nodes) : kw.edges)
+                key = name(column)
                 _brm_df_has_column(new_data, key) || (edges[key] = training[key])
             end
         end

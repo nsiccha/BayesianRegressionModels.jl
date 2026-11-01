@@ -1,6 +1,7 @@
 # test/car_term.jl — semantic and executable contract for the areal term
 # `car(area; edges=(from, to), type=:icar | :bym2)`: an intrinsic CAR field over
-# an adjacency graph, alone or in the BYM2 convolution.
+# an adjacency graph, alone or in the BYM2 convolution. `nodes=all_areas`
+# declares the graph's complete support apart from the rows.
 
 using Test
 using BayesianRegressionModels
@@ -29,6 +30,26 @@ function car_model(df=car_df(); type=:bym2)
         y ~ Normal(mu, 1.0)
     end) : (@brm df begin
         mu ~ 1 + car(area; edges=(from, to), type=:icar)
+        effect(mu, Intercept) ~ Normal(0, 1)
+        y ~ Normal(mu, 1.0)
+    end)
+end
+
+# The same areas with the support declared: `all_areas` lists "a".."i", so "i"
+# — an island with no rows and no neighbours, which nothing else names — is an
+# area of the graph (snag atlas-conditiona-48d4086a: a Gemeinde with no
+# neighbours and no training row had no node, so a held-out replay onto its
+# rows was refused).
+const NODES = ["a", "b", "c", "d", "e", "f", "g", "h", "i"]
+car_df_nodes(; all_areas=NODES, kwargs...) = merge(car_df(; kwargs...), (; all_areas))
+
+function car_model_nodes(df=car_df_nodes(); type=:bym2)
+    type === :bym2 ? (@brm df begin
+        mu ~ 1 + car(area; edges=(from, to), nodes=all_areas, type=:bym2)
+        effect(mu, Intercept) ~ Normal(0, 1)
+        y ~ Normal(mu, 1.0)
+    end) : (@brm df begin
+        mu ~ 1 + car(area; edges=(from, to), nodes=all_areas, type=:icar)
         effect(mu, Intercept) ~ Normal(0, 1)
         y ~ Normal(mu, 1.0)
     end)
@@ -174,9 +195,83 @@ end
     @test described.complete
 end
 
+@testset "car nodes= declares the graph's support: an island without rows keeps its place" begin
+    sb = SBBRMI(car_model_nodes(); mod=@__MODULE__)
+    plain = SBBRMI(car_model(); mod=@__MODULE__)
+    # sorted areas a..i = 1..9; "i" is an island: no `phi` position, no scaling
+    @test sb.data[:car_mu_area_n_nodes] == 9
+    @test sb.data[:car_mu_area_n_struct] == 7
+    @test sb.data[:car_mu_area_struct_idx] == [1, 2, 3, 4, 6, 7, 0, 5, 0]
+    @test sb.data[:car_mu_area_inv_scale] == vcat(plain.data[:car_mu_area_inv_scale], 0.0)
+    for key in (:car_mu_area_node1, :car_mu_area_node2, :car_mu_area_comp_start,
+                :car_mu_area_comp_size, :car_mu_area_row_idx)
+        @test sb.data[key] == plain.data[key]
+    end
+    @test StanBlocks.stan_code(sb.model) == StanBlocks.stan_code(plain.model)
+    @test StanBlocks.stanc_check(StanBlocks.stan_code(sb.model); warn_pedantic=false).ok
+    # a repeated label (a level table's column, one entry per row) names its area once
+    repeated = car_model_nodes(car_df_nodes(; all_areas=vcat(NODES, reverse(NODES))))
+    @test SBBRMI(repeated; mod=@__MODULE__).data[:car_mu_area_struct_idx] ==
+          sb.data[:car_mu_area_struct_idx]
+    # the support is a data column the model reads
+    declared = @brm begin
+        mu ~ 1 + car(area; edges=(from, to), nodes=all_areas, type=:icar)
+        y ~ Normal(mu, 1.0)
+    end
+    @test :all_areas in brm_columns(declared)
+    # a frozen replay maps a row onto the declared island; neither the support
+    # nor the edges are needed
+    held_out = reprocess(sb, (; area=["i", "a"], y=zeros(2)))
+    @test held_out.data[:car_mu_area_row_idx] == [9, 1]
+    @test held_out.data[:car_mu_area_struct_idx] == sb.data[:car_mu_area_struct_idx]
+    @test StanBlocks.stan_code(held_out.model) == StanBlocks.stan_code(sb.model)
+    @test_throws "not an area of the fitted graph" reprocess(sb, (; area=["z"], y=[0.0]))
+    # a fresh rebuild reads the new support
+    fresh = reprocess(sb, car_df_nodes(; area=["a", "b"], from=["a"], to=["b"],
+                                       all_areas=["a", "b", "q"]); freeze_constants=false)
+    @test fresh.data[:car_mu_area_n_nodes] == 3
+    @test fresh.data[:car_mu_area_struct_idx] == [1, 2, 0]
+    # the declared support is the whole graph: a row or an edge outside it is refused
+    @test_throws "`car` area label \"g\" is not among" SBBRMI(
+        car_model_nodes(car_df_nodes(; all_areas=setdiff(NODES, ["g"]))); mod=@__MODULE__)
+    @test_throws "`car` edge label \"h\" is not among" SBBRMI(
+        car_model_nodes(car_df_nodes(; all_areas=setdiff(NODES, ["h"]))); mod=@__MODULE__)
+    @test_throws "names no area" SBBRMI(
+        car_model_nodes(car_df_nodes(; all_areas=String[])); mod=@__MODULE__)
+    @test_throws "mix" SBBRMI(
+        car_model_nodes(car_df_nodes(; all_areas=collect(1:9))); mod=@__MODULE__)
+    df = car_df_nodes()
+    @test_throws "takes only" SBBRMI((@brm df begin
+        mu ~ 1 + car(area; edges=(from, to), support=all_areas, type=:icar)
+        y ~ Normal(mu, 1.0)
+    end); mod=@__MODULE__)
+    # the reporter's shape: a two-area graph fitted on rows of both areas, then
+    # replayed onto an island the fit had no row of
+    builder = @brm begin
+        mu ~ 1 + car(area; edges=(edge_from, edge_to), nodes=all_areas, type=:icar)
+        y ~ Normal(mu, 1.0)
+    end
+    train = (; area=["A", "B"], edge_from=["A"], edge_to=["B"], all_areas=["A", "B", "C"],
+               y=[0.2, -0.1])
+    fit = SBBRMI(builder(train); mod=@__MODULE__)
+    @test fit.data[:car_mu_area_struct_idx] == [1, 2, 0]
+    @test reprocess(fit, (; area=["C"], y=[0.0])).data[:car_mu_area_row_idx] == [3]
+    undeclared = @brm begin
+        mu ~ 1 + car(area; edges=(edge_from, edge_to), type=:icar)
+        y ~ Normal(mu, 1.0)
+    end
+    rows = (; area=["A", "B"], edge_from=["A"], edge_to=["B"], y=[0.2, -0.1])
+    @test_throws "not an area of the fitted graph" reprocess(
+        SBBRMI(undeclared(rows); mod=@__MODULE__), (; area=["C"], y=[0.0]))
+    # a declared support the data lacks is refused when the model is built
+    @test_throws "expects a raw data column" SBBRMI(builder(rows); mod=@__MODULE__)
+    d = brm_descriptor(fit)
+    @test brm_description(d).complete
+end
+
 # Julia oracle of the whole BYM2 model density (propto=false, Jacobian on).
 function car_oracle(df, q; intercept, sigma, rho, theta, phi)
-    nodes = sort(unique(vcat(df.area, df.from, df.to)))
+    nodes = sort(unique(vcat(df.area, df.from, df.to, get(df, :all_areas, String[]))))
     k(label) = findfirst(==(label), nodes)
     struct_nodes = ["a", "b", "c", "d", "h", "e", "f"]   # phi order
     comp = Dict("a" => 1, "b" => 1, "c" => 1, "d" => 1, "h" => 1, "e" => 2, "f" => 2)
@@ -189,6 +284,7 @@ function car_oracle(df, q; intercept, sigma, rho, theta, phi)
                                  sqrt(1 - rho) * theta[k(label)])
     end
     effect["g"] = sigma * theta[k("g")]
+    haskey(df, :all_areas) && (effect["i"] = sigma * theta[k("i")])   # declared island
     pos = Dict(l => p for (p, l) in enumerate(struct_nodes))
     icar = -0.5 * sum((phi[pos[a]] - phi[pos[b]])^2 for (a, b) in zip(df.from, df.to))
     s2z = logpdf(Normal(0, 0.001 * 5), sum(phi[1:5])) + logpdf(Normal(0, 0.001 * 2), sum(phi[6:7]))
@@ -209,14 +305,18 @@ indices_of(names, prefix) = findall(startswith(prefix * "."), names)
 
 @testset "car BridgeStan density equals the Julia oracle; coordinates resolve" begin
     if CAR_RUNTIME
-        df = car_df(; y=[0.3, -0.2, 0.5, 1.1, -0.7, 0.0, 0.4, -0.1, 0.9])
-        sb = SBBRMI(car_model(df); mod=@__MODULE__)
+      y = [0.3, -0.2, 0.5, 1.1, -0.7, 0.0, 0.4, -0.1, 0.9]
+      # the graph as the rows and edges name it (8 areas), and with the declared
+      # support (9: the island "i" gets its own BYM2 `theta`)
+      for (model, df, n_nodes) in ((car_model, car_df(; y), 8),
+                                   (car_model_nodes, car_df_nodes(; y), 9))
+        sb = SBBRMI(model(df); mod=@__MODULE__)
         problem = instantiate(sb)
         sm = problem.model
         names = String.(BS.param_names(sm))
-        @test LogDensityProblems.dimension(problem) == 1 + 2 + 8 + 7
+        @test LogDensityProblems.dimension(problem) == 1 + 2 + n_nodes + 7
         q = zeros(LogDensityProblems.dimension(problem))
-        theta = collect(range(-1.0, 1.0; length=8))
+        theta = collect(range(-1.0, 1.0; length=n_nodes))
         phi = [0.4, -0.3, 0.2, 0.1, -0.4, 0.25, -0.25]
         q[index_of(names, "car_mu_area_sigma")] = log(0.7)
         q[index_of(names, "car_mu_area_rho")] = log(0.6 / 0.4)
@@ -235,12 +335,14 @@ indices_of(names, prefix) = findall(startswith(prefix * "."), names)
         @test length(coords(:sd)) == 1
         @test length(coords(:mixing)) == 1
         @test length(coords(:structured)) == 7
-        @test length(coords(:unstructured)) == 8
+        @test length(coords(:unstructured)) == n_nodes
         effects = constrained[coords(:effects)]
-        @test length(effects) == 8
+        @test length(effects) == n_nodes
         @test effects[7] ≈ 0.7 * theta[7]                        # island g
+        n_nodes == 9 && @test effects[9] ≈ 0.7 * theta[9]        # declared island i
         value = constrained[coords(:value)]
         @test value ≈ effects[sb.data[:car_mu_area_row_idx]]
+      end
     else
         @info "Skipping BridgeStan car runtime gate (BRM_CAR_RUNTIME=0)"
         @test true
@@ -338,8 +440,9 @@ end
 @testset "car on RKBRMI: the same law as SBBRMI at transported coordinates" begin
     if CAR_RUNTIME
         y = [0.3, -0.2, 0.5, 1.1, -0.7, 0.0, 0.4, -0.1, 0.9]
-        for type in (:bym2, :icar)
-            brmi = car_model(car_df(; y); type)
+        for type in (:bym2, :icar), (model, df) in ((car_model, car_df(; y)),
+                                                    (car_model_nodes, car_df_nodes(; y)))
+            brmi = model(df; type)
             rk, problem = consumer_problem(brmi)
             sb = SBBRMI(brmi; mod=@__MODULE__)
             stan = instantiate(sb)
@@ -386,6 +489,16 @@ end
         # Not built yet: a data-free fitted state does not carry the graph
         # (`brm_fitted_state` names the term); replays use the training fit.
         @test_broken (brm_fitted_state(rk); true)
+        # the declared support: a replay onto the island "i", which no training
+        # row names, reads the fitted graph (neither `all_areas` nor the edges
+        # are bound); under `:icar` its effect is zero, as the island "g"'s
+        icar = RKBRMI(car_model_nodes(car_df_nodes(; y); type=:icar))
+        u_icar = collect(range(-0.4, 0.5; length=length(coordinate_names(icar.model.layout))))
+        train_icar = mu_at(icar, u_icar)
+        @test rk_bound_data(icar).car_mu_area_nodes == NODES
+        replay_icar = reprocess(icar, (; area=["i", "g", "a"], y=zeros(3)))
+        @test mu_at(replay_icar, u_icar) ≈ train_icar[[7, 7, 1]] atol=1e-12 rtol=1e-12
+        @test_throws "not an area of the fitted graph" reprocess(icar, (; area=["z"], y=[0.0]))
     else
         @info "Skipping the RKBRMI car replay gate (BRM_CAR_RUNTIME=0)"
         @test true
@@ -402,6 +515,12 @@ end
         for design in ((; area=["a", "b"], y=zeros(2)), (; area=["e", "g", "h"], y=zeros(3)))
             @test binder(design) == rk_bound_data(reprocess(rk, design))
         end
+        # `i` names an area only the declared support holds
+        declared = RKBRMI(car_model_nodes(car_df_nodes(; y)))
+        binder_declared = rk_design_binder(declared)
+        for design in ((; area=["i", "h"], y=zeros(2)), (; area=["a", "i", "g"], y=zeros(3)))
+            @test binder_declared(design) == rk_bound_data(reprocess(declared, design))
+        end
     else
         @info "Skipping the RKBRMI car binder gate (BRM_CAR_RUNTIME=0)"
         @test true
@@ -417,10 +536,12 @@ untyped_columns(bound) = [k for (k, v) in pairs(bound)
     if CAR_RUNTIME
         ints = car_df(; area=[1, 2, 3, 4, 5, 6, 7, 1, 5],
                       from=Float64[1, 2, 3, 1, 4, 5], to=Float64[2, 3, 4, 3, 8, 6])
-        for (df, label) in ((car_df(), String), (ints, Int)), type in (:bym2, :icar)
-            rk = RKBRMI(car_model(df; type))
+        for (df, label) in ((car_df(), String), (ints, Int), (car_df_nodes(), String)),
+                type in (:bym2, :icar)
+            rk = RKBRMI((haskey(df, :all_areas) ? car_model_nodes : car_model)(df; type))
             bound = rk_bound_data(rk)
             @test eltype(bound.car_mu_area_nodes) === label
+            @test length(bound.car_mu_area_nodes) == (haskey(df, :all_areas) ? 9 : 8)
             @test isempty(untyped_columns(bound))
             replay = reprocess(rk, (; area=df.area[[1, 5]], y=zeros(2)))
             @test isempty(untyped_columns(rk_bound_data(replay)))
