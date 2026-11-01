@@ -4,7 +4,9 @@
 # This is a research control, not an SVI entry point or a streaming algorithm.
 # The operator uses one compact HVP direction, never a field Hessian. Dense
 # matrices below are confined to the eight-coefficient Gaussian oracle.
-include(joinpath(@__DIR__, "../../test/nlme_fixtures.jl"))
+# Several independent research controls share this fixture through converging
+# include paths. The standalone test filter must be registered only once.
+isdefined(@__MODULE__, :NLME_AD) || include(joinpath(@__DIR__, "../../test/nlme_fixtures.jl"))
 using LinearAlgebra, Random, LogDensityProblems
 const KrylovKit = BRM.KrylovKit
 

@@ -59,7 +59,9 @@ function BRM._brm_svi_iteration!(rng,t::JointWindowTarget,q,global_opt,batch,
     probes = [ifelse.(rand(rng,Bool,length(t.op.field)),1.0,-1.0)
         for _ in 1:t.trace_probes]
     a = joint_window_state(rng,t,plus,probes)
-    b = joint_window_state(rng,t,minus,probes)
+    # With every unit integrated, plus and minus are the same point. Its
+    # caller can allocate the full logdet probe budget to this single action.
+    b = isempty(t.units) ? a : joint_window_state(rng,t,minus,probes)
     w = (a.gradient[t.globals]+b.gradient[t.globals])/2
     x = BRM._brm_svi_global_vector(q)
     grad = BRM._brm_svi_global_gradient(q,w,epsilon,eta)
