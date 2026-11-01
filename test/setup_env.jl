@@ -260,7 +260,10 @@ const PINS = [
     # 0e251cfb (libEnzyme build 782c9d95) also fixes second derivatives
     # through dynamic calls on Julia 1.10 (Enzyme snag compute-an-ordin-902b6418),
     # including the lower-bounded completion's ParameterGeometry callbacks.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "0e251cfbcb810ee4dc2120b51de0784d30140aef"),  # dogfood (KB mirror only)
+    # 5325554c keeps that libEnzyme build and repairs erfcx derivatives in
+    # positive tails through third order (Enzyme snag erfcx-positive-t-db1c8c84).
+    # Embedded Laplace needs those orders for scaled-tail likelihoods.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "5325554cab66d13ab34c22ec502fd00759ffdcf7"),  # dogfood (KB mirror only)
 ]
 
 # Pins whose commits are not on GitHub: the KB host mirror they come from.

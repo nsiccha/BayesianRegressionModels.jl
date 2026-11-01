@@ -797,6 +797,13 @@ through RK against the whole-model gradient and differences. It needs
 ReactiveKernels with `prepare_ad_third` and pullbacks over several WANT ports
 (the test pin) and runs in the test environment above.
 
+`nlme_laplace_history.jl` checks a nonlinear Normal cell with two conditional
+modes. The generic and sparse targets return exactly the same density,
+gradient and modes after either of two distant proposals. A scalar conditional
+mode oracle checks the value, and finite differences check both population
+derivatives. This checks independence from previous evaluations; the
+approximation still uses one mode.
+
 `start_values.jl` checks `brm_start`, initial values keyed by prior address,
 on both backends. For a correlated population-PK model, a linked predictor,
 a categorical predictor with a `Dirichlet` simplex, and an exact-total block,
@@ -1804,10 +1811,13 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   `native-reverse-t-6d51cae6`; user pick on BRM decision `0n0kgfh`). The
   sparse Laplace's `@plate` cells take their Hessian blocks through RKPPL's
   compact-cell AD under plain Reverse, which needs dogfood from `7a886d9`
-  (Enzyme snag `static-reverse-s-f9483e9c`). The current pin is `0e251cfb`
+  (Enzyme snag `static-reverse-s-f9483e9c`). The current pin is `5325554c`
   with its declared libEnzyme `782c9d95`; it includes `3a89b497`'s compact
   nested-AD overlay repairs for sum factors and the dynamic-call Hessian
-  repair needed by lower-bounded completion geometry.
+  repair needed by lower-bounded completion geometry. It also repairs
+  positive-tail `erfcx` derivatives through third order (Enzyme snag
+  `erfcx-positive-t-db1c8c84`), required by scaled-tail likelihoods in the
+  embedded Laplace.
   `setup_env.jl` materializes the pinned dogfood commit from the KB host's
   Enzyme mirror (it is not on GitHub), develops its nested `lib/EnzymeCore`
   0.8.27 beside it (Pkg 1.10 ignores Enzyme's `[sources]`; registered

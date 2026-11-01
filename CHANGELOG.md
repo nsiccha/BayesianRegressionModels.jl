@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.97
+
+- Fixed: all three `brm_laplace_problem` engines start each conditional mode
+  search at zero standardized effects. Previous evaluations no longer choose
+  a basin or change whether a point converges, so the density and gradient at
+  a population point are independent of call history. This keeps the existing
+  single-mode Laplace approximation; it does not sum multiple modes. Searches
+  may take more Newton steps than the former warm starts.
+
 ## 0.2.96
 
 - Added: sparse embedded Laplace integration of sum-factored `@plate`

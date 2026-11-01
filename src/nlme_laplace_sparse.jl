@@ -1123,7 +1123,7 @@ function _brm_spl_population(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     (; uA, values, A, C, dC)
 end
 
-# Every component's mode at population point φ, from the previous modes: one
+# Every component's mode at population point φ, from zero effects: one
 # factor per Newton step, each component its own step length (backtracking on
 # its own terms), stop (Newton decrement at most `tol`, or at its rounding
 # floor) and failure. Then h at the modes and its factor.
@@ -1135,15 +1135,11 @@ function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     end
     n = length(p.integrated)
     nc = length(p.components)
-    z = p.u[p.integrated]
+    z = zeros(n)
     fc = zeros(nc); g = zeros(n); h = _brm_spl_precision(p)
     _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
-    if !(all(isfinite, fc) && all(isfinite, g))
-        z .= 0.0
-        _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
-        all(isfinite, fc) && all(isfinite, g) || (p.nonfinite += 1;
-            return (; finite=false, value=-Inf, iterations=0))
-    end
+    all(isfinite, fc) && all(isfinite, g) || (p.nonfinite += 1;
+        return (; finite=false, value=-Inf, iterations=0))
     converged = falses(nc)
     previous = fill(Inf, nc)
     λ = zeros(nc)
