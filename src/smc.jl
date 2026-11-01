@@ -159,3 +159,32 @@ to the caller.
 """
 function brm_smc_checkpoint end
 function brm_smc_resume end
+
+"""
+    brm_smc_compare(fits::BRMSMCFit...)
+    brm_smc_runs(model; seeds, particles=1000, reference=nothing,
+        options=SMCOptions(), ad_backend=AutoEnzyme(mode=Enzyme.Reverse), progress=nothing)
+
+Compare two or more completed fits of the same model, data and, for updates,
+the same previous posterior; fits of different identities, or fits that have
+not reached temperature one, are refused by name. Nothing is fitted or
+reweighted: the comparison summarizes the retained clouds. Per unconstrained
+coordinate (`names`) it returns each run's weighted mean and SD (`runs`), the
+pooled mean and the root mean within-run variance (`pooled_mean`,
+`pooled_sd`), the largest difference between run means in pooled-SD units
+(`mean_difference`), the smallest and largest run SD in pooled-SD units
+(`sd_ratio_min`, `sd_ratio_max`), and the coordinate with the largest mean
+difference (`worst`). `log_normalizer` holds the runs' evidence estimates with
+their mean and sample SD. Each run also reports its surviving initial
+lineages, this bridge's stage count, and the evaluations and divergences summed
+over its retained history, which `history_limit` may have truncated.
+
+These are descriptive agreement statistics between independent runs, not
+Monte Carlo standard errors and not an acceptance gate: close agreement does
+not prove the runs explored the posterior, and disagreement localizes which
+coordinates to inspect. `brm_smc_runs` fits one bridge per integer seed with
+the same settings as [`brm_smc_fit`](@ref), in sequence, and returns
+`(; fits, comparison)`.
+"""
+function brm_smc_compare end
+function brm_smc_runs end

@@ -77,6 +77,12 @@ oracle's spread, and a known-gap testset pinned to ReactiveKernels snag
 reference (`reference=:pilot`) is narrower than the posterior and leaves the
 population intercept under-dispersed while the group effects stay right.
 
+`smc_compare.jl` checks `brm_smc_runs` and `brm_smc_compare`: independent
+bridges on an analytic Normal posterior and on the tuned correlated Gaussian
+oracle agree with the exact means, SDs and evidence; the comparison is
+deterministic for fixed seeds; fits of different data, of a different
+previous posterior, or incomplete fits are refused by name.
+
 `rk_captured_source.jl` checks that `rkppl_model(rk)` preserves submodel and
 callable-provider densities, shares captured source across compatible replays,
 and keeps frozen preprocessing in the binding, including training-free replay.

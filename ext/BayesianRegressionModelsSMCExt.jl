@@ -9,6 +9,7 @@ import ReactiveKernels
 import SequentialMonteCarlo
 import WarmupHMC
 using Random: Xoshiro
+using Statistics: mean, std
 using Serialization: serialize
 using SHA: sha256
 
@@ -157,6 +158,62 @@ function BRM.brm_smc_resume(template::BRM.RKBRMI, checkpoint;
     state = PPL.resume_smc(target, checkpoint.state; previous=old_target)
     BRM.BRMSMCFit(template, rk, previous, state, ad_backend,
         checkpoint.model_id, checkpoint.binding_id, checkpoint.previous_id)
+end
+
+
+# Weighted first and second moments of a d × n cloud with normalized weights.
+function weighted_moments(positions, weights)
+    means = positions * weights
+    centered = positions .- means
+    variances = vec(sum(centered .^ 2 .* transpose(weights); dims=2))
+    (means, sqrt.(max.(variances, 0.0)))
+end
+
+function BRM.brm_smc_compare(fits::BRM.BRMSMCFit...)
+    length(fits) >= 2 || throw(ArgumentError("brm_smc_compare needs at least two completed fits"))
+    reference = first(fits)
+    for (k, fit) in enumerate(fits)
+        BRM._brm_validate_smc_fit(fit)
+        fit.model_id == reference.model_id && fit.binding_id == reference.binding_id &&
+            fit.previous_id == reference.previous_id || throw(ArgumentError(
+            "fit $k targets a different model, data or previous posterior than fit 1"))
+        fit.state.temperature == 1 || throw(ArgumentError(
+            "fit $k is not complete (temperature $(fit.state.temperature)); finish it with brm_smc_fit first"))
+    end
+    names = PPL.coordinate_names(reference.backend.model.layout)
+    runs = map(fits) do fit
+        means, sds = weighted_moments(fit.state.positions, fit.state.weights)
+        history = fit.state.history
+        (; means, sds, log_normalizer=fit.state.log_normalizer,
+            lineages=length(Set(fit.state.lineage)), stages=fit.state.stage,
+            history_stages=length(history),
+            evaluations=sum(stage.evaluations for stage in history; init=0),
+            divergences=sum(stage.divergences for stage in history; init=0))
+    end
+    d = length(names)
+    mean_matrix = reduce(hcat, (run.means for run in runs))
+    sd_matrix = reduce(hcat, (run.sds for run in runs))
+    pooled_mean = [mean(view(mean_matrix, i, :)) for i in 1:d]
+    pooled_sd = [sqrt(mean(abs2, view(sd_matrix, i, :))) for i in 1:d]
+    ratio(x, s) = s > 0 ? x / s : (x == 0 ? 0.0 : Inf)
+    mean_difference = [ratio(maximum(view(mean_matrix, i, :)) - minimum(view(mean_matrix, i, :)), pooled_sd[i]) for i in 1:d]
+    sd_ratio_min = [ratio(minimum(view(sd_matrix, i, :)), pooled_sd[i]) for i in 1:d]
+    sd_ratio_max = [ratio(maximum(view(sd_matrix, i, :)), pooled_sd[i]) for i in 1:d]
+    values = [run.log_normalizer for run in runs]
+    worst = d == 0 ? nothing :
+        (i = argmax(mean_difference); (; coordinate=names[i], index=i, mean_difference=mean_difference[i]))
+    (; names, runs=collect(runs), pooled_mean, pooled_sd, mean_difference, sd_ratio_min, sd_ratio_max,
+        log_normalizer=(; values, mean=mean(values), sd=std(values)), worst)
+end
+
+function BRM.brm_smc_runs(model::Union{BRM.BRMI,BRM.RKBRMI}; seeds, particles=1000, reference=nothing,
+        options=PPL.SMCOptions(), ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), progress=nothing)
+    length(seeds) >= 2 || throw(ArgumentError("brm_smc_runs needs at least two seeds"))
+    all(seed -> seed isa Integer, seeds) || throw(ArgumentError("seeds must be integers; each run draws its own Xoshiro from one"))
+    rk = model isa BRM.RKBRMI ? model : BRM.RKBRMI(model)
+    fits = [BRM.brm_smc_fit(rk; rng=Xoshiro(seed), particles, reference, options, ad_backend, progress)
+        for seed in seeds]
+    (; fits, comparison=BRM.brm_smc_compare(fits...))
 end
 
 end
