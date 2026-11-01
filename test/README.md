@@ -34,6 +34,10 @@ and keeps frozen preprocessing in the binding, including training-free replay.
 scores and a Kalman recursion, calibrated ensemble warm-up, independent group
 updates, cooperative stream consumption, checkpoint recovery and bounded
 retention. `filter_models.jl` contains the shared public synthetic models.
+`filter_checkpoint_process.jl` is invoked in separate processes by that suite.
+`filter_calibration.jl` additionally checks an explicitly drifting parameter
+against analytic filtering, narrow-ensemble predictive calibration and the
+completed-SMC-to-filter interface.
 
 `test/Project.toml` is a superset of the root project: it carries every package
 that any `test/*.jl` loads, so no test file fails at its own `using` line the way
