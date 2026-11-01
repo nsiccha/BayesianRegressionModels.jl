@@ -8,7 +8,8 @@ include(joinpath(@__DIR__, "../../test/nlme_fixtures.jl"))
 using LinearAlgebra, Random, LogDensityProblems
 const KrylovKit = BRM.KrylovKit
 
-function shared_field_fixture(; groups=3, rows=3, temporal=2, spatial=2, poisson=false)
+function shared_field_fixture(; groups=3, rows=3, temporal=2, spatial=2, poisson=false,
+        prepare_model=true)
     rng = Xoshiro(20261101)
     data = (; probe=repeat(1:groups; inner=rows),
         time=repeat(collect(range(0.1, 2.0; length=rows)), groups),
@@ -23,7 +24,7 @@ function shared_field_fixture(; groups=3, rows=3, temporal=2, spatial=2, poisson
         end
     end; mod=@__MODULE__)
     rk = RKBRMI(builder(data))
-    m = brm_nlme_model(rk; ad_backend=NLME_AD)
+    m = prepare_model ? brm_nlme_model(rk; ad_backend=NLME_AD) : nothing
     (; rk, m, data)
 end
 

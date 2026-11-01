@@ -7,7 +7,7 @@ using WarmupHMC, MCMCDiagnosticTools, Serialization, Statistics
 
 @stestset "shared-field posterior comparison" begin
     directory = get(ENV,"KB_LAPLACE_REFERENCE_DIR",
-        "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace/posterior-v1")
+        "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace/posterior-v2-accept99")
     mkpath(directory)
     signature = bytes2hex(sha256(vcat(read(@__FILE__),read(joinpath(@__DIR__,"operator_probe.jl")),
         read(joinpath(@__DIR__,"../../test/Manifest.toml")))))
@@ -27,7 +27,7 @@ using WarmupHMC, MCMCDiagnosticTools, Serialization, Statistics
         problem = rk_logdensity_problem(rk;ad_backend=NLME_AD)
         checkpoint_dir = joinpath(directory,"chain-$chain")
         resume = isfile(joinpath(checkpoint_dir,"cp_latest.jls"))
-        println((;stage="reference",chain,resume)); flush(stdout)
+        println((;stage="reference",chain,resume,target_acceptance_rate=0.99)); flush(stdout)
         callback = (state,stage) -> begin
             println((;stage="reference boundary",chain,boundary=stage)); flush(stdout)
             false
@@ -35,7 +35,7 @@ using WarmupHMC, MCMCDiagnosticTools, Serialization, Statistics
         seconds = @elapsed result = adaptive_warmup_mcmc(Xoshiro(500+chain),problem;
             init=(;position=start+0.05randn(Xoshiro(600+chain),length(start)),
                 squared_scale=ones(length(start))),
-            n_draws=2000,target_acceptance_rate=0.9,checkpoint_dir,resume,callback)
+            n_draws=2000,target_acceptance_rate=0.99,checkpoint_dir,resume,callback)
         record = (;position=Matrix{Float64}(result.posterior_position),
             divergences=result.n_divergent_samples,seconds,signature)
         serialize(saved,record)
