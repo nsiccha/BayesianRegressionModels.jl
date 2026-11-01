@@ -144,31 +144,25 @@ end
                 laplace_population_logprior(rk, p, u) + units atol=1e-10
         end
         # A population point where the rates overflow scores -Inf, as the full
-        # model's density there does, and is counted. Without previous modes (no
-        # predictor) the whole-model search starts at zero, where they overflow;
-        # the structured one sees the overflow in the rows' parameters.
+        # model's density there does, and is counted independently of preceding
+        # evaluations. The mode searches always start at zero effects.
         overflow = zeros(length(p.population))
         overflow[findfirst(==(Symbol("pop_log_mu.beta_pop.1")), p.names)] = 800.0
-        if !structured
-            p.u .= p.model.unit
-            p.factors[] = nothing
-        end
         before = p.nonfinite
         value, gradient = LogDensityProblems.logdensity_and_gradient(p, overflow)
         @test value == -Inf && all(isnan, gradient)
         @test p.nonfinite == before + 1
         @test !isfinite(LogDensityProblems.logdensity(
             rk_logdensity_problem(rk; ad_backend=NLME_AD), laplace_point(p, overflow)))
-        if !structured
-            # From modes at an ordinary point the predictor starts far up the
-            # rates' exponential, where Newton gains about one unit per step: the
-            # search does not converge, scores -Inf, is counted and warns.
-            LogDensityProblems.logdensity(p, zeros(length(p.population)))
-            before = p.unconverged
-            value = @test_logs (:warn, r"did not converge") match_mode=:any LogDensityProblems.logdensity(p, overflow)
-            @test value == -Inf
-            @test p.unconverged == before + 1
-        end
+        ordinary = zeros(length(p.population))
+        reference, reference_gradient = LogDensityProblems.logdensity_and_gradient(p, ordinary)
+        reference_gradient = copy(reference_gradient)
+        before = p.nonfinite
+        @test LogDensityProblems.logdensity(p, overflow) == -Inf
+        @test p.nonfinite == before + 1
+        recovered, recovered_gradient = LogDensityProblems.logdensity_and_gradient(p, ordinary)
+        @test recovered == reference
+        @test recovered_gradient == reference_gradient
         # Conditional draws by importance resampling follow each unit's exact
         # conditional posterior, here its mean by quadrature on a fine grid.
         φ = 0.4 .* randn(rng, length(p.population))
@@ -204,8 +198,6 @@ end
         out = brm_laplace_draws(p, repeat(φ, 1, n); rng=Xoshiro(3))
         @test size(out.draws) == (length(p.u), n)
         @test all(out.draws[p.population, :] .== φ)
-        # Later draws start at the earlier draws' modes, which are this point's.
-        @test all(==(0), out.diagnostics.newton_steps[2:end])
         @test rk_restore_draws(rk, out.draws) isa NamedTuple
         # A Gaussian unit's conditional posterior is exact: η_i | y_i has precision
         # n_i/σ² + 1/τ² and mean (Σ_k r_k / σ²) / precision, with z_i = η_i / τ.

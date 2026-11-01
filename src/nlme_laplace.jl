@@ -38,8 +38,8 @@ over the population coordinates, in packed order (`problem.names`). Its log
 density is the Laplace approximation of the model's marginal log posterior
 density in those unconstrained coordinates, exact when the model is Gaussian
 in the random effects. Each evaluation finds every unit's mode by Newton's
-method with a per-unit backtracking line search, from the modes of the
-previous evaluation moved to first order in the population step, until every unit's Newton decrement gᵀ(−H)⁻¹g is at
+method with a per-unit backtracking line search, starting the standardized
+effects at zero on every evaluation, until every unit's Newton decrement gᵀ(−H)⁻¹g is at
 most `tol`, or stops shrinking at rounding level. The log determinant moves
 with the modes to first order; the standardized draws' N(0, I) prior makes
 −H ≥ I for log-concave likelihoods, so the default `tol` keeps the modes to
@@ -59,7 +59,12 @@ reaches:
   the unit and its last decrements. At a point a sampler would accept this
   marks a defect.
 
-A problem holds the last modes as mutable state: use one per chain
+A mode search must not depend on preceding evaluations: in a non-concave
+conditional density, a warm start can select a different local maximum and
+change the target. The fixed start defines a single-mode approximation; it
+does not sum over multiple conditional modes or guarantee a global maximum.
+
+A problem holds the last result and prepared AD workspaces as mutable state: use one per chain
 (`deepcopy` gives a copy its own prepared AD workspaces).
 
 When every likelihood term's parameters depend on its unit's random effects
@@ -217,32 +222,12 @@ function _brm_laplace_step(block, g)
     E.vectors * ((E.vectors' * g) ./ max.(abs.(E.values), 1.0))
 end
 
-# The mode search's start: the previous evaluation's modes moved to first order
-# in the population step Δφ, dẑ = (−H_zz)⁻¹ H_zφ Δφ, from one colored HVP at
-# the previous modes and their factors. It leaves an O(Δφ²) error, so a small
-# step (an HMC leapfrog step) needs fewer Newton steps.
-function _brm_laplace_predict(p::BRMLaplaceProblem, φ)
-    u = copy(p.u)
-    u[p.population] .= φ
-    factors = p.factors[]
-    factors === nothing && return u
-    step = zeros(length(u))
-    step[p.population] .= φ .- view(p.u, p.population)
-    any(!iszero, step) || return u
-    moved = _rk_eta_hvp(p.model.eta_hvp, step, p.u)
-    _brm_laplace_finite(moved) || return u
-    for (i, block) in enumerate(p.model.view.subject_coordinates)
-        u[block] .+= factors[i] \ moved[block]
-    end
-    u
-end
-
 """
     _brm_laplace_mode!(p::BRMLaplaceProblem, φ) -> state
 
 Every unit's conditional mode at population point `φ`, by Newton's method
-from the modes of the previous evaluation, moved to first order in the
-population step. `state` holds the packed point `u`
+from zero standardized effects, independently of preceding evaluations.
+`state` holds the packed point `u`
 at the modes, the sampler density's `value` and `gradient` there, each unit's
 Hessian block, the Cholesky factor of its negation, and the number of Newton
 steps taken.
@@ -253,17 +238,13 @@ function _brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector)
     length(φ) == length(p.population) || throw(DimensionMismatch(
         "the population point has length $(length(φ)), the problem has " *
         "$(length(p.population)) population coordinates"))
-    u = _brm_laplace_predict(p, φ)
+    # Previous modes can belong to another basin. Even a converged search
+    # from them need not define the same density at this population point.
+    u = zeros(length(p.u))
+    u[p.population] .= φ
     current = _brm_laplace_evaluate(m, u)
-    if !(isfinite(current.value) && _brm_laplace_finite(current.gradient))
-        # The previous modes may be far from this point's; start again at zero.
-        for block in blocks
-            u[block] .= 0.0
-        end
-        current = _brm_laplace_evaluate(m, u)
-        isfinite(current.value) && _brm_laplace_finite(current.gradient) ||
-            return _brm_laplace_nonfinite!(p, u, 0)
-    end
+    isfinite(current.value) && _brm_laplace_finite(current.gradient) ||
+        return _brm_laplace_nonfinite!(p, u, 0)
     previous = fill(Inf, length(blocks))
     history = Vector{Float64}[]
     for iteration in 1:p.maxiter
@@ -394,7 +375,7 @@ resampled. All units' `k`-th proposals are scored by one model evaluation.
   `rk_restore_draws`) × draws; its population rows are `P`. Pass it to
   [`rk_restore_draws`](@ref) and the other readers of a full RK fit.
 - `diagnostics` — `newton_steps`, the Newton steps each draw's mode search
-  took from the previous draw's modes; with `conditional > 0` also
+  took from zero standardized effects; with `conditional > 0` also
   `importance_ess`, units × draws, each unit's effective number of proposals
   (`(Σw)²/Σw²`, at most `K`). A small value marks a unit whose conditional
   posterior is far from Gaussian, where more proposals are needed.

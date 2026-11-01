@@ -655,18 +655,14 @@ function _brm_slap_step(H::SMatrix, g::SVector)
     E.vectors * ((E.vectors' * g) ./ max.(abs.(E.values), 1.0))
 end
 
-# Unit i's mode by Newton's method from z0: its own iterations, backtracking,
-# stop (Newton decrement at most `tol`, or at its rounding floor) and restart.
+# Unit i's mode by Newton's method from zero: its own iterations, backtracking
+# and stop (Newton decrement at most `tol`, or at its rounding floor).
 # Returns (status, steps, mode, Hessian there).
 function _brm_slap_unit_mode(p::BRMStructuredLaplaceProblem, A, M::SMatrix{D,D,Float64},
-        i, z0::SVector{D,Float64}) where {D}
-    z = z0
+        i) where {D}
+    z = zero(SVector{D,Float64})
     f, g, H = _brm_slap_unit(p, A, M, i, z)
-    if !(isfinite(f) && all(isfinite, g))
-        z = zero(z0)
-        f, g, H = _brm_slap_unit(p, A, M, i, z)
-        isfinite(f) && all(isfinite, g) || return :nonfinite, 0, z, H
-    end
+    isfinite(f) && all(isfinite, g) || return :nonfinite, 0, z, H
     previous = Inf
     for iteration in 1:p.maxiter
         all(isfinite, H) || return :nonfinite, iteration - 1, z, H
@@ -692,7 +688,7 @@ function _brm_slap_unit_mode(p::BRMStructuredLaplaceProblem, A, M::SMatrix{D,D,F
     :unconverged, p.maxiter, z, H
 end
 
-# Every unit's mode at population point φ, from the previous modes, and the
+# Every unit's mode at population point φ, from zero effects, and the
 # Cholesky factor of each unit's −H there.
 function _brm_slap_mode!(p::BRMStructuredLaplaceProblem, φ::AbstractVector)
     length(φ) == length(p.population) || throw(DimensionMismatch(
@@ -722,8 +718,7 @@ function _brm_slap_modes!(p::BRMStructuredLaplaceProblem, φ, uA, values, A,
     factors = Vector{typeof(cholesky(Symmetric(one(M))))}(undef, length(p.blocks))
     iterations = 0
     for (i, block) in enumerate(p.blocks)
-        status, steps, z, H = _brm_slap_unit_mode(p, A, M, i,
-            SVector{D,Float64}(view(p.u, block)))
+        status, steps, z, H = _brm_slap_unit_mode(p, A, M, i)
         if status !== :converged
             status === :nonfinite ? (p.nonfinite += 1) : (p.unconverged += 1)
             status === :unconverged && @warn("brm_laplace_problem: unit " *
