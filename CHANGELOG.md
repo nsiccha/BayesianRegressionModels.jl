@@ -22,9 +22,12 @@ instead of failing at run time.
   requested units; full-cohort and population-gradient calls retain batching.
 - Changed: separated CAR fields expose their shared values through row-local
   graph computations, preserving their law, coordinates, inverse and Jacobian.
-- Compatibility: requires ReactiveKernels 0.1.40 and ReactiveKernelsPPL 0.1.35,
-  whose scalar inference preserves ordinary indexed predictor expressions
-  under strict partitioning. Unit gradients use ordinary Enzyme Reverse.
+- Compatibility: requires ReactiveKernels 0.1.42 and ReactiveKernelsPPL 0.1.39.
+  Scalar inference preserves ordinary indexed predictor expressions under
+  strict partitioning, and nested data-only helpers inside sampled
+  expressions, such as a lower-bounded shares completion's
+  `lower=lo[x_shares_free]`, keep their shapes through strict cell and
+  partition preparation. Unit gradients use ordinary Enzyme Reverse.
   The test bootstrap selects Enzyme dogfood `5325554c`, including the
   compact-partition activity, wide-plan and nested differentiation repairs.
 

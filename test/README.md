@@ -1002,7 +1002,10 @@ both shared and unit gradients with independent per-cell reverse passes for
 ICAR and BYM2, including CAR unit terms. Graph-visible identity geometry needs
 ReactiveKernels 0.1.33 / ReactiveKernelsPPL 0.1.27 or later; strict partition
 evaluation requires 0.1.36 / 0.1.30 for uniform empty/nonempty plans and
-scheduled-loop resets. Both partition fixtures use ordinary Enzyme Reverse
+scheduled-loop resets. Lower-bounded shares completions evaluated
+through strict partitions (`nlme_lower_shares.jl`) require 0.1.42 / 0.1.39,
+which keeps shapes through nested data-only helpers inside sampled
+expressions. Both partition fixtures use ordinary Enzyme Reverse
 with the repaired dogfood revision pinned by `setup_env.jl`.
 
 `nlme_integrated.jl` covers NLMEEstimation's integrated families on BRM
