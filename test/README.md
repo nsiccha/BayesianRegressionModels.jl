@@ -1,6 +1,11 @@
 # Running the tests
 
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
+`rk_grouped_anisotropic_hsgp.jl` checks per-axis length scales of grouped
+HSGPs: independent, sampled, known and multigroup correlations, default and
+explicit floor bounds, fixed scales, term starts, shared readers and frozen
+replay. Compiled Stan densities and gradients agree with native Enzyme and
+coordinate-wise finite differences.
 `plate_vector_parameters.jl` checks declared vector priors read by plate cells:
 literal and data-dependent extents, joint-normal and simplex axes, scalar
 hyperparameters, standalone parameter axes, replay, and extent validation.

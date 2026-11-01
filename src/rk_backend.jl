@@ -5216,8 +5216,6 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
             "$prefix: predictor `$target` periodic `hsgp(...)` needs one " *
             "isotropic axis (the thin-layer periodic surface is 1D isotropic)")
     end
-    state.by === nothing || state.iso || error(
-        "$prefix: grouped HSGP currently requires one isotropic length scale")
     any(!iszero, state.centeredness) && error(
         "$prefix: predictor `$target` partially-centered `hsgp(...)` " *
         "is out of slice 1 (the thin-layer surface is non-centered; " *

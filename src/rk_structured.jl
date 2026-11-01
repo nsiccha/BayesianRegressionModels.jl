@@ -109,22 +109,26 @@ end
 function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, bindings)
     options = term.options
     G = get(options, :n_groups, 1)
-    rho_prior = _rk_ast_hsgp_hyper_prior(options, :length_scale, bindings, taken)
+    rho_priors = options.iso ?
+        [_rk_ast_hsgp_hyper_prior(options, :length_scale, bindings, taken)] :
+        [_rk_ast_hsgp_rho_prior(options, floors, j, bindings, taken)
+         for j in eachindex(term.columns)]
     # A floor named in the length-scale prior is read there (decision 1fk9b29);
     # only a truncation or a hyper-predictor reads it as a block argument.
     floor_named = get(options, :rho_floor_named, false)
-    floor_named && (rho_prior = _rk_ast_replace_floor_marker(rho_prior, floors))
+    floor_named && options.iso &&
+        (rho_priors[1] = _rk_ast_replace_floor_marker(only(rho_priors), floors))
     sigma_prior = _rk_ast_hsgp_hyper_prior(options, :sd, bindings, taken)
     grouped = haskey(options, :group_index)
-    block = _rk_block_body(rho_prior, sigma_prior)
+    block = _rk_block_body(rho_priors..., sigma_prior)
     arguments = Pair{Symbol,Any}[formal => _rk_block_argument!(block, formal, value)
         for (formal, value) in inputs]
     floor = floors === nothing || floor_named ? nothing :
         _rk_block_argument!(block, :floor, floors)
     group_index = grouped ? _rk_block_argument!(block, :group_index, options.group_index) :
         nothing
-    rho, rho_effects, rho_sampled = _rk_ast_hsgp_hyper!(block, options, :length_scale,
-        rho_prior, floor, G)
+    rho, rho_effects, rho_sampled = _rk_ast_hsgp_lengths!(block, options,
+        rho_priors, floor, G, Val(options.iso))
     sigma, sigma_effects, sigma_sampled = _rk_ast_hsgp_hyper!(block, options, :sd,
         sigma_prior, floor, G)
     z = _rk_block_local!(block, :z)
@@ -143,6 +147,29 @@ function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, 
         (; weights=z, hypers=(length_scale=rho_effects, sd=sigma_effects),
            scales=(length_scale=rho_sampled, sd=sigma_sampled),
            lambda=isnothing(multigroup) ? nothing : get(multigroup, :lambda, nothing))
+end
+
+_rk_ast_hsgp_lengths!(block, options, priors, floor, G, ::Val{true}) =
+    _rk_ast_hsgp_hyper!(block, options, :length_scale, only(priors), floor, G)
+
+# Each axis has its own positive parameter and bound, just as in the
+# ungrouped component. The spectral graph consumes their assembled vector;
+# the sampled locals retain axis order for coordinate transport and starts.
+function _rk_ast_hsgp_lengths!(block, options, priors, floor, _G, ::Val{false})
+    rhos = Symbol[]
+    sampled = Symbol[]
+    for (j, prior) in enumerate(priors)
+        rho = _rk_block_local!(block, "rho_$j")
+        push!(rhos, rho)
+        lower = length(priors) == 1 ? floor : Expr(:ref, floor, j)
+        options.rho_truncated && (prior = Expr(:call, :restricted, prior, lower, Inf))
+        statement = _rk_ast_hyper_statement(rho, prior)
+        push!(block.statements, statement)
+        Meta.isexpr(statement, :call) && push!(sampled, rho)
+    end
+    value = _rk_block_local!(block, :rho)
+    push!(block.statements, Expr(:(=), value, Expr(:vect, rhos...)))
+    value, nothing, isempty(sampled) ? nothing : Tuple(sampled)
 end
 
 # The level weights of a grouped HSGP's `cor=` (src/level_correlation.jl).

@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.113
+
+- RK grouped HSGPs accept `iso=false`, retaining one shared length scale per
+  axis, declared priors and bounds, and the grouping's sampled or known
+  correlation. The same coordinates support Stan transport, term starts,
+  shared value readers and frozen replay.
+
 ## 0.2.112
 
 - Added RK-only `brm_smc_compare` and `brm_smc_runs`: agreement statistics
