@@ -517,7 +517,10 @@ global coordinates (`globals`), `seconds` of optimization, and the prepared
 `model`. The approximation is variational: posterior means are close, and
 the spread of the population, scale and correlation coordinates is too narrow.
 """
-brm_svi_fit(x; kwargs...) = _brm_svi_fit(x, nothing; kwargs...)
+function brm_svi_fit(x; laplace=nothing, kwargs...)
+    laplace===nothing && return _brm_svi_fit(x,nothing;kwargs...)
+    _brm_svi_laplace_dispatch(x,nothing,laplace;kwargs...)
+end
 
 function _brm_svi_fit(x, previous; rng=Random.default_rng(), batch_size=32,
         max_iterations=100_000, family=nothing,

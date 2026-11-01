@@ -311,4 +311,6 @@ function BRM._rk_spl_factor_third(ad, direction, base, indices, cell;
     _spl_factor_flat(g), _spl_factor_flat(hv), _spl_factor_flat(tv)
 end
 
+include("rk_svi_laplace.jl")
+
 end
