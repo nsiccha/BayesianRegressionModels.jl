@@ -4881,6 +4881,12 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     end
     _sb_check_mixture_membership_names(pop!(data, _SB_MIXTURE_MEMBERSHIPS_KEY, ()),
                                        keys(brmi.operations))
+    # Captured indexed outputs in a cell need the same shape-aware selection
+    # as a model-scope read (fixed-width cells are stored as matrix columns).
+    plate_outputs = union(Set(keys(output_reads)), Set(key for (key, op) in
+        _brm_operation_entries(brmi) if _sb_kernel_producer(op) !== nothing))
+    select_cell(name, index) = Expr(:call, brm_plate_cell, name, index)
+    map!(stmt -> _brm_plate_cell_refs(select_cell, stmt, plate_outputs), stmts, stmts)
     # StanBlocks stores a cell's non-collected output `tot` as `<target>_tot`;
     # a model-scope read of `tot` reads that carrier, adding no second one.
     pop!(data, _SB_KERNEL_OUTPUT_READS_KEY)

@@ -1,6 +1,11 @@
 # Running the tests
 
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
+`plate_selected_outputs.jl` checks nested selection of shared vector outputs
+across plates with different cell counts: data-only and parameter-dependent
+outputs, fixed and varying widths, both output orders, reader-first composition,
+and lexical binding preservation. Native reverse and compiled Stan match an
+independent density and gradient.
 `plate_capture_dependencies.jl` checks whole-value captures in composed plates:
 late parameter dependencies, cell-local name collisions, scan-local names,
 and compiled Stan/native density and gradient agreement with an independent oracle.

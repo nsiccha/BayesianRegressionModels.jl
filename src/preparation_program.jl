@@ -106,12 +106,18 @@ function _brm_prior_value_dependencies(program::_BRMPreparedProgram, roots)
     Tuple(name for name in program.order if name in required)
 end
 
-function _brm_operation_dependencies(@nospecialize(op), names, key, role)
+function _brm_operation_dependencies(@nospecialize(op), names, key, role, output_reads)
     role === :prior_modifier && return ()
     op isa ExprColumn || return ()
     args = getargs(op)
     length(args) == 2 || return ()
     refs = _brm_operation_references!(Set{Symbol}(), last(args))
+    # A captured side output may have no operation of its own. Its producer
+    # must still precede the reader, including when fragments are composed in
+    # reader-first order.
+    for ref in collect(refs)
+        haskey(output_reads, ref) && push!(refs, output_reads[ref])
+    end
     # Preserve source order between independent nodes. References retain their
     # callable expression in the operation; this list only orders declarations.
     Tuple(name for name in names if name != key && name in refs)
@@ -155,7 +161,7 @@ Base.@nospecializeinfer function _brm_prepare_program(@nospecialize(brmi::BRMI);
         isnothing(op) && (op = raw)
         role = _brm_operation_role(op)
         dependencies = haskey(output_reads, key) ? (output_reads[key],) :
-            _brm_operation_dependencies(op, names, key, role)
+            _brm_operation_dependencies(op, names, key, role, output_reads)
         prepared[index] = _BRMPreparedOperation(key, role, op, dependencies)
     end
     operations = Tuple(prepared)
