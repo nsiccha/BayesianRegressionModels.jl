@@ -171,7 +171,11 @@ function _rk_recorded_fits(rk::RKBRMI)
     training = _rk_frozen_training(parent(rk))
     record = Dict{Tuple{Symbol,Symbol},Any}()
     constants = _rk_fitted_constants(rk)
-    _brm_with_frozen_replay(_BRMFrozenReplay(training, Set{Symbol}(), nothing, record)) do
+    # Re-exporting a data-free replay preserves its original fitted geometry
+    # and priors. Only its resampled groups have acquired current level sets.
+    groups = rk.fitted === nothing ? Set{Symbol}() : Set(rk.fitted.resample)
+    fits = rk.fitted === nothing ? nothing : rk.fitted.state.fits
+    _brm_with_frozen_replay(_BRMFrozenReplay(training, groups, fits, record)) do
         _brm_rk_plan(parent(rk); held_out=_rk_held_out_names(rk.plan),
             fitted_constants=(name, _source) -> get(constants, name, nothing))
     end

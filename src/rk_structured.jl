@@ -191,15 +191,14 @@ function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMMultigroupCorrelation, _o
     (z, (; weights=:(brm_hsgp_multigroup_weights(z, omega2, rho, L_level, tau_level)),
            formals=[:L_level, :tau_level], values=Any[L, tau]))
 end
-# The coordinates are fit-role data columns; the graph assembles them and
-# derives the inducing grid (`brm_multigroup_coordinate_grid`) in place.
+# The coordinates are current locations; the grid is a fitted graph value.
 function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMMultigroupCoordinates, options)
     columns = Any[_rk_block_argument!(block, Symbol(:coordinate_, j), column)
                   for (j, column) in enumerate(options.coordinate_columns)]
     positions = Any[_rk_block_argument!(block, Symbol(:position_, j), column)
                     for (j, column) in enumerate(get(options, :position_columns, ()))]
     own = isnothing(lc.lambda)
-    lambda = own ? _rk_multigroup_own_lambda!(block, lc) :
+    lambda = own ? _rk_multigroup_own_lambda!(block, options.coordinate_prior) :
         _rk_block_argument!(block, :lambda_level, lc.lambda)
     # The term's own spatial scale is a sampled local of the block.
     own_lambda = own ? (; lambda) : (;)
@@ -216,20 +215,22 @@ function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMMultigroupCoordinates, op
                     values=Any[columns; positions; lambda], own_lambda...))
     end
     method = _brm_multigroup_method_code(lc.method)
+    grid = _rk_block_argument!(block, :grid_level, options.coordinate_grid)
     weights = quote
         coordinates_level = hcat($(formals...))
-        grid_level = brm_multigroup_coordinate_grid(coordinates_level, $(lc.k), $method, $(lc.c))
         brm_hsgp_multigroup_coordinate_weights(z, omega2, rho, coordinates_level,
             grid_level, lambda_level, $method)
     end
-    (z, (; weights, formals=[formals; :lambda_level], values=Any[columns; lambda],
+    (z, (; weights, formals=[formals; :grid_level; :lambda_level],
+           values=Any[columns; grid; lambda],
            own_lambda...))
 end
 
 # `multigroup((x, y); k)`: the term's own spatial scale, with SBBRMI's prior
 # (`_sb_multigroup_own_lambda`, decision `100gkpq`).
-function _rk_multigroup_own_lambda!(block, lc)
-    (; location, lower) = _brm_multigroup_default_lambda(lc)
+function _rk_multigroup_own_lambda!(block, prior)
+    fitted = _rk_block_argument!(block, :spatial_prior, prior)
+    location, lower = Expr(:ref, fitted, 1), Expr(:ref, fitted, 2)
     lambda = _rk_block_local!(block, :lambda)
     push!(block.statements, Expr(:call, :~, lambda,
         Expr(:call, :restricted, Expr(:call, :LogNormal, location, 1.0), lower, Inf)))

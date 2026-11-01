@@ -2306,7 +2306,8 @@ end
 # exported fit on a data-free replay.
 function _brm_fitted(fit, tag::Symbol, name::Symbol, values)
     frozen = _brm_frozen_replay()
-    (frozen === nothing || name in frozen.resample) && return fit(values)
+    frozen === nothing && return fit(values)
+    name in frozen.resample && return _brm_record_fit(frozen, (tag, name), fit(values))
     _brm_frozen_fit(frozen, (tag, name)) do
         fit(get(frozen.training, name, values))
     end
@@ -2336,7 +2337,8 @@ end
 # exporting, or read from the exported fits on a data-free replay.
 function _brm_fitted_value(compute, tag::Symbol, name::Symbol)
     frozen = _brm_frozen_replay()
-    (frozen === nothing || name in frozen.resample) && return compute()
+    frozen === nothing && return compute()
+    name in frozen.resample && return _brm_record_fit(frozen, (tag, name), compute())
     _brm_frozen_fit(compute, frozen, (tag, name))
 end
 
@@ -2353,9 +2355,11 @@ end
 function _brm_frozen_fit(compute, frozen::_BRMFrozenReplay, key)
     if frozen.fits !== nothing
         haskey(frozen.fits, key) || _brm_fit_not_exported(key...)
-        return frozen.fits[key]
+        return _brm_record_fit(frozen, key, frozen.fits[key])
     end
-    fit = compute()
+    _brm_record_fit(frozen, key, compute())
+end
+function _brm_record_fit(frozen, key, fit)
     frozen.record === nothing || (frozen.record[key] = fit)
     fit
 end

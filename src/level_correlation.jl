@@ -256,13 +256,22 @@ _brm_multigroup_resolution(lc::_BRMMultigroupCoordinates) = isempty(lc.positions
 # `LogNormal(log(E), 1)` with `E` the coordinates' largest extent, bounded
 # below where every frequency the basis cannot resolve stays negligible.
 function _brm_multigroup_default_lambda(lc::_BRMMultigroupCoordinates)
-    extent = maximum(maximum(c) - minimum(c) for c in eachcol(lc.coordinates))
+    brm_multigroup_coordinate_prior(lc.coordinates, lc.k,
+        _brm_multigroup_method_code(lc.method), lc.c,
+        isempty(lc.positions) ? 0 : lc.n_points)
+end
+
+# The same prior preprocessing as an ordinary RK fitted graph value. A zero
+# point count denotes a regular grid; otherwise it is a free inducing set.
+function brm_multigroup_coordinate_prior(coordinates, k, method, c, n_points)
+    extent = maximum(maximum(axis) - minimum(axis) for axis in eachcol(coordinates))
     extent > 0 || error(
         "BRM backend lowering: `multigroup((x, y); k)` sets its spatial scale " *
         "from the coordinates' extent, but every level has the same coordinates; " *
         "give `lambda` explicitly")
-    (; location=log(extent),
-       lower=_BRM_MULTIGROUP_RESOLUTION_RATIO * _brm_multigroup_resolution(lc))
+    resolution = n_points == 0 ? last(brm_multigroup_coordinate_grid(coordinates,k,method,c)) :
+        brm_multigroup_inducing_resolution(coordinates,n_points)
+    (; location=log(extent), lower=_BRM_MULTIGROUP_RESOLUTION_RATIO * resolution)
 end
 
 # `inducing = (ux, uy)`: one field per coordinate axis, each a data vector or

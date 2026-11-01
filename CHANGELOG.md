@@ -12,6 +12,16 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.115
+
+- RK frozen replay accepts changing group labels for coordinate multigroup
+  HSGPs (`hsgp(t; by=g, cor=multigroup((x,y), ...))`). Fitted-state export
+  freezes the temporal basis, spatial grid and default spatial-scale prior;
+  replay maps current level coordinates onto the same shared weights without
+  retaining observation rows. Known labels must keep their fitted locations,
+  and new locations must lie inside the fitted spatial region. Per-level
+  hyperparameter effects and projections still refuse group resampling.
+
 ## 0.2.114
 
 - Plate cells retain dependencies on captured model values, including whole
