@@ -10,6 +10,9 @@ function checkpoint_bytes(filter)
     serialize(io, brm_filter_checkpoint(filter))
     take!(io)
 end
+# Serialization can include padding in isbits diagnostics; continuation requires
+# exact checkpoint values, not a canonical byte representation.
+checkpoints_equal(left, right) = isequal(brm_filter_checkpoint(left), brm_filter_checkpoint(right))
 records(x, y) = [(; observation=(; y=y[i]), inputs=(; x=x[i])) for i in eachindex(x)]
 const TRAIN = (; x=[-1.0, 0.0, 1.0, 2.0], y=[0.3, -0.1, 0.7, 0.4])
 
@@ -37,27 +40,28 @@ const TRAIN = (; x=[-1.0, 0.0, 1.0, 2.0], y=[0.3, -0.1, 0.7, 0.4])
     end
     @test filtered.state.log_normalizer ≈ total atol=1e-12
     streamed = brm_filter_stream(initial, all_records)
-    @test checkpoint_bytes(streamed) == checkpoint_bytes(filtered)
+    @test checkpoints_equal(streamed, filtered)
+    @test rand(copy(streamed.state.rng), UInt64, 8) == rand(copy(filtered.state.rng), UInt64, 8)
     live = Iterators.Stateful(all_records)
     stopped = brm_filter_stream(initial, live; stop=_ -> true)
-    @test checkpoint_bytes(stopped) == checkpoint_bytes(initial)
+    @test checkpoints_equal(stopped, initial)
     @test length(live) == length(all_records)
     partial = brm_filter_stream(initial, live; steps=2)
     @test length(live) == length(all_records)-2
-    @test checkpoint_bytes(brm_filter_stream(partial, live)) == checkpoint_bytes(filtered)
+    @test checkpoints_equal(brm_filter_stream(partial, live), filtered)
     interrupted = Treebars.with_progress(:state; description="filter interruption") do node
         Treebars.request_interrupt!(node)
         brm_filter_stream(initial, all_records; progress=node)
     end
-    @test checkpoint_bytes(interrupted) == checkpoint_bytes(initial)
+    @test checkpoints_equal(interrupted, initial)
     restored = brm_filter_resume(RKBRMI(FM.provider(TRAIN)),
         deserialize(IOBuffer(checkpoint_bytes(partial))))
-    @test checkpoint_bytes(brm_filter_stream(restored, all_records[3:end])) == checkpoint_bytes(filtered)
+    @test checkpoints_equal(brm_filter_stream(restored, all_records[3:end]), filtered)
     @test_throws ArgumentError brm_filter_stream(initial, all_records; steps=-1)
     @test_throws ArgumentError brm_filter(rk; ensemble=NamedTuple[])
     old = checkpoint_bytes(filtered)
     @test_throws Exception brm_filter_step(filtered, (; y=Inf); inputs=(; x=0.1))
-    @test checkpoint_bytes(filtered) == old
+    @test isequal(brm_filter_checkpoint(filtered), deserialize(IOBuffer(old)))
     longer = brm_filter_stream(filtered, Iterators.repeated(first(all_records), 100))
     @test length(longer.state.history) <= 4
     @test Base.summarysize(longer) <= Base.summarysize(filtered) + 1024
@@ -138,7 +142,7 @@ end
     saved = brm_fitted_state(rk)
     datafree = RKBRMI(FM.scaled((; x=[8.0], y=[1.2])), saved)
     restored = brm_filter_resume(datafree, checkpoint)
-    @test checkpoint_bytes(restored) == checkpoint_bytes(filtered)
+    @test checkpoints_equal(restored, filtered)
 end
 
 @testset "BRM filter checkpoints across independent Julia processes" begin
