@@ -440,8 +440,10 @@ function _rk_ast_value_spline(definitions, term, taken)
     push!(block.statements, Expr(:call, :.~,
         Expr(:ref, fixed, Expr(:call, :axes, fixed_basis, 2)), _rk_ast_dotted(:Flat)))
     parts = Any[Expr(:call, :*, fixed_basis, fixed)]
+    scales = Symbol[]
     for (j, basis) in enumerate(penalized)
         sd, raw = _rk_block_local!(block, "sd$j"), _rk_block_local!(block, "raw$j")
+        push!(scales, sd)
         push!(block.statements, Expr(:call, :~, sd,
             Expr(:call, :restricted, Expr(:call, :Normal, 0, 1), 0.0, Inf)))
         push!(block.statements, Expr(:call, :.~,
@@ -451,7 +453,8 @@ function _rk_ast_value_spline(definitions, term, taken)
     push!(stmts, Expr(:call, :~, term.options.id, _rk_ast_block_call!(definitions, taken,
         term.options.kind === :t2 ? "brm_t2_smooth" : "brm_smooth", block,
         Expr(:call, :.+, parts...))))
-    stmts
+    stmts, term.options.kind === :t2 ?
+        (; sd_rr=scales[1], sd_rn=scales[2], sd_nr=scales[3]) : (; sd=only(scales))
 end
 
 # `length_scale_floor` in a length-scale prior reads the term's validity floor,

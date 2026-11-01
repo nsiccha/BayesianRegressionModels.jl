@@ -144,44 +144,8 @@ end
 # declares, the RK emitter records the law it wrote (`prior`, `scale_priors`).
 # The default start reads those records, so it follows the emitted program.
 
-# A recorded law as a Distributions.jl distribution. Names resolve through
-# `value`: another declaration's own start, or a bound scalar. `nothing` when
-# the law has no median (`Flat()`) or an argument has no value.
-_brm_prior_law(x::Real, _value) = Float64(x)
-_brm_prior_law(x::Symbol, value) = value(x)
-function _brm_prior_law(x::Expr, value)
-    x.head === :call && first(x.args) isa Symbol || return nothing
-    args = Any[_brm_prior_law(a, value) for a in x.args[2:end]]
-    any(isnothing, args) && return nothing
-    _brm_prior_law(Val(first(x.args)), args...)
-end
-_brm_prior_law(_x, _value) = nothing
-
-_brm_prior_law(::Val{:Flat}) = nothing
-_brm_prior_law(::Val{:HalfNormal}, s::Real) = truncated(Normal(0, s), 0, Inf)
-_brm_prior_law(::Val{:HalfCauchy}, s::Real) = truncated(Cauchy(0, s), 0, Inf)
-# `restricted` keeps its family's kernel on the support, so its median within
-# the bounds is the normalized truncation's.
-_brm_prior_law(::Val{:restricted}, d::UnivariateDistribution, lo::Real, hi::Real) =
-    truncated(d, lo, hi)
-_brm_prior_law(::Val{:truncated}, d::UnivariateDistribution, lo::Real, hi::Real) =
-    truncated(d, lo, hi)
-# RKPPL's three-argument Student t is located and scaled.
-_brm_prior_law(::Val{:StudentT}, nu::Real, mu::Real, s::Real) = mu + s * TDist(nu)
-for op in (:+, :-, :*, :/, :^, :sqrt, :exp, :log, :abs)
-    @eval _brm_prior_law(::Val{$(QuoteNode(op))}, args::Real...) = $op(args...)
-end
-# Any other law names its Distributions.jl family.
-function _brm_prior_law(::Val{F}, args...) where {F}
-    isdefined(Distributions, F) || return nothing
-    family = getfield(Distributions, F)
-    family isa Type && family <: UnivariateDistribution &&
-        all(a -> a isa Real, args) || return nothing
-    family(args...)
-end
-
-_brm_prior_median(law::UnivariateDistribution) = Float64(median(law))
-_brm_prior_median(_law) = nothing
+# Law evaluation and scalar medians are shared with explicit prior bases
+# in start_prior.jl. This NLME adapter retains its coordinate-selection policy.
 
 _brm_nlme_scalar_data(plan::_RKHeldOutPlan, name) = _brm_nlme_scalar_data(plan.parent, name)
 _brm_nlme_scalar_data(plan, name) = let x = get(plan.columns, name, nothing)

@@ -11,8 +11,8 @@
 # constrained value, so standardized random-effect draws stay at the base.
 
 """
-    brm_start(rk::RKBRMI, inits::NamedTuple; base) -> Vector{Float64}
-    brm_start(sb::SBBRMI, stan_model, inits::NamedTuple; base) -> Vector{Float64}
+    brm_start(rk::RKBRMI, inits::NamedTuple; base, term_inits=()) -> Vector{Float64}
+    brm_start(sb::SBBRMI, stan_model, inits::NamedTuple; base, term_inits=()) -> Vector{Float64}
 
 Build a complete unconstrained starting point from initial values keyed by
 the model's prior addresses. The RK method returns a packed point of `rk`'s
@@ -60,6 +60,32 @@ the value a sampler takes as its initial position.
   or one vector per cell when its length varies by cell (one number per cell
   for a scalar latent). Both backends take both forms and give the same
   physical point.
+
+`term_inits` sets formula terms' own parameters with quoted prior addresses:
+
+```julia
+term_inits = [:(sd(mu, cdar(year))) => 0.02, :(ar(mu, cdar(year))) => 0.6]
+u = brm_start(sb, stan_model, (; mu=(; Intercept=0.0)); term_inits)
+```
+
+Addresses are parsed, never evaluated. They follow the prior grammar's
+wildcards, components (`sd(mu, t2(x, z), rr)`) and literal keyword qualifiers.
+Values are on the natural constrained scale. Scalars broadcast over a
+vector-valued parameter; supplied vectors must have its exact size. Simplexes
+require positive entries summing to one. Known values may only be restated
+consistently. A predicted hyperparameter must be initialized through its
+predictor, since it has no independent sampled carrier.
+
+`base=:prior_median` fills unaddressed scalar-prior parameters from finite
+medians within their effective bounds, including fitted length-scale floors.
+Explicit `inits` and `term_inits` take precedence. Structured latent blocks
+(cell latents, innovations, ordered vectors, correlation factors, simplexes
+and joint shrinkage coordinates)
+keep the valid neutral coordinates of the zero base; these are not called
+multivariate medians. An unsupported scalar median requires an explicit value
+or a numeric base. This deterministic operation does not optimize or sample.
+`brm_start(sb, stan_model, (;); base=:prior_median)` returns a reusable vector.
+It does not change the no-`inits` method, which computes a start from data.
 
 Every other coordinate keeps the constrained value it has at `base`, a full
 unconstrained point of the same backend (default all zeros: coefficients 0,
@@ -376,9 +402,9 @@ end
 function _rk_unconstrained_point end
 
 function brm_start(rk::RKBRMI, inits::NamedTuple;
-        base=zeros(Float64, length(_rk_layout_coordinate_names(rk))))
-    u0 = _brm_start_base(base, length(_rk_layout_coordinate_names(rk)), "RK layout")
-    records = [_brm_rk_start_record(rk, r) for r in _rk_coordinate_records(rk.plan)]
+        base=zeros(Float64, length(_rk_layout_coordinate_names(rk))), term_inits=())
+    u0 = _brm_start_base_vector(base, length(_rk_layout_coordinate_names(rk)), "RK layout")
+    records = [_brm_rk_start_record(rk, r) for r in _rk_coordinate_records(rk.plan; term_starts=true)]
     values = _rk_constrained_values(rk, u0)
     writes = Tuple{Symbol,Tuple,Any}[]
     effects = NamedTuple[]
@@ -386,6 +412,12 @@ function brm_start(rk::RKBRMI, inits::NamedTuple;
         _brm_rk_start_writes!(writes, Val(target.kind), target, records, values)
         target.kind === :ranef && !isnothing(target.effects) &&
             push!(effects, (; target, record=_brm_rk_ranef_record(target, records)))
+    end
+    term_targets = _brm_start_term_targets(parent(rk), term_inits)
+    _brm_rk_start_terms!(writes, term_targets, records, values)
+    if _brm_start_prior_requested(base)
+        prior_writes = _brm_rk_start_prior_writes(rk, records, values, writes, inits, term_targets)
+        append!(writes, prior_writes)
     end
     _brm_rk_start_point(rk, values, writes, effects)
 end
@@ -765,8 +797,8 @@ end
 # StanBlocks: descriptor resolvers + BridgeStan's inverse transform.
 
 function brm_start(sb::SBBRMI, stan_model, inits::NamedTuple;
-        base=zeros(Float64, BridgeStan.param_unc_num(stan_model)))
-    u0 = _brm_start_base(base, BridgeStan.param_unc_num(stan_model), "compiled Stan model")
+        base=zeros(Float64, BridgeStan.param_unc_num(stan_model)), term_inits=())
+    u0 = _brm_start_base_vector(base, BridgeStan.param_unc_num(stan_model), "compiled Stan model")
     names = String.(BridgeStan.param_names(stan_model))
     d = brm_descriptor(sb)
     totals = total_effect_blocks(d.plan)
@@ -797,7 +829,12 @@ function brm_start(sb::SBBRMI, stan_model, inits::NamedTuple;
         _brm_sb_start_writes!(writes, deferred, Val(target.kind), target, d,
             names, totals)
     end
+    term_targets = _brm_start_term_targets(parent(sb), term_inits)
+    _brm_sb_start_terms!(writes, term_targets, d, names)
     _brm_sb_start_totals!(writes, deferred, sb, d, names, totals)
+    if _brm_start_prior_requested(base)
+        append!(writes, _brm_sb_start_prior_writes(sb, d, names, writes, inits, term_targets))
+    end
     θ = BridgeStan.param_constrain(stan_model, u0)
     _brm_sb_start_apply!(θ, writes, names)
     # An S2Z block's coordinates depend on its scale as written.

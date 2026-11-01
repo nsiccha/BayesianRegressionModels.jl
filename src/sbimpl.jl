@@ -11261,7 +11261,7 @@ function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, su
     # Carrier disambiguation follows `mo` (see `_sb_predictor_term!`): the
     # first `mo1(c)` keeps `mo1_<c>`; repeats take `mo1_<target>_<c>`.
     col_name = last(_sb_unique_structured_term_names(
-        stmts, :mo1, string(inner_name), target))
+        stmts, :mo1, string(inner_name), target; data, term=t))
     if n_levels < 2
         # Single-level factor: 0 increments -> the monotonic effect is
         # identically 0. Contribute a scalar `0.0` summand and NEVER ask Sb for
@@ -14842,7 +14842,7 @@ _sb_predictor_term!(stmts, data, ::typeof(mo), t;
     n_levels = length(levels)
     col_name = isnothing(target) ? Symbol(:mo_, inner_name) :
         last(_sb_unique_structured_term_names(
-            stmts, :mo, string(inner_name), target))
+            stmts, :mo, string(inner_name), target; data, term=t))
     if n_levels < 2
         # Single-level factor: 0 increments -> the free-beta monotonic effect is
         # identically 0. Contribute NO column (returning `nothing`, which
@@ -14969,7 +14969,7 @@ _sb_predictor_term!(stmts, data, ::typeof(s), t;
     isempty(getkwargs(t)) || error("sbimpl: `s(x)` does not support keyword arguments yet")
     xname, raw = _sb_inner_data(:s, only(args))
     v = _sb_real_vec(:s, xname, raw)
-    suffix, col_name = _sb_unique_structured_term_names(stmts, :s, string(xname), target)
+    suffix, col_name = _sb_unique_structured_term_names(stmts, :s, string(xname), target; data, term=t)
     Xnull_name = Symbol(:Xnull_, suffix)
     Zpen_name = Symbol(:Zpen_, suffix)
     frozen = _sb_frozen_preproc_entry(data, Xnull_name, :spline, xname)
@@ -15066,13 +15066,20 @@ end
 # and the returned suffix excludes it.
 function _sb_unique_structured_term_names(stmts, family::Symbol,
                                           suffix::AbstractString, target;
-                                          tail::AbstractString="")
+                                          tail::AbstractString="", data=nothing, term=nothing)
+    function recorded(suffix, col)
+        if data !== nothing && term !== nothing && target !== nothing
+            _sb_record_binding!(data, col, :parameter, col;
+                term_key=_brm_term_full_key(term), term_predictor=target)
+        end
+        String(suffix), col
+    end
     bound(name) = any(stmts) do stmt
         Meta.isexpr(stmt, :call) && length(stmt.args) >= 2 && stmt.args[1] === :~ &&
             _sb_plan_lhs_name(stmt.args[2]) === name
     end
     col = Symbol(family, :_, suffix, tail)
-    bound(col) || return String(suffix), col
+    bound(col) || return recorded(suffix, col)
     stem = string(something(target, :term), "_", suffix)
     candidate = stem
     serial = 2
@@ -15080,7 +15087,7 @@ function _sb_unique_structured_term_names(stmts, family::Symbol,
         candidate = string(stem, "_", serial)
         serial += 1
     end
-    candidate, Symbol(family, :_, candidate, tail)
+    recorded(candidate, Symbol(family, :_, candidate, tail))
 end
 
 # `gp(x...)` is the exact GP term. It records an N x d predictor matrix and
@@ -15092,7 +15099,7 @@ _sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(),
     _check_term_kwargs(gp, kw)
     names, axes = _sb_gp_axes(:gp, args)
     suffix, col_name = _sb_unique_structured_term_names(
-        stmts, :gp, join(string.(names), "_"), target)
+        stmts, :gp, join(string.(names), "_"), target; data, term=t)
     X_name = Symbol(:X_gp_, suffix)
     term_data = Dict{Symbol,Any}(names[j] => axes[j] for j in eachindex(names))
     prepared = _brm_prepare_term(
@@ -15260,7 +15267,7 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         target, options)
     axes_suffix = join(string.(names), "_")
     suffix, col_name = _sb_unique_structured_term_names(
-        stmts, :hsgp, axes_suffix, target)
+        stmts, :hsgp, axes_suffix, target; data, term=t)
     centeredness = _brm_hsgp_centeredness(kw, prod(K))
     partial = any(!iszero, centeredness)
     domain_fits = _sb_hsgp_domain_fits(kw, n_axes; required=!is_raw)
@@ -15351,7 +15358,7 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         # A repeat over the same axes and group on another predictor takes
         # `hsgp_<target>_<axes>_by_<g>`, like the ungrouped carrier.
         suffix, col_name = _sb_unique_structured_term_names(
-            stmts, :hsgp, axes_suffix, target; tail="_by_$gname")
+            stmts, :hsgp, axes_suffix, target; tail="_by_$gname", data, term=t)
         PHI_name = Symbol(:PHI_hsgp_, suffix, :_by_, gname)
         omega2_name = Symbol(:omega2_hsgp_, suffix, :_by_, gname)
         rho_lower_name = Symbol(:rho_lower_hsgp_, suffix, :_by_, gname)
@@ -15509,7 +15516,7 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
     # `hsgp(x; cov=:periodic)` keeps `hsgp_<x>`; a repeat over the same axis
     # takes `hsgp_<target>_<x>` (snag periodic-hsgp-sh-2b41252b).
     suffix, col_name = _sb_unique_structured_term_names(
-        stmts, :hsgp, string(x), target)
+        stmts, :hsgp, string(x), target; data, term=t)
     PHI_name = Symbol(:PHI_hsgp_, suffix)
     harmonics_name = Symbol(:harmonics_hsgp_, suffix)
     rho_lower_name = Symbol(:rho_lower_hsgp_, suffix)

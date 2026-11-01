@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.103
+
+- `brm_start` accepts `term_inits`, quoted authored term-prior addresses paired
+  with natural-scale initial values, on StanBlocks and ReactiveKernels. This
+  includes scales, persistence, length scales, spatial mixing, smoothing
+  components, latent covariates and simplexes the backend already supports.
+  Qualified repeated terms resolve to their own emitted parameters.
+- Explicit starts accept `base=:prior_median`, a deterministic prior-informed
+  base with explicit values taking precedence. Effective scalar bounds and
+  HSGP floors are respected; structured latent blocks keep neutral coordinates.
+  Existing zero/numeric bases and no-initial-values data-based starts keep
+  their meanings. Initialization never changes the model or its priors.
+
 ## 0.2.102
 
 - Both backends accept grouped reads of every indexed output of another
