@@ -1,4 +1,6 @@
 [deps]
+Optim = "429524aa-4258-5aef-a3af-852621145aeb"
+SelectedInversion = "043bf095-3f01-458a-9f1c-8cf4448fe908"
 ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
 BayesianRegressionModels = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 BridgeStan = "c88b6f0a-829e-4b0b-94b7-f06ab5908f5a"
@@ -197,8 +199,8 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # b31d672fa (ReactiveKernels 0.1.6) contains e32d442c6: a plate cell computes
 # a value it reads at several rows at those rows only (snag
 # compact-cell-sam-d85d96ae).
-# Enzyme has no `[sources]` entry: its pinned dogfood commit is only in the
-# KB host mirror, which test/setup_env.jl clones it from.
+# Enzyme and SelectedInversion have no `[sources]` entries: their pinned
+# fleet commits are in the KB host mirrors, which setup_env.jl clones from.
 # 2a6829265 (ReactiveKernels 0.1.7, ReactiveKernelsPPL 0.1.3) contains
 # b31d672fa: a location summand computed from `logistic` binds (snag
 # rkppl-leaf-colum-59c22941).
@@ -233,11 +235,16 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 5f18f4b84 (ReactiveKernels 0.1.29, ReactiveKernelsPPL 0.1.23) fixes
 # plate buffer inference used by nested SAEM's population gradient
 # (snag brm-canonical-44-a1653c2a).
+# 9c9434a2 (RK 0.1.32 / PPL 0.1.26) adds public sum-factor values,
+# structural footprints and compact higher derivatives.
+# 30d676c9 (RK 0.1.34 / PPL 0.1.28) repairs single-sum outer AD exemplars.
 # 260d9a94 (RK 0.1.35 / RKPPL 0.1.29): visible grouped kernels retain
 # their shape facts for strict local observation queries.
 # f851e008 (RK 0.1.37 / RKPPL 0.1.31) binds data-computed entry axes
 # before shape inference.
 # 81363978 (RK 0.1.38 / RKPPL 0.1.32) also binds visible tuple-geometry
 # metadata operands, keeping the full completion's NLME cells local.
+# 23d26ca1 (RK 0.1.39 / RKPPL 0.1.33) keeps indexed direct predictor
+# reads beside reductions local (sum-factor-outer-ca5cc80e).
 # RKPPL 0.1.34: optional SMC and data-only checkpoints.
 rev = "4ddd18e563cd6f9726f50601d9a3992845a310f7"

@@ -1,6 +1,19 @@
 # Running the tests
 
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
+`nlme_laplace_sums.jl` checks sparse sum-cell integration against exact
+Gaussian marginals, conditional covariance and full-model derivatives, plus
+automatic selection, marginal optimization, independent copies and scalar
+curvature sign changes. Indexed direct predictor reads beside sums retain
+four outer coordinates at 16, 64 and 4,096 effects (RK 0.1.39 / RKPPL 0.1.33).
+`laplace_factors.jl` checks the compact factor chain
+rule and bounded covariance square-root action. The end-to-end scaling
+driver is `research/sparse_laplace_factors/fitting_scaling.jl`.
+
+Sum-cell tests require the fleet SelectedInversion revision recorded in
+`setup_env.jl`; registered 0.2.2 does not include its KLU API. The bootstrap
+reads that revision from the host mirror, as it does the Enzyme dogfood pin.
+
 Run any one of them with:
 
 ```sh
@@ -1791,7 +1804,10 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   `native-reverse-t-6d51cae6`; user pick on BRM decision `0n0kgfh`). The
   sparse Laplace's `@plate` cells take their Hessian blocks through RKPPL's
   compact-cell AD under plain Reverse, which needs dogfood from `7a886d9`
-  (Enzyme snag `static-reverse-s-f9483e9c`); the pin is `3e707d79`.
+  (Enzyme snag `static-reverse-s-f9483e9c`). The current pin is `0e251cfb`
+  with its declared libEnzyme `782c9d95`; it includes `3a89b497`'s compact
+  nested-AD overlay repairs for sum factors and the dynamic-call Hessian
+  repair needed by lower-bounded completion geometry.
   `setup_env.jl` materializes the pinned dogfood commit from the KB host's
   Enzyme mirror (it is not on GitHub), develops its nested `lib/EnzymeCore`
   0.8.27 beside it (Pkg 1.10 ignores Enzyme's `[sources]`; registered

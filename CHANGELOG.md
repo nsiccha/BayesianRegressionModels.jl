@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.96
+
+- Added: sparse embedded Laplace integration of sum-factored `@plate`
+  likelihoods. Summand curvature stays local and outer curvature enters an
+  augmented sparse system, including overlapping, repeated and empty sums.
+  KLU supplies pivoted solves, SelectedInversion supplies the required inverse
+  entries, and MUMPS certifies curvature and log determinants. Conditional
+  draws use a bounded Krylov covariance square-root action. Automatic term
+  diagnostics reuse baseline sums and evaluate only changed summands.
+  Requires the fleet SelectedInversion revision `8b1ee1077cea94c1aff746e182681ae39ce91526`
+  (the registered 0.2.2 release does not carry its pivoted-LU API), KLU 0.6,
+  MUMPS 1.7 and KrylovKit 0.10; `test/setup_env.jl` records the exact source.
+  Requires ReactiveKernels 0.1.39 / ReactiveKernelsPPL 0.1.33 so an indexed
+  predictor read beside a sum keeps its local derivative footprint.
+
 ## 0.2.95
 
 - Non-centered missing-value completions follow data-indexed gathers of

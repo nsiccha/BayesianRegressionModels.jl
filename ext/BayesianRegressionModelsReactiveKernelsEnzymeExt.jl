@@ -258,4 +258,57 @@ function BRM._rk_spl_cell_third(ad, direction::Vector{Float64}, base::Vector{Flo
     gradient, hv, tv
 end
 
+# A factor's complete derivative block is small: the outer sums and direct
+# reads, or one summand's own reads. Operators are shared only across factors
+# with the same selection length, never across concurrent problem copies.
+# Give the shared preparation reference identity. Its nested immutable RK
+# records otherwise get embedded into every term and repeatedly boxed when
+# walking heterogeneous cell states (over 3 KB per record in the sum fixture).
+mutable struct _SPLFactorAD{H,T,D}
+    const hvp::H
+    const third::T
+    const dirs::D
+    const r::Int
+    const outer::Bool
+end
+
+function BRM._rk_spl_factor_ad(q, part, base, indices, ad_backend; cell0=1, term0=1)
+    r = part === :outer ? length(q.terms) : 0
+    m = length(indices)
+    shape(v) = part === :outer ? (v[1:r], v[(r + 1):end]) : v
+    dirs = ntuple(r + m) do k
+        v = zeros(r + m); v[k] = 1.0
+        shape(v)
+    end
+    forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
+    second = SecondOrder(AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse,
+        ad_backend)), forward)
+    hvp = Base.invokelatest(prepare_cell_factor_ad, prepare_ad_hvp, q.factors,
+        part, base, indices, second, dirs; cell0, term0)
+    third = Base.invokelatest(prepare_cell_factor_ad, prepare_ad_third, q.factors,
+        part, base, indices, SecondOrder(second, forward), (shape(zeros(r + m)),);
+        cell0, term0)
+    _SPLFactorAD(hvp, third, dirs, r, part === :outer)
+end
+
+_spl_factor_flat(v::Tuple) = vcat(v...)
+_spl_factor_flat(v::AbstractVector) = v
+_spl_factor_point(ad, base, indices, cell, sums, term) = ad.outer ?
+    (base, sums, base[indices], indices, cell) :
+    (base, base[indices], indices, cell, term)
+
+function BRM._rk_spl_factor_block(ad, base, indices, cell; sums=nothing, term=1)
+    point = _spl_factor_point(ad, base, indices, cell, sums, term)
+    g, cols = ad_gradient_and_hvp(ad.hvp, ad.dirs, point...)
+    _spl_factor_flat(g), hcat(map(_spl_factor_flat, cols)...)
+end
+
+function BRM._rk_spl_factor_third(ad, direction, base, indices, cell;
+        sums=nothing, term=1)
+    d = ad.outer ? (direction[1:ad.r], direction[(ad.r + 1):end]) : direction
+    point = _spl_factor_point(ad, base, indices, cell, sums, term)
+    g, (hv,), (tv,) = ad_gradient_hvp_and_third(ad.third, (d,), point...)
+    _spl_factor_flat(g), _spl_factor_flat(hv), _spl_factor_flat(tv)
+end
+
 end
