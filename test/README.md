@@ -88,6 +88,13 @@ collected last (the RK gradient of vector-cell reads is `@test_broken`, todo
 `1svm4l1`). It also covers the omitted response, `reprocess`, and
 the refusal of a name two cells write. Snag `model-scope-read-3649ae8a`.
 
+`plate_grouped_outputs.jl` checks grouped reads of both outputs from another
+plate through `rows = groups(group => labels)` and `value[rows[k]]`.
+Compiled Stan and native RK densities and gradients match an independent
+oracle, including interleaved rows, an empty group, either output order, a
+reader written before its producer, and replay onto changed groups and row
+counts. Its testsets accept substring filters.
+
 `walk_forecast.jl` checks forecasts of the walk terms `rw(time)` and
 `cdar(step; by=g, cor=C)`: a replay whose rows reach past the fitted grid keeps
 the fit's unconstrained coordinates and draws the appended steps' innovations
