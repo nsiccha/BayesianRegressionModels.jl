@@ -2128,15 +2128,25 @@ function _brm_nlme_eta_patterns(blocks, reads)
         block = blocks[i]
         n = length(block)
         local_index = Dict(j => k for (k, j) in enumerate(block))
-        rows, columns = Int[], Int[]
+        # Repeated observations do not add curvature edges. Keep one column
+        # per distinct cell support, then form their incidence product. Sparse
+        # multiplication accumulates each output column without storing every
+        # duplicate pair from every cell (billions of pairs on Atlas).
+        supports = Set{Vector{Int}}()
         for group in reads[i], read in group
-            ks = [local_index[j] for j in read]
-            for j in ks, k in ks
-                push!(rows, j)
-                push!(columns, k)
-            end
+            isempty(read) && continue
+            push!(supports, sort!(unique!([local_index[j] for j in read])))
         end
-        sparse(rows, columns, true, n, n, |)
+        rows, pointers = Int[], Int[1]
+        for support in supports
+            append!(rows, support)
+            push!(pointers, length(rows) + 1)
+        end
+        incidence = SparseMatrixCSC(n, length(supports), pointers, rows,
+            fill(true, length(rows)))
+        # Boolean sparse multiplication counts common cells. Only whether a
+        # pair shares any cell matters; no whole-unit clique is introduced.
+        (incidence * transpose(incidence)) .!= 0
     end
 end
 

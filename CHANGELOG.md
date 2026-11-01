@@ -18,7 +18,9 @@ instead of failing at run time.
   partition per unit. Preparation checks structural coordinate ownership,
   including dormant branches, and names nonlocal producers or foreign unit
   effects. Sparse curvature retains individual cell supports without numerical
-  probing or gradient-based pruning. Conditional subsets evaluate only their
+  probing or gradient-based pruning; repeated observations share one support
+  during pattern assembly instead of accumulating duplicate coordinate pairs.
+  Conditional subsets evaluate only their
   requested units; full-cohort and population-gradient calls retain batching.
 - Changed: separated CAR fields expose their shared values through row-local
   graph computations, preserving their law, coordinates, inverse and Jacobian.

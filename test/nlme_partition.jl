@@ -4,6 +4,41 @@
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_panel_fixture.jl"))
 using Random
+using SparseArrays
+
+@stestset "curvature patterns retain only pairs sharing a cell" begin
+    # Packed coordinates need not follow the unit's local coordinate order.
+    # Repeated cells and repeated reads do not add edges; an unobserved effect
+    # and an empty unit keep their zero rows/columns.
+    blocks = [[70, 10, 50, 90, 30], [400, 200], Int[]]
+    reads = [([[70, 50], [50, 30]], [[50, 70], Int[], [90]]),
+        ([[400, 200, 400]], Vector{Int}[]), (Vector{Int}[], Vector{Int}[])]
+    saved = deepcopy(reads)
+    patterns = BRM._brm_nlme_eta_patterns(blocks, reads)
+    @test patterns[1] == Bool[1 0 1 0 0; 0 0 0 0 0; 1 0 1 0 1;
+        0 0 0 1 0; 0 0 1 0 1]
+    @test patterns[2] == trues(2, 2)
+    @test size(patterns[3]) == (0, 0)
+    @test all(P -> P isa SparseMatrixCSC{Bool,Int}, patterns)
+    @test reads == saved
+end
+
+@stestset "repeated observations do not accumulate duplicate curvature pairs" begin
+    blocks = [collect(10:10:5120)]
+    # 4,000 observations share 128 effects. Their curvature still has only
+    # 128² entries; retaining all cell pairs would allocate over 1 GB.
+    support = blocks[1][1:4:end]
+    reads = [([copy(support) for _ in 1:4000],)]
+    patterns = BRM._brm_nlme_eta_patterns(blocks, reads)
+    @test size(only(patterns)) == (512, 512)
+    @test nnz(only(patterns)) == 128^2
+    @test only(patterns)[1, 509]
+    @test !only(patterns)[1, 2]
+    # Warmed allocation budget allows the linear support copies and the
+    # sparse output, but rules out accumulating every repeated cell pair.
+    bytes = @allocated BRM._brm_nlme_eta_patterns(blocks, reads)
+    @test bytes < 32 * 1024^2
+end
 
 @stestset "global scalar expressions remain authorable with strict partitions" begin
     # The shared predictor has its own row domain. Its literal-index reads
