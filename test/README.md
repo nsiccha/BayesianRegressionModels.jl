@@ -38,6 +38,7 @@ retention. `filter_models.jl` contains the shared public synthetic models.
 `filter_calibration.jl` additionally checks an explicitly drifting parameter
 against analytic filtering, narrow-ensemble predictive calibration and the
 completed-SMC-to-filter interface.
+Its testsets accept the usual substring filters as trailing arguments.
 
 `test/Project.toml` is a superset of the root project: it carries every package
 that any `test/*.jl` loads, so no test file fails at its own `using` line the way

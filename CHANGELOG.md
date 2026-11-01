@@ -15,7 +15,7 @@ instead of failing at run time.
 ## 0.2.98
 
 - Added RK-only finite-state `brm_filter`, observation steps, bounded streaming
-  and data-only checkpoints through RKPPL 0.1.35. Calibrated parameter points
+  and data-only checkpoints through RKPPL 0.1.36. Calibrated parameter points
   and ensembles retain separate conditional state clouds; explicit authored
   parameter drift is supported. State-only warm-up avoids counting the
   parameter-training likelihood twice. Filtering preserves frozen

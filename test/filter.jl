@@ -125,6 +125,7 @@ end
     rk = RKBRMI(FM.scaled(training))
     point = fill(0.2, rk.model.layout.total)
     filtered = brm_filter(rk; parameters=point, inputs=(:x,), particles=8, rng=Xoshiro(44))
+    @test isempty(intersect(keys(filtered.target.data), (:x, :x_fit, :X_mu, :y)))
     for (x, y) in ((8.0, 1.2), (9.0, 1.3))
         replay = reprocess(rk, (; x=[x], y=[y]))
         score = PPL.prepare_query(replay.model, rk_bound_plan(replay), :likelihood)(point)

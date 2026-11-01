@@ -240,8 +240,8 @@ const PINS = [
     # metadata operands before shape inference (prepare-one-resp-b1f58f91).
     # 23d26ca1 (RK 0.1.39 / RKPPL 0.1.33) keeps indexed direct predictor
     # reads beside reductions local (sum-factor-outer-ca5cc80e).
-    # RKPPL 0.1.35: finite-state filtering alongside batch/cumulative SMC.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "5ca751cc95dbc9cfd78fe432a2a0b11f4dacd264"),
+    # RKPPL 0.1.36: finite-state filtering, design rows and grouped scan outputs.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "6fee103e84583780e5ca0e9f1ea21fcf1e585ea0"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

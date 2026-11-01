@@ -9,6 +9,7 @@ const FM = FilterModels
     rk = RKBRMI(FM.drifting_intercept((; y=[zeros(3)], T=3)))
     filter = brm_filter(rk; groups=(; i=1:1),
         drifting=(Symbol("i.coefficient"),), particles=4000, rng=Xoshiro(81))
+    @test isempty(intersect(keys(filter.target.data), (:y, :y_cell_input_y, :T)))
     mean, variance = 0.0, 1.0
     ys = [0.1, 0.4, 0.8, 1.2, 1.7, 2.0]
     for (index, y) in enumerate(ys)
