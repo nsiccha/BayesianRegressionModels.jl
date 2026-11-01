@@ -266,6 +266,14 @@ function _rk_design_checks(binder::RKDesignBinder, plan, design, derived)
                 continue
             end
             push!(checks, _rk_design_hsgp_check(term))
+            if get(options, :level_cor, nothing) isa _BRMMultigroupCoordinates
+                required = (options.group_column, options.level_cor.axes...)
+                if all(has, required)
+                    push!(checks, _rk_design_multigroup_check(term, binder.resample_groups))
+                else
+                    push!(derived, Symbol(predictor.name, "#multigroup"))
+                end
+            end
         elseif term.kind === :factor && haskey(options, :index_levels)
             source = only(term.columns)
             has(source) || continue

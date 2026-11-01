@@ -176,8 +176,9 @@ _rk_replay_buckets(_plan) = ()
 # Plain blocks read their levels from a fit-role copy of the grouping column;
 # `mm(...)` and `gr(...; by=...)` blocks still read the bound columns' levels,
 # so a replay of their groups is refused unless they are resampled.
-# Correlated levels (`gr(g; cor=...)`, `hsgp(...; by=g, cor=...)`) share one
-# factor over the fitted level set; new levels would need a larger one.
+# Finite level-correlation factors cover the fitted level set; new levels
+# would need a larger one. Coordinate multigroup fields instead share fixed
+# spatial weights and evaluate the field at the new levels' locations.
 function _rk_refuse_level_correlated_resample(brmi, groups::Set{Symbol}; prefix)
     isempty(groups) && return nothing
     correlated = Symbol[_brm_grouping_column(d) for d in _brm_group_declarations(brmi)
@@ -188,7 +189,8 @@ function _rk_refuse_level_correlated_resample(brmi, groups::Set{Symbol}; prefix)
         for term in _brm_additive_terms(last(getargs(operation, 2)))
             term isa ExprColumn && getf(term) === hsgp || continue
             kw = getkwargs(term)
-            haskey(kw, :cor) && push!(correlated, name(kw.by))
+            haskey(kw, :cor) && !_brm_multigroup_coordinates_form(kw.cor) &&
+                push!(correlated, name(kw.by))
         end
     end
     hit = sort!(collect(intersect(groups, correlated)))
@@ -200,7 +202,7 @@ function _rk_refuse_level_correlated_resample(brmi, groups::Set{Symbol}; prefix)
     nothing
 end
 
-# A grouped HSGP (`hsgp(...; by=g)`) draws its standardized basis weights, and
+# An independent grouped HSGP (`hsgp(...; by=g)`) draws its basis weights, and
 # the level effects of a `log(sd(hsgp(...))) ~ 1 + (1 | g)` hyper-predictor,
 # inside its own block, one row per level: unlike a `(… | g)` block's effects,
 # a replay has no input through which a caller supplies new levels' values.
@@ -217,7 +219,9 @@ function _rk_refuse_grouped_hsgp_resample(brmi, groups::Set{Symbol}; prefix)
         for term in _brm_additive_terms(last(getargs(operation, 2)))
             term isa ExprColumn && getf(term) === hsgp || continue
             kw = getkwargs(term)
-            haskey(kw, :by) && push!(grouped, name(kw.by))
+            haskey(kw, :by) || continue
+            haskey(kw, :cor) && _brm_multigroup_coordinates_form(kw.cor) && continue
+            push!(grouped, name(kw.by))
         end
     end
     hit = sort!(collect(intersect(groups, grouped)))

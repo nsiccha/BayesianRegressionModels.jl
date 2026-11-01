@@ -1741,7 +1741,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             index_sources[only(term.columns)] = (term.options.source, term.options.levels)
         elseif term.kind === :hsgp && haskey(term.options, :group_index)
             index_sources[term.options.group_index] =
-                (term.options.group_source, term.options.group_levels)
+                (term.options.group_source,
+                 get(term.options, :group_fit_source, term.options.group_levels))
         end
     end
     # Data-only assignments, their fit-role twins and the constants they read
@@ -1752,10 +1753,16 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             only(derived.expression.args); fitted)
         push!(stmts, Expr(:(=), derived.name, expression))
     end
+    for predictor in plan.predictors, term in predictor.terms
+        term.kind === :hsgp && _rk_ast_multigroup_fit!(defs, stmts, taken, term)
+    end
     for name in sort!(collect(keys(index_sources)); by=string)
         source, levels = index_sources[name]
+        level_value = levels isa Symbol ?
+            _rk_ast_fitted_value!(stmts, taken, fitted, :brm_fit_levels,
+                Expr(:call, :brm_fit_levels, levels)) : _rk_ast_level_values(levels)
         call = _rk_ast_statistical_call!(defs, taken, :brm_prepared_indices,
-            source, _rk_ast_level_values(levels); kernel=true)
+            source, level_value; kernel=true)
         push!(stmts, Expr(:(=), name, call))
     end
     for derived in plan.derived

@@ -5311,7 +5311,8 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         (; group_index=idx, group_source=source, group_column=state.by.source,
             group_levels=collect(state.by.levels), n_groups=length(state.by.levels),
             level_cor, _rk_plan_level_coordinates!(level_cor, data, columns, taken,
-                                                   derived)...,
+                derived; id, source=state.by.source, levels=state.by.levels,
+                hyper_plans, orthogonal)...,
             _rk_plan_projection_levels!(orthogonal, state, idx, data, columns, taken,
                                         derived, fit_mask)...)
     end
@@ -5351,18 +5352,39 @@ function _rk_plan_projection_levels!(orthogonal::Symbol, state, index, data, col
     (; fit_group_index=index_fit)
 end
 
-# `cor = multigroup(coordinates, lambda; k)` reads the levels' coordinates as
-# fit-role inputs, so a frozen replay keeps the training coordinates; the
-# graph derives the inducing grid from them (src/rk_structured.jl). Free
-# inducing positions are fit-role inputs too when they are data, and the
-# declared vector parameters by name otherwise.
-_rk_plan_level_coordinates!(_level_cor, data, columns, taken, derived) = (;)
-_rk_plan_level_coordinates!(lc::_BRMMultigroupCoordinates, data, columns, taken, derived) =
-    (; coordinate_columns=Tuple(_rk_fit_twin!(derived, columns, taken, data, axis)
-                                for axis in lc.axes),
-       position_columns=Tuple(isnothing(position.values) ? position.name :
-                                  _rk_fit_twin!(derived, columns, taken, data, position.name)
-                              for position in lc.positions))
+# A coordinate field reads the window's locations, while its grid is a fitted
+# graph value of the training locations. Its shared weights never have a row
+# per group. Data-valued free inducing positions are fitted values as well.
+_rk_plan_level_coordinates!(_level_cor, data, columns, taken, derived; kwargs...) = (;)
+function _rk_plan_level_coordinates!(lc::_BRMMultigroupCoordinates, data, columns,
+        taken, derived; id, source, levels, hyper_plans, orthogonal)
+    frozen = _brm_frozen_replay()
+    if frozen !== nothing && source in frozen.resample
+        orthogonal === nothing || error(
+            "RK reprocess: resampling `$source` with `orthogonal_to` on a " *
+            "coordinate multigroup HSGP needs new per-level projection fits")
+        any(p -> !isempty(p.ranefs), hyper_plans) && error(
+            "RK reprocess: resampling `$source` with per-level HSGP " *
+            "hyperparameter effects has no input for the new levels' effects")
+    end
+    fit = _rk_multigroup_replay_fit(lc, source, id, data)
+    _rk_check_multigroup_replay(fit, levels, lc.coordinates; source)
+    for axis in lc.axes
+        columns[axis] = data[axis]
+    end
+    coordinate_fit_columns = isempty(lc.positions) || isnothing(lc.lambda) ?
+        Tuple(_rk_fit_twin!(derived, columns, taken, data, axis) for axis in lc.axes) : ()
+    position_fit_columns = Tuple(isnothing(p.values) ? nothing :
+        _rk_fit_twin!(derived, columns, taken, data, p.name) for p in lc.positions)
+    position_columns = Tuple(isnothing(input) ? p.name :
+        _rk_mint_generated!(taken, columns, string(id, "_position_", j))
+        for (j, (p, input)) in enumerate(zip(lc.positions, position_fit_columns)))
+    (; coordinate_columns=Tuple(lc.axes), coordinate_fit_columns,
+       coordinate_grid=_rk_mint_generated!(taken, columns, string(id, "_coordinate_grid")),
+       coordinate_prior=_rk_mint_generated!(taken, columns, string(id, "_coordinate_prior")),
+       group_fit_source=_rk_fit_twin!(derived, columns, taken, data, source),
+       position_columns, position_fit_columns, multigroup_fit=fit)
+end
 
 # ---- AR(1) latent-path terms (mirrors `_sb_ar1`) ----
 #
@@ -8974,6 +8996,9 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     union!(statistical_inputs, (input for p in predictor_specs
         for t in p.terms if t.kind === :car || t.kind === :cdar
         for input in t.options.inputs))
+    union!(statistical_inputs, (input for p in predictor_specs
+        for t in p.terms if haskey(t.options, :coordinate_columns)
+        for input in t.options.coordinate_columns))
     union!(statistical_inputs, (spec.expression.args[2] for spec in derived
         if spec.expression.head === :_rk_data_preparation &&
             first(spec.expression.args) === :brm_matrix_column))

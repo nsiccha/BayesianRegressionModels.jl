@@ -4,6 +4,10 @@ The files in this directory are standalone scripts, not a `Pkg.test` suite.
 `plate_capture_dependencies.jl` checks whole-value captures in composed plates:
 late parameter dependencies, cell-local name collisions, scan-local names,
 and compiled Stan/native density and gradient agreement with an independent oracle.
+`rk_multigroup_replay.jl` checks coordinate multigroup HSGPs across changing
+windows, including data-free state serialization, shared weight identities,
+new and returning labels, reordered levels, cached binder validation, frozen
+prior preprocessing, and dense tensor-field values and native gradients.
 `rk_grouped_anisotropic_hsgp.jl` checks per-axis length scales of grouped
 HSGPs: independent, sampled, known and multigroup correlations, default and
 explicit floor bounds, fixed scales, term starts, shared readers and frozen
