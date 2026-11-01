@@ -556,7 +556,7 @@ function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend)
     pointwise = _rk_slap_pointwise(p.kernels, u0)
     term = length(p.family)
     for name in names
-        query = _rk_nlme_cell_query(p.backend, (name,))
+        query = _rk_nlme_cell_query(p.backend, (name,), (), u0)
         expected = pointwise[name]
         isempty(expected) && continue
         factors = _rk_spl_factor_queries(p.backend, name)

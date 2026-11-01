@@ -1551,6 +1551,7 @@ function _rk_nlme_cell_value end
 function _rk_nlme_partitioned end
 function _rk_nlme_partition_context end
 function _rk_nlme_partition_query end
+function _rk_nlme_is_partition_separability_error end
 function _rk_nlme_partition_labels end
 function _rk_nlme_partition_value end
 function _rk_nlme_partition_query_footprint end
@@ -1733,7 +1734,17 @@ function _brm_nlme_partition_queries(backend, cells, view, unit, partitioned, pr
             _rk_nlme_partition_context(backend, cells, _brm_nlme_partition_keys(cells), partitioned)
         end
         query = _brm_run_phase(phases.query) do _
-            _rk_nlme_partition_query(context, unit)
+            try
+                _rk_nlme_partition_query(context, unit)
+            catch error
+                _rk_nlme_is_partition_separability_error(error) || rethrow()
+                # RK reports packed positions. On refusal only, use the same
+                # structural cell reads as sparse curvature to name BRM's
+                # foreign coordinates, including dormant branches.
+                _brm_nlme_structural_reads(cells, unit, view)
+                _brm_nlme_error("brm_nlme_model: observation partition reads effect " *
+                    "coordinates owned by another subject: " * sprint(showerror, error))
+            end
         end
         labels = Set(_rk_nlme_partition_labels(query))
         footprints = _brm_run_phase(phases.footprints) do phase

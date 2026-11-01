@@ -620,33 +620,31 @@ end
 
 # BRM supplies semantic ownership; the public RKPPL declaration assigns each
 # parameter's first axis to those same integer unit keys. Other axes repeat
-# that ownership in packed column-major order. Shared entries stay undeclared.
+# that ownership in packed column-major order. Entirely shared entries stay
+# undeclared; a shared position inside a mixed entry has the RK label `missing`.
 function BRM._rk_nlme_partitioned(backend::BRM.RKBRMI, view::BRM.BRMNLMEView)
-    declarations = Pair{Symbol,Vector{Int}}[]
+    declarations = Pair{Symbol,Vector{Union{Missing,Int}}}[]
     for entry in backend.model.layout.entries
         positions = entry.offset:(entry.offset + entry.size - 1)
         owners = @view view.subject[positions]
         any(!iszero, owners) || continue
         n = isempty(entry.dims) ? entry.size : first(entry.dims)
-        0 < n <= length(owners) && all(!iszero, owners) &&
+        0 < n <= length(owners) &&
             all(j -> owners[j] == owners[mod1(j, n)], eachindex(owners)) ||
             BRM._brm_nlme_error("brm_nlme_model: parameter `$(entry.name)` " *
                 "cannot represent its subject ownership on its first axis")
-        push!(declarations, entry.name => collect(owners[1:n]))
+        labels = Union{Missing,Int}[iszero(owner) ? missing : owner
+            for owner in @view owners[1:n]]
+        push!(declarations, entry.name => labels)
     end
     declarations
 end
 
-function BRM._rk_nlme_partition_query(context, unit)
-    try
-        prepare_partition(context.built, context.bound, context.observations;
-            by=context.by, locality=:error, partitioned=context.partitioned, u0=unit)
-    catch error
-        error isa ReactiveKernels.PartitionSeparabilityError || rethrow()
-        BRM._brm_nlme_error("brm_nlme_model: observation partition reads effect " *
-            "coordinates owned by another subject: " * sprint(showerror, error))
-    end
-end
+BRM._rk_nlme_partition_query(context, unit) =
+    prepare_partition(context.built, context.bound, context.observations;
+        by=context.by, locality=:error, partitioned=context.partitioned, u0=unit)
+BRM._rk_nlme_is_partition_separability_error(error) =
+    error isa ReactiveKernels.PartitionSeparabilityError
 BRM._rk_nlme_partition_labels(query) = partition_labels(query)
 BRM._rk_nlme_partition_value(query, point, label) = query(point, label)
 
