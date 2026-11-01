@@ -85,6 +85,7 @@ using StanBlocks
 include("sbimpl.jl")
 include("sb_marginal_ranef.jl")
 include("sb_cell_julia.jl")
+include("sb_distribution_statistics.jl")
 include("sb_plate_outputs.jl")
 # Fusion-append artifacts + SB reference numbers (RK-side driver inputs).
 # After sbimpl (SBBRMI) and the RK planner/AST above; RK-free — the

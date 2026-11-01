@@ -96,12 +96,14 @@ const _RK_SOURCE_IMPORTS = (
         :brm_panel_slice, :brm_flatten_cells, :brm_invprobit, :brm_invcloglog,
         :brm_ragged_rows, :brm_ragged_rows_ordered, :brm_ragged_rows_shared))
 
-# RKPPL vocabulary that Base, Core, Distributions and LogExpFunctions do not
-# define. RKPPL reads these heads by name whatever the model module binds
+# RKPPL heads with a fixed model meaning, including response combinators
+# that also name ordinary Distributions constructors. Value calls to those
+# constructors need a fresh name so RKPPL resolves the Julia callable.
+# RKPPL reads these heads by name whatever the model module binds
 # (`rkppl-use` §2 and §9).
 const _RK_SOURCE_VOCABULARY = Set{Symbol}([:ReactiveKernelsPPL,
     :normcdf, :probit, :cloglog, :treatment, :levels, :weighted, :restricted,
-    :interval_censored, :Ordered, :LogDensity, :Flat, :Ordinal, :Cumulative,
+    :truncated, :censored, :interval_censored, :Ordered, :LogDensity, :Flat, :Ordinal, :Cumulative,
     :StoppingRatio, :LogitLink, :ProbitLink, :CloglogLink, :PoissonLog,
     :CategoricalLogit, :OrderedLogistic, :MvNormalCholesky, :NormalIDGLM,
     :ZeroInflatedPoisson, :ZeroInflatedBinomial])

@@ -25,6 +25,18 @@ Run any one of them with:
 julia --project=test test/adaptive_centering_bridgestan.jl
 ```
 
+`bounded_lognormal_moments.jl` checks ordinary `mean`/`var` expressions over
+a lower-truncated LogNormal and its separate support log probability in scalar
+and plate models. It compares compiled Stan and native Enzyme gradients with
+high-precision moment references and independent finite differences, including
+deep tails, nearly certain survival, and a parameter-dependent bound. A grouped
+model checks NLME unit attribution and unit/full-model density and gradient
+agreement. The survival
+event is an explicit likelihood factor; normalized moments alone do not add it.
+The exact Distributions fork and StanBlocks revisions are pinned in
+`setup_env.jl` and `Project.toml`; the bootstrap can materialize review
+candidates from the fleet mirrors before their publication.
+
 `smc.jl` checks RK-only batch and cumulative-data SMC against analytic
 Gaussian posteriors and evidence, deterministic continuation and checkpoint
 replay, unchanged caller RNG, frozen training preprocessing, incompatible

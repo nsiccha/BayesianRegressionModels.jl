@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.107
+
+- Added Stan lowering for ordinary `mean` and `var` expressions over a
+  lower-truncated LogNormal, plus its separate stable `logcdf`/`logccdf`, in
+  plates and model-scope expressions. Constructor parameters and the lower
+  bound may depend on model parameters. Numerical evaluation uses the
+  Distributions and StanBlocks implementations; normalized moments do not
+  implicitly add the support-probability factor to the likelihood. StanBlocks
+  0.2.14 supplies the Stan builtins; the test environment pins that release
+  and the Distributions fork revision carrying the one-sided moments.
+- RK source preserves ordinary `truncated` and `censored` constructors in
+  model-value expressions by distinguishing their callable bindings from
+  RKPPL's response combinators.
+
 ## 0.2.106
 
 - `brm_start(sb, stan_model, inits)` with a block's `effects` holds one

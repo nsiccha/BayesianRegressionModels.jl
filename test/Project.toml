@@ -36,6 +36,7 @@ WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 ZipFile = "a5390f91-8eb1-5f08-bee0-b1d1ffed6cea"
 
 [compat]
+Distributions = "0.25.133"
 BridgeStan = "2.9"
 Enzyme = "0.13"
 # Enzyme_jll 0.0.302 (required by Enzyme 0.13.211) segfaults native Reverse
@@ -45,7 +46,7 @@ Enzyme = "0.13"
 Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PSIS = "0.9"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.12"
+StanBlocks = "0.2.14"
 Treebars = "0.1.1"
 Turing = "0.46"
 WarmupHMC = "0.2.8"
@@ -53,9 +54,9 @@ julia = "1.10"
 
 [sources.Distributions]
 url = "https://github.com/nsiccha/Distributions.jl.git"
-# Unreleased DirichletMultinomial support correction; also selected on Julia
-# 1.10 by setup_env.jl, where [sources] is ignored.
-rev = "83cec5e3a8a35167d54f19da9dc5afb54f59273e"
+# One-sided LogNormal moments and tail-stable truncation mass, including the
+# DirichletMultinomial support correction; setup_env.jl also pins this on 1.10.
+rev = "63b968eaae73193f73d784529dc291253d62ee6f"
 
 [sources.StanBlocks]
 url = "https://github.com/nsiccha/StanBlocks.jl"
@@ -95,7 +96,9 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # 02a93f48 (StanBlocks 0.2.10) serializes exact infinite bound data for
 # BridgeStan, including mixed censored and detected observations.
 # ab3960bb (StanBlocks 0.2.12) registers stable hypot and its Base callable.
-rev = "ab3960bb4c3663ff9e5bb6f0c166c826fd7d9e3c"
+# fac3385a (StanBlocks 0.2.14) supplies stable lower-truncated LogNormal
+# moments and both log-CDF tails for ordinary distribution statistics.
+rev = "fac3385a5cb9d0e894352c34f4d0e590e4f93328"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
