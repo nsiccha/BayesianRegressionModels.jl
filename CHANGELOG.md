@@ -12,6 +12,16 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.116
+
+- A plate may select another plate's complete vector-valued output through
+  an index on its own axis, such as `path[which[i]][positions[i]]`. RK and
+  Stan preserve the source cell before selecting its entries, for data-only
+  and parameter-dependent outputs, including non-last outputs. The plates
+  may have different cell counts and several readers may share one cell.
+  Captured outputs also retain their producer dependencies when model
+  fragments are composed with the reader first.
+
 ## 0.2.115
 
 - RK frozen replay accepts changing group labels for coordinate multigroup

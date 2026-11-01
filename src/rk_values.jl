@@ -1129,6 +1129,11 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         base = _rk_weighted_observation(base, observation.weight, bindings, taken)
         push!(stmts, _rk_observation_statement(observation, base, taken; joint))
     end
+    # Raw expressions inside authored cells can select a shared producer on
+    # a different axis. Formula-level reads were lowered above; lower these
+    # captures before ordering so the dependency is the complete cell array.
+    select_cell(name, index) = Expr(:ref, cells[name], index)
+    stmts = Any[_brm_plate_cell_refs(select_cell, stmt, keys(cells)) for stmt in stmts]
     computed = Set{Symbol}()
     foreach(statement -> _rk_source_assignments!(computed, statement), stmts)
     stmts = _rk_order_value_statements(stmts, setdiff(Set(keys(plan.columns)), computed), defs;
