@@ -8,17 +8,18 @@ include(joinpath(@__DIR__, "../../test/nlme_fixtures.jl"))
 using LinearAlgebra, Random, LogDensityProblems
 const KrylovKit = BRM.KrylovKit
 
-function shared_field_fixture(; groups=3, rows=3, temporal=2, spatial=2)
+function shared_field_fixture(; groups=3, rows=3, temporal=2, spatial=2, poisson=false)
     rng = Xoshiro(20261101)
     data = (; probe=repeat(1:groups; inner=rows),
         time=repeat(collect(range(0.1, 2.0; length=rows)), groups),
         sx=cos.(1.3 .* (1:groups)), sy=sin.(0.7 .* (1:groups)),
-        y=randn(rng, groups * rows))
+        y=poisson ? rand(rng, Poisson(2.0), groups * rows) : randn(rng, groups * rows))
+    response = poisson ? :(y[p] ~ Poisson(exp.(mu[p]))) : :(y[p] ~ Normal(mu[p], 0.7))
     builder = BRM.brm(quote
         mu ~ 1 + (1 | probe) + hsgp(time; k=$temporal, by=probe,
             cor=multigroup((sx, sy), 2.0; k=$spatial))
         @plate for p in groups(probe)
-            y[p] ~ Normal(mu[p], 0.7)
+            $response
         end
     end; mod=@__MODULE__)
     rk = RKBRMI(builder(data))
@@ -111,7 +112,7 @@ function shared_gaussian_mode(op, u; rtol=1e-10, maxiter=128)
     (; mode, info)
 end
 
-@testset "shared HSGP native operator against a small Gaussian control" begin
+@stestset "shared HSGP native operator against a small Gaussian control" begin
     println((; stage="prepare", julia=string(VERSION), enzyme=pkgdir(Enzyme),
         libenzyme=Enzyme.Compiler.Enzyme_jll.libEnzyme_path)); flush(stdout)
     (; rk, m, data) = shared_field_fixture()

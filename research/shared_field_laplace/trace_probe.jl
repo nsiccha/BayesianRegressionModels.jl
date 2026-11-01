@@ -31,7 +31,7 @@ function shared_trace(op, mode, probes; rtol=1e-11, maxiter=128)
     (; trace=result ./ n, operations, max_residual)
 end
 
-@testset "solve-based trace equals the small exact contraction" begin
+@stestset "solve-based trace equals the small exact contraction" begin
     (; m) = shared_field_fixture()
     op = shared_field_operator(m)
     u = first(BRM._brm_nlme_prior_median_point(m))
