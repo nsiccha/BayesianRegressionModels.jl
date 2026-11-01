@@ -262,6 +262,8 @@ const PINS = [
     # RKPPL 0.1.37: exact nonfinite SMC diagnostics across mutation tasks.
     # RKPPL 0.1.42 (RK 0.1.44): independent SMC pilot tuning, adaptive pilots and
     # portable correlated references.
+    # RK 0.1.47 / RKPPL 0.1.43: strict row reductions and whole-row gathers,
+    # unchanged scan captures, and censored ragged cell-factor projections.
     # RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
     # helper calls, guarded captures and broadcast observation locations.
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "0a517908470ceb0480b3db91d6b052b4dc02bb8c"),
@@ -290,7 +292,9 @@ const PINS = [
     # Embedded Laplace needs those orders for scaled-tail likelihoods.
     # 5325554c also contains the wide-plan tuple-field typing repair used by
     # large compact partitions (32d31ca; same libEnzyme build 782c9d95).
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "5325554cab66d13ab34c22ec502fd00759ffdcf7"),  # dogfood (KB mirror only)
+    # 68ed90fe declares libEnzyme 2063db12, repairing the integer division
+    # fold that stopped grouped-HSGP partition gradients on Julia 1.10.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "68ed90fecada7b8cca1ae3219d9e1bb104d9508d"),  # dogfood (KB mirror only)
 ]
 
 # Prefer the exact candidate from the host mirror. The resolver falls back to

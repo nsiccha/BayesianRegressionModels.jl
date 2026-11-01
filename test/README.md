@@ -988,7 +988,9 @@ Shared fixtures live in `nlme_fixtures.jl`.
 
 `nlme_partition.jl` checks strict structural ownership before returning an
 NLME model, including a cross-unit dependency in a dormant branch, and a valid
-unit with no observations in one group. `nlme_units_panel.jl` covers nested
+unit with no observations in one group. It also checks exact cell-wise
+curvature edges and bounds allocations when observations repeat a support.
+`nlme_units_panel.jl` covers nested
 partition likelihoods, gradients, cell-based Hessian sparsity and allocation
 scaling. The `nlme_svi.jl` filters `minibatch split` and
 `structural footprints and target split` check the wider SVI gradients without
@@ -1005,7 +1007,8 @@ evaluation requires 0.1.36 / 0.1.30 for uniform empty/nonempty plans and
 scheduled-loop resets. Lower-bounded shares completions evaluated
 through strict partitions (`nlme_lower_shares.jl`) require 0.1.42 / 0.1.39,
 which keeps shapes through nested data-only helpers inside sampled
-expressions. Both partition fixtures use ordinary Enzyme Reverse
+expressions. Scan-captured sigma rows and censored ragged factors need the
+current 0.1.47 / 0.1.43 floors. Both partition fixtures use ordinary Enzyme Reverse
 with the repaired dogfood revision pinned by `setup_env.jl`.
 
 `nlme_integrated.jl` covers NLMEEstimation's integrated families on BRM
@@ -1993,13 +1996,15 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   compact-cell AD under plain Reverse, which needs dogfood from `7a886d9`
   (Enzyme snag `static-reverse-s-f9483e9c`). Strict partition gradients need
   `a6458e9c` for constant plans and compact overlays; the ordinary Reverse
-  fixtures do not enable runtime activity. The current pin is `5325554c`
-  with its declared libEnzyme `782c9d95`; it includes `3a89b497`'s compact
+  fixtures do not enable runtime activity. The current pin is `68ed90fe`
+  with its declared libEnzyme `2063db12`; it includes `3a89b497`'s compact
   nested-AD overlay repairs for sum factors and the dynamic-call Hessian
   repair needed by lower-bounded completion geometry. It also repairs
   positive-tail `erfcx` derivatives through third order (Enzyme snag
   `erfcx-positive-t-db1c8c84`), required by scaled-tail likelihoods in the
-  embedded Laplace.
+  embedded Laplace. Its libEnzyme also repairs the integer-division fold
+  that prevented grouped-HSGP partition gradients from compiling on Julia
+  1.10 with default bounds (Enzyme snag `enzyme-type-anal-b401ef8f`).
   `setup_env.jl` materializes the pinned dogfood commit from the KB host's
   Enzyme mirror (it is not on GitHub), develops its nested `lib/EnzymeCore`
   0.8.27 beside it (Pkg 1.10 ignores Enzyme's `[sources]`; registered
