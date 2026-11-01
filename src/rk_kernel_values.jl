@@ -343,7 +343,12 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     scope = _brm_inline_scope(first(getargs(rhs)))
     output_reads = _brm_kernel_output_reads(brmi)
     direct_lps = [argument for argument in arguments
-        if argument isa NamedColumn && parent(argument) isa ExprColumn]
+        if argument isa NamedColumn && parent(argument) isa ExprColumn{typeof(~)}]
+    # Assignments are already graph values, not formula declarations. Their
+    # array axis belongs to the expression (which may gather or concatenate
+    # predictors); walking its inputs as a formula would invent a grouping.
+    assigned_inputs = any(argument -> argument isa NamedColumn &&
+        parent(argument) isa ExprColumn{typeof(assign)}, arguments)
     ragged_cols = [argument for argument in arguments
         if argument isa ExprColumn && getf(argument) === ragged]
     buckets = _sb_kernel_lp_buckets(direct_lps; ragged_cols)
@@ -458,7 +463,8 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     group_values === nothing && isempty(outer_lengths) && foreach(
         lp -> append!(outer_lengths, last.(_brm_kernel_lp_data_lengths(lp))), direct_lps)
     nsubjects = group_values === nothing ?
-        (isempty(outer_lengths) ? error("RK backend: kernel `$name` needs a subject input") : first(outer_lengths)) :
+        (isempty(outer_lengths) ? (assigned_inputs ? nothing :
+            error("RK backend: kernel `$name` needs a subject input")) : first(outer_lengths)) :
         length(group_values)
     all(==(nsubjects), outer_lengths) || error(
         "RK backend: kernel `$name` positional inputs disagree on subject count")
