@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.104
+
+- **Breaking:** SMC numerical failures now propagate RKPPL's
+  `SMCNonfiniteError` instead of `DomainError` (or its task wrapper). Catch
+  this exported RKPPL exception to inspect the exact unconstrained `position`,
+  `value`, optional `gradient`, `quantity`, `endpoint` and `temperature`.
+  Rendering is compact, NaN/+Inf still fail fast, and `-Inf` retains its
+  outside-support meaning. Requires RKPPL 0.1.37.
+
 ## 0.2.103
 
 - `brm_start` accepts `term_inits`, quoted authored term-prior addresses paired

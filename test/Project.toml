@@ -247,5 +247,5 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # metadata operands, keeping the full completion's NLME cells local.
 # 23d26ca1 (RK 0.1.39 / RKPPL 0.1.33) keeps indexed direct predictor
 # reads beside reductions local (sum-factor-outer-ca5cc80e).
-# RKPPL 0.1.36: finite-state filtering, design rows and grouped scan outputs.
-rev = "30e9a4a5b1e21dcbe36c56df2eacb012082e6366"
+# RKPPL 0.1.37: exact nonfinite SMC diagnostics across mutation tasks.
+rev = "44c9cd1533890e7ae2b0cbbc941caad3353b413d"

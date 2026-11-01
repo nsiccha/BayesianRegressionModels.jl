@@ -31,6 +31,11 @@ replay, unchanged caller RNG, frozen training preprocessing, incompatible
 groups and mutated-data refusals, and a synthetic deterministic recurrence.
 It uses the optional SequentialMonteCarlo and WarmupHMC extensions.
 
+`smc_nonfinite.jl` checks that batch fits and cumulative updates expose RKPPL's
+`SMCNonfiniteError` directly, including with Treebars progress, with the exact
+failing unconstrained point, compact rendering and serializable diagnostics.
+Failed updates preserve the input fit's complete checkpoint, including its RNG.
+
 `rk_captured_source.jl` checks that `rkppl_model(rk)` preserves submodel and
 callable-provider densities, shares captured source across compatible replays,
 and keeps frozen preprocessing in the binding, including training-free replay.
