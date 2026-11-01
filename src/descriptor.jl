@@ -2367,6 +2367,29 @@ _brm_emitted_coordinates(output::BRMOutput, constrained_names) = begin
 end
 
 # Element-order coordinates for one carrier: the same stem/prefix match as
+# The positions of a model's constrained (and transformed-parameter) names by
+# their stem, the text before the first `.` or the whole name: one pass over
+# the names, built once per `brm_start`, so each carrier lookup of its
+# random-effect solve reads one key instead of scanning every name of a large
+# model, as `_brm_element_coordinates(output, constrained_names)` must (snag
+# brm-start-explic-aaf34bf9).
+struct _BRMNameIndex
+    names::Vector{String}
+    stems::Dict{String,Vector{Int}}
+end
+
+function _BRMNameIndex(constrained_names)
+    names = String[string(n) for n in constrained_names]
+    stems = Dict{String,Vector{Int}}()
+    for (i, s) in enumerate(names)
+        dot = findfirst('.', s)
+        push!(get!(() -> Int[], stems, isnothing(dot) ? s : s[1:prevind(s, dot)]), i)
+    end
+    _BRMNameIndex(names, stems)
+end
+
+Base.length(index::_BRMNameIndex) = length(index.names)
+
 # `_brm_emitted_coordinates`, but returned in the carrier's ELEMENT order
 # (column-major over the parsed `.i[.j...]` suffix) instead of the caller's
 # axis order. The label- and margin-indexed resolvers
@@ -2386,12 +2409,23 @@ end
 # non-integer suffixes rather than guessing. An unmatched carrier returns
 # empty, exactly as `_brm_emitted_coordinates` does, so callers keep their
 # own absence handling (notably the exact-total fallback).
-function _brm_element_coordinates(output::BRMOutput, constrained_names)
+_brm_element_coordinates(output::BRMOutput, constrained_names) =
+    _brm_element_coordinates_among(output, enumerate(constrained_names))
+
+# The same coordinates through a name index: only the names whose stem is the
+# output's name are candidates, so a lookup costs the output's elements, not a
+# pass over every constrained and transformed-parameter name of a large model
+# (`brm_start`'s random-effect solve, snag brm-start-explic-aaf34bf9).
+_brm_element_coordinates(output::BRMOutput, index::_BRMNameIndex) =
+    _brm_element_coordinates_among(output,
+        ((i, index.names[i]) for i in get(index.stems, String(output.name), Int[])))
+
+function _brm_element_coordinates_among(output::BRMOutput, candidates)
     stem = String(output.name)
     prefix = stem * "."
     axis = Int[]
     keys = Vector{Int}[]
-    for (i, name) in enumerate(constrained_names)
+    for (i, name) in candidates
         s = string(name)
         if s == stem
             push!(axis, i)

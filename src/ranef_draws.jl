@@ -184,6 +184,18 @@ function _brm_ranef_stratified_draws(d, block::RanefBlock, draws, names)
        effects=_brm_ranef_effect_draws(d, block, spec, nothing, draws, names))
 end
 
+# Draws × levels × margins effects of one conventional block, stratified or
+# not: what `_brm_ranef_block_draws` / `_brm_ranef_stratified_draws` return as
+# `effects`, without the block's scales and correlations, which `brm_start`'s
+# solve for a block's coordinates reads at every probe and never needs.
+function _brm_ranef_block_effects(d, block::RanefBlock, draws, names)
+    spec = _RANEF_FAMILIES[block.family]
+    sd = isnothing(block.by) && isnothing(spec.effects) ?
+        _brm_ranef_scale_draws(d, block, spec, _brm_ranef_keywords(d, block), draws, names) :
+        nothing
+    _brm_ranef_effect_draws(d, block, spec, sd, draws, names)
+end
+
 # A stratified `gr(g, by=b)` block's stratum labels in index order and the
 # stratum (a position among them) of each of its levels. `caller` prefixes the
 # error.

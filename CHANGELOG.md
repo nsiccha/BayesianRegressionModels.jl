@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.106
+
+- `brm_start(sb, stan_model, inits)` with a block's `effects` holds one
+  constrained-plus-transformed-parameter vector at a time while it solves
+  for the block's coordinates, locates the block's carriers through one name
+  index built once, and measures a level-correlated `gr(g; cor=...)` block
+  through `levels + margins - 1` probes instead of `levels × margins`. Memory
+  is linear in the model's size, whatever the block's margins and given
+  levels; the points are unchanged. Before, the solve held `margins + 1`
+  (`levels × margins + 1` for a level-correlated block) full vectors twice
+  over, 50 GB on a 623k-parameter model (snag brm-start-explic-aaf34bf9).
+
 ## 0.2.105
 
 - RK observation-source providers honor the original constructor's
