@@ -72,12 +72,10 @@ function BRM._brm_svi_iteration!(rng,t::JointWindowTarget,q,global_opt,batch,
         diff_grad = (a.gradient[block]-b.gradient[block])/2
         BRM._brm_svi_unit_step!(q,i,mean_grad,diff_grad,unit_eps[i],beta)
     end
-    println((;iteration=global_opt.t,value=(a.value+b.value)/2,
-        scope="full-current-window joint collapse")); flush(stdout)
     (a.value+b.value)/2
 end
 
-function BRM._brm_svi_draws(rng,t::JointWindowTarget,q,n)
+function BRM._brm_svi_draws(rng,t::JointWindowTarget,q,n;node=nothing)
     U = repeat(t.m.unit,1,n)
     for j in 1:n
         U[t.globals,j] .= BRM._brm_svi_draw_global(q,randn(rng,length(q.μ)),
@@ -96,6 +94,7 @@ function BRM._brm_svi_draws(rng,t::JointWindowTarget,q,n)
         root = BRM._brm_spl_covariance_root(solve,randn(rng,length(t.op.field));
             maxdim=32,rtol=1e-9)
         U[t.op.field,j] .= state.mode[t.op.field] + root.draw
+        BRM._brm_update_progress!(node,j)
     end
     U
 end
