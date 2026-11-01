@@ -255,6 +255,10 @@ const PINS = [
     # inside sampled expressions, such as a bounded shares completion's
     # `lower=lo[x_shares_free]` (RK snag bounded-shares-g-792cef37);
     # dc06acc8 is the RK main containing it.
+    # 8f7832e7 (RK main after 0.1.42 / RKPPL 0.1.39, no version change) bounds
+    # partition-plan and metadata compilation at Atlas size: value-only shape
+    # reads stay out of plans and bookkeeping helper calls stay separate
+    # kernels (RK snag full-atlas-value-740085e1).
     # RKPPL 0.1.37: exact nonfinite SMC diagnostics across mutation tasks.
     # RKPPL 0.1.42 (RK 0.1.44): independent SMC pilot tuning, adaptive pilots and
     # portable correlated references.

@@ -28,8 +28,11 @@ instead of failing at run time.
   expressions, such as a lower-bounded shares completion's
   `lower=lo[x_shares_free]`, keep their shapes through strict cell and
   partition preparation. Unit gradients use ordinary Enzyme Reverse.
-  The test bootstrap selects Enzyme dogfood `5325554c`, including the
-  compact-partition activity, wide-plan and nested differentiation repairs.
+  The test bootstrap pins ReactiveKernels main `8f7832e7`, which bounds
+  partition-plan and metadata compilation at Atlas size (RK snag
+  `full-atlas-value-740085e1`) without an API change, and selects Enzyme
+  dogfood `5325554c`, including the compact-partition activity, wide-plan
+  and nested differentiation repairs.
 
 ## 0.2.120
 
