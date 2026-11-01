@@ -4,6 +4,7 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 using Statistics, SpecialFunctions, LinearAlgebra
 
 module OwnMomentFunctions
+using Distributions: LogNormal
 mean(x) = 2x
 var(x) = 3x
 end
@@ -15,6 +16,8 @@ end
     @test spell(:(var(x))) == :(var(x))
     @test spell(:(mean(LogNormal(mu, sigma))), OwnMomentFunctions) ==
         :(mean(LogNormal(mu, sigma)))
+    @test spell(:(var(LogNormal(mu, sigma))), OwnMomentFunctions) ==
+        :(var(LogNormal(mu, sigma)))
     @test spell(:(Statistics.mean(Distributions.LogNormal(mu, sigma)))) ==
         spell(:(mean(LogNormal(mu, sigma))))
     @test spell(:(mean(LogNormal()))) == spell(:(mean(LogNormal(0.0, 1.0))))
@@ -25,6 +28,8 @@ end
         :(mean(truncated(LogNormal(mu, sigma); bounds...)))
     @test_throws "lower truncation only" spell(
         :(mean(truncated(LogNormal(mu, sigma); lower=lo, upper=hi))))
+    @test_throws "upper=nothing" spell(
+        :(mean(truncated(LogNormal(mu, sigma); lower=lo, upper=Inf))))
 end
 
 # Independent tilted-normal identity evaluated at 256-bit precision. The
@@ -49,9 +54,10 @@ function scalar_bounded_model(data)
         m = mean(truncated(LogNormal(mu, exp(log_sigma)); lower=0.8))
         v = var(truncated(LogNormal(mu, exp(log_sigma)); lower=0.8))
         logmass = logccdf(LogNormal(mu, exp(log_sigma)), 0.8)
+        logcomplement = logcdf(LogNormal(mu, exp(log_sigma)), 0.8)
         unbounded = mean(LogNormal(mu, exp(log_sigma)))
         y ~ Normal(m + 0.01 * unbounded, sqrt(v + 0.1))
-        survived ~ BernoulliLogit(logmass - LogExpFunctions.log1mexp(logmass))
+        survived ~ BernoulliLogit(logmass - logcomplement)
     end
 end
 
@@ -77,7 +83,7 @@ end
 end
 
 const MOMENT_DATA = (; baseline=[-3.0, 0.0, 3.0, -40.0],
-    scale=[0.2, 0.2, 0.8, 1.0], lower=[1.0, 0.7, 2.0, 1.2],
+    scale=[0.2, 0.2, 0.8, 1.0], bound=[1.0, 0.7, 2.0, 1.2],
     y=[1.02, 1.05, 20.0, 1.24], noise=[0.03, 0.05, 0.5, 0.04],
     survived=ones(Int, 4))
 
@@ -89,14 +95,16 @@ function bounded_plate(data)
         @plate for i in eachindex(y)
             mu = baseline[i] + shift
             sigma = scale[i] * exp(log_scale)
-            lo = lower[i] * exp(log_bound)
+            lo = bound[i] * exp(log_bound)
             m[i] = mean(truncated(LogNormal(mu, sigma); lower=lo))
             v[i] = var(truncated(LogNormal(mu, sigma); lower=lo))
             logmass[i] = logccdf(LogNormal(mu, sigma), lo)
+            logcomplement[i] = logcdf(LogNormal(mu, sigma), lo)
             y[i] ~ Normal(m[i], sqrt(v[i] + noise[i]^2))
             # The observed event contributes logmass, independently of the
-            # normalized distribution's moments, even when exp(logmass) is 0.
-            survived[i] ~ BernoulliLogit(logmass[i] - LogExpFunctions.log1mexp(logmass[i]))
+            # normalized distribution's moments, even when exp(logmass) is 0
+            # or 1. Compute both log tails directly to retain the complement.
+            survived[i] ~ BernoulliLogit(logmass[i] - logcomplement[i])
         end
     end
 end
@@ -110,7 +118,7 @@ function moment_oracle(data, names)
             logpdf(Normal(0, 0.3), log_bound)
         for i in eachindex(data.y)
             m, v, mass = bounded_reference(data.baseline[i] + shift,
-                data.scale[i] * exp(log_scale), data.lower[i] * exp(log_bound))
+                data.scale[i] * exp(log_scale), data.bound[i] * exp(log_bound))
             value += logpdf(Normal(m, sqrt(v + data.noise[i]^2)), data.y[i]) + mass
         end
         value
@@ -124,7 +132,9 @@ end
     oracle = moment_oracle(MOMENT_DATA, names)
     stan = consumer_stan(brmi, "bounded-lognormal-moments")
     mapping = [:shift => "shift", :log_scale => "log_scale", :log_bound => "log_bound"]
-    for u in (zeros(3), [0.15, -0.1, 0.08], [-0.2, 0.1, -0.15])
+    near_full = zeros(3)
+    near_full[coordinate(names, :shift)] = 40.0
+    for u in (zeros(3), [0.15, -0.1, 0.08], [-0.2, 0.1, -0.15], near_full)
         check_consumer_point(problem, u, oracle)
         check_consumer_stan(problem, stan, mapping, backend, u)
     end
@@ -136,11 +146,12 @@ function grouped_bounded_plate(data)
         log_scale ~ Normal(0, 0.5)
         @plate for i in eachindex(y)
             sigma = scale[i] * exp(log_scale)
-            m = mean(truncated(LogNormal(mu[i], sigma); lower=lower[i]))
-            v = var(truncated(LogNormal(mu[i], sigma); lower=lower[i]))
-            logmass = logccdf(LogNormal(mu[i], sigma), lower[i])
+            m = mean(truncated(LogNormal(mu[i], sigma); lower=bound[i]))
+            v = var(truncated(LogNormal(mu[i], sigma); lower=bound[i]))
+            logmass = logccdf(LogNormal(mu[i], sigma), bound[i])
+            logcomplement = logcdf(LogNormal(mu[i], sigma), bound[i])
             y[i] ~ Normal(m, sqrt(v + noise[i]^2))
-            survived[i] ~ BernoulliLogit(logmass - LogExpFunctions.log1mexp(logmass))
+            survived[i] ~ BernoulliLogit(logmass - logcomplement)
         end
     end
 end

@@ -8,8 +8,8 @@
 # any shared `~/github/nsiccha/<pkg>` checkout. A full-SHA revision is
 # branch-independent, so it does not matter that several of these live on a
 # `dev`/`devibe` branch rather than `main`; the commit only has to be pushed to
-# GitHub, except the Enzyme dogfood and SelectedInversion fleet revisions,
-# which are materialized from their host mirrors.
+# GitHub, except fleet revisions and unpublished review candidates,
+# which are materialized from their host mirrors (`MIRRORS`).
 #
 # Enzyme is the ecosystem's `dogfood` line (user pick on decision
 # `BayesianRegressionModels/decisions/2026-10-28T15-34-11-008-0n0kgfh`): reviewed
@@ -55,15 +55,17 @@ const TESTENV = @__DIR__
 const PINS = [
     # Fleet-only pivoted KLU selected inversion; registered 0.2.2 lacks it.
     ("SelectedInversion", "https://github.com/timweiland/SelectedInversion.jl.git", "8b1ee1077cea94c1aff746e182681ae39ce91526"),
-    # Public unreleased support correction: reject invalid DirichletMultinomial
+    # One-sided LogNormal moments and tail-stable truncation mass, plus the
+    # public support correction: reject invalid DirichletMultinomial
     # counts/totals before gamma evaluation. An RK/RKPPL version floor alone
     # cannot select this Distributions revision (snag dirichlet-multin-457e95cf).
-    ("Distributions",     "https://github.com/nsiccha/Distributions.jl.git",     "83cec5e3a8a35167d54f19da9dc5afb54f59273e"),  # fix/dirichletmultinomial-support
+    ("Distributions",     "https://github.com/nsiccha/Distributions.jl.git",     "63b968eaae73193f73d784529dc291253d62ee6f"),  # fix/truncated-lognormal-moments (also carries support correction)
     # 359a4fae (StanBlocks 0.2.8) adds the native explicit-total
     # Dirichlet-multinomial density, pointwise likelihood and predictive RNG.
     # StanBlocks 0.2.10 preserves infinite bound data through BridgeStan JSON.
     # 0.2.12 registers stable hypot, including Base.hypot function values.
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "ab3960bb4c3663ff9e5bb6f0c166c826fd7d9e3c"),  # devibe: `restricted(family, args...; lower, upper)` declares the bounds and keeps the plain kernel (566bbc0f, StanBlocks 0.2.7, snag in-slic-declare-996328e0), which SBBRMI emits for every prior bound; a `truncated` draw succeeds whatever mass its window holds: after 100 misses it inverts the base CDF on the window (9a4fb3a6, StanBlocks 0.2.6, snag truncated-rng-re-bd555cae), which BRM's omitted truncated responses and `_gen` draws call; `rv[idx]` selects groups of a ragged value and `sum(rv)` adds its groups elementwise (ffbaff09, StanBlocks 0.2.2, snag selecting-severa-027a8191), which BRM's model-scope reads of a ragged plate output pass through; Stan's `sum_to_zero_constrain`/`_unconstrain`/`_jacobian` trace (8e57a83, snag sum-to-zero-cons-90a72024) and `head`/`tail`/`reverse` (359844e, snag stan-vector-buil-5792b9e5), which `T::shares(total)` cell latents call, both in f5e4650; a `Vector{Matrix}` data value ingests as a `RaggedMatrix` and `X[g]` reads the g-th matrix in a plate cell (c9504e99, snag ragged-matrix-da-163255e9); a plate cell may bind a matrix local of fixed or per-cell size (a57951eb, snag binding-a-per-ce-e16efa8d); a plate's Stan names follow from each value's own name, without the `__pl_mem_1` suffix (1d93a65), and `stan_interface` / `stan_data_json` describe the program (dc3f713), both in fd91d0c; tuple descriptor entries carry their components in `fields` (785edf4); ragged sizes are reported derived (9118764); a values-free `maybecv(:y)` marks an observation with no values as predicted given a fit (c4671eb, snag held-out-observa-58a2eb13); shared scan arguments read once per step, linear in series length (b97fc5a6); Stan's vectorised builtins (`fmax`, `fmin`, …) evaluate elementwise in the Julia layer, so a per-axis `fmax(0.0, lo)` bound reads one value per coordinate (c7293b88); descriptor inputs/outputs carry `constraint_values`, their bounds evaluated against the bound data (b233afbc); a `ValueFamily` as the base family of `weighted`/`truncated`/`censored`/`interval_censored` with `lcdf=`/`lccdf=` companions (94e414bb); descriptor outputs carry their value shape as `dims`; non-finite literals render as Stan infinity builtins; `weighted` over censored/truncated/interval_censored; an exchangeable ordered prior re-draws as the sorted iid draw; observed scans and per-cell scan lengths (82a954da), also through a do-cell parameter that shadows its data name (4ee6e0e8); integer step locals in nested scans (2f5b6203); a latent or observed `@scan` inside a called `@slic` submodel (e67bc314), observing a plate cell's group (d3483f11); `interval_censored`'s interval by keyword and unknown combinator keywords refused (897557c); typed `=` in `stan_descriptor` (204e5a7)
+    # 0.2.14 adds stable lower-truncated LogNormal moments and log-CDF tails.
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "fac3385a5cb9d0e894352c34f4d0e590e4f93328"),  # devibe: `restricted(family, args...; lower, upper)` declares the bounds and keeps the plain kernel (566bbc0f, StanBlocks 0.2.7, snag in-slic-declare-996328e0), which SBBRMI emits for every prior bound; a `truncated` draw succeeds whatever mass its window holds: after 100 misses it inverts the base CDF on the window (9a4fb3a6, StanBlocks 0.2.6, snag truncated-rng-re-bd555cae), which BRM's omitted truncated responses and `_gen` draws call; `rv[idx]` selects groups of a ragged value and `sum(rv)` adds its groups elementwise (ffbaff09, StanBlocks 0.2.2, snag selecting-severa-027a8191), which BRM's model-scope reads of a ragged plate output pass through; Stan's `sum_to_zero_constrain`/`_unconstrain`/`_jacobian` trace (8e57a83, snag sum-to-zero-cons-90a72024) and `head`/`tail`/`reverse` (359844e, snag stan-vector-buil-5792b9e5), which `T::shares(total)` cell latents call, both in f5e4650; a `Vector{Matrix}` data value ingests as a `RaggedMatrix` and `X[g]` reads the g-th matrix in a plate cell (c9504e99, snag ragged-matrix-da-163255e9); a plate cell may bind a matrix local of fixed or per-cell size (a57951eb, snag binding-a-per-ce-e16efa8d); a plate's Stan names follow from each value's own name, without the `__pl_mem_1` suffix (1d93a65), and `stan_interface` / `stan_data_json` describe the program (dc3f713), both in fd91d0c; tuple descriptor entries carry their components in `fields` (785edf4); ragged sizes are reported derived (9118764); a values-free `maybecv(:y)` marks an observation with no values as predicted given a fit (c4671eb, snag held-out-observa-58a2eb13); shared scan arguments read once per step, linear in series length (b97fc5a6); Stan's vectorised builtins (`fmax`, `fmin`, …) evaluate elementwise in the Julia layer, so a per-axis `fmax(0.0, lo)` bound reads one value per coordinate (c7293b88); descriptor inputs/outputs carry `constraint_values`, their bounds evaluated against the bound data (b233afbc); a `ValueFamily` as the base family of `weighted`/`truncated`/`censored`/`interval_censored` with `lcdf=`/`lccdf=` companions (94e414bb); descriptor outputs carry their value shape as `dims`; non-finite literals render as Stan infinity builtins; `weighted` over censored/truncated/interval_censored; an exchangeable ordered prior re-draws as the sorted iid draw; observed scans and per-cell scan lengths (82a954da), also through a do-cell parameter that shadows its data name (4ee6e0e8); integer step locals in nested scans (2f5b6203); a latent or observed `@scan` inside a called `@slic` submodel (e67bc314), observing a plate cell's group (d3483f11); `interval_censored`'s interval by keyword and unknown combinator keywords refused (897557c); typed `=` in `stan_descriptor` (204e5a7)
     # Cooperative interruption used by BRM's progress hooks.
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "f071111945c165dbae097e94c5939b79103434ac"),
     # 0.2.8: fixed-kernel NUTS used by RKPPL's SMC rejuvenation.
@@ -267,8 +269,11 @@ const PINS = [
     ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "5325554cab66d13ab34c22ec502fd00759ffdcf7"),  # dogfood (KB mirror only)
 ]
 
-# Pins whose commits are not on GitHub: the KB host mirror they come from.
+# Prefer the exact candidate from the host mirror. The resolver falls back to
+# the public origin when the mirror does not contain that revision.
 const MIRRORS = Dict(
+    "Distributions" => joinpath(homedir(), ".local", "state", "kb-agents", "git-mirrors", "Distributions.jl.git"),
+    "StanBlocks" => joinpath(homedir(), ".local", "state", "kb-agents", "git-mirrors", "StanBlocks.jl.git"),
     "SelectedInversion" => joinpath(homedir(), ".local", "state", "kb-agents", "git-mirrors", "SelectedInversion.jl.git"),
     "Enzyme" => joinpath(homedir(), ".local", "state", "kb-agents", "git-mirrors", "Enzyme.jl.git"),
 )

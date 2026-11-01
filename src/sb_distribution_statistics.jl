@@ -45,12 +45,12 @@ function _sb_lognormal_statistic_law(ex, scope)
         else
             return nothing
         end
-        # An absent upper bound is the lower-truncated family. Preserve the
-        # distinction from a finite or parameter-dependent upper bound.
-        unbounded_upper = upper === nothing || upper === :nothing || upper === Inf ||
-            (upper isa Symbol && _sb_cell_binding(scope, upper) === Inf)
+        # Julia distinguishes an absent upper bound from an explicit Inf:
+        # the latter constructs a two-sided Truncated, whose moments are not
+        # implemented. Keep the same accepted family on both backends.
+        unbounded_upper = upper === nothing || upper === :nothing
         unbounded_upper || error("sbimpl: LogNormal mean/var currently support lower truncation only; " *
-            "an upper bound needs a corresponding StanBlocks statistic")
+            "omit the upper bound or pass upper=nothing")
         lower = lower === nothing || lower === :nothing ? 0.0 : lower
         return (; base.mu, base.sigma, lower, truncated=true)
     end
@@ -58,13 +58,15 @@ function _sb_lognormal_statistic_law(ex, scope)
 end
 
 function _sb_distribution_statistic(callable, args, scope)
-    (callable === mean || callable === var || callable === logccdf) || return nothing
-    length(args) == (callable === logccdf ? 2 : 1) || return nothing
+    is_logcdf = callable === logcdf || callable === logccdf
+    (callable === mean || callable === var || is_logcdf) || return nothing
+    length(args) == (is_logcdf ? 2 : 1) || return nothing
     law = _sb_lognormal_statistic_law(first(args), scope)
     law === nothing && return nothing
-    if callable === logccdf
+    if is_logcdf
         law.truncated && return nothing
-        return Expr(:call, :lognormal_lccdf_stable, args[2], law.mu, law.sigma)
+        name = callable === logcdf ? :lognormal_lcdf_stable : :lognormal_lccdf_stable
+        return Expr(:call, name, args[2], law.mu, law.sigma)
     end
     name = callable === mean ? :lognormal_truncated_mean : :lognormal_truncated_variance
     Expr(:call, name, law.mu, law.sigma, law.lower)

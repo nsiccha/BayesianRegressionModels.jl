@@ -11,7 +11,7 @@
 #   `cumulative_sum`, `fill`/`zeros`/`ones` -> `rep_vector`/`rep_matrix`,
 #   `vcat` -> `append_row`, ...);
 # - distribution statistics over an explicit constructor (`mean`/`var` of
-#   lower-truncated LogNormal, and its separate `logccdf`), using the numerical
+#   lower-truncated LogNormal, and its separate `logcdf`/`logccdf`), using the numerical
 #   primitives in StanBlocks (`sb_distribution_statistics.jl`);
 # - an observation constructor from Distributions (`y ~ Normal(mu, s)`),
 #   through the `_sb_stan_distribution_call` table the top-level likelihoods

@@ -102,6 +102,8 @@ end
     @test free(:logistic, BRM.logistic)
     @test !free(:logistic, PublicCallableNames.cell_decay)
     @test free(:cumsum, cumsum)
+    @test !free(:truncated, Distributions.truncated)
+    @test !free(:censored, Distributions.censored)
     @test !free(:cumsum, PublicCallableNames.cell_decay)
     @test !free(:mean, PublicCallableNames.mean)
     @test free(:cell_decay, PublicCallableNames.cell_decay)
