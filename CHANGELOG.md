@@ -37,7 +37,8 @@ instead of failing at run time.
   grouped-field row reductions and censored ragged factors. Unit gradients
   use ordinary Enzyme Reverse. The test bootstrap pins RK `5b651e21` and
   Enzyme dogfood `68ed90fe` with libEnzyme `2063db12`, including the repair
-  for matrix-window partition gradients on Julia 1.10.
+  for matrix-window partition gradients on Julia 1.10. The test environment
+  also pins WarmupHMC 0.2.10, required by RKPPL 0.1.52.
 
 ## 0.2.120
 
