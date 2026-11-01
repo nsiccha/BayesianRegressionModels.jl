@@ -579,17 +579,26 @@ function _brm_kernel_side_outputs(@nospecialize(brmi::BRMI))
     writers
 end
 
-# Model-scope reads of such outputs: each free name the model reads outside
-# every cell (`obs ~ Normal(tot[idx], sigma)`) that is one cell's indexed
-# output, mapped to that cell's kernel target. The cell's value is then the
+# Reads of such outputs: each free name the model reads at model scope or
+# captures in another cell, mapped to its producer's kernel target. Captures
+# need not have a MissingColumn entry of their own. The cell's value is the
 # model value of that name, exactly like the collected output, whichever
 # indexed assignment of the cell comes last.
 function _brm_kernel_output_reads(@nospecialize(brmi::BRMI))
     writers = _brm_kernel_side_outputs(brmi)
     reads = Dict{Symbol,Symbol}()
     isempty(writers) && return reads
+    refs = Set{Symbol}()
     for (key, raw) in _brm_operation_entries(brmi)
-        raw isa NamedColumn && parent(raw) isa MissingColumn || continue
+        if raw isa NamedColumn && parent(raw) isa MissingColumn
+            push!(refs, key)
+        else
+            op = _named_op(raw)
+            op isa ExprColumn || continue
+            _brm_operation_references!(refs, last(getargs(op)))
+        end
+    end
+    for key in refs
         cells = get(writers, key, nothing)
         cells === nothing && continue
         length(cells) == 1 || error(
@@ -599,4 +608,46 @@ function _brm_kernel_output_reads(@nospecialize(brmi::BRMI))
         reads[key] = only(cells)
     end
     reads
+end
+
+# A captured plate output still holds whole cells when another cell selects
+# it, `out[which[i]][positions[i]]`. These reads remain raw cell expressions,
+# unlike model-scope ExprColumns, so both emitters must lower them too. The
+# backend supplies the representation of a selected cell; locals and formals
+# of an inner cell keep their own indexing semantics.
+_brm_plate_cell_refs(select, x, outputs, bound=()) = x
+function _brm_plate_cell_refs(select, x::Expr, outputs, bound=())
+    recur(value) = _brm_plate_cell_refs(select, value, outputs, bound)
+    if Meta.isexpr(x, :->, 2)
+        inner = _brm_cell_bound_names!(Set{Symbol}(bound), x)
+        return Expr(:->, x.args[1],
+            _brm_plate_cell_refs(select, x.args[2], outputs, inner))
+    elseif Meta.isexpr(x, :generator)
+        inner = Set{Symbol}(bound)
+        function ranges(spec)
+            if Meta.isexpr(spec, :(=), 2)
+                range = _brm_plate_cell_refs(select, spec.args[2], outputs, inner)
+                _brm_bound_symbols!(inner, spec.args[1])
+                return Expr(:(=), spec.args[1], range)
+            elseif Meta.isexpr(spec, :filter)
+                bindings = map(ranges, spec.args[2:end])
+                return Expr(:filter,
+                    _brm_plate_cell_refs(select, spec.args[1], outputs, inner), bindings...)
+            end
+            spec
+        end
+        specs = map(ranges, x.args[2:end])
+        return Expr(:generator, _brm_plate_cell_refs(select, x.args[1], outputs, inner),
+            specs...)
+    elseif Meta.isexpr(x, :quote)
+        return x
+    elseif Meta.isexpr(x, :ref, 2) && x.args[1] isa Symbol &&
+            x.args[1] in outputs && !(x.args[1] in bound)
+        return select(x.args[1], recur(x.args[2]))
+    elseif x.head in (:call, :macrocall, :kw) || _brm_is_broadcast_call(x)
+        return Expr(x.head, first(x.args), map(recur, x.args[2:end])...)
+    elseif Meta.isexpr(x, :., 2) && x.args[2] isa QuoteNode
+        return Expr(:., recur(x.args[1]), x.args[2])
+    end
+    Expr(x.head, map(recur, x.args)...)
 end
