@@ -12,6 +12,24 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.110
+
+- `brm_svi_fit(previous, new_window; ...)` continues on disjoint observations
+  with the previous Gaussian factors as both initialization and prior.
+  `brm_svi_checkpoint(fit)` returns a data-only `BRMSVIState` for serialization
+  and fresh-process resume with the same model and frozen preprocessing.
+  Units match by label and coordinate identity: new units start from their
+  model prior, absent units retain their factors, and returning units recover
+  them. Changed preprocessing, global layouts, or existing unit coordinate
+  sets are refused. The history is approximated by the carried Gaussians;
+  sequential fits can depend on window order and need not equal a batch fit.
+- SVI global precision, entropy and covariance-root operations use
+  diagonal-plus-low-rank algebra without a dense global covariance matrix.
+  `diagnostics.unit_gradient_calls` reports optimization work on the current
+  window. The one-argument calibration entry is unchanged.
+- Exporting constants from a data-free RK replay preserves the frozen values
+  instead of fitting them again from the replay's new rows.
+
 ## 0.2.109
 
 - Added RK-only `brm_smc_tune` for independent pilot tuning of initial and
@@ -23,6 +41,7 @@ instead of failing at run time.
   Completed-stage history includes selected kernel settings, evaluation
   counts, mean acceptance and unconstrained movement. Requires RKPPL 0.1.42
   and WarmupHMC 0.2.9.
+
 ## 0.2.108
 
 - `car(area; edges=(from, to), nodes=all_areas, type=...)`: the optional

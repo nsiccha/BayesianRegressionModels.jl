@@ -178,8 +178,13 @@ function _rk_recorded_fits(rk::RKBRMI)
     record
 end
 
-_rk_fitted_constants(rk::RKBRMI) = Dict{Symbol,Any}(c.name => c.value
-    for c in last(_brm_resolve_constants(parent(rk); prefix="brm_fitted_state")))
+function _rk_fitted_constants(rk::RKBRMI)
+    # A data-free replay's declaration holds its new rows. Its constants were
+    # bound from the saved state, so evaluating that declaration would refit.
+    rk.fitted === nothing || return deepcopy(rk.fitted.state.constants)
+    Dict{Symbol,Any}(c.name => c.value
+        for c in last(_brm_resolve_constants(parent(rk); prefix="brm_fitted_state")))
+end
 
 # The plan of `new_data` under the exported fits alone, as `reprocess` plans it
 # under the training data: every Julia-side fit and `constant(...)` value comes
