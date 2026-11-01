@@ -169,7 +169,8 @@ end
     end
     theta = fill(0.1, length(model.theta))
     sigma = fill(-0.1, length(model.sigma))
-    omega = [Matrix{Float64}(I, n, n) for n in view.family_sizes]
+    n_effects = length(view.block_margins)
+    omega = Matrix{Float64}(I, n_effects, n_effects)
     full = rk_logdensity_problem(rk; ad_backend=ad)
     for (i, block) in enumerate(view.subject_coordinates)
         unit = brm_nlme_unit_problem(model, i, theta, sigma, omega)
