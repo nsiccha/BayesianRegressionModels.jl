@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.105
+
+- RK observation-source providers honor the original constructor's
+  `brm_distribution_type`: multivariate and matrixvariate laws receive each
+  complete event and its arguments, instead of being broadcast over entries.
+  Scalar source providers keep their elementwise behavior.
+
 ## 0.2.104
 
 - **Breaking:** SMC numerical failures now propagate RKPPL's
