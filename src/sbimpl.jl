@@ -6821,22 +6821,27 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_preproc[key] = freeze ? e :
             PreprocEntry(:rw, merge(e.const_, (; steps)), e.raw_ref, true)
     elseif e.kind === :car
-        # `car(area; edges=..., type=...)`: frozen, the graph and its numbering are
-        # constants of the fit and each row must name a fitted area; fresh, the
-        # graph is rebuilt from the new area and edge columns.
-        area_col, from_col, to_col = e.raw_ref
+        # `car(area; edges=..., nodes=..., type=...)`: frozen, the graph and its
+        # numbering are constants of the fit and each row must name a fitted
+        # area; fresh, the graph is rebuilt from the new area and edge columns,
+        # and from the new `nodes=` column when the term declares one.
+        area_col, from_col, to_col = e.raw_ref[1], e.raw_ref[2], e.raw_ref[3]
+        nodes_col = length(e.raw_ref) > 3 ? e.raw_ref[4] : nothing
         area_raw = _sb_df_column(df, area_col)
         area_raw isa AbstractVector || error("sbimpl: reprocess: `car` area column must be a vector")
         k = e.const_.keys
         labels = _brm_car_labels(area_raw, "area")
         graph = freeze ? e.const_.graph : _sb_car_graph_record(_brm_car_graph(labels,
             _brm_car_labels(_sb_df_column(df, from_col), "edge"),
-            _brm_car_labels(_sb_df_column(df, to_col), "edge")))
+            _brm_car_labels(_sb_df_column(df, to_col), "edge"),
+            nodes_col === nothing ? nothing :
+                _brm_car_labels(_sb_df_column(df, nodes_col), "node")))
         row_idx = _brm_car_row_idx(graph.nodes, labels; prefix="sbimpl: reprocess")
         _sb_car_data!(new_data, k, merge(graph, (; row_idx)))
         foreach(other -> push!(handled, other), Base.values(k))
-        # the edge columns feed only the graph; a frozen replay needs none
+        # the edge and node columns feed only the graph; a frozen replay needs none
         push!(handled, from_col, to_col)
+        nodes_col === nothing || push!(handled, nodes_col)
         new_preproc[key] = PreprocEntry(:car, merge(e.const_, (; graph)), e.raw_ref, true)
     elseif e.kind === :cdar
         # `cdar(step; by=group, cor=C)`: levels and `L` are frozen from the fit (the
@@ -15702,12 +15707,20 @@ function _sb_car_data!(data, keys_, st)
 end
 _sb_predictor_term!(stmts, data, ::typeof(car), t;
                     target::Symbol, term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
-    area, (from, to), type = _brm_car_arguments(t)
+    area, (from, to), nodes, type = _brm_car_arguments(t)
     aname, araw = _sb_inner_data(:car, area)
     fname, fraw = _sb_inner_data(:car, from)
     tname, traw = _sb_inner_data(:car, to)
-    prepared = _brm_prepare_term(t, target,
-        (; data=Dict{Symbol,Any}(aname => araw, fname => fraw, tname => traw)))
+    inner = Dict{Symbol,Any}(aname => araw, fname => fraw, tname => traw)
+    # the replay record names the graph's columns: the area, both edge ends and,
+    # when the term declares one, the `nodes=` vector
+    raw_ref = (aname, fname, tname)
+    if nodes !== nothing
+        nname, nraw = _sb_inner_data(:car, nodes)
+        inner[nname] = nraw
+        raw_ref = (raw_ref..., nname)
+    end
+    prepared = _brm_prepare_term(t, target, (; data=inner))
     st = prepared.state
     col_name = Symbol(:car_, target, :_, aname)
     keys_ = _sb_car_keys(col_name, type)
@@ -15716,11 +15729,11 @@ _sb_predictor_term!(stmts, data, ::typeof(car), t;
     end
     _sb_car_data!(data, keys_, st)
     # replay: the graph is a constant of the fitted term (frozen), or rebuilt from
-    # the new edge columns (fresh). Recorded on the row-index key; the other keys
-    # ride along.
+    # the new area, edge and node columns (fresh). Recorded on the row-index key;
+    # the other keys ride along.
     graph = _sb_car_graph_record(st)
     _sb_record_preproc!(data, keys_.row_idx, PreprocEntry(:car,
-        (; type, graph, keys=keys_), (aname, fname, tname), true))
+        (; type, graph, keys=keys_), raw_ref, true))
     submodel = _sb_car_submodel_expr(term_overrides, t, type)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
         submodel, term_overrides, t; data, stem=col_name, keys_...)))
