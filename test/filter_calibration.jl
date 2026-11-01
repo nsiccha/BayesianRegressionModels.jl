@@ -1,23 +1,12 @@
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 using SequentialMonteCarlo, Distributions, Random, Statistics
 using Enzyme, ADTypes, DifferentiationInterface, WarmupHMC
+include("testset_filter.jl")
 include("filter_models.jl")
 const FM = FilterModels
 
-drifting_intercept(d) = @brm d begin
-    @plate for i in eachindex(y)
-        @scan begin
-            coefficient[1] ~ Normal(0, 1)
-            for t in 2:T
-                coefficient[t] ~ Normal(coefficient[t-1], 0.35)
-            end
-        end
-        y[i] ~ Normal(coefficient, 0.2)
-    end
-end
-
-@testset "BRM explicit parameter drift follows its authored transition" begin
-    rk = RKBRMI(drifting_intercept((; y=[zeros(3)], T=3)))
+@stestset "BRM explicit parameter drift follows its authored transition" begin
+    rk = RKBRMI(FM.drifting_intercept((; y=[zeros(3)], T=3)))
     filter = brm_filter(rk; groups=(; i=1:1),
         drifting=(Symbol("i.coefficient"),), particles=4000, rng=Xoshiro(81))
     mean, variance = 0.0, 1.0
@@ -37,7 +26,7 @@ end
     @test_throws ArgumentError brm_filter(rk; groups=(; i=1:1), drifting=(:missing_parameter,))
 end
 
-@testset "BRM concentrated calibrated parameters preserve predictive uncertainty" begin
+@stestset "BRM concentrated calibrated parameters preserve predictive uncertainty" begin
     training = (; x=[0.5, 0.7, 0.3], y=[0.4, 0.8, 0.9])
     rk = RKBRMI(FM.provider(training))
     mean, sd = 1.0, 0.02
@@ -58,7 +47,7 @@ end
     @test warm.state.parameter_mass ≈ [1/6, 2/3, 1/6]
 end
 
-@testset "BRM posterior SMC particles initialize a calibrated filter" begin
+@stestset "BRM posterior SMC particles initialize a calibrated filter" begin
     data = (; x=[0.5, 0.7, 0.3], y=[0.4, 0.8, 0.9])
     rk = RKBRMI(FM.provider(data))
     initial = brm_smc_fit(rk; rng=Xoshiro(29), particles=32, stages=0,

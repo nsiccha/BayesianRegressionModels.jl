@@ -41,4 +41,15 @@ observed_groups(d) = @brm d begin
         end
     end
 end
+drifting_intercept(d) = @brm d begin
+    @plate for i in eachindex(y)
+        @scan begin
+            coefficient[1] ~ Normal(0, 1)
+            for t in 2:T
+                coefficient[t] ~ Normal(coefficient[t-1], 0.35)
+            end
+        end
+        y[i] ~ Normal(coefficient, 0.2)
+    end
+end
 end
