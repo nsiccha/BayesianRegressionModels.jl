@@ -23,6 +23,14 @@ _brm_lower_family(::Type{<:_BRMLowerLaw}) = true
 _brm_lower_normalized(::Type{<:_BRMLowerLaw{F,N}}) where {F,N} = N
 _brm_lower_base(::Type{<:_BRMLowerLaw{F}}) where {F} = F
 
+# As with grouped shares, put a standard normal on the unconstrained
+# coordinate and observe the exact density remainder. This changes only the
+# prior/likelihood split: x = lo + exp(z), with log-Jacobian z.
+struct _BRMLowerEntryWeight{F} end
+function (::_BRMLowerEntryWeight{F})(z, x, args...) where {F}
+    logpdf(F(args...), x) + z + (z * z + log(2pi)) / 2
+end
+
 function _brm_lower_parts(f, args, kwargs)
     f in (truncated, restricted) || return nothing
     length(args) in (1, 3) || error("@brm: a bounded completion needs a base law and lower/upper bounds")

@@ -1086,9 +1086,9 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
             _rk_coordinate_record!(coordinates,
                 (; kind=:missing_value, target=completion.source,
                    declaration=scoped(part.sampled),
-                   noncentered=completion.noncentered &&
-                       (shares || !_brm_lower_family(completion.distribution.callable)),
-                   bijection=shares ? :shares : nothing, standardized))
+                   noncentered=completion.noncentered,
+                   bijection=shares ? :shares : nothing, standardized,
+                   carrier=haskey(part, :carrier) ? scoped(part.carrier) : nothing))
         end
     end
     for observation in plan.observations
