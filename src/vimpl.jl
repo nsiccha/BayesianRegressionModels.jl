@@ -17,7 +17,8 @@ ld    = LogDensityProblems.logdensity(vbrmi, randn(d))
 ```
 
 For Stan-grade sampling use [`SBBRMI`](@ref) instead; `VBRMI` is the
-pure-Julia path (Mooncake AD compatible, no BridgeStan required).
+pure-Julia path for log-density evaluation without BridgeStan. It does not
+select an automatic differentiation backend.
 """
 struct VBRMI{P<:BRMI,M<:NamedTuple}
     parent::P
