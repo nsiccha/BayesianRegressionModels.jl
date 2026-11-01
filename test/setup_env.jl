@@ -245,6 +245,10 @@ const PINS = [
     # metadata operands before shape inference (prepare-one-resp-b1f58f91).
     # 23d26ca1 (RK 0.1.39 / RKPPL 0.1.33) keeps indexed direct predictor
     # reads beside reductions local (sum-factor-outer-ca5cc80e).
+    # RKPPL 0.1.34: optional SMC adapter and data-only checkpoints.
+    # 4df6564e (RK 0.1.40 / RKPPL 0.1.35) preserves natural scalar reads
+    # of predictor elements in strict partitions, including separate row domains.
+    # RKPPL 0.1.36: finite-state filtering, design rows and grouped scan outputs.
     # RKPPL 0.1.37: exact nonfinite SMC diagnostics across mutation tasks.
     # RKPPL 0.1.42 (RK 0.1.44): independent SMC pilot tuning, adaptive pilots and
     # portable correlated references.
@@ -274,6 +278,8 @@ const PINS = [
     # 5325554c keeps that libEnzyme build and repairs erfcx derivatives in
     # positive tails through third order (Enzyme snag erfcx-positive-t-db1c8c84).
     # Embedded Laplace needs those orders for scaled-tail likelihoods.
+    # 5325554c also contains the wide-plan tuple-field typing repair used by
+    # large compact partitions (32d31ca; same libEnzyme build 782c9d95).
     ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "5325554cab66d13ab34c22ec502fd00759ffdcf7"),  # dogfood (KB mirror only)
 ]
 
