@@ -46,6 +46,14 @@ diagonal-scale NUTS. The explicit `Random.Xoshiro` is copied, not advanced.
 initializes). `progress` accepts the usual BRM Treebars node or backend symbol.
 An interrupt returns the last completed stage; resume the returned fit.
 No other backend is fitted by this entry point.
+
+Numerical failures propagate `ReactiveKernelsPPL.SMCNonfiniteError` (RKPPL
+0.1.37+), with owned `position` and optional `gradient` vectors, `value`,
+`quantity`, `endpoint` and `temperature`. Its compact display does not replace
+the complete numerical fields. NaN/+Inf densities and nonfinite gradients at
+finite density fail fast; `-Inf` still denotes points outside support. A failed
+continuation leaves the input fit and its RNG unchanged, so it can be inspected
+or checkpointed. This exception also propagates from [`brm_smc_update`](@ref).
 """
 function brm_smc_fit end
 
