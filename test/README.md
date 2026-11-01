@@ -26,6 +26,20 @@ replay, unchanged caller RNG, frozen training preprocessing, incompatible
 groups and mutated-data refusals, and a synthetic deterministic recurrence.
 It uses the optional SequentialMonteCarlo and WarmupHMC extensions.
 
+`rk_captured_source.jl` checks that `rkppl_model(rk)` preserves submodel and
+callable-provider densities, shares captured source across compatible replays,
+and keeps frozen preprocessing in the binding, including training-free replay.
+
+`filter.jl` checks the RK filtering adapter against deterministic recurrence
+scores and a Kalman recursion, calibrated ensemble warm-up, independent group
+updates, cooperative stream consumption, checkpoint recovery and bounded
+retention. `filter_models.jl` contains the shared public synthetic models.
+`filter_checkpoint_process.jl` is invoked in separate processes by that suite.
+`filter_calibration.jl` additionally checks an explicitly drifting parameter
+against analytic filtering, narrow-ensemble predictive calibration and the
+completed-SMC-to-filter interface.
+Its testsets accept the usual substring filters as trailing arguments.
+
 `test/Project.toml` is a superset of the root project: it carries every package
 that any `test/*.jl` loads, so no test file fails at its own `using` line the way
 three of them do under `--project=.` (see below).

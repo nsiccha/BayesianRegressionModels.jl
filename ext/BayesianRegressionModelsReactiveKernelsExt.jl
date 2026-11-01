@@ -285,8 +285,10 @@ end
 struct _RKProgram
     emitted::BRM._RKEmittedProgram
     mod::Module
+    captured::BRM._RKOnce
 end
-_RKProgram(emitted::BRM._RKEmittedProgram) = _RKProgram(emitted, _rk_emit_module(emitted))
+_RKProgram(emitted::BRM._RKEmittedProgram) =
+    _RKProgram(emitted, _rk_emit_module(emitted), BRM._RKOnce())
 # A program is code, as a compiled function is: a copy of a backend (a
 # per-chain copy) shares it with the original, and its replays share it too.
 # Julia refuses to deepcopy the module it holds.
@@ -358,6 +360,14 @@ function BRM._rk_fitted_build(emitted::BRM._RKEmittedProgram, plan, frozen, prev
     BRM._RKOnce(program), BRM._RKOnce(bound), build_kernel(bound)
 end
 BRM._rk_retained_program(backend::BRM.RKBRMI) = _rk_program(backend).emitted
+
+function BRM.rkppl_model(backend::BRM.RKBRMI)
+    program = _rk_program(backend)
+    BRM._rk_once!(program.captured) do
+        Core.eval(program.mod, Expr(:macrocall, Symbol("@rkppl"),
+            LineNumberNode(0), program.emitted.main))
+    end
+end
 
 const _RK_STATISTICAL_MODEL_MODULE = Ref{Union{Nothing,Module}}(nothing)
 const _RK_STATISTICAL_MODEL_LOCK = ReentrantLock()

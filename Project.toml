@@ -1,7 +1,7 @@
 name = "BayesianRegressionModels"
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.2.97"
+version = "0.2.98"
 
 [deps]
 KLU = "ef3ab10e-7fda-4108-b977-705223b18434"
@@ -53,6 +53,7 @@ BayesianRegressionModelsPathfinderExt = "Pathfinder"
 BayesianRegressionModelsReactiveKernelsExt = ["ReactiveKernels", "ReactiveKernelsPPL"]
 BayesianRegressionModelsReactiveKernelsEnzymeExt = ["ReactiveKernels", "ReactiveKernelsPPL", "Enzyme", "DifferentiationInterface"]
 BayesianRegressionModelsSMCExt = ["ReactiveKernels", "ReactiveKernelsPPL", "SequentialMonteCarlo", "WarmupHMC", "Enzyme", "ADTypes", "DifferentiationInterface"]
+BayesianRegressionModelsFilterExt = ["ReactiveKernels", "ReactiveKernelsPPL", "SequentialMonteCarlo"]
 BayesianRegressionModelsTreebarsExt = "Treebars"
 BayesianRegressionModelsTuringExt = "Turing"
 BayesianRegressionModelsTuringWarmupHMCExt = ["Turing", "WarmupHMC"]
@@ -72,7 +73,7 @@ NLMEEstimation = "0.2.4"
 Optim = "2"
 Pathfinder = "0.9, 0.10"
 ReactiveKernels = "0.1.39"
-ReactiveKernelsPPL = "0.1.34"
+ReactiveKernelsPPL = "0.1.36"
 SequentialMonteCarlo = "0.7"
 RuntimeGeneratedFunctions = "0.5"
 SelectedInversion = "0.2.2"

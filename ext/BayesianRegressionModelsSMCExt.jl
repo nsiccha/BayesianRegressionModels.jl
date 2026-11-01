@@ -29,7 +29,7 @@ function check_identity(rk, expected, label)
         "BRM SMC: $label has changed; retain the original model, preprocessing and data"))
 end
 
-function check_fit(fit)
+function BRM._brm_validate_smc_fit(fit::BRM.BRMSMCFit)
     check_identity(fit.template, fit.model_id, "training template")
     check_identity(fit.backend, fit.binding_id, "current binding")
     fit.previous === nothing || check_identity(fit.previous, fit.previous_id, "previous binding")
@@ -70,7 +70,7 @@ function BRM.brm_smc_fit(model::Union{BRM.BRMI,BRM.RKBRMI};
 end
 
 function BRM.brm_smc_fit(fit::BRM.BRMSMCFit; stages=typemax(Int), progress=nothing)
-    check_fit(fit)
+    BRM._brm_validate_smc_fit(fit)
     BRM._brm_with_progress(progress; description="BRM SMC continuation") do node
         state = finish(fit.state, stages, node)
         BRM.BRMSMCFit(fit.template, fit.backend, fit.previous, state,
@@ -80,7 +80,7 @@ end
 
 function BRM.brm_smc_update(fit::BRM.BRMSMCFit, cumulative_data;
         options=fit.state.options, stages=typemax(Int), progress=nothing)
-    check_fit(fit)
+    BRM._brm_validate_smc_fit(fit)
     fit.state.temperature == 1 || throw(ArgumentError(
         "BRM SMC: finish the current bridge with brm_smc_fit before starting another update"))
     BRM._brm_with_progress(progress; description="BRM SMC data update") do node
@@ -96,7 +96,7 @@ function BRM.brm_smc_update(fit::BRM.BRMSMCFit, cumulative_data;
 end
 
 function BRM.brm_smc_checkpoint(fit::BRM.BRMSMCFit)
-    check_fit(fit)
+    BRM._brm_validate_smc_fit(fit)
     (; format=1, model_id=fit.model_id, binding_id=fit.binding_id,
        previous_id=fit.previous_id, state=PPL.smc_checkpoint(fit.state))
 end

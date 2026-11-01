@@ -72,7 +72,22 @@ reads a training column, and that model is replayed with
 [`reprocess`](@ref) on the training fit instead.
 """
 function brm_fitted_state(rk::RKBRMI)
-    prefix = "brm_fitted_state"
+    names, reads = _rk_fitted_value_names(rk; prefix="brm_fitted_state")
+    emitted = _rk_retained_program(rk)
+    fit_inputs = Set{Symbol}(keys(_rk_plan_fit_inputs(rk.plan)))
+    BRMFittedState(_BRM_FITTED_STATE_FORMAT, _rk_frozen_values(rk, names),
+        sort!(collect(fit_inputs)), reads,
+        Dict{Symbol,Symbol}(_rk_plan_fit_inputs(rk.plan)),
+        _rk_recorded_fits(rk), _rk_fitted_constants(rk), sprint(show, brm_source(rk)),
+        _rk_program_statements(emitted), _rk_layout_coordinate_names(rk),
+        Dict{Symbol,Any}(name => value isa AbstractArray ? eltype(value) : typeof(value)
+            for (name, value) in _rk_training_columns(parent(rk))),
+        sort!(collect(_rk_response_names(rk.plan))), Tuple(_rk_held_out_names(rk.plan)))
+end
+
+# Select graph summaries without rerunning the planner's fit collection.
+# A data-free backend already binds those summaries from its fitted record.
+function _rk_fitted_value_names(rk::RKBRMI; prefix)
     _rk_design_checked(rk.plan) || error(
         "$prefix: a $(nameof(typeof(rk.plan))) program has no fitted-state export")
     for predictor in _rk_replay_predictors(rk.plan), term in predictor.terms
@@ -82,15 +97,7 @@ function brm_fitted_state(rk::RKBRMI)
     end
     emitted = _rk_retained_program(rk)
     fit_inputs = Set{Symbol}(keys(_rk_plan_fit_inputs(rk.plan)))
-    names, reads = _rk_fitted_value_names(emitted, rk.plan, fit_inputs; prefix)
-    BRMFittedState(_BRM_FITTED_STATE_FORMAT, _rk_frozen_values(rk, names),
-        sort!(collect(fit_inputs)), reads,
-        Dict{Symbol,Symbol}(_rk_plan_fit_inputs(rk.plan)),
-        _rk_recorded_fits(rk), _rk_fitted_constants(rk), sprint(show, brm_source(rk)),
-        _rk_program_statements(emitted), _rk_layout_coordinate_names(rk),
-        Dict{Symbol,Any}(name => value isa AbstractArray ? eltype(value) : typeof(value)
-            for (name, value) in _rk_training_columns(parent(rk))),
-        sort!(collect(_rk_response_names(rk.plan))), Tuple(_rk_held_out_names(rk.plan)))
+    _rk_fitted_value_names(emitted, rk.plan, fit_inputs; prefix)
 end
 
 # A term whose fit no summary of the training data stands in for: a thin-plate

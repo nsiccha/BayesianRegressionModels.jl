@@ -143,6 +143,7 @@ include("nlme_fit.jl")
 include("nlme_two_stage.jl")
 include("nlme_svi.jl")
 include("smc.jl")
+include("filter.jl")
 include("covariate_resampling.jl")
 export modeled_covariates
 using SHA: sha256
@@ -207,6 +208,8 @@ export rk_artifact_inputs
 export rk_bound_data, rk_bound_plan, rk_design_binder, RKDesignBinder
 export brm_fitted_state, BRMFittedState
 export BRMSMCFit, brm_smc_fit, brm_smc_update, brm_smc_checkpoint, brm_smc_resume
+export BRMFilter, brm_filter, brm_filter_step, brm_filter_stream,
+    brm_filter_checkpoint, brm_filter_resume
 export BRMCutFamily, brm_cut_family, brm_cut_fit, brm_cut_point, brm_cut_propagate, rk_draw_values
 export rkppl_model, rk_model
 # Re-export every Distributions.jl family BRM lowers so

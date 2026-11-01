@@ -22,6 +22,9 @@ struct BRMSMCFit{S,A}
     previous_id::Union{Nothing,String}
 end
 
+# Shared by posterior consumers that must retain the fit's original binding.
+function _brm_validate_smc_fit end
+
 """
     brm_smc_fit(model; rng=Xoshiro(), particles=1000, reference=nothing,
         options=SMCOptions(), ad_backend=AutoEnzyme(mode=Enzyme.Reverse),

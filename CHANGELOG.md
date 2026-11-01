@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.98
+
+- Added RK-only finite-state `brm_filter`, observation steps, bounded streaming
+  and data-only checkpoints through RKPPL 0.1.36. Calibrated parameter points
+  and ensembles retain separate conditional state clouds; explicit authored
+  parameter drift is supported. State-only warm-up avoids counting the
+  parameter-training likelihood twice. Filtering preserves frozen
+  preprocessing and does not retain the training backend or stream history.
+- Added `rkppl_model(rk::RKBRMI)` to expose the retained emitted declarations
+  as a cached, unbound RKPPL source model, including its submodels and callable
+  source providers. Observation roles and frozen preprocessing remain in
+  `rk_bound_plan(rk)`; capturing source does not change the executable fit.
+
 ## 0.2.97
 
 - Fixed: all three `brm_laplace_problem` engines start each conditional mode
