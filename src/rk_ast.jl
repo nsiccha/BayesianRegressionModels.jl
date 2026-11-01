@@ -1103,6 +1103,8 @@ function _rk_ast_emit_joint_monotonic!(definitions, statements, groups, taken, c
                 head=group.head, source=group.source, beta=entry.beta && beta !== nothing,
                 beta_declaration=beta === nothing ? nothing : first(beta),
                 beta_index=beta === nothing ? () : last(beta)))
+            _rk_start_term_record!(coordinates, entry.predictor, entry.start_term,
+                group.block, (; simplex=:simplex_incr); column=entry.column)
         end
     end
     statements
@@ -1274,7 +1276,7 @@ function _rk_ast_gp_block!(definitions, taken, term)
         options.cov === :periodic ? options.period : 0.0, options.jitter;
         periodic=options.cov === :periodic, iso=options.iso)
     _rk_ast_block_call!(definitions, taken, "brm_gp", block,
-        Expr(:call, :brm_gp_latent, covariance, z))
+        Expr(:call, :brm_gp_latent, covariance, z)), (; length_scale=rho, sigma)
 end
 
 function _rk_ast_gp_names(plan::_RKStructuralPlan)
@@ -1347,7 +1349,8 @@ function _rk_ast_dar_block!(definitions, taken, term, nsteps)
             Expr(:(=), Expr(:ref, level, 1), 0.0),
             Expr(:(=), Expr(:ref, increment, 1), 0.0),
             Expr(:for, Expr(:(=), t, Expr(:call, :(:), 2, T)), body))))
-    _rk_ast_block_call!(definitions, taken, "brm_differenced_ar1", block, level)
+    _rk_ast_block_call!(definitions, taken, "brm_differenced_ar1", block, level),
+        (; ar=beta, sigma)
 end
 
 # An areal field, as StanBlocks' `_sb_car_icar` / `_sb_car_bym2`: the ICAR field
@@ -1827,7 +1830,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     Expr(:ref, joint.group.block, joint.group.column, joint.column))
                 push!(stmts, read)
                 push!(joint.group.entries, (; column=joint.column, predictor=predictor.name,
-                    prior, beta, read, alpha=monotonic_alpha(term)))
+                    prior, beta, read, alpha=monotonic_alpha(term), start_term=term))
                 return joint.name
             end
             name = _rk_ast_monotonic_component!(defs, stmts, taken,
@@ -1836,6 +1839,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             _rk_coordinate_record!(coordinates, (; kind=:monotonic,
                 declaration=name, predictor=predictor.name,
                 head, source=term.options.source, beta))
+            _rk_start_term_record!(coordinates, predictor.name, term, name,
+                (; simplex=:simplex_incr))
             name
         end
         # An ordinary scalar coefficient under its resolved prior.
@@ -1874,8 +1879,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 refactual[index] = term.options.latent
             elseif kind === :dar
                 refactual[index] = _rk_ast_fresh_name(string(term.label, "_level"), taken)
-                push!(stmts, Expr(:call, :~, refactual[index], _rk_ast_dar_block!(defs,
-                    taken, term, length(plan.columns[term.options.source]))))
+                call, locals = _rk_ast_dar_block!(defs,
+                    taken, term, length(plan.columns[term.options.source]))
+                push!(stmts, Expr(:call, :~, refactual[index], call))
+                _rk_start_term_record!(coordinates, predictor.name, term, refactual[index], locals)
             elseif kind === :car
                 # rows find their graph position by the fitted area labels
                 positions = _rk_ast_fresh_name(string(term.label, "_area"), taken)
@@ -1891,6 +1898,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     declaration=term.options.value, predictor=predictor.name,
                     area=term.options.source, type=term.options.type, locals,
                     separation=get(term.options, :separation, nothing)))
+                _rk_start_term_record!(coordinates, predictor.name, term, term.options.value,
+                    term.options.type === :bym2 ?
+                        (; sigma=locals.sigma, mixing=locals.rho) : (; sigma=locals.sigma))
             elseif kind === :cdar
                 # rows find their group and step by the fitted labels
                 rows = map((term.options.group => term.options.levels,
@@ -1909,6 +1919,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     step=term.options.source, group=term.options.group,
                     levels=term.options.levels, steps=term.options.steps,
                     cor_factor=term.options.L, locals))
+                _rk_start_term_record!(coordinates, predictor.name, term, term.options.value,
+                    (; sigma=locals.sigma, ar=locals.rho))
             elseif kind === :ranef_gather
                 refactual[index] = ranef_effects[(predictor.name,
                     term.options.bucket_group, term.options.bucket_id)]
@@ -2011,7 +2023,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         end
         for term in predictor.terms
             term.kind === :spline || continue
-            append!(stmts, _rk_ast_value_spline(defs, term, taken))
+            spline_stmts, locals = _rk_ast_value_spline(defs, term, taken)
+            append!(stmts, spline_stmts)
+            _rk_start_term_record!(coordinates, predictor.name, term, term.options.id, locals)
         end
         for term in predictor.terms
             term.kind === :hsgp || continue
@@ -2032,13 +2046,21 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 levels=get(term.options, :group_levels, nothing),
                 level_correlation=get(term.options, :level_cor, nothing) !== nothing,
                 locals))
+            hyper_plans = get(term.options, :hyper_plans, ())
+            rho = isnothing(locals) ? (get(term.options, :iso, true) ? :rho_iso : :rho) : locals.scales.length_scale
+            sigma = isnothing(locals) ? :sigma : locals.scales.sd
+            _rk_start_term_record!(coordinates, predictor.name, term, term.options.id,
+                (; length_scale=any(p -> p.hyper === :length_scale, hyper_plans) ? nothing : rho,
+                   sigma=any(p -> p.hyper === :sd, hyper_plans) ? nothing : sigma))
         end
         for term in predictor.terms
             term.kind === :gp || continue
             isempty(term.columns) && error(
                 "RK backend: internal: gp predictor `$(predictor.name)` " *
                 "feeds no response")
-            push!(stmts, Expr(:call, :~, term.options.f, _rk_ast_gp_block!(defs, taken, term)))
+            call, locals = _rk_ast_gp_block!(defs, taken, term)
+            push!(stmts, Expr(:call, :~, term.options.f, call))
+            _rk_start_term_record!(coordinates, predictor.name, term, term.options.f, locals)
         end
         for term in predictor.terms
             term.kind === :ar || continue
@@ -2050,6 +2072,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             options = term.options
             push!(stmts, _rk_ast_plate(options.latent,
                 only(term.columns), options.loc, options.scale))
+            _rk_start_term_record!(coordinates, predictor.name, term, options.latent,
+                (; latent=Symbol("")))
         end
         append!(stmts, scalar_stmts)
         # The population component's value takes the place of the first

@@ -2844,6 +2844,15 @@ end
 # single-level `mo1(c)`), several only for an ambiguous trace.
 function _brm_term_owners(d, logical::Symbol, entry)
     emitted_lp = _sb_lp_emitted_name(logical, entry.link)
+    # Repeated axes can belong to distinct qualified terms. The emitter
+    # records the exact source key beside the carrier it actually chose.
+    recorded = Set(k for (k, b) in d.plan.bindings if
+        get(b, :term_predictor, nothing) === emitted_lp &&
+        get(b, :term_key, nothing) === _brm_term_full_key(entry.value))
+    if !isempty(recorded)
+        return BRMOutput[o for o in d.outputs if o.logical in recorded &&
+            o.declaration !== nothing && o.declaration.target in recorded]
+    end
     owners = BRMOutput[]
     for label in _brm_term_owner_labels(getf(entry.value), entry.value, emitted_lp)
         append!(owners, BRMOutput[

@@ -830,6 +830,11 @@ mode oracle checks the value, and finite differences check both population
 derivatives. This checks independence from previous evaluations; the
 approximation still uses one mode.
 
+`start_terms.jl` checks authored term initializers and deterministic prior bases
+on StanBlocks and ReactiveKernels, with constrained read-back and coordinate
+transport, effective bounds, known values, invalid addresses and overrides.
+Run it directly in the test environment.
+
 `start_values.jl` checks `brm_start`, initial values keyed by prior address,
 on both backends. For a correlated population-PK model, a linked predictor,
 a categorical predictor with a `Dirichlet` simplex, and an exact-total block,

@@ -72,9 +72,11 @@ function _rk_drop_unfitted_records!(records::AbstractVector, outputs, kept)
     nothing
 end
 
-_rk_coordinate_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan}) =
+_rk_coordinate_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan};
+        term_starts=false) =
     let records = Any[]
         _rk_emit_ast(plan; coordinates=records)
+        term_starts || filter!(r -> r.kind !== :term_start, records)
         records
     end
 _rk_coordinate_records(plan) = _brm_transport_error(:unsupported_coverage,

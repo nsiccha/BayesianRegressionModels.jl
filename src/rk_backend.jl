@@ -6241,6 +6241,7 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
         brmi, context, target; available_predictors=available,
         tolerant_default, matched_defaults)
     for (raw, prepared) in zip(structured, geometry.terms)
+        before = length(terms)
         if prepared.callable === gp
             push!(terms, _rk_plan_gp_term!(
                 prepared, target, context.data, columns, taken))
@@ -6294,6 +6295,13 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
             end
             push!(terms, _RKTermSpec(:structured, Symbol[],
                 (; id, prepared, prepared_data, metadata, field_sources), id, id))
+        end
+        for i in (before + 1):length(terms)
+            isempty(_brm_term_prior_slots(prepared.callable)) && continue
+            t = terms[i]
+            terms[i] = _RKTermSpec(t.kind, t.columns,
+                merge(t.options, (; start_term=raw, start_prepared=_brm_start_prepared_term(prepared))),
+                t.addressee, t.label)
         end
     end
     if isempty(terms)

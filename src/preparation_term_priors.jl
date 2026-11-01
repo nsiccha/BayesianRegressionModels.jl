@@ -331,8 +331,8 @@ Base.@nospecializeinfer function _brm_term_address_map(@nospecialize(brmi::BRMI)
 end
 
 """Resolve and account for every term-prior statement before backend lowering."""
-Base.@nospecializeinfer function _brm_resolve_term_priors(@nospecialize(brmi::BRMI); prefix="BRM preparation")
-    specs = term_priors(brmi)
+Base.@nospecializeinfer function _brm_resolve_term_priors(@nospecialize(brmi::BRMI);
+        prefix="BRM preparation", specs=term_priors(brmi), resolve_prior=true)
     result = Dict{Symbol,Dict{Symbol,Dict{Symbol,Any}}}()
     isempty(specs) && return result
     targets = Symbol[predictor.name for predictor in linear_predictors(brmi)]
@@ -364,9 +364,9 @@ Base.@nospecializeinfer function _brm_resolve_term_priors(@nospecialize(brmi::BR
                 "that tells them apart, as in `hsgp(x; cov=:periodic)`")
             term = only(terms)
             slot = _brm_resolve_term_slot(term, spec; prefix)
-            resolved = _brm_known_term_spec(
+            resolved = resolve_prior ? _brm_known_term_spec(
                 _brm_floor_prior_spec(spec, term, slot, spelling),
-                term, slot, spelling; prefix)
+                term, slot, spelling; prefix) : spec
             key = length(shared) > 1 ? _brm_term_full_key(term) : spec.term
             per_term = get!(get!(result, target, Dict{Symbol,Dict{Symbol,Any}}()),
                             key, Dict{Symbol,Any}())
