@@ -381,7 +381,9 @@ end
     end
     # Value/footprint queries count under construction; the one partition
     # sampler is lazy and reports under the fit that first needs gradients.
-    for label in ("Cell queries", "Unit partition gradients", "Partition sampler")
+    for label in ("Cell queries", "Value partition", "Bind partition keys",
+            "Prepare partition kernel", "Check coordinate ownership", "Unit footprints",
+            "Unit partition gradients", "Partition sampler")
         @test get(rows, label, nothing) == '✓'
     end
     groups = length(f.model.cell_query)

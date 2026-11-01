@@ -1725,17 +1725,34 @@ function _brm_nlme_check_partition_ownership(view::BRMNLMEView, i, footprint)
         "$(length(foreign)) effect coordinates owned by another subject: $names")
 end
 
-function _brm_nlme_partition_queries(backend, cells, view, unit)
-    context = _rk_nlme_partition_context(backend, cells, _brm_nlme_partition_keys(cells))
-    query = _rk_nlme_partition_query(context)
-    labels = Set(_rk_nlme_partition_labels(query))
-    footprints = map(eachindex(view.subject_coordinates)) do i
-        i in labels || return Int[]
-        footprint = _rk_nlme_partition_query_footprint(query, unit, i)
-        _brm_nlme_check_partition_ownership(view, i, footprint)
-        footprint
+function _brm_nlme_partition_queries(backend, cells, view, unit, progress=nothing)
+    _brm_with_phases(progress, (context="Bind partition keys",
+            query="Prepare partition kernel", footprints="Check coordinate ownership")) do phases
+        context = _brm_run_phase(phases.context) do _
+            _rk_nlme_partition_context(backend, cells, _brm_nlme_partition_keys(cells))
+        end
+        query = _brm_run_phase(phases.query) do _
+            _rk_nlme_partition_query(context)
+        end
+        labels = Set(_rk_nlme_partition_labels(query))
+        footprints = _brm_run_phase(phases.footprints) do phase
+            _brm_with_counter(phase, length(view.subject_coordinates);
+                    description="Unit footprints") do node
+                map(eachindex(view.subject_coordinates)) do i
+                    footprint = if i in labels
+                        read = _rk_nlme_partition_query_footprint(query, unit, i)
+                        _brm_nlme_check_partition_ownership(view, i, read)
+                        read
+                    else
+                        Int[]
+                    end
+                    _brm_update_progress!(node, i)
+                    footprint
+                end
+            end
+        end
+        (; context, query, labels, footprints, state=Ref{Any}(nothing), lock=ReentrantLock())
     end
-    (; context, query, labels, footprints, state=Ref{Any}(nothing), lock=ReentrantLock())
 end
 
 # One compact sampler per owner of mutable AD workspace (model, SVI target or
@@ -2001,7 +2018,10 @@ function _brm_nlme_model(backend::RKBRMI, node; ad_backend, observation_ad_backe
         cell_query, cell_gradient = cells === nothing ? (nothing, nothing) :
             _brm_run_phase(phases.cells) do phase
                 queries = _brm_nlme_cell_queries(backend, cells, phase)
-                queries, _brm_nlme_partition_queries(backend, queries, view, unit)
+                partition = _brm_with_progress(phase; description="Value partition") do node
+                    _brm_nlme_partition_queries(backend, queries, view, unit, node)
+                end
+                queries, partition
             end
         population_prior = _brm_run_phase(phases.prior) do _
             _rk_nlme_population_prior(backend, unit, ad_backend)
