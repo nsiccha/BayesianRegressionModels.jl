@@ -12,16 +12,19 @@ struct _RKMissingValueSpec
     nmissing::Int
     distribution::_BRMPreparedExpr
     # Sample a standard normal draw per missing value and compute the value
-    # from its law's location and scale (`RKBRMI(...; completions=:noncentered)`).
+    # from its law's location and scale, or its bound's support transform with
+    # an exact pointwise density remainder (`completions=:noncentered`).
     noncentered::Bool
     # `nothing`, or the names of the free and grouped missing rows, the groups'
     # ends and residuals of `mi(x)::shares(total, rows)` (cell_total_coordinates.jl).
     totals::Union{Nothing,NamedTuple}
+    # Bound placeholder for a bounded free entry's exact density remainder.
+    free_weights::Union{Nothing,Symbol}
 end
 _RKMissingValueSpec(source, observed, observed_rows, missing_rows, observed_component,
         order, nmissing, distribution, noncentered=false) =
     _RKMissingValueSpec(source, observed, observed_rows, missing_rows, observed_component,
-        order, nmissing, distribution, noncentered, nothing)
+        order, nmissing, distribution, noncentered, nothing, nothing)
 
 function _rk_mi_predictor_plan(term::NamedColumn)
     operation = parent(term)
@@ -289,9 +292,21 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
             Expr(:_rk_data_preparation, :brm_covariate_total_rows, raw, present,
                 totals.inputs...) :
             Expr(:_rk_data_preparation, :brm_covariate_missing_rows, present), jmis))
+        # As for the shares weights, a submodel may observe only an argument
+        # bound to data. The missing/free row indices are data preparations,
+        # so they cannot double as the observation's placeholder.
+        nfree = totals === nothing ? length(plan.missing_indices) :
+            totals.downstream ? length(columns[totals.free_rows]) : 0
+        free_weights = if _brm_lower_family(distribution.callable) && nfree > 0
+            name = _rk_ast_fresh_name(string(plan.source, "_free_weights"), taken)
+            columns[name] = zeros(nfree)
+            name
+        else
+            nothing
+        end
         push!(completions, _RKMissingValueSpec(plan.source, observed,
             jobs, jmis, component, order, length(plan.missing_indices),
-            distribution, false, totals))
+            distribution, false, totals, free_weights))
     end
     _BRMPreparedObservation(observed, observation.lhs,
         _rk_mi_gather(distribution, jobs), plan.observed_values,
@@ -349,32 +364,16 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
     end
     completion.totals === nothing ||
         return _rk_emit_missing_totals!(definitions, statements, bindings, taken, completion)
-    distribution = _rk_mi_gather(completion.distribution, completion.missing_rows)
     # One block, as StanBlocks' `_sb_mi_response`: the missing entries with
     # their law, completed onto the covariate's original row axis. The
     # declared dimensions belong to the missing-row axis; unlike an
     # observation broadcast, the statement samples that independent array.
-    standardize = completion.noncentered && distribution.callable in _RK_NONCENTERED_LAWS
-    if standardize
-        location, scale = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
-        part = (; callable=distribution.callable, location, scale)
-        block = _rk_block_body(location, scale)
-    else
-        law = _rk_ast_value_distribution(distribution, bindings, taken)
-        block = _rk_block_body(law)
-    end
+    part = _rk_mi_free_part(bindings, taken, completion, completion.missing_rows)
+    block = _rk_block_body(part.reads)
     observed = _rk_block_argument!(block, :observed, completion.observed_component)
     rows = _rk_block_argument!(block, :rows, completion.missing_rows)
     order = _rk_block_argument!(block, :order, completion.order)
-    if standardize
-        entry = _rk_emit_standardized!(block, part, rows, :z_mis, :y_mis)
-        missing = entry.standardized.value
-    else
-        missing = _rk_block_local!(block, :y_mis)
-        push!(block.statements, Expr(:call, :.~,
-            Expr(:ref, missing, Expr(:call, :axes, rows, 1)), law))
-        entry = (; sampled=missing, standardized=nothing)
-    end
+    entry, missing = _rk_emit_mi_free!(block, part, rows; draws=:z_mis, value=:y_mis)
     # Completion is a whole covariate value on its original row axis. Keep
     # its gather in an explicit graph when downstream likelihoods have
     # different observation axes, rather than inferring a scalar recipe; an
@@ -468,23 +467,48 @@ end
 # its location and scale when non-centered. A non-centered completion with no
 # free entries may have any law (`_rk_noncentered_completion`); its empty free
 # entries stay under the law as written.
-function _rk_mi_free_part(bindings, taken, completion)
-    distribution = _rk_mi_gather(completion.distribution, completion.totals.free_rows)
+function _rk_mi_free_part(bindings, taken, completion, rows=completion.totals.free_rows)
+    distribution = _rk_mi_gather(completion.distribution, rows)
     if completion.noncentered && distribution.callable in _RK_NONCENTERED_LAWS
         location, scale = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
-        return (; noncentered=true, callable=distribution.callable, location, scale,
+        return (; noncentered=true, bounded=false, callable=distribution.callable, location, scale,
             reads=Expr(:tuple, location, scale))
+    elseif completion.noncentered && _brm_lower_family(distribution.callable)
+        arguments = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
+        return (; noncentered=true, bounded=true, arguments,
+            placeholder=completion.free_weights,
+            weight=_rk_value_callee!(bindings, _BRMLowerEntryWeight{distribution.callable}(), taken),
+            logweight=_rk_value_callee!(bindings, _BRMLogWeight, taken),
+            reads=Expr(:tuple, arguments...))
     end
     law = _rk_ast_value_distribution(distribution, bindings, taken)
     (; noncentered=false, law, reads=law)
 end
 
-function _rk_emit_mi_free!(block, part, free_rows)
+function _rk_emit_mi_free!(block, part, free_rows; draws=:z_free, value=:y_free)
     if part.noncentered
-        entry = _rk_emit_standardized!(block, part, free_rows, :z_free, :y_free)
+        if part.bounded
+            sampled = _rk_block_local!(block, draws)
+            push!(block.statements, Expr(:call, :.~,
+                Expr(:ref, sampled, Expr(:call, :axes, free_rows, 1)),
+                _rk_ast_dotted(:Normal, 0, 1)))
+            free = _rk_block_local!(block, value)
+            push!(block.statements, Expr(:(=), free,
+                Expr(:call, :.+, first(part.arguments), _rk_ast_dotted(:exp, sampled))))
+            if part.placeholder !== nothing
+                observed = _rk_block_argument!(block, :free_weights, part.placeholder)
+                weights = _rk_block_local!(block, Symbol(value, :_weights))
+                push!(block.statements, Expr(:(=), weights,
+                    _rk_ast_dotted(part.weight, sampled, free, part.arguments...)))
+                push!(block.statements, Expr(:call, :.~, observed,
+                    _rk_ast_dotted(part.logweight, weights)))
+            end
+            return (; sampled, standardized=nothing, carrier=free), free
+        end
+        entry = _rk_emit_standardized!(block, part, free_rows, draws, value)
         return entry, entry.standardized.value
     end
-    free = _rk_block_local!(block, :y_free)
+    free = _rk_block_local!(block, value)
     push!(block.statements, Expr(:call, :.~,
         Expr(:ref, free, Expr(:call, :axes, free_rows, 1)), part.law))
     (; sampled=free, standardized=nothing), free

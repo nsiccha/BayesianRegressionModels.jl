@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.95
+
+- Non-centered missing-value completions follow data-indexed gathers of
+  their law's predictors when assigning NLME subjects. Shares coordinates,
+  free entries and observed entries keep the source rows' subjects even
+  when the response is a subset, repetition or permutation of those rows.
+- Lower-bounded free completion entries can be NLME unit draws. Their
+  support transform and exact density remainder preserve both restricted
+  and truncated laws, with variance fixed at one and the same
+  unconstrained coordinates as Stan.
+
 ## 0.2.94
 
 - Added RK-only `brm_smc_fit` and `brm_smc_update`, using RKPPL's optional

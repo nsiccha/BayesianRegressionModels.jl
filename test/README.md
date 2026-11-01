@@ -152,6 +152,20 @@ coordinates' family in `NLMEEstimation.fixed_omega`, `check_protocol` (with
 the η Hessian blocks) and a short SAEM fit. Run it in the NLMEEstimation
 scratch environment described below. Snag `nlme-view-shares-f1cfaa71`.
 
+`nlme_completion_axes.jl` checks gathered completion ownership on a shorter
+response and on a reordered response with the same length as the subject
+column, and ordinary completions with repeated rows on a longer response.
+Shares, free entries, observed entries and downstream responses follow the
+gathered subjects; groups spanning subjects are refused. Lower-bounded free entries
+are unit draws with their exact density remainder. Lockstep and unit
+densities and native gradients are compared with the full RK model.
+Run it in the test environment. `mi_lower_totals.jl` also covers the bounded
+coordinate transport, density, gradients, replay and per-row locality.
+`nlme_completion_axes_fit.jl` uses the same panel in the NLMEEstimation
+scratch environment below: both completion families stay fixed at unit
+variance through `check_protocol` (including native Hessians) and a short
+SAEM fit.
+
 `nlme_offaxis_observations.jl` (test environment) checks `brm_nlme_model`'s
 attribution of observations on rows other than the subject column's, on a
 regional panel with a fragment of its own (`nlme_offaxis_fixture.jl`): its

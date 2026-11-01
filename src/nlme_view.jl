@@ -69,14 +69,17 @@ unconstrained coordinate vector (`coordinates`, in packed order).
   per stratum; each level's block belongs to its stratum's family, and its
   `block` identity carries `stratum` (the `by` level). A non-centered
   completion (`RKBRMI(brmi; completions=:noncentered)`) whose rows lie on the
-  grouping axis is one family of size 1 with covariance fixed at 1: each
+  grouping axis or read it through data-indexed gathers is one family of
+  size 1 with covariance fixed at 1: each
   missing cell is an instance of it in the subject owning its row, with role
   `:subject_effect` (its block identity carries `completion=true`). The
   grouped entries of a non-centered `mi(x)::shares(total, rows)` completion
   are one more such family (its block identity also carries `shares=true`):
   each coordinate of a group, `K - 1` for a group of `K` missing entries, is an
   instance in the subject owning the group's rows, and the group's observed
-  term (`RKBRMI`'s `completions`) belongs to that subject. A grouped
+  term (`RKBRMI`'s `completions`) belongs to that subject. Bounded free
+  entries use the same Gaussian family and observe their transformed law
+  minus the Gaussian density, preserving the exact full density. A grouped
   HSGP `hsgp(x; by=g)` without `cor=` whose levels are the units (`g` is the
   subject grouping, a nested grouping, or a column whose labels are subjects)
   is one family whose size is its number of basis functions, with covariance
@@ -562,6 +565,7 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
     # The subject owning each row of the grouping column.
     row_subject = Int[subject_index[_brm_transport_level(label)]
         for label in backend.plan.columns[group]]
+    completion_subjects = _brm_nlme_row_subjects(backend.plan, row_subject).completions
     role = fill(:unclaimed, length(names))
     subject = zeros(Int, length(names))
     claim!(i, r) = (role[i] === :unclaimed || error(
@@ -831,11 +835,11 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
                 "draw at zero, while the law's arguments may read those draws. Lower " *
                 "the model with `RKBRMI(brmi; completions = :noncentered)`, the same " *
                 "model, whose grouped coordinates are unit draws.")
-            groups_of = _brm_nlme_completion_groups(backend.plan, record.target,
-                length(row_subject))
-            groups_of === nothing && _brm_nlme_error(
-                "brm_nlme_view: the rows of `mi($(record.target))::shares(…)` are not " *
-                "the rows of `$group`, so its groups belong to no subject")
+            owners = get(completion_subjects, record.target, nothing)
+            owners === nothing && _brm_nlme_error(
+                "brm_nlme_view: cannot trace the rows of `mi($(record.target))::shares(…)` " *
+                "to subjects of `$group` through its law's predictors and gathers")
+            groups_of = _brm_nlme_completion_groups(backend.plan, record.target, length(owners))
             family = length(families) + 1
             block = (; group=record.target, id=nothing, predictor=record.target,
                 completion=true, shares=true)
@@ -844,7 +848,7 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             push!(block_margins, (; block, predictor=record.target, coefficient=:shares))
             c = 0
             for (g, rows) in enumerate(groups_of)
-                i = _brm_nlme_group_subject(row_subject, rows, record.target, g, group)
+                i = _brm_nlme_group_subject(owners, rows, record.target, g, group)
                 for _ in 1:(length(rows) - 1)
                     c += 1
                     p = coordinate(Symbol(record.declaration, ".", c))
@@ -858,12 +862,13 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             end
         elseif kind === :missing_value
             # Only the completion's sampled carrier is a parameter. A
-            # non-centered completion whose rows lie on the grouping axis is
+            # non-centered completion whose rows trace to the grouping axis is
             # one standard-normal draw per missing cell: a unit draw of the
             # subject owning the cell's row, in a family whose variance is
             # fixed at 1. Every other completion is shared by all subjects.
-            missing_rows = record.noncentered ?
-                _brm_nlme_completion_missing_rows(backend.plan, record.target, length(row_subject)) :
+            owners = get(completion_subjects, record.target, nothing)
+            missing_rows = record.noncentered && owners !== nothing ?
+                _brm_nlme_completion_missing_rows(backend.plan, record.target, length(owners)) :
                 nothing
             if missing_rows === nothing
                 claim_declaration!(record.declaration, :shared_latent)
@@ -877,7 +882,7 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
                 for (k, r) in enumerate(missing_rows)
                     c = coordinate(Symbol(record.declaration, ".", k))
                     claim!(c, :subject_effect)
-                    i = row_subject[r]
+                    i = owners[r]
                     subject[c] = i
                     push!(blocks[i], c)
                     push!(subject_families[i], family)
@@ -1136,6 +1141,103 @@ function _brm_nlme_moments(m, arguments, tangents=())
             for i in 1:nsubjects]
 end
 
+# Trace the subject labels carried by model values through pointwise
+# assignments and data-indexed gathers. A completion can have fewer rows, more
+# rows, or a permutation of the subject column's rows. Cache by authored name
+# so shared expression paths are visited once; never allocate row-by-row
+# dependency matrices or probe one coordinate at a time.
+_brm_nlme_row_subjects(plan::_RKHeldOutPlan, subjects) =
+    _brm_nlme_row_subjects(plan.parent, subjects)
+_brm_nlme_row_subjects(_plan, _subjects) =
+    (; completions=Dict{Symbol,Any}(), observations=Dict{Symbol,Any}())
+function _brm_nlme_row_subjects(plan::_RKValuePlan, subjects)
+    assignments = Dict(a.name => a.expression for a in plan.assignments
+        if a isa _BRMPreparedAssignment)
+    predictors = Dict(p.name => p for p in plan.regression.predictors)
+    completions = Dict(c.source => c for c in plan.completions)
+    cache = Dict{Symbol,Any}()
+    active = Set{Symbol}()
+    function combine(parts, target)
+        known = filter(!isnothing, parts)
+        isempty(known) && return nothing
+        broadcast(known...) do owners...
+            all(==(first(owners)), owners) || _brm_nlme_error(
+                "brm_nlme_view: the law of `$target` combines rows of different " *
+                "subjects; its rows cannot belong to one subject each")
+            first(owners)
+        end
+    end
+    function indices(value)
+        value isa _BRMPreparedRef && return get(plan.columns, value.name, nothing)
+        value isa _BRMPreparedExpr || return value
+        args = map(indices, value.args)
+        kwargs = map(indices, value.kwargs)
+        any(isnothing, args) || any(isnothing, values(kwargs)) ? nothing :
+            value.callable(args...; kwargs...)
+    end
+    function rows(value, target)
+        if value isa _BRMPreparedRef
+            return named(value.name, target)
+        elseif value isa _BRMPreparedExpr
+            if value.callable === getindex && length(value.args) == 2
+                source = rows(first(value.args), target)
+                source === nothing && return nothing
+                index = indices(last(value.args))
+                index === nothing && return nothing
+                return source[index]
+            elseif haskey(_RK_DERIVED_BINOPS, value.callable) ||
+                    haskey(_RK_DERIVED_MATH, value.callable) ||
+                    haskey(_RK_DERIVED_CMP, value.callable) ||
+                    value.callable === _brm_effective_lower
+                return combine(map(arg -> rows(arg, target), value.args), target)
+            end
+        end
+        nothing
+    end
+    function named(name, target)
+        haskey(cache, name) && return cache[name]
+        name in active && return nothing
+        push!(active, name)
+        result = if haskey(assignments, name)
+            rows(assignments[name], target)
+        elseif haskey(predictors, name)
+            p = predictors[name]
+            length(get(plan.columns, p.row_source, ())) == length(subjects) ? subjects : nothing
+        elseif haskey(completions, name)
+            c = completions[name]
+            owned = combine(map(arg -> rows(arg, name), c.distribution.args), name)
+            n = length(plan.columns[c.observed_rows]) + length(plan.columns[c.missing_rows])
+            if owned === nothing
+                n == length(subjects) ? subjects : nothing
+            elseif owned isa Integer
+                fill(owned, n)
+            else
+                length(owned) == n || _brm_nlme_error(
+                    "brm_nlme_view: the law of `mi($name)` traces $(length(owned)) " *
+                    "subject rows for $n completion rows")
+                collect(Int, owned)
+            end
+        else
+            nothing
+        end
+        delete!(active, name)
+        cache[name] = result
+    end
+    completed = Dict(c.source => named(c.source, c.source) for c in plan.completions)
+    # Consumers of a gathered completion retain that order too. In
+    # particular, equal lengths do not imply equal axes: assigning a
+    # permuted response by position would silently change its unit density.
+    observed = Dict{Symbol,Any}()
+    for o in plan.observations
+        o isa _BRMPreparedObservation && o.modifier === nothing || continue
+        d = o.distribution
+        d isa _BRMPreparedExpr || continue
+        owned = combine(map(arg -> rows(arg, o.name), (d.args..., o.weight)), o.name)
+        owned === nothing || (observed[o.name] = owned)
+    end
+    (; completions=completed, observations=observed)
+end
+
 # The grouping-axis rows of a completion's missing cells, in the order of its
 # sampled coordinates, when its observed and missing rows cover exactly the
 # `nrows` rows of the grouping column; `nothing` otherwise.
@@ -1178,19 +1280,18 @@ end
 
 # The groups of the non-centered completion whose group terms the observation
 # `name` holds (`_rk_mi_grouped_arguments!`), or `nothing`.
-_brm_nlme_completion_weights(plan::_RKHeldOutPlan, name, nrows) =
-    _brm_nlme_completion_weights(plan.parent, name, nrows)
-_brm_nlme_completion_weights(_plan, _name, _nrows) = nothing
-function _brm_nlme_completion_weights(plan::_RKValuePlan, name, nrows)
+_brm_nlme_completion_weights(plan::_RKHeldOutPlan, name, subjects) =
+    _brm_nlme_completion_weights(plan.parent, name, subjects)
+_brm_nlme_completion_weights(_plan, _name, _subjects) = nothing
+function _brm_nlme_completion_weights(plan::_RKValuePlan, name, subjects)
     matches = [c for c in plan.completions if c.noncentered && c.totals !== nothing &&
         c.totals.weights === name]
     isempty(matches) && return nothing
     c = only(matches)
-    groups = _brm_nlme_completion_groups(plan, c.source, nrows)
-    groups === nothing && _brm_nlme_error(
-        "brm_nlme_model: the rows of `mi($(c.source))::shares(…)` are not the " *
-        "grouping column's rows, so its group terms belong to no subject")
-    (; target=c.source, groups)
+    owners = get(subjects, c.source, nothing)
+    owners === nothing && return nothing
+    groups = _brm_nlme_completion_groups(plan, c.source, length(owners))
+    (; target=c.source, groups, owners)
 end
 
 # The unit label of each of a separated `car` field's unit terms, when `name`
@@ -1215,19 +1316,20 @@ function _brm_nlme_group_subject(row_subject, rows, target, g, group)
     only(owners)
 end
 
-_brm_nlme_completion_rows(_plan, _name, _nrows) = nothing
-function _brm_nlme_completion_rows(plan::_RKValuePlan, name, nrows)
-    matches = [c for c in plan.completions if c.observed === name]
+_brm_nlme_completion_rows(_plan, _name, _subjects) = nothing
+_brm_nlme_completion_rows(plan::_RKHeldOutPlan, name, subjects) =
+    _brm_nlme_completion_rows(plan.parent, name, subjects)
+function _brm_nlme_completion_rows(plan::_RKValuePlan, name, subjects)
+    matches = [c for c in plan.completions if c.observed === name ||
+        _rk_mi_free_weight_name(c) === name]
     length(matches) == 1 || return nothing
     completion = only(matches)
-    observed = get(plan.columns, completion.observed_rows, nothing)
-    missing = get(plan.columns, completion.missing_rows, nothing)
+    rows = completion.observed === name ? completion.observed_rows :
+        completion.totals === nothing ? completion.missing_rows : completion.totals.free_rows
+    observed = get(plan.columns, rows, nothing)
     observed === nothing && return nothing
-    missing === nothing && return nothing
-    # A completion's observed and missing positions must cover precisely the
-    # subject grouping axis before its observed-value density is attributable.
-    sort(vcat(observed, missing)) == collect(1:nrows) || return nothing
-    observed
+    owners = get(subjects, completion.source, nothing)
+    owners === nothing ? nothing : owners[observed]
 end
 
 # The grouping-axis rows each cell of a plate observation reads, through the
@@ -1268,6 +1370,8 @@ function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, query, unit)
     end
     any(iszero, row_subject) && error(
         "brm_nlme_model: internal: a row of `$(view.group)` belongs to no subject")
+    traced = _brm_nlme_row_subjects(backend.plan, row_subject)
+    completion_subjects = traced.completions
     attribution = Pair{Symbol,Vector{Int}}[]
     measured = Symbol[]
     probe = nothing
@@ -1290,21 +1394,21 @@ function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, query, unit)
         end
         # A non-centered `mi(x)::shares(total, rows)` completion's group terms:
         # each belongs to the subject owning its group's rows.
-        weights = _brm_nlme_completion_weights(backend.plan, name, L)
+        weights = _brm_nlme_completion_weights(backend.plan, name, completion_subjects)
         if weights !== nothing
             length(weights.groups) == m || error(
                 "brm_nlme_model: internal: `$name` has $m group terms for " *
                 "$(length(weights.groups)) groups of `mi($(weights.target))`")
-            push!(attribution, name => [_brm_nlme_group_subject(row_subject, rows,
+            push!(attribution, name => [_brm_nlme_group_subject(weights.owners, rows,
                 weights.target, g, view.group) for (g, rows) in enumerate(weights.groups)])
             continue
         end
-        completion_rows = _brm_nlme_completion_rows(backend.plan, name, L)
+        completion_rows = _brm_nlme_completion_rows(backend.plan, name, completion_subjects)
         if completion_rows !== nothing
             length(completion_rows) == m || _brm_nlme_error(
                 "brm_nlme_model: completed-covariate observation `$name` has $m " *
                 "densities for $(length(completion_rows)) observed rows")
-            push!(attribution, name => row_subject[completion_rows])
+            push!(attribution, name => completion_rows)
             continue
         end
         # One density per cell of a ragged join over the grouping axis (a
@@ -1320,6 +1424,15 @@ function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, query, unit)
                     "belongs to no single subject")
                 only(owners)
             end)
+            continue
+        end
+        owners = get(traced.observations, name, nothing)
+        if owners !== nothing
+            owners isa Integer && (owners = fill(owners, m))
+            length(owners) == m || _brm_nlme_error(
+                "brm_nlme_model: observation `$name` traces $(length(owners)) " *
+                "subject rows for $m densities")
+            push!(attribution, name => owners)
             continue
         end
         # One density element per row of the grouping column: flat rows on the

@@ -80,7 +80,9 @@ end
 # The completion parametrization a lowering asks for: `:centered` (the default)
 # samples each missing value under its law; `:noncentered` samples a standard
 # normal draw per missing value, so a completion is a unit draw for the NLME
-# paths (`brm_nlme_view`). Only location-scale laws have that form. The
+# paths (`brm_nlme_view`). Location-scale laws directly have that form;
+# bounded free entries retain their support transform and observe the exact
+# density remainder. The
 # grouped entries of `mi(x)::shares(total, rows)` take it under any law: their
 # coordinates are standard normal draws, and each group observes the rest of
 # its density (`_rk_emit_missing_totals!`).
@@ -102,16 +104,16 @@ end
 const _RK_NONCENTERED_LAWS = (Normal, LogNormal)
 function _rk_noncentered_completion(c::_RKMissingValueSpec, columns)
     d = c.distribution
-    # The shared coordinates may be non-centered while independent bounded
-    # entries retain their exact support geometry and authored law.
+    # Bounded coordinates retain the authored support transform and carry
+    # its exact density remainder as a pointwise observation.
     _brm_lower_family(d.callable) && return _RKMissingValueSpec(c.source, c.observed,
         c.observed_rows, c.missing_rows, c.observed_component, c.order, c.nmissing,
-        d, true, c.totals)
+        d, true, c.totals, c.free_weights)
     # Free entries are standardized by the law's location and scale.
     c.totals === nothing || !isempty(columns[c.totals.free_rows]) ||
         return _RKMissingValueSpec(c.source, c.observed, c.observed_rows, c.missing_rows,
             c.observed_component, c.order, c.nmissing, d, true,
-            c.totals)
+            c.totals, c.free_weights)
     d.callable in _RK_NONCENTERED_LAWS && isempty(d.kwargs) && length(d.args) == 2 ||
         error("RK backend: completions=:noncentered needs a location-scale law " *
             "(`Normal(location, scale)` or `LogNormal(location, scale)`) for " *
@@ -120,7 +122,7 @@ function _rk_noncentered_completion(c::_RKMissingValueSpec, columns)
                 "group with a total") * "; its law is `$(d.callable)`")
     _RKMissingValueSpec(c.source, c.observed, c.observed_rows, c.missing_rows,
         c.observed_component, c.order, c.nmissing, d, true,
-        c.totals)
+        c.totals, c.free_weights)
 end
 # The completion parametrization of an existing plan, which a replay keeps.
 _rk_completion_mode(plan::_RKValuePlan) =
@@ -334,7 +336,12 @@ _rk_structural_responses(plan::_RKStructuralPlan) = Tuple(unique(
 # `mi(x)::shares(total, rows)` completion's group terms (`_rk_mi_grouped_arguments!`).
 _rk_observed_names(plan::_RKValuePlan) = (Tuple(o.name for o in plan.observations)...,
     (c.totals.weights for c in plan.completions if c.noncentered && c.totals !== nothing)...,
+    (_rk_mi_free_weight_name(c) for c in plan.completions if _rk_mi_free_weight_name(c) !== nothing)...,
     _rk_car_term_placeholders(plan)...)
+
+function _rk_mi_free_weight_name(c::_RKMissingValueSpec)
+    c.noncentered ? c.free_weights : nothing
+end
 # The placeholders a `car_units` field's unit terms observe (`_rk_ast_car_separated!`).
 _rk_car_term_placeholders(plan) = Tuple(term.options.separation.terms
     for predictor in _rk_replay_predictors(plan) for term in predictor.terms

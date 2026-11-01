@@ -126,7 +126,9 @@ of the same [`BRMI`](@ref):
   `mi(x)::shares(total, rows)` completion: the same coordinate on both sides,
   whose missing entries are compared), or `:completion` (one standardized
   draw `z` of a non-centered missing-value completion against the Stan entry
-  `s = location + scale * z` of the same position; see below), or
+  `s = location + scale * z` of the same position; see below),
+  `:bounded_completion` (the same support-unconstrained coordinate on both
+  sides, with the computed value `lower + exp(z)` compared), or
   `:car_separated` (one coordinate of a `car(...)` field lowered by its unit
   border separator, `RKBRMI(brmi; car_units)`: a shared or unit draw on RK
   against one area of Stan's field; see below);
@@ -136,7 +138,8 @@ of the same [`BRMI`](@ref):
   while `param_unc_names` lists the same block first-index-fastest, so the
   name at a position can belong to another element.
 
-In the `:identity`, `:exp`, `:cholesky`, `:shares` and `:grouped_shares` relations the two
+In the `:identity`, `:exp`, `:cholesky`, `:shares`, `:grouped_shares` and
+`:bounded_completion` relations the two
 UNCONSTRAINED values are equal, so those coordinates move by a permutation. A `:simplex`
 block has the same physical simplex on both sides but different free
 coordinates: RK samples stick-breaking fractions `σ(u[j] + log(K-j))`, while
@@ -1368,7 +1371,7 @@ end
 function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         kind::Symbol, target::Symbol, rk, d, stan, stan_pos;
         only_declaration::Union{Nothing,Symbol}=nothing, relation::Symbol=:identity,
-        carrier::Union{Nothing,Symbol}=nothing)
+        carrier::Union{Nothing,Symbol}=nothing, physical_value::Union{Nothing,Symbol}=nothing)
     owned = Dict{String,BRMOutput}(String(o.name) => o for o in d.outputs
         if !isnothing(o.declaration) && o.declaration.target === target &&
             o.kind === :parameter)
@@ -1396,6 +1399,7 @@ function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
             "brm_coordinate_transport: RK declaration `$declaration` mixes layout " *
             "transforms $(Tuple(transforms))")
         address = (; kind, target, declaration)
+        physical_value === nothing || (address = (; address..., value=physical_value))
         if only(transforms) === :simplex
             _brm_transport_simplex!(pairs, simplexes, address,
                 [e.name for e in elements], declaration, output, stan)
@@ -1515,15 +1519,18 @@ end
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:missing_value}, record, rk, d, stan, stan_pos)
     shares = get(record, :bijection, nothing) === :shares
+    bounded = get(record, :carrier, nothing)
     standardized = get(record, :standardized, nothing)
     standardized === nothing ||
         _brm_transport_completion_space(d, record.target, standardized)
     _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         :missing_value, record.target, rk, d, stan, stan_pos;
         only_declaration=record.declaration,
-        relation=shares ? :grouped_shares : standardized === nothing ? :identity : :completion,
+        relation=shares ? :grouped_shares : bounded !== nothing ? :bounded_completion :
+            standardized === nothing ? :identity : :completion,
         carrier=shares ? Symbol(record.target, ".y_shares") :
-            standardized === nothing ? nothing : standardized.value)
+            standardized === nothing ? bounded : standardized.value,
+        physical_value=bounded)
 end
 
 # A standardized part moves as `s = location .+ scale .* z`, where `s` is SB's
@@ -2180,8 +2187,10 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
     rk_values = _rk_constrained_values(rk, u)
     # A standardized completion's values are RK graph values, not parameters,
     # and so is a separated field.
-    completion_values = isempty(t.completions) ? (;) :
-        _rk_value_reader(rk, Tuple(b.value for b in t.completions))(u)
+    completion_names = Tuple(unique([Symbol[b.value for b in t.completions];
+        Symbol[p.address.value for p in t.pairs if p.relation === :bounded_completion]]))
+    completion_values = isempty(completion_names) ? (;) :
+        _rk_value_reader(rk, completion_names)(u)
     field_values = isempty(t.fields) ? (;) :
         _rk_value_reader(rk, Tuple(b.value for b in t.fields))(u)
     stan_u = brm_rk_point_to_stan(t, u)
@@ -2202,6 +2211,13 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
     end
     checked = 0
     for pair in t.pairs
+        if pair.relation === :bounded_completion
+            rk_value = _brm_rk_value_entry(completion_values[pair.address.value], pair.rk_index)
+            compare("bounded completion `$(pair.rk)` / `$(pair.stan_value)`", rk_value,
+                stan_value(pair.stan_value))
+            checked += 1
+            continue
+        end
         pair.relation in (:cholesky, :simplex, :centered, :shares, :grouped_shares,
             :completion, :car_separated) && continue
         value = _brm_rk_declaration_value(rk_values, pair.rk_declaration)
