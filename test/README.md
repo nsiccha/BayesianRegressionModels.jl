@@ -870,6 +870,30 @@ fit is compared with NUTS too. Starts (prior medians, a packed point,
 `inits`) and their refusals are covered as well. It runs in the test
 environment above.
 
+`nlme_svi_laplace_plan.jl` checks structural eligibility for
+`GaussianBlockLaplace`, including fixed HSGP fitting inputs, nonstandard
+Gaussian coefficient priors, and named refusals for nonlinear expressions.
+`nlme_svi_laplace_carry.jl` and `nlme_svi_laplace_prior.jl` compare the
+bounded common-factor carry and its conditional precision with small dense
+Gaussian controls. `nlme_svi_laplace.jl` checks native mode, curvature,
+marginal gradients, numerical budgets, and reproducible public fits.
+`nlme_svi_laplace_streaming.jl` adds frozen replay across new, absent and
+returning units, checkpoint serialization, and identity refusals. Its short
+fits exercise transport; posterior accuracy is checked separately by
+`research/shared_field_laplace/public_acceptance.jl` against the retained
+exact Gaussian-marginal reference. Run these files separately in the test
+environment; the native file also includes the structural checks.
+`nlme_svi_laplace_identity.jl` checks that requesting additional output draws
+does not change the checkpoint, absent-unit marginals follow the updated
+common factor, and within-unit coordinate order follows semantic identities.
+The public acceptance and cost drivers share `public_fixture.jl`.
+`public_scaling.jl` measures five predeclared size cases with fixed numerical
+limits. `public_streaming_cost.jl` keeps the active window fixed and extends
+only the absent Gaussian state; it checks identical active targets and
+separately reports checkpoint copying, construction and serialization costs.
+These cost controls do not establish posterior accuracy on larger panels or
+across repeated windows.
+
 `nlme_laplace.jl` checks the per-unit Laplace marginal (`brm_laplace_problem`,
 `brm_laplace_draws`) against oracles written from the model equations: Gaussian
 random-intercept and correlated intercept-and-slope models equal their analytic

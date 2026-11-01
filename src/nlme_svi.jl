@@ -465,7 +465,7 @@ function _brm_svi_start(m::BRMNLMEModel, start, inits)
 end
 
 """
-    brm_svi_fit(x; batch_size=32, rng=Random.default_rng(),
+    brm_svi_fit(x; laplace=nothing, batch_size=32, rng=Random.default_rng(),
         family=MeanFieldGlobal(), ndraws=1000, start=nothing, inits=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), progress=nothing, kwargs...)
@@ -478,6 +478,14 @@ coordinates. Each iteration evaluates `batch_size` subjects, each at an
 antithetic pair of draws through their own observation cells, and scales them
 to all subjects, so its cost follows the batch size, not the number of
 subjects.
+
+With `laplace=GaussianBlockLaplace()`, jointly integrate certified Gaussian
+coefficients, unit effects and shared fields inside the variational target.
+This opt-in evaluates the entire current window, uses a fixed update budget
+with convergence unassessed, and returns a correlated `BRMSVILaplaceState`
+through [`brm_svi_checkpoint`](@ref). See [`GaussianBlockLaplace`](@ref) for
+eligibility, numerical limits and the additional carry approximation.
+The minibatch controls and per-subject factors below describe `laplace=nothing`.
 
 - `x` — a `@brm` model ([`BRMI`](@ref)), its [`RKBRMI`](@ref), or a prepared
   [`BRMNLMEModel`](@ref). For a BRMI or RKBRMI the model is prepared with
@@ -517,7 +525,10 @@ global coordinates (`globals`), `seconds` of optimization, and the prepared
 `model`. The approximation is variational: posterior means are close, and
 the spread of the population, scale and correlation coordinates is too narrow.
 """
-brm_svi_fit(x; kwargs...) = _brm_svi_fit(x, nothing; kwargs...)
+function brm_svi_fit(x; laplace=nothing, kwargs...)
+    laplace===nothing && return _brm_svi_fit(x,nothing;kwargs...)
+    _brm_svi_laplace_dispatch(x,nothing,laplace;kwargs...)
+end
 
 function _brm_svi_fit(x, previous; rng=Random.default_rng(), batch_size=32,
         max_iterations=100_000, family=nothing,

@@ -147,6 +147,13 @@ include("nlme_fit.jl")
 include("nlme_two_stage.jl")
 include("nlme_svi.jl")
 include("nlme_svi_streaming.jl")
+include("nlme_svi_laplace_plan.jl")
+include("nlme_svi_laplace_quadrature.jl")
+include("nlme_svi_laplace.jl")
+include("nlme_svi_laplace_carry.jl")
+include("nlme_svi_laplace_prior.jl")
+include("nlme_svi_laplace_streaming.jl")
+include("nlme_svi_laplace_fit.jl")
 include("smc.jl")
 include("filter.jl")
 include("covariate_resampling.jl")
@@ -212,7 +219,7 @@ export rk_translate_artifact
 export rk_artifact_inputs
 export rk_bound_data, rk_bound_plan, rk_design_binder, RKDesignBinder
 export brm_fitted_state, BRMFittedState
-export BRMSVIState, brm_svi_checkpoint
+export BRMSVIState, BRMSVILaplaceState, GaussianBlockLaplace, brm_svi_checkpoint
 export BRMSMCFit, brm_smc_fit, brm_smc_tune, brm_smc_update, brm_smc_checkpoint, brm_smc_resume
 export brm_smc_compare, brm_smc_runs
 export BRMFilter, brm_filter, brm_filter_step, brm_filter_stream,

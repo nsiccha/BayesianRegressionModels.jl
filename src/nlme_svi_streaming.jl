@@ -220,12 +220,16 @@ must stay fixed. For nested units, pass the new window's `nested_groups` map.
 Only new-window units are minibatched; diagnostics count their gradient calls.
 Checkpoint size grows with distinct units, not the number of observations.
 """
-function brm_svi_fit(previous, x_new; kwargs...)
+function brm_svi_fit(previous, x_new; laplace=nothing, kwargs...)
     state = brm_svi_checkpoint(previous)
+    collapsed = state isa BRMSVILaplaceState
+    collapsed || laplace===nothing || throw(ArgumentError(
+        "brm_svi_fit: GaussianBlockLaplace continuation requires a BRMSVILaplaceState; " *
+        "an ordinary SVI checkpoint has no common-factor carry"))
     x = if x_new isa Union{BRMI,RKBRMI,BRMNLMEModel}
         x_new
-    elseif previous isa BRMSVIState
-        throw(ArgumentError("brm_svi_fit: pass builder(new_data) with a saved BRMSVIState"))
+    elseif previous isa Union{BRMSVIState,BRMSVILaplaceState}
+        throw(ArgumentError("brm_svi_fit: pass builder(new_data) with a saved SVI checkpoint"))
     else
         _brm_rebind_brmi(brm_source(previous.diagnostics.model.backend), x_new)
     end
@@ -236,5 +240,7 @@ function brm_svi_fit(previous, x_new; kwargs...)
     end
     options = x isa BRMNLMEModel ? (; kwargs...) :
         merge((; subject_group=state.group, shared_groups=state.shared), (; kwargs...))
+    collapsed && return _brm_svi_laplace_dispatch(x,state,
+        laplace===nothing ? state.method : laplace;options...)
     _brm_svi_fit(x, state; options...)
 end
