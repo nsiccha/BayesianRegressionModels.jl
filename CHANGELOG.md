@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.99
+
+- `RKBRMI` supports exact exponentiated-quadratic `gp(x...)` terms on
+  multiple axes, with one shared length scale (`iso=true`) or one length
+  scale per axis (`iso=false`). Declared hyperpriors and known scales retain
+  their meaning. The covariance is emitted as a ReactiveKernels graph and
+  the non-centered latent draw supports native Enzyme density gradients.
+
 ## 0.2.98
 
 - Added RK-only finite-state `brm_filter`, observation steps, bounded streaming
