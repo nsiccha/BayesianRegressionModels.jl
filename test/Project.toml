@@ -27,6 +27,7 @@ OutputSignatures = "86cfaae4-1704-4c69-ba62-d919d81ae5f8"
 Pathfinder = "b1d3bc72-d0e7-4279-b92f-7fa5d6d2d454"
 PSIS = "ce719bf2-d5d0-4fb9-925d-10a81b42ad04"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+ReparametrizableDistributions = "7d03e222-df96-4b80-bcdc-d089be88b5f2"
 ReactiveKernels = "78e9f072-d36b-4c73-b7a3-751b0eb26cf9"
 ReactiveKernelsDistributionKernels = "4b169cd9-fc12-43fd-ba39-43e54ed8db7a"
 ReactiveKernelsPPL = "e266ea2a-6817-46cd-8bec-6238f0035f44"
@@ -43,6 +44,7 @@ WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 ZipFile = "a5390f91-8eb1-5f08-bee0-b1d1ffed6cea"
 
 [compat]
+ReparametrizableDistributions = "0.3"
 TreeArrays = "0.2.0"
 AlgebraOfVega = "0.2.14"
 Distributions = "0.25.133"
@@ -64,6 +66,10 @@ julia = "1.10"
 [sources.TreeArrays]
 url = "https://github.com/nsiccha/TreeArrays.jl"
 rev = "53cfd1b17ee4d1b726dcecfe151458ae41bd20a8"
+
+[sources.ReparametrizableDistributions]
+url = "https://github.com/nsiccha/ReparametrizableDistributions.jl"
+rev = "8f7d382df700d3780ed31d093bc4983d3734a6c6"
 
 [sources.DynamicObjects]
 url = "https://github.com/nsiccha/DynamicObjects.jl"
