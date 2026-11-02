@@ -8,13 +8,12 @@ const AC = Base.get_extension(BRM, :BayesianRegressionModelsWarmupHMCExt)
 
 data = (; g=repeat(["a", "b", "c"]; inner=3),
         x=repeat([-0.8, 0.1, 0.7]; outer=3),
-        y=[-0.4, 0.2, 0.7, -0.3, 0.5, 1.1, -1.0, -0.1, 0.2],
-        scale_lo=0.3, scale_hi=4.7)
+        y=[-0.4, 0.2, 0.7, -0.3, 0.5, 1.1, -1.0, -0.1, 0.2])
 
 const BOUNDED = @brm begin
     mu ~ 1 + x + (1 + x | g)
     effect(mu, :) ~ Normal(0, 2)
-    sd(mu, g) ~ Uniform(scale_lo, scale_hi)
+    sd(mu, g) ~ Uniform(0.3, 4.7)
     y ~ Normal(mu, 0.8)
 end
 
@@ -44,6 +43,9 @@ end for i in eachindex(q)]
         L = reshape(physical[vec(brm_output_coordinates(Lout, cnames))], 2, 2)
         C = Diagonal(tau) * L
         @test BRM._adaptive_block_cholesky(raw, block) ≈ C
+        permutation = randperm(Xoshiro(12), length(names))
+        shuffled = only(adaptive_centering_blocks(sb, names[permutation]))
+        @test BRM._adaptive_block_cholesky(raw[permutation], shuffled) ≈ C
         beta = [only(brm_population_effect_coordinates(d, :mu, names;
                       coefficient=term).coordinates) for term in (:Intercept, :x)]
 

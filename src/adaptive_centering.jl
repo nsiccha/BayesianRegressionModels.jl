@@ -247,7 +247,7 @@ _AdaptiveLogScale(constant, linear, unit, simplex) = _AdaptiveLogScale(
     constant, linear, unit, simplex, Tuple{Float64,Int,Float64,Float64}[])
 
 # A block's `_AdaptiveLogScale`s, term `k` owning `linear[k]:linear[k+1]-1` of
-# the linear atoms, likewise `unit` and `simplex`; simplex atom `q` owns
+# the linear atoms, likewise `unit`, `simplex` and `bounded`; simplex atom `q` owns
 # `simplex_coordinates[q]:simplex_coordinates[q+1]-1` of `simplex_coordinate`.
 # Atoms keep their order within each term.
 struct _AdaptiveLogScaleTable
@@ -312,8 +312,9 @@ or its correlation at known values (`sd(...) = value`, `cor(:, ID) = R`).
 on [`AdaptiveCenteringBlock`](@ref). There is no `log_scales` coordinate
 vector: `scales[k]` is the compiled log-scale of term `k` as a function of the
 unconstrained vector — the model's own `R2`, Dirichlet share and
-reference/total scale coordinates, a known block's sampled scale coordinate, or
-a known scale's constant. Those coordinates are read, never transformed. A
+reference/total scale coordinates, a known block's sampled scale coordinate,
+a bounded ordinary scale's declared transform, or a known scale's constant.
+Those coordinates are read, never transformed. A
 known correlation is the constant Cholesky factor `cholesky_known` (empty when
 the block samples `L`), and `cholesky_free` is then empty.
 
@@ -1257,6 +1258,8 @@ function _adaptive_resolve_scale_bounds(blocks, model, unc_names)
         any(in(wanted), indices) || continue
         # An explicitly sampled log_scale is unbounded and already is a log.
         haskey(output.constraints, :lower) || continue
+        # Bounds follow carrier element order even when the caller's axis does not.
+        indices = _brm_element_coordinates(output, unc_names)
         lower, upper = _adaptive_bounds(descriptor, output, length(indices),
                                         output.name, "random-effect scale")
         for (i, lo, hi) in zip(indices, lower, upper)
@@ -2907,7 +2910,7 @@ function _adaptive_block_cov_chol(x::AbstractVector, block::AdaptiveCenteringBlo
     end
     _adaptive_block_cholesky(x, block)
 end
-# A centered known-value block (the only derived-scale block that is centered).
+# Centered known-value and bounded-scale blocks use the derived frame too.
 _adaptive_block_cov_chol(x::AbstractVector, block::R2D2AdaptiveCenteringBlock) =
     _adaptive_block_cholesky(x, block)
 
