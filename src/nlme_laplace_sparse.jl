@@ -274,10 +274,14 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
     function block!(declaration, group, z, hyper; edges=zeros(Int, 2, 0),
             sums=Vector{Int}[], λ=Float64[])
         js = Int[]
-        for d in hyper, i in owned(d)
-            j = findfirst(==(i), omega)
-            j === nothing && (push!(omega, i); j = length(omega))
-            push!(js, j)
+        for d in hyper
+            # Known scales/correlations have no sampled coordinate declaration.
+            d === nothing && continue
+            for i in owned(d)
+                j = findfirst(==(i), omega)
+                j === nothing && (push!(omega, i); j = length(omega))
+                push!(js, j)
+            end
         end
         push!(blocks, _BRMSlapBlock(declaration, group, size(z, 2), z, unique(js), edges,
             sums, λ))
