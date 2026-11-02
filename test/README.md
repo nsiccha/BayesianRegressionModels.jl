@@ -1945,6 +1945,11 @@ exercise the diagnostic and implicit gradient; mixed generated effects,
 retained subsets, independent copies, prior dependencies, whole-vector width
 screening and linear sparse storage cover structural behavior.
 
+`laplace_mode_overflow.jl` exercises finite-density trials with overflowing
+derivatives in ordinary and sum cells. It checks local backtracking, sequential
+fallback, conditional stationarity, marginal gradients, independent component
+steps and deterministic repeated evaluations.
+
 ## One-time bootstrap
 
 Use `test/setup_env.jl` as the single bootstrap entry:

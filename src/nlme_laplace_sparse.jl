@@ -1247,7 +1247,8 @@ function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
         _brm_spl_finite(h) || (p.nonfinite += 1;
             return (; finite=false, value=-Inf, iterations))
         δ = _brm_spl_direction(p, h, g)
-        δ === nothing && (p.nonfinite += 1; return (; finite=false, value=-Inf, iterations))
+        (δ === nothing || !all(isfinite, δ)) &&
+            (p.nonfinite += 1; return (; finite=false, value=-Inf, iterations))
         fill!(λ, 0.0)
         for i in 1:n
             λ[p.component[i]] += g[i] * δ[i]
@@ -1263,7 +1264,6 @@ function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
         all(converged) && break
         _brm_spl_step!(p, pop, z, δ, g, h, fc, converged) ||
             (p.nonfinite += 1; return (; finite=false, value=-Inf, iterations))
-        _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
     end
     F = _brm_spl_factor!(p, h)
     issuccess(F) || _brm_nlme_error("brm_laplace_problem: the integrated effects' " *
@@ -1281,7 +1281,10 @@ end
 # prior pieces that touch it, with its share of the decrement); a component
 # whose density still did not rise then takes a block Gauss–Seidel sweep: each
 # block in turn its own Newton step on its own terms with the others fixed,
-# which can only raise it. False when a component finds no finite gain.
+# which can only raise it. Every accepted trial also has finite first and
+# second derivatives. Updates fc, g and h to the accepted z; the usual full
+# step therefore needs just one derivative assembly. False when a component
+# finds no finite gain.
 function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, converged)
     n = length(z)
     nb = length(p.sblocks)
@@ -1289,23 +1292,28 @@ function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, conver
     for i in 1:n
         λc[p.component[i]] += g[i] * δ[i]
     end
-    ft = similar(fc)
+    ft = similar(fc); gt = similar(g); ht = _brm_spl_precision(p)
     trial = copy(z)
     for i in 1:n
         converged[p.component[i]] || (trial[i] = z[i] + δ[i])
     end
-    _brm_spl_assemble!(ft, nothing, nothing, p, pop.A, pop.C, trial; derivatives=false, uA=pop.uA)
+    _brm_spl_assemble!(ft, gt, ht, p, pop.A, pop.C, trial; derivatives=true, uA=pop.uA)
+    valid = _brm_spl_finite_blocks(p, gt, ht)
     converged = copy(converged)
     for c in eachindex(fc)
         converged[c] && continue
-        if isfinite(ft[c]) && (λc[c] <= 1e-8 || ft[c] >= fc[c] + 1e-4 * λc[c])
+        if isfinite(ft[c]) && all(valid[p.sblock[i]] for i in p.components[c]) &&
+                (λc[c] <= 1e-8 || ft[c] >= fc[c] + 1e-4 * λc[c])
             converged[c] = true
             for i in p.components[c]
                 z[i] = trial[i]
             end
         end
     end
-    all(converged) && return true
+    if all(converged)
+        copyto!(fc, ft); copyto!(g, gt); _brm_spl_copy_precision!(h, ht)
+        return true
+    end
     p.blockwise += 1
     moving(k) = !converged[p.sblock_component[k]]
     λb = zeros(nb)
@@ -1323,13 +1331,16 @@ function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, conver
             k = p.sblock[i]
             accepted[k] || (trial[i] = z[i] + t[k] * δ[i])
         end
-        _brm_spl_assemble!(ft, nothing, nothing, p, pop.A, pop.C, trial; derivatives=false,
+        _brm_spl_assemble!(ft, gt, ht, p, pop.A, pop.C, trial; derivatives=true,
             fb=fbt, uA=pop.uA)
+        valid = _brm_spl_finite_blocks(p, gt, ht)
         for k in 1:nb
-            accepted[k] && continue
-            if isfinite(fbt[k]) && (λb[k] <= 1e-8 || fbt[k] >= fb[k] + 1e-4 * t[k] * λb[k])
+            moving(k) || continue
+            if valid[k] && isfinite(fbt[k]) &&
+                    (λb[k] <= 1e-8 || fbt[k] >= fb[k] + 1e-4 * t[k] * λb[k])
                 accepted[k] = true
             else
+                accepted[k] = false
                 t[k] /= 2
             end
         end
@@ -1347,6 +1358,7 @@ function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, conver
             _brm_spl_sweep!(p, pop, z, c) || return false
         end
     end
+    _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
     true
 end
 
@@ -1357,12 +1369,13 @@ end
 function _brm_spl_sweep!(p::BRMSparseLaplaceProblem, pop, z, c)
     nc = length(p.components)
     fc = zeros(nc); ft = zeros(nc); g = zeros(length(z)); h = _brm_spl_precision(p)
+    gt = similar(g); ht = _brm_spl_precision(p)
+    _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
     for (k, members) in enumerate(p.sblocks)
         p.sblock_component[k] == c || continue
-        _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
         gk = g[members]
         δ = _brm_spl_block_direction(p, h, members, gk)
-        δ === nothing && return false
+        (δ === nothing || !all(isfinite, δ)) && return false
         λ = dot(gk, δ)
         λ <= 1e-8 && continue
         trial = copy(z)
@@ -1370,9 +1383,11 @@ function _brm_spl_sweep!(p::BRMSparseLaplaceProblem, pop, z, c)
         gained = false
         for _ in 1:60
             trial[members] .= z[members] .+ step .* δ
-            _brm_spl_assemble!(ft, nothing, nothing, p, pop.A, pop.C, trial;
-                derivatives=false, uA=pop.uA)
-            if isfinite(ft[c]) && ft[c] >= fc[c] + 1e-4 * step * λ
+            _brm_spl_assemble!(ft, gt, ht, p, pop.A, pop.C, trial;
+                derivatives=true, uA=pop.uA)
+            valid = _brm_spl_finite_blocks(p, gt, ht)
+            if isfinite(ft[c]) && all(valid[p.sblock[i]] for i in p.components[c]) &&
+                    ft[c] >= fc[c] + 1e-4 * step * λ
                 gained = true
                 break
             end
@@ -1380,6 +1395,7 @@ function _brm_spl_sweep!(p::BRMSparseLaplaceProblem, pop, z, c)
         end
         gained || return false
         z[members] .= trial[members]
+        copyto!(fc, ft); copyto!(g, gt); _brm_spl_copy_precision!(h, ht)
     end
     true
 end

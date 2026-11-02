@@ -496,12 +496,14 @@ end
     BRM._brm_spl_assemble!(fc, g, h, r, pop.A, pop.C, z; derivatives=true)
     δ = 100 .* BRM._brm_spl_direction(r, h, g)
     before = (r.blockwise, r.sweeps)
+    f0 = sum(fc)
     z1 = copy(z)
     @test BRM._brm_spl_step!(r, pop, z1, δ, g, h, fc, falses(length(r.components)))
     @test r.blockwise == before[1] + 1
     f1 = zeros(length(r.components))
     BRM._brm_spl_assemble!(f1, nothing, nothing, r, pop.A, pop.C, z1; derivatives=false)
-    @test sum(f1) > sum(fc)
+    @test sum(f1) > f0
+    @test f1 ≈ fc
 end
 
 # `@plate` cells: subjects whose cells read their own effect and their rows'
