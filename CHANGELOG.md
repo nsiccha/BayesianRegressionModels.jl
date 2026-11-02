@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.118
+## 0.2.121
 
 - Changed: NLME unit likelihoods and gradients use one strict RK plate
   partition per unit. Preparation checks structural coordinate ownership,
@@ -28,17 +28,19 @@ instead of failing at run time.
   retain their structural checks. Shared-coordinate changes refresh the cache.
 - Changed: separated CAR fields expose their shared values through row-local
   graph computations, preserving their law, coordinates, inverse and Jacobian.
-- Compatibility: requires ReactiveKernels 0.1.50 and ReactiveKernelsPPL 0.1.52.
+- Compatibility: requires ReactiveKernels 0.1.51 and ReactiveKernelsPPL 0.1.54.
   Scalar inference preserves ordinary indexed predictor expressions under
   strict partitioning, and nested data-only helpers inside sampled
   expressions, such as a lower-bounded shares completion's
   `lower=lo[x_shares_free]`, keep their shapes through strict cell and
   partition preparation. Strict queries also preserve local scan captures,
-  grouped-field row reductions and censored ragged factors. Unit gradients
-  use ordinary Enzyme Reverse. The test bootstrap pins RK `5b651e21` and
+  grouped-field row reductions and censored ragged factors. Shared-prefix
+  binding includes freshly emitted helpers and preserves local reads from
+  custom packed vectors. Unit gradients use ordinary Enzyme Reverse.
+  The test bootstrap pins RK `97bd11bc` and
   Enzyme dogfood `68ed90fe` with libEnzyme `2063db12`, including the repair
   for matrix-window partition gradients on Julia 1.10. The test environment
-  also pins WarmupHMC 0.2.10, required by RKPPL 0.1.52.
+  also pins WarmupHMC 0.2.10, required by RKPPL.
 
 ## 0.2.120
 

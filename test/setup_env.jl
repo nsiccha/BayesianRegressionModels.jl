@@ -267,7 +267,9 @@ const PINS = [
     # unchanged scan captures, and censored ragged cell-factor projections.
     # RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
     # helper calls, guarded captures and broadcast observation locations.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "0a517908470ceb0480b3db91d6b052b4dc02bb8c"),
+    # RKPPL 0.1.54 binds shared-prefix queries in the latest world and preserves
+    # custom packed-vector storage and its local reads.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "97bd11bc9774c42880e69693941e26d0ca68ba87"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

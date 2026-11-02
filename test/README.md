@@ -1009,8 +1009,10 @@ through strict partitions (`nlme_lower_shares.jl`) require 0.1.42 / 0.1.39,
 which keeps shapes through nested data-only helpers inside sampled
 expressions. Scan-captured sigma rows and censored ragged factors need the
 0.1.47 / 0.1.43 floors. Shared-prefix value queries and gradients need
-0.1.48 / 0.1.51; packed gathered-column shapes need the current
-0.1.50 / 0.1.52 floors. The grouped HSGP variants in `nlme_svi.jl` check
+0.1.48 / 0.1.51; packed gathered-column shapes need 0.1.50 / 0.1.52.
+The current RKPPL 0.1.54 floor also keeps shared-prefix binding in the
+latest world and preserves custom packed-vector storage and local reads.
+The grouped HSGP variants in `nlme_svi.jl` check
 value/gradient parity and shared-cache refresh across changed points.
 Both partition fixtures use ordinary Enzyme Reverse
 with the repaired dogfood revision pinned by `setup_env.jl`.
