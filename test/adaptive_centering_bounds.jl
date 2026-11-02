@@ -43,7 +43,11 @@ end for i in eachindex(q)]
         L = reshape(physical[vec(brm_output_coordinates(Lout, cnames))], 2, 2)
         C = Diagonal(tau) * L
         @test BRM._adaptive_block_cholesky(raw, block) ≈ C
-        permutation = randperm(Xoshiro(12), length(names))
+        # Keep a centered array-of-vectors' effect segment intact; only the
+        # scalar scale carrier is reordered here.
+        permutation = collect(eachindex(names))
+        scale_indices = BRM._brm_element_coordinates(scale_output, names)
+        permutation[scale_indices] = reverse(scale_indices)
         shuffled = only(adaptive_centering_blocks(sb, names[permutation]))
         @test BRM._adaptive_block_cholesky(raw[permutation], shuffled) ≈ C
         beta = [only(brm_population_effect_coordinates(d, :mu, names;
