@@ -34,6 +34,7 @@ function check_plan_reuse(rk, groups; partial=false, cellkind=:none)
     prepared = counts(ad)
     @test prepared[1] == 1
     cellkind === :ordinary && @test prepared[2] > 0
+    cellkind === :nested && @test prepared[2] + prepared[3] > 0
     cellkind === :sum && @test prepared[3] > 0
     elapsed = @timed brm_laplace_problem(rk; ad_backend=ad, integrate=plan,
         tol=1e-20, maxiter=70)
@@ -131,9 +132,26 @@ end
 end
 
 @stestset "ordinary plate plan reuse and strict subsets" begin
+    d = (; a=["a", "a", "b", "b"], b=["x", "y", "x", "y"],
+        y=[0.2, -0.1, 0.4, 0.3])
+    rk = RKBRMI(@brm d begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + (1 | a) + (1 | b)
+        @plate for k in eachindex(y)
+            y[k] ~ Normal(mu[k], sigma)
+        end
+    end)
+    for partial in (false, true)
+        check_plan_reuse(rk, (:a, :b); partial, cellkind=:ordinary)
+    end
+end
+
+@stestset "nested vector plate plan reuse and strict subsets" begin
+    # RK may factor the vector likelihood's reduction. Both preparation paths
+    # must save setup calls without changing the marginal or sharing state.
     rk = RKBRMI(nested_model(NESTED_DATA))
     for partial in (false, true)
-        check_plan_reuse(rk, (:subject, :unit); partial, cellkind=:ordinary)
+        check_plan_reuse(rk, (:subject, :unit); partial, cellkind=:nested)
     end
 end
 
