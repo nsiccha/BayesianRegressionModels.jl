@@ -18,6 +18,14 @@
 # Gaussian. `importance_ess` is reported as its minimum, median and the number
 # of blocks below the floor; a gated term is admitted when no block is.
 
+# A private, read-only template. Targets copy it before evaluating or remapping
+# any workspace; copying a plan need not duplicate this retained preparation.
+struct _BRMLaplacePreparation
+    problem::BRMSparseLaplaceProblem
+    ad_backend::Any
+end
+Base.deepcopy_internal(p::_BRMLaplacePreparation, ::IdDict) = p
+
 """
     BRMLaplacePlan
 
@@ -30,13 +38,21 @@ whether it is `admitted` (integrated by the problem), and for a gated term its
 `plan.ess_floor` is the floor, a fraction of `draws`. Pass a plan as
 `brm_laplace_problem(rk; integrate = plan)` to integrate exactly its admitted
 terms; [`brm_laplace_plan`](@ref)'s `integrate` and `sample` override the
-classes.
+classes. A generated plan retains its preparation: applying it to the same
+`rk` with the same `ad_backend` copies the prepared workspaces without preparing
+the observations again, including when only some candidate terms are admitted.
+Each returned problem has independent mutable state. Keep the backend's inputs
+unchanged while using the plan; another backend or AD configuration is prepared
+afresh. This is an in-process reuse contract: diagnostic exports and
+reconstructed plans do not retain a portable cache of compiled factors.
 """
 struct BRMLaplacePlan
     terms::Vector{NamedTuple}
     ess_floor::Float64
     draws::Int
+    prepared::Union{Nothing,_BRMLaplacePreparation}
 end
+BRMLaplacePlan(terms, ess_floor, draws) = BRMLaplacePlan(terms, ess_floor, draws, nothing)
 
 _brm_plan_admitted(plan::BRMLaplacePlan) = [t for t in plan.terms if t.admitted]
 
@@ -94,8 +110,8 @@ function brm_laplace_plan(backend::RKBRMI; ad_backend, integrate=:auto, sample=(
 end
 
 # The plan and the sparse problem its diagnostic was measured on (over every
-# candidate term), which `brm_laplace_problem` reuses when the plan admits all
-# of them.
+# candidate term). The public plan retains it too, including when the
+# diagnostic admits only a subset of those terms.
 function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_floor,
         draws, at, rng, tol, maxiter)
     forced = integrate === :auto ? Symbol[] : Symbol[_brm_plan_names(integrate)...]
@@ -173,7 +189,11 @@ function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_f
             "; every block's importance ESS is above the floor" :
             "; blocks below the importance ESS floor"), admitted, e)
     end
-    plan = BRMLaplacePlan(entries, ess_floor, draws)
+    # Retain preparation, not the diagnostic's numerical factorization and
+    # selected inverse. Each target owns and fills that cache independently.
+    p.factor[] = nothing
+    plan = BRMLaplacePlan(entries, ess_floor, draws,
+        _BRMLaplacePreparation(p, ad_backend))
     (; plan, problem=p)
 end
 
@@ -335,20 +355,132 @@ function _brm_plan_local_value(p::BRMSparseLaplaceProblem, state, terms, I, z, u
     total
 end
 
-# The sparse problem of a plan's admitted terms: the diagnostic's own problem
-# when the plan admits every term it was built over.
+# Materialize independent mutable state from the diagnostic's preparation.
+# A plan applied to another backend or AD configuration still builds that
+# backend's target, as does a manually constructed three-argument plan.
 function _brm_sparse_laplace_problem_from_plan(backend::RKBRMI, r; ad_backend, tol,
         maxiter)
     admitted = _brm_plan_admitted(r.plan)
     isempty(admitted) && _brm_nlme_error("brm_laplace_problem: the plan integrates no " *
         "latent term:\n" * sprint(show, MIME"text/plain"(), r.plan))
     declarations = Set(t.declaration for t in admitted)
-    p = r.problem
-    if p === nothing || Set(_brm_plan_problem_terms(p)) != declarations
+    prepared = r.plan.prepared
+    if prepared !== nothing && prepared.problem.backend === backend &&
+            isequal(prepared.ad_backend, ad_backend) &&
+            issubset(declarations, Set(_brm_plan_problem_terms(prepared.problem)))
+        # Backend inputs are read-only. Do not clone the model and its bound
+        # data along with each target's derivative and solver workspaces.
+        p = Base.deepcopy_internal(prepared.problem, IdDict{Any,Any}(backend => backend))
+        Set(_brm_plan_problem_terms(p)) == declarations ||
+            _brm_spl_restrict!(p, declarations)
+        p.tol = Float64(tol)
+        p.maxiter = Int(maxiter)
+        fill!(p.u, 0.0)
+        p.nonfinite = p.unconverged = p.blockwise = p.sweeps = 0
+    else
         p = _brm_sparse_laplace_problem(backend, unique(t.grouping for t in admitted);
             ad_backend, tol, maxiter, declarations)
     end
     p.plan = r.plan
+    p
+end
+
+# Reclassify a prepared selection's actual reads. Padding in ordinary compact
+# cells remains padding; newly sampled effects become population derivatives.
+function _brm_spl_repartition(c, zof, pof, maps)
+    positions = sort!(vcat(c.lpos, c.ppos))
+    z = sort!([(zof[c.sel[k]], k) for k in positions if zof[c.sel[k]] > 0])
+    ps = [(pof[c.sel[k]], k) for k in positions if pof[c.sel[k]] > 0]
+    share(v) = get!(maps, v, v)
+    merge(c, (; lz=first.(z), lpos=share(last.(z)),
+        pidx=share(first.(ps)), ppos=share(last.(ps))))
+end
+
+function _brm_spl_restrict_cells(group, zof, pof, maps)
+    # Newer preparation shares zero direction buffers across an observation's
+    # cells. Keep that representation and its prepared AD arity: evaluation
+    # fills the directions from each remapped cell's lpos, then clears them.
+    if hasproperty(group, :dirs)
+        foreach(d -> fill!(d, 0.0), group.dirs)
+        cells = map(c -> _brm_spl_repartition(c, zof, pof, maps), group.cells)
+        return merge(group, (; cells))
+    end
+    cells = map(group.cells) do c
+        c = _brm_spl_repartition(c, zof, pof, maps)
+        # Keep the prepared operator's direction arity; unused directions are
+        # zero. The leading directions still give the selected Hessian columns.
+        dirs = ntuple(length(c.dirs)) do k
+            v = zeros(length(c.sel))
+            k <= length(c.lpos) && (v[c.lpos[k]] = 1.0)
+            v
+        end
+        merge(c, (; dirs))
+    end
+    merge(group, (; cells))
+end
+
+function _brm_spl_restrict_cells(group::_BRMSumCellGroup, zof, pof, maps)
+    share(v) = get!(maps, v, v)
+    cells = map(group.cells) do c
+        direct = _brm_spl_repartition(c.direct, zof, pof, maps)
+        terms = [map(t -> _brm_spl_repartition(t, zof, pof, maps), reduction)
+            for reduction in c.terms]
+        lz = sort!(unique!(vcat(direct.lz,
+            [z for reduction in terms for t in reduction for z in t.lz])))
+        localof = Dict(z => k for (k, z) in enumerate(lz))
+        direct = merge(direct, (; loc=share([localof[z] for z in direct.lz])))
+        terms = [map(t -> merge(t, (; loc=share([localof[z] for z in t.lz]))), reduction)
+            for reduction in terms]
+        merge(c, (; direct, terms, lz))
+    end
+    _BRMSumCellGroup(group.name, group.query, cells, merge(group.prepared, (; cells)))
+end
+
+# Restrict a private copy of a prepared problem, without querying footprints or
+# preparing AD again. Keep omega's original indexing, which the copied row
+# kernels use; the retained blocks reference their original entries in it.
+function _brm_spl_restrict!(p::BRMSparseLaplaceProblem, declarations)
+    keep = findall(b -> any(d -> _brm_nlme_owned(b.declaration, d), declarations), p.blocks)
+    oldz = sort!([z for j in keep for z in p.blocks[j].z])
+    zmap = zeros(Int, length(p.integrated)); zmap[oldz] .= eachindex(oldz)
+    blockmap = zeros(Int, length(p.blocks)); blockmap[keep] .= eachindex(keep)
+    p.integrated = p.integrated[oldz]
+    p.population = setdiff(eachindex(p.u), p.integrated)
+    p.names = _rk_layout_coordinate_names(p.backend)[p.population]
+    p.blocks = [_BRMSlapBlock(b.declaration, b.group, b.K, zmap[b.z], b.omega,
+        b.edges, b.sums, b.λ) for b in p.blocks[keep]]
+    p.integrate = unique(b.group for b in p.blocks)
+    old = (; p.rptr, p.rblock, p.rlevel, p.rentry)
+    p.rptr = [1]; p.rblock = Int[]; p.rlevel = Int[]; p.rentry = Int[]; p.coff = Int[]
+    p.block_reads = [Int[] for _ in p.blocks]
+    nc = 0
+    for e in eachindex(p.port)
+        for r in old.rptr[e]:(old.rptr[e + 1] - 1)
+            j = blockmap[old.rblock[r]]
+            j == 0 && continue
+            push!(p.rblock, j); push!(p.rlevel, old.rlevel[r])
+            push!(p.rentry, e); push!(p.coff, nc)
+            push!(p.block_reads[j], length(p.rblock))
+            nc += p.blocks[j].K
+        end
+        push!(p.rptr, length(p.rblock) + 1)
+    end
+    for t in eachindex(p.family)
+        e = p.entry[t]
+        p.moving[t] = _brm_lap_width(p.family[t]) == 2 && p.rptr[e + 2] > p.rptr[e + 1]
+    end
+    # Sampled draws times their scales need the existing nonlinear row path.
+    p.affine = false
+    p.φ0 = zeros(length(p.population))
+    p.jptr = Int[]; p.jcol = Int[]; p.jval = Float64[]
+    zof = zeros(Int, length(p.u)); zof[p.integrated] .= eachindex(p.integrated)
+    pof = zeros(Int, length(p.u)); pof[p.population] .= eachindex(p.population)
+    # Preserve read-only position-map sharing when reclassifying coordinates;
+    # these maps belong to this target, never to the retained template.
+    maps = Dict{Vector{Int},Vector{Int}}()
+    p.cells = [_brm_spl_restrict_cells(g, zof, pof, maps) for g in p.cells]
+    _brm_spl_pattern!(p)
+    _brm_spl_step_blocks!(p)
     p
 end
 

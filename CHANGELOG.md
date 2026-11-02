@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.122
+
+- A `brm_laplace_plan` retains its prepared sparse problem. Building a target
+  from that plan on the same backend and automatic-differentiation
+  configuration copies the prepared workspaces instead of preparing every
+  observation again. Plans that admit only some candidate terms restrict the
+  prepared row, plate-cell and sum factors to those terms. Repeated targets
+  keep independent mutable state and honor their own solver tolerances.
+
 ## 0.2.121
 
 - `brm_smc_tune` forwards `reference_inflation`, added in RKPPL 0.1.47. Its learned
