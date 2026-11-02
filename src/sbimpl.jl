@@ -6645,13 +6645,13 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             new_data[key] = _sb_reprocess_column_length(df, columns[found],
                 "kernel per-subject column")
         else
-            subjects = _sb_reprocess_kernel_cells(df, e.raw_ref, e.const_)
+            subjects = _sb_reprocess_kernel_cells(df, e.raw_ref, e.const_; freeze)
             new_data[key] = length(subjects)
         end
         new_preproc[key] = e
     elseif e.kind === :kernel_ragged
         arg_name, event_group, subject_group = e.raw_ref
-        subjects = _sb_reprocess_kernel_cells(df, subject_group, e.const_)
+        subjects = _sb_reprocess_kernel_cells(df, subject_group, e.const_; freeze)
         event_groups = _sb_df_column(df, event_group)
         event_groups isa AbstractVector || error(
             "sbimpl: reprocess: kernel event grouping column `$event_group` " *
@@ -7196,7 +7196,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     # 1. Regenerate every independent transform-output key from its preproc
     #    record. Interactions wait until their raw/transformed operands exist.
     for (key, e) in sb.preproc
-        e.kind in (:interaction, :submodel_hook) && continue
+        e.kind in (:interaction, :submodel_hook, :cell_formulas) && continue
         _sb_reads_level_codes(e) && continue
         # A response a cell observes through a grouping (`y[rows[i]]`) is a
         # gathered key whose raw column the new data may lack. Its record is
@@ -7221,6 +7221,12 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                 "joint response is not supported yet (todo `1fnt1zu`); include its outcome columns.")
         end
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
+    end
+    # Cell formulas read the ragged inputs regenerated above, and retain the
+    # field fitted to each semantic cell label.
+    for (key, e) in sb.preproc
+        e.kind === :cell_formulas || continue
+        _sb_replay_cell_formulas!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
     # 1a. A `by=` HSGP projection reads the level codes step 1 regenerated.
     for (key, e) in sb.preproc
@@ -7754,11 +7760,19 @@ _sb_kernel_ragged_partition(a_name, grp_name, ev_vals, subject_vals; observed::B
 
 # A plate's cells on a replayed frame: the labels of its cell column, one per
 # row, or the distinct labels of its one grouping column.
-_sb_reprocess_kernel_cells(df, column, options) =
-    options isa NamedTuple && get(options, :distinct_labels, false) ?
+function _sb_reprocess_kernel_cells(df, column, options; freeze=false)
+    labels = options isa NamedTuple && get(options, :distinct_labels, false) ?
         _brm_kernel_distinct_labels(_sb_df_column(df, column), column;
             prefix="sbimpl: reprocess") :
         _sb_kernel_subject_values(_sb_df_column(df, column), column)
+    if freeze && options isa NamedTuple && haskey(options, :fitted_cell_labels)
+        fitted = options.fitted_cell_labels
+        all(label -> label in fitted, labels) || throw(ArgumentError(
+            "cell formula replay cannot introduce an unfitted cell; rebuild the model"))
+        return copy(fitted)
+    end
+    labels
+end
 
 function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals;
                                 allow_unbound_observation=false, order=nothing,
@@ -8193,6 +8207,10 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # so the plate is count-form over `outer` for them while bound positionals
     # keep slicing; the dropped cell parameter becomes a fresh per-cell `~`.
     kept_params = slice_params[kept]
+    body_stmts = _sb_cell_formulas!(body_stmts, data, target, kept_names, kept_params,
+        _brm_inline_scope(lam);
+        labels=isempty(grouped) && isempty(ragged_specs) ? (nsub === nothing ? () : 1:nsub) : g_vals,
+        group=isempty(grouped) && isempty(ragged_specs) ? nothing : name(group_col), distinct)
     _brm_check_cell_total_latents(body_stmts, params, _brm_inline_scope(lam); prefix="sbimpl")
     # The cell is Julia source; give StanBlocks its Stan spellings.
     body_stmts = _sb_cell_statements(_sb_cell_ar1_normal_calls(body_stmts, kept_params),

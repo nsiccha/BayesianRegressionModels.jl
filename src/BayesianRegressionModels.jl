@@ -92,6 +92,7 @@ include("sbimpl.jl")
 include("sb_gmrf.jl")
 include("sb_marginal_ranef.jl")
 include("sb_cell_julia.jl")
+include("sb_cell_formulas.jl")
 include("sb_distribution_statistics.jl")
 include("sb_plate_outputs.jl")
 # Fusion-append artifacts + SB reference numbers (RK-side driver inputs).
