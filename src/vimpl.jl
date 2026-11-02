@@ -528,9 +528,6 @@ nparams(p::Part{typeof(chol)}) = let n = size(p.data.L, 1); n * (n + 1) ÷ 2 end
 nparams(p::Part{typeof(chol_by)}) = let n = size(p.data.Ls, 1), S = size(p.data.Ls, 3); S * n * (n + 1) ÷ 2 end
 nparams(p::Part{typeof(simplex)}) = length(p.data.values) - 1
 
-@inline advance!!(x, pos) = x[pos+1], pos+1
-@inline advance!!(x, pos, n) = view(x, pos+1:pos+n), pos+n
-
 """
     lprior!(container, x) -> lp
 
@@ -551,54 +548,15 @@ Jacobian contribution.
     sum(Base.Fix1(logpdf, Normal()), x)
 end
 
-log_abs_tanh(x) = begin
-    z = -2*abs(x)
-    (log1mexp(z) - log1pexp(z))
-end
-log_square_tanh(x) = 2 * log_abs_tanh(x)
-
 """
     lprior!(p::Part{typeof(chol)}, x; eta=1.0) -> lp
 
-Either wrong or better LKJCholesky unconstraining + prior. Writes `p.data.L`
+LKJ-Cholesky unconstraining + prior. Writes `p.data.L`
 in place from `x` (length n(n+1)/2) and returns the log-prior + Jacobian
 contribution. `eta` is the LKJ shape parameter.
 """
-@inline lprior!(p::Part{typeof(chol)}, x; eta=1.0) = _chol_lprior!(p.data.L, x; eta)
-
-# Shared LKJ-Cholesky unconstraining body. Writes `L` in place from the first
-# n(n+1)/2 entries of `x` and returns the log-prior + Jacobian contribution.
-# Used by both `chol` (one shared L) and `chol_by` (per-stratum slice).
-@inline _chol_lprior!(L, x; eta=1.0) = begin
-    n = LinearAlgebra.checksquare(L)
-    pos = 0
-    lprior = 0.0
-    log_scale, pos = advance!!(x, pos)
-    lprior += logpdf(Normal(), log_scale)
-    L[1, 1] = exp(log_scale)
-    for i in 2:n
-        log_scale, pos = advance!!(x, pos)
-        lprior += logpdf(Normal(), log_scale)
-        xi, pos = advance!!(x, pos)
-        tmp = log_abs_tanh(xi / sqrt(n-1))
-        L[i, 1] = sign(xi) * exp(log_scale + tmp)
-        log_sos = 2 * tmp
-        lprior += log1mexp(log_sos)
-        for j in 2:i-1
-            xi, pos = advance!!(x, pos)
-            tmp1 = .5 * log1mexp(log_sos)
-            lprior += tmp1
-            tmp2 = log_abs_tanh(xi / sqrt(n-j))
-            lprior += log1mexp(2*tmp2)
-            tmp = tmp1 + tmp2
-            L[i, j] = sign(xi) * exp(log_scale + tmp)
-            log_sos = logaddexp(log_sos, 2*tmp)
-        end
-        L[i, i] = exp(log_scale + .5 * log1mexp(log_sos))
-        lprior += (n - i + 2*eta-2) * .5 * log1mexp(log_sos)
-    end
-    lprior
-end
+@inline lprior!(p::Part{typeof(chol)}, x; eta=1.0) =
+    first(lkj_cholesky!(p.data.L, x; eta))
 
 # Array-of-Cholesky: one L per stratum. Unconstrains n_strata independent LKJ
 # factors, writing each slice `Ls[:, :, s]` in place. Same eta for every
@@ -612,7 +570,7 @@ end
     pos = 0
     for s in 1:n_strata
         xi, pos = advance!!(x, pos, n_per)
-        lprior += _chol_lprior!(view(Ls, :, :, s), xi; eta)
+        lprior += first(lkj_cholesky!(view(Ls, :, :, s), xi; eta))
     end
     lprior
 end
@@ -655,25 +613,10 @@ never forms `1 - Σ values_<i` on the linear scale, so it stays stable even
 when simplex entries get tiny. `α == 1.0` reduces to the Jacobian-only
 transform (plus the constant `loggamma(K)`).
 
-Ported from `blog/posts/simplex/transforms/stickbreakingLogistic.stan`.
+The transform is provided by ReparametrizableDistributions.
 """
-@inline lprior!(p::Part{typeof(simplex)}, x; alpha=1.0) = begin
-    values = p.data.values
-    K = length(values)
-    lp = 0.0
-    log_cum_prod = 0.0
-    for i in 1:K-1
-        log_zi = -log1pexp(-(x[i] - log(K - i)))
-        log_xi = log_cum_prod + log_zi
-        values[i] = exp(log_xi)
-        lp += alpha * log_xi
-        log_cum_prod += log1mexp(log_zi)
-    end
-    values[K] = exp(log_cum_prod)
-    lp += alpha * log_cum_prod
-    lp += loggamma(K * alpha) - K * loggamma(alpha)
-    lp
-end
+@inline lprior!(p::Part{typeof(simplex)}, x; alpha=1.0) =
+    first(simplex!(p.data.values, x; alpha))
 
 @inline llikelihood!((;meta)::VBRMI) = foldl(meta.materialized; init=0.) do llikelihood, m
     llikelihood + llikelihood!(m)
