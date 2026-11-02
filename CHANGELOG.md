@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.131
+
+- Label ragged response draws in `brm_output_tree` and `brm_predictive_tree`
+  with flat observation positions, retaining the existing backing arrays and
+  separate chains. Aggregate log likelihoods have one position per group;
+  predictive outputs have one per element, with group boundaries in `segments`.
+
 ## 0.2.130
 
 - Outer SMC accepts prepared RK-backed generic, structured and sparse embedded
