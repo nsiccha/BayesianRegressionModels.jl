@@ -80,14 +80,14 @@ function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, conte
             component=:space, default=ExprColumn(LogNormal, 0.0, 1.0)),
         temporal_prior=_brm_term_prior_expression(term, target, context, :term_length_scale;
             component=:time, default=ExprColumn(LogNormal, 0.0, 1.0)))
-    state = (; target, times, channels, correlation, vertices_source, cells_source,
+    layout = _BRMGMRFStateLayout(size(vertices, 1), channels, times)
+    state = (; target, times=layout.times, channels=layout.channels, layout, correlation, vertices_source, cells_source,
         vertices, cells, nvertices=size(vertices, 1), priors...)
     prepared = _BRMPreparedTerm(gmrf, source, state, dependencies)
     geometry || return prepared
     mesh = _brm_gmrf_mesh(vertices, cells)
     interpolation = _brm_gmrf_interpolation(mesh, last.(spatial)...)
-    indices = _brm_gmrf_state_indices(interpolation.indices, time, row_channels,
-        times, channels, size(vertices, 1))
+    indices = _brm_gmrf_state_indices(interpolation.indices, time, row_channels, layout)
     _BRMPreparedTerm(gmrf, source,
         merge(state, (; mesh, indices, weights=interpolation.weights)), dependencies)
 end
@@ -98,8 +98,7 @@ function _brm_replay_gmrf(training, context)
     row_channels = length(training.source) == 3 ? ones(Int, length(time)) :
         context.data[training.source[4]]
     interpolation = _brm_gmrf_interpolation(state.mesh, x, y)
-    indices = _brm_gmrf_state_indices(interpolation.indices, time, row_channels,
-        state.times, state.channels, state.nvertices)
+    indices = _brm_gmrf_state_indices(interpolation.indices, time, row_channels, state.layout)
     _BRMPreparedTerm(gmrf, training.source,
         merge(state, (; indices, weights=interpolation.weights)), training.dependencies)
 end

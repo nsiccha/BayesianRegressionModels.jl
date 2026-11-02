@@ -23,6 +23,9 @@ data = (; east=[0.1, 0.9, 0.7, 0.3], north=[0.2, 0.4, 0.8, 0.5],
     @test prepared.source == (:east, :north, :time, :channel)
     @test prepared.state.times == [0, 0.3, 1.7]
     @test prepared.state.channels == ["a", "b"]
+    @test prepared.state.layout.ncoordinates == 30
+    @test prepared.state.layout.times === prepared.state.times
+    @test prepared.state.layout.channels === prepared.state.channels
     @test prepared.state.correlation.factor ≈ Matrix(cholesky(Symmetric(data.Omega)).L)
     @test size(prepared.state.indices) == (4, 3)
     @test size(prepared.state.weights) == (4, 3)
@@ -42,6 +45,7 @@ data = (; east=[0.1, 0.9, 0.7, 0.3], north=[0.2, 0.4, 0.8, 0.5],
         :time=>[0.3, 0.0], :channel=>["a", "b"])
     replay = BRM._brm_replay_gmrf(prepared, (; data=rows))
     @test replay.state.mesh === prepared.state.mesh
+    @test replay.state.layout === prepared.state.layout
     @test replay.state.indices == prepared.state.indices[[2, 1], :]
     @test replay.state.weights ≈ prepared.state.weights[[2, 1], :]
     rows[:time] = [2.0, 0.0]

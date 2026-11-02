@@ -196,7 +196,7 @@ end
 
 function _sb_gmrf_data(prepared)
     s = prepared.state
-    (; n_field=s.nvertices * length(s.times) * length(s.channels),
+    (; n_field=s.layout.ncoordinates,
        times=s.times, _brm_gmrf_factor_data(s.mesh)...,
        index1=s.indices[:, 1], index2=s.indices[:, 2], index3=s.indices[:, 3],
        weight1=s.weights[:, 1], weight2=s.weights[:, 2], weight3=s.weights[:, 3])
@@ -221,8 +221,9 @@ function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
                 "gmrf replay with channel correlation cannot introduce new channel labels"))
             channels = state.channels
         end
+        layout = _BRMGMRFStateLayout(size(vertices, 1), channels, times)
         training = _BRMPreparedTerm(gmrf, training.source,
-            merge(state, (; vertices, cells, mesh, times, channels,
+            merge(state, (; vertices, cells, mesh, times=layout.times, channels=layout.channels, layout,
                           nvertices=size(vertices, 1))), training.dependencies)
     end
     prepared = _brm_replay_gmrf(training, (; data=rows))
