@@ -1620,6 +1620,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     outputs = _brm_ranef_components(outputs, plan, stan)
     outputs = _brm_output_dims(outputs, plan, stan)
     outputs = _brm_output_addresses(outputs, plan, stan)
+    outputs = _brm_cell_formula_output_addresses(outputs, plan, stan)
 
     # --- schema -------------------------------------------------------------
     columns = Tuple(sort!(collect(df_columns)))
@@ -1954,6 +1955,54 @@ function _brm_output_addresses(outputs, plan, stan)
                         isnothing(o.component) ? get(parts, o.name, nothing) : o.component,
                         o.dims, predictors(o), term_of(o))
               for o in outputs]
+end
+
+# Cell formulas retain the actual emission bindings beside their declaration
+# context. Resolve each role through the traced model so ragged promotion and
+# two plates using the same term name preserve their separate owners.
+function _brm_cell_formula_output_addresses(outputs, plan, stan)
+    output_names = Set{Symbol}(o.name for o in outputs)
+    model_names = Set{Symbol}(keys(stan.model))
+    addressed = copy(outputs)
+    for entry in values(plan.preproc)
+        entry.kind === :cell_formulas || continue
+        fit = entry.const_
+        for (target, binding) in fit.bindings
+            hasproperty(binding, :term_parameters) || continue
+            predictors = [p.logical for p in fit.predictors
+                if p.emitted === binding.term_predictor]
+            length(predictors) == 1 || error(
+                "brm_descriptor: scoped term `$target` has no unique predictor owner")
+            indices = findall(outputs) do o
+                d = o.declaration
+                d !== nothing && d.context == fit.context && d.target === target
+            end
+            isempty(indices) && continue
+            declaration = outputs[first(indices)].declaration
+            owned = Set{Symbol}(outputs[i].name for i in indices)
+            resolved = _brm_stan_name(declaration)
+            parts = Dict{Symbol,Symbol}()
+            for carrier in _brm_binding_carriers(stan, output_names, model_names, resolved, owned)
+                parts[carrier] = :value
+            end
+            for (role, local_name) in pairs(binding.term_parameters)
+                name = Symbol(resolved, :_, local_name)
+                for carrier in _brm_binding_carriers(stan, output_names, model_names, name, owned)
+                    haskey(parts, carrier) && parts[carrier] !== role && error(
+                        "brm_descriptor: scoped term `$target` has conflicting roles for `$carrier`")
+                    parts[carrier] = role
+                end
+            end
+            for i in indices
+                o = outputs[i]
+                addressed[i] = BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
+                    o.generative, o.source, o.role, o.declaration, o.logical, o.labels,
+                    o.segments, get(parts, o.name, :auxiliary), o.dims,
+                    (only(predictors),), binding.term_label)
+            end
+        end
+    end
+    addressed
 end
 
 # The component of a grouped term's per-group latent block.
