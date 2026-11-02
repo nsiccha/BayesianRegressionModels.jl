@@ -6,7 +6,26 @@ Rows are draws; a vector of per-chain matrices adds an outer `:chain` axis.
 `logical` may also be a discovered `BRMOutput`, for example a coefficient
 carrier from `brm_outputs`. Coefficients use their descriptor labels;
 observation outputs use their element positions. Scalar outputs have only
-the `:draw` axis. Labels follow the supplied constrained-name order.
+the `:draw` axis. Labels follow the supplied constrained-name order for these
+single-axis outputs.
+
+Random-effect carriers use the fitted `:level` labels and `(predictor,
+coefficient)` addresses on `:margin`. Standardized draws and effects have
+`:draw × :level × :margin` (omit `:margin` for a one-margin block), scales
+have `:margin`, and Cholesky factors have `:margin × :margin2`. Stratified
+scales and factors also carry `:stratum`. These carriers use fitted coordinate
+order, independently of the supplied name order, with views into the input.
+
+Per-row block contributions use `:observation`. Model-scope assignments also
+inherit `:observation` through elementary pointwise arithmetic and functions
+of row outputs and scalars, including chains of assignments. Vector length
+alone does not establish row alignment.
+
+Ragged predictions use flat `:observation` positions `1:N`, where `N` is
+the total number of elements. Their aggregate log likelihood uses `1:G`
+on its own `:observation` axis, one contribution per group, not per element.
+The output's `segments` retains the inclusive group ends of the predictive
+element axis; it does not partition the aggregate likelihood's `G` columns.
 
 The returned backing aliases the input: treat both as read-only. Unknown
 output-axis semantics are reported by name, never replaced by guessed labels.
@@ -40,6 +59,8 @@ A TreeArrays record of posterior-predictive responses, with a leading `:draw`
 axis and descriptor-owned response coordinates. The second form labels the
 arrays already returned by `brm_predictive_draws`, without copying or drawing
 again. Per-chain matrix input retains chains separately. Requires TreeArrays.
+Ragged responses use flat `:observation` positions `1:N`; group boundaries
+remain available as `segments` on the descriptor's predictive output.
 """
 function brm_predictive_tree end
 

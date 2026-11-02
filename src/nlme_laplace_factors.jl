@@ -307,7 +307,7 @@ function _brm_spl_factor_contraction!(tz, tp, prepared, u, c, state, blocks, SB,
         traces[j] += sum(S .* t.h[t.lpos, :])
         # The two differentiated-Jacobian terms in the chain rule.
         cross = 2 .* (t.h * (SB[t.loc, :] * state.hf[state.active, j]))
-        L = cholesky(Symmetric(S)).L
+        L = _brm_spl_psd_root(S)
         for a in axes(L, 2)
             d = zeros(length(t.sel)); d[t.lpos] .= L[:, a]
             _, _, tv = _rk_spl_factor_third(t.ad, d, u, t.sel, c.i; term=t.t)

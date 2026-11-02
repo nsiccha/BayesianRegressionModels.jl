@@ -12,6 +12,82 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.133
+
+- `brm_output_tree` preserves observation coordinates through pointwise
+  assignments that combine row outputs with scalar model constants or scalar
+  data inputs, including aliases and chained transforms. Array constants still
+  require their own axis semantics; equal length alone does not label them.
+
+## 0.2.132
+
+- Plans retain their conditional numerical policy when reused or automatically
+  replanned. `brm_ladder_fit` accepts the same solver and matrix-free options;
+  continuation keeps its existing target's policy.
+- Outer SMC identities retain the operator policy, fixed probes and sparse
+  reference values. Checkpoint replay rejects a different finite target;
+  scratch buffers and evaluation diagnostics do not change its identity.
+
+- `brm_laplace_problem(...; integrate, solver=:auto)` selects exact algebra
+  for connected components through 1,024 coordinates and iterative conditional
+  algebra for larger components. `solver=:exact` retains the previous sparse-factor
+  path; `solver=:matrixfree` forces iterative algebra. `MatrixFreeLaplace`
+  sets the component bound, retained probe seed, solve caps and quadrature.
+- The large-component determinant is a reproducible fixed-probe rational
+  approximation. Its gradient differentiates that same approximation,
+  including the nonlinear conditional mode and sum-factored observations.
+  A fixed bounded-fill LDL reference conditions the solves and determinant;
+  its relative diagonal ridge affects only that numerical reference. No
+  unbounded sparse factor or dense covariance is formed. Numerical convergence
+  and probe variability remain distinct from Laplace approximation error.
+- Component densities use compensated summation on the operator path, so
+  accumulated rounding over large fields does not hide the final Newton gain
+  from the line search. Acceptance and convergence tolerances are unchanged.
+- **Breaking:** large Gaussian components now also have numerical determinant
+  approximation error under the default `solver=:auto`. Use `solver=:exact`
+  to reproduce the previous determinant algebra. Small components retain
+  exact algebra. This does not alter the authored statistical model.
+
+## 0.2.131
+
+- Label ragged response draws in `brm_output_tree` and `brm_predictive_tree`
+  with flat observation positions, retaining the existing backing arrays and
+  separate chains. Aggregate log likelihoods have one position per group;
+  predictive outputs have one per element, with group boundaries in `segments`.
+
+## 0.2.130
+
+- Outer SMC accepts prepared RK-backed generic, structured and sparse embedded
+  Laplace problems, including plans with zero integrated terms. Fit, independent
+  pilot tuning, comparison, cumulative prepared-target updates and checkpoint
+  replay reuse RKPPL 0.1.57's supplied-gradient adapter with independent mutable
+  workspaces. Identities include approximation and solver settings, coordinate
+  order, frozen preprocessing and exact data.
+- Sparse Laplace preparation accepts fixed random-effect scales without
+  trying to find sampled coordinates for their known values.
+- `brm_laplace_draws(fit::BRMSMCFit; conditional, rng)` completes a finished
+  marginal cloud and returns its outer weights alongside full packed draws.
+  Conditional importance resampling does not correct the outer approximation.
+- **Breaking:** ladder rung 5b is named `population_sampling` (formerly
+  `population_hmc`). It accepts a completed SMC fit, explicitly resamples its
+  outer weights, and forwards `conditional` to effect completion. Its `method`
+  is `:smc` or `:callback`. A Laplace-only callback requires `upto=5`; rung 6
+  still needs a sampler for the full-model target.
+
+## 0.2.129
+
+- `brm_output_tree` labels random-effect standardized draws and centered
+  effects with fitted levels and coefficient margins, including flattened
+  and stratified carriers. Scales, correlation factors and Student-t mixing
+  weights carry their corresponding margin, stratum or level coordinates.
+  These outputs use fitted coordinate order regardless of the caller's name
+  order and retain views into the supplied draws. Unequal per-chain inputs
+  work with `TreeActualArray` for parameter-wise convergence diagnostics.
+- Per-row block contributions and model-scope assignments using elementary
+  pointwise operations on row outputs and scalars carry `:observation`,
+  including chained assignments. Equal vector lengths alone do not establish
+  observation coordinates.
+
 ## 0.2.128
 
 - Sparse embedded Laplace accepts declared independent Gaussian vectors such

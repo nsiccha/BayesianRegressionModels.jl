@@ -32,6 +32,7 @@ ReactiveKernels = "78e9f072-d36b-4c73-b7a3-751b0eb26cf9"
 ReactiveKernelsDistributionKernels = "4b169cd9-fc12-43fd-ba39-43e54ed8db7a"
 ReactiveKernelsPPL = "e266ea2a-6817-46cd-8bec-6238f0035f44"
 ReactiveKernelsPPLExamples = "a4d4be3d-45c5-49cc-80d7-34e606a16bce"
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
 SequentialMonteCarlo = "8c675823-c5d5-50f8-acb2-29aff48dfc1d"
 SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 StanBlocks = "2e771a56-c23a-4e0b-9282-20c2e37157e9"
@@ -56,6 +57,7 @@ Enzyme = "0.13"
 # against its own libEnzyme build instead of the jll's library.
 Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PSIS = "0.9"
+Revise = "3"
 SequentialMonteCarlo = "0.7"
 StanBlocks = "0.2.18"
 Treebars = "0.1.1"
@@ -296,4 +298,4 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
 # helper calls, guarded captures and broadcast observation locations.
 # Guarded gathered reductions through typed aliases: RK 0.1.52 / PPL 0.1.55.
-rev = "5e9d2d03818ba5c8ef7d6d068fef42101f902d0e"
+rev = "1968438e6d7281cef36af12fc3c538d7c5ecea0a"

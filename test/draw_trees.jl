@@ -1,6 +1,6 @@
 using Test, BayesianRegressionModels, StanBlocks, BridgeStan
 using TreeArrays, NaNStatistics, Tables, AlgebraOfVega
-using WarmupHMC, Random, Statistics, LogDensityProblems, Treebars
+using WarmupHMC, Random, Statistics, LinearAlgebra, LogDensityProblems, Treebars
 using ReactiveKernels, ReactiveKernelsPPL
 
 const BRM = BayesianRegressionModels
@@ -13,6 +13,10 @@ const MODEL = @brm begin
     sd(:, g) = 0.3
     sd(:, h) = 0.2
     mu ~ 1 + x + (1 + x | g) + (1 | h)
+    t_loc = constant(median(y))
+    log_T = t_loc + mu
+    mu_ref = log_T
+    mu_sum = log(exp(log_T) + exp(mu))
     y ~ Normal(mu, 0.4)
 end
 
@@ -88,6 +92,25 @@ end
     @test coords(tree, :observation) == 1:length(DATA.y)
     @test C[1] == original
 
+    # These values come from compiled Stan at fitted draws. A data-calibrated
+    # scalar must not break the row labels of a transform or its plain alias.
+    for (logical, expected) in (
+            (:log_T, median(DATA.y) .+ parent(tree)),
+            (:mu_ref, median(DATA.y) .+ parent(tree)),
+            (:mu_sum, log.(exp.(median(DATA.y) .+ parent(tree)) .+ exp.(parent(tree)))))
+        derived = brm_output_tree(d, C[1], names; logical)
+        @test coords(derived, :observation) == 1:length(DATA.y)
+        @test parent(derived) ≈ expected
+        @test parent(derived) == brm_output_draws(d, C[1], names; logical)
+        @test Base.mightalias(parent(derived), C[1])
+        derived_chains = brm_output_tree(d, [C[1], view(C[2], 1:2, :)], names; logical)
+        pooled = Tables.columntable(TreeTable(nanquantile(derived_chains, (mid=0.5,);
+            dims=(:chain, :draw))))
+        reference = vcat(brm_output_draws(d, C[1], names; logical),
+            brm_output_draws(d, C[2][1:2, :], names; logical))
+        @test pooled.mid == [median(reference[:, j]) for j in axes(reference, 2)]
+    end
+
     # Permuting a caller's coordinates must permute its labels with them.
     order = reverse(eachindex(names))
     reversed = brm_output_tree(d, view(C[1], :, order), names[order]; logical=:mu)
@@ -98,13 +121,13 @@ end
     @test coords(coefficients, :coefficient) == beta.labels
     @test Base.mightalias(parent(coefficients), C[1])
     @test_throws ArgumentError brm_output_tree(d, C[1], names; logical=beta, role=:membership)
-    unknown = first(o for o in d.outputs if !isnothing(o.dims) && length(o.dims) == 2 && isnothing(o.labels))
-    @test_throws string(unknown.name) brm_output_tree(d, C[1], names; logical=unknown)
-    unnamed_vectors = [o for o in d.outputs if !isnothing(o.dims) && length(o.dims) == 1 &&
-                       o.role === :random_effect && !isnothing(o.component) && isnothing(o.labels)]
-    @test !isempty(unnamed_vectors)
-    for output in unnamed_vectors
-        @test_throws string(output.name) brm_output_tree(d, C[1], names; logical=output)
+    # Every sampled parameter of this model is reachable for diagnostics.
+    for output in brm_outputs(d; kind=:parameter)
+        post = brm_output_tree(d, C, names; logical=output)
+        numeric = TreeActualArray(post; dims=:draw, align=:truncate_min)
+        selected = brm_output_coordinates(output, names)
+        @test sort(vec(reshape(Array(numeric), size(numeric, 1), 2, :)[:, 1, :])) ==
+              sort(vec(C[1][1:size(numeric, 1), selected]))
     end
 
     bands = nanquantile(tree, (lo=0.025, mid=0.5, hi=0.975); dims=:draw)
@@ -149,6 +172,20 @@ end
             @test Base.mightalias(parent(leaf.effects), C[1])
         end
         @test !Base.mightalias(entry.effects, C[1])
+        # Compiled Stan's effects are an independent oracle for the sampled
+        # standardized carrier's level/margin placement.
+        output = only(o for o in brm_outputs(d; component=:standardized, kind=:parameter)
+                      if o.declaration.target === entry.binding)
+        z = brm_output_tree(d, C[1], names; logical=output)
+        @test coords(z, :level) == entry.levels
+        if length(entry.margins) == 1
+            @test parent(z) .* entry.sd ≈ entry.effects[:, :, 1]
+        else
+            for i in axes(C[1], 1)
+                covariance_factor = Diagonal(entry.sd[i, :]) * cholesky(Symmetric(entry.cor[i, :, :])).L
+                @test parent(z)[i, :, :] * covariance_factor' ≈ entry.effects[i, :, :]
+            end
+        end
     end
     @test coords(brm_ranef_tree(d, C, names), :chain) == 1:2
 

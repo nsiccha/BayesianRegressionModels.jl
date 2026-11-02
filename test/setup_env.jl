@@ -260,7 +260,8 @@ const PINS = [
     # helper calls, guarded captures and broadcast observation locations.
     # 5e9d2d03 contains 8b7caa90: guarded gathered sums retain reductions
     # through redundant typed aliases (RK 0.1.52 / RKPPL 0.1.55).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "5e9d2d03818ba5c8ef7d6d068fef42101f902d0e"),
+    # RKPPL 0.1.57: independent prepared-density SMC factories.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "1968438e6d7281cef36af12fc3c538d7c5ecea0a"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
@@ -285,7 +286,8 @@ const PINS = [
     # ae936763 (libEnzyme build 0dd21172) includes 71c203f9: Julia 1.10
     # inference preserves nested reduction types during ordinary Reverse,
     # including sum(sum, columns) after matrix-valued plate helpers.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "ae936763b292ecc958aa33e1fa710f10ca2f9402"),  # dogfood (KB mirror only)
+    # 93e89fc8 / libEnzyme 7f957e67 also supplies the concurrent-GC repair.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "93e89fc870d240d9489f88d665c28302eb6b5e4e"),  # dogfood (KB mirror only)
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also

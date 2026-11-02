@@ -73,7 +73,8 @@ function _brm_plan_cell_value(group::_BRMSumCellGroup, c, I, u, cache)
     Base.invokelatest(group.prepared.q.outer.value, u, sums, c.i)
 end
 
-function _brm_spl_assemble_sums!(fc, g, h, p, u; derivatives, third, fb, tv)
+function _brm_spl_assemble_sums!(fc, g, h, p, u; derivatives, third, fb, tv,
+        correction=nothing)
     rest = 0.0
     parts = Any[]; jacobians = SparseMatrixCSC{Float64,Int}[]
     outers = SparseMatrixCSC{Float64,Int}[]
@@ -101,7 +102,7 @@ function _brm_spl_assemble_sums!(fc, g, h, p, u; derivatives, third, fb, tv)
             if comp == 0
                 rest += value
             else
-                fc[comp] += value
+                _brm_spl_add_value!(fc, correction, comp, value)
                 if fb !== nothing
                     for a in p.tsbptr[c.term]:(p.tsbptr[c.term + 1] - 1)
                         fb[p.tsb[a]] += value
@@ -138,6 +139,7 @@ end
 
 _brm_spl_woodbury(p::BRMSparseLaplaceProblem, F::_BRMAugmentedFactor) = nothing
 function _brm_spl_factor!(p::BRMSparseLaplaceProblem, h::_BRMSumPrecision; shift=0.0)
+    p.algebra === nothing || return _brm_operator_factor(p, h; shift)
     D = copy(h.D)
     nonzeros(D)[p.diagonal] .+= shift
     K = _brm_spl_augmented_matrix(D, h.B, h.W)
@@ -157,7 +159,7 @@ end
 
 function _brm_spl_sum_gradient!(s, gradient, p, state, u, on)
     state.h isa _BRMSumPrecision || return
-    selected = _brm_spl_selected(state.F)
+    selected = state.F isa _BRMOperatorFactor ? nothing : _brm_spl_selected(state.F)
     n = length(s); r = size(state.h.B, 1)
     scratch = zeros(n); tz = zeros(n); tp = zeros(length(gradient))
     for (; group, part, offset) in state.h.parts
@@ -166,7 +168,9 @@ function _brm_spl_sum_gradient!(s, gradient, p, state, u, on)
             cs = part.states[k]
             _brm_spl_factor_pullback!(scratch, gradient, c, cs, cs.gf)
             rows = (offset + part.rowptr[k]):(offset + part.rowptr[k + 1] - 1)
-            cov = _brm_spl_factor_covariances(c, rows, selected, n, r)
+            cov = state.F isa _BRMOperatorFactor ?
+                _brm_operator_sum_covariances(p, state.F, c) :
+                _brm_spl_factor_covariances(c, rows, selected, n, r)
             _brm_spl_factor_contraction!(tz, tp, group.prepared, u, c, cs,
                 cov.blocks, cov.SB, cov.BSB)
         end
