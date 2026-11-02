@@ -12,6 +12,31 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.135
+
+- Power-scaling sensitivity now uses PowerScaling.jl 0.1.0 and its PSIS.jl
+  implementation. `brm_powerscale_inputs` retains BRM's model assembly;
+  `brm_powerscale_sensitivity` delegates the summary and accepts `reff`.
+  `BRMPowerscaleSensitivity` is an alias for PowerScaling's summary type,
+  preserving its fields and numerical table contents; printing uses
+  PowerScaling's diagnostic labels and formatting.
+- **Breaking:** the generic `brm_psis_weights`, `brm_cjs_dist` and
+  `brm_powerscale_weights` exports are removed. Use `PSIS.psis`,
+  `PowerScaling.cjs_dist` and `PowerScaling.powerscale_weights` directly.
+  PowerScaling is pinned by URL and revision until registered; the test
+  bootstrap and Docs installation supply that revision on Julia 1.10.
+
+## 0.2.134
+
+- Data-free RK fitted states retain numeric scalar inputs used by priors and
+  `constant(...)`, so prediction designs can omit them. Retained-fit replay
+  also supplies omitted numeric scalars. Changed prior arguments still fail
+  the fitted-program check; constants keep their fitted values. Re-export,
+  serialization and design binders preserve this behavior without retaining
+  training-row arrays (snag `rk-fitted-state-56bb407b`).
+- **Breaking:** `BRMFittedState` now uses format 2. Re-export persisted states
+  from their training fits after upgrading.
+
 ## 0.2.133
 
 - `brm_output_tree` preserves observation coordinates through pointwise

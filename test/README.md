@@ -1,5 +1,10 @@
 # Running the tests
 
+`powerscale.jl` checks BRM's density assembly against the compiled Stan
+target and its PowerScaling.jl adapter against the pre-extraction Gaussian
+sensitivity table. Generic CJS, PSIS and sensitivity tests live in PowerScaling.
+The bootstrap supplies its pinned 0.1.0 release on Julia 1.10 too.
+
 `reparametrization_primitives.jl` checks VBRMI's shared and stratified Cholesky
 blocks, simplex blocks, and nested parameter cursors against numerical
 references captured before the ReparametrizableDistributions extraction.
