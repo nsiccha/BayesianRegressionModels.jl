@@ -238,7 +238,13 @@ struct _AdaptiveLogScale
     linear::Vector{Tuple{Float64,Int}}
     unit::Vector{Tuple{Float64,Float64,Int}}
     simplex::Vector{_AdaptiveSimplexLog}
+    # (weight, coordinate, lower, upper): log of the physical scalar, not
+    # its unconstrained coordinate. Bounds are evaluated against the data.
+    bounded::Vector{Tuple{Float64,Int,Float64,Float64}}
 end
+
+_AdaptiveLogScale(constant, linear, unit, simplex) = _AdaptiveLogScale(
+    constant, linear, unit, simplex, Tuple{Float64,Int,Float64,Float64}[])
 
 # A block's `_AdaptiveLogScale`s, term `k` owning `linear[k]:linear[k+1]-1` of
 # the linear atoms, likewise `unit` and `simplex`; simplex atom `q` owns
@@ -258,11 +264,17 @@ struct _AdaptiveLogScaleTable
     simplex_entry::Vector{Int}
     simplex_coordinates::Vector{Int}
     simplex_coordinate::Vector{Int}
+    bounded::Vector{Int}
+    bounded_weight::Vector{Float64}
+    bounded_index::Vector{Int}
+    bounded_lower::Vector{Float64}
+    bounded_upper::Vector{Float64}
 end
 
 function _AdaptiveLogScaleTable(scales::AbstractVector{_AdaptiveLogScale})
     t = _AdaptiveLogScaleTable(Float64[], [1], Float64[], Int[], [1], Float64[],
-        Float64[], Int[], [1], Float64[], Int[], [1], Int[])
+        Float64[], Int[], [1], Float64[], Int[], [1], Int[],
+        [1], Float64[], Int[], Float64[], Float64[])
     for s in scales
         push!(t.constant, s.constant)
         for (w, i) in s.linear
@@ -279,6 +291,11 @@ function _AdaptiveLogScaleTable(scales::AbstractVector{_AdaptiveLogScale})
             push!(t.simplex_coordinates, length(t.simplex_coordinate) + 1)
         end
         push!(t.simplex, length(t.simplex_entry) + 1)
+        for (w, i, lower, upper) in s.bounded
+            push!(t.bounded_weight, w); push!(t.bounded_index, i)
+            push!(t.bounded_lower, lower); push!(t.bounded_upper, upper)
+        end
+        push!(t.bounded, length(t.bounded_index) + 1)
     end
     t
 end
@@ -446,6 +463,10 @@ function _adaptive_log_scale(x::AbstractVector, t::_AdaptiveLogScaleTable, k::In
         acc += t.simplex_weight[q] * _adaptive_log_simplex(x, t.simplex_coordinate,
             first - 1, t.simplex_coordinates[q + 1] - first, t.simplex_entry[q])
     end
+    for q in t.bounded[k]:t.bounded[k + 1] - 1
+        acc += t.bounded_weight[q] * _adaptive_log_constrain(
+            x[t.bounded_index[q]], t.bounded_lower[q], t.bounded_upper[q])
+    end
     acc
 end
 
@@ -454,6 +475,7 @@ function _adaptive_scale_coordinates(s::_AdaptiveLogScale)
     out = Int[]
     append!(out, (i for (_, i) in s.linear))
     append!(out, (i for (_, _, i) in s.unit))
+    append!(out, (i for (_, i, _, _) in s.bounded))
     for atom in s.simplex
         append!(out, atom.coordinates)
     end
@@ -1024,6 +1046,7 @@ function adaptive_centering_blocks(model, unc_names)
                               known=_adaptive_known_record(plan, ranef))
         isnothing(blk) || push!(out, blk)
     end
+    out = _adaptive_resolve_scale_bounds(out, model, unc_names)
 
     claimed = Int[]
     for block in out
@@ -1201,6 +1224,70 @@ end
 _adaptive_constrain(x, lower, upper) =
     isfinite(upper) ? (upper - lower) * _adaptive_inv_logit(x) + lower :
                       exp(x) + lower
+
+# Keep a zero-lower-bound log scale finite even when the physical value
+# underflows. The lower=0, upper=Inf case retains the historical arithmetic.
+_adaptive_log_constrain(x, lower, upper) = iszero(lower) ?
+    (isfinite(upper) ? log(upper) - _adaptive_softplus(-x) : x) :
+    log(_adaptive_constrain(x, lower, upper))
+
+_adaptive_linear_scale_coordinates(b::AdaptiveCenteringBlock) = b.log_scales
+_adaptive_linear_scale_coordinates(b::R2D2AdaptiveCenteringBlock) =
+    [i for s in b.scales for (_, i) in s.linear]
+
+# All ordinary, stratified, known-value and Student-t scale readers start
+# from the same coordinate metadata. Resolve the compiler's transforms once,
+# before building accessors, rather than assuming every scale has lower=0.
+# A bounded scale belongs in the existing derived-scale representation; plain
+# log scales retain their block type, fast path and floating-point arithmetic.
+function _adaptive_resolve_scale_bounds(blocks, model, unc_names)
+    wanted = Set{Int}(Iterators.flatten(_adaptive_linear_scale_coordinates(b)
+                                      for b in blocks))
+    isempty(wanted) && return blocks
+    carriers = Dict{Symbol,Vector{Int}}()
+    for (i, name) in enumerate(unc_names)
+        carrier = Symbol(first(split(String(name), '.'; limit=2)))
+        push!(get!(Vector{Int}, carriers, carrier), i)
+    end
+    descriptor = brm_descriptor(model)
+    bounds = Dict{Int,Tuple{Float64,Float64}}()
+    for output in descriptor.outputs
+        output.kind === :parameter || continue
+        indices = get(carriers, output.name, Int[])
+        any(in(wanted), indices) || continue
+        # An explicitly sampled log_scale is unbounded and already is a log.
+        haskey(output.constraints, :lower) || continue
+        lower, upper = _adaptive_bounds(descriptor, output, length(indices),
+                                        output.name, "random-effect scale")
+        for (i, lo, hi) in zip(indices, lower, upper)
+            i in wanted || continue
+            (iszero(lo) && isinf(hi)) || (bounds[i] = (lo, hi))
+        end
+    end
+    isempty(bounds) && return blocks
+    AbstractAdaptiveCenteringBlock[_adaptive_bounded_block(b, bounds) for b in blocks]
+end
+
+function _adaptive_bounded_block(block, bounds)
+    any(i -> haskey(bounds, i), _adaptive_linear_scale_coordinates(block)) || return block
+    frame = block isa AdaptiveCenteringBlock ? _adaptive_derived_block(block) : block
+    scales = map(frame.scales) do s
+        linear = Tuple{Float64,Int}[]
+        bounded = copy(s.bounded)
+        for (w, i) in s.linear
+            if haskey(bounds, i)
+                lo, hi = bounds[i]
+                push!(bounded, (w, i, lo, hi))
+            else
+                push!(linear, (w, i))
+            end
+        end
+        _AdaptiveLogScale(s.constant, linear, s.unit, s.simplex, bounded)
+    end
+    R2D2AdaptiveCenteringBlock(frame.ranef, frame.target_c, frame.effects,
+        frame.cholesky_free, scales; cholesky_known=frame.cholesky_known,
+        mixing=frame.mixing)
+end
 
 function _adaptive_same_hsgp_owner(resolved, owner, role)
     declaration = resolved.output.declaration

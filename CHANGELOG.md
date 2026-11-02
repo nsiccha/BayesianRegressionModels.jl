@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.139
+
+- Adaptive centering and centered prediction replay use the compiler's
+  physical random-effect scales when their declarations have a nonzero
+  lower bound or a finite upper bound. Fully centered coordinates therefore
+  retain the declared covariance, including scales with data-dependent bounds.
+
 ## 0.2.138
 
 - `rk_design_binder` reuses its lowered program when HSGP axes, grouping

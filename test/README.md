@@ -1,5 +1,10 @@
 # Running the tests
 
+`adaptive_centering_bounds.jl` checks bounded random-effect scales against
+BridgeStan's constrained values, correlated centered and noncentered maps,
+their Jacobians, Enzyme gradients, centered replay, and stable log-scale tails.
+Run it as a standalone script in the test environment.
+
 `rk_interval_tails.jl` checks interval-censored Normal responses through
 `RKBRMI`: pointwise and total log densities, native Enzyme Reverse location
 and log-scale gradients, and input immutability. Synthetic intervals cover
