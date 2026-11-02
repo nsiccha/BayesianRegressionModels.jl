@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.130
+
+- Outer SMC accepts prepared RK-backed generic, structured and sparse embedded
+  Laplace problems, including plans with zero integrated terms. Fit, independent
+  pilot tuning, comparison, cumulative prepared-target updates and checkpoint
+  replay reuse RKPPL 0.1.57's supplied-gradient adapter with independent mutable
+  workspaces. Identities include approximation and solver settings, coordinate
+  order, frozen preprocessing and exact data.
+- Sparse Laplace preparation accepts fixed random-effect scales without
+  trying to find sampled coordinates for their known values.
+- `brm_laplace_draws(fit::BRMSMCFit; conditional, rng)` completes a finished
+  marginal cloud and returns its outer weights alongside full packed draws.
+  Conditional importance resampling does not correct the outer approximation.
+- **Breaking:** ladder rung 5b is named `population_sampling` (formerly
+  `population_hmc`). It accepts a completed SMC fit, explicitly resamples its
+  outer weights, and forwards `conditional` to effect completion. Its `method`
+  is `:smc` or `:callback`. A Laplace-only callback requires `upto=5`; rung 6
+  still needs a sampler for the full-model target.
+
 ## 0.2.129
 
 - `brm_output_tree` labels random-effect standardized draws and centered

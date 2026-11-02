@@ -123,6 +123,16 @@ The exact Distributions fork and StanBlocks revisions are pinned in
 `setup_env.jl` and `Project.toml`; the bootstrap can materialize review
 candidates from the fleet mirrors before their publication.
 
+`smc_laplace.jl` checks outer SMC over all RK-backed embedded-Laplace
+implementations against exact Gaussian marginals and completed joint moments,
+with scalar quadrature for the generic/structured model's sampled scale,
+independent pilots/workspaces, frozen cumulative updates, identity refusals,
+non-Gaussian completion, zero integration, interruption, weighted ladder
+resampling and fresh-process checkpoint replay. It uses the RKPPL 0.1.57
+prepared-target adapter and Enzyme's concurrent-GC repair. Pass testset title
+substrings to run a focused subset; run with two Julia threads for the
+serial/threaded comparison.
+
 `smc.jl` checks RK-only batch and cumulative-data SMC against analytic
 Gaussian posteriors and evidence, deterministic continuation and checkpoint
 replay, unchanged caller RNG, frozen training preprocessing, incompatible
