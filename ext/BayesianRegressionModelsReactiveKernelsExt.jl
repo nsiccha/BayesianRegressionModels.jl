@@ -688,4 +688,12 @@ function BRM._rk_value_reader(rk::BRM.RKBRMI, names::Tuple{Vararg{Symbol}})
     end
 end
 
+function BRM._rk_spl_value_reads(rk::BRM.RKBRMI, names::Tuple, u0)
+    bound = BRM.rk_bound_data(rk)
+    query = ReactiveKernels.prepare(rk.model.spec;
+        have=(:unconstrained, keys(bound)...), want=names, bound)
+    reads = Base.invokelatest(partition_footprint_kernel(query), u0).unconstrained
+    reads === :whole ? collect(eachindex(u0)) : reads
+end
+
 end
