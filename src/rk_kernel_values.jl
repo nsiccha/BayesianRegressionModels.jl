@@ -1522,8 +1522,8 @@ _rk_flatten_cells!(defs, taken, cells) =
 # A plate output at model scope is one value per cell, as the Julia loop leaves
 # it: `out[i]` is cell `i`'s value and `sum(out)` adds the cells. The graph
 # value of the output's name is its cells concatenated, which formula terms and
-# observations read; `out[...]` and `sum(out)` read the cells instead (snag
-# `sum-a-vector-pla-812e04d2`, decision `09e0gc5`). `cells` maps each output
+# observations read; indexing, reductions and whole-value helpers read the
+# cells instead (snag `sum-a-vector-pla-812e04d2`, decision `09e0gc5`). `cells` maps each output
 # the kernel collected (the last one, and the other indexed outputs in
 # `graph_outputs`) to the graph value of its cells: the argument of the
 # `<output> = flatten_cells(<cells>)` statement that defines it.
@@ -1556,12 +1556,26 @@ function _rk_plate_cell_reads(x::_BRMPreparedExpr, cells, bind=identity)
     _BRMPreparedExpr(x.callable, _rk_plate_cell_reads(x.args, cells, bind),
         map(value -> _rk_plate_cell_reads(value, cells, bind), x.kwargs))
 end
-# `out[...]`, `sum(out)` or `sum(out[...])` of a plate output `out`, read over
-# its cells, or `nothing`.
+# A whole-value call reads the original cells, including their inner array
+# axes. BRM's elementwise arithmetic and direct distribution arguments keep
+# their row-aligned representation.
 _rk_plate_cell_read(x::_BRMPreparedExpr, cells, bind) =
-    isempty(x.kwargs) && !isempty(x.args) ?
+    (!isempty(x.args) || !isempty(x.kwargs)) ?
         _rk_plate_cell_read(x.callable, x, cells, bind) : nothing
-_rk_plate_cell_read(_callable, _x, cells, bind) = nothing
+_rk_plate_cell_read(callable, x, cells, bind) =
+    _rk_plate_whole_cell_read(callable, x, cells, bind)
+_rk_plate_cell_read(::Type{<:Distribution}, x, cells, bind) = nothing
+function _rk_plate_whole_cell_read(callable, x, cells, bind)
+    isempty(x.kwargs) && (haskey(_RK_DERIVED_BINOPS, callable) ||
+        haskey(_RK_DERIVED_CMP, callable) || haskey(_RK_DERIVED_MATH, callable)) &&
+        return nothing
+    any(arg -> _rk_plate_cells_ref(arg, cells) !== nothing,
+        (x.args..., values(x.kwargs)...)) || return nothing
+    argument(arg) = let ref = _rk_plate_cells_ref(arg, cells)
+        ref === nothing ? _rk_plate_cell_reads(arg, cells, bind) : ref
+    end
+    _BRMPreparedExpr(callable, map(argument, x.args), map(argument, x.kwargs))
+end
 function _rk_plate_cell_read(::typeof(getindex), x, cells, bind)
     ref = _rk_plate_cells_ref(first(x.args), cells)
     ref === nothing && return nothing
@@ -1569,7 +1583,8 @@ function _rk_plate_cell_read(::typeof(getindex), x, cells, bind)
         (ref, _rk_plate_cell_reads(Base.tail(x.args), cells, bind)...), x.kwargs)
 end
 function _rk_plate_cell_read(::typeof(sum), x, cells, bind)
-    length(x.args) == 1 || return nothing
+    length(x.args) == 1 && isempty(x.kwargs) ||
+        return _rk_plate_whole_cell_read(sum, x, cells, bind)
     inner = only(x.args)
     ref = _rk_plate_cells_ref(inner, cells)
     ref === nothing || return _BRMPreparedExpr(sum, (ref,), x.kwargs)

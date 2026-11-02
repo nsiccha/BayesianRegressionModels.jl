@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.125
+
+- RKBRMI passes a plate's original cell values to model-scope whole-value
+  helpers, including matrix and higher-dimensional array cells. Positional
+  and keyword arguments, helpers in likelihood expressions, and non-last
+  indexed outputs preserve the inner axes of each cell. Per-row arithmetic
+  and direct observation arguments retain their existing flattened layout
+  (snag `rkbrmi-model-sco-bcc72190`).
+- Function-valued arguments interpolated into `brm` source now emit named
+  callable bindings, so higher-order reductions such as `sum($sum, columns)`
+  retain ordinary Julia semantics and survive printed-source replay.
+
 ## 0.2.124
 
 - Added `brm_smc_carry` and carried-posterior `brm_smc_update` for bounded

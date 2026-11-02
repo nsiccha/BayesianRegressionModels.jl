@@ -223,6 +223,15 @@ collected last (the RK gradient of vector-cell reads is `@test_broken`, todo
 `1svm4l1`). It also covers the omitted response, `reprocess`, and
 the refusal of a name two cells write. Snag `model-scope-read-3649ae8a`.
 
+`plate_output_helpers.jl` checks model-scope whole-value helpers receiving
+matrix, vector and higher-dimensional plate cells. Independent normalized
+density and finite-difference gradient oracles cover positional and keyword
+arguments, likelihood arguments, non-last outputs, reader-first order,
+data-only cells, replay with empty cells and changed row counts, and ordinary
+Reverse AD. Complete printed-source replay and flattened rowwise observation
+controls guard the surrounding contracts. Run with `julia --project=test
+test/plate_output_helpers.jl`; testset substring filters are supported.
+
 `plate_grouped_outputs.jl` checks grouped reads of both outputs from another
 plate through `rows = groups(group => labels)` and `value[rows[k]]`.
 Compiled Stan and native RK densities and gradients match an independent
