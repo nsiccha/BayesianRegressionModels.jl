@@ -440,7 +440,7 @@ function _brm_spl_repartition(c, zof, pof, maps)
         pidx=share(first.(ps)), ppos=share(last.(ps))))
 end
 
-function _brm_spl_restrict_cells(group, zof, pof, maps)
+function _brm_spl_restrict_cells(group, zof, pof, maps, layout)
     # Newer preparation shares zero direction buffers across an observation's
     # cells. Keep that representation and its prepared AD arity: evaluation
     # fills the directions from each remapped cell's lpos, then clears them.
@@ -463,11 +463,13 @@ function _brm_spl_restrict_cells(group, zof, pof, maps)
     merge(group, (; cells))
 end
 
-function _brm_spl_restrict_cells(group::_BRMSumCellGroup, zof, pof, maps)
+function _brm_spl_restrict_cells(group::_BRMSumCellGroup, zof, pof, maps, layout)
     share(v) = get!(maps, v, v)
+    repartition(c) = _brm_spl_factor_indices(
+        _brm_spl_repartition(c, zof, pof, maps), maps, layout)
     cells = map(group.cells) do c
-        direct = _brm_spl_repartition(c.direct, zof, pof, maps)
-        terms = [map(t -> _brm_spl_repartition(t, zof, pof, maps), reduction)
+        direct = repartition(c.direct)
+        terms = [map(repartition, reduction)
             for reduction in c.terms]
         lz = sort!(unique!(vcat(direct.lz,
             [z for reduction in terms for t in reduction for z in t.lz])))
@@ -524,7 +526,8 @@ function _brm_spl_restrict!(p::BRMSparseLaplaceProblem, declarations)
     # Preserve read-only position-map sharing when reclassifying coordinates;
     # these maps belong to this target, never to the retained template.
     maps = Dict{Vector{Int},Vector{Int}}()
-    p.cells = [_brm_spl_restrict_cells(g, zof, pof, maps) for g in p.cells]
+    layout = (; integrated=copy(p.integrated), population=copy(p.population))
+    p.cells = [_brm_spl_restrict_cells(g, zof, pof, maps, layout) for g in p.cells]
     _brm_spl_pattern!(p)
     _brm_spl_step_blocks!(p)
     p
