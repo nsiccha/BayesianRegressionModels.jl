@@ -1,7 +1,7 @@
 # src/nlme_laplace_plan.jl — which latent terms the sparse Laplace integrates.
 #
 # `brm_laplace_plan` sorts a model's latent terms (random-effect blocks, `cdar`
-# walks, `car` fields: the sparse Laplace's records) by how its rows read them:
+# walks, `car` fields and declared Gaussian vectors) by how its rows read them:
 #
 # - integrated: every row reading it is Normal, so the Laplace is exact there;
 # - gated: read by other closed-form families (counts, binomial), model-value
@@ -31,7 +31,7 @@ Base.deepcopy_internal(p::_BRMLaplacePreparation, ::IdDict) = p
 
 Which latent terms of a model [`brm_laplace_problem`](@ref) integrates, from
 [`brm_laplace_plan`](@ref). `plan.terms` holds one entry per latent term
-(random-effect block, `cdar` walk, `car` field): its `declaration`, `grouping`,
+(random-effect block, `cdar` walk, `car` field or declared vector): its `declaration`, `grouping`,
 `kind`, `class` (`:integrated`, `:gated`, `:sampled` or `:never`), `reason`,
 whether it is `admitted` (integrated by the problem), and for a gated term its
 `importance_ess` (`(; min, median, below, blocks, draws)`) or `nothing`.
@@ -94,6 +94,15 @@ Base.show(io::IO, plan::BRMLaplacePlan) = print(io, "BRMLaplacePlan(",
 
 Sort `rk`'s latent terms for the sparse Laplace ([`BRMLaplacePlan`](@ref)):
 
+Declared independent Gaussian vectors, such as `field[1:n] .~ Normal.(mean,
+scale)`, participate in automatic planning and can be named in `integrate`
+or `sample` by their declaration. Each element is a diagnostic block; width
+screening keeps or samples the whole vector. Fixed or outer-dependent means
+and scales retain the authored prior and its derivatives. A term supplying
+another Gaussian law's parameters stays sampled. Constrained, non-Gaussian
+and correlated vector priors are never admitted. Derived Normal observations
+remain gated because their dependence on the vector can be nonlinear.
+
 - **integrated:** every row reading the term is Normal, so its Laplace is exact;
 - **gated:** read by counts, binomial rows, model-value observations or `@plate`
   cells. The term is
@@ -146,12 +155,16 @@ function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_f
     named(t, names) = t.declaration in names || t.grouping in names
     records = [r for r in _rk_coordinate_records(backend.plan) if r.kind in _BRM_SPL_LATENT]
     isempty(records) && _brm_nlme_error("brm_laplace_plan: the model has no random-effect " *
-        "block, `cdar` walk or `car` field to integrate")
+        "block, `cdar` walk, `car` field or declared vector to integrate")
     terms = map(records) do r
         (; declaration=_brm_spl_record_declaration(r), grouping=_brm_spl_record_group(r),
             kind=r.kind === :stratified_ranef ? :ranef : r.kind,
             never=_brm_plan_never(r))
     end
+    outer = _brm_spl_gaussian_outer(backend, [t for t in terms if t.never === nothing])
+    terms = [any(d -> _brm_nlme_owned(d, t.declaration), outer) ?
+        merge(t, (; never="its draws supply a declared Gaussian prior's mean or scale and must stay sampled")) : t
+        for t in terms]
     for name in vcat(forced, sampled)
         any(t -> named(t, (name,)), terms) || _brm_nlme_error("brm_laplace_plan: `$name` " *
             "names no latent term; the terms are " *
@@ -250,6 +263,8 @@ _brm_plan_entry(t, class, reason, admitted, importance_ess) = (; t.declaration,
 
 # Why the sparse Laplace never integrates a record, or `nothing`.
 function _brm_plan_never(r)
+    r.kind === :vector && get(r, :gaussian, nothing) === nothing &&
+        return "the declared vector does not have an unconstrained independent Normal prior"
     r.kind === :stratified_ranef && return "a stratified block is not integrated yet"
     r.kind === :ranef && get(r, :mixing, nothing) !== nothing &&
         return "a Student-t block's draws are not Gaussian"
@@ -387,7 +402,10 @@ function _brm_plan_local_value(p::BRMSparseLaplaceProblem, state, terms, I, z, u
         end
     end
     for i in I
-        cache.identity[i] && (total -= z[i]^2 / 2)
+        if cache.identity[i]
+            mu, precision = _brm_spl_gaussian_parameters(p, i)
+            total += precision * z[i] * (mu - z[i] / 2)
+        end
     end
     for e in unique(e for i in I for e in cache.edges_by_effect[i])
         i, j = cache.edges[e]
@@ -440,7 +458,7 @@ function _brm_spl_repartition(c, zof, pof, maps)
         pidx=share(first.(ps)), ppos=share(last.(ps))))
 end
 
-function _brm_spl_restrict_cells(group, zof, pof, maps)
+function _brm_spl_restrict_cells(group, zof, pof, maps, layout)
     # Newer preparation shares zero direction buffers across an observation's
     # cells. Keep that representation and its prepared AD arity: evaluation
     # fills the directions from each remapped cell's lpos, then clears them.
@@ -463,11 +481,13 @@ function _brm_spl_restrict_cells(group, zof, pof, maps)
     merge(group, (; cells))
 end
 
-function _brm_spl_restrict_cells(group::_BRMSumCellGroup, zof, pof, maps)
+function _brm_spl_restrict_cells(group::_BRMSumCellGroup, zof, pof, maps, layout)
     share(v) = get!(maps, v, v)
+    repartition(c) = _brm_spl_factor_indices(
+        _brm_spl_repartition(c, zof, pof, maps), maps, layout)
     cells = map(group.cells) do c
-        direct = _brm_spl_repartition(c.direct, zof, pof, maps)
-        terms = [map(t -> _brm_spl_repartition(t, zof, pof, maps), reduction)
+        direct = repartition(c.direct)
+        terms = [map(repartition, reduction)
             for reduction in c.terms]
         lz = sort!(unique!(vcat(direct.lz,
             [z for reduction in terms for t in reduction for z in t.lz])))
@@ -491,6 +511,12 @@ function _brm_spl_restrict!(p::BRMSparseLaplaceProblem, declarations)
     zmap = zeros(Int, length(p.integrated)); zmap[oldz] .= eachindex(oldz)
     blockmap = zeros(Int, length(p.blocks)); blockmap[keep] .= eachindex(keep)
     p.integrated = p.integrated[oldz]
+    if p.gaussian !== nothing
+        g = p.gaussian
+        blocks = [merge(b, (; z=zmap[b.z])) for b in g.blocks if all(i -> zmap[i] > 0, b.z)]
+        p.gaussian = _BRMSPLGaussianPrior(blocks, g.ports, g.read, g.pullback,
+            g.mean[oldz], g.precision[oldz], g.values)
+    end
     p.population = setdiff(eachindex(p.u), p.integrated)
     p.names = _rk_layout_coordinate_names(p.backend)[p.population]
     p.blocks = [_BRMSlapBlock(b.declaration, b.group, b.K, zmap[b.z], b.omega,
@@ -524,7 +550,8 @@ function _brm_spl_restrict!(p::BRMSparseLaplaceProblem, declarations)
     # Preserve read-only position-map sharing when reclassifying coordinates;
     # these maps belong to this target, never to the retained template.
     maps = Dict{Vector{Int},Vector{Int}}()
-    p.cells = [_brm_spl_restrict_cells(g, zof, pof, maps) for g in p.cells]
+    layout = (; integrated=copy(p.integrated), population=copy(p.population))
+    p.cells = [_brm_spl_restrict_cells(g, zof, pof, maps, layout) for g in p.cells]
     _brm_spl_pattern!(p)
     _brm_spl_step_blocks!(p)
     p

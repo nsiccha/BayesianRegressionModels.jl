@@ -1,5 +1,10 @@
 # Running the tests
 
+`reparametrization_primitives.jl` checks VBRMI's shared and stratified Cholesky
+blocks, simplex blocks, and nested parameter cursors against numerical
+references captured before the ReparametrizableDistributions extraction.
+The transform algorithms and their derivative tests live in that package.
+
 `runtime_constants.jl` checks strict RK inference of runtime `constant(...)`
 expressions from `brm(source; mod)`, changed fit inputs, frozen inputs, and
 printed-source round trips. It exercises constants feeding a parameter-dependent
@@ -14,7 +19,20 @@ terms with the per-block importance diagnostic.
 types prepare type-stable ragged factors whose values equal the full model's
 pointwise densities.
 
+`draw_trees.jl` fits a small hierarchical model with WarmupHMC, then checks
+the optional TreeArrays draw APIs: descriptor labels under permuted names,
+views and allocation size, unequal chain lengths, ragged random-effect blocks,
+predictive and conditional outputs, RK values, and `nanquantile` through
+`TreeTable` to AlgebraOfVega. `ranef_draws.jl` and `level_correlation.jl`
+also check the labelled wrappers against their existing independent oracles.
+Use `julia --project=test test/setup_env.jl` first; it pins the optional
+plotting dependencies as well as the fitting stack.
+
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
+`smc_window_identity.jl` checks carried-posterior identity across dictionary
+rebuilding, array padding, shared values, copying and serialization, plus
+window update/tuning, checkpoint replay and mutation rejection through the
+public APIs. `smc_window.jl` additionally checks replay in a fresh process.
 `plate_derived_inputs.jl` checks computed arrays read directly by plate cells:
 transformed hierarchical predictors, chained assignments, gathers and
 concatenations, including a derived array as the plate range. Independent
@@ -1886,6 +1904,14 @@ BRM_SB_PRESERVATION=check BRM_SB_PRESERVATION_FILE="$TMPDIR/brm-sb.bin" \
 The artifact is intentionally untracked. The comparison normalizes only the
 absolute test-source path embedded by StanBlocks; it retains model text and
 parameter identities.
+
+`laplace_declared_gaussian.jl` checks automatic and explicit integration of
+declared independent Normal vectors. It compares heterogeneous fixed priors
+and sampled means/scales against closed-form Gaussian marginal values and
+finite-difference gradients at several points. Nonlinear Normal observations
+exercise the diagnostic and implicit gradient; mixed generated effects,
+retained subsets, independent copies, prior dependencies, whole-vector width
+screening and linear sparse storage cover structural behavior.
 
 ## One-time bootstrap
 

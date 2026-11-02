@@ -12,6 +12,40 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.128
+
+- Sparse embedded Laplace accepts declared independent Gaussian vectors such
+  as `field[1:n] .~ Normal.(mean, scale)`, automatically or by declaration name.
+  Fixed and outer-dependent means/scales retain their prior normalization,
+  diagonal precision and marginal gradients in the authored coordinates.
+  Width screening samples whole vectors before derivative preparation;
+  nonlinear observations retain the per-coordinate importance diagnostic.
+  A vector supplying another Gaussian law's parameters stays sampled.
+  Non-Gaussian, constrained and correlated vector priors are not admitted
+  (snag `laplace-integrat-61a058f1`).
+
+## 0.2.127
+
+- Carried SMC posteriors now retain their identity across defensive copies
+  and serialization round trips, including layouts with dictionary aliases.
+  Window updates, pilot tuning, checkpoints and filter calibration still
+  reject changed posterior values or frozen preprocessing. Identities hash
+  record values rather than dictionary traversal, object sharing or padding.
+  Persisted carries and window checkpoints require matching package versions;
+  regenerate them from the completed fit when upgrading to this identity format.
+
+## 0.2.126
+
+- Added optional TreeArrays twins for output, random-effect, predictive and
+  conditional draws, plus `rk_draw_tree`. They label existing arrays or views
+  with descriptor coefficients, group levels and margins, observation positions,
+  or actual prediction-grid values. Per-chain matrices retain an outer chain
+  axis, including unequal chain lengths and ragged random-effect blocks.
+- Stored output and random-effect carriers are viewed without copying their
+  draw values; quantities that need computation use the existing extraction
+  and simulation paths. Existing array APIs retain owned array results. Axes
+  without known coordinates raise an error naming the output.
+
 ## 0.2.125
 
 - RKBRMI passes a plate's original cell values to model-scope whole-value

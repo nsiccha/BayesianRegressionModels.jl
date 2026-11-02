@@ -11,6 +11,7 @@
 using Test
 using BayesianRegressionModels
 using StanBlocks
+using TreeArrays
 using Distributions
 using LinearAlgebra
 using Random
@@ -322,6 +323,10 @@ end
                 include_tp=true)) for u in unc)
             block = only(brm_ranef_draws(brm_descriptor(sb), draws, names))
             @test size(block.level_cor) == (3, R, R)
+            tree = only(parent(brm_ranef_tree(brm_descriptor(sb), draws, names)))
+            @test coords(tree.level_cor, :level) == block.levels
+            @test coords(tree.level_cor, :level2) == block.levels
+            @test parent(tree.level_cor) == block.level_cor
             # Capability gap: per-level centering of correlated levels
             # (BRM todo `2026-10-25T05-58-32-890-0lopk07`).
             @test_broken builds(() -> BRM.adaptive_centering_blocks(sb,
