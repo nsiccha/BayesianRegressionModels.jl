@@ -1,4 +1,11 @@
 [deps]
+HTMX = "27f3e1ef-6ef8-44dc-9e9a-2fb23ed44e83"
+HTMXObjects = "b12ef442-5798-4353-80f3-9562b03a0cb6"
+DynamicObjects = "23d02862-63fe-4c6e-8fdb-1d52cbbd39d5"
+Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
+TreeArrays = "5daaa025-ac78-4e9a-8805-78946e672e43"
+NaNStatistics = "b946abbf-3ea7-4610-9019-9858bfdeaf2d"
+AlgebraOfVega = "a2420894-485a-4f42-a4fc-c4323ec6fb2b"
 Optim = "429524aa-4258-5aef-a3af-852621145aeb"
 SelectedInversion = "043bf095-3f01-458a-9f1c-8cf4448fe908"
 ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
@@ -36,6 +43,8 @@ WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 ZipFile = "a5390f91-8eb1-5f08-bee0-b1d1ffed6cea"
 
 [compat]
+TreeArrays = "0.2.0"
+AlgebraOfVega = "0.2.14"
 Distributions = "0.25.133"
 BridgeStan = "2.9"
 Enzyme = "0.13"
@@ -51,6 +60,26 @@ Treebars = "0.1.1"
 Turing = "0.46"
 WarmupHMC = "0.2.10"
 julia = "1.10"
+
+[sources.TreeArrays]
+url = "https://github.com/nsiccha/TreeArrays.jl"
+rev = "53cfd1b17ee4d1b726dcecfe151458ae41bd20a8"
+
+[sources.DynamicObjects]
+url = "https://github.com/nsiccha/DynamicObjects.jl"
+rev = "bc23860cd85ee06ca39bc862c14b6ca9b0a55f08"
+
+[sources.HTMXObjects]
+url = "https://github.com/nsiccha/HTMXObjects.jl"
+rev = "d2a86956a221035c4f1b9ac629836e90ae77a2b5"
+
+[sources.HTMX]
+url = "https://github.com/nsiccha/HTMX.jl"
+rev = "0b8dc2f94e879bf31237bd28e751cf2ebc8d95f6"
+
+[sources.AlgebraOfVega]
+url = "https://github.com/nsiccha/AlgebraOfVega.jl"
+rev = "73695d5d563074bfd9ab1f98debf2ebe38d7bd00"
 
 [sources.Distributions]
 url = "https://github.com/nsiccha/Distributions.jl.git"
