@@ -20,6 +20,10 @@ broadcast observation locations: strict selected-cell queries, ordinary Enzyme
 Reverse gradients, independent analytic values, and bounded allocations as
 the number of observations grows. The test environment pins RK 0.1.51 /
 RKPPL 0.1.53, including scalar-helper type inference and guarded captures.
+`laplace_plan_reuse.jl` counts actual row/cell derivative preparations and
+compares retained plans with freshly prepared targets, including strict
+subsets of row, plate and sum factors. It checks marginal values, gradients,
+finite differences, independent workspaces and backend/AD changes.
 `plate_selected_outputs.jl` checks nested selection of shared vector outputs
 across plates with different cell counts: data-only and parameter-dependent
 outputs, fixed and varying widths, both output orders, reader-first composition,
