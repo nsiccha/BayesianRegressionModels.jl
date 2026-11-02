@@ -1,5 +1,14 @@
 # Running the tests
 
+`rk_interval_tails.jl` checks interval-censored Normal responses through
+`RKBRMI`: pointwise and total log densities, native Enzyme Reverse location
+and log-scale gradients, and input immutability. Synthetic intervals cover
+both tails through 400 standard deviations and moderate controls at two
+parameter points. Independent 256-bit MPFR masses, analytic derivatives and
+central differences supply the references. Run `test/setup_env.jl` first to
+select the RKPPL 0.1.60 / DistributionKernels 0.1.1 repair, then
+`julia --startup-file=no --project=test test/rk_interval_tails.jl`.
+
 `powerscale.jl` checks BRM's density assembly against the compiled Stan
 target and its PowerScaling.jl adapter against the pre-extraction Gaussian
 sensitivity table. Generic CJS, PSIS and sensitivity tests live in PowerScaling.

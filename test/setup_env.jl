@@ -261,7 +261,9 @@ const PINS = [
     # 5e9d2d03 contains 8b7caa90: guarded gathered sums retain reductions
     # through redundant typed aliases (RK 0.1.52 / RKPPL 0.1.55).
     # RKPPL 0.1.57: independent prepared-density SMC factories.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "1968438e6d7281cef36af12fc3c538d7c5ecea0a"),
+    # PPL 0.1.60 / DistributionKernels 0.1.1 keeps Normal interval masses
+    # and native Reverse gradients finite in both extreme tails.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "60cb795d48058499c800d25f28d7e9acc97ccce6"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
