@@ -1,18 +1,5 @@
-# test/powerscale.jl — power-scaling sensitivity acceptance.
-#
-# Covers the four things `src/powerscale.jl` must promise a consumer:
-#   1. PSIS weights match PSIS.jl (the test env already carries it), with
-#      loud errors for non-finite input and too-few draws.
-#   2. CJS matches its published calibration (EABM: 0.05 ~= 0.3-sd mean shift
-#      on a standard Normal) and agrees between its weighted-ECDF and binned
-#      paths; validation errors are loud.
-#   3. The sensitivity summary recovers the analytic Normal perturbation
-#      (independent direct-sampling oracle) and flags the conflict direction.
-#   4. The SBBRMI assembly is SOUND: the Julia-side joint prior plus the Stan
-#      twins reconstruct the BridgeStan target up to an additive constant on
-#      every admitted shape (the identity battery), the coverage gate names
-#      everything outside, and missing generated quantities error loudly.
-#
+# BRM power-scaling assembly and integration acceptance.
+# Generic CJS, PSIS and sensitivity tests live in PowerScaling.jl.
 # Run: julia --project=test test/powerscale.jl
 
 using Test
@@ -20,191 +7,14 @@ using BayesianRegressionModels
 using BridgeStan
 using StanBlocks
 using Distributions
-using PSIS
+using PowerScaling
 using Random
 using Statistics
-using Logging
 using LinearAlgebra
 using LogDensityProblems
 
 const BRM = BayesianRegressionModels
 const BS = BridgeStan
-
-# PSIS.jl warns on bad shapes; the cross-check pins VALUES, not warnings.
-function ref_psis(logr)
-    with_logger(NullLogger()) do
-        PSIS.psis(Vector{Float64}(logr))
-    end
-end
-
-@testset "psis weights match PSIS.jl" begin
-    rng = Xoshiro(20260918)
-    cases = Dict(
-        "mild" => randn(rng, 500),
-        "skewed" => rand(rng, LogNormal(0.0, 1.0), 500) .- 1.5,
-        "heavy tail" => vcat(randn(rng, 490), 8 .+ randn(rng, 10)),
-    )
-    for (label, logr) in cases
-        mine = brm_psis_weights(logr)
-        ref = ref_psis(logr)
-        @test mine.weights ≈ ref.weights rtol = 1e-8
-        @test mine.pareto_k ≈ PSIS.pareto_shape(ref) rtol = 1e-8
-        @test mine.tail_length == ref.tail_length
-        @test sum(mine.weights) ≈ 1.0
-        @test all(>(0), mine.weights)
-    end
-    # ESS is the textbook L2 form on the SMOOTHED weights.
-    logr = cases["mild"]
-    mine = brm_psis_weights(logr)
-    @test mine.ess ≈ 1 / sum(abs2, mine.weights)
-    reffed = brm_psis_weights(logr; reff=0.5)
-    @test reffed.ess ≈ 0.5 / sum(abs2, reffed.weights)
-
-    @test_throws ErrorException brm_psis_weights(fill(0.1, 20))
-    bad = randn(rng, 100)
-    bad[7] = Inf
-    @test_throws ErrorException brm_psis_weights(bad)
-    bad[7] = NaN
-    @test_throws ErrorException brm_psis_weights(bad)
-    @test_throws ErrorException brm_psis_weights(randn(rng, 100); reff=0.0)
-    @test_throws ErrorException brm_psis_weights(randn(rng, 100); reff=NaN)
-end
-
-@testset "cjs matches its published calibration" begin
-    S = 200_000
-    x = randn(Xoshiro(11), S)
-    # EABM sensitivity chapter: CJS ~= 0.05 corresponds to a mean shift of
-    # ~= 0.3 standard deviations on a standard Normal. The book's figure is
-    # approximate, so this pins the ORDER, not the digit.
-    shifted = 0.3 .+ randn(Xoshiro(12), S)
-    c = brm_cjs_dist(x, shifted)
-    @test 0.02 < c < 0.10
-    # Same distribution, independent samples: near zero.
-    same = brm_cjs_dist(x, randn(Xoshiro(13), S))
-    @test same < 0.02
-    # Monotone in the shift and symmetric.
-    further = brm_cjs_dist(x, 0.6 .+ randn(Xoshiro(14), S))
-    @test further > c
-    @test brm_cjs_dist(x, shifted) ≈ brm_cjs_dist(shifted, x)
-    # Identical draws: exactly zero, weights or not.
-    @test brm_cjs_dist(x, x) == 0.0
-    # Differently-normalised uniform weights agree up to float noise.
-    @test brm_cjs_dist(x, x; y_weights=fill(2.0, S)) ≈ 0.0 atol = 1e-9
-    # A point mass against itself is 0 (R priorsense NaNs here).
-    @test brm_cjs_dist(fill(1.5, 50), fill(1.5, 50)) == 0.0
-    # Unsigned: invariant to a joint sign flip.
-    @test brm_cjs_dist(x, shifted) ≈ brm_cjs_dist(-x, -shifted)
-
-    # Weighted-ECDF path versus binned path on the SAME perturbation: smooth
-    # weights tilting N(0,1) toward N(0.4,1). Both estimate one truth.
-    Sb = 20_000
-    xb = randn(Xoshiro(21), Sb)
-    tilt = exp.(0.4 .* xb .- 0.08)
-    weighted = brm_cjs_dist(xb, xb; y_weights=tilt)
-    resampled =
-        xb[rand(Xoshiro(22), Distributions.Categorical(tilt ./ sum(tilt)), Sb)]
-    binned = brm_cjs_dist(xb, resampled)
-    @test abs(weighted - binned) < 0.03
-
-    @test_throws ErrorException brm_cjs_dist([1.0], [1.0, 2.0])
-    bad = [1.0, 2.0, 3.0]
-    bad[2] = NaN
-    @test_throws ErrorException brm_cjs_dist(bad, [1.0, 2.0, 3.0])
-    @test_throws ErrorException brm_cjs_dist(
-        [1.0, 2.0], [1.0, 2.0]; y_weights=[0.5, -0.5])
-    @test_throws ErrorException brm_cjs_dist(
-        [1.0, 2.0], [1.0, 2.0]; y_weights=[0.0, 0.0])
-    @test_throws DimensionMismatch brm_cjs_dist(
-        [1.0, 2.0], [1.0, 2.0]; y_weights=[1.0])
-end
-
-@testset "powerscale weights follow alpha" begin
-    rng = Xoshiro(31)
-    S = 2_000
-    draws = randn(rng, S)
-    ℓ = logpdf.(Normal(0.0, 1.0), draws)
-    # alpha == 1 is the base posterior, exactly as priorsense.
-    base = brm_powerscale_weights(ℓ; alpha=1)
-    @test base.weights ≈ fill(1 / S, S)
-    @test base.pareto_k == -Inf
-    # Strengthening a standard-Normal prior compresses toward 0 ...
-    up = brm_powerscale_weights(ℓ; alpha=1.25)
-    @test sum(up.weights .* abs2.(draws)) < sum(abs2.(draws)) / S
-    # ... and weakening stretches away from it.
-    down = brm_powerscale_weights(ℓ; alpha=0.8)
-    @test sum(down.weights .* abs2.(draws)) > sum(abs2.(draws)) / S
-    @test_throws ErrorException brm_powerscale_weights(fill(3.0, S); alpha=1.1)
-    bad = copy(ℓ)
-    bad[5] = -Inf
-    @test_throws ErrorException brm_powerscale_weights(bad; alpha=1.1)
-    @test_throws ErrorException brm_powerscale_weights(ℓ; alpha=-0.5)
-end
-
-@testset "sensitivity recovers the analytic Normal perturbation" begin
-    # Consistent triple: prior == likelihood == N(0, sqrt(2)), so the
-    # posterior is N(0, 1). Power-scaling the prior by alpha gives
-    # N(0, sqrt(2 / (1 + alpha))) in closed form — the INDEPENDENT oracle is
-    # direct sampling of that Normal, scored through the binned CJS path.
-    S = 20_000
-    draws = randn(Xoshiro(41), S)
-    ℓ = logpdf.(Normal(0.0, sqrt(2.0)), draws)
-    α = 1.01
-    w_hi = brm_powerscale_weights(ℓ; alpha=α).weights
-    weighted = brm_cjs_dist(draws, draws; y_weights=w_hi)
-    oracle = sqrt(2 / (1 + α)) .* randn(Xoshiro(42), S)
-    direct = brm_cjs_dist(draws, oracle)
-    @test abs(weighted - direct) < 0.02
-
-    # draws × coordinates orientation is enforced, like every diagnostic:
-    # one row against S-length densities is a transposed caller matrix.
-    @test_throws DimensionMismatch brm_powerscale_sensitivity(
-        reshape(draws, 1, S), ℓ, ℓ, ["v"])
-    names = ["v"]
-    s = brm_powerscale_sensitivity(reshape(draws, S, 1), ℓ, ℓ, names)
-    @test s.variables == [:v]
-    @test all(isfinite, s.prior) && all(isfinite, s.likelihood)
-    @test length(s.diagnosis) == 1
-    @test s.threshold == 0.05
-    # The v1 summary always scales the joint densities it is given.
-    @test sprint(show, MIME("text/plain"), s) isa String
-end
-
-@testset "sensitivity flags prior-data conflict" begin
-    # Steep prior far from the posterior mass + steep likelihood: both
-    # perturbations move the marginal a lot.
-    S = 20_000
-    draws = 1.0 .+ 0.5 .* randn(Xoshiro(51), S)
-    ℓp = logpdf.(Normal(0.0, 1.0), draws)
-    ℓl = logpdf.(Normal(1.2, 0.4), draws)
-    s = brm_powerscale_sensitivity(
-        reshape(draws, S, 1), ℓp, ℓl, ["beta"])
-    @test s.prior[1] > 0.05 && s.likelihood[1] > 0.05
-    @test s.diagnosis == [:prior_data_conflict]
-    # The threshold is honoured, not decorative.
-    calm = brm_powerscale_sensitivity(
-        reshape(draws, S, 1), ℓp, ℓl, ["beta"]; threshold=1e9)
-    @test calm.diagnosis == [:none]
-    # Robust direction: the conflict triple moves strictly more than a calm
-    # triple (flat prior, likelihood matching the posterior).
-    ℓflat = logpdf.(Normal(0.0, 100.0), draws)
-    ℓmatch = logpdf.(Normal(1.0, 0.5), draws)
-    t = brm_powerscale_sensitivity(
-        reshape(draws, S, 1), ℓflat, ℓmatch, ["beta"])
-    @test s.prior[1] > 5 * t.prior[1]
-    # Selection, validation, and the multi-variable path.
-    two = hcat(draws, draws)
-    s2 = brm_powerscale_sensitivity(two, ℓp, ℓl, ["a", "b"])
-    @test s2.variables == [:a, :b]
-    @test s2.prior[1] ≈ s.prior[1]
-    sel = brm_powerscale_sensitivity(two, ℓp, ℓl, ["a", "b"]; variables=[:b])
-    @test sel.variables == [:b]
-    @test_throws ErrorException brm_powerscale_sensitivity(
-        two, ℓp, ℓl, ["a", "b"]; variables=[:nope])
-    @test_throws DimensionMismatch brm_powerscale_sensitivity(
-        two, ℓp[1:(S - 1)], ℓl, ["a", "b"])
-    @test_throws ErrorException brm_powerscale_sensitivity(
-        two, ℓp, ℓl, ["a", "b"]; lower_alpha=1.5)
-end
 
 # The gate runs before any draw is touched, so rejected shapes are provoked
 # with dummy draws — no compile, no sampling.
@@ -363,6 +173,8 @@ end
     sens = brm_powerscale_sensitivity(constrained, inputs.log_prior,
                                    inputs.log_lik, full_names;
                                    variables=inputs.variables)
+    @test BRMPowerscaleSensitivity === PowerScaling.PowerscaleSensitivity
+    @test sens isa BRMPowerscaleSensitivity
     @test sens.variables == inputs.variables
     @test all(isfinite, sens.prior) && all(isfinite, sens.likelihood)
     @test all(isfinite, (sens.pareto_k.prior_lower, sens.pareto_k.prior_upper,
@@ -372,6 +184,28 @@ end
     @test occursin("Power-scaling sensitivity", rendered)
     @test occursin("Pareto-k", rendered)
     @test inputs.descriptor isa BRMDescriptor
+
+    # Original BRM implementation at 078a2324e6db85c889a9fcead76464c2e4179dae,
+    # evaluated on these exact draws. Generic numerical tests live upstream;
+    # this pins the assembled model's seven sampled-parameter rows.
+    variables = [:sigma, Symbol("pop_mu_beta_pop.1"), Symbol("pop_mu_beta_pop.2"),
+        Symbol("cat_mu_g_beta.1"), Symbol("cat_mu_g_beta.2"),
+        Symbol("cat_mu2_h_beta.1"), Symbol("cat_mu2_h_beta.2")]
+    selected = brm_powerscale_sensitivity(constrained, inputs.log_prior,
+        inputs.log_lik, full_names; variables)
+    @test selected.variables == variables
+    @test selected.prior ≈ [0.13789838674866176, 0.10152085703156137,
+        0.15786421648447513, 0.09308084960904192, 0.10227357588013433,
+        0.087747645770414, 0.2630639281739019] atol=1e-8 rtol=1e-8
+    @test selected.likelihood ≈ [0.22601292785881805, 0.26565718181789977,
+        0.5806870907723355, 0.3175449811138312, 0.14218735930757082,
+        0.24014589224273009, 0.40081559804927136] atol=1e-8 rtol=1e-8
+    @test collect(selected.pareto_k) ≈ [-0.10368410781725323,
+        1.6166814108773797, 1.1248250990003723, 0.4829095130520477] atol=1e-8 rtol=1e-8
+    @test selected.diagnosis == fill(:prior_data_conflict, length(variables))
+    # The deliberately dispersed supplied draws are a density-assembly test,
+    # not a posterior fit: both old and new diagnostics flag unreliable IS.
+    @test selected.reliable == (prior=false, likelihood=false)
 end
 
 @testset "identity battery — bernoullilogit, jacobian-free" begin

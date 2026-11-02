@@ -53,6 +53,7 @@ const TESTENV = @__DIR__
 # name => (github url, pinned commit)   — comment records the branch the commit
 # is on, for humans; the pin itself is the full SHA and needs no branch.
 const PINS = [
+    ("PowerScaling", "https://github.com/nsiccha/PowerScaling.jl.git", "8d27c83f6928781a39c99c31fd3d528b50ef2dad"),  # 0.1.0: generic power-scaling sensitivity on PSIS.jl
     ("ReparametrizableDistributions", "https://github.com/nsiccha/ReparametrizableDistributions.jl.git", "8f7d382df700d3780ed31d093bc4983d3734a6c6"),  # 0.3.0: shared parameter views, Cholesky and simplex transforms
     ("HTMX", "https://github.com/nsiccha/HTMX.jl.git", "0b8dc2f94e879bf31237bd28e751cf2ebc8d95f6"),
     ("HTMXObjects", "https://github.com/nsiccha/HTMXObjects.jl.git", "d2a86956a221035c4f1b9ac629836e90ae77a2b5"),
