@@ -297,6 +297,104 @@ function check_data_free(build, state, rk, design; resample_groups=(), want=:mu)
     free
 end
 
+@stestset "data-free replay preserves scalar prior inputs" begin
+    build = brm(quote
+        sigma ~ Exponential(prior_scale)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+    end; mod=FM)
+    train = (; x=[-2.0, 1.0, 4.0], y=[0.2, 0.7, -0.1], prior_scale=1.7)
+    design = (; x=[2.0, 5.0], y=[0.3, -0.4])
+    rk = RKBRMI(build(train))
+    state = brm_fitted_state(rk)
+    free = check_data_free(build, state, rk, design)
+    @test state.scalars == Dict(:prior_scale => train.prior_scale)
+    # Supplied values cannot change a fitted prior, including on a later replay.
+    conflicting = merge(design, (; prior_scale=9.0))
+    for fitted in (rk, free)
+        @test_throws "changes the fitted RK program" reprocess(fitted, conflicting)
+    end
+    @test_throws "changes the fitted RK program" RKBRMI(build(conflicting), state)
+    fresh = reprocess(rk, conflicting; freeze_constants=false)
+    @test density(fresh, point(fresh)) == density(RKBRMI(build(conflicting)), point(fresh))
+    io = IOBuffer()
+    serialize(io, state)
+    check_data_free(build, deserialize(seekstart(io)), rk, design)
+    check_data_free(build, brm_fitted_state(free), rk, design)
+    prediction = check_data_free(build, state, rk, (; x=design.x))
+    check_data_free(build, brm_fitted_state(prediction), rk, design)
+end
+
+@stestset "data-free replay preserves scalar inputs of graph constants" begin
+    # Runtime source builders and macro builders must freeze the same values.
+    source = quote
+        anchor_fit = constant(anchor)
+        offset = abs(anchor_fit)
+        shifted = x - offset
+        sigma ~ Exponential(1)
+        mu ~ 1 + shifted
+        y ~ Normal(mu, sigma)
+    end
+    macro_build = @brm begin
+        anchor_fit = constant(anchor)
+        offset = abs(anchor_fit)
+        shifted = x - offset
+        sigma ~ Exponential(1)
+        mu ~ 1 + shifted
+        y ~ Normal(mu, sigma)
+    end
+    train = (; x=[-2.0, 1.0, 4.0], y=[0.2, 0.7, -0.1], anchor=-0.8)
+    design = (; x=[2.0, 5.0], y=[0.3, -0.4])
+    for build in (brm(source; mod=FM), macro_build)
+        rk = RKBRMI(build(train))
+        state = brm_fitted_state(rk)
+        free = check_data_free(build, state, rk, design)
+        @test graph_value(free, :shifted, point(free)) == design.x .- abs(train.anchor)
+        conflicting = merge(design, (; anchor=9.0))
+        @test isequal(rk_bound_data(RKBRMI(build(conflicting), state)), rk_bound_data(free))
+        check_data_free(build, brm_fitted_state(free), rk, design)
+        binder = rk_design_binder(free)
+        trained = rk_design_binder(rk)
+        for next in (design, (; x=[7.0], y=[0.6]), conflicting)
+            check_inputs(binder(next), trained(next), state, rk)
+        end
+    end
+end
+
+@stestset "scalar replay re-exports mixed constants and resampled groups" begin
+    build = brm(quote
+        anchor_fit = constant(mean(reference) + anchor)
+        shifted = x - abs(anchor_fit)
+        sigma ~ Exponential(prior_scale)
+        mu ~ 1 + shifted + (1 | subject)
+        y ~ Normal(mu, sigma)
+    end; mod=FM)
+    train = (; x=[-2.0, 1.0, 4.0], y=[0.2, 0.7, -0.1], subject=[1, 1, 2],
+        reference=[-3.0, 4.0, 5.0, 2.0], anchor=-0.8, prior_scale=1.7)
+    rk = RKBRMI(build(train))
+    state = brm_fitted_state(rk)
+    @test state.scalars == Dict(:anchor => train.anchor, :prior_scale => train.prior_scale)
+    @test state.constants[:anchor_fit] == mean(train.reference) + train.anchor
+    for (subjects, groups) in (([1, 2], ()), ([101, 102], (:subject,)))
+        design = (; x=[2.0, 5.0], y=[0.3, -0.4], subject=subjects)
+        free = check_data_free(build, state, rk, design; resample_groups=groups)
+        exported = brm_fitted_state(free)
+        @test exported.scalars == state.scalars
+        @test exported.columns == state.columns
+        @test exported.constants == state.constants
+        io = IOBuffer()
+        serialize(io, exported)
+        again = RKBRMI(build(design), deserialize(seekstart(io)))
+        # Re-export freezes newly fitted group levels too: its raw group-fit
+        # input is now absent, while every value that reads the levels agrees.
+        check_inputs(rk_bound_data(again), rk_bound_data(free), exported, free)
+        @test BRM._rk_layout_coordinate_names(again) == exported.coordinates
+        @test density(again, point(again)) == density(free, point(free))
+        @test graph_value(again, :shifted, point(again)) ==
+            design.x .- abs(mean(train.reference) + train.anchor)
+    end
+end
+
 @stestset "a design binds from the fitted state alone" begin
     for build in SUPPORTED
         rk = RKBRMI(build(TRAIN))

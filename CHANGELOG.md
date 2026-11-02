@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.134
+
+- Data-free RK fitted states retain numeric scalar inputs used by priors and
+  `constant(...)`, so prediction designs can omit them. Retained-fit replay
+  also supplies omitted numeric scalars. Changed prior arguments still fail
+  the fitted-program check; constants keep their fitted values. Re-export,
+  serialization and design binders preserve this behavior without retaining
+  training-row arrays (snag `rk-fitted-state-56bb407b`).
+- **Breaking:** `BRMFittedState` now uses format 2. Re-export persisted states
+  from their training fits after upgrading.
+
 ## 0.2.133
 
 - `brm_output_tree` preserves observation coordinates through pointwise
