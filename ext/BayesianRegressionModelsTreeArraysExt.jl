@@ -34,7 +34,8 @@ function _output_axis(output, caller)
     isnothing(output.segments) || throw(ArgumentError(
         "$caller: output $(output.name) has a ragged element axis without semantic group labels"))
     if length(dims) == 1
-        if output.role in (:linear_predictor, :posterior_predictive, :pointwise_loglik)
+        if output.role in (:linear_predictor, :posterior_predictive, :pointwise_loglik) ||
+           output.component === :contribution
             return :observation => Base.OneTo(only(dims))
         elseif output.role === :parameter && isnothing(output.component) && isempty(output.predictors)
             # An explicitly declared vector's positions ARE its coordinates.
@@ -46,16 +47,150 @@ function _output_axis(output, caller)
         "(role=$(output.role), shape=$dims)"))
 end
 
+# A model-scope assignment inherits observations only through pointwise
+# operations on known row outputs and scalars. Equal lengths alone cannot
+# establish this: a coefficient vector or an indexed/reordered value may
+# happen to have the same length as the observations.
+_row_extent(d, x, seen) = nothing
+_row_extent(d, x::Real, seen) = 0
+_row_extent(d, x::BRM.NamedColumn, seen) = _row_extent(d, BRM.name(x), seen)
+function _row_extent(d, name::Symbol, seen)
+    name in seen && return nothing
+    outputs = filter(o -> o.name === name, d.outputs)
+    length(outputs) == 1 || return nothing
+    output = only(outputs)
+    output.dims == () && return 0
+    isnothing(output.dims) && return nothing
+    length(output.dims) == 1 && isnothing(output.segments) || return nothing
+    (output.role === :linear_predictor || output.component === :contribution) &&
+        return only(output.dims)
+    brmi = d.plan.parent
+    BRM._brm_has_operation(brmi, name) || return nothing
+    op = BRM._named_op(BRM._brm_operation(brmi, name))
+    op isa BRM.ExprColumn{typeof(BRM.assign)} || return nothing
+    extent = _row_extent(d, last(BRM.getargs(op)), union(seen, (name,)))
+    extent == only(output.dims) ? extent : nothing
+end
+function _row_extent(d, x::BRM.ExprColumn, seen)
+    BRM.getf(x) in (+, -, *, /, ^, exp, expm1, log, log1p, sqrt,
+                   abs, abs2, sin, cos, tan, tanh) || return nothing
+    isempty(BRM.getkwargs(x)) || return nothing
+    extents = map(arg -> _row_extent(d, arg, seen), BRM.getargs(x))
+    any(isnothing, extents) && return nothing
+    rows = unique(filter(!iszero, collect(extents)))
+    isempty(rows) ? 0 : length(rows) == 1 ? only(rows) : nothing
+end
+
+function _output_axis(d, output, caller)
+    if output.role === :stan_derived && !isnothing(output.dims) && length(output.dims) == 1
+        extent = _row_extent(d, output.name, Set{Symbol}())
+        isnothing(extent) || return :observation => Base.OneTo(extent)
+    end
+    _output_axis(output, caller)
+end
+
+# Random-effect carriers have several physical layouts for the same fitted
+# coordinates. Reuse the emission table and margin metadata used by the other
+# readers; neither the carrier's spelling nor equal-sized dimensions identify
+# which coordinate varies fastest.
+_ranef_draw_axes(::Val{:group}, levels, margins) = (:level => levels,)
+_ranef_draw_axes(::Val{:group_term}, levels, margins) =
+    (:level => levels, :margin => margins)
+_ranef_draw_axes(::Val{:term_group}, levels, margins) =
+    (:margin => margins, :level => levels)
+_ranef_draw_axes(::Val{:flat_term_group}, levels, margins) =
+    _ranef_draw_axes(Val(:term_group), levels, margins)
+
+function _ranef_output_axes(d, output)
+    isnothing(output.component) && return nothing
+    output.dims == () && return nothing
+    margins_by_block = BRM._adaptive_block_margins(d)
+    for block in ranef_blocks(d)
+        spec = BRM._RANEF_FAMILIES[block.family]
+        keywords = BRM._brm_ranef_keywords(d, block)
+        (output.name => output.component) in
+            BRM._ranef_component_carriers(block.binding, spec, keywords) || continue
+        margins = collect(margins_by_block[block.binding])
+        length(margins) == block.n_terms || throw(DimensionMismatch(
+            "brm_output_tree: margins do not match block $(block.binding)"))
+        if output.name === block.z
+            return _ranef_draw_axes(Val(spec.layout), block.levels, margins)
+        end
+        return _ranef_component_axes(Val(output.component), d, output,
+                                     (; block, keywords, margins))
+    end
+    nothing
+end
+
+_ranef_carrier(x, s) = (k = get(x.keywords, s, nothing);
+    k isa Symbol ? k : Symbol(x.block.binding, :_, s))
+_ranef_component_axes(::Val, d, output, x) = nothing
+function _ranef_component_axes(::Val{:standardized}, d, output, x)
+    margins = output.name === _ranef_carrier(x, :z_inactive) ?
+        x.margins[collect(d.plan.bindings[x.block.binding].margins)] : x.margins
+    (:margin => margins, :level => x.block.levels)
+end
+function _ranef_component_axes(::Val{:effects}, d, output, x)
+    output.name in (_ranef_carrier(x, :b_T), _ranef_carrier(x, :b_cols)) &&
+        return (:margin => x.margins, :level => x.block.levels)
+    (:level => x.block.levels, :margin => x.margins)
+end
+_ranef_component_axes(::Val{:mixing_weight}, d, output, x) = (:level => x.block.levels,)
+function _ranef_component_axes(::Val{:scale}, d, output, x)
+    margins = x.margins
+    if output.name === _ranef_carrier(x, :tau_free)
+        known = d.plan.bindings[x.block.binding].known_scales
+        margins = margins[findall(isnothing, collect(known))]
+    elseif output.name === _ranef_carrier(x, :tau_inactive)
+        margins = margins[collect(d.plan.bindings[x.block.binding].margins)]
+    end
+    isnothing(x.block.by) && return (:margin => margins,)
+    strata = BRM._brm_ranef_strata(d, x.block, "brm_output_tree").strata
+    (:margin => margins, :stratum => strata)
+end
+function _ranef_component_axes(::Val{:correlation_cholesky}, d, output, x)
+    margins = x.margins
+    isnothing(x.block.by) && return (:margin => margins, :margin2 => margins)
+    strata = BRM._brm_ranef_strata(d, x.block, "brm_output_tree").strata
+    (:stratum => strata, :margin => margins, :margin2 => margins)
+end
+_ranef_component_axes(::Val{:level_scale}, d, output, x) =
+    (:margin => x.margins, :level => x.block.levels)
+_ranef_component_axes(::Val{:level_correlation_cholesky}, d, output, x) =
+    (:level => x.block.levels, :margin => x.margins, :margin2 => x.margins)
+
+function _ranef_output_tree(draws, ordered, axes)
+    # Reorder only a coordinate-sized index array, never the draw storage.
+    # The new multi-axis outputs use fitted coordinate order even when the
+    # caller permutes names; existing single-axis output ordering is unchanged.
+    shape = map(axis -> length(last(axis)), axes)
+    length(ordered) == prod(shape) || throw(DimensionMismatch(
+        "brm_output_tree: random-effect coordinates do not match the carrier"))
+    indices = reshape(ordered, shape)
+    if length(axes) == 2 && first.(axes) == (:margin, :level)
+        indices = PermutedDimsArray(indices, (2, 1))
+        axes = reverse(axes)
+    end
+    # One-margin effects have only a level axis, as a random intercept does.
+    if length(axes) == 2 && first.(axes) == (:level, :margin) && length(last(axes[2])) == 1
+        axes = (first(axes),)
+    end
+    values = reshape(view(draws, :, vec(indices)), size(draws, 1),
+                     map(axis -> length(last(axis)), axes)...)
+    TreeData(values, :draw => Base.axes(draws, 1), axes...)
+end
+
 function BRM.brm_output_tree(d::BRMDescriptor, draws::AbstractMatrix, names;
                               logical, role=nothing)
     BRM._brm_check_draw_names(draws, names)
     output = _output(d, logical, role)
     indices = brm_output_coordinates(output, names)
     ordered = BRM._brm_element_coordinates(output, names)
-    axis = _output_axis(output, "brm_output_tree")
-    expected = prod(output.dims)
-    length(indices) == expected || throw(DimensionMismatch(
-        "brm_output_tree: $(output.name) needs $expected elements, got $(length(indices))"))
+    isnothing(output.dims) || length(indices) == prod(output.dims) || throw(DimensionMismatch(
+        "brm_output_tree: $(output.name) needs $(prod(output.dims)) elements, got $(length(indices))"))
+    ranef_axes = _ranef_output_axes(d, output)
+    isnothing(ranef_axes) || return _ranef_output_tree(draws, ordered, ranef_axes)
+    axis = _output_axis(d, output, "brm_output_tree")
     if isnothing(axis)
         return TreeData(view(draws, :, only(indices)), :draw => axes(draws, 1))
     end
