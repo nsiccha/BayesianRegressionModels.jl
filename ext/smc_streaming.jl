@@ -1,10 +1,67 @@
 # Included inside BayesianRegressionModelsSMCExt. Sampler mechanics and the
 # carried Gaussian live in RKPPL; this file only binds BRM models and identity.
 
+# Serialization is a transport format, not a value fingerprint: it preserves
+# object sharing, dictionary iteration order and padding in isbits arrays.
+# Walk the data-only records by value, with a fresh serializer for each leaf.
+# Type/shape tags keep distinct coordinate records distinct; numerical arrays
+# retain the bulk path only when their elements have no struct padding.
+function streaming_value!(io, value)
+    write(io, 0x01)
+    serialize(io, typeof(value))
+    if isprimitivetype(typeof(value))
+        serialize(io, value)
+        return nothing
+    end
+    for name in fieldnames(typeof(value))
+        streaming_value!(io, getfield(value, name))
+    end
+    nothing
+end
+
+function streaming_value!(io, value::Union{Number,Char,Symbol,AbstractString,Type,Module,Nothing,Missing,GlobalRef})
+    write(io, 0x00)
+    serialize(io, value)
+    nothing
+end
+
+function streaming_value!(io, value::AbstractArray)
+    write(io, 0x02)
+    serialize(io, typeof(value))
+    serialize(io, map(axis -> (first(axis), length(axis)), axes(value)))
+    if isprimitivetype(eltype(value))
+        # Materializing also excludes a view's parent and indexing machinery.
+        serialize(io, collect(value))
+    else
+        for element in value
+            streaming_value!(io, element)
+        end
+    end
+    nothing
+end
+
+function streaming_value!(io, value::AbstractDict)
+    write(io, 0x03)
+    serialize(io, typeof(value))
+    serialize(io, length(value))
+    entries = map(collect(pairs(value))) do (key, val)
+        keyio = IOBuffer()
+        streaming_value!(keyio, key)
+        (take!(keyio), val)
+    end
+    sort!(entries; by=entry -> bytes2hex(first(entry)))
+    for (key, val) in entries
+        serialize(io, length(key))
+        write(io, key)
+        streaming_value!(io, val)
+    end
+    nothing
+end
+
 function streaming_identity(value)
     io = IOBuffer()
-    serialize(io, value)
-    "brm-smc-window-v1:" * bytes2hex(sha256(take!(io)))
+    streaming_value!(io, value)
+    "brm-smc-window-v2:" * bytes2hex(sha256(take!(io)))
 end
 
 function streaming_source(rk, preprocessing)

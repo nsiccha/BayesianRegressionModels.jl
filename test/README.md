@@ -24,6 +24,10 @@ Use `julia --project=test test/setup_env.jl` first; it pins the optional
 plotting dependencies as well as the fitting stack.
 
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
+`smc_window_identity.jl` checks carried-posterior identity across dictionary
+rebuilding, array padding, shared values, copying and serialization, plus
+window update/tuning, checkpoint replay and mutation rejection through the
+public APIs. `smc_window.jl` additionally checks replay in a fresh process.
 `plate_derived_inputs.jl` checks computed arrays read directly by plate cells:
 transformed hierarchical predictors, chained assignments, gathers and
 concatenations, including a derived array as the plate range. Independent
