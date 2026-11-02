@@ -240,14 +240,29 @@ end
 # Apply Q_t ⊗ Omega^-1 ⊗ Q_s using two spatial sparse products and two
 # small channel triangular solves per time. Storage is linear in the field;
 # no Kronecker matrix, covariance, or space-time Cholesky factor is built.
+function _brm_gmrf_precision_workspace(state)
+    n, channels, _ = size(state)
+    residual = Matrix{eltype(state)}(undef, n, channels)
+    (; residual, spatial=similar(residual), work=Vector{eltype(state)}(undef, n))
+end
+
 function _brm_gmrf_precision_mul!(out, state, mesh::_BRMGMRFMesh,
         times, spatial_length, temporal_length, L)
+    _brm_gmrf_precision_mul!(out, state, mesh, times, spatial_length, temporal_length, L,
+        _brm_gmrf_precision_workspace(state))
+end
+
+function _brm_gmrf_precision_mul!(out, state, mesh::_BRMGMRFMesh,
+        times, spatial_length, temporal_length, L, workspace)
     size(out) == size(state) || throw(DimensionMismatch("gmrf precision output shape"))
     n, channels, nt = size(state)
+    n == length(mesh.mass) && nt == length(times) && size(L) == (channels, channels) ||
+        throw(DimensionMismatch("gmrf precision support shape"))
+    Base.mightalias(out, state) && throw(ArgumentError("gmrf precision input and output must not alias"))
+    (; residual, spatial, work) = workspace
+    size(residual) == size(spatial) == (n, channels) && length(work) == n ||
+        throw(DimensionMismatch("gmrf precision workspace shape"))
     fill!(out, zero(eltype(out)))
-    residual = Matrix{eltype(state)}(undef, n, channels)
-    spatial = similar(residual)
-    work = Vector{eltype(state)}(undef, n)
     for t in 1:nt
         a = t == 1 ? zero(temporal_length) : exp(-(times[t] - times[t - 1]) / temporal_length)
         v = t == 1 ? one(temporal_length) : -expm1(-2 * (times[t] - times[t - 1]) / temporal_length)
@@ -276,6 +291,46 @@ function _brm_gmrf_precision_mul!(out, state, mesh::_BRMGMRFMesh,
             out[i, c, t] += z
             t > 1 && (out[i, c, t - 1] -= a * z)
         end
+    end
+    out
+end
+
+# A conditional solver's diagonal preconditioner needs only the diagonals
+# of the three separable precisions. The spatial diagonal is a sum over K's
+# sparse columns; no space-time sparse matrix or factor is constructed.
+function _brm_gmrf_precision_diagonal!(out, mesh::_BRMGMRFMesh,
+        times, spatial_length, temporal_length, L)
+    n, channels, nt = size(out)
+    n == length(mesh.mass) && nt == length(times) && size(L) == (channels, channels) ||
+        throw(DimensionMismatch("gmrf precision diagonal support shape"))
+    _brm_gmrf_positive(spatial_length, "spatial length scale")
+    _brm_gmrf_positive(temporal_length, "temporal length scale")
+    kappa2 = 2 / spatial_length^2
+    G, mass = mesh.stiffness, mesh.mass
+    spatial = zeros(eltype(out), n)
+    for j in 1:n
+        value = zero(eltype(out))
+        for p in nzrange(G, j)
+            i = rowvals(G)[p]
+            entry = nonzeros(G)[p]
+            value += entry^2 / mass[i]
+            i == j && (value += 2kappa2 * entry)
+        end
+        spatial[j] = (value + kappa2^2 * mass[j]) / (4pi * kappa2)
+    end
+    inverse_factor = inv(LowerTriangular(L))
+    channel = vec(sum(abs2, inverse_factor; dims=1))
+    temporal = zeros(eltype(out), nt)
+    temporal[1] = 1
+    for t in 2:nt
+        gap = times[t] - times[t - 1]
+        a = exp(-gap / temporal_length)
+        variance = -expm1(-2gap / temporal_length)
+        temporal[t] += inv(variance)
+        temporal[t - 1] += a^2 / variance
+    end
+    for t in 1:nt, c in 1:channels, i in 1:n
+        out[i, c, t] = spatial[i] * channel[c] * temporal[t]
     end
     out
 end
