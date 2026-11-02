@@ -111,12 +111,47 @@ function _brm_gmrf_interpolation(mesh::_BRMGMRFMesh, x, y,
     (; indices, weights)
 end
 
+# The state layout is independent of sparse-factor permutations and row order.
+# Keep only the axes: a Cartesian label vector would itself be field-sized.
+struct _BRMGMRFStateLayout{C<:AbstractVector,T<:AbstractVector}
+    nvertices::Int
+    channels::C
+    times::T
+    ncoordinates::Int
+    function _BRMGMRFStateLayout(nvertices::Integer, channels::AbstractVector,
+            times::AbstractVector{<:Real})
+        nvertices > 0 || throw(ArgumentError("gmrf needs at least one state vertex"))
+        !isempty(channels) && !any(ismissing, channels) && allunique(channels) ||
+            throw(ArgumentError("gmrf state channels must be nonempty, unique and nonmissing"))
+        !isempty(times) && all(isfinite, times) && issorted(times) && allunique(times) ||
+            throw(ArgumentError("gmrf state times must be finite and strictly increasing"))
+        n = Base.checked_mul(Base.checked_mul(Int(nvertices), length(channels)), length(times))
+        cc, tt = copy(channels), copy(times)
+        new{typeof(cc),typeof(tt)}(Int(nvertices), cc, tt, n)
+    end
+end
+
+function _brm_gmrf_state_coordinate(layout::_BRMGMRFStateLayout, index::Integer)
+    1 <= index <= layout.ncoordinates || throw(BoundsError(layout, index))
+    plane, vertex = divrem(index - 1, layout.nvertices)
+    time, channel = divrem(plane, length(layout.channels))
+    (; vertex=vertex + 1, channel=layout.channels[channel + 1], time=layout.times[time + 1])
+end
+
 # Time and channel identities are frozen by the fitted term. Adding a new
 # time requires a conditional state, not interpolating unrelated coefficients.
 # This mapping therefore refuses unknown times/channels during draw replay.
 function _brm_gmrf_state_indices(vertices, row_times, row_channels, times, channels, nvertices)
+    _brm_gmrf_state_indices(vertices, row_times, row_channels,
+        _BRMGMRFStateLayout(nvertices, channels, times))
+end
+
+function _brm_gmrf_state_indices(vertices, row_times, row_channels, layout::_BRMGMRFStateLayout)
     length(row_times) == length(row_channels) == size(vertices, 1) ||
         throw(DimensionMismatch("gmrf row support lengths disagree"))
+    nvertices, times, channels = layout.nvertices, layout.times, layout.channels
+    all(v -> 1 <= v <= nvertices, vertices) || throw(ArgumentError(
+        "gmrf row reads a vertex outside the fitted mesh"))
     time_index = Dict(t => i for (i, t) in enumerate(times))
     channel_index = Dict(c => i for (i, c) in enumerate(channels))
     out = similar(vertices)

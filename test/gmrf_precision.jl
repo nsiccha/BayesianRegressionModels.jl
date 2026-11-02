@@ -13,6 +13,35 @@ vertices = [0.0 0.0; 1 0; 1 1; 0 1; 0.5 0.5]
 cells = [1 2 5; 2 3 5; 3 4 5; 4 1 5]
 mesh = GM._brm_gmrf_mesh(vertices, cells)
 
+@testset "GMRF semantic state axes without Cartesian label storage" begin
+    channels, times = ["north", "south"], [0.0, 0.3, 1.7]
+    layout = GM._BRMGMRFStateLayout(5, channels, times)
+    channels[1], times[1] = "changed", -1
+    @test layout.ncoordinates == 30
+    # The stored axis identities survive mutation of the caller's inputs.
+    @test GM._brm_gmrf_state_coordinate(layout, 1) ==
+        (; vertex=1, channel="north", time=0.0)
+    @test GM._brm_gmrf_state_coordinate(layout, 30) ==
+        (; vertex=5, channel="south", time=1.7)
+    vertex_reads = [5 1 3; 4 2 1; 3 5 2]
+    row_times, row_channels = [1.7, 0.0, 0.3], ["south", "north", "south"]
+    indices = GM._brm_gmrf_state_indices(vertex_reads, row_times, row_channels, layout)
+    @test all(GM._brm_gmrf_state_coordinate(layout, indices[r, c]) ==
+        (; vertex=vertex_reads[r, c], channel=row_channels[r], time=row_times[r])
+        for r in 1:3, c in 1:3)
+    @test_throws BoundsError GM._brm_gmrf_state_coordinate(layout, 31)
+    @test_throws ArgumentError GM._brm_gmrf_state_indices(zeros(Int, 3, 3), row_times, row_channels, layout)
+    @test_throws ArgumentError GM._BRMGMRFStateLayout(5, [1, 1], [0.0])
+    @test_throws ArgumentError GM._BRMGMRFStateLayout(5, [1], [0.3, 0.0])
+    @test_throws OverflowError GM._BRMGMRFStateLayout(typemax(Int), [1, 2], [0.0])
+    # This proves bounded metadata storage only, not a viable field allocation.
+    huge = GM._BRMGMRFStateLayout(100_000, collect(1:38), collect(0.0:8199.0))
+    @test huge.ncoordinates == 31_160_000_000
+    @test Base.summarysize(huge) < 100_000
+    @test GM._brm_gmrf_state_coordinate(huge, huge.ncoordinates) ==
+        (; vertex=100_000, channel=38, time=8199.0)
+end
+
 @testset "Local mesh interpolation and frozen state identities" begin
     x = [0.1, 0.2, 0.9, 0.7, 0.0, 1.0, 0.5, 0.5]
     y = [0.2, 0.1, 0.6, 0.8, 0.0, 1.0, 0.5, 0.0]
