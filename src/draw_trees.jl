@@ -6,7 +6,20 @@ Rows are draws; a vector of per-chain matrices adds an outer `:chain` axis.
 `logical` may also be a discovered `BRMOutput`, for example a coefficient
 carrier from `brm_outputs`. Coefficients use their descriptor labels;
 observation outputs use their element positions. Scalar outputs have only
-the `:draw` axis. Labels follow the supplied constrained-name order.
+the `:draw` axis. Labels follow the supplied constrained-name order for these
+single-axis outputs.
+
+Random-effect carriers use the fitted `:level` labels and `(predictor,
+coefficient)` addresses on `:margin`. Standardized draws and effects have
+`:draw × :level × :margin` (omit `:margin` for a one-margin block), scales
+have `:margin`, and Cholesky factors have `:margin × :margin2`. Stratified
+scales and factors also carry `:stratum`. These carriers use fitted coordinate
+order, independently of the supplied name order, with views into the input.
+
+Per-row block contributions use `:observation`. Model-scope assignments also
+inherit `:observation` through elementary pointwise arithmetic and functions
+of row outputs and scalars, including chains of assignments. Vector length
+alone does not establish row alignment.
 
 The returned backing aliases the input: treat both as read-only. Unknown
 output-axis semantics are reported by name, never replaced by guessed labels.

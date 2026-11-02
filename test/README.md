@@ -19,6 +19,13 @@ expressions from `brm(source; mod)`, changed fit inputs, frozen inputs, and
 printed-source round trips. It exercises constants feeding a parameter-dependent
 helper, so they remain graph recipes rather than bind-time data.
 
+`revise_ar1.jl` loads Revise before BRM, checks that all 16 AR(1) submodels
+match their anonymous `@slic` definitions, and rescans the package twice.
+It also edits and restores an unrelated method in a temporary copy of the
+cell source, checking that explicit rescans apply the edits and preserve the
+registered models. Run it as a standalone process with
+`julia --startup-file=no --project=test test/revise_ar1.jl`.
+
 `nlme_laplace_values.jl` checks sparse integration of model-scope observations:
 gathered predictors on distinct row axes against an exact Gaussian marginal,
 and derived count likelihoods against equivalent plate cells and numerical
@@ -36,6 +43,16 @@ predictive and conditional outputs, RK values, and `nanquantile` through
 also check the labelled wrappers against their existing independent oracles.
 Use `julia --project=test test/setup_env.jl` first; it pins the optional
 plotting dependencies as well as the fitting stack.
+
+`draw_tree_coordinates.jl` checks random-effect parameter trees for known scales,
+correlated and centered effects, stratified blocks, Student-t mixing weights
+and shared predictors. Distinct supplied values and shuffled constrained names
+verify level/margin storage order. Unequal chains give the same R-hat and bulk
+and tail effective sample sizes as direct column selection, without copying
+draw storage. The fitted `draw_trees.jl` fixture also checks the standardized
+tree against compiled Stan's scaled, correlated effects.
+Pointwise model assignments and population contributions retain observation
+coordinates; unrelated equal-length vectors cannot acquire them by shape.
 
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
 `smc_window_identity.jl` checks carried-posterior identity across dictionary
