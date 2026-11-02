@@ -2149,10 +2149,13 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   rows, which registered Enzyme rejects with `IllegalTypeAnalysisException`
   and dogfood `d37cb0b4` differentiates (Enzyme snag
   `native-reverse-t-6d51cae6`; user pick on BRM decision `0n0kgfh`). The
-  sparse Laplace's `@plate` cells take their Hessian blocks through RKPPL's
-  compact-cell AD under plain Reverse, which needs dogfood from `7a886d9`
-  (Enzyme snag `static-reverse-s-f9483e9c`). The current pin is `5325554c`
-  with its declared libEnzyme `782c9d95`; it includes `3a89b497`'s compact
+  sparse Laplace's ordinary `@plate` cells take their Hessian blocks through
+  RKPPL's forward-over-reverse compact-cell AD. This requires both the
+  static-activity repair from `7a886d9` (Enzyme snag
+  `static-reverse-s-f9483e9c`) and the augmented-helper JIT-symbol repair
+  (Enzyme snag `forward-over-rev-188051dc`), which preserves the `digamma`
+  partials used by negative-binomial cells. The exact pin and declared
+  libEnzyme build come from `setup_env.jl`. The pin includes `3a89b497`'s compact
   nested-AD overlay repairs for sum factors and the dynamic-call Hessian
   repair needed by lower-bounded completion geometry. It also repairs
   positive-tail `erfcx` derivatives through third order (Enzyme snag
