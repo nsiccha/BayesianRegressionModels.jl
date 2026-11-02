@@ -263,7 +263,8 @@ const PINS = [
     # through redundant typed aliases (RK 0.1.52 / RKPPL 0.1.55).
     # RKPPL 0.1.57: independent prepared-density SMC factories.
     # RK 0.1.57 / PPL 0.1.64: caller-owned joint density KernelSpecs and geometry.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "0b39af36c33b5f4eacb78f2ab2cc3e4330cda69e"),
+    # RK 0.1.59 / PPL 0.1.66: property-based whole-parameter geometry dimensions.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "634bf2aa2430f9897958e7055fa50783593cd54b"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
