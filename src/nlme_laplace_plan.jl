@@ -4,8 +4,9 @@
 # walks, `car` fields: the sparse Laplace's records) by how its rows read them:
 #
 # - integrated: every row reading it is Normal, so the Laplace is exact there;
-# - gated: read by other closed-form families (counts, binomial) or by `@plate`
-#   cells; integrated only where a per-block diagnostic admits it;
+# - gated: read by other closed-form families (counts, binomial), model-value
+#   observations or `@plate` cells; integrated only where a per-block diagnostic
+#   admits it;
 # - never: the term moves a shape or dispersion, is Student-t, stratified, or
 #   a `car_units` field, which the sparse Laplace does not integrate;
 # - sampled: named in `sample`, or gated and not admitted.
@@ -64,7 +65,8 @@ Base.show(io::IO, plan::BRMLaplacePlan) = print(io, "BRMLaplacePlan(",
 Sort `rk`'s latent terms for the sparse Laplace ([`BRMLaplacePlan`](@ref)):
 
 - **integrated:** every row reading the term is Normal, so its Laplace is exact;
-- **gated:** read by counts, binomial rows or `@plate` cells. The term is
+- **gated:** read by counts, binomial rows, model-value observations or `@plate`
+  cells. The term is
   integrated where its per-block importance diagnostic admits it. That
   diagnostic proposes each block (one level of the term, one area of a field)
   from the Gaussian of the Laplace's precision restricted to it, given the rest
@@ -128,7 +130,8 @@ function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_f
     for t in candidates
         r = reads[t.declaration]
         r.moving && (gated[t.declaration] = :never; continue)
-        (r.cells || any(!=(_BRM_LAP_NORMAL), r.families)) && (gated[t.declaration] = r)
+        (r.cells || r.values || any(!=(_BRM_LAP_NORMAL), r.families)) &&
+            (gated[t.declaration] = r)
     end
     # the diagnostic, at the population point `at`, for the gated terms the
     # caller did not force
@@ -194,12 +197,13 @@ const _BRM_PLAN_FAMILY_NAMES = Dict(_BRM_LAP_POISSON => "Poisson",
     _BRM_LAP_BINOMIAL => "binomial", _BRM_LAP_NB2 => "NegativeBinomial2",
     _BRM_LAP_NORMAL => "Normal")
 _brm_plan_family_names(r) = vcat(sort!([_BRM_PLAN_FAMILY_NAMES[f] for f in r.families]),
-    r.cells ? ["`@plate` cells"] : String[])
+    r.cells ? ["`@plate` cells"] : String[],
+    r.values ? ["model-value observations"] : String[])
 
 # Per block declaration of `p`: the families of the row terms that read it,
-# whether a `@plate` cell reads it, and whether it moves a term's second
-# parameter (a shape, dispersion or log scale). A BYM2 field's iid part counts
-# toward its field.
+# whether a `@plate` cell or model-value observation reads it, and whether it
+# moves a term's second parameter (a shape, dispersion or log scale). A BYM2
+# field's iid part counts toward its field.
 function _brm_plan_reads(p::BRMSparseLaplaceProblem)
     second = falses(length(p.port))
     for t in eachindex(p.family)
@@ -213,7 +217,8 @@ function _brm_plan_reads(p::BRMSparseLaplaceProblem)
     roots = unique(blk.declaration for blk in p.blocks if !any(o -> o !== blk.declaration &&
         _brm_nlme_owned(blk.declaration, o), (x.declaration for x in p.blocks)))
     root(b) = only(r for r in roots if _brm_nlme_owned(b.declaration, r))
-    out = Dict(r => (; families=Set{Int8}(), cells=false, moving=false) for r in roots)
+    out = Dict(r => (; families=Set{Int8}(), cells=false, values=false, moving=false)
+        for r in roots)
     zblock = zeros(Int, length(p.integrated))
     for (j, b) in enumerate(p.blocks), i in b.z
         zblock[i] = j
@@ -228,11 +233,12 @@ function _brm_plan_reads(p::BRMSparseLaplaceProblem)
             push!(fams, p.family[t])
             second[e] && (moving = true)
         end
-        out[d] = (; families=fams, out[d].cells, moving)
+        out[d] = (; families=fams, out[d].cells, out[d].values, moving)
     end
+    plates = _brm_nlme_plate_observations(p.backend.plan)
     for group in p.cells, c in group.cells, i in c.lz
         d = root(p.blocks[zblock[i]])
-        out[d] = (; out[d].families, cells=true, out[d].moving)
+        out[d] = merge(out[d], group.name in plates ? (; cells=true) : (; values=true))
     end
     out
 end

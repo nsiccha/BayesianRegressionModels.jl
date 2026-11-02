@@ -244,10 +244,10 @@ _brm_slap_predictors(plan::_RKStructuralPlan) = plan.predictors
 _brm_slap_predictors(plan::_RKValuePlan) = plan.regression.predictors
 # Observations the row structure has no terms for: a value plan's observations
 # beside its regression responses (a distribution reading a model value, a
-# `@plate` cell's) and those of its kernel cells.
+# `@plate` cell's), completion-density corrections, and kernel cells.
 _brm_slap_other_observations(plan) = Symbol[]
 _brm_slap_other_observations(plan::_RKValuePlan) = sort!(collect(union(
-    Set{Symbol}(o.name for o in plan.observations), _brm_nlme_plate_observations(plan))))
+    Set{Symbol}(_rk_observed_names(plan)), _brm_nlme_plate_observations(plan))))
 
 # Why a model has no row structure, or `nothing` when it has one.
 function _brm_slap_refusal(backend::RKBRMI, view::BRMNLMEView)
@@ -258,12 +258,18 @@ end
 
 # Why the model's observations are not all regression responses of a family
 # with closed-form rows, or `nothing` (shared with the sparse Laplace).
-function _brm_slap_response_refusal(backend::RKBRMI; cells::Bool=false)
+function _brm_slap_response_refusal(backend::RKBRMI; cells::Bool=false,
+        values::Bool=false)
     responses = _brm_slap_responses(backend.plan)
     responses === nothing && return "the RK plan has no likelihood specs"
     other = _brm_slap_other_observations(backend.plan)
     # the sparse Laplace takes `@plate` cells as terms of their own
     cells && setdiff!(other, _brm_nlme_plate_observations(backend.plan))
+    # The sparse engine also prepares each model-value observation as an
+    # exact likelihood factor, including emitted completion corrections.
+    # The row-only engine must still refuse these terms.
+    values && backend.plan isa _RKValuePlan &&
+        setdiff!(other, _rk_observed_names(backend.plan))
     isempty(other) || return "observation `$(first(other))` is not a regression " *
         "response (it reads a model value or sits in a `@plate` cell)"
     for spec in responses

@@ -1,5 +1,14 @@
 # Running the tests
 
+`nlme_laplace_values.jl` checks sparse integration of model-scope observations:
+gathered predictors on distinct row axes against an exact Gaussian marginal,
+and derived count likelihoods against equivalent plate cells and numerical
+derivatives. Automatic plans retain these likelihoods and gate their latent
+terms with the per-block importance diagnostic.
+`ragged_factor_preparation.jl` checks that a wide predictor's mixed column
+types prepare type-stable ragged factors whose values equal the full model's
+pointwise densities.
+
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
 `plate_derived_inputs.jl` checks computed arrays read directly by plate cells:
 transformed hierarchical predictors, chained assignments, gathers and
