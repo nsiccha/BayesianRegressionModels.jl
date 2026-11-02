@@ -53,6 +53,18 @@ struct _BRMSlapBlock
 end
 _brm_spl_identity(b::_BRMSlapBlock) = isempty(b.sums) && size(b.edges, 2) == 0
 
+# The kernels run once per population point. Coordinate loops read concrete
+# arrays, including when a declared field has millions of elements.
+struct _BRMSPLGaussianPrior
+    blocks::Vector{NamedTuple{(:z, :meanport, :scaleport),Tuple{Vector{Int},Int,Int}}}
+    ports::Tuple{Vararg{Symbol}}
+    read::Any
+    pullback::Any
+    mean::Vector{Float64}
+    precision::Vector{Float64}
+    values::Base.RefValue{Any}
+end
+
 """
     BRMSparseLaplaceProblem
 
@@ -74,6 +86,8 @@ mutable struct BRMSparseLaplaceProblem{K}
     integrated::Vector{Int}
     blocks::Vector{_BRMSlapBlock}
     kernels::K
+    # Independent declared Gaussian priors, in their authored coordinates.
+    gaussian::Union{Nothing,_BRMSPLGaussianPrior}
     # Likelihood terms and their parameter entries, as in the structured path.
     family::Vector{Int8}
     y::Vector{Float64}
@@ -180,10 +194,11 @@ end
 
 # The grouping column a latent block is integrated by: a random-effect block's
 # and a `cdar` walk's group, a `car` field's area column.
-_brm_spl_record_group(r) = r.kind === :car ? r.area : r.group
+_brm_spl_record_group(r) = r.kind === :car ? r.area :
+    r.kind === :vector ? r.declaration : r.group
 _brm_spl_record_declaration(r) =
     r.kind in (:ranef, :stratified_ranef) ? _brm_nlme_ranef_declaration(r) : r.declaration
-const _BRM_SPL_LATENT = (:ranef, :stratified_ranef, :car, :cdar)
+const _BRM_SPL_LATENT = (:ranef, :stratified_ranef, :car, :cdar, :vector)
 
 # The model's latent blocks over the named grouping columns.
 function _brm_spl_records(backend::RKBRMI, integrate; declarations=nothing)
@@ -191,13 +206,16 @@ function _brm_spl_records(backend::RKBRMI, integrate; declarations=nothing)
     available = unique(Symbol[_brm_spl_record_group(r) for r in records])
     for g in integrate
         g in available || _brm_nlme_error("brm_laplace_problem: integrate names " *
-            "`$g`, which groups no random-effect block, `cdar` walk or `car` field of " *
+            "`$g`, which names no random-effect block, `cdar` walk, `car` field or declared vector of " *
             "the model; its groupings are " *
             "$(isempty(available) ? "none" : join(repr.(available), ", "))")
     end
     chosen = [r for r in records if _brm_spl_record_group(r) in integrate &&
         (declarations === nothing || _brm_spl_record_declaration(r) in declarations)]
     for r in chosen
+        r.kind === :vector && get(r, :gaussian, nothing) === nothing &&
+            _brm_nlme_error("brm_laplace_problem: `$(r.declaration)` does not have an " *
+                "unconstrained independent Normal prior")
         r.kind === :stratified_ranef && _brm_nlme_error("brm_laplace_problem: the " *
             "random-effect block over `$(r.group)` is stratified, which the sparse " *
             "Laplace does not integrate yet")
@@ -267,6 +285,9 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
             block!(_brm_nlme_ranef_declaration(r), r.group, z,
                 ((isnothing(r.scales) ? (r.scale,) : r.scales)...,
                     (isnothing(r.L) ? () : (r.L,))...))
+        elseif r.kind === :vector
+            labels = names[owned(r.declaration)]
+            block!(r.declaration, r.declaration, draws!(reshape(labels, :, 1)), ())
         elseif r.kind === :cdar
             # standardized innovations, groups × steps; scale and persistence
             eta = Symbol(r.declaration, ".", r.locals.eta)
@@ -330,7 +351,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         (1:nrows,))
     nψ = length(t.port)
     p = BRMSparseLaplaceProblem(backend, population, names[population], integrate,
-        integrated, blocks, kernels, t.family, t.y, t.trials, t.constant, t.entry,
+        integrated, blocks, kernels, nothing, t.family, t.y, t.trials, t.constant, t.entry,
         fill(true, length(t.family)), t.port, t.index, t.link, t.fixed, t.response, t.row,
         Int[], Int[], Int[], Int[], Int[], Vector{Int}[], Int[], Int[], Int[], (;),
         spzeros(0, 0), Int[], Int[], Vector{Int}[], Int[], Int[], Float64[], Vector{Int}[],
@@ -338,6 +359,8 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         false,
         u0[population], zeros(nψ), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
         Float64(tol), Int(maxiter), 0, 0, 0, 0, nothing)
+    p.gaussian = _brm_spl_gaussian_prior(p, records, u0)
+    _brm_spl_gaussian_parameters!(p, u0)
     _brm_spl_design!(p, u0)
     sampled || _brm_slap_population_design!(p, u0)
     cells = Set(_brm_slap_other_observations(backend.plan))
@@ -501,12 +524,15 @@ function _brm_spl_cdot(p::BRMSparseLaplaceProblem, C, e, z)
     s
 end
 
-# zᵀ P z for the integrated draws' prior precision P.
+# zᵀ P z - 2 muᵀ P z for the integrated draws' prior difference from zero.
 function _brm_spl_prior_quad(p::BRMSparseLaplaceProblem, z)
     q = 0.0
     for b in p.blocks
         if _brm_spl_identity(b)
-            q += sum(i -> z[i]^2, b.z; init=0.0)
+            for i in b.z
+                mu, precision = _brm_spl_gaussian_parameters(p, i)
+                q += precision * z[i] * (z[i] - 2mu)
+            end
             continue
         end
         for e in axes(b.edges, 2)
@@ -519,8 +545,8 @@ function _brm_spl_prior_quad(p::BRMSparseLaplaceProblem, z)
     q
 end
 
-# The integrated draws' prior must be the blocks' Gaussian, −½ zᵀPz, and
-# depend on nothing else: the value adds that and RK's prior at z = 0.
+# The integrated draws' prior must match their conditional Gaussian blocks:
+# the value adds their difference from zero and RK's complete prior at z=0.
 function _brm_spl_verify_prior(p::BRMSparseLaplaceProblem, u0)
     rng = Random.Xoshiro(20261031)
     for _ in 1:2
@@ -528,6 +554,7 @@ function _brm_spl_verify_prior(p::BRMSparseLaplaceProblem, u0)
         u[p.population] .+= 0.1 .* randn(rng, length(p.population))
         z = randn(rng, length(p.integrated))
         uA = _brm_slap_zero_integrated!(copy(u), p)
+        _brm_spl_gaussian_parameters!(p, uA)
         u[p.integrated] .= z
         Δ = _rk_slap_prior(p.kernels, u) - _rk_slap_prior(p.kernels, uA)
         isapprox(Δ, -_brm_spl_prior_quad(p, z) / 2; rtol=1e-9, atol=1e-9) ||
@@ -535,6 +562,7 @@ function _brm_spl_verify_prior(p::BRMSparseLaplaceProblem, u0)
                 "the Gaussian of their blocks in their packed coordinates (adaptive " *
                 "centring or a constrained block), so the sparse Laplace does not apply")
     end
+    _brm_spl_gaussian_parameters!(p, u0)
     nothing
 end
 
@@ -980,9 +1008,11 @@ function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing)
     for b in p.blocks
         if _brm_spl_identity(b)
             for i in b.z
-                fc[p.component[i]] -= z[i]^2 / 2
-                fb === nothing || (fb[p.sblock[i]] -= z[i]^2 / 2)
-                g === nothing || (g[i] -= z[i])
+                mu, precision = _brm_spl_gaussian_parameters(p, i)
+                delta = precision * z[i] * (mu - z[i] / 2)
+                fc[p.component[i]] += delta
+                fb === nothing || (fb[p.sblock[i]] += delta)
+                g === nothing || (g[i] += precision * (mu - z[i]))
             end
             continue
         end
@@ -1020,6 +1050,11 @@ function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing)
         fill!(nz, 0.0)
         for (k, v) in zip(p.prior_nz, p.prior_val)
             nz[k] += v
+        end
+        if p.gaussian !== nothing
+            for b in p.gaussian.blocks, i in b.z
+                nz[p.diagonal[i]] += p.gaussian.precision[i] - 1
+            end
         end
     end
     nothing
@@ -1167,6 +1202,7 @@ function _brm_spl_population(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     uA = copy(p.u)
     uA[p.population] .= φ
     _brm_slap_zero_integrated!(uA, p)
+    _brm_spl_gaussian_parameters!(p, uA)
     C, dC, A, values = _brm_spl_cmaps(p, uA)
     (; uA, values, A, C, dC)
 end
@@ -1509,6 +1545,7 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
     for (j, o) in enumerate(p.omega)
         gradient[findfirst(==(o), p.population)] += gω[j]
     end
+    _brm_spl_gaussian_gradient!(gradient, p, state, S, v, active)
     prior || return value, gradient .+ gcell
     lp, prior_gradient = _rk_slap_prior_gradient(p.kernels, state.uA)
     value + lp, gradient .+ gcell .+ prior_gradient[p.population]

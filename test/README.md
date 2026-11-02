@@ -1900,6 +1900,14 @@ The artifact is intentionally untracked. The comparison normalizes only the
 absolute test-source path embedded by StanBlocks; it retains model text and
 parameter identities.
 
+`laplace_declared_gaussian.jl` checks automatic and explicit integration of
+declared independent Normal vectors. It compares heterogeneous fixed priors
+and sampled means/scales against closed-form Gaussian marginal values and
+finite-difference gradients at several points. Nonlinear Normal observations
+exercise the diagnostic and implicit gradient; mixed generated effects,
+retained subsets, independent copies, prior dependencies, whole-vector width
+screening and linear sparse storage cover structural behavior.
+
 ## One-time bootstrap
 
 Use `test/setup_env.jl` as the single bootstrap entry:
