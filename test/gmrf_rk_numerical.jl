@@ -1,4 +1,5 @@
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
+using ReactiveKernelsDistributionKernels.DistributionKernelSources: normal
 using LinearAlgebra, SparseArrays, Distributions, Enzyme
 import DifferentiationInterface as DI
 const BRM = BayesianRegressionModels
