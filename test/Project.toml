@@ -57,7 +57,7 @@ Enzyme = "0.13"
 Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PSIS = "0.9"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.14"
+StanBlocks = "0.2.18"
 Treebars = "0.1.1"
 Turing = "0.46"
 WarmupHMC = "0.2.10"
@@ -133,7 +133,9 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # ab3960bb (StanBlocks 0.2.12) registers stable hypot and its Base callable.
 # fac3385a (StanBlocks 0.2.14) supplies stable lower-truncated LogNormal
 # moments and both log-CDF tails for ordinary distribution statistics.
-rev = "fac3385a5cb9d0e894352c34f4d0e590e4f93328"
+# 0b42d636 (StanBlocks 0.2.18) implements segment in @juliacompat
+# helpers, used by the native GMRF normalized sparse density.
+rev = "0b42d63688e19f42041840301e59700762516ade"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
