@@ -224,6 +224,12 @@ took 19.392 s. Receipt: `poisson-40128-v130.log` (exit 0, elapsed 354 s).
 These paired timings do not establish a universal crossover. Based on the
 small-model result, the automatic policy retains exact algebra through 1,024
 coordinates per connected component; callers can override that bound.
+The public `solver=:auto` control at 1,000 coordinates subsequently confirmed
+that it selects exact algebra. Its value and gradient were identical to an
+explicit exact target, finite differences agreed to relative error 4.005e-9,
+and the warmed evaluation took 0.006109 s with 5,180,048 allocated bytes.
+Receipt: `poisson-auto-1000-v130.log` (exit 0, elapsed 545 s, including a shared
+compile-cache wait).
 
 At 40,128 coordinates the production squared-precision proxy also passed
 separate quadrature/probe refinement and draw controls. With the same eight
