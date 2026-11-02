@@ -6,9 +6,10 @@
 # of (m, l) on a grid and mixes the Gaussian group effects over it; it is never
 # supplied to the sampler. Positive checks: the continuous diagonal pilot and the
 # adaptive pilot with the standard-normal reference reproduce the oracle's
-# spread. Known gap (ReactiveKernels snag learned-smc-refe-cc5677a1): the
-# adaptive pilot's learned reference (`reference=:pilot`) is narrower than the
-# posterior in m and l, and the final cloud stays under-dispersed in m.
+# spread. RKPPL 0.1.47 repairs learned references by fitting retained pilot
+# moments with separate inflation (ReactiveKernels snag learned-smc-refe-cc5677a1).
+# Check the reference repair directly and retain the known population-intercept
+# spread deficit: the repaired reference alone does not establish coverage.
 using BayesianRegressionModels, Distributions, ReactiveKernels, ReactiveKernelsPPL
 using Enzyme, ADTypes, DifferentiationInterface, LogDensityProblems
 using SequentialMonteCarlo, WarmupHMC, Random, Statistics, Printf, Test
@@ -116,12 +117,13 @@ end
 
 const SPREAD_LO, SPREAD_HI, MEAN_TOL = 0.8, 1.25, 0.35
 
-function tuned_schedule(rk, d; pilot, reference, pilot_seed)
+function tuned_schedule(rk, d; pilot, reference, pilot_seed, reference_inflation=nothing)
     kw = (; rng=Xoshiro(pilot_seed), init=zeros(d), pilot_steps=64,
         options=SMCOptions(; moves=2, max_tree_depth=7))
     if pilot == :adaptive
         kw = (; kw..., pilot=:adaptive, max_reflections=16, recording_target=128, pilot_evaluations=1000)
         reference === nothing || (kw = (; kw..., reference))
+        reference_inflation === nothing || (kw = (; kw..., reference_inflation))
     else
         kw = (; kw..., pilot=:continuous)
     end
@@ -161,21 +163,48 @@ dim = length(idx.names)
     end
 end
 
-@testset "known gap (ReactiveKernels snag learned-smc-refe-cc5677a1): the learned reference is narrower than the posterior" begin
-    schedule = tuned_schedule(rk, dim; pilot=:adaptive, reference=:pilot, pilot_seed=11)
-    ref = smc_reference(schedule)
-    @test ref !== nothing
-    options = SMCOptions(; tuning=schedule, history_limit=1000)
-    fit, rows = run_bridge(rk, idx, options; seed=101, particles=256)
-    s = final_summary(fit, idx, orc)
-    @test fit.state.temperature == 1
-    @test first(rows).sd_m / orc.sd_m < 0.6            # reference draws: 0.38 of the oracle SD in m
-    @test first(rows).sd_l / orc.sd_l < 0.7            # and 0.47 in l
-    @test rows[2].temperature > 0.05                   # the ESS rule jumps from a too-narrow reference
-    @test s.sd_m / orc.sd_m < 0.95                     # the final cloud stays under-dispersed in m
-    @test abs(s.mean_m - orc.mean_m) <= MEAN_TOL * orc.sd_m
-    @test abs(s.mean_l - orc.mean_l) <= MEAN_TOL * orc.sd_l
-    for (a, b) in zip(s.sd_z, orc.sd_z)                 # the group effects are still right
-        @test SPREAD_LO <= a / b <= SPREAD_HI
+@testset "learned pilot moments: repaired reference with residual population under-dispersion" begin
+    for (pilot_seed, seed) in ((11, 101), (12, 102))
+        schedule = tuned_schedule(rk, dim; pilot=:adaptive, reference=:pilot, pilot_seed)
+        @test schedule.pilot.reference_work.reference_inflation == 2.0
+        options = SMCOptions(; tuning=schedule, history_limit=1000)
+        fit, rows = run_bridge(rk, idx, options; seed, particles=256)
+        s = final_summary(fit, idx, orc)
+        @test fit.state.temperature == 1
+        # Keep the original known-gap assertion. This is NOT the controls'
+        # accuracy gate: the current seed-101 intercept SD is 0.786 of the
+        # oracle, below SPREAD_LO. Reference repair does not fix finite-move
+        # exploration; the strict failed accuracy run remains in the evidence.
+        @test s.sd_m / orc.sd_m < 0.95
+        @test SPREAD_LO <= s.sd_l / orc.sd_l <= SPREAD_HI
+        @test abs(s.mean_m - orc.mean_m) <= MEAN_TOL * orc.sd_m
+        @test abs(s.mean_l - orc.mean_l) <= MEAN_TOL * orc.sd_l
+        for (a, b) in zip(s.sd_z, orc.sd_z)
+            @test SPREAD_LO <= a / b <= SPREAD_HI
+        end
+        stage = last(fit.state.history)
+        # The reference is wider than the oracle in both population coordinates.
+        @test stage.reference_sd[idx.im] > orc.sd_m
+        @test stage.reference_sd[idx.il] > orc.sd_l
+        @test length(stage.coordinate_sd) == dim
+        @test all(isfinite, stage.coordinate_sd)
+        @test stage.coordinate_sd[idx.im] ≈ s.sd_m rtol=0.01
+        @test stage.coordinate_sd[idx.il] ≈ s.sd_l rtol=0.01
+        @printf("LEARNED_HIERARCHY seed=%d sd_ratio_m=%.4f sd_ratio_l=%.4f divergences=%d\n",
+            seed, s.sd_m / orc.sd_m, s.sd_l / orc.sd_l, s.divergences)
+
+        if pilot_seed == 11
+            uninflated = tuned_schedule(rk, dim; pilot=:adaptive, reference=:pilot,
+                pilot_seed, reference_inflation=1.0)
+            @test uninflated.pilot.reference_work.reference_inflation == 1.0
+            @test uninflated.pilot.reference_work.draw_sd == schedule.pilot.reference_work.draw_sd
+            ref = smc_reference(schedule)
+            @test ref.location == smc_reference(uninflated).location
+            original = brm_smc_fit(rk; rng=Xoshiro(seed), particles=256, stages=0,
+                options=SMCOptions(; tuning=uninflated))
+            inflated = brm_smc_fit(rk; rng=Xoshiro(seed), particles=256, stages=0, options)
+            @test inflated.state.positions .- ref.location ≈
+                2 .* (original.state.positions .- ref.location)
+        end
     end
 end

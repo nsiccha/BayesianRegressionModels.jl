@@ -246,6 +246,9 @@ const PINS = [
     # RKPPL 0.1.37: exact nonfinite SMC diagnostics across mutation tasks.
     # RKPPL 0.1.42 (RK 0.1.44): independent SMC pilot tuning, adaptive pilots and
     # portable correlated references.
+    # RKPPL 0.1.47 (RK 0.1.47): the learned reference fits inflated pilot moments
+    # (`reference_inflation`, default 2); stage summaries add coordinate and
+    # reference SDs (snag learned-smc-refe-cc5677a1).
     # RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
     # helper calls, guarded captures and broadcast observation locations.
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "0a517908470ceb0480b3db91d6b052b4dc02bb8c"),

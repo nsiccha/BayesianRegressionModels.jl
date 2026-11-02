@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.121
+
+- `brm_smc_tune` forwards `reference_inflation`, added in RKPPL 0.1.47. Its learned
+  reference (`pilot=:adaptive, reference=:pilot`) now fits the retained pilot
+  draws' spread in the learned basis times that factor (default 2) instead of
+  the pilot's local mutation scale, which under-dispersed the population
+  coordinates of hierarchies (ReactiveKernels snag learned-smc-refe-cc5677a1).
+  Stage summaries carry `reference_sd` and `coordinate_sd`. The test environment
+  retains the current RK 0.1.51 / RKPPL 0.1.53 pins. The hierarchy regression
+  verifies the reference repair while retaining the known population-intercept
+  spread deficit; wider references alone do not establish posterior accuracy.
+
 ## 0.2.120
 
 - Require ReactiveKernels 0.1.51 and ReactiveKernelsPPL 0.1.53 for selected-row
