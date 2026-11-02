@@ -76,7 +76,7 @@ function _rk_plan_gmrf_term!(prepared, target, data, columns, taken; derived)
     end
     fit_time = _rk_fit_twin!(derived, columns, taken, data, sources[3])
     fit_channel = length(prepared.source) == 3 ?
-        _rk_fit_input!(derived, columns, taken, sources[4], columns[sources[4]]) :
+        _rk_fit_input!(derived, columns, taken, sources[4], [1]) :
         _rk_fit_twin!(derived, columns, taken, data, sources[4])
     vertices = _rk_fit_input!(derived, columns, taken, state.vertices_source, [state.vertices])
     cells = _rk_fit_input!(derived, columns, taken, state.cells_source, [state.cells])

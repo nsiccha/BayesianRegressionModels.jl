@@ -48,5 +48,33 @@ end
         @test occursin("weight1", source) && occursin("index3", source)
         @test !occursin("brm_gmrf_logdensity", source)
         @test !occursin("sampling_logdensity", source)
+        fit_inputs = Set(keys(BRM._rk_plan_fit_inputs(plan)))
+        fitted_names, fitted_reads = BRM._rk_fitted_value_names(emitted, plan, fit_inputs;
+            prefix="GMRF preparation test")
+        @test length(fitted_names) == 1
+        @test Set(only(values(fitted_reads))) == fit_inputs
+        training = BRM._rk_frozen_training(model)
+        for selected in ([3, 1], [2])
+            fresh = merge(data, (; (k => getproperty(data, k)[selected] for k in
+                (:east, :north, :time, :channel, :y))...), (; xy=data.xy .+ 10.0))
+            replay = BRM._brm_with_frozen_replay(BRM._BRMFrozenReplay(training, Set{Symbol}())) do
+                BRM._brm_rk_plan(BRM._brm_rebind_brmi(model, fresh))
+            end
+            replayed = BRM._rk_emit_ast(replay)
+            @test BRM._rk_program_statements(replayed) == BRM._rk_program_statements(emitted)
+            term = only(t for p in replay.predictors for t in p.terms if t.kind === :gmrf)
+            options = term.options
+            @test only(replay.columns[options.vertices]) == data.xy
+            support = BRM.brm_gmrf_support(only(replay.columns[options.vertices]),
+                only(replay.columns[options.cells]), replay.columns[options.fit_time],
+                replay.columns[options.fit_channel])
+            @test support.layout.times == [0.0, 0.3, 1.7]
+            @test support.layout.channels == (has_channels ? ["a", "b"] : [1])
+            rows = BRM.brm_gmrf_rows(support, (replay.columns[c] for c in term.columns)...)
+            @test length(rows.index1) == length(selected)
+            empty_rows = BRM.brm_gmrf_rows(support,
+                (empty(replay.columns[c]) for c in term.columns)...)
+            @test all(isempty, values(empty_rows))
+        end
     end
 end
