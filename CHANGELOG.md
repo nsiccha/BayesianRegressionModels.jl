@@ -33,6 +33,9 @@ instead of failing at run time.
   its relative diagonal ridge affects only that numerical reference. No
   unbounded sparse factor or dense covariance is formed. Numerical convergence
   and probe variability remain distinct from Laplace approximation error.
+- Component densities use compensated summation on the operator path, so
+  accumulated rounding over large fields does not hide the final Newton gain
+  from the line search. Acceptance and convergence tolerances are unchanged.
 - **Breaking:** large Gaussian components now also have numerical determinant
   approximation error under the default `solver=:auto`. Use `solver=:exact`
   to reproduce the previous determinant algebra. Small components retain

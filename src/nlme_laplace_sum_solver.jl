@@ -73,7 +73,8 @@ function _brm_plan_cell_value(group::_BRMSumCellGroup, c, I, u, cache)
     Base.invokelatest(group.prepared.q.outer.value, u, sums, c.i)
 end
 
-function _brm_spl_assemble_sums!(fc, g, h, p, u; derivatives, third, fb, tv)
+function _brm_spl_assemble_sums!(fc, g, h, p, u; derivatives, third, fb, tv,
+        correction=nothing)
     rest = 0.0
     parts = Any[]; jacobians = SparseMatrixCSC{Float64,Int}[]
     outers = SparseMatrixCSC{Float64,Int}[]
@@ -101,7 +102,7 @@ function _brm_spl_assemble_sums!(fc, g, h, p, u; derivatives, third, fb, tv)
             if comp == 0
                 rest += value
             else
-                fc[comp] += value
+                _brm_spl_add_value!(fc, correction, comp, value)
                 if fb !== nothing
                     for a in p.tsbptr[c.term]:(p.tsbptr[c.term + 1] - 1)
                         fb[p.tsb[a]] += value

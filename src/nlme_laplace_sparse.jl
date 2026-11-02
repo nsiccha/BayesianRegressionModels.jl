@@ -844,7 +844,9 @@ end
 function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
         derivatives::Bool, third::Bool=false, rows=nothing, crows=nothing, fb=nothing,
         uA=nothing, tv=nothing)
-    _brm_spl_prior!(fc, derivatives ? g : nothing, derivatives ? hnz : nothing, p, z, fb)
+    correction = p.algebra === nothing ? nothing : zeros(length(fc))
+    _brm_spl_prior!(fc, derivatives ? g : nothing, derivatives ? hnz : nothing,
+        p, z, fb; correction)
     rest = 0.0
     mmax = maximum(t -> p.tptr[t + 1] - p.tptr[t], eachindex(p.family); init=0)
     c1 = zeros(mmax); c2 = zeros(mmax)
@@ -877,7 +879,7 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
             rest += r.v
             continue
         end
-        fc[comp] += r.v
+        _brm_spl_add_value!(fc, correction, comp, r.v)
         if fb !== nothing
             for k in p.tsbptr[t]:(p.tsbptr[t + 1] - 1)
                 fb[p.tsb[k]] += r.v
@@ -908,7 +910,7 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
             rest += value
             continue
         end
-        fc[comp] += value
+        _brm_spl_add_value!(fc, correction, comp, value)
         if fb !== nothing
             for k in p.tsbptr[c.term]:(p.tsbptr[c.term + 1] - 1)
                 fb[p.tsb[k]] += value
@@ -926,7 +928,7 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
             end
         end
     end
-    rest + _brm_spl_assemble_sums!(fc, g, hnz, p, u; derivatives, third, fb, tv)
+    rest + _brm_spl_assemble_sums!(fc, g, hnz, p, u; derivatives, third, fb, tv, correction)
 end
 
 # Step blocks: inside a component, the levels of the coarsest integrated
@@ -1013,8 +1015,25 @@ end
 # The integrated draws' prior −½ zᵀPz into `fc` per component, its gradient
 # −Pz into `g` and P's sparse part into h's nonzeros (the soft sums' rank-one
 # part stays out of h, see `_brm_spl_woodbury`).
-function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing)
+# A large component's density can dwarf the final Newton gain. Compensating
+# its accumulation preserves that gain for the operator line search without
+# relaxing its acceptance or convergence tolerances.
+@inline function _brm_spl_add_value!(fc, ::Nothing, component, value)
+    fc[component] += value
+    nothing
+end
+@inline function _brm_spl_add_value!(fc, correction::AbstractVector, component, value)
+    increment = value - correction[component]
+    total = fc[component] + increment
+    correction[component] = (total - fc[component]) - increment
+    fc[component] = total
+    nothing
+end
+
+function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing;
+        correction=p.algebra === nothing ? nothing : zeros(length(fc)))
     fill!(fc, 0.0)
+    correction === nothing || fill!(correction, 0.0)
     g === nothing || fill!(g, 0.0)
     fb === nothing || fill!(fb, 0.0)
     w = 0
@@ -1023,7 +1042,7 @@ function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing)
             for i in b.z
                 mu, precision = _brm_spl_gaussian_parameters(p, i)
                 delta = precision * z[i] * (mu - z[i] / 2)
-                fc[p.component[i]] += delta
+                _brm_spl_add_value!(fc, correction, p.component[i], delta)
                 fb === nothing || (fb[p.sblock[i]] += delta)
                 g === nothing || (g[i] += precision * (mu - z[i]))
             end
@@ -1032,7 +1051,7 @@ function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing)
         for e in axes(b.edges, 2)
             i, j = b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]
             d = z[i] - z[j]
-            fc[p.component[i]] -= d^2 / 2
+            _brm_spl_add_value!(fc, correction, p.component[i], -d^2 / 2)
             if fb !== nothing
                 fb[p.sblock[i]] -= d^2 / 2
                 p.sblock[j] == p.sblock[i] || (fb[p.sblock[j]] -= d^2 / 2)
@@ -1045,7 +1064,8 @@ function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing)
         for (c, levels) in enumerate(b.sums)
             w += 1
             total = sum(l -> z[b.z[l, 1]], levels)
-            fc[p.component[b.z[first(levels), 1]]] -= b.λ[c] * total^2 / 2
+            _brm_spl_add_value!(fc, correction, p.component[b.z[first(levels), 1]],
+                -b.λ[c] * total^2 / 2)
             if fb !== nothing
                 for k in p.wsblocks[w]
                     fb[k] -= b.λ[c] * total^2 / 2

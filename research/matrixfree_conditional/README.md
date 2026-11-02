@@ -269,6 +269,20 @@ Finite differences were not reached. Receipt: `poisson-561792-v130.log`
 large-model result. `mode_trace.jl` records decrement, line-search step and
 observed density gain using the existing mode primitives to diagnose it
 without changing the policy or tolerances.
+The trace localized the loss of progress: after three full Newton steps the
+decrement was 1.964e-8, but sequential accumulation of the component density
+obscured its final gain. Accepted step fractions fell from 1/32 to about
+1e-10 while the decrement stalled at 1.843e-8. Linear solves remained accurate
+(maximum 17 iterations, checked residual 9.723e-14). Receipt:
+`poisson-561792-mode-trace.log` (exit 0, elapsed 310 s). Compensated component
+density accumulation restored full steps with unchanged acceptance and
+convergence tolerances. After the fourth full step the decrement dropped to
+4.918e-19; the next was 6.686e-27, below the unchanged 1e-24 tolerance. The
+gradient infinity norm fell to 2.220e-15. Linear solves used at most 17
+iterations with checked residual 7.344e-14. Receipt:
+`poisson-561792-mode-compensated.log` (exit 0, elapsed 543 s, token held 441 s).
+This establishes restored mode convergence; the full value, gradient and
+finite-difference rerun remains a separate check.
 
 The refreshed exact plan-reuse controls passed 123 assertions: 61 for row
 models and 62 for nonlinear sum factors, including strict subsets, comparison
