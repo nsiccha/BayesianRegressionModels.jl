@@ -33,6 +33,17 @@ end
         @test occursin("brm_gmrf_lpdf", code)
         @test !occursin("multi_normal", code)
         @test isempty(popcoefnames(gmrf_stan_model(; known), :field))
+        for fitted in (sb, reprocess(sb, data))
+            entry = only(e for e in values(fitted.preproc) if e.kind === :gmrf)
+            priors = BRM._brm_term_prior_expressions(entry.const_.prepared)
+            if known
+                @test all(p -> p isa BRM._BRMKnownTermValue, priors)
+                @test map(p -> p.value, values(priors)) == (1.2, 0.4, 1.7)
+            else
+                @test map(BRM.getf, values(priors)) == (Exponential, LogNormal, LogNormal)
+                @test map(BRM.getargs, values(priors)) == ((0.7,), (0.5, 0.8), (0.7, 0.6))
+            end
+        end
     end
 end
 

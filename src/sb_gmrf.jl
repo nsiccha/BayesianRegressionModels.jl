@@ -249,6 +249,17 @@ function _sb_predictor_term!(stmts, data, ::typeof(gmrf), term;
         arguments.mesh.vertices, arguments.mesh.cells)
     inner = Dict{Symbol,Any}(_sb_inner_data(:gmrf, value) for value in raw)
     prepared = _brm_prepare_term(term, target, (; data=inner))
+    # Preparation here receives raw support data, while the resolved prior
+    # configurations arrive separately. Preserve those same configurations in
+    # fitted metadata, so replay and descriptions agree with the emitted law.
+    prior_keys = (:sigma_prior, :spatial_prior, :temporal_prior)
+    priors = map(prior_keys, (:sigma, :spatial_length, :temporal_length)) do key, slot
+        cfg = _sb_term_cfg(term_overrides, term, slot)
+        isnothing(cfg) ? getproperty(prepared.state, key) :
+            _sb_known_cfg(cfg) ? _BRMKnownTermValue(cfg.known) : cfg.prior
+    end
+    prepared = _BRMPreparedTerm(gmrf, prepared.source,
+        merge(prepared.state, NamedTuple{prior_keys}(priors)), prepared.dependencies)
     state = prepared.state
     stem = Symbol("gmrf_", target, "_", join(prepared.source, "_"))
     field_data = _sb_gmrf_data(prepared)
