@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.120
+
+- Require ReactiveKernels 0.1.51 and ReactiveKernelsPPL 0.1.53 for selected-row
+  lowering through scalar plate collectors and broadcast observation
+  locations. The compiler preserves type information through scalar helpers
+  and skips inactive guarded capture indices, so strict cell queries and
+  NLME preparation can retain local reads through those collectors.
+
 ## 0.2.119
 
 - Sparse embedded Laplace retains model-scope observations of derived values,
