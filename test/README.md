@@ -1,5 +1,10 @@
 # Running the tests
 
+`runtime_constants.jl` checks strict RK inference of runtime `constant(...)`
+expressions from `brm(source; mod)`, changed fit inputs, frozen inputs, and
+printed-source round trips. It exercises constants feeding a parameter-dependent
+helper, so they remain graph recipes rather than bind-time data.
+
 `nlme_laplace_values.jl` checks sparse integration of model-scope observations:
 gathered predictors on distinct row axes against an exact Gaussian marginal,
 and derived count likelihoods against equivalent plate cells and numerical
