@@ -12,6 +12,16 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.136
+
+- RK interval-censored Normal responses retain finite log likelihoods and
+  native Enzyme Reverse gradients in both extreme tails, verified through
+  400 standard deviations against independent high-precision values and
+  location/log-scale derivatives.
+- **Breaking:** the RK backend requires ReactiveKernelsPPL 0.1.60 or later
+  (and its ReactiveKernelsDistributionKernels 0.1.1 floor). Update older
+  pinned RK environments; the test bootstrap selects the delivered repair.
+
 ## 0.2.135
 
 - Power-scaling sensitivity now uses PowerScaling.jl 0.1.0 and its PSIS.jl
