@@ -31,13 +31,14 @@ function _output_axis(output, caller)
             "$caller: labels do not match the element axis of $(output.name)"))
         return :coefficient => output.labels
     end
-    isnothing(output.segments) || throw(ArgumentError(
-        "$caller: output $(output.name) has a ragged element axis without semantic group labels"))
     if length(dims) == 1
         if output.role in (:linear_predictor, :posterior_predictive, :pointwise_loglik) ||
-           output.component === :contribution
+           (isnothing(output.segments) && output.component === :contribution)
+            # The descriptor shape is role-specific: ragged predictions have
+            # one value per element, while their likelihood has one per group.
             return :observation => Base.OneTo(only(dims))
-        elseif output.role === :parameter && isnothing(output.component) && isempty(output.predictors)
+        elseif isnothing(output.segments) && output.role === :parameter &&
+                isnothing(output.component) && isempty(output.predictors)
             # An explicitly declared vector's positions ARE its coordinates.
             return :element => Base.OneTo(only(dims))
         end

@@ -21,6 +21,12 @@ inherit `:observation` through elementary pointwise arithmetic and functions
 of row outputs and scalars, including chains of assignments. Vector length
 alone does not establish row alignment.
 
+Ragged predictions use flat `:observation` positions `1:N`, where `N` is
+the total number of elements. Their aggregate log likelihood uses `1:G`
+on its own `:observation` axis, one contribution per group, not per element.
+The output's `segments` retains the inclusive group ends of the predictive
+element axis; it does not partition the aggregate likelihood's `G` columns.
+
 The returned backing aliases the input: treat both as read-only. Unknown
 output-axis semantics are reported by name, never replaced by guessed labels.
 """
@@ -53,6 +59,8 @@ A TreeArrays record of posterior-predictive responses, with a leading `:draw`
 axis and descriptor-owned response coordinates. The second form labels the
 arrays already returned by `brm_predictive_draws`, without copying or drawing
 again. Per-chain matrix input retains chains separately. Requires TreeArrays.
+Ragged responses use flat `:observation` positions `1:N`; group boundaries
+remain available as `segments` on the descriptor's predictive output.
 """
 function brm_predictive_tree end
 
