@@ -59,7 +59,7 @@ Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PSIS = "0.9"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.18"
+StanBlocks = "0.2.19"
 Treebars = "0.1.1"
 Turing = "0.46"
 WarmupHMC = "0.2.10"
@@ -137,7 +137,8 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # moments and both log-CDF tails for ordinary distribution statistics.
 # 0b42d636 (StanBlocks 0.2.18) implements segment in @juliacompat
 # helpers, used by the native GMRF normalized sparse density.
-rev = "0b42d63688e19f42041840301e59700762516ade"
+# 009f4180 (0.2.19) adds indexed /= for its sparse solve and prior RNG.
+rev = "009f418067563349edf0b311004f215f7c4e1f17"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
@@ -298,4 +299,5 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
 # helper calls, guarded captures and broadcast observation locations.
 # Guarded gathered reductions through typed aliases: RK 0.1.52 / PPL 0.1.55.
-rev = "1968438e6d7281cef36af12fc3c538d7c5ecea0a"
+# RK 0.1.57 / PPL 0.1.64: caller-owned joint density KernelSpecs and geometry.
+rev = "0b39af36c33b5f4eacb78f2ab2cc3e4330cda69e"
