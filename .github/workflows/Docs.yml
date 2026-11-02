@@ -75,7 +75,7 @@ jobs:
           git clone -b devibe https://github.com/nsiccha/StanBlocks.jl.git
           julia --project=docs -e '
             using Pkg, TOML
-            # Julia 1.10 ignores [sources]; read BRM's release pins here.
+            # Julia 1.10 ignores [sources]; read the BRM release pins here.
             sources = TOML.parsefile("Project.toml")["sources"]
             pinned = map(["ReparametrizableDistributions", "PowerScaling"]) do name
               source = sources[name]
