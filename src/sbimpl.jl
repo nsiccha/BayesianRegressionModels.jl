@@ -4082,6 +4082,7 @@ SBBRMI(parent::BRMI, model, data::AbstractDict, preproc::AbstractDict,
 # Bind semantic meaning at emission time. These records are removed from the
 # Stan data dictionary and carried with the emitted artifact through replay.
 const _SB_BINDINGS_KEY = :__brm_emission_bindings__
+const _SB_CELL_FORMULA_BINDINGS_KEY = :__brm_cell_formula_bindings__
 const _SB_THRESHOLD_LOCATED_KEY = :__brm_threshold_located__
 # Raw grouping columns the ranef pass replaced by a dense index, each with the
 # value it removed (see `_sb_note_group_column!`). Settled once emission is
@@ -4695,6 +4696,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # A data-only assignment becomes a data field the same way, evaluated here
     # from this model's data (user decision `1tb1jrg`).
     brmi, _ = _brm_resolve_data_assignments(brmi; prefix="sbimpl")
+    data[_SB_CELL_FORMULA_BINDINGS_KEY] = Dict(_brm_operation_entries(brmi))
     # Predictors whose intercept an ordinal response's thresholds supply: their
     # categorical terms stay treatment-coded (see `_brm_cellmeans_block`).
     data[_SB_THRESHOLD_LOCATED_KEY] = _brm_threshold_located_predictors(brmi)
@@ -4905,6 +4907,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # Pop the preproc side-channel BEFORE building the SlicModel so it never
     # pollutes Stan's data dict.
     bindings = pop!(data, _SB_BINDINGS_KEY)
+    pop!(data, _SB_CELL_FORMULA_BINDINGS_KEY)
     pop!(data, _SB_TOTAL_PLANS_KEY)
     pop!(data, _SB_S2Z_PLANS_KEY)
     pop!(data, _SB_HS_PLANS_KEY)
@@ -16197,7 +16200,7 @@ end
 # of them, not just the preproc dict: with no observation bound, the fallback
 # tiers above would otherwise mistake a side-channel for a sizing column.
 _sb_is_side_channel_key(k::Symbol) =
-    k === _SB_PREPROC_KEY || k === _SB_BINDINGS_KEY ||
+    k === _SB_PREPROC_KEY || k === _SB_BINDINGS_KEY || k === _SB_CELL_FORMULA_BINDINGS_KEY ||
     k === _SB_THRESHOLD_LOCATED_KEY || k === _SB_HYPER_PLANS_KEY ||
     k === _SB_TOTAL_PLANS_KEY || k === _SB_S2Z_PLANS_KEY ||
     k === _SB_HS_PLANS_KEY || k === _SB_GROUP_COLUMNS_KEY ||

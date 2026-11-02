@@ -7,6 +7,32 @@ struct _BRMCellFormulaProgram{B}
     targets::Tuple{Vararg{Symbol}}
     positions::Tuple{Vararg{Int}}
     prior_positions::Tuple{Vararg{Int}}
+    declarations::Tuple{Vararg{Symbol}}
+    declaration_positions::Tuple{Vararg{Int}}
+end
+
+# A lexical reference keeps its declared column node. Treating it as raw data
+# would erase a sampled prior (notably the dimension of an LKJ factor).
+struct _BRMCellFormulaInputs{D,B}
+    raw::D
+    bindings::B
+end
+struct _BRMCellFormulaColumns{D,B}
+    columns::D
+    bindings::B
+end
+function Base.hasproperty(d::_BRMCellFormulaColumns, key::Symbol)
+    haskey(getfield(d, :bindings), key) || hasproperty(getfield(d, :columns), key)
+end
+function Base.getproperty(d::_BRMCellFormulaColumns, key::Symbol)
+    bindings = getfield(d, :bindings)
+    haskey(bindings, key) ? bindings[key] : getproperty(getfield(d, :columns), key)
+end
+data(d::_BRMCellFormulaInputs) = _BRMCellFormulaColumns(data(d.raw), d.bindings)
+maybedata(d::_BRMCellFormulaInputs) = _BRMCellFormulaColumns(maybedata(d.raw), d.bindings)
+function capturedata(d::_BRMCellFormulaInputs, names::Tuple)
+    columns = data(d)
+    (; (key => getproperty(columns, key) for key in names if hasproperty(columns, key))...)
 end
 
 _brm_cell_formula_marker(_callable) = false
@@ -18,7 +44,7 @@ function _brm_cell_has_formula(value::Expr, scope)
     any(arg -> _brm_cell_has_formula(arg, scope), value.args)
 end
 
-function _brm_cell_formula_program(statements, scope::Module)
+function _brm_cell_formula_program(statements, scope::Module; inputs=())
     positions = Int[]
     targets = Symbol[]
     priors = Int[]
@@ -34,8 +60,31 @@ function _brm_cell_formula_program(statements, scope::Module)
     end
     isempty(positions) && return nothing
     selected = sort!([positions; priors])
+    # Include local priors read by a formula or its hyperpriors, transitively.
+    # Observation positionals and unrelated statements retain ordinary cell
+    # lowering. A shared prior is supplied as a binding, never redeclared here.
+    candidates = Dict(stmt.args[2] => i for (i, stmt) in enumerate(statements)
+        if isxcall(stmt, :~) && stmt.args[2] isa Symbol &&
+           !(stmt.args[2] in targets) && !(stmt.args[2] in inputs))
+    declarations = Symbol[]
+    declaration_positions = Int[]
+    refs = Set{Symbol}()
+    foreach(i -> _brm_cell_value_refs!(refs, statements[i]), selected)
+    while true
+        needed = sort!([key for key in keys(candidates) if key in refs && !(key in declarations)];
+            by=key -> candidates[key])
+        isempty(needed) && break
+        for key in needed
+            push!(declarations, key)
+            push!(declaration_positions, candidates[key])
+            _brm_cell_value_refs!(refs, statements[candidates[key]])
+        end
+    end
+    append!(selected, declaration_positions)
+    sort!(selected)
     source = Expr(:block, (deepcopy(statements[i]) for i in selected)...)
-    _BRMCellFormulaProgram(brm(source; mod=scope), Tuple(targets), Tuple(positions), Tuple(priors))
+    _BRMCellFormulaProgram(brm(source; mod=scope), Tuple(targets), Tuple(positions), Tuple(priors),
+        Tuple(declarations), Tuple(declaration_positions))
 end
 
 function _brm_prepare_cell_formulas(program::_BRMCellFormulaProgram, data; geometry::Bool=true)

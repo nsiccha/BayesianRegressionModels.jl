@@ -1,16 +1,37 @@
 # Cell-local formulas use ordinary predictor emission. Derived inputs are
 # stacked on the plate axis; each invocation retains its own joint prior.
-function _sb_cell_formula_instance(program, raw, scope)
-    model = program.builder(_BRMReplayData((;), raw))
+_sb_cell_formula_syntax(x) = x
+_sb_cell_formula_syntax(x::Expr) = Expr(x.head, map(_sb_cell_formula_syntax, x.args)...)
+_sb_cell_formula_syntax(x::StanBlocks.SlicModel) =
+    (; model=_sb_cell_formula_syntax(x.model), x.data, x.mod, x.observations)
+_sb_cell_formula_syntax(x::AbstractVector) = map(_sb_cell_formula_syntax, x)
+_sb_cell_formula_syntax(x::AbstractDict) =
+    Dict(key => _sb_cell_formula_syntax(value) for (key, value) in x)
+
+function _sb_cell_formula_instance(program, raw, scope; bindings=Dict{Symbol,Any}())
+    model = program.builder(_BRMCellFormulaInputs(_BRMReplayData((;), raw), bindings))
     overrides = _sb_prior_overrides(model)
     data = Dict{Symbol,Any}(_SB_PREPROC_KEY => Dict{Symbol,PreprocEntry}())
-    statements = map(program.targets) do target
+    statements = Dict{Int,Vector{Any}}()
+    for (target, position) in zip(program.targets, program.positions)
         op = linear_predictor_op(model, target)
         _, rhs = getargs(op, 2)
         emitted = Any[]
         _sb_linear_predictor!(emitted, data, target, rhs;
             effect_overrides=overrides, mod=scope)
-        emitted
+        statements[position] = emitted
+    end
+    for (target, position) in zip(program.declarations, program.declaration_positions)
+        op = _named_op(model.operations[target])
+        _, rhs = getargs(op, 2)
+        emitted = Any[]
+        previous = Set(keys(data))
+        _sb_emit_sampled_declaration!(emitted, data, target, getf(rhs), rhs)
+        # Vector-prior dimensions are fitted declaration constants.
+        for key in setdiff(Set(keys(data)), previous)
+            _sb_record_static!(data, key)
+        end
+        statements[position] = emitted
     end
     preproc = pop!(data, _SB_PREPROC_KEY)
     (; data, preproc, statements)
@@ -18,22 +39,30 @@ end
 
 function _sb_cell_formulas!(body, data, plate_target, names, params, scope;
         labels, group, distinct)
-    program = _brm_cell_formula_program(body, scope)
+    program = _brm_cell_formula_program(body, scope; inputs=params)
     program === nothing && return body
     isempty(labels) && throw(ArgumentError("a formula plate needs at least one fitted cell"))
     # Only data-backed positionals participate in preparation. Other inputs
     # remain symbolic references in the native emitted cell.
     inputs = [(param, key) for (param, key) in zip(params, names) if haskey(data, key)]
+    locals = Set((program.targets..., program.declarations...))
+    bindings = Dict(key => column for (key, column) in
+        get(data, _SB_CELL_FORMULA_BINDINGS_KEY, Dict{Symbol,Any}())
+        if !(key in params) && !(key in locals))
     cells = map(eachindex(labels)) do i
         raw = Dict{Symbol,Any}(data)
+        foreach(key -> delete!(raw, key), locals)
         for (param, key) in inputs
             raw[param] = data[key][i]
         end
-        _sb_cell_formula_instance(program, raw, scope)
+        _sb_cell_formula_instance(program, raw, scope; bindings)
     end
     local_keys = sort!(collect(keys(first(cells).data)); by=string)
     all(c -> Set(keys(c.data)) == Set(local_keys), cells) || throw(ArgumentError(
         "cell formulas must emit the same named inputs in each plate cell"))
+    syntax = _sb_cell_formula_syntax(first(cells).statements)
+    all(c -> _sb_cell_formula_syntax(c.statements) == syntax, cells) || throw(ArgumentError(
+        "cell formula declarations must have the same structure in each plate cell"))
     # Each datum is passed explicitly to the cell, including known parameter
     # values. Ragged dimensions therefore follow each field's fitted support.
     owned = Dict{Symbol,Symbol}()
@@ -79,7 +108,7 @@ function _sb_cell_formulas!(body, data, plate_target, names, params, scope;
     end
     _sb_record_preproc!(data, record_key, PreprocEntry(:cell_formulas,
         (; cells=fitted, labels=collect(labels), inputs, ragged_inputs, owned, group, distinct), group, true))
-    replacements = Dict(zip(program.positions, first(cells).statements))
+    replacements = first(cells).statements
     rewritten = Any[]
     for (i, statement) in enumerate(body)
         i in program.prior_positions && continue
