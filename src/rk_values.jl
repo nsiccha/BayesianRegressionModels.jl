@@ -975,6 +975,10 @@ function _rk_value_callee!(bindings, callable, taken)
 end
 
 _rk_value_expr!(bindings, value, taken) = value
+# Function arguments need the same named bindings as call heads; raw Julia
+# function objects are not literals in the emitted RKPPL source.
+_rk_value_expr!(bindings, value::Function, taken) =
+    _rk_value_callee!(bindings, value, taken)
 _rk_value_expr!(bindings, value::_BRMPreparedRef, taken) = value.name
 _rk_value_expr!(bindings, values::Tuple, taken) =
     Expr(:tuple, (_rk_value_expr!(bindings, value, taken) for value in values)...)

@@ -275,7 +275,10 @@ const PINS = [
     # 5325554c keeps that libEnzyme build and repairs erfcx derivatives in
     # positive tails through third order (Enzyme snag erfcx-positive-t-db1c8c84).
     # Embedded Laplace needs those orders for scaled-tail likelihoods.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "5325554cab66d13ab34c22ec502fd00759ffdcf7"),  # dogfood (KB mirror only)
+    # ae936763 (libEnzyme build 0dd21172) includes 71c203f9: Julia 1.10
+    # inference preserves nested reduction types during ordinary Reverse,
+    # including sum(sum, columns) after matrix-valued plate helpers.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "ae936763b292ecc958aa33e1fa710f10ca2f9402"),  # dogfood (KB mirror only)
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also
