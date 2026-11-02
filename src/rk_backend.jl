@@ -6297,6 +6297,8 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
                 prepared, target, context.data, columns, taken))
         elseif prepared.callable === cdar
             push!(terms, _rk_plan_cdar_term!(prepared, target, context.data, columns, taken))
+        elseif prepared.callable === gmrf
+            push!(terms, _rk_plan_gmrf_term!(prepared, target, context.data, columns, taken; derived))
         else
             haskey(prepared.state, :fields) || error(
                 "$prefix: predictor `$target` structured term `$(nameof(prepared.callable))` " *
