@@ -14,6 +14,7 @@ wrapper for Julia runs.
 julia --project=test test/nlme_laplace_matrixfree_algebra.jl
 julia --project=test test/nlme_laplace_matrixfree.jl
 julia --project=test test/nlme_laplace_matrixfree_subset.jl
+julia --project=test test/smc_laplace_matrixfree.jl
 julia --project=test research/matrixfree_conditional/scaling.jl 44 38 24 det
 julia --project=test research/matrixfree_conditional/nonlinear.jl 10 10 10 exact fd
 julia --project=test research/matrixfree_conditional/nonlinear.jl 44 38 24 exact fd
@@ -313,3 +314,35 @@ cache wait). The strict matrix-free plan-subset rerun passed all 32 assertions
 for row and nonlinear-sum models, including comparison against fresh targets,
 finite-difference gradients, rebuilt references and unchanged source plans.
 Receipt: `matrixfree-subset-fix-v130.log` (exit 0, elapsed 291 s).
+
+## Final focused acceptance
+
+After the compensated density change and canonical dependency refresh, all
+166 assertions in the four focused suites passed:
+
+| Suite | Assertions | Exit | Elapsed | Retained receipt |
+| --- | ---: | ---: | ---: | --- |
+| Nonlinear targets, mode correction and plan policy | 74 | 0 | 456 s | `nonlinear-final-v131.log` |
+| Finite determinant derivatives, solves and draws | 33 | 0 | 36 s | `algebra-final-v131.log` |
+| Restricted row and nonlinear-sum plans | 32 | 0 | 280 s | `subset-final-v131.log` |
+| SMC ownership, checkpoint replay and target identity | 27 | 0 | 202 s | `smc-matrixfree-v131.log` |
+
+The nonlinear suite covers crossed effects, ordinary nonlinear cells,
+overlapping sums, moving negative-binomial shape and declared Gaussian priors
+with moving mean and scale. The SMC suite verifies replay from a fresh target,
+rejection of changed policy/probes/reference values, independent workspaces,
+conditional draws and cumulative-data references.
+
+These runs started at `d28f513e` using ReactiveKernels 0.1.52 and
+ReactiveKernelsPPL 0.1.57 from `1968438e6d72`, Enzyme 0.13.217 from
+`93e89fc870d2`, Krylov 0.10.12, KrylovKit 0.10.4 and
+LimitedLDLFactorizations 0.5.2. While they ran, `99684930` merged canonical
+`fd30f300` and reserved version 0.2.132. That merge changed ragged draw labels,
+documentation and the version; the Laplace/SMC numerical source and dependency
+pins were unchanged. The test manifest's path dependency still recorded
+version 0.2.131, but loaded this worktree. This is focused acceptance, not a
+run of the entire repository suite.
+
+The companion guide at `03a4e1923`, based on Claude `b75c517f`, passed all six
+affected fixtures (exit 0, 22 s, `skills-fixtures-v132.log`). The source and
+guide remain review candidates until the user's landing decision is resolved.
