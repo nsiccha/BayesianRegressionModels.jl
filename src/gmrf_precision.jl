@@ -334,3 +334,48 @@ function _brm_gmrf_precision_diagonal!(out, mesh::_BRMGMRFMesh,
     end
     out
 end
+
+# A solver-facing view of the separable prior, with reusable spatial buffers.
+# Each prepared solver owns this mutable workspace; no field-sized factor or
+# precision entries are retained by the operator.
+struct _BRMGMRFPrecisionOperator{M,T,C,W}
+    mesh::M
+    times::T
+    spatial_length::Float64
+    temporal_length::Float64
+    correlation_factor::C
+    shape::NTuple{3,Int}
+    ncoordinates::Int
+    workspace::W
+end
+function _BRMGMRFPrecisionOperator(mesh::_BRMGMRFMesh, times, spatial_length,
+        temporal_length, L)
+    _brm_gmrf_positive(spatial_length, "spatial length scale")
+    _brm_gmrf_positive(temporal_length, "temporal length scale")
+    size(L, 1) == size(L, 2) && all(>(0), diag(L)) ||
+        throw(ArgumentError("gmrf channel factor must be square with a positive diagonal"))
+    layout = _BRMGMRFStateLayout(length(mesh.mass), collect(1:size(L, 1)), times)
+    shape = (layout.nvertices, length(layout.channels), length(layout.times))
+    workspace = _brm_gmrf_precision_workspace(zeros(shape[1], shape[2], 1))
+    _BRMGMRFPrecisionOperator(mesh, layout.times, Float64(spatial_length),
+        Float64(temporal_length), Matrix{Float64}(L), shape, layout.ncoordinates, workspace)
+end
+Base.size(Q::_BRMGMRFPrecisionOperator) = (Q.ncoordinates, Q.ncoordinates)
+Base.size(Q::_BRMGMRFPrecisionOperator, d::Integer) = size(Q)[d]
+Base.eltype(::Type{<:_BRMGMRFPrecisionOperator}) = Float64
+Base.eltype(::_BRMGMRFPrecisionOperator) = Float64
+function LinearAlgebra.mul!(out::AbstractVector, Q::_BRMGMRFPrecisionOperator,
+        x::AbstractVector)
+    length(out) == length(x) == Q.ncoordinates || throw(DimensionMismatch(
+        "gmrf precision vector size"))
+    _brm_gmrf_precision_mul!(reshape(out, Q.shape), reshape(x, Q.shape), Q.mesh,
+        Q.times, Q.spatial_length, Q.temporal_length, Q.correlation_factor, Q.workspace)
+    out
+end
+(Q::_BRMGMRFPrecisionOperator)(x) = mul!(similar(x, Float64), Q, x)
+function LinearAlgebra.diag(Q::_BRMGMRFPrecisionOperator)
+    out = zeros(Q.ncoordinates)
+    _brm_gmrf_precision_diagonal!(reshape(out, Q.shape), Q.mesh, Q.times,
+        Q.spatial_length, Q.temporal_length, Q.correlation_factor)
+    out
+end
