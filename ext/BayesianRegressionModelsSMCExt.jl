@@ -63,12 +63,13 @@ function BRM.brm_smc_tune(model::Union{BRM.BRMI,BRM.RKBRMI};
         rng, init, reference=nothing,
         temperatures=nothing, pilot_steps=64, pilot=nothing,
         max_reflections=nothing, recording_target=nothing, pilot_evaluations=nothing,
+        reference_inflation=nothing,
         options=PPL.SMCOptions(), ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
     rk = model isa BRM.RKBRMI ? model : BRM.RKBRMI(model)
     id = binding_identity(rk)
     target = prepare(rk, ad_backend, id, id)
     controls = tuning_controls(; temperatures, pilot, max_reflections,
-        recording_target, pilot_evaluations)
+        recording_target, pilot_evaluations, reference_inflation)
     PPL.tune_smc(target; rng, init, reference, controls..., pilot_steps, options)
 end
 

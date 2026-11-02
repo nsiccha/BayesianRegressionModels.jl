@@ -29,6 +29,7 @@ function _brm_validate_smc_fit end
     brm_smc_tune(model; rng, init, reference=nothing,
         temperatures=nothing, pilot_steps=64, pilot=nothing,
         max_reflections=nothing, recording_target=nothing, pilot_evaluations=nothing,
+        reference_inflation=nothing,
         options=SMCOptions(), ad_backend=AutoEnzyme(mode=Enzyme.Reverse))
     brm_smc_tune(completed_fit::BRMSMCFit, cumulative_data; rng, init,
         temperatures=nothing, pilot_steps=64, pilot=nothing,
@@ -62,9 +63,15 @@ already contain a schedule. Pilot draws are not posterior samples.
 
 For an initial fit, the normalized reference defaults to standard Normal and
 stays fixed. With `pilot=:adaptive, reference=:pilot`, a separate full-target
-pilot first estimates the reference mean and scale; that normalized Gaussian
-is then frozen before temperature-grid tuning and production. The scale is
-stored as copied plain data, with no dense metric. Omit `reference` in the
+pilot first estimates the reference mean and, from RKPPL 0.1.47, the spread
+of its retained draws in the learned basis multiplied by `reference_inflation`
+(RKPPL's default is 2; `nothing` leaves that default; 1 uses the uninflated
+moments); that normalized Gaussian is then frozen before temperature-grid
+tuning and production. The scale is stored as copied plain data, with no
+dense metric. Cross-covariances in the learned basis are discarded, and
+inflation does not guarantee posterior coverage: compare independent runs
+(`brm_smc_compare`) and read each stage's `reference_sd` beside its
+`coordinate_sd`. Omit `reference` in the
 subsequent fit to use the schedule's exact reference; an explicit conflicting
 reference rejects. For an update, supply
 the complete cumulative data. The original preprocessing is frozen and the
