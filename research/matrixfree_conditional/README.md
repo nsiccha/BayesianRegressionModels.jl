@@ -281,8 +281,20 @@ convergence tolerances. After the fourth full step the decrement dropped to
 gradient infinity norm fell to 2.220e-15. Linear solves used at most 17
 iterations with checked residual 7.344e-14. Receipt:
 `poisson-561792-mode-compensated.log` (exit 0, elapsed 543 s, token held 441 s).
-This establishes restored mode convergence; the full value, gradient and
-finite-difference rerun remains a separate check.
+The subsequent full Poisson target also passed at 561,792 coordinates. A
+warmed value and gradient took 59.42895 s and cumulatively allocated
+7,215,291,560 bytes; the first evaluation took 74.4110 s. Setup, including
+compilation, took 231.385 s and cumulatively allocated 26,836,877,444 bytes.
+These allocation totals are not peak process memory. Repeated evaluations
+were identical, no mode failures were recorded, and finite differences over
+all three population coordinates agreed to relative error 3.293e-9. Linear
+solves used at most 17 iterations (checked residual 7.344e-14), shifted solves
+14 (residual 9.694e-12). The log determinant was 1119555.02242, with probe
+MCSE 25.4759 and 10,109,334 reference entries. This run did not compute an
+exact sparse determinant, so it establishes density-gradient consistency,
+not approximation accuracy at this size. Host load was 31.86 at grant and
+37.56 at release. Receipt: `poisson-561792-compensated-fd.log` (exit 0,
+elapsed 779 s, token held 776 s).
 
 The refreshed exact plan-reuse controls passed 123 assertions: 61 for row
 models and 62 for nonlinear sum factors, including strict subsets, comparison
