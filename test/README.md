@@ -1040,6 +1040,16 @@ the `resample_groups` route. It also checks the ambiguity message for an
 unqualified hyper-predictor. `BRM_PRED_RUNTIME=0` skips the compiled-model
 sets.
 
+`nlme_svi_sampling.jl` checks work-weighted batches by exact enumeration of
+density and gradient expectations, including repeated draws, the alias
+distribution, positive probabilities and bounded batch allocations.
+`nlme_svi_weighted_iteration.jl` exercises the production optimizer against
+an analytic target, including duplicate evaluation counts, reported visits,
+and lazy local averages against averages of every iterate.
+`nlme_svi_workspace.jl` checks compact local layouts against independent dense
+gather/scatter arithmetic and storage independent of the global dimension.
+These three arithmetic scripts need only Julia's standard libraries.
+
 `nlme_svi.jl` checks minibatch stochastic variational inference
 (`brm_svi_fit`). The minibatch split of the RK target is checked first: the
 global prior and Jacobian term plus every subject's cell term equal the full

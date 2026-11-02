@@ -11,8 +11,9 @@
 #
 # with P the authored priors and coordinate Jacobians at z = 0 (RK's `:prior`
 # and `:log_jacobian` queries minus the subject draws' N(0, 1) constants) and
-# ℓ_i the subject's observation cells. A batch of B subjects, its terms scaled
-# by N/B, is an unbiased estimate of that sum, and of its gradient.
+# ℓ_i the subject's observation cells. Uniform distinct-unit batches use N/B;
+# work-weighted draws use multiplicity/(B p_i). Both estimate the same sum and
+# gradient without bias from the choice of unit.
 #
 # The variational family is Gaussian and factorizes into a global factor and
 # one factor per subject:
@@ -49,6 +50,9 @@ end
 _brm_svi_rank(::MeanFieldGlobal) = 0
 _brm_svi_rank(f::LowRankGlobal) = f.rank
 
+include("nlme_svi_sampling.jl")
+include("nlme_svi_workspace.jl")
+
 # ── The minibatch target ─────────────────────────────────────────────────────
 
 # Packed positions of the global coordinates: everything the NLME model
@@ -69,12 +73,11 @@ function _brm_svi_target(m::BRMNLMEModel)
     # costs its own coordinates, not its subject's whole block.
     plan = _brm_nlme_cell_plan(m.backend, m.cell_query, m.unit, globals, units,
         _brm_nlme_cell_state(m).reads)
-    # For subject i, `order[i]` sorts [globals; units[i]] into packed order.
-    order = [sortperm(vcat(globals, block)) for block in units]
-    indices = [vcat(globals, block)[o] for (block, o) in zip(units, order)]
-    work = [(; values=zeros(length(o)), gradient=zeros(length(o))) for o in order]
+    layouts = [_brm_svi_unit_layout(globals, block) for block in units]
+    width = length(globals) + maximum(length, units; init=0)
+    work = (; values=zeros(width), gradient=zeros(width))
     nz = count(==(:subject_effect), m.view.role)
-    (; m, globals, units, plan, work, order, indices, prior=nothing,
+    (; m, globals, units, plan, work, layouts, prior=nothing,
        z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
 end
 
@@ -91,17 +94,14 @@ end
 # ℓ_i(g, z) + log N(z; 0, I) for subject i, with its gradients in g and z.
 function _brm_svi_unit_term!(gg, gz, t, i, g, z)
     D = length(t.globals)
-    order = t.order[i]
-    w = t.work[i]
-    joint = vcat(g, z)
-    w.values .= joint[order]
-    fill!(w.gradient, 0.0)
-    value = _brm_nlme_cell_plan_sum!(w.gradient, t.plan, t.m.cell_query, t.m.unit,
-        i, w.values)
-    joint_gradient = similar(joint)
-    joint_gradient[order] .= w.gradient
-    gg .= view(joint_gradient, 1:D)
-    gz .= view(joint_gradient, D+1:length(joint))
+    layout = t.layouts[i]
+    values = view(t.work.values, 1:D+length(z))
+    gradient = view(t.work.gradient, 1:D+length(z))
+    _brm_svi_joint!(values, layout, g, z)
+    fill!(gradient, 0.0)
+    value = _brm_nlme_cell_plan_sum!(gradient, t.plan, t.m.cell_query, t.m.unit,
+        i, values)
+    _brm_svi_split_gradient!(gg, gz, layout, gradient)
     value + _brm_svi_unit_prior!(gz, t.prior, i, z)
 end
 
@@ -164,6 +164,7 @@ _brm_svi_draw_unit(q, i, εi) = q.M[i] .+ _brm_svi_unit_offset(q, i, εi)
 # The entropy of q, up to the constant (D + Σ d_i)(1 + log 2π)/2.
 _brm_svi_entropy(q) = _brm_svi_global_logdet(_brm_svi_global_geometry(q)) / 2 -
     sum(U -> sum(log, diag(U)), q.U; init=0.0)
+_brm_svi_unit_entropy(q, i) = -sum(log, diag(q.U[i]))
 
 # ── The global factor: Adam ──────────────────────────────────────────────────
 
@@ -287,9 +288,8 @@ end
 # step of each batch subject. Returns the minibatch estimate of E_q log p
 # (without the entropy).
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
-        whiten=false)
-    D, N = length(t.globals), length(t.units)
-    s = N / length(batch)
+        whiten=false, weights=fill(length(t.units) / length(batch), length(batch)))
+    D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
     P, gP = _brm_svi_global_term(t, g)
@@ -298,10 +298,11 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     batch_value = 0.0
     steps = Vector{NTuple{3,Vector{Float64}}}(undef, length(batch))
     for (k, i) in enumerate(batch)
+        s = weights[k]
         εi = randn(rng, length(t.units[i]))
         gz₊, gz₋ = zeros(length(εi)), zeros(length(εi))
         m, δ = q.M[i], _brm_svi_unit_offset(q, i, εi)
-        batch_value += (_brm_svi_unit_term!(gg₊, gz₊, t, i, g, m .+ δ) +
+        batch_value += s * (_brm_svi_unit_term!(gg₊, gz₊, t, i, g, m .+ δ) +
             _brm_svi_unit_term!(gg₋, gz₋, t, i, g, m .- δ)) / 2
         w .+= (s / 2) .* (gg₊ .+ gg₋)
         steps[k] = ((gz₊ .+ gz₋) ./ 2, (gz₊ .- gz₋) ./ 2, εi)
@@ -314,19 +315,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     for (k, i) in enumerate(batch)
         _brm_svi_unit_step!(q, i, steps[k]..., β)
     end
-    P + s * batch_value
-end
-
-# `B` distinct subjects drawn uniformly from `1:N` in O(B) (Floyd's algorithm),
-# so choosing a batch does not scale with the number of subjects.
-function _brm_svi_batch(rng, N, B)
-    chosen = Set{Int}()
-    sizehint!(chosen, B)
-    for j in N-B+1:N
-        k = rand(rng, 1:j)
-        push!(chosen, k in chosen ? j : k)
-    end
-    collect(chosen)
+    P + batch_value
 end
 
 const _BRM_SVI_PHASES = (lower="Lower to ReactiveKernels", prepare="Prepare NLME model",
@@ -344,8 +333,18 @@ const _BRM_SVI_PHASES = (lower="Lower to ReactiveKernels", prepare="Prepare NLME
 # those iterations (Polyak–Ruppert), which damps the noise a stochastic step
 # leaves.
 function _brm_svi_fit!(rng, t, q; batch_size, max_iterations, lr_global, unit_step,
-        polish_lr, window, patience, min_windows, polish_windows, node=nothing)
+        polish_lr, window, patience, min_windows, polish_windows, node=nothing,
+        unit_sampling=:uniform)
     N = length(t.units)
+    # A structural work proxy: local coordinates plus selected-coordinate
+    # incidences across this unit's cells. This is not a runtime measurement.
+    work = [Float64(length(t.units[i])) + sum(length, Iterators.flatten(
+        t.plan.selections[i]); init=0) for i in 1:N]
+    sampler = _brm_svi_unit_sampler(unit_sampling, work)
+    visits, draws = zeros(Int, N), zeros(Int, N)
+    sampling = (; method=unit_sampling, work, probabilities=sampler.probabilities,
+        visits, draws)
+    gradient_calls = 0
     adam(lr) = _BRMSVIAdam(length(_brm_svi_global_vector(q)), lr)
     global_opt = adam(lr_global)
     B = min(batch_size, N)
@@ -354,21 +353,43 @@ function _brm_svi_fit!(rng, t, q; batch_size, max_iterations, lr_global, unit_st
     windows = NamedTuple{(:mean, :var),Tuple{Float64,Float64}}[]
     polish_start = 0
     average = nothing
+    averaged_through = zeros(Int, N)
+    unit_entropy = [_brm_svi_unit_entropy(q, i) for i in 1:N]
+    entropy_sum = sum(unit_entropy)
     for it in 1:max_iterations
         polishing = polish_start > 0
         scale = polishing ? 1 / sqrt(1 + (it - polish_start) / W) : 1.0
-        value = _brm_svi_iteration!(rng, t, q, global_opt, _brm_svi_batch(rng, N, B),
+        batch = _brm_svi_batch(rng, sampler, B)
+        # Accrue unchanged local factors up to the preceding iteration before
+        # overwriting any of them. Globals still move and average every step.
+        polishing && _brm_svi_average_units!(average, q, averaged_through,
+            batch.indices, it - polish_start - 1)
+        for (k, i) in enumerate(batch.indices)
+            visits[i] += 1
+            draws[i] += batch.multiplicities[k]
+        end
+        gradient_calls += 2length(batch.indices)
+        value = _brm_svi_iteration!(rng, t, q, global_opt, batch.indices,
             scale * (polishing ? polish_lr : lr_global), scale * unit_step;
-            whiten=polishing)
-        push!(trace, value + _brm_svi_entropy(q))
+            whiten=polishing, weights=batch.weights)
+        for i in batch.indices
+            entropy = _brm_svi_unit_entropy(q, i)
+            entropy_sum += entropy - unit_entropy[i]
+            unit_entropy[i] = entropy
+        end
+        push!(trace, value + entropy_sum +
+            _brm_svi_global_logdet(_brm_svi_global_geometry(q)) / 2)
         if polishing
             k = it - polish_start
-            for name in (:μ, :ρ, :Β, :M, :Λ)
+            for name in (:μ, :ρ, :Β)
                 _brm_svi_average!(getfield(average, name), getfield(q, name), k)
             end
-            k >= polish_windows * W && return (; q=_brm_svi_factor!(average),
-                elbo=trace, elbo_windows=first.(windows), converged=true,
-                iterations=it)
+            if k >= polish_windows * W
+                _brm_svi_average_units!(average, q, averaged_through, 1:N, k)
+                return (; q=_brm_svi_factor!(average), elbo=trace,
+                    elbo_windows=first.(windows), converged=true,
+                    iterations=it, sampling, unit_gradient_calls=gradient_calls)
+            end
         end
         it % W == 0 || continue
         w = view(trace, it-W+1:it)
@@ -388,8 +409,11 @@ function _brm_svi_fit!(rng, t, q; batch_size, max_iterations, lr_global, unit_st
             end
         end
     end
+    average === nothing || _brm_svi_average_units!(average, q, averaged_through,
+        1:N, max_iterations - polish_start)
     (; q=average === nothing ? q : _brm_svi_factor!(average), elbo=trace,
-       elbo_windows=first.(windows), converged=false, iterations=max_iterations)
+       elbo_windows=first.(windows), converged=false, iterations=max_iterations,
+       sampling, unit_gradient_calls=gradient_calls)
 end
 
 # The running mean `a` of iterates `x`, at the k-th: an array, or one array
@@ -397,6 +421,23 @@ end
 _brm_svi_average!(a::AbstractArray{<:Real}, x, k) = (@. a += (x - a) / k; a)
 _brm_svi_average!(a::AbstractVector{<:AbstractArray}, x, k) =
     (foreach((ai, xi) -> _brm_svi_average!(ai, xi, k), a, x); a)
+
+# Weighted running averages over stretches during which a unit was unchanged.
+# This equals visiting every unit at every polishing iteration, but touches
+# only the selected units until the single final flush.
+function _brm_svi_average_units!(average, q, through, indices, iteration)
+    for i in indices
+        count = iteration - through[i]
+        count == 0 && continue
+        weight = count / iteration
+        for name in (:M, :Λ)
+            a, x = getfield(average, name)[i], getfield(q, name)[i]
+            @. a += weight * (x - a)
+        end
+        through[i] = iteration
+    end
+    average
+end
 
 # The subjects' Cholesky factors of an averaged precision.
 function _brm_svi_factor!(q)
@@ -466,7 +507,8 @@ end
 
 """
     brm_svi_fit(x; laplace=nothing, batch_size=32, rng=Random.default_rng(),
-        family=MeanFieldGlobal(), ndraws=1000, start=nothing, inits=nothing,
+        family=MeanFieldGlobal(), unit_sampling=:uniform,
+        ndraws=1000, start=nothing, inits=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), progress=nothing, kwargs...)
         -> (; draws, coordinates, diagnostics)
@@ -474,10 +516,10 @@ end
 Minibatch stochastic variational inference for a model whose subjects are
 conditionally independent given the population (the subjects of
 [`brm_nlme_view`](@ref)), over the RK backend's packed unconstrained
-coordinates. Each iteration evaluates `batch_size` subjects, each at an
-antithetic pair of draws through their own observation cells, and scales them
-to all subjects, so its cost follows the batch size, not the number of
-subjects.
+coordinates. Each iteration samples up to `batch_size` units, evaluates an
+antithetic pair of draws through each selected unit's own observation cells,
+and weights their terms to estimate the full sum. Work depends on the selected
+units' sizes and the global factor as well as the batch size.
 
 With `laplace=GaussianBlockLaplace()`, jointly integrate certified Gaussian
 coefficients, unit effects and shared fields inside the variational target.
@@ -500,6 +542,15 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   `LowRankGlobal(r)` (diagonal plus rank `r`). Each subject has its own
   full-covariance Gaussian factor over its block, whose length can differ
   between the subjects of a nested model.
+- `unit_sampling` — `:uniform` selects distinct units with weight `N/B`;
+  `:work` makes `B` draws with replacement, with probabilities
+  `pᵢ = (1/N + wᵢ/sum(w))/2`. The structural work proxy `wᵢ` counts local
+  coordinates and selected-coordinate incidences in that unit's cell plan;
+  it is not measured runtime. All-zero work gives uniform probabilities.
+  Repeated selections share one antithetic evaluation and one local update,
+  with multiplicity retained in the global density and gradient weight
+  `countᵢ/(B*pᵢ)`. Every unit has positive probability. This changes the visit
+  schedule and estimator variance; it does not guarantee faster convergence.
 - `start` / `inits` — where the globals' means start: the prior medians by
   default, a full RK packed point, or initial values keyed by prior address as
   [`brm_start`](@ref) takes them (the rest at the prior medians).
@@ -520,7 +571,9 @@ Returns `draws`, `ndraws` draws from the fitted approximation as RK packed
 unconstrained points (coordinates × draws, one column per draw, the order of
 `coordinate_names(rk.model.layout)`), their `coordinates`, and `diagnostics`:
 the ELBO trace (`elbo`, `elbo_windows`, up to a constant), `converged`,
-`iterations`, the variational parameters `q`, the packed positions of the
+`iterations`, the variational parameters `q`, sampling diagnostics (`sampling`:
+work proxy, probabilities, per-unit draw counts and actual update visits),
+the actual `unit_gradient_calls`, the packed positions of the
 global coordinates (`globals`), `seconds` of optimization, and the prepared
 `model`. The approximation is variational: posterior means are close, and
 the spread of the population, scale and correlation coordinates is too narrow.
@@ -531,13 +584,15 @@ function brm_svi_fit(x; laplace=nothing, kwargs...)
 end
 
 function _brm_svi_fit(x, previous; rng=Random.default_rng(), batch_size=32,
-        max_iterations=100_000, family=nothing,
+        max_iterations=100_000, family=nothing, unit_sampling=:uniform,
         lr_global=0.01, unit_step=0.1, start=nothing, inits=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), global_scale=0.1, unit_scale=1.0,
         ndraws=1000, polish_lr=0.05, window=nothing, patience=10, min_windows=40,
         polish_windows=20, progress=nothing)
     family = _brm_svi_family(previous, family)
+    unit_sampling in (:uniform, :work) || throw(ArgumentError(
+        "brm_svi_fit: unit_sampling must be :uniform or :work"))
     batch_size >= 1 || throw(ArgumentError("brm_svi_fit: batch_size must be positive"))
     max_iterations >= 0 || throw(ArgumentError("brm_svi_fit: max_iterations must be nonnegative"))
     previous === nothing || (start === nothing && inits === nothing) || throw(ArgumentError(
@@ -554,14 +609,14 @@ function _brm_svi_fit(x, previous; rng=Random.default_rng(), batch_size=32,
             seconds = @elapsed fit = _brm_enter_phase(phases.fit) do phase
                 _brm_svi_fit!(rng, t, q; batch_size, max_iterations, lr_global,
                     unit_step, polish_lr, window, patience, min_windows,
-                    polish_windows, node=phase)
+                    polish_windows, unit_sampling, node=phase)
             end
             draws = _brm_run_phase(_ -> _brm_svi_draws(rng, t, fit.q, ndraws),
                 phases.draws)
             (; draws, coordinates=copy(m.view.coordinates), diagnostics=(;
                 fit.elbo, fit.elbo_windows, fit.converged, fit.iterations, fit.q,
                 globals=t.globals, seconds, model=m, source_id=_brm_svi_source_id(m.backend),
-                unit_gradient_calls=2min(batch_size, length(t.units)) * fit.iterations,
+                fit.sampling, fit.unit_gradient_calls,
                 streaming=_brm_svi_carried_state(previous, m, fit.q)))
         end
     end
