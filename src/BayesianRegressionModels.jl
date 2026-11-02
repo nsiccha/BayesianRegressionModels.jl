@@ -19,6 +19,7 @@ include("introspection.jl")
 using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays, Libdl,
       LogDensityProblems, LinearAlgebra, SpecialFunctions, Random, Statistics
 using StaticArrays: SMatrix, SVector, MMatrix, MVector
+using ReparametrizableDistributions: advance!!, lkj_cholesky!, simplex!
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, nonzeros, rowvals, nzrange, blockdiag
 using SelectedInversion: selinv_diag, selinv, selinv_extract
 import SparseArrays, SelectedInversion, KLU, MUMPS
