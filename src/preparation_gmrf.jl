@@ -63,13 +63,13 @@ function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, conte
     end
     vertices_source, vertices = _brm_term_data(:gmrf, arguments.mesh.vertices, context)
     cells_source, cells = _brm_term_data(:gmrf, arguments.mesh.cells, context)
-    vertices = _brm_fit_source(vertices_source, vertices)
-    cells = _brm_fit_source(cells_source, cells)
+    vertices = _brm_fitted(copy, :gmrf_vertices, vertices_source, vertices)
+    cells = _brm_fitted(copy, :gmrf_cells, cells_source, cells)
     vertices isa AbstractMatrix{<:Real} && cells isa AbstractMatrix{<:Integer} ||
         throw(ArgumentError("gmrf mesh needs numeric vertex and integer cell matrices"))
     size(vertices, 2) == 2 && size(cells, 2) == 3 || throw(ArgumentError(
         "gmrf mesh needs two vertex coordinates and three vertex indices per cell"))
-    correlation = _brm_level_correlation(arguments.cor; what="gmrf(...; cor=...)")
+    correlation = _brm_gmrf_correlation(arguments.cor)
     correlation === nothing || correlation.K == length(channels) || throw(DimensionMismatch(
         "gmrf channel correlation dimension must equal the fitted channel count"))
     source = (first.(spatial)..., time_source,
@@ -93,6 +93,17 @@ function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, conte
     indices = _brm_gmrf_state_indices(interpolation.indices, time, row_channels, layout)
     _BRMPreparedTerm(gmrf, source,
         merge(state, (; mesh, indices, weights=interpolation.weights)), dependencies)
+end
+
+function _brm_gmrf_correlation(value)
+    what = "gmrf(...; cor=...)"
+    if value isa NamedColumn && parent(value) isa DataColumn
+        factor = _brm_fitted(:gmrf_correlation, name(value), parent(parent(value))) do raw
+            _brm_correlation_factor(_brm_correlation_matrix(raw; what); what)
+        end
+        return _BRMLevelCorrelation(name(value), :data, size(factor, 1), factor)
+    end
+    _brm_level_correlation(value; what)
 end
 
 function _brm_replay_gmrf(training, context)
