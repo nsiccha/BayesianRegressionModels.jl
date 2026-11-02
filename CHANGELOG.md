@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.129
+
+- `brm_output_tree` labels random-effect standardized draws and centered
+  effects with fitted levels and coefficient margins, including flattened
+  and stratified carriers. Scales, correlation factors and Student-t mixing
+  weights carry their corresponding margin, stratum or level coordinates.
+  These outputs use fitted coordinate order regardless of the caller's name
+  order and retain views into the supplied draws. Unequal per-chain inputs
+  work with `TreeActualArray` for parameter-wise convergence diagnostics.
+- Per-row block contributions and model-scope assignments using elementary
+  pointwise operations on row outputs and scalars carry `:observation`,
+  including chained assignments. Equal vector lengths alone do not establish
+  observation coordinates.
+
 ## 0.2.128
 
 - Sparse embedded Laplace accepts declared independent Gaussian vectors such

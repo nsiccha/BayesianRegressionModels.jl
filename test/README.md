@@ -35,6 +35,16 @@ also check the labelled wrappers against their existing independent oracles.
 Use `julia --project=test test/setup_env.jl` first; it pins the optional
 plotting dependencies as well as the fitting stack.
 
+`draw_tree_coordinates.jl` checks random-effect parameter trees for known scales,
+correlated and centered effects, stratified blocks, Student-t mixing weights
+and shared predictors. Distinct supplied values and shuffled constrained names
+verify level/margin storage order. Unequal chains give the same R-hat and bulk
+and tail effective sample sizes as direct column selection, without copying
+draw storage. The fitted `draw_trees.jl` fixture also checks the standardized
+tree against compiled Stan's scaled, correlated effects.
+Pointwise model assignments and population contributions retain observation
+coordinates; unrelated equal-length vectors cannot acquire them by shape.
+
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
 `smc_window_identity.jl` checks carried-posterior identity across dictionary
 rebuilding, array padding, shared values, copying and serialization, plus
