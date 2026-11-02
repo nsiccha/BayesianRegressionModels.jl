@@ -19,6 +19,7 @@ include("introspection.jl")
 using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays, Libdl,
       LogDensityProblems, LinearAlgebra, SpecialFunctions, Random, Statistics
 using StaticArrays: SMatrix, SVector, MMatrix, MVector
+using ReparametrizableDistributions: advance!!, lkj_cholesky!, simplex!
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, nonzeros, rowvals, nzrange, blockdiag
 using SelectedInversion: selinv_diag, selinv, selinv_extract
 import SparseArrays, SelectedInversion, KLU, MUMPS
@@ -139,6 +140,7 @@ include("nlme_laplace.jl")
 include("nlme_laplace_structured.jl")
 include("nlme_laplace_factors.jl")
 include("nlme_laplace_sparse.jl")
+include("nlme_laplace_gaussian.jl")
 include("nlme_laplace_sum_solver.jl")
 include("nlme_laplace_width.jl")
 include("nlme_laplace_plan.jl")
@@ -189,6 +191,7 @@ include("powerscale.jl")
 # column accessor of the same name.
 import BridgeStan
 include("conditional_effects.jl")
+include("draw_trees.jl")
 
 # Public surface. The macros and value types everything downstream
 # (web-macro, downstream extensions, tests) reaches for.
@@ -342,6 +345,7 @@ export AbstractAdaptiveCenteringBlock, AdaptiveCenteringBlock,
        select_hsgp_centeredness,
        select_ranef_centeredness
 export brm_output_draws, brm_predictive_draws, hsgp_coordinate_draws, hsgp_transform_draws, hsgp_boundary_check
+export brm_output_tree, brm_ranef_tree, brm_predictive_tree, brm_conditional_tree, rk_draw_tree
 export BRMPowerscaleSensitivity, brm_psis_weights, brm_cjs_dist,
        brm_powerscale_weights, brm_powerscale_sensitivity, brm_powerscale_inputs
 export brm_prediction_grid, brm_conditional_draws, brm_contrast_draws,

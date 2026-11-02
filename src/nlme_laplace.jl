@@ -77,6 +77,11 @@ is one reverse sweep of the likelihood parameters. Otherwise it is a
 `BRMLaplaceProblem`, which differentiates the whole model. `structured=true`
 requires the first (refusing with the reason), `false` forces the second.
 
+Declared independent Gaussian vectors can also be named by declaration, e.g.
+`integrate = (:field,)` for `field[1:n] .~ Normal.(mean, scale)`. Their means
+and scales can depend on outer coordinates; each element retains its authored
+coordinate and prior. Width screening applies to the whole vector.
+
 `integrate = :auto` chooses the latent terms itself ([`brm_laplace_plan`](@ref)
 with its defaults): every term only Normal rows read, and every term read by
 counts, binomial rows or `@plate` cells whose per-block importance diagnostic

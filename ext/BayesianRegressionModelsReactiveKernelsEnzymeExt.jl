@@ -242,9 +242,13 @@ function BRM._rk_spl_cell_ad(backend::BRM.RKBRMI, observations::Tuple,
         ad_backend)), forward)
     hvp = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_hvp, built, plan,
         observations, base0, indices0, second, ntuple(_ -> zeros(Float64, m), K))
+    # The implicit correction needs only H*v after the global solve. Keep its
+    # one-direction preparation separate from the Newton Hessian block.
+    single = K == 1 ? hvp : Base.invokelatest(prepare_compact_cell_ad, prepare_ad_hvp,
+        built, plan, observations, base0, indices0, second, (zeros(Float64, m),))
     third = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_third, built, plan,
         observations, base0, indices0, SecondOrder(second, forward), (zeros(Float64, m),))
-    (; hvp, third)
+    (; hvp, single, third)
 end
 
 BRM._rk_spl_cell_block(ad, directions::Tuple, base::Vector{Float64},
@@ -256,6 +260,17 @@ function BRM._rk_spl_cell_third(ad, direction::Vector{Float64}, base::Vector{Flo
     gradient, (hv,), (tv,) = ad_gradient_hvp_and_third(ad.third, (direction,), base,
         base[indices], indices, i)
     gradient, hv, tv
+end
+
+BRM._rk_spl_cell_third_only(ad, direction::Vector{Float64}, base::Vector{Float64},
+    indices::Vector{Int}, i::Int) =
+    only(ad_third(ad.third, (direction,), base, base[indices], indices, i))
+
+function BRM._rk_spl_cell_implicit(ad, direction::Vector{Float64}, base::Vector{Float64},
+        indices::Vector{Int}, i::Int)
+    gradient, (hv,) = ad_gradient_and_hvp(ad.single, (direction,), base,
+        base[indices], indices, i)
+    gradient, hv
 end
 
 # A factor's complete derivative block is small: the outer sums and direct
