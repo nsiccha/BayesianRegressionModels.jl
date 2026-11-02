@@ -1,7 +1,7 @@
 name = "BayesianRegressionModels"
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.2.134"
+version = "0.2.135"
 
 [deps]
 KLU = "ef3ab10e-7fda-4108-b977-705223b18434"
@@ -19,6 +19,7 @@ LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LogDensityProblems = "6fdf6af0-433a-55f7-b3ed-c6c6e0b8df7c"
 LogExpFunctions = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
 OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
+PowerScaling = "ea5902b9-87b7-4ea4-9e46-f9c5bf9e0b31"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 ReparametrizableDistributions = "7d03e222-df96-4b80-bcdc-d089be88b5f2"
 RuntimeGeneratedFunctions = "7e49a35a-f44a-4d26-94aa-eba1b4ca6b47"
@@ -80,6 +81,7 @@ Enzyme = "0.13"
 NLMEEstimation = "0.2.4"
 Optim = "2"
 Pathfinder = "0.9, 0.10"
+PowerScaling = "0.1.0"
 ReactiveKernels = "0.1.52"
 ReactiveKernelsPPL = "0.1.57"
 ReparametrizableDistributions = "0.3"
@@ -103,3 +105,7 @@ rev = "53cfd1b17ee4d1b726dcecfe151458ae41bd20a8"
 [sources.ReparametrizableDistributions]
 url = "https://github.com/nsiccha/ReparametrizableDistributions.jl"
 rev = "8f7d382df700d3780ed31d093bc4983d3734a6c6"
+
+[sources.PowerScaling]
+url = "https://github.com/nsiccha/PowerScaling.jl"
+rev = "8d27c83f6928781a39c99c31fd3d528b50ef2dad"

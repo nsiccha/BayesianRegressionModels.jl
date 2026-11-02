@@ -7,6 +7,7 @@
 # the helper's v1 surface does not reach (StudentT priors).
 using Random, Statistics, Distributions, LinearAlgebra, CSV, DataFrames, JSON
 using BayesianRegressionModels, StanBlocks, BridgeStan, LogDensityProblems
+using PowerScaling: powerscale_weights
 using WarmupHMC, Enzyme
 include(joinpath(@__DIR__, "quorum.jl"))  # chains through WarmupHMC's quorum sampler
 using DifferentiationInterface: AutoEnzyme
@@ -80,7 +81,7 @@ end
 traj = Dict{String,Any}[]
 for (lab, ell) in (("prior", inputsB.log_prior), ("likelihood", inputsB.log_lik))
     for alpha in (0.8, 1.0, 1.25)
-        w = BRM.brm_powerscale_weights(ell; alpha=alpha).weights
+        w = powerscale_weights(ell; alpha=alpha).weights
         m = sum(w .* wcol)
         v = sum(w .* (wcol .- m) .^ 2)
         push!(traj, Dict("half" => lab, "alpha" => alpha, "mean" => m, "sd" => sqrt(v)))
