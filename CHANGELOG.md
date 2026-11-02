@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.133
+
+- `brm_output_tree` preserves observation coordinates through pointwise
+  assignments that combine row outputs with scalar model constants or scalar
+  data inputs, including aliases and chained transforms. Array constants still
+  require their own axis semantics; equal length alone does not label them.
+
 ## 0.2.132
 
 - Plans retain their conditional numerical policy when reused or automatically

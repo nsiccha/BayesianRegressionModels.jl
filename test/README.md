@@ -56,6 +56,9 @@ draw storage. The fitted `draw_trees.jl` fixture also checks the standardized
 tree against compiled Stan's scaled, correlated effects.
 Pointwise model assignments and population contributions retain observation
 coordinates; unrelated equal-length vectors cannot acquire them by shape.
+Scalar model constants and scalar data inputs preserve those coordinates through
+aliases and chained transforms. The fitted fixture checks their values against
+compiled Stan and their pooled summaries against direct draw extraction.
 
 `ragged_draw_trees.jl` checks ragged top-level and in-cell response axes,
 group-aggregate likelihood widths, constrained-name permutations, shared

@@ -57,6 +57,11 @@ _row_extent(d, x::Real, seen) = 0
 _row_extent(d, x::BRM.NamedColumn, seen) = _row_extent(d, BRM.name(x), seen)
 function _row_extent(d, name::Symbol, seen)
     name in seen && return nothing
+    # Fitted constants and scalar data are inputs, not output carriers. Their
+    # declared scalar shape is broadcast-neutral; an array constant has no
+    # observation semantics merely because its length matches the rows.
+    any(i -> i.name === name && i.type in (:real, :int) && isempty(i.size), d.inputs) &&
+        return 0
     outputs = filter(o -> o.name === name, d.outputs)
     length(outputs) == 1 || return nothing
     output = only(outputs)
