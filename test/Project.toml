@@ -25,7 +25,7 @@ MCMCDiagnosticTools = "be115224-59cd-429b-ad48-344e309966f0"
 LogExpFunctions = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
 OutputSignatures = "86cfaae4-1704-4c69-ba62-d919d81ae5f8"
 Pathfinder = "b1d3bc72-d0e7-4279-b92f-7fa5d6d2d454"
-PSIS = "ce719bf2-d5d0-4fb9-925d-10a81b42ad04"
+PowerScaling = "ea5902b9-87b7-4ea4-9e46-f9c5bf9e0b31"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 ReparametrizableDistributions = "7d03e222-df96-4b80-bcdc-d089be88b5f2"
 ReactiveKernels = "78e9f072-d36b-4c73-b7a3-751b0eb26cf9"
@@ -56,7 +56,7 @@ Enzyme = "0.13"
 # The pinned Enzyme dogfood (test/setup_env.jl) requires 0.0.301 and runs
 # against its own libEnzyme build instead of the jll's library.
 Enzyme_jll = "< 0.0.302, >= 0.0.303"
-PSIS = "0.9"
+PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
 StanBlocks = "0.2.14"
@@ -68,6 +68,10 @@ julia = "1.10"
 [sources.TreeArrays]
 url = "https://github.com/nsiccha/TreeArrays.jl"
 rev = "53cfd1b17ee4d1b726dcecfe151458ae41bd20a8"
+
+[sources.PowerScaling]
+url = "https://github.com/nsiccha/PowerScaling.jl"
+rev = "8d27c83f6928781a39c99c31fd3d528b50ef2dad"
 
 [sources.ReparametrizableDistributions]
 url = "https://github.com/nsiccha/ReparametrizableDistributions.jl"
@@ -296,4 +300,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
 # helper calls, guarded captures and broadcast observation locations.
 # Guarded gathered reductions through typed aliases: RK 0.1.52 / PPL 0.1.55.
-rev = "49b7f4c6b930623466db217ac7a1beaa198c6b8b"
+# PPL 0.1.60 / DistributionKernels 0.1.1: log-space interval masses and tails.
+# RK 0.1.58 / PPL 0.1.65: batched values and local shared-prefix footprints.
+rev = "9a76ed08632e2febee0ffe6fa45b3dd1c588e1b2"

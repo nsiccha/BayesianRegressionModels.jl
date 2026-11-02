@@ -31,13 +31,14 @@ function _output_axis(output, caller)
             "$caller: labels do not match the element axis of $(output.name)"))
         return :coefficient => output.labels
     end
-    isnothing(output.segments) || throw(ArgumentError(
-        "$caller: output $(output.name) has a ragged element axis without semantic group labels"))
     if length(dims) == 1
         if output.role in (:linear_predictor, :posterior_predictive, :pointwise_loglik) ||
-           output.component === :contribution
+           (isnothing(output.segments) && output.component === :contribution)
+            # The descriptor shape is role-specific: ragged predictions have
+            # one value per element, while their likelihood has one per group.
             return :observation => Base.OneTo(only(dims))
-        elseif output.role === :parameter && isnothing(output.component) && isempty(output.predictors)
+        elseif isnothing(output.segments) && output.role === :parameter &&
+                isnothing(output.component) && isempty(output.predictors)
             # An explicitly declared vector's positions ARE its coordinates.
             return :element => Base.OneTo(only(dims))
         end
@@ -56,6 +57,11 @@ _row_extent(d, x::Real, seen) = 0
 _row_extent(d, x::BRM.NamedColumn, seen) = _row_extent(d, BRM.name(x), seen)
 function _row_extent(d, name::Symbol, seen)
     name in seen && return nothing
+    # Fitted constants and scalar data are inputs, not output carriers. Their
+    # declared scalar shape is broadcast-neutral; an array constant has no
+    # observation semantics merely because its length matches the rows.
+    any(i -> i.name === name && i.type in (:real, :int) && isempty(i.size), d.inputs) &&
+        return 0
     outputs = filter(o -> o.name === name, d.outputs)
     length(outputs) == 1 || return nothing
     output = only(outputs)

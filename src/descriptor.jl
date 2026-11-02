@@ -180,9 +180,12 @@ BRM adds:
 - `segments` — group boundaries for a RAGGED quantity, carried through from
   StanBlocks' `ModelOutput.segments`, otherwise `nothing`. Group `g` occupies
   `segments[g-1]+1 : segments[g]` (with `segments[0] ≡ 0`) *within this
-  output's own coordinates* — so it composes directly with the vector
-  [`brm_output_coordinates`](@ref) returns, and a consumer never re-derives
-  per-subject boundaries from a length column.
+  output's element order*. Predictive outputs have one value per element;
+  an aggregate `:pointwise_loglik` instead has one value per group, while
+  its `segments` still describes the response's element grouping. The ends
+  do not partition that aggregate likelihood's columns. For predictive
+  draws, [`brm_output_tree`](@ref) keeps element positions aligned with
+  values even when the supplied constrained names are permuted.
 - `component` — which part of a random-effect block, or of a population,
   categorical or structured-term block (second table), this output is, or
   `nothing` for an output that belongs to no such block. Every
@@ -3748,8 +3751,12 @@ brm_output_coordinates(d, :slope, param_names; submodel=:effect)
 ```
 
 The returned integers index `constrained_names` in their existing order. For a
-ragged carrier they compose with that output's `segments`: group `g` is
-`coordinates[segments[g-1]+1 : segments[g]]`. This axis-order preservation is
+ragged predictive carrier in element order, group `g` is
+`coordinates[segments[g-1]+1 : segments[g]]`. Under a name permutation, use
+[`brm_output_tree`](@ref)'s observation coordinates to identify those element
+positions. An aggregate ragged likelihood has one coordinate per group;
+its `segments` describes the response elements, not likelihood columns.
+This axis-order preservation is
 deliberate, and is the one ordering contract that differs from the
 label-indexed resolvers ([`brm_population_effect_coordinates`](@ref),
 [`brm_term_coordinates`](@ref), [`brm_ranef_sd_coordinates`](@ref)), which

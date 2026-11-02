@@ -1,4 +1,4 @@
-using Test, BayesianRegressionModels, StanBlocks, TreeArrays, Random
+using Test, BayesianRegressionModels, StanBlocks, TreeArrays, Random, Statistics
 using MCMCDiagnosticTools
 
 @test !isnothing(Base.get_extension(BayesianRegressionModels, :BayesianRegressionModelsTreeArraysExt))
@@ -60,6 +60,46 @@ end
     for name in (:same_length, :reordered)
         @test brm_output(d, name).dims == (6,)
         @test_throws ArgumentError brm_output_tree(d, draws, names; logical=name)
+    end
+end
+
+@testset "scalar inputs are neutral to observation alignment" begin
+    model = @brm begin
+        dev ~ 0 + (1 | g)
+        sd(dev, g) = 3.0
+        t_loc = constant(median(y))
+        offsets = constant(x)
+        log_b ~ 1 + x
+        log_c ~ 1
+        log_T = t_loc + dev
+        mu_ref = log_T
+        mu_sum = log(exp(log_c) + exp(log_T + log_b))
+        scaled = (mu_sum + scalar_offset) / scalar_divisor
+        sig = exp(scaled / 2)
+        same_length = offsets + dev
+        reordered = mu_ref[permutation]
+        y ~ Normal(mu_sum, sig)
+    end
+    data = (; DATA..., scalar_offset=0.5, scalar_divisor=2,
+        permutation=collect(6:-1:1))
+    d = brm_descriptor(SBBRMI(model(data); mod=@__MODULE__, total_groups=()))
+    (; names, draws) = carrier_fixture(d)
+    @test only(i for i in d.inputs if i.name === :t_loc).transform === :constant
+    for logical in (:log_T, :mu_ref, :mu_sum, :scaled, :sig)
+        tree = brm_output_tree(d, draws, names; logical)
+        @test coords(tree, :observation) == 1:6
+        @test parent(tree) == brm_output_draws(d, draws, names; logical)
+        @test Base.mightalias(parent(tree), draws)
+        order = reverse(eachindex(names))
+        reversed = brm_output_tree(d, view(draws, :, order), names[order]; logical)
+        @test coords(reversed, :observation) == 6:-1:1
+        @test parent(reversed) == reverse(parent(tree); dims=2)
+    end
+    # Equal-sized array constants and gathers still need their own axis
+    # semantics; treating all model inputs as scalars would mislabel these.
+    for logical in (:same_length, :reordered)
+        @test brm_output(d, logical).dims == (6,)
+        @test_throws ArgumentError brm_output_tree(d, draws, names; logical)
     end
 end
 

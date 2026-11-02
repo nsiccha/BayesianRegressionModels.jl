@@ -73,9 +73,12 @@ function _brm_spl_screen(backend, candidates, forced, max_cell_width)
             layout.integrated, layout.population; query=q)
         if prepared === nothing
             query = _rk_nlme_cell_query(backend, (name,); layout.partitioned, u0)
-            footprint = _rk_spl_cell_footprint(query)
-            for i in 1:ncells
-                record!(name, i, :cell, _rk_spl_cell_reads(footprint, u0, i))
+            footprint = _rk_spl_cell_footprint(query; shared=false)
+            _rk_spl_cell_batch(query, u0) do batch
+                for i in 1:ncells
+                    record!(name, i, :cell,
+                        _rk_spl_cell_reads(footprint, u0, i; context=batch))
+                end
             end
         else
             for c in prepared.cells

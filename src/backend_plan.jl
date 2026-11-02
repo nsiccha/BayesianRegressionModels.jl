@@ -2289,7 +2289,10 @@ end
 # the replay data's own values, which no bound value is computed from.
 function _brm_fit_input_source(name::Symbol, values)
     frozen = _brm_frozen_replay()
-    frozen === nothing || frozen.fits === nothing || return values
+    # A data-free replay retains scalar inputs, whose literals must stay the
+    # fit's even when a constant's raw input is supplied with another value.
+    frozen === nothing || frozen.fits === nothing ||
+        return get(frozen.training, name, values)
     _brm_fit_source(name, values)
 end
 

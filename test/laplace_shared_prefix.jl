@@ -229,3 +229,61 @@ end
     end
     @test allocations[2] <= 5allocations[1]+10000
 end
+
+function shared_preparation_fixture(n)
+    data=(; n,rows=[[i,mod1(i+1,n)] for i in 1:n],y=ones(n))
+    RKBRMI(@brm data begin
+        weights[1:n] .~ Normal.(0,1)
+        z[1:n] .~ Normal.(0,1)
+        field=spl_shared_vector(weights)
+        @plate for i in eachindex(rows)
+            y[i] ~ Normal(sum(z[rows[i]].*field[rows[i]]),1)
+        end
+    end)
+end
+
+@stestset "shared prefix preparation retains only local supports" begin
+    allocations=Int[]
+    for n in (64,256)
+        rk=shared_preparation_fixture(n)
+        layout=BRM._brm_spl_layout(rk,(:z,))
+        u=zeros(length(layout.names))
+        q=BRM._rk_spl_factor_queries(rk,:y;layout.partitioned,u0=u)
+        prepare()=BRM._brm_spl_prepare_factors(rk,:y,u,n,
+            layout.integrated,layout.population;query=q)
+        prepared=prepare()
+        support=sum(c -> length(c.direct.sel)+
+            sum(t -> length(t.sel),Iterators.flatten(c.terms);init=0),prepared.cells)
+        @test support==2n
+        @test all(c -> length(c.lz)==2,prepared.cells)
+        u[layout.integrated].=0.2
+        u[layout.population].=0.1
+        expected=logpdf(Normal(0.4exp(0.1),1),1)
+        values=BRM._rk_spl_cell_batch(q.factors,u) do batch
+            [BRM._brm_spl_factor_values(prepared,u,c;context=batch).value
+                for c in prepared.cells]
+        end
+        @test values ≈ fill(expected,n)
+        @test u[layout.integrated]==fill(0.2,n)
+        @test u[layout.population]==fill(0.1,n)
+        prepare()
+        bytes=minimum(@allocated(prepare()) for _ in 1:3)
+        push!(allocations,bytes)
+        println("shared preparation n=",n," total_support=",support," bytes=",bytes)
+    end
+    @test allocations[2] <= 5allocations[1]+50000
+end
+
+@stestset "shared prefix gradients preserve matrix-free contractions" begin
+    for summed in (false,true)
+        rk,_=summed ? shared_sum_fixture(;nonlinear=true) : shared_fixture(4)
+        p=brm_laplace_problem(rk;integrate=:z,ad_backend=NLME_AD,
+            solver=:matrixfree,matrixfree=MatrixFreeLaplace(;probes=1,seed=79))
+        for beta in (0.0,0.15)
+            value,gradient=LogDensityProblems.logdensity_and_gradient(p,[beta])
+            @test isfinite(value)
+            @test gradient ≈ shared_fd(x -> LogDensityProblems.logdensity(p,x),[beta]) atol=3e-5 rtol=3e-5
+            @test LogDensityProblems.logdensity_and_gradient(deepcopy(p),[beta]) == (value,gradient)
+        end
+    end
+end

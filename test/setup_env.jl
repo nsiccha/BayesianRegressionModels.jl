@@ -53,6 +53,7 @@ const TESTENV = @__DIR__
 # name => (github url, pinned commit)   — comment records the branch the commit
 # is on, for humans; the pin itself is the full SHA and needs no branch.
 const PINS = [
+    ("PowerScaling", "https://github.com/nsiccha/PowerScaling.jl.git", "8d27c83f6928781a39c99c31fd3d528b50ef2dad"),  # 0.1.0: generic power-scaling sensitivity on PSIS.jl
     ("ReparametrizableDistributions", "https://github.com/nsiccha/ReparametrizableDistributions.jl.git", "8f7d382df700d3780ed31d093bc4983d3734a6c6"),  # 0.3.0: shared parameter views, Cholesky and simplex transforms
     ("HTMX", "https://github.com/nsiccha/HTMX.jl.git", "0b8dc2f94e879bf31237bd28e751cf2ebc8d95f6"),
     ("HTMXObjects", "https://github.com/nsiccha/HTMXObjects.jl.git", "d2a86956a221035c4f1b9ac629836e90ae77a2b5"),
@@ -259,8 +260,12 @@ const PINS = [
     # helper calls, guarded captures and broadcast observation locations.
     # 5e9d2d03 contains 8b7caa90: guarded gathered sums retain reductions
     # through redundant typed aliases (RK 0.1.52 / RKPPL 0.1.55).
-    # Shared-prefix compact mixed derivatives and factor pullbacks (PPL 0.1.61).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "49b7f4c6b930623466db217ac7a1beaa198c6b8b"),
+    # RKPPL 0.1.57: independent prepared-density SMC factories.
+    # PPL 0.1.60 / DistributionKernels 0.1.1 keeps Normal interval masses
+    # and native Reverse gradients finite in both extreme tails.
+    # Shared-prefix mixed derivatives, batched values and local supports
+    # require RK 0.1.58 / PPL 0.1.65.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "9a76ed08632e2febee0ffe6fa45b3dd1c588e1b2"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
@@ -285,7 +290,7 @@ const PINS = [
     # ae936763 (libEnzyme build 0dd21172) includes 71c203f9: Julia 1.10
     # inference preserves nested reduction types during ordinary Reverse,
     # including sum(sum, columns) after matrix-valued plate helpers.
-    # Native shared-prefix accumulator stack, libEnzyme 7f957e67.
+    # Shared-prefix accumulators and concurrent-GC repair, libEnzyme 7f957e67.
     ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "93e89fc870d240d9489f88d665c28302eb6b5e4e"),  # dogfood (KB mirror only)
 ]
 

@@ -556,11 +556,14 @@ BRM._rk_pointwise_query(backend::BRM.RKBRMI) =
 BRM._rk_pointwise_values(query, u::AbstractVector) = Base.invokelatest(query, u)
 BRM._rk_nlme_cell_query(backend::BRM.RKBRMI, observations::Tuple; kwargs...) =
     prepare_cell_query(backend.model, _rk_translated(backend), observations; kwargs...)
-BRM._rk_nlme_cell_value(query::CellQuery, point::AbstractVector{Float64}, row::Int) =
+BRM._rk_nlme_cell_value(query::CellQuery, point, row::Int) =
     query(point, row)
-BRM._rk_spl_cell_footprint(query::CellQuery) = partition_footprint_kernel(query.kernel)
-function BRM._rk_spl_cell_reads(footprint, u, row)
-    reads = Base.invokelatest(footprint, u, row).unconstrained
+BRM._rk_spl_cell_batch(f, query, u) = with_cell_batch(f, query, u)
+BRM._rk_spl_cell_footprint(query::CellQuery; shared=true) =
+    shared ? partition_footprint_kernel(query.kernel) :
+        partition_footprint_kernel(query; shared=false)
+function BRM._rk_spl_cell_reads(footprint, u, row; context=u)
+    reads = Base.invokelatest(footprint, context, row).unconstrained
     reads === :whole ? collect(eachindex(u)) : reads
 end
 function BRM._rk_spl_factor_queries(backend::BRM.RKBRMI, observation::Symbol;
@@ -570,7 +573,8 @@ function BRM._rk_spl_factor_queries(backend::BRM.RKBRMI, observation::Symbol;
         locality=:error, cache_options...)
     function query(part)
         value = prepare_cell_factor_query(factors, part)
-        footprint = partition_footprint_kernel(value.kernel)
+        footprint = partitioned === nothing ? partition_footprint_kernel(value.kernel) :
+            partition_footprint_kernel(value; shared=false)
         (; value, footprint)
     end
     (; factors, cached=partitioned !== nothing, outer=query(:outer),

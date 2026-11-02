@@ -59,7 +59,7 @@ end
     @test r5.covariance ≈ inv(-Symmetric(r5.hessian)) rtol=1e-8
     @test fit.draws === r4.draws
     # 5b needs a sampler, and is named without one
-    @test fit.ladder[6].name === :population_hmc && fit.ladder[6].skipped
+    @test fit.ladder[6].name === :population_sampling && fit.ladder[6].skipped
 
     # Supplying a sampler later runs both skipped sampling rungs, preserving
     # the old result and passing the marginal draw to the exact sampler.
@@ -68,13 +68,13 @@ end
     sampler(q, init, rng) = (push!(calls, copy(init)); repeat(init, 1, 3))
     more = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=6,
         continue_from=missing, sampler, rng=Xoshiro(7))
-    hmc = only(r for r in more.rungs if r.name === :population_hmc)
+    hmc = only(r for r in more.rungs if r.name === :population_sampling)
     exact = only(r for r in more.rungs if r.name === :exact)
     @test length(calls) == 2 && calls[1] == fit.point
     @test calls[2] == hmc.draws[:, end]
     @test more.draws === exact.draws && size(more.draws, 2) == 3
     @test only(r for r in missing.rungs if r.name === :exact).skipped
-    @test only(r for r in fit.rungs if r.name === :population_hmc).skipped
+    @test only(r for r in fit.rungs if r.name === :population_sampling).skipped
     @test length(more.rungs) == length(more.ladder) == 7
 end
 
@@ -90,11 +90,11 @@ end
     fit = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=6, draws=20, sampler,
         rng=Xoshiro(6))
     p = fit.problem
-    hmc = only(r for r in fit.rungs if r.name === :population_hmc)
+    hmc = only(r for r in fit.rungs if r.name === :population_sampling)
     @test size(hmc.draws, 1) == length(p.u) && size(hmc.draws, 2) >= 100
     # the population varies across draws; each draw's effects come through the factor
     @test all(>(0), vec(std(hmc.draws[p.population, :]; dims=2)))
-    comparison = only(c for c in fit.ladder if c.name === :population_hmc).comparison
+    comparison = only(c for c in fit.ladder if c.name === :population_sampling).comparison
     curvature = only(r for r in fit.rungs if r.name === :population_curvature)
     @test comparison.mean ≈ vec(mean(hmc.draws[p.population, :]; dims=2))
     @test comparison.standard_deviations ≈ vec(std(hmc.draws[p.population, :]; dims=2))

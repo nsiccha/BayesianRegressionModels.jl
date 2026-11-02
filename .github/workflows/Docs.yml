@@ -75,15 +75,19 @@ jobs:
           git clone -b devibe https://github.com/nsiccha/StanBlocks.jl.git
           julia --project=docs -e '
             using Pkg, TOML
-            # Read the release pin from BRM rather than duplicating it in CI.
-            source = TOML.parsefile("Project.toml")["sources"]["ReparametrizableDistributions"]
-            rd_path = joinpath(ENV["RUNNER_TEMP"], "ReparametrizableDistributions.jl")
-            run(`git clone --no-checkout $(source["url"]) $rd_path`)
-            run(`git -C $rd_path checkout --detach $(source["rev"])`)
+            # Julia 1.10 ignores [sources]; read the BRM release pins here.
+            sources = TOML.parsefile("Project.toml")["sources"]
+            pinned = map(["ReparametrizableDistributions", "PowerScaling"]) do name
+              source = sources[name]
+              path = joinpath(ENV["RUNNER_TEMP"], name * ".jl")
+              run(`git clone --no-checkout $(source["url"]) $path`)
+              run(`git -C $path checkout --detach $(source["rev"])`)
+              PackageSpec(path=path)
+            end
             Pkg.develop([
               PackageSpec(path=pwd()),
               PackageSpec(path="StanBlocks.jl"),
-              PackageSpec(path=rd_path),
+              pinned...,
             ])
             Pkg.instantiate()
           '

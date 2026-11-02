@@ -149,14 +149,13 @@ end
 # dispatching through q.terms in the inner loop erases their types and also
 # makes the selection/record construction allocate dynamically per summand.
 function _brm_spl_prepare_reduction(value::V, footprint::F, q, j, u0, ncells,
-        zof, pof, maps, layout) where {V,F}
+        zof, pof, maps, layout, context) where {V,F}
     sums = zeros(ncells)
     terms = map(1:ncells) do i
         map(eachindex(_rk_spl_factor_rows(q, j, i))) do t
-            sums[i] += value(u0, i, t)
-            reads = footprint(u0, i, t).unconstrained
-            reads = reads === :whole ? eachindex(u0) : reads
-            q.cached && (reads = filter(i -> haskey(zof, i), reads))
+            sums[i] += value(context, i, t)
+            reads = footprint(context, i, t).unconstrained
+            reads = reads === :whole ? (q.cached ? layout.integrated : eachindex(u0)) : reads
             merge((; j, t), _brm_spl_factor_selection(reads, zof, pof, maps, layout))
         end
     end
@@ -164,13 +163,12 @@ function _brm_spl_prepare_reduction(value::V, footprint::F, q, j, u0, ncells,
 end
 
 function _brm_spl_prepare_factor_cells(footprint::F, reductions, u0, ncells,
-        zof, pof, maps, layout, cached=false) where {F}
+        zof, pof, maps, layout, cached, context) where {F}
     map(1:ncells) do i
         sums = [r.sums[i] for r in reductions]
         terms = [r.terms[i] for r in reductions]
-        reads = footprint(u0, sums, i).unconstrained
-        reads = reads === :whole ? eachindex(u0) : reads
-        cached && (reads = filter(i -> haskey(zof, i), reads))
+        reads = footprint(context, sums, i).unconstrained
+        reads = reads === :whole ? (cached ? layout.integrated : eachindex(u0)) : reads
         direct = _brm_spl_factor_selection(reads, zof, pof, maps, layout)
         lz = sort!(unique!(vcat(direct.lz,
             [z for reduction in terms for term in reduction for z in term.lz])))
@@ -194,14 +192,17 @@ function _brm_spl_prepare_factors(backend, name, u0, ncells, integrated, populat
     pof = Dict(i => k for (k, i) in enumerate(population))
     maps = Dict{Vector{Int},Vector{Int}}()
     layout = (; integrated=collect(Int, integrated), population=collect(Int, population))
-    reductions = map(eachindex(q.terms)) do j
-        term = q.terms[j]
-        Base.invokelatest(_brm_spl_prepare_reduction, term.value, term.footprint,
-            q, j, u0, ncells, zof, pof, maps, layout)
+    function prepare(context)
+        reductions = map(eachindex(q.terms)) do j
+            term = q.terms[j]
+            Base.invokelatest(_brm_spl_prepare_reduction, term.value, term.footprint,
+                q, j, u0, ncells, zof, pof, maps, layout, context)
+        end
+        cells = Base.invokelatest(_brm_spl_prepare_factor_cells, q.outer.footprint,
+            reductions, u0, ncells, zof, pof, maps, layout, q.cached, context)
+        (; q, cells)
     end
-    cells = Base.invokelatest(_brm_spl_prepare_factor_cells, q.outer.footprint,
-        reductions, u0, ncells, zof, pof, maps, layout, q.cached)
-    (; q, cells)
+    q.cached ? _rk_spl_cell_batch(prepare, q.factors, u0) : prepare(u0)
 end
 
 # The Jacobian has one row per sum or direct outer input and one column per
@@ -320,7 +321,7 @@ function _brm_spl_factor_contraction!(tz, tp, prepared, u, c, state, blocks, SB,
         traces[j] += sum(S .* t.h[t.lpos, :])
         # The two differentiated-Jacobian terms in the chain rule.
         cross = 2 .* (t.h * (SB[t.loc, :] * state.hf[state.active, j]))
-        L = cholesky(Symmetric(S)).L
+        L = _brm_spl_psd_root(S)
         for a in axes(L, 2)
             d = zeros(length(t.sel)); d[t.lpos] .= L[:, a]
             _, _, tv = _rk_spl_factor_third(t.ad, d, u, t.sel, c.i; term=t.t)
@@ -399,7 +400,7 @@ function _brm_spl_accumulate_contraction!(batch, u, c, state, blocks, SB, BSB)
         d[t.lpos] .= SB[t.loc, :] * state.hf[state.active, j]
         _rk_spl_factor_accumulate(batch, t.ad, 1, d, 1.0,
             u, t.sel, c.i; term=t.t)
-        L = cholesky(Symmetric(S)).L
+        L = _brm_spl_psd_root(S)
         for a in axes(L, 2)
             d = zeros(length(t.sel)); d[t.lpos] .= view(L, :, a)
             _rk_spl_factor_accumulate(batch, t.ad, 2, d, 0.5state.gf[j],
@@ -414,15 +415,9 @@ function _brm_spl_accumulate_contraction!(batch, u, c, state, blocks, SB, BSB)
 end
 
 function _brm_spl_factor_values(prepared, u, cell; context=u)
-    if prepared.q.cached && hasproperty(cell, :outer)
-        sums = [sum(t -> _rk_spl_factor_value(t.ad, u, t.sel, cell.i;
-            term=t.t, context), terms; init=0.0) for terms in cell.terms]
-        value = _rk_spl_factor_value(cell.outer, u, cell.direct.sel, cell.i; sums, context)
-        return (; value, sums)
-    end
-    sums = [sum(t -> Base.invokelatest(prepared.q.terms[j].value, u, cell.i, t.t),
+    sums = [sum(t -> Base.invokelatest(prepared.q.terms[j].value, context, cell.i, t.t),
         terms; init=0.0) for (j, terms) in enumerate(cell.terms)]
-    value = Base.invokelatest(prepared.q.outer.value, u, sums, cell.i)
+    value = Base.invokelatest(prepared.q.outer.value, context, sums, cell.i)
     (; value, sums)
 end
 

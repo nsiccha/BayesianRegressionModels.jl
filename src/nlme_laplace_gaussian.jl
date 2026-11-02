@@ -71,7 +71,8 @@ end
     (p.gaussian.mean[i], p.gaussian.precision[i])
 
 # Differentiate the prior difference, the diagonal log determinant and the
-# mode's implicit derivative. S is the selected inverse of the full precision;
+# mode's implicit derivative. S is the selected determinant sensitivity (the
+# full precision's inverse under exact algebra);
 # v = H^-1 * (1/2 trace(S * likelihood''')) is shared with the likelihood path.
 # Scalar prior arguments accumulate all coordinates before one RK pullback.
 function _brm_spl_gaussian_gradient!(gradient, p, state, S, v, active)

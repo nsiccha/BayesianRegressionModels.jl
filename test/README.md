@@ -1,9 +1,35 @@
 # Running the tests
 
+`rk_interval_tails.jl` checks interval-censored Normal responses through
+`RKBRMI`: pointwise and total log densities, native Enzyme Reverse location
+and log-scale gradients, and input immutability. Synthetic intervals cover
+both tails through 400 standard deviations and moderate controls at two
+parameter points. Independent 256-bit MPFR masses, analytic derivatives and
+central differences supply the references. Run `test/setup_env.jl` first to
+select the RKPPL 0.1.60 / DistributionKernels 0.1.1 repair, then
+`julia --startup-file=no --project=test test/rk_interval_tails.jl`.
+
+`powerscale.jl` checks BRM's density assembly against the compiled Stan
+target and its PowerScaling.jl adapter against the pre-extraction Gaussian
+sensitivity table. Generic CJS, PSIS and sensitivity tests live in PowerScaling.
+The bootstrap supplies its pinned 0.1.0 release on Julia 1.10 too.
+
 `reparametrization_primitives.jl` checks VBRMI's shared and stratified Cholesky
 blocks, simplex blocks, and nested parameter cursors against numerical
 references captured before the ReparametrizableDistributions extraction.
 The transform algorithms and their derivative tests live in that package.
+
+`nlme_laplace_matrixfree_algebra.jl` checks the derivative of the fixed-probe
+rational determinant against independent two-dimensional identities, including
+noncommuting curvature, mixed exact/operator components, ICAR soft constraints,
+conditional draws and explicit solver failures. `nlme_laplace_matrixfree.jl`
+checks nonlinear row/cell/sum gradients, evaluation-history and copy invariance,
+plan/ladder policy retention and nonconcave mode searches.
+`nlme_laplace_matrixfree_subset.jl` compares restricted row and nonlinear-sum
+plans with fresh preparation, including gradients of newly sampled effects.
+The synthetic drivers
+in `research/matrixfree_conditional/` measure operator/exact algebra and a full
+Poisson/ICAR target separately; neither represents a fitted consumer model.
 
 `runtime_constants.jl` checks strict RK inference of runtime `constant(...)`
 expressions from `brm(source; mod)`, changed fit inputs, frozen inputs, and
@@ -44,6 +70,14 @@ draw storage. The fitted `draw_trees.jl` fixture also checks the standardized
 tree against compiled Stan's scaled, correlated effects.
 Pointwise model assignments and population contributions retain observation
 coordinates; unrelated equal-length vectors cannot acquire them by shape.
+Scalar model constants and scalar data inputs preserve those coordinates through
+aliases and chained transforms. The fitted fixture checks their values against
+compiled Stan and their pooled summaries against direct draw extraction.
+
+`ragged_draw_trees.jl` checks ragged top-level and in-cell response axes,
+group-aggregate likelihood widths, constrained-name permutations, shared
+backing, quantiles over unequal chains, and changed-design replay with an
+omitted response. It uses deterministic unconstrained points, not a fit.
 
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
 `smc_window_identity.jl` checks carried-posterior identity across dictionary
@@ -122,6 +156,20 @@ event is an explicit likelihood factor; normalized moments alone do not add it.
 The exact Distributions fork and StanBlocks revisions are pinned in
 `setup_env.jl` and `Project.toml`; the bootstrap can materialize review
 candidates from the fleet mirrors before their publication.
+
+`smc_laplace_matrixfree.jl` checks fixed-target checkpoint replay, owned
+operator buffers, rejection of changed numerical policy or retained probe and
+reference values, conditional completion and cumulative-data reference reuse.
+
+`smc_laplace.jl` checks outer SMC over all RK-backed embedded-Laplace
+implementations against exact Gaussian marginals and completed joint moments,
+with scalar quadrature for the generic/structured model's sampled scale,
+independent pilots/workspaces, frozen cumulative updates, identity refusals,
+non-Gaussian completion, zero integration, interruption, weighted ladder
+resampling and fresh-process checkpoint replay. It uses the RKPPL 0.1.57
+prepared-target adapter and Enzyme's concurrent-GC repair. Pass testset title
+substrings to run a focused subset; run with two Julia threads for the
+serial/threaded comparison.
 
 `smc.jl` checks RK-only batch and cumulative-data SMC against analytic
 Gaussian posteriors and evidence, deterministic continuation and checkpoint
@@ -1083,6 +1131,13 @@ julia --project=<scratch-env> test/nlme_estimation_ext.jl
 Without NLMEEstimation the file stops with an error rather than skipping.
 Shared fixtures live in `nlme_fixtures.jl`.
 
+`nlme_laplace_capability.jl` checks an optional Laplace refusal using a toy
+recurrence whose selected outputs are summed. It verifies that the capability
+probe returns `false` and caches the RK locality diagnostic, ordinary protocol
+checks and a short SAEM fit succeed, explicit integration rethrows the same
+diagnostic, and unrelated errors propagate. A supported nested model remains
+Laplace-capable. Run it in the same NLMEEstimation scratch environment.
+
 `nlme_integrated.jl` covers NLMEEstimation's integrated families on BRM
 models: SAEM integrates the chosen covariance families by BRM's sparse Laplace
 and samples the rest. `check_protocol` with each set of families integrated
@@ -1929,6 +1984,12 @@ finite-difference gradients at several points. Nonlinear Normal observations
 exercise the diagnostic and implicit gradient; mixed generated effects,
 retained subsets, independent copies, prior dependencies, whole-vector width
 screening and linear sparse storage cover structural behavior.
+
+`laplace_mode_overflow.jl` exercises finite-density trials with overflowing
+derivatives in ordinary and sum cells, with exact and matrix-free solvers.
+It checks local backtracking, sequential
+fallback, conditional stationarity, marginal gradients, independent component
+steps and deterministic repeated evaluations.
 
 ## One-time bootstrap
 
