@@ -98,6 +98,11 @@ RKPPL 0.1.53, including scalar-helper type inference and guarded captures.
 compares retained plans with freshly prepared targets, including strict
 subsets of row, plate and sum factors. It checks marginal values, gradients,
 finite differences, independent workspaces and backend/AD changes.
+`laplace_shared_prefix.jl` checks helpers shared by ordinary and sum factors:
+exact mixed derivatives, strict local supports, retained subsets, independent
+copies and matrix-free covariance contractions. Synthetic scaling fixtures
+check that preparation retains only local supports and shared derivative
+sweeps allocate approximately in proportion to the number of cells.
 `plate_selected_outputs.jl` checks nested selection of shared vector outputs
 across plates with different cell counts: data-only and parameter-dependent
 outputs, fixed and varying widths, both output orders, reader-first composition,
