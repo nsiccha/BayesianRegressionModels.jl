@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.121
+## 0.2.122
 
 - Changed: NLME unit likelihoods and gradients use one strict RK plate
   partition per unit. Preparation checks structural coordinate ownership,
@@ -41,6 +41,18 @@ instead of failing at run time.
   Enzyme dogfood `68ed90fe` with libEnzyme `2063db12`, including the repair
   for matrix-window partition gradients on Julia 1.10. The test environment
   also pins WarmupHMC 0.2.10, required by RKPPL.
+
+## 0.2.121
+
+- `brm_smc_tune` forwards `reference_inflation`, added in RKPPL 0.1.47. Its learned
+  reference (`pilot=:adaptive, reference=:pilot`) now fits the retained pilot
+  draws' spread in the learned basis times that factor (default 2) instead of
+  the pilot's local mutation scale, which under-dispersed the population
+  coordinates of hierarchies (ReactiveKernels snag learned-smc-refe-cc5677a1).
+  Stage summaries carry `reference_sd` and `coordinate_sd`. The test environment
+  retains the current RK 0.1.51 / RKPPL 0.1.53 pins. The hierarchy regression
+  verifies the reference repair while retaining the known population-intercept
+  spread deficit; wider references alone do not establish posterior accuracy.
 
 ## 0.2.120
 

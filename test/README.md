@@ -108,10 +108,12 @@ RKPPL 0.1.42 and WarmupHMC 0.2.9 pins from `setup_env.jl`.
 `mu ~ 1 + (1 | g)` against an exact grid oracle of the population intercept
 and log scale, with the group effects mixed analytically: the continuous pilot
 and the adaptive pilot with the standard-normal reference reproduce the
-oracle's spread, and a known-gap testset pinned to ReactiveKernels snag
-`learned-smc-refe-cc5677a1` records that the adaptive pilot's learned
-reference (`reference=:pilot`) is narrower than the posterior and leaves the
-population intercept under-dispersed while the group effects stay right.
+oracle's spread. With RKPPL 0.1.47, the learned-reference regression checks
+the retained-moment repair for ReactiveKernels snag `learned-smc-refe-cc5677a1`,
+the forwarded `reference_inflation` control and reference/cloud spread diagnostics.
+It retains the known population-intercept under-dispersion assertion: the
+repaired-reference seed-101 run has SD 0.786 of the oracle, below the controls'
+unchanged 0.8 lower bound. The reference repair is not an accuracy acceptance.
 
 `smc_compare.jl` checks `brm_smc_runs` and `brm_smc_compare`: independent
 bridges on an analytic Normal posterior and on the tuned correlated Gaussian
