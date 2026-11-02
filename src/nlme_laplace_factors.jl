@@ -86,6 +86,56 @@ function _brm_spl_factor_selection(reads, integrated, population)
     (; sel, lz=first.(z), lpos=last.(z), pidx=first.(ps), ppos=last.(ps))
 end
 
+# These position/population maps are read-only after preparation and commonly
+# identical across rows and reductions. Intern them within this preparation,
+# never globally; deepcopy still gives each chain its own arrays. Absolute
+# packed/effect selections usually differ per row, so do not cache those.
+_brm_spl_share_indices(maps, indices) = get!(maps, indices, indices)
+function _brm_spl_factor_selection(reads, integrated, population, maps)
+    s = _brm_spl_factor_selection(reads, integrated, population)
+    merge(s, (; lpos=_brm_spl_share_indices(maps, s.lpos),
+        pidx=_brm_spl_share_indices(maps, s.pidx),
+        ppos=_brm_spl_share_indices(maps, s.ppos)))
+end
+
+# Each reduction can have a different generated callable type. Enter its
+# current world once, then specialize this whole batch on both callables:
+# dispatching through q.terms in the inner loop erases their types and also
+# makes the selection/record construction allocate dynamically per summand.
+function _brm_spl_prepare_reduction(value::V, footprint::F, q, j, u0, ncells,
+        zof, pof, maps) where {V,F}
+    sums = zeros(ncells)
+    terms = map(1:ncells) do i
+        map(eachindex(_rk_spl_factor_rows(q, j, i))) do t
+            sums[i] += value(u0, i, t)
+            reads = footprint(u0, i, t).unconstrained
+            reads = reads === :whole ? eachindex(u0) : reads
+            merge((; j, t), _brm_spl_factor_selection(reads, zof, pof, maps))
+        end
+    end
+    (; sums, terms)
+end
+
+function _brm_spl_prepare_factor_cells(footprint::F, reductions, u0, ncells,
+        zof, pof, maps) where {F}
+    map(1:ncells) do i
+        sums = [r.sums[i] for r in reductions]
+        terms = [r.terms[i] for r in reductions]
+        reads = footprint(u0, sums, i).unconstrained
+        reads = reads === :whole ? eachindex(u0) : reads
+        direct = _brm_spl_factor_selection(reads, zof, pof, maps)
+        lz = sort!(unique!(vcat(direct.lz,
+            [z for reduction in terms for term in reduction for z in term.lz])))
+        localof = Dict(z => k for (k, z) in enumerate(lz))
+        direct = merge(direct, (; loc=_brm_spl_share_indices(maps,
+            [localof[z] for z in direct.lz])))
+        terms = [map(t -> merge(t, (; loc=_brm_spl_share_indices(maps,
+                [localof[z] for z in t.lz]))), reduction)
+            for reduction in terms]
+        (; i, direct, terms, lz)
+    end
+end
+
 # Discover support structurally before preparing AD. Numeric zeros therefore
 # cannot remove a coordinate, and empty sums need no exemplar term call.
 function _brm_spl_prepare_factors(backend, name, u0, ncells, integrated, population)
@@ -93,25 +143,14 @@ function _brm_spl_prepare_factors(backend, name, u0, ncells, integrated, populat
     isempty(q.terms) && return nothing
     zof = Dict(i => k for (k, i) in enumerate(integrated))
     pof = Dict(i => k for (k, i) in enumerate(population))
-    cells = map(1:ncells) do i
-        sums = zeros(length(q.terms))
-        terms = map(eachindex(q.terms)) do j
-            map(eachindex(_rk_spl_factor_rows(q, j, i))) do t
-                sums[j] += Base.invokelatest(q.terms[j].value, u0, i, t)
-                reads = _rk_spl_factor_reads(q.terms[j], u0, i, t)
-                merge((; j, t), _brm_spl_factor_selection(reads, zof, pof))
-            end
-        end
-        reads = _rk_spl_factor_reads(q.outer, u0, sums, i)
-        direct = _brm_spl_factor_selection(reads, zof, pof)
-        lz = sort!(unique!(vcat(direct.lz,
-            [z for reduction in terms for term in reduction for z in term.lz])))
-        localof = Dict(z => k for (k, z) in enumerate(lz))
-        direct = merge(direct, (; loc=[localof[z] for z in direct.lz]))
-        terms = [map(t -> merge(t, (; loc=[localof[z] for z in t.lz])), reduction)
-            for reduction in terms]
-        (; i, direct, terms, lz)
+    maps = Dict{Vector{Int},Vector{Int}}()
+    reductions = map(eachindex(q.terms)) do j
+        term = q.terms[j]
+        Base.invokelatest(_brm_spl_prepare_reduction, term.value, term.footprint,
+            q, j, u0, ncells, zof, pof, maps)
     end
+    cells = Base.invokelatest(_brm_spl_prepare_factor_cells, q.outer.footprint,
+        reductions, u0, ncells, zof, pof, maps)
     (; q, cells)
 end
 
