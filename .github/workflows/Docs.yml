@@ -73,10 +73,20 @@ jobs:
         # (run 30708357301).
         run: |
           git clone -b devibe https://github.com/nsiccha/StanBlocks.jl.git
-          julia --project=docs -e 'using Pkg; Pkg.develop([
-            PackageSpec(path=pwd()),
-            PackageSpec(path="StanBlocks.jl"),
-          ]); Pkg.instantiate()'
+          julia --project=docs -e '
+            using Pkg, TOML
+            # Read the release pin from BRM rather than duplicating it in CI.
+            source = TOML.parsefile("Project.toml")["sources"]["ReparametrizableDistributions"]
+            rd_path = joinpath(ENV["RUNNER_TEMP"], "ReparametrizableDistributions.jl")
+            run(`git clone --no-checkout $(source["url"]) $rd_path`)
+            run(`git -C $rd_path checkout --detach $(source["rev"])`)
+            Pkg.develop([
+              PackageSpec(path=pwd()),
+              PackageSpec(path="StanBlocks.jl"),
+              PackageSpec(path=rd_path),
+            ])
+            Pkg.instantiate()
+          '
       - name: Build and deploy
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

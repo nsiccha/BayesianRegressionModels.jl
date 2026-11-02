@@ -569,10 +569,13 @@ end
 # Implemented by `BayesianRegressionModelsReactiveKernelsEnzymeExt`: one cell's
 # compact AD (`_rk_spl_cell_ad`), its gradient and Hessian block over its
 # selection (`_rk_spl_cell_block`), and one direction's HVP and third-order
-# product there (`_rk_spl_cell_third`).
+# product there (`_rk_spl_cell_third`). The correction requests just the third
+# product, then a gradient and one HVP along the solved implicit direction.
 function _rk_spl_cell_ad end
 function _rk_spl_cell_block end
 function _rk_spl_cell_third end
+function _rk_spl_cell_third_only end
+function _rk_spl_cell_implicit end
 function _rk_spl_cell_footprint end
 function _rk_spl_cell_reads end
 
@@ -1447,45 +1450,41 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
     # columns l_k of L, S's block on its integrated draws = L Lᵀ (S = h⁻¹
     # there, positive definite); its integrated part goes into s, its
     # population part (with the cell's own gradient there) straight into the
-    # gradient. The same calls' HVPs are H_c[:, z] L, which the implicit term
-    # below reads.
+    # gradient. Only third-order products are needed here; after solving for
+    # v below, one HVP per cell supplies the implicit term directly.
     gcell = zeros(length(p.population))
     u = copy(state.uA)
     u[p.integrated] .= state.z
-    implicit = Tuple{Vector{Int},Matrix{Float64},LowerTriangular{Float64,Matrix{Float64}},
-        Vector{Int}}[]
     for group in p.cells, c in group.cells
         group isa _BRMSumCellGroup && continue
         on(c.term) || continue
         m = length(c.lz)
-        if m == 0
-            gsel, _, _ = _rk_spl_cell_third(group.ad, zeros(group.m), u, c.sel, c.i)
-            gcell[c.pidx] .+= gsel[c.ppos]
-            continue
-        end
+        m == 0 && continue
         Sb = [S[_brm_spl_nzindex(p.pattern, a, b)] for a in c.lz, b in c.lz]
         Lb = cholesky(Symmetric(Sb)).L
         τsel = zeros(group.m)
-        HL = zeros(length(c.ppos), m)
-        gsel = nothing
         for k in 1:m
             direction = zeros(group.m)
             direction[c.lpos] .= view(Lb, :, k)
-            gsel, hv, tv = _rk_spl_cell_third(group.ad, direction, u, c.sel, c.i)
+            tv = _rk_spl_cell_third_only(group.ad, direction, u, c.sel, c.i)
             τsel .+= tv
-            HL[:, k] .= view(hv, c.ppos)
         end
         s[c.lz] .+= τsel[c.lpos] ./ 2
-        gcell[c.pidx] .+= gsel[c.ppos] .+ τsel[c.ppos] ./ 2
-        push!(implicit, (c.pidx, HL, Lb, c.lz))
+        gcell[c.pidx] .+= τsel[c.ppos] ./ 2
     end
     _brm_spl_sum_gradient!(s, gcell, p, state, u, on)
     v = _brm_spl_solve(state.F, state.W, s)
     _brm_spl_sum_implicit!(gcell, p, state, v, on)
-    # the cells' implicit term: H_c[population, z] v_z = (H_c[:, z] L)[population, :]
-    # L⁻¹ v_z, through each cell's mixed second derivatives
-    for (pidx, HL, Lb, lz) in implicit
-        gcell[pidx] .+= HL * (Lb \ v[lz])
+    # H_c[population, z] v_z directly, plus the cell's population gradient.
+    # This replaces m HVPs and m identical gradients in the contractions above
+    # with one of each, and needs no retained population-by-m matrix per cell.
+    for group in p.cells, c in group.cells
+        group isa _BRMSumCellGroup && continue
+        on(c.term) || continue
+        direction = zeros(group.m)
+        direction[c.lpos] .= v[c.lz]
+        gsel, hv = _rk_spl_cell_implicit(group.ad, direction, u, c.sel, c.i)
+        gcell[c.pidx] .+= gsel[c.ppos] .+ hv[c.ppos]
     end
     w = zeros(length(p.port))
     gω = zeros(length(p.omega))

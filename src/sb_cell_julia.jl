@@ -210,10 +210,13 @@ end
 
 # One submodel per pattern of which of `mu`, `sigma`, `phi` vary along the
 # series, with a time column (`timed`) or one step apart.
+# Anonymous submodels are values, so construct them without top-level eval.
+# Keep the same scope and empty docstring metadata as an anonymous `@slic`.
 const _sb_ar1_normal_models = Dict{Tuple{NTuple{3,Bool},Bool},StanBlocks.SlicModel}()
 for along in Iterators.product((false, true), (false, true), (false, true)), timed in (false, true)
     _sb_ar1_normal_models[(along, timed)] =
-        @eval StanBlocks.@slic $(_sb_ar1_normal_body(along, timed))
+        StanBlocks.SlicModel(_sb_ar1_normal_body(along, timed),
+            Dict{Symbol,Any}(:docstring => ""), @__MODULE__)
 end
 
 # A cell's statements with each `y ~ AR1Normal(...)` calling the AR(1)
