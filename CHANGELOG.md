@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.123
+
+- Require RK 0.1.52 / RKPPL 0.1.55 for sum recognition through guarded
+  gathered observations; tests pin landed RK `5e9d2d03818ba5c8ef7d6d068fef42101f902d0e`.
+
+- Sparse Laplace plans screen structural cell footprints before preparing
+  derivatives. `max_cell_width=128` bounds integrated coordinates per ordinary
+  cell or local sum-factor block. Overwide cells sample whole unforced latent
+  terms in stable order, retaining every likelihood and prior; forced choices
+  that exceed the bound raise with the observation, cell and contributing terms.
+  Plans report the triggering cells and final integrated/sampled dimensions.
+- Sparse patterns deduplicate footprints before pair enumeration, union directly
+  into CSC columns, and omit the per-cell quadratic nonzero-index map. Sum
+  factors prepare Hessian directions only for integrated coordinates and outer
+  sum outputs, while retaining all sampled-coordinate gradients.
+- A plan admitting no latent terms now supplies the full model's density,
+  gradient, draws and fitting workflow. The ladder reports and skips its dense
+  population-curvature diagnostic above 128 coordinates, while retaining HMC.
+
 ## 0.2.122
 
 - A `brm_laplace_plan` retains its prepared sparse problem. Building a target

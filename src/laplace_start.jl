@@ -117,7 +117,7 @@ _brm_laplace_parts(p::BRMStructuredLaplaceProblem) = (p.backend, p.view,
     _brm_nlme_unit_point(p.backend, p.view; shared_point=nothing))
 # The sparse problem has no NLME view: the prior medians read only its packed
 # coordinate names, from its zero start point.
-_brm_laplace_parts(p::BRMSparseLaplaceProblem) =
+_brm_laplace_parts(p::Union{BRMSparseLaplaceProblem,_BRMSampledLaplaceProblem}) =
     (p.backend, (; coordinates=_rk_layout_coordinate_names(p.backend)), zero(p.u))
 
 # Implemented by `BayesianRegressionModelsPathfinderExt`: Pathfinder over the

@@ -133,8 +133,9 @@ end
     # a floor no non-Gaussian block reaches keeps them sampled
     strict = plan_of(counts; ess_floor=0.9999, draws=100)
     @test all(t -> t.class === :sampled && !t.admitted, strict.terms)
-    @test_throws BRMNLMEViewError brm_laplace_problem(counts; ad_backend=NLME_AD,
-        integrate=strict)
+    sampled = brm_laplace_problem(counts; ad_backend=NLME_AD, integrate=strict)
+    @test isempty(sampled.integrated)
+    @test LogDensityProblems.dimension(sampled) == length(sampled.u)
     # a plan is taken as given
     p = brm_laplace_problem(counts; ad_backend=NLME_AD, integrate=plan)
     @test p.plan === plan && sort(p.integrate) == [:a, :b]

@@ -13,7 +13,7 @@ const BRM = BayesianRegressionModels
 # instead of restarting from a random point.
 function BRM._brm_pathfinder_draws(
         p::Union{BRM.BRMLaplaceProblem,BRM.BRMStructuredLaplaceProblem,
-            BRM.BRMSparseLaplaceProblem},
+            BRM.BRMSparseLaplaceProblem,BRM._BRMSampledLaplaceProblem},
         φ0::AbstractVector; ndraws, rng)
     result = Pathfinder.pathfinder(p; init=collect(Float64, φ0), rng, ndraws,
         ndraws_elbo=1, maxiters=100, ntries=1, adtype=Pathfinder.SciMLBase.NoAD())

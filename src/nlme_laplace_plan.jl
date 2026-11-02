@@ -50,9 +50,19 @@ struct BRMLaplacePlan
     terms::Vector{NamedTuple}
     ess_floor::Float64
     draws::Int
+    max_cell_width::Int
+    width_events::Dict{Symbol,NamedTuple}
+    integrated_dimension::Int
+    sampled_dimension::Int
     prepared::Union{Nothing,_BRMLaplacePreparation}
 end
-BRMLaplacePlan(terms, ess_floor, draws) = BRMLaplacePlan(terms, ess_floor, draws, nothing)
+
+# Keep the original diagnostic-only constructor. Packed dimensions need a
+# backend and are unknown for a manually reconstructed plan.
+BRMLaplacePlan(terms, ess_floor, draws) = BRMLaplacePlan(terms, ess_floor, draws,
+    128, Dict{Symbol,NamedTuple}(), -1, -1, nothing)
+BRMLaplacePlan(terms, ess_floor, draws, prepared::Union{Nothing,_BRMLaplacePreparation}) =
+    BRMLaplacePlan(terms, ess_floor, draws, 128, Dict{Symbol,NamedTuple}(), -1, -1, prepared)
 
 _brm_plan_admitted(plan::BRMLaplacePlan) = [t for t in plan.terms if t.admitted]
 
@@ -61,6 +71,9 @@ function Base.show(io::IO, ::MIME"text/plain", plan::BRMLaplacePlan)
     println(io, "BRMLaplacePlan: ", n, " of ", length(plan.terms),
         " latent terms integrated (importance ESS floor ", plan.ess_floor, " of ",
         plan.draws, " draws per block)")
+    dimension(n) = n < 0 ? "unknown" : n
+    println(io, "  dimensions: ", dimension(plan.integrated_dimension), " integrated, ",
+        dimension(plan.sampled_dimension), " sampled; max_cell_width=", plan.max_cell_width)
     for t in plan.terms
         ess = t.importance_ess === nothing ? "" : string("; importance ESS min ",
             round(t.importance_ess.min; digits=1), ", median ",
@@ -75,7 +88,8 @@ Base.show(io::IO, plan::BRMLaplacePlan) = print(io, "BRMLaplacePlan(",
 
 """
     brm_laplace_plan(rk::RKBRMI; ad_backend, integrate = :auto, sample = (),
-        ess_floor = 0.5, draws = 200, at = nothing, rng = Random.Xoshiro(20261031))
+        ess_floor = 0.5, draws = 200, at = nothing, rng = Random.Xoshiro(20261031),
+        max_cell_width = 128)
         -> BRMLaplacePlan
 
 Sort `rk`'s latent terms for the sparse Laplace ([`BRMLaplacePlan`](@ref)):
@@ -95,6 +109,18 @@ Sort `rk`'s latent terms for the sparse Laplace ([`BRMLaplacePlan`](@ref)):
   stratified or `car_units` block, which the sparse Laplace does not integrate;
 - **sampled:** named in `sample`, or gated and not admitted.
 
+Before preparing derivatives, `max_cell_width` (a finite positive integer,
+default 128) bounds the integrated footprint of each ordinary observation cell,
+or each summand/direct outer block of a recognized sum. Cells are visited in
+observation-name/cell order. An overwide cell samples the whole unforced term
+contributing the most coordinates, breaking ties by declaration order, and
+updates every cell that reads that term. Correlated margins stay together.
+Forced terms are never silently sampled: an unresolved conflict raises with
+the observation, cell, width and bound. All likelihoods and priors remain.
+`plan.width_events` reports those choices; `integrated_dimension` and
+`sampled_dimension` report the final packed dimensions. A plan with no admitted
+terms supplies the full model's density and gradient through the same workflow.
+
 `integrate = (names…)` and `sample = (names…)` override the classes by
 declaration or grouping. A term on a shape or dispersion can be named in
 `integrate`; a Student-t, stratified or `car_units` term cannot (the sparse
@@ -104,16 +130,17 @@ gated term's importance ESS so a reader can judge.
 """
 function brm_laplace_plan(backend::RKBRMI; ad_backend, integrate=:auto, sample=(),
         ess_floor::Real=0.5, draws::Integer=200, at=nothing,
-        rng=Random.Xoshiro(20261031), tol=1e-24, maxiter=50)
+        rng=Random.Xoshiro(20261031), tol=1e-24, maxiter=50, max_cell_width=128)
     _brm_laplace_plan(backend; ad_backend, integrate, sample, ess_floor=Float64(ess_floor),
-        draws=Int(draws), at, rng, tol, maxiter).plan
+        draws=Int(draws), at, rng, tol, maxiter, max_cell_width).plan
 end
 
 # The plan and the sparse problem its diagnostic was measured on (over every
 # candidate term). The public plan retains it too, including when the
 # diagnostic admits only a subset of those terms.
 function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_floor,
-        draws, at, rng, tol, maxiter)
+        draws, at, rng, tol, maxiter, max_cell_width=128)
+    max_cell_width = _brm_spl_width_limit(max_cell_width)
     forced = integrate === :auto ? Symbol[] : Symbol[_brm_plan_names(integrate)...]
     sampled = Symbol[_brm_plan_names(sample)...]
     named(t, names) = t.declaration in names || t.grouping in names
@@ -131,16 +158,30 @@ function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_f
             join(("`$(t.declaration)` over `$(t.grouping)`" for t in terms), ", "))
     end
     for t in terms
+        named(t, forced) && named(t, sampled) && throw(ArgumentError(
+            "brm_laplace_plan: `$(t.declaration)` is both forced and sampled"))
         t.never !== nothing && named(t, forced) && _brm_nlme_error("brm_laplace_plan: " *
             "`$(t.declaration)` cannot be integrated: $(t.never)")
     end
     candidates = [t for t in terms if t.never === nothing && !named(t, sampled)]
-    isempty(candidates) && return (; plan=BRMLaplacePlan([_brm_plan_entry(t,
-        t.never === nothing ? :sampled : :never,
-        something(t.never, "named in `sample`"), false, nothing) for t in terms],
-        ess_floor, draws), problem=nothing)
+    screen = isempty(candidates) ? (; active=Bool[], events=Dict{Symbol,NamedTuple}(),
+        integrated_dimension=0, sampled_dimension=length(_rk_layout_coordinate_names(backend))) :
+        _brm_spl_screen(backend, candidates,
+            Set(t.declaration for t in candidates if named(t, forced)), max_cell_width)
+    candidates = candidates[screen.active]
+    width_reason(t) = let e = screen.events[t.declaration]
+        "observation `$(e.observation)`, cell $(e.cell), $(e.part) has integrated width $(e.width) above max_cell_width=$(e.bound); sampled whole term (contribution $(e.contribution))"
+    end
+    if isempty(candidates)
+        entries = [_brm_plan_entry(t, t.never === nothing ? :sampled : :never,
+            haskey(screen.events, t.declaration) ? width_reason(t) :
+                something(t.never, "named in `sample`"), false, nothing) for t in terms]
+        return (; plan=BRMLaplacePlan(entries, ess_floor, draws, max_cell_width,
+            screen.events, 0, screen.sampled_dimension, nothing), problem=nothing)
+    end
     p = _brm_sparse_laplace_problem(backend, unique(t.grouping for t in candidates);
-        ad_backend, tol, maxiter, declarations=Set(t.declaration for t in candidates))
+        ad_backend, tol, maxiter, declarations=Set(t.declaration for t in candidates),
+        max_cell_width, screened=true)
     reads = _brm_plan_reads(p)
     gated = Dict{Symbol,Any}()
     for t in candidates
@@ -170,6 +211,8 @@ function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_f
         t.never !== nothing && return _brm_plan_entry(t, :never, t.never, false, nothing)
         named(t, sampled) && return _brm_plan_entry(t, :sampled, "named in `sample`",
             false, nothing)
+        haskey(screen.events, t.declaration) && return _brm_plan_entry(t, :sampled,
+            width_reason(t), false, nothing)
         g = get(gated, t.declaration, nothing)
         if g === :never
             reason = "it moves a shape or dispersion parameter"
@@ -192,8 +235,10 @@ function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_f
     # Retain preparation, not the diagnostic's numerical factorization and
     # selected inverse. Each target owns and fills that cache independently.
     p.factor[] = nothing
-    plan = BRMLaplacePlan(entries, ess_floor, draws,
-        _BRMLaplacePreparation(p, ad_backend))
+    admitted = Set(t.declaration for t in entries if t.admitted)
+    ni = sum(length(b.z) for b in p.blocks if any(d -> _brm_nlme_owned(b.declaration, d), admitted); init=0)
+    plan = BRMLaplacePlan(entries, ess_floor, draws, max_cell_width, screen.events,
+        ni, length(p.u) - ni, _BRMLaplacePreparation(p, ad_backend))
     (; plan, problem=p)
 end
 
@@ -361,8 +406,7 @@ end
 function _brm_sparse_laplace_problem_from_plan(backend::RKBRMI, r; ad_backend, tol,
         maxiter)
     admitted = _brm_plan_admitted(r.plan)
-    isempty(admitted) && _brm_nlme_error("brm_laplace_problem: the plan integrates no " *
-        "latent term:\n" * sprint(show, MIME"text/plain"(), r.plan))
+    isempty(admitted) && return _brm_sampled_laplace_problem(backend, r.plan; ad_backend, tol, maxiter)
     declarations = Set(t.declaration for t in admitted)
     prepared = r.plan.prepared
     if prepared !== nothing && prepared.problem.backend === backend &&
@@ -379,7 +423,7 @@ function _brm_sparse_laplace_problem_from_plan(backend::RKBRMI, r; ad_backend, t
         p.nonfinite = p.unconverged = p.blockwise = p.sweeps = 0
     else
         p = _brm_sparse_laplace_problem(backend, unique(t.grouping for t in admitted);
-            ad_backend, tol, maxiter, declarations)
+            ad_backend, tol, maxiter, declarations, max_cell_width=r.plan.max_cell_width)
     end
     p.plan = r.plan
     p
@@ -431,7 +475,9 @@ function _brm_spl_restrict_cells(group::_BRMSumCellGroup, zof, pof, maps)
         direct = merge(direct, (; loc=share([localof[z] for z in direct.lz])))
         terms = [map(t -> merge(t, (; loc=share([localof[z] for z in t.lz]))), reduction)
             for reduction in terms]
-        merge(c, (; direct, terms, lz))
+        r = length(terms)
+        active = vcat(collect(1:r), r .+ direct.lpos)
+        merge(c, (; direct, terms, lz, active))
     end
     _BRMSumCellGroup(group.name, group.query, cells, merge(group.prepared, (; cells)))
 end

@@ -24,7 +24,7 @@
     BRMLaplaceProblem
     brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), tol=1e-24, maxiter=50,
-        structured=:auto, integrate=nothing)
+        structured=:auto, integrate=nothing, max_cell_width=128)
 
 Integrate every unit's standardized random effects out of an RK-lowered model
 by a Laplace approximation at their conditional mode, leaving the population
@@ -134,7 +134,8 @@ Base.show(io::IO, p::BRMLaplaceProblem) = print(io, "BRMLaplaceProblem(",
 
 function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), tol=1e-24, maxiter=50,
-        structured=:auto, integrate=nothing)
+        structured=:auto, integrate=nothing, max_cell_width=128)
+    max_cell_width = _brm_spl_width_limit(max_cell_width)
     if integrate !== nothing
         subject_group === nothing && isempty(nested_groups) && isempty(shared_groups) &&
             structured === :auto || throw(ArgumentError("brm_laplace_problem: " *
@@ -144,10 +145,10 @@ function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
         integrate === :auto && return _brm_sparse_laplace_problem_from_plan(backend,
             _brm_laplace_plan(backend; ad_backend, integrate=:auto, sample=(),
                 ess_floor=0.5, draws=200, at=nothing, rng=Random.Xoshiro(20261031), tol,
-                maxiter); ad_backend, tol, maxiter)
+                maxiter, max_cell_width); ad_backend, tol, maxiter)
         integrate isa BRMLaplacePlan && return _brm_sparse_laplace_problem_from_plan(
             backend, (; plan=integrate, problem=nothing); ad_backend, tol, maxiter)
-        return _brm_sparse_laplace_problem(backend, integrate; ad_backend, tol, maxiter)
+        return _brm_sparse_laplace_problem(backend, integrate; ad_backend, tol, maxiter, max_cell_width)
     end
     structured in (:auto, true, false) || throw(ArgumentError(
         "brm_laplace_problem: structured = $(repr(structured)); pass :auto, true or false"))

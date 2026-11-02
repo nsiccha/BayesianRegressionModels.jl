@@ -100,13 +100,12 @@ mutable struct BRMSparseLaplaceProblem{K}
     block_reads::Vector{Vector{Int}}
     # Each term's effects (`tz[tptr[t]:tptr[t+1]-1]`, ascending), the local
     # position of read r's first effect (`rloc[r]`, its K effects consecutive
-    # and in margin order) and h's nonzeros at the term's m × m effect pairs
-    # (`tnz[nptr[t] + (j-1) m + (i-1)]`).
+    # and in margin order). Pair locations are looked up in the sparse column;
+    # no cell retains a width-squared map into the shared pattern.
     tptr::Vector{Int}
     tz::Vector{Int}
     rloc::Vector{Int}
-    nptr::Vector{Int}
-    tnz::Vector{Int}
+    pattern_stats::NamedTuple
     pattern::SparseMatrixCSC{Float64,Int}
     diagonal::Vector{Int}
     component::Vector{Int}
@@ -229,16 +228,8 @@ function _brm_spl_car_graph(backend::RKBRMI, r)
     (; S=sum(length, sums; init=0), edges, sums, λ=[1 / (0.001 * length(c))^2 for c in sums])
 end
 
-function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol,
-        maxiter, declarations=nothing)
-    integrate = Symbol[g for g in (integrate isa Symbol ? (integrate,) : integrate)]
-    isempty(integrate) && throw(ArgumentError(
-        "brm_laplace_problem: integrate names no grouping"))
-    refusal = _brm_slap_response_refusal(backend; cells=true, values=true)
-    refusal === nothing || _brm_nlme_error("brm_laplace_problem: integrate = " *
-        "$(repr(Tuple(integrate))) needs every observation to be a regression row " *
-        "of a closed-form family or an observation factor, but $refusal")
-    responses = _brm_slap_responses(backend.plan)
+# Packed latent layout only; safe before any derivative preparation.
+function _brm_spl_layout(backend, integrate; declarations=nothing)
     records = _brm_spl_records(backend, integrate; declarations)
     names = _rk_layout_coordinate_names(backend)
     position = Dict{Symbol,Int}(n => i for (i, n) in enumerate(names))
@@ -303,6 +294,28 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     allunique(integrated) || _brm_nlme_error("brm_laplace_problem: internal: a draw " *
         "belongs to two integrated blocks")
     population = setdiff(1:length(names), integrated)
+    (; records, names, integrated, population, blocks, omega)
+end
+
+function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol,
+        maxiter, declarations=nothing, max_cell_width=128, screened=false)
+    max_cell_width = _brm_spl_width_limit(max_cell_width)
+    integrate = Symbol[g for g in (integrate isa Symbol ? (integrate,) : integrate)]
+    isempty(integrate) && throw(ArgumentError(
+        "brm_laplace_problem: integrate names no grouping"))
+    refusal = _brm_slap_response_refusal(backend; cells=true, values=true)
+    refusal === nothing || _brm_nlme_error("brm_laplace_problem: integrate = " *
+        "$(repr(Tuple(integrate))) needs every observation to be a regression row " *
+        "of a closed-form family or an observation factor, but $refusal")
+    responses = _brm_slap_responses(backend.plan)
+    (; records, names, integrated, population, blocks, omega) =
+        _brm_spl_layout(backend, integrate; declarations)
+    if !screened
+        candidates = [(; declaration=_brm_spl_record_declaration(r),
+            grouping=_brm_spl_record_group(r)) for r in records]
+        _brm_spl_screen(backend, candidates, Set(t.declaration for t in candidates),
+            max_cell_width)
+    end
     # Latent draws left to the target make A bilinear in the population.
     # The plan may integrate only some declarations over the same grouping.
     selected = Set(_brm_spl_record_declaration(r) for r in records)
@@ -319,7 +332,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     p = BRMSparseLaplaceProblem(backend, population, names[population], integrate,
         integrated, blocks, kernels, t.family, t.y, t.trials, t.constant, t.entry,
         fill(true, length(t.family)), t.port, t.index, t.link, t.fixed, t.response, t.row,
-        Int[], Int[], Int[], Int[], Int[], Vector{Int}[], Int[], Int[], Int[], Int[], Int[],
+        Int[], Int[], Int[], Int[], Int[], Vector{Int}[], Int[], Int[], Int[], (;),
         spzeros(0, 0), Int[], Int[], Vector{Int}[], Int[], Int[], Float64[], Vector{Int}[],
         Float64[], Int[], Vector{Int}[], Int[], Int[], Int[], Vector{Int}[], Any[], omega,
         false,
@@ -625,6 +638,50 @@ end
 _brm_spl_nterms(p::BRMSparseLaplaceProblem) = length(p.family) +
     sum(g -> length(g.cells), p.cells; init=0)
 
+# Footprints are sorted unique effect indices. Deduplicate them before visiting
+# pairs, then union each sparse column directly. Construction storage is the
+# distinct input footprints plus the retained pattern, never duplicate triplets.
+function _brm_spl_pattern(footprints, n, edges)
+    distinct = Set{Vector{Int}}()
+    input_footprints = input_indices = 0
+    for zs in footprints
+        input_footprints += 1
+        input_indices += length(zs)
+        push!(distinct, collect(zs))
+    end
+    columns = [Set{Int}((j,)) for j in 1:n]
+    pair_visits = 0
+    for zs in distinct
+        pair_visits += length(zs)^2
+        for j in zs
+            union!(columns[j], zs)
+        end
+    end
+    for (i, j) in edges
+        push!(columns[j], i)
+        push!(columns[i], j)
+    end
+    colptr = Vector{Int}(undef, n + 1)
+    colptr[1] = 1
+    for j in 1:n
+        colptr[j + 1] = colptr[j] + length(columns[j])
+    end
+    rowval = Vector{Int}(undef, last(colptr) - 1)
+    for j in 1:n
+        copyto!(rowval, colptr[j], sort!(collect(columns[j])), 1, length(columns[j]))
+    end
+    pattern = SparseMatrixCSC(n, n, colptr, rowval, zeros(length(rowval)))
+    stats = (; input_footprints, input_indices, distinct_footprints=length(distinct),
+        distinct_indices=sum(length, distinct; init=0), pair_visits,
+        retained_nnz=length(nonzeros(pattern)))
+    (; pattern, stats)
+end
+
+@inline function _brm_spl_nzindex(pattern, i, j)
+    span = nzrange(pattern, j)
+    first(span) - 1 + searchsortedfirst(view(rowvals(pattern), span), i)
+end
+
 # h's pattern (the identity and every pair of effects a term reads), each
 # term's place in it, and the components: effects connected through terms.
 function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
@@ -654,28 +711,17 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
         push!(p.tptr, length(p.tz) + 1)
     end
     nterms = _brm_spl_nterms(p)
-    I = collect(1:n); J = collect(1:n)
     sumterms = Set(c.term for group in p.cells if group isa _BRMSumCellGroup for c in group.cells)
-    for t in 1:nterms
-        t in sumterms && continue
-        for i in p.tptr[t]:(p.tptr[t + 1] - 1), j in p.tptr[t]:(p.tptr[t + 1] - 1)
-            push!(I, p.tz[i]); push!(J, p.tz[j])
-        end
-    end
-    for group in p.cells
-        group isa _BRMSumCellGroup || continue
-        for c in group.cells, reduction in c.terms, term in reduction, i in term.lz, j in term.lz
-            push!(I, i); push!(J, j)
-        end
-    end
+    footprints = Iterators.flatten(((view(p.tz, p.tptr[t]:(p.tptr[t + 1] - 1))
+        for t in 1:nterms if t ∉ sumterms),
+        (term.lz for group in p.cells if group isa _BRMSumCellGroup
+            for c in group.cells for reduction in c.terms for term in reduction)))
     edges = [(b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]) for b in p.blocks
         for e in axes(b.edges, 2)]
-    for (i, j) in edges
-        push!(I, i, j); push!(J, j, i)
-    end
-    pattern = sparse(I, J, 1.0, n, n)
-    nonzeros(pattern) .= 0.0
-    index(i, j) = (r = nzrange(pattern, j); r[searchsortedfirst(view(rowvals(pattern), r), i)])
+    built = _brm_spl_pattern(footprints, n, edges)
+    pattern = built.pattern
+    p.pattern_stats = built.stats
+    index(i, j) = _brm_spl_nzindex(pattern, i, j)
     p.diagonal = [index(i, i) for i in 1:n]
     # The prior precision's sparse part: the identity, or a field's Laplacian.
     prior = Dict{Int,Float64}()
@@ -692,16 +738,6 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
     p.prior_val = [prior[k] for k in p.prior_nz]
     p.wcols = [[b.z[l, 1] for l in levels] for b in p.blocks for levels in b.sums]
     p.wλ = [λ for b in p.blocks for λ in b.λ]
-    p.nptr = [1]; p.tnz = Int[]
-    for t in 1:nterms
-        zs = view(p.tz, p.tptr[t]:(p.tptr[t + 1] - 1))
-        if t ∉ sumterms
-            for j in zs, i in zs
-                push!(p.tnz, index(i, j))
-            end
-        end
-        push!(p.nptr, length(p.tnz) + 1)
-    end
     p.pattern = pattern
     # Components by union-find over the terms' effects.
     parent = collect(1:n)
@@ -810,11 +846,10 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
         for i in 1:m
             g[zs[i]] += c1[i] * r.g1 + (moving ? c2[i] * r.g2 : 0.0)
         end
-        base = p.nptr[t] - 1
         for j in 1:m, i in 1:m
             v = r.h11 * c1[i] * c1[j]
             moving && (v += r.h12 * (c1[i] * c2[j] + c2[i] * c1[j]) + r.h22 * c2[i] * c2[j])
-            nz[p.tnz[base + (j - 1) * m + i]] -= v
+            nz[_brm_spl_nzindex(p.pattern, zs[i], zs[j])] -= v
         end
     end
     isempty(p.cells) && return rest
@@ -843,11 +878,10 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
         gsel, columns = _rk_spl_cell_block(group.ad, group.dirs, u, c.sel, c.i)
         _brm_spl_cell_directions!(group.dirs, c.lpos, 0.0)
         m = length(c.lz)
-        base = p.nptr[c.term] - 1
         for a in 1:m
             g[c.lz[a]] += gsel[c.lpos[a]]
             for b in 1:m
-                nz[p.tnz[base + (b - 1) * m + a]] -= columns[b][c.lpos[a]]
+                nz[_brm_spl_nzindex(p.pattern, c.lz[a], c.lz[b])] -= columns[b][c.lpos[a]]
             end
         end
     end
@@ -1356,11 +1390,11 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
         span = p.tptr[t]:(p.tptr[t + 1] - 1)
         c1 = view(crows[1], span); c2 = view(crows[2], span)
         m = length(span)
-        base = p.nptr[t] - 1
         moving = p.moving[t]
         m11 = m12 = m22 = 0.0
+        zs = view(p.tz, span)
         for j in 1:m, i in 1:m
-            Sij = S[p.tnz[base + (j - 1) * m + i]]
+            Sij = S[_brm_spl_nzindex(p.pattern, zs[i], zs[j])]
             m11 += c1[i] * Sij * c1[j]
             moving && (m12 += c1[i] * Sij * c2[j]; m22 += c2[i] * Sij * c2[j])
         end
@@ -1393,8 +1427,7 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
             gcell[c.pidx] .+= gsel[c.ppos]
             continue
         end
-        base = p.nptr[c.term] - 1
-        Sb = [S[p.tnz[base + (b - 1) * m + a]] for a in 1:m, b in 1:m]
+        Sb = [S[_brm_spl_nzindex(p.pattern, a, b)] for a in c.lz, b in c.lz]
         Lb = cholesky(Symmetric(Sb)).L
         τsel = zeros(group.m)
         HL = zeros(length(c.ppos), m)
@@ -1449,10 +1482,9 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
             w[e + 1] = w2
         end
         # (ℓ″ C S) per parameter, on the term's local effects.
-        base = p.nptr[t] - 1
         resize!(LCS, 2m); fill!(LCS, 0.0)
         for j in 1:m, i in 1:m
-            Sij = S[p.tnz[base + (j - 1) * m + i]]
+            Sij = S[_brm_spl_nzindex(p.pattern, zs[i], zs[j])]
             LCS[j] += (r.h11 * c1[i] + (moving ? r.h12 * c2[i] : 0.0)) * Sij
             moving && (LCS[m + j] += (r.h12 * c1[i] + r.h22 * c2[i]) * Sij)
         end

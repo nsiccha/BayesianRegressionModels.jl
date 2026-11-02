@@ -258,4 +258,5 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # reference SDs (snag learned-smc-refe-cc5677a1).
 # RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
 # helper calls, guarded captures and broadcast observation locations.
-rev = "0a517908470ceb0480b3db91d6b052b4dc02bb8c"
+# Guarded gathered reductions through typed aliases: RK 0.1.52 / PPL 0.1.55.
+rev = "5e9d2d03818ba5c8ef7d6d068fef42101f902d0e"
