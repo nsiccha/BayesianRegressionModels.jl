@@ -1,7 +1,7 @@
 # Full BRM Poisson/ICAR target on a synthetic three-dimensional lattice.
 # This is a nonlinear conditional target, not the reporter's ODL model or
 # the separately developed native space-time GMRF term.
-# RUN: julia --project=test research/matrixfree_conditional/nonlinear.jl NX NY NT [exact] [fd]
+# RUN: julia --project=test research/matrixfree_conditional/nonlinear.jl NX NY NT [exact] [fd] [auto]
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface: AutoEnzyme
 using LogDensityProblems, LinearAlgebra, Random, Printf
@@ -23,7 +23,7 @@ function lattice_data(nx, ny, nt)
         y=[mod(i,5) for i in 1:n], from, to)
 end
 
-function measure_nonlinear(nx, ny, nt; exact=false, finite_difference=false)
+function measure_nonlinear(nx, ny, nt; exact=false, finite_difference=false, solver=:matrixfree)
     data = lattice_data(nx,ny,nt)
     setup = @timed begin
         rk = RKBRMI(@brm data begin
@@ -31,7 +31,7 @@ function measure_nonlinear(nx, ny, nt; exact=false, finite_difference=false)
             y ~ Poisson(mu)
         end)
         brm_laplace_problem(rk; integrate=:area,
-            ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), solver=:matrixfree)
+            ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), solver)
     end
     p = setup.value
     x = fill(0.1,length(p.population))
@@ -40,14 +40,16 @@ function measure_nonlinear(nx, ny, nt; exact=false, finite_difference=false)
     value, gradient = warm.value
     @assert isfinite(value) && all(isfinite,gradient)
     @assert cold.value == warm.value
-    @assert p.factor[] === nothing
+    operator = p.algebra !== nothing
+    operator && @assert p.factor[] === nothing
     println("dimensions\t",length(p.integrated),'\t',length(x),'\t',length(data.y))
     println("population\t",p.names)
+    println("solver\t",solver,"\toperator=",operator)
     @printf("setup\t%.9g\t%d\n",setup.time,setup.bytes)
     @printf("cold_value_gradient\t%.9g\t%d\n",cold.time,cold.bytes)
     @printf("warm_value_gradient\t%.9g\t%d\t%.12g\t%.12g\n",
         warm.time,warm.bytes,value,norm(gradient))
-    println("diagnostics\t",p.algebra.diagnostics)
+    operator && println("diagnostics\t",p.algebra.diagnostics)
     if finite_difference
         h = 1e-4
         fd = map(eachindex(x)) do j
@@ -71,7 +73,7 @@ function measure_nonlinear(nx, ny, nt; exact=false, finite_difference=false)
     end
 end
 
-length(ARGS)>=3 || error("pass NX NY NT [exact] [fd]")
+length(ARGS)>=3 || error("pass NX NY NT [exact] [fd] [auto]")
 println("julia\t",VERSION)
 measure_nonlinear(parse.(Int,ARGS[1:3])...; exact="exact" in ARGS,
-    finite_difference="fd" in ARGS)
+    finite_difference="fd" in ARGS, solver="auto" in ARGS ? :auto : :matrixfree)

@@ -10,7 +10,10 @@ rational determinant against independent two-dimensional identities, including
 noncommuting curvature, mixed exact/operator components, ICAR soft constraints,
 conditional draws and explicit solver failures. `nlme_laplace_matrixfree.jl`
 checks nonlinear row/cell/sum gradients, evaluation-history and copy invariance,
-plan/ladder policy retention and nonconcave mode searches. The synthetic drivers
+plan/ladder policy retention and nonconcave mode searches.
+`nlme_laplace_matrixfree_subset.jl` compares restricted row and nonlinear-sum
+plans with fresh preparation, including gradients of newly sampled effects.
+The synthetic drivers
 in `research/matrixfree_conditional/` measure operator/exact algebra and a full
 Poisson/ICAR target separately; neither represents a fitted consumer model.
 

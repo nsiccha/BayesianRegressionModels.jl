@@ -2,7 +2,7 @@
 # no large dense matrix or unbounded-fill sparse factor is formed.
 
 """
-    MatrixFreeLaplace(; exact_limit=256, probes=8, seed=20261102,
+    MatrixFreeLaplace(; exact_limit=1024, probes=8, seed=20261102,
         solve_tolerance=1e-10, solve_maxiter=512,
         logdet_step=1.0, logdet_extent=32.0,
         preconditioner_memory=32, preconditioner_ridge=0.01)
@@ -41,7 +41,7 @@ struct MatrixFreeLaplace
     logdet_extent::Float64
     preconditioner_memory::Union{Nothing,Int}
     preconditioner_ridge::Float64
-    function MatrixFreeLaplace(; exact_limit=256, probes=8, seed=20261102,
+    function MatrixFreeLaplace(; exact_limit=1024, probes=8, seed=20261102,
             solve_tolerance=1e-10, solve_maxiter=512,
             logdet_step=1.0, logdet_extent=32.0,
             preconditioner_memory=32, preconditioner_ridge=0.01)
@@ -304,9 +304,9 @@ function _brm_operator_logdet!(F::_BRMOperatorFactor)
             end
             for (; cs, cov, localrows) in sums[component]
                 localx = x[localrows]
-                b = cs.B * localx
-                cov.SB .+= weight .* localx .* b'
-                cov.BSB .+= weight .* b .* b'
+                projected = cs.B * localx
+                cov.SB .+= weight .* localx .* projected'
+                cov.BSB .+= weight .* projected .* projected'
             end
         end
         if part.factor !== nothing
@@ -323,16 +323,16 @@ function _brm_operator_logdet!(F::_BRMOperatorFactor)
         shifts = exp.(collect(-K:K) .* options.logdet_step)
         operator = part.operator
         transformed = operator isa _BRMPreconditionedOperator
-        b = zeros(length(I)); hx = similar(b); physical = similar(b)
-        workspace = Krylov.CgLanczosShiftWorkspace(operator, b, shifts)
+        probe_rhs = zeros(length(I)); hx = similar(probe_rhs); physical = similar(probe_rhs)
+        workspace = Krylov.CgLanczosShiftWorkspace(operator, probe_rhs, shifts)
         max_residual = 0.0
         max_iterations = 0
         for (q, r) in enumerate(eachcol(part.probes))
             # One common Krylov recurrence for every shift. This avoids one
             # full field traversal per shift per iteration. The congruence
             # reference is fixed; shifts are identities in these coordinates.
-            b .= r
-            Krylov.cg_lanczos_shift!(workspace, operator, b, shifts;
+            probe_rhs .= r
+            Krylov.cg_lanczos_shift!(workspace, operator, probe_rhs, shifts;
                 check_curvature=true, atol=0.0, rtol=options.solve_tolerance / 10,
                 itmax=options.solve_maxiter)
             xs = Krylov.solution(workspace)

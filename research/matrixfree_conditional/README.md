@@ -13,9 +13,14 @@ wrapper for Julia runs.
 ```sh
 julia --project=test test/nlme_laplace_matrixfree_algebra.jl
 julia --project=test test/nlme_laplace_matrixfree.jl
+julia --project=test test/nlme_laplace_matrixfree_subset.jl
 julia --project=test research/matrixfree_conditional/scaling.jl 44 38 24 det
 julia --project=test research/matrixfree_conditional/nonlinear.jl 10 10 10 exact fd
+julia --project=test research/matrixfree_conditional/nonlinear.jl 44 38 24 exact fd
+julia --project=test research/matrixfree_conditional/nonlinear.jl 10 10 10 auto exact fd
 julia --project=test research/matrixfree_conditional/production.jl 8 8 8 refine draw
+julia --project=test research/matrixfree_conditional/production.jl 44 38 24 refine draw
+julia --project=test research/matrixfree_conditional/production.jl 44 38 336
 ```
 
 `scaling.jl` uses a rectangular spatial precision `(I + L)'(I + L)` and an
@@ -30,6 +35,8 @@ The fixed reference is prepared once and reported separately. Add
 effect and three population coordinates. Its warmed timings include both the
 target value and population gradient. Finite differences recompute the mode,
 so they also check the implicit mode correction.
+The default measurement forces operator algebra; `auto` exercises the public
+automatic policy instead.
 
 `production.jl` uses the production determinant and selected contractions,
 with an independent separable eigenvalue oracle instead of an exact sparse
@@ -136,8 +143,9 @@ The retained operator/reference size was 790,507,456 bytes, not the peak memory
 of a full model. The estimate was 2602608.42155 versus exact 2602695.43665,
 with probe MCSE 103.440; the trace derivative was 44151.91865 versus exact
 44065.11355. Host load rose from 18.37 at grant to 52.36 at release, so the
-timing increase cannot be attributed to dimension alone. The production
-integration and full nonlinear target remain to be validated.
+timing increase cannot be attributed to dimension alone. These standalone
+measurements exclude BRM's selected contractions and full nonlinear target;
+integrated controls follow below.
 
 The 24-node mapped Gauss-Legendre trial at 40,128 took 6.673 s, but its estimate
 183315.79423 differed by -14.2675 from the same-probe log-trapezoidal reference.
@@ -181,3 +189,74 @@ is not peak memory. Receipts: `production-512-refinement.log` (exit 0, 58 s),
 `production-512-unboxed.log` (exit 0, 216 s including a live precompile wait)
 and `algebra-preconditioned-unboxed.log` (exit 0, 221 s) in the scratch directory
 above.
+
+On the refreshed BRM 0.2.130 candidate `8d328b28`, the production
+40,128-coordinate squared-precision proxy passed with the default
+512-iteration cap: 57 solve iterations and 47 shifted-solve iterations.
+Operator preparation plus a solve took 0.95959 s versus 2.65654 s for exact
+refactorization plus a solve on the same matrix; original-system residual was
+1.340e-13. The warmed determinant, including selected sensitivity contractions,
+took 13.0857 s and allocated 95,147,288 bytes, with 94,984,321 retained bytes.
+Its estimate was 183337.98647 versus exact 183333.85164, with probe MCSE
+16.4748. The one-time reference preparation took 3.337 s including its first
+compilation. Host load was 61.76 at grant and 67.36 at release. Receipt:
+`scaling-40128-v130.log` (exit 0, elapsed 69 s).
+
+The full 1,000-coordinate nonlinear Poisson control also passed on this
+candidate. Its warmed value and gradient took 0.03987 s and allocated
+13,060,680 bytes; exact algebra took 0.007664 s and allocated 5,179,888 bytes.
+Thus this small control does not show a speed advantage for the operator
+policy. The finite-difference relative gradient discrepancy was 3.949e-9.
+The approximate log density differed from exact by -0.14851, and the gradient
+difference norm was 0.60249. Solves used at most 24 iterations and shifted
+solves 20. Receipt: `poisson-1000-v130.log` (exit 0, elapsed 225 s).
+
+At 40,128 coordinates the full nonlinear Poisson target took 4.52281 s for
+the warmed value and gradient, allocating 479,564,472 bytes. Exact algebra on
+the same model took 5.47564 s and allocated 480,314,080 bytes. Finite
+differences, recomputing the mode for all three population coordinates,
+agreed to relative error 2.422e-9. The approximate value differed from exact
+by +2.22632 and the gradient difference norm was 6.30392. Solves used at most
+17 iterations and shifted solves 14; maximum checked residuals were
+1.511e-13 and 9.575e-12, respectively. Setup took 209.43 s, including
+compilation, and cumulatively allocated 8.690 GB; the first value and gradient
+took 19.392 s. Receipt: `poisson-40128-v130.log` (exit 0, elapsed 354 s).
+These paired timings do not establish a universal crossover. Based on the
+small-model result, the automatic policy retains exact algebra through 1,024
+coordinates per connected component; callers can override that bound.
+
+At 40,128 coordinates the production squared-precision proxy also passed
+separate quadrature/probe refinement and draw controls. With the same eight
+probes and fixed reference, halving the quadrature spacing changed the
+determinant by only 0.000241573 and the selected sensitivity by 6.326e-8 in
+relative norm. Increasing to 32 probes at the finer spacing changed the
+log-determinant error from +4.13482 to -7.37158 (MCSE 11.3014), while the
+trace-inverse derivative error improved from -42.1306 to +0.434782. Thus the
+probe refinement did not monotonically improve every result. The 32-probe
+fine-quadrature determinant took 145.564 s, versus 11.871 s for the default
+eight-probe rule in this run. A warmed conditional draw took 23.0104 s and
+allocated 129,983,296 bytes. Repeated draws with the same seed were identical
+and finite; the precision quadratic form was 40426.18, 1.053 standard
+deviations above its Gaussian expectation. This single diagnostic is not a
+covariance certificate. Receipt: `production-40128-refinement-v130.log`
+(exit 0, elapsed 451 s).
+
+The production determinant and selected contractions at 561,792 coordinates
+passed with the unchanged 512-iteration budget: 71 solve iterations and 57
+shifted-solve iterations, with original-system residual 1.030e-13. The warmed
+determinant took 203.056 s and allocated 1,260,147,800 bytes; the retained
+operator factor, reference and selected contractions occupied 1,358,524,945
+bytes. These are cumulative allocations and retained object sizes, not a
+peak process measurement. The determinant was 2602608.42155 versus the
+separable eigenvalue oracle 2602695.43665, an error of -87.0151 with probe
+MCSE 103.440. The trace-inverse derivative was 44151.91865 versus exact
+44065.11355, an error of +86.8051. Reference preparation took 14.013 s
+including its first compilation; a warmed solve took 13.791 s. Host load was
+31.77 at grant and 31.64 at release. Receipt: `production-561792-v130.log`
+(exit 0, elapsed 655 s). This control measures conditional algebra; the
+40,128-coordinate Poisson control above measures a full nonlinear target.
+
+The refreshed exact plan-reuse controls passed 123 assertions: 61 for row
+models and 62 for nonlinear sum factors, including strict subsets, comparison
+with freshly prepared targets and finite-difference gradients. Receipt:
+`exact-plan-reuse-v130.log` (exit 0, elapsed 509 s).
