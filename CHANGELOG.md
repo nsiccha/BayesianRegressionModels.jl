@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.137
+
+- `NLMEEstimation.provides_laplace_gradient(::BRMNLMEModel)` returns `false`
+  when RK refuses row-local sparse Laplace factors, allowing ordinary protocol
+  checks and SAEM to proceed. The structural refusal is cached; explicit
+  integration still throws its original diagnostic, and unrelated errors
+  continue to propagate.
+
 ## 0.2.136
 
 - RK interval-censored Normal responses retain finite log likelihoods and

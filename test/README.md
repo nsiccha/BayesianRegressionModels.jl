@@ -1131,6 +1131,13 @@ julia --project=<scratch-env> test/nlme_estimation_ext.jl
 Without NLMEEstimation the file stops with an error rather than skipping.
 Shared fixtures live in `nlme_fixtures.jl`.
 
+`nlme_laplace_capability.jl` checks an optional Laplace refusal using a toy
+recurrence whose selected outputs are summed. It verifies that the capability
+probe returns `false` and caches the RK locality diagnostic, ordinary protocol
+checks and a short SAEM fit succeed, explicit integration rethrows the same
+diagnostic, and unrelated errors propagate. A supported nested model remains
+Laplace-capable. Run it in the same NLMEEstimation scratch environment.
+
 `nlme_integrated.jl` covers NLMEEstimation's integrated families on BRM
 models: SAEM integrates the chosen covariance families by BRM's sparse Laplace
 and samples the rest. `check_protocol` with each set of families integrated
