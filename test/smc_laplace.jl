@@ -200,6 +200,49 @@ end
     end
 end
 
+@stestset "Laplace SMC owns declared Gaussian prior workspaces" begin
+    data = (; idx=[1,2,1,2], y=[0.3,-0.5,0.8,0.1],
+        prior_mean=[-0.2,0.4], prior_scale=[0.5,1.1])
+    rk = RKBRMI(@brm data begin
+        offset ~ Normal(0, 1)
+        field[1:2] .~ Normal.(prior_mean, prior_scale)
+        prediction = offset + field[idx]
+        y ~ Normal(prediction, 0.6)
+    end)
+    p = brm_laplace_problem(rk; ad_backend=LSMC_AD, integrate=(:field,))
+    a = SMCEXT.copy_laplace(p); b = SMCEXT.copy_laplace(p)
+    @test a.gaussian.mean !== b.gaussian.mean && a.gaussian.mean !== p.gaussian.mean
+    @test a.gaussian.precision !== b.gaussian.precision
+    @test a.gaussian.values !== b.gaussian.values
+    expected = LogDensityProblems.logdensity_and_gradient(a, [0.2])
+    LogDensityProblems.logdensity_and_gradient(b, [-0.4])
+    @test LogDensityProblems.logdensity_and_gradient(a, [0.2]) == expected
+    fit = brm_smc_fit(p; rng=Xoshiro(64), particles=768,
+        options=SMCOptions(; moves=2, stepsize=0.4, max_tree_depth=4, nthreads=1))
+    if Threads.nthreads() > 1
+        parallel = brm_smc_fit(p; rng=Xoshiro(64), particles=768,
+            options=SMCOptions(; moves=2, stepsize=0.4, max_tree_depth=4, nthreads=2))
+        @test parallel.state.positions == fit.state.positions
+        @test parallel.state.weights == fit.state.weights
+    end
+    # Integrating the authored Gaussian prior gives an independent evidence
+    # and posterior for the scalar offset.
+    B = [Float64(j == i) for i in data.idx, j in 1:2]
+    C = Symmetric(0.6^2 * I + B * Diagonal(data.prior_scale.^2) * B')
+    residual = data.y - B * data.prior_mean
+    one = ones(length(data.y))
+    variance = inv(1 + dot(one, C \ one))
+    location = variance * dot(one, C \ residual)
+    evidence = logpdf(MvNormal(B * data.prior_mean, Matrix(C + one * one')), data.y)
+    @test fit.state.log_normalizer ≈ evidence atol=0.15
+    @test only(fit.state.positions * fit.state.weights) ≈ location atol=0.08
+    @test only((fit.state.positions .- location).^2 * fit.state.weights) ≈ variance atol=0.08
+    out = brm_laplace_draws(fit; rng=Xoshiro(7), conditional=8)
+    @test out.draws[p.population,:] == fit.state.positions
+    @test out.weights == fit.state.weights
+    @test all(isfinite, out.draws)
+end
+
 @stestset "Laplace SMC propagates nonfinite failures without changing inputs" begin
     # Valid finite inputs whose deliberately unstable sigmoid arithmetic
     # overflows only when the prepared density evaluates a particle.

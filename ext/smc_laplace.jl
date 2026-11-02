@@ -20,53 +20,13 @@ laplace_partition(p::Union{BRM.BRMSparseLaplaceProblem,BRM._BRMSampledLaplacePro
 laplace_configuration(p) = (; engine=Symbol(nameof(typeof(p))), p.tol, p.maxiter,
     partition=laplace_partition(p))
 
-# Identity is by value: copying a Dict or rebuilding an equivalent graph may
-# change serialization traversal and aliases. Encode ordered containers in
-# order and unordered maps/sets in a canonical byte order, without alias IDs.
-# These records contain source, preprocessing and data, never solver scratch.
-function laplace_identity_bytes(x)
+# Share the extension's value encoder with carried-window identities. It
+# ignores object sharing and dictionary traversal, retaining type and shape.
+function laplace_identity(x)
     io = IOBuffer()
-    laplace_identity_write(io, x)
-    take!(io)
+    streaming_value!(io, x)
+    "brm-smc-laplace-v1:" * bytes2hex(sha256(take!(io)))
 end
-function laplace_identity_write(io, x)
-    if x isa AbstractDict
-        serialize(io, :dictionary)
-        entries = [(laplace_identity_bytes(k), v) for (k, v) in x]
-        sort!(entries; by=first)
-        serialize(io, length(entries))
-        for (key, value) in entries
-            serialize(io, key)
-            laplace_identity_write(io, value)
-        end
-    elseif x isa AbstractSet
-        serialize(io, :set)
-        serialize(io, sort!([laplace_identity_bytes(v) for v in x]))
-    elseif x isa AbstractArray
-        serialize(io, (:array, size(x)))
-        for value in x
-            laplace_identity_write(io, value)
-        end
-    elseif x isa NamedTuple
-        serialize(io, (:record, keys(x)))
-        for value in x
-            laplace_identity_write(io, value)
-        end
-    elseif x isa Tuple
-        serialize(io, (:tuple, length(x)))
-        for value in x
-            laplace_identity_write(io, value)
-        end
-    elseif x isa Union{Number,AbstractString,Symbol,Type,Module,Function,Nothing,Missing}
-        serialize(io, x)
-    else
-        serialize(io, (typeof(x), fieldnames(typeof(x))))
-        for name in fieldnames(typeof(x))
-            laplace_identity_write(io, getfield(x, name))
-        end
-    end
-end
-laplace_identity(x) = "brm-smc-laplace-v1:" * bytes2hex(sha256(laplace_identity_bytes(x)))
 
 function laplace_preprocessing(rk)
     data = BRM.rk_bound_data(rk)
