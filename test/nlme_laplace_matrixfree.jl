@@ -177,3 +177,35 @@ end
     end
     @test p.nonfinite == 0
 end
+
+@stestset "matrix-free declared Gaussian priors retain moving mean and scale derivatives" begin
+    data=(; left=[1,2,3,1],right=[2,3,1,3],y=[0.9,1.2,0.7,1.1])
+    rk=RKBRMI(@brm data begin
+        offset ~ Normal(0,1)
+        location ~ Normal(0.2,0.8)
+        scale ~ LogNormal(0,0.4)
+        field[1:3] .~ Normal.(location,scale)
+        @plate for i in eachindex(y)
+            y[i] ~ Normal(offset + exp(field[left[i]] + 0.3field[right[i]]),0.8)
+        end
+    end)
+    p=brm_laplace_problem(rk; integrate=(:field,),ad_backend=NLME_AD,
+        solver=:matrixfree,matrixfree=MatrixFreeLaplace(;probes=2))
+    for point in (-0.1,0.15)
+        x=fill(point,length(p.population))
+        value,gradient=LogDensityProblems.logdensity_and_gradient(p,x)
+        @test isfinite(value)
+        @test gradient ≈ mf_fd(y -> LogDensityProblems.logdensity(p,y),x) rtol=2e-5 atol=2e-5
+    end
+    x=fill(0.1,length(p.population))
+    reference=LogDensityProblems.logdensity_and_gradient(p,x)
+    LogDensityProblems.logdensity(p,x .+ 0.3)
+    @test LogDensityProblems.logdensity_and_gradient(p,x) == reference
+    BRM._brm_spl_algebra!(p,:matrixfree,MatrixFreeLaplace(;probes=4))
+    p.algebra.probes[1] .= [1.0 1 1 1; 1 -1 1 -1; 1 1 -1 -1]
+    exact=brm_laplace_problem(rk; integrate=(:field,),ad_backend=NLME_AD,solver=:exact)
+    value,gradient=LogDensityProblems.logdensity_and_gradient(p,x)
+    ve,ge=LogDensityProblems.logdensity_and_gradient(exact,x)
+    @test value ≈ ve atol=5e-7
+    @test gradient ≈ ge rtol=3e-6 atol=3e-6
+end
