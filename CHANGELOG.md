@@ -12,6 +12,30 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.141
+
+- `brm_svi_fit` accepts `unit_sampling=:work` for positive work-weighted
+  sampling with replacement and inverse-probability objective/global-gradient
+  weights. Repeated draws share one local update. Diagnostics distinguish
+  draws, visits, selection probabilities and actual gradient calls;
+  `:uniform` retains distinct-unit batches and remains the default.
+- **Breaking:** local SVI factors larger than 64 coordinates now use a
+  diagonal-plus-low-rank covariance instead of dense precision matrices.
+  `unit_dense_limit` (0:256) and `unit_rank` (0:32, default 8) control the
+  approximation. Small dense units retain their natural-gradient updates;
+  larger units use posterior-scaled path-gradient Adam updates. For those
+  units, diagnostic `q.Λ` and `q.U` are matrix operators and `q.U` is no
+  longer triangular: use multiplication rather than triangular indexing or
+  solves. Materializing an operator still requires a dense matrix.
+- Format-2 SVI checkpoints store structured local factors without optimizer
+  moments. Resume preserves their distribution and family under coordinate
+  reordering, accepts format-1 checkpoints, and retains carried dense factors.
+- SVI targets reuse a single global-plus-local workspace and store only local
+  ordering metadata per unit. Cached entropy and lazy local polishing avoid
+  visiting all local factors on every iteration. The underlying cell plan
+  still determines structural-selection storage; full returned draws still
+  scale with the complete parameter dimension.
+
 ## 0.2.140
 
 - Carried RK SMC windows accept `coordinates=:auto`: particles contain only
