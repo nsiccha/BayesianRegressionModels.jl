@@ -57,6 +57,11 @@ tree against compiled Stan's scaled, correlated effects.
 Pointwise model assignments and population contributions retain observation
 coordinates; unrelated equal-length vectors cannot acquire them by shape.
 
+`ragged_draw_trees.jl` checks ragged top-level and in-cell response axes,
+group-aggregate likelihood widths, constrained-name permutations, shared
+backing, quantiles over unequal chains, and changed-design replay with an
+omitted response. It uses deterministic unconstrained points, not a fit.
+
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
 `smc_window_identity.jl` checks carried-posterior identity across dictionary
 rebuilding, array padding, shared values, copying and serialization, plus

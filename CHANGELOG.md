@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.131
+## 0.2.132
 
 - Plans retain their conditional numerical policy when reused or automatically
   replanned. `brm_ladder_fit` accepts the same solver and matrix-free options;
@@ -22,8 +22,8 @@ instead of failing at run time.
   scratch buffers and evaluation diagnostics do not change its identity.
 
 - `brm_laplace_problem(...; integrate, solver=:auto)` selects exact algebra
-  for connected components through 1,024 coordinates and iterative conditional algebra
-  for larger components. `solver=:exact` retains the previous sparse-factor
+  for connected components through 1,024 coordinates and iterative conditional
+  algebra for larger components. `solver=:exact` retains the previous sparse-factor
   path; `solver=:matrixfree` forces iterative algebra. `MatrixFreeLaplace`
   sets the component bound, retained probe seed, solve caps and quadrature.
 - The large-component determinant is a reproducible fixed-probe rational
@@ -40,6 +40,13 @@ instead of failing at run time.
   approximation error under the default `solver=:auto`. Use `solver=:exact`
   to reproduce the previous determinant algebra. Small components retain
   exact algebra. This does not alter the authored statistical model.
+
+## 0.2.131
+
+- Label ragged response draws in `brm_output_tree` and `brm_predictive_tree`
+  with flat observation positions, retaining the existing backing arrays and
+  separate chains. Aggregate log likelihoods have one position per group;
+  predictive outputs have one per element, with group boundaries in `segments`.
 
 ## 0.2.130
 
