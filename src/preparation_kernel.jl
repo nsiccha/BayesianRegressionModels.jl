@@ -416,11 +416,15 @@ end
 # checked against `groups` as `_brm_kernel_ragged_rows` checks them. A row in
 # no cell is skipped here; a response's coverage is refused where its data is
 # bound (`_rk_prepare_kernel_value`, `_rk_design_cell_check`), not in the graph.
-function brm_ragged_rows(names, groups, cells, axes...)
+# Keep the axis arity in the specialization. Forwarding a long mixed-type
+# vararg tail otherwise leaves the call to the graph helper dynamically
+# dispatched when RK prepares a factor's data-only prefix.
+function brm_ragged_rows(names, groups, cells, axes::Vararg{Any,N}) where {N}
     x, group, cell = names[1], names[2], names[3]
     _brm_ragged_rows_graph(x, group, groups, cell, cells, names[4:end], axes)
 end
-function brm_ragged_rows_ordered(names, groups, cells, order, axes...)
+function brm_ragged_rows_ordered(names, groups, cells, order,
+        axes::Vararg{Any,N}) where {N}
     x, group, cell, order_name = names[1], names[2], names[3], names[4]
     rows = _brm_ragged_rows_graph(x, group, groups, cell, cells, names[5:end], axes)
     _brm_kernel_order_rows!(rows, order, order_name, group, length(groups);
@@ -436,7 +440,7 @@ end
 # axes are checked against `groups` as `brm_ragged_rows` checks them, and the
 # partition is returned as it is, so the graph partitions each join once
 # however many columns its cells read through it.
-function brm_ragged_rows_shared(rows, names, groups, axes...)
+function brm_ragged_rows_shared(rows, names, groups, axes::Vararg{Any,N}) where {N}
     _brm_kernel_check_ragged_axis(names[1], names[2],
         ((names[k + 2], length(axes[k])) for k in eachindex(axes)), length(groups);
         prefix="RK backend")

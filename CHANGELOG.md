@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.119
+
+- Sparse embedded Laplace retains model-scope observations of derived values,
+  including gathered nonlinear count predictors, using compact observation
+  factors, including emitted missing-value completion density corrections.
+  Automatic plans gate terms read by these observations with the same
+  importance diagnostic as plate cells. Factor selections use structural
+  coordinate footprints, including dependencies inactive at the initial point
+  (snag sparse-automatic-1de1001a).
+- Ragged-row helpers specialize on their axis arity, so factor preparation
+  retains type stability for wide predictors with mixed column types.
+- An observation's cells share one set of Hessian-vector direction buffers
+  that the evaluation sets per cell, instead of `K × m` floats stored per
+  cell: a Gemeinde-level observation's cells no longer cost tens of
+  gigabytes to prepare.
+
 ## 0.2.118
 
 - Plate cells read model-scope computed arrays directly, including transforms

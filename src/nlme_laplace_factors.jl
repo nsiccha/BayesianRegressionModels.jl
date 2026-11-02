@@ -88,8 +88,9 @@ end
 
 # Discover support structurally before preparing AD. Numeric zeros therefore
 # cannot remove a coordinate, and empty sums need no exemplar term call.
-function _brm_spl_prepare_factors(backend, name, u0, ncells, integrated, population)
-    q = _rk_spl_factor_queries(backend, name)
+function _brm_spl_prepare_factors(backend, name, u0, ncells, integrated, population;
+        query=nothing)
+    q = query === nothing ? _rk_spl_factor_queries(backend, name) : query
     isempty(q.terms) && return nothing
     zof = Dict(i => k for (k, i) in enumerate(integrated))
     pof = Dict(i => k for (k, i) in enumerate(population))

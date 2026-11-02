@@ -128,7 +128,7 @@ mutable struct BRMSparseLaplaceProblem{K}
     tsbptr::Vector{Int}
     tsb::Vector{Int}
     wsblocks::Vector{Vector{Int}}
-    # `@plate` cells by observation (`_brm_spl_cells!`): per observation its
+    # Factors by observation (`_brm_spl_cells!`): per observation its
     # cell query, compact AD and cells, each with its selection, its integrated
     # draws (`lz`, ascending) at selection positions `lpos`, its population
     # coordinates (`pidx`) at `ppos`, and its term (after the rows').
@@ -231,10 +231,10 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     integrate = Symbol[g for g in (integrate isa Symbol ? (integrate,) : integrate)]
     isempty(integrate) && throw(ArgumentError(
         "brm_laplace_problem: integrate names no grouping"))
-    refusal = _brm_slap_response_refusal(backend; cells=true)
+    refusal = _brm_slap_response_refusal(backend; cells=true, values=true)
     refusal === nothing || _brm_nlme_error("brm_laplace_problem: integrate = " *
         "$(repr(Tuple(integrate))) needs every observation to be a regression row " *
-        "of a closed-form family or a `@plate` cell, but $refusal")
+        "of a closed-form family or an observation factor, but $refusal")
     responses = _brm_slap_responses(backend.plan)
     records = _brm_spl_records(backend, integrate; declarations)
     names = _rk_layout_coordinate_names(backend)
@@ -324,7 +324,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         Float64(tol), Int(maxiter), 0, 0, 0, 0, nothing)
     _brm_spl_design!(p, u0)
     sampled || _brm_slap_population_design!(p, u0)
-    cells = _brm_nlme_plate_observations(backend.plan)
+    cells = Set(_brm_slap_other_observations(backend.plan))
     _brm_slap_verify!(p, u0, t.response, t.row; cells)
     _brm_spl_verify_prior(p, u0)
     _brm_spl_cells!(p, u0, sort!(collect(cells)), ad_backend)
@@ -529,27 +529,39 @@ end
 function _rk_spl_cell_ad end
 function _rk_spl_cell_block end
 function _rk_spl_cell_third end
+function _rk_spl_cell_footprint end
+function _rk_spl_cell_reads end
 
-# The `@plate` cells: per observation, each cell's selection (the packed
-# coordinates its value reads, recorded at two probe points; a cell with fewer
+# Observation factors, including model-scope value observations: each cell's
+# selection (its structural packed-coordinate footprint; a cell with fewer
 # reads than its observation's widest is padded with coordinates it does not
 # read, which give zero rows), its integrated draws and population
 # coordinates, and one compact AD per observation. Each cell's value must be
 # its pointwise density.
+# A cell's HVP directions in the group's shared buffers: direction `k` is the
+# unit at the cell's `k`-th integrated position; the buffers are zero between
+# cells.
+function _brm_spl_cell_directions!(dirs, lpos, v)
+    for (k, pos) in enumerate(lpos)
+        dirs[k][pos] = v
+    end
+    dirs
+end
+
 function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend)
     isempty(names) && return p
     n = length(p.integrated)
     zof = zeros(Int, length(u0)); zof[p.integrated] .= 1:n
     pof = zeros(Int, length(u0)); pof[p.population] .= eachindex(p.population)
-    rng = Random.Xoshiro(20261101)
-    probes = [u0 .+ 0.1 .* randn(rng, length(u0)) for _ in 1:2]
     pointwise = _rk_slap_pointwise(p.kernels, u0)
     term = length(p.family)
     for name in names
         query = _rk_nlme_cell_query(p.backend, (name,))
         expected = pointwise[name]
+        isempty(expected) && continue
+        factors = _rk_spl_factor_queries(p.backend, name)
         prepared = _brm_spl_prepare_factors(p.backend, name, u0, length(expected),
-            p.integrated, p.population)
+            p.integrated, p.population; query=factors)
         if prepared !== nothing
             prepared = _brm_spl_factor_operators(prepared, u0, ad_backend)
             cells = map(prepared.cells) do c
@@ -560,17 +572,15 @@ function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend)
                 merge(c, (; term))
             end
             prepared = merge(prepared, (; cells))
+            @debug "sparse Laplace sum-factor group" name cells=length(cells) maxrss_gib=Sys.maxrss() / 2^30
             push!(p.cells, _BRMSumCellGroup(name, query, cells, prepared))
             continue
         end
+        # An ordinary cell keeps its original graph: the factored outer can
+        # conservatively widen captured arrays even when it has no sums.
+        footprint = _rk_spl_cell_footprint(query)
         reads = map(eachindex(expected)) do i
-            seen = Int[]
-            for u in probes
-                point = _BRMNLMERecordingPoint(u, Int[])
-                _rk_nlme_cell_value(query, point, i)
-                append!(seen, point.seen)
-            end
-            sort!(unique!(seen))
+            _rk_spl_cell_reads(footprint, u0, i)
         end
         # (cells that read no coordinate still get a one-coordinate selection,
         # so they are terms like the others)
@@ -596,18 +606,15 @@ function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend)
         end
         # each cell's HVP directions: the units at its integrated draws (K of
         # them, zero past a cell's own), whose results are the Hessian's
-        # columns there
+        # columns there. The group holds one zero buffer per direction and the
+        # evaluation sets a cell's units in place (`_brm_spl_cell_directions!`):
+        # a buffer per cell is `K × m` floats each, tens of gigabytes over a
+        # Gemeinde-level observation's cells.
         K = max(1, maximum(c -> length(c.lz), cells))
-        cells = map(cells) do c
-            dirs = ntuple(K) do k
-                e = zeros(m)
-                k <= length(c.lpos) && (e[c.lpos[k]] = 1.0)
-                e
-            end
-            merge(c, (; dirs))
-        end
+        dirs = ntuple(_ -> zeros(m), K)
         ad = _rk_spl_cell_ad(p.backend, (name,), copy(u0), first(cells).sel, ad_backend, K)
-        push!(p.cells, (; name, query, ad, m, cells))
+        @debug "sparse Laplace cell group" name cells=length(cells) m K maxrss_gib=Sys.maxrss() / 2^30
+        push!(p.cells, (; name, query, ad, m, dirs, cells))
     end
     p
 end
@@ -829,7 +836,9 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
             end
         end
         derivatives || continue
-        gsel, columns = _rk_spl_cell_block(group.ad, c.dirs, u, c.sel, c.i)
+        _brm_spl_cell_directions!(group.dirs, c.lpos, 1.0)
+        gsel, columns = _rk_spl_cell_block(group.ad, group.dirs, u, c.sel, c.i)
+        _brm_spl_cell_directions!(group.dirs, c.lpos, 0.0)
         m = length(c.lz)
         base = p.nptr[c.term] - 1
         for a in 1:m
