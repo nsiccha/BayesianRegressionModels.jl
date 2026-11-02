@@ -24,6 +24,7 @@ using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, nonzeros, rowvals
 using SelectedInversion: selinv_diag, selinv, selinv_extract
 import SparseArrays, SelectedInversion, KLU, MUMPS
 import KrylovKit
+import Krylov
 using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
                  ProbabilityWeights, UnitWeights, Weights,
                  aweights, fweights, pweights, uweights, weights
@@ -138,6 +139,7 @@ include("nlme_laplace_factors.jl")
 include("nlme_laplace_sparse.jl")
 include("nlme_laplace_gaussian.jl")
 include("nlme_laplace_sum_solver.jl")
+include("nlme_laplace_matrixfree.jl")
 include("nlme_laplace_width.jl")
 include("nlme_laplace_plan.jl")
 include("nlme_laplace_sampled.jl")

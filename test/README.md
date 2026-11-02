@@ -5,6 +5,15 @@ blocks, simplex blocks, and nested parameter cursors against numerical
 references captured before the ReparametrizableDistributions extraction.
 The transform algorithms and their derivative tests live in that package.
 
+`nlme_laplace_matrixfree_algebra.jl` checks the derivative of the fixed-probe
+rational determinant against independent two-dimensional identities, including
+noncommuting curvature, mixed exact/operator components, ICAR soft constraints,
+conditional draws and explicit solver failures. `nlme_laplace_matrixfree.jl`
+checks nonlinear row/cell/sum gradients, evaluation-history and copy invariance,
+plan/ladder policy retention and nonconcave mode searches. The synthetic drivers
+in `research/matrixfree_conditional/` measure operator/exact algebra and a full
+Poisson/ICAR target separately; neither represents a fitted consumer model.
+
 `runtime_constants.jl` checks strict RK inference of runtime `constant(...)`
 expressions from `brm(source; mod)`, changed fit inputs, frozen inputs, and
 printed-source round trips. It exercises constants feeding a parameter-dependent

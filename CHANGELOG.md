@@ -12,6 +12,27 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.129
+
+- Plans retain their conditional numerical policy when reused or automatically
+  replanned. `brm_ladder_fit` accepts the same solver and matrix-free options;
+  continuation keeps its existing target's policy.
+
+- `brm_laplace_problem(...; integrate, solver=:auto)` selects exact algebra
+  for bounded small connected components and iterative conditional algebra
+  for larger components. `solver=:exact` retains the previous sparse-factor
+  path; `solver=:matrixfree` forces iterative algebra. `MatrixFreeLaplace`
+  sets the component bound, retained probe seed, solve caps and quadrature.
+- The large-component determinant is a reproducible fixed-probe rational
+  approximation. Its gradient differentiates that same approximation,
+  including the nonlinear conditional mode and sum-factored observations.
+  No large sparse factor or dense covariance is formed. Numerical convergence
+  and probe variability remain distinct from Laplace approximation error.
+- **Breaking:** large Gaussian components now also have numerical determinant
+  approximation error under the default `solver=:auto`. Use `solver=:exact`
+  to reproduce the previous determinant algebra. Small components retain
+  exact algebra. This does not alter the authored statistical model.
+
 ## 0.2.128
 
 - Sparse embedded Laplace accepts declared independent Gaussian vectors such
