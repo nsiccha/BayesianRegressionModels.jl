@@ -2053,3 +2053,85 @@ toolchain, so a GitHub Actions job would be red by construction.
 # Controls cover normalized compiled same-BRMI Stan, ordinary native Reverse,
 # full source/artifact replay and input ownership; native generated draws are
 # unavailable.
+
+## Bounded sparse Laplace acceptance
+
+`laplace_width.jl` checks structural screening before derivative preparation,
+deterministic whole-term selection, forced conflicts, correlated margins,
+exact Gaussian retained-set values and native Enzyme gradients, local sum
+directions, and the zero-integration target/draw/Pathfinder/ladder workflows.
+Its independent Gaussian oracle integrates the same selected coordinates of
+the full pointwise model; it does not compare different marginal targets.
+`laplace_plan_reuse.jl` checks that prepared plans still avoid new AD preparation
+and give independent targets when a strict subset is retained.
+
+The measurements in `research/sparse_laplace_factors/*_2026-11-02.tsv` use
+Julia 1.10.12 on gordito, one CPU per process, RK
+`5e9d2d03818ba5c8ef7d6d068fef42101f902d0e` (0.1.52 / PPL 0.1.55), Enzyme
+`5325554cab66d13ab34c22ec502fd00759ffdcf7` and libEnzyme
+`782c9d95efd9895e380c451ea9975cde1c197219` (LLVM 15). Each point runs in a
+separate process under `/usr/bin/time -v`; `external_peak_rss_kib` is that
+independent measurement. `allocated_bytes` and `seconds` cover the warmed
+operation; process peak RSS includes Julia, package loading and compilation.
+Concurrent host load makes these short timings descriptive, not a speedup
+comparison.
+
+Three probes separate the costs:
+
+- `pattern_scaling.jl` measures only footprint deduplication and CSC union.
+  Its `statistics_bytes` is just the small statistics tuple, not all metadata.
+- `pattern_builder_scaling.jl` executes the complete, unchanged production
+  `_brm_spl_pattern!` method in a minimal input container. It counts input cell
+  storage and all retained index metadata, including linear `tptr`/`tz`/`rloc`,
+  diagonals, prior maps and components. The source hash identifies the measured
+  implementation. Repeated footprints test duplicate suppression; overlapping
+  distinct footprints test retained structure separately from pair visits.
+- `width_scaling.jl` calls the public planner on ordinary Gaussian cells using
+  `dot` to preserve a genuinely coupled footprint. It passes no AD backend,
+  sets the bound to 32, and asserts that all effects are sampled with no prepared
+  conditional problem. This measures structural planning and generated query
+  setup, not just the selection helper.
+
+Complete production builder results (bytes, rounded to decimal MB):
+
+| Shape | Width | Cells | Pair visits | Retained nnz | Allocated MB | Index metadata MB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| repeated | 32 | 100 | 1,024 | 1,024 | 0.541 | 0.029 |
+| repeated | 32 | 400 | 1,024 | 1,024 | 2.072 | 0.110 |
+| repeated | 128 | 100 | 16,384 | 16,384 | 2.701 | 0.108 |
+| repeated | 128 | 400 | 16,384 | 16,384 | 7.440 | 0.420 |
+| overlapping | 32 | 400 | 409,600 | 26,161 | 5.221 | 0.120 |
+| overlapping | 128 | 400 | 6,553,600 | 118,129 | 18.019 | 0.429 |
+
+Every point retains zero per-cell quadratic pair-map entries. Width 128 with
+400 repeated cells keeps 51,200 input incidences, a 263,336-byte CSC pattern
+and a 1,122,952-byte complete fixture. Distinct overlapping blocks still visit
+their required local pairs; those visits are not stored as duplicate triplets.
+With a fixed local width bound, their work is bounded by that width times
+footprint incidence. Storage follows input incidence and the retained sparse
+pattern, including its diagonals and prior edges.
+
+Public planning allocated 18.20/23.02 MB at width 64 with 100/400 cells, and
+21.95/37.28 MB at width 256. All four plans retained zero integrated coordinates
+and 66/258 sampled coordinates respectively; none prepared conditional AD.
+Their isolated process peaks were 1.01–1.08 GB including compilation, while
+the warmed planner took 0.033–0.046 seconds. The raw TSV retains each result
+and its source hash.
+
+To reproduce, run each parameter tuple in a fresh process inside the usual
+compute-token wrapper (and use `JULIA_PKG_OFFLINE=true` when dependencies are
+already present):
+
+```sh
+/usr/bin/time -v julia --project=test research/sparse_laplace_factors/pattern_builder_scaling.jl 128 400 repeated
+/usr/bin/time -v julia --project=test research/sparse_laplace_factors/width_scaling.jl 256 400
+```
+
+The builder and microprobe matrix is `(width,cells,shape)` =
+`(32,100,repeated)`, `(32,400,repeated)`, `(128,100,repeated)`,
+`(128,400,repeated)`, `(32,400,overlap)`, `(128,400,overlap)`.
+The public-planner matrix is widths `(64,256)` crossed with cells `(100,400)`.
+
+These bounded fixtures do not establish full Atlas runtime, memory or fitting
+speed. Sparse factorization can still incur fill-in, sampled targets can be
+large, and raising `max_cell_width` permits genuinely dense local blocks.

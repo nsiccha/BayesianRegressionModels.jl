@@ -160,30 +160,30 @@ end
 # remain the outer's small block and each summand's small block.
 function _brm_spl_factor_blocks(prepared, u, c)
     values = _brm_spl_factor_values(prepared, u, c)
-    gf, hf = _rk_spl_factor_block(c.outer, u, c.direct.sel, c.i; sums=values.sums)
+    gf, hf = _rk_spl_factor_block(c.outer, u, c.direct.sel, c.i; sums=values.sums, columns=c.active)
     ri = Int[]; ci = Int[]; bv = Float64[]
     r = length(values.sums)
-    for (k, loc) in zip(c.direct.lpos, c.direct.loc)
+    for (k, loc) in enumerate(c.direct.loc)
         push!(ri, r + k); push!(ci, loc); push!(bv, 1.0)
     end
     terms = map(c.terms) do reduction
         map(reduction) do t
             g, h = t.ad === nothing ? (Float64[], zeros(0, 0)) :
-                _rk_spl_factor_block(t.ad, u, t.sel, c.i; term=t.t)
+                _rk_spl_factor_block(t.ad, u, t.sel, c.i; term=t.t, columns=t.lpos)
             for (k, loc) in zip(t.lpos, t.loc)
                 push!(ri, t.j); push!(ci, loc); push!(bv, g[k])
             end
             merge(t, (; g, h))
         end
     end
-    B = sparse(ri, ci, bv, length(gf), length(c.lz))
+    B = sparse(ri, ci, bv, length(c.active), length(c.lz))
     # The third-order chain rule needs S*B' for every outer input at every
     # effect this cell reads, including pairs where the current Jacobian is
     # zero. Keep that rectangular request in the structural pattern.
     ri = [i for j in axes(B, 2) for i in axes(B, 1)]
     ci = [j for j in axes(B, 2) for i in axes(B, 1)]
     B = sparse(ri, ci, Float64[B[i,j] for (i,j) in zip(ri,ci)], size(B)...)
-    (; values..., gf, hf, B, terms)
+    (; values..., gf, hf, B, terms, active=c.active)
 end
 
 # Assemble likelihood precision as D + B' W B. Only each summand's small
@@ -200,7 +200,7 @@ function _brm_spl_factor_curvature(prepared, u, n, np)
         state = _brm_spl_factor_blocks(prepared, u, c)
         _brm_spl_factor_pullback!(gradient, population, c, state, state.gf)
         for reduction in state.terms, t in reduction
-            for (b, j) in zip(t.lpos, t.lz), (a, i) in zip(t.lpos, t.lz)
+            for (b, j) in enumerate(t.lz), (a, i) in zip(t.lpos, t.lz)
                 push!(di, i); push!(dj, j); push!(dv, -state.gf[t.j] * t.h[a,b])
             end
         end
@@ -209,10 +209,10 @@ function _brm_spl_factor_curvature(prepared, u, n, np)
             push!(bi, offset + rowvals(state.B)[k])
             push!(bj, c.lz[j]); push!(bv, nonzeros(state.B)[k])
         end
-        for j in axes(state.hf, 2), i in axes(state.hf, 1)
-            push!(wi, offset + i); push!(wj, offset + j); push!(wv, -state.hf[i,j])
+        for j in axes(state.hf, 2), (i, a) in enumerate(state.active)
+            push!(wi, offset + i); push!(wj, offset + j); push!(wv, -state.hf[a,j])
         end
-        push!(rowptr, offset + length(state.gf) + 1)
+        push!(rowptr, offset + length(state.active) + 1)
         state
     end
     r = last(rowptr) - 1
@@ -249,18 +249,19 @@ function _brm_spl_factor_contraction!(tz, tp, prepared, u, c, state, blocks, SB,
     outer_tau = zeros(length(state.gf))
     for k in eachindex(eig.values)
         eig.values[k] <= 0 && continue
-        d = sqrt(eig.values[k]) .* eig.vectors[:, k]
+        d = zeros(length(state.gf))
+        d[state.active] .= sqrt(eig.values[k]) .* eig.vectors[:, k]
         _, _, tv = _rk_spl_factor_third(c.outer, d, u, c.direct.sel, c.i;
             sums=state.sums)
         outer_tau .+= tv
     end
-    traces = zeros(length(state.gf))
+    traces = zeros(length(state.active))
     for (j, reduction) in enumerate(state.terms), (k, t) in enumerate(reduction)
         isempty(t.lz) && continue
         S = blocks[j][k]
-        traces[j] += sum(S .* t.h[t.lpos, t.lpos])
+        traces[j] += sum(S .* t.h[t.lpos, :])
         # The two differentiated-Jacobian terms in the chain rule.
-        cross = 2 .* (t.h[:, t.lpos] * (SB[t.loc, :] * state.hf[:, j]))
+        cross = 2 .* (t.h * (SB[t.loc, :] * state.hf[state.active, j]))
         L = cholesky(Symmetric(S)).L
         for a in axes(L, 2)
             d = zeros(length(t.sel)); d[t.lpos] .= L[:, a]
@@ -277,7 +278,7 @@ function _brm_spl_factor_hvp!(z, population, c, state, direction)
     _brm_spl_factor_pullback!(z, population, c, state,
         state.hf * (state.B * direction[c.lz]))
     for reduction in state.terms, t in reduction
-        local_hv = state.gf[t.j] .* (t.h[:, t.lpos] * direction[t.lz])
+        local_hv = state.gf[t.j] .* (t.h * direction[t.lz])
         _brm_spl_factor_scatter!(z, population, t, local_hv)
     end
     nothing
@@ -291,20 +292,22 @@ function _brm_spl_factor_values(prepared, u, cell)
 end
 
 function _brm_spl_factor_operators(prepared, u0, ad_backend)
-    cache = Dict{Tuple{Any,Int},Any}()
-    operator(part, selection, i, t=1) = get!(cache, (part, length(selection.sel))) do
+    cache = Dict{Tuple{Any,Int,Int},Any}()
+    operator(part, selection, K, i, t=1) = get!(cache, (part, length(selection.sel), K)) do
         _rk_spl_factor_ad(prepared.q, part, u0, selection.sel, ad_backend;
-            cell0=i, term0=t)
+            cell0=i, term0=t, K)
     end
     cells = map(prepared.cells) do c
-        outer = operator(:outer, c.direct, c.i)
+        r = length(c.terms)
+        active = vcat(collect(1:r), r .+ c.direct.lpos)
+        outer = operator(:outer, c.direct, length(active), c.i)
         terms = map(c.terms) do reduction
             map(reduction) do t
-                ad = isempty(t.sel) ? nothing : operator(t.j, t, c.i, t.t)
+                ad = isempty(t.sel) ? nothing : operator(t.j, t, length(t.lpos), c.i, t.t)
                 merge(t, (; ad))
             end
         end
-        merge(c, (; outer, terms))
+        merge(c, (; outer, terms, active))
     end
     merge(prepared, (; cells))
 end

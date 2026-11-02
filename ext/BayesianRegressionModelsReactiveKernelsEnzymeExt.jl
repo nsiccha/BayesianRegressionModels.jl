@@ -272,18 +272,16 @@ mutable struct _SPLFactorAD{H,T,D}
     const outer::Bool
 end
 
-function BRM._rk_spl_factor_ad(q, part, base, indices, ad_backend; cell0=1, term0=1)
+function BRM._rk_spl_factor_ad(q, part, base, indices, ad_backend; cell0=1, term0=1, K=nothing)
     r = part === :outer ? length(q.terms) : 0
     m = length(indices)
     shape(v) = part === :outer ? (v[1:r], v[(r + 1):end]) : v
-    dirs = ntuple(r + m) do k
-        v = zeros(r + m); v[k] = 1.0
-        shape(v)
-    end
+    K = K === nothing ? r + m : K
+    dirs = ntuple(_ -> shape(zeros(r + m)), K)
     forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
     second = SecondOrder(AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse,
         ad_backend)), forward)
-    hvp = Base.invokelatest(prepare_cell_factor_ad, prepare_ad_hvp, q.factors,
+    hvp = K == 0 ? nothing : Base.invokelatest(prepare_cell_factor_ad, prepare_ad_hvp, q.factors,
         part, base, indices, second, dirs; cell0, term0)
     third = Base.invokelatest(prepare_cell_factor_ad, prepare_ad_third, q.factors,
         part, base, indices, SecondOrder(second, forward), (shape(zeros(r + m)),);
@@ -297,10 +295,34 @@ _spl_factor_point(ad, base, indices, cell, sums, term) = ad.outer ?
     (base, sums, base[indices], indices, cell) :
     (base, base[indices], indices, cell, term)
 
-function BRM._rk_spl_factor_block(ad, base, indices, cell; sums=nothing, term=1)
+function BRM._rk_spl_factor_block(ad, base, indices, cell; sums=nothing, term=1,
+        columns=collect(1:(ad.r + length(indices))))
     point = _spl_factor_point(ad, base, indices, cell, sums, term)
-    g, cols = ad_gradient_and_hvp(ad.hvp, ad.dirs, point...)
-    _spl_factor_flat(g), hcat(map(_spl_factor_flat, cols)...)
+    if isempty(columns)
+        g, _, _ = BRM._rk_spl_factor_third(ad, zeros(ad.r + length(indices)),
+            base, indices, cell; sums, term)
+        return g, zeros(length(g), 0)
+    end
+    function set!(v, k, value)
+        if ad.outer
+            k <= ad.r ? (v[1][k] = value) : (v[2][k - ad.r] = value)
+        else
+            v[k] = value
+        end
+    end
+    for (v, k) in zip(ad.dirs, columns)
+        set!(v, k, 1.0)
+    end
+    try
+        g, cols = ad_gradient_and_hvp(ad.hvp, ad.dirs, point...)
+        # A reused plan can restrict the integrated set without preparing AD
+        # again. Its original direction tuple then has a zero unused suffix.
+        _spl_factor_flat(g), hcat(map(_spl_factor_flat, cols[1:length(columns)])...)
+    finally
+        for (v, k) in zip(ad.dirs, columns)
+            set!(v, k, 0.0)
+        end
+    end
 end
 
 function BRM._rk_spl_factor_third(ad, direction, base, indices, cell;
