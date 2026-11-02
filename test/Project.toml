@@ -302,4 +302,5 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # Guarded gathered reductions through typed aliases: RK 0.1.52 / PPL 0.1.55.
 # PPL 0.1.60 / DistributionKernels 0.1.1: log-space interval masses and tails.
 # RK 0.1.58 / PPL 0.1.65: batched values and local shared-prefix footprints.
-rev = "9a76ed08632e2febee0ffe6fa45b3dd1c588e1b2"
+# RK 0.1.59 / PPL 0.1.66: cached factors retain their broadcast domains.
+rev = "0fc5bd20a2495067bc86ce5d8af90df05e0238e2"

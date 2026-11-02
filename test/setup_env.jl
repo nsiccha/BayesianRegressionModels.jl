@@ -264,8 +264,9 @@ const PINS = [
     # PPL 0.1.60 / DistributionKernels 0.1.1 keeps Normal interval masses
     # and native Reverse gradients finite in both extreme tails.
     # Shared-prefix mixed derivatives, batched values and local supports
-    # require RK 0.1.58 / PPL 0.1.65.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "9a76ed08632e2febee0ffe6fa45b3dd1c588e1b2"),
+    # require RK 0.1.58 / PPL 0.1.65. RK 0.1.59 / PPL 0.1.66 also keeps
+    # the broadcast domain through cached factor projection.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "0fc5bd20a2495067bc86ce5d8af90df05e0238e2"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
