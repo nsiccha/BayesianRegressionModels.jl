@@ -206,8 +206,8 @@ function _brm_spl_records(backend::RKBRMI, integrate; declarations=nothing)
     available = unique(Symbol[_brm_spl_record_group(r) for r in records])
     for g in integrate
         g in available || _brm_nlme_error("brm_laplace_problem: integrate names " *
-            "`$g`, which names no random-effect block, `cdar` walk, `car` field or declared vector of " *
-            "the model; its groupings are " *
+            "`$g`, which groups no random-effect block, `cdar` walk or `car` field " *
+            "and names no declared vector of the model; its groupings and declarations are " *
             "$(isempty(available) ? "none" : join(repr.(available), ", "))")
     end
     chosen = [r for r in records if _brm_spl_record_group(r) in integrate &&
