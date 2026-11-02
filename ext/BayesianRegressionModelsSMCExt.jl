@@ -161,6 +161,8 @@ function BRM.brm_smc_resume(template::BRM.RKBRMI, checkpoint;
         checkpoint.model_id, checkpoint.binding_id, checkpoint.previous_id)
 end
 
+include("smc_streaming.jl")
+include("filter_smc.jl")
 
 # Weighted first and second moments of a d × n cloud with normalized weights.
 function weighted_moments(positions, weights)
