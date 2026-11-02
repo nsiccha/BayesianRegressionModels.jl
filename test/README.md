@@ -1,5 +1,10 @@
 # Running the tests
 
+`reparametrization_primitives.jl` checks VBRMI's shared and stratified Cholesky
+blocks, simplex blocks, and nested parameter cursors against numerical
+references captured before the ReparametrizableDistributions extraction.
+The transform algorithms and their derivative tests live in that package.
+
 `runtime_constants.jl` checks strict RK inference of runtime `constant(...)`
 expressions from `brm(source; mod)`, changed fit inputs, frozen inputs, and
 printed-source round trips. It exercises constants feeding a parameter-dependent
