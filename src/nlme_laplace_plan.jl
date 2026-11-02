@@ -55,6 +55,24 @@ struct BRMLaplacePlan
     integrated_dimension::Int
     sampled_dimension::Int
     prepared::Union{Nothing,_BRMLaplacePreparation}
+    algebra_policy::NamedTuple
+end
+
+# Preserve the diagnostic-only constructors, including the original full
+# constructor. New plans carry their numerical policy into reuse and replans.
+BRMLaplacePlan(terms, ess_floor, draws, max_cell_width, width_events,
+        integrated_dimension, sampled_dimension, prepared) =
+    BRMLaplacePlan(terms, ess_floor, draws, max_cell_width, width_events,
+        integrated_dimension, sampled_dimension, prepared,
+        (; solver=:auto, matrixfree=MatrixFreeLaplace()))
+
+function _brm_plan_algebra_policy(plan, solver, matrixfree)
+    policy = (; solver=something(solver, plan.algebra_policy.solver),
+        matrixfree=something(matrixfree, plan.algebra_policy.matrixfree))
+    isequal(policy, plan.algebra_policy) && return plan
+    BRMLaplacePlan(plan.terms, plan.ess_floor, plan.draws, plan.max_cell_width,
+        plan.width_events, plan.integrated_dimension, plan.sampled_dimension,
+        plan.prepared, policy)
 end
 
 # Keep the original diagnostic-only constructor. Packed dimensions need a
@@ -74,6 +92,9 @@ function Base.show(io::IO, ::MIME"text/plain", plan::BRMLaplacePlan)
     dimension(n) = n < 0 ? "unknown" : n
     println(io, "  dimensions: ", dimension(plan.integrated_dimension), " integrated, ",
         dimension(plan.sampled_dimension), " sampled; max_cell_width=", plan.max_cell_width)
+    (; solver, matrixfree) = plan.algebra_policy
+    println(io, "  conditional algebra: ", solver, "; exact_limit=", matrixfree.exact_limit,
+        ", fixed probes=", matrixfree.probes, ", solve_maxiter=", matrixfree.solve_maxiter)
     for t in plan.terms
         ess = t.importance_ess === nothing ? "" : string("; importance ESS min ",
             round(t.importance_ess.min; digits=1), ", median ",
@@ -89,7 +110,7 @@ Base.show(io::IO, plan::BRMLaplacePlan) = print(io, "BRMLaplacePlan(",
 """
     brm_laplace_plan(rk::RKBRMI; ad_backend, integrate = :auto, sample = (),
         ess_floor = 0.5, draws = 200, at = nothing, rng = Random.Xoshiro(20261031),
-        max_cell_width = 128)
+        max_cell_width = 128, solver=:auto, matrixfree=MatrixFreeLaplace())
         -> BRMLaplacePlan
 
 Sort `rk`'s latent terms for the sparse Laplace ([`BRMLaplacePlan`](@ref)):
@@ -103,7 +124,8 @@ another Gaussian law's parameters stays sampled. Constrained, non-Gaussian
 and correlated vector priors are never admitted. Derived Normal observations
 remain gated because their dependence on the vector can be nonlinear.
 
-- **integrated:** every row reading the term is Normal, so its Laplace is exact;
+- **integrated:** every row reading the term is Normal, so its Laplace is exact
+  when linear in the integrated effects and using exact determinant algebra;
 - **gated:** read by counts, binomial rows, model-value observations or `@plate`
   cells. The term is
   integrated where its per-block importance diagnostic admits it. That
@@ -136,19 +158,25 @@ declaration or grouping. A term on a shape or dispersion can be named in
 Laplace does not integrate it). `ess_floor = 0.5`
 and `draws = 200` are defaults, not measured thresholds; the plan reports each
 gated term's importance ESS so a reader can judge.
+
+`solver` and `matrixfree` select the conditional algebra as in
+[`brm_laplace_problem`](@ref). The plan retains that policy when applied to a
+target or replanned by [`brm_ladder_fit`](@ref); explicit target keywords override it.
 """
 function brm_laplace_plan(backend::RKBRMI; ad_backend, integrate=:auto, sample=(),
         ess_floor::Real=0.5, draws::Integer=200, at=nothing,
-        rng=Random.Xoshiro(20261031), tol=1e-24, maxiter=50, max_cell_width=128)
+        rng=Random.Xoshiro(20261031), tol=1e-24, maxiter=50, max_cell_width=128,
+        solver=:auto, matrixfree=MatrixFreeLaplace())
     _brm_laplace_plan(backend; ad_backend, integrate, sample, ess_floor=Float64(ess_floor),
-        draws=Int(draws), at, rng, tol, maxiter, max_cell_width).plan
+        draws=Int(draws), at, rng, tol, maxiter, max_cell_width, solver, matrixfree).plan
 end
 
 # The plan and the sparse problem its diagnostic was measured on (over every
 # candidate term). The public plan retains it too, including when the
 # diagnostic admits only a subset of those terms.
 function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_floor,
-        draws, at, rng, tol, maxiter, max_cell_width=128)
+        draws, at, rng, tol, maxiter, max_cell_width=128,
+        solver=:auto, matrixfree=MatrixFreeLaplace())
     max_cell_width = _brm_spl_width_limit(max_cell_width)
     forced = integrate === :auto ? Symbol[] : Symbol[_brm_plan_names(integrate)...]
     sampled = Symbol[_brm_plan_names(sample)...]
@@ -190,11 +218,12 @@ function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_f
             haskey(screen.events, t.declaration) ? width_reason(t) :
                 something(t.never, "named in `sample`"), false, nothing) for t in terms]
         return (; plan=BRMLaplacePlan(entries, ess_floor, draws, max_cell_width,
-            screen.events, 0, screen.sampled_dimension, nothing), problem=nothing)
+            screen.events, 0, screen.sampled_dimension, nothing,
+            (; solver, matrixfree)), problem=nothing)
     end
     p = _brm_sparse_laplace_problem(backend, unique(t.grouping for t in candidates);
         ad_backend, tol, maxiter, declarations=Set(t.declaration for t in candidates),
-        max_cell_width, screened=true)
+        max_cell_width, screened=true, solver, matrixfree)
     reads = _brm_plan_reads(p)
     gated = Dict{Symbol,Any}()
     for t in candidates
@@ -251,7 +280,7 @@ function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_f
     admitted = Set(t.declaration for t in entries if t.admitted)
     ni = sum(length(b.z) for b in p.blocks if any(d -> _brm_nlme_owned(b.declaration, d), admitted); init=0)
     plan = BRMLaplacePlan(entries, ess_floor, draws, max_cell_width, screen.events,
-        ni, length(p.u) - ni, _BRMLaplacePreparation(p, ad_backend))
+        ni, length(p.u) - ni, _BRMLaplacePreparation(p, ad_backend), (; solver, matrixfree))
     (; plan, problem=p)
 end
 
@@ -422,9 +451,11 @@ end
 # A plan applied to another backend or AD configuration still builds that
 # backend's target, as does a manually constructed three-argument plan.
 function _brm_sparse_laplace_problem_from_plan(backend::RKBRMI, r; ad_backend, tol,
-        maxiter)
-    admitted = _brm_plan_admitted(r.plan)
-    isempty(admitted) && return _brm_sampled_laplace_problem(backend, r.plan; ad_backend, tol, maxiter)
+        maxiter, solver=nothing, matrixfree=nothing)
+    plan = _brm_plan_algebra_policy(r.plan, solver, matrixfree)
+    (; solver, matrixfree) = plan.algebra_policy
+    admitted = _brm_plan_admitted(plan)
+    isempty(admitted) && return _brm_sampled_laplace_problem(backend, plan; ad_backend, tol, maxiter)
     declarations = Set(t.declaration for t in admitted)
     prepared = r.plan.prepared
     if prepared !== nothing && prepared.problem.backend === backend &&
@@ -433,17 +464,23 @@ function _brm_sparse_laplace_problem_from_plan(backend::RKBRMI, r; ad_backend, t
         # Backend inputs are read-only. Do not clone the model and its bound
         # data along with each target's derivative and solver workspaces.
         p = Base.deepcopy_internal(prepared.problem, IdDict{Any,Any}(backend => backend))
-        Set(_brm_plan_problem_terms(p)) == declarations ||
-            _brm_spl_restrict!(p, declarations)
+        restricted = Set(_brm_plan_problem_terms(p)) != declarations
+        restricted && _brm_spl_restrict!(p, declarations)
         p.tol = Float64(tol)
         p.maxiter = Int(maxiter)
         fill!(p.u, 0.0)
         p.nonfinite = p.unconverged = p.blockwise = p.sweeps = 0
+        # A full copy already owns the same fixed probes and reference. Only
+        # a changed selection or numerical policy needs new preparation.
+        retain = !restricted && p.algebra !== nothing && p.algebra.solver === solver &&
+            isequal(p.algebra.options, matrixfree)
+        retain || _brm_spl_algebra!(p, solver, matrixfree)
     else
         p = _brm_sparse_laplace_problem(backend, unique(t.grouping for t in admitted);
-            ad_backend, tol, maxiter, declarations, max_cell_width=r.plan.max_cell_width)
+            ad_backend, tol, maxiter, declarations, max_cell_width=r.plan.max_cell_width,
+            solver, matrixfree)
     end
-    p.plan = r.plan
+    p.plan = plan
     p
 end
 
