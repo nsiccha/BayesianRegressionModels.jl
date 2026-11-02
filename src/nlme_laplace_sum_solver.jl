@@ -11,6 +11,63 @@ end
 _brm_spl_finite(h::SparseMatrixCSC) = all(isfinite, nonzeros(h))
 _brm_spl_finite(h::_BRMSumPrecision) = all(_brm_spl_finite, (h.D, h.B, h.W))
 
+# A finite density does not imply finite derivatives (for example an
+# overflowing inner exponential whose outer exponential saturates at zero).
+# Attribute invalid derivatives to the blocks they touch so backtracking a
+# bad trial never shortens an unrelated block's step. Inspect sparse storage,
+# including the augmented sum factors, without forming B' W B.
+function _brm_spl_finite_blocks(p, g, h)
+    valid = trues(length(p.sblocks))
+    for i in eachindex(g)
+        isfinite(g[i]) || (valid[p.sblock[i]] = false)
+    end
+    _brm_spl_finite_blocks!(valid, p, h)
+    valid
+end
+function _brm_spl_finite_blocks!(valid, p, h::SparseMatrixCSC)
+    for j in axes(h, 2), k in nzrange(h, j)
+        if !isfinite(nonzeros(h)[k])
+            valid[p.sblock[j]] = false
+            valid[p.sblock[rowvals(h)[k]]] = false
+        end
+    end
+    valid
+end
+function _brm_spl_finite_blocks!(valid, p, h::_BRMSumPrecision)
+    _brm_spl_finite_blocks!(valid, p, h.D)
+    for j in axes(h.B, 2), k in nzrange(h.B, j)
+        isfinite(nonzeros(h.B)[k]) || (valid[p.sblock[j]] = false)
+    end
+    # Each outer curvature block belongs to one cell. Its nonfinite entries
+    # invalidate every step block that supplies that cell's integrated inputs.
+    offset = 0
+    for piece in h.parts
+        for (i, c) in enumerate(piece.group.cells)
+            cols = (piece.offset + piece.part.rowptr[i]):(piece.offset + piece.part.rowptr[i + 1] - 1)
+            if any(j -> any(k -> !isfinite(nonzeros(h.W)[k]), nzrange(h.W, j)), cols)
+                for z in c.lz
+                    valid[p.sblock[z]] = false
+                end
+            end
+        end
+        offset += size(piece.part.W, 1)
+    end
+    for (j, blocks) in enumerate(p.wsblocks)
+        if !isfinite(h.W[offset + j, offset + j])
+            valid[blocks] .= false
+        end
+    end
+    valid
+end
+
+_brm_spl_copy_precision!(h::SparseMatrixCSC, trial::SparseMatrixCSC) =
+    copyto!(nonzeros(h), nonzeros(trial))
+function _brm_spl_copy_precision!(h::_BRMSumPrecision, trial::_BRMSumPrecision)
+    _brm_spl_copy_precision!(h.D, trial.D)
+    h.B = trial.B; h.W = trial.W; h.parts = trial.parts
+    h
+end
+
 _brm_spl_precision_block(h::SparseMatrixCSC, I) = Matrix(Symmetric(_brm_spl_entries(h, I, I)))
 function _brm_spl_precision_block(h::_BRMSumPrecision, I)
     rows = sort!(unique!([rowvals(h.B)[k] for j in I for k in nzrange(h.B, j)]))
