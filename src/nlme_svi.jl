@@ -52,6 +52,7 @@ _brm_svi_rank(f::LowRankGlobal) = f.rank
 
 include("nlme_svi_sampling.jl")
 include("nlme_svi_workspace.jl")
+include("nlme_svi_units.jl")
 
 # ── The minibatch target ─────────────────────────────────────────────────────
 
@@ -113,13 +114,20 @@ end
 # ── Variational parameters ───────────────────────────────────────────────────
 
 # Subject i's factor is `M[i]`, `Λ[i]` and `U[i]`, sized by its own block.
-function _brm_svi_params(t, μ, family::BRMSVIFamily; global_scale, unit_scale)
+# Large units use bounded-rank operators; only small units store dense arrays.
+function _brm_svi_params(t, μ, family::BRMSVIFamily; global_scale, unit_scale,
+        unit_dense_limit=64, unit_rank=8)
+    _brm_svi_unit_options(unit_dense_limit, unit_rank)
+    isfinite(unit_scale) && unit_scale > 0 || throw(ArgumentError(
+        "brm_svi_fit: unit_scale must be finite and positive"))
     D = length(t.globals)
-    eye(block) = Matrix{Float64}(I, length(block), length(block))
+    factors = [_brm_svi_unit_factors(length(b), unit_scale, unit_dense_limit, unit_rank)
+        for b in t.units]
     (; family, μ=Vector{Float64}(μ), ρ=fill(log(global_scale), D),
        Β=zeros(D, _brm_svi_rank(family)), M=[zeros(length(b)) for b in t.units],
-       Λ=[eye(b) ./ unit_scale^2 for b in t.units],
-       U=[eye(b) ./ unit_scale for b in t.units])
+       Λ=Union{Matrix{Float64},_BRMSVIUnitPrecision}[f[1] for f in factors],
+       U=Union{Matrix{Float64},_BRMSVIUnitRoot}[f[2] for f in factors],
+       unit_opt=Union{Nothing,_BRMSVIAdam}[f[3] for f in factors])
 end
 
 _brm_svi_global_covariance(q) = Diagonal(exp.(2 .* q.ρ)) + q.Β * q.Β'
@@ -158,13 +166,14 @@ end
 _brm_svi_draw_global(q, ε, η) = q.μ .+ exp.(q.ρ) .* ε .+ q.Β * η
 # A draw of subject i from ε_i: m_i + U_i⁻ᵀ ε_i, with U_i the lower Cholesky
 # factor of the precision Λ_i.
-_brm_svi_unit_offset(q, i, εi) = LowerTriangular(q.U[i])' \ εi
+_brm_svi_unit_offset(U::AbstractMatrix, ε) = LowerTriangular(U)' \ ε
+_brm_svi_unit_offset(q, i, εi) = _brm_svi_unit_offset(q.U[i], εi)
 _brm_svi_draw_unit(q, i, εi) = q.M[i] .+ _brm_svi_unit_offset(q, i, εi)
 
 # The entropy of q, up to the constant (D + Σ d_i)(1 + log 2π)/2.
 _brm_svi_entropy(q) = _brm_svi_global_logdet(_brm_svi_global_geometry(q)) / 2 -
-    sum(U -> sum(log, diag(U)), q.U; init=0.0)
-_brm_svi_unit_entropy(q, i) = -sum(log, diag(q.U[i]))
+    sum(_brm_svi_unit_logdet_root, q.U; init=0.0)
+_brm_svi_unit_entropy(q, i) = -_brm_svi_unit_logdet_root(q.U[i])
 
 # ── The global factor: Adam ──────────────────────────────────────────────────
 
@@ -265,7 +274,9 @@ const _BRM_SVI_UNIT_MEAN_TRUST = 1.0
 #   Λ_new = ½ (Uᵀ; U⁻¹A)ᵀ (Uᵀ; U⁻¹A), so the R of that stacked matrix's QR
 #   factorization is √2 times the new Cholesky factor, which is positive
 #   definite in floating point too.
-function _brm_svi_unit_step!(q, i, gz, gd, εi, β)
+_brm_svi_unit_step!(q, i, gz, gd, εi, β) =
+    _brm_svi_unit_step!(q.Λ[i], q, i, gz, gd, εi, β)
+function _brm_svi_unit_step!(::AbstractMatrix, q, i, gz, gd, εi, β)
     U = LowerTriangular(q.U[i])
     H = gd * (U * εi)'
     G = Symmetric(-(H + H') ./ 2 .- q.Λ[i])
@@ -285,7 +296,8 @@ end
 
 # One draw of the globals, an antithetic pair of draws per batch subject, the
 # minibatch ELBO gradient, an Adam step of the globals and a natural-gradient
-# step of each batch subject. Returns the minibatch estimate of E_q log p
+# step of each small batch subject, or a structured step for a large unit.
+# Returns the minibatch estimate of E_q log p
 # (without the entropy).
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false, weights=fill(length(t.units) / length(batch), length(batch)))
@@ -299,8 +311,8 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     steps = Vector{NTuple{3,Vector{Float64}}}(undef, length(batch))
     for (k, i) in enumerate(batch)
         s = weights[k]
-        εi = randn(rng, length(t.units[i]))
-        gz₊, gz₋ = zeros(length(εi)), zeros(length(εi))
+        εi = _brm_svi_unit_noise(rng, q.U[i])
+        gz₊, gz₋ = zeros(length(t.units[i])), zeros(length(t.units[i]))
         m, δ = q.M[i], _brm_svi_unit_offset(q, i, εi)
         batch_value += s * (_brm_svi_unit_term!(gg₊, gz₊, t, i, g, m .+ δ) +
             _brm_svi_unit_term!(gg₋, gz₋, t, i, g, m .- δ)) / 2
@@ -423,6 +435,8 @@ _brm_svi_average!(a::AbstractVector{<:AbstractArray}, x, k) =
     (foreach((ai, xi) -> _brm_svi_average!(ai, xi, k), a, x); a)
 
 # Weighted running averages over stretches during which a unit was unchanged.
+# Dense factors average precision; structured factors average log scales and
+# factor loadings, retaining their bounded rank and positive covariance.
 # This equals visiting every unit at every polishing iteration, but touches
 # only the selected units until the single final flush.
 function _brm_svi_average_units!(average, q, through, indices, iteration)
@@ -430,10 +444,9 @@ function _brm_svi_average_units!(average, q, through, indices, iteration)
         count = iteration - through[i]
         count == 0 && continue
         weight = count / iteration
-        for name in (:M, :Λ)
-            a, x = getfield(average, name)[i], getfield(q, name)[i]
-            @. a += weight * (x - a)
-        end
+        a, x = average.M[i], q.M[i]
+        @. a += weight * (x - a)
+        _brm_svi_unit_average_precision!(average.Λ[i], q.Λ[i], weight)
         through[i] = iteration
     end
     average
@@ -442,7 +455,7 @@ end
 # The subjects' Cholesky factors of an averaged precision.
 function _brm_svi_factor!(q)
     for i in eachindex(q.Λ)
-        q.U[i] .= cholesky(Symmetric(q.Λ[i])).L
+        _brm_svi_unit_refactor!(q.U[i], q.Λ[i])
     end
     q
 end
@@ -454,7 +467,7 @@ function _brm_svi_draws(rng, t, q, n)
         U[t.globals, j] .= _brm_svi_draw_global(q, randn(rng, length(q.μ)),
             randn(rng, size(q.Β, 2)))
         for (i, block) in enumerate(t.units)
-            U[block, j] .= _brm_svi_draw_unit(q, i, randn(rng, length(block)))
+            U[block, j] .= _brm_svi_draw_unit(q, i, _brm_svi_unit_noise(rng, q.U[i]))
         end
     end
     U
@@ -508,6 +521,7 @@ end
 """
     brm_svi_fit(x; laplace=nothing, batch_size=32, rng=Random.default_rng(),
         family=MeanFieldGlobal(), unit_sampling=:uniform,
+        unit_dense_limit=64, unit_rank=8,
         ndraws=1000, start=nothing, inits=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), progress=nothing, kwargs...)
@@ -539,9 +553,18 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   cell of a `@plate for` over the subjects or over their rows, or a row of a
   flat-row response grouped by the subjects.
 - `family` — the global factor: `MeanFieldGlobal()` (diagonal) or
-  `LowRankGlobal(r)` (diagonal plus rank `r`). Each subject has its own
-  full-covariance Gaussian factor over its block, whose length can differ
-  between the subjects of a nested model.
+  `LowRankGlobal(r)` (diagonal plus rank `r`).
+- `unit_dense_limit` — units with at most this many coordinates use a dense
+  Gaussian and natural-gradient updates (default 64, allowed 0:256).
+  Larger units use a diagonal-plus-low-rank covariance with `unit_rank`
+  columns (default 8, allowed 0:32, clipped to the unit dimension). Rank zero
+  gives a diagonal factor. Their reparameterized ELBO gradients use Adam with
+  posterior-scale preconditioning and bounded relative steps. Polishing
+  averages their log scales and loadings; dense units average precisions.
+  `diagnostics.unit_families` reports each unit's family, dimension and rank.
+  A streaming update preserves existing units' families and ranks; these
+  controls apply to new units. The factor restriction changes the
+  approximation, not the model density.
 - `unit_sampling` — `:uniform` selects distinct units with weight `N/B`;
   `:work` makes `B` draws with replacement, with probabilities
   `pᵢ = (1/N + wᵢ/sum(w))/2`. The structural work proxy `wᵢ` counts local
@@ -560,9 +583,10 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   message names the window, iteration and ELBO) and Draws from q. An interrupt raises `Treebars.ProgressInterrupted` at the
   next window.
 - Optimizer controls: `max_iterations`, `lr_global` (Adam on the globals),
-  `unit_step` (the subjects' natural-gradient step; a step that would change a
-  subject's precision more than 2.5-fold along some direction, or move its
-  mean more than one sd of its factor, is shortened for that subject),
+  `unit_step` (local learning rate; dense natural-gradient steps limit
+  precision growth to 2.5-fold and mean moves to one posterior sd;
+  structured steps limit the mean move to one posterior sd and log-scale
+  and relative loading changes to 0.5),
   `polish_lr`, `window`,
   `patience`, `min_windows`, `polish_windows`, `global_scale` and `unit_scale`
   (initial factor scales).
@@ -585,6 +609,7 @@ end
 
 function _brm_svi_fit(x, previous; rng=Random.default_rng(), batch_size=32,
         max_iterations=100_000, family=nothing, unit_sampling=:uniform,
+        unit_dense_limit=64, unit_rank=8,
         lr_global=0.01, unit_step=0.1, start=nothing, inits=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), global_scale=0.1, unit_scale=1.0,
@@ -593,6 +618,7 @@ function _brm_svi_fit(x, previous; rng=Random.default_rng(), batch_size=32,
     family = _brm_svi_family(previous, family)
     unit_sampling in (:uniform, :work) || throw(ArgumentError(
         "brm_svi_fit: unit_sampling must be :uniform or :work"))
+    _brm_svi_unit_options(unit_dense_limit, unit_rank)
     batch_size >= 1 || throw(ArgumentError("brm_svi_fit: batch_size must be positive"))
     max_iterations >= 0 || throw(ArgumentError("brm_svi_fit: max_iterations must be nonnegative"))
     previous === nothing || (start === nothing && inits === nothing) || throw(ArgumentError(
@@ -604,7 +630,8 @@ function _brm_svi_fit(x, previous; rng=Random.default_rng(), batch_size=32,
             t, q = _brm_run_phase(phases.target) do phase
                 # The model's compact cell gradients, on first use, report here.
                 t = _brm_with_cell_progress(() -> _brm_svi_target(m), phase)
-                _brm_svi_initialize(t, previous, family; start, inits, global_scale, unit_scale)
+                _brm_svi_initialize(t, previous, family; start, inits, global_scale,
+                    unit_scale, unit_dense_limit, unit_rank)
             end
             seconds = @elapsed fit = _brm_enter_phase(phases.fit) do phase
                 _brm_svi_fit!(rng, t, q; batch_size, max_iterations, lr_global,
@@ -617,6 +644,7 @@ function _brm_svi_fit(x, previous; rng=Random.default_rng(), batch_size=32,
                 fit.elbo, fit.elbo_windows, fit.converged, fit.iterations, fit.q,
                 globals=t.globals, seconds, model=m, source_id=_brm_svi_source_id(m.backend),
                 fit.sampling, fit.unit_gradient_calls,
+                unit_families=_brm_svi_unit_description.(fit.q.U),
                 streaming=_brm_svi_carried_state(previous, m, fit.q)))
         end
     end
@@ -624,8 +652,9 @@ end
 
 _brm_svi_family(::Nothing, ::Nothing) = MeanFieldGlobal()
 _brm_svi_family(::Nothing, family::BRMSVIFamily) = family
-function _brm_svi_initialize(t, ::Nothing, family; start, inits, global_scale, unit_scale)
+function _brm_svi_initialize(t, ::Nothing, family; start, inits, global_scale, unit_scale,
+        unit_dense_limit=64, unit_rank=8)
     μ = _brm_svi_start(t.m, start, inits)[t.globals]
-    t, _brm_svi_params(t, μ, family; global_scale, unit_scale)
+    t, _brm_svi_params(t, μ, family; global_scale, unit_scale, unit_dense_limit, unit_rank)
 end
 _brm_svi_carried_state(::Nothing, m, q) = nothing

@@ -10,6 +10,9 @@ label, semantic coordinate identities and frozen `BRMFittedState` preprocessing.
 It holds neither observations nor a compiled model or AD workspace. Serialize
 this state to resume with `brm_svi_fit(state, builder(new_data); ...)` in another
 process. Recreate custom model functions in that process before loading it.
+Format 1 dense-unit states remain supported. Format 2 also stores local
+diagonal-plus-low-rank factors directly, without dense matrices or optimizer
+moments. Coordinate reordering preserves their covariance exactly.
 """
 struct BRMSVIState
     format::Int
@@ -24,6 +27,8 @@ struct BRMSVIState
     fixed::Dict{Symbol,Float64}
     updates::Int
 end
+
+include("nlme_svi_unit_streaming.jl")
 
 _brm_svi_global_factor(q) = deepcopy((; q.family, q.μ, q.ρ, q.Β))
 
@@ -45,8 +50,8 @@ end
 
 function _brm_svi_save_units!(units, m, q)
     for (i, label) in enumerate(m.view.levels)
-        units[label] = deepcopy((; keys=_brm_svi_unit_keys(m, i),
-            M=q.M[i], Λ=q.Λ[i], U=q.U[i]))
+        units[label] = _brm_svi_saved_unit(_brm_svi_unit_keys(m, i),
+            q.M[i], q.Λ[i], q.U[i])
     end
     units
 end
@@ -63,17 +68,19 @@ function brm_svi_checkpoint(fit)
     estimated = Set(vcat(d.globals, reduce(vcat, m.view.subject_coordinates; init=Int[])))
     fixed = Dict(m.view.coordinates[i] => m.unit[i] for i in eachindex(m.unit)
         if !(i in estimated))
-    BRMSVIState(1, deepcopy(state), _brm_svi_source_id(m.backend),
+    units = _brm_svi_save_units!(Dict{Any,NamedTuple}(), m, d.q)
+    BRMSVIState(_brm_svi_state_format(units), deepcopy(state), _brm_svi_source_id(m.backend),
         copy(m.view.coordinates[d.globals]), _brm_svi_global_factor(d.q),
-        _brm_svi_save_units!(Dict{Any,NamedTuple}(), m, d.q), m.view.group,
+        units, m.view.group,
         Tuple(keys(m.view.nested_groups)), m.view.shared_groups, fixed, 0)
 end
 brm_svi_checkpoint(state::BRMSVIState) = deepcopy(state)
 
 function _brm_svi_carried_state(previous::BRMSVIState, m, q)
-    BRMSVIState(1, deepcopy(previous.preprocessing), previous.source_id,
+    units = _brm_svi_save_units!(deepcopy(previous.units), m, q)
+    BRMSVIState(_brm_svi_state_format(units), deepcopy(previous.preprocessing), previous.source_id,
         copy(previous.globals), _brm_svi_global_factor(q),
-        _brm_svi_save_units!(deepcopy(previous.units), m, q), previous.group,
+        units, previous.group,
         previous.nested, previous.shared, copy(previous.fixed), previous.updates + 1)
 end
 
@@ -122,7 +129,7 @@ function _brm_svi_check_preprocessing(rk, previous)
 end
 
 function _brm_svi_check_model(m, previous)
-    previous.format == 1 || throw(ArgumentError("brm_svi_fit: unsupported streaming state format"))
+    previous.format in (1, 2) || throw(ArgumentError("brm_svi_fit: unsupported streaming state format"))
     m.view.group === previous.group && Tuple(keys(m.view.nested_groups)) == previous.nested &&
         m.view.shared_groups == previous.shared || throw(ArgumentError(
             "brm_svi_fit: subject/nested/shared grouping partition changed"))
@@ -155,10 +162,11 @@ struct _BRMSVIStreamingPrior{G,H,Q}
 end
 
 function _brm_svi_initialize(t, previous::BRMSVIState, family;
-        start, inits, global_scale, unit_scale)
+        start, inits, global_scale, unit_scale, unit_dense_limit=64, unit_rank=8)
     _brm_svi_check_model(t.m, previous)
     q0 = previous.q
-    q = _brm_svi_params(t, q0.μ, family; global_scale=1.0, unit_scale=1.0)
+    q = _brm_svi_params(t, q0.μ, family; global_scale=1.0, unit_scale=1.0,
+        unit_dense_limit, unit_rank)
     q.ρ .= q0.ρ
     q.Β .= q0.Β
     for (i, label) in enumerate(t.m.view.levels)
@@ -170,9 +178,7 @@ function _brm_svi_initialize(t, previous::BRMSVIState, family;
             throw(ArgumentError("brm_svi_fit: unit $(repr(label)) changed its latent " *
                 "coordinate layout; streaming carries persistent unit statics"))
         perm = [index[k] for k in keys]
-        q.M[i] .= old.M[perm]
-        q.Λ[i] .= old.Λ[perm, perm]
-        q.U[i] .= cholesky(Symmetric(q.Λ[i])).L
+        _brm_svi_restore_unit!(q, i, old, perm)
     end
     prior = _BRMSVIStreamingPrior(_brm_svi_global_factor(q),
         _brm_svi_global_geometry(q), deepcopy((; q.M, q.Λ, q.U)))
@@ -190,7 +196,7 @@ function _brm_svi_unit_prior!(gz, prior::_BRMSVIStreamingPrior, i, z)
     δ = z - prior.units.M[i]
     gradient = -(prior.units.Λ[i] * δ)
     gz .+= gradient
-    dot(δ, gradient) / 2 + sum(log, diag(prior.units.U[i])) - length(z) * log(2π) / 2
+    dot(δ, gradient) / 2 + _brm_svi_unit_logdet_root(prior.units.U[i]) - length(z) * log(2π) / 2
 end
 
 """

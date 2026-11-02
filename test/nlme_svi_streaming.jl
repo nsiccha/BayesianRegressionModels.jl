@@ -80,9 +80,10 @@ end
 end
 
 @stestset "streaming SVI fresh-process resume" begin
+    for dense_limit in (64, 0)
     data = svi_stream_data(Xoshiro(51), ["a", "b", "c"], 4)
     first_fit = brm_svi_fit(svi_stream_model(data); rng=Xoshiro(52),
-        max_iterations=25, ndraws=0)
+        max_iterations=25, ndraws=0, unit_dense_limit=dense_limit, unit_rank=1)
     state = brm_svi_checkpoint(first_fit)
     next_data = svi_stream_data(Xoshiro(53), ["b", "c", "new"], 4)
     in_process = brm_svi_fit(state, svi_stream_model(next_data); rng=Xoshiro(54),
@@ -94,6 +95,7 @@ end
         run(`$(Base.julia_cmd()) --project=$(dirname(Base.active_project())) $script $input $output`)
         resumed = deserialize(output)
         @test svi_stream_same_factors(resumed, brm_svi_checkpoint(in_process))
+    end
     end
 end
 

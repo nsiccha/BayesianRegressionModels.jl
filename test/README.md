@@ -1049,6 +1049,10 @@ and lazy local averages against averages of every iterate.
 `nlme_svi_workspace.jl` checks compact local layouts against independent dense
 gather/scatter arithmetic and storage independent of the global dimension.
 These three arithmetic scripts need only Julia's standard libraries.
+`nlme_svi_units.jl` checks the bounded local Gaussian operators, exact
+reparameterized gradients, linear allocation and checkpoint growth at fixed
+rank, covariance preservation under coordinate reordering, and an independent
+correlated Gaussian fitting oracle. It also needs only standard libraries.
 
 `nlme_svi.jl` checks minibatch stochastic variational inference
 (`brm_svi_fit`). The minibatch split of the RK target is checked first: the
