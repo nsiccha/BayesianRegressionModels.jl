@@ -157,7 +157,9 @@ include("nlme_svi_laplace_prior.jl")
 include("nlme_svi_laplace_streaming.jl")
 include("nlme_svi_laplace_fit.jl")
 include("smc.jl")
+include("smc_streaming.jl")
 include("filter.jl")
+include("filter_smc.jl")
 include("covariate_resampling.jl")
 export modeled_covariates
 using SHA: sha256
@@ -223,9 +225,11 @@ export rk_bound_data, rk_bound_plan, rk_design_binder, RKDesignBinder
 export brm_fitted_state, BRMFittedState
 export BRMSVIState, BRMSVILaplaceState, GaussianBlockLaplace, brm_svi_checkpoint
 export BRMSMCFit, brm_smc_fit, brm_smc_tune, brm_smc_update, brm_smc_checkpoint, brm_smc_resume
+export BRMSMCCarriedReference, BRMSMCWindowFit, brm_smc_carry
 export brm_smc_compare, brm_smc_runs
 export BRMFilter, brm_filter, brm_filter_step, brm_filter_stream,
     brm_filter_checkpoint, brm_filter_resume
+export BRMFilterSMC, brm_filter_tune
 export BRMCutFamily, brm_cut_family, brm_cut_fit, brm_cut_point, brm_cut_propagate, rk_draw_values
 export rkppl_model, rk_model
 # Re-export every Distributions.jl family BRM lowers so

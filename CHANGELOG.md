@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.124
+
+- Added `brm_smc_carry` and carried-posterior `brm_smc_update` for bounded
+  windows of new observations. Frozen preprocessing, source identities and
+  the owned Gaussian summary survive checkpoints without old training rows.
+  `basis=:fit` delegates bounded correlation and moment fitting to RKPPL and
+  WarmupHMC; independent pilots continue to tune fixed mutation kernels,
+  with `reference_inflation` forwarded for learned window proposals.
+- Added `brm_filter(fit; learn=true, ...)` and `brm_filter_tune` for static
+  parameter ensembles with bounded-window replenishment and rejuvenation.
+  Selected calibration drops historical latent coordinates. A state-only
+  warmed ordinary filter can transfer its finite-state pool and clocks.
+- Streaming carries are Gaussian assumed-density approximations. Filter
+  boundaries additionally discard parameter correlations and parameter–state
+  dependence. Checkpoints support exact continuation of that approximation,
+  not exact full-history inference. Requires RKPPL 0.1.55 and WarmupHMC 0.2.10.
+
 ## 0.2.123
 
 - Require RK 0.1.52 / RKPPL 0.1.55 for sum recognition through guarded

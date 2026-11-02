@@ -67,10 +67,12 @@ function BRM.brm_filter(model::Union{BRM.BRMI,BRM.RKBRMI}; parameters=nothing,
     BRM.BRMFilter(target, state, configuration, id)
 end
 
-function BRM.brm_filter(fit::BRM.BRMSMCFit; kwargs...)
+function BRM.brm_filter(fit::Union{BRM.BRMSMCFit,BRM.BRMSMCWindowFit};
+        learn=false, kwargs...)
     BRM._brm_validate_smc_fit(fit)
     fit.state.temperature == 1 || throw(ArgumentError(
         "BRM filter: complete the parameter posterior bridge before filtering"))
+    learn && return BRM._brm_filter_learn(fit; kwargs...)
     BRM.brm_filter(fit.backend; ensemble=eachcol(fit.state.positions),
         weights=fit.state.weights, kwargs...)
 end
@@ -81,7 +83,7 @@ function BRM.brm_filter_step(filter::BRM.BRMFilter, observation::NamedTuple;
     BRM.BRMFilter(filter.target, state, filter.configuration, filter.model_id)
 end
 
-function BRM.brm_filter_stream(filter::BRM.BRMFilter, records;
+function BRM.brm_filter_stream(filter::Union{BRM.BRMFilter,BRM.BRMFilterSMC}, records;
         steps=typemax(Int), condition_state_only=false, progress=nothing,
         stop=filter -> false)
     steps isa Integer && steps >= 0 || throw(ArgumentError("steps must be a nonnegative integer"))
@@ -109,6 +111,7 @@ function BRM.brm_filter_checkpoint(filter::BRM.BRMFilter)
 end
 
 function BRM.brm_filter_resume(model::Union{BRM.BRMI,BRM.RKBRMI}, checkpoint)
+    checkpoint.format == 2 && return BRM._brm_filter_learning_resume(model, checkpoint)
     checkpoint.format == 1 || throw(ArgumentError("unsupported BRM filter checkpoint format"))
     configuration = deepcopy(checkpoint.configuration)
     target, id = prepare(backend(model), configuration)

@@ -106,7 +106,7 @@ learned, frozen normalized reference, replayed in fresh processes through
 correlated `SMCReference` and mutation `metric` built with
 `WarmupHMC.scale_data`. `smc_tuning_frozen.jl` checks that update tuning
 reprocesses cumulative data with frozen training preprocessing. They use the
-RKPPL 0.1.42 and WarmupHMC 0.2.9 pins from `setup_env.jl`.
+RKPPL 0.1.55 and WarmupHMC 0.2.10 pins from `setup_env.jl`.
 
 `smc_hierarchy_spread.jl` checks tuned SMC on a two-group hierarchy
 `mu ~ 1 + (1 | g)` against an exact grid oracle of the population intercept
@@ -138,6 +138,47 @@ retention. `filter_models.jl` contains the shared public synthetic models.
 against analytic filtering, narrow-ensemble predictive calibration and the
 completed-SMC-to-filter interface.
 Its testsets accept the usual substring filters as trailing arguments.
+
+`streaming_oracles_check.jl` validates the independent Gaussian and Kalman
+references in `streaming_oracles.jl`. Sequential Gaussian windows must equal
+the batch posterior and evidence, counting the prior once. The joint static
+parameter/AR(1) oracle is checked against numerical integration of a separate
+conditional scalar filter, including missing observations. These checks need
+only Julia's standard libraries; they do not exercise the SMC/filter adapters.
+
+`streaming_preprocessing.jl` checks a serialized fitted-state replay after
+poisoning the training arrays, comparing its window likelihood with the
+analytic density under the original scaling anchors. It also checks that the
+serialized preprocessing size stays bounded as the training rows grow.
+
+`filter_smc.jl` checks selected-static calibration from a latent-history fit,
+owned RNGs and inputs, named identity refusals, warm state-only boundary
+transfer and exact continuation of parameter learning. `filter_smc_process.jl`
+runs as `write <path>` then `read <path>` in separate Julia processes; its
+reader constructs only a one-slice model, never the old fit or training data.
+`filter_smc_scaling.jl` measures fixed-work allocation and checkpoint retention
+at 12 and 120 elapsed steps. These use `filter_smc_fixture.jl`.
+`filter_smc_oracle.jl` compares the learned static parameter and predictive
+normalizer with an independent joint Kalman recursion, using three seeds,
+missing observations, an independent frozen pilot and forced replenishment.
+It stays within a single window to separate particle accuracy from the
+documented Gaussian/state-independence approximation at boundaries.
+
+`smc_window_pilot.jl` tests correlated sequential windows against both their
+actual carried Gaussian oracle and the full batch posterior. Independent
+pilots tune kernels; completed clouds supply the next reference via `basis=:fit`.
+Ownership, schedule identity, `reference_inflation` forwarding and exact
+checkpoint continuation are also checked.
+
+`smc_window_scaling.jl` checks bounded carry/checkpoint storage over 128 windows
+and reports warmed initialization time at fixed particle/window dimensions.
+Shared-host wall times are reported, not asserted.
+
+`smc_window.jl` checks carried posterior summaries on new, nonoverlapping
+windows: sequential Gaussian posteriors against a batch fit, unchanged caller
+RNG and carried inputs, named source/data/preprocessing refusals, and bounded
+summary size. `smc_window_process.jl` checks exact checkpoint continuation in
+a fresh process that never constructs the training arrays.
 
 `test/Project.toml` is a superset of the root project: it carries every package
 that any `test/*.jl` loads, so no test file fails at its own `using` line the way
