@@ -23,6 +23,66 @@ function make_package_checkout(path; name="WarmupHMC")
     readchomp(`git -C $path rev-parse HEAD`)
 end
 
+# Loading the bootstrap's actual pin/mirror configuration must not instantiate
+# the test environment or clone any dependencies.
+module BootstrapConfig
+include("setup_env.jl")
+end
+
+@testset "every bootstrap pin can use its host mirror" begin
+    mktempdir() do root
+        package = joinpath(root, "package")
+        revision = String(make_package_checkout(package))
+        host_mirrors = joinpath(homedir(), ".local", "state", "kb-agents", "git-mirrors")
+        for (name, _, _) in BootstrapConfig.PINS
+            configured = get(BootstrapConfig.MIRRORS, name, "")
+            @test configured == joinpath(host_mirrors, "$name.jl.git")
+            isempty(configured) && continue
+            mirror = joinpath(root, basename(configured))
+            git!("clone", "--quiet", "--bare", package, mirror)
+            cache_root = joinpath(root, "cache")
+            resolved = resolve_git_revision_checkout(
+                name, revision; cache_root, mirror,
+                origin=joinpath(root, "unavailable-origin"))
+            @test readchomp(`git -C $resolved rev-parse HEAD`) == revision
+            @test read(joinpath(resolved, "Project.toml")) ==
+                read(joinpath(package, "Project.toml"))
+            @test readchomp(`git -C $resolved remote get-url origin`) == mirror
+
+            # Reuse must not contact either source after the exact cache exists.
+            @test resolve_git_revision_checkout(
+                name, revision; cache_root,
+                mirror=joinpath(root, "unavailable-mirror"),
+                origin=joinpath(root, "unavailable-origin")) == resolved
+        end
+    end
+end
+
+@testset "exact pin falls back only when absent from the mirror" begin
+    mktempdir() do root
+        package = joinpath(root, "package")
+        older = make_package_checkout(package)
+        mirror = joinpath(root, "mirror.git")
+        git!("clone", "--quiet", "--bare", package, mirror)
+        write(joinpath(package, "payload.txt"), "new pinned tree\n")
+        git!("add", "payload.txt"; dir=package)
+        git!("commit", "--quiet", "-m", "new pinned revision"; dir=package)
+        revision = String(readchomp(`git -C $package rev-parse HEAD`))
+        @test _mirror_contains(mirror, older)
+        @test !_mirror_contains(mirror, revision)
+
+        for (case, source) in (("absent", joinpath(root, "absent.git")),
+                ("stale", mirror))
+            resolved = resolve_git_revision_checkout(
+                "WarmupHMC", revision; cache_root=joinpath(root, case),
+                mirror=source, origin=package)
+            @test readchomp(`git -C $resolved rev-parse HEAD`) == revision
+            @test read(joinpath(resolved, "payload.txt"), String) == "new pinned tree\n"
+            @test readchomp(`git -C $resolved remote get-url origin`) == package
+        end
+    end
+end
+
 @testset "dependency-floor checkout resolution" begin
     mktempdir() do root
         valid = joinpath(root, "valid")
