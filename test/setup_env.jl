@@ -289,7 +289,10 @@ const PINS = [
     # inference preserves nested reduction types during ordinary Reverse,
     # including sum(sum, columns) after matrix-valued plate helpers.
     # 93e89fc8 / libEnzyme 7f957e67 also supplies the concurrent-GC repair.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "93e89fc870d240d9489f88d665c28302eb6b5e4e"),  # dogfood (KB mirror only)
+    # 474fd636 / libEnzyme df199913 preserves JIT symbols from augmented
+    # reverse helpers under Forward, including the digamma partials needed
+    # by ordinary negative-binomial compact-cell HVPs.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "474fd63654e64fdff77eed5326b9f9c6613dac50"),  # dogfood (KB mirror only)
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also
