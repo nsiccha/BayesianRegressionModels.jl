@@ -158,6 +158,25 @@ end
     @test prepared.cells[1].terms[1][2].sel == prepared.cells[1].terms[1][3].sel
     @test isempty(only(prepared.cells[3].terms))
 
+    # The same local position maps recur even when absolute row support
+    # differs. Sharing them must preserve arbitrary population/effect order,
+    # repeated summands, and independent preparation/chain ownership.
+    integrated = collect(n:-2:1)
+    population = reverse(setdiff(1:n, integrated))
+    partitioned = BRM._brm_spl_prepare_factors(rk, :y, u, length(rows),
+        integrated, population)
+    for c in partitioned.cells, s in (c.direct, Iterators.flatten(c.terms)...)
+        @test integrated[s.lz] == s.sel[s.lpos]
+        @test population[s.pidx] == s.sel[s.ppos]
+        @test c.lz[s.loc] == s.lz
+        @test sort(vcat(s.lpos, s.ppos)) == collect(eachindex(s.sel))
+    end
+    first_term = prepared.cells[1].terms[1][1]
+    other_term = prepared.cells[4].terms[1][1]
+    @test first_term.sel != other_term.sel
+    @test first_term.lpos === other_term.lpos
+    @test first_term.lpos !== partitioned.cells[1].terms[1][1].lpos
+
     # Full-model AD is an independent reference, avoiding the separate
     # ordinary whole-cell shared-predictor query route.
     ops = BRM._brm_spl_factor_operators(prepared, u, NLME_AD)
@@ -230,6 +249,8 @@ end
     # Each chain owns an independent preparation/selection map, while terms
     # of one chain still share the same compact operator by selection width.
     replica = deepcopy(ops)
+    @test replica.cells[1].terms[1][1].lpos !== ops.cells[1].terms[1][1].lpos
+    @test replica.cells[1].terms[1][1].lpos === replica.cells[4].terms[1][1].lpos
     @test replica.cells[1].terms[1][1].ad !== ops.cells[1].terms[1][1].ad
     @test replica.cells[1].terms[1][1].ad === replica.cells[4].terms[1][1].ad
     u2 = u .+ 0.05
