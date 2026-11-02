@@ -23,25 +23,24 @@ function lattice_data(nx, ny, nt)
         y=[mod(i,5) for i in 1:n], from, to)
 end
 
+function lattice_problem(data; solver=:matrixfree)
+    rk = RKBRMI(@brm data begin
+        log(mu) ~ 1 + x + car(area; edges=(from,to), type=:icar)
+        y ~ Poisson(mu)
+    end)
+    brm_laplace_problem(rk; integrate=:area,
+        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), solver)
+end
+
 function measure_nonlinear(nx, ny, nt; exact=false, finite_difference=false, solver=:matrixfree)
     data = lattice_data(nx,ny,nt)
-    setup = @timed begin
-        rk = RKBRMI(@brm data begin
-            log(mu) ~ 1 + x + car(area; edges=(from,to), type=:icar)
-            y ~ Poisson(mu)
-        end)
-        brm_laplace_problem(rk; integrate=:area,
-            ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), solver)
-    end
+    setup = @timed lattice_problem(data; solver)
     p = setup.value
     x = fill(0.1,length(p.population))
     cold = @timed LogDensityProblems.logdensity_and_gradient(p,x)
     warm = @timed LogDensityProblems.logdensity_and_gradient(p,x)
     value, gradient = warm.value
-    @assert isfinite(value) && all(isfinite,gradient)
-    @assert cold.value == warm.value
     operator = p.algebra !== nothing
-    operator && @assert p.factor[] === nothing
     println("dimensions\t",length(p.integrated),'\t',length(x),'\t',length(data.y))
     println("population\t",p.names)
     println("solver\t",solver,"\toperator=",operator)
@@ -50,6 +49,10 @@ function measure_nonlinear(nx, ny, nt; exact=false, finite_difference=false, sol
     @printf("warm_value_gradient\t%.9g\t%d\t%.12g\t%.12g\n",
         warm.time,warm.bytes,value,norm(gradient))
     operator && println("diagnostics\t",p.algebra.diagnostics)
+    println("mode_failures\t",p.nonfinite,'\t',p.unconverged)
+    @assert isfinite(value) && all(isfinite,gradient)
+    @assert cold.value == warm.value
+    operator && @assert p.factor[] === nothing
     if finite_difference
         h = 1e-4
         fd = map(eachindex(x)) do j
@@ -73,7 +76,9 @@ function measure_nonlinear(nx, ny, nt; exact=false, finite_difference=false, sol
     end
 end
 
-length(ARGS)>=3 || error("pass NX NY NT [exact] [fd] [auto]")
-println("julia\t",VERSION)
-measure_nonlinear(parse.(Int,ARGS[1:3])...; exact="exact" in ARGS,
-    finite_difference="fd" in ARGS, solver="auto" in ARGS ? :auto : :matrixfree)
+if abspath(PROGRAM_FILE) == @__FILE__
+    length(ARGS)>=3 || error("pass NX NY NT [exact] [fd] [auto]")
+    println("julia\t",VERSION)
+    measure_nonlinear(parse.(Int,ARGS[1:3])...; exact="exact" in ARGS,
+        finite_difference="fd" in ARGS, solver="auto" in ARGS ? :auto : :matrixfree)
+end

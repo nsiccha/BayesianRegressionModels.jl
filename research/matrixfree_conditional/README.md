@@ -261,6 +261,14 @@ including its first compilation; a warmed solve took 13.791 s. Host load was
 31.77 at grant and 31.64 at release. Receipt: `production-561792-v130.log`
 (exit 0, elapsed 655 s). This control measures conditional algebra; the
 40,128-coordinate Poisson control above measures a full nonlinear target.
+The first full Poisson run at 561,792 coordinates subsequently failed: its
+conditional mode did not converge within 50 Newton iterations at population
+point `[0.1,0.1,0.1]`, so both repeated evaluations returned a nonfinite result.
+Finite differences were not reached. Receipt: `poisson-561792-v130.log`
+(exit 1, elapsed 674 s, token held 606 s). This is not a successful
+large-model result. `mode_trace.jl` records decrement, line-search step and
+observed density gain using the existing mode primitives to diagnose it
+without changing the policy or tolerances.
 
 The refreshed exact plan-reuse controls passed 123 assertions: 61 for row
 models and 62 for nonlinear sum factors, including strict subsets, comparison
