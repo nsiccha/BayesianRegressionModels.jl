@@ -89,6 +89,22 @@ p.effects[:, :, 1]            # draws × subjects: intercept deviations
 function brm_ranef_draws(d::BRMDescriptor, draws::AbstractMatrix, constrained_names;
                          id::Union{Nothing,Symbol}=nothing,
                          group::Union{Nothing,Symbol}=nothing)
+    map(_brm_ranef_views(d, draws, constrained_names; id, group)) do entry
+        (; entry..., sd=_brm_ranef_owned(entry.sd), cor=_brm_ranef_owned(entry.cor),
+           effects=_brm_ranef_owned(entry.effects),
+           level_cor=isnothing(entry.level_cor) ? nothing : _brm_ranef_owned(entry.level_cor))
+    end
+end
+
+_brm_ranef_owned(x::Array) = x
+_brm_ranef_owned(x::AbstractArray) = Array(x)
+
+# The shared extraction retains views of already-computed carriers. The public
+# array API materializes its owned results above; the TreeArrays extension
+# labels these views without a second posterior-sized allocation.
+function _brm_ranef_views(d::BRMDescriptor, draws::AbstractMatrix, constrained_names;
+                          id::Union{Nothing,Symbol}=nothing,
+                          group::Union{Nothing,Symbol}=nothing)
     _brm_check_draw_names(draws, constrained_names)
     blocks = (_brmd_ranef_metadata(d)..., _brm_s2z_ranef_metadata(d)...)
     selected = [m for m in blocks if _brm_ranef_draws_selects(m.block, id, group)]
@@ -137,8 +153,8 @@ function _brm_ranef_entries(d, m, draws, names)
     x = _brm_ranef_stratified_draws(d, m.block, draws, names)
     map(eachindex(x.strata)) do s
         members = findall(==(s), x.stratum)
-        (; stratum=x.strata[s], levels=m.block.levels[members], sd=x.sd[:, s, :],
-           cor=x.cor[:, s, :, :], effects=x.effects[:, members, :])
+        (; stratum=x.strata[s], levels=m.block.levels[members], sd=view(x.sd, :, s, :),
+           cor=view(x.cor, :, s, :, :), effects=view(x.effects, :, members, :))
     end
 end
 
@@ -180,7 +196,7 @@ function _brm_ranef_stratified_draws(d, block::RanefBlock, draws, names)
             cor[:, s, :, :] = _brm_ranef_cor_draws(L[:, s, :, :])
         end
     end
-    (; strata, stratum, sd=permutedims(tau, (1, 3, 2)), cor,
+    (; strata, stratum, sd=PermutedDimsArray(tau, (1, 3, 2)), cor,
        effects=_brm_ranef_effect_draws(d, block, spec, nothing, draws, names))
 end
 
@@ -283,7 +299,7 @@ function _brm_ranef_carrier_draws(d, block, name::Symbol, n_elements::Int, draws
         "brm_ranef_draws: carrier `$name` of block `$(block.binding)` has ",
         "$n_elements elements but resolves to $(length(coordinates)) of the ",
         "given names" * _brm_ranef_kind_hint(output) * ".")
-    draws[:, coordinates]
+    view(draws, :, coordinates)
 end
 
 # The descriptor output that a block's carrier `name` is.
@@ -315,10 +331,10 @@ function _brm_ranef_column_draws(d, block, k, effects, draws, names)
     length(scales) == 1 || error(
         "brm_ranef_draws: scale `$(block.scales)` of block `$(block.binding)` owns ",
         "$(length(scales)) descriptor outputs; expected exactly one.")
-    sd = draws[:, [_brm_claimed_scale_coordinate(
-        (; block, column=k, output=only(scales)), names, "brm_ranef_draws")]]
+    sd = view(draws, :, [_brm_claimed_scale_coordinate(
+        (; block, column=k, output=only(scales)), names, "brm_ranef_draws")])
     values = _brm_ranef_carrier_draws(d, block, effects, J * K, draws, names)
-    (; sd, cor=ones(n, 1, 1), effects=reshape(values, n, J, K)[:, :, k:k])
+    (; sd, cor=ones(n, 1, 1), effects=view(reshape(values, n, J, K), :, :, k:k))
 end
 
 # Each column of every sum-to-zero block (`s2z_groups`) as one independent

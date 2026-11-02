@@ -53,6 +53,11 @@ const TESTENV = @__DIR__
 # name => (github url, pinned commit)   — comment records the branch the commit
 # is on, for humans; the pin itself is the full SHA and needs no branch.
 const PINS = [
+    ("HTMX", "https://github.com/nsiccha/HTMX.jl.git", "0b8dc2f94e879bf31237bd28e751cf2ebc8d95f6"),
+    ("HTMXObjects", "https://github.com/nsiccha/HTMXObjects.jl.git", "d2a86956a221035c4f1b9ac629836e90ae77a2b5"),
+    ("DynamicObjects", "https://github.com/nsiccha/DynamicObjects.jl.git", "bc23860cd85ee06ca39bc862c14b6ca9b0a55f08"),
+    ("TreeArrays", "https://github.com/nsiccha/TreeArrays.jl.git", "53cfd1b17ee4d1b726dcecfe151458ae41bd20a8"),
+    ("AlgebraOfVega", "https://github.com/nsiccha/AlgebraOfVega.jl.git", "73695d5d563074bfd9ab1f98debf2ebe38d7bd00"),
     # Fleet-only pivoted KLU selected inversion; registered 0.2.2 lacks it.
     ("SelectedInversion", "https://github.com/timweiland/SelectedInversion.jl.git", "8b1ee1077cea94c1aff746e182681ae39ce91526"),
     # One-sided LogNormal moments and tail-stable truncation mass, plus the

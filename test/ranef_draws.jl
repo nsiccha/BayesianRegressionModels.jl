@@ -19,6 +19,7 @@
 using Test
 using BayesianRegressionModels
 using StanBlocks
+using TreeArrays
 using Random
 using LinearAlgebra: cholesky, Symmetric, dot, I
 using Distributions: Exponential, Normal, TDist, Beta, LKJCholesky
@@ -182,7 +183,21 @@ function constrained_draws(sb; n_draws = 3, seed = 1)
     end
     draws = permutedims(reduce(hcat, rows))
     col = Dict(n => j for (j, n) in enumerate(names))
-    (; sm, names, draws, col, d = brm_descriptor(sb))
+    d = brm_descriptor(sb)
+    raw = brm_ranef_draws(d, draws, names)
+    tree = brm_ranef_tree(d, draws, names)
+    @test length(parent(tree)) == length(raw)
+    for (entry, leaf) in zip(raw, parent(tree))
+        @test coords(leaf.effects, :level) == entry.levels
+        @test coords(leaf.effects, :margin) == entry.margins
+        @test parent(leaf.effects) == entry.effects
+        @test parent(leaf.sd) == entry.sd
+        @test parent(leaf.cor) == entry.cor
+        @test entry.effects isa Array && !Base.mightalias(entry.effects, draws)
+        @test entry.sd isa Array && !Base.mightalias(entry.sd, draws)
+        @test entry.cor isa Array && !Base.mightalias(entry.cor, draws)
+    end
+    (; sm, names, draws, col, d)
 end
 value(c, i, name) = c.draws[i, c.col[name]]
 level_of(levels, labels) = [findfirst(==(l), levels) for l in labels]

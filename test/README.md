@@ -14,6 +14,15 @@ terms with the per-block importance diagnostic.
 types prepare type-stable ragged factors whose values equal the full model's
 pointwise densities.
 
+`draw_trees.jl` fits a small hierarchical model with WarmupHMC, then checks
+the optional TreeArrays draw APIs: descriptor labels under permuted names,
+views and allocation size, unequal chain lengths, ragged random-effect blocks,
+predictive and conditional outputs, RK values, and `nanquantile` through
+`TreeTable` to AlgebraOfVega. `ranef_draws.jl` and `level_correlation.jl`
+also check the labelled wrappers against their existing independent oracles.
+Use `julia --project=test test/setup_env.jl` first; it pins the optional
+plotting dependencies as well as the fitting stack.
+
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
 `plate_derived_inputs.jl` checks computed arrays read directly by plate cells:
 transformed hierarchical predictors, chained assignments, gathers and

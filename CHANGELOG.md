@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.126
+
+- Added optional TreeArrays twins for output, random-effect, predictive and
+  conditional draws, plus `rk_draw_tree`. They label existing arrays or views
+  with descriptor coefficients, group levels and margins, observation positions,
+  or actual prediction-grid values. Per-chain matrices retain an outer chain
+  axis, including unequal chain lengths and ragged random-effect blocks.
+- Stored output and random-effect carriers are viewed without copying their
+  draw values; quantities that need computation use the existing extraction
+  and simulation paths. Existing array APIs retain owned array results. Axes
+  without known coordinates raise an error naming the output.
+
 ## 0.2.125
 
 - RKBRMI passes a plate's original cell values to model-scope whole-value

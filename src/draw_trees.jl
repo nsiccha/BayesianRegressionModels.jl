@@ -1,0 +1,69 @@
+"""
+    brm_output_tree(descriptor, constrained_draws, constrained_names; logical, role=nothing)
+
+Label a logical output without copying its draws. Requires `using TreeArrays`.
+Rows are draws; a vector of per-chain matrices adds an outer `:chain` axis.
+`logical` may also be a discovered `BRMOutput`, for example a coefficient
+carrier from `brm_outputs`. Coefficients use their descriptor labels;
+observation outputs use their element positions. Scalar outputs have only
+the `:draw` axis. Labels follow the supplied constrained-name order.
+
+The returned backing aliases the input: treat both as read-only. Unknown
+output-axis semantics are reported by name, never replaced by guessed labels.
+"""
+function brm_output_tree end
+
+"""
+    brm_ranef_tree(descriptor, constrained_draws, constrained_names; id=nothing, group=nothing)
+    brm_ranef_tree(entries::AbstractVector{<:NamedTuple})
+
+Random-effect draws as a TreeArrays tree of block records. Each record has
+`sd`, `cor`, `effects`, and, for level-correlated blocks, `level_cor`.
+The axes are `:draw`, `:margin` and `:level`; correlation matrices distinguish
+their second coordinate with `:margin2` / `:level2`. Margin coordinates are
+`(predictor, coefficient)` records, and levels are the fitted group labels.
+An outer `:block` axis identifies each binding and stratum. Per-chain input
+adds `:chain`. Requires `using TreeArrays`.
+
+Stored effects and scales alias constrained draws. Derived correlations and
+scales are computed once by the same extraction as `brm_ranef_draws`; adding
+labels does not copy them. Treat the returned backing as read-only.
+The second form labels existing `brm_ranef_draws` entries without recomputing.
+"""
+function brm_ranef_tree end
+
+"""
+    brm_predictive_tree(descriptor, unconstrained_draws; problem, seed)
+    brm_predictive_tree(descriptor, predicted::NamedTuple)
+
+A TreeArrays record of posterior-predictive responses, with a leading `:draw`
+axis and descriptor-owned response coordinates. The second form labels the
+arrays already returned by `brm_predictive_draws`, without copying or drawing
+again. Per-chain matrix input retains chains separately. Requires TreeArrays.
+"""
+function brm_predictive_tree end
+
+"""
+    brm_conditional_tree(descriptor, unconstrained_draws, grid; kwargs...)
+    brm_conditional_tree(result::NamedTuple)
+
+Label `brm_conditional_draws` on `:draw × :grid`, retaining its result metadata
+and replacing only `result.draws` with a TreeData over the same matrix. Grid
+coordinates are records of the actual grid values (`focal` columns when
+specified). Per-chain inputs add `:chain`. Requires `using TreeArrays`.
+"""
+function brm_conditional_tree end
+
+"""
+    rk_draw_tree(rk::RKBRMI, U, names)
+    rk_draw_tree(values::NamedTuple)
+
+The named values returned by `rk_draw_values` as a TreeArrays record of
+per-name `:draw` trees. Like `rk_draw_values`, **columns** of `U` are draws.
+Scalar values are stored directly; vector-valued draws stay separate, with
+their actual element indices, rather than being stacked. A vector of
+per-chain matrices adds `:chain`. Requires `using TreeArrays`.
+The second form labels an existing `rk_draw_values` result without querying
+the model again or copying its values.
+"""
+function rk_draw_tree end
