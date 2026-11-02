@@ -33,6 +33,8 @@ include("likelihood_distributions.jl")
 include("preparation_basis.jl")
 include("preparation_hsgp.jl")
 include("formula_markers.jl")
+include("gmrf_precision.jl")
+include("gmrf_interpolation.jl")
 include("formula_validation.jl")
 include("prepared_metadata.jl")
 include("preparation_replay.jl")
@@ -52,6 +54,7 @@ include("level_correlation.jl")
 include("preparation_terms.jl")
 include("car_separation.jl")
 include("preparation_gp.jl")
+include("preparation_gmrf.jl")
 include("preparation_structured.jl")
 include("turing_backend.jl")
 include("rk_backend.jl")
@@ -84,6 +87,7 @@ include("vimpl.jl")
 # so it can be compiled by BridgeStan / fit via Stan.
 using StanBlocks
 include("sbimpl.jl")
+include("sb_gmrf.jl")
 include("sb_marginal_ranef.jl")
 include("sb_cell_julia.jl")
 include("sb_distribution_statistics.jl")
@@ -201,7 +205,7 @@ export brm_total, brm_total_recover_rng, brm_total_deviations, brm_total_locatio
 export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
        ProbabilityWeights, UnitWeights, Weights,
        aweights, fweights, pweights, uweights, weights
-export me, mi, s, t2, ar, dar, rw, cdar, car, mo, mo1, hsgp, multigroup, OrderedLogistic, Ordinal,
+export me, mi, s, t2, ar, dar, rw, cdar, car, gmrf, mo, mo1, hsgp, multigroup, OrderedLogistic, Ordinal,
        OrdinalStructure, Cumulative, StoppingRatio,
        OrdinalLink, LogitLink, ProbitLink, CloglogLink, Horseshoe,
        CategoricalLogit, ZeroInflatedPoisson, HurdlePoisson, NegativeBinomial2,

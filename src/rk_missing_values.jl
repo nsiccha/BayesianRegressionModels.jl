@@ -219,6 +219,8 @@ end
 _rk_prepare_term(term, target, context) = _brm_prepare_term(term, target, context)
 _rk_prepare_term(term::ExprColumn{typeof(hsgp)}, target, context) =
     _brm_prepare_term(term, target, context; basis=_brm_hsgp_basis_geometry)
+_rk_prepare_term(term::ExprColumn{typeof(gmrf)}, target, context) =
+    _brm_prepare_term(term, target, context; geometry=false)
 
 function _rk_mi_downstream(program, key, source)
     any(operation -> operation.name !== key &&

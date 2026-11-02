@@ -1,0 +1,114 @@
+# The spatial support and state identities are fitted data. The RK planner
+# requests metadata only; its emitted graph computes geometry from raw inputs.
+_brm_prepares_term(::ExprColumn{typeof(gmrf)}) = true
+_brm_term_prior_slots(::typeof(gmrf)) = (
+    _BRMTermPriorSlot(:sigma, :term_sd, :positive),
+    _BRMTermPriorSlot(:spatial_length, :term_length_scale, :positive; component=:space),
+    _BRMTermPriorSlot(:temporal_length, :term_length_scale, :positive; component=:time))
+_brm_term_slot_ambiguity(::typeof(gmrf)) = "a space-time field has separate spatial and temporal lengths"
+_brm_term_prior_expressions(term::_BRMPreparedTerm{typeof(gmrf)}) =
+    (; sigma=term.state.sigma_prior, spatial_length=term.state.spatial_prior,
+       temporal_length=term.state.temporal_prior)
+
+function _brm_prepared_term_key(term::ExprColumn{typeof(gmrf)})
+    args = getargs(term)
+    axes = first(args)
+    axes isa Tuple && length(axes) == 2 && all(x -> x isa NamedColumn, axes) ||
+        throw(ArgumentError("gmrf needs two named spatial columns as `(east, north)`"))
+    rest = map(a -> _brm_term_arg_name(a), args[2:end])
+    all(!isnothing, rest) || throw(ArgumentError("gmrf time and channel must name data columns"))
+    Symbol("gmrf((", join(name.(axes), ","), "),", join(rest, ","), ")")
+end
+
+function _brm_gmrf_arguments(term)
+    args, kw = getargs(term), getkwargs(term)
+    length(args) in (2, 3) || throw(ArgumentError(
+        "gmrf takes `(east, north), time` and an optional channel column"))
+    axes = first(args)
+    axes isa Tuple && length(axes) == 2 || throw(ArgumentError(
+        "gmrf needs two spatial columns as `(east, north)`"))
+    haskey(kw, :by) && throw(ArgumentError("use @plate for independent gmrf fields"))
+    unknown = setdiff(keys(kw), (:mesh, :spatial, :temporal, :cor))
+    isempty(unknown) || throw(ArgumentError("unknown gmrf keywords: $(join(unknown, ", "))"))
+    get(kw, :spatial, :matern) === :matern || throw(ArgumentError(
+        "gmrf currently supports spatial=:matern (two-dimensional smoothness ν=1)"))
+    get(kw, :temporal, :ou) === :ou || throw(ArgumentError("gmrf currently supports temporal=:ou"))
+    mesh = get(kw, :mesh, nothing)
+    mesh isa NamedTuple && Set(keys(mesh)) == Set((:vertices, :cells)) || throw(ArgumentError(
+        "gmrf needs mesh=(vertices=xy, cells=triangles)"))
+    (; axes, time=args[2], channel=length(args) == 3 ? args[3] : nothing,
+       mesh, cor=get(kw, :cor, nothing))
+end
+
+function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, context;
+        geometry::Bool=true)
+    arguments = _brm_gmrf_arguments(term)
+    spatial = map(arg -> _brm_term_data(:gmrf, arg, context), arguments.axes)
+    time_source, time = _brm_term_data(:gmrf, arguments.time, context)
+    nrows = length(time)
+    all(pair -> last(pair) isa AbstractVector{<:Real} && length(last(pair)) == nrows, spatial) ||
+        throw(ArgumentError("gmrf spatial columns must be numeric vectors on the time rows"))
+    time isa AbstractVector{<:Real} || throw(ArgumentError("gmrf time must be a numeric vector"))
+    times = _brm_fitted(_brm_gmrf_times, :gmrf_times, time_source, time)
+    channel_source, row_channels, channels = if arguments.channel === nothing
+        nothing, ones(Int, nrows), [1]
+    else
+        source, raw = _brm_term_data(:gmrf, arguments.channel, context)
+        raw isa AbstractVector && length(raw) == nrows && !any(ismissing, raw) ||
+            throw(ArgumentError("gmrf channel must have one nonmissing label per row"))
+        source, raw, _brm_fitted_levels(source, raw)
+    end
+    vertices_source, vertices = _brm_term_data(:gmrf, arguments.mesh.vertices, context)
+    cells_source, cells = _brm_term_data(:gmrf, arguments.mesh.cells, context)
+    vertices = _brm_fit_source(vertices_source, vertices)
+    cells = _brm_fit_source(cells_source, cells)
+    vertices isa AbstractMatrix{<:Real} && cells isa AbstractMatrix{<:Integer} ||
+        throw(ArgumentError("gmrf mesh needs numeric vertex and integer cell matrices"))
+    size(vertices, 2) == 2 && size(cells, 2) == 3 || throw(ArgumentError(
+        "gmrf mesh needs two vertex coordinates and three vertex indices per cell"))
+    correlation = _brm_level_correlation(arguments.cor; what="gmrf(...; cor=...)")
+    correlation === nothing || correlation.K == length(channels) || throw(DimensionMismatch(
+        "gmrf channel correlation dimension must equal the fitted channel count"))
+    source = (first.(spatial)..., time_source,
+        (channel_source === nothing ? () : (channel_source,))...)
+    dependencies = (source..., vertices_source, cells_source,
+        (correlation === nothing ? () : (correlation.name,))...)
+    priors = (;
+        sigma_prior=_brm_term_prior_expression(term, target, context, :term_sd;
+            default=ExprColumn(LogNormal, 0.0, 1.0)),
+        spatial_prior=_brm_term_prior_expression(term, target, context, :term_length_scale;
+            component=:space, default=ExprColumn(LogNormal, 0.0, 1.0)),
+        temporal_prior=_brm_term_prior_expression(term, target, context, :term_length_scale;
+            component=:time, default=ExprColumn(LogNormal, 0.0, 1.0)))
+    state = (; target, times, channels, correlation, vertices_source, cells_source,
+        vertices, cells, nvertices=size(vertices, 1), priors...)
+    prepared = _BRMPreparedTerm(gmrf, source, state, dependencies)
+    geometry || return prepared
+    mesh = _brm_gmrf_mesh(vertices, cells)
+    interpolation = _brm_gmrf_interpolation(mesh, last.(spatial)...)
+    indices = _brm_gmrf_state_indices(interpolation.indices, time, row_channels,
+        times, channels, size(vertices, 1))
+    _BRMPreparedTerm(gmrf, source,
+        merge(state, (; mesh, indices, weights=interpolation.weights)), dependencies)
+end
+
+function _brm_replay_gmrf(training, context)
+    state = training.state
+    x, y, time = map(s -> context.data[s], training.source[1:3])
+    row_channels = length(training.source) == 3 ? ones(Int, length(time)) :
+        context.data[training.source[4]]
+    interpolation = _brm_gmrf_interpolation(state.mesh, x, y)
+    indices = _brm_gmrf_state_indices(interpolation.indices, time, row_channels,
+        state.times, state.channels, state.nvertices)
+    _BRMPreparedTerm(gmrf, training.source,
+        merge(state, (; indices, weights=interpolation.weights)), training.dependencies)
+end
+function _brm_replay_term(::typeof(gmrf), training, fresh::ExprColumn, context)
+    args = _brm_gmrf_arguments(fresh)
+    source = (name.(args.axes)..., name(args.time),
+        (args.channel === nothing ? () : (name(args.channel),))...)
+    source == training.source || throw(ArgumentError("gmrf fitted columns changed"))
+    _brm_replay_gmrf(training, context)
+end
+_brm_replay_term(::typeof(gmrf), training, fresh::_BRMPreparedTerm, context) =
+    _brm_replay_gmrf(training, context)

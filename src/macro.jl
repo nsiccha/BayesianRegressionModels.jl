@@ -1870,7 +1870,7 @@ _effect_address_symbol(x) = error(
 # when one predictor carries several terms over the same axes,
 # `hsgp(x; cov=:periodic)` picks one of them (decision 1fk9b29).
 const _TERM_HEADS =
-    (:s, :t2, :mo, :mo1, :me, :interval_censored, :gp, :hsgp, :ar, :dar, :rw, :cdar, :car)
+    (:s, :t2, :mo, :mo1, :me, :interval_censored, :gp, :hsgp, :ar, :dar, :rw, :cdar, :car, :gmrf)
 
 _is_term_address(x) = Meta.isexpr(x, :call) && !isempty(x.args) &&
                       x.args[1] isa Symbol && x.args[1] in _TERM_HEADS
@@ -1908,6 +1908,8 @@ function _term_address_key(x::Expr)
             push!(names, a)
         elseif a isa QuoteNode && a.value isa Symbol
             push!(names, a.value)
+        elseif head === :gmrf && Meta.isexpr(a, :tuple, 2) && all(v -> v isa Symbol, a.args)
+            push!(names, Symbol("(", join(a.args, ","), ")"))
         else
             error("@brm: `$head(...)` in a prior address takes plain column " *
                   "names; got $(repr(a)). Address the term the way the formula " *
@@ -2008,7 +2010,7 @@ const _TERM_PRIOR_HEAD_EXAMPLE =
 #     sd(<lp|:>, <term>[, <block>])     -> [:term_sd, key, lp[, block]]
 #     simplex(<lp|:>, <term>)           -> [:term_simplex, key, lp]
 #     latent(<lp|:>, <term>)            -> [:term_latent, key, lp]
-#     length_scale(<lp|:>, <term>)      -> [:term_length_scale, key, lp]
+#     length_scale(<lp|:>, <term>[, component]) -> [:term_length_scale, key, lp[, component]]
 #     ar(<lp|:>, <term>)                -> [:term_ar, key, lp]
 #     mixing(<lp|:>, <term>)            -> [:term_mixing, key, lp]
 #
@@ -2048,14 +2050,15 @@ function _prior_address(head::Symbol, args::Vector{Symbol})
     end
 
     if haskey(_TERM_PRIOR_HEAD_CLASS, head)
-        length(args) == 2 || error(
-            "@brm: `$head` takes exactly `$head(<linear_predictor|:>, <term>)`; " *
+        (length(args) == 2 || (head === :length_scale && length(args) == 3)) || error(
+            "@brm: `$head` takes `$head(<linear_predictor|:>, <term>)`" *
+            (head === :length_scale ? " with an optional component slot" : "") * "; " *
             "got `$spelling`.")
         _is_term_key(args[2]) || error(
             "@brm: `$head` addresses a term's own parameter, so its target slot " *
             "must be a term as the formula spells it — `$head($(args[1]), " *
             "$(_TERM_PRIOR_HEAD_EXAMPLE[head]))`, not `$spelling`.")
-        return Symbol[_TERM_PRIOR_HEAD_CLASS[head], args[2], args[1]]
+        return Symbol[_TERM_PRIOR_HEAD_CLASS[head], args[2], args[1], args[3:end]...]
     end
 
     if head === :effect
@@ -3736,7 +3739,7 @@ function _prior_address_spelling(address::Vector{Symbol})
     elseif class === :term_sd
         return :sd, [address[3], address[2], address[4:end]...]
     elseif haskey(_TERM_PRIOR_CLASS_HEAD, class)
-        return _TERM_PRIOR_CLASS_HEAD[class], [address[3], address[2]]
+        return _TERM_PRIOR_CLASS_HEAD[class], [address[3], address[2], address[4:end]...]
     end
     :effect, address
 end

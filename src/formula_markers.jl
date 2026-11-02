@@ -173,6 +173,35 @@ name a fitted area. Dispatch tag — see `_sb_car_icar` / `_sb_car_bym2`.
 function car end
 
 """
+    gmrf((east, north), time[, channel]; mesh=(vertices=xy, cells=triangles),
+         spatial=:matern, temporal=:ou, cor=Omega)
+
+A space-time Gaussian Markov field on a supplied triangular mesh. `xy` has
+two columns in projected physical coordinates; each row of `triangles` has
+three vertex indices. An observation reads the piecewise-linear interpolation
+of three vertices at its time and channel. All distinct observation times form
+the state grid. Elapsed times retain their physical units, including gaps.
+
+The spatial law is the mass-lumped finite-element Matérn with smoothness ν=1
+and κ=√2/ℓ_space, with natural Neumann boundaries. Its amplitude is the
+continuum marginal SD; finite-mesh variances, especially near boundaries,
+need not equal that amplitude. Time has stationary OU correlation
+`exp(-abs(t-s)/ℓ_time)`. The optional `channel` column uses `cor`, a known
+correlation matrix or a declared `LKJCholesky` factor in fitted channel order.
+Omitting `cor` uses independent channels. Use `@plate` for independent fields.
+
+`sd(lp, gmrf((east, north), time))` addresses the amplitude;
+`length_scale(lp, gmrf((east, north), time), space)` and the corresponding
+`time` component address the two lengths. Each defaults to `LogNormal(0, 1)`
+in the coordinates' units. Include the channel argument in an address when
+present. The term adds its field directly, without a population coefficient.
+Frozen replay retains the mesh, times and channels, and can evaluate new
+spatial locations inside that mesh. New state times or channels require a
+conditional prediction law and are refused by frozen replay.
+"""
+function gmrf end
+
+"""
     Horseshoe
 
 Carvalho-Polson-Scott horseshoe shrinkage prior marker. Use as a prior

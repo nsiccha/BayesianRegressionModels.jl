@@ -2517,6 +2517,11 @@ _brm_term_label(::typeof(cdar), t, target) =
     Symbol(:cdar_, target, :_, name(_sb_named_inner(:cdar, only(getargs(t)))))
 _brm_term_label(::typeof(car), t, target) =
     Symbol(:car_, target, :_, name(_sb_named_inner(:car, only(getargs(t)))))
+function _brm_term_label(::typeof(gmrf), t, target)
+    a = _brm_gmrf_arguments(t)
+    columns = (a.axes..., a.time, (a.channel === nothing ? () : (a.channel,))...)
+    Symbol(:gmrf_, target, :_, join(name.(columns), "_"))
+end
 
 _brm_term_owner_labels(f, t, target) = (_brm_term_label(f, t, target),)
 # `mo`/`mo1` carriers disambiguate like `s`/`gp`/`hsgp`: the first occurrence
@@ -2596,6 +2601,9 @@ _brm_term_parameter_bindings(::typeof(rw), _t) =
     (; sd=:sigma, innovations=:z)
 _brm_term_parameter_bindings(::typeof(cdar), _t) =
     (; ar=:rho, sd=:sigma, innovations=:eta)
+_brm_term_parameter_bindings(::typeof(gmrf), _t) =
+    (; sd=:sigma, spatial_length=:spatial_length, temporal_length=:temporal_length,
+       field=:field)
 # `effects` is the per-area field in the order of the fitted graph's sorted area
 # labels; `structured` / `unstructured` are BYM2's standardized `phi` / `theta`.
 _brm_term_parameter_bindings(::typeof(car), t) =
@@ -2614,6 +2622,7 @@ _brm_term_has_value(::typeof(dar)) = true
 _brm_term_has_value(::typeof(rw)) = true
 _brm_term_has_value(::typeof(cdar)) = true
 _brm_term_has_value(::typeof(car)) = true
+_brm_term_has_value(::typeof(gmrf)) = true
 
 # ---- hyper-predictor term roles ---------------------------------------------
 # A hyper-predictor statement replaces its hyper's shared sampled scalar with
@@ -2902,6 +2911,8 @@ end
 
 # The term-prior class behind each public parameter role a known value can hold.
 const _BRM_TERM_ROLE_CLASS = (; sd=:term_sd, length_scale=:term_length_scale,
+                               spatial_length=:term_length_scale,
+                               temporal_length=:term_length_scale,
                                ar=:term_ar, mixing=:term_mixing)
 
 """
@@ -2913,8 +2924,10 @@ function _brm_term_known_value(brmi::BRMI, logical::Symbol, term, parameter::Sym
     class = get(_BRM_TERM_ROLE_CLASS, parameter, nothing)
     isnothing(class) && return nothing
     term isa ExprColumn || return nothing
+    component = parameter === :spatial_length ? :space :
+                parameter === :temporal_length ? :time : nothing
     slots = [slot for slot in _brm_term_prior_slots(getf(term))
-             if slot.class === class && isnothing(slot.component)]
+             if slot.class === class && slot.component === component]
     length(slots) == 1 || return nothing
     per_term = _brm_term_override(
         get(_brm_resolve_term_priors(brmi), logical, Dict()), term)

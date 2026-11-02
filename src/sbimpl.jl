@@ -6826,6 +6826,8 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         # a forecast's record keeps the fitted grid: its parameters stay the fit's
         new_preproc[key] = freeze ? e :
             PreprocEntry(:rw, merge(e.const_, (; steps)), e.raw_ref, true)
+    elseif e.kind === :gmrf
+        _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
     elseif e.kind === :car
         # `car(area; edges=..., nodes=..., type=...)`: frozen, the graph and its
         # numbering are constants of the fit and each row must name a fitted
