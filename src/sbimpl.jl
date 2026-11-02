@@ -7933,6 +7933,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     dcol_names    = Symbol[]
     lp_cols       = Any[]
     read_outputs  = Symbol[]
+    assigned_inputs = Symbol[]
     ragged_specs  = Any[]
     ragged_cols   = Any[]
     for (i, c) in enumerate(dcols[2:end])
@@ -7965,6 +7966,10 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         if parent(c) isa DataColumn
             v = parent(parent(c))
             data[k] = v
+        elseif parent(c) isa ExprColumn{typeof(assign)}
+            # Read the emitted value on its own axis. An assignment can
+            # change its inputs' axes, so it has no formula grouping to infer.
+            push!(assigned_inputs, k)
         elseif parent(c) isa MissingColumn && k in get(data, _SB_KERNEL_OUTPUT_READS_KEY, ())
             # Another cell's non-collected indexed output, emitted before this
             # cell (`_brm_prepare_program`): sliced by name like a collected
@@ -8050,29 +8055,38 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         # The subject count is the common length of the pre-grouped data
         # columns or, when the cell slices only LPs (beside omitted outcomes),
         # of the per-subject columns those LPs read.
-        lp_names = union(Set(name(c) for c in lp_cols), read_outputs)
+        lp_names = union(Set(name(c) for c in lp_cols), read_outputs, assigned_inputs)
         counted = [(k, length(data[k])) for k in kept_names if k ∉ lp_names]
         isempty(counted) &&
             foreach(c -> append!(counted, _brm_kernel_lp_data_lengths(c)), lp_cols)
-        isempty(counted) && error(
+        isempty(counted) && isempty(assigned_inputs) && error(
             "sbimpl: kernel(...) with no random-effect linear predictor needs at least ",
             "one pre-grouped per-subject data column to derive the subject count from; ",
             "omitted outcomes cannot supply it.")
         col_lens = unique(last.(counted))
-        length(col_lens) == 1 || error(
+        length(col_lens) <= 1 || error(
             "sbimpl: kernel(...) pre-grouped per-subject columns disagree on the ",
             "subject count: ",
             join(("$(k)=$(n)" for (k, n) in counted), ", "),
             ". Every positional column must carry exactly one entry per subject.")
-        nsub = only(col_lens)
+        nsub = isempty(col_lens) ? nothing : only(col_lens)
         # Count only; no group column exists (labels are the implicit 1:nsub row
         # order). Replayed on a new frame, the count is the length of the first
         # of these columns that frame carries — see the `:kernel_subject_count`
         # reprocess branch. A forecast replay's frame lacks the response.
-        data[nsub_sym] = nsub
+        if nsub === nothing
+            # A plate over only a derived array gets its extent from that
+            # value, in the emitted program, rather than a frozen guessed
+            # length of one of the expression's dependencies.
+            nsub_sym = nothing
+        else
+            data[nsub_sym] = nsub
+        end
         vector_names = Set(name(c) for c in lp_cols if !isnothing(_brm_parameter_length(c)))
         columns = Tuple(k for (k, _) in counted if k ∉ vector_names)
-        if isempty(columns)
+        if nsub === nothing
+            nothing # The emitted value, not preparation data, owns the extent.
+        elseif isempty(columns)
             # Sampled vectors supply a fitted axis, never a raw-data column.
             _sb_record_static!(data, nsub_sym)
         else
@@ -8182,9 +8196,10 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     body_stmts = _sb_cell_statements(_sb_cell_ar1_normal_calls(body_stmts, kept_params),
         _brm_inline_scope(lam))
     plate_body = Expr(:block, body_stmts...)
-    plate_call = Expr(:call, :plate,
-        Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
-        kept_names...)
+    plate_call = nsub_sym === nothing ? Expr(:call, :plate, kept_names...) :
+        Expr(:call, :plate,
+            Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
+            kept_names...)
     plate_do = Expr(:do, plate_call,
         Expr(:->, Expr(:tuple, kept_params...), plate_body))
     push!(stmts, :($target ~ $plate_do))

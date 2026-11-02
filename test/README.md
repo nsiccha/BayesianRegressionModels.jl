@@ -1,6 +1,11 @@
 # Running the tests
 
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
+`plate_derived_inputs.jl` checks computed arrays read directly by plate cells:
+transformed hierarchical predictors, chained assignments, gathers and
+concatenations, including a derived array as the plate range. Independent
+normalized densities and finite differences agree with native reverse and
+compiled Stan; printed RK source and changed-data replay are checked too.
 `plate_selected_outputs.jl` checks nested selection of shared vector outputs
 across plates with different cell counts: data-only and parameter-dependent
 outputs, fixed and varying widths, both output orders, reader-first composition,

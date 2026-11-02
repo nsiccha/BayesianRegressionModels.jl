@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.118
+
+- Plate cells read model-scope computed arrays directly, including transforms
+  of formula predictors and assignments that gather or concatenate values.
+  SBBRMI and RKBRMI preserve the computed array's own axis and dependencies;
+  a derived array can also supply the plate range without a raw-data input.
+
 ## 0.2.117
 
 - `brm_svi_fit(...; laplace=GaussianBlockLaplace())` jointly integrates
