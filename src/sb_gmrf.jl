@@ -262,6 +262,9 @@ function _sb_predictor_term!(stmts, data, ::typeof(gmrf), term;
         merge(prepared.state, NamedTuple{prior_keys}(priors)), prepared.dependencies)
     state = prepared.state
     stem = Symbol("gmrf_", target, "_", join(prepared.source, "_"))
+    _sb_record_binding!(data, stem, :parameter, stem; family=:gmrf,
+        term_key=_brm_term_full_key(term), term_predictor=target,
+        term_label=stem, term_parameters=_BRM_GMRF_PARAMETER_BINDINGS)
     field_data = _sb_gmrf_data(prepared)
     keys_ = NamedTuple{keys(field_data)}(map(key -> Symbol(stem, :_, key), keys(field_data)))
     for (name, value) in pairs(field_data)

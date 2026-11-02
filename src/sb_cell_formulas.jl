@@ -11,7 +11,8 @@ _sb_cell_formula_syntax(x::AbstractDict) =
 function _sb_cell_formula_instance(program, raw, scope; bindings=Dict{Symbol,Any}())
     model = program.builder(_BRMCellFormulaInputs(_BRMReplayData((;), raw), bindings))
     overrides = _sb_prior_overrides(model)
-    data = Dict{Symbol,Any}(_SB_PREPROC_KEY => Dict{Symbol,PreprocEntry}())
+    data = Dict{Symbol,Any}(_SB_PREPROC_KEY => Dict{Symbol,PreprocEntry}(),
+        _SB_BINDINGS_KEY => Dict{Symbol,NamedTuple}())
     statements = Dict{Int,Vector{Any}}()
     for (target, position) in zip(program.targets, program.positions)
         op = linear_predictor_op(model, target)
@@ -34,7 +35,10 @@ function _sb_cell_formula_instance(program, raw, scope; bindings=Dict{Symbol,Any
         statements[position] = emitted
     end
     preproc = pop!(data, _SB_PREPROC_KEY)
-    (; data, preproc, statements)
+    emission = pop!(data, _SB_BINDINGS_KEY)
+    predictors = Tuple((; logical=lp.name, emitted=_sb_lp_emitted_name(lp.name, lp.link_lhs_fn),
+        link=lp.link_lhs_fn) for lp in linear_predictors(model) if lp.name in program.targets)
+    (; data, preproc, statements, bindings=emission, predictors)
 end
 
 function _sb_cell_formulas!(body, data, plate_target, names, params, scope;
@@ -63,6 +67,8 @@ function _sb_cell_formulas!(body, data, plate_target, names, params, scope;
     syntax = _sb_cell_formula_syntax(first(cells).statements)
     all(c -> _sb_cell_formula_syntax(c.statements) == syntax, cells) || throw(ArgumentError(
         "cell formula declarations must have the same structure in each plate cell"))
+    all(c -> c.bindings == first(cells).bindings && c.predictors == first(cells).predictors,
+        cells) || throw(ArgumentError("cell formula ownership must agree across plate cells"))
     # Each datum is passed explicitly to the cell, including known parameter
     # values. Ragged dimensions therefore follow each field's fitted support.
     owned = Dict{Symbol,Symbol}()
@@ -107,7 +113,9 @@ function _sb_cell_formulas!(body, data, plate_target, names, params, scope;
         end
     end
     _sb_record_preproc!(data, record_key, PreprocEntry(:cell_formulas,
-        (; cells=fitted, labels=collect(labels), inputs, ragged_inputs, owned, group, distinct), group, true))
+        (; cells=fitted, labels=collect(labels), inputs, ragged_inputs, owned, group, distinct,
+           context=(plate_target,), bindings=first(cells).bindings,
+           predictors=first(cells).predictors), group, true))
     replacements = first(cells).statements
     rewritten = Any[]
     for (i, statement) in enumerate(body)

@@ -2602,8 +2602,7 @@ _brm_term_parameter_bindings(::typeof(rw), _t) =
 _brm_term_parameter_bindings(::typeof(cdar), _t) =
     (; ar=:rho, sd=:sigma, innovations=:eta)
 _brm_term_parameter_bindings(::typeof(gmrf), _t) =
-    (; sd=:sigma, spatial_length=:spatial_length, temporal_length=:temporal_length,
-       field=:field)
+    _BRM_GMRF_PARAMETER_BINDINGS
 # `effects` is the per-area field in the order of the fitted graph's sorted area
 # labels; `structured` / `unstructured` are BYM2's standardized `phi` / `theta`.
 _brm_term_parameter_bindings(::typeof(car), t) =

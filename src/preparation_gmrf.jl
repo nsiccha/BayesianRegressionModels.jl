@@ -1,6 +1,9 @@
 # The spatial support and state identities are fitted data. The RK planner
 # requests metadata only; its emitted graph computes geometry from raw inputs.
 _brm_prepares_term(::ExprColumn{typeof(gmrf)}) = true
+const _BRM_GMRF_PARAMETER_BINDINGS =
+    (; sd=:sigma, spatial_length=:spatial_length, temporal_length=:temporal_length,
+       field=:field)
 _brm_term_prior_slots(::typeof(gmrf)) = (
     _BRMTermPriorSlot(:sigma, :term_sd, :positive),
     _BRMTermPriorSlot(:spatial_length, :term_length_scale, :positive; component=:space),
