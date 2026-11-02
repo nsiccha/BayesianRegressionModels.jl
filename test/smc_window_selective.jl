@@ -2,15 +2,11 @@ using Test, BayesianRegressionModels, Distributions, ReactiveKernels, ReactiveKe
 using Enzyme, ADTypes, DifferentiationInterface, SequentialMonteCarlo, WarmupHMC
 using Random, Serialization, LinearAlgebra, Statistics
 include("smc_window_fixture.jl")
+include("smc_window_selective_fixture.jl")
 include("testset_filter.jl")
 const F = SMCWindowFixture
-
-hierarchical_window(data) = @brm data begin
-    m ~ Normal(0, 4)
-    z[1:nb] .~ Normal.(m, 2)
-    mu = z[block]
-    y ~ Normal(mu, 1)
-end
+const SF = SMCSelectiveFixture
+const hierarchical_window = SF.hierarchical
 
 @stestset "An old-only window selects the likelihood without replaying old priors" begin
     training = (; nb=2, block=[1, 2], y=[0.0, 0.0])
@@ -140,12 +136,71 @@ end
     @test var(draws[z2i, :]) ≈ 1 atol=0.15
     @test compact == fill(1.25, 2)
     @test F.equal(brm_smc_checkpoint(fit), before)
+    rng = Xoshiro(913)
+    saved_rng = copy(rng)
+    recovered = brm_smc_recover(fit, compact; rng)
+    @test rng != saved_rng
+    @test recovered == brm_smc_recover(fit, compact; rng=saved_rng)
 end
 
 positive_window(data) = @brm data begin
     z[1:nb] .~ Exponential(2)
     mu = z[block]
     y ~ Normal(mu, 1)
+end
+
+@stestset "Repeated selective carries retain bounded summaries" begin
+    training = (; nb=2, block=[1, 2], y=[0.0, 0.0])
+    rk = RKBRMI(hierarchical_window(training))
+    carried = brm_smc_carry(rk; reference=SMCReference(zeros(3), ones(3)))
+    options = SMCOptions(; moves=2, stepsize=0.25, max_tree_depth=3, history_limit=2)
+    sizes = Int[]
+    for step in 1:5
+        # A coordinate introduced after calibration can be absent from a
+        # later window and reappear; it must still be old, with no new prior.
+        nb = step == 3 ? 2 : 3
+        window = (; nb, block=[nb], y=[0.5 + step / 10])
+        fit = brm_smc_update(carried, hierarchical_window(window);
+            coordinates=:auto, rng=Xoshiro(2200 + step), particles=128, options)
+        # After introduction, m is no longer needed by this window's likelihood.
+        @test size(fit.state.positions, 1) == (step == 1 ? 2 : 1)
+        carried = F.roundtrip(brm_smc_carry(fit; max_reflections=2))
+        @test length(carried.posterior.reference.location) == 4
+        @test carried.posterior.fit_diagnostics.joint.rank <= 2
+        push!(sizes, F.serialized_size(carried))
+        fill!(window.y, NaN)
+    end
+    println("BRM_SELECTIVE_REPEATED_CARRY bytes=", sizes)
+    @test maximum(sizes) - minimum(sizes) < 2048
+end
+
+@stestset "A plate selects fresh coordinates by the window's bound indices" begin
+    training = (; nb=2, block=[1, 2], y=[0.0, 0.0])
+    rk = RKBRMI(SF.plated(training))
+    carried = brm_smc_carry(rk; reference=SMCReference([0.4, -0.2], [0.8, 0.7]))
+    window = (; nb=3, block=[3, 3], y=[1.0, 2.0])
+    options = SMCOptions(; moves=3, stepsize=0.25, max_tree_depth=4)
+    fit = brm_smc_update(carried, SF.plated(window);
+        coordinates=:auto, rng=Xoshiro(2251), particles=1024, options)
+    @test size(fit.state.positions) == (1, 1024)
+    @test only(F.weighted_mean(fit.state)) ≈ 3 / 2.25 atol=0.08
+    @test only(F.weighted_variance(fit.state)) ≈ 1 / 2.25 atol=0.08
+    next = brm_smc_carry(fit)
+    names = coordinate_names(fit.backend.model.layout)
+    values = Dict(zip(names, next.posterior.reference.location))
+    @test values[Symbol("z.1")] ≈ 0.4 atol=1e-12
+    @test values[Symbol("z.2")] ≈ -0.2 atol=1e-12
+end
+
+@stestset "Selective checkpoints replay frozen preprocessing in a fresh process" begin
+    mktempdir() do dir
+        path = joinpath(dir, "selective.bin")
+        script = joinpath(@__DIR__, "smc_window_selective_process.jl")
+        project = dirname(Base.active_project())
+        command = `$(Base.julia_cmd()) --startup-file=no --project=$project $script`
+        @test success(pipeline(`$command write $path`; stdout, stderr))
+        @test success(pipeline(`$command read $path`; stdout, stderr))
+    end
 end
 
 @stestset "Fresh positive coordinates retain their prior and transform Jacobian" begin

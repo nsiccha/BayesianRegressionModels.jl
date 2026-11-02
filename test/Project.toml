@@ -62,7 +62,7 @@ SequentialMonteCarlo = "0.7"
 StanBlocks = "0.2.14"
 Treebars = "0.1.1"
 Turing = "0.46"
-WarmupHMC = "0.2.10"
+WarmupHMC = "0.2.11"
 julia = "1.10"
 
 [sources.TreeArrays]
@@ -148,8 +148,8 @@ rev = "f071111945c165dbae097e94c5939b79103434ac"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
-# 0.2.10: weighted-cloud moments required by the current RKPPL SMC extension.
-rev = "41b7fba7ccfcb01049ec859cda596646e5238516"
+# 0.2.11: public covariance projection used by selective SMC carries.
+rev = "8e1d45a78b38e3e9d82ee75312e0eb7e5203d327"
 
 [sources.SequentialMonteCarlo]
 url = "https://github.com/awllee/SequentialMonteCarlo.jl.git"
@@ -301,4 +301,5 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # helper calls, guarded captures and broadcast observation locations.
 # Guarded gathered reductions through typed aliases: RK 0.1.52 / PPL 0.1.55.
 # PPL 0.1.60 / DistributionKernels 0.1.1: log-space interval masses and tails.
-rev = "60cb795d48058499c800d25f28d7e9acc97ccce6"
+# RK 0.1.61 / PPL 0.1.70: selective windows, recovery and bounded joint carries.
+rev = "f5628f179b7cd9e2c47568c82bf956c6ea43a8aa"

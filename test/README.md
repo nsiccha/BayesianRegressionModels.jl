@@ -280,7 +280,12 @@ Independent Gaussian and truncated-Normal references check posterior moments
 and predictive normalizers. Storage checks compare 32 and 256 particles in a
 10,002-coordinate growing frame, and lazy recovery checks a correlated omitted
 coordinate without adding full-width particles. Its testsets accept substring
-filters as trailing arguments.
+filters as trailing arguments. Repeated carries check that summaries stay
+bounded after growth. `smc_window_selective_api.jl` checks owned coordinate maps,
+compact pilot tuning, schedule identity and exact tuned continuation.
+`smc_window_selective_process.jl` checks fresh-process checkpoint continuation,
+coordinate maps, conditional recovery and the next carry while
+preserving fitted standardization without the original training rows.
 
 `rk_vector_extent.jl` checks data-driven declared-vector extents through emitted
 RK source, fitted replay and design binding. It covers integral expressions,
