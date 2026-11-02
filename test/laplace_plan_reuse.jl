@@ -17,9 +17,9 @@ function BRM._rk_slap_kernels(rk::RKBRMI, ports::Tuple, effects::Tuple,
     BRM._rk_slap_kernels(rk, ports, effects, omega, u, NLME_AD)
 end
 function BRM._rk_spl_cell_ad(rk::RKBRMI, obs::Tuple, u::Vector{Float64},
-        indices::Vector{Int}, ad::CountingLaplaceAD, K::Int)
+        indices::Vector{Int}, ad::CountingLaplaceAD, K::Int; kwargs...)
     ad.cells += 1
-    BRM._rk_spl_cell_ad(rk, obs, u, indices, NLME_AD, K)
+    BRM._rk_spl_cell_ad(rk, obs, u, indices, NLME_AD, K; kwargs...)
 end
 function BRM._rk_spl_factor_ad(q, part, u, indices, ad::CountingLaplaceAD; kwargs...)
     ad.factors += 1

@@ -233,7 +233,10 @@ BRM._rk_slap_prior_gradient(k, u::Vector{Float64}) =
 # direction's HVP and third-order product `D³ℓ[v, v, ·]`, each over the
 # selection.
 function BRM._rk_spl_cell_ad(backend::BRM.RKBRMI, observations::Tuple,
-        base0::Vector{Float64}, indices0::Vector{Int}, ad_backend, K::Int)
+        base0::Vector{Float64}, indices0::Vector{Int}, ad_backend, K::Int;
+        query=nothing)
+    query === nothing || return BRM._rk_spl_factor_ad(query, :outer, base0,
+        indices0, ad_backend; K)
     rkext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     built, plan = backend.model, rkext._rk_translated(backend)
     m = length(indices0)
@@ -279,12 +282,15 @@ end
 # Give the shared preparation reference identity. Its nested immutable RK
 # records otherwise get embedded into every term and repeatedly boxed when
 # walking heterogeneous cell states (over 3 KB per record in the sum fixture).
-mutable struct _SPLFactorAD{H,T,D}
+mutable struct _SPLFactorAD{H,T,D,G,A,P}
     const hvp::H
     const third::T
     const dirs::D
     const r::Int
     const outer::Bool
+    const gradient::G
+    const accumulators::A
+    const pullback::P
 end
 
 function BRM._rk_spl_factor_ad(q, part, base, indices, ad_backend; cell0=1, term0=1, K=nothing)
@@ -301,21 +307,31 @@ function BRM._rk_spl_factor_ad(q, part, base, indices, ad_backend; cell0=1, term
     third = Base.invokelatest(prepare_cell_factor_ad, prepare_ad_third, q.factors,
         part, base, indices, SecondOrder(second, forward), (shape(zeros(r + m)),);
         cell0, term0)
-    _SPLFactorAD(hvp, third, dirs, r, part === :outer)
+    reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
+    gradient = Base.invokelatest(prepare_cell_factor_ad, prepare_ad, q.factors,
+        part, base, indices, reverse; cell0, term0)
+    cached = hasproperty(q, :cached) && q.cached
+    accumulators = cached ? (
+        Base.invokelatest(prepare_cell_accumulator, gradient, reverse, base; order=0),
+        Base.invokelatest(prepare_cell_accumulator, third, second, base; order=1),
+        Base.invokelatest(prepare_cell_accumulator, third, SecondOrder(second, forward), base; order=2),
+    ) : nothing
+    pullback = cached ? Base.invokelatest(prepare_cell_pullback, q.factors, reverse, base) : nothing
+    _SPLFactorAD(hvp, third, dirs, r, part === :outer, gradient, accumulators, pullback)
 end
 
 _spl_factor_flat(v::Tuple) = vcat(v...)
 _spl_factor_flat(v::AbstractVector) = v
-_spl_factor_point(ad, base, indices, cell, sums, term) = ad.outer ?
-    (base, sums, base[indices], indices, cell) :
-    (base, base[indices], indices, cell, term)
+_spl_factor_point(ad, base, indices, cell, sums, term, context=base) = ad.outer ?
+    (context, sums, base[indices], indices, cell) :
+    (context, base[indices], indices, cell, term)
 
 function BRM._rk_spl_factor_block(ad, base, indices, cell; sums=nothing, term=1,
-        columns=collect(1:(ad.r + length(indices))))
-    point = _spl_factor_point(ad, base, indices, cell, sums, term)
+        columns=collect(1:(ad.r + length(indices))), context=base)
+    point = _spl_factor_point(ad, base, indices, cell, sums, term, context)
     if isempty(columns)
-        g, _, _ = BRM._rk_spl_factor_third(ad, zeros(ad.r + length(indices)),
-            base, indices, cell; sums, term)
+        _, g = ad_value_and_gradient(ad.gradient, point...)
+        g = _spl_factor_flat(g)
         return g, zeros(length(g), 0)
     end
     function set!(v, k, value)
@@ -341,11 +357,55 @@ function BRM._rk_spl_factor_block(ad, base, indices, cell; sums=nothing, term=1,
 end
 
 function BRM._rk_spl_factor_third(ad, direction, base, indices, cell;
-        sums=nothing, term=1)
+        sums=nothing, term=1, context=base)
     d = ad.outer ? (direction[1:ad.r], direction[(ad.r + 1):end]) : direction
-    point = _spl_factor_point(ad, base, indices, cell, sums, term)
+    point = _spl_factor_point(ad, base, indices, cell, sums, term, context)
     g, (hv,), (tv,) = ad_gradient_hvp_and_third(ad.third, (d,), point...)
     _spl_factor_flat(g), _spl_factor_flat(hv), _spl_factor_flat(tv)
+end
+
+# A whole observation shares one cache. Enter it once per sweep, then pass the
+# batch to every local operation, so validation never scans shared coordinates
+# once per cell. The returned packed cotangent includes the prefix pullback.
+function BRM._rk_spl_cell_pass(f, ad::_SPLFactorAD, base)
+    packed = zeros(length(base))
+    result = nothing
+    cell_pullback!(packed, ad.pullback, base) do batch
+        result = f(batch)
+    end
+    result, packed
+end
+
+function BRM._rk_spl_factor_accumulate(batch, ad::_SPLFactorAD, order, direction,
+        weight, base, indices, cell; sums=nothing, term=1)
+    d = direction === nothing ? nothing : ad.outer ?
+        (direction[1:ad.r], direction[(ad.r + 1):end]) : direction
+    tail = ad.outer ? (sums, base[indices], indices, cell) :
+        (base[indices], indices, cell, term)
+    value, local_gradient = accumulate_cell!(batch, ad.accumulators[order + 1],
+        d, weight, tail...)
+    value, _spl_factor_flat(local_gradient)
+end
+
+function BRM._rk_spl_cell_block(ad::_SPLFactorAD, directions::Tuple,
+        base::Vector{Float64}, indices::Vector{Int}, i::Int; context=base)
+    point = _spl_factor_point(ad, base, indices, i, Float64[], 1, context)
+    g, columns = ad_gradient_and_hvp(ad.hvp,
+        map(d -> (Float64[], d), directions), point...)
+    last(g), map(last, columns)
+end
+
+function BRM._rk_spl_cell_value(ad::_SPLFactorAD, base, indices, cell; context=base)
+    value, _ = ad_value_and_gradient(ad.gradient,
+        _spl_factor_point(ad, base, indices, cell, Float64[], 1, context)...)
+    value
+end
+
+function BRM._rk_spl_factor_value(ad::_SPLFactorAD, base, indices, cell;
+        sums=nothing, term=1, context=base)
+    value, _ = ad_value_and_gradient(ad.gradient,
+        _spl_factor_point(ad, base, indices, cell, sums, term, context)...)
+    value
 end
 
 include("rk_svi_laplace.jl")

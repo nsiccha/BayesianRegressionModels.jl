@@ -329,12 +329,19 @@ end
 # touch it.
 function _brm_plan_ess(p::BRMSparseLaplaceProblem, state, declaration, draws, ess_floor,
         rng)
+    _brm_spl_cell_batches(p, state.u) do contexts
+        _brm_plan_ess(p, state, declaration, draws, ess_floor, rng, contexts)
+    end
+end
+
+function _brm_plan_ess(p::BRMSparseLaplaceProblem, state, declaration, draws, ess_floor,
+        rng, contexts)
     local_terms = _brm_plan_local_terms(p)
     u = copy(state.uA)
     u[p.integrated] .= state.z
     sets = [b.z[l, :] for b in p.blocks if _brm_nlme_owned(b.declaration, declaration)
         for l in axes(b.z, 1)]
-    cache = _brm_plan_local_cache(p, state)
+    cache = _brm_plan_local_cache(p, state; contexts)
     z = copy(state.z)
     values = map(sets) do I
         H = _brm_spl_precision_block(state.h, I)
@@ -397,7 +404,8 @@ function _brm_plan_local_value(p::BRMSparseLaplaceProblem, state, terms, I, z, u
         else
             group, c = cache.cells[t]
             u[p.integrated[I]] .= z[I]
-            total += _brm_plan_cell_value(group, c, I, u, cache.sums)
+            total += _brm_plan_cell_value(group, c, I, u, cache.sums;
+                context=get(cache.contexts, group.name, u))
             u[p.integrated[I]] .= state.z[I]
         end
     end

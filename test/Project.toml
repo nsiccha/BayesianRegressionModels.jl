@@ -296,4 +296,4 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
 # helper calls, guarded captures and broadcast observation locations.
 # Guarded gathered reductions through typed aliases: RK 0.1.52 / PPL 0.1.55.
-rev = "5e9d2d03818ba5c8ef7d6d068fef42101f902d0e"
+rev = "49b7f4c6b930623466db217ac7a1beaa198c6b8b"

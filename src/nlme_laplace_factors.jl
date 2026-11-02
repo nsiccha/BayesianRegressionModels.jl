@@ -7,6 +7,8 @@ function _rk_spl_factor_reads end
 function _rk_spl_factor_ad end
 function _rk_spl_factor_block end
 function _rk_spl_factor_third end
+function _rk_spl_factor_value end
+function _rk_spl_factor_accumulate end
 
 struct _BRMSumCellGroup
     name::Symbol
@@ -154,6 +156,7 @@ function _brm_spl_prepare_reduction(value::V, footprint::F, q, j, u0, ncells,
             sums[i] += value(u0, i, t)
             reads = footprint(u0, i, t).unconstrained
             reads = reads === :whole ? eachindex(u0) : reads
+            q.cached && (reads = filter(i -> haskey(zof, i), reads))
             merge((; j, t), _brm_spl_factor_selection(reads, zof, pof, maps, layout))
         end
     end
@@ -161,12 +164,13 @@ function _brm_spl_prepare_reduction(value::V, footprint::F, q, j, u0, ncells,
 end
 
 function _brm_spl_prepare_factor_cells(footprint::F, reductions, u0, ncells,
-        zof, pof, maps, layout) where {F}
+        zof, pof, maps, layout, cached=false) where {F}
     map(1:ncells) do i
         sums = [r.sums[i] for r in reductions]
         terms = [r.terms[i] for r in reductions]
         reads = footprint(u0, sums, i).unconstrained
         reads = reads === :whole ? eachindex(u0) : reads
+        cached && (reads = filter(i -> haskey(zof, i), reads))
         direct = _brm_spl_factor_selection(reads, zof, pof, maps, layout)
         lz = sort!(unique!(vcat(direct.lz,
             [z for reduction in terms for term in reduction for z in term.lz])))
@@ -196,16 +200,17 @@ function _brm_spl_prepare_factors(backend, name, u0, ncells, integrated, populat
             q, j, u0, ncells, zof, pof, maps, layout)
     end
     cells = Base.invokelatest(_brm_spl_prepare_factor_cells, q.outer.footprint,
-        reductions, u0, ncells, zof, pof, maps, layout)
+        reductions, u0, ncells, zof, pof, maps, layout, q.cached)
     (; q, cells)
 end
 
 # The Jacobian has one row per sum or direct outer input and one column per
 # effect this cell reads. No cell-wide Hessian is formed: second derivatives
 # remain the outer's small block and each summand's small block.
-function _brm_spl_factor_blocks(prepared, u, c)
-    values = _brm_spl_factor_values(prepared, u, c)
-    gf, hf = _rk_spl_factor_block(c.outer, u, c.direct.sel, c.i; sums=values.sums, columns=c.active)
+function _brm_spl_factor_blocks(prepared, u, c; context=u)
+    values = _brm_spl_factor_values(prepared, u, c; context)
+    gf, hf = _rk_spl_factor_block(c.outer, u, c.direct.sel, c.i;
+        sums=values.sums, columns=c.active, context)
     ri = Int[]; ci = Int[]; bv = Float64[]
     r = length(values.sums)
     for (k, loc) in enumerate(c.direct.loc)
@@ -214,7 +219,7 @@ function _brm_spl_factor_blocks(prepared, u, c)
     terms = map(c.terms) do reduction
         map(reduction) do t
             g, h = t.ad === nothing ? (Float64[], zeros(0, 0)) :
-                _rk_spl_factor_block(t.ad, u, t.sel, c.i; term=t.t, columns=t.lpos)
+                _rk_spl_factor_block(t.ad, u, t.sel, c.i; term=t.t, columns=t.lpos, context)
             for (k, loc) in zip(t.lpos, t.loc)
                 push!(ri, t.j); push!(ci, loc); push!(bv, g[k])
             end
@@ -236,13 +241,21 @@ end
 # are retained for selected inverse requests as the curvature changes sign.
 # This is shared by Newton assembly and the saved state for its derivatives.
 function _brm_spl_factor_curvature(prepared, u, n, np)
+    prepared.q.cached || return _brm_spl_factor_curvature(prepared, u, n, np, u)
+    result, _ = _rk_spl_cell_pass(first(prepared.cells).outer, u) do batch
+        _brm_spl_factor_curvature(prepared, u, n, np, batch)
+    end
+    result
+end
+
+function _brm_spl_factor_curvature(prepared, u, n, np, context)
     gradient = zeros(n); population = zeros(np)
     di = Int[]; dj = Int[]; dv = Float64[]
     bi = Int[]; bj = Int[]; bv = Float64[]
     wi = Int[]; wj = Int[]; wv = Float64[]
     rowptr = [1]
     states = map(prepared.cells) do c
-        state = _brm_spl_factor_blocks(prepared, u, c)
+        state = _brm_spl_factor_blocks(prepared, u, c; context)
         _brm_spl_factor_pullback!(gradient, population, c, state, state.gf)
         for reduction in state.terms, t in reduction
             for (b, j) in enumerate(t.lz), (a, i) in zip(t.lpos, t.lz)
@@ -329,7 +342,84 @@ function _brm_spl_factor_hvp!(z, population, c, state, direction)
     nothing
 end
 
-function _brm_spl_factor_values(prepared, u, cell)
+# Supplied sums are independent inputs to the outer factor. Its packed
+# pullback covers direct/shared operands; their sum cotangents must also pass
+# through the summands. All calls below add to one observation's batch.
+function _brm_spl_accumulate_sums!(batch, u, c, weights)
+    for reduction in c.terms, t in reduction
+        _rk_spl_factor_accumulate(batch, t.ad, 0, nothing, weights[t.j],
+            u, t.sel, c.i; term=t.t)
+    end
+    nothing
+end
+
+function _brm_spl_accumulate_gradient!(batch, u, c, state)
+    _, gf = _rk_spl_factor_accumulate(batch, c.outer, 0, nothing, 1.0,
+        u, c.direct.sel, c.i; sums=state.sums)
+    _brm_spl_accumulate_sums!(batch, u, c, gf)
+end
+
+function _brm_spl_accumulate_hvp!(batch, u, c, state, direction)
+    d = zeros(length(state.gf))
+    d[state.active] .= state.B * direction[c.lz]
+    _, hv = _rk_spl_factor_accumulate(batch, c.outer, 1, d, 1.0,
+        u, c.direct.sel, c.i; sums=state.sums)
+    _brm_spl_accumulate_sums!(batch, u, c, hv)
+    for reduction in c.terms, t in reduction
+        d = zeros(length(t.sel)); d[t.lpos] .= direction[t.lz]
+        _rk_spl_factor_accumulate(batch, t.ad, 1, d, state.gf[t.j],
+            u, t.sel, c.i; term=t.t)
+    end
+    nothing
+end
+
+# The same third-order chain rule as _brm_spl_factor_contraction!, but mixed
+# derivatives of shared operands go into RK's prefix cotangent storage rather
+# than a cell-by-population matrix. The covariance and directions are held fixed.
+function _brm_spl_accumulate_contraction!(batch, u, c, state, blocks, SB, BSB)
+    eig = eigen(Symmetric(BSB))
+    scale = max(1.0, maximum(abs, eig.values; init=0.0))
+    minimum(eig.values; init=0.0) >= -1e-10scale ||
+        error("sum-cell covariance projection is not positive semidefinite")
+    weights = zeros(length(state.sums))
+    for k in eachindex(eig.values)
+        eig.values[k] <= 0 && continue
+        d = zeros(length(state.gf))
+        d[state.active] .= sqrt(eig.values[k]) .* eig.vectors[:, k]
+        _, tv = _rk_spl_factor_accumulate(batch, c.outer, 2, d, 0.5,
+            u, c.direct.sel, c.i; sums=state.sums)
+        weights .+= view(tv, eachindex(weights))
+    end
+    traces = zeros(length(state.gf))
+    for (j, reduction) in enumerate(state.terms), (k, t) in enumerate(reduction)
+        isempty(t.lz) && continue
+        S = blocks[j][k]
+        traces[j] += sum(S .* t.h[t.lpos, :])
+        d = zeros(length(t.sel))
+        d[t.lpos] .= SB[t.loc, :] * state.hf[state.active, j]
+        _rk_spl_factor_accumulate(batch, t.ad, 1, d, 1.0,
+            u, t.sel, c.i; term=t.t)
+        L = cholesky(Symmetric(S)).L
+        for a in axes(L, 2)
+            d = zeros(length(t.sel)); d[t.lpos] .= view(L, :, a)
+            _rk_spl_factor_accumulate(batch, t.ad, 2, d, 0.5state.gf[j],
+                u, t.sel, c.i; term=t.t)
+        end
+    end
+    _, hv = _rk_spl_factor_accumulate(batch, c.outer, 1, traces, 0.5,
+        u, c.direct.sel, c.i; sums=state.sums)
+    weights .+= view(hv, eachindex(weights))
+    _brm_spl_accumulate_sums!(batch, u, c, weights)
+    nothing
+end
+
+function _brm_spl_factor_values(prepared, u, cell; context=u)
+    if prepared.q.cached && hasproperty(cell, :outer)
+        sums = [sum(t -> _rk_spl_factor_value(t.ad, u, t.sel, cell.i;
+            term=t.t, context), terms; init=0.0) for terms in cell.terms]
+        value = _rk_spl_factor_value(cell.outer, u, cell.direct.sel, cell.i; sums, context)
+        return (; value, sums)
+    end
     sums = [sum(t -> Base.invokelatest(prepared.q.terms[j].value, u, cell.i, t.t),
         terms; init=0.0) for (j, terms) in enumerate(cell.terms)]
     value = Base.invokelatest(prepared.q.outer.value, u, sums, cell.i)
@@ -348,7 +438,8 @@ function _brm_spl_factor_operators(prepared, u0, ad_backend)
         outer = operator(:outer, c.direct, length(active), c.i)
         terms = map(c.terms) do reduction
             map(reduction) do t
-                ad = isempty(t.sel) ? nothing : operator(t.j, t, length(t.lpos), c.i, t.t)
+                ad = isempty(t.sel) && !prepared.q.cached ? nothing :
+                    operator(t.j, t, length(t.lpos), c.i, t.t)
                 merge(t, (; ad))
             end
         end

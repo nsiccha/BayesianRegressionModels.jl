@@ -254,9 +254,11 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
     owned(declaration) = [i for (i, n) in enumerate(names) if _brm_nlme_owned(n, declaration)]
     # The integrated draws, block by block, levels × margins.
     integrated = Int[]
+    partitioned = Pair{Symbol,Vector{Int}}[]
     omega = Int[]
     blocks = _BRMSlapBlock[]
-    function draws!(labels::AbstractMatrix{Symbol})
+    function draws!(labels::AbstractMatrix{Symbol}, parameter::Symbol)
+        push!(partitioned, parameter => collect(axes(labels, 1)))
         z = Matrix{Int}(undef, size(labels))
         for l in axes(labels, 1), k in axes(labels, 2)
             push!(integrated, get(position, labels[l, k]) do
@@ -281,18 +283,18 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
     for r in records
         if r.kind === :ranef
             nlevels = length(_rk_ranef_record_levels(backend, r))
-            z = draws!([Symbol(r.z, ".", l, ".", k) for l in 1:nlevels, k in 1:length(r.margins)])
+            z = draws!([Symbol(r.z, ".", l, ".", k) for l in 1:nlevels, k in 1:length(r.margins)], r.z)
             block!(_brm_nlme_ranef_declaration(r), r.group, z,
                 ((isnothing(r.scales) ? (r.scale,) : r.scales)...,
                     (isnothing(r.L) ? () : (r.L,))...))
         elseif r.kind === :vector
             labels = names[owned(r.declaration)]
-            block!(r.declaration, r.declaration, draws!(reshape(labels, :, 1)), ())
+            block!(r.declaration, r.declaration, draws!(reshape(labels, :, 1), r.declaration), ())
         elseif r.kind === :cdar
             # standardized innovations, groups × steps; scale and persistence
             eta = Symbol(r.declaration, ".", r.locals.eta)
             z = draws!([Symbol(eta, ".", g, ".", w) for g in 1:length(r.levels),
-                w in 1:length(r.steps)])
+                w in 1:length(r.steps)], eta)
             block!(r.declaration, r.group, z, (Symbol(r.declaration, ".", r.locals.sigma),
                 Symbol(r.declaration, ".", r.locals.rho)))
         else
@@ -303,19 +305,19 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
                 (r.type === :bym2 ? (Symbol(r.declaration, ".", r.locals.rho),) : ())...)
             phi = Symbol(r.declaration, ".", r.locals.phi)
             block!(r.declaration, r.area, draws!(reshape([Symbol(phi, ".", l)
-                for l in 1:graph.S], :, 1)), hyper; graph.edges, graph.sums, graph.λ)
+                for l in 1:graph.S], :, 1), phi), hyper; graph.edges, graph.sums, graph.λ)
             if r.type === :bym2
                 theta = Symbol(r.declaration, ".", r.locals.theta)
                 ntheta = count(n -> _brm_nlme_owned(n, theta), names)
                 block!(theta, r.area, draws!(reshape([Symbol(theta, ".", l)
-                    for l in 1:ntheta], :, 1)), hyper)
+                    for l in 1:ntheta], :, 1), theta), hyper)
             end
         end
     end
     allunique(integrated) || _brm_nlme_error("brm_laplace_problem: internal: a draw " *
         "belongs to two integrated blocks")
     population = setdiff(1:length(names), integrated)
-    (; records, names, integrated, population, blocks, omega)
+    (; records, names, integrated, population, blocks, omega, partitioned=Tuple(partitioned))
 end
 
 function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol,
@@ -329,7 +331,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         "$(repr(Tuple(integrate))) needs every observation to be a regression row " *
         "of a closed-form family or an observation factor, but $refusal")
     responses = _brm_slap_responses(backend.plan)
-    (; records, names, integrated, population, blocks, omega) =
+    (; records, names, integrated, population, blocks, omega, partitioned) =
         _brm_spl_layout(backend, integrate; declarations)
     if !screened
         candidates = [(; declaration=_brm_spl_record_declaration(r),
@@ -366,7 +368,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     cells = Set(_brm_slap_other_observations(backend.plan))
     _brm_slap_verify!(p, u0, t.response, t.row; cells)
     _brm_spl_verify_prior(p, u0)
-    _brm_spl_cells!(p, u0, sort!(collect(cells)), ad_backend)
+    _brm_spl_cells!(p, u0, sort!(collect(cells)), ad_backend; partitioned)
     _brm_spl_pattern!(p)
     _brm_spl_step_blocks!(p)
     p
@@ -578,6 +580,8 @@ function _rk_spl_cell_third_only end
 function _rk_spl_cell_implicit end
 function _rk_spl_cell_footprint end
 function _rk_spl_cell_reads end
+function _rk_spl_cell_pass end
+function _rk_spl_cell_value end
 
 # Observation factors, including model-scope value observations: each cell's
 # selection (its structural packed-coordinate footprint; a cell with fewer
@@ -595,7 +599,7 @@ function _brm_spl_cell_directions!(dirs, lpos, v)
     dirs
 end
 
-function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend)
+function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend; partitioned)
     isempty(names) && return p
     n = length(p.integrated)
     zof = zeros(Int, length(u0)); zof[p.integrated] .= 1:n
@@ -603,10 +607,10 @@ function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend)
     pointwise = _rk_slap_pointwise(p.kernels, u0)
     term = length(p.family)
     for name in names
-        query = _rk_nlme_cell_query(p.backend, (name,))
+        query = _rk_nlme_cell_query(p.backend, (name,); partitioned, u0)
         expected = pointwise[name]
         isempty(expected) && continue
-        factors = _rk_spl_factor_queries(p.backend, name)
+        factors = _rk_spl_factor_queries(p.backend, name; partitioned, u0)
         prepared = _brm_spl_prepare_factors(p.backend, name, u0, length(expected),
             p.integrated, p.population; query=factors)
         if prepared !== nothing
@@ -627,11 +631,11 @@ function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend)
         # conservatively widen captured arrays even when it has no sums.
         footprint = _rk_spl_cell_footprint(query)
         reads = map(eachindex(expected)) do i
-            _rk_spl_cell_reads(footprint, u0, i)
+            filter(j -> zof[j] > 0, _rk_spl_cell_reads(footprint, u0, i))
         end
-        # (cells that read no coordinate still get a one-coordinate selection,
-        # so they are terms like the others)
-        m = max(1, maximum(length, reads; init=0))
+        # A shared-only cell has no local coordinates; its population
+        # derivatives are supplied by the accumulated prefix pullback.
+        m = maximum(length, reads; init=0)
         cells = map(eachindex(expected)) do i
             r = reads[i]
             value = _rk_nlme_cell_value(query, u0, i)
@@ -639,9 +643,8 @@ function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend)
                 "brm_laplace_problem: internal: cell $i of `$name` has value $value, " *
                 "its pointwise density $(sum(expected[i]))")
             pad = Int[]
-            j = 0
-            while length(pad) < m - length(r)
-                j += 1
+            for j in p.integrated
+                length(pad) == m - length(r) && break
                 insorted(j, r) || push!(pad, j)
             end
             sel = sort!(vcat(r, pad))
@@ -659,7 +662,8 @@ function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend)
         # Gemeinde-level observation's cells.
         K = max(1, maximum(c -> length(c.lz), cells))
         dirs = ntuple(_ -> zeros(m), K)
-        ad = _rk_spl_cell_ad(p.backend, (name,), copy(u0), first(cells).sel, ad_backend, K)
+        ad = _rk_spl_cell_ad(p.backend, (name,), copy(u0), first(cells).sel, ad_backend, K;
+            query=factors)
         @debug "sparse Laplace cell group" name cells=length(cells) m K maxrss_gib=Sys.maxrss() / 2^30
         push!(p.cells, (; name, query, ad, m, dirs, cells))
     end
@@ -668,6 +672,24 @@ end
 
 _brm_spl_nterms(p::BRMSparseLaplaceProblem) = length(p.family) +
     sum(g -> length(g.cells), p.cells; init=0)
+
+# Importance diagnostics perturb only local coordinates. Keep one active batch
+# per observation across the diagnostic, while compact active values supply
+# each perturbed cell point. Distinct observation families own distinct caches.
+function _brm_spl_cell_batches(f, p, u)
+    contexts = Dict{Symbol,Any}()
+    function enter(k)
+        k > length(p.cells) && return f(contexts)
+        group = p.cells[k]
+        ad = group isa _BRMSumCellGroup ? first(group.cells).outer : group.ad
+        result, _ = _rk_spl_cell_pass(ad, u) do batch
+            contexts[group.name] = batch
+            enter(k + 1)
+        end
+        result
+    end
+    enter(1)
+end
 
 # Footprints are sorted unique effect indices. Deduplicate them before visiting
 # pairs, then union each sparse column directly. Construction storage is the
@@ -888,31 +910,38 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
     # `derivatives` its gradient and Hessian block over its selection.
     u = copy(uA)
     u[p.integrated] .= z
-    for group in p.cells, c in group.cells
+    for group in p.cells
         group isa _BRMSumCellGroup && continue
-        comp = p.term_component[c.term]
-        comp == 0 && !third && continue
-        value = _rk_nlme_cell_value(group.query, u, c.i)
-        tv === nothing || (tv[c.term] = value)
-        if comp == 0
-            rest += value
-            continue
-        end
-        fc[comp] += value
-        if fb !== nothing
-            for k in p.tsbptr[c.term]:(p.tsbptr[c.term + 1] - 1)
-                fb[p.tsb[k]] += value
-            end
-        end
-        derivatives || continue
-        _brm_spl_cell_directions!(group.dirs, c.lpos, 1.0)
-        gsel, columns = _rk_spl_cell_block(group.ad, group.dirs, u, c.sel, c.i)
-        _brm_spl_cell_directions!(group.dirs, c.lpos, 0.0)
-        m = length(c.lz)
-        for a in 1:m
-            g[c.lz[a]] += gsel[c.lpos[a]]
-            for b in 1:m
-                nz[_brm_spl_nzindex(p.pattern, c.lz[a], c.lz[b])] -= columns[b][c.lpos[a]]
+        _rk_spl_cell_pass(group.ad, u) do batch
+            for c in group.cells
+                comp = p.term_component[c.term]
+                comp == 0 && !third && continue
+                value = _rk_spl_cell_value(group.ad, u, c.sel, c.i; context=batch)
+                tv === nothing || (tv[c.term] = value)
+                if comp == 0
+                    rest += value
+                    continue
+                end
+                fc[comp] += value
+                if fb !== nothing
+                    for k in p.tsbptr[c.term]:(p.tsbptr[c.term + 1] - 1)
+                        fb[p.tsb[k]] += value
+                    end
+                end
+                derivatives || continue
+                _brm_spl_cell_directions!(group.dirs, c.lpos, 1.0)
+                gsel, columns = try
+                    _rk_spl_cell_block(group.ad, group.dirs, u, c.sel, c.i; context=batch)
+                finally
+                    _brm_spl_cell_directions!(group.dirs, c.lpos, 0.0)
+                end
+                m = length(c.lz)
+                for a in 1:m
+                    g[c.lz[a]] += gsel[c.lpos[a]]
+                    for b in 1:m
+                        nz[_brm_spl_nzindex(p.pattern, c.lz[a], c.lz[b])] -= columns[b][c.lpos[a]]
+                    end
+                end
             end
         end
     end
@@ -1455,22 +1484,25 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
     gcell = zeros(length(p.population))
     u = copy(state.uA)
     u[p.integrated] .= state.z
-    for group in p.cells, c in group.cells
+    for group in p.cells
         group isa _BRMSumCellGroup && continue
-        on(c.term) || continue
-        m = length(c.lz)
-        m == 0 && continue
-        Sb = [S[_brm_spl_nzindex(p.pattern, a, b)] for a in c.lz, b in c.lz]
-        Lb = cholesky(Symmetric(Sb)).L
-        τsel = zeros(group.m)
-        for k in 1:m
-            direction = zeros(group.m)
-            direction[c.lpos] .= view(Lb, :, k)
-            tv = _rk_spl_cell_third_only(group.ad, direction, u, c.sel, c.i)
-            τsel .+= tv
+        _, correction = _rk_spl_cell_pass(group.ad, u) do batch
+            for c in group.cells
+                on(c.term) || continue
+                m = length(c.lz)
+                m == 0 && continue
+                Sb = [S[_brm_spl_nzindex(p.pattern, a, b)] for a in c.lz, b in c.lz]
+                Lb = cholesky(Symmetric(Sb)).L
+                for k in 1:m
+                    direction = zeros(group.m)
+                    direction[c.lpos] .= view(Lb, :, k)
+                    _rk_spl_factor_accumulate(batch, group.ad, 2, direction, 0.5,
+                        u, c.sel, c.i; sums=Float64[])
+                end
+            end
         end
-        s[c.lz] .+= τsel[c.lpos] ./ 2
-        gcell[c.pidx] .+= τsel[c.ppos] ./ 2
+        s .+= correction[p.integrated]
+        gcell .+= correction[p.population]
     end
     _brm_spl_sum_gradient!(s, gcell, p, state, u, on)
     v = _brm_spl_solve(state.F, state.W, s)
@@ -1478,13 +1510,20 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
     # H_c[population, z] v_z directly, plus the cell's population gradient.
     # This replaces m HVPs and m identical gradients in the contractions above
     # with one of each, and needs no retained population-by-m matrix per cell.
-    for group in p.cells, c in group.cells
+    for group in p.cells
         group isa _BRMSumCellGroup && continue
-        on(c.term) || continue
-        direction = zeros(group.m)
-        direction[c.lpos] .= v[c.lz]
-        gsel, hv = _rk_spl_cell_implicit(group.ad, direction, u, c.sel, c.i)
-        gcell[c.pidx] .+= gsel[c.ppos] .+ hv[c.ppos]
+        _, correction = _rk_spl_cell_pass(group.ad, u) do batch
+            for c in group.cells
+                on(c.term) || continue
+                direction = zeros(group.m)
+                direction[c.lpos] .= v[c.lz]
+                _rk_spl_factor_accumulate(batch, group.ad, 0, nothing, 1.0,
+                    u, c.sel, c.i; sums=Float64[])
+                _rk_spl_factor_accumulate(batch, group.ad, 1, direction, 1.0,
+                    u, c.sel, c.i; sums=Float64[])
+            end
+        end
+        gcell .+= correction[p.population]
     end
     w = zeros(length(p.port))
     gω = zeros(length(p.omega))
