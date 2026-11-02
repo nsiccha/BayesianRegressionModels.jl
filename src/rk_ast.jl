@@ -2164,12 +2164,30 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         vector_parameter.name in owned_vectors && continue
         stmt = _rk_ast_vector_parameter(vector_parameter)
         stmt === nothing && continue
+        # Name the independent Gaussian law's arguments so inference can read
+        # and differentiate the authored mean/scale without rebuilding its law.
+        gaussian = nothing
+        args = if vector_parameter.family === :vector_normal
+            vector_parameter.args
+        elseif vector_parameter.family === :elementwise
+            element = only(vector_parameter.args)
+            element.family === :Normal && element.support_override === nothing ? element.args : nothing
+        else
+            nothing
+        end
+        if args !== nothing
+            mu = _rk_ast_fresh_name(string(vector_parameter.name, "_prior_mean"), taken)
+            sigma = _rk_ast_fresh_name(string(vector_parameter.name, "_prior_scale"), taken)
+            push!(stmts, Expr(:(=), mu, args[1]), Expr(:(=), sigma, args[2]))
+            stmt.args[end] = _rk_ast_dotted(:Normal, mu, sigma)
+            gaussian = (; mean=mu, scale=sigma)
+        end
         push!(stmts, stmt)
         # Response cutpoints/thresholds and authored `Dirichlet` simplexes
         # keep their declaration name on both backends, like scalars.
         vector_parameter.name in r2d2_phis ||
             _rk_coordinate_record!(coordinates, (; kind=:vector,
-                declaration=vector_parameter.name, family=vector_parameter.family))
+                declaration=vector_parameter.name, family=vector_parameter.family, gaussian))
     end
     for assignment in plan.assignments
         push!(stmts, Expr(:(=), assignment.name,
