@@ -158,10 +158,78 @@ end
 _RKConstantEvaluator(name::Symbol, evaluate, value) =
     _RKConstantEvaluator{typeof(value),typeof(evaluate)}(name, evaluate)
 function (f::_RKConstantEvaluator{T})(args...) where {T}
-    result = f.evaluate(args...)
+    _rk_constant_result(T, f.name, f.evaluate(args...))
+end
+function _rk_constant_result(::Type{T}, name, result) where {T}
     value = _brm_constant_value(result)
-    value isa T || error("RK backend: `$(f.name) = constant(...)` evaluated to " *
+    value isa T || error("RK backend: `$name = constant(...)` evaluated to " *
         "$(repr(result)) (::$(typeof(result))) in the graph, but to a $T when " *
         "the model was planned from the same inputs")
     value::T
+end
+
+# The builder stays eval-free, but a runtime graph must not interpret its
+# constant's AST on every call. Emit that expression as ordinary Julia in the
+# backend's existing compilation module. A result assertion alone types the
+# graph value, not the interpreter's internals under RK's strict audit.
+function _rk_callable_source!(definitions, bindings, entry,
+        f::_RKConstantEvaluator{T,<:_BRMClosure}) where {T}
+    closure = f.evaluate
+    names = _brm_body_names!(Set{Symbol}(), closure.body)
+    # Julia lowers a dotted operator through its undotted binding.
+    for name in collect(names)
+        text = string(name)
+        if startswith(text, '.') && length(text) > 1 && Base.isoperator(Symbol(text[2:end]))
+            push!(names, Symbol(text[2:end]))
+        end
+    end
+    taken = union(copy(names), closure.parameters, [entry])
+    module_name = _rk_ast_fresh_name(string(entry, "_scope"), taken)
+    type_name = _rk_ast_fresh_name(string(entry, "_type"), taken)
+    push!(bindings, module_name => closure.scope.mod, type_name => T)
+    aliases = Expr[]
+    for name in sort!(collect(names); by=string)
+        name in closure.parameters && continue
+        owner = _brm_binding_scope(closure.scope, name)
+        if owner !== nothing
+            capture = _rk_ast_fresh_name(string(entry, "_capture_", name), taken)
+            push!(bindings, capture => owner.vars[name])
+            push!(aliases, Expr(:(=), name, capture))
+        elseif isdefined(closure.scope.mod, name)
+            push!(aliases, Expr(:(=), name, Expr(:., module_name, QuoteNode(name))))
+        end
+    end
+    # An outer let preserves inner lambda/comprehension bindings, including
+    # those that shadow a global. Only referenced captures leave the scope.
+    body = Expr(:let, Expr(:block, aliases...),
+        _rk_constant_source_body!(bindings, entry, taken, closure.body))
+    checked = Expr(:call, GlobalRef(@__MODULE__, :_rk_constant_result),
+        type_name, QuoteNode(f.name), body)
+    push!(definitions, Expr(:function, Expr(:call, entry, closure.parameters...),
+        Expr(:block, checked)))
+    true
+end
+
+# Interpolated functions, arrays and modules are values, not printable Julia
+# syntax. Keep their identities as leaf bindings, just like captured locals.
+_rk_constant_source_body!(_bindings, _entry, _taken,
+    x::Union{Symbol,LineNumberNode,Number,AbstractString,Char,Nothing}) = x
+function _rk_constant_source_body!(bindings, entry, taken, x::Expr)
+    x.head === :quote && return x
+    Expr(x.head, map(a -> _rk_constant_source_body!(bindings, entry, taken, a), x.args)...)
+end
+function _rk_constant_source_body!(bindings, entry, taken, x::GlobalRef)
+    mod = _rk_constant_source_body!(bindings, entry, taken, x.mod)
+    Expr(:., mod, QuoteNode(x.name))
+end
+function _rk_constant_source_body!(bindings, entry, taken, x::QuoteNode)
+    x.value isa Symbol && return x
+    _rk_constant_source_literal!(bindings, entry, taken, x.value)
+end
+_rk_constant_source_body!(bindings, entry, taken, x) =
+    _rk_constant_source_literal!(bindings, entry, taken, x)
+function _rk_constant_source_literal!(bindings, entry, taken, x)
+    name = _rk_ast_fresh_name(string(entry, "_literal"), taken)
+    push!(bindings, name => x)
+    name
 end
