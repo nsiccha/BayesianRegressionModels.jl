@@ -15,6 +15,11 @@ transformed hierarchical predictors, chained assignments, gathers and
 concatenations, including a derived array as the plate range. Independent
 normalized densities and finite differences agree with native reverse and
 compiled Stan; printed RK source and changed-data replay are checked too.
+`rk_scalar_plate_locality.jl` checks collected scalar plate outputs through
+broadcast observation locations: strict selected-cell queries, ordinary Enzyme
+Reverse gradients, independent analytic values, and bounded allocations as
+the number of observations grows. The test environment pins RK 0.1.51 /
+RKPPL 0.1.53, including scalar-helper type inference and guarded captures.
 `plate_selected_outputs.jl` checks nested selection of shared vector outputs
 across plates with different cell counts: data-only and parameter-dependent
 outputs, fixed and varying widths, both output orders, reader-first composition,

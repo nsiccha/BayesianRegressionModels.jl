@@ -107,9 +107,8 @@ rev = "f071111945c165dbae097e94c5939b79103434ac"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
-# 0.2.9: portable bounded-reflection scale data and shared fixed kernels for
-# RKPPL SMC.
-rev = "601267869b5f663987cde0d83b22336acd935d6e"
+# 0.2.10: weighted-cloud moments required by the current RKPPL SMC extension.
+rev = "41b7fba7ccfcb01049ec859cda596646e5238516"
 
 [sources.SequentialMonteCarlo]
 url = "https://github.com/awllee/SequentialMonteCarlo.jl.git"
@@ -254,4 +253,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RKPPL 0.1.37: exact nonfinite SMC diagnostics across mutation tasks.
 # RKPPL 0.1.42 (RK 0.1.44): independent SMC pilot tuning, adaptive pilots and
 # portable correlated references.
-rev = "652c6a51a26b1f12c008f160b920b3dfa95916a9"
+# RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
+# helper calls, guarded captures and broadcast observation locations.
+rev = "0a517908470ceb0480b3db91d6b052b4dc02bb8c"
