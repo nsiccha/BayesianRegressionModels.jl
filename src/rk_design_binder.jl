@@ -46,6 +46,8 @@ into that replay's lowered program.
   that is not 0/1 or not as long as the axis, a `missing` axis value in a row
   the mask carries, a `car` area outside the fitted graph, ragged labels that
   name no cell, and per-cell inputs whose cell counts disagree.
+- Checks of data-only model assignments read their values from the bound
+  program, so derived axes, grouping keys and masks use the same cached path.
 - A model whose inputs include a value BRM derives from the design in Julia
   replays every design in full; `show(binder)` names those inputs.
 """
@@ -70,18 +72,28 @@ struct _RKDesignInput
     column::Symbol
 end
 
+# Raw-column checks run before binding. Checks that read data-only definitions
+# run on their bound graph values, including definitions preparation folds
+# instead of materializing as bound columns.
+struct _RKDesignChecks
+    raw::Vector{Any}
+    bound::Vector{Any}
+    columns::Vector{Pair{Symbol,Symbol}}
+end
+_RKDesignChecks() = _RKDesignChecks(Any[], Any[], Pair{Symbol,Symbol}[])
+
 # One kind of design: how its inputs are read, the program lowered for it, the
 # value checks, and the definitions it binds frozen (RKPPL's `FrozenValues`, or
 # `nothing`). `derived` names the inputs that force a planned replay.
 struct _RKDesignClass
     sources::Vector{Pair{Symbol,Any}}
     lowering::Any
-    checks::Vector{Any}
+    checks::_RKDesignChecks
     derived::Vector{Symbol}
     frozen::Any
 end
 _RKDesignClass(derived::Vector{Symbol}) =
-    _RKDesignClass(Pair{Symbol,Any}[], nothing, Any[], derived, nothing)
+    _RKDesignClass(Pair{Symbol,Any}[], nothing, _RKDesignChecks(), derived, nothing)
 _rk_design_planned(class::_RKDesignClass) = !isempty(class.derived)
 
 function rk_design_binder(rk::RKBRMI; resample_groups=(),
@@ -117,12 +129,29 @@ function _rk_design_plan(binder::RKDesignBinder, design)
     class = lock(() -> get(binder.classes, key, nothing), binder.lock)
     class === nothing && return _rk_design_first!(binder, key, design)
     _rk_design_planned(class) && return rk_bound_plan(_rk_design_replay(binder, design))
-    for check in class.checks
+    for check in class.checks.raw
         check(design)
     end
     columns = Dict{Symbol,Any}(name => _rk_design_input(source, design)
         for (name, source) in class.sources)
-    _rk_bind_design_plan(class.lowering, columns, class.frozen)
+    plan = try
+        _rk_bind_design_plan(class.lowering, columns, class.frozen)
+    catch err
+        # Binding may read a derived level index before its validation value
+        # is available. Replay a failed binding to report the planner's public
+        # refusal (or bind a value shape that requires a different plan).
+        # Successful designs still use only the cached lowering.
+        err isa InterruptException && rethrow()
+        isempty(class.checks.bound) && rethrow()
+        return rk_bound_plan(_rk_design_replay(binder, design))
+    end
+    if !isempty(class.checks.bound)
+        data = _BRMReplayData(design, _rk_design_check_values(plan, class.checks.columns))
+        for check in class.checks.bound
+            check(data)
+        end
+    end
+    plan
 end
 
 _rk_design_replay(binder::RKDesignBinder, design) = reprocess(binder.rk, design;
@@ -256,8 +285,22 @@ end
 # planned terms. A term whose check cannot be read off the plan marks the kind
 # as planned (`derived`).
 function _rk_design_checks(binder::RKDesignBinder, plan, design, derived)
-    checks = Any[]
-    has(column) = _brm_df_has_column(design, column)
+    checks = _RKDesignChecks()
+    definitions = Dict(spec.label => spec.name for spec in _rk_plan_derived(plan)
+        if _rk_fit_twinned(spec.label) === nothing &&
+            Meta.isexpr(spec.expression, :_rk_data_assignment))
+    has(column) = column !== nothing &&
+        (haskey(definitions, column) || _brm_df_has_column(design, column))
+    function add(check, columns)
+        computed = [column => definitions[column] for column in columns
+            if haskey(definitions, column)]
+        if isempty(computed)
+            push!(checks.raw, check)
+        else
+            push!(checks.bound, check)
+            union!(checks.columns, computed)
+        end
+    end
     for predictor in _rk_replay_predictors(plan), term in predictor.terms
         options = term.options
         if term.kind === :hsgp && !get(options, :latent, false)
@@ -265,11 +308,11 @@ function _rk_design_checks(binder::RKDesignBinder, plan, design, derived)
                 push!(derived, Symbol(predictor.name, "#hsgp"))
                 continue
             end
-            push!(checks, _rk_design_hsgp_check(term))
+            add(_rk_design_hsgp_check(term), _rk_design_hsgp_columns(term))
             if get(options, :level_cor, nothing) isa _BRMMultigroupCoordinates
                 required = (options.group_column, options.level_cor.axes...)
                 if all(has, required)
-                    push!(checks, _rk_design_multigroup_check(term, binder.resample_groups))
+                    add(_rk_design_multigroup_check(term, binder.resample_groups), required)
                 else
                     push!(derived, Symbol(predictor.name, "#multigroup"))
                 end
@@ -278,25 +321,25 @@ function _rk_design_checks(binder::RKDesignBinder, plan, design, derived)
             source = only(term.columns)
             has(source) || continue
             levels = options.index_levels
-            push!(checks, design -> _brm_apply_fitted_levels(levels,
-                _brm_df_column(design, source); prefix="RK reprocess"))
+            add(design -> _brm_apply_fitted_levels(levels,
+                _brm_df_column(design, source); prefix="RK reprocess"), (source,))
         elseif term.kind === :monotonic && haskey(options, :levels)
             source = options.source
             has(source) || continue
             levels = options.levels
-            push!(checks, design -> _brm_apply_fitted_levels(levels,
-                _brm_df_column(design, source); prefix="RK reprocess"))
+            add(design -> _brm_apply_fitted_levels(levels,
+                _brm_df_column(design, source); prefix="RK reprocess"), (source,))
         elseif term.kind === :car
             # Each row's area must be a node of the fitted graph.
             source = options.source
             has(source) || continue
             nodes = options.nodes
-            push!(checks, design -> _brm_car_row_idx(nodes,
-                _brm_car_labels(_brm_df_column(design, source), "area")))
+            add(design -> _brm_car_row_idx(nodes,
+                _brm_car_labels(_brm_df_column(design, source), "area")), (source,))
         end
     end
     for kernel in _rk_plan_kernels(plan)
-        push!(checks, _rk_design_cell_check(kernel, design))
+        _rk_design_cell_check!(add, kernel, has)
     end
     # Responses bind as the design holds them: an ordered outcome lies in the
     # fitted levels, and weights are checked as the planner checks them.
@@ -306,16 +349,16 @@ function _rk_design_checks(binder::RKDesignBinder, plan, design, derived)
         response.weights === nothing || (weighted[key] = response.weights)
         if response.family === :ordered_logit && has(key)
             K = response.n_levels
-            push!(checks, design -> _rk_check_ordered_outcomes(key,
-                _brm_df_column(design, key), K))
+            add(design -> _rk_check_ordered_outcomes(key,
+                _brm_df_column(design, key), K), (key,))
         end
     end
     for (key, K) in _rk_ordered_observation_levels(plan)
         has(key) || continue
-        push!(checks, design -> _brm_ordered_outcome_levels(key,
-            _brm_df_column(design, key), (; n_levels=K)))
+        add(design -> _brm_ordered_outcome_levels(key,
+            _brm_df_column(design, key), (; n_levels=K)), (key,))
     end
-    isempty(weighted) || _rk_design_weight_checks!(checks, binder, weighted, has)
+    isempty(weighted) || _rk_design_weight_checks!(add, binder, weighted, has)
     checks
 end
 
@@ -339,20 +382,22 @@ end
 
 # `weighted` maps each weighted response to its weight column. The weight kind
 # is the likelihood's syntax (`fweights(n)`), read off the fitted model.
-function _rk_design_weight_checks!(checks, binder::RKDesignBinder, weighted, has)
+function _rk_design_weight_checks!(add, binder::RKDesignBinder, weighted, has)
     prefix = "RK backend"
     for observation in _brm_direct_observation_list(parent(binder.rk); prefix)
         target = observation.key
         source = get(weighted, target, nothing)
         source !== nothing && has(source) || continue
-        kind = _brm_observation_weight_syntax(observation.rhs, target; prefix).kind
+        # The fitted plan already validated the weight source. Read only the
+        # constructor here: the authored source may be a data-only assignment.
+        kind = _brm_observation_weight_kind(getf(last(getargs(observation.rhs))))
         response = has(target) ? target : nothing
-        push!(checks, design -> _brm_check_observation_weight_values(kind,
+        add(design -> _brm_check_observation_weight_values(kind,
             _brm_df_column(design, source),
             response === nothing ? nothing : length(_brm_df_column(design, response)),
-            target, source; prefix))
+            target, source; prefix), response === nothing ? (source,) : (source, response))
     end
-    checks
+    nothing
 end
 
 # The design columns a raw-axis HSGP term reads: its axes and `rows=` column.
@@ -392,14 +437,14 @@ end
 # a shorter input would silently drop cells. Each join is checked as the graph
 # checks it when it computes the partition, without building the partition,
 # which binding never reads: the graph computes it once the design is bound.
-function _rk_design_cell_check(kernel, design)
-    has(column) = column !== nothing && _brm_df_has_column(design, column)
+function _rk_design_cell_check!(add, kernel, has)
     per_cell = unique!(Symbol[input.column for input in kernel.inputs
         if input.kind === :element && has(input.column)])
     cells = has(kernel.cell_column) ? [kernel.cell_column] : Symbol[]
     joins = unique!([input.partition for input in kernel.inputs if input.kind === :gather &&
         get(input, :partition, nothing) !== nothing &&
-        all(has, (input.partition.group, input.partition.cell, input.partition.axes...))])
+        all(has, (input.partition.group, input.partition.cell, input.partition.axes...)) &&
+        (input.partition.order === nothing || has(input.partition.order))])
     name = kernel.name
     function check(design)
         for cell in cells
@@ -418,13 +463,20 @@ function _rk_design_cell_check(kernel, design)
         end
         nothing
     end
-    isempty(cells) && isempty(per_cell) && isempty(joins) ? (_design -> nothing) : check
+    columns = unique!([cells; per_cell])
+    for entry in joins
+        union!(columns, (entry.group, entry.cell, entry.axes...))
+        entry.order === nothing || union!(columns, (entry.order,))
+    end
+    isempty(columns) || add(check, columns)
+    nothing
 end
 
 # Lowering, freezing and binding live in the ReactiveKernels extension.
 function _rk_design_lowering end
 function _rk_design_frozen end
 function _rk_bind_design_plan end
+function _rk_design_check_values end
 function _rk_plan_columns end
 
 function Base.show(io::IO, binder::RKDesignBinder)
