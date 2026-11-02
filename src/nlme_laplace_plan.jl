@@ -464,18 +464,22 @@ function _brm_sparse_laplace_problem_from_plan(backend::RKBRMI, r; ad_backend, t
         # Backend inputs are read-only. Do not clone the model and its bound
         # data along with each target's derivative and solver workspaces.
         p = Base.deepcopy_internal(prepared.problem, IdDict{Any,Any}(backend => backend))
-        Set(_brm_plan_problem_terms(p)) == declarations ||
-            _brm_spl_restrict!(p, declarations)
+        restricted = Set(_brm_plan_problem_terms(p)) != declarations
+        restricted && _brm_spl_restrict!(p, declarations)
         p.tol = Float64(tol)
         p.maxiter = Int(maxiter)
         fill!(p.u, 0.0)
         p.nonfinite = p.unconverged = p.blockwise = p.sweeps = 0
+        # A full copy already owns the same fixed probes and reference. Only
+        # a changed selection or numerical policy needs new preparation.
+        retain = !restricted && p.algebra !== nothing && p.algebra.solver === solver &&
+            isequal(p.algebra.options, matrixfree)
+        retain || _brm_spl_algebra!(p, solver, matrixfree)
     else
         p = _brm_sparse_laplace_problem(backend, unique(t.grouping for t in admitted);
             ad_backend, tol, maxiter, declarations, max_cell_width=r.plan.max_cell_width,
             solver, matrixfree)
     end
-    _brm_spl_algebra!(p, solver, matrixfree)
     p.plan = plan
     p
 end

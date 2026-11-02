@@ -55,6 +55,10 @@ end
         copy_p = deepcopy(p)
         @test copy_p.algebra.probes == p.algebra.probes
         @test copy_p.algebra.probes !== p.algebra.probes
+        @test copy_p.algebra.references !== p.algebra.references
+        @test all(zip(copy_p.algebra.references,p.algebra.references)) do (a,b)
+            a.lower == b.lower && a.lower !== b.lower
+        end
         @test LogDensityProblems.logdensity_and_gradient(copy_p,x) == (value,gradient)
         if counts
             z = copy(BRM._brm_spl_mode!(p,x).z)

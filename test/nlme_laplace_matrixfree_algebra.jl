@@ -6,13 +6,14 @@ include(joinpath(@__DIR__, "testset_filter.jl"))
 # 2x2 noncommuting example distinguishes the derivative of the fixed trace
 # functional from the tempting but incorrect r' H^-1 H' r estimator.
 function mf_factor(H, R; components=[collect(axes(H, 1))], large=trues(length(components)),
-        options=MatrixFreeLaplace(; probes=size(R, 2)), wcols=Vector{Int}[], wλ=Float64[])
+        options=MatrixFreeLaplace(; probes=size(R, 2)), wcols=Vector{Int}[], wλ=Float64[],
+        references=nothing)
     component = zeros(Int, size(H, 1))
     for (c, I) in enumerate(components)
         component[I] .= c
     end
     p = (; pattern=sparse(H), components, component, wcols, wλ,
-        algebra=(; options, large, probes=[R[I, :] for I in components], diagnostics=Dict{Symbol,Any}()))
+        algebra=(; options, large, references, probes=[R[I, :] for I in components], diagnostics=Dict{Symbol,Any}()))
     BRM._brm_operator_factor(p, sparse(H))
 end
 function mf_sensitivity(F)
@@ -22,6 +23,30 @@ function mf_sensitivity(F)
     Matrix(S)
 end
 
+@stestset "fixed preconditioner transforms the same determinant derivative and covariance" begin
+    H(t) = [2.0 t; t 5.0]
+    reference = BRM._brm_fixed_reference(only(mf_factor(H(0.3),ones(2,1)).parts).H,32)
+    saved = deepcopy(reference)
+    f(t) = logdet(mf_factor(H(t),ones(2,1);references=[reference]))
+    F = mf_factor(H(0.5),ones(2,1);references=[reference])
+    S = mf_sensitivity(F)
+    @test 2S[1,2] ≈ (f(0.5+1e-5)-f(0.5-1e-5))/2e-5 atol=2e-7
+    F = mf_factor(H(0.5),[1.0 1;1 -1];references=[reference])
+    @test logdet(F) ≈ logdet(H(0.5)) atol=2e-7
+    @test mf_sensitivity(F) ≈ inv(H(0.5)) atol=2e-7
+    @test F \ [1.0,2.0] ≈ H(0.5) \ [1.0,2.0] atol=1e-10
+    @test F \ zeros(2) == zeros(2)
+    @test only(BRM._brm_operator_inverse_blocks(F,[[1,2]])) ≈ inv(H(0.5)) atol=1e-10
+    # Dense independent oracle for C^-T A^-1/2 ξ, including the permutation.
+    Cinv = Diagonal(reference.inverse_scale) * inv(Matrix(reference.lower)) *
+        Matrix{Float64}(I,2,2)[reference.permutation,:]
+    E = eigen(Symmetric(Cinv * H(0.5) * Cinv'))
+    expected = Cinv' * (E.vectors * ((E.vectors' * randn(Xoshiro(41),2)) ./ sqrt.(E.values)))
+    @test BRM._brm_operator_draw(F,Xoshiro(41)) ≈ expected atol=1e-9
+    @test reference.lower == saved.lower && reference.permutation == saved.permutation
+    @test_throws BRM._BRMOperatorSolveFailure logdet(mf_factor(H(0.5),ones(2,1);
+        references=[reference],options=MatrixFreeLaplace(;probes=1,solve_maxiter=1)))
+end
 @stestset "matrix-free determinant differentiates its fixed probes" begin
     H(t) = [2.0 t; t 5.0]
     # Keep structural off-diagonal zeros in the sensitivity request.

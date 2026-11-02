@@ -30,13 +30,21 @@ function operator_problem(H; options=MatrixFreeLaplace())
     p = (; pattern=H, components=[collect(1:n)], component=ones(Int,n),
         wcols=Vector{Int}[], wλ=Float64[],
         algebra=(; options, large=[true], probes=[2.0 .* rand(Xoshiro(options.seed),Bool,n,options.probes) .- 1],
+            references=Any[nothing],
             diagnostics=Dict{Symbol,Any}()))
+    if options.preconditioner_memory !== nothing
+        F = BRM._brm_operator_factor(p,H)
+        p.algebra.references[1] = BRM._brm_fixed_reference(only(F.parts).H,
+            options.preconditioner_memory;ridge=options.preconditioner_ridge)
+    end
     p
 end
 function measure(nx,ny,nt; determinant=false, options=MatrixFreeLaplace())
     H = proxy(nx,ny,nt)
     n = size(H,1)
-    p = operator_problem(H; options)
+    preparation = @timed operator_problem(H; options)
+    p = preparation.value
+    println("preparation\t",(;n,seconds=preparation.time,bytes=preparation.bytes))
     b = randn(Xoshiro(72),n)
     F = BRM._brm_operator_factor(p,H)
     # Warm compilation, then keep preparation in the per-step measurement.
@@ -74,7 +82,9 @@ println("step columns: n nnz operator_seconds exact_refactor_solve_seconds relat
 println("det columns: n seconds approximate_logdet exact_logdet allocated_bytes retained_operator_bytes")
 options = MatrixFreeLaplace(; solve_maxiter=setting("iterations",512,Int),
     probes=setting("probes",8,Int), solve_tolerance=setting("tolerance",1e-10,Float64),
-    logdet_step=setting("step",1.0,Float64), logdet_extent=setting("extent",32.0,Float64))
+    logdet_step=setting("step",1.0,Float64), logdet_extent=setting("extent",32.0,Float64),
+    preconditioner_memory="unpreconditioned" in ARGS ? nothing : setting("memory",32,Int),
+    preconditioner_ridge=setting("ridge",0.01,Float64))
 println("options\t",options)
 measure(parse.(Int,ARGS[1:3])...; determinant="det" in ARGS, options)
 end

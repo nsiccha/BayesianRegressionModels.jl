@@ -26,7 +26,9 @@ instead of failing at run time.
 - The large-component determinant is a reproducible fixed-probe rational
   approximation. Its gradient differentiates that same approximation,
   including the nonlinear conditional mode and sum-factored observations.
-  No large sparse factor or dense covariance is formed. Numerical convergence
+  A fixed bounded-fill LDL reference conditions the solves and determinant;
+  its relative diagonal ridge affects only that numerical reference. No
+  unbounded sparse factor or dense covariance is formed. Numerical convergence
   and probe variability remain distinct from Laplace approximation error.
 - **Breaking:** large Gaussian components now also have numerical determinant
   approximation error under the default `solver=:auto`. Use `solver=:exact`
