@@ -12,6 +12,42 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.133
+
+- `brm_output_tree` preserves observation coordinates through pointwise
+  assignments that combine row outputs with scalar model constants or scalar
+  data inputs, including aliases and chained transforms. Array constants still
+  require their own axis semantics; equal length alone does not label them.
+
+## 0.2.132
+
+- Plans retain their conditional numerical policy when reused or automatically
+  replanned. `brm_ladder_fit` accepts the same solver and matrix-free options;
+  continuation keeps its existing target's policy.
+- Outer SMC identities retain the operator policy, fixed probes and sparse
+  reference values. Checkpoint replay rejects a different finite target;
+  scratch buffers and evaluation diagnostics do not change its identity.
+
+- `brm_laplace_problem(...; integrate, solver=:auto)` selects exact algebra
+  for connected components through 1,024 coordinates and iterative conditional
+  algebra for larger components. `solver=:exact` retains the previous sparse-factor
+  path; `solver=:matrixfree` forces iterative algebra. `MatrixFreeLaplace`
+  sets the component bound, retained probe seed, solve caps and quadrature.
+- The large-component determinant is a reproducible fixed-probe rational
+  approximation. Its gradient differentiates that same approximation,
+  including the nonlinear conditional mode and sum-factored observations.
+  A fixed bounded-fill LDL reference conditions the solves and determinant;
+  its relative diagonal ridge affects only that numerical reference. No
+  unbounded sparse factor or dense covariance is formed. Numerical convergence
+  and probe variability remain distinct from Laplace approximation error.
+- Component densities use compensated summation on the operator path, so
+  accumulated rounding over large fields does not hide the final Newton gain
+  from the line search. Acceptance and convergence tolerances are unchanged.
+- **Breaking:** large Gaussian components now also have numerical determinant
+  approximation error under the default `solver=:auto`. Use `solver=:exact`
+  to reproduce the previous determinant algebra. Small components retain
+  exact algebra. This does not alter the authored statistical model.
+
 ## 0.2.131
 
 - Label ragged response draws in `brm_output_tree` and `brm_predictive_tree`

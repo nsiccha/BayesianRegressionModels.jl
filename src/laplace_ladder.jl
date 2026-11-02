@@ -80,6 +80,11 @@ preparation, as in [`brm_laplace_plan`](@ref). Automatic replanning preserves
 that bound; an explicit plan keeps its own. If no terms are admitted, the
 workflow uses the full sampled model's value and gradient.
 
+`solver` and `matrixfree` select the conditional algebra as in
+[`brm_laplace_problem`](@ref). Omitted values use an explicit plan's policy
+or the automatic defaults. Replanning and continuation retain that policy;
+continuation uses the existing target and does not change numerical options.
+
 Returns `(; draws, point, problem, plan, rungs, ladder)`:
 - `draws`: the packed draws of the highest sampling or point rung climbed
   (coordinates × draws); the curvature diagnostic keeps rung 4's draws;
@@ -97,14 +102,14 @@ function brm_ladder_fit(backend::RKBRMI; ad_backend, upto::Integer=4, integrate=
         start=nothing, draws::Integer=1000, conditional::Integer=0,
         rng=Random.default_rng(), continue_from=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), saem_options=nothing,
-        sampler=nothing, max_cell_width=128)
+        sampler=nothing, max_cell_width=128, solver=nothing, matrixfree=nothing)
     1 <= upto <= 6 || throw(ArgumentError(
         "brm_ladder_fit: upto = $upto; the ladder's rungs are 1 to 6"))
     rungs = continue_from === nothing ? NamedTuple[] : copy(continue_from.rungs)
     ladder = continue_from === nothing ? NamedTuple[] : copy(continue_from.ladder)
     done(r) = any(x -> x.rung == r, rungs)
     p = continue_from === nothing ?
-        brm_laplace_problem(backend; ad_backend, integrate, max_cell_width) : continue_from.problem
+        brm_laplace_problem(backend; ad_backend, integrate, max_cell_width, solver, matrixfree) : continue_from.problem
     p.backend === backend || throw(ArgumentError(
         "brm_ladder_fit: continue_from belongs to a different RK backend"))
     automatic = continue_from === nothing ? integrate === :auto : continue_from.automatic
@@ -287,7 +292,8 @@ _brm_ladder_has_draws(r) = !get(r, :skipped, false) && r.name !== :population_cu
 function _brm_ladder_replan(p, u; ad_backend, rng)
     r = _brm_laplace_plan(p.backend; ad_backend, integrate=:auto, sample=(),
         ess_floor=p.plan.ess_floor, draws=p.plan.draws, at=u, rng,
-        tol=p.tol, maxiter=p.maxiter, max_cell_width=p.plan.max_cell_width)
+        tol=p.tol, maxiter=p.maxiter, max_cell_width=p.plan.max_cell_width,
+        p.plan.algebra_policy...)
     before = Set(t.declaration for t in _brm_plan_admitted(p.plan))
     after = Set(t.declaration for t in _brm_plan_admitted(r.plan))
     switched = sort!(collect(symdiff(before, after)))

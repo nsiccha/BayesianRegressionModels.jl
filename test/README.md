@@ -5,6 +5,18 @@ blocks, simplex blocks, and nested parameter cursors against numerical
 references captured before the ReparametrizableDistributions extraction.
 The transform algorithms and their derivative tests live in that package.
 
+`nlme_laplace_matrixfree_algebra.jl` checks the derivative of the fixed-probe
+rational determinant against independent two-dimensional identities, including
+noncommuting curvature, mixed exact/operator components, ICAR soft constraints,
+conditional draws and explicit solver failures. `nlme_laplace_matrixfree.jl`
+checks nonlinear row/cell/sum gradients, evaluation-history and copy invariance,
+plan/ladder policy retention and nonconcave mode searches.
+`nlme_laplace_matrixfree_subset.jl` compares restricted row and nonlinear-sum
+plans with fresh preparation, including gradients of newly sampled effects.
+The synthetic drivers
+in `research/matrixfree_conditional/` measure operator/exact algebra and a full
+Poisson/ICAR target separately; neither represents a fitted consumer model.
+
 `runtime_constants.jl` checks strict RK inference of runtime `constant(...)`
 expressions from `brm(source; mod)`, changed fit inputs, frozen inputs, and
 printed-source round trips. It exercises constants feeding a parameter-dependent
@@ -44,6 +56,9 @@ draw storage. The fitted `draw_trees.jl` fixture also checks the standardized
 tree against compiled Stan's scaled, correlated effects.
 Pointwise model assignments and population contributions retain observation
 coordinates; unrelated equal-length vectors cannot acquire them by shape.
+Scalar model constants and scalar data inputs preserve those coordinates through
+aliases and chained transforms. The fitted fixture checks their values against
+compiled Stan and their pooled summaries against direct draw extraction.
 
 `ragged_draw_trees.jl` checks ragged top-level and in-cell response axes,
 group-aggregate likelihood widths, constrained-name permutations, shared
@@ -127,6 +142,10 @@ event is an explicit likelihood factor; normalized moments alone do not add it.
 The exact Distributions fork and StanBlocks revisions are pinned in
 `setup_env.jl` and `Project.toml`; the bootstrap can materialize review
 candidates from the fleet mirrors before their publication.
+
+`smc_laplace_matrixfree.jl` checks fixed-target checkpoint replay, owned
+operator buffers, rejection of changed numerical policy or retained probe and
+reference values, conditional completion and cumulative-data reference reuse.
 
 `smc_laplace.jl` checks outer SMC over all RK-backed embedded-Laplace
 implementations against exact Gaussian marginals and completed joint moments,
