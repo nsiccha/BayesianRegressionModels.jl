@@ -1317,7 +1317,7 @@ end
 # step therefore needs just one derivative assembly. False when a component
 # finds no finite gain.
 function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, converged)
-    p.algebra === nothing || return _brm_operator_step!(p, pop, z, δ, g, fc, converged)
+    p.algebra === nothing || return _brm_operator_step!(p, pop, z, δ, g, h, fc, converged)
     n = length(z)
     nb = length(p.sblocks)
     λc = zeros(length(fc))

@@ -112,3 +112,37 @@ overflow_dense(h::BRM._BRMSumPrecision) = Matrix(h.D + h.B' * h.W * h.B)
         @test p.nonfinite == 1
     end
 end
+
+@stestset "matrix-free conditional steps reject overflowing derivatives" begin
+    for sumcell in (false,true)
+        rk = overflow_fixture(sumcell)
+        p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:field,),
+            solver=:matrixfree, matrixfree=MatrixFreeLaplace(; probes=2,
+                preconditioner_memory=nothing), maxiter=200)
+        phi = zeros(length(p.population))
+        pop = BRM._brm_spl_population(p,phi)
+        z = zeros(length(p.integrated))
+        initial = overflow_assemble(p,pop,z)
+        delta = BRM._brm_spl_direction(p,initial.h,initial.g)
+        @test delta[1] > 1000
+        trial = overflow_assemble(p,pop,z+delta)
+        @test all(isfinite,trial.fc) && !all(isfinite,trial.g)
+        @test BRM._brm_spl_step!(p,pop,z,delta,initial.g,initial.h,initial.fc,falses(2))
+        @test 0 < z[1] < delta[1]
+        @test z[2] == delta[2]
+        accepted = overflow_assemble(p,pop,z)
+        @test all(isfinite,initial.g) && BRM._brm_spl_finite(initial.h)
+        @test initial.fc ≈ accepted.fc
+        @test initial.g ≈ accepted.g
+        @test overflow_dense(initial.h) ≈ overflow_dense(accepted.h)
+        result = LogDensityProblems.logdensity_and_gradient(p,phi)
+        @test isfinite(result[1]) && all(isfinite,result[2])
+        eps = 1e-4
+        fd = (LogDensityProblems.logdensity(p,phi .+ eps) -
+              LogDensityProblems.logdensity(p,phi .- eps))/(2eps)
+        @test only(result[2]) ≈ fd rtol=2e-5 atol=2e-5
+        LogDensityProblems.logdensity_and_gradient(p,phi .+ 0.2)
+        @test LogDensityProblems.logdensity_and_gradient(p,phi) == result
+        @test p.nonfinite == p.unconverged == 0
+    end
+end

@@ -96,21 +96,25 @@ end
 
 # Backtrack all unresolved components together, with a fixed cap. A local
 # Gauss-Seidel fallback would reassemble the whole field once per level.
-function _brm_operator_step!(p, pop, z, direction, g, fc, converged)
+# Like the exact step, require finite derivatives and return them at the
+# accepted point for the next Newton iteration.
+function _brm_operator_step!(p, pop, z, direction, g, h, fc, converged)
     accepted = copy(converged)
     decrement = [dot(view(g, I), view(direction, I)) for I in p.components]
     steps = ones(length(fc))
-    trial = copy(z); ft = similar(fc)
+    trial = copy(z); ft = similar(fc); gt = similar(g); ht = _brm_spl_precision(p)
     for _ in 1:60
         for i in eachindex(z)
             c = p.component[i]
             accepted[c] || (trial[i] = z[i] + steps[c] * direction[i])
         end
-        _brm_spl_assemble!(ft, nothing, nothing, p, pop.A, pop.C, trial;
-            derivatives=false, uA=pop.uA)
+        _brm_spl_assemble!(ft, gt, ht, p, pop.A, pop.C, trial;
+            derivatives=true, uA=pop.uA)
+        valid = _brm_spl_finite_blocks(p, gt, ht)
         for c in eachindex(fc)
             accepted[c] && continue
-            if isfinite(ft[c]) && (decrement[c] <= 1e-8 ||
+            if isfinite(ft[c]) && all(valid[p.sblock[i]] for i in p.components[c]) &&
+                    (decrement[c] <= 1e-8 ||
                     ft[c] >= fc[c] + 1e-4 * steps[c] * decrement[c])
                 accepted[c] = true
                 z[p.components[c]] .= trial[p.components[c]]
@@ -118,7 +122,10 @@ function _brm_operator_step!(p, pop, z, direction, g, fc, converged)
                 steps[c] /= 2
             end
         end
-        all(accepted) && return true
+        if all(accepted)
+            copyto!(fc, ft); copyto!(g, gt); _brm_spl_copy_precision!(h, ht)
+            return true
+        end
     end
     false
 end
