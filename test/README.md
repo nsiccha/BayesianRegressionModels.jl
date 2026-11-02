@@ -135,6 +135,10 @@ The exact Distributions fork and StanBlocks revisions are pinned in
 `setup_env.jl` and `Project.toml`; the bootstrap can materialize review
 candidates from the fleet mirrors before their publication.
 
+`smc_laplace_matrixfree.jl` checks fixed-target checkpoint replay, owned
+operator buffers, rejection of changed numerical policy or retained probe and
+reference values, conditional completion and cumulative-data reference reuse.
+
 `smc_laplace.jl` checks outer SMC over all RK-backed embedded-Laplace
 implementations against exact Gaussian marginals and completed joint moments,
 with scalar quadrature for the generic/structured model's sampled scale,

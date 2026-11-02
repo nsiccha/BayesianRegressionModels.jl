@@ -260,3 +260,16 @@ The refreshed exact plan-reuse controls passed 123 assertions: 61 for row
 models and 62 for nonlinear sum factors, including strict subsets, comparison
 with freshly prepared targets and finite-difference gradients. Receipt:
 `exact-plan-reuse-v130.log` (exit 0, elapsed 509 s).
+
+The first refreshed nonlinear run passed 50 assertions for crossed models,
+policy retention and ordinary cells, then exposed a sum-factor bug: a closure's
+local reduction variable shared the probe right-hand-side binding and replaced
+that buffer with a shorter vector. Renaming the two bindings fixed it. The
+focused overlapping-sum rerun passed all 10 assertions, but the process then
+hit its 600-second limit before reporting the negative-binomial and declared
+Gaussian sets; that run is not an overall pass. Receipt:
+`nonlinear-sum-fix-v130.log` (exit 124, elapsed 603 s, including a shared compile
+cache wait). The strict matrix-free plan-subset rerun passed all 32 assertions
+for row and nonlinear-sum models, including comparison against fresh targets,
+finite-difference gradients, rebuilt references and unchanged source plans.
+Receipt: `matrixfree-subset-fix-v130.log` (exit 0, elapsed 291 s).

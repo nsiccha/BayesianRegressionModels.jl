@@ -17,8 +17,29 @@ laplace_partition(p::Union{BRM.BRMSparseLaplaceProblem,BRM._BRMSampledLaplacePro
     (; p.integrate, p.integrated, declarations=[b.declaration for b in p.blocks],
        p.components)
 
-laplace_configuration(p) = (; engine=Symbol(nameof(typeof(p))), p.tol, p.maxiter,
+laplace_base_configuration(p) = (; engine=Symbol(nameof(typeof(p))), p.tol, p.maxiter,
     partition=laplace_partition(p))
+laplace_configuration(p) = laplace_base_configuration(p)
+function laplace_configuration(p::BRM.BRMSparseLaplaceProblem)
+    base = laplace_base_configuration(p)
+    p.algebra === nothing && return base
+    (; base..., algebra=(; p.algebra.solver, p.algebra.options))
+end
+
+# The fixed probes/reference define the finite target. Fingerprint their
+# values, excluding scratch buffers and diagnostics that evaluations mutate.
+# Encode sparse factors by their stored entries, never as dense arrays.
+laplace_numerical_binding(p) = nothing
+function laplace_numerical_binding(p::BRM.BRMSparseLaplaceProblem)
+    p.algebra === nothing && return nothing
+    references = map(p.algebra.references) do reference
+        reference === nothing && return nothing
+        L = parent(reference.lower)
+        (; dimensions=size(L), L.colptr, L.rowval, L.nzval,
+            reference.permutation, reference.inverse_scale, reference.logdet)
+    end
+    (; p.algebra.large, p.algebra.probes, references)
+end
 
 # Share the extension's value encoder with carried-window identities. It
 # ignores object sharing and dictionary traversal, retaining type and shape.
@@ -49,7 +70,9 @@ function laplace_frame(p)
        configuration=laplace_configuration(p))
 end
 function binding_identity(p::BRM._BRMSMCLaplaceProblem)
-    laplace_identity((; frame=laplace_frame(p), data=BRM.rk_bound_data(laplace_backend(p))))
+    binding = (; frame=laplace_frame(p), data=BRM.rk_bound_data(laplace_backend(p)))
+    numerical = laplace_numerical_binding(p)
+    laplace_identity(numerical === nothing ? binding : (; binding..., numerical))
 end
 
 function prepare(p::BRM._BRMSMCLaplaceProblem, ad_backend, model_id, binding_id)

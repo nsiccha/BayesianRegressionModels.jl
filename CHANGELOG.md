@@ -17,6 +17,9 @@ instead of failing at run time.
 - Plans retain their conditional numerical policy when reused or automatically
   replanned. `brm_ladder_fit` accepts the same solver and matrix-free options;
   continuation keeps its existing target's policy.
+- Outer SMC identities retain the operator policy, fixed probes and sparse
+  reference values. Checkpoint replay rejects a different finite target;
+  scratch buffers and evaluation diagnostics do not change its identity.
 
 - `brm_laplace_problem(...; integrate, solver=:auto)` selects exact algebra
   for connected components through 1,024 coordinates and iterative conditional algebra
