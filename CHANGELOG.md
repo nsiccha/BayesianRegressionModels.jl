@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.138
+
+- `rk_design_binder` reuses its lowered program when HSGP axes, grouping
+  keys or validation columns are data-only model assignments. Validation reads
+  those definitions from the bound graph, including values folded during
+  preparation. Masked HSGPs can read a data-only axis without defining it twice.
+
 ## 0.2.137
 
 - `NLMEEstimation.provides_laplace_gradient(::BRMNLMEModel)` returns `false`
