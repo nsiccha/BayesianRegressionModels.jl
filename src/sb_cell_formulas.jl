@@ -14,6 +14,7 @@ function _sb_cell_formula_instance(program, raw, scope; bindings=Dict{Symbol,Any
     data = Dict{Symbol,Any}(_SB_PREPROC_KEY => Dict{Symbol,PreprocEntry}(),
         _SB_BINDINGS_KEY => Dict{Symbol,NamedTuple}())
     statements = Dict{Int,Vector{Any}}()
+    declaration_constants = Set{Symbol}()
     for (target, position) in zip(program.targets, program.positions)
         op = linear_predictor_op(model, target)
         _, rhs = getargs(op, 2)
@@ -31,6 +32,7 @@ function _sb_cell_formula_instance(program, raw, scope; bindings=Dict{Symbol,Any
         # Vector-prior dimensions are fitted declaration constants.
         for key in setdiff(Set(keys(data)), previous)
             _sb_record_static!(data, key)
+            push!(declaration_constants, key)
         end
         statements[position] = emitted
     end
@@ -38,7 +40,7 @@ function _sb_cell_formula_instance(program, raw, scope; bindings=Dict{Symbol,Any
     emission = pop!(data, _SB_BINDINGS_KEY)
     predictors = Tuple((; logical=lp.name, emitted=_sb_lp_emitted_name(lp.name, lp.link_lhs_fn),
         link=lp.link_lhs_fn) for lp in linear_predictors(model) if lp.name in program.targets)
-    (; data, preproc, statements, bindings=emission, predictors)
+    (; data, preproc, statements, bindings=emission, predictors, declaration_constants)
 end
 
 function _sb_cell_formulas!(body, data, plate_target, names, params, scope;
@@ -72,14 +74,24 @@ function _sb_cell_formulas!(body, data, plate_target, names, params, scope;
     # Each datum is passed explicitly to the cell, including known parameter
     # values. Ragged dimensions therefore follow each field's fitted support.
     owned = Dict{Symbol,Symbol}()
+    shared = Set{Symbol}()
     for key in local_keys
         key in params && throw(ArgumentError("cell formula input `$key` conflicts with a plate input"))
         outer = Symbol(:cell_formula_, plate_target, :_, key)
         haskey(data, outer) && throw(ArgumentError("cell formula reserves data key `$outer`"))
-        data[outer] = [c.data[key] for c in cells]
         owned[key] = outer
-        push!(names, outer)
-        push!(params, key)
+        if all(c -> key in c.declaration_constants &&
+                isequal(c.data[key], first(cells).data[key]), cells)
+            # A fixed declaration dimension (e.g. LKJCholesky(2, eta)) is
+            # shared fitted data. Slicing it would falsely declare a varying
+            # constrained shape; the sampled parameters remain per cell.
+            data[outer] = first(cells).data[key]
+            push!(shared, key)
+        else
+            data[outer] = [c.data[key] for c in cells]
+            push!(names, outer)
+            push!(params, key)
+        end
     end
     record_key = Symbol(:__cell_formulas_, plate_target)
     fitted = [(; c.data, c.preproc) for c in cells]
@@ -113,7 +125,7 @@ function _sb_cell_formulas!(body, data, plate_target, names, params, scope;
         end
     end
     _sb_record_preproc!(data, record_key, PreprocEntry(:cell_formulas,
-        (; cells=fitted, labels=collect(labels), inputs, ragged_inputs, owned, group, distinct,
+        (; cells=fitted, labels=collect(labels), inputs, ragged_inputs, owned, shared, group, distinct,
            context=(plate_target,), bindings=first(cells).bindings,
            predictors=first(cells).predictors), group, true))
     replacements = first(cells).statements
@@ -122,7 +134,29 @@ function _sb_cell_formulas!(body, data, plate_target, names, params, scope;
         i in program.prior_positions && continue
         haskey(replacements, i) ? append!(rewritten, replacements[i]) : push!(rewritten, statement)
     end
+    for key in shared
+        rewritten = Any[_sb_subst_sym(statement, key, owned[key]) for statement in rewritten]
+    end
+    # Formula preparation consumes labels and raw coordinates. Only inputs
+    # still read by the emitted cell belong in its Stan signature; the full
+    # input/provenance records above remain available for frozen replay.
+    reads = _brm_cell_value_refs!(Set{Symbol}(), Expr(:block, rewritten...))
+    unused = findall(param -> !(param in reads), params)
+    deleteat!(names, unused)
+    deleteat!(params, unused)
     rewritten
+end
+
+function _sb_prune_cell_formula_inputs!(data, preproc, statements)
+    reads = Set{Symbol}()
+    foreach(statement -> _sb_read_symbols!(reads, statement), statements)
+    for entry in values(preproc)
+        entry.kind === :cell_formulas || continue
+        for (_, source) in entry.const_.inputs
+            source in reads || delete!(data, source)
+        end
+    end
+    nothing
 end
 
 function _sb_replay_cell_formulas!(data, preproc, handled, key, entry, df, freeze)
@@ -156,7 +190,14 @@ function _sb_replay_cell_formulas!(data, preproc, handled, key, entry, df, freez
         (; data=new_data, preproc=new_preproc)
     end
     for (local_key, outer) in fit.owned
-        data[outer] = [c.data[local_key] for c in cells]
+        values = [c.data[local_key] for c in cells]
+        if local_key in fit.shared
+            all(isequal(first(values)), values) || throw(ArgumentError(
+                "cell formula replay changed a shared declaration dimension `$local_key`"))
+            data[outer] = first(values)
+        else
+            data[outer] = values
+        end
         push!(handled, outer)
     end
     preproc[key] = PreprocEntry(:cell_formulas, merge(fit, (; cells, labels)), entry.raw_ref, true)

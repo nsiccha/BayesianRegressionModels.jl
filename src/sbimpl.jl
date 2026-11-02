@@ -4917,6 +4917,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     pop!(data, _SB_SKIPPED_ROWS_KEY)
     preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
     preproc = preproc_ctx isa _SBPreprocContext ? preproc_ctx.recorded : preproc_ctx
+    _sb_prune_cell_formula_inputs!(data, preproc, stmts)
     # Drop leaked non-Stan data (raw `CategoricalVector`/string predictor columns
     # collected as reprocess provenance). See `_sb_is_stan_data_value`. This also
     # keeps `reprocess`'s pass-through (step 2) from re-leaking the raw column
@@ -7316,6 +7317,9 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         e.kind === :interaction || continue
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
+    # The cell recipes above use raw labels/coordinates to regenerate their
+    # numeric inputs. StanBlocks types every data key, including unused ones.
+    _sb_prune_cell_formula_inputs!(new_data, new_preproc, sb.model.model.args)
     new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod, sb.model.observations)
     _sb_apply_held_out(
         SBBRMI(sb.parent, new_model, new_data, new_preproc, forecast, sb.bindings,
