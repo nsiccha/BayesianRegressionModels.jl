@@ -20,7 +20,8 @@ _rk_attach_data_assignments!(plan::_RKUnconditionedPlan, _assignments, _constant
 _rk_plan_taken(plan::_RKStructuralPlan) = union!(Set{Symbol}(keys(plan.columns)),
     (d.name for d in plan.derived), (p.name for p in plan.parameters),
     (p.name for p in plan.predictors), (a.name for a in plan.assignments),
-    (v.name for v in plan.vector_parameters))
+    (v.name for v in plan.vector_parameters),
+    (first(binding) for binding in _rk_extent_bindings(plan)))
 _rk_plan_taken(plan::_RKValuePlan) = union!(_rk_plan_taken(plan.regression),
     keys(plan.columns), (a.name for a in plan.assignments))
 
