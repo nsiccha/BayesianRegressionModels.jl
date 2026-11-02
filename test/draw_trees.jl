@@ -13,6 +13,10 @@ const MODEL = @brm begin
     sd(:, g) = 0.3
     sd(:, h) = 0.2
     mu ~ 1 + x + (1 + x | g) + (1 | h)
+    t_loc = constant(median(y))
+    log_T = t_loc + mu
+    mu_ref = log_T
+    mu_sum = log(exp(log_T) + exp(mu))
     y ~ Normal(mu, 0.4)
 end
 
@@ -87,6 +91,25 @@ end
     @test parent(tree) == brm_output_draws(d, C[1], names; logical=:mu)
     @test coords(tree, :observation) == 1:length(DATA.y)
     @test C[1] == original
+
+    # These values come from compiled Stan at fitted draws. A data-calibrated
+    # scalar must not break the row labels of a transform or its plain alias.
+    for (logical, expected) in (
+            (:log_T, median(DATA.y) .+ parent(tree)),
+            (:mu_ref, median(DATA.y) .+ parent(tree)),
+            (:mu_sum, log.(exp.(median(DATA.y) .+ parent(tree)) .+ exp.(parent(tree)))))
+        derived = brm_output_tree(d, C[1], names; logical)
+        @test coords(derived, :observation) == 1:length(DATA.y)
+        @test parent(derived) ≈ expected
+        @test parent(derived) == brm_output_draws(d, C[1], names; logical)
+        @test Base.mightalias(parent(derived), C[1])
+        derived_chains = brm_output_tree(d, [C[1], view(C[2], 1:2, :)], names; logical)
+        pooled = Tables.columntable(TreeTable(nanquantile(derived_chains, (mid=0.5,);
+            dims=(:chain, :draw))))
+        reference = vcat(brm_output_draws(d, C[1], names; logical),
+            brm_output_draws(d, C[2][1:2, :], names; logical))
+        @test pooled.mid == [median(reference[:, j]) for j in axes(reference, 2)]
+    end
 
     # Permuting a caller's coordinates must permute its labels with them.
     order = reverse(eachindex(names))
