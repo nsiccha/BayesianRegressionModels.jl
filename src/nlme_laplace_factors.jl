@@ -98,32 +98,76 @@ function _brm_spl_factor_selection(reads, integrated, population, maps)
         ppos=_brm_spl_share_indices(maps, s.ppos)))
 end
 
+# A packed read set is already described by its effect/population maps. Keep
+# only the interleaving here: its pattern commonly repeats across rows even
+# when the absolute coordinates differ. The two layout vectors are owned by
+# this preparation and shared by every selection; all these arrays are read
+# only, and deepcopy preserves sharing within each independent target.
+struct _BRMFactorIndices <: AbstractVector{Int}
+    integrated::Vector{Int}
+    population::Vector{Int}
+    lz::Vector{Int}
+    pidx::Vector{Int}
+    slots::Vector{Int}
+    unclassified::Union{Nothing,Vector{Int}}
+end
+Base.IndexStyle(::Type{_BRMFactorIndices}) = IndexLinear()
+Base.size(s::_BRMFactorIndices) = (length(s.slots),)
+@inline function Base.getindex(s::_BRMFactorIndices, i::Int)
+    @boundscheck checkbounds(s, i)
+    @inbounds begin
+        k = s.slots[i]
+        k == 0 && return (s.unclassified::Vector{Int})[i]
+        k < 0 ? s.integrated[s.lz[-k]] : s.population[s.pidx[k]]
+    end
+end
+
+function _brm_spl_factor_selection(reads, integrated, population, maps, layout)
+    s = _brm_spl_factor_selection(reads, integrated, population, maps)
+    _brm_spl_factor_indices(s, maps, layout)
+end
+
+function _brm_spl_factor_indices(s, maps, layout)
+    slots = zeros(Int, length(s.sel))
+    for (k, pos) in enumerate(s.lpos)
+        slots[pos] = -k
+    end
+    for (k, pos) in enumerate(s.ppos)
+        slots[pos] = k
+    end
+    # Retain any reads a private caller leaves out of both partitions too.
+    unclassified = any(iszero, slots) ? collect(s.sel) : nothing
+    sel = _BRMFactorIndices(layout.integrated, layout.population, s.lz, s.pidx,
+        _brm_spl_share_indices(maps, slots), unclassified)
+    merge(s, (; sel))
+end
+
 # Each reduction can have a different generated callable type. Enter its
 # current world once, then specialize this whole batch on both callables:
 # dispatching through q.terms in the inner loop erases their types and also
 # makes the selection/record construction allocate dynamically per summand.
 function _brm_spl_prepare_reduction(value::V, footprint::F, q, j, u0, ncells,
-        zof, pof, maps) where {V,F}
+        zof, pof, maps, layout) where {V,F}
     sums = zeros(ncells)
     terms = map(1:ncells) do i
         map(eachindex(_rk_spl_factor_rows(q, j, i))) do t
             sums[i] += value(u0, i, t)
             reads = footprint(u0, i, t).unconstrained
             reads = reads === :whole ? eachindex(u0) : reads
-            merge((; j, t), _brm_spl_factor_selection(reads, zof, pof, maps))
+            merge((; j, t), _brm_spl_factor_selection(reads, zof, pof, maps, layout))
         end
     end
     (; sums, terms)
 end
 
 function _brm_spl_prepare_factor_cells(footprint::F, reductions, u0, ncells,
-        zof, pof, maps) where {F}
+        zof, pof, maps, layout) where {F}
     map(1:ncells) do i
         sums = [r.sums[i] for r in reductions]
         terms = [r.terms[i] for r in reductions]
         reads = footprint(u0, sums, i).unconstrained
         reads = reads === :whole ? eachindex(u0) : reads
-        direct = _brm_spl_factor_selection(reads, zof, pof, maps)
+        direct = _brm_spl_factor_selection(reads, zof, pof, maps, layout)
         lz = sort!(unique!(vcat(direct.lz,
             [z for reduction in terms for term in reduction for z in term.lz])))
         localof = Dict(z => k for (k, z) in enumerate(lz))
@@ -145,13 +189,14 @@ function _brm_spl_prepare_factors(backend, name, u0, ncells, integrated, populat
     zof = Dict(i => k for (k, i) in enumerate(integrated))
     pof = Dict(i => k for (k, i) in enumerate(population))
     maps = Dict{Vector{Int},Vector{Int}}()
+    layout = (; integrated=collect(Int, integrated), population=collect(Int, population))
     reductions = map(eachindex(q.terms)) do j
         term = q.terms[j]
         Base.invokelatest(_brm_spl_prepare_reduction, term.value, term.footprint,
-            q, j, u0, ncells, zof, pof, maps)
+            q, j, u0, ncells, zof, pof, maps, layout)
     end
     cells = Base.invokelatest(_brm_spl_prepare_factor_cells, q.outer.footprint,
-        reductions, u0, ncells, zof, pof, maps)
+        reductions, u0, ncells, zof, pof, maps, layout)
     (; q, cells)
 end
 
