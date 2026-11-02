@@ -1850,7 +1850,18 @@ developed paths enter one resolve on Julia 1.10, where `[sources]` in
 source of truth: an exact revision is checked out deliberately, so the
 environment does not drift with local branches.
 
-That writes `test/Manifest.toml`, which is deliberately **not** committed (the
+Every pin first checks `~/.local/state/kb-agents/git-mirrors/<Name>.jl.git`.
+When that mirror contains the exact revision, materialization uses it without
+contacting GitHub. An absent mirror or missing revision falls back to the pin's
+public origin. Mirror paths are derived from the pin list, so adding a dependency
+needs no separate mirror entry. Existing exact cached checkouts are reused.
+The offline regression checks use small local Git repositories:
+
+```sh
+julia --project=test test/dependency_floors_test.jl
+```
+
+Running `setup_env.jl` writes `test/Manifest.toml`, which is deliberately **not** committed (the
 root `.gitignore` covers `Manifest*.toml`). Re-run `setup_env.jl` on a new
 machine, after changing a pin, or when an existing ignored manifest still points
 at an older dependency checkout.

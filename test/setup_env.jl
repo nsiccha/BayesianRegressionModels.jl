@@ -276,13 +276,12 @@ const PINS = [
     ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "5325554cab66d13ab34c22ec502fd00759ffdcf7"),  # dogfood (KB mirror only)
 ]
 
-# Prefer the exact candidate from the host mirror. The resolver falls back to
-# the public origin when the mirror does not contain that revision.
+# Derive every host mirror from the pins so newly added dependencies also
+# avoid a public clone when their exact revision is already available locally.
+# The resolver falls back to the public origin if the mirror or revision is absent.
 const MIRRORS = Dict(
-    "Distributions" => joinpath(homedir(), ".local", "state", "kb-agents", "git-mirrors", "Distributions.jl.git"),
-    "StanBlocks" => joinpath(homedir(), ".local", "state", "kb-agents", "git-mirrors", "StanBlocks.jl.git"),
-    "SelectedInversion" => joinpath(homedir(), ".local", "state", "kb-agents", "git-mirrors", "SelectedInversion.jl.git"),
-    "Enzyme" => joinpath(homedir(), ".local", "state", "kb-agents", "git-mirrors", "Enzyme.jl.git"),
+    name => joinpath(homedir(), ".local", "state", "kb-agents", "git-mirrors", "$name.jl.git")
+    for (name, _, _) in PINS
 )
 
 # The KB resolver's dogfood-libEnzyme step, printed by the public
@@ -313,7 +312,7 @@ function main()
             name,
             rev;
             cache_root=joinpath(TESTENV, ".bootstrap"),
-            mirror=get(MIRRORS, name, ""),
+            mirror=MIRRORS[name],
             origin=url,
         )
     end
@@ -352,4 +351,6 @@ function main()
     return nothing
 end
 
-main()
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+end
