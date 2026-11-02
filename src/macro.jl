@@ -1523,7 +1523,11 @@ function _brm_plate_kernel(x::Expr; groupings=Dict{Symbol,_BRMPlateGrouping}(),
 
     for stmt in stmts
         stmt isa LineNumberNode && (push!(rewritten, stmt); continue)
-        if Meta.isexpr(stmt, :(=), 2)
+        if _is_prior_address_statement(stmt)
+            # A formula declared in this lexical cell owns its prior addresses.
+            # Preserve them for formula preparation after rewriting sliced reads.
+            push!(rewritten, rewrite(stmt))
+        elseif Meta.isexpr(stmt, :(=), 2)
             lhs, rhs = stmt.args
             if lhs isa Symbol
                 bare_bindings[lhs] = rhs
