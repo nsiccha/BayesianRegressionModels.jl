@@ -5,6 +5,13 @@ expressions from `brm(source; mod)`, changed fit inputs, frozen inputs, and
 printed-source round trips. It exercises constants feeding a parameter-dependent
 helper, so they remain graph recipes rather than bind-time data.
 
+`revise_ar1.jl` loads Revise before BRM, checks that all 16 AR(1) submodels
+match their anonymous `@slic` definitions, and rescans the package twice.
+It also edits and restores an unrelated method in a temporary copy of the
+cell source, checking that explicit rescans apply the edits and preserve the
+registered models. Run it as a standalone process with
+`julia --startup-file=no --project=test test/revise_ar1.jl`.
+
 `nlme_laplace_values.jl` checks sparse integration of model-scope observations:
 gathered predictors on distinct row axes against an exact Gaussian marginal,
 and derived count likelihoods against equivalent plate cells and numerical
