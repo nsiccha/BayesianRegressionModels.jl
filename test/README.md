@@ -1161,7 +1161,7 @@ curvature edges and bounds allocations when observations repeat a support.
 Its dense-point testset checks that a one-unit η gradient (RK's local-only
 `shared=false` route) equals the η entries of the full gradient, that the
 query and plan work points equal the unit point after every call, and that one
-unit's allocations do not grow with the number of units.
+unit's allocations do not grow with the number of units (3 against 300).
 `nlme_units_panel.jl` covers nested
 partition likelihoods, gradients, cell-based Hessian sparsity and allocation
 scaling. The `nlme_svi.jl` filters `minibatch split` and

@@ -129,7 +129,7 @@ end
 end
 
 @stestset "one-unit calls write a dense point in place and hold θ and σ fixed for η" begin
-    # The same three subjects repeated: 16 times the units multiplies the
+    # The same three subjects repeated: 100 times the units multiplies the
     # packed coordinates but not one unit's work.
     function plate_data(n)
         base = NLME_PLATE_DATA
@@ -138,7 +138,7 @@ end
             weight=base.weight[pick] .+ 0.01 .* (1:n), t=base.t[pick], dv=base.dv[pick])
     end
     rng = Xoshiro(7)
-    allocations = map((3, 48)) do n
+    allocations = map((3, 300)) do n
         m = brm_nlme_model(RKBRMI(nlme_plate_pk(plate_data(n))); ad_backend=NLME_AD)
         θ = 0.1 .* randn(rng, length(m.theta))
         σ = 0.1 .* randn(rng, length(m.sigma))
@@ -162,11 +162,19 @@ end
         @test m.cell_gradient.point == m.unit
         brm_nlme_loglikelihood_and_gradient(m, 1, θ, σ, H[1])
         brm_nlme_loglikelihood(m, 1, θ, σ, H[1])
+        # Control, logged and not asserted: the lazy overlay 0.2.122 passed,
+        # which RK's partition gradient copies into a full packed vector.
+        overlay = BRM._BRMNLMEPoint(m.unit, plan.indices[1], m.unit[plan.indices[1]],
+            Int[], Float64[], Int[], Float64[])
+        BRM._rk_nlme_partition_value_and_gradient!(plan.sampler, plan.gradients[1], overlay, 1)
         (; packed=length(m.unit),
             gradient=@allocated(brm_nlme_loglikelihood_and_gradient(m, 1, θ, σ, H[1])),
-            value=@allocated(brm_nlme_loglikelihood(m, 1, θ, σ, H[1])))
+            value=@allocated(brm_nlme_loglikelihood(m, 1, θ, σ, H[1])),
+            overlay=@allocated(BRM._rk_nlme_partition_value_and_gradient!(plan.sampler,
+                plan.gradients[1], overlay, 1)))
     end
-    @test allocations[2].packed > 10allocations[1].packed
+    @info "one unit's allocations (bytes) at 3 and 300 units" allocations
+    @test allocations[2].packed > 40allocations[1].packed
     @test allocations[2].gradient <= 1.2allocations[1].gradient
     @test allocations[2].value <= 1.2allocations[1].value
 end
