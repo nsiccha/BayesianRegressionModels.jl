@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.145
+
+- `rk_design_binder` keeps its cached lowering for a design that omits a numeric
+  scalar the program reads as data, such as the argument of a correlated block's
+  `sd(:, p) ~ Exponential(scale)`. The design takes the fit's value, as on
+  `reprocess`. It used to replay every design of that kind in full, on a training
+  fit and on a data-free `RKBRMI(builder(design), state)` alike.
+- **Fix:** when a design held another column equal by value to such an omitted
+  scalar, the binder read the scalar from that column, so a later design that
+  changed the column silently changed the scalar. A later design now binds the
+  fit's value, the same as `reprocess`.
+
 ## 0.2.144
 
 - **Native space-time fields:** `field ~ 0 + gmrf((east, north), time[, channel];
