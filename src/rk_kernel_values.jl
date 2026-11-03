@@ -472,6 +472,9 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
         bucket === nothing && _brm_kernel_check_subject_frame_lp(
             lp, nsubjects; prefix="RK backend")
     end
+    # A `gmrf` cell formula becomes its field marker (rk_gmrf.jl).
+    raw_body = _rk_kernel_cell_formulas(brmi, program, name, scope, raw_body, params,
+        inputs, columns, group_values)
     body = Any[]
     observations = Any[]
     # The observation statements the cell keeps; one whose response is
@@ -1122,6 +1125,7 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
         Set(spec.name for spec in plan.regression.derived),
         Set(assignment.name for assignment in plan.assignments),
         Set(kernel.cells for kernel in kernels))
+    _rk_plan_cell_gmrf!(kernels, plan, program.context.data, taken)
     for kernel in kernels, observation in kernel.observations
         raw = program.context.data[observation.source]
         distribution = _rk_kernel_observation_distribution(observation)
@@ -1285,6 +1289,8 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
         if _rk_is_cell_latent(statement)]
     any(input -> input.kind === :omitted, slice.inputs) && error(
         "RK backend: kernel `$(kernel.name)` reads an unbound in-cell response outside its observation")
+    # Cell fields fit their supports at model scope, before the plate.
+    selected = _rk_emit_cell_gmrf_supports!(statements, bindings, taken, slice.body)
     cell = Any[[_rk_kernel_cell_statement(statement, slice, defs, bindings, taken)
         for statement in slice.body];
         [Expr(:(=), cells, _rk_kernel_bind_calls(value, kernel.scope, bindings, taken))
@@ -1391,6 +1397,8 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     locals_of = Dict{Symbol,Symbol}(get(reads, latent, latent) => declared[latent]
         for latent in latents)
     body = mapreduce(vcat, body; init=Any[]) do statement
+        _rk_is_cell_gmrf(statement) && return _rk_expand_cell_gmrf(statement, index, selected,
+            defs, bindings, taken, avoid, coordinates, kernel.name)
         _rk_is_cell_latent(statement) || return Any[statement]
         lhs, marker = statement.args
         law = marker.args[2]

@@ -469,7 +469,7 @@ function _brm_sparse_laplace_problem_from_plan(backend::RKBRMI, r; ad_backend, t
         p.tol = Float64(tol)
         p.maxiter = Int(maxiter)
         fill!(p.u, 0.0)
-        p.nonfinite = p.unconverged = p.blockwise = p.sweeps = 0
+        p.nonfinite = p.unconverged = p.nonfinite_gradient = p.blockwise = p.sweeps = 0
         # A full copy already owns the same fixed probes and reference. Only
         # a changed selection or numerical policy needs new preparation.
         retain = !restricted && p.algebra !== nothing && p.algebra.solver === solver &&
@@ -554,10 +554,11 @@ function _brm_spl_restrict!(p::BRMSparseLaplaceProblem, declarations)
         p.gaussian = _BRMSPLGaussianPrior(blocks, g.ports, g.read, g.pullback,
             g.mean[oldz], g.precision[oldz], g.values)
     end
+    p.gmrf = _brm_spl_gmrf_restrict(p.gmrf, blockmap, zmap)
     p.population = setdiff(eachindex(p.u), p.integrated)
     p.names = _rk_layout_coordinate_names(p.backend)[p.population]
     p.blocks = [_BRMSlapBlock(b.declaration, b.group, b.K, zmap[b.z], b.omega,
-        b.edges, b.sums, b.λ) for b in p.blocks[keep]]
+        b.edges, b.sums, b.λ, b.prior) for b in p.blocks[keep]]
     p.integrate = unique(b.group for b in p.blocks)
     old = (; p.rptr, p.rblock, p.rlevel, p.rentry)
     p.rptr = [1]; p.rblock = Int[]; p.rlevel = Int[]; p.rentry = Int[]; p.coff = Int[]

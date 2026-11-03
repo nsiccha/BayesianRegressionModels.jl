@@ -38,6 +38,7 @@ _brm_collect_data_columns!(acc, x::ExprColumn{typeof(getindex)}) =
 _brm_row_keyword(_f, ::Val) = true
 _brm_row_keyword(::Union{typeof(gr),typeof(hsgp),typeof(cdar)}, ::Val{:cor}) = false
 _brm_row_keyword(::typeof(car), ::Union{Val{:edges},Val{:nodes}}) = false
+_brm_row_keyword(::typeof(gmrf), ::Union{Val{:mesh},Val{:cor}}) = false
 _brm_collect_data_columns!(acc, x::Union{Tuple,AbstractVector}) = begin
     for a in x; _brm_collect_data_columns!(acc, a); end
     nothing

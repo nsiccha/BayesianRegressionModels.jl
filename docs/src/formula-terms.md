@@ -24,6 +24,7 @@ signature — the rest are covered by their docstrings on the [API](@ref) page.
 | `rw(time)` | direct random-walk trajectory: `dar` with the persistence fixed at zero | — |
 | `cdar(step; by=group, cor=C)` | per-group deviations following a damped walk over `step` with innovations correlated across groups by `C` | — |
 | `car(area; edges=(from, to), type=:icar \| :bym2)` | areal spatial effect over an adjacency graph: an intrinsic CAR field, alone or in the BYM2 convolution | — |
+| `gmrf((east, north), time[, channel]; mesh, cor=Omega)` | triangular-mesh Matérn field with stationary OU time evolution and optional channel correlation — see [Space-time fields](space-time-fields.md) | — |
 | `mo(c)`, `mo1(c)` | monotonic effect of an ordered factor via Dirichlet increments | — |
 | `me(x, sd)` | measurement-error covariate — `x` is observed with known `sd` | — |
 | `interval_censored(x; upper=lloq, lower=0)` | quantified/BLOQ covariate with bounded latent values on BLOQ rows | — |
