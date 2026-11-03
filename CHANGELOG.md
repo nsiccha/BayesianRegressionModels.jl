@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.141
+
+- Strict local cell queries and sparse Laplace planning support a plate
+  selecting rows from another plate's array-valued output, including outputs
+  built from shared correlated random effects.
+- **Breaking:** the RK backend requires ReactiveKernels 0.1.62 or later.
+  Update older pinned RK environments; the test bootstrap selects the
+  producer-plate locality repair.
+
 ## 0.2.140
 
 - Carried RK SMC windows accept `coordinates=:auto`: particles contain only
