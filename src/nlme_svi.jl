@@ -102,13 +102,100 @@ function _brm_svi_unit_term!(gg, gz, t, i, g, z)
     joint_gradient[order] .= w.gradient
     gg .= view(joint_gradient, 1:D)
     gz .= view(joint_gradient, D+1:length(joint))
-    value + _brm_svi_unit_prior!(gz, t.prior, i, z)
+    value + _brm_svi_unit_prior!(gg, gz, t.prior, t, i, g, z)
 end
 
-function _brm_svi_unit_prior!(gz, ::Nothing, i, z)
+# Unit i's prior term, its gradients added into `gg` (the globals) and `gz`
+# (the unit's block). A standardized subject draw's N(0, I) reads no global.
+function _brm_svi_unit_prior!(gg, gz, ::Nothing, t, i, g, z)
     gz .-= z
     -sum(abs2, z) / 2 - length(z) * log(2π) / 2
 end
+
+# ── Authored unit priors ─────────────────────────────────────────────────────
+
+# The exact prior split for units whose blocks hold ordinary sampled
+# coordinates, not only standardized subject draws: RK's authored prior and
+# coordinate-Jacobian factors (ReactiveKernelsPPL `density_factors`), each
+# assigned once by the coordinates it owns or reads. A factor touching unit i's
+# block is part of U_i(g, z_i), with its reads of the globals (a hyperparameter
+# such as `z ~ Normal(m, tau)`); a factor touching no unit is part of G(g). A
+# factor touching two units, such as a joint law or a coupled transform across
+# them, has no split into unit terms and is refused when the prior is built.
+#
+# `queries[1]` is the global term and `queries[1 + i]` unit i's, `nothing` when
+# empty. Each query differentiates its own structural support only. For its
+# k-th active coordinate, `places[b][k]` is p > 0 for `globals[p]`, -p for the
+# unit block's p-th coordinate, and 0 for a coordinate SVI does not move (a
+# fixed shared value), whose value `active[b][k]` holds from `base`.
+struct _BRMSVIAuthoredPrior{Q}
+    queries::Vector{Q}
+    places::Vector{Vector{Int}}
+    active::Vector{Vector{Float64}}
+    base::Vector{Float64}
+end
+
+# Implemented by the ReactiveKernels extension: the factor queries above for
+# `owner` (the unit owning each packed coordinate, 0 for none), the packed
+# coordinates each differentiates, and one query's value and compact gradient.
+function _rk_svi_factor_queries end
+function _rk_svi_factor_coordinates end
+function _rk_svi_factor_value_gradient end
+
+function _brm_svi_authored_prior(m::BRMNLMEModel, globals, units)
+    n = length(m.unit)
+    owner, place = zeros(Int, n), zeros(Int, n)
+    place[globals] .= eachindex(globals)
+    for (i, block) in enumerate(units)
+        allunique(block) || _brm_nlme_error("brm_svi: packed coordinate " *
+            "$(block[findfirst(j -> count(==(j), block) > 1, block)]) appears twice in unit $i")
+        clash = findfirst(j -> owner[j] != 0 || place[j] != 0, block)
+        clash === nothing || _brm_nlme_error("brm_svi: packed coordinate " *
+            "$(block[clash]) is assigned to unit $i and to " *
+            (owner[block[clash]] != 0 ? "unit $(owner[block[clash]])" : "the globals"))
+        owner[block] .= i
+        place[block] .= .-eachindex(block)
+    end
+    queries = _rk_svi_factor_queries(m.backend, m.unit,
+        m.population_prior.ad_backend, owner, length(units))
+    places = map(enumerate(queries)) do (b, query)
+        query === nothing && return Int[]
+        map(_rk_svi_factor_coordinates(query)) do j
+            # The extension assigned each factor to one bucket by its reads, so a
+            # bucket only reads the globals, fixed values and its own unit.
+            owner[j] == 0 || owner[j] == b - 1 || error("brm_svi: the authored " *
+                "prior bucket $(b - 1) reads unit $(owner[j])'s coordinate $j")
+            place[j]
+        end
+    end
+    active = map(queries) do query
+        query === nothing ? Float64[] : m.unit[_rk_svi_factor_coordinates(query)]
+    end
+    _BRMSVIAuthoredPrior(queries, places, active, copy(m.unit))
+end
+
+# One bucket's value, its gradient added into `gg` and `gz`.
+function _brm_svi_factor_term!(gg, gz, prior::_BRMSVIAuthoredPrior, b, g, z)
+    query = prior.queries[b]
+    query === nothing && return 0.0
+    places, active = prior.places[b], copy(prior.active[b])
+    for (k, p) in enumerate(places)
+        p > 0 ? (active[k] = g[p]) : p < 0 && (active[k] = z[-p])
+    end
+    value, gradient = _rk_svi_factor_value_gradient(query, prior.base, active)
+    for (k, p) in enumerate(places)
+        p > 0 ? (gg[p] += gradient[k]) : p < 0 && (gz[-p] += gradient[k])
+    end
+    value
+end
+
+function _brm_svi_global_term(prior::_BRMSVIAuthoredPrior, t, g)
+    gradient = zeros(length(g))
+    _brm_svi_factor_term!(gradient, Float64[], prior, 1, g, Float64[]), gradient
+end
+
+_brm_svi_unit_prior!(gg, gz, prior::_BRMSVIAuthoredPrior, t, i, g, z) =
+    _brm_svi_factor_term!(gg, gz, prior, 1 + i, g, z)
 
 # ── Variational parameters ───────────────────────────────────────────────────
 

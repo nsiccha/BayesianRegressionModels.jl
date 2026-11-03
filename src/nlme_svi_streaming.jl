@@ -186,7 +186,7 @@ function _brm_svi_global_term(prior::_BRMSVIStreamingPrior, t, g)
         gradient
 end
 
-function _brm_svi_unit_prior!(gz, prior::_BRMSVIStreamingPrior, i, z)
+function _brm_svi_unit_prior!(gg, gz, prior::_BRMSVIStreamingPrior, t, i, g, z)
     δ = z - prior.units.M[i]
     gradient = -(prior.units.Λ[i] * δ)
     gz .+= gradient

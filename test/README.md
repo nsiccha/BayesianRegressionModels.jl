@@ -1066,7 +1066,17 @@ subject, keeps the hyperparameters' priors global although every subject reads
 them, and checks that each prior and Jacobian event lands in exactly one
 bucket. At three nonzero packed points the bucket values and compact gradients
 plus the likelihood equal the full RK sampler's value and Reverse gradient.
-The fixture supplies the subject membership itself; it does not test how
+It then checks SVI's authored prior term (`_BRMSVIAuthoredPrior`): on the
+strict subject units it equals the standard-normal split term by term, and
+with the subjects also owning their coefficients the global term plus every
+unit term equals RK's whole prior and Jacobian, with the units' reads of
+`tau` carried in the globals' gradient. A `Dirichlet` simplex, one atomic
+law and coupled transform, is refused once its two coordinates are given to
+different units, as is a coordinate assigned twice. That the strict subject
+units still build with a global simplex is `@test_broken`: RKPPL 0.1.70
+reports the whole packed vector as the constant Dirichlet's support (snag
+`ReactiveKernels/factor-support-r-2b8c2968`). The
+fixture supplies the subject membership itself; it does not test how
 production preparation discovers it. Run it alone in the test environment.
 
 `nlme_svi_laplace_plan.jl` checks structural eligibility for

@@ -1,6 +1,8 @@
 # Independent acceptance of the public authored-density API needed by SVI's
-# block-local coordinate extension. This does not claim that brm_svi_fit uses
-# this layout yet: the connected-unit integration is a separate prerequisite.
+# block-local coordinate extension, and of SVI's authored prior term built on
+# it (`_BRMSVIAuthoredPrior`, src/nlme_svi.jl). Unit membership is supplied
+# here. This does not claim that brm_svi_fit uses this layout yet: production
+# discovery of unit-owned coordinates waits on the structural unit partition.
 # Run: julia --startup-file=no --project=test test/nlme_svi_authored_factors.jl
 using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 using ADTypes: AutoEnzyme
@@ -42,6 +44,43 @@ function dependent_constrained_model(data)
     end
 end
 
+const BRM = BayesianRegressionModels
+
+# The same six subjects plus a simplex: a joint law with a coupled transform,
+# whose two unconstrained coordinates one atomic event owns together. (An
+# isotropic `MvNormal(zeros(n), s)` is not such a control: RK lowers it to n
+# independent per-entry events.)
+function joint_simplex_model(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        tau ~ Exponential(1)
+        z[1:12] .~ Normal(0., 1.)
+        s ~ Dirichlet([1.0, 2.0, 1.5])
+        mu ~ 1 + (1 | unit | subject)
+        @plate for i in eachindex(mu)
+            y[i] ~ Normal(mu[i] .+ tau .* (z[c1[i]] .+ z[c2[i]] .* x[i]) .+ s[1], sigma)
+        end
+    end
+end
+
+# Subject i's own coordinates beyond its random-effect block: the coefficient
+# pair it alone reads and, in the constrained model, its positive and bounded
+# entries, selected by authored ownership.
+function fixture_owned(catalogue, n; constrained=false)
+    map(1:n) do i
+        owned = Int[]
+        sites = constrained ? ((:z, 2i - 1), (:z, 2i), (:positive, i), (:bounded, i)) :
+            ((:z, 2i - 1), (:z, 2i))
+        for (site, entry) in sites
+            coordinates = factor_coordinates(select_factors(catalogue;
+                kind=:prior, site, entries=entry:entry))
+            @test length(coordinates) == 1
+            append!(owned, coordinates)
+        end
+        owned
+    end
+end
+
 # Use authored ownership, never support, to select a child's prior. The
 # hyperparameter's prior must stay global even when every child reads it.
 function check_authored_factor_split(rk; constrained=false)
@@ -49,28 +88,13 @@ function check_authored_factor_split(rk; constrained=false)
     catalogue = density_factors(rk.model, plan)
     events = collect(catalogue)
     view = brm_nlme_view(rk)
-    units = deepcopy(view.subject_coordinates)
-    n = length(units)
+    n = length(view.subject_coordinates)
+    units = [vcat(block, owned) for (block, owned) in
+        zip(view.subject_coordinates, fixture_owned(catalogue, n; constrained))]
     u0 = [0.17sin(k) for k in 1:rk.model.layout.total]
     owner = zeros(Int, length(u0))
     for (i, block) in enumerate(units)
         owner[block] .= i
-        for entry in (2i - 1, 2i)
-            coordinates = factor_coordinates(select_factors(catalogue;
-                kind=:prior, site=:z, entries=entry:entry))
-            @test length(coordinates) == 1
-            append!(block, coordinates)
-            owner[coordinates] .= i
-        end
-        if constrained
-            for site in (:positive, :bounded)
-                coordinates = factor_coordinates(select_factors(catalogue;
-                    kind=:prior, site, entries=i:i))
-                @test length(coordinates) == 1
-                append!(block, coordinates)
-                owner[coordinates] .= i
-            end
-        end
     end
     @test length.(units) == fill(constrained ? 5 : 3, n)
     @test count(iszero, owner) == 4
@@ -133,12 +157,110 @@ function check_authored_factor_split(rk; constrained=false)
         " unit_sizes=", length.(units), " events=", length(events))
 end
 
+# The same split as SVI's prior term evaluates it (`_BRMSVIAuthoredPrior`,
+# src/nlme_svi.jl). On the strict subject units it equals the standard-normal
+# split term by term; with each subject also owning its coefficients, the
+# global term plus every unit term equals RK's whole prior and Jacobian, with
+# the units' reads of `tau` in the globals' gradient.
+function check_svi_authored_prior(rk; constrained=false)
+    m = brm_nlme_model(rk; ad_backend=FACTOR_AD)
+    t = BRM._brm_svi_target(m)
+    u0 = [0.17sin(k) for k in eachindex(m.unit)]
+    strict = BRM._brm_svi_authored_prior(m, t.globals, t.units)
+    @test count(!isnothing, strict.queries) == length(t.units) + 1
+    catalogue = density_factors(rk.model, BRM.rk_bound_plan(rk))
+    owned = fixture_owned(catalogue, length(t.units); constrained)
+    globals = setdiff(t.globals, reduce(vcat, owned))
+    units = [vcat(block, extra) for (block, extra) in zip(t.units, owned)]
+    @test length(globals) == 4
+    @test sort(vcat(globals, units...)) == eachindex(u0)
+    local_units = (; globals, units)
+    authored = BRM._brm_svi_authored_prior(m, globals, units)
+    @test count(!isnothing, authored.queries) == length(units) + 1
+    for offset in (0.0, 0.31, -0.24)
+        u = u0 .+ offset
+        untouched = copy(u)
+        g = u[t.globals]
+        P, gP = BRM._brm_svi_global_term(t, g)
+        Pa, gPa = BRM._brm_svi_global_term(strict, t, g)
+        @test Pa ≈ P atol=2e-10 rtol=2e-12
+        @test gPa ≈ gP atol=2e-9 rtol=2e-10
+        for (i, block) in enumerate(t.units)
+            z = u[block]
+            gg0, gz0, gg1, gz1 = zeros(length(g)), zeros(length(z)),
+                zeros(length(g)), zeros(length(z))
+            v0 = BRM._brm_svi_unit_prior!(gg0, gz0, nothing, t, i, g, z)
+            v1 = BRM._brm_svi_unit_prior!(gg1, gz1, strict, t, i, g, z)
+            @test v1 ≈ v0 atol=2e-12
+            @test gz1 ≈ gz0 atol=2e-12
+            @test iszero(gg1)
+        end
+
+        g = u[globals]
+        value, gradient = BRM._brm_svi_global_term(authored, local_units, g)
+        full_gradient = zeros(length(u))
+        full_gradient[globals] .= gradient
+        reads_globals = false
+        for (i, block) in enumerate(units)
+            gg, gz = zeros(length(g)), zeros(length(block))
+            value += BRM._brm_svi_unit_prior!(gg, gz, authored, local_units, i, g, u[block])
+            reads_globals |= !iszero(gg)
+            full_gradient[globals] .+= gg
+            full_gradient[block] .+= gz
+        end
+        @test reads_globals == constrained
+        expected, expected_gradient =
+            BRM._rk_nlme_population_prior_value_gradient(m.population_prior, u)
+        @test value ≈ expected atol=2e-10 rtol=2e-12
+        @test full_gradient ≈ expected_gradient atol=2e-9 rtol=2e-10
+        @test u == untouched
+    end
+    println("SVI_AUTHORED_PRIOR constrained=", constrained, " globals=", length(globals),
+        " unit_sizes=", length.(units), " strict_unit_sizes=", length.(t.units))
+end
+
 @testset "BRM authored factors for block-local SVI" begin
     @testset "six-unit coefficient-vector reproduction" begin
-        check_authored_factor_split(RKBRMI(standard_vector_model(authored_factor_data())))
+        rk = RKBRMI(standard_vector_model(authored_factor_data()))
+        check_authored_factor_split(rk)
+        check_svi_authored_prior(rk)
     end
     @testset "non-unit dependent and constrained priors" begin
-        check_authored_factor_split(RKBRMI(dependent_constrained_model(authored_factor_data()));
-            constrained=true)
+        rk = RKBRMI(dependent_constrained_model(authored_factor_data()))
+        check_authored_factor_split(rk; constrained=true)
+        check_svi_authored_prior(rk; constrained=true)
+    end
+    @testset "a joint law across units is refused" begin
+        rk = RKBRMI(joint_simplex_model(authored_factor_data()))
+        m = brm_nlme_model(rk; ad_backend=FACTOR_AD)
+        t = BRM._brm_svi_target(m)
+        catalogue = density_factors(rk.model, BRM.rk_bound_plan(rk))
+        simplex = sort(factor_coordinates(select_factors(catalogue; kind=:prior, site=:s)))
+        # Precondition: one atomic event owns both simplex coordinates.
+        @test length(simplex) == 2
+        @test any(e -> e.site == :s && length(factor_coordinates(catalogue, e)) == 2,
+            collect(catalogue))
+        owned = [i <= 2 ? [simplex[i]] : Int[] for i in eachindex(t.units)]
+        globals = setdiff(t.globals, reduce(vcat, owned))
+        units = [vcat(block, extra) for (block, extra) in zip(t.units, owned)]
+        refusal(globals, units) = try
+            BRM._brm_svi_authored_prior(m, globals, units)
+            nothing
+        catch e
+            e isa BRM.BRMNLMEViewError || rethrow()
+            sprint(showerror, e)
+        end
+        # The event owns coordinates of units 1 and 2, whatever it reads.
+        @test occursin("coupled transform across units", something(refusal(globals, units), ""))
+        # One coordinate in two places is refused before any factor is prepared.
+        @test occursin("assigned to unit 1 and to the globals",
+            something(refusal(t.globals, units), ""))
+        @test occursin("appears twice in unit 1",
+            something(refusal(globals, vcat([vcat(units[1], units[1][end])], units[2:end])), ""))
+        # The strict subject units leave the simplex global, so they should build.
+        # RKPPL 0.1.70 reports the whole packed vector as this constant Dirichlet's
+        # support, so it appears to read every subject and is refused (snag
+        # ReactiveKernels/factor-support-r-2b8c2968).
+        @test_broken refusal(t.globals, t.units) === nothing
     end
 end
