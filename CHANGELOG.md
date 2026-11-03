@@ -12,6 +12,28 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.146
+
+- **`brm_svi_fit` and `brm_svi_resume` evaluate a batch on several tasks:**
+  `threads` (default `Threads.nthreads()`, capped at the batch size) divides an
+  iteration's unit terms and the units' factor steps over that many tasks, each
+  with its own compact cell samplers and buffers, as `brm_two_stage_fit` does.
+  A run does not depend on it: its draws stay on the one `rng`, in batch order,
+  and the units' results are summed in batch order, so the ELBO, the gradients,
+  the factors, the checkpoints and the draws are the same to the last bit at any
+  `threads`, and a resume may use another count. `fit.diagnostics.threads` records
+  the tasks a call used. Above one task the fit needs Enzyme's concurrent-GC repair
+  (dogfood from `72d5d25`): without it an explicit `threads` above one is refused,
+  naming `threads = 1`, and the default stays at one.
+  **Behavior:** with that repair, a process started with several threads now uses
+  them by default, and prepares a copy of the cell samplers per task before the first
+  iteration; pass `threads = 1` to keep one. `laplace=GaussianBlockLaplace()` refuses
+  `threads`: its updates evaluate the whole window.
+- **The minibatch fit holds BLAS at one thread** while it optimizes and draws, at any
+  `threads`, and restores the count afterwards. A process running with more BLAS
+  threads may see different last bits than before, and no longer depends on that
+  count, including when a run resumes in a new process.
+
 ## 0.2.145
 
 - **Per-cell fields in the sparse embedded Laplace:** a `gmrf` formula inside

@@ -1,7 +1,26 @@
 # Synthetic models shared by the minibatch SVI tests (test/nlme_svi.jl,
-# test/nlme_svi_optimizer.jl and its fresh-process script).
+# test/nlme_svi_optimizer.jl and its fresh-process script,
+# test/nlme_svi_threads.jl).
 using BayesianRegressionModels, Random
 using LinearAlgebra: cholesky
+
+# Whether two runs or results are the same to the last bit. The Adam moments
+# are the run's gradients so far, so states compared at every iteration compare
+# the gradient trajectory.
+svi_same_adam(a, b) = all(n -> isequal(getfield(a, n), getfield(b, n)),
+    fieldnames(typeof(a)))
+svi_same_run(a, b) = svi_same_adam(a.adam, b.adam) && a.rng == b.rng &&
+    all(n -> isequal(getfield(a, n), getfield(b, n)),
+        (:q, :iteration, :trace, :windows, :polish_start, :average, :converged))
+svi_same_state(a, b) = svi_same_run(a.run, b.run) && isequal(a.identity, b.identity) &&
+    isequal(a.controls, b.controls)
+
+function svi_same_result(a, b)
+    da, db = a.diagnostics, b.diagnostics
+    a.draws == b.draws && isequal(da.q, db.q) && da.elbo == db.elbo &&
+        da.elbo_windows == db.elbo_windows && da.iterations == db.iterations &&
+        da.converged == db.converged && da.unit_gradient_calls == db.unit_gradient_calls
+end
 
 # Correlated random intercept and slope, `nobs` Normal observations per subject.
 function svi_gauss_data(rng, N; nobs=5, a=1.0, b=0.5, sa=0.7, sb=0.3, rho=0.3,
