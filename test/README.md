@@ -1111,7 +1111,7 @@ derivatives. This checks independence from previous evaluations; the
 approximation still uses one mode.
 
 `laplace_continuation.jl` checks which conditional mode the marginal uses:
-the one continuation from the prior reaches (BRM 0.2.145). One unit with a
+the one continuation from the prior reaches (BRM 0.2.146). One unit with a
 squared-mean and a linear Normal observation has two conditional modes on part
 of the population line. On both the whole-model and the sparse target:
 - the value and the selected mode match a scalar oracle of the followed mode

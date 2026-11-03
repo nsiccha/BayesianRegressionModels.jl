@@ -69,46 +69,53 @@ function _brm_gmrf_interpolation(mesh::_BRMGMRFMesh, x, y,
     indices = Matrix{Int}(undef, length(x), 3)
     weights = Matrix{Float64}(undef, length(x), 3)
     stack = Int[]
-    tolerance = 64eps(Float64)
     for row in eachindex(x, y)
-        push!(stack, 1)
-        chosen = 0
-        interior = 0
-        chosen_weights = (0.0, 0.0, 0.0)
-        while !isempty(stack)
-            node = pop!(stack)
-            _brm_gmrf_in_box(tree.bounds[node], x[row], y[row]) || continue
-            left, right = tree.children[node]
-            if left != 0
-                push!(stack, right, left)
-                continue
-            end
-            for p in tree.ranges[node]
-                c = tree.order[p]
-                _brm_gmrf_in_box(tree.cell_bounds[c], x[row], y[row]) || continue
-                b = _brm_gmrf_barycentric(mesh, c, x[row], y[row])
-                minimum(b) >= -tolerance || continue
-                if minimum(b) > tolerance
-                    interior == 0 || throw(ArgumentError(
-                        "gmrf spatial row $row lies inside overlapping mesh cells $interior and $c"))
-                    interior = c
-                end
-                # A shared edge belongs to either adjacent triangle. Choosing
-                # by cell index makes replay independent of tree traversal.
-                if chosen == 0 || c < chosen
-                    chosen, chosen_weights = c, b
-                end
-            end
-        end
-        chosen != 0 || throw(ArgumentError("gmrf spatial row $row is outside the declared mesh"))
-        b = max.(chosen_weights, 0.0)
-        total = sum(b)
+        chosen, b = _brm_gmrf_locate(mesh, tree, x[row], y[row], stack, row)
         for a in 1:3
             indices[row, a] = mesh.cells[chosen, a]
-            weights[row, a] = b[a] / total
+            weights[row, a] = b[a]
         end
     end
     (; indices, weights)
+end
+
+# The mesh cell holding one point and its normalized barycentric weights.
+# `stack` is scratch; `row` only names the point in an error.
+function _brm_gmrf_locate(mesh::_BRMGMRFMesh, tree::_BRMGMRFLocator, x, y, stack, row)
+    tolerance = 64eps(Float64)
+    empty!(stack)
+    push!(stack, 1)
+    chosen = 0
+    interior = 0
+    chosen_weights = (0.0, 0.0, 0.0)
+    while !isempty(stack)
+        node = pop!(stack)
+        _brm_gmrf_in_box(tree.bounds[node], x, y) || continue
+        left, right = tree.children[node]
+        if left != 0
+            push!(stack, right, left)
+            continue
+        end
+        for p in tree.ranges[node]
+            c = tree.order[p]
+            _brm_gmrf_in_box(tree.cell_bounds[c], x, y) || continue
+            b = _brm_gmrf_barycentric(mesh, c, x, y)
+            minimum(b) >= -tolerance || continue
+            if minimum(b) > tolerance
+                interior == 0 || throw(ArgumentError(
+                    "gmrf spatial row $row lies inside overlapping mesh cells $interior and $c"))
+                interior = c
+            end
+            # A shared edge belongs to either adjacent triangle. Choosing
+            # by cell index makes replay independent of tree traversal.
+            if chosen == 0 || c < chosen
+                chosen, chosen_weights = c, b
+            end
+        end
+    end
+    chosen != 0 || throw(ArgumentError("gmrf spatial row $row is outside the declared mesh"))
+    b = max.(chosen_weights, 0.0)
+    chosen, b ./ sum(b)
 end
 
 # The state layout is independent of sparse-factor permutations and row order.

@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.145
+## 0.2.146
 
 - `brm_laplace_problem`'s conditional modes are found by continuation from
   the prior, in all three problems (sparse, structured and whole-model). Every
@@ -41,6 +41,16 @@ instead of failing at run time.
   1e-4 nats from its mode, with a gradient error of the same order. The
   rounding-floor stop now applies only to plain Newton steps, in all three
   problems.
+
+## 0.2.145
+
+- **Per-cell fields in the sparse embedded Laplace:** a `gmrf` formula inside
+  `@plate for p in groups(g)` is integrated per cell by
+  `brm_laplace_problem(rk; integrate=(declaration,))`, exact for Normal rows, with each cell's strict observation footprint (its
+  rows read only its own field). A cell's row reads are emitted as one dotted
+  per-row read over the plate's shared mesh locator, which ReactiveKernels
+  prepares at the cell's rows.
+- **Breaking:** requires ReactiveKernels 0.1.67 and ReactiveKernelsPPL 0.1.76.
 
 ## 0.2.144
 

@@ -116,6 +116,49 @@ function brm_gmrf_rows(support, east, north, time, channel)
        weight1=weights[:, 1], weight2=weights[:, 2], weight3=weights[:, 3])
 end
 
+# One field of a cell row read (`brm_gmrf_cell_read`), as a function of its
+# own so a broadcast over the reads infers one concrete element type
+# (`getproperty.(reads, :index1)` with a runtime Symbol infers a Union, which
+# native Enzyme refuses).
+brm_gmrf_index1(r) = r.index1
+brm_gmrf_index2(r) = r.index2
+brm_gmrf_index3(r) = r.index3
+brm_gmrf_weight1(r) = r.weight1
+brm_gmrf_weight2(r) = r.weight2
+brm_gmrf_weight3(r) = r.weight3
+const _BRM_GMRF_READ_FIELDS = (; index1=brm_gmrf_index1, index2=brm_gmrf_index2,
+    index3=brm_gmrf_index3, weight1=brm_gmrf_weight1, weight2=brm_gmrf_weight2,
+    weight3=brm_gmrf_weight3)
+
+# The shared mesh locator of a plate's cell fields, built once from their
+# fitted supports (`brm_gmrf_cell_supports`).
+brm_gmrf_cell_locator(fitted) = _brm_gmrf_locator(first(fitted.supports).mesh)
+
+# One row's three vertex reads in a cell's support: state indices and
+# barycentric weights. A cell broadcasts it over its rows,
+# `brm_gmrf_cell_read.(Ref(locator), Ref(support), east, north, time[, channel])`,
+# so ReactiveKernels prepares each read at its own rows (a dotted call) while
+# the locator and support are read whole.
+function brm_gmrf_cell_read(locator, support, east, north, time, channel=1)
+    isfinite(east) && isfinite(north) ||
+        throw(ArgumentError("gmrf spatial coordinates must be finite"))
+    mesh, layout = support.mesh, support.layout
+    cell, b = _brm_gmrf_locate(mesh, locator, east, north, Int[], 1)
+    t = searchsortedfirst(layout.times, time)
+    t <= length(layout.times) && layout.times[t] == time ||
+        throw(ArgumentError("gmrf row time $time is outside the fitted state grid"))
+    # A typed search: the cell's derivative passes through this read, and
+    # Enzyme refuses `findfirst`'s `Union{Nothing,Int}`.
+    c = 0
+    for (k, level) in enumerate(layout.channels)
+        isequal(level, channel) && (c = k; break)
+    end
+    c == 0 && throw(ArgumentError("gmrf row channel $channel is unknown"))
+    offset = layout.nvertices * ((c - 1) + length(layout.channels) * (t - 1))
+    (; index1=offset + mesh.cells[cell, 1], index2=offset + mesh.cells[cell, 2],
+       index3=offset + mesh.cells[cell, 3], weight1=b[1], weight2=b[2], weight3=b[3])
+end
+
 function _rk_plan_gmrf_term!(prepared, target, data, columns, taken; derived)
     state = prepared.state
     sources = collect(prepared.source)
@@ -177,7 +220,7 @@ _rk_ast_identity_factor(n) = Expr(:call, :hcat, (Expr(:vect, (i == j ? 1.0 : 0.0
 # declares its field bare, `field ~ law(...)`, its shape the law's sampling
 # geometry (RKPPL cell submodels bind bare names only).
 function _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, reads, L;
-        cell::Bool=false)
+        cell::Bool=false, accessors=nothing)
     sigma = _rk_block_local!(block, :sigma)
     spatial_length = _rk_block_local!(block, :spatial_length)
     temporal_length = _rk_block_local!(block, :temporal_length)
@@ -189,8 +232,13 @@ function _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, re
         Expr(:call, :~, cell ? field : Expr(:ref, field, Expr(:call, :(:), 1,
             _rk_ast_property(geometry, :ncoordinates))),
             Expr(:call, law, spatial_length, temporal_length, L, geometry)))
-    summands = [Expr(:call, :.*, _rk_ast_property(reads, Symbol(:weight, j)),
-        Expr(:ref, field, _rk_ast_property(reads, Symbol(:index, j)))) for j in 1:3]
+    # A cell's reads are one named tuple per row (`brm_gmrf_cell_read`), read
+    # through dotted accessors (`accessors`, callee names) so each stays a row
+    # form with a concrete element type.
+    access(name) = accessors === nothing ? _rk_ast_property(reads, name) :
+        Expr(:., getproperty(accessors, name), Expr(:tuple, reads))
+    summands = [Expr(:call, :.*, access(Symbol(:weight, j)),
+        Expr(:ref, field, access(Symbol(:index, j)))) for j in 1:3]
     value = Expr(:call, :.*, sigma, Expr(:call, :.+, summands...))
     call = _rk_ast_block_call!(definitions, taken, "brm_gmrf", block, value)
     (; call, sigma, spatial_length, temporal_length, field)
@@ -353,7 +401,7 @@ end
 # supports and their selection for the current cells. Returns the selection's
 # name per field.
 function _rk_emit_cell_gmrf_supports!(statements, bindings, taken, body)
-    selected = IdDict{Any,Symbol}()
+    selected = IdDict{Any,Any}()
     for statement in body
         _rk_is_cell_gmrf(statement) || continue
         spec = _rk_cell_gmrf_spec(statement)
@@ -370,7 +418,10 @@ function _rk_emit_cell_gmrf_supports!(statements, bindings, taken, body)
             Expr(:ref, fit.vertices, 1), Expr(:ref, fit.cells, 1), fit.time,
             (fit.channel === nothing ? () : (fit.channel,))..., fit.group, nchannels...)))
         push!(statements, Expr(:(=), cells, Expr(:call, select, fitted, spec.labels)))
-        selected[spec] = cells
+        locator = _rk_ast_fresh_name(string(spec.id, "_locator"), taken)
+        push!(statements, Expr(:(=), locator, Expr(:call,
+            _rk_value_callee!(bindings, brm_gmrf_cell_locator, taken), fitted)))
+        selected[spec] = (; cells, locator)
     end
     selected
 end
@@ -387,12 +438,12 @@ function _rk_expand_cell_gmrf(statement, index, selected, defs, bindings, taken,
     nrows = spec.channel === nothing ? 3 : 4
     rows_args = marker.args[3:(2 + nrows)]
     input_values = marker.args[(3 + nrows):end]
-    support = Expr(:ref, selected[spec], index)
+    support = Expr(:ref, selected[spec].cells, index)
     rows = _rk_ast_fresh_name(string(spec.id, "_rows"), union(avoid, taken))
     declared = _rk_ast_fresh_name(spec.id, union(avoid, taken))
     push!(avoid, rows, declared)
     push!(taken, declared)
-    reader = _rk_value_callee!(bindings, brm_gmrf_rows, taken)
+    reader = _rk_value_callee!(bindings, brm_gmrf_cell_read, taken)
     law = _rk_value_callee!(bindings, _BRMGMRFLaw, taken)
     block = _rk_block_body()
     geometry = _rk_block_argument!(block, :geometry, _rk_ast_property(support, :geometry))
@@ -410,13 +461,16 @@ function _rk_expand_cell_gmrf(statement, index, selected, defs, bindings, taken,
     prior = map(spec.priors) do p
         _rk_rename_symbols(_rk_ast_positive_prior(p, bindings, taken; default=:LogNormal), renamed)
     end
-    locals = _rk_ast_gmrf_block!(defs, taken, law, block, prior, geometry, reads, L; cell=true)
+    accessors = map(f -> _rk_value_callee!(bindings, f, taken), _BRM_GMRF_READ_FIELDS)
+    locals = _rk_ast_gmrf_block!(defs, taken, law, block, prior, geometry, reads, L;
+        cell=true, accessors)
     _rk_coordinate_record!(coordinates, (; kind=:cell_gmrf, declaration=declared,
         name=spec.target, kernel=kernel, id=spec.id, labels=spec.labels, fit=spec.fit,
-        cells=selected[spec], correlation=spec.correlation,
+        cells=selected[spec].cells, correlation=spec.correlation,
         nchannels=spec.correlation === nothing ? nothing : spec.correlation.K, locals))
     entry = Expr(:ref, declared, index)
-    Any[Expr(:(=), rows, Expr(:call, reader, support, rows_args...)),
+    Any[Expr(:(=), rows, Expr(:., reader, Expr(:tuple, Expr(:call, :Ref, selected[spec].locator),
+            Expr(:call, :Ref, support), rows_args...))),
         Expr(:call, :~, entry, locals.call),
         Expr(:(=), lhs, entry)]
 end
