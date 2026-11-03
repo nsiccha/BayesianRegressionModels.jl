@@ -53,6 +53,7 @@ const TESTENV = @__DIR__
 # name => (github url, pinned commit)   — comment records the branch the commit
 # is on, for humans; the pin itself is the full SHA and needs no branch.
 const PINS = [
+    ("PowerScaling", "https://github.com/nsiccha/PowerScaling.jl.git", "8d27c83f6928781a39c99c31fd3d528b50ef2dad"),  # 0.1.0: generic power-scaling sensitivity on PSIS.jl
     ("ReparametrizableDistributions", "https://github.com/nsiccha/ReparametrizableDistributions.jl.git", "8f7d382df700d3780ed31d093bc4983d3734a6c6"),  # 0.3.0: shared parameter views, Cholesky and simplex transforms
     ("HTMX", "https://github.com/nsiccha/HTMX.jl.git", "0b8dc2f94e879bf31237bd28e751cf2ebc8d95f6"),
     ("HTMXObjects", "https://github.com/nsiccha/HTMXObjects.jl.git", "d2a86956a221035c4f1b9ac629836e90ae77a2b5"),
@@ -76,8 +77,8 @@ const PINS = [
     ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "009f418067563349edf0b311004f215f7c4e1f17"),  # devibe: `restricted(family, args...; lower, upper)` declares the bounds and keeps the plain kernel (566bbc0f, StanBlocks 0.2.7, snag in-slic-declare-996328e0), which SBBRMI emits for every prior bound; a `truncated` draw succeeds whatever mass its window holds: after 100 misses it inverts the base CDF on the window (9a4fb3a6, StanBlocks 0.2.6, snag truncated-rng-re-bd555cae), which BRM's omitted truncated responses and `_gen` draws call; `rv[idx]` selects groups of a ragged value and `sum(rv)` adds its groups elementwise (ffbaff09, StanBlocks 0.2.2, snag selecting-severa-027a8191), which BRM's model-scope reads of a ragged plate output pass through; Stan's `sum_to_zero_constrain`/`_unconstrain`/`_jacobian` trace (8e57a83, snag sum-to-zero-cons-90a72024) and `head`/`tail`/`reverse` (359844e, snag stan-vector-buil-5792b9e5), which `T::shares(total)` cell latents call, both in f5e4650; a `Vector{Matrix}` data value ingests as a `RaggedMatrix` and `X[g]` reads the g-th matrix in a plate cell (c9504e99, snag ragged-matrix-da-163255e9); a plate cell may bind a matrix local of fixed or per-cell size (a57951eb, snag binding-a-per-ce-e16efa8d); a plate's Stan names follow from each value's own name, without the `__pl_mem_1` suffix (1d93a65), and `stan_interface` / `stan_data_json` describe the program (dc3f713), both in fd91d0c; tuple descriptor entries carry their components in `fields` (785edf4); ragged sizes are reported derived (9118764); a values-free `maybecv(:y)` marks an observation with no values as predicted given a fit (c4671eb, snag held-out-observa-58a2eb13); shared scan arguments read once per step, linear in series length (b97fc5a6); Stan's vectorised builtins (`fmax`, `fmin`, …) evaluate elementwise in the Julia layer, so a per-axis `fmax(0.0, lo)` bound reads one value per coordinate (c7293b88); descriptor inputs/outputs carry `constraint_values`, their bounds evaluated against the bound data (b233afbc); a `ValueFamily` as the base family of `weighted`/`truncated`/`censored`/`interval_censored` with `lcdf=`/`lccdf=` companions (94e414bb); descriptor outputs carry their value shape as `dims`; non-finite literals render as Stan infinity builtins; `weighted` over censored/truncated/interval_censored; an exchangeable ordered prior re-draws as the sorted iid draw; observed scans and per-cell scan lengths (82a954da), also through a do-cell parameter that shadows its data name (4ee6e0e8); integer step locals in nested scans (2f5b6203); a latent or observed `@scan` inside a called `@slic` submodel (e67bc314), observing a plate cell's group (d3483f11); `interval_censored`'s interval by keyword and unknown combinator keywords refused (897557c); typed `=` in `stan_descriptor` (204e5a7)
     # Cooperative interruption used by BRM's progress hooks.
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "f071111945c165dbae097e94c5939b79103434ac"),
-    # 0.2.10: weighted-cloud moments required by the current RKPPL SMC extension.
-    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "41b7fba7ccfcb01049ec859cda596646e5238516"),
+    # 0.2.11: public covariance projection used by selective SMC carries.
+    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "8e1d45a78b38e3e9d82ee75312e0eb7e5203d327"),
     ("SequentialMonteCarlo", "https://github.com/awllee/SequentialMonteCarlo.jl.git", "d3a322394c7a1df07e3b5e941acc2960f4daf656"),
     # Current plain-function/array PPL surface, with data-only declaration inputs
     # retained before predictor inlining (computed membership axes; 606d76d0),
@@ -264,7 +265,11 @@ const PINS = [
     # RKPPL 0.1.57: independent prepared-density SMC factories.
     # RK 0.1.57 / PPL 0.1.64: caller-owned joint density KernelSpecs and geometry.
     # RK 0.1.59 / PPL 0.1.66: property-based whole-parameter geometry dimensions.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "634bf2aa2430f9897958e7055fa50783593cd54b"),
+    # PPL 0.1.60 / DistributionKernels 0.1.1 keeps Normal interval masses
+    # and native Reverse gradients finite in both extreme tails.
+    # RK 0.1.61 / PPL 0.1.70: selective growing-window targets, conditional
+    # recovery and bounded-rank joint Gaussian carries.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "f5628f179b7cd9e2c47568c82bf956c6ea43a8aa"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
@@ -290,7 +295,10 @@ const PINS = [
     # inference preserves nested reduction types during ordinary Reverse,
     # including sum(sum, columns) after matrix-valued plate helpers.
     # 93e89fc8 / libEnzyme 7f957e67 also supplies the concurrent-GC repair.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "93e89fc870d240d9489f88d665c28302eb6b5e4e"),  # dogfood (KB mirror only)
+    # 474fd636 / libEnzyme df199913 preserves JIT symbols from augmented
+    # reverse helpers under Forward, including the digamma partials needed
+    # by ordinary negative-binomial compact-cell HVPs.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "474fd63654e64fdff77eed5326b9f9c6613dac50"),  # dogfood (KB mirror only)
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also

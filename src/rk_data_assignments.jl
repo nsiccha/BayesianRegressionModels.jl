@@ -20,7 +20,8 @@ _rk_attach_data_assignments!(plan::_RKUnconditionedPlan, _assignments, _constant
 _rk_plan_taken(plan::_RKStructuralPlan) = union!(Set{Symbol}(keys(plan.columns)),
     (d.name for d in plan.derived), (p.name for p in plan.parameters),
     (p.name for p in plan.predictors), (a.name for a in plan.assignments),
-    (v.name for v in plan.vector_parameters))
+    (v.name for v in plan.vector_parameters),
+    (first(binding) for binding in _rk_extent_bindings(plan)))
 _rk_plan_taken(plan::_RKValuePlan) = union!(_rk_plan_taken(plan.regression),
     keys(plan.columns), (a.name for a in plan.assignments))
 
@@ -50,6 +51,16 @@ function _rk_attach_data_assignments!(derived::Vector{_RKDerivedSpec}, columns,
     used_constants = Symbol[]
     lowered = Dict(name => _rk_lower_data_assignment(by_name[name].node, by_name,
         constant_nodes, raw, used_constants) for name in order)
+    # A masked HSGP already defines its numeric axis from a raw source. An
+    # authored assignment supplies that source, preserving its missing values
+    # for validation and for other assignments that read it. Defining the axis
+    # a second time would both lose that distinction and violate single assignment.
+    masked = Dict(spec.name => spec.expression.args[2] for spec in derived
+        if haskey(by_name, spec.name) && Meta.isexpr(spec.expression, :_rk_data_preparation) &&
+            first(spec.expression.args) === :brm_hsgp_masked_axis)
+    live(x::Symbol) = get(masked, x, x)
+    live(x::Expr) = Expr(x.head, map(live, x.args)...)
+    live(x) = x
     # Every constant first: it reads fit-role inputs alone.
     for key in unique(used_constants)
         node = constant_nodes[key]
@@ -71,16 +82,22 @@ function _rk_attach_data_assignments!(derived::Vector{_RKDerivedSpec}, columns,
     twin(x::Expr) = Expr(x.head, map(twin, x.args)...)
     twin(x) = x
     for name in order
-        push!(derived, _RKDerivedSpec(name, Expr(:_rk_data_assignment, lowered[name]), name))
+        push!(derived, _RKDerivedSpec(live(name),
+            Expr(:_rk_data_assignment, live(lowered[name])), name))
         name in twinned || continue
         label = _rk_fit_label(name)
         index = findfirst(spec -> spec.label === label, derived)
         twin_name = index === nothing ? _rk_fit_name!(derived, columns, taken, name) :
             derived[index].name
         index === nothing || deleteat!(derived, index)
-        push!(derived, _RKDerivedSpec(twin_name,
-            Expr(:_rk_data_assignment, twin(lowered[name])), label))
-        fit_twins[name] = twin_name
+        raw_twin = haskey(masked, name) ?
+            _rk_mint_generated!(taken, columns, string(masked[name], "_fit")) : twin_name
+        push!(derived, _RKDerivedSpec(raw_twin,
+            Expr(:_rk_data_assignment, twin(lowered[name])),
+            haskey(masked, name) ? _rk_fit_label(masked[name]) : label))
+        raw_twin === twin_name || push!(derived, _RKDerivedSpec(twin_name,
+            Expr(:_rk_data_preparation, :brm_hsgp_masked_axis, raw_twin), label))
+        fit_twins[name] = raw_twin
     end
     nothing
 end

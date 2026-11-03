@@ -31,6 +31,9 @@ what [`brm_fitted_state`](@ref) returns. It holds
 - `fits`: the fits the planner computes in Julia (factor and `mo` level sets,
   spline fits), keyed by what they fit;
 - `constants`: the `name = constant(expr)` values;
+- `scalars`: numeric scalar data inputs, including prior arguments and inputs
+  of `constant(...)`. Omitted fields take these fitted values; supplied prior
+  arguments must still reproduce the fitted program;
 - `declaration`: the authored model (`show(brm_source(rk))`), which a replay's
   model must repeat;
 - `program`: the fit's emitted program, which a replay must reproduce;
@@ -51,6 +54,7 @@ struct BRMFittedState
     fit_twins::Dict{Symbol,Symbol}
     fits::Dict{Tuple{Symbol,Symbol},Any}
     constants::Dict{Symbol,Any}
+    scalars::Dict{Symbol,Any}
     declaration::String
     program::Vector{String}
     coordinates::Vector{Symbol}
@@ -59,7 +63,7 @@ struct BRMFittedState
     held_out::Tuple{Vararg{Symbol}}
 end
 
-const _BRM_FITTED_STATE_FORMAT = 1
+const _BRM_FITTED_STATE_FORMAT = 2
 
 """
     brm_fitted_state(rk::RKBRMI) -> BRMFittedState
@@ -78,11 +82,22 @@ function brm_fitted_state(rk::RKBRMI)
     BRMFittedState(_BRM_FITTED_STATE_FORMAT, _rk_frozen_values(rk, names),
         sort!(collect(fit_inputs)), reads,
         Dict{Symbol,Symbol}(_rk_plan_fit_inputs(rk.plan)),
-        _rk_recorded_fits(rk), _rk_fitted_constants(rk), sprint(show, brm_source(rk)),
+        _rk_recorded_fits(rk), _rk_fitted_constants(rk), _rk_fitted_scalars(rk),
+        sprint(show, brm_source(rk)),
         _rk_program_statements(emitted), _rk_layout_coordinate_names(rk),
-        Dict{Symbol,Any}(name => value isa AbstractArray ? eltype(value) : typeof(value)
-            for (name, value) in _rk_training_columns(parent(rk))),
+        _rk_fitted_column_types(rk),
         sort!(collect(_rk_response_names(rk.plan))), Tuple(_rk_held_out_names(rk.plan)))
+end
+
+_rk_fitted_scalars(rk::RKBRMI) = rk.fitted === nothing ?
+    _rk_scalar_data(parent(rk)) : deepcopy(rk.fitted.state.scalars)
+
+function _rk_fitted_column_types(rk::RKBRMI)
+    columns = rk.fitted === nothing ? Dict{Symbol,Any}() : copy(rk.fitted.state.columns)
+    for (name, value) in _rk_training_columns(parent(rk))
+        columns[name] = value isa AbstractArray ? eltype(value) : typeof(value)
+    end
+    columns
 end
 
 # Select graph summaries without rerunning the planner's fit collection.
@@ -168,14 +183,20 @@ _rk_fitted_definition(statement, fitted) = Meta.isexpr(statement, :(=), 2) &&
 # The fits the planner computes in Julia, recorded while it plans the fit's own
 # data as a frozen replay of itself (`_brm_fitted`).
 function _rk_recorded_fits(rk::RKBRMI)
-    training = _rk_frozen_training(parent(rk))
     record = Dict{Tuple{Symbol,Symbol},Any}()
-    constants = _rk_fitted_constants(rk)
     # Re-exporting a data-free replay preserves its original fitted geometry
-    # and priors. Only its resampled groups have acquired current level sets.
-    groups = rk.fitted === nothing ? Set{Symbol}() : Set(rk.fitted.resample)
-    fits = rk.fitted === nothing ? nothing : rk.fitted.state.fits
-    _brm_with_frozen_replay(_BRMFrozenReplay(training, groups, fits, record)) do
+    # and priors, without evaluating constants on missing training inputs.
+    # Only its resampled groups have acquired current level sets.
+    if rk.fitted !== nothing
+        template = brm_source(rk)
+        _rk_fitted_replay_plan(template, _rk_brmi_data(template), rk.fitted.state;
+            resample_groups=rk.fitted.resample, held_out=_rk_held_out_names(rk.plan),
+            record, prefix="brm_fitted_state")
+        return record
+    end
+    training = _rk_frozen_training(parent(rk))
+    constants = _rk_fitted_constants(rk)
+    _brm_with_frozen_replay(_BRMFrozenReplay(training, Set{Symbol}(), nothing, record)) do
         _brm_rk_plan(parent(rk); held_out=_rk_held_out_names(rk.plan),
             fitted_constants=(name, _source) -> get(constants, name, nothing))
     end
@@ -196,7 +217,8 @@ end
 # frozen binding replaces them with `state.fitted`), and the emitted program
 # must be the fit's. `template` is the model on any data (`builder(new_data)`).
 function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
-        resample_groups=(), held_out=state.held_out, prefix="RK data-free replay")
+        resample_groups=(), held_out=state.held_out, prefix="RK data-free replay",
+        record=nothing)
     state.format == _BRM_FITTED_STATE_FORMAT || error(
         "$prefix: a format-$(state.format) fitted state; this BRM reads format " *
         "$_BRM_FITTED_STATE_FORMAT, so export it again from the fit")
@@ -213,9 +235,10 @@ function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
     absent = Dict{Symbol,Any}(name => _BRMAbsentResponse{state.columns[name]}(name)
         for name in state.responses
         if haskey(state.columns, name) && !_brm_df_has_column(new_data, name))
+    merge!(absent, _rk_omitted_scalars(state.scalars, new_data))
     rebound = _brm_rebind_brmi(_brm_resolve_optional_priors(template),
         _BRMReplayData(new_data, absent))
-    frozen = _BRMFrozenReplay(Dict{Symbol,Any}(), groups, state.fits, nothing)
+    frozen = _BRMFrozenReplay(state.scalars, groups, state.fits, record)
     plan = _brm_with_frozen_replay(frozen) do
         _brm_rk_plan(rebound; held_out,
             fitted_constants=(name, _source) -> get(state.constants, name, nothing))
@@ -270,7 +293,11 @@ _rk_resampled_fit_inputs(state::BRMFittedState, groups) =
 # when its program's callables are the same.
 function _rk_fitted_replay(template::BRMI, new_data, state::BRMFittedState;
         resample_groups=(), held_out=state.held_out, previous=nothing,
-        prefix="RK data-free replay")
+        prefix="RK data-free replay", coordinates=:fixed)
+    coordinates in (:fixed, :growing) || throw(ArgumentError(
+        "$prefix: unsupported coordinate replay mode $coordinates"))
+    coordinates === :growing && !isempty(resample_groups) && throw(ArgumentError(
+        "$prefix: growing windows retain the fitted group levels"))
     groups = _rk_resample_group_set(resample_groups; prefix)
     plan, emitted = _rk_fitted_replay_plan(template, new_data, state;
         resample_groups=groups, held_out, prefix)
@@ -281,12 +308,17 @@ function _rk_fitted_replay(template::BRMI, new_data, state::BRMFittedState;
         program, bound, source=template, fitted=_RKFittedReplay(state, frozen, groups))
     if isempty(groups)
         names = _rk_layout_coordinate_names(backend)
-        names == state.coordinates || error(
-            "$prefix: the new data changes the fitted coordinates " *
-            "($(length(state.coordinates)) fitted, $(length(names)) on the " *
-            "replay), so the fit's draws do not apply to it. A grouping whose " *
-            "levels the replay does not freeze must be named in " *
-            "`resample_groups`.")
+        if coordinates === :growing
+            issubset(Set(state.coordinates), Set(names)) || error(
+                "$prefix: a growing window cannot remove fitted coordinates")
+        else
+            names == state.coordinates || error(
+                "$prefix: the new data changes the fitted coordinates " *
+                "($(length(state.coordinates)) fitted, $(length(names)) on the " *
+                "replay), so the fit's draws do not apply to it. A grouping whose " *
+                "levels the replay does not freeze must be named in " *
+                "`resample_groups`.")
+        end
     end
     backend
 end

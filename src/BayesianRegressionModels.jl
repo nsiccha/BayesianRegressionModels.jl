@@ -23,7 +23,7 @@ using ReparametrizableDistributions: advance!!, lkj_cholesky!, simplex!
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, nonzeros, rowvals, nzrange, blockdiag
 using SelectedInversion: selinv_diag, selinv, selinv_extract
 import SparseArrays, SelectedInversion, KLU, MUMPS
-import KrylovKit
+import KrylovKit, PowerScaling
 import Krylov
 import LimitedLDLFactorizations
 using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
@@ -185,8 +185,7 @@ include("posterior_diagnostics.jl")
 include("ranef_draws.jl")
 include("multigroup_readers.jl")
 
-# Prior/likelihood power-scaling sensitivity — PSIS weights, CJS distance, the
-# per-variable summary, and the SBBRMI input assembly. After the descriptor
+# PowerScaling.jl adapter and SBBRMI input assembly. After the descriptor
 # and diagnostics, whose coordinates and draw conventions it stands on.
 include("powerscale.jl")
 
@@ -241,6 +240,7 @@ export brm_fitted_state, BRMFittedState
 export BRMSVIState, BRMSVILaplaceState, GaussianBlockLaplace, brm_svi_checkpoint
 export BRMSMCFit, brm_smc_fit, brm_smc_tune, brm_smc_update, brm_smc_checkpoint, brm_smc_resume
 export BRMSMCCarriedReference, BRMSMCWindowFit, brm_smc_carry
+export brm_smc_coordinates, brm_smc_recover
 export brm_smc_compare, brm_smc_runs
 export BRMFilter, brm_filter, brm_filter_step, brm_filter_stream,
     brm_filter_checkpoint, brm_filter_resume
@@ -354,8 +354,7 @@ export AbstractAdaptiveCenteringBlock, AdaptiveCenteringBlock,
        select_ranef_centeredness
 export brm_output_draws, brm_predictive_draws, hsgp_coordinate_draws, hsgp_transform_draws, hsgp_boundary_check
 export brm_output_tree, brm_ranef_tree, brm_predictive_tree, brm_conditional_tree, rk_draw_tree
-export BRMPowerscaleSensitivity, brm_psis_weights, brm_cjs_dist,
-       brm_powerscale_weights, brm_powerscale_sensitivity, brm_powerscale_inputs
+export BRMPowerscaleSensitivity, brm_powerscale_sensitivity, brm_powerscale_inputs
 export brm_prediction_grid, brm_conditional_draws, brm_contrast_draws,
        brm_slope_draws, brm_summarize_draws
 export brm_posteriorplot, brm_ppcplot, brm_pairplot,

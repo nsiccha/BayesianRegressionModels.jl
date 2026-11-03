@@ -25,7 +25,7 @@ MCMCDiagnosticTools = "be115224-59cd-429b-ad48-344e309966f0"
 LogExpFunctions = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
 OutputSignatures = "86cfaae4-1704-4c69-ba62-d919d81ae5f8"
 Pathfinder = "b1d3bc72-d0e7-4279-b92f-7fa5d6d2d454"
-PSIS = "ce719bf2-d5d0-4fb9-925d-10a81b42ad04"
+PowerScaling = "ea5902b9-87b7-4ea4-9e46-f9c5bf9e0b31"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 ReparametrizableDistributions = "7d03e222-df96-4b80-bcdc-d089be88b5f2"
 ReactiveKernels = "78e9f072-d36b-4c73-b7a3-751b0eb26cf9"
@@ -56,18 +56,22 @@ Enzyme = "0.13"
 # The pinned Enzyme dogfood (test/setup_env.jl) requires 0.0.301 and runs
 # against its own libEnzyme build instead of the jll's library.
 Enzyme_jll = "< 0.0.302, >= 0.0.303"
-PSIS = "0.9"
+PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
 StanBlocks = "0.2.19"
 Treebars = "0.1.1"
 Turing = "0.46"
-WarmupHMC = "0.2.10"
+WarmupHMC = "0.2.11"
 julia = "1.10"
 
 [sources.TreeArrays]
 url = "https://github.com/nsiccha/TreeArrays.jl"
 rev = "53cfd1b17ee4d1b726dcecfe151458ae41bd20a8"
+
+[sources.PowerScaling]
+url = "https://github.com/nsiccha/PowerScaling.jl"
+rev = "8d27c83f6928781a39c99c31fd3d528b50ef2dad"
 
 [sources.ReparametrizableDistributions]
 url = "https://github.com/nsiccha/ReparametrizableDistributions.jl"
@@ -147,8 +151,8 @@ rev = "f071111945c165dbae097e94c5939b79103434ac"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
-# 0.2.10: weighted-cloud moments required by the current RKPPL SMC extension.
-rev = "41b7fba7ccfcb01049ec859cda596646e5238516"
+# 0.2.11: public covariance projection used by selective SMC carries.
+rev = "8e1d45a78b38e3e9d82ee75312e0eb7e5203d327"
 
 [sources.SequentialMonteCarlo]
 url = "https://github.com/awllee/SequentialMonteCarlo.jl.git"
@@ -301,4 +305,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # Guarded gathered reductions through typed aliases: RK 0.1.52 / PPL 0.1.55.
 # RK 0.1.57 / PPL 0.1.64: caller-owned joint density KernelSpecs and geometry.
 # RK 0.1.59 / PPL 0.1.66: property-based whole-parameter geometry dimensions.
-rev = "634bf2aa2430f9897958e7055fa50783593cd54b"
+# PPL 0.1.60 / DistributionKernels 0.1.1: log-space interval masses and tails.
+# RK 0.1.61 / PPL 0.1.70: selective windows, recovery and bounded joint carries.
+rev = "f5628f179b7cd9e2c47568c82bf956c6ea43a8aa"

@@ -238,16 +238,20 @@ function BRM._rk_spl_cell_ad(backend::BRM.RKBRMI, observations::Tuple,
     built, plan = backend.model, rkext._rk_translated(backend)
     m = length(indices0)
     forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
-    second = SecondOrder(AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse,
-        ad_backend)), forward)
+    reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
+    # Ordinary cells have one active vector and a fixed direction-tuple arity.
+    # Forward-over-reverse reduces the work of their Newton and implicit HVPs.
+    second = SecondOrder(forward, reverse)
     hvp = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_hvp, built, plan,
         observations, base0, indices0, second, ntuple(_ -> zeros(Float64, m), K))
     # The implicit correction needs only H*v after the global solve. Keep its
     # one-direction preparation separate from the Newton Hessian block.
     single = K == 1 ? hvp : Base.invokelatest(prepare_compact_cell_ad, prepare_ad_hvp,
         built, plan, observations, base0, indices0, second, (zeros(Float64, m),))
+    # Keep the supported reverse-over-forward-over-forward third derivative.
     third = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_third, built, plan,
-        observations, base0, indices0, SecondOrder(second, forward), (zeros(Float64, m),))
+        observations, base0, indices0, SecondOrder(SecondOrder(reverse, forward), forward),
+        (zeros(Float64, m),))
     (; hvp, single, third)
 end
 
