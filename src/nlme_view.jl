@@ -1858,6 +1858,20 @@ function _brm_nlme_cell_plan(backend::RKBRMI, cells, unit, globals, blocks, read
     (; samplers, selections, slots, buffers)
 end
 
+# A plan for another task: its own compact samplers (each owns an AD workspace
+# and a selection map, RK's one-per-caller contract) and call buffers, sharing
+# the read-only `selections` and `slots`, which are sized by the model's cells.
+function _brm_nlme_worker_plan(plan, backend::RKBRMI, cells, unit)
+    samplers = map(eachindex(cells)) do g
+        i = findfirst(subject -> !isempty(subject[g]), plan.selections)
+        i === nothing ? nothing : _rk_nlme_compact_cell_sampler(backend, cells[g].names,
+            unit, first(plan.selections[i][g]))
+    end
+    buffers = [(; active=zeros(length(b.active)), gradient=zeros(length(b.gradient)))
+        for b in plan.buffers]
+    (; samplers, plan.selections, plan.slots, buffers)
+end
+
 # Subject `i`'s `k`-th cell of group `g` (at cell position `p`) through `plan`:
 # returns its value and adds its gradient into `gradient`, both aligned with
 # `values`, the point's values at the subject's sorted `[globals; block]`.

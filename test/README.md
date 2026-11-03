@@ -1057,6 +1057,17 @@ fit is compared with NUTS too. Starts (prior medians, a packed point,
 `inits`) and their refusals are covered as well. It runs in the test
 environment above.
 
+`nlme_svi_threads.jl` checks `brm_svi_fit(...; threads)` with real threads (run
+it with `--threads=4`; it refuses to run without them). The state after every
+iteration, whose Adam moments are the gradient trajectory, and the draws must equal
+the one-task run to the last bit: through exploration and polishing, beside a thread
+that allocates and collects, on nested blocks of different lengths, flat rows, a
+low-rank global factor, the default random stream, a resume at another count and a
+window fit. It also covers each worker's own samplers over shared read-only tables,
+how a failing unit stops the tasks, the BLAS pin and the refusals.
+`research/svi_threads/benchmark.jl` measures per-iteration time, GC share and retained
+worker memory against `threads`.
+
 `nlme_svi_laplace_plan.jl` checks structural eligibility for
 `GaussianBlockLaplace`, including fixed HSGP fitting inputs, nonstandard
 Gaussian coefficient priors, and named refusals for nonlinear expressions.
@@ -1111,7 +1122,7 @@ derivatives. This checks independence from previous evaluations; the
 approximation still uses one mode.
 
 `laplace_continuation.jl` checks which conditional mode the marginal uses:
-the one continuation from the prior reaches (BRM 0.2.146). One unit with a
+the one continuation from the prior reaches (BRM 0.2.147). One unit with a
 squared-mean and a linear Normal observation has two conditional modes on part
 of the population line. On both the whole-model and the sparse target:
 - the value and the selected mode match a scalar oracle of the followed mode
