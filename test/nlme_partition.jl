@@ -127,3 +127,46 @@ end
         @test brm_nlme_loglikelihood(m, i, θ, σ, H[i]) ≈ expected[i] atol=1e-9 rtol=1e-10
     end
 end
+
+@stestset "one-unit calls write a dense point in place and hold θ and σ fixed for η" begin
+    # The same three subjects repeated: 16 times the units multiplies the
+    # packed coordinates but not one unit's work.
+    function plate_data(n)
+        base = NLME_PLATE_DATA
+        pick = [mod1(i, length(base.subject)) for i in 1:n]
+        (; subject=["s$i" for i in 1:n], dose=base.dose[pick],
+            weight=base.weight[pick] .+ 0.01 .* (1:n), t=base.t[pick], dv=base.dv[pick])
+    end
+    rng = Xoshiro(7)
+    allocations = map((3, 48)) do n
+        m = brm_nlme_model(RKBRMI(nlme_plate_pk(plate_data(n))); ad_backend=NLME_AD)
+        θ = 0.1 .* randn(rng, length(m.theta))
+        σ = 0.1 .* randn(rng, length(m.sigma))
+        H = [0.2 .* randn(rng, length(b)) for b in m.view.subject_coordinates]
+        plan = BRM._brm_nlme_cell_state(m).plan
+        for i in eachindex(H)
+            # The η route differentiates only the unit's own effects; it
+            # agrees with the η entries of the full θ, σ and η gradient.
+            value, gradient = brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, H[i])
+            full, indices, selected, block =
+                BRM._brm_nlme_cell_value_and_selected_gradient(m, i, θ, σ, H[i])
+            @test value ≈ full rtol=1e-12
+            @test gradient ≈ selected[[searchsortedfirst(indices, j) for j in block]] rtol=1e-10 atol=1e-12
+            @test issubset(plan.local_footprints[i], block)
+            @test brm_nlme_loglikelihood(m, i, θ, σ, H[i]) ≈ value rtol=1e-12
+        end
+        # Outside a call the work points equal the unit point again, also
+        # after an argument error.
+        @test_throws DimensionMismatch brm_nlme_loglikelihood(m, 1, θ, σ, H[1][1:end-1])
+        @test plan.point == m.unit
+        @test m.cell_gradient.point == m.unit
+        brm_nlme_loglikelihood_and_gradient(m, 1, θ, σ, H[1])
+        brm_nlme_loglikelihood(m, 1, θ, σ, H[1])
+        (; packed=length(m.unit),
+            gradient=@allocated(brm_nlme_loglikelihood_and_gradient(m, 1, θ, σ, H[1])),
+            value=@allocated(brm_nlme_loglikelihood(m, 1, θ, σ, H[1])))
+    end
+    @test allocations[2].packed > 10allocations[1].packed
+    @test allocations[2].gradient <= 1.2allocations[1].gradient
+    @test allocations[2].value <= 1.2allocations[1].value
+end

@@ -105,7 +105,7 @@ function _brm_nlme_worker_model(m::BRMNLMEModel)
     (; reads, patterns) = _brm_nlme_cell_state(m)
     g = m.cell_gradient
     partition = (; g.context, query=_rk_nlme_partition_query(g.context, m.unit),
-        g.labels, g.footprints)
+        g.labels, g.footprints, point=copy(m.unit))
     plan = _brm_nlme_partition_plan(partition, m.unit,
         sort!(vcat(m.theta, m.sigma)), m.view)
     cell_gradient = (; partition..., state=Ref{Any}((; reads, plan, patterns)),

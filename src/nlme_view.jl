@@ -1558,6 +1558,8 @@ function _rk_nlme_partition_query_footprint end
 function _rk_nlme_partition_sampler end
 function _rk_nlme_partition_footprint end
 function _rk_nlme_partition_value_and_gradient! end
+function _rk_nlme_partition_local_footprint end
+function _rk_nlme_partition_value_and_local_gradient! end
 function _rk_nlme_cell_footprint_query end
 function _rk_nlme_cell_footprint end
 function _rk_nlme_population_prior end
@@ -1763,8 +1765,42 @@ function _brm_nlme_partition_queries(backend, cells, view, unit, partitioned, pr
                 end
             end
         end
-        (; context, query, labels, footprints, state=Ref{Any}(nothing), lock=ReentrantLock())
+        (; context, query, labels, footprints, state=Ref{Any}(nothing),
+            lock=ReentrantLock(), point=copy(unit))
     end
+end
+
+# A unit is evaluated at a dense packed point owned by its query or plan, not
+# at a lazy overlay: RK's partition gradient copies any other AbstractVector
+# into a Vector on every call, which costs the whole packed length (224k
+# coordinates on Atlas) per unit, and the overlay's reads are binary searches.
+# Only the positions the caller sets are written, and `_brm_nlme_restore!`
+# puts back `unit` there, so outside a call the point equals `unit`. The
+# caller holds the owner's lock.
+function _brm_nlme_restore!(point, unit, positions)
+    for j in positions
+        point[j] = unit[j]
+    end
+    point
+end
+function _brm_nlme_write!(point, positions, values)
+    for (k, j) in enumerate(positions)
+        point[j] = values[k]
+    end
+    point
+end
+_brm_nlme_unit_positions(m, i) = (m.theta, m.sigma, m.view.subject_coordinates[i])
+function _brm_nlme_write_unit!(point, m, i, θ, σ, η)
+    for (positions, values) in zip(_brm_nlme_unit_positions(m, i), (θ, σ, η))
+        _brm_nlme_write!(point, positions, values)
+    end
+    point
+end
+function _brm_nlme_restore_unit!(point, m, i)
+    for positions in _brm_nlme_unit_positions(m, i)
+        _brm_nlme_restore!(point, m.unit, positions)
+    end
+    point
 end
 
 # One compact sampler per owner of mutable AD workspace (model, SVI target or
@@ -1785,20 +1821,64 @@ function _brm_nlme_partition_plan(partition, unit, globals, view)
     slots = [[_brm_sorted_slot(indices[i], j) for j in footprint]
         for (i, footprint) in enumerate(footprints)]
     gradients = [zeros(length(footprint)) for footprint in footprints]
-    (; sampler, indices, footprints, slots, gradients, labels=partition.labels)
+    # The unit's own effects only (RK `shared=false`): an η gradient at fixed
+    # population coordinates neither differentiates nor pulls back through the
+    # shared values. `eta_slots[i][k]` is the place in the unit's block of the
+    # k-th local footprint position; positions RK declares local are the
+    # unit's effects (`_rk_nlme_partitioned`), which ownership checks confirm.
+    local_footprints = map(eachindex(indices)) do i
+        i in partition.labels || return Int[]
+        _rk_nlme_partition_local_footprint(sampler, i)
+    end
+    eta_slots = map(eachindex(local_footprints)) do i
+        block = view.subject_coordinates[i]
+        map(local_footprints[i]) do j
+            k = findfirst(==(j), block)
+            k === nothing && _brm_nlme_error("brm_nlme_model: subject $i's " *
+                "local partition gradient reads coordinate " *
+                "$(view.coordinates[j]), which is not one of its effects")
+            k
+        end
+    end
+    local_gradients = [zeros(length(footprint)) for footprint in local_footprints]
+    (; sampler, indices, footprints, slots, gradients, local_footprints, eta_slots,
+        local_gradients, labels=partition.labels, point=copy(unit))
 end
 
-# Evaluate a unit in one compiled pass, with no packed point/gradient copy.
-# The caller owns this plan's workspace or holds its model's lock.
-function _brm_nlme_partition_sum!(gradient, plan, unit, i, values)
+# Evaluate a unit in one compiled pass at the plan's dense point, whose
+# `indices[i]` positions the caller has written; `gradient` follows
+# `indices[i]`. The caller owns this plan's workspace or holds its model's lock.
+function _brm_nlme_partition_evaluate!(gradient, plan, i)
     fill!(gradient, 0.0)
     i in plan.labels || return 0.0
-    point = _BRMNLMEPoint(unit, plan.indices[i], values, Int[], Float64[],
-        Int[], Float64[])
     value = first(_rk_nlme_partition_value_and_gradient!(plan.sampler,
-        plan.gradients[i], point, i))
+        plan.gradients[i], plan.point, i))
     for (k, slot) in enumerate(plan.slots[i])
         slot == 0 || (gradient[slot] = plan.gradients[i][k])
+    end
+    value
+end
+
+# The same with `values` at `indices[i]` and `unit` everywhere else.
+function _brm_nlme_partition_sum!(gradient, plan, unit, i, values)
+    positions = plan.indices[i]
+    _brm_nlme_write!(plan.point, positions, values)
+    try
+        _brm_nlme_partition_evaluate!(gradient, plan, i)
+    finally
+        _brm_nlme_restore!(plan.point, unit, positions)
+    end
+end
+
+# The unit's value and its η gradient in block order, at the plan's point.
+function _brm_nlme_partition_eta!(gradient, plan, i)
+    fill!(gradient, 0.0)
+    i in plan.labels || return 0.0
+    g = plan.local_gradients[i]
+    value = first(_rk_nlme_partition_value_and_local_gradient!(plan.sampler,
+        g, plan.point, i))
+    for (k, slot) in enumerate(plan.eta_slots[i])
+        gradient[slot] = g[k]
     end
     value
 end
@@ -2047,7 +2127,13 @@ function _brm_nlme_model(backend::RKBRMI, node; ad_backend, observation_ad_backe
     end
 end
 
-function _brm_nlme_cell_point(m::BRMNLMEModel, i::Integer, θ, σ, η)
+_brm_nlme_cell_point(m::BRMNLMEModel, i::Integer, θ, σ, η) =
+    _BRMNLMEPoint(m.unit, m.theta, Vector{Float64}(θ), m.sigma,
+        Vector{Float64}(σ), _brm_nlme_check_unit(m, i, θ, σ, η),
+        Vector{Float64}(η))
+
+# The argument checks of every one-unit evaluation; returns the unit's block.
+function _brm_nlme_check_unit(m::BRMNLMEModel, i::Integer, θ, σ, η)
     m.cell_query === nothing && _brm_nlme_error(
         "brm_nlme_loglikelihood: per-subject evaluation needs observation " *
         "cells that each belong to one subject, and this model's observations " *
@@ -2060,8 +2146,7 @@ function _brm_nlme_cell_point(m::BRMNLMEModel, i::Integer, θ, σ, η)
     block = m.view.subject_coordinates[i]
     length(η) == length(block) || throw(DimensionMismatch(
         "η has length $(length(η)), expected $(length(block))"))
-    _BRMNLMEPoint(m.unit, m.theta, Vector{Float64}(θ), m.sigma,
-        Vector{Float64}(σ), block, Vector{Float64}(η))
+    block
 end
 
 """
@@ -2082,11 +2167,16 @@ function brm_nlme_loglikelihood(m::BRMNLMEModel, i::Integer, θ, σ, η)
         H[i] = Vector{Float64}(η)
         return brm_nlme_loglikelihoods(m, θ, σ, H)[i]
     end
-    point = _brm_nlme_cell_point(m, i, θ, σ, η)
+    _brm_nlme_check_unit(m, i, θ, σ, η)
     partition = m.cell_gradient
     i in partition.labels || return 0.0
     lock(partition.lock) do
-        _rk_nlme_partition_value(partition.query, point, i)
+        point = _brm_nlme_write_unit!(partition.point, m, i, θ, σ, η)
+        try
+            _rk_nlme_partition_value(partition.query, point, i)
+        finally
+            _brm_nlme_restore_unit!(point, m, i)
+        end
     end
 end
 
@@ -2177,20 +2267,27 @@ function _brm_nlme_point_values(p::_BRMNLMEPoint, indices::Vector{Int})
     values
 end
 
+# θ, σ and η at the unit's packed positions (the plan's `indices[i]`: the
+# model's globals are θ and σ), and the gradient there.
 function _brm_nlme_cell_value_and_selected_gradient(m::BRMNLMEModel, i::Integer, θ, σ, η)
     m.cell_gradient === nothing && _brm_nlme_error(
         "brm_nlme_model: this subject cell has no prepared compact gradient")
-    point = _brm_nlme_cell_point(m, i, θ, σ, η)
-    indices = sort!(vcat(m.theta, m.sigma, point.eta_positions))
-    values = _brm_nlme_point_values(point, indices)
-    selected_gradient = zeros(length(indices))
+    block = _brm_nlme_check_unit(m, i, θ, σ, η)
     # A prepared RK sampler owns mutable AD workspace. Protect it when the
     # model is shared across concurrent subject requests.
     state = _brm_nlme_cell_state(m)
+    plan = state.plan
+    indices = plan.indices[i]
+    selected_gradient = zeros(length(indices))
     value = lock(m.cell_gradient.lock) do
-        _brm_nlme_partition_sum!(selected_gradient, state.plan, m.unit, i, values)
+        _brm_nlme_write_unit!(plan.point, m, i, θ, σ, η)
+        try
+            _brm_nlme_partition_evaluate!(selected_gradient, plan, i)
+        finally
+            _brm_nlme_restore_unit!(plan.point, m, i)
+        end
     end
-    value, indices, selected_gradient, point.eta_positions
+    value, copy(indices), selected_gradient, block
 end
 
 """
@@ -2198,7 +2295,8 @@ end
 
 Return one subject's conditional log-likelihood and its η_i gradient. RK's
 compact partition sampler evaluates all that subject's cells in one fused
-call, without a packed point or gradient buffer.
+call and differentiates only the subject's own effects: θ and σ are held
+fixed, so no derivative flows through the values they share with other units.
 """
 function brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i::Integer, θ, σ, η)
     # A nested model without subject cells evaluates the whole model.
@@ -2211,10 +2309,20 @@ function brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i::Integer, θ, σ
         values, gradients = brm_nlme_loglikelihoods_and_gradients(m, θ, σ, H)
         return values[i], gradients[i]
     end
-    value, indices, selected_gradient, eta_positions =
-        _brm_nlme_cell_value_and_selected_gradient(m, i, θ, σ, η)
-    value, [selected_gradient[searchsortedfirst(indices, j)]
-        for j in eta_positions]
+    m.cell_gradient === nothing && _brm_nlme_error(
+        "brm_nlme_model: this subject cell has no prepared compact gradient")
+    block = _brm_nlme_check_unit(m, i, θ, σ, η)
+    plan = _brm_nlme_cell_state(m).plan
+    gradient = zeros(length(block))
+    value = lock(m.cell_gradient.lock) do
+        _brm_nlme_write_unit!(plan.point, m, i, θ, σ, η)
+        try
+            _brm_nlme_partition_eta!(gradient, plan, i)
+        finally
+            _brm_nlme_restore_unit!(plan.point, m, i)
+        end
+    end
+    value, gradient
 end
 
 # Subject `i`'s η: column `i` of a flat model's matrix, or entry `i` of a

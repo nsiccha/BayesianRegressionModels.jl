@@ -73,6 +73,13 @@ BRM._rk_nlme_partition_footprint(sampler, label) =
     partition_footprint(sampler, label)
 BRM._rk_nlme_partition_value_and_gradient!(sampler, gradient, point, label) =
     partition_value_and_gradient!(sampler, gradient, point, label)
+# The unit's own (declared `partitioned`) coordinates only, with the shared
+# coordinates and the values computed from them held fixed (rkppl-use §14,
+# "Reuse shared values").
+BRM._rk_nlme_partition_local_footprint(sampler, label) =
+    partition_footprint(sampler, label; shared=false)
+BRM._rk_nlme_partition_value_and_local_gradient!(sampler, gradient, point, label) =
+    partition_value_and_gradient!(sampler, gradient, point, label; shared=false)
 
 # The row-structured Laplace (src/nlme_laplace_structured.jl): the likelihood
 # parameters `ports` (natural scale, one value per row or a scalar) at a
