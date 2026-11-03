@@ -81,7 +81,7 @@ function _rk_plan_gmrf_term!(prepared, target, data, columns, taken; derived)
     vertices = _rk_fit_input!(derived, columns, taken, state.vertices_source, [state.vertices])
     cells = _rk_fit_input!(derived, columns, taken, state.cells_source, [state.cells])
     _RKTermSpec(:gmrf, sources,
-        (; id, vertices, cells, fit_time, fit_channel, correlation=state.correlation,
+        (; id, vertices, cells, fit_time, fit_channel, source=prepared.source, correlation=state.correlation,
            nchannels=length(state.channels), priors=_brm_term_prior_expressions(prepared),
            state_axes=(; nvertices=state.nvertices, times=state.times, channels=state.channels)),
         id, id)

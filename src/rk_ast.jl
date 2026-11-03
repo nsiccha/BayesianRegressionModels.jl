@@ -2065,7 +2065,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             locals = _rk_ast_gmrf!(defs, stmts, taken, bindings, term)
             _rk_coordinate_record!(coordinates, (; kind=:gmrf,
                 declaration=term.options.id, predictor=predictor.name,
-                axes=Tuple(term.columns), state_axes=term.options.state_axes, locals))
+                axes=term.options.source, state_axes=term.options.state_axes,
+                mesh_inputs=(; term.options.vertices, term.options.cells), locals))
             _rk_start_term_record!(coordinates, predictor.name, term, term.options.id,
                 (; sigma=locals.sigma, spatial_length=locals.spatial_length,
                    temporal_length=locals.temporal_length))
