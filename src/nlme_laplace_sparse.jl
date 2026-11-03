@@ -80,8 +80,10 @@ one sparse Laplace; see
 [`brm_laplace_problem`](@ref)'s `integrate`. Same interface as
 [`BRMStructuredLaplaceProblem`](@ref): LogDensityProblems order 1 over `names`
 (packed positions `population`), [`brm_laplace_draws`](@ref), and the counters
-`nonfinite` and `unconverged`, plus `nonfinite_gradient` (gradients that are not
-finite although the log density is; a warning names the first nonfinite term).
+`nonfinite`, `unconverged` and `folds`, plus `nonfinite_gradient` (gradients that
+are not finite although the log density is; a warning names the first nonfinite
+term) and `search` (the last evaluation's Newton steps, shifted steps per stage,
+largest shift, refused full steps, final decrement and stop reason per component).
 `integrate` names the integrated groupings,
 `integrated` their draws' packed positions, `components` the groups of
 integrated draws that share likelihood terms.

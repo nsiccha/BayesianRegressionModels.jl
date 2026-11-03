@@ -39,9 +39,12 @@ over the population coordinates, in packed order (`problem.names`). Its log
 density is the Laplace approximation of the model's marginal log posterior
 density in those unconstrained coordinates, exact when the model is Gaussian
 in the random effects and exact determinant algebra is selected (see `solver`
-below). Each evaluation finds every unit's mode by Newton's
-method with a per-unit backtracking line search, starting the standardized
-effects at zero on every evaluation, until every unit's Newton decrement gᵀ(−H)⁻¹g is at
+below). Each evaluation finds every unit's mode by continuation from the prior:
+it starts the effects at their prior's mode and follows each unit's mode while
+the likelihood's weight rises from 0 to 1 in 10 stages (one stage for a sparse
+component or structured unit whose density is known to be log-concave). Each
+stage uses Newton's method with a per-unit backtracking line search, until every
+unit's Newton decrement gᵀ(−H)⁻¹g is at
 most `tol`, or stops shrinking at rounding level. The log determinant moves
 with the modes to first order; the standardized draws' N(0, I) prior makes
 −H ≥ I for log-concave likelihoods, so the default `tol` keeps the modes to
@@ -55,7 +58,7 @@ reaches:
 - the model's density, gradient or unit Hessians overflow during the mode
   search, so that no finite Newton step exists (the full model's density there
   is not finite either); `problem.nonfinite` counts them;
-- the mode search has not converged after `maxiter` Newton steps, as when a
+- a stage of the mode search has not converged after `maxiter` Newton steps, as when a
   start lies far up an exponential's slope, where Newton gains about one unit
   per step; `problem.unconverged` counts them, and a warning names the point,
   the unit and its last decrements. At a point a sampler would accept this
@@ -63,8 +66,12 @@ reaches:
 
 A mode search must not depend on preceding evaluations: in a non-concave
 conditional density, a warm start can select a different local maximum and
-change the target. The fixed start defines a single-mode approximation; it
-does not sum over multiple conditional modes or guarantee a global maximum.
+change the target. Continuation from the prior defines a single-mode
+approximation at the mode connected to the prior's mode, which changes only
+where that mode ceases to exist; the marginal can jump there. `problem.folds`
+counts evaluations whose followed mode needed a modified Newton step after the
+first stage. This does not sum over multiple conditional modes or guarantee a
+global maximum.
 
 A problem holds the last result and prepared AD workspaces as mutable state: use one per chain
 (`deepcopy` gives a copy its own prepared AD workspaces).
@@ -452,7 +459,7 @@ resampled. All units' `k`-th proposals are scored by one model evaluation.
   `rk_restore_draws`) × draws; its population rows are `P`. Pass it to
   [`rk_restore_draws`](@ref) and the other readers of a full RK fit.
 - `diagnostics` — `newton_steps`, the Newton steps each draw's mode search
-  took from zero standardized effects; with `conditional > 0` also
+  took from the prior's mode; with `conditional > 0` also
   `importance_ess`, units × draws, each unit's effective number of proposals
   (`(Σw)²/Σw²`, at most `K`). A small value marks a unit whose conditional
   posterior is far from Gaussian, where more proposals are needed.
