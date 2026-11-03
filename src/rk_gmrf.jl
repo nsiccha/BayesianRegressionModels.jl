@@ -206,7 +206,7 @@ function _rk_ast_gmrf!(definitions, statements, taken, bindings, term)
     locals = _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, reads, L)
     push!(statements, Expr(:call, :~, options.id, locals.call))
     (; locals.sigma, locals.spatial_length, locals.temporal_length, locals.field,
-       geometry, support, rows)
+       geometry, support, rows, priors=prior)
 end
 
 _rk_ast_property(value, name) = Expr(:., value, QuoteNode(name))

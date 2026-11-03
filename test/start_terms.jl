@@ -163,6 +163,90 @@ end
     end
 end
 
+@stestset "prior bases: native gmrf fields" begin
+    data = (; east=[0.1, 0.9, 0.7, 0.3], north=[0.2, 0.4, 0.8, 0.5],
+        time=[0.0, 0.3, 0.3, 1.7], channel=["b", "a", "b", "a"], y=[0.4, -0.3, 0.2, 0.1],
+        xy=[0.0 0.0; 1 0; 1 1; 0 1; 0.5 0.5], triangles=[1 2 5; 2 3 5; 3 4 5; 4 1 5])
+    term = :gmrf_field_east_north_time
+    hyper(f, s, parameter) = only(term_values(f, s, :field, term, parameter))
+    sd_address = :(sd(field, gmrf((east, north), time)))
+    space = :(length_scale(field, gmrf((east, north), time), space))
+    time = :(length_scale(field, gmrf((east, north), time), time))
+
+    # Declared laws: each hyperparameter takes its own median on both backends.
+    declared = @brm begin
+        field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+        sd(field, gmrf((east, north), time)) ~ Exponential(0.7)
+        length_scale(field, gmrf((east, north), time), space) ~ LogNormal(0.5, 0.8)
+        length_scale(field, gmrf((east, north), time), time) ~ LogNormal(0.7, 0.6)
+        y ~ Normal(field, 0.2)
+    end
+    f = start_fixture(declared, data, "gmrf_declared")
+    r, s = start_pair(f; base=:prior_median)
+    medians = (; sd=median(Exponential(0.7)), spatial_length=exp(0.5), temporal_length=exp(0.7))
+    for (parameter, expected) in pairs(medians)
+        @test hyper(f, s, parameter) ≈ expected
+    end
+    rv = getproperty(BRM._rk_constrained_values(f.rk, r), term)
+    @test [rv.sigma, rv.spatial_length, rv.temporal_length] ≈ collect(medians)
+    # The field itself keeps its neutral coordinates, so the base differs from
+    # the unit-scale start only in the three hyperparameters.
+    unit = brm_start(f.rk, (;))
+    @test findall(!iszero, r .- unit) == 1:3
+    @test isfinite(BridgeStan.log_density(f.model, s))
+    # Explicit values win over the prior base, one hyperparameter at a time.
+    _, explicit = start_pair(f; base=:prior_median, term_inits=[sd_address => 0.3, space => 2.0])
+    @test hyper(f, explicit, :sd) ≈ 0.3
+    @test hyper(f, explicit, :spatial_length) ≈ 2.0
+    @test hyper(f, explicit, :temporal_length) ≈ medians.temporal_length
+    @test_throws "strictly positive" brm_start(f.rk, (;); base=:prior_median, term_inits=[time => 0.0])
+
+    # The default law, a law on a known sibling and a restated known value.
+    known = @brm begin
+        field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+        length_scale(field, gmrf((east, north), time), space) = 0.4
+        length_scale(field, gmrf((east, north), time), time) ~ LogNormal(0.7, 0.6)
+        y ~ Normal(field, 0.2)
+    end
+    f = start_fixture(known, data, "gmrf_known")
+    _, s = start_pair(f; base=:prior_median)
+    @test hyper(f, s, :sd) ≈ median(LogNormal(0, 1))
+    @test hyper(f, s, :temporal_length) ≈ medians.temporal_length
+    @test_throws "known value 0.4" brm_term_coordinates(f.d, :field, f.names; term, parameter=:spatial_length)
+    r_known = brm_start(f.rk, (;); base=:prior_median)
+    @test brm_start(f.rk, (;); base=:prior_median, term_inits=[space => 0.4]) ≈ r_known
+    for backend in ((args...; kw...) -> brm_start(f.rk, args...; kw...),
+                    (args...; kw...) -> brm_start(f.sb, f.model, args...; kw...))
+        @test_throws "known at" backend((;); base=:prior_median, term_inits=[space => 0.5])
+    end
+
+    # A law reading a model-scope parameter uses that parameter's own start.
+    reader = @brm begin
+        s0 ~ LogNormal(1, 0.5)
+        field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+        sd(field, gmrf((east, north), time)) ~ Exponential(s0)
+        y ~ Normal(field, 0.2)
+    end
+    f = start_fixture(reader, data, "gmrf_reader")
+    _, s = start_pair(f; base=:prior_median)
+    @test hyper(f, s, :sd) ≈ median(Exponential(exp(1)))
+    _, chosen = start_pair(f, (; s0=3.0); base=:prior_median)
+    @test hyper(f, chosen, :sd) ≈ median(Exponential(3.0))
+
+    # A correlated channel axis: the sampled factor keeps its neutral identity.
+    correlated = @brm begin
+        Omega ~ LKJCholesky(2, 2.0)
+        field ~ 0 + gmrf((east, north), time, channel;
+            mesh=(vertices=xy, cells=triangles), cor=Omega)
+        sd(field, gmrf((east, north), time, channel)) ~ Exponential(0.7)
+        y ~ Normal(field, 0.2)
+    end
+    f = start_fixture(correlated, data, "gmrf_channels")
+    _, s = start_pair(f; base=:prior_median)
+    @test only(term_values(f, s, :field, :gmrf_field_east_north_time_channel, :sd)) ≈ medians.sd
+    @test isfinite(BridgeStan.log_density(f.model, s))
+end
+
 @stestset "term starts: monotonic simplexes and smoothing components" begin
     builder = @brm begin
         mu ~ 0 + mo1(dose)
