@@ -155,7 +155,7 @@ _brm_lap_dlink(transform::Symbol, θ) = transform === :log ? inv(θ) : one(θ)
 The per-unit Laplace of a regression-shaped RK model, built on its rows; see
 [`brm_laplace_problem`](@ref). Same interface as [`BRMLaplaceProblem`](@ref):
 LogDensityProblems order 1 over `names` (packed positions `population`),
-[`brm_laplace_draws`](@ref), and the counters `nonfinite` and `unconverged`.
+[`brm_laplace_draws`](@ref), and the counters `nonfinite`, `unconverged` and `folds`.
 """
 mutable struct BRMStructuredLaplaceProblem{K}
     backend::RKBRMI
