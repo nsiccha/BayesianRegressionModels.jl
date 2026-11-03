@@ -19,10 +19,13 @@ include("introspection.jl")
 using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays, Libdl,
       LogDensityProblems, LinearAlgebra, SpecialFunctions, Random, Statistics
 using StaticArrays: SMatrix, SVector, MMatrix, MVector
+using ReparametrizableDistributions: advance!!, lkj_cholesky!, simplex!
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, nonzeros, rowvals, nzrange, blockdiag
 using SelectedInversion: selinv_diag, selinv, selinv_extract
 import SparseArrays, SelectedInversion, KLU, MUMPS
-import KrylovKit
+import KrylovKit, PowerScaling
+import Krylov
+import LimitedLDLFactorizations
 using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
                  ProbabilityWeights, UnitWeights, Weights,
                  aweights, fweights, pweights, uweights, weights
@@ -135,8 +138,13 @@ include("nlme_laplace.jl")
 include("nlme_laplace_structured.jl")
 include("nlme_laplace_factors.jl")
 include("nlme_laplace_sparse.jl")
+include("nlme_laplace_gaussian.jl")
 include("nlme_laplace_sum_solver.jl")
+include("nlme_laplace_matrixfree.jl")
+include("nlme_laplace_preconditioner.jl")
+include("nlme_laplace_width.jl")
 include("nlme_laplace_plan.jl")
+include("nlme_laplace_sampled.jl")
 include("start_values.jl")
 include("start_terms.jl")
 include("start_prior.jl")
@@ -154,8 +162,11 @@ include("nlme_svi_laplace_carry.jl")
 include("nlme_svi_laplace_prior.jl")
 include("nlme_svi_laplace_streaming.jl")
 include("nlme_svi_laplace_fit.jl")
+include("nlme_svi_optimizer.jl")
 include("smc.jl")
+include("smc_streaming.jl")
 include("filter.jl")
+include("filter_smc.jl")
 include("covariate_resampling.jl")
 export modeled_covariates
 using SHA: sha256
@@ -167,8 +178,7 @@ include("posterior_diagnostics.jl")
 include("ranef_draws.jl")
 include("multigroup_readers.jl")
 
-# Prior/likelihood power-scaling sensitivity — PSIS weights, CJS distance, the
-# per-variable summary, and the SBBRMI input assembly. After the descriptor
+# PowerScaling.jl adapter and SBBRMI input assembly. After the descriptor
 # and diagnostics, whose coordinates and draw conventions it stands on.
 include("powerscale.jl")
 
@@ -181,6 +191,7 @@ include("powerscale.jl")
 # column accessor of the same name.
 import BridgeStan
 include("conditional_effects.jl")
+include("draw_trees.jl")
 
 # Public surface. The macros and value types everything downstream
 # (web-macro, downstream extensions, tests) reaches for.
@@ -220,10 +231,14 @@ export rk_artifact_inputs
 export rk_bound_data, rk_bound_plan, rk_design_binder, RKDesignBinder
 export brm_fitted_state, BRMFittedState
 export BRMSVIState, BRMSVILaplaceState, GaussianBlockLaplace, brm_svi_checkpoint
+export BRMSVIOptimizerState, brm_svi_optimizer_checkpoint, brm_svi_resume
 export BRMSMCFit, brm_smc_fit, brm_smc_tune, brm_smc_update, brm_smc_checkpoint, brm_smc_resume
+export BRMSMCCarriedReference, BRMSMCWindowFit, brm_smc_carry
+export brm_smc_coordinates, brm_smc_recover
 export brm_smc_compare, brm_smc_runs
 export BRMFilter, brm_filter, brm_filter_step, brm_filter_stream,
     brm_filter_checkpoint, brm_filter_resume
+export BRMFilterSMC, brm_filter_tune
 export BRMCutFamily, brm_cut_family, brm_cut_fit, brm_cut_point, brm_cut_propagate, rk_draw_values
 export rkppl_model, rk_model
 # Re-export every Distributions.jl family BRM lowers so
@@ -332,8 +347,8 @@ export AbstractAdaptiveCenteringBlock, AdaptiveCenteringBlock,
        select_hsgp_centeredness,
        select_ranef_centeredness
 export brm_output_draws, brm_predictive_draws, hsgp_coordinate_draws, hsgp_transform_draws, hsgp_boundary_check
-export BRMPowerscaleSensitivity, brm_psis_weights, brm_cjs_dist,
-       brm_powerscale_weights, brm_powerscale_sensitivity, brm_powerscale_inputs
+export brm_output_tree, brm_ranef_tree, brm_predictive_tree, brm_conditional_tree, rk_draw_tree
+export BRMPowerscaleSensitivity, brm_powerscale_sensitivity, brm_powerscale_inputs
 export brm_prediction_grid, brm_conditional_draws, brm_contrast_draws,
        brm_slope_draws, brm_summarize_draws
 export brm_posteriorplot, brm_ppcplot, brm_pairplot,

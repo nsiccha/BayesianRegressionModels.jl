@@ -51,7 +51,8 @@ through [`rk_bound_plan`](@ref).
 - `held_out`: the response hold-outs of the replay, as in `RKBRMI`.
 
 `new_data` supplies every data column the model reads. With
-`freeze_constants=true` it may omit responses: they are bound without values,
+`freeze_constants=true` it may omit numeric scalar inputs (their fitted values
+are kept) and responses: responses are bound without values,
 so authored values (`want=(:mu,)`, `@plate` cell outputs) evaluate on the new
 rows, while the density and other queries that read an omitted response are
 refused, naming it. A model whose planning reads the response values (for
@@ -83,6 +84,7 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
         for name in _rk_response_names(rk.plan)
         if haskey(training, name) && !_brm_df_has_column(new_data, name))
     merge!(absent, _rk_car_fitted_edges(parent(rk), new_data, training))
+    merge!(absent, _rk_omitted_scalars(_rk_scalar_data(parent(rk)), new_data))
     rebound = _brm_rebind_brmi(parent(rk), _BRMReplayData(new_data, absent))
     _, fitted = _brm_resolve_constants(parent(rk); prefix)
     constants = Dict{Symbol,Any}(c.name => c.value for c in fitted)
@@ -332,6 +334,14 @@ function _rk_training_columns(brmi::BRMI)
     merge!(columns, _brm_backend_context(brmi; retain_mm_sources=true).data)
 end
 
+# Numeric scalar inputs become literals in the fitted program. They carry no
+# training rows and can supply omitted replay fields. Present fields still go
+# through program identity checks, so a design cannot silently change a prior.
+_rk_scalar_data(brmi::BRMI) = Dict{Symbol,Any}(name => deepcopy(value)
+    for (name, value) in _rk_training_columns(brmi) if value isa Real)
+_rk_omitted_scalars(scalars, new_data) = Dict{Symbol,Any}(name => value
+    for (name, value) in scalars if !_brm_df_has_column(new_data, name))
+
 # What a frozen replay fits from (`_BRMFrozenReplay`): the fit's data columns
 # and each data-only assignment's training value, which a fit
 # (`standardize(tt)`) reads like a column (`_brm_resolve_data_assignments`).
@@ -385,6 +395,20 @@ columns of [`rk_bound_plan`](@ref)`(rk)`. Implemented by the ReactiveKernels
 package extension.
 """
 function rk_bound_data end
+
+# The identity of the density a backend binds: its emitted program and
+# callables, its complete bound inputs (data and frozen preprocessing, not a
+# truncated display or just their shapes) and its packed coordinate names,
+# hashed under `tag`. SMC checkpoints identify their bindings with
+# `tag="brm-smc-v1"`, SVI optimizer checkpoints with `tag="brm-svi-v1"`.
+function _brm_rk_binding_identity(rk, tag)
+    emitted = _rk_retained_program(rk)
+    io = IOBuffer()
+    serialize(io, (format=1, program=_rk_program_statements(emitted),
+        callables=emitted.bindings, data=rk_bound_data(rk),
+        coordinates=_rk_bound_coordinate_names(rk)))
+    "$tag:" * bytes2hex(sha256(take!(io)))
+end
 
 """
     rk_bound_plan(rk::RKBRMI) -> ReactiveKernelsPPL.StructuralPlan

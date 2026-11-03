@@ -9,21 +9,16 @@ import ReactiveKernels
 import SequentialMonteCarlo
 import WarmupHMC
 using Random: Xoshiro
+import LogDensityProblems
 using Statistics: mean, std
+using StatsBase: sample, Weights
 using Serialization: serialize
 using SHA: sha256
 
 # Hash the complete binding, not a truncated display or just its shape.
 # The initial template deliberately identifies a fit lineage, including its
 # training data. Updates keep this template; callers never author identity IDs.
-function binding_identity(rk::BRM.RKBRMI)
-    emitted = BRM._rk_retained_program(rk)
-    io = IOBuffer()
-    serialize(io, (format=1, program=BRM._rk_program_statements(emitted),
-        callables=emitted.bindings, data=BRM.rk_bound_data(rk),
-        coordinates=BRM._rk_bound_coordinate_names(rk)))
-    "brm-smc-v1:" * bytes2hex(sha256(take!(io)))
-end
+binding_identity(rk::BRM.RKBRMI) = BRM._brm_rk_binding_identity(rk, "brm-smc-v1")
 
 function check_identity(rk, expected, label)
     binding_identity(rk) == expected || throw(ArgumentError(
@@ -37,11 +32,19 @@ function BRM._brm_validate_smc_fit(fit::BRM.BRMSMCFit)
     nothing
 end
 
-function prepare(rk, ad_backend, model_id, binding_id)
+function prepare(rk::BRM.RKBRMI, ad_backend, model_id, binding_id)
     PPL.prepare_smc(rk.model, BRM.rk_bound_plan(rk),
         zeros(Float64, rk.model.layout.total);
         backend=ad_backend, model_id, binding_id)
 end
+
+smc_model(model::BRM.BRMI) = BRM.RKBRMI(model)
+smc_model(model::BRM.RKBRMI) = model
+smc_names(rk::BRM.RKBRMI) = PPL.coordinate_names(rk.model.layout)
+smc_update_model(template::BRM.RKBRMI, data) =
+    BRM.reprocess(template, data; freeze_constants=true)
+
+include("smc_laplace.jl")
 
 function finish(state, stages, node)
     stages isa Integer && stages >= 0 || throw(ArgumentError("stages must be a nonnegative integer"))
@@ -59,13 +62,13 @@ function tuning_controls(; kwargs...)
     (; (key => value for (key, value) in pairs(kwargs) if value !== nothing)...)
 end
 
-function BRM.brm_smc_tune(model::Union{BRM.BRMI,BRM.RKBRMI};
+function BRM.brm_smc_tune(model::Union{BRM.BRMI,BRM.RKBRMI,BRM._BRMSMCLaplaceProblem};
         rng, init, reference=nothing,
         temperatures=nothing, pilot_steps=64, pilot=nothing,
         max_reflections=nothing, recording_target=nothing, pilot_evaluations=nothing,
         reference_inflation=nothing,
         options=PPL.SMCOptions(), ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
-    rk = model isa BRM.RKBRMI ? model : BRM.RKBRMI(model)
+    rk = smc_model(model)
     id = binding_identity(rk)
     target = prepare(rk, ad_backend, id, id)
     controls = tuning_controls(; temperatures, pilot, max_reflections,
@@ -80,7 +83,7 @@ function BRM.brm_smc_tune(fit::BRM.BRMSMCFit, cumulative_data;
     BRM._brm_validate_smc_fit(fit)
     fit.state.temperature == 1 || throw(ArgumentError(
         "BRM SMC: finish the current bridge before tuning a data update"))
-    rk = BRM.reprocess(fit.template, cumulative_data; freeze_constants=true)
+    rk = smc_update_model(fit.template, cumulative_data)
     id = binding_identity(rk)
     target = prepare(rk, fit.ad_backend, fit.model_id, id)
     previous = prepare(fit.backend, fit.ad_backend, fit.model_id, fit.binding_id)
@@ -89,12 +92,12 @@ function BRM.brm_smc_tune(fit::BRM.BRMSMCFit, cumulative_data;
     PPL.tune_smc(target; rng, init, previous, controls..., pilot_steps, options)
 end
 
-function BRM.brm_smc_fit(model::Union{BRM.BRMI,BRM.RKBRMI};
+function BRM.brm_smc_fit(model::Union{BRM.BRMI,BRM.RKBRMI,BRM._BRMSMCLaplaceProblem};
         rng=Xoshiro(), particles=1000, reference=nothing, options=PPL.SMCOptions(),
         ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), stages=typemax(Int), progress=nothing)
     BRM._brm_with_progress(progress; description="BRM SMC fit") do node
         BRM._brm_throw_if_interrupted(node)
-        rk = model isa BRM.RKBRMI ? model : BRM.RKBRMI(model)
+        rk = smc_model(model)
         id = binding_identity(rk)
         target = prepare(rk, ad_backend, id, id)
         state = reference === nothing ?
@@ -121,7 +124,7 @@ function BRM.brm_smc_update(fit::BRM.BRMSMCFit, cumulative_data;
         "BRM SMC: finish the current bridge with brm_smc_fit before starting another update"))
     BRM._brm_with_progress(progress; description="BRM SMC data update") do node
         BRM._brm_throw_if_interrupted(node)
-        rk = BRM.reprocess(fit.template, cumulative_data; freeze_constants=true)
+        rk = smc_update_model(fit.template, cumulative_data)
         id = binding_identity(rk)
         target = prepare(rk, fit.ad_backend, fit.model_id, id)
         state = PPL.update_smc(fit.state, target; options, stages=0)
@@ -161,6 +164,8 @@ function BRM.brm_smc_resume(template::BRM.RKBRMI, checkpoint;
         checkpoint.model_id, checkpoint.binding_id, checkpoint.previous_id)
 end
 
+include("smc_streaming.jl")
+include("filter_smc.jl")
 
 # Weighted first and second moments of a d × n cloud with normalized weights.
 function weighted_moments(positions, weights)
@@ -181,7 +186,7 @@ function BRM.brm_smc_compare(fits::BRM.BRMSMCFit...)
         fit.state.temperature == 1 || throw(ArgumentError(
             "fit $k is not complete (temperature $(fit.state.temperature)); finish it with brm_smc_fit first"))
     end
-    names = PPL.coordinate_names(reference.backend.model.layout)
+    names = smc_names(reference.backend)
     runs = map(fits) do fit
         means, sds = weighted_moments(fit.state.positions, fit.state.weights)
         history = fit.state.history
@@ -207,11 +212,11 @@ function BRM.brm_smc_compare(fits::BRM.BRMSMCFit...)
         log_normalizer=(; values, mean=mean(values), sd=std(values)), worst)
 end
 
-function BRM.brm_smc_runs(model::Union{BRM.BRMI,BRM.RKBRMI}; seeds, particles=1000, reference=nothing,
+function BRM.brm_smc_runs(model::Union{BRM.BRMI,BRM.RKBRMI,BRM._BRMSMCLaplaceProblem}; seeds, particles=1000, reference=nothing,
         options=PPL.SMCOptions(), ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), progress=nothing)
     length(seeds) >= 2 || throw(ArgumentError("brm_smc_runs needs at least two seeds"))
     all(seed -> seed isa Integer, seeds) || throw(ArgumentError("seeds must be integers; each run draws its own Xoshiro from one"))
-    rk = model isa BRM.RKBRMI ? model : BRM.RKBRMI(model)
+    rk = smc_model(model)
     fits = [BRM.brm_smc_fit(rk; rng=Xoshiro(seed), particles, reference, options, ad_backend, progress)
         for seed in seeds]
     (; fits, comparison=BRM.brm_smc_compare(fits...))

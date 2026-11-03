@@ -345,3 +345,65 @@ end
         @test all(size(t.h,1) <= 3 for t in only(a.states).terms[1])
     end
 end
+
+@stestset "sum selections preserve arbitrary coordinate partitions" begin
+    rng = Xoshiro(198)
+    for nz in (0, 1, 15, 30), _ in 1:3
+        order = randperm(rng, 30)
+        integrated, population = order[1:nz], order[(nz + 1):end]
+        layout = (; integrated=copy(integrated), population=copy(population))
+        zof = Dict(i => k for (k, i) in enumerate(integrated))
+        pof = Dict(i => k for (k, i) in enumerate(population))
+        maps = Dict{Vector{Int},Vector{Int}}()
+        point = randn(rng, 30)
+        for reads in (Int[], rand(rng, 1:30, 45), collect(30:-1:1))
+            s = BRM._brm_spl_factor_selection(reads, zof, pof, maps, layout)
+            expected = sort(unique(reads))
+            @test collect(s.sel) == expected
+            @test point[s.sel] == point[expected]
+            @test integrated[s.lz] == s.sel[s.lpos]
+            @test population[s.pidx] == s.sel[s.ppos]
+            @test collect(deepcopy(s).sel) == expected
+            @test_throws BoundsError s.sel[0]
+            @test_throws BoundsError s.sel[length(s.sel) + 1]
+        end
+    end
+    # A private caller can omit coordinates from both derivative partitions;
+    # the packed read set must still retain them.
+    s = BRM._brm_spl_factor_selection([3, 1, 2], Dict(2 => 1), Dict(3 => 1),
+        Dict{Vector{Int},Vector{Int}}(), (; integrated=[2], population=[3]))
+    @test collect(s.sel) == [1, 2, 3]
+end
+
+@stestset "sum selections avoid a duplicate packed index vector" begin
+    # Each summand reads a shared population prefix, its own population
+    # coordinates, and several integrated effects. Count retained Int vectors
+    # by identity, including the owned layout, to exclude transient allocation
+    # and avoid double-counting shared maps.
+    n, fixed, moving, effects = 1024, 224, 25, 53
+    population = collect(1:(fixed + n * moving))
+    integrated = collect((last(population) + 1):(last(population) + n * effects))
+    layout = (; integrated, population)
+    zof = Dict(i => k for (k, i) in enumerate(integrated))
+    pof = Dict(i => k for (k, i) in enumerate(population))
+    maps = Dict{Vector{Int},Vector{Int}}()
+    records = map(1:n) do row
+        p = fixed + (row - 1) * moving
+        z = last(population) + (row - 1) * effects
+        reads = vcat(1:fixed, (p + 1):(p + moving), (z + 1):(z + effects))
+        BRM._brm_spl_factor_selection(reads, zof, pof, maps, layout)
+    end
+    arrays = IdDict{Any,Nothing}()
+    function visit(x)
+        if x isa Vector{Int}
+            arrays[x] = nothing
+        elseif x isa NamedTuple
+            foreach(visit, values(x))
+        elseif x isa AbstractVector{Int}
+            foreach(k -> visit(getfield(x, k)), 1:fieldcount(typeof(x)))
+        end
+    end
+    foreach(visit, records)
+    @test sum(length, keys(arrays)) <= 450n
+    @test all(length(s.sel) == fixed + moving + effects for s in records)
+end

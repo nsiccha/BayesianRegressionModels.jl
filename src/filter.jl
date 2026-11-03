@@ -20,7 +20,7 @@ end
     brm_filter(model; parameters=nothing, ensemble=nothing, weights=nothing,
         inputs=(), groups=(;), drifting=(), rng=Xoshiro(), particles=1000,
         history_limit=32)
-    brm_filter(fit::BRMSMCFit; kwargs...)
+    brm_filter(fit::Union{BRMSMCFit,BRMSMCWindowFit}; learn=false, kwargs...)
 
 Initialize filtering before the first authored time slice of a `BRMI` or
 `RKBRMI`. Load ReactiveKernels, ReactiveKernelsPPL and SequentialMonteCarlo.
@@ -32,7 +32,11 @@ coordinate vector, or an `ensemble` of such points. RKPPL selects only static
 parameters, excluding historical latent seeds, innovations and trajectories.
 An SMC fit supplies its completed posterior particles and weights. `particles`
 is the number of conditional state particles **per parameter member**. A fixed
-ensemble can lose parameter diversity; filtering does not replenish it.
+ensemble can lose parameter diversity. With `learn=true`, the completed fit
+instead initializes a `BRMFilterSMC` through its selected static Gaussian
+summary. This route adds `members`, `window_length`, `ess_fraction`, `options`
+and `boundary` controls for bounded-window replenishment and rejuvenation.
+Its Gaussian/state-pool approximation is documented on `BRMFilterSMC`.
 
 `inputs` names the per-step covariate ports. `groups` fixes the authored plate
 axis, and `drifting` names sampled carried states with an explicit authored
@@ -73,7 +77,10 @@ Consume records `(observation=(;y=...), inputs=(;x=...), groups=nothing)`;
 `inputs` and `groups` can be omitted. Check cooperative interruption and `stop`
 before requesting each record, and return after the last completed step.
 Use an `Iterators.Stateful` iterator to resume consumption of a live stream.
-No records or iterator are retained in the returned filter.
+An ordinary filter retains no records or iterator. For `BRMFilterSMC`, the
+producer retains at most `window_length` records for rejuvenation;
+`condition_state_only=true` requires an ordinary filter first, then transfer
+through `boundary`.
 """
 function brm_filter_stream end
 

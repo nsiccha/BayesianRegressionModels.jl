@@ -215,6 +215,17 @@ function _rk_indexed_definition(derived, expression)
     isnothing(index) ? expression : derived[index].expression
 end
 
+function _rk_transform_anchor(rk, anchor, derived, memo)
+    evaluate() = _rk_eval_dotted(anchor, Dict{Symbol,Any}(), derived, memo)
+    rk.fitted === nothing && return evaluate()
+    # A data-free replay's plan holds the new rows. Read the recorded fits,
+    # just as replay planning does, instead of fitting those rows again.
+    state = rk.fitted.state
+    frozen = _BRMFrozenReplay(state.scalars, Set{Symbol}(rk.fitted.resample),
+        state.fits, nothing)
+    _brm_with_frozen_replay(evaluate, frozen)
+end
+
 function brm_transform_constants(rk::RKBRMI)
     derived = _rk_plan_derived(rk.plan)
     sites = _brm_transform_sites(parent(rk))
@@ -228,9 +239,10 @@ function brm_transform_constants(rk::RKBRMI)
         isnothing(anchors) && error(
             "brm_transform_constants: internal: RK value `$name` is not a " *
             "fitted transform: $(derived[index].expression)")
-        # The anchors read fit-role inputs, which hold the training values.
+        # Ordinary backends hold fit-role inputs; data-free backends instead
+        # hold recorded fits from the training values.
         memo = Dict{Symbol,Any}()
-        evaluate(anchor) = _rk_eval_dotted(anchor, Dict{Symbol,Any}(), derived, memo)
+        evaluate(anchor) = _rk_transform_anchor(rk, anchor, derived, memo)
         center = evaluate(anchors.mean)
         scale = isnothing(anchors.sd) ? 1.0 : evaluate(anchors.sd)
         site = sites[name]

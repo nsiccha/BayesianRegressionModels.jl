@@ -1,5 +1,53 @@
 # Running the tests
 
+`adaptive_centering_bounds.jl` checks bounded random-effect scales against
+BridgeStan's constrained values, correlated centered and noncentered maps,
+their Jacobians, Enzyme gradients, centered replay, and stable log-scale tails.
+Run it as a standalone script in the test environment.
+
+`rk_interval_tails.jl` checks interval-censored Normal responses through
+`RKBRMI`: pointwise and total log densities, native Enzyme Reverse location
+and log-scale gradients, and input immutability. Synthetic intervals cover
+both tails through 400 standard deviations and moderate controls at two
+parameter points. Independent 256-bit MPFR masses, analytic derivatives and
+central differences supply the references. Run `test/setup_env.jl` first to
+select the RKPPL 0.1.60 / DistributionKernels 0.1.1 repair, then
+`julia --startup-file=no --project=test test/rk_interval_tails.jl`.
+
+`powerscale.jl` checks BRM's density assembly against the compiled Stan
+target and its PowerScaling.jl adapter against the pre-extraction Gaussian
+sensitivity table. Generic CJS, PSIS and sensitivity tests live in PowerScaling.
+The bootstrap supplies its pinned 0.1.0 release on Julia 1.10 too.
+
+`reparametrization_primitives.jl` checks VBRMI's shared and stratified Cholesky
+blocks, simplex blocks, and nested parameter cursors against numerical
+references captured before the ReparametrizableDistributions extraction.
+The transform algorithms and their derivative tests live in that package.
+
+`nlme_laplace_matrixfree_algebra.jl` checks the derivative of the fixed-probe
+rational determinant against independent two-dimensional identities, including
+noncommuting curvature, mixed exact/operator components, ICAR soft constraints,
+conditional draws and explicit solver failures. `nlme_laplace_matrixfree.jl`
+checks nonlinear row/cell/sum gradients, evaluation-history and copy invariance,
+plan/ladder policy retention and nonconcave mode searches.
+`nlme_laplace_matrixfree_subset.jl` compares restricted row and nonlinear-sum
+plans with fresh preparation, including gradients of newly sampled effects.
+The synthetic drivers
+in `research/matrixfree_conditional/` measure operator/exact algebra and a full
+Poisson/ICAR target separately; neither represents a fitted consumer model.
+
+`runtime_constants.jl` checks strict RK inference of runtime `constant(...)`
+expressions from `brm(source; mod)`, changed fit inputs, frozen inputs, and
+printed-source round trips. It exercises constants feeding a parameter-dependent
+helper, so they remain graph recipes rather than bind-time data.
+
+`revise_ar1.jl` loads Revise before BRM, checks that all 16 AR(1) submodels
+match their anonymous `@slic` definitions, and rescans the package twice.
+It also edits and restores an unrelated method in a temporary copy of the
+cell source, checking that explicit rescans apply the edits and preserve the
+registered models. Run it as a standalone process with
+`julia --startup-file=no --project=test test/revise_ar1.jl`.
+
 `nlme_laplace_values.jl` checks sparse integration of model-scope observations:
 gathered predictors on distinct row axes against an exact Gaussian marginal,
 and derived count likelihoods against equivalent plate cells and numerical
@@ -9,7 +57,38 @@ terms with the per-block importance diagnostic.
 types prepare type-stable ragged factors whose values equal the full model's
 pointwise densities.
 
+`draw_trees.jl` fits a small hierarchical model with WarmupHMC, then checks
+the optional TreeArrays draw APIs: descriptor labels under permuted names,
+views and allocation size, unequal chain lengths, ragged random-effect blocks,
+predictive and conditional outputs, RK values, and `nanquantile` through
+`TreeTable` to AlgebraOfVega. `ranef_draws.jl` and `level_correlation.jl`
+also check the labelled wrappers against their existing independent oracles.
+Use `julia --project=test test/setup_env.jl` first; it pins the optional
+plotting dependencies as well as the fitting stack.
+
+`draw_tree_coordinates.jl` checks random-effect parameter trees for known scales,
+correlated and centered effects, stratified blocks, Student-t mixing weights
+and shared predictors. Distinct supplied values and shuffled constrained names
+verify level/margin storage order. Unequal chains give the same R-hat and bulk
+and tail effective sample sizes as direct column selection, without copying
+draw storage. The fitted `draw_trees.jl` fixture also checks the standardized
+tree against compiled Stan's scaled, correlated effects.
+Pointwise model assignments and population contributions retain observation
+coordinates; unrelated equal-length vectors cannot acquire them by shape.
+Scalar model constants and scalar data inputs preserve those coordinates through
+aliases and chained transforms. The fitted fixture checks their values against
+compiled Stan and their pooled summaries against direct draw extraction.
+
+`ragged_draw_trees.jl` checks ragged top-level and in-cell response axes,
+group-aggregate likelihood widths, constrained-name permutations, shared
+backing, quantiles over unequal chains, and changed-design replay with an
+omitted response. It uses deterministic unconstrained points, not a fit.
+
 The files in this directory are standalone scripts, not a `Pkg.test` suite.
+`smc_window_identity.jl` checks carried-posterior identity across dictionary
+rebuilding, array padding, shared values, copying and serialization, plus
+window update/tuning, checkpoint replay and mutation rejection through the
+public APIs. `smc_window.jl` additionally checks replay in a fresh process.
 `plate_derived_inputs.jl` checks computed arrays read directly by plate cells:
 transformed hierarchical predictors, chained assignments, gathers and
 concatenations, including a derived array as the plate range. Independent
@@ -20,6 +99,10 @@ broadcast observation locations: strict selected-cell queries, ordinary Enzyme
 Reverse gradients, independent analytic values, and bounded allocations as
 the number of observations grows. The test environment pins RK 0.1.51 /
 RKPPL 0.1.53, including scalar-helper type inference and guarded captures.
+`laplace_plan_reuse.jl` counts actual row/cell derivative preparations and
+compares retained plans with freshly prepared targets, including strict
+subsets of row, plate and sum factors. It checks marginal values, gradients,
+finite differences, independent workspaces and backend/AD changes.
 `plate_selected_outputs.jl` checks nested selection of shared vector outputs
 across plates with different cell counts: data-only and parameter-dependent
 outputs, fixed and varying widths, both output orders, reader-first composition,
@@ -79,6 +162,20 @@ The exact Distributions fork and StanBlocks revisions are pinned in
 `setup_env.jl` and `Project.toml`; the bootstrap can materialize review
 candidates from the fleet mirrors before their publication.
 
+`smc_laplace_matrixfree.jl` checks fixed-target checkpoint replay, owned
+operator buffers, rejection of changed numerical policy or retained probe and
+reference values, conditional completion and cumulative-data reference reuse.
+
+`smc_laplace.jl` checks outer SMC over all RK-backed embedded-Laplace
+implementations against exact Gaussian marginals and completed joint moments,
+with scalar quadrature for the generic/structured model's sampled scale,
+independent pilots/workspaces, frozen cumulative updates, identity refusals,
+non-Gaussian completion, zero integration, interruption, weighted ladder
+resampling and fresh-process checkpoint replay. It uses the RKPPL 0.1.57
+prepared-target adapter and Enzyme's concurrent-GC repair. Pass testset title
+substrings to run a focused subset; run with two Julia threads for the
+serial/threaded comparison.
+
 `smc.jl` checks RK-only batch and cumulative-data SMC against analytic
 Gaussian posteriors and evidence, deterministic continuation and checkpoint
 replay, unchanged caller RNG, frozen training preprocessing, incompatible
@@ -102,7 +199,7 @@ learned, frozen normalized reference, replayed in fresh processes through
 correlated `SMCReference` and mutation `metric` built with
 `WarmupHMC.scale_data`. `smc_tuning_frozen.jl` checks that update tuning
 reprocesses cumulative data with frozen training preprocessing. They use the
-RKPPL 0.1.42 and WarmupHMC 0.2.9 pins from `setup_env.jl`.
+RKPPL 0.1.55 and WarmupHMC 0.2.10 pins from `setup_env.jl`.
 
 `smc_hierarchy_spread.jl` checks tuned SMC on a two-group hierarchy
 `mu ~ 1 + (1 | g)` against an exact grid oracle of the population intercept
@@ -134,6 +231,66 @@ retention. `filter_models.jl` contains the shared public synthetic models.
 against analytic filtering, narrow-ensemble predictive calibration and the
 completed-SMC-to-filter interface.
 Its testsets accept the usual substring filters as trailing arguments.
+
+`streaming_oracles_check.jl` validates the independent Gaussian and Kalman
+references in `streaming_oracles.jl`. Sequential Gaussian windows must equal
+the batch posterior and evidence, counting the prior once. The joint static
+parameter/AR(1) oracle is checked against numerical integration of a separate
+conditional scalar filter, including missing observations. These checks need
+only Julia's standard libraries; they do not exercise the SMC/filter adapters.
+
+`streaming_preprocessing.jl` checks a serialized fitted-state replay after
+poisoning the training arrays, comparing its window likelihood with the
+analytic density under the original scaling anchors. It also checks that the
+serialized preprocessing size stays bounded as the training rows grow.
+
+`filter_smc.jl` checks selected-static calibration from a latent-history fit,
+owned RNGs and inputs, named identity refusals, warm state-only boundary
+transfer and exact continuation of parameter learning. `filter_smc_process.jl`
+runs as `write <path>` then `read <path>` in separate Julia processes; its
+reader constructs only a one-slice model, never the old fit or training data.
+`filter_smc_scaling.jl` measures fixed-work allocation and checkpoint retention
+at 12 and 120 elapsed steps. These use `filter_smc_fixture.jl`.
+`filter_smc_oracle.jl` compares the learned static parameter and predictive
+normalizer with an independent joint Kalman recursion, using three seeds,
+missing observations, an independent frozen pilot and forced replenishment.
+It stays within a single window to separate particle accuracy from the
+documented Gaussian/state-independence approximation at boundaries.
+
+`smc_window_pilot.jl` tests correlated sequential windows against both their
+actual carried Gaussian oracle and the full batch posterior. Independent
+pilots tune kernels; completed clouds supply the next reference via `basis=:fit`.
+Ownership, schedule identity, `reference_inflation` forwarding and exact
+checkpoint continuation are also checked.
+
+`smc_window_scaling.jl` checks bounded carry/checkpoint storage over 128 windows
+and reports warmed initialization time at fixed particle/window dimensions.
+Shared-host wall times are reported, not asserted.
+
+`smc_window.jl` checks carried posterior summaries on new, nonoverlapping
+windows: sequential Gaussian posteriors against a batch fit, unchanged caller
+RNG and carried inputs, named source/data/preprocessing refusals, and bounded
+summary size. `smc_window_process.jl` checks exact checkpoint continuation in
+a fresh process that never constructs the training arrays.
+
+`smc_window_selective.jl` exercises opt-in `coordinates=:auto` windows: old
+priors are excluded, fresh priors include their old parents and transform
+Jacobians, and omitted coordinates retain their carried conditional law.
+Independent Gaussian and truncated-Normal references check posterior moments
+and predictive normalizers. Storage checks compare 32 and 256 particles in a
+10,002-coordinate growing frame, and lazy recovery checks a correlated omitted
+coordinate without adding full-width particles. Its testsets accept substring
+filters as trailing arguments. Repeated carries check that summaries stay
+bounded after growth. `smc_window_selective_api.jl` checks owned coordinate maps,
+compact pilot tuning, schedule identity and exact tuned continuation.
+`smc_window_selective_process.jl` checks fresh-process checkpoint continuation,
+coordinate maps, conditional recovery and the next carry while
+preserving fitted standardization without the original training rows.
+
+`rk_vector_extent.jl` checks data-driven declared-vector extents through emitted
+RK source, fitted replay and design binding. It covers integral expressions,
+growing versus fixed replay, shrinking refusal and an unrelated scalar input
+whose value happens to equal the extent.
 
 `test/Project.toml` is a superset of the root project: it carries every package
 that any `test/*.jl` loads, so no test file fails at its own `using` line the way
@@ -177,6 +334,15 @@ BridgeStan and RK log density and gradient of the spelling with that output
 collected last (the RK gradient of vector-cell reads is `@test_broken`, todo
 `1svm4l1`). It also covers the omitted response, `reprocess`, and
 the refusal of a name two cells write. Snag `model-scope-read-3649ae8a`.
+
+`plate_output_helpers.jl` checks model-scope whole-value helpers receiving
+matrix, vector and higher-dimensional plate cells. Independent normalized
+density and finite-difference gradient oracles cover positional and keyword
+arguments, likelihood arguments, non-last outputs, reader-first order,
+data-only cells, replay with empty cells and changed row counts, and ordinary
+Reverse AD. Complete printed-source replay and flattened rowwise observation
+controls guard the surrounding contracts. Run with `julia --project=test
+test/plate_output_helpers.jl`; testset substring filters are supported.
 
 `plate_grouped_outputs.jl` checks grouped reads of both outputs from another
 plate through `rows = groups(group => labels)` and `value[rows[k]]`.
@@ -1012,12 +1178,19 @@ which keeps shapes through nested data-only helpers inside sampled
 expressions. Scan-captured sigma rows and censored ragged factors need the
 0.1.47 / 0.1.43 floors. Shared-prefix value queries and gradients need
 0.1.48 / 0.1.51; packed gathered-column shapes need 0.1.50 / 0.1.52.
-The current RKPPL 0.1.54 floor also keeps shared-prefix binding in the
+RKPPL 0.1.54 or later also keeps shared-prefix binding in the
 latest world and preserves custom packed-vector storage and local reads.
 The grouped HSGP variants in `nlme_svi.jl` check
 value/gradient parity and shared-cache refresh across changed points.
 Both partition fixtures use ordinary Enzyme Reverse
 with the repaired dogfood revision pinned by `setup_env.jl`.
+
+`nlme_laplace_capability.jl` checks an optional Laplace refusal using a toy
+recurrence whose selected outputs are summed. It verifies that the capability
+probe returns `false` and caches the RK locality diagnostic, ordinary protocol
+checks and a short SAEM fit succeed, explicit integration rethrows the same
+diagnostic, and unrelated errors propagate. A supported nested model remains
+Laplace-capable. Run it in the same NLMEEstimation scratch environment.
 
 `nlme_integrated.jl` covers NLMEEstimation's integrated families on BRM
 models: SAEM integrates the chosen covariance families by BRM's sparse Laplace
@@ -1858,6 +2031,20 @@ The artifact is intentionally untracked. The comparison normalizes only the
 absolute test-source path embedded by StanBlocks; it retains model text and
 parameter identities.
 
+`laplace_declared_gaussian.jl` checks automatic and explicit integration of
+declared independent Normal vectors. It compares heterogeneous fixed priors
+and sampled means/scales against closed-form Gaussian marginal values and
+finite-difference gradients at several points. Nonlinear Normal observations
+exercise the diagnostic and implicit gradient; mixed generated effects,
+retained subsets, independent copies, prior dependencies, whole-vector width
+screening and linear sparse storage cover structural behavior.
+
+`laplace_mode_overflow.jl` exercises finite-density trials with overflowing
+derivatives in ordinary and sum cells, with exact and matrix-free solvers.
+It checks local backtracking, sequential
+fallback, conditional stationarity, marginal gradients, independent component
+steps and deterministic repeated evaluations.
+
 ## One-time bootstrap
 
 Use `test/setup_env.jl` as the single bootstrap entry:
@@ -1876,7 +2063,18 @@ developed paths enter one resolve on Julia 1.10, where `[sources]` in
 source of truth: an exact revision is checked out deliberately, so the
 environment does not drift with local branches.
 
-That writes `test/Manifest.toml`, which is deliberately **not** committed (the
+Every pin first checks `~/.local/state/kb-agents/git-mirrors/<Name>.jl.git`.
+When that mirror contains the exact revision, materialization uses it without
+contacting GitHub. An absent mirror or missing revision falls back to the pin's
+public origin. Mirror paths are derived from the pin list, so adding a dependency
+needs no separate mirror entry. Existing exact cached checkouts are reused.
+The offline regression checks use small local Git repositories:
+
+```sh
+julia --project=test test/dependency_floors_test.jl
+```
+
+Running `setup_env.jl` writes `test/Manifest.toml`, which is deliberately **not** committed (the
 root `.gitignore` covers `Manifest*.toml`). Re-run `setup_env.jl` on a new
 machine, after changing a pin, or when an existing ignored manifest still points
 at an older dependency checkout.
@@ -2000,12 +2198,15 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   rows, which registered Enzyme rejects with `IllegalTypeAnalysisException`
   and dogfood `d37cb0b4` differentiates (Enzyme snag
   `native-reverse-t-6d51cae6`; user pick on BRM decision `0n0kgfh`). The
-  sparse Laplace's `@plate` cells take their Hessian blocks through RKPPL's
-  compact-cell AD under plain Reverse, which needs dogfood from `7a886d9`
-  (Enzyme snag `static-reverse-s-f9483e9c`). Strict partition gradients need
-  `a6458e9c` for constant plans and compact overlays; the ordinary Reverse
-  fixtures do not enable runtime activity. The current pin is `68ed90fe`
-  with its declared libEnzyme `2063db12`; it includes `3a89b497`'s compact
+  sparse Laplace's ordinary `@plate` cells take their Hessian blocks through
+  RKPPL's forward-over-reverse compact-cell AD. This requires both the
+  static-activity repair from `7a886d9` (Enzyme snag
+  `static-reverse-s-f9483e9c`) and the augmented-helper JIT-symbol repair
+  (Enzyme snag `forward-over-rev-188051dc`), which preserves the `digamma`
+  partials used by negative-binomial cells. Strict partition gradients
+  need `a6458e9c` for constant plans and compact overlays; the ordinary
+  Reverse fixtures do not enable runtime activity. The exact pin and declared
+  libEnzyme build come from `setup_env.jl`. The pin includes `3a89b497`'s compact
   nested-AD overlay repairs for sum factors and the dynamic-call Hessian
   repair needed by lower-bounded completion geometry. It also repairs
   positive-tail `erfcx` derivatives through third order (Enzyme snag
@@ -2072,3 +2273,85 @@ toolchain, so a GitHub Actions job would be red by construction.
 # Controls cover normalized compiled same-BRMI Stan, ordinary native Reverse,
 # full source/artifact replay and input ownership; native generated draws are
 # unavailable.
+
+## Bounded sparse Laplace acceptance
+
+`laplace_width.jl` checks structural screening before derivative preparation,
+deterministic whole-term selection, forced conflicts, correlated margins,
+exact Gaussian retained-set values and native Enzyme gradients, local sum
+directions, and the zero-integration target/draw/Pathfinder/ladder workflows.
+Its independent Gaussian oracle integrates the same selected coordinates of
+the full pointwise model; it does not compare different marginal targets.
+`laplace_plan_reuse.jl` checks that prepared plans still avoid new AD preparation
+and give independent targets when a strict subset is retained.
+
+The measurements in `research/sparse_laplace_factors/*_2026-11-02.tsv` use
+Julia 1.10.12 on gordito, one CPU per process, RK
+`5e9d2d03818ba5c8ef7d6d068fef42101f902d0e` (0.1.52 / PPL 0.1.55), Enzyme
+`5325554cab66d13ab34c22ec502fd00759ffdcf7` and libEnzyme
+`782c9d95efd9895e380c451ea9975cde1c197219` (LLVM 15). Each point runs in a
+separate process under `/usr/bin/time -v`; `external_peak_rss_kib` is that
+independent measurement. `allocated_bytes` and `seconds` cover the warmed
+operation; process peak RSS includes Julia, package loading and compilation.
+Concurrent host load makes these short timings descriptive, not a speedup
+comparison.
+
+Three probes separate the costs:
+
+- `pattern_scaling.jl` measures only footprint deduplication and CSC union.
+  Its `statistics_bytes` is just the small statistics tuple, not all metadata.
+- `pattern_builder_scaling.jl` executes the complete, unchanged production
+  `_brm_spl_pattern!` method in a minimal input container. It counts input cell
+  storage and all retained index metadata, including linear `tptr`/`tz`/`rloc`,
+  diagonals, prior maps and components. The source hash identifies the measured
+  implementation. Repeated footprints test duplicate suppression; overlapping
+  distinct footprints test retained structure separately from pair visits.
+- `width_scaling.jl` calls the public planner on ordinary Gaussian cells using
+  `dot` to preserve a genuinely coupled footprint. It passes no AD backend,
+  sets the bound to 32, and asserts that all effects are sampled with no prepared
+  conditional problem. This measures structural planning and generated query
+  setup, not just the selection helper.
+
+Complete production builder results (bytes, rounded to decimal MB):
+
+| Shape | Width | Cells | Pair visits | Retained nnz | Allocated MB | Index metadata MB |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| repeated | 32 | 100 | 1,024 | 1,024 | 0.541 | 0.029 |
+| repeated | 32 | 400 | 1,024 | 1,024 | 2.072 | 0.110 |
+| repeated | 128 | 100 | 16,384 | 16,384 | 2.701 | 0.108 |
+| repeated | 128 | 400 | 16,384 | 16,384 | 7.440 | 0.420 |
+| overlapping | 32 | 400 | 409,600 | 26,161 | 5.221 | 0.120 |
+| overlapping | 128 | 400 | 6,553,600 | 118,129 | 18.019 | 0.429 |
+
+Every point retains zero per-cell quadratic pair-map entries. Width 128 with
+400 repeated cells keeps 51,200 input incidences, a 263,336-byte CSC pattern
+and a 1,122,952-byte complete fixture. Distinct overlapping blocks still visit
+their required local pairs; those visits are not stored as duplicate triplets.
+With a fixed local width bound, their work is bounded by that width times
+footprint incidence. Storage follows input incidence and the retained sparse
+pattern, including its diagonals and prior edges.
+
+Public planning allocated 18.20/23.02 MB at width 64 with 100/400 cells, and
+21.95/37.28 MB at width 256. All four plans retained zero integrated coordinates
+and 66/258 sampled coordinates respectively; none prepared conditional AD.
+Their isolated process peaks were 1.01–1.08 GB including compilation, while
+the warmed planner took 0.033–0.046 seconds. The raw TSV retains each result
+and its source hash.
+
+To reproduce, run each parameter tuple in a fresh process inside the usual
+compute-token wrapper (and use `JULIA_PKG_OFFLINE=true` when dependencies are
+already present):
+
+```sh
+/usr/bin/time -v julia --project=test research/sparse_laplace_factors/pattern_builder_scaling.jl 128 400 repeated
+/usr/bin/time -v julia --project=test research/sparse_laplace_factors/width_scaling.jl 256 400
+```
+
+The builder and microprobe matrix is `(width,cells,shape)` =
+`(32,100,repeated)`, `(32,400,repeated)`, `(128,100,repeated)`,
+`(128,400,repeated)`, `(32,400,overlap)`, `(128,400,overlap)`.
+The public-planner matrix is widths `(64,256)` crossed with cells `(100,400)`.
+
+These bounded fixtures do not establish full Atlas runtime, memory or fitting
+speed. Sparse factorization can still incur fill-in, sampled targets can be
+large, and raising `max_cell_width` permits genuinely dense local blocks.

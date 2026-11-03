@@ -73,10 +73,24 @@ jobs:
         # (run 30708357301).
         run: |
           git clone -b devibe https://github.com/nsiccha/StanBlocks.jl.git
-          julia --project=docs -e 'using Pkg; Pkg.develop([
-            PackageSpec(path=pwd()),
-            PackageSpec(path="StanBlocks.jl"),
-          ]); Pkg.instantiate()'
+          julia --project=docs -e '
+            using Pkg, TOML
+            # Julia 1.10 ignores [sources]; read the BRM release pins here.
+            sources = TOML.parsefile("Project.toml")["sources"]
+            pinned = map(["ReparametrizableDistributions", "PowerScaling"]) do name
+              source = sources[name]
+              path = joinpath(ENV["RUNNER_TEMP"], name * ".jl")
+              run(`git clone --no-checkout $(source["url"]) $path`)
+              run(`git -C $path checkout --detach $(source["rev"])`)
+              PackageSpec(path=path)
+            end
+            Pkg.develop([
+              PackageSpec(path=pwd()),
+              PackageSpec(path="StanBlocks.jl"),
+              pinned...,
+            ])
+            Pkg.instantiate()
+          '
       - name: Build and deploy
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

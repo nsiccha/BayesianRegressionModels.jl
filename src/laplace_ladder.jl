@@ -10,7 +10,7 @@
 #   4  effects given the point: Laplace draws through the factor
 #   5a the population's curvature at the point: a labelled diagnostic, never
 #      the delivered posterior
-#   5b HMC over the Laplace marginal, the effects drawn through the factor
+#   5b Sampling the Laplace marginal, the effects drawn through the factor
 #   6  exact MCMC on the full model, from rung 5
 #
 # With `integrate = :auto` the plan (`brm_laplace_plan`) is measured again at
@@ -21,7 +21,8 @@
     brm_ladder_fit(rk::RKBRMI; ad_backend, upto = 4, integrate = :auto,
         start = nothing, draws = 1000, conditional = 0, rng = Random.default_rng(),
         continue_from = nothing, subject_group = nothing, nested_groups = (;),
-        shared_groups = (), saem_options = nothing, sampler = nothing) -> NamedTuple
+        shared_groups = (), saem_options = nothing, sampler = nothing,
+        max_cell_width = 128) -> NamedTuple
 
 A staged fit of `rk` over its sparse embedded Laplace ([`brm_laplace_problem`](@ref)
 with `integrate`, by default [`brm_laplace_plan`](@ref)'s choice). It climbs the
@@ -54,10 +55,11 @@ that starts the next:
 5. **(5a) The population's curvature** at the point, from central differences
    of the Laplace gradient: a dense matrix over the population coordinates
    only, labelled a diagnostic. Its standard errors are never the delivered
-   posterior. **(5b) HMC over the Laplace marginal:** `sampler(problem, init,
+   posterior. Above 128 population coordinates this dense diagnostic is
+   skipped with a reason. **(5b) Sampling the Laplace marginal:** `sampler(problem, init,
    rng)` draws the population coordinates from the sparse problem started at
    the point, and each draw's integrated effects are drawn through the factor.
-   Its check's `comparison` reports the HMC mean and standard deviation,
+   Its check's `comparison` reports the sampled mean and standard deviation,
    the mean shift in curvature standard errors, and the ratio of standard
    deviations, in `problem.population` order.
 6. **Exact:** `sampler` on the full model ([`rk_logdensity_problem`](@ref)),
@@ -66,7 +68,22 @@ that starts the next:
 `sampler = (problem, init, rng) -> draws` (dimension × draws) runs rungs 5b
 and 6, for example
 `(p, init, rng) -> Matrix(adaptive_warmup_mcmc(rng, p; init).posterior_position)`
-with WarmupHMC; without it they are skipped and named.
+with WarmupHMC; without it they are skipped and named. At rung 5b the callback
+may instead return a completed `brm_smc_fit(problem; rng, ...)`. Its weighted
+outer cloud is resampled to equally weighted columns before conditional
+completion; `conditional` applies here as at rung 4. The rung is named
+`:population_sampling`, with `method=:smc` or `:callback`. Use `upto=5` for a
+Laplace-only callback: rung 6 still needs a sampler for the full-model target.
+
+`max_cell_width` bounds local integrated footprints before derivative
+preparation, as in [`brm_laplace_plan`](@ref). Automatic replanning preserves
+that bound; an explicit plan keeps its own. If no terms are admitted, the
+workflow uses the full sampled model's value and gradient.
+
+`solver` and `matrixfree` select the conditional algebra as in
+[`brm_laplace_problem`](@ref). Omitted values use an explicit plan's policy
+or the automatic defaults. Replanning and continuation retain that policy;
+continuation uses the existing target and does not change numerical options.
 
 Returns `(; draws, point, problem, plan, rungs, ladder)`:
 - `draws`: the packed draws of the highest sampling or point rung climbed
@@ -85,14 +102,14 @@ function brm_ladder_fit(backend::RKBRMI; ad_backend, upto::Integer=4, integrate=
         start=nothing, draws::Integer=1000, conditional::Integer=0,
         rng=Random.default_rng(), continue_from=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), saem_options=nothing,
-        sampler=nothing)
+        sampler=nothing, max_cell_width=128, solver=nothing, matrixfree=nothing)
     1 <= upto <= 6 || throw(ArgumentError(
         "brm_ladder_fit: upto = $upto; the ladder's rungs are 1 to 6"))
     rungs = continue_from === nothing ? NamedTuple[] : copy(continue_from.rungs)
     ladder = continue_from === nothing ? NamedTuple[] : copy(continue_from.ladder)
     done(r) = any(x -> x.rung == r, rungs)
     p = continue_from === nothing ?
-        brm_laplace_problem(backend; ad_backend, integrate) : continue_from.problem
+        brm_laplace_problem(backend; ad_backend, integrate, max_cell_width, solver, matrixfree) : continue_from.problem
     p.backend === backend || throw(ArgumentError(
         "brm_ladder_fit: continue_from belongs to a different RK backend"))
     automatic = continue_from === nothing ? integrate === :auto : continue_from.automatic
@@ -105,7 +122,7 @@ function brm_ladder_fit(backend::RKBRMI; ad_backend, upto::Integer=4, integrate=
         filter!(r -> r.rung < 3, ladder)
     end
     if sampler !== nothing
-        keep(r) = !(get(r, :skipped, false) && r.name in (:population_hmc, :exact))
+        keep(r) = !(get(r, :skipped, false) && r.name in (:population_sampling, :exact))
         filter!(keep, rungs)
         filter!(keep, ladder)
     end
@@ -199,40 +216,50 @@ function brm_ladder_fit(backend::RKBRMI; ad_backend, upto::Integer=4, integrate=
         check = (; rung=4, name=:effect_draws, draws, conditional,
             newton_steps=maximum(out.diagnostics.newton_steps))
         conditional > 0 && (check = (; check...,
-            importance_ess_min=minimum(out.diagnostics.importance_ess)))
+            importance_ess_min=minimum(out.diagnostics.importance_ess; init=Inf)))
         push!(ladder, check)
     end
     named(r, n) = any(x -> x.rung == r && x.name === n, rungs)
     if upto >= 5 && !named(5, :population_curvature)
-        curvature = _brm_ladder_curvature(p, point)
-        push!(rungs, (; rung=5, name=:population_curvature, point,
-            draws=_brm_ladder_packed(p, _brm_spl_mode!(p, point)), curvature...))
-        push!(ladder, (; rung=5, name=:population_curvature, diagnostic=true,
-            curvature.positive_definite,
-            standard_errors=curvature.standard_errors))
+        if length(point) > 128
+            reason = "population curvature exceeds the 128-coordinate dense diagnostic bound"
+            standard_errors = fill(NaN, length(point))
+            push!(rungs, (; rung=5, name=:population_curvature, skipped=true,
+                reason, standard_errors))
+            push!(ladder, (; rung=5, name=:population_curvature, diagnostic=true,
+                skipped=true, reason, standard_errors))
+        else
+            curvature = _brm_ladder_curvature(p, point)
+            push!(rungs, (; rung=5, name=:population_curvature, point,
+                draws=_brm_ladder_packed(p, _brm_spl_mode!(p, point)), curvature...))
+            push!(ladder, (; rung=5, name=:population_curvature, diagnostic=true,
+                curvature.positive_definite,
+                standard_errors=curvature.standard_errors))
+        end
     end
     no_sampler = "pass `sampler = (problem, init, rng) -> draws` (dimension × draws), " *
         "for example `Matrix(adaptive_warmup_mcmc(rng, problem; init).posterior_position)` " *
         "with WarmupHMC"
-    if upto >= 5 && !named(5, :population_hmc)
+    if upto >= 5 && !named(5, :population_sampling)
         if sampler === nothing
-            push!(ladder, (; rung=5, name=:population_hmc, skipped=true, reason=no_sampler))
-            push!(rungs, (; rung=5, name=:population_hmc, skipped=true))
+            push!(ladder, (; rung=5, name=:population_sampling, skipped=true, reason=no_sampler))
+            push!(rungs, (; rung=5, name=:population_sampling, skipped=true))
         else
-            P = sampler(p, copy(point), rng)
+            sampled = _brm_ladder_samples(sampler(p, copy(point), rng), p, rng)
+            P = sampled.positions
             size(P, 1) == length(p.population) || throw(DimensionMismatch(
                 "brm_ladder_fit: rung 5b: the sampler returned $(size(P, 1)) rows for " *
                 "$(length(p.population)) population coordinates"))
-            out = brm_laplace_draws(p, P; rng)
-            push!(rungs, (; rung=5, name=:population_hmc, point, out.draws))
+            out = brm_laplace_draws(p, P; rng, conditional)
+            push!(rungs, (; rung=5, name=:population_sampling, method=sampled.method, point, out.draws))
             curvature = only(r for r in rungs if r.name === :population_curvature)
             sample_mean = vec(mean(P; dims=2))
             sample_sd = vec(std(P; dims=2))
             comparison = (; mean=sample_mean, standard_deviations=sample_sd,
                 mean_shift_in_standard_errors=(sample_mean .- point) ./ curvature.standard_errors,
                 standard_deviation_ratio=sample_sd ./ curvature.standard_errors)
-            push!(ladder, (; rung=5, name=:population_hmc, draws=size(P, 2),
-                newton_steps=maximum(out.diagnostics.newton_steps), comparison))
+            push!(ladder, (; rung=5, name=:population_sampling, method=sampled.method, draws=size(P, 2),
+                conditional, newton_steps=maximum(out.diagnostics.newton_steps), comparison))
         end
     end
     if upto >= 6 && !done(6)
@@ -242,7 +269,7 @@ function brm_ladder_fit(backend::RKBRMI; ad_backend, upto::Integer=4, integrate=
         else
             # started from the last draw of the highest rung below it
             below = last(sort([r for r in rungs if _brm_ladder_has_draws(r) && r.rung < 6];
-                by=r -> (r.rung, r.name === :population_hmc)))
+                by=r -> (r.rung, r.name === :population_sampling)))
             init = below.draws[:, end]
             q = rk_logdensity_problem(backend; ad_backend, u0=copy(init))
             D = sampler(q, init, rng)
@@ -254,7 +281,7 @@ function brm_ladder_fit(backend::RKBRMI; ad_backend, upto::Integer=4, integrate=
         end
     end
     top = last(sort([r for r in rungs if _brm_ladder_has_draws(r)];
-        by=r -> (r.rung, r.name === :population_hmc)))
+        by=r -> (r.rung, r.name === :population_sampling)))
     (; draws=top.draws, point, problem=p, plan, automatic, rungs, ladder)
 end
 
@@ -265,7 +292,8 @@ _brm_ladder_has_draws(r) = !get(r, :skipped, false) && r.name !== :population_cu
 function _brm_ladder_replan(p, u; ad_backend, rng)
     r = _brm_laplace_plan(p.backend; ad_backend, integrate=:auto, sample=(),
         ess_floor=p.plan.ess_floor, draws=p.plan.draws, at=u, rng,
-        tol=p.tol, maxiter=p.maxiter)
+        tol=p.tol, maxiter=p.maxiter, max_cell_width=p.plan.max_cell_width,
+        p.plan.algebra_policy...)
     before = Set(t.declaration for t in _brm_plan_admitted(p.plan))
     after = Set(t.declaration for t in _brm_plan_admitted(r.plan))
     switched = sort!(collect(symdiff(before, after)))
@@ -293,7 +321,7 @@ _brm_ladder_packed(p, state) = reshape(copy(state.u), :, 1)
 # The Laplace marginal's curvature over the population coordinates at `φ`:
 # central differences of its gradient (2p gradients), symmetrized. Its inverse
 # negative is a Gaussian's covariance, reported as a diagnostic only.
-function _brm_ladder_curvature(p::BRMSparseLaplaceProblem, φ; h=1e-4)
+function _brm_ladder_curvature(p::Union{BRMSparseLaplaceProblem,_BRMSampledLaplaceProblem}, φ; h=1e-4)
     n = length(φ)
     H = zeros(n, n)
     for j in 1:n
@@ -310,3 +338,7 @@ function _brm_ladder_curvature(p::BRMSparseLaplaceProblem, φ; h=1e-4)
     (; hessian=H, covariance, positive_definite,
         standard_errors=positive_definite ? sqrt.(diag(covariance)) : fill(NaN, n))
 end
+
+# Ordinary callbacks already return equally weighted columns. Extensions may
+# adapt weighted sampler results explicitly before the matrix-only ladder.
+_brm_ladder_samples(P::AbstractMatrix, problem, rng) = (; positions=P, method=:callback)

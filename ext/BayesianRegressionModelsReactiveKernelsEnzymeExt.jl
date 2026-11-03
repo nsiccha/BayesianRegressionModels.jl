@@ -236,13 +236,21 @@ function BRM._rk_spl_cell_ad(backend::BRM.RKBRMI, observations::Tuple,
     built, plan = backend.model, rkext._rk_translated(backend)
     m = length(indices0)
     forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
-    second = SecondOrder(AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse,
-        ad_backend)), forward)
+    reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
+    # Ordinary cells have one active vector and a fixed direction-tuple arity.
+    # Forward-over-reverse reduces the work of their Newton and implicit HVPs.
+    second = SecondOrder(forward, reverse)
     hvp = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_hvp, built, plan,
         observations, base0, indices0, second, ntuple(_ -> zeros(Float64, m), K))
+    # The implicit correction needs only H*v after the global solve. Keep its
+    # one-direction preparation separate from the Newton Hessian block.
+    single = K == 1 ? hvp : Base.invokelatest(prepare_compact_cell_ad, prepare_ad_hvp,
+        built, plan, observations, base0, indices0, second, (zeros(Float64, m),))
+    # Keep the supported reverse-over-forward-over-forward third derivative.
     third = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_third, built, plan,
-        observations, base0, indices0, SecondOrder(second, forward), (zeros(Float64, m),))
-    (; hvp, third)
+        observations, base0, indices0, SecondOrder(SecondOrder(reverse, forward), forward),
+        (zeros(Float64, m),))
+    (; hvp, single, third)
 end
 
 BRM._rk_spl_cell_block(ad, directions::Tuple, base::Vector{Float64},
@@ -254,6 +262,17 @@ function BRM._rk_spl_cell_third(ad, direction::Vector{Float64}, base::Vector{Flo
     gradient, (hv,), (tv,) = ad_gradient_hvp_and_third(ad.third, (direction,), base,
         base[indices], indices, i)
     gradient, hv, tv
+end
+
+BRM._rk_spl_cell_third_only(ad, direction::Vector{Float64}, base::Vector{Float64},
+    indices::Vector{Int}, i::Int) =
+    only(ad_third(ad.third, (direction,), base, base[indices], indices, i))
+
+function BRM._rk_spl_cell_implicit(ad, direction::Vector{Float64}, base::Vector{Float64},
+        indices::Vector{Int}, i::Int)
+    gradient, (hv,) = ad_gradient_and_hvp(ad.single, (direction,), base,
+        base[indices], indices, i)
+    gradient, hv
 end
 
 # A factor's complete derivative block is small: the outer sums and direct
@@ -270,18 +289,16 @@ mutable struct _SPLFactorAD{H,T,D}
     const outer::Bool
 end
 
-function BRM._rk_spl_factor_ad(q, part, base, indices, ad_backend; cell0=1, term0=1)
+function BRM._rk_spl_factor_ad(q, part, base, indices, ad_backend; cell0=1, term0=1, K=nothing)
     r = part === :outer ? length(q.terms) : 0
     m = length(indices)
     shape(v) = part === :outer ? (v[1:r], v[(r + 1):end]) : v
-    dirs = ntuple(r + m) do k
-        v = zeros(r + m); v[k] = 1.0
-        shape(v)
-    end
+    K = K === nothing ? r + m : K
+    dirs = ntuple(_ -> shape(zeros(r + m)), K)
     forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
     second = SecondOrder(AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse,
         ad_backend)), forward)
-    hvp = Base.invokelatest(prepare_cell_factor_ad, prepare_ad_hvp, q.factors,
+    hvp = K == 0 ? nothing : Base.invokelatest(prepare_cell_factor_ad, prepare_ad_hvp, q.factors,
         part, base, indices, second, dirs; cell0, term0)
     third = Base.invokelatest(prepare_cell_factor_ad, prepare_ad_third, q.factors,
         part, base, indices, SecondOrder(second, forward), (shape(zeros(r + m)),);
@@ -295,10 +312,34 @@ _spl_factor_point(ad, base, indices, cell, sums, term) = ad.outer ?
     (base, sums, base[indices], indices, cell) :
     (base, base[indices], indices, cell, term)
 
-function BRM._rk_spl_factor_block(ad, base, indices, cell; sums=nothing, term=1)
+function BRM._rk_spl_factor_block(ad, base, indices, cell; sums=nothing, term=1,
+        columns=collect(1:(ad.r + length(indices))))
     point = _spl_factor_point(ad, base, indices, cell, sums, term)
-    g, cols = ad_gradient_and_hvp(ad.hvp, ad.dirs, point...)
-    _spl_factor_flat(g), hcat(map(_spl_factor_flat, cols)...)
+    if isempty(columns)
+        g, _, _ = BRM._rk_spl_factor_third(ad, zeros(ad.r + length(indices)),
+            base, indices, cell; sums, term)
+        return g, zeros(length(g), 0)
+    end
+    function set!(v, k, value)
+        if ad.outer
+            k <= ad.r ? (v[1][k] = value) : (v[2][k - ad.r] = value)
+        else
+            v[k] = value
+        end
+    end
+    for (v, k) in zip(ad.dirs, columns)
+        set!(v, k, 1.0)
+    end
+    try
+        g, cols = ad_gradient_and_hvp(ad.hvp, ad.dirs, point...)
+        # A reused plan can restrict the integrated set without preparing AD
+        # again. Its original direction tuple then has a zero unused suffix.
+        _spl_factor_flat(g), hcat(map(_spl_factor_flat, cols[1:length(columns)])...)
+    finally
+        for (v, k) in zip(ad.dirs, columns)
+            set!(v, k, 0.0)
+        end
+    end
 end
 
 function BRM._rk_spl_factor_third(ad, direction, base, indices, cell;

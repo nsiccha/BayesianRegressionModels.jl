@@ -12,7 +12,7 @@ const BRM = BayesianRegressionModels
 # which precompilation refuses.
 function BRM._brm_laplace_mode(
         p::Union{BRM.BRMLaplaceProblem,BRM.BRMStructuredLaplaceProblem,
-            BRM.BRMSparseLaplaceProblem},
+            BRM.BRMSparseLaplaceProblem,BRM._BRMSampledLaplaceProblem},
         φ0::AbstractVector; iterations, g_abstol)
     nonfinite = p.nonfinite
     f(φ) = -LogDensityProblems.logdensity(p, φ)

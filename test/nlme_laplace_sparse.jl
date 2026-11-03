@@ -496,12 +496,14 @@ end
     BRM._brm_spl_assemble!(fc, g, h, r, pop.A, pop.C, z; derivatives=true)
     δ = 100 .* BRM._brm_spl_direction(r, h, g)
     before = (r.blockwise, r.sweeps)
+    f0 = sum(fc)
     z1 = copy(z)
     @test BRM._brm_spl_step!(r, pop, z1, δ, g, h, fc, falses(length(r.components)))
     @test r.blockwise == before[1] + 1
     f1 = zeros(length(r.components))
     BRM._brm_spl_assemble!(f1, nothing, nothing, r, pop.A, pop.C, z1; derivatives=false)
-    @test sum(f1) > sum(fc)
+    @test sum(f1) > f0
+    @test f1 ≈ fc
 end
 
 # `@plate` cells: subjects whose cells read their own effect and their rows'
@@ -553,6 +555,37 @@ end
         @test last(LogDensityProblems.logdensity_and_gradient(partial, ψ)) ≈
             spl_fd(partial, ψ) rtol=1e-5 atol=1e-5
     end
+end
+
+@stestset "ordinary cells with no integrated coordinates retain population gradients" begin
+    d = (; g=["a", "b"], y=[0.2, -0.3], calibration=[0.8, 1.2, 0.9])
+    rk = RKBRMI(@brm d begin
+        beta ~ Normal(0, 1)
+        mu ~ 1 + (1 | g)
+        @plate for i in eachindex(y)
+            y[i] ~ Normal(mu[i], 1.0)
+        end
+        @plate for i in eachindex(calibration)
+            calibration[i] ~ Normal(exp(beta), 0.7)
+        end
+    end)
+    p = spl_problem(rk, :g)
+    cells = only(group.cells for group in p.cells if group.name === :calibration)
+    @test all(isempty(c.lz) for c in cells)
+    phi = 0.1 .* randn(Xoshiro(52), length(p.population))
+    _, gradient = LogDensityProblems.logdensity_and_gradient(p, phi)
+    @test gradient ≈ spl_fd(p, phi) rtol=1e-6 atol=1e-6
+    active = falses(BRM._brm_spl_nterms(p))
+    for c in cells
+        active[c.term] = true
+    end
+    state = BRM._brm_spl_mode!(p, phi)
+    _, selected = BRM._brm_spl_value_and_gradient(p, state; active, prior=false)
+    expected = zeros(length(phi))
+    j = findfirst(==(:beta), p.names)
+    mean = exp(phi[j])
+    expected[j] = mean * sum(d.calibration .- mean) / 0.7^2
+    @test selected ≈ expected rtol=1e-12 atol=1e-12
 end
 
 # Per-unit values and the gradient of a subset of units (the NLME protocol's

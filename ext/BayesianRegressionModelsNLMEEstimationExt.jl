@@ -17,6 +17,7 @@ import DifferentiationInterface as DI
 using LinearAlgebra
 import Enzyme
 import NLMEEstimation as NE
+import ReactiveKernels: PartitionLocalityError
 import ReactiveKernelsPPL as RKPPL
 const BRM = BayesianRegressionModels
 
@@ -528,13 +529,13 @@ function _laplace_problem(m::BRM.BRMNLMEModel, integrated)
     built
 end
 
-# A refusal is kept, so a model the sparse Laplace does not take is not
-# rebuilt at every call.
+# A structural refusal is kept, so optional capability probes return false
+# without rebuilding. Explicit integration rethrows the original diagnostic.
 function _build_laplace_problem(m::BRM.BRMNLMEModel, key)
     try
         _new_laplace_problem(m, key)
     catch err
-        err isa BRM.BRMNLMEViewError || rethrow()
+        err isa Union{BRM.BRMNLMEViewError,PartitionLocalityError} || rethrow()
         err
     end
 end

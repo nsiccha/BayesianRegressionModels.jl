@@ -153,6 +153,61 @@ masked_periodic(d) = @brm d begin
     mu ~ 1 + hsgp(x; k=2, cov=:periodic, period=4.0, rows=keep)
     y ~ Normal(mu, sigma)
 end
+# Data-only definitions used by validation can be materialized at binding
+# (the HSGP axis) or folded later by preparation (the grouping key).
+pack_rows(x, key) = hcat(x .+ 0.25, key)
+pack_rows(x::AbstractVector{<:AbstractVector}, key) =
+    pack_rows(reduce(vcat, x), reduce(vcat, [fill(k, length(v)) for (k, v) in zip(key, x)]))
+derived_rows(d) = @brm d begin
+    packed = pack_rows(x, raw_key)
+    axis = packed[:, 1]
+    key = packed[:, 2]
+    m ~ 1 + (1 | group)
+    h ~ 0 + hsgp(axis; k=4, domain=(-2.0, 2.0))
+    rows = groups(key => group)
+    @plate for i in eachindex(m)
+        total[i] = m[i] + sum(h[rows[i]])
+        y[i] ~ Normal(total[i], 1.0)
+    end
+end
+derived_key(d) = @brm d begin
+    key = copy(raw_key)
+    rank = copy(raw_rank)
+    m ~ 1 + (1 | group)
+    rows = groups(key => group; order=rank)
+    @plate for i in eachindex(m)
+        total[i] = m[i] + sum(x[rows[i]])
+        y[i] ~ Normal(total[i], 1.0)
+    end
+end
+missing_axis(x) = Union{Missing,Float64}[isnan(v) ? missing : v for v in x]
+derived_masked(d) = @brm d begin
+    axis = missing_axis(x)
+    mask = copy(keep)
+    mu ~ 0 + hsgp(axis; k=4, domain=(-2.0, 2.0), rows=mask)
+    y ~ Normal(mu, 1.0)
+end
+derived_masked_fitted(d) = @brm d begin
+    axis = missing_axis(x)
+    mask = copy(keep)
+    mu ~ 0 + hsgp(axis; k=4, rows=mask)
+    y ~ Normal(mu, 1.0)
+end
+derived_factor(d) = @brm d begin
+    level = copy(g)
+    mu ~ 1 + factor(level)
+    y ~ Normal(mu, 1.0)
+end
+derived_monotonic(d) = @brm d begin
+    level = copy(g)
+    mu ~ 1 + mo(level)
+    y ~ Normal(mu, 1.0)
+end
+derived_weighted(d) = @brm d begin
+    weight = copy(n)
+    mu ~ 1 + x
+    y ~ weighted(Normal(mu, 1.0), fweights(weight))
+end
 # An areal field: its graph is fitted from the training areas and edges.
 areal(d) = @brm d begin
     mu ~ 1 + car(area; edges=(from, to), type=:bym2)
@@ -327,6 +382,106 @@ end
 
 subject_effects(design) = (:b_p_subject => 0.1 .* reshape(
     collect(1.0:(2 * length(design.subject))), length(design.subject), 2),)
+
+@stestset "derived axes and grouping keys reuse the design lowering" begin
+    train = (; group=[1, 2, 3], raw_key=[1, 2, 1, 3, 2],
+        raw_rank=[1., 1., 2., 1., 2.], x=[-0.8, -0.4, 0.0, 0.4, 0.8], y=zeros(3))
+    designs = [(; group=[4, 5], raw_key=[4, 5, 4], raw_rank=[2., 1., 1.],
+                   x=[-0.6, 0.2, 0.7], y=zeros(2)),
+               (; group=[6, 8, 7], raw_key=[7, 6, 8, 6], raw_rank=[1., 2., 1., 1.],
+                   x=[0.3, -0.7, 0.1, 0.8], y=zeros(3))]
+    for build in (BM.derived_rows, BM.derived_key)
+        rk = RKBRMI(build(train))
+        binder = check_binder(rk, designs; resample_groups=[:group], want=:total,
+            runtime=d -> (:b_group => reshape(0.1 .* collect(1:length(d.group)), :, 1),))
+        @test length(binder.classes) == 1
+        @test !occursin("replayed in full", sprint(show, binder))
+        lowering = only(values(binder.classes)).lowering
+        @test lowering !== nothing
+        base = first(designs)
+        # Repeat a changed design of the same kind: the lowering stays fixed.
+        changed = merge(base, (; x=reverse(base.x)))
+        @test same_inputs(binder(changed), rk_bound_data(reprocess(rk, changed;
+            resample_groups=[:group])))
+        @test only(values(binder.classes)).lowering === lowering
+        if build === BM.derived_rows
+            for x in ([8., 0.2, 0.7], [Inf, 0.2, 0.7])
+                invalid = merge(base, (; x))
+                message = isfinite(first(x)) ? "lies outside its fixed domain" :
+                    "`hsgp` axes must be finite"
+                @test_throws message reprocess(rk, invalid; resample_groups=[:group])
+                @test_throws message binder(invalid)
+            end
+        else
+            # This definition is absent from bound columns: validation must
+            # still read it through the program without changing the inputs.
+            @test !haskey(binder(base), :key)
+            for invalid in (merge(base, (; x=base.x[1:2])),
+                    merge(base, (; raw_rank=base.raw_rank[1:2])))
+                message = try
+                    reprocess(rk, invalid; resample_groups=[:group]); nothing
+                catch err
+                    sprint(showerror, err)
+                end
+                @test message !== nothing
+                message === nothing || @test_throws message binder(invalid)
+            end
+        end
+    end
+end
+
+@stestset "ragged inputs build a derived HSGP axis in cached binding" begin
+    train = (; group=[1, 2, 3], raw_key=[1, 2, 3],
+        x=[[-0.8, 0.2], [0.4], [-0.2, 0.7, 0.8]], y=zeros(3))
+    designs = [(; group=[4, 5], raw_key=[4, 5], x=[[-0.6, 0.2, 0.7], [0.3]], y=zeros(2)),
+               (; group=[6, 8, 7], raw_key=[7, 6, 8],
+                   x=[[0.1], [-0.7, 0.3, 0.5, 0.8], [-0.1, 0.6]], y=zeros(3))]
+    rk = RKBRMI(BM.derived_rows(train))
+    binder = check_binder(rk, designs; resample_groups=[:group], want=:total,
+        runtime=d -> (:b_group => reshape(0.1 .* collect(1:length(d.group)), :, 1),))
+    @test length(binder.classes) == 1
+    @test !occursin("replayed in full", sprint(show, binder))
+    @test same_inputs(binder(first(designs)), rk_bound_data(reprocess(rk, first(designs);
+        resample_groups=[:group])))
+end
+
+@stestset "derived masks and fitted levels retain replay validation" begin
+    train = (; x=collect(range(-0.8, 0.8; length=12)), keep=ones(Int, 12), y=zeros(12))
+    # The assignment introduces missing values on its own axis. Its raw input
+    # stays numeric, and even a changed missingness pattern has the same kind.
+    holes = merge(train, (; x=[train.x[1:5]; NaN; train.x[7:end]],
+        keep=[ones(Int, 5); 0; ones(Int, 6)]))
+    for build in (BM.derived_masked, BM.derived_masked_fitted)
+        rk = RKBRMI(build(build === BM.derived_masked ? holes : train))
+        base = (; x=[-0.5, NaN, 0.7], keep=[1, 0, 1], y=zeros(3))
+        binder = check_binder(rk, [base, merge(base, (; x=reverse(base.x)))]; want=:mu)
+        @test !occursin("replayed in full", sprint(show, binder))
+        for (invalid, message) in ((merge(base, (; keep=[1, 2, 1])), "must hold Bool (or 0/1)"),
+                (merge(base, (; keep=[1, 0])), "has 2 rows but the axis has 3"),
+                (merge(base, (; x=[Inf, NaN, 0.7])),
+                    "`hsgp` axes must be finite"),
+                (merge(base, (; x=[NaN, NaN, 0.7])),
+                    "missing in a row its `rows=` mask marks as carrying"))
+            @test_throws message reprocess(rk, invalid)
+            @test_throws message binder(invalid)
+        end
+    end
+    for build in (BM.derived_factor, BM.derived_monotonic)
+        rk = RKBRMI(build((; g=repeat(1:3; inner=4), y=zeros(12))))
+        base = (; g=[1, 3, 2], y=zeros(3))
+        binder = check_binder(rk, [base, merge(base, (; g=[2, 1, 3]))]; want=:mu)
+        invalid = merge(base, (; g=[1, 4, 2]))
+        @test_throws "not a training level" reprocess(rk, invalid)
+        @test_throws "not a training level" binder(invalid)
+        @test same_inputs(binder(base), rk_bound_data(reprocess(rk, base)))
+    end
+    rk = RKBRMI(BM.derived_weighted((; x=train.x, n=ones(12), y=train.y)))
+    base = (; x=[-0.5, 0.2, 0.7], n=[1., 2., 1.], y=zeros(3))
+    binder = check_binder(rk, [base, merge(base, (; n=[2., 1., 3.]))]; want=:mu)
+    invalid = merge(base, (; n=[-1., 2., 1.]))
+    @test_throws "nonnegative" reprocess(rk, invalid)
+    @test_throws "nonnegative" binder(invalid)
+end
 
 @stestset "binder inputs are the planned replay's" begin
     rng = Xoshiro(7)

@@ -1,4 +1,11 @@
 [deps]
+HTMX = "27f3e1ef-6ef8-44dc-9e9a-2fb23ed44e83"
+HTMXObjects = "b12ef442-5798-4353-80f3-9562b03a0cb6"
+DynamicObjects = "23d02862-63fe-4c6e-8fdb-1d52cbbd39d5"
+Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
+TreeArrays = "5daaa025-ac78-4e9a-8805-78946e672e43"
+NaNStatistics = "b946abbf-3ea7-4610-9019-9858bfdeaf2d"
+AlgebraOfVega = "a2420894-485a-4f42-a4fc-c4323ec6fb2b"
 Optim = "429524aa-4258-5aef-a3af-852621145aeb"
 SelectedInversion = "043bf095-3f01-458a-9f1c-8cf4448fe908"
 ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
@@ -18,12 +25,14 @@ MCMCDiagnosticTools = "be115224-59cd-429b-ad48-344e309966f0"
 LogExpFunctions = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
 OutputSignatures = "86cfaae4-1704-4c69-ba62-d919d81ae5f8"
 Pathfinder = "b1d3bc72-d0e7-4279-b92f-7fa5d6d2d454"
-PSIS = "ce719bf2-d5d0-4fb9-925d-10a81b42ad04"
+PowerScaling = "ea5902b9-87b7-4ea4-9e46-f9c5bf9e0b31"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+ReparametrizableDistributions = "7d03e222-df96-4b80-bcdc-d089be88b5f2"
 ReactiveKernels = "78e9f072-d36b-4c73-b7a3-751b0eb26cf9"
 ReactiveKernelsDistributionKernels = "4b169cd9-fc12-43fd-ba39-43e54ed8db7a"
 ReactiveKernelsPPL = "e266ea2a-6817-46cd-8bec-6238f0035f44"
 ReactiveKernelsPPLExamples = "a4d4be3d-45c5-49cc-80d7-34e606a16bce"
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
 SequentialMonteCarlo = "8c675823-c5d5-50f8-acb2-29aff48dfc1d"
 SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 StanBlocks = "2e771a56-c23a-4e0b-9282-20c2e37157e9"
@@ -36,6 +45,9 @@ WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 ZipFile = "a5390f91-8eb1-5f08-bee0-b1d1ffed6cea"
 
 [compat]
+ReparametrizableDistributions = "0.3"
+TreeArrays = "0.2.0"
+AlgebraOfVega = "0.2.14"
 Distributions = "0.25.133"
 BridgeStan = "2.9"
 Enzyme = "0.13"
@@ -44,13 +56,42 @@ Enzyme = "0.13"
 # The pinned Enzyme dogfood (test/setup_env.jl) requires 0.0.301 and runs
 # against its own libEnzyme build instead of the jll's library.
 Enzyme_jll = "< 0.0.302, >= 0.0.303"
-PSIS = "0.9"
+PowerScaling = "0.1.0"
+Revise = "3"
 SequentialMonteCarlo = "0.7"
 StanBlocks = "0.2.14"
 Treebars = "0.1.1"
 Turing = "0.46"
-WarmupHMC = "0.2.10"
+WarmupHMC = "0.2.11"
 julia = "1.10"
+
+[sources.TreeArrays]
+url = "https://github.com/nsiccha/TreeArrays.jl"
+rev = "53cfd1b17ee4d1b726dcecfe151458ae41bd20a8"
+
+[sources.PowerScaling]
+url = "https://github.com/nsiccha/PowerScaling.jl"
+rev = "8d27c83f6928781a39c99c31fd3d528b50ef2dad"
+
+[sources.ReparametrizableDistributions]
+url = "https://github.com/nsiccha/ReparametrizableDistributions.jl"
+rev = "8f7d382df700d3780ed31d093bc4983d3734a6c6"
+
+[sources.DynamicObjects]
+url = "https://github.com/nsiccha/DynamicObjects.jl"
+rev = "bc23860cd85ee06ca39bc862c14b6ca9b0a55f08"
+
+[sources.HTMXObjects]
+url = "https://github.com/nsiccha/HTMXObjects.jl"
+rev = "d2a86956a221035c4f1b9ac629836e90ae77a2b5"
+
+[sources.HTMX]
+url = "https://github.com/nsiccha/HTMX.jl"
+rev = "0b8dc2f94e879bf31237bd28e751cf2ebc8d95f6"
+
+[sources.AlgebraOfVega]
+url = "https://github.com/nsiccha/AlgebraOfVega.jl"
+rev = "73695d5d563074bfd9ab1f98debf2ebe38d7bd00"
 
 [sources.Distributions]
 url = "https://github.com/nsiccha/Distributions.jl.git"
@@ -107,8 +148,8 @@ rev = "f071111945c165dbae097e94c5939b79103434ac"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
-# 0.2.10: weighted-cloud moments required by the current RKPPL SMC extension.
-rev = "41b7fba7ccfcb01049ec859cda596646e5238516"
+# 0.2.11: public covariance projection used by selective SMC carries.
+rev = "8e1d45a78b38e3e9d82ee75312e0eb7e5203d327"
 
 [sources.SequentialMonteCarlo]
 url = "https://github.com/awllee/SequentialMonteCarlo.jl.git"
@@ -279,4 +320,8 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # helper calls, guarded captures and broadcast observation locations.
 # RKPPL 0.1.54 binds shared-prefix queries in the latest world and preserves
 # custom packed-vector storage and its local reads.
-rev = "97bd11bc9774c42880e69693941e26d0ca68ba87"
+# Guarded gathered reductions through typed aliases: RK 0.1.52 / PPL 0.1.55.
+# PPL 0.1.60 / DistributionKernels 0.1.1: log-space interval masses and tails.
+# RK 0.1.61 / PPL 0.1.70: selective windows, recovery and bounded joint carries.
+# RK 0.1.62: strict selected rows through array-valued producer plate cells.
+rev = "2ee187c57890421f69c001793c6b5997a8f0600a"

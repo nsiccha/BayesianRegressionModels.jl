@@ -24,7 +24,8 @@
     BRMLaplaceProblem
     brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), tol=1e-24, maxiter=50,
-        structured=:auto, integrate=nothing)
+        structured=:auto, integrate=nothing, max_cell_width=128,
+        solver=:auto, matrixfree=MatrixFreeLaplace())
 
 Integrate every unit's standardized random effects out of an RK-lowered model
 by a Laplace approximation at their conditional mode, leaving the population
@@ -37,7 +38,8 @@ The returned problem implements the LogDensityProblems interface (order 1)
 over the population coordinates, in packed order (`problem.names`). Its log
 density is the Laplace approximation of the model's marginal log posterior
 density in those unconstrained coordinates, exact when the model is Gaussian
-in the random effects. Each evaluation finds every unit's mode by Newton's
+in the random effects and exact determinant algebra is selected (see `solver`
+below). Each evaluation finds every unit's mode by Newton's
 method with a per-unit backtracking line search, starting the standardized
 effects at zero on every evaluation, until every unit's Newton decrement gᵀ(−H)⁻¹g is at
 most `tol`, or stops shrinking at rounding level. The log determinant moves
@@ -77,6 +79,11 @@ is one reverse sweep of the likelihood parameters. Otherwise it is a
 `BRMLaplaceProblem`, which differentiates the whole model. `structured=true`
 requires the first (refusing with the reason), `false` forces the second.
 
+Declared independent Gaussian vectors can also be named by declaration, e.g.
+`integrate = (:field,)` for `field[1:n] .~ Normal.(mean, scale)`. Their means
+and scales can depend on outer coordinates; each element retains its authored
+coordinate and prior. Width screening applies to the whole vector.
+
 `integrate = :auto` chooses the latent terms itself ([`brm_laplace_plan`](@ref)
 with its defaults): every term only Normal rows read, and every term read by
 counts, binomial rows or `@plate` cells whose per-block importance diagnostic
@@ -99,13 +106,25 @@ structured problem's four families, whose rows it shares, or sits in a
 Hessian block and third derivatives by Enzyme over that selection
 (ReactiveKernelsPPL's compact-cell AD), which needs the Enzyme dogfood line
 from `7a886d9`. The integrated effects' negative
-Hessian `I + Cᵀ W C` (with the cells' blocks added) is sparse and factored by
-CHOLMOD at every Newton step;
-the gradient reads the inverse's entries the likelihood terms couple from its
-selected inverse; each group of integrated effects that share likelihood terms
+Hessian `I + Cᵀ W C` (with the cells' blocks added) has sparse local structure;
+each group of integrated effects that share likelihood terms
 (a unit, or the units a crossed grouping joins) takes its own Newton steps,
 backtracking and stop. `subject_group`, `nested_groups`, `shared_groups` and
 `structured` describe the per-unit Laplace and do not apply with it.
+
+For the `integrate` path, `solver=:auto` keeps exact algebra on components of
+at most `matrixfree.exact_limit` coordinates (default 256) and uses operator
+solves and approximate determinants on larger components. `solver=:exact`
+retains the sparse Cholesky/augmented-factor implementation, while
+`solver=:matrixfree` forces operator algebra. [`MatrixFreeLaplace`](@ref)
+configures fixed probes, numerical tolerances and iteration caps. The
+large-component gradient differentiates the reported finite determinant
+approximation, including its dependence on the conditional mode. Probes and
+policy stay fixed throughout a prepared target's use and copies.
+`problem.algebra.diagnostics` reports per-component determinant probe MCSE;
+this is not a bound on quadrature error or on the error of Laplace integration.
+Operator curvature checks cover Krylov search directions; they do not certify
+global positive definiteness. Failed capped linear solves raise an error.
 
 `subject_group`, `nested_groups` and `shared_groups` are those of
 [`brm_nlme_view`](@ref); the shared latents (a block over a grouping in
@@ -134,7 +153,13 @@ Base.show(io::IO, p::BRMLaplaceProblem) = print(io, "BRMLaplaceProblem(",
 
 function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), tol=1e-24, maxiter=50,
-        structured=:auto, integrate=nothing)
+        structured=:auto, integrate=nothing, max_cell_width=128,
+        solver=nothing, matrixfree=nothing)
+    max_cell_width = _brm_spl_width_limit(max_cell_width)
+    policy = integrate isa BRMLaplacePlan ? integrate.algebra_policy :
+        (; solver=:auto, matrixfree=MatrixFreeLaplace())
+    solver = something(solver, policy.solver)
+    matrixfree = something(matrixfree, policy.matrixfree)
     if integrate !== nothing
         subject_group === nothing && isempty(nested_groups) && isempty(shared_groups) &&
             structured === :auto || throw(ArgumentError("brm_laplace_problem: " *
@@ -144,11 +169,16 @@ function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
         integrate === :auto && return _brm_sparse_laplace_problem_from_plan(backend,
             _brm_laplace_plan(backend; ad_backend, integrate=:auto, sample=(),
                 ess_floor=0.5, draws=200, at=nothing, rng=Random.Xoshiro(20261031), tol,
-                maxiter); ad_backend, tol, maxiter)
+                maxiter, max_cell_width, solver, matrixfree); ad_backend, tol, maxiter,
+                solver, matrixfree)
         integrate isa BRMLaplacePlan && return _brm_sparse_laplace_problem_from_plan(
-            backend, (; plan=integrate, problem=nothing); ad_backend, tol, maxiter)
-        return _brm_sparse_laplace_problem(backend, integrate; ad_backend, tol, maxiter)
+            backend, (; plan=integrate, problem=nothing); ad_backend, tol, maxiter,
+            solver, matrixfree)
+        return _brm_sparse_laplace_problem(backend, integrate; ad_backend, tol, maxiter,
+            max_cell_width, solver, matrixfree)
     end
+    solver in (:auto, :exact) || throw(ArgumentError(
+        "brm_laplace_problem: solver=:matrixfree applies to the integrate path"))
     structured in (:auto, true, false) || throw(ArgumentError(
         "brm_laplace_problem: structured = $(repr(structured)); pass :auto, true or false"))
     if structured !== false

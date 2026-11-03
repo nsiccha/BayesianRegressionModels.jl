@@ -113,8 +113,19 @@ function _rk_source_data_columns(plan, emitted)
         (name in computed || !(name in read)) && continue
         _rk_bind_source_column!(columns, name, value, plan)
     end
+    for (name, value) in _rk_extent_bindings(plan)
+        name in read || continue
+        (name in computed || haskey(columns, name)) && error(
+            "RK source: vector extent input `$name` collides with another binding")
+        columns[name] = value
+    end
     columns
 end
+
+_rk_extent_bindings(_plan) = ()
+_rk_extent_bindings(plan::_RKStructuralPlan) =
+    (parameter.extent => parameter.size for parameter in plan.vector_parameters
+        if parameter.extent !== nothing)
 
 _rk_bind_source_column!(columns, name, value, plan) = (columns[name] = value; columns)
 # An absent response (a `reprocess` design without it) is never bound: RKPPL
@@ -1186,8 +1197,10 @@ function _rk_ast_vector_parameter(parameter::_RKVectorParameter)
     elseif parameter.family === :elementwise
         # A declared vector: its element's scalar law, broadcast.
         law = last(_rk_ast_sampled(only(parameter.args)).args)
+        extent = parameter.extent === nothing ? parameter.size :
+            parameter.extent
         return Expr(:call, :.~, Expr(:ref, parameter.name,
-            Expr(:call, :(:), 1, parameter.size)), _rk_ast_broadcast_law(law))
+            Expr(:call, :(:), 1, extent)), _rk_ast_broadcast_law(law))
     elseif parameter.family === :mvnormal
         return Expr(:call, :~, Expr(:ref, parameter.name,
             Expr(:call, :(:), 1, parameter.size)),
@@ -1698,6 +1711,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     union!(taken, (t.options.id for p in plan.predictors for t in p.terms
         if t.kind === :structured))
     union!(taken, reserved)
+    union!(taken, (first(binding) for binding in _rk_extent_bindings(plan)))
     # Fitted values (group levels, R2D2 variances) read these fit-role twins.
     fit_sources = _rk_fit_sources(plan.derived)
     fitted = _RKFittedValues(Base.values(fit_sources))
@@ -2176,12 +2190,30 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         vector_parameter.name in owned_vectors && continue
         stmt = _rk_ast_vector_parameter(vector_parameter)
         stmt === nothing && continue
+        # Name the independent Gaussian law's arguments so inference can read
+        # and differentiate the authored mean/scale without rebuilding its law.
+        gaussian = nothing
+        args = if vector_parameter.family === :vector_normal
+            vector_parameter.args
+        elseif vector_parameter.family === :elementwise
+            element = only(vector_parameter.args)
+            element.family === :Normal && element.support_override === nothing ? element.args : nothing
+        else
+            nothing
+        end
+        if args !== nothing
+            mu = _rk_ast_fresh_name(string(vector_parameter.name, "_prior_mean"), taken)
+            sigma = _rk_ast_fresh_name(string(vector_parameter.name, "_prior_scale"), taken)
+            push!(stmts, Expr(:(=), mu, args[1]), Expr(:(=), sigma, args[2]))
+            stmt.args[end] = _rk_ast_dotted(:Normal, mu, sigma)
+            gaussian = (; mean=mu, scale=sigma)
+        end
         push!(stmts, stmt)
         # Response cutpoints/thresholds and authored `Dirichlet` simplexes
         # keep their declaration name on both backends, like scalars.
         vector_parameter.name in r2d2_phis ||
             _rk_coordinate_record!(coordinates, (; kind=:vector,
-                declaration=vector_parameter.name, family=vector_parameter.family))
+                declaration=vector_parameter.name, family=vector_parameter.family, gaussian))
     end
     for assignment in plan.assignments
         push!(stmts, Expr(:(=), assignment.name,

@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.122
+## 0.2.143
 
 - Changed: NLME unit likelihoods and gradients use one strict RK plate
   partition per unit. Preparation checks structural coordinate ownership,
@@ -28,19 +28,302 @@ instead of failing at run time.
   retain their structural checks. Shared-coordinate changes refresh the cache.
 - Changed: separated CAR fields expose their shared values through row-local
   graph computations, preserving their law, coordinates, inverse and Jacobian.
-- Compatibility: requires ReactiveKernels 0.1.51 and ReactiveKernelsPPL 0.1.54.
-  Scalar inference preserves ordinary indexed predictor expressions under
-  strict partitioning, and nested data-only helpers inside sampled
+- Compatibility: the strict partitions need ReactiveKernels 0.1.51 and
+  ReactiveKernelsPPL 0.1.54 or later, within the existing 0.1.62 / 0.1.70
+  floor. Scalar inference preserves ordinary indexed predictor expressions
+  under strict partitioning, and nested data-only helpers inside sampled
   expressions, such as a lower-bounded shares completion's
   `lower=lo[x_shares_free]`, keep their shapes through strict cell and
   partition preparation. Strict queries also preserve local scan captures,
   grouped-field row reductions and censored ragged factors. Shared-prefix
   binding includes freshly emitted helpers and preserves local reads from
-  custom packed vectors. Unit gradients use ordinary Enzyme Reverse.
-  The test bootstrap pins RK `97bd11bc` and
-  Enzyme dogfood `68ed90fe` with libEnzyme `2063db12`, including the repair
-  for matrix-window partition gradients on Julia 1.10. The test environment
-  also pins WarmupHMC 0.2.10, required by RKPPL.
+  custom packed vectors. Unit gradients use ordinary Enzyme Reverse, with the
+  test bootstrap's Enzyme dogfood pin, which contains `68ed90fe`'s repair for
+  matrix-window partition gradients on Julia 1.10.
+
+## 0.2.142
+
+- SVI runs can stop after any completed iteration and continue on
+  the same model and data exactly as if they had not stopped:
+  `brm_svi_resume([save,] model, checkpoint; stop_after, checkpoint_every,
+  ndraws, progress)` continues a `BRMSVIOptimizerState` (or a fit result) to
+  the same iterates, random stream, ELBO trace, stopping decision, polishing
+  average and draws. `brm_svi_optimizer_checkpoint(fit)` copies the state; it
+  holds the raw factors, global Adam moments, random stream, iteration,
+  stopping and polishing state, controls, a window fit's streaming carry and
+  the target's identity, but no observations or compiled model. Resume refuses
+  a changed program, callables, bound data, frozen preprocessing, coordinates,
+  groupings, subject coordinates or fixed shared values before any step.
+- `brm_svi_fit` and window fits `brm_svi_fit(previous, x_new)` take
+  `stop_after` (iterations in this call) and an optional first argument
+  `save`, called with a checkpoint every `checkpoint_every` iterations
+  (default once per window), when the call stops, and before a Treebars
+  interrupt propagates. Diagnostics add `finished` and `optimizer`.
+- The returned draws (and a GaussianBlockLaplace carry) come from a copy of
+  the run's stream: their values are unchanged, but they no longer advance the
+  caller's `rng` or `draw_rng`, and a stopped run's intermediate draws do not
+  change its continuation.
+- `laplace=GaussianBlockLaplace()` runs stop and resume the same way: the
+  state holds the global factor, Adam, the averaging window, the random and
+  draw streams, and the call counts and numerical records, so a continued
+  run's draws, carry and diagnostics equal the uninterrupted run's. A stopped
+  run's result averages the iterates of its window so far
+  (`stop_reason=:stopped`). `save` defaults to every 50 updates.
+- `brm_svi_checkpoint` remains the streaming carry for a new, disjoint window.
+- `BRM SMC` checkpoints identify their bindings through a shared helper; the
+  identities are unchanged, so existing SMC checkpoints still resume.
+
+## 0.2.141
+
+- Strict local cell queries and sparse Laplace planning support a plate
+  selecting rows from another plate's array-valued output, including outputs
+  built from shared correlated random effects.
+- **Breaking:** the RK backend requires ReactiveKernels 0.1.62 or later.
+  Update older pinned RK environments; the test bootstrap selects the
+  producer-plate locality repair.
+
+## 0.2.140
+
+- Carried RK SMC windows accept `coordinates=:auto`: particles contain only
+  old coordinates required by the new likelihood or fresh priors, plus fresh
+  coordinates. Data-driven declared-vector extents can grow while fitted
+  preprocessing and existing coordinate meanings stay fixed. RKPPL counts
+  fresh priors and their transform Jacobians once and replaces old priors
+  with the carried Gaussian.
+- `brm_smc_coordinates` describes compact and full-joint coordinate orders;
+  `brm_smc_recover` samples omitted coordinates from their carried conditional
+  distribution. A completed selective fit carries a flattened bounded-rank
+  Gaussian into the next window. Unread coordinates may change marginally
+  through correlation; this remains assumed-density inference. Selective
+  tuning and checkpoint replay use the same compact coordinate order.
+- `brm_transform_constants` reads saved transform anchors on data-free RK
+  replay, matching the frozen values applied by the graph.
+- Requires ReactiveKernels 0.1.61, ReactiveKernelsPPL 0.1.70 and WarmupHMC
+  0.2.11. Existing full-frame windows remain the default.
+
+## 0.2.139
+
+- Adaptive centering and centered prediction replay use the compiler's
+  physical random-effect scales when their declarations have a nonzero
+  lower bound or a finite upper bound. Fully centered coordinates therefore
+  retain the declared covariance, including scales with data-dependent bounds.
+
+## 0.2.138
+
+- `rk_design_binder` reuses its lowered program when HSGP axes, grouping
+  keys or validation columns are data-only model assignments. Validation reads
+  those definitions from the bound graph, including values folded during
+  preparation. Masked HSGPs can read a data-only axis without defining it twice.
+
+## 0.2.137
+
+- `NLMEEstimation.provides_laplace_gradient(::BRMNLMEModel)` returns `false`
+  when RK refuses row-local sparse Laplace factors, allowing ordinary protocol
+  checks and SAEM to proceed. The structural refusal is cached; explicit
+  integration still throws its original diagnostic, and unrelated errors
+  continue to propagate.
+
+## 0.2.136
+
+- RK interval-censored Normal responses retain finite log likelihoods and
+  native Enzyme Reverse gradients in both extreme tails, verified through
+  400 standard deviations against independent high-precision values and
+  location/log-scale derivatives.
+- **Breaking:** the RK backend requires ReactiveKernelsPPL 0.1.60 or later
+  (and its ReactiveKernelsDistributionKernels 0.1.1 floor). Update older
+  pinned RK environments; the test bootstrap selects the delivered repair.
+
+## 0.2.135
+
+- Power-scaling sensitivity now uses PowerScaling.jl 0.1.0 and its PSIS.jl
+  implementation. `brm_powerscale_inputs` retains BRM's model assembly;
+  `brm_powerscale_sensitivity` delegates the summary and accepts `reff`.
+  `BRMPowerscaleSensitivity` is an alias for PowerScaling's summary type,
+  preserving its fields and numerical table contents; printing uses
+  PowerScaling's diagnostic labels and formatting.
+- **Breaking:** the generic `brm_psis_weights`, `brm_cjs_dist` and
+  `brm_powerscale_weights` exports are removed. Use `PSIS.psis`,
+  `PowerScaling.cjs_dist` and `PowerScaling.powerscale_weights` directly.
+  PowerScaling is pinned by URL and revision until registered; the test
+  bootstrap and Docs installation supply that revision on Julia 1.10.
+
+## 0.2.134
+
+- Data-free RK fitted states retain numeric scalar inputs used by priors and
+  `constant(...)`, so prediction designs can omit them. Retained-fit replay
+  also supplies omitted numeric scalars. Changed prior arguments still fail
+  the fitted-program check; constants keep their fitted values. Re-export,
+  serialization and design binders preserve this behavior without retaining
+  training-row arrays (snag `rk-fitted-state-56bb407b`).
+- **Breaking:** `BRMFittedState` now uses format 2. Re-export persisted states
+  from their training fits after upgrading.
+
+## 0.2.133
+
+- `brm_output_tree` preserves observation coordinates through pointwise
+  assignments that combine row outputs with scalar model constants or scalar
+  data inputs, including aliases and chained transforms. Array constants still
+  require their own axis semantics; equal length alone does not label them.
+
+## 0.2.132
+
+- Plans retain their conditional numerical policy when reused or automatically
+  replanned. `brm_ladder_fit` accepts the same solver and matrix-free options;
+  continuation keeps its existing target's policy.
+- Outer SMC identities retain the operator policy, fixed probes and sparse
+  reference values. Checkpoint replay rejects a different finite target;
+  scratch buffers and evaluation diagnostics do not change its identity.
+
+- `brm_laplace_problem(...; integrate, solver=:auto)` selects exact algebra
+  for connected components through 1,024 coordinates and iterative conditional
+  algebra for larger components. `solver=:exact` retains the previous sparse-factor
+  path; `solver=:matrixfree` forces iterative algebra. `MatrixFreeLaplace`
+  sets the component bound, retained probe seed, solve caps and quadrature.
+- The large-component determinant is a reproducible fixed-probe rational
+  approximation. Its gradient differentiates that same approximation,
+  including the nonlinear conditional mode and sum-factored observations.
+  A fixed bounded-fill LDL reference conditions the solves and determinant;
+  its relative diagonal ridge affects only that numerical reference. No
+  unbounded sparse factor or dense covariance is formed. Numerical convergence
+  and probe variability remain distinct from Laplace approximation error.
+- Component densities use compensated summation on the operator path, so
+  accumulated rounding over large fields does not hide the final Newton gain
+  from the line search. Acceptance and convergence tolerances are unchanged.
+- **Breaking:** large Gaussian components now also have numerical determinant
+  approximation error under the default `solver=:auto`. Use `solver=:exact`
+  to reproduce the previous determinant algebra. Small components retain
+  exact algebra. This does not alter the authored statistical model.
+
+## 0.2.131
+
+- Label ragged response draws in `brm_output_tree` and `brm_predictive_tree`
+  with flat observation positions, retaining the existing backing arrays and
+  separate chains. Aggregate log likelihoods have one position per group;
+  predictive outputs have one per element, with group boundaries in `segments`.
+
+## 0.2.130
+
+- Outer SMC accepts prepared RK-backed generic, structured and sparse embedded
+  Laplace problems, including plans with zero integrated terms. Fit, independent
+  pilot tuning, comparison, cumulative prepared-target updates and checkpoint
+  replay reuse RKPPL 0.1.57's supplied-gradient adapter with independent mutable
+  workspaces. Identities include approximation and solver settings, coordinate
+  order, frozen preprocessing and exact data.
+- Sparse Laplace preparation accepts fixed random-effect scales without
+  trying to find sampled coordinates for their known values.
+- `brm_laplace_draws(fit::BRMSMCFit; conditional, rng)` completes a finished
+  marginal cloud and returns its outer weights alongside full packed draws.
+  Conditional importance resampling does not correct the outer approximation.
+- **Breaking:** ladder rung 5b is named `population_sampling` (formerly
+  `population_hmc`). It accepts a completed SMC fit, explicitly resamples its
+  outer weights, and forwards `conditional` to effect completion. Its `method`
+  is `:smc` or `:callback`. A Laplace-only callback requires `upto=5`; rung 6
+  still needs a sampler for the full-model target.
+
+## 0.2.129
+
+- `brm_output_tree` labels random-effect standardized draws and centered
+  effects with fitted levels and coefficient margins, including flattened
+  and stratified carriers. Scales, correlation factors and Student-t mixing
+  weights carry their corresponding margin, stratum or level coordinates.
+  These outputs use fitted coordinate order regardless of the caller's name
+  order and retain views into the supplied draws. Unequal per-chain inputs
+  work with `TreeActualArray` for parameter-wise convergence diagnostics.
+- Per-row block contributions and model-scope assignments using elementary
+  pointwise operations on row outputs and scalars carry `:observation`,
+  including chained assignments. Equal vector lengths alone do not establish
+  observation coordinates.
+
+## 0.2.128
+
+- Sparse embedded Laplace accepts declared independent Gaussian vectors such
+  as `field[1:n] .~ Normal.(mean, scale)`, automatically or by declaration name.
+  Fixed and outer-dependent means/scales retain their prior normalization,
+  diagonal precision and marginal gradients in the authored coordinates.
+  Width screening samples whole vectors before derivative preparation;
+  nonlinear observations retain the per-coordinate importance diagnostic.
+  A vector supplying another Gaussian law's parameters stays sampled.
+  Non-Gaussian, constrained and correlated vector priors are not admitted
+  (snag `laplace-integrat-61a058f1`).
+
+## 0.2.127
+
+- Carried SMC posteriors now retain their identity across defensive copies
+  and serialization round trips, including layouts with dictionary aliases.
+  Window updates, pilot tuning, checkpoints and filter calibration still
+  reject changed posterior values or frozen preprocessing. Identities hash
+  record values rather than dictionary traversal, object sharing or padding.
+  Persisted carries and window checkpoints require matching package versions;
+  regenerate them from the completed fit when upgrading to this identity format.
+
+## 0.2.126
+
+- Added optional TreeArrays twins for output, random-effect, predictive and
+  conditional draws, plus `rk_draw_tree`. They label existing arrays or views
+  with descriptor coefficients, group levels and margins, observation positions,
+  or actual prediction-grid values. Per-chain matrices retain an outer chain
+  axis, including unequal chain lengths and ragged random-effect blocks.
+- Stored output and random-effect carriers are viewed without copying their
+  draw values; quantities that need computation use the existing extraction
+  and simulation paths. Existing array APIs retain owned array results. Axes
+  without known coordinates raise an error naming the output.
+
+## 0.2.125
+
+- RKBRMI passes a plate's original cell values to model-scope whole-value
+  helpers, including matrix and higher-dimensional array cells. Positional
+  and keyword arguments, helpers in likelihood expressions, and non-last
+  indexed outputs preserve the inner axes of each cell. Per-row arithmetic
+  and direct observation arguments retain their existing flattened layout
+  (snag `rkbrmi-model-sco-bcc72190`).
+- Function-valued arguments interpolated into `brm` source now emit named
+  callable bindings, so higher-order reductions such as `sum($sum, columns)`
+  retain ordinary Julia semantics and survive printed-source replay.
+
+## 0.2.124
+
+- Added `brm_smc_carry` and carried-posterior `brm_smc_update` for bounded
+  windows of new observations. Frozen preprocessing, source identities and
+  the owned Gaussian summary survive checkpoints without old training rows.
+  `basis=:fit` delegates bounded correlation and moment fitting to RKPPL and
+  WarmupHMC; independent pilots continue to tune fixed mutation kernels,
+  with `reference_inflation` forwarded for learned window proposals.
+- Added `brm_filter(fit; learn=true, ...)` and `brm_filter_tune` for static
+  parameter ensembles with bounded-window replenishment and rejuvenation.
+  Selected calibration drops historical latent coordinates. A state-only
+  warmed ordinary filter can transfer its finite-state pool and clocks.
+- Streaming carries are Gaussian assumed-density approximations. Filter
+  boundaries additionally discard parameter correlations and parameter–state
+  dependence. Checkpoints support exact continuation of that approximation,
+  not exact full-history inference. Requires RKPPL 0.1.55 and WarmupHMC 0.2.10.
+
+## 0.2.123
+
+- Require RK 0.1.52 / RKPPL 0.1.55 for sum recognition through guarded
+  gathered observations; tests pin landed RK `5e9d2d03818ba5c8ef7d6d068fef42101f902d0e`.
+
+- Sparse Laplace plans screen structural cell footprints before preparing
+  derivatives. `max_cell_width=128` bounds integrated coordinates per ordinary
+  cell or local sum-factor block. Overwide cells sample whole unforced latent
+  terms in stable order, retaining every likelihood and prior; forced choices
+  that exceed the bound raise with the observation, cell and contributing terms.
+  Plans report the triggering cells and final integrated/sampled dimensions.
+- Sparse patterns deduplicate footprints before pair enumeration, union directly
+  into CSC columns, and omit the per-cell quadratic nonzero-index map. Sum
+  factors prepare Hessian directions only for integrated coordinates and outer
+  sum outputs, while retaining all sampled-coordinate gradients.
+- A plan admitting no latent terms now supplies the full model's density,
+  gradient, draws and fitting workflow. The ladder reports and skips its dense
+  population-curvature diagnostic above 128 coordinates, while retaining HMC.
+
+## 0.2.122
+
+- A `brm_laplace_plan` retains its prepared sparse problem. Building a target
+  from that plan on the same backend and automatic-differentiation
+  configuration copies the prepared workspaces instead of preparing every
+  observation again. Plans that admit only some candidate terms restrict the
+  prepared row, plate-cell and sum factors to those terms. Repeated targets
+  keep independent mutable state and honor their own solver tolerances.
 
 ## 0.2.121
 

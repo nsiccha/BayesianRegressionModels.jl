@@ -2,7 +2,9 @@
     BRMSMCFit
 
 An RK-only SMC fit, including its frozen training `template`, current `backend`
-and RKPPL `state`. `state.positions` contains unconstrained draws as columns;
+and RKPPL `state`. For a prepared embedded-Laplace fit, `template` and `backend`
+are Laplace problems; the particle rows follow `backend.names`.
+`state.positions` contains unconstrained draws as columns;
 `state.weights` contains normalized weights. A completed fit has
 `state.temperature == 1`. Inspect `state.history` for ESS before resampling,
 ancestry and mutation diagnostics; equal final weights do not prove mixing.
@@ -11,16 +13,19 @@ Keep model code, bound data and the returned arrays read-only. Continue a
 partial fit with [`brm_smc_fit`](@ref), and assimilate cumulative data with
 [`brm_smc_update`](@ref).
 """
-struct BRMSMCFit{S,A}
-    template::RKBRMI
-    backend::RKBRMI
-    previous::Union{Nothing,RKBRMI}
+struct BRMSMCFit{S,A,T,B,P}
+    template::T
+    backend::B
+    previous::P
     state::S
     ad_backend::A
     model_id::String
     binding_id::String
     previous_id::Union{Nothing,String}
 end
+
+const _BRMSMCLaplaceProblem = Union{BRMLaplaceProblem,BRMStructuredLaplaceProblem,
+    BRMSparseLaplaceProblem,_BRMSampledLaplaceProblem}
 
 # Shared by posterior consumers that must retain the fit's original binding.
 function _brm_validate_smc_fit end
@@ -42,6 +47,8 @@ in [`brm_smc_fit`](@ref) or [`brm_smc_update`](@ref). Load the same packages as
 for fitting. Both explicit `rng::Xoshiro` and unconstrained `init` are copied;
 choose them independently of the production cloud, including the retained
 cloud of a completed fit. BRM never derives pilot inputs from fitted particles.
+`model` may be a prepared Laplace problem; for its updates pass the prepared
+cumulative target in place of `cumulative_data`, as in [`brm_smc_update`](@ref).
 
 The default `pilot=:continuous` adapts diagonal scales and step size at each
 supplied temperature; `pilot_steps` counts transitions per knot.
@@ -89,10 +96,21 @@ function brm_smc_tune end
         stages=typemax(Int), progress=nothing)
     brm_smc_fit(fit::BRMSMCFit; stages=typemax(Int), progress=nothing)
 
-Fit a `BRMI` or `RKBRMI` through RKPPL's adaptive SMC bridge, or continue a
+Fit a `BRMI`, `RKBRMI` or prepared RK-backed `brm_laplace_problem` through
+RKPPL's adaptive SMC bridge, or continue a
 partial fit. Load ReactiveKernels, ReactiveKernelsPPL, SequentialMonteCarlo,
 WarmupHMC, Enzyme, ADTypes and DifferentiationInterface. The model is evaluated
 with its full prior, likelihood and unconstrained-coordinate Jacobian.
+
+For an embedded-Laplace problem, the supplied marginal gradient is consumed
+directly, without differentiating through its mode search. Generic, structured,
+sparse and zero-integration targets are supported (RKPPL 0.1.57+). Each sampler
+execution, pilot and mutation worker owns independent mutable problem
+workspaces. `ad_backend` prepares the reference; the supplied problem already
+owns its target-gradient implementation. Complete a finished marginal cloud
+with `brm_laplace_draws(fit; conditional, rng)`, retaining its returned weights.
+The normalizer is for the approximate marginal, and conditional completion
+does not correct that outer approximation.
 
 `reference` is RKPPL's `SMCReference(location, scale)`: a normalized Gaussian
 in unconstrained coordinates. `scale` accepts a vector of diagonal scales or
@@ -131,6 +149,11 @@ contain the complete data intended for the new posterior, not just the new
 rows. Replays the original training template with frozen preprocessing and
 the same coordinates. New group levels and incompatible layouts are refused.
 
+For a Laplace fit, pass a prepared next problem in place of `cumulative_data`.
+Build it with `brm_laplace_problem(reprocess(training_rk, cumulative_data); ...)`
+using the same integration, engine, tolerance and iteration limit. BRM checks
+those controls, ordered coordinates and frozen preprocessing before bridging.
+
 The bridge is from the previous posterior to the new posterior: the prior
 and Jacobian occur once. Both histories are evaluated after parameter moves,
 including deterministic recurrences. This is sequential parameter inference
@@ -149,6 +172,8 @@ function brm_smc_update end
     brm_smc_checkpoint(fit::BRMSMCFit)
     brm_smc_resume(template::RKBRMI, checkpoint;
         data=nothing, previous_data=nothing, ad_backend=AutoEnzyme(mode=Enzyme.Reverse))
+    brm_smc_resume(laplace_problem, checkpoint;
+        current=laplace_problem, previous=nothing, ad_backend=AutoEnzyme(mode=Enzyme.Reverse))
 
 Create a data-only checkpoint or restore it against an explicitly rebuilt
 original training `template`. Persist the checkpoint with Julia Serialization
@@ -163,6 +188,12 @@ layout and endpoint-density checks. It restores without advancing; continue
 with `brm_smc_fit`. Exact replay requires the same Julia/package versions,
 model code, data and configuration. File writing and atomic replacement belong
 to the caller.
+
+A Laplace checkpoint requires explicitly reconstructed equivalent problems:
+`current` is the cumulative endpoint and `previous` the previous endpoint
+(defaults to the training template for the first update). Approximation and
+solver settings, data, coordinates and preprocessing must match. No problem,
+factory or mutable solver workspace is stored in the checkpoint.
 """
 function brm_smc_checkpoint end
 function brm_smc_resume end

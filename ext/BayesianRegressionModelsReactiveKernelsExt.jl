@@ -517,6 +517,23 @@ BRM._rk_bind_design_plan(lowering, columns, frozen) = frozen === nothing ?
     bind_data(lowering, columns) : bind_data(lowering, columns; frozen)
 BRM._rk_plan_columns(plan) = _rk_bound_inputs(plan)
 
+# Validation reads the graph's data-only definitions, never reevaluates BRM's
+# planning expressions. Reuse materialized columns; RKPPL's frozen_values
+# evaluates only the requested definitions that preparation normally folds.
+# These are validation values, not additional inputs to the returned plan.
+function BRM._rk_design_check_values(bound, sources)
+    values = Dict{Symbol,Any}(column => bound.columns[name]
+        for (column, name) in sources if haskey(bound.columns, name))
+    folded = [name for (column, name) in sources if !haskey(values, column)]
+    if !isempty(folded)
+        computed = frozen_values(bound, folded).values
+        for (column, name) in sources
+            haskey(values, column) || (values[column] = computed[name])
+        end
+    end
+    values
+end
+
 function BRM.rk_restore_draws(backend::BRM.RKBRMI, U::AbstractMatrix)
     restore_draws(backend.model.layout, U)
 end
@@ -769,6 +786,14 @@ function BRM._rk_value_reader(rk::BRM.RKBRMI, names::Tuple{Vararg{Symbol}})
         values isa NamedTuple ? NamedTuple{names}(Tuple(values[n] for n in names)) :
             NamedTuple{names}(Tuple(values))
     end
+end
+
+function BRM._rk_spl_value_reads(rk::BRM.RKBRMI, names::Tuple, u0)
+    bound = BRM.rk_bound_data(rk)
+    query = ReactiveKernels.prepare(rk.model.spec;
+        have=(:unconstrained, keys(bound)...), want=names, bound)
+    reads = Base.invokelatest(partition_footprint_kernel(query), u0).unconstrained
+    reads === :whole ? collect(eachindex(u0)) : reads
 end
 
 end
