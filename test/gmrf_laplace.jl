@@ -127,8 +127,7 @@ using Random
     @test Matrix(Symmetric(half.h, :L)) ≈ (Q + Matrix(Symmetric(full.h, :L))) / 2
     @test iszero(BRM._brm_spl_prior_mode(target, pop))
     stages = BRM._brm_lap_stages(false)
-    search = (; stages=collect(stages), steps=zeros(Int, nc), max_shift=zeros(nc),
-        stage_shifts=zeros(Int, nc, length(stages)), decrement=fill(NaN, nc))
+    search = BRM._brm_spl_search(nc, stages)
     followed = zeros(n)
     for (k, s) in enumerate(stages)
         @test BRM._brm_spl_stage!(target, pop, followed, s, target.tol, search, k).status ===

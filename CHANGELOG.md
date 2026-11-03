@@ -31,7 +31,9 @@ instead of failing at run time.
   modified Newton step after the first stage (the mode ceased to exist on the
   way; the marginal can jump near such points). The sparse problem's
   `target.search` records the last evaluation's stages, Newton steps,
-  shifted steps per stage, largest shift and final decrements per component.
+  shifted steps per stage, largest shift, refused full Newton steps
+  (`backtracks`), final decrements and `stop` reason (`:tol`, or `:floor` for
+  the rounding floor) per component.
 - The sparse problem damps each component's Newton step by its own shift
   where its curvature is not positive definite, in exact and matrix-free
   algebra. Before, one shift served all components, and a component damped by

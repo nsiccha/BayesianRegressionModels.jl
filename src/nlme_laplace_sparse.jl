@@ -1452,6 +1452,7 @@ function _brm_spl_stage!(p::BRMSparseLaplaceProblem, pop, z, s, tol, search, sta
             if λ[c] <= tol || (shift[c] == 0 && λ[c] <= 1e-8 && λ[c] >= previous[c] / 4)
                 converged[c] = true
                 search.decrement[c] = λ[c]
+                search.stop[c] = λ[c] <= tol ? :tol : :floor
             else
                 previous[c] = shift[c] == 0 ? λ[c] : Inf
                 search.steps[c] += 1
@@ -1465,10 +1466,18 @@ function _brm_spl_stage!(p::BRMSparseLaplaceProblem, pop, z, s, tol, search, sta
         iterations == p.maxiter &&
             return (; status=:unconverged, iterations, h, converged, λ)
         iterations += 1
-        _brm_spl_step!(p, pop, z, δ, g, h, fc, converged; weight=s) ||
+        _brm_spl_step!(p, pop, z, δ, g, h, fc, converged; weight=s, search) ||
             return (; status=:nonfinite, iterations, h)
     end
 end
+
+# One evaluation's mode-search record, per component: Newton steps, shifted
+# steps per stage, the largest shift, steps whose full Newton step was refused,
+# and the last stage's final decrement and stop (`:tol`, or `:floor` for the
+# rounding floor).
+_brm_spl_search(nc, stages) = (; stages=collect(stages), steps=zeros(Int, nc),
+    max_shift=zeros(nc), stage_shifts=zeros(Int, nc, length(stages)),
+    backtracks=zeros(Int, nc), decrement=fill(NaN, nc), stop=fill(:none, nc))
 
 # Every component's mode at population point φ, by continuation from the
 # prior: start at the prior's mode (`_brm_spl_prior_mode`) and follow each
@@ -1488,8 +1497,7 @@ function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     end
     nc = length(p.components)
     stages = _brm_lap_stages(_brm_spl_concave(p))
-    search = (; stages=collect(stages), steps=zeros(Int, nc), max_shift=zeros(nc),
-        stage_shifts=zeros(Int, nc, length(stages)), decrement=fill(NaN, nc))
+    search = _brm_spl_search(nc, stages)
     p.search = search
     z = _brm_spl_prior_mode(p, pop)
     iterations = 0
@@ -1534,9 +1542,9 @@ end
 # step therefore needs just one derivative assembly. False when a component
 # finds no finite gain.
 function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, converged;
-        weight::Float64=1.0)
+        weight::Float64=1.0, search=nothing)
     p.algebra === nothing || return _brm_operator_step!(p, pop, z, δ, g, h, fc, converged;
-        weight)
+        weight, search)
     n = length(z)
     nb = length(p.sblocks)
     λc = zeros(length(fc))
@@ -1560,6 +1568,8 @@ function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, conver
             for i in p.components[c]
                 z[i] = trial[i]
             end
+        elseif search !== nothing
+            search.backtracks[c] += 1
         end
     end
     if all(converged)

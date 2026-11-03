@@ -98,7 +98,8 @@ end
 # Gauss-Seidel fallback would reassemble the whole field once per level.
 # Like the exact step, require finite derivatives and return them at the
 # accepted point for the next Newton iteration.
-function _brm_operator_step!(p, pop, z, direction, g, h, fc, converged; weight::Float64=1.0)
+function _brm_operator_step!(p, pop, z, direction, g, h, fc, converged; weight::Float64=1.0,
+        search=nothing)
     accepted = copy(converged)
     decrement = [dot(view(g, I), view(direction, I)) for I in p.components]
     steps = ones(length(fc))
@@ -119,6 +120,7 @@ function _brm_operator_step!(p, pop, z, direction, g, h, fc, converged; weight::
                 accepted[c] = true
                 z[p.components[c]] .= trial[p.components[c]]
             else
+                search === nothing || steps[c] < 1 || (search.backtracks[c] += 1)
                 steps[c] /= 2
             end
         end

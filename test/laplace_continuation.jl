@@ -72,6 +72,13 @@ end
             gradient = copy(gradient)
             @test p.folds == folds + 1
             @test value ≈ oracle(-1.0) atol=1e-9
+            if p isa BRMSparseLaplaceProblem
+                nc = length(p.components)
+                @test length(p.search.backtracks) == length(p.search.stop) == nc
+                @test all(in((:tol, :floor)), p.search.stop)
+                @test all(>=(0), p.search.backtracks)
+                @test all(p.search.steps .>= p.search.backtracks)
+            end
             for φ in (-1.4, -1.0), j in 1:2
                 x0 = point(φ)
                 _, g = LogDensityProblems.logdensity_and_gradient(p, x0)

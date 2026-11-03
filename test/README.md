@@ -1120,7 +1120,9 @@ of the population line. On both the whole-model and the sparse target:
 - an evaluation whose followed mode ceases to exist mid-way is counted in
   `folds`;
 - finite differences match the gradient on each smooth piece;
-- the two targets agree.
+- the two targets agree;
+- the sparse target's `search` record names each component's stop and counts
+  its refused full steps.
 
 A log-concave Poisson model takes one stage. Run it in the test environment
 with `julia --project=test test/laplace_continuation.jl`.
