@@ -439,7 +439,12 @@ struct _RKVectorParameter
                 # :elementwise (element::_RKSampledParameter,); :mvnormal (mean, Σ)
     size::Union{Nothing,Int}
     label::Symbol
+    # A data-owned extent is bound as a validated integer shape input.
+    # `size` describes this binding for BRM's shape checks.
+    extent::Union{Nothing,Symbol}
 end
+_RKVectorParameter(name, family, args, size, label) =
+    _RKVectorParameter(name, family, args, size, label, nothing)
 
 struct _RKStructuralPlan
     responses::Vector{_RKLikelihoodSpec}
@@ -6854,6 +6859,8 @@ function _rk_plan_vector_parameters!(prepared, data::AbstractDict,
         parameters::Set{Symbol}, assign_names::Set{Symbol})
     prefix = "RK backend"
     specs = _RKVectorParameter[]
+    taken = union(Set{Symbol}(keys(data)), Set{Symbol}(keys(prepared.source_operations)),
+        parameters, assign_names)
     for parameter in prepared.parameters
         prior = parameter.prior
         prior isa _BRMPreparedExpr || continue
@@ -6872,7 +6879,10 @@ function _rk_plan_vector_parameters!(prepared, data::AbstractDict,
                 "$prefix: `$name[1:n] .~ ...` needs a scalar distribution")
             element = _rk_sampled_parameter(name, law, data, consts, aliases,
                 parameters, assign_names; elements=n)
-            push!(specs, _RKVectorParameter(name, :elementwise, (element,), n, name))
+            refs = _brm_prepared_references(len)
+            extent = !isempty(refs) && all(ref -> haskey(data, ref), refs) ?
+                _rk_ast_fresh_name(string(name, "_length"), taken) : nothing
+            push!(specs, _RKVectorParameter(name, :elementwise, (element,), n, name, extent))
         elseif prior.callable isa Type && prior.callable <: MvNormal
             push!(specs, _rk_mvnormal_parameter(name, prior, prepared, data,
                 consts, aliases, parameters, assign_names))

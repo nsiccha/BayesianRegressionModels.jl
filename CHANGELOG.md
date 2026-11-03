@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.140
+
+- Carried RK SMC windows accept `coordinates=:auto`: particles contain only
+  old coordinates required by the new likelihood or fresh priors, plus fresh
+  coordinates. Data-driven declared-vector extents can grow while fitted
+  preprocessing and existing coordinate meanings stay fixed. RKPPL counts
+  fresh priors and their transform Jacobians once and replaces old priors
+  with the carried Gaussian.
+- `brm_smc_coordinates` describes compact and full-joint coordinate orders;
+  `brm_smc_recover` samples omitted coordinates from their carried conditional
+  distribution. A completed selective fit carries a flattened bounded-rank
+  Gaussian into the next window. Unread coordinates may change marginally
+  through correlation; this remains assumed-density inference. Selective
+  tuning and checkpoint replay use the same compact coordinate order.
+- `brm_transform_constants` reads saved transform anchors on data-free RK
+  replay, matching the frozen values applied by the graph.
+- Requires ReactiveKernels 0.1.61, ReactiveKernelsPPL 0.1.70 and WarmupHMC
+  0.2.11. Existing full-frame windows remain the default.
+
 ## 0.2.139
 
 - Adaptive centering and centered prediction replay use the compiler's

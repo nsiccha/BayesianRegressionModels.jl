@@ -91,6 +91,23 @@ end
 fitted_preprocessing(fit::BRM.BRMSMCFit) = BRM.brm_fitted_state(fit.template)
 fitted_preprocessing(fit::BRM.BRMSMCWindowFit) = fit.previous.preprocessing
 
+function check_selective_window(fit::BRM.BRMSMCWindowFit)
+    fit.coordinates === :auto || throw(ArgumentError(
+        "BRM SMC: coordinate inspection and recovery require coordinates=:auto"))
+    BRM._brm_validate_smc_fit(fit)
+    nothing
+end
+
+function BRM.brm_smc_coordinates(fit::BRM.BRMSMCWindowFit)
+    check_selective_window(fit)
+    PPL.smc_window_coordinates(fit.state)
+end
+
+function BRM.brm_smc_recover(fit::BRM.BRMSMCWindowFit, compact_position; rng=Xoshiro())
+    check_selective_window(fit)
+    PPL.smc_recover(fit.state, compact_position; rng)
+end
+
 function carried_reference(rk, posterior, preprocessing, model_id)
     source_id = streaming_source(rk, preprocessing)
     identity = streaming_identity((; posterior, preprocessing, model_id, source_id))
@@ -124,52 +141,88 @@ function BRM.brm_smc_carry(model::Union{BRM.BRMI,BRM.RKBRMI};
     carried_reference(rk, posterior, preprocessing, id)
 end
 
-function prepare_window(carried::BRM.BRMSMCCarriedReference, model::BRM.BRMI, ad_backend)
+function prepare_window(carried::BRM.BRMSMCCarriedReference, model::BRM.BRMI, ad_backend;
+        coordinates=nothing)
+    coordinates in (nothing, :auto) || throw(ArgumentError(
+        "BRM SMC: coordinates must be nothing or :auto"))
     check_carried(carried)
     carried.preprocessing isa BRM.BRMFittedState || throw(ArgumentError(
         "BRM SMC: a selected filter calibration requires brm_filter, not a full-frame window bridge"))
-    rk = BRM.RKBRMI(model, carried.preprocessing)
+    rk = coordinates === :auto ? BRM._rk_fitted_replay(model,
+        BRM._rk_brmi_data(model), carried.preprocessing;
+        coordinates=:growing, prefix="BRM SMC growing window") :
+        BRM.RKBRMI(model, carried.preprocessing)
     streaming_source(rk, carried.preprocessing) == carried.source_id || throw(ArgumentError(
         "BRM SMC: the window source or frozen preprocessing differs from the carried posterior"))
     id = binding_identity(rk)
+    selection = coordinates === nothing ? (;) : (; coordinates)
     target = PPL.prepare_smc_window(rk.model, BRM.rk_bound_plan(rk),
         zeros(Float64, rk.model.layout.total); previous=carried.posterior,
-        backend=ad_backend, model_id=carried.model_id, binding_id=id)
+        backend=ad_backend, model_id=carried.model_id, binding_id=id, selection...)
     rk, id, target
 end
 
 """
-    brm_smc_tune(carried::BRMSMCCarriedReference, model::BRMI; rng, init, ...)
+    brm_smc_tune(carried::BRMSMCCarriedReference, model::BRMI;
+        rng, init, coordinates=nothing, ...)
 
 Tune independent pilot kernels for the new window under the carried posterior
 and frozen preprocessing. Controls have the same meaning as the initial-fit
 `brm_smc_tune` method. Use the returned schedule in `SMCOptions(tuning=...)`
-for this exact window. `reference=:pilot` learns an importance reference for
+for this exact window and the same `coordinates` selection used by
+[`brm_smc_update`](@ref). `reference=:pilot` learns an importance reference for
 the new target; it does not replace the carried posterior in that target.
 """
 function BRM.brm_smc_tune(carried::BRM.BRMSMCCarriedReference, model::BRM.BRMI;
         rng, init, reference=nothing, temperatures=nothing, pilot_steps=64,
         pilot=nothing, max_reflections=nothing, recording_target=nothing,
         pilot_evaluations=nothing, reference_inflation=nothing,
-        options=PPL.SMCOptions(),
+        options=PPL.SMCOptions(), coordinates=nothing,
         ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
-    _, _, target = prepare_window(deepcopy(carried), model, ad_backend)
+    _, _, target = prepare_window(deepcopy(carried), model, ad_backend; coordinates)
     controls = tuning_controls(; temperatures, pilot, max_reflections,
         recording_target, pilot_evaluations, reference_inflation)
     PPL.tune_smc(target; rng, init, reference, controls..., pilot_steps, options)
 end
 
+"""
+    brm_smc_update(carried::BRMSMCCarriedReference, model::BRMI;
+        coordinates=nothing, rng, particles=1000, options=SMCOptions(), ...)
+
+Assimilate this window's new observations under a carried posterior and its
+frozen preprocessing. The default `coordinates=nothing` uses the complete,
+unchanged parameter frame.
+
+Use `coordinates=:auto` for a selective growing window. RKPPL discovers old
+coordinates needed by the likelihood, new coordinates, and the old parents
+needed by those new coordinates' priors. The target is the carried marginal
+on the selected old coordinates times the new coordinates' authored priors
+and this window's likelihood. Old priors are not counted again. Fresh priors
+include their transform Jacobians; the likelihood retains the model's
+constrained transforms.
+
+The particle state contains only selected old and new coordinates. The
+remaining old coordinates retain their conditional distribution given the
+selected old coordinates; their marginal can therefore change when they
+are correlated. [`brm_smc_carry`](@ref) combines this conditional with the
+completed compact posterior approximation for the next window.
+
+The authored declaration and frozen preprocessing must stay the same.
+Data-driven declared-vector extents may grow; fitted group levels and the
+identity of existing coordinates must be preserved. Checkpoints remember
+the coordinate mode and require the same window on resume.
+"""
 function BRM.brm_smc_update(carried::BRM.BRMSMCCarriedReference, model::BRM.BRMI;
-        rng=Xoshiro(), particles=1000, options=PPL.SMCOptions(),
+        rng=Xoshiro(), particles=1000, options=PPL.SMCOptions(), coordinates=nothing,
         ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), stages=typemax(Int), progress=nothing)
     BRM._brm_with_progress(progress; description="BRM SMC new-window update") do node
         BRM._brm_throw_if_interrupted(node)
         # Own the retained summary so later caller edits cannot change a fit.
         previous = deepcopy(carried)
-        rk, id, target = prepare_window(previous, model, ad_backend)
+        rk, id, target = prepare_window(previous, model, ad_backend; coordinates)
         state = PPL.initialize_smc(target; rng, particles, options)
         state = finish(state, stages, node)
-        BRM.BRMSMCWindowFit(rk, previous, state, ad_backend, previous.model_id, id)
+        BRM.BRMSMCWindowFit(rk, previous, state, ad_backend, previous.model_id, id, coordinates)
     end
 end
 
@@ -178,14 +231,15 @@ function BRM.brm_smc_fit(fit::BRM.BRMSMCWindowFit; stages=typemax(Int), progress
     BRM._brm_with_progress(progress; description="BRM SMC window continuation") do node
         state = finish(fit.state, stages, node)
         BRM.BRMSMCWindowFit(fit.backend, fit.previous, state,
-            fit.ad_backend, fit.model_id, fit.binding_id)
+            fit.ad_backend, fit.model_id, fit.binding_id, fit.coordinates)
     end
 end
 
 function BRM.brm_smc_checkpoint(fit::BRM.BRMSMCWindowFit)
     BRM._brm_validate_smc_fit(fit)
     (; format=2, kind=:window, model_id=fit.model_id, binding_id=fit.binding_id,
-       previous=deepcopy(fit.previous), state=PPL.smc_checkpoint(fit.state))
+       previous=deepcopy(fit.previous), coordinates=fit.coordinates,
+       state=PPL.smc_checkpoint(fit.state))
 end
 
 function BRM.brm_smc_resume(model::BRM.BRMI, checkpoint;
@@ -195,9 +249,10 @@ function BRM.brm_smc_resume(model::BRM.BRMI, checkpoint;
     previous = deepcopy(checkpoint.previous)
     previous.model_id == checkpoint.model_id || throw(ArgumentError(
         "BRM SMC: the checkpoint belongs to another carried model"))
-    rk, id, target = prepare_window(previous, model, ad_backend)
+    coordinates = get(checkpoint, :coordinates, nothing)
+    rk, id, target = prepare_window(previous, model, ad_backend; coordinates)
     id == checkpoint.binding_id || throw(ArgumentError(
         "BRM SMC: the checkpoint's window data has changed"))
     state = PPL.resume_smc(target, checkpoint.state)
-    BRM.BRMSMCWindowFit(rk, previous, state, ad_backend, previous.model_id, id)
+    BRM.BRMSMCWindowFit(rk, previous, state, ad_backend, previous.model_id, id, coordinates)
 end

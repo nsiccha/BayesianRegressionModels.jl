@@ -248,7 +248,14 @@ function _rk_design_class(binder::RKDesignBinder, replay::RKBRMI, design)
     fitted = binder.fitted
     sources = Pair{Symbol,Any}[]
     derived = Symbol[]
+    extents = Set(first(binding) for binding in _rk_extent_bindings(replay.plan))
     for (name, value) in columns
+        # A computed integer extent can equal an unrelated scalar data value.
+        # Replan its authored expression; value equality is not its source.
+        if name in extents
+            push!(derived, name)
+            continue
+        end
         # A fitted input reads the training values on every replay.
         if haskey(fitted, name) && isequal(value, fitted[name])
             push!(sources, name => _RKFixedInput(fitted[name]))

@@ -11,6 +11,7 @@ end
 
 _RKValuePlan(regression, assignments, observations, columns) =
     _RKValuePlan(regression, assignments, observations, columns, ())
+_rk_extent_bindings(plan::_RKValuePlan) = _rk_extent_bindings(plan.regression)
 
 _rk_value_invlogit(x) = logistic(x)
 brm_invprobit(x) = 0.5erfc(-x / sqrt(2))
@@ -1034,6 +1035,7 @@ end
 
 function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     reserved = Set{Symbol}(keys(plan.columns))
+    union!(reserved, (first(binding) for binding in _rk_extent_bindings(plan)))
     union!(reserved, (a.name for a in plan.assignments))
     kernel_cells = Set{Symbol}(a.cells for a in plan.assignments
         if a isa _RKPreparedKernelAssignment)
@@ -1050,6 +1052,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     stmts = map(statement -> _rk_observed_anchor_source(statement, observations), stmts)
     defs = map(definition -> _rk_observed_anchor_source(definition, observations), defs)
     taken = Set{Symbol}(keys(plan.columns))
+    union!(taken, (first(binding) for binding in _rk_extent_bindings(plan)))
     union!(taken, first.(bindings), (a.name for a in plan.assignments), kernel_cells,
         (p.name for p in plan.regression.parameters),
         (p.name for p in plan.regression.predictors),

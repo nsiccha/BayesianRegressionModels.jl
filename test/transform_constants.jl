@@ -137,6 +137,10 @@ end
     replay = reprocess(rk, NEW)
     @test brm_transform_constants(replay) == records
     @test graph_value(replay, :standardize_age) ≈ (NEW.age .- s.center) ./ s.scale
+    free = RKBRMI(plain(NEW), brm_fitted_state(rk))
+    @test brm_transform_constants(free) == records
+    @test graph_value(free, :standardize_age) ≈ (NEW.age .- s.center) ./ s.scale
+    @test brm_transform_constants(reprocess(free, TRAIN)) == records
 end
 
 @testset "RKBRMI mi() columns" begin
