@@ -31,6 +31,22 @@ per_cell(d) = @brm d begin
         y[i] ~ Normal(conc[i] .+ background[i], sigma)
     end
 end
+# A second response, so either one can be held out.
+two_responses(d) = @brm d begin
+    sigma ~ Exponential(1)
+    log_k ~ Normal(0, 0.5)
+    @plate for i in eachindex(dose)
+        m[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
+        y[i] ~ Normal(m[i], sigma)
+    end
+    w ~ Normal(log_k, sigma)
+end
+# No plate, no assignment: the structural plan.
+plain_regression(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x
+    y ~ Normal(mu, sigma)
+end
 # An authored output holds the name `m`'s cells would otherwise take.
 taken_cells(d) = @brm d begin
     sigma ~ Exponential(1)
@@ -297,6 +313,28 @@ end
         @test v.m[k] ≈ expected atol=1e-12 rtol=1e-12
         @test v.m_cells[k] ≈ sum.(expected) atol=1e-12 rtol=1e-12
     end
+end
+
+@stestset "every RK plan kind reads through rk_draw_values" begin
+    # A model with a held-out response keeps its plate outputs per cell,
+    # whichever response is held out.
+    data = (; PK.dose, PK.t, PK.y, w=[0.1, 0.2])
+    for hold in (:y, :w)
+        held = RKBRMI(PM.two_responses(data); held_out=hold)
+        @test held.plan isa BRM._RKHeldOutPlan
+        U = draw_matrix(held)
+        v = rk_draw_values(held, U, (:m,))
+        for (k, log_k) in enumerate(draw_rates(held, U))
+            @test v.m[k] ≈ draw_conc(log_k) atol=1e-12 rtol=1e-12
+        end
+    end
+    # A plain regression has no plate outputs: its values read as before.
+    plain = RKBRMI(PM.plain_regression((; x=[0.5, 1.0, 2.0], y=[0.1, 0.4, 0.3])))
+    @test plain.plan isa BRM._RKStructuralPlan
+    @test isempty(BRM._rk_plate_output_cell_names(plain))
+    w = rk_draw_values(plain, draw_matrix(plain), (:sigma,))
+    @test length(w.sigma) == 3
+    @test all(x -> x isa Float64 && x > 0, w.sigma)
 end
 
 @stestset "a replay on new rows reads its own cells" begin

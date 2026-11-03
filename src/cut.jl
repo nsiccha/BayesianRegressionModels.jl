@@ -252,13 +252,16 @@ end
 # Each `@plate` output of `rk` with a graph value, to the graph value holding
 # its cells. The cells' name is chosen at emission and can differ from
 # `<output>_cells`, so it is read from the program a query runs.
-function _rk_plate_output_cell_names(rk::RKBRMI)
-    statements = _rk_retained_program(rk).main.args
-    outputs = _rk_kernel_output_names(rk.plan)
+_rk_plate_output_cell_names(rk::RKBRMI) =
+    _rk_plate_output_cell_names(rk.plan, _rk_retained_program(rk).main.args)
+_rk_plate_output_cell_names(_plan, statements) = Dict{Symbol,Symbol}()
+_rk_plate_output_cell_names(plan::_RKHeldOutPlan, statements) =
+    _rk_plate_output_cell_names(plan.parent, statements)
+function _rk_plate_output_cell_names(plan::_RKValuePlan, statements)
+    outputs = _rk_kernel_output_names(plan)
     cells = Dict{Symbol,Symbol}()
-    for kernel in rk.plan.assignments
-        kernel isa _RKPreparedKernelAssignment &&
-            _rk_plate_output_cells!(cells, statements, kernel, outputs[kernel.name])
+    for kernel in _rk_plan_kernels(plan)
+        _rk_plate_output_cells!(cells, statements, kernel, outputs[kernel.name])
     end
     cells
 end
