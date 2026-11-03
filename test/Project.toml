@@ -311,4 +311,5 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK 0.1.62: strict selected rows through array-valued producer plate cells.
 # b5740888 (RKPPL 0.1.71): data-free replay reads frozen whole values.
 # fbf65b46 (RK 0.1.65 / PPL 0.1.74): prepared queries holding modules deep-copy.
-rev = "fbf65b46130a03b1d6f14e5946b953a6cef013f9"
+# f17b6a24 (RK 0.1.67 / PPL 0.1.76): strict cell footprints of per-cell joint fields.
+rev = "f17b6a243f19446895856b2d90dbded6c4f0315c"
