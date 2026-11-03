@@ -22,6 +22,12 @@ instead of failing at run time.
   during pattern assembly instead of accumulating duplicate coordinate pairs.
   Conditional subsets evaluate only their requested units; full-cohort and
   population-gradient calls retain batching.
+- Changed: a one-unit value or gradient writes θ, σ and the unit's η into a
+  dense work point owned by its query or plan, instead of an overlay that RK
+  copied into a full packed vector on every call, so one unit's cost and
+  allocations no longer grow with the number of units.
+  `brm_nlme_loglikelihood_and_gradient`, which returns only the η gradient,
+  differentiates only the unit's own effects (RK `shared=false`).
 - Changed: NLME cell, partition and gradient queries declare their local
   parameter ownership so RK/PPL can cache shared producers before strict
   lowering. Correlated grouped HSGP values remain shared; local coordinates
