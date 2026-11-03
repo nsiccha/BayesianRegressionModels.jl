@@ -1692,7 +1692,9 @@ _brm_nlme_cell_queries(backend::RKBRMI, cells, partitioned, unit, progress=nothi
 
 # A point that notes each packed position read through it: evaluating a cell's
 # value at it records the coordinates that cell reads, for the cost of that one
-# evaluation.
+# evaluation. A query prepared with `partitioned` also reads every shared
+# coordinate on each call to compare it with its cache, and those reads are
+# recorded too.
 struct _BRMNLMERecordingPoint{P<:AbstractVector{Float64}} <: AbstractVector{Float64}
     point::P
     seen::Vector{Int}
