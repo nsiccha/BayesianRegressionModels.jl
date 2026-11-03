@@ -1,5 +1,10 @@
 # Running the tests
 
+`adaptive_centering_bounds.jl` checks bounded random-effect scales against
+BridgeStan's constrained values, correlated centered and noncentered maps,
+their Jacobians, Enzyme gradients, centered replay, and stable log-scale tails.
+Run it as a standalone script in the test environment.
+
 `rk_interval_tails.jl` checks interval-censored Normal responses through
 `RKBRMI`: pointwise and total log densities, native Enzyme Reverse location
 and log-scale gradients, and input immutability. Synthetic intervals cover
@@ -272,6 +277,25 @@ windows: sequential Gaussian posteriors against a batch fit, unchanged caller
 RNG and carried inputs, named source/data/preprocessing refusals, and bounded
 summary size. `smc_window_process.jl` checks exact checkpoint continuation in
 a fresh process that never constructs the training arrays.
+
+`smc_window_selective.jl` exercises opt-in `coordinates=:auto` windows: old
+priors are excluded, fresh priors include their old parents and transform
+Jacobians, and omitted coordinates retain their carried conditional law.
+Independent Gaussian and truncated-Normal references check posterior moments
+and predictive normalizers. Storage checks compare 32 and 256 particles in a
+10,002-coordinate growing frame, and lazy recovery checks a correlated omitted
+coordinate without adding full-width particles. Its testsets accept substring
+filters as trailing arguments. Repeated carries check that summaries stay
+bounded after growth. `smc_window_selective_api.jl` checks owned coordinate maps,
+compact pilot tuning, schedule identity and exact tuned continuation.
+`smc_window_selective_process.jl` checks fresh-process checkpoint continuation,
+coordinate maps, conditional recovery and the next carry while
+preserving fitted standardization without the original training rows.
+
+`rk_vector_extent.jl` checks data-driven declared-vector extents through emitted
+RK source, fitted replay and design binding. It covers integral expressions,
+growing versus fixed replay, shrinking refusal and an unrelated scalar input
+whose value happens to equal the extent.
 
 `test/Project.toml` is a superset of the root project: it carries every package
 that any `test/*.jl` loads, so no test file fails at its own `using` line the way
@@ -2149,10 +2173,13 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   rows, which registered Enzyme rejects with `IllegalTypeAnalysisException`
   and dogfood `d37cb0b4` differentiates (Enzyme snag
   `native-reverse-t-6d51cae6`; user pick on BRM decision `0n0kgfh`). The
-  sparse Laplace's `@plate` cells take their Hessian blocks through RKPPL's
-  compact-cell AD under plain Reverse, which needs dogfood from `7a886d9`
-  (Enzyme snag `static-reverse-s-f9483e9c`). The current pin is `5325554c`
-  with its declared libEnzyme `782c9d95`; it includes `3a89b497`'s compact
+  sparse Laplace's ordinary `@plate` cells take their Hessian blocks through
+  RKPPL's forward-over-reverse compact-cell AD. This requires both the
+  static-activity repair from `7a886d9` (Enzyme snag
+  `static-reverse-s-f9483e9c`) and the augmented-helper JIT-symbol repair
+  (Enzyme snag `forward-over-rev-188051dc`), which preserves the `digamma`
+  partials used by negative-binomial cells. The exact pin and declared
+  libEnzyme build come from `setup_env.jl`. The pin includes `3a89b497`'s compact
   nested-AD overlay repairs for sum factors and the dynamic-call Hessian
   repair needed by lower-bounded completion geometry. It also repairs
   positive-tail `erfcx` derivatives through third order (Enzyme snag

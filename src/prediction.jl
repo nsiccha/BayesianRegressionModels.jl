@@ -1042,7 +1042,7 @@ function _ranef_centered_frame(bf::RanefBlock, unc_from, plan)
         "fresh levels cannot be drawn from the fitted covariance. Cover ",
         "`$(bf.family)` in `_adaptive_block` (src/adaptive_centering.jl) in ",
         "the same change that tables it.")
-    frame
+    only(_adaptive_resolve_scale_bounds([frame], plan, unc_from))
 end
 
 """

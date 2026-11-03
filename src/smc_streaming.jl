@@ -23,6 +23,13 @@ and `state` is the producer's particle state. Continue a partial bridge with
 [`brm_smc_fit`](@ref). Once complete, call [`brm_smc_carry`](@ref) to discard
 this window before assimilating the next one.
 
+With `coordinates=:auto`, particle rows contain only the old coordinates
+needed by this window and the new coordinates it introduces. The backend's
+layout still describes the full current model. Omitted old coordinates are
+retained through their conditional Gaussian in the carried summary.
+Use [`brm_smc_coordinates`](@ref) to inspect the coordinate mapping and
+[`brm_smc_recover`](@ref) to recover a full joint draw from a compact position.
+
 `state.log_normalizer` estimates this window's predictive normalizer under
 the carried prior, not exact full-history evidence.
 """
@@ -33,7 +40,36 @@ struct BRMSMCWindowFit{B,C,S,A}
     ad_backend::A
     model_id::String
     binding_id::String
+    coordinates::Union{Nothing,Symbol}
 end
+BRMSMCWindowFit(backend, previous, state, ad_backend, model_id, binding_id) =
+    BRMSMCWindowFit(backend, previous, state, ad_backend, model_id, binding_id, nothing)
+
+"""
+    brm_smc_coordinates(fit::BRMSMCWindowFit)
+
+Inspect an initialized or completed selective window's compact, current-model
+and full-joint coordinate mapping through RKPPL's `smc_window_coordinates`.
+Particle rows use the compact order; [`brm_smc_recover`](@ref) uses the joint
+order. Requires a fit initialized with `coordinates=:auto`.
+"""
+function brm_smc_coordinates end
+
+"""
+    brm_smc_recover(fit::BRMSMCWindowFit, compact_position; rng=Xoshiro())
+
+Recover one full joint unconstrained position from a selective window's
+compact position. Selected coordinates keep their supplied values; omitted
+old coordinates are drawn from their carried conditional Gaussian. The
+result follows the joint order of [`brm_smc_coordinates`](@ref). Recovery
+does not add full-width particles to the fit. A supplied compact position
+must have the order and length of a column of `fit.state.positions`.
+
+Works for an initialized or completed `coordinates=:auto` window. To obtain
+a posterior draw, use a completed fit and select a compact particle according
+to `fit.state.weights` before recovery.
+"""
+function brm_smc_recover end
 
 """
     brm_smc_carry(fit::Union{BRMSMCFit,BRMSMCWindowFit}; scale=nothing, basis=nothing,
@@ -42,8 +78,11 @@ end
     brm_smc_carry(model::Union{BRMI,RKBRMI}; reference, ad_backend=AutoEnzyme())
 
 Summarize a completed posterior with RKPPL's `carry_smc`, retaining BRM's
-fitted preprocessing without training rows. The default reference has the
-cloud's weighted mean and marginal standard deviations. A supplied portable
+fitted preprocessing without training rows. For a complete-frame cloud, the
+default reference has its weighted mean and marginal standard deviations.
+A selective window updates its compact marginal and combines it with the
+old inactive conditional to produce a full joint Gaussian summary.
+A supplied portable
 WarmupHMC `scale_data` record defines the Gaussian covariance; the caller must
 calibrate it as a posterior approximation. A mutation/proposal scale alone does
 not guarantee posterior moments. No dense covariance or mutation-kernel
@@ -87,8 +126,8 @@ moments come from a finite cloud. A diagonal reference discards correlations.
 
 Pass the result and a newly bound declaration to
 `brm_smc_update(carried, builder(new_window); rng, particles, options, ...)`.
-Only new, nonoverlapping observations belong in each window. The same source,
-coordinates and fitted preprocessing must apply; growing latent trajectories
-require a state-filtering model instead of this static-parameter bridge.
+Only new, nonoverlapping observations belong in each window. By default the
+same source, coordinates and fitted preprocessing must apply. Selective
+growing windows opt in with `coordinates=:auto`; see [`brm_smc_update`](@ref).
 """
 function brm_smc_carry end
