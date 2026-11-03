@@ -2015,6 +2015,12 @@ It checks local backtracking, sequential
 fallback, conditional stationarity, marginal gradients, independent component
 steps and deterministic repeated evaluations.
 
+`laplace_gradient_nonfinite.jl` evaluates a finite marginal whose gradient is
+not (an infinite third derivative at a converged mode) in an ordinary cell, a
+sum cell and under matrix-free algebra. It checks the `nonfinite_gradient`
+counter, the warning's named term, the closed-form value and the central
+difference, and that a target materialized from a plan starts at zero.
+
 ## One-time bootstrap
 
 Use `test/setup_env.jl` as the single bootstrap entry:
