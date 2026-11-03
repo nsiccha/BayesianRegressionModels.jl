@@ -304,14 +304,17 @@ function BRM._rk_spl_factor_ad(q, part, base, indices, ad_backend; cell0=1, term
     K = K === nothing ? r + m : K
     dirs = ntuple(_ -> shape(zeros(r + m)), K)
     forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
-    second = SecondOrder(AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse,
-        ad_backend)), forward)
+    reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
+    second = SecondOrder(reverse, forward)
+    # Cached ordinary cells now use the factor API too. Preserve their
+    # forward-over-reverse Newton HVPs, while sum factors and mixed/third
+    # derivative accumulators retain their existing compositions.
+    hessian = isempty(q.terms) ? SecondOrder(forward, reverse) : second
     hvp = K == 0 ? nothing : Base.invokelatest(prepare_cell_factor_ad, prepare_ad_hvp, q.factors,
-        part, base, indices, second, dirs; cell0, term0)
+        part, base, indices, hessian, dirs; cell0, term0)
     third = Base.invokelatest(prepare_cell_factor_ad, prepare_ad_third, q.factors,
         part, base, indices, SecondOrder(second, forward), (shape(zeros(r + m)),);
         cell0, term0)
-    reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
     gradient = Base.invokelatest(prepare_cell_factor_ad, prepare_ad, q.factors,
         part, base, indices, reverse; cell0, term0)
     cached = hasproperty(q, :cached) && q.cached

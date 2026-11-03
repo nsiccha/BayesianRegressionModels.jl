@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.141
+
+- Sparse Laplace supports model-scope helpers shared by ordinary or
+  sum-factored observation cells. Sampled-coordinate helper values are
+  reused across a cell sweep while their mixed derivatives remain part
+  of the marginal gradient. Integrated-coordinate helper reads retain
+  strict locality checks.
+- Preparation retains local integrated supports without expanding shared
+  sampled coordinates into every cell. Retained plans, sampled subsets,
+  independent problem copies and matrix-free contractions use the same
+  shared-derivative path.
+
 ## 0.2.140
 
 - Carried RK SMC windows accept `coordinates=:auto`: particles contain only
