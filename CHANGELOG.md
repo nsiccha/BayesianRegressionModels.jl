@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.143
+## 0.2.145
 
 - Sparse Laplace supports model-scope helpers shared by ordinary or
   sum-factored observation cells. Sampled-coordinate helper values are
@@ -23,11 +23,69 @@ instead of failing at run time.
   sampled coordinates into every cell. Retained plans, sampled subsets,
   independent problem copies and matrix-free contractions use the same
   shared-derivative path.
-- **Breaking:** the RK backend requires ReactiveKernels 0.1.63 or later.
-  Earlier releases lose the shared-prefix cut's frontier types when
-  preparing `partitioned` cell factors and refuse such sum-factored cells
-  with a locality error. Update older pinned RK environments; the test
-  bootstrap selects that release.
+- **Breaking:** the RK backend requires ReactiveKernels 0.1.67 and
+  ReactiveKernelsPPL 0.1.76. Earlier releases lose the shared-prefix cut's
+  frontier types when preparing `partitioned` cell factors and refuse such
+  sum-factored cells with a locality error. Update older pinned RK
+  environments; the test bootstrap selects that release.
+
+## 0.2.144
+
+- **Native space-time fields:** `field ~ 0 + gmrf((east, north), time[, channel];
+  mesh=(vertices=xy, cells=triangles)[, cor=Omega])` is a sparse-precision
+  Gaussian Markov random field: a mass-lumped finite-element Matérn (ν = 1)
+  field on a triangular mesh, stationary Ornstein–Uhlenbeck evolution over the
+  fitted times (exact transitions over irregular gaps), and an optional
+  channel correlation (`cor=` a known correlation matrix or an
+  `LKJCholesky` declaration). Each row reads three mesh vertices at its own
+  time and channel. Its normalized prior keeps the determinants that depend
+  on the learned SD, spatial length, temporal length and channel factor. The
+  term's addresses are `sd(field, gmrf(...))` and
+  `length_scale(field, gmrf(...), space|time)`; `= value` holds one fixed.
+  The spatial length ℓ_s has κ = √2/ℓ_s, so the practical range is 2ℓ_s.
+  Supported on SBBRMI and RKBRMI with density, gradient, coordinate-transport
+  and fitted-state parity, frozen replay of the fitted mesh, times and
+  channels, and scientific descriptions.
+- **Independent fields in plate cells:** a `gmrf` formula inside
+  `@plate for p in groups(g)` gives each cell its own field on that cell's
+  fitted times and channels, with the cell's own term hyperparameters and
+  priors that may read cell-local or model-scope values. On SBBRMI cell
+  declarations are `local` (StanBlocks 0.2.20), so caller data of the same
+  name never turns a cell prior into an observation. On RKBRMI the cell
+  formula is `0 + gmrf(...)` alone, a cell-local `LKJCholesky` correlation is
+  not lowered, and replay keeps the fit's cells.
+- **Sparse embedded Laplace over a model-scope field:**
+  `brm_laplace_problem(rk; integrate=(declaration,))` and
+  `brm_laplace_plan(rk; integrate=:auto)` integrate a model-scope `gmrf`
+  field (exact for Normal rows), with its precision moving with the lengths
+  and channel factor. `brm_laplace_problem(rk; integrate=plan)` applies a
+  plan to such a target, and `deepcopy` gives each chain its own copy.
+  Integrating per-cell fields waits on a ReactiveKernels fix (snag
+  `prepare-strict-o-332ad6b9`). No large-field performance is claimed:
+  measured cost grows superlinearly with the state dimension under both exact
+  and matrix-free algebra.
+- **Breaking:** requires StanBlocks 0.2.20, ReactiveKernels 0.1.65 and
+  ReactiveKernelsPPL 0.1.74 (deep copies of prepared queries whose generated
+  programs hold modules, as a `gmrf` field's do).
+
+## 0.2.143
+
+- A sparse embedded Laplace target (`brm_laplace_problem(...; integrate)`)
+  whose log density is finite and whose conditional modes all converged, but
+  whose gradient is not, now reports it: the new counter `nonfinite_gradient`
+  counts such evaluations, and a warning (at most three) names the population
+  point, how many population coordinates are nonfinite and the first nonfinite
+  term, for example "the third derivative of cell 1 of `y`". The gradient
+  itself is unchanged, so SMC still raises `SMCNonfiniteError` there and HMC
+  still rejects the step. Such a gradient needs a derivative the mode search
+  does not: typically a likelihood's third derivative that automatic
+  differentiation cannot represent in Float64 although the value and curvature
+  are finite. One known source is nested Enzyme Forward derivatives through
+  `log` of a value below about 1.5e-154, for example `log(erfc(t))` for `t`
+  above about 18.5 (snag `laplace-gradient-db992ae0`).
+- Matrix-free components (`solver = :matrixfree`, or `:auto` above 1,024
+  coordinates) give a nonfinite solution for a nonfinite right-hand side, as
+  exact algebra does, instead of raising "conditional solve failed".
 
 ## 0.2.142
 

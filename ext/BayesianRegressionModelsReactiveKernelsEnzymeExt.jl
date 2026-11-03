@@ -99,7 +99,7 @@ function BRM._rk_slap_kernels(backend::BRM.RKBRMI, ports::Tuple, effects::Tuple,
     # it. Its seed holds one cotangent per port (untupled for a single port).
     reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
     pullback = Ref{Any}(nothing)
-    seeds = map(value -> value isa Number ? 0.0 : zeros(Float64, length(value)), v0)
+    seeds = map(value -> value isa Number ? 0.0 : zeros(Float64, size(value)), v0)
     prepare_pullback() = Base.invokelatest(prepare_ad_pullback, values, reverse,
         _rk_slap_seed(seeds), u0; active=:unconstrained)
     # One draws kernel per block, differentiated along the `omega` coordinates
@@ -165,12 +165,12 @@ function BRM._rk_value_pullback(backend::BRM.RKBRMI, names::Tuple{Vararg{Symbol}
     values = Base.invokelatest(ReactiveKernels.prepare, backend.model.spec;
         have=(:unconstrained, keys(bound)...), want=names[live], bound)
     v0 = _rk_slap_tuple(Base.invokelatest(values, u0), length(live))
-    seeds = map(value -> value isa Number ? 0.0 : zeros(Float64, length(value)), v0)
+    seeds = map(value -> value isa Number ? 0.0 : zeros(Float64, size(value)), v0)
     reverse = AutoEnzyme(; mode=Enzyme.Reverse)
     prepared = Base.invokelatest(prepare_ad_pullback, values, reverse,
         _rk_slap_seed(seeds), u0; active=:unconstrained)
     function pullback(u::Vector{Float64}, cotangents::Tuple)
-        seed = map(i -> (c = cotangents[i]; c isa Number ? Float64(c) : Vector{Float64}(c)),
+        seed = map(i -> (c = cotangents[i]; c isa Number ? Float64(c) : Array{Float64}(c)),
             Tuple(live))
         Base.invokelatest(ad_pullback, prepared, _rk_slap_seed(seed), u)
     end

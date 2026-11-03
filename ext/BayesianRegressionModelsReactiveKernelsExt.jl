@@ -8,6 +8,7 @@ using ReactiveKernelsPPL
 const BRM = BayesianRegressionModels
 
 include("rk_statistical_gp.jl")
+include("rk_gmrf.jl")
 
 # Stan builtins a kernel cell calls, bound to their Julia equivalents. Stan's
 # conversions between vectors and one-dimensional arrays flatten column-major,

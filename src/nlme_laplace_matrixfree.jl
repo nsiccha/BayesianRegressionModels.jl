@@ -130,8 +130,8 @@ function _brm_operator_step!(p, pop, z, direction, g, h, fc, converged)
     false
 end
 
-struct _BRMConditionalOperator
-    D::SparseMatrixCSC{Float64,Int}
+struct _BRMConditionalOperator{P}
+    D::P
     B::SparseMatrixCSC{Float64,Int}
     W::SparseMatrixCSC{Float64,Int}
     diagonal::Vector{Float64}
@@ -141,7 +141,7 @@ struct _BRMConditionalOperator
 end
 Base.size(H::_BRMConditionalOperator) = size(H.D)
 Base.size(H::_BRMConditionalOperator, d::Integer) = size(H.D, d)
-Base.eltype(::Type{_BRMConditionalOperator}) = Float64
+Base.eltype(::Type{<:_BRMConditionalOperator}) = Float64
 Base.eltype(::_BRMConditionalOperator) = Float64
 function LinearAlgebra.mul!(y, H::_BRMConditionalOperator, x)
     mul!(y, H.D, x)
@@ -221,7 +221,7 @@ function _brm_operator_factor(p, h; shift=0.0)
         Bc = _brm_spl_submatrix(B, rows, I)
         Wc = _brm_spl_submatrix(W, rows, rows)
         WB = Wc * Bc
-        diagonal = diag(Dc) .+ vec(sum(Bc .* WB; dims=1))
+        diagonal = collect(diag(Dc) .+ vec(sum(Bc .* WB; dims=1)))
         H = _BRMConditionalOperator(Dc, Bc, Wc, diagonal, shift,
             zeros(length(rows)), zeros(length(rows)))
         factor = if p.algebra.large[c]
@@ -243,12 +243,18 @@ end
 LinearAlgebra.issuccess(F::_BRMOperatorFactor) = all(F.parts) do part
     part.factor === nothing ? all(>(0), part.H.diagonal .+ part.H.shift) : issuccess(part.factor)
 end
+# A component whose right-hand side is not finite gets a nonfinite solution,
+# as a direct factor's solve gives, instead of a failed iterative solve: the
+# marginal gradient then reports the term that made it nonfinite
+# (`_brm_spl_nonfinite_gradient!`). Other components are unaffected.
 function Base.:\(F::_BRMOperatorFactor, b::AbstractVector)
     x = zeros(length(b))
     for (part, I) in zip(F.parts, F.components)
-        x[I] .= part.factor === nothing ? _brm_operator_solve(part.operator, b[I], F.options;
-            diagnostics=F.problem.algebra.diagnostics) :
-            part.factor \ b[I]
+        bI = b[I]
+        x[I] .= !all(isfinite, bI) ? NaN :
+            part.factor === nothing ? _brm_operator_solve(part.operator, bI, F.options;
+                diagnostics=F.problem.algebra.diagnostics) :
+            part.factor \ bI
     end
     x
 end

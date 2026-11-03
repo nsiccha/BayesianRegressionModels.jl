@@ -1188,6 +1188,146 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     end
 end
 
+# A native field's scalar roles and joint state. State positions are paired
+# by fitted vertex/channel/time identities, never by the observation order.
+function _brm_transport_gmrf_axes(term)
+    args = _brm_gmrf_arguments(term)
+    (name.(args.axes)..., name(args.time),
+        (args.channel === nothing ? () : (name(args.channel),))...)
+end
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:gmrf}, record, rk, d, stan, stan_pos)
+    entry = _brm_term_entry(d, record.predictor,
+        e -> getf(e.value) === gmrf && _brm_transport_gmrf_axes(e.value) == record.axes,
+        "`gmrf$(record.axes)`")
+    base = (; kind=:gmrf, predictor=record.predictor, term=entry.term)
+    target = _sb_lp_emitted_name(record.predictor, entry.link)
+    prepared = only(e.const_.prepared for e in values(d.plan.preproc)
+        if e.kind === :gmrf && e.const_.prepared.state.target === target &&
+            e.const_.prepared.source == record.axes)
+    state = prepared.state
+    for key in (:vertices, :cells)
+        isequal(only(rk.plan.columns[getproperty(record.mesh_inputs, key)]),
+            getproperty(state, key)) || _brm_transport_error(:parameterization_mismatch,
+            "brm_coordinate_transport: GMRF $(base) has different fitted mesh $key")
+    end
+    layout = _BRMGMRFStateLayout(record.state_axes.nvertices,
+        record.state_axes.channels, record.state_axes.times)
+    layout.nvertices == state.layout.nvertices &&
+        Set(layout.channels) == Set(state.channels) && Set(layout.times) == Set(state.times) ||
+        _brm_transport_error(:parameterization_mismatch,
+            "brm_coordinate_transport: GMRF $(base) has different fitted state axes")
+    for (parameter, local_name) in ((:sd, :sigma), (:spatial_length, :spatial_length),
+            (:temporal_length, :temporal_length), (:field, :field))
+        isnothing(_brm_term_known_value(d.plan.parent, record.predictor,
+            entry.value, parameter)) || continue
+        names = _brm_transport_elements(
+            _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
+            (; base..., parameter))
+        declaration = Symbol(record.declaration, ".", getproperty(record.locals, local_name))
+        if parameter === :field
+            length(names) == layout.ncoordinates || error(
+                "brm_coordinate_transport: GMRF $(base) field coordinate count disagrees")
+            time_index = Dict(t => i for (i, t) in enumerate(state.times))
+            channel_index = Dict(c => i for (i, c) in enumerate(state.channels))
+            for j in 1:layout.ncoordinates
+                coordinate = _brm_gmrf_state_coordinate(layout, j)
+                k = coordinate.vertex + layout.nvertices *
+                    ((channel_index[coordinate.channel] - 1) + length(state.channels) *
+                        (time_index[coordinate.time] - 1))
+                push!(pairs, BRMCoordinatePair((; base..., parameter, coordinate...),
+                    Symbol(declaration, ".", j), names[k], declaration, (j,), :identity))
+            end
+        else
+            push!(pairs, BRMCoordinatePair((; base..., parameter, index=1),
+                declaration, only(names), declaration, (), :identity))
+        end
+    end
+    nothing
+end
+
+# Independent cell fields (`field ~ 0 + gmrf(...)` in a `@plate` cell): RK
+# declares one field per current cell, SB's cell formula fit one per fitted
+# label. Cells pair by label, scalar roles per cell, and state positions by
+# (label, vertex, channel, time), never by cell or observation order. RK's
+# per-cell supports are fitted from its bound fit-role inputs, as its graph
+# fits them.
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:cell_gmrf}, record, rk, d, stan, stan_pos)
+    base = (; kind=:cell_gmrf, kernel=record.kernel, name=record.name)
+    fits = [e.const_ for e in values(d.plan.preproc) if e.kind === :cell_formulas &&
+        e.const_.context == (record.kernel,) &&
+        any(p -> p.logical === record.name, e.const_.predictors)]
+    length(fits) == 1 || _brm_transport_error(:parameterization_mismatch,
+        "brm_coordinate_transport: cell field $(base) has no unique SB cell formula fit")
+    fit = only(fits)
+    emitted = only(p.emitted for p in fit.predictors if p.logical === record.name)
+    states = map(fit.cells) do cell
+        only(e.const_.prepared.state for e in values(cell.preproc)
+            if e.kind === :gmrf && e.const_.prepared.state.target === emitted)
+    end
+    columns = rk.plan.columns
+    f = record.fit
+    fitted = brm_gmrf_cell_supports(only(columns[f.vertices]), only(columns[f.cells]),
+        columns[f.time], f.channel === nothing ? nothing : columns[f.channel],
+        columns[f.group], record.nchannels)
+    labels = columns[record.labels]
+    supports = brm_gmrf_cell_select(fitted, labels)
+    stan_cell = Dict(label => i for (i, label) in enumerate(fit.labels))
+    length(labels) == length(fit.labels) && all(l -> haskey(stan_cell, l), labels) ||
+        _brm_transport_error(:parameterization_mismatch,
+            "brm_coordinate_transport: cell field $(base) has different cells on RK and SB")
+    outputs(role) = [o for o in d.outputs if o.kind === :parameter &&
+        o.declaration !== nothing && o.declaration.context == fit.context &&
+        o.component === role && record.name in o.predictors]
+    rk_names = Set(_rk_layout_coordinate_names(rk))
+    for (role, local_name) in ((:sd, :sigma), (:spatial_length, :spatial_length),
+            (:temporal_length, :temporal_length))
+        declaration = Symbol(record.declaration, ".", getproperty(record.locals, local_name))
+        first_name = Symbol(declaration, ".", 1)
+        known = !(first_name in rk_names)
+        found = outputs(role)
+        known && isempty(found) && continue
+        length(found) == 1 && !known || _brm_transport_error(:parameterization_mismatch,
+            "brm_coordinate_transport: cell field $(base) `$role` is sampled on one backend only")
+        names = stan[_brm_element_coordinates(only(found), stan)]
+        length(names) == length(labels) || error(
+            "brm_coordinate_transport: cell field $(base) `$role` has $(length(names)) SB entries")
+        for (j, label) in enumerate(labels)
+            push!(pairs, BRMCoordinatePair((; base..., parameter=role, cell=label),
+                Symbol(declaration, ".", j), names[stan_cell[label]], declaration, (j,),
+                :identity))
+        end
+    end
+    field = only(outputs(:field))
+    names = stan[_brm_element_coordinates(field, stan)]
+    offsets = cumsum([0; [s.layout.ncoordinates for s in states]])
+    length(names) == last(offsets) || error(
+        "brm_coordinate_transport: cell field $(base) has $(length(names)) SB field " *
+        "entries; its fitted cells hold $(last(offsets))")
+    declaration = Symbol(record.declaration, ".", record.locals.field)
+    for (j, label) in enumerate(labels)
+        s = stan_cell[label]
+        state, layout = states[s], supports[j].layout
+        layout.nvertices == state.layout.nvertices &&
+            Set(layout.channels) == Set(state.channels) && Set(layout.times) == Set(state.times) ||
+            _brm_transport_error(:parameterization_mismatch,
+                "brm_coordinate_transport: cell field $(base) cell `$label` has different fitted state axes")
+        time_index = Dict(t => i for (i, t) in enumerate(state.times))
+        channel_index = Dict(c => i for (i, c) in enumerate(state.channels))
+        for k in 1:layout.ncoordinates
+            coordinate = _brm_gmrf_state_coordinate(layout, k)
+            m = coordinate.vertex + layout.nvertices *
+                ((channel_index[coordinate.channel] - 1) + length(state.channels) *
+                    (time_index[coordinate.time] - 1))
+            push!(pairs, BRMCoordinatePair((; base..., parameter=:field, cell=label, coordinate...),
+                Symbol(declaration, ".", j, ".", k), names[offsets[s] + m], declaration,
+                (j, k), :identity))
+        end
+    end
+    nothing
+end
+
 # An HSGP component, paired by its formula axes and parameter roles. A grouped
 # one (`by = g`) pairs below.
 _brm_transport_hsgp_axes(t) = Tuple(name(_sb_named_inner(:hsgp, a)) for a in getargs(t))

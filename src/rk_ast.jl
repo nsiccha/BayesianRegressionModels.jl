@@ -352,7 +352,7 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
         elseif term.kind === :hsgp
             # The ordinary Hilbert basis/spectral product is a summand.
             push!(summands, refref[index])
-        elseif term.kind === :gp
+        elseif term.kind === :gp || term.kind === :gmrf
             push!(summands, refref[index])
         elseif term.kind === :ar
             # Scaled scan summand: the thin layer classifies
@@ -1886,7 +1886,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             end
             if kind === :monotonic_summand
                 refactual[index] = monotonic!(index, term, nothing, :mo1, false)
-            elseif kind === :spline || kind === :hsgp
+            elseif kind === :spline || kind === :hsgp || kind === :gmrf
                 refactual[index] = term.options.id
             elseif kind === :structured
                 refactual[index] = term.options.id
@@ -1948,7 +1948,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             end
             (kind === :offset || kind === :ranef_gather ||
                 kind === :spline || kind === :hsgp ||
-                kind === :structured ||
+                kind === :structured || kind === :gmrf ||
                 kind === :gp || kind === :dar || kind === :car || kind === :cdar ||
                 kind === :monotonic_summand) && continue
             hs_spec = get(hs_priors, (predictor.name, term.addressee),
@@ -2073,6 +2073,18 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             _rk_start_term_record!(coordinates, predictor.name, term, term.options.id,
                 (; length_scale=any(p -> p.hyper === :length_scale, hyper_plans) ? nothing : rho,
                    sigma=any(p -> p.hyper === :sd, hyper_plans) ? nothing : sigma))
+        end
+        for term in predictor.terms
+            term.kind === :gmrf || continue
+            locals = _rk_ast_gmrf!(defs, stmts, taken, bindings, term)
+            _rk_coordinate_record!(coordinates, (; kind=:gmrf,
+                declaration=term.options.id, predictor=predictor.name,
+                axes=term.options.source, state_axes=term.options.state_axes,
+                mesh_inputs=(; term.options.vertices, term.options.cells),
+                correlation=term.options.correlation, locals))
+            _rk_start_term_record!(coordinates, predictor.name, term, term.options.id,
+                (; sigma=locals.sigma, spatial_length=locals.spatial_length,
+                   temporal_length=locals.temporal_length))
         end
         for term in predictor.terms
             term.kind === :gp || continue
