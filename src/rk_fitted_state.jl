@@ -293,7 +293,11 @@ _rk_resampled_fit_inputs(state::BRMFittedState, groups) =
 # when its program's callables are the same.
 function _rk_fitted_replay(template::BRMI, new_data, state::BRMFittedState;
         resample_groups=(), held_out=state.held_out, previous=nothing,
-        prefix="RK data-free replay")
+        prefix="RK data-free replay", coordinates=:fixed)
+    coordinates in (:fixed, :growing) || throw(ArgumentError(
+        "$prefix: unsupported coordinate replay mode $coordinates"))
+    coordinates === :growing && !isempty(resample_groups) && throw(ArgumentError(
+        "$prefix: growing windows retain the fitted group levels"))
     groups = _rk_resample_group_set(resample_groups; prefix)
     plan, emitted = _rk_fitted_replay_plan(template, new_data, state;
         resample_groups=groups, held_out, prefix)
@@ -304,12 +308,17 @@ function _rk_fitted_replay(template::BRMI, new_data, state::BRMFittedState;
         program, bound, source=template, fitted=_RKFittedReplay(state, frozen, groups))
     if isempty(groups)
         names = _rk_layout_coordinate_names(backend)
-        names == state.coordinates || error(
-            "$prefix: the new data changes the fitted coordinates " *
-            "($(length(state.coordinates)) fitted, $(length(names)) on the " *
-            "replay), so the fit's draws do not apply to it. A grouping whose " *
-            "levels the replay does not freeze must be named in " *
-            "`resample_groups`.")
+        if coordinates === :growing
+            issubset(Set(state.coordinates), Set(names)) || error(
+                "$prefix: a growing window cannot remove fitted coordinates")
+        else
+            names == state.coordinates || error(
+                "$prefix: the new data changes the fitted coordinates " *
+                "($(length(state.coordinates)) fitted, $(length(names)) on the " *
+                "replay), so the fit's draws do not apply to it. A grouping whose " *
+                "levels the replay does not freeze must be named in " *
+                "`resample_groups`.")
+        end
     end
     backend
 end

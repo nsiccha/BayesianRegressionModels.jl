@@ -273,6 +273,25 @@ RNG and carried inputs, named source/data/preprocessing refusals, and bounded
 summary size. `smc_window_process.jl` checks exact checkpoint continuation in
 a fresh process that never constructs the training arrays.
 
+`smc_window_selective.jl` exercises opt-in `coordinates=:auto` windows: old
+priors are excluded, fresh priors include their old parents and transform
+Jacobians, and omitted coordinates retain their carried conditional law.
+Independent Gaussian and truncated-Normal references check posterior moments
+and predictive normalizers. Storage checks compare 32 and 256 particles in a
+10,002-coordinate growing frame, and lazy recovery checks a correlated omitted
+coordinate without adding full-width particles. Its testsets accept substring
+filters as trailing arguments. Repeated carries check that summaries stay
+bounded after growth. `smc_window_selective_api.jl` checks owned coordinate maps,
+compact pilot tuning, schedule identity and exact tuned continuation.
+`smc_window_selective_process.jl` checks fresh-process checkpoint continuation,
+coordinate maps, conditional recovery and the next carry while
+preserving fitted standardization without the original training rows.
+
+`rk_vector_extent.jl` checks data-driven declared-vector extents through emitted
+RK source, fitted replay and design binding. It covers integral expressions,
+growing versus fixed replay, shrinking refusal and an unrelated scalar input
+whose value happens to equal the extent.
+
 `test/Project.toml` is a superset of the root project: it carries every package
 that any `test/*.jl` loads, so no test file fails at its own `using` line the way
 three of them do under `--project=.` (see below).
