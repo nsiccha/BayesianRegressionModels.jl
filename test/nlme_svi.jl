@@ -330,8 +330,10 @@ const SVI_NESTED = (; subject_group=:subject, nested_groups=(unit=:obs_subject,)
                 @test issubset(block[touched], st.reads[i][g][k])
                 footprint_query = BRM._rk_nlme_cell_footprint_query(cell.query)
                 for active in points
-                    point = BRM._BRMNLMEPoint(m.unit, selection, active,
-                        Int[], Float64[], Int[], Float64[])
+                    # A footprint kernel takes the packed Vector it was
+                    # prepared from, as `_brm_nlme_structural_reads` passes it.
+                    point = copy(m.unit)
+                    point[selection] = active
                     support = BRM._rk_nlme_cell_footprint(footprint_query, point, p)
                     @test Set(st.reads[i][g][k]) == Set(intersect(block, support))
                 end
