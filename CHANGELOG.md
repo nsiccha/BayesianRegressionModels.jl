@@ -12,6 +12,36 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.147
+
+- `brm_laplace_problem`'s conditional modes are found by continuation from
+  the prior, in all three problems (sparse, structured and whole-model). Every
+  evaluation starts the integrated effects at their prior's mode and follows
+  each unit's mode while the likelihood's weight rises from 0 to 1 in 10
+  stages. The marginal is evaluated at the mode connected to the prior's mode:
+  it still does not depend on earlier evaluations, and as the population
+  parameters vary it changes only where that mode ceases to exist. Before, a
+  search from zero effects with the full likelihood could reach a different
+  mode of a multimodal conditional at points millionths apart, so the marginal
+  jumped and an outer gradient sampler saw a discontinuous target.
+  Log-concave units and sparse components (closed-form rows with no effect on
+  a second parameter, no cells) take one stage; their values and gradients
+  are unchanged. `maxiter` now applies per stage.
+- `target.folds` counts evaluations in which a unit's followed mode needed a
+  modified Newton step after the first stage (the mode ceased to exist on the
+  way; the marginal can jump near such points). The sparse problem's
+  `target.search` records the last evaluation's stages, Newton steps,
+  shifted steps per stage, largest shift, refused full Newton steps
+  (`backtracks`), final decrements and `stop` reason (`:tol`, or `:floor` for
+  the rounding floor) per component.
+- The sparse problem damps each component's Newton step by its own shift
+  where its curvature is not positive definite, in exact and matrix-free
+  algebra. Before, one shift served all components, and a component damped by
+  another's curvature could stop early on its rounding-floor rule, about
+  1e-4 nats from its mode, with a gradient error of the same order. The
+  rounding-floor stop now applies only to plain Newton steps, in all three
+  problems.
+
 ## 0.2.146
 
 - **`brm_svi_fit` and `brm_svi_resume` evaluate a batch on several tasks:**
