@@ -257,10 +257,13 @@ end
             something(refusal(t.globals, units), ""))
         @test occursin("appears twice in unit 1",
             something(refusal(globals, vcat([vcat(units[1], units[1][end])], units[2:end])), ""))
-        # The strict subject units leave the simplex global, so they should build.
-        # RKPPL 0.1.70 reports the whole packed vector as this constant Dirichlet's
-        # support, so it appears to read every subject and is refused (snag
-        # ReactiveKernels/factor-support-r-2b8c2968).
-        @test_broken refusal(t.globals, t.units) === nothing
+        # The strict subject units leave the simplex global, so they build, with
+        # the simplex in the global term. RKPPL 0.1.72 reports a constant
+        # Dirichlet's support as its own block (snag
+        # ReactiveKernels/factor-support-r-2b8c2968); 0.1.70 reported the whole
+        # packed vector, which made it read every subject and refused this.
+        @test refusal(t.globals, t.units) === nothing
+        @test sort(factor_support(select_factors(catalogue; site=:s);
+            u0=m.unit)) == simplex
     end
 end

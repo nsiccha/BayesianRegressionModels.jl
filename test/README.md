@@ -1072,10 +1072,11 @@ with the subjects also owning their coefficients the global term plus every
 unit term equals RK's whole prior and Jacobian, with the units' reads of
 `tau` carried in the globals' gradient. A `Dirichlet` simplex, one atomic
 law and coupled transform, is refused once its two coordinates are given to
-different units, as is a coordinate assigned twice. That the strict subject
-units still build with a global simplex is `@test_broken`: RKPPL 0.1.70
-reports the whole packed vector as the constant Dirichlet's support (snag
-`ReactiveKernels/factor-support-r-2b8c2968`). The
+different units, as is a coordinate assigned twice, while the strict subject
+units build with the simplex global. That needs RKPPL 0.1.72, which reports
+the constant Dirichlet's own block as its support (snag
+`ReactiveKernels/factor-support-r-2b8c2968`; 0.1.70 reported the whole packed
+vector). The
 fixture supplies the subject membership itself; it does not test how
 production preparation discovers it. Run it alone in the test environment.
 
