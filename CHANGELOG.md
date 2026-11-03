@@ -41,12 +41,15 @@ instead of failing at run time.
   `brm_laplace_problem(rk; integrate=(declaration,))` and
   `brm_laplace_plan(rk; integrate=:auto)` integrate a model-scope `gmrf`
   field (exact for Normal rows), with its precision moving with the lengths
-  and channel factor. Applying a plan to such a target and integrating
-  per-cell fields wait on ReactiveKernels fixes (snags
-  `prepared-query-h-b7bd890a`, `prepare-strict-o-332ad6b9`). No large-field
-  performance is claimed: measured cost grows superlinearly with the state
-  dimension under both exact and matrix-free algebra.
-- **Breaking:** requires StanBlocks 0.2.20.
+  and channel factor. `brm_laplace_problem(rk; integrate=plan)` applies a
+  plan to such a target, and `deepcopy` gives each chain its own copy.
+  Integrating per-cell fields waits on a ReactiveKernels fix (snag
+  `prepare-strict-o-332ad6b9`). No large-field performance is claimed:
+  measured cost grows superlinearly with the state dimension under both exact
+  and matrix-free algebra.
+- **Breaking:** requires StanBlocks 0.2.20, ReactiveKernels 0.1.65 and
+  ReactiveKernelsPPL 0.1.74 (deep copies of prepared queries whose generated
+  programs hold modules, as a `gmrf` field's do).
 
 ## 0.2.143
 

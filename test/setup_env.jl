@@ -274,7 +274,9 @@ const PINS = [
     # plate cells, including BRM's shared correlated random-effect predictors.
     # b5740888 (RKPPL 0.1.71) sizes a data-free replay from frozen whole
     # values, such as a gmrf support fitted from an indexed fit-role input.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "b574088897ef09fec4e1319d5ceb294a171bb53e"),
+    # fbf65b46 (RK 0.1.65 / RKPPL 0.1.74) deep-copies prepared queries whose
+    # generated programs hold modules, as a Laplace plan over a gmrf does.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "fbf65b46130a03b1d6f14e5946b953a6cef013f9"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

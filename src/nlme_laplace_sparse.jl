@@ -195,9 +195,8 @@ Base.show(io::IO, p::BRMSparseLaplaceProblem) = print(io,
 function Base.deepcopy_internal(p::BRMSparseLaplaceProblem, stackdict::IdDict)
     haskey(stackdict, p) && return stackdict[p]
     fields = map(fieldnames(typeof(p))) do f
-        # Plan materialization seeds the read-only backend explicitly. Julia's
-        # generic deepcopy otherwise traverses immutable RKBRMI wrappers too.
-        f === :backend && haskey(stackdict, p.backend) && return stackdict[p.backend]
+        # A seeded backend (plan materialization) is shared by the RKBRMI
+        # method (src/rk_backend.jl), on this field and through the kernels.
         f === :factor ? Ref{Any}(nothing) : Base.deepcopy_internal(getfield(p, f), stackdict)
     end
     stackdict[p] = typeof(p)(fields...)

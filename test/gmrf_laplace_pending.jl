@@ -1,11 +1,8 @@
-# GMRF Laplace acceptance that waits on ReactiveKernels deliveries; kept failing
-# until they land, never weakened:
-# - one field per `@plate` cell, exact against the dense per-cell marginals:
-#   RK snag prepare-strict-o-332ad6b9 (strict observation-cell partitions of a
-#   per-cell joint field and its per-cell vertex reads);
-# - applying a Laplace plan, which deep-copies its prepared problem: RK snag
-#   prepared-query-h-b7bd890a (a prepared query holding a kernel source op's
-#   module cannot be deep-copied).
+# GMRF Laplace acceptance that waits on a ReactiveKernels delivery; kept failing
+# until it lands, never weakened:
+# one field per `@plate` cell, exact against the dense per-cell marginals:
+# RK snag prepare-strict-o-332ad6b9 (strict observation-cell partitions of a
+# per-cell joint field and its per-cell vertex reads).
 include("gmrf_laplace_oracles.jl")
 
 @testset "Sparse Laplace integrates one gmrf field per plate cell exactly" begin
@@ -57,24 +54,4 @@ include("gmrf_laplace_oracles.jl")
         end
         gmrf_laplace_gradient_check(target, oracle, φ)
     end
-end
-
-@testset "A Laplace plan's target over a gmrf field is the direct target" begin
-    y = [0.4, -0.3, 0.2, 0.1]
-    input = merge(data, (; y))
-    model = @brm input begin
-        field ~ 0 + gmrf((east, north), time, channel;
-            mesh=(vertices=xy, cells=triangles), cor=Omega)
-        sd(field, gmrf((east, north), time, channel)) ~ Exponential(0.7)
-        y ~ Normal(field, 0.2)
-    end
-    rk, _, _ = gmrf_rk_build(model)
-    ad_backend = DI.AutoEnzyme(; mode=Enzyme.Reverse)
-    plan = brm_laplace_plan(rk; ad_backend, integrate=:auto)
-    planned = brm_laplace_problem(rk; ad_backend, integrate=plan)
-    direct = brm_laplace_problem(rk; ad_backend,
-        integrate=(:gmrf_field_east_north_time_channel,))
-    φ = 0.1 .* cos.(1:LDP.dimension(direct))
-    @test planned.names == direct.names
-    @test LDP.logdensity_and_gradient(planned, φ)[2] ≈ LDP.logdensity_and_gradient(direct, φ)[2]
 end

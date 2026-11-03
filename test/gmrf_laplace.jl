@@ -80,11 +80,21 @@ using Random
     plan = brm_laplace_plan(rk; ad_backend, integrate=:auto)
     entry = only(e for e in plan.terms if e.declaration === declaration)
     @test entry.admitted && entry.class === :integrated
-    # Applying the plan (one deep copy of its prepared problem) waits on RK snag
-    # prepared-query-h-b7bd890a; see gmrf_laplace_pending.jl.
     target = brm_laplace_problem(rk; ad_backend, integrate=(declaration,))
     names = target.names
     φ = 0.1 .* cos.(1:length(names))
+    # Applying the plan deep-copies its prepared problem and shares the read-only
+    # backend; a per-chain `deepcopy` copies the backend once. Both copies hold
+    # the field's lowered program, whose rebuilt law arguments carry modules.
+    planned = brm_laplace_problem(rk; ad_backend, integrate=plan)
+    chain = deepcopy(target)
+    @test planned.backend === rk && chain.backend !== rk
+    reference = LDP.logdensity_and_gradient(target, φ)
+    for copied in (planned, chain)
+        @test copied.names == names
+        value, gradient = LDP.logdensity_and_gradient(copied, φ)
+        @test value ≈ reference[1] && gradient ≈ reference[2]
+    end
     sigma, ell_s, ell_t = (exp(φ[coordinate(names, "$declaration.$h")])
         for h in ("sigma", "spatial_length", "temporal_length"))
     support = BRM.brm_gmrf_support(data.xy, data.triangles, data.time, data.channel)

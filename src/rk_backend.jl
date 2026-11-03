@@ -582,6 +582,23 @@ struct RKBRMI{P<:BRMI,PL,M,S<:BRMI}
     end
 end
 
+# A backend's inputs are read-only. A caller that must not clone them (a
+# Laplace plan copying its prepared problem) seeds the backend in `stackdict`.
+# Julia's generic method never consults `stackdict` for an immutable value, so
+# the seed is honoured here, on every path that reaches the backend: a problem
+# also holds it through its prior kernel. An unseeded copy (one per chain)
+# copies the backend once and shares that copy across those paths. The built
+# model's lowered `program` is code, like the shared `_RKProgram`: its rebuilt
+# law arguments hold modules (`Core.GlobalRef(Base, :getproperty)` in a `gmrf`
+# field's geometry), which Julia refuses to deepcopy, so it is shared.
+function Base.deepcopy_internal(rk::RKBRMI, stackdict::IdDict)
+    haskey(stackdict, rk) && return stackdict[rk]
+    rk.model isa NamedTuple && foreach(values(rk.model)) do value
+        value isa Expr && !haskey(stackdict, value) && (stackdict[value] = value)
+    end
+    stackdict[rk] = invoke(Base.deepcopy_internal, Tuple{Any,IdDict}, rk, stackdict)
+end
+
 Base.parent(x::RKBRMI) = x.parent
 brm_source(x::RKBRMI) = x.source
 structure_of(x::RKBRMI) = structure_of(parent(x))
