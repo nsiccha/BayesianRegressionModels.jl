@@ -1121,6 +1121,23 @@ mode oracle checks the value, and finite differences check both population
 derivatives. This checks independence from previous evaluations; the
 approximation still uses one mode.
 
+`laplace_continuation.jl` checks which conditional mode the marginal uses:
+the one continuation from the prior reaches (BRM 0.2.147). One unit with a
+squared-mean and a linear Normal observation has two conditional modes on part
+of the population line. On both the whole-model and the sparse target:
+- the value and the selected mode match a scalar oracle of the followed mode
+  on both sides of the point where that mode ceases to exist, where the
+  selection switches branch;
+- an evaluation whose followed mode ceases to exist mid-way is counted in
+  `folds`;
+- finite differences match the gradient on each smooth piece;
+- the two targets agree;
+- the sparse target's `search` record names each component's stop and counts
+  its refused full steps.
+
+A log-concave Poisson model takes one stage. Run it in the test environment
+with `julia --project=test test/laplace_continuation.jl`.
+
 `start_terms.jl` checks authored term initializers and deterministic prior bases
 on StanBlocks and ReactiveKernels, with constrained read-back and coordinate
 transport, effective bounds, known values, invalid addresses and overrides.
