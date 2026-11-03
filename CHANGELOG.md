@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.149
+
+- **Prior-median starts of native fields:** `brm_start(rk, inits;
+  base=:prior_median)` and `brm_start(sb, model, inits; base=:prior_median)` no
+  longer raise on a model-scope `gmrf` term. Its SD and both lengths start at
+  their prior medians, the default `LogNormal(0, 1)` included; a known
+  hyperparameter stays known, `term_inits` wins, and the field keeps its neutral
+  coordinates.
+- **Laplace default start of native fields:** the default population point of
+  `brm_laplace_plan`, `brm_laplace_mode` and the ladder now takes the same
+  medians for those hyperparameters instead of holding them at one. A model with
+  a `gmrf` term can therefore start somewhere else than under 0.2.148.
+
 ## 0.2.148
 
 - `rk_design_binder` keeps its cached lowering for a design that omits a numeric

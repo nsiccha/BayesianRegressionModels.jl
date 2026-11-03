@@ -1143,6 +1143,12 @@ on StanBlocks and ReactiveKernels, with constrained read-back and coordinate
 transport, effective bounds, known values, invalid addresses and overrides.
 Run it directly in the test environment.
 
+`gmrf_laplace_start.jl` checks that the Laplace default start of a model-scope
+`gmrf` field equals its `brm_start(rk, (;); base=:prior_median)` medians, for
+declared laws, a known hyperparameter and a law reading a model-scope parameter.
+It also checks that `brm_laplace_mode` and the `brm_laplace_plan` diagnostic use
+that point, with the diagnostic at the unit point as a positive control.
+
 `start_values.jl` checks `brm_start`, initial values keyed by prior address,
 on both backends. For a correlated population-PK model, a linked predictor,
 a categorical predictor with a `Dirichlet` simplex, and an exact-total block,
