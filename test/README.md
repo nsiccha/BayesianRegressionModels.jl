@@ -1057,6 +1057,18 @@ fit is compared with NUTS too. Starts (prior medians, a packed point,
 `inits`) and their refusals are covered as well. It runs in the test
 environment above.
 
+`nlme_svi_authored_factors.jl` checks the public RKPPL authored-factor API
+that block-local SVI coordinates need, before `brm_svi_fit` uses it. On a
+six-subject model whose coefficient pair `z[2i-1], z[2i]` is read only by
+subject `i`, and on a variant with hyperparameter-dependent Normal, Exponential
+and Beta priors, it gives each pair (and each constrained coordinate) to its
+subject, keeps the hyperparameters' priors global although every subject reads
+them, and checks that each prior and Jacobian event lands in exactly one
+bucket. At three nonzero packed points the bucket values and compact gradients
+plus the likelihood equal the full RK sampler's value and Reverse gradient.
+The fixture supplies the subject membership itself; it does not test how
+production preparation discovers it. Run it alone in the test environment.
+
 `nlme_svi_laplace_plan.jl` checks structural eligibility for
 `GaussianBlockLaplace`, including fixed HSGP fitting inputs, nonstandard
 Gaussian coefficient priors, and named refusals for nonlinear expressions.
