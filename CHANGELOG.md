@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.143
+## 0.2.144
 
 - **Native space-time fields:** `field ~ 0 + gmrf((east, north), time[, channel];
   mesh=(vertices=xy, cells=triangles)[, cor=Omega])` is a sparse-precision
@@ -47,6 +47,25 @@ instead of failing at run time.
   performance is claimed: measured cost grows superlinearly with the state
   dimension under both exact and matrix-free algebra.
 - **Breaking:** requires StanBlocks 0.2.20.
+
+## 0.2.143
+
+- A sparse embedded Laplace target (`brm_laplace_problem(...; integrate)`)
+  whose log density is finite and whose conditional modes all converged, but
+  whose gradient is not, now reports it: the new counter `nonfinite_gradient`
+  counts such evaluations, and a warning (at most three) names the population
+  point, how many population coordinates are nonfinite and the first nonfinite
+  term, for example "the third derivative of cell 1 of `y`". The gradient
+  itself is unchanged, so SMC still raises `SMCNonfiniteError` there and HMC
+  still rejects the step. Such a gradient needs a derivative the mode search
+  does not: typically a likelihood's third derivative that automatic
+  differentiation cannot represent in Float64 although the value and curvature
+  are finite. One known source is nested Enzyme Forward derivatives through
+  `log` of a value below about 1.5e-154, for example `log(erfc(t))` for `t`
+  above about 18.5 (snag `laplace-gradient-db992ae0`).
+- Matrix-free components (`solver = :matrixfree`, or `:auto` above 1,024
+  coordinates) give a nonfinite solution for a nonfinite right-hand side, as
+  exact algebra does, instead of raising "conditional solve failed".
 
 ## 0.2.142
 

@@ -80,7 +80,9 @@ one sparse Laplace; see
 [`brm_laplace_problem`](@ref)'s `integrate`. Same interface as
 [`BRMStructuredLaplaceProblem`](@ref): LogDensityProblems order 1 over `names`
 (packed positions `population`), [`brm_laplace_draws`](@ref), and the counters
-`nonfinite` and `unconverged`. `integrate` names the integrated groupings,
+`nonfinite` and `unconverged`, plus `nonfinite_gradient` (gradients that are not
+finite although the log density is; a warning names the first nonfinite term).
+`integrate` names the integrated groupings,
 `integrated` their draws' packed positions, `components` the groups of
 integrated draws that share likelihood terms.
 """
@@ -167,6 +169,9 @@ mutable struct BRMSparseLaplaceProblem{K}
     maxiter::Int
     nonfinite::Int
     unconverged::Int
+    # gradients that came out nonfinite at a finite log density
+    # (`_brm_spl_nonfinite_gradient!`)
+    nonfinite_gradient::Int
     # how often a component's full step failed and its blocks stepped on their
     # own, and how often a block Gauss–Seidel sweep followed
     blockwise::Int
@@ -395,7 +400,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         Float64[], Int[], Vector{Int}[], Int[], Int[], Int[], Vector{Int}[], Any[], omega,
         false,
         u0[population], zeros(nψ), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
-        Float64(tol), Int(maxiter), 0, 0, 0, 0, nothing, nothing)
+        Float64(tol), Int(maxiter), 0, 0, 0, 0, 0, nothing, nothing)
     p.gaussian = _brm_spl_gaussian_prior(p, records, u0)
     _brm_spl_gaussian_parameters!(p, u0)
     p.gmrf = _brm_spl_gmrf_prior(p, records, u0)
@@ -1538,8 +1543,16 @@ end
 # nothing to s, w or the cells' parts, so v = h⁻¹s is zero on the components
 # only inactive terms read. The value stays the whole problem's. `prior =
 # false` leaves the population prior out of both.
+#
+# The mode search accepts only finite first and second derivatives, but the
+# gradient also needs the likelihood's third derivatives and the population
+# pullbacks, which can still leave Float64's range where those do not. `bad`
+# names the first such term in evaluation order; a nonfinite gradient at a
+# finite value is then counted and reported (`_brm_spl_nonfinite_gradient!`)
+# and returned unchanged.
 function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
         active=nothing, prior::Bool=true)
+    bad = nothing
     n = length(p.integrated)
     nterms = length(p.family)
     fc = zeros(length(p.components))
@@ -1578,6 +1591,8 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
         two = _brm_lap_width(p.family[t]) == 2
         τ1 = m11 * r.t111 + 2m12 * r.t112 + m22 * r.t122
         τ2 = two ? m11 * r.t112 + 2m12 * r.t122 + m22 * r.t222 : 0.0
+        bad === nothing && !(isfinite(τ1) && isfinite(τ2)) &&
+            (bad = "the third derivative of row $(p.row[t]) of `$(p.response[t])`")
         taus[1, t] = τ1; taus[2, t] = τ2
         zs = view(p.tz, p.tptr[t]:(p.tptr[t + 1] - 1))
         for i in 1:m
@@ -1605,12 +1620,20 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
             tv = _rk_spl_cell_third_only(group.ad, direction, u, c.sel, c.i)
             τsel .+= tv
         end
+        bad === nothing && !all(isfinite, τsel) &&
+            (bad = "the third derivative of cell $(c.i) of `$(group.name)`")
         s[c.lz] .+= τsel[c.lpos] ./ 2
         gcell[c.pidx] .+= τsel[c.ppos] ./ 2
     end
     _brm_spl_sum_gradient!(s, gcell, p, state, u, on)
+    bad === nothing && !(all(isfinite, s) && all(isfinite, gcell)) &&
+        (bad = "the third derivatives of the sum factors of " * _brm_spl_sum_names(p))
     v = _brm_spl_solve(state.F, state.W, s)
+    bad === nothing && !all(isfinite, v) &&
+        (bad = "the solve with the conditional precision at the modes")
     _brm_spl_sum_implicit!(gcell, p, state, v, on)
+    bad === nothing && !all(isfinite, gcell) &&
+        (bad = "the curvature-vector products of the sum factors of " * _brm_spl_sum_names(p))
     # H_c[population, z] v_z directly, plus the cell's population gradient.
     # This replaces m HVPs and m identical gradients in the contractions above
     # with one of each, and needs no retained population-by-m matrix per cell.
@@ -1620,6 +1643,9 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
         direction = zeros(group.m)
         direction[c.lpos] .= v[c.lz]
         gsel, hv = _rk_spl_cell_implicit(group.ad, direction, u, c.sel, c.i)
+        bad === nothing && !(all(isfinite, gsel) && all(isfinite, hv)) &&
+            (bad = "the gradient or curvature-vector product of cell $(c.i) of " *
+                "`$(group.name)` at the modes")
         gcell[c.pidx] .+= gsel[c.ppos] .+ hv[c.ppos]
     end
     w = zeros(length(p.port))
@@ -1633,6 +1659,8 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
         if p.term_component[t] == 0
             w[e] = r.g1
             two && (w[e + 1] = r.g2)
+            bad === nothing && !(isfinite(r.g1) && isfinite(r.g2)) &&
+                (bad = "the first derivatives of row $(p.row[t]) of `$(p.response[t])`")
             continue
         end
         span = p.tptr[t]:(p.tptr[t + 1] - 1)
@@ -1652,6 +1680,8 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
             w2 = r.g2 + taus[2, t] / 2 + r.h12 * cv1 + r.h22 * cv2
             w[e + 1] = w2
         end
+        bad === nothing && !(isfinite(w1) && isfinite(w2)) &&
+            (bad = "the parameter derivatives of row $(p.row[t]) of `$(p.response[t])`")
         # (ℓ″ C S) per parameter, on the term's local effects.
         resize!(LCS, 2m); fill!(LCS, 0.0)
         for j in 1:m, i in 1:m
@@ -1674,17 +1704,57 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
             end
         end
     end
+    bad === nothing && !all(isfinite, gω) &&
+        (bad = "the row terms' derivatives along the random-effect scales and correlations")
     gradient = p.affine ? _brm_slap_affine_pullback(p, w) :
         _rk_slap_pullback(p.kernels, state.uA,
             _brm_slap_cotangents(p, state.values, w))[p.population]
+    bad === nothing && !all(isfinite, gradient) &&
+        (bad = "the pullback of the row terms' parameters to the population coordinates")
     for (j, o) in enumerate(p.omega)
         gradient[findfirst(==(o), p.population)] += gω[j]
     end
     _brm_spl_gaussian_gradient!(gradient, p, state, S, v, active)
+    bad === nothing && !all(isfinite, gradient) &&
+        (bad = "the declared Gaussian vectors' prior terms")
     _brm_spl_gmrf_gradient!(gradient, p, state, S, v, active)
-    prior || return value, gradient .+ gcell
+    bad === nothing && !all(isfinite, gradient) &&
+        (bad = "the gmrf fields' prior terms")
+    if !prior
+        gradient .+= gcell
+        _brm_spl_nonfinite_gradient!(p, state, value, gradient, bad)
+        return value, gradient
+    end
     lp, prior_gradient = _rk_slap_prior_gradient(p.kernels, state.uA)
-    value + lp, gradient .+ gcell .+ prior_gradient[p.population]
+    bad === nothing && !all(isfinite, prior_gradient) &&
+        (bad = "the population prior's gradient")
+    gradient .+= gcell .+ prior_gradient[p.population]
+    _brm_spl_nonfinite_gradient!(p, state, value + lp, gradient, bad)
+    value + lp, gradient
+end
+
+_brm_spl_sum_names(p::BRMSparseLaplaceProblem) =
+    join(("`$(g.name)`" for g in p.cells if g isa _BRMSumCellGroup), ", ")
+
+# A finite log density whose gradient is not. Every component's mode converged
+# with finite first and second derivatives, so the cause is a derivative only
+# the gradient needs: typically a likelihood's third derivative that automatic
+# differentiation cannot represent in Float64 although its value and curvature
+# are finite. The gradient is returned as it is (a sampler then fails or
+# rejects the point); this counts it and names its first nonfinite term.
+function _brm_spl_nonfinite_gradient!(p::BRMSparseLaplaceProblem, state, value,
+        gradient, bad)
+    (isfinite(value) && !all(isfinite, gradient)) || return nothing
+    p.nonfinite_gradient += 1
+    coordinates = findall(!isfinite, gradient)
+    @warn("brm_laplace_problem: the gradient is not finite in $(length(coordinates)) of " *
+        "$(length(gradient)) population coordinates (the first is " *
+        "`$(p.names[first(coordinates)])`) although the log density $value is finite and " *
+        "every component's mode converged, at population point " *
+        "$(repr(state.uA[p.population])). The first nonfinite term is " *
+        "$(something(bad, "none on its own (their sum is not finite)")). " *
+        "Counted in `nonfinite_gradient`.", maxlog=3)
+    nothing
 end
 
 LogDensityProblems.capabilities(::Type{<:BRMSparseLaplaceProblem}) =

@@ -243,12 +243,18 @@ end
 LinearAlgebra.issuccess(F::_BRMOperatorFactor) = all(F.parts) do part
     part.factor === nothing ? all(>(0), part.H.diagonal .+ part.H.shift) : issuccess(part.factor)
 end
+# A component whose right-hand side is not finite gets a nonfinite solution,
+# as a direct factor's solve gives, instead of a failed iterative solve: the
+# marginal gradient then reports the term that made it nonfinite
+# (`_brm_spl_nonfinite_gradient!`). Other components are unaffected.
 function Base.:\(F::_BRMOperatorFactor, b::AbstractVector)
     x = zeros(length(b))
     for (part, I) in zip(F.parts, F.components)
-        x[I] .= part.factor === nothing ? _brm_operator_solve(part.operator, b[I], F.options;
-            diagnostics=F.problem.algebra.diagnostics) :
-            part.factor \ b[I]
+        bI = b[I]
+        x[I] .= !all(isfinite, bI) ? NaN :
+            part.factor === nothing ? _brm_operator_solve(part.operator, bI, F.options;
+                diagnostics=F.problem.algebra.diagnostics) :
+            part.factor \ bI
     end
     x
 end
