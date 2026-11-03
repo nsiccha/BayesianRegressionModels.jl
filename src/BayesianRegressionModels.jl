@@ -162,6 +162,7 @@ include("nlme_svi_laplace_carry.jl")
 include("nlme_svi_laplace_prior.jl")
 include("nlme_svi_laplace_streaming.jl")
 include("nlme_svi_laplace_fit.jl")
+include("nlme_svi_optimizer.jl")
 include("smc.jl")
 include("smc_streaming.jl")
 include("filter.jl")
@@ -230,6 +231,7 @@ export rk_artifact_inputs
 export rk_bound_data, rk_bound_plan, rk_design_binder, RKDesignBinder
 export brm_fitted_state, BRMFittedState
 export BRMSVIState, BRMSVILaplaceState, GaussianBlockLaplace, brm_svi_checkpoint
+export BRMSVIOptimizerState, brm_svi_optimizer_checkpoint, brm_svi_resume
 export BRMSMCFit, brm_smc_fit, brm_smc_tune, brm_smc_update, brm_smc_checkpoint, brm_smc_resume
 export BRMSMCCarriedReference, BRMSMCWindowFit, brm_smc_carry
 export brm_smc_coordinates, brm_smc_recover
