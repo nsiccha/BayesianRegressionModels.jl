@@ -270,7 +270,11 @@ const PINS = [
     # recovery and bounded-rank joint Gaussian carries.
     # RK 0.1.62 preserves inner row selection through array-valued producer
     # plate cells, including BRM's shared correlated random-effect predictors.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "2ee187c57890421f69c001793c6b5997a8f0600a"),
+    # RK 0.1.63 (57f9a59a; PPL 0.1.73) keeps the shared-prefix cut's frontier
+    # types when preparing `partitioned` cell factors, so sparse Laplace
+    # sum factors over shared model-scope helpers stay strict
+    # (RK snag partitioned-cell-717ab7c7).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "57f9a59a69b97ee015a306b39b731c0a7c203eb2"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

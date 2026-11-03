@@ -23,6 +23,11 @@ instead of failing at run time.
   sampled coordinates into every cell. Retained plans, sampled subsets,
   independent problem copies and matrix-free contractions use the same
   shared-derivative path.
+- **Breaking:** the RK backend requires ReactiveKernels 0.1.63 or later.
+  Earlier releases lose the shared-prefix cut's frontier types when
+  preparing `partitioned` cell factors and refuse such sum-factored cells
+  with a locality error. Update older pinned RK environments; the test
+  bootstrap selects that release.
 
 ## 0.2.142
 
