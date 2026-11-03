@@ -886,6 +886,17 @@ _sb_bound_name(x::Symbol) = x
 _sb_bound_name(x::Expr) = Meta.isexpr(x, :(::)) ? _sb_bound_name(x.args[1]) : nothing
 _sb_bound_name(_) = nothing
 
+# A plate cell's `local x ~ …`, `local x = …` or `local x::T` (StanBlocks
+# 0.2.20) declares a fresh cell binding that shadows an outer `x` in the whole
+# cell. The name it declares, or `nothing` for any other statement.
+function _sb_local_name(x)
+    Meta.isexpr(x, :local, 1) || return nothing
+    s = only(x.args)
+    lhs = Meta.isexpr(s, :(=), 2) ? s.args[1] :
+        Meta.isexpr(s, :call, 3) && s.args[1] === :~ ? s.args[2] : s
+    _sb_bound_name(lhs)
+end
+
 function _sb_single_margin_ranef(base::StanBlocks.SlicModel; strict::Bool=true)
     # Read-only: `rewrite` builds fresh `Expr` nodes and shares the leaves. A
     # configured family's body holds values (a custom prior's `ValueUDF`, which
@@ -4918,6 +4929,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
     preproc = preproc_ctx isa _SBPreprocContext ? preproc_ctx.recorded : preproc_ctx
     _sb_prune_cell_formula_inputs!(data, preproc, stmts)
+    _sb_drop_shadowed_data!(data, preproc, stmts)
     # Drop leaked non-Stan data (raw `CategoricalVector`/string predictor columns
     # collected as reprocess provenance). See `_sb_is_stan_data_value`. This also
     # keeps `reprocess`'s pass-through (step 2) from re-leaking the raw column
@@ -5700,6 +5712,11 @@ function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate
                                           obs_keys, plate_params, unbound_cell), x.args)
         return nothing
     end
+    # A cell's `local` binding is the statement it wraps; its plate removed the
+    # shadowed outer name from the cell's data scope.
+    x.head === :local && length(x.args) == 1 &&
+        return _sb_plan_collect!(declarations, only(x.args), data_scope, context,
+                                 obs_keys, plate_params, unbound_cell)
     # A cell's `@scan` writes each array it carries through its seeds and its
     # steps (`h[1] ~ …`, `h[t] ~ …`), and StanBlocks declares that array once:
     # one declaration per array, family `:scan` (a structural site, like
@@ -5788,6 +5805,12 @@ function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate
                 iterable isa Symbol || continue
                 source = get(data_scope, iterable, nothing)
                 isnothing(source) || (nested_scope[param] = source)
+            end
+            # A `local` cell binding is the cell's own value, never the outer
+            # data of that name: it is a prior, not an observation of the data.
+            for stmt in _sb_plan_statements(plate.body)
+                local_name = _sb_local_name(stmt)
+                isnothing(local_name) || delete!(nested_scope, local_name)
             end
             _sb_plan_collect!(declarations, plate.body, nested_scope, (context..., target),
                               obs_keys, nested_params, unbound_cell)
@@ -7728,7 +7751,8 @@ function _sb_subst_model_scope(x::Expr, from::Symbol, to)
         params = Meta.isexpr(x.args[1], :tuple) ? x.args[1].args : Any[x.args[1]]
         body = x.args[2]
         stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
-        binds(s) = (Meta.isexpr(s, :(=), 2) || isxcall(s, :~)) && s.args[end-1] === from
+        binds(s) = _sb_local_name(s) === from ||
+            (Meta.isexpr(s, :(=), 2) || isxcall(s, :~)) && s.args[end-1] === from
         (from in params || any(binds, stmts)) && return x
     end
     x.head === :. && length(x.args) == 2 && x.args[2] isa QuoteNode &&

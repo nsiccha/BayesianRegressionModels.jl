@@ -8,6 +8,21 @@ _sb_cell_formula_syntax(x::AbstractVector) = map(_sb_cell_formula_syntax, x)
 _sb_cell_formula_syntax(x::AbstractDict) =
     Dict(key => _sb_cell_formula_syntax(value) for (key, value) in x)
 
+# Formula declarations own their bindings lexically, even when caller data
+# have the same names. Mark only the emitted bare declarations; observations
+# and shared references retain the ordinary cell semantics.
+function _sb_cell_formula_local(statement)
+    lhs = if Meta.isexpr(statement, :(=), 2)
+        statement.args[1]
+    elseif isxcall(statement, :~)
+        statement.args[2]
+    else
+        return statement
+    end
+    Meta.isexpr(lhs, :(::)) && (lhs = lhs.args[1])
+    lhs isa Symbol ? Expr(:local, statement) : statement
+end
+
 function _sb_cell_formula_instance(program, raw, scope; bindings=Dict{Symbol,Any}())
     model = program.builder(_BRMCellFormulaInputs(_BRMReplayData((;), raw), bindings))
     overrides = _sb_prior_overrides(model)
@@ -132,7 +147,9 @@ function _sb_cell_formulas!(body, data, plate_target, names, params, scope;
     rewritten = Any[]
     for (i, statement) in enumerate(body)
         i in program.prior_positions && continue
-        haskey(replacements, i) ? append!(rewritten, replacements[i]) : push!(rewritten, statement)
+        haskey(replacements, i) ?
+            append!(rewritten, _sb_cell_formula_local.(replacements[i])) :
+            push!(rewritten, statement)
     end
     for key in shared
         rewritten = Any[_sb_subst_sym(statement, key, owned[key]) for statement in rewritten]
@@ -155,6 +172,57 @@ function _sb_prune_cell_formula_inputs!(data, preproc, statements)
         for (_, source) in entry.const_.inputs
             source in reads || delete!(data, source)
         end
+    end
+    nothing
+end
+
+# The names an emitted program reads from its data, with plate-cell scoping: a
+# do-block parameter and a cell's `local` binding shadow an outer name in the
+# whole cell, so a read of that name there is the cell's own value. As in
+# `_sb_read_symbols!`, a keyword NAME and the target of `x = …` are not reads,
+# and non-expression payloads (a nested `@slic` model) are opaque.
+_sb_scoped_reads!(out, x, bound) = out
+_sb_scoped_reads!(out, x::Symbol, bound) = (x in bound || push!(out, x); out)
+function _sb_scoped_reads!(out, x::Expr, bound)
+    if x.head === :-> && length(x.args) == 2
+        body = x.args[2]
+        cell = union(bound, _sb_plan_param_names(x.args[1]), Set{Symbol}(
+            something(_sb_local_name(s)) for s in _sb_plan_statements(body)
+            if _sb_local_name(s) !== nothing))
+        return _sb_scoped_reads!(out, body, cell)
+    end
+    args = x.head === :kw ? x.args[2:end] :
+        x.head === :(=) && x.args[1] isa Symbol ? x.args[2:end] :
+        x.head === :. && length(x.args) == 2 && x.args[2] isa QuoteNode ? x.args[1:1] :
+        x.args
+    foreach(a -> _sb_scoped_reads!(out, a, bound), args)
+    out
+end
+
+# An outer data key that a plate cell declares `local` (a formula cell's own
+# prior next to caller data of the same name) and that no statement reads
+# outside such a cell is not an input of the program. StanBlocks declares no
+# data for it, and keeping it would make replay demand the shadowed value.
+function _sb_drop_shadowed_data!(data, preproc, statements)
+    shadowed = Set{Symbol}()
+    visit(x) = nothing
+    function visit(x::Expr)
+        if x.head === :-> && length(x.args) == 2
+            for s in _sb_plan_statements(x.args[2])
+                name = _sb_local_name(s)
+                name === nothing || push!(shadowed, name)
+            end
+        end
+        foreach(visit, x.args)
+    end
+    foreach(visit, statements)
+    isempty(shadowed) && return nothing
+    reads = Set{Symbol}()
+    foreach(s -> _sb_scoped_reads!(reads, s, Set{Symbol}()), statements)
+    for key in shadowed
+        haskey(data, key) && !(key in reads) || continue
+        delete!(data, key)
+        delete!(preproc, key)
     end
     nothing
 end

@@ -59,7 +59,7 @@ Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.19"
+StanBlocks = "0.2.20"
 Treebars = "0.1.1"
 Turing = "0.46"
 WarmupHMC = "0.2.11"
@@ -142,7 +142,8 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # 0b42d636 (StanBlocks 0.2.18) implements segment in @juliacompat
 # helpers, used by the native GMRF normalized sparse density.
 # 009f4180 (0.2.19) adds indexed /= for its sparse solve and prior RNG.
-rev = "009f418067563349edf0b311004f215f7c4e1f17"
+# 61fa161f (0.2.20) gives cell-owned bindings explicit lexical local scope.
+rev = "61fa161fb39065dd90e8f5f2a1151442b1af6491"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
