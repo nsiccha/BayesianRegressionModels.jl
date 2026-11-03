@@ -240,10 +240,6 @@ mutable struct _SPLCellAD{H,N,A,P}
     const pullback::P
 end
 
-# Newton's HVP order for an ordinary cell. Forward over reverse allocates less,
-# but under `partitioned` Enzyme can refuse it at call time.
-_spl_newton_order(forward, reverse) = SecondOrder(reverse, forward)
-
 function BRM._rk_spl_cell_ad(backend::BRM.RKBRMI, observations::Tuple,
         base0::Vector{Float64}, indices0::Vector{Int}, ad_backend, K::Int; partitioned)
     rkext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
@@ -251,9 +247,10 @@ function BRM._rk_spl_cell_ad(backend::BRM.RKBRMI, observations::Tuple,
     m = length(indices0)
     forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
     reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
-    second = _spl_newton_order(forward, reverse)
+    # Ordinary cells have one active vector and a fixed direction-tuple arity.
+    # Forward over reverse reduces the work of their Newton HVPs.
     hvp = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_hvp, built, plan,
-        observations, base0, indices0, second,
+        observations, base0, indices0, SecondOrder(forward, reverse),
         ntuple(_ -> zeros(Float64, m), K); partitioned, locality=:error)
     # RK's accumulators take reverse over forward for order 1 and the supported
     # reverse over forward over forward for order 2.
