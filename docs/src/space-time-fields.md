@@ -152,8 +152,43 @@ transitions without constructing a dense space-time covariance.
 Posterior inference must also account for the observation model and shared
 parameters. Sparse posterior factorization can have substantial fill, and a
 fast precision application alone does not establish scalable marginalization.
-At this implementation checkpoint, large-field embedded-Laplace/SVI
-integration, the explicit RK law, and compiled independent field declarations
-inside plates remain under development. The model-scope StanBlocks density,
-learned normalizers, gradients, local reads and frozen replay have independent
-numerical regression checks.
+
+## Independent fields in plate cells
+
+Write the term inside `@plate for p in groups(g)` to give each cell its own
+field. Every cell keeps the shared mesh but fits its own times and channels
+from its rows, and its term hyperparameters are its own:
+
+```julia
+@plate for p in groups(window)
+    field ~ 0 + gmrf((east[p], north[p]), time[p], channel[p];
+        mesh=(vertices=xy, cells=triangles), cor=Omega)
+    sd(field, gmrf((east[p], north[p]), time[p], channel[p])) ~ Exponential(0.7)
+    y[p] ~ Normal(field, 0.2)
+end
+```
+
+A prior may read a model-scope parameter or a cell-local one declared in the
+same cell (`tau ~ Exponential(s)`, then `sd(...) ~ Exponential(tau)`). A cell
+declaration never takes caller data of the same name: on SBBRMI it is emitted
+as a StanBlocks `local` binding. Cells are independent conditional on the
+shared hyperparameters; use one model-scope field when cells must be
+correlated. On the ReactiveKernels backend the cell formula must be
+`0 + gmrf(...)` alone, a correlation declared inside the cell is not lowered,
+and replay keeps the fit's cells.
+
+## Embedded Laplace
+
+On `RKBRMI`, `brm_laplace_problem(rk; ad_backend, integrate=(declaration,))`
+integrates a model-scope field, where `declaration` is the field's RK
+declaration (`gmrf_<predictor>_<axes…>`, as `brm_laplace_plan` lists it), and
+`brm_laplace_plan(rk; ad_backend, integrate=:auto)` admits it. With Normal
+rows the integrated target is the exact marginal. The field's precision moves
+with its lengths and channel factor, and the target's gradient includes their
+log-determinant terms. Applying a plan to such a target (which copies its
+prepared problem) and integrating per-cell fields wait on two ReactiveKernels
+repairs. Measured cost grows superlinearly with the number of field states
+under both exact and matrix-free algebra (about 12–15 s per value and
+gradient at 51,200 states on one or two CPUs), dominated by space-time
+factorization and log-determinant work; large fields are not yet a supported
+Laplace workload.

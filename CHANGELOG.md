@@ -12,6 +12,42 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.142
+
+- **Native space-time fields:** `field ~ 0 + gmrf((east, north), time[, channel];
+  mesh=(vertices=xy, cells=triangles)[, cor=Omega])` is a sparse-precision
+  Gaussian Markov random field: a mass-lumped finite-element Matérn (ν = 1)
+  field on a triangular mesh, stationary Ornstein–Uhlenbeck evolution over the
+  fitted times (exact transitions over irregular gaps), and an optional
+  channel correlation (`cor=` a known correlation matrix or an
+  `LKJCholesky` declaration). Each row reads three mesh vertices at its own
+  time and channel. Its normalized prior keeps the determinants that depend
+  on the learned SD, spatial length, temporal length and channel factor. The
+  term's addresses are `sd(field, gmrf(...))` and
+  `length_scale(field, gmrf(...), space|time)`; `= value` holds one fixed.
+  The spatial length ℓ_s has κ = √2/ℓ_s, so the practical range is 2ℓ_s.
+  Supported on SBBRMI and RKBRMI with density, gradient, coordinate-transport
+  and fitted-state parity, frozen replay of the fitted mesh, times and
+  channels, and scientific descriptions.
+- **Independent fields in plate cells:** a `gmrf` formula inside
+  `@plate for p in groups(g)` gives each cell its own field on that cell's
+  fitted times and channels, with the cell's own term hyperparameters and
+  priors that may read cell-local or model-scope values. On SBBRMI cell
+  declarations are `local` (StanBlocks 0.2.20), so caller data of the same
+  name never turns a cell prior into an observation. On RKBRMI the cell
+  formula is `0 + gmrf(...)` alone, a cell-local `LKJCholesky` correlation is
+  not lowered, and replay keeps the fit's cells.
+- **Sparse embedded Laplace over a model-scope field:**
+  `brm_laplace_problem(rk; integrate=(declaration,))` and
+  `brm_laplace_plan(rk; integrate=:auto)` integrate a model-scope `gmrf`
+  field (exact for Normal rows), with its precision moving with the lengths
+  and channel factor. Applying a plan to such a target and integrating
+  per-cell fields wait on ReactiveKernels fixes (snags
+  `prepared-query-h-b7bd890a`, `prepare-strict-o-332ad6b9`). No large-field
+  performance is claimed: measured cost grows superlinearly with the state
+  dimension under both exact and matrix-free algebra.
+- **Breaking:** requires StanBlocks 0.2.20.
+
 ## 0.2.141
 
 - Strict local cell queries and sparse Laplace planning support a plate
