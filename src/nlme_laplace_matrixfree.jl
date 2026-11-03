@@ -98,7 +98,7 @@ end
 # Gauss-Seidel fallback would reassemble the whole field once per level.
 # Like the exact step, require finite derivatives and return them at the
 # accepted point for the next Newton iteration.
-function _brm_operator_step!(p, pop, z, direction, g, h, fc, converged)
+function _brm_operator_step!(p, pop, z, direction, g, h, fc, converged; weight::Float64=1.0)
     accepted = copy(converged)
     decrement = [dot(view(g, I), view(direction, I)) for I in p.components]
     steps = ones(length(fc))
@@ -109,7 +109,7 @@ function _brm_operator_step!(p, pop, z, direction, g, h, fc, converged)
             accepted[c] || (trial[i] = z[i] + steps[c] * direction[i])
         end
         _brm_spl_assemble!(ft, gt, ht, p, pop.A, pop.C, trial;
-            derivatives=true, uA=pop.uA)
+            derivatives=true, uA=pop.uA, weight)
         valid = _brm_spl_finite_blocks(p, gt, ht)
         for c in eachindex(fc)
             accepted[c] && continue
@@ -202,6 +202,7 @@ mutable struct _BRMOperatorFactor
     curvature::Any
 end
 
+# `shift`: one number, or one per component (each part takes its own).
 function _brm_operator_factor(p, h; shift=0.0)
     D = h isa _BRMSumPrecision ? h.D : h
     if h isa _BRMSumPrecision
@@ -222,14 +223,15 @@ function _brm_operator_factor(p, h; shift=0.0)
         Wc = _brm_spl_submatrix(W, rows, rows)
         WB = Wc * Bc
         diagonal = collect(diag(Dc) .+ vec(sum(Bc .* WB; dims=1)))
-        H = _BRMConditionalOperator(Dc, Bc, Wc, diagonal, shift,
+        sc = shift isa AbstractVector ? Float64(shift[c]) : Float64(shift)
+        H = _BRMConditionalOperator(Dc, Bc, Wc, diagonal, sc,
             zeros(length(rows)), zeros(length(rows)))
         factor = if p.algebra.large[c]
             nothing
         else
             # Only a bounded component is ever materialized densely.
             dense = Matrix(Dc) + Matrix(Bc' * WB)
-            dense[diagind(dense)] .+= shift
+            dense[diagind(dense)] .+= sc
             cholesky(Symmetric(dense); check=false)
         end
         references = get(p.algebra, :references, nothing)
@@ -260,16 +262,29 @@ function Base.:\(F::_BRMOperatorFactor, b::AbstractVector)
 end
 _brm_spl_woodbury(p::BRMSparseLaplaceProblem, F::_BRMOperatorFactor) = nothing
 
+# The operator algebra's Newton direction and each component's shift
+# (`_brm_spl_shifted_direction`): every part tries 0 and then the shifts in
+# `_BRM_SPL_SHIFTS` on its own, so one part's curvature never damps another's.
 function _brm_operator_direction(p, h, g)
-    for shift in (0.0, (10.0^k for k in -4:7)...)
-        F = _brm_operator_factor(p, h; shift)
-        issuccess(F) || continue
-        try
-            return F \ g
-        catch err
-            err isa _BRMOperatorSolveFailure || rethrow()
-            p.algebra.diagnostics[:last_damped_solve_failure] = sprint(showerror, err)
+    nc = length(p.components)
+    x = zeros(length(g)); shift = zeros(nc); done = falses(nc)
+    for μ in (0.0, _BRM_SPL_SHIFTS...)
+        F = _brm_operator_factor(p, h; shift=[done[c] ? shift[c] : μ for c in 1:nc])
+        for (c, (part, I)) in enumerate(zip(F.parts, F.components))
+            done[c] && continue
+            definite = part.factor === nothing ?
+                all(>(0), part.H.diagonal .+ part.H.shift) : issuccess(part.factor)
+            definite || continue
+            try
+                x[I] .= part.factor === nothing ? _brm_operator_solve(part.operator, g[I],
+                    F.options; diagnostics=p.algebra.diagnostics) : part.factor \ g[I]
+                shift[c] = μ; done[c] = true
+            catch err
+                err isa _BRMOperatorSolveFailure || rethrow()
+                p.algebra.diagnostics[:last_damped_solve_failure] = sprint(showerror, err)
+            end
         end
+        all(done) && return (x, shift)
     end
     nothing
 end
