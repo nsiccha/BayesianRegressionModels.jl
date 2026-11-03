@@ -2080,7 +2080,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             _rk_coordinate_record!(coordinates, (; kind=:gmrf,
                 declaration=term.options.id, predictor=predictor.name,
                 axes=term.options.source, state_axes=term.options.state_axes,
-                mesh_inputs=(; term.options.vertices, term.options.cells), locals))
+                mesh_inputs=(; term.options.vertices, term.options.cells),
+                correlation=term.options.correlation, locals))
             _rk_start_term_record!(coordinates, predictor.name, term, term.options.id,
                 (; sigma=locals.sigma, spatial_length=locals.spatial_length,
                    temporal_length=locals.temporal_length))

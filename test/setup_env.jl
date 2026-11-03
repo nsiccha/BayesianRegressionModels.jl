@@ -272,7 +272,9 @@ const PINS = [
     # recovery and bounded-rank joint Gaussian carries.
     # RK 0.1.62 preserves inner row selection through array-valued producer
     # plate cells, including BRM's shared correlated random-effect predictors.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "2ee187c57890421f69c001793c6b5997a8f0600a"),
+    # b5740888 (RKPPL 0.1.71) sizes a data-free replay from frozen whole
+    # values, such as a gmrf support fitted from an indexed fit-role input.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "b574088897ef09fec4e1319d5ceb294a171bb53e"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

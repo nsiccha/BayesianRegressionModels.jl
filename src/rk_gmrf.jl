@@ -33,7 +33,11 @@ function brm_gmrf_geometry(vertices, cells, times, nchannels)
     _brm_gmrf_graph_geometry(mesh, layout)
 end
 
-function _brm_gmrf_graph_geometry(mesh, layout)
+_brm_gmrf_graph_geometry(mesh, layout) =
+    _brm_gmrf_graph_layout(_brm_gmrf_graph_base(mesh), layout)
+
+# A mesh's sparse factor pattern and stiffness, shared by every support on it.
+function _brm_gmrf_graph_base(mesh)
     factor = _brm_gmrf_factor_data(mesh)
     columns = Vector{Int}(undef, length(factor.lrow))
     stiffness = Vector{Float64}(undef, length(factor.lrow))
@@ -42,9 +46,11 @@ function _brm_gmrf_graph_geometry(mesh, layout)
         source = _brm_gmrf_sparse_slot(factor.grow, factor.gptr, j, factor.lrow[p])
         stiffness[p] = source == 0 ? 0.0 : factor.gval[source]
     end
-    (; factor..., columns, stiffness, times=layout.times,
-       nchannels=length(layout.channels), ncoordinates=layout.ncoordinates)
+    (; factor..., columns, stiffness)
 end
+
+_brm_gmrf_graph_layout(base, layout) = (; base..., times=layout.times,
+    nchannels=length(layout.channels), ncoordinates=layout.ncoordinates)
 
 function brm_gmrf_support(vertices, cells, fit_time, fit_channel)
     mesh = _brm_gmrf_mesh(vertices, cells)
@@ -52,6 +58,55 @@ function brm_gmrf_support(vertices, cells, fit_time, fit_channel)
         _brm_gmrf_times(fit_time))
     (; mesh, layout, geometry=_brm_gmrf_graph_geometry(mesh, layout))
 end
+
+# Independent fields of a `@plate for p in groups(g)` cell, one per fitted cell
+# label, read from the fit-role (training) columns: one shared mesh and sparse
+# pattern, and each label's own fitted times and channel levels, partitioned
+# in one pass over the rows. `channel === nothing` is a one-channel field;
+# `nchannels` (or `nothing`) is the channel count a correlation factor fixes.
+function brm_gmrf_cell_supports(vertices, cells, time, channel, group, nchannels)
+    length(time) == length(group) && (channel === nothing || length(channel) == length(group)) ||
+        throw(DimensionMismatch("gmrf cell time, channel and grouping columns need one entry per row"))
+    mesh = _brm_gmrf_mesh(vertices, cells)
+    base = _brm_gmrf_graph_base(mesh)
+    position = Dict{eltype(group),Int}()
+    rows = Vector{Int}[]
+    for (row, label) in enumerate(group)
+        k = get!(position, label) do
+            push!(rows, Int[])
+            length(rows)
+        end
+        push!(rows[k], row)
+    end
+    supports = map(rows) do index
+        channels = channel === nothing ? [1] : _brm_fit_levels([channel[r] for r in index])
+        nchannels === nothing || length(channels) == nchannels || throw(DimensionMismatch(
+            "gmrf channel correlation dimension must equal each cell's fitted channel count"))
+        layout = _BRMGMRFStateLayout(size(vertices, 1), channels,
+            _brm_gmrf_times([time[r] for r in index]))
+        (; mesh, layout, geometry=_brm_gmrf_graph_layout(base, layout))
+    end
+    (; position, supports)
+end
+
+brm_gmrf_cell_supports(vertices, cells, time, group) =
+    brm_gmrf_cell_supports(vertices, cells, time, nothing, group, nothing)
+brm_gmrf_cell_supports(vertices, cells, time, channel, group) =
+    brm_gmrf_cell_supports(vertices, cells, time, channel, group, nothing)
+
+# The fitted supports of `labels`, the current plate cells in plate order. A
+# label without a fitted field is refused: a cell's field belongs to the fit.
+function brm_gmrf_cell_select(fitted, labels)
+    map(labels) do label
+        k = get(fitted.position, label, 0)
+        k == 0 && throw(ArgumentError(
+            "gmrf cell `$label` has no fitted field; replay onto the fit's cells or rebuild the model"))
+        fitted.supports[k]
+    end
+end
+
+brm_gmrf_rows(support, east, north, time) =
+    brm_gmrf_rows(support, east, north, time, ones(Int, length(time)))
 
 function brm_gmrf_rows(support, east, north, time, channel)
     interpolation = _brm_gmrf_interpolation(support.mesh, east, north)
@@ -100,13 +155,29 @@ function _rk_ast_gmrf!(definitions, statements, taken, bindings, term)
     push!(statements, Expr(:(=), rows, Expr(:call, reader, support, term.columns...)))
     prior = map(p -> _rk_ast_positive_prior(p, bindings, taken; default=:LogNormal), options.priors)
     block = _rk_block_body(prior...)
-    property(value, name) = Expr(:., value, QuoteNode(name))
-    geometry = _rk_block_argument!(block, :geometry, property(support, :geometry))
+    geometry = _rk_block_argument!(block, :geometry, _rk_ast_property(support, :geometry))
     reads = _rk_block_argument!(block, :rows, rows)
     correlation = options.correlation === nothing ?
-        Expr(:call, :hcat, (Expr(:vect, (i == j ? 1.0 : 0.0 for i in 1:options.nchannels)...)
-            for j in 1:options.nchannels)...) : _rk_ast_level_factor_value(options.correlation)
+        _rk_ast_identity_factor(options.nchannels) : _rk_ast_level_factor_value(options.correlation)
     L = _rk_block_argument!(block, :L, correlation)
+    locals = _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, reads, L)
+    push!(statements, Expr(:call, :~, options.id, locals.call))
+    (; locals.sigma, locals.spatial_length, locals.temporal_length, locals.field,
+       geometry, support, rows)
+end
+
+_rk_ast_property(value, name) = Expr(:., value, QuoteNode(name))
+_rk_ast_identity_factor(n) = Expr(:call, :hcat, (Expr(:vect, (i == j ? 1.0 : 0.0 for i in 1:n)...)
+    for j in 1:n)...)
+
+# One field's block: its hyperparameters under their priors, its joint law on
+# `geometry`, and the rows' three-vertex reads scaled by its SD, as the call of
+# a shared definition. `block` already holds the arguments `geometry`, `reads`
+# and `L` (and any prior inputs the priors read). A block called per plate cell
+# declares its field bare, `field ~ law(...)`, its shape the law's sampling
+# geometry (RKPPL cell submodels bind bare names only).
+function _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, reads, L;
+        cell::Bool=false)
     sigma = _rk_block_local!(block, :sigma)
     spatial_length = _rk_block_local!(block, :spatial_length)
     temporal_length = _rk_block_local!(block, :temporal_length)
@@ -115,12 +186,240 @@ function _rk_ast_gmrf!(definitions, statements, taken, bindings, term)
         _rk_ast_hyper_statement(sigma, prior.sigma),
         _rk_ast_hyper_statement(spatial_length, prior.spatial_length),
         _rk_ast_hyper_statement(temporal_length, prior.temporal_length),
-        Expr(:call, :~, Expr(:ref, field, Expr(:call, :(:), 1, property(geometry, :ncoordinates))),
+        Expr(:call, :~, cell ? field : Expr(:ref, field, Expr(:call, :(:), 1,
+            _rk_ast_property(geometry, :ncoordinates))),
             Expr(:call, law, spatial_length, temporal_length, L, geometry)))
-    summands = [Expr(:call, :.*, property(reads, Symbol(:weight, j)),
-        Expr(:ref, field, property(reads, Symbol(:index, j)))) for j in 1:3]
+    summands = [Expr(:call, :.*, _rk_ast_property(reads, Symbol(:weight, j)),
+        Expr(:ref, field, _rk_ast_property(reads, Symbol(:index, j)))) for j in 1:3]
     value = Expr(:call, :.*, sigma, Expr(:call, :.+, summands...))
     call = _rk_ast_block_call!(definitions, taken, "brm_gmrf", block, value)
-    push!(statements, Expr(:call, :~, options.id, call))
-    (; sigma, spatial_length, temporal_length, field, geometry, support, rows)
+    (; call, sigma, spatial_length, temporal_length, field)
 end
+
+# ---- Independent fields in `@plate for p in groups(g)` cells ----------------
+#
+# A cell formula `field ~ 0 + gmrf(...)` is one field per cell label, as on
+# SBBRMI (`sb_cell_formulas.jl`). Its support is fitted in the graph from the
+# fit-role copies of the mesh, time, channel and grouping columns
+# (`brm_gmrf_cell_supports`, one fitted value), and selected for the plate's
+# current cells by label (`brm_gmrf_cell_select`). Each cell reads its own
+# rows from that support and draws its field, with its own hyperparameters,
+# from the same field block as a model-scope `gmrf`.
+#
+# The prepared cell keeps the formula as the local assignment
+# `field = _rk_cell_gmrf(spec, east, north, time[, channel], inputs...)`: its
+# arguments are what the cell reads for it, so slicing and the cell's reads
+# treat it as any other local. `inputs` are the names the term's priors and a
+# sampled correlation factor read, passed to the block as arguments.
+mutable struct _RKCellGMRF
+    target::Symbol
+    id::String
+    group::Symbol
+    time::Symbol
+    channel::Union{Nothing,Symbol}
+    vertices::Symbol
+    cells::Symbol
+    correlation::Any
+    priors::Any
+    inputs::Vector{Symbol}
+    labels::Symbol
+    # The fit-role inputs, registered with the plan (`_rk_plan_cell_gmrf!`).
+    fit::Any
+end
+
+_rk_cell_gmrf(spec, args...) = error("RK backend: internal: a cell gmrf marker was evaluated")
+_rk_is_cell_gmrf(statement) = Meta.isexpr(statement, :(=), 2) &&
+    Meta.isexpr(last(statement.args), :call) &&
+    first(last(statement.args).args) === _rk_cell_gmrf
+_rk_cell_gmrf_spec(statement) = last(statement.args).args[2]
+
+# One cell's values of a positional input, read to build the formula's static
+# structure (its support is fitted in the graph per cell).
+function _rk_kernel_first_cell(input, columns)
+    haskey(columns, input.source) || return nothing
+    values = columns[input.source]
+    input.kind === :gather && return values[first(columns[input.rows])]
+    input.kind === :element && return first(values)
+    nothing
+end
+
+# The cell body with each `gmrf` formula replaced by its marker and its term
+# prior statements removed. A body without a formula is returned unchanged.
+function _rk_kernel_cell_formulas(@nospecialize(brmi::BRMI), program, kernel, scope,
+        raw_body, params, inputs, columns, group_values)
+    formula = _brm_cell_formula_program(raw_body, scope; inputs=params)
+    formula === nothing && return raw_body
+    prefix = "RK backend: kernel `$kernel`"
+    group_values === nothing && error(
+        "$prefix: a gmrf field in a cell needs the cells' grouping (`@plate for p in groups(g)`)")
+    isempty(group_values) && error("$prefix: a gmrf field needs at least one fitted cell")
+    locals = Set{Symbol}((formula.targets..., formula.declarations...))
+    bindings = Dict{Symbol,Any}(key => column for (key, column) in _brm_operation_entries(brmi)
+        if !(key in params) && !(key in locals))
+    raw = Dict{Symbol,Any}(program.context.data)
+    foreach(key -> delete!(raw, key), locals)
+    for (param, input) in zip(params, inputs)
+        value = _rk_kernel_first_cell(input, columns)
+        value === nothing || (raw[param] = value)
+    end
+    model = formula.builder(_BRMCellFormulaInputs(_BRMReplayData((;), raw), bindings))
+    context = _brm_backend_context(model)
+    available = union(Set(keys(program.context.data)), Set(op.name for op in program.operations))
+    bound = Set{Symbol}(params)
+    foreach(statement -> _rk_source_outputs!(bound, statement), raw_body)
+    for statement in raw_body
+        isxcall(statement, :~) && statement.args[2] isa Symbol && push!(bound, statement.args[2])
+    end
+    prior_reads = Set{Symbol}()
+    for i in formula.prior_positions
+        foreach(value -> _brm_cell_value_refs!(prior_reads, value), raw_body[i].args[3:end])
+    end
+    taken = union(Set{Symbol}(keys(columns)), available, bound)
+    labels = _rk_ast_fresh_name(string(kernel, "_cell_labels"), taken)
+    replacements = Dict{Int,Any}()
+    for (target, position) in zip(formula.targets, formula.positions)
+        _, rhs = getargs(linear_predictor_op(model, target), 2)
+        terms = _brm_additive_terms(rhs)
+        fields = [term for term in terms if term isa ExprColumn && getf(term) === gmrf]
+        length(fields) == 1 && all(term -> term in fields || term isa Integer && term == 0, terms) ||
+            error("$prefix: cell field `$target` must be `0 + gmrf(...)` alone; other " *
+                "terms in an independent cell formula are not lowered on RK yet")
+        term = only(fields)
+        arguments = _brm_gmrf_arguments(term)
+        positional = (name.(arguments.axes)..., name(arguments.time),
+            (arguments.channel === nothing ? () : (name(arguments.channel),))...)
+        sources = map(positional) do param
+            k = findfirst(==(param), params)
+            k === nothing && error("$prefix: cell field `$target` reads `$param`, which " *
+                "is no positional input of the cell; read a row column such as `$param[p]`")
+            input = inputs[k]
+            input.kind === :gather && haskey(program.context.data, input.source) || error(
+                "$prefix: cell field `$target` needs `$param` as a data column read " *
+                "through the cell's grouping (`$param[p]` in `@plate for p in groups(g)`)")
+            input
+        end
+        groups = unique(input.group for input in sources)
+        length(groups) == 1 || error(
+            "$prefix: cell field `$target` reads its rows through different groupings")
+        mesh = map(value -> name(value), arguments.mesh)
+        all(source -> haskey(program.context.data, source) && !(source in params), mesh) ||
+            error("$prefix: cell field `$target` needs its mesh as shared data columns")
+        correlation = _brm_gmrf_correlation(arguments.cor)
+        priors = (;
+            sigma=_brm_term_prior_expression(term, target, context, :term_sd;
+                default=ExprColumn(LogNormal, 0.0, 1.0)),
+            spatial_length=_brm_term_prior_expression(term, target, context, :term_length_scale;
+                component=:space, default=ExprColumn(LogNormal, 0.0, 1.0)),
+            temporal_length=_brm_term_prior_expression(term, target, context, :term_length_scale;
+                component=:time, default=ExprColumn(LogNormal, 0.0, 1.0)))
+        reads = copy(prior_reads)
+        correlation !== nothing && correlation.kind === :parameter && push!(reads, correlation.name)
+        inputs_read = sort!(collect(intersect(reads, union(bound, available))))
+        spec = _RKCellGMRF(target, string("gmrf_", target, "_", join(positional, "_")),
+            only(groups), sources[3].source,
+            arguments.channel === nothing ? nothing : sources[4].source,
+            mesh.vertices, mesh.cells, correlation, priors, inputs_read, labels, nothing)
+        replacements[position] = Expr(:(=), target,
+            Expr(:call, _rk_cell_gmrf, spec, positional..., inputs_read...))
+    end
+    columns[labels] = collect(group_values)
+    Any[get(replacements, i, statement) for (i, statement) in enumerate(raw_body)
+        if !(i in formula.prior_positions)]
+end
+
+# Register each cell field's fit-role inputs with the plan: the training mesh
+# (fitted like a model-scope field's) and twins of its time, channel and
+# grouping columns, so a replay fits the same supports from the training rows.
+function _rk_plan_cell_gmrf!(kernels, plan, data, taken)
+    derived, columns = plan.regression.derived, plan.columns
+    for kernel in kernels, statement in kernel.body
+        _rk_is_cell_gmrf(statement) || continue
+        spec = _rk_cell_gmrf_spec(statement)
+        spec.fit === nothing || continue
+        vertices = _brm_fitted(copy, :gmrf_vertices, spec.vertices, data[spec.vertices])
+        cells = _brm_fitted(copy, :gmrf_cells, spec.cells, data[spec.cells])
+        spec.fit = (;
+            vertices=_rk_fit_input!(derived, columns, taken, spec.vertices, [vertices]),
+            cells=_rk_fit_input!(derived, columns, taken, spec.cells, [cells]),
+            time=_rk_fit_twin!(derived, columns, taken, data, spec.time),
+            channel=spec.channel === nothing ? nothing :
+                _rk_fit_twin!(derived, columns, taken, data, spec.channel),
+            group=_rk_fit_twin!(derived, columns, taken, data, spec.group))
+    end
+    nothing
+end
+
+# The plate's model-scope statements for its cell fields: each field's fitted
+# supports and their selection for the current cells. Returns the selection's
+# name per field.
+function _rk_emit_cell_gmrf_supports!(statements, bindings, taken, body)
+    selected = IdDict{Any,Symbol}()
+    for statement in body
+        _rk_is_cell_gmrf(statement) || continue
+        spec = _rk_cell_gmrf_spec(statement)
+        haskey(selected, spec) && continue
+        fit = spec.fit
+        fit === nothing && error(
+            "RK backend: internal: cell field `$(spec.target)` has no fit-role inputs")
+        fitted = _rk_ast_fresh_name(string(spec.id, "_supports"), taken)
+        cells = _rk_ast_fresh_name(string(spec.id, "_cells"), taken)
+        fitter = _rk_value_callee!(bindings, brm_gmrf_cell_supports, taken)
+        select = _rk_value_callee!(bindings, brm_gmrf_cell_select, taken)
+        nchannels = spec.correlation === nothing ? () : (spec.correlation.K,)
+        push!(statements, Expr(:(=), fitted, Expr(:call, fitter,
+            Expr(:ref, fit.vertices, 1), Expr(:ref, fit.cells, 1), fit.time,
+            (fit.channel === nothing ? () : (fit.channel,))..., fit.group, nchannels...)))
+        push!(statements, Expr(:(=), cells, Expr(:call, select, fitted, spec.labels)))
+        selected[spec] = cells
+    end
+    selected
+end
+
+# A cell's field marker, its reads already the cell's: the cell's rows on its
+# selected support, its field drawn from the field block, and the authored
+# local bound to the field's row values.
+function _rk_expand_cell_gmrf(statement, index, selected, defs, bindings, taken, avoid,
+        coordinates, kernel)
+    defs === nothing && error(
+        "RK backend: internal: kernel `$kernel` emits a gmrf cell field without the program's definitions")
+    lhs, marker = statement.args
+    spec = marker.args[2]
+    nrows = spec.channel === nothing ? 3 : 4
+    rows_args = marker.args[3:(2 + nrows)]
+    input_values = marker.args[(3 + nrows):end]
+    support = Expr(:ref, selected[spec], index)
+    rows = _rk_ast_fresh_name(string(spec.id, "_rows"), union(avoid, taken))
+    declared = _rk_ast_fresh_name(spec.id, union(avoid, taken))
+    push!(avoid, rows, declared)
+    push!(taken, declared)
+    reader = _rk_value_callee!(bindings, brm_gmrf_rows, taken)
+    law = _rk_value_callee!(bindings, _BRMGMRFLaw, taken)
+    block = _rk_block_body()
+    geometry = _rk_block_argument!(block, :geometry, _rk_ast_property(support, :geometry))
+    reads = _rk_block_argument!(block, :rows, rows)
+    values = Dict{Symbol,Any}(zip(spec.inputs, input_values))
+    correlation = spec.correlation === nothing ?
+        Expr(:call, _rk_value_callee!(bindings, brm_gmrf_identity_factor, taken),
+            _rk_ast_property(support, :geometry)) :
+        spec.correlation.kind === :parameter ? values[spec.correlation.name] :
+        _rk_ast_level_factor_value(spec.correlation)
+    L = _rk_block_argument!(block, :L, correlation)
+    renamed = Dict{Symbol,Symbol}(name => _rk_block_argument!(block, name, values[name])
+        for name in spec.inputs if spec.correlation === nothing ||
+            spec.correlation.kind !== :parameter || name !== spec.correlation.name)
+    prior = map(spec.priors) do p
+        _rk_rename_symbols(_rk_ast_positive_prior(p, bindings, taken; default=:LogNormal), renamed)
+    end
+    locals = _rk_ast_gmrf_block!(defs, taken, law, block, prior, geometry, reads, L; cell=true)
+    _rk_coordinate_record!(coordinates, (; kind=:cell_gmrf, declaration=declared,
+        name=spec.target, kernel=kernel, id=spec.id, labels=spec.labels, fit=spec.fit,
+        cells=selected[spec], correlation=spec.correlation,
+        nchannels=spec.correlation === nothing ? nothing : spec.correlation.K, locals))
+    entry = Expr(:ref, declared, index)
+    Any[Expr(:(=), rows, Expr(:call, reader, support, rows_args...)),
+        Expr(:call, :~, entry, locals.call),
+        Expr(:(=), lhs, entry)]
+end
+
+brm_gmrf_identity_factor(geometry) = Matrix{Float64}(I, geometry.nchannels, geometry.nchannels)
+

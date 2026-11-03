@@ -3068,7 +3068,7 @@ _rk_eval_data_preparation(::Val{recipe}, _args...) where {recipe} = error(
 # definition. A staged derived value gets a twin definition over the fit-role
 # inputs of the columns it reads.
 function _rk_fit_twin!(derived::Vector{_RKDerivedSpec},
-        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol},
+        columns::AbstractDict{Symbol}, taken::Set{Symbol},
         data::AbstractDict, vname::Symbol)
     label = _rk_fit_label(vname)
     for spec in derived
