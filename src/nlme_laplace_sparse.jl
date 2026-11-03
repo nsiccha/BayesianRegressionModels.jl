@@ -51,8 +51,13 @@ struct _BRMSlapBlock
     edges::Matrix{Int}
     sums::Vector{Vector{Int}}
     λ::Vector{Float64}
+    # `:gmrf` for a native field, whose structured prior `p.gmrf` holds
+    prior::Symbol
 end
-_brm_spl_identity(b::_BRMSlapBlock) = isempty(b.sums) && size(b.edges, 2) == 0
+_BRMSlapBlock(declaration, group, K, z, omega, edges, sums, λ) =
+    _BRMSlapBlock(declaration, group, K, z, omega, edges, sums, λ, :standard)
+_brm_spl_identity(b::_BRMSlapBlock) = b.prior === :standard && isempty(b.sums) &&
+    size(b.edges, 2) == 0
 
 # The kernels run once per population point. Coordinate loops read concrete
 # arrays, including when a declared field has millions of elements.
@@ -91,6 +96,8 @@ mutable struct BRMSparseLaplaceProblem{K}
     kernels::K
     # Independent declared Gaussian priors, in their authored coordinates.
     gaussian::Union{Nothing,_BRMSPLGaussianPrior}
+    # Native GMRF fields' structured priors (`nlme_laplace_gmrf.jl`).
+    gmrf::Any
     # Likelihood terms and their parameter entries, as in the structured path.
     family::Vector{Int8}
     y::Vector{Float64}
@@ -188,9 +195,8 @@ Base.show(io::IO, p::BRMSparseLaplaceProblem) = print(io,
 function Base.deepcopy_internal(p::BRMSparseLaplaceProblem, stackdict::IdDict)
     haskey(stackdict, p) && return stackdict[p]
     fields = map(fieldnames(typeof(p))) do f
-        # Plan materialization seeds the read-only backend explicitly. Julia's
-        # generic deepcopy otherwise traverses immutable RKBRMI wrappers too.
-        f === :backend && haskey(stackdict, p.backend) && return stackdict[p.backend]
+        # A seeded backend (plan materialization) is shared by the RKBRMI
+        # method (src/rk_backend.jl), on this field and through the kernels.
         f === :factor ? Ref{Any}(nothing) : Base.deepcopy_internal(getfield(p, f), stackdict)
     end
     stackdict[p] = typeof(p)(fields...)
@@ -204,10 +210,10 @@ end
 # The grouping column a latent block is integrated by: a random-effect block's
 # and a `cdar` walk's group, a `car` field's area column.
 _brm_spl_record_group(r) = r.kind === :car ? r.area :
-    r.kind === :vector ? r.declaration : r.group
+    r.kind in (:vector, :gmrf, :cell_gmrf) ? r.declaration : r.group
 _brm_spl_record_declaration(r) =
     r.kind in (:ranef, :stratified_ranef) ? _brm_nlme_ranef_declaration(r) : r.declaration
-const _BRM_SPL_LATENT = (:ranef, :stratified_ranef, :car, :cdar, :vector)
+const _BRM_SPL_LATENT = (:ranef, :stratified_ranef, :car, :cdar, :vector, :gmrf, :cell_gmrf)
 
 # The model's latent blocks over the named grouping columns.
 function _brm_spl_records(backend::RKBRMI, integrate; declarations=nothing)
@@ -277,7 +283,7 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
         z
     end
     function block!(declaration, group, z, hyper; edges=zeros(Int, 2, 0),
-            sums=Vector{Int}[], λ=Float64[])
+            sums=Vector{Int}[], λ=Float64[], prior=:standard)
         js = Int[]
         for d in hyper
             # Known scales/correlations have no sampled coordinate declaration.
@@ -289,7 +295,7 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
             end
         end
         push!(blocks, _BRMSlapBlock(declaration, group, size(z, 2), z, unique(js), edges,
-            sums, λ))
+            sums, λ, prior))
     end
     for r in records
         if r.kind === :ranef
@@ -301,6 +307,27 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
         elseif r.kind === :vector
             labels = names[owned(r.declaration)]
             block!(r.declaration, r.declaration, draws!(reshape(labels, :, 1)), ())
+        elseif r.kind === :gmrf
+            # The field's state draws in state order; its SD scales the reads.
+            field = Symbol(r.declaration, ".", r.locals.field)
+            n = count(name -> _brm_nlme_owned(name, field), names)
+            sigma = Symbol(r.declaration, ".", r.locals.sigma)
+            block!(r.declaration, r.declaration,
+                draws!(reshape([Symbol(field, ".", j) for j in 1:n], :, 1)),
+                (haskey(position, sigma) ? sigma : nothing,); prior=:gmrf)
+        elseif r.kind === :cell_gmrf
+            # One field per cell, each with its own SD.
+            field = Symbol(r.declaration, ".", r.locals.field)
+            sigma = Symbol(r.declaration, ".", r.locals.sigma)
+            ncells = length(rk_bound_data(backend)[r.labels])
+            for cell in 1:ncells
+                prefix = Symbol(field, ".", cell)
+                n = count(name -> startswith(string(name), string(prefix, ".")), names)
+                s = Symbol(sigma, ".", cell)
+                block!(r.declaration, r.declaration,
+                    draws!(reshape([Symbol(prefix, ".", j) for j in 1:n], :, 1)),
+                    (haskey(position, s) ? s : nothing,); prior=:gmrf)
+            end
         elseif r.kind === :cdar
             # standardized innovations, groups × steps; scale and persistence
             eta = Symbol(r.declaration, ".", r.locals.eta)
@@ -365,7 +392,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         (1:nrows,))
     nψ = length(t.port)
     p = BRMSparseLaplaceProblem(backend, population, names[population], integrate,
-        integrated, blocks, kernels, nothing, t.family, t.y, t.trials, t.constant, t.entry,
+        integrated, blocks, kernels, nothing, nothing, t.family, t.y, t.trials, t.constant, t.entry,
         fill(true, length(t.family)), t.port, t.index, t.link, t.fixed, t.response, t.row,
         Int[], Int[], Int[], Int[], Int[], Vector{Int}[], Int[], Int[], Int[], (;),
         spzeros(0, 0), Int[], Int[], Vector{Int}[], Int[], Int[], Float64[], Vector{Int}[],
@@ -375,6 +402,8 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         Float64(tol), Int(maxiter), 0, 0, 0, 0, 0, nothing, nothing)
     p.gaussian = _brm_spl_gaussian_prior(p, records, u0)
     _brm_spl_gaussian_parameters!(p, u0)
+    p.gmrf = _brm_spl_gmrf_prior(p, records, u0)
+    _brm_spl_gmrf_parameters!(p, u0)
     _brm_spl_design!(p, u0)
     sampled || _brm_slap_population_design!(p, u0)
     cells = Set(_brm_slap_other_observations(backend.plan))
@@ -422,16 +451,25 @@ function _brm_spl_cmaps(p::BRMSparseLaplaceProblem, uA)
     ψ = zeros(nψ)
     for (j, b) in enumerate(p.blocks), k in 1:b.K
         isempty(p.block_reads[j]) && continue
-        probe = copy(uA)
-        probe[p.integrated[view(b.z, :, k)]] .= 1.0
-        pv, pt = _rk_slap_values_and_tangents(p.kernels, probe, b.omega)
-        _brm_slap_psi!(ψ, p, pv)
-        dψ = [_brm_spl_dpsi(p, pv, t) for t in pt]
-        for r in p.block_reads[j]
-            e = p.rentry[r]
-            C[p.coff[r] + k] = ψ[e] - A[e]
-            for (i, o) in enumerate(b.omega)
-                dC[o][p.coff[r] + k] = dψ[i][e]
+        # A native field's entries read several of its levels: probe them
+        # one level color at a time (`_brm_gmrf_level_colors`).
+        colors = _brm_spl_gmrf_colors(p, j)
+        for color in (colors === nothing ? (0,) : 1:maximum(colors))
+            probe = copy(uA)
+            for l in axes(b.z, 1)
+                color == 0 || colors[l] == color || continue
+                probe[p.integrated[b.z[l, k]]] = 1.0
+            end
+            pv, pt = _rk_slap_values_and_tangents(p.kernels, probe, b.omega)
+            _brm_slap_psi!(ψ, p, pv)
+            dψ = [_brm_spl_dpsi(p, pv, t) for t in pt]
+            for r in p.block_reads[j]
+                color == 0 || colors[p.rlevel[r]] == color || continue
+                e = p.rentry[r]
+                C[p.coff[r] + k] = ψ[e] - A[e]
+                for (i, o) in enumerate(b.omega)
+                    dC[o][p.coff[r] + k] = dψ[i][e]
+                end
             end
         end
     end
@@ -449,7 +487,38 @@ function _brm_spl_design!(p::BRMSparseLaplaceProblem, u0)
     ψ0 = _brm_slap_psi!(zeros(nψ), p, _rk_slap_values(p.kernels, base))
     ψ1 = zeros(nψ); ψ2 = zeros(nψ)
     level = [zeros(Int, nψ) for _ in p.blocks]
+    # A native field's entries read several levels (a row's vertices), one
+    # per level color: `fields[j][e]` lists them.
+    fields = Dict{Int,Vector{Vector{Int}}}()
     for (j, b) in enumerate(p.blocks), k in 1:b.K
+        colors = _brm_spl_gmrf_colors(p, j)
+        colors === nothing && continue
+        reads = [Int[] for _ in 1:nψ]
+        for color in 1:maximum(colors)
+            unit = copy(base); scaled = copy(base)
+            for l in axes(b.z, 1)
+                colors[l] == color || continue
+                unit[p.integrated[b.z[l, k]]] = 1.0
+                scaled[p.integrated[b.z[l, k]]] = l
+            end
+            _brm_slap_psi!(ψ1, p, _rk_slap_values(p.kernels, unit))
+            _brm_slap_psi!(ψ2, p, _rk_slap_values(p.kernels, scaled))
+            for e in 1:nψ
+                d1 = ψ1[e] - ψ0[e]
+                abs(d1) <= 1e-12 * max(1.0, abs(ψ0[e])) && continue
+                ratio = (ψ2[e] - ψ0[e]) / d1
+                l = round(Int, ratio)
+                (1 <= l <= size(b.z, 1) && abs(ratio - l) <= 1e-6 * max(1.0, abs(ratio))) ||
+                    _brm_nlme_error("brm_laplace_problem: likelihood parameter $e reads " *
+                        "two field levels that a row's vertex reads cannot share; the " *
+                        "sparse Laplace integrates a field read through its rows' vertices")
+                push!(reads[e], l)
+            end
+        end
+        fields[j] = reads
+    end
+    for (j, b) in enumerate(p.blocks), k in 1:b.K
+        haskey(fields, j) && continue
         unit = copy(base); scaled = copy(base)
         for l in axes(b.z, 1)
             unit[p.integrated[b.z[l, k]]] = 1.0
@@ -477,11 +546,12 @@ function _brm_spl_design!(p::BRMSparseLaplaceProblem, u0)
     nc = 0
     for e in 1:nψ
         for (j, b) in enumerate(p.blocks)
-            l = level[j][e]
-            l == 0 && continue
-            push!(p.rblock, j); push!(p.rlevel, l); push!(p.rentry, e); push!(p.coff, nc)
-            push!(p.block_reads[j], length(p.rblock))
-            nc += b.K
+            for l in (haskey(fields, j) ? sort(fields[j][e]) : (level[j][e],))
+                l == 0 && continue
+                push!(p.rblock, j); push!(p.rlevel, l); push!(p.rentry, e); push!(p.coff, nc)
+                push!(p.block_reads[j], length(p.rblock))
+                nc += b.K
+            end
         end
         push!(p.rptr, length(p.rblock) + 1)
     end
@@ -557,7 +627,7 @@ function _brm_spl_prior_quad(p::BRMSparseLaplaceProblem, z)
             q += b.λ[c] * sum(l -> z[b.z[l, 1]], levels)^2
         end
     end
-    q
+    q + _brm_spl_gmrf_quad(p, z)
 end
 
 # The integrated draws' prior must match their conditional Gaussian blocks:
@@ -570,6 +640,7 @@ function _brm_spl_verify_prior(p::BRMSparseLaplaceProblem, u0)
         z = randn(rng, length(p.integrated))
         uA = _brm_slap_zero_integrated!(copy(u), p)
         _brm_spl_gaussian_parameters!(p, uA)
+        _brm_spl_gmrf_parameters!(p, uA)
         u[p.integrated] .= z
         Δ = _rk_slap_prior(p.kernels, u) - _rk_slap_prior(p.kernels, uA)
         isapprox(Δ, -_brm_spl_prior_quad(p, z) / 2; rtol=1e-9, atol=1e-9) ||
@@ -578,6 +649,7 @@ function _brm_spl_verify_prior(p::BRMSparseLaplaceProblem, u0)
                 "centring or a constrained block), so the sparse Laplace does not apply")
     end
     _brm_spl_gaussian_parameters!(p, u0)
+    _brm_spl_gmrf_parameters!(p, u0)
     nothing
 end
 
@@ -764,7 +836,9 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
             for c in group.cells for reduction in c.terms for term in reduction)))
     edges = [(b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]) for b in p.blocks
         for e in axes(b.edges, 2)]
-    built = _brm_spl_pattern(footprints, n, edges)
+    # A native field's prior couples its draws through Q's pattern.
+    couplings = p.gmrf === nothing ? edges : vcat(edges, _brm_gmrf_pattern_pairs(p.gmrf))
+    built = _brm_spl_pattern(footprints, n, couplings)
     pattern = built.pattern
     p.pattern_stats = built.stats
     index(i, j) = _brm_spl_nzindex(pattern, i, j)
@@ -782,6 +856,7 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
     end
     p.prior_nz = collect(keys(prior))
     p.prior_val = [prior[k] for k in p.prior_nz]
+    p.gmrf === nothing || _brm_gmrf_pattern_positions!(p.gmrf, pattern)
     p.wcols = [[b.z[l, 1] for l in levels] for b in p.blocks for levels in b.sums]
     p.wλ = [λ for b in p.blocks for λ in b.λ]
     p.pattern = pattern
@@ -795,7 +870,7 @@ function _brm_spl_pattern!(p::BRMSparseLaplaceProblem)
             join!(first(zs), i)
         end
     end
-    for (i, j) in edges
+    for (i, j) in couplings
         join!(i, j)
     end
     for cols in p.wcols, i in Iterators.drop(cols, 1)
@@ -983,6 +1058,13 @@ function _brm_spl_step_blocks!(p::BRMSparseLaplaceProblem)
         isempty(counts[i]) && continue
         effect_key[i] = first(sort!(collect(counts[i]); by=kv -> (-kv[2], kv[1])))[1]
     end
+    # A field's prior couples all its draws: it steps as one block.
+    for (j, b) in enumerate(p.blocks)
+        b.prior === :gmrf || continue
+        for i in b.z
+            effect_key[i] = (j, 0)
+        end
+    end
     neighbours = [Int[] for _ in 1:n]
     for b in p.blocks, e in axes(b.edges, 2)
         i, j = b.z[b.edges[1, e], 1], b.z[b.edges[2, e], 1]
@@ -1083,12 +1165,14 @@ function _brm_spl_prior!(fc, g, hnz, p::BRMSparseLaplaceProblem, z, fb=nothing;
             end
         end
     end
+    _brm_spl_gmrf_prior!(fc, g, p, z, fb, correction)
     if hnz !== nothing
         nz = nonzeros(hnz)
         fill!(nz, 0.0)
         for (k, v) in zip(p.prior_nz, p.prior_val)
             nz[k] += v
         end
+        _brm_spl_gmrf_precision!(nz, p)
         if p.gaussian !== nothing
             for b in p.gaussian.blocks, i in b.z
                 nz[p.diagonal[i]] += p.gaussian.precision[i] - 1
@@ -1245,6 +1329,7 @@ function _brm_spl_population(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     uA[p.population] .= φ
     _brm_slap_zero_integrated!(uA, p)
     _brm_spl_gaussian_parameters!(p, uA)
+    _brm_spl_gmrf_parameters!(p, uA)
     C, dC, A, values = _brm_spl_cmaps(p, uA)
     (; uA, values, A, C, dC)
 end
@@ -1631,6 +1716,9 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
     _brm_spl_gaussian_gradient!(gradient, p, state, S, v, active)
     bad === nothing && !all(isfinite, gradient) &&
         (bad = "the declared Gaussian vectors' prior terms")
+    _brm_spl_gmrf_gradient!(gradient, p, state, S, v, active)
+    bad === nothing && !all(isfinite, gradient) &&
+        (bad = "the gmrf fields' prior terms")
     if !prior
         gradient .+= gcell
         _brm_spl_nonfinite_gradient!(p, state, value, gradient, bad)

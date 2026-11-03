@@ -582,6 +582,23 @@ struct RKBRMI{P<:BRMI,PL,M,S<:BRMI}
     end
 end
 
+# A backend's inputs are read-only. A caller that must not clone them (a
+# Laplace plan copying its prepared problem) seeds the backend in `stackdict`.
+# Julia's generic method never consults `stackdict` for an immutable value, so
+# the seed is honoured here, on every path that reaches the backend: a problem
+# also holds it through its prior kernel. An unseeded copy (one per chain)
+# copies the backend once and shares that copy across those paths. The built
+# model's lowered `program` is code, like the shared `_RKProgram`: its rebuilt
+# law arguments hold modules (`Core.GlobalRef(Base, :getproperty)` in a `gmrf`
+# field's geometry), which Julia refuses to deepcopy, so it is shared.
+function Base.deepcopy_internal(rk::RKBRMI, stackdict::IdDict)
+    haskey(stackdict, rk) && return stackdict[rk]
+    rk.model isa NamedTuple && foreach(values(rk.model)) do value
+        value isa Expr && !haskey(stackdict, value) && (stackdict[value] = value)
+    end
+    stackdict[rk] = invoke(Base.deepcopy_internal, Tuple{Any,IdDict}, rk, stackdict)
+end
+
 Base.parent(x::RKBRMI) = x.parent
 brm_source(x::RKBRMI) = x.source
 structure_of(x::RKBRMI) = structure_of(parent(x))
@@ -3068,7 +3085,7 @@ _rk_eval_data_preparation(::Val{recipe}, _args...) where {recipe} = error(
 # definition. A staged derived value gets a twin definition over the fit-role
 # inputs of the columns it reads.
 function _rk_fit_twin!(derived::Vector{_RKDerivedSpec},
-        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol},
+        columns::AbstractDict{Symbol}, taken::Set{Symbol},
         data::AbstractDict, vname::Symbol)
     label = _rk_fit_label(vname)
     for spec in derived
@@ -6302,6 +6319,8 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
                 prepared, target, context.data, columns, taken))
         elseif prepared.callable === cdar
             push!(terms, _rk_plan_cdar_term!(prepared, target, context.data, columns, taken))
+        elseif prepared.callable === gmrf
+            push!(terms, _rk_plan_gmrf_term!(prepared, target, context.data, columns, taken; derived))
         else
             haskey(prepared.state, :fields) || error(
                 "$prefix: predictor `$target` structured term `$(nameof(prepared.callable))` " *

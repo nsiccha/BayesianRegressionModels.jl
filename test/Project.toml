@@ -59,7 +59,7 @@ Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.14"
+StanBlocks = "0.2.20"
 Treebars = "0.1.1"
 Turing = "0.46"
 WarmupHMC = "0.2.11"
@@ -139,7 +139,11 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # ab3960bb (StanBlocks 0.2.12) registers stable hypot and its Base callable.
 # fac3385a (StanBlocks 0.2.14) supplies stable lower-truncated LogNormal
 # moments and both log-CDF tails for ordinary distribution statistics.
-rev = "fac3385a5cb9d0e894352c34f4d0e590e4f93328"
+# 0b42d636 (StanBlocks 0.2.18) implements segment in @juliacompat
+# helpers, used by the native GMRF normalized sparse density.
+# 009f4180 (0.2.19) adds indexed /= for its sparse solve and prior RNG.
+# 61fa161f (0.2.20) gives cell-owned bindings explicit lexical local scope.
+rev = "61fa161fb39065dd90e8f5f2a1151442b1af6491"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
@@ -300,7 +304,11 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
 # helper calls, guarded captures and broadcast observation locations.
 # Guarded gathered reductions through typed aliases: RK 0.1.52 / PPL 0.1.55.
+# RK 0.1.57 / PPL 0.1.64: caller-owned joint density KernelSpecs and geometry.
+# RK 0.1.59 / PPL 0.1.66: property-based whole-parameter geometry dimensions.
 # PPL 0.1.60 / DistributionKernels 0.1.1: log-space interval masses and tails.
 # RK 0.1.61 / PPL 0.1.70: selective windows, recovery and bounded joint carries.
 # RK 0.1.62: strict selected rows through array-valued producer plate cells.
-rev = "2ee187c57890421f69c001793c6b5997a8f0600a"
+# b5740888 (RKPPL 0.1.71): data-free replay reads frozen whole values.
+# fbf65b46 (RK 0.1.65 / PPL 0.1.74): prepared queries holding modules deep-copy.
+rev = "fbf65b46130a03b1d6f14e5946b953a6cef013f9"

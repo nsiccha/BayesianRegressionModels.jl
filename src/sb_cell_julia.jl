@@ -150,6 +150,8 @@ end
 
 _sb_cell_statement(x, scope) = _sb_cell_value(x, scope)
 function _sb_cell_statement(x::Expr, scope)
+    Meta.isexpr(x, :local, 1) &&
+        return Expr(:local, _sb_cell_statement(only(x.args), scope))
     # A cell's `@scan` block and its step loop hold statements of their own.
     _is_brm_scan(x) &&
         return Expr(:macrocall, x.args[1:end-1]..., _sb_cell_block(x.args[end], scope))
