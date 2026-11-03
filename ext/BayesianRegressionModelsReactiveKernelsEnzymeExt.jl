@@ -305,13 +305,13 @@ function BRM._rk_spl_factor_ad(q, part, base, indices, ad_backend; cell0=1, term
     dirs = ntuple(_ -> shape(zeros(r + m)), K)
     forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
     reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
+    # Reverse over forward, also for an ordinary cell's outer factor: its
+    # active point is the `(sums, active)` tuple even with no sums, and a
+    # forward-over-reverse HVP over a tuple selector fails inside
+    # DifferentiationInterface (reactivekernels-use §7a2 Boundaries).
     second = SecondOrder(reverse, forward)
-    # Cached ordinary cells now use the factor API too. Preserve their
-    # forward-over-reverse Newton HVPs, while sum factors and mixed/third
-    # derivative accumulators retain their existing compositions.
-    hessian = isempty(q.terms) ? SecondOrder(forward, reverse) : second
     hvp = K == 0 ? nothing : Base.invokelatest(prepare_cell_factor_ad, prepare_ad_hvp, q.factors,
-        part, base, indices, hessian, dirs; cell0, term0)
+        part, base, indices, second, dirs; cell0, term0)
     third = Base.invokelatest(prepare_cell_factor_ad, prepare_ad_third, q.factors,
         part, base, indices, SecondOrder(second, forward), (shape(zeros(r + m)),);
         cell0, term0)
