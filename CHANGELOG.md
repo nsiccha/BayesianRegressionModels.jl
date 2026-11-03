@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.145
+## 0.2.146
 
 - Changed: NLME unit likelihoods and gradients use one strict RK plate
   partition per unit. Preparation checks structural coordinate ownership,
@@ -35,7 +35,7 @@ instead of failing at run time.
 - Changed: separated CAR fields expose their shared values through row-local
   graph computations, preserving their law, coordinates, inverse and Jacobian.
 - Compatibility: the strict partitions need ReactiveKernels 0.1.51 and
-  ReactiveKernelsPPL 0.1.54 or later, within the existing 0.1.65 / 0.1.74
+  ReactiveKernelsPPL 0.1.54 or later, within the existing 0.1.67 / 0.1.76
   floor. Scalar inference preserves ordinary indexed predictor expressions
   under strict partitioning, and nested data-only helpers inside sampled
   expressions, such as a lower-bounded shares completion's
@@ -46,6 +46,16 @@ instead of failing at run time.
   custom packed vectors. Unit gradients use ordinary Enzyme Reverse, with the
   test bootstrap's Enzyme dogfood pin, which contains `68ed90fe`'s repair for
   matrix-window partition gradients on Julia 1.10.
+
+## 0.2.145
+
+- **Per-cell fields in the sparse embedded Laplace:** a `gmrf` formula inside
+  `@plate for p in groups(g)` is integrated per cell by
+  `brm_laplace_problem(rk; integrate=(declaration,))`, exact for Normal rows, with each cell's strict observation footprint (its
+  rows read only its own field). A cell's row reads are emitted as one dotted
+  per-row read over the plate's shared mesh locator, which ReactiveKernels
+  prepares at the cell's rows.
+- **Breaking:** requires ReactiveKernels 0.1.67 and ReactiveKernelsPPL 0.1.76.
 
 ## 0.2.144
 

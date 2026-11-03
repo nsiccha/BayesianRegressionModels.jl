@@ -187,7 +187,9 @@ rows the integrated target is the exact marginal. The field's precision moves
 with its lengths and channel factor, and the target's gradient includes their
 log-determinant terms. `brm_laplace_problem(rk; ad_backend, integrate=plan)`
 applies the plan to the same target, and `deepcopy` gives each chain its own
-problem. Integrating per-cell fields waits on a ReactiveKernels repair.
+problem. `integrate=(declaration,)` also integrates one field per
+`@plate for p in groups(g)` cell, each cell's rows reading only that cell's
+field.
 Measured cost grows superlinearly with the number of field states
 under both exact and matrix-free algebra (about 12–15 s per value and
 gradient at 51,200 states on one or two CPUs), dominated by space-time
