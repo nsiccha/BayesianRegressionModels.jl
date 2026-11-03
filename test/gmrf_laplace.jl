@@ -95,6 +95,18 @@ using Random
         value, gradient = LDP.logdensity_and_gradient(copied, φ)
         @test value ≈ reference[1] && gradient ≈ reference[2]
     end
+    # Matrix-free algebra over the field: its reference and probes stay fixed,
+    # so the gradient is the exact derivative of the returned value, and the
+    # value estimates the exact one within its probe error.
+    mf = brm_laplace_problem(rk; ad_backend, integrate=(declaration,),
+        solver=:matrixfree, matrixfree=MatrixFreeLaplace(; probes=16))
+    value, gradient = LDP.logdensity_and_gradient(mf, φ)
+    diagnostics = mf.algebra.diagnostics[:component_1]
+    @test abs(value - reference[1]) <= 4diagnostics.probe_mcse + 1e-8
+    for j in eachindex(φ)
+        e = zeros(length(φ)); e[j] = 1e-5
+        @test gradient[j] ≈ (LDP.logdensity(mf, φ .+ e) - LDP.logdensity(mf, φ .- e)) / 2e-5 atol=2e-5 rtol=2e-5
+    end
     sigma, ell_s, ell_t = (exp(φ[coordinate(names, "$declaration.$h")])
         for h in ("sigma", "spatial_length", "temporal_length"))
     support = BRM.brm_gmrf_support(data.xy, data.triangles, data.time, data.channel)
