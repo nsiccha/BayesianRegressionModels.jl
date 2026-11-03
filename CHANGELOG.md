@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.142
+## 0.2.143
 
 - **Native space-time fields:** `field ~ 0 + gmrf((east, north), time[, channel];
   mesh=(vertices=xy, cells=triangles)[, cor=Omega])` is a sparse-precision
@@ -47,6 +47,38 @@ instead of failing at run time.
   performance is claimed: measured cost grows superlinearly with the state
   dimension under both exact and matrix-free algebra.
 - **Breaking:** requires StanBlocks 0.2.20.
+
+## 0.2.142
+
+- SVI runs can stop after any completed iteration and continue on
+  the same model and data exactly as if they had not stopped:
+  `brm_svi_resume([save,] model, checkpoint; stop_after, checkpoint_every,
+  ndraws, progress)` continues a `BRMSVIOptimizerState` (or a fit result) to
+  the same iterates, random stream, ELBO trace, stopping decision, polishing
+  average and draws. `brm_svi_optimizer_checkpoint(fit)` copies the state; it
+  holds the raw factors, global Adam moments, random stream, iteration,
+  stopping and polishing state, controls, a window fit's streaming carry and
+  the target's identity, but no observations or compiled model. Resume refuses
+  a changed program, callables, bound data, frozen preprocessing, coordinates,
+  groupings, subject coordinates or fixed shared values before any step.
+- `brm_svi_fit` and window fits `brm_svi_fit(previous, x_new)` take
+  `stop_after` (iterations in this call) and an optional first argument
+  `save`, called with a checkpoint every `checkpoint_every` iterations
+  (default once per window), when the call stops, and before a Treebars
+  interrupt propagates. Diagnostics add `finished` and `optimizer`.
+- The returned draws (and a GaussianBlockLaplace carry) come from a copy of
+  the run's stream: their values are unchanged, but they no longer advance the
+  caller's `rng` or `draw_rng`, and a stopped run's intermediate draws do not
+  change its continuation.
+- `laplace=GaussianBlockLaplace()` runs stop and resume the same way: the
+  state holds the global factor, Adam, the averaging window, the random and
+  draw streams, and the call counts and numerical records, so a continued
+  run's draws, carry and diagnostics equal the uninterrupted run's. A stopped
+  run's result averages the iterates of its window so far
+  (`stop_reason=:stopped`). `save` defaults to every 50 updates.
+- `brm_svi_checkpoint` remains the streaming carry for a new, disjoint window.
+- `BRM SMC` checkpoints identify their bindings through a shared helper; the
+  identities are unchanged, so existing SMC checkpoints still resume.
 
 ## 0.2.141
 
