@@ -107,9 +107,8 @@ function _brm_nlme_worker_model(m::BRMNLMEModel)
     cell_query = _brm_nlme_cell_queries(m.backend, m.cell_query)
     # Fresh samplers and buffers (each worker owns its AD workspace) over the
     # cell reads `m` measured once.
-    (; reads, patterns) = _brm_nlme_cell_state(m)
-    plan = _brm_nlme_cell_plan(m.backend, m.cell_query, m.unit,
-        sort!(vcat(m.theta, m.sigma)), m.view.subject_coordinates, reads)
+    (; reads, plan, patterns) = _brm_nlme_cell_state(m)
+    plan = _brm_nlme_worker_plan(plan, m.backend, m.cell_query, m.unit)
     cell_gradient = (; state=Ref{Any}((; reads, plan, patterns)), lock=ReentrantLock())
     BRMNLMEModel(m.view, m.backend, m.sampler, m.pointwise, m.eta_hvp, m.attribution,
         m.theta, m.sigma, m.eta_blocks, m.unit, m.observations_query,
