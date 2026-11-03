@@ -234,13 +234,33 @@ The graph values `names` of `rk` (formula values, `=` assignments, `@plate`
 cell outputs) at each draw, the columns of `U` in `rk`'s unconstrained
 coordinates: one vector of per-draw values per name, from one prepared value
 kernel.
+
+A draw's value of a `@plate` output has one entry per cell in the cell's own
+shape, as the model reads it: after `out[i] = v`, `value[i]` is cell `i`'s
+number, vector or matrix. `reduce(vcat, value)` concatenates vector cells.
 """
 function rk_draw_values(rk::RKBRMI, U::AbstractMatrix, names)
     names = Tuple(Symbol.(names))
     U = _brm_cut_draws(U, _rk_layout_coordinate_names(rk); prefix="rk_draw_values")
-    read = _rk_value_reader(rk, names)
+    cells = _rk_plate_output_cell_names(rk)
+    sources = map(name -> get(cells, name, name), names)
+    read = _rk_value_reader(rk, Tuple(unique(sources)))
     values = [read(U[:, k]) for k in axes(U, 2)]
-    NamedTuple{names}(Tuple([v[name] for v in values] for name in names))
+    NamedTuple{names}(Tuple([v[source] for v in values] for source in sources))
+end
+
+# Each `@plate` output of `rk` with a graph value, to the graph value holding
+# its cells. The cells' name is chosen at emission and can differ from
+# `<output>_cells`, so it is read from the program a query runs.
+function _rk_plate_output_cell_names(rk::RKBRMI)
+    statements = _rk_retained_program(rk).main.args
+    outputs = _rk_kernel_output_names(rk.plan)
+    cells = Dict{Symbol,Symbol}()
+    for kernel in rk.plan.assignments
+        kernel isa _RKPreparedKernelAssignment &&
+            _rk_plate_output_cells!(cells, statements, kernel, outputs[kernel.name])
+    end
+    cells
 end
 
 function _brm_cut_draws(U, names; prefix)

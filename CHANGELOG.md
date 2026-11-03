@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.150
+
+- **`rk_draw_values` reads a `@plate` output per cell:** a draw's value has one
+  entry per cell in the cell's own shape (a number, a vector or a matrix), as
+  the model reads it, so `value[t][h]` is cell `t`'s entry `h`.
+- **`rk_draw_tree(rk, U, names)` labels a `@plate` output by cell:** `:draw`,
+  `:cell`, then `:element` for a vector cell or `:row` × `:column` for a matrix
+  cell.
+- **Breaking:** for vector and matrix cells, `value[i]` was the `i`-th entry of
+  the concatenation and is now cell `i`. `reduce(vcat, value)` gives the
+  previous vector for vector cells. Number cells hold the same values, and
+  their axis in `rk_draw_tree(rk, U, names)` is now `:cell` instead of
+  `:element`. `rk_draw_tree(values)` on an `rk_draw_values` result now raises
+  for vector and matrix cells, because it sees only shapes; use
+  `rk_draw_tree(rk, U, names)`. A raw ReactiveKernels query of the output's name
+  and `brm_cut_family((:conc,), …)` keep the concatenated value.
+
 ## 0.2.149
 
 - **Prior-median starts of native fields:** `brm_start(rk, inits;
