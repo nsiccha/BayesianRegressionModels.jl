@@ -226,59 +226,81 @@ BRM._rk_slap_prior(k, u::Vector{Float64}) =
 BRM._rk_slap_prior_gradient(k, u::Vector{Float64}) =
     BRM._rk_nlme_population_prior_value_gradient(k.prior, u)
 
-# The sparse Laplace's `@plate` cells (src/nlme_laplace_sparse.jl): one cell
-# of `observations` differentiated over a compact selection of packed
-# coordinates (ReactiveKernelsPPL 0.1.22): its gradient and HVPs along `K`
-# directions (the Hessian's columns at its integrated draws), and one
-# direction's HVP and third-order product `D³ℓ[v, v, ·]`, each over the
-# selection.
+# The sparse Laplace's `@plate` cells (src/nlme_laplace_sparse.jl): one cell of
+# `observations` differentiated over a compact selection of partitioned
+# coordinates, conditional on the shared ones. RK gives every compact operator
+# its own shared cache. Newton's HVP therefore runs in its own pass, and the
+# third-order operator owns the additive accumulators, whose
+# shared pullback restores the mixed population derivatives. Reference identity
+# keeps the nested RK records out of every cell group.
+mutable struct _SPLCellAD{H,N,A,P}
+    const hvp::H
+    const newton::N
+    const accumulators::A
+    const pullback::P
+end
+
+# Newton's HVP order for an ordinary cell. Forward over reverse allocates less,
+# but under `partitioned` Enzyme can refuse it at call time.
+_spl_newton_order(forward, reverse) = SecondOrder(reverse, forward)
+
 function BRM._rk_spl_cell_ad(backend::BRM.RKBRMI, observations::Tuple,
-        base0::Vector{Float64}, indices0::Vector{Int}, ad_backend, K::Int;
-        query=nothing)
-    query === nothing || return BRM._rk_spl_factor_ad(query, :outer, base0,
-        indices0, ad_backend; K)
+        base0::Vector{Float64}, indices0::Vector{Int}, ad_backend, K::Int; partitioned)
     rkext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     built, plan = backend.model, rkext._rk_translated(backend)
     m = length(indices0)
     forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
     reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
-    # Ordinary cells have one active vector and a fixed direction-tuple arity.
-    # Forward-over-reverse reduces the work of their Newton and implicit HVPs.
-    second = SecondOrder(forward, reverse)
+    second = _spl_newton_order(forward, reverse)
     hvp = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_hvp, built, plan,
-        observations, base0, indices0, second, ntuple(_ -> zeros(Float64, m), K))
-    # The implicit correction needs only H*v after the global solve. Keep its
-    # one-direction preparation separate from the Newton Hessian block.
-    single = K == 1 ? hvp : Base.invokelatest(prepare_compact_cell_ad, prepare_ad_hvp,
-        built, plan, observations, base0, indices0, second, (zeros(Float64, m),))
-    # Keep the supported reverse-over-forward-over-forward third derivative.
-    third = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_third, built, plan,
-        observations, base0, indices0, SecondOrder(SecondOrder(reverse, forward), forward),
-        (zeros(Float64, m),))
-    (; hvp, single, third)
+        observations, base0, indices0, second,
+        ntuple(_ -> zeros(Float64, m), K); partitioned, locality=:error)
+    # RK's accumulators take reverse over forward for order 1 and the supported
+    # reverse over forward over forward for order 2.
+    second = SecondOrder(reverse, forward)
+    third = SecondOrder(second, forward)
+    owner = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_third, built, plan,
+        observations, base0, indices0, third, (zeros(Float64, m),);
+        partitioned, locality=:error)
+    accumulators = (
+        Base.invokelatest(prepare_cell_accumulator, owner, reverse, base0; order=0),
+        Base.invokelatest(prepare_cell_accumulator, owner, second, base0; order=1),
+        Base.invokelatest(prepare_cell_accumulator, owner, third, base0; order=2),
+    )
+    _SPLCellAD(hvp, Base.invokelatest(prepare_cell_pullback, hvp, reverse, base0),
+        accumulators, Base.invokelatest(prepare_cell_pullback, owner, reverse, base0))
 end
 
-BRM._rk_spl_cell_block(ad, directions::Tuple, base::Vector{Float64},
-    indices::Vector{Int}, i::Int) =
-    ad_gradient_and_hvp(ad.hvp, directions, base, base[indices], indices, i)
-
-function BRM._rk_spl_cell_third(ad, direction::Vector{Float64}, base::Vector{Float64},
-        indices::Vector{Int}, i::Int)
-    gradient, (hv,), (tv,) = ad_gradient_hvp_and_third(ad.third, (direction,), base,
-        base[indices], indices, i)
-    gradient, hv, tv
+function BRM._rk_spl_cell_newton(f, ad::_SPLCellAD, base)
+    result = nothing
+    cell_pullback!(zeros(length(base)), ad.newton, base) do batch
+        result = f(batch)
+    end
+    result
 end
 
-BRM._rk_spl_cell_third_only(ad, direction::Vector{Float64}, base::Vector{Float64},
-    indices::Vector{Int}, i::Int) =
-    only(ad_third(ad.third, (direction,), base, base[indices], indices, i))
+BRM._rk_spl_cell_block(ad::_SPLCellAD, directions::Tuple, base::Vector{Float64},
+    indices::Vector{Int}, i::Int; context) =
+    ad_gradient_and_hvp(ad.hvp, directions, context, base[indices], indices, i)
 
-function BRM._rk_spl_cell_implicit(ad, direction::Vector{Float64}, base::Vector{Float64},
-        indices::Vector{Int}, i::Int)
-    gradient, (hv,) = ad_gradient_and_hvp(ad.single, (direction,), base,
-        base[indices], indices, i)
-    gradient, hv
+function BRM._rk_spl_cell_pass(f, ad::_SPLCellAD, base)
+    packed = zeros(length(base))
+    result = nothing
+    cell_pullback!(packed, ad.pullback, base) do batch
+        result = f(batch)
+    end
+    result, packed
 end
+
+BRM._rk_spl_cell_accumulate(batch, ad::_SPLCellAD, order, direction, weight, base,
+        indices, cell) =
+    accumulate_cell!(batch, ad.accumulators[order + 1], direction, weight,
+        base[indices], indices, cell)
+
+# Diagnostics perturb the compact active values inside one pass and discard its
+# accumulated gradient. Order zero's weighted contraction is the cell's value.
+BRM._rk_spl_cell_value(ad::_SPLCellAD, base, indices, cell; context) =
+    first(BRM._rk_spl_cell_accumulate(context, ad, 0, nothing, 1.0, base, indices, cell))
 
 # A factor's complete derivative block is small: the outer sums and direct
 # reads, or one summand's own reads. Operators are shared only across factors
@@ -305,8 +327,7 @@ function BRM._rk_spl_factor_ad(q, part, base, indices, ad_backend; cell0=1, term
     dirs = ntuple(_ -> shape(zeros(r + m)), K)
     forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
     reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
-    # Reverse over forward, also for an ordinary cell's outer factor: its
-    # active point is the `(sums, active)` tuple even with no sums, and a
+    # An outer factor's active point is the `(sums, active)` tuple, and a
     # forward-over-reverse HVP over a tuple selector fails inside
     # DifferentiationInterface (reactivekernels-use §7a2 Boundaries).
     second = SecondOrder(reverse, forward)
@@ -392,20 +413,6 @@ function BRM._rk_spl_factor_accumulate(batch, ad::_SPLFactorAD, order, direction
     value, local_gradient = accumulate_cell!(batch, ad.accumulators[order + 1],
         d, weight, tail...)
     value, _spl_factor_flat(local_gradient)
-end
-
-function BRM._rk_spl_cell_block(ad::_SPLFactorAD, directions::Tuple,
-        base::Vector{Float64}, indices::Vector{Int}, i::Int; context=base)
-    point = _spl_factor_point(ad, base, indices, i, Float64[], 1, context)
-    g, columns = ad_gradient_and_hvp(ad.hvp,
-        map(d -> (Float64[], d), directions), point...)
-    last(g), map(last, columns)
-end
-
-function BRM._rk_spl_cell_value(ad::_SPLFactorAD, base, indices, cell; context=base)
-    value, _ = ad_value_and_gradient(ad.gradient,
-        _spl_factor_point(ad, base, indices, cell, Float64[], 1, context)...)
-    value
 end
 
 function BRM._rk_spl_factor_value(ad::_SPLFactorAD, base, indices, cell;

@@ -577,6 +577,19 @@ BRM._rk_nlme_cell_query(backend::BRM.RKBRMI, observations::Tuple; kwargs...) =
 BRM._rk_nlme_cell_value(query::CellQuery, point, row::Int) =
     query(point, row)
 BRM._rk_spl_cell_batch(f, query, u) = with_cell_batch(f, query, u)
+# RK partitions whole layout entries by the name it gives them, which a cell
+# latent's entry does not share with its coordinates. Read that from the layout.
+function BRM._rk_spl_partitioned(backend::BRM.RKBRMI, integrated)
+    layout = backend.model.layout
+    marked = falses(layout.total)
+    marked[integrated] .= true
+    entries = [e for e in layout.entries if any(view(marked, e.offset:(e.offset + e.size - 1)))]
+    for e in entries
+        all(view(marked, e.offset:(e.offset + e.size - 1))) || BRM._brm_nlme_error(
+            "brm_laplace_problem: internal: layout entry `$(e.name)` is only partly integrated")
+    end
+    Tuple(e.name => collect(1:(isempty(e.dims) ? e.size : first(e.dims))) for e in entries)
+end
 BRM._rk_spl_cell_footprint(query::CellQuery; shared=true) =
     shared ? partition_footprint_kernel(query.kernel) :
         partition_footprint_kernel(query; shared=false)

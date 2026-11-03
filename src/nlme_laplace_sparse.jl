@@ -269,11 +269,9 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
     owned(declaration) = [i for (i, n) in enumerate(names) if _brm_nlme_owned(n, declaration)]
     # The integrated draws, block by block, levels × margins.
     integrated = Int[]
-    partitioned = Pair{Symbol,Vector{Int}}[]
     omega = Int[]
     blocks = _BRMSlapBlock[]
-    function draws!(labels::AbstractMatrix{Symbol}, parameter::Symbol)
-        push!(partitioned, parameter => collect(axes(labels, 1)))
+    function draws!(labels::AbstractMatrix{Symbol})
         z = Matrix{Int}(undef, size(labels))
         for l in axes(labels, 1), k in axes(labels, 2)
             push!(integrated, get(position, labels[l, k]) do
@@ -302,20 +300,20 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
     for r in records
         if r.kind === :ranef
             nlevels = length(_rk_ranef_record_levels(backend, r))
-            z = draws!([Symbol(r.z, ".", l, ".", k) for l in 1:nlevels, k in 1:length(r.margins)], r.z)
+            z = draws!([Symbol(r.z, ".", l, ".", k) for l in 1:nlevels, k in 1:length(r.margins)])
             block!(_brm_nlme_ranef_declaration(r), r.group, z,
                 ((isnothing(r.scales) ? (r.scale,) : r.scales)...,
                     (isnothing(r.L) ? () : (r.L,))...))
         elseif r.kind === :vector
             labels = names[owned(r.declaration)]
-            block!(r.declaration, r.declaration, draws!(reshape(labels, :, 1), r.declaration), ())
+            block!(r.declaration, r.declaration, draws!(reshape(labels, :, 1)), ())
         elseif r.kind === :gmrf
             # The field's state draws in state order; its SD scales the reads.
             field = Symbol(r.declaration, ".", r.locals.field)
             n = count(name -> _brm_nlme_owned(name, field), names)
             sigma = Symbol(r.declaration, ".", r.locals.sigma)
             block!(r.declaration, r.declaration,
-                draws!(reshape([Symbol(field, ".", j) for j in 1:n], :, 1), field),
+                draws!(reshape([Symbol(field, ".", j) for j in 1:n], :, 1)),
                 (haskey(position, sigma) ? sigma : nothing,); prior=:gmrf)
         elseif r.kind === :cell_gmrf
             # One field per cell, each with its own SD.
@@ -327,14 +325,14 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
                 n = count(name -> startswith(string(name), string(prefix, ".")), names)
                 s = Symbol(sigma, ".", cell)
                 block!(r.declaration, r.declaration,
-                    draws!(reshape([Symbol(prefix, ".", j) for j in 1:n], :, 1), field),
+                    draws!(reshape([Symbol(prefix, ".", j) for j in 1:n], :, 1)),
                     (haskey(position, s) ? s : nothing,); prior=:gmrf)
             end
         elseif r.kind === :cdar
             # standardized innovations, groups × steps; scale and persistence
             eta = Symbol(r.declaration, ".", r.locals.eta)
             z = draws!([Symbol(eta, ".", g, ".", w) for g in 1:length(r.levels),
-                w in 1:length(r.steps)], eta)
+                w in 1:length(r.steps)])
             block!(r.declaration, r.group, z, (Symbol(r.declaration, ".", r.locals.sigma),
                 Symbol(r.declaration, ".", r.locals.rho)))
         else
@@ -345,19 +343,20 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
                 (r.type === :bym2 ? (Symbol(r.declaration, ".", r.locals.rho),) : ())...)
             phi = Symbol(r.declaration, ".", r.locals.phi)
             block!(r.declaration, r.area, draws!(reshape([Symbol(phi, ".", l)
-                for l in 1:graph.S], :, 1), phi), hyper; graph.edges, graph.sums, graph.λ)
+                for l in 1:graph.S], :, 1)), hyper; graph.edges, graph.sums, graph.λ)
             if r.type === :bym2
                 theta = Symbol(r.declaration, ".", r.locals.theta)
                 ntheta = count(n -> _brm_nlme_owned(n, theta), names)
                 block!(theta, r.area, draws!(reshape([Symbol(theta, ".", l)
-                    for l in 1:ntheta], :, 1), theta), hyper)
+                    for l in 1:ntheta], :, 1)), hyper)
             end
         end
     end
     allunique(integrated) || _brm_nlme_error("brm_laplace_problem: internal: a draw " *
         "belongs to two integrated blocks")
     population = setdiff(1:length(names), integrated)
-    (; records, names, integrated, population, blocks, omega, partitioned=Tuple(partitioned))
+    (; records, names, integrated, population, blocks, omega,
+        partitioned=_rk_spl_partitioned(backend, integrated))
 end
 
 function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol,
@@ -657,17 +656,18 @@ end
 
 # Implemented by `BayesianRegressionModelsReactiveKernelsEnzymeExt`: one cell's
 # compact AD (`_rk_spl_cell_ad`), its gradient and Hessian block over its
-# selection (`_rk_spl_cell_block`), and one direction's HVP and third-order
-# product there (`_rk_spl_cell_third`). The correction requests just the third
-# product, then a gradient and one HVP along the solved implicit direction.
+# selection inside a Newton pass (`_rk_spl_cell_newton`, `_rk_spl_cell_block`),
+# and additive derivative contractions inside a shared pass (`_rk_spl_cell_pass`,
+# `_rk_spl_cell_accumulate`). The correction accumulates third-order products,
+# then a gradient and one HVP along the solved implicit direction.
 function _rk_spl_cell_ad end
+function _rk_spl_cell_newton end
 function _rk_spl_cell_block end
-function _rk_spl_cell_third end
-function _rk_spl_cell_third_only end
-function _rk_spl_cell_implicit end
+function _rk_spl_cell_accumulate end
 function _rk_spl_cell_footprint end
 function _rk_spl_cell_reads end
 function _rk_spl_cell_batch end
+function _rk_spl_partitioned end
 function _rk_spl_cell_pass end
 function _rk_spl_cell_value end
 
@@ -727,9 +727,10 @@ function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend; part
                 (; reads, value)
             end
         end
-        # A shared-only cell has no local coordinates; its population
-        # derivatives are supplied by the accumulated prefix pullback.
-        m = maximum(d -> length(d.reads), localdata; init=0)
+        # (cells that read no coordinate still get a one-coordinate selection,
+        # so they are terms like the others; a pad is always partitioned, and
+        # their population derivatives come from the accumulated prefix pullback)
+        m = max(1, maximum(d -> length(d.reads), localdata; init=0))
         cells = map(eachindex(expected)) do i
             r = localdata[i].reads
             value = localdata[i].value
@@ -757,9 +758,9 @@ function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend; part
         K = max(1, maximum(c -> length(c.lz), cells))
         dirs = ntuple(_ -> zeros(m), K)
         ad = _rk_spl_cell_ad(p.backend, (name,), copy(u0), first(cells).sel, ad_backend, K;
-            query=factors)
+            partitioned)
         @debug "sparse Laplace cell group" name cells=length(cells) m K maxrss_gib=Sys.maxrss() / 2^30
-        push!(p.cells, (; name, query, value=factors.outer.value, ad, m, dirs, cells))
+        push!(p.cells, (; name, query, ad, m, dirs, cells))
     end
     p
 end
@@ -1011,11 +1012,11 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
     u[p.integrated] .= z
     for group in p.cells
         group isa _BRMSumCellGroup && continue
-        _rk_spl_cell_pass(group.ad, u) do batch
-            for c in group.cells
+        _rk_spl_cell_batch(group.query, u) do values
+            sweep = batch -> for c in group.cells
                 comp = p.term_component[c.term]
                 comp == 0 && !third && continue
-                value = Base.invokelatest(group.value, batch, Float64[], c.i)
+                value = _rk_nlme_cell_value(group.query, values, c.i)
                 tv === nothing || (tv[c.term] = value)
                 if comp == 0
                     rest += value
@@ -1042,6 +1043,7 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
                     end
                 end
             end
+            derivatives ? _rk_spl_cell_newton(sweep, group.ad, u) : sweep(nothing)
         end
     end
     rest + _brm_spl_assemble_sums!(fc, g, hnz, p, u; derivatives, third, fb, tv, correction)
@@ -1654,8 +1656,8 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
                 for k in 1:m
                     direction = zeros(group.m)
                     direction[c.lpos] .= view(Lb, :, k)
-                    _, tv = _rk_spl_factor_accumulate(batch, group.ad, 2, direction, 0.5,
-                        u, c.sel, c.i; sums=Float64[])
+                    _, tv = _rk_spl_cell_accumulate(batch, group.ad, 2, direction, 0.5,
+                        u, c.sel, c.i)
                     bad === nothing && !all(isfinite, tv) &&
                         (bad = "the third derivative of cell $(c.i) of `$(group.name)`")
                 end
@@ -1685,11 +1687,11 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
                 on(c.term) || continue
                 direction = zeros(group.m)
                 direction[c.lpos] .= v[c.lz]
-                _, gsel = _rk_spl_factor_accumulate(batch, group.ad, 0, nothing, 1.0,
-                    u, c.sel, c.i; sums=Float64[])
+                _, gsel = _rk_spl_cell_accumulate(batch, group.ad, 0, nothing, 1.0,
+                    u, c.sel, c.i)
                 gfinite = all(isfinite, gsel)
-                _, hv = _rk_spl_factor_accumulate(batch, group.ad, 1, direction, 1.0,
-                    u, c.sel, c.i; sums=Float64[])
+                _, hv = _rk_spl_cell_accumulate(batch, group.ad, 1, direction, 1.0,
+                    u, c.sel, c.i)
                 bad === nothing && !(gfinite && all(isfinite, hv)) &&
                     (bad = "the gradient or curvature-vector product of cell $(c.i) of " *
                         "`$(group.name)` at the modes")

@@ -31,8 +31,8 @@ function shared_sweep(p,u)
     group=only(p.cells)
     _,packed=BRM._rk_spl_cell_pass(group.ad,u) do batch
         for c in group.cells
-            BRM._rk_spl_factor_accumulate(batch,group.ad,2,ones(group.m),1.0,
-                u,c.sel,c.i;sums=Float64[])
+            BRM._rk_spl_cell_accumulate(batch,group.ad,2,ones(group.m),1.0,
+                u,c.sel,c.i)
         end
     end
     packed
