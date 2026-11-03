@@ -469,7 +469,7 @@ function _brm_sparse_laplace_problem_from_plan(backend::RKBRMI, r; ad_backend, t
         p.tol = Float64(tol)
         p.maxiter = Int(maxiter)
         fill!(p.u, 0.0)
-        p.nonfinite = p.unconverged = p.blockwise = p.sweeps = 0
+        p.nonfinite = p.unconverged = p.nonfinite_gradient = p.blockwise = p.sweeps = 0
         # A full copy already owns the same fixed probes and reference. Only
         # a changed selection or numerical policy needs new preparation.
         retain = !restricted && p.algebra !== nothing && p.algebra.solver === solver &&
