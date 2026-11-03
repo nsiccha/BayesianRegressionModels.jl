@@ -396,6 +396,20 @@ package extension.
 """
 function rk_bound_data end
 
+# The identity of the density a backend binds: its emitted program and
+# callables, its complete bound inputs (data and frozen preprocessing, not a
+# truncated display or just their shapes) and its packed coordinate names,
+# hashed under `tag`. SMC checkpoints identify their bindings with
+# `tag="brm-smc-v1"`, SVI optimizer checkpoints with `tag="brm-svi-v1"`.
+function _brm_rk_binding_identity(rk, tag)
+    emitted = _rk_retained_program(rk)
+    io = IOBuffer()
+    serialize(io, (format=1, program=_rk_program_statements(emitted),
+        callables=emitted.bindings, data=rk_bound_data(rk),
+        coordinates=_rk_bound_coordinate_names(rk)))
+    "$tag:" * bytes2hex(sha256(take!(io)))
+end
+
 """
     rk_bound_plan(rk::RKBRMI) -> ReactiveKernelsPPL.StructuralPlan
 

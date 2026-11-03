@@ -18,14 +18,7 @@ using SHA: sha256
 # Hash the complete binding, not a truncated display or just its shape.
 # The initial template deliberately identifies a fit lineage, including its
 # training data. Updates keep this template; callers never author identity IDs.
-function binding_identity(rk::BRM.RKBRMI)
-    emitted = BRM._rk_retained_program(rk)
-    io = IOBuffer()
-    serialize(io, (format=1, program=BRM._rk_program_statements(emitted),
-        callables=emitted.bindings, data=BRM.rk_bound_data(rk),
-        coordinates=BRM._rk_bound_coordinate_names(rk)))
-    "brm-smc-v1:" * bytes2hex(sha256(take!(io)))
-end
+binding_identity(rk::BRM.RKBRMI) = BRM._brm_rk_binding_identity(rk, "brm-smc-v1")
 
 function check_identity(rk, expected, label)
     binding_identity(rk) == expected || throw(ArgumentError(
