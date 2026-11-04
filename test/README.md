@@ -2088,7 +2088,12 @@ steps and deterministic repeated evaluations.
 not (an infinite third derivative at a converged mode) in an ordinary cell, a
 sum cell and under matrix-free algebra. It checks the `nonfinite_gradient`
 counter, the warning's named term, the closed-form value and the central
-difference, and that a target materialized from a plan starts at zero.
+difference, and that a target materialized from a plan starts at zero. It also
+pins a `log(erfc(t))` cell with its modes near `t = 19` in the same three
+configurations: the gradient is finite, matches central differences and counts
+nothing. That one needs an Enzyme whose libEnzyme build is `2b1f1cfe` or later
+(`setup_env.jl` pins dogfood `07842f2`, libEnzyme `fce75191`); with an earlier
+build its third order is NaN.
 
 ## One-time bootstrap
 
