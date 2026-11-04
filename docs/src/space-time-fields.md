@@ -152,9 +152,9 @@ is far larger than the reads, use `neighbors=` below.
 
 Posterior inference must also account for the observation model and shared
 parameters. Sparse posterior factorization can have substantial fill, and a
-fast precision application alone does not establish scalable marginalization;
-[the embedded Laplace](#Embedded-Laplace) below reports what its operator algebra
-measures at large sizes.
+fast precision application alone does not establish scalable marginalization.
+The Embedded Laplace section below reports what its operator algebra measures at
+large sizes.
 
 ## A field too large for a mesh: `neighbors=`
 
