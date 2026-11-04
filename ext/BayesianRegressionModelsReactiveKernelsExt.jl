@@ -542,6 +542,10 @@ end
 # Cross-backend coordinate transport (src/coordinate_transport.jl).
 BRM._rk_layout_coordinate_names(backend::BRM.RKBRMI) =
     coordinate_names(backend.model.layout)
+# The declarations the layout holds at zero length, which name no coordinate:
+# a single-level treatment-coded factor's coefficient block, for one.
+BRM._rk_layout_empty_declarations(backend::BRM.RKBRMI) =
+    Set{Symbol}(entry.name for entry in backend.model.layout.entries if entry.size == 0)
 # Each packed coordinate's layout transform, in coordinate order.
 function BRM._rk_layout_coordinate_transforms(backend::BRM.RKBRMI)
     layout = backend.model.layout

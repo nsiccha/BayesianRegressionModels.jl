@@ -892,3 +892,52 @@ end
     @test collect(p) == [1.0, 20.0, 30.0, 4.0, 50.0, 60.0, 70.0, 8.0, 90.0, 10.0]
     @test BRM._brm_nlme_point_values(p, [3, 6, 9]) == [30.0, 60.0, 90.0]
 end
+
+@stestset "a single-level categorical owns no coordinate" begin
+    for (with, without, data, empty) in NLME_LEVEL_MODELS
+        rk = RKBRMI(with(data))
+        view = brm_nlme_view(rk)
+        twin = brm_nlme_view(RKBRMI(without(data)))
+        @test BRM._rk_layout_empty_declarations(rk) == empty
+        # The same partition as the model without the factor.
+        @test view.coordinates == twin.coordinates
+        @test view.role == twin.role
+        @test view.subject == twin.subject
+        @test view.subject_coordinates == twin.subject_coordinates
+        @test view.block_margins == twin.block_margins
+        @test view.mu_references == twin.mu_references
+        # The same likelihoods and η gradients, since the block adds zero.
+        m = brm_nlme_model(rk; ad_backend=NLME_AD)
+        m0 = brm_nlme_model(RKBRMI(without(data)); ad_backend=NLME_AD)
+        θ = 0.1 .* (1:length(m.theta)) .- 0.2
+        σ = fill(-0.4, length(m.sigma))
+        H = [0.1 * sin(1.3i + j) for i in eachindex(view.block_margins), j in eachindex(view.levels)]
+        @test brm_nlme_loglikelihoods(m, θ, σ, H) ≈ brm_nlme_loglikelihoods(m0, θ, σ, H) rtol=1e-12
+        @test brm_nlme_loglikelihoods_and_gradients(m, θ, σ, H)[2] ≈
+            brm_nlme_loglikelihoods_and_gradients(m0, θ, σ, H)[2] rtol=1e-12
+    end
+    # The rule is the layout's, not the factor's: one observed category of an
+    # ordinal response has no cutpoint.
+    ordinal = RKBRMI(@brm (; subject=NLME_DATA.subject, y=fill(1, 13)) begin
+        eta ~ 0 + (1 | subject)
+        y ~ OrderedLogistic(eta)
+    end)
+    @test BRM._rk_layout_empty_declarations(ordinal) == Set([:y_cutpoints])
+    @test count(==(:subject_effect), brm_nlme_view(ordinal).role) == 4
+    # Two levels are an ordinary coefficient block: the layout holds nothing at
+    # zero length and the coefficient is a population coordinate.
+    two = RKBRMI(flat_level(merge(NLME_LEVEL_DATA, (; g=[isodd(i) ? 1 : 2 for i in 1:13]))))
+    @test isempty(BRM._rk_layout_empty_declarations(two))
+    view = brm_nlme_view(two)
+    @test view.role[only(findall(==(Symbol("s_g.1")), view.coordinates))] === :population
+    # Only the layout's own word excuses a declaration: a coordinate record
+    # naming one it does not hold is an inventory defect the view must not read
+    # as an empty block, since a misnamed declaration would then lose its
+    # coordinates without a word.
+    names = view.coordinates
+    @test BRM._brm_nlme_declaration_coordinates(names, :s_g, Set([:s_g])) ==
+        findall(==(Symbol("s_g.1")), names)
+    @test BRM._brm_nlme_declaration_coordinates(names, :no_such, Set([:no_such])) == Int[]
+    @test_throws "`no_such` owns no packed coordinate" BRM._brm_nlme_declaration_coordinates(
+        names, :no_such, BRM._rk_layout_empty_declarations(two))
+end

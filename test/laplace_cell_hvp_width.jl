@@ -104,6 +104,35 @@ end
     @test isfinite(v) && all(isfinite, d)
 end
 
+struct HVPWidthRaising{E}
+    err::E
+end
+ReactiveKernels.ad_gradient_and_hvp(h::HVPWidthRaising, _directions, _base, _active,
+    _indices, _i) = throw(h.err)
+
+# A stub, because which cells Enzyme can take changes: this holds whatever it takes.
+# The group keeps its width through the move, and its batches the same columns.
+@stestset "a batched group moves to reverse over forward at its width" begin
+    width = BRM._BRM_SPL_CELL_HVP_WIDTH
+    n = 2width + 3
+    p = hvp_width_problem(hvp_width_fixture(n; short=width + 1))
+    group, u = hvp_width_group(p)
+    ad = group.ad
+    @test length(group.dirs) == n
+    blocks = [cell_block(ad, group, c, u) for c in group.cells]
+    @test !ad.reverse_over_forward
+    ad.hvp = HVPWidthRaising(Enzyme.Compiler.EnzymeRuntimeActivityError("stub", nothing, nothing))
+    for (c, (g, columns)) in zip(group.cells, blocks)
+        g_moved, columns_moved = cell_block(ad, group, c, u)
+        @test ad.reverse_over_forward
+        @test ad.width === Val(width)
+        @test g_moved ≈ g rtol=1e-12
+        @test length(columns_moved) == length(c.lz)
+        @test all(k -> columns_moved[k] ≈ columns[k], eachindex(columns))
+    end
+    @test all(iszero, Iterators.flatten(group.dirs))
+end
+
 @stestset "plan and problem report their preparation through Treebars" begin
     rk = hvp_width_fixture(5)
     report = Ref("")

@@ -156,6 +156,7 @@ _rk_ast_level_values(values) = Expr(:vect, (_rk_ast_level_value(value) for value
 
 function _rk_lower_assignment_expr(node, name::Symbol)
     node isa Number && return node
+    node isa AbstractVector{<:Real} && return Expr(:vect, node...)
     node isa _BRMPreparedRef && return node.name
     node isa _BRMPreparedExpr || error(
         "RK backend: internal: assignment `$name` holds an unlowerable node")
@@ -1632,7 +1633,7 @@ function _rk_ast_cdar_block!(definitions, taken, term, group_rows, step_rows)
     if factor_values !== nothing
         L = _rk_block_local!(block, :L)
         # Sparse, so the factor declares which groups it couples: a cell reads
-        # `eta` only at the columns its row stores (ReactiveKernels 0.1.70), and a
+        # `eta` only at the columns its row stores (ReactiveKernels 0.1.77 / RKPPL 0.1.85), and a
         # `cor=` coupling groups only within a unit stays local to that unit. A
         # dense factor's zeros remove no read. The factor is built here because
         # bound columns hold vectors.

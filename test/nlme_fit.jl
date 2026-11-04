@@ -460,3 +460,41 @@ end
     @test rows["Estimate (saem)"] == '✓' && rows["SAEM"] == '✓'
     @test rows["Posthoc EBEs"] == '⊘'
 end
+
+@stestset "a single-level categorical fits like the model without it" begin
+    for (with, without, data, _) in NLME_LEVEL_MODELS
+        m = brm_nlme_model(RKBRMI(with(data)); ad_backend=NLME_AD)
+        m0 = brm_nlme_model(RKBRMI(without(data)); ad_backend=NLME_AD)
+        start = brm_nlme_start(m)
+        start0 = brm_nlme_start(m0)
+        @test start.theta == start0.theta && start.sigma == start0.sigma
+        @test start.omega_matrix == start0.omega_matrix
+        @test start.population_logprior ≈ start0.population_logprior rtol=1e-12
+        @test check_protocol(m, start.theta, start.sigma, start.omega; η=start.eta,
+            population_gradient=true)
+        options() = SAEMOptions(iterations=10, burnin=5)
+        f = brm_nlme_fit(m, saem; rng=Xoshiro(1), options=options())
+        f0 = brm_nlme_fit(m0, saem; rng=Xoshiro(1), options=options())
+        @test f.result.theta ≈ f0.result.theta rtol=1e-9
+        @test f.result.sigma ≈ f0.result.sigma rtol=1e-9
+        @test f.result.omega ≈ f0.result.omega rtol=1e-9
+        @test f.estimates.eta.values ≈ f0.estimates.eta.values rtol=1e-7
+    end
+    # The estimates name the block with no levels, in the shape two levels have,
+    # and they start the model again.
+    data = NLME_PLATE_LEVEL_DATA
+    m = brm_nlme_model(RKBRMI(plate_level(data)); ad_backend=NLME_AD)
+    start = brm_nlme_start(m)
+    point = brm_nlme_estimates(m, start.theta, start.sigma, start.omega_matrix).point
+    @test isempty(point.log_CL.src) && eltype(point.log_CL.src) <: Pair
+    @test isempty(point.log_V.sex) && eltype(point.log_V.sex) <: Pair
+    inits = (; log_CL=point.log_CL, log_V=point.log_V, sigma=point.sigma)
+    from_inits = brm_nlme_start(m, inits)
+    @test from_inits.theta ≈ start.theta rtol=1e-12 atol=1e-12
+    @test exp(only(from_inits.sigma)) ≈ point.sigma rtol=1e-12
+    two = brm_nlme_model(RKBRMI(plate_level(merge(data, (; sex=["f", "m", "f"], src=[1, 2, 1]))));
+        ad_backend=NLME_AD)
+    s2 = brm_nlme_start(two)
+    p2 = brm_nlme_estimates(two, s2.theta, s2.sigma, s2.omega_matrix).point
+    @test first.(p2.log_CL.src) == [2] && first.(p2.log_V.sex) == ["m"]
+end

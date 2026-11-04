@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.154
+## 0.2.159
 
 - Changed: NLME unit likelihoods and gradients use one strict RK plate
   partition per unit. Preparation checks structural coordinate ownership,
@@ -34,8 +34,13 @@ instead of failing at run time.
   retain their structural checks. Shared-coordinate changes refresh the cache.
 - Changed: separated CAR fields expose their shared values through row-local
   graph computations, preserving their law, coordinates, inverse and Jacobian.
+- Changed: `cdar(...; cor=C)` emits its fixed correlation factor as a sparse
+  matrix, so a subject reads only the innovation groups its factor rows store.
+- Compatibility: ReactiveKernels 0.1.77 / ReactiveKernelsPPL 0.1.85 preserve
+  sparse factors, stratified group reads, grouped HSGP row forms and shared
+  plate computations across several observations in one unit partition.
 - Compatibility: the strict partitions need ReactiveKernels 0.1.51 and
-  ReactiveKernelsPPL 0.1.54 or later, within the existing 0.1.67 / 0.1.76
+  ReactiveKernelsPPL 0.1.54 or later, within the new 0.1.77 / 0.1.85
   floor. Scalar inference preserves ordinary indexed predictor expressions
   under strict partitioning, and nested data-only helpers inside sampled
   expressions, such as a lower-bounded shares completion's
@@ -46,6 +51,85 @@ instead of failing at run time.
   custom packed vectors. Unit gradients use ordinary Enzyme Reverse, with the
   test bootstrap's Enzyme dogfood pin, which contains `68ed90fe`'s repair for
   matrix-window partition gradients on Julia 1.10.
+
+## 0.2.158
+
+- **Sparse Laplace cells that static Enzyme cannot take forward over reverse:**
+  `brm_laplace_problem`, NLMEEstimation's `laplace_marginals_and_gradient` and so
+  `check_protocol` no longer raise `EnzymeRuntimeActivityError` on such a `@plate`
+  cell. The cell group moves to reverse over forward the first time a product
+  raises that error, with a warning naming the group. Values are the same and the
+  group allocates up to about twice as much. Any other error still propagates. A
+  cell that reduces its data with `unique!(sort!(...))`, as a PK event reader's
+  step lengths do, needs this before Enzyme dogfood `0ed41342`, which takes that
+  cell forward over reverse itself.
+
+## 0.2.157
+
+- **NLME view of a single-level categorical:** `brm_nlme_view`, and with it
+  `brm_nlme_model` and `brm_nlme_fit`, no longer raise ``internal: declaration
+  `x` owns no packed coordinate`` on a model with a categorical term that
+  observes one level, such as `log(s) ~ 1 + g` with `g` an integer column holding
+  a single value. Any declaration the RK layout holds at zero length owns no
+  coordinate, so the model has the partition, likelihoods and gradients of the
+  same model without the term. The named estimates list the term with no levels
+  (`g = []`), and that value starts the model again through `inits`.
+
+## 0.2.156
+
+- **`RKBRMI` random-effect and term priors can read data.** A formula-route
+  prior such as `sd(:, p) ~ Exponential(prior_sd_scale)` failed at construction
+  with `references unknown name prior_sd_scale`, naming an internal array, while
+  `sigma ~ Exponential(prior_sd_scale)` and `SBBRMI` accepted it. Random-effect
+  scale priors (including per-margin, truncated and stratified blocks), Student-t
+  `ranef(:, id) ~ TDist(nu)` degrees of freedom, `hsgp` priors and an `r2d2`
+  `reference_scale` now take a numeric data scalar, an expression or element over
+  numeric data fields, a literal assignment (`rate = 1.7`) or a
+  `name = constant(expr)`. `SBBRMI` still refuses a data `reference_scale`. Data
+  of another type, such as a vector of labels, is refused naming the field.
+- `gp`, `car`, `cdar` and `dar` priors, which otherwise take literals only, now
+  take a numeric data scalar, an element of a data vector or a
+  `name = constant(expr)` as its number. `dar`'s scale prior stays `Normal`.
+- These values stay in the fitted program, as a scalar parameter's prior does. A
+  design may omit the field or repeat its value; one that changes it fails
+  `reprocess`'s program check unless `freeze_constants=false`, and no design binds
+  it. Value-route models (`@plate` cells and assignments reading predictors) still
+  bind these scalars as before.
+
+## 0.2.155
+
+- **In-cell `MvNormal` on `SBBRMI`:** a `@plate` cell may observe its slice
+  jointly, `y[rows[i]] ~ MvNormal(location, covariance)`, with the covariance
+  computed in the cell, inline or bound to a local. It lowers to the BRM-owned
+  family `brm_mvnormal`, which is Stan's `multi_normal` with log density 0 for
+  an empty slice, as in Julia. The pointwise log likelihood is one value per
+  cell and the predictive draw is the slice. Only the two-argument constructor
+  is accepted in a cell. `RKBRMI` already had this since 0.2.86, and both
+  backends now give the same density and gradient.
+- **`Diagonal(v)` and `diagm(v)` on `SBBRMI`:** both lower to `diag_matrix(v)`,
+  in a cell and in a model-scope expression.
+
+## 0.2.154
+
+- **A replay refuses a changed scalar a prior reads by name:** `reprocess`,
+  `RKBRMI(brmi, state)` and `rk_design_binder` accepted a design holding another
+  value of a numeric scalar the program reads by name, such as `s` in
+  `sd(:, p) ~ Exponential(s)` over a `@plate` model, and evaluated the new prior.
+  They now raise "changes the fitted RK program", naming the field, as they
+  already did for a scalar the program holds as a literal. This covers every
+  sampled parameter's law, a `@plate` cell latent's included, and a scalar read
+  through an assignment. A scalar only a cell's values or observations read
+  stays a design input. `freeze_constants=false` still rebuilds with the new
+  prior.
+- **`rk_design_binder` refuses what `reprocess` refuses for held scalars:** after
+  the first design of a kind, a design holding another value of a scalar the
+  program holds as a literal was accepted and the value ignored. It now replays
+  in full, which refuses it. An input read only by `constant(...)` still keeps
+  its fitted value.
+- **A data-free replay supplies an omitted scalar a `@plate` cell reads:**
+  `RKBRMI(builder(design), state)` on a design without such a scalar raised a
+  lowering error, because the builder had declared no data field for it. It now
+  takes the fitted value, as every other replay of an omitted scalar does.
 
 ## 0.2.153
 
