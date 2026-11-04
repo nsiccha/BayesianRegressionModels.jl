@@ -74,10 +74,7 @@ function _brm_gmrf_tracked(field, reference::_BRMGMRFTimeReference, h)
         dinverse_v[t] = -dv / v[t]^2
         dβ[t] = (da * v[t] - a * dv) / v[t]^2
     end
-    p = reference.pattern.permutation
-    tracked = SparseMatrixCSC(nv, nv, colptr, rowval, collect(1.0:ns))[p, p]
-    order = Int.(nonzeros(tracked))
-    position = [only(k for k in nzrange(sp, j) if rowval[k] == j) for j in 1:nv]
+    (; order, position) = reference
     chains = Matrix{SparseMatrixCSC{Float64,Int}}(undef, nc, nt)
     lower = Matrix{Vector{Float64}}(undef, nc, nt)
     diagonal = Matrix{Vector{Float64}}(undef, nc, nt)
@@ -92,7 +89,7 @@ function _brm_gmrf_tracked(field, reference::_BRMGMRFTimeReference, h)
                 chain[k] += weight * data[k, c, t]
             end
         end
-        (; factor, shift) = _brm_gmrf_chain_factor(chain, tracked, order, position, reference.pattern)
+        (; factor, shift) = _brm_gmrf_chain_factor(chain, reference.permuted, order, position, reference.pattern)
         largest_shift = max(largest_shift, shift)
         shift > 0 && (view(chain, position) .+= shift)
         chains[j, t] = SparseMatrixCSC(nv, nv, colptr, rowval, chain)
@@ -250,10 +247,20 @@ function _brm_gmrf_tracked_exact!(M::_BRMGMRFTracked)
     nv, nc, nt = M.reference.shape
     ns = length(nonzeros(M.spatial))
     z = zeros(ns)
+    # One symbolic analysis for every S: they share a pattern.
+    F = cholesky(Symmetric(first(M.chains)))
+    destination = copy(M.spatial)
+    plan = nothing
     for t in 1:nt, j in 1:nc
-        F = cholesky(Symmetric(M.chains[j, t]))
+        t == 1 && j == 1 || cholesky!(F, Symmetric(M.chains[j, t]))
         selected = SelectedInversion.selinv(F; depermute=true).Z
-        copyto!(z, nonzeros(SelectedInversion.selinv_extract(selected, M.spatial)))
+        if selected isa SelectedInversion.SupernodalMatrix
+            plan === nothing && (plan = SelectedInversion.selinv_extract_setup(selected, M.spatial))
+            SelectedInversion.selinv_extract!(destination, selected, plan)
+            copyto!(z, nonzeros(destination))
+        else
+            copyto!(z, nonzeros(SelectedInversion.selinv_extract(selected, M.spatial)))
+        end
         λ = M.scale[j]
         with_q = dot(z, nonzeros(M.spatial))
         with_dq = dot(z, nonzeros(M.derivative))

@@ -29,6 +29,11 @@
 struct _BRMGMRFTimeReference
     pattern::_BRMGMRFFactorPattern
     spatial::SparseMatrixCSC{Float64,Int}
+    # The spatial pattern's permuted storage, the unpermuted position of each of its
+    # entries, and each vertex's diagonal position: what any S on it needs.
+    permuted::SparseMatrixCSC{Float64,Int}
+    order::Vector{Int}
+    position::Vector{Int}
     lower::Matrix{Vector{Float64}}
     root::Matrix{Vector{Float64}}
     scale::Vector{Float64}
@@ -195,7 +200,8 @@ function _brm_gmrf_chains(field, shared, scales, weights, basis, sequential)
         isempty(curvature) && (shared_factor[scale] = (; lower=lower[j, t], root=root[j, t],
             logdet=sum(log, factor.diagonal)))
     end
-    _BRMGMRFTimeReference(pattern, spatial, lower, root, Vector{Float64}(scales), a ./ v,
+    _BRMGMRFTimeReference(pattern, spatial, tracked, order, position, lower, root,
+        Vector{Float64}(scales), a ./ v,
         copy(field.qt), copy(field.qo), basis, sequential, state, field.shape,
         logdetM, entries, largest_shift)
 end
