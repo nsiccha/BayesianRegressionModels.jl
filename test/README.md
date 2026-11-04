@@ -963,7 +963,8 @@ scratch environment described below.
 `nlme_start.jl` reads complete RK and Stan points as NLMEEstimation starting
 values with `brm_nlme_start`. It covers a correlated population-PK model and a
 nested model with a correlated subject family, nested units and a shared HSGP,
-in estimated and fixed shared modes. Subject log-likelihoods sum to the RK
+in estimated and fixed shared modes, and a partial fit withholding one endpoint
+of a shared block. Subject log-likelihoods sum to the RK
 observation likelihood at the point, and `brm_nlme_joint_start` rebuilds the
 same Stan point from the natural values. Initial estimates keyed by prior
 address (`brm_nlme_start(m, inits)`) give the addressed θ, σ and Ω with zero
