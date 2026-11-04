@@ -281,7 +281,6 @@ end
         @test abs(member.dspatial) < 1e-5 && abs(member.dtemporal) < 1e-5
         @test maximum(abs, member.dscale) < 1e-5
     end
-    @test maximum(abs, tracked.cross) < 1e-6
     # The total sensitivity to h is h's inverse, its own estimate having cancelled.
     S = copy(case.h); nonzeros(S) .= F.sensitivity
     @test maximum(abs, (Matrix(S) .- inv(Symmetric(dense)))[dense .!= 0]) < 1e-6

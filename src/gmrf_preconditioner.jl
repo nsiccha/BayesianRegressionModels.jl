@@ -440,6 +440,8 @@ struct _BRMGMRFStarReference
     members::Vector{_BRMGMRFTimeReference}
     hub::Int
     coupling::SparseMatrixCSC{Float64,Int}
+    # The hub's data on its times and channels, as its fixed chains hold them.
+    hub_data::Array{Float64,3}
     logdet::Float64
     factor_entries::Int
     diagonal_shift::Float64
@@ -466,7 +468,7 @@ function _brm_gmrf_star_reference(fields, H, h, localindex)
             push!(rows, i); push!(cols, j); push!(values, nonzeros(D)[a])
         end
         R = _BRMGMRFStarReference(members, k, sparse(rows, cols, values, n, n),
-            sum(m -> m.logdet, members), sum(m -> m.factor_entries, members),
+            _brm_gmrf_field_data(field, h), sum(m -> m.logdet, members), sum(m -> m.factor_entries, members),
             maximum(m -> m.diagonal_shift, members))
         residual = _brm_lanczos_run(_BRMPreconditionedOperator(H, R), trial, 0.0,
             _BRM_GMRF_REFERENCE_TRIAL_ITERATIONS).residual
