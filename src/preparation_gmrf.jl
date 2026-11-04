@@ -31,16 +31,24 @@ function _brm_gmrf_arguments(term)
     axes isa Tuple && length(axes) == 2 || throw(ArgumentError(
         "gmrf needs two spatial columns as `(east, north)`"))
     haskey(kw, :by) && throw(ArgumentError("use @plate for independent gmrf fields"))
-    unknown = setdiff(keys(kw), (:mesh, :spatial, :temporal, :cor))
+    unknown = setdiff(keys(kw), (:mesh, :neighbors, :spatial, :temporal, :cor))
     isempty(unknown) || throw(ArgumentError("unknown gmrf keywords: $(join(unknown, ", "))"))
     get(kw, :spatial, :matern) === :matern || throw(ArgumentError(
         "gmrf currently supports spatial=:matern (two-dimensional smoothness ν=1)"))
     get(kw, :temporal, :ou) === :ou || throw(ArgumentError("gmrf currently supports temporal=:ou"))
     mesh = get(kw, :mesh, nothing)
-    mesh isa NamedTuple && Set(keys(mesh)) == Set((:vertices, :cells)) || throw(ArgumentError(
-        "gmrf needs mesh=(vertices=xy, cells=triangles)"))
+    neighbors = get(kw, :neighbors, nothing)
+    (mesh === nothing) != (neighbors === nothing) || throw(ArgumentError(
+        "gmrf takes either mesh=(vertices=xy, cells=triangles) or neighbors=m, not both or neither"))
+    if neighbors === nothing
+        mesh isa NamedTuple && Set(keys(mesh)) == Set((:vertices, :cells)) || throw(ArgumentError(
+            "gmrf needs mesh=(vertices=xy, cells=triangles)"))
+    else
+        neighbors isa Integer && neighbors >= 1 || throw(ArgumentError(
+            "gmrf neighbors must be a positive integer literal; got $(repr(neighbors))"))
+    end
     (; axes, time=args[2], channel=length(args) == 3 ? args[3] : nothing,
-       mesh, cor=get(kw, :cor, nothing))
+       mesh, neighbors=neighbors === nothing ? nothing : Int(neighbors), cor=get(kw, :cor, nothing))
 end
 
 function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, context;
@@ -61,6 +69,23 @@ function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, conte
             throw(ArgumentError("gmrf channel must have one nonmissing label per row"))
         source, raw, _brm_fitted_levels(source, raw)
     end
+    correlation = _brm_gmrf_correlation(arguments.cor)
+    correlation === nothing || correlation.K == length(channels) || throw(DimensionMismatch(
+        "gmrf channel correlation dimension must equal the fitted channel count"))
+    source = (first.(spatial)..., time_source,
+        (channel_source === nothing ? () : (channel_source,))...)
+    priors = (;
+        sigma_prior=_brm_term_prior_expression(term, target, context, :term_sd;
+            default=ExprColumn(LogNormal, 0.0, 1.0)),
+        spatial_prior=_brm_term_prior_expression(term, target, context, :term_length_scale;
+            component=:space, default=ExprColumn(LogNormal, 0.0, 1.0)),
+        temporal_prior=_brm_term_prior_expression(term, target, context, :term_length_scale;
+            component=:time, default=ExprColumn(LogNormal, 0.0, 1.0)))
+    correlation_source = correlation === nothing ? () : (correlation.name,)
+    if arguments.neighbors !== nothing
+        return _brm_prepare_gmrf_footprint(source, correlation_source, spatial, time,
+            row_channels, channels, correlation, times, priors, target, arguments.neighbors, geometry)
+    end
     vertices_source, vertices = _brm_term_data(:gmrf, arguments.mesh.vertices, context)
     cells_source, cells = _brm_term_data(:gmrf, arguments.mesh.cells, context)
     vertices = _brm_fitted(copy, :gmrf_vertices, vertices_source, vertices)
@@ -69,23 +94,10 @@ function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, conte
         throw(ArgumentError("gmrf mesh needs numeric vertex and integer cell matrices"))
     size(vertices, 2) == 2 && size(cells, 2) == 3 || throw(ArgumentError(
         "gmrf mesh needs two vertex coordinates and three vertex indices per cell"))
-    correlation = _brm_gmrf_correlation(arguments.cor)
-    correlation === nothing || correlation.K == length(channels) || throw(DimensionMismatch(
-        "gmrf channel correlation dimension must equal the fitted channel count"))
-    source = (first.(spatial)..., time_source,
-        (channel_source === nothing ? () : (channel_source,))...)
-    dependencies = (source..., vertices_source, cells_source,
-        (correlation === nothing ? () : (correlation.name,))...)
-    priors = (;
-        sigma_prior=_brm_term_prior_expression(term, target, context, :term_sd;
-            default=ExprColumn(LogNormal, 0.0, 1.0)),
-        spatial_prior=_brm_term_prior_expression(term, target, context, :term_length_scale;
-            component=:space, default=ExprColumn(LogNormal, 0.0, 1.0)),
-        temporal_prior=_brm_term_prior_expression(term, target, context, :term_length_scale;
-            component=:time, default=ExprColumn(LogNormal, 0.0, 1.0)))
+    dependencies = (source..., vertices_source, cells_source, correlation_source...)
     layout = _BRMGMRFStateLayout(size(vertices, 1), channels, times)
     state = (; target, times=layout.times, channels=layout.channels, layout, correlation, vertices_source, cells_source,
-        vertices, cells, nvertices=size(vertices, 1), priors...)
+        vertices, cells, nvertices=size(vertices, 1), neighbors=nothing, priors...)
     prepared = _BRMPreparedTerm(gmrf, source, state, dependencies)
     geometry || return prepared
     mesh = _brm_gmrf_mesh(vertices, cells)
@@ -93,6 +105,24 @@ function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, conte
     indices = _brm_gmrf_state_indices(interpolation.indices, time, row_channels, layout)
     _BRMPreparedTerm(gmrf, source,
         merge(state, (; mesh, indices, weights=interpolation.weights)), dependencies)
+end
+
+# A footprint field has no mesh: its support is the training rows' read pairs,
+# and its state follows from them and the neighbour count alone.
+function _brm_prepare_gmrf_footprint(source, correlation_source, spatial, time,
+        row_channels, channels, correlation, times, priors, target, neighbors, geometry)
+    state = (; target, times, channels=copy(channels), correlation, neighbors, priors...)
+    dependencies = (source..., correlation_source...)
+    prepared = _BRMPreparedTerm(gmrf, source, state, dependencies)
+    geometry || return prepared
+    footprint = _brm_fitted_value(:gmrf_footprint, source[3]) do
+        _brm_vecchia_footprint(_brm_fit_input_source(source[1], last(spatial[1])),
+            _brm_fit_input_source(source[2], last(spatial[2])),
+            _brm_fit_input_source(source[3], time), length(channels); neighbors)
+    end
+    index = _brm_vecchia_field_index(footprint, channels, last(spatial[1]), last(spatial[2]),
+        time, row_channels)
+    _BRMPreparedTerm(gmrf, source, merge(state, (; footprint, index)), dependencies)
 end
 
 function _brm_gmrf_correlation(value)
@@ -111,6 +141,10 @@ function _brm_replay_gmrf(training, context)
     x, y, time = map(s -> context.data[s], training.source[1:3])
     row_channels = length(training.source) == 3 ? ones(Int, length(time)) :
         context.data[training.source[4]]
+    if state.neighbors !== nothing
+        index = _brm_vecchia_field_index(state.footprint, state.channels, x, y, time, row_channels)
+        return _BRMPreparedTerm(gmrf, training.source, merge(state, (; index)), training.dependencies)
+    end
     interpolation = _brm_gmrf_interpolation(state.mesh, x, y)
     indices = _brm_gmrf_state_indices(interpolation.indices, time, row_channels, state.layout)
     _BRMPreparedTerm(gmrf, training.source,

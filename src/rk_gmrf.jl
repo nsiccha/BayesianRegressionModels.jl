@@ -7,6 +7,14 @@ struct _BRMGMRFLaw{S,T,L,G}
     geometry::G
 end
 
+# The same field on its read footprint: `geometry` is a `_BRMGMRFFootprint`.
+struct _BRMGMRFVecchiaLaw{S,T,L,G}
+    spatial_length::S
+    temporal_length::T
+    correlation_factor::L
+    geometry::G
+end
+
 # Symbolic sparse lookup only: no sampled values enter this operation. Zero
 # denotes an absent entry. Keeping the lookup avoids storing every pair in
 # every sparse elimination dot product (which can exceed the factor storage).
@@ -116,6 +124,21 @@ function brm_gmrf_rows(support, east, north, time, channel)
        weight1=weights[:, 1], weight2=weights[:, 2], weight3=weights[:, 3])
 end
 
+# A footprint field's fitted support, from the fit-role columns in the graph.
+struct _BRMGMRFFootprintSupport{C}
+    geometry::_BRMGMRFFootprint
+    channels::C
+end
+
+function brm_gmrf_footprint_support(east, north, time, channel, neighbors)
+    channels = _brm_fit_levels(channel)
+    _BRMGMRFFootprintSupport(
+        _brm_vecchia_footprint(east, north, time, length(channels); neighbors), channels)
+end
+
+brm_gmrf_rows(support::_BRMGMRFFootprintSupport, east, north, time, channel) =
+    (; index=_brm_vecchia_field_index(support.geometry, support.channels, east, north, time, channel))
+
 # One field of a cell row read (`brm_gmrf_cell_read`), as a function of its
 # own so a broadcast over the reads infers one concrete element type
 # (`getproperty.(reads, :index1)` with a runtime Symbol infers a Union, which
@@ -176,10 +199,20 @@ function _rk_plan_gmrf_term!(prepared, target, data, columns, taken; derived)
     fit_channel = length(prepared.source) == 3 ?
         _rk_fit_input!(derived, columns, taken, sources[4], [1]) :
         _rk_fit_twin!(derived, columns, taken, data, sources[4])
+    if state.neighbors !== nothing
+        fit_east = _rk_fit_twin!(derived, columns, taken, data, sources[1])
+        fit_north = _rk_fit_twin!(derived, columns, taken, data, sources[2])
+        return _RKTermSpec(:gmrf, sources,
+            (; id, neighbors=state.neighbors, fit_east, fit_north, fit_time, fit_channel,
+               source=prepared.source, correlation=state.correlation,
+               nchannels=length(state.channels), priors=_brm_term_prior_expressions(prepared),
+               state_axes=(; times=state.times, channels=state.channels)),
+            id, id)
+    end
     vertices = _rk_fit_input!(derived, columns, taken, state.vertices_source, [state.vertices])
     cells = _rk_fit_input!(derived, columns, taken, state.cells_source, [state.cells])
     _RKTermSpec(:gmrf, sources,
-        (; id, vertices, cells, fit_time, fit_channel, source=prepared.source, correlation=state.correlation,
+        (; id, neighbors=nothing, vertices, cells, fit_time, fit_channel, source=prepared.source, correlation=state.correlation,
            nchannels=length(state.channels), priors=_brm_term_prior_expressions(prepared),
            state_axes=(; nvertices=state.nvertices, times=state.times, channels=state.channels)),
         id, id)
@@ -189,12 +222,19 @@ function _rk_ast_gmrf!(definitions, statements, taken, bindings, term)
     options = term.options
     support = _rk_ast_fresh_name(string(options.id, "_support"), taken)
     rows = _rk_ast_fresh_name(string(options.id, "_rows"), taken)
-    fitter = _rk_value_callee!(bindings, brm_gmrf_support, taken)
     reader = _rk_value_callee!(bindings, brm_gmrf_rows, taken)
-    law = _rk_value_callee!(bindings, _BRMGMRFLaw, taken)
-    push!(statements, Expr(:(=), support, Expr(:call, fitter,
-        Expr(:ref, options.vertices, 1), Expr(:ref, options.cells, 1),
-        options.fit_time, options.fit_channel)))
+    footprint = options.neighbors !== nothing
+    law = _rk_value_callee!(bindings, footprint ? _BRMGMRFVecchiaLaw : _BRMGMRFLaw, taken)
+    fit = if footprint
+        Expr(:call, _rk_value_callee!(bindings, brm_gmrf_footprint_support, taken),
+            options.fit_east, options.fit_north, options.fit_time, options.fit_channel,
+            options.neighbors)
+    else
+        Expr(:call, _rk_value_callee!(bindings, brm_gmrf_support, taken),
+            Expr(:ref, options.vertices, 1), Expr(:ref, options.cells, 1),
+            options.fit_time, options.fit_channel)
+    end
+    push!(statements, Expr(:(=), support, fit))
     push!(statements, Expr(:(=), rows, Expr(:call, reader, support, term.columns...)))
     prior = map(p -> _rk_ast_positive_prior(p, bindings, taken; default=:LogNormal), options.priors)
     block = _rk_block_body(prior...)
@@ -203,7 +243,7 @@ function _rk_ast_gmrf!(definitions, statements, taken, bindings, term)
     correlation = options.correlation === nothing ?
         _rk_ast_identity_factor(options.nchannels) : _rk_ast_level_factor_value(options.correlation)
     L = _rk_block_argument!(block, :L, correlation)
-    locals = _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, reads, L)
+    locals = _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, reads, L; footprint)
     push!(statements, Expr(:call, :~, options.id, locals.call))
     (; locals.sigma, locals.spatial_length, locals.temporal_length, locals.field,
        geometry, support, rows, priors=prior)
@@ -220,7 +260,7 @@ _rk_ast_identity_factor(n) = Expr(:call, :hcat, (Expr(:vect, (i == j ? 1.0 : 0.0
 # declares its field bare, `field ~ law(...)`, its shape the law's sampling
 # geometry (RKPPL cell submodels bind bare names only).
 function _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, reads, L;
-        cell::Bool=false, accessors=nothing)
+        cell::Bool=false, accessors=nothing, footprint::Bool=false)
     sigma = _rk_block_local!(block, :sigma)
     spatial_length = _rk_block_local!(block, :spatial_length)
     temporal_length = _rk_block_local!(block, :temporal_length)
@@ -237,9 +277,14 @@ function _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, re
     # form with a concrete element type.
     access(name) = accessors === nothing ? _rk_ast_property(reads, name) :
         Expr(:., getproperty(accessors, name), Expr(:tuple, reads))
-    summands = [Expr(:call, :.*, access(Symbol(:weight, j)),
-        Expr(:ref, field, access(Symbol(:index, j)))) for j in 1:3]
-    value = Expr(:call, :.*, sigma, Expr(:call, :.+, summands...))
+    # A footprint field has a state at every read, so a row reads that state.
+    read = if footprint
+        Expr(:ref, field, access(:index))
+    else
+        Expr(:call, :.+, (Expr(:call, :.*, access(Symbol(:weight, j)),
+            Expr(:ref, field, access(Symbol(:index, j)))) for j in 1:3)...)
+    end
+    value = Expr(:call, :.*, sigma, read)
     call = _rk_ast_block_call!(definitions, taken, "brm_gmrf", block, value)
     (; call, sigma, spatial_length, temporal_length, field)
 end
@@ -334,6 +379,8 @@ function _rk_kernel_cell_formulas(@nospecialize(brmi::BRMI), program, kernel, sc
                 "terms in an independent cell formula are not lowered on RK yet")
         term = only(fields)
         arguments = _brm_gmrf_arguments(term)
+        arguments.neighbors === nothing || error(
+            "$prefix: cell field `$target` uses neighbors=; a footprint field is one model-scope field")
         positional = (name.(arguments.axes)..., name(arguments.time),
             (arguments.channel === nothing ? () : (name(arguments.channel),))...)
         sources = map(positional) do param

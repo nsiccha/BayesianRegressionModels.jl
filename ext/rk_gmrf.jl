@@ -81,3 +81,39 @@ function ReactiveKernelsPPL.sampling_geometry(::Type{BRM._BRMGMRFLaw}, args, sha
 end
 ReactiveKernelsPPL.sampling_distribution_graph(::Type{BRM._BRMGMRFLaw}, args::Tuple) =
     _gmrf_density_graph
+
+# A footprint field's density and its reverse derivative are one data-only pass
+# per distinct conditional geometry over plain arrays. The derivative is
+# authored in the rule graph, so reverse mode keeps no tape over the states.
+ReactiveKernels.@kernel function _gmrf_vecchia_rule_graph(field::Vector{Float64},
+        spatial_length::Float64, temporal_length::Float64, L::Matrix{Float64},
+        geometry, density_bar::Float64)
+    density::Float64 = BRM._brm_vecchia_logdensity(field, spatial_length, temporal_length, L, geometry)
+    gradient = BRM._brm_vecchia_gradient(field, spatial_length, temporal_length, L, geometry)
+    field_bar::Vector{Float64} = density_bar .* gradient.field
+    spatial_length_bar::Float64 = density_bar * gradient.spatial_length
+    temporal_length_bar::Float64 = density_bar * gradient.temporal_length
+    L_bar::Matrix{Float64} = density_bar .* gradient.L
+    # The footprint is data: its cotangent port is empty and never read.
+    geometry_bar = nothing
+    return density, field_bar, spatial_length_bar, temporal_length_bar, L_bar, geometry_bar
+end
+const _gmrf_vecchia_density = ReactiveKernels.derivative_rule(_gmrf_vecchia_rule_graph;
+    primal=:density, covector=:density_bar,
+    cotangents=(field=:field_bar, spatial_length=:spatial_length_bar,
+        temporal_length=:temporal_length_bar, L=:L_bar, geometry=:geometry_bar),
+    name=:brm_gmrf_vecchia_density)
+
+ReactiveKernels.@kernel function _gmrf_vecchia_density_graph(field, spatial_length,
+        temporal_length, L, geometry)
+    return _gmrf_vecchia_density(field, spatial_length, temporal_length, L, geometry)
+end
+
+function ReactiveKernelsPPL.sampling_geometry(::Type{BRM._BRMGMRFVecchiaLaw}, args, shape)
+    dimension = :($(args[4]).ncoordinates)
+    dimensions = isempty(shape) ? (dimension,) : shape
+    ParameterGeometry(dimensions, dimension; support=:real,
+        constrain=_gmrf_coordinates, unconstrain=_gmrf_coordinates, logjac=_gmrf_logjac)
+end
+ReactiveKernelsPPL.sampling_distribution_graph(::Type{BRM._BRMGMRFVecchiaLaw}, args::Tuple) =
+    _gmrf_vecchia_density_graph

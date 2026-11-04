@@ -274,6 +274,7 @@ _brmd_law(::typeof(StanBlocks.stan.builtin.dummy)) = :allocation_only
 _brmd_law(::typeof(brm_total)) = :exact_total
 _brmd_law(::typeof(brm_icar)) = :icar
 _brmd_law(::typeof(brm_gmrf)) = :gmrf
+_brmd_law(::typeof(brm_gmrf_vecchia)) = :gmrf_vecchia
 # These are exact producer-owned StanBlocks bindings, never a name heuristic
 # applied to arbitrary user callables.
 for (name,law) in ((:normal,:normal_sd),(:std_normal,:standard_normal),
@@ -315,6 +316,7 @@ _brmd_law_math(_c,::Val{:student_t_standard},a) = "t_{"*only(a)*"}(0,1)"
 _brmd_law_math(_c,::Val{:student_t_location_scale},a) = "t_{"*a[1]*"}("*join(a[2:3],",")*")"
 _brmd_law_math(_c,::Val{:mvnormal_cholesky},a) = "\\mathcal N(" * a[1] * "," * a[2] * a[2] * "^{\\mathsf T})"
 _brmd_law_math(_c,::Val{:gmrf},_a) = "\\mathcal N(0,(Q_t\\otimes\\Omega^{-1}\\otimes Q_s)^{-1})"
+_brmd_law_math(_c,::Val{:gmrf_vecchia},_a) = "\\mathcal N(0,\\Omega\\otimes[(I-B)^{\\mathsf T}F^{-1}(I-B)]^{-1})"
 # The absorbed coefficients' prior p(beta) is integrated out exactly. With
 # group-level predictors each group's mean uses its own column values w_i.
 _brmd_exact_total_math(sds,group_level::Bool=false) = "\\int\\prod_{i}\\mathcal N\\left(\\mathbf t_{i}\\mid "*
@@ -326,6 +328,7 @@ _brmd_law_prose(c,::Val{:normal_sd}) = _brmd_text(c,:law_normal_sd)
 _brmd_law_prose(c,::Val{:standard_normal}) = _brmd_text(c,:law_standard_normal)
 _brmd_law_prose(c,::Val{:icar}) = _brmd_text(c,:law_icar)
 _brmd_law_prose(c,::Val{:gmrf}) = _brmd_text(c,:law_gmrf)
+_brmd_law_prose(c,::Val{:gmrf_vecchia}) = _brmd_text(c,:law_gmrf_vecchia)
 _brmd_law_prose(c,::Val{:improper_flat}) = _brmd_text(c,:law_improper_flat)
 _brmd_law_prose(c,::Val{:allocation_only}) = _brmd_text(c,:law_allocation_only)
 _brmd_law_prose(c,::Val{:exponential_rate}) = _brmd_text(c,:law_exponential_rate)
@@ -753,7 +756,12 @@ _brmd_builtin_call(::typeof(ar),c)=BRMDescriptionFragment(
 _brmd_builtin_call(::typeof(cdar),c)=BRMDescriptionFragment(
     prose=(_brmd_text(c,:damped_walk),),
     equations=("\\delta_1=\\sigma Lz_1,\\quad\\delta_t=\\rho\\delta_{t-1}+\\sigma\\sqrt{1-\\rho^2}Lz_t,\\quad z_t\\sim\\mathcal N(0,I)",),covers=(c.id,))
-_brmd_builtin_call(::typeof(gmrf),c)=BRMDescriptionFragment(
+_brmd_builtin_call(::typeof(gmrf),c)=haskey(c.keywords,:neighbors) ? BRMDescriptionFragment(
+    prose=(_brmd_text(c,:space_time_gmrf_vecchia),),
+    equations=("K_{ij}=M_1(\\kappa r_{ij})\\exp(-|t_i-t_j|/\\ell_t),\\quad M_1(x)=xK_1(x),\\quad\\kappa=\\frac{\\sqrt2}{\\ell_s},\\quad\\rho=2\\ell_s",
+        "x_i\\mid x_{N(i)}\\sim\\mathcal N(b_i^{\\mathsf T}x_{N(i)},F_i),\\quad b_i=K_{N(i)N(i)}^{-1}K_{N(i)i},\\quad F_i=1-K_{iN(i)}b_i",
+        "f_i=\\sigma x_{i,c_i}"),
+    covers=(c.id,)) : BRMDescriptionFragment(
     prose=(_brmd_text(c,:space_time_gmrf),),
     equations=("K=\\kappa^2 C+G,\\quad Q_s=\\frac{KC^{-1}K}{4\\pi\\kappa^2},\\quad\\kappa=\\frac{\\sqrt2}{\\ell_s},\\quad\\rho=2\\ell_s",
         "a_t=\\exp[-(t_t-t_{t-1})/\\ell_t],\\quad u_1\\sim\\mathcal N(0,\\Omega\\otimes Q_s^{-1}),\\quad u_t\\mid u_{t-1}\\sim\\mathcal N(a_tu_{t-1},(1-a_t^2)\\Omega\\otimes Q_s^{-1})",

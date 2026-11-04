@@ -221,6 +221,9 @@ function _brm_nlme_prior_writes!(writes, ::Val{:gmrf}, record, values, value)
     writes
 end
 
+_brm_nlme_prior_writes!(writes, ::Val{:gmrf_footprint}, record, values, value) =
+    _brm_nlme_prior_writes!(writes, Val(:gmrf), record, values, value)
+
 # `m`'s unit point with its prior-median coordinates set, and the positions of
 # those coordinates. Every other coordinate keeps the unit point's exact value,
 # the fixed values of a fixed-shared model included.

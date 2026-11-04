@@ -1246,6 +1246,53 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     nothing
 end
 
+# A footprint field's states follow from its rows and neighbour count alone, so
+# both backends hold them in one order; the channel axis is paired by label.
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:gmrf_footprint}, record, rk, d, stan, stan_pos)
+    entry = _brm_term_entry(d, record.predictor,
+        e -> getf(e.value) === gmrf && _brm_transport_gmrf_axes(e.value) == record.axes,
+        "`gmrf$(record.axes)`")
+    base = (; kind=:gmrf_footprint, predictor=record.predictor, term=entry.term)
+    target = _sb_lp_emitted_name(record.predictor, entry.link)
+    prepared = only(e.const_.prepared for e in values(d.plan.preproc)
+        if e.kind === :gmrf && e.const_.prepared.state.target === target &&
+            e.const_.prepared.source == record.axes)
+    state = prepared.state
+    footprint = state.footprint
+    record.neighbors == state.neighbors && record.state_axes.times == state.times &&
+        Set(record.state_axes.channels) == Set(state.channels) ||
+        _brm_transport_error(:parameterization_mismatch,
+            "brm_coordinate_transport: GMRF $(base) has a different fitted footprint")
+    C = length(state.channels)
+    channel_index = Dict(c => i for (i, c) in enumerate(state.channels))
+    for (parameter, local_name) in ((:sd, :sigma), (:spatial_length, :spatial_length),
+            (:temporal_length, :temporal_length), (:field, :field))
+        isnothing(_brm_term_known_value(d.plan.parent, record.predictor,
+            entry.value, parameter)) || continue
+        names = _brm_transport_elements(
+            _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
+            (; base..., parameter))
+        declaration = Symbol(record.declaration, ".", getproperty(record.locals, local_name))
+        if parameter === :field
+            length(names) == footprint.ncoordinates || error(
+                "brm_coordinate_transport: GMRF $(base) field coordinate count disagrees")
+            for j in 1:footprint.ncoordinates
+                state_position = (j - 1) ÷ C
+                label = record.state_axes.channels[j - C * state_position]
+                coordinate = _brm_vecchia_coordinate(footprint, record.state_axes.channels, j)
+                k = channel_index[label] + C * state_position
+                push!(pairs, BRMCoordinatePair((; base..., parameter, coordinate...),
+                    Symbol(declaration, ".", j), names[k], declaration, (j,), :identity))
+            end
+        else
+            push!(pairs, BRMCoordinatePair((; base..., parameter, index=1),
+                declaration, only(names), declaration, (), :identity))
+        end
+    end
+    nothing
+end
+
 # Independent cell fields (`field ~ 0 + gmrf(...)` in a `@plate` cell): RK
 # declares one field per current cell, SB's cell formula fit one per fitted
 # label. Cells pair by label, scalar roles per cell, and state positions by
