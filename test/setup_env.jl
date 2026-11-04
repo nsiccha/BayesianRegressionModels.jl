@@ -14,10 +14,10 @@
 # Enzyme is the ecosystem's `dogfood` line (user pick on decision
 # `BayesianRegressionModels/decisions/2026-10-28T15-34-11-008-0n0kgfh`): reviewed
 # repairs no registered release carries, which BRM's RK cell gradients need. Its
-# commits live only in the KB hosts' Enzyme mirror (`MIRRORS`), and it runs
-# against its own libEnzyme build (`deps/dogfood_libenzyme.toml`), which exists
-# only on the hosts the Enzyme lane builds it for (gordito, Julia 1.10 and
-# 1.12). `apply_dogfood_libenzyme()` points `Enzyme_jll` at this host's build
+# commits are materialized from the KB hosts' Enzyme mirror (`MIRRORS`) when
+# available, and it runs against its own libEnzyme build
+# (`deps/dogfood_libenzyme.toml`). `apply_dogfood_libenzyme()` checks the host
+# and Julia version and points `Enzyme_jll` at the matching build
 # through the KB resolver's own step, and refuses where there is none: the
 # stock library gives wrong Reverse gradients the build fixes (skill
 # `enzyme-use`).
@@ -307,7 +307,10 @@ const PINS = [
     # 474fd636 / libEnzyme df199913 preserves JIT symbols from augmented
     # reverse helpers under Forward, including the digamma partials needed
     # by ordinary negative-binomial compact-cell HVPs.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "474fd63654e64fdff77eed5326b9f9c6613dac50"),  # dogfood (KB mirror only)
+    # 6053067f / libEnzyme 3425ed9c types floating-point tuple stack slots
+    # throughout Reverse, so derived-scale blocks wider than four margins
+    # differentiate without changing BRM's block pass (reverse-untyped-a117a92b).
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "6053067f2fa33a4390aea2a365e9e24f83acb495"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also

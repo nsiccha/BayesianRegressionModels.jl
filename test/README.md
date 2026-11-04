@@ -1978,6 +1978,15 @@ the generic path does. It also checks the candidate-scoring frame, which builds
 a Gaussian block's factor once per block, bit for bit against the per-level
 frame.
 
+`adaptive_centering_blockwise_widths.jl` sweeps that pass over block widths from
+1 to 12 margins and four kinds of derived scale on a toy Gaussian density, with
+no Stan toolchain. It checks that each plan takes the pass, that its log density
+equals the generic path's exactly and its gradient to rounding, that both agree
+with central differences, and that inputs are unchanged. A width has to be
+checked on its own: the pass works at four margins, and at five Enzyme raised
+`EnzymeNoTypeError` until the repair in Enzyme. The test bootstrap pins
+`6053067f`, which includes that repair and declares libEnzyme `3425ed9c`.
+
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, Turing/Enzyme versus StanBlocks/BridgeStan
 density and gradient parity, physical constrained quantities, and the
@@ -2237,8 +2246,8 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   binary without another edit; like Treebars, it is resolution plumbing, not a
   test dependency. A manifest resolved before this entry still holds 0.0.302:
   re-run `setup_env.jl`.
-- **Enzyme is the ecosystem's `dogfood` line, so the suite runs on gordito
-  only.** BRM's RK cell gradients need repairs no registered Enzyme carries:
+- **Enzyme is the ecosystem's `dogfood` line and needs its declared
+  libEnzyme build.** BRM's RK cell gradients need repairs no registered Enzyme carries:
   a nested-NLME totals cell reads an `hcat` design built from views at its
   rows, which registered Enzyme rejects with `IllegalTypeAnalysisException`
   and dogfood `d37cb0b4` differentiates (Enzyme snag
@@ -2256,14 +2265,14 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   `erfcx-positive-t-db1c8c84`), required by scaled-tail likelihoods in the
   embedded Laplace.
   `setup_env.jl` materializes the pinned dogfood commit from the KB host's
-  Enzyme mirror (it is not on GitHub), develops its nested `lib/EnzymeCore`
+  Enzyme mirror when available, develops its nested `lib/EnzymeCore`
   0.8.27 beside it (Pkg 1.10 ignores Enzyme's `[sources]`; registered
   EnzymeCore lacks `set_atomic_add`), and runs the KB resolver's
   dogfood-libEnzyme step: it points `Enzyme_jll` 0.0.301 at the declared
   libEnzyme build through the ignored `test/LocalPreferences.toml` and
-  prints `KB-DOGFOOD-LIBENZYME <commit> llvm<M> <dir>`. That build exists
-  only where the Enzyme lane builds it (gordito, Julia 1.10 and 1.12);
-  elsewhere setup refuses rather than load the stock library, whose Reverse
+  prints `KB-DOGFOOD-LIBENZYME <commit> llvm<M> <dir>`. The resolver checks
+  that the build is available for the host and Julia version;
+  otherwise setup refuses rather than load the stock library, whose Reverse
   gradients the build fixes (skill `enzyme-use`). Check a running process with
   `Enzyme.Compiler.Enzyme_jll.libEnzyme_path`.
 - **All `develop` paths go in ONE `Pkg.develop` call.** Resolution has to
