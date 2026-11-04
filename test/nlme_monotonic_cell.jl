@@ -7,14 +7,14 @@
 # so a strict query that declares the subjects' effects as partitioned computes
 # it once per population point, in the shared prefix, and each cell gathers from
 # it at its own rows. These are toy data: a cell reads a per-event predictor
-# through `groups`, as a dose stream does.
+# through `groups`.
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 
 const MONOTONIC_CELL_DATA = (; subject=[1, 2, 3, 4], weight=[0.1, -0.2, 0.3, 0.0],
-    op_subject=[1, 1, 2, 2, 3, 4, 4, 3],
-    op_diet=[1, 2, 1, 3, 2, 4, 1, 2],
-    op_x=[0.1, 0.2, -0.1, 0.3, 0.0, -0.2, 0.15, 0.05],
-    op_amount=[100.0, 50.0, 80.0, 40.0, 120.0, 60.0, 90.0, 30.0],
+    event_subject=[1, 1, 2, 2, 3, 4, 4, 3],
+    event_rank=[1, 2, 1, 3, 2, 4, 1, 2],
+    event_x=[0.1, 0.2, -0.1, 0.3, 0.0, -0.2, 0.15, 0.05],
+    event_amount=[100.0, 50.0, 80.0, 40.0, 120.0, 60.0, 90.0, 30.0],
     y=[0.8, 0.6, 0.5, 0.4, 0.7, 0.2, 0.1, 0.3])
 
 function monotonic_cell_model(predictors, exponent)
@@ -22,34 +22,34 @@ function monotonic_cell_model(predictors, exponent)
         sigma ~ Exponential(1)
         $(predictors.args...)
         log_CL ~ 1 + weight + (1 | pk | subject)
-        events = groups(op_subject => subject)
+        events = groups(event_subject => subject)
         @plate for i in eachindex(log_CL)
-            loc[i] = 0.01 .* op_amount[events[i]] .* exp.($exponent .- exp(log_CL[i]))
+            loc[i] = 0.01 .* event_amount[events[i]] .* exp.($exponent .- exp(log_CL[i]))
             y[events[i]] ~ normal(loc[i], sigma)
         end
     end
     RKBRMI(brm(source; mod=@__MODULE__)(MONOTONIC_CELL_DATA))
 end
 
-const LOG_F_AT_EVENTS = :(log_F[events[i]])
+const LOG_A_AT_EVENTS = :(log_a[events[i]])
 
 # Each spelling emits its own level table: a coefficient on the contrast, a
 # contrast beside a population block, the matrix of a joint block over two
 # predictors, and a coefficient-free summand.
 const MONOTONIC_CELL_SHAPES = (
     bare=(quote
-        log_F ~ 0 + mo(op_diet)
-    end, LOG_F_AT_EVENTS),
+        log_a ~ 0 + mo(event_rank)
+    end, LOG_A_AT_EVENTS),
     population=(quote
-        log_F ~ 1 + op_x + mo(op_diet)
-    end, LOG_F_AT_EVENTS),
+        log_a ~ 1 + event_x + mo(event_rank)
+    end, LOG_A_AT_EVENTS),
     joint=(quote
-        log_F ~ 0 + mo(op_diet)
-        log_K ~ 0 + mo(op_diet)
-    end, :(log_F[events[i]] .+ log_K[events[i]])),
+        log_a ~ 0 + mo(event_rank)
+        log_b ~ 0 + mo(event_rank)
+    end, :(log_a[events[i]] .+ log_b[events[i]])),
     summand=(quote
-        log_F ~ 0 + op_x + mo1(op_diet)
-    end, LOG_F_AT_EVENTS))
+        log_a ~ 0 + event_x + mo1(event_rank)
+    end, LOG_A_AT_EVENTS))
 
 monotonic_cell_point(rk) = 0.1 .* sin.(1:rk.model.layout.total)
 
