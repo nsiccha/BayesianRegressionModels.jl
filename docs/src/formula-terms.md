@@ -7,8 +7,9 @@ predictor formulas, likelihoods and plates. Put its priors last. Scalar and
 vector parameter declarations are priors for this convention, just like
 addressed coefficient, scale and correlation priors:
 
-```julia
-model = @brm begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+structure_first_model = (@brm begin
     mu ~ 1 + (1 | subject)
     @plate for i in eachindex(y)
         y[i] ~ Normal(mu[i], sigma)
@@ -16,7 +17,8 @@ model = @brm begin
     sigma ~ Exponential(1)
     effect(mu, Intercept) ~ Normal(0, 1)
     sd(mu, subject) ~ Exponential(1)
-end
+end)((; subject=["a", "a", "b", "b"], y=[0.1, 0.3, -0.2, 0.4]))
+""", :structure_first_model; title="Structure first, priors last", require_stan=true)
 ```
 
 For composition, retain separate structural and prior builders for each
@@ -32,13 +34,15 @@ stays inside that plate, after its structural statements; moving it to the
 global prior block would change the model. Trailing cell-local priors require
 BRM 0.2.165 or later on `SBBRMI`. For example:
 
-```julia
-local_model = @brm begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+structure_first_local_model = (@brm begin
     @plate for i in eachindex(y)
         y[i] ~ Normal(theta, 0.5)
         theta ~ Normal(0, 1)
     end
-end
+end)((; y=[0.1, -0.2, 0.4]))
+""", :structure_first_local_model; title="Priors last within each cell", require_stan=true)
 ```
 
 The existing `structure_of` and `priors_of` views partition **prior-address
