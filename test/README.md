@@ -2102,6 +2102,14 @@ exercise the diagnostic and implicit gradient; mixed generated effects,
 retained subsets, independent copies, prior dependencies, whole-vector width
 screening and linear sparse storage cover structural behavior.
 
+`laplace_mode_floor.jl` checks the mode search's rounding floor on the
+whole-model, structured, sparse and matrix-free problems. One Poisson effect
+starts far up an exponential's slope, where the decrement stops shrinking
+fourfold with a gradient near 100: the value must be the Laplace formula at a
+BigFloat oracle's mode, and the gradient must match central differences. An
+effect beside an intercept of 1e6 has a real floor above `tol`, which must still
+stop the search. Run it with `julia --project=test test/laplace_mode_floor.jl`.
+
 `laplace_mode_overflow.jl` exercises finite-density trials with overflowing
 derivatives in ordinary and sum cells, with exact and matrix-free solvers.
 It checks local backtracking, sequential
