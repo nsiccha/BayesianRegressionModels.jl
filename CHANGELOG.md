@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.168
+
+- `RKBRMI` accepts scalar `@plate` outputs in `offset(field)`, including
+  non-last outputs and elementwise assignments over them. The offset reads
+  the declared field with coefficient one, preserving selected-row queries
+  and native reverse gradients. Vector-valued cells cannot establish row
+  alignment merely by having the same flattened length.
+- An explicit gather of an opaque helper's output, `field = whole[position]`,
+  supplies the index vector's row axis to a model-value offset. The helper
+  remains one graph value; its arguments and output length do not implicitly
+  declare the consumer's rows.
+
 ## 0.2.167
 
 - `RKBRMI` accepts mixture probabilities computed from linked or hierarchical
