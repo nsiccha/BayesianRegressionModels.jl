@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.157
+
+- **NLME view of a single-level categorical:** `brm_nlme_view`, and with it
+  `brm_nlme_model` and `brm_nlme_fit`, no longer raise ``internal: declaration
+  `x` owns no packed coordinate`` on a model with a categorical term that
+  observes one level, such as `log(s) ~ 1 + g` with `g` an integer column holding
+  a single value. Any declaration the RK layout holds at zero length owns no
+  coordinate, so the model has the partition, likelihoods and gradients of the
+  same model without the term. The named estimates list the term with no levels
+  (`g = []`), and that value starts the model again through `inits`.
+
 ## 0.2.156
 
 - **`RKBRMI` random-effect and term priors can read data.** A formula-route
