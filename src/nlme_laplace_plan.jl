@@ -4,12 +4,13 @@
 # walks, `car` fields and declared Gaussian vectors) by how its rows read them:
 #
 # - integrated: every row reading it is Normal, so the Laplace is exact there;
-# - gated: read by other closed-form families (counts, binomial), model-value
-#   observations or `@plate` cells; integrated only where a per-block diagnostic
-#   admits it;
+# - gated: affine in the first parameter of other closed-form families
+#   (counts, binomial); integrated only where a per-block diagnostic admits it;
 # - never: the term moves a shape or dispersion, is Student-t, stratified, or
 #   a `car_units` field, which the sparse Laplace does not integrate;
-# - sampled: named in `sample`, or gated and not admitted.
+# - sampled: named in `sample`, read by uncertified model-value observations
+#   or `@plate` cells, or gated and not admitted. Explicit `integrate` opts in
+#   to supported terms without a structural concavity guarantee.
 #
 # The diagnostic is measured after the factorization, block by block: a block
 # is one level of the term (one area of a field), its proposal the Gaussian of
@@ -122,13 +123,16 @@ screening keeps or samples the whole vector. Fixed or outer-dependent means
 and scales retain the authored prior and its derivatives. A term supplying
 another Gaussian law's parameters stays sampled. Constrained, non-Gaussian
 and correlated vector priors are never admitted. Derived Normal observations
-remain gated because their dependence on the vector can be nonlinear.
+stay sampled automatically because their dependence on the vector can be nonlinear;
+name the vector in `integrate` to opt in.
 
-- **integrated:** every row reading the term is Normal, so its Laplace is exact
-  when linear in the integrated effects and using exact determinant algebra;
-- **gated:** read by counts, binomial rows, model-value observations or `@plate`
-  cells. The term is
-  integrated where its per-block importance diagnostic admits it. That
+- **integrated:** every row reading the term is recognized as affine Normal,
+  with scale fixed conditional on the sampled coordinates. Its Laplace is exact
+  with exact determinant algebra;
+- **gated:** recognized affine log-Poisson, logit-binomial/Bernoulli, or
+  log-NegativeBinomial2 rows with shape fixed conditional on the sampled
+  coordinates. These have log-concave conditionals. The term is integrated
+  where its per-block importance diagnostic admits it. That
   diagnostic proposes each block (one level of the term, one area of a field)
   from the Gaussian of the Laplace's precision restricted to it, given the rest
   at the mode, and weighs it by the exact density of the terms and prior pieces
@@ -138,7 +142,17 @@ remain gated because their dependence on the vector can be nonlinear.
   taken too);
 - **never:** the term moves a shape or dispersion, or is a Student-t,
   stratified or `car_units` block, which the sparse Laplace does not integrate;
-- **sampled:** named in `sample`, or gated and not admitted.
+- **sampled:** named in `sample`, gated and not admitted, or read by arbitrary
+  `@plate` cells/model-value observations without a structural log-concavity
+  guarantee. This conservative rule also declines linear cells whose algebra
+  has not been recognized. The reason identifies the relevant observations.
+
+Automatic selection requires the recognized structure at every outer point;
+a good local ESS or a positive mode Hessian cannot establish it. Log-concavity
+does not guarantee an accurate Gaussian approximation. The local diagnostic
+checks only the chosen point and one block at a time, so passing it does not
+certify joint tails or accuracy elsewhere. Scale and shape may still depend on
+sampled outer parameters. The selected partition stays fixed in the target.
 
 Before preparing derivatives, `max_cell_width` (a finite positive integer,
 default 128) bounds the integrated footprint of each ordinary observation cell,
@@ -153,8 +167,12 @@ the observation, cell, width and bound. All likelihoods and priors remain.
 terms supplies the full model's density and gradient through the same workflow.
 
 `integrate = (names…)` and `sample = (names…)` override the classes by
-declaration or grouping. A term on a shape or dispersion can be named in
-`integrate`; a Student-t, stratified or `car_units` term cannot (the sparse
+declaration or grouping. Naming a supported term in `integrate` explicitly
+opts in even without a concavity guarantee and bypasses the ESS gate, including
+cells, model-value observations and terms on shape or dispersion. The caller
+must assess that approximation; the automatic guarantee does not extend to
+the joint conditional containing such forced terms. A Student-t, stratified
+or `car_units` term cannot be forced (the sparse
 Laplace does not integrate it). `ess_floor = 0.5`
 and `draws = 200` are defaults, not measured thresholds; the plan reports each
 gated term's importance ESS so a reader can judge.
@@ -217,6 +235,7 @@ function _brm_laplace_plan_steps(backend::RKBRMI; ad_backend, integrate, sample,
     end
     candidates = [t for t in terms if t.never === nothing && !named(t, sampled)]
     screen = isempty(candidates) ? (; active=Bool[], events=Dict{Symbol,NamedTuple}(),
+        uncertified=Dict{Symbol,Set{Symbol}}(),
         integrated_dimension=0, sampled_dimension=length(_rk_layout_coordinate_names(backend))) :
         _brm_with_progress(progress; description="Cell width screening") do _
             _brm_spl_screen(backend, candidates,
@@ -226,12 +245,19 @@ function _brm_laplace_plan_steps(backend::RKBRMI; ad_backend, integrate, sample,
     width_reason(t) = let e = screen.events[t.declaration]
         "observation `$(e.observation)`, cell $(e.cell), $(e.part) has integrated width $(e.width) above max_cell_width=$(e.bound); sampled whole term (contribution $(e.contribution))"
     end
+    unknown = Dict(t.declaration => "conditional log-concavity is not structurally certified: " *
+        "read by `@plate` cells or model-value observations (" *
+        join(sort!(string.(collect(screen.uncertified[t.declaration]))), ", ") *
+        "); name it in `integrate` to opt in" for t in candidates
+        if haskey(screen.uncertified, t.declaration))
+    candidates = [t for t in candidates if !haskey(unknown, t.declaration) || named(t, forced)]
     if isempty(candidates)
         entries = [_brm_plan_entry(t, t.never === nothing ? :sampled : :never,
             haskey(screen.events, t.declaration) ? width_reason(t) :
-                something(t.never, "named in `sample`"), false, nothing) for t in terms]
+                get(unknown, t.declaration, something(t.never, "named in `sample`")),
+            false, nothing) for t in terms]
         return (; plan=BRMLaplacePlan(entries, ess_floor, draws, max_cell_width,
-            screen.events, 0, screen.sampled_dimension, nothing,
+            screen.events, 0, length(_rk_layout_coordinate_names(backend)), nothing,
             (; solver, matrixfree)), problem=nothing)
     end
     p = _brm_sparse_laplace_problem(backend, unique(t.grouping for t in candidates);
@@ -241,14 +267,28 @@ function _brm_laplace_plan_steps(backend::RKBRMI; ad_backend, integrate, sample,
     gated = Dict{Symbol,Any}()
     for t in candidates
         r = reads[t.declaration]
+        # Prepared-factor reads must obey the same boundary if a future
+        # factor representation reports a read absent from width screening.
+        (r.cells || r.values) && get!(unknown, t.declaration,
+            "conditional log-concavity is not structurally certified: read by " *
+            join(_brm_plan_family_names(r), ", ") * "; name it in `integrate` to opt in")
         r.moving && (gated[t.declaration] = :never; continue)
         (r.cells || r.values || any(!=(_BRM_LAP_NORMAL), r.families)) &&
             (gated[t.declaration] = r)
     end
+    # A rejected dispersion term must be sampled while diagnosing retained
+    # effects. Otherwise its mode can distort their supposedly concave
+    # conditional, even though the returned plan never integrates it.
+    retained = Set(t.declaration for t in candidates if named(t, forced) ||
+        (!haskey(unknown, t.declaration) && get(gated, t.declaration, nothing) !== :never))
+    if !isempty(retained) && length(retained) < length(candidates)
+        _brm_spl_restrict!(p, retained)
+        _brm_spl_algebra!(p, solver, matrixfree)
+    end
     # the diagnostic, at the population point `at`, for the gated terms the
     # caller did not force
     measure = [t for t in candidates if get(gated, t.declaration, nothing) isa NamedTuple &&
-        !named(t, forced)]
+        t.declaration in retained && !named(t, forced)]
     ess = Dict{Symbol,Any}()
     isempty(measure) || _brm_with_progress(progress;
             description="Importance diagnostic of $(length(measure)) terms") do _
@@ -263,12 +303,19 @@ function _brm_laplace_plan_steps(backend::RKBRMI; ad_backend, integrate, sample,
                 rng)
         end
     end
+    forced_unknown = any(t -> named(t, forced) && (haskey(unknown, t.declaration) ||
+        get(gated, t.declaration, nothing) === :never), candidates)
     entries = map(terms) do t
         t.never !== nothing && return _brm_plan_entry(t, :never, t.never, false, nothing)
         named(t, sampled) && return _brm_plan_entry(t, :sampled, "named in `sample`",
             false, nothing)
         haskey(screen.events, t.declaration) && return _brm_plan_entry(t, :sampled,
             width_reason(t), false, nothing)
+        if haskey(unknown, t.declaration)
+            return _brm_plan_entry(t, named(t, forced) ? :gated : :sampled,
+                unknown[t.declaration] * (named(t, forced) ? "; named in `integrate`" : ""),
+                named(t, forced), nothing)
+        end
         g = get(gated, t.declaration, nothing)
         if g === :never
             reason = "it moves a shape or dispersion parameter"
@@ -276,12 +323,14 @@ function _brm_laplace_plan_steps(backend::RKBRMI; ad_backend, integrate, sample,
                 string(reason, "; named in `integrate`"), true, nothing)
             return _brm_plan_entry(t, :never, reason, false, nothing)
         end
-        read = g === nothing ? "every row reading it is Normal" :
-            string("read by ", join(_brm_plan_family_names(g), ", "))
+        read = g === nothing ? "every row reading it is affine Normal in this term" :
+            string(forced_unknown ? "recognized log-concave first-parameter dependence; read by " :
+                "recognized log-concave conditional; read by ", join(_brm_plan_family_names(g), ", "))
+        forced_unknown && (read *= "; joint conditional includes explicitly selected uncertified terms")
         named(t, forced) && return _brm_plan_entry(t, g === nothing ? :integrated : :gated,
             string(read, "; named in `integrate`"), true, nothing)
         g === nothing && return _brm_plan_entry(t, :integrated,
-            string(read, ", so its Laplace is exact"), true, nothing)
+            string(read, forced_unknown ? "" : ", so its Laplace is exact with exact algebra"), true, nothing)
         e = ess[t.declaration]
         admitted = e.below == 0
         _brm_plan_entry(t, admitted ? :gated : :sampled, string(read, admitted ?
@@ -323,6 +372,51 @@ _brm_plan_family_names(r) = vcat(sort!([_BRM_PLAN_FAMILY_NAMES[f] for f in r.fam
     r.cells ? ["`@plate` cells"] : String[],
     r.values ? ["model-value observations"] : String[])
 
+# A value plan routes even ordinary predictor observations through factors.
+# Recognize only direct predictor reads, with the required link and second
+# parameters drawn solely from data or sampled scalars. Do not infer affine
+# dependence from numerical probes of arbitrary assignments or cell bodies.
+function _brm_plan_certified_observations(backend)
+    plan = backend.plan
+    out = Dict{Symbol,Int8}()
+    plan isa _RKValuePlan || return out
+    predictor_names = Set(p.name for p in plan.regression.predictors)
+    scalars = Set(p.name for p in plan.regression.parameters)
+    static = setdiff(Set(keys(rk_bound_data(backend))), union(predictor_names,
+        Set(a.name for a in plan.assignments),
+        Set(v.name for v in plan.regression.vector_parameters)))
+    # A formula predictor may itself contain nonlinear model offsets or
+    # model-valued design columns. Only data-backed columns establish the
+    # usual affine dependence; the predictor name alone is insufficient.
+    predictors = Dict(p.name => p.link for p in plan.regression.predictors
+        if all(t -> !_rk_model_offset(t) && all(c -> c in static, t.columns), p.terms))
+    fixed(x) = x isa Number || (x isa _BRMPreparedRef &&
+        (x.name in static || x.name in scalars))
+    for o in plan.observations
+        o isa _BRMPreparedObservation || continue
+        o.modifier === nothing && o.weight === nothing && o.missing_response === nothing || continue
+        d = o.distribution
+        d isa _BRMPreparedExpr && isempty(d.kwargs) || continue
+        family, link, firstarg, fixedargs = if d.callable === Normal && length(d.args) == 2
+            (_BRM_LAP_NORMAL, :identity, d.args[1], (d.args[2],))
+        elseif d.callable === Poisson && length(d.args) == 1
+            (_BRM_LAP_POISSON, :log, d.args[1], ())
+        elseif d.callable === Bernoulli && length(d.args) == 1
+            (_BRM_LAP_BINOMIAL, :logit, d.args[1], ())
+        elseif d.callable === Binomial && length(d.args) == 2
+            (_BRM_LAP_BINOMIAL, :logit, d.args[2], (d.args[1],))
+        elseif d.callable === NegativeBinomial2 && length(d.args) == 2
+            (_BRM_LAP_NB2, :log, d.args[1], (d.args[2],))
+        else
+            continue
+        end
+        firstarg isa _BRMPreparedRef && get(predictors, firstarg.name, nothing) === link || continue
+        all(fixed, fixedargs) || continue
+        out[o.name] = family
+    end
+    out
+end
+
 # Per block declaration of `p`: the families of the row terms that read it,
 # whether a `@plate` cell or model-value observation reads it, and whether it
 # moves a term's second parameter (a shape, dispersion or log scale). A BYM2
@@ -359,9 +453,14 @@ function _brm_plan_reads(p::BRMSparseLaplaceProblem)
         out[d] = (; families=fams, out[d].cells, out[d].values, moving)
     end
     plates = _brm_nlme_plate_observations(p.backend.plan)
+    certified = _brm_plan_certified_observations(p.backend)
     for group in p.cells, c in group.cells, i in c.lz
         d = root(p.blocks[zblock[i]])
-        out[d] = merge(out[d], group.name in plates ? (; cells=true) : (; values=true))
+        if haskey(certified, group.name)
+            push!(out[d].families, certified[group.name])
+        else
+            out[d] = merge(out[d], group.name in plates ? (; cells=true) : (; values=true))
+        end
     end
     out
 end
