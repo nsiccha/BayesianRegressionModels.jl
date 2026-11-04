@@ -220,6 +220,69 @@ end
 _sb_cell_block(x, scope) = Meta.isexpr(x, :block) ?
     Expr(:block, _sb_cell_statements(x.args, scope)...) : _sb_cell_statement(x, scope)
 
+# StanBlocks traces a cell in statement order. A bare local prior can be
+# authored after its readers, just like a model-scope prior. Schedule those
+# declarations through the shared dependency walk, retaining the relative
+# order of every other statement (including assignments and entire scans).
+# This operates on one cell only; it never moves a draw across a plate or
+# changes the sequential steps inside a scan.
+_sb_cell_unwrap_local(x) = Meta.isexpr(x, :local, 1) ? only(x.args) : x
+function _sb_cell_prior_order(statements, inputs)
+    assignments = Dict{Symbol,Vector{Int}}()
+    for (i, statement) in enumerate(statements)
+        s = _sb_cell_unwrap_local(statement)
+        Meta.isexpr(s, :(=), 2) || continue
+        name = _sb_bound_name(s.args[1])
+        name === nothing || push!(get!(assignments, name, Int[]), i)
+    end
+    declarations = Dict{Symbol,Int}()
+    for (i, statement) in enumerate(statements)
+        s = _sb_cell_unwrap_local(statement)
+        isxcall(s, :~) || continue
+        name = _sb_bound_name(s.args[2])
+        name === nothing && continue
+        # An input or an assigned value is observed, not a fresh draw. An
+        # explicit `local` declaration instead shadows that outer binding.
+        _sb_local_name(statement) === nothing &&
+            (name in inputs || haskey(assignments, name)) && continue
+        get!(declarations, name, i)
+    end
+    isempty(declarations) && return statements
+    priors = Set(values(declarations))
+    keys = [Symbol(:cell_statement_, i) for i in eachindex(statements)]
+    dependencies = [Set{Int}() for _ in statements]
+    previous = nothing
+    for (i, statement) in enumerate(statements)
+        prior = i in priors
+        s = _sb_cell_unwrap_local(statement)
+        refs = _brm_cell_value_refs!(Set{Symbol}(), prior ? s.args[3] : s)
+        union!(dependencies[i], (j for (name, j) in declarations if name in refs && j != i))
+        if prior
+            # Preserve the version of an ordinary cell value read by a prior:
+            # its preceding assignment stays before it, and the next write
+            # stays after it. A forward dependency is retained as well, so a
+            # real cycle fails instead of changing the law.
+            for name in refs
+                writers = get(assignments, name, Int[])
+                isempty(writers) && continue
+                before = findlast(<(i), writers)
+                producer = before === nothing ? first(writers) : writers[before]
+                push!(dependencies[i], producer)
+                after = findfirst(>(max(i, producer)), writers)
+                after === nothing || push!(dependencies[writers[after]], i)
+            end
+        else
+            previous === nothing || push!(dependencies[i], previous)
+            previous = i
+        end
+    end
+    operations = [_BRMPreparedOperation(keys[i], :cell, statement,
+        Tuple(keys[j] for j in sort!(collect(dependencies[i]))))
+        for (i, statement) in enumerate(statements)]
+    byname = Dict(op.name => op.expression for op in operations)
+    Any[byname[key] for key in _brm_operation_order(operations)]
+end
+
 # ---- `AR1Normal` in a cell: the BRM-owned AR(1) submodel ---------------------
 #
 # The `@slic` submodels `y[p] ~ AR1Normal(...)` calls (`ar1_normal.jl`): the

@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.164
+
+- **Structure first, priors last:** `SBBRMI` accepts a cell-local prior after
+  statements that read it, keeping the draw in its original plate. Prior
+  dependencies are emitted before their readers; ordinary cell statements and
+  scan steps retain their relative order. The authoring guide and executable
+  examples cover scalar, vector, coefficient, scale and correlation priors,
+  composed structural/prior builders, and complete printed-source replay.
+
 ## 0.2.163
 
 - **Mesh `gmrf` densities at very short spatial lengths:** `RKBRMI` and `SBBRMI`
