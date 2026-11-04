@@ -578,6 +578,18 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
             family = first(getargs(family))
         end
         head = family isa ExprColumn ? getf(family) : nothing
+        # Heterogeneous and custom mixtures retain each component's ordinary
+        # value and source-graph boundary. The legacy formula planner has a
+        # fixed location/scale record and cannot carry these signatures.
+        if head === MixtureModel
+            components = first(getargs(family))
+            if components isa AbstractVector && !isempty(components) &&
+                all(component -> component isa ExprColumn, components) &&
+                    (!allequal(map(getf, components)) ||
+                     any(component -> getf(component) isa Function, components))
+                return true
+            end
+        end
         # A categorical response owns fitted level coding and a whole simplex;
         # it is not a scalar response merely because it has no formula location.
         head === Categorical && continue
@@ -650,7 +662,7 @@ end
 # RKPPL's explicit ordinal: tags by name, shared thresholds, positional
 # discrimination and one threshold-effect row per observation.
 function _rk_ast_value_distribution!(statements, ::Type{Ordinal}, observation,
-        distribution, bindings, taken; coordinates=nothing)
+        distribution, bindings, taken; coordinates=nothing, definitions=nothing)
     length(distribution.args) == 4 ||
         return _rk_ast_value_call(Ordinal, distribution, bindings, taken)
     structure, link, eta, thresholds = distribution.args
@@ -665,8 +677,43 @@ function _rk_ast_value_distribution!(statements, ::Type{Ordinal}, observation,
         _rk_value_expr!(bindings, distribution.kwargs.discrimination, taken), effects...)
 end
 _rk_ast_value_distribution!(statements, callable, observation, distribution, bindings,
-    taken; coordinates=nothing) = _rk_ast_value_distribution(callable, distribution,
+    taken; coordinates=nothing, definitions=nothing) = _rk_ast_value_distribution(callable, distribution,
     bindings, taken)
+
+# Keep the native RKPPL mixture head. Each component uses the same constructor
+# lowering or density-source provider as a plain observation; RK composes the
+# resulting graphs and owns their scheduling and shared-work hoisting.
+function _rk_ast_value_distribution!(statements, ::Type{<:MixtureModel}, observation,
+        distribution, bindings, taken; coordinates=nothing, definitions)
+    isempty(distribution.kwargs) && length(distribution.args) == 2 || error(
+        "RK backend: MixtureModel needs components and weights")
+    components, weights = distribution.args
+    components isa _BRMPreparedExpr && components.callable === Base.vect &&
+        !isempty(components.args) || error(
+        "RK backend: MixtureModel components must be a nonempty vector of distribution calls")
+    component_calls = map(enumerate(components.args)) do (k, component)
+        component isa _BRMPreparedExpr || error(
+            "RK backend: MixtureModel component $k must be a distribution call")
+        isempty(component.kwargs) || error(
+            "RK backend: MixtureModel component $k takes no constructor keywords")
+        entry = _rk_emit_density_source!(definitions, bindings, taken,
+            Symbol(observation.name, "_component_", k), component)
+        entry === nothing && return _rk_ast_value_distribution(component, bindings, taken)
+        _rk_ast_dotted(:LogDensity, entry,
+            (_rk_value_expr!(bindings, arg, taken) for arg in component.args)...)
+    end
+    # A shared probability vector is one operand, not one probability per row.
+    # A vector literal of row-valued probabilities instead builds one vector
+    # per row using the same dotted-vcat convention as the components.
+    weights_expr = if _brm_has_row_ref(weights) && weights isa _BRMPreparedExpr &&
+            weights.callable === Base.vect
+        _rk_ast_dotted(:vcat,
+            (_rk_value_expr!(bindings, arg, taken) for arg in weights.args)...)
+    else
+        Expr(:call, :Ref, _rk_value_expr!(bindings, weights, taken))
+    end
+    _rk_ast_dotted(:MixtureModel, _rk_ast_dotted(:vcat, component_calls...), weights_expr)
+end
 
 _rk_ast_value_threshold_effects!(statements, response, eta, bindings, taken;
     coordinates=nothing) = (eta, ())
@@ -845,6 +892,21 @@ _rk_threshold_vector(name::Symbol, ::Type{_BRMThresholdPrior{false}}, n::Int) =
 Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         @nospecialize(program), @nospecialize(observations);
         @nospecialize(kernels=()), @nospecialize(submodels=()))
+    # Admission is independent of why this planner was selected: an earlier
+    # deterministic assignment may already have required the value route.
+    for observation in observations
+        family = observation.rhs
+        while family isa ExprColumn && getf(family) in
+                (weighted, censored, truncated, interval_censored) && !isempty(getargs(family))
+            family = first(getargs(family))
+        end
+        family isa ExprColumn && getf(family) === MixtureModel || continue
+        components = first(getargs(family))
+        components isa AbstractVector && !isempty(components) &&
+            all(component -> component isa ExprColumn, components) || error(
+            "RK backend: MixtureModel components must be a nonempty vector of distribution calls")
+        _brm_check_heterogeneous_mixture(components; prefix="RK backend")
+    end
     context = program.context
     leveled = _rk_value_leveled_responses(observations, context.data)
     implicit = Pair{Symbol,Any}[parameter for entry in values(leveled)
@@ -1140,7 +1202,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         base = joint ? _rk_ast_value_call(distribution.callable, distribution,
             bindings, taken; joint=true) :
             _rk_ast_value_distribution!(stmts, distribution.callable, observation,
-                distribution, bindings, taken; coordinates)
+                distribution, bindings, taken; coordinates, definitions=defs)
         if modifier !== nothing
             lower = modifier.lower === nothing ? -Inf :
                 _rk_value_expr!(bindings, _brm_prepare_expr(modifier.lower), taken)

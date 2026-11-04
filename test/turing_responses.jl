@@ -312,8 +312,8 @@ end
 end
 
 @testset "mixture contract rejects incompatible inputs loudly" begin
-    @test_throws "must share one family" SBBRMI((@brm begin
-        y ~ MixtureModel([Normal(0, 1), Cauchy(0, 1)], [0.5, 0.5])
+    @test_throws "full-real" SBBRMI((@brm begin
+        y ~ MixtureModel([Normal(0, 1), Exponential(1)], [0.5, 0.5])
     end)((; y=[0.1])))
     @test_throws "is not scalar" SBBRMI((@brm begin
         y ~ MixtureModel([MvNormal([0.0, 0.0], [1.0 0.0; 0.0 1.0])], [1.0])
