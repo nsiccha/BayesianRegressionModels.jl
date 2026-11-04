@@ -341,8 +341,10 @@ density and finite-difference gradient oracles cover positional and keyword
 arguments, likelihood arguments, non-last outputs, reader-first order,
 data-only cells, replay with empty cells and changed row counts, and ordinary
 Reverse AD. Complete printed-source replay and flattened rowwise observation
-controls guard the surrounding contracts. Run with `julia --project=test
-test/plate_output_helpers.jl`; testset substring filters are supported.
+controls guard the surrounding contracts, including `addprop` over a plate
+output, assigned or in the law, with a shared or per-row additive scale. Run with
+`julia --project=test test/plate_output_helpers.jl`; testset substring filters
+are supported.
 
 `plate_grouped_outputs.jl` checks grouped reads of both outputs from another
 plate through `rows = groups(group => labels)` and `value[rows[k]]`.
@@ -1185,7 +1187,10 @@ rows), subject-cell population gradients,
 analytic η Hessian blocks, Gaussian observation moments
 and colored η Jacobians, `check_protocol`, and Newton posthoc against
 independent oracles. Its Gaussian checks include arrays observed within plate
-cells and a modeled scale shared by the observations in each cell.
+cells and a modeled scale shared by the observations in each cell. A periodic
+`hsgp` read in a subject cell passes `check_protocol` with every preparation
+checked at `type_stability = :error`, the sparse Laplace probe's data prefix
+included.
 NLMEEstimation.jl is not part of `test/Project.toml`. Run the file from a
 copy of this environment that develops a local NLMEEstimation checkout:
 
