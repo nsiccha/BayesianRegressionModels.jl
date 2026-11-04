@@ -8259,6 +8259,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         labels=isempty(grouped) && isempty(ragged_specs) ? (nsub === nothing ? () : 1:nsub) : g_vals,
         group=isempty(grouped) && isempty(ragged_specs) ? nothing : name(group_col), distinct)
     _brm_check_cell_total_latents(body_stmts, params, _brm_inline_scope(lam); prefix="sbimpl")
+    body_stmts = _sb_cell_prior_order(body_stmts, kept_params)
     # The cell is Julia source; give StanBlocks its Stan spellings.
     body_stmts = _sb_cell_statements(_sb_cell_ar1_normal_calls(body_stmts, kept_params),
         _brm_inline_scope(lam))

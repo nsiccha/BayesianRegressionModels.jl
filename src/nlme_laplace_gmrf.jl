@@ -363,9 +363,17 @@ function _brm_spl_gmrf_gradient!(gradient, p, state, S, v, active)
         gt = zeros(nt)
         go = zeros(max(nt - 1, 0))
         z = state.z
+        # A rebuilt reference's derivative in the data is in S for the likelihood's
+        # chain rule. The prior takes its own, in the same factors, below.
+        tracked, with_data = state.F isa _BRMOperatorFactor ?
+            _brm_gmrf_tracked_member(state.F.tracked[p.component[first(field.z)]], field) :
+            (nothing, false)
+        share = with_data ? _brm_gmrf_tracked_data(tracked) : nothing
         _brm_gmrf_foreach_entry(field) do k, i, j, ks, ta, tb, ca, cb
             a, b = field.z[i], field.z[j]
-            w = -(S[field.nz[k]] + z[a] * z[b] + v[a] * z[b] + z[a] * v[b]) / 2
+            selected = S[field.nz[k]]
+            share === nothing || (ta == tb && ca == cb && (selected -= share[ks, ca, ta]))
+            w = -(selected + z[a] * z[b] + v[a] * z[b] + z[a] * v[b]) / 2
             qt = _brm_gmrf_temporal_entry(field, ta, tb)
             λ = field.Λ[ca, cb]
             gs[ks] += w * qt * λ
@@ -378,6 +386,14 @@ function _brm_spl_gmrf_gradient!(gradient, p, state, S, v, active)
         end
         dls = dot(gs, field.dqs)
         dlt = dot(gt, field.dqt) + dot(go, field.dqo)
+        if tracked !== nothing
+            dls -= tracked.dspatial / 2
+            dlt -= tracked.dtemporal / 2
+            basis = tracked.reference.basis
+            for jj in axes(basis, 2)
+                gΛ .-= (tracked.dscale[jj] / 2) .* (view(basis, :, jj) * view(basis, :, jj)')
+            end
+        end
         Λ = field.Λ
         dL = -2 .* (Λ * Symmetric((gΛ .+ gΛ') ./ 2) * Λ * field.L)
         _brm_gmrf_seed!(seeds, field.spatial_port, dls)

@@ -1,5 +1,58 @@
 # Formula terms
 
+## Authoring order and composition
+
+Write the model's structure first, including deterministic assignments,
+predictor formulas, likelihoods and plates. Put its priors last. Scalar and
+vector parameter declarations are priors for this convention, just like
+addressed coefficient, scale and correlation priors:
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+structure_first_model = (@brm begin
+    mu ~ 1 + (1 | subject)
+    @plate for i in eachindex(y)
+        y[i] ~ Normal(mu[i], sigma)
+    end
+    sigma ~ Exponential(1)
+    effect(mu, Intercept) ~ Normal(0, 1)
+    sd(mu, subject) ~ Exponential(1)
+end)((; subject=["a", "a", "b", "b"], y=[0.1, 0.3, -0.2, 0.4]))
+""", :structure_first_model; title="Structure first, priors last", require_stan=true)
+```
+
+For composition, retain separate structural and prior builders for each
+component. Assemble `merge(structure_a, structure_b, priors_a, priors_b)` and
+bind the data to that joint builder. `string(joint)` then prints the assembled
+declaration in that order, and `brm(Meta.parse("begin\n" * string(joint) *
+"\nend"); mod=...)` rebuilds it in the module where its names are defined.
+Merging each complete component in turn would interleave its priors with the
+next component's structure.
+
+The order applies within each lexical scope. A prior declared inside a plate
+stays inside that plate, after its structural statements; moving it to the
+global prior block would change the model. Trailing cell-local priors require
+BRM 0.2.165 or later on `SBBRMI`. For example:
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+structure_first_local_model = (@brm begin
+    @plate for i in eachindex(y)
+        y[i] ~ Normal(theta, 0.5)
+        theta ~ Normal(0, 1)
+    end
+end)((; y=[0.1, -0.2, 0.4]))
+""", :structure_first_local_model; title="Priors last within each cell", require_stan=true)
+```
+
+The existing `structure_of` and `priors_of` views partition **prior-address
+operations**, not all parameter priors. In particular, scalar and vector
+declarations remain in `structure_of`; those views do not establish this
+authoring order. Keep the explicitly authored fragments for composition and
+for separate structure/prior listings. The executable examples in
+`docs/examples/structure_first.jl` also cover vector hyperpriors and correlation
+priors.
+
 ## Catalogue
 
 Every term below lowers on the StanBlocks backend (`SBBRMI`); the
