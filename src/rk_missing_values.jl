@@ -57,7 +57,7 @@ function _rk_model_value_axis(value::NamedColumn, backing::ExprColumn{typeof(~)}
     _brm_prior_expression(rhs) && return (
         _brm_parameter_reference_axis(rhs) === :scalar ? () : nothing)
     rhs isa ExprColumn && getf(rhs) isa BRMComponent &&
-        return _brm_component_output_axis(getf(rhs), rhs, context)
+        return _brm_component_output_axis(name(value), getf(rhs), rhs, context)
     rhs isa ExprColumn{typeof(kernel)} &&
         return _rk_plate_offset_axis(value, rhs, context)
     context === nothing && return nothing

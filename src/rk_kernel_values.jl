@@ -1587,6 +1587,7 @@ function _rk_offset_scalar_cells!(defs, statements, taken, plan, cells)
         output = statement.args[1]
         statement.args[2] = Expr(:call, callee, cells[output])
     end
+    _rk_component_offset_cells!(defs, plan, outputs, callee)
     nothing
 end
 

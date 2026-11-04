@@ -40,6 +40,7 @@ struct _RKPreparedSubmodelAssignment
     globals::Vector{Symbol}
     fit_inputs::Dict{Symbol,Symbol}
     observed::Tuple{Vararg{Symbol}}
+    component::Any
 end
 
 function _rk_prepare_submodel_values(program)
@@ -72,7 +73,8 @@ function _rk_prepare_submodel_values(program)
             statements, columns, bindings, globals,
             claimed isa NamedTuple ? get(claimed, :fit_inputs, Dict{Symbol,Symbol}()) :
                 Dict{Symbol,Symbol}(),
-            claimed isa NamedTuple ? get(claimed, :observed, ()) : ()))
+            claimed isa NamedTuple ? get(claimed, :observed, ()) : (),
+            claimed isa NamedTuple ? get(claimed, :component, nothing) : nothing))
     end
     Tuple(submodels)
 end

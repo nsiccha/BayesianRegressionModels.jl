@@ -1105,7 +1105,7 @@ function _rk_kernel_output_names(plan::_RKValuePlan)
         for kernel in kernels)
 end
 
-function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
+function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, cell_sources=nothing)
     reserved = Set{Symbol}(keys(plan.columns))
     union!(reserved, (first(binding) for binding in _rk_extent_bindings(plan)))
     union!(reserved, (a.name for a in plan.assignments))
@@ -1146,8 +1146,9 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         # its target; the transport pairs them with the SB declaration's.
         assignment isa _RKPreparedSubmodelAssignment &&
             _rk_coordinate_record!(coordinates, (; kind=:submodel,
-                target=assignment.name))
+                target=assignment.name, component=assignment.component))
     end
+    cell_sources === nothing || merge!(cell_sources, cells)
     _rk_offset_scalar_cells!(defs, stmts, taken, plan, cells)
     for completion in plan.completions
         parts = _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)

@@ -1634,6 +1634,81 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:submodel}, record, rk, d, stan, stan_pos)
     _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         :submodel, record.target, rk, d, stan, stan_pos)
+    metadata = get(record, :component, nothing)
+    metadata === nothing && return nothing
+    replay = d.plan.preproc[_brm_component_replay_key(record.target)].const_
+    _brm_transport_component_records!(pairs, metadata, replay.fitted,
+        (record.target,), rk, d, stan)
+end
+
+# Component-owned cell and formula declarations retain the same semantic
+# records as ordinary BRM declarations. Use those records and the SB binding
+# inventory when the native submodel spelling alone does not pair a carrier.
+function _brm_transport_component_records!(pairs, metadata, fitted, path, rk, d, stan)
+    submodel = _brm_submodel_entry(d, path)
+    paired = Set(pair.rk_declaration for pair in pairs)
+    population_blocks = Dict{Symbol,Any}()
+    local_descriptor = nothing
+    for record in metadata.coordinates
+        if record.kind === :submodel && get(record, :component, nothing) !== nothing
+            replay = fitted.preproc[_brm_component_replay_key(record.target)].const_
+            _brm_transport_component_records!(pairs, record.component, replay.fitted,
+                (path..., record.target), rk, d, stan)
+            continue
+        end
+        record.kind in (:cell_latent, :population) || continue
+        declaration = Symbol(join((path..., record.declaration), "."))
+        declaration in paired && continue
+        if record.kind === :population
+            local_descriptor === nothing && (local_descriptor = brm_descriptor(fitted))
+            block = get!(population_blocks, record.predictor) do
+                _brm_transport_population_binding(local_descriptor, record.predictor)
+            end
+            block === nothing && _brm_transport_error(:unsupported_coverage,
+                "component population predictor $(Tuple((path..., record.predictor))) has no SB binding")
+            block.kind === :ordinary || _brm_transport_error(:unsupported_coverage,
+                "component population predictor $(Tuple((path..., record.predictor))) uses a $(block.kind) prior scheme")
+            # A population block returns the predictor's value; its sampled
+            # coefficient carrier is a different output. Resolve that carrier
+            # in the component's own descriptor before adding the call scope.
+            carrier = Symbol(join((path..., block.output.name), "_"))
+            output = only(output for output in submodel.outputs if
+                output.name === carrier && output.kind === :parameter)
+            labels = block.labels
+            position = only(findall(==(record.coefficient), labels))
+            names = stan[_brm_element_coordinates(output, stan)]
+            length(names) == length(labels) || error("component population carrier has inconsistent labels")
+            index = get(record, :index, ())
+            rk_name = isempty(index) ? declaration : Symbol(declaration, ".", join(index, "."))
+            push!(pairs, BRMCoordinatePair((; kind=:population, scope=path,
+                    predictor=record.predictor, coefficient=record.coefficient),
+                rk_name, names[position], declaration, index, :identity))
+        else
+            local_declaration = only(decl for decl in submodel.declarations if
+                decl.target === record.name && decl.context == (record.kernel,))
+            local_name = _brm_stan_name(local_declaration)
+            get(record, :bijection, nothing) === nothing ||
+                (local_name = _brm_total_coordinates_name(local_name))
+            resolved = Symbol(join((path..., local_name), "_"))
+            owned = Set(output.name for output in submodel.outputs)
+            carriers = _brm_binding_carriers(d.stan, Set(output.name for output in d.stan.outputs),
+                Set(keys(d.stan.model)), resolved, owned)
+            outputs = [output for output in submodel.outputs if output.name in carriers]
+            output = outputs[only(_brm_carrier_indices(outputs, o -> o.kind === :parameter))]
+            names = stan[_brm_element_coordinates(output, stan)]
+            elements = [(last(scoped), name) for name in _rk_layout_coordinate_names(rk)
+                for scoped in (_brm_transport_scoped(name),)
+                if scoped !== nothing && first(scoped) === declaration]
+            length(names) == length(elements) || _brm_transport_error(:parameterization_mismatch,
+                "component cell latent $(Tuple((path..., record.name))) has unequal coordinate counts")
+            relation = get(record, :bijection, nothing) === nothing ? :identity : :shares
+            for ((index, rk_name), stan_name) in zip(elements, names)
+                push!(pairs, BRMCoordinatePair((; kind=:cell_latent, scope=path,
+                    name=record.name, index), rk_name, stan_name, declaration, index, relation))
+            end
+        end
+    end
+    nothing
 end
 
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,

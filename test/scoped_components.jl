@@ -40,6 +40,18 @@ end
     effect(value, Intercept) ~ Normal(0, 1)
     return value
 end
+
+@brm function nested_cell_field(x, scale)
+    inner ~ cell_field(x, scale)
+    return inner + 0.1
+end
+
+@brm function shape_field(x, theta)
+    @plate for i in eachindex(x)
+        value[i] = theta .* x[i]
+    end
+    return value
+end
 end
 
 module ScopedConsumer
@@ -55,6 +67,7 @@ const repeated = @brm begin
     obs_sd ~ Exponential(1)
 end
 
+
 const expanded = @brm begin
     left = left_a + left_b * x_left
     right = right_a + right_b * x_right
@@ -67,6 +80,52 @@ const expanded = @brm begin
     shared_scale ~ Exponential(1)
     obs_sd ~ Exponential(1)
 end
+end
+
+@stestset "component plate offsets prove rows before flattening local cells" begin
+    data = (; x=[-0.4, 0.2, 0.7], read_row=[3, 1, 3], y=[0.2, -0.1, 0.4])
+    for component in (:cell_field, :nested_cell_field)
+        builder = brm(quote
+            field ~ $component(x, scale)
+            quantity ~ 1 + offset(2 * field)
+            effect(quantity, Intercept) ~ Normal(0, 1)
+            y ~ Normal(quantity[read_row], 0.7)
+            scale ~ Exponential(1)
+        end; mod=ScopedCalibration)
+        model = builder(data)
+        rk, problem = consumer_problem(model)
+        sb = SBBRMI(model; mod=ScopedCalibration, total_groups=())
+        stan = consumer_stan(model, "component-cell-offset-$component"; mod=ScopedCalibration)
+        mapping = [pair.rk => pair.stan for pair in
+            brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan.model)).pairs]
+        names = coordinate_names(rk.model.layout)
+        scale = coordinate(names, :scale)
+        level = coordinate(names, :quantity_Intercept)
+        stem = component === :cell_field ? "field.z." : "field.inner.z."
+        draws = [coordinate(names, Symbol(stem, i)) for i in eachindex(data.x)]
+        shift = component === :cell_field ? 0.0 : 0.1
+        oracle(u) = logpdf(Exponential(1), exp(u[scale])) + u[scale] +
+            logpdf(Normal(), u[level]) + sum(logpdf.(Normal(0, exp(u[scale])), u[draws])) +
+            sum(logpdf.(Normal.(u[level] .+ 2 .* (data.x[data.read_row] .+
+                u[draws][data.read_row] .+ shift), 0.7), data.y))
+        for point in (zeros(length(names)), collect(range(-0.2, 0.3; length=length(names))))
+            check_consumer_point(problem, point, oracle)
+            check_consumer_stan(problem, stan, mapping, rk, point)
+        end
+    end
+    ragged = (; x=[[0.2, 0.4], Float64[], [0.8]], fixed=zeros(3), y=ones(3))
+    builder = brm(quote
+        field ~ shape_field(x, theta)
+        quantity ~ 1 + offset(field) + offset(fixed)
+        effect(quantity, Intercept) ~ Normal(0, 1)
+        y ~ Normal(quantity, 0.7)
+        theta ~ Normal(0, 1)
+    end; mod=ScopedCalibration)
+    @test_throws r"offset of a plate output requires one real scalar per cell" begin
+        rk = RKBRMI(builder(ragged))
+        problem = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        LogDensityProblems.logdensity(problem, fill(0.2, rk.model.layout.total))
+    end
 end
 
 @stestset "one BRM component gives each call its own local priors" begin
@@ -355,8 +414,8 @@ end
         if builder === ScopedVariants.cells
             descriptor = brm_descriptor(sb)
             @test only(descriptor.submodels).name === :calibration
-            @test brm_output(descriptor, :a; submodel=(:location, :cell)).role === :parameter
-            @test brm_output(descriptor, :b; submodel=(:location, :cell)).role === :parameter
+            @test brm_output(descriptor, :a; submodel=(:location, :cell)).kind === :parameter
+            @test brm_output(descriptor, :b; submodel=(:location, :cell)).kind === :parameter
         end
     end
 end
@@ -375,7 +434,8 @@ end
         transport = brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan.model))
         mapping = [pair.rk => pair.stan for pair in transport.pairs]
         for point in (zeros(rk.model.layout.total),
-                collect(range(-0.2, 0.3; length=rk.model.layout.total)))
+                collect(range(-0.2; step=0.5 / max(rk.model.layout.total - 1, 1),
+                    length=rk.model.layout.total)))
             check_consumer_stan(problem, stan, mapping, rk, point)
         end
     end

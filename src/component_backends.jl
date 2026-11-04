@@ -18,17 +18,35 @@ function _brm_component_input_axis(input::_BRMComponentInput)
     prepared isa _BRMPreparedRef ? prepared.axis : :scalar
 end
 
-_rk_model_value_axis(::NamedColumn, input::_BRMComponentInput, context) =
-    _rk_model_value_axis(input.value, context)
+function _rk_model_value_axis(column::NamedColumn, input::_BRMComponentInput, context)
+    axis = _rk_model_value_axis(input.value, context)
+    (axis === nothing || isempty(axis)) && return axis
+    # A formal input's conditional cell proof belongs to its actual argument.
+    # Recover it when substituting the component's output axis below.
+    (; source=name(column), nrows=axis.nrows)
+end
 
-function _brm_component_output_axis(component, call, context)
+function _brm_component_output_axis(target, component, call, context)
     instance = _brm_component_instance(component, call)
     inner = _brm_backend_context(instance; retain_mm_sources=true)
     axis = _rk_model_value_axis(_brm_operation(instance, component.result), inner)
     (axis === nothing || isempty(axis)) && return axis
     index = findfirst(==(axis.source), component.inputs)
-    index === nothing && return axis
-    _rk_model_value_axis(_brm_component_arguments(component, call)[index], context)
+    argument = index === nothing ? nothing : _brm_component_arguments(component, call)[index]
+    mapped = index === nothing ? axis : _rk_model_value_axis(argument, context)
+    if mapped === nothing && !isempty(get(axis, :scalar_cells, ())) &&
+            argument isa NamedColumn && parent(argument) isa DataColumn &&
+            parent(parent(argument)) isa AbstractVector
+        # The inner authored plate explicitly declares this argument's cell
+        # axis, including a vector of vectors. Its guard still has to prove
+        # that the returned cells are scalar before treating them as rows.
+        mapped = (; source=name(argument), nrows=axis.nrows)
+    end
+    (mapped === nothing || isempty(mapped)) && return mapped
+    local_cells = Tuple(Symbol(target, ".", output) for output in get(axis, :scalar_cells, ()))
+    external_cells = index === nothing ? () : get(mapped, :scalar_cells, ())
+    scalar_cells = Tuple(unique((external_cells..., local_cells...)))
+    isempty(scalar_cells) ? mapped : (; mapped..., scalar_cells)
 end
 
 _sb_emit!(statements, data, key, ::_BRMComponentInput; kwargs...) = nothing
@@ -176,7 +194,9 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     plan, instance = _brm_component_replay_scope(target, component, call) do
         _brm_component_rk_plan(component, call)
     end
-    emitted = _rk_emit_ast(plan)
+    cells = Dict{Symbol,Symbol}()
+    coordinates = Any[]
+    emitted = _rk_emit_ast(plan; cell_sources=cells, coordinates)
     taken = union(Set{Symbol}(component.inputs), Set(_brm_operation_names(instance)),
         Set{Symbol}(reserved))
     # Helpers are module-level definitions. Give each instantiated subprogram
@@ -187,8 +207,13 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
         renames[key] = _rk_ast_fresh_name(string(target, "_component_", key), taken)
     end
     for (key, value) in emitted.bindings
-        renamed = _rk_ast_fresh_name(string(target, "_component_", key), taken)
-        renames[key] = renamed
+        # Native distribution vocabulary is also used by local priors. A
+        # bound observation constructor must not rename those prior heads
+        # into opaque external constructors. Shared compiler bindings retain
+        # their exact identity; component-specific callables get private names.
+        shared = isdefined(@__MODULE__, key) && getfield(@__MODULE__, key) === value
+        renamed = shared ? key : _rk_ast_fresh_name(string(target, "_component_", key), taken)
+        shared || (renames[key] = renamed)
         push!(bindings, renamed => value)
     end
     append!(definitions, (_rk_rename_symbols(definition, renames) for definition in emitted.defs))
@@ -231,12 +256,52 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
         push!(args, renames[key])
     end
     entry = _rk_ast_fresh_name(string(target, "_component"), taken)
-    push!(definitions, Expr(:(=), Expr(:call, entry, params...), body))
+    header = Tuple(doc for doc in _brm_component_own_documentation(component) if isempty(doc.path))
+    definition = Expr(:(=), Expr(:call, entry, params...), body)
+    push!(definitions, _brm_documented_statement(definition, header))
     push!(statements, Expr(:call, :~, target, Expr(:call, entry, args...)))
     outer_fits = Dict{Symbol,Symbol}()
     for (input, source) in fit_inputs
         outer_fits[column_names[input]] = column_names[source]
     end
     observed = Tuple(column_names[name] for name in _rk_observed_names(plan))
-    (; kind=:component, fit_inputs=outer_fits, observed)
+    row_cells = Dict{Symbol,Any}()
+    for (output, raw) in cells
+        row_cells[Symbol(target, ".", output)] = (; definition=entry,
+            output=get(renames, output, output), cells=get(renames, raw, raw))
+    end
+    for assignment in plan.assignments
+        assignment isa _RKPreparedSubmodelAssignment || continue
+        assignment.component === nothing && continue
+        for (path, record) in assignment.component.row_cells
+            row_cells[Symbol(target, ".", path)] =
+                NamedTuple{keys(record)}(Tuple(get(renames, value, value) for value in values(record)))
+        end
+    end
+    metadata = (; definition=component, source=instance, plan, entry, renames, row_cells,
+        coordinates)
+    (; kind=:component, fit_inputs=outer_fits, observed, component=metadata)
+end
+
+# The caller's offset can require a row proof inside a component. Retained
+# emission records identify the exact local output and its unflattened cells;
+# no output length or private-name parsing establishes this correspondence.
+function _rk_component_offset_cells!(definitions, plan, outputs, callee)
+    for assignment in plan.assignments
+        assignment isa _RKPreparedSubmodelAssignment || continue
+        metadata = assignment.component
+        metadata === nothing && continue
+        for output in intersect(outputs, keys(metadata.row_cells))
+            record = metadata.row_cells[output]
+            definition = only(d for d in definitions if
+                _rk_source_definition(d).name === record.definition)
+            body = last(_brm_undoc(definition).args)
+            selected = [statement for statement in body.args if
+                Meta.isexpr(_brm_undoc(statement), :(=), 2) &&
+                first(_brm_undoc(statement).args) === record.output]
+            length(selected) == 1 || error("component row proof lost local output `$output`")
+            _brm_undoc(only(selected)).args[2] = Expr(:call, callee, record.cells)
+        end
+    end
+    nothing
 end
