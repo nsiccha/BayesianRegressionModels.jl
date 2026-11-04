@@ -169,6 +169,7 @@ end
 @testset "Unsupported inputs are refused with their reason" begin
     @test_throws ArgumentError BRM._brm_vecchia_footprint(Float64[], Float64[], Float64[], 1; neighbors=2)
     @test_throws ArgumentError BRM._brm_vecchia_footprint([1.0], [1.0], [1.0], 1; neighbors=0)
+    @test_throws ArgumentError BRM._brm_vecchia_footprint([1.0], [1.0], [1.0], 1; neighbors=101)
     @test_throws ArgumentError BRM._brm_vecchia_footprint([NaN], [1.0], [1.0], 1; neighbors=2)
     @test_throws DimensionMismatch BRM._brm_vecchia_footprint([1.0, 2.0], [1.0], [1.0], 1; neighbors=2)
     f = BRM._brm_vecchia_footprint([0.0, 1.0], [0.0, 0.0], [0.0, 0.0], 1; neighbors=2)

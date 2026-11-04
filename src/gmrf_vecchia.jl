@@ -339,8 +339,9 @@ function _brm_vecchia_footprint(east::AbstractVector, north::AbstractVector, tim
         throw(ArgumentError("gmrf spatial coordinates must be finite"))
     all(isfinite, time) || throw(ArgumentError("gmrf times must be finite"))
     neighbors >= 1 || throw(ArgumentError("gmrf neighbors must be a positive integer"))
-    neighbors <= 100 || throw(ArgumentError(
-        "gmrf neighbors above 100 cost more than they can add; got $neighbors"))
+    # A pattern's tables index its distinct positions and lags in one byte, and a
+    # conditioning set of 3m + 1 reads costs the cube of that in every solve.
+    neighbors <= 100 || throw(ArgumentError("gmrf neighbors is limited to 100; got $neighbors"))
     nchannels >= 1 || throw(ArgumentError("gmrf needs at least one channel"))
     # Positions, in the fixed maximin order.
     seen = Dict{Tuple{Float64,Float64},Int32}()
@@ -558,7 +559,6 @@ end
 struct _BRMVecchiaWork
     A::Matrix{Float64}
     b::Vector{Float64}
-    k::Vector{Float64}
     v::Vector{Float64}
     w::Vector{Float64}
     space::Matrix{Float64}
@@ -568,7 +568,7 @@ struct _BRMVecchiaWork
 end
 function _BRMVecchiaWork(f::_BRMGMRFFootprint)
     m, u, l = f.max_items, f.max_positions, f.max_lags
-    _BRMVecchiaWork(zeros(m, m), zeros(m), zeros(m), zeros(m), zeros(m),
+    _BRMVecchiaWork(zeros(m, m), zeros(m), zeros(m), zeros(m),
         zeros(u, u), zeros(u, u), zeros(l, l), zeros(l, l))
 end
 
@@ -617,7 +617,6 @@ function _brm_vecchia_solve!(work, f::_BRMGMRFFootprint, p, kappa, temporal_leng
         end
         b[j] = space[1, uj] * timecor[1, lj]
     end
-    copyto!(work.k, 1, b, 1, m)
     # Lower Cholesky in place, then the forward and back solves.
     @inbounds for j in 1:m
         d = A[j, j]
