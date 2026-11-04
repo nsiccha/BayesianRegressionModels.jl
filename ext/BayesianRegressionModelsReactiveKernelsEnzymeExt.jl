@@ -385,6 +385,11 @@ BRM._rk_spl_cell_accumulate(batch, ad::_SPLCellAD, order, direction, weight, bas
         base[indices], indices, cell)
 
 
+# Diagnostics perturb the compact active values inside one pass and discard its
+# accumulated gradient. Order zero's weighted contraction is the cell's value.
+BRM._rk_spl_cell_value(ad::_SPLCellAD, base, indices, cell; context) =
+    first(BRM._rk_spl_cell_accumulate(context, ad, 0, nothing, 1.0, base, indices, cell))
+
 # A factor's complete derivative block is small: the outer sums and direct
 # reads, or one summand's own reads. Operators are shared only across factors
 # with the same selection length, never across concurrent problem copies.
