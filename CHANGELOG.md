@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.166
+## 0.2.170
 
 - **Authored declaration documentation:** ordinary Julia docstrings in BRM
   source survive binding, tuple expansion, model composition, source printing
@@ -29,6 +29,56 @@ instead of failing at run time.
   lowering and replay. This requires ReactiveKernelsPPL 0.1.93. Complete BRM
   records retain element-specific prior addresses when several coefficients
   share one emitted array declaration.
+
+## 0.2.169
+
+- `SBBRMI` now accepts an omitted `interval_censored(D; upper=hi)` response
+  in the unchanged model. Retained bounds and family arguments determine the
+  predictive shape; draws use the uncoarsened base law, with no interval
+  likelihood or fabricated lower endpoints. Observed interval densities and
+  predictor-side interval terms retain their semantics.
+- A censored response may also omit its own endpoint: keep
+  `y ~ censored(D; lower=y)` or `upper=y` unchanged and omit `y`. Only that
+  endpoint disappears for prediction; independent retained bounds still clamp
+  the draw. Observed CDF/CCDF evidence and missing-independent-bound validation
+  are unchanged. Requires StanBlocks 0.2.24, now the package and
+  test-environment minimum.
+
+## 0.2.168
+
+- `RKBRMI` accepts scalar `@plate` outputs in `offset(field)`, including
+  non-last outputs and elementwise assignments over them. The offset reads
+  the declared field with coefficient one, preserving selected-row queries
+  and native reverse gradients. Vector-valued cells cannot establish row
+  alignment merely by having the same flattened length.
+- An explicit gather of an opaque helper's output, `field = whole[position]`,
+  supplies the index vector's row axis to a model-value offset. The helper
+  remains one graph value; its arguments and output length do not implicitly
+  declare the consumer's rows.
+
+## 0.2.167
+
+- `RKBRMI` accepts mixture probabilities computed from linked or hierarchical
+  predictors, including predictors used only in the weights. The ordinary
+  value graph retains their coefficients, group effects and authored priors.
+  Probability vectors may be shared or vary by observation; native density,
+  Reverse gradients, pointwise likelihood and printed-source replay use the
+  same normalized mixture. Requires ReactiveKernelsPPL 0.1.90.
+
+## 0.2.166
+
+- **Breaking: conservative automatic embedded Laplace.** `integrate=:auto`
+  now requires recognized conditional log-concavity. Affine Normal rows retain
+  exact integration with exact algebra; log-Poisson, logit-binomial/Bernoulli
+  and log-NegativeBinomial2 rows with sampled shape retain the local ESS gate.
+  Arbitrary plate cells and model-value observations stay sampled even if an
+  ESS check at one point would pass. To retain a previously automatic cell
+  partition, explicitly name its declarations/groupings in `integrate=(...)`
+  after assessing the approximation. Supported explicit selections remain
+  available, including effects on scale/shape. Automatic diagnostics now hold
+  rejected dispersion terms sampled. All model factors remain in the target;
+  no eligible terms gives the full sampled model. Structural concavity and
+  passing local ESS do not certify Gaussian approximation accuracy.
 
 ## 0.2.165
 

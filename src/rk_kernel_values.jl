@@ -1549,6 +1549,34 @@ _rk_flatten_cells!(defs, taken, cells) =
     Expr(:call, _rk_shared_definition!(defs, taken, _RK_FLATTEN_CELLS_KERNEL; kernel=true),
         cells)
 
+# An offset whose declared row axis is the plate's cell axis consumes scalar
+# cells unchanged. A vector-valued cell has a different (possibly ragged) axis;
+# even an accidentally equal flattened length must not establish alignment.
+# Keep the type test in the graph so the live scalar arm remains an identity
+# for selected-row queries and reverse gradients.
+const _RK_OFFSET_CELLS_KERNEL = :(offset_cells(cells) = begin
+    values = eltype(cells) <: Real ? cells : throw(ArgumentError(
+        "RK backend: offset of a plate output requires one real scalar per cell; " *
+        "vector-valued cells need an explicit row selection"))
+    return values
+end)
+
+function _rk_offset_scalar_cells!(defs, statements, taken, plan, cells)
+    outputs = Set{Symbol}()
+    for predictor in plan.regression.predictors, term in predictor.terms
+        _rk_model_offset(term) && !_rk_scalar_model_offset(term) || continue
+        union!(outputs, get(term.options.axis, :scalar_cells, ()))
+    end
+    isempty(outputs) && return nothing
+    callee = _rk_shared_definition!(defs, taken, _RK_OFFSET_CELLS_KERNEL; kernel=true)
+    for statement in statements
+        Meta.isexpr(statement, :(=), 2) && statement.args[1] in outputs || continue
+        output = statement.args[1]
+        statement.args[2] = Expr(:call, callee, cells[output])
+    end
+    nothing
+end
+
 # A plate output at model scope is one value per cell, as the Julia loop leaves
 # it: `out[i]` is cell `i`'s value and `sum(out)` adds the cells. The graph
 # value of the output's name is its cells concatenated, which formula terms and

@@ -352,6 +352,13 @@ function _brm_prepare_call_expr(callable::Type{<:Multinomial}, expression, axes)
         map(value -> _brm_prepare_expr(value, axes), getkwargs(expression)))
 end
 
+function _brm_prepare_call_expr(callable::Type{MixtureModel}, expression, axes)
+    args = Tuple(index == 2 ? _brm_prepare_vector_argument(argument, axes) :
+        _brm_prepare_expr(argument, axes) for (index, argument) in enumerate(getargs(expression)))
+    _BRMPreparedExpr(callable, args,
+        map(value -> _brm_prepare_expr(value, axes), getkwargs(expression)))
+end
+
 function _brm_prepare_call_expr(callable::Type{<:MvNormal}, expression, axes)
     args = Tuple(if index > 1 && argument isa NamedColumn &&
                     parent(argument) isa DataColumn &&

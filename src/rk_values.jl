@@ -578,6 +578,8 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
             family = first(getargs(family))
         end
         head = family isa ExprColumn ? getf(family) : nothing
+        head === MixtureModel && _rk_mixture_value_weights(program, family) &&
+            return true
         # A categorical response owns fitted level coding and a whole simplex;
         # it is not a scalar response merely because it has no formula location.
         head === Categorical && continue
@@ -611,6 +613,24 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
     false
 end
 
+# Shared literals, simplexes and sampled complements retain their structural
+# route. Computed/row weights use the ordinary value graph, whose reachability
+# includes predictors read only by the weights and their group-scale priors.
+function _rk_mixture_value_weights(program, family)
+    args = getargs(family)
+    length(args) == 2 || return false
+    weights = args[2]
+    parameters = Set(op.name for op in program.operations if op.role === :parameter)
+    weights isa NamedColumn && name(weights) in parameters && return false
+    if weights isa Union{AbstractVector,Tuple}
+        all(w -> w isa Real, weights) && return false
+        length(weights) == 2 &&
+            _rk_mixture_complement(weights[1], weights[2], parameters) !== nothing &&
+            return false
+    end
+    true
+end
+
 _rk_ast_value_distribution(distribution, bindings, taken) =
     _rk_ast_value_distribution(distribution.callable, distribution, bindings, taken)
 
@@ -631,6 +651,30 @@ end
 
 _rk_ast_value_distribution(callable, distribution, bindings, taken) =
     _rk_ast_value_call(callable, distribution, bindings, taken)
+
+function _rk_ast_value_distribution(::Type{MixtureModel}, distribution, bindings, taken)
+    length(distribution.args) in (1, 2) || error(
+        "RK backend: MixtureModel needs components and optional probabilities")
+    components = first(distribution.args)
+    entries = components isa Tuple ? components :
+        components isa _BRMPreparedExpr && components.callable === Base.vect ?
+        components.args : error("RK backend: MixtureModel components must be a vector or tuple")
+    component_rows = _rk_ast_dotted(:vcat,
+        (_rk_ast_value_distribution(component, bindings, taken) for component in entries)...)
+    length(distribution.args) == 1 &&
+        return _rk_ast_dotted(:MixtureModel, component_rows)
+    weights = distribution.args[2]
+    row_weights = weights isa Tuple ? any(_brm_has_row_ref, weights) :
+        _brm_has_row_ref(weights)
+    probabilities = if weights isa Tuple
+        entries = map(w -> _rk_value_expr!(bindings, w, taken), weights)
+        row_weights ? _rk_ast_dotted(:vcat, entries...) : Expr(:vect, entries...)
+    else
+        _rk_value_expr!(bindings, weights, taken)
+    end
+    row_weights || (probabilities = Expr(:call, :Ref, probabilities))
+    _rk_ast_dotted(:MixtureModel, component_rows, probabilities)
+end
 
 function _rk_ast_value_call(callable, distribution, bindings, taken; joint=false)
     callee = _rk_value_callee!(bindings, callable, taken)
@@ -1001,11 +1045,21 @@ _rk_value_expr!(bindings, values::Tuple, taken) =
 function _rk_value_expr!(bindings, expression::_BRMPreparedExpr, taken)
     args = map(arg -> _rk_value_expr!(bindings, arg, taken), expression.args)
     expression.callable === getindex && return Expr(:ref, args...)
-    expression.callable === Base.vect && return Expr(:vect, args...)
+    if expression.callable === Base.vect
+        # A formula vector containing row values is constructed once per row.
+        # Keeping this in the ordinary expression emitter also covers named
+        # probability vectors without transposing components and observations.
+        return _brm_has_row_ref(expression) ? _rk_ast_dotted(:vcat, args...) :
+            Expr(:vect, args...)
+    end
     # BRM expression arithmetic is elementwise. Ordinary RKPPL source must
     # state that explicitly, while reductions and authored whole-array calls
     # keep their own Julia semantics and exact callable bindings.
     if isempty(expression.kwargs)
+        # Unary negation is `-x` for scalars and arrays. The dotted operator
+        # spelling below belongs to binary subtraction in native source.
+        expression.callable === (-) && length(args) == 1 &&
+            return Expr(:call, :-, only(args))
         if haskey(_RK_DERIVED_BINOPS, expression.callable)
             return Expr(:call, _RK_DERIVED_BINOPS[expression.callable], args...)
         elseif haskey(_RK_DERIVED_CMP, expression.callable)
@@ -1093,6 +1147,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, documentation=())
             _rk_coordinate_record!(coordinates, (; kind=:submodel,
                 target=assignment.name))
     end
+    _rk_offset_scalar_cells!(defs, stmts, taken, plan, cells)
     for completion in plan.completions
         parts = _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)
         # `declaration` holds the completion's sampled coordinates: the missing
