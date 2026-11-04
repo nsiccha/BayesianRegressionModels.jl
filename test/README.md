@@ -99,6 +99,12 @@ broadcast observation locations: strict selected-cell queries, ordinary Enzyme
 Reverse gradients, independent analytic values, and bounded allocations as
 the number of observations grows. The test environment pins RK 0.1.51 /
 RKPPL 0.1.53, including scalar-helper type inference and guarded captures.
+`rk_field_offset.jl` checks coefficient-one offsets of declared scalar plate
+outputs and explicitly gathered helper outputs. It covers both output orders,
+reader-first composition, unequal axes, repeated and reordered reads, normalized
+density, native reverse and Stan gradients, complete printed-source replay,
+immutable inputs, and bounded selected-row allocations. Vector cells with an
+accidentally matching flattened length must not establish a scalar row axis.
 `laplace_plan_reuse.jl` counts actual row/cell derivative preparations and
 compares retained plans with freshly prepared targets, including strict
 subsets of row, plate and sum factors. It checks marginal values, gradients,

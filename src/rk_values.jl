@@ -1091,6 +1091,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
             _rk_coordinate_record!(coordinates, (; kind=:submodel,
                 target=assignment.name))
     end
+    _rk_offset_scalar_cells!(defs, stmts, taken, plan, cells)
     for completion in plan.completions
         parts = _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)
         # `declaration` holds the completion's sampled coordinates: the missing
