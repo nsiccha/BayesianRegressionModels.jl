@@ -54,12 +54,19 @@ function _brm_spl_screen(backend, candidates, forced, max_cell_width)
         owner[layout.integrated[vec(b.z)]] .= t
     end
     constraints = NamedTuple[]
+    # Retain structural reads for the automatic planner. A cell's current
+    # numerical Hessian cannot certify its dependence at other outer points.
+    other = setdiff(Set(_brm_slap_other_observations(backend.plan)),
+        keys(_brm_plan_certified_observations(backend)))
+    uncertified = Dict{Symbol,Set{Symbol}}()
     function record!(observation, cell, part, reads; extra=0)
         counts = Dict{Int,Int}()
         for i in reads
             t = owner[i]
             t == 0 && continue
             counts[t] = get(counts, t, 0) + 1
+            observation in other && push!(get!(Set{Symbol}, uncertified,
+                declarations[t]), observation)
         end
         push!(constraints, (; observation, cell, part, extra, counts=sort!(collect(counts))))
     end
@@ -88,6 +95,6 @@ function _brm_spl_screen(backend, candidates, forced, max_cell_width)
     end
     selected = _brm_spl_select_width(constraints, declarations, forced, bound)
     integrated_dimension = count(i -> owner[i] != 0 && selected.active[owner[i]], eachindex(owner))
-    (; selected..., integrated_dimension,
+    (; selected..., uncertified, integrated_dimension,
         sampled_dimension=length(owner) - integrated_dimension)
 end
