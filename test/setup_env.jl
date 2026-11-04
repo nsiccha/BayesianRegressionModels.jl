@@ -330,7 +330,10 @@ const PINS = [
     # 6053067f / libEnzyme 3425ed9c types floating-point tuple stack slots
     # throughout Reverse, so derived-scale blocks wider than four margins
     # differentiate without changing BRM's block pass (reverse-untyped-a117a92b).
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "6053067f2fa33a4390aea2a365e9e24f83acb495"),  # dogfood
+    # de016556 / libEnzyme c1743bf9 retains those fixes and frees constant
+    # loop-count caches after Forward over Reverse. Repeated sparse Laplace
+    # cell HVPs otherwise retain native memory (forward-over-rev-f93d10bc).
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "de016556e7b8f7b037736847fd58f6a12bc3701e"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also
