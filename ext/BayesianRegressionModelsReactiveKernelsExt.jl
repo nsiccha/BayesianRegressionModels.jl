@@ -317,7 +317,8 @@ end
 
 # A backend's program, translated once and shared with its replays.
 _rk_program(backend::BRM.RKBRMI) =
-    BRM._rk_once!(() -> _RKProgram(BRM._rk_emit_ast(backend.plan)), backend.program)
+    BRM._rk_once!(() -> _RKProgram(BRM._rk_emit_ast(backend.plan;
+        documentation=BRM.brm_documentation(BRM.brm_source(backend)))), backend.program)
 # A backend's binding of that program to its own data, bound once. Every
 # query of the backend reads it.
 _rk_translated(backend::BRM.RKBRMI) =
@@ -424,7 +425,7 @@ Base.@nospecializeinfer function BRM.RKBRMI(@nospecialize(source::BRM.BRMI); hel
     brmi = BRM._brm_resolve_optional_priors(source)
     plan = BRM._rk_plan_car_units(
         BRM._rk_plan_completions(BRM._brm_rk_plan(brmi; held_out), completions), car_units)
-    program = _RKProgram(BRM._rk_emit_ast(plan))
+    program = _RKProgram(BRM._rk_emit_ast(plan; documentation=BRM.brm_documentation(source)))
     bound = _rk_bind_program(program, plan)
     BRM.RKBRMI(brmi, plan, build_kernel(bound);
         program=BRM._RKOnce(program), bound=BRM._RKOnce(bound), source)

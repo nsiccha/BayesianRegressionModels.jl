@@ -1296,7 +1296,7 @@ end
 # in the same order, because RK prepares a cell's data-only work once only when
 # bound data fix the plate's domain (rkppl-use §13 "Arrays per index").
 function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
-        rendered=(), defs=nothing, coordinates=nothing)
+        rendered=(), defs=nothing, coordinates=nothing, documentation=())
     # `rendered` outputs are already emitted program expressions (hoisted
     # observation arguments): their calls are bound, not cell source.
     written = Any[outputs..., rendered...]
@@ -1444,9 +1444,14 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
                 law.args[2:end]...))
         Any[draw, Expr(:(=), lhs, entry)]
     end
+    names = Dict{Symbol,Symbol}(local_name => get(reads, local_name, local_name)
+        for local_name in locals)
+    merge!(names, declared)
+    documented_body = _rk_documentation_block(Expr(:block, body...), documentation;
+        path=(kernel.name,), names)
     push!(statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
         Expr(:for, Expr(:(=), index, Expr(:call, :eachindex, range)),
-            Expr(:block, body...))))
+            documented_body)))
 end
 
 # `<rows> = brm_ragged_rows([x, group, cell, axes...], group, cell, axes...)`
@@ -1686,7 +1691,7 @@ _rk_kernel_scalar_response(kernel, observation) =
 # RKPPL runs it only in a query that reads it.
 function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         kernel::_RKPreparedKernelAssignment; arguments=nothing, coordinates=nothing,
-        graph_outputs=(), cell_sources=Dict{Symbol,Symbol}())
+        graph_outputs=(), cell_sources=Dict{Symbol,Symbol}(), documentation=())
     arguments === nothing || (kernel = _rk_kernel_with_arguments(kernel, arguments))
     kernel = _rk_kernel_input_cells(kernel, cell_sources)
     # A cell without a collected value writes only what its observations read.
@@ -1729,7 +1734,8 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         end
     end
     _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
-        rendered=arguments === nothing ? () : arguments.outputs, defs, coordinates)
+        rendered=arguments === nothing ? () : arguments.outputs, defs, coordinates,
+        documentation)
     append!(statements, after)
 end
 

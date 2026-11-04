@@ -19,7 +19,7 @@ _rk_plan_summary(plan::_RKUnconditionedPlan) =
     "unconditioned program (zero fitted coordinates; " *
     string(length(plan.generative.declarations)) * " retained generative declarations)"
 _rk_observed_names(::_RKUnconditionedPlan) = ()
-_rk_emit_ast(::_RKUnconditionedPlan) =
+_rk_emit_ast(::_RKUnconditionedPlan; documentation=()) =
     _RKEmittedProgram(Expr[], Expr(:block), Pair{Symbol,Any}[])
 
 # The module authoring the model's cells, where the Stan program reads the
@@ -341,8 +341,8 @@ function _rk_withheld_observation(statement, names)
     body = _rk_plate_body(statement)
     body !== nothing && !isempty(body) && all(s -> _rk_withheld_observation(s, names), body)
 end
-function _rk_emit_ast(plan::_RKHeldOutPlan; coordinates=nothing)
-    emitted = _rk_emit_ast(plan.parent; coordinates)
+function _rk_emit_ast(plan::_RKHeldOutPlan; coordinates=nothing, documentation=())
+    emitted = _rk_emit_ast(plan.parent; coordinates, documentation)
     conditioned = _rk_observed_names(plan.parent)
     main = _rk_active_observation_source(emitted, conditioned, plan.held_out)
     _RKEmittedProgram(emitted.defs, main, emitted.bindings)
