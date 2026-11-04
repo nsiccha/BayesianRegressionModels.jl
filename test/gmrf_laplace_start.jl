@@ -62,6 +62,17 @@ end
         @test medians ≈ full_start_medians(rk, target)
         @test isfinite(LDP.logdensity(target, medians))
     end
+    # A law's inner call reaches the start in the DSL's broadcast spelling.
+    spelled = @brm input begin
+        field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+        sd(field, gmrf((east, north), time)) ~ Exponential(0.7)
+        length_scale(field, gmrf((east, north), time), space) ~ LogNormal(log(0.2), 0.5)
+        length_scale(field, gmrf((east, north), time), time) ~ LogNormal(2 * log(5.0) - log(5.0), 0.5)
+        y ~ Normal(field, 0.2)
+    end
+    rk, _, _ = gmrf_rk_build(spelled)
+    target = brm_laplace_problem(rk; ad_backend=START_AD, integrate=(FIELD,))
+    @test BRM._brm_laplace_prior_median(target) ≈ log.([median(Exponential(0.7)), 0.2, 5.0])
     # The default mode search starts from these medians: an explicit init of
     # the same point takes the identical path.
     rk, _, _ = gmrf_rk_build(declared)

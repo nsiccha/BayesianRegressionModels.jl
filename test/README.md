@@ -25,7 +25,7 @@ references captured before the ReparametrizableDistributions extraction.
 The transform algorithms and their derivative tests live in that package.
 
 `nlme_laplace_matrixfree_algebra.jl` checks the derivative of the fixed-probe
-rational determinant against independent two-dimensional identities, including
+Lanczos determinant against independent two-dimensional identities, including
 noncommuting curvature, mixed exact/operator components, ICAR soft constraints,
 conditional draws and explicit solver failures. `nlme_laplace_matrixfree.jl`
 checks nonlinear row/cell/sum gradients, evaluation-history and copy invariance,
@@ -1176,6 +1176,17 @@ on StanBlocks and ReactiveKernels, with constrained read-back and coordinate
 transport, effective bounds, known values, invalid addresses and overrides.
 Run it directly in the test environment.
 
+`gmrf_preconditioner.jl` checks a `gmrf` field's references against dense oracles,
+without model lowering: each is one congruence with the determinant it reports,
+in both channel combinations and through a star over coupled fields, and its blocks
+between neighbouring times, or between a star's hub and another field, equal the
+precision's. With a complete orthogonal probe set the rebuilt reference's exact
+derivative cancels its estimate entry by entry, and with few probes the control
+variate's derivative matches a central difference of its value.
+
+`gmrf_laplace.jl` also compares a 640-state field and two coupled fields under
+matrix-free algebra with exact algebra: value within four probe standard errors,
+gradient against a central difference of the returned value.
 `gmrf_vecchia.jl` checks the footprint representation's numerical core without a
 backend: the exact Gaussian on a fully read grid with irregular gaps, the exact
 time factor at any neighbour count, separable channels, shared solves, gap

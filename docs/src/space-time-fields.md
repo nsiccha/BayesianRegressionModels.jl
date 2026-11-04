@@ -153,6 +153,8 @@ is far larger than the reads, use `neighbors=` below.
 Posterior inference must also account for the observation model and shared
 parameters. Sparse posterior factorization can have substantial fill, and a
 fast precision application alone does not establish scalable marginalization.
+The Embedded Laplace section below reports what its operator algebra measures at
+large sizes.
 
 ## A field too large for a mesh: `neighbors=`
 
@@ -256,8 +258,33 @@ applies the plan to the same target, and `deepcopy` gives each chain its own
 problem. `integrate=(declaration,)` also integrates one field per
 `@plate for p in groups(g)` cell, each cell's rows reading only that cell's
 field.
-Measured cost grows superlinearly with the number of field states
-under both exact and matrix-free algebra (about 12–15 s per value and
-gradient at 51,200 states on one or two CPUs), dominated by space-time
-factorization and log-determinant work; large fields are not yet a supported
-Laplace workload.
+
+Above 1,024 coordinates `solver=:auto` uses operator algebra, which needs no
+space-time factorization. Its determinant is an estimate from fixed probes, so
+even with Normal rows the target is then approximate. A component holding one
+field uses a reference with one sparse spatial factor per channel and time, which
+sees the data's curvature and stays fixed. The estimate is the difference from that
+reference rebuilt at each point, whose own determinant is exact, and the gradient
+is the exact derivative of the fixed-probe value. Fields read by the same rows are
+coupled through one of them. Measured per warm value and gradient, one CPU of a
+loaded host, one Normal field at its prior medians:
+
+| States | Vertices × times × channels | Probes | Operator algebra | Exact |
+|:--|:--|:--|:--|:--|
+| 10,000 | 400 × 25 × 1 | 8 | 0.28 s | 0.61 s |
+| 51,200 | 1,024 × 50 × 1 | 8 | 3.0 s | 9.4–19 s |
+| 202,500 | 2,025 × 100 × 1 | 8 | 13 s | not run |
+| 640,000 | 1,600 × 400 × 1 | 8 | 51 s | not run |
+| 810,000 | 8,100 × 100 × 1 | 4 | 87 s | not run |
+| 1,698,450 | 4,225 × 402 × 1 | 4 | 134 s | not run |
+| 1,920,000 | 1,600 × 400 × 3 | 4 | 262 s | not run |
+
+Work grows about linearly in times and channels, and faster than linearly in
+vertices, because each spatial factor does. A point far from the prior medians
+costs about three to four times as much. At 10,000 states and 8 probes the value and
+gradient agreed with exact within their probe error, for Normal and Poisson rows,
+and the gradient's error across probe seeds was about 0.3 to 0.6 posterior standard
+deviations of each hyperparameter. That ratio does not shrink as a field grows, so
+compare with more probes before relying on a fit. Correlated channels read at
+different places, and the scales of fields read by the same rows, have several times
+that error. Sizes beyond the table have not been measured.

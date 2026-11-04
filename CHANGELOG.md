@@ -12,6 +12,34 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.164
+
+- **Large `gmrf` fields under the sparse Laplace:** a warm value and gradient, at
+  the prior medians, with one Normal field and one CPU, took 13 s at 202,500 states
+  on 8 probes (was 93 s), and 134 s at 1,698,450 states on 4 probes. A component
+  that is exactly one `gmrf` field now has a reference that sees the data, built at
+  the prior medians, and the determinant takes one Lanczos recurrence per probe.
+- **Lower fixed-probe noise:** `MatrixFreeLaplace(control_variate=true)`, the default,
+  rebuilds a field's reference at each point and estimates only the difference from
+  it. At 10,000 states and 8 probes the gradient's SD across probe seeds fell from
+  about [9, 11, 14] to [2.2, 2.1, 1.6] at the same fixture, for a cost of about twice
+  as much per probe. The value and gradient stay one fixed-probe function and its
+  exact derivative. Correlated channels read at different places keep the plain
+  estimator.
+- **Fields read by the same rows** integrate through a reference that couples them
+  (two at 20,000 states 10 s against 24 s exact; three at 30,000 states 17 s against
+  83 s). Its control variate tracks only the fields' priors: a field's scale keeps
+  the plain estimator's noise.
+- **`brm_start(...; base=:prior_median)` and the Laplace default start** now read a
+  prior with an inner call, such as `LogNormal(log(0.2), 0.5)`. Those coordinates
+  used to keep the unit point, so such a model's starts change.
+- **Breaking:** `MatrixFreeLaplace` no longer takes `logdet_step` or `logdet_extent`:
+  remove them, there is no quadrature. `target.algebra.diagnostics` replaces
+  `quadrature_nodes` with `gradient_rank` and adds `ritz`, `tracked_iterations` and
+  `tracked_shift`. Matrix-free values change within their probe error, and a problem
+  with a `gmrf` field prepares its reference at the prior medians rather than at zero
+  coordinates, so an SMC checkpoint from an earlier version is refused.
+
 ## 0.2.163
 
 - **Mesh `gmrf` densities at very short spatial lengths:** `RKBRMI` and `SBBRMI`
