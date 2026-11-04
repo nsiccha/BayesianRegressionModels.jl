@@ -1175,6 +1175,16 @@ on StanBlocks and ReactiveKernels, with constrained read-back and coordinate
 transport, effective bounds, known values, invalid addresses and overrides.
 Run it directly in the test environment.
 
+`gmrf_vecchia.jl` checks the footprint representation's numerical core without a
+backend: the exact Gaussian on a fully read grid with irregular gaps, the exact
+time factor at any neighbour count, separable channels, shared solves, gap
+linkage, reverse derivatives against finite differences and refusals.
+`gmrf_vecchia_rk.jl` checks the term on RKBRMI: density and native reverse rule,
+sampled channel factor, state plates under `locality = :error`, a strict
+partition, replay from a fitted state and refusals. `gmrf_vecchia_stan.jl` checks
+valid Stan, the shared helper, RK/Stan parity through coordinate transport, replay
+and descriptions.
+
 `gmrf_laplace_start.jl` checks that the Laplace default start of a model-scope
 `gmrf` field equals its `brm_start(rk, (;); base=:prior_median)` medians, for
 declared laws, a known hyperparameter and a law reading a model-scope parameter.

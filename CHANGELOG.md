@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.160
+
+- **`gmrf(...; neighbors=m)`, a space-time field bounded by its reads:** in place
+  of `mesh=`, a nearest-neighbour (Vecchia) sparse precision with one state per
+  channel at each distinct `(east, north, time)` the rows read. The covariance is
+  the exact continuum Matérn × OU at those reads: no mesh boundary inflation, no
+  resolution floor, no interpolation. The conditioning set is the approximation;
+  channels stay exactly separable, and positions read at the same times keep the
+  exact OU correlation across every gap. Same parameters, addresses and priors as
+  the mesh form, on SBBRMI and RKBRMI. Frozen replay reads fitted pairs only. One
+  model-scope field: not in `@plate` cells and not integrated by embedded Laplace.
+  Adds a dependency on Bessels.jl.
+- **A `gmrf` term with only default priors transpiles from any `mod`:** the mesh
+  form named its submodel in the caller's module and failed with `Could not find
+  _sb_gmrf`.
 ## 0.2.159
 
 - **`RKBRMI`: a model-scope `gmrf` prior can read data.** `sd(field, gmrf(...))
