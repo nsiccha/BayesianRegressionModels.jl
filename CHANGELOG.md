@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.158
+
+- **Sparse Laplace cells that static Enzyme cannot take forward over reverse:**
+  `brm_laplace_problem`, NLMEEstimation's `laplace_marginals_and_gradient` and so
+  `check_protocol` no longer raise `EnzymeRuntimeActivityError` on such a `@plate`
+  cell. The cell group moves to reverse over forward the first time a product
+  raises that error, with a warning naming the group. Values are the same and the
+  group allocates up to about twice as much. Any other error still propagates. A
+  cell that reduces its data with `unique!(sort!(...))`, as a PK event reader's
+  step lengths do, needs this before Enzyme dogfood `0ed41342`, which takes that
+  cell forward over reverse itself.
+
 ## 0.2.157
 
 - **NLME view of a single-level categorical:** `brm_nlme_view`, and with it
