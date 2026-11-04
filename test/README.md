@@ -25,7 +25,7 @@ references captured before the ReparametrizableDistributions extraction.
 The transform algorithms and their derivative tests live in that package.
 
 `nlme_laplace_matrixfree_algebra.jl` checks the derivative of the fixed-probe
-rational determinant against independent two-dimensional identities, including
+Lanczos determinant against independent two-dimensional identities, including
 noncommuting curvature, mixed exact/operator components, ICAR soft constraints,
 conditional draws and explicit solver failures. `nlme_laplace_matrixfree.jl`
 checks nonlinear row/cell/sum gradients, evaluation-history and copy invariance,

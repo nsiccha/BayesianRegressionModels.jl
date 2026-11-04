@@ -129,7 +129,7 @@ large-component gradient differentiates the reported finite determinant
 approximation, including its dependence on the conditional mode. Probes and
 policy stay fixed throughout a prepared target's use and copies.
 `problem.algebra.diagnostics` reports per-component determinant probe MCSE;
-this is not a bound on quadrature error or on the error of Laplace integration.
+this is not a bound on the error of Laplace integration.
 Operator curvature checks cover Krylov search directions; they do not certify
 global positive definiteness. Failed capped linear solves raise an error.
 

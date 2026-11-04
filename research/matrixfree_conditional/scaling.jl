@@ -82,7 +82,6 @@ println("step columns: n nnz operator_seconds exact_refactor_solve_seconds relat
 println("det columns: n seconds approximate_logdet exact_logdet allocated_bytes retained_operator_bytes")
 options = MatrixFreeLaplace(; solve_maxiter=setting("iterations",512,Int),
     probes=setting("probes",8,Int), solve_tolerance=setting("tolerance",1e-10,Float64),
-    logdet_step=setting("step",1.0,Float64), logdet_extent=setting("extent",32.0,Float64),
     preconditioner_memory="unpreconditioned" in ARGS ? nothing : setting("memory",32,Int),
     preconditioner_ridge=setting("ridge",0.01,Float64))
 println("options\t",options)

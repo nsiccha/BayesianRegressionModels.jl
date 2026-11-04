@@ -24,6 +24,22 @@ function _brm_fixed_reference(H, memory; ridge=0.01)
         sum(log, abs.(F.D)), SparseArrays.nnz(F.L), Float64(F.α))
 end
 
+# A component that is exactly one native field has its own reference.
+function _brm_component_reference(p, c, H, h, localindex, options)
+    field = _brm_gmrf_component_field(p, c)
+    field === nothing || return _brm_gmrf_time_reference(field, H, h, localindex)
+    _brm_fixed_reference(H, options.preconditioner_memory; ridge=options.preconditioner_ridge)
+end
+
+# What identifies a prepared reference, as stored values and never as a dense
+# array (`laplace_numerical_binding`, the SMC checkpoint identity).
+_brm_reference_binding(::Nothing) = nothing
+function _brm_reference_binding(R::_BRMFixedReference)
+    L = parent(R.lower)
+    (; dimensions=size(L), L.colptr, L.rowval, L.nzval,
+        R.permutation, R.inverse_scale, R.logdet)
+end
+
 struct _BRMPreconditionedOperator{H,R}
     h::H
     reference::R

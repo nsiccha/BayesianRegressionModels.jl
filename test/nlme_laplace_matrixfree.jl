@@ -73,7 +73,7 @@ end
         @test exact.algebra === nothing
         @test p.factor[] === nothing
         # Hadamard probes remove Monte Carlo error for this seven-coordinate
-        # control, leaving only the finite rational and iterative errors.
+        # control, leaving only the iterative errors.
         hadamard = [1.0;;]
         for _ in 1:3
             hadamard = [hadamard hadamard; hadamard -hadamard]
