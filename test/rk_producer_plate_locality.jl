@@ -129,7 +129,8 @@ end
         @test plan.integrated_dimension == 4
         automatic = brm_laplace_plan(rk; ad_backend=PRODUCER_PLATE_AD,
             integrate=:auto, draws=12)
-        @test automatic.integrated_dimension == plan.integrated_dimension
+        @test automatic.integrated_dimension == 0
+        @test all(t -> !t.admitted && t.importance_ess === nothing, automatic.terms)
         target = brm_laplace_problem(rk; ad_backend=PRODUCER_PLATE_AD,
             integrate=plan, maxiter=100)
         @test length(target.components) == 2

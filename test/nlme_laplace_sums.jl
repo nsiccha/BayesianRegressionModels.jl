@@ -99,8 +99,10 @@ end
     @test LogDensityProblems.logdensity_and_gradient(cp,φ)[2] ≈ gradient
     @test cp.factor[].F !== p.factor[].F
     plan = brm_laplace_plan(rk; ad_backend=NLME_AD, draws=8, at=φ)
-    @test only(plan.terms).admitted
-    @test only(plan.terms).importance_ess.min ≈ 8.0 atol=1e-7
+    @test !only(plan.terms).admitted
+    @test only(plan.terms).importance_ess === nothing
+    forced = brm_laplace_plan(rk; ad_backend=NLME_AD, integrate=:unit)
+    @test only(forced.terms).admitted
     fit = brm_laplace_mode(p; init=φ, iterations=200)
     @test fit.diagnostics.converged
     @test fit.diagnostics.value ≈ exact(fit.draws[p.population,1]) atol=1e-8
