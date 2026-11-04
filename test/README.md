@@ -1222,7 +1222,12 @@ julia --project=<scratch-env> test/nlme_estimation_ext.jl
 ```
 
 Without NLMEEstimation the file stops with an error rather than skipping.
-Shared fixtures live in `nlme_fixtures.jl`.
+Shared fixtures live in `nlme_fixtures.jl`. Its sparse-Laplace testsets check a
+cell that reduces its data with `unique!(sort!(...))`, with both responses and
+with one omitted: `check_protocol` and the Laplace value and gradient against the
+same lengths computed by `sort!(unique(...))`. A stub product checks that a cell
+group moves to reverse over forward on `EnzymeRuntimeActivityError` alone, whatever
+Enzyme can take today.
 
 `nlme_laplace_capability.jl` checks an optional Laplace refusal using a toy
 recurrence whose selected outputs are summed. It verifies that the capability
@@ -2097,7 +2102,12 @@ steps and deterministic repeated evaluations.
 not (an infinite third derivative at a converged mode) in an ordinary cell, a
 sum cell and under matrix-free algebra. It checks the `nonfinite_gradient`
 counter, the warning's named term, the closed-form value and the central
-difference, and that a target materialized from a plan starts at zero.
+difference, and that a target materialized from a plan starts at zero. It also
+pins a `log(erfc(t))` cell with its modes near `t = 19` in the same three
+configurations: the gradient is finite, matches central differences and counts
+nothing. That one needs an Enzyme whose libEnzyme build is `2b1f1cfe` or later
+(`setup_env.jl` pins dogfood `07842f2`, libEnzyme `fce75191`); with an earlier
+build its third order is NaN.
 
 ## One-time bootstrap
 
@@ -2329,8 +2339,9 @@ toolchain, so a GitHub Actions job would be red by construction.
 `laplace_cell_hvp_width.jl` checks that a cell's Hessian block compiles at a
 bounded Enzyme batch width: batched blocks and the whole target's value and
 gradient against one batch over every direction, finite differences of the cell
-gradient, a 129-direction cell at the same width, and the plan's and problem's
-Treebars reports. It needs Treebars and the Enzyme dogfood line.
+gradient, a 129-direction cell at the same width, a batched group's move to
+reverse over forward at that width, and the plan's and problem's Treebars
+reports. It needs Treebars and the Enzyme dogfood line.
 `laplace_width.jl` checks structural screening before derivative preparation,
 deterministic whole-term selection, forced conflicts, correlated margins,
 exact Gaussian retained-set values and native Enzyme gradients, local sum

@@ -307,6 +307,15 @@ const PINS = [
     # 474fd636 / libEnzyme df199913 preserves JIT symbols from augmented
     # reverse helpers under Forward, including the digamma partials needed
     # by ordinary negative-binomial compact-cell HVPs.
+    # 330b3578 / libEnzyme 2b1f1cfe: the Forward derivative of a division no
+    # longer squares its divisor (Enzyme todo 0g6ywzj), so a cell's third order
+    # through log(erfc(t)) stays finite in the tail; it also carries the logger
+    # repair (Enzyme snag nested-forward-o-206e01ab) that lets a nested
+    # derivative first compile under a TestLogger, as @test_logs does here.
+    # 07842f2e / libEnzyme fce75191 carries both, and adds the repair for
+    # "Illegal cached pointer" from an array element read in a loop, which
+    # 330b3578 raised in a nested @plate cell's sparse Laplace HVP and in
+    # nlme_integrated.jl (Enzyme snag dogfood-tip-ille-519c9d56).
     # 6053067f / libEnzyme 3425ed9c types floating-point tuple stack slots
     # throughout Reverse, so derived-scale blocks wider than four margins
     # differentiate without changing BRM's block pass (reverse-untyped-a117a92b).
