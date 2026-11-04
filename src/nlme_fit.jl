@@ -27,11 +27,13 @@ function _brm_nlme_named!(::Val{:population}, acc, record, values)
     acc
 end
 function _brm_nlme_named!(::Val{:population_block}, acc, record, values)
-    # Level => value pairs, as `brm_start` takes a categorical column.
+    # Level => value pairs, as `brm_start` takes a categorical column. A
+    # single-level factor has no coefficient, so it has no pairs.
     contrasts = _brm_rk_declaration_value(values, record.declaration)
+    levels = isempty(contrasts) ? Pair{Any,eltype(contrasts)}[] :
+        [level => x for (level, x) in zip(record.level_values, contrasts)]
     push!(get!(acc.population, record.predictor, Pair{Symbol,Any}[]),
-        record.coefficient => [level => x
-            for (level, x) in zip(record.level_values, contrasts)])
+        record.coefficient => levels)
     acc
 end
 function _brm_nlme_named!(::Val{:scalar}, acc, record, values)
