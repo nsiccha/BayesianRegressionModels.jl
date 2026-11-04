@@ -12,12 +12,16 @@ struct _BRMGMRFFactorPattern
     previous_pos::Vector{Int}
 end
 
-function _brm_gmrf_factor_pattern(G, mass)
-    # kappa=1 only chooses a symbolic pattern. Every positive kappa has the
-    # same structural pattern; numeric entries are recomputed at evaluation.
-    F = cholesky(Symmetric(G + spdiagm(0 => mass)))
+# kappa=1 only chooses a symbolic pattern. Every positive kappa has the
+# same structural pattern; numeric entries are recomputed at evaluation.
+_brm_gmrf_factor_pattern(G, mass) = _brm_gmrf_factor_pattern(G + spdiagm(0 => mass))
+
+# The fixed factor pattern of a positive definite matrix, whose stored entries
+# (explicit zeros included) are all structural.
+function _brm_gmrf_factor_pattern(A::SparseMatrixCSC)
+    F = cholesky(Symmetric(A))
     L = sparse(F.L)
-    n = length(mass)
+    n = size(A, 1)
     previous = [Tuple{Int,Int}[] for _ in 1:n]
     for j in 1:n, p in nzrange(L, j)
         i = rowvals(L)[p]
@@ -86,19 +90,30 @@ end
 
 function _brm_gmrf_ldl_solve!(x, b, factor, pattern::_BRMGMRFFactorPattern)
     copyto!(x, b)
-    n = length(x)
-    for j in 1:n
-        for p in (pattern.colptr[j] + 1):(pattern.colptr[j + 1] - 1)
-            x[pattern.rowval[p]] -= factor.lower[p] * x[j]
+    _brm_gmrf_ldl_forward!(x, factor.lower, pattern)
+    x ./= factor.diagonal
+    _brm_gmrf_ldl_backward!(x, factor.lower, pattern)
+end
+
+# x ← L⁻¹ x and x ← L⁻ᵀ x on a fixed pattern, in the factor's permuted order.
+function _brm_gmrf_ldl_forward!(x, lower, pattern::_BRMGMRFFactorPattern)
+    colptr, rowval = pattern.colptr, pattern.rowval
+    @inbounds for j in eachindex(x)
+        xj = x[j]
+        for p in (colptr[j] + 1):(colptr[j + 1] - 1)
+            x[rowval[p]] -= lower[p] * xj
         end
     end
-    for j in 1:n
-        x[j] /= factor.diagonal[j]
-    end
-    for j in n:-1:1
-        for p in (pattern.colptr[j] + 1):(pattern.colptr[j + 1] - 1)
-            x[j] -= factor.lower[p] * x[pattern.rowval[p]]
+    x
+end
+function _brm_gmrf_ldl_backward!(x, lower, pattern::_BRMGMRFFactorPattern)
+    colptr, rowval = pattern.colptr, pattern.rowval
+    @inbounds for j in reverse(eachindex(x))
+        value = x[j]
+        for p in (colptr[j] + 1):(colptr[j + 1] - 1)
+            value -= lower[p] * x[rowval[p]]
         end
+        x[j] = value
     end
     x
 end

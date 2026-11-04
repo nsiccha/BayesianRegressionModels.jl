@@ -30,7 +30,7 @@ next component's structure.
 The order applies within each lexical scope. A prior declared inside a plate
 stays inside that plate, after its structural statements; moving it to the
 global prior block would change the model. Trailing cell-local priors require
-BRM 0.2.164 or later on `SBBRMI`. For example:
+BRM 0.2.165 or later on `SBBRMI`. For example:
 
 ```julia
 local_model = @brm begin
