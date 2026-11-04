@@ -30,7 +30,7 @@ end
         @test actual ≈ expected rtol=2e-12 atol=2e-12
     end
     k2 = 2 / 0.7^2
-    factor = BRM.brm_gmrf_factor(k2, factor_data.mass,
+    factor = BRM.brm_gmrf_factor(k2, 1.0, factor_data.mass,
         factor_data.gptr, factor_data.grow, factor_data.gval, factor_data.lptr,
         factor_data.lrow, factor_data.previous_ptr, factor_data.previous_col, factor_data.previous_pos)
     b = [0.2, -0.8, 0.1, 0.5, 1.3]

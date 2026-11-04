@@ -1192,6 +1192,16 @@ declared laws, a known hyperparameter and a law reading a model-scope parameter.
 It also checks that `brm_laplace_mode` and the `brm_laplace_plan` diagnostic use
 that point, with the diagnostic at the unit point as a positive control.
 
+`gmrf_small_length.jl` compares the normalized GMRF density, precision action
+and diagonal against an independent 256-bit dense oracle on a five-vertex
+mesh, through spatial lengths of `exp(-365)`. `gmrf_small_length_backends.jl`
+checks the RK graph and Stan's Julia-compatible helper against that oracle,
+including native Reverse gradients. `gmrf_small_length_runtime.jl` checks
+the public RK and compiled Stan models' sampler values and gradients, and
+distinguishes a finite tail density from a genuine `-Inf` overflow. The latter
+two run directly with `julia --project=test test/<file>.jl`; the first needs
+only Julia's standard libraries.
+
 `start_values.jl` checks `brm_start`, initial values keyed by prior address,
 on both backends. For a correlated population-PK model, a linked predictor,
 a categorical predictor with a `Dirichlet` simplex, and an exact-total block,
