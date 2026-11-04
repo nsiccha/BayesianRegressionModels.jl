@@ -195,20 +195,28 @@ function _rk_plan_gmrf_term!(prepared, target, data, columns, taken; derived)
         columns[channel] = ones(Int, length(columns[sources[3]]))
         push!(sources, channel)
     end
-    fit_time = _rk_fit_twin!(derived, columns, taken, data, sources[3])
-    fit_channel = length(prepared.source) == 3 ?
-        _rk_fit_input!(derived, columns, taken, sources[4], [1]) :
-        _rk_fit_twin!(derived, columns, taken, data, sources[4])
     if state.neighbors !== nothing
-        fit_east = _rk_fit_twin!(derived, columns, taken, data, sources[1])
-        fit_north = _rk_fit_twin!(derived, columns, taken, data, sources[2])
+        # One build per plan, bound like the mesh matrices: a footprint costs far
+        # more than a mesh, and each prepared query would otherwise rebuild it.
+        support = _brm_fitted_value(:gmrf_footprint_support, Symbol(id)) do
+            brm_gmrf_footprint_support(_brm_fit_input_source(sources[1], data[sources[1]]),
+                _brm_fit_input_source(sources[2], data[sources[2]]),
+                _brm_fit_input_source(sources[3], data[sources[3]]),
+                length(prepared.source) == 3 ? [1] : _brm_fit_input_source(sources[4], data[sources[4]]),
+                state.neighbors)
+        end
+        fitted = _rk_fit_input!(derived, columns, taken, Symbol(id, :_footprint), [support])
         return _RKTermSpec(:gmrf, sources,
-            (; id, neighbors=state.neighbors, fit_east, fit_north, fit_time, fit_channel,
+            (; id, neighbors=state.neighbors, fitted,
                source=prepared.source, correlation=state.correlation,
                nchannels=length(state.channels), priors=_brm_term_prior_expressions(prepared),
                state_axes=(; times=state.times, channels=state.channels)),
             id, id)
     end
+    fit_time = _rk_fit_twin!(derived, columns, taken, data, sources[3])
+    fit_channel = length(prepared.source) == 3 ?
+        _rk_fit_input!(derived, columns, taken, sources[4], [1]) :
+        _rk_fit_twin!(derived, columns, taken, data, sources[4])
     vertices = _rk_fit_input!(derived, columns, taken, state.vertices_source, [state.vertices])
     cells = _rk_fit_input!(derived, columns, taken, state.cells_source, [state.cells])
     _RKTermSpec(:gmrf, sources,
@@ -226,9 +234,7 @@ function _rk_ast_gmrf!(definitions, statements, taken, bindings, term)
     footprint = options.neighbors !== nothing
     law = _rk_value_callee!(bindings, footprint ? _BRMGMRFVecchiaLaw : _BRMGMRFLaw, taken)
     fit = if footprint
-        Expr(:call, _rk_value_callee!(bindings, brm_gmrf_footprint_support, taken),
-            options.fit_east, options.fit_north, options.fit_time, options.fit_channel,
-            options.neighbors)
+        Expr(:ref, options.fitted, 1)
     else
         Expr(:call, _rk_value_callee!(bindings, brm_gmrf_support, taken),
             Expr(:ref, options.vertices, 1), Expr(:ref, options.cells, 1),

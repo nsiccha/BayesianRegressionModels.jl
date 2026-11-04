@@ -115,7 +115,7 @@ function _brm_prepare_gmrf_footprint(source, correlation_source, spatial, time,
     dependencies = (source..., correlation_source...)
     prepared = _BRMPreparedTerm(gmrf, source, state, dependencies)
     geometry || return prepared
-    footprint = _brm_fitted_value(:gmrf_footprint, source[3]) do
+    footprint = _brm_fitted_value(:gmrf_footprint, Symbol(target, :_, join(source, :_))) do
         _brm_vecchia_footprint(_brm_fit_input_source(source[1], last(spatial[1])),
             _brm_fit_input_source(source[2], last(spatial[2])),
             _brm_fit_input_source(source[3], time), length(channels); neighbors)

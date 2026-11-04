@@ -82,6 +82,26 @@ end
     @test gradient[position(".sigma")] != 0
 end
 
+@testset "Preparation builds each footprint once and keeps fields apart" begin
+    data = vecchia_rk_data()
+    # Two fields on one time column have different footprints.
+    input = (; data..., east2=data.east .+ 0.5, north2=data.north)
+    model = @brm input begin
+        a ~ 0 + gmrf((east, north), time; neighbors=3)
+        b ~ 0 + gmrf((east2, north2), time; neighbors=2)
+        y ~ Normal(a .+ b, 0.2)
+    end
+    plan = BRM._brm_rk_plan(model)
+    supports = [only(v) for (k, v) in plan.columns if occursin("_footprint", string(k))]
+    @test length(supports) == 2
+    @test all(s -> s isa BRM._BRMGMRFFootprintSupport, supports)
+    @test Set(s.geometry.neighbors for s in supports) == Set([2, 3])
+    @test Set(first(s.geometry.east) in input.east2 for s in supports) == Set([true, false])
+    # The emitted graph reads the bound support and never rebuilds it.
+    emitted = BRM._rk_emit_ast(plan)
+    @test !occursin("brm_gmrf_footprint_support", string(emitted.main, emitted.defs))
+end
+
 @testset "Correlated channels through a sampled LKJ factor" begin
     data = vecchia_rk_data(; channels=true)
     model = @brm data begin

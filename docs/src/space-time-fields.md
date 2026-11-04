@@ -206,8 +206,8 @@ near the range when the range is much longer than the read spacing, and grows
 for pairs linked only through a chain of sparsely read times. Measure it for your
 support and your range prior: on a network of about 1,600 positions, a range
 about five times the typical spacing has a largest covariance error of about
-0.04 at `m=20` and 0.015 at `m=30`. Each conditioning set holds up to `2m+1`
-reads.
+0.04 at `m=20` and 0.015 at `m=30`. A conditioning set holds at most `2m+1`
+reads when its position was read at the previous read time, and `3m+1` otherwise.
 
 Frozen replay reads only fitted `(position, time)` pairs, in any order and any
 subset. A new position or time needs a conditional prediction law and is
