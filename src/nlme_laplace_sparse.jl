@@ -367,7 +367,7 @@ end
 
 function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol,
         maxiter, declarations=nothing, max_cell_width=128, screened=false,
-        solver=:auto, matrixfree=MatrixFreeLaplace())
+        solver=:auto, matrixfree=MatrixFreeLaplace(), progress=nothing)
     max_cell_width = _brm_spl_width_limit(max_cell_width)
     integrate = Symbol[g for g in (integrate isa Symbol ? (integrate,) : integrate)]
     isempty(integrate) && throw(ArgumentError(
@@ -416,7 +416,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     cells = Set(_brm_slap_other_observations(backend.plan))
     _brm_slap_verify!(p, u0, t.response, t.row; cells)
     _brm_spl_verify_prior(p, u0)
-    _brm_spl_cells!(p, u0, sort!(collect(cells)), ad_backend)
+    _brm_spl_cells!(p, u0, sort!(collect(cells)), ad_backend; progress)
     _brm_spl_pattern!(p)
     _brm_spl_step_blocks!(p)
     _brm_spl_algebra!(p, solver, matrixfree)
@@ -665,6 +665,11 @@ end
 # selection (`_rk_spl_cell_block`), and one direction's HVP and third-order
 # product there (`_rk_spl_cell_third`). The correction requests just the third
 # product, then a gradient and one HVP along the solved implicit direction.
+# The widest Enzyme batch one cell's Hessian block compiles; wider cells take
+# several batches (`_rk_spl_cell_ad`). On a 168-coordinate nonlinear cell the
+# first compile took 92, 107, 174 and 377 s at widths 2, 4, 8 and 16, with a
+# warm cost per direction of about 0.13 ms from width 4 on.
+const _BRM_SPL_CELL_HVP_WIDTH = 4
 function _rk_spl_cell_ad end
 function _rk_spl_cell_block end
 function _rk_spl_cell_third end
@@ -689,7 +694,7 @@ function _brm_spl_cell_directions!(dirs, lpos, v)
     dirs
 end
 
-function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend)
+function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend; progress=nothing)
     isempty(names) && return p
     n = length(p.integrated)
     zof = zeros(Int, length(u0)); zof[p.integrated] .= 1:n
@@ -697,67 +702,89 @@ function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend)
     pointwise = _rk_slap_pointwise(p.kernels, u0)
     term = length(p.family)
     for name in names
-        query = _rk_nlme_cell_query(p.backend, (name,), (), u0)
         expected = pointwise[name]
         isempty(expected) && continue
-        factors = _rk_spl_factor_queries(p.backend, name)
-        prepared = _brm_spl_prepare_factors(p.backend, name, u0, length(expected),
-            p.integrated, p.population; query=factors)
-        if prepared !== nothing
-            prepared = _brm_spl_factor_operators(prepared, u0, ad_backend)
-            cells = map(prepared.cells) do c
-                value = _brm_spl_factor_values(prepared, u0, c).value
-                isapprox(value, sum(expected[c.i]); rtol=1e-9, atol=1e-9) ||
-                    _brm_nlme_error("sum-factor density does not match cell $(c.i) of `$name`")
-                term += 1
-                merge(c, (; term))
-            end
-            prepared = merge(prepared, (; cells))
-            @debug "sparse Laplace sum-factor group" name cells=length(cells) maxrss_gib=Sys.maxrss() / 2^30
-            push!(p.cells, _BRMSumCellGroup(name, query, cells, prepared))
-            continue
+        term = _brm_with_progress(progress;
+                description="Observation `$name`, $(length(expected)) cells") do node
+            _brm_spl_observation_cells!(p, u0, name, expected, term, zof, pof, ad_backend, node)
         end
-        # An ordinary cell keeps its original graph: the factored outer can
-        # conservatively widen captured arrays even when it has no sums.
-        footprint = _rk_spl_cell_footprint(query)
-        reads = map(eachindex(expected)) do i
-            _rk_spl_cell_reads(footprint, u0, i)
-        end
-        # (cells that read no coordinate still get a one-coordinate selection,
-        # so they are terms like the others)
-        m = max(1, maximum(length, reads; init=0))
-        cells = map(eachindex(expected)) do i
-            r = reads[i]
-            value = _rk_nlme_cell_value(query, u0, i)
-            isapprox(value, sum(expected[i]); rtol=1e-9, atol=1e-9) || _brm_nlme_error(
-                "brm_laplace_problem: internal: cell $i of `$name` has value $value, " *
-                "its pointwise density $(sum(expected[i]))")
-            pad = Int[]
-            j = 0
-            while length(pad) < m - length(r)
-                j += 1
-                insorted(j, r) || push!(pad, j)
-            end
-            sel = sort!(vcat(r, pad))
-            z = [(zof[x], k) for (k, x) in enumerate(sel) if zof[x] > 0 && insorted(x, r)]
-            sort!(z)
-            ps = [(pof[x], k) for (k, x) in enumerate(sel) if pof[x] > 0 && insorted(x, r)]
-            term += 1
-            (; i, sel, lz=first.(z), lpos=last.(z), pidx=first.(ps), ppos=last.(ps), term)
-        end
-        # each cell's HVP directions: the units at its integrated draws (K of
-        # them, zero past a cell's own), whose results are the Hessian's
-        # columns there. The group holds one zero buffer per direction and the
-        # evaluation sets a cell's units in place (`_brm_spl_cell_directions!`):
-        # a buffer per cell is `K × m` floats each, tens of gigabytes over a
-        # Gemeinde-level observation's cells.
-        K = max(1, maximum(c -> length(c.lz), cells))
-        dirs = ntuple(_ -> zeros(m), K)
-        ad = _rk_spl_cell_ad(p.backend, (name,), copy(u0), first(cells).sel, ad_backend, K)
-        @debug "sparse Laplace cell group" name cells=length(cells) m K maxrss_gib=Sys.maxrss() / 2^30
-        push!(p.cells, (; name, query, ad, m, dirs, cells))
     end
     p
+end
+
+# One observation's factors. Returns the last term number it took.
+function _brm_spl_observation_cells!(p, u0, name, expected, term, zof, pof, ad_backend, progress)
+    query = _rk_nlme_cell_query(p.backend, (name,), (), u0)
+    factors = _rk_spl_factor_queries(p.backend, name)
+    prepared = _brm_spl_prepare_factors(p.backend, name, u0, length(expected),
+        p.integrated, p.population; query=factors)
+    if prepared !== nothing
+        prepared = _brm_spl_factor_operators(prepared, u0, ad_backend)
+        cells = map(prepared.cells) do c
+            value = _brm_spl_factor_values(prepared, u0, c).value
+            isapprox(value, sum(expected[c.i]); rtol=1e-9, atol=1e-9) ||
+                _brm_nlme_error("sum-factor density does not match cell $(c.i) of `$name`")
+            term += 1
+            merge(c, (; term))
+        end
+        prepared = merge(prepared, (; cells))
+        @debug "sparse Laplace sum-factor group" name cells=length(cells) maxrss_gib=Sys.maxrss() / 2^30
+        push!(p.cells, _BRMSumCellGroup(name, query, cells, prepared))
+        return term
+    end
+    # An ordinary cell keeps its original graph: the factored outer can
+    # conservatively widen captured arrays even when it has no sums.
+    footprint = _rk_spl_cell_footprint(query)
+    reads = map(eachindex(expected)) do i
+        _rk_spl_cell_reads(footprint, u0, i)
+    end
+    # (cells that read no coordinate still get a one-coordinate selection,
+    # so they are terms like the others)
+    m = max(1, maximum(length, reads; init=0))
+    cells = map(eachindex(expected)) do i
+        r = reads[i]
+        value = _rk_nlme_cell_value(query, u0, i)
+        isapprox(value, sum(expected[i]); rtol=1e-9, atol=1e-9) || _brm_nlme_error(
+            "brm_laplace_problem: internal: cell $i of `$name` has value $value, " *
+            "its pointwise density $(sum(expected[i]))")
+        pad = Int[]
+        j = 0
+        while length(pad) < m - length(r)
+            j += 1
+            insorted(j, r) || push!(pad, j)
+        end
+        sel = sort!(vcat(r, pad))
+        z = [(zof[x], k) for (k, x) in enumerate(sel) if zof[x] > 0 && insorted(x, r)]
+        sort!(z)
+        ps = [(pof[x], k) for (k, x) in enumerate(sel) if pof[x] > 0 && insorted(x, r)]
+        term += 1
+        (; i, sel, lz=first.(z), lpos=last.(z), pidx=first.(ps), ppos=last.(ps), term)
+    end
+    # each cell's HVP directions: the units at its integrated draws (K of
+    # them, zero past a cell's own), whose results are the Hessian's
+    # columns there. The group holds one zero buffer per direction and the
+    # evaluation sets a cell's units in place (`_brm_spl_cell_directions!`):
+    # a buffer per cell is `K × m` floats each, tens of gigabytes over a
+    # Gemeinde-level observation's cells.
+    K = max(1, maximum(c -> length(c.lz), cells))
+    dirs = ntuple(_ -> zeros(m), K)
+    ad = _rk_spl_cell_ad(p.backend, (name,), copy(u0), first(cells).sel, ad_backend, K)
+    @debug "sparse Laplace cell group" name cells=length(cells) m K maxrss_gib=Sys.maxrss() / 2^30
+    _brm_spl_compile_cell_block(progress, ad, dirs, u0, first(cells); m, K)
+    push!(p.cells, (; name, query, ad, m, dirs, cells))
+    term
+end
+
+# Enzyme compiles a cell's Hessian block on its first use. With a progress
+# node, that happens here, under a node naming the block's size and timing it,
+# rather than unnamed inside the first assembly. Its directions are all zero.
+_brm_spl_compile_cell_block(::Nothing, ad, dirs, u, cell; m, K) = nothing
+function _brm_spl_compile_cell_block(progress, ad, dirs, u, cell; m, K)
+    _brm_with_progress(progress;
+            description="Compiling a Hessian block: $m coordinates, $K integrated") do _
+        _rk_spl_cell_block(ad, dirs, u, cell.sel, cell.i; used=1)
+    end
+    nothing
 end
 
 _brm_spl_nterms(p::BRMSparseLaplaceProblem) = length(p.family) +
@@ -1011,9 +1038,9 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
         end
         derivatives || continue
         _brm_spl_cell_directions!(group.dirs, c.lpos, 1.0)
-        gsel, columns = _rk_spl_cell_block(group.ad, group.dirs, u, c.sel, c.i)
-        _brm_spl_cell_directions!(group.dirs, c.lpos, 0.0)
         m = length(c.lz)
+        gsel, columns = _rk_spl_cell_block(group.ad, group.dirs, u, c.sel, c.i; used=m)
+        _brm_spl_cell_directions!(group.dirs, c.lpos, 0.0)
         for a in 1:m
             g[c.lz[a]] += weight * gsel[c.lpos[a]]
             for b in 1:m

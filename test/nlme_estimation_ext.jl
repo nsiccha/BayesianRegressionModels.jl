@@ -398,6 +398,34 @@ end
     @test check_protocol(m, θ, σ, ω; η=[0.1 -0.05 0.2; -0.1 0.15 0.05])
 end
 
+# A periodic hsgp's basis is data its program computes. The sparse Laplace probe
+# behind `provides_laplace_gradient`, which `check_protocol` reads, prepares that
+# data prefix as a program of its own, so a run-time dispatch in the basis helper
+# refuses a project that sets `type_stability = :error`, whatever the number of
+# basis functions (snag brm-nlme-check-p-d7ec2672).
+@stestset "a periodic hsgp passes check_protocol under strict type stability" begin
+    @test BRM._brm_hsgp_periodic_harmonics(3) == [1, 2, 3, 1, 2, 3]
+    @test BRM._brm_hsgp_periodic_harmonics(3) isa Vector{Float64}
+    data = (; subject=["a", "b", "c", "d"],
+        row_subject=["a", "b", "a", "c", "d", "b", "c", "a", "d", "c", "b", "d"],
+        t=[0.0, 5.0, 10.0, 2.0, 1.0, 15.0, 18.0, 25.0, 22.0, 30.0, 29.0, 34.0],
+        y=[0.1, 0.9, 0.4, -0.2, 1.4, 0.6, 0.0, 0.8, 1.7, -0.4, 1.1, 1.5])
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        base ~ 1 + (1 | subject)
+        daily ~ 0 + hsgp(t; k=2, cov=:periodic, period=24.0)
+        rows = groups(row_subject => subject)
+        @plate for i in eachindex(base)
+            y[rows[i]] ~ Normal(base[i] .+ daily[rows[i]], sigma)
+        end
+    end
+    ReactiveKernels._with_type_stability(:error, :all) do
+        m = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
+        start = brm_nlme_start(m)
+        @test check_protocol(m, start.theta, start.sigma, start.omega; η=start.eta)
+    end
+end
+
 @stestset "SAEM differentiates the batched conditional density" begin
     m = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
     θ, σ = plate_pk_point(m)

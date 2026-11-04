@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.150
+## 0.2.154
 
 - Changed: NLME unit likelihoods and gradients use one strict RK plate
   partition per unit. Preparation checks structural coordinate ownership,
@@ -46,6 +46,55 @@ instead of failing at run time.
   custom packed vectors. Unit gradients use ordinary Enzyme Reverse, with the
   test bootstrap's Enzyme dogfood pin, which contains `68ed90fe`'s repair for
   matrix-window partition gradients on Julia 1.10.
+
+## 0.2.153
+
+- **The sparse Laplace compiles each `@plate` cell's Hessian block at a bounded
+  Enzyme batch width.** A cell's block used to compile one batch over all its
+  integrated coordinates, and that compile grows faster than the batch: a cell
+  integrating 121 coordinates had not compiled after 2 h 37 min. Cells now
+  compile batches of 4 directions and take as many as they need, so preparation
+  no longer depends on how many coordinates a cell integrates. Values and
+  gradients are unchanged.
+- **`brm_laplace_plan` and `brm_laplace_problem` take `progress`:** a Treebars
+  node or a backend symbol such as `:state`. It reports the width screening, the
+  importance diagnostic and each observation, with a node naming a Hessian
+  block's size for the time Enzyme compiles it. `brm_laplace_problem` accepts it
+  only with `integrate`, and raises otherwise.
+
+## 0.2.152
+
+- **Fix:** on RKBRMI, `addprop` over a plate output at model scope reads the
+  plate's rows again, assigned first (`scales = addprop(reads, a, b)`) or written
+  in the law. Since 0.2.125 it received one array per cell, so preparing the model
+  worked and evaluating it raised `MethodError: no method matching
+  ^(::Vector{Float64}, ::Int64)`. An authored whole-value helper still receives
+  one value per cell.
+
+## 0.2.151
+
+- **Periodic `hsgp` under strict type stability:** `NLMEEstimation.check_protocol`
+  on a model with `hsgp(x; cov=:periodic, period=...)` no longer raises
+  `TypeInstabilityError` in a project that sets ReactiveKernels'
+  `type_stability = :error`, at any `k`. The harmonics, and every value computed
+  from them, are unchanged.
+
+## 0.2.150
+
+- **`rk_draw_values` reads a `@plate` output per cell:** a draw's value has one
+  entry per cell in the cell's own shape (a number, a vector or a matrix), as
+  the model reads it, so `value[t][h]` is cell `t`'s entry `h`.
+- **`rk_draw_tree(rk, U, names)` labels a `@plate` output by cell:** `:draw`,
+  `:cell`, then `:element` for a vector cell or `:row` × `:column` for a matrix
+  cell.
+- **Breaking:** for vector and matrix cells, `value[i]` was the `i`-th entry of
+  the concatenation and is now cell `i`. `reduce(vcat, value)` gives the
+  previous vector for vector cells. Number cells hold the same values, and
+  their axis in `rk_draw_tree(rk, U, names)` is now `:cell` instead of
+  `:element`. `rk_draw_tree(values)` on an `rk_draw_values` result now raises
+  for vector and matrix cells, because it sees only shapes; use
+  `rk_draw_tree(rk, U, names)`. A raw ReactiveKernels query of the output's name
+  and `brm_cut_family((:conc,), …)` keep the concatenated value.
 
 ## 0.2.149
 

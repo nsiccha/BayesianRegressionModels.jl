@@ -341,8 +341,10 @@ density and finite-difference gradient oracles cover positional and keyword
 arguments, likelihood arguments, non-last outputs, reader-first order,
 data-only cells, replay with empty cells and changed row counts, and ordinary
 Reverse AD. Complete printed-source replay and flattened rowwise observation
-controls guard the surrounding contracts. Run with `julia --project=test
-test/plate_output_helpers.jl`; testset substring filters are supported.
+controls guard the surrounding contracts, including `addprop` over a plate
+output, assigned or in the law, with a shared or per-row additive scale. Run with
+`julia --project=test test/plate_output_helpers.jl`; testset substring filters
+are supported.
 
 `plate_grouped_outputs.jl` checks grouped reads of both outputs from another
 plate through `rows = groups(group => labels)` and `value[rows[k]]`.
@@ -911,6 +913,15 @@ covariate's observed entries join their subject's cell.
 Flat-row grouped models retain lockstep evaluation and refuse
 the single-subject method by name. It runs in the test environment above.
 
+`nlme_monotonic_cell.jl` reads a `mo()` or `mo1()` term in a subject's `@plate`
+cell through `groups`, as a bare term, beside a population block and as a joint
+block over two predictors. RK prepares each strictly with the subjects' effects
+declared partitioned, and the level table, which has no row form, is computed
+once per population point. Cell values and full partition gradients match the
+whole model's pointwise densities and central differences, and no subject reads
+another subject's effect. `brm_nlme_model` matches the same reference. It runs
+in the test environment above.
+
 `nlme_nested.jl` uses a public synthetic model with interleaved observations
 and 1, 2, and 3 nested units per subject. It checks explicit ownership,
 compact η likelihoods and gradients against an independent Normal oracle,
@@ -1175,7 +1186,10 @@ SAEM on ragged joins and flat grouped rows), unit-partition population gradients
 analytic η Hessian blocks, Gaussian observation moments
 and colored η Jacobians, `check_protocol`, and Newton posthoc against
 independent oracles. Its Gaussian checks include arrays observed within plate
-cells and a modeled scale shared by the observations in each cell.
+cells and a modeled scale shared by the observations in each cell. A periodic
+`hsgp` read in a subject cell passes `check_protocol` with every preparation
+checked at `type_stability = :error`, the sparse Laplace probe's data prefix
+included.
 NLMEEstimation.jl is not part of `test/Project.toml`. Run the file from a
 copy of this environment that develops a local NLMEEstimation checkout:
 
@@ -2320,6 +2334,11 @@ toolchain, so a GitHub Actions job would be red by construction.
 
 ## Bounded sparse Laplace acceptance
 
+`laplace_cell_hvp_width.jl` checks that a cell's Hessian block compiles at a
+bounded Enzyme batch width: batched blocks and the whole target's value and
+gradient against one batch over every direction, finite differences of the cell
+gradient, a 129-direction cell at the same width, and the plan's and problem's
+Treebars reports. It needs Treebars and the Enzyme dogfood line.
 `laplace_width.jl` checks structural screening before derivative preparation,
 deterministic whole-term selection, forced conflicts, correlated margins,
 exact Gaussian retained-set values and native Enzyme gradients, local sum
