@@ -44,14 +44,18 @@ function reference_factors(A, N)
     physical, whitened
 end
 
-function exact_probe_factor(case; solve_maxiter=512)
+# A problem's view for the determinant, with a chosen probe matrix. `gmrf` turns the
+# control variate on for a decoupled reference.
+function probe_factor(case, probes; control_variate=false, h=case.h, reference=case.reference)
     N = case.N
-    options = MatrixFreeLaplace(; probes=N, solve_maxiter)
+    options = MatrixFreeLaplace(; probes=size(probes, 2), control_variate)
+    gmrf = control_variate ? BRM._BRMSPLGMRF([case.field], (), nothing) : nothing
     p = (; pattern=case.h, components=[collect(1:N)], component=ones(Int, N), wcols=Vector{Int}[],
-        wλ=Float64[], algebra=(; options, large=trues(1), references=[case.reference],
-            probes=[sqrt(N) .* Matrix{Float64}(I, N, N)], diagnostics=Dict{Symbol,Any}()))
-    BRM._brm_operator_factor(p, case.h)
+        wλ=Float64[], gmrf, algebra=(; options, large=trues(1), references=[reference],
+            probes=[probes], diagnostics=Dict{Symbol,Any}()))
+    BRM._brm_operator_factor(p, h)
 end
+exact_probe_factor(case; kwargs...) = probe_factor(case, sqrt(case.N) .* Matrix{Float64}(I, case.N, case.N); kwargs...)
 
 const MESH = BRM._brm_gmrf_mesh([0.0 0; 1 0; 1 1; 0 1; 0.5 0.5], [1 2 5; 2 3 5; 3 4 5; 4 1 5])
 
@@ -123,6 +127,71 @@ end
     independent = reference_case(MESH, times, 0.7, 1.3, Matrix(1.0I, 3, 3), same)
     @test independent.reference.sequential === nothing
     @test independent.reference.basis == I
+end
+
+@testset "The rebuilt reference's derivative cancels its own estimate" begin
+    # With a complete orthogonal probe set V(θ) is log det H exactly for any M, so
+    # the exact derivative of log det M and the estimate of it, computed from
+    # different formulas, must cancel entry by entry.
+    times = [0.0, 0.3, 1.7, 2.0]
+    for channels in (1, 3)
+        L = Matrix(cholesky(Symmetric([0.4^abs(i - j) for i in 1:channels, j in 1:channels])).L)
+        reads = Dict((t, c) => [((1, 2, 5), [0.2, 0.3, 0.5], 40.0), ((2, 3, 5), [0.7, 0.1, 0.2], 3.0)]
+            for t in eachindex(times), c in 1:channels)
+        case = reference_case(MESH, times, 0.7, 1.3, L, reads; mode=:decoupled)
+        F = exact_probe_factor(case; control_variate=true)
+        @test logdet(F) ≈ logdet(Symmetric(Matrix(case.h))) atol=1e-6
+        tracked = only(F.tracked)
+        @test tracked isa BRM._BRMGMRFTracked
+        # The rebuilt reference at the reference's own point is that reference.
+        @test tracked.logdet ≈ case.reference.logdet atol=1e-8
+        @test maximum(abs, tracked.block) < 1e-6
+        @test abs(tracked.dspatial) < 1e-5
+        @test abs(tracked.dtemporal) < 1e-5
+        @test maximum(abs, tracked.dscale) < 1e-5
+        x = randn(Xoshiro(5), case.N)
+        physical, _ = reference_factors(case.A, case.N)
+        @test tracked(x) ≈ inv(Symmetric(physical * physical')) * x atol=1e-7 rtol=1e-8
+    end
+end
+
+@testset "Few probes: the control variate's derivative is that of its value" begin
+    # V's arguments move one at a time, with the reference and probes fixed; each
+    # exact-plus-estimated derivative must match a central difference of V.
+    times = [0.0, 0.3, 1.7, 2.0]
+    reads = Dict((t, 1) => [((1, 2, 5), [0.2, 0.3, 0.5], 40.0), ((2, 3, 5), [0.7, 0.1, 0.2], 3.0)]
+        for t in eachindex(times))
+    ell_s, ell_t = 0.7, 1.3
+    fixed = reference_case(MESH, times, ell_s, ell_t, ones(1, 1), reads; mode=:decoupled)
+    probes = 2.0 .* rand(Xoshiro(11), Bool, fixed.N, 3) .- 1
+    value(s, t) = begin
+        moved = reference_case(MESH, times, s, t, ones(1, 1), reads; mode=:decoupled)
+        logdet(probe_factor(moved, probes; control_variate=true, reference=fixed.reference))
+    end
+    moved = reference_case(MESH, times, ell_s, ell_t, ones(1, 1), reads; mode=:decoupled)
+    F = probe_factor(moved, probes; control_variate=true, reference=fixed.reference)
+    logdet(F)
+    tracked = only(F.tracked)
+    # S_H at fixed data and M's own arguments: the prior moves in both.
+    function entry_list(field)
+        out = Tuple{Int,Int,Int,Int}[]
+        BRM._brm_gmrf_foreach_entry(field) do k, i, j, ks, ta, tb, ca, cb
+            push!(out, (k, ks, ta, tb))
+        end
+        out
+    end
+    field = moved.field
+    share = BRM._brm_gmrf_tracked_data(tracked)
+    function prior_only(k, ks, ta, tb)
+        ta == tb ? share[ks, 1, ta] : 0.0
+    end
+    sensitivity_of(entries) = sum((F.sensitivity[field.nz[k]] - prior_only(k, ks, ta, tb)) * entries(ks, ta, tb)
+        for (k, ks, ta, tb) in entry_list(field))
+    spatial = sensitivity_of((ks, ta, tb) -> BRM._brm_gmrf_temporal_entry(field, ta, tb) * field.dqs[ks]) + tracked.dspatial
+    temporal = sensitivity_of((ks, ta, tb) -> BRM._brm_gmrf_dtemporal_entry(field, ta, tb) * field.qs[ks]) + tracked.dtemporal
+    h = 1e-5
+    @test spatial ≈ (value(ell_s + h, ell_t) - value(ell_s - h, ell_t)) / 2h atol=2e-4 rtol=2e-4
+    @test temporal ≈ (value(ell_s, ell_t + h) - value(ell_s, ell_t - h)) / 2h atol=2e-4 rtol=2e-4
 end
 
 @testset "A reference survives curvature that is not positive semidefinite" begin

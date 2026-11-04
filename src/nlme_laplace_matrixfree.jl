@@ -4,7 +4,7 @@
 """
     MatrixFreeLaplace(; exact_limit=1024, probes=8, seed=20261102,
         solve_tolerance=1e-10, solve_maxiter=512,
-        preconditioner_memory=32, preconditioner_ridge=0.01)
+        preconditioner_memory=32, preconditioner_ridge=0.01, control_variate=true)
 
 Numerical policy for `brm_laplace_problem(...; solver=:auto)`. Components
 above `exact_limit` use preconditioned CG and a fixed Rademacher trace
@@ -35,6 +35,14 @@ does not increase the work caps or guarantee accuracy. Lanczos checks curvature
 in its own directions; this is not a proof of global positive definiteness for
 a nonconcave conditional density. A recurrence retains its basis while its
 probe runs, so that probe's memory is the iteration count times the coordinates.
+
+Fixed probes leave noise in the gradient that does not shrink relative to the
+posterior as a field grows. With `control_variate=true` a field whose reference
+decouples its channels (one channel included) also rebuilds that reference at
+each point and estimates only the difference from it
+(`src/gmrf_tracked_reference.jl`). This costs about twice as much per probe and
+cuts the noise several times over. The value and its gradient stay one
+fixed-probe function and its exact derivative.
 """
 struct MatrixFreeLaplace
     exact_limit::Int
@@ -44,9 +52,10 @@ struct MatrixFreeLaplace
     solve_maxiter::Int
     preconditioner_memory::Union{Nothing,Int}
     preconditioner_ridge::Float64
+    control_variate::Bool
     function MatrixFreeLaplace(; exact_limit=1024, probes=8, seed=20261102,
             solve_tolerance=1e-10, solve_maxiter=512,
-            preconditioner_memory=32, preconditioner_ridge=0.01)
+            preconditioner_memory=32, preconditioner_ridge=0.01, control_variate=true)
         exact_limit >= 0 && probes > 0 && solve_maxiter > 0 ||
             throw(ArgumentError("Laplace dimensions and iteration budgets must be positive"))
         0 < solve_tolerance < 1 && isfinite(solve_tolerance) ||
@@ -55,7 +64,7 @@ struct MatrixFreeLaplace
             isfinite(preconditioner_ridge) && preconditioner_ridge >= 0 ||
             throw(ArgumentError("invalid fixed conditional preconditioner policy"))
         new(exact_limit, probes, seed, solve_tolerance, solve_maxiter,
-            preconditioner_memory, preconditioner_ridge)
+            preconditioner_memory, preconditioner_ridge, control_variate)
     end
 end
 export MatrixFreeLaplace
@@ -207,6 +216,8 @@ mutable struct _BRMOperatorFactor
     ready::Bool
     problem::Any
     curvature::Any
+    # Each part's control variate (`_BRMGMRFTracked`), once its determinant is computed.
+    tracked::Vector{Any}
 end
 
 # `shift`: one number, or one per component (each part takes its own).
@@ -247,7 +258,8 @@ function _brm_operator_factor(p, h; shift=0.0)
         push!(parts, (; H, operator, factor, probes=p.algebra.probes[c]))
     end
     _BRMOperatorFactor(parts, p.components, p.component, localindex, p.algebra.options,
-        zeros(length(parts)), zeros(SparseArrays.nnz(p.pattern)), Dict{Int,Any}(), false, p, h)
+        zeros(length(parts)), zeros(SparseArrays.nnz(p.pattern)), Dict{Int,Any}(), false, p, h,
+        Any[nothing for _ in parts])
 end
 LinearAlgebra.issuccess(F::_BRMOperatorFactor) = all(F.parts) do part
     part.factor === nothing ? all(>(0), part.H.diagonal .+ part.H.shift) : issuccess(part.factor)
@@ -378,6 +390,19 @@ _brm_lanczos_combine!(out, V, coefficients) = begin
     out
 end
 
+# This part's control variate, for a field with a `decoupled` reference. A sum's
+# reductions stay out of the rebuilt reference, whose derivative they would need.
+function _brm_operator_tracked(F, component, operator)
+    F.options.control_variate || return nothing
+    operator isa _BRMPreconditionedOperator{<:Any,_BRMGMRFTimeReference} || return nothing
+    F.curvature isa _BRMSumPrecision && return nothing
+    iszero(operator.h.shift) || return nothing
+    p = F.problem
+    hasproperty(p, :gmrf) && p.gmrf !== nothing || return nothing
+    field = _brm_gmrf_component_field(p, component)
+    field === nothing ? nothing : _brm_gmrf_tracked(field, operator.reference, F.curvature)
+end
+
 # S[k] += weight x[row] x[col] over the component's stored entries, without a
 # stored index per entry: those would outweigh the precision itself.
 function _brm_operator_sensitivity!(S, pattern, localindex, I, x, weight)
@@ -435,6 +460,10 @@ function _brm_operator_logdet!(F::_BRMOperatorFactor)
         max_iterations = 0
         max_rank = 0
         smallest, largest = Inf, -Inf
+        tracked = _brm_operator_tracked(F, component, operator)
+        tracked_operator = tracked === nothing ? nothing :
+            _BRMPreconditionedOperator(tracked, operator.reference)
+        tracked_iterations = 0
         for (q, r) in enumerate(eachcol(part.probes))
             state = _brm_lanczos(operator, r, options)
             V = KrylovKit.basis(state)
@@ -458,14 +487,31 @@ function _brm_operator_logdet!(F::_BRMOperatorFactor)
                     accumulate(direction, weight / options.probes)
                 end
             end
+            tracked === nothing && continue
+            state_m = _brm_lanczos(tracked_operator, r, options)
+            V_m = KrylovKit.basis(state_m)
+            log_m = _brm_lanczos_log(state_m, r)
+            estimates[q] -= log_m.value
+            tracked_iterations = max(tracked_iterations, length(state_m))
+            for (k, weight) in enumerate(log_m.weights)
+                _brm_lanczos_combine!(direction, V_m, view(log_m.directions, :, k))
+                _brm_to_physical!(physical, tracked_operator, direction)
+                _brm_gmrf_tracked_contract!(tracked, physical, -weight / options.probes)
+            end
         end
         reference_logdet = transformed ? operator.reference.logdet : 0.0
-        F.logdets[component] = reference_logdet + mean(estimates)
+        F.logdets[component] = (tracked === nothing ? reference_logdet : tracked.logdet) + mean(estimates)
+        if tracked !== nothing
+            _brm_gmrf_tracked_exact!(tracked)
+            _brm_gmrf_tracked_sensitivity!(F.sensitivity, tracked, _brm_gmrf_component_field(p, component))
+            F.tracked[component] = tracked
+        end
         p.algebra.diagnostics[Symbol("component_", component)] =
             (; logdet=F.logdets[component], probe_mcse=options.probes > 1 ?
                 std(estimates) / sqrt(options.probes) : NaN,
                 probes=options.probes, gradient_rank=max_rank,
-                ritz=(smallest, largest),
+                ritz=(smallest, largest), tracked_iterations,
+                tracked_shift=tracked === nothing ? 0.0 : tracked.shift,
                 max_solve_residual=max_residual, max_solve_iterations=max_iterations,
                 curvature_check=:krylov_directions,
                 reference_entries=transformed ? operator.reference.factor_entries : 0,
@@ -525,6 +571,16 @@ function _brm_operator_inverse_blocks(F, sets)
         end
         Matrix(Symmetric(S))
     end
+end
+
+# A square root of a sensitivity block and each column's sign: a control variate's
+# difference of estimates need not be positive semidefinite, as a sum of its own
+# rank-one terms is.
+_brm_spl_sensitivity_root(F, S) = (cholesky(Symmetric(S)).L, nothing)
+function _brm_spl_sensitivity_root(F::_BRMOperatorFactor, S)
+    all(isnothing, F.tracked) && return (_brm_spl_psd_root(S), nothing)
+    E = eigen(Symmetric(S))
+    (E.vectors * Diagonal(sqrt.(abs.(E.values))), sign.(E.values))
 end
 
 # Probe sensitivities can be rank deficient (e.g. H=I and fewer probes than
