@@ -63,7 +63,7 @@ end
 @stestset "width screening retains the full model and correlated whole terms" begin
     for correlated in (false, true)
         rk = width_fixture(; correlated)
-        plan = brm_laplace_plan(rk; ad_backend=NLME_AD, max_cell_width=4, draws=8)
+        plan = brm_laplace_plan(rk; ad_backend=NLME_AD, integrate=(:b,), max_cell_width=4, draws=8)
         a = only(t for t in plan.terms if t.grouping === :a)
         b = only(t for t in plan.terms if t.grouping === :b)
         @test !a.admitted && a.class === :sampled && b.admitted
@@ -165,7 +165,7 @@ end
             y[k] ~ Normal(sum(eta[rows[k]]), 0.7)
         end
     end)
-    plan = brm_laplace_plan(rk; ad_backend=NLME_AD, max_cell_width=1, draws=8)
+    plan = brm_laplace_plan(rk; ad_backend=NLME_AD, integrate=(:b,), max_cell_width=1, draws=8)
     @test only(t for t in plan.terms if t.grouping === :b).admitted
     @test !only(t for t in plan.terms if t.grouping === :a).admitted
     p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=plan)

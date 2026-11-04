@@ -1960,6 +1960,13 @@ definitions and model source are printed, reparsed and built afresh, then
 compared bit-exactly for likelihood, prior and full density at three points.
 `rk_parity.jl` adds independent statistical density and Jacobian references,
 standard Enzyme reverse gradients and finite-difference checks.
+`rk_mixture_weights.jl` checks hierarchical mixture probabilities against
+independent normalized laws and compiled Stan, every ordinary Reverse
+coordinate, pointwise likelihood, complete printed replay and changed-data
+reprocessing. It also covers weight-only predictors, more than two components,
+named and tuple expressions, computed shared weights, shared and row-valued
+probability data, invalid rows and logistic endpoints.
+Run it directly with `julia --project=test test/rk_mixture_weights.jl`.
 `rk_stan_priors.jl` compares explicit shared scale/LKJ priors with emitted Stan
 using a complete named coordinate map. `rk_gaussian.jl` checks the actual
 ordinary Gaussian emission against analytic and mapped Stan densities and
