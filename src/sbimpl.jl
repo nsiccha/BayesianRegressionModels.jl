@@ -17203,6 +17203,15 @@ function _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, 
     push!(stmts, Expr(:call, :~, target, rhs))
 end
 
+# A censoring threshold can be the observation itself. When that observation
+# is omitted, its endpoint has no data to validate; the unchanged producer
+# statement still carries it so StanBlocks owns the generative interpretation.
+_sb_censored_validation_bound(bound, _target, _data) = bound
+function _sb_censored_validation_bound(bound::NamedColumn, target, data)
+    name(bound) === target && parent(bound) isa MissingColumn &&
+        !haskey(data, target) ? nothing : bound
+end
+
 function _sb_lik_composed!(stmts, target, wrapper, producer,
                            args, kwargs::NamedTuple, data)
     base = _sb_composed_family(wrapper, args)
@@ -17211,8 +17220,12 @@ function _sb_lik_composed!(stmts, target, wrapper, producer,
     isnothing(lower) && isnothing(upper) && error(
         "sbimpl: `$wrapper` needs at least one non-`nothing` bound")
 
-    _sb_validate_bounds(wrapper, target, lower, upper, data)
-    _sb_validate_composed_support(wrapper, target, lower, upper, base.kind, data)
+    validation_lower, validation_upper = wrapper === :censored ?
+        (_sb_censored_validation_bound(lower, target, data),
+         _sb_censored_validation_bound(upper, target, data)) : (lower, upper)
+    _sb_validate_bounds(wrapper, target, validation_lower, validation_upper, data)
+    _sb_validate_composed_support(wrapper, target, validation_lower,
+                                  validation_upper, base.kind, data)
     _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, data)
 end
 
