@@ -191,6 +191,7 @@ end
 _rk_emitted_observation_name(_) = nothing
 
 function _rk_source_symbols!(names, value)
+    value = _brm_undoc(value)
     value isa Symbol && push!(names, value)
     value isa Expr && foreach(arg -> _rk_source_symbols!(names, arg), value.args)
     names
@@ -206,6 +207,7 @@ end
 # A `@plate for` cell's bare locals belong to its plate (rkppl-use §13); its
 # model outputs are its indexed writes, declarations and observations.
 function _rk_source_outputs!(names, statement)
+    statement = _brm_undoc(statement)
     statement isa Expr || return names
     if statement.head === :(=)
         _rk_source_lhs!(names, first(statement.args))
@@ -215,6 +217,7 @@ function _rk_source_outputs!(names, statement)
     elseif Meta.isexpr(statement, :macrocall) && first(statement.args) === Symbol("@plate") &&
             Meta.isexpr(last(statement.args), :for)
         for cell in last(last(statement.args).args).args
+            cell = _brm_undoc(cell)
             Meta.isexpr(cell, :(=)) && !Meta.isexpr(first(cell.args), :ref) && continue
             _rk_source_outputs!(names, cell)
         end
@@ -320,6 +323,7 @@ function _rk_active_observation_source(emitted, conditioned, held_out)
     Expr(:block, statements[.!withheld]...)
 end
 function _rk_withheld_observation(statement, names)
+    statement = _brm_undoc(statement)
     statement isa Expr || return false
     statement.head === :call && length(statement.args) == 3 &&
         first(statement.args) in (:~, :.~) &&

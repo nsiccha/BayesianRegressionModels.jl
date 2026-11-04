@@ -20,6 +20,7 @@ _rk_source_macro(head, mod::Symbol, name::Symbol) = head === name ||
 # submodel is an @rkppl assignment definition, written bare or with its macro;
 # `_rk_canonical_source_definition` spells it bare.
 function _rk_source_definition(definition)
+    definition = _brm_undoc(definition)
     kind = :rkppl
     body = definition
     if Meta.isexpr(definition, :macrocall)
@@ -48,9 +49,27 @@ end
 # Emitted source spells a submodel as its bare assignment; evaluation applies
 # @rkppl to it once. Other definitions are already in their emitted spelling.
 function _rk_canonical_source_definition(definition)
+    if _brm_is_doc(definition)
+        result = deepcopy(definition)
+        result.args[4] = _rk_canonical_source_definition(definition.args[4])
+        return result
+    end
     Meta.isexpr(definition, :macrocall) &&
         _rk_source_definition(definition).kind === :rkppl || return definition
     only(filter(arg -> !(arg isa LineNumberNode), definition.args[2:end]))
+end
+
+# Julia owns definition documentation, so the wrapper stays outside @rkppl.
+# Native functions and @kernel definitions already carry their defining syntax.
+function _rk_definition_expression(definition)
+    if _brm_is_doc(definition)
+        result = deepcopy(definition)
+        result.args[4] = _rk_definition_expression(definition.args[4])
+        return result
+    end
+    _rk_source_definition(definition).kind === :rkppl || return definition
+    Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0),
+        _rk_canonical_source_definition(definition))
 end
 
 # Source locations are not part of a definition's meaning, so two copies
@@ -288,6 +307,7 @@ end
 function _rk_ast_block_call!(definitions, taken, base, block::_RKBlockBody, value)
     body = Expr(:block, block.statements..., Expr(:return, value))
     for definition in definitions
+        definition = _brm_undoc(definition)
         Meta.isexpr(definition, :(=), 2) || continue
         call = first(definition.args)
         Meta.isexpr(call, :call) && isequal(call.args[2:end], block.arguments) &&
