@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.166
+
+- **Authored declaration documentation:** ordinary Julia docstrings in BRM
+  source survive binding, tuple expansion, model composition, source printing
+  and replay. `brm_documentation` returns copied `BRMDocumentation` records
+  with logical paths, raw Markdown, authored statements and file/line provenance,
+  including declarations inside plates and scans. Documentation stays separate
+  from executable operations and numerical model identity.
+- `brm_documentation_markdown` and scientific model descriptions include the
+  authored prose for HTML/PDF pipelines, without treating it as generated
+  scientific coverage. Emitted RK artifacts retain the same records in their
+  metadata.
+
 ## 0.2.165
 
 - **Structure first, priors last:** `SBBRMI` accepts a cell-local prior after

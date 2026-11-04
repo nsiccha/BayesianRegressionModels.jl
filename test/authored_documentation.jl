@@ -14,6 +14,18 @@ const DOC_SOURCE = quote
     "Intercept prior."
     effect(mu, Intercept) ~ Normal(0, 2)
 end
+const DOC_CELL_SOURCE = quote
+    "Global slope."
+    theta ~ Normal(0, 1)
+    @plate for i in eachindex(x)
+        "Cell mean, not a global parameter."
+        mean_i = theta * x[i]
+        "Predicted value."
+        expected[i] = mean_i
+        "Cell observation."
+        y[i] ~ Normal(mean_i, 1)
+    end
+end
 nodocs(x) = sprint(show, x; context=:brm_documentation => false)
 doc_signature(x) = [(d.path, d.owner, d.markdown) for d in brm_documentation(x)]
 
@@ -82,18 +94,7 @@ end
 end
 
 @testset "Plate-local declarations retain their scope and source" begin
-    b = brm(quote
-        "Global slope."
-        theta ~ Normal(0, 1)
-        @plate for i in eachindex(x)
-            "Cell mean, not a global parameter."
-            mean_i = theta * x[i]
-            "Predicted value."
-            expected[i] = mean_i
-            "Cell observation."
-            y[i] ~ Normal(mean_i, 1)
-        end
-    end; mod=@__MODULE__)
+    b = brm(DOC_CELL_SOURCE; mod=@__MODULE__)
     m = b(DOC_DATA)
     @test [d.path for d in brm_documentation(m)] ==
         [(:theta,), (:expected, :mean_i), (:expected, :expected), (:expected, :y)]
@@ -130,6 +131,74 @@ end
     scanned = brm(scan_source; mod=@__MODULE__)(scan_data)
     @test length(brm_documentation(scanned)) == 2
     @test doc_signature(brm(string(scanned); mod=@__MODULE__)(scan_data)) == doc_signature(scanned)
+end
+
+# The producer artifact is available without loading the RK package extension.
+# Documentation is retained beside the identical executable source and bindings.
+@testset "RK artifacts retain authored records without numerical source changes" begin
+    model = brm(DOC_SOURCE; mod=@__MODULE__)(DOC_DATA)
+    plain = brm(BRM._brm_strip_docs(DOC_SOURCE); mod=@__MODULE__)(DOC_DATA)
+    artifact = BRM.emit_rk_artifact(model; case_id="authored-documentation")
+    control = BRM.emit_rk_artifact(plain; case_id="authored-documentation-control")
+    @test artifact.ast == control.ast
+    @test artifact.defs == control.defs
+    @test artifact.bindings == control.bindings
+    @test isequal(rk_artifact_inputs(artifact), rk_artifact_inputs(control))
+    @test doc_signature(artifact) == doc_signature(model)
+    @test isempty(brm_documentation(control))
+    mktemp() do path, io
+        close(io)
+        BRM.write_rk_artifact(path, artifact)
+        @test doc_signature(BRM.read_rk_artifact(path)) == doc_signature(model)
+    end
+end
+
+# Optional export acceptance, matching the existing description_tex.jl mode.
+# Quarto and Poppler are required when requested; renderer failures propagate.
+if "--render" in ARGS
+    @testset "Authored source and Markdown survive HTML/PDF export" begin
+        output = get(() -> mktempdir(), ENV, "BRM_AUTHORED_DOC_OUTPUT")
+        mkpath(output)
+        model = brm(DOC_SOURCE; mod=@__MODULE__)(DOC_DATA)
+        cell = brm(DOC_CELL_SOURCE; mod=@__MODULE__)(DOC_DATA)
+        report = brm_description_markdown(brm_description(brm_descriptor(SBBRMI(model))))
+        header = raw"""
+        ---
+        title: Authored declaration documentation
+        format:
+          html:
+            embed-resources: true
+            code-overflow: wrap
+          pdf:
+            pdf-engine: lualatex
+            mainfont: DejaVu Serif
+            monofont: DejaVu Sans Mono
+            include-in-header:
+              text: |
+                \usepackage{fvextra}
+                \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,breakanywhere,commandchars=\\\{\}}
+        ---
+
+        """
+        document = header * report *
+            "\n# Cell documentation\n\n" * brm_documentation_markdown(cell) *
+            "\n# Authored model source\n\n```julia\n" * string(model) *
+            "\n```\n\n# Authored cell source\n\n```julia\n" * string(cell) * "\n```\n"
+        input = joinpath(output, "authored-documentation.qmd")
+        write(input, document)
+        run(`quarto render $input --to html`)
+        run(`quarto render $input --to pdf`)
+        html = read(joinpath(output, "authored-documentation.html"), String)
+        pdf = joinpath(output, "authored-documentation.pdf")
+        pdftext = read(`pdftotext $pdf -`, String)
+        @test filesize(pdf) > 0
+        for text in ("Expected response", "Cell observation.", "Predicted value.")
+            @test occursin(text, html)
+            @test occursin(text, pdftext)
+        end
+        @test occursin("α", pdftext)
+        @test !occursin('\ufffd', pdftext)
+    end
 end
 
 @testset "Executable Stan, descriptor identity and report rendering" begin
