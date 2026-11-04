@@ -911,6 +911,15 @@ covariate's observed entries join their subject's cell.
 Flat-row grouped models retain lockstep evaluation and refuse
 the single-subject method by name. It runs in the test environment above.
 
+`nlme_monotonic_cell.jl` reads a `mo()` or `mo1()` term in a subject's `@plate`
+cell through `groups`, as a bare term, beside a population block and as a joint
+block over two predictors. RK prepares each strictly with the subjects' effects
+declared partitioned, and the level table, which has no row form, is computed
+once per population point. Cell values and full partition gradients match the
+whole model's pointwise densities and central differences, and no subject reads
+another subject's effect. `brm_nlme_model` matches the same reference. It runs
+in the test environment above.
+
 `nlme_nested.jl` uses a public synthetic model with interleaved observations
 and 1, 2, and 3 nested units per subject. It checks explicit ownership,
 compact η likelihoods and gradients against an independent Normal oracle,
