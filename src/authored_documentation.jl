@@ -204,23 +204,76 @@ function _brm_print_doc(io, markdown)
     println(io, repr(markdown))
 end
 
+# Julia's generic Expr printer spells Core.@doc as a long macro call. Within
+# a statement block, ordinary literal strings recover the authored spelling
+# and let Julia's printer handle function/control-flow indentation itself.
+_brm_display_source(x, documentation) = x
+function _brm_display_source(x::Expr, documentation)
+    x.head in (:quote, :$) && return deepcopy(x)
+    args = Any[]
+    for arg in x.args
+        if arg isa LineNumberNode
+            # A macro still needs its location slot, but a display has no
+            # reason to print the source-file annotation there.
+            x.head === :macrocall && push!(args, nothing)
+            continue
+        end
+        if x.head in (:block, :toplevel)
+            while _brm_is_doc(arg)
+                documentation && push!(args, arg.args[3])
+                arg = arg.args[4]
+            end
+        end
+        push!(args, _brm_display_source(arg, documentation))
+    end
+    Expr(x.head, args...)
+end
+
+function _brm_documentation_index(documentation)
+    index = Dict{Tuple,Vector{Tuple{Int,BRMDocumentation}}}()
+    for (i, doc) in enumerate(documentation)
+        push!(get!(Vector{Tuple{Int,BRMDocumentation}}, index, doc.path), (i, doc))
+    end
+    index
+end
+
+# Multiple tuple targets can interleave records; selection preserves their
+# original order without rescanning unrelated documentation.
+function _brm_documentation_records(index, targets)
+    selected = Tuple{Int,BRMDocumentation}[]
+    for target in unique(targets)
+        append!(selected, get(index, target, ()))
+    end
+    sort!(selected; by=first)
+    last.(selected)
+end
+
+function _brm_documentation_owners(documentation)
+    owners = Dict{Symbol,Vector{BRMDocumentation}}()
+    for doc in documentation
+        push!(get!(Vector{BRMDocumentation}, owners, doc.owner), doc)
+    end
+    owners
+end
+
 # Restore wrappers onto the retained source, which also contains the grouping
 # bindings needed to replay a cell. Never substitute a pre-normalization body.
-_brm_restore_documentation(x, docs, path=()) = x
-function _brm_restore_documentation(x::Expr, docs, path=())
+_brm_restore_documentation(x, docs, path=()) =
+    _brm_restore_indexed_documentation(x, _brm_documentation_index(docs), path)
+_brm_restore_indexed_documentation(x, docs, path) = x
+function _brm_restore_indexed_documentation(x::Expr, docs, path)
     targets = _brm_documentation_targets(x)
     result = deepcopy(x)
     if _is_brm_plate(x)
         loop = last(result.args)
-        loop.args[end] = _brm_restore_documentation(last(loop.args), docs, (path..., only(targets)))
+        loop.args[end] = _brm_restore_indexed_documentation(last(loop.args), docs, (path..., only(targets)))
     elseif x.head in (:block, :toplevel)
-        result.args = Any[_brm_restore_documentation(a, docs, path) for a in x.args]
+        result.args = Any[_brm_restore_indexed_documentation(a, docs, path) for a in x.args]
     elseif x.head in (:for, :while, :let) || _is_brm_scan(x)
-        result.args[end] = _brm_restore_documentation(last(x.args), docs, path)
+        result.args[end] = _brm_restore_indexed_documentation(last(x.args), docs, path)
     end
     attached = Set{String}()
-    for doc in docs
-        any(target -> doc.path == (path..., target), targets) || continue
+    for doc in _brm_documentation_records(docs, ((path..., target) for target in targets))
         Base.remove_linenums!(_brm_strip_docs(doc.statement)) ==
             Base.remove_linenums!(deepcopy(x)) || continue
         doc.markdown in attached && continue

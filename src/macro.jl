@@ -1693,6 +1693,10 @@ function _brm_print_source(io::IO, x::Expr, outer::Int=0; left::Bool=false)
     elseif Meta.isexpr(x, :vect)
         _brm_print_arguments(io, x.args, "[", "]")
     elseif Meta.isexpr(x, :(=), 2)
+        if Meta.isexpr(first(x.args), :call) && Meta.isexpr(last(x.args), :block)
+            return Base.show_unquoted(io,
+                _brm_display_source(x, get(io, :brm_documentation, true)))
+        end
         _brm_print_source(io, x.args[1])
         print(io, " = ")
         _brm_print_source(io, x.args[2])
@@ -1703,7 +1707,7 @@ function _brm_print_source(io::IO, x::Expr, outer::Int=0; left::Bool=false)
         i, range, body = _brm_plate_loop(x)
         _brm_print_plate(io, i, range, Meta.isexpr(body, :block) ? body.args : Any[body])
     else
-        print(io, x)
+        Base.show_unquoted(io, _brm_display_source(x, get(io, :brm_documentation, true)))
     end
 end
 function _brm_source_infix(x::Expr)
@@ -3514,18 +3518,18 @@ end
 # source cards.
 Base.show(io::IO, brmi::BRMI) = begin
     operations = brmi.operations
+    documentation = get(io, :brm_documentation, true) ?
+        _brm_documentation_owners(brmi.documentation) : Dict{Symbol,Vector{BRMDocumentation}}()
     started = false
     for (key, value::NamedColumn) in pairs(operations)
         _brm_is_statement(parent(value)) || continue
         started && print(io, "\n")
         started = true
-        if get(io, :brm_documentation, true)
-            for doc in brmi.documentation
-                doc.path == (key,) && _brm_print_doc(io, doc.markdown)
-            end
+        owned = get(documentation, key, ())
+        for doc in owned
+            doc.path == (key,) && _brm_print_doc(io, doc.markdown)
         end
-        docs = get(io, :brm_documentation, true) ?
-            Tuple(d for d in brmi.documentation if d.owner === key && length(d.path) > 1) : ()
+        docs = Tuple(d for d in owned if length(d.path) > 1)
         _show_top(IOContext(io, :brm_cell_documentation => docs), key, parent(value))
     end
 end

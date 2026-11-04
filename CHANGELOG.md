@@ -24,6 +24,11 @@ instead of failing at run time.
   authored prose for HTML/PDF pipelines, without treating it as generated
   scientific coverage. Emitted RK artifacts retain the same records in their
   metadata.
+- The RK source retains ordinary declaration and plate-local docstrings using
+  the emitter's exact names; reusable definition wrappers remain intact during
+  lowering and replay. This requires ReactiveKernelsPPL 0.1.93. Complete BRM
+  records retain element-specific prior addresses when several coefficients
+  share one emitted array declaration.
 
 ## 0.2.165
 

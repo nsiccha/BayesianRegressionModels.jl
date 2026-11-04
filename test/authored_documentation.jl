@@ -140,7 +140,7 @@ end
     plain = brm(BRM._brm_strip_docs(DOC_SOURCE); mod=@__MODULE__)(DOC_DATA)
     artifact = BRM.emit_rk_artifact(model; case_id="authored-documentation")
     control = BRM.emit_rk_artifact(plain; case_id="authored-documentation-control")
-    @test artifact.ast == control.ast
+    @test BRM._brm_strip_docs(artifact.ast) == control.ast
     @test artifact.defs == control.defs
     @test artifact.bindings == control.bindings
     @test isequal(rk_artifact_inputs(artifact), rk_artifact_inputs(control))

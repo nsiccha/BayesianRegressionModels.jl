@@ -1048,7 +1048,8 @@ function _rk_kernel_output_names(plan::_RKValuePlan)
         for kernel in kernels)
 end
 
-function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
+function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, documentation=())
+    documentation_owners = _brm_documentation_owners(documentation)
     reserved = Set{Symbol}(keys(plan.columns))
     union!(reserved, (first(binding) for binding in _rk_extent_bindings(plan)))
     union!(reserved, (a.name for a in plan.assignments))
@@ -1079,7 +1080,8 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         if assignment isa _RKPreparedKernelAssignment
             _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment;
                 arguments=get(hoisted.kernels, assignment.name, nothing), coordinates,
-                graph_outputs=kernel_outputs[assignment.name], cell_sources=cells)
+                graph_outputs=kernel_outputs[assignment.name], cell_sources=cells,
+                documentation=get(documentation_owners, assignment.name, ()))
             _rk_plate_output_cells!(cells, stmts, assignment, kernel_outputs[assignment.name])
         else
             _rk_emit_value_assignment!(defs, stmts, bindings, taken,
@@ -1163,9 +1165,22 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     authored = union(Set(a.name for a in plan.assignments),
         (p.name for p in plan.regression.predictors),
         Iterators.flatten(values(kernel_outputs)))
-    _rk_scalar_lone_intercepts(
+    emitted = _rk_scalar_lone_intercepts(
         _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
             _rk_observed_names(plan); retained=authored, coordinates,
             densities=Set(c.source for c in plan.completions if c.totals !== nothing)),
         lone_intercepts)
+    # A cell observation is emitted outside its value plate. Its prepared
+    # record supplies both the cell-local parameter and the response source.
+    docs = collect(documentation)
+    documentation_paths = _brm_documentation_index(documentation)
+    for kernel in plan.assignments
+        kernel isa _RKPreparedKernelAssignment || continue
+        for observation in kernel.observations,
+                (_, doc) in get(documentation_paths, (kernel.name, observation.param), ())
+            push!(docs, BRMDocumentation((observation.source,), observation.source,
+                doc.markdown, doc.statement, doc.file, doc.line))
+        end
+    end
+    _rk_documented_program(emitted, docs)
 end

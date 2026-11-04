@@ -6,6 +6,61 @@ function documented_rk(statement, text="Authored explanation."; owner=:piece)
     DOC_RK_BRM._brm_documented_statement(statement, (doc,))
 end
 
+@testset "The emitter selects an exact documentation scope before renaming" begin
+    source = quote
+        "Global value."
+        theta ~ Normal(0, 1)
+        @plate for i in eachindex(x)
+            "Cell value."
+            theta_cell = theta * x[i]
+            expected[i] = theta_cell
+        end
+    end
+    documentation = DOC_RK_BRM._brm_source_documentation(source)
+    block = :(begin theta ~ Normal(0, 1); theta_cell = theta*x; end)
+    documented = DOC_RK_BRM._rk_documentation_block(block, documentation)
+    @test length(DOC_RK_BRM._brm_source_documentation(documented)) == 1
+    @test only(DOC_RK_BRM._brm_source_documentation(documented)).markdown == "Global value."
+    local_block = :(begin private_cell = theta*x; end)
+    scoped = DOC_RK_BRM._rk_documentation_block(local_block, documentation;
+        path=(:expected,), names=Dict(:theta_cell => :private_cell))
+    @test only(DOC_RK_BRM._brm_source_documentation(scoped)).markdown == "Cell value."
+    @test DOC_RK_BRM._brm_strip_docs(scoped) == local_block
+    @test DOC_RK_BRM._rk_documentation_block(documented, documentation) == documented
+    unrelated = DOC_RK_BRM._rk_documentation_block(local_block, documentation;
+        path=(:another_component,), names=Dict(:theta_cell => :private_cell))
+    @test unrelated == local_block
+    dotted = BRMDocumentation((Symbol("expected.theta_cell"),),
+        Symbol("expected.theta_cell"), "A literal dotted name.",
+        :(private_cell = theta*x), :authored_model, 21)
+    @test DOC_RK_BRM._rk_documentation_block(local_block, (dotted,);
+        path=(:expected,), names=Dict(:theta_cell => :private_cell)) == local_block
+end
+
+struct CountedDocumentation <: AbstractVector{BRMDocumentation}
+    records::Vector{BRMDocumentation}
+    reads::Base.RefValue{Int}
+end
+Base.size(d::CountedDocumentation) = size(d.records)
+function Base.getindex(d::CountedDocumentation, i::Int)
+    d.reads[] += 1
+    d.records[i]
+end
+
+@testset "Attaching documentation reads each input record once" begin
+    names = [Symbol(:theta_, i) for i in 1:128]
+    statements = [Expr(:(=), name, i) for (i, name) in enumerate(names)]
+    docs = CountedDocumentation([BRMDocumentation((name,), name, string(name),
+        statement, :large_model, i) for (i, (name, statement)) in
+        enumerate(zip(names, statements))], Ref(0))
+    source = Expr(:block, statements...)
+    documented = DOC_RK_BRM._rk_documentation_block(source, docs)
+    @test docs.reads[] == length(docs)
+    @test DOC_RK_BRM._brm_strip_docs(documented) == source
+    @test [d.path for d in DOC_RK_BRM._brm_source_documentation(documented)] ==
+        [(name,) for name in names]
+end
+
 @testset "RK definitions retain outer documentation through canonicalization" begin
     definition = :(piece(location) = begin
         theta ~ Normal(location, tau)

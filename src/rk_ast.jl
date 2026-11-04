@@ -72,6 +72,37 @@ function _rk_definition_expression(definition)
         _rk_canonical_source_definition(definition))
 end
 
+# Attach records only within the lexical scope selected by the emitter. The
+# optional mapping is supplied where names are chosen, never reconstructed
+# from flattened private names. Component emitters call this before renaming
+# their local declarations; plates supply their own enclosing authored path.
+function _rk_documentation_block(block::Expr, documentation; path=(),
+        names=Dict{Symbol,Symbol}())
+    isempty(documentation) && return block
+    by_target = Dict{Symbol,Vector{Tuple{Int,BRMDocumentation}}}()
+    for (i, doc) in enumerate(documentation)
+        length(doc.path) == length(path) + 1 &&
+            doc.path[1:length(path)] == path || continue
+        target = get(names, last(doc.path), last(doc.path))
+        push!(get!(Vector{Tuple{Int,BRMDocumentation}}, by_target, target), (i, doc))
+    end
+    statements = map(block.args) do statement
+        statement isa Expr || return statement
+        _brm_is_doc(statement) && return statement
+        lhs = _brm_statement_lhs(statement)
+        targets = _brm_documentation_lhs(lhs)
+        selected = _brm_documentation_records(by_target, targets)
+        isempty(selected) ? statement : _brm_documented_statement(statement, selected)
+    end
+    Expr(block.head, statements...)
+end
+
+function _rk_documented_program(emitted::_RKEmittedProgram, documentation; kwargs...)
+    isempty(documentation) && return emitted
+    _RKEmittedProgram(emitted.defs,
+        _rk_documentation_block(emitted.main, documentation; kwargs...), emitted.bindings)
+end
+
 # Source locations are not part of a definition's meaning, so two copies
 # quoted at different sites still compare equal.
 _rk_source_equal(a, b) = isequal(a, b)
@@ -1702,7 +1733,7 @@ end
 # otherwise unchanged; an unrecorded declaration is refused by the transport.
 function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         values::Bool=false, reserved=(), coordinates=nothing,
-        lone_intercepts=Dict{Symbol,Any}())
+        lone_intercepts=Dict{Symbol,Any}(), documentation=())
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
@@ -2278,5 +2309,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     emitted = _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
         _rk_structural_responses(plan); retained=authored, coordinates)
     # A value plan resolves lone intercepts once its own readers are emitted.
-    values ? emitted : _rk_scalar_lone_intercepts(emitted, lone_intercepts)
+    emitted = values ? emitted : _rk_scalar_lone_intercepts(emitted, lone_intercepts)
+    # Linked predictors retain their response-scale authored name. The one
+    # identity predictor/data collision is renamed at the explicit site above.
+    names = Dict(p.name => get(rename, p.name, p.name) for p in plan.predictors
+        if p.link === :identity)
+    _rk_documented_program(emitted, documentation; names)
 end

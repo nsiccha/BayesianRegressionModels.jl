@@ -248,7 +248,7 @@ function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
         _brm_rk_plan(rebound; held_out,
             fitted_constants=(name, _source) -> get(state.constants, name, nothing))
     end
-    emitted = _rk_emit_ast(plan)
+    emitted = _rk_emit_ast(plan; documentation=brm_documentation(template))
     _rk_check_replay_program(state.program, _rk_program_statements(emitted); prefix)
     _rk_check_replay_priors(emitted, plan, state.scalars, new_data; prefix)
     _rk_check_replay_terms(plan; prefix)
