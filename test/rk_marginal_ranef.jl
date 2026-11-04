@@ -322,7 +322,9 @@ end
 end
 
 # `brm_coordinate_transport` does not pair R2D2 blocks, omitted response or not, so
-# these coordinates are matched by name here.
+# these coordinates are matched by name here. The allocation is a simplex: the two
+# backends' free coordinates differ, and so do their densities by Stan's constant
+# `log(K) / 2` (`brm_coordinate_transport`, `logdensity_offset`).
 @stestset "an R2D2 block SBBRMI keeps whole has the same target on RK" begin
     for (name, builder) in (("r2d2_scales", RKM.r2d2_scales), ("r2d2_reference", RKM.r2d2_reference))
         brmi = builder(RKM.WHOLE_OMIT_C)
@@ -344,11 +346,16 @@ end
         @test length(rk_names) == length(names)
         positions = [findfirst(==(stan_name(n)), names) for n in rk_names]
         @test !any(isnothing, positions)
+        simplex = findall(n -> occursin("_phi.", n), rk_names)
+        @test length(simplex) == K - 1
         for u in (zeros(length(names)), collect(range(-0.43, 0.51; length=length(names))))
             stan_u = zeros(length(names))
             stan_u[Int.(positions)] = u
+            stan_u[Int.(positions[simplex])] =
+                BRM._brm_stan_simplex_free(first(BRM._brm_rk_simplex_log(u[simplex])))
             @test LogDensityProblems.logdensity(problem, u) ≈
-                BridgeStan.log_density(stan.model, stan_u; propto=false, jacobian=true) atol=1e-10 rtol=1e-10
+                BridgeStan.log_density(stan.model, stan_u; propto=false, jacobian=true) -
+                log(K) / 2 atol=1e-10 rtol=1e-10
         end
     end
 end
