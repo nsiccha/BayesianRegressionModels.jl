@@ -314,6 +314,12 @@ data_scale_stratified(data) = @brm data begin
     sd(:, p) ~ Exponential(prior_sd_scale)
     y ~ Normal(mu, sigma)
 end
+data_scale_gmrf(data) = @brm data begin
+    field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+    sd(field, gmrf((east, north), time)) ~ Exponential(prior_sd_scale)
+    length_scale(field, gmrf((east, north), time), space) ~ LogNormal(0.5, prior_sd_scale)
+    y ~ Normal(field, 0.2)
+end
 data_scale_hsgp(data) = @brm data begin
     sigma ~ Exponential(1)
     mu ~ 1 + hsgp(x; k=3)
@@ -760,6 +766,19 @@ end
             (:prior_sd_scale, :nu0, :rate, :other)))
         @test isequal(data, saved)
     end
+end
+
+@stestset "coordinate transport gmrf priors that read a data scalar" begin
+    data = (; east=[0.1, 0.9, 0.7, 0.3], north=[0.2, 0.4, 0.8, 0.5],
+        time=[0.0, 0.3, 0.3, 1.7], y=[0.4, -0.3, 0.2, 0.1],
+        xy=[0.0 0.0; 1 0; 1 1; 0 1; 0.5 0.5], triangles=[1 2 5; 2 3 5; 3 4 5; 4 1 5],
+        prior_sd_scale=1.7)
+    saved = deepcopy(data)
+    fixture = coordinate_transport_fixture(PublicCoordinateTransport.data_scale_gmrf(data),
+        "data_scale_gmrf")
+    check_coordinate_transport(fixture)
+    @test :prior_sd_scale ∉ keys(rk_bound_data(fixture.rk))
+    @test isequal(data, saved)
 end
 
 @stestset "coordinate transport linked shared-design factor and plain slope" begin
