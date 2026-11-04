@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.163
+
+- **Mesh `gmrf` densities at very short spatial lengths:** `RKBRMI` and `SBBRMI`
+  no longer produce `NaN` from an overflowing intermediate inverse-squared
+  length, such as `exp(-365)`. A rescaled sparse Matérn factor and normalized
+  quadratic retain the same proper prior, including its normalizer and
+  derivatives, without clipping lengths or changing their declared support.
+  Representable tail densities remain finite; a log density below Float64's
+  range evaluates to `-Inf`. The numerical precision operations and
+  Stan prior RNG use the same scaling.
+
 ## 0.2.162
 
 - `RKBRMI` of a model with an omitted response now samples what `SBBRMI` samples,

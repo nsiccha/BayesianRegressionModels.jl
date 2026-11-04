@@ -1,7 +1,7 @@
 # A sparse LDL recurrence over stored entries. A diagonal history entry is D;
 # an off-diagonal entry is L. Every learned-length operation stays in the
 # retained scan. Only the sparse integer lookup is an ordinary data function.
-ReactiveKernels.@kernel function _gmrf_factor_graph(kappa2, geometry)
+ReactiveKernels.@kernel function _gmrf_factor_graph(mass_scale, stiffness_scale, geometry)
     factor = scan(eachindex(geometry.lrow); init=0, history=0.0) do carry, p, earlier
         i = geometry.lrow[p]
         j = geometry.columns[p]
@@ -12,7 +12,8 @@ ReactiveKernels.@kernel function _gmrf_factor_graph(kappa2, geometry)
                 earlier[geometry.previous_pos[q]] * earlier[geometry.lptr[k]]
             return value
         end
-        raw = geometry.stiffness[p] + (i == j ? kappa2 * geometry.mass[j] : 0.0)
+        raw = stiffness_scale * geometry.stiffness[p] +
+            (i == j ? mass_scale * geometry.mass[j] : 0.0)
         numerator = raw - sum(corrections)
         entry = i == j ? numerator : numerator / earlier[geometry.lptr[j]]
         (carry, entry)
@@ -20,7 +21,9 @@ ReactiveKernels.@kernel function _gmrf_factor_graph(kappa2, geometry)
     return factor
 end
 
-# K = kappa² C + G commutes with the channel operation. Apply it before the
+# B = C/ell + (ell/2) G = K/kappa/sqrt(2) gives Q = B C^-1 B/(2pi).
+# Unlike K, B never squares or inverse-squares a length before cancellation.
+# It commutes with the channel operation. Apply it before the
 # small channel solve, so each vertex/time cell needs only a C-entry history.
 # No dense spatial matrix or space-time factor is constructed.
 ReactiveKernels.@kernel function _gmrf_density_graph(field, spatial_length,
@@ -28,10 +31,9 @@ ReactiveKernels.@kernel function _gmrf_density_graph(field, spatial_length,
     N = length(geometry.mass)
     C = geometry.nchannels
     T = length(geometry.times)
-    kappa2 = 2.0 / spatial_length^2
-    factor = _gmrf_factor_graph(kappa2, geometry)
+    factor = _gmrf_factor_graph(1.0 / spatial_length, spatial_length / 2.0, geometry)
     logdet_space = 2.0 * sum(log.(factor[geometry.lptr[1:N]])) -
-        sum(log.(geometry.mass)) - N * log(4.0 * pi * kappa2)
+        sum(log.(geometry.mass)) - N * log(2.0 * pi)
     channel_logs = plate(1:C) do c
         return log(L[c, c])
     end
@@ -52,14 +54,18 @@ ReactiveKernels.@kernel function _gmrf_density_graph(field, spatial_length,
                         (t == 1 ? 0.0 : decay * field[neighbour - N * C])
                     return geometry.gval[p] * difference
                 end
-                spatial = kappa2 * geometry.mass[i] * innovation + sum(neighbours)
+                spatial = geometry.mass[i] * (innovation / spatial_length) +
+                    (spatial_length / 2.0) * sum(neighbours)
                 previous = sum((earlier[k] * L[c, k] for k in 1:(c - 1)); init=0.0)
                 white = (spatial - previous) / L[c, c]
                 (carry, white)
             end
-            return sum(abs2, residual) / geometry.mass[i]
+            # Normalize before squaring: an unscaled square can overflow
+            # even when the final log density is representable.
+            scale = sqrt(4.0 * pi * geometry.mass[i]) * sqrt(variance)
+            return sum(abs2, residual ./ scale)
         end
-        return (sum(vertices) / (4.0 * pi * kappa2 * variance) + N * C * log(variance)) / 2.0
+        return sum(vertices) + N * C * log(variance) / 2.0
     end
     return normalizer - sum(transitions)
 end

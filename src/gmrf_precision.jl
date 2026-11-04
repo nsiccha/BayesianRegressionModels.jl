@@ -38,10 +38,10 @@ end
 # Left-looking LDL' on a fixed lower-triangular CSC pattern. The workspace
 # clears only the current column's fill, not all n rows for every column.
 # The diagonal is stored separately; the factor's explicit diagonal is one.
-function _brm_gmrf_ldl(kappa2, mass, gptr, grow, gval, lptr, lrow,
+function _brm_gmrf_ldl(mass_scale, stiffness_scale, mass, gptr, grow, gval, lptr, lrow,
         previous_ptr, previous_col, previous_pos)
     n = length(mass)
-    T = promote_type(typeof(kappa2), eltype(mass), eltype(gval))
+    T = promote_type(typeof(mass_scale), typeof(stiffness_scale), eltype(mass), eltype(gval))
     lower = zeros(T, length(lrow))
     diagonal = zeros(T, n)
     work = zeros(T, n)
@@ -51,9 +51,9 @@ function _brm_gmrf_ldl(kappa2, mass, gptr, grow, gval, lptr, lrow,
         end
         for p in gptr[j]:(gptr[j + 1] - 1)
             i = grow[p]
-            i >= j && (work[i] = gval[p])
+            i >= j && (work[i] = stiffness_scale * gval[p])
         end
-        work[j] += kappa2 * mass[j]
+        work[j] += mass_scale * mass[j]
         for q in previous_ptr[j]:(previous_ptr[j + 1] - 1)
             k = previous_col[q]
             start = previous_pos[q]
@@ -75,7 +75,11 @@ function _brm_gmrf_ldl(kappa2, mass, gptr, grow, gval, lptr, lrow,
 end
 
 function _brm_gmrf_ldl(kappa2, mass, G, pattern::_BRMGMRFFactorPattern)
-    _brm_gmrf_ldl(kappa2, mass, G.colptr, rowvals(G), nonzeros(G),
+    _brm_gmrf_ldl(kappa2, one(kappa2), mass, G, pattern)
+end
+
+function _brm_gmrf_ldl(mass_scale, stiffness_scale, mass, G, pattern::_BRMGMRFFactorPattern)
+    _brm_gmrf_ldl(mass_scale, stiffness_scale, mass, G.colptr, rowvals(G), nonzeros(G),
         pattern.colptr, pattern.rowval, pattern.previous_ptr,
         pattern.previous_col, pattern.previous_pos)
 end
@@ -168,21 +172,21 @@ end
 # differ near boundaries; there is no claim of exact unit mesh variance.
 function _brm_gmrf_spatial_logdet(mesh::_BRMGMRFMesh, spatial_length)
     _brm_gmrf_positive(spatial_length, "spatial length scale")
-    kappa2 = 2 / spatial_length^2
-    factor = _brm_gmrf_ldl(kappa2, mesh.factor_mass,
+    # B = C/ell + (ell/2) G, so Q = B C^-1 B/(2pi). Factoring B
+    # avoids the overflowing kappa² and its cancelling determinant terms.
+    factor = _brm_gmrf_ldl(inv(spatial_length), spatial_length / 2, mesh.factor_mass,
         mesh.factor_stiffness, mesh.factor_pattern)
-    2sum(log, factor.diagonal) - sum(log, mesh.mass) - length(mesh.mass) * log(4pi * kappa2)
+    2sum(log, factor.diagonal) - sum(log, mesh.mass) - length(mesh.mass) * log(2pi)
 end
 
 function _brm_gmrf_spatial_mul!(out, x, mesh::_BRMGMRFMesh, spatial_length, work)
-    kappa2 = 2 / spatial_length^2
     mul!(work, mesh.stiffness, x)
     for i in eachindex(work, x)
-        work[i] = (work[i] + kappa2 * mesh.mass[i] * x[i]) / mesh.mass[i]
+        work[i] = x[i] / spatial_length + (spatial_length / 2) * (work[i] / mesh.mass[i])
     end
     mul!(out, mesh.stiffness, work)
     for i in eachindex(out, work)
-        out[i] = (out[i] + kappa2 * mesh.mass[i] * work[i]) / (4pi * kappa2)
+        out[i] = (mesh.mass[i] * (work[i] / spatial_length) + (spatial_length / 2) * out[i]) / (2pi)
     end
     out
 end
@@ -211,8 +215,7 @@ function _brm_gmrf_logpdf(state::AbstractArray{<:Real,3}, mesh::_BRMGMRFMesh,
     value = nt * channels * spatial_logdet / 2 - n * nt * sum(log, diag(L)) -
         (n * channels * nt / 2) * log(2pi)
     residual = Matrix{eltype(state)}(undef, n, channels)
-    precision = zeros(eltype(state), n)
-    work = similar(precision)
+    work = zeros(eltype(state), n)
     for t in 1:nt
         a = t == 1 ? zero(temporal_length) : exp(-(times[t] - times[t - 1]) / temporal_length)
         v = t == 1 ? one(temporal_length) : -expm1(-2 * (times[t] - times[t - 1]) / temporal_length)
@@ -229,10 +232,14 @@ function _brm_gmrf_logpdf(state::AbstractArray{<:Real,3}, mesh::_BRMGMRFMesh,
         end
         q = zero(value)
         for c in 1:channels
-            _brm_gmrf_spatial_mul!(precision, view(residual, :, c), mesh, spatial_length, work)
-            q += dot(view(residual, :, c), precision)
+            mul!(work, mesh.stiffness, view(residual, :, c))
+            for i in 1:n
+                z = mesh.mass[i] * (residual[i, c] / spatial_length) +
+                    (spatial_length / 2) * work[i]
+                q += abs2(z / (sqrt(4pi * mesh.mass[i]) * sqrt(v)))
+            end
         end
-        value -= (q / v + n * channels * log(v)) / 2
+        value -= q + n * channels * log(v) / 2
     end
     value
 end
@@ -305,18 +312,17 @@ function _brm_gmrf_precision_diagonal!(out, mesh::_BRMGMRFMesh,
         throw(DimensionMismatch("gmrf precision diagonal support shape"))
     _brm_gmrf_positive(spatial_length, "spatial length scale")
     _brm_gmrf_positive(temporal_length, "temporal length scale")
-    kappa2 = 2 / spatial_length^2
     G, mass = mesh.stiffness, mesh.mass
     spatial = zeros(eltype(out), n)
     for j in 1:n
         value = zero(eltype(out))
         for p in nzrange(G, j)
             i = rowvals(G)[p]
-            entry = nonzeros(G)[p]
-            value += entry^2 / mass[i]
-            i == j && (value += 2kappa2 * entry)
+            entry = (spatial_length / 2) * nonzeros(G)[p]
+            i == j && (entry += mass[j] / spatial_length)
+            value += abs2(entry / sqrt(2pi * mass[i]))
         end
-        spatial[j] = (value + kappa2^2 * mass[j]) / (4pi * kappa2)
+        spatial[j] = value
     end
     inverse_factor = inv(LowerTriangular(L))
     channel = vec(sum(abs2, inverse_factor; dims=1))

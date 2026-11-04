@@ -70,7 +70,7 @@ end
         L = C == 1 ? ones(1, 1) : [1.0 0.0; 0.45 sqrt(1-0.45^2)]
         z = 0.03 .* sin.(1:geometry.ncoordinates)
         for spatial in (0.2, 1.3), temporal in (0.1, 2.1)
-            factor = factor_query(2/spatial^2, geometry)
+            factor = factor_query(1/spatial, spatial/2, geometry)
             n = length(geometry.mass)
             lower = sparse(geometry.lrow, geometry.columns, copy(factor), n, n)
             diagonal = factor[geometry.lptr[1:n]]
@@ -79,7 +79,7 @@ end
             end
             mesh = BRM._brm_gmrf_mesh(GMRF_XY, GMRF_TRIANGLES)
             @test lower * Diagonal(diagonal) * lower' ≈
-                mesh.factor_stiffness + (2/spatial^2) * Diagonal(geometry.mass)
+                (spatial/2) * mesh.factor_stiffness + Diagonal(geometry.mass ./ spatial)
             @test query(z, spatial, temporal, L, geometry) ≈
                 gmrf_rk_oracle(z, spatial, temporal, L, times) atol=2e-8 rtol=2e-10
         end

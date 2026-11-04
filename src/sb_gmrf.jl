@@ -2,7 +2,7 @@
 # field law. The emitted model retains original vertex/channel/time ordering;
 # only the spatial factor uses the data-only fill-reducing permutation.
 StanBlocks.@deffun @juliacompat begin
-    brm_gmrf_factor(kappa2::real, mass::vector[N], gptr::int[NP],
+    brm_gmrf_factor(mass_scale::real, stiffness_scale::real, mass::vector[N], gptr::int[NP],
             grow::int[NZ], gval::vector[NZ], lptr::int[NP], lrow::int[NL],
             previous_ptr::int[NP], previous_col::int[ND], previous_pos::int[ND])::vector[N + NL] = begin
         ldl_values = rep_vector(0.0, NL)
@@ -14,10 +14,10 @@ StanBlocks.@deffun @juliacompat begin
             end
             for p in gptr[j]:(gptr[j + 1] - 1)
                 if grow[p] >= j
-                    work[grow[p]] = gval[p]
+                    work[grow[p]] = stiffness_scale * gval[p]
                 end
             end
-            work[j] += kappa2 * mass[j]
+            work[j] += mass_scale * mass[j]
             for q in previous_ptr[j]:(previous_ptr[j + 1] - 1)
                 k = previous_col[q]
                 start = previous_pos[q]
@@ -62,10 +62,12 @@ StanBlocks.@deffun @juliacompat begin
             L::matrix[C, C], times::vector[T], permutation::int[N], mass::vector[N],
             gptr::int[NP], grow::int[NZ], gval::vector[NZ], lptr::int[NP], lrow::int[NL],
             previous_ptr::int[NP], previous_col::int[ND], previous_pos::int[ND])::real = begin
-        kappa2 = 2.0 / square(spatial_length)
-        factor = brm_gmrf_factor(kappa2, mass, gptr, grow, gval, lptr, lrow,
+        # B = C/ell + (ell/2) G gives Q = B C^-1 B/(2pi), without
+        # overflowing an inverse-squared range before it cancels.
+        factor = brm_gmrf_factor(1.0 / spatial_length, spatial_length / 2.0,
+            mass, gptr, grow, gval, lptr, lrow,
             previous_ptr, previous_col, previous_pos)
-        logdet_space = 2.0 * sum(log(segment(factor, 1, N))) - sum(log(mass)) - N * log(4.0 * pi * kappa2)
+        logdet_space = 2.0 * sum(log(segment(factor, 1, N))) - sum(log(mass)) - N * log(2.0 * pi)
         lp = T * C * logdet_space / 2.0 - D * log(2.0 * pi) / 2.0
         for c in 1:C
             lp -= N * T * log(L[c, c])
@@ -90,14 +92,16 @@ StanBlocks.@deffun @juliacompat begin
             quadratic = 0.0
             for c in 1:C
                 for i in 1:N
-                    z = kappa2 * mass[i] * residual[i, c]
+                    stiffness = 0.0
                     for p in gptr[i]:(gptr[i + 1] - 1)
-                        z += gval[p] * residual[grow[p], c]
+                        stiffness += gval[p] * residual[grow[p], c]
                     end
-                    quadratic += square(z) / mass[i]
+                    z = mass[i] * (residual[i, c] / spatial_length) +
+                        (spatial_length / 2.0) * stiffness
+                    quadratic += square(z / (sqrt(4.0 * pi * mass[i]) * sqrt(variance)))
                 end
             end
-            lp -= (quadratic / (4.0 * pi * kappa2 * variance) + N * C * log(variance)) / 2.0
+            lp -= quadratic + N * C * log(variance) / 2.0
         end
         lp
     end
@@ -113,8 +117,8 @@ StanBlocks.@deffun @juliacompat begin
             L::matrix[C, C], times::vector[T], permutation::int[N], mass::vector[N],
             gptr::int[NP], grow::int[NZ], gval::vector[NZ], lptr::int[NP], lrow::int[NL],
             previous_ptr::int[NP], previous_col::int[ND], previous_pos::int[ND])::vector[D] = begin
-        kappa2 = 2.0 / square(spatial_length)
-        factor = brm_gmrf_factor(kappa2, mass, gptr, grow, gval, lptr, lrow,
+        factor = brm_gmrf_factor(1.0 / spatial_length, spatial_length / 2.0,
+            mass, gptr, grow, gval, lptr, lrow,
             previous_ptr, previous_col, previous_pos)
         field = rep_vector(0.0, D)
         residual::matrix[N, C]
@@ -124,7 +128,7 @@ StanBlocks.@deffun @juliacompat begin
             variance = t == 1 ? 1.0 : -expm1(-2.0 * (times[t] - times[t - 1]) / temporal_length)
             for c in 1:C
                 for i in 1:N
-                    white[i] = normal_rng(0.0, sqrt(4.0 * pi * kappa2 * mass[i]))
+                    white[i] = normal_rng(0.0, sqrt(2.0 * pi * mass[i]))
                 end
                 residual[:, c] = brm_gmrf_solve(white, factor, lptr, lrow)
             end
