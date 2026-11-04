@@ -3,6 +3,7 @@ module BayesianRegressionModels
 # @brm macro — parses a formula block, produces a BRMI (BRM
 # intermediate: expression tree + column metadata).
 using OrderedCollections
+include("authored_documentation.jl")
 include("macro.jl")
 include("builder_interpreter.jl")
 include("groups.jl")
@@ -375,7 +376,8 @@ export outcomes, linear_predictor_op, linear_predictors, predictors,
        hierarchical_outcomes,
        linear_predictor_args, data_args, primary_lp, popcoefnames, effect_priors,
        ranef_effect_priors, r2d2_priors, term_priors, ranefcoefnames,
-       priors_of, structure_of, brm_source
+       priors_of, structure_of, brm_source,
+       BRMDocumentation, brm_documentation, brm_documentation_markdown
 
 # Extension API. Downstream packages add their own formula terms
 # by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and

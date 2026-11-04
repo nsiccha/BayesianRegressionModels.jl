@@ -56,7 +56,7 @@ Base.@nospecializeinfer function _brm_resolve_optional_priors(@nospecialize(brmi
         push!(kept, key => NamedColumn(name(op_nc),
             ExprColumn(~, ExprColumn(effect, getargs(lhs)...), rhs)))
     end
-    BRMI((; kept...))
+    _brm_select_documentation(brmi, (; kept...))
 end
 
 # `false` only when the address provably reaches nothing in `brmi`.

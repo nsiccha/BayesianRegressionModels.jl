@@ -83,7 +83,7 @@ function brm_fitted_state(rk::RKBRMI)
         sort!(collect(fit_inputs)), reads,
         Dict{Symbol,Symbol}(_rk_plan_fit_inputs(rk.plan)),
         _rk_recorded_fits(rk), _rk_fitted_constants(rk), _rk_fitted_scalars(rk),
-        sprint(show, brm_source(rk)),
+        sprint(show, brm_source(rk); context=:brm_documentation => false),
         _rk_program_statements(emitted), _rk_layout_coordinate_names(rk),
         _rk_fitted_column_types(rk),
         sort!(collect(_rk_response_names(rk.plan))), Tuple(_rk_held_out_names(rk.plan)))
@@ -222,7 +222,7 @@ function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
     state.format == _BRM_FITTED_STATE_FORMAT || error(
         "$prefix: a format-$(state.format) fitted state; this BRM reads format " *
         "$_BRM_FITTED_STATE_FORMAT, so export it again from the fit")
-    declaration = sprint(show, template)
+    declaration = sprint(show, template; context=:brm_documentation => false)
     declaration == state.declaration || error(
         "$prefix: the fitted state was exported from another model:\n" *
         "  fitted: $(state.declaration)\n  replay: $declaration")
@@ -259,7 +259,7 @@ function _rk_declare_scalars(brmi::BRMI, scalars)
     names = Tuple(sort!([name for name in keys(scalars) if !haskey(operations, name)]))
     isempty(names) && return brmi
     BRMI(merge(NamedTuple{names}(map(name -> NamedColumn(name, DataColumn(scalars[name])), names)),
-        operations))
+        operations), brmi.documentation)
 end
 
 """

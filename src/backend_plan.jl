@@ -104,7 +104,7 @@ end
 function _brm_rebind_brmi(brmi::BRMI, df)
     operations = brmi.operations
     BRMI(NamedTuple{keys(operations)}(
-        map(value -> _brm_rebind_value(value, df), values(operations))))
+        map(value -> _brm_rebind_value(value, df), values(operations))), brmi.documentation)
 end
 
 # ---- `name = constant(expr)`: data-calibrated scalars and arrays ----------

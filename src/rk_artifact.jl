@@ -40,7 +40,9 @@ Lower `brmi` through the production RK route (`_brm_rk_plan` →
 `(; case_id, ast, defs, bindings, plan, meta)`. Definitions, main source and
 callable bindings come from the same emission. `meta` is
 `(; case_id, provenance, brm_pin, generator_version, emitted_at,
-julia_version)`; `emitted_at` is a unix-epoch-UTC `Int`
+julia_version, documentation)`; `documentation` holds the authored records
+from [`brm_documentation`](@ref), separate from executable source.
+`emitted_at` is a unix-epoch-UTC `Int`
 (`Dates` deliberately avoided). `provenance`/`brm_pin` are
 caller-supplied (the worker resolves the pin from its checkout; nothing
 here shells out). Fails closed on a malformed emission.
@@ -67,7 +69,8 @@ Base.@nospecializeinfer function emit_rk_artifact(@nospecialize(brmi::BRMI);
         brm_pin,
         generator_version=rk_artifact_version(),
         emitted_at=Int(floor(time())),
-        julia_version=string(VERSION))
+        julia_version=string(VERSION),
+        documentation=brm_documentation(brmi))
     return (;
         case_id=String(case_id),
         ast=emitted.main,
