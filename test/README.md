@@ -25,7 +25,7 @@ references captured before the ReparametrizableDistributions extraction.
 The transform algorithms and their derivative tests live in that package.
 
 `nlme_laplace_matrixfree_algebra.jl` checks the derivative of the fixed-probe
-rational determinant against independent two-dimensional identities, including
+Lanczos determinant against independent two-dimensional identities, including
 noncommuting curvature, mixed exact/operator components, ICAR soft constraints,
 conditional draws and explicit solver failures. `nlme_laplace_matrixfree.jl`
 checks nonlinear row/cell/sum gradients, evaluation-history and copy invariance,
@@ -976,7 +976,8 @@ scratch environment described below.
 `nlme_start.jl` reads complete RK and Stan points as NLMEEstimation starting
 values with `brm_nlme_start`. It covers a correlated population-PK model and a
 nested model with a correlated subject family, nested units and a shared HSGP,
-in estimated and fixed shared modes. Subject log-likelihoods sum to the RK
+in estimated and fixed shared modes, and a partial fit withholding one endpoint
+of a shared block. Subject log-likelihoods sum to the RK
 observation likelihood at the point, and `brm_nlme_joint_start` rebuilds the
 same Stan point from the natural values. Initial estimates keyed by prior
 address (`brm_nlme_start(m, inits)`) give the addressed θ, σ and Ω with zero
@@ -1188,11 +1189,42 @@ on StanBlocks and ReactiveKernels, with constrained read-back and coordinate
 transport, effective bounds, known values, invalid addresses and overrides.
 Run it directly in the test environment.
 
+`gmrf_preconditioner.jl` checks a `gmrf` field's references against dense oracles,
+without model lowering: each is one congruence with the determinant it reports,
+in both channel combinations and through a star over coupled fields, and its blocks
+between neighbouring times, or between a star's hub and another field, equal the
+precision's. With a complete orthogonal probe set the rebuilt reference's exact
+derivative cancels its estimate entry by entry, and with few probes the control
+variate's derivative matches a central difference of its value.
+
+`gmrf_laplace.jl` also compares a 640-state field and two coupled fields under
+matrix-free algebra with exact algebra: value within four probe standard errors,
+gradient against a central difference of the returned value.
+`gmrf_vecchia.jl` checks the footprint representation's numerical core without a
+backend: the exact Gaussian on a fully read grid with irregular gaps, the exact
+time factor at any neighbour count, separable channels, shared solves, gap
+linkage, reverse derivatives against finite differences and refusals.
+`gmrf_vecchia_rk.jl` checks the term on RKBRMI: density and native reverse rule,
+sampled channel factor, state plates under `locality = :error`, a strict
+partition, replay from a fitted state and refusals. `gmrf_vecchia_stan.jl` checks
+valid Stan, the shared helper, RK/Stan parity through coordinate transport, replay
+and descriptions.
+
 `gmrf_laplace_start.jl` checks that the Laplace default start of a model-scope
 `gmrf` field equals its `brm_start(rk, (;); base=:prior_median)` medians, for
 declared laws, a known hyperparameter and a law reading a model-scope parameter.
 It also checks that `brm_laplace_mode` and the `brm_laplace_plan` diagnostic use
 that point, with the diagnostic at the unit point as a positive control.
+
+`gmrf_small_length.jl` compares the normalized GMRF density, precision action
+and diagonal against an independent 256-bit dense oracle on a five-vertex
+mesh, through spatial lengths of `exp(-365)`. `gmrf_small_length_backends.jl`
+checks the RK graph and Stan's Julia-compatible helper against that oracle,
+including native Reverse gradients. `gmrf_small_length_runtime.jl` checks
+the public RK and compiled Stan models' sampler values and gradients, and
+distinguishes a finite tail density from a genuine `-Inf` overflow. The latter
+two run directly with `julia --project=test test/<file>.jl`; the first needs
+only Julia's standard libraries.
 
 `start_values.jl` checks `brm_start`, initial values keyed by prior address,
 on both backends. For a correlated population-PK model, a linked predictor,
@@ -1703,6 +1735,16 @@ gap. `rk_modeled_random_slopes.jl` additionally compares the generated map with
 its independent hand-written mapping. Run either file through the test project;
 trailing filters select individual blocks.
 
+`generated_prior_transport.jl` composes the existing public APIs to reuse a
+single response-omitted Stan prior draw in an observed Stan/RK target. Runtime
+constrained names select the target parameters, BridgeStan applies the target's
+inverse transforms, and BRM maps the resulting point into RK coordinates.
+The fixture checks four joint draws containing a GMRF with learned space/time
+scales and channel correlation, correlated ordinary effects, positive/bounded
+scalars, a simplex and a declared coefficient vector. Complete parameter
+round trips and graph values must agree with the saved generated draw. Run
+`julia --startup-file=no --project=test test/generated_prior_transport.jl`.
+
 `spline_basis_signs.jl` checks canonical TPS/t2 projection signs, input
 ownership, and frozen projections directly. The spline blocks in
 `rk_parity.jl` compare RK densities and Enzyme gradients with independent
@@ -1996,6 +2038,15 @@ the generic path does. It also checks the candidate-scoring frame, which builds
 a Gaussian block's factor once per block, bit for bit against the per-level
 frame.
 
+`adaptive_centering_blockwise_widths.jl` sweeps that pass over block widths from
+1 to 12 margins and four kinds of derived scale on a toy Gaussian density, with
+no Stan toolchain. It checks that each plan takes the pass, that its log density
+equals the generic path's exactly and its gradient to rounding, that both agree
+with central differences, and that inputs are unchanged. A width has to be
+checked on its own: the pass works at four margins, and at five Enzyme raised
+`EnzymeNoTypeError` until the repair in Enzyme. The test bootstrap pins
+`6053067f`, which includes that repair and declares libEnzyme `3425ed9c`.
+
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, Turing/Enzyme versus StanBlocks/BridgeStan
 density and gradient parity, physical constrained quantities, and the
@@ -2095,6 +2146,14 @@ finite-difference gradients at several points. Nonlinear Normal observations
 exercise the diagnostic and implicit gradient; mixed generated effects,
 retained subsets, independent copies, prior dependencies, whole-vector width
 screening and linear sparse storage cover structural behavior.
+
+`laplace_mode_floor.jl` checks the mode search's rounding floor on the
+whole-model, structured, sparse and matrix-free problems. One Poisson effect
+starts far up an exponential's slope, where the decrement stops shrinking
+fourfold with a gradient near 100: the value must be the Laplace formula at a
+BigFloat oracle's mode, and the gradient must match central differences. An
+effect beside an intercept of 1e6 has a real floor above `tol`, which must still
+stop the search. Run it with `julia --project=test test/laplace_mode_floor.jl`.
 
 `laplace_mode_overflow.jl` exercises finite-density trials with overflowing
 derivatives in ordinary and sum cells, with exact and matrix-free solvers.
@@ -2260,8 +2319,8 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   binary without another edit; like Treebars, it is resolution plumbing, not a
   test dependency. A manifest resolved before this entry still holds 0.0.302:
   re-run `setup_env.jl`.
-- **Enzyme is the ecosystem's `dogfood` line, so the suite runs on gordito
-  only.** BRM's RK cell gradients need repairs no registered Enzyme carries:
+- **Enzyme is the ecosystem's `dogfood` line and needs its declared
+  libEnzyme build.** BRM's RK cell gradients need repairs no registered Enzyme carries:
   a nested-NLME totals cell reads an `hcat` design built from views at its
   rows, which registered Enzyme rejects with `IllegalTypeAnalysisException`
   and dogfood `d37cb0b4` differentiates (Enzyme snag
@@ -2279,14 +2338,14 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   `erfcx-positive-t-db1c8c84`), required by scaled-tail likelihoods in the
   embedded Laplace.
   `setup_env.jl` materializes the pinned dogfood commit from the KB host's
-  Enzyme mirror (it is not on GitHub), develops its nested `lib/EnzymeCore`
+  Enzyme mirror when available, develops its nested `lib/EnzymeCore`
   0.8.27 beside it (Pkg 1.10 ignores Enzyme's `[sources]`; registered
   EnzymeCore lacks `set_atomic_add`), and runs the KB resolver's
   dogfood-libEnzyme step: it points `Enzyme_jll` 0.0.301 at the declared
   libEnzyme build through the ignored `test/LocalPreferences.toml` and
-  prints `KB-DOGFOOD-LIBENZYME <commit> llvm<M> <dir>`. That build exists
-  only where the Enzyme lane builds it (gordito, Julia 1.10 and 1.12);
-  elsewhere setup refuses rather than load the stock library, whose Reverse
+  prints `KB-DOGFOOD-LIBENZYME <commit> llvm<M> <dir>`. The resolver checks
+  that the build is available for the host and Julia version;
+  otherwise setup refuses rather than load the stock library, whose Reverse
   gradients the build fixes (skill `enzyme-use`). Check a running process with
   `Enzyme.Compiler.Enzyme_jll.libEnzyme_path`.
 - **All `develop` paths go in ONE `Pkg.develop` call.** Resolution has to

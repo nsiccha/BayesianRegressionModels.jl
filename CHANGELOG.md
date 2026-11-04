@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.160
+## 0.2.166
 
 - Sparse Laplace supports model-scope helpers shared by ordinary or
   sum-factored observation cells. Sampled-coordinate helper values are
@@ -42,6 +42,109 @@ instead of failing at run time.
   `locality = :error`, a matrix with no row form read as `M[p, 2]` is now
   refused by name rather than computed whole in every cell. Update older pinned
   RK environments; the test bootstrap selects that release.
+
+## 0.2.165
+
+- **Structure first, priors last:** `SBBRMI` accepts a cell-local prior after
+  statements that read it, keeping the draw in its original plate. Prior
+  dependencies are emitted before their readers; ordinary cell statements and
+  scan steps retain their relative order. The authoring guide and executable
+  examples cover scalar, vector, coefficient, scale and correlation priors,
+  composed structural/prior builders, and complete printed-source replay.
+
+## 0.2.164
+
+- **Large `gmrf` fields under the sparse Laplace:** a warm value and gradient, at
+  the prior medians, with one Normal field and one CPU, took 13 s at 202,500 states
+  on 8 probes (was 93 s), and 134 s at 1,698,450 states on 4 probes. A component
+  that is exactly one `gmrf` field now has a reference that sees the data, built at
+  the prior medians, and the determinant takes one Lanczos recurrence per probe.
+- **Lower fixed-probe noise:** `MatrixFreeLaplace(control_variate=true)`, the default,
+  rebuilds a field's reference at each point and estimates only the difference from
+  it. At 10,000 states and 8 probes the gradient's SD across probe seeds fell from
+  about [9, 11, 14] to [2.2, 2.1, 1.6] at the same fixture, for a cost of about twice
+  as much per probe. The value and gradient stay one fixed-probe function and its
+  exact derivative. Correlated channels read at different places keep the plain
+  estimator.
+- **Fields read by the same rows** integrate through a reference that couples them
+  (two at 20,000 states 10 s against 24 s exact; three at 30,000 states 17 s against
+  83 s). Its control variate tracks only the fields' priors: a field's scale keeps
+  the plain estimator's noise.
+- **`brm_start(...; base=:prior_median)` and the Laplace default start** now read a
+  prior with an inner call, such as `LogNormal(log(0.2), 0.5)`. Those coordinates
+  used to keep the unit point, so such a model's starts change.
+- **Breaking:** `MatrixFreeLaplace` no longer takes `logdet_step` or `logdet_extent`:
+  remove them, there is no quadrature. `target.algebra.diagnostics` replaces
+  `quadrature_nodes` with `gradient_rank` and adds `ritz`, `tracked_iterations` and
+  `tracked_shift`. Matrix-free values change within their probe error, and a problem
+  with a `gmrf` field prepares its reference at the prior medians rather than at zero
+  coordinates, so an SMC checkpoint from an earlier version is refused.
+
+## 0.2.163
+
+- **Mesh `gmrf` densities at very short spatial lengths:** `RKBRMI` and `SBBRMI`
+  no longer produce `NaN` from an overflowing intermediate inverse-squared
+  length, such as `exp(-365)`. A rescaled sparse Matérn factor and normalized
+  quadratic retain the same proper prior, including its normalizer and
+  derivatives, without clipping lengths or changing their declared support.
+  Representable tail densities remain finite; a log density below Float64's
+  range evaluates to `-Inf`. The numerical precision operations and
+  Stan prior RNG use the same scaling.
+
+## 0.2.162
+
+- `RKBRMI` of a model with an omitted response now samples what `SBBRMI` samples,
+  so `brm_coordinate_transport` and `brm_nlme_joint_map` work for every partial
+  fit of a shared `|ID|` block whose laws they cover.
+  - A plate cell no longer keeps a predictor, margin, scale or cell latent that
+    no kept likelihood reaches because a local or a reported indexed output
+    still reads it (`loc = base[i] + …; z[i] = loc; y[i] ~ Normal(loc, s)`). A
+    statement reading only what kept likelihoods reach and data stays, reported
+    output included.
+  - A shared block `SBBRMI` cannot split stays whole on RK too: Student-t,
+    R2D2-derived or known scales, stratified `gr(g, by=b)` and blocks joining
+    several grouping columns. This replaces the two refusals of an R2D2 block
+    and of a joined block under an omitted response.
+  - A long-format response omitted in a cell (`y[rows[i]] ~ …`) now plans, and an
+    `effect(lp, …)` prior on a predictor only an omitted response reads no longer
+    fails planning.
+  - **Breaking:** on such a partial fit `RKBRMI` has fewer coordinates. Saved RK
+    draws of the old layout do not fit it, and a cell output computed from what no
+    kept likelihood reaches (`z[i]` above) is no longer in the RK program. Read
+    it from `SBBRMI`'s generated quantities, or fit with the response bound.
+    Fully observed programs and designs that omit a response the fit observed
+    (`reprocess`) are unchanged.
+
+## 0.2.161
+
+- **A Laplace mode search no longer stops short of the mode on a stiff
+  conditional:** the search stopped at a "rounding floor" whenever a plain
+  Newton step's decrement was below 1e-8 and had stopped shrinking fourfold.
+  Newton can converge that slowly far from the mode, on an exponential's slope
+  or along a stiff curved valley, so the marginal came from a point that was not
+  a mode, with no counter or warning. All three problems did this. A decrement
+  now counts as at its floor only when the gradient no longer follows the Newton
+  model; otherwise the search continues to `tol`, the floor, or `maxiter`, which
+  scores `-Inf` and counts in `unconverged`. Log densities and gradients change
+  at the points this affected: on one synthetic stiff fixture, values moved by
+  0.58 and 0.16 nats and the integrated gradient fell from 7.3 and 1.4 to below
+  1e-6. Values at five points of that fixture that had converged are identical.
+
+## 0.2.160
+
+- **`gmrf(...; neighbors=m)`, a space-time field bounded by its reads:** in place
+  of `mesh=`, a nearest-neighbour (Vecchia) sparse precision with one state per
+  channel at each distinct `(east, north, time)` the rows read. The covariance is
+  the exact continuum Matérn × OU at those reads: no mesh boundary inflation, no
+  resolution floor, no interpolation. The conditioning set is the approximation;
+  channels stay exactly separable, and positions read at the same times keep the
+  exact OU correlation across every gap. Same parameters, addresses and priors as
+  the mesh form, on SBBRMI and RKBRMI. Frozen replay reads fitted pairs only. One
+  model-scope field: not in `@plate` cells and not integrated by embedded Laplace.
+  Adds a dependency on Bessels.jl.
+- **A `gmrf` term with only default priors transpiles from any `mod`:** the mesh
+  form named its submodel in the caller's module and failed with `Could not find
+  _sb_gmrf`.
 
 ## 0.2.159
 

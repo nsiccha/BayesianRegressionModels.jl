@@ -1,5 +1,13 @@
 # Matrix-free conditional Laplace measurements
 
+> **Superseded in part (BRM 0.2.159).** This record measures the rational
+> quadrature (65 shifted solves per probe) that BRM has since replaced by one
+> Lanczos recurrence per probe, so `logdet_step` and `logdet_extent` no longer
+> exist; `refine` now compares solve tolerances. A `gmrf` field's component also
+> has its own reference (`src/gmrf_preconditioner.jl`). The numbers below stay as
+> recorded and do not describe the current code.
+
+
 These are synthetic controls for the nonlinear embedded-Laplace implementation.
 They do not import an ODL model, graph or observation. Results below were measured
 on `gordito` on 2026-11-02 with one CPU per run. Host load varied; allocation

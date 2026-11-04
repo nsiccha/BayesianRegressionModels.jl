@@ -670,6 +670,17 @@ function _brm_slap_step(H::SMatrix, g::SVector)
     E.vectors * ((E.vectors' * g) ./ max.(abs.(E.values), 1.0)), false
 end
 
+# Whether unit i's decrement λ, a candidate for its rounding floor, is at it
+# (`_brm_lap_floor_candidate` in nlme_laplace.jl).
+function _brm_slap_at_floor(p::BRMStructuredLaplaceProblem, A, M, i, z, step, g, H, λ;
+        weight)
+    ξ = _BRM_LAP_FLOOR_PROBE
+    _, gt, _ = _brm_slap_unit(p, A, M, i, z + ξ * step; weight)
+    r = gt - (1 - ξ) * g
+    all(isfinite, r) || return false
+    _brm_lap_at_floor(dot(r, first(_brm_slap_step(H, r))), λ)
+end
+
 # Unit i's mode by continuation from its prior's mode, zero: Newton's method on
 # the continuation density −|z|²/2 + s × likelihood for each stage s of
 # `_brm_lap_stages` (one stage when every term is log-concave in the effects:
@@ -694,7 +705,8 @@ function _brm_slap_unit_mode(p::BRMStructuredLaplaceProblem, A, M::SMatrix{D,D,F
             all(isfinite, H) || return :nonfinite, steps, z, H, late
             step, exact = _brm_slap_step(H, g)
             λ = dot(g, step)
-            if λ <= tol || (exact && λ <= 1e-8 && λ >= previous / 4)
+            if λ <= tol || (exact && _brm_lap_floor_candidate(λ, previous, tol) &&
+                    _brm_slap_at_floor(p, A, M, i, z, step, g, H, λ; weight=s))
                 converged = true
                 break
             end

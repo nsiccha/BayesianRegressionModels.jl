@@ -98,6 +98,61 @@ const START_GROUPS = (; subject_group=:subject, nested_groups=(unit=:obs_subject
     @test_throws BRMNLMEViewError brm_nlme_start(m, other, stan_u)
 end
 
+# Two endpoints share one subject block. Withholding one endpoint's response
+# leaves its margins outside every likelihood, though the cell still computes and
+# reports its location: both backends must lower the same reduced block, and the
+# NLME view and joint map of the partial fit must work like the full fit's.
+const START_ENDPOINTS = (; NLME_PLATE_DATA...,
+    z=[[0.4, 0.1], [0.3], [0.2, 0.5, 0.1]], z_time=[[1.0, 2.0], [1.5], [0.5, 1.0, 4.0]])
+const START_FIRST_ENDPOINT = (; (k => v for (k, v) in pairs(START_ENDPOINTS) if k !== :z)...)
+
+function start_endpoints(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        z_scale ~ Exponential(1)
+        log_CL ~ 1 + weight + (1 | pk | subject)
+        log_V ~ 1 + (1 | pk | subject)
+        z_base ~ 1 + weight + (1 | pk | subject)
+        z_slope ~ 1 + (1 | pk | subject)
+        @plate for i in eachindex(log_CL)
+            CL = exp(log_CL[i])
+            Vc = exp(log_V[i])
+            z_loc = z_base[i] .+ z_slope[i] .* dose[i] / Vc .* exp.(-(CL / Vc) .* z_time[i])
+            z_out[i] = z_loc
+            z[i] ~ normal(z_loc, z_scale)
+            pred[i] = dose[i] / Vc .* exp.(-(CL / Vc) .* t[i])
+            dv[i] ~ normal(pred[i], sigma)
+        end
+    end
+end
+
+@stestset "a withheld response's margins of a shared block leave both backends" begin
+    brmi = start_endpoints(START_FIRST_ENDPOINT)
+    backend = RKBRMI(brmi)
+    m = brm_nlme_model(backend; ad_backend=NLME_AD)
+    view = m.view
+    @test count(==(:subject_effect), view.role) == 2 * length(view.levels)
+    @test !any(n -> occursin("z_base", string(n)) || occursin("z_scale", string(n)),
+        view.coordinates)
+    sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+    map = brm_nlme_joint_map(backend, sb;
+        path=joinpath(mktempdir(), "nlme_start_endpoints.stan"))
+    @test length(map.transport) == length(view.coordinates)
+    u = spread_point(length(view.coordinates))
+    start = brm_nlme_start(m, u)
+    @test start.max_error <= 1e-10
+    @test sum(start.loglikelihoods) ≈
+        Base.invokelatest(likelihood_query(backend), u) rtol=1e-10
+    @test check_protocol(m, start.theta, start.sigma, start.omega; η=start.eta)
+    stan_u = brm_rk_point_to_stan(map.transport, u)
+    forward = brm_nlme_joint_start(map; theta=start.theta, sigma=start.sigma,
+        omega=start.omega_matrix, eta=start.eta, subjects=start.subjects)
+    @test forward.stan ≈ stan_u rtol=1e-9 atol=1e-10
+    from_stan = brm_nlme_start(m, map, stan_u)
+    @test from_stan.omega ≈ start.omega rtol=1e-10
+    @test from_stan.eta ≈ start.eta rtol=1e-10
+end
+
 @stestset "a nested model with a shared HSGP starts in both shared modes" begin
     brmi = start_model(START_DATA)
     backend = RKBRMI(brmi)

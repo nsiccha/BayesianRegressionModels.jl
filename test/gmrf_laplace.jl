@@ -154,6 +154,15 @@ using Random
     value, gradient = LDP.logdensity_and_gradient(mf, φ)
     diagnostics = mf.algebra.diagnostics[:component_1]
     @test abs(value - reference[1]) <= 4diagnostics.probe_mcse + 1e-8
+    # The field's own component takes its time-block reference, at the prior medians.
+    prepared = only(mf.algebra.references)
+    @test prepared isa BRM._BRMGMRFTimeReference
+    field_times = BRM.brm_gmrf_support(data.xy, data.triangles, data.time, data.channel).layout.times
+    median_length = exp(0.7)
+    if length(field_times) > 1
+        gap = (field_times[2] - field_times[1]) / median_length
+        @test prepared.decay[2] ≈ exp(-gap) / -expm1(-2gap)
+    end
     for j in eachindex(φ)
         e = zeros(length(φ)); e[j] = 1e-5
         @test gradient[j] ≈ (LDP.logdensity(mf, φ .+ e) - LDP.logdensity(mf, φ .- e)) / 2e-5 atol=2e-5 rtol=2e-5
@@ -218,4 +227,89 @@ end
     u0 = zeros(rk.model.layout.total)
     @test prepare_cell_query(rk.model, rk_bound_plan(rk), :y;
         partitioned=layout.partitioned, u0, locality=:error) isa CellQuery
+end
+
+# Beyond the dense oracle's reach for a whole target: a moderate field against
+# the exact algebra, its data on a grid mesh at random positions. The returned
+# value must estimate exact within its own probe error, the gradient must
+# differentiate the returned value, and it must also estimate exact's gradient.
+@testset "A moderate gmrf field under matrix-free algebra agrees with exact algebra" begin
+    rng = Xoshiro(20261104)
+    k, T, nobs = 8, 10, 160
+    xy = permutedims(reduce(hcat, [[(i - 1) / (k - 1), (j - 1) / (k - 1)] for j in 1:k for i in 1:k]))
+    id(i, j) = i + (j - 1) * k
+    triangles = permutedims(reduce(hcat, vcat([[[id(i, j), id(i + 1, j), id(i + 1, j + 1)],
+        [id(i, j), id(i + 1, j + 1), id(i, j + 1)]] for j in 1:(k - 1) for i in 1:(k - 1)]...)))
+    time = Float64.(rand(rng, 0:(T - 1), nobs)); time[1:T] .= 0:(T - 1)
+    input = (; east=0.02 .+ 0.96 .* rand(rng, nobs), north=0.02 .+ 0.96 .* rand(rng, nobs),
+        time, y=randn(rng, nobs), xy, triangles)
+    model = @brm input begin
+        field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+        sd(field, gmrf((east, north), time)) ~ Exponential(1.0)
+        length_scale(field, gmrf((east, north), time), space) ~ LogNormal(log(0.2), 0.5)
+        length_scale(field, gmrf((east, north), time), time) ~ LogNormal(log(5.0), 0.5)
+        y ~ Normal(field, 0.5)
+    end
+    rk, _, _ = gmrf_rk_build(model)
+    declaration = :gmrf_field_east_north_time
+    ad_backend = DI.AutoEnzyme(; mode=Enzyme.Reverse)
+    exact = brm_laplace_problem(rk; ad_backend, integrate=(declaration,), solver=:exact)
+    mf = brm_laplace_problem(rk; ad_backend, integrate=(declaration,), solver=:matrixfree,
+        matrixfree=MatrixFreeLaplace(; probes=32))
+    @test only(mf.algebra.references) isa BRM._BRMGMRFTimeReference
+    names = mf.names
+    φ = [endswith(string(n), "sigma") ? log(0.7) : endswith(string(n), "spatial_length") ? log(0.25) :
+        log(4.0) for n in names]
+    value, gradient = LDP.logdensity_and_gradient(mf, φ)
+    reference, reference_gradient = LDP.logdensity_and_gradient(exact, φ)
+    d = mf.algebra.diagnostics[:component_1]
+    @test abs(value - reference) <= 4d.probe_mcse + 1e-8
+    @test d.max_solve_iterations < 80
+    @test d.ritz[1] > 0
+    for j in eachindex(φ)
+        e = zeros(length(φ)); e[j] = 1e-5
+        @test gradient[j] ≈ (LDP.logdensity(mf, φ .+ e) - LDP.logdensity(mf, φ .- e)) / 2e-5 atol=2e-5 rtol=2e-5
+    end
+    @test norm(gradient - reference_gradient) <= 0.1 * norm(reference_gradient) + 2.0
+end
+
+@testset "Two gmrf fields read by the same rows integrate through a star" begin
+    rng = Xoshiro(20261105)
+    k, T, nobs = 6, 6, 80
+    xy = permutedims(reduce(hcat, [[(i - 1) / (k - 1), (j - 1) / (k - 1)] for j in 1:k for i in 1:k]))
+    id(i, j) = i + (j - 1) * k
+    triangles = permutedims(reduce(hcat, vcat([[[id(i, j), id(i + 1, j), id(i + 1, j + 1)],
+        [id(i, j), id(i + 1, j + 1), id(i, j + 1)]] for j in 1:(k - 1) for i in 1:(k - 1)]...)))
+    time = Float64.(rand(rng, 0:(T - 1), nobs)); time[1:T] .= 0:(T - 1)
+    input = (; east=0.02 .+ 0.96 .* rand(rng, nobs), north=0.02 .+ 0.96 .* rand(rng, nobs),
+        time, y=randn(rng, nobs), xy, triangles)
+    model = @brm input begin
+        slow ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+        sd(slow, gmrf((east, north), time)) ~ Exponential(1.0)
+        length_scale(slow, gmrf((east, north), time), space) ~ LogNormal(log(0.5), 0.3)
+        length_scale(slow, gmrf((east, north), time), time) ~ LogNormal(log(5.0), 0.3)
+        fast ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+        sd(fast, gmrf((east, north), time)) ~ Exponential(1.0)
+        length_scale(fast, gmrf((east, north), time), space) ~ LogNormal(log(0.2), 0.3)
+        length_scale(fast, gmrf((east, north), time), time) ~ LogNormal(log(1.5), 0.3)
+        y ~ Normal(slow + fast, 0.5)
+    end
+    rk, _, _ = gmrf_rk_build(model)
+    declarations = (:gmrf_slow_east_north_time, :gmrf_fast_east_north_time)
+    ad_backend = DI.AutoEnzyme(; mode=Enzyme.Reverse)
+    exact = brm_laplace_problem(rk; ad_backend, integrate=declarations, solver=:exact)
+    mf = brm_laplace_problem(rk; ad_backend, integrate=declarations, solver=:matrixfree,
+        matrixfree=MatrixFreeLaplace(; probes=32))
+    @test only(mf.algebra.references) isa BRM._BRMGMRFStarReference
+    φ = 0.2 .* cos.(1:length(mf.names))
+    value, gradient = LDP.logdensity_and_gradient(mf, φ)
+    reference, reference_gradient = LDP.logdensity_and_gradient(exact, φ)
+    d = mf.algebra.diagnostics[:component_1]
+    @test abs(value - reference) <= 4d.probe_mcse + 1e-8
+    @test d.max_solve_iterations < 200
+    for j in eachindex(φ)
+        e = zeros(length(φ)); e[j] = 1e-5
+        @test gradient[j] ≈ (LDP.logdensity(mf, φ .+ e) - LDP.logdensity(mf, φ .- e)) / 2e-5 atol=2e-5 rtol=2e-5
+    end
+    @test norm(gradient - reference_gradient) <= 0.5 * norm(reference_gradient) + 5.0
 end

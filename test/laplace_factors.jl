@@ -5,6 +5,22 @@ using LinearAlgebra, Random
 using SparseArrays
 using DifferentiationInterface: SecondOrder
 
+@stestset "sparse restrictions retain values and selection-sized workspace" begin
+    allocations = Int[]
+    for n in (100, 100_000)
+        A = sparse([1, 3, n], [1, 2, 3], [0.0, 2.0, -1.0], n, 3)
+        for rows in ([1, 3, n], [n, 1, 3], Int[]), cols in ([1, 2, 3], [3, 1], Int[])
+            selected = BRM._brm_spl_submatrix(A, rows, cols)
+            @test selected == A[rows, cols]
+            @test nnz(selected) == nnz(A[rows, cols])
+        end
+        rows, cols = [1, 3], [1, 2]
+        BRM._brm_spl_submatrix(A, rows, cols)
+        push!(allocations, minimum(@allocated(BRM._brm_spl_submatrix(A, rows, cols)) for _ in 1:3))
+    end
+    @test allocations[2] <= allocations[1] + 10_000
+end
+
 function spl_sum_fixture(n; rows=[collect(1:n)])
     data = (; unit=["u$i" for i in 1:n], rows,
         y=[1.2length(r) + 0.1 for r in rows])

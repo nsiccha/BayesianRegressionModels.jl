@@ -131,7 +131,7 @@ large-component gradient differentiates the reported finite determinant
 approximation, including its dependence on the conditional mode. Probes and
 policy stay fixed throughout a prepared target's use and copies.
 `problem.algebra.diagnostics` reports per-component determinant probe MCSE;
-this is not a bound on quadrature error or on the error of Laplace integration.
+this is not a bound on the error of Laplace integration.
 Operator curvature checks cover Krylov search directions; they do not certify
 global positive definiteness. Failed capped linear solves raise an error.
 
@@ -280,6 +280,40 @@ function _brm_laplace_step_exact(block, g)
     _brm_laplace_step(block, g), false
 end
 
+# A plain Newton step's decrement below 1e-8 that has stopped shrinking fourfold
+# is either at the rounding floor the density's scale sets, or in a stretch where
+# Newton converges only linearly: on an exponential's slope it falls by a factor
+# e per step, along a stiff curved valley more slowly, and the gradient is far
+# from zero there. The gradient tells them apart. Moved a small fraction ξ along
+# the Newton direction, a gradient that curvature sets scales by 1 − ξ, up to
+# order ξ²; one that rounding sets stays put or jumps. So a candidate is at its
+# floor when r = g(z + ξδ) − (1 − ξ) g(z), in the decrement's norm, is at least
+# half the expected response ξ√λ.
+const _BRM_LAP_FLOOR_PROBE = 1 / 64
+_brm_lap_floor_candidate(λ, previous, tol) = tol < λ <= 1e-8 && λ >= previous / 4
+_brm_lap_at_floor(ρ, λ) = ρ >= (_BRM_LAP_FLOOR_PROBE / 2)^2 * λ
+
+# Which of the candidate units are at their rounding floor (above), by one
+# evaluation at every unit's probe point.
+function _brm_laplace_at_floor(m, s, u, current, hessians, steps, decrements, candidate)
+    blocks = m.view.subject_coordinates
+    ξ = _BRM_LAP_FLOOR_PROBE
+    probe_u = copy(u)
+    for (i, block) in enumerate(blocks)
+        probe_u[block] .+= ξ .* steps[i]
+    end
+    probe = _brm_laplace_evaluate(m, probe_u)
+    map(eachindex(blocks)) do i
+        candidate[i] || return false
+        block = blocks[i]
+        r = _brm_laplace_blend(s, view(probe.gradient, block), view(probe_u, block)) .-
+            (1 - ξ) .* _brm_laplace_blend(s, view(current.gradient, block), view(u, block))
+        all(isfinite, r) || return false
+        direction, _ = _brm_laplace_step_exact(s * hessians[i] - (1 - s) * I, r)
+        _brm_lap_at_floor(dot(r, direction), decrements[i])
+    end
+end
+
 """
     _brm_laplace_mode!(p::BRMLaplaceProblem, φ) -> state
 
@@ -332,14 +366,18 @@ function _brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector)
                 decrements[i] = dot(g, steps[i])
             end
             # A unit is at its mode once its Newton decrement is below `tol`, or
-            # once a plain Newton step no longer shrinks its decrement: in
-            # Newton's quadratic region that is the decrement's rounding floor,
-            # which the scale of the unit's density sets. A modified step's
-            # decrement can shrink slowly away from the mode.
-            converged = all(eachindex(blocks)) do i
-                decrements[i] <= tol ||
-                    (exact[i] && decrements[i] <= 1e-8 && decrements[i] >= previous[i] / 4)
+            # at its rounding floor on a plain Newton step
+            # (`_brm_lap_floor_candidate`, `_brm_laplace_at_floor`). A modified
+            # step's decrement can shrink slowly away from the mode. The search
+            # stops only when every unit does, so only then is the floor measured.
+            stopped = [decrements[i] <= tol for i in eachindex(blocks)]
+            candidate = [exact[i] && _brm_lap_floor_candidate(decrements[i], previous[i], tol)
+                for i in eachindex(blocks)]
+            if any(candidate) && all(stopped .| candidate)
+                stopped .|= _brm_laplace_at_floor(m, s, u, current, hessians, steps,
+                    decrements, candidate)
             end
+            converged = all(stopped)
             previous = [exact[i] ? decrements[i] : Inf for i in eachindex(blocks)]
             push!(history, decrements)
             converged && break
