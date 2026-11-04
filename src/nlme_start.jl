@@ -151,6 +151,13 @@ _brm_nlme_scalar_data(plan::_RKHeldOutPlan, name) = _brm_nlme_scalar_data(plan.p
 _brm_nlme_scalar_data(plan, name) = let x = get(plan.columns, name, nothing)
     x isa Real ? Float64(x) : nothing
 end
+# The regression plan defines a scalar it read by name (`_rk_define_read_scalars!`).
+function _brm_nlme_scalar_data(plan::_RKStructuralPlan, name)
+    index = findfirst(a -> a.name === name, plan.assignments)
+    index === nothing && return nothing
+    x = plan.assignments[index].expression
+    x isa Real ? Float64(x) : nothing
+end
 
 # The packed names a write addresses: `<declaration>.<index>`, or every
 # coordinate of the declaration.

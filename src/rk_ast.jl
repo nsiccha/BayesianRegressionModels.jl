@@ -156,6 +156,7 @@ _rk_ast_level_values(values) = Expr(:vect, (_rk_ast_level_value(value) for value
 
 function _rk_lower_assignment_expr(node, name::Symbol)
     node isa Number && return node
+    node isa AbstractVector{<:Real} && return Expr(:vect, node...)
     node isa _BRMPreparedRef && return node.name
     node isa _BRMPreparedExpr || error(
         "RK backend: internal: assignment `$name` holds an unlowerable node")

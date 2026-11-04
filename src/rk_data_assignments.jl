@@ -102,6 +102,61 @@ function _rk_attach_data_assignments!(derived::Vector{_RKDerivedSpec}, columns,
     nothing
 end
 
+# The regression plan folds every value a prior reads into a literal
+# (`sigma ~ Exponential(1.7)`, `_rk_scalar_data`), but a component's prior reads
+# its inputs by name (`b ~ brm_group_effects(g, scale)`), and folding removed
+# the assignment that would define `scale`. Define each name the program reads
+# in its main block. The value stays in the fitted program, as a folded prior's
+# does: no design binds it, and a replay that changes it fails the program
+# identity check. The value plan instead binds these (`_brm_rk_value_plan`).
+_rk_define_read_scalars!(plan, _known) = plan
+function _rk_define_read_scalars!(plan::_RKStructuralPlan, known)
+    (; consts, aliases, parameters, assignments, data) = known
+    # Whether a statement reads one by name takes an emission to tell. A model
+    # all of whose data are columns, with no folded assignment, has none. Prior
+    # dependencies cannot decide it: they omit an R2D2 `reference_scale`.
+    candidate(name) = !haskey(plan.columns, name) &&
+        (haskey(consts, name) || haskey(aliases, name) || haskey(data, name))
+    any(candidate, Iterators.flatten((keys(consts), keys(aliases), keys(data)))) ||
+        return plan
+    main = _rk_emit_ast(plan).main
+    defined = Set{Symbol}(keys(plan.columns))
+    union!(defined, (first(binding) for binding in _rk_extent_bindings(plan)))
+    for statement in main.args
+        _rk_source_assignments!(defined, statement)
+        _rk_source_outputs!(defined, statement)
+    end
+    for name in sort!(collect(setdiff(_rk_value_reads!(Set{Symbol}(), main), defined));
+            by=string)
+        candidate(name) || continue
+        expression = if haskey(consts, name) || haskey(aliases, name)
+            _, value = _rk_resolve_use_ref(name, consts, aliases, parameters,
+                assignments, "assignment `$name`")
+            value isa Symbol ? _BRMPreparedRef(value, :scalar) : value
+        else
+            value = data[name]
+            value isa AbstractVector{<:Real} || error(
+                "RK backend: a random-effect or term prior reads data field " *
+                "`$name`, a $(typeof(value)); its inputs must be numeric scalars " *
+                "or numeric vectors")
+            collect(value)
+        end
+        push!(plan.assignments, _RKAssignmentSpec(name, expression, name))
+    end
+    plan
+end
+
+# The names a statement reads as values: not call heads, keyword names or the
+# targets of `=` and `~`. A data scalar may share its name with a callee.
+_rk_value_reads!(names, _value) = names
+_rk_value_reads!(names, value::Symbol) = push!(names, value)
+function _rk_value_reads!(names, value::Expr)
+    skip = value.head === :call && first(value.args) in (:~, :.~) ? 2 :
+        value.head in (:call, :(=), :kw, :., :macrocall) ? 1 : 0
+    foreach(arg -> _rk_value_reads!(names, arg), value.args[skip+1:end])
+    names
+end
+
 # A right-hand side with the model-scope semantics of `_rk_value_expr!`:
 # arithmetic, comparisons and built-in math per element, indexing and vector
 # literals as written, any other call on whole arrays. A data column or another

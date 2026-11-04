@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.155
+## 0.2.157
 
 - **NLME view of a single-level categorical:** `brm_nlme_view`, and with it
   `brm_nlme_model` and `brm_nlme_fit`, no longer raise ``internal: declaration
@@ -22,6 +22,40 @@ instead of failing at run time.
   coordinate, so the model has the partition, likelihoods and gradients of the
   same model without the term. The named estimates list the term with no levels
   (`g = []`), and that value starts the model again through `inits`.
+
+## 0.2.156
+
+- **`RKBRMI` random-effect and term priors can read data.** A formula-route
+  prior such as `sd(:, p) ~ Exponential(prior_sd_scale)` failed at construction
+  with `references unknown name prior_sd_scale`, naming an internal array, while
+  `sigma ~ Exponential(prior_sd_scale)` and `SBBRMI` accepted it. Random-effect
+  scale priors (including per-margin, truncated and stratified blocks), Student-t
+  `ranef(:, id) ~ TDist(nu)` degrees of freedom, `hsgp` priors and an `r2d2`
+  `reference_scale` now take a numeric data scalar, an expression or element over
+  numeric data fields, a literal assignment (`rate = 1.7`) or a
+  `name = constant(expr)`. `SBBRMI` still refuses a data `reference_scale`. Data
+  of another type, such as a vector of labels, is refused naming the field.
+- `gp`, `car`, `cdar` and `dar` priors, which otherwise take literals only, now
+  take a numeric data scalar, an element of a data vector or a
+  `name = constant(expr)` as its number. `dar`'s scale prior stays `Normal`.
+- These values stay in the fitted program, as a scalar parameter's prior does. A
+  design may omit the field or repeat its value; one that changes it fails
+  `reprocess`'s program check unless `freeze_constants=false`, and no design binds
+  it. Value-route models (`@plate` cells and assignments reading predictors) still
+  bind these scalars as before.
+
+## 0.2.155
+
+- **In-cell `MvNormal` on `SBBRMI`:** a `@plate` cell may observe its slice
+  jointly, `y[rows[i]] ~ MvNormal(location, covariance)`, with the covariance
+  computed in the cell, inline or bound to a local. It lowers to the BRM-owned
+  family `brm_mvnormal`, which is Stan's `multi_normal` with log density 0 for
+  an empty slice, as in Julia. The pointwise log likelihood is one value per
+  cell and the predictive draw is the slice. Only the two-argument constructor
+  is accepted in a cell. `RKBRMI` already had this since 0.2.86, and both
+  backends now give the same density and gradient.
+- **`Diagonal(v)` and `diagm(v)` on `SBBRMI`:** both lower to `diag_matrix(v)`,
+  in a cell and in a model-scope expression.
 
 ## 0.2.154
 
