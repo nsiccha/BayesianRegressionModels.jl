@@ -389,3 +389,24 @@ end
         check_rk_parity(c, r, c.position, x)
     end
 end
+
+@stestset "a single-level categorical conditions both backends alike" begin
+    for (name, (with, _, data, _)) in zip(("flat", "plate"), NLME_LEVEL_MODELS)
+        brmi = with(data)
+        rk = RKBRMI(brmi)
+        sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+        map = brm_nlme_joint_map(rk, sb; path=joinpath(CONDITIONAL_DIR, "level-$name.stan"))
+        view = map.view
+        K, n = length(view.block_margins), length(view.levels)
+        start = brm_nlme_joint_start(map;
+            theta=fill(0.2, count(==(:population), view.role)),
+            sigma=fill(-0.3, count(==(:scalar), view.role)),
+            omega=Matrix(0.5I, K, K),
+            eta=[0.1 * sin(i + j) for i in 1:K, j in 1:n], subjects=view.levels)
+        # The empty block has no Stan coordinate either.
+        @test length(start.stan) == length(view.coordinates)
+        c = brm_nlme_conditional_problem(map, start)
+        r = brm_nlme_conditional_problem(map, start; backend=map.rk, ad_backend=NLME_AD)
+        check_rk_parity(c, r, c.position, c.position .+ 0.1)
+    end
+end

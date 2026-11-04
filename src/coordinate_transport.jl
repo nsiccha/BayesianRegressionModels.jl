@@ -92,10 +92,11 @@ _rk_ranef_record_levels(rk, record) = _rk_grouping_levels(
         rk.plan.columns[record.group])
 
 # Implemented by `BayesianRegressionModelsReactiveKernelsExt`: the built
-# layout's coordinate names, each coordinate's layout transform and the
-# constrained lower bound of a `:floored` one, and the named constrained values
-# at a point.
+# layout's coordinate names, the declarations it holds at zero length, each
+# coordinate's layout transform and the constrained lower bound of a `:floored`
+# one, and the named constrained values at a point.
 function _rk_layout_coordinate_names end
+function _rk_layout_empty_declarations end
 function _rk_layout_coordinate_transforms end
 function _rk_layout_coordinate_floors end
 function _rk_constrained_values end

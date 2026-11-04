@@ -926,6 +926,14 @@ covariate's observed entries join their subject's cell.
 Flat-row grouped models retain lockstep evaluation and refuse
 the single-subject method by name. It runs in the test environment above.
 
+A single-level treatment-coded factor owns no packed coordinate: `nlme_view.jl`
+checks that such a model has the partition, likelihoods and η gradients of the
+same model without the factor, on flat rows and in a `@plate for` cell, and that
+a declaration the layout does not hold at zero length stays an internal error.
+`nlme_fit.jl` checks `check_protocol`, SAEM and the named estimates on those
+models, and `nlme_conditional.jl` checks RK and Stan parity of their conditional
+targets.
+
 `nlme_monotonic_cell.jl` reads a `mo()` or `mo1()` term in a subject's `@plate`
 cell through `groups`, as a bare term, beside a population block and as a joint
 block over two predictors. RK prepares each strictly with the subjects' effects
