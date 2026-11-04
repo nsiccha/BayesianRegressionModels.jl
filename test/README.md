@@ -1,5 +1,13 @@
 # Running the tests
 
+`authored_documentation.jl`, `authored_documentation_binding.jl`,
+`authored_documentation_printing.jl`, `authored_documentation_rk_source.jl`
+and `authored_documentation_rkppl.jl` check ordinary Julia documentation through
+binding, composition, readable source replay, scientific descriptions, artifact
+metadata and native RKPPL lowering. They verify exact declaration scopes and
+unchanged numerical results. Run each as a standalone script in the test
+environment after `test/setup_env.jl`; native metadata requires RKPPL 0.1.93.
+
 `adaptive_centering_bounds.jl` checks bounded random-effect scales against
 BridgeStan's constrained values, correlated centered and noncentered maps,
 their Jacobians, Enzyme gradients, centered replay, and stable log-scale tails.
