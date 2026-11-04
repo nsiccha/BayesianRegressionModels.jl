@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.155
+
+- **In-cell `MvNormal` on `SBBRMI`:** a `@plate` cell may observe its slice
+  jointly, `y[rows[i]] ~ MvNormal(location, covariance)`, with the covariance
+  computed in the cell, inline or bound to a local. It lowers to the BRM-owned
+  family `brm_mvnormal`, which is Stan's `multi_normal` with log density 0 for
+  an empty slice, as in Julia. The pointwise log likelihood is one value per
+  cell and the predictive draw is the slice. Only the two-argument constructor
+  is accepted in a cell. `RKBRMI` already had this since 0.2.86, and both
+  backends now give the same density and gradient.
+- **`Diagonal(v)` and `diagm(v)` on `SBBRMI`:** both lower to `diag_matrix(v)`,
+  in a cell and in a model-scope expression.
+
 ## 0.2.154
 
 - **A replay refuses a changed scalar a prior reads by name:** `reprocess`,
