@@ -1690,6 +1690,16 @@ gap. `rk_modeled_random_slopes.jl` additionally compares the generated map with
 its independent hand-written mapping. Run either file through the test project;
 trailing filters select individual blocks.
 
+`generated_prior_transport.jl` composes the existing public APIs to reuse a
+single response-omitted Stan prior draw in an observed Stan/RK target. Runtime
+constrained names select the target parameters, BridgeStan applies the target's
+inverse transforms, and BRM maps the resulting point into RK coordinates.
+The fixture checks four joint draws containing a GMRF with learned space/time
+scales and channel correlation, correlated ordinary effects, positive/bounded
+scalars, a simplex and a declared coefficient vector. Complete parameter
+round trips and graph values must agree with the saved generated draw. Run
+`julia --startup-file=no --project=test test/generated_prior_transport.jl`.
+
 `spline_basis_signs.jl` checks canonical TPS/t2 projection signs, input
 ownership, and frozen projections directly. The spline blocks in
 `rk_parity.jl` compare RK densities and Enzyme gradients with independent
