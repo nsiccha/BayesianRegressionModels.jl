@@ -316,4 +316,5 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # fbf65b46 (RK 0.1.65 / PPL 0.1.74): prepared queries holding modules deep-copy.
 # RK 0.1.66 / PPL 0.1.75: per-position helpers run at a strict cell's rows.
 # RK 0.1.67 / PPL 0.1.76: joint cell latents and storage fields read at rows.
-rev = "f17b6a243f19446895856b2d90dbded6c4f0315c"
+# RK 0.1.70 / PPL 0.1.80: matrix-row helpers, vec of a row value, whole arrays read by index.
+rev = "fe40fa6d814415e7786422d5f545d11f5e96d3c9"

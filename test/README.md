@@ -346,8 +346,10 @@ density and finite-difference gradient oracles cover positional and keyword
 arguments, likelihood arguments, non-last outputs, reader-first order,
 data-only cells, replay with empty cells and changed row counts, and ordinary
 Reverse AD. Complete printed-source replay and flattened rowwise observation
-controls guard the surrounding contracts. Run with `julia --project=test
-test/plate_output_helpers.jl`; testset substring filters are supported.
+controls guard the surrounding contracts, including `addprop` over a plate
+output, assigned or in the law, with a shared or per-row additive scale. Run with
+`julia --project=test test/plate_output_helpers.jl`; testset substring filters
+are supported.
 
 `plate_grouped_outputs.jl` checks grouped reads of both outputs from another
 plate through `rows = groups(group => labels)` and `value[rows[k]]`.
@@ -916,6 +918,15 @@ covariate's observed entries join their subject's cell.
 Flat-row grouped models retain lockstep evaluation and refuse
 the single-subject method by name. It runs in the test environment above.
 
+`nlme_monotonic_cell.jl` reads a `mo()` or `mo1()` term in a subject's `@plate`
+cell through `groups`, as a bare term, beside a population block and as a joint
+block over two predictors. RK prepares each strictly with the subjects' effects
+declared partitioned, and the level table, which has no row form, is computed
+once per population point. Cell values and full partition gradients match the
+whole model's pointwise densities and central differences, and no subject reads
+another subject's effect. `brm_nlme_model` matches the same reference. It runs
+in the test environment above.
+
 `nlme_nested.jl` uses a public synthetic model with interleaved observations
 and 1, 2, and 3 nested units per subject. It checks explicit ownership,
 compact η likelihoods and gradients against an independent Normal oracle,
@@ -1062,6 +1073,17 @@ fit is compared with NUTS too. Starts (prior medians, a packed point,
 `inits`) and their refusals are covered as well. It runs in the test
 environment above.
 
+`nlme_svi_threads.jl` checks `brm_svi_fit(...; threads)` with real threads (run
+it with `--threads=4`; it refuses to run without them). The state after every
+iteration, whose Adam moments are the gradient trajectory, and the draws must equal
+the one-task run to the last bit: through exploration and polishing, beside a thread
+that allocates and collects, on nested blocks of different lengths, flat rows, a
+low-rank global factor, the default random stream, a resume at another count and a
+window fit. It also covers each worker's own samplers over shared read-only tables,
+how a failing unit stops the tasks, the BLAS pin and the refusals.
+`research/svi_threads/benchmark.jl` measures per-iteration time, GC share and retained
+worker memory against `threads`.
+
 `nlme_svi_laplace_plan.jl` checks structural eligibility for
 `GaussianBlockLaplace`, including fixed HSGP fitting inputs, nonstandard
 Gaussian coefficient priors, and named refusals for nonlinear expressions.
@@ -1115,10 +1137,33 @@ mode oracle checks the value, and finite differences check both population
 derivatives. This checks independence from previous evaluations; the
 approximation still uses one mode.
 
+`laplace_continuation.jl` checks which conditional mode the marginal uses:
+the one continuation from the prior reaches (BRM 0.2.147). One unit with a
+squared-mean and a linear Normal observation has two conditional modes on part
+of the population line. On both the whole-model and the sparse target:
+- the value and the selected mode match a scalar oracle of the followed mode
+  on both sides of the point where that mode ceases to exist, where the
+  selection switches branch;
+- an evaluation whose followed mode ceases to exist mid-way is counted in
+  `folds`;
+- finite differences match the gradient on each smooth piece;
+- the two targets agree;
+- the sparse target's `search` record names each component's stop and counts
+  its refused full steps.
+
+A log-concave Poisson model takes one stage. Run it in the test environment
+with `julia --project=test test/laplace_continuation.jl`.
+
 `start_terms.jl` checks authored term initializers and deterministic prior bases
 on StanBlocks and ReactiveKernels, with constrained read-back and coordinate
 transport, effective bounds, known values, invalid addresses and overrides.
 Run it directly in the test environment.
+
+`gmrf_laplace_start.jl` checks that the Laplace default start of a model-scope
+`gmrf` field equals its `brm_start(rk, (;); base=:prior_median)` medians, for
+declared laws, a known hyperparameter and a law reading a model-scope parameter.
+It also checks that `brm_laplace_mode` and the `brm_laplace_plan` diagnostic use
+that point, with the diagnostic at the unit point as a positive control.
 
 `start_values.jl` checks `brm_start`, initial values keyed by prior address,
 on both backends. For a correlated population-PK model, a linked predictor,
@@ -1147,7 +1192,10 @@ rows), subject-cell population gradients,
 analytic η Hessian blocks, Gaussian observation moments
 and colored η Jacobians, `check_protocol`, and Newton posthoc against
 independent oracles. Its Gaussian checks include arrays observed within plate
-cells and a modeled scale shared by the observations in each cell.
+cells and a modeled scale shared by the observations in each cell. A periodic
+`hsgp` read in a subject cell passes `check_protocol` with every preparation
+checked at `type_stability = :error`, the sparse Laplace probe's data prefix
+included.
 NLMEEstimation.jl is not part of `test/Project.toml`. Run the file from a
 copy of this environment that develops a local NLMEEstimation checkout:
 
@@ -2253,6 +2301,11 @@ toolchain, so a GitHub Actions job would be red by construction.
 
 ## Bounded sparse Laplace acceptance
 
+`laplace_cell_hvp_width.jl` checks that a cell's Hessian block compiles at a
+bounded Enzyme batch width: batched blocks and the whole target's value and
+gradient against one batch over every direction, finite differences of the cell
+gradient, a 129-direction cell at the same width, and the plan's and problem's
+Treebars reports. It needs Treebars and the Enzyme dogfood line.
 `laplace_width.jl` checks structural screening before derivative preparation,
 deterministic whole-term selection, forced conflicts, correlated margins,
 exact Gaussian retained-set values and native Enzyme gradients, local sum

@@ -210,6 +210,17 @@ function _brm_nlme_prior_writes!(writes, ::Val{:stratified_ranef}, record, value
     writes
 end
 
+# A native field's sampled hyperparameters take the laws its block declares; a
+# known hyperparameter's literal has no median and no coordinate.
+function _brm_nlme_prior_writes!(writes, ::Val{:gmrf}, record, values, value)
+    for (slot, law) in pairs(record.locals.priors)
+        x = _brm_prior_median(_brm_prior_law(law, value))
+        x === nothing || push!(writes,
+            (Symbol(record.declaration, ".", record.locals[slot]), (), x))
+    end
+    writes
+end
+
 # `m`'s unit point with its prior-median coordinates set, and the positions of
 # those coordinates. Every other coordinate keeps the unit point's exact value,
 # the fixed values of a fixed-shared model included.

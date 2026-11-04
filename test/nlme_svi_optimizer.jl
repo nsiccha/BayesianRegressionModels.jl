@@ -19,13 +19,6 @@ import Treebars
 const SVI_OPT = (; batch_size=4, window=20, min_windows=6, patience=3,
     polish_windows=4, max_iterations=3000)
 
-svi_same_adam(a, b) = all(n -> isequal(getfield(a, n), getfield(b, n)),
-    fieldnames(typeof(a)))
-svi_same_run(a, b) = svi_same_adam(a.adam, b.adam) && a.rng == b.rng &&
-    all(n -> isequal(getfield(a, n), getfield(b, n)),
-        (:q, :iteration, :trace, :windows, :polish_start, :average, :converged))
-svi_same_state(a, b) = svi_same_run(a.run, b.run) && isequal(a.identity, b.identity) &&
-    isequal(a.controls, b.controls)
 svi_bytes(x) = (io = IOBuffer(); serialize(io, x); position(io))
 
 # `svi_gauss_model` with another prior: another program on the same data.
@@ -44,13 +37,6 @@ function svi_reference(m; kwargs...)
     fit = brm_svi_fit(s -> push!(states, s), m; checkpoint_every=1, kwargs...)
     @test [s.run.iteration for s in states] == 1:fit.diagnostics.iterations
     fit, states
-end
-
-function svi_same_result(a, b)
-    da, db = a.diagnostics, b.diagnostics
-    a.draws == b.draws && isequal(da.q, db.q) && da.elbo == db.elbo &&
-        da.elbo_windows == db.elbo_windows && da.iterations == db.iterations &&
-        da.converged == db.converged && da.unit_gradient_calls == db.unit_gradient_calls
 end
 
 @stestset "an interrupted run continues exactly: exploration, window end, polishing" begin

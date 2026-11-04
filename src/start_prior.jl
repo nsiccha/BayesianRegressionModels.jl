@@ -136,6 +136,9 @@ function _brm_start_term_prior(prepared, slot)
     prior = get(priors, role, nothing)
     slot.component === nothing ? prior : prior[findfirst(==(slot.component), (:rr, :rn, :nr))]
 end
+# Both of a field's lengths share the length-scale class: its laws go by slot.
+_brm_start_term_prior(prepared::_BRMPreparedTerm{typeof(gmrf)}, slot) =
+    _brm_term_prior_expressions(prepared)[slot.name]
 
 # An authored HSGP hyper prior is the log-scale intercept's law. The
 # unconfigured intercept is standard normal, not the shared scale's lognormal.

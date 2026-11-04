@@ -299,19 +299,40 @@ function _rk_value_tree(values::AbstractVector, name)
     all(v -> v isa Number, values) && return TreeData(values, :draw => axes(values, 1))
     leaves = map(values) do value
         value isa AbstractVector{<:Number} || throw(ArgumentError(
-            "rk_draw_tree: cannot name the value axes of $name with type $(typeof(value))"))
+            "rk_draw_tree: cannot name the value axes of $name with type $(typeof(value)); " *
+            "rk_draw_tree(rk, U, names) labels the cells of a @plate output"))
         TreeData(value, :element => axes(value, 1))
     end
     TreeData(leaves, :draw => axes(values, 1))
 end
+
+# A plate output's draws, per cell: only the backend knows that a nested value
+# holds cells, so only the form that has it labels them.
+_rk_cell_tree(cell::AbstractVector{<:Number}, name) = TreeData(cell, :element => axes(cell, 1))
+_rk_cell_tree(cell::AbstractMatrix{<:Number}, name) =
+    TreeData(cell, :row => axes(cell, 1), :column => axes(cell, 2))
+_rk_cell_tree(cell, name) = throw(ArgumentError(
+    "rk_draw_tree: cannot name the value axes of a cell of $name with type $(typeof(cell))"))
+_rk_cells_tree(cells::AbstractVector{<:Number}, name) = TreeData(cells, :cell => axes(cells, 1))
+_rk_cells_tree(cells::AbstractVector, name) =
+    TreeData(map(cell -> _rk_cell_tree(cell, name), cells), :cell => axes(cells, 1))
+_rk_plate_output_tree(values, name) =
+    TreeData(map(cells -> _rk_cells_tree(cells, name), values), :draw => axes(values, 1))
 
 function BRM.rk_draw_tree(values::NamedTuple)
     fields = map(name -> _rk_value_tree(getproperty(values, name), name), keys(values))
     TreeData(:value => NamedTuple{keys(values)}(fields))
 end
 
-BRM.rk_draw_tree(rk::RKBRMI, U::AbstractMatrix, names) =
-    rk_draw_tree(rk_draw_values(rk, U, names))
+function BRM.rk_draw_tree(rk::RKBRMI, U::AbstractMatrix, names)
+    values = rk_draw_values(rk, U, names)
+    cells = BRM._rk_plate_output_cell_names(rk)
+    fields = map(keys(values)) do name
+        value = getproperty(values, name)
+        haskey(cells, name) ? _rk_plate_output_tree(value, name) : _rk_value_tree(value, name)
+    end
+    TreeData(:value => NamedTuple{keys(values)}(fields))
+end
 
 BRM.rk_draw_tree(rk::RKBRMI, chains::AbstractVector{<:AbstractMatrix}, names) =
     _chains(U -> rk_draw_tree(rk, U, names), chains)

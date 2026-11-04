@@ -285,8 +285,10 @@ const PINS = [
     # generated programs hold modules, as a Laplace plan over a gmrf does.
     # RK 0.1.66 / RKPPL 0.1.75 computes per-position helpers at a strict
     # cell's rows; f17b6a24 (RK 0.1.67 / RKPPL 0.1.76) also reads joint cell
-    # latents and storage fields there.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "f17b6a243f19446895856b2d90dbded6c4f0315c"),
+    # latents and storage fields there. RK 0.1.70 / RKPPL 0.1.80 gives strict
+    # cells row forms for matrix-row helpers, `vec` of a row value and whole
+    # arrays read by index; fe40fa6d is RK 0.1.72, on that line.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "fe40fa6d814415e7786422d5f545d11f5e96d3c9"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

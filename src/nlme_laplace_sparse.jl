@@ -80,8 +80,10 @@ one sparse Laplace; see
 [`brm_laplace_problem`](@ref)'s `integrate`. Same interface as
 [`BRMStructuredLaplaceProblem`](@ref): LogDensityProblems order 1 over `names`
 (packed positions `population`), [`brm_laplace_draws`](@ref), and the counters
-`nonfinite` and `unconverged`, plus `nonfinite_gradient` (gradients that are not
-finite although the log density is; a warning names the first nonfinite term).
+`nonfinite`, `unconverged` and `folds`, plus `nonfinite_gradient` (gradients that
+are not finite although the log density is; a warning names the first nonfinite
+term) and `search` (the last evaluation's Newton steps, shifted steps per stage,
+largest shift, refused full steps, final decrement and stop reason per component).
 `integrate` names the integrated groupings,
 `integrated` their draws' packed positions, `components` the groups of
 integrated draws that share likelihood terms.
@@ -176,6 +178,11 @@ mutable struct BRMSparseLaplaceProblem{K}
     # own, and how often a block Gauss–Seidel sweep followed
     blockwise::Int
     sweeps::Int
+    # evaluations in which a component's followed mode needed a shifted step
+    # after the continuation's first stage (`_brm_spl_mode!`), and the last
+    # evaluation's mode-search record
+    folds::Int
+    search::Any
     # the `BRMLaplacePlan` it was built from (src/nlme_laplace_plan.jl), or
     # `nothing` for groupings named directly
     plan::Any
@@ -361,7 +368,7 @@ end
 
 function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol,
         maxiter, declarations=nothing, max_cell_width=128, screened=false,
-        solver=:auto, matrixfree=MatrixFreeLaplace())
+        solver=:auto, matrixfree=MatrixFreeLaplace(), progress=nothing)
     max_cell_width = _brm_spl_width_limit(max_cell_width)
     integrate = Symbol[g for g in (integrate isa Symbol ? (integrate,) : integrate)]
     isempty(integrate) && throw(ArgumentError(
@@ -400,7 +407,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         Float64[], Int[], Vector{Int}[], Int[], Int[], Int[], Vector{Int}[], Any[], omega,
         false,
         u0[population], zeros(nψ), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
-        Float64(tol), Int(maxiter), 0, 0, 0, 0, 0, nothing, nothing)
+        Float64(tol), Int(maxiter), 0, 0, 0, 0, 0, 0, nothing, nothing, nothing)
     p.gaussian = _brm_spl_gaussian_prior(p, records, u0)
     _brm_spl_gaussian_parameters!(p, u0)
     p.gmrf = _brm_spl_gmrf_prior(p, records, u0)
@@ -410,7 +417,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     cells = Set(_brm_slap_other_observations(backend.plan))
     _brm_slap_verify!(p, u0, t.response, t.row; cells)
     _brm_spl_verify_prior(p, u0)
-    _brm_spl_cells!(p, u0, sort!(collect(cells)), ad_backend; partitioned)
+    _brm_spl_cells!(p, u0, sort!(collect(cells)), ad_backend; partitioned, progress)
     _brm_spl_pattern!(p)
     _brm_spl_step_blocks!(p)
     _brm_spl_algebra!(p, solver, matrixfree)
@@ -660,6 +667,11 @@ end
 # and additive derivative contractions inside a shared pass (`_rk_spl_cell_pass`,
 # `_rk_spl_cell_accumulate`). The correction accumulates third-order products,
 # then a gradient and one HVP along the solved implicit direction.
+# The widest Enzyme batch one cell's Hessian block compiles; wider cells take
+# several batches (`_rk_spl_cell_ad`). On a 168-coordinate nonlinear cell the
+# first compile took 92, 107, 174 and 377 s at widths 2, 4, 8 and 16, with a
+# warm cost per direction of about 0.13 ms from width 4 on.
+const _BRM_SPL_CELL_HVP_WIDTH = 4
 function _rk_spl_cell_ad end
 function _rk_spl_cell_newton end
 function _rk_spl_cell_block end
@@ -687,7 +699,8 @@ function _brm_spl_cell_directions!(dirs, lpos, v)
     dirs
 end
 
-function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend; partitioned)
+function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend; partitioned,
+        progress=nothing)
     isempty(names) && return p
     n = length(p.integrated)
     zof = zeros(Int, length(u0)); zof[p.integrated] .= 1:n
@@ -695,74 +708,100 @@ function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend; part
     pointwise = _rk_slap_pointwise(p.kernels, u0)
     term = length(p.family)
     for name in names
-        query = _rk_nlme_cell_query(p.backend, (name,); partitioned, u0)
         expected = pointwise[name]
         isempty(expected) && continue
-        factors = _rk_spl_factor_queries(p.backend, name; partitioned, u0)
-        prepared = _brm_spl_prepare_factors(p.backend, name, u0, length(expected),
-            p.integrated, p.population; query=factors)
-        if prepared !== nothing
-            prepared = _brm_spl_factor_operators(prepared, u0, ad_backend)
-            cells = _rk_spl_cell_batch(factors.factors, u0) do batch
-                map(prepared.cells) do c
-                    value = _brm_spl_factor_values(prepared, u0, c; context=batch).value
-                    isapprox(value, sum(expected[c.i]); rtol=1e-9, atol=1e-9) ||
-                        _brm_nlme_error("sum-factor density does not match cell $(c.i) of `$name`")
-                    term += 1
-                    merge(c, (; term))
-                end
-            end
-            prepared = merge(prepared, (; cells))
-            @debug "sparse Laplace sum-factor group" name cells=length(cells) maxrss_gib=Sys.maxrss() / 2^30
-            push!(p.cells, _BRMSumCellGroup(name, query, cells, prepared))
-            continue
+        term = _brm_with_progress(progress;
+                description="Observation `$name`, $(length(expected)) cells") do node
+            _brm_spl_observation_cells!(p, u0, name, expected, term, zof, pof, ad_backend, node;
+                partitioned)
         end
-        # An ordinary cell keeps its original graph: the factored outer can
-        # conservatively widen captured arrays even when it has no sums.
-        footprint = _rk_spl_cell_footprint(query; shared=false)
-        localdata = _rk_spl_cell_batch(query, u0) do batch
-            map(eachindex(expected)) do i
-                reads = _rk_spl_cell_reads(footprint, u0, i; context=batch)
-                value = _rk_nlme_cell_value(query, batch, i)
-                (; reads, value)
-            end
-        end
-        # (cells that read no coordinate still get a one-coordinate selection,
-        # so they are terms like the others; a pad is always partitioned, and
-        # their population derivatives come from the accumulated prefix pullback)
-        m = max(1, maximum(d -> length(d.reads), localdata; init=0))
-        cells = map(eachindex(expected)) do i
-            r = localdata[i].reads
-            value = localdata[i].value
-            isapprox(value, sum(expected[i]); rtol=1e-9, atol=1e-9) || _brm_nlme_error(
-                "brm_laplace_problem: internal: cell $i of `$name` has value $value, " *
-                "its pointwise density $(sum(expected[i]))")
-            pad = Int[]
-            for j in p.integrated
-                length(pad) == m - length(r) && break
-                insorted(j, r) || push!(pad, j)
-            end
-            sel = sort!(vcat(r, pad))
-            z = [(zof[x], k) for (k, x) in enumerate(sel) if zof[x] > 0 && insorted(x, r)]
-            sort!(z)
-            ps = [(pof[x], k) for (k, x) in enumerate(sel) if pof[x] > 0 && insorted(x, r)]
-            term += 1
-            (; i, sel, lz=first.(z), lpos=last.(z), pidx=first.(ps), ppos=last.(ps), term)
-        end
-        # each cell's HVP directions: the units at its integrated draws (K of
-        # them, zero past a cell's own), whose results are the Hessian's
-        # columns there. The group holds one zero buffer per direction and the
-        # evaluation sets a cell's units in place (`_brm_spl_cell_directions!`):
-        # a buffer per cell is `K × m` floats each, tens of gigabytes over a
-        # Gemeinde-level observation's cells.
-        K = max(1, maximum(c -> length(c.lz), cells))
-        dirs = ntuple(_ -> zeros(m), K)
-        ad = _rk_spl_cell_ad(p.backend, (name,), copy(u0), first(cells).sel, ad_backend, K;
-            partitioned)
-        @debug "sparse Laplace cell group" name cells=length(cells) m K maxrss_gib=Sys.maxrss() / 2^30
-        push!(p.cells, (; name, query, ad, m, dirs, cells))
     end
     p
+end
+
+# One observation's factors. Returns the last term number it took.
+function _brm_spl_observation_cells!(p, u0, name, expected, term, zof, pof, ad_backend, progress;
+        partitioned)
+    query = _rk_nlme_cell_query(p.backend, (name,); partitioned, u0)
+    factors = _rk_spl_factor_queries(p.backend, name; partitioned, u0)
+    prepared = _brm_spl_prepare_factors(p.backend, name, u0, length(expected),
+        p.integrated, p.population; query=factors)
+    if prepared !== nothing
+        prepared = _brm_spl_factor_operators(prepared, u0, ad_backend)
+        cells = _rk_spl_cell_batch(factors.factors, u0) do batch
+            map(prepared.cells) do c
+                value = _brm_spl_factor_values(prepared, u0, c; context=batch).value
+                isapprox(value, sum(expected[c.i]); rtol=1e-9, atol=1e-9) ||
+                    _brm_nlme_error("sum-factor density does not match cell $(c.i) of `$name`")
+                term += 1
+                merge(c, (; term))
+            end
+        end
+        prepared = merge(prepared, (; cells))
+        @debug "sparse Laplace sum-factor group" name cells=length(cells) maxrss_gib=Sys.maxrss() / 2^30
+        push!(p.cells, _BRMSumCellGroup(name, query, cells, prepared))
+        return term
+    end
+    # An ordinary cell keeps its original graph: the factored outer can
+    # conservatively widen captured arrays even when it has no sums.
+    footprint = _rk_spl_cell_footprint(query; shared=false)
+    localdata = _rk_spl_cell_batch(query, u0) do batch
+        map(eachindex(expected)) do i
+            reads = _rk_spl_cell_reads(footprint, u0, i; context=batch)
+            value = _rk_nlme_cell_value(query, batch, i)
+            (; reads, value)
+        end
+    end
+    # (cells that read no coordinate still get a one-coordinate selection,
+    # so they are terms like the others; a pad is always partitioned, and
+    # their population derivatives come from the accumulated prefix pullback)
+    m = max(1, maximum(d -> length(d.reads), localdata; init=0))
+    cells = map(eachindex(expected)) do i
+        r = localdata[i].reads
+        value = localdata[i].value
+        isapprox(value, sum(expected[i]); rtol=1e-9, atol=1e-9) || _brm_nlme_error(
+            "brm_laplace_problem: internal: cell $i of `$name` has value $value, " *
+            "its pointwise density $(sum(expected[i]))")
+        pad = Int[]
+        for j in p.integrated
+            length(pad) == m - length(r) && break
+            insorted(j, r) || push!(pad, j)
+        end
+        sel = sort!(vcat(r, pad))
+        z = [(zof[x], k) for (k, x) in enumerate(sel) if zof[x] > 0 && insorted(x, r)]
+        sort!(z)
+        ps = [(pof[x], k) for (k, x) in enumerate(sel) if pof[x] > 0 && insorted(x, r)]
+        term += 1
+        (; i, sel, lz=first.(z), lpos=last.(z), pidx=first.(ps), ppos=last.(ps), term)
+    end
+    # each cell's HVP directions: the units at its integrated draws (K of
+    # them, zero past a cell's own), whose results are the Hessian's
+    # columns there. The group holds one zero buffer per direction and the
+    # evaluation sets a cell's units in place (`_brm_spl_cell_directions!`):
+    # a buffer per cell is `K × m` floats each, tens of gigabytes over a
+    # Gemeinde-level observation's cells.
+    K = max(1, maximum(c -> length(c.lz), cells))
+    dirs = ntuple(_ -> zeros(m), K)
+    ad = _rk_spl_cell_ad(p.backend, (name,), copy(u0), first(cells).sel, ad_backend, K;
+        partitioned)
+    @debug "sparse Laplace cell group" name cells=length(cells) m K maxrss_gib=Sys.maxrss() / 2^30
+    _brm_spl_compile_cell_block(progress, ad, dirs, u0, first(cells); m, K)
+    push!(p.cells, (; name, query, ad, m, dirs, cells))
+    term
+end
+
+# Enzyme compiles a cell's Hessian block on its first use. With a progress
+# node, that happens here, under a node naming the block's size and timing it,
+# rather than unnamed inside the first assembly. Its directions are all zero.
+_brm_spl_compile_cell_block(::Nothing, ad, dirs, u, cell; m, K) = nothing
+function _brm_spl_compile_cell_block(progress, ad, dirs, u, cell; m, K)
+    _brm_with_progress(progress;
+            description="Compiling a Hessian block: $m coordinates, $K integrated") do _
+        _rk_spl_cell_newton(ad, u) do batch
+            _rk_spl_cell_block(ad, dirs, u, cell.sel, cell.i; context=batch, used=1)
+        end
+    end
+    nothing
 end
 
 _brm_spl_nterms(p::BRMSparseLaplaceProblem) = length(p.family) +
@@ -951,9 +990,15 @@ end
 # when given, keep each term's row and C rows (`crows = (c1, c2)`, flat
 # vectors indexed like `p.tz`), and `tv` each term's density
 # with its constant (rows, then cells; with `third`).
+#
+# `weight` multiplies the likelihood (every term, cell and sum) and leaves the
+# integrated effects' prior as it is: the mode search's continuation density
+# prior + weight × likelihood (`_brm_spl_mode!`). At weight 0 the likelihood is
+# not evaluated at all, so a reader that overflows cannot turn the prior's
+# value into 0 × Inf.
 function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
         derivatives::Bool, third::Bool=false, rows=nothing, crows=nothing, fb=nothing,
-        uA=nothing, tv=nothing)
+        uA=nothing, tv=nothing, weight::Float64=1.0)
     correction = p.algebra === nothing ? nothing : zeros(length(fc))
     _brm_spl_prior!(fc, derivatives ? g : nothing, derivatives ? hnz : nothing,
         p, z, fb; correction)
@@ -961,7 +1006,7 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
     mmax = maximum(t -> p.tptr[t + 1] - p.tptr[t], eachindex(p.family); init=0)
     c1 = zeros(mmax); c2 = zeros(mmax)
     nz = derivatives ? nonzeros(hnz) : Float64[]
-    @inbounds for t in eachindex(p.family)
+    @inbounds for t in 1:(weight == 0 ? 0 : length(p.family))
         comp = p.term_component[t]
         # A term no integrated effect moves matters only to the full value.
         comp == 0 && !third && continue
@@ -989,20 +1034,20 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
             rest += r.v
             continue
         end
-        _brm_spl_add_value!(fc, correction, comp, r.v)
+        _brm_spl_add_value!(fc, correction, comp, weight * r.v)
         if fb !== nothing
             for k in p.tsbptr[t]:(p.tsbptr[t + 1] - 1)
-                fb[p.tsb[k]] += r.v
+                fb[p.tsb[k]] += weight * r.v
             end
         end
         derivatives || continue
         for i in 1:m
-            g[zs[i]] += c1[i] * r.g1 + (moving ? c2[i] * r.g2 : 0.0)
+            g[zs[i]] += weight * (c1[i] * r.g1 + (moving ? c2[i] * r.g2 : 0.0))
         end
         for j in 1:m, i in 1:m
             v = r.h11 * c1[i] * c1[j]
             moving && (v += r.h12 * (c1[i] * c2[j] + c2[i] * c1[j]) + r.h22 * c2[i] * c2[j])
-            nz[_brm_spl_nzindex(p.pattern, zs[i], zs[j])] -= v
+            nz[_brm_spl_nzindex(p.pattern, zs[i], zs[j])] -= weight * v
         end
     end
     isempty(p.cells) && return rest
@@ -1010,7 +1055,7 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
     # `derivatives` its gradient and Hessian block over its selection.
     u = copy(uA)
     u[p.integrated] .= z
-    for group in p.cells
+    for group in (weight == 0 ? empty(p.cells) : p.cells)
         group isa _BRMSumCellGroup && continue
         _rk_spl_cell_batch(group.query, u) do values
             sweep = batch -> for c in group.cells
@@ -1022,31 +1067,33 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
                     rest += value
                     continue
                 end
-                _brm_spl_add_value!(fc, correction, comp, value)
+                _brm_spl_add_value!(fc, correction, comp, weight * value)
                 if fb !== nothing
                     for k in p.tsbptr[c.term]:(p.tsbptr[c.term + 1] - 1)
-                        fb[p.tsb[k]] += value
+                        fb[p.tsb[k]] += weight * value
                     end
                 end
                 derivatives || continue
                 _brm_spl_cell_directions!(group.dirs, c.lpos, 1.0)
+                m = length(c.lz)
                 gsel, columns = try
-                    _rk_spl_cell_block(group.ad, group.dirs, u, c.sel, c.i; context=batch)
+                    _rk_spl_cell_block(group.ad, group.dirs, u, c.sel, c.i; context=batch, used=m)
                 finally
                     _brm_spl_cell_directions!(group.dirs, c.lpos, 0.0)
                 end
-                m = length(c.lz)
                 for a in 1:m
-                    g[c.lz[a]] += gsel[c.lpos[a]]
+                    g[c.lz[a]] += weight * gsel[c.lpos[a]]
                     for b in 1:m
-                        nz[_brm_spl_nzindex(p.pattern, c.lz[a], c.lz[b])] -= columns[b][c.lpos[a]]
+                        nz[_brm_spl_nzindex(p.pattern, c.lz[a], c.lz[b])] -=
+                            weight * columns[b][c.lpos[a]]
                     end
                 end
             end
             derivatives ? _rk_spl_cell_newton(sweep, group.ad, u) : sweep(nothing)
         end
     end
-    rest + _brm_spl_assemble_sums!(fc, g, hnz, p, u; derivatives, third, fb, tv, correction)
+    rest + _brm_spl_assemble_sums!(fc, g, hnz, p, u; derivatives, third, fb, tv, correction,
+        weight)
 end
 
 # Step blocks: inside a component, the levels of the coarsest integrated
@@ -1330,10 +1377,22 @@ function _brm_spl_draw(p::BRMSparseLaplaceProblem, state, rng)
     x .- W.X * (W.G \ (W.U' * x .+ randn(rng, length(p.wλ)) ./ sqrt.(p.wλ)))
 end
 
-# The factor of h + shift I, reusing the symbolic analysis.
+# A shift for every effect: one number for all, or one per component.
+_brm_spl_effect_shift(p::BRMSparseLaplaceProblem, shift::Real) = shift
+_brm_spl_effect_shift(p::BRMSparseLaplaceProblem, shift::AbstractVector) =
+    shift[p.component]
+
+# The factor of h + shift I, reusing the symbolic analysis. `shift` is one
+# number, or one per component (`p.components`; h is block diagonal over them).
 function _brm_spl_factor!(p::BRMSparseLaplaceProblem, h; shift=0.0)
     p.algebra === nothing || return _brm_operator_factor(p, h; shift)
-    H = Hermitian(h, :L)
+    if shift isa AbstractVector
+        hs = copy(h)
+        nonzeros(hs)[p.diagonal] .+= _brm_spl_effect_shift(p, shift)
+        H = Hermitian(hs, :L); shift = 0.0
+    else
+        H = Hermitian(h, :L)
+    end
     if p.factor[] === nothing
         F = cholesky(H; shift, check=false)
         p.factor[] = F
@@ -1342,19 +1401,42 @@ function _brm_spl_factor!(p::BRMSparseLaplaceProblem, h; shift=0.0)
     cholesky!(p.factor[], H; shift, check=false)
 end
 
-# The Newton direction h⁻¹ g, or where h is not positive definite away from
-# the mode, (h + μ I)⁻¹ g with the smallest μ = 10^k (k ≥ −4) that is.
-function _brm_spl_direction(p::BRMSparseLaplaceProblem, h, g)
+# The shifts the Newton direction tries where a component's h is not positive
+# definite: 10^k for k = −4, …, 7.
+const _BRM_SPL_SHIFTS = ntuple(k -> 10.0^(k - 5), 12)
+
+# Whether component `members`' block of h + μ I is positive definite (its
+# soft sums' rank-one part, which `_brm_spl_woodbury` keeps out of the
+# factor, only adds a positive semidefinite term).
+_brm_spl_block_definite(p::BRMSparseLaplaceProblem, h::SparseMatrixCSC, members, μ) =
+    issuccess(cholesky(Hermitian(h[members, members], :L); shift=μ, check=false))
+
+# The Newton direction and the shift each component took: h⁻¹ g, or for each
+# component whose h is not positive definite away from its mode,
+# (h + μ_c I)⁻¹ g with the smallest μ_c in `_BRM_SPL_SHIFTS` that is. Every
+# component's shift is its own: one component's curvature never damps
+# another's step. `nothing` when a component's h stays indefinite.
+function _brm_spl_shifted_direction(p::BRMSparseLaplaceProblem, h, g)
     p.algebra === nothing || return _brm_operator_direction(p, h, g)
+    nc = length(p.components)
     F = _brm_spl_factor!(p, h)
-    issuccess(F) && return _brm_spl_solve(F, _brm_spl_woodbury(p, F), g)
-    μ = 1e-4
-    for _ in 1:12
-        F = _brm_spl_factor!(p, h; shift=μ)
-        issuccess(F) && return _brm_spl_solve(F, _brm_spl_woodbury(p, F), g)
-        μ *= 10
+    issuccess(F) && return (_brm_spl_solve(F, _brm_spl_woodbury(p, F), g), zeros(nc))
+    shift = zeros(nc)
+    for (c, members) in enumerate(p.components)
+        _brm_spl_block_definite(p, h, members, 0.0) && continue
+        k = findfirst(μ -> _brm_spl_block_definite(p, h, members, μ), _BRM_SPL_SHIFTS)
+        k === nothing && return nothing
+        shift[c] = _BRM_SPL_SHIFTS[k]
     end
-    nothing
+    F = _brm_spl_factor!(p, h; shift)
+    issuccess(F) || return nothing
+    (_brm_spl_solve(F, _brm_spl_woodbury(p, F), g), shift)
+end
+
+# The direction alone (`_brm_spl_shifted_direction`).
+function _brm_spl_direction(p::BRMSparseLaplaceProblem, h, g)
+    r = _brm_spl_shifted_direction(p, h, g)
+    r === nothing ? nothing : first(r)
 end
 
 # The population point's A (link-scale parameters at z = 0), the parameter
@@ -1372,10 +1454,112 @@ function _brm_spl_population(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     (; uA, values, A, C, dC)
 end
 
-# Every component's mode at population point φ, from zero effects: one
-# factor per Newton step, each component its own step length (backtracking on
-# its own terms), stop (Newton decrement at most `tol`, or at its rounding
-# floor) and failure. Then h at the modes and its factor.
+# The continuation's likelihood weights (`_brm_spl_mode!`): one stage when
+# the integrated effects' density is log-concave (its mode is unique), else
+# `_BRM_LAP_STAGES` equal stages from the prior. Intermediate stages stop at a
+# decrement of `_BRM_LAP_STAGE_TOL` (modes to about 1e-6), the last at `tol`.
+const _BRM_LAP_STAGES = 10
+const _BRM_LAP_STAGE_TOL = 1e-12
+_brm_lap_stages(concave::Bool) = concave ? (1.0,) :
+    ntuple(k -> k / _BRM_LAP_STAGES, _BRM_LAP_STAGES)
+
+# Row terms of the closed-form families are log-concave in their first
+# parameter, which the effects enter linearly, and the prior is Gaussian. A
+# moving second parameter (an effect on a scale or shape) or an observation
+# factor (`@plate` cell, sum) leaves concavity unknown.
+_brm_spl_concave(p::BRMSparseLaplaceProblem) = isempty(p.cells) && !any(p.moving)
+
+# The integrated effects' prior mode at the population point. The prior is
+# Gaussian, so one Newton step from zero reaches it: zero, except where a
+# declared vector's prior mean is not.
+function _brm_spl_prior_mode(p::BRMSparseLaplaceProblem, pop)
+    n = length(p.integrated)
+    z = zeros(n); g = zeros(n); h = _brm_spl_precision(p)
+    _brm_spl_assemble!(zeros(length(p.components)), g, h, p, pop.A, pop.C, z;
+        derivatives=true, uA=pop.uA, weight=0.0)
+    all(iszero, g) && return z
+    r = _brm_spl_shifted_direction(p, h, g)
+    r === nothing ? z : first(r)
+end
+
+# Newton's method on the continuation density prior + s × likelihood, from z
+# (in place), for every component at once: one factor per step, with each
+# component's own shift where its h is not positive definite
+# (`_brm_spl_shifted_direction`), its own step length and backtracking
+# (`_brm_spl_step!`), and its own stop: decrement at most `tol`, or at its
+# rounding floor on an unshifted step (a shifted decrement shrinks slowly
+# without being at the mode). Each component's steps and shifted steps go
+# into `search`, stage `stage`. With `start`, a likelihood that is not finite
+# at z moves z halfway toward zero effects until it is (deterministically).
+function _brm_spl_stage!(p::BRMSparseLaplaceProblem, pop, z, s, tol, search, stage;
+        start::Bool=false)
+    n = length(z); nc = length(p.components)
+    fc = zeros(nc); g = zeros(n); h = _brm_spl_precision(p)
+    _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA, weight=s)
+    halvings = 0
+    while start && any(!iszero, z) && !(all(isfinite, fc) && all(isfinite, g)) &&
+            halvings <= 60
+        halvings += 1
+        halvings > 60 ? fill!(z, 0.0) : (z ./= 2)
+        _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA,
+            weight=s)
+    end
+    all(isfinite, fc) && all(isfinite, g) || return (; status=:nonfinite, iterations=0, h)
+    converged = falses(nc)
+    previous = fill(Inf, nc)
+    λ = zeros(nc)
+    iterations = 0
+    while true
+        _brm_spl_finite(h) || return (; status=:nonfinite, iterations, h)
+        r = _brm_spl_shifted_direction(p, h, g)
+        r === nothing && return (; status=:nonfinite, iterations, h)
+        δ, shift = r
+        all(isfinite, δ) || return (; status=:nonfinite, iterations, h)
+        fill!(λ, 0.0)
+        for i in 1:n
+            λ[p.component[i]] += g[i] * δ[i]
+        end
+        for c in 1:nc
+            converged[c] && continue
+            if λ[c] <= tol || (shift[c] == 0 && λ[c] <= 1e-8 && λ[c] >= previous[c] / 4)
+                converged[c] = true
+                search.decrement[c] = λ[c]
+                search.stop[c] = λ[c] <= tol ? :tol : :floor
+            else
+                previous[c] = shift[c] == 0 ? λ[c] : Inf
+                search.steps[c] += 1
+                if shift[c] > 0
+                    search.stage_shifts[c, stage] += 1
+                    search.max_shift[c] = max(search.max_shift[c], shift[c])
+                end
+            end
+        end
+        all(converged) && return (; status=:converged, iterations, h)
+        iterations == p.maxiter &&
+            return (; status=:unconverged, iterations, h, converged, λ)
+        iterations += 1
+        _brm_spl_step!(p, pop, z, δ, g, h, fc, converged; weight=s, search) ||
+            return (; status=:nonfinite, iterations, h)
+    end
+end
+
+# One evaluation's mode-search record, per component: Newton steps, shifted
+# steps per stage, the largest shift, steps whose full Newton step was refused,
+# and the last stage's final decrement and stop (`:tol`, or `:floor` for the
+# rounding floor).
+_brm_spl_search(nc, stages) = (; stages=collect(stages), steps=zeros(Int, nc),
+    max_shift=zeros(nc), stage_shifts=zeros(Int, nc, length(stages)),
+    backtracks=zeros(Int, nc), decrement=fill(NaN, nc), stop=fill(:none, nc))
+
+# Every component's mode at population point φ, by continuation from the
+# prior: start at the prior's mode (`_brm_spl_prior_mode`) and follow each
+# component's mode as the likelihood's weight rises to one over the stages of
+# `_brm_lap_stages` (`_brm_spl_stage!`). The mode reached is the one
+# connected to the prior's mode, for every call alike: it does not depend on
+# earlier evaluations, and as φ varies it changes only where the followed mode
+# ceases to exist. Then h at the modes and its factor. `p.search` records the
+# evaluation's steps per component; `p.folds` counts evaluations in which a
+# component's followed mode needed a shifted step after the first stage.
 function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     p.algebra === nothing || empty!(p.algebra.diagnostics)
     pop = _brm_spl_population(p, φ)
@@ -1383,47 +1567,32 @@ function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
         p.nonfinite += 1
         return (; finite=false, value=-Inf, iterations=0)
     end
-    n = length(p.integrated)
     nc = length(p.components)
-    z = zeros(n)
-    fc = zeros(nc); g = zeros(n); h = _brm_spl_precision(p)
-    _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
-    all(isfinite, fc) && all(isfinite, g) || (p.nonfinite += 1;
-        return (; finite=false, value=-Inf, iterations=0))
-    converged = falses(nc)
-    previous = fill(Inf, nc)
-    λ = zeros(nc)
+    stages = _brm_lap_stages(_brm_spl_concave(p))
+    search = _brm_spl_search(nc, stages)
+    p.search = search
+    z = _brm_spl_prior_mode(p, pop)
     iterations = 0
-    while !all(converged)
-        if iterations == p.maxiter
+    h = nothing
+    for (k, s) in enumerate(stages)
+        r = _brm_spl_stage!(p, pop, z, s, s == 1 ? p.tol : max(p.tol, _BRM_LAP_STAGE_TOL),
+            search, k; start=k == 1)
+        iterations += r.iterations
+        if r.status === :unconverged
             p.unconverged += 1
-            @warn("brm_laplace_problem: $(count(!, converged)) of $nc components' " *
-                "modes did not converge in $(p.maxiter) Newton iterations at population " *
-                "point $(repr(collect(φ))); its log density is -Inf", maxlog=3)
+            @warn("brm_laplace_problem: $(count(!, r.converged)) of $nc components' " *
+                "modes did not converge in $(p.maxiter) Newton iterations of " *
+                "continuation stage $k of $(length(stages)) at population point " *
+                "$(repr(collect(φ))); its log density is -Inf. Decrements: " *
+                "$(r.λ[.!r.converged])", maxlog=3)
+            return (; finite=false, value=-Inf, iterations)
+        elseif r.status === :nonfinite
+            p.nonfinite += 1
             return (; finite=false, value=-Inf, iterations)
         end
-        iterations += 1
-        _brm_spl_finite(h) || (p.nonfinite += 1;
-            return (; finite=false, value=-Inf, iterations))
-        δ = _brm_spl_direction(p, h, g)
-        (δ === nothing || !all(isfinite, δ)) &&
-            (p.nonfinite += 1; return (; finite=false, value=-Inf, iterations))
-        fill!(λ, 0.0)
-        for i in 1:n
-            λ[p.component[i]] += g[i] * δ[i]
-        end
-        for c in 1:nc
-            converged[c] && continue
-            if λ[c] <= p.tol || (λ[c] <= 1e-8 && λ[c] >= previous[c] / 4)
-                converged[c] = true
-            else
-                previous[c] = λ[c]
-            end
-        end
-        all(converged) && break
-        _brm_spl_step!(p, pop, z, δ, g, h, fc, converged) ||
-            (p.nonfinite += 1; return (; finite=false, value=-Inf, iterations))
+        h = r.h
     end
+    any(>(0), view(search.stage_shifts, :, 2:length(stages))) && (p.folds += 1)
     F = _brm_spl_factor!(p, h)
     issuccess(F) || _brm_nlme_error("brm_laplace_problem: the integrated effects' " *
         "density has a stationary point that is not a maximum at this population point")
@@ -1444,8 +1613,10 @@ end
 # second derivatives. Updates fc, g and h to the accepted z; the usual full
 # step therefore needs just one derivative assembly. False when a component
 # finds no finite gain.
-function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, converged)
-    p.algebra === nothing || return _brm_operator_step!(p, pop, z, δ, g, h, fc, converged)
+function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, converged;
+        weight::Float64=1.0, search=nothing)
+    p.algebra === nothing || return _brm_operator_step!(p, pop, z, δ, g, h, fc, converged;
+        weight, search)
     n = length(z)
     nb = length(p.sblocks)
     λc = zeros(length(fc))
@@ -1457,7 +1628,8 @@ function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, conver
     for i in 1:n
         converged[p.component[i]] || (trial[i] = z[i] + δ[i])
     end
-    _brm_spl_assemble!(ft, gt, ht, p, pop.A, pop.C, trial; derivatives=true, uA=pop.uA)
+    _brm_spl_assemble!(ft, gt, ht, p, pop.A, pop.C, trial; derivatives=true, uA=pop.uA,
+        weight)
     valid = _brm_spl_finite_blocks(p, gt, ht)
     converged = copy(converged)
     for c in eachindex(fc)
@@ -1468,6 +1640,8 @@ function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, conver
             for i in p.components[c]
                 z[i] = trial[i]
             end
+        elseif search !== nothing
+            search.backtracks[c] += 1
         end
     end
     if all(converged)
@@ -1482,7 +1656,7 @@ function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, conver
     end
     fb = zeros(nb); fbt = zeros(nb)
     _brm_spl_assemble!(similar(fc), nothing, nothing, p, pop.A, pop.C, z; derivatives=false,
-        fb, uA=pop.uA)
+        fb, uA=pop.uA, weight)
     t = [moving(k) ? 1.0 : 0.0 for k in 1:nb]
     accepted = [!moving(k) for k in 1:nb]
     trial = copy(z)
@@ -1492,7 +1666,7 @@ function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, conver
             accepted[k] || (trial[i] = z[i] + t[k] * δ[i])
         end
         _brm_spl_assemble!(ft, gt, ht, p, pop.A, pop.C, trial; derivatives=true,
-            fb=fbt, uA=pop.uA)
+            fb=fbt, uA=pop.uA, weight)
         valid = _brm_spl_finite_blocks(p, gt, ht)
         for k in 1:nb
             moving(k) || continue
@@ -1515,10 +1689,10 @@ function _brm_spl_step!(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, fc, conver
             end
         else
             p.sweeps += 1
-            _brm_spl_sweep!(p, pop, z, c) || return false
+            _brm_spl_sweep!(p, pop, z, c; weight) || return false
         end
     end
-    _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
+    _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA, weight)
     true
 end
 
@@ -1526,11 +1700,11 @@ end
 # Newton step on its own terms (h's block, shifted where it is not positive
 # definite) with the other blocks fixed, halved until the component's density
 # rises. False when a block finds no finite gain.
-function _brm_spl_sweep!(p::BRMSparseLaplaceProblem, pop, z, c)
+function _brm_spl_sweep!(p::BRMSparseLaplaceProblem, pop, z, c; weight::Float64=1.0)
     nc = length(p.components)
     fc = zeros(nc); ft = zeros(nc); g = zeros(length(z)); h = _brm_spl_precision(p)
     gt = similar(g); ht = _brm_spl_precision(p)
-    _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA)
+    _brm_spl_assemble!(fc, g, h, p, pop.A, pop.C, z; derivatives=true, uA=pop.uA, weight)
     for (k, members) in enumerate(p.sblocks)
         p.sblock_component[k] == c || continue
         gk = g[members]
@@ -1544,7 +1718,7 @@ function _brm_spl_sweep!(p::BRMSparseLaplaceProblem, pop, z, c)
         for _ in 1:60
             trial[members] .= z[members] .+ step .* δ
             _brm_spl_assemble!(ft, gt, ht, p, pop.A, pop.C, trial;
-                derivatives=true, uA=pop.uA)
+                derivatives=true, uA=pop.uA, weight)
             valid = _brm_spl_finite_blocks(p, gt, ht)
             if isfinite(ft[c]) && all(valid[p.sblock[i]] for i in p.components[c]) &&
                     ft[c] >= fc[c] + 1e-4 * step * λ
