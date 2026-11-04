@@ -849,6 +849,7 @@ end
 function _rk_shared_definition!(defs, taken, template; kernel::Bool=false)
     call, body = template.args
     for definition in defs
+        definition = _brm_undoc(definition)
         Meta.isexpr(definition, :macrocall) == kernel || continue
         kernel && (definition = last(definition.args))
         Meta.isexpr(definition, :(=), 2) || continue

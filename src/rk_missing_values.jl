@@ -672,6 +672,7 @@ end
 function _rk_block_free_reads(definitions)
     reads = Dict{Symbol,Set{Symbol}}()
     for definition in definitions
+        definition = _brm_undoc(definition)
         Meta.isexpr(definition, :(=), 2) || continue
         call, body = definition.args
         Meta.isexpr(call, :call) && Meta.isexpr(body, :block) || continue

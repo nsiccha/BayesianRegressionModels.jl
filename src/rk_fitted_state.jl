@@ -157,9 +157,11 @@ function _rk_statement_reads(emitted, plan)
         _rk_source_assignments!(data, statement)
         _rk_source_outputs!(data, statement)
     end
-    [(statement, intersect(_rk_source_symbols!(Set{Symbol}(),
-            Meta.isexpr(statement, :(=), 2) ? statement.args[2] : statement), data))
-        for statement in emitted.main.args if statement isa Expr]
+    map(filter(statement -> statement isa Expr, emitted.main.args)) do statement
+        bare = _brm_undoc(statement)
+        rhs = Meta.isexpr(bare, :(=), 2) ? bare.args[2] : bare
+        (statement, intersect(_rk_source_symbols!(Set{Symbol}(), rhs), data))
+    end
 end
 
 # The definitions an emitted program fits from `inputs` alone: each `name = …`
@@ -168,6 +170,7 @@ end
 function _rk_fitted_definitions(emitted, plan, inputs::Set{Symbol})
     fitted = Dict{Symbol,Set{Symbol}}()
     for (statement, reads) in _rk_statement_reads(emitted, plan)
+        statement = _brm_undoc(statement)
         Meta.isexpr(statement, :(=), 2) && statement.args[1] isa Symbol &&
             !isempty(reads) && all(name -> name in inputs || haskey(fitted, name), reads) ||
             continue
@@ -176,9 +179,11 @@ function _rk_fitted_definitions(emitted, plan, inputs::Set{Symbol})
     end
     fitted
 end
-_rk_fitted_definition(statement, fitted) = Meta.isexpr(statement, :(=), 2) &&
-    statement.args[1] isa Symbol && haskey(fitted, statement.args[1]) ?
-    statement.args[1] : nothing
+function _rk_fitted_definition(statement, fitted)
+    statement = _brm_undoc(statement)
+    Meta.isexpr(statement, :(=), 2) && statement.args[1] isa Symbol &&
+        haskey(fitted, statement.args[1]) ? statement.args[1] : nothing
+end
 
 # The fits the planner computes in Julia, recorded while it plans the fit's own
 # data as a frozen replay of itself (`_brm_fitted`).

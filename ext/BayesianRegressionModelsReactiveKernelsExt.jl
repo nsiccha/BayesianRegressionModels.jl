@@ -271,12 +271,7 @@ function _rk_emit_module(emitted::BRM._RKEmittedProgram)
         Core.eval(mod, Expr(:const, Expr(:(=), name, QuoteNode(value))))
     end
     for d in emitted.defs
-        if BRM._rk_source_definition(d).kind in (:function, :kernel)
-            Core.eval(mod, d)
-        else
-            Core.eval(mod, Expr(:macrocall, Symbol("@rkppl"),
-                LineNumberNode(0), d))
-        end
+        Core.eval(mod, BRM._rk_definition_expression(d))
     end
     mod
 end
