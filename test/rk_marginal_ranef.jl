@@ -63,6 +63,23 @@ end
 # population prior reading a constant, and a flat data column through a grouped
 # read. `kept_out` reports only what the kept likelihood reaches. Each option
 # below is one of the block laws SBBRMI keeps whole.
+# `t` is read by the omitted branch and by a reported output, by no kept likelihood.
+reported_data(data) = @brm data begin
+    a_loc ~ 1 + x + (1 | p | subject)
+    b_loc ~ 1 + (1 | p | subject)
+    c_loc ~ 1 + x + (1 | p | subject)
+    c_scale ~ LogNormal(0.0, 1.0)
+    rows = groups(obs_subject => subject)
+    @plate for i in eachindex(a_loc)
+        shared = a_loc[i] .+ b_loc[i]
+        c_mu = shared .+ c_loc[i] .* t[rows[i]]
+        c_out[i] = c_mu
+        yc[rows[i]] ~ Normal(c_mu, c_scale)
+        kept_data[i] = shared .+ t[rows[i]]
+        kept_out[i] = shared .* 2.0
+        ya[i] ~ Normal(shared, 0.5)
+    end
+end
 const LONG = (; subject=[1, 2, 3, 4], x=[-1.0, 0.5, 0.0, 1.5],
     obs_subject=[1, 1, 2, 3, 3, 4, 4], t=[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
     ya=[[0.3, 0.9], [-0.2], [0.1, 1.2], [-0.8, 0.0]],
@@ -301,6 +318,32 @@ end
                   if a isa BRM._RKPreparedKernelAssignment)
     @test :kept_out in kernel.outputs
     @test !(:c_out in kernel.outputs)
+end
+
+@stestset "an output reading data no kept likelihood reads stays readable" begin
+    brmi = RKM.reported_data(RKM.LONG_OMIT_C)
+    rk, _ = same_rk_stan_target(brmi, "reported_data"; check_gradient=true)
+    @test rk_margins(rk_bucket(brmi)) == [(:a_loc, :Intercept), (:b_loc, :Intercept)]
+    names = string.(coordinate_names(rk.model.layout))
+    @test !any(n -> occursin("c_scale", n) || occursin("c_loc", n), names)
+    kernel = only(a for a in BRM._brm_rk_plan(brmi).assignments
+                  if a isa BRM._RKPreparedKernelAssignment)
+    @test :kept_data in kernel.outputs
+    @test !(:c_out in kernel.outputs)
+    # Oracle: each cell recomputed from the draw's own predictors and the data.
+    n = rk.model.layout.total
+    U = hcat(zeros(n), fill(0.2, n), fill(-0.1, n))
+    v = rk_draw_values(rk, U, (:a_loc, :b_loc, :kept_data, :kept_out))
+    rows = [[1, 2], [3], [4, 5], [6, 7]]
+    for k in axes(U, 2)
+        shared = v.a_loc[k] .+ v.b_loc[k]
+        @test v.kept_out[k] ≈ 2 .* shared atol=1e-12
+        @test v.kept_data[k] isa Vector{Vector{Float64}}
+        @test length.(v.kept_data[k]) == length.(rows)
+        @test all(v.kept_data[k][i] ≈ shared[i] .+ RKM.LONG.t[rows[i]] for i in eachindex(rows))
+    end
+    # The output that reads the omitted branch is gone, and asking for it says so.
+    @test_throws "no port :c_out" rk_draw_values(rk, U, (:c_out,))
 end
 
 @stestset "an omitted response's plate axis, cell latent and cell leave the program" begin

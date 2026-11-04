@@ -49,7 +49,9 @@ function _rk_cells_under_omission(program, kernels, observations, submodels)
         (name in reach.names || name in retained) && return true
         operation = get(operations, name, nothing)
         operation === nothing && return !haskey(reach.owners, name)
-        operation.role === :assignment && all(free, operation.dependencies)
+        # A bound column is an operation too, and adds no coordinate.
+        operation.role === :assignment ? all(free, operation.dependencies) :
+            operation.role === :extension && haskey(program.context.data, name)
     end
     for name in program.order, (k, kernel) in enumerate(kernels)
         kernel.name === name || continue
