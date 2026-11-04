@@ -1793,8 +1793,8 @@ _rk_mixture_head_name(head) =
 # First-referenced predictor order over the component args (deduped,
 # possibly empty — all-scalar mixtures reference no predictor). Total:
 # malformed shapes collect nothing and fail specifically in Phase 5.
-# Weights never contribute (a predictor-named weight fails in weights
-# validation, it never plans a predictor).
+# This structural route has only shared literal/simplex/scalar weights.
+# Computed weights use the value route and its full dependency reachability.
 function _rk_mixture_refs(program, rhs::ExprColumn, response::Symbol)
     declared = Set{Symbol}(node.name for node in program.operations
         if node.role === :predictor)
@@ -2273,12 +2273,9 @@ end
 
 # Mixture weights: a numeric vector/tuple summing to 1 (frozen), a
 # Dirichlet-backed simplex parameter of matching width, or two
-# complementary weights `[1 - w, w]` from one sampled scalar. Data-column
-# weights are out of mixture v1 (they are not n_obs columns, so they
-# cannot cross as data — the thin layer agrees). Other weight expressions
-# (per-row weights from a linear predictor, several scalars) are SBBRMI-only:
-# RKPPL shares one weight vector across rows and documents only the
-# complementary scalar form.
+# complementary weights `[1 - w, w]` from one sampled scalar. Computed
+# probabilities and data vectors use `_RKValuePlan`, which preserves their
+# ordinary expression dependencies and distinguishes shared vectors from rows.
 function _rk_mixture_weights(arg, K::Int, response::Symbol,
         vectors::Dict{Symbol,_RKVectorParameter}, parameters::Set{Symbol})
     prefix = "RK backend"
@@ -2289,9 +2286,8 @@ function _rk_mixture_weights(arg, K::Int, response::Symbol,
         isnothing(complement) || return complement
         error("$prefix: response `$response` `MixtureModel` expression " *
               "weights must be two complementary weights of one sampled " *
-              "scalar, `[1 - w, w]` or `[w, 1 - w]`; other weight " *
-              "expressions, such as per-row weights from a linear " *
-              "predictor, are supported on SBBRMI only")
+              "scalar, `[1 - w, w]` or `[w, 1 - w]`; computed weights " *
+              "must use the ordinary value plan")
     end
     if arg isa Union{AbstractVector,Tuple} &&
             all(w -> w isa Real && !(w isa Bool), arg)
@@ -2313,8 +2309,7 @@ function _rk_mixture_weights(arg, K::Int, response::Symbol,
     end
     arg isa NamedColumn && parent(arg) isa DataColumn && error(
         "$prefix: response `$response` `MixtureModel` data-column " *
-        "weights are out of mixture v1; write a literal weight vector " *
-        "or a Dirichlet-backed simplex parameter")
+        "weights need the ordinary value plan")
     if arg isa NamedColumn
         wname = name(arg)
         haskey(vectors, wname) && vectors[wname].family ===

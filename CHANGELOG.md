@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.166
+
+- `RKBRMI` accepts mixture probabilities computed from linked or hierarchical
+  predictors, including predictors used only in the weights. The ordinary
+  value graph retains their coefficients, group effects and authored priors.
+  Probability vectors may be shared or vary by observation; native density,
+  Reverse gradients, pointwise likelihood and printed-source replay use the
+  same normalized mixture. Requires ReactiveKernelsPPL 0.1.90.
+
 ## 0.2.165
 
 - **Structure first, priors last:** `SBBRMI` accepts a cell-local prior after
