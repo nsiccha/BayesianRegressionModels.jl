@@ -7,6 +7,7 @@ TreeArrays = "5daaa025-ac78-4e9a-8805-78946e672e43"
 NaNStatistics = "b946abbf-3ea7-4610-9019-9858bfdeaf2d"
 AlgebraOfVega = "a2420894-485a-4f42-a4fc-c4323ec6fb2b"
 Optim = "429524aa-4258-5aef-a3af-852621145aeb"
+OptimizationBase = "bca83a33-5cc9-4baa-983d-23429ab6bcbb"
 SelectedInversion = "043bf095-3f01-458a-9f1c-8cf4448fe908"
 ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
 BayesianRegressionModels = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
@@ -51,6 +52,8 @@ AlgebraOfVega = "0.2.14"
 Distributions = "0.25.133"
 BridgeStan = "2.9"
 Enzyme = "0.13"
+# Enzyme dogfood uses the split readonly/attribute-preserving rule hooks.
+OptimizationBase = "5.10.1"
 # Enzyme_jll 0.0.302 (required by Enzyme 0.13.211) segfaults native Reverse
 # gathers on Julia 1.10 (EnzymeAD/Enzyme.jl#3776); see test/README.md.
 # The pinned Enzyme dogfood (test/setup_env.jl) requires 0.0.301 and runs
@@ -318,4 +321,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK 0.1.67 / PPL 0.1.76: joint cell latents and storage fields read at rows.
 # RK 0.1.70 / PPL 0.1.80: matrix-row helpers, vec of a row value, whole arrays read by index.
 # RK 0.1.73 / PPL 0.1.82: a producer plate cell and b[p, 2] of a computed matrix at their rows.
-rev = "38421748c9643a84e341c7a9d30306b0b11b7046"
+# f17b6a24 (RK 0.1.67 / PPL 0.1.76): strict cell footprints of per-cell joint fields.
+# 1e43b1b8 (PPL 0.1.90): native row-dependent and computed shared mixture probabilities.
+rev = "1e43b1b844fa32d9d7e231e068e3e061bf67981f"

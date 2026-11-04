@@ -99,6 +99,12 @@ broadcast observation locations: strict selected-cell queries, ordinary Enzyme
 Reverse gradients, independent analytic values, and bounded allocations as
 the number of observations grows. The test environment pins RK 0.1.51 /
 RKPPL 0.1.53, including scalar-helper type inference and guarded captures.
+`rk_field_offset.jl` checks coefficient-one offsets of declared scalar plate
+outputs and explicitly gathered helper outputs. It covers both output orders,
+reader-first composition, unequal axes, repeated and reordered reads, normalized
+density, native reverse and Stan gradients, complete printed-source replay,
+immutable inputs, and bounded selected-row allocations. Vector cells with an
+accidentally matching flattened length must not establish a scalar row axis.
 `laplace_plan_reuse.jl` counts actual row/cell derivative preparations and
 compares retained plans with freshly prepared targets, including strict
 subsets of row, plate and sum factors. It checks marginal values, gradients,
@@ -1967,6 +1973,13 @@ definitions and model source are printed, reparsed and built afresh, then
 compared bit-exactly for likelihood, prior and full density at three points.
 `rk_parity.jl` adds independent statistical density and Jacobian references,
 standard Enzyme reverse gradients and finite-difference checks.
+`rk_mixture_weights.jl` checks hierarchical mixture probabilities against
+independent normalized laws and compiled Stan, every ordinary Reverse
+coordinate, pointwise likelihood, complete printed replay and changed-data
+reprocessing. It also covers weight-only predictors, more than two components,
+named and tuple expressions, computed shared weights, shared and row-valued
+probability data, invalid rows and logistic endpoints.
+Run it directly with `julia --project=test test/rk_mixture_weights.jl`.
 `rk_stan_priors.jl` compares explicit shared scale/LKJ priors with emitted Stan
 using a complete named coordinate map. `rk_gaussian.jl` checks the actual
 ordinary Gaussian emission against analytic and mapped Stan densities and

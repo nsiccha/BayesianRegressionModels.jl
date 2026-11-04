@@ -90,7 +90,8 @@ end
     plan=brm_laplace_plan(rk;ad_backend=NLME_AD,integrate=:z,draws=12)
     @test plan.integrated_dimension==4
     automatic=brm_laplace_plan(rk;ad_backend=NLME_AD,integrate=:auto,draws=12,ess_floor=0.01)
-    @test automatic.integrated_dimension==4
+    @test automatic.integrated_dimension==0
+    @test all(t -> !t.admitted && t.importance_ess === nothing, automatic.terms)
     reused=brm_laplace_problem(rk;ad_backend=NLME_AD,integrate=plan)
     copied=deepcopy(reused)
     @test only(reused.cells).ad !== only(copied.cells).ad

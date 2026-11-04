@@ -4,7 +4,7 @@
 # importance ESS, which is exactly `draws` on a Gaussian term; the floor admits
 # or keeps them sampled; a term on a dispersion is never integrated;
 # `integrate` and `sample` override (a term on a dispersion too); `@plate`
-# cells are gated; a plan passed to
+# cells require explicit opt-in; a plan passed to
 # brm_laplace_problem is taken as given.
 # RUN: julia --project=test test/laplace_plan.jl
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
@@ -24,6 +24,59 @@ end
 
 plan_of(rk; kwargs...) = brm_laplace_plan(rk; ad_backend=NLME_AD, kwargs...)
 entry(plan, name) = only(t for t in plan.terms if t.grouping === name)
+
+@stestset "direct predictor observations retain their structure inside value plans" begin
+    data = (; g=["a","a","b","b"], y=[0,1,1,0], n=fill(3,4), v=[0.1,0.2,-0.1,0.3])
+    extra = @brm begin
+        nuisance[1:4] .~ Normal.(0,1)
+        @plate for i in eachindex(v)
+            v[i] ~ Normal(nuisance[i]^2,0.7)
+        end
+    end
+    builders = [@brm(begin
+        mu ~ 1 + (1 | g)
+        sigma ~ LogNormal(0,0.4)
+        y ~ Normal(mu,sigma)
+    end), @brm(begin
+        logit(p) ~ 1 + (1 | g)
+        y ~ Bernoulli(p)
+    end), @brm(begin
+        logit(p) ~ 1 + (1 | g)
+        y ~ Binomial(n,p)
+    end), @brm(begin
+        shape ~ LogNormal(0,0.5)
+        log(mu) ~ 1 + (1 | g)
+        y ~ NegativeBinomial2(mu,shape)
+    end)]
+    for (i,builder) in enumerate(builders)
+        rk = RKBRMI(merge(builder,extra)(data))
+        plan = plan_of(rk; draws=12,ess_floor=0)
+        @test entry(plan,:g).admitted
+        @test entry(plan,:g).class === (i == 1 ? :integrated : :gated)
+        @test !only(t for t in plan.terms if t.declaration === :nuisance).admitted
+    end
+    # Normal(exp(eta), sigma) is not affine Normal in the effects, despite a
+    # direct predictor reference. The family and link must match together.
+    nonlinear = @brm begin
+        log(mu) ~ 1 + (1 | g)
+        y ~ Normal(mu,0.7)
+    end
+    plan = brm_laplace_plan(RKBRMI(merge(nonlinear,extra)(data)); ad_backend=nothing)
+    @test !entry(plan,:g).admitted
+    # A direct predictor reference is not enough when its summands read
+    # nonlinear model values, either as offsets or fitted design columns.
+    for formula in (@brm(mu ~ 0 + offset(curved)), @brm(mu ~ 0 + curved))
+        structure = @brm begin
+            eta ~ 1 + (1 | g)
+            curved = eta^2
+            y ~ Normal(mu,0.7)
+        end
+        rk = RKBRMI(merge(structure,formula)(data))
+        plan = brm_laplace_plan(rk; ad_backend=nothing)
+        @test !entry(plan,:g).admitted
+        @test plan.prepared === nothing
+    end
+end
 
 @stestset "stratified terms keep their identity and remain sampled" begin
     d = (; g=repeat(["a", "b", "c", "d"], inner=2),
@@ -164,6 +217,8 @@ end
     @test entry(plan, :b).class === :never && !entry(plan, :b).admitted
     @test occursin("shape or dispersion", entry(plan, :b).reason)
     @test entry(plan, :a).class in (:gated, :sampled)
+    @test all(b -> b.group === :a, plan.prepared.problem.blocks)
+    @test !any(plan.prepared.problem.moving)
     # named in `integrate`, it is integrated all the same
     forced = plan_of(shape; integrate=(:b,), draws=50)
     @test entry(forced, :b).admitted && occursin("named in `integrate`", entry(forced, :b).reason)
@@ -171,4 +226,98 @@ end
     cells = RKBRMI(nested_model(NESTED_DATA))
     plan = plan_of(cells; draws=50)
     @test all(t -> occursin("`@plate` cells", t.reason), plan.terms)
+    @test all(t -> !t.admitted && t.importance_ess === nothing, plan.terms)
+    @test plan.prepared === nothing
+end
+
+@stestset "automatic admission is structural across outer points; explicit opt-in remains" begin
+    rk = RKBRMI(@brm (; y=[4.0]) begin
+        amplitude ~ Normal(0, 1)
+        field[1:1] .~ Normal.(0, 1)
+        @plate for i in eachindex(y)
+            y[i] ~ Normal(amplitude * field[i]^2, 0.3)
+        end
+    end)
+    # At amplitude=0 this conditional is exactly Gaussian, and its local ESS
+    # passes. At amplitude=1 it has two separated modes. Neither the point nor
+    # an arbitrarily permissive ESS floor can authorize automatic integration.
+    names = BRM._rk_layout_coordinate_names(rk)
+    for amplitude in (0.0, 1.0)
+        at = zeros(length(names)); at[findfirst(==(:amplitude), names)] = amplitude
+        plan = brm_laplace_plan(rk; ad_backend=nothing, at, ess_floor=0, draws=20)
+        @test only(plan.terms).class === :sampled
+        @test !only(plan.terms).admitted && only(plan.terms).importance_ess === nothing
+        @test occursin("name it in `integrate`", only(plan.terms).reason)
+        @test plan.integrated_dimension == 0 && plan.sampled_dimension == length(names)
+        @test plan.prepared === nothing
+    end
+    auto = plan_of(rk)
+    sampled = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=auto)
+    full = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+    u = zeros(length(names))
+    @test LogDensityProblems.logdensity_and_gradient(sampled, u) ==
+        LogDensityProblems.logdensity_and_gradient(full, u)
+    forced = plan_of(rk; integrate=:field)
+    @test only(forced.terms).admitted && only(forced.terms).importance_ess === nothing
+    p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=forced)
+    state = BRM._brm_spl_mode!(p, zeros(length(p.population)))
+    @test BRM._brm_plan_ess(p, state, :field, 20, 0.5, Xoshiro(3)).min ≈ 20
+    u[findfirst(==(:amplitude), names)] = 1.0
+    f0 = LogDensityProblems.logdensity(full, u)
+    u[p.integrated] .= 2.0
+    plus = LogDensityProblems.logdensity(full, u)
+    u[p.integrated] .= -2.0
+    @test LogDensityProblems.logdensity(full, u) ≈ plus
+    @test plus > f0 + 80
+end
+
+@stestset "unknown cells do not discard unrelated certified terms" begin
+    d = (; a=["a1","a2","a1","a2"], b=["b1","b1","b2","b2"],
+        y=[1,2,1,3], v=[0.2,-0.1,0.3,0.4])
+    rk = RKBRMI(@brm d begin
+        log(mu) ~ 1 + (1 | a)
+        eta ~ 1 + (1 | b)
+        y ~ Poisson(mu)
+        @plate for i in eachindex(v)
+            v[i] ~ Normal(eta[i]^2, 0.5)
+        end
+    end)
+    plan = plan_of(rk; draws=20, ess_floor=0)
+    @test entry(plan, :a).admitted && entry(plan, :a).importance_ess !== nothing
+    @test !entry(plan, :b).admitted && entry(plan, :b).importance_ess === nothing
+    @test all(b -> b.group === :a, plan.prepared.problem.blocks)
+    reference = plan_of(rk; sample=:b, draws=20, ess_floor=0)
+    @test entry(plan, :a).importance_ess == entry(reference, :a).importance_ess
+    p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=plan)
+    q = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:a,))
+    phi = fill(0.1, length(p.population))
+    value, gradient = LogDensityProblems.logdensity_and_gradient(p, phi)
+    reference_value, reference_gradient = LogDensityProblems.logdensity_and_gradient(q, phi)
+    @test value ≈ reference_value
+    @test gradient ≈ reference_gradient
+end
+
+@stestset "recognized logit and log-NB2 rows remain eligible" begin
+    d = (; g=["a","a","b","b"], y=[0,1,1,0], n=fill(3,4))
+    models = [@brm(d, begin
+        logit(p) ~ 1 + (1 | g)
+        y ~ Bernoulli(p)
+    end), @brm(d, begin
+        logit(p) ~ 1 + (1 | g)
+        y ~ Binomial(n,p)
+    end), @brm(d, begin
+        shape ~ LogNormal(0,0.5)
+        log(mu) ~ 1 + (1 | g)
+        y ~ NegativeBinomial2(mu,shape)
+    end)]
+    for model in models
+        rk = RKBRMI(model)
+        for amplitude in (0.0, 0.2)
+            at = fill(amplitude, length(BRM._rk_layout_coordinate_names(rk)))
+            plan = plan_of(rk; at, draws=16, ess_floor=0)
+            @test only(plan.terms).admitted && only(plan.terms).class === :gated
+            @test only(plan.terms).importance_ess !== nothing
+            @test occursin("recognized log-concave conditional", only(plan.terms).reason)
+        end
+    end
 end

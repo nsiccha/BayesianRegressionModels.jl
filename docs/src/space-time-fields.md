@@ -250,8 +250,13 @@ and replay keeps the fit's cells.
 On `RKBRMI`, `brm_laplace_problem(rk; ad_backend, integrate=(declaration,))`
 integrates a model-scope field, where `declaration` is the field's RK
 declaration (`gmrf_<predictor>_<axes…>`, as `brm_laplace_plan` lists it), and
-`brm_laplace_plan(rk; ad_backend, integrate=:auto)` admits it. With Normal
-rows the integrated target is the exact marginal. The field's precision moves
+`brm_laplace_plan(rk; ad_backend, integrate=:auto)` admits recognized affine
+Normal rows, or eligible count rows that pass the local ESS gate. From BRM
+0.2.166, arbitrary plate cells and model-value observations require explicit
+selection: automatic planning cannot certify their conditional log-concavity.
+Concavity does not itself guarantee Gaussian approximation accuracy. With
+affine Normal rows and exact algebra the integrated target is the exact marginal.
+The field's precision moves
 with its lengths and channel factor, and the target's gradient includes their
 log-determinant terms. `brm_laplace_problem(rk; ad_backend, integrate=plan)`
 applies the plan to the same target, and `deepcopy` gives each chain its own
