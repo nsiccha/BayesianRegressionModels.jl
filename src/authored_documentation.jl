@@ -133,6 +133,30 @@ _brm_source_documentation(source) =
     Tuple(_brm_collect_documentation!(BRMDocumentation[], _brm_normalize_docs(source)))
 _brm_copy_documentation(d::BRMDocumentation) = BRMDocumentation(d.path, d.owner,
     d.markdown, deepcopy(d.statement), d.file, d.line)
+
+# An outer `"doc" @brm function ... end` belongs to Julia's documentation
+# macro. Read its original strings rather than re-rendering Markdown. This is
+# Julia's existing store, and autoinit=false makes this a strictly read-only
+# operation even in an otherwise undocumented defining module.
+function _brm_binding_docstring(scope::Module, name::Symbol)
+    metadata = Base.Docs.meta(scope; autoinit=false)
+    metadata === nothing && return nothing
+    binding = Base.Docs.Binding(scope, name)
+    docs = get(metadata, binding, nothing)
+    docs === nothing ? nothing : get(docs.docs, Union{}, nothing)
+end
+
+function _brm_binding_documentation(scope::Module, name::Symbol, statement::Expr;
+        previous=nothing)
+    doc = _brm_binding_docstring(scope, name)
+    (doc === nothing || doc === previous) && return ()
+    all(x -> x isa AbstractString, doc.text) && !isempty(doc.text) ||
+        throw(ArgumentError("BRM binding documentation must contain Markdown strings"))
+    file = get(doc.data, :path, "")
+    (BRMDocumentation((name,), name, join(doc.text), deepcopy(statement),
+        isempty(file) ? nothing : Symbol(file), get(doc.data, :linenumber, 0)),)
+end
+
 _brm_documentation(model) = _brm_documentation(brm_source(model))
 _brm_documentation(source::Expr) = _brm_source_documentation(source)
 _brm_documentation(artifact::NamedTuple) = haskey(artifact, :meta) ?
