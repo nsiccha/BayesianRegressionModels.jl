@@ -199,15 +199,15 @@ const _BRM_SVI_RESUME_MODEL_OPTIONS = (:ad_backend, :shared_point, :subject_grou
 """
     brm_svi_resume([save,] x, checkpoint; stop_after=nothing,
         checkpoint_every=nothing, ndraws=1000, progress=nothing,
-        ad_backend=nothing, shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple(), shared_groups=())
+        threads=nothing, ad_backend=nothing, shared_point=nothing,
+        subject_group=nothing, nested_groups=NamedTuple(), shared_groups=())
         -> (; draws, coordinates, diagnostics)
 
 Continue a [`brm_svi_fit`](@ref) run on the same target from `checkpoint`, a
 [`BRMSVIOptimizerState`](@ref) or a fit/resume result, exactly as the run would
 have continued without stopping: the same iterates, random stream, stopping
-decision and draws, in the same Julia and package versions (different BLAS
-threading may change the last bits). The run keeps its optimizer controls, its
+decision and draws, in the same Julia and package versions, at any `threads`
+(the fit's option; a run may continue at another). The run keeps its optimizer controls, its
 `max_iterations` horizon and step-size schedule; `stop_after` bounds only this
 call. A finished checkpoint does no iterations and returns draws of its
 result. A `laplace=GaussianBlockLaplace()` run continues its fixed update
@@ -250,7 +250,7 @@ brm_svi_resume(save::Function, x, checkpoint; kwargs...) =
     _brm_svi_resume(save, x, checkpoint; kwargs...)
 
 function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
-        checkpoint_every=nothing, progress=nothing, kwargs...)
+        checkpoint_every=nothing, progress=nothing, threads=nothing, kwargs...)
     unknown = setdiff(keys(kwargs), _BRM_SVI_RESUME_MODEL_OPTIONS)
     isempty(unknown) || throw(ArgumentError("brm_svi_resume: unsupported options " *
         join(string.(unknown), ", ") * "; the checkpoint fixes the optimizer controls, " *
@@ -266,13 +266,17 @@ function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
         x, options = _brm_svi_window_input(state.previous, x, options; caller="brm_svi_resume")
     end
     call = (; caller="brm_svi_resume", ndraws, stop_after, checkpoint_every, progress)
-    state.run isa _BRMSVILaplaceRun && return _brm_svi_laplace_drive(save, x,
-            state.previous, state.controls.method; call...,
-            description="BRM conditional Gaussian SVI resume", options...) do t, _
-        _brm_svi_laplace_restored(t, state)
+    if state.run isa _BRMSVILaplaceRun
+        threads === nothing || throw(ArgumentError(
+            "GaussianBlockLaplace: whole-window fixed-budget optimization does not use " *
+            "threads; omit this option"))
+        return _brm_svi_laplace_drive(save, x, state.previous, state.controls.method;
+                call..., description="BRM conditional Gaussian SVI resume", options...) do t, _
+            _brm_svi_laplace_restored(t, state)
+        end
     end
     _brm_svi_drive(save, x, state.previous; call..., description="BRM SVI resume",
-            options...) do t
+            threads, options...) do t
         _brm_svi_restore(t, state)
     end
 end

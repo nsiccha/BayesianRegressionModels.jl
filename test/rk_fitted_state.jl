@@ -454,6 +454,66 @@ end
     end
 end
 
+@stestset "a design that omits a scalar the program reads stays on the cached lowering" begin
+    # Snag `rk-design-binder-ddee0088`. A correlated block's scale prior reads
+    # its argument as data, so the program binds the scalar. A design may leave
+    # it out: every replay then binds the fit's value, on the training fit and
+    # on a data-free replay alike.
+    build = brm(quote
+        anchor_fit = constant(anchor)
+        shifted = w - anchor_fit
+        sigma ~ Exponential(1)
+        log_a ~ 1 + shifted + (1 | p | subject)
+        log_b ~ 1 + (1 | p | subject)
+        sd(:, p) ~ Exponential(prior_sd_scale)
+        @plate for i in eachindex(log_a)
+            mu = log_a[i] .+ log_b[i] .* t[i]
+            y[i] ~ Normal(mu, sigma)
+        end
+    end; mod=FM)
+    train = (; subject=[1, 2, 3], w=[1.0, 2.0, 3.0], t=[[0.5, 1.0], [0.25], [1.0, 2.0]],
+        y=[[0.1, 0.2], [0.2], [0.3, 0.1]], anchor=-0.8, prior_sd_scale=1.7)
+    rk = RKBRMI(build(train))
+    state = brm_fitted_state(rk)
+    @test haskey(rk_bound_data(rk), :prior_sd_scale)
+    @test haskey(state.scalars, :prior_sd_scale)
+    groups = [:subject]
+    responses = (; subject=[101, 102], w=[1.5, 2.5], t=[[0.5], [1.0, 2.0]], y=[[0.3], [-0.4, 0.2]])
+    more = (; subject=[103, 104, 105], w=[1.0, 2.0, 2.5], t=[[1.0], [0.5, 1.5], [2.0]],
+        y=[[0.1], [0.2, 0.3], [0.4]])
+    same(a, b) = Set(keys(a)) == Set(keys(b)) && all(k -> isequal(a[k], b[k]), keys(a))
+    free = RKBRMI(build(responses), state; resample_groups=groups)
+    for fit in (rk, free), (base, next) in ((responses, more),
+            (without(responses, :y), without(more, :y)))
+        planned(design) = rk_bound_data(reprocess(fit, design; resample_groups=groups))
+        binder = rk_design_binder(fit; resample_groups=groups)
+        for design in (base, next)
+            inputs = binder(design)
+            @test same(inputs, planned(design))
+            @test inputs.prior_sd_scale == train.prior_sd_scale
+        end
+        @test !occursin("replayed in full", sprint(show, binder))
+        class = only(values(binder.classes))
+        @test class.lowering !== nothing
+        @test last(only(s for s in class.sources if first(s) === :prior_sd_scale)) isa BRM._RKFixedInput
+
+        # Equal by value to a column the design holds, it is still not that
+        # column: a later design that changes the column leaves it alone.
+        aliased = rk_design_binder(fit; resample_groups=groups)
+        aliased(merge(base, (; anchor=train.prior_sd_scale)))
+        changed = merge(next, (; anchor=9.0))
+        @test aliased(changed).prior_sd_scale == train.prior_sd_scale
+        @test same(aliased(changed), planned(changed))
+
+        # A design that holds the scalar is another kind, read from the design.
+        holding = rk_design_binder(fit; resample_groups=groups)
+        holding(merge(base, (; prior_sd_scale=train.prior_sd_scale)))
+        held = merge(next, (; prior_sd_scale=train.prior_sd_scale))
+        @test same(holding(held), planned(held))
+        @test !occursin("replayed in full", sprint(show, holding))
+    end
+end
+
 @stestset "a thin-plate basis cannot leave its training values" begin
     # refused: `s(x)` keeps every training value of `x` as a knot, so no
     # data-free state can carry it (snag `no-data-free-exp-fec940cb`).

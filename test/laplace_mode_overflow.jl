@@ -62,7 +62,9 @@ overflow_dense(h::BRM._BRMSumPrecision) = Matrix(h.D + h.B' * h.W * h.B)
 
         # Full-step rejection, local backtracking, and reuse of the accepted
         # derivatives. The healthy component keeps its exact full step.
-        @test BRM._brm_spl_step!(p,pop,z,delta,initial.g,initial.h,initial.fc,falses(2))
+        search = BRM._brm_spl_search(2, (1.0,))
+        @test BRM._brm_spl_step!(p,pop,z,delta,initial.g,initial.h,initial.fc,falses(2); search)
+        @test search.backtracks == [1, 0]
         @test p.blockwise == 1
         @test p.sweeps == 0
         @test 0 < z[1] < delta[1]

@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.146
+## 0.2.150
 
 - Changed: NLME unit likelihoods and gradients use one strict RK plate
   partition per unit. Preparation checks structural coordinate ownership,
@@ -46,6 +46,83 @@ instead of failing at run time.
   custom packed vectors. Unit gradients use ordinary Enzyme Reverse, with the
   test bootstrap's Enzyme dogfood pin, which contains `68ed90fe`'s repair for
   matrix-window partition gradients on Julia 1.10.
+
+## 0.2.149
+
+- **Prior-median starts of native fields:** `brm_start(rk, inits;
+  base=:prior_median)` and `brm_start(sb, model, inits; base=:prior_median)` no
+  longer raise on a model-scope `gmrf` term. Its SD and both lengths start at
+  their prior medians, the default `LogNormal(0, 1)` included; a known
+  hyperparameter stays known, `term_inits` wins, and the field keeps its neutral
+  coordinates.
+- **Laplace default start of native fields:** the default population point of
+  `brm_laplace_plan`, `brm_laplace_mode` and the ladder now takes the same
+  medians for those hyperparameters instead of holding them at one. A model with
+  a `gmrf` term can therefore start somewhere else than under 0.2.148.
+
+## 0.2.148
+
+- `rk_design_binder` keeps its cached lowering for a design that omits a numeric
+  scalar the program reads as data, such as the argument of a correlated block's
+  `sd(:, p) ~ Exponential(scale)`. The design takes the fit's value, as on
+  `reprocess`. It used to replay every design of that kind in full, on a training
+  fit and on a data-free `RKBRMI(builder(design), state)` alike.
+- **Fix:** when a design held another column equal by value to such an omitted
+  scalar, the binder read the scalar from that column, so a later design that
+  changed the column silently changed the scalar. A later design now binds the
+  fit's value, the same as `reprocess`.
+
+## 0.2.147
+
+- `brm_laplace_problem`'s conditional modes are found by continuation from
+  the prior, in all three problems (sparse, structured and whole-model). Every
+  evaluation starts the integrated effects at their prior's mode and follows
+  each unit's mode while the likelihood's weight rises from 0 to 1 in 10
+  stages. The marginal is evaluated at the mode connected to the prior's mode:
+  it still does not depend on earlier evaluations, and as the population
+  parameters vary it changes only where that mode ceases to exist. Before, a
+  search from zero effects with the full likelihood could reach a different
+  mode of a multimodal conditional at points millionths apart, so the marginal
+  jumped and an outer gradient sampler saw a discontinuous target.
+  Log-concave units and sparse components (closed-form rows with no effect on
+  a second parameter, no cells) take one stage; their values and gradients
+  are unchanged. `maxiter` now applies per stage.
+- `target.folds` counts evaluations in which a unit's followed mode needed a
+  modified Newton step after the first stage (the mode ceased to exist on the
+  way; the marginal can jump near such points). The sparse problem's
+  `target.search` records the last evaluation's stages, Newton steps,
+  shifted steps per stage, largest shift, refused full Newton steps
+  (`backtracks`), final decrements and `stop` reason (`:tol`, or `:floor` for
+  the rounding floor) per component.
+- The sparse problem damps each component's Newton step by its own shift
+  where its curvature is not positive definite, in exact and matrix-free
+  algebra. Before, one shift served all components, and a component damped by
+  another's curvature could stop early on its rounding-floor rule, about
+  1e-4 nats from its mode, with a gradient error of the same order. The
+  rounding-floor stop now applies only to plain Newton steps, in all three
+  problems.
+
+## 0.2.146
+
+- **`brm_svi_fit` and `brm_svi_resume` evaluate a batch on several tasks:**
+  `threads` (default `Threads.nthreads()`, capped at the batch size) divides an
+  iteration's unit terms and the units' factor steps over that many tasks, each
+  with its own compact cell samplers and buffers, as `brm_two_stage_fit` does.
+  A run does not depend on it: its draws stay on the one `rng`, in batch order,
+  and the units' results are summed in batch order, so the ELBO, the gradients,
+  the factors, the checkpoints and the draws are the same to the last bit at any
+  `threads`, and a resume may use another count. `fit.diagnostics.threads` records
+  the tasks a call used. Above one task the fit needs Enzyme's concurrent-GC repair
+  (dogfood from `72d5d25`): without it an explicit `threads` above one is refused,
+  naming `threads = 1`, and the default stays at one.
+  **Behavior:** with that repair, a process started with several threads now uses
+  them by default, and prepares a copy of the cell samplers per task before the first
+  iteration; pass `threads = 1` to keep one. `laplace=GaussianBlockLaplace()` refuses
+  `threads`: its updates evaluate the whole window.
+- **The minibatch fit holds BLAS at one thread** while it optimizes and draws, at any
+  `threads`, and restores the count afterwards. A process running with more BLAS
+  threads may see different last bits than before, and no longer depends on that
+  count, including when a run resumes in a new process.
 
 ## 0.2.145
 

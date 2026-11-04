@@ -42,6 +42,10 @@ end
 
 BRM._brm_rk_default_ad(caller, ::BRM.RKBRMI) = AutoEnzyme(; mode=Enzyme.Reverse)
 
+# Enzyme's own check of its concurrent-GC repair (dogfood from 72d5d25).
+BRM._brm_concurrent_gradients(::Union{Nothing,AutoEnzyme}) =
+    isdefined(Enzyme.Compiler, :RestoreSafepointEffectsPass)
+
 BRM._rk_eta_hvp(state, direction::Vector{Float64}, u::Vector{Float64}) =
     only(ad_hvp(_rk_eta_hvp_prepared(state), (direction,), u))
 

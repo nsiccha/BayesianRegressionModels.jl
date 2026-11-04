@@ -1847,6 +1847,16 @@ function _brm_nlme_partition_plan(partition, unit, globals, view)
         local_gradients, labels=partition.labels, point=copy(unit))
 end
 
+# A plan for another task: its own AD sampler, gradients and work point (RK's
+# one-per-caller contract), sharing the read-only tables, which scale with the
+# units.
+function _brm_nlme_worker_plan(plan, partition, unit)
+    merge(plan, (; sampler=_rk_nlme_partition_sampler(partition.context, unit),
+        gradients=[zeros(length(g)) for g in plan.gradients],
+        local_gradients=[zeros(length(g)) for g in plan.local_gradients],
+        point=copy(unit)))
+end
+
 # Evaluate a unit in one compiled pass at the plan's dense point, whose
 # `indices[i]` positions the caller has written; `gradient` follows
 # `indices[i]`. The caller owns this plan's workspace or holds its model's lock.

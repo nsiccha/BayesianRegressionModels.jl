@@ -170,6 +170,33 @@ using Random
     field = [i for (i, n) in enumerate(all_names) if startswith(string(n), "$declaration.field.")]
     state = BRM._brm_spl_mode!(target, φ)
     @test state.u[field] ≈ m atol=1e-8 rtol=1e-7
+    # The mode search's likelihood weight leaves the field's prior whole: at
+    # weight zero the density is the prior alone (whose mode is zero), halfway
+    # its precision is Q + (h − Q) / 2, and the continuation's stages end at the
+    # mode a single stage finds, although Normal rows take one stage here.
+    pop = BRM._brm_spl_population(target, φ)
+    n = length(target.integrated)
+    nc = length(target.components)
+    assembled(z, weight) = (fc = zeros(nc); g = zeros(n); h = BRM._brm_spl_precision(target);
+        BRM._brm_spl_assemble!(fc, g, h, target, pop.A, pop.C, z; derivatives=true,
+            uA=pop.uA, weight); (; fc, g, h))
+    zprobe = 0.1 .* sin.(1:n)
+    prior = assembled(zprobe, 0.0)
+    half = assembled(zprobe, 0.5)
+    full = assembled(zprobe, 1.0)
+    Q = Matrix(Symmetric(prior.h, :L))
+    @test sum(prior.fc) ≈ -BRM._brm_spl_prior_quad(target, zprobe) / 2
+    @test prior.g ≈ -Q * zprobe
+    @test Matrix(Symmetric(half.h, :L)) ≈ (Q + Matrix(Symmetric(full.h, :L))) / 2
+    @test iszero(BRM._brm_spl_prior_mode(target, pop))
+    stages = BRM._brm_lap_stages(false)
+    search = BRM._brm_spl_search(nc, stages)
+    followed = zeros(n)
+    for (k, s) in enumerate(stages)
+        @test BRM._brm_spl_stage!(target, pop, followed, s, target.tol, search, k).status ===
+            :converged
+    end
+    @test followed ≈ state.z rtol=1e-7
     draws = brm_laplace_draws(target, repeat(φ, 1, 4000); rng=Xoshiro(20261103)).draws
     z = draws[field, :]
     se = sqrt.(diag(V) ./ size(z, 2))

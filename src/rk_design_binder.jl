@@ -35,6 +35,10 @@ into that replay's lowered program.
   values). Bind them once with
   `ReactiveKernels.prepare(spec; have, want, bound=binder.fitted)` and pass the
   rest per design; values that read only them are then computed once.
+- A numeric scalar a design omits (a prior argument the fitted state carries)
+  takes the fit's value, as on `reprocess`, and stays on the cached path. It is
+  among `binder(design)`'s inputs, not `binder.fitted`: a design of another kind
+  may hold it.
 - What the program fits from those inputs alone and binding evaluates (spline
   and HSGP fits, fitted means and SDs, level sets) is taken from the first
   design of each kind and bound frozen into every later one (RKPPL's
@@ -249,6 +253,7 @@ function _rk_design_class(binder::RKDesignBinder, replay::RKBRMI, design)
     sources = Pair{Symbol,Any}[]
     derived = Symbol[]
     extents = Set(first(binding) for binding in _rk_extent_bindings(replay.plan))
+    scalars = _rk_fitted_scalars(rk)
     for (name, value) in columns
         # A computed integer extent can equal an unrelated scalar data value.
         # Replan its authored expression; value equality is not its source.
@@ -259,6 +264,13 @@ function _rk_design_class(binder::RKDesignBinder, replay::RKBRMI, design)
         # A fitted input reads the training values on every replay.
         if haskey(fitted, name) && isequal(value, fitted[name])
             push!(sources, name => _RKFixedInput(fitted[name]))
+            continue
+        end
+        # A scalar the design omits takes the fit's value on every replay
+        # (`_rk_omitted_scalars`), and the kind records that it is absent. It
+        # has no column to find, whatever other column holds an equal number.
+        if haskey(scalars, name) && !_brm_df_has_column(design, name)
+            push!(sources, name => _RKFixedInput(value))
             continue
         end
         column = _rk_design_column_of(binder, design, name, get(twins, name, nothing), value)

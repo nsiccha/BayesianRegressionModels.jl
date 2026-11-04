@@ -1057,6 +1057,17 @@ fit is compared with NUTS too. Starts (prior medians, a packed point,
 `inits`) and their refusals are covered as well. It runs in the test
 environment above.
 
+`nlme_svi_threads.jl` checks `brm_svi_fit(...; threads)` with real threads (run
+it with `--threads=4`; it refuses to run without them). The state after every
+iteration, whose Adam moments are the gradient trajectory, and the draws must equal
+the one-task run to the last bit: through exploration and polishing, beside a thread
+that allocates and collects, on nested blocks of different lengths, flat rows, a
+low-rank global factor, the default random stream, a resume at another count and a
+window fit. It also covers each worker's own samplers over shared read-only tables,
+how a failing unit stops the tasks, the BLAS pin and the refusals.
+`research/svi_threads/benchmark.jl` measures per-iteration time, GC share and retained
+worker memory against `threads`.
+
 `nlme_svi_laplace_plan.jl` checks structural eligibility for
 `GaussianBlockLaplace`, including fixed HSGP fitting inputs, nonstandard
 Gaussian coefficient priors, and named refusals for nonlinear expressions.
@@ -1110,10 +1121,33 @@ mode oracle checks the value, and finite differences check both population
 derivatives. This checks independence from previous evaluations; the
 approximation still uses one mode.
 
+`laplace_continuation.jl` checks which conditional mode the marginal uses:
+the one continuation from the prior reaches (BRM 0.2.147). One unit with a
+squared-mean and a linear Normal observation has two conditional modes on part
+of the population line. On both the whole-model and the sparse target:
+- the value and the selected mode match a scalar oracle of the followed mode
+  on both sides of the point where that mode ceases to exist, where the
+  selection switches branch;
+- an evaluation whose followed mode ceases to exist mid-way is counted in
+  `folds`;
+- finite differences match the gradient on each smooth piece;
+- the two targets agree;
+- the sparse target's `search` record names each component's stop and counts
+  its refused full steps.
+
+A log-concave Poisson model takes one stage. Run it in the test environment
+with `julia --project=test test/laplace_continuation.jl`.
+
 `start_terms.jl` checks authored term initializers and deterministic prior bases
 on StanBlocks and ReactiveKernels, with constrained read-back and coordinate
 transport, effective bounds, known values, invalid addresses and overrides.
 Run it directly in the test environment.
+
+`gmrf_laplace_start.jl` checks that the Laplace default start of a model-scope
+`gmrf` field equals its `brm_start(rk, (;); base=:prior_median)` medians, for
+declared laws, a known hyperparameter and a law reading a model-scope parameter.
+It also checks that `brm_laplace_mode` and the `brm_laplace_plan` diagnostic use
+that point, with the diagnostic at the unit point as a positive control.
 
 `start_values.jl` checks `brm_start`, initial values keyed by prior address,
 on both backends. For a correlated population-PK model, a linked predictor,
