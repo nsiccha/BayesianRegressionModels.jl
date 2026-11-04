@@ -395,7 +395,49 @@ end
     area_data = (; area=[1, 2, 3, 1, 2, 3], y=data.y, from=[1, 2], to=[2, 3], half=0.5, low=0.2)
     panel_data = (; year=[1, 2, 3, 1, 2, 3], kreis=[1, 1, 1, 2, 2, 2], y=data.y,
         C=[1.0 0.0; 0.0 1.0], scale=1.7)
+    field_data = (; east=[0.1, 0.9, 0.7, 0.3], north=[0.2, 0.4, 0.8, 0.5],
+        time=[0.0, 0.3, 0.3, 1.7], y=[0.4, -0.3, 0.2, 0.1],
+        xy=[0.0 0.0; 1 0; 1 1; 0 1; 0.5 0.5], triangles=[1 2 5; 2 3 5; 3 4 5; 4 1 5],
+        scale=1.7, rates=[1.7, 2.0, 0.5])
+    field_scale = @brm(field_data, begin
+        field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+        sd(field, gmrf((east, north), time)) ~ Exponential(1.7)
+        y ~ Normal(field, 0.2)
+    end)
     twins = (
+        "gmrf scale" => (@brm(field_data, begin
+            field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+            sd(field, gmrf((east, north), time)) ~ Exponential(scale)
+            y ~ Normal(field, 0.2)
+        end), field_scale),
+        "gmrf scale from a vector element" => (@brm(field_data, begin
+            field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+            sd(field, gmrf((east, north), time)) ~ Exponential(rates[1])
+            y ~ Normal(field, 0.2)
+        end), field_scale),
+        "gmrf scale from an assignment" => (@brm(field_data, begin
+            rate = 1.7
+            field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+            sd(field, gmrf((east, north), time)) ~ Exponential(rate)
+            y ~ Normal(field, 0.2)
+        end), field_scale),
+        "gmrf scale from a constant" => (@brm(field_data, begin
+            rate = constant(scale)
+            field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+            sd(field, gmrf((east, north), time)) ~ Exponential(rate)
+            y ~ Normal(field, 0.2)
+        end), field_scale),
+        "gmrf lengths" => (@brm(field_data, begin
+            field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+            length_scale(field, gmrf((east, north), time), space) ~ LogNormal(scale, 0.8)
+            length_scale(field, gmrf((east, north), time), time) ~ LogNormal(0.7, scale)
+            y ~ Normal(field, 0.2)
+        end), @brm(field_data, begin
+            field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+            length_scale(field, gmrf((east, north), time), space) ~ LogNormal(1.7, 0.8)
+            length_scale(field, gmrf((east, north), time), time) ~ LogNormal(0.7, 1.7)
+            y ~ Normal(field, 0.2)
+        end)),
         "gp scale" => (@brm(data, begin
             sigma ~ Exponential(1)
             mu ~ 0 + gp(x, w; jitter=.03)
@@ -516,6 +558,68 @@ end
     @test BRM._rk_value_reads!(Set{Symbol}(), :(b ~ f(g, s; k=v))) == Set([:g, :s, :v])
     @test BRM._rk_value_reads!(Set{Symbol}(), :(a = Normal.(m, t))) == Set([:m, :t])
     @test BRM._rk_value_reads!(Set{Symbol}(), :(z[1:n] .~ Normal.(0, s))) == Set([:s])
+
+    # A definition's free reads: not its parameters, locals or sampled names.
+    definition = :(block(a, b) = begin
+        s ~ Exponential(rate)
+        t = a + other
+        x[1:b] ~ Normal(s, t)
+        return x
+    end)
+    @test BRM._rk_free_reads!(Set{Symbol}(), definition) == Set([:rate, :other])
+    @test BRM._rk_free_reads!(Set{Symbol}(), :(block(a; k=1) = begin
+        s ~ Exponential(rate * k)
+        return s + a
+    end)) == Set([:rate])
+    # An ordinary function has no caller scope to read a name from.
+    @test isempty(BRM._rk_free_reads!(Set{Symbol}(), :(function helper(a)
+        return a + rate
+    end)))
+    # A block's local is no read of the data field that shares its name.
+    field_data = (; east=[0.1, 0.9, 0.7, 0.3], north=[0.2, 0.4, 0.8, 0.5],
+        time=[0.0, 0.3, 0.3, 1.7], y=[0.4, -0.3, 0.2, 0.1],
+        xy=[0.0 0.0; 1 0; 1 1; 0 1; 0.5 0.5], triangles=[1 2 5; 2 3 5; 3 4 5; 4 1 5],
+        sigma=1.7)
+    local_named = @brm field_data begin
+        field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+        y ~ Normal(field, 0.2)
+    end
+    emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(local_named))
+    @test any(d -> :sigma in BRM._rk_source_outputs!(Set{Symbol}(),
+        BRM._rk_definition_parts(d).statements), emitted.defs)
+    @test !any(s -> Meta.isexpr(s, :(=)) && first(s.args) === :sigma, emitted.main.args)
+end
+
+@stestset "a gmrf prior's data scalar replays as a block prior's does" begin
+    build = @brm begin
+        field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+        sd(field, gmrf((east, north), time)) ~ Exponential(scale)
+        y ~ Normal(field, 0.2)
+    end
+    train = (; east=[0.1, 0.9, 0.7, 0.3], north=[0.2, 0.4, 0.8, 0.5],
+        time=[0.0, 0.3, 0.3, 1.7], y=[0.4, -0.3, 0.2, 0.1],
+        xy=[0.0 0.0; 1 0; 1 1; 0 1; 0.5 0.5], triangles=[1 2 5; 2 3 5; 3 4 5; 4 1 5],
+        scale=1.7)
+    omitted = (; (k => v for (k, v) in pairs(train) if k !== :scale)...)
+    changed = merge(train, (; scale=9.0))
+    rk = RKBRMI(build(train))
+    u = point(rk)
+    @test :scale ∉ keys(rk_bound_data(rk))
+    # A design may repeat the value or omit it.
+    @test density(reprocess(rk, train), u) == density(rk, u)
+    @test density(reprocess(rk, omitted), u) == density(rk, u)
+    state = brm_fitted_state(rk)
+    @test density(RKBRMI(build(omitted), state), u) == density(rk, u)
+    binder = rk_design_binder(rk)
+    @test isequal(binder(omitted), binder(train))
+    # A design cannot change the prior, on any replay route.
+    @test_throws "changes the fitted RK program" reprocess(rk, changed)
+    @test_throws "changes the fitted RK program" RKBRMI(build(changed), state)
+    @test_throws "changes the fitted RK program" binder(changed)
+    # Positive control: the rebuild does read the new value.
+    rebuilt = reprocess(rk, changed; freeze_constants=false)
+    @test density(rebuilt, u) ≈ density(RKBRMI(build(changed)), u) rtol=1e-13
+    @test density(rebuilt, u) != density(rk, u)
 end
 
 @stestset "data-free replay preserves scalar inputs of graph constants" begin

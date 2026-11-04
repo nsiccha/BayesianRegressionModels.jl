@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.159
+
+- **`RKBRMI`: a model-scope `gmrf` prior can read data.** `sd(field, gmrf(...))
+  ~ Exponential(scale)` and a `length_scale` law failed at construction with
+  `references unknown name scale`, naming the field's internal `sigma`, while
+  `SBBRMI` accepted them. These laws now take what the 0.2.156 priors take: a
+  numeric data scalar, an expression or element over numeric data fields, a
+  literal assignment or a `name = constant(expr)`. The prior-median and Laplace
+  default starts read the value, which stays in the fitted program: a design may
+  omit the field or repeat its value, and one that changes it is refused unless
+  `freeze_constants=false`.
+
 ## 0.2.158
 
 - **Sparse Laplace cells that static Enzyme cannot take forward over reverse:**

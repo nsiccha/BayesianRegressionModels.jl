@@ -233,6 +233,19 @@ end
     _, chosen = start_pair(f, (; s0=3.0); base=:prior_median)
     @test hyper(f, chosen, :sd) ≈ median(Exponential(3.0))
 
+    # A law reading a data scalar takes its value, as a stated number does.
+    scaled = @brm begin
+        field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+        sd(field, gmrf((east, north), time)) ~ Exponential(rate)
+        length_scale(field, gmrf((east, north), time), space) ~ LogNormal(location, 0.8)
+        y ~ Normal(field, 0.2)
+    end
+    f = start_fixture(scaled, merge(data, (; rate=0.7, location=0.5)), "gmrf_data_scalar")
+    _, s = start_pair(f; base=:prior_median)
+    @test hyper(f, s, :sd) ≈ medians.sd
+    @test hyper(f, s, :spatial_length) ≈ medians.spatial_length
+    @test isfinite(BridgeStan.log_density(f.model, s))
+
     # A correlated channel axis: the sampled factor keeps its neutral identity.
     correlated = @brm begin
         Omega ~ LKJCholesky(2, 2.0)
