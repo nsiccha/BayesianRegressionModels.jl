@@ -49,7 +49,8 @@ into that replay's lowered program.
   interval or fixed domain, non-finite HSGP axis values, a `rows=` column
   that is not 0/1 or not as long as the axis, a `missing` axis value in a row
   the mask carries, a `car` area outside the fitted graph, ragged labels that
-  name no cell, and per-cell inputs whose cell counts disagree.
+  name no cell, and per-cell inputs whose cell counts disagree, and a numeric
+  scalar a prior reads or the program holds as a literal, at another value.
 - Checks of data-only model assignments read their values from the bound
   program, so derived axes, grouping keys and masks use the same cached path.
 - A model whose inputs include a value BRM derives from the design in Julia
@@ -88,16 +89,19 @@ _RKDesignChecks() = _RKDesignChecks(Any[], Any[], Pair{Symbol,Symbol}[])
 
 # One kind of design: how its inputs are read, the program lowered for it, the
 # value checks, and the definitions it binds frozen (RKPPL's `FrozenValues`, or
-# `nothing`). `derived` names the inputs that force a planned replay.
+# `nothing`). `derived` names the inputs that force a planned replay. `scalars`
+# are the numeric scalars the kind holds whose values its cached lowering cannot
+# take from a later design (`_rk_design_kept_scalars`).
 struct _RKDesignClass
     sources::Vector{Pair{Symbol,Any}}
     lowering::Any
     checks::_RKDesignChecks
     derived::Vector{Symbol}
     frozen::Any
+    scalars::Vector{Pair{Symbol,Any}}
 end
-_RKDesignClass(derived::Vector{Symbol}) =
-    _RKDesignClass(Pair{Symbol,Any}[], nothing, _RKDesignChecks(), derived, nothing)
+_RKDesignClass(derived::Vector{Symbol}) = _RKDesignClass(Pair{Symbol,Any}[], nothing,
+    _RKDesignChecks(), derived, nothing, Pair{Symbol,Any}[])
 _rk_design_planned(class::_RKDesignClass) = !isempty(class.derived)
 
 function rk_design_binder(rk::RKBRMI; resample_groups=(),
@@ -133,6 +137,8 @@ function _rk_design_plan(binder::RKDesignBinder, design)
     class = lock(() -> get(binder.classes, key, nothing), binder.lock)
     class === nothing && return _rk_design_first!(binder, key, design)
     _rk_design_planned(class) && return rk_bound_plan(_rk_design_replay(binder, design))
+    all(scalar -> isequal(_brm_df_column(design, first(scalar)), last(scalar)), class.scalars) ||
+        return rk_bound_plan(_rk_design_replay(binder, design))
     for check in class.checks.raw
         check(design)
     end
@@ -283,7 +289,17 @@ function _rk_design_class(binder::RKDesignBinder, replay::RKBRMI, design)
     # design: bound frozen, it is computed once, here, not on every binding.
     fixed = Set{Symbol}(name for (name, source) in sources if source isa _RKFixedInput)
     _RKDesignClass(sources, _rk_design_lowering(replay), checks, Symbol[],
-        _rk_design_frozen(replay, fixed))
+        _rk_design_frozen(replay, fixed), _rk_design_kept_scalars(rk, replay, design, columns))
+end
+
+# The numeric scalars this design holds that a later design of its kind must not
+# change on the cached path: those a prior reads, and those the program binds no
+# input for (a literal, or an input of `constant(...)`). A later design holding
+# another value replays in full, and `reprocess` refuses it or plans it.
+function _rk_design_kept_scalars(rk, replay, design, columns)
+    priors = _rk_prior_reads(_rk_retained_program(rk), _rk_response_names(replay.plan))
+    Pair{Symbol,Any}[name => _brm_df_column(design, name) for name in keys(_rk_fitted_scalars(rk))
+        if _brm_df_has_column(design, name) && (name in priors || !haskey(columns, name))]
 end
 
 _rk_design_checked(::Union{_RKStructuralPlan,_RKValuePlan}) = true

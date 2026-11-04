@@ -638,17 +638,17 @@ function _rk_nested_cells!(cells, value::_BRMPreparedRef, context)
     data isa Real || (value.axis === :scalar && value.name in context.parameters)
 end
 function _rk_nested_cells!(cells, value::_BRMPreparedExpr, context)
-    callable = value.callable
-    isempty(value.kwargs) && (haskey(_RK_DERIVED_BINOPS, callable) ||
-        haskey(_RK_DERIVED_CMP, callable) || haskey(_RK_DERIVED_MATH, callable) ||
-        _rk_rowwise_callable(callable)) &&
+    isempty(value.kwargs) && _rk_rowwise_callable(value.callable) &&
         all(argument -> _rk_nested_cells!(cells, argument, context), value.args)
 end
 
 # A callable whose output entry `k` depends only on entry `k` of its
 # row-aligned inputs (and on shared values), so a subject cell may evaluate it
-# on that subject's rows alone. Opt in by method (`addprop`, `src/sbimpl.jl`).
-_rk_rowwise_callable(callable) = false
+# on that subject's rows alone, and a model-scope call reads a plate's flattened
+# rows rather than its cells. BRM's elementwise arithmetic is row-wise; any other
+# callable opts in by method (`addprop`, `src/sbimpl.jl`).
+_rk_rowwise_callable(callable) = haskey(_RK_DERIVED_BINOPS, callable) ||
+    haskey(_RK_DERIVED_CMP, callable) || haskey(_RK_DERIVED_MATH, callable)
 
 # The data columns observed by a likelihood: every authored response, and
 # every kernel input this cell observes. Each is flattened under its own name.
@@ -1565,8 +1565,8 @@ function _rk_plate_cell_reads(x::_BRMPreparedExpr, cells, bind=identity)
         map(value -> _rk_plate_cell_reads(value, cells, bind), x.kwargs))
 end
 # A whole-value call reads the original cells, including their inner array
-# axes. BRM's elementwise arithmetic and direct distribution arguments keep
-# their row-aligned representation.
+# axes. A row-wise callable and a direct distribution argument keep their
+# row-aligned representation.
 _rk_plate_cell_read(x::_BRMPreparedExpr, cells, bind) =
     (!isempty(x.args) || !isempty(x.kwargs)) ?
         _rk_plate_cell_read(x.callable, x, cells, bind) : nothing
@@ -1574,9 +1574,7 @@ _rk_plate_cell_read(callable, x, cells, bind) =
     _rk_plate_whole_cell_read(callable, x, cells, bind)
 _rk_plate_cell_read(::Type{<:Distribution}, x, cells, bind) = nothing
 function _rk_plate_whole_cell_read(callable, x, cells, bind)
-    isempty(x.kwargs) && (haskey(_RK_DERIVED_BINOPS, callable) ||
-        haskey(_RK_DERIVED_CMP, callable) || haskey(_RK_DERIVED_MATH, callable)) &&
-        return nothing
+    isempty(x.kwargs) && _rk_rowwise_callable(callable) && return nothing
     any(arg -> _rk_plate_cells_ref(arg, cells) !== nothing,
         (x.args..., values(x.kwargs)...)) || return nothing
     argument(arg) = let ref = _rk_plate_cells_ref(arg, cells)

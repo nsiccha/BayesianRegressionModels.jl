@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.151
+## 0.2.155
 
 - **NLME view of a single-level categorical:** `brm_nlme_view`, and with it
   `brm_nlme_model` and `brm_nlme_fit`, no longer raise ``internal: declaration
@@ -22,6 +22,60 @@ instead of failing at run time.
   coordinate, so the model has the partition, likelihoods and gradients of the
   same model without the term. The named estimates list the term with no levels
   (`g = []`), and that value starts the model again through `inits`.
+
+## 0.2.154
+
+- **A replay refuses a changed scalar a prior reads by name:** `reprocess`,
+  `RKBRMI(brmi, state)` and `rk_design_binder` accepted a design holding another
+  value of a numeric scalar the program reads by name, such as `s` in
+  `sd(:, p) ~ Exponential(s)` over a `@plate` model, and evaluated the new prior.
+  They now raise "changes the fitted RK program", naming the field, as they
+  already did for a scalar the program holds as a literal. This covers every
+  sampled parameter's law, a `@plate` cell latent's included, and a scalar read
+  through an assignment. A scalar only a cell's values or observations read
+  stays a design input. `freeze_constants=false` still rebuilds with the new
+  prior.
+- **`rk_design_binder` refuses what `reprocess` refuses for held scalars:** after
+  the first design of a kind, a design holding another value of a scalar the
+  program holds as a literal was accepted and the value ignored. It now replays
+  in full, which refuses it. An input read only by `constant(...)` still keeps
+  its fitted value.
+- **A data-free replay supplies an omitted scalar a `@plate` cell reads:**
+  `RKBRMI(builder(design), state)` on a design without such a scalar raised a
+  lowering error, because the builder had declared no data field for it. It now
+  takes the fitted value, as every other replay of an omitted scalar does.
+
+## 0.2.153
+
+- **The sparse Laplace compiles each `@plate` cell's Hessian block at a bounded
+  Enzyme batch width.** A cell's block used to compile one batch over all its
+  integrated coordinates, and that compile grows faster than the batch: a cell
+  integrating 121 coordinates had not compiled after 2 h 37 min. Cells now
+  compile batches of 4 directions and take as many as they need, so preparation
+  no longer depends on how many coordinates a cell integrates. Values and
+  gradients are unchanged.
+- **`brm_laplace_plan` and `brm_laplace_problem` take `progress`:** a Treebars
+  node or a backend symbol such as `:state`. It reports the width screening, the
+  importance diagnostic and each observation, with a node naming a Hessian
+  block's size for the time Enzyme compiles it. `brm_laplace_problem` accepts it
+  only with `integrate`, and raises otherwise.
+
+## 0.2.152
+
+- **Fix:** on RKBRMI, `addprop` over a plate output at model scope reads the
+  plate's rows again, assigned first (`scales = addprop(reads, a, b)`) or written
+  in the law. Since 0.2.125 it received one array per cell, so preparing the model
+  worked and evaluating it raised `MethodError: no method matching
+  ^(::Vector{Float64}, ::Int64)`. An authored whole-value helper still receives
+  one value per cell.
+
+## 0.2.151
+
+- **Periodic `hsgp` under strict type stability:** `NLMEEstimation.check_protocol`
+  on a model with `hsgp(x; cov=:periodic, period=...)` no longer raises
+  `TypeInstabilityError` in a project that sets ReactiveKernels'
+  `type_stability = :error`, at any `k`. The harmonics, and every value computed
+  from them, are unchanged.
 
 ## 0.2.150
 
