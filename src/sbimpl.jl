@@ -16276,9 +16276,7 @@ _sb_grouped_port_broadcasts(_argument, _actual, ::Nothing) = false
 # whole flattened argument, it would run once per group, every group's rows
 # each time.
 function _sb_grouped_argument_ports!(ports, argument::ExprColumn, lengths)
-    f = getf(argument)
-    (haskey(_RK_DERIVED_BINOPS, f) || haskey(_RK_DERIVED_CMP, f) ||
-        haskey(_RK_DERIVED_MATH, f) || _rk_rowwise_callable(f)) || return false
+    _rk_rowwise_callable(getf(argument)) || return false
     foreach(a -> _sb_grouped_argument_ports!(ports, a, lengths), getargs(argument))
     !isempty(ports)
 end
