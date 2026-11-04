@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.164
+
+- `SBBRMI` now accepts an omitted `interval_censored(D; upper=hi)` response
+  in the unchanged model. Retained bounds and family arguments determine the
+  predictive shape; draws use the uncoarsened base law, with no interval
+  likelihood or fabricated lower endpoints. Observed interval densities and
+  predictor-side interval terms retain their semantics. Requires StanBlocks
+  0.2.21, now the package and test-environment minimum.
+
 ## 0.2.163
 
 - **Mesh `gmrf` densities at very short spatial lengths:** `RKBRMI` and `SBBRMI`
