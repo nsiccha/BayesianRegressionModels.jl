@@ -574,6 +574,8 @@ BRM._rk_pointwise_query(backend::BRM.RKBRMI) =
 BRM._rk_pointwise_values(query, u::AbstractVector) = Base.invokelatest(query, u)
 BRM._rk_nlme_cell_query(backend::BRM.RKBRMI, observations::Tuple; kwargs...) =
     prepare_cell_query(backend.model, _rk_translated(backend), observations; kwargs...)
+BRM._rk_spl_cell_whole(query::CellQuery) =
+    any(entry -> entry.status === :whole, ReactiveKernels.partition_locality(query))
 BRM._rk_nlme_cell_value(query::CellQuery, point, row::Int) =
     query(point, row)
 BRM._rk_spl_cell_batch(f, query, u) = with_cell_batch(f, query, u)

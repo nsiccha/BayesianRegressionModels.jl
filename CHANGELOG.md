@@ -23,6 +23,11 @@ instead of failing at run time.
   sampled coordinates into every cell. Retained plans, sampled subsets,
   independent problem copies and matrix-free contractions use the same
   shared-derivative path.
+- A cell with no sums takes compact operators when every value it reads is
+  computed at its rows. Otherwise it takes its strict factor outer, and is refused
+  by name if that refuses it too.
+- A factor's Hessian block compiles at the same bounded Enzyme batch width as a
+  compact cell's, and takes as many batches as it needs.
 - A `mo()` or `mo1()` term read by a subject's `@plate` cell now plans: the
   subjects' effects are declared partitioned, so its level table, which has no
   row form, is computed once per population point in the shared prefix.

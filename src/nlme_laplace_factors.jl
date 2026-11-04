@@ -184,10 +184,16 @@ end
 
 # Discover support structurally before preparing AD. Numeric zeros therefore
 # cannot remove a coordinate, and empty sums need no exemplar term call.
+#
+# With no sums the outer is the original cell, and compact operators are cheaper
+# (`_rk_spl_cell_ad`), so such a cell has no factors here unless `whole`:
+# RK computes one of its values whole in a compact cell, and strict compact
+# preparation refuses it. Its strict outer then carries the cell, or refuses it by
+# name.
 function _brm_spl_prepare_factors(backend, name, u0, ncells, integrated, population;
-        query=nothing)
+        query=nothing, whole::Bool=false)
     q = query === nothing ? _rk_spl_factor_queries(backend, name) : query
-    isempty(q.terms) && return nothing
+    isempty(q.terms) && !whole && return nothing
     zof = Dict(i => k for (k, i) in enumerate(integrated))
     pof = Dict(i => k for (k, i) in enumerate(population))
     maps = Dict{Vector{Int},Vector{Int}}()

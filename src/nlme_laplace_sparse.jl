@@ -673,6 +673,7 @@ end
 # warm cost per direction of about 0.13 ms from width 4 on.
 const _BRM_SPL_CELL_HVP_WIDTH = 4
 function _rk_spl_cell_ad end
+function _rk_spl_cell_whole end
 function _rk_spl_cell_newton end
 function _rk_spl_cell_block end
 function _rk_spl_cell_accumulate end
@@ -722,10 +723,11 @@ end
 # One observation's factors. Returns the last term number it took.
 function _brm_spl_observation_cells!(p, u0, name, expected, term, zof, pof, ad_backend, progress;
         partitioned)
-    query = _rk_nlme_cell_query(p.backend, (name,); partitioned, u0)
+    # Only the compact route evaluates this query, and only with nothing computed whole.
+    query = _rk_nlme_cell_query(p.backend, (name,); partitioned, u0, locality=:ignore)
     factors = _rk_spl_factor_queries(p.backend, name; partitioned, u0)
     prepared = _brm_spl_prepare_factors(p.backend, name, u0, length(expected),
-        p.integrated, p.population; query=factors)
+        p.integrated, p.population; query=factors, whole=_rk_spl_cell_whole(query))
     if prepared !== nothing
         prepared = _brm_spl_factor_operators(prepared, u0, ad_backend)
         cells = _rk_spl_cell_batch(factors.factors, u0) do batch
