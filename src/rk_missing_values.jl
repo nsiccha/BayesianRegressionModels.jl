@@ -56,6 +56,8 @@ function _rk_model_value_axis(value::NamedColumn, backing::ExprColumn{typeof(~)}
     _brm_observation_name(lhs) === nothing || return _rk_model_value_axis(lhs, context)
     _brm_prior_expression(rhs) && return (
         _brm_parameter_reference_axis(rhs) === :scalar ? () : nothing)
+    rhs isa ExprColumn && getf(rhs) isa BRMComponent &&
+        return _brm_component_output_axis(getf(rhs), rhs, context)
     context === nothing && return nothing
     # Reuse the predictor's actual geometry, including declared consumers and
     # group rows. The number of group levels is a coefficient axis, not this

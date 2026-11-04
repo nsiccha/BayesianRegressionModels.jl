@@ -298,7 +298,9 @@ _brm_prepared_references(x) =
 function _brm_prepare_expr(x, axes::AbstractDict{Symbol,Symbol})
     if x isa NamedColumn
         key = name(x)
-        axis = get(axes, key, parent(x) isa DataColumn ? :observation : :scalar)
+        fallback = parent(x) isa DataColumn ? :observation :
+            parent(x) isa _BRMComponentInput ? _brm_component_input_axis(parent(x)) : :scalar
+        axis = get(axes, key, fallback)
         if axis === :observation && parent(x) isa DataColumn &&
            parent(parent(x)) isa AbstractMatrix
             axis = :observation_row

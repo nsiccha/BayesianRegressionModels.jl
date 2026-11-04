@@ -804,6 +804,7 @@ _brm_submodel_declarations(_model, _inputs) = ()
 
 function _brm_submodels(plan, outputs)
     entries = NamedTuple[]
+    components = Dict(call.path => call.definition for call in brm_components(plan.parent))
     function visit!(declaration, scope, path, parent_index, root, trigger, stack)
         model = _brmd_binding(declaration.family, scope)
         _brm_consumer_submodel(model) || return nothing
@@ -811,7 +812,10 @@ function _brm_submodels(plan, outputs)
             "brm_descriptor: submodel `$(declaration.family)` calls itself.")
         inputs = declaration.keywords
         own = _brm_submodel_declarations(model, inputs)
-        push!(entries, (; name=_brm_submodel_name(declaration.family, model), model,
+        component = get(components, (path..., declaration.target), nothing)
+        component_name = component === nothing ?
+            _brm_submodel_name(declaration.family, model) : component.name
+        push!(entries, (; name=component_name, model,
                           target=declaration.target, path, parent=parent_index, root,
                           trigger, declaration, inputs, declarations=own,
                           source=_brm_submodel_source(model)))

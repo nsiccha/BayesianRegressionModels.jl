@@ -844,7 +844,8 @@ _rk_threshold_vector(name::Symbol, ::Type{_BRMThresholdPrior{false}}, n::Int) =
 
 Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         @nospecialize(program), @nospecialize(observations);
-        @nospecialize(kernels=()), @nospecialize(submodels=()))
+        @nospecialize(kernels=()), @nospecialize(submodels=()),
+        @nospecialize(value_roots=()), @nospecialize(external_inputs=()))
     context = program.context
     leveled = _rk_value_leveled_responses(observations, context.data)
     implicit = Pair{Symbol,Any}[parameter for entry in values(leveled)
@@ -864,6 +865,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     threshold_vectors = [_rk_threshold_vector(p) for p in prepared.parameters
         if p.name in implicit_names && !(p.name in coefficients)]
     roots = Set{Symbol}(observation.key for observation in observations)
+    union!(roots, value_roots)
     routes = (kernels..., submodels...)
     dependencies = Dict(op.name => op.dependencies for op in program.operations)
     for route in routes
@@ -886,6 +888,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     assignments = Tuple(operations[name] for name in program.order if haskey(operations, name))
     parameter_names = Set{Symbol}(p.name for p in prepared.parameters)
     assignment_names = Set{Symbol}(a.name for a in assignments)
+    union!(assignment_names, external_inputs)
     consts = _rk_data_constants!(Dict{Symbol,Float64}(a.name => Float64(a.expression)
         for a in ordinary_assignments if a.expression isa Number), context.data)
     parameters = _rk_plan_parameters!(prepared, context.data, consts,
@@ -1163,9 +1166,12 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     authored = union(Set(a.name for a in plan.assignments),
         (p.name for p in plan.regression.predictors),
         Iterators.flatten(values(kernel_outputs)))
+    densities = union(Set(c.source for c in plan.completions if c.totals !== nothing),
+        Set(a.name for a in plan.assignments if a isa _RKPreparedSubmodelAssignment &&
+            !isempty(a.observed)))
     _rk_scalar_lone_intercepts(
         _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
             _rk_observed_names(plan); retained=authored, coordinates,
-            densities=Set(c.source for c in plan.completions if c.totals !== nothing)),
+            densities),
         lone_intercepts)
 end

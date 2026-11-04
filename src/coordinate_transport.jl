@@ -1565,11 +1565,12 @@ end
 function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         kind::Symbol, target::Symbol, rk, d, stan, stan_pos;
         only_declaration::Union{Nothing,Symbol}=nothing, relation::Symbol=:identity,
-        carrier::Union{Nothing,Symbol}=nothing, physical_value::Union{Nothing,Symbol}=nothing)
+        carrier::Union{Nothing,Symbol}=nothing, physical_value::Union{Nothing,Symbol}=nothing,
+        context::Tuple=(), declaration_scope::Symbol=target)
     owned = Dict{String,BRMOutput}(String(o.name) => o for o in d.outputs
         if !isnothing(o.declaration) && o.declaration.target === target &&
-            o.kind === :parameter)
-    prefix = string(target, ".")
+            o.declaration.context == context && o.kind === :parameter)
+    prefix = string(declaration_scope, ".")
     declarations = Symbol[]
     entries = Dict{Symbol,Vector{Any}}()
     for (rk_name, transform) in zip(_rk_layout_coordinate_names(rk),
@@ -1584,7 +1585,10 @@ function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
     end
     stan_declaration = carrier
     for declaration in declarations
-        carrier = replace(String(something(stan_declaration, declaration)), '.' => '_')
+        local_path = chop(String(declaration); head=length(prefix), tail=0)
+        carrier = stan_declaration === nothing ?
+            string(join((context..., target), "_"), "_", replace(local_path, '.' => '_')) :
+            replace(String(stan_declaration), '.' => '_')
         output = get(owned, carrier, nothing)
         isnothing(output) && continue
         elements = sort(entries[declaration]; by=e -> reverse(e.index))
@@ -1593,6 +1597,7 @@ function _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
             "brm_coordinate_transport: RK declaration `$declaration` mixes layout " *
             "transforms $(Tuple(transforms))")
         address = (; kind, target, declaration)
+        isempty(context) || (address = (; address..., scope=context))
         physical_value === nothing || (address = (; address..., value=physical_value))
         if only(transforms) === :simplex
             _brm_transport_simplex!(pairs, simplexes, address,
@@ -1629,6 +1634,13 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:submodel}, record, rk, d, stan, stan_pos)
     _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         :submodel, record.target, rk, d, stan, stan_pos)
+end
+
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:cell_component}, record, rk, d, stan, stan_pos)
+    _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
+        :submodel, record.name, rk, d, stan, stan_pos;
+        context=(record.kernel,), declaration_scope=record.declaration)
 end
 
 # A stratified `gr(g, by=b)` block: each stratum's scales and correlation

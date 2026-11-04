@@ -1,5 +1,13 @@
 # Running the tests
 
+`scoped_components.jl` checks function-style BRM components with independent
+local priors, explicit shared inputs, nested calls, vector results, and plate
+cells. It compares normalized densities and native Reverse gradients with
+independent references and compiled Stan, and checks source/documentation
+inspection, row selection, offsets, and frozen or refitted preprocessing.
+Run it as a standalone script in the test environment; StanBlocks 0.2.25
+preserves keyword labels when a component is called inside a plate.
+
 `adaptive_centering_bounds.jl` checks bounded random-effect scales against
 BridgeStan's constrained values, correlated centered and noncentered maps,
 their Jacobians, Enzyme gradients, centered replay, and stable log-scale tails.
