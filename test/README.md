@@ -924,8 +924,11 @@ block over two predictors. RK prepares each strictly with the subjects' effects
 declared partitioned, and the level table, which has no row form, is computed
 once per population point. Cell values and full partition gradients match the
 whole model's pointwise densities and central differences, and no subject reads
-another subject's effect. `brm_nlme_model` matches the same reference. It runs
-in the test environment above.
+another subject's effect. `brm_nlme_model` matches the same reference. A planned
+sparse Laplace problem integrates the subjects' effects past the same term, one
+component per subject: its value matches a Laplace marginal computed from the
+whole model's density, and its gradient matches central differences. It runs in
+the test environment above.
 
 `nlme_nested.jl` uses a public synthetic model with interleaved observations
 and 1, 2, and 3 nested units per subject. It checks explicit ownership,
