@@ -82,6 +82,46 @@ end
     @test parent(parent(chains)[2].theta) == raw.theta[1:2]
 end
 
+@testset "RK plate outputs are labelled by cell" begin
+    rk = RKBRMI(@brm (; dose=[1.0, 2.0], t=[[0.5, 1.0], [0.25, 1.5, 2.0]],
+            y=[[0.9, 0.8], [1.7, 1.1, 0.9]]) begin
+        log_k ~ Normal(0, 0.5)
+        @plate for i in eachindex(dose)
+            conc[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
+            total[i] = sum(conc[i])
+            grid[i] = hcat(conc[i], 2.0 .* conc[i])
+            y[i] ~ Normal(conc[i], 0.5)
+        end
+    end)
+    U = reshape([-0.1, 0.2, 0.5], 1, :)
+    names = (:conc, :total, :grid, :log_k)
+    raw = rk_draw_values(rk, U, names)
+    tree = rk_draw_tree(rk, U, names)
+    # Vector cells: :draw, :cell, :element, over the values `rk_draw_values` gives.
+    @test coords(tree.conc, :draw) == 1:3
+    conc = parent(tree.conc)[2]
+    @test coords(conc, :cell) == 1:2
+    @test coords(parent(conc)[2], :element) == 1:3
+    @test parent(parent(conc)[2]) == raw.conc[2][2]
+    # Number cells: :draw, :cell.
+    total = parent(tree.total)[3]
+    @test coords(total, :cell) == 1:2
+    @test parent(total) == raw.total[3]
+    # Matrix cells: :draw, :cell, :row, :column.
+    grid = parent(parent(tree.grid)[1])[2]
+    @test coords(grid, :row) == 1:3
+    @test coords(grid, :column) == 1:2
+    @test parent(grid) == raw.grid[1][2]
+    # A value that is not a plate output keeps its labels.
+    @test parent(tree.log_k) == raw.log_k
+    # Per chain, as for any value.
+    chains = rk_draw_tree(rk, [U, view(U, :, 1:2)], (:conc,))
+    @test coords(chains, :chain) == 1:2
+    # A saved result holds only shapes: nested values raise, naming the other form.
+    @test_throws "rk_draw_tree(rk, U, names) labels the cells" rk_draw_tree(raw)
+    @test parent(parent(rk_draw_tree((; total=raw.total)).total)[1]) == raw.total[1]
+end
+
 @testset "draw trees over a fitted hierarchical model" begin
     (; d, problem, U, C, names) = fitted_fixture()
     @test all(all(isfinite, c) for c in C)

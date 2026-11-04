@@ -82,9 +82,12 @@ function brm_conditional_tree end
 The named values returned by `rk_draw_values` as a TreeArrays record of
 per-name `:draw` trees. Like `rk_draw_values`, **columns** of `U` are draws.
 Scalar values are stored directly; vector-valued draws stay separate, with
-their actual element indices, rather than being stacked. A vector of
-per-chain matrices adds `:chain`. Requires `using TreeArrays`.
+their actual element indices, rather than being stacked. A `@plate` output has
+`:cell` below `:draw`, then `:element` for a vector cell or `:row` × `:column`
+for a matrix cell. A vector of per-chain matrices adds `:chain`. Requires
+`using TreeArrays`.
 The second form labels an existing `rk_draw_values` result without querying
-the model again or copying its values.
+the model again or copying its values. It sees only shapes, so a nested value,
+a plate output's cells included, raises an error there.
 """
 function rk_draw_tree end
