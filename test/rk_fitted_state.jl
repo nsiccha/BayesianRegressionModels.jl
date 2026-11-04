@@ -519,3 +519,233 @@ end
     # data-free state can carry it (snag `no-data-free-exp-fec940cb`).
     @test_throws "thin-plate" brm_fitted_state(RKBRMI(FM.thin_plate(TRAIN)))
 end
+
+# Snag `rk-replay-read-s-1ec7a5c5`. A correlated block's scale prior, a cell
+# latent's law and an assignment a prior reads keep a numeric scalar a read in
+# the program, so the program is the same at any value and its identity check
+# cannot see a design change it. `SCALAR_*` are one model's rows on each path.
+const SCALAR_TRAIN = (; subject=[1, 2, 3], w=[1.0, 2.0, 3.0], t=[[0.5, 1.0], [0.25], [1.0, 2.0]],
+    y=[[0.1, 0.2], [0.2], [0.3, 0.1]])
+const SCALAR_DESIGN = (; subject=[1, 2, 3], w=[1.5, 2.5, 0.5], t=[[0.5], [1.0, 2.0], [0.75]],
+    y=[[0.3], [-0.4, 0.2], [0.6]])
+const SCALAR_LATER = (; subject=[3, 2, 1], w=[0.5, 1.0, 2.0], t=[[1.5], [0.5], [2.5, 0.25]],
+    y=[[0.2], [0.1], [-0.3, 0.4]])
+const SCALAR_NEW = merge(SCALAR_DESIGN, (; subject=[101, 102, 103]))
+scalar_equal(a, b) = Set(keys(a)) == Set(keys(b)) && all(k -> isequal(a[k], b[k]), keys(a))
+
+const PRIOR_READS = (
+    "a correlated block's scale" => brm(quote
+        sigma ~ Exponential(1)
+        log_a ~ 1 + w + (1 | p | subject)
+        log_b ~ 1 + (1 | p | subject)
+        sd(:, p) ~ Exponential(s)
+        @plate for i in eachindex(log_a)
+            mu = log_a[i] .+ log_b[i] .* t[i]
+            y[i] ~ Normal(mu, sigma)
+        end
+    end; mod=FM),
+    "one block's scale" => brm(quote
+        sigma ~ Exponential(1)
+        log_a ~ 1 + w + (1 | subject)
+        sd(log_a, subject) ~ Exponential(s)
+        @plate for i in eachindex(log_a)
+            mu = log_a[i] .+ t[i]
+            y[i] ~ Normal(mu, sigma)
+        end
+    end; mod=FM),
+    "through an assignment" => brm(quote
+        sigma ~ Exponential(1)
+        doubled = 2 * s
+        log_a ~ 1 + w + (1 | p | subject)
+        log_b ~ 1 + (1 | p | subject)
+        sd(:, p) ~ Exponential(doubled)
+        @plate for i in eachindex(log_a)
+            mu = log_a[i] .+ log_b[i] .* t[i]
+            y[i] ~ Normal(mu, sigma)
+        end
+    end; mod=FM),
+    "read by a cell as well" => brm(quote
+        sigma ~ Exponential(1)
+        log_a ~ 1 + w + (1 | p | subject)
+        log_b ~ 1 + (1 | p | subject)
+        sd(:, p) ~ Exponential(s)
+        @plate for i in eachindex(log_a)
+            mu = s .* log_a[i] .+ log_b[i] .* t[i]
+            y[i] ~ Normal(mu, sigma)
+        end
+    end; mod=FM),
+    "a cell latent's law" => brm(quote
+        sigma ~ Exponential(1)
+        log_a ~ 1 + w + (1 | subject)
+        @plate for i in eachindex(log_a)
+            z ~ Normal(0, s)
+            mu = log_a[i] .+ z .* t[i]
+            y[i] ~ Normal(mu, sigma)
+        end
+    end; mod=FM),
+)
+
+@stestset "a replay refuses a changed scalar a prior reads by name" begin
+    for (label, build) in PRIOR_READS
+        @testset "$label" begin
+            train = merge(SCALAR_TRAIN, (; s=1.7))
+            rk = RKBRMI(build(train))
+            state = brm_fitted_state(rk)
+            @test state.scalars[:s] == train.s
+            held(data, value=train.s) = merge(data, (; s=value))
+            free = RKBRMI(build(SCALAR_DESIGN), state)
+            frozen = reprocess(rk, SCALAR_DESIGN)
+            u = point(frozen)
+            @test density(free, u) == density(frozen, u)
+            # The same value held by the design, omitted or not, is the same density.
+            @test density(reprocess(rk, held(SCALAR_DESIGN)), u) == density(frozen, u)
+            for fitted in (rk, free)
+                for (data, groups) in ((SCALAR_DESIGN, ()), (SCALAR_NEW, (:subject,)))
+                    label == "a cell latent's law" && !isempty(groups) && continue
+                    @test reprocess(fitted, held(data); resample_groups=groups) isa RKBRMI
+                    changed = held(data, 9.0)
+                    @test_throws "changes the fitted RK program" reprocess(fitted, changed; resample_groups=groups)
+                    @test_throws "prior input: s = 9.0" reprocess(fitted, changed; resample_groups=groups)
+                end
+                # A binder refuses it after the first design of the kind too.
+                binder = rk_design_binder(fitted)
+                @test scalar_equal(binder(held(SCALAR_DESIGN)),
+                    rk_bound_data(reprocess(fitted, held(SCALAR_DESIGN))))
+                @test scalar_equal(binder(held(SCALAR_LATER)),
+                    rk_bound_data(reprocess(fitted, held(SCALAR_LATER))))
+                @test_throws "changes the fitted RK program" binder(held(SCALAR_LATER, 9.0))
+                @test !occursin("replayed in full", sprint(show, binder))
+            end
+            changed = held(SCALAR_DESIGN, 9.0)
+            @test_throws "changes the fitted RK program" RKBRMI(build(changed), state)
+            @test_throws "prior input: s = 9.0" RKBRMI(build(changed), state)
+            # The value reaches the density, and the sanctioned rebuild takes it.
+            fresh = reprocess(rk, changed; freeze_constants=false)
+            @test density(fresh, u) == density(RKBRMI(build(changed)), u)
+            @test density(fresh, u) != density(frozen, u)
+        end
+    end
+end
+
+@stestset "a scalar equal to the fitted value passes whatever its numeric type" begin
+    # The same number is the same prior; the literal route folds both to Float64.
+    build = last(first(PRIOR_READS))
+    rk = RKBRMI(build(merge(SCALAR_TRAIN, (; s=2.0))))
+    @test rk_bound_data(reprocess(rk, merge(SCALAR_DESIGN, (; s=2)))).s == 2
+end
+
+@stestset "a scalar a cell reads as data stays a design input" begin
+    noise = brm(quote
+        log_a ~ 1 + w + (1 | subject)
+        @plate for i in eachindex(log_a)
+            mu = log_a[i] .+ t[i]
+            y[i] ~ Normal(mu, s)
+        end
+    end; mod=FM)
+    dosed = brm(quote
+        sigma ~ Exponential(1)
+        log_a ~ 1 + w + (1 | subject)
+        @plate for i in eachindex(log_a)
+            mu = s .* exp.(log_a[i]) .* t[i]
+            y[i] ~ Normal(mu, sigma)
+        end
+    end; mod=FM)
+    for build in (noise, dosed)
+        rk = RKBRMI(build(merge(SCALAR_TRAIN, (; s=1.7))))
+        state = brm_fitted_state(rk)
+        changed = merge(SCALAR_DESIGN, (; s=9.0))
+        base = reprocess(rk, SCALAR_DESIGN)
+        u = point(base)
+        for fitted in (rk, RKBRMI(build(SCALAR_DESIGN), state))
+            replay = reprocess(fitted, changed)
+            @test density(replay, u) != density(base, u)
+            # These rows hold every fitted level, so nothing else is frozen.
+            @test density(replay, u) == density(RKBRMI(build(changed)), u)
+            binder = rk_design_binder(fitted)
+            for design in (merge(SCALAR_DESIGN, (; s=1.7)), merge(SCALAR_LATER, (; s=9.0)))
+                @test scalar_equal(binder(design), rk_bound_data(reprocess(fitted, design)))
+            end
+            @test !occursin("replayed in full", sprint(show, binder))
+        end
+        @test density(RKBRMI(build(changed), state), u) == density(reprocess(rk, changed), u)
+    end
+end
+
+@stestset "a binder refuses a changed scalar the program holds as a literal" begin
+    # The program holds no input for it, so a later design's value had no way in
+    # and was dropped, where `reprocess` refuses that same design.
+    build = brm(quote
+        sigma ~ Exponential(s)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+    end; mod=FM)
+    train = (; x=[-2.0, 1.0, 4.0], y=[0.2, 0.7, -0.1], s=1.7)
+    design = (; x=[2.0, 5.0], y=[0.3, -0.4], s=1.7)
+    rk = RKBRMI(build(train))
+    for fitted in (rk, RKBRMI(build(without(design, :s)), brm_fitted_state(rk)))
+        binder = rk_design_binder(fitted)
+        binder(design)
+        later = (; x=[1.0], y=[0.5])
+        @test scalar_equal(binder(merge(later, (; s=train.s))),
+            rk_bound_data(reprocess(fitted, merge(later, (; s=train.s)))))
+        @test_throws "changes the fitted RK program" binder(merge(later, (; s=9.0)))
+    end
+end
+
+@stestset "a constant's input a prior reads through it keeps its fitted value" begin
+    build = brm(quote
+        sigma ~ Exponential(1)
+        anchor_fit = constant(anchor)
+        scale = abs(anchor_fit)
+        log_a ~ 1 + w + (1 | p | subject)
+        log_b ~ 1 + (1 | p | subject)
+        sd(:, p) ~ Exponential(scale)
+        @plate for i in eachindex(log_a)
+            mu = log_a[i] .+ log_b[i] .* t[i]
+            y[i] ~ Normal(mu, sigma)
+        end
+    end; mod=FM)
+    rk = RKBRMI(build(merge(SCALAR_TRAIN, (; anchor=-0.8))))
+    base = reprocess(rk, SCALAR_DESIGN)
+    u = point(base)
+    @test density(reprocess(rk, merge(SCALAR_DESIGN, (; anchor=9.0))), u) == density(base, u)
+    binder = rk_design_binder(rk)
+    for design in (merge(SCALAR_DESIGN, (; anchor=9.0)), merge(SCALAR_LATER, (; anchor=4.0)))
+        @test scalar_equal(binder(design), rk_bound_data(reprocess(rk, design)))
+    end
+end
+
+@stestset "a prior read is what a sampled parameter's law reads" begin
+    defs = Expr[
+        :(effects(X, n, loc, scale) = begin
+            beta[1:n] .~ Normal.(loc, scale)
+            return X * beta
+        end),
+        # `~` on a parameter observes what the caller passes.
+        :(observed_part(v, m, noise) = begin
+            v ~ Normal(m, noise)
+        end),
+        :(nested(g, scale) = begin
+            inner ~ effects(g, 2, 0.0, scale)
+            return inner
+        end),
+    ]
+    main = quote
+        a = 2 .* q
+        b ~ effects(X, n, loc_in, a)
+        c ~ restricted(Normal(0, rate), 0.0, Inf)
+        e ~ observed_part(w, m_in, noise_in)
+        f ~ nested(G, nested_scale)
+        @plate for i in eachindex(t)
+            z[i] .~ Normal.(0, cell_scale)
+            mu = dose .* t[i]
+            out[i] = mu
+        end
+        @plate for i in eachindex(y)
+            y[i] .~ Normal.(out[i], known_sd)
+        end
+    end
+    reads = BRM._rk_prior_reads(BRM._RKEmittedProgram(defs, main), (:y,))
+    @test issubset((:loc_in, :a, :q, :rate, :cell_scale, :nested_scale), reads)
+    @test isdisjoint(reads, (:X, :n, :G, :w, :m_in, :noise_in, :dose, :t, :out, :known_sd, :y))
+end

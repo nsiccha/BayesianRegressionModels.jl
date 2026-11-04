@@ -16,7 +16,9 @@
 #
 # The replay's emitted program must equal the fit's, statement for statement:
 # anything a fit site still derived from the new data would show up as a
-# different literal, and is refused rather than evaluated.
+# different literal, and is refused rather than evaluated. A numeric scalar a
+# sampled parameter's law reads by name has no literal to differ, so its value
+# must equal the fit's too (`_rk_check_replay_priors`).
 #
 # A design may omit responses (prediction). Each omitted response plans as a
 # `_BRMAbsentResponse`: the fit's route, no values. It is never bound, and
@@ -57,6 +59,13 @@ so authored values (`want=(:mu,)`, `@plate` cell outputs) evaluate on the new
 rows, while the density and other queries that read an omitted response are
 refused, naming it. A model whose planning reads the response values (for
 example an `mi(y)` response or a bounded likelihood) needs them.
+
+A supplied numeric scalar a prior reads must equal the fitted value, or the
+replay is refused: a design cannot change a fitted prior. That covers every
+sampled parameter's law, a `@plate` cell latent's included, and a scalar it
+reads through an assignment. A scalar only a `@plate` cell's values or
+observations read (a dose, a known observation scale) is a design input, and
+takes the design's value.
 """
 function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
         resample_groups=(), held_out=_rk_held_out_names(rk.plan))
@@ -96,6 +105,7 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
     retained = _rk_retained_program(rk)
     replayed = _rk_emit_ast(plan)
     _rk_check_replay_program(retained, replayed; prefix)
+    _rk_check_replay_priors(replayed, plan, _rk_scalar_data(parent(rk)), new_data; prefix)
     _rk_check_replay_terms(plan; prefix)
     _rk_check_replay_groupings(plan, groups; prefix)
     # The fit's program, translated once, binds the replay's data too, unless
@@ -334,13 +344,104 @@ function _rk_training_columns(brmi::BRMI)
     merge!(columns, _brm_backend_context(brmi; retain_mm_sources=true).data)
 end
 
-# Numeric scalar inputs become literals in the fitted program. They carry no
-# training rows and can supply omitted replay fields. Present fields still go
-# through program identity checks, so a design cannot silently change a prior.
+# A fit's numeric scalar inputs. They carry no training rows and can supply
+# omitted replay fields. A present field cannot silently change a prior: where
+# the fitted program holds it as a literal, the program identity check sees the
+# change; where the program reads it by name, `_rk_check_replay_priors` does.
 _rk_scalar_data(brmi::BRMI) = Dict{Symbol,Any}(name => deepcopy(value)
     for (name, value) in _rk_training_columns(brmi) if value isa Real)
 _rk_omitted_scalars(scalars, new_data) = Dict{Symbol,Any}(name => value
     for (name, value) in scalars if !_brm_df_has_column(new_data, name))
+
+# The names the laws of a program's sampled declarations read, directly or
+# through the assignments they read. An observation's law is no prior, and a
+# callee's arguments count only where its own laws read them: a component's
+# design matrix reads no prior, its location and scale do.
+_rk_prior_reads(emitted::_RKEmittedProgram, observed) = _rk_law_inputs(emitted.main,
+    Set{Symbol}(observed), Dict{Symbol,Any}(part.name => part
+        for part in map(_rk_definition_parts, emitted.defs)), Dict{Symbol,Set{Symbol}}())
+
+function _rk_definition_parts(definition)
+    body = Meta.isexpr(definition, :macrocall) ?
+        only(filter(arg -> !(arg isa LineNumberNode), definition.args[2:end])) : definition
+    signature, statements = body.args
+    parameter(arg) = Meta.isexpr(arg, :(::)) ? first(arg.args) : arg
+    (; name=first(signature.args), parameters=map(parameter, signature.args[2:end]), statements)
+end
+
+function _rk_law_inputs(statements, observed, callees, inputs)
+    reads = Set{Symbol}()
+    assigned = Dict{Symbol,Vector{Any}}()
+    _rk_scan_laws!(reads, assigned, statements, observed, callees, inputs)
+    pending = collect(reads)
+    while !isempty(pending)
+        for value in get(assigned, pop!(pending), ()), name in _rk_value_names!(Symbol[], value)
+            name in reads || (push!(reads, name); push!(pending, name))
+        end
+    end
+    reads
+end
+
+_rk_scan_laws!(_reads, _assigned, _statement, _observed, _callees, _inputs) = nothing
+function _rk_scan_laws!(reads, assigned, statement::Expr, observed, callees, inputs)
+    scan(s) = _rk_scan_laws!(reads, assigned, s, observed, callees, inputs)
+    if statement.head === :call && length(statement.args) == 3 &&
+            first(statement.args) in (:~, :.~)
+        _rk_emitted_observation_name(statement.args[2]) in observed ||
+            _rk_law_reads!(reads, statement.args[3], callees, inputs)
+    elseif statement.head === :(=)
+        for name in _rk_source_lhs!(Set{Symbol}(), first(statement.args))
+            push!(get!(assigned, name, Any[]), last(statement.args))
+        end
+    elseif statement.head === :for
+        scan(last(statement.args))
+    elseif statement.head in (:macrocall, :block)
+        foreach(scan, statement.args)
+    end
+    nothing
+end
+
+function _rk_law_reads!(reads, law, callees, inputs)
+    callee = Meta.isexpr(law, :call) ? get(callees, first(law.args), nothing) : nothing
+    callee === nothing && return _rk_value_names!(reads, law)
+    # Inside a definition, `~` on a parameter observes what the caller passes.
+    used = get!(inputs, callee.name) do
+        _rk_law_inputs(callee.statements, Set{Symbol}(callee.parameters), callees, inputs)
+    end
+    arguments = law.args[2:end]
+    length(arguments) == length(callee.parameters) || return _rk_value_names!(reads, law)
+    for (parameter, argument) in zip(callee.parameters, arguments)
+        parameter in used && _rk_value_names!(reads, argument)
+    end
+    reads
+end
+
+# The names a value reads: not call heads, broadcast callees or keyword names.
+_rk_value_names!(names, _value) = names
+_rk_value_names!(names, value::Symbol) = push!(names, value)
+function _rk_value_names!(names, value::Expr)
+    skip = value.head in (:call, :kw, :macrocall) ||
+        (value.head === :. && !(last(value.args) isa QuoteNode)) ? 1 : 0
+    foreach(arg -> _rk_value_names!(names, arg), value.args[skip+1:end])
+    names
+end
+
+# A scalar the program reads by name is the same program at any value, so the
+# identity check cannot see a design change the law that reads it. Refuse it
+# with that check's error. A scalar no law reads is a design input.
+function _rk_check_replay_priors(emitted, plan, scalars, new_data; prefix)
+    reads = _rk_prior_reads(emitted, _rk_response_names(plan))
+    fitted, replay = String[], String[]
+    for name in sort!(collect(intersect(reads, keys(scalars))))
+        _brm_df_has_column(new_data, name) || continue
+        value = _brm_df_column(new_data, name)
+        isequal(value, scalars[name]) && continue
+        shown = sprint(show, value; context=:limit => true)
+        push!(fitted, "prior input: $name = $(scalars[name])")
+        push!(replay, "prior input: $name = $shown")
+    end
+    _rk_check_replay_program(fitted, replay; prefix)
+end
 
 # What a frozen replay fits from (`_BRMFrozenReplay`): the fit's data columns
 # and each data-only assignment's training value, which a fit
