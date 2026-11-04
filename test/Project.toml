@@ -143,6 +143,8 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # helpers, used by the native GMRF normalized sparse density.
 # 009f4180 (0.2.19) adds indexed /= for its sparse solve and prior RNG.
 # 61fa161f (0.2.20) gives cell-owned bindings explicit lexical local scope.
+# ef55b84f (0.2.21) predicts upper-only intervals with their response omitted.
+# b43fc26d (0.2.24) predicts censored responses whose bound is the omitted response.
 # dba65366 (0.2.25) preserves keyword labels when a plate renames its
 # inputs, including BRM component calls whose formal and actual names match.
 rev = "dba6536683e8c226f2e74823856d0d85e7ad02a2"

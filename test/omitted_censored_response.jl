@@ -5,7 +5,8 @@
 using Test
 using BayesianRegressionModels, StanBlocks
 using BridgeStan, LogDensityProblems
-using Distributions: Exponential, Normal
+using Distributions: Exponential, Normal, logpdf, logcdf, logccdf
+using Statistics: mean, var
 
 const BRM = BayesianRegressionModels
 
@@ -85,4 +86,69 @@ end
     @test LogDensityProblems.logdensity(problem, x) ≈
           LogDensityProblems.logdensity(expected, x) rtol=1e-12
     @test brm_output(brm_descriptor(sb), :y; role=:posterior_predictive).name === :y_gen
+end
+
+const self_bound_builders = (
+    @brm(begin
+        mu ~ Normal(0.0, 1.0)
+        location = mu + x
+        y ~ censored(Normal(location, 0.8); lower=y)
+    end),
+    @brm(begin
+        mu ~ Normal(0.0, 1.0)
+        location = mu + x
+        y ~ censored(Normal(location, 0.8); upper=y)
+    end))
+const self_bound_data = (; x=[-0.5, 0.2, 1.1], y=[-0.2, 0.4, 1.5])
+
+@testset "a response used as its own censoring endpoint retains observed evidence" begin
+    for (builder, logmass) in zip(self_bound_builders, (logcdf, logccdf))
+        sb = SBBRMI(builder(self_bound_data); mod=@__MODULE__, total_groups=())
+        problem = BRM.stan_instantiate(sb)
+        @test BridgeStan.param_unc_names(problem.model) == ["mu"]
+        expected(mu) = logpdf(Normal(), mu) + sum(
+            logmass(Normal(mu + x, 0.8), y)
+            for (x, y) in zip(self_bound_data.x, self_bound_data.y))
+        q = [0.3]
+        gradient = similar(q)
+        lp, _ = BridgeStan.log_density_gradient!(problem.model, q, gradient;
+            propto=false, jacobian=true)
+        @test lp ≈ expected(only(q)) atol=1e-10
+        h = 1e-5
+        @test only(gradient) ≈ (expected(0.3 + h) - expected(0.3 - h)) / (2h) atol=1e-7
+    end
+    independent_bound = @brm begin
+        y ~ censored(Normal(x, 0.8); lower=cutoff)
+    end
+    @test_throws "must be backed by observed data" SBBRMI(
+        independent_bound((; x=self_bound_data.x)); mod=@__MODULE__)
+    @test_throws "must be backed by observed data" SBBRMI(
+        independent_bound(self_bound_data); mod=@__MODULE__)
+end
+
+@testset "omitted self-bound censoring draws the base family" begin
+    for builder in self_bound_builders
+        prior_data = omit(self_bound_data, :y)
+        before = deepcopy(prior_data)
+        sb = SBBRMI(builder(prior_data); mod=@__MODULE__, total_groups=())
+        @test isequal(prior_data, before)
+        @test stanc_ok(sb)
+        problem = BRM.stan_instantiate(sb)
+        @test LogDensityProblems.dimension(problem) == 0
+        names = BridgeStan.param_names(problem.model; include_tp=true, include_gq=true)
+        coordinates = brm_output_coordinates(
+            brm_output(brm_descriptor(sb), :y; role=:posterior_predictive), names)
+        @test length(coordinates) == length(self_bound_data.x)
+        original = [findfirst(==("y.$i"), names) for i in eachindex(self_bound_data.x)]
+        location = findfirst(==("mu"), names)
+        rng = BridgeStan.StanRNG(problem.model, 31)
+        draws = [BridgeStan.param_constrain(problem.model, Float64[];
+            include_tp=true, include_gq=true, rng) for _ in 1:256]
+        @test all(d -> d[coordinates] == d[original], draws)
+        residuals = [(d[c] - d[location] - x) / 0.8
+                     for d in draws for (c, x) in zip(coordinates, self_bound_data.x)]
+        @test all(isfinite, residuals)
+        @test mean(residuals) ≈ 0.0 atol=0.1
+        @test var(residuals) ≈ 1.0 atol=0.15
+    end
 end

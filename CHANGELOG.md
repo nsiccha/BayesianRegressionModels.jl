@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.169
+## 0.2.170
 
 - `@brm function component(inputs...) … return value end` defines a reusable
   component for both StanBlocks and ReactiveKernels. Each `result ~ component(...)`
@@ -35,6 +35,20 @@ instead of failing at run time.
   lowering and replay. This requires ReactiveKernelsPPL 0.1.93. Complete BRM
   records retain element-specific prior addresses when several coefficients
   share one emitted array declaration.
+
+## 0.2.169
+
+- `SBBRMI` now accepts an omitted `interval_censored(D; upper=hi)` response
+  in the unchanged model. Retained bounds and family arguments determine the
+  predictive shape; draws use the uncoarsened base law, with no interval
+  likelihood or fabricated lower endpoints. Observed interval densities and
+  predictor-side interval terms retain their semantics.
+- A censored response may also omit its own endpoint: keep
+  `y ~ censored(D; lower=y)` or `upper=y` unchanged and omit `y`. Only that
+  endpoint disappears for prediction; independent retained bounds still clamp
+  the draw. Observed CDF/CCDF evidence and missing-independent-bound validation
+  are unchanged. Requires StanBlocks 0.2.24, now the package and
+  test-environment minimum.
 
 ## 0.2.168
 

@@ -840,6 +840,13 @@ draw their bound twin's law, a continuous omitted response spells
 `logistic` as `inv_logit`, and a `@plate` cell's `BetaBinomial2` has the
 density of its `beta_binomial` spelling and lowers omitted.
 
+`omitted_interval_response.jl` checks response-omitted interval observations:
+zero-dimensional joint prior draws, uncoarsened base-law moments, predictive
+twins, retained row reads and scalar/dense/ragged bound shapes. It also checks
+the observed interval mass and gradient, a fitted response beside an omitted
+interval, bound validation, and the sole-term interval predictor spelling.
+Requires StanBlocks 0.2.21; the bootstrap pins its published omission fix.
+
 `truncated_low_mass_draws.jl` draws omitted `truncated` responses whose window
 holds almost none of the base law's mass: a two-sided `NegativeBinomial2`
 count class in [1, 9] and [250, 1e7] around a mean of 70, its one-sided tails,
