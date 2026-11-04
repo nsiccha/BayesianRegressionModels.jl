@@ -325,6 +325,199 @@ end
     check_data_free(build, brm_fitted_state(prediction), rk, design)
 end
 
+@stestset "a block prior's data scalar stays a literal of the regression program" begin
+    # Snag `rk-sd-prior-data-fecc0c41`. A random-effect block reads its prior's
+    # inputs by name, and nothing defined that name on the regression route, so
+    # binding failed with "references unknown name". It takes the replay
+    # contract of `sigma ~ Exponential(prior_scale)` above: a literal no design
+    # binds, omitted or equal on a replay, and refused when changed.
+    build = brm(quote
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | p | subject)
+        sd(:, p) ~ Exponential(prior_sd_scale)
+        y ~ Normal(mu, sigma)
+    end; mod=FM)
+    train = (; subject=[1, 1, 2, 2], x=[-2.0, 1.0, 4.0, 2.5], y=[0.2, 0.7, -0.1, 0.4],
+        prior_sd_scale=1.7)
+    design = (; subject=[1, 2], x=[2.0, 5.0], y=[0.3, -0.4])
+    rk = RKBRMI(build(train))
+    @test !haskey(rk_bound_data(rk), :prior_sd_scale)
+    @test :(prior_sd_scale = 1.7) in BRM._rk_emit_ast(rk.plan).main.args
+    state = brm_fitted_state(rk)
+    @test state.scalars == Dict(:prior_sd_scale => train.prior_sd_scale)
+    free = check_data_free(build, state, rk, design)
+    check_data_free(build, state, rk, (; subject=design.subject, x=design.x))
+    # A held-out response and a build without the response read it the same way.
+    joint = @brm merge(train, (; z=[0.1, 0.3, -0.2, 0.5])) begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 + x | p | subject)
+        eta ~ 1 + (1 | p | subject)
+        sd(:, p) ~ Exponential(prior_sd_scale)
+        y ~ Normal(mu, sigma)
+        z ~ Normal(eta, sigma)
+    end
+    @test :(prior_sd_scale = 1.7) in BRM._rk_emit_ast(
+        RKBRMI(joint; held_out=(:z,)).plan).main.args
+    predictive = RKBRMI(build((; subject=train.subject, x=train.x,
+        prior_sd_scale=train.prior_sd_scale)))
+    @test !haskey(rk_bound_data(predictive), :prior_sd_scale)
+    conflicting = merge(design, (; prior_sd_scale=9.0))
+    for fitted in (rk, free)
+        @test_throws "changes the fitted RK program" reprocess(fitted, conflicting)
+    end
+    @test_throws "changes the fitted RK program" RKBRMI(build(conflicting), state)
+    fresh = reprocess(rk, conflicting; freeze_constants=false)
+    @test density(fresh, point(fresh)) == density(RKBRMI(build(conflicting)), point(fresh))
+    # The same value held by the design is the same program.
+    equal = reprocess(rk, merge(design, (; prior_sd_scale=train.prior_sd_scale)))
+    @test density(equal, point(equal)) == density(reprocess(rk, design), point(equal))
+    binder = rk_design_binder(rk)
+    for held in (design, merge(design, (; x=[1.0, 3.0])))
+        inputs = binder(held)
+        @test !haskey(inputs, :prior_sd_scale)
+        @test Set(keys(inputs)) == Set(keys(rk_bound_data(reprocess(rk, held))))
+    end
+    @test !occursin("replayed in full", sprint(show, binder))
+
+    # The default start reads the emitted law's number: the median of the scale.
+    model = brm_nlme_model(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    u = first(BRM._brm_nlme_prior_median_point(model))
+    values = BRM._rk_constrained_values(rk, u)
+    @test BRM._brm_rk_declaration_value(values, Symbol("b_p_subject.tau")) ≈
+        fill(1.7log(2), 2)
+end
+
+@stestset "a term prior reading a data scalar is the model with its number" begin
+    # The twin states the number; the literal forms have their own parity tests.
+    data = (; x=[-2.0, 1.0, 4.0, 2.5, 0.3, -1.0], w=[0.1, 0.5, 0.3, 0.9, 0.2, 0.8],
+        t=collect(1.0:6.0), y=[0.2, 0.7, -0.1, 0.4, 0.3, 0.1],
+        subject=[1, 1, 2, 2, 3, 3], scale=1.7, rates=[1.7, 2.0, 0.5])
+    area_data = (; area=[1, 2, 3, 1, 2, 3], y=data.y, from=[1, 2], to=[2, 3], half=0.5, low=0.2)
+    panel_data = (; year=[1, 2, 3, 1, 2, 3], kreis=[1, 1, 1, 2, 2, 2], y=data.y,
+        C=[1.0 0.0; 0.0 1.0], scale=1.7)
+    twins = (
+        "gp scale" => (@brm(data, begin
+            sigma ~ Exponential(1)
+            mu ~ 0 + gp(x, w; jitter=.03)
+            sd(:, gp(x, w)) ~ Exponential(scale)
+            y ~ Normal(mu, sigma)
+        end), @brm(data, begin
+            sigma ~ Exponential(1)
+            mu ~ 0 + gp(x, w; jitter=.03)
+            sd(:, gp(x, w)) ~ Exponential(1.7)
+            y ~ Normal(mu, sigma)
+        end)),
+        "dar scale" => (@brm(data, begin
+            sigma ~ Exponential(1)
+            mu ~ 1 + x + dar(t)
+            sd(mu, dar(t)) ~ Normal(0, scale)
+            y ~ Normal(mu, sigma)
+        end), @brm(data, begin
+            sigma ~ Exponential(1)
+            mu ~ 1 + x + dar(t)
+            sd(mu, dar(t)) ~ Normal(0, 1.7)
+            y ~ Normal(mu, sigma)
+        end)),
+        "car scale and mixing share" => (@brm(area_data, begin
+            mu ~ 1 + car(area; edges=(from, to), type=:bym2)
+            sd(mu, car(area)) ~ Normal(0, half)
+            mixing(mu, car(area)) ~ Uniform(low, 0.9)
+            y ~ Normal(mu, 1.0)
+        end), @brm(area_data, begin
+            mu ~ 1 + car(area; edges=(from, to), type=:bym2)
+            sd(mu, car(area)) ~ Normal(0, 0.5)
+            mixing(mu, car(area)) ~ Uniform(0.2, 0.9)
+            y ~ Normal(mu, 1.0)
+        end)),
+        "cdar scale and persistence" => (@brm(panel_data, begin
+            sigma ~ Exponential(1)
+            mu ~ 1 + cdar(year; by=kreis, cor=C)
+            sd(mu, cdar(year)) ~ Exponential(scale)
+            ar(mu, cdar(year)) ~ Beta(scale, 2.0)
+            y ~ Normal(mu, sigma)
+        end), @brm(panel_data, begin
+            sigma ~ Exponential(1)
+            mu ~ 1 + cdar(year; by=kreis, cor=C)
+            sd(mu, cdar(year)) ~ Exponential(1.7)
+            ar(mu, cdar(year)) ~ Beta(1.7, 2.0)
+            y ~ Normal(mu, sigma)
+        end)),
+        "R2D2 reference scale" => (@brm(data, begin
+            sigma ~ Exponential(1)
+            mu ~ 1 + x + (1 | p | subject)
+            sd(:, p) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1, reference_scale=scale)
+            y ~ Normal(mu, sigma)
+        end), @brm(data, begin
+            sigma ~ Exponential(1)
+            mu ~ 1 + x + (1 | p | subject)
+            sd(:, p) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1, reference_scale=1.7)
+            y ~ Normal(mu, sigma)
+        end)),
+        "block scale from a vector element" => (@brm(data, begin
+            sigma ~ Exponential(1)
+            mu ~ 1 + x + (1 | p | subject)
+            sd(:, p) ~ Exponential(rates[1])
+            y ~ Normal(mu, sigma)
+        end), @brm(data, begin
+            sigma ~ Exponential(1)
+            mu ~ 1 + x + (1 | p | subject)
+            sd(:, p) ~ Exponential(1.7)
+            y ~ Normal(mu, sigma)
+        end)),
+        "block scale from a vector reduction" => (@brm(data, begin
+            sigma ~ Exponential(1)
+            mu ~ 1 + x + (1 | p | subject)
+            sd(:, p) ~ Exponential(maximum(rates) - 0.3)
+            y ~ Normal(mu, sigma)
+        end), @brm(data, begin
+            sigma ~ Exponential(1)
+            mu ~ 1 + x + (1 | p | subject)
+            sd(:, p) ~ Exponential(1.7)
+            y ~ Normal(mu, sigma)
+        end)))
+    for (label, (read, stated)) in twins
+        @testset "$label" begin
+            a, b = RKBRMI(read), RKBRMI(stated)
+            @test BRM._rk_layout_coordinate_names(a) == BRM._rk_layout_coordinate_names(b)
+            # Not a design input: the binding may evaluate a data-only vector
+            # definition, as it does a design matrix.
+            @test isempty(intersect(
+                keys(BRM._rk_source_data_columns(a.plan, BRM._rk_emit_ast(a.plan))),
+                (:scale, :rates, :half, :low)))
+            for u in (point(a), zeros(a.model.layout.total))
+                @test density(a, u) ≈ density(b, u) rtol=1e-13
+            end
+        end
+    end
+    # Only numbers: anything else is refused in terms of the model.
+    labels = merge(data, (; rates=["a", "b", "c"]))
+    @test_throws "reads data field `rates`" RKBRMI(@brm(labels, begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | p | subject)
+        sd(:, p) ~ Exponential(length(rates))
+        y ~ Normal(mu, sigma)
+    end))
+end
+
+@stestset "only a scalar the program reads by name gets a definition" begin
+    data = (; x=[-2.0, 1.0, 4.0], y=[0.2, 0.7, -0.1], unused=5.0, scale=1.7)
+    # A population prior folds its argument, and no statement reads the name.
+    folded = @brm data begin
+        sigma ~ Exponential(scale)
+        mu ~ 1 + x
+        effect(mu, x) ~ Normal(0, scale)
+        y ~ Normal(mu, sigma)
+    end
+    main = BRM._rk_emit_ast(BRM._brm_rk_plan(folded)).main
+    @test !any(s -> Meta.isexpr(s, :(=)) && first(s.args) in (:scale, :unused), main.args)
+
+    # Call heads, keyword names and declaration targets are not value reads, so
+    # a data scalar named like a callee cannot shadow it.
+    @test BRM._rk_value_reads!(Set{Symbol}(), :(b ~ f(g, s; k=v))) == Set([:g, :s, :v])
+    @test BRM._rk_value_reads!(Set{Symbol}(), :(a = Normal.(m, t))) == Set([:m, :t])
+    @test BRM._rk_value_reads!(Set{Symbol}(), :(z[1:n] .~ Normal.(0, s))) == Set([:s])
+end
+
 @stestset "data-free replay preserves scalar inputs of graph constants" begin
     # Runtime source builders and macro builders must freeze the same values.
     source = quote

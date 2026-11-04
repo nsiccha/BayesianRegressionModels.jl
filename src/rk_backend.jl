@@ -4948,6 +4948,10 @@ const _RK_GP_HYPER_ADMITTED = "LogNormal, InverseGamma, Gamma, Exponential, " *
 _rk_term_parameter(sampled, prior) = sampled(prior)
 _rk_term_parameter(_sampled, known::_BRMKnownTermValue) = known
 
+# A literal-only term prior takes a numeric data scalar as its number, as a
+# population prior does: `sd(:, gp(x)) ~ Exponential(scale)`.
+_rk_literal_prior_args(prior) = map(arg -> something(_brm_effect_number(arg), arg), getargs(prior))
+
 function _rk_gp_hyper_prior(prior, role::String, target::Symbol, axis::Symbol;
                             term::String="gp")
     prefix = "RK backend"
@@ -4961,7 +4965,7 @@ function _rk_gp_hyper_prior(prior, role::String, target::Symbol, axis::Symbol;
     name = nameof(f)
     isempty(getkwargs(prior)) || error(
         "$prefix: $where prior cannot have keywords in slice 1")
-    args = getargs(prior)
+    args = _rk_literal_prior_args(prior)
     if name === :Normal
         length(args) == 2 || error(
             "$prefix: $where prior `Normal` needs 2 " *
@@ -5011,7 +5015,7 @@ function _rk_car_mixing_prior(prior, target::Symbol, area::Symbol)
         "$prefix: $where prior `$name` is out of slice 1 (admitted: Beta, Uniform)")
     isempty(getkwargs(prior)) || error(
         "$prefix: $where prior cannot have keywords in slice 1")
-    args = getargs(prior)
+    args = _rk_literal_prior_args(prior)
     length(args) == 2 && all(a -> a isa Number && isfinite(Float64(a)), args) || error(
         "$prefix: $where prior `$name` needs two finite literal arguments")
     lo, hi = Float64.(args)
@@ -5094,7 +5098,7 @@ function _rk_cdar_rho_prior(prior, target::Symbol, source::Symbol)
         "$prefix: $where prior `$name` is out of slice 1 (admitted: Normal, Beta, Uniform)")
     isempty(getkwargs(prior)) || error(
         "$prefix: $where prior cannot have keywords in slice 1")
-    args = getargs(prior)
+    args = _rk_literal_prior_args(prior)
     length(args) == 2 && all(a -> a isa Number && isfinite(Float64(a)), args) || error(
         "$prefix: $where prior `$name` needs two finite literal arguments")
     a, b = Float64.(args)
@@ -5946,7 +5950,7 @@ function _rk_dar_beta_prior(prior, target::Symbol, source::Symbol)
         "Normal)")
     isempty(getkwargs(prior)) || error(
         "$prefix: $where prior cannot have keywords in slice 1")
-    args = getargs(prior)
+    args = _rk_literal_prior_args(prior)
     length(args) == 2 || error(
         "$prefix: $where prior `Normal` needs 2 arguments, got " *
         "$(length(args))")
@@ -5971,7 +5975,7 @@ function _rk_dar_sigma_prior(prior, target::Symbol, source::Symbol)
         "thin-layer scale is HalfNormal; admitted: Normal)")
     isempty(getkwargs(prior)) || error(
         "$prefix: $where prior cannot have keywords in slice 1")
-    args = getargs(prior)
+    args = _rk_literal_prior_args(prior)
     length(args) == 2 || error(
         "$prefix: $where prior `Normal` needs 2 arguments, got " *
         "$(length(args))")
@@ -8601,7 +8605,8 @@ arrays on their own row axes. Regression geometry and priors use the same
 preparation on both regression routes. The extension emits and binds the
 current RKPPL surface; unsupported formula terms fail with RK attribution.
 """
-Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRMI))
+Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRMI),
+        @nospecialize(known_scalars::Ref{Any}=Ref{Any}(nothing)))
     prefix = "RK backend"
     unconditioned = _rk_unconditioned_plan(brmi)
     unconditioned === nothing || return unconditioned
@@ -8670,6 +8675,8 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
         "a sampled parameter and an assignment; names must be unique")
     consts, aliases, exprs = _rk_fold_assignment_consts!(
         kept_assignments, context.data, parameter_names)
+    known_scalars[] = (; consts, aliases, parameters=parameter_names,
+        assignments=assignment_names, data=context.data)
     parameters = _rk_plan_parameters!(prepared, context.data, consts,
         aliases, parameter_names, assignment_names)
     vector_specs = _rk_plan_vector_parameters!(prepared, context.data, consts,
