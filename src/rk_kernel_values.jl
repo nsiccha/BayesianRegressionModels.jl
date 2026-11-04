@@ -329,6 +329,14 @@ end
 _rk_push_outer_length!(lengths, values) = push!(lengths, length(values))
 _rk_push_outer_length!(lengths, ::_BRMAbsentResponse) = lengths
 
+# Whether a cell's positional argument is a response with no data: an unbound
+# name, or a `ragged` join of one. A name another cell writes is that cell's
+# output instead.
+_rk_kernel_omitted_response(argument, output_reads) = argument isa NamedColumn &&
+    parent(argument) isa MissingColumn && !(_rk_kernel_column_name(argument) in output_reads)
+_rk_kernel_omitted_response(argument::ExprColumn, output_reads) = getf(argument) === ragged &&
+    _rk_kernel_omitted_response(first(getargs(argument)), output_reads)
+
 Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BRMI), program, name, rhs)
     parts = _sb_kernel_lambda_parts(first(getargs(rhs)))
     parts === nothing && error("RK backend: kernel `$name` requires an inline cell body")
@@ -386,6 +394,13 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
         if argument isa ExprColumn && getf(argument) === ragged
             value, group = _brm_kernel_ragged_args(argument; prefix="RK backend")
             value isa NamedColumn || error("RK backend: ragged input must name a column or predictor")
+            if _rk_kernel_omitted_response(argument, keys(output_reads)) &&
+                    (params[i] in scanned || _sb_cell_param_observed(raw_body, params[i]))
+                # A long-format response with no data, as the unbound input below.
+                push!(inputs, (; source=_rk_kernel_column_name(value), kind=:omitted,
+                    rows=nothing, column=nothing))
+                continue
+            end
             (; into, order) = _brm_kernel_ragged_options(argument; prefix="RK backend")
             # Coverage and raw-response ports belong to this cell's
             # observations. Reading a completion or a response observed
@@ -493,7 +508,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                 continue
             end
             argument = arguments[index]
-            argument isa NamedColumn && parent(argument) isa MissingColumn && continue
+            _rk_kernel_omitted_response(argument, keys(output_reads)) && continue
             # The emitter calls the AR(1) submodel in the cell, which observes
             # the response in place (`scan_observed`).
             _is_brm_ar1_normal(statement) && (push!(body, statement); continue)
@@ -1119,6 +1134,7 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
             parent(node) isa ExprColumn{typeof(~)} &&
             _brm_observation_name(first(getargs(parent(node)))) !== nothing]
     submodels = _rk_prepare_submodel_values(program)
+    program, kernels = _rk_cells_under_omission(program, kernels, direct, submodels)
     plan = _brm_rk_value_plan(brmi, program, direct; kernels, submodels)
     observations = Any[plan.observations...]
     taken = union(Set{Symbol}(keys(plan.columns)),
@@ -1775,19 +1791,30 @@ function _rk_nested_observation_reads(observation, distribution, reads)
         _BRMPreparedExpr(distribution.callable, args, distribution.kwargs)
 end
 
-# The program names a kernel depends on, for the plan's reachability: its own
-# dependencies except the positional sources only an omitted response's
-# observation reads (a source another kept statement reads stays one).
-function _rk_kernel_dependencies(kernel::_RKPreparedKernelAssignment, dependencies)
-    reads = Set{Symbol}()
-    foreach(statement -> _brm_cell_value_refs!(reads, statement), kernel.body)
-    kernel.collected === nothing || _brm_cell_value_refs!(reads, kernel.collected)
+# The names a cell's observations read.
+function _rk_kernel_observation_reads!(reads, kernel::_RKPreparedKernelAssignment)
     for observation in kernel.observations
         push!(reads, observation.param)
         foreach(argument -> _brm_cell_value_refs!(reads, argument), observation.arguments)
         observation.weight === nothing || _brm_cell_value_refs!(reads, observation.weight)
         foreach(bound -> _brm_cell_value_refs!(reads, bound.expression), observation.bounds)
     end
+    reads
+end
+
+# The names a cell reads: its statements, its collected value and its observations.
+function _rk_kernel_reads(kernel::_RKPreparedKernelAssignment)
+    reads = Set{Symbol}()
+    foreach(statement -> _brm_cell_value_refs!(reads, statement), kernel.body)
+    kernel.collected === nothing || _brm_cell_value_refs!(reads, kernel.collected)
+    _rk_kernel_observation_reads!(reads, kernel)
+end
+
+# The program names a kernel depends on, for the plan's reachability: its own
+# dependencies except the positional sources only an omitted response's
+# observation reads (a source another kept statement reads stays one).
+function _rk_kernel_dependencies(kernel::_RKPreparedKernelAssignment, dependencies)
+    reads = _rk_kernel_reads(kernel)
     unread = Set{Symbol}(input.source for (param, input) in zip(kernel.params, kernel.inputs)
         if !(param in reads))
     setdiff!(unread, reads)
@@ -1805,6 +1832,12 @@ function _rk_kernel_with_arguments(kernel::_RKPreparedKernelAssignment, argument
         kernel.cells, kernel.scan_observed, kernel.cell_column, kernel.outputs)
 end
 
+# The names a cell statement binds. Any other statement (an AR(1) submodel call
+# observing its response) binds none, and stays with everything it reads.
+_rk_cell_statement_writes(statement) = Meta.isexpr(statement, :(=)) ?
+    _rk_source_outputs!(Set{Symbol}(), statement) :
+    _is_brm_scan(statement) ? _rk_scan_writes(statement) : Set{Symbol}()
+
 # The cell restricted to what `value` reads: the body statements producing
 # its names, and the positional inputs and globals those statements read.
 # Only an assignment whose every recognized output is unread is left out; any
@@ -1813,9 +1846,7 @@ function _rk_kernel_value_slice(kernel::_RKPreparedKernelAssignment, value)
     needed = _brm_cell_value_refs!(Set{Symbol}(), value)
     body = Any[]
     for statement in Iterators.reverse(kernel.body)
-        outputs = Meta.isexpr(statement, :(=)) ?
-            _rk_source_outputs!(Set{Symbol}(), statement) :
-            _is_brm_scan(statement) ? _rk_scan_writes(statement) : Set{Symbol}()
+        outputs = _rk_cell_statement_writes(statement)
         !isempty(outputs) && isdisjoint(outputs, needed) && continue
         pushfirst!(body, statement)
         _brm_cell_value_refs!(needed, statement)

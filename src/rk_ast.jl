@@ -2078,11 +2078,19 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         for term in predictor.terms
             term.kind === :gmrf || continue
             locals = _rk_ast_gmrf!(defs, stmts, taken, bindings, term)
-            _rk_coordinate_record!(coordinates, (; kind=:gmrf,
-                declaration=term.options.id, predictor=predictor.name,
-                axes=term.options.source, state_axes=term.options.state_axes,
-                mesh_inputs=(; term.options.vertices, term.options.cells),
-                correlation=term.options.correlation, locals))
+            if term.options.neighbors === nothing
+                _rk_coordinate_record!(coordinates, (; kind=:gmrf,
+                    declaration=term.options.id, predictor=predictor.name,
+                    axes=term.options.source, state_axes=term.options.state_axes,
+                    mesh_inputs=(; term.options.vertices, term.options.cells),
+                    correlation=term.options.correlation, locals))
+            else
+                _rk_coordinate_record!(coordinates, (; kind=:gmrf_footprint,
+                    declaration=term.options.id, predictor=predictor.name,
+                    axes=term.options.source, state_axes=term.options.state_axes,
+                    neighbors=term.options.neighbors,
+                    correlation=term.options.correlation, locals))
+            end
             _rk_start_term_record!(coordinates, predictor.name, term, term.options.id,
                 (; sigma=locals.sigma, spatial_length=locals.spatial_length,
                    temporal_length=locals.temporal_length))

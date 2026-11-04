@@ -82,7 +82,7 @@ function _brm_gmrf_chain_factor(values, permuted, order, diagonal, pattern)
     scale = maximum(abs, view(values, diagonal))
     while true
         try
-            return (; factor=_brm_gmrf_ldl(0.0, zeros(n), permuted.colptr, rowvals(permuted), gval,
+            return (; factor=_brm_gmrf_ldl(0.0, 1.0, zeros(n), permuted.colptr, rowvals(permuted), gval,
                 pattern.colptr, pattern.rowval, pattern.previous_ptr, pattern.previous_col,
                 pattern.previous_pos), shift)
         catch err

@@ -147,11 +147,79 @@ With ``N`` vertices, ``C_h`` channels and ``T`` fitted times, there are
 ``N C_h T`` latent field coordinates. Sparse spatial precision and local
 observation reads reduce the cost of working with the prior, but do not
 remove this state dimension. The joint prior uses spatial factors and OU
-transitions without constructing a dense space-time covariance.
+transitions without constructing a dense space-time covariance. When this state
+is far larger than the reads, use `neighbors=` below.
 
 Posterior inference must also account for the observation model and shared
 parameters. Sparse posterior factorization can have substantial fill, and a
-fast precision application alone does not establish scalable marginalization.
+fast precision application alone does not establish scalable marginalization;
+[the embedded Laplace](#Embedded-Laplace) below reports what its operator algebra
+measures at large sizes.
+
+## A field too large for a mesh: `neighbors=`
+
+Replace `mesh` by `neighbors=m` when the mesh × time state is too large and the
+rows read far fewer position and time pairs than that product:
+
+```julia
+field ~ 0 + gmrf((east, north), time, channel; neighbors=20, cor=Omega)
+```
+
+The field has the same three parameters, addresses, priors and length
+convention. Its latent state is one coordinate per channel at each distinct
+`(east, north, time)` the rows read, so it is bounded by the data rather than
+by vertices × times. A row reads its own state directly.
+
+Instead of a finite-element precision, the joint law is a product of Gaussian
+conditionals under the exact covariance of the section above, the continuum
+``(\kappa r)K_1(\kappa r)\exp(-|d|/\ell_t)``:
+
+```math
+x_i\mid x_{N(i)}\sim\mathcal N(b_i^{\mathsf T}x_{N(i)},F_i),
+\qquad b_i=K_{N(i)N(i)}^{-1}K_{N(i)i},
+\qquad F_i=1-K_{iN(i)}b_i.
+```
+
+Its precision ``(I-B)^{\mathsf T}F^{-1}(I-B)`` is sparse. Reads are ordered by
+time, then by one greedy maximin position order for the whole support. The
+conditioning set ``N(i)`` of a read holds:
+
+- its `m` nearest lower-order positions read at its own time;
+- the previous read of its own position and of each of those neighbours;
+- when its own position was not read at the previous read time, its `m` nearest
+  among the latest earlier reads, reaching back until they hold at least `m`.
+
+Selection depends only on the coordinates and `m`, never on the sampled lengths.
+Only ``b_i`` and ``F_i`` move with them, and reads with the same geometry share
+one solve, so a repeated observing pattern costs one solve per position and
+gap rather than one per read.
+
+**What it preserves.** The spatial correlation is the continuum Matérn at the
+actual positions: there is no mesh boundary inflation, no resolution floor at
+short ranges and no interpolation within triangles. Channels are exactly
+separable (``\Omega\otimes K``). On positions read at the same times, the
+implied covariance is the spatial approximation times the exact OU correlation
+across every gap. No time gap is cut: every read time conditions on earlier
+reads however long ago they were.
+
+**What it approximates.** The conditioning set. Implied covariances differ from
+the exact covariance by an error that shrinks with `m`, is largest at distances
+near the range when the range is much longer than the read spacing, and grows
+for pairs linked only through a chain of sparsely read times. Measure it for your
+support and your range prior: on a network of about 1,600 positions, a range
+about five times the typical spacing has a largest covariance error of about
+0.04 at `m=20` and 0.015 at `m=30`. A conditioning set holds at most `2m+1`
+reads when its position was read at the previous read time, and `3m+1` otherwise.
+
+Lengths far beyond the read domain make a conditional correlation numerically
+singular, which raises a `DomainError` naming them. Positions a metre apart in a
+domain of about 1,000 km first fail at a range of about 5,000 km with a correlation
+time of ``10^5`` time units, or a range of ``10^6`` km at any correlation time.
+
+Frozen replay reads only fitted `(position, time)` pairs, in any order and any
+subset. A new position or time needs a conditional prediction law and is
+refused. It is one model-scope field: use `mesh=` for independent fields in
+plate cells. Embedded Laplace does not integrate it.
 
 ## Independent fields in plate cells
 
@@ -190,8 +258,33 @@ applies the plan to the same target, and `deepcopy` gives each chain its own
 problem. `integrate=(declaration,)` also integrates one field per
 `@plate for p in groups(g)` cell, each cell's rows reading only that cell's
 field.
-Measured cost grows superlinearly with the number of field states
-under both exact and matrix-free algebra (about 12–15 s per value and
-gradient at 51,200 states on one or two CPUs), dominated by space-time
-factorization and log-determinant work; large fields are not yet a supported
-Laplace workload.
+
+Above 1,024 coordinates `solver=:auto` uses operator algebra, which needs no
+space-time factorization. Its determinant is an estimate from fixed probes, so
+even with Normal rows the target is then approximate. A component holding one
+field uses a reference with one sparse spatial factor per channel and time, which
+sees the data's curvature and stays fixed. The estimate is the difference from that
+reference rebuilt at each point, whose own determinant is exact, and the gradient
+is the exact derivative of the fixed-probe value. Fields read by the same rows are
+coupled through one of them. Measured per warm value and gradient, one CPU of a
+loaded host, one Normal field at its prior medians:
+
+| States | Vertices × times × channels | Probes | Operator algebra | Exact |
+|:--|:--|:--|:--|:--|
+| 10,000 | 400 × 25 × 1 | 8 | 0.28 s | 0.61 s |
+| 51,200 | 1,024 × 50 × 1 | 8 | 3.0 s | 9.4–19 s |
+| 202,500 | 2,025 × 100 × 1 | 8 | 13 s | not run |
+| 640,000 | 1,600 × 400 × 1 | 8 | 51 s | not run |
+| 810,000 | 8,100 × 100 × 1 | 4 | 87 s | not run |
+| 1,698,450 | 4,225 × 402 × 1 | 4 | 134 s | not run |
+| 1,920,000 | 1,600 × 400 × 3 | 4 | 262 s | not run |
+
+Work grows about linearly in times and channels, and faster than linearly in
+vertices, because each spatial factor does. A point far from the prior medians
+costs about three to four times as much. At 10,000 states and 8 probes the value and
+gradient agreed with exact within their probe error, for Normal and Poisson rows,
+and the gradient's error across probe seeds was about 0.3 to 0.6 posterior standard
+deviations of each hyperparameter. That ratio does not shrink as a field grows, so
+compare with more probes before relying on a fit. Correlated channels read at
+different places, and the scales of fields read by the same rows, have several times
+that error. Sizes beyond the table have not been measured.

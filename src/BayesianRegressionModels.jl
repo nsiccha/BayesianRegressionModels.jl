@@ -22,6 +22,7 @@ using StaticArrays: SMatrix, SVector, MMatrix, MVector
 using ReparametrizableDistributions: advance!!, lkj_cholesky!, simplex!
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, nonzeros, rowvals, nzrange, blockdiag
 using SelectedInversion: selinv_diag, selinv, selinv_extract
+using Bessels: besselk, besselk0, besselk1
 import SparseArrays, SelectedInversion, KLU, MUMPS
 import KrylovKit, PowerScaling
 import Krylov
@@ -38,6 +39,7 @@ include("preparation_hsgp.jl")
 include("formula_markers.jl")
 include("gmrf_precision.jl")
 include("gmrf_interpolation.jl")
+include("gmrf_vecchia.jl")
 include("formula_validation.jl")
 include("prepared_metadata.jl")
 include("preparation_replay.jl")
@@ -77,6 +79,7 @@ include("rk_observation_source.jl")
 include("rk_callable_terms.jl")
 include("rk_kernel_values.jl")
 include("rk_submodel_values.jl")
+include("rk_omitted_cells.jl")
 include("rk_structured.jl")
 include("rk_multigroup_replay.jl")
 include("rk_observations.jl")
