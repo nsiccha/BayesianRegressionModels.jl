@@ -187,6 +187,12 @@ end
         field ~ 0 + gmrf((east, north), time; neighbors=3, mesh=(vertices=xy, cells=triangles))
         y ~ Normal(field, 0.2)
     end)
+    # The neighbour count selects the representation, so it is not data.
+    counted = (; data..., k=3)
+    @test_throws ArgumentError RKBRMI(@brm counted begin
+        field ~ 0 + gmrf((east, north), time; neighbors=k)
+        y ~ Normal(field, 0.2)
+    end)
     # One model-scope field: independent cell fields keep the mesh form.
     grouped = (; data..., window=repeat([1, 2]; outer=length(data.y) ÷ 2 + 1)[eachindex(data.y)])
     @test_throws Exception RKBRMI(@brm grouped begin

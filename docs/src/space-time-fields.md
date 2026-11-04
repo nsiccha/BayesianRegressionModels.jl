@@ -209,6 +209,11 @@ about five times the typical spacing has a largest covariance error of about
 0.04 at `m=20` and 0.015 at `m=30`. A conditioning set holds at most `2m+1`
 reads when its position was read at the previous read time, and `3m+1` otherwise.
 
+Lengths far beyond the read domain make a conditional correlation numerically
+singular, which raises a `DomainError` naming them. Positions a metre apart in a
+domain of about 1,000 km first fail at a range of about 5,000 km with a correlation
+time of ``10^5`` time units, or a range of ``10^6`` km at any correlation time.
+
 Frozen replay reads only fitted `(position, time)` pairs, in any order and any
 subset. A new position or time needs a conditional prediction law and is
 refused. It is one model-scope field: use `mesh=` for independent fields in

@@ -115,6 +115,11 @@ end
     end
     @test BRM._brm_vecchia_field_index(f, ["a", "b"], east[[3, 1]], north[[3, 1]], time[[3, 1]],
         channel[[3, 1]]) == index[[3, 1]]
+    # Rows repeating a read share its state.
+    repeated = BRM._brm_vecchia_footprint(vcat(east, east[1]), vcat(north, north[1]), vcat(time, time[1]), 2; neighbors=2)
+    @test repeated.ncoordinates == f.ncoordinates
+    @test BRM._brm_vecchia_field_index(repeated, ["a", "b"], east[[1, 1]], north[[1, 1]], time[[1, 1]],
+        channel[[1, 1]]) == fill(index[1], 2)
     @test_throws ArgumentError BRM._brm_vecchia_field_index(f, ["a", "b"], [0.5], [0.0], [0.0], ["a"])
     @test_throws ArgumentError BRM._brm_vecchia_field_index(f, ["a", "b"], [0.0], [0.0], [2.0], ["a"])
     @test_throws ArgumentError BRM._brm_vecchia_field_index(f, ["a", "b"], [0.0], [0.0], [0.0], ["z"])

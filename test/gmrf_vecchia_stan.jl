@@ -99,6 +99,12 @@ end
     @test replay.data[keys_of(replay.data, "_n_field")] == sb.data[keys_of(sb.data, "_n_field")]
     moved = (; east=[data.east[1] + 0.01], north=[data.north[1]], time=[data.time[1]], y=[0.0])
     @test_throws ArgumentError BRM.reprocess(sb, moved)
+    # A fresh refit takes its own rows' read pairs as its footprint.
+    fresh = BRM.reprocess(sb, subset; freeze_constants=false)
+    @test fresh.data[keys_of(fresh.data, "_n_field")] == 3
+    @test sort(fresh.data[keys_of(fresh.data, "_index")]) == 1:3
+    @test isfinite(BS.log_density(BRM.stan_instantiate(fresh).model,
+        zeros(3 + fresh.data[keys_of(fresh.data, "_n_field")]); propto=false, jacobian=true))
 end
 
 @testset "Default priors transpile in a module that does not see BRM's internals" begin
