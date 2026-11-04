@@ -4474,8 +4474,7 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
     buckets = _RKRanefBucket[]
     lookup = Dict{Tuple{Symbol,Symbol,Union{Nothing,Symbol}},
         Union{_RKRanefBucket,Nothing}}()
-    declarations =
-        [d for d in context.group_declarations if d.predictor in predictor_order]
+    declarations = _rk_block_declarations(brmi, context, predictor_order)
     isempty(declarations) && return buckets, lookup
     for d in declarations
         what = "predictor `$(d.predictor)` random effect"
@@ -4612,17 +4611,6 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
     for key in id_keys
         id, gname = key
         decls = id_decls[key]
-        # A joined block whose predictors an omitted response leaves unread
-        # would be planned narrower here than SB's full block over every
-        # column's levels (`_sb_emit_joint_id_bucket!`).
-        all_columns = unique(name(d.descriptor) for d in context.group_declarations
-                             if d.id === id && d.descriptor isa NamedColumn)
-        length(all_columns) > 1 && length(decls) < count(d -> d.id === id &&
-                !d.uncorrelated, context.group_declarations) && error(
-            "$prefix: `|$id|` joins the grouping columns " *
-            join(("`$c`" for c in all_columns), ", ") * " by label, and an omitted " *
-            "response leaves some of its predictors outside every likelihood; a " *
-            "joined block narrowed to its read predictors is not implemented on RK")
         bucket = _rk_lower_ranef_bucket(context, id, gname,
             Any[(d.predictor, d) for d in decls], columns, taken, derived)
         for d in decls
@@ -4699,11 +4687,6 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
         any(isnothing, found) && error(
             "$prefix: internal: `|$(bucket.id)|` plans margins outside its shared block")
         positions = Int[p for p in found]
-        reduced && decomposition !== nothing && error(
-            "$prefix: `|$(bucket.id)|` carries an `sd(...) ~ r2d2(...)` " *
-            "decomposition, and an omitted response leaves some of its margins " *
-            "outside every likelihood; a partial R2D2 block is not implemented. " *
-            "Bind the response, or drop the decomposition for this fit")
         dist = override === nothing ? nothing : override.dist
         if dist !== nothing
             decomposition === nothing || error(
@@ -4741,11 +4724,6 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
                 "$prefix: `|$(bucket.id)|` holds a known scale or correlation over " *
                 "a `$(bucket.grouping.form)` grouping; known values are " *
                 "implemented for ordinary grouping factors only")
-            # A narrower block (an omitted response) keeps exactly the known
-            # values of its planned margins: the marginal of a fixed
-            # correlation is its submatrix.
-            reduced && known_cor !== nothing &&
-                (known_cor = known_cor[positions, positions])
         end
         bucket.level_cor !== nothing && (dist !== nothing || decomposition !== nothing) &&
             error("$prefix: `|$(bucket.id)|` correlates the levels of " *
@@ -8574,24 +8552,45 @@ end
 # metadata rather than a normal formula operand.
 Base.@nospecializeinfer function _rk_with_ranef_prior_dependencies(@nospecialize(brmi::BRMI), program, roots)
     # Known values (`sd(...) = value`) resolve to constants and read nothing.
-    specs = [spec for spec in ranef_effect_priors(brmi)
+    all_specs = ranef_effect_priors(brmi)
+    r2d2_specs = [spec for spec in all_specs if spec.class === :sd && spec.family === r2d2]
+    specs = [spec for spec in all_specs
         if !(spec.class === :sd && spec.family === r2d2) && spec.family !== _brm_known]
-    any(spec -> spec.class in (:sd, :ranef) &&
-        !isempty(_brm_prepared_references(_brm_prepare_expr(spec.expression))), specs) ||
+    (!isempty(r2d2_specs) || any(spec -> spec.class in (:sd, :ranef) &&
+        !isempty(_brm_prepared_references(_brm_prepare_expr(spec.expression))), specs)) ||
         return program
     reachable = _brm_reachable_operations(program, roots)
-    declarations = [declaration for declaration in program.context.group_declarations
-        if declaration.predictor in reachable]
-    buckets = _sb_collect_id_buckets(declarations)
-    ids = Set(first(key) for key in keys(buckets))
+    declarations = _rk_block_declarations(brmi, program.context, reachable)
+    ids = Set(first(key) for key in keys(_sb_collect_id_buckets(declarations)))
     active = [spec for spec in specs if spec.id in ids]
-    isempty(active) && return program
-    margins = Dict(key => _sb_id_bucket_margins(bucket) for (key, bucket) in buckets)
+    # An R2D2 scale reads every margin's reference scale, reached or not.
+    budget = Pair{Symbol,Tuple}[]
+    for spec in r2d2_specs
+        spec.id in ids || continue
+        reader = first(d.predictor for d in declarations
+            if d.id === spec.id && d.predictor in reachable)
+        push!(budget, reader => (spec.expression,))
+    end
+    isempty(active) && return isempty(budget) ? program :
+        _brm_with_prior_dependencies(program, budget)
+    # `sd`/`cor` statements address the whole block's margins, and only the
+    # planned ones' priors are read (`_rk_plan_ranef_buckets`).
+    margins = Dict(key => _sb_id_bucket_margins(bucket)
+        for (key, bucket) in _sb_collect_id_buckets(program.context) if first(key) in ids)
     overrides = _brm_resolve_ranef_effect_overrides(active, margins; prefix="RK backend")
-    claims = Pair{Symbol,Tuple}[]
-    for override in values(overrides), (margin, prior) in zip(override.margins, override.sd_prior)
-        prior === nothing || push!(claims, margin.predictor => (prior,))
-        override.dist === nothing || push!(claims, margin.predictor => (override.dist,))
+    planned = Set{Symbol}(d.predictor for d in declarations)
+    claims = budget
+    for override in values(overrides)
+        # A margin of a whole block may belong to a predictor no likelihood
+        # reaches (`_rk_block_declarations`): a reached predictor of its block
+        # carries its prior's reads into the plan.
+        reader = first(m.predictor for m in override.margins if m.predictor in reachable)
+        for (margin, prior) in zip(override.margins, override.sd_prior)
+            margin.predictor in planned || continue
+            owner = margin.predictor in reachable ? margin.predictor : reader
+            prior === nothing || push!(claims, owner => (prior,))
+            override.dist === nothing || push!(claims, owner => (override.dist,))
+        end
     end
     isempty(claims) ? program : _brm_with_prior_dependencies(program, claims)
 end

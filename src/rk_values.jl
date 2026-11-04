@@ -723,6 +723,20 @@ function _rk_has_value_call(expression::_BRMPreparedExpr)
         any(_rk_has_value_call, values(expression.kwargs))
 end
 
+# The predictors a population prior may address: the plan's, and those of the
+# model it left out because no likelihood reaches them (an omitted response's).
+# A prior addressing one samples nothing here, and a name the model does not
+# declare still fails.
+Base.@nospecializeinfer function _rk_declared_predictors(@nospecialize(brmi::BRMI), predictor_order)
+    declared = Symbol[predictor_order...]
+    for (key, raw) in _brm_operation_entries(brmi)
+        operation = _named_op(raw)
+        operation isa ExprColumn{typeof(~)} && _brm_operation_role(operation) === :predictor &&
+            !(key in declared) && push!(declared, key)
+    end
+    Tuple(declared)
+end
+
 # Model-wide orchestration over already boxed plan carriers. Do not infer this
 # loop again from each source BRMI's NamedTuple type; term-level helpers still
 # dispatch on the expression values they consume.
@@ -737,9 +751,10 @@ Base.@nospecializeinfer function _rk_predictor_components(@nospecialize(brmi::BR
         brmi, context, predictor_order, columns, taken, derived)
     me_sources = Set{Symbol}()
     matched_defaults = Set{Int}()
+    available = _rk_declared_predictors(brmi, predictor_order)
     for target in predictor_order
         spec, term_priors, r2d2, hs = _rk_plan_predictor(
-            brmi, context, target, Tuple(predictor_order), columns, derived,
+            brmi, context, target, available, columns, derived,
             taken, lookup, me_sources; tolerant_default=true, matched_defaults)
         push!(predictors, spec)
         append!(priors, term_priors)

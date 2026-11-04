@@ -198,6 +198,21 @@ present. The term adds its field directly, without a population coefficient.
 Frozen replay retains the mesh, times and channels, and can evaluate new
 spatial locations inside that mesh. New state times or channels require a
 conditional prediction law and are refused by frozen replay.
+
+    gmrf((east, north), time[, channel]; neighbors=m, cor=Omega)
+
+The same covariance without a mesh: a nearest-neighbour (Vecchia) sparse
+precision whose state is one coordinate per channel at each distinct
+`(east, north, time)` the rows read, so its size follows the data rather than
+vertices × times. A state conditions on its `m` nearest lower-order positions
+read at its own time, the previous read of its own position and of each of
+those, and, when its own position was not read at the previous read time, its
+`m` nearest among the latest earlier reads, reaching back until they hold at
+least `m`. The spatial correlation is the continuum
+`M₁(κ r) = κ r K₁(κ r)`, so there is no mesh boundary or resolution effect; the
+approximation is the conditioning set, which leaves the time factor exact on
+positions read at the same times. Frozen replay reads only fitted
+`(position, time)` pairs.
 """
 function gmrf end
 

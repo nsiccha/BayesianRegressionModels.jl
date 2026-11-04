@@ -38,9 +38,17 @@ end
         sd(field, gmrf((east, north), time)) ~ Exponential(s0)
         y ~ Normal(field, 0.2)
     end
+    scaled_input = merge(input, (; rate=0.7))
+    scaled = @brm scaled_input begin
+        field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+        sd(field, gmrf((east, north), time)) ~ Exponential(rate)
+        y ~ Normal(field, 0.2)
+    end
     expected = (
         ([:sigma, :spatial_length, :temporal_length], declared,
             log.([median(Exponential(0.7)), exp(0.5), exp(0.7)])),
+        ([:sigma, :spatial_length, :temporal_length], scaled,
+            [log(median(Exponential(0.7))), 0.0, 0.0]),
         ([:sigma, :temporal_length], known, [0.0, 0.7]),
         ([:sigma, :spatial_length, :temporal_length, :s0], reader,
             [log(median(Exponential(exp(1)))), 0.0, 0.0, 1.0]))

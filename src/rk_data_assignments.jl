@@ -119,15 +119,17 @@ function _rk_define_read_scalars!(plan::_RKStructuralPlan, known)
         (haskey(consts, name) || haskey(aliases, name) || haskey(data, name))
     any(candidate, Iterators.flatten((keys(consts), keys(aliases), keys(data)))) ||
         return plan
-    main = _rk_emit_ast(plan).main
+    emitted = _rk_emit_ast(plan)
+    main = emitted.main
     defined = Set{Symbol}(keys(plan.columns))
     union!(defined, (first(binding) for binding in _rk_extent_bindings(plan)))
     for statement in main.args
         _rk_source_assignments!(defined, statement)
         _rk_source_outputs!(defined, statement)
     end
-    for name in sort!(collect(setdiff(_rk_value_reads!(Set{Symbol}(), main), defined));
-            by=string)
+    reads = _rk_value_reads!(Set{Symbol}(), main)
+    foreach(definition -> _rk_free_reads!(reads, definition), emitted.defs)
+    for name in sort!(collect(setdiff(reads, defined)); by=string)
         candidate(name) || continue
         expression = if haskey(consts, name) || haskey(aliases, name)
             _, value = _rk_resolve_use_ref(name, consts, aliases, parameters,
@@ -144,6 +146,18 @@ function _rk_define_read_scalars!(plan::_RKStructuralPlan, known)
         push!(plan.assignments, _RKAssignmentSpec(name, expression, name))
     end
     plan
+end
+
+# What a submodel reads from its caller: a block's law reads a prior's input
+# freely (`_RKBlockBody`), so it is neither an argument nor a local of the block.
+# A `@kernel` or an ordinary function reads only what it is passed.
+function _rk_free_reads!(names, definition)
+    _rk_source_definition(definition).kind === :rkppl || return names
+    (; parameters, statements) = _rk_definition_parts(definition)
+    locals = _rk_source_symbols!(Set{Symbol}(), collect(Any, parameters))
+    _rk_source_assignments!(locals, statements)
+    _rk_source_outputs!(locals, statements)
+    union!(names, setdiff(_rk_value_reads!(Set{Symbol}(), statements), locals))
 end
 
 # The names a statement reads as values: not call heads, keyword names or the

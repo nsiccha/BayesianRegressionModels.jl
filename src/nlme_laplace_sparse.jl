@@ -1439,15 +1439,35 @@ function _brm_spl_prior_mode(p::BRMSparseLaplaceProblem, pop)
     r === nothing ? z : first(r)
 end
 
+# Which components are at their rounding floor (`_brm_lap_floor_candidate` in
+# nlme_laplace.jl), by one assembly at every component's probe point and one
+# solve with the step's h.
+function _brm_spl_at_floor(p::BRMSparseLaplaceProblem, pop, z, δ, g, h, λ; weight::Float64)
+    ξ = _BRM_LAP_FLOOR_PROBE
+    nc = length(p.components)
+    r = zeros(length(z))
+    _brm_spl_assemble!(zeros(nc), r, _brm_spl_precision(p), p, pop.A, pop.C, z .+ ξ .* δ;
+        derivatives=true, uA=pop.uA, weight)
+    r .-= (1 - ξ) .* g
+    all(isfinite, r) || return falses(nc)
+    direction = _brm_spl_shifted_direction(p, h, r)
+    direction === nothing && return falses(nc)
+    ρ = zeros(nc)
+    for i in eachindex(r)
+        ρ[p.component[i]] += r[i] * first(direction)[i]
+    end
+    _brm_lap_at_floor.(ρ, λ)
+end
+
 # Newton's method on the continuation density prior + s × likelihood, from z
 # (in place), for every component at once: one factor per step, with each
 # component's own shift where its h is not positive definite
 # (`_brm_spl_shifted_direction`), its own step length and backtracking
 # (`_brm_spl_step!`), and its own stop: decrement at most `tol`, or at its
-# rounding floor on an unshifted step (a shifted decrement shrinks slowly
-# without being at the mode). Each component's steps and shifted steps go
-# into `search`, stage `stage`. With `start`, a likelihood that is not finite
-# at z moves z halfway toward zero effects until it is (deterministically).
+# rounding floor on an unshifted step (`_brm_spl_at_floor`; a shifted decrement
+# shrinks slowly without being at the mode). Each component's steps and shifted
+# steps go into `search`, stage `stage`. With `start`, a likelihood that is not
+# finite at z moves z halfway toward zero effects until it is (deterministically).
 function _brm_spl_stage!(p::BRMSparseLaplaceProblem, pop, z, s, tol, search, stage;
         start::Bool=false)
     n = length(z); nc = length(p.components)
@@ -1476,9 +1496,12 @@ function _brm_spl_stage!(p::BRMSparseLaplaceProblem, pop, z, s, tol, search, sta
         for i in 1:n
             λ[p.component[i]] += g[i] * δ[i]
         end
+        candidate = [!converged[c] && shift[c] == 0 &&
+            _brm_lap_floor_candidate(λ[c], previous[c], tol) for c in 1:nc]
+        floor = any(candidate) ? _brm_spl_at_floor(p, pop, z, δ, g, h, λ; weight=s) : candidate
         for c in 1:nc
             converged[c] && continue
-            if λ[c] <= tol || (shift[c] == 0 && λ[c] <= 1e-8 && λ[c] >= previous[c] / 4)
+            if λ[c] <= tol || (candidate[c] && floor[c])
                 converged[c] = true
                 search.decrement[c] = λ[c]
                 search.stop[c] = λ[c] <= tol ? :tol : :floor

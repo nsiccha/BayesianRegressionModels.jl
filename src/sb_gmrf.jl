@@ -2,7 +2,7 @@
 # field law. The emitted model retains original vertex/channel/time ordering;
 # only the spatial factor uses the data-only fill-reducing permutation.
 StanBlocks.@deffun @juliacompat begin
-    brm_gmrf_factor(kappa2::real, mass::vector[N], gptr::int[NP],
+    brm_gmrf_factor(mass_scale::real, stiffness_scale::real, mass::vector[N], gptr::int[NP],
             grow::int[NZ], gval::vector[NZ], lptr::int[NP], lrow::int[NL],
             previous_ptr::int[NP], previous_col::int[ND], previous_pos::int[ND])::vector[N + NL] = begin
         ldl_values = rep_vector(0.0, NL)
@@ -14,10 +14,10 @@ StanBlocks.@deffun @juliacompat begin
             end
             for p in gptr[j]:(gptr[j + 1] - 1)
                 if grow[p] >= j
-                    work[grow[p]] = gval[p]
+                    work[grow[p]] = stiffness_scale * gval[p]
                 end
             end
-            work[j] += kappa2 * mass[j]
+            work[j] += mass_scale * mass[j]
             for q in previous_ptr[j]:(previous_ptr[j + 1] - 1)
                 k = previous_col[q]
                 start = previous_pos[q]
@@ -62,10 +62,12 @@ StanBlocks.@deffun @juliacompat begin
             L::matrix[C, C], times::vector[T], permutation::int[N], mass::vector[N],
             gptr::int[NP], grow::int[NZ], gval::vector[NZ], lptr::int[NP], lrow::int[NL],
             previous_ptr::int[NP], previous_col::int[ND], previous_pos::int[ND])::real = begin
-        kappa2 = 2.0 / square(spatial_length)
-        factor = brm_gmrf_factor(kappa2, mass, gptr, grow, gval, lptr, lrow,
+        # B = C/ell + (ell/2) G gives Q = B C^-1 B/(2pi), without
+        # overflowing an inverse-squared range before it cancels.
+        factor = brm_gmrf_factor(1.0 / spatial_length, spatial_length / 2.0,
+            mass, gptr, grow, gval, lptr, lrow,
             previous_ptr, previous_col, previous_pos)
-        logdet_space = 2.0 * sum(log(segment(factor, 1, N))) - sum(log(mass)) - N * log(4.0 * pi * kappa2)
+        logdet_space = 2.0 * sum(log(segment(factor, 1, N))) - sum(log(mass)) - N * log(2.0 * pi)
         lp = T * C * logdet_space / 2.0 - D * log(2.0 * pi) / 2.0
         for c in 1:C
             lp -= N * T * log(L[c, c])
@@ -90,14 +92,16 @@ StanBlocks.@deffun @juliacompat begin
             quadratic = 0.0
             for c in 1:C
                 for i in 1:N
-                    z = kappa2 * mass[i] * residual[i, c]
+                    stiffness = 0.0
                     for p in gptr[i]:(gptr[i + 1] - 1)
-                        z += gval[p] * residual[grow[p], c]
+                        stiffness += gval[p] * residual[grow[p], c]
                     end
-                    quadratic += square(z) / mass[i]
+                    z = mass[i] * (residual[i, c] / spatial_length) +
+                        (spatial_length / 2.0) * stiffness
+                    quadratic += square(z / (sqrt(4.0 * pi * mass[i]) * sqrt(variance)))
                 end
             end
-            lp -= (quadratic / (4.0 * pi * kappa2 * variance) + N * C * log(variance)) / 2.0
+            lp -= quadratic + N * C * log(variance) / 2.0
         end
         lp
     end
@@ -113,8 +117,8 @@ StanBlocks.@deffun @juliacompat begin
             L::matrix[C, C], times::vector[T], permutation::int[N], mass::vector[N],
             gptr::int[NP], grow::int[NZ], gval::vector[NZ], lptr::int[NP], lrow::int[NL],
             previous_ptr::int[NP], previous_col::int[ND], previous_pos::int[ND])::vector[D] = begin
-        kappa2 = 2.0 / square(spatial_length)
-        factor = brm_gmrf_factor(kappa2, mass, gptr, grow, gval, lptr, lrow,
+        factor = brm_gmrf_factor(1.0 / spatial_length, spatial_length / 2.0,
+            mass, gptr, grow, gval, lptr, lrow,
             previous_ptr, previous_col, previous_pos)
         field = rep_vector(0.0, D)
         residual::matrix[N, C]
@@ -124,7 +128,7 @@ StanBlocks.@deffun @juliacompat begin
             variance = t == 1 ? 1.0 : -expm1(-2.0 * (times[t] - times[t - 1]) / temporal_length)
             for c in 1:C
                 for i in 1:N
-                    white[i] = normal_rng(0.0, sqrt(4.0 * pi * kappa2 * mass[i]))
+                    white[i] = normal_rng(0.0, sqrt(2.0 * pi * mass[i]))
                 end
                 residual[:, c] = brm_gmrf_solve(white, factor, lptr, lrow)
             end
@@ -160,6 +164,172 @@ StanBlocks.@deffun @juliacompat begin
         sigma * (weight1 .* field[index1] + weight2 .* field[index2] + weight3 .* field[index3])
 end
 
+# The Julia method a shared helper's Stan builtin call resolves to.
+modified_bessel_second_kind(order::Integer, x::Real) = besselk(order, x)
+
+# The footprint form of the same covariance: one conditional per distinct
+# geometry, in the scalar correlation, with the channel factor whitening each
+# state (`gmrf_vecchia.jl` is its native counterpart and holds the derivation).
+StanBlocks.@deffun @juliacompat begin
+    brm_gmrf_matern1(x::real)::real = x > 0.0 ? x * modified_bessel_second_kind(1, x) : 1.0
+
+    # Conditional weights of pattern `p` in the first entries, its variance last.
+    brm_gmrf_vecchia_weights(p::int, kappa::real, temporal_length::real, east::vector[P],
+            north::vector[P], origin::int[NT], item_ptr::int[NIP], item_position::int[NI],
+            item_lag::vector[NI], M::int)::vector[M + 1] = begin
+        first_item = item_ptr[p]
+        m = item_ptr[p + 1] - first_item
+        out = rep_vector(0.0, M + 1)
+        A = rep_matrix(0.0, M, M)
+        center = origin[p]
+        for j in 1:m
+            pj = item_position[first_item + j - 1]
+            lj = item_lag[first_item + j - 1]
+            for i in j:m
+                pk = item_position[first_item + i - 1]
+                lk = item_lag[first_item + i - 1]
+                A[i, j] = brm_gmrf_matern1(kappa * hypot(east[pk] - east[pj], north[pk] - north[pj])) *
+                    exp(-abs(lk - lj) / temporal_length)
+            end
+            out[j] = brm_gmrf_matern1(kappa * hypot(east[center] - east[pj], north[center] - north[pj])) *
+                exp(-abs(lj) / temporal_length)
+        end
+        for j in 1:m
+            d = A[j, j]
+            for k in 1:(j - 1)
+                d -= square(A[j, k])
+            end
+            d = sqrt(d)
+            A[j, j] = d
+            for i in (j + 1):m
+                value = A[i, j]
+                for k in 1:(j - 1)
+                    value -= A[i, k] * A[j, k]
+                end
+                A[i, j] = value / d
+            end
+        end
+        variance = 1.0
+        for i in 1:m
+            value = out[i]
+            for k in 1:(i - 1)
+                value -= A[i, k] * out[k]
+            end
+            out[i] = value / A[i, i]
+            variance -= square(out[i])
+        end
+        for step in 1:m
+            i = m + 1 - step
+            value = out[i]
+            for k in (i + 1):m
+                value -= A[k, i] * out[k]
+            end
+            out[i] = value / A[i, i]
+        end
+        out[M + 1] = variance
+        out
+    end
+
+    brm_gmrf_vecchia_logdensity(field::vector[D], spatial_length::real, temporal_length::real,
+            L::matrix[C, C], east::vector[P], north::vector[P], origin::int[NT], item_ptr::int[NIP],
+            item_position::int[NI], item_lag::vector[NI], pattern_ptr::int[NPP], pattern_states::int[N],
+            neighbor_ptr::int[NNP], neighbor::int[NN], state_pattern::int[N], M::int)::real = begin
+        kappa = sqrt(2.0) / spatial_length
+        z = rep_matrix(0.0, C, N)
+        for s in 1:N
+            for c in 1:C
+                value = field[c + C * (s - 1)]
+                for k in 1:(c - 1)
+                    value -= z[k, s] * L[c, k]
+                end
+                z[c, s] = value / L[c, c]
+            end
+        end
+        lp = -N * C * log(2.0 * pi) / 2.0
+        for c in 1:C
+            lp -= N * log(L[c, c])
+        end
+        for p in 1:NT
+            weights = brm_gmrf_vecchia_weights(p, kappa, temporal_length, east, north, origin,
+                item_ptr, item_position, item_lag, M)
+            m = item_ptr[p + 1] - item_ptr[p]
+            q = 0.0
+            for slot in pattern_ptr[p]:(pattern_ptr[p + 1] - 1)
+                s = pattern_states[slot]
+                for c in 1:C
+                    r = z[c, s]
+                    for a in 1:m
+                        r -= weights[a] * z[c, neighbor[neighbor_ptr[s] + a - 1]]
+                    end
+                    q += square(r)
+                end
+            end
+            count = (pattern_ptr[p + 1] - pattern_ptr[p]) * C
+            lp -= (count * log(weights[M + 1]) + q / weights[M + 1]) / 2.0
+        end
+        lp
+    end
+
+    @lpxf brm_gmrf_vecchia_lpdf(field::vector[D], spatial_length::real, temporal_length::real,
+            L::matrix[C, C], east::vector[P], north::vector[P], origin::int[NT], item_ptr::int[NIP],
+            item_position::int[NI], item_lag::vector[NI], pattern_ptr::int[NPP], pattern_states::int[N],
+            neighbor_ptr::int[NNP], neighbor::int[NN], state_pattern::int[N], M::int)::real =
+        brm_gmrf_vecchia_logdensity(field, spatial_length, temporal_length, L, east, north, origin,
+            item_ptr, item_position, item_lag, pattern_ptr, pattern_states, neighbor_ptr, neighbor,
+            state_pattern, M)
+
+    @stanonly brm_gmrf_vecchia_rng(vector[D], spatial_length::real, temporal_length::real,
+            L::matrix[C, C], east::vector[P], north::vector[P], origin::int[NT], item_ptr::int[NIP],
+            item_position::int[NI], item_lag::vector[NI], pattern_ptr::int[NPP], pattern_states::int[N],
+            neighbor_ptr::int[NNP], neighbor::int[NN], state_pattern::int[N], M::int)::vector[D] = begin
+        kappa = sqrt(2.0) / spatial_length
+        z = rep_matrix(0.0, C, N)
+        field = rep_vector(0.0, D)
+        for s in 1:N
+            p = state_pattern[s]
+            weights = brm_gmrf_vecchia_weights(p, kappa, temporal_length, east, north, origin,
+                item_ptr, item_position, item_lag, M)
+            m = item_ptr[p + 1] - item_ptr[p]
+            for c in 1:C
+                value = sqrt(weights[M + 1]) * normal_rng(0.0, 1.0)
+                for a in 1:m
+                    value += weights[a] * z[c, neighbor[neighbor_ptr[s] + a - 1]]
+                end
+                z[c, s] = value
+            end
+            for c in 1:C
+                value = 0.0
+                for k in 1:c
+                    value += L[c, k] * z[k, s]
+                end
+                field[c + C * (s - 1)] = value
+            end
+        end
+        field
+    end
+
+    brm_gmrf_vecchia_lpdfs(field::vector[D], spatial_length::real, temporal_length::real,
+            L::matrix[C, C], east::vector[P], north::vector[P], origin::int[NT], item_ptr::int[NIP],
+            item_position::int[NI], item_lag::vector[NI], pattern_ptr::int[NPP], pattern_states::int[N],
+            neighbor_ptr::int[NNP], neighbor::int[NN], state_pattern::int[N], M::int)::vector[D] = begin
+        out = rep_vector(0.0, D)
+        out[1] = brm_gmrf_vecchia_lpdf(field, spatial_length, temporal_length, L, east, north, origin,
+            item_ptr, item_position, item_lag, pattern_ptr, pattern_states, neighbor_ptr, neighbor,
+            state_pattern, M)
+        out
+    end
+end
+
+_sb_gmrf_vecchia = StanBlocks.@slic begin
+    sigma ~ lognormal(0.0, 1.0; lower=0.0)
+    spatial_length ~ lognormal(0.0, 1.0; lower=0.0)
+    temporal_length ~ lognormal(0.0, 1.0; lower=0.0)
+    field::vector[n_field] ~ brm_gmrf_vecchia(spatial_length, temporal_length, L, east, north, origin,
+        item_ptr, item_position, item_lag, pattern_ptr, pattern_states, neighbor_ptr, neighbor,
+        state_pattern, M)
+    return sigma * field[index]
+end
+
 _sb_gmrf = StanBlocks.@slic begin
     sigma ~ lognormal(0.0, 1.0; lower=0.0)
     spatial_length ~ lognormal(0.0, 1.0; lower=0.0)
@@ -179,11 +349,13 @@ _sb_term_slot_config(::Val{:spatial_length}, entry) =
 _sb_term_slot_config(::Val{:temporal_length}, entry) =
     _sb_gp_scale_prior(entry.spec, _sb_term_prior_spelling(entry))
 
-function _sb_gmrf_submodel_expr(overrides, term)
+function _sb_gmrf_submodel_expr(overrides, term, footprint::Bool)
     slots = (:sigma, :spatial_length, :temporal_length)
     cfgs = map(slot -> _sb_term_cfg(overrides, term, slot), slots)
-    all(isnothing, cfgs) && return :_sb_gmrf
-    _sb_configured_term_submodel(_sb_gmrf, zip(slots, cfgs)...)
+    # The submodel itself, not its name: a caller's `mod` need not see this module.
+    base = footprint ? _sb_gmrf_vecchia : _sb_gmrf
+    all(isnothing, cfgs) && return base
+    _sb_configured_term_submodel(base, zip(slots, cfgs)...)
 end
 
 function _brm_gmrf_factor_data(mesh)
@@ -194,7 +366,38 @@ function _brm_gmrf_factor_data(mesh)
        previous_col=p.previous_col, previous_pos=p.previous_pos)
 end
 
-function _sb_gmrf_data(prepared)
+# A footprint's pattern tables with absolute positions and lags, for the
+# Stan helpers above: they evaluate each conditional without the native tables.
+function _brm_gmrf_footprint_data(f::_BRMGMRFFootprint)
+    npatterns = length(f.pattern_ptr) - 1
+    item_position = Vector{Int}(undef, length(f.item_position))
+    item_lag = Vector{Float64}(undef, length(f.item_lag))
+    origin = Vector{Int}(undef, npatterns)
+    state_pattern = Vector{Int}(undef, length(f.position))
+    for p in 1:npatterns
+        origin[p] = f.geometry_position[f.geometry_ptr[p]]
+        for q in f.item_ptr[p]:(f.item_ptr[p + 1] - 1)
+            item_position[q] = f.geometry_position[f.geometry_ptr[p] + f.item_position[q] - 1]
+            item_lag[q] = f.lag[f.lag_ptr[p] + f.item_lag[q] - 1]
+        end
+        for slot in f.pattern_ptr[p]:(f.pattern_ptr[p + 1] - 1)
+            state_pattern[f.pattern_states[slot]] = p
+        end
+    end
+    (; east=f.east, north=f.north, origin, item_ptr=f.item_ptr, item_position, item_lag,
+       pattern_ptr=f.pattern_ptr, pattern_states=Vector{Int}(f.pattern_states),
+       neighbor_ptr=f.neighbor_ptr, neighbor=Vector{Int}(f.neighbor), state_pattern, M=f.max_items)
+end
+
+_sb_gmrf_data(prepared) = prepared.state.neighbors === nothing ?
+    _sb_gmrf_mesh_data(prepared) : _sb_gmrf_footprint_data(prepared)
+
+function _sb_gmrf_footprint_data(prepared)
+    s = prepared.state
+    (; n_field=s.footprint.ncoordinates, _brm_gmrf_footprint_data(s.footprint)..., index=s.index)
+end
+
+function _sb_gmrf_mesh_data(prepared)
     s = prepared.state
     (; n_field=s.layout.ncoordinates,
        times=s.times, _brm_gmrf_factor_data(s.mesh)...,
@@ -205,7 +408,21 @@ end
 function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
     training = e.const_.prepared
     rows = Dict{Symbol,Any}(s => _sb_df_column(df, s) for s in training.source)
-    if !freeze
+    if !freeze && training.state.neighbors !== nothing
+        # A fresh fit's footprint is its own rows' read pairs.
+        state = training.state
+        times = _brm_gmrf_times(rows[training.source[3]])
+        channels = length(training.source) == 3 ? [1] : _brm_fit_levels(rows[training.source[4]])
+        if state.correlation !== nothing
+            all(c -> c in state.channels, channels) || throw(ArgumentError(
+                "gmrf replay with channel correlation cannot introduce new channel labels"))
+            channels = state.channels
+        end
+        footprint = _brm_vecchia_footprint(rows[training.source[1]], rows[training.source[2]],
+            rows[training.source[3]], length(channels); state.neighbors)
+        training = _BRMPreparedTerm(gmrf, training.source,
+            merge(state, (; times, channels, footprint)), training.dependencies)
+    elseif !freeze
         state = training.state
         vertices = _sb_df_column(df, state.vertices_source)
         cells = _sb_df_column(df, state.cells_source)
@@ -237,16 +454,17 @@ function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
         new_data[e.const_.L_key] = Matrix{Float64}(I, length(s.channels), length(s.channels))
         push!(handled, e.const_.L_key)
     end
-    push!(handled, s.vertices_source, s.cells_source)
+    s.neighbors === nothing && push!(handled, s.vertices_source, s.cells_source)
     new_preproc[key] = PreprocEntry(:gmrf, merge(e.const_, (; prepared)), e.raw_ref, true)
 end
 
 function _sb_predictor_term!(stmts, data, ::typeof(gmrf), term;
         target::Symbol, term_overrides=Dict{Symbol,Any}(), kwargs...)
     arguments = _brm_gmrf_arguments(term)
+    footprint = arguments.neighbors !== nothing
     raw = (arguments.axes..., arguments.time,
         (arguments.channel === nothing ? () : (arguments.channel,))...,
-        arguments.mesh.vertices, arguments.mesh.cells)
+        (footprint ? () : (arguments.mesh.vertices, arguments.mesh.cells))...)
     inner = Dict{Symbol,Any}(_sb_inner_data(:gmrf, value) for value in raw)
     prepared = _brm_prepare_term(term, target, (; data=inner))
     # Preparation here receives raw support data, while the resolved prior
@@ -286,9 +504,9 @@ function _sb_predictor_term!(stmts, data, ::typeof(gmrf), term;
         end
         _sb_level_correlation_factor!(data, state.correlation)
     end
-    _sb_record_preproc!(data, keys_.index1, PreprocEntry(:gmrf,
+    _sb_record_preproc!(data, footprint ? keys_.index : keys_.index1, PreprocEntry(:gmrf,
         (; prepared, keys=keys_, L_key), prepared.source, true))
-    submodel = _sb_gmrf_submodel_expr(term_overrides, term)
+    submodel = _sb_gmrf_submodel_expr(term_overrides, term, footprint)
     push!(stmts, Expr(:call, :~, stem, _sb_term_model_call(submodel, term_overrides, term;
         data, stem, L=L_key, keys_...)))
     stem
