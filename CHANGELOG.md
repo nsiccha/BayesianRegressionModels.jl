@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.155
+## 0.2.157
 
 - Sparse Laplace supports model-scope helpers shared by ordinary or
   sum-factored observation cells. Sampled-coordinate helper values are
@@ -26,12 +26,48 @@ instead of failing at run time.
 - A `mo()` or `mo1()` term read by a subject's `@plate` cell now plans: the
   subjects' effects are declared partitioned, so its level table, which has no
   row form, is computed once per population point in the shared prefix.
-- **Breaking:** the RK backend requires ReactiveKernels 0.1.72 and
-  ReactiveKernelsPPL 0.1.80. Earlier releases lose the shared-prefix cut's
-  frontier types when preparing `partitioned` cell factors and refuse such
-  sum-factored cells with a locality error, and have no row forms for
-  matrix-row helpers, `vec` of a row value or whole arrays read by index.
-  Update older pinned RK environments; the test bootstrap selects that release.
+- **Breaking:** the RK backend requires ReactiveKernels 0.1.73 and
+  ReactiveKernelsPPL 0.1.82. Earlier releases refuse sum-factored cells over
+  shared helpers with a locality error, read a producer plate's cell whole
+  under `partitioned`, and have no row forms for matrix-row helpers, `vec` of a
+  row value, whole arrays read by index or `b[p, 2]` of a computed matrix. Under
+  `locality = :error`, a matrix with no row form read as `M[p, 2]` is now
+  refused by name rather than computed whole in every cell. Update older pinned
+  RK environments; the test bootstrap selects that release.
+
+## 0.2.156
+
+- **`RKBRMI` random-effect and term priors can read data.** A formula-route
+  prior such as `sd(:, p) ~ Exponential(prior_sd_scale)` failed at construction
+  with `references unknown name prior_sd_scale`, naming an internal array, while
+  `sigma ~ Exponential(prior_sd_scale)` and `SBBRMI` accepted it. Random-effect
+  scale priors (including per-margin, truncated and stratified blocks), Student-t
+  `ranef(:, id) ~ TDist(nu)` degrees of freedom, `hsgp` priors and an `r2d2`
+  `reference_scale` now take a numeric data scalar, an expression or element over
+  numeric data fields, a literal assignment (`rate = 1.7`) or a
+  `name = constant(expr)`. `SBBRMI` still refuses a data `reference_scale`. Data
+  of another type, such as a vector of labels, is refused naming the field.
+- `gp`, `car`, `cdar` and `dar` priors, which otherwise take literals only, now
+  take a numeric data scalar, an element of a data vector or a
+  `name = constant(expr)` as its number. `dar`'s scale prior stays `Normal`.
+- These values stay in the fitted program, as a scalar parameter's prior does. A
+  design may omit the field or repeat its value; one that changes it fails
+  `reprocess`'s program check unless `freeze_constants=false`, and no design binds
+  it. Value-route models (`@plate` cells and assignments reading predictors) still
+  bind these scalars as before.
+
+## 0.2.155
+
+- **In-cell `MvNormal` on `SBBRMI`:** a `@plate` cell may observe its slice
+  jointly, `y[rows[i]] ~ MvNormal(location, covariance)`, with the covariance
+  computed in the cell, inline or bound to a local. It lowers to the BRM-owned
+  family `brm_mvnormal`, which is Stan's `multi_normal` with log density 0 for
+  an empty slice, as in Julia. The pointwise log likelihood is one value per
+  cell and the predictive draw is the slice. Only the two-argument constructor
+  is accepted in a cell. `RKBRMI` already had this since 0.2.86, and both
+  backends now give the same density and gradient.
+- **`Diagonal(v)` and `diagm(v)` on `SBBRMI`:** both lower to `diag_matrix(v)`,
+  in a cell and in a model-scope expression.
 
 ## 0.2.154
 

@@ -575,6 +575,19 @@ refused as a row column (snags `rkbrmi-on-a-mode-0bd31c04`,
 `cdar-cor-matrix-c8278be6`). Set
 `BRM_PLATE_LEVEL_AXIS_RUNTIME=0` to skip the compiled-model sets.
 
+`plate_mvnormal_observation.jl` checks a cell observing its slice jointly,
+`y[rows[i]] ~ MvNormal(location, covariance)`, with the covariance computed in
+the cell. The model is an aggregate benchmark: unit-level means and variances
+summed to district totals, a grand total, and the observed district totals
+given it. It checks:
+
+- the SBBRMI density and gradient against a plain-Julia joint `MvNormal`,
+  including a cell with an empty slice (log density 0);
+- `Diagonal(v)` and `diagm(v)` both lowering to `diag_matrix(v)`;
+- a covariance bound to a cell local against the inline spelling;
+- the unit-level spelling against district sums precomputed as data;
+- the RKBRMI density and native Enzyme gradient against the same Stan program.
+
 `fixed_ranef_scales.jl` checks random-effect scales and correlations held at
 known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
 
