@@ -41,5 +41,18 @@ module UndocumentedScope end
     @test replacement.value == 2
     @test _brm_binding_docstring(UndocumentedScope, :absent) === nothing
     @test Base.Docs.meta(UndocumentedScope; autoinit=false) === nothing
+    emitted = :(result = value + 1)
+    wrapped = _brm_documented_statement(emitted, original.documentation)
+    @test _brm_strip_normalized_docs(wrapped) == emitted
+    @test wrapped.args[3] == doc.markdown
+    @test wrapped.args[2] == LineNumberNode(doc.line, doc.file)
+    @test wrapped.args[4] !== emitted
+end
+
+@testset "A component's root documentation has its definition name" begin
+    doc = BRMDocumentation((), :piece, "Component description.",
+        :(function piece(x); x; end), nothing, 0)
+    artifact = (; meta=(; documentation=(doc,)))
+    @test brm_documentation_markdown(artifact) == "### `piece`\n\nComponent description.\n\n"
 end
 end

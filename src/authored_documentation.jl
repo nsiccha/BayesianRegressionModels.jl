@@ -134,6 +134,17 @@ _brm_source_documentation(source) =
 _brm_copy_documentation(d::BRMDocumentation) = BRMDocumentation(d.path, d.owner,
     d.markdown, deepcopy(d.statement), d.file, d.line)
 
+# Emission sites supply the exact records for their known logical target.
+# Wrapping never infers identity from generated names or evaluates @doc.
+function _brm_documented_statement(statement::Expr, docs)
+    result = deepcopy(statement)
+    for doc in reverse(docs)
+        result = Expr(:macrocall, GlobalRef(Core, Symbol("@doc")),
+            LineNumberNode(doc.line, something(doc.file, :none)), doc.markdown, result)
+    end
+    result
+end
+
 # An outer `"doc" @brm function ... end` belongs to Julia's documentation
 # macro. Read its original strings rather than re-rendering Markdown. This is
 # Julia's existing store, and autoinit=false makes this a strictly read-only
@@ -244,7 +255,8 @@ description coverage.
 function brm_documentation_markdown(model)
     io = IOBuffer()
     for doc in brm_documentation(model)
-        println(io, "### `", join(string.(doc.path), "."), "`\n\n", doc.markdown, "\n")
+        path = isempty(doc.path) ? (doc.owner,) : doc.path
+        println(io, "### `", join(string.(path), "."), "`\n\n", doc.markdown, "\n")
     end
     String(take!(io))
 end
