@@ -432,8 +432,11 @@ function _brm_apply_hsgp_periodic(period::Real, raw::AbstractVector{<:Real},
     _brm_gather_rows(PHI, rows)
 end
 
+# No `Float64[v...]`: splatting a vector into an array literal dispatches at run
+# time, and a ReactiveKernels program computing this basis (the sparse Laplace's
+# data prefix) is refused for that under `type_stability = :error`.
 _brm_hsgp_periodic_harmonics(K::Integer) =
-    Float64[repeat(1:K, 2)...]
+    Float64.(repeat(1:K, 2))
 
 # The periodic analogue of `_brm_hsgp_rho_lower`, by the SAME amplitude-ratio
 # rule: the exp-quad floor is the length scale at which the k-th basis
