@@ -60,6 +60,14 @@ function _brm_gmrf_component_field(p, c)
     k === nothing ? nothing : p.gmrf.fields[k]
 end
 
+# The fields that together are exactly component `c` (several read by shared rows).
+function _brm_gmrf_component_fields(p, c)
+    p.gmrf === nothing && return nothing
+    fields = [f for f in p.gmrf.fields if p.component[first(f.z)] == c]
+    sum(f -> length(f.z), fields; init=0) == length(p.components[c]) && length(fields) >= 2 ?
+        fields : nothing
+end
+
 # One S's factor on the shared pattern, shifting its diagonal only if the
 # likelihood's curvature at the reference point is not positive semidefinite.
 function _brm_gmrf_chain_factor(values, permuted, order, diagonal, pattern)
@@ -88,24 +96,27 @@ end
 # `H` is the component's operator at the reference point, `h` the problem's
 # precision there, and the field's factors hold that point's values. `mode` is
 # `:auto`, `:decoupled` or `:sequential` (tests name a combination to check it).
-function _brm_gmrf_time_reference(field, H, h, localindex; mode=:auto)
+# `data=false` leaves the likelihood out: a star's other fields.
+function _brm_gmrf_time_reference(field, H, h, localindex; mode=:auto, data=true)
     nv, nc, nt = field.shape
     D = h isa _BRMSumPrecision ? h.D : h
     values = nonzeros(D)
     ns = length(field.qs)
-    data = zeros(ns, nc, nt)
+    curvature = zeros(data ? ns : 0, nc, nt)
     sp = field.spatial.pattern
-    _brm_gmrf_foreach_entry(field) do k, i, j, ks, ta, tb, ca, cb
-        ta == tb && ca == cb && (data[ks, ca, ta] = values[field.nz[k]] -
-            field.qt[ta] * field.Λ[ca, ca] * field.qs[ks])
-    end
     state = localindex[field.z]
-    # The diagonal of a reduction's B'WB: it stays out of H.D, as in the LDL reference.
     position = [only(k for k in nzrange(sp, j) if rowvals(sp)[k] == j) for j in 1:nv]
-    Dd = diag(H.D)
-    for t in 1:nt, c in 1:nc, i in 1:nv
-        l = state[i + nv * ((c - 1) + nc * (t - 1))]
-        data[position[i], c, t] += H.diagonal[l] - Dd[l]
+    if data
+        _brm_gmrf_foreach_entry(field) do k, i, j, ks, ta, tb, ca, cb
+            ta == tb && ca == cb && (curvature[ks, ca, ta] = values[field.nz[k]] -
+                field.qt[ta] * field.Λ[ca, ca] * field.qs[ks])
+        end
+        # The diagonal of a reduction's B'WB: it stays out of H.D, as in the LDL reference.
+        Dd = diag(H.D)
+        for t in 1:nt, c in 1:nc, i in 1:nv
+            l = state[i + nv * ((c - 1) + nc * (t - 1))]
+            curvature[position[i], c, t] += H.diagonal[l] - Dd[l]
+        end
     end
     spatial = SparseMatrixCSC(nv, nv, copy(sp.colptr), copy(rowvals(sp)), copy(field.qs))
     pattern = _brm_gmrf_factor_pattern(spatial)
@@ -120,7 +131,7 @@ function _brm_gmrf_time_reference(field, H, h, localindex; mode=:auto)
         a[t] = exp(-gap)
         v[t] = -expm1(-2gap)
     end
-    shared = (; pattern, spatial, tracked, order, position, data, a, v, state)
+    shared = (; pattern, spatial, tracked, order, position, curvature, a, v, state)
     U = Matrix(inv(LowerTriangular(Matrix(field.L))))
     diagonal = all(iszero, U .- Diagonal(diag(U)))
     decoupled() = begin
@@ -149,7 +160,7 @@ const _BRM_GMRF_REFERENCE_TRIAL_ITERATIONS = 24
 # The factors of chains with these prior `scales` and data `weights[c, j]`.
 function _brm_gmrf_chains(field, shared, scales, weights, basis, sequential)
     nv, nc, nt = field.shape
-    (; pattern, spatial, tracked, order, position, data, a, v, state) = shared
+    (; pattern, spatial, tracked, order, position, curvature, a, v, state) = shared
     ns = length(field.qs)
     lower = Matrix{Vector{Float64}}(undef, nc, nt)
     root = Matrix{Vector{Float64}}(undef, nc, nt)
@@ -157,13 +168,22 @@ function _brm_gmrf_chains(field, shared, scales, weights, basis, sequential)
     entries = nt + nc^2
     largest_shift = 0.0
     chain = zeros(ns)
+    # Without data a chain's S is the same at every equal time gap: share its factor.
+    shared_factor = Dict{Float64,Any}()
     for t in 1:nt, j in 1:nc
-        chain .= (scales[j] / v[t]) .* field.qs
-        for c in 1:nc
+        scale = scales[j] / v[t]
+        if isempty(curvature) && haskey(shared_factor, scale)
+            known = shared_factor[scale]
+            lower[j, t], root[j, t] = known.lower, known.root
+            logdetM += known.logdet
+            continue
+        end
+        chain .= scale .* field.qs
+        isempty(curvature) || for c in 1:nc
             weight = weights[c, j]
             iszero(weight) && continue
             for k in 1:ns
-                chain[k] += weight * data[k, c, t]
+                chain[k] += weight * curvature[k, c, t]
             end
         end
         (; factor, shift) = _brm_gmrf_chain_factor(chain, tracked, order, position, pattern)
@@ -172,6 +192,8 @@ function _brm_gmrf_chains(field, shared, scales, weights, basis, sequential)
         root[j, t] = sqrt.(factor.diagonal)
         logdetM += sum(log, factor.diagonal)
         entries += length(factor.lower)
+        isempty(curvature) && (shared_factor[scale] = (; lower=lower[j, t], root=root[j, t],
+            logdet=sum(log, factor.diagonal)))
     end
     _BRMGMRFTimeReference(pattern, spatial, lower, root, Vector{Float64}(scales), a ./ v,
         copy(field.qt), copy(field.qo), basis, sequential, state, field.shape,
@@ -299,10 +321,15 @@ function _brm_gmrf_channel_basis!(y, V, nv, nc, nt, transposed)
     y
 end
 
-function _brm_from_physical!(out, A::_BRMPreconditionedOperator{H,_BRMGMRFTimeReference}, b) where {H}
-    R = A.reference
+_brm_from_physical!(out, A::_BRMPreconditionedOperator{H,_BRMGMRFTimeReference}, b) where {H} =
+    _brm_gmrf_whiten!(out, A.reference, b, A.first, A.physical)
+_brm_to_physical!(out, A::_BRMPreconditionedOperator{H,_BRMGMRFTimeReference}, x) where {H} =
+    _brm_gmrf_unwhiten!(out, A.reference, x, A.first, A.product)
+
+# out ← C⁻¹ b and out ← C⁻ᵀ x on this reference's coordinates of the component,
+# whose other entries they neither read nor write; y and w are scratch.
+function _brm_gmrf_whiten!(out, R::_BRMGMRFTimeReference, b, y, w)
     nv, nc, nt = R.shape
-    y, w = A.first, A.physical
     state = R.state
     @inbounds for k in eachindex(state)
         y[k] = b[state[k]]
@@ -314,7 +341,7 @@ function _brm_from_physical!(out, A::_BRMPreconditionedOperator{H,_BRMGMRFTimeRe
             _brm_gmrf_chain_whiten!(w, y, R, j, work)
         end
     else
-        solved = similar(y)
+        solved = zeros(length(state))
         for c in nc:-1:1
             _brm_gmrf_chain_whiten!(w, y, R, c, work)
             c == 1 && break
@@ -328,10 +355,8 @@ function _brm_from_physical!(out, A::_BRMPreconditionedOperator{H,_BRMGMRFTimeRe
     out
 end
 
-function _brm_to_physical!(out, A::_BRMPreconditionedOperator{H,_BRMGMRFTimeReference}, x) where {H}
-    R = A.reference
+function _brm_gmrf_unwhiten!(out, R::_BRMGMRFTimeReference, x, y, w)
     nv, nc, nt = R.shape
-    y, w = A.first, A.product
     state = R.state
     @inbounds for k in eachindex(state)
         w[k] = x[state[k]]
@@ -344,7 +369,7 @@ function _brm_to_physical!(out, A::_BRMPreconditionedOperator{H,_BRMGMRFTimeRefe
         nc == 1 || _brm_gmrf_channel_basis!(y, R.basis, nv, nc, nt, false)
     else
         fill!(y, 0.0)
-        accumulated, whitened = zeros(length(y)), zeros(length(y))
+        accumulated, whitened = zeros(length(state)), zeros(length(state))
         for c in 1:nc
             if c > 1
                 # w_c − C_c⁻¹ Σ_{k<c} weight (Q_t ⊗ Q_s) x_k.
@@ -393,5 +418,85 @@ function _brm_gmrf_sequential_gather!(out, x, R, c)
             out[offset + i] = value
         end
     end
+    out
+end
+
+# Several fields that shared rows couple into one component. Curvature between
+# them comes from their common data, so a diagonal block of references fails:
+# the data pin only sums of fields and leave their differences to the priors. In
+#   M = Σ_{g≠h} x_gᵀ P_g x_g + (x_h + T_h⁻¹ Σ_{g≠h} D_hg x_g)ᵀ T_h (x_h + T_h⁻¹ Σ_{g≠h} D_hg x_g)
+# one hub h takes the data (T_h its time-block reference), the others only their
+# priors (P_g), and M's blocks between the hub and another field equal H's. Which
+# field makes the best hub varies by orders of magnitude (matrix level, 20,000
+# states: 35 iterations against 800 for the same two fields), so preparation
+# measures each on a fixed short trial. There is no control variate here yet.
+struct _BRMGMRFStarReference
+    members::Vector{_BRMGMRFTimeReference}
+    hub::Int
+    coupling::SparseMatrixCSC{Float64,Int}
+    logdet::Float64
+    factor_entries::Int
+    diagonal_shift::Float64
+end
+Base.deepcopy_internal(R::_BRMGMRFStarReference, ::IdDict) = R
+_brm_reference_binding(R::_BRMGMRFStarReference) = (; members=map(_brm_reference_binding, R.members),
+    R.hub, R.coupling.colptr, R.coupling.rowval, R.coupling.nzval, R.logdet)
+
+function _brm_gmrf_star_reference(fields, H, h, localindex)
+    n = size(H, 1)
+    priors = [_brm_gmrf_time_reference(f, H, h, localindex; mode=:decoupled, data=false) for f in fields]
+    trial = 2.0 .* rand(Random.Xoshiro(_BRM_GMRF_REFERENCE_TRIAL_SEED), Bool, n) .- 1
+    best, best_residual = nothing, Inf
+    for (k, field) in enumerate(fields)
+        members = copy(priors)
+        members[k] = _brm_gmrf_time_reference(field, H, h, localindex)
+        hub = falses(n)
+        hub[members[k].state] .= true
+        rows, cols, values = Int[], Int[], Float64[]
+        D = H.D
+        for j in findall(hub), a in nzrange(D, j)
+            i = rowvals(D)[a]
+            hub[i] && continue
+            push!(rows, i); push!(cols, j); push!(values, nonzeros(D)[a])
+        end
+        R = _BRMGMRFStarReference(members, k, sparse(rows, cols, values, n, n),
+            sum(m -> m.logdet, members), sum(m -> m.factor_entries, members),
+            maximum(m -> m.diagonal_shift, members))
+        residual = _brm_lanczos_run(_BRMPreconditionedOperator(H, R), trial, 0.0,
+            _BRM_GMRF_REFERENCE_TRIAL_ITERATIONS).residual
+        residual < best_residual && ((best, best_residual) = (R, residual))
+    end
+    something(best, first(priors))
+end
+
+function _brm_from_physical!(out, A::_BRMPreconditionedOperator{H,_BRMGMRFStarReference}, b) where {H}
+    R = A.reference
+    hub = R.members[R.hub]
+    y, w = A.first, A.physical
+    _brm_gmrf_whiten!(out, hub, b, y, w)
+    solved = zeros(length(b))
+    _brm_gmrf_unwhiten!(solved, hub, out, y, w)
+    rest = collect(b)
+    mul!(rest, R.coupling, solved, -1.0, 1.0)
+    for (k, member) in enumerate(R.members)
+        k == R.hub || _brm_gmrf_whiten!(out, member, rest, y, w)
+    end
+    out
+end
+
+function _brm_to_physical!(out, A::_BRMPreconditionedOperator{H,_BRMGMRFStarReference}, x) where {H}
+    R = A.reference
+    hub = R.members[R.hub]
+    y, w = A.first, A.product
+    others = zeros(length(x))
+    for (k, member) in enumerate(R.members)
+        k == R.hub || _brm_gmrf_unwhiten!(others, member, x, y, w)
+    end
+    carried = transpose(R.coupling) * others
+    whitened = zeros(length(x))
+    _brm_gmrf_whiten!(whitened, hub, carried, y, w)
+    whitened .= x .- whitened
+    copyto!(out, others)
+    _brm_gmrf_unwhiten!(out, hub, whitened, y, w)
     out
 end

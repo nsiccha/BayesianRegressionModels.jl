@@ -24,10 +24,13 @@ function _brm_fixed_reference(H, memory; ridge=0.01)
         sum(log, abs.(F.D)), SparseArrays.nnz(F.L), Float64(F.α))
 end
 
-# A component that is exactly one native field has its own reference.
+# A component that is exactly native fields has its own reference: one field's
+# chains, or a star when shared rows couple several.
 function _brm_component_reference(p, c, H, h, localindex, options)
     field = _brm_gmrf_component_field(p, c)
     field === nothing || return _brm_gmrf_time_reference(field, H, h, localindex)
+    fields = _brm_gmrf_component_fields(p, c)
+    fields === nothing || return _brm_gmrf_star_reference(fields, H, h, localindex)
     _brm_fixed_reference(H, options.preconditioner_memory; ridge=options.preconditioner_ridge)
 end
 

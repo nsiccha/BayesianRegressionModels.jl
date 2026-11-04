@@ -209,3 +209,48 @@ end
         Dict((1, 1) => [((1, 2, 5), [0.2, 0.3, 0.5], 4.0)]))
     @test deepcopy(case.reference) === case.reference
 end
+
+# Two fields on one mesh, read by the same rows: h = [Q₁+D D; D Q₂+D].
+function star_case(mesh, times, lengths1, lengths2, reads)
+    a = reference_case(mesh, times, lengths1..., ones(1, 1), reads; mode=:decoupled)
+    b = reference_case(mesh, times, lengths2..., ones(1, 1), reads; mode=:decoupled)
+    n = a.N
+    h = [a.prior+a.D a.D; a.D b.prior+b.D]
+    fields = [a.field, b.field]
+    fields[2].z = collect((n + 1):2n)
+    H = BRM._BRMConditionalOperator(h, spzeros(0, 2n), spzeros(0, 0), Vector(diag(h)), 0.0,
+        Float64[], Float64[])
+    gmrf = BRM._BRMSPLGMRF(fields, (), nothing)
+    BRM._brm_gmrf_pattern_positions!(gmrf, h)
+    (; fields, h, H, N=2n, reference=BRM._brm_gmrf_star_reference(fields, H, h, collect(1:2n)))
+end
+
+@testset "A star over fields that shared rows couple is one congruence" begin
+    times = [0.0, 0.3, 1.7, 2.0]
+    reads = Dict((t, 1) => [((1, 2, 5), [0.2, 0.3, 0.5], 40.0), ((2, 3, 5), [0.7, 0.1, 0.2], 3.0)]
+        for t in eachindex(times))
+    case = star_case(MESH, times, (0.9, 2.0), (0.3, 0.5), reads)
+    R = case.reference
+    @test R isa BRM._BRMGMRFStarReference
+    @test deepcopy(R) === R
+    A = BRM._BRMPreconditionedOperator(case.H, R)
+    physical, whitened = reference_factors(A, case.N)
+    @test whitened' ≈ physical atol=1e-10
+    M = inv(Symmetric(physical * physical'))
+    @test R.logdet ≈ logdet(Symmetric(M)) atol=1e-7
+    dense = Matrix(case.h)
+    # Its blocks between the hub and the other field are H's own.
+    hub = R.members[R.hub].state
+    other = setdiff(1:case.N, hub)
+    @test M[other, hub] ≈ dense[other, hub] atol=1e-7
+    x = randn(Xoshiro(3), case.N)
+    @test A(x) ≈ physical' * dense * physical * x atol=1e-7 rtol=1e-8
+    @test BRM._brm_operator_solve(A, x, MatrixFreeLaplace()) ≈ dense \ x atol=1e-7 rtol=1e-7
+    # A complete probe set recovers the determinant through the star.
+    options = MatrixFreeLaplace(; probes=case.N, control_variate=false)
+    p = (; pattern=case.h, components=[collect(1:case.N)], component=ones(Int, case.N),
+        wcols=Vector{Int}[], wλ=Float64[], gmrf=nothing, algebra=(; options, large=trues(1),
+            references=[R], probes=[sqrt(case.N) .* Matrix{Float64}(I, case.N, case.N)],
+            diagnostics=Dict{Symbol,Any}()))
+    @test logdet(BRM._brm_operator_factor(p, case.h)) ≈ logdet(Symmetric(dense)) atol=1e-6
+end
