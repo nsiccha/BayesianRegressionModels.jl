@@ -108,6 +108,11 @@ exact mixed derivatives, strict local supports, retained subsets, independent
 copies and matrix-free covariance contractions. Synthetic scaling fixtures
 check that preparation retains only local supports and shared derivative
 sweeps allocate approximately in proportion to the number of cells.
+`laplace_cell_routes.jl` checks that both routes of a cell with no sums, compact
+operators and the factor outer, give the same marginal value and gradient,
+including a cell wider than the HVP batch, a retained plan and a copy. It forces
+the factor route for one testset by overriding the locality report, and a helper
+that hides its rows from both routes is refused by name.
 `plate_selected_outputs.jl` checks nested selection of shared vector outputs
 across plates with different cell counts: data-only and parameter-dependent
 outputs, fixed and varying widths, both output orders, reader-first composition,

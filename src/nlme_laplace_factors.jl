@@ -165,7 +165,7 @@ end
 function _brm_spl_prepare_factor_cells(footprint::F, reductions, u0, ncells,
         zof, pof, maps, layout, cached, context) where {F}
     map(1:ncells) do i
-        sums = [r.sums[i] for r in reductions]
+        sums = Float64[r.sums[i] for r in reductions]
         terms = [r.terms[i] for r in reductions]
         reads = footprint(context, sums, i).unconstrained
         reads = reads === :whole ? (cached ? layout.integrated : eachindex(u0)) : reads
@@ -421,7 +421,7 @@ function _brm_spl_accumulate_contraction!(batch, u, c, state, blocks, SB, BSB)
 end
 
 function _brm_spl_factor_values(prepared, u, cell; context=u)
-    sums = [sum(t -> Base.invokelatest(prepared.q.terms[j].value, context, cell.i, t.t),
+    sums = Float64[sum(t -> Base.invokelatest(prepared.q.terms[j].value, context, cell.i, t.t),
         terms; init=0.0) for (j, terms) in enumerate(cell.terms)]
     value = Base.invokelatest(prepared.q.outer.value, context, sums, cell.i)
     (; value, sums)
