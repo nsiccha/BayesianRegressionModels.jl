@@ -12,6 +12,30 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.162
+
+- `RKBRMI` of a model with an omitted response now samples what `SBBRMI` samples,
+  so `brm_coordinate_transport` and `brm_nlme_joint_map` work for every partial
+  fit of a shared `|ID|` block whose laws they cover.
+  - A plate cell no longer keeps a predictor, margin, scale or cell latent that
+    no kept likelihood reaches because a local or a reported indexed output
+    still reads it (`loc = base[i] + …; z[i] = loc; y[i] ~ Normal(loc, s)`). A
+    statement reading only what kept likelihoods reach and data stays, reported
+    output included.
+  - A shared block `SBBRMI` cannot split stays whole on RK too: Student-t,
+    R2D2-derived or known scales, stratified `gr(g, by=b)` and blocks joining
+    several grouping columns. This replaces the two refusals of an R2D2 block
+    and of a joined block under an omitted response.
+  - A long-format response omitted in a cell (`y[rows[i]] ~ …`) now plans, and an
+    `effect(lp, …)` prior on a predictor only an omitted response reads no longer
+    fails planning.
+  - **Breaking:** on such a partial fit `RKBRMI` has fewer coordinates. Saved RK
+    draws of the old layout do not fit it, and a cell output computed from what no
+    kept likelihood reaches (`z[i]` above) is no longer in the RK program. Read
+    it from `SBBRMI`'s generated quantities, or fit with the response bound.
+    Fully observed programs and designs that omit a response the fit observed
+    (`reprocess`) are unchanged.
+
 ## 0.2.161
 
 - **A Laplace mode search no longer stops short of the mode on a stiff
