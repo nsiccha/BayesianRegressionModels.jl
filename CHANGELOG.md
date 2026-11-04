@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.152
+
+- **Fix:** on RKBRMI, `addprop` over a plate output at model scope reads the
+  plate's rows again, assigned first (`scales = addprop(reads, a, b)`) or written
+  in the law. Since 0.2.125 it received one array per cell, so preparing the model
+  worked and evaluating it raised `MethodError: no method matching
+  ^(::Vector{Float64}, ::Int64)`. An authored whole-value helper still receives
+  one value per cell.
+
 ## 0.2.151
 
 - **Periodic `hsgp` under strict type stability:** `NLMEEstimation.check_protocol`

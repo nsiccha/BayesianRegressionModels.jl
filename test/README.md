@@ -341,8 +341,10 @@ density and finite-difference gradient oracles cover positional and keyword
 arguments, likelihood arguments, non-last outputs, reader-first order,
 data-only cells, replay with empty cells and changed row counts, and ordinary
 Reverse AD. Complete printed-source replay and flattened rowwise observation
-controls guard the surrounding contracts. Run with `julia --project=test
-test/plate_output_helpers.jl`; testset substring filters are supported.
+controls guard the surrounding contracts, including `addprop` over a plate
+output, assigned or in the law, with a shared or per-row additive scale. Run with
+`julia --project=test test/plate_output_helpers.jl`; testset substring filters
+are supported.
 
 `plate_grouped_outputs.jl` checks grouped reads of both outputs from another
 plate through `rows = groups(group => labels)` and `value[rows[k]]`.
