@@ -45,14 +45,14 @@ Base.eltype(::_BRMGMRFTracked) = Float64
 Base.eltype(::Type{_BRMGMRFTracked}) = Float64
 
 # The block's chain basis, as the fixed reference holds it.
-function _brm_gmrf_tracked(field, reference::_BRMGMRFTimeReference, h)
+function _brm_gmrf_tracked(field, reference::_BRMGMRFTimeReference, h; with_data=true)
     reference.sequential === nothing || return nothing
     nv, nc, nt = field.shape
     D = h isa _BRMSumPrecision ? h.D : h
     values = nonzeros(D)
     ns = length(field.qs)
     data = zeros(ns, nc, nt)
-    _brm_gmrf_foreach_entry(field) do k, i, j, ks, ta, tb, ca, cb
+    with_data && _brm_gmrf_foreach_entry(field) do k, i, j, ks, ta, tb, ca, cb
         ta == tb && ca == cb && (data[ks, ca, ta] = values[field.nz[k]] -
             field.qt[ta] * field.Λ[ca, ca] * field.qs[ks])
     end
@@ -296,4 +296,165 @@ function _brm_gmrf_tracked_sensitivity!(S, M::_BRMGMRFTracked, field)
         ta == tb && ca == cb && (S[field.nz[k]] += data[ks, ca, ta])
     end
     data
+end
+
+# T⁻¹ b for a rebuilt field reference, in the component's coordinates.
+function _brm_gmrf_tracked_ldiv!(out, M::_BRMGMRFTracked, b)
+    R = M.reference
+    nv, nc, nt = R.shape
+    state = R.state
+    y = Vector{Float64}(undef, length(state))
+    @inbounds for k in eachindex(state)
+        y[k] = b[state[k]]
+    end
+    nc == 1 || _brm_gmrf_channel_basis!(y, R.basis, nv, nc, nt, true)
+    stride = nv * nc
+    a, c, solved, work, previous = zeros(nv), zeros(nv), zeros(nv), zeros(nv), zeros(nv)
+    for j in 1:nc
+        λ = M.scale[j]
+        for t in nt:-1:2
+            offset = nv * (j - 1) + stride * (t - 1)
+            copyto!(a, 1, y, offset + 1, nv)
+            _brm_gmrf_tracked_solve!(solved, M, j, t, a, work)
+            mul!(c, M.spatial, solved)
+            coefficient = M.β[t] * λ
+            @inbounds for i in 1:nv
+                y[offset - stride + i] += coefficient * c[i]
+            end
+        end
+        for t in 1:nt
+            offset = nv * (j - 1) + stride * (t - 1)
+            copyto!(a, 1, y, offset + 1, nv)
+            if t > 1
+                mul!(c, M.spatial, previous)
+                coefficient = M.β[t] * λ
+                @inbounds for i in 1:nv
+                    a[i] += coefficient * c[i]
+                end
+            end
+            _brm_gmrf_tracked_solve!(previous, M, j, t, a, work)
+            copyto!(y, offset + 1, previous, 1, nv)
+        end
+    end
+    nc == 1 || _brm_gmrf_channel_basis!(y, R.basis, nv, nc, nt, false)
+    @inbounds for k in eachindex(state)
+        out[state[k]] = y[k]
+    end
+    out
+end
+
+# The same control variate over a star. With s = Σ_{g≠h} D_hg u_g and w = T_h⁻¹ s,
+#   uᵀ M u = Σ_{g≠h} u_gᵀ P_g u_g + u_hᵀ T_h u_h + 2 u_hᵀ s + sᵀ T_h⁻¹ s,
+# so its derivative is each field's own chain at u, less the hub's at w, and
+# 2 (u_h + w)_j u_i in the entry (i, j) of D_gh.
+mutable struct _BRMGMRFStarTracked
+    reference::_BRMGMRFStarReference
+    members::Vector{_BRMGMRFTracked}
+    fields::Vector{Any}
+    coupling::SparseMatrixCSC{Float64,Int}
+    cross::Vector{Float64}
+    logdet::Float64
+    shift::Float64
+end
+Base.size(M::_BRMGMRFStarTracked) = size(M.coupling)
+Base.size(M::_BRMGMRFStarTracked, d::Integer) = size(M.coupling, d)
+Base.eltype(::_BRMGMRFStarTracked) = Float64
+Base.eltype(::Type{_BRMGMRFStarTracked}) = Float64
+
+_brm_gmrf_hub(M::_BRMGMRFStarTracked) = M.members[M.reference.hub]
+
+# D_gh's entries at the current precision, on the star's stored coupling pattern.
+function _brm_gmrf_star_coupling(R::_BRMGMRFStarReference, D)
+    C = R.coupling
+    values = Vector{Float64}(undef, length(nonzeros(C)))
+    rows = rowvals(C)
+    for j in axes(C, 2), k in nzrange(C, j)
+        values[k] = D[rows[k], j]
+    end
+    SparseMatrixCSC(size(C)..., C.colptr, rows, values)
+end
+
+function _brm_gmrf_tracked(fields, R::_BRMGMRFStarReference, h)
+    any(m -> m.sequential !== nothing, R.members) && return nothing
+    D = h isa _BRMSumPrecision ? h.D : h
+    members = [_brm_gmrf_tracked(f, m, h; with_data=k == R.hub)
+        for (k, (f, m)) in enumerate(zip(fields, R.members))]
+    coupling = _brm_gmrf_star_coupling(R, D)
+    _BRMGMRFStarTracked(R, members, collect(Any, fields), coupling, zeros(length(nonzeros(coupling))),
+        sum(m -> m.logdet, members), maximum(m -> m.shift, members))
+end
+
+function LinearAlgebra.mul!(y, M::_BRMGMRFStarTracked, x)
+    fill!(y, 0.0)
+    for member in M.members
+        mul!(y, member, x)
+    end
+    hub = _brm_gmrf_hub(M)
+    s = transpose(M.coupling) * x
+    w = zeros(length(x))
+    _brm_gmrf_tracked_ldiv!(w, hub, s)
+    @inbounds for k in hub.reference.state
+        y[k] += s[k]
+        w[k] += x[k]
+    end
+    # w now holds x_h + T_h⁻¹ s at the hub.
+    mul!(y, M.coupling, _brm_gmrf_star_hub_only(w, hub), 1.0, 1.0)
+    y
+end
+(M::_BRMGMRFStarTracked)(x) = mul!(similar(x, Float64), M, x)
+
+function _brm_gmrf_star_hub_only(w, hub)
+    out = zeros(length(w))
+    @inbounds for k in hub.reference.state
+        out[k] = w[k]
+    end
+    out
+end
+
+function _brm_gmrf_tracked_contract!(M::_BRMGMRFStarTracked, u, weight)
+    hub = _brm_gmrf_hub(M)
+    for member in M.members
+        _brm_gmrf_tracked_contract!(member, u, weight)
+    end
+    s = transpose(M.coupling) * u
+    w = zeros(length(u))
+    _brm_gmrf_tracked_ldiv!(w, hub, s)
+    _brm_gmrf_tracked_contract!(hub, w, -weight)
+    C = M.coupling
+    rows = rowvals(C)
+    @inbounds for j in hub.reference.state, k in nzrange(C, j)
+        M.cross[k] += weight * (u[j] + w[j]) * u[rows[k]]
+    end
+    M
+end
+
+function _brm_gmrf_tracked_exact!(M::_BRMGMRFStarTracked)
+    foreach(_brm_gmrf_tracked_exact!, M.members)
+    M
+end
+
+# A rebuilt reference's derivative in the likelihood's entries of h.
+_brm_gmrf_tracked_sensitivity!(S, M::_BRMGMRFTracked, p, c) =
+    _brm_gmrf_tracked_sensitivity!(S, M, _brm_gmrf_component_field(p, c))
+function _brm_gmrf_tracked_sensitivity!(S, M::_BRMGMRFStarTracked, p, c)
+    hub = M.reference.hub
+    _brm_gmrf_tracked_sensitivity!(S, M.members[hub], M.fields[hub])
+    C = M.coupling
+    rows = rowvals(C)
+    for j in axes(C, 2), k in nzrange(C, j)
+        iszero(M.cross[k]) && continue
+        i = rows[k]
+        # Each stored direction of the symmetric precision takes the same share.
+        S[_brm_spl_nzindex(p.pattern, i, j)] += M.cross[k]
+        S[_brm_spl_nzindex(p.pattern, j, i)] += M.cross[k]
+    end
+    S
+end
+
+# A field's rebuilt reference, and whether the likelihood's data enter it.
+_brm_gmrf_tracked_member(::Nothing, field) = (nothing, false)
+_brm_gmrf_tracked_member(M::_BRMGMRFTracked, field) = (M, true)
+function _brm_gmrf_tracked_member(M::_BRMGMRFStarTracked, field)
+    k = findfirst(f -> f === field, M.fields)
+    k === nothing ? (nothing, false) : (M.members[k], k == M.reference.hub)
 end

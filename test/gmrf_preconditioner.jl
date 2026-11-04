@@ -254,3 +254,53 @@ end
             diagnostics=Dict{Symbol,Any}()))
     @test logdet(BRM._brm_operator_factor(p, case.h)) ≈ logdet(Symmetric(dense)) atol=1e-6
 end
+
+@testset "The star's rebuilt reference cancels its own estimate" begin
+    times = [0.0, 0.3, 1.7, 2.0]
+    reads = Dict((t, 1) => [((1, 2, 5), [0.2, 0.3, 0.5], 40.0), ((2, 3, 5), [0.7, 0.1, 0.2], 3.0)]
+        for t in eachindex(times))
+    case = star_case(MESH, times, (0.9, 2.0), (0.3, 0.5), reads)
+    R = case.reference
+    n = case.N
+    options = MatrixFreeLaplace(; probes=n, control_variate=true)
+    gmrf = BRM._BRMSPLGMRF(case.fields, (), nothing)
+    p = (; pattern=case.h, components=[collect(1:n)], component=ones(Int, n), wcols=Vector{Int}[],
+        wλ=Float64[], gmrf, algebra=(; options, large=trues(1), references=[R],
+            probes=[sqrt(n) .* Matrix{Float64}(I, n, n)], diagnostics=Dict{Symbol,Any}()))
+    F = BRM._brm_operator_factor(p, case.h)
+    dense = Matrix(case.h)
+    @test logdet(F) ≈ logdet(Symmetric(dense)) atol=1e-6
+    tracked = only(F.tracked)
+    @test tracked isa BRM._BRMGMRFStarTracked
+    @test tracked.logdet ≈ R.logdet atol=1e-8
+    physical, _ = reference_factors(BRM._BRMPreconditionedOperator(case.H, R), n)
+    x = randn(Xoshiro(9), n)
+    @test tracked(x) ≈ inv(Symmetric(physical * physical')) * x atol=1e-7 rtol=1e-8
+    for member in tracked.members
+        @test maximum(abs, member.block) < 1e-6
+        @test abs(member.dspatial) < 1e-5 && abs(member.dtemporal) < 1e-5
+        @test maximum(abs, member.dscale) < 1e-5
+    end
+    @test maximum(abs, tracked.cross) < 1e-6
+    # The total sensitivity to h is h's inverse, its own estimate having cancelled.
+    S = copy(case.h); nonzeros(S) .= F.sensitivity
+    @test maximum(abs, (Matrix(S) .- inv(Symmetric(dense)))[dense .!= 0]) < 1e-6
+    # A few probes: the derivative in one data entry matches a central difference.
+    probes = 2.0 .* rand(Xoshiro(13), Bool, n, 3) .- 1
+    factor(h) = begin
+        q = (; p..., algebra=(; p.algebra..., options=MatrixFreeLaplace(; probes=3, control_variate=true),
+            probes=[probes]))
+        BRM._brm_operator_factor(q, h)
+    end
+    G = factor(case.h)
+    logdet(G)
+    i, j = 1 + 0, n ÷ 2 + 1 # field 1 and field 2 at the first vertex, time and channel
+    @test case.h[i, j] != 0
+    bump(ε) = begin
+        moved = copy(case.h)
+        moved[i, j] += ε; moved[j, i] += ε
+        logdet(factor(moved))
+    end
+    position = (BRM._brm_spl_nzindex(case.h, i, j), BRM._brm_spl_nzindex(case.h, j, i))
+    @test sum(G.sensitivity[k] for k in position) ≈ (bump(1e-5) - bump(-1e-5)) / 2e-5 atol=2e-4 rtol=2e-4
+end

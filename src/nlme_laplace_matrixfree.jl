@@ -390,17 +390,24 @@ _brm_lanczos_combine!(out, V, coefficients) = begin
     out
 end
 
-# This part's control variate, for a field with a `decoupled` reference. A sum's
-# reductions stay out of the rebuilt reference, whose derivative they would need.
+# This part's control variate, for a field or star whose references decouple their
+# channels. A sum's reductions stay out of the rebuilt reference, whose derivative
+# they would need.
 function _brm_operator_tracked(F, component, operator)
     F.options.control_variate || return nothing
-    operator isa _BRMPreconditionedOperator{<:Any,_BRMGMRFTimeReference} || return nothing
+    operator isa _BRMPreconditionedOperator || return nothing
     F.curvature isa _BRMSumPrecision && return nothing
     iszero(operator.h.shift) || return nothing
     p = F.problem
     hasproperty(p, :gmrf) && p.gmrf !== nothing || return nothing
-    field = _brm_gmrf_component_field(p, component)
-    field === nothing ? nothing : _brm_gmrf_tracked(field, operator.reference, F.curvature)
+    if operator.reference isa _BRMGMRFTimeReference
+        field = _brm_gmrf_component_field(p, component)
+        return field === nothing ? nothing : _brm_gmrf_tracked(field, operator.reference, F.curvature)
+    elseif operator.reference isa _BRMGMRFStarReference
+        fields = _brm_gmrf_component_fields(p, component)
+        return fields === nothing ? nothing : _brm_gmrf_tracked(fields, operator.reference, F.curvature)
+    end
+    nothing
 end
 
 # S[k] += weight x[row] x[col] over the component's stored entries, without a
@@ -503,7 +510,7 @@ function _brm_operator_logdet!(F::_BRMOperatorFactor)
         F.logdets[component] = (tracked === nothing ? reference_logdet : tracked.logdet) + mean(estimates)
         if tracked !== nothing
             _brm_gmrf_tracked_exact!(tracked)
-            _brm_gmrf_tracked_sensitivity!(F.sensitivity, tracked, _brm_gmrf_component_field(p, component))
+            _brm_gmrf_tracked_sensitivity!(F.sensitivity, tracked, p, component)
             F.tracked[component] = tracked
         end
         p.algebra.diagnostics[Symbol("component_", component)] =

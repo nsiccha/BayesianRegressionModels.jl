@@ -1175,6 +1175,18 @@ on StanBlocks and ReactiveKernels, with constrained read-back and coordinate
 transport, effective bounds, known values, invalid addresses and overrides.
 Run it directly in the test environment.
 
+`gmrf_preconditioner.jl` checks a `gmrf` field's references against dense oracles,
+without model lowering: each is one congruence with the determinant it reports,
+in both channel combinations and through a star over coupled fields, and its blocks
+between neighbouring times, or between a star's hub and another field, equal the
+precision's. With a complete orthogonal probe set the rebuilt reference's exact
+derivative cancels its estimate entry by entry, and with few probes the control
+variate's derivative matches a central difference of its value.
+
+`gmrf_laplace.jl` also compares a 640-state field and two coupled fields under
+matrix-free algebra with exact algebra: value within four probe standard errors,
+gradient against a central difference of the returned value.
+
 `gmrf_laplace_start.jl` checks that the Laplace default start of a model-scope
 `gmrf` field equals its `brm_start(rk, (;); base=:prior_median)` medians, for
 declared laws, a known hyperparameter and a law reading a model-scope parameter.

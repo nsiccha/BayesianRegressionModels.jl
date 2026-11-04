@@ -365,9 +365,10 @@ function _brm_spl_gmrf_gradient!(gradient, p, state, S, v, active)
         z = state.z
         # A rebuilt reference's derivative in the data is in S for the likelihood's
         # chain rule. The prior takes its own, in the same factors, below.
-        tracked = state.F isa _BRMOperatorFactor ?
-            state.F.tracked[p.component[first(field.z)]] : nothing
-        share = tracked === nothing ? nothing : _brm_gmrf_tracked_data(tracked)
+        tracked, with_data = state.F isa _BRMOperatorFactor ?
+            _brm_gmrf_tracked_member(state.F.tracked[p.component[first(field.z)]], field) :
+            (nothing, false)
+        share = with_data ? _brm_gmrf_tracked_data(tracked) : nothing
         _brm_gmrf_foreach_entry(field) do k, i, j, ks, ta, tb, ca, cb
             a, b = field.z[i], field.z[j]
             selected = S[field.nz[k]]
