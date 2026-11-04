@@ -32,8 +32,8 @@ what [`brm_fitted_state`](@ref) returns. It holds
   spline fits), keyed by what they fit;
 - `constants`: the `name = constant(expr)` values;
 - `scalars`: numeric scalar data inputs, including prior arguments and inputs
-  of `constant(...)`. Omitted fields take these fitted values; supplied prior
-  arguments must still reproduce the fitted program;
+  of `constant(...)`. Omitted fields take these fitted values; a supplied prior
+  argument must equal its fitted value, literal or read by name in the program;
 - `declaration`: the authored model (`show(brm_source(rk))`), which a replay's
   model must repeat;
 - `program`: the fit's emitted program, which a replay must reproduce;
@@ -236,8 +236,8 @@ function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
         for name in state.responses
         if haskey(state.columns, name) && !_brm_df_has_column(new_data, name))
     merge!(absent, _rk_omitted_scalars(state.scalars, new_data))
-    rebound = _brm_rebind_brmi(_brm_resolve_optional_priors(template),
-        _BRMReplayData(new_data, absent))
+    rebound = _brm_rebind_brmi(_rk_declare_scalars(_brm_resolve_optional_priors(template),
+        state.scalars), _BRMReplayData(new_data, absent))
     frozen = _BRMFrozenReplay(state.scalars, groups, state.fits, record)
     plan = _brm_with_frozen_replay(frozen) do
         _brm_rk_plan(rebound; held_out,
@@ -245,9 +245,21 @@ function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
     end
     emitted = _rk_emit_ast(plan)
     _rk_check_replay_program(state.program, _rk_program_statements(emitted); prefix)
+    _rk_check_replay_priors(emitted, plan, state.scalars, new_data; prefix)
     _rk_check_replay_terms(plan; prefix)
     _rk_check_replay_groupings(plan, groups; prefix)
     plan, emitted
+end
+
+# A builder declares a scalar a `@plate` cell reads only when its data holds it,
+# so a model built on a design that omitted one has no data field to rebind, on
+# this replay or on a later one of its backend.
+function _rk_declare_scalars(brmi::BRMI, scalars)
+    operations = brmi.operations
+    names = Tuple(sort!([name for name in keys(scalars) if !haskey(operations, name)]))
+    isempty(names) && return brmi
+    BRMI(merge(NamedTuple{names}(map(name -> NamedColumn(name, DataColumn(scalars[name])), names)),
+        operations))
 end
 
 """

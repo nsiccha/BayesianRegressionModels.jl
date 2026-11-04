@@ -25,7 +25,7 @@
     brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), tol=1e-24, maxiter=50,
         structured=:auto, integrate=nothing, max_cell_width=128,
-        solver=:auto, matrixfree=MatrixFreeLaplace())
+        solver=:auto, matrixfree=MatrixFreeLaplace(), progress=nothing)
 
 Integrate every unit's standardized random effects out of an RK-lowered model
 by a Laplace approximation at their conditional mode, leaving the population
@@ -95,7 +95,9 @@ coordinate and prior. Width screening applies to the whole vector.
 with its defaults): every term only Normal rows read, and every term read by
 counts, binomial rows or `@plate` cells whose per-block importance diagnostic
 admits it. `integrate = plan` takes a [`BRMLaplacePlan`](@ref) as given; the
-problem's `plan` field holds the plan it was built from.
+problem's `plan` field holds the plan it was built from. With `integrate`,
+`progress` reports the preparation through Treebars as in
+[`brm_laplace_plan`](@ref).
 
 `integrate = :g` or `integrate = (:g, :h, …)` instead integrates every level
 of the named grouping columns' latent blocks by one sparse Laplace, whatever
@@ -164,8 +166,10 @@ Base.show(io::IO, p::BRMLaplaceProblem) = print(io, "BRMLaplaceProblem(",
 function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), tol=1e-24, maxiter=50,
         structured=:auto, integrate=nothing, max_cell_width=128,
-        solver=nothing, matrixfree=nothing)
+        solver=nothing, matrixfree=nothing, progress=nothing)
     max_cell_width = _brm_spl_width_limit(max_cell_width)
+    integrate === nothing && progress !== nothing && throw(ArgumentError(
+        "brm_laplace_problem: `progress` reports the sparse Laplace's preparation, which needs `integrate`"))
     policy = integrate isa BRMLaplacePlan ? integrate.algebra_policy :
         (; solver=:auto, matrixfree=MatrixFreeLaplace())
     solver = something(solver, policy.solver)
@@ -179,13 +183,13 @@ function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
         integrate === :auto && return _brm_sparse_laplace_problem_from_plan(backend,
             _brm_laplace_plan(backend; ad_backend, integrate=:auto, sample=(),
                 ess_floor=0.5, draws=200, at=nothing, rng=Random.Xoshiro(20261031), tol,
-                maxiter, max_cell_width, solver, matrixfree); ad_backend, tol, maxiter,
-                solver, matrixfree)
+                maxiter, max_cell_width, solver, matrixfree, progress); ad_backend, tol, maxiter,
+                solver, matrixfree, progress)
         integrate isa BRMLaplacePlan && return _brm_sparse_laplace_problem_from_plan(
             backend, (; plan=integrate, problem=nothing); ad_backend, tol, maxiter,
-            solver, matrixfree)
+            solver, matrixfree, progress)
         return _brm_sparse_laplace_problem(backend, integrate; ad_backend, tol, maxiter,
-            max_cell_width, solver, matrixfree)
+            max_cell_width, solver, matrixfree, progress)
     end
     solver in (:auto, :exact) || throw(ArgumentError(
         "brm_laplace_problem: solver=:matrixfree applies to the integrate path"))

@@ -14,8 +14,9 @@
 # Enzyme is the ecosystem's `dogfood` line (user pick on decision
 # `BayesianRegressionModels/decisions/2026-10-28T15-34-11-008-0n0kgfh`): reviewed
 # repairs no registered release carries, which BRM's RK cell gradients need. Its
-# commits live only in the KB hosts' Enzyme mirror (`MIRRORS`), and it runs
-# against its own libEnzyme build (`deps/dogfood_libenzyme.toml`), which exists
+# commits come from the KB hosts' Enzyme mirror (`MIRRORS`; GitHub
+# nsiccha/Enzyme.jl `dogfood` also serves the tip), and it runs against its own
+# libEnzyme build (`deps/dogfood_libenzyme.toml`), which exists
 # only on the hosts the Enzyme lane builds it for (gordito, Julia 1.10 and
 # 1.12). `apply_dogfood_libenzyme()` points `Enzyme_jll` at this host's build
 # through the KB resolver's own step, and refuses where there is none: the
@@ -307,7 +308,16 @@ const PINS = [
     # 474fd636 / libEnzyme df199913 preserves JIT symbols from augmented
     # reverse helpers under Forward, including the digamma partials needed
     # by ordinary negative-binomial compact-cell HVPs.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "474fd63654e64fdff77eed5326b9f9c6613dac50"),  # dogfood (KB mirror only)
+    # 330b3578 / libEnzyme 2b1f1cfe: the Forward derivative of a division no
+    # longer squares its divisor (Enzyme todo 0g6ywzj), so a cell's third order
+    # through log(erfc(t)) stays finite in the tail; it also carries the logger
+    # repair (Enzyme snag nested-forward-o-206e01ab) that lets a nested
+    # derivative first compile under a TestLogger, as @test_logs does here.
+    # 07842f2e / libEnzyme fce75191 carries both, and adds the repair for
+    # "Illegal cached pointer" from an array element read in a loop, which
+    # 330b3578 raised in a nested @plate cell's sparse Laplace HVP and in
+    # nlme_integrated.jl (Enzyme snag dogfood-tip-ille-519c9d56).
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "07842f2e9f12133872834aba08cd35c51bc0be00"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also

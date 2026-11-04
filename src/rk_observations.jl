@@ -73,8 +73,10 @@ Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_ou
     # graph from its own inputs (user decision `1tb1jrg`).
     brmi, assignments = _brm_resolve_data_assignments(brmi; prefix="RK backend")
     selected = _rk_held_out_selection(brmi, held_out)
-    original = _brm_rk_unselected_plan(brmi)
+    known_scalars = Ref{Any}(nothing)
+    original = _brm_rk_unselected_plan(brmi, known_scalars)
     _rk_attach_data_assignments!(original, assignments, constants)
+    _rk_define_read_scalars!(original, known_scalars[])
     isempty(selected) ? original : _RKHeldOutPlan(original, selected)
 end
 

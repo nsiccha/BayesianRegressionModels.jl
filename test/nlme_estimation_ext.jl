@@ -379,6 +379,146 @@ end
     @test check_protocol(m, θ, σ, ω; η=[0.1 -0.05 0.2; -0.1 0.15 0.05])
 end
 
+# A periodic hsgp's basis is data its program computes. The sparse Laplace probe
+# behind `provides_laplace_gradient`, which `check_protocol` reads, prepares that
+# data prefix as a program of its own, so a run-time dispatch in the basis helper
+# refuses a project that sets `type_stability = :error`, whatever the number of
+# basis functions (snag brm-nlme-check-p-d7ec2672).
+@stestset "a periodic hsgp passes check_protocol under strict type stability" begin
+    @test BRM._brm_hsgp_periodic_harmonics(3) == [1, 2, 3, 1, 2, 3]
+    @test BRM._brm_hsgp_periodic_harmonics(3) isa Vector{Float64}
+    data = (; subject=["a", "b", "c", "d"],
+        row_subject=["a", "b", "a", "c", "d", "b", "c", "a", "d", "c", "b", "d"],
+        t=[0.0, 5.0, 10.0, 2.0, 1.0, 15.0, 18.0, 25.0, 22.0, 30.0, 29.0, 34.0],
+        y=[0.1, 0.9, 0.4, -0.2, 1.4, 0.6, 0.0, 0.8, 1.7, -0.4, 1.1, 1.5])
+    brmi = @brm data begin
+        sigma ~ Exponential(1)
+        base ~ 1 + (1 | subject)
+        daily ~ 0 + hsgp(t; k=2, cov=:periodic, period=24.0)
+        rows = groups(row_subject => subject)
+        @plate for i in eachindex(base)
+            y[rows[i]] ~ Normal(base[i] .+ daily[rows[i]], sigma)
+        end
+    end
+    ReactiveKernels._with_type_stability(:error, :all) do
+        m = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
+        start = brm_nlme_start(m)
+        @test check_protocol(m, start.theta, start.sigma, start.omega; η=start.eta)
+    end
+end
+
+# A cell that reduces its data to its distinct step lengths, as a PK event reader
+# does. Static Enzyme before dogfood `0ed41342` could not take forward over reverse
+# through `unique!(sort!(...))` (Enzyme snag `static-forward-o-b7a86278`), and the
+# sparse Laplace's cell products meet it. `sort!(unique(...))` is the same lengths
+# through code it could take.
+function nlme_step_lengths(dt)
+    lengths = Float64[]
+    for x in dt
+        (isempty(lengths) || !isequal(x, last(lengths))) && push!(lengths, x)
+    end
+    unique!(sort!(lengths))
+end
+nlme_step_lengths_reference(dt) = sort!(unique(dt))
+nlme_step_curve(lengths, dt, k, A) =
+    (A .* exp.(-k .* lengths))[Int[searchsortedfirst(lengths, x) for x in dt]]
+
+const NLME_STEP_DATA = (; subject=["a", "b", "c"], dose=[100.0, 80.0, 120.0],
+    t=[[2.0, 0.5, 1.0, 1.0], [3.0, 0.5], [1.0, 8.0, 2.0, 4.0]],
+    dv=[[11.0, 18.0, 15.0, 15.5], [8.0, 20.0], [16.0, 3.0, 12.0, 7.0]],
+    qt=[[1.1, 1.8, 1.5, 1.4], [0.8, 2.0], [1.6, 0.3, 1.2, 0.7]])
+
+nlme_step_model(data, ::Val{:lengths}) = @brm data begin
+    sigma ~ Exponential(1)
+    sigma_q ~ Exponential(1)
+    log_CL ~ 1 + (1 | pk | subject)
+    log_V ~ 1 + (1 | pk | subject)
+    slope ~ 1 + (1 | pk | subject)
+    @plate for i in eachindex(log_CL)
+        conc = nlme_step_curve(nlme_step_lengths(t[i]), t[i], exp(log_CL[i] - log_V[i]),
+            dose[i] / exp(log_V[i]))
+        qt[i] ~ normal(slope[i] .* conc, sigma_q)
+        pk_loc[i] = conc
+        dv[i] ~ normal(pk_loc[i], sigma)
+    end
+end
+nlme_step_model(data, ::Val{:reference}) = @brm data begin
+    sigma ~ Exponential(1)
+    sigma_q ~ Exponential(1)
+    log_CL ~ 1 + (1 | pk | subject)
+    log_V ~ 1 + (1 | pk | subject)
+    slope ~ 1 + (1 | pk | subject)
+    @plate for i in eachindex(log_CL)
+        conc = nlme_step_curve(nlme_step_lengths_reference(t[i]), t[i],
+            exp(log_CL[i] - log_V[i]), dose[i] / exp(log_V[i]))
+        qt[i] ~ normal(slope[i] .* conc, sigma_q)
+        pk_loc[i] = conc
+        dv[i] ~ normal(pk_loc[i], sigma)
+    end
+end
+
+# Omitting `dv` is how a regime stops conditioning on a response. It is here
+# because the sparse Laplace is what `check_protocol` reaches on such a model.
+@stestset "check_protocol and the Laplace gradient of a cell that sorts its data, $name" for (name, data) in (
+        "both responses" => NLME_STEP_DATA,
+        "one response omitted" => Base.structdiff(NLME_STEP_DATA, NamedTuple{(:dv,)}))
+    model(shape) = brm_nlme_model(RKBRMI(nlme_step_model(data, shape)); ad_backend=NLME_AD)
+    m, reference = model(Val(:lengths)), model(Val(:reference))
+    start = brm_nlme_start(m)
+    θ, σ, ω, H = start.theta, start.sigma, start.omega, start.eta
+    @test provides_laplace_gradient(m)
+    # Its Laplace value against the package's own and its gradient against central
+    # differences, the independent references.
+    @test check_protocol(m, θ, σ, ω; η=H)
+    subjects = collect(1:nsubjects(m))
+    ℓ, gθ, gσ, gω = laplace_marginals_and_gradient(m, subjects, θ, σ, ω, H)
+    ℓr, gθr, gσr, gωr = laplace_marginals_and_gradient(reference, subjects, θ, σ, ω, H)
+    @test ℓ ≈ ℓr rtol=1e-8
+    @test vcat(gθ, gσ, gω) ≈ vcat(gθr, gσr, gωr) rtol=1e-6
+end
+
+struct NLMERaisingCellHVP{E}
+    err::E
+end
+ReactiveKernels.ad_gradient_and_hvp(h::NLMERaisingCellHVP, _directions, _base, _active,
+    _indices, _i) = throw(h.err)
+
+# Independent of which cells Enzyme can take today, so it still covers the move
+# once Enzyme takes the cell above.
+@stestset "a Laplace cell group moves to reverse over forward on the activity error alone" begin
+    m = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
+    L = NLMEEXT._laplace_problem(m, collect(eachindex(m.view.families)))
+    group = first(L.p.cells)
+    ad, c, u = group.ad, first(group.cells), copy(m.unit)
+    BRM._brm_spl_cell_directions!(group.dirs, c.lpos, 1.0)
+    block() = BRM._rk_spl_cell_block(ad, group.dirs, u, c.sel, c.i)
+    gradient, columns = block()
+    @test !ad.reverse_over_forward
+
+    ad.hvp = NLMERaisingCellHVP(ArgumentError("unrelated"))
+    @test_throws ArgumentError block()
+    @test !ad.reverse_over_forward
+
+    activity = Enzyme.Compiler.EnzymeRuntimeActivityError("stub", nothing, nothing)
+    ad.hvp = NLMERaisingCellHVP(activity)
+    moved_gradient, moved_columns = block()
+    @test ad.reverse_over_forward
+    @test !(ad.hvp isa NLMERaisingCellHVP)
+    @test moved_gradient ≈ gradient rtol=1e-12
+    @test all(a ≈ b for (a, b) in zip(moved_columns, columns))
+
+    # The implicit correction's one-direction product moved with it.
+    direction = zeros(group.m)
+    direction[first(c.lpos)] = 1.0
+    _, hv = BRM._rk_spl_cell_implicit(ad, direction, u, c.sel, c.i)
+    @test hv ≈ moved_columns[1] rtol=1e-12
+
+    # Reverse over forward has no further fallback: the error is the caller's.
+    ad.hvp = NLMERaisingCellHVP(activity)
+    @test_throws Enzyme.Compiler.EnzymeRuntimeActivityError block()
+    BRM._brm_spl_cell_directions!(group.dirs, c.lpos, 0.0)
+end
+
 @stestset "SAEM differentiates the batched conditional density" begin
     m = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
     θ, σ = plate_pk_point(m)
