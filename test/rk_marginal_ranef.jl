@@ -9,7 +9,7 @@
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 
 module RKMarginalRanef
-using BayesianRegressionModels, Distributions
+using BayesianRegressionModels, Distributions, StanBlocks
 
 const DF = (;
     subject = [1, 1, 2, 2, 3, 3, 4, 4],
@@ -124,6 +124,14 @@ inactive_cell(data) = @brm data begin
         ya[i] ~ Normal(a_loc[i], 0.5)
     end
     yc ~ Normal(c_cell, 1.0)
+end
+
+StanBlocks.@deffun rk_marginal_helper(x::vector[n])::vector[n] = 2.0 .* x
+helper_cell(data) = @brm data begin
+    a_loc ~ 1 + x + (1 | p | subject)
+    @plate for i in eachindex(a_loc)
+        ya[i] ~ Normal(rk_marginal_helper(a_loc[i]), 0.5)
+    end
 end
 
 const WHOLE = (; CELL.subject, CELL.x, arm=[1, 1, 2, 2], CELL.ya, CELL.yc)
@@ -343,6 +351,13 @@ end
                 BridgeStan.log_density(stan.model, stan_u; propto=false, jacobian=true) atol=1e-10 rtol=1e-10
         end
     end
+end
+
+# Every response omitted: the prior program is built from the cells' own module,
+# which holds the functions they call (here, one `Main` does not see).
+@stestset "a prior program finds the functions its cells call" begin
+    plan = BRM._brm_rk_plan(RKM.helper_cell((; RKM.LONG.subject, RKM.LONG.x)))
+    @test plan isa BRM._RKUnconditionedPlan
 end
 
 # Fully observed programs keep their cell statements: a replay design without
