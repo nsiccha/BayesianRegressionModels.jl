@@ -1631,7 +1631,14 @@ function _rk_ast_cdar_block!(definitions, taken, term, group_rows, step_rows)
     innovations = eta
     if factor_values !== nothing
         L = _rk_block_local!(block, :L)
-        push!(block.statements, Expr(:(=), L, Expr(:call, :reshape, factor_values, P, P)))
+        # Sparse, so the factor declares which groups it couples: a cell reads
+        # `eta` only at the columns its row stores (ReactiveKernels 0.1.70), and a
+        # `cor=` coupling groups only within a unit stays local to that unit. A
+        # dense factor's zeros remove no read. The factor is built here because
+        # bound columns hold vectors.
+        push!(block.statements, Expr(:(=), L, Expr(:call,
+            Expr(:., :BayesianRegressionModels, QuoteNode(:sparse)),
+            Expr(:call, :reshape, factor_values, P, P))))
         innovations = _rk_block_local!(block, :correlated)
         push!(block.statements, Expr(:(=), innovations, Expr(:call, :*, L, eta)))
     end
