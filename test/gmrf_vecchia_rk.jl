@@ -102,6 +102,28 @@ end
     @test !occursin("brm_gmrf_footprint_support", string(emitted.main, emitted.defs))
 end
 
+@testset "Term priors may read data, as on the mesh form" begin
+    data = (; vecchia_rk_data()..., amplitude=0.7)
+    model = @brm data begin
+        field ~ 0 + gmrf((east, north), time; neighbors=3)
+        sd(field, gmrf((east, north), time)) ~ Exponential(amplitude)
+        y ~ Normal(field, 0.2)
+    end
+    fx = vecchia_rk_backend(model; case_id="gmrf-vecchia-data-prior")
+    u = 0.1 .* randn(MersenneTwister(5), fx.built.layout.total)
+    names = BRM._rk_layout_coordinate_names(fx.rk)
+    sigma = exp(u[only(i for (i, name) in enumerate(names) if endswith(string(name), ".sigma"))])
+    baseline = Base.invokelatest(prepare_query(fx.built, fx.bound, :sampler), u)
+    other = (; data..., amplitude=1.4)
+    moved = vecchia_rk_backend(@brm(other, begin
+        field ~ 0 + gmrf((east, north), time; neighbors=3)
+        sd(field, gmrf((east, north), time)) ~ Exponential(amplitude)
+        y ~ Normal(field, 0.2)
+    end); case_id="gmrf-vecchia-data-prior-moved")
+    changed = Base.invokelatest(prepare_query(moved.built, moved.bound, :sampler), u)
+    @test changed - baseline ≈ logpdf(Exponential(1.4), sigma) - logpdf(Exponential(0.7), sigma) atol=1e-9
+end
+
 @testset "Correlated channels through a sampled LKJ factor" begin
     data = vecchia_rk_data(; channels=true)
     model = @brm data begin
