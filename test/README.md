@@ -2296,6 +2296,11 @@ toolchain, so a GitHub Actions job would be red by construction.
 
 ## Bounded sparse Laplace acceptance
 
+`laplace_cell_hvp_width.jl` checks that a cell's Hessian block compiles at a
+bounded Enzyme batch width: batched blocks and the whole target's value and
+gradient against one batch over every direction, finite differences of the cell
+gradient, a 129-direction cell at the same width, and the plan's and problem's
+Treebars reports. It needs Treebars and the Enzyme dogfood line.
 `laplace_width.jl` checks structural screening before derivative preparation,
 deterministic whole-term selection, forced conflicts, correlated margins,
 exact Gaussian retained-set values and native Enzyme gradients, local sum

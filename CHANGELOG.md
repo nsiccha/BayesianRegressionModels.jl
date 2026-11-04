@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.153
+
+- **The sparse Laplace compiles each `@plate` cell's Hessian block at a bounded
+  Enzyme batch width.** A cell's block used to compile one batch over all its
+  integrated coordinates, and that compile grows faster than the batch: a cell
+  integrating 121 coordinates had not compiled after 2 h 37 min. Cells now
+  compile batches of 4 directions and take as many as they need, so preparation
+  no longer depends on how many coordinates a cell integrates. Values and
+  gradients are unchanged.
+- **`brm_laplace_plan` and `brm_laplace_problem` take `progress`:** a Treebars
+  node or a backend symbol such as `:state`. It reports the width screening, the
+  importance diagnostic and each observation, with a node naming a Hessian
+  block's size for the time Enzyme compiles it. `brm_laplace_problem` accepts it
+  only with `integrate`, and raises otherwise.
+
 ## 0.2.152
 
 - **Fix:** on RKBRMI, `addprop` over a plate output at model scope reads the
