@@ -116,6 +116,8 @@ function _sb_cell_formulas!(body, data, plate_target, names, params, scope;
     for cell in cells, entry in values(cell.preproc)
         entry.kind === :gmrf || continue
         state = entry.const_.prepared.state
+        state.neighbors === nothing || throw(ArgumentError(
+            "a gmrf field with neighbors= is one model-scope field; independent cell fields keep mesh="))
         captured = (state.vertices_source, state.cells_source,
             (state.correlation !== nothing && state.correlation.kind === :data ?
                 (state.correlation.name,) : ())...)

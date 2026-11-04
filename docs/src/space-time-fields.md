@@ -147,11 +147,77 @@ With ``N`` vertices, ``C_h`` channels and ``T`` fitted times, there are
 ``N C_h T`` latent field coordinates. Sparse spatial precision and local
 observation reads reduce the cost of working with the prior, but do not
 remove this state dimension. The joint prior uses spatial factors and OU
-transitions without constructing a dense space-time covariance.
+transitions without constructing a dense space-time covariance. When this state
+is far larger than the reads, use `neighbors=` below.
 
 Posterior inference must also account for the observation model and shared
 parameters. Sparse posterior factorization can have substantial fill, and a
 fast precision application alone does not establish scalable marginalization.
+
+## A field too large for a mesh: `neighbors=`
+
+Replace `mesh` by `neighbors=m` when the mesh × time state is too large and the
+rows read far fewer position and time pairs than that product:
+
+```julia
+field ~ 0 + gmrf((east, north), time, channel; neighbors=20, cor=Omega)
+```
+
+The field has the same three parameters, addresses, priors and length
+convention. Its latent state is one coordinate per channel at each distinct
+`(east, north, time)` the rows read, so it is bounded by the data rather than
+by vertices × times. A row reads its own state directly.
+
+Instead of a finite-element precision, the joint law is a product of Gaussian
+conditionals under the exact covariance of the section above, the continuum
+``(\kappa r)K_1(\kappa r)\exp(-|d|/\ell_t)``:
+
+```math
+x_i\mid x_{N(i)}\sim\mathcal N(b_i^{\mathsf T}x_{N(i)},F_i),
+\qquad b_i=K_{N(i)N(i)}^{-1}K_{N(i)i},
+\qquad F_i=1-K_{iN(i)}b_i.
+```
+
+Its precision ``(I-B)^{\mathsf T}F^{-1}(I-B)`` is sparse. Reads are ordered by
+time, then by one greedy maximin position order for the whole support. The
+conditioning set ``N(i)`` of a read holds:
+
+- its `m` nearest lower-order positions read at its own time;
+- the previous read of its own position and of each of those neighbours;
+- when its own position was not read at the previous read time, its `m` nearest
+  among the latest earlier reads, reaching back until they hold at least `m`.
+
+Selection depends only on the coordinates and `m`, never on the sampled lengths.
+Only ``b_i`` and ``F_i`` move with them, and reads with the same geometry share
+one solve, so a repeated observing pattern costs one solve per position and
+gap rather than one per read.
+
+**What it preserves.** The spatial correlation is the continuum Matérn at the
+actual positions: there is no mesh boundary inflation, no resolution floor at
+short ranges and no interpolation within triangles. Channels are exactly
+separable (``\Omega\otimes K``). On positions read at the same times, the
+implied covariance is the spatial approximation times the exact OU correlation
+across every gap. No time gap is cut: every read time conditions on earlier
+reads however long ago they were.
+
+**What it approximates.** The conditioning set. Implied covariances differ from
+the exact covariance by an error that shrinks with `m`, is largest at distances
+near the range when the range is much longer than the read spacing, and grows
+for pairs linked only through a chain of sparsely read times. Measure it for your
+support and your range prior: on a network of about 1,600 positions, a range
+about five times the typical spacing has a largest covariance error of about
+0.04 at `m=20` and 0.015 at `m=30`. A conditioning set holds at most `2m+1`
+reads when its position was read at the previous read time, and `3m+1` otherwise.
+
+Lengths far beyond the read domain make a conditional correlation numerically
+singular, which raises a `DomainError` naming them. Positions a metre apart in a
+domain of about 1,000 km first fail at a range of about 5,000 km with a correlation
+time of ``10^5`` time units, or a range of ``10^6`` km at any correlation time.
+
+Frozen replay reads only fitted `(position, time)` pairs, in any order and any
+subset. A new position or time needs a conditional prediction law and is
+refused. It is one model-scope field: use `mesh=` for independent fields in
+plate cells. Embedded Laplace does not integrate it.
 
 ## Independent fields in plate cells
 

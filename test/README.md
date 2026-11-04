@@ -1175,6 +1175,16 @@ on StanBlocks and ReactiveKernels, with constrained read-back and coordinate
 transport, effective bounds, known values, invalid addresses and overrides.
 Run it directly in the test environment.
 
+`gmrf_vecchia.jl` checks the footprint representation's numerical core without a
+backend: the exact Gaussian on a fully read grid with irregular gaps, the exact
+time factor at any neighbour count, separable channels, shared solves, gap
+linkage, reverse derivatives against finite differences and refusals.
+`gmrf_vecchia_rk.jl` checks the term on RKBRMI: density and native reverse rule,
+sampled channel factor, state plates under `locality = :error`, a strict
+partition, replay from a fitted state and refusals. `gmrf_vecchia_stan.jl` checks
+valid Stan, the shared helper, RK/Stan parity through coordinate transport, replay
+and descriptions.
+
 `gmrf_laplace_start.jl` checks that the Laplace default start of a model-scope
 `gmrf` field equals its `brm_start(rk, (;); base=:prior_median)` medians, for
 declared laws, a known hyperparameter and a law reading a model-scope parameter.
@@ -2101,6 +2111,14 @@ finite-difference gradients at several points. Nonlinear Normal observations
 exercise the diagnostic and implicit gradient; mixed generated effects,
 retained subsets, independent copies, prior dependencies, whole-vector width
 screening and linear sparse storage cover structural behavior.
+
+`laplace_mode_floor.jl` checks the mode search's rounding floor on the
+whole-model, structured, sparse and matrix-free problems. One Poisson effect
+starts far up an exponential's slope, where the decrement stops shrinking
+fourfold with a gradient near 100: the value must be the Laplace formula at a
+BigFloat oracle's mode, and the gradient must match central differences. An
+effect beside an intercept of 1e6 has a real floor above `tol`, which must still
+stop the search. Run it with `julia --project=test test/laplace_mode_floor.jl`.
 
 `laplace_mode_overflow.jl` exercises finite-density trials with overflowing
 derivatives in ordinary and sum cells, with exact and matrix-free solvers.

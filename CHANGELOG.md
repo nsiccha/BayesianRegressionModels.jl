@@ -12,6 +12,36 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.161
+
+- **A Laplace mode search no longer stops short of the mode on a stiff
+  conditional:** the search stopped at a "rounding floor" whenever a plain
+  Newton step's decrement was below 1e-8 and had stopped shrinking fourfold.
+  Newton can converge that slowly far from the mode, on an exponential's slope
+  or along a stiff curved valley, so the marginal came from a point that was not
+  a mode, with no counter or warning. All three problems did this. A decrement
+  now counts as at its floor only when the gradient no longer follows the Newton
+  model; otherwise the search continues to `tol`, the floor, or `maxiter`, which
+  scores `-Inf` and counts in `unconverged`. Log densities and gradients change
+  at the points this affected: on one synthetic stiff fixture, values moved by
+  0.58 and 0.16 nats and the integrated gradient fell from 7.3 and 1.4 to below
+  1e-6. Values at five points of that fixture that had converged are identical.
+
+## 0.2.160
+
+- **`gmrf(...; neighbors=m)`, a space-time field bounded by its reads:** in place
+  of `mesh=`, a nearest-neighbour (Vecchia) sparse precision with one state per
+  channel at each distinct `(east, north, time)` the rows read. The covariance is
+  the exact continuum Matérn × OU at those reads: no mesh boundary inflation, no
+  resolution floor, no interpolation. The conditioning set is the approximation;
+  channels stay exactly separable, and positions read at the same times keep the
+  exact OU correlation across every gap. Same parameters, addresses and priors as
+  the mesh form, on SBBRMI and RKBRMI. Frozen replay reads fitted pairs only. One
+  model-scope field: not in `@plate` cells and not integrated by embedded Laplace.
+  Adds a dependency on Bessels.jl.
+- **A `gmrf` term with only default priors transpiles from any `mod`:** the mesh
+  form named its submodel in the caller's module and failed with `Could not find
+  _sb_gmrf`.
 ## 0.2.159
 
 - **`RKBRMI`: a model-scope `gmrf` prior can read data.** `sd(field, gmrf(...))
