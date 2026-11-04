@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.169
+## 0.2.170
 
 - `SBBRMI` and `RKBRMI` compose heterogeneous scalar `MixtureModel`
   components with known full-real continuous support, including custom
@@ -26,6 +26,20 @@ instead of failing at run time.
 - Requires StanBlocks 0.2.24, ReactiveKernels 0.1.80 and
   ReactiveKernelsPPL 0.1.92. Bounded or mixed-support heterogeneous components
   remain outside the supported mixture contract.
+
+## 0.2.169
+
+- `SBBRMI` now accepts an omitted `interval_censored(D; upper=hi)` response
+  in the unchanged model. Retained bounds and family arguments determine the
+  predictive shape; draws use the uncoarsened base law, with no interval
+  likelihood or fabricated lower endpoints. Observed interval densities and
+  predictor-side interval terms retain their semantics.
+- A censored response may also omit its own endpoint: keep
+  `y ~ censored(D; lower=y)` or `upper=y` unchanged and omit `y`. Only that
+  endpoint disappears for prediction; independent retained bounds still clamp
+  the draw. Observed CDF/CCDF evidence and missing-independent-bound validation
+  are unchanged. Requires StanBlocks 0.2.24, now the package and
+  test-environment minimum.
 
 ## 0.2.168
 
