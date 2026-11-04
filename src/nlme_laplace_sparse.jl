@@ -792,6 +792,16 @@ function _brm_spl_observation_cells!(p, u0, name, expected, term, zof, pof, ad_b
     term
 end
 
+# A cell's gradient and Hessian block, inside a Newton pass.
+function _brm_spl_cell_hessian(group, u, c, batch)
+    _brm_spl_cell_directions!(group.dirs, c.lpos, 1.0)
+    try
+        _rk_spl_cell_block(group.ad, group.dirs, u, c.sel, c.i; context=batch, used=length(c.lz))
+    finally
+        _brm_spl_cell_directions!(group.dirs, c.lpos, 0.0)
+    end
+end
+
 # Enzyme compiles a cell's Hessian block on its first use. With a progress
 # node, that happens here, under a node naming the block's size and timing it,
 # rather than unnamed inside the first assembly. Its directions are all zero.
@@ -1059,37 +1069,44 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
     u[p.integrated] .= z
     for group in (weight == 0 ? empty(p.cells) : p.cells)
         group isa _BRMSumCellGroup && continue
+        # A move to reverse over forward restarts the Newton pass (`_rk_spl_cell_newton`).
+        # The sweep resumes at the cell that raised, which has changed nothing yet: its
+        # block comes before anything it adds.
+        next = 1
         _rk_spl_cell_batch(group.query, u) do values
-            sweep = batch -> for c in group.cells
+            sweep = batch -> while next <= length(group.cells)
+                c = group.cells[next]
                 comp = p.term_component[c.term]
-                comp == 0 && !third && continue
+                if comp == 0 && !third
+                    next += 1
+                    continue
+                end
                 value = _rk_nlme_cell_value(group.query, values, c.i)
                 tv === nothing || (tv[c.term] = value)
                 if comp == 0
                     rest += value
+                    next += 1
                     continue
                 end
+                block = derivatives ? _brm_spl_cell_hessian(group, u, c, batch) : nothing
                 _brm_spl_add_value!(fc, correction, comp, weight * value)
                 if fb !== nothing
                     for k in p.tsbptr[c.term]:(p.tsbptr[c.term + 1] - 1)
                         fb[p.tsb[k]] += weight * value
                     end
                 end
-                derivatives || continue
-                _brm_spl_cell_directions!(group.dirs, c.lpos, 1.0)
-                m = length(c.lz)
-                gsel, columns = try
-                    _rk_spl_cell_block(group.ad, group.dirs, u, c.sel, c.i; context=batch, used=m)
-                finally
-                    _brm_spl_cell_directions!(group.dirs, c.lpos, 0.0)
-                end
-                for a in 1:m
-                    g[c.lz[a]] += weight * gsel[c.lpos[a]]
-                    for b in 1:m
-                        nz[_brm_spl_nzindex(p.pattern, c.lz[a], c.lz[b])] -=
-                            weight * columns[b][c.lpos[a]]
+                if block !== nothing
+                    gsel, columns = block
+                    m = length(c.lz)
+                    for a in 1:m
+                        g[c.lz[a]] += weight * gsel[c.lpos[a]]
+                        for b in 1:m
+                            nz[_brm_spl_nzindex(p.pattern, c.lz[a], c.lz[b])] -=
+                                weight * columns[b][c.lpos[a]]
+                        end
                     end
                 end
+                next += 1
             end
             derivatives ? _rk_spl_cell_newton(sweep, group.ad, u) : sweep(nothing)
         end

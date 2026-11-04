@@ -108,6 +108,71 @@ end
     @test isfinite(v) && all(isfinite, d)
 end
 
+struct HVPWidthRaising{E}
+    err::E
+end
+ReactiveKernels.ad_gradient_and_hvp(h::HVPWidthRaising, _directions, _base, _active,
+    _indices, _i) = throw(h.err)
+
+# A stub, because which cells Enzyme can take changes: this holds whatever it takes.
+# The group keeps its width through the move, and its batches the same columns.
+@stestset "a batched group moves to reverse over forward at its width" begin
+    width = BRM._BRM_SPL_CELL_HVP_WIDTH
+    n = 2width + 3
+    p = hvp_width_problem(hvp_width_fixture(n; short=width + 1))
+    group, u = hvp_width_group(p)
+    ad = group.ad
+    @test length(group.dirs) == n
+    blocks = [cell_block(ad, group, c, u) for c in group.cells]
+    @test !ad.reverse_over_forward
+    ad.hvp = HVPWidthRaising(Enzyme.Compiler.EnzymeRuntimeActivityError("stub", nothing, nothing))
+    for (c, (g, columns)) in zip(group.cells, blocks)
+        g_moved, columns_moved = cell_block(ad, group, c, u)
+        @test ad.reverse_over_forward
+        @test ad.width === Val(width)
+        @test g_moved ≈ g rtol=1e-12
+        @test length(columns_moved) == length(c.lz)
+        @test all(k -> columns_moved[k] ≈ columns[k], eachindex(columns))
+    end
+    @test all(iszero, Iterators.flatten(group.dirs))
+end
+
+# Forwards its first calls and then raises, so a move happens partway through a sweep.
+mutable struct HVPWidthRaisingLater{H,E}
+    hvp::H
+    err::E
+    calls::Int
+end
+function ReactiveKernels.ad_gradient_and_hvp(h::HVPWidthRaisingLater, directions, base, active,
+        indices, i)
+    h.calls == 0 && throw(h.err)
+    h.calls -= 1
+    ReactiveKernels.ad_gradient_and_hvp(h.hvp, directions, base, active, indices, i)
+end
+
+@stestset "a move partway through a sweep counts every cell once" begin
+    data = (; n=4, grid=collect(range(0.1, 0.9; length=4)), y=ones(Int, 4))
+    rk = RKBRMI(@brm data begin
+        beta ~ Normal(0, 1)
+        z[1:n] .~ Normal.(0, 1)
+        @plate for i in eachindex(grid)
+            y[i] ~ Poisson(exp(z[i] + beta * grid[i]))
+        end
+    end)
+    p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:z,))
+    group = only(g for g in p.cells if hasproperty(g, :dirs))
+    @test length(group.cells) == 4
+    φ = [0.2]
+    v, d = LDP.logdensity_and_gradient(p, φ)
+    activity = Enzyme.Compiler.EnzymeRuntimeActivityError("stub", nothing, nothing)
+    group.ad.hvp = HVPWidthRaisingLater(group.ad.hvp, activity, 2)
+    v_moved, d_moved = LDP.logdensity_and_gradient(p, φ)
+    @test group.ad.reverse_over_forward
+    @test v_moved ≈ v rtol=1e-10
+    @test d_moved ≈ d rtol=1e-8
+    @test all(iszero, Iterators.flatten(group.dirs))
+end
+
 @stestset "plan and problem report their preparation through Treebars" begin
     rk = hvp_width_fixture(5)
     report = Ref("")

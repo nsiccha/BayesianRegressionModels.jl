@@ -243,14 +243,45 @@ BRM._rk_slap_prior_gradient(k, u::Vector{Float64}) =
 # prepared at a bounded width, and `_rk_spl_cell_block` covers a cell's `K`
 # directions in as many batches as it takes: compile cost does not depend on
 # how many coordinates a cell integrates, and run time stays linear in them.
-mutable struct _SPLCellAD{H,N,A,P,W}
-    const hvp::H
-    const newton::N
+#
+# Ordinary cells have one active vector and a fixed direction-tuple arity, and
+# forward over reverse allocates less than reverse over forward for their Newton
+# HVPs, about half from four directions up (`cc0dee14`, and
+# reactivekernels-use §7a2's measurement). Static Enzyme cannot take it
+# through every cell, though. Before dogfood `0ed41342`, a cell that sorts and
+# uniques its data, as a PK reader's step lengths do, raised
+# `EnzymeRuntimeActivityError` where reverse over forward differentiated the same
+# cell (Enzyme snag `static-forward-o-b7a86278`), and enzyme-use lists the shapes
+# still open. The error sits on a path of the compiled derivative, so only running
+# a cell shows it, and one cell passing clears no other. The group therefore moves to
+# reverse over forward, at the same width, the first time a product raises it.
+mutable struct _SPLCellAD{A,P,W,B,O,Q}
+    hvp::Any
+    newton::Any
     const accumulators::A
     const pullback::P
     const width::W
     # A partial last batch keeps the prepared arity through this zero direction.
     const padding::Vector{Float64}
+    const backend::B
+    const observations::O
+    const base0::Vector{Float64}
+    const indices0::Vector{Int}
+    const ad_backend::Any
+    const partitioned::Q
+    reverse_over_forward::Bool
+end
+
+# Newton's bounded-width HVP and the pullback that runs its pass.
+function _rk_spl_cell_hvp(backend, observations, base0, indices0, second, reverse, ::Val{W};
+        partitioned) where {W}
+    rkext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+    built, plan = backend.model, rkext._rk_translated(backend)
+    m = length(indices0)
+    hvp = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_hvp, built, plan,
+        observations, base0, indices0, second, ntuple(_ -> zeros(Float64, m), W);
+        partitioned, locality=:error)
+    hvp, Base.invokelatest(prepare_cell_pullback, hvp, reverse, base0)
 end
 
 function BRM._rk_spl_cell_ad(backend::BRM.RKBRMI, observations::Tuple,
@@ -261,12 +292,9 @@ function BRM._rk_spl_cell_ad(backend::BRM.RKBRMI, observations::Tuple,
     m = length(indices0)
     forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
     reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
-    # Ordinary cells have one active vector and a fixed direction-tuple arity.
-    # Forward over reverse reduces the work of their Newton HVPs.
-    W = min(K, width)
-    hvp = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_hvp, built, plan,
-        observations, base0, indices0, SecondOrder(forward, reverse),
-        ntuple(_ -> zeros(Float64, m), W); partitioned, locality=:error)
+    W = Val(min(K, width))
+    hvp, newton = _rk_spl_cell_hvp(backend, observations, base0, indices0,
+        SecondOrder(forward, reverse), reverse, W; partitioned)
     # RK's accumulators take reverse over forward for order 1 and the supported
     # reverse over forward over forward for order 2.
     second = SecondOrder(reverse, forward)
@@ -279,17 +307,43 @@ function BRM._rk_spl_cell_ad(backend::BRM.RKBRMI, observations::Tuple,
         Base.invokelatest(prepare_cell_accumulator, owner, second, base0; order=1),
         Base.invokelatest(prepare_cell_accumulator, owner, third, base0; order=2),
     )
-    _SPLCellAD(hvp, Base.invokelatest(prepare_cell_pullback, hvp, reverse, base0),
-        accumulators, Base.invokelatest(prepare_cell_pullback, owner, reverse, base0),
-        Val(W), zeros(Float64, m))
+    _SPLCellAD(hvp, newton, accumulators,
+        Base.invokelatest(prepare_cell_pullback, owner, reverse, base0), W, zeros(Float64, m),
+        backend, observations, base0, indices0, ad_backend, partitioned, false)
 end
 
+function _rk_spl_cell_reverse_over_forward!(ad::_SPLCellAD, err)
+    @warn "sparse Laplace: forward-over-reverse Hessian-vector products of the cells of " *
+        "$(ad.observations) raised $(nameof(typeof(err))); this group uses reverse over " *
+        "forward from now on, with the same values and up to about twice the allocations"
+    reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad.ad_backend))
+    second = SecondOrder(reverse,
+        AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad.ad_backend)))
+    ad.hvp, ad.newton = _rk_spl_cell_hvp(ad.backend, ad.observations, ad.base0, ad.indices0,
+        second, reverse, ad.width; ad.partitioned)
+    ad.reverse_over_forward = true
+    ad
+end
+
+# A Newton pass `f(batch)`, moving the group to reverse over forward if forward over
+# reverse raises the activity error. The move starts a new pass, so `f` runs again and
+# must resume rather than repeat (`_brm_spl_assemble!` resumes at the cell that raised).
+# Every other error, and that error from reverse over forward, is the caller's.
 function BRM._rk_spl_cell_newton(f, ad::_SPLCellAD, base)
-    result = nothing
-    cell_pullback!(zeros(length(base)), ad.newton, base) do batch
-        result = f(batch)
+    function pass(ad)
+        result = nothing
+        cell_pullback!(zeros(length(base)), ad.newton, base) do batch
+            result = f(batch)
+        end
+        result
     end
-    result
+    try
+        pass(ad)
+    catch err
+        err isa Enzyme.Compiler.EnzymeRuntimeActivityError && !ad.reverse_over_forward ||
+            rethrow()
+        pass(_rk_spl_cell_reverse_over_forward!(ad, err))
+    end
 end
 
 # The gradient at the point and the Hessian columns of the first `used`
@@ -330,10 +384,6 @@ BRM._rk_spl_cell_accumulate(batch, ad::_SPLCellAD, order, direction, weight, bas
     accumulate_cell!(batch, ad.accumulators[order + 1], direction, weight,
         base[indices], indices, cell)
 
-# Diagnostics perturb the compact active values inside one pass and discard its
-# accumulated gradient. Order zero's weighted contraction is the cell's value.
-BRM._rk_spl_cell_value(ad::_SPLCellAD, base, indices, cell; context) =
-    first(BRM._rk_spl_cell_accumulate(context, ad, 0, nothing, 1.0, base, indices, cell))
 
 # A factor's complete derivative block is small: the outer sums and direct
 # reads, or one summand's own reads. Operators are shared only across factors

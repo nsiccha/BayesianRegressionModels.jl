@@ -162,6 +162,17 @@ _brm_nlme_records(plan) = _brm_nlme_error(
 _brm_nlme_owned(name::Symbol, declaration::Symbol) = name === declaration ||
     startswith(String(name), string(declaration, "."))
 
+# The packed coordinates a declaration owns. A declaration the layout holds at
+# zero length (`empty`), such as a single-level treatment-coded factor's
+# coefficient block, owns none and has nothing to partition. Any other
+# declaration without a coordinate is a defect in the inventory.
+function _brm_nlme_declaration_coordinates(names, declaration, empty)
+    hits = [i for (i, name) in enumerate(names) if _brm_nlme_owned(name, declaration)]
+    isempty(hits) && declaration ∉ empty && error("brm_nlme_view: internal: " *
+        "declaration `$declaration` owns no packed coordinate")
+    hits
+end
+
 # A random-effect block's identity: its grouping and `|ID|`. A block without an
 # ID belongs to one predictor, and several predictors can each own one over the
 # same grouping, so its owning predictor completes the identity.
@@ -464,8 +475,9 @@ grouped entries of
 `mi(x)::shares(total, rows)` are unit draws of the subject owning each
 group's rows when the backend is non-centered
 (`RKBRMI(brmi; completions = :noncentered)`); centred they are refused, since
-their density reads the law and with it the units' draws. See
-[`BRMNLMEView`](@ref).
+their density reads the law and with it the units' draws. A declaration of zero
+length, such as the coefficient block of a single-level treatment-coded factor,
+owns no coordinate and is not a refusal. See [`BRMNLMEView`](@ref).
 
 Refuses with [`BRMNLMEViewError`](@ref) when the model has no such reading:
 no random effects over the subjects, a grouping named in neither
@@ -571,10 +583,9 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
     claim!(i, r) = (role[i] === :unclaimed || error(
         "brm_nlme_view: internal: coordinate `$(names[i])` is claimed twice " *
         "($(role[i]) and $r)"); role[i] = r; nothing)
+    empty_declarations = _rk_layout_empty_declarations(backend)
     function claim_declaration!(declaration, r)
-        hits = [i for (i, name) in enumerate(names) if _brm_nlme_owned(name, declaration)]
-        isempty(hits) && error("brm_nlme_view: internal: declaration " *
-            "`$declaration` owns no packed coordinate")
+        hits = _brm_nlme_declaration_coordinates(names, declaration, empty_declarations)
         foreach(i -> claim!(i, r), hits)
         hits
     end

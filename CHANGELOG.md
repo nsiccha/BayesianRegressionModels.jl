@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.157
+## 0.2.160
 
 - Sparse Laplace supports model-scope helpers shared by ordinary or
   sum-factored observation cells. Sampled-coordinate helper values are
@@ -28,6 +28,9 @@ instead of failing at run time.
   by name if that refuses it too.
 - A factor's Hessian block compiles at the same bounded Enzyme batch width as a
   compact cell's, and takes as many batches as it needs.
+- A move of a cell group to reverse over forward on Enzyme's activity error
+  (0.2.158) restarts its Newton pass and resumes at the cell that raised, so no
+  cell counts twice.
 - A `mo()` or `mo1()` term read by a subject's `@plate` cell now plans: the
   subjects' effects are declared partitioned, so its level table, which has no
   row form, is computed once per population point in the shared prefix.
@@ -39,6 +42,42 @@ instead of failing at run time.
   `locality = :error`, a matrix with no row form read as `M[p, 2]` is now
   refused by name rather than computed whole in every cell. Update older pinned
   RK environments; the test bootstrap selects that release.
+
+## 0.2.159
+
+- **`RKBRMI`: a model-scope `gmrf` prior can read data.** `sd(field, gmrf(...))
+  ~ Exponential(scale)` and a `length_scale` law failed at construction with
+  `references unknown name scale`, naming the field's internal `sigma`, while
+  `SBBRMI` accepted them. These laws now take what the 0.2.156 priors take: a
+  numeric data scalar, an expression or element over numeric data fields, a
+  literal assignment or a `name = constant(expr)`. The prior-median and Laplace
+  default starts read the value, which stays in the fitted program: a design may
+  omit the field or repeat its value, and one that changes it is refused unless
+  `freeze_constants=false`.
+
+## 0.2.158
+
+- **Sparse Laplace cells that static Enzyme cannot take forward over reverse:**
+  `brm_laplace_problem`, NLMEEstimation's `laplace_marginals_and_gradient` and so
+  `check_protocol` no longer raise `EnzymeRuntimeActivityError` on such a `@plate`
+  cell. The cell group moves to reverse over forward the first time a product
+  raises that error, with a warning naming the group. Values are the same and the
+  group allocates up to about twice as much. Any other error still propagates. A
+  cell that reduces its data with `unique!(sort!(...))`, as a PK event reader's
+  step lengths do, needs this before Enzyme dogfood `0ed41342`, which takes that
+  cell forward over reverse itself.
+
+## 0.2.157
+
+- **NLME view of a single-level categorical:** `brm_nlme_view`, and with it
+  `brm_nlme_model` and `brm_nlme_fit`, no longer raise ``internal: declaration
+  `x` owns no packed coordinate`` on a model with a categorical term that
+  observes one level, such as `log(s) ~ 1 + g` with `g` an integer column holding
+  a single value. Any declaration the RK layout holds at zero length owns no
+  coordinate, so the model has the partition, likelihoods and gradients of the
+  same model without the term. The named estimates list the term with no levels
+  (`g = []`), and that value starts the model again through `inits`.
+
 
 ## 0.2.156
 

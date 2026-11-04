@@ -1,6 +1,7 @@
 # RUN: julia --project=test test/laplace_gradient_nonfinite.jl
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using LogDensityProblems
+using SpecialFunctions: erfc
 
 # Requirement (snag laplace-gradient-db992ae0): where the sparse Laplace log
 # density is finite and every conditional mode converged but the gradient is
@@ -68,6 +69,71 @@ const THIRD_SINGULAR_CASES = (
         @test p.nonfinite_gradient == 1
         LogDensityProblems.logdensity_and_gradient(p, [0.3])
         @test p.nonfinite_gradient == 2
+    end
+end
+
+# Requirement (issue #6, Enzyme todo 0g6ywzj): a Forward derivative of a division
+# must not square its divisor, so a likelihood that takes log(erfc(t)) in its
+# tail has a finite marginal gradient wherever its third derivatives are
+# representable. Near t = 19, erfc(t) is about 5e-159: the value and curvature
+# were always finite, but the cell's third order came out NaN while libEnzyme's
+# rule formed `y * y`. This pins the repaired build, unlike the |b|^2.5 cases
+# above, whose third derivative is genuinely infinite.
+const LOG_ERFC_TAIL = 19.0
+
+function log_erfc_fixture(sumcell)
+    t0 = LOG_ERFC_TAIL
+    # The small offsets keep each mode away from zero movement, so the gradient
+    # really multiplies the third derivative by a nonzero mode response.
+    data = (; n=2, idx=[1,2], rows=[[1],[2]], tail=[t0, t0],
+        y=[log(erfc(t0 + 0.02)), log(erfc(t0 - 0.03))], noise=[1.0, 0.5])
+    model = if sumcell
+        @brm data begin
+            shift ~ Normal(0,1)
+            field[1:n] .~ Normal.(0,1)
+            @plate for k in eachindex(rows)
+                y[k] ~ Normal(log(erfc(tail[k] + shift + sum(field[rows[k]]))), noise[k])
+            end
+        end
+    else
+        @brm data begin
+            shift ~ Normal(0,1)
+            field[1:n] .~ Normal.(0,1)
+            @plate for k in eachindex(idx)
+                y[k] ~ Normal(log(erfc(tail[k] + shift + field[idx[k]])), noise[k])
+            end
+        end
+    end
+    RKBRMI(model)
+end
+
+const LOG_ERFC_CASES = (
+    (false, (; solver=:exact)),
+    (true, (; solver=:exact)),
+    (false, (; solver=:matrixfree, matrixfree=MatrixFreeLaplace(; probes=2,
+        preconditioner_memory=nothing))))
+
+@stestset "a log(erfc) cell in its tail has a finite marginal gradient" begin
+    @test erfc(LOG_ERFC_TAIL)^2 < floatmin()
+    for (sumcell, algebra) in LOG_ERFC_CASES
+        rk = log_erfc_fixture(sumcell)
+        p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:field,), maxiter=200,
+            algebra...)
+        @test (only(p.cells) isa BRM._BRMSumCellGroup) == sumcell
+        @test (p.algebra === nothing) == (algebra.solver === :exact)
+        for shift in (0.05, -0.1)
+            value, gradient = LogDensityProblems.logdensity_and_gradient(p, [shift])
+            # The modes sit in the tail, where the fixture means to be.
+            t = LOG_ERFC_TAIL + shift .+ BRM._brm_spl_mode!(p, [shift]).z
+            @test t ≈ [LOG_ERFC_TAIL + 0.02, LOG_ERFC_TAIL - 0.03] atol=0.01
+            @test isfinite(value)
+            @test all(isfinite, gradient)
+            fd = (LogDensityProblems.logdensity(p, [shift + 1e-4]) -
+                  LogDensityProblems.logdensity(p, [shift - 1e-4])) / 2e-4
+            @test only(gradient) ≈ fd rtol=1e-6
+        end
+        @test p.nonfinite_gradient == 0
+        @test p.nonfinite == p.unconverged == 0
     end
 end
 
