@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.151
+
+- **Periodic `hsgp` under strict type stability:** `NLMEEstimation.check_protocol`
+  on a model with `hsgp(x; cov=:periodic, period=...)` no longer raises
+  `TypeInstabilityError` in a project that sets ReactiveKernels'
+  `type_stability = :error`, at any `k`. The harmonics, and every value computed
+  from them, are unchanged.
+
 ## 0.2.150
 
 - **`rk_draw_values` reads a `@plate` output per cell:** a draw's value has one

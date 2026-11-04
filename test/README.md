@@ -1176,7 +1176,10 @@ rows), subject-cell population gradients,
 analytic η Hessian blocks, Gaussian observation moments
 and colored η Jacobians, `check_protocol`, and Newton posthoc against
 independent oracles. Its Gaussian checks include arrays observed within plate
-cells and a modeled scale shared by the observations in each cell.
+cells and a modeled scale shared by the observations in each cell. A periodic
+`hsgp` read in a subject cell passes `check_protocol` with every preparation
+checked at `type_stability = :error`, the sparse Laplace probe's data prefix
+included.
 NLMEEstimation.jl is not part of `test/Project.toml`. Run the file from a
 copy of this environment that develops a local NLMEEstimation checkout:
 
