@@ -12,6 +12,94 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.169
+
+- `SBBRMI` and `RKBRMI` compose heterogeneous scalar `MixtureModel`
+  components with known full-real continuous support, including custom
+  function families with different argument counts. Each component retains
+  its ordinary parameterization and backend mapping.
+- RK preserves native component density graphs, including existing
+  `_rk_observation_source!` providers, for dependency-aware scheduling,
+  native Reverse gradients, pointwise likelihood and source replay.
+  Stan preserves component predictive draws and membership outputs.
+  Native RK mixture/custom-law predictive generation remains separate work.
+- Requires StanBlocks 0.2.24, ReactiveKernels 0.1.80 and
+  ReactiveKernelsPPL 0.1.92. Bounded or mixed-support heterogeneous components
+  remain outside the supported mixture contract.
+
+## 0.2.168
+
+- `RKBRMI` accepts scalar `@plate` outputs in `offset(field)`, including
+  non-last outputs and elementwise assignments over them. The offset reads
+  the declared field with coefficient one, preserving selected-row queries
+  and native reverse gradients. Vector-valued cells cannot establish row
+  alignment merely by having the same flattened length.
+- An explicit gather of an opaque helper's output, `field = whole[position]`,
+  supplies the index vector's row axis to a model-value offset. The helper
+  remains one graph value; its arguments and output length do not implicitly
+  declare the consumer's rows.
+
+## 0.2.167
+
+- `RKBRMI` accepts mixture probabilities computed from linked or hierarchical
+  predictors, including predictors used only in the weights. The ordinary
+  value graph retains their coefficients, group effects and authored priors.
+  Probability vectors may be shared or vary by observation; native density,
+  Reverse gradients, pointwise likelihood and printed-source replay use the
+  same normalized mixture. Requires ReactiveKernelsPPL 0.1.90.
+
+## 0.2.166
+
+- **Breaking: conservative automatic embedded Laplace.** `integrate=:auto`
+  now requires recognized conditional log-concavity. Affine Normal rows retain
+  exact integration with exact algebra; log-Poisson, logit-binomial/Bernoulli
+  and log-NegativeBinomial2 rows with sampled shape retain the local ESS gate.
+  Arbitrary plate cells and model-value observations stay sampled even if an
+  ESS check at one point would pass. To retain a previously automatic cell
+  partition, explicitly name its declarations/groupings in `integrate=(...)`
+  after assessing the approximation. Supported explicit selections remain
+  available, including effects on scale/shape. Automatic diagnostics now hold
+  rejected dispersion terms sampled. All model factors remain in the target;
+  no eligible terms gives the full sampled model. Structural concavity and
+  passing local ESS do not certify Gaussian approximation accuracy.
+
+## 0.2.165
+
+- **Structure first, priors last:** `SBBRMI` accepts a cell-local prior after
+  statements that read it, keeping the draw in its original plate. Prior
+  dependencies are emitted before their readers; ordinary cell statements and
+  scan steps retain their relative order. The authoring guide and executable
+  examples cover scalar, vector, coefficient, scale and correlation priors,
+  composed structural/prior builders, and complete printed-source replay.
+
+## 0.2.164
+
+- **Large `gmrf` fields under the sparse Laplace:** a warm value and gradient, at
+  the prior medians, with one Normal field and one CPU, took 13 s at 202,500 states
+  on 8 probes (was 93 s), and 134 s at 1,698,450 states on 4 probes. A component
+  that is exactly one `gmrf` field now has a reference that sees the data, built at
+  the prior medians, and the determinant takes one Lanczos recurrence per probe.
+- **Lower fixed-probe noise:** `MatrixFreeLaplace(control_variate=true)`, the default,
+  rebuilds a field's reference at each point and estimates only the difference from
+  it. At 10,000 states and 8 probes the gradient's SD across probe seeds fell from
+  about [9, 11, 14] to [2.2, 2.1, 1.6] at the same fixture, for a cost of about twice
+  as much per probe. The value and gradient stay one fixed-probe function and its
+  exact derivative. Correlated channels read at different places keep the plain
+  estimator.
+- **Fields read by the same rows** integrate through a reference that couples them
+  (two at 20,000 states 10 s against 24 s exact; three at 30,000 states 17 s against
+  83 s). Its control variate tracks only the fields' priors: a field's scale keeps
+  the plain estimator's noise.
+- **`brm_start(...; base=:prior_median)` and the Laplace default start** now read a
+  prior with an inner call, such as `LogNormal(log(0.2), 0.5)`. Those coordinates
+  used to keep the unit point, so such a model's starts change.
+- **Breaking:** `MatrixFreeLaplace` no longer takes `logdet_step` or `logdet_extent`:
+  remove them, there is no quadrature. `target.algebra.diagnostics` replaces
+  `quadrature_nodes` with `gradient_rank` and adds `ritz`, `tracked_iterations` and
+  `tracked_shift`. Matrix-free values change within their probe error, and a problem
+  with a `gmrf` field prepares its reference at the prior medians rather than at zero
+  coordinates, so an SMC checkpoint from an earlier version is refused.
+
 ## 0.2.163
 
 - **Mesh `gmrf` densities at very short spatial lengths:** `RKBRMI` and `SBBRMI`

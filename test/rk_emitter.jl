@@ -5397,6 +5397,28 @@ end
     @test likelihood.predictor === :p1
 end
 
+@stestset "mixture predictor probabilities" begin
+    model = @brm (; y=[-0.2,0.3,0.8], analyte=[1,2,1], sample=[1,1,2]) begin
+        logit(w) ~ 1 + (1 | analyte)
+        mu ~ 1 + (1 | sample)
+        y ~ MixtureModel([Normal(mu,sigma),Normal(mu,tau)], [1-w,w])
+        effect(w, Intercept) ~ Normal(0,1)
+        effect(mu, Intercept) ~ Normal(0,1)
+        sd(w, analyte) ~ Exponential(1)
+        sd(mu, sample) ~ Exponential(1)
+        sigma ~ Exponential(1)
+        tau ~ Exponential(1)
+    end
+    plan = BRM._brm_rk_plan(model)
+    @test plan isa BRM._RKValuePlan
+    @test Set(p.name for p in plan.regression.predictors) == Set((:w,:mu))
+    @test length(plan.regression.ranef_buckets) == 2
+    source = value_observation(model)
+    @test occursin("MixtureModel.",source)
+    @test occursin("vcat.(1 .- w, w)",source)
+    @test !occursin("Ref",source)
+end
+
 @stestset "fail closed: mixture" begin
     dfmix = (; y=[-2.0, -1.8, 1.9, 2.2])
     dfcount = (; y=[0, 1, 3, 5, 2])
@@ -5431,7 +5453,7 @@ end
         y ~ MixtureModel(
             [BinomialLogit(10, 0.5), BinomialLogit(10, 0.5)], [0.5, 0.5])
     end))
-    # Weights: sum, length, nonnegativity, data columns, simplex width.
+    # Weights: sum, length, nonnegativity and simplex width.
     @test_throws "must sum to 1" BRM._brm_rk_plan((@brm dfmix begin
         m ~ Normal(0, 1)
         y ~ MixtureModel([Normal(m, 1), Normal(m, 1)], [0.5, 0.6])
@@ -5444,11 +5466,11 @@ end
         m ~ Normal(0, 1)
         y ~ MixtureModel([Normal(m, 1), Normal(m, 1)], [1.5, -0.5])
     end))
-    @test_throws "data-column weights" BRM._brm_rk_plan(
+    @test BRM._brm_rk_plan(
         (@brm begin
             m ~ Normal(0, 1)
             y ~ MixtureModel([Normal(m, 1), Normal(m, 1)], w)
-        end)((; y=[1.0, 2.0], w=[0.5, 0.5])))
+        end)((; y=[1.0, 2.0], w=[0.5, 0.5]))) isa BRM._RKValuePlan
     @test_throws "sizes must agree" BRM._brm_rk_plan((@brm dfmix begin
         w ~ Dirichlet(3, 1.0)
         m ~ Normal(0, 1)
@@ -5561,7 +5583,7 @@ end
     @test only(truncated_mixture.responses).family === :mixture
     @test only(truncated_mixture.responses).evidence.kind === :truncated
     # Two complementary weights of one sampled scalar; any other weight
-    # expression is SBBRMI-only (RKPPL shares one weight vector across rows).
+    # expressions use the ordinary value graph instead.
     complement = BRM._brm_rk_plan((@brm dfmix begin
         w ~ Beta(2, 5)
         m ~ Normal(0, 1)

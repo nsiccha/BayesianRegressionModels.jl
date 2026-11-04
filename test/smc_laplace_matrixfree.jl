@@ -36,7 +36,7 @@ const SMCEXT = Base.get_extension(BRM, :BayesianRegressionModelsSMCExt)
     @test all(isfinite,out.draws) && out.weights == completed.state.weights
     @test out.draws[p.population,:] == completed.state.positions
 
-    for settings in ((; seed=76), (; logdet_step=0.5), (; solve_tolerance=1e-9),
+    for settings in ((; seed=76), (; preconditioner_memory=16), (; solve_tolerance=1e-9),
             (; preconditioner_ridge=0.02))
         changed = problem(; settings...)
         @test_throws ArgumentError brm_smc_resume(changed,checkpoint)

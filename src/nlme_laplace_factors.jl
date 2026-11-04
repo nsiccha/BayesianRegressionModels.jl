@@ -416,15 +416,40 @@ _brm_spl_entries(A, rows, cols) = Float64[A[i,j] for i in rows, j in cols]
 # Sparse restriction with workspace proportional to the requested rows and
 # columns, retaining stored zeros. Julia's general CSC indexing uses a row
 # map proportional to size(A,1), which is too costly inside per-level work.
+# A[rows, cols] in time linear in the entries read, with no per-entry lookup
+# table: `rows` is ascending wherever this runs over a large component.
 function _brm_spl_submatrix(A::SparseMatrixCSC, rows, cols)
-    rowof = Dict(i => k for (k,i) in enumerate(rows))
-    ii = Int[]; jj = Int[]; vv = Float64[]
-    for (j,col) in enumerate(cols), k in nzrange(A,col)
-        i = get(rowof,rowvals(A)[k],0)
-        i == 0 && continue
-        push!(ii,i); push!(jj,j); push!(vv,nonzeros(A)[k])
+    rowof = zeros(Int, size(A, 1))
+    rowof[rows] .= eachindex(rows)
+    issorted(rows) || return _brm_spl_submatrix_unsorted(A, rowof, rows, cols)
+    colptr = Vector{Int}(undef, length(cols) + 1)
+    colptr[1] = 1
+    count = 0
+    for (j, col) in enumerate(cols)
+        for k in nzrange(A, col)
+            rowof[rowvals(A)[k]] == 0 || (count += 1)
+        end
+        colptr[j + 1] = count + 1
     end
-    sparse(ii,jj,vv,length(rows),length(cols))
+    rowval = Vector{Int}(undef, count); nzval = Vector{Float64}(undef, count)
+    next = 0
+    for col in cols, k in nzrange(A, col)
+        i = rowof[rowvals(A)[k]]
+        i == 0 && continue
+        next += 1
+        rowval[next] = i
+        nzval[next] = nonzeros(A)[k]
+    end
+    SparseMatrixCSC(length(rows), length(cols), colptr, rowval, nzval)
+end
+function _brm_spl_submatrix_unsorted(A, rowof, rows, cols)
+    ii = Int[]; jj = Int[]; vv = Float64[]
+    for (j, col) in enumerate(cols), k in nzrange(A, col)
+        i = rowof[rowvals(A)[k]]
+        i == 0 && continue
+        push!(ii, i); push!(jj, j); push!(vv, nonzeros(A)[k])
+    end
+    sparse(ii, jj, vv, length(rows), length(cols))
 end
 
 function _brm_spl_augmented_factor(K, n; previous=nothing)

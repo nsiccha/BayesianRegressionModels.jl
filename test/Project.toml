@@ -314,5 +314,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # b5740888 (RKPPL 0.1.71): data-free replay reads frozen whole values.
 # fbf65b46 (RK 0.1.65 / PPL 0.1.74): prepared queries holding modules deep-copy.
 # f17b6a24 (RK 0.1.67 / PPL 0.1.76): strict cell footprints of per-cell joint fields.
+# 1e43b1b8 (PPL 0.1.90): native row-dependent and computed shared mixture probabilities.
 # e190bff0 (RK 0.1.80 / PPL 0.1.92): heterogeneous native mixture component graphs.
 rev = "e190bff05e433b65e8ba8e6a9cedee8d5198b65a"

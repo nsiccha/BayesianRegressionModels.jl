@@ -273,6 +273,86 @@ end
     end
 end
 
+module MixtureSchedulingProbe
+const shape_calls = Ref(0)
+const scale_calls = Ref(0)
+measured_hypot(x, y) = (shape_calls[] += 1; hypot(x, y))
+measured_inverse_scale(x) = (scale_calls[] += 1; exp(-x))
+reset!() = (shape_calls[] = scale_calls[] = 0)
+
+# Instrument the caller's source before normal lowering; never patch a
+# translated graph. The uninstrumented graph's Reverse is tested above.
+function measured_source(ex)
+    ex isa Expr || return ex
+    ex == :(hypot(1.0, alpha)) &&
+        return :(brm_test_measured_hypot(1.0, alpha))
+    ex == :(exp(-log_scale)) &&
+        return :(brm_test_measured_inverse_scale(log_scale))
+    Expr(ex.head, map(measured_source, ex.args)...)
+end
+
+function shape_loop_depths!(depths, ex, depth=0)
+    ex isa Expr || return depths
+    if ex.head === :call && occursin("brm_test_measured_hypot", string(ex.args[1]))
+        push!(depths, depth)
+    end
+    next = depth + (ex.head in (:for, :while))
+    foreach(arg -> shape_loop_depths!(depths, arg, next), ex.args)
+    depths
+end
+end
+
+@stestset "native mixture scheduling follows component dependencies" begin
+    probe = MixtureSchedulingProbe
+    ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+    @testset "row_alpha=$row_alpha n=$n" for row_alpha in (false, true), n in (0, 1, 6, 32)
+        data = (; y=[0.1i - 0.4 for i in 1:n], x=[0.2i - 0.3 for i in 1:n])
+        brmi = custom_mixture_builder(row_alpha)(data)
+        plan = BRM._brm_rk_plan(brmi)
+        emitted = BRM._rk_emit_ast(plan)
+        # Count the centered-skew component; the excess component is unchanged.
+        definitions = [occursin("log_normalizer", string(d)) ?
+            probe.measured_source(d) : d for d in emitted.defs]
+        bindings = [emitted.bindings;
+            :brm_test_measured_hypot => probe.measured_hypot;
+            :brm_test_measured_inverse_scale => probe.measured_inverse_scale]
+        instrumented = BRM._RKEmittedProgram(definitions, emitted.main, bindings)
+        translated = ext._rk_translate_from_emitted(plan, instrumented)
+        model = Base.invokelatest(build_kernel, translated)
+        probe.reset!()
+        query = prepare_query(model, translated, :likelihood)
+        @test probe.shape_calls[] == probe.scale_calls[] == 0
+        names = coordinate_names(model.layout)
+        for shift in (0.0, 0.2)
+            u = fill(shift, length(names))
+            probe.reset!()
+            value = Base.invokelatest(query, u)
+            @test probe.shape_calls[] == (row_alpha ? n : min(n, 1))
+            @test probe.scale_calls[] == min(n, 1)
+            w = LogExpFunctions.logistic(shift)
+            expected = sum((LogExpFunctions.logsumexp(custom_mixture_terms(
+                data.y[i], shift, shift + (row_alpha ? data.x[i] : 0.0),
+                shift, shift, w)) for i in eachindex(data.y)); init=0.0)
+            @test value ≈ expected atol=2e-11
+        end
+        # A rejected probability vector must not execute either component.
+        if n > 0
+            invalid = zeros(length(names))
+            invalid[coordinate(names, :w)] = NaN
+            probe.reset!()
+            @test Base.invokelatest(query, invalid) == -Inf
+            @test probe.shape_calls[] == probe.scale_calls[] == 0
+        end
+        if n == 6
+            generated = code_expr(query)
+            depths = probe.shape_loop_depths!(Int[], generated)
+            @test !isempty(depths)
+            @test all(d -> row_alpha ? d > 0 : d == 0, depths)
+            @test !occursin("_rng", string(generated))
+        end
+    end
+end
+
 @stestset "RK heterogeneous empty data rebinding" begin
     @testset "$kind" for kind in (:cauchy, :student)
         backend = RKBRMI(heterogeneous_builder(kind)((; y=[-0.2, 0.7])))

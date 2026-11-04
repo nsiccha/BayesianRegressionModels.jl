@@ -281,6 +281,7 @@ const PINS = [
     # generated programs hold modules, as a Laplace plan over a gmrf does.
     # f17b6a24 (RK 0.1.67 / RKPPL 0.1.76) prepares strict observation-cell
     # footprints of a per-cell joint field and its named-tuple row reads.
+    # 1e43b1b8 (RKPPL 0.1.90): native row-dependent and computed shared mixture probabilities.
     # e190bff0 (RK 0.1.80 / RKPPL 0.1.92) composes heterogeneous native
     # MixtureModel component graphs while retaining their scheduling.
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "e190bff05e433b65e8ba8e6a9cedee8d5198b65a"),
