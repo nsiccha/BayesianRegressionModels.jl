@@ -9,7 +9,8 @@
 # written block by block. This file pins, at varied controls and positions:
 #
 # - which plans take the block-level pass and which keep WarmupHMC's generic
-#   path (Student-t mixing, HSGP cells);
+#   path (Student-t mixing, HSGP cells), R2D2-scaled blocks wider than four
+#   margins among them (`adaptive_centering_blockwise_widths.jl` sweeps the width);
 # - its log density equals the generic path's exactly, its gradient to rounding;
 # - it allocates a small fraction of what the generic path allocates;
 # - the candidate-scoring frame, which builds a Gaussian block's factor once per
@@ -25,7 +26,7 @@ using DifferentiationInterface: AutoEnzyme
 using LogDensityProblems
 using StanBlocks
 using WarmupHMC
-using Distributions: Exponential, LKJCholesky, Normal, TDist
+using Distributions: Beta, Exponential, LKJCholesky, Normal, TDist
 
 const BRM = BayesianRegressionModels
 const ENZYME_EXT = Base.get_extension(BRM, :BayesianRegressionModelsWarmupHMCEnzymeExt)
@@ -106,6 +107,31 @@ const BLOCKWISE_VARIANTS = [
         cor(:, p) = [1 0.3; 0.3 1]
         y ~ Normal(mu, sigma)
     end), true),
+    "joint plan: R2D2 scale over a five-margin block" => (@brm(begin
+        sigma ~ Exponential(1)
+        mu1 ~ 1 + (1 | p | g)
+        mu2 ~ 1 + (1 | p | g)
+        mu3 ~ 1 + (1 | p | g)
+        mu4 ~ 1 + (1 | p | g)
+        mu5 ~ 1 + (1 | p | g)
+        sd(:, p) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1, reference_scale=sigma)
+        cor(:, p) ~ LKJCholesky(5, 2)
+        y ~ Normal(mu1 + mu2 + mu3 + mu4 + mu5, sigma)
+    end), true),
+    "joint plan: a joint R2D2 prior per margin of a five-margin block" => (@brm(begin
+        sigma ~ Exponential(1)
+        mu1 ~ 1 + x + (1 | p | g)
+        mu2 ~ 1 + x + (1 | p | g)
+        mu3 ~ 1 + x + (1 | p | g)
+        mu4 ~ 1 + x + (1 | p | g)
+        mu5 ~ 1 + x + (1 | p | g)
+        effect(mu1, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5, alpha=1)
+        effect(mu2, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5, alpha=1)
+        effect(mu3, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5, alpha=1)
+        effect(mu4, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5, alpha=1)
+        effect(mu5, :) ~ r2d2(R2=Beta(1, 1), tau_bsv=0.5, alpha=1)
+        y ~ Normal(mu1 + mu2 + mu3 + mu4 + mu5, sigma)
+    end), true),
     "joint plan with Student-t mixing keeps the generic path" => (@brm(begin
         sigma ~ Exponential(1)
         mu ~ 1 + x + (1 + x | p | g) + (1 | h)
@@ -117,67 +143,70 @@ const BLOCKWISE_VARIANTS = [
 generic_gradient(wrapped, x) = invoke(LogDensityProblems.logdensity_and_gradient,
     Tuple{WarmupHMC.ReparametrizedProblem,AbstractVector}, wrapped, x)
 
-@testset "block-level centred gradient: $label" for (label, (builder, blockwise)) in
-        BLOCKWISE_VARIANTS
-    sb = SBBRMI(builder(BLOCKWISE_DF); total_groups=(), mod=@__MODULE__)
-    problem = StanBlocks.stan_instantiate(sb.model)
-    d = LogDensityProblems.dimension(problem)
-    n_cells = length(WarmupHMC.reparametrizer(
-        adaptive_centering_problem(sb, problem, AutoEnzyme())).pairs)
-    wrapped = adaptive_centering_problem(sb, problem, AutoEnzyme();
-        centeredness=rand(Xoshiro(3), n_cells))
-    # Both plan kinds dispatch to the extension; a joint plan with Student-t
-    # mixing then hands the call back to WarmupHMC's generic method, so its
-    # gradient is the generic one bit for bit.
-    method = which(LogDensityProblems.logdensity_and_gradient,
-        (typeof(wrapped), Vector{Float64}))
-    @test method.module === ENZYME_EXT
-    for seed in 1:3
-        x = 0.3 .* randn(Xoshiro(seed), d)
+# One outer testset, so a failing row reports without stopping the rows after it.
+@testset "block-level reverse pass" begin
+    @testset "block-level centred gradient: $label" for (label, (builder, blockwise)) in
+            BLOCKWISE_VARIANTS
+        sb = SBBRMI(builder(BLOCKWISE_DF); total_groups=(), mod=@__MODULE__)
+        problem = StanBlocks.stan_instantiate(sb.model)
+        d = LogDensityProblems.dimension(problem)
+        n_cells = length(WarmupHMC.reparametrizer(
+            adaptive_centering_problem(sb, problem, AutoEnzyme())).pairs)
+        wrapped = adaptive_centering_problem(sb, problem, AutoEnzyme();
+            centeredness=rand(Xoshiro(3), n_cells))
+        # Both plan kinds dispatch to the extension; a joint plan with Student-t
+        # mixing then hands the call back to WarmupHMC's generic method, so its
+        # gradient is the generic one bit for bit.
+        method = which(LogDensityProblems.logdensity_and_gradient,
+            (typeof(wrapped), Vector{Float64}))
+        @test method.module === ENZYME_EXT
+        for seed in 1:3
+            x = 0.3 .* randn(Xoshiro(seed), d)
+            lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
+            lp_generic, gradient_generic = generic_gradient(wrapped, x)
+            @test lp == lp_generic
+            if blockwise
+                @test gradient ≈ gradient_generic rtol=1e-11 atol=1e-11
+            else
+                @test gradient == gradient_generic
+            end
+            @test LogDensityProblems.logdensity(wrapped, x) == lp
+        end
+        if blockwise
+            x = 0.3 .* randn(Xoshiro(9), d)
+            LogDensityProblems.logdensity_and_gradient(wrapped, x)
+            generic_gradient(wrapped, x)
+            bytes = @allocated LogDensityProblems.logdensity_and_gradient(wrapped, x)
+            bytes_generic = @allocated generic_gradient(wrapped, x)
+            @test bytes < bytes_generic / 4
+        end
+        state = ranef_state(first(WarmupHMC.reparametrizer(wrapped).pairs).second.args[1].state)
+        for seed in 1:2
+            x = 0.3 .* randn(Xoshiro(10 + seed), d)
+            gradient = randn(Xoshiro(20 + seed), d)
+            frame = AC_EXT._centering_frame(state, x, gradient)
+            reference = per_level_frame(state, x, gradient)
+            for field in propertynames(reference)
+                @test getproperty(frame, field) == getproperty(reference, field)
+            end
+        end
+    end
+
+    # The HSGP joint plan keeps WarmupHMC's generic path (its cells are not
+    # random-effect pairs).
+    @testset "joint plan with HSGP cells keeps the generic path" begin
+        builder = @brm begin
+            sigma ~ Exponential(1)
+            mu ~ 1 + hsgp(x; k=4) + (1 + x | g)
+            y ~ Normal(mu, sigma)
+        end
+        sb = SBBRMI(builder(BLOCKWISE_DF); total_groups=(), mod=@__MODULE__)
+        problem = StanBlocks.stan_instantiate(sb.model)
+        wrapped = adaptive_centering_problem(sb, problem, AutoEnzyme())
+        x = 0.3 .* randn(Xoshiro(4), LogDensityProblems.dimension(problem))
         lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
         lp_generic, gradient_generic = generic_gradient(wrapped, x)
         @test lp == lp_generic
-        if blockwise
-            @test gradient ≈ gradient_generic rtol=1e-11 atol=1e-11
-        else
-            @test gradient == gradient_generic
-        end
-        @test LogDensityProblems.logdensity(wrapped, x) == lp
+        @test gradient == gradient_generic
     end
-    if blockwise
-        x = 0.3 .* randn(Xoshiro(9), d)
-        LogDensityProblems.logdensity_and_gradient(wrapped, x)
-        generic_gradient(wrapped, x)
-        bytes = @allocated LogDensityProblems.logdensity_and_gradient(wrapped, x)
-        bytes_generic = @allocated generic_gradient(wrapped, x)
-        @test bytes < bytes_generic / 4
-    end
-    state = ranef_state(first(WarmupHMC.reparametrizer(wrapped).pairs).second.args[1].state)
-    for seed in 1:2
-        x = 0.3 .* randn(Xoshiro(10 + seed), d)
-        gradient = randn(Xoshiro(20 + seed), d)
-        frame = AC_EXT._centering_frame(state, x, gradient)
-        reference = per_level_frame(state, x, gradient)
-        for field in propertynames(reference)
-            @test getproperty(frame, field) == getproperty(reference, field)
-        end
-    end
-end
-
-# The HSGP joint plan keeps WarmupHMC's generic path (its cells are not
-# random-effect pairs).
-@testset "joint plan with HSGP cells keeps the generic path" begin
-    builder = @brm begin
-        sigma ~ Exponential(1)
-        mu ~ 1 + hsgp(x; k=4) + (1 + x | g)
-        y ~ Normal(mu, sigma)
-    end
-    sb = SBBRMI(builder(BLOCKWISE_DF); total_groups=(), mod=@__MODULE__)
-    problem = StanBlocks.stan_instantiate(sb.model)
-    wrapped = adaptive_centering_problem(sb, problem, AutoEnzyme())
-    x = 0.3 .* randn(Xoshiro(4), LogDensityProblems.dimension(problem))
-    lp, gradient = LogDensityProblems.logdensity_and_gradient(wrapped, x)
-    lp_generic, gradient_generic = generic_gradient(wrapped, x)
-    @test lp == lp_generic
-    @test gradient == gradient_generic
 end
