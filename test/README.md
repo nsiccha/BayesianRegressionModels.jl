@@ -2171,8 +2171,8 @@ no Stan toolchain. It checks that each plan takes the pass, that its log density
 equals the generic path's exactly and its gradient to rounding, that both agree
 with central differences, and that inputs are unchanged. A width has to be
 checked on its own: the pass works at four margins, and at five Enzyme raised
-`EnzymeNoTypeError` until the repair in Enzyme. The test bootstrap pins
-`6053067f`, which includes that repair and declares libEnzyme `3425ed9c`.
+`EnzymeNoTypeError` until the repair in Enzyme `6053067f`. The test bootstrap
+pins `d3189970`, which contains that repair and declares libEnzyme `33709d12`.
 
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, Turing/Enzyme versus StanBlocks/BridgeStan
