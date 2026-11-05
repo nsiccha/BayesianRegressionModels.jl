@@ -333,6 +333,23 @@ function _brm_spl_gmrf_precision!(nz, p)
     nothing
 end
 
+# The fields' prior precision Q over the `n` integrated draws at the current
+# population point, both triangles, or `nothing` without fields. For local
+# (per-block) prior values, as the plan's importance diagnostic needs.
+function _brm_spl_gmrf_sparse(p, n)
+    gmrf = p.gmrf
+    gmrf === nothing && return nothing
+    rows, cols, vals = Int[], Int[], Float64[]
+    for field in gmrf.fields
+        _brm_gmrf_foreach_entry(field) do k, i, j, ks, ta, tb, ca, cb
+            push!(rows, field.z[i]); push!(cols, field.z[j])
+            push!(vals, _brm_gmrf_temporal_entry(field, ta, tb) * field.Λ[ca, cb] *
+                field.qs[ks])
+        end
+    end
+    sparse(rows, cols, vals, n, n)
+end
+
 function _brm_spl_gmrf_quad(p, z)
     gmrf = p.gmrf
     gmrf === nothing && return 0.0
