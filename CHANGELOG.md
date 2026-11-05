@@ -26,8 +26,6 @@ instead of failing at run time.
 - **Breaking:** SVI streaming checkpoints use format 2 with explicit
   `unit_partition`; serialize and reload with matching package versions.
 
-## 0.2.171
-
 - Changed: NLME unit likelihoods and gradients use one strict RK plate
   partition per unit. Preparation checks structural coordinate ownership,
   including dormant branches, and names nonlocal producers or foreign unit
@@ -65,6 +63,17 @@ instead of failing at run time.
   custom packed vectors. Unit gradients use ordinary Enzyme Reverse, with the
   test bootstrap's Enzyme dogfood pin, which contains `68ed90fe`'s repair for
   matrix-window partition gradients on Julia 1.10.
+
+## 0.2.171
+
+- `@brm function component(inputs...) … return value end` defines a reusable
+  component for both StanBlocks and ReactiveKernels. Each `result ~ component(...)`
+  call owns its local parameters and reads explicit shared inputs. Components
+  support nested calls, array-valued results, prior/output inspection and
+  changed-data replay. Existing short-form data-to-model builders retain their
+  meaning. Returned row axes remain available to formula offsets and selective
+  readers; internal plate cells must prove scalar values before flattening.
+  `brm_components` exposes definition identity, source and each logical call path.
 
 ## 0.2.170
 

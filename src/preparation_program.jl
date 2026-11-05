@@ -95,7 +95,8 @@ function _brm_prior_value_dependencies(program::_BRMPreparedProgram, roots)
         # number: the builder binds the unread name to a placeholder, and every
         # backend reads it as the literal.
         operation.role === :extension &&
-            (haskey(program.context.data, name) || name === :Inf) && return
+            (haskey(program.context.data, name) || name === :Inf ||
+             operation.expression isa _BRMComponentInput) && return
         operation.role in (:parameter, :assignment) || error(
             "BRM preparation: model-level prior references `$name`, a $(operation.role); " *
             "it requires a sampled parameter, deterministic model value, or data")

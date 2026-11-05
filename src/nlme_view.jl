@@ -2082,11 +2082,18 @@ jointly with ordinary population parameters. To hold them fixed, pass
 `shared_point`, a full RK packed unconstrained point. Only its shared entries
 are used. The model's θ positions and names make the chosen fit mode explicit.
 
-Pass the same `subject_group`, `nested_groups` and `shared_groups` as for
+Pass the same `subject_group`, `nested_groups`, `shared_groups` and
+`unit_partition` as for
 `brm_nlme_view` when the model has several groupings. With nested effects its
 NLME layout has one shared covariance family per random-effect declaration and
 one compact η vector per subject; the blocks over `shared_groups` are shared
 latents in θ (or fixed by `shared_point`).
+
+With `unit_partition=:connected`, individual structural cell supports join
+likelihood-linked subjects before attribution. Every likelihood, gradient and
+subset then uses complete inference units; the view retains original subject
+labels and slices. The attribution description below applies to the default
+`:subjects` policy. Both policies retain strict locality validation.
 
 Each pointwise density belongs to one subject. A density on the subject
 column's rows (a flat grouped response, a completed covariate's observed
@@ -2123,7 +2130,8 @@ when the next step starts. `nothing` (the default) reports nothing.
 
 Refuses ([`BRMNLMEViewError`](@ref)) everything `brm_nlme_view` refuses, Student-t
 random-effect blocks (the estimators own a Gaussian η prior), and observed
-densities that cannot be attributed to subjects: a plate cell joining rows of
+densities that cannot be attributed under the selected policy. In default
+`:subjects` mode, a plate cell joining rows of
 several subjects, and a measured density that reads several subjects' η (the
 message names them), is not finite at the measuring point, or changes with
 some of the moves but not all.
