@@ -60,6 +60,16 @@ are included recursively. Paths identify authored call sites, so repeated
 plate iterations share a site. The defining module and authored docstring
 provenance remain available without compiling a backend.
 
+The Roles and ranks tab lists each call's own declarations under its exact call
+path, such as `left › b`, with the same parameter, predictor, assignment and
+prior roles as model-scope declarations; the call itself is a component result.
+Inputs refer to the caller's values and are not listed again. A local
+observation of a data input marks the caller's column as `Data · response`.
+A component called inside a plate cell declares its locals once per iteration:
+those rows say so, and their rank and shape describe one iteration. A prepared
+RK model or Stan descriptor resolves a local parameter's dimensions from its
+exact call path, never from a model-scope quantity of the same name.
+
 `brm_model_view(component)` also inspects a component definition and its
 reachable definitions without data. Its Component inputs tab distinguishes
 positional and keyword arguments, required inputs and optional defaults.

@@ -31,6 +31,34 @@ grouped = @brm begin
     cor(:, block) ~ LKJCholesky(2, 2.0)
     y ~ Normal(mu, sigma)
 end
+@brm function vector_local(x)
+    z[1:length(x)] .~ Normal.(0, 1)
+    return x + z
+end
+vector_parent = @brm begin
+    z[1:n] .~ Normal.(0, 1)
+    left ~ vector_local(x)
+    y ~ Normal(left .+ sum(z), 1)
+end
+end
+
+@testset "RK model view enriches component-local parameters by exact path" begin
+    model = RKModelViewFixture.vector_parent((; x=[-1., 0., 1.], y=[0.1, 0.2, 0.3], n=2))
+    rk = RKBRMI(model)
+    rows = Dict(row.path => row for row in BRM._brm_view_rk_parameters(rk))
+    @test rows[(:z,)].shape == (2,)
+    @test rows[(:left, :z)].shape == (3,)
+    for mime in ("text/html", "text/markdown", "text/plain")
+        rendered = repr(mime, brm_model_view(rk))
+        @test occursin("left › z", rendered)
+        @test occursin("Vector · 3", rendered)
+        @test occursin("Vector · 2", rendered)
+    end
+    md = repr("text/markdown", brm_model_view(rk))
+    @test occursin("| z | Parameter | 1 | Vector · 2 |", md)
+    @test occursin("| left › z | Parameter | 1 | Vector · 3 |", md)
+    @test occursin("| (:left, :z) | Declared parameter | 1 | Vector · 3 |", md)
+    @test occursin("| (:z,) | Declared parameter | 1 | Vector · 2 |", md)
 end
 
 @testset "RK model view uses constrained parameter metadata" begin

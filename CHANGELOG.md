@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.192
+
+- `brm_model_view` of a bound model lists each component call's own
+  declarations in Roles and ranks under the exact call path, such as
+  `left › b`, with the same roles and ranks as model-scope declarations. Before,
+  only the call's result row appeared. A local observation of a data input marks
+  the caller's column as response data. Locals of a call inside a plate cell are
+  marked as declared once per iteration. RK and descriptor views resolve a local
+  parameter's dimensions by its exact call path. `brm_components` records are
+  unchanged.
+
 ## 0.2.191
 
 - `brm_start`'s `component_inits` takes the top-level `inits` grammar for a
