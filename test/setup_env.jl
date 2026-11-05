@@ -360,7 +360,11 @@ const PINS = [
     # 6053067f / libEnzyme 3425ed9c types floating-point tuple stack slots
     # throughout Reverse, so derived-scale blocks wider than four margins
     # differentiate without changing BRM's block pass (reverse-untyped-a117a92b).
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "6053067f2fa33a4390aea2a365e9e24f83acb495"),  # dogfood
+    # d3189970 / libEnzyme 33709d12 contains 6053067f and repairs ordinary
+    # Reverse through returned memory (Enzyme snag ordinary-autoenz-6cf1298d):
+    # the ordinary AR/DAR and smooth readers in rk_values.jl segfaulted
+    # on Julia 1.10 under 6053067f.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "d31899704b6f5eab6e3843c9517a5486d2139740"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also
