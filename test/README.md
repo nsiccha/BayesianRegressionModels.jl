@@ -83,8 +83,9 @@ field model at initialization in one Julia process and resumes it in another,
 through `smc_generated_law_process.jl`. The field's law is bound in the
 generated RK program module, so the consumer first confirms that the raw law
 expression cannot be deserialized, then requires exact window and schedule
-replay from a serialized partial and from disk. It needs the ReactiveKernelsPPL
-0.1.98 pin from `setup_env.jl`.
+replay from a serialized partial and from disk. It needs ReactiveKernelsPPL
+0.1.98 or later. The `setup_env.jl` pin also carries the selective-window
+capture-footprint repair, covered by `smc_window_selective_api.jl`.
 
 `scoped_components.jl` checks function-style BRM components with independent
 local priors, explicit shared inputs, nested calls, vector results, and plate
@@ -2177,7 +2178,7 @@ equals the generic path's exactly and its gradient to rounding, that both agree
 with central differences, and that inputs are unchanged. A width has to be
 checked on its own: the pass works at four margins, and at five Enzyme raised
 `EnzymeNoTypeError` until the repair in Enzyme `6053067f`. The test bootstrap
-pins `d3189970`, which contains that repair and declares libEnzyme `33709d12`.
+pins `b2bb4cb6`, which contains that repair and declares libEnzyme `f392eba5`.
 
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, StanBlocks/BridgeStan density and gradient
