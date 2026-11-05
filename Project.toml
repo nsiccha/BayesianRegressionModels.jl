@@ -1,7 +1,7 @@
 name = "BayesianRegressionModels"
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.2.179"
+version = "0.2.181"
 
 [deps]
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
@@ -37,6 +37,7 @@ StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
 StatsFuns = "4c63d2b9-4356-54db-8cca-17b64c39e42c"
 
 [weakdeps]
+HTMXObjects = "b12ef442-5798-4353-80f3-9562b03a0cb6"
 TreeArrays = "5daaa025-ac78-4e9a-8805-78946e672e43"
 ADTypes = "47edcb42-4c32-4615-8424-f2b9edc5f35b"
 AlgebraOfVega = "a2420894-485a-4f42-a4fc-c4323ec6fb2b"
@@ -53,6 +54,7 @@ Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [extensions]
+BayesianRegressionModelsHTMXObjectsExt = "HTMXObjects"
 BayesianRegressionModelsTreeArraysExt = "TreeArrays"
 BayesianRegressionModelsAlgebraOfVegaExt = "AlgebraOfVega"
 BayesianRegressionModelsNLMEEstimationExt = ["NLMEEstimation", "Enzyme", "ADTypes", "DifferentiationInterface", "ReactiveKernels", "ReactiveKernelsPPL"]
@@ -70,6 +72,7 @@ BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 
 [compat]
 DataStructures = "0.18, 0.19"
+HTMXObjects = "0.1.58"
 Bessels = "0.2"
 TreeArrays = "0.2.0"
 KLU = "0.6"

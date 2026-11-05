@@ -211,6 +211,7 @@ include("powerscale.jl")
 import BridgeStan
 include("conditional_effects.jl")
 include("draw_trees.jl")
+include("model_view.jl")
 
 # Public surface. The macros and value types everything downstream
 # (web-macro, downstream extensions, tests) reaches for.
@@ -308,6 +309,7 @@ export BRMI, BRMBuilder, brm, VBRMI, SBBRMI, TuringBRMI, RKBRMI, GenerativeDecla
        rk_logdensity_problem, rk_restore_draws
 export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight,
        BRMHighlightSpec, BRMSubmodel, brm_highlight
+export brm_model_view
 export BRMDescription, BRMDescriptionComponent, BRMDescriptionContext,
        BRMDescriptionFragment, BRMDescriptionReference, BRMPriorDescription,
        BRMDescriptionCoverage, brm_description, brm_describe_component,
