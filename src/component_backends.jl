@@ -196,7 +196,8 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     end
     cells = Dict{Symbol,Symbol}()
     coordinates = Any[]
-    emitted = _rk_emit_ast(plan; cell_sources=cells, coordinates)
+    emitted = _rk_emit_ast(plan; cell_sources=cells, coordinates,
+        documentation=brm_documentation(instance))
     taken = union(Set{Symbol}(component.inputs), Set(_brm_operation_names(instance)),
         Set{Symbol}(reserved))
     # Helpers are module-level definitions. Give each instantiated subprogram
@@ -287,20 +288,27 @@ end
 # emission records identify the exact local output and its unflattened cells;
 # no output length or private-name parsing establishes this correspondence.
 function _rk_component_offset_cells!(definitions, plan, outputs, callee)
+    definitions_by_name = Dict(_rk_source_definition(d).name => d for d in definitions)
+    assignments_by_definition = Dict{Symbol,Dict{Symbol,Vector{Expr}}}()
     for assignment in plan.assignments
         assignment isa _RKPreparedSubmodelAssignment || continue
         metadata = assignment.component
         metadata === nothing && continue
         for output in intersect(outputs, keys(metadata.row_cells))
             record = metadata.row_cells[output]
-            definition = only(d for d in definitions if
-                _rk_source_definition(d).name === record.definition)
-            body = last(_brm_undoc(definition).args)
-            selected = [statement for statement in body.args if
-                Meta.isexpr(_brm_undoc(statement), :(=), 2) &&
-                first(_brm_undoc(statement).args) === record.output]
+            assignments = get!(assignments_by_definition, record.definition) do
+                body = last(_brm_undoc(definitions_by_name[record.definition]).args)
+                by_name = Dict{Symbol,Vector{Expr}}()
+                for statement in body.args
+                    plain = _brm_undoc(statement)
+                    Meta.isexpr(plain, :(=), 2) && first(plain.args) isa Symbol || continue
+                    push!(get!(Vector{Expr}, by_name, first(plain.args)), plain)
+                end
+                by_name
+            end
+            selected = get(assignments, record.output, Expr[])
             length(selected) == 1 || error("component row proof lost local output `$output`")
-            _brm_undoc(only(selected)).args[2] = Expr(:call, callee, record.cells)
+            only(selected).args[2] = Expr(:call, callee, record.cells)
         end
     end
     nothing

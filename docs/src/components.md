@@ -33,8 +33,8 @@ sb = SBBRMI(model; mod=@__MODULE__, total_groups=())
 rk = RKBRMI(model)
 ```
 
-There are six sampled scalars: each call owns its own `a` and `b`, and both
-read the parent's `shared_scale` and `obs_sd`. A component call introduces no
+There are six sampled scalars: each call owns its own `a` and `b`, both calls
+read the parent's `shared_scale`, and the likelihoods share `obs_sd`. A component call introduces no
 regression coefficient. The two input vectors need not have the same length.
 The result can be scalar or array valued; ordinary component statements can
 declare vector priors and call other components.
@@ -51,6 +51,10 @@ rows = @brm begin
     scale ~ Exponential(1)
 end
 ```
+
+An internal plate also retains its cell axis when each returned cell is a
+scalar. Vector-valued cells require explicit row selection; matching the
+flattened length to another predictor does not establish row alignment.
 
 Inputs are positional names or keyword names, with optional defaults. Model
 values outside the component must be passed explicitly. Functions resolve in

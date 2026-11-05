@@ -41,6 +41,12 @@ end
     return value
 end
 
+@brm function regression_field(x)
+    value ~ 1 + x
+    effect(value, :) ~ Normal(0, 1)
+    return value
+end
+
 @brm function nested_cell_field(x, scale)
     inner ~ cell_field(x, scale)
     return inner + 0.1
@@ -171,7 +177,8 @@ end
 
 module ScopedVariants
 using BayesianRegressionModels, Distributions, Statistics
-using ..ScopedCalibration: calibration, nested, deviations, observed_calibration, cell_field, intercept_field
+using ..ScopedCalibration: calibration, nested, deviations, observed_calibration,
+    cell_field, intercept_field, regression_field
 
 const nesting = @brm begin
     field ~ nested(x, scale)
@@ -190,6 +197,10 @@ const plate_body = @brm begin
 end
 const formula_body = @brm begin
     field ~ intercept_field(x)
+    y ~ Normal(field, 0.7)
+end
+const regression_body = @brm begin
+    field ~ regression_field(x)
     y ~ Normal(field, 0.7)
 end
 const rows = @brm begin
@@ -366,6 +377,19 @@ end
     @test [(d.path, d.markdown) for d in brm_documentation(sb)] ==
         [(d.path, d.markdown) for d in brm_documentation(rk)] ==
         [(d.path, d.markdown) for d in brm_documentation(model)]
+    native = rkppl_documentation(rk_bound_plan(rk))
+    for path in ((:left, :inner), (:right,))
+        @test any(d -> d.path == path &&
+            d.markdown == "A documented calibration component.", native)
+        local_doc = only(d for d in native if d.path == (path..., :a))
+        @test local_doc.markdown == "Local intercept, unique to this call."
+        @test local_doc.file == docs[2].file
+        @test local_doc.line == docs[2].line
+    end
+    artifact = BRM.emit_rk_artifact(model; case_id="scoped-documentation")
+    @test [(d.path, d.markdown) for d in rkppl_documentation(rk_translate_artifact(artifact))] ==
+        [(d.path, d.markdown) for d in native]
+    @test check_rk_source_roundtrip(rk) === rk
 end
 
 module ScopedErrors
@@ -404,7 +428,8 @@ end
     data = (; x=[-0.4, 0.2, 0.7], y=[0.1, 0.4, 0.8])
     for (builder, count) in ((ScopedVariants.nesting, 4), (ScopedVariants.vector, 4),
             (ScopedVariants.default_calls, 2), (ScopedVariants.cells, 7),
-            (ScopedVariants.plate_body, 4), (ScopedVariants.formula_body, 1))
+            (ScopedVariants.plate_body, 4), (ScopedVariants.formula_body, 1),
+            (ScopedVariants.regression_body, 2))
         println("COMPONENT_EXPECTED_COORDINATES=", count); flush(stdout)
         model = builder(data)
         rk = check_rk_source_roundtrip(RKBRMI(model))
@@ -425,7 +450,8 @@ end
     for (label, builder) in (("nested", ScopedVariants.nesting),
             ("vector", ScopedVariants.vector), ("defaults", ScopedVariants.default_calls),
             ("cells", ScopedVariants.cells), ("plate-body", ScopedVariants.plate_body),
-            ("formula-body", ScopedVariants.formula_body))
+            ("formula-body", ScopedVariants.formula_body),
+            ("regression-body", ScopedVariants.regression_body))
         println("COMPONENT_DENSITY=", label); flush(stdout)
         model = builder(data)
         rk, problem = consumer_problem(model)
@@ -437,6 +463,13 @@ end
                 collect(range(-0.2; step=0.5 / max(rk.model.layout.total - 1, 1),
                     length=rk.model.layout.total)))
             check_consumer_stan(problem, stan, mapping, rk, point)
+            saved = copy(point)
+            stan_point = brm_rk_point_to_stan(transport, point)
+            @test brm_stan_point_to_rk(transport, stan_point) ≈ point atol=1e-12 rtol=1e-12
+            @test isequal(point, saved)
+            checked = brm_check_coordinate_transport(transport, rk, stan.model, point)
+            @test checked.pairs == length(transport)
+            @test checked.max_error <= 1e-12
         end
     end
 end

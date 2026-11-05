@@ -4,9 +4,12 @@
 local priors, explicit shared inputs, nested calls, vector results, and plate
 cells. It compares normalized densities and native Reverse gradients with
 independent references and compiled Stan, and checks source/documentation
-inspection, row selection, offsets, and frozen or refitted preprocessing.
+inspection, constrained-value and coordinate round trips, row selection,
+offsets, and frozen or refitted preprocessing. Native RKPPL documentation
+retains component headers and local provenance at each nested call site.
 Run it as a standalone script in the test environment; StanBlocks 0.2.25
-preserves keyword labels when a component is called inside a plate.
+preserves keyword labels when a component is called inside a plate, and
+ReactiveKernelsPPL 0.1.93 retains authored documentation.
 
 `adaptive_centering_bounds.jl` checks bounded random-effect scales against
 BridgeStan's constrained values, correlated centered and noncentered maps,

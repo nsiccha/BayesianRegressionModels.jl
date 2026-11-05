@@ -19,7 +19,9 @@ instead of failing at run time.
   call owns its local parameters and reads explicit shared inputs. Components
   support nested calls, array-valued results, prior/output inspection and
   changed-data replay. Existing short-form data-to-model builders retain their
-  meaning.
+  meaning. Returned row axes remain available to formula offsets and selective
+  readers; internal plate cells must prove scalar values before flattening.
+  `brm_components` exposes definition identity, source and each logical call path.
 - **Authored declaration documentation:** ordinary Julia docstrings in BRM
   source survive binding, tuple expansion, model composition, source printing
   and replay. `brm_documentation` returns copied `BRMDocumentation` records
