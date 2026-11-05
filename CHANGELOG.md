@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.193
+## 0.2.194
 
 - A function-style component's formula priors read its model-valued inputs on
   `SBBRMI`, as its scalar priors already did: with `center` and `scale` bound
@@ -23,6 +23,14 @@ instead of failing at run time.
   `RKBRMI` already read such inputs in random-effect SD priors. Its
   population-effect prior arguments remain numeric constants or data, in a
   component as at model scope.
+
+## 0.2.193
+
+- Model views support readable `text/plain` output through HTMXObjects 0.1.65.
+  All eager tabs and disclosures retain their labels, source, documentation,
+  roles and dimensions without internal node dumps. Component defaults and
+  model helpers remain unevaluated. The dependency floor and test pins require
+  the shared renderer fix.
 
 ## 0.2.192
 
