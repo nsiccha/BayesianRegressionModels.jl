@@ -324,4 +324,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # e190bff0 (PPL 0.1.92): heterogeneous native mixture component graphs.
 # 0ee20c70 (PPL 0.1.93): authored local and reusable-definition docs.
 # 405190ae (RK 0.1.81 / PPL 0.1.94): same-model empty observation rebinding.
-rev = "405190ae85e0cee2f2f20a6741c1e821507b625b"
+# a9a7e9a2 (RK 0.1.84 / PPL 0.1.97): bound-data LKJ dimensions in reusable
+# definitions; contains every revision above.
+rev = "a9a7e9a2182ef2057c004a3c81dd74eef4f3a699"

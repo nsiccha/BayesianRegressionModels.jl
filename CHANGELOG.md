@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.174
+## 0.2.175
 
 - `SBBRMI` and `RKBRMI` compose heterogeneous scalar `MixtureModel`
   components with known full-real continuous support, including custom
@@ -26,6 +26,14 @@ instead of failing at run time.
 - Requires StanBlocks 0.2.25, ReactiveKernels 0.1.81 and
   ReactiveKernelsPPL 0.1.94. Bounded or mixed-support heterogeneous components
   remain outside the supported mixture contract.
+
+## 0.2.174
+
+- `LKJCholesky(K, eta)` accepts data-supplied scalar dimensions and
+  concentrations in `SBBRMI` and `RKBRMI`, including reusable and nested
+  `@brm function` components. RK source retains named inputs while coordinate
+  bookkeeping uses their bound dimension. The RK backend requires
+  ReactiveKernelsPPL 0.1.97 for data-supplied LKJ dimensions.
 
 ## 0.2.173
 

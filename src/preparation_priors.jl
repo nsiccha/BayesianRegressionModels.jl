@@ -332,7 +332,17 @@ function _brm_lkj_cholesky_spec(target::Symbol, op::ExprColumn;
     length(args) == 2 || error(
         "$prefix: `$target ~ LKJCholesky(K, eta)` needs a dimension and a " *
         "shape, got $(length(args)) arguments")
-    K, eta = args[1], _brm_prior_constant(args[2])
+    state = _BRMDataAssignments(prefix)
+    bound(arg) = _brm_data_assignment_value(arg, state, Set{Symbol}())
+    K = bound(args[1])
+    eta = _brm_prior_constant(args[2])
+    values = _brm_lkj_cholesky_values(target, K, bound(eta); prefix)
+    # Preserve a named concentration in Stan source; the resolved dimension
+    # is also used by BRM's grouping/coordinate checks.
+    (; K=values.K, eta=eta isa Real ? values.eta : eta)
+end
+
+function _brm_lkj_cholesky_values(target, K, eta; prefix="BRM preparation")
     K isa Integer && !(K isa Bool) && K >= 1 || error(
         "$prefix: `$target ~ LKJCholesky(K, eta)` needs an integer dimension " *
         ">= 1, got $(repr(K))")

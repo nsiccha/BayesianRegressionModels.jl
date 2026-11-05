@@ -8,6 +8,13 @@ predictive outputs, and measured shared/row work placement. It accepts testset
 substring filters through `testset_filter.jl`; empty-data rebinding has its own
 testset so other cases remain independently runnable.
 
+`lkj_data_inputs.jl` checks data-supplied correlation dimensions and concentrations
+at model scope and in reusable and nested BRM components, including two sizes
+in one model, derived data, frozen constants and correlated groupings. It compares normalized
+densities and native Reverse gradients with literal controls, an independent
+two-dimensional law and compiled Stan, and checks source replay, physical
+coordinate transport and invalid inputs. The bootstrap supplies RKPPL 0.1.97.
+
 `plate_direct_outputs.jl` checks direct reads of complete cells from another
 plate, including fixed-width vectors, collected and non-last outputs, and
 observed or omitted responses. Square and non-square shapes compare compiled
