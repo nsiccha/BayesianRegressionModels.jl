@@ -40,6 +40,12 @@ explicit precedence, numeric-base preservation and input immutability.
 The default run only builds RK models. Add `--stan` for compiled Stan
 readback and cross-backend physical-point parity.
 
+`matrix_start_values.jl` checks top-level LKJ Cholesky starts at identity and
+nonidentity factors, matrix shape and support, unchanged base values and input
+immutability. It also combines top-level matrices with scalar/vector starts,
+component-local factors and prior medians. Add `--stan` for independent
+compiled-Stan readback and physical coordinate parity.
+
 `smc_tuning_lifecycle.jl` checks adaptive pilot interruption before any draw and
 during a later grid pilot, nested Treebars progress, input ownership, endpoint
 and configuration validation, and exact fresh-process replay from both a
