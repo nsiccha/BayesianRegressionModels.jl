@@ -3,6 +3,16 @@
 _brm_group_values(raw::CA.CategoricalVector) = CA.unwrap.(raw)
 _brm_group_values(raw::AbstractVector) = raw
 
+# Computed values own their result axes. Their inputs can be shared arrays,
+# or live on entirely different axes, and are not a formula's row columns.
+_brm_kernel_value_input(_value) = false
+_brm_kernel_value_input(value::NamedColumn) = _brm_kernel_value_input(parent(value))
+_brm_kernel_value_input(::ExprColumn{typeof(assign)}) = true
+function _brm_kernel_value_input(value::ExprColumn{typeof(~)})
+    rhs = last(getargs(value))
+    rhs isa ExprColumn && (getf(rhs) === kernel || getf(rhs) isa BRMComponent)
+end
+
 _brm_collect_data_columns!(_acc, _x) = nothing
 _brm_collect_data_columns!(acc, x::NamedColumn) = begin
     p = parent(x)

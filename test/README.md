@@ -103,6 +103,11 @@ verifies row/channel selection, strict per-row dependency footprints, emitted
 source replay, normalized densities and native gradients against compiled Stan.
 Run it as a standalone script in the same test environment.
 
+`component_direct_rows.jl` checks direct downstream reads of component cells
+with shared matrix inputs, including nested calls and a component result as
+the plate's only extent. It compares physical values, normalized densities,
+native Reverse gradients, compiled Stan and strict selected-row dependencies.
+
 `authored_documentation.jl`, `authored_documentation_binding.jl`,
 `authored_documentation_printing.jl`, `authored_documentation_rk_source.jl`
 and `authored_documentation_rkppl.jl` check ordinary Julia documentation through
