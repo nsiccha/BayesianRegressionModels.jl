@@ -7,6 +7,13 @@ Stan densities and gradients with analytic references; prior draws check the
 same cell values. Scalar, ragged-vector and matrix cells supply shape controls.
 Run it as a standalone script in the test environment.
 
+`component_start_descriptors.jl` checks exact initial values in repeated and
+nested components through the public descriptor, BridgeStan and coordinate
+transport APIs. It covers independent scalars, unequal-length vectors, positive
+scales and simplexes, and preserves unaddressed values and top-level starts.
+Run it as a standalone script in the test environment; it compiles Stan even
+when the resulting point is consumed by RK.
+
 `scoped_components.jl` checks function-style BRM components with independent
 local priors, explicit shared inputs, nested calls, vector results, and plate
 cells. It compares normalized densities and native Reverse gradients with
