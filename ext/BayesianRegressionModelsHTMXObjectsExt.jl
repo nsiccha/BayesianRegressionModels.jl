@@ -48,7 +48,9 @@ function _documentation(callables)
         mod in (Base, Core) && Base.isoperator(name) && continue
         isdefined(mod, name) && getfield(mod, name) === callable || continue
         binding = Base.Docs.Binding(mod, name)
-        haskey(Base.Docs.meta(mod; autoinit=false), binding) || continue
+        metadata = Base.Docs.meta(mod; autoinit=false)
+        isnothing(metadata) && continue
+        haskey(metadata, binding) || continue
         doc = Base.Docs.doc(binding)
         isnothing(doc) || push!(entries, string(mod, ".", name) => doc)
     end

@@ -47,7 +47,7 @@ end
     @get component() = component_view
 end
 
-output = abspath(only(ARGS))
+let output = abspath(only(ARGS))
 rk = RKBRMI(PreparedExportFixture.cells((;
     loc=[[0., 1.], Float64[], [2.]], total=[0.1, 0.2, 0.3])))
 descriptor = brm_descriptor(PreparedExportFixture.simplex,
@@ -77,4 +77,5 @@ try
     println("PREPARED_MODEL_VIEW_EXPORT_COMPLETE result=", result)
 finally
     PreparedExportFixture.inspecting[] = false
+end
 end

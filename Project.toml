@@ -72,7 +72,7 @@ BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 
 [compat]
 DataStructures = "0.18, 0.19"
-HTMXObjects = "0.1.58"
+HTMXObjects = "0.1.60"
 Bessels = "0.2"
 TreeArrays = "0.2.0"
 KLU = "0.6"

@@ -2,6 +2,14 @@ using Test, BayesianRegressionModels, HTMXObjects
 
 const BRM = BayesianRegressionModels
 
+module UndocumentedModelViewHelper
+using BayesianRegressionModels
+helper(x) = error("inspection evaluated an undocumented helper")
+builder = @brm begin
+    y ~ Normal(helper(x), 1)
+end
+end
+
 module ModelViewEdgeCases
 using BayesianRegressionModels
 
@@ -50,6 +58,15 @@ end
     facts = BRM._brm_view_facts(transformed)
     @test only(row for row in facts.inputs if row.name === :y).role === :response_data
     @test isempty(facts.quantities)
+end
+
+@testset "undocumented helper modules need no documentation registry" begin
+    @test isnothing(Base.Docs.meta(UndocumentedModelViewHelper; autoinit=false))
+    model = UndocumentedModelViewHelper.builder((; x=[0., 1.], y=[1., 2.]))
+    for mime in ("text/html", "text/markdown", "text/plain")
+        @test occursin("Roles and ranks", repr(mime, brm_model_view(model)))
+    end
+    @test isnothing(Base.Docs.meta(UndocumentedModelViewHelper; autoinit=false))
 end
 
 @testset "nested formula containers retain inputs and callable documentation" begin

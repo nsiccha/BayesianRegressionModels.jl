@@ -22,6 +22,9 @@ instead of failing at run time.
   names must be supplied as data; their role depends on binding.
 - Callable documentation includes helpers nested in formula containers such as
   mixture-component lists, without executing those helpers.
+- Helpers from modules with no documentation registry no longer crash a view.
+- Requires HTMXObjects 0.1.60 for code-block PDF tagging without whitespace-only
+  PAC Quality warnings, preserving complete source and syntax highlighting.
 - Empty input inventories explain their absence. Component-instance and authored
   documentation headings use readable paths while retaining exact tuple paths in
   provenance. Unknown derived shapes explain the limits of inspection.

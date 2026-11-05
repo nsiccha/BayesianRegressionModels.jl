@@ -4,7 +4,7 @@
 
 [`brm_model_view`](@ref) returns a reusable HTMXObjects semantic tree with the
 declaration, data/parameter roles, value ranks and dimensions. Load HTMXObjects
-0.1.58 or later; no web demo app is needed:
+0.1.60 or later; no web demo app is needed:
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
