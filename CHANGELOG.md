@@ -25,6 +25,11 @@ instead of failing at run time.
 - Compatibility: authored SVI queries use the batched preparation API from
   ReactiveKernels 0.1.84 / ReactiveKernelsPPL 0.1.96, sharing binding validation
   and packed exemplars while retaining one derivative workspace per bucket.
+- Compatibility: the test bootstrap pins Enzyme dogfood `0fa85df3`
+  (0.13.218, libEnzyme `c1743bf9`), whose ordinary Reverse differentiates a
+  unit's dormant scalar/vector branch. With it the test environment requires
+  OptimizationBase 5.10.1 and DiffEqBase 7.21.6, whose Enzyme extensions load
+  against that Enzyme.
 
 ## 0.2.178
 
