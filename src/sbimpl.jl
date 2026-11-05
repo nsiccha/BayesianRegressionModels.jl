@@ -2209,6 +2209,13 @@ StanBlocks.@deffun begin
         rv
     end
 end
+# The positive half-line is the family's own support (stanblocks-use §8): its
+# density and RNG honour it. StanBlocks declares it on a prior's parameter and
+# draws a prior-only value with `brm_inverse_gaussian_rng`; spelled as a bound
+# instead, the draw was a truncated re-draw asking for an `_lccdf` companion
+# the family does not have (todo 0w0ukqc).
+StanBlocks.autokwargs(::StanBlocks.CanonicalExpr{typeof(brm_inverse_gaussian)}) =
+    (; lower=0.0)
 
 function addprop end
 
@@ -8466,8 +8473,9 @@ function _sb_emit_prior!(stmts, target, ::Type{<:VonMises}, op)
     true
 end
 
-# The prior uses the same exact density/RNG as an observation. Its declaration
-# additionally carries the positive-half-line support.
+# The prior uses the same exact density/RNG as an observation. The family
+# declares its positive-half-line support itself (`autokwargs` above), so only a
+# bound that narrows it is spelled, and that one restricts the prior.
 function _sb_emit_prior!(stmts, target, ::Type{<:InverseGaussian}, op)
     length(getargs(op)) in (0, 1, 2) || error(
         "sbimpl: `InverseGaussian` expects `InverseGaussian()`, " *
@@ -8477,14 +8485,16 @@ function _sb_emit_prior!(stmts, target, ::Type{<:InverseGaussian}, op)
     mu, lambda = _sb_stan_dist_args(InverseGaussian, args)
     bounds = _sb_prior_bound_keywords(target, InverseGaussian, getkwargs(op))
     supplied = Dict(kw.args[1] => kw.args[2] for kw in bounds.args)
-    lower = 0.0
+    narrowing = Pair{Symbol,Any}[]
     if haskey(supplied, :lower)
-        lower = _sb_bound_intersection(max, lower, supplied[:lower])
+        lower = _sb_bound_intersection(max, 0.0, supplied[:lower])
+        lower == 0.0 || push!(narrowing, :lower => lower)
     end
-    decl_kwargs = haskey(supplied, :upper) ? (; lower, upper=supplied[:upper]) : (; lower)
-    declaration = _sb_prior_bound_keywords(target, InverseGaussian, decl_kwargs)
-    push!(stmts, Expr(:call, :~, target,
-        Expr(:call, brm_inverse_gaussian, declaration, mu, lambda)))
+    haskey(supplied, :upper) && push!(narrowing, :upper => supplied[:upper])
+    rhs = Expr(:call, brm_inverse_gaussian, mu, lambda)
+    isempty(narrowing) || insert!(rhs.args, 2,
+        _sb_prior_bound_keywords(target, InverseGaussian, (; narrowing...)))
+    push!(stmts, Expr(:call, :~, target, rhs))
     true
 end
 # Generic scalar prior via a Distributions.jl constructor on the RHS
