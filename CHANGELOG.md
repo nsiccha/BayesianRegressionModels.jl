@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.192
+## 0.2.198
 
 - Fixed: a prior-only program (the response column omitted) with an
   `InverseGaussian` prior builds on SBBRMI and draws the prior with the
@@ -33,6 +33,81 @@ instead of failing at run time.
 - Not yet: a `VonMises` prior's prior-only program still asks for
   `brm_von_mises_lcdf`. Declaring its moving support `[mu - pi, mu + pi]` the
   same way needs StanBlocks snag `autokwargs-suppo-412811f6`.
+## 0.2.197
+
+- Added: SVI units own ordinary sampled coordinates read only within that
+  unit, with their authored priors, Jacobians and global hyperparameter
+  gradients counted once. Structural supports close over joint laws and
+  transforms; `global_coordinates` explicitly promotes coordinates. Diagnostics
+  expose the inference ownership separately from scientific NLME roles.
+- Changed: SVI streaming and packed draws preserve ordinary coordinate
+  identities through absent, returning and new units. A retained unit's
+  Gaussian replaces its complete authored prior bucket.
+- Compatibility: authored SVI queries use the batched preparation API from
+  ReactiveKernels 0.1.84 / ReactiveKernelsPPL 0.1.96, sharing binding validation
+  and packed exemplars while retaining one derivative workspace per bucket.
+- Compatibility: a unit's dormant scalar/vector branch differentiates under
+  ordinary Reverse from Enzyme dogfood `0fa85df3` (repairs `74abe90` and
+  `7ac58eb`), which the test bootstrap's `b2bb4cb6` (libEnzyme `f392eba5`)
+  contains.
+
+## 0.2.196
+
+- `brm_model_view` of a bound model lists each component call's own
+  declarations in Roles and ranks under the exact call path, such as
+  `left › b`, with the same roles and ranks as model-scope declarations. Before,
+  only the call's result row appeared. A local observation of a data input marks
+  the caller's column as response data. Locals of a call inside a plate cell are
+  marked as declared once per iteration. RK and descriptor views resolve a local
+  parameter's dimensions by its exact call path. `brm_components` records are
+  unchanged.
+
+## 0.2.195
+
+- Changed: one-unit NLME calls from several tasks run in parallel. Each call
+  takes its own evaluator from the model's pool: the model's first, or one
+  prepared when calls first overlap (its own partition query, compact sampler
+  and work points), at most one per Julia thread. Before, every call waited on
+  one lock. NLMEEstimation's `WarmupHMCNUTS(threads = true)` therefore runs
+  BRM subjects in parallel. A unit's value and gradient do not depend on which
+  evaluator computes them. The NLMEEstimation floor is 0.2.5, the first
+  release with `threads = true`.
+- Changed: overlapping one-unit calls need Enzyme's concurrent-GC repair
+  (dogfood from `72d5d25`). Without it, the first call that would prepare a
+  second evaluator raises a `BRMNLMEViewError` instead of running beside
+  other threads unprotected. `brm_two_stage_fit` with `threads > 1` now
+  samples its units through that pool instead of its own worker copies of the
+  model, and therefore needs the repair as well.
+
+## 0.2.194
+
+- A function-style component's formula priors read its model-valued inputs on
+  `SBBRMI`, as its scalar priors already did: with `center` and `scale` bound
+  by the caller to parent parameters, `effect(value, Intercept) ~
+  Normal(center, 0.4)` and `sd(value, unit) ~ Exponential(scale)` build. They
+  failed with "model-level prior references `center`, a extension", so one
+  definition could not be called with different prior locations or scales.
+  `RKBRMI` already read such inputs in random-effect SD priors. Its
+  population-effect prior arguments remain numeric constants or data, in a
+  component as at model scope.
+
+## 0.2.193
+
+- Model views support readable `text/plain` output through HTMXObjects 0.1.65.
+  All eager tabs and disclosures retain their labels, source, documentation,
+  roles and dimensions without internal node dumps. Component defaults and
+  model helpers remain unevaluated. The dependency floor and test pins require
+  the shared renderer fix.
+
+## 0.2.192
+
+- `brm_coordinate_transport` pairs random-effect blocks declared inside a
+  function-style component call, plain or stratified `gr(g, by=b)`, including
+  per-margin scale laws, Student-t mixing weights, repeated calls over
+  different groupings and nested calls. Each call's scales, correlation factor
+  and standardized draws pair by its own level labels and margins, and their
+  addresses carry `scope = <call path>`. Such models previously refused with
+  unpaired `<call>.<block>.z` and `<call>_<block>_z_flat` coordinates.
 
 ## 0.2.191
 

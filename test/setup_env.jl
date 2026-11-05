@@ -56,7 +56,7 @@ const PINS = [
     ("ReparametrizableDistributions", "https://github.com/nsiccha/ReparametrizableDistributions.jl.git", "8f7d382df700d3780ed31d093bc4983d3734a6c6"),  # 0.3.0: WarmupHMC dependency; BRM no longer depends on this directly
     ("PowerScaling", "https://github.com/nsiccha/PowerScaling.jl.git", "8d27c83f6928781a39c99c31fd3d528b50ef2dad"),  # 0.1.0: generic power-scaling sensitivity on PSIS.jl
     ("HTMX", "https://github.com/nsiccha/HTMX.jl.git", "0b8dc2f94e879bf31237bd28e751cf2ebc8d95f6"),
-    ("HTMXObjects", "https://github.com/nsiccha/HTMXObjects.jl.git", "ee46e8d6bd381c8b066f3b26afa7ea3336e23146"), # 0.1.65: includes 0.1.62 model-view documentation projection
+    ("HTMXObjects", "https://github.com/nsiccha/HTMXObjects.jl.git", "ee46e8d6bd381c8b066f3b26afa7ea3336e23146"), # 0.1.65: readable plain-text views; includes 0.1.62 documentation projection
     ("DynamicObjects", "https://github.com/nsiccha/DynamicObjects.jl.git", "c84047be45cd2bba8a1d02660af9408d4cdf58f4"),
     ("TreeArrays", "https://github.com/nsiccha/TreeArrays.jl.git", "53cfd1b17ee4d1b726dcecfe151458ae41bd20a8"),
     ("AlgebraOfVega", "https://github.com/nsiccha/AlgebraOfVega.jl.git", "73695d5d563074bfd9ab1f98debf2ebe38d7bd00"),
@@ -299,6 +299,8 @@ const PINS = [
     # recovery and bounded-rank joint Gaussian carries.
     # RK 0.1.62 preserves inner row selection through array-valued producer
     # plate cells, including BRM's shared correlated random-effect predictors.
+    # RKPPL 0.1.72 reports a vector simplex or ordered prior's own block
+    # (plus sampled hyperparents) as its authored-factor support.
     # b5740888 (RKPPL 0.1.71) sizes a data-free replay from frozen whole
     # values, such as a gmrf support fitted from an indexed fit-role input.
     # fbf65b46 (RK 0.1.65 / RKPPL 0.1.74) deep-copies prepared queries whose
@@ -309,6 +311,8 @@ const PINS = [
     # 0ee20c70 (RKPPL 0.1.93): authored local and reusable-definition docs.
     # Includes native row-dependent/shared mixture probabilities (0.1.90).
     # Also contains the adaptive pilot lifecycle introduced in RKPPL 0.1.91.
+    # c1f175d7 (RK 0.1.84 / PPL 0.1.96): compact authored-query batches
+    # share binding validation and exemplars; event inventory avoids full copies.
     # a9a7e9a2 (RKPPL 0.1.97): bound-data LKJ dimensions in reusable definitions.
     # Also contains RK 0.1.82 (b08cb894), which retains live broadcast fusion
     # after data binding, so batched vector-cell readers reuse their result
@@ -373,6 +377,10 @@ const PINS = [
     # Reverse through returned memory (Enzyme snag ordinary-autoenz-6cf1298d):
     # the ordinary AR/DAR and smooth readers in rk_values.jl segfaulted
     # on Julia 1.10 under 6053067f.
+    # d3189970 also contains 0fa85df3's 74abe90/7ac58eb: ordinary Reverse of a mixed
+    # integer/Float64 select and of a guarded PHI joining scalar stack storage
+    # with a boxed broadcast wrapper, which an SVI unit's dormant scalar/vector
+    # branch reaches (ReactiveKernels snag brm-retained-poi-a68d4412).
     # b2bb4cb6 / libEnzyme f392eba5 contains d3189970 and caches a value that
     # cannot change inside a loop once per loop entry (Enzyme snag
     # reverse-generato-03b2003d), so a multiresolution gmrf reader's generator

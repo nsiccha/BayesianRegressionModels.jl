@@ -733,6 +733,21 @@ function BRM._rk_nlme_population_prior_value_gradient(state, u::Vector{Float64})
     value + jacobian, gradient + jacobian_gradient
 end
 
+# SVI's authored prior split (`_BRMSVIAuthoredPrior`, src/nlme_svi.jl): every
+# authored prior and coordinate-Jacobian event of the catalogue goes to the
+# bucket of the one unit whose coordinates it owns or structurally reads
+# (`owner`, 0 for none; reads include hyperparents and both branch arms), or to
+# the global bucket 1. Each nonempty bucket is one compact native query over
+# its own support.
+include("rk_svi_ownership.jl")
+BRM._rk_svi_factor_queries(backend::BRM.RKBRMI, unit::Vector{Float64},
+        ad_backend, owner::Vector{Int}, n::Int) = BRM._rk_svi_factor_queries(
+    backend, unit, ad_backend, owner, n, BRM._rk_svi_factors(backend, unit))
+
+BRM._rk_svi_factor_coordinates(query) = query.coordinates
+BRM._rk_svi_factor_value_gradient(query, base::Vector{Float64},
+    active::Vector{Float64}) = ad_value_and_gradient(query, base, active)
+
 # The Gaussian NLME view uses one primal observations query and one set of
 # colored η directions. Direction k moves margin k for every subject; their
 # responses are conditionally independent, so each output sees only its own
