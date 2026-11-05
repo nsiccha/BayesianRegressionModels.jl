@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.203
+
+- Added: RKBRMI lowers formula-level `weighted(family, fweights(n))` and
+  `weighted(family, weights(w))` on a response whose law reads an assigned
+  value (`p = reader(...)`, `loc = 2 * mu`), the reader route. The base family
+  is observed with each row's log density multiplied by its weight, as on the
+  regression route and in Stan; the weight column binds under its own name,
+  so `reprocess` and `rk_design_binder` rebind and check it from a new
+  design. A mixture with per-row component weights is on that route and
+  takes `fweights` too. Before, construction failed with "value-based
+  response weights need an authored response". Analytic `aweights`, a
+  weighted `mi()` response and a weighted response holding one array per
+  subject are refused with an RK-attributed error.
+
 ## 0.2.202
 
 - Added: a function-style component called inside a `@plate` cell may return
