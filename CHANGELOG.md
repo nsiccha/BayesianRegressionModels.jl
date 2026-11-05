@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.199
+## 0.2.200
 
 - Fixed: a prior-only program (the response column omitted) with a
   `VonMises` prior builds on SBBRMI and draws the prior with the family's own
@@ -27,6 +27,13 @@ instead of failing at run time.
   - `[compat] StanBlocks = "0.2.30"`: StanBlocks reads the qualifier of an
     argument-dependent support from 0.2.30 on (snag
     `autokwargs-suppo-412811f6`).
+
+## 0.2.199
+
+- Direct plate reads of component results use the returned cells' axis on both
+  backends. Shared arrays inside a component no longer count as rows of a
+  formula predictor. Nested components and plates whose extent comes only
+  from the returned value keep the same direct indexing syntax.
 
 ## 0.2.198
 
