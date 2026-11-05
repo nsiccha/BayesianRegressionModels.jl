@@ -2,6 +2,8 @@
 """Check the exported model view with a real browser, using only bundle assets.
 
 Run with kb-playwright-python validate_model_view_browser.py <export-output>.
+Add --prepared after running validate_model_view_prepared_export.jl to inspect
+RK, descriptor and component pages in the same bundle.
 The temporary server and Chrome belong to this process and close on exit.
 """
 
@@ -18,6 +20,9 @@ from playwright.sync_api import sync_playwright
 
 
 output = Path(sys.argv[1]).resolve()
+prepared = "--prepared" in sys.argv[2:]
+if prepared:
+    assert (output / "site" / "prepared").is_dir()
 handler = functools.partial(http.server.SimpleHTTPRequestHandler,
                             directory=str(output / "site"))
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -38,6 +43,7 @@ try:
                 try:
                     external = []
                     failed = []
+                    errors = []
 
                     def local_only(route):
                         if route.request.url.startswith(origin + "/"):
@@ -48,6 +54,7 @@ try:
 
                     context.route("**/*", local_only)
                     page = context.new_page()
+                    page.on("pageerror", lambda error: errors.append(str(error)))
                     page.on("response", lambda response: failed.append(
                         (response.status, response.url)) if response.status >= 400 else None)
                     page.goto(origin + "/index.html", wait_until="networkidle")
@@ -111,9 +118,48 @@ try:
                     response = context.request.get(urljoin(page.url, pdf.get_attribute("href")),
                                                    fail_on_status_code=True)
                     assert response.body().startswith(b"%PDF-")
+                    if prepared:
+                        for name, tab, heading in (
+                                ("rk", "Roles and ranks", "Prepared RK parameters"),
+                                ("descriptor", "Roles and ranks", "Prepared values"),
+                                ("component", "Component inputs", "Component inputs")):
+                            page.goto(origin + f"/prepared/{name}.html", wait_until="networkidle")
+                            page.get_by_role("tab", name=tab, exact=True).tap()
+                            assert page.get_by_role("heading", name=heading, exact=True).is_visible()
+                            if name == "rk":
+                                detail = page.locator("summary", has_text="Element shapes").first
+                                detail.focus()
+                                page.keyboard.press("Enter")
+                                assert detail.evaluate("el => el.parentElement.open")
+                                assert page.get_by_role("cell", name="Vector · 0", exact=True).is_visible()
+                            elif name == "descriptor":
+                                assert page.get_by_role("cell", name="Vector · 3", exact=True).count() >= 1
+                            else:
+                                assert page.get_by_role("cell", name="Optional", exact=True).count() == 2
+                                assert page.get_by_role("cell", name="Required", exact=True).count() == 1
+                                for argument, passing, requirement, default in (
+                                        ("x", "Positional", "Required", "None"),
+                                        ("shift", "Positional", "Optional", "2"),
+                                        ("scale", "Keyword", "Optional", "default_scale()")):
+                                    row = page.get_by_role("row").filter(
+                                        has=page.get_by_role("cell", name=argument, exact=True))
+                                    assert row.inner_text().split("\t") == [argument, passing, requirement, default]
+                            assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+                            page.wait_for_timeout(250)
+                            page.screenshot(path=str(output / f"{name}-{theme}.png"), full_page=True)
+                            if name == "descriptor":
+                                detail = page.locator("summary", has_text="Carrier details")
+                                detail.focus()
+                                page.keyboard.press("Enter")
+                                assert detail.evaluate("el => el.parentElement.open")
+                                carrier = detail.locator("..").locator("details summary").first
+                                carrier.click()
+                                assert carrier.evaluate("el => el.parentElement.open")
+                                page.screenshot(path=str(output / f"carrier-details-{theme}.png"), full_page=True)
                     assert not external, external
                     assert not failed, failed
-                    print(f"{theme}: bundled syntax, touch tabs, keyboard tabs/docs, PDF and width passed", flush=True)
+                    assert not errors, errors
+                    print(f"{theme}: bundled syntax, touch tabs, keyboard tabs/docs, PDF and width passed; prepared={prepared}", flush=True)
                 finally:
                     context.close()
 

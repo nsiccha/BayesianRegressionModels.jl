@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.181
+
+- Model views label every authored member of a joint response as response data,
+  without exposing the synthetic joint operation as a model quantity.
+- Component input tables distinguish positional and keyword arguments, required
+  inputs and optional defaults. Defaults are shown as source, never evaluated.
+- Unbound builders label potential data inputs without claiming that sampled
+  names must be supplied as data; their role depends on binding.
+- Callable documentation includes helpers nested in formula containers such as
+  mixture-component lists, without executing those helpers.
+- Empty input inventories explain their absence. Component-instance and authored
+  documentation headings use readable paths while retaining exact tuple paths in
+  provenance. Unknown derived shapes explain the limits of inspection.
+
 ## 0.2.180
 
 - `SBBRMI` and `RKBRMI` compose heterogeneous scalar `MixtureModel`
