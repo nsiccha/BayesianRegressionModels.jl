@@ -306,7 +306,7 @@ function _brm_svi_global_precision(h, x)
     (y - h.V * (h.K \ (h.V' * y))) ./ h.s
 end
 
-_brm_svi_global_logdet(h) = 2sum(log, h.s) + logdet(h.K)
+_brm_svi_global_logdet(h) = 2sum(log, h.s; init=0.0) + logdet(h.K)
 
 # C = diag(s) (I + V A V'), C C' = diag(s²) + ΒΒ'. The stable divided
 # difference 1/(sqrt(1+λ)+1) also works when a rank column is initially zero.
