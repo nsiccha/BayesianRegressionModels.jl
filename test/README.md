@@ -20,6 +20,18 @@ ordinary helpers. Reordered and repeated selections, collected and non-last
 outputs, analytic densities and gradients, and prior draws retain the same
 cell semantics across distinct producer and reader frames.
 
+`gmrf_multiresolution.jl` checks the sparse spatial basis, normalized shared OU
+prior and analytic derivatives, compressed read maps, and the original
+213-read temporal-covariance regression. `gmrf_multiresolution_backends.jl`
+checks Stan emission and native Reverse derivatives, physical coordinate
+transport, strict cell locality, frozen replay, multiple fields, descriptions,
+and stationary prior draws. Both are standalone scripts in the test environment.
+The backend file accepts testset-name substrings as command-line filters.
+`Primal coordinate` independently compares native values and central finite
+differences with compiled Stan, including sampled LKJ channels. Archive-scale
+operator and cost controls are in
+[`research/irregular_read_gmrf`](../research/irregular_read_gmrf/README.md).
+
 `plate_direct_outputs.jl` checks direct reads of complete cells from another
 plate, including fixed-width vectors, collected and non-last outputs, and
 observed or omitted responses. Square and non-square shapes compare compiled
@@ -1288,7 +1300,7 @@ matrix-free algebra with exact algebra: value within four probe standard errors,
 gradient against a central difference of the returned value.
 `gmrf_vecchia.jl` checks the footprint representation's numerical core without a
 backend: the exact Gaussian on a fully read grid with irregular gaps, the exact
-time factor at any neighbour count, separable channels, shared solves, gap
+time factor on synchronized reads at any neighbour count, separable channels, shared solves, gap
 linkage, reverse derivatives against finite differences and refusals.
 `gmrf_vecchia_rk.jl` checks the term on RKBRMI: density and native reverse rule,
 sampled channel factor, state plates under `locality = :error`, a strict

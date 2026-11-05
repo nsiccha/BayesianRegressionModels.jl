@@ -31,24 +31,28 @@ function _brm_gmrf_arguments(term)
     axes isa Tuple && length(axes) == 2 || throw(ArgumentError(
         "gmrf needs two spatial columns as `(east, north)`"))
     haskey(kw, :by) && throw(ArgumentError("use @plate for independent gmrf fields"))
-    unknown = setdiff(keys(kw), (:mesh, :neighbors, :spatial, :temporal, :cor))
+    unknown = setdiff(keys(kw), (:mesh, :neighbors, :multiresolution, :spatial, :temporal, :cor))
     isempty(unknown) || throw(ArgumentError("unknown gmrf keywords: $(join(unknown, ", "))"))
     get(kw, :spatial, :matern) === :matern || throw(ArgumentError(
         "gmrf currently supports spatial=:matern (two-dimensional smoothness ν=1)"))
     get(kw, :temporal, :ou) === :ou || throw(ArgumentError("gmrf currently supports temporal=:ou"))
     mesh = get(kw, :mesh, nothing)
     neighbors = get(kw, :neighbors, nothing)
-    (mesh === nothing) != (neighbors === nothing) || throw(ArgumentError(
-        "gmrf takes either mesh=(vertices=xy, cells=triangles) or neighbors=m, not both or neither"))
-    if neighbors === nothing
+    multiresolution = get(kw, :multiresolution, nothing)
+    count(!isnothing, (mesh, neighbors, multiresolution)) == 1 || throw(ArgumentError(
+        "gmrf takes exactly one of mesh=(vertices=xy, cells=triangles), neighbors=m, or multiresolution=m"))
+    if mesh !== nothing
         mesh isa NamedTuple && Set(keys(mesh)) == Set((:vertices, :cells)) || throw(ArgumentError(
             "gmrf needs mesh=(vertices=xy, cells=triangles)"))
-    else
-        neighbors isa Integer && neighbors >= 1 || throw(ArgumentError(
-            "gmrf neighbors must be a positive integer literal; got $(repr(neighbors))"))
+    end
+    for (name, value) in ((:neighbors, neighbors), (:multiresolution, multiresolution))
+        value === nothing && continue
+        value isa Integer && 1 <= value <= 100 || throw(ArgumentError(
+            "gmrf $name must be an integer literal between 1 and 100; got $(repr(value))"))
     end
     (; axes, time=args[2], channel=length(args) == 3 ? args[3] : nothing,
-       mesh, neighbors=neighbors === nothing ? nothing : Int(neighbors), cor=get(kw, :cor, nothing))
+       mesh, neighbors=neighbors === nothing ? nothing : Int(neighbors),
+       multiresolution=multiresolution === nothing ? nothing : Int(multiresolution), cor=get(kw, :cor, nothing))
 end
 
 function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, context;
@@ -82,6 +86,10 @@ function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, conte
         temporal_prior=_brm_term_prior_expression(term, target, context, :term_length_scale;
             component=:time, default=ExprColumn(LogNormal, 0.0, 1.0)))
     correlation_source = correlation === nothing ? () : (correlation.name,)
+    if arguments.multiresolution !== nothing
+        return _brm_prepare_gmrf_multiresolution(source, correlation_source, spatial, time,
+            row_channels, channels, correlation, times, priors, target, arguments.multiresolution, geometry)
+    end
     if arguments.neighbors !== nothing
         return _brm_prepare_gmrf_footprint(source, correlation_source, spatial, time,
             row_channels, channels, correlation, times, priors, target, arguments.neighbors, geometry)
@@ -97,7 +105,7 @@ function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, conte
     dependencies = (source..., vertices_source, cells_source, correlation_source...)
     layout = _BRMGMRFStateLayout(size(vertices, 1), channels, times)
     state = (; target, times=layout.times, channels=layout.channels, layout, correlation, vertices_source, cells_source,
-        vertices, cells, nvertices=size(vertices, 1), neighbors=nothing, priors...)
+        vertices, cells, nvertices=size(vertices, 1), neighbors=nothing, multiresolution=nothing, priors...)
     prepared = _BRMPreparedTerm(gmrf, source, state, dependencies)
     geometry || return prepared
     mesh = _brm_gmrf_mesh(vertices, cells)
@@ -111,7 +119,7 @@ end
 # and its state follows from them and the neighbour count alone.
 function _brm_prepare_gmrf_footprint(source, correlation_source, spatial, time,
         row_channels, channels, correlation, times, priors, target, neighbors, geometry)
-    state = (; target, times, channels=copy(channels), correlation, neighbors, priors...)
+    state = (; target, times, channels=copy(channels), correlation, neighbors, multiresolution=nothing, priors...)
     dependencies = (source..., correlation_source...)
     prepared = _BRMPreparedTerm(gmrf, source, state, dependencies)
     geometry || return prepared
@@ -141,6 +149,10 @@ function _brm_replay_gmrf(training, context)
     x, y, time = map(s -> context.data[s], training.source[1:3])
     row_channels = length(training.source) == 3 ? ones(Int, length(time)) :
         context.data[training.source[4]]
+    if get(state, :multiresolution, nothing) !== nothing
+        reads, index = _brm_multiresolution_rows(state.support, state.channels, x, y, time, row_channels)
+        return _BRMPreparedTerm(gmrf, training.source, merge(state, (; reads, index)), training.dependencies)
+    end
     if state.neighbors !== nothing
         index = _brm_vecchia_field_index(state.footprint, state.channels, x, y, time, row_channels)
         return _BRMPreparedTerm(gmrf, training.source, merge(state, (; index)), training.dependencies)
@@ -159,3 +171,21 @@ function _brm_replay_term(::typeof(gmrf), training, fresh::ExprColumn, context)
 end
 _brm_replay_term(::typeof(gmrf), training, fresh::_BRMPreparedTerm, context) =
     _brm_replay_gmrf(training, context)
+
+# Shared spatial coefficients lifted to exact OU paths on their readers' times.
+function _brm_prepare_gmrf_multiresolution(source, correlation_source, spatial, time,
+        row_channels, channels, correlation, times, priors, target, multiresolution, geometry)
+    state = (; target, times, channels=copy(channels), correlation, neighbors=nothing,
+        multiresolution, priors...)
+    dependencies = (source..., correlation_source...)
+    prepared = _BRMPreparedTerm(gmrf, source, state, dependencies)
+    geometry || return prepared
+    support = _brm_fitted_value(:gmrf_multiresolution, Symbol(target, :_, join(source, :_))) do
+        _brm_multiresolution_support(_brm_fit_input_source(source[1], last(spatial[1])),
+            _brm_fit_input_source(source[2], last(spatial[2])),
+            _brm_fit_input_source(source[3], time), length(channels); rank=multiresolution)
+    end
+    reads, index = _brm_multiresolution_rows(support, channels, last(spatial[1]), last(spatial[2]),
+        time, row_channels)
+    _BRMPreparedTerm(gmrf, source, merge(state, (; support, reads, index)), dependencies)
+end
