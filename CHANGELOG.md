@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.175
+## 0.2.179
 
 - Fresh-process recovery of adaptive `brm_smc_tune` pilots (`resume=partial`
   or `checkpoint_dir=dir, resume=true`) works for `RKBRMI` models whose laws
@@ -21,11 +21,93 @@ instead of failing at run time.
   failed with `UndefVarError: ##RKEmittedModels#…`. **Breaking:** the RK backend
   now requires ReactiveKernelsPPL 0.1.98, which normalizes generated-module
   names in SMC checkpoint identities; raise an environment pinning an older
-  ReactiveKernels commit to `b0ffcdc1` or a descendant. (RK `main` from
-  `8e67ee82` currently breaks selective carried-window tuning,
-  `coordinates=:auto`; BRM's test pin stays on `b0ffcdc1` until that is fixed.) Checkpoints written with
-  ReactiveKernelsPPL 0.1.97 or earlier are not migrated: resume them with their
-  original versions or write a new initialization checkpoint.
+  ReactiveKernels commit to `b0ffcdc1` or a descendant. Checkpoints written
+  with ReactiveKernelsPPL 0.1.97 or earlier are not migrated: resume them with
+  their original versions or write a new initialization checkpoint.
+- RK `main` from `8e67ee82` currently breaks selective carried-window tuning
+  (`coordinates=:auto`) with a `MethodError` in `_cell_joined_rows`; BRM's test
+  pin stays on `b0ffcdc1` until ReactiveKernels repairs it.
+
+## 0.2.178
+
+- Added: explicit `unit_partition=:connected` for the NLME view and model,
+  NLME fits, SVI, per-unit Laplace and joint starts. Structural likelihood
+  supports join scientific subjects into complete inference units, retaining
+  their original labels, coordinates and every covariance-family instance.
+  The default `:subjects` keeps strict subject independence. Connected starts
+  carry unit membership; named estimates restore scientific subject labels.
+- Changed: SVI streaming retains the partition policy and refuses changed
+  membership of a carried connected unit before updating. Complete unchanged
+  units and wholly new units can continue.
+- **Breaking:** SVI streaming checkpoints use format 2 with explicit
+  `unit_partition`; serialize and reload with matching package versions.
+
+- Changed: NLME unit likelihoods and gradients use one strict RK plate
+  partition per unit. Preparation checks structural coordinate ownership,
+  including dormant branches, and names nonlocal producers or foreign unit
+  effects. Sparse curvature retains individual cell supports without numerical
+  probing or gradient-based pruning; repeated observations share one support
+  during pattern assembly instead of accumulating duplicate coordinate pairs.
+  Conditional subsets evaluate only their requested units; full-cohort and
+  population-gradient calls retain batching.
+- Changed: a one-unit value or gradient writes θ, σ and the unit's η into a
+  dense work point owned by its query or plan, instead of an overlay that RK
+  copied into a full packed vector on every call, so one unit's cost and
+  allocations no longer grow with the number of units.
+  `brm_nlme_loglikelihood_and_gradient`, which returns only the η gradient,
+  differentiates only the unit's own effects (RK `shared=false`).
+- Changed: NLME cell, partition and gradient queries declare their local
+  parameter ownership so RK/PPL can cache shared producers before strict
+  lowering. Correlated grouped HSGP values remain shared; local coordinates
+  retain their structural checks. Shared-coordinate changes refresh the cache.
+- Changed: separated CAR fields expose their shared values through row-local
+  graph computations, preserving their law, coordinates, inverse and Jacobian.
+- Changed: `cdar(...; cor=C)` emits its fixed correlation factor as a sparse
+  matrix, so a subject reads only the innovation groups its factor rows store.
+- Compatibility: ReactiveKernels 0.1.77 / ReactiveKernelsPPL 0.1.85 preserve
+  sparse factors, stratified group reads, grouped HSGP row forms and shared
+  plate computations across several observations in one unit partition.
+- Compatibility: the strict partitions need ReactiveKernels 0.1.51 and
+  ReactiveKernelsPPL 0.1.54 or later, within the new 0.1.77 / 0.1.85
+  floor. Scalar inference preserves ordinary indexed predictor expressions
+  under strict partitioning, and nested data-only helpers inside sampled
+  expressions, such as a lower-bounded shares completion's
+  `lower=lo[x_shares_free]`, keep their shapes through strict cell and
+  partition preparation. Strict queries also preserve local scan captures,
+  grouped-field row reductions and censored ragged factors. Shared-prefix
+  binding includes freshly emitted helpers and preserves local reads from
+  custom packed vectors. Unit gradients use ordinary Enzyme Reverse, with the
+  test bootstrap's Enzyme dogfood pin, which contains `68ed90fe`'s repair for
+  matrix-window partition gradients on Julia 1.10.
+
+## 0.2.177
+
+- Require ReactiveKernels 0.1.82 to restore buffer reuse when batched readers
+  evaluate vector-valued plate cells. Emitted and printed RK models retain
+  live broadcast fusion after binding data, avoiding a temporary vector per
+  cell and position.
+
+## 0.2.176
+
+- Applying an explicitly selected Laplace plan over a per-cell `gmrf` field
+  and copying its target per chain preserve the direct target's coordinates,
+  value and gradient. The dependency floor now includes ReactiveKernels
+  0.1.70's supporting copy machinery; the ReactiveKernelsPPL floor is
+  unchanged.
+- The block importance diagnostic includes the `gmrf` precision prior in its
+  weights. For an exactly Gaussian conditional, every proposed draw retains
+  equal weight. This diagnostic does not change automatic eligibility:
+  unrecognized plate-cell algebra still requires explicit integration.
+- The count-field prior-median diagnostic fixture uses a declared log link,
+  retaining its ESS assertions under structural automatic selection.
+
+## 0.2.175
+
+- Selecting several fixed-width vector cells preserves their collection
+  semantics in ordinary helpers: `f(cells[indices])` can read each selected
+  vector with `rows[t]`, including repeated and reordered indices. This works
+  with observed responses and omitted-response prior generation. The
+  StanBlocks floor and test pin advance to 0.2.26 for its ordinary view helpers.
 
 ## 0.2.174
 

@@ -13,6 +13,8 @@ Resume with `brm_svi_fit(state, builder(new_window); ...)`.
 Projection preserves selected block moments approximately and drops residual
 cross-block dependence. New units initially have zero common-factor loading;
 fixed-rank continuation cannot preserve every new cross-unit dependence.
+The checkpoint retains `unit_partition` and uses format 2. Connected units
+must retain all their members in the same order across windows.
 """
 struct BRMSVILaplaceState
     format::Int
@@ -29,13 +31,16 @@ struct BRMSVILaplaceState
     shared::Tuple{Vararg{Symbol}}
     method::GaussianBlockLaplace
     projection::NamedTuple
+    unit_partition::Symbol
     updates::Int
 end
 brm_svi_checkpoint(state::BRMSVILaplaceState)=deepcopy(state)
 
 function _brm_svi_laplace_locations(m)
     reg=_brm_nlme_regression(m.backend.plan)
-    locations=Dict(label=>Dict{Symbol,Tuple}() for label in m.view.levels)
+    locations=Dict(label=>Dict{Any,Tuple}() for label in m.view.levels)
+    subject_unit=Dict(label=>m.view.levels[m.view.subject_unit[s]]
+        for (s,label) in enumerate(m.view.subject_levels))
     for predictor in reg.predictors, term in predictor.terms
         term.kind===:hsgp || continue
         o=term.options
@@ -44,8 +49,9 @@ function _brm_svi_laplace_locations(m)
         levels=o.group_levels;C=o.level_cor.coordinates
         size(C,1)==length(levels) || _brm_svi_carry_error("field location layout changed")
         for (i,label) in enumerate(levels)
-            haskey(locations,label) || continue
-            locations[label][o.id]=Tuple(C[i,:])
+            haskey(subject_unit,label) || continue
+            unit=subject_unit[label]
+            locations[unit][(o.id,label)]=Tuple(C[i,:])
         end
     end
     locations
@@ -86,9 +92,10 @@ end
 
 function _brm_svi_laplace_check_model(t,previous,layout)
     m=t.m
-    previous.format==1 || _brm_svi_carry_error("unsupported checkpoint format")
+    previous.format==2 || _brm_svi_carry_error("unsupported checkpoint format")
     m.view.group===previous.group && Tuple(keys(m.view.nested_groups))==previous.nested &&
         m.view.shared_groups==previous.shared || _brm_svi_carry_error("grouping partition changed")
+    _brm_svi_check_units(m.view,previous)
     _brm_svi_check_preprocessing(m.backend,previous)
     _brm_svi_source_id(m.backend)==previous.source_id || _brm_svi_carry_error("model source changed")
     m.view.coordinates[t.globals]==previous.globals || _brm_svi_carry_error("global coordinate layout changed")
@@ -181,9 +188,10 @@ function _brm_svi_laplace_checkpoint(rng,t,q,draws,previous,layout,active)
     units=previous===nothing ? Dict{Any,NamedTuple}() : copy(previous.units)
     merge!(units,layout.units)
     preprocessing=previous===nothing ? brm_fitted_state(m.backend) : previous.preprocessing
-    BRMSVILaplaceState(1,preprocessing,_brm_svi_source_id(m.backend),
+    BRMSVILaplaceState(2,preprocessing,_brm_svi_source_id(m.backend),
         copy(m.view.coordinates[t.globals]),copy(layout.shared_coordinates),
         projection.core,projection.blocks,units,_brm_svi_global_factor(q),
         m.view.group,Tuple(keys(m.view.nested_groups)),m.view.shared_groups,
-        t.options,projection.metadata,previous===nothing ? 0 : previous.updates+1)
+        t.options,projection.metadata,m.view.unit_partition,
+        previous===nothing ? 0 : previous.updates+1)
 end

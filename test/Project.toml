@@ -59,7 +59,7 @@ Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.25"
+StanBlocks = "0.2.26"
 Treebars = "0.1.5"
 Turing = "0.46"
 WarmupHMC = "0.2.11"
@@ -147,7 +147,8 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # b43fc26d (0.2.24) predicts censored responses whose bound is the omitted response.
 # dba65366 (0.2.25) preserves keyword labels when a plate renames its
 # inputs, including BRM component calls whose formal and actual names match.
-rev = "dba6536683e8c226f2e74823856d0d85e7ad02a2"
+# ea1d64f0 (0.2.26) keeps EachCol/EachRow views through ordinary helpers.
+rev = "ea1d64f0c691092b9d4e7d8ad03ab83727671264"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
@@ -295,20 +296,41 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 30d676c9 (RK 0.1.34 / PPL 0.1.28) repairs single-sum outer AD exemplars.
 # 260d9a94 (RK 0.1.35 / RKPPL 0.1.29): visible grouped kernels retain
 # their shape facts for strict local observation queries.
+# 4925e53d (RK 0.1.36 / RKPPL 0.1.30) includes homogeneous
+# empty/nonempty partition plans and scheduled-loop resets.
 # f851e008 (RK 0.1.37 / RKPPL 0.1.31) binds data-computed entry axes
 # before shape inference.
 # 81363978 (RK 0.1.38 / RKPPL 0.1.32) also binds visible tuple-geometry
 # metadata operands, keeping the full completion's NLME cells local.
 # 23d26ca1 (RK 0.1.39 / RKPPL 0.1.33) keeps indexed direct predictor
 # reads beside reductions local (sum-factor-outer-ca5cc80e).
+# RKPPL 0.1.34: optional SMC and data-only checkpoints.
+# 4df6564e (RK 0.1.40 / RKPPL 0.1.35): strict partitions preserve natural
+# scalar reads of predictor elements, including a separate row domain.
+# RKPPL 0.1.36: finite-state filtering, design rows and grouped scan outputs.
+# RKPPL 0.1.38 (RK 0.1.42): shared-prefix partition sampling and mixed
+# concrete partition-label plans.
+# 171f36b9 (RKPPL 0.1.39): strict cells and partitions keep shapes through
+# nested data-only helpers inside sampled expressions, such as a bounded
+# shares completion's `lower=lo[x_shares_free]` (RK snag
+# bounded-shares-g-792cef37); dc06acc8 is the RK main containing it.
+# 8f7832e7 (RK main after 0.1.42 / RKPPL 0.1.39, no version change) bounds
+# partition-plan and metadata compilation at Atlas size: value-only shape
+# reads stay out of plans and bookkeeping helper calls stay separate kernels
+# (RK snag full-atlas-value-740085e1).
 # RKPPL 0.1.37: exact nonfinite SMC diagnostics across mutation tasks.
 # RKPPL 0.1.42 (RK 0.1.44): independent SMC pilot tuning, adaptive pilots and
 # portable correlated references.
 # RKPPL 0.1.47 (RK 0.1.47): the learned reference fits inflated pilot moments
 # (`reference_inflation`, default 2); stage summaries add coordinate and
 # reference SDs (snag learned-smc-refe-cc5677a1).
+# RK 0.1.50 / RKPPL 0.1.52: shared-prefix queries, packed gathered-column
+# shapes, strict row reductions and whole-row gathers,
+# unchanged scan captures, and censored ragged cell-factor projections.
 # RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
 # helper calls, guarded captures and broadcast observation locations.
+# RKPPL 0.1.54 binds shared-prefix queries in the latest world and preserves
+# custom packed-vector storage and its local reads.
 # Guarded gathered reductions through typed aliases: RK 0.1.52 / PPL 0.1.55.
 # RK 0.1.57 / PPL 0.1.64: caller-owned joint density KernelSpecs and geometry.
 # RK 0.1.59 / PPL 0.1.66: property-based whole-parameter geometry dimensions.
@@ -322,6 +344,8 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # includes native row-dependent/shared mixture probabilities (0.1.90).
 # Also contains the recoverable adaptive pilot lifecycle introduced in RKPPL 0.1.91.
 # a9a7e9a2 (RKPPL 0.1.97): bound-data LKJ dimensions in reusable definitions.
+# Also contains RK 0.1.82 (b08cb894), which retains live broadcast fusion after
+# binding for batched cell readers.
 # b0ffcdc1 (RKPPL 0.1.98): generated-module-safe SMC checkpoint identities;
 # a9a7e9a2 plus that fix only (main from 8e67ee82: RK snag selective-carrie-1aa69e67).
 rev = "b0ffcdc1d915fc111988ddb6bceca8dabeede643"

@@ -83,12 +83,14 @@ end
 
 @testset "brm_laplace_plan measures a count gmrf field at its medians" begin
     input = merge(data, (; count=[1, 0, 2, 1]))
+    # The declared log link establishes the affine log-rate structurally;
+    # an arbitrary exp(field) expression deliberately stays sampled.
     model = @brm input begin
-        field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+        log(field) ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
         sd(field, gmrf((east, north), time)) ~ Exponential(0.2)
         length_scale(field, gmrf((east, north), time), space) ~ LogNormal(0.5, 0.8)
         length_scale(field, gmrf((east, north), time), time) ~ LogNormal(0.7, 0.6)
-        count ~ Poisson(exp(field))
+        count ~ Poisson(field)
     end
     rk, _, _ = gmrf_rk_build(model)
     target = brm_laplace_problem(rk; ad_backend=START_AD, integrate=(FIELD,))

@@ -77,7 +77,8 @@ const PINS = [
     # 0.2.20 supports explicit local declarations shadowing outer cell inputs.
     # 0.2.21/0.2.24 predict omitted interval and self-bound censored responses.
     # 0.2.25 preserves keyword labels inside plate component calls.
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "dba6536683e8c226f2e74823856d0d85e7ad02a2"),  # devibe: `restricted(family, args...; lower, upper)` declares the bounds and keeps the plain kernel (566bbc0f, StanBlocks 0.2.7, snag in-slic-declare-996328e0), which SBBRMI emits for every prior bound; a `truncated` draw succeeds whatever mass its window holds: after 100 misses it inverts the base CDF on the window (9a4fb3a6, StanBlocks 0.2.6, snag truncated-rng-re-bd555cae), which BRM's omitted truncated responses and `_gen` draws call; `rv[idx]` selects groups of a ragged value and `sum(rv)` adds its groups elementwise (ffbaff09, StanBlocks 0.2.2, snag selecting-severa-027a8191), which BRM's model-scope reads of a ragged plate output pass through; Stan's `sum_to_zero_constrain`/`_unconstrain`/`_jacobian` trace (8e57a83, snag sum-to-zero-cons-90a72024) and `head`/`tail`/`reverse` (359844e, snag stan-vector-buil-5792b9e5), which `T::shares(total)` cell latents call, both in f5e4650; a `Vector{Matrix}` data value ingests as a `RaggedMatrix` and `X[g]` reads the g-th matrix in a plate cell (c9504e99, snag ragged-matrix-da-163255e9); a plate cell may bind a matrix local of fixed or per-cell size (a57951eb, snag binding-a-per-ce-e16efa8d); a plate's Stan names follow from each value's own name, without the `__pl_mem_1` suffix (1d93a65), and `stan_interface` / `stan_data_json` describe the program (dc3f713), both in fd91d0c; tuple descriptor entries carry their components in `fields` (785edf4); ragged sizes are reported derived (9118764); a values-free `maybecv(:y)` marks an observation with no values as predicted given a fit (c4671eb, snag held-out-observa-58a2eb13); shared scan arguments read once per step, linear in series length (b97fc5a6); Stan's vectorised builtins (`fmax`, `fmin`, …) evaluate elementwise in the Julia layer, so a per-axis `fmax(0.0, lo)` bound reads one value per coordinate (c7293b88); descriptor inputs/outputs carry `constraint_values`, their bounds evaluated against the bound data (b233afbc); a `ValueFamily` as the base family of `weighted`/`truncated`/`censored`/`interval_censored` with `lcdf=`/`lccdf=` companions (94e414bb); descriptor outputs carry their value shape as `dims`; non-finite literals render as Stan infinity builtins; `weighted` over censored/truncated/interval_censored; an exchangeable ordered prior re-draws as the sorted iid draw; observed scans and per-cell scan lengths (82a954da), also through a do-cell parameter that shadows its data name (4ee6e0e8); integer step locals in nested scans (2f5b6203); a latent or observed `@scan` inside a called `@slic` submodel (e67bc314), observing a plate cell's group (d3483f11); `interval_censored`'s interval by keyword and unknown combinator keywords refused (897557c); typed `=` in `stan_descriptor` (204e5a7)
+    # StanBlocks 0.2.26 preserves EachCol/EachRow at ordinary helper boundaries.
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "ea1d64f0c691092b9d4e7d8ad03ab83727671264"),  # devibe: `restricted(family, args...; lower, upper)` declares the bounds and keeps the plain kernel (566bbc0f, StanBlocks 0.2.7, snag in-slic-declare-996328e0), which SBBRMI emits for every prior bound; a `truncated` draw succeeds whatever mass its window holds: after 100 misses it inverts the base CDF on the window (9a4fb3a6, StanBlocks 0.2.6, snag truncated-rng-re-bd555cae), which BRM's omitted truncated responses and `_gen` draws call; `rv[idx]` selects groups of a ragged value and `sum(rv)` adds its groups elementwise (ffbaff09, StanBlocks 0.2.2, snag selecting-severa-027a8191), which BRM's model-scope reads of a ragged plate output pass through; Stan's `sum_to_zero_constrain`/`_unconstrain`/`_jacobian` trace (8e57a83, snag sum-to-zero-cons-90a72024) and `head`/`tail`/`reverse` (359844e, snag stan-vector-buil-5792b9e5), which `T::shares(total)` cell latents call, both in f5e4650; a `Vector{Matrix}` data value ingests as a `RaggedMatrix` and `X[g]` reads the g-th matrix in a plate cell (c9504e99, snag ragged-matrix-da-163255e9); a plate cell may bind a matrix local of fixed or per-cell size (a57951eb, snag binding-a-per-ce-e16efa8d); a plate's Stan names follow from each value's own name, without the `__pl_mem_1` suffix (1d93a65), and `stan_interface` / `stan_data_json` describe the program (dc3f713), both in fd91d0c; tuple descriptor entries carry their components in `fields` (785edf4); ragged sizes are reported derived (9118764); a values-free `maybecv(:y)` marks an observation with no values as predicted given a fit (c4671eb, snag held-out-observa-58a2eb13); shared scan arguments read once per step, linear in series length (b97fc5a6); Stan's vectorised builtins (`fmax`, `fmin`, …) evaluate elementwise in the Julia layer, so a per-axis `fmax(0.0, lo)` bound reads one value per coordinate (c7293b88); descriptor inputs/outputs carry `constraint_values`, their bounds evaluated against the bound data (b233afbc); a `ValueFamily` as the base family of `weighted`/`truncated`/`censored`/`interval_censored` with `lcdf=`/`lccdf=` companions (94e414bb); descriptor outputs carry their value shape as `dims`; non-finite literals render as Stan infinity builtins; `weighted` over censored/truncated/interval_censored; an exchangeable ordered prior re-draws as the sorted iid draw; observed scans and per-cell scan lengths (82a954da), also through a do-cell parameter that shadows its data name (4ee6e0e8); integer step locals in nested scans (2f5b6203); a latent or observed `@scan` inside a called `@slic` submodel (e67bc314), observing a plate cell's group (d3483f11); `interval_censored`'s interval by keyword and unknown combinator keywords refused (897557c); typed `=` in `stan_descriptor` (204e5a7)
     # Cooperative interruption used by BRM's progress hooks.
     # Treebars 0.1.5 satisfies the pinned ReactiveKernelsPPL extension floor.
     # Treebars 0.1.5: nested progress used by recoverable adaptive SMC pilots.
@@ -251,20 +252,41 @@ const PINS = [
     # exemplars for a single sum, including empty reductions and selections.
     # 260d9a94 (RK 0.1.35 / RKPPL 0.1.29) preserves shape facts across
     # visible grouped kernels, so strict NLME cells read their owning group.
+    # 4925e53d (RK 0.1.36 / RKPPL 0.1.30) includes homogeneous
+    # empty/nonempty partition plans and scheduled-loop resets.
     # f851e008 (RK 0.1.37 / RKPPL 0.1.31) also binds data-computed entry
     # axes before shape inference (RK snag prepare-a-strict-13a9e1b8).
     # 81363978 (RK 0.1.38 / RKPPL 0.1.32) binds visible tuple-geometry
     # metadata operands before shape inference (prepare-one-resp-b1f58f91).
     # 23d26ca1 (RK 0.1.39 / RKPPL 0.1.33) keeps indexed direct predictor
     # reads beside reductions local (sum-factor-outer-ca5cc80e).
+    # RKPPL 0.1.34: optional SMC adapter and data-only checkpoints.
+    # 4df6564e (RK 0.1.40 / RKPPL 0.1.35) preserves natural scalar reads
+    # of predictor elements in strict partitions, including separate row domains.
+    # RKPPL 0.1.36: finite-state filtering, design rows and grouped scan outputs.
+    # RKPPL 0.1.38 (RK 0.1.42): shared-prefix partition sampling and mixed
+    # concrete partition-label plans.
+    # 171f36b9 (RKPPL 0.1.39) keeps shapes through nested data-only helpers
+    # inside sampled expressions, such as a bounded shares completion's
+    # `lower=lo[x_shares_free]` (RK snag bounded-shares-g-792cef37);
+    # dc06acc8 is the RK main containing it.
+    # 8f7832e7 (RK main after 0.1.42 / RKPPL 0.1.39, no version change) bounds
+    # partition-plan and metadata compilation at Atlas size: value-only shape
+    # reads stay out of plans and bookkeeping helper calls stay separate
+    # kernels (RK snag full-atlas-value-740085e1).
     # RKPPL 0.1.37: exact nonfinite SMC diagnostics across mutation tasks.
     # RKPPL 0.1.42 (RK 0.1.44): independent SMC pilot tuning, adaptive pilots and
     # portable correlated references.
     # RKPPL 0.1.47 (RK 0.1.47): the learned reference fits inflated pilot moments
     # (`reference_inflation`, default 2); stage summaries add coordinate and
     # reference SDs (snag learned-smc-refe-cc5677a1).
+    # RK 0.1.50 / RKPPL 0.1.52: shared-prefix queries, packed gathered-column
+    # shapes, strict row reductions and whole-row gathers,
+    # unchanged scan captures, and censored ragged cell-factor projections.
     # RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
     # helper calls, guarded captures and broadcast observation locations.
+    # RKPPL 0.1.54 binds shared-prefix queries in the latest world and preserves
+    # custom packed-vector storage and its local reads.
     # 5e9d2d03 contains 8b7caa90: guarded gathered sums retain reductions
     # through redundant typed aliases (RK 0.1.52 / RKPPL 0.1.55).
     # RKPPL 0.1.57: independent prepared-density SMC factories.
@@ -286,6 +308,9 @@ const PINS = [
     # Includes native row-dependent/shared mixture probabilities (0.1.90).
     # Also contains the adaptive pilot lifecycle introduced in RKPPL 0.1.91.
     # a9a7e9a2 (RKPPL 0.1.97): bound-data LKJ dimensions in reusable definitions.
+    # Also contains RK 0.1.82 (b08cb894), which retains live broadcast fusion
+    # after data binding, so batched vector-cell readers reuse their result
+    # buffers at every position.
     # b0ffcdc1 (RKPPL 0.1.98, on RK main through 6ea1d4ca) normalizes
     # generated-module names in SMC checkpoint identities, so a fresh process
     # resumes an adaptive pilot of an RKBRMI model whose law is an emitted
@@ -308,12 +333,18 @@ const PINS = [
     # plain Reverse when the sparse Laplace differentiates an `@plate` cell.
     # 3a89b497 includes the compact nested-AD overlay repairs; its declared
     # libEnzyme is 782c9d95, the sum-factor producer's tested native pair.
+    # a6458e9c (libEnzyme 782c9d95) repairs ordinary Reverse over
+    # constant plan fields and compact grouped overlays.
     # 0e251cfb (libEnzyme build 782c9d95) also fixes second derivatives
     # through dynamic calls on Julia 1.10 (Enzyme snag compute-an-ordin-902b6418),
     # including the lower-bounded completion's ParameterGeometry callbacks.
     # 5325554c keeps that libEnzyme build and repairs erfcx derivatives in
     # positive tails through third order (Enzyme snag erfcx-positive-t-db1c8c84).
     # Embedded Laplace needs those orders for scaled-tail likelihoods.
+    # 5325554c also contains the wide-plan tuple-field typing repair used by
+    # large compact partitions (32d31ca; same libEnzyme build 782c9d95).
+    # 68ed90fe declares libEnzyme 2063db12, repairing the integer division
+    # fold that stopped grouped-HSGP partition gradients on Julia 1.10.
     # ae936763 (libEnzyme build 0dd21172) includes 71c203f9: Julia 1.10
     # inference preserves nested reduction types during ordinary Reverse,
     # including sum(sum, columns) after matrix-valued plate helpers.
