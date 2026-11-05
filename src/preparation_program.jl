@@ -82,6 +82,13 @@ function _brm_operation_references!(refs, mapping::AbstractDict)
     refs
 end
 
+# A component's model-valued input is the caller's value, bound by name: its
+# operation is the input's `NamedColumn`, and the call passes the value in, as
+# it does for a scalar prior (`a ~ Normal(center, 0.2)`).
+_brm_component_input_operation(@nospecialize(_expression)) = false
+_brm_component_input_operation(expression::NamedColumn) =
+    parent(expression) isa _BRMComponentInput
+
 # Backends that allocate group/structured blocks before their ordinary walk
 # still consume model values in the common graph's dependency order.
 function _brm_prior_value_dependencies(program::_BRMPreparedProgram, roots)
@@ -96,7 +103,7 @@ function _brm_prior_value_dependencies(program::_BRMPreparedProgram, roots)
         # backend reads it as the literal.
         operation.role === :extension &&
             (haskey(program.context.data, name) || name === :Inf ||
-             operation.expression isa _BRMComponentInput) && return
+             _brm_component_input_operation(operation.expression)) && return
         operation.role in (:parameter, :assignment) || error(
             "BRM preparation: model-level prior references `$name`, a $(operation.role); " *
             "it requires a sampled parameter, deterministic model value, or data")
