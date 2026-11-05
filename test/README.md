@@ -6,6 +6,11 @@ in-cell consumers. It compares physical values, normalized densities and native
 Reverse gradients with independent formulas and compiled Stan, and retains the
 row-length and scalar-cell checks. It accepts testset substring filters.
 
+`model_view_documentation.jl` checks authored Julia documentation in builder and
+bound-model views, plus callable docs after binding: references become formatted labels,
+ordinary URLs remain linked, doctest contents survive, and source/doc records
+remain unchanged. The bootstrap selects HTMXObjects 0.1.62 for this projection.
+
 `heterogeneous_mixtures.jl` checks native mixtures of different full-real
 scalar families and custom component graphs against independent normalized
 densities and compiled Stan. It covers native Reverse, pointwise likelihood,

@@ -1,6 +1,7 @@
 module BayesianRegressionModelsHTMXObjectsExt
 
 import BayesianRegressionModels as BRM
+import Markdown
 using HTMXObjects
 
 _role(role) = replace(string(role), '_' => ' ')
@@ -57,7 +58,7 @@ function _documentation(callables)
     sort!(entries; by=first)
     isempty(entries) && return nothing
     SemanticSection("Callable documentation",
-        [SemanticDisclosure(name, SemanticProse(string(doc))) for (name, doc) in entries]...)
+        [SemanticDisclosure(name, SemanticProse(doc)) for (name, doc) in entries]...)
 end
 
 _path_label(path) = isempty(path) ? "Root" : join(
@@ -66,7 +67,7 @@ _path_label(path) = isempty(path) ? "Root" : join(
 function _authored_documentation(records)
     isempty(records) && return nothing
     SemanticSection("Authored documentation", [
-        SemanticSection(_path_label(doc.path), SemanticProse(doc.markdown),
+        SemanticSection(_path_label(doc.path), SemanticProse(Markdown.parse(doc.markdown)),
             SemanticDisclosure("Declaration and provenance",
                 SemanticCode(:julia, _source_text(doc.statement)),
                 SemanticFields(; path=repr(doc.path), owner=string(doc.owner),

@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.190
+
+- Model views render callable and authored Julia documentation through the shared
+  HTMXObjects documentation projection. Unresolved Documenter references retain
+  their formatted labels without broken links, and doctest examples use Julia
+  highlighting in offline HTML. Original source and documentation records remain
+  unchanged. Requires HTMXObjects 0.1.62; both test pins select that release.
+
 ## 0.2.189
 
 - Function-style components returning one internal plate's collected values

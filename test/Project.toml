@@ -1,4 +1,5 @@
 [deps]
+Markdown = "d6f4376e-aef5-505a-96c1-9c027394607a"
 HTMX = "27f3e1ef-6ef8-44dc-9e9a-2fb23ed44e83"
 HTMXObjects = "b12ef442-5798-4353-80f3-9562b03a0cb6"
 DynamicObjects = "23d02862-63fe-4c6e-8fdb-1d52cbbd39d5"
@@ -90,7 +91,7 @@ rev = "c84047be45cd2bba8a1d02660af9408d4cdf58f4"
 
 [sources.HTMXObjects]
 url = "https://github.com/nsiccha/HTMXObjects.jl"
-rev = "5105564146a3147d7429d3183f1c9744c766fc79"
+rev = "5853ba527ad09e733b6abee11728856becd628ec"
 
 [sources.HTMX]
 url = "https://github.com/nsiccha/HTMX.jl"
