@@ -405,7 +405,7 @@ Base.@nospecializeinfer function _brm_resolve_grouping_addresses(@nospecialize(b
     allunique(first.(kept)) || error(
         "$prefix: internal: rewriting grouping-column addresses produced " *
         "duplicate operation names")
-    BRMI((; kept...))
+    BRMI((; kept...), brmi.documentation)
 end
 
 # Rebuild an additive formula right-hand side, replacing every grouped term

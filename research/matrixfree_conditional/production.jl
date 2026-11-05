@@ -29,7 +29,7 @@ function production_case(H, prepared; options=prepared.algebra.options)
     trace_gradient = sum(F.sensitivity[k] for j in 1:n for k in nzrange(H,j)
         if rowvals(H)[k] == j)
     scale_gradient = dot(nonzeros(H),F.sensitivity) - 0.1trace_gradient
-    println("production\t",(; n, probes=options.probes, step=options.logdet_step,
+    println("production\t",(; n, probes=options.probes,
         solve_seconds=solve.time, solve_bytes=solve.bytes, residual,
         cold_determinant_seconds=cold.time, determinant_seconds=determinant.time,
         determinant_bytes=determinant.bytes, retained_bytes=Base.summarysize(F),
@@ -54,9 +54,9 @@ function measure_production(nx,ny,nt; refine=false, draw=false)
         trace_gradient=baseline.trace_gradient-exact.trace_gradient,
         scale_gradient=baseline.scale_gradient-(n-0.1exact.trace_gradient)))
     if refine
-        finer = production_case(H,p; options=MatrixFreeLaplace(; logdet_step=0.5))
-        more = production_case(H,p; options=MatrixFreeLaplace(; logdet_step=0.5, probes=32))
-        println("quadrature_change\t",(; logdet=finer.value-baseline.value,
+        finer = production_case(H,p; options=MatrixFreeLaplace(; solve_tolerance=1e-12))
+        more = production_case(H,p; options=MatrixFreeLaplace(; solve_tolerance=1e-12, probes=32))
+        println("tolerance_change\t",(; logdet=finer.value-baseline.value,
             trace_gradient=finer.trace_gradient-baseline.trace_gradient,
             sensitivity_relative=norm(finer.F.sensitivity-baseline.F.sensitivity) /
                 norm(finer.F.sensitivity)))

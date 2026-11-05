@@ -143,7 +143,7 @@ end
 function _sb_covariate_brmi(brmi, selected)
     operations = brmi.operations
     BRMI(NamedTuple{keys(operations)}(
-        map(v -> _sb_covariate_value(v,selected),values(operations))))
+        map(v -> _sb_covariate_value(v,selected),values(operations))), brmi.documentation)
 end
 
 function _sb_fresh_covariate_inputs!(data, key, members, family, rows)

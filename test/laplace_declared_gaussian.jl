@@ -45,10 +45,13 @@ end
 @stestset "declared Gaussian exact marginal and outer gradients" begin
     for (moving, standard) in ((false,true), (false,false), (true,false))
         rk, data = declared_fixture(; moving, standard)
-        plan = brm_laplace_plan(rk; ad_backend=NLME_AD, draws=12)
+        auto = brm_laplace_plan(rk; ad_backend=nothing, draws=12)
+        @test !only(auto.terms).admitted
+        @test only(auto.terms).importance_ess === nothing
+        plan = brm_laplace_plan(rk; ad_backend=NLME_AD, integrate=:field, draws=12)
         @test only(plan.terms).admitted
         @test only(plan.terms).declaration === :field
-        @test only(plan.terms).importance_ess.min ≈ 12 atol=1e-8
+        @test only(plan.terms).importance_ess === nothing
         @test plan.integrated_dimension == 4
         p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=plan)
         q = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:field,))
@@ -131,7 +134,9 @@ end
     end)
     plan = brm_laplace_plan(rk; ad_backend=NLME_AD, draws=8)
     @test !only(t for t in plan.terms if t.declaration === :parent).admitted
-    @test only(t for t in plan.terms if t.declaration === :child).admitted
+    @test !only(t for t in plan.terms if t.declaration === :child).admitted
+    forced = brm_laplace_plan(rk; ad_backend=NLME_AD, integrate=:child)
+    @test only(t for t in forced.terms if t.declaration === :child).admitted
     @test only(t for t in plan.terms if t.declaration === :positive).class === :never
     @test_throws "must stay sampled" brm_laplace_plan(rk;
         ad_backend=nothing, integrate=:parent)
@@ -139,11 +144,12 @@ end
         ad_backend=nothing, integrate=:positive)
 end
 
-@stestset "nonlinear Normal observations are diagnosed and differentiated" begin
+@stestset "nonlinear Normal observations require opt-in and remain differentiated" begin
     rk, _ = declared_fixture(; nonlinear=true)
     plan = brm_laplace_plan(rk; ad_backend=NLME_AD, draws=20, ess_floor=0.001)
-    @test only(plan.terms).class === :gated
-    @test only(plan.terms).importance_ess !== nothing
+    @test only(plan.terms).class === :sampled
+    @test only(plan.terms).importance_ess === nothing
+    @test occursin("log-concavity is not structurally certified", only(plan.terms).reason)
     p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:field,))
     for point in (-0.15, 0.2)
         phi = fill(point, length(p.population))

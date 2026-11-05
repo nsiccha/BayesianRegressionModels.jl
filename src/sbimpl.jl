@@ -5638,11 +5638,25 @@ function _sb_plan_observation_keys(body, data, @nospecialize(brmi), mod::Module)
             union!(varying, _sb_plan_param_names(stmt.args[end - 1]))
         elseif stmt.head === :call && !isempty(refs)
             target = _sb_plan_lhs_name(stmt.args[2])
+            # Scalar data constants can parameterize an observation-only law
+            # too. Its omission remains an observation, even without row data
+            # or fitted parameters to distinguish it from a parameter prior.
+            _sb_plan_observation_only(brmi, target) && continue
             (issubset(refs, constants) || target in read) &&
                 delete!(observable, target)
         end
     end
     observable
+end
+
+function _sb_plan_observation_only(@nospecialize(brmi), target)
+    target isa Symbol && _brm_has_operation(brmi, target) || return false
+    op = _named_op(_brm_operation(brmi, target))
+    op isa ExprColumn{typeof(~)} || return false
+    lhs, rhs = getargs(op, 2)
+    lhs isa NamedColumn && parent(lhs) isa MissingColumn && rhs isa ExprColumn ||
+        return false
+    _sb_observation_only_law(getf(rhs), rhs)
 end
 # A non-data name declared with a vector law, `x[1:n] .~ Family.(...)` or
 # `x ~ MvNormal(...)`, is a parameter: its data (the length, the mean, an
@@ -7439,12 +7453,14 @@ end
 # likelihood statement, arguments and family spelling included, which
 # StanBlocks forward-simulates from the fitted predictive law. `weighted` and
 # `censored` wrap only observations (a censored law puts mass on its bounds),
+# `interval_censored` supplies interval evidence rather than a parameter law,
 # and Stan has no discrete parameters, so a discrete law (`Poisson`,
 # `Binomial`, `BetaBinomial2`, ..., also under `truncated`) is one too. The
 # families whose outcome structure is read from response values keep their
 # refusal (`_SBValueStructuredFamily`).
 _sb_observation_only_law(_callable, _rhs) = false
-_sb_observation_only_law(::Union{typeof(weighted),typeof(censored)}, _rhs) = true
+_sb_observation_only_law(
+    ::Union{typeof(weighted),typeof(censored),typeof(interval_censored)}, _rhs) = true
 _sb_observation_only_law(::Type{D}, _rhs) where {D<:Distribution} =
     D <: Distribution{<:Distributions.VariateForm,Distributions.Discrete} &&
     !(D <: _SBValueStructuredFamily)
@@ -8243,6 +8259,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         labels=isempty(grouped) && isempty(ragged_specs) ? (nsub === nothing ? () : 1:nsub) : g_vals,
         group=isempty(grouped) && isempty(ragged_specs) ? nothing : name(group_col), distinct)
     _brm_check_cell_total_latents(body_stmts, params, _brm_inline_scope(lam); prefix="sbimpl")
+    body_stmts = _sb_cell_prior_order(body_stmts, kept_params)
     # The cell is Julia source; give StanBlocks its Stan spellings.
     body_stmts = _sb_cell_statements(_sb_cell_ar1_normal_calls(body_stmts, kept_params),
         _brm_inline_scope(lam))
@@ -17187,6 +17204,15 @@ function _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, 
     push!(stmts, Expr(:call, :~, target, rhs))
 end
 
+# A censoring threshold can be the observation itself. When that observation
+# is omitted, its endpoint has no data to validate; the unchanged producer
+# statement still carries it so StanBlocks owns the generative interpretation.
+_sb_censored_validation_bound(bound, _target, _data) = bound
+function _sb_censored_validation_bound(bound::NamedColumn, target, data)
+    name(bound) === target && parent(bound) isa MissingColumn &&
+        !haskey(data, target) ? nothing : bound
+end
+
 function _sb_lik_composed!(stmts, target, wrapper, producer,
                            args, kwargs::NamedTuple, data)
     base = _sb_composed_family(wrapper, args)
@@ -17195,8 +17221,12 @@ function _sb_lik_composed!(stmts, target, wrapper, producer,
     isnothing(lower) && isnothing(upper) && error(
         "sbimpl: `$wrapper` needs at least one non-`nothing` bound")
 
-    _sb_validate_bounds(wrapper, target, lower, upper, data)
-    _sb_validate_composed_support(wrapper, target, lower, upper, base.kind, data)
+    validation_lower, validation_upper = wrapper === :censored ?
+        (_sb_censored_validation_bound(lower, target, data),
+         _sb_censored_validation_bound(upper, target, data)) : (lower, upper)
+    _sb_validate_bounds(wrapper, target, validation_lower, validation_upper, data)
+    _sb_validate_composed_support(wrapper, target, validation_lower,
+                                  validation_upper, base.kind, data)
     _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, data)
 end
 
@@ -17207,8 +17237,8 @@ _sb_lik_family!(stmts, target, ::typeof(censored), args, kwargs::NamedTuple, dat
     _sb_lik_composed!(stmts, target, :censored, :censored, args, kwargs, data)
 
 # Genuine interval evidence uses the observed response as the lower endpoint.
-# Its producer call has no optional-bound encoding, so it is independent of the
-# one-sided truncation/censoring producer decision.
+# An omitted response keeps the upper-only call; StanBlocks draws the base
+# predictive law and sizes it from the retained family arguments and upper.
 function _sb_lik_family!(stmts, target, ::typeof(interval_censored),
                          args, kwargs::NamedTuple, data)
     length(args) == 1 || error(
@@ -17218,20 +17248,33 @@ function _sb_lik_family!(stmts, target, ::typeof(interval_censored),
         "the response column is the interval lower endpoint")
     base = _sb_composed_family(:interval_censored, args)
     upper = kwargs.upper
-    _sb_validate_bounds(:interval_censored, target, data[target], upper, data;
+    lower = get(data, target, nothing)
+    _sb_validate_bounds(:interval_censored, target, lower, upper, data;
                         check_order=false)
-    lo = _sb_composed_values(data[target])
-    hi = _sb_composed_values(_sb_bound_data(upper, data))
-    all(eachindex(lo)) do i
-        lo[i] < (hi isa AbstractVector ? hi[i] : hi)
-    end || error(
-        "sbimpl: `interval_censored` lower endpoints must be strictly below upper endpoints")
-    _sb_validate_composed_support(:interval_censored, target, data[target],
+    if !isnothing(lower)
+        lo = _sb_composed_values(lower)
+        hi = _sb_composed_values(_sb_bound_data(upper, data))
+        all(eachindex(lo)) do i
+            lo[i] < (hi isa AbstractVector ? hi[i] : hi)
+        end || error(
+            "sbimpl: `interval_censored` lower endpoints must be strictly below upper endpoints")
+    end
+    _sb_validate_composed_support(:interval_censored, target, lower,
                                   upper, base.kind, data)
     native = _sb_composed_stan_call!(stmts, target, base, data)
+    upper_expr = _sb_scalar_expr(upper, data)
+    if isnothing(lower)
+        # Preserve the observation law and its retained shape input. There is
+        # no lower endpoint to read: the producer must draw the fitted base
+        # predictive law, without conditioning on an invented interval.
+        rhs = Expr(:call, :interval_censored,
+            Expr(:parameters, Expr(:kw, :upper, upper_expr)),
+            Expr(:call, native.name, native.args...))
+        push!(stmts, Expr(:call, :~, target, rhs))
+        return nothing
+    end
     _sb_mixture_membership_evidence!(stmts, target, native, :interval_censored,
                                      nothing, upper, base.kind, data)
-    upper_expr = _sb_scalar_expr(upper, data)
     _sb_lik_stan_exprs!(stmts, target, :interval_censored,
                         (native.name, target, upper_expr, native.args...))
 end

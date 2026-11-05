@@ -1,5 +1,13 @@
 # Running the tests
 
+`authored_documentation.jl`, `authored_documentation_binding.jl`,
+`authored_documentation_printing.jl`, `authored_documentation_rk_source.jl`
+and `authored_documentation_rkppl.jl` check ordinary Julia documentation through
+binding, composition, readable source replay, scientific descriptions, artifact
+metadata and native RKPPL lowering. They verify exact declaration scopes and
+unchanged numerical results. Run each as a standalone script in the test
+environment after `test/setup_env.jl`; native metadata requires RKPPL 0.1.93.
+
 `adaptive_centering_bounds.jl` checks bounded random-effect scales against
 BridgeStan's constrained values, correlated centered and noncentered maps,
 their Jacobians, Enzyme gradients, centered replay, and stable log-scale tails.
@@ -25,7 +33,7 @@ references captured before the ReparametrizableDistributions extraction.
 The transform algorithms and their derivative tests live in that package.
 
 `nlme_laplace_matrixfree_algebra.jl` checks the derivative of the fixed-probe
-rational determinant against independent two-dimensional identities, including
+Lanczos determinant against independent two-dimensional identities, including
 noncommuting curvature, mixed exact/operator components, ICAR soft constraints,
 conditional draws and explicit solver failures. `nlme_laplace_matrixfree.jl`
 checks nonlinear row/cell/sum gradients, evaluation-history and copy invariance,
@@ -99,6 +107,12 @@ broadcast observation locations: strict selected-cell queries, ordinary Enzyme
 Reverse gradients, independent analytic values, and bounded allocations as
 the number of observations grows. The test environment pins RK 0.1.51 /
 RKPPL 0.1.53, including scalar-helper type inference and guarded captures.
+`rk_field_offset.jl` checks coefficient-one offsets of declared scalar plate
+outputs and explicitly gathered helper outputs. It covers both output orders,
+reader-first composition, unequal axes, repeated and reordered reads, normalized
+density, native reverse and Stan gradients, complete printed-source replay,
+immutable inputs, and bounded selected-row allocations. Vector cells with an
+accidentally matching flattened length must not establish a scalar row axis.
 `laplace_plan_reuse.jl` counts actual row/cell derivative preparations and
 compares retained plans with freshly prepared targets, including strict
 subsets of row, plate and sum factors. It checks marginal values, gradients,
@@ -826,6 +840,13 @@ draw their bound twin's law, a continuous omitted response spells
 `logistic` as `inv_logit`, and a `@plate` cell's `BetaBinomial2` has the
 density of its `beta_binomial` spelling and lowers omitted.
 
+`omitted_interval_response.jl` checks response-omitted interval observations:
+zero-dimensional joint prior draws, uncoarsened base-law moments, predictive
+twins, retained row reads and scalar/dense/ragged bound shapes. It also checks
+the observed interval mass and gradient, a fitted response beside an omitted
+interval, bound validation, and the sole-term interval predictor spelling.
+Requires StanBlocks 0.2.21; the bootstrap pins its published omission fix.
+
 `truncated_low_mass_draws.jl` draws omitted `truncated` responses whose window
 holds almost none of the base law's mass: a two-sided `NegativeBinomial2`
 count class in [1, 9] and [250, 1e7] around a mean of 70, its one-sided tails,
@@ -892,6 +913,17 @@ julia --startup-file=no --project=test test/rk_planning_specialization.jl
 ```
 
 ## NLME estimators
+
+`nlme_connected.jl` checks explicit `unit_partition=:connected` with generic
+Gaussian models: structural transitive connectivity, dormant branches and zero
+coefficients, indivisible joint observations, exact likelihood/gradient and
+prior accounting, complete-unit SVI minibatches, optimizer continuation,
+streaming membership checks, and a Laplace marginal against an analytic
+Gaussian marginal. `nlme_connected_fit.jl`, in the NLMEEstimation scratch
+environment below, checks repeated covariance families, protocol agreement,
+start transport, scientific labels and empirical Bayes modes against the
+analytic conditional Gaussian, plus a short SAEM call. Neither rewrites the
+authored model or uses numerical derivatives as an oracle.
 
 `nlme_joint_start.jl` checks a complete NLME estimate against the same
 BRMI's compiled Stan model: non-unit covariance and natural subject effects
@@ -1199,6 +1231,17 @@ on StanBlocks and ReactiveKernels, with constrained read-back and coordinate
 transport, effective bounds, known values, invalid addresses and overrides.
 Run it directly in the test environment.
 
+`gmrf_preconditioner.jl` checks a `gmrf` field's references against dense oracles,
+without model lowering: each is one congruence with the determinant it reports,
+in both channel combinations and through a star over coupled fields, and its blocks
+between neighbouring times, or between a star's hub and another field, equal the
+precision's. With a complete orthogonal probe set the rebuilt reference's exact
+derivative cancels its estimate entry by entry, and with few probes the control
+variate's derivative matches a central difference of its value.
+
+`gmrf_laplace.jl` also compares a 640-state field and two coupled fields under
+matrix-free algebra with exact algebra: value within four probe standard errors,
+gradient against a central difference of the returned value.
 `gmrf_vecchia.jl` checks the footprint representation's numerical core without a
 backend: the exact Gaussian on a fully read grid with irregular gaps, the exact
 time factor at any neighbour count, separable channels, shared solves, gap
@@ -2000,6 +2043,13 @@ definitions and model source are printed, reparsed and built afresh, then
 compared bit-exactly for likelihood, prior and full density at three points.
 `rk_parity.jl` adds independent statistical density and Jacobian references,
 standard Enzyme reverse gradients and finite-difference checks.
+`rk_mixture_weights.jl` checks hierarchical mixture probabilities against
+independent normalized laws and compiled Stan, every ordinary Reverse
+coordinate, pointwise likelihood, complete printed replay and changed-data
+reprocessing. It also covers weight-only predictors, more than two components,
+named and tuple expressions, computed shared weights, shared and row-valued
+probability data, invalid rows and logistic endpoints.
+Run it directly with `julia --project=test test/rk_mixture_weights.jl`.
 `rk_stan_priors.jl` compares explicit shared scale/LKJ priors with emitted Stan
 using a complete named coordinate map. `rk_gaussian.jl` checks the actual
 ordinary Gaussian emission against analytic and mapped Stan densities and

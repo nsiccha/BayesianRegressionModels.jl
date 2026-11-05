@@ -110,6 +110,19 @@ unconstrained coordinate vector (`coordinates`, in packed order).
 - `rows[i]` — the rows of the grouping column that belong to subject `i`.
 - `nested_groups`, `shared_groups` — the groupings the caller named as owned
   by a unit and as crossed with the units.
+- `unit_partition` — `:subjects` (default) or `:connected`. In connected mode,
+  `levels[i]` is the tuple of scientific subject labels in inference unit `i`;
+  `subject_coordinates`, `subject_families`, `subject_margins` and `rows` are
+  indexed by inference unit. Every original covariance-family instance remains.
+- `subject_levels`, `subject_unit`, `unit_members`, `subject_ranges` — original
+  scientific labels, their unit IDs, each unit's original subject indices, and
+  each original subject's range inside its unit's compact effect vector.
+  `coordinate_subject[c]` retains the original owner of packed coordinate `c`;
+  `subject[c]` is its inference-unit owner. Zero means shared in both maps.
+- `factor_supports` — in connected mode, structural packed-coordinate supports
+  per observation cell, keyed by observation name. A support is a vector of
+  indices or `:whole`; it includes dormant branches and zero coefficients.
+  These supports determine connectivity and retain individual-cell sparsity.
 
 Subject draws are standardized (`η = diag(scale) L z`, `z ~ N(0, I)`): the
 subject block holds `z`, and Ω is read through the scale and correlation
@@ -133,6 +146,13 @@ struct BRMNLMEView
     shared_groups::Tuple{Vararg{Symbol}}
     families::Vector{NamedTuple}
     ragged::Bool
+    unit_partition::Symbol
+    subject_levels::Vector{Any}
+    subject_unit::Vector{Int}
+    unit_members::Vector{Vector{Int}}
+    subject_ranges::Vector{UnitRange{Int}}
+    coordinate_subject::Vector{Int}
+    factor_supports::Dict{Symbol,Vector{Union{Symbol,Vector{Int}}}}
 end
 
 # Subjects whose η blocks differ in shape (nested groupings, stratified
@@ -447,7 +467,8 @@ end
 
 """
     brm_nlme_view(backend::RKBRMI; subject_group=nothing,
-                  nested_groups=NamedTuple(), shared_groups=()) -> BRMNLMEView
+                  nested_groups=NamedTuple(), shared_groups=(),
+                  unit_partition=:subjects) -> BRMNLMEView
 
 Read the nonlinear-mixed-effects partition of an RK-lowered model: population
 coordinates, subject-level covariance coordinates, other scalars, and one
@@ -479,6 +500,15 @@ their density reads the law and with it the units' draws. A declaration of zero
 length, such as the coefficient block of a single-level treatment-coded factor,
 owns no coordinate and is not a refusal. See [`BRMNLMEView`](@ref).
 
+`unit_partition=:subjects` keeps the scientific subjects as inference units.
+With `:connected`, structural likelihood-cell supports join subjects that a
+cell reads together, transitively. Shared coordinates do not join units.
+The model, priors and scientific subject labels are preserved; estimator
+indices refer to whole connected units. Merged units use compact ragged
+effects and retain every original covariance-family instance. This policy
+does not expand the coordinate inventory or remove the structural refusals
+below.
+
 Refuses with [`BRMNLMEViewError`](@ref) when the model has no such reading:
 no random effects over the subjects, a grouping named in neither
 `nested_groups` nor `shared_groups` (the message names it), a subject-owned
@@ -488,7 +518,9 @@ completion or one with a group whose missing entries lie on rows of several
 subjects, or any coordinate the semantic inventory does not cover.
 """
 function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
-        nested_groups=NamedTuple(), shared_groups=())
+        nested_groups=NamedTuple(), shared_groups=(), unit_partition=:subjects)
+    unit_partition in (:subjects, :connected) || throw(ArgumentError(
+        "unit_partition must be :subjects or :connected"))
     names = Vector{Symbol}(_rk_layout_coordinate_names(backend))
     position = Dict{Symbol,Int}(n => i for (i, n) in enumerate(names))
     records = _brm_nlme_records(backend.plan)
@@ -976,7 +1008,12 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
         "terms, `cdar` walks, `car(...)` fields, missing-value completions and " *
         "submodels; other terms, such as `mm(...)` blocks, file no coordinate record.")
     labels = map(_brm_transport_level, backend.plan.columns[group])
-    rows = [findall(x -> isequal(x, _brm_transport_level(level)), labels) for level in levels]
+    # Build row ownership once, rather than scanning every row for each subject.
+    row_index = Dict(_brm_transport_level(level) => i for (i, level) in enumerate(levels))
+    rows = [Int[] for _ in levels]
+    for (row, label) in enumerate(labels)
+        push!(rows[row_index[label]], row)
+    end
     # Subjects of a stratified block, or with completion draws, hold different
     # families, so their blocks differ in shape, as nested ones do; so do
     # subjects without a level of a grouped HSGP.
@@ -986,10 +1023,13 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
     mu_references = ragged ? NamedTuple[] :
         _brm_nlme_mu_references(backend, block_margins, population,
             rows, length(labels))
-    BRMNLMEView(group, levels, names, role, subject, blocks, block_margins,
+    view = BRMNLMEView(group, levels, names, role, subject, blocks, block_margins,
         mu_references, rows, Int[f.size for f in families],
         subject_families, subject_margins, nested_groups, shared_groups, families,
-        ragged)
+        ragged, :subjects, copy(levels), collect(eachindex(levels)),
+        [[i] for i in eachindex(levels)], [1:length(block) for block in blocks],
+        copy(subject), Dict{Symbol,Vector{Union{Symbol,Vector{Int}}}}())
+    unit_partition === :subjects ? view : _brm_nlme_connected_view(backend, view)
 end
 
 # ── Evaluation for NLME estimators ───────────────────────────────────────────
@@ -1373,6 +1413,8 @@ end
 # Each pointwise density's subject, and the observations whose subjects were
 # measured (`_brm_nlme_measured_subjects`) rather than read from their rows.
 function _brm_nlme_attribution(backend::RKBRMI, view::BRMNLMEView, query, unit)
+    view.unit_partition === :connected && return _brm_nlme_connected_attribution(
+        view, keys(_rk_pointwise_values(query, unit)))
     fields = _rk_pointwise_values(query, unit)
     L = sum(length, view.rows)
     row_subject = zeros(Int, L)
@@ -1573,6 +1615,7 @@ function _rk_nlme_partition_local_footprint end
 function _rk_nlme_partition_value_and_local_gradient! end
 function _rk_nlme_cell_footprint_query end
 function _rk_nlme_cell_footprint end
+function _rk_nlme_raw_cell_footprint end
 function _rk_nlme_population_prior end
 function _rk_nlme_population_prior_value end
 function _rk_nlme_population_prior_value_gradient end
@@ -1640,6 +1683,17 @@ function _brm_nlme_subject_cells(backend::RKBRMI, view::BRMNLMEView, attribution
     plan = backend.plan
     isempty(attribution) && return nothing
     _brm_nlme_cell_plan(plan) || return nothing
+    if view.unit_partition === :connected
+        # Every stored support is one complete cell, including a vector-valued
+        # observation. Build buckets in one pass; never split such a cell.
+        return Tuple(map(attribution) do (name, owners)
+            positions = [Int[] for _ in view.levels]
+            for (cell, owner) in enumerate(owners)
+                push!(positions[owner], cell)
+            end
+            (; names=(name,), positions, elementwise=true)
+        end)
+    end
     plate_observations = setdiff(_brm_nlme_plate_observations(plan), measured)
     n = length(view.levels)
     L = sum(length, view.rows)
@@ -1845,8 +1899,9 @@ function _brm_nlme_partition_plan(partition, unit, globals, view)
     end
     eta_slots = map(eachindex(local_footprints)) do i
         block = view.subject_coordinates[i]
+        place = Dict(j => k for (k, j) in enumerate(block))
         map(local_footprints[i]) do j
-            k = findfirst(==(j), block)
+            k = get(place, j, nothing)
             k === nothing && _brm_nlme_error("brm_nlme_model: subject $i's " *
                 "local partition gradient reads coordinate " *
                 "$(view.coordinates[j]), which is not one of its effects")
@@ -1910,14 +1965,20 @@ end
 # footprint kernel per observation group is reused for all its cells, without
 # AD, numeric probes or a retained partition plan per cell. Keep block order.
 function _brm_nlme_structural_reads(cells, unit, view; progress=nothing)
-    queries = map(cell -> _rk_nlme_cell_footprint_query(cell.query), cells)
+    queries = view.unit_partition === :connected ? nothing :
+        map(cell -> _rk_nlme_cell_footprint_query(cell.query), cells)
     place = zeros(Int, length(unit))
     map(eachindex(view.subject_coordinates)) do i
         block = view.subject_coordinates[i]
         place[block] .= eachindex(block)
         reads = map(ntuple(identity, length(cells)), cells) do g, cell
             group = map(cell.positions[i]) do p
-                footprint = _rk_nlme_cell_footprint(queries[g], unit, p)
+                footprint = if view.unit_partition === :connected
+                    support = view.factor_supports[only(cell.names)][p]
+                    support === :whole ? eachindex(unit) : support
+                else
+                    _rk_nlme_cell_footprint(queries[g], unit, p)
+                end
                 _brm_nlme_check_partition_ownership(view, i, footprint)
                 block[sort!([place[j] for j in footprint if place[j] != 0])]
             end
@@ -1994,7 +2055,8 @@ Base.show(io::IO, m::BRMNLMEModel) = print(io, "BRMNLMEModel(",
 """
     brm_nlme_model(backend::RKBRMI; ad_backend, observation_ad_backend=nothing,
         shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple(), shared_groups=(), progress=nothing) -> BRMNLMEModel
+        nested_groups=NamedTuple(), shared_groups=(), unit_partition=:subjects,
+        progress=nothing) -> BRMNLMEModel
 
 Prepare an RK-lowered population model for NLME estimators: its
 [`brm_nlme_view`](@ref) partition, the backend's sampler query retaining its
@@ -2073,10 +2135,10 @@ effects before returning the model.
 function brm_nlme_model(backend::RKBRMI; ad_backend,
         observation_ad_backend=nothing, shared_point=nothing,
         subject_group=nothing, nested_groups=NamedTuple(), shared_groups=(),
-        progress=nothing)
+        unit_partition=:subjects, progress=nothing)
     _brm_with_progress(progress; description="Prepare NLME model") do node
         _brm_nlme_model(backend, node; ad_backend, observation_ad_backend,
-            shared_point, subject_group, nested_groups, shared_groups)
+            shared_point, subject_group, nested_groups, shared_groups, unit_partition)
     end
 end
 
@@ -2088,10 +2150,10 @@ const _BRM_NLME_MODEL_PHASES = (view="Subject partition",
     cells="Subject cells", prior="Population prior")
 
 function _brm_nlme_model(backend::RKBRMI, node; ad_backend, observation_ad_backend,
-        shared_point, subject_group, nested_groups, shared_groups=())
+        shared_point, subject_group, nested_groups, shared_groups=(), unit_partition=:subjects)
     _brm_with_phases(node, _BRM_NLME_MODEL_PHASES) do phases
         view, unit = _brm_run_phase(phases.view) do _
-            v = brm_nlme_view(backend; subject_group, nested_groups, shared_groups)
+            v = brm_nlme_view(backend; subject_group, nested_groups, shared_groups, unit_partition)
             any(==(:subject_mixing), v.role) && _brm_nlme_error(
                 "brm_nlme_model: Student-t random-effect blocks are not covered; NLME " *
                 "estimators own a Gaussian random-effect prior")

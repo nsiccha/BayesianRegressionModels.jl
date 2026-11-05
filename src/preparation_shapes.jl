@@ -17,6 +17,14 @@ _brm_distribution_shape(::typeof(censored), args) =
 _brm_distribution_shape(::typeof(weighted), args) =
     _brm_distribution_shape(first(args))
 
+# `interval_censored` also names a predictor term over a data column. Only
+# its distribution-call form is a sampled declaration when the LHS is absent.
+_brm_prior_expression(x::ExprColumn{typeof(interval_censored)}) =
+    !isempty(getargs(x)) && _brm_prior_expression(first(getargs(x)))
+_brm_distribution_shape(::typeof(interval_censored), args) =
+    !isempty(args) && _brm_prior_expression(first(args)) ?
+        _brm_distribution_shape(first(args)) : nothing
+
 _brm_prior_constructor(::typeof(truncated)) = true
 _brm_prior_constructor(::typeof(censored)) = true
 # A `weighted` observation whose response is omitted is a sampled declaration,

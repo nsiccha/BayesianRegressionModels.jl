@@ -1803,13 +1803,13 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
         m = length(c.lz)
         m == 0 && continue
         Sb = [S[_brm_spl_nzindex(p.pattern, a, b)] for a in c.lz, b in c.lz]
-        Lb = state.F isa _BRMOperatorFactor ? _brm_spl_psd_root(Sb) : cholesky(Symmetric(Sb)).L
+        Lb, signs = _brm_spl_sensitivity_root(state.F, Sb)
         τsel = zeros(group.m)
         for k in 1:m
             direction = zeros(group.m)
             direction[c.lpos] .= view(Lb, :, k)
             tv = _rk_spl_cell_third_only(group.ad, direction, u, c.sel, c.i)
-            τsel .+= tv
+            τsel .+= signs === nothing ? tv : signs[k] .* tv
         end
         bad === nothing && !all(isfinite, τsel) &&
             (bad = "the third derivative of cell $(c.i) of `$(group.name)`")

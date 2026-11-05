@@ -281,12 +281,7 @@ function _rk_emit_module(emitted::BRM._RKEmittedProgram)
         Core.eval(mod, Expr(:const, Expr(:(=), name, QuoteNode(value))))
     end
     for d in emitted.defs
-        if BRM._rk_source_definition(d).kind in (:function, :kernel)
-            Core.eval(mod, d)
-        else
-            Core.eval(mod, Expr(:macrocall, Symbol("@rkppl"),
-                LineNumberNode(0), d))
-        end
+        Core.eval(mod, BRM._rk_definition_expression(d))
     end
     mod
 end
@@ -332,7 +327,8 @@ end
 
 # A backend's program, translated once and shared with its replays.
 _rk_program(backend::BRM.RKBRMI) =
-    BRM._rk_once!(() -> _RKProgram(BRM._rk_emit_ast(backend.plan)), backend.program)
+    BRM._rk_once!(() -> _RKProgram(BRM._rk_emit_ast(backend.plan;
+        documentation=BRM.brm_documentation(BRM.brm_source(backend)))), backend.program)
 # A backend's binding of that program to its own data, bound once. Every
 # query of the backend reads it.
 _rk_translated(backend::BRM.RKBRMI) =
@@ -439,7 +435,7 @@ Base.@nospecializeinfer function BRM.RKBRMI(@nospecialize(source::BRM.BRMI); hel
     brmi = BRM._brm_resolve_optional_priors(source)
     plan = BRM._rk_plan_car_units(
         BRM._rk_plan_completions(BRM._brm_rk_plan(brmi; held_out), completions), car_units)
-    program = _RKProgram(BRM._rk_emit_ast(plan))
+    program = _RKProgram(BRM._rk_emit_ast(plan; documentation=BRM.brm_documentation(source)))
     bound = _rk_bind_program(program, plan)
     BRM.RKBRMI(brmi, plan, build_kernel(bound);
         program=BRM._RKOnce(program), bound=BRM._RKOnce(bound), source)
@@ -683,6 +679,8 @@ BRM._rk_nlme_cell_footprint_query(query::CellQuery) =
     partition_footprint_kernel(query.kernel)
 BRM._rk_nlme_cell_footprint(query, point, row) =
     _rk_nlme_footprint_indices(Base.invokelatest(query, point, row).unconstrained, point)
+BRM._rk_nlme_raw_cell_footprint(query, point, row) =
+    Base.invokelatest(query, point, row).unconstrained
 
 BRM._rk_retained_pointwise_sampler(backend::BRM.RKBRMI; ad_backend,
         u0=zeros(Float64, backend.model.layout.total)) =

@@ -842,6 +842,7 @@ end
 function _rk_shared_definition!(defs, taken, template; kernel::Bool=false)
     call, body = template.args
     for definition in defs
+        definition = _brm_undoc(definition)
         Meta.isexpr(definition, :macrocall) == kernel || continue
         kernel && (definition = last(definition.args))
         Meta.isexpr(definition, :(=), 2) || continue
@@ -1288,7 +1289,7 @@ end
 # in the same order, because RK prepares a cell's data-only work once only when
 # bound data fix the plate's domain (rkppl-use §13 "Arrays per index").
 function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
-        rendered=(), defs=nothing, coordinates=nothing)
+        rendered=(), defs=nothing, coordinates=nothing, documentation=())
     # `rendered` outputs are already emitted program expressions (hoisted
     # observation arguments): their calls are bound, not cell source.
     written = Any[outputs..., rendered...]
@@ -1425,9 +1426,14 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
                 law.args[2:end]...))
         Any[draw, Expr(:(=), lhs, entry)]
     end
+    names = Dict{Symbol,Symbol}(local_name => get(reads, local_name, local_name)
+        for local_name in locals)
+    merge!(names, declared)
+    documented_body = _rk_documentation_block(Expr(:block, body...), documentation;
+        path=(kernel.name,), names)
     push!(statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
         Expr(:for, Expr(:(=), index, Expr(:call, :eachindex, range)),
-            Expr(:block, body...))))
+            documented_body)))
 end
 
 # `<rows> = brm_ragged_rows([x, group, cell, axes...], group, cell, axes...)`
@@ -1543,6 +1549,34 @@ _rk_flatten_cells!(defs, taken, cells) =
     Expr(:call, _rk_shared_definition!(defs, taken, _RK_FLATTEN_CELLS_KERNEL; kernel=true),
         cells)
 
+# An offset whose declared row axis is the plate's cell axis consumes scalar
+# cells unchanged. A vector-valued cell has a different (possibly ragged) axis;
+# even an accidentally equal flattened length must not establish alignment.
+# Keep the type test in the graph so the live scalar arm remains an identity
+# for selected-row queries and reverse gradients.
+const _RK_OFFSET_CELLS_KERNEL = :(offset_cells(cells) = begin
+    values = eltype(cells) <: Real ? cells : throw(ArgumentError(
+        "RK backend: offset of a plate output requires one real scalar per cell; " *
+        "vector-valued cells need an explicit row selection"))
+    return values
+end)
+
+function _rk_offset_scalar_cells!(defs, statements, taken, plan, cells)
+    outputs = Set{Symbol}()
+    for predictor in plan.regression.predictors, term in predictor.terms
+        _rk_model_offset(term) && !_rk_scalar_model_offset(term) || continue
+        union!(outputs, get(term.options.axis, :scalar_cells, ()))
+    end
+    isempty(outputs) && return nothing
+    callee = _rk_shared_definition!(defs, taken, _RK_OFFSET_CELLS_KERNEL; kernel=true)
+    for statement in statements
+        Meta.isexpr(statement, :(=), 2) && statement.args[1] in outputs || continue
+        output = statement.args[1]
+        statement.args[2] = Expr(:call, callee, cells[output])
+    end
+    nothing
+end
+
 # A plate output at model scope is one value per cell, as the Julia loop leaves
 # it: `out[i]` is cell `i`'s value and `sum(out)` adds the cells. The graph
 # value of the output's name is its cells concatenated, which formula terms and
@@ -1638,7 +1672,7 @@ _rk_kernel_scalar_response(kernel, observation) =
 # RKPPL runs it only in a query that reads it.
 function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         kernel::_RKPreparedKernelAssignment; arguments=nothing, coordinates=nothing,
-        graph_outputs=(), cell_sources=Dict{Symbol,Symbol}())
+        graph_outputs=(), cell_sources=Dict{Symbol,Symbol}(), documentation=())
     arguments === nothing || (kernel = _rk_kernel_with_arguments(kernel, arguments))
     kernel = _rk_kernel_input_cells(kernel, cell_sources)
     # A cell without a collected value writes only what its observations read.
@@ -1681,7 +1715,8 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         end
     end
     _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
-        rendered=arguments === nothing ? () : arguments.outputs, defs, coordinates)
+        rendered=arguments === nothing ? () : arguments.outputs, defs, coordinates,
+        documentation)
     append!(statements, after)
 end
 

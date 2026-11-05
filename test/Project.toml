@@ -59,7 +59,7 @@ Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.20"
+StanBlocks = "0.2.24"
 Treebars = "0.1.1"
 Turing = "0.46"
 WarmupHMC = "0.2.11"
@@ -143,12 +143,14 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # helpers, used by the native GMRF normalized sparse density.
 # 009f4180 (0.2.19) adds indexed /= for its sparse solve and prior RNG.
 # 61fa161f (0.2.20) gives cell-owned bindings explicit lexical local scope.
-rev = "61fa161fb39065dd90e8f5f2a1151442b1af6491"
+# ef55b84f (0.2.21) predicts upper-only intervals with their response omitted.
+# b43fc26d (0.2.24) predicts censored responses whose bound is the omitted response.
+rev = "b43fc26d78d3257860070317d2ec6e3d723d55f1"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
 # Includes cooperative interruption used by BRM's progress hooks.
-rev = "f071111945c165dbae097e94c5939b79103434ac"
+rev = "44c37e60e22bab9e8a0d3ab88bd47b575dec6bb0"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
@@ -333,6 +335,7 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # PPL 0.1.72: exact structural support for vector simplex/ordered factors.
 # b5740888 (RKPPL 0.1.71): data-free replay reads frozen whole values.
 # fbf65b46 (RK 0.1.65 / PPL 0.1.74): prepared queries holding modules deep-copy.
-# 149a6cca (RK 0.1.77 / PPL 0.1.85): strict row forms, stratified reads,
-# sparse correlation factors and one plate-cell execution per unit partition.
-rev = "149a6ccaedca632a0163e7a1203655445b7c320f"
+# f17b6a24 (RK 0.1.67 / PPL 0.1.76): strict cell footprints of per-cell joint fields.
+# 1e43b1b8 (PPL 0.1.90): native row-dependent and computed shared mixture probabilities.
+# eb1b62dc (RKPPL 0.1.93): authored declaration and reusable-definition metadata.
+rev = "eb1b62dc94003616851d4144e61bb1086409560d"
