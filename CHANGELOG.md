@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.172
+
+- `SBBRMI` preserves complete fixed-width vector cells in direct reads from
+  another `@plate`. Collected and non-last indexed outputs retain their outer
+  cell axis with observed responses and with responses omitted for prior
+  draws. Scalar, varying-width vector and matrix cells retain their existing
+  iteration behavior; model declarations and priors need no changes.
+
+## 0.2.171
+
+- `@brm function component(inputs...) … return value end` defines a reusable
+  component for both StanBlocks and ReactiveKernels. Each `result ~ component(...)`
+  call owns its local parameters and reads explicit shared inputs. Components
+  support nested calls, array-valued results, prior/output inspection and
+  changed-data replay. Existing short-form data-to-model builders retain their
+  meaning. Returned row axes remain available to formula offsets and selective
+  readers; internal plate cells must prove scalar values before flattening.
+  `brm_components` exposes definition identity, source and each logical call path.
+
 ## 0.2.170
 
 - **Authored declaration documentation:** ordinary Julia docstrings in BRM

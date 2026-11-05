@@ -1,5 +1,23 @@
 # Running the tests
 
+`plate_direct_outputs.jl` checks direct reads of complete cells from another
+plate, including fixed-width vectors, collected and non-last outputs, and
+observed or omitted responses. Square and non-square shapes compare compiled
+Stan densities and gradients with analytic references; prior draws check the
+same cell values. Scalar, ragged-vector and matrix cells supply shape controls.
+Run it as a standalone script in the test environment.
+
+`scoped_components.jl` checks function-style BRM components with independent
+local priors, explicit shared inputs, nested calls, vector results, and plate
+cells. It compares normalized densities and native Reverse gradients with
+independent references and compiled Stan, and checks source/documentation
+inspection, constrained-value and coordinate round trips, row selection,
+offsets, and frozen or refitted preprocessing. Native RKPPL documentation
+retains component headers and local provenance at each nested call site.
+Run it as a standalone script in the test environment; StanBlocks 0.2.25
+preserves keyword labels when a component is called inside a plate, and
+ReactiveKernelsPPL 0.1.93 retains authored documentation.
+
 `authored_documentation.jl`, `authored_documentation_binding.jl`,
 `authored_documentation_printing.jl`, `authored_documentation_rk_source.jl`
 and `authored_documentation_rkppl.jl` check ordinary Julia documentation through

@@ -8607,7 +8607,7 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     # A kernel(...) model routes to the panel kernel planner; it has no
     # top-level observation, so it must not enter the GLM flow below.
     isempty(_rk_kernel_ops(brmi)) || return _brm_rk_composed_kernel_plan(brmi)
-    observations = _brm_direct_observation_list(brmi; prefix)
+    observations = _brm_direct_observation_list(brmi; prefix, require_observation=false)
     keys = Symbol[observation.key for observation in observations]
     length(unique(keys)) == length(keys) || error(
         "$prefix: multi-response observation names must be unique")
@@ -8615,6 +8615,7 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
         brmi; context=_brm_backend_context(brmi; retain_mm_sources=true))
     submodels = _rk_prepare_submodel_values(program)
     !isempty(submodels) && return _brm_rk_value_plan(brmi, program, observations; submodels)
+    isempty(observations) && error("$prefix: direct execution requires at least one observed likelihood")
     _rk_needs_value_plan(program, observations) &&
         return _brm_rk_value_plan(brmi, program, observations)
     context = program.context
