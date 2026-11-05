@@ -1,4 +1,4 @@
-# test/downstream_group_block_term.jl — dual-backend contract for the
+# test/downstream_group_block_term.jl — contract for the
 # downstream grouped-term pattern (snag brm-parametric-t-ae5e02f9).
 #
 # A downstream package ships grouped parametric terms through BRM's public
@@ -12,20 +12,19 @@
 # downstream module with an example pair — `transient` (single-peak
 # bump, 3 per-group params) and `saturating` (0-to-1 dose multiplier, 2
 # per-group params) — plus their additive and multiplicative compositions,
-# and pins exact behavior on BOTH executable backends:
+# and pins exact behavior:
 #   - SBBRMI lowers to stanc-clean Stan calling the shared builtins;
-#   - TuringBRMI assembles bit-exact effects versus independent Julia math
-#     (max abs diff 0.0) with finite joint densities.
+#   - the shared preparation hands `_brm_native_structured_effect` the term's
+#     rows and group indices, so its row math is bit-exact versus independent
+#     Julia math (max abs diff 0.0).
 # Core openings this relies on: `_sb_is_direct_term` routing and the
-# group-block branch of `_sb_emit_direct!` (sbimpl), and the generic
-# single-field structured `_brm_turing_term_model` / `_brm_term_rows`
-# (Turing ext). Promotion of such terms into BRM core waits on multi-package
-# adoption; see docs/src/formula-terms.md "Downstream grouped terms".
+# group-block branch of `_sb_emit_direct!` (sbimpl), and the shared
+# structured-term preparation. Promotion of such terms into BRM core waits on
+# multi-package adoption; see docs/src/formula-terms.md "Downstream grouped terms".
 
 using Test
 using BayesianRegressionModels
 using StanBlocks
-using Turing
 using Random
 using LinearAlgebra: Diagonal
 using Distributions: Exponential, Normal
@@ -169,15 +168,13 @@ composed_model(df=term_df()) = @brm df begin
     y ~ Normal(mu, sigma)
 end
 
-# Rebuild the exact non-centered block the Turing ext draws, so the hand
-# computation shares nothing with the implementation under test except the
-# documented layout (n_groups x n_per_group, row = group).
-function hand_block(draw, prefix, ncols)
-    key(p) = only([k for k in keys(draw) if endswith(string(k), p)])
-    tau, L, z = draw[key(prefix * ".tau")], draw[key(prefix * ".L")],
-                draw[key(prefix * ".z")]
-    ngroups = length(z) ÷ ncols
-    transpose(Diagonal(tau) * Matrix(L.L) * reshape(z, ncols, ngroups))
+# The prepared term of the downstream callable `f` on predictor `target`.
+function prepared_downstream_term(brmi, target, f)
+    context = BRM._brm_backend_context(brmi)
+    rhs = last(BRM.getargs(BRM.linear_predictor_op(brmi, target), 2))
+    term = only(t for t in BRM._brm_additive_terms(rhs)
+                if t isa BRM.ExprColumn && BRM.getf(t) === f)
+    BRM._brm_prepare_term(term, target, context)
 end
 
 @testset "nested downstream transient lowers to stanc-clean Stan" begin
@@ -193,23 +190,21 @@ end
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
 end
 
-@testset "nested downstream transient is exact in Turing" begin
+@testset "nested downstream transient row math is exact" begin
     df = term_df()
-    tb = TuringBRMI(nested_model(df))
-    draw = rand(MersenneTwister(11), tb.model)
-    term = only(only(tb.plan.predictors).terms)
+    term = prepared_downstream_term(nested_model(df), :mu, transient)
     field = only(term.state.fields)
-    block = hand_block(draw, "term_mu_1.draw", 3)
+    # A per-group block (row = group, column = per-group parameter).
+    block = randn(MersenneTwister(11), 2, 3)
     effect = BRM._brm_native_structured_effect(term, block, field)
     expected = [bump_math(df.logt[i], block[df.series[i], 1],
                           block[df.series[i], 2], block[df.series[i], 3])
                 for i in eachindex(df.logt)]
     @test effect ≈ expected
     @test maximum(abs.(effect .- expected)) == 0.0
-    @test isfinite(Turing.logjoint(tb.model, draw))
 end
 
-@testset "saturating pair and multiplicative composition on both backends" begin
+@testset "saturating pair and multiplicative composition lower to Stan" begin
     df = term_df()
     sb = SBBRMI(composed_model(df); mod=@__MODULE__)
     code = StanBlocks.stan_code(sb.model)
@@ -222,19 +217,12 @@ end
     @test sb.data[:n_terms_saturating_series] == 2
     @test transpiles(sb.model)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
-    tb = TuringBRMI(composed_model(df))
-    draw = rand(MersenneTwister(3), tb.model)
-    Bb = hand_block(draw, "term_bump_1.draw", 3)
-    Br = hand_block(draw, "term_resp_1.draw", 2)
-    hand_bump = [bump_math(df.logt[i], Bb[df.series[i], 1], Bb[df.series[i], 2],
-                           Bb[df.series[i], 3]) for i in eachindex(df.logt)]
-    hand_resp = [sigmoid_math(df.logd[i], Br[df.series[i], 1],
-                              Br[df.series[i], 2]) for i in eachindex(df.logd)]
-    hand_mu = draw[:base] .+ hand_bump .* hand_resp
-    pointwise = BRM.turing_pointwise_loglikelihoods(tb, draw)
-    @test pointwise.y ≈ logpdf.(Normal.(hand_mu, draw[:sigma]), df.y)
-    @test maximum(abs.(pointwise.y .-
-        logpdf.(Normal.(hand_mu, draw[:sigma]), df.y))) == 0.0
+    # The saturating row math, through the same shared preparation.
+    term = prepared_downstream_term(composed_model(df), :resp, saturating)
+    block = randn(MersenneTwister(3), 2, 2)
+    effect = BRM._brm_native_structured_effect(term, block, only(term.state.fields))
+    @test maximum(abs.(effect .- [sigmoid_math(df.logd[i], block[df.series[i], 1],
+        block[df.series[i], 2]) for i in eachindex(df.logd)])) == 0.0
 end
 
 @testset "downstream terms keep descriptor and frozen replay" begin

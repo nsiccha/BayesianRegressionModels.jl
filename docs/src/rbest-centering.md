@@ -45,7 +45,7 @@ BRM's exact totals do the same marginalization in different coordinates: the `H`
 
 ## BRM models
 
-The authoring panes below read the exact fitted declarations. The backend views are regenerated during the docs build. Sampling uses StanBlocks/BridgeStan and WHMC; the generated Turing pane is for inspection only.
+The authoring panes below read the exact fitted declarations. The backend views are regenerated during the docs build. Sampling uses StanBlocks/BridgeStan and WHMC.
 
 ### AS
 

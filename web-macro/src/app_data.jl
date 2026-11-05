@@ -33,7 +33,7 @@
 
     # One run of the @brm pipeline for a given (text, namespace) pair. Every
     # stage is a derived property -- accessing `.brmi` triggers parse + eval,
-    # `.benches` triggers the benchmark loop, etc. Unused branches don't
+    # `.stan.src` produces the Stan program. Unused branches don't
     # compute. Safety is enforced at `wrapped`, which refuses to produce Julia
     # code for an unsafe formula.
     # TODO(DO): investigate whether indexed inline structs (@include) should
@@ -52,37 +52,6 @@
             _brm(text; df=container)
         end
         brmi = eval(wrapped)
-
-        # ── cimpl branch ──
-        vbrmi = VBRMI(brmi)
-        dim   = LogDensityProblems.dimension(vbrmi)
-        x0    = randn(Xoshiro(0), dim)
-        ldp   = string(LogDensityProblems.logdensity(vbrmi, x0))
-        grad  = FiniteDifferences.grad(
-            central_fdm(5, 1),
-            Base.Fix1(LogDensityProblems.logdensity, vbrmi),
-            x0,
-        )[1]
-
-        tol    = 1e-8
-        n_dead = count(<=(tol) ∘ abs, grad)
-        dead   = findall(<=(tol) ∘ abs, grad)
-
-        benches = vcat(
-            [
-                "logdensity (total)" => @be(randn(dim), LogDensityProblems.logdensity($vbrmi, _)),
-                "lprior!"            => @be(randn(dim), lprior!($vbrmi, _)),
-            ],
-            [
-                "  lprior!($group_key[$i] $(part))" => @be(randn(nparams(part)), lprior!($part, _))
-                for (group_key, parts) in pairs(vbrmi.meta.blocks)
-                for (i, part) in enumerate(parts)
-            ],
-            [
-                "llikelihood!($key)" => @be(llikelihood!($m))
-                for (key, m) in pairs(vbrmi.meta.materialized)
-            ],
-        )
 
         # ── stan branch ──
         sbbrmi = SBBRMI(brmi; mod=@__MODULE__)
@@ -409,7 +378,7 @@
     # step names in dependency order. Built incrementally via `merge`: each
     # stage's chain is its parent's chain plus the one step it adds. Fork
     # points are visible in the `merge` calls (e.g. `slic_model = merge(brmi,
-    # …)` forks off of `brmi`, parallel to `vbrmi`). Inner values are one of:
+    # …)` extends `brmi`). Inner values are one of:
     #   - Symbol                       → `r.<sym>` (top-level property)
     #   - Tuple{Vararg{Symbol}}        → nested access, e.g. `(:stan, :src)` → `r.stan.src`
     #   - NamedTuple of (Symbol|Tuple) → bundle, keys preserved in the result.
@@ -420,8 +389,6 @@
         transform        = merge(parse,      (; transform=:transform))
         wrap             = merge(transform,  (; wrap=:wrap))
         brmi             = merge(wrap,       (; brmi=:brmi))
-        vbrmi            = merge(brmi,       (; vbrmi=(; vbrmi=:vbrmi, dim=:dim, ldp=:ldp, grad=:grad, n_dead=:n_dead, dead=:dead)))
-        bench            = merge(vbrmi,      (; bench=:benches))
         slic_model       = merge(brmi,       (; slic_model=:sbbrmi))
         stan_code        = merge(slic_model, (; stan_code=(:stan, :src)))
         stan_compile     = merge(stan_code,  (; stan_compile=(; file=(:stan, :file), lib=(:stan, :lib))))
@@ -435,7 +402,7 @@
         # read the resulting cached values back out as plain properties.
         stan_fit_pathfinder = merge(stan_generate, (; stan_fit_pathfinder=(; long=(:stan, :posterior, :long_df), wide=(:stan, :posterior, :wide_df), summary=(:stan, :posterior, :summary_df), full_long=(:stan, :posterior, :full_long_df), truth=(:stan, :truth, :unc_df))))
         stan_fit_warmup     = merge(stan_fit_pathfinder, (; stan_fit_warmup=(; long=(:stan, :posterior, :warmup, :long_df), wide=(:stan, :posterior, :warmup, :wide_df), summary=(:stan, :posterior, :warmup, :summary_df), full_long=(:stan, :posterior, :warmup, :full_long_df), diagnostics=(:stan, :posterior, :warmup, :diagnostics), truth=(:stan, :truth, :unc_df))))
-        (; parse, transform, wrap, brmi, vbrmi, bench, slic_model, stan_code, stan_compile,
+        (; parse, transform, wrap, brmi, slic_model, stan_code, stan_compile,
            stan_instantiate, stan_eval, stan_shapes, stan_generate, stan_fit_pathfinder, stan_fit_warmup)
     end
 

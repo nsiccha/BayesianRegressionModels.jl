@@ -48,8 +48,7 @@ does not receive an additional population coefficient.
 
 Prediction and replay through [`reprocess`](@ref) or [`restan_data`](@ref) use
 the frozen training basis by default. This marker is implemented only by the
-StanBlocks backend; it is not a deterministic B-spline expansion and is not
-available to `VBRMI`.
+StanBlocks backend; it is not a deterministic B-spline expansion.
 
 See [Formula terms](@ref) for an example and a comparison with
 `bs(...)` formulas. Dispatch tag — see `_sb_s`.

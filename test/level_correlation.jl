@@ -150,8 +150,6 @@ end
         y ~ Normal(mu, 1.0)
     end
     @test_throws "name different level correlations" SBBRMI(mixed(df); mod=@__MODULE__)
-    # A level correlation is not an independent-level block: VBRMI refuses it.
-    @test_throws "VBRMI does not implement" VBRMI(slope(df))
 end
 
 @testset "combinations not implemented yet" begin
