@@ -68,7 +68,7 @@ OptimizationBase = "5.10.1"
 PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.26"
+StanBlocks = "0.2.31"
 Treebars = "0.1.5"
 WarmupHMC = "0.2.11"
 julia = "1.10"
@@ -158,7 +158,10 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # ea1d64f0 (0.2.26) keeps EachCol/EachRow views through ordinary helpers.
 # 904e839a (0.2.30) makes a number passed to `stan_call` a data literal, which
 # `brm_von_mises`'s argument-dependent `autokwargs` support needs.
-rev = "904e839a2e6059f42f3387b3618c8cc17664835c"
+# d9396ae6 (0.2.31) collects tuple-valued plate cells as `array[outer...] tuple(...)`
+# and reads `cell.lo` as `cell[i].1` (b28164c, snag plate-cell-submo-4867bc5b), which
+# BRM's named returns from a component called inside a plate cell lower to.
+rev = "d9396ae6c66c7cb44d641989573b7008154de6c5"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

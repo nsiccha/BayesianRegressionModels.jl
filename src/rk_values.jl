@@ -1021,11 +1021,19 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     obs = Tuple(o for o in prepared.observations if o.name in roots)
     completions = _RKMissingValueSpec[]
     obs = map(obs) do original
+        # An `mi()` response plans no weight; its law still reads `weighted`.
+        original.missing_response === nothing ||
+            !(original.distribution isa _BRMPreparedExpr &&
+              original.distribution.callable === weighted) || error(
+            "RK backend: response `$(original.name)` combines `mi()` with " *
+            "`weighted(...)`; the reader route weights only fully observed responses")
         o = _rk_prepare_missing_value!(value_columns, taken, original, program, completions, derived)
-        o.weight === nothing || error(
-            "RK backend: value-based response `$(o.name)` weights need an authored response")
+        o = _rk_value_observation_weight(value_columns, o, o.weight)
         layout = isempty(kernels) ? (; values=o.response, lengths=nothing) :
             _rk_observed_layout(o.response)
+        o.weight === nothing || layout.lengths === nothing || error(
+            "RK backend: response `$(o.name)` holds one array per subject; " *
+            "`weighted(...)` takes one weight per row of a flat response")
         cells = isempty(kernels) ? nothing :
             _rk_nested_kernel_cells(o, layout, kernels, value_columns, parameter_names)
         if cells !== nothing
@@ -1140,6 +1148,34 @@ function _rk_value_expr!(bindings, expression::_BRMPreparedExpr, taken)
         insert!(call.args, 2, Expr(:parameters, kws...))
     end
     call
+end
+
+# A formula-level `weighted(family, fweights(n))` or `weights(w)` observation
+# on the reader route scales each row's log density by its weight, as the
+# regression route does (`_rk_plan_response_spec`): the base family is
+# observed, and the checked weight column binds unchanged under its own name,
+# so a replay design rebinds it like any other data input. Analytic weights
+# change a Normal's scale rather than its density's power; neither RK route
+# lowers them at formula level yet.
+_rk_value_observation_weight(columns, observation, ::Nothing) = observation
+_rk_value_observation_weight(columns, observation, ::_BRMPreparedRef) = observation
+function _rk_value_observation_weight(columns, observation,
+        weight::_BRMObservationWeightPlan)
+    weight.kind in (:frequency, :power) || error(
+        "RK backend: response `$(observation.name)` weights are $(weight.kind); " *
+        "RKBRMI admits frequency (`fweights`) and power (`weights`) weights")
+    law = observation.distribution
+    law isa _BRMPreparedExpr && law.callable === weighted || error(
+        "RK backend: internal: weighted response `$(observation.name)` has no " *
+        "`weighted(...)` law")
+    bound = get(columns, weight.source, nothing)
+    bound === nothing || isequal(bound, weight.column) || error(
+        "RK backend: internal: weight column `$(weight.source)` of response " *
+        "`$(observation.name)` is bound to other values")
+    columns[weight.source] = weight.column
+    _BRMPreparedObservation(observation.name, observation.lhs, first(law.args),
+        observation.response, observation.modifier,
+        _BRMPreparedRef(weight.source, :whole), observation.missing_response)
 end
 
 # An in-cell `weighted(family, weight, args...)` observation keeps RKPPL's

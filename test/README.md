@@ -1,5 +1,16 @@
 # Running the tests
 
+`rk_value_weighted_observations.jl` checks formula-level `fweights` and
+`weights` on RKBRMI responses whose law reads an assigned value: a Julia
+reader's probability under `weighted(Bernoulli(p), fweights(n))` against
+its `Binomial(n, p)` equivalent, power, frequency and censored Normal rows,
+a predictor read through an assignment and a mixture with per-row component
+weights. It compares normalized densities
+and native Reverse gradients with independent oracles and compiled Stan,
+checks printed-source replay, rebinding and value checks of a new design's
+weights, and the refused analytic, `mi()` and invalid-weight cases. It
+accepts testset substring filters.
+
 `offset_only_axes.jl` checks coefficient-free formulas on scalar plate and
 component rows, fixed expressions, explicit gathers, changed-size replay and
 in-cell consumers. It compares physical values, normalized densities and native
