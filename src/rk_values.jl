@@ -1186,7 +1186,10 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, cell_sources=noth
             _brm_prepare_expr(modifier.base)
         distribution isa _BRMPreparedExpr || error(
             "RK backend: response `$(observation.name)` needs a distribution call")
-        distribution = _rk_plate_cell_reads(distribution, cells,
+        # This call is the observation constructor, including caller-owned
+        # families. Only its arguments can be whole-value reads of cells;
+        # rewriting the constructor itself loses its identity and arguments.
+        distribution = _rk_plate_cell_arguments(distribution, cells,
             read -> _rk_plate_cell_value!(stmts, bindings, taken, read))
         isempty(distribution.kwargs) || distribution.callable === Ordinal || error(
             "RK backend: response `$(observation.name)` distribution keywords are unsupported")
