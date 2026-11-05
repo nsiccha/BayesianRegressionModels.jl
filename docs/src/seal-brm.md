@@ -69,8 +69,7 @@ nothing
 
 The declaration below is extracted verbatim from `grey_seal_brm_model` in the reviewed
 source, followed by the StanBlocks model it emits, the generated Stan (whose `functions
-{}` block carries the verbatim scan + UDFs + the composition densities), and the Turing
-pane.
+{}` block carries the verbatim scan + UDFs + the composition densities).
 
 ```@eval
 Main.BRMDocsComparisons.comparison(
@@ -83,10 +82,6 @@ Main.BRMDocsComparisons.comparison(
     require_stan=true,
 )
 ```
-
-The Turing pane is intentionally retained even though this structural model is outside
-the current Turing executor; its build-time construction error is part of the comparison
-rather than being hidden.
 
 ## Provenance and scope
 

@@ -8,7 +8,6 @@ using BayesianRegressionModels
 using Distributions
 using Statistics
 using StanBlocks
-using Turing
 
 const BRM = BayesianRegressionModels
 
@@ -96,13 +95,6 @@ end
         :transpile)
     @test occursin("y ~ brm_inverse_gaussian(exp(eta), lambda", code)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
-end
-
-@testset "Turing backend agrees the model is well-formed" begin
-    backend = TuringBRMI(regression_builder(regression_df))
-    params = (; lambda=1.0, beta_pop=[0.1, 0.2])
-    @test isfinite(Turing.logjoint(backend.model, params))
-    @test occursin("InverseGaussian", string(turing_model_source(backend)))
 end
 
 @testset "inverse-Gaussian validation is early and explicit" begin

@@ -281,11 +281,6 @@ end
     @test all(iszero, urk[findall(n -> startswith(n, "v.y_shares"), rk_names)])
 end
 
-@stestset "VBRMI does not lower a completion with group totals" begin
-    # A backend without the lowering must refuse rather than drop the totals.
-    @test_throws Exception VBRMI(totals_model(totals_data()))
-end
-
 @stestset "SBBRMI: a real-valued law is refused" begin
     data = totals_data()
     message(f) = try f(); "" catch e; sprint(showerror, e) end

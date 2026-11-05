@@ -1864,8 +1864,7 @@ function _rk_classify_mixture(rhs::ExprColumn, candidates::Vector{Symbol},
         "$prefix: response `$response` `MixtureModel` components must " *
         "share one family (found " *
         "$(join(unique!(map(string, heads)), ", "))); heterogeneous " *
-        "mixtures are not supported because Stan rejects out-of-support " *
-        "values where Turing returns `-Inf`)")
+        "mixtures are not supported here)")
     classified = map(enumerate(components)) do (k, comp)
         _rk_classify_mixture_component(comp, k, candidates, predictor_link,
             parameters, assignments, consts, aliases, response)
@@ -7414,7 +7413,7 @@ end
 # `observed_values` under the response name plus the `Jobs_<response>`
 # index column, and the thin layer restricts the likelihood to
 # observed rows. Compositions SB never tested (weights, evidence) fail
-# closed, mirroring the Turing backend.
+# closed.
 Base.@nospecializeinfer function _rk_peel_mi_observation(@nospecialize(brmi::BRMI), observation, plan)
     prefix = "RK backend"
     _brm_mi_grouped(plan.totals) && error(

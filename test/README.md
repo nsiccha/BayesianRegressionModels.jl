@@ -118,11 +118,6 @@ target and its PowerScaling.jl adapter against the pre-extraction Gaussian
 sensitivity table. Generic CJS, PSIS and sensitivity tests live in PowerScaling.
 The bootstrap supplies its pinned 0.1.0 release on Julia 1.10 too.
 
-`reparametrization_primitives.jl` checks VBRMI's shared and stratified Cholesky
-blocks, simplex blocks, and nested parameter cursors against numerical
-references captured before the ReparametrizableDistributions extraction.
-The transform algorithms and their derivative tests live in that package.
-
 `nlme_laplace_matrixfree_algebra.jl` checks the derivative of the fixed-probe
 Lanczos determinant against independent two-dimensional identities, including
 noncommuting curvature, mixed exact/operator components, ICAR soft constraints,
@@ -493,7 +488,7 @@ place, a completion nothing reads); RKBRMI against SBBRMI through the coordinate
 transport, value and Enzyme gradient (the Gamma gradient is `@test_broken` on
 registered Enzyme, repaired on Enzyme dogfood from `4c73c40`, Enzyme snag
 `rkbrmi-gradient-519ec090`); frozen replay; the descriptor, the
-description, `brm_start`; and the refusals on VBRMI and of real-valued laws.
+description, `brm_start`; and refusals of real-valued laws.
 Snag `mi-completion-wi-54222432`. It also checks
 `RKBRMI(brmi; completions = :noncentered)` on such a completion: the same
 coordinates and density as the centred lowering, its group terms in
@@ -880,7 +875,7 @@ it, and `reprocess` moves the Stan program onto data with rows.
 
 `hsgp_constant_axis.jl` checks that a fresh HSGP fit refuses a constant axis at
 every row count, including those whose computed mean rounds an ulp away from
-the axis value, on the shared fit, the vectorised backend's basis, a fresh
+the axis value, on the shared fit, a fresh
 `SBBRMI` build and a `freeze_constants=false` reprocess. A frozen replay keeps
 the fitted interval on that axis, and an explicit `domain=` fits it fresh.
 
@@ -1845,7 +1840,7 @@ row-aligned vector locations, and fitted completion during group resampling.
 Run `julia --project=. test/missing_joint_covariates.jl`; trailing filters
 such as `independent` or `log-space` select focused blocks.
 
-## Shared preparation and Turing lowering
+## Shared preparation and backend lowering
 
 `rk_addprop.jl` checks the shared additive/proportional scale law as visible
 native graph source. Unequal grouped responses, empty subjects, callable
@@ -1915,19 +1910,9 @@ on operation rows consumed by a subject kernel. It checks complete source and
 artifact replay, independent density/all-gradient oracles, compiled same-BRMI
 Stan at physical simplex parameters, and an empty subject's retained prior.
 The assignment gate checks dependency ordering and distinct response row axes.
-`preparation_replay.jl` compares the shared fitted transform contract across
-StanBlocks and Turing. Callable-specific frozen replay is covered by
-`turing_terms.jl`, `turing_gp.jl`, `turing_structured.jl`, and the corresponding
-StanBlocks term files; these tests guard callable-type dispatch, fitted spline
-and HSGP geometry, categorical/group levels, and backend-owned data bindings.
-`turing_generic.jl` exercises
-callable likelihoods and priors, while `turing_backend.jl` retains the existing
-grouping, conditioning, replay, prediction, and parameterization contracts.
-`turing_world_age.jl` constructs and evaluates models inside compiled callers
-and checks that generated-model caching distinguishes prior literals.
-`model_source_ownership.jl` checks concurrent Turing construction, source-AST
-isolation and stable shared-group source. Run it in a fresh process with `julia --threads=4 --project=test
-test/model_source_ownership.jl` to exercise the concurrent paths.
+`preparation_replay.jl` checks fitted-transform replay through StanBlocks.
+`shared_preparation.jl` checks categorical and group levels, callable term
+shape dispatch, and explicit refusal of unsupported structured group forms.
 `sbimpl_generation_concurrency.jl` checks concurrent SBBRMI construction and
 immediate consumption in compiled callers, including cold and warm vector
 priors, continuous and discrete mixtures, horseshoe labels and source ownership,
@@ -2124,20 +2109,11 @@ ordinary Gaussian emission against analytic and mapped Stan densities and
 gradients at three points and three data sizes, then reports warmed native
 density and preallocated reverse allocations without machine-specific limits.
 
-`turing_natural_emission.jl` checks direct observation ASTs and named model
-inputs against an independently written Turing model. It executes the emitted
-source again, checks input-name hygiene and closure captures, and verifies
-bounds, analytic weights, prediction and replay after removing runtime
-preparation-plan lookups from the generated body.
-
-The `turing_terms.jl`, `turing_gp.jl`, `turing_structured.jl`,
-`turing_r2d2.jl`, and `turing_responses.jl` scripts exercise the corresponding
-native verticals. Prior support and density comparisons against BridgeStan live
+Prior support and density comparisons against BridgeStan live
 in `truncated_priors.jl`, `hierarchical_prior_bounds.jl`,
 `prior_expression_keywords.jl`, `term_prior_bounds.jl`, and
 `von_mises_prior.jl`. `backend_comparisons.jl` executes the documentation's
-four-pane helper, checks the emitted Stan, and scores the generated Turing
-model.
+four-pane helper and checks the emitted Stan.
 `sbbrmi_display.jl` evaluates the displayed configured-submodel bindings and
 body in a fresh module, requiring identical generated Stan and data. It covers
 shared and distinct configurations, unchanged default calls, one-margin grouped
@@ -2145,17 +2121,10 @@ blocks (named through their family's single-margin form), and replay.
 `callable_priors.jl` checks distribution-factory shape registration and a
 complete-call Stan AST translation against the original Julia factory's
 density.
-`term_prior_semantics.jl` checks that both backends consume every resolved term
-prior address, reject unmatched or ambiguous addresses, and retain the exact
-density, RNG, support, dimension, keywords, and simplex transform of a custom
-multivariate simplex prior. `turing_descriptor.jl` checks the common
-`brm_descriptor`/`brm_output`/`brm_outputs` schema and Turing-backed execution;
-its descriptor intentionally has no Stan artifact or source highlights.
+`term_prior_semantics.jl` checks that both backends reject unmatched or
+ambiguous term-prior addresses and that the most specific address resolves.
 `stanblocks_term_prior_semantics.jl` checks custom simplex densities through
 BridgeStan and prior-only RNG draws, alongside unchanged Dirichlet spellings.
-`turing_shared_assignments.jl` checks that shared group effects reach dependent
-assignments before their consumers are evaluated.
-
 `adaptive_centering_public_api.jl` exercises ordinary scalar, shared-ID `K=1`,
 and correlated `K=3` blocks through the public wrapper at both compiled endpoints.
 It checks scalar/per-cell controls, independent BridgeStan scale/correlation
@@ -2199,8 +2168,8 @@ checked on its own: the pass works at four margins, and at five Enzyme raised
 pins `d3189970`, which contains that repair and declares libEnzyme `33709d12`.
 
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
-the partial-coordinate Jacobian, Turing/Enzyme versus StanBlocks/BridgeStan
-density and gradient parity, physical constrained quantities, and the
+the partial-coordinate Jacobian, StanBlocks/BridgeStan density and gradient
+consistency, physical constrained quantities, and the
 distributional model's two distinct zero-mean HSGP bindings.
 
 `adaptive_hsgp_level_centering.jl` checks online adaptive centering of a
@@ -2361,62 +2330,6 @@ at an older dependency checkout.
 `BridgeStan.jl` finds them via `$BRIDGESTAN`, falling back to
 `~/.bridgestan/bridgestan-<version>`, and downloads them if neither exists.
 
-The grouped Turing parity benchmark compares the same BRMI and constrained
-parameter point through StanBlocks/BridgeStan and Turing/Enzyme. Pass a case
-name to keep a hardening run focused; the centered-geometry gate is:
-
-```sh
-julia --project=test test/benchmark_turing_backend_groups.jl \
-  centered_correlated_poisson
-```
-
-It checks constrained density and mapped gradients before reporting warmed,
-allocation-aware construction, density, and gradient timings. Gradient setup
-is outside the hot loop: the harness prepares Enzyme once with
-`DifferentiationInterface.prepare_gradient`, reuses a caller-owned gradient
-buffer, and times only repeated `value_and_gradient!` calls. Sampling is omitted
-because this gate targets the lowering and density kernels.
-
-The multi-membership Turing parity benchmark exercises one weighted correlated
-`mm(...)` block through the direct Turing plan and StanBlocks emission:
-
-```sh
-julia --project=test test/benchmark_turing_multi_membership.jl
-```
-
-It checks constrained density and mapped Enzyme/BridgeStan gradients before
-reporting warmed, allocation-aware construction, density, and gradient timings.
-Like the grouped and crossed-group harnesses, it prepares Enzyme once, reuses a
-caller-owned gradient buffer, and measures the repeated hot call separately
-from construction. Sampling is omitted because this focused gate targets
-lowering and density kernels rather than sampler behavior.
-
-The dual-HSGP gradient benchmark exercises the source-faithful 133-row
-motorcycle model through generated Turing/DynamicPPL+Enzyme and compiled
-StanBlocks/BridgeStan targets:
-
-```sh
-BRM_HSGP_BENCH_OUTPUT=/tmp/turing-hsgp-gradient.tsv \
-  julia --project=test test/benchmark_turing_hsgp_gradients.jl
-```
-
-It prepares AD once, separates compilation/setup from hot calls, pins BLAS to
-one thread, and interleaves 21 batches of 1,000 value-and-gradient calls. By
-default it checks a deterministic physical point in fixed NCP, centered, and
-per-basis partial coordinates plus all three online source frames. Set
-`BRM_HSGP_BENCH_DRAW_DIR` to an extracted source-faithful posterior bundle to
-also check columns 1, 2500, 5000, 7500, and 10000 from the original 10,000-draw
-Stan fits. The TSV records normalized-density, absolute and scaled gradient,
-finite-difference, allocation, runtime-ratio, model/draw hash, and exact
-dependency provenance fields. Sampling is intentionally absent: this is the
-numerical/runtime gate that must pass before native Turing sampling.
-The committed source-faithful k=20 measurement is
-`test/receipts/turing_hsgp_gradients.tsv`; its `brm_revision` and
-`benchmark_sha256` columns bind every row to the exact measured implementation
-and harness.
-A committed `k=8` noncentered pilot is
-`test/receipts/turing_hsgp_gradients_k8_noncentered.tsv`.
-
 ## Why each constraint exists
 
 Every one of these was paid for by a failed resolve; none is stylistic.
@@ -2429,7 +2342,7 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   revision must contain WarmupHMC `9c642178720d5c294b9cead86fc8c82da5a5db09`:
   that floor retains Pathfinder's use of the target's own
   `logdensity_and_gradient` and admits Pathfinder 0.10.7, the first registered
-  release compatible with the test environment's Turing 0.46. Older and newer
+  release admitted by that dependency floor. Older and newer
   checkouts all report version 0.2.1, so the version number cannot express
   this. `setup_env.jl` resolves an exact published revision rather than a
   shared checkout's possibly stale local branch.
@@ -2509,14 +2422,10 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   StanBlocks by itself fails with `expected package
   BayesianRegressionModels to be registered`, while omitting a source-only or
   nested package produces the same error for that dependency.
-- **Serial extension precompilation is limited to Julia 1.10.0–1.10.11.**
-  `setup_env.jl` builds Pathfinder's sibling Turing extensions once with
-  `JULIA_NUM_PRECOMPILE_TASKS=1` on those runtimes, then runs the normal
-  parallel pass. Julia 1.10.12 includes the Pkg `loadable_exts` fix and skips
-  the serial phase, as do newer Julia versions. Setup suppresses instantiate's
-  automatic precompile and explicitly runs `Pkg.precompile()` once after
-  resolution. Host CPU and memory budgets still apply. See the `precompile`
-  skill for the current runtime policy and independent stall diagnostics.
+- **Setup precompiles after resolution.** `setup_env.jl` suppresses
+  instantiate's automatic precompile and explicitly runs `Pkg.precompile()`
+  once after resolution. Host CPU and memory budgets still apply. See the
+  `precompile` skill for current runtime policy and stall diagnostics.
 
 ## Why not `Pkg.test`
 
@@ -2531,16 +2440,13 @@ and no `[extras]`/`[targets]` in the root `Project.toml`:
   every supported Julia version, so carrying both would be two declarations of
   one dependency list.
 
-Six files are the reason this environment exists — they fail at their own
+These files illustrate why this environment exists — they fail at their own
 `using` line under `julia --project=.`, before any BRM code runs:
 
 | file | needs beyond the root project |
 | --- | --- |
-| `test/benchmark_turing_multi_membership.jl` | `BridgeStan`, `StanBlocks`, `Enzyme`, `DifferentiationInterface` |
-| `test/benchmark_turing_hsgp_gradients.jl` | `BridgeStan`, `StanBlocks`, `Turing`, `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
 | `test/adaptive_centering_bridgestan.jl` | `WarmupHMC`, `Enzyme` |
 | `test/adaptive_centering_warmuphmc.jl` | `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
-| `test/turing_adaptive_centering_warmuphmc.jl` | `Turing`, `WarmupHMC`, `Enzyme`, `DifferentiationInterface` |
 | `test/plate_stress.jl` | `BridgeStan` |
 
 There is no CI workflow for these on purpose: they need `stanc` and a BridgeStan
