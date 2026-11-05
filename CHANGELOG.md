@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.183
+## 0.2.184
 
 - Added: SVI units own ordinary sampled coordinates read only within that
   unit, with their authored priors, Jacobians and global hyperparameter
@@ -25,11 +25,28 @@ instead of failing at run time.
 - Compatibility: authored SVI queries use the batched preparation API from
   ReactiveKernels 0.1.84 / ReactiveKernelsPPL 0.1.96, sharing binding validation
   and packed exemplars while retaining one derivative workspace per bucket.
-- Compatibility: the test bootstrap pins Enzyme dogfood `0fa85df3`
-  (0.13.218, libEnzyme `c1743bf9`), whose ordinary Reverse differentiates a
-  unit's dormant scalar/vector branch. With it the test environment requires
-  OptimizationBase 5.10.1 and DiffEqBase 7.21.6, whose Enzyme extensions load
-  against that Enzyme.
+- Compatibility: a unit's dormant scalar/vector branch differentiates under
+  ordinary Reverse from Enzyme dogfood `0fa85df3` (repairs `74abe90` and
+  `7ac58eb`), which the test bootstrap's `d3189970` (libEnzyme `33709d12`)
+  contains. With that Enzyme the test environment requires OptimizationBase
+  5.10.1 and DiffEqBase 7.21.6, whose Enzyme extensions load against it.
+
+## 0.2.183
+
+- Model views label every authored member of a joint response as response data,
+  without exposing the synthetic joint operation as a model quantity.
+- Component input tables distinguish positional and keyword arguments, required
+  inputs and optional defaults. Defaults are shown as source, never evaluated.
+- Unbound builders label potential data inputs without claiming that sampled
+  names must be supplied as data; their role depends on binding.
+- Callable documentation includes helpers nested in formula containers such as
+  mixture-component lists, without executing those helpers.
+- Helpers from modules with no documentation registry no longer crash a view.
+- Requires HTMXObjects 0.1.60 for code-block PDF tagging without whitespace-only
+  PAC Quality warnings, preserving complete source and syntax highlighting.
+- Empty input inventories explain their absence. Component-instance and authored
+  documentation headings use readable paths while retaining exact tuple paths in
+  provenance. Unknown derived shapes explain the limits of inspection.
 
 ## 0.2.182
 
@@ -56,6 +73,7 @@ instead of failing at run time.
   `base=:prior_median` now visits component-local scalar priors recursively,
   resolves each call's bound inputs and preserves explicit-start precedence.
   Numeric bases retain every unaddressed value.
+
 
 ## 0.2.180
 

@@ -4,7 +4,7 @@
 
 [`brm_model_view`](@ref) returns a reusable HTMXObjects semantic tree with the
 declaration, data/parameter roles, value ranks and dimensions. Load HTMXObjects
-0.1.58 or later; no web demo app is needed:
+0.1.60 or later; no web demo app is needed:
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
@@ -23,8 +23,20 @@ Pass the bound model to the view:
 using HTMXObjects
 
 view = brm_model_view(model_view_demo; title="Regression model")
-repr("text/html", view)       # also text/markdown and text/plain
+repr("text/html", view)       # also text/markdown
 ```
+
+With HTMXObjects 0.1.60, the `text/plain` projection of a tabbed view exposes
+internal node representations. Use Markdown for readable text until the shared
+renderer fixes this limitation; HTML and PDF are unaffected.
+
+Callable docstrings can also contain Documenter `@ref` links. Those references
+currently become unresolved local links outside Documenter, and `export_site`
+reports an incomplete bundle when it encounters them. Check the export result
+before distributing a static bundle.
+Julia `jldoctest` fences also request an unavailable browser highlighting grammar
+in this version. The text remains visible, but a strict no-failed-requests check
+reports the missing asset.
 
 Use the result inside another semantic page or as an HTMXObjects route result.
 Source, roles/ranks and callable documentation have separate tabs. Callable
@@ -38,6 +50,8 @@ tab, using [`brm_documentation`](@ref). Each record includes its exact logical
 path and a disclosure with the attached statement, source file and line. The
 same records supply the source text and the PDF; the view stores no separate
 copy of documentation metadata.
+Headings use readable paths such as `left › inner`; the exact tuple path remains
+in provenance, preserving the distinction between nested names and dotted names.
 
 For a bound model containing reusable [components](components.md), the Source
 tab includes the actual reachable definitions from [`brm_components`](@ref).
@@ -48,18 +62,25 @@ plate iterations share a site. The defining module and authored docstring
 provenance remain available without compiling a backend.
 
 `brm_model_view(component)` also inspects a component definition and its
-reachable definitions without data. An unbound builder shows its own source;
-bind it to data to discover its component instances.
+reachable definitions without data. Its Component inputs tab distinguishes
+positional and keyword arguments, required inputs and optional defaults.
+Default expressions are shown as source without evaluation. An unbound builder
+shows its own source; bind it to data to discover its component instances.
 
 The view only inspects what it receives. It never prepares or fits a model and
 never evaluates a custom helper to discover its result shape. A bound `BRMI`
 provides concrete data shapes and distribution ranks where known. A `BRMBuilder`
-provides its source and required inputs; observation roles depend on binding.
+provides its source and potential data inputs; observation roles depend on
+binding, and a sampled name can remain latent when no data is supplied.
+Joint observations label each authored response column as `Data · response`;
+their synthetic operation is not a separate logical quantity. Empty input
+inventories explicitly say when there are no potential or bound data inputs.
 
 To request RK preparation explicitly, load `ReactiveKernels` and
 `ReactiveKernelsPPL` 0.1.93 or later, then call `brm_model_view(RKBRMI(model))`. For an existing
 Stan-backed descriptor, call `brm_model_view(descriptor)`. Preparation can enrich
 parameter dimensions; arbitrary derived values can still have unknown shapes.
+Unknown means no shape metadata is available, not that a value is scalar.
 `brm_descriptor` is Stan-backed, so it is not a generic inspection step for
 RK models with Julia helpers.
 
