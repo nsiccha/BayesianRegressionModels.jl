@@ -286,10 +286,13 @@ const PINS = [
     # Includes native row-dependent/shared mixture probabilities (0.1.90).
     # Also contains the adaptive pilot lifecycle introduced in RKPPL 0.1.91.
     # a9a7e9a2 (RKPPL 0.1.97): bound-data LKJ dimensions in reusable definitions.
-    # 6ea1d4ca (RKPPL 0.1.98) normalizes generated-module helpers in SMC
-    # checkpoint identities, so a fresh process resumes an adaptive pilot of
-    # an RKBRMI model whose priors call emitted definitions.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "6ea1d4cabb0df811b1a76919aa63c0160aef5acd"),
+    # b0ffcdc1 (RKPPL 0.1.98, on RK main through 6ea1d4ca) normalizes
+    # generated-module names in SMC checkpoint identities, so a fresh process
+    # resumes an adaptive pilot of an RKBRMI model whose law is an emitted
+    # binding (a gmrf field). It is a9a7e9a2 plus that fix only: main from
+    # 8e67ee82 breaks the selective carried-window route
+    # (test/smc_window_selective_api.jl; RK snag selective-carrie-1aa69e67).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "b0ffcdc1d915fc111988ddb6bceca8dabeede643"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

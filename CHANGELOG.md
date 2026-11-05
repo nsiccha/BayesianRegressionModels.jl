@@ -21,7 +21,9 @@ instead of failing at run time.
   failed with `UndefVarError: ##RKEmittedModels#…`. **Breaking:** the RK backend
   now requires ReactiveKernelsPPL 0.1.98, which normalizes generated-module
   names in SMC checkpoint identities; raise an environment pinning an older
-  ReactiveKernels commit to `6ea1d4ca` or later. Checkpoints written with
+  ReactiveKernels commit to `b0ffcdc1` or a descendant. (RK `main` from
+  `8e67ee82` currently breaks selective carried-window tuning,
+  `coordinates=:auto`; BRM's test pin stays on `b0ffcdc1` until that is fixed.) Checkpoints written with
   ReactiveKernelsPPL 0.1.97 or earlier are not migrated: resume them with their
   original versions or write a new initialization checkpoint.
 
