@@ -2148,7 +2148,13 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         for term in predictor.terms
             term.kind === :gmrf || continue
             locals = _rk_ast_gmrf!(defs, stmts, taken, bindings, term)
-            if term.options.neighbors === nothing
+            if term.options.multiresolution !== nothing
+                _rk_coordinate_record!(coordinates, (; kind=:gmrf_multiresolution,
+                    declaration=term.options.id, predictor=predictor.name,
+                    axes=term.options.source, state_axes=term.options.state_axes,
+                    multiresolution=term.options.multiresolution, fit=term.options.fit,
+                    correlation=term.options.correlation, locals))
+            elseif term.options.neighbors === nothing
                 _rk_coordinate_record!(coordinates, (; kind=:gmrf,
                     declaration=term.options.id, predictor=predictor.name,
                     axes=term.options.source, state_axes=term.options.state_axes,

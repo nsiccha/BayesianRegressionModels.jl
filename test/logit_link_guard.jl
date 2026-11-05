@@ -3,9 +3,8 @@
 # Snag logit-link-predi-e5d55be7: `logit(p) ~ 1 + x` binds `p` on the
 # inverse-link scale (`p = logistic(eta)`), so `y ~ BernoulliLogit(p)` applied
 # the link twice — SBBRMI emitted `p = inv_logit(logit_p)` next to
-# `y ~ bernoulli_logit(p)`, and TuringBRMI evaluated
-# `BernoulliLogit(logistic.(eta))`, collapsing expressible probabilities to
-# [0.5, 0.731] with no warning. Both backends now fail loudly through the
+# `y ~ bernoulli_logit(p)`, collapsing expressible probabilities to
+# [0.5, 0.731] with no warning. SBBRMI now fails loudly through the
 # shared `_brm_validate_logit_family_links`, while the sanctioned spellings —
 # probability families over linked predictors, logit families over
 # identity-link predictors, and explicit re-links — keep lowering.
@@ -17,7 +16,6 @@ using BayesianRegressionModels
 using StanBlocks
 using LogExpFunctions: logit, logistic
 using Distributions: Normal, logpdf
-using Turing
 import StanBlocks.stan: transpiles
 
 const BRM = BayesianRegressionModels
@@ -123,28 +121,4 @@ end
         y ~ Normal(log(v), s)
     end)(df))
     @test occursin("normal(log(v), s)", relinked)
-end
-
-@testset "TuringBRMI rejects logit families over linked predictors" begin
-    df = link_data()
-    @test_throws "double link" TuringBRMI((@brm begin
-        logit(p) ~ 1 + x
-        y ~ BernoulliLogit(p)
-    end)(df))
-    @test_throws "double link" TuringBRMI((@brm begin
-        logit(p) ~ 1 + x
-        count ~ BRM.BinomialLogit(trials, p)
-    end)(df))
-
-    # The sanctioned linked spelling keeps its single-link density.
-    backend = TuringBRMI((@brm begin
-        logit(p) ~ 1 + x
-        y ~ Bernoulli(p)
-    end)(df))
-    params = (; beta_pop=[0.25, -0.5])
-    eta = backend.plan.design.matrix * params.beta_pop
-    prior = sum(logpdf.(Normal(), params.beta_pop))
-    expected = prior + sum(logpdf.(BRM.BernoulliLogit.(eta), backend.plan.response))
-    @test Turing.logjoint(backend.model, params) ≈ expected atol=1e-12 rtol=1e-12
-    @test Turing.DynamicPPL.returned(backend.model, params).p == logistic.(eta)
 end

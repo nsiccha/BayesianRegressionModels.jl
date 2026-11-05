@@ -195,6 +195,19 @@ function _rk_plan_gmrf_term!(prepared, target, data, columns, taken; derived)
         columns[channel] = ones(Int, length(columns[sources[3]]))
         push!(sources, channel)
     end
+    if get(state, :multiresolution, nothing) !== nothing
+        fit = (; east=_rk_fit_twin!(derived, columns, taken, data, sources[1]),
+            north=_rk_fit_twin!(derived, columns, taken, data, sources[2]),
+            time=_rk_fit_twin!(derived, columns, taken, data, sources[3]),
+            channel=length(prepared.source) == 3 ?
+                _rk_fit_input!(derived, columns, taken, sources[4], [1]) :
+                _rk_fit_twin!(derived, columns, taken, data, sources[4]))
+        return _RKTermSpec(:gmrf, sources,
+            (; id, neighbors=nothing, multiresolution=state.multiresolution, fit,
+               source=prepared.source, correlation=state.correlation,
+               nchannels=length(state.channels), priors=_brm_term_prior_expressions(prepared),
+               state_axes=(; times=state.times, channels=state.channels)), id, id)
+    end
     if state.neighbors !== nothing
         # One build per plan, bound like the mesh matrices: a footprint costs far
         # more than a mesh, and each prepared query would otherwise rebuild it.
@@ -207,7 +220,7 @@ function _rk_plan_gmrf_term!(prepared, target, data, columns, taken; derived)
         end
         fitted = _rk_fit_input!(derived, columns, taken, Symbol(id, :_footprint), [support])
         return _RKTermSpec(:gmrf, sources,
-            (; id, neighbors=state.neighbors, fitted,
+            (; id, neighbors=state.neighbors, multiresolution=nothing, fitted,
                source=prepared.source, correlation=state.correlation,
                nchannels=length(state.channels), priors=_brm_term_prior_expressions(prepared),
                state_axes=(; times=state.times, channels=state.channels)),
@@ -220,7 +233,7 @@ function _rk_plan_gmrf_term!(prepared, target, data, columns, taken; derived)
     vertices = _rk_fit_input!(derived, columns, taken, state.vertices_source, [state.vertices])
     cells = _rk_fit_input!(derived, columns, taken, state.cells_source, [state.cells])
     _RKTermSpec(:gmrf, sources,
-        (; id, neighbors=nothing, vertices, cells, fit_time, fit_channel, source=prepared.source, correlation=state.correlation,
+        (; id, neighbors=nothing, multiresolution=nothing, vertices, cells, fit_time, fit_channel, source=prepared.source, correlation=state.correlation,
            nchannels=length(state.channels), priors=_brm_term_prior_expressions(prepared),
            state_axes=(; nvertices=state.nvertices, times=state.times, channels=state.channels)),
         id, id)
@@ -232,8 +245,14 @@ function _rk_ast_gmrf!(definitions, statements, taken, bindings, term)
     rows = _rk_ast_fresh_name(string(options.id, "_rows"), taken)
     reader = _rk_value_callee!(bindings, brm_gmrf_rows, taken)
     footprint = options.neighbors !== nothing
-    law = _rk_value_callee!(bindings, footprint ? _BRMGMRFVecchiaLaw : _BRMGMRFLaw, taken)
-    fit = if footprint
+    multiresolution = options.multiresolution !== nothing
+    law = _rk_value_callee!(bindings, multiresolution ? _BRMGMRFMultiresolutionLaw :
+        footprint ? _BRMGMRFVecchiaLaw : _BRMGMRFLaw, taken)
+    fit = if multiresolution
+        Expr(:call, _rk_value_callee!(bindings, brm_gmrf_multiresolution_support, taken),
+            options.fit.east, options.fit.north, options.fit.time, options.fit.channel,
+            options.multiresolution)
+    elseif footprint
         Expr(:ref, options.fitted, 1)
     else
         Expr(:call, _rk_value_callee!(bindings, brm_gmrf_support, taken),
@@ -249,7 +268,11 @@ function _rk_ast_gmrf!(definitions, statements, taken, bindings, term)
     correlation = options.correlation === nothing ?
         _rk_ast_identity_factor(options.nchannels) : _rk_ast_level_factor_value(options.correlation)
     L = _rk_block_argument!(block, :L, correlation)
-    locals = _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, reads, L; footprint)
+    multiresolution_functions = multiresolution ?
+        (; basis=_rk_value_callee!(bindings, _rk_gmrf_multiresolution_basis(), taken),
+           reader=_rk_gmrf_multiresolution_reader!(definitions, taken, bindings)) : nothing
+    locals = _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, reads, L;
+        footprint, multiresolution_functions)
     push!(statements, Expr(:call, :~, options.id, locals.call))
     (; locals.sigma, locals.spatial_length, locals.temporal_length, locals.field,
        geometry, support, rows, priors=prior)
@@ -266,7 +289,7 @@ _rk_ast_identity_factor(n) = Expr(:call, :hcat, (Expr(:vect, (i == j ? 1.0 : 0.0
 # declares its field bare, `field ~ law(...)`, its shape the law's sampling
 # geometry (RKPPL cell submodels bind bare names only).
 function _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, reads, L;
-        cell::Bool=false, accessors=nothing, footprint::Bool=false)
+        cell::Bool=false, accessors=nothing, footprint::Bool=false, multiresolution_functions=nothing)
     sigma = _rk_block_local!(block, :sigma)
     spatial_length = _rk_block_local!(block, :spatial_length)
     temporal_length = _rk_block_local!(block, :temporal_length)
@@ -284,7 +307,12 @@ function _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, re
     access(name) = accessors === nothing ? _rk_ast_property(reads, name) :
         Expr(:., getproperty(accessors, name), Expr(:tuple, reads))
     # A footprint field has a state at every read, so a row reads that state.
-    read = if footprint
+    read = if multiresolution_functions !== nothing
+        weights = _rk_block_local!(block, :weights)
+        push!(block.statements, Expr(:(=), weights,
+            Expr(:call, multiresolution_functions.basis, spatial_length, geometry)))
+        Expr(:call, multiresolution_functions.reader, field, weights, geometry, access(:read))
+    elseif footprint
         Expr(:ref, field, access(:index))
     else
         Expr(:call, :.+, (Expr(:call, :.*, access(Symbol(:weight, j)),
@@ -385,8 +413,8 @@ function _rk_kernel_cell_formulas(@nospecialize(brmi::BRMI), program, kernel, sc
                 "terms in an independent cell formula are not lowered on RK yet")
         term = only(fields)
         arguments = _brm_gmrf_arguments(term)
-        arguments.neighbors === nothing || error(
-            "$prefix: cell field `$target` uses neighbors=; a footprint field is one model-scope field")
+        arguments.mesh !== nothing || error(
+            "$prefix: cell field `$target` needs mesh=; read-support forms are model-scope fields")
         positional = (name.(arguments.axes)..., name(arguments.time),
             (arguments.channel === nothing ? () : (name(arguments.channel),))...)
         sources = map(positional) do param
@@ -530,3 +558,42 @@ end
 
 brm_gmrf_identity_factor(geometry) = Matrix{Float64}(I, geometry.nchannels, geometry.nchannels)
 
+
+struct _BRMGMRFMultiresolutionLaw{S,T,L,G}
+    spatial_length::S
+    temporal_length::T
+    correlation_factor::L
+    geometry::G
+end
+
+struct _BRMGMRFMultiresolutionSupport{C}
+    geometry::_BRMGMRFMultiresolution
+    channels::C
+end
+function brm_gmrf_multiresolution_support(east, north, time, channel, rank)
+    channels = _brm_fit_levels(channel)
+    _BRMGMRFMultiresolutionSupport(
+        _brm_multiresolution_support(east, north, time, length(channels); rank), channels)
+end
+function brm_gmrf_rows(s::_BRMGMRFMultiresolutionSupport, east, north, time, channel)
+    reads, _ = _brm_multiresolution_rows(s.geometry, s.channels, east, north, time, channel)
+    (; read=reads)
+end
+# The extension provides the RK-owned derivative rule and visible read graph.
+function _rk_gmrf_multiresolution_basis end
+
+# Emit the weighted read as a visible plate and scalar reduction. The two
+# ordinary helpers read data only; all parameter gathers stay in the graph.
+function _rk_gmrf_multiresolution_reader!(definitions, taken, bindings)
+    reader = _rk_ast_fresh_name("brm_gmrf_multiresolution_read", taken)
+    coordinate = _rk_value_callee!(bindings, _brm_multiresolution_read_coordinate, taken)
+    domain = _rk_value_callee!(bindings, _brm_multiresolution_basis_range, taken)
+    push!(definitions, :(ReactiveKernels.@kernel function $reader(field, weights, geometry, reads)
+        values = plate(reads) do read
+            sum((weights[j] * field[$coordinate(geometry, read, j)]
+                for j in $domain(geometry, read)); init=0.0)
+        end
+        return values
+    end))
+    reader
+end

@@ -15,7 +15,6 @@ using LinearAlgebra
 using BayesianRegressionModels
 using StanBlocks
 using LogDensityProblems
-using Turing: Turing   # loads the direct Turing backend extension
 using Distributions: Exponential, Gamma, InverseGamma, LKJCholesky, Normal, TDist,
     Cauchy, MvNormal, logpdf, quantile, cdf
 
@@ -492,7 +491,6 @@ end
         y ~ Normal(mu, 1)
     end
     @test_throws "block-wide in this version" build(per_predictor)
-    @test_throws "does not implement Student-t" TuringBRMI(fixed_builder(df))
     stratified = @brm begin
         mu ~ 1 + (1 | p | gr(subject, by=arm))
         ranef(:, p) ~ TDist(3)

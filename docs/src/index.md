@@ -5,7 +5,7 @@ layout: home
 hero:
   name: BayesianRegressionModels.jl
   text: A brms-shaped formula DSL for Julia
-  tagline: Same formula grammar, but your columns do not all have to come from one equal-length data frame. Runs through ReactiveKernelsPPL or Turing, and can transpile to Stan through StanBlocks.
+  tagline: Same formula grammar, but your columns do not all have to come from one equal-length data frame. Runs through ReactiveKernelsPPL, and transpiles to Stan through StanBlocks.
   actions:
     - theme: brand
       text: Gallery
@@ -31,14 +31,12 @@ representation, then lowers into a backend-specific executor:
   NLMEEstimation's posthoc, FOCE(I), and SAEM estimators. The
   [PK method comparison](https://nsiccha.github.io/NLMEEstimation.jl/dev/pk-comparison)
   runs those estimators and full joint WarmupHMC on one model.
-- [`TuringBRMI`](@ref) — direct Turing / `DynamicPPL.Model` execution for the
-  [generic backend capabilities and support contract](turing-backend.md).
 - [`SBBRMI`](@ref) — StanBlocks → Stan source, fit via Pathfinder or full
   warmup HMC (`WarmupHMC.adaptive_warmup_mcmc`).
 
 The [BRM feature atlas](feature-atlas.md) gives every executable example the
-same build-generated four-way view: BRM authoring, the emitted StanBlocks model,
-generated Stan, and the selected Turing model.
+same build-generated view: BRM authoring, the parsed IR, the emitted StanBlocks
+model, and generated Stan.
 
 The [Warfarin PK/PD examples](warfarin.md) render both the faithful public
 two-stage workflow and a joint one-posterior model where shared latent PK
@@ -149,9 +147,9 @@ values of ordinary linear predictors as arguments and reading another vector's
 entries per group through a [`groups`](@ref) binding. In brms this
 class of model is `nlf()` plus manual `data2` bookkeeping, or Stan by hand.
 
-Two smaller gains: [`VBRMI`](@ref) gives you a pure-Julia
-`LogDensityProblems` object with no Stan toolchain in the loop, and
-[`brm_descriptor`](@ref) exposes one reflectable description of everything the
+Two smaller gains: [`RKBRMI`](@ref) gives you a pure-Julia
+`LogDensityProblems` object (`rk_logdensity_problem`) with no Stan toolchain
+in the loop, and [`brm_descriptor`](@ref) exposes one reflectable description of everything the
 model emits, so a consumer mounts a fitted model without keeping a parallel
 registry of parameter names.
 
@@ -207,8 +205,7 @@ specificity reaching one parameter, and unknown addresses, error. The first ship
 `Normal(location, scale)` overrides and retains the existing
 `pop_<predictor>_beta_pop` vector parameter, its `popcoefnames` labels, and
 descriptor provenance. Inspect the captured formula statements with
-`effect_priors(brmi)`. This surface belongs to `SBBRMI`; `VBRMI` does not
-implement it.
+`effect_priors(brmi)`. This surface belongs to `SBBRMI`.
 
 ### Categorical contrasts
 

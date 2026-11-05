@@ -1,14 +1,14 @@
 # BRM feature atlas
 
-Every executable example in the user guide has the same four semantic views:
-the BRM declaration, the StanBlocks model BRM emitted, the complete Stan source
-emitted from that model, and the Turing model selected directly from the BRM.
+Every executable example in the user guide has the same views: the BRM
+declaration, the parsed IR, the StanBlocks model BRM emitted, and the complete
+Stan source emitted from that model.
 Choose a tab for one view, or **Compare** and select any two or more views for a
 side-by-side reading. If a backend does not support an example, its pane remains
 present and shows the exact construction error produced by the current build.
 
 Nothing below is copied output. The docs build evaluates the displayed source
-and derives all three emission panes from it.
+and derives all its generated panes from it.
 
 ## Gaussian population model and effect priors
 
@@ -385,8 +385,7 @@ end)((;
 
 ## Spline term
 
-This smooth example is supported by both backends. The Turing pane shows the
-native spline submodel selected directly from the shared BRMI preparation.
+This smooth example is supported by both backends.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""

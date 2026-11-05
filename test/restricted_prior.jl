@@ -4,15 +4,15 @@
 # prior in its favour (decision 0q18o98, todo 2026-10-29T23-49-52-862-1e4wxe4).
 #
 # Covered: the spelling rewrites to the declaration-bound form the backends
-# read; the keyword form warns, `restricted` and `truncated` do not; Turing's
-# log joint is the plain kernel; RK emits RKPPL's `restricted`; SBBRMI declares
+# read; the keyword form warns, `restricted` and `truncated` do not; RK emits
+# RKPPL's `restricted`; SBBRMI declares
 # the bounds and keeps the plain statement (StanBlocks 0.2.7's `restricted`,
 # todo 2026-10-29T23-49-53-197-18t54wh); malformed spellings are refused.
 #
 # Run: julia --project=test test/restricted_prior.jl
 
 using Test
-using BayesianRegressionModels, Distributions, Turing, StanBlocks
+using BayesianRegressionModels, Distributions, StanBlocks
 using ReactiveKernels, ReactiveKernelsPPL
 const BRM = BayesianRegressionModels
 
@@ -77,20 +77,6 @@ end
         y ~ Normal(mu, 1.0)
     end
     @test operations(@test_logs with_restricted(data)) == operations(with_keywords(data))
-end
-
-@testset "Turing evaluates the plain kernel" begin
-    model = @brm begin
-        location ~ Normal(0, 1)
-        bounded ~ restricted(Normal(0.2, 0.7), location, location + 2)
-        y ~ Normal(bounded, 1)
-    end
-    backend = TuringBRMI(model(DATA))
-    for (location, bounded) in ((0.3, 1.1), (-0.4, 0.0))
-        expected = logpdf(Normal(0, 1), location) + logpdf(Normal(0.2, 0.7), bounded) +
-            sum(logpdf.(Normal(bounded, 1), DATA.y))
-        @test Turing.logjoint(backend.model, (; location, bounded)) ≈ expected
-    end
 end
 
 @testset "RK emits RKPPL's restricted" begin

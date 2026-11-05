@@ -27,7 +27,9 @@ _brmd_snapshot(x::Expr) = (; syntax=x.head, arguments=Tuple(
 # as a dense array, making descriptions quadratic in the vertex count.
 function _brmd_snapshot(term::_BRMPreparedTerm{typeof(gmrf)})
     s = term.state
-    state = s.neighbors === nothing ?
+    state = get(s, :multiresolution, nothing) !== nothing ?
+        (; s.target, s.multiresolution, s.times, s.channels, s.correlation,
+            s.sigma_prior, s.spatial_prior, s.temporal_prior) : s.neighbors === nothing ?
         (; s.target, s.vertices_source, s.cells_source, s.vertices, s.cells,
             s.nvertices, s.layout, s.correlation,
             s.sigma_prior, s.spatial_prior, s.temporal_prior) :

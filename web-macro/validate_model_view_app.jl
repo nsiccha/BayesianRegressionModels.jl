@@ -20,14 +20,6 @@ using BRMMacroWeb, BayesianRegressionModels, HTMXObjects, Test
     @test response.status == 200
     @test occursin("BRM", String(response.body))
 
-    # NamedColumn carries its parent as a value, not a type parameter.
-    # Exercise each legacy expression-card role through that public payload.
-    for (payload, bold) in ((BRMMacroWeb.DataColumn([1.]), false),
-            (BRMMacroWeb.MissingColumn(), true), (1., false))
-        column = BRMMacroWeb.NamedColumn(:quantity, payload)
-        rendered = repr("text/html", BRMMacroWeb._html_expr(column))
-        @test occursin("quantity", rendered)
-        @test occursin("<strong", rendered) == bold
-    end
+
 end
 println("MODEL_VIEW_APP_ACCEPTANCE_COMPLETE")

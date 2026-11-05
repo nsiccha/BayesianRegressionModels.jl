@@ -106,31 +106,6 @@
             h.h3("4. eval — BRMI value (parsed model)"),
             brmi_card(__parent__.context!().run.brmi),
         )
-        vbrmi = let r = __parent__.context!().run
-            fd_summary = r.n_dead == 0 ?
-                h.span("logdensity + FD check: $(r.dim)/$(r.dim) active ✓"; data_status="success") :
-                h.span("logdensity + FD check: $(r.n_dead) dead param(s)"; data_status="error")
-            fd_body = h.div(
-                h.p("dim = ", r.dim, ", logdensity = ", r.ldp),
-                isempty(r.dead) ? "" :
-                    h.p(; data_status="error")("dead param indices: ", r.dead),
-                h.pre(r.grad),
-            )
-            h.section(
-                h.h3("5. VBRMI — materialized action (blocks, dim, columns)"),
-                vbrmi_card(r.vbrmi),
-                h.details(h.summary(fd_summary), fd_body),
-            )
-        end
-        bench = h.section(
-            h.h3("6. Chairmarks @be — per-step"),
-            # `h.pre(b)` would call 2-arg show -> `Benchmark([Sample(...)...])`.
-            # Force the 3-arg `text/plain` show to get Chairmarks' pretty
-            # multi-line summary (min/median/quantiles/etc.).
-            [h.article(h.header(label),
-                       h.pre(sprint(show, MIME("text/plain"), b)))
-             for (label, b) in __parent__.context!().run.benches]...,
-        )
         slic_model = let slic = __parent__.context!().run.sbbrmi
             h.section(
                 h.h3("5a. SlicModel — SBBRMI @slic body"),
@@ -407,12 +382,10 @@
                 "Stages 1-4 are the macro frontend (",
                 h.code("Meta.parse"), " -> ", h.code("parse!"), " -> ", h.code("_brm"),
                 " let-block -> ", h.code("eval"), " -> ", h.code("BRMI"),
-                "). From the ", h.code("BRMI"), " you can branch into either ",
-                h.code("VBRMI"), " (5/6 -- vectorized Julia LogDensityProblem + ",
-                h.code("Chairmarks"), " benchmark; mostly a stub right now) or the ",
-                "StanBlocks backend (5a-c: ", h.code("SlicModel"), " -> ",
-                h.code("StanCode"), " -> ", h.code("StanCompile"),
-                "; 6a-d': instantiate / eval / shapes / generate / fit via Pathfinder or full warmup).",
+                "). The StanBlocks pipeline lowers ", h.code("BRMI"), " to ",
+                h.code("SlicModel"), " -> ", h.code("StanCode"), " -> ",
+                h.code("StanCompile"),
+                "; then instantiate, evaluate, inspect shapes, generate, and fit via Pathfinder or full warmup.",
             ),
             h.aside(; class="htmxo-status-banner", data_status="muted")(
                 h.small(
@@ -531,7 +504,7 @@
                 # click; the response replaces the inner HTML of
                 # `#brm-macro-output`. Labels match the previous button
                 # row so the numeric prefix carries the macro-frontend
-                # / VBRMI / SB-branch / SB-fit grouping. `hx_push_url`
+                # / SB-branch / SB-fit grouping. `hx_push_url`
                 # so the address bar reflects the active tab; the
                 # server gates `force=true` on `is_htmx(__req__)` so a
                 # reload of that pushed URL re-attaches to the IP cache
@@ -541,8 +514,6 @@
                     "2. Transform"         => string(query_url(__self__/"stage/transform";        force=true)),
                     "3. Wrap"              => string(query_url(__self__/"stage/wrap";             force=true)),
                     "4. BRMI"              => string(query_url(__self__/"stage/brmi";             force=true)),
-                    "5. VBRMI"             => string(query_url(__self__/"stage/vbrmi";            force=true)),
-                    "6. Benchmark"         => string(query_url(__self__/"stage/bench";            force=true)),
                     "5a. SlicModel"        => string(query_url(__self__/"stage/slic_model";       force=true)),
                     "5b. StanCode"         => string(query_url(__self__/"stage/stan_code";        force=true)),
                     "5c. StanCompile"      => string(query_url(__self__/"stage/stan_compile";     force=true)),

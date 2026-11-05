@@ -588,3 +588,360 @@ end
         check_consumer_point(problem, point, oracle)
     end
 end
+
+module ScopedNamed
+using BayesianRegressionModels, Distributions
+
+"Two related curves from one shared pair of coefficients."
+@brm function bounds(x, scale)
+    a ~ Normal(0, scale)
+    b ~ Normal(1, 0.2)
+    lo = a + b * x
+    return (; lo, hi = a - b * x)
+end
+
+# Two linear predictors whose unit effects share one correlation block.
+@brm function kinetics(x, unit)
+    recovery ~ 1 + x + (1 | p | unit)
+    decay ~ 1 + (1 | p | unit)
+    effect(recovery, :) ~ Normal(0, 1)
+    effect(decay, :) ~ Normal(0, 1)
+    return (; recovery, decay)
+end
+
+@brm function shifted(x, scale)
+    inner ~ bounds(x, scale)
+    shift ~ Normal(0, 0.3)
+    return (up = inner.lo + shift, down = inner.hi)
+end
+
+const fields = @brm begin
+    k ~ bounds(x, scale)
+    y1 ~ Normal(k.lo, 0.5)
+    y2 ~ Normal(k.lo + k.hi, 0.5)
+    scale ~ Exponential(1)
+end
+const offset_field = @brm begin
+    k ~ bounds(x, scale)
+    log(q) ~ 1 + offset(k.hi)
+    effect(q, Intercept) ~ Normal(0, 1)
+    y1 ~ Normal(q, 0.5)
+    y2 ~ Normal(k.lo, 0.5)
+    scale ~ Exponential(1)
+end
+# A parent binding may take the field's own name; the plate slices it.
+const plate_fields = @brm begin
+    k ~ bounds(x, scale)
+    lo = k.lo
+    hi = k.hi
+    @plate for i in eachindex(y1)
+        y1[i] ~ Normal(2 * lo[i], 0.5)
+        y2[i] ~ Normal(hi[i], 0.5)
+    end
+    scale ~ Exponential(1)
+end
+const nested_fields = @brm begin
+    o ~ shifted(x, scale)
+    y1 ~ Normal(o.up, 0.5)
+    y2 ~ Normal(o.down, 0.5)
+    scale ~ Exponential(1)
+end
+const kinetic_fields = @brm begin
+    kin ~ kinetics(x, unit)
+    recovery = kin.recovery
+    y1 ~ Normal(recovery, 0.5)
+    y2 ~ Normal(kin.decay, 0.5)
+end
+const kinetic_expanded = @brm begin
+    recovery ~ 1 + x + (1 | p | unit)
+    decay ~ 1 + (1 | p | unit)
+    effect(recovery, :) ~ Normal(0, 1)
+    effect(decay, :) ~ Normal(0, 1)
+    y1 ~ Normal(recovery, 0.5)
+    y2 ~ Normal(decay, 0.5)
+end
+# A grouped field is row-aligned through its label input: a formula offset.
+const kinetic_offset = @brm begin
+    kin ~ kinetics(x, unit)
+    y1 ~ Normal(kin.recovery, 0.5)
+    log(q) ~ 1 + offset(kin.decay)
+    effect(q, Intercept) ~ Normal(0, 1)
+    y2 ~ Normal(q, 0.5)
+end
+const kinetic_offset_expanded = @brm begin
+    recovery ~ 1 + x + (1 | p | unit)
+    decay ~ 1 + (1 | p | unit)
+    effect(recovery, :) ~ Normal(0, 1)
+    effect(decay, :) ~ Normal(0, 1)
+    y1 ~ Normal(recovery, 0.5)
+    log(q) ~ 1 + offset(decay)
+    effect(q, Intercept) ~ Normal(0, 1)
+    y2 ~ Normal(q, 0.5)
+end
+const unknown_field = @brm begin
+    k ~ bounds(x, scale)
+    y1 ~ Normal(k.mid, 0.5)
+    scale ~ Exponential(1)
+end
+const bare_read = @brm begin
+    k ~ bounds(x, scale)
+    y1 ~ Normal(k, 0.5)
+    scale ~ Exponential(1)
+end
+const cell_call = @brm begin
+    @plate for i in eachindex(x)
+        cell ~ bounds(x[i], scale)
+        y1[i] ~ Normal(cell.lo, 0.5)
+    end
+    scale ~ Exponential(1)
+end
+end
+
+@stestset "a component returns named values read as fields on both backends" begin
+    data = (; x=[-0.4, 0.2, 0.7], y1=[0.1, 0.4, 0.8], y2=[0.3, -0.1, 0.2])
+    @test ScopedNamed.bounds.result isa NamedTuple
+    @test keys(ScopedNamed.bounds.result) == (:lo, :hi)
+    @test brm_source(ScopedNamed.bounds) == brm_source(brm(brm_source(ScopedNamed.bounds);
+        mod=ScopedNamed))
+    lo(u, ia, ib) = u[ia] .+ u[ib] .* data.x
+    hi(u, ia, ib) = u[ia] .- u[ib] .* data.x
+    prior(u, ia, ib, is) = logpdf(Exponential(1), exp(u[is])) + u[is] +
+        logpdf(Normal(0, exp(u[is])), u[ia]) + logpdf(Normal(1, 0.2), u[ib])
+    for (label, builder, likelihood) in (
+            ("fields", ScopedNamed.fields, (u, ia, ib) ->
+                sum(logpdf.(Normal.(lo(u, ia, ib), 0.5), data.y1)) +
+                sum(logpdf.(Normal.(lo(u, ia, ib) .+ hi(u, ia, ib), 0.5), data.y2))),
+            ("plate", ScopedNamed.plate_fields, (u, ia, ib) ->
+                sum(logpdf.(Normal.(2 .* lo(u, ia, ib), 0.5), data.y1)) +
+                sum(logpdf.(Normal.(hi(u, ia, ib), 0.5), data.y2))))
+        println("NAMED_COMPONENT=", label); flush(stdout)
+        model = builder(data)
+        rk, problem = consumer_problem(model)
+        names = coordinate_names(rk.model.layout)
+        ia, ib, is = coordinate(names, Symbol("k.a")), coordinate(names, Symbol("k.b")),
+            coordinate(names, :scale)
+        @test length(names) == 3
+        oracle(u) = prior(u, ia, ib, is) + likelihood(u, ia, ib)
+        sb = SBBRMI(model; mod=ScopedNamed, total_groups=())
+        @test occursin("tuple(vector[x_n], vector[x_n]) k", stan_code(sb))
+        stan = consumer_stan(model, "named-component-" * label; mod=ScopedNamed)
+        mapping = [pair.rk => pair.stan for pair in
+            brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan.model)).pairs]
+        for point in (zeros(3), [-0.2, 0.1, 0.3])
+            check_consumer_point(problem, point, oracle)
+            check_consumer_stan(problem, stan, mapping, rk, point)
+        end
+    end
+    for (label, builder, count) in (("offset", ScopedNamed.offset_field, 4),
+            ("nested", ScopedNamed.nested_fields, 4))
+        println("NAMED_COMPONENT=", label); flush(stdout)
+        model = builder(data)
+        rk, problem = consumer_problem(model)
+        @test rk.model.layout.total == count
+        sb = SBBRMI(model; mod=ScopedNamed, total_groups=())
+        stan = consumer_stan(model, "named-component-" * label; mod=ScopedNamed)
+        mapping = [pair.rk => pair.stan for pair in
+            brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan.model)).pairs]
+        for point in (zeros(count), collect(range(-0.3, 0.4; length=count)))
+            check_consumer_stan(problem, stan, mapping, rk, point)
+        end
+    end
+    d = brm_descriptor(SBBRMI(ScopedNamed.nested_fields(data); mod=ScopedNamed,
+        total_groups=()))
+    @test brm_output(d, :up; submodel=:o).name === :o_component_result_up
+    @test brm_output(d, :hi; submodel=(:o, :inner)).name === :o_inner_component_result_hi
+    @test brm_output(d, :lo; submodel=(:o, :inner)).name === :o_inner_lo
+    @test brm_output(d, :shift; submodel=:o).kind === :parameter
+end
+
+@stestset "correlated predictors returned by one component equal their expansion" begin
+    data = (; x=[-0.4, 0.2, 0.7, 0.1, -0.3], y1=[0.1, 0.4, 0.8, 0.0, -0.2],
+        y2=[0.3, -0.1, 0.2, 0.5, 0.1], unit=["a", "b", "a", "c", "b"])
+    for (label, component_builder, expanded_builder, count) in (
+            ("fields", ScopedNamed.kinetic_fields, ScopedNamed.kinetic_expanded, 12),
+            ("offset", ScopedNamed.kinetic_offset, ScopedNamed.kinetic_offset_expanded, 13))
+        println("NAMED_KINETICS=", label); flush(stdout)
+        component, expanded = component_builder(data), expanded_builder(data)
+        # RK: the call scopes the expansion's coordinates; nothing else changes.
+        rk_c, problem_c = consumer_problem(component)
+        rk_e, problem_e = consumer_problem(expanded)
+        names_c = coordinate_names(rk_c.model.layout)
+        names_e = coordinate_names(rk_e.model.layout)
+        @test length(names_c) == length(names_e) == count
+        # Parent coordinates keep their names; the call scopes the rest.
+        order = [something(findfirst(==(Symbol("kin.", n)), names_c),
+            findfirst(==(n), names_c)) for n in names_e]
+        # Stan: the grouping column is the component's own index data, and the
+        # carriers are the expansion's under the call prefix.
+        stan_c = consumer_stan(component, "named-kinetics-component-" * label; mod=ScopedNamed)
+        stan_e = consumer_stan(expanded, "named-kinetics-expanded-" * label; mod=ScopedNamed)
+        stan_names_c = BridgeStan.param_unc_names(stan_c.model)
+        stan_names_e = BridgeStan.param_unc_names(stan_e.model)
+        stan_order = [something(findfirst(==("kin_" * n), stan_names_c),
+            findfirst(==(n), stan_names_c)) for n in stan_names_e]
+        sb_e = SBBRMI(expanded; mod=ScopedNamed, total_groups=())
+        mapping = [pair.rk => pair.stan for pair in
+            brm_coordinate_transport(rk_e, sb_e, stan_names_e).pairs]
+        # The component's own transport pairs the call's random-effect block
+        # (scales, factor and standardized draws by level label) exactly as
+        # the expansion's transport does, under the call prefix.
+        sb_c = SBBRMI(component; mod=ScopedNamed, total_groups=())
+        transport_c = brm_coordinate_transport(rk_c, sb_c, stan_names_c)
+        mapping_c = [pair.rk => pair.stan for pair in transport_c.pairs]
+        rk_index_e = Dict(n => i for (i, n) in enumerate(names_e))
+        stan_index_e = Dict(n => i for (i, n) in enumerate(stan_names_e))
+        @test Set(mapping_c) == Set(names_c[order[rk_index_e[rk]]] =>
+            stan_names_c[stan_order[stan_index_e[stan]]] for (rk, stan) in mapping)
+        @test Set(string(pair.address.level) for pair in transport_c.pairs
+            if pair.address.kind === :ranef_z && pair.address.scope == (:kin,)) ==
+            Set(data.unit)
+        for point in (zeros(count), collect(range(-0.3, 0.4; length=count)))
+            check_consumer_stan(problem_c, stan_c, mapping_c, rk_c, point)
+            @test brm_stan_point_to_rk(transport_c,
+                brm_rk_point_to_stan(transport_c, point)) == point
+            @test brm_check_coordinate_transport(transport_c, rk_c, stan_c.model,
+                point).max_error <= 1e-12
+            value_c, gradient_c = LogDensityProblems.logdensity_and_gradient(problem_c, point)
+            value_e, gradient_e = LogDensityProblems.logdensity_and_gradient(problem_e,
+                point[order])
+            @test value_c ≈ value_e atol=2e-11 rtol=2e-11
+            @test gradient_c[order] ≈ gradient_e atol=2e-10 rtol=2e-10
+            gc, ge = similar(point), similar(point)
+            sc, _ = BridgeStan.log_density_gradient!(stan_c.model, point, gc;
+                propto=false, jacobian=true)
+            se, _ = BridgeStan.log_density_gradient!(stan_e.model, point[stan_order], ge;
+                propto=false, jacobian=true)
+            @test sc ≈ se atol=2e-11 rtol=2e-11
+            @test gc[stan_order] ≈ ge atol=2e-10 rtol=2e-10
+            check_consumer_stan(problem_e, stan_e, mapping, rk_e, point[order])
+        end
+    end
+end
+
+module ScopedBlocks
+using BayesianRegressionModels, Distributions
+
+# One correlated block over two linear predictors whose margins have
+# different scale laws, so each margin's scale is its own RK declaration.
+@brm function linked_rates(unit)
+    log(rise) ~ 1 + (1 | rates | unit)
+    log(fall) ~ 1 + (1 | rates | unit)
+    effect(rise, Intercept) ~ Normal(-1.8, 0.4)
+    effect(fall, Intercept) ~ Normal(-1.6, 0.3)
+    sd(rise, rates) ~ Exponential(1)
+    sd(fall, rates) ~ Exponential(2)
+    cor(:, rates) ~ LKJCholesky(2, 2)
+    return rise + fall
+end
+
+@brm function wrapped_rates(unit)
+    inner ~ linked_rates(unit)
+    return inner
+end
+
+@brm function arm_slopes(x, subject, arm)
+    mu ~ 1 + x + (1 + x | p | gr(subject, by = arm))
+    effect(mu, :) ~ Normal(0, 1)
+    return mu
+end
+
+@brm function heavy_sites(site)
+    mu ~ 1 + (1 | heavy | site)
+    effect(mu, :) ~ Normal(0, 1)
+    ranef(:, heavy) ~ TDist(4)
+    return mu
+end
+
+# Repeated and nested calls over different groupings and level counts, beside
+# a model-scope block over yet another grouping.
+const rates = @brm begin
+    left ~ linked_rates(unit_l)
+    right ~ linked_rates(unit_r)
+    nested ~ wrapped_rates(unit_n)
+    mu ~ 1 + (1 | g)
+    effect(mu, :) ~ Normal(0, 1)
+    y_l ~ Normal(left, sigma)
+    y_r ~ Normal(right, sigma)
+    y_n ~ Normal(nested, sigma)
+    z ~ Normal(mu, sigma)
+    sigma ~ Exponential(1)
+end
+
+const strata = @brm begin
+    a ~ arm_slopes(x, subject, arm)
+    b ~ heavy_sites(site)
+    y ~ Normal(a, sigma)
+    y2 ~ Normal(b, sigma)
+    sigma ~ Exponential(1)
+end
+end
+
+@stestset "random-effect blocks declared inside components pair by call and level" begin
+    for (label, builder, data, levels) in (
+            ("rates", ScopedBlocks.rates,
+                (; unit_l=["a", "a", "b", "c"], unit_r=["u", "v", "v"],
+                    unit_n=["p", "q", "p", "r", "s"], g=["x", "y", "x", "y"],
+                    y_l=[0.3, 0.4, 0.2, 0.5], y_r=[0.1, 0.6, 0.2],
+                    y_n=[0.2, 0.3, 0.1, 0.4, 0.5], z=[0.1, 0.2, 0.3, 0.4]),
+                [(:left,) => ["a", "b", "c"], (:right,) => ["u", "v"],
+                    (:nested, :inner) => ["p", "q", "r", "s"]]),
+            ("strata", ScopedBlocks.strata,
+                (; x=[-0.4, 0.2, 0.7, 0.1, -0.3, 0.5],
+                    subject=["s1", "s2", "s1", "s3", "s4", "s3"],
+                    arm=["t", "c", "t", "c", "t", "c"],
+                    site=["k", "m", "k", "n", "m", "k"],
+                    y=[0.1, 0.4, 0.8, 0.0, -0.2, 0.3], y2=[0.3, -0.1, 0.2, 0.5, 0.1, 0.0]),
+                [(:a,) => ["s1", "s2", "s3", "s4"], (:b,) => ["k", "m", "n"]]))
+        println("COMPONENT_BLOCKS=", label); flush(stdout)
+        model = builder(data)
+        rk, problem = consumer_problem(model)
+        sb = SBBRMI(model; mod=ScopedBlocks, total_groups=())
+        stan = consumer_stan(model, "component-blocks-" * label; mod=ScopedBlocks)
+        stan_names = BridgeStan.param_unc_names(stan.model)
+        transport = brm_coordinate_transport(rk, sb, stan_names)
+        @test length(transport) == length(stan_names) == rk.model.layout.total
+        # Each call's standardized draws are addressed by its own levels.
+        for (scope, labels) in levels
+            @test sort!(unique(string(pair.address.level) for pair in transport.pairs
+                if pair.address.kind === :ranef_z &&
+                    get(pair.address, :scope, nothing) == scope)) == labels
+        end
+        mapping = [pair.rk => pair.stan for pair in transport.pairs]
+        n = length(transport)
+        for point in (collect(range(-0.3, 0.4; length=n)), 0.3 .* sin.(1:n))
+            check_consumer_stan(problem, stan, mapping, rk, point)
+            @test brm_stan_point_to_rk(transport,
+                brm_rk_point_to_stan(transport, point)) == point
+            checked = brm_check_coordinate_transport(transport, rk, stan.model, point)
+            @test checked.max_error <= 1e-12
+            @test checked.factors == (label == "rates" ? 3 : 2)
+        end
+    end
+end
+
+@stestset "named component returns refuse unread or unknown fields" begin
+    data = (; x=[-0.4, 0.2, 0.7], y1=[0.1, 0.4, 0.8], y2=[0.3, -0.1, 0.2])
+    for backend in (model -> SBBRMI(model; mod=ScopedNamed, total_groups=()), RKBRMI)
+        @test_throws r"reads field `mid`, but `bounds` returns only `lo`, `hi`" backend(
+            ScopedNamed.unknown_field(data))
+        @test_throws r"reads `k` as one value, .* read one field, such as `k.lo`" backend(
+            ScopedNamed.bare_read(data))
+        @test_throws r"inside a `@plate` cell a component call binds one value" backend(
+            ScopedNamed.cell_call(data))
+    end
+    @test_throws r"a positional tuple has no field names" brm(:(function pairwise(x)
+        a ~ Normal(0, 1)
+        return (a, x)
+    end); mod=ScopedNamed)
+    @test_throws r"duplicate returned field" brm(:(function twice(x)
+        a ~ Normal(0, 1)
+        return (; a, a = x)
+    end); mod=ScopedNamed)
+    @test_throws r"bind `k.lo` at model scope, `lo = k.lo`, and read `lo\[i\]`" brm(quote
+        k ~ bounds(x, scale)
+        @plate for i in eachindex(y1)
+            y1[i] ~ Normal(k.lo[i], 0.5)
+        end
+        scale ~ Exponential(1)
+    end; mod=ScopedNamed)
+end

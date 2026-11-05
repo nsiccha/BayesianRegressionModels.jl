@@ -100,9 +100,7 @@ On the 6-subject × 10-occasion fixture this model has **190** parameters, most 
 innovations: its dimension grows with subjects × occasions × processes, and the
 innovations meet their scale parameters in the funnel geometry familiar from every
 non-marginalized hierarchical model. It is the most flexible form — any observation
-family, any nonlinearity — and the most expensive one. (The Turing pane is retained on
-this page even though kernel cells are outside the current Turing executor; its
-construction error documents that backend boundary.)
+family, any nonlinearity — and the most expensive one.
 
 ## 2. Integrating the states out exactly: a Kalman filter in the cell
 
