@@ -70,6 +70,14 @@ immutability. It also combines top-level matrices with scalar/vector starts,
 component-local factors and prior medians. Add `--stan` for independent
 compiled-Stan readback and physical coordinate parity.
 
+`component_formula_starts.jl` checks `component_inits` entries that name a
+component call's own linear predictors and shared `|ID|` blocks: link-scale
+coefficients, block scales, correlation, covariance and per-level effects in
+repeated and nested calls over different levels, component-local coefficient
+and scale prior medians, unchanged top-level values and refusals. The default
+run only builds RK models; `--stan` adds compiled readback of each call's
+predictor values and cross-backend physical-point parity.
+
 `smc_tuning_lifecycle.jl` checks adaptive pilot interruption before any draw and
 during a later grid pilot, nested Treebars progress, input ownership, endpoint
 and configuration validation, and exact fresh-process replay from both a

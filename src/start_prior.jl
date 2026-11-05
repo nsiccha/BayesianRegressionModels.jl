@@ -239,6 +239,30 @@ function _brm_rk_start_prior_writes(rk, records, values, explicit, inits, term_t
         x = _brm_start_median(_brm_start_evaluate_law(prior, env.value, spelling), spelling; lower, upper)
         push!(writes, (d, i, x))
     end
+    _brm_rk_start_prior_records!(add, records, values; scalars=true)
+    for p in _sb_collect_hyper_plans(parent(rk))
+        term = _brm_rk_start_term_record((; predictor=p.lp, term=p.term, spelling=p.spelling), records)
+        record = only(r for r in records if r.kind === :hsgp && r.declaration === term.declaration)
+        if p.intercept
+            declaration = Symbol(record.declaration, ".", record.locals.scales[p.hyper])
+            add(declaration, (), _brm_start_hyper_prior(p, env.context), "log($(p.spelling)) intercept")
+        end
+        if !isempty(p.ranefs)
+            declaration = Symbol(record.declaration, ".", record.locals.hypers[p.hyper].scale)
+            add(declaration, (), _brmd_default_normal(), "log($(p.spelling)) group SD"; lower=0.0)
+        end
+    end
+    inventory = [r for r in records if r.kind === :term_start]
+    targets = _brm_start_prior_term_targets(inventory, term_targets, env.value)
+    _brm_rk_start_terms!(writes, targets, records, values)
+    writes
+end
+
+# The medians of population coefficients, `|ID|` scales and (with `scalars`)
+# named scalar parameters among RK coordinate records; `add(declaration,
+# index, law, spelling; lower)` writes one unless an explicit start covers it.
+# Top-level records and a component call's scoped records share it.
+function _brm_rk_start_prior_records!(add, records, values; scalars)
     for r in records
         if r.kind === :population
             add(r.declaration, get(r, :index, ()), r.prior, "effect($(r.predictor), $(r.coefficient))")
@@ -247,7 +271,7 @@ function _brm_rk_start_prior_writes(rk, records, values, explicit, inits, term_t
                 add(r.declaration, (i,), _brm_nlme_block_law(r.prior, i), "effect($(r.predictor), $label)")
             end
         elseif r.kind === :scalar
-            add(r.declaration, (), r.prior, r.declaration)
+            scalars && add(r.declaration, (), r.prior, r.declaration)
         elseif r.kind in (:ranef, :stratified_ranef)
             laws = get(r, :scale_priors, nothing)
             laws === nothing && continue
@@ -265,22 +289,7 @@ function _brm_rk_start_prior_writes(rk, records, values, explicit, inits, term_t
             end
         end
     end
-    for p in _sb_collect_hyper_plans(parent(rk))
-        term = _brm_rk_start_term_record((; predictor=p.lp, term=p.term, spelling=p.spelling), records)
-        record = only(r for r in records if r.kind === :hsgp && r.declaration === term.declaration)
-        if p.intercept
-            declaration = Symbol(record.declaration, ".", record.locals.scales[p.hyper])
-            add(declaration, (), _brm_start_hyper_prior(p, env.context), "log($(p.spelling)) intercept")
-        end
-        if !isempty(p.ranefs)
-            declaration = Symbol(record.declaration, ".", record.locals.hypers[p.hyper].scale)
-            add(declaration, (), _brmd_default_normal(), "log($(p.spelling)) group SD"; lower=0.0)
-        end
-    end
-    inventory = [r for r in records if r.kind === :term_start]
-    targets = _brm_start_prior_term_targets(inventory, term_targets, env.value)
-    _brm_rk_start_terms!(writes, targets, records, values)
-    writes
+    nothing
 end
 
 function _brm_sb_start_prior_writes(sb, d, names, explicit, inits, term_targets; env=nothing)
@@ -309,6 +318,28 @@ function _brm_sb_start_prior_writes(sb, d, names, explicit, inits, term_targets;
             :cholesky_factor_cov, :corr_matrix, :cov_matrix) && continue
         add(_brm_element_coordinates(output, names), last(getargs(op.expression)), op.name)
     end
+    _brm_sb_start_prior_population!(add, sb, d, names)
+    _brm_sb_start_prior_ranefs!(writes, d, names, chosen, env.value)
+    for p in _sb_collect_hyper_plans(parent(sb))
+        entry = _brm_term_entry(d, p.lp,
+            e -> _brm_term_full_key(e.value) === _brm_term_full_key(p.term), p.spelling)
+        coordinates(role) = _brm_element_coordinates(
+            _brm_term_parameter_output(d, p.lp, entry, Symbol(p.hyper, :_, role)), names)
+        p.intercept && add(coordinates(:intercept), _brm_start_hyper_prior(p, env.context),
+            "log($(p.spelling)) intercept")
+        isempty(p.ranefs) || add(coordinates(:ranef_sd), _brmd_default_normal(),
+            "log($(p.spelling)) group SD"; lower=0.0)
+    end
+    inventory = _brm_sb_start_term_inventory(d, env.context)
+    targets = _brm_start_prior_term_targets(inventory, term_targets, env.value)
+    _brm_sb_start_terms!(writes, targets, d, names)
+    writes
+end
+
+# The medians of an SBBRMI's ordinary population coefficients, numeric and
+# categorical, through `add(indices, law, spelling)`. `names` may be a component
+# call's local names (`_brm_sb_component_local_names`).
+function _brm_sb_start_prior_population!(add, sb, d, names)
     overrides = _sb_effect_prior_overrides(parent(sb); frozen_preproc=d.plan.preproc)
     for entry in _brm_population_effect_entries(parent(sb))
         scheme = get(get(d.plan.bindings, entry.block, (;)), :prior_scheme, (; kind=:ordinary))
@@ -333,21 +364,7 @@ function _brm_sb_start_prior_writes(sb, d, names, explicit, inits, term_targets;
             end
         end
     end
-    _brm_sb_start_prior_ranefs!(writes, d, names, chosen, env.value)
-    for p in _sb_collect_hyper_plans(parent(sb))
-        entry = _brm_term_entry(d, p.lp,
-            e -> _brm_term_full_key(e.value) === _brm_term_full_key(p.term), p.spelling)
-        coordinates(role) = _brm_element_coordinates(
-            _brm_term_parameter_output(d, p.lp, entry, Symbol(p.hyper, :_, role)), names)
-        p.intercept && add(coordinates(:intercept), _brm_start_hyper_prior(p, env.context),
-            "log($(p.spelling)) intercept")
-        isempty(p.ranefs) || add(coordinates(:ranef_sd), _brmd_default_normal(),
-            "log($(p.spelling)) group SD"; lower=0.0)
-    end
-    inventory = _brm_sb_start_term_inventory(d, env.context)
-    targets = _brm_start_prior_term_targets(inventory, term_targets, env.value)
-    _brm_sb_start_terms!(writes, targets, d, names)
-    writes
+    nothing
 end
 
 # Public StanBlocks reflection supplies evaluated bounds, including vector
