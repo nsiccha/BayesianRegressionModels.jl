@@ -142,6 +142,20 @@ _sb_emit!(statements, data, key, ::_BRMComponentInput; kwargs...) = nothing
 _sb_prior_arg_named(value::NamedColumn, ::_BRMComponentInput) = name(value)
 _sb_records_submodel_hook(::BRMComponent) = false
 
+# Follow a returned binding's aliases to a local plate output. A component
+# returns the authored collection of cells, not its backend's flat storage.
+# Nested component calls already return that collection at their own boundary.
+function _brm_component_cell_output(value::NamedColumn)
+    _sb_kernel_producer(value) !== nothing && return name(value)
+    operation = parent(value)
+    operation isa ExprColumn{typeof(assign)} || return nothing
+    _brm_component_cell_output(last(getargs(operation)))
+end
+_brm_component_cell_output(value) = nothing
+_brm_component_cell_output(component::BRMComponent, instance) =
+    component.result isa Symbol ?
+        _brm_component_cell_output(_brm_operation(instance, component.result)) : nothing
+
 struct _BRMComponentReplay
     component::BRMComponent
     target::Symbol
@@ -174,7 +188,11 @@ function _sb_submodel_rhs!(statements, data, target::Symbol,
         columns[key] = outer
         push!(inputs, key => outer)
     end
-    body = Expr(:block, compiled.model.model.args..., _sb_component_return(component))
+    result = _sb_component_return(component)
+    if _brm_component_cell_output(component, instance) !== nothing
+        result.args[1] = Expr(:call, brm_plate_cells, component.result)
+    end
+    body = Expr(:block, compiled.model.model.args..., result)
     submodel = StanBlocks.SlicModel(body, Dict{Symbol,Any}(), component.scope,
         compiled.model.observations)
     keywords = Expr(:parameters, (Expr(:kw, key, value) for (key, value) in inputs)...)
@@ -292,6 +310,16 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     coordinates = Any[]
     emitted = _rk_emit_ast(plan; cell_sources=cells, coordinates,
         documentation=brm_documentation(instance))
+    cell_output = _brm_component_cell_output(component, instance)
+    if cell_output !== nothing
+        # Keep the raw cells in the returned binding. Its public local plate
+        # value retains the ordinary flattened representation for other reads.
+        returned = [plain for statement in emitted.main.args
+            for plain in (_brm_undoc(statement),)
+            if Meta.isexpr(plain, :(=), 2) && plain.args[1] === component.result]
+        length(returned) == 1 || error("component emission lost returned binding `$(component.result)`")
+        only(returned).args[2] = cells[cell_output]
+    end
     taken = union(Set{Symbol}(component.inputs), Set(_brm_operation_names(instance)),
         Set{Symbol}(reserved))
     # Helpers are module-level definitions. Give each instantiated subprogram
@@ -362,8 +390,10 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     observed = Tuple(column_names[name] for name in _rk_observed_names(plan))
     row_cells = Dict{Symbol,Any}()
     for (output, raw) in cells
+        returned = output === cell_output ? component.result : output
         row_cells[Symbol(target, ".", output)] = (; definition=entry,
-            output=get(renames, output, output), cells=get(renames, raw, raw))
+            output=get(renames, returned, returned),
+            cells=get(renames, raw, raw))
     end
     for assignment in plan.assignments
         assignment isa _RKPreparedSubmodelAssignment || continue

@@ -469,5 +469,7 @@ function _check_term_kwargs(::typeof(kernel), kwargs)
 end
 # Formula markers needed by common term preparation before backend-specific
 # implementations add methods.
+"""Monotonic effect with a free coefficient (brms-style mo); scales the simplex-based `mo1` contrast."""
 function mo end
+"""Monotonic effect with coefficient fixed to 1; uses a simplex over successive ordered levels."""
 function mo1 end

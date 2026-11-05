@@ -6,6 +6,11 @@ in-cell consumers. It compares physical values, normalized densities and native
 Reverse gradients with independent formulas and compiled Stan, and retains the
 row-length and scalar-cell checks. It accepts testset substring filters.
 
+`model_view_documentation.jl` checks authored Julia documentation in builder and
+bound-model views, plus callable docs after binding: references become formatted labels,
+ordinary URLs remain linked, doctest contents survive, and source/doc records
+remain unchanged. The bootstrap selects HTMXObjects 0.1.62 for this projection.
+
 `heterogeneous_mixtures.jl` checks native mixtures of different full-real
 scalar families and custom component graphs against independent normalized
 densities and compiled Stan. It covers native Reverse, pointwise likelihood,
@@ -64,6 +69,14 @@ immutability. It also combines top-level matrices with scalar/vector starts,
 component-local factors and prior medians. Add `--stan` for independent
 compiled-Stan readback and physical coordinate parity.
 
+`component_formula_starts.jl` checks `component_inits` entries that name a
+component call's own linear predictors and shared `|ID|` blocks: link-scale
+coefficients, block scales, correlation, covariance and per-level effects in
+repeated and nested calls over different levels, component-local coefficient
+and scale prior medians, unchanged top-level values and refusals. The default
+run only builds RK models; `--stan` adds compiled readback of each call's
+predictor values and cross-backend physical-point parity.
+
 `smc_tuning_lifecycle.jl` checks adaptive pilot interruption before any draw and
 during a later grid pilot, nested Treebars progress, input ownership, endpoint
 and configuration validation, and exact fresh-process replay from both a
@@ -77,8 +90,9 @@ field model at initialization in one Julia process and resumes it in another,
 through `smc_generated_law_process.jl`. The field's law is bound in the
 generated RK program module, so the consumer first confirms that the raw law
 expression cannot be deserialized, then requires exact window and schedule
-replay from a serialized partial and from disk. It needs the ReactiveKernelsPPL
-0.1.98 pin from `setup_env.jl`.
+replay from a serialized partial and from disk. It needs ReactiveKernelsPPL
+0.1.98 or later. The `setup_env.jl` pin also carries the selective-window
+capture-footprint repair, covered by `smc_window_selective_api.jl`.
 
 `scoped_components.jl` checks function-style BRM components with independent
 local priors, explicit shared inputs, nested calls, vector results, and plate
@@ -90,6 +104,12 @@ retains component headers and local provenance at each nested call site.
 Run it as a standalone script in the test environment; StanBlocks 0.2.25
 preserves keyword labels when a component is called inside a plate, and
 ReactiveKernelsPPL 0.1.93 retains authored documentation.
+
+`component_cell_returns.jl` checks returned plate collections through direct,
+aliased and nested component calls. It
+verifies row/channel selection, strict per-row dependency footprints, emitted
+source replay, normalized densities and native gradients against compiled Stan.
+Run it as a standalone script in the same test environment.
 
 `authored_documentation.jl`, `authored_documentation_binding.jl`,
 `authored_documentation_printing.jl`, `authored_documentation_rk_source.jl`
@@ -2165,7 +2185,7 @@ equals the generic path's exactly and its gradient to rounding, that both agree
 with central differences, and that inputs are unchanged. A width has to be
 checked on its own: the pass works at four margins, and at five Enzyme raised
 `EnzymeNoTypeError` until the repair in Enzyme `6053067f`. The test bootstrap
-pins `d3189970`, which contains that repair and declares libEnzyme `33709d12`.
+pins `b2bb4cb6`, which contains that repair and declares libEnzyme `f392eba5`.
 
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, StanBlocks/BridgeStan density and gradient
