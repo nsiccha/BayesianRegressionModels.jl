@@ -59,8 +59,9 @@ field model at initialization in one Julia process and resumes it in another,
 through `smc_generated_law_process.jl`. The field's law is bound in the
 generated RK program module, so the consumer first confirms that the raw law
 expression cannot be deserialized, then requires exact window and schedule
-replay from a serialized partial and from disk. It needs the ReactiveKernelsPPL
-0.1.98 pin from `setup_env.jl`.
+replay from a serialized partial and from disk. It needs ReactiveKernelsPPL
+0.1.98 or later. The `setup_env.jl` pin also carries the selective-window
+capture-footprint repair, covered by `smc_window_selective_api.jl`.
 
 `scoped_components.jl` checks function-style BRM components with independent
 local priors, explicit shared inputs, nested calls, vector results, and plate

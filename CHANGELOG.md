@@ -68,9 +68,10 @@ instead of failing at run time.
   ReactiveKernels commit to `b0ffcdc1` or a descendant. Checkpoints written
   with ReactiveKernelsPPL 0.1.97 or earlier are not migrated: resume them with
   their original versions or write a new initialization checkpoint.
-- RK `main` from `8e67ee82` currently breaks selective carried-window tuning
-  (`coordinates=:auto`) with a `MethodError` in `_cell_joined_rows`; BRM's test
-  pin stays on `b0ffcdc1` until ReactiveKernels repairs it.
+- At this release, RK `main` from `8e67ee82` broke selective carried-window
+  tuning (`coordinates=:auto`) with a `MethodError` in `_cell_joined_rows`, so
+  BRM's test pin used `b0ffcdc1`. RK `df3eb8872` repaired the regression; the
+  test pin now includes that repair through `db6bca825`.
 
 ## 0.2.181
 

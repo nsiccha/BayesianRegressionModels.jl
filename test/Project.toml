@@ -83,7 +83,7 @@ rev = "c84047be45cd2bba8a1d02660af9408d4cdf58f4"
 
 [sources.HTMXObjects]
 url = "https://github.com/nsiccha/HTMXObjects.jl"
-rev = "1de5b7aa45bc8ed8e7cf3db86c7d376dd5e5c04e"
+rev = "ee46e8d6bd381c8b066f3b26afa7ea3336e23146"
 
 [sources.HTMX]
 url = "https://github.com/nsiccha/HTMX.jl"
@@ -348,6 +348,8 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # a9a7e9a2 (RKPPL 0.1.97): bound-data LKJ dimensions in reusable definitions.
 # Also contains RK 0.1.82 (b08cb894), which retains live broadcast fusion after
 # binding for batched cell readers.
-# b0ffcdc1 (RKPPL 0.1.98): generated-module-safe SMC checkpoint identities;
-# a9a7e9a2 plus that fix only (main from 8e67ee82: RK snag selective-carrie-1aa69e67).
-rev = "b0ffcdc1d915fc111988ddb6bceca8dabeede643"
+# b0ffcdc1 (RKPPL 0.1.98): generated-module-safe SMC checkpoint identities.
+# db6bca825 (RK 0.1.86 / RKPPL 0.1.99) includes df3eb8872's selective-window
+# capture-footprint fix and the scalar-observation gather-demand repair.
+# Use the SHA: those versions alone do not identify the footprint fix.
+rev = "db6bca825d257b09616a0962ffb75587a81a6bb8"
