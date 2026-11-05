@@ -58,7 +58,8 @@ serial_round() = [NE.conditional_loglikelihood_and_gradient(m, i, θ, σ, η) fo
 function threaded_round()
     out = Vector{Any}(undef, length(calls))
     Threads.@threads :dynamic for k in eachindex(calls)
-        out[k] = NE.conditional_loglikelihood_and_gradient(m, calls[k]...)
+        i, η = calls[k]
+        out[k] = NE.conditional_loglikelihood_and_gradient(m, i, θ, σ, η)
     end
     out
 end
