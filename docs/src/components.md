@@ -39,7 +39,11 @@ There are six sampled scalars: each call owns its own `a` and `b`, both calls
 read the parent's `shared_scale`, and the likelihoods share `obs_sd`. A component call introduces no
 regression coefficient. The two input vectors need not have the same length.
 The result can be scalar or array valued; ordinary component statements can
-declare vector priors and call other components.
+declare vector priors and call other components. Formula priors read inputs as
+scalar priors do: `effect(value, Intercept) ~ Normal(center, 0.4)` and
+`sd(value, unit) ~ Exponential(scale)` may name inputs that the caller binds to
+its own parameters. `RKBRMI` admits only numeric constants and data as
+population-effect prior arguments, in a component as at model scope.
 
 An elementwise vector result retains its input row frame. It can be used in a formula
 offset or selected by a row index, including repeated or reordered indices:

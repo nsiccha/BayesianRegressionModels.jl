@@ -9,7 +9,8 @@ row-length and scalar-cell checks. It accepts testset substring filters.
 `model_view_documentation.jl` checks authored Julia documentation in builder and
 bound-model views, plus callable docs after binding: references become formatted labels,
 ordinary URLs remain linked, doctest contents survive, and source/doc records
-remain unchanged. The bootstrap selects HTMXObjects 0.1.62 for this projection.
+remain unchanged. The bootstrap selects HTMXObjects 0.1.65, which also renders
+tabbed views as readable plain text without internal node representations.
 
 `heterogeneous_mixtures.jl` checks native mixtures of different full-real
 scalar families and custom component graphs against independent normalized
@@ -56,6 +57,14 @@ transport APIs. It covers independent scalars, unequal-length vectors, positive
 scales and simplexes, and preserves unaddressed values and top-level starts.
 Run it as a standalone script in the test environment; it compiles Stan even
 when the resulting point is consumed by RK.
+
+`component_prior_inputs.jl` checks component formula priors that read the
+caller's parameters through inputs: population-effect locations and scales and
+a component-local `|ID|` block's SD prior. It compares compiled Stan densities
+and gradients with an independent density, checks each input's contribution
+along its coordinate, and covers a nested call and a call whose input is a
+number. The SD case is also checked on `RKBRMI`. It accepts testset substring
+filters; run it as a standalone script in the test environment.
 
 `component_start_values.jl` checks native component-local starts, recursive
 scalar prior medians, repeated and nested call paths, constrained values,
@@ -1238,6 +1247,21 @@ window fit. It also covers each worker's own samplers over shared read-only tabl
 how a failing unit stops the tasks, the BLAS pin and the refusals.
 `research/svi_threads/benchmark.jl` measures per-iteration time, GC share and retained
 worker memory against `threads`.
+
+`nlme_threads.jl` checks one-unit NLME calls from several tasks at once, which
+take their own evaluators from the model's pool. On flat, plate and nested
+models, the protocol's one-unit values, η gradients and population gradients,
+called from every thread in shuffled order, equal serial calls to the last bit,
+and the pool prepares more than one evaluator. `check_protocol(...; threads =
+true)` passes on a nested model. A seeded `WarmupHMCNUTS(threads = true)` SAEM fit
+of a 24-subject plate PK model gives the same bits in child processes with 1, 4
+and N threads (`BRM_NLME_THREADS_N`, default 8). Over six seeds its estimates
+agree with lockstep fits (`threads = false`) within twice the lockstep fits'
+spread, and both recover the simulated population values. Run it in the
+NLMEEstimation scratch environment below (NLMEEstimation 0.2.5 or later) with
+`--threads=4`; it refuses to run without threads.
+`research/nlme_threads/benchmark.jl` measures a round of one-unit calls and SAEM
+fits at the thread count it is started with.
 
 `nlme_svi_laplace_plan.jl` checks structural eligibility for
 `GaussianBlockLaplace`, including fixed HSGP fitting inputs, nonstandard
@@ -2573,6 +2597,11 @@ semantic projections. It verifies that viewing a model never evaluates a custom
 helper. The descriptor fixture checks constrained simplex dimensions and keeps
 logical quantities separate from generated carriers, without fitting or compiling
 Stan. Set `BRM_MODEL_VIEW_HTML` to an output path to save a browser preview.
+The model-view files share `model_view_plain_text_checks.jl`: titles and tab
+labels must occupy real lines, source remains multiline, default-input rows are
+readable fields, and renderer implementation dumps are absent. These checks cover
+builders, bound declarations, reusable components, descriptors and prepared RK
+views, retaining the helper/default non-evaluation guards.
 
 `julia --project=test test/model_view_edge_cases.jl` covers joint and transformed
 response roles, callable documentation inside mixture-component lists, optional
@@ -2595,11 +2624,9 @@ The browser script owns and closes its temporary server and Chrome process.
 For fresh RK, descriptor and component captures, also run
 `julia --project=<rk-env> web-macro/validate_model_view_prepared_export.jl <output-dir>`
 after the main export, then append `--prepared` to the browser command.
-With HTMXObjects 0.1.60 these additional fixtures expose unresolved Documenter
-`@ref` links (incomplete static export) and a missing `jldoctest` browser grammar.
-The checks intentionally fail on those upstream gaps; do not treat their
-screenshots as evidence of a complete prepared bundle. The base export and
-browser check remain independently runnable.
+The current dependency floor includes Julia-documentation projection and the
+shared Julia doctest grammar. Both the base and prepared bundles must pass strict
+export and browser checks; the base checks remain independently runnable.
 The RK environment must contain BRM, HTMXObjects, ReactiveKernels and
 ReactiveKernelsPPL. This explicitly prepares toy objects, then exports the
 supplied objects with helper evaluation guarded off. Browser checks cover

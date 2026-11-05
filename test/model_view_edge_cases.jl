@@ -1,4 +1,5 @@
 using Test, BayesianRegressionModels, HTMXObjects
+include("model_view_plain_text_checks.jl")
 
 const BRM = BayesianRegressionModels
 
@@ -83,6 +84,11 @@ end
 
 @testset "component inputs distinguish defaults without evaluating them" begin
     view = brm_model_view(ModelViewEdgeCases.with_defaults)
+    text = test_model_view_plain_text(view, "Model component", ("Source", "Component inputs"))
+    rows = split.(split(text, '\n'), '\t')
+    @test ["x", "Positional", "Required", "None"] in rows
+    @test ["shift", "Positional", "Optional", "2"] in rows
+    @test ["scale", "Keyword", "Optional", "default_scale()"] in rows
     for mime in ("text/html", "text/markdown", "text/plain")
         rendered = repr(mime, view)
         @test occursin("Component inputs", rendered)

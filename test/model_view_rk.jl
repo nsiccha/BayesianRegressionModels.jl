@@ -1,5 +1,6 @@
 using Test, BayesianRegressionModels, HTMXObjects
 using ReactiveKernels, ReactiveKernelsPPL
+include("model_view_plain_text_checks.jl")
 
 const BRM = BayesianRegressionModels
 
@@ -73,6 +74,9 @@ end
     @test rows[(:p,)].ncoordinates == 2
     @test rows[(:theta,)].shape == (2,)
     before_bound = rk.bound.value
+    text = test_model_view_plain_text(brm_model_view(rk; title="Prepared RK regression"),
+        "Prepared RK regression", ("Source", "Roles and ranks", "Documentation"))
+    @test occursin("Prepared RK parameters", text)
     for mime in ("text/html", "text/markdown", "text/plain")
         rendered = repr(mime, brm_model_view(rk))
         @test occursin("Prepared RK parameters", rendered)
@@ -104,6 +108,11 @@ end
     @test latent.ncoordinates == 3
     RKModelViewFixture.inspecting[] = true
     try
+        text = test_model_view_plain_text(brm_model_view(rk), "Model",
+            ("Source", "Roles and ranks", "Documentation"))
+        @test occursin("Element shapes", text)
+        @test occursin("Vector · 0", text)
+        @test occursin("Sum a toy cell", text)
         html = repr("text/html", brm_model_view(rk))
         @test occursin("Sum a toy cell", html)
         @test occursin("Element shapes", html)
