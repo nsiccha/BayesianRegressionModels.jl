@@ -12,6 +12,27 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.187
+
+- Added `gmrf((east, north), time[, channel]; multiresolution=m)`: a bounded
+  sparse Matérn-1 spatial basis of shared stationary OU paths. A position uses
+  the same normalized weights at every time, preserving exact temporal
+  exponential covariance, marginal SD and channel separability on irregular
+  reads. Spatial covariance remains approximate. Each innovation retains only
+  its readers' times; the representation does not complete a position × time
+  grid. It shares the existing hyperparameter addresses and priors.
+- The new model-scope form supports `RKBRMI` and `SBBRMI`, native analytic
+  derivatives, Stan prior draws, frozen replay and physical coordinate
+  transport. Its fitted support construction is part of the native graph.
+  Exact reader locality requires ReactiveKernels 0.1.83, now the RK floor.
+  Native Reverse needs Enzyme dogfood's literal-dictionary callback repair and,
+  from dogfood `7a1f689c`, its repeated-reader repair, without which gradient
+  cost grows with support metadata × reads. The test bootstrap's RK
+  `b0ffcdc1` and Enzyme `d3189970` pins contain both.
+- Clarified the `neighbors=` contract: local Matérn × OU kernel entries are
+  exact, but the implied joint temporal covariance is approximate on irregular
+  read support. Its numerical behavior is unchanged.
+
 ## 0.2.186
 
 - Offset-only predictors on RK retain the declared rows of scalar plate or
