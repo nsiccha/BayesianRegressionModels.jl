@@ -152,7 +152,8 @@ rev = "dba6536683e8c226f2e74823856d0d85e7ad02a2"
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
 # Includes cooperative interruption used by BRM's progress hooks.
-rev = "f071111945c165dbae097e94c5939b79103434ac"
+# Treebars 0.1.5 also satisfies the pinned ReactiveKernelsPPL extension floor.
+rev = "0c22ab3b1a38aad1df36c013f36aa923e0891975"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
