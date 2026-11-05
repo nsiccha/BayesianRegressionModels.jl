@@ -215,7 +215,7 @@ Base.@nospecializeinfer function _brm_prune_cells(@nospecialize(brmi::BRMI), wan
     rewritten = Pair{Symbol,Any}[key => _brm_prune_cell_body(raw, key, wanted)
                                  for (key, raw) in entries]
     all(i -> last(rewritten[i]) === last(entries[i]), eachindex(entries)) && return brmi
-    BRMI((; rewritten...))
+    BRMI((; rewritten...), brmi.documentation)
 end
 
 # Names a kernel cell body reads from the model (its free names), which the
@@ -460,7 +460,7 @@ Base.@nospecializeinfer function _brm_prune_assemble(@nospecialize(brmi::BRMI), 
         push!(operations, key => NamedColumn(key, ExprColumn(~, ExprColumn(effect, :cor, id),
             ExprColumn(LKJCholesky, w.a, 1.0 + (w.K - w.a) / 2))))
     end
-    BRMI((; operations...))
+    _brm_select_documentation(brmi, (; operations...))
 end
 
 # `cor(:, ID) ~ LKJCholesky(K, eta)` at the `a` kept margins: the same eta, or

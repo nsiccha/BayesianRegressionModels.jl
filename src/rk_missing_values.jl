@@ -670,6 +670,7 @@ end
 function _rk_block_free_reads(definitions)
     reads = Dict{Symbol,Set{Symbol}}()
     for definition in definitions
+        definition = _brm_undoc(definition)
         Meta.isexpr(definition, :(=), 2) || continue
         call, body = definition.args
         Meta.isexpr(call, :call) && Meta.isexpr(body, :block) || continue
@@ -686,6 +687,7 @@ end
 # An observation reads its response rather than defining it: a top-level `~`,
 # or a per-subject `@plate` holding only observations (`_rk_observation_statement`).
 function _rk_observation_source_statement(statement)
+    statement = _brm_undoc(statement)
     Meta.isexpr(statement, :call) && return first(statement.args) in (:~, :.~)
     body = _rk_plate_body(statement)
     body !== nothing && !isempty(body) && all(_rk_observation_source_statement, body)
@@ -693,6 +695,7 @@ end
 
 # The statements of an emitted `@plate for … end`, or `nothing`.
 function _rk_plate_body(statement)
+    statement = _brm_undoc(statement)
     Meta.isexpr(statement, :macrocall) && first(statement.args) === Symbol("@plate") &&
         Meta.isexpr(last(statement.args), :for) || return nothing
     [s for s in last(last(statement.args).args).args if !(s isa LineNumberNode)]

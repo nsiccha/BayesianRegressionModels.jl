@@ -40,7 +40,12 @@ Lower `brmi` through the production RK route (`_brm_rk_plan` →
 `(; case_id, ast, defs, bindings, plan, meta)`. Definitions, main source and
 callable bindings come from the same emission. `meta` is
 `(; case_id, provenance, brm_pin, generator_version, emitted_at,
-julia_version)`; `emitted_at` is a unix-epoch-UTC `Int`
+julia_version, documentation)`; `documentation` holds the authored records
+from [`brm_documentation`](@ref). Ordinary emitted declarations also carry
+Julia doc wrappers. The complete records preserve BRM addresses, including
+element-specific prior addresses that a fused backend declaration cannot
+represent as separate RKPPL declaration paths.
+`emitted_at` is a unix-epoch-UTC `Int`
 (`Dates` deliberately avoided). `provenance`/`brm_pin` are
 caller-supplied (the worker resolves the pin from its checkout; nothing
 here shells out). Fails closed on a malformed emission.
@@ -56,7 +61,7 @@ Base.@nospecializeinfer function emit_rk_artifact(@nospecialize(brmi::BRMI);
     isempty(case_id) && error(
         "RK artifact: case_id must be non-empty")
     plan = _brm_rk_plan(brmi; held_out)
-    emitted = _rk_emit_ast(plan)
+    emitted = _rk_emit_ast(plan; documentation=brm_documentation(brmi))
     _check_emitted(emitted, case_id)
     columns = plan.columns
     isempty(columns) && !(plan isa _RKUnconditionedPlan) && error(
@@ -67,7 +72,8 @@ Base.@nospecializeinfer function emit_rk_artifact(@nospecialize(brmi::BRMI);
         brm_pin,
         generator_version=rk_artifact_version(),
         emitted_at=Int(floor(time())),
-        julia_version=string(VERSION))
+        julia_version=string(VERSION),
+        documentation=brm_documentation(brmi))
     return (;
         case_id=String(case_id),
         ast=emitted.main,
