@@ -81,7 +81,7 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
     nz = count(==(:subject_effect), m.view.role)
     prior = units == m.view.subject_coordinates ? nothing :
         _brm_svi_authored_prior(m, globals, units; factors=ownership.factors)
-    (; m, globals, units, ownership, plan, plans=[plan], work, order, indices, prior,
+    (; m, globals, units, ownership, previous, plan, plans=[plan], work, order, indices, prior,
        z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
 end
 
@@ -411,6 +411,7 @@ const _BRM_SVI_UNIT_MEAN_TRUST = 1.0
 #   factorization is √2 times the new Cholesky factor, which is positive
 #   definite in floating point too.
 function _brm_svi_unit_step!(q, i, gz, gd, εi, β)
+    isempty(gz) && return q
     U = LowerTriangular(q.U[i])
     H = gd * (U * εi)'
     G = Symmetric(-(H + H') ./ 2 .- q.Λ[i])
@@ -633,8 +634,10 @@ function _brm_svi_draws(rng, t, q, n)
             U[block, j] .= _brm_svi_draw_unit(q, i, randn(rng, length(block)))
         end
     end
-    U
+    _brm_svi_fill_absent_draws!(rng, U, t, t.previous)
 end
+
+_brm_svi_fill_absent_draws!(rng, draws, t, ::Nothing) = draws
 
 # The model through its preparation phases, as for `brm_nlme_fit`: lowering to
 # RK and `brm_nlme_model`. A stage `x` has already passed is reused.

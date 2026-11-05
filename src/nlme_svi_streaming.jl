@@ -125,6 +125,30 @@ function _brm_svi_carried_state(previous::BRMSVIState, t, q)
         previous.unit_partition, previous.updates + 1)
 end
 
+# Model-scope arrays can retain coordinates of absent units. The target
+# integrates those carried factors out, but packed output still represents
+# their marginal uncertainty rather than filling those slots with constants.
+function _brm_svi_fill_absent_draws!(rng, draws, t, previous::BRMSVIState)
+    isempty(t.ownership.absent) && return draws
+    positions = Dict(t.m.view.coordinates[j] => j for j in t.ownership.absent)
+    for unit in values(previous.units)
+        source, destination = Int[], Int[]
+        for (k, key) in enumerate(unit.keys)
+            hasproperty(key, :coordinate) || continue
+            j = get(positions, key.coordinate, 0)
+            j == 0 && continue
+            push!(source, k)
+            push!(destination, j)
+        end
+        isempty(source) && continue
+        for draw in axes(draws, 2)
+            z = unit.M + LowerTriangular(unit.U)' \ randn(rng, length(unit.M))
+            draws[destination, draw] .= z[source]
+        end
+    end
+    draws
+end
+
 # Only grouping level fits may change. A transform of the grouping column
 # itself (e.g. standardize(subject)) must remain frozen too.
 function _brm_svi_level_values(rk, groups)
