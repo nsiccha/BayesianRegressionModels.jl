@@ -140,4 +140,43 @@ end
         message(() -> nested(DATA)))
 end
 
+# A prior-only program draws a `restricted` prior in generated quantities only
+# when its mass inside its bounds is constant; otherwise StanBlocks keeps it a
+# sampled parameter with what its bounds and arguments read (stanblocks-use
+# §8.1). The prior-program warning says so and names the restricted priors,
+# instead of claiming every parameter forward-simulates (todo 0mhtheb).
+@testset "the prior-program warning names restricted priors that can stay sampled" begin
+    moving = @brm begin
+        location ~ Normal(0, 1)
+        bounded ~ restricted(Normal(0.2, 0.7), location, location + 2)
+        y ~ Normal(bounded, 0.8)
+    end
+    sb = @test_logs (:warn, r"unconditioned \(prior\) program.*A `restricted` prior \(`bounded`\) whose mass inside its bounds moves.*stays a sampled parameter") SBBRMI(
+        moving((; dummy=[1.0])); mod=@__MODULE__)
+    code = BRM.stan_code(sb)
+    @test StanBlocks.stanc_check(code).ok
+    parameters = match(r"(?ms)^parameters \{\n(.*?)^\}", code).captures[1]
+    @test occursin("real location;", parameters)
+    @test occursin("> bounded;", parameters)
+
+    # Constant mass: drawn in generated quantities, which is exact. The
+    # warning still names the restricted prior, conditionally.
+    constant = @brm begin
+        bounded ~ restricted(Normal(0.2, 0.7), 0.0, 2.0)
+        y ~ Normal(bounded, 0.8)
+    end
+    sb = SBBRMI(constant((; dummy=[1.0])); mod=@__MODULE__)
+    code = BRM.stan_code(sb)
+    @test isempty(strip(match(r"(?ms)^parameters \{\n(.*?)^\}", code).captures[1]))
+    @test occursin("bounded = conditioning_normal_rng(", code)
+
+    # Without a restricted prior the warning does not mention one.
+    plain = @brm begin
+        location ~ Normal(0, 1)
+        y ~ Normal(location, 0.8)
+    end
+    @test_logs (:warn, r"^(?!.*restricted).*unconditioned \(prior\) program"s) SBBRMI(
+        plain((; dummy=[1.0])); mod=@__MODULE__)
+end
+
 println("restricted_prior.jl: all testsets passed")
