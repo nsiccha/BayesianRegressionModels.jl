@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.175
+## 0.2.176
 
 - Applying an explicitly selected Laplace plan over a per-cell `gmrf` field
   and copying its target per chain preserve the direct target's coordinates,
@@ -25,6 +25,14 @@ instead of failing at run time.
   unrecognized plate-cell algebra still requires explicit integration.
 - The count-field prior-median diagnostic fixture uses a declared log link,
   retaining its ESS assertions under structural automatic selection.
+
+## 0.2.175
+
+- Selecting several fixed-width vector cells preserves their collection
+  semantics in ordinary helpers: `f(cells[indices])` can read each selected
+  vector with `rows[t]`, including repeated and reordered indices. This works
+  with observed responses and omitted-response prior generation. The
+  StanBlocks floor and test pin advance to 0.2.26 for its ordinary view helpers.
 
 ## 0.2.174
 

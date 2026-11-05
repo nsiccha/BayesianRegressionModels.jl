@@ -30,7 +30,8 @@ StanBlocks.@deffun begin
     @inline brm_plate_cell(x::vector[n], i) = x[i]
     @inline brm_plate_cell(x::int[n], i) = x[i]
     @inline brm_plate_cell(x::matrix[k, n], i::int) = col(x, i)
-    @inline brm_plate_cell(x::matrix[k, n], idx::int[m]) = x[:, idx]
+    # Several selected vector cells remain a collection at helper boundaries.
+    @inline brm_plate_cell(x::matrix[k, n], idx::int[m]) = EachCol(x[:, idx])
     @inline brm_plate_cell(x::RaggedVector, i) = x[i]
 end
 
