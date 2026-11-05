@@ -1873,9 +1873,10 @@ end
 # One compact sampler per owner of mutable AD workspace (model, SVI target or
 # worker). Its structural footprint also includes fixed population coordinates;
 # slots maps only the globals and unit effects requested by this consumer.
-function _brm_nlme_partition_plan(partition, unit, globals, view)
+function _brm_nlme_partition_plan(partition, unit, globals, view;
+        units=view.subject_coordinates)
     sampler = _rk_nlme_partition_sampler(partition.context, unit)
-    indices = [sort!(vcat(globals, block)) for block in view.subject_coordinates]
+    indices = [sort!(vcat(globals, block)) for block in units]
     footprints = map(eachindex(indices)) do i
         i in partition.labels || return Int[]
         footprint = _rk_nlme_partition_footprint(sampler, i)

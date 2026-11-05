@@ -734,27 +734,10 @@ end
 # (`owner`, 0 for none; reads include hyperparents and both branch arms), or to
 # the global bucket 1. Each nonempty bucket is one compact native query over
 # its own support.
-function BRM._rk_svi_factor_queries(backend::BRM.RKBRMI, unit::Vector{Float64},
-        ad_backend, owner::Vector{Int}, n::Int)
-    built, plan = backend.model, _rk_translated(backend)
-    catalogue = density_factors(built, plan)
-    events = collect(catalogue)
-    buckets = [similar(events, 0) for _ in 0:n]
-    for event in events
-        touched = vcat(factor_coordinates(catalogue, event),
-            factor_support(catalogue, event; u0=unit))
-        units = sort!(unique!(filter!(!iszero, owner[touched])))
-        length(units) > 1 && BRM._brm_nlme_error("brm_svi: the authored " *
-            "$(event.kind) factor of `$(event.site)` entry $(event.entry) owns or " *
-            "reads coordinates of units $(join(units, ", ")); a joint law or " *
-            "coupled transform across units has no exact split into unit terms")
-        push!(buckets[isempty(units) ? 1 : only(units) + 1], event)
-    end
-    map(buckets) do bucket
-        isempty(bucket) ? nothing : prepare_query_ad(prepare_ad, built, plan,
-            select_factors(catalogue, bucket), ad_backend, unit; coordinates=:support)
-    end
-end
+include("rk_svi_ownership.jl")
+BRM._rk_svi_factor_queries(backend::BRM.RKBRMI, unit::Vector{Float64},
+        ad_backend, owner::Vector{Int}, n::Int) = BRM._rk_svi_factor_queries(
+    backend, unit, ad_backend, owner, n, BRM._rk_svi_factors(backend, unit))
 
 BRM._rk_svi_factor_coordinates(query) = query.coordinates
 BRM._rk_svi_factor_value_gradient(query, base::Vector{Float64},

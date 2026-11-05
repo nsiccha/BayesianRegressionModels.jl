@@ -1,10 +1,9 @@
 # Independent acceptance of the public authored-density API needed by SVI's
 # block-local coordinate extension, and of SVI's authored prior term built on
 # it (`_BRMSVIAuthoredPrior`, src/nlme_svi.jl). Unit membership is supplied
-# here. This does not claim that brm_svi_fit uses this layout yet: production
-# discovery of unit-owned coordinates waits on the structural unit partition.
+# here as an independent oracle beside production structural ownership.
 # Run: julia --startup-file=no --project=test test/nlme_svi_authored_factors.jl
-using Test, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
+using Test, Random, LinearAlgebra, BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 using ADTypes: AutoEnzyme
 import Enzyme
 
@@ -164,7 +163,9 @@ end
 # the units' reads of `tau` in the globals' gradient.
 function check_svi_authored_prior(rk; constrained=false)
     m = brm_nlme_model(rk; ad_backend=FACTOR_AD)
-    t = BRM._brm_svi_target(m)
+    target = BRM._brm_svi_target(m)
+    t = merge(target, (; globals=BRM._brm_svi_globals(m),
+        units=m.view.subject_coordinates, prior=nothing))
     u0 = [0.17sin(k) for k in eachindex(m.unit)]
     strict = BRM._brm_svi_authored_prior(m, t.globals, t.units)
     @test count(!isnothing, strict.queries) == length(t.units) + 1
@@ -217,6 +218,49 @@ function check_svi_authored_prior(rk; constrained=false)
     end
     println("SVI_AUTHORED_PRIOR constrained=", constrained, " globals=", length(globals),
         " unit_sizes=", length.(units), " strict_unit_sizes=", length.(t.units))
+    @test target.globals == globals
+    @test target.units == units
+    check_svi_owned_target(target; constrained)
+end
+
+function check_svi_owned_target(t; constrained=false)
+    m = t.m
+    @test length(t.globals) == 4
+    @test length.(t.units) == fill(constrained ? 5 : 3, 6)
+    @test t.prior isa BRM._BRMSVIAuthoredPrior
+    sampler = prepare_sampler(m.backend.model, BRM.rk_bound_plan(m.backend),
+        m.unit; backend=FACTOR_AD)
+    for offset in (0.0, 0.31, -0.24)
+        u = [0.17sin(k) + offset for k in eachindex(m.unit)]
+        g = u[t.globals]
+        value, gg = BRM._brm_svi_global_term(t, g)
+        gradient = zeros(length(u))
+        gradient[t.globals] .= gg
+        for (i, block) in enumerate(t.units)
+            gg, gz = zeros(length(g)), zeros(length(block))
+            value += BRM._brm_svi_unit_term!(gg, gz, t, i, g, u[block])
+            gradient[t.globals] .+= gg
+            gradient[block] .+= gz
+        end
+        expected_gradient = similar(u)
+        expected, _ = sampler_value_and_gradient!(sampler, expected_gradient, u)
+        @test value ≈ expected atol=2e-10 rtol=2e-12
+        @test gradient ≈ expected_gradient atol=2e-9 rtol=2e-10
+    end
+    fit = brm_svi_fit(m; rng=Xoshiro(16), batch_size=2, max_iterations=2,
+        ndraws=5, threads=1)
+    @test fit.diagnostics.units == t.units
+    @test fit.diagnostics.owner == t.ownership.owner
+    @test size(fit.draws) == (length(m.unit), 5)
+    @test all(isfinite, fit.draws)
+    # With zero noise the packed draw must recover every factor's mean at
+    # exactly its original coordinate, including the newly local vector.
+    q = fit.diagnostics.q
+    centered = merge(q, (; ρ=fill(-Inf, length(q.ρ)), Β=zero(q.Β),
+        U=[Matrix{Float64}(I, length(b), length(b)) .* 1e100 for b in t.units]))
+    draws = BRM._brm_svi_draws(Xoshiro(3), t, centered, 1)
+    @test draws[t.globals, 1] == q.μ
+    @test all(i -> draws[t.units[i], 1] ≈ q.M[i], eachindex(t.units))
 end
 
 @testset "BRM authored factors for block-local SVI" begin

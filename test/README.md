@@ -1123,7 +1123,7 @@ fit is compared with NUTS too. Starts (prior medians, a packed point,
 environment above.
 
 `nlme_svi_authored_factors.jl` checks the public RKPPL authored-factor API
-that block-local SVI coordinates need, before `brm_svi_fit` uses it. On a
+and production SVI ownership. On a
 six-subject model whose coefficient pair `z[2i-1], z[2i]` is read only by
 subject `i`, and on a variant with hyperparameter-dependent Normal, Exponential
 and Beta priors, it gives each pair (and each constrained coordinate) to its
@@ -1141,9 +1141,15 @@ different units, as is a coordinate assigned twice, while the strict subject
 units build with the simplex global. That needs RKPPL 0.1.72, which reports
 the constant Dirichlet's own block as its support (snag
 `ReactiveKernels/factor-support-r-2b8c2968`; 0.1.70 reported the whole packed
-vector). The
-fixture supplies the subject membership itself; it does not test how
-production preparation discovers it. Run it alone in the test environment.
+vector). It also checks the production ownership split, public fits and
+draw packing. Run it alone in the test environment.
+
+`nlme_svi_owned.jl` covers structural ownership through dormant branches and
+zero coefficients, shared and prior-only coordinates, connected units,
+explicit global promotions, optimizer resume and streaming absent/returning
+units. Its density and native Reverse gradient oracle is the full RK sampler.
+`nlme_svi_ownership_algebra.jl` isolates atomic-block and directed-prior
+closure, including fixed coordinates and factors that own no coordinates.
 
 `nlme_svi_threads.jl` checks `brm_svi_fit(...; threads)` with real threads (run
 it with `--threads=4`; it refuses to run without them). The state after every
