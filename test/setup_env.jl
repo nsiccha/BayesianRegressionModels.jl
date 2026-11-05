@@ -317,7 +317,13 @@ const PINS = [
     # Also contains RK 0.1.82 (b08cb894), which retains live broadcast fusion
     # after data binding, so batched vector-cell readers reuse their result
     # buffers at every position.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a9a7e9a2182ef2057c004a3c81dd74eef4f3a699"),
+    # b0ffcdc1 (RKPPL 0.1.98, on RK main through 6ea1d4ca) normalizes
+    # generated-module names in SMC checkpoint identities, so a fresh process
+    # resumes an adaptive pilot of an RKBRMI model whose law is an emitted
+    # binding (a gmrf field). It is a9a7e9a2 plus that fix only: main from
+    # 8e67ee82 breaks the selective carried-window route
+    # (test/smc_window_selective_api.jl; RK snag selective-carrie-1aa69e67).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "b0ffcdc1d915fc111988ddb6bceca8dabeede643"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
