@@ -12,6 +12,47 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.182
+
+- Fresh-process recovery of adaptive `brm_smc_tune` pilots (`resume=partial`
+  or `checkpoint_dir=dir, resume=true`) works for `RKBRMI` models whose laws
+  are bound in the generated RK program module, such as `gmrf(...)` fields.
+  Before, the checkpoint named that process-local module and a fresh process
+  failed with `UndefVarError: ##RKEmittedModels#…`. **Breaking:** the RK backend
+  now requires ReactiveKernelsPPL 0.1.98, which normalizes generated-module
+  names in SMC checkpoint identities; raise an environment pinning an older
+  ReactiveKernels commit to `b0ffcdc1` or a descendant. Checkpoints written
+  with ReactiveKernelsPPL 0.1.97 or earlier are not migrated: resume them with
+  their original versions or write a new initialization checkpoint.
+- RK `main` from `8e67ee82` currently breaks selective carried-window tuning
+  (`coordinates=:auto`) with a `MethodError` in `_cell_joined_rows`; BRM's test
+  pin stays on `b0ffcdc1` until ReactiveKernels repairs it.
+
+## 0.2.181
+
+- `brm_start` accepts `component_inits` on both backends, keyed by authored
+  component call paths and local parameter names. Repeated and nested calls
+  can set independent scalar, vector, simplex and correlation Cholesky starts
+  on the constrained scale; RK uses its native layout without compiling Stan.
+  `base=:prior_median` now visits component-local scalar priors recursively,
+  resolves each call's bound inputs and preserves explicit-start precedence.
+  Numeric bases retain every unaddressed value.
+
+## 0.2.180
+
+- `SBBRMI` and `RKBRMI` compose heterogeneous scalar `MixtureModel`
+  components with known full-real continuous support, including custom
+  function families with different argument counts. Each component retains
+  its ordinary parameterization and backend mapping.
+- RK preserves native component density graphs, including existing
+  `_rk_observation_source!` providers, for dependency-aware scheduling,
+  native Reverse gradients, pointwise likelihood and source replay.
+  Stan preserves component predictive draws and membership outputs.
+  Native RK mixture/custom-law predictive generation remains separate work.
+- Requires StanBlocks 0.2.25, ReactiveKernels 0.1.81 and
+  ReactiveKernelsPPL 0.1.94. Bounded or mixed-support heterogeneous components
+  remain outside the supported mixture contract.
+
 ## 0.2.179
 
 - `brm_model_view(model)` with HTMXObjects shows data/parameter roles and value

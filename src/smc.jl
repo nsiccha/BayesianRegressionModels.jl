@@ -110,6 +110,11 @@ fit/carry and coordinate selection for updates. BRM supplies endpoint identities
 RKPPL validates those, configuration and versions, skips completed pilots and
 restores the active sampler and RNG. The required `rng` is ignored on resume.
 Supply callback/progress afresh. Inputs and supplied partials remain unchanged.
+A fresh process rebuilds the model as usual, including models whose laws are
+bound in the generated RK program module (such as `gmrf(...)` fields); this
+needs ReactiveKernelsPPL 0.1.98 or later. Checkpoints written with an earlier
+ReactiveKernelsPPL are not migrated: resume them with their original versions
+or write a new initialization checkpoint.
 
 Fresh calls refuse an existing tuning checkpoint unless `overwrite=true`;
 overwrite cannot accompany resume. Only the latest outer checkpoint is kept and
