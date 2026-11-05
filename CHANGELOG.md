@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.179
+
+- Changed: one-unit NLME calls from several tasks run in parallel. Each call
+  takes its own evaluator from the model's pool: the model's first, or one
+  prepared when calls first overlap (its own partition query, compact sampler
+  and work points), at most one per Julia thread. Before, every call waited on
+  one lock. NLMEEstimation's `WarmupHMCNUTS(threads = true)` therefore runs
+  BRM subjects in parallel. A unit's value and gradient do not depend on which
+  evaluator computes them. The NLMEEstimation floor is 0.2.5, the first
+  release with `threads = true`.
+- Changed: overlapping one-unit calls need Enzyme's concurrent-GC repair
+  (dogfood from `72d5d25`). Without it, the first call that would prepare a
+  second evaluator raises a `BRMNLMEViewError` instead of running beside
+  other threads unprotected. `brm_two_stage_fit` with `threads > 1` now
+  samples its units through that pool instead of its own worker copies of the
+  model, and therefore needs the repair as well.
+
 ## 0.2.178
 
 - Added: explicit `unit_partition=:connected` for the NLME view and model,

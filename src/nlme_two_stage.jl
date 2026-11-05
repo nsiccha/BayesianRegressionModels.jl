@@ -94,28 +94,6 @@ function LogDensityProblems.logdensity_and_gradient(p::BRMNLMEUnitProblem, z)
     _brm_nlme_unit_prior(z) + value, transpose(p.factor) * gradient .- z
 end
 
-# A worker owns its mutable value partition and AD sampler. The binding,
-# cell metadata and structural Hessian patterns are shared read-only.
-function _brm_nlme_worker_model(m::BRMNLMEModel)
-    m.cell_gradient === nothing && _brm_nlme_error(
-        "brm_two_stage_fit: units of a nested model without subject cells " *
-        "evaluate through the whole-model sampler, which one thread owns; " *
-        "use `threads = 1`")
-    cell_query = m.cell_query
-    (; reads, plan, patterns) = _brm_nlme_cell_state(m)
-    g = m.cell_gradient
-    partition = (; g.context, query=_rk_nlme_partition_query(g.context, m.unit),
-        g.labels, g.footprints, point=copy(m.unit))
-    plan = _brm_nlme_worker_plan(plan, partition, m.unit)
-    cell_gradient = (; partition..., state=Ref{Any}((; reads, plan, patterns)),
-        lock=ReentrantLock())
-    BRMNLMEModel(m.view, m.backend, m.sampler, m.pointwise, m.eta_hvp, m.attribution,
-        m.theta, m.sigma, m.eta_blocks, m.unit, m.observations_query,
-        m.observations_pushforward, m.observed, m.observation_attribution,
-        cell_query, cell_gradient, m.population_prior, m.prior_structure,
-        Dict{Vector{Int},Any}())
-end
-
 """
     brm_nlme_unit_eta(p::BRMNLMEUnitProblem, z) -> Vector
 
@@ -158,8 +136,9 @@ units (the subjects of [`brm_nlme_view`](@ref)):
    [`brm_nlme_unit_problem`](@ref), is sampled by `sampler(problem)`. It
    returns a dimension × draws matrix in the problem's coordinates (WarmupHMC's
    `posterior_position` orientation), and every
-   unit returns the same number of draws. Units are sampled on `threads` tasks,
-   each with its own prepared copy of the model's cells, so `sampler` must be
+   unit returns the same number of draws. Units are sampled on `threads` tasks.
+   Each model call takes its own prepared evaluator of the model's cells (see
+   [`brm_nlme_model`](@ref), "Calls from several tasks"), so `sampler` must be
    safe to call concurrently (an independent RNG per unit, as below). A nested
    model without subject cells samples on one thread: its units evaluate
    through the whole-model sampler.

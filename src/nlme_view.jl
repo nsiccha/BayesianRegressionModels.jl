@@ -1796,6 +1796,89 @@ function _brm_nlme_check_partition_ownership(view::BRMNLMEView, i, footprint)
         "$(length(foreign)) effect coordinates owned by another subject: $names")
 end
 
+# ── Concurrent one-unit calls ────────────────────────────────────────────────
+#
+# A one-unit call writes θ, σ and η into a dense work point and runs a prepared
+# RK partition query or sampler. Both are mutable state that RK allows one
+# caller at a time (rkppl-use §14). An evaluator owns one value query, its work
+# point and, from its first gradient, one gradient plan with its own sampler,
+# gradients and work point. The model keeps a pool of evaluators. A call takes
+# an idle one, prepares a new one while the pool has fewer than
+# `Threads.maxthreadid()`, or waits until one comes back. So one-unit calls from
+# several tasks run in parallel, as NLMEEstimation's
+# `WarmupHMCNUTS(threads = true)` and `check_protocol(...; threads = true)`
+# make them. A process whose calls never overlap prepares only the first
+# evaluator. Every evaluator runs the same compiled program, and a call restores
+# its point to `m.unit`, so a unit's result does not depend on which evaluator
+# ran it.
+mutable struct _BRMNLMEEvaluator
+    const primary::Bool  # holds the model's own query, point and plan
+    const query::Any
+    const point::Vector{Float64}
+    plan::Any            # `nothing` until the first gradient
+end
+
+_brm_nlme_evaluator_pool(query, point) = (; condition=Threads.Condition(),
+    idle=[_BRMNLMEEvaluator(true, query, point, nothing)], count=Ref(1))
+
+function _brm_nlme_with_evaluator(f, m)
+    pool = m.cell_gradient.evaluators
+    evaluator = _brm_nlme_take_evaluator!(m, pool)
+    try
+        f(evaluator)
+    finally
+        lock(pool.condition) do
+            push!(pool.idle, evaluator)
+            notify(pool.condition; all=false)
+        end
+    end
+end
+
+function _brm_nlme_take_evaluator!(m, pool)
+    evaluator = lock(pool.condition) do
+        while isempty(pool.idle) && pool.count[] >= Threads.maxthreadid()
+            wait(pool.condition)
+        end
+        isempty(pool.idle) || return pop!(pool.idle)
+        pool.count[] += 1
+        nothing
+    end
+    evaluator === nothing || return evaluator
+    # Prepared outside the pool's lock, so the other evaluators stay usable.
+    try
+        _brm_nlme_new_evaluator(m)
+    catch
+        lock(pool.condition) do
+            pool.count[] -= 1
+            notify(pool.condition; all=false)
+        end
+        rethrow()
+    end
+end
+
+# A second evaluator means calls overlap: reverse gradients then run beside
+# other threads, which needs Enzyme's concurrent-GC repair (enzyme-use, "Reverse
+# gradients beside other threads"). NLMEEstimation checks `ad_backend(model)`
+# before a threaded fit; BRM checks again here for every other caller.
+function _brm_nlme_new_evaluator(m)
+    _brm_concurrent_gradients(nothing) || _brm_nlme_error(
+        "brm_nlme_model: one-unit calls overlap on several tasks, so reverse " *
+        "gradients run beside other threads, and this Enzyme lacks the " *
+        "concurrent-GC repair, so a gradient can use freed memory; use Enzyme's " *
+        "dogfood line (from 72d5d25) or call the model from one task at a time")
+    _BRMNLMEEvaluator(false, _rk_nlme_partition_query(m.cell_gradient.context, m.unit),
+        copy(m.unit), nothing)
+end
+
+# The evaluator's gradient plan: the model's own for the first evaluator, a
+# worker copy of it (own sampler, gradients and point) for the others.
+function _brm_nlme_evaluator_plan!(m, evaluator::_BRMNLMEEvaluator)
+    evaluator.plan === nothing || return evaluator.plan
+    plan = _brm_nlme_cell_state(m).plan
+    evaluator.plan = evaluator.primary ? plan :
+        _brm_nlme_worker_plan(plan, m.cell_gradient, m.unit)
+end
+
 function _brm_nlme_partition_queries(backend, cells, view, unit, partitioned, progress=nothing)
     _brm_with_phases(progress, (context="Bind partition keys",
             query="Prepare partition kernel", footprints="Check coordinate ownership")) do phases
@@ -1832,8 +1915,9 @@ function _brm_nlme_partition_queries(backend, cells, view, unit, partitioned, pr
                 end
             end
         end
+        point = copy(unit)
         (; context, query, labels, footprints, state=Ref{Any}(nothing),
-            lock=ReentrantLock(), point=copy(unit))
+            lock=ReentrantLock(), point, evaluators=_brm_nlme_evaluator_pool(query, point))
     end
 end
 
@@ -1843,7 +1927,8 @@ end
 # coordinates on Atlas) per unit, and the overlay's reads are binary searches.
 # Only the positions the caller sets are written, and `_brm_nlme_restore!`
 # puts back `unit` there, so outside a call the point equals `unit`. The
-# caller holds the owner's lock.
+# caller owns the point for the call: an evaluator taken from the model's pool
+# (`_brm_nlme_with_evaluator`), or an SVI plan its task owns.
 function _brm_nlme_restore!(point, unit, positions)
     for j in positions
         point[j] = unit[j]
@@ -2118,6 +2203,20 @@ arms of branches and zero-weight coordinates; no numerical probes or gradient
 pruning determine the structure. Retained conditional captures can still have
 conservative supports; a structural read of another unit's effect is refused.
 
+**Calls from several tasks.** One-unit calls can come from several tasks at
+once: [`brm_nlme_loglikelihood`](@ref),
+[`brm_nlme_loglikelihood_and_gradient`](@ref), the NLMEEstimation protocol's
+per-subject methods, and [`brm_nlme_unit_problem`](@ref) densities. NLMEEstimation's
+`WarmupHMCNUTS(threads = true)` makes such calls. Each call takes an evaluator
+of its own. The first evaluator is the model's own partition query and sampler.
+Further ones are prepared when calls first overlap, at most one per Julia
+thread, each with its own partition query, compact sampler and work points.
+Overlapping calls therefore run in parallel instead of waiting for each other.
+A unit's value and gradient are the same bit for bit whichever evaluator
+computes them. Overlapping calls need Enzyme's concurrent-GC repair (Enzyme
+dogfood from `72d5d25`). Without it the first call that would need a second
+evaluator raises a `BRMNLMEViewError`. Batched calls run on the calling task.
+
 `progress` reports the preparation through Treebars: pass a Treebars node and
 the call builds a `Prepare NLME model` node under it, with one phase per step
 (subject partition, pointwise sampler, observation attribution, η
@@ -2261,12 +2360,11 @@ function brm_nlme_loglikelihood(m::BRMNLMEModel, i::Integer, θ, σ, η)
         return brm_nlme_loglikelihoods(m, θ, σ, H)[i]
     end
     _brm_nlme_check_unit(m, i, θ, σ, η)
-    partition = m.cell_gradient
-    i in partition.labels || return 0.0
-    lock(partition.lock) do
-        point = _brm_nlme_write_unit!(partition.point, m, i, θ, σ, η)
+    i in m.cell_gradient.labels || return 0.0
+    _brm_nlme_with_evaluator(m) do evaluator
+        point = _brm_nlme_write_unit!(evaluator.point, m, i, θ, σ, η)
         try
-            _rk_nlme_partition_value(partition.query, point, i)
+            _rk_nlme_partition_value(evaluator.query, point, i)
         finally
             _brm_nlme_restore_unit!(point, m, i)
         end
@@ -2366,13 +2464,11 @@ function _brm_nlme_cell_value_and_selected_gradient(m::BRMNLMEModel, i::Integer,
     m.cell_gradient === nothing && _brm_nlme_error(
         "brm_nlme_model: this subject cell has no prepared compact gradient")
     block = _brm_nlme_check_unit(m, i, θ, σ, η)
-    # A prepared RK sampler owns mutable AD workspace. Protect it when the
-    # model is shared across concurrent subject requests.
-    state = _brm_nlme_cell_state(m)
-    plan = state.plan
-    indices = plan.indices[i]
+    # Every evaluator's plan shares these read-only tables.
+    indices = _brm_nlme_cell_state(m).plan.indices[i]
     selected_gradient = zeros(length(indices))
-    value = lock(m.cell_gradient.lock) do
+    value = _brm_nlme_with_evaluator(m) do evaluator
+        plan = _brm_nlme_evaluator_plan!(m, evaluator)
         _brm_nlme_write_unit!(plan.point, m, i, θ, σ, η)
         try
             _brm_nlme_partition_evaluate!(selected_gradient, plan, i)
@@ -2405,9 +2501,9 @@ function brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i::Integer, θ, σ
     m.cell_gradient === nothing && _brm_nlme_error(
         "brm_nlme_model: this subject cell has no prepared compact gradient")
     block = _brm_nlme_check_unit(m, i, θ, σ, η)
-    plan = _brm_nlme_cell_state(m).plan
     gradient = zeros(length(block))
-    value = lock(m.cell_gradient.lock) do
+    value = _brm_nlme_with_evaluator(m) do evaluator
+        plan = _brm_nlme_evaluator_plan!(m, evaluator)
         _brm_nlme_write_unit!(plan.point, m, i, θ, σ, η)
         try
             _brm_nlme_partition_eta!(gradient, plan, i)
