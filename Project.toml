@@ -1,9 +1,10 @@
 name = "BayesianRegressionModels"
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.2.177"
+version = "0.2.178"
 
 [deps]
+DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
 Bessels = "0e736298-9ec6-45e8-9647-e4fc86a2fe38"
 KLU = "ef3ab10e-7fda-4108-b977-705223b18434"
 MUMPS = "55d2b088-9f4e-11e9-26c0-150b02ea6a46"
@@ -68,6 +69,7 @@ BayesianRegressionModelsWarmupHMCEnzymeExt = ["WarmupHMC", "Enzyme"]
 BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 
 [compat]
+DataStructures = "0.18, 0.19"
 Bessels = "0.2"
 TreeArrays = "0.2.0"
 KLU = "0.6"

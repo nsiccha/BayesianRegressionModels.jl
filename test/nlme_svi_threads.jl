@@ -195,11 +195,14 @@ end
     w = BRM._brm_svi_with_workers(t, 3)
     @test length(w.plans) == 3 && first(w.plans) === t.plan
     for plan in w.plans[2:end]
-        @test all(g -> plan.samplers[g] !== t.plan.samplers[g], eachindex(plan.samplers))
-        @test all(g -> plan.buffers[g].active !== t.plan.buffers[g].active &&
-            plan.buffers[g].gradient !== t.plan.buffers[g].gradient, eachindex(plan.buffers))
-        # Scaling with the cells, these must not be copied per worker.
-        @test plan.selections === t.plan.selections && plan.slots === t.plan.slots
+        @test plan.sampler !== t.plan.sampler && plan.point !== t.plan.point
+        @test all(i -> plan.gradients[i] !== t.plan.gradients[i], eachindex(plan.gradients))
+        @test all(i -> plan.local_gradients[i] !== t.plan.local_gradients[i],
+            eachindex(plan.local_gradients))
+        # Scaling with the units, these must not be copied per worker.
+        @test plan.indices === t.plan.indices && plan.footprints === t.plan.footprints &&
+            plan.slots === t.plan.slots && plan.local_footprints === t.plan.local_footprints &&
+            plan.eta_slots === t.plan.eta_slots
     end
     # A worker's plan gives what the model's own does.
     g, z = m.unit[t.globals], m.unit[t.units[2]] .+ 0.2

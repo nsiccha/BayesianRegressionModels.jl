@@ -714,7 +714,7 @@ end
 
 # One observation's factors. Returns the last term number it took.
 function _brm_spl_observation_cells!(p, u0, name, expected, term, zof, pof, ad_backend, progress)
-    query = _rk_nlme_cell_query(p.backend, (name,))
+    query = _rk_nlme_cell_query(p.backend, (name,), (), u0)
     factors = _rk_spl_factor_queries(p.backend, name)
     prepared = _brm_spl_prepare_factors(p.backend, name, u0, length(expected),
         p.integrated, p.population; query=factors)
