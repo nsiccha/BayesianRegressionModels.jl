@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.177
+
+- Require ReactiveKernels 0.1.82 to restore buffer reuse when batched readers
+  evaluate vector-valued plate cells. Emitted and printed RK models retain
+  live broadcast fusion after binding data, avoiding a temporary vector per
+  cell and position.
+
 ## 0.2.176
 
 - Applying an explicitly selected Laplace plan over a per-cell `gmrf` field
