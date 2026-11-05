@@ -1248,6 +1248,21 @@ how a failing unit stops the tasks, the BLAS pin and the refusals.
 `research/svi_threads/benchmark.jl` measures per-iteration time, GC share and retained
 worker memory against `threads`.
 
+`nlme_threads.jl` checks one-unit NLME calls from several tasks at once, which
+take their own evaluators from the model's pool. On flat, plate and nested
+models, the protocol's one-unit values, η gradients and population gradients,
+called from every thread in shuffled order, equal serial calls to the last bit,
+and the pool prepares more than one evaluator. `check_protocol(...; threads =
+true)` passes on a nested model. A seeded `WarmupHMCNUTS(threads = true)` SAEM fit
+of a 24-subject plate PK model gives the same bits in child processes with 1, 4
+and N threads (`BRM_NLME_THREADS_N`, default 8). Over six seeds its estimates
+agree with lockstep fits (`threads = false`) within twice the lockstep fits'
+spread, and both recover the simulated population values. Run it in the
+NLMEEstimation scratch environment below (NLMEEstimation 0.2.5 or later) with
+`--threads=4`; it refuses to run without threads.
+`research/nlme_threads/benchmark.jl` measures a round of one-unit calls and SAEM
+fits at the thread count it is started with.
+
 `nlme_svi_laplace_plan.jl` checks structural eligibility for
 `GaussianBlockLaplace`, including fixed HSGP fitting inputs, nonstandard
 Gaussian coefficient priors, and named refusals for nonlinear expressions.
