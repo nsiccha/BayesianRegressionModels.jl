@@ -37,7 +37,9 @@ function separator_simplex_model(data)
 end
 
 @testset "explicit promotion closes a coupled prior and its transform" begin
-    data = (; subject=["subject $i" for i in 1:4], y=[-0.2, 0.1, 0.3, 0.5], extra=0.4)
+    # Isolate prior/transform closure in one scientific subject. Hub and
+    # chain fixtures below independently check the multi-subject regrouping.
+    data = (; subject=fill("subject 1", 4), y=[-0.2, 0.1, 0.3, 0.5], extra=0.4)
     m = brm_nlme_model(RKBRMI(separator_simplex_model(data));
         ad_backend=NLME_AD, unit_partition=:connected)
     catalogue = density_factors(m.backend.model, BRM.rk_bound_plan(m.backend))

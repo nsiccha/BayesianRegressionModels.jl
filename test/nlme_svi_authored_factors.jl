@@ -76,7 +76,7 @@ function fixture_owned(catalogue, n; constrained=false)
             @test length(coordinates) == 1
             append!(owned, coordinates)
         end
-        owned
+        sort!(owned)
     end
 end
 

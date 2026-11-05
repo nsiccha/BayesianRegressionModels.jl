@@ -97,7 +97,7 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
     prior = !connected && sum(length, units; init=0) == nz &&
         all(j -> m.view.role[j] === :subject_effect, Iterators.flatten(units)) ? nothing :
         _brm_svi_authored_prior(m, globals, units; factors=ownership.factors)
-    (; m, globals, units, ownership, partition, plan, plans=[plan], work, layouts, prior,
+    (; m, globals, units, ownership, previous, partition, plan, plans=[plan], work, layouts, prior,
        z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
 end
 
@@ -440,6 +440,7 @@ function _brm_svi_unit_step!(::AbstractMatrix, q, i, gz, gd, εi, β)
     # Promoting all of a scientific subject's effects leaves an empty local
     # factor. Its observation term may still contribute to the globals.
     isempty(q.M[i]) && return q
+
     U = LowerTriangular(q.U[i])
     H = gd * (U * εi)'
     G = Symmetric(-(H + H') ./ 2 .- q.Λ[i])
@@ -712,8 +713,10 @@ function _brm_svi_draws(rng, t, q, n)
             U[block, j] .= _brm_svi_draw_unit(q, i, _brm_svi_unit_noise(rng, q.U[i]))
         end
     end
-    U
+    _brm_svi_fill_absent_draws!(rng, U, t, t.previous)
 end
+
+_brm_svi_fill_absent_draws!(rng, draws, t, ::Nothing) = draws
 
 # The model through its preparation phases, as for `brm_nlme_fit`: lowering to
 # RK and `brm_nlme_model`. A stage `x` has already passed is reused.
