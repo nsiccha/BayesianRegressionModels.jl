@@ -10,7 +10,15 @@ using Test, BayesianRegressionModels, HTMXObjects
 module ExportFixture
 using BayesianRegressionModels
 
-"""Center the toy predictor. Inspecting or exporting the model must not call it."""
+"""
+Center the toy predictor. Inspecting or exporting the model must not call it.
+See [`sum`](@ref) and [a *named* reference](@ref model-view-reference).
+
+```jldoctest model-view-export
+julia> 1 + 1
+2
+```
+"""
 center_predictor(x) = error("export evaluated center_predictor")
 
 """Reusable centered curve; each call has its own intercept."""
@@ -28,7 +36,7 @@ end
 end
 
 builder = @brm begin
-    """Residual **response scale** for the synthetic regression."""
+    """Residual **response scale** for the synthetic regression. See [`Exponential`](@ref)."""
     sigma ~ Exponential(1)
     beta ~ Normal(0, 1)
     left ~ shifted_curve(x)
@@ -72,6 +80,9 @@ result = export_site(site; pages=["/"], parallel=false)
 @testset "model view PDF and static HTML export" begin
     @test occursin("Model quantities", markdown)
     @test occursin("Center the toy predictor", markdown)
+    @test occursin("See `sum` and a *named* reference.", markdown)
+    @test occursin("See `Exponential`.", markdown)
+    @test occursin("julia> 1 + 1\n2", markdown)
     @test occursin("Response likelihood. This authored prose", markdown)
     @test occursin("Authored documentation", route_markdown)
     @test occursin("Model quantities", route_plain)
@@ -87,6 +98,8 @@ result = export_site(site; pages=["/"], parallel=false)
     @test startswith(String(pdf[1:5]), "%PDF-")
     @test read(joinpath(site, "files", "model.pdf")) == pdf
     html = read(joinpath(site, "index.html"), String)
+    @test !occursin(r"href=\"[^\"]*@ref", html)
+    @test !occursin("language-jldoctest", html)
     @test occursin("Center the toy predictor", html)
     @test occursin("<details", html)
     @test occursin("files/model.pdf", html)
