@@ -94,6 +94,14 @@ cumulative-update, selective carried-window and prepared sparse-Laplace targets
 using small synthetic models. Run `test/setup_env.jl` first for the pinned RKPPL recovery contract and
 Treebars 0.1.5, then `julia --project=test test/smc_tuning_lifecycle.jl`.
 
+`smc_worker_forwarding.jl` checks that BRM forwards ReactiveKernelsPPL 0.1.100's
+worker controls on the same four targets: `grid_start=:independent` reaches every
+`brm_smc_tune` route and gives the same schedule at one and several workers, and
+`nthreads` on every `brm_smc_resume` route replaces a production checkpoint's
+saved worker cap without changing the resumed cloud. Its assertions hold at any
+thread count; run `julia -t 4 --project=test test/smc_worker_forwarding.jl` to
+also exercise concurrent pilots and workers.
+
 `smc_generated_law_recovery.jl` stops an adaptive pilot of a small `gmrf(...)`
 field model at initialization in one Julia process and resumes it in another,
 through `smc_generated_law_process.jl`. The field's law is bound in the

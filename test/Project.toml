@@ -363,4 +363,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # db6bca825 (RK 0.1.86 / RKPPL 0.1.99) includes df3eb8872's selective-window
 # capture-footprint fix and the scalar-observation gather-demand repair.
 # Use the SHA: those versions alone do not identify the footprint fix.
-rev = "db6bca825d257b09616a0962ffb75587a81a6bb8"
+# cb3b33bd (RKPPL 0.1.100): opt-in independent adaptive grid pilots
+# (`tune_smc(...; grid_start=:independent)`) and `resume_smc(...; nthreads)`.
+rev = "cb3b33bd08da2b13c9105eb75a6c15473b72d467"

@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.198
+
+- SMC worker parallelism from ReactiveKernelsPPL 0.1.100 (now the floor).
+  Every `brm_smc_tune` method (initial, prepared Laplace, cumulative update,
+  carried window) forwards `grid_start`: with `pilot=:adaptive`,
+  `grid_start=:independent` runs the grid pilots concurrently on up to
+  `options.nthreads` workers, each from its own copy of `init`, after the
+  reference pilot. The schedule is the same for every worker count but
+  generally differs from the default sequential one (`grid_start=nothing`).
+  Every `brm_smc_resume` method (initial/update, Laplace, carried window) takes
+  `nthreads=n` to replace a production checkpoint's saved worker cap; the
+  resumed cloud does not depend on it.
+
 ## 0.2.197
 
 - Added: SVI units own ordinary sampled coordinates read only within that
