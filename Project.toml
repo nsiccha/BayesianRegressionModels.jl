@@ -1,7 +1,7 @@
 name = "BayesianRegressionModels"
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.2.173"
+version = "0.2.174"
 
 [deps]
 Bessels = "0e736298-9ec6-45e8-9647-e4fc86a2fe38"
@@ -85,7 +85,7 @@ Optim = "2"
 Pathfinder = "0.9, 0.10"
 PowerScaling = "0.1.0"
 ReactiveKernels = "0.1.67"
-ReactiveKernelsPPL = "0.1.93"
+ReactiveKernelsPPL = "0.1.97"
 ReparametrizableDistributions = "0.3"
 SequentialMonteCarlo = "0.7"
 RuntimeGeneratedFunctions = "0.5"
