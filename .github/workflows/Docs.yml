@@ -77,7 +77,7 @@ jobs:
             using Pkg, TOML
             # Julia 1.10 ignores [sources]; read the BRM release pins here.
             sources = TOML.parsefile("Project.toml")["sources"]
-            pinned = map(["ReparametrizableDistributions", "PowerScaling"]) do name
+            pinned = map(["PowerScaling"]) do name
               source = sources[name]
               path = joinpath(ENV["RUNNER_TEMP"], name * ".jl")
               run(`git clone --no-checkout $(source["url"]) $path`)

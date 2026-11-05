@@ -13,6 +13,7 @@ BayesianRegressionModels = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 BridgeStan = "c88b6f0a-829e-4b0b-94b7-f06ab5908f5a"
 CategoricalArrays = "324d7699-5711-5eae-9e2f-1d82baa6b597"
 DifferentiationInterface = "a0c0ee7d-e4b9-4e03-894e-1c5f64a51d63"
+DiffEqBase = "2b5f629d-d688-5b77-993f-72d75c75574e"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
 Enzyme = "7da242da-08ed-463a-9acd-ee780be4f1d9"
 EnzymeCore = "f151be2c-9106-41f4-ab19-57ee4f262869"
@@ -22,6 +23,7 @@ JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LogDensityProblems = "6fdf6af0-433a-55f7-b3ed-c6c6e0b8df7c"
 MCMCDiagnosticTools = "be115224-59cd-429b-ad48-344e309966f0"
+OptimizationBase = "bca83a33-5cc9-4baa-983d-23429ab6bcbb"
 LogExpFunctions = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
 OutputSignatures = "86cfaae4-1704-4c69-ba62-d919d81ae5f8"
 Pathfinder = "b1d3bc72-d0e7-4279-b92f-7fa5d6d2d454"
@@ -40,7 +42,6 @@ Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 StatsFuns = "4c63d2b9-4356-54db-8cca-17b64c39e42c"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
-Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 ZipFile = "a5390f91-8eb1-5f08-bee0-b1d1ffed6cea"
 
@@ -56,12 +57,18 @@ Enzyme = "0.13"
 # The pinned Enzyme dogfood (test/setup_env.jl) requires 0.0.301 and runs
 # against its own libEnzyme build instead of the jll's library.
 Enzyme_jll = "< 0.0.302, >= 0.0.303"
+# Enzyme dogfood from 0fa85df3 carries upstream Enzyme.jl #3898, which split
+# `has_easy_rule` into `has_readonly_rule` / `has_attribute_preserving_rule`.
+# Older DiffEqBase and OptimizationBase extensions define the removed hook and
+# fail to load (SciMLSensitivity ODE gradients, Pathfinder starts); these
+# releases guard it (skill enzyme-use, OptimizationBase extension section).
+DiffEqBase = "7.21.6"
+OptimizationBase = "5.10.1"
 PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
 StanBlocks = "0.2.26"
 Treebars = "0.1.5"
-Turing = "0.46"
 WarmupHMC = "0.2.11"
 julia = "1.10"
 

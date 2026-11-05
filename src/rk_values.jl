@@ -870,7 +870,7 @@ end
 
 # Leveled families own their response coding and implicit threshold vectors as
 # formula semantics (`_brm_prepare_response`, the record SBBRMI's emitted
-# `<response>_cutpoints` and Turing's model share). A response whose location
+# `<response>_cutpoints` reads). A response whose location
 # is an authored value takes the same record as a formula-predictor location.
 const _RK_VALUE_LEVELED_HEADS = (OrderedLogistic, Ordinal, CategoricalLogit)
 

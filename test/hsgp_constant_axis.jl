@@ -42,8 +42,6 @@ constant_axis_model(builder, df) = SBBRMI(builder(df); mod=@__MODULE__)
         @test_throws "hsgp: degenerate input" BRM._brm_fit_hsgp(axis, 5, 1.5)
         @test_throws "hsgp: degenerate input" BRM._brm_fit_hsgp(
             (axis, collect(range(0.0, 1.0; length=n + 1))[1:n]), (5, 3), (1.5, 1.5))
-        # The vectorised backend's basis is the same law.
-        @test_throws "hsgp: degenerate input" BRM._hsgp_basis(axis, 5, 1.5)
     end
     # An anchor at the constant value adds no width; another anchor does.
     @test_throws "hsgp: degenerate input" BRM._brm_fit_hsgp(

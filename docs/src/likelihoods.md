@@ -5,9 +5,7 @@
 This is the exhaustive public likelihood catalogue for the default
 [`SBBRMI`](@ref) Stan backend. A `Distributions.jl` subtype not named here is
 not accepted merely because it is a distribution: BRM rejects it until its
-Julia constructor has an explicit Stan mapping. The pure-Julia [`VBRMI`](@ref)
-backend is independent and does not implement every specialized family or
-response wrapper below.
+Julia constructor has an explicit Stan mapping.
 
 ### Direct `Distributions.jl` families
 
@@ -313,11 +311,7 @@ tested. BRM's eager two-sided bound check accepts `lower <= upper`, while the
 StanBlocks producer requires a non-degenerate interval with `lower < upper`;
 equal bounds are therefore rejected during Stan lowering.
 
-This composition is implemented only by the `SBBRMI` Stan backend. **Do not
-use `VBRMI` for these formulas:** it currently does not reject `truncated` or
-`censored` at construction and can return log densities for a misinterpreted
-model; `interval_censored` may fail only when the density is evaluated. A
-`VBRMI` result is therefore not a valid cross-check of an `SBBRMI` fit. The
+This composition is implemented by the `SBBRMI` Stan backend. The
 legacy `TruncatedNormal` marker remains a separate censored-Normal
 compatibility surface.
 

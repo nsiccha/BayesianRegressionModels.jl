@@ -1,7 +1,7 @@
 name = "BayesianRegressionModels"
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.2.185"
+version = "0.2.188"
 
 [deps]
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
@@ -14,7 +14,6 @@ LimitedLDLFactorizations = "f5a24dde-3ab7-510b-b81b-6a72c6098d3b"
 BridgeStan = "c88b6f0a-829e-4b0b-94b7-f06ab5908f5a"
 CategoricalArrays = "324d7699-5711-5eae-9e2f-1d82baa6b597"
 Distributions = "31c24e10-a181-5473-b8eb-7969acd0382f"
-ElasticArrays = "fdbdab4c-e67f-52f5-8c3f-e7b388dad3d4"
 InverseFunctions = "3587e190-3f89-42d0-90ee-14403ec27112"
 Libdl = "8f399da3-3557-5675-b5ff-fb832c97cbdb"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
@@ -23,8 +22,6 @@ LogExpFunctions = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
 OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
 PowerScaling = "ea5902b9-87b7-4ea4-9e46-f9c5bf9e0b31"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
-ReparametrizableDistributions = "7d03e222-df96-4b80-bcdc-d089be88b5f2"
-RuntimeGeneratedFunctions = "7e49a35a-f44a-4d26-94aa-eba1b4ca6b47"
 SHA = "ea8e919c-243c-51af-8825-aaa63cd721ce"
 SelectedInversion = "043bf095-3f01-458a-9f1c-8cf4448fe908"
 Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
@@ -50,7 +47,6 @@ ReactiveKernels = "78e9f072-d36b-4c73-b7a3-751b0eb26cf9"
 ReactiveKernelsPPL = "e266ea2a-6817-46cd-8bec-6238f0035f44"
 SequentialMonteCarlo = "8c675823-c5d5-50f8-acb2-29aff48dfc1d"
 Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
-Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [extensions]
@@ -65,8 +61,6 @@ BayesianRegressionModelsReactiveKernelsEnzymeExt = ["ReactiveKernels", "Reactive
 BayesianRegressionModelsSMCExt = ["ReactiveKernels", "ReactiveKernelsPPL", "SequentialMonteCarlo", "WarmupHMC", "Enzyme", "ADTypes", "DifferentiationInterface"]
 BayesianRegressionModelsFilterExt = ["ReactiveKernels", "ReactiveKernelsPPL", "SequentialMonteCarlo"]
 BayesianRegressionModelsTreebarsExt = "Treebars"
-BayesianRegressionModelsTuringExt = "Turing"
-BayesianRegressionModelsTuringWarmupHMCExt = ["Turing", "WarmupHMC"]
 BayesianRegressionModelsWarmupHMCEnzymeExt = ["WarmupHMC", "Enzyme"]
 BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 
@@ -89,16 +83,13 @@ NLMEEstimation = "0.2.4"
 Optim = "2"
 Pathfinder = "0.9, 0.10"
 PowerScaling = "0.1.0"
-ReactiveKernels = "0.1.82"
+ReactiveKernels = "0.1.83"
 ReactiveKernelsPPL = "0.1.98"
-ReparametrizableDistributions = "0.3"
 SequentialMonteCarlo = "0.7"
-RuntimeGeneratedFunctions = "0.5"
 SelectedInversion = "0.2.2"
 StanBlocks = "0.2.26"
 StaticArrays = "1"
 Treebars = "0.1.1"
-Turing = "0.46"
 WarmupHMC = "0.2.11"
 julia = "1.10"
 
@@ -108,10 +99,6 @@ TreeArrays = "5daaa025-ac78-4e9a-8805-78946e672e43"
 [sources.TreeArrays]
 url = "https://github.com/nsiccha/TreeArrays.jl"
 rev = "53cfd1b17ee4d1b726dcecfe151458ae41bd20a8"
-
-[sources.ReparametrizableDistributions]
-url = "https://github.com/nsiccha/ReparametrizableDistributions.jl"
-rev = "8f7d382df700d3780ed31d093bc4983d3734a6c6"
 
 [sources.PowerScaling]
 url = "https://github.com/nsiccha/PowerScaling.jl"

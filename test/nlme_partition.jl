@@ -106,6 +106,56 @@ end
     @test occursin("b_subject", sprint(showerror, error))
 end
 
+# Elementwise in value, but written as a scan, which has no row form: a cell
+# reading it at its rows would compute it whole, every unit's effects included.
+halved_by_scan(x) = 0.5 .* x
+function BRM._rk_callable_source!(definitions, bindings, entry, ::typeof(halved_by_scan))
+    push!(definitions, :(ReactiveKernels.@kernel $entry(x) = begin
+        values = ReactiveKernels.scan(x; init=0.0) do carry, value
+            next = 0.5 * value
+            (next, next)
+        end
+        return values
+    end))
+    :done
+end
+
+@stestset "a value computed whole from the units' effects is refused by name" begin
+    # Guards the ArbeitsplatzAtlas stall (snag saem-s-nuts-warm-28e5f1d9, todo
+    # 0y5jynw): cells that computed a field whole made one unit's gradient cost
+    # more than the whole model's. The user asked for a check that errors out,
+    # not a threshold (decision 1vncxdq). Each density reads only its own
+    # subject's effect, so attribution accepts the model; the refusal is RK's
+    # strict locality check at preparation, naming the value and its producer.
+    data = (; subject=["a", "b", "c", "a", "b", "c"], y=[0.1, 0.2, 0.3, -0.1, 0.4, 0.0])
+    whole = RKBRMI(@brm data begin
+        mu ~ 1 + (1 | subject)
+        h = halved_by_scan(mu)
+        y ~ Normal(h, 1)
+    end)
+    local_h = RKBRMI(@brm data begin
+        mu ~ 1 + (1 | subject)
+        h = 0.5 .* mu
+        y ~ Normal(h, 1)
+    end)
+    u = 0.3 .* randn(Xoshiro(3), whole.model.layout.total)
+    @test whole.model.layout.total == local_h.model.layout.total
+    @test Base.invokelatest(likelihood_query(whole), u) ≈
+        Base.invokelatest(likelihood_query(local_h), u) atol=1e-12
+    refusal = try
+        brm_nlme_model(whole; ad_backend=NLME_AD)
+        nothing
+    catch e
+        e
+    end
+    @test refusal isa ReactiveKernels.PartitionLocalityError
+    text = sprint(showerror, refusal)
+    @test occursin("`h` is computed whole", text)
+    @test occursin("ReactiveKernels.scan", text)
+    # The same model with a row form prepares.
+    @test brm_nlme_model(local_h; ad_backend=NLME_AD) isa BRM.BRMNLMEModel
+end
+
 @stestset "a unit can have no cells of one observation group" begin
     data = panel_data()
     x1 = copy(data.x1)

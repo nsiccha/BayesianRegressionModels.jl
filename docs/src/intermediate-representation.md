@@ -35,15 +35,15 @@ dropped.
 
 ## The lowering chain
 
-One `BRMI` feeds every backend through two further stages:
+One `BRMI` feeds both backends:
 
-- [`VBRMI`](@ref) — the prepared, modification-frozen model: prior
-  addresses matched, group declarations resolved, fitted
-  preprocessing/replay recorded. Its summary prints the flat parameter
-  dimension plus the materialized columns and blocks.
-- [`SBBRMI`](@ref) / [`TuringBRMI`](@ref) — the backend lowerings shown in
-  the remaining panes: the StanBlocks model and Stan source on one side,
-  the native `Turing` model on the other.
+- [`SBBRMI`](@ref) — the StanBlocks lowering shown in the remaining panes:
+  the StanBlocks model and its Stan source.
+- [`RKBRMI`](@ref) — the ReactiveKernelsPPL lowering, evaluated and
+  differentiated in Julia.
+
+Both match prior addresses, resolve group declarations and record fitted
+preprocessing for replay in BRM's shared preparation layer.
 
 Nothing in the chain re-parses the formula: backends consume the same
 operations, so the IR pane and the emitted panes cannot drift apart —

@@ -69,7 +69,7 @@ the source hyperpriors, not just algebraic prior identities.
 
 This executable example reads the full dataset and uses the same 20-frequency
 model as the sampling runs. The tabs expose its generated backends. All fits
-on this page use StanBlocks/BridgeStan; the Turing tab shows generated code.
+on this page use StanBlocks/BridgeStan.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
@@ -265,14 +265,6 @@ centered position.
 [![Log-SD GP: positions and gradients, online](assets/centering-refresh-hsgp/gradients-online-log-sd-gp.png)](assets/centering-refresh-hsgp/gradients-online-log-sd-gp.png)
 
 ### Separate backend gradient comparison
-
-A separate DynamicPPL/Enzyme gradient benchmark passed numerical agreement
-checks against StanBlocks. Fixed-coordinate runtime ratios were
-1.41–1.48× StanBlocks and the online
-wrapper ratios were 1.03–1.19×. The committed receipt is
-`test/receipts/turing_hsgp_gradients.tsv`. The fits and figures here remain
-StanBlocks/BridgeStan results; the gradient benchmark is not
-Turing posterior-sampling evidence.
 
 
 ## Reproduce and inspect

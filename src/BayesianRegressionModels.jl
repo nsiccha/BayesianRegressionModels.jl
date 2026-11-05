@@ -16,12 +16,11 @@ include("ar1_normal.jl")
 # wants the model shape without re-walking the operations dict).
 include("introspection.jl")
 
-# VBRMI — vectorized implementation. Materializes predictors and
-# likelihood into a LogDensityProblems-compatible object.
-using LogExpFunctions, InverseFunctions, Distributions, ElasticArrays, Libdl,
+# Numerical and distribution dependencies shared by the preparation layer and
+# both backends (SBBRMI, RKBRMI).
+using LogExpFunctions, InverseFunctions, Distributions, Libdl,
       LogDensityProblems, LinearAlgebra, SpecialFunctions, Random, Statistics
 using StaticArrays: SMatrix, SVector, MMatrix, MVector
-using ReparametrizableDistributions: advance!!, lkj_cholesky!, simplex!
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, nonzeros, rowvals, nzrange, blockdiag
 using SelectedInversion: selinv_diag, selinv, selinv_extract
 using Bessels: besselk, besselk0, besselk1
@@ -42,6 +41,8 @@ include("formula_markers.jl")
 include("gmrf_precision.jl")
 include("gmrf_interpolation.jl")
 include("gmrf_vecchia.jl")
+include("gmrf_multiresolution.jl")
+include("gmrf_multiresolution_reads.jl")
 include("formula_validation.jl")
 include("prepared_metadata.jl")
 include("preparation_replay.jl")
@@ -64,7 +65,6 @@ include("preparation_gp.jl")
 include("preparation_gmrf.jl")
 include("preparation_cell_formulas.jl")
 include("preparation_structured.jl")
-include("turing_backend.jl")
 include("rk_backend.jl")
 include("rk_ast.jl")
 include("rk_callable_source.jl")
@@ -91,13 +91,13 @@ include("rk_reprocess.jl")
 include("rk_design_binder.jl")
 include("rk_fitted_state.jl")
 include("cut.jl")
-include("vimpl.jl")
 
 # SBBRMI — StanBlocks backend. Lowers a BRMI into a StanBlocks SlicModel
 # so it can be compiled by BridgeStan / fit via Stan.
 using StanBlocks
 include("sbimpl.jl")
 include("sb_gmrf.jl")
+include("sb_gmrf_multiresolution.jl")
 include("sb_marginal_ranef.jl")
 include("sb_cell_julia.jl")
 include("sb_cell_formulas.jl")
@@ -130,7 +130,6 @@ include("s2z_select.jl")
 # derived operations, so a consumer mounts a declaration without keeping any
 # parallel registry of its own.
 include("descriptor.jl")
-include("turing_descriptor.jl")
 include("transform_constants.jl")
 
 # Post-fit prediction modes — population-level ("no random effects") and
@@ -301,12 +300,9 @@ export brm_ordinal, brm_ordinal_lpmf, brm_ordinal_lpmfs, brm_ordinal_rng,
        brm_ranef_sd, brm_ranef_sd_lpdf
 export Data, MaybeData, maybedata
 export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
-       ExprColumn, LikelihoodColumn, MaterializedColumn
-export BRMI, BRMBuilder, brm, VBRMI, SBBRMI, TuringBRMI, RKBRMI, GenerativeDeclaration, GenerativePlan,
-       brm_distribution_type, turing_model_source,
-       turing_pointwise_loglikelihoods, turing_predictive_model,
-       turing_generated_quantities, turing_posterior_predictive,
-       rk_logdensity_problem, rk_restore_draws
+       ExprColumn, LikelihoodColumn
+export BRMI, BRMBuilder, brm, SBBRMI, RKBRMI, GenerativeDeclaration, GenerativePlan,
+       brm_distribution_type, rk_logdensity_problem, rk_restore_draws
 export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight,
        BRMHighlightSpec, BRMSubmodel, brm_highlight
 export brm_model_view
@@ -350,7 +346,7 @@ export brm_transform_constants
 
 # Accessor helpers for column types — used unqualified by html renderers,
 # sbimpl dispatch logic, and downstream extension hooks.
-export name, getf, getargs, getkwargs, getbroadcast, getop
+export name, getf, getargs, getkwargs, getop
 
 # Macro plumbing + compiled-output accessors used by downstream code
 # (web-macro's Formula struct, downstream direct pipeline calls).
@@ -387,13 +383,10 @@ export outcomes, linear_predictor_op, linear_predictors, predictors,
        priors_of, structure_of, brm_source,
        BRMDocumentation, brm_documentation, brm_documentation_markdown
 
-# Extension API. Downstream packages add their own formula terms
-# by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and
-# pushing `Part`s via `push_parts!!`; `nparams` + `lprior!` complete the
-# vimpl side. `vbroadcasted` is the materializer they call to resolve
-# column args inside those method bodies.
-export Part, push_parts!!, nparams, lprior!
-export vbroadcasted, vmeta_sampling_rhs, _sb_submodel_rhs!, _rk_submodel_rhs!, _rk_callable_source!
+# Extension API. Downstream packages add their own formula terms by
+# defining methods on `_sb_submodel_rhs!` (SBBRMI) and `_rk_submodel_rhs!`
+# (RKBRMI), and their own callables through `_rk_callable_source!`.
+export _sb_submodel_rhs!, _rk_submodel_rhs!, _rk_callable_source!
 export _sb_term_group_block, _sb_emit_group_block_term!
 
 # Internal @slic submodels from sbimpl.jl — exported so downstream

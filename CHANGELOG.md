@@ -12,6 +12,52 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.188
+
+- **Breaking:** BRM now supports only `SBBRMI` (StanBlocks/Stan) and `RKBRMI`
+  (ReactiveKernelsPPL). Removed `TuringBRMI`, its Turing/WarmupHMC extensions,
+  the `turing_*` helpers, and `VBRMI` with its materialization/parameter-part
+  API (`MaterializedColumn`, `getbroadcast`, `Part`, `push_parts!!`, `nparams`,
+  `lprior!`, `vbroadcasted`, `vmeta_sampling_rhs`). Build one of the supported
+  backends from the same `BRMI`; use that backend's fitting, replay and
+  prediction APIs. Custom terms must use the StanBlocks or RK extension hooks.
+- Removed the retired backends' dependencies, tests and documentation. Shared
+  preparation and mixture-response checks remain on the supported paths. The
+  macro explorer now exposes its StanBlocks pipeline without the VBRMI stages.
+- Incomplete constrained-coordinate carriers now report their emitted output
+  and missing coverage instead of an undefined-variable error.
+- Refresh the test and macro-app HTMXObjects pins for the model-view floor.
+  The test environment requires DiffEqBase 7.21.6 and OptimizationBase 5.10.1
+  so their extensions load with the current Enzyme rule hooks.
+
+## 0.2.187
+
+- Added `gmrf((east, north), time[, channel]; multiresolution=m)`: a bounded
+  sparse Matérn-1 spatial basis of shared stationary OU paths. A position uses
+  the same normalized weights at every time, preserving exact temporal
+  exponential covariance, marginal SD and channel separability on irregular
+  reads. Spatial covariance remains approximate. Each innovation retains only
+  its readers' times; the representation does not complete a position × time
+  grid. It shares the existing hyperparameter addresses and priors.
+- The new model-scope form supports `RKBRMI` and `SBBRMI`, native analytic
+  derivatives, Stan prior draws, frozen replay and physical coordinate
+  transport. Its fitted support construction is part of the native graph.
+  Exact reader locality requires ReactiveKernels 0.1.83, now the RK floor.
+  Native Reverse needs Enzyme dogfood's literal-dictionary callback repair and,
+  from dogfood `7a1f689c`, its repeated-reader repair, without which gradient
+  cost grows with support metadata × reads. The test bootstrap's RK
+  `b0ffcdc1` and Enzyme `d3189970` pins contain both.
+- Clarified the `neighbors=` contract: local Matérn × OU kernel entries are
+  exact, but the implied joint temporal covariance is approximate on irregular
+  read support. Its numerical behavior is unchanged.
+
+## 0.2.186
+
+- Offset-only predictors on RK retain the declared rows of scalar plate or
+  component outputs and fixed data expressions before an explicit gather onto
+  observation rows. They no longer need a raw fixed offset or an estimated
+  coefficient to establish those rows.
+
 ## 0.2.185
 
 - Added: a function-style `@brm` component may return several named values,

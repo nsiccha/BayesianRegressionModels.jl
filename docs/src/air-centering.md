@@ -45,7 +45,7 @@ The source captures also retain `cluster_log_region` and `super_region` specific
 
 ## BRM models
 
-The authoring panes below read the exact fitted declarations. The backend views are regenerated during the docs build. Sampling uses StanBlocks/BridgeStan and WHMC; the generated Turing pane is for inspection only.
+The authoring panes below read the exact fitted declarations. The backend views are regenerated during the docs build. Sampling uses StanBlocks/BridgeStan and WHMC.
 
 ### Regional intercepts
 

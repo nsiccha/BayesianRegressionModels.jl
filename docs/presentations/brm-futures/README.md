@@ -16,14 +16,13 @@ research agenda.
 `source-examples.lua` reads the Gaussian and population-PK declarations from
 `docs/src/feature-atlas.md` at render time. Two PK slides extract its model body
 and data; appendix B shows the full declaration. These are source excerpts,
-not manually invented generated Stan/Turing programs. The normal documentation
+not manually invented generated Stan programs. The normal documentation
 build executes the feature atlas and generates its backend views.
 
-The Gaussian example generates both StanBlocks/Stan and Turing code. The PK
-example generates StanBlocks/Stan code; Turing currently rejects its ragged
-response decorator. That limit is visible on the PK slides, not just in notes.
-After preparing the normal docs environment, check those exact declarations
-and their stated construction support from the repository root with:
+The deck describes the StanBlocks and ReactiveKernels/RKPPL backends. After
+preparing the normal docs environment, check that both declarations still
+lower to StanBlocks/Stan from
+the repository root with:
 
 ```sh
 julia --startup-file=no --project=docs docs/presentations/brm-futures/check-examples.jl
@@ -96,9 +95,7 @@ fixed NCP and CP, plus post-hoc and online fits for both the position and the
 gradient loss. Its post-hoc position fit is the source workflow. Each fit is one
 chain, so split R-hat is a within-chain diagnostic rather than evidence that
 independent chains agree, and the results are not a general efficiency
-guarantee. No Turing posterior samples exist; the separate Turing gradient
-benchmark in `test/receipts/turing_hsgp_gradients.tsv` is not sampling
-evidence.
+guarantee.
 
 ## Possible Julia-to-XLA GPU path
 
@@ -114,7 +111,7 @@ Primary documentation checked on 2026-09-14:
   <https://paulbuerkner.com/brms/reference/opencl.html>
 
 This establishes a compiler route to investigate. It does not establish that
-BRM's current Julia/Turing models already compile through Reactant or run faster
+BRM's Julia models already compile through Reactant or run faster
 on a GPU. The user's suggested Wren connection could not be identified in the
 public primary sources reviewed; no specific Wren-to-Reactant relationship is
 asserted in the presentation.
