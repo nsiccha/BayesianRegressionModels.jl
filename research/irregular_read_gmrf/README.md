@@ -29,7 +29,10 @@ Keep data and generated receipts outside the repository.
 | Uncompressed input | 205,598,363 | `5d5a162f718b29ae84938c7a31e0a47c7b6153ff7ab05139b623b06a650cc2b0` |
 
 Use the repository's pinned `test/setup_env.jl` environment and the host's
-managed compute wrapper. The commands below show the Julia payloads; substitute
+managed compute wrapper. The native controls need ReactiveKernels `c497e3a7`
+(RK 0.1.83 / RKPPL 0.1.95) or later for exact reader footprints, and Enzyme
+dogfood `7a1f689c` or later: before that repair, static Reverse shadowed the
+support's literal dictionary once per reader. The commands below show the Julia payloads; substitute
 absolute paths for `REPO`, `SUPPORTS`, and `OUTPUT`. Each cost control runs in a
 fresh process with one CPU.
 

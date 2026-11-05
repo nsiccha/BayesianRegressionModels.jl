@@ -24,6 +24,11 @@ instead of failing at run time.
 - The new model-scope form supports `RKBRMI` and `SBBRMI`, native analytic
   derivatives, Stan prior draws, frozen replay and physical coordinate
   transport. Its fitted support construction is part of the native graph.
+  Exact reader locality requires ReactiveKernels 0.1.83, now the RK floor.
+  Native Reverse needs Enzyme dogfood's literal-dictionary callback repair and,
+  from dogfood `7a1f689c`, its repeated-reader repair, without which gradient
+  cost grows with support metadata × reads. The test bootstrap's RK
+  `b0ffcdc1` and Enzyme `d3189970` pins contain both.
 - Clarified the `neighbors=` contract: local Matérn × OU kernel entries are
   exact, but the implied joint temporal covariance is approximate on irregular
   read support. Its numerical behavior is unchanged.
