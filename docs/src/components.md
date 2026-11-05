@@ -5,7 +5,9 @@ parameters and one returned value. Call it with `~` inside another BRM model.
 StanBlocks and ReactiveKernels compile the same scientific declaration into
 their native submodel scopes.
 
-```julia
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:ScopedComponentsDocs), raw"""
 using BayesianRegressionModels, Distributions
 
 "A calibration curve with independent coefficients for each call."
@@ -29,8 +31,7 @@ end
 data = (x_left=[-0.4, 0.2, 0.7], x_right=[0.3, -0.2],
         y_left=[0.1, 0.4, 0.8], y_right=[0.3, -0.1])
 model = joint(data)
-sb = SBBRMI(model; mod=@__MODULE__, total_groups=())
-rk = RKBRMI(model)
+""", :model; title="Independent calibration components", require_stan=true)
 ```
 
 There are six sampled scalars: each call owns its own `a` and `b`, both calls
@@ -42,7 +43,9 @@ declare vector priors and call other components.
 An elementwise vector result retains its input row frame. It can be used in a formula
 offset or selected by a row index, including repeated or reordered indices:
 
-```julia
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:ScopedComponentsDocs), raw"""
 rows = @brm begin
     field ~ calibration(x, scale)
     log(quantity) ~ 1 + offset(field) + offset(fixed)
@@ -50,6 +53,9 @@ rows = @brm begin
     y ~ Normal(quantity, 0.7)
     scale ~ Exponential(1)
 end
+row_model = rows((; x=[-0.4, 0.2, 0.7], fixed=[0.1, -0.1, 0.2],
+                   y=[1.1, 1.4, 1.8]))
+""", :row_model; title="Component output in a formula offset", require_stan=true)
 ```
 
 An internal plate also retains its cell axis when each returned cell is a
@@ -90,6 +96,8 @@ same logical paths. `brm_source` preserves the docstrings for reconstruction,
 and redefining a Julia binding does not change a retained component's docs.
 
 ```julia
+sb = SBBRMI(model; mod=@__MODULE__, total_groups=())
+rk = RKBRMI(model)
 d = brm_descriptor(sb)
 d.submodels
 brm_output(d, :a; submodel=:left)
