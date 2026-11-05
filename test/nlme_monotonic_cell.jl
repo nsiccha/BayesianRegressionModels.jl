@@ -172,7 +172,7 @@ end
     for (shape, (predictors, exponent)) in pairs(MONOTONIC_CELL_SHAPES)
         @testset "$shape" begin
             rk = monotonic_cell_model(predictors, exponent)
-            plan = brm_laplace_plan(rk; ad_backend=NLME_AD, integrate=:auto)
+            plan = brm_laplace_plan(rk; ad_backend=NLME_AD, integrate=(:subject,))
             @test plan.integrated_dimension == 4
             p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=plan)
             names = String.(coordinate_names(rk.model.layout))
