@@ -89,7 +89,8 @@ function smc_update_model(::BRM._BRMSMCLaplaceProblem, data)
 end
 
 function BRM.brm_smc_resume(template::BRM._BRMSMCLaplaceProblem, checkpoint;
-        current=template, previous=nothing, ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        current=template, previous=nothing, nthreads=nothing,
+        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
     checkpoint.format == 1 || throw(ArgumentError("unsupported BRM SMC checkpoint format"))
     check_identity(template, checkpoint.model_id, "training Laplace target")
     rk = smc_update_model(template, current)
@@ -105,7 +106,7 @@ function BRM.brm_smc_resume(template::BRM._BRMSMCLaplaceProblem, checkpoint;
     target = prepare(rk, ad_backend, checkpoint.model_id, checkpoint.binding_id)
     old_target = old === nothing ? nothing :
         prepare(old, ad_backend, checkpoint.model_id, checkpoint.previous_id)
-    state = PPL.resume_smc(target, checkpoint.state; previous=old_target)
+    state = PPL.resume_smc(target, checkpoint.state; previous=old_target, nthreads)
     BRM.BRMSMCFit(copy_laplace(template), rk, old, state, ad_backend,
         checkpoint.model_id, checkpoint.binding_id, checkpoint.previous_id)
 end

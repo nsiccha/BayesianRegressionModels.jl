@@ -330,7 +330,10 @@ const PINS = [
     # db6bca825 (RK 0.1.86 / RKPPL 0.1.99) includes both fixes and the
     # follow-up scalar-observation gather-demand repair. Pin by SHA: these
     # versions also label earlier commits without the footprint repair.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "db6bca825d257b09616a0962ffb75587a81a6bb8"),
+    # cb3b33bd (RKPPL 0.1.100) adds opt-in independent adaptive grid pilots
+    # (`tune_smc(...; grid_start=:independent)`) and the production worker
+    # override `resume_smc(...; nthreads)`, which BRM forwards.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "cb3b33bd08da2b13c9105eb75a6c15473b72d467"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
