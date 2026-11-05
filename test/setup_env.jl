@@ -382,13 +382,14 @@ const PINS = [
     # de016556 / libEnzyme c1743bf9 retains those fixes and frees constant
     # loop-count caches after Forward over Reverse. Repeated sparse Laplace
     # cell HVPs otherwise retain native memory (forward-over-rev-f93d10bc).
-    # d3189970 / libEnzyme 33709d12 keeps those and adds two repairs this
-    # branch's Laplace needs. Without the first, a forced bounded ODL plan's
-    # Forward over Reverse cell HVPs stop on "Mismatch codegen type" through
-    # a non-inlined `Base.unalias` (julia-1-10-unali-c91b1f15). Without the
-    # second, ordinary Reverse drops the input shadow of a non-inlined gather
-    # and the strict `mo1()` summand partition gradient segfaults
-    # (ordinary-autoenz-6cf1298d, RK monotonic-summan-c191e14a).
+    # d3189970 / libEnzyme 33709d12 contains 6053067f and repairs ordinary
+    # Reverse through returned memory (Enzyme snag ordinary-autoenz-6cf1298d):
+    # the ordinary AR/DAR and smooth readers in rk_values.jl segfaulted
+    # on Julia 1.10 under 6053067f, as did the strict `mo1()` summand
+    # partition gradient (RK monotonic-summan-c191e14a). It also keeps
+    # 842cbefe: without it, a forced bounded ODL plan's Forward over Reverse
+    # cell HVPs stop on "Mismatch codegen type" through a non-inlined
+    # `Base.unalias` (julia-1-10-unali-c91b1f15).
     ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "d31899704b6f5eab6e3843c9517a5486d2139740"),  # dogfood
 ]
 

@@ -11,10 +11,12 @@ Pass a `BRMI`, a data-free `BRMBuilder` or `BRMComponent`, a prepared `RKBRMI`,
 or an existing `BRMDescriptor`. Reachable component source comes from
 [`brm_components`](@ref), retaining separate call paths and shared definitions.
 The view does not bind data, prepare, fit or evaluate a model.
-Unknown dimensions stay explicit. A builder lists its required inputs; bind
+Unknown dimensions stay explicit. A builder lists potential data inputs; bind
 it first to distinguish observed data from latent declarations. A descriptor
 adds its exact carrier dimensions and roles. Value rank (number of axes) is
-never inferred from the number of free coordinates.
+never inferred from the number of free coordinates. Component input tables
+distinguish required inputs and optional defaults, shown without evaluation.
+Joint observations label each authored response column as response data.
 
 RK inspection requires ReactiveKernelsPPL 0.1.93 or later. A replay that shares
 an earlier build leaves current parameter dimensions unresolved: that build's
@@ -58,6 +60,11 @@ function _brm_view_walk!(data, callables, seen, x::ExprColumn)
 end
 function _brm_view_walk!(data, callables, seen, x::JointResponseColumn)
     foreach(a -> _brm_view_walk!(data, callables, seen, a), joint_response_columns(x))
+end
+function _brm_view_walk!(data, callables, seen, items::Union{Tuple,NamedTuple,AbstractArray})
+    haskey(seen, items) && return
+    seen[items] = nothing
+    foreach(item -> _brm_view_walk!(data, callables, seen, item), items)
 end
 function _brm_view_walk!(_data, callables, _seen, body::_BRMInlineBody)
     expression = _brm_inline_expr(body)
@@ -104,22 +111,26 @@ Base.@nospecializeinfer function _brm_view_facts(@nospecialize(brmi::BRMI))
         bound = _brm_cell_bound_names!(Set{Symbol}(brm_columns(record.definition)), record.source)
         _brm_view_source_callables!(callables, record.source, record.scope, bound)
     end
-    roles = Dict{Symbol,Symbol}()
-    cell_responses = Set{Symbol}()
+    responses = Set{Symbol}()
     quantities = NamedTuple[]
     for (key, value) in entries
         op = parent(value)
         role = _brm_operation_role(op)
+        if role === :observation
+            # Use the producer's member projection: a joint response has a
+            # synthetic operation key, but its authored members are the data.
+            union!(responses, _brm_covariate_members(first(getargs(op))))
+            continue
+        end
         key in component_targets && (role = :component)
         cell = _brm_prune_cell(value)
         if !isnothing(cell)
             role = :cell
             for (_, _, column) in _brm_prune_cell_observations(cell)
                 column isa NamedColumn && haskey(data, name(column)) &&
-                    push!(cell_responses, name(column))
+                    push!(responses, name(column))
             end
         end
-        roles[key] = role
         haskey(data, key) && continue
         _brm_is_statement(op) || continue
         shape = role === :parameter ? _brm_view_prior_shape(last(getargs(op))) :
@@ -127,7 +138,7 @@ Base.@nospecializeinfer function _brm_view_facts(@nospecialize(brmi::BRMI))
         push!(quantities, _brm_view_record(key, role; shape...))
     end
     inputs = [_brm_view_record(key,
-        get(roles, key, :data) === :observation || key in cell_responses ? :response_data : :data;
+        key in responses ? :response_data : :data;
         _brm_view_shape(data[key])...,
         detail=data[key] isa AbstractArray && eltype(data[key]) <: AbstractArray ?
             "Outer container shape; elements have their own axes." : "")
