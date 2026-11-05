@@ -7,6 +7,11 @@ densities and native Reverse gradients with literal controls, an independent
 two-dimensional law and compiled Stan, and checks source replay, physical
 coordinate transport and invalid inputs. The bootstrap supplies RKPPL 0.1.97.
 
+`plate_selected_collection.jl` checks selections of vector cells passed to
+ordinary helpers. Reordered and repeated selections, collected and non-last
+outputs, analytic densities and gradients, and prior draws retain the same
+cell semantics across distinct producer and reader frames.
+
 `plate_direct_outputs.jl` checks direct reads of complete cells from another
 plate, including fixed-width vectors, collected and non-last outputs, and
 observed or omitted responses. Square and non-square shapes compare compiled
