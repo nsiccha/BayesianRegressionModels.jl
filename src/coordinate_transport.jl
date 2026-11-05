@@ -377,7 +377,13 @@ level label and basis function, or by inducing point and basis function for
 declared inputs of `multigroup` pair as their own declarations), monotonic `mo`/`mo1` terms (the
 coefficient as a population coefficient, the increments as a `:simplex`
 block), and the declarations a downstream submodel provider scopes under its
-target (`_rk_submodel_rhs!` / `_sb_submodel_rhs!`). A provider declaration
+target (`_rk_submodel_rhs!` / `_sb_submodel_rhs!`). A plain or stratified
+random-effect block declared inside a function-style component call
+(`kin ~ kinetics(x, unit)` with `(1 | p | unit)` in its body) pairs as at model
+scope, by that call's own grouping levels and margins: RK `kin.<block>.z`
+with Stan `kin_<block>_z_flat`, its semantic addresses carrying
+`scope = (:kin,)` (a tuple path for nested calls), so repeated calls over equal
+labels stay apart. A provider declaration
 `<target>.<path>` pairs with the sampled SB output that the same `<target>`
 declaration owns under StanBlocks' submodel name `<target>_<path>` (path
 segments joined by `_`), element by element; a simplex declaration pairs as a
@@ -530,6 +536,7 @@ function _brm_transport_validate(rk_names, stan, pairs, correlations, simplexes,
               "population and categorical coefficients, plain non-centered or " *
               "centered random-effect " *
               "blocks with sampled scales, stratified `gr(g, by=b)` blocks, " *
+              "also declared inside a component call, " *
               "HSGP terms (grouped by `by=` too), monotonic " *
               "terms, submodel provider declarations, and missing-value " *
               "completions (RK `<column>.y_mis` with SB `<column>_y_mis`, and " *
@@ -1633,22 +1640,116 @@ end
 
 function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         ::Val{:submodel}, record, rk, d, stan, stan_pos)
+    first_generic, first_factor = length(pairs) + 1, length(correlations) + 1
     elements = _brm_transport_scoped_pairs!(pairs, correlations, simplexes,
         :submodel, record.target, rk, d, stan, stan_pos)
     metadata = get(record, :component, nothing)
     metadata === nothing && return nothing
+    generic = first_generic:length(pairs)
+    factors = first_factor:length(correlations)
     replay = d.plan.preproc[_brm_component_replay_key(record.target)].const_
+    names = _BRMNameIndex(stan)
     index = (; paired=Set(pair.rk_declaration for pair in pairs), elements,
-        names=_BRMNameIndex(stan), outputs=Set(output.name for output in d.stan.outputs),
+        names, stems=sort!(collect(keys(names.stems))), kinds=_output_kinds(d.stan),
+        outputs=Set(output.name for output in d.stan.outputs),
         bindings=Set(keys(d.stan.model)))
-    _brm_transport_component_records!(pairs, metadata, replay.fitted,
-        (record.target,), d, stan, index)
+    blocks = (; pairs=BRMCoordinatePair[], correlations=NamedTuple[])
+    _brm_transport_component_records!(pairs, blocks, simplexes, centered, metadata,
+        replay.fitted, (record.target,), d, stan, index)
+    # A random-effect block's semantic pairs supersede the generic scoped pairs
+    # that matched some of its coordinates by name (its scales or factor).
+    isempty(blocks.pairs) && return nothing
+    rk_claimed = Set(pair.rk for pair in blocks.pairs)
+    stan_claimed = Set(pair.stan for pair in blocks.pairs)
+    factor_claimed = Set(factor.rk_declaration for factor in blocks.correlations)
+    deleteat!(correlations,
+        [i for i in factors if correlations[i].rk_declaration in factor_claimed])
+    deleteat!(pairs, [i for i in generic
+        if pairs[i].rk in rk_claimed || pairs[i].stan in stan_claimed])
+    append!(pairs, blocks.pairs)
+    append!(correlations, blocks.correlations)
+    nothing
+end
+
+# The unconstrained Stan names a component call at `path` owns, in their
+# unconstrained order and without the call prefix `<path>_`: the names its own
+# SB descriptor knows. The sorted stems hold the call's names as one range.
+function _brm_transport_call_names(index, path)
+    prefix = string(join(path, "_"), "_")
+    positions = Int[]
+    for k in searchsortedfirst(index.stems, prefix):length(index.stems)
+        stem = index.stems[k]
+        startswith(stem, prefix) || break
+        append!(positions, index.names.stems[stem])
+    end
+    sort!(positions)
+    offset = ncodeunits(prefix)
+    String[index.names.names[i][(offset + 1):end] for i in positions]
+end
+
+# A component call's SB descriptor in its parent's placement. The call's own
+# `SBBRMI` is traced standalone, where nothing reads its returned values, so
+# that trace draws its random-effect blocks in generated quantities; the parent
+# samples them wherever it reads the call. A block's placement is therefore the
+# parent's traced program's answer for the carrier under the call prefix.
+struct _BRMCallDescriptor{P,S}
+    plan::P
+    stan::S
+end
+ranef_blocks(d::_BRMCallDescriptor) = _ranef_blocks(d.plan, d.stan)
+
+_brm_call_descriptor(local_descriptor, parent_kinds, stan_prefix) =
+    _BRMCallDescriptor(local_descriptor.plan, (; outputs=[
+        (; name=o.name, kind=get(parent_kinds, Symbol(stan_prefix, o.name), o.kind))
+        for o in local_descriptor.stan.outputs]))
+
+# A random-effect block a component call declares (plain or stratified) pairs
+# exactly as one at model scope: the same `_brm_transport_pairs!` method, read
+# against the call's own SB plan in its parent's placement, its prefix-free Stan
+# names and its RK plan's grouping columns. Its pairs then take the call path, RK
+# `<path>.<declaration>` and Stan `<path>_<name>`, and `scope = path` in their
+# semantic addresses, so repeated calls with equal grouping labels stay apart.
+function _brm_transport_component_block!(blocks, simplexes, centered, record, plan,
+        local_descriptor, path, index)
+    rk_prefix = string(join(path, "."), ".")
+    stan_prefix = string(join(path, "_"), "_")
+    scoped(::Nothing) = nothing
+    scoped(name::Symbol) = Symbol(rk_prefix, name)
+    scoped(names::Tuple) = map(scoped, names)
+    global_name(name) = string(stan_prefix, name)
+    fields = (:scale, :scales, :z, :L, :mixing)
+    scoped_record = merge(record,
+        (; (field => scoped(record[field]) for field in fields if haskey(record, field))...))
+    names = _brm_transport_call_names(index, path)
+    local_pos = Dict{String,Int}(name => i for (i, name) in enumerate(names))
+    local_pairs, local_correlations = BRMCoordinatePair[], NamedTuple[]
+    local_centered = NamedTuple[]
+    call_descriptor = _brm_call_descriptor(local_descriptor, index.kinds, stan_prefix)
+    _brm_transport_pairs!(local_pairs, local_correlations, simplexes, local_centered,
+        Val(record.kind), scoped_record, (; plan), call_descriptor, names, local_pos)
+    for pair in local_pairs
+        push!(blocks.pairs, BRMCoordinatePair(
+            merge((; kind=pair.address.kind, scope=path), pair.address),
+            pair.rk, global_name(pair.stan), pair.rk_declaration, pair.rk_index,
+            pair.relation, global_name(pair.stan_value)))
+    end
+    for factor in local_correlations
+        push!(blocks.correlations, merge((; scope=path), factor,
+            (; stan_carrier=global_name(factor.stan_carrier))))
+    end
+    for block in local_centered
+        push!(centered, merge((; scope=path), block,
+            (; stan=global_name.(block.stan), stan_values=global_name.(block.stan_values),
+               stan_carrier=global_name(block.stan_carrier))))
+    end
+    nothing
 end
 
 # Component-owned cell and formula declarations retain the same semantic
 # records as ordinary BRM declarations. Use those records and the SB binding
 # inventory when the native submodel spelling alone does not pair a carrier.
-function _brm_transport_component_records!(pairs, metadata, fitted, path, d, stan, index)
+function _brm_transport_component_records!(pairs, blocks, simplexes, centered, metadata,
+        fitted, path, d, stan, index)
     submodel = _brm_submodel_entry(d, path)
     outputs_by_name = Dict(output.name => output for output in submodel.outputs)
     owned = Set(keys(outputs_by_name))
@@ -1662,8 +1763,14 @@ function _brm_transport_component_records!(pairs, metadata, fitted, path, d, sta
     for record in metadata.coordinates
         if record.kind === :submodel && get(record, :component, nothing) !== nothing
             replay = fitted.preproc[_brm_component_replay_key(record.target)].const_
-            _brm_transport_component_records!(pairs, record.component, replay.fitted,
-                (path..., record.target), d, stan, index)
+            _brm_transport_component_records!(pairs, blocks, simplexes, centered,
+                record.component, replay.fitted, (path..., record.target), d, stan, index)
+            continue
+        end
+        if record.kind in (:ranef, :stratified_ranef)
+            local_descriptor === nothing && (local_descriptor = brm_descriptor(fitted))
+            _brm_transport_component_block!(blocks, simplexes, centered, record,
+                metadata.plan, local_descriptor, path, index)
             continue
         end
         record.kind in (:cell_latent, :population) || continue

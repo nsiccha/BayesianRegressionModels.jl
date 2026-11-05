@@ -12,13 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.192
+## 0.2.193
 
 - Model views support readable `text/plain` output through HTMXObjects 0.1.65.
   All eager tabs and disclosures retain their labels, source, documentation,
   roles and dimensions without internal node dumps. Component defaults and
   model helpers remain unevaluated. The dependency floor and test pins require
   the shared renderer fix.
+
+## 0.2.192
+
+- `brm_coordinate_transport` pairs random-effect blocks declared inside a
+  function-style component call, plain or stratified `gr(g, by=b)`, including
+  per-margin scale laws, Student-t mixing weights, repeated calls over
+  different groupings and nested calls. Each call's scales, correlation factor
+  and standardized draws pair by its own level labels and margins, and their
+  addresses carry `scope = <call path>`. Such models previously refused with
+  unpaired `<call>.<block>.z` and `<call>_<block>_z_flat` coordinates.
 
 ## 0.2.191
 
