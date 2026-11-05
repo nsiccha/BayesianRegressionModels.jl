@@ -83,7 +83,7 @@ rev = "c84047be45cd2bba8a1d02660af9408d4cdf58f4"
 
 [sources.HTMXObjects]
 url = "https://github.com/nsiccha/HTMXObjects.jl"
-rev = "1de5b7aa45bc8ed8e7cf3db86c7d376dd5e5c04e"
+rev = "9d4d6c8f0b3308ff1215ab2062f38456d7e680c9"
 
 [sources.HTMX]
 url = "https://github.com/nsiccha/HTMX.jl"
