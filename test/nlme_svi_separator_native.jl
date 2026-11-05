@@ -142,7 +142,11 @@ end
     m = brm_nlme_model(RKBRMI(connected_model(connected_data(n,
         collect(1:n-1), collect(2:n)))); ad_backend=NLME_AD, unit_partition=:connected)
     # Three scientific cuts also promote their intercept and scale parents.
-    cuts = findall(in((5, 10, 15)), m.view.coordinate_subject)
+    # Declared string-level order differs from the chain's numeric row order.
+    cut_labels = ["subject $i" for i in (5, 10, 15)]
+    cut_subjects = findall(in(cut_labels), m.view.subject_levels)
+    @test length(cut_subjects) == 3
+    cuts = findall(in(cut_subjects), m.view.coordinate_subject)
     manual = BRM._brm_svi_target(m; separator=:none, global_coordinates=cuts)
     original = BRM._brm_svi_target(m; separator=:none)
     budget = length(setdiff(manual.globals, original.globals))
