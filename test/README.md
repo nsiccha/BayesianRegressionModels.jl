@@ -1165,6 +1165,13 @@ units. Its density and native Reverse gradient oracle is the full RK sampler.
 `nlme_svi_ownership_algebra.jl` isolates atomic-block and directed-prior
 closure, including fixed coordinates and factors that own no coordinates.
 
+`nlme_svi_atomic_partition.jl` checks a two-margin correlated soil hierarchy
+with no trajectory parent. Its local atomic Cholesky parameter has one
+packed coordinate but a two-by-two constrained shape. Both local ownership
+and explicit global promotion must preserve the scientific grouping and
+the full native density, Reverse gradient and authored-factor accounting.
+Run this standalone script in the test environment.
+
 `nlme_svi_threads.jl` checks `brm_svi_fit(...; threads)` with real threads (run
 it with `--threads=4`; it refuses to run without them). The state after every
 iteration, whose Adam moments are the gradient trajectory, and the draws must equal
