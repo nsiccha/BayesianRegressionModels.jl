@@ -38,3 +38,16 @@ const _brm_svi_coordinate_owners = BayesianRegressionModels._brm_svi_coordinate_
         [[1], [2], [3]], [[1], [1, 2], [1, 3]], BitVector([false, true, true])) ==
         [0, 1, 2]
 end
+
+@testset "empty Gaussian factors after promotion" begin
+    brm = BayesianRegressionModels
+    t = (; globals=Int[], units=[Int[]])
+    q = brm._brm_svi_params(t, Float64[], MeanFieldGlobal();
+        global_scale=1.0, unit_scale=1.0)
+    @test brm._brm_svi_entropy(q) == 0.0
+    prior = brm._BRMSVIStreamingPrior(brm._brm_svi_global_factor(q),
+        brm._brm_svi_global_geometry(q), (; q.M, q.Λ, q.U), trues(1), nothing)
+    gg, gz = Float64[], Float64[]
+    @test brm._brm_svi_unit_prior!(gg, gz, prior, t, 1, Float64[], Float64[]) == 0.0
+    @test brm._brm_svi_unit_step!(q, 1, gz, Float64[], Float64[], 0.1) === q
+end

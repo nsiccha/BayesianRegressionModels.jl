@@ -284,7 +284,7 @@ function _brm_svi_global_precision(h, x)
     (y - h.V * (h.K \ (h.V' * y))) ./ h.s
 end
 
-_brm_svi_global_logdet(h) = 2sum(log, h.s) + logdet(h.K)
+_brm_svi_global_logdet(h) = 2sum(log, h.s; init=0.0) + logdet(h.K)
 
 # C = diag(s) (I + V A V'), C C' = diag(s²) + ΒΒ'. The stable divided
 # difference 1/(sqrt(1+λ)+1) also works when a rank column is initially zero.
@@ -309,7 +309,7 @@ _brm_svi_draw_unit(q, i, εi) = q.M[i] .+ _brm_svi_unit_offset(q, i, εi)
 
 # The entropy of q, up to the constant (D + Σ d_i)(1 + log 2π)/2.
 _brm_svi_entropy(q) = _brm_svi_global_logdet(_brm_svi_global_geometry(q)) / 2 -
-    sum(U -> sum(log, diag(U)), q.U; init=0.0)
+    sum(U -> sum(log, diag(U); init=0.0), q.U; init=0.0)
 
 # ── The global factor: Adam ──────────────────────────────────────────────────
 

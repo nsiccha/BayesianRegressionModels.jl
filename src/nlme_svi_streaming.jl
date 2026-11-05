@@ -287,7 +287,7 @@ function _brm_svi_unit_prior!(gg, gz, prior::_BRMSVIStreamingPrior, t, i, g, z)
     δ = z - prior.units.M[i]
     gradient = -(prior.units.Λ[i] * δ)
     gz .+= gradient
-    dot(δ, gradient) / 2 + sum(log, diag(prior.units.U[i])) - length(z) * log(2π) / 2
+    dot(δ, gradient) / 2 + sum(log, diag(prior.units.U[i]); init=0.0) - length(z) * log(2π) / 2
 end
 
 """
