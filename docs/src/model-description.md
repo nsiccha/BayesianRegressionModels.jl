@@ -34,6 +34,9 @@ Callable docstrings can also contain Documenter `@ref` links. Those references
 currently become unresolved local links outside Documenter, and `export_site`
 reports an incomplete bundle when it encounters them. Check the export result
 before distributing a static bundle.
+Julia `jldoctest` fences also request an unavailable browser highlighting grammar
+in this version. The text remains visible, but a strict no-failed-requests check
+reports the missing asset.
 
 Use the result inside another semantic page or as an HTMXObjects route result.
 Source, roles/ranks and callable documentation have separate tabs. Callable

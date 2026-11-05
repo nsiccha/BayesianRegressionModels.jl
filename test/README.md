@@ -2645,6 +2645,11 @@ The browser script owns and closes its temporary server and Chrome process.
 For fresh RK, descriptor and component captures, also run
 `julia --project=<rk-env> web-macro/validate_model_view_prepared_export.jl <output-dir>`
 after the main export, then append `--prepared` to the browser command.
+With HTMXObjects 0.1.60 these additional fixtures expose unresolved Documenter
+`@ref` links (incomplete static export) and a missing `jldoctest` browser grammar.
+The checks intentionally fail on those upstream gaps; do not treat their
+screenshots as evidence of a complete prepared bundle. The base export and
+browser check remain independently runnable.
 The RK environment must contain BRM, HTMXObjects, ReactiveKernels and
 ReactiveKernelsPPL. This explicitly prepares toy objects, then exports the
 supplied objects with helper evaluation guarded off. Browser checks cover
