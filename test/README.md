@@ -29,6 +29,14 @@ cumulative-update, selective carried-window and prepared sparse-Laplace targets
 using small synthetic models. Run `test/setup_env.jl` first for the pinned RKPPL recovery contract and
 Treebars 0.1.5, then `julia --project=test test/smc_tuning_lifecycle.jl`.
 
+`smc_generated_law_recovery.jl` stops an adaptive pilot of a small `gmrf(...)`
+field model at initialization in one Julia process and resumes it in another,
+through `smc_generated_law_process.jl`. The field's law is bound in the
+generated RK program module, so the consumer first confirms that the raw law
+expression cannot be deserialized, then requires exact window and schedule
+replay from a serialized partial and from disk. It needs the ReactiveKernelsPPL
+0.1.98 pin from `setup_env.jl`.
+
 `scoped_components.jl` checks function-style BRM components with independent
 local priors, explicit shared inputs, nested calls, vector results, and plate
 cells. It compares normalized densities and native Reverse gradients with
