@@ -3,6 +3,7 @@ using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 using DifferentiationInterface
 using ADTypes: AutoEnzyme
 import Enzyme
+include("testset_filter.jl")
 include("nlme_svi_owned_fixture.jl")
 const BRM = BayesianRegressionModels
 const OWNED_AD = AutoEnzyme(; mode=Enzyme.Reverse)
@@ -57,7 +58,7 @@ function check_owned_density(t)
     end
 end
 
-@testset "ordinary coordinate ownership uses dormant structural reads" begin
+@stestset "ordinary coordinate ownership, promotions and optimizer resume" begin
     data = svi_owned_data()
     m = owned_model(data)
     t = BRM._brm_svi_target(m)
@@ -65,7 +66,7 @@ end
     @test length.(t.units) == fill(3, 6)
     check_owned_density(t)
     shared = BRM._brm_svi_target(owned_model(svi_owned_data(; shared=true)))
-    # z[1] is shared by all six cells, even though its branch is dormant.
+    # z[1] is shared by all six cells.
     # The unused odd coordinates are prior-only globals too.
     @test length(shared.globals) == 10
     @test length.(shared.units) == fill(2, 6)
@@ -110,7 +111,7 @@ end
     end
 end
 
-@testset "connected units own ordinary coordinates without changing scientific roles" begin
+@stestset "connected units own ordinary coordinates without changing scientific roles" begin
     data = merge(svi_owned_data(), (; left=collect(1:6), right=[2, 1, 3, 4, 5, 6],
         weight=zeros(6)))
     m = owned_model(data; connected=true)
@@ -126,7 +127,7 @@ end
     @test size(fit.draws) == (length(m.unit), 3)
 end
 
-@testset "owned coordinates survive absent and returning streaming units" begin
+@stestset "owned coordinates survive absent and returning streaming units" begin
     data = svi_owned_data()
     initial = brm_svi_fit(svi_owned_model(data); rng=Xoshiro(51), max_iterations=2,
         ndraws=0, threads=1)
@@ -192,4 +193,13 @@ end
         @test gz ≈ -old.Λ * delta
         @test iszero(gg)
     end
+end
+
+@stestset "dormant branch structural ownership and native partition density" begin
+    m = brm_nlme_model(RKBRMI(svi_owned_dormant_model(svi_owned_data()));
+        ad_backend=OWNED_AD)
+    t = BRM._brm_svi_target(m)
+    @test length(t.globals) == 4
+    @test length.(t.units) == fill(3, 6)
+    check_owned_density(t)
 end

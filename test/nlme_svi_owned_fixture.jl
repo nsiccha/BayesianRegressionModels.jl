@@ -16,6 +16,22 @@ function svi_owned_model(data)
         z[1:ncoeff] .~ Normal(0.4, tau)
         mu ~ 1 + (1 | unit | subject)
         @plate for i in eachindex(mu)
+            y[i] ~ Normal(mu[i] .+ z[c1[i]] .+ z[c2[i]] .* x[i], sigma)
+        end
+    end
+end
+
+# Keep the branch-native regression independent of the non-branch ownership,
+# checkpoint and operation-cost cases. The mixed scalar/vector branch below
+# currently triggers RK/Enzyme IllegalTypeAnalysisException (co-report
+# ReactiveKernels/brm-retained-poi-a68d4412); do not rewrite it to hide that gap.
+function svi_owned_dormant_model(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        tau ~ Exponential(1)
+        z[1:ncoeff] .~ Normal(0.4, tau)
+        mu ~ 1 + (1 | unit | subject)
+        @plate for i in eachindex(mu)
             y[i] ~ Normal(mu[i] .+ ifelse(active[i], z[c1[i]], z[c2[i]] .* x[i]), sigma)
         end
     end

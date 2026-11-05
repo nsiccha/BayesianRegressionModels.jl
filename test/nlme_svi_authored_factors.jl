@@ -253,14 +253,22 @@ function check_svi_owned_target(t; constrained=false)
     @test fit.diagnostics.owner == t.ownership.owner
     @test size(fit.draws) == (length(m.unit), 5)
     @test all(isfinite, fit.draws)
-    # With zero noise the packed draw must recover every factor's mean at
-    # exactly its original coordinate, including the newly local vector.
+    # Explicit starts cover the newly local coordinates too.
+    initial_point = [0.05i for i in eachindex(m.unit)]
+    initial = brm_svi_fit(m; start=initial_point, max_iterations=0, ndraws=0, threads=1)
+    @test initial.diagnostics.q.μ == initial_point[t.globals]
+    @test initial.diagnostics.q.M == [initial_point[block] for block in t.units]
+    # Distinct nonzero means identify every original coordinate, including
+    # the newly local vector. Tiny Gaussian noise rounds away at these means;
+    # comparing tiny noise to an untouched zero mean with relative tolerance
+    # alone would fail without testing the packed mapping.
     q = fit.diagnostics.q
     centered = merge(q, (; ρ=fill(-Inf, length(q.ρ)), Β=zero(q.Β),
+        M=[Float64.(block) for block in t.units],
         U=[Matrix{Float64}(I, length(b), length(b)) .* 1e100 for b in t.units]))
     draws = BRM._brm_svi_draws(Xoshiro(3), t, centered, 1)
     @test draws[t.globals, 1] == q.μ
-    @test all(i -> draws[t.units[i], 1] ≈ q.M[i], eachindex(t.units))
+    @test all(i -> draws[t.units[i], 1] == centered.M[i], eachindex(t.units))
 end
 
 @testset "BRM authored factors for block-local SVI" begin
