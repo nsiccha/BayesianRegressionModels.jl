@@ -34,6 +34,7 @@ struct BRMSVIState
     shared::Tuple{Vararg{Symbol}}
     fixed::Dict{Symbol,Float64}
     unit_partition::Symbol
+    layout::NamedTuple
     updates::Int
 end
 
@@ -42,6 +43,11 @@ end
 BRMSVIState(format, preprocessing, source_id, globals, q, units, group, nested,
     shared, fixed, updates) = BRMSVIState(format, preprocessing, source_id,
         globals, q, units, group, nested, shared, fixed, :subjects, updates)
+
+BRMSVIState(format, preprocessing, source_id, globals, q, units, group, nested,
+    shared, fixed, unit_partition, updates) = BRMSVIState(format, preprocessing,
+        source_id, globals, q, units, group, nested, shared, fixed, unit_partition,
+        NamedTuple(), updates)
 
 include("nlme_svi_unit_streaming.jl")
 
@@ -63,19 +69,33 @@ function _brm_svi_unit_keys(m, i)
     keys
 end
 
-function _brm_svi_owned_unit_keys(m, blocks, i)
-    subject_keys = Dict(zip(m.view.subject_coordinates[i], _brm_svi_unit_keys(m, i)))
-    result = NamedTuple[get(subject_keys, j, (; coordinate=m.view.coordinates[j]))
+function _brm_svi_scientific_keys(m)
+    result = Dict{Int,NamedTuple}()
+    for i in eachindex(m.view.levels)
+        for (j, key) in zip(m.view.subject_coordinates[i], _brm_svi_unit_keys(m, i))
+            result[j] = key
+        end
+    end
+    result
+end
+_brm_svi_global_keys(m, globals) = let scientific = _brm_svi_scientific_keys(m)
+    [get(scientific, j, (; coordinate=m.view.coordinates[j])) for j in globals]
+end
+
+function _brm_svi_owned_unit_keys(m, blocks, i; scientific=_brm_svi_scientific_keys(m))
+    result = NamedTuple[get(scientific, j, (; coordinate=m.view.coordinates[j]))
         for j in blocks[i]]
     allunique(result) || throw(ArgumentError(
-        "brm_svi_fit: unit $(repr(m.view.levels[i])) has ambiguous coordinate identities"))
+        "brm_svi_fit: inference unit $i has ambiguous coordinate identities"))
     result
 end
 
-function _brm_svi_save_units!(units, m, q, blocks=m.view.subject_coordinates)
-    for (i, label) in enumerate(m.view.levels)
-        units[label] = _brm_svi_saved_unit(_brm_svi_owned_unit_keys(m, blocks, i),
-            q.M[i], q.Λ[i], q.U[i])
+function _brm_svi_save_units!(units, m, q, blocks=m.view.subject_coordinates;
+        levels=m.view.levels)
+    scientific = _brm_svi_scientific_keys(m)
+    for (i, label) in enumerate(levels)
+        units[label] = _brm_svi_saved_unit(
+            _brm_svi_owned_unit_keys(m, blocks, i; scientific), q.M[i], q.Λ[i], q.U[i])
     end
     units
 end
@@ -93,21 +113,26 @@ function brm_svi_checkpoint(fit)
     estimated = Set(vcat(d.globals, reduce(vcat, blocks; init=Int[])))
     fixed = Dict(m.view.coordinates[i] => m.unit[i] for i in eachindex(m.unit)
         if !(i in estimated))
-    units = _brm_svi_save_units!(Dict{Any,NamedTuple}(), m, d.q, blocks)
+    levels = hasproperty(d, :unit_levels) ? d.unit_levels : m.view.levels
+    units = _brm_svi_save_units!(Dict{Any,NamedTuple}(), m, d.q, blocks; levels)
+    options = d.separator === nothing ? (; separator=:none) :
+        (; (key => getproperty(d.separator, key) for key in
+            (:separator, :max_unit_coordinates, :max_unit_work, :max_promoted_coordinates))...)
+    layout = (; options, global_keys=_brm_svi_global_keys(m, d.globals))
     BRMSVIState(3, deepcopy(state), _brm_svi_source_id(m.backend),
         copy(m.view.coordinates[d.globals]), _brm_svi_global_factor(d.q),
         units, m.view.group,
         Tuple(keys(m.view.nested_groups)), m.view.shared_groups, fixed,
-        m.view.unit_partition, 0)
+        m.view.unit_partition, layout, 0)
 end
 brm_svi_checkpoint(state::BRMSVIState) = deepcopy(state)
 
 # Restore semantic ownership before rediscovering the new window's local
 # coordinates. An absent ordinary block remains in the carried checkpoint;
 # it must not become a new global merely because this window has no reader.
-function _brm_svi_previous_ownership!(estimated, seeds, promoted, m, previous::BRMSVIState)
+function _brm_svi_previous_ownership!(estimated, seeds, promoted, m, previous::BRMSVIState; levels=m.view.levels)
     position = Dict(name => i for (i, name) in enumerate(m.view.coordinates))
-    labels = Dict(label => i for (i, label) in enumerate(m.view.levels))
+    labels = Dict(label => i for (i, label) in enumerate(levels))
     for name in previous.globals
         haskey(position, name) && push!(promoted, position[name])
     end
@@ -132,9 +157,11 @@ function _brm_svi_carried_state(previous::BRMSVIState, t, q)
     m = t.m
     BRMSVIState(3, deepcopy(previous.preprocessing), previous.source_id,
         copy(previous.globals), _brm_svi_global_factor(q),
-        _brm_svi_save_units!(deepcopy(previous.units), m, q, t.units), previous.group,
+        _brm_svi_save_units!(deepcopy(previous.units), m, q, t.units;
+            levels=_brm_svi_unit_levels(t)), previous.group,
         previous.nested, previous.shared, copy(previous.fixed),
-        previous.unit_partition, previous.updates + 1)
+        previous.unit_partition, (; options=_brm_svi_separator_options(t),
+            global_keys=_brm_svi_global_keys(m, t.globals)), previous.updates + 1)
 end
 
 # Only grouping level fits may change. A transform of the grouping column
@@ -201,13 +228,18 @@ function _brm_svi_check_model(t, previous)
     m.view.group === previous.group && Tuple(keys(m.view.nested_groups)) == previous.nested &&
         m.view.shared_groups == previous.shared || throw(ArgumentError(
             "brm_svi_fit: subject/nested/shared grouping partition changed"))
-    _brm_svi_check_units(m.view, previous)
+    _brm_svi_check_units((; unit_partition=m.view.unit_partition,
+        levels=_brm_svi_unit_levels(t)), previous)
     _brm_svi_check_preprocessing(m.backend, previous)
     _brm_svi_source_id(m.backend) == previous.source_id || throw(ArgumentError(
         "brm_svi_fit: model source changed (declaration, emitted program or callable bindings)"))
     globals = t.globals
     m.view.coordinates[globals] == previous.globals || throw(ArgumentError(
         "brm_svi_fit: global coordinate layout changed"))
+    if hasproperty(previous.layout, :global_keys)
+        isequal(_brm_svi_global_keys(m, globals), previous.layout.global_keys) ||
+            throw(ArgumentError("brm_svi_fit: promoted global subject identities changed"))
+    end
     estimated = Set(vcat(globals, reduce(vcat, t.units; init=Int[]), t.ownership.absent))
     fixed = Dict(m.view.coordinates[i] => m.unit[i] for i in eachindex(m.unit)
         if !(i in estimated))
@@ -245,8 +277,9 @@ function _brm_svi_initialize(t, previous::BRMSVIState, family;
         q.M[i] .= median[block]
     end
     carried = falses(length(t.units))
-    for (i, label) in enumerate(t.m.view.levels)
-        keys = _brm_svi_owned_unit_keys(t.m, t.units, i)
+    scientific = _brm_svi_scientific_keys(t.m)
+    for (i, label) in enumerate(_brm_svi_unit_levels(t))
+        keys = _brm_svi_owned_unit_keys(t.m, t.units, i; scientific)
         haskey(previous.units, label) || continue
         carried[i] = true
         old = previous.units[label]
@@ -339,7 +372,9 @@ function _brm_svi_window_input(state, x, options; caller)
             "$caller: model source changed"))
         x = RKBRMI(x, state.preprocessing; resample_groups=(state.group, state.nested...))
     end
-    x, x isa BRMNLMEModel ? options :
-        merge((; subject_group=state.group, shared_groups=state.shared,
+    defaults = hasproperty(state, :layout) && hasproperty(state.layout, :options) ?
+        state.layout.options : NamedTuple()
+    x, x isa BRMNLMEModel ? merge(defaults, options) :
+        merge(defaults, (; subject_group=state.group, shared_groups=state.shared,
             unit_partition=state.unit_partition), options)
 end

@@ -1790,7 +1790,7 @@ end
 
 # BRM owns the packed-coordinate attribution, including nested/ragged blocks.
 # Structural reads may include shared values and this unit's effects only.
-function _brm_nlme_check_partition_ownership(view::BRMNLMEView, i, footprint)
+function _brm_nlme_check_partition_ownership(view, i, footprint)
     foreign = [j for j in footprint if view.subject[j] != 0 && view.subject[j] != i]
     isempty(foreign) && return nothing
     names = join(string.(view.coordinates[foreign]), ", ")

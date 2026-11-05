@@ -118,3 +118,91 @@ function _brm_svi_regroup_layout(view, inventory, factors, estimated, axis_block
     (; owner, globals, units, levels, work, attribution, footprints,
         subject_unit=mapping.subject_unit, unit_members=mapping.members)
 end
+
+function _brm_svi_connected_ownership(m; global_coordinates=nothing, previous=nothing,
+        separator=:auto, max_unit_coordinates=4096, max_unit_work=1_000_000,
+        max_promoted_coordinates=128)
+    factors = _rk_svi_factors(m.backend, m.unit)
+    estimated = falses(length(m.unit))
+    estimated[_brm_svi_globals(m)] .= true
+    for block in m.view.subject_coordinates
+        estimated[block] .= true
+    end
+    promoted = _brm_svi_global_coordinates(m, global_coordinates)
+    all(j -> estimated[j], promoted) || throw(ArgumentError(
+        "brm_svi_fit: global_coordinates cannot promote fixed coordinates"))
+    # A carried global cannot become local on another window.
+    if previous !== nothing
+        append!(promoted, _brm_svi_global_coordinates(m,
+            intersect(previous.globals, m.view.coordinates)))
+        sort!(unique!(promoted))
+    end
+    inventory = _brm_svi_factor_inventory(m.view, length(m.unit))
+    axis_blocks = _brm_svi_partition_blocks(m.backend)
+    blocks = _brm_svi_atomic_blocks(length(m.unit), factors.owned, axis_blocks, estimated)
+    incidence = zeros(Int, length(m.unit))
+    for support in inventory.supports, j in support
+        incidence[j] += 1
+    end
+    evaluate = requested -> _brm_svi_regroup_layout(m.view, inventory, factors,
+        estimated, axis_blocks, requested)
+    chosen = _brm_svi_separator_plan(evaluate, blocks, incidence;
+        global_coordinates=promoted, separator, max_unit_coordinates,
+        max_unit_work, max_promoted_coordinates)
+    layout = chosen.layout
+    # Preserve carried ordinary coordinates that have no current observations.
+    # Reclose after applying their saved seeds; membership changes are refused
+    # by the streaming initializer before any optimizer update.
+    seeds = copy.(layout.units)
+    absent = _brm_svi_previous_ownership!(estimated, seeds, promoted, m, previous;
+        levels=layout.levels)
+    if previous !== nothing
+        owner = _brm_svi_coordinate_owners(layout.footprints, seeds,
+            vcat(factors.owned, axis_blocks), vcat(factors.support, axis_blocks),
+            estimated; global_coordinates=layout.globals)
+        units = [Int[] for _ in layout.units]
+        globals = Int[]
+        for j in eachindex(owner)
+            estimated[j] || continue
+            owner[j] == 0 ? push!(globals, j) : push!(units[owner[j]], j)
+        end
+        layout = merge(layout, (; owner, units, globals))
+    end
+    absent_set = Set(absent)
+    for reads in layout.footprints
+        any(in(absent_set), reads) && throw(ArgumentError(
+            "brm_svi_fit: an observation reads an absent carried coordinate"))
+    end
+    for (block, reads) in zip(factors.owned, factors.support)
+        any(j -> layout.owner[j] > 0, block) || continue
+        any(in(absent_set), reads) && throw(ArgumentError(
+            "brm_svi_fit: a current prior reads an absent carried coordinate"))
+    end
+    merge(layout, (; factors, promoted=chosen.global_coordinates, absent,
+        separator=chosen.policy))
+end
+
+# Compile one final partition after all structural trials. The scientific
+# BRMNLMEModel remains unchanged; only its SVI target uses these inference IDs.
+function _brm_svi_partition(m, ownership)
+    view = (; subject=ownership.owner, coordinates=m.view.coordinates,
+        subject_coordinates=ownership.units)
+    partitioned = _rk_nlme_partitioned(m.backend, ownership.owner)
+    cells = Tuple(map(ownership.attribution) do (name, owners)
+        positions = [Int[] for _ in ownership.units]
+        for (cell, owner) in enumerate(owners)
+            push!(positions[owner], cell)
+        end
+        (; names=(name,), positions, elementwise=true)
+    end)
+    partition = _brm_nlme_partition_queries(m.backend, cells, view, m.unit, partitioned)
+    (; partition, view)
+end
+
+_brm_svi_unit_levels(t) = hasproperty(t.ownership, :levels) ? t.ownership.levels : t.m.view.levels
+_brm_svi_separator_options(t) = hasproperty(t.ownership, :separator) ?
+    (; (key => getproperty(t.ownership.separator, key) for key in
+        (:separator, :max_unit_coordinates, :max_unit_work, :max_promoted_coordinates))...) :
+    (; separator=:none)
+_brm_svi_requested_globals(t) = hasproperty(t.ownership, :separator) ?
+    t.ownership.separator.requested : t.ownership.promoted

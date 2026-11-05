@@ -2591,3 +2591,14 @@ The public-planner matrix is widths `(64,256)` crossed with cells `(100,400)`.
 These bounded fixtures do not establish full Atlas runtime, memory or fitting
 speed. Sparse factorization can still incur fill-in, sampled targets can be
 large, and raising `max_cell_width` permits genuinely dense local blocks.
+
+### Connected SVI separators and weighted continuation
+
+- `julia --startup-file=no test/nlme_svi_separators.jl`: bounded deterministic
+  hub/chain policy, explicit overrides and atomic promotion budgets.
+- `julia --project=test test/nlme_svi_separator_native.jl`: actual hub/chain
+  repartition, full-density/native Reverse-gradient equality at nonzero points,
+  automatic work sampling, optimizer continuation and structured streaming carry.
+- `julia --project=test --threads=2 test/nlme_svi_weighted_resume.jl`: exact
+  trajectories for uniform/work batches and dense/structured local factors,
+  lazy polishing, thread-count changes and a fresh-process checkpoint resume.

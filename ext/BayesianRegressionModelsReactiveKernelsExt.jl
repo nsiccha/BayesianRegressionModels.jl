@@ -640,11 +640,14 @@ end
 # parameter's first axis to those same integer unit keys. Other axes repeat
 # that ownership in packed column-major order. Entirely shared entries stay
 # undeclared; a shared position inside a mixed entry has the RK label `missing`.
-function BRM._rk_nlme_partitioned(backend::BRM.RKBRMI, view::BRM.BRMNLMEView)
+BRM._rk_nlme_partitioned(backend::BRM.RKBRMI, view::BRM.BRMNLMEView) =
+    BRM._rk_nlme_partitioned(backend, view.subject)
+
+function BRM._rk_nlme_partitioned(backend::BRM.RKBRMI, owner::Vector{Int})
     declarations = Pair{Symbol,Vector{Union{Missing,Int}}}[]
     for entry in backend.model.layout.entries
         positions = entry.offset:(entry.offset + entry.size - 1)
-        owners = @view view.subject[positions]
+        owners = @view owner[positions]
         any(!iszero, owners) || continue
         n = isempty(entry.dims) ? entry.size : first(entry.dims)
         0 < n <= length(owners) &&

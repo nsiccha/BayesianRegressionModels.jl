@@ -86,10 +86,11 @@ function _brm_svi_identity(t)
     (; binding=_brm_rk_binding_identity(m.backend, "brm-svi-v1"),
        grouping=(; group=m.view.group, nested=Tuple(keys(m.view.nested_groups)),
            shared=Tuple(m.view.shared_groups), unit_partition=m.view.unit_partition),
-       ownership=_brm_svi_digest((m.view.levels, t.globals, t.units)),
+       ownership=_brm_svi_digest((hasproperty(t, :ownership) ? _brm_svi_unit_levels(t) : m.view.levels, t.globals, t.units)),
        fixed=_brm_svi_digest(fixed),
        global_coordinates=hasproperty(t, :ownership) ?
-           copy(m.view.coordinates[t.ownership.promoted]) : Symbol[])
+           copy(m.view.coordinates[_brm_svi_requested_globals(t)]) : Symbol[],
+       separator=hasproperty(t, :ownership) ? _brm_svi_separator_options(t) : (; separator=:none))
 end
 
 _brm_svi_optimizer_state(t, previous, c, run) = BRMSVIOptimizerState(
@@ -131,7 +132,9 @@ const _BRM_SVI_IDENTITY_PARTS = (
         "preprocessing, or its packed coordinates",
     grouping="the subject, nested or shared groupings",
     ownership="the subjects or the coordinates each subject owns",
-    fixed="the values of the fixed shared coordinates")
+    fixed="the values of the fixed shared coordinates",
+    global_coordinates="the requested global-coordinate promotion",
+    separator="the separator policy and budgets")
 
 function _brm_svi_check_identity(current, saved)
     for (part, description) in pairs(_BRM_SVI_IDENTITY_PARTS)
@@ -286,7 +289,8 @@ function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
     end
     if hasproperty(state.identity, :global_coordinates) &&
             state.run isa _BRMSVIRun
-        options = merge((; global_coordinates=state.identity.global_coordinates), options)
+        options = merge(state.identity.separator,
+            (; global_coordinates=state.identity.global_coordinates), options)
     end
     _brm_svi_drive(save, x, state.previous; call..., description="BRM SVI resume",
             threads, options...) do t

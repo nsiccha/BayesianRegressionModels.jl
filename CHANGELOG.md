@@ -14,11 +14,22 @@ instead of failing at run time.
 
 ## 0.2.173
 
+- Explicitly connected SVI defaults to bounded automatic separator selection
+  and work-weighted unit batches. `separator=:none`, `global_coordinates`,
+  `max_unit_coordinates`, `max_unit_work` and `max_promoted_coordinates`
+  control promotion. The final partition is rebuilt from structural supports;
+  scientific subject identity stays intact. Diagnostics report actual unit
+  ownership, promotion reasons and unmet budgets. All authored density factors
+  remain exact; the global/local split changes the variational approximation.
+- Streaming format 3 retains final inference-unit membership, separator controls
+  and promoted global identities alongside dense or structured local factors.
+  Changed retained membership or global scientific identity is refused.
+
 - `brm_svi_fit` accepts `unit_sampling=:work` for positive work-weighted
   sampling with replacement and inverse-probability objective/global-gradient
   weights. Repeated draws share one local update. Diagnostics distinguish
   draws, visits, selection probabilities and actual gradient calls;
-  `:uniform` retains distinct-unit batches and remains the default.
+  `:uniform` retains distinct-unit batches and remains the subject-mode default.
 - **Breaking:** local SVI factors larger than 64 coordinates now use a
   diagonal-plus-low-rank covariance instead of dense precision matrices.
   `unit_dense_limit` (0:256) and `unit_rank` (0:32, default 8) control the
