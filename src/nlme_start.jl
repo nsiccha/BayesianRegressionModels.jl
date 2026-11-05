@@ -110,6 +110,8 @@ function brm_nlme_start(m::BRMNLMEModel, u::AbstractVector)
     coordinates = _brm_nlme_start_coordinates(m, θ, σ, Ω, point)
     (; theta=θ, sigma=σ, coordinates.omega, omega_matrix=Ω, eta=H,
        subjects=copy(view.levels), names=_brm_nlme_parameter_names(m),
+       unit_partition=view.unit_partition, subject_levels=copy(view.subject_levels),
+       subject_unit=copy(view.subject_unit),
        theta_roles=view.role[m.theta],
        shared=(; names=view.coordinates[shared], values=point[shared], estimated),
        loglikelihoods, coordinates.population_logprior, coordinates.max_error)
@@ -127,7 +129,8 @@ function brm_nlme_start(m::BRMNLMEModel, map::BRMNLMEJointMap, stan_u::AbstractV
         a.subject_coordinates == b.subject_coordinates &&
         a.block_margins == b.block_margins && a.family_sizes == b.family_sizes &&
         a.subject_families == b.subject_families &&
-        a.nested_groups == b.nested_groups && a.shared_groups == b.shared_groups ||
+        a.nested_groups == b.nested_groups && a.shared_groups == b.shared_groups &&
+        a.unit_partition == b.unit_partition && a.subject_unit == b.subject_unit ||
         _brm_nlme_error(
         "brm_nlme_start: the joint map's NLME partition differs from the model's")
     length(stan_u) == length(map.transport.stan_names) || throw(DimensionMismatch(

@@ -4,7 +4,7 @@
 """
     BRMNLMEJointMap
     brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path, subject_group=nothing,
-                       nested_groups=NamedTuple(), shared_groups=(), kwargs...)
+                       nested_groups=NamedTuple(), shared_groups=(), unit_partition=:subjects, kwargs...)
 
 Prepare a bridge from natural subject effects and an NLME covariance to the
 complete unconstrained coordinates of a compiled BridgeStan model. BRM
@@ -33,10 +33,10 @@ struct BRMNLMEJointMap{R<:RKBRMI,S<:SBBRMI,P,M}
 end
 
 function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
-        subject_group=nothing, nested_groups=NamedTuple(), shared_groups=(), kwargs...)
+        subject_group=nothing, nested_groups=NamedTuple(), shared_groups=(), unit_partition=:subjects, kwargs...)
     parent(rk) === parent(sb) || error(
         "brm_nlme_joint_map: build both backends from the same BRMI instance")
-    view = brm_nlme_view(rk; subject_group, nested_groups, shared_groups)
+    view = brm_nlme_view(rk; subject_group, nested_groups, shared_groups, unit_partition)
     any(==(:subject_mixing), view.role) && _brm_nlme_error(
         "brm_nlme_joint_map: Student-t mixing coordinates are not natural " *
         "Gaussian subject effects")

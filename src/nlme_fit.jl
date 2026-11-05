@@ -250,6 +250,15 @@ end
 
 function _brm_nlme_named_eta(m::BRMNLMEModel, ebes)
     names = _brm_nlme_parameter_names(m).eta
+    if m.view.unit_partition === :connected
+        original = _brm_nlme_original_effects(m.view, ebes.subjects, ebes.modes)
+        labels = m.view.subject_levels[original.subjects]
+        subject_names = [copy((_brm_nlme_ragged(m.view) ?
+            names[m.view.subject_unit[s]] : names)[m.view.subject_ranges[s]])
+            for s in original.subjects]
+        return (; subjects=labels, names=subject_names, values=original.values,
+            units=copy(ebes.subjects), subject_unit=m.view.subject_unit[original.subjects])
+    end
     (; subjects=m.view.levels[ebes.subjects],
        names=_brm_nlme_ragged(m.view) ? names[ebes.subjects] : names,
        values=copy(ebes.modes))
@@ -258,7 +267,8 @@ end
 """
     brm_nlme_fit(x, estimator; start=nothing, inits=nothing, ebes=true,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple(), shared_groups=(), progress=nothing, kwargs...)
+        nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing,
+        progress=nothing, kwargs...)
 
 Fit an NLME model through the RK backend with one of NLMEEstimation's own
 estimators and read the result in the model's names and natural units.
@@ -267,7 +277,7 @@ Requires NLMEEstimation and Enzyme to be loaded.
 - `x` — a `@brm` model ([`BRMI`](@ref)), its [`RKBRMI`](@ref), or a prepared
   [`BRMNLMEModel`](@ref). For a BRMI or RKBRMI the model is prepared with
   `ad_backend` (default reverse-mode `AutoEnzyme`) and the `shared_point`,
-  `subject_group`, `nested_groups` and `shared_groups` of
+  `subject_group`, `nested_groups`, `shared_groups` and `unit_partition` of
   [`brm_nlme_model`](@ref); passing those to a prepared model is refused.
 - `estimator` — `NLMEEstimation.saem`, `NLMEEstimation.focei`, or
   `NLMEEstimation.empirical_bayes` (equivalently `posthoc`, which estimates

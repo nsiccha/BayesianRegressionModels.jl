@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.172
+
+- Added: explicit `unit_partition=:connected` for the NLME view and model,
+  NLME fits, SVI, per-unit Laplace and joint starts. Structural likelihood
+  supports join scientific subjects into complete inference units, retaining
+  their original labels, coordinates and every covariance-family instance.
+  The default `:subjects` keeps strict subject independence. Connected starts
+  carry unit membership; named estimates restore scientific subject labels.
+- Changed: SVI streaming retains the partition policy and refuses changed
+  membership of a carried connected unit before updating. Complete unchanged
+  units and wholly new units can continue.
+- **Breaking:** SVI streaming checkpoints use format 2 with explicit
+  `unit_partition`; serialize and reload with matching package versions.
+
 ## 0.2.171
 
 - Changed: NLME unit likelihoods and gradients use one strict RK plate

@@ -150,7 +150,7 @@ rev = "b43fc26d78d3257860070317d2ec6e3d723d55f1"
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
 # Includes cooperative interruption used by BRM's progress hooks.
-rev = "f071111945c165dbae097e94c5939b79103434ac"
+rev = "44c37e60e22bab9e8a0d3ab88bd47b575dec6bb0"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"

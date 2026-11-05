@@ -914,6 +914,17 @@ julia --startup-file=no --project=test test/rk_planning_specialization.jl
 
 ## NLME estimators
 
+`nlme_connected.jl` checks explicit `unit_partition=:connected` with generic
+Gaussian models: structural transitive connectivity, dormant branches and zero
+coefficients, indivisible joint observations, exact likelihood/gradient and
+prior accounting, complete-unit SVI minibatches, optimizer continuation,
+streaming membership checks, and a Laplace marginal against an analytic
+Gaussian marginal. `nlme_connected_fit.jl`, in the NLMEEstimation scratch
+environment below, checks repeated covariance families, protocol agreement,
+start transport, scientific labels and empirical Bayes modes against the
+analytic conditional Gaussian, plus a short SAEM call. Neither rewrites the
+authored model or uses numerical derivatives as an oracle.
+
 `nlme_joint_start.jl` checks a complete NLME estimate against the same
 BRMI's compiled Stan model: non-unit covariance and natural subject effects
 round-trip through Stan's unconstrained coordinates, fixed/free indices
