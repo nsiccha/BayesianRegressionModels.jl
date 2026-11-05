@@ -195,7 +195,14 @@ end
 
 # The fit-role inputs of a plan, by the column each one twins.
 _rk_plan_fit_inputs(plan::_RKStructuralPlan) = _rk_fit_inputs(plan.derived)
-_rk_plan_fit_inputs(plan::_RKValuePlan) = _rk_fit_inputs(plan.regression.derived)
+function _rk_plan_fit_inputs(plan::_RKValuePlan)
+    inputs = _rk_fit_inputs(plan.regression.derived)
+    for assignment in plan.assignments
+        assignment isa _RKPreparedSubmodelAssignment || continue
+        merge!(inputs, assignment.fit_inputs)
+    end
+    inputs
+end
 _rk_plan_fit_inputs(plan::_RKHeldOutPlan) = _rk_plan_fit_inputs(plan.parent)
 _rk_plan_fit_inputs(_plan) = Dict{Symbol,Symbol}()
 function _rk_fit_inputs(derived)
