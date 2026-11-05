@@ -1630,6 +1630,9 @@ _rk_plate_cell_reads(x::_BRMPreparedAssignment, cells, bind=identity) =
 function _rk_plate_cell_reads(x::_BRMPreparedExpr, cells, bind=identity)
     read = _rk_plate_cell_read(x, cells, bind)
     read === nothing || return bind(read)
+    _rk_plate_cell_arguments(x, cells, bind)
+end
+function _rk_plate_cell_arguments(x::_BRMPreparedExpr, cells, bind=identity)
     _BRMPreparedExpr(x.callable, _rk_plate_cell_reads(x.args, cells, bind),
         map(value -> _rk_plate_cell_reads(value, cells, bind), x.kwargs))
 end
