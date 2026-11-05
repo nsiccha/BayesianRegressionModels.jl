@@ -1,0 +1,96 @@
+{
+  "N_linelist": 200,
+  "N_rows": 94,
+  "build_seconds": {
+    "brm_rk_build_s": 69.362136074,
+    "brm_sb_build_s": 46.75355173,
+    "epidist_stan_build_s": 0.254785157,
+    "rkppl_build_s": 7.209715866
+  },
+  "coordinates": {
+    "BRM RKBRMI": [
+      "mu_Intercept",
+      "sigma_Intercept"
+    ],
+    "BRM SBBRMI": [
+      "pop_mu_beta_pop.1",
+      "pop_log_sigma_beta_pop.1"
+    ],
+    "RKPPL @rkppl": [
+      "Intercept",
+      "Intercept_sigma"
+    ],
+    "epidist (brms Stan)": [
+      "Intercept",
+      "Intercept_sigma"
+    ]
+  },
+  "gradient_seconds": {
+    "BRM RKBRMI": 4.5276156e-5,
+    "BRM SBBRMI": 0.0001055757845,
+    "RKPPL @rkppl": 3.5567395e-5,
+    "epidist (brms Stan)": 0.0002004131125
+  },
+  "parity": {
+    "BRM RKBRMI": {
+      "bulk_constant_offset": 1.7053025658242404e-13,
+      "bulk_max_abs_logdensity_diff": 2.3874235921539366e-12,
+      "bulk_max_abs_logdensity_diff_after_offset": 2.2168933355715126e-12,
+      "bulk_max_rel_gradient_diff": 2.2526425169644426e-12,
+      "max_abs_logdensity_diff": 0.33717818751961204,
+      "max_rel_gradient_diff": 0.01600149046354379,
+      "mean_logdensity_diff": 0.00170432591769607,
+      "nonfinite_logdensities": [
+        "-Inf",
+        "-Inf"
+      ],
+      "nonfinite_points": 2
+    },
+    "BRM SBBRMI": {
+      "bulk_constant_offset": 0.9215863345354478,
+      "bulk_max_abs_logdensity_diff": 0.9215863345381194,
+      "bulk_max_abs_logdensity_diff_after_offset": 2.6716406864579767e-12,
+      "bulk_max_rel_gradient_diff": 3.4303671014868087e-12,
+      "max_abs_logdensity_diff": 1.290458641712803,
+      "max_rel_gradient_diff": 0.01723492855884475,
+      "mean_logdensity_diff": 0.923450319844655,
+      "nonfinite_logdensities": [
+        "-Inf",
+        "-Inf"
+      ],
+      "nonfinite_points": 2
+    },
+    "RKPPL @rkppl": {
+      "bulk_constant_offset": 1.7053025658242404e-13,
+      "bulk_max_abs_logdensity_diff": 2.3874235921539366e-12,
+      "bulk_max_abs_logdensity_diff_after_offset": 2.2168933355715126e-12,
+      "bulk_max_rel_gradient_diff": 2.266298260167332e-12,
+      "max_abs_logdensity_diff": 0.33717818751961204,
+      "max_rel_gradient_diff": 0.016001490463543627,
+      "mean_logdensity_diff": 0.00170432591769607,
+      "nonfinite_logdensities": [
+        "-Inf",
+        "-Inf"
+      ],
+      "nonfinite_points": 2
+    },
+    "bulk_points": 25,
+    "epidist (brms Stan)": {
+      "bulk_constant_offset": 0.0,
+      "bulk_max_abs_logdensity_diff": 0.0,
+      "bulk_max_abs_logdensity_diff_after_offset": 0.0,
+      "bulk_max_rel_gradient_diff": 0.0,
+      "max_abs_logdensity_diff": 0.0,
+      "max_rel_gradient_diff": 0.0,
+      "mean_logdensity_diff": 0.0,
+      "nonfinite_logdensities": [
+        "NaN",
+        "NaN"
+      ],
+      "nonfinite_points": 2
+    },
+    "finite_everywhere": 198,
+    "points": 200
+  },
+  "threads": 1
+}
