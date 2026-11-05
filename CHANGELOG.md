@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.182
+
+- Fresh-process recovery of adaptive `brm_smc_tune` pilots (`resume=partial`
+  or `checkpoint_dir=dir, resume=true`) works for `RKBRMI` models whose laws
+  are bound in the generated RK program module, such as `gmrf(...)` fields.
+  Before, the checkpoint named that process-local module and a fresh process
+  failed with `UndefVarError: ##RKEmittedModels#…`. **Breaking:** the RK backend
+  now requires ReactiveKernelsPPL 0.1.98, which normalizes generated-module
+  names in SMC checkpoint identities; raise an environment pinning an older
+  ReactiveKernels commit to `b0ffcdc1` or a descendant. Checkpoints written
+  with ReactiveKernelsPPL 0.1.97 or earlier are not migrated: resume them with
+  their original versions or write a new initialization checkpoint.
+- RK `main` from `8e67ee82` currently breaks selective carried-window tuning
+  (`coordinates=:auto`) with a `MethodError` in `_cell_joined_rows`; BRM's test
+  pin stays on `b0ffcdc1` until ReactiveKernels repairs it.
+
 ## 0.2.181
 
 - `brm_start` accepts `component_inits` on both backends, keyed by authored
