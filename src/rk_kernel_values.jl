@@ -1425,6 +1425,14 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     # `<declared>[i] ~ _BRMShares{Family}(n, total, args...)`.
     locals_of = Dict{Symbol,Symbol}(get(reads, latent, latent) => declared[latent]
         for latent in (latents..., components...))
+    # A named-return component's field is a local of this cell's call:
+    # `cell.component_result_lo` reads `<declared>[i].component_result_lo`.
+    component_locals = Set{Symbol}(get(reads, c, c) for c in components)
+    field_read(x) = !(x isa Expr) ? x :
+        Meta.isexpr(x, :., 2) && x.args[1] in component_locals && x.args[2] isa QuoteNode ?
+            Expr(:., Expr(:ref, locals_of[x.args[1]], index), x.args[2]) :
+            Expr(x.head, map(field_read, x.args)...)
+    isempty(component_locals) || (body = Any[field_read(statement) for statement in body])
     body = mapreduce(vcat, body; init=Any[]) do statement
         if _rk_is_cell_component(statement)
             lhs, marker = statement.args

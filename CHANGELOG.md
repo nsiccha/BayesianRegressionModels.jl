@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.202
+
+- Added: a function-style component called inside a `@plate` cell may return
+  named values. The cell reads each as a property of its call,
+  `cell ~ bounds(x[i], scale)` then `cell.lo` and `cell.lo + cell.hi`, on SBBRMI
+  and RKBRMI. Each cell owns its call's locals. Before, such a call was refused.
+- Changed: inside a cell, a bare read of a named-return call or an unknown
+  field is refused with the returned field names.
+- Compatibility: the StanBlocks floor and test pin advance to 0.2.31, which
+  collects a tuple-valued plate cell as an array of tuples.
+
 ## 0.2.201
 
 - SMC worker parallelism from ReactiveKernelsPPL 0.1.100 (now the floor).

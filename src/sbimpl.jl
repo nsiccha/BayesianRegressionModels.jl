@@ -7929,6 +7929,7 @@ end
 # `nothing` when the lambda is malformed. The emitter validates loudly on
 # `nothing`; formula walkers (which run where emission already succeeded) skip.
 function _sb_kernel_lambda_parts(lam)
+    scope = _brm_inline_scope(lam)
     lam = _brm_inline_expr(lam)
     lam isa Expr && lam.head === :-> && length(lam.args) >= 2 || return nothing
     ptuple = lam.args[1]
@@ -7946,7 +7947,8 @@ function _sb_kernel_lambda_parts(lam)
         statements = copy(statements)
         statements[final] = only(statements[final].args)
     end
-    (params, statements)
+    # A cell's reads of a named-return component's fields, for both backends.
+    (params, _brm_cell_component_reads(statements, scope))
 end
 
 # The column a kernel positional binds to its cell formal: the column itself,
