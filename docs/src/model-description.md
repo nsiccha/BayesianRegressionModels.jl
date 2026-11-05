@@ -30,6 +30,11 @@ With HTMXObjects 0.1.60, the `text/plain` projection of a tabbed view exposes
 internal node representations. Use Markdown for readable text until the shared
 renderer fixes this limitation; HTML and PDF are unaffected.
 
+Callable docstrings can also contain Documenter `@ref` links. Those references
+currently become unresolved local links outside Documenter, and `export_site`
+reports an incomplete bundle when it encounters them. Check the export result
+before distributing a static bundle.
+
 Use the result inside another semantic page or as an HTMXObjects route result.
 Source, roles/ranks and callable documentation have separate tabs. Callable
 documentation and carrier details use clickable, keyboard-accessible disclosures.

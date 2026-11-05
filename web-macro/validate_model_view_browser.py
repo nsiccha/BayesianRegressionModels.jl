@@ -131,18 +131,18 @@ try:
                                 detail.focus()
                                 page.keyboard.press("Enter")
                                 assert detail.evaluate("el => el.parentElement.open")
-                                assert page.get_by_role("cell", name="Vector · 0", exact=True).is_visible()
+                                assert page.get_by_role("gridcell", name="Vector · 0", exact=True).is_visible()
                             elif name == "descriptor":
-                                assert page.get_by_role("cell", name="Vector · 3", exact=True).count() >= 1
+                                assert page.get_by_role("gridcell", name="Vector · 3", exact=True).count() >= 1
                             else:
-                                assert page.get_by_role("cell", name="Optional", exact=True).count() == 2
-                                assert page.get_by_role("cell", name="Required", exact=True).count() == 1
+                                assert page.get_by_role("gridcell", name="Optional", exact=True).count() == 2
+                                assert page.get_by_role("gridcell", name="Required", exact=True).count() == 1
                                 for argument, passing, requirement, default in (
                                         ("x", "Positional", "Required", "None"),
                                         ("shift", "Positional", "Optional", "2"),
                                         ("scale", "Keyword", "Optional", "default_scale()")):
                                     row = page.get_by_role("row").filter(
-                                        has=page.get_by_role("cell", name=argument, exact=True))
+                                        has=page.get_by_role("gridcell", name=argument, exact=True))
                                     assert row.inner_text().split("\t") == [argument, passing, requirement, default]
                             assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
                             page.wait_for_timeout(250)
