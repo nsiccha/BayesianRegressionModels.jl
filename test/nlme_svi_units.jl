@@ -30,6 +30,18 @@ end
 using Test, Random, LinearAlgebra, Serialization
 const SU = SVIUnitArithmetic
 
+@testset "empty local factors after separator promotion" begin
+    t = SU.GaussianUnits([1], [Int[], [2]], (; footprints=[Int[], [2]]))
+    q = SU._brm_svi_params(t, [0.0], SU.MeanFieldGlobal();
+        global_scale=0.1, unit_scale=1.0)
+    fit = SU.arithmetic_fit(Xoshiro(52), t, q; batch_size=2, max_iterations=3,
+        lr_global=0.01, unit_step=0.05, polish_lr=0.01, window=10,
+        patience=2, min_windows=3, polish_windows=2)
+    @test isempty(fit.q.M[1])
+    @test size(fit.q.U[1]) == (0, 0)
+    @test all(isfinite, fit.elbo)
+end
+
 @testset "bounded local Gaussian operators and exact path gradient" begin
     rng = Xoshiro(51)
     for d in (1, 5), rank in (0, 1, 2)

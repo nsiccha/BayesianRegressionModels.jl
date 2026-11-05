@@ -71,7 +71,7 @@ function Base.getindex(a::_BRMSVIUnitOperator, i::Int, j::Int)
     (a * e)[i]
 end
 
-_brm_svi_unit_logdet_root(U::AbstractMatrix) = sum(log, diag(U))
+_brm_svi_unit_logdet_root(U::AbstractMatrix) = sum(log, diag(U); init=0.0)
 _brm_svi_unit_logdet_root(U::_BRMSVIUnitRoot) =
     -_brm_svi_global_logdet(_brm_svi_global_geometry(U.factor)) / 2
 

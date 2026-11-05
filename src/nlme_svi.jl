@@ -437,6 +437,9 @@ const _BRM_SVI_UNIT_MEAN_TRUST = 1.0
 _brm_svi_unit_step!(q, i, gz, gd, εi, β) =
     _brm_svi_unit_step!(q.Λ[i], q, i, gz, gd, εi, β)
 function _brm_svi_unit_step!(::AbstractMatrix, q, i, gz, gd, εi, β)
+    # Promoting all of a scientific subject's effects leaves an empty local
+    # factor. Its observation term may still contribute to the globals.
+    isempty(q.M[i]) && return q
     U = LowerTriangular(q.U[i])
     H = gd * (U * εi)'
     G = Symmetric(-(H + H') ./ 2 .- q.Λ[i])
