@@ -1193,6 +1193,9 @@ draw packing. Run it alone in the test environment.
 zero coefficients, shared and prior-only coordinates, connected units,
 explicit global promotions, optimizer resume and streaming absent/returning
 units. Its density and native Reverse gradient oracle is the full RK sampler.
+The dormant scalar/vector branch's ordinary Reverse needs Enzyme dogfood from
+`0fa85df3` (repairs `74abe90` and `7ac58eb`); earlier pins raise
+`IllegalTypeAnalysisException` there.
 `nlme_svi_ownership_algebra.jl` isolates atomic-block and directed-prior
 closure, including fixed coordinates and factors that own no coordinates.
 
@@ -2178,8 +2181,9 @@ no Stan toolchain. It checks that each plan takes the pass, that its log density
 equals the generic path's exactly and its gradient to rounding, that both agree
 with central differences, and that inputs are unchanged. A width has to be
 checked on its own: the pass works at four margins, and at five Enzyme raised
-`EnzymeNoTypeError` until the repair in Enzyme. The test bootstrap pins
-`6053067f`, which includes that repair and declares libEnzyme `3425ed9c`.
+`EnzymeNoTypeError` until the repair in Enzyme (from dogfood `6053067f`). The
+test bootstrap pins dogfood `0fa85df3`, which includes it and declares libEnzyme
+`c1743bf9`.
 
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, Turing/Enzyme versus StanBlocks/BridgeStan

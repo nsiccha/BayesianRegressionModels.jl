@@ -359,7 +359,12 @@ const PINS = [
     # 6053067f / libEnzyme 3425ed9c types floating-point tuple stack slots
     # throughout Reverse, so derived-scale blocks wider than four margins
     # differentiate without changing BRM's block pass (reverse-untyped-a117a92b).
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "6053067f2fa33a4390aea2a365e9e24f83acb495"),  # dogfood
+    # 0fa85df3 (0.13.218) / libEnzyme c1743bf9 keeps those repairs and adds
+    # 74abe90/7ac58eb: ordinary Reverse of a mixed integer/Float64 select and of
+    # a guarded PHI joining scalar stack storage with a boxed broadcast wrapper,
+    # which an SVI unit's dormant scalar/vector branch reaches
+    # (ReactiveKernels snag brm-retained-poi-a68d4412, Enzyme ordinary-reverse-cb7fa1d9).
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "0fa85df3e6cf1157f6ee8a57b41d95e5496ccd7f"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also
