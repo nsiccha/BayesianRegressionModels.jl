@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.170
+## 0.2.171
 
 - `@brm function component(inputs...) … return value end` defines a reusable
   component for both StanBlocks and ReactiveKernels. Each `result ~ component(...)`
@@ -22,6 +22,9 @@ instead of failing at run time.
   meaning. Returned row axes remain available to formula offsets and selective
   readers; internal plate cells must prove scalar values before flattening.
   `brm_components` exposes definition identity, source and each logical call path.
+
+## 0.2.170
+
 - **Authored declaration documentation:** ordinary Julia docstrings in BRM
   source survive binding, tuple expansion, model composition, source printing
   and replay. `brm_documentation` returns copied `BRMDocumentation` records
