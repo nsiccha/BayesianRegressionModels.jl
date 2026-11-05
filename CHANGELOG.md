@@ -14,6 +14,18 @@ instead of failing at run time.
 
 ## 0.2.174
 
+- Added: SVI units own ordinary sampled coordinates read only within that
+  unit, with their authored priors, Jacobians and global hyperparameter
+  gradients counted once. Structural supports close over joint laws and
+  transforms; `global_coordinates` explicitly promotes coordinates. Diagnostics
+  expose the inference ownership separately from scientific NLME roles.
+- Changed: SVI streaming and packed draws preserve ordinary coordinate
+  identities through absent, returning and new units. A retained unit's
+  Gaussian replaces its complete authored prior bucket.
+- Compatibility: authored SVI queries use the batched preparation API from
+  ReactiveKernels 0.1.84 / ReactiveKernelsPPL 0.1.96, sharing binding validation
+  and packed exemplars while retaining one derivative workspace per bucket.
+
 - Added: explicit `unit_partition=:connected` for the NLME view and model,
   NLME fits, SVI, per-unit Laplace and joint starts. Structural likelihood
   supports join scientific subjects into complete inference units, retaining

@@ -68,6 +68,7 @@ end
             " likelihood_support=", length(t.plan.footprints[1]),
             " prior_retained_bytes=", Base.summarysize(t.prior),
             " preparation_bytes=", preparation.bytes,
+            " preparation_seconds=", preparation.time,
             " unit=", unit_work, " unit_prior=", prior_work,
             " likelihood=", likelihood_work, " global_prior=", global_prior_work,
             " global_update=", global_update_work, " dense_unit_update=", factor_work,
