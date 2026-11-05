@@ -575,14 +575,19 @@ struct RKBRMI{P<:BRMI,PL,M,S<:BRMI}
     # training data (a `BRMFittedState`), or `nothing` for a backend of its own
     # data or a replay of one.
     fitted::Any
+    # The BRM plan whose binding produced `model`'s retained layout. Frozen
+    # replays can share that build with a different plan. Inspection uses this
+    # provenance to avoid presenting the old layout's shapes as current.
+    model_plan::Any
     # The retained parent is the model the plan lowered: `optional(...)`
     # priors and grouping-column addresses are already resolved
     # (`_brm_resolve_prior_addresses`).
     function RKBRMI(parent::BRMI, plan, model; program::_RKOnce=_RKOnce(),
-            bound::_RKOnce=_RKOnce(), source::BRMI=parent, fitted=nothing)
+            bound::_RKOnce=_RKOnce(), source::BRMI=parent, fitted=nothing,
+            model_plan=plan)
         parent = _brm_resolve_prior_addresses(parent)
         new{typeof(parent),typeof(plan),typeof(model),typeof(source)}(parent,
-            plan, model, program, bound, source, fitted)
+            plan, model, program, bound, source, fitted, model_plan)
     end
 end
 

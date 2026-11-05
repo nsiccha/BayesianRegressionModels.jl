@@ -5423,13 +5423,14 @@ end
     dfmix = (; y=[-2.0, -1.8, 1.9, 2.2])
     dfcount = (; y=[0, 1, 3, 5, 2])
     dfbin = (; y=[0, 1, 1, 0])
-    # Heterogeneous families (SB's allequal rule, mirrored).
-    @test_throws "must share one family" BRM._brm_rk_plan((@brm dfmix begin
-        y ~ MixtureModel([Normal(0, 1), Cauchy(0, 1)], [0.5, 0.5])
+    # Heterogeneous full-real components use the ordinary value planner;
+    # mixtures whose components have different supports stay rejected.
+    @test_throws "full-real" BRM._brm_rk_plan((@brm dfmix begin
+        y ~ MixtureModel([Normal(0, 1), Exponential(1)], [0.5, 0.5])
     end))
     # BernoulliLogit/Bernoulli mix: one RK family, two Julia heads —
     # SB rejects it, so RK rejects it too.
-    @test_throws "must share one family" BRM._brm_rk_plan((@brm dfbin begin
+    @test_throws "full-real" BRM._brm_rk_plan((@brm dfbin begin
         eta ~ 1
         p ~ Beta(2, 2)
         y ~ MixtureModel([BernoulliLogit(eta), Bernoulli(p)], [0.5, 0.5])
