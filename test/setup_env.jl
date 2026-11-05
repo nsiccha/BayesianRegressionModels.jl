@@ -359,9 +359,10 @@ const PINS = [
     # 6053067f / libEnzyme 3425ed9c types floating-point tuple stack slots
     # throughout Reverse, so derived-scale blocks wider than four margins
     # differentiate without changing BRM's block pass (reverse-untyped-a117a92b).
-    # 92b49f69 / libEnzyme c1743bf9 is the verified native tuple for
-    # the unchanged owned-correlation preparation and Reverse regression.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "92b49f69ae4c11aa51980281a1cd29d0cc084911"),  # dogfood
+    # 3de90eeb / libEnzyme 33709d12 reuses retained constant-parent shadows
+    # in ordinary Reverse, removing the selected-partition allocation slope
+    # without changing the model or enabling runtime activity.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "3de90eeb9fede511eb95b45b0506279b9262bd6a"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also
