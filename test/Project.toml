@@ -156,7 +156,9 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # dba65366 (0.2.25) preserves keyword labels when a plate renames its
 # inputs, including BRM component calls whose formal and actual names match.
 # ea1d64f0 (0.2.26) keeps EachCol/EachRow views through ordinary helpers.
-rev = "ea1d64f0c691092b9d4e7d8ad03ab83727671264"
+# 904e839a (0.2.30) makes a number passed to `stan_call` a data literal, which
+# `brm_von_mises`'s argument-dependent `autokwargs` support needs.
+rev = "904e839a2e6059f42f3387b3618c8cc17664835c"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
@@ -346,6 +348,7 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # PPL 0.1.60 / DistributionKernels 0.1.1: log-space interval masses and tails.
 # RK 0.1.61 / PPL 0.1.70: selective windows, recovery and bounded joint carries.
 # RK 0.1.62: strict selected rows through array-valued producer plate cells.
+# PPL 0.1.72: exact structural support for vector simplex/ordered factors.
 # b5740888 (RKPPL 0.1.71): data-free replay reads frozen whole values.
 # fbf65b46 (RK 0.1.65 / PPL 0.1.74): prepared queries holding modules deep-copy.
 # f17b6a24 (RK 0.1.67 / PPL 0.1.76): strict cell footprints of per-cell joint fields.
@@ -353,6 +356,8 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 0ee20c70 (PPL 0.1.93): authored local and reusable-definition docs;
 # includes native row-dependent/shared mixture probabilities (0.1.90).
 # Also contains the recoverable adaptive pilot lifecycle introduced in RKPPL 0.1.91.
+# c1f175d7 (RK 0.1.84 / PPL 0.1.96): batched authored queries share
+# binding validation and compact preparation metadata; event inventory borrows exemplars.
 # a9a7e9a2 (RKPPL 0.1.97): bound-data LKJ dimensions in reusable definitions.
 # Also contains RK 0.1.82 (b08cb894), which retains live broadcast fusion after
 # binding for batched cell readers.
@@ -360,4 +365,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # db6bca825 (RK 0.1.86 / RKPPL 0.1.99) includes df3eb8872's selective-window
 # capture-footprint fix and the scalar-observation gather-demand repair.
 # Use the SHA: those versions alone do not identify the footprint fix.
-rev = "db6bca825d257b09616a0962ffb75587a81a6bb8"
+# cb3b33bd (RKPPL 0.1.100): opt-in independent adaptive grid pilots
+# (`tune_smc(...; grid_start=:independent)`) and `resume_smc(...; nthreads)`.
+rev = "cb3b33bd08da2b13c9105eb75a6c15473b72d467"
