@@ -253,6 +253,11 @@ function check_svi_owned_target(t; constrained=false)
     @test fit.diagnostics.owner == t.ownership.owner
     @test size(fit.draws) == (length(m.unit), 5)
     @test all(isfinite, fit.draws)
+    # Explicit starts cover the newly local coordinates too.
+    initial_point = [0.05i for i in eachindex(m.unit)]
+    initial = brm_svi_fit(m; start=initial_point, max_iterations=0, ndraws=0, threads=1)
+    @test initial.diagnostics.q.μ == initial_point[t.globals]
+    @test initial.diagnostics.q.M == [initial_point[block] for block in t.units]
     # Distinct nonzero means identify every original coordinate, including
     # the newly local vector. Tiny Gaussian noise rounds away at these means;
     # comparing tiny noise to an untouched zero mean with relative tolerance

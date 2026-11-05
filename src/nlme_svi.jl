@@ -671,8 +671,8 @@ _brm_rk_default_ad(caller, x) = throw(ArgumentError(
     "$caller: pass `ad_backend` (reverse-mode AutoEnzyme), or load Enzyme " *
     "and DifferentiationInterface for that default"))
 
-# The packed point the globals' means start from: the prior medians, a full
-# packed point `start`, or address-keyed `inits` over the prior medians.
+# The packed point the global and unit means start from: BRM's default prior
+# starting point, a full packed `start`, or address-keyed `inits` over it.
 function _brm_svi_start(m::BRMNLMEModel, start, inits)
     start === nothing || inits === nothing || throw(ArgumentError(
         "brm_svi_fit: give either `start` or `inits`, not both"))
@@ -733,9 +733,11 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   standardized subject effects; it does not split an existing connected
   observation partition. Diagnostics expose `globals`, `units` and `owner`
   (zero for globals or fixed coordinates, otherwise the unit index).
-- `start` / `inits` — where the global and unit means start: prior medians by
-  default, a full RK packed point, or initial values keyed by prior address as
-  [`brm_start`](@ref) takes them (the rest at the prior medians).
+- `start` / `inits` — where the global and unit means start: BRM's prior-median
+  starting point by default, a full RK packed point `start`, or values keyed
+  by prior address as [`brm_start`](@ref) takes them. Declarations without a
+  recorded median, including ordinary model-scope vectors, retain the packed
+  unit point; entries not supplied in `inits` retain that default point.
 - `progress` — a Treebars node or backend symbol: one `BRM SVI fit` node with
   the phases Lower to ReactiveKernels, Prepare NLME model, Minibatch target
   (the unit partition gradient and the start), Stochastic optimization (its
