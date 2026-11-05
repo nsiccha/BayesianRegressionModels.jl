@@ -149,6 +149,7 @@ values: this pass neither selects a likelihood family nor emits backend code.
 """
 Base.@nospecializeinfer function _brm_prepare_program(@nospecialize(brmi::BRMI); data=Dict{Symbol,Any}(),
                               context=_brm_backend_context(brmi; data))
+    _brm_check_component_reads(brmi)
     # Loop over erased entries: a closure capturing `brmi` would make this
     # mapping compile again for every model's operation NamedTuple.
     entries = _brm_operation_entries(brmi)

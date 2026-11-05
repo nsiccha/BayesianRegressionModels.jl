@@ -46,6 +46,12 @@ explicit precedence, numeric-base preservation and input immutability.
 The default run only builds RK models. Add `--stan` for compiled Stan
 readback and cross-backend physical-point parity.
 
+`matrix_start_values.jl` checks top-level LKJ Cholesky starts at identity and
+nonidentity factors, matrix shape and support, unchanged base values and input
+immutability. It also combines top-level matrices with scalar/vector starts,
+component-local factors and prior medians. Add `--stan` for independent
+compiled-Stan readback and physical coordinate parity.
+
 `smc_tuning_lifecycle.jl` checks adaptive pilot interruption before any draw and
 during a later grid pilot, nested Treebars progress, input ownership, endpoint
 and configuration validation, and exact fresh-process replay from both a
@@ -2630,6 +2636,11 @@ helper. The descriptor fixture checks constrained simplex dimensions and keeps
 logical quantities separate from generated carriers, without fitting or compiling
 Stan. Set `BRM_MODEL_VIEW_HTML` to an output path to save a browser preview.
 
+`julia --project=test test/model_view_edge_cases.jl` covers joint and transformed
+response roles, callable documentation inside mixture-component lists, optional
+component defaults and explicit empty-input states. Helper/default functions must
+not run during any projection.
+
 `julia --project=test test/model_view_rk.jl` checks the RK extension with RKPPL
 0.1.93 or later: constrained simplex dimensions versus free-coordinate counts,
 ragged/empty cells, matrix parameters, custom helper documentation, existing-build
@@ -2643,3 +2654,15 @@ Run `kb-playwright-python web-macro/validate_model_view_browser.py <output-dir>`
 for real browser acceptance of bundled highlighting, touch/keyboard tabs,
 documentation disclosures and the PDF download in light and dark themes.
 The browser script owns and closes its temporary server and Chrome process.
+For fresh RK, descriptor and component captures, also run
+`julia --project=<rk-env> web-macro/validate_model_view_prepared_export.jl <output-dir>`
+after the main export, then append `--prepared` to the browser command.
+With HTMXObjects 0.1.60 these additional fixtures expose unresolved Documenter
+`@ref` links (incomplete static export) and a missing `jldoctest` browser grammar.
+The checks intentionally fail on those upstream gaps; do not treat their
+screenshots as evidence of a complete prepared bundle. The base export and
+browser check remain independently runnable.
+The RK environment must contain BRM, HTMXObjects, ReactiveKernels and
+ReactiveKernelsPPL. This explicitly prepares toy objects, then exports the
+supplied objects with helper evaluation guarded off. Browser checks cover
+ragged element shapes, constrained simplex carriers and optional input rows.
