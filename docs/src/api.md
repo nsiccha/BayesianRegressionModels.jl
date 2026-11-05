@@ -5,6 +5,9 @@
 ```@docs
 brm_description
 brm_description_markdown
+BRMDocumentation
+brm_documentation
+brm_documentation_markdown
 brm_describe_component
 brm_description_components
 brm_description_math

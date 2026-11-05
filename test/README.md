@@ -1,5 +1,31 @@
 # Running the tests
 
+`plate_direct_outputs.jl` checks direct reads of complete cells from another
+plate, including fixed-width vectors, collected and non-last outputs, and
+observed or omitted responses. Square and non-square shapes compare compiled
+Stan densities and gradients with analytic references; prior draws check the
+same cell values. Scalar, ragged-vector and matrix cells supply shape controls.
+Run it as a standalone script in the test environment.
+
+`scoped_components.jl` checks function-style BRM components with independent
+local priors, explicit shared inputs, nested calls, vector results, and plate
+cells. It compares normalized densities and native Reverse gradients with
+independent references and compiled Stan, and checks source/documentation
+inspection, constrained-value and coordinate round trips, row selection,
+offsets, and frozen or refitted preprocessing. Native RKPPL documentation
+retains component headers and local provenance at each nested call site.
+Run it as a standalone script in the test environment; StanBlocks 0.2.25
+preserves keyword labels when a component is called inside a plate, and
+ReactiveKernelsPPL 0.1.93 retains authored documentation.
+
+`authored_documentation.jl`, `authored_documentation_binding.jl`,
+`authored_documentation_printing.jl`, `authored_documentation_rk_source.jl`
+and `authored_documentation_rkppl.jl` check ordinary Julia documentation through
+binding, composition, readable source replay, scientific descriptions, artifact
+metadata and native RKPPL lowering. They verify exact declaration scopes and
+unchanged numerical results. Run each as a standalone script in the test
+environment after `test/setup_env.jl`; native metadata requires RKPPL 0.1.93.
+
 `adaptive_centering_bounds.jl` checks bounded random-effect scales against
 BridgeStan's constrained values, correlated centered and noncentered maps,
 their Jacobians, Enzyme gradients, centered replay, and stable log-scale tails.
@@ -831,6 +857,13 @@ density. Products, `logistic`, `truncated` and the `Bernoulli`-type families
 draw their bound twin's law, a continuous omitted response spells
 `logistic` as `inv_logit`, and a `@plate` cell's `BetaBinomial2` has the
 density of its `beta_binomial` spelling and lowers omitted.
+
+`omitted_interval_response.jl` checks response-omitted interval observations:
+zero-dimensional joint prior draws, uncoarsened base-law moments, predictive
+twins, retained row reads and scalar/dense/ragged bound shapes. It also checks
+the observed interval mass and gradient, a fitted response beside an omitted
+interval, bound validation, and the sole-term interval predictor spelling.
+Requires StanBlocks 0.2.21; the bootstrap pins its published omission fix.
 
 `truncated_low_mass_draws.jl` draws omitted `truncated` responses whose window
 holds almost none of the base law's mass: a two-sided `NegativeBinomial2`

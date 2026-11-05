@@ -503,6 +503,11 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             lhs, distribution = statement.args[2:end]
             index = findfirst(==(lhs), params)
             if index === nothing
+                if _brm_component_cell_head(distribution, scope) !== nothing
+                    lhs isa Symbol || error("RK backend: a component cell binding needs a local name")
+                    push!(body, Expr(:(=), lhs, Expr(:call, _rk_cell_component, distribution)))
+                    continue
+                end
                 push!(body, _rk_kernel_cell_latent(scope, lhs, distribution, name,
                     raw_body, program))
                 continue
@@ -791,6 +796,8 @@ end
 # definitions once. A cell latent keeps its marker, with its family named and
 # its arguments' calls bound, for `_rk_emit_kernel_plate!` to declare.
 function _rk_kernel_cell_statement(statement, kernel, defs, bindings, taken)
+    _rk_is_cell_component(statement) &&
+        return _rk_component_cell_statement(statement, kernel, defs, bindings, taken)
     _is_brm_ar1_normal(statement) &&
         return _rk_kernel_ar1_normal_call!(statement, kernel, defs, bindings, taken)
     _rk_is_cell_latent(statement) || return _rk_kernel_bind_calls(statement,
@@ -842,6 +849,7 @@ end
 function _rk_shared_definition!(defs, taken, template; kernel::Bool=false)
     call, body = template.args
     for definition in defs
+        definition = _brm_undoc(definition)
         Meta.isexpr(definition, :macrocall) == kernel || continue
         kernel && (definition = last(definition.args))
         Meta.isexpr(definition, :(=), 2) || continue
@@ -1288,7 +1296,7 @@ end
 # in the same order, because RK prepares a cell's data-only work once only when
 # bound data fix the plate's domain (rkppl-use §13 "Arrays per index").
 function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
-        rendered=(), defs=nothing, coordinates=nothing)
+        rendered=(), defs=nothing, coordinates=nothing, documentation=())
     # `rendered` outputs are already emitted program expressions (hoisted
     # observation arguments): their calls are bound, not cell source.
     written = Any[outputs..., rendered...]
@@ -1303,6 +1311,8 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     # draw, absent from the fitted program as on SBBRMI.
     latents = Symbol[first(statement.args) for statement in slice.body
         if _rk_is_cell_latent(statement)]
+    components = Symbol[first(statement.args) for statement in slice.body
+        if _rk_is_cell_component(statement)]
     any(input -> input.kind === :omitted, slice.inputs) && error(
         "RK backend: kernel `$(kernel.name)` reads an unbound in-cell response outside its observation")
     # Cell fields fit their supports at model scope, before the plate.
@@ -1340,7 +1350,7 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     # model name spells it (its coordinates then read `name.<cell>…`); the cell
     # local of that name reads the cell's own entry back.
     declared = Dict{Symbol,Symbol}(latent => _rk_ast_fresh_name(string(latent), model)
-        for latent in latents)
+        for latent in (latents..., components...))
     union!(taken, values(declared))
     # Its coordinate record names the authored latent (its `brm_start` and
     # descriptor address), the cell it belongs to, and the bijection it is
@@ -1355,6 +1365,10 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
         _rk_coordinate_record!(coordinates, (; kind=:cell_latent,
             declaration=declared[latent], name=latent, kernel=kernel.name,
             bijection=bijections[latent]))
+    end
+    for component in components
+        _rk_coordinate_record!(coordinates, (; kind=:cell_component,
+            declaration=declared[component], name=component, kernel=kernel.name))
     end
     # A latent through a bijection is one joint draw per cell whose length the
     # cell's data decide: the first law argument that reads data and nothing
@@ -1411,8 +1425,13 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     # Through `shares(total)` it is one joint draw,
     # `<declared>[i] ~ _BRMShares{Family}(n, total, args...)`.
     locals_of = Dict{Symbol,Symbol}(get(reads, latent, latent) => declared[latent]
-        for latent in latents)
+        for latent in (latents..., components...))
     body = mapreduce(vcat, body; init=Any[]) do statement
+        if _rk_is_cell_component(statement)
+            lhs, marker = statement.args
+            entry = Expr(:ref, locals_of[lhs], index)
+            return Any[Expr(:call, :~, entry, marker.args[2]), Expr(:(=), lhs, entry)]
+        end
         _rk_is_cell_gmrf(statement) && return _rk_expand_cell_gmrf(statement, index, selected,
             defs, bindings, taken, avoid, coordinates, kernel.name)
         _rk_is_cell_latent(statement) || return Any[statement]
@@ -1425,9 +1444,14 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
                 law.args[2:end]...))
         Any[draw, Expr(:(=), lhs, entry)]
     end
+    names = Dict{Symbol,Symbol}(local_name => get(reads, local_name, local_name)
+        for local_name in locals)
+    merge!(names, declared)
+    documented_body = _rk_documentation_block(Expr(:block, body...), documentation;
+        path=(kernel.name,), names)
     push!(statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
         Expr(:for, Expr(:(=), index, Expr(:call, :eachindex, range)),
-            Expr(:block, body...))))
+            documented_body)))
 end
 
 # `<rows> = brm_ragged_rows([x, group, cell, axes...], group, cell, axes...)`
@@ -1568,6 +1592,7 @@ function _rk_offset_scalar_cells!(defs, statements, taken, plan, cells)
         output = statement.args[1]
         statement.args[2] = Expr(:call, callee, cells[output])
     end
+    _rk_component_offset_cells!(defs, plan, outputs, callee)
     nothing
 end
 
@@ -1669,7 +1694,7 @@ _rk_kernel_scalar_response(kernel, observation) =
 # RKPPL runs it only in a query that reads it.
 function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         kernel::_RKPreparedKernelAssignment; arguments=nothing, coordinates=nothing,
-        graph_outputs=(), cell_sources=Dict{Symbol,Symbol}())
+        graph_outputs=(), cell_sources=Dict{Symbol,Symbol}(), documentation=())
     arguments === nothing || (kernel = _rk_kernel_with_arguments(kernel, arguments))
     kernel = _rk_kernel_input_cells(kernel, cell_sources)
     # A cell without a collected value writes only what its observations read.
@@ -1712,7 +1737,8 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         end
     end
     _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
-        rendered=arguments === nothing ? () : arguments.outputs, defs, coordinates)
+        rendered=arguments === nothing ? () : arguments.outputs, defs, coordinates,
+        documentation)
     append!(statements, after)
 end
 

@@ -12,7 +12,9 @@ standardized covariate and a shared intercept/slope covariance block:
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 description_model = (@brm begin
+    "Observation standard deviation."
     sigma ~ Exponential(2)
+    "Expected response with a shared intercept and slope covariance block."
     mu ~ 1 + zscale(x) + (1 + x | shared | group)
     effect(mu, zscale_x) ~ Normal(0, 0.4)
     y ~ Normal(mu, sigma)
@@ -32,6 +34,24 @@ let d = brm_descriptor(SBBRMI(description_model; total_groups=())),
     Markdown.parse(brm_description_markdown(result))
 end
 ```
+
+## Authored declaration documentation
+
+Ordinary Julia docstrings keep Markdown beside the declaration it explains,
+as in the model above. Read an exact declaration's documentation by its
+logical path:
+
+```julia
+brm_documentation(description_model; path=:mu)
+```
+
+[`brm_documentation`](@ref) returns copied records containing the logical
+declaration path, Markdown, authored statement and source location. The
+records follow tuple expansion, prior/structure partition, merges and replay.
+[`brm_documentation_markdown`](@ref) emits the authored Markdown for HTML and
+PDF pipelines; [`brm_description_markdown`](@ref) includes it alongside the
+generated scientific description. Authored prose does not change the
+description's coverage assessment or the model's numerical identity.
 
 ## The description result
 

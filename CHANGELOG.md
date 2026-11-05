@@ -12,6 +12,57 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.172
+
+- `SBBRMI` preserves complete fixed-width vector cells in direct reads from
+  another `@plate`. Collected and non-last indexed outputs retain their outer
+  cell axis with observed responses and with responses omitted for prior
+  draws. Scalar, varying-width vector and matrix cells retain their existing
+  iteration behavior; model declarations and priors need no changes.
+
+## 0.2.171
+
+- `@brm function component(inputs...) … return value end` defines a reusable
+  component for both StanBlocks and ReactiveKernels. Each `result ~ component(...)`
+  call owns its local parameters and reads explicit shared inputs. Components
+  support nested calls, array-valued results, prior/output inspection and
+  changed-data replay. Existing short-form data-to-model builders retain their
+  meaning. Returned row axes remain available to formula offsets and selective
+  readers; internal plate cells must prove scalar values before flattening.
+  `brm_components` exposes definition identity, source and each logical call path.
+
+## 0.2.170
+
+- **Authored declaration documentation:** ordinary Julia docstrings in BRM
+  source survive binding, tuple expansion, model composition, source printing
+  and replay. `brm_documentation` returns copied `BRMDocumentation` records
+  with logical paths, raw Markdown, authored statements and file/line provenance,
+  including declarations inside plates and scans. Documentation stays separate
+  from executable operations and numerical model identity.
+- `brm_documentation_markdown` and scientific model descriptions include the
+  authored prose for HTML/PDF pipelines, without treating it as generated
+  scientific coverage. Emitted RK artifacts retain the same records in their
+  metadata.
+- The RK source retains ordinary declaration and plate-local docstrings using
+  the emitter's exact names; reusable definition wrappers remain intact during
+  lowering and replay. This requires ReactiveKernelsPPL 0.1.93. Complete BRM
+  records retain element-specific prior addresses when several coefficients
+  share one emitted array declaration.
+
+## 0.2.169
+
+- `SBBRMI` now accepts an omitted `interval_censored(D; upper=hi)` response
+  in the unchanged model. Retained bounds and family arguments determine the
+  predictive shape; draws use the uncoarsened base law, with no interval
+  likelihood or fabricated lower endpoints. Observed interval densities and
+  predictor-side interval terms retain their semantics.
+- A censored response may also omit its own endpoint: keep
+  `y ~ censored(D; lower=y)` or `upper=y` unchanged and omit `y`. Only that
+  endpoint disappears for prediction; independent retained bounds still clamp
+  the draw. Observed CDF/CCDF evidence and missing-independent-bound validation
+  are unchanged. Requires StanBlocks 0.2.24, now the package and
+  test-environment minimum.
+
 ## 0.2.168
 
 - `RKBRMI` accepts scalar `@plate` outputs in `offset(field)`, including

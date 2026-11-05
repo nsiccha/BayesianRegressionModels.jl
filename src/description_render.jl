@@ -1270,7 +1270,8 @@ function brm_description(d::BRMDescriptor; hooks=(),labels=Dict(),prior_anchors=
         c.provenance) for c in inventory)
     diagnostics=Tuple(x.reason for x in coverage if x.status !== :covered)
     BRMDescription(d.id,Tuple(roots),Tuple(prose),Tuple(equations),
-        (notation...,added_notation...),priors,coverage,diagnostics,isempty(diagnostics),texts,Tuple(sections))
+        (notation...,added_notation...),priors,coverage,diagnostics,isempty(diagnostics),texts,Tuple(sections),
+        brm_documentation(d))
 end
 brm_description(prepared::Union{SBBRMI,GenerativePlan};kwargs...) =
     brm_description(brm_descriptor(prepared);kwargs...)
@@ -1337,6 +1338,10 @@ function brm_description_markdown(description::BRMDescription;prefix=nothing)
     t=description.texts
     text(name;values...)=_brmd_text(t,name;values...)
     println(io,description.complete ? text(:complete_description) : _brmd_incomplete_line(description))
+    if !isempty(description.documentation)
+        println(io, "\n## ", text(:authored_documentation), "\n")
+        print(io, brm_documentation_markdown(description))
+    end
     # Each described part: its sentences, then its own equations.
     for section in description.sections
         for paragraph in section.prose

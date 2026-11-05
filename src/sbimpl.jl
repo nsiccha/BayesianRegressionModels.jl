@@ -4654,7 +4654,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        centered_groups=Set{Symbol}(), total_groups=(),
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
        resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing,
-       _s2z_generated=nothing, _source::BRMI=brmi)
+       _s2z_generated=nothing, _source::BRMI=brmi, _component_output=nothing)
     brmi = _brm_resolve_prior_addresses(brmi)
     # A frozen re-emission codes releveled factors over their fitted levels.
     isnothing(_frozen_preproc) || (brmi = _sb_fit_factor_levels(brmi, _frozen_preproc))
@@ -4683,6 +4683,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         "carry a cv taint; drop the group from `cv_groups`."))
     stmts = Any[]
     data = Dict{Symbol,Any}()
+    data[_SB_COMPONENT_NAMES_KEY] = Set{Symbol}(_brm_operation_names(brmi))
     isempty(fresh_covariates) || (data[_SB_FRESH_COVARIATES_KEY] = fresh_covariates)
     # Side-channel: transform emitters record their fit-time constant + raw
     # reference here (via `_sb_record_preproc!`); popped before `SlicModel` below
@@ -4918,6 +4919,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # Pop the preproc side-channel BEFORE building the SlicModel so it never
     # pollutes Stan's data dict.
     bindings = pop!(data, _SB_BINDINGS_KEY)
+    pop!(data, _SB_COMPONENT_NAMES_KEY)
     pop!(data, _SB_CELL_FORMULA_BINDINGS_KEY)
     pop!(data, _SB_TOTAL_PLANS_KEY)
     pop!(data, _SB_S2Z_PLANS_KEY)
@@ -4956,6 +4958,13 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod, _sb_declared_observations(body, data, brmi, mod))
     sb = SBBRMI(source_parent, model, data, preproc, Set{Symbol}(), bindings, _source)
+    # A scoped component contributes its returned value to a parent's model;
+    # its likelihood can therefore live entirely in that parent.
+    if _component_output !== nothing
+        _brm_has_operation(brmi, _component_output) || error(
+            "sbimpl: component result `$_component_output` is not declared")
+        return sb
+    end
     triage = _sb_observation_triage(sb)
     # The activity probe's own build: no warnings, no held-out marks.
     _marginal_id_targets isa _SBMarginalProbe && return sb
@@ -5007,6 +5016,14 @@ Base.@nospecializeinfer function _sb_observation_triage(@nospecialize(sb::SBBRMI
     unbound = sort!(unique!(Symbol[d.target for d in declarations
                            if d.role === :observation && isnothing(d.data_source) &&
                               !(d.target in missing_sources) && !(d.target in fresh_sources)]))
+    for entry in values(sb.preproc)
+        entry.kind === :brm_component || continue
+        record = entry.const_
+        nested = _sb_observation_triage(record.fitted)
+        bound += nested.bound
+        append!(unbound, (Symbol(record.target, :., target) for target in nested.unbound))
+        union!(fresh_sources, (Symbol(record.target, :., target) for target in nested.fresh_sources))
+    end
     (; bound, unbound, fresh_sources)
 end
 
@@ -5638,11 +5655,25 @@ function _sb_plan_observation_keys(body, data, @nospecialize(brmi), mod::Module)
             union!(varying, _sb_plan_param_names(stmt.args[end - 1]))
         elseif stmt.head === :call && !isempty(refs)
             target = _sb_plan_lhs_name(stmt.args[2])
+            # Scalar data constants can parameterize an observation-only law
+            # too. Its omission remains an observation, even without row data
+            # or fitted parameters to distinguish it from a parameter prior.
+            _sb_plan_observation_only(brmi, target) && continue
             (issubset(refs, constants) || target in read) &&
                 delete!(observable, target)
         end
     end
     observable
+end
+
+function _sb_plan_observation_only(@nospecialize(brmi), target)
+    target isa Symbol && _brm_has_operation(brmi, target) || return false
+    op = _named_op(_brm_operation(brmi, target))
+    op isa ExprColumn{typeof(~)} || return false
+    lhs, rhs = getargs(op, 2)
+    lhs isa NamedColumn && parent(lhs) isa MissingColumn && rhs isa ExprColumn ||
+        return false
+    _sb_observation_only_law(getf(rhs), rhs)
 end
 # A non-data name declared with a vector law, `x[1:n] .~ Family.(...)` or
 # `x ~ MvNormal(...)`, is a parameter: its data (the length, the mean, an
@@ -7223,7 +7254,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     # 1. Regenerate every independent transform-output key from its preproc
     #    record. Interactions wait until their raw/transformed operands exist.
     for (key, e) in sb.preproc
-        e.kind in (:interaction, :submodel_hook, :cell_formulas) && continue
+        e.kind in (:interaction, :submodel_hook, :cell_formulas, :brm_component) && continue
         _sb_reads_level_codes(e) && continue
         # A response a cell observes through a grouping (`y[rows[i]]`) is a
         # gathered key whose raw column the new data may lack. Its record is
@@ -7263,6 +7294,11 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     # 1b. Re-invoke each consumer `_sb_submodel_rhs!` term on the new frame; it
     #     re-derives every key it wrote, reading constants regenerated in step 1.
     for (key, e) in sb.preproc
+        if e.kind === :brm_component
+            _sb_replay_component!(new_data, new_preproc, handled, key, e, sb,
+                                  new_df, freeze_constants)
+            continue
+        end
         e.kind === :submodel_hook || continue
         _sb_reprocess_submodel_hook!(new_data, new_preproc, handled, key, e, sb,
                                      new_df, freeze_constants)
@@ -7439,12 +7475,14 @@ end
 # likelihood statement, arguments and family spelling included, which
 # StanBlocks forward-simulates from the fitted predictive law. `weighted` and
 # `censored` wrap only observations (a censored law puts mass on its bounds),
+# `interval_censored` supplies interval evidence rather than a parameter law,
 # and Stan has no discrete parameters, so a discrete law (`Poisson`,
 # `Binomial`, `BetaBinomial2`, ..., also under `truncated`) is one too. The
 # families whose outcome structure is read from response values keep their
 # refusal (`_SBValueStructuredFamily`).
 _sb_observation_only_law(_callable, _rhs) = false
-_sb_observation_only_law(::Union{typeof(weighted),typeof(censored)}, _rhs) = true
+_sb_observation_only_law(
+    ::Union{typeof(weighted),typeof(censored),typeof(interval_censored)}, _rhs) = true
 _sb_observation_only_law(::Type{D}, _rhs) where {D<:Distribution} =
     D <: Distribution{<:Distributions.VariateForm,Distributions.Discrete} &&
     !(D <: _SBValueStructuredFamily)
@@ -8248,10 +8286,15 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     body_stmts = _sb_cell_statements(_sb_cell_ar1_normal_calls(body_stmts, kept_params),
         _brm_inline_scope(lam))
     plate_body = Expr(:block, body_stmts...)
-    plate_call = nsub_sym === nothing ? Expr(:call, :plate, kept_names...) :
+    # A producer's collected or indexed side output holds whole cells.
+    # In particular, fixed-width vectors are stored as matrix columns, so
+    # ordinary positional matrix slicing would select channels instead.
+    plate_inputs = Any[_sb_plate_output(dcols[j + 1], data) ?
+        Expr(:call, brm_plate_cells, dcol_names[j]) : dcol_names[j] for j in kept]
+    plate_call = nsub_sym === nothing ? Expr(:call, :plate, plate_inputs...) :
         Expr(:call, :plate,
             Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
-            kept_names...)
+            plate_inputs...)
     plate_do = Expr(:do, plate_call,
         Expr(:->, Expr(:tuple, kept_params...), plate_body))
     push!(stmts, :($target ~ $plate_do))
@@ -16229,6 +16272,7 @@ end
 # of them, not just the preproc dict: with no observation bound, the fallback
 # tiers above would otherwise mistake a side-channel for a sizing column.
 _sb_is_side_channel_key(k::Symbol) =
+    k === _SB_COMPONENT_NAMES_KEY ||
     k === _SB_PREPROC_KEY || k === _SB_BINDINGS_KEY || k === _SB_CELL_FORMULA_BINDINGS_KEY ||
     k === _SB_THRESHOLD_LOCATED_KEY || k === _SB_HYPER_PLANS_KEY ||
     k === _SB_TOTAL_PLANS_KEY || k === _SB_S2Z_PLANS_KEY ||
@@ -17188,6 +17232,15 @@ function _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, 
     push!(stmts, Expr(:call, :~, target, rhs))
 end
 
+# A censoring threshold can be the observation itself. When that observation
+# is omitted, its endpoint has no data to validate; the unchanged producer
+# statement still carries it so StanBlocks owns the generative interpretation.
+_sb_censored_validation_bound(bound, _target, _data) = bound
+function _sb_censored_validation_bound(bound::NamedColumn, target, data)
+    name(bound) === target && parent(bound) isa MissingColumn &&
+        !haskey(data, target) ? nothing : bound
+end
+
 function _sb_lik_composed!(stmts, target, wrapper, producer,
                            args, kwargs::NamedTuple, data)
     base = _sb_composed_family(wrapper, args)
@@ -17196,8 +17249,12 @@ function _sb_lik_composed!(stmts, target, wrapper, producer,
     isnothing(lower) && isnothing(upper) && error(
         "sbimpl: `$wrapper` needs at least one non-`nothing` bound")
 
-    _sb_validate_bounds(wrapper, target, lower, upper, data)
-    _sb_validate_composed_support(wrapper, target, lower, upper, base.kind, data)
+    validation_lower, validation_upper = wrapper === :censored ?
+        (_sb_censored_validation_bound(lower, target, data),
+         _sb_censored_validation_bound(upper, target, data)) : (lower, upper)
+    _sb_validate_bounds(wrapper, target, validation_lower, validation_upper, data)
+    _sb_validate_composed_support(wrapper, target, validation_lower,
+                                  validation_upper, base.kind, data)
     _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, data)
 end
 
@@ -17208,8 +17265,8 @@ _sb_lik_family!(stmts, target, ::typeof(censored), args, kwargs::NamedTuple, dat
     _sb_lik_composed!(stmts, target, :censored, :censored, args, kwargs, data)
 
 # Genuine interval evidence uses the observed response as the lower endpoint.
-# Its producer call has no optional-bound encoding, so it is independent of the
-# one-sided truncation/censoring producer decision.
+# An omitted response keeps the upper-only call; StanBlocks draws the base
+# predictive law and sizes it from the retained family arguments and upper.
 function _sb_lik_family!(stmts, target, ::typeof(interval_censored),
                          args, kwargs::NamedTuple, data)
     length(args) == 1 || error(
@@ -17219,20 +17276,33 @@ function _sb_lik_family!(stmts, target, ::typeof(interval_censored),
         "the response column is the interval lower endpoint")
     base = _sb_composed_family(:interval_censored, args)
     upper = kwargs.upper
-    _sb_validate_bounds(:interval_censored, target, data[target], upper, data;
+    lower = get(data, target, nothing)
+    _sb_validate_bounds(:interval_censored, target, lower, upper, data;
                         check_order=false)
-    lo = _sb_composed_values(data[target])
-    hi = _sb_composed_values(_sb_bound_data(upper, data))
-    all(eachindex(lo)) do i
-        lo[i] < (hi isa AbstractVector ? hi[i] : hi)
-    end || error(
-        "sbimpl: `interval_censored` lower endpoints must be strictly below upper endpoints")
-    _sb_validate_composed_support(:interval_censored, target, data[target],
+    if !isnothing(lower)
+        lo = _sb_composed_values(lower)
+        hi = _sb_composed_values(_sb_bound_data(upper, data))
+        all(eachindex(lo)) do i
+            lo[i] < (hi isa AbstractVector ? hi[i] : hi)
+        end || error(
+            "sbimpl: `interval_censored` lower endpoints must be strictly below upper endpoints")
+    end
+    _sb_validate_composed_support(:interval_censored, target, lower,
                                   upper, base.kind, data)
     native = _sb_composed_stan_call!(stmts, target, base, data)
+    upper_expr = _sb_scalar_expr(upper, data)
+    if isnothing(lower)
+        # Preserve the observation law and its retained shape input. There is
+        # no lower endpoint to read: the producer must draw the fitted base
+        # predictive law, without conditioning on an invented interval.
+        rhs = Expr(:call, :interval_censored,
+            Expr(:parameters, Expr(:kw, :upper, upper_expr)),
+            Expr(:call, native.name, native.args...))
+        push!(stmts, Expr(:call, :~, target, rhs))
+        return nothing
+    end
     _sb_mixture_membership_evidence!(stmts, target, native, :interval_censored,
                                      nothing, upper, base.kind, data)
-    upper_expr = _sb_scalar_expr(upper, data)
     _sb_lik_stan_exprs!(stmts, target, :interval_censored,
                         (native.name, target, upper_expr, native.args...))
 end
