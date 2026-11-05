@@ -262,7 +262,9 @@ log-determinant terms. `brm_laplace_problem(rk; ad_backend, integrate=plan)`
 applies the plan to the same target, and `deepcopy` gives each chain its own
 problem. `integrate=(declaration,)` also integrates one field per
 `@plate for p in groups(g)` cell, each cell's rows reading only that cell's
-field.
+field. Applying an explicitly selected plan and `deepcopy`
+also work for these fields. Automatic selection retains the structural
+eligibility rule above; a passing local diagnostic does not admit a cell.
 
 Above 1,024 coordinates `solver=:auto` uses operator algebra, which needs no
 space-time factorization. Its determinant is an estimate from fixed probes, so
