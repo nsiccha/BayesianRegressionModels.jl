@@ -61,7 +61,20 @@ end
         unit_partition=:connected)
     scientific = deepcopy(m.view)
     hub = findall(==(1), m.view.coordinate_subject)
-    t = BRM._brm_svi_target(m; max_unit_coordinates=2, max_promoted_coordinates=1)
+    none = BRM._brm_svi_target(m; separator=:none)
+    manual = BRM._brm_svi_target(m; separator=:none,
+        global_coordinates=m.view.coordinates[hub])
+    # Splitting one unit also makes its shared population/scale parents global.
+    # The budget counts the complete closure, not only the scientific cut.
+    promotion_budget = length(setdiff(manual.globals, none.globals))
+    @test promotion_budget > length(hub)
+    limited = BRM._brm_svi_target(m; max_unit_coordinates=2,
+        max_promoted_coordinates=1)
+    @test limited.ownership.separator.status === :promotion_budget
+    t = BRM._brm_svi_target(m; max_unit_coordinates=2,
+        max_promoted_coordinates=promotion_budget)
+    println("SVI_HUB_PROMOTION before=", m.view.coordinates[none.globals],
+        " after=", m.view.coordinates[t.globals], " budget=", promotion_budget)
     @test length(m.view.levels) == 1
     @test length(t.units) == n
     @test maximum(length, t.units) == 1
@@ -72,14 +85,11 @@ end
     @test all(selection -> selection.globals === t.globals, t.plan.indices)
     @test all(i -> all(j -> t.ownership.owner[j] in (0, i), t.plan.footprints[i]),
         eachindex(t.units))
-    manual = BRM._brm_svi_target(m; separator=:none,
-        global_coordinates=m.view.coordinates[hub])
     @test manual.units == t.units && manual.globals == t.globals
-    none = BRM._brm_svi_target(m; separator=:none)
     @test length(none.units) == 1
     check_separator_density(t)
     check_separator_density(manual)
-    options = (; max_unit_coordinates=2, max_promoted_coordinates=1,
+    options = (; max_unit_coordinates=2, max_promoted_coordinates=promotion_budget,
         batch_size=4, max_iterations=9, ndraws=8, unit_dense_limit=0)
     full = brm_svi_fit(m; rng=Xoshiro(518), options..., threads=1)
     @test full.diagnostics.sampling.method === :work
@@ -91,7 +101,15 @@ end
     @test carry.format == 3
     @test Set(keys(carry.units)) == Set(full.diagnostics.unit_levels)
     next = merge(data, (; y=data.y .+ 0.1))
-    fit = brm_svi_fit(carry, connected_model(next); max_iterations=2, ndraws=0,
+    next_rk, _ = BRM._brm_svi_window_input(carry, connected_model(next), (;);
+        caller="separator acceptance")
+    next_model = brm_nlme_model(next_rk; ad_backend=NLME_AD,
+        subject_group=carry.group, shared_groups=carry.shared,
+        unit_partition=carry.unit_partition)
+    next_target = BRM._brm_svi_target(next_model; previous=carry, carry.layout.options...)
+    @test next_model.view.coordinates[next_target.globals] == carry.globals
+    @test next_target.units == t.units
+    fit = brm_svi_fit(carry, next_model; max_iterations=2, ndraws=0,
         batch_size=4, threads=1)
     @test fit.diagnostics.unit_levels == full.diagnostics.unit_levels
     @test fit.diagnostics.streaming.updates == 1
