@@ -14,6 +14,15 @@ instead of failing at run time.
 
 ## 0.2.183
 
+- The Laplace mode search's default Newton budget per continuation stage
+  (`maxiter` of `brm_laplace_problem`, `brm_laplace_plan` and the NLME
+  integrated families) rises from 50 to 200. Where a followed mode ceases to
+  exist between stages, the walk to the next mode can take more than 50 steps:
+  on the bounded ODL target a 38-effect component needed 56-59 at stage 4/10
+  and up to 122 at stage 5, with exact derivatives, so the default scored a
+  point that has a mode `-Inf`. A point that does not converge now costs up to
+  four times as many steps before it is `-Inf`. Pass `maxiter=50` for the
+  former budget.
 - Sparse Laplace supports model-scope helpers shared by ordinary or
   sum-factored observation cells. Sampled-coordinate helper values are
   reused across a cell sweep while their mixed derivatives remain part

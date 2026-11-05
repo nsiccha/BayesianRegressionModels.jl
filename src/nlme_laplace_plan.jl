@@ -188,7 +188,7 @@ Enzyme compiles it, so the node's time shows where preparation goes.
 """
 function brm_laplace_plan(backend::RKBRMI; ad_backend, integrate=:auto, sample=(),
         ess_floor::Real=0.5, draws::Integer=200, at=nothing,
-        rng=Random.Xoshiro(20261031), tol=1e-24, maxiter=50, max_cell_width=128,
+        rng=Random.Xoshiro(20261031), tol=1e-24, maxiter=_BRM_LAP_MAXITER, max_cell_width=128,
         solver=:auto, matrixfree=MatrixFreeLaplace(), progress=nothing)
     _brm_laplace_plan(backend; ad_backend, integrate, sample, ess_floor=Float64(ess_floor),
         draws=Int(draws), at, rng, tol, maxiter, max_cell_width, solver, matrixfree,

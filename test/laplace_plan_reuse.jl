@@ -45,7 +45,7 @@ function check_plan_reuse(rk, groups; partial=false, cellkind=:none)
     @test p.plan === plan && q.plan === plan
     @test p.backend === rk && q.backend === rk
     @test p.tol == 1e-20 && p.maxiter == 70
-    @test q.tol == 1e-24 && q.maxiter == 50
+    @test q.tol == 1e-24 && q.maxiter == 200
     @test p.factor[] === nothing && q.factor[] === nothing
     @test all(iszero, p.u) && all(iszero, q.u)
     # The derived-observation preparation uses one direction buffer tuple per
