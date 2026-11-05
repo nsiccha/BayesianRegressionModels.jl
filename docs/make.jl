@@ -6,6 +6,7 @@ include("centering_examples.jl")
 const GENERATED_EXAMPLE_PAGES = [
     joinpath(@__DIR__, "src", "index.md"),
     joinpath(@__DIR__, "src", "formula-terms.md"),
+    joinpath(@__DIR__, "src", "components.md"),
     joinpath(@__DIR__, "src", "space-time-fields.md"),
     joinpath(@__DIR__, "src", "likelihoods.md"),
     joinpath(@__DIR__, "src", "feature-atlas.md"),
@@ -63,6 +64,7 @@ makedocs(
     pages = [
         "Home" => "index.md",
         "Formula terms" => "formula-terms.md",
+        "Reusable components" => "components.md",
         "Space-time fields" => "space-time-fields.md",
         "Likelihoods" => "likelihoods.md",
         "Feature atlas" => "feature-atlas.md",

@@ -26,10 +26,10 @@ instead of failing at run time.
   identities through absent, returning and new units. A retained unit's
   Gaussian replaces its complete authored prior bucket.
 - Compatibility: authored SVI queries use the batched preparation API from
-  ReactiveKernels 0.1.84 / ReactiveKernelsPPL 0.1.96, sharing binding validation
+  ReactiveKernels 0.1.84 / ReactiveKernelsPPL 0.1.97, sharing binding validation
   and packed exemplars while retaining one derivative workspace per bucket.
-
-## 0.2.173
+  The pinned RKPPL candidate also preserves absent-observation demand through
+  scalar helpers and owned covariance blocks.
 
 - Explicitly connected SVI defaults to bounded automatic separator selection
   and work-weighted unit batches. `separator=:none`, `global_coordinates`,
@@ -70,8 +70,6 @@ instead of failing at run time.
   participate in optimizer checkpoints, preserving continuation across thread
   counts. Structured local factors retain their Adam state on same-target resume.
 
-## 0.2.172
-
 - Added: explicit `unit_partition=:connected` for the NLME view and model,
   NLME fits, SVI, per-unit Laplace and joint starts. Structural likelihood
   supports join scientific subjects into complete inference units, retaining
@@ -81,10 +79,6 @@ instead of failing at run time.
 - Changed: SVI streaming retains the partition policy and refuses changed
   membership of a carried connected unit before updating. Complete unchanged
   units and wholly new units can continue.
-- **Breaking:** SVI streaming checkpoints use format 2 with explicit
-  `unit_partition`; serialize and reload with matching package versions.
-
-## 0.2.171
 
 - Changed: NLME unit likelihoods and gradients use one strict RK plate
   partition per unit. Preparation checks structural coordinate ownership,
@@ -96,8 +90,8 @@ instead of failing at run time.
   population-gradient calls retain batching.
 - Changed: a one-unit value or gradient writes θ, σ and the unit's η into a
   dense work point owned by its query or plan, instead of an overlay that RK
-  copied into a full packed vector on every call, so one unit's cost and
-  allocations no longer grow with the number of units.
+  copied into a full packed vector on every call, removing BRM packing
+  allocation proportional to the complete parameter dimension.
   `brm_nlme_loglikelihood_and_gradient`, which returns only the η gradient,
   differentiates only the unit's own effects (RK `shared=false`).
 - Changed: NLME cell, partition and gradient queries declare their local
@@ -123,6 +117,36 @@ instead of failing at run time.
   custom packed vectors. Unit gradients use ordinary Enzyme Reverse, with the
   test bootstrap's Enzyme dogfood pin, which contains `68ed90fe`'s repair for
   matrix-window partition gradients on Julia 1.10.
+
+## 0.2.173
+
+- Adaptive `brm_smc_tune` forwards nested Treebars progress, cooperative stop
+  callbacks, `checkpoint_dir`, `resume` and `overwrite` for initial, prepared
+  Laplace, cumulative-update and carried-window targets. Interrupted pilots
+  return RKPPL's `SMCTuningPartial`; completed calls still return a production
+  tuning schedule. Resume restores the active pilot and skips completed pilots
+  after checking endpoint identities and configuration. Uses the RKPPL recoverable-pilot contract introduced in 0.1.91.
+  Stops occur at safe boundaries rather than hard deadlines; active checkpoint
+  draws can grow even though outer history and retained checkpoint files are bounded.
+
+## 0.2.172
+
+- `SBBRMI` preserves complete fixed-width vector cells in direct reads from
+  another `@plate`. Collected and non-last indexed outputs retain their outer
+  cell axis with observed responses and with responses omitted for prior
+  draws. Scalar, varying-width vector and matrix cells retain their existing
+  iteration behavior; model declarations and priors need no changes.
+
+## 0.2.171
+
+- `@brm function component(inputs...) … return value end` defines a reusable
+  component for both StanBlocks and ReactiveKernels. Each `result ~ component(...)`
+  call owns its local parameters and reads explicit shared inputs. Components
+  support nested calls, array-valued results, prior/output inspection and
+  changed-data replay. Existing short-form data-to-model builders retain their
+  meaning. Returned row axes remain available to formula offsets and selective
+  readers; internal plate cells must prove scalar values before flattening.
+  `brm_components` exposes definition identity, source and each logical call path.
 
 ## 0.2.170
 

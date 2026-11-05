@@ -59,8 +59,8 @@ Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.24"
-Treebars = "0.1.1"
+StanBlocks = "0.2.25"
+Treebars = "0.1.5"
 Turing = "0.46"
 WarmupHMC = "0.2.11"
 julia = "1.10"
@@ -145,11 +145,15 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # 61fa161f (0.2.20) gives cell-owned bindings explicit lexical local scope.
 # ef55b84f (0.2.21) predicts upper-only intervals with their response omitted.
 # b43fc26d (0.2.24) predicts censored responses whose bound is the omitted response.
-rev = "b43fc26d78d3257860070317d2ec6e3d723d55f1"
+# dba65366 (0.2.25) preserves keyword labels when a plate renames its
+# inputs, including BRM component calls whose formal and actual names match.
+rev = "dba6536683e8c226f2e74823856d0d85e7ad02a2"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
 # Includes cooperative interruption used by BRM's progress hooks.
+# Treebars 0.1.5 also satisfies the pinned ReactiveKernelsPPL extension floor.
+# 0.1.5: nested progress used by recoverable adaptive SMC pilots.
 rev = "44c37e60e22bab9e8a0d3ab88bd47b575dec6bb0"
 
 [sources.WarmupHMC]
@@ -339,6 +343,8 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 0ee20c70 (PPL 0.1.93): authored local and reusable-definition docs;
 # includes native row-dependent/shared mixture probabilities (0.1.90).
 # Also contains the recoverable adaptive pilot lifecycle introduced in RKPPL 0.1.91.
+# f8ab474a (RK 0.1.84 / PPL 0.1.97) preserves absent-observation
+# demand through scalar helpers and owned covariance blocks.
 # c1f175d7 (RK 0.1.84 / PPL 0.1.96): batched authored queries share
 # binding validation and compact preparation metadata; event inventory borrows exemplars.
-rev = "c1f175d73fb6f934117eadcc0ddfa634f48b2141"
+rev = "f8ab474a8a5039bced5dd8c49f86770516f7bb7d"

@@ -888,7 +888,8 @@ _rk_threshold_vector(name::Symbol, ::Type{_BRMThresholdPrior{false}}, n::Int) =
 
 Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         @nospecialize(program), @nospecialize(observations);
-        @nospecialize(kernels=()), @nospecialize(submodels=()))
+        @nospecialize(kernels=()), @nospecialize(submodels=()),
+        @nospecialize(value_roots=()), @nospecialize(external_inputs=()))
     context = program.context
     leveled = _rk_value_leveled_responses(observations, context.data)
     implicit = Pair{Symbol,Any}[parameter for entry in values(leveled)
@@ -908,6 +909,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     threshold_vectors = [_rk_threshold_vector(p) for p in prepared.parameters
         if p.name in implicit_names && !(p.name in coefficients)]
     roots = Set{Symbol}(observation.key for observation in observations)
+    union!(roots, value_roots)
     routes = (kernels..., submodels...)
     dependencies = Dict(op.name => op.dependencies for op in program.operations)
     for route in routes
@@ -930,6 +932,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     assignments = Tuple(operations[name] for name in program.order if haskey(operations, name))
     parameter_names = Set{Symbol}(p.name for p in prepared.parameters)
     assignment_names = Set{Symbol}(a.name for a in assignments)
+    union!(assignment_names, external_inputs)
     consts = _rk_data_constants!(Dict{Symbol,Float64}(a.name => Float64(a.expression)
         for a in ordinary_assignments if a.expression isa Number), context.data)
     parameters = _rk_plan_parameters!(prepared, context.data, consts,
@@ -1102,7 +1105,8 @@ function _rk_kernel_output_names(plan::_RKValuePlan)
         for kernel in kernels)
 end
 
-function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, documentation=())
+function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, cell_sources=nothing,
+        documentation=())
     documentation_owners = _brm_documentation_owners(documentation)
     reserved = Set{Symbol}(keys(plan.columns))
     union!(reserved, (first(binding) for binding in _rk_extent_bindings(plan)))
@@ -1145,8 +1149,9 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, documentation=())
         # its target; the transport pairs them with the SB declaration's.
         assignment isa _RKPreparedSubmodelAssignment &&
             _rk_coordinate_record!(coordinates, (; kind=:submodel,
-                target=assignment.name))
+                target=assignment.name, component=assignment.component))
     end
+    cell_sources === nothing || merge!(cell_sources, cells)
     _rk_offset_scalar_cells!(defs, stmts, taken, plan, cells)
     for completion in plan.completions
         parts = _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)
@@ -1181,7 +1186,10 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, documentation=())
             _brm_prepare_expr(modifier.base)
         distribution isa _BRMPreparedExpr || error(
             "RK backend: response `$(observation.name)` needs a distribution call")
-        distribution = _rk_plate_cell_reads(distribution, cells,
+        # This call is the observation constructor, including caller-owned
+        # families. Only its arguments can be whole-value reads of cells;
+        # rewriting the constructor itself loses its identity and arguments.
+        distribution = _rk_plate_cell_arguments(distribution, cells,
             read -> _rk_plate_cell_value!(stmts, bindings, taken, read))
         isempty(distribution.kwargs) || distribution.callable === Ordinal || error(
             "RK backend: response `$(observation.name)` distribution keywords are unsupported")
@@ -1220,10 +1228,13 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, documentation=())
     authored = union(Set(a.name for a in plan.assignments),
         (p.name for p in plan.regression.predictors),
         Iterators.flatten(values(kernel_outputs)))
+    densities = union(Set(c.source for c in plan.completions if c.totals !== nothing),
+        Set(a.name for a in plan.assignments if a isa _RKPreparedSubmodelAssignment &&
+            !isempty(a.observed)))
     emitted = _rk_scalar_lone_intercepts(
         _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
             _rk_observed_names(plan); retained=authored, coordinates,
-            densities=Set(c.source for c in plan.completions if c.totals !== nothing)),
+            densities),
         lone_intercepts)
     # A cell observation is emitted outside its value plate. Its prepared
     # record supplies both the cell-local parameter and the response source.

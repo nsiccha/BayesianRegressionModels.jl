@@ -6,6 +6,7 @@ using OrderedCollections
 include("authored_documentation.jl")
 include("macro.jl")
 include("builder_interpreter.jl")
+include("components.jl")
 include("groups.jl")
 include("ar1_normal.jl")
 
@@ -102,6 +103,8 @@ include("sb_cell_julia.jl")
 include("sb_cell_formulas.jl")
 include("sb_distribution_statistics.jl")
 include("sb_plate_outputs.jl")
+include("component_backends.jl")
+include("component_cells.jl")
 # Fusion-append artifacts + SB reference numbers (RK-side driver inputs).
 # After sbimpl (SBBRMI) and the RK planner/AST above; RK-free — the
 # bound-plan translation lives in the ReactiveKernels extension.
@@ -214,6 +217,7 @@ include("draw_trees.jl")
 # Public surface. The macros and value types everything downstream
 # (web-macro, downstream extensions, tests) reaches for.
 export @brm, @n, @x, @getproperty
+export BRMComponent, brm_components
 export assign, effect, r2d2, doublepipe, gr, mm, gp, offset, zscale, center, standardize, constant, protect, factor
 export restricted
 export LKJCovarianceFactor, MvNormalCholesky
