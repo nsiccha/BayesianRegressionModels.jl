@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.184
+
+- `brm_start` accepts top-level matrix parameters on their constrained scale
+  on both RK and compiled Stan. Initialize `L ~ LKJCholesky(K, eta)` with
+  `(; L=lower_factor)`, preserving its exact matrix shape. RK uses its native
+  transform without compiling Stan. Unaddressed base values and caller-owned
+  inputs are preserved, as for scalar, vector and component-local starts.
+
 ## 0.2.183
 
 - Model views label every authored member of a joint response as response data,
