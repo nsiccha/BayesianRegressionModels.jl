@@ -1,7 +1,7 @@
 name = "BayesianRegressionModels"
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.2.175"
+version = "0.2.177"
 
 [deps]
 Bessels = "0e736298-9ec6-45e8-9647-e4fc86a2fe38"
@@ -90,7 +90,7 @@ ReparametrizableDistributions = "0.3"
 SequentialMonteCarlo = "0.7"
 RuntimeGeneratedFunctions = "0.5"
 SelectedInversion = "0.2.2"
-StanBlocks = "0.2.25"
+StanBlocks = "0.2.26"
 StaticArrays = "1"
 Treebars = "0.1.1"
 Turing = "0.46"

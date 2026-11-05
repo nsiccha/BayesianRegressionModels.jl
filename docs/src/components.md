@@ -72,7 +72,11 @@ Correlation dimensions and concentrations can be explicit data inputs. The
 same component definition can serve different sizes, including different
 sizes in one model:
 
-```julia
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:LKJComponentsDocs), raw"""
+using BayesianRegressionModels, Distributions
+
 @brm function correlation(K, eta)
     L ~ LKJCholesky(K, eta)
     return L
@@ -85,6 +89,7 @@ paired = @brm begin
 end
 model = paired((; small_K=2, small_eta=1.3,
                   large_K=4, large_eta=2.3, y=0.1))
+""", :model; title="One correlation component at two sizes", require_stan=true)
 ```
 
 `K` must resolve from known data to an integer at least one; `eta` must be
