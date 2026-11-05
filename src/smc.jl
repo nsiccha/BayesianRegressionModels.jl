@@ -34,15 +34,18 @@ function _brm_validate_smc_fit end
     brm_smc_tune(model; rng, init, reference=nothing,
         temperatures=nothing, pilot_steps=64, pilot=nothing,
         max_reflections=nothing, recording_target=nothing, pilot_evaluations=nothing,
-        reference_inflation=nothing,
+        reference_inflation=nothing, progress=nothing, callback=nothing,
+        checkpoint_dir=nothing, resume=false, overwrite=false,
         options=SMCOptions(), ad_backend=AutoEnzyme(mode=Enzyme.Reverse))
     brm_smc_tune(completed_fit::BRMSMCFit, cumulative_data; rng, init,
         temperatures=nothing, pilot_steps=64, pilot=nothing,
         max_reflections=nothing, recording_target=nothing, pilot_evaluations=nothing,
+        progress=nothing, callback=nothing, checkpoint_dir=nothing, resume=false,
+        overwrite=false,
         options=SMCOptions())
 
-Prepare a bridge-specific RKPPL `SMCTuningSchedule` with independent pilots,
-before running production particles. Pass it to `SMCOptions(tuning=schedule)`
+Prepare bridge-specific independent pilots before running production particles.
+A completed call returns RKPPL's `SMCTuningSchedule`; pass it to `SMCOptions(tuning=schedule)`
 in [`brm_smc_fit`](@ref) or [`brm_smc_update`](@ref). Load the same packages as
 for fitting. Both explicit `rng::Xoshiro` and unconstrained `init` are copied;
 choose them independently of the production cloud, including the retained
@@ -87,6 +90,35 @@ Schedules belong to their exact endpoints and cannot silently transfer to new
 data. Checkpoints retain the schedule without rerunning its pilots on resume.
 The production temperature rule remains adaptive; this does not establish
 exactly unbiased evidence at finite particle counts.
+
+With `pilot=:adaptive`, `progress` accepts a Treebars parent and reports nested
+tuning, current pilot and sampler progress. `callback(snapshot, boundary)` can
+return literal `true` to stop at `:init`, `:window` or `:pilot` boundaries.
+The scalar snapshot describes `phase` (`:reference` or `:grid`), `knot`,
+`temperature`, `boundary`, `completed_knots`, `window`, `retained_draws` and
+`evaluations`. A stop before completion returns RKPPL's `SMCTuningPartial`,
+including when no draw exists yet; it cannot tune production. A stop after the
+last completed pilot returns the ready schedule. These boundaries are
+cooperative: initialization or one window can exceed a wall-clock deadline.
+
+`checkpoint_dir` atomically retains `tuning_latest.jls` before callbacks. Resume
+with the original model/data/preprocessing and tuning keywords using either
+`resume=partial` (also after trusted Serialization round-trip) or
+`checkpoint_dir=dir, resume=true`. Use this same method for initial, prepared
+Laplace, cumulative-update and carried-window targets; retain the same previous
+fit/carry and coordinate selection for updates. BRM supplies endpoint identities;
+RKPPL validates those, configuration and versions, skips completed pilots and
+restores the active sampler and RNG. The required `rng` is ignored on resume.
+Supply callback/progress afresh. Inputs and supplied partials remain unchanged.
+
+Fresh calls refuse an existing tuning checkpoint unless `overwrite=true`;
+overwrite cannot accompany resume. Only the latest outer checkpoint is kept and
+progress/history retention is bounded, but active sampler draws can grow.
+Completed pilots retain summaries, not draws. A process failure loses work since
+the last boundary; without a directory, only an orderly stop yields recoverable
+work. Keep Julia/package versions, code, data and configuration unchanged and
+deserialize only trusted files. Production [`brm_smc_checkpoint`](@ref) is
+separate: it retains an already-completed schedule, not an unfinished pilot.
 """
 function brm_smc_tune end
 

@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.173
+
+- Adaptive `brm_smc_tune` forwards nested Treebars progress, cooperative stop
+  callbacks, `checkpoint_dir`, `resume` and `overwrite` for initial, prepared
+  Laplace, cumulative-update and carried-window targets. Interrupted pilots
+  return RKPPL's `SMCTuningPartial`; completed calls still return a production
+  tuning schedule. Resume restores the active pilot and skips completed pilots
+  after checking endpoint identities and configuration. Uses the RKPPL recoverable-pilot contract introduced in 0.1.91.
+  Stops occur at safe boundaries rather than hard deadlines; active checkpoint
+  draws can grow even though outer history and retained checkpoint files are bounded.
+
 ## 0.2.172
 
 - `SBBRMI` preserves complete fixed-width vector cells in direct reads from
