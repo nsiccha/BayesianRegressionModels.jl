@@ -4,7 +4,7 @@
 
 [`brm_model_view`](@ref) returns a reusable HTMXObjects semantic tree with the
 declaration, data/parameter roles, value ranks and dimensions. Load HTMXObjects
-0.1.62 or later; no web demo app is needed:
+0.1.65 or later; no web demo app is needed:
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
@@ -23,12 +23,12 @@ Pass the bound model to the view:
 using HTMXObjects
 
 view = brm_model_view(model_view_demo; title="Regression model")
-repr("text/html", view)       # also text/markdown
+repr("text/html", view)       # also text/markdown and text/plain
 ```
 
-With HTMXObjects 0.1.60, the `text/plain` projection of a tabbed view exposes
-internal node representations. Use Markdown for readable text until the shared
-renderer fixes this limitation; HTML and PDF are unaffected.
+The `text/plain` projection includes every eager tab and disclosure as readable
+text: labels, complete source, documentation, roles and dimensions. Component
+defaults remain source expressions and are never evaluated by inspection.
 
 Callable and authored docstrings use HTMXObjects' Julia documentation projection. Documenter
 `@ref` references without a known destination retain their formatted labels
@@ -59,6 +59,16 @@ the model source also lists how each instance is called. Nested definitions
 are included recursively. Paths identify authored call sites, so repeated
 plate iterations share a site. The defining module and authored docstring
 provenance remain available without compiling a backend.
+
+The Roles and ranks tab lists each call's own declarations under its exact call
+path, such as `left › b`, with the same parameter, predictor, assignment and
+prior roles as model-scope declarations; the call itself is a component result.
+Inputs refer to the caller's values and are not listed again. A local
+observation of a data input marks the caller's column as `Data · response`.
+A component called inside a plate cell declares its locals once per iteration:
+those rows say so, and their rank and shape describe one iteration. A prepared
+RK model or Stan descriptor resolves a local parameter's dimensions from its
+exact call path, never from a model-scope quantity of the same name.
 
 `brm_model_view(component)` also inspects a component definition and its
 reachable definitions without data. Its Component inputs tab distinguishes

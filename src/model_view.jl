@@ -10,6 +10,9 @@ provenance come from [`brm_documentation`](@ref).
 Pass a `BRMI`, a data-free `BRMBuilder` or `BRMComponent`, a prepared `RKBRMI`,
 or an existing `BRMDescriptor`. Reachable component source comes from
 [`brm_components`](@ref), retaining separate call paths and shared definitions.
+Each component call's own declarations are listed with their roles under the
+exact call path (`left › b`); declarations of a call inside a plate cell are
+marked as made once per iteration.
 The view does not bind data, prepare, fit or evaluate a model.
 Unknown dimensions stay explicit. A builder lists potential data inputs; bind
 it first to distinguish observed data from latent declarations. A descriptor
@@ -42,14 +45,20 @@ function _brm_view_prior_shape(prior)
     (; rank, dims=rank === 0 ? () : nothing)
 end
 
-_brm_view_record(name, role; rank=nothing, dims=nothing, detail="") =
-    (; name, role, rank, dims, detail)
+# `path` is the exact authored address: `(name,)` at model scope, and the call
+# path plus the local name inside a component call (`(:left, :b)`), so a scoped
+# local stays distinct from a literal dotted name such as `Symbol("left.b")`.
+# `plate` marks a declaration made once per plate iteration (a component called
+# inside a plate cell); its rank and shape then describe one iteration.
+_brm_view_record(name, role; path=(name,), plate=false, rank=nothing, dims=nothing,
+        detail="") =
+    (; name, path, role, rank, dims, detail, plate)
 
 function _brm_view_walk!(data, callables, seen, x::NamedColumn)
     haskey(seen, x) && return
     seen[x] = nothing
     p = parent(x)
-    p isa DataColumn && (data[name(x)] = parent(p))
+    p isa DataColumn && (data[name(x)] = p)
     _brm_view_walk!(data, callables, seen, p)
 end
 function _brm_view_walk!(data, callables, seen, x::ExprColumn)
@@ -95,55 +104,120 @@ function _brm_view_source_callables!(callables, x::Expr, scope, bound)
 end
 _brm_view_source_callables!(_callables, _x, _scope, _bound) = nothing
 
-Base.@nospecializeinfer function _brm_view_facts(@nospecialize(brmi::BRMI))
-    data = Dict{Symbol,Any}()
-    callables = Set{Any}()
-    seen = IdDict{Any,Nothing}()
-    entries = _brm_operation_entries(brmi)
-    components = brm_components(brmi)
-    component_targets = Set(only(record.path) for record in components if length(record.path) == 1)
-    for (_, value) in entries
-        _brm_view_walk!(data, callables, seen, value)
-    end
-    for record in components
-        haskey(seen, record.definition) && continue
-        seen[record.definition] = nothing
-        bound = _brm_cell_bound_names!(Set{Symbol}(brm_columns(record.definition)), record.source)
-        _brm_view_source_callables!(callables, record.source, record.scope, bound)
-    end
-    responses = Set{Symbol}()
-    quantities = NamedTuple[]
+const _BRM_VIEW_PLATE_NOTE =
+    "Declared once per plate iteration; rank and shape describe one iteration."
+
+# The declarations of one scope: the model's own operations, or a component
+# call's instance (its local declarations bound to the call's arguments).
+# `data_key(name)` is the bound data column that `name` reads in this scope, or
+# `nothing`; `skip` holds names that are not declarations of this scope.
+function _brm_view_scope!(ctx, entries, path, plate, data_key, skip)
     for (key, value) in entries
         op = parent(value)
         role = _brm_operation_role(op)
         if role === :observation
             # Use the producer's member projection: a joint response has a
             # synthetic operation key, but its authored members are the data.
-            union!(responses, _brm_covariate_members(first(getargs(op))))
+            for member in _brm_covariate_members(first(getargs(op)))
+                observed = data_key(member)
+                isnothing(observed) || push!(ctx.responses, observed)
+            end
             continue
         end
-        key in component_targets && (role = :component)
+        key in skip && continue
+        address = (path..., key)
+        call = get(ctx.calls, address, nothing)
+        isnothing(call) || (role = :component)
         cell = _brm_prune_cell(value)
         if !isnothing(cell)
             role = :cell
             for (_, _, column) in _brm_prune_cell_observations(cell)
-                column isa NamedColumn && haskey(data, name(column)) &&
-                    push!(responses, name(column))
+                column isa NamedColumn || continue
+                observed = data_key(name(column))
+                isnothing(observed) || push!(ctx.responses, observed)
             end
         end
-        haskey(data, key) && continue
+        isnothing(data_key(key)) || continue
         _brm_is_statement(op) || continue
         shape = role === :parameter ? _brm_view_prior_shape(last(getargs(op))) :
             (; rank=nothing, dims=nothing)
-        push!(quantities, _brm_view_record(key, role; shape...))
+        push!(ctx.quantities, _brm_view_record(key, role; path=address, plate,
+            detail=plate ? _BRM_VIEW_PLATE_NOTE : "", shape...))
+        isnothing(call) || _brm_view_call!(ctx, call)
+        isnothing(cell) && continue
+        # Component calls inside a plate cell: one call (and one set of locals)
+        # per iteration, at the cell's authored call site.
+        for inner in ctx.records
+            length(inner.path) == length(address) + 1 &&
+                inner.path[1:end-1] == address || continue
+            push!(ctx.quantities, _brm_view_record(last(inner.path), :component;
+                path=inner.path, plate=true, detail=_BRM_VIEW_PLATE_NOTE))
+            _brm_view_call!(ctx, inner)
+        end
     end
+end
+
+# A component call's own declarations, under its exact call path. Its inputs
+# refer to the caller's values and its generated result locals carry the call's
+# returned value, which the caller's row already lists; neither is a local
+# declaration. An input bound to caller data resolves to that data column, so a
+# local observation of it marks the caller's column as response data.
+function _brm_view_call!(ctx, call)
+    definition = call.definition
+    entries = _brm_operation_entries(call.instance)
+    observed = Dict{Symbol,Symbol}()
+    for (key, value) in entries
+        key in definition.inputs || continue
+        backing = _brm_view_input_data(value)
+        column = isnothing(backing) ? nothing : get(ctx.columns, backing, nothing)
+        isnothing(column) || (observed[key] = column)
+    end
+    skip = Set{Symbol}((definition.inputs..., _brm_component_results(definition)...))
+    _brm_view_scope!(ctx, entries, call.path, call.plate,
+        key -> get(observed, key, nothing), skip)
+end
+
+# The caller's data column bound to a component input, or `nothing` when the
+# input refers to a model value. A local observation of the input replaces its
+# operation entry; the observed column is then that statement's left-hand side.
+_brm_view_input_data(_) = nothing
+function _brm_view_input_data(value::NamedColumn)
+    backing = parent(value)
+    backing isa DataColumn && return backing
+    backing isa ExprColumn{typeof(~)} || return nothing
+    lhs = first(getargs(backing))
+    lhs isa NamedColumn && parent(lhs) isa DataColumn ? parent(lhs) : nothing
+end
+
+Base.@nospecializeinfer function _brm_view_facts(@nospecialize(brmi::BRMI))
+    data = Dict{Symbol,Any}()  # data name => its bound DataColumn
+    callables = Set{Any}()
+    seen = IdDict{Any,Nothing}()
+    entries = _brm_operation_entries(brmi)
+    records = _brm_component_records(brmi)
+    components = map(_brm_public_component_record, records)
+    for (_, value) in entries
+        _brm_view_walk!(data, callables, seen, value)
+    end
+    for record in records
+        haskey(seen, record.definition) && continue
+        seen[record.definition] = nothing
+        bound = _brm_cell_bound_names!(Set{Symbol}(brm_columns(record.definition)), record.source)
+        _brm_view_source_callables!(callables, record.source, record.scope, bound)
+    end
+    names = sort!(collect(keys(data)); by=string)
+    columns = IdDict{Any,Symbol}()
+    foreach(key -> get!(columns, data[key], key), names)
+    ctx = (; quantities=NamedTuple[], responses=Set{Symbol}(), records, columns,
+        calls=Dict(record.path => record for record in records if !isempty(record.path)))
+    _brm_view_scope!(ctx, entries, (), false, key -> haskey(data, key) ? key : nothing, ())
     inputs = [_brm_view_record(key,
-        key in responses ? :response_data : :data;
-        _brm_view_shape(data[key])...,
-        detail=data[key] isa AbstractArray && eltype(data[key]) <: AbstractArray ?
+        key in ctx.responses ? :response_data : :data;
+        _brm_view_shape(parent(data[key]))...,
+        detail=parent(data[key]) isa AbstractArray && eltype(parent(data[key])) <: AbstractArray ?
             "Outer container shape; elements have their own axes." : "")
-        for key in sort!(collect(keys(data)); by=string)]
-    (; source=string(brmi), inputs, quantities, callables, components,
+        for key in names]
+    (; source=string(brmi), inputs, quantities=ctx.quantities, callables, components,
         documentation=brm_documentation(brmi))
 end
 
