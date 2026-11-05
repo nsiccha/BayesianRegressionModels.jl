@@ -26,6 +26,12 @@ scales and simplexes, and preserves unaddressed values and top-level starts.
 Run it as a standalone script in the test environment; it compiles Stan even
 when the resulting point is consumed by RK.
 
+`component_start_values.jl` checks native component-local starts, recursive
+scalar prior medians, repeated and nested call paths, constrained values,
+explicit precedence, numeric-base preservation and input immutability.
+The default run only builds RK models. Add `--stan` for compiled Stan
+readback and cross-backend physical-point parity.
+
 `smc_tuning_lifecycle.jl` checks adaptive pilot interruption before any draw and
 during a later grid pilot, nested Treebars progress, input ownership, endpoint
 and configuration validation, and exact fresh-process replay from both a

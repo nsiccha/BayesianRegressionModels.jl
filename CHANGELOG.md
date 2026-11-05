@@ -12,6 +12,16 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.179
+
+- `brm_start` accepts `component_inits` on both backends, keyed by authored
+  component call paths and local parameter names. Repeated and nested calls
+  can set independent scalar, vector, simplex and correlation Cholesky starts
+  on the constrained scale; RK uses its native layout without compiling Stan.
+  `base=:prior_median` now visits component-local scalar priors recursively,
+  resolves each call's bound inputs and preserves explicit-start precedence.
+  Numeric bases retain every unaddressed value.
+
 ## 0.2.178
 
 - Added: explicit `unit_partition=:connected` for the NLME view and model,
