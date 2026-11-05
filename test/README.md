@@ -91,6 +91,12 @@ Run it as a standalone script in the test environment; StanBlocks 0.2.25
 preserves keyword labels when a component is called inside a plate, and
 ReactiveKernelsPPL 0.1.93 retains authored documentation.
 
+`component_cell_returns.jl` checks returned plate collections through direct,
+aliased and nested component calls. It
+verifies row/channel selection, strict per-row dependency footprints, emitted
+source replay, normalized densities and native gradients against compiled Stan.
+Run it as a standalone script in the same test environment.
+
 `authored_documentation.jl`, `authored_documentation_binding.jl`,
 `authored_documentation_printing.jl`, `authored_documentation_rk_source.jl`
 and `authored_documentation_rkppl.jl` check ordinary Julia documentation through
