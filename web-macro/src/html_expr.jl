@@ -1,16 +1,6 @@
-# Styled HTML rendering for BRMI / VBRMI cards.
-#
-# Each symbol gets a deterministic color, data columns are bold, parameters
-# are italic, and likelihood statements are underlined. The tree walker
-# (_html_expr) converts an ExprColumn AST into a nest of <span>s.
-#
-# Eventually this belongs in an ext of the main package (rendering depends on
-# HTMX.jl which is a web-only concern); keeping it in its own file makes that
-# future move a single-file relocation.
-#
-# TODO: HTMX.jl should grow a generic `htmx_node(x)::Node` extension point
-# so downstream packages can overload once and have every consumer dispatch
-# automatically. For now these card functions are wired in by hand.
+# Model cards for the macro app. BRMI uses BRM's reusable semantic view.
+# The VBRMI renderer below also describes materialized arrays and compiler blocks;
+# its expression walker converts ExprColumn values into styled spans.
 
 # Deterministic HSL color per symbol (golden-ratio spread for visual variety).
 _symbol_color(name::Symbol) = "hsl($(mod(hash(name) * 137, 360)), 60%, 40%)"
@@ -30,9 +20,11 @@ _styled_name(name::Symbol, role::Symbol) = (role == :parameter ? h.strong : h.sp
     string(name); class="brm-sym",
     style="color:$(_symbol_color(name))")
 
-_html_expr(x::NamedColumn{<:Any, <:DataColumn})  = _styled_name(name(x), :data)
-_html_expr(x::NamedColumn{<:Any, MissingColumn}) = _styled_name(name(x), :parameter)
-_html_expr(x::NamedColumn)                       = _styled_name(name(x), :derived)
+function _html_expr(x::NamedColumn)
+    value = parent(x)
+    role = value isa DataColumn ? :data : value isa MissingColumn ? :parameter : :derived
+    _styled_name(name(x), role)
+end
 _html_expr(x::Int)                               = h.span(string(x); data_kind="num")
 _html_expr(x::Float64)                           = h.span(string(x); data_kind="num")
 _html_expr(x::Number)                            = h.span(string(x); data_kind="num")
@@ -42,7 +34,7 @@ _html_expr(x::LikelihoodColumn)   = h.span(
     _html_expr(parent(x)), h.span(" .~ "; data_kind="likelihood"), _html_expr(rhs(x)))
 
 # Infix operators: always parenthesized so inner expressions like (1 + b | g1)
-# keep their grouping. Top-level callers (_html_brmi_row) use _html_infix
+# keep their grouping. Top-level VBRMI rows use _html_infix
 # directly to skip the outermost parens.
 _html_expr(x::ExprColumn{<:Union{typeof.((~,*,+,|,doublepipe,assign))...}}) = begin
     h.span("(", _html_infix(x), ")")
@@ -112,30 +104,8 @@ _html_expr(x::AbstractMatrix) = h.span("mat[$(join(size(x), "×"))]"; data_kind=
 _html_expr(x) = h.small(sprint(show, x; context=:compact=>true))
 
 function brmi_card(brmi::BRMI)
-    rows = [_html_brmi_row(key, parent(value)) for (key, value) in pairs(brmi.operations)]
-    h.article(
-        h.header(h.strong("BRMI"),
-            h.small(" -- $(length(brmi.operations)) operations")),
-        h.div(; class="brm-expr-list")(rows...),
-    )
+    brm_model_view(brmi; title="BRMI")
 end
-
-_leaf_column(x::NamedColumn) = x
-_leaf_column(x::ExprColumn) = _leaf_column(getargs(x)[1])
-_leaf_column(x) = x
-
-function _html_brmi_row(key, op::ExprColumn{typeof(~)})
-    lhs_leaf = _leaf_column(getargs(op)[1])
-    is_likelihood = lhs_leaf isa NamedColumn && parent(lhs_leaf) isa DataColumn
-    content = _html_infix(op)
-    h.div(content; class=is_likelihood ? "brm-likelihood" : "")
-end
-_html_brmi_row(key, op::ExprColumn{typeof(assign)}) = h.div(_html_infix(op))
-_html_brmi_row(key, op) = h.div(
-    _styled_name(key, :data),
-    h.span(": "; data_kind="op"),
-    h.small(sprint(show, op)),
-)
 
 function vbrmi_card(vbrmi::VBRMI)
     brmi = getfield(vbrmi, :parent)
