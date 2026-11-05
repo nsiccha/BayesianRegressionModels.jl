@@ -12,6 +12,16 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.188
+
+- Function-style components returning one internal plate's collected values
+  preserve one value per cell, including vector-valued cells, aliases and
+  nested component calls. Parent reads such as `field[row[i]][channel[i]]`
+  select the declared row and then its channel on both backends.
+  ReactiveKernels keeps selected-row locality instead of reading a flattened
+  whole; StanBlocks preserves the cell axis of its matrix storage. Formula
+  offsets still require scalar cells.
+
 ## 0.2.187
 
 - Added `gmrf((east, north), time[, channel]; multiresolution=m)`: a bounded
