@@ -6,17 +6,23 @@
 declaration, data/parameter roles, value ranks and dimensions. Load HTMXObjects
 0.1.58 or later; no web demo app is needed:
 
-```julia
-using BayesianRegressionModels, HTMXObjects
-
-builder = @brm begin
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+model_view_demo = (@brm begin
     sigma ~ Exponential(1)
     beta ~ Normal(0, 1)
     mu = beta * x
     y ~ Normal(mu, sigma)
-end
-model = builder((; x=[-1., 0., 1.], y=[0.1, 0.2, 0.3]))
-view = brm_model_view(model; title="Regression model")
+end)((; x=[-1., 0., 1.], y=[0.1, 0.2, 0.3]))
+""", :model_view_demo; title="Regression model")
+```
+
+Pass the bound model to the view:
+
+```julia
+using HTMXObjects
+
+view = brm_model_view(model_view_demo; title="Regression model")
 repr("text/html", view)       # also text/markdown and text/plain
 ```
 
