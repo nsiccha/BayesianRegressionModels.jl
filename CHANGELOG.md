@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.191
+## 0.2.192
 
 - Added: SVI units own ordinary sampled coordinates read only within that
   unit, with their authored priors, Jacobians and global hyperparameter
@@ -27,8 +27,19 @@ instead of failing at run time.
   and packed exemplars while retaining one derivative workspace per bucket.
 - Compatibility: a unit's dormant scalar/vector branch differentiates under
   ordinary Reverse from Enzyme dogfood `0fa85df3` (repairs `74abe90` and
-  `7ac58eb`), which the test bootstrap's `d3189970` (libEnzyme `33709d12`)
+  `7ac58eb`), which the test bootstrap's `b2bb4cb6` (libEnzyme `f392eba5`)
   contains.
+
+## 0.2.191
+
+- `brm_start`'s `component_inits` takes the top-level `inits` grammar for a
+  component call's own linear predictors and `|ID|` blocks on both backends:
+  `:left => (; rise=(; Intercept=v), rates=(; sd, cor, effects))` sets the
+  call's link-scale coefficients and its shared block's scales, correlation
+  (or covariance `rates = Σ`) and per-level effects, keyed by the call's own
+  levels. `base=:prior_median` also fills component-local population
+  coefficients and `|ID|` scales from their priors. RK still needs no
+  compiled Stan model.
 
 ## 0.2.190
 
@@ -150,9 +161,10 @@ instead of failing at run time.
   ReactiveKernels commit to `b0ffcdc1` or a descendant. Checkpoints written
   with ReactiveKernelsPPL 0.1.97 or earlier are not migrated: resume them with
   their original versions or write a new initialization checkpoint.
-- RK `main` from `8e67ee82` currently breaks selective carried-window tuning
-  (`coordinates=:auto`) with a `MethodError` in `_cell_joined_rows`; BRM's test
-  pin stays on `b0ffcdc1` until ReactiveKernels repairs it.
+- At this release, RK `main` from `8e67ee82` broke selective carried-window
+  tuning (`coordinates=:auto`) with a `MethodError` in `_cell_joined_rows`, so
+  BRM's test pin used `b0ffcdc1`. RK `df3eb8872` repaired the regression; the
+  test pin now includes that repair through `db6bca825`.
 
 ## 0.2.181
 
