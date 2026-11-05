@@ -31,8 +31,8 @@ function _rows(records)
     end
 end
 
-function _inventory(title, records)
-    isempty(records) ? SemanticGroup() : SemanticSection(title, SemanticTable(_rows(records)))
+function _inventory(title, records; empty="No quantities in this category.")
+    SemanticSection(title, isempty(records) ? SemanticProse(empty) : SemanticTable(_rows(records)))
 end
 
 # Query only documentation attached to the actual callable's binding. Do not
@@ -48,7 +48,9 @@ function _documentation(callables)
         mod in (Base, Core) && Base.isoperator(name) && continue
         isdefined(mod, name) && getfield(mod, name) === callable || continue
         binding = Base.Docs.Binding(mod, name)
-        haskey(Base.Docs.meta(mod; autoinit=false), binding) || continue
+        metadata = Base.Docs.meta(mod; autoinit=false)
+        isnothing(metadata) && continue
+        haskey(metadata, binding) || continue
         doc = Base.Docs.doc(binding)
         isnothing(doc) || push!(entries, string(mod, ".", name) => doc)
     end
@@ -58,10 +60,13 @@ function _documentation(callables)
         [SemanticDisclosure(name, SemanticProse(string(doc))) for (name, doc) in entries]...)
 end
 
+_path_label(path) = isempty(path) ? "Root" : join(
+    [Base.isidentifier(string(part)) ? string(part) : repr(part) for part in path], " › ")
+
 function _authored_documentation(records)
     isempty(records) && return nothing
     SemanticSection("Authored documentation", [
-        SemanticSection(repr(doc.path), SemanticProse(doc.markdown),
+        SemanticSection(_path_label(doc.path), SemanticProse(doc.markdown),
             SemanticDisclosure("Declaration and provenance",
                 SemanticCode(:julia, _source_text(doc.statement)),
                 SemanticFields(; path=repr(doc.path), owner=string(doc.owner),
@@ -80,7 +85,7 @@ end
 _source_text(expression) = sprint(BRM._brm_print_source, expression)
 
 function _call_instance(call)
-    SemanticGroup(SemanticFields(; path=repr(call.path)),
+    SemanticSection(_path_label(call.path), SemanticFields(; path=repr(call.path)),
         isnothing(call.call) ? SemanticProse("Root definition") :
             SemanticCode(:julia, _source_text(call.call)))
 end
@@ -133,7 +138,7 @@ function _declaration(facts; title, note, extra=(), data_title="Data")
     panels = Pair{String,Any}[
         "Source" => _source_panel(facts.source, facts.components),
         "Roles and ranks" => HTMXObjects.h.div(
-            _inventory(data_title, facts.inputs),
+            _inventory(data_title, facts.inputs; empty="No bound data inputs."),
             _inventory("Model quantities", facts.quantities), extra...),
     ]
     documentation = _documentation_panel(facts.documentation, facts.callables)
@@ -146,17 +151,20 @@ end
 function BRM.brm_model_view(model::BRM.BRMI; title="Model")
     _declaration(BRM._brm_view_facts(model); title,
         note="Roles come from the bound declaration. Rank is the number of value axes: " *
-             "0 scalar, 1 vector, 2 matrix. Unknown shapes need prepared backend metadata; " *
-             "they are not assumed to be scalar.")
+             "0 scalar, 1 vector, 2 matrix. Unknown means inspection has no value-shape " *
+             "metadata; it does not mean scalar. Supplied backend metadata can resolve " *
+             "parameter dimensions. Helper and component results remain unknown unless " *
+             "the supplied descriptor records their shape; inspection never evaluates them.")
 end
 
 function BRM.brm_model_view(builder::BRM.BRMBuilder; title="Model")
     inputs = [BRM._brm_view_record(name, :input;
-        detail="Required input; observation/parameter role depends on binding.")
+        detail="Potential data input; observation/parameter role depends on binding.")
         for name in BRM.brm_columns(builder)]
     panels = Pair{String,Any}[
         "Source" => SemanticCode(:julia, string(builder)),
-        "Required inputs" => _inventory("Required inputs", inputs),
+        "Potential data inputs" => _inventory("Potential data inputs", inputs;
+            empty="No potential data inputs."),
     ]
     documentation = _authored_documentation(BRM.brm_documentation(builder))
     isnothing(documentation) || push!(panels, "Documentation" => documentation)
@@ -167,13 +175,18 @@ function BRM.brm_model_view(builder::BRM.BRMBuilder; title="Model")
 end
 
 function BRM.brm_model_view(component::BRM.BRMComponent; title="Model component")
-    inputs = [BRM._brm_view_record(name, :input;
-        detail="Explicit component input; values come from each call.")
+    inputs = [(; input=string(name),
+        passing=name in component.keywords ? "Keyword" : "Positional",
+        requirement=haskey(component.defaults, name) ? "Optional" : "Required",
+        default=haskey(component.defaults, name) ? _source_text(component.defaults[name]) : "None")
         for name in BRM.brm_columns(component)]
     panels = Pair{String,Any}[
         "Source" => _source_panel(string(component), BRM.brm_components(component);
             root_definition=component),
-        "Required inputs" => _inventory("Required inputs", inputs),
+        "Component inputs" => SemanticSection("Component inputs",
+            SemanticProse("Default expressions are shown without evaluation. " *
+                "An omitted optional input uses its authored default at the call site."),
+            isempty(inputs) ? SemanticProse("No explicit component inputs.") : SemanticTable(inputs)),
     ]
     documentation = _authored_documentation(BRM.brm_documentation(component))
     isnothing(documentation) || push!(panels, "Documentation" => documentation)
