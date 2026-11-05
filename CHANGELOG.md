@@ -12,6 +12,24 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.190
+
+- Model views render callable and authored Julia documentation through the shared
+  HTMXObjects documentation projection. Unresolved Documenter references retain
+  their formatted labels without broken links, and doctest examples use Julia
+  highlighting in offline HTML. Original source and documentation records remain
+  unchanged. Requires HTMXObjects 0.1.62; both test pins select that release.
+
+## 0.2.189
+
+- Function-style components returning one internal plate's collected values
+  preserve one value per cell, including vector-valued cells, aliases and
+  nested component calls. Parent reads such as `field[row[i]][channel[i]]`
+  select the declared row and then its channel on both backends.
+  ReactiveKernels keeps selected-row locality instead of reading a flattened
+  whole; StanBlocks preserves the cell axis of its matrix storage. Formula
+  offsets still require scalar cells.
+
 ## 0.2.188
 
 - **Breaking:** BRM now supports only `SBBRMI` (StanBlocks/Stan) and `RKBRMI`

@@ -6,6 +6,11 @@ in-cell consumers. It compares physical values, normalized densities and native
 Reverse gradients with independent formulas and compiled Stan, and retains the
 row-length and scalar-cell checks. It accepts testset substring filters.
 
+`model_view_documentation.jl` checks authored Julia documentation in builder and
+bound-model views, plus callable docs after binding: references become formatted labels,
+ordinary URLs remain linked, doctest contents survive, and source/doc records
+remain unchanged. The bootstrap selects HTMXObjects 0.1.62 for this projection.
+
 `heterogeneous_mixtures.jl` checks native mixtures of different full-real
 scalar families and custom component graphs against independent normalized
 densities and compiled Stan. It covers native Reverse, pointwise likelihood,
@@ -91,6 +96,12 @@ retains component headers and local provenance at each nested call site.
 Run it as a standalone script in the test environment; StanBlocks 0.2.25
 preserves keyword labels when a component is called inside a plate, and
 ReactiveKernelsPPL 0.1.93 retains authored documentation.
+
+`component_cell_returns.jl` checks returned plate collections through direct,
+aliased and nested component calls. It
+verifies row/channel selection, strict per-row dependency footprints, emitted
+source replay, normalized densities and native gradients against compiled Stan.
+Run it as a standalone script in the same test environment.
 
 `authored_documentation.jl`, `authored_documentation_binding.jl`,
 `authored_documentation_printing.jl`, `authored_documentation_rk_source.jl`
