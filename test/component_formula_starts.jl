@@ -27,6 +27,24 @@ end
     return inner
 end
 
+# A formula call whose scalar prior reads a parameter-valued input: traced on
+# its own, `center` is a keyword it does not hold.
+@brm function shifted_rates(unit, center)
+    log(rise) ~ 1 + (1 | rates | unit)
+    effect(rise, Intercept) ~ Normal(-1.0, .4)
+    sd(rise, rates) ~ Exponential(1)
+    a ~ Normal(center, .2)
+    return rise + a
+end
+const SHIFTED_BUILDER = @brm begin
+    left ~ shifted_rates(unit_l, center)
+    y_l ~ Normal(left, sigma)
+    center ~ Normal(.3, .4)
+    sigma ~ Exponential(1)
+end
+const SHIFTED_DATA = (; unit_l=["a", "a", "b", "c"], y_l=[.3, .4, .2, .5])
+const SHIFTED_COMPONENTS = [:left => (; rise=(; Intercept=.4), rates=(; sd=.3, effects=["a" => .2]))]
+
 const FORMULA_DATA = (; unit_l=["a", "a", "b", "c"], unit_r=["u", "v", "v"],
     unit_n=["p", "q", "p", "r", "s"], g=["x", "y", "x", "y"],
     y_l=[.3, .4, .2, .5], y_r=[.1, .6, .2], y_n=[.2, .3, .1, .4, .5], z=[.1, .2, .3, .4])
@@ -202,5 +220,25 @@ if "--stan" in ARGS
                 [:right => (; rates=(; effects=["a" => [.1, .2]]))])
             @test_throws Exception brm_start(sb, stan, (;); component_inits=bad)
         end
+    end
+    @testset "component formula starts: a call whose prior reads a parameter input" begin
+        model = SHIFTED_BUILDER(SHIFTED_DATA)
+        rk = RKBRMI(model)
+        sb = SBBRMI(model; mod=@__MODULE__, total_groups=())
+        stan = BRM.stan_instantiate(sb; path=joinpath(mktempdir(), "component-shifted.stan")).model
+        names = String.(BridgeStan.param_names(stan; include_tp=true))
+        d = brm_descriptor(sb)
+        s = brm_start(sb, stan, (;); component_inits=SHIFTED_COMPONENTS, base=:prior_median)
+        θ = BridgeStan.param_constrain(stan, s; include_tp=true)
+        read(name) = θ[brm_output_coordinates(d, name, names; submodel=:left)]
+        effects = Dict("a" => .2, "b" => 0., "c" => 0.)
+        @test read(:rise) ≈ [exp(.4 + effects[u]) for u in SHIFTED_DATA.unit_l]
+        @test only(read(:a)) ≈ .3             # median(Normal(median(center), .2))
+        @test stan_value(θ, names, "center") ≈ .3
+        r = BRM._rk_constrained_values(rk,
+            brm_start(rk, (;); component_inits=SHIFTED_COMPONENTS, base=:prior_median))
+        @test coefficient(r.left, :rise) ≈ .4
+        @test r.left.a ≈ only(read(:a))
+        @test r.center ≈ .3
     end
 end

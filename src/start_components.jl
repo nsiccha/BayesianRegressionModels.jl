@@ -69,8 +69,15 @@ function _brm_component_start_inits(scopes, inits)
     result
 end
 
-_brm_component_formula_key(source, key) =
-    !isnothing(popcoefnames(source, key)) || !isnothing(ranefcoefnames(source, key))
+# A nested component call (`inner ~ field(x)`) is a predictor but no formula.
+function _brm_component_call_key(source, key)
+    op = linear_predictor_op(source, key)
+    op === nothing && return false
+    rhs = last(getargs(op))
+    rhs isa ExprColumn && getf(rhs) isa BRMComponent
+end
+_brm_component_formula_key(source, key) = !_brm_component_call_key(source, key) &&
+    (!isnothing(popcoefnames(source, key)) || !isnothing(ranefcoefnames(source, key)))
 
 # A component's own predictor is computed, never a sampled value.
 function _brm_component_formula_targets(source, formula)
@@ -245,17 +252,45 @@ _brm_sb_component_local_names(names, prefix) =
     [startswith(n, prefix) ? n[nextind(n, ncodeunits(prefix)):end] : "\0" * n
      for n in String.(names)]
 
-# The call's own descriptor and local names, built once per call. The call is
-# traced on its own, where nothing reads its result, so StanBlocks would place
-# its blocks and coefficients in generated quantities; inside the parent they
-# are sampled. Each output therefore takes its placement (`kind`) from the
-# parent's traced program, under the call's prefix.
+# The call's own descriptor and local names, built once per call and only for
+# a call with formulas. The call is traced on its own, where nothing reads its
+# result, so StanBlocks would place its blocks and coefficients in generated
+# quantities; inside the parent they are sampled. Each output therefore takes
+# its placement (`kind`) from the parent's traced program, under the call's
+# prefix.
 _brm_with_field(x, field, value) = typeof(x)((f === field ? value : getfield(x, f)
     for f in fieldnames(typeof(x)))...)
+_brm_component_has_formulas(source) =
+    any(lp -> _brm_component_formula_key(source, lp.name), linear_predictors(source))
+
+# A parameter-valued input (`center` in `a ~ Normal(center, .2)`) is a keyword
+# the parent passes, absent from the call's own data, so the standalone trace
+# cannot type the predictive draws that read it. A placeholder of the
+# argument's shape types it; its value is never read, because placement comes
+# from the parent's trace. The shape is the parent's value of the same name;
+# an argument the parent does not hold by name is a scalar.
+function _brm_sb_component_input_placeholders(scope, path, model, parent_d)
+    enclosing = length(path) > 1 ? _brm_sb_component_prefix(Base.front(path)) : ""
+    dims = Dict(o.name => o.dims for o in parent_d.stan.outputs)
+    placeholders = Dict{Symbol,Any}()
+    for (input, argument) in zip(scope.definition.inputs,
+            _brm_component_arguments(scope.definition, scope.call))
+        haskey(model.data, input) && continue
+        shape = argument isa NamedColumn ?
+            get(dims, Symbol(enclosing, name(argument)), ()) : ()
+        placeholders[input] = isempty(shape) ? 0.0 : zeros(shape...)
+    end
+    placeholders
+end
+
 function _brm_sb_component_scope(scope, path, names, parent_d)
     prefix = _brm_sb_component_prefix(path)
     plan = _brm_plan_of(scope.fitted)
-    own = Base.invokelatest(StanBlocks.stan_descriptor, plan.model)
+    model = plan.model
+    typed = StanBlocks.SlicModel(model.model,
+        merge(model.data, _brm_sb_component_input_placeholders(scope, path, model, parent_d)),
+        model.mod, model.observations)
+    own = Base.invokelatest(StanBlocks.stan_descriptor, typed)
     kinds = Dict(o.name => o.kind for o in parent_d.stan.outputs)
     outputs = map(own.outputs) do o
         kind = get(kinds, Symbol(prefix, o.name), o.kind)
@@ -335,6 +370,7 @@ function _brm_sb_start_components!(writes, deferred, sb, d, names, inits, compon
             end
         end
         # The call's population coefficients and `|ID|` scales, as at top level.
+        _brm_component_has_formulas(scope.source) || continue
         own = scoped(path)
         chosen = Set(first(w) for w in writes)
         function add(indices, prior, label; lower=-Inf, upper=Inf)
