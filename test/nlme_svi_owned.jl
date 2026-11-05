@@ -1,5 +1,6 @@
 using Test, Random, LinearAlgebra, Serialization
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
+using DifferentiationInterface
 using ADTypes: AutoEnzyme
 import Enzyme
 include("nlme_svi_owned_fixture.jl")
