@@ -2,6 +2,7 @@ include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_connected_fixture.jl"))
 include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))
 using LogDensityProblems, Random
+using ReactiveKernelsPPL: density_factors, select_factors, factor_coordinates
 
 function check_separator_density(t)
     full = rk_logdensity_problem(t.m.backend; ad_backend=NLME_AD)
@@ -22,6 +23,33 @@ function check_separator_density(t)
         @test gradient ≈ native atol=2e-8 rtol=2e-9
         @test t.plan.point == t.m.unit
     end
+end
+
+function separator_simplex_model(data)
+    @brm data begin
+        composition ~ Dirichlet([1.0, 2.0, 1.5])
+        mu ~ 1 + (1 | effect | subject)
+        extra ~ Normal(mu[1] + composition[1], 0.5)
+        @plate for i in eachindex(y)
+            y[i] ~ Normal(mu[i], 0.5)
+        end
+    end
+end
+
+@testset "explicit promotion closes a coupled prior and its transform" begin
+    data = (; subject=["subject $i" for i in 1:4], y=[-0.2, 0.1, 0.3, 0.5], extra=0.4)
+    m = brm_nlme_model(RKBRMI(separator_simplex_model(data));
+        ad_backend=NLME_AD, unit_partition=:connected)
+    catalogue = density_factors(m.backend.model, BRM.rk_bound_plan(m.backend))
+    block = factor_coordinates(select_factors(catalogue; kind=:prior, site=:composition))
+    @test length(block) == 2
+    original = BRM._brm_svi_target(m; separator=:none)
+    @test all(j -> original.ownership.owner[j] == 1, block)
+    promoted = BRM._brm_svi_target(m; separator=:none, global_coordinates=[first(block)])
+    @test all(in(promoted.globals), block)
+    @test length(promoted.units[1]) == length(original.units[1]) - 2
+    check_separator_density(original)
+    check_separator_density(promoted)
 end
 
 @testset "automatic hub separators rebuild exact inference partitions" begin

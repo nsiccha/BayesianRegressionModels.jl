@@ -186,7 +186,8 @@ end
 # BRMNLMEModel remains unchanged; only its SVI target uses these inference IDs.
 function _brm_svi_partition(m, ownership)
     view = (; subject=ownership.owner, coordinates=m.view.coordinates,
-        subject_coordinates=ownership.units)
+        subject_coordinates=ownership.units, unit_partition=:connected,
+        factor_supports=m.view.factor_supports)
     partitioned = _rk_nlme_partitioned(m.backend, ownership.owner)
     cells = Tuple(map(ownership.attribution) do (name, owners)
         positions = [Int[] for _ in ownership.units]
