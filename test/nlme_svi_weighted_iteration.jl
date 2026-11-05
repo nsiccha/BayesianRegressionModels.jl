@@ -6,6 +6,7 @@ using Random, LinearAlgebra, Statistics
 struct BRMI end
 struct RKBRMI end
 struct BRMNLMEModel end
+include(joinpath(@__DIR__, "..", "src", "nlme_selection.jl"))
 include(joinpath(@__DIR__, "..", "src", "nlme_svi.jl"))
 
 struct QuadraticUnits
@@ -39,7 +40,7 @@ const S = SVIArithmetic
 
 @testset "production SVI weighted iteration" begin
     t = S.QuadraticUnits([1], [[2], [3], [4]],
-        (; selections=[[[[1, i + 1]]] for i in 1:3]), zeros(Int, 3),
+        (; footprints=[[1, i + 1] for i in 1:3]), zeros(Int, 3),
         [0.3, 4, 9], [-2.0, 0.5, 3])
     p = S._brm_svi_unit_sampler(:work, [1.0, 50, 4]).probabilities
     g = 0.7 + 0.2randn(Xoshiro(14))

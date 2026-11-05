@@ -1553,10 +1553,22 @@ function _rk_ast_car_separated!(definitions, taken, bindings, block, separation,
         push!(block.statements,
             Expr(:call, :~, Expr(:ref, w, Expr(:call, :(:), 1, m)),
                 Expr(:call, law, arguments.last, arguments.scale, arguments.weight,
-                    arguments.shared_first, arguments.shared_second)),
+                    arguments.shared_first, arguments.shared_second)))
+        # Expose the linear shared-value map by row. Its integer lists and
+        # coefficients depend only on data and are computed at binding; a
+        # partition computes just the shared values its areas read.
+        rows = _rk_block_local!(block, :shared_rows)
+        coefficients = _rk_block_local!(block, :shared_coefficients)
+        row_ids = _rk_block_local!(block, :shared_ids)
+        push!(block.statements,
+            Expr(:(=), rows, _rk_ast_statistical_call!(definitions, taken,
+                :brm_car_shared_rows, arguments.last)),
+            Expr(:(=), coefficients, _rk_ast_statistical_call!(definitions, taken,
+                :brm_car_shared_coefficients, arguments.last, arguments.scale,
+                arguments.weight)),
+            Expr(:(=), row_ids, Expr(:call, :eachindex, arguments.last)),
             Expr(:(=), x, _rk_ast_statistical_call!(definitions, taken,
-                :brm_car_shared_values, w, arguments.last, arguments.scale,
-                arguments.weight)))
+                :brm_car_shared_local, w, rows, coefficients, row_ids; kernel=true)))
     end
     z = map(separation.blocks) do b
         b.ndraws == 0 && return nothing
@@ -1671,7 +1683,14 @@ function _rk_ast_cdar_block!(definitions, taken, term, group_rows, step_rows)
     innovations = eta
     if factor_values !== nothing
         L = _rk_block_local!(block, :L)
-        push!(block.statements, Expr(:(=), L, Expr(:call, :reshape, factor_values, P, P)))
+        # Sparse, so the factor declares which groups it couples: a cell reads
+        # `eta` only at the columns its row stores (ReactiveKernels 0.1.77 / RKPPL 0.1.85), and a
+        # `cor=` coupling groups only within a unit stays local to that unit. A
+        # dense factor's zeros remove no read. The factor is built here because
+        # bound columns hold vectors.
+        push!(block.statements, Expr(:(=), L, Expr(:call,
+            Expr(:., :BayesianRegressionModels, QuoteNode(:sparse)),
+            Expr(:call, :reshape, factor_values, P, P))))
         innovations = _rk_block_local!(block, :correlated)
         push!(block.statements, Expr(:(=), innovations, Expr(:call, :*, L, eta)))
     end

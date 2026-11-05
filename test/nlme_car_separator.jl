@@ -377,6 +377,59 @@ end
     end
 end
 
+@stestset "car identity geometry exposes strict cell reads" begin
+    # Cell queries verify the geometry independently of heterogeneous planned
+    # unit partitions (RK snag d227045c). Full unit acceptance remains below.
+    for build in (sep_icar, sep_bym2)
+        rk = RKBRMI(build(SEP_DATA); car_units=:subject)
+        view = brm_nlme_view(rk)
+        bound = rk_bound_plan(rk)
+        point = 0.1 .* randn(Xoshiro(20261031), length(view.coordinates))
+        query = prepare_cell_query(rk.model, bound, :y; locality=:error)
+        footprint = partition_footprint_kernel(query.kernel)
+        expected = Base.invokelatest(pointwise_query(rk), point).y
+        for (p, label) in enumerate(SEP_DATA.subject)
+            i = findfirst(==(label), view.levels)
+            selected = Base.invokelatest(footprint, point, p).unconstrained
+            @test selected !== :whole
+            @test all(j -> view.subject[j] in (0, i), selected)
+            @test query(point, p) ≈ expected[p] atol=1e-9 rtol=1e-10
+        end
+    end
+end
+
+@stestset "strict car partitions preserve shared and unit gradients" begin
+    for build in (sep_icar, sep_bym2)
+        rk = RKBRMI(build(SEP_DATA); car_units=:subject)
+        m = brm_nlme_model(rk; ad_backend=NLME_AD)
+        θ, σ, H = random_point(m, Xoshiro(20261031))
+        for i in eachindex(H)
+            point = BRM._brm_nlme_cell_point(m, i, θ, σ, H[i])
+            value, selected, gradient, _ =
+                BRM._brm_nlme_cell_value_and_selected_gradient(m, i, θ, σ, H[i])
+            expected = 0.0
+            oracle = zeros(length(selected))
+            active = Float64[point[j] for j in selected]
+            # Independent per-cell reverse passes include the CAR unit terms
+            # as well as y. This checks shared-coordinate derivatives too.
+            for cell in m.cell_query
+                sampler = compact_cell_oracle(rk, cell.names, m.unit, selected)
+                for p in cell.positions[i]
+                    buffer = zeros(length(selected))
+                    v, _ = cell_value_and_gradient!(sampler,
+                        buffer, m.unit, active, selected, p)
+                    expected += v
+                    oracle .+= buffer
+                end
+            end
+            @test value ≈ expected atol=1e-8 rtol=1e-10
+            @test gradient ≈ oracle atol=1e-8 rtol=1e-8
+            @test brm_nlme_loglikelihood(m, i, θ, σ, H[i]) ≈ expected atol=1e-8 rtol=1e-10
+            @test all(j -> m.view.subject[j] in (0, i), m.cell_gradient.footprints[i])
+        end
+    end
+end
+
 # A side × side grid of areas in four quadrant units, one row per area.
 function grid_data(side)
     id(i, j) = (i - 1) * side + j

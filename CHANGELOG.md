@@ -14,6 +14,44 @@ instead of failing at run time.
 
 ## 0.2.171
 
+- Changed: NLME unit likelihoods and gradients use one strict RK plate
+  partition per unit. Preparation checks structural coordinate ownership,
+  including dormant branches, and names nonlocal producers or foreign unit
+  effects. Sparse curvature retains individual cell supports without numerical
+  probing or gradient-based pruning; repeated observations share one support
+  during pattern assembly instead of accumulating duplicate coordinate pairs.
+  Conditional subsets evaluate only their requested units; full-cohort and
+  population-gradient calls retain batching.
+- Changed: a one-unit value or gradient writes θ, σ and the unit's η into a
+  dense work point owned by its query or plan, instead of an overlay that RK
+  copied into a full packed vector on every call, so one unit's cost and
+  allocations no longer grow with the number of units.
+  `brm_nlme_loglikelihood_and_gradient`, which returns only the η gradient,
+  differentiates only the unit's own effects (RK `shared=false`).
+- Changed: NLME cell, partition and gradient queries declare their local
+  parameter ownership so RK/PPL can cache shared producers before strict
+  lowering. Correlated grouped HSGP values remain shared; local coordinates
+  retain their structural checks. Shared-coordinate changes refresh the cache.
+- Changed: separated CAR fields expose their shared values through row-local
+  graph computations, preserving their law, coordinates, inverse and Jacobian.
+- Changed: `cdar(...; cor=C)` emits its fixed correlation factor as a sparse
+  matrix, so a subject reads only the innovation groups its factor rows store.
+- Compatibility: ReactiveKernels 0.1.77 / ReactiveKernelsPPL 0.1.85 preserve
+  sparse factors, stratified group reads, grouped HSGP row forms and shared
+  plate computations across several observations in one unit partition.
+- Compatibility: the strict partitions need ReactiveKernels 0.1.51 and
+  ReactiveKernelsPPL 0.1.54 or later, within the new 0.1.77 / 0.1.85
+  floor. Scalar inference preserves ordinary indexed predictor expressions
+  under strict partitioning, and nested data-only helpers inside sampled
+  expressions, such as a lower-bounded shares completion's
+  `lower=lo[x_shares_free]`, keep their shapes through strict cell and
+  partition preparation. Strict queries also preserve local scan captures,
+  grouped-field row reductions and censored ragged factors. Shared-prefix
+  binding includes freshly emitted helpers and preserves local reads from
+  custom packed vectors. Unit gradients use ordinary Enzyme Reverse, with the
+  test bootstrap's Enzyme dogfood pin, which contains `68ed90fe`'s repair for
+  matrix-window partition gradients on Julia 1.10.
+
 - `brm_svi_fit` accepts `unit_sampling=:work` for positive work-weighted
   sampling with replacement and inverse-probability objective/global-gradient
   weights. Repeated draws share one local update. Diagnostics distinguish

@@ -1,10 +1,8 @@
 # A unit's layout stores only its local coordinate permutation and positions
 # in sorted [globals; locals]. Never replicate the globals for every unit.
 function _brm_svi_unit_layout(globals, block)
-    order = sortperm(block)
-    slots = [searchsortedfirst(globals, block[j]) + k - 1
-        for (k, j) in enumerate(order)]
-    (; order, slots)
+    selection = _brm_nlme_unit_selection(globals, block)
+    (; selection.order, selection.slots)
 end
 
 function _brm_svi_joint!(values, layout, g, z)

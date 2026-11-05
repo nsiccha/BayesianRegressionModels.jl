@@ -3,6 +3,7 @@ using Random, LinearAlgebra, Statistics
 struct BRMI end
 struct RKBRMI end
 struct BRMNLMEModel end
+include(joinpath(@__DIR__, "..", "src", "nlme_selection.jl"))
 include(joinpath(@__DIR__, "..", "src", "nlme_svi.jl"))
 include(joinpath(@__DIR__, "..", "src", "nlme_svi_unit_streaming.jl"))
 struct GaussianUnits
@@ -148,7 +149,7 @@ end
 
 @testset "mixed local families in the production optimization loop" begin
     t = SU.GaussianUnits([1], [[2], [3, 4, 5, 6, 7]],
-        (; selections=[[[[1, 2]]], [[[1, 3, 4, 5, 6, 7]]]]))
+        (; footprints=[[1, 2], [1, 3, 4, 5, 6, 7]]))
     q = SU._brm_svi_params(t, [0.0], SU.MeanFieldGlobal();
         global_scale=1.0, unit_scale=1.0, unit_dense_limit=2, unit_rank=2)
     fit = SU.arithmetic_fit(Xoshiro(51), t, q; batch_size=2, max_iterations=40,

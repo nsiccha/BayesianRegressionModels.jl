@@ -25,7 +25,7 @@ end
     check_lockstep(m, Xoshiro(5))
     check_unit_problems(m, Xoshiro(6))
     start = brm_nlme_start(m)
-    # The public unit model's cell queries may only read one group's shares.
+    # Each cell's structural support may only contain one group's shares.
     names = BRM._rk_layout_coordinate_names(rk)
     c = only(rk.plan.completions)
     owned, next = Vector{Int}[], 0
@@ -36,11 +36,12 @@ end
         previous, next = stop, next + count
     end
     shared = reduce(vcat, owned)
-    for cell in m.cell_query, i in eachindex(cell.positions), p in cell.positions[i]
-        point = BRM._BRMNLMERecordingPoint(m.unit, Int[])
-        BRM._rk_nlme_cell_value(cell.query, point, p)
-        read = unique(intersect(point.seen, shared))
-        @test isempty(read) || any(o -> issubset(read, o), owned)
+    for cell in m.cell_query
+        footprint = BRM._rk_nlme_cell_footprint_query(cell.query)
+        for positions in cell.positions, p in positions
+            read = intersect(BRM._rk_nlme_cell_footprint(footprint, m.unit, p), shared)
+            @test isempty(read) || any(o -> issubset(read, o), owned)
+        end
     end
     @test NLMEEstimation.check_protocol(m, start.theta, start.sigma, start.omega)
 end
