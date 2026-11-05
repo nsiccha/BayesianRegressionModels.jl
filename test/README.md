@@ -1237,6 +1237,38 @@ fit is compared with NUTS too. Starts (prior medians, a packed point,
 `inits`) and their refusals are covered as well. It runs in the test
 environment above.
 
+`nlme_svi_authored_factors.jl` checks the public RKPPL authored-factor API
+and production SVI ownership. On a
+six-subject model whose coefficient pair `z[2i-1], z[2i]` is read only by
+subject `i`, and on a variant with hyperparameter-dependent Normal, Exponential
+and Beta priors, it gives each pair (and each constrained coordinate) to its
+subject, keeps the hyperparameters' priors global although every subject reads
+them, and checks that each prior and Jacobian event lands in exactly one
+bucket. At three nonzero packed points the bucket values and compact gradients
+plus the likelihood equal the full RK sampler's value and Reverse gradient.
+It then checks SVI's authored prior term (`_BRMSVIAuthoredPrior`): on the
+strict subject units it equals the standard-normal split term by term, and
+with the subjects also owning their coefficients the global term plus every
+unit term equals RK's whole prior and Jacobian, with the units' reads of
+`tau` carried in the globals' gradient. A `Dirichlet` simplex, one atomic
+law and coupled transform, is refused once its two coordinates are given to
+different units, as is a coordinate assigned twice, while the strict subject
+units build with the simplex global. That needs RKPPL 0.1.72, which reports
+the constant Dirichlet's own block as its support (snag
+`ReactiveKernels/factor-support-r-2b8c2968`; 0.1.70 reported the whole packed
+vector). It also checks the production ownership split, public fits and
+draw packing. Run it alone in the test environment.
+
+`nlme_svi_owned.jl` covers structural ownership through dormant branches and
+zero coefficients, shared and prior-only coordinates, connected units,
+explicit global promotions, optimizer resume and streaming absent/returning
+units. Its density and native Reverse gradient oracle is the full RK sampler.
+The dormant scalar/vector branch's ordinary Reverse needs Enzyme dogfood from
+`0fa85df3` (repairs `74abe90` and `7ac58eb`, contained in the bootstrap's
+`b2bb4cb6`); earlier pins raise `IllegalTypeAnalysisException` there.
+`nlme_svi_ownership_algebra.jl` isolates atomic-block and directed-prior
+closure, including fixed coordinates and factors that own no coordinates.
+
 `nlme_svi_threads.jl` checks `brm_svi_fit(...; threads)` with real threads (run
 it with `--threads=4`; it refuses to run without them). The state after every
 iteration, whose Adam moments are the gradient trajectory, and the draws must equal
