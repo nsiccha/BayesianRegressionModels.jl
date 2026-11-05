@@ -45,6 +45,20 @@ function main()
     @assert isfinite(baseline[1]) && all(isfinite,baseline[2])
     value=timed("warm value",()->LDP.logdensity(problem,u))
     @assert isapprox(value,baseline[1];rtol=1e-12)
+    # Central differences of the native primal along a dense direction and
+    # one concentrated on the small (hyperparameter and correlation) entries.
+    small=falses(length(u))
+    for entry in rk.model.layout.entries
+        entry.size<=16 && (small[entry.offset:entry.offset+entry.size-1].=true)
+    end
+    f=x->LDP.logdensity(problem,x);h=1e-5
+    for (k,v) in enumerate(([cos(3i) for i in eachindex(u)],[small[i] ? 1.0 : 1e-3*sin(7i) for i in eachindex(u)]))
+        v./=sqrt(sum(abs2,v))
+        dd=timed("directional difference $k",()->(f(u.+h.*v)-f(u.-h.*v))/(2h))
+        gv=sum(baseline[2].*v);rel=abs(dd-gv)/max(1.0,abs(dd))
+        println("DIRECTION ",(;direction=k,small_coordinates=count(small),directional_fd=dd,gradient_dot=gv,rel_error=rel));flush(stdout)
+        @assert rel<1e-4
+    end
     println("native control passed");flush(stdout)
 end
 main()

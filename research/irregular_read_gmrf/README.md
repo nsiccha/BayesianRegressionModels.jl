@@ -43,6 +43,9 @@ julia --startup-file=no --project=test research/irregular_read_gmrf/paired_suppo
 julia --startup-file=no --project=test research/irregular_read_gmrf/measure_native_primal.jl SUPPORTS physical 1
 julia --startup-file=no --project=test research/irregular_read_gmrf/measure_native_primal.jl SUPPORTS rain 1
 julia --startup-file=no --project=test research/irregular_read_gmrf/measure_native_primal.jl SUPPORTS rain 2
+julia --startup-file=no --project=test research/irregular_read_gmrf/measure_native_gradient.jl SUPPORTS physical 1
+julia --startup-file=no --project=test research/irregular_read_gmrf/measure_native_gradient.jl SUPPORTS rain 1
+julia --startup-file=no --project=test research/irregular_read_gmrf/measure_native_gradient.jl SUPPORTS rain 2
 ```
 
 The core-only drivers can also use a minimal environment containing Bessels
@@ -80,7 +83,10 @@ latent vectors and repeatability. It does not measure gradients or fit a target.
 Its two-channel control uses independent channels.
 `measure_native_gradient.jl` supplies the analogous value/gradient control once
 the small native reverse checks pass, with sampled LKJ correlation for multiple
-channels. Its existence is not a passed measurement.
+channels. It also compares the native Reverse gradient with central differences
+of the native primal along two unit directions: a dense one, and one
+concentrated on the hyperparameter and correlation coordinates. Its existence
+is not a passed measurement.
 
 The small backend tests separately cover compiled Stan, sampled LKJ channels,
 coordinate transport, nonlinear read locality, multiple fields and replay.
