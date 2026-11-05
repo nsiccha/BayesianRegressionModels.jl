@@ -120,6 +120,7 @@ function _brm_plan_local_cache(p, state; contexts=Dict{Symbol,Any}())
         push!(soft_by_effect[i], c)
     end
     (; cells, sums, contexts, identity, edges, edges_by_effect, soft_by_effect,
+        gmrf=_brm_spl_gmrf_sparse(p, n),
         soft_members=Set.(p.wcols), soft_values=[sum(state.z[cols]) for cols in p.wcols],
         mmax=maximum(t -> p.tptr[t + 1] - p.tptr[t], eachindex(p.family); init=0))
 end

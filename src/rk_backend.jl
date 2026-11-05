@@ -344,7 +344,11 @@ struct _RKSampledParameter
     support_override::Union{Nothing,Symbol,Tuple} # `(:truncated, lo, hi)`
         # normalizes the family; `(:restricted, lo, hi)` retains its kernel.
     label::Symbol
+    # Shape metadata must not replace a data argument in emitted source.
+    dimension::Union{Nothing,Int}
 end
+_RKSampledParameter(name, family, args, support_override, label; dimension=nothing) =
+    _RKSampledParameter(name, family, args, support_override, label, dimension)
 
 struct _RKAssignmentSpec
     name::Symbol
@@ -571,14 +575,19 @@ struct RKBRMI{P<:BRMI,PL,M,S<:BRMI}
     # training data (a `BRMFittedState`), or `nothing` for a backend of its own
     # data or a replay of one.
     fitted::Any
+    # The BRM plan whose binding produced `model`'s retained layout. Frozen
+    # replays can share that build with a different plan. Inspection uses this
+    # provenance to avoid presenting the old layout's shapes as current.
+    model_plan::Any
     # The retained parent is the model the plan lowered: `optional(...)`
     # priors and grouping-column addresses are already resolved
     # (`_brm_resolve_prior_addresses`).
     function RKBRMI(parent::BRMI, plan, model; program::_RKOnce=_RKOnce(),
-            bound::_RKOnce=_RKOnce(), source::BRMI=parent, fitted=nothing)
+            bound::_RKOnce=_RKOnce(), source::BRMI=parent, fitted=nothing,
+            model_plan=plan)
         parent = _brm_resolve_prior_addresses(parent)
         new{typeof(parent),typeof(plan),typeof(model),typeof(source)}(parent,
-            plan, model, program, bound, source, fitted)
+            plan, model, program, bound, source, fitted, model_plan)
     end
 end
 
@@ -6479,7 +6488,7 @@ end
 
 function _rk_plan_parameters!(prepared, data::AbstractDict,
         consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol},
-        parameters::Set{Symbol}, assign_names::Set{Symbol})
+        parameters::Set{Symbol}, assign_names::Set{Symbol}; retain_lkj_inputs=false)
     prefix = "RK backend"
     specs = _RKSampledParameter[]
     for parameter in prepared.parameters
@@ -6501,7 +6510,10 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
         # A level correlation's factor (`Omega ~ LKJCholesky(K, eta)`), read
         # by name by the `gr(g; cor=Omega)` / `hsgp(...; cor=Omega)` it serves.
         if callable === LKJCholesky
-            push!(specs, _rk_lkj_cholesky_parameter(parameter.name, prior))
+            push!(specs, _rk_lkj_cholesky_parameter(parameter.name, prior, data,
+                consts, aliases, parameters, assign_names,
+                Dict(a.name => a.expression for a in prepared.assignments);
+                retain_inputs=retain_lkj_inputs))
             continue
         end
         push!(specs, _rk_sampled_parameter(parameter.name, prior, data,
@@ -6831,23 +6843,37 @@ function _rk_lkj_factor_parameter(name::Symbol, prior::_BRMPreparedExpr,
         nothing, name)
 end
 
-# `Omega ~ LKJCholesky(K, eta)`: a literal dimension and shape, as on SB
-# (`_brm_lkj_cholesky_spec`).
-function _rk_lkj_cholesky_parameter(name::Symbol, prior::_BRMPreparedExpr)
+# Resolve the same known shape inputs as SBBRMI, while the value route keeps
+# their authored expressions in the graph for binding and source replay.
+function _rk_lkj_cholesky_parameter(name::Symbol, prior::_BRMPreparedExpr,
+        data, consts, aliases, parameters, assign_names, assignments; retain_inputs=false)
     prefix = "RK backend"
     isempty(prior.kwargs) || error(
         "$prefix: `$name ~ LKJCholesky(K, eta)` takes no keywords")
     length(prior.args) == 2 || error(
         "$prefix: `$name ~ LKJCholesky(K, eta)` needs a dimension and a shape, " *
         "got $(length(prior.args)) arguments")
-    K, eta = prior.args
-    K isa Integer && !(K isa Bool) && K >= 1 || error(
-        "$prefix: `$name ~ LKJCholesky(K, eta)` needs an integer dimension " *
-        ">= 1, got $(repr(K))")
-    eta isa Real && !(eta isa Bool) && isfinite(eta) && eta > 0 || error(
-        "$prefix: LKJ shape `eta` for `$name` must be a finite, strictly " *
-        "positive literal, got $(repr(eta))")
-    _RKSampledParameter(name, :LKJCholesky, (Int(K), Float64(eta)), nothing, name)
+    function resolve(arg)
+        if arg isa _BRMPreparedRef
+            haskey(data, arg.name) && return data[arg.name]
+            haskey(assignments, arg.name) && return resolve(assignments[arg.name])
+        elseif arg isa _BRMPreparedExpr
+            values = map(resolve, arg.args)
+            kwargs = map(resolve, arg.kwargs)
+            all(_brm_is_data_value, values) &&
+                all(_brm_is_data_value, Base.values(kwargs)) || return arg
+            # Shape inputs read whole data values. Arithmetic follows the
+            # elementwise semantics of the value emitter; reductions do not.
+            return isempty(kwargs) && _brm_is_elementwise_builtin(arg.callable) ?
+                broadcast(arg.callable, values...) : arg.callable(values...; kwargs...)
+        end
+        _rk_frozen_bound(arg, name, :LKJ, data, consts, aliases,
+            parameters, assign_names)
+    end
+    K, eta = map(resolve, prior.args)
+    spec = _brm_lkj_cholesky_values(name, K, eta; prefix)
+    args = retain_inputs ? prior.args : (spec.K, spec.eta)
+    _RKSampledParameter(name, :LKJCholesky, args, nothing, name; dimension=spec.K)
 end
 
 function _rk_plan_vector_parameters!(prepared, data::AbstractDict,
@@ -8498,7 +8524,7 @@ end
 
 # Emit a panel kernel model: globals (sampled params + assignments) as top-level
 # `@rkppl` statements, then the subject-plate cell subgraph.
-function _rk_emit_ast(plan::_RKKernelPlan)
+function _rk_emit_ast(plan::_RKKernelPlan; documentation=())
     stmts = Expr[]
     for parameter in plan.parameters
         push!(stmts, _rk_ast_sampled(parameter))
@@ -8509,7 +8535,7 @@ function _rk_emit_ast(plan::_RKKernelPlan)
     end
     append!(stmts, _rk_emit_kernel_ast(plan.kernel, union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters), Set(a.name for a in plan.assignments))).args)
-    _RKEmittedProgram(Expr[], Expr(:block, stmts...))
+    _rk_documented_program(_RKEmittedProgram(Expr[], Expr(:block, stmts...)), documentation)
 end
 
 # A modeled ordinal scale feeds nothing else: a discrimination
@@ -8607,7 +8633,7 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     # A kernel(...) model routes to the panel kernel planner; it has no
     # top-level observation, so it must not enter the GLM flow below.
     isempty(_rk_kernel_ops(brmi)) || return _brm_rk_composed_kernel_plan(brmi)
-    observations = _brm_direct_observation_list(brmi; prefix)
+    observations = _brm_direct_observation_list(brmi; prefix, require_observation=false)
     keys = Symbol[observation.key for observation in observations]
     length(unique(keys)) == length(keys) || error(
         "$prefix: multi-response observation names must be unique")
@@ -8615,6 +8641,7 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
         brmi; context=_brm_backend_context(brmi; retain_mm_sources=true))
     submodels = _rk_prepare_submodel_values(program)
     !isempty(submodels) && return _brm_rk_value_plan(brmi, program, observations; submodels)
+    isempty(observations) && error("$prefix: direct execution requires at least one observed likelihood")
     _rk_needs_value_plan(program, observations) &&
         return _brm_rk_value_plan(brmi, program, observations)
     context = program.context

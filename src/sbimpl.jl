@@ -92,7 +92,7 @@ const _SB_VECTOR_PRIOR_CACHE = Dict{Tuple{String,Tuple},StanBlocks.ValueFamily}(
 # bounds per coordinate. Descriptions read this record under `_SB_GEN_LOCK`
 # instead of parsing a generated name or body.
 const _SB_VECTOR_PRIOR_COORDINATES = IdDict{StanBlocks.ValueFamily,Tuple}()
-const _SB_MIXTURE_CACHE = Dict{String,StanBlocks.ValueFamily}()
+const _SB_MIXTURE_CACHE = Dict{Tuple{String,Tuple},StanBlocks.ValueFamily}()
 # The membership function and component count of every generated mixture
 # family, keyed by the family object, so the descriptor recognizes a mixture
 # observation by its family instead of parsing a generated name.
@@ -4654,7 +4654,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        centered_groups=Set{Symbol}(), total_groups=(),
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
        resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing,
-       _s2z_generated=nothing, _source::BRMI=brmi)
+       _s2z_generated=nothing, _source::BRMI=brmi, _component_output=nothing)
     brmi = _brm_resolve_prior_addresses(brmi)
     # A frozen re-emission codes releveled factors over their fitted levels.
     isnothing(_frozen_preproc) || (brmi = _sb_fit_factor_levels(brmi, _frozen_preproc))
@@ -4683,6 +4683,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         "carry a cv taint; drop the group from `cv_groups`."))
     stmts = Any[]
     data = Dict{Symbol,Any}()
+    data[_SB_COMPONENT_NAMES_KEY] = Set{Symbol}(_brm_operation_names(brmi))
     isempty(fresh_covariates) || (data[_SB_FRESH_COVARIATES_KEY] = fresh_covariates)
     # Side-channel: transform emitters record their fit-time constant + raw
     # reference here (via `_sb_record_preproc!`); popped before `SlicModel` below
@@ -4918,6 +4919,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # Pop the preproc side-channel BEFORE building the SlicModel so it never
     # pollutes Stan's data dict.
     bindings = pop!(data, _SB_BINDINGS_KEY)
+    pop!(data, _SB_COMPONENT_NAMES_KEY)
     pop!(data, _SB_CELL_FORMULA_BINDINGS_KEY)
     pop!(data, _SB_TOTAL_PLANS_KEY)
     pop!(data, _SB_S2Z_PLANS_KEY)
@@ -4956,6 +4958,13 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod, _sb_declared_observations(body, data, brmi, mod))
     sb = SBBRMI(source_parent, model, data, preproc, Set{Symbol}(), bindings, _source)
+    # A scoped component contributes its returned value to a parent's model;
+    # its likelihood can therefore live entirely in that parent.
+    if _component_output !== nothing
+        _brm_has_operation(brmi, _component_output) || error(
+            "sbimpl: component result `$_component_output` is not declared")
+        return sb
+    end
     triage = _sb_observation_triage(sb)
     # The activity probe's own build: no warnings, no held-out marks.
     _marginal_id_targets isa _SBMarginalProbe && return sb
@@ -5007,6 +5016,14 @@ Base.@nospecializeinfer function _sb_observation_triage(@nospecialize(sb::SBBRMI
     unbound = sort!(unique!(Symbol[d.target for d in declarations
                            if d.role === :observation && isnothing(d.data_source) &&
                               !(d.target in missing_sources) && !(d.target in fresh_sources)]))
+    for entry in values(sb.preproc)
+        entry.kind === :brm_component || continue
+        record = entry.const_
+        nested = _sb_observation_triage(record.fitted)
+        bound += nested.bound
+        append!(unbound, (Symbol(record.target, :., target) for target in nested.unbound))
+        union!(fresh_sources, (Symbol(record.target, :., target) for target in nested.fresh_sources))
+    end
     (; bound, unbound, fresh_sources)
 end
 
@@ -5638,11 +5655,25 @@ function _sb_plan_observation_keys(body, data, @nospecialize(brmi), mod::Module)
             union!(varying, _sb_plan_param_names(stmt.args[end - 1]))
         elseif stmt.head === :call && !isempty(refs)
             target = _sb_plan_lhs_name(stmt.args[2])
+            # Scalar data constants can parameterize an observation-only law
+            # too. Its omission remains an observation, even without row data
+            # or fitted parameters to distinguish it from a parameter prior.
+            _sb_plan_observation_only(brmi, target) && continue
             (issubset(refs, constants) || target in read) &&
                 delete!(observable, target)
         end
     end
     observable
+end
+
+function _sb_plan_observation_only(@nospecialize(brmi), target)
+    target isa Symbol && _brm_has_operation(brmi, target) || return false
+    op = _named_op(_brm_operation(brmi, target))
+    op isa ExprColumn{typeof(~)} || return false
+    lhs, rhs = getargs(op, 2)
+    lhs isa NamedColumn && parent(lhs) isa MissingColumn && rhs isa ExprColumn ||
+        return false
+    _sb_observation_only_law(getf(rhs), rhs)
 end
 # A non-data name declared with a vector law, `x[1:n] .~ Family.(...)` or
 # `x ~ MvNormal(...)`, is a parameter: its data (the length, the mean, an
@@ -7223,7 +7254,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     # 1. Regenerate every independent transform-output key from its preproc
     #    record. Interactions wait until their raw/transformed operands exist.
     for (key, e) in sb.preproc
-        e.kind in (:interaction, :submodel_hook, :cell_formulas) && continue
+        e.kind in (:interaction, :submodel_hook, :cell_formulas, :brm_component) && continue
         _sb_reads_level_codes(e) && continue
         # A response a cell observes through a grouping (`y[rows[i]]`) is a
         # gathered key whose raw column the new data may lack. Its record is
@@ -7263,6 +7294,11 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     # 1b. Re-invoke each consumer `_sb_submodel_rhs!` term on the new frame; it
     #     re-derives every key it wrote, reading constants regenerated in step 1.
     for (key, e) in sb.preproc
+        if e.kind === :brm_component
+            _sb_replay_component!(new_data, new_preproc, handled, key, e, sb,
+                                  new_df, freeze_constants)
+            continue
+        end
         e.kind === :submodel_hook || continue
         _sb_reprocess_submodel_hook!(new_data, new_preproc, handled, key, e, sb,
                                      new_df, freeze_constants)
@@ -7439,12 +7475,14 @@ end
 # likelihood statement, arguments and family spelling included, which
 # StanBlocks forward-simulates from the fitted predictive law. `weighted` and
 # `censored` wrap only observations (a censored law puts mass on its bounds),
+# `interval_censored` supplies interval evidence rather than a parameter law,
 # and Stan has no discrete parameters, so a discrete law (`Poisson`,
 # `Binomial`, `BetaBinomial2`, ..., also under `truncated`) is one too. The
 # families whose outcome structure is read from response values keep their
 # refusal (`_SBValueStructuredFamily`).
 _sb_observation_only_law(_callable, _rhs) = false
-_sb_observation_only_law(::Union{typeof(weighted),typeof(censored)}, _rhs) = true
+_sb_observation_only_law(
+    ::Union{typeof(weighted),typeof(censored),typeof(interval_censored)}, _rhs) = true
 _sb_observation_only_law(::Type{D}, _rhs) where {D<:Distribution} =
     D <: Distribution{<:Distributions.VariateForm,Distributions.Discrete} &&
     !(D <: _SBValueStructuredFamily)
@@ -8248,10 +8286,15 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     body_stmts = _sb_cell_statements(_sb_cell_ar1_normal_calls(body_stmts, kept_params),
         _brm_inline_scope(lam))
     plate_body = Expr(:block, body_stmts...)
-    plate_call = nsub_sym === nothing ? Expr(:call, :plate, kept_names...) :
+    # A producer's collected or indexed side output holds whole cells.
+    # In particular, fixed-width vectors are stored as matrix columns, so
+    # ordinary positional matrix slicing would select channels instead.
+    plate_inputs = Any[_sb_plate_output(dcols[j + 1], data) ?
+        Expr(:call, brm_plate_cells, dcol_names[j]) : dcol_names[j] for j in kept]
+    plate_call = nsub_sym === nothing ? Expr(:call, :plate, plate_inputs...) :
         Expr(:call, :plate,
             Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
-            kept_names...)
+            plate_inputs...)
     plate_do = Expr(:do, plate_call,
         Expr(:->, Expr(:tuple, kept_params...), plate_body))
     push!(stmts, :($target ~ $plate_do))
@@ -8747,7 +8790,8 @@ function _sb_emit_vector_prior!(stmts, data, target, ::Type{<:LKJCholesky}, op)
         "that name is already used")
     data[n_key] = spec.K
     lhs = Expr(:(::), target, Expr(:ref, :cholesky_factor_corr, n_key))
-    push!(stmts, Expr(:call, :~, lhs, Expr(:call, :lkj_corr_cholesky, spec.eta)))
+    push!(stmts, Expr(:call, :~, lhs,
+        Expr(:call, :lkj_corr_cholesky, _sb_effect_prior_arg(spec.eta))))
     true
 end
 
@@ -16229,6 +16273,7 @@ end
 # of them, not just the preproc dict: with no observation bound, the fallback
 # tiers above would otherwise mistake a side-channel for a sizing column.
 _sb_is_side_channel_key(k::Symbol) =
+    k === _SB_COMPONENT_NAMES_KEY ||
     k === _SB_PREPROC_KEY || k === _SB_BINDINGS_KEY || k === _SB_CELL_FORMULA_BINDINGS_KEY ||
     k === _SB_THRESHOLD_LOCATED_KEY || k === _SB_HYPER_PLANS_KEY ||
     k === _SB_TOTAL_PLANS_KEY || k === _SB_S2Z_PLANS_KEY ||
@@ -17188,6 +17233,15 @@ function _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, 
     push!(stmts, Expr(:call, :~, target, rhs))
 end
 
+# A censoring threshold can be the observation itself. When that observation
+# is omitted, its endpoint has no data to validate; the unchanged producer
+# statement still carries it so StanBlocks owns the generative interpretation.
+_sb_censored_validation_bound(bound, _target, _data) = bound
+function _sb_censored_validation_bound(bound::NamedColumn, target, data)
+    name(bound) === target && parent(bound) isa MissingColumn &&
+        !haskey(data, target) ? nothing : bound
+end
+
 function _sb_lik_composed!(stmts, target, wrapper, producer,
                            args, kwargs::NamedTuple, data)
     base = _sb_composed_family(wrapper, args)
@@ -17196,8 +17250,12 @@ function _sb_lik_composed!(stmts, target, wrapper, producer,
     isnothing(lower) && isnothing(upper) && error(
         "sbimpl: `$wrapper` needs at least one non-`nothing` bound")
 
-    _sb_validate_bounds(wrapper, target, lower, upper, data)
-    _sb_validate_composed_support(wrapper, target, lower, upper, base.kind, data)
+    validation_lower, validation_upper = wrapper === :censored ?
+        (_sb_censored_validation_bound(lower, target, data),
+         _sb_censored_validation_bound(upper, target, data)) : (lower, upper)
+    _sb_validate_bounds(wrapper, target, validation_lower, validation_upper, data)
+    _sb_validate_composed_support(wrapper, target, validation_lower,
+                                  validation_upper, base.kind, data)
     _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, data)
 end
 
@@ -17208,8 +17266,8 @@ _sb_lik_family!(stmts, target, ::typeof(censored), args, kwargs::NamedTuple, dat
     _sb_lik_composed!(stmts, target, :censored, :censored, args, kwargs, data)
 
 # Genuine interval evidence uses the observed response as the lower endpoint.
-# Its producer call has no optional-bound encoding, so it is independent of the
-# one-sided truncation/censoring producer decision.
+# An omitted response keeps the upper-only call; StanBlocks draws the base
+# predictive law and sizes it from the retained family arguments and upper.
 function _sb_lik_family!(stmts, target, ::typeof(interval_censored),
                          args, kwargs::NamedTuple, data)
     length(args) == 1 || error(
@@ -17219,20 +17277,33 @@ function _sb_lik_family!(stmts, target, ::typeof(interval_censored),
         "the response column is the interval lower endpoint")
     base = _sb_composed_family(:interval_censored, args)
     upper = kwargs.upper
-    _sb_validate_bounds(:interval_censored, target, data[target], upper, data;
+    lower = get(data, target, nothing)
+    _sb_validate_bounds(:interval_censored, target, lower, upper, data;
                         check_order=false)
-    lo = _sb_composed_values(data[target])
-    hi = _sb_composed_values(_sb_bound_data(upper, data))
-    all(eachindex(lo)) do i
-        lo[i] < (hi isa AbstractVector ? hi[i] : hi)
-    end || error(
-        "sbimpl: `interval_censored` lower endpoints must be strictly below upper endpoints")
-    _sb_validate_composed_support(:interval_censored, target, data[target],
+    if !isnothing(lower)
+        lo = _sb_composed_values(lower)
+        hi = _sb_composed_values(_sb_bound_data(upper, data))
+        all(eachindex(lo)) do i
+            lo[i] < (hi isa AbstractVector ? hi[i] : hi)
+        end || error(
+            "sbimpl: `interval_censored` lower endpoints must be strictly below upper endpoints")
+    end
+    _sb_validate_composed_support(:interval_censored, target, lower,
                                   upper, base.kind, data)
     native = _sb_composed_stan_call!(stmts, target, base, data)
+    upper_expr = _sb_scalar_expr(upper, data)
+    if isnothing(lower)
+        # Preserve the observation law and its retained shape input. There is
+        # no lower endpoint to read: the producer must draw the fitted base
+        # predictive law, without conditioning on an invented interval.
+        rhs = Expr(:call, :interval_censored,
+            Expr(:parameters, Expr(:kw, :upper, upper_expr)),
+            Expr(:call, native.name, native.args...))
+        push!(stmts, Expr(:call, :~, target, rhs))
+        return nothing
+    end
     _sb_mixture_membership_evidence!(stmts, target, native, :interval_censored,
                                      nothing, upper, base.kind, data)
-    upper_expr = _sb_scalar_expr(upper, data)
     _sb_lik_stan_exprs!(stmts, target, :interval_censored,
                         (native.name, target, upper_expr, native.args...))
 end
@@ -17366,11 +17437,11 @@ end
 
 # ---- generic MixtureModel likelihood -----------------------------------------
 #
-# `y ~ MixtureModel([D1(th1), ..., DK(thK)], weights)` with K same-family
+# `y ~ MixtureModel([D1(th1), ..., DK(thK)], weights)` with K admitted
 # scalar components lowers to a generated ValueFamily triad (model density,
 # pointwise log-likelihood, posterior-predictive RNG), following the
 # `_sb_vector_prior_family` precedent: one fingerprinted `brm_mixture_<hash>`
-# family per (component Stan family, arity, K, discrete/continuous) shape,
+# family per (component family identities and arities, discrete/continuous) shape,
 # cached in `_SB_MIXTURE_CACHE`.
 #
 # Each row contributes `log_sum_exp(log(w_k) + component_lpdf)` — the
@@ -17381,23 +17452,19 @@ end
 # `categorical_rng` over the row's weights, then draw from that row's selected
 # component. Component densities call the SAME `X_lpdf`/`X_lpmf`/`X_rng`
 # functions the plain single-family path resolves, with the SAME
-# `_sb_stan_dist_args` parameterization translation, so a family that lowers
+# ordinary likelihood parameterization translation, so a family that lowers
 # plainly lowers identically as a mixture component.
 #
 # The contract is deliberately narrow (fail-closed, brms rule):
 #
-# - every component is a scalar (`Univariate`) Distributions.jl call, all of
-#   ONE Julia family. Heterogeneous families are rejected: Stan's `_lpmf`
-#   functions THROW on out-of-support `y` (probed: `poisson_lpmf` at `y = -1`
-#   throws `Random variable is -1, but must be nonnegative!`) while
-#   Distributions.jl/Turing return `-Inf`, so mixed-support mixtures would
-#   crash Stan where Turing stays finite. Same-family mixtures share one
-#   support structure and cannot diverge this way.
-# - the family must be directly Stan-mapped (`_sb_stan_dist_name`) or one of
-#   the two native translations (`NegativeBinomial2` → `neg_binomial_2`,
-#   `BetaBinomial2` → `beta_binomial`). Bespoke/custom families
-#   (`ZeroInflatedPoisson`, `HurdlePoisson`, `VonMises`, `InverseGaussian`,
-#   `LocationScale`, ordinals, ...) are rejected: composing customs is v2.
+# - every component is scalar (`Univariate`). Different Julia families need
+#   known full-real continuous support. Stan's bounded densities can throw
+#   on out-of-support `y` where Distributions.jl returns `-Inf`, so mixed
+#   supports are not admitted by merely removing the family-equality check.
+# - ordinary custom @lpxf function families use registered scalar full-real
+#   support and their own companions. Distribution types must be directly
+#   Stan-mapped or use the existing NegativeBinomial2/BetaBinomial2 translation.
+#   Other bespoke types and LocationScale are not admitted here.
 # - `Uniform`/`Pareto` (parameter-dependent continuous support) and
 #   `Categorical` (simplex, not scalar, parameters) are rejected.
 # - Binomial-family components (`Binomial`, `BinomialLogit`, `BetaBinomial`,
@@ -17429,7 +17496,7 @@ _sb_mixture_int_positions(::Type{<:Binomial}) = (1,)
 _sb_mixture_int_positions(::Type{<:BinomialLogit}) = (1,)
 _sb_mixture_int_positions(::Type{<:BetaBinomial}) = (1,)
 _sb_mixture_int_positions(::Type{<:BetaBinomial2}) = (1,)
-_sb_mixture_int_positions(::Type) = ()
+_sb_mixture_int_positions(_) = ()
 
 function _sb_mixture_stan_name(T::Type, target)
     T <: NegativeBinomial2 && return :neg_binomial_2
@@ -17447,39 +17514,11 @@ function _sb_mixture_stan_name(T::Type, target)
     name
 end
 
-# A component's log CDF and log CCDF, as its single-family `censored` /
-# `truncated` calls them: `normal` selects the `erfc`-based stable pair
-# (stanblocks-use §8.1), every other family Stan's `<family>_lcdf/_lccdf`.
-_sb_mixture_cdf_names(stan_name::Symbol) = _sb_mixture_cdf_names(Val(stan_name))
-_sb_mixture_cdf_names(::Val{S}) where {S} = (Symbol(S, :_lcdf), Symbol(S, :_lccdf))
-_sb_mixture_cdf_names(::Val{:normal}) = (:normal_lcdf_stable, :normal_lccdf_stable)
-
 # A component's term for a row censored at `hi` from above: the log probability
 # of a value at or above `hi`, i.e. the CCDF just below it, which for a
 # discrete family is the CCDF at `hi - 1`.
 _sb_mixture_upper_term(lccdf_term, discrete::Bool) =
     discrete ? (k, value) -> lccdf_term(k, Expr(:call, :-, value, 1)) : lccdf_term
-
-function _sb_mixture_component_args(T::Type, comp::ExprColumn, target, k, data)
-    isempty(getkwargs(comp)) || error(
-        "sbimpl: `MixtureModel($target)` component $k (`$T`) takes no constructor keywords")
-    raw = getargs(comp)
-    if T <: BetaBinomial2
-        length(raw) == 3 || error(
-            "sbimpl: `MixtureModel($target)` `BetaBinomial2` component $k expects " *
-            "`(trials, mean, precision)`, got $(length(raw)) arguments")
-        trials, mean, precision = map(a -> _sb_scalar_expr(a, data), raw)
-        alpha = Expr(:call, Symbol(".*"), mean, precision)
-        beta = Expr(:call, Symbol(".*"), Expr(:call, :-, 1, mean), precision)
-        return (trials, alpha, beta)
-    end
-    if T <: NegativeBinomial2
-        length(raw) == 2 || error(
-            "sbimpl: `MixtureModel($target)` `NegativeBinomial2` component $k expects " *
-            "`(mu, phi)`, got $(length(raw)) arguments")
-    end
-    _sb_stan_dist_args(T, map(a -> _sb_scalar_expr(a, data), raw))
-end
 
 function _sb_mixture_coerce_discrete!(data, target)
     response = data[target]
@@ -17566,34 +17605,55 @@ function _sb_mixture_weights_exprs!(target, weights, K, data)
         "expressions such as `[1 - w, w]`, got $(typeof(weights))")
 end
 
+function _sb_mixture_component_selector(component, call)
+    call.name isa Symbol || return call.name
+    constructor = getf(component)
+    # The ordinary @lpxf observation route emits the family's name. Preserve
+    # the original function here so two modules need not re-export it into a
+    # common model scope just to compose their laws.
+    constructor isa Function && call.name === nameof(constructor) && return constructor
+    _sb_vector_prior_selector(call.name, parentmodule(constructor))
+end
+
 function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple,
                             K::Int, discrete::Bool; checked::Bool=false)
-    key = repr((:mixture_rows, stan_name, n_args, int_positions, K, discrete, checked))
+    component = (; family=getfield(StanBlocks, stan_name), n_args, int_positions)
+    _sb_mixture_family(ntuple(_ -> component, K), discrete; checked)
+end
+
+function _sb_mixture_family(components::Tuple, discrete::Bool; checked::Bool=false)
+    K = length(components)
+    selectors = Tuple(component.family for component in components)
+    shape = Tuple((nameof(component.family), Symbol(parentmodule(component.family)),
+                   component.n_args, component.int_positions) for component in components)
+    key = repr((:mixture_rows, shape, discrete, checked))
+    # Callable identity must survive even if two defining module objects have
+    # the same printed name. The spelling only determines the emitted label.
+    cache_key = (key, selectors)
     lock(_SB_GEN_LOCK) do
-        get!(_SB_MIXTURE_CACHE, key) do
+        get!(_SB_MIXTURE_CACHE, cache_key) do
         stem = Symbol(:brm_mixture_, _sb_stable_fingerprint(key))
         suffix = discrete ? :lpmf : :lpdf
         density = Symbol(stem, :_, suffix)
         pointwise = Symbol(density, :s)
         rng = Symbol(stem, :_rng)
-        density_fn = Symbol(stan_name, :_, suffix)
-        rng_fn = Symbol(stan_name, :_rng)
         y_scalar = discrete ? :int : :real
         y_vector = discrete ? :int : :vector
         argname(k, j) = Symbol(:c, k, :_, j)
         weightname(k) = Symbol(:w, k)
-        scalar_kind(j) = j in int_positions ? :int : :real
-        vector_kind(j) = j in int_positions ? :int : :vector
+        arg_indices(k) = 1:components[k].n_args
+        scalar_kind(k, j) = j in components[k].int_positions ? :int : :real
+        vector_kind(k, j) = j in components[k].int_positions ? :int : :vector
         scalar_formals = Any[Expr(:(::), :y, y_scalar)]
         vector_formals = Any[Expr(:(::), :y, Expr(:ref, y_vector, :n))]
         for k in 1:K
             push!(scalar_formals, Expr(:(::), weightname(k), :real))
             push!(vector_formals, Expr(:(::), weightname(k), Expr(:ref, :vector, :n)))
         end
-        for k in 1:K, j in 1:n_args
-            push!(scalar_formals, Expr(:(::), argname(k, j), scalar_kind(j)))
+        for k in 1:K, j in arg_indices(k)
+            push!(scalar_formals, Expr(:(::), argname(k, j), scalar_kind(k, j)))
             push!(vector_formals, Expr(:(::), argname(k, j),
-                                      Expr(:ref, vector_kind(j), :n)))
+                                      Expr(:ref, vector_kind(k, j), :n)))
         end
         guard(label) = checked ? Any[Expr(:if,
             foldl((a, b) -> Expr(:||, a, b), Any[
@@ -17608,12 +17668,13 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
         # `log_sum_exp` is the row's density (or CDF), their `softmax` its
         # component membership; `term` is a component's density, CDF or CCDF
         # at a value, so every companion sums the same terms.
-        component(f) = (k, value) -> Expr(:call, f, value,
-                                          (argname(k, j) for j in 1:n_args)...)
-        lcdf_fn, lccdf_fn = _sb_mixture_cdf_names(stan_name)
-        density_term = component(density_fn)
-        lcdf_term = component(lcdf_fn)
-        lccdf_term = component(lccdf_fn)
+        component(selector) = (k, value) -> Expr(:call, selector, selectors[k], value,
+                                          (argname(k, j) for j in arg_indices(k))...)
+        # The ordinary family selectors resolve each component in its own
+        # defining module and retain StanBlocks' stable CDF selection.
+        density_term = component(:density)
+        lcdf_term = component(:logcdf)
+        lccdf_term = component(:logccdf)
         # `interval_censored` evidence: the row lies in (y, hi].
         interval_term(k, value) = Expr(:call, :log_diff_exp, lcdf_term(k, :hi),
                                        lcdf_term(k, value))
@@ -17623,7 +17684,7 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
         terms(term, value) = Any[:(terms::vector[$K]), assign_terms(term, value)...]
         row_actuals = Any[Expr(:ref, weightname(k), :i) for k in 1:K]
         append!(row_actuals, (Expr(:ref, argname(k, j), :i)
-                              for k in 1:K for j in 1:n_args))
+                              for k in 1:K for j in arg_indices(k)))
         row_call = Expr(:call, density, Expr(:ref, :y, :i), row_actuals...)
         vector_body = quote
             rv = 0.
@@ -17639,7 +17700,8 @@ function _sb_mixture_family(stan_name::Symbol, n_args::Int, int_positions::Tuple
             end
             rv
         end
-        comp_rng(k) = Expr(:call, rng_fn, (argname(k, j) for j in 1:n_args)...)
+        comp_rng(k) = Expr(:call, :predictive, selectors[k],
+            (argname(k, j) for j in arg_indices(k))...)
         scalar_rng_body = if K == 1
             quote
                 $(comp_rng(1))
@@ -17844,28 +17906,24 @@ function _sb_lik_family!(stmts, target, ::Type{<:MixtureModel}, args, data)
         # correct for families Julia's `<:` answers conservatively
         # (`LocationScale`'s dependent bounds fail `<: Distribution`, yet it
         # has a known shape and must reach the Stan-translation verdict).
-        shape = _brm_distribution_shape(comp)
+        shape = _brm_mixture_component_shape(comp)
         isnothing(shape) && error(
             "sbimpl: `MixtureModel($target)` component $k must be a " *
-            "Distributions.jl family, got `$T`")
+            "scalar distribution family with a registered event shape, got `$T`")
         first(shape) === Distributions.Univariate || error(
             "sbimpl: `MixtureModel($target)` component $k (`$T`) is not scalar; " *
             "mixtures of vector responses are not supported")
         T
     end
-    allequal(Ts) || error(
-        "sbimpl: `MixtureModel($target)` components must share one family " *
-        "(found $(join(unique!(map(string, Ts)), ", "))); heterogeneous mixtures " *
-        "are not supported because Stan rejects out-of-support values where " *
-        "Turing returns `-Inf`")
+    _brm_check_heterogeneous_mixture(components; prefix="sbimpl")
     T = first(Ts)
-    stan_name = _sb_mixture_stan_name(T, target)
+    foreach(T -> T isa Type && _sb_mixture_stan_name(T, target), Ts)
     response = get(data, target, nothing)
     response isa AbstractVector || error(
         "sbimpl: `MixtureModel($target)` expects an observed vector, got " *
         "$(typeof(response))")
     n_obs = length(response)
-    discrete = Distributions.value_support(T) === Distributions.Discrete
+    discrete = last(_brm_mixture_component_shape(first(components))) === Distributions.Discrete
     if discrete
         if T <: Bernoulli || T <: BernoulliLogit
             _sb_coerce_bernoulli_response!(data, target, "MixtureModel")
@@ -17904,13 +17962,16 @@ function _sb_lik_family!(stmts, target, ::Type{<:MixtureModel}, args, data)
             (data[target] = Float64.(response))
     end
     weights_plan = _sb_mixture_weights_exprs!(target, weights, K, data)
-    translated = map(enumerate(components)) do (k, comp)
-        Tuple(_sb_mixture_component_args(T, comp, target, k, data))
+    calls = map(enumerate(components)) do (k, comp)
+        isempty(getkwargs(comp)) || error(
+            "sbimpl: `MixtureModel($target)` component $k takes no constructor keywords")
+        _sb_composed_stan_call!(stmts, target, (; distribution=comp), data)
     end
-    allequal(map(length, translated)) || error(
-        "sbimpl: internal `MixtureModel($target)` components translated to " *
-        "different arities")
-    P = length(first(translated))
+    translated = map(call -> Tuple(call.args), calls)
+    descriptions = Tuple((; family=_sb_mixture_component_selector(comp, call),
+                            n_args=length(call.args),
+                            int_positions=_sb_mixture_int_positions(Tk))
+        for (comp, call, Tk) in zip(components, calls, Ts))
     int_positions = _sb_mixture_int_positions(T)
     if !isempty(int_positions)
         trials = map(t -> t[first(int_positions)], translated)
@@ -17919,19 +17980,18 @@ function _sb_lik_family!(stmts, target, ::Type{<:MixtureModel}, args, data)
             "identical trial-count expression; value-equal but structurally " *
             "different counts could diverge on `reprocess` — share one column")
     end
-    family = _sb_mixture_family(stan_name, P, int_positions, K, discrete;
-                                checked=weights_plan.checked)
+    family = _sb_mixture_family(descriptions, discrete; checked=weights_plan.checked)
     rows = Expr(:call, :num_elements, target)
     actuals = Any[Expr(:call, :brm_joint_mean_rows, w, rows)
                   for w in weights_plan.exprs]
-    for t in translated, (j, arg) in enumerate(t)
+    for (description, t) in zip(descriptions, translated), (j, arg) in enumerate(t)
         arg isa Bool && error(
             "sbimpl: `MixtureModel($target)` component arguments must be numeric, " *
             "got a Boolean")
-        if arg isa Integer && !(j in int_positions)
+        if arg isa Integer && !(j in description.int_positions)
             arg = Float64(arg)
         end
-        push!(actuals, j in int_positions ?
+        push!(actuals, j in description.int_positions ?
               Expr(:call, :brm_mixture_rows_int, arg, rows) :
               Expr(:call, :brm_joint_mean_rows, arg, rows))
     end

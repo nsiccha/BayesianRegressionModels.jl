@@ -3,8 +3,10 @@ module BayesianRegressionModels
 # @brm macro — parses a formula block, produces a BRMI (BRM
 # intermediate: expression tree + column metadata).
 using OrderedCollections
+include("authored_documentation.jl")
 include("macro.jl")
 include("builder_interpreter.jl")
+include("components.jl")
 include("groups.jl")
 include("ar1_normal.jl")
 
@@ -101,6 +103,8 @@ include("sb_cell_julia.jl")
 include("sb_cell_formulas.jl")
 include("sb_distribution_statistics.jl")
 include("sb_plate_outputs.jl")
+include("component_backends.jl")
+include("component_cells.jl")
 # Fusion-append artifacts + SB reference numbers (RK-side driver inputs).
 # After sbimpl (SBBRMI) and the RK planner/AST above; RK-free — the
 # bound-plan translation lives in the ReactiveKernels extension.
@@ -141,6 +145,7 @@ include("response_pruning.jl")
 include("coordinate_transport.jl")
 include("progress.jl")
 include("nlme_view.jl")
+include("nlme_connected.jl")
 include("nlme_joint_start.jl")
 include("nlme_conditional.jl")
 include("nlme_start.jl")
@@ -161,6 +166,7 @@ include("nlme_laplace_sampled.jl")
 include("start_values.jl")
 include("start_terms.jl")
 include("start_prior.jl")
+include("start_components.jl")
 include("laplace_start.jl")
 include("laplace_mode.jl")
 include("laplace_ladder.jl")
@@ -205,10 +211,12 @@ include("powerscale.jl")
 import BridgeStan
 include("conditional_effects.jl")
 include("draw_trees.jl")
+include("model_view.jl")
 
 # Public surface. The macros and value types everything downstream
 # (web-macro, downstream extensions, tests) reaches for.
 export @brm, @n, @x, @getproperty
+export BRMComponent, brm_components
 export assign, effect, r2d2, doublepipe, gr, mm, gp, offset, zscale, center, standardize, constant, protect, factor
 export restricted
 export LKJCovarianceFactor, MvNormalCholesky
@@ -301,6 +309,7 @@ export BRMI, BRMBuilder, brm, VBRMI, SBBRMI, TuringBRMI, RKBRMI, GenerativeDecla
        rk_logdensity_problem, rk_restore_draws
 export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight,
        BRMHighlightSpec, BRMSubmodel, brm_highlight
+export brm_model_view
 export BRMDescription, BRMDescriptionComponent, BRMDescriptionContext,
        BRMDescriptionFragment, BRMDescriptionReference, BRMPriorDescription,
        BRMDescriptionCoverage, brm_description, brm_describe_component,
@@ -375,7 +384,8 @@ export outcomes, linear_predictor_op, linear_predictors, predictors,
        hierarchical_outcomes,
        linear_predictor_args, data_args, primary_lp, popcoefnames, effect_priors,
        ranef_effect_priors, r2d2_priors, term_priors, ranefcoefnames,
-       priors_of, structure_of, brm_source
+       priors_of, structure_of, brm_source,
+       BRMDocumentation, brm_documentation, brm_documentation_markdown
 
 # Extension API. Downstream packages add their own formula terms
 # by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and

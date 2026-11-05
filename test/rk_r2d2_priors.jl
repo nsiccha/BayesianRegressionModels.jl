@@ -1,6 +1,7 @@
 # Synthetic shared R2D2M2 laws: normalized density, all native Reverse
 # coordinates, physical same-BRMI Stan parity and complete printed-source replay.
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
+using Statistics: var
 
 module PublicR2D2
 using BayesianRegressionModels, Distributions
@@ -95,7 +96,21 @@ end
         graph = ReactiveKernels.kernel_graph(backend.model.spec)
         ports = Set(string(p.name) for recipe in graph.recipes for p in recipe.outputs)
         @test "b_shared_subject_tau" in ports
-        @test !joint || "mu_a_x_r2d2_variance" in ports
+        if joint
+            # Empirical variances depend only on data, so binding evaluates
+            # them before the executable recipes. Their names and values
+            # remain available through the public bound-data surface.
+            bound = rk_bound_data(backend)
+            for predictor in (:mu_a, :mu_b)
+                @test bound[Symbol(predictor, "_x_r2d2_variance")] ≈ var(data.x)
+                if categorical
+                    for (index, level) in enumerate((2, 3))
+                        name = Symbol(predictor, "_c_r2d2_", index, "_variance")
+                        @test bound[name] ≈ var(data.c .== level)
+                    end
+                end
+            end
+        end
         function components(u)
             c = r2d2_components(u, names; nphi, latent, partial)
             mu_a = c.beta[1] .+ c.beta[2] .* data.x .+ c.random[data.subject,1]

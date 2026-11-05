@@ -20,6 +20,7 @@ _rk_source_macro(head, mod::Symbol, name::Symbol) = head === name ||
 # submodel is an @rkppl assignment definition, written bare or with its macro;
 # `_rk_canonical_source_definition` spells it bare.
 function _rk_source_definition(definition)
+    definition = _brm_undoc(definition)
     kind = :rkppl
     body = definition
     if Meta.isexpr(definition, :macrocall)
@@ -48,9 +49,58 @@ end
 # Emitted source spells a submodel as its bare assignment; evaluation applies
 # @rkppl to it once. Other definitions are already in their emitted spelling.
 function _rk_canonical_source_definition(definition)
+    if _brm_is_doc(definition)
+        result = deepcopy(definition)
+        result.args[4] = _rk_canonical_source_definition(definition.args[4])
+        return result
+    end
     Meta.isexpr(definition, :macrocall) &&
         _rk_source_definition(definition).kind === :rkppl || return definition
     only(filter(arg -> !(arg isa LineNumberNode), definition.args[2:end]))
+end
+
+# Julia owns definition documentation, so the wrapper stays outside @rkppl.
+# Native functions and @kernel definitions already carry their defining syntax.
+function _rk_definition_expression(definition)
+    if _brm_is_doc(definition)
+        result = deepcopy(definition)
+        result.args[4] = _rk_definition_expression(definition.args[4])
+        return result
+    end
+    _rk_source_definition(definition).kind === :rkppl || return definition
+    Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0),
+        _rk_canonical_source_definition(definition))
+end
+
+# Attach records only within the lexical scope selected by the emitter. The
+# optional mapping is supplied where names are chosen, never reconstructed
+# from flattened private names. Component emitters call this before renaming
+# their local declarations; plates supply their own enclosing authored path.
+function _rk_documentation_block(block::Expr, documentation; path=(),
+        names=Dict{Symbol,Symbol}())
+    isempty(documentation) && return block
+    by_target = Dict{Symbol,Vector{Tuple{Int,BRMDocumentation}}}()
+    for (i, doc) in enumerate(documentation)
+        length(doc.path) == length(path) + 1 &&
+            doc.path[1:length(path)] == path || continue
+        target = get(names, last(doc.path), last(doc.path))
+        push!(get!(Vector{Tuple{Int,BRMDocumentation}}, by_target, target), (i, doc))
+    end
+    statements = map(block.args) do statement
+        statement isa Expr || return statement
+        _brm_is_doc(statement) && return statement
+        lhs = _brm_statement_lhs(statement)
+        targets = _brm_documentation_lhs(lhs)
+        selected = _brm_documentation_records(by_target, targets)
+        isempty(selected) ? statement : _brm_documented_statement(statement, selected)
+    end
+    Expr(block.head, statements...)
+end
+
+function _rk_documented_program(emitted::_RKEmittedProgram, documentation; kwargs...)
+    isempty(documentation) && return emitted
+    _RKEmittedProgram(emitted.defs,
+        _rk_documentation_block(emitted.main, documentation; kwargs...), emitted.bindings)
 end
 
 # Source locations are not part of a definition's meaning, so two copies
@@ -288,6 +338,7 @@ end
 function _rk_ast_block_call!(definitions, taken, base, block::_RKBlockBody, value)
     body = Expr(:block, block.statements..., Expr(:return, value))
     for definition in definitions
+        definition = _brm_undoc(definition)
         Meta.isexpr(definition, :(=), 2) || continue
         call = first(definition.args)
         Meta.isexpr(call, :call) && isequal(call.args[2:end], block.arguments) &&
@@ -1502,10 +1553,22 @@ function _rk_ast_car_separated!(definitions, taken, bindings, block, separation,
         push!(block.statements,
             Expr(:call, :~, Expr(:ref, w, Expr(:call, :(:), 1, m)),
                 Expr(:call, law, arguments.last, arguments.scale, arguments.weight,
-                    arguments.shared_first, arguments.shared_second)),
+                    arguments.shared_first, arguments.shared_second)))
+        # Expose the linear shared-value map by row. Its integer lists and
+        # coefficients depend only on data and are computed at binding; a
+        # partition computes just the shared values its areas read.
+        rows = _rk_block_local!(block, :shared_rows)
+        coefficients = _rk_block_local!(block, :shared_coefficients)
+        row_ids = _rk_block_local!(block, :shared_ids)
+        push!(block.statements,
+            Expr(:(=), rows, _rk_ast_statistical_call!(definitions, taken,
+                :brm_car_shared_rows, arguments.last)),
+            Expr(:(=), coefficients, _rk_ast_statistical_call!(definitions, taken,
+                :brm_car_shared_coefficients, arguments.last, arguments.scale,
+                arguments.weight)),
+            Expr(:(=), row_ids, Expr(:call, :eachindex, arguments.last)),
             Expr(:(=), x, _rk_ast_statistical_call!(definitions, taken,
-                :brm_car_shared_values, w, arguments.last, arguments.scale,
-                arguments.weight)))
+                :brm_car_shared_local, w, rows, coefficients, row_ids; kernel=true)))
     end
     z = map(separation.blocks) do b
         b.ndraws == 0 && return nothing
@@ -1620,7 +1683,14 @@ function _rk_ast_cdar_block!(definitions, taken, term, group_rows, step_rows)
     innovations = eta
     if factor_values !== nothing
         L = _rk_block_local!(block, :L)
-        push!(block.statements, Expr(:(=), L, Expr(:call, :reshape, factor_values, P, P)))
+        # Sparse, so the factor declares which groups it couples: a cell reads
+        # `eta` only at the columns its row stores (ReactiveKernels 0.1.77 / RKPPL 0.1.85), and a
+        # `cor=` coupling groups only within a unit stays local to that unit. A
+        # dense factor's zeros remove no read. The factor is built here because
+        # bound columns hold vectors.
+        push!(block.statements, Expr(:(=), L, Expr(:call,
+            Expr(:., :BayesianRegressionModels, QuoteNode(:sparse)),
+            Expr(:call, :reshape, factor_values, P, P))))
         innovations = _rk_block_local!(block, :correlated)
         push!(block.statements, Expr(:(=), innovations, Expr(:call, :*, L, eta)))
     end
@@ -1682,7 +1752,7 @@ end
 # otherwise unchanged; an unrecorded declaration is refused by the transport.
 function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         values::Bool=false, reserved=(), coordinates=nothing,
-        lone_intercepts=Dict{Symbol,Any}())
+        lone_intercepts=Dict{Symbol,Any}(), documentation=())
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
@@ -2166,10 +2236,12 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         elseif parameter.family === :LKJCholesky
             # A level correlation's factor: its free values share Stan's
             # `cholesky_factor_corr` transform and carry over by name.
-            sampled = _rk_ast_sampled(parameter)
+            args = map(arg -> _rk_value_expr!(bindings, arg, taken), parameter.args)
+            sampled = Expr(:call, :~, parameter.name, Expr(:call, :LKJCholesky, args...))
             push!(stmts, sampled)
             _rk_coordinate_record!(coordinates, (; kind=:lkj_cholesky,
-                declaration=parameter.name, K=first(parameter.args)))
+                declaration=parameter.name,
+                K=something(parameter.dimension, first(parameter.args))))
         else
             sampled = _rk_ast_sampled(parameter)
             push!(stmts, sampled)
@@ -2258,5 +2330,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     emitted = _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
         _rk_structural_responses(plan); retained=authored, coordinates)
     # A value plan resolves lone intercepts once its own readers are emitted.
-    values ? emitted : _rk_scalar_lone_intercepts(emitted, lone_intercepts)
+    emitted = values ? emitted : _rk_scalar_lone_intercepts(emitted, lone_intercepts)
+    # Linked predictors retain their response-scale authored name. The one
+    # identity predictor/data collision is renamed at the explicit site above.
+    names = Dict(p.name => get(rename, p.name, p.name) for p in plan.predictors
+        if p.link === :identity)
+    _rk_documented_program(emitted, documentation; names)
 end

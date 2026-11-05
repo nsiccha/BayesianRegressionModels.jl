@@ -1,5 +1,112 @@
 # Scientific model descriptions
 
+## Inspect roles and ranks
+
+[`brm_model_view`](@ref) returns a reusable HTMXObjects semantic tree with the
+declaration, data/parameter roles, value ranks and dimensions. Load HTMXObjects
+0.1.58 or later; no web demo app is needed:
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+model_view_demo = (@brm begin
+    sigma ~ Exponential(1)
+    beta ~ Normal(0, 1)
+    mu = beta * x
+    y ~ Normal(mu, sigma)
+end)((; x=[-1., 0., 1.], y=[0.1, 0.2, 0.3]))
+""", :model_view_demo; title="Regression model")
+```
+
+Pass the bound model to the view:
+
+```julia
+using HTMXObjects
+
+view = brm_model_view(model_view_demo; title="Regression model")
+repr("text/html", view)       # also text/markdown and text/plain
+```
+
+Use the result inside another semantic page or as an HTMXObjects route result.
+Source, roles/ranks and callable documentation have separate tabs. Callable
+documentation and carrier details use clickable, keyboard-accessible disclosures.
+Documentation comes from the actual callable bindings in the model, when those
+bindings have docstrings; unrelated overloads of Base arithmetic operators are
+omitted.
+
+Authored declaration docstrings appear as formatted prose in the Documentation
+tab, using [`brm_documentation`](@ref). Each record includes its exact logical
+path and a disclosure with the attached statement, source file and line. The
+same records supply the source text and the PDF; the view stores no separate
+copy of documentation metadata.
+
+For a bound model containing reusable [components](components.md), the Source
+tab includes the actual reachable definitions from [`brm_components`](@ref).
+Each shared definition gets one source tab, with all its call-instance paths;
+the model source also lists how each instance is called. Nested definitions
+are included recursively. Paths identify authored call sites, so repeated
+plate iterations share a site. The defining module and authored docstring
+provenance remain available without compiling a backend.
+
+`brm_model_view(component)` also inspects a component definition and its
+reachable definitions without data. An unbound builder shows its own source;
+bind it to data to discover its component instances.
+
+The view only inspects what it receives. It never prepares or fits a model and
+never evaluates a custom helper to discover its result shape. A bound `BRMI`
+provides concrete data shapes and distribution ranks where known. A `BRMBuilder`
+provides its source and required inputs; observation roles depend on binding.
+
+To request RK preparation explicitly, load `ReactiveKernels` and
+`ReactiveKernelsPPL` 0.1.93 or later, then call `brm_model_view(RKBRMI(model))`. For an existing
+Stan-backed descriptor, call `brm_model_view(descriptor)`. Preparation can enrich
+parameter dimensions; arbitrary derived values can still have unknown shapes.
+`brm_descriptor` is Stan-backed, so it is not a generic inspection step for
+RK models with Julia helpers.
+
+A frozen RK replay can share an earlier build with a different binding. Its
+view leaves current parameter dimensions unresolved, because that build's
+layout still belongs to the earlier binding. The RK data table is explicitly
+labelled as declaration data; a replay can retain the original source data.
+No layout is assigned during inspection to fill in missing current dimensions.
+
+Rank is the number of axes: scalar 0, vector 1, matrix 2. Displayed dimensions
+describe constrained values, including zero-length axes. Free-coordinate counts
+are a separate fact: a length-three simplex is a vector with two free coordinates.
+Generated carriers are identified separately from logical model quantities.
+RK parameter paths retain their authored namespace segments. Ragged parameters
+show their outer rank and shape, with each element's shape in a disclosure.
+
+### Export the view
+
+Use the same view for an accessible PDF. HTMXObjects projects every disclosure
+and eager tab into Markdown, so the report includes their contents even when
+they are closed in the browser. This includes all reachable component source,
+not just the selected definition:
+
+```julia
+pdf_report(view, "model.pdf"; title="Regression model", lang="en-GB")
+```
+
+This uses HTMXObjects' Quarto/Typst exporter; Quarto must be on `PATH`.
+To bundle an app containing the view, give its page shell vendored assets,
+register the vendor routes, and call `export_site` on the app's existing routes:
+
+```julia
+# In the app's @htmx root:
+# __page__(content) = HTMXObjects.pico_page(content; assets=:vendor, runtime=:linked)
+vendorfiles()
+staticfiles("reports", "files")  # if the page links /files/model.pdf
+export_site("model-snapshot"; pages=["/model"])
+```
+
+`export_site` requires a new or empty destination. It bundles linked files,
+syntax highlighting and the framework's interaction assets. Keep source and
+documentation tabs eager to include their bodies in both the PDF and snapshot.
+The app controls where it mounts the view and links the PDF; the reusable view
+does not install routes or generate files when a reader opens it.
+
+## Describe a prepared model
+
 [`brm_description`](@ref) describes a selected, prepared StanBlocks model.
 Reuse its [`BRMDescriptor`](@ref); the description reads its parsed formula,
 prepared design, fitted preprocessing and generative declarations. It returns
@@ -12,7 +119,9 @@ standardized covariate and a shared intercept/slope covariance block:
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 description_model = (@brm begin
+    "Observation standard deviation."
     sigma ~ Exponential(2)
+    "Expected response with a shared intercept and slope covariance block."
     mu ~ 1 + zscale(x) + (1 + x | shared | group)
     effect(mu, zscale_x) ~ Normal(0, 0.4)
     y ~ Normal(mu, sigma)
@@ -32,6 +141,24 @@ let d = brm_descriptor(SBBRMI(description_model; total_groups=())),
     Markdown.parse(brm_description_markdown(result))
 end
 ```
+
+## Authored declaration documentation
+
+Ordinary Julia docstrings keep Markdown beside the declaration it explains,
+as in the model above. Read an exact declaration's documentation by its
+logical path:
+
+```julia
+brm_documentation(description_model; path=:mu)
+```
+
+[`brm_documentation`](@ref) returns copied records containing the logical
+declaration path, Markdown, authored statement and source location. The
+records follow tuple expansion, prior/structure partition, merges and replay.
+[`brm_documentation_markdown`](@ref) emits the authored Markdown for HTML and
+PDF pipelines; [`brm_description_markdown`](@ref) includes it alongside the
+generated scientific description. Authored prose does not change the
+description's coverage assessment or the model's numerical identity.
 
 ## The description result
 

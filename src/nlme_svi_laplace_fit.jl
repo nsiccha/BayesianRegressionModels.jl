@@ -151,7 +151,7 @@ end
 function _brm_svi_laplace_drive(init,save,x,previous,method;caller,description,
         ndraws=1000,stop_after=nothing,checkpoint_every=nothing,progress=nothing,
         ad_backend=nothing,shared_point=nothing,subject_group=nothing,
-        nested_groups=NamedTuple(),shared_groups=())
+        nested_groups=NamedTuple(),shared_groups=(),unit_partition=nothing)
     ndraws isa Integer && ndraws>=0 || throw(ArgumentError("GaussianBlockLaplace: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller,save,stop_after,checkpoint_every)
     _brm_with_progress(progress;description) do node
@@ -159,13 +159,13 @@ function _brm_svi_laplace_drive(init,save,x,previous,method;caller,description,
             lowered=_brm_svi_lowered(x,phases.lower)
             # Refuse unsupported model structure before compiling AD for it.
             if lowered isa RKBRMI
-                view=brm_nlme_view(lowered;subject_group,nested_groups,shared_groups)
+                view=brm_nlme_view(lowered;subject_group,nested_groups,shared_groups,unit_partition=something(unit_partition, :subjects))
                 _brm_svi_gaussian_certificate(lowered,view)
             else
                 _brm_svi_gaussian_certificate(lowered.backend,lowered.view)
             end
             m=_brm_svi_model(lowered,phases.prepare;
-                ad_backend,shared_point,subject_group,nested_groups,shared_groups)
+                ad_backend,shared_point,subject_group,nested_groups,shared_groups,unit_partition)
             t,layout,active,state=_brm_run_phase(phases.target) do _
                 t=_brm_svi_laplace_target(m,method)
                 layout=_brm_svi_laplace_layout(t)

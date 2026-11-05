@@ -1,5 +1,80 @@
 # Running the tests
 
+`heterogeneous_mixtures.jl` checks native mixtures of different full-real
+scalar families and custom component graphs against independent normalized
+densities and compiled Stan. It covers native Reverse, pointwise likelihood,
+printed-source replay, changed data, extreme log scales, Stan membership and
+predictive outputs, and measured shared/row work placement. It accepts testset
+substring filters through `testset_filter.jl`; empty-data rebinding has its own
+testset so other cases remain independently runnable.
+
+`lkj_data_inputs.jl` checks data-supplied correlation dimensions and concentrations
+at model scope and in reusable and nested BRM components, including two sizes
+in one model, derived data, frozen constants and correlated groupings. It compares normalized
+densities and native Reverse gradients with literal controls, an independent
+two-dimensional law and compiled Stan, and checks source replay, physical
+coordinate transport and invalid inputs. The bootstrap supplies RKPPL 0.1.97.
+
+`plate_selected_collection.jl` checks selections of vector cells passed to
+ordinary helpers. Reordered and repeated selections, collected and non-last
+outputs, analytic densities and gradients, and prior draws retain the same
+cell semantics across distinct producer and reader frames.
+
+`plate_direct_outputs.jl` checks direct reads of complete cells from another
+plate, including fixed-width vectors, collected and non-last outputs, and
+observed or omitted responses. Square and non-square shapes compare compiled
+Stan densities and gradients with analytic references; prior draws check the
+same cell values. Scalar, ragged-vector and matrix cells supply shape controls.
+Run it as a standalone script in the test environment.
+
+`component_start_descriptors.jl` checks exact initial values in repeated and
+nested components through the public descriptor, BridgeStan and coordinate
+transport APIs. It covers independent scalars, unequal-length vectors, positive
+scales and simplexes, and preserves unaddressed values and top-level starts.
+Run it as a standalone script in the test environment; it compiles Stan even
+when the resulting point is consumed by RK.
+
+`component_start_values.jl` checks native component-local starts, recursive
+scalar prior medians, repeated and nested call paths, constrained values,
+explicit precedence, numeric-base preservation and input immutability.
+The default run only builds RK models. Add `--stan` for compiled Stan
+readback and cross-backend physical-point parity.
+
+`smc_tuning_lifecycle.jl` checks adaptive pilot interruption before any draw and
+during a later grid pilot, nested Treebars progress, input ownership, endpoint
+and configuration validation, and exact fresh-process replay from both a
+serialized partial and the latest disk checkpoint. It covers initial,
+cumulative-update, selective carried-window and prepared sparse-Laplace targets
+using small synthetic models. Run `test/setup_env.jl` first for the pinned RKPPL recovery contract and
+Treebars 0.1.5, then `julia --project=test test/smc_tuning_lifecycle.jl`.
+
+`smc_generated_law_recovery.jl` stops an adaptive pilot of a small `gmrf(...)`
+field model at initialization in one Julia process and resumes it in another,
+through `smc_generated_law_process.jl`. The field's law is bound in the
+generated RK program module, so the consumer first confirms that the raw law
+expression cannot be deserialized, then requires exact window and schedule
+replay from a serialized partial and from disk. It needs the ReactiveKernelsPPL
+0.1.98 pin from `setup_env.jl`.
+
+`scoped_components.jl` checks function-style BRM components with independent
+local priors, explicit shared inputs, nested calls, vector results, and plate
+cells. It compares normalized densities and native Reverse gradients with
+independent references and compiled Stan, and checks source/documentation
+inspection, constrained-value and coordinate round trips, row selection,
+offsets, and frozen or refitted preprocessing. Native RKPPL documentation
+retains component headers and local provenance at each nested call site.
+Run it as a standalone script in the test environment; StanBlocks 0.2.25
+preserves keyword labels when a component is called inside a plate, and
+ReactiveKernelsPPL 0.1.93 retains authored documentation.
+
+`authored_documentation.jl`, `authored_documentation_binding.jl`,
+`authored_documentation_printing.jl`, `authored_documentation_rk_source.jl`
+and `authored_documentation_rkppl.jl` check ordinary Julia documentation through
+binding, composition, readable source replay, scientific descriptions, artifact
+metadata and native RKPPL lowering. They verify exact declaration scopes and
+unchanged numerical results. Run each as a standalone script in the test
+environment after `test/setup_env.jl`; native metadata requires RKPPL 0.1.93.
+
 `adaptive_centering_bounds.jl` checks bounded random-effect scales against
 BridgeStan's constrained values, correlated centered and noncentered maps,
 their Jacobians, Enzyme gradients, centered replay, and stable log-scale tails.
@@ -842,6 +917,13 @@ draw their bound twin's law, a continuous omitted response spells
 `logistic` as `inv_logit`, and a `@plate` cell's `BetaBinomial2` has the
 density of its `beta_binomial` spelling and lowers omitted.
 
+`omitted_interval_response.jl` checks response-omitted interval observations:
+zero-dimensional joint prior draws, uncoarsened base-law moments, predictive
+twins, retained row reads and scalar/dense/ragged bound shapes. It also checks
+the observed interval mass and gradient, a fitted response beside an omitted
+interval, bound validation, and the sole-term interval predictor spelling.
+Requires StanBlocks 0.2.21; the bootstrap pins its published omission fix.
+
 `truncated_low_mass_draws.jl` draws omitted `truncated` responses whose window
 holds almost none of the base law's mass: a two-sided `NegativeBinomial2`
 count class in [1, 9] and [250, 1e7] around a mean of 70, its one-sided tails,
@@ -908,6 +990,17 @@ julia --startup-file=no --project=test test/rk_planning_specialization.jl
 ```
 
 ## NLME estimators
+
+`nlme_connected.jl` checks explicit `unit_partition=:connected` with generic
+Gaussian models: structural transitive connectivity, dormant branches and zero
+coefficients, indivisible joint observations, exact likelihood/gradient and
+prior accounting, complete-unit SVI minibatches, optimizer continuation,
+streaming membership checks, and a Laplace marginal against an analytic
+Gaussian marginal. `nlme_connected_fit.jl`, in the NLMEEstimation scratch
+environment below, checks repeated covariance families, protocol agreement,
+start transport, scientific labels and empirical Bayes modes against the
+analytic conditional Gaussian, plus a short SAEM call. Neither rewrites the
+authored model or uses numerical derivatives as an oracle.
 
 `nlme_joint_start.jl` checks a complete NLME estimate against the same
 BRMI's compiled Stan model: non-unit covariance and natural subject effects
@@ -1254,8 +1347,7 @@ environment above.
 
 `nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:
 batched and single-subject evaluation (including `check_protocol` and online
-SAEM on ragged joins, and SAEM's batched population gradient for flat grouped
-rows), subject-cell population gradients,
+SAEM on ragged joins and flat grouped rows), unit-partition population gradients,
 analytic η Hessian blocks, Gaussian observation moments
 and colored η Jacobians, `check_protocol`, and Newton posthoc against
 independent oracles. Its Gaussian checks include arrays observed within plate
@@ -1279,6 +1371,41 @@ with one omitted: `check_protocol` and the Laplace value and gradient against th
 same lengths computed by `sort!(unique(...))`. A stub product checks that a cell
 group moves to reverse over forward on `EnzymeRuntimeActivityError` alone, whatever
 Enzyme can take today.
+
+`nlme_partition.jl` checks strict structural ownership before returning an
+NLME model, including a cross-unit dependency in a dormant branch, and a valid
+unit with no observations in one group. It also checks exact cell-wise
+curvature edges and bounds allocations when observations repeat a support.
+Its dense-point testset checks that a one-unit η gradient (RK's local-only
+`shared=false` route) equals the η entries of the full gradient, that the
+query and plan work points equal the unit point after every call, and that one
+unit's allocations do not grow with the number of units (3 against 300).
+`nlme_units_panel.jl` covers nested
+partition likelihoods, gradients, cell-based Hessian sparsity and allocation
+scaling. The `nlme_svi.jl` filters `minibatch split` and
+`structural footprints and target split` check the wider SVI gradients without
+running its longer sampling comparisons.
+
+`nlme_car_separator.jl` checks the separated CAR law, coordinate transport,
+replays and sparse unit supports. Its `car identity geometry` filter checks
+strict cell values and structural ownership independently of unit plans.
+The `strict car partitions` filter compares
+both shared and unit gradients with independent per-cell reverse passes for
+ICAR and BYM2, including CAR unit terms. Graph-visible identity geometry needs
+ReactiveKernels 0.1.33 / ReactiveKernelsPPL 0.1.27 or later; strict partition
+evaluation requires 0.1.36 / 0.1.30 for uniform empty/nonempty plans and
+scheduled-loop resets. Lower-bounded shares completions evaluated
+through strict partitions (`nlme_lower_shares.jl`) require 0.1.42 / 0.1.39,
+which keeps shapes through nested data-only helpers inside sampled
+expressions. Scan-captured sigma rows and censored ragged factors need the
+0.1.47 / 0.1.43 floors. Shared-prefix value queries and gradients need
+0.1.48 / 0.1.51; packed gathered-column shapes need 0.1.50 / 0.1.52.
+RKPPL 0.1.54 or later also keeps shared-prefix binding in the
+latest world and preserves custom packed-vector storage and local reads.
+The grouped HSGP variants in `nlme_svi.jl` check
+value/gradient parity and shared-cache refresh across changed points.
+Both partition fixtures use ordinary Enzyme Reverse
+with the repaired dogfood revision pinned by `setup_env.jl`.
 
 `nlme_laplace_capability.jl` checks an optional Laplace refusal using a toy
 recurrence whose selected outputs are summed. It verifies that the capability
@@ -2343,13 +2470,17 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   static-activity repair from `7a886d9` (Enzyme snag
   `static-reverse-s-f9483e9c`) and the augmented-helper JIT-symbol repair
   (Enzyme snag `forward-over-rev-188051dc`), which preserves the `digamma`
-  partials used by negative-binomial cells. The exact pin and declared
+  partials used by negative-binomial cells. Strict partition gradients
+  need `a6458e9c` for constant plans and compact overlays; the ordinary
+  Reverse fixtures do not enable runtime activity. The exact pin and declared
   libEnzyme build come from `setup_env.jl`. The pin includes `3a89b497`'s compact
   nested-AD overlay repairs for sum factors and the dynamic-call Hessian
   repair needed by lower-bounded completion geometry. It also repairs
   positive-tail `erfcx` derivatives through third order (Enzyme snag
   `erfcx-positive-t-db1c8c84`), required by scaled-tail likelihoods in the
-  embedded Laplace.
+  embedded Laplace. Its libEnzyme also repairs the integer-division fold
+  that prevented grouped-HSGP partition gradients from compiling on Julia
+  1.10 with default bounds (Enzyme snag `enzyme-type-anal-b401ef8f`).
   `setup_env.jl` materializes the pinned dogfood commit from the KB host's
   Enzyme mirror when available, develops its nested `lib/EnzymeCore`
   0.8.27 beside it (Pkg 1.10 ignores Enzyme's `[sources]`; registered
@@ -2497,3 +2628,25 @@ The public-planner matrix is widths `(64,256)` crossed with cells `(100,400)`.
 These bounded fixtures do not establish full Atlas runtime, memory or fitting
 speed. Sparse factorization can still incur fill-in, sampled targets can be
 large, and raising `max_cell_width` permits genuinely dense local blocks.
+## Reusable model view
+
+`julia --project=test test/model_view.jl` checks declaration roles, scalar/vector/
+matrix/higher ranks, zero-length axes, callable documentation and all three
+semantic projections. It verifies that viewing a model never evaluates a custom
+helper. The descriptor fixture checks constrained simplex dimensions and keeps
+logical quantities separate from generated carriers, without fitting or compiling
+Stan. Set `BRM_MODEL_VIEW_HTML` to an output path to save a browser preview.
+
+`julia --project=test test/model_view_rk.jl` checks the RK extension with RKPPL
+0.1.93 or later: constrained simplex dimensions versus free-coordinate counts,
+ragged/empty cells, matrix parameters, custom helper documentation, existing-build
+wrappers without lazy binding, and both ordinary and data-free replay boundaries.
+It builds toy models but does not prepare a density query or fit them.
+
+`julia --project=web-macro web-macro/validate_model_view_export.jl <new-output-dir>`
+exports the same view as a Quarto PDF and a static HTML site. It verifies the
+PDF link and the documentation content without executing the fixture's helper.
+Run `kb-playwright-python web-macro/validate_model_view_browser.py <output-dir>`
+for real browser acceptance of bundled highlighting, touch/keyboard tabs,
+documentation disclosures and the PDF download in light and dark themes.
+The browser script owns and closes its temporary server and Chrome process.

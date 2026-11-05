@@ -98,6 +98,17 @@ function grouped_join(data)
         z ~ Normal(reference, 1)
     end
 end
+
+function selected_cell(data)
+    @brm data begin
+        a ~ Normal(0, 0.7)
+        sigma ~ Exponential(0.9)
+        @plate for i in eachindex(x)
+            loc[i] = a .* x[i]
+        end
+        y ~ relative_normal(loc[2], reference, sigma)
+    end
+end
 end
 
 # Inspect the actual built graph, including retained child recipes.
@@ -233,6 +244,28 @@ end
 
 @stestset "grouped outside arguments: singleton" begin
     check_grouped_arguments(:singleton, singleton)
+end
+
+@stestset "caller observation arguments retain whole-cell selections" begin
+    data = (; x=[[3.0, -2.0], [0.2, 0.7, -0.4]],
+        reference=[0.1, -0.2, 0.05], y=[0.3, -0.1, 0.2])
+    saved = deepcopy(data)
+    brmi = PublicKernelObservationFamilies.selected_cell(data)
+    backend, problem = consumer_problem(brmi)
+    names = coordinate_names(backend.model.layout)
+    ia, is = coordinate(names, :a), coordinate(names, :sigma)
+    oracle(u) = begin
+        sigma = exp(u[is])
+        logpdf(Normal(0, 0.7), u[ia]) + logpdf(Exponential(0.9), sigma) + u[is] +
+            sum(logpdf.(Normal.(u[ia] .* data.x[2] .- data.reference, sigma), data.y))
+    end
+    stan = consumer_stan(brmi, "grouped-argument-selected-cell";
+        mod=PublicKernelObservationFamilies)
+    for u in (zeros(2), [0.3, -0.2], [-0.4, 0.1])
+        check_consumer_point(problem, u, oracle)
+        check_consumer_stan(problem, stan, [:a => "a", :sigma => "sigma"], backend, u)
+    end
+    @test isequal(data, saved)
 end
 
 @stestset "grouped argument partitions must match the observed partitions" begin

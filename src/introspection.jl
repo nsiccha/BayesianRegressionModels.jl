@@ -548,7 +548,8 @@ end
 # order. The `(; pairs...)` splat keeps the NamedTuple key order, so each
 # fragment prints in the same order the statements were written.
 _select_ops(brmi::BRMI, keep) =
-    BRMI((; (k => v for (k, v) in pairs(brmi.operations) if keep(v))...))
+    _brm_select_documentation(brmi,
+        (; (k => v for (k, v) in pairs(brmi.operations) if keep(v))...))
 
 """
     priors_of(brmi::BRMI) -> BRMI

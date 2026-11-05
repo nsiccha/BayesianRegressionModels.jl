@@ -72,6 +72,13 @@ likelihood_query(backend) = prepare_query(backend.model,
 
 const NLME_AD = AutoEnzyme(; mode=Enzyme.Reverse)
 
+# Independent per-cell AD oracle for the unit-partition implementation.
+# Production NLME code prepares only partition samplers.
+compact_cell_oracle(rk, observations, base, selected) =
+    prepare_compact_cell_sampler(rk.model, rk_bound_plan(rk), observations,
+        base, selected;
+        backend=AutoEnzyme(; mode=Enzyme.Reverse))
+
 # Independent oracle for the @plate population-PK model: every subject's
 # conditional log-likelihood, η gradient, and η Hessian, written out from the model's
 # equations. With CL = exp(a + η_CL), V = exp(b + η_V), k = CL / V and

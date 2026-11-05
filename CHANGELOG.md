@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.169
+## 0.2.183
 
 - Sparse Laplace supports model-scope helpers shared by ordinary or
   sum-factored observation cells. Sampled-coordinate helper values are
@@ -34,15 +34,234 @@ instead of failing at run time.
 - A `mo()` or `mo1()` term read by a subject's `@plate` cell now plans: the
   subjects' effects are declared partitioned, so its level table, which has no
   row form, is computed once per population point in the shared prefix.
-- **Breaking:** the RK backend requires ReactiveKernels 0.1.73 and
-  ReactiveKernelsPPL 0.1.90. Earlier releases refuse sum-factored cells over
-  shared helpers with a locality error, read a producer plate's cell whole
-  under `partitioned`, and have no row forms for matrix-row helpers, `vec` of a
-  row value, whole arrays read by index or `b[p, 2]` of a computed matrix. Under
-  `locality = :error`, a matrix with no row form read as `M[p, 2]` is now
-  refused by name rather than computed whole in every cell. Update older pinned
-  RK environments; the test bootstrap includes these repairs and the newer
-  native mixture-probability support.
+- **Breaking:** under `locality = :error`, a matrix with no row form read as
+  `M[p, 2]` is now refused by name rather than computed whole in every cell.
+  Shared helpers need the RK repairs of ReactiveKernels 0.1.73 and
+  ReactiveKernelsPPL 0.1.90, which the current floors (0.1.82 / 0.1.98)
+  include: earlier releases refuse sum-factored cells over shared helpers with
+  a locality error, read a producer plate's cell whole under `partitioned`, and
+  have no row forms for matrix-row helpers, `vec` of a row value, whole arrays
+  read by index or `b[p, 2]` of a computed matrix.
+
+## 0.2.182
+
+- Fresh-process recovery of adaptive `brm_smc_tune` pilots (`resume=partial`
+  or `checkpoint_dir=dir, resume=true`) works for `RKBRMI` models whose laws
+  are bound in the generated RK program module, such as `gmrf(...)` fields.
+  Before, the checkpoint named that process-local module and a fresh process
+  failed with `UndefVarError: ##RKEmittedModels#…`. **Breaking:** the RK backend
+  now requires ReactiveKernelsPPL 0.1.98, which normalizes generated-module
+  names in SMC checkpoint identities; raise an environment pinning an older
+  ReactiveKernels commit to `b0ffcdc1` or a descendant. Checkpoints written
+  with ReactiveKernelsPPL 0.1.97 or earlier are not migrated: resume them with
+  their original versions or write a new initialization checkpoint.
+- RK `main` from `8e67ee82` currently breaks selective carried-window tuning
+  (`coordinates=:auto`) with a `MethodError` in `_cell_joined_rows`; BRM's test
+  pin stays on `b0ffcdc1` until ReactiveKernels repairs it.
+
+## 0.2.181
+
+- `brm_start` accepts `component_inits` on both backends, keyed by authored
+  component call paths and local parameter names. Repeated and nested calls
+  can set independent scalar, vector, simplex and correlation Cholesky starts
+  on the constrained scale; RK uses its native layout without compiling Stan.
+  `base=:prior_median` now visits component-local scalar priors recursively,
+  resolves each call's bound inputs and preserves explicit-start precedence.
+  Numeric bases retain every unaddressed value.
+
+## 0.2.180
+
+- `SBBRMI` and `RKBRMI` compose heterogeneous scalar `MixtureModel`
+  components with known full-real continuous support, including custom
+  function families with different argument counts. Each component retains
+  its ordinary parameterization and backend mapping.
+- RK preserves native component density graphs, including existing
+  `_rk_observation_source!` providers, for dependency-aware scheduling,
+  native Reverse gradients, pointwise likelihood and source replay.
+  Stan preserves component predictive draws and membership outputs.
+  Native RK mixture/custom-law predictive generation remains separate work.
+- Requires StanBlocks 0.2.25, ReactiveKernels 0.1.81 and
+  ReactiveKernelsPPL 0.1.94. Bounded or mixed-support heterogeneous components
+  remain outside the supported mixture contract.
+
+## 0.2.179
+
+- `brm_model_view(model)` with HTMXObjects shows data/parameter roles and value
+  ranks from the supplied declaration or prepared model. Unknown dimensions
+  stay explicit; descriptor carriers retain their own constrained shapes and
+  logical identities. Callable documentation and carrier details are accessible
+  by click and keyboard. The view performs no fit or implicit backend preparation.
+  The macro app and descriptor mount share this reusable view.
+- Source, roles/ranks and callable documentation use eager tabs, retaining all
+  content in Markdown/PDF and static HTML exports. Plate response labels reuse
+  the compiler's cell observation metadata. Export acceptance exercises the
+  standard HTMXObjects PDF and bundled-site exporters.
+- Authored declaration docstrings use the shared `brm_documentation` records
+  in the view, with formatted prose, exact paths and source provenance.
+- Source tabs automatically include reachable BRM component definitions from
+  `brm_components`, once per shared definition, with all call-instance paths.
+  Complete PDF and static HTML exports include every nested definition.
+- Component source and declaration details use the shared Julia source printer,
+  preserving readable docstrings without exposing internal doc wrappers.
+- The macro app's expression cards read `NamedColumn` parent values for their
+  data/parameter styling, matching the current column representation.
+- Prepared RK views use ReactiveKernelsPPL 0.1.89's read-only parameter metadata:
+  constrained shapes, ragged element shapes and free-coordinate counts remain
+  separate. Replays retain the build's binding provenance and show current
+  parameter dimensions as unresolved when they share an earlier layout.
+- Refresh the macro app's HTMXObjects dependency closure to 0.1.58 and its
+  StanBlocks/WarmupHMC pins to versions compatible with the current BRM package.
+
+## 0.2.178
+
+- Added: explicit `unit_partition=:connected` for the NLME view and model,
+  NLME fits, SVI, per-unit Laplace and joint starts. Structural likelihood
+  supports join scientific subjects into complete inference units, retaining
+  their original labels, coordinates and every covariance-family instance.
+  The default `:subjects` keeps strict subject independence. Connected starts
+  carry unit membership; named estimates restore scientific subject labels.
+- Changed: SVI streaming retains the partition policy and refuses changed
+  membership of a carried connected unit before updating. Complete unchanged
+  units and wholly new units can continue.
+- **Breaking:** SVI streaming checkpoints use format 2 with explicit
+  `unit_partition`; serialize and reload with matching package versions.
+
+- Changed: NLME unit likelihoods and gradients use one strict RK plate
+  partition per unit. Preparation checks structural coordinate ownership,
+  including dormant branches, and names nonlocal producers or foreign unit
+  effects. Sparse curvature retains individual cell supports without numerical
+  probing or gradient-based pruning; repeated observations share one support
+  during pattern assembly instead of accumulating duplicate coordinate pairs.
+  Conditional subsets evaluate only their requested units; full-cohort and
+  population-gradient calls retain batching.
+- Changed: a one-unit value or gradient writes θ, σ and the unit's η into a
+  dense work point owned by its query or plan, instead of an overlay that RK
+  copied into a full packed vector on every call, so one unit's cost and
+  allocations no longer grow with the number of units.
+  `brm_nlme_loglikelihood_and_gradient`, which returns only the η gradient,
+  differentiates only the unit's own effects (RK `shared=false`).
+- Changed: NLME cell, partition and gradient queries declare their local
+  parameter ownership so RK/PPL can cache shared producers before strict
+  lowering. Correlated grouped HSGP values remain shared; local coordinates
+  retain their structural checks. Shared-coordinate changes refresh the cache.
+- Changed: separated CAR fields expose their shared values through row-local
+  graph computations, preserving their law, coordinates, inverse and Jacobian.
+- Changed: `cdar(...; cor=C)` emits its fixed correlation factor as a sparse
+  matrix, so a subject reads only the innovation groups its factor rows store.
+- Compatibility: ReactiveKernels 0.1.77 / ReactiveKernelsPPL 0.1.85 preserve
+  sparse factors, stratified group reads, grouped HSGP row forms and shared
+  plate computations across several observations in one unit partition.
+- Compatibility: the strict partitions need ReactiveKernels 0.1.51 and
+  ReactiveKernelsPPL 0.1.54 or later, within the new 0.1.77 / 0.1.85
+  floor. Scalar inference preserves ordinary indexed predictor expressions
+  under strict partitioning, and nested data-only helpers inside sampled
+  expressions, such as a lower-bounded shares completion's
+  `lower=lo[x_shares_free]`, keep their shapes through strict cell and
+  partition preparation. Strict queries also preserve local scan captures,
+  grouped-field row reductions and censored ragged factors. Shared-prefix
+  binding includes freshly emitted helpers and preserves local reads from
+  custom packed vectors. Unit gradients use ordinary Enzyme Reverse, with the
+  test bootstrap's Enzyme dogfood pin, which contains `68ed90fe`'s repair for
+  matrix-window partition gradients on Julia 1.10.
+
+## 0.2.177
+
+- Require ReactiveKernels 0.1.82 to restore buffer reuse when batched readers
+  evaluate vector-valued plate cells. Emitted and printed RK models retain
+  live broadcast fusion after binding data, avoiding a temporary vector per
+  cell and position.
+
+## 0.2.176
+
+- Applying an explicitly selected Laplace plan over a per-cell `gmrf` field
+  and copying its target per chain preserve the direct target's coordinates,
+  value and gradient. The dependency floor now includes ReactiveKernels
+  0.1.70's supporting copy machinery; the ReactiveKernelsPPL floor is
+  unchanged.
+- The block importance diagnostic includes the `gmrf` precision prior in its
+  weights. For an exactly Gaussian conditional, every proposed draw retains
+  equal weight. This diagnostic does not change automatic eligibility:
+  unrecognized plate-cell algebra still requires explicit integration.
+- The count-field prior-median diagnostic fixture uses a declared log link,
+  retaining its ESS assertions under structural automatic selection.
+
+## 0.2.175
+
+- Selecting several fixed-width vector cells preserves their collection
+  semantics in ordinary helpers: `f(cells[indices])` can read each selected
+  vector with `rows[t]`, including repeated and reordered indices. This works
+  with observed responses and omitted-response prior generation. The
+  StanBlocks floor and test pin advance to 0.2.26 for its ordinary view helpers.
+
+## 0.2.174
+
+- `LKJCholesky(K, eta)` accepts data-supplied scalar dimensions and
+  concentrations in `SBBRMI` and `RKBRMI`, including reusable and nested
+  `@brm function` components. RK source retains named inputs while coordinate
+  bookkeeping uses their bound dimension. The RK backend requires
+  ReactiveKernelsPPL 0.1.97 for data-supplied LKJ dimensions.
+
+## 0.2.173
+
+- Adaptive `brm_smc_tune` forwards nested Treebars progress, cooperative stop
+  callbacks, `checkpoint_dir`, `resume` and `overwrite` for initial, prepared
+  Laplace, cumulative-update and carried-window targets. Interrupted pilots
+  return RKPPL's `SMCTuningPartial`; completed calls still return a production
+  tuning schedule. Resume restores the active pilot and skips completed pilots
+  after checking endpoint identities and configuration. Uses the RKPPL recoverable-pilot contract introduced in 0.1.91.
+  Stops occur at safe boundaries rather than hard deadlines; active checkpoint
+  draws can grow even though outer history and retained checkpoint files are bounded.
+
+## 0.2.172
+
+- `SBBRMI` preserves complete fixed-width vector cells in direct reads from
+  another `@plate`. Collected and non-last indexed outputs retain their outer
+  cell axis with observed responses and with responses omitted for prior
+  draws. Scalar, varying-width vector and matrix cells retain their existing
+  iteration behavior; model declarations and priors need no changes.
+
+## 0.2.171
+
+- `@brm function component(inputs...) … return value end` defines a reusable
+  component for both StanBlocks and ReactiveKernels. Each `result ~ component(...)`
+  call owns its local parameters and reads explicit shared inputs. Components
+  support nested calls, array-valued results, prior/output inspection and
+  changed-data replay. Existing short-form data-to-model builders retain their
+  meaning. Returned row axes remain available to formula offsets and selective
+  readers; internal plate cells must prove scalar values before flattening.
+  `brm_components` exposes definition identity, source and each logical call path.
+
+## 0.2.170
+
+- **Authored declaration documentation:** ordinary Julia docstrings in BRM
+  source survive binding, tuple expansion, model composition, source printing
+  and replay. `brm_documentation` returns copied `BRMDocumentation` records
+  with logical paths, raw Markdown, authored statements and file/line provenance,
+  including declarations inside plates and scans. Documentation stays separate
+  from executable operations and numerical model identity.
+- `brm_documentation_markdown` and scientific model descriptions include the
+  authored prose for HTML/PDF pipelines, without treating it as generated
+  scientific coverage. Emitted RK artifacts retain the same records in their
+  metadata.
+- The RK source retains ordinary declaration and plate-local docstrings using
+  the emitter's exact names; reusable definition wrappers remain intact during
+  lowering and replay. This requires ReactiveKernelsPPL 0.1.93. Complete BRM
+  records retain element-specific prior addresses when several coefficients
+  share one emitted array declaration.
+
+## 0.2.169
+
+- `SBBRMI` now accepts an omitted `interval_censored(D; upper=hi)` response
+  in the unchanged model. Retained bounds and family arguments determine the
+  predictive shape; draws use the uncoarsened base law, with no interval
+  likelihood or fabricated lower endpoints. Observed interval densities and
+  predictor-side interval terms retain their semantics.
+- A censored response may also omit its own endpoint: keep
+  `y ~ censored(D; lower=y)` or `upper=y` unchanged and omit `y`. Only that
+  endpoint disappears for prediction; independent retained bounds still clamp
+  the draw. Observed CDF/CCDF evidence and missing-independent-bound validation
+  are unchanged. Requires StanBlocks 0.2.24, now the package and
+  test-environment minimum.
 
 ## 0.2.168
 

@@ -5,6 +5,9 @@
 ```@docs
 brm_description
 brm_description_markdown
+BRMDocumentation
+brm_documentation
+brm_documentation_markdown
 brm_describe_component
 brm_description_components
 brm_description_math
@@ -242,6 +245,9 @@ BayesianRegressionModels.required_brm_inputs
 ## Introspection
 
 ```@docs
+BayesianRegressionModels.brm_model_view
+BayesianRegressionModels.BRMComponent
+BayesianRegressionModels.brm_components
 BayesianRegressionModels.outcomes
 BayesianRegressionModels.linear_predictor_op
 BayesianRegressionModels.linear_predictors

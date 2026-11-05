@@ -177,12 +177,15 @@ function BRM.brm_smc_tune(carried::BRM.BRMSMCCarriedReference, model::BRM.BRMI;
         rng, init, reference=nothing, temperatures=nothing, pilot_steps=64,
         pilot=nothing, max_reflections=nothing, recording_target=nothing,
         pilot_evaluations=nothing, reference_inflation=nothing,
+        progress=nothing, callback=nothing, checkpoint_dir=nothing, resume=false,
+        overwrite=false,
         options=PPL.SMCOptions(), coordinates=nothing,
         ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
     _, _, target = prepare_window(deepcopy(carried), model, ad_backend; coordinates)
     controls = tuning_controls(; temperatures, pilot, max_reflections,
         recording_target, pilot_evaluations, reference_inflation)
-    PPL.tune_smc(target; rng, init, reference, controls..., pilot_steps, options)
+    PPL.tune_smc(target; rng, init, reference, controls..., pilot_steps, options,
+        progress, callback, checkpoint_dir, resume, overwrite)
 end
 
 """

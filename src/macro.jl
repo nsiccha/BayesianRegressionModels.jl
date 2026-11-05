@@ -639,12 +639,14 @@ function Base.merge(a::BRMBuilder, b::BRMBuilder, rest::BRMBuilder...)
 end
 
 Base.show(io::IO, b::BRMBuilder) = begin
-    for (i, stmt) in enumerate(b.source.args)
+    statements = filter(x -> !(x isa LineNumberNode), b.source.args)
+    for (i, stmt) in enumerate(statements)
         i == 1 || print(io, "\n")
         _brm_print_source(io, stmt)
     end
 end
 Base.show(io::IO, ::MIME"text/plain", b::BRMBuilder) = show(io, b)
+_brm_documentation(b::BRMBuilder) = _brm_source_documentation(b.source)
 
 # The names `parselocals!` classifies while parsing one block, for the
 # data-free column inventory (`brm_columns(::BRMBuilder)`):
@@ -752,6 +754,11 @@ begin
 end
 """)
 _brm(x::Expr; df=nothing) = begin
+    component = _brm_component_source(x)
+    if component !== nothing
+        isnothing(df) || throw(ArgumentError("@brm: a component definition takes its inputs as arguments, not a data frame"))
+        return _brm_component_definition(component)
+    end
     (; named, lhs, body, source, columns) = _brm_builder_code(x; df)
     if isnothing(df) && named
         # named no-df: the caller's `f(df) = body` function definition.
@@ -772,15 +779,16 @@ end
 # interprets: the `__df__ -> BRMI` builder body, the authored source, and, for
 # an unnamed builder, the expression of its column inventory.
 function _brm_builder_code(x::Expr; df=nothing)
-    (x.head == :block || x.head == :(=) || isxcall(x, :~) ||
+    (x.head == :block || x.head == :(=) || isxcall(x, :~) || _brm_is_doc(x) ||
      _is_brm_plate(x)) || error(
         "@brm: a standalone predictor fragment such as `@brm(1 + x)` is " *
         "not implemented. Use nested `@brm(1 + x)` inside an outer `@brm` " *
         "likelihood, or write a top-level `lhs ~ rhs` formula.")
     named = x.head == :(=)
     lhs, x = named ? x.args : (:($(gensym("model"))(__df__)), x)
-    source = Base.remove_linenums!(Meta.isexpr(x, :block) ?
-        deepcopy(x) : Expr(:block, deepcopy(x)))
+    source = _brm_normalize_docs(Meta.isexpr(x, :block) ? x : Expr(:block, x))
+    documentation = _brm_source_documentation(source)
+    x = _brm_strip_docs(x)
     # `T::shares(total) ~ Law(…)` in a `@plate` cell (cell_total_coordinates.jl).
     x = _brm_desugar_cell_bijections(x)
     alllocals = OrderedDict{Symbol,Symbol}()
@@ -814,8 +822,8 @@ function _brm_builder_code(x::Expr; df=nothing)
         if value == :nonlocal && (key in inventory.assigned ||
             key in inventory.responses || key in inventory.latent ||
             key in inventory.data)]))
-    finalize = :($_brm_finalize_operations(
-        (;$(keys(alllocals)...)), __caps__, $forward))
+    finalize = :($_brm_with_documentation($_brm_finalize_operations(
+        (;$(keys(alllocals)...)), __caps__, $forward), $(QuoteNode(documentation))))
     # ONE shared builder body, parameterised on the `__df__` symbol. Nonlocals
     # bind via the @getproperty (hasproperty→MissingColumn) fallback so a name
     # that isn't a df column (e.g. a multi-equation predictor/param like
@@ -1605,6 +1613,13 @@ function _brm_print_cell_statements(io::IO, stmts, indent)
     for stmt in stmts
         stmt isa LineNumberNode && continue
         print(io, indent)
+        while _brm_is_doc(stmt)
+            if get(io, :brm_documentation, true)
+                _brm_print_doc(io, stmt.args[3])
+                print(io, indent)
+            end
+            stmt = stmt.args[4]
+        end
         if _is_brm_scan(stmt) || Meta.isexpr(stmt, :for)
             body = stmt.args[end]
             if _is_brm_scan(stmt)
@@ -1639,6 +1654,13 @@ _brm_print_source(io::IO, x::Real, outer::Int=0; left::Bool=false) =
 _brm_print_source(io::IO, x::QuoteNode, outer::Int=0; left::Bool=false) = print(io, x)
 _brm_print_source(io::IO, x::LineNumberNode, outer::Int=0; left::Bool=false) = nothing
 function _brm_print_source(io::IO, x::Expr, outer::Int=0; left::Bool=false)
+    if _brm_is_doc(x)
+        get(io, :brm_documentation, true) && _brm_print_doc(io, x.args[3])
+        return _brm_print_source(io, x.args[4], outer; left)
+    elseif _is_brm_plate(x)
+        i, range, body = _brm_plate_loop(x)
+        return _brm_print_plate(io, i, range, Meta.isexpr(body, :block) ? body.args : Any[body])
+    end
     op = _brm_source_infix(x)
     if !isnothing(op)
         operands = x.head === :call ? x.args[2:end] : x.args
@@ -1676,6 +1698,10 @@ function _brm_print_source(io::IO, x::Expr, outer::Int=0; left::Bool=false)
     elseif Meta.isexpr(x, :vect)
         _brm_print_arguments(io, x.args, "[", "]")
     elseif Meta.isexpr(x, :(=), 2)
+        if Meta.isexpr(first(x.args), :call) && Meta.isexpr(last(x.args), :block)
+            return Base.show_unquoted(io,
+                _brm_display_source(x, get(io, :brm_documentation, true)))
+        end
         _brm_print_source(io, x.args[1])
         print(io, " = ")
         _brm_print_source(io, x.args[2])
@@ -1686,7 +1712,7 @@ function _brm_print_source(io::IO, x::Expr, outer::Int=0; left::Bool=false)
         i, range, body = _brm_plate_loop(x)
         _brm_print_plate(io, i, range, Meta.isexpr(body, :block) ? body.args : Any[body])
     else
-        print(io, x)
+        Base.show_unquoted(io, _brm_display_source(x, get(io, :brm_documentation, true)))
     end
 end
 function _brm_source_infix(x::Expr)
@@ -1832,7 +1858,8 @@ end
 # statements `parse!` lowers onto the `effect` carrier, so this test splits a
 # builder's source (`priors_of(::BRMBuilder)`) the way `_is_effect_prior_op`
 # splits a BRMI's operations.
-_brm_statement_lhs(x) = isxcall(x, :~) || isxcall(x, :.~) ? x.args[2] :
+_brm_statement_lhs(x) = _brm_is_doc(x) ? _brm_statement_lhs(x.args[4]) :
+    isxcall(x, :~) || isxcall(x, :.~) ? x.args[2] :
     Meta.isexpr(x, :(=), 2) ? x.args[1] : nothing
 _is_prior_address_statement(x) =
     (lhs = _brm_statement_lhs(x); _is_optional_prior_lhs(lhs) || _is_effect_lhs(lhs))
@@ -2310,7 +2337,7 @@ function _is_hyper_lhs(x)
     length(inner.args) in (2, 3)
 end
 
-function _parse_hyper!(lhs, rhs; info)
+function _brm_hyper_address(lhs)
     inner = lhs.args[2]
     head = inner.args[1]::Symbol
     slots = map(_prior_slot, inner.args[2:end])
@@ -2318,9 +2345,15 @@ function _parse_hyper!(lhs, rhs; info)
     # to the default-`:` two-slot form so it normalises exactly like its
     # prior-statement twin.
     length(slots) == 1 && (slots = [_EFFECT_COLON, first(slots)])
-    address = _prior_address(head, slots)
-    key = Symbol("__hyper__", replace(join(string.(address), "__"),
+    _prior_address(head, slots)
+end
+_brm_hyper_statement_key(address) = Symbol("__hyper__", replace(join(string.(address), "__"),
                                       "(" => "_", ")" => "", "," => "_"))
+function _parse_hyper!(lhs, rhs; info)
+    inner = lhs.args[2]
+    head = inner.args[1]::Symbol
+    address = _brm_hyper_address(lhs)
+    key = _brm_hyper_statement_key(address)
     haskey(info.alllocals, key) && error(
         "@brm: duplicate `$head($(join(string.(inner.args[2:end]), ", ")))` " *
         "hyper-predictor statement")
@@ -3046,8 +3079,13 @@ dataframe). Introspect via [`outcomes`](@ref) / [`linear_predictors`](@ref)
 """
 struct BRMI{O<:NamedTuple}
     operations::O
+    documentation::Tuple{Vararg{BRMDocumentation}}
 end
+BRMI(operations::NamedTuple) = BRMI(operations, ())
 BRMI(;kwargs...) = BRMI((;kwargs...))
+_brm_documentation(brmi::BRMI) =
+    (brmi.documentation..., _brm_component_documentation(brmi)...)
+_brm_with_documentation(brmi::BRMI, docs) = BRMI(brmi.operations, Tuple(docs))
 
 # Planning reads a BRMI's operations as syntax. Their NamedTuple type spells
 # every formula name and expression tree, so `values`, `pairs`, `keys`,
@@ -3128,7 +3166,8 @@ in one block.
 """
 Base.merge(a::BRMI, b::BRMI) = _brm_resolve_forward_reads(
     BRMI(Base.merge(a.operations,
-        _brm_drop_shadowing_reads(b.operations, a.operations))),
+        _brm_drop_shadowing_reads(b.operations, a.operations)),
+        _brm_merge_documentation(a, b)),
     _brm_read_binding_names(a, b))
 Base.merge(a::BRMI, b::BRMI, rest::BRMI...) =
     foldl(Base.merge, rest; init=Base.merge(a, b))
@@ -3174,7 +3213,7 @@ Base.@nospecializeinfer function _brm_resolve_forward_reads(
         haskey(declarations, key) ? _brm_forward_declaration(reads, key) :
             _brm_rebind_value(op, reads)
     end
-    BRMI(NamedTuple{Tuple(first.(entries))}(Tuple(resolved)))
+    BRMI(NamedTuple{Tuple(first.(entries))}(Tuple(resolved)), brmi.documentation)
 end
 
 function _brm_forward_declaration(reads::_BRMForwardReads, key::Symbol)
@@ -3483,13 +3522,21 @@ end
 # fragment binds for names it only reads are not statements and do not print,
 # so `string(structure_of(m))` and `string(priors_of(m))` are the model's two
 # source cards.
-Base.show(io::IO, (;operations)::BRMI) = begin
+Base.show(io::IO, brmi::BRMI) = begin
+    operations = brmi.operations
+    documentation = get(io, :brm_documentation, true) ?
+        _brm_documentation_owners(brmi.documentation) : Dict{Symbol,Vector{BRMDocumentation}}()
     started = false
     for (key, value::NamedColumn) in pairs(operations)
         _brm_is_statement(parent(value)) || continue
         started && print(io, "\n")
         started = true
-        _show_top(io, key, parent(value))
+        owned = get(documentation, key, ())
+        for doc in owned
+            doc.path == (key,) && _brm_print_doc(io, doc.markdown)
+        end
+        docs = Tuple(d for d in owned if length(d.path) > 1)
+        _show_top(IOContext(io, :brm_cell_documentation => docs), key, parent(value))
     end
 end
 _brm_is_statement(op) = false
@@ -3530,7 +3577,7 @@ _show_top(io::IO, key, op::ExprColumn{<:Union{typeof(~),typeof(assign)}}) = begi
     if getf(op) === (~) && last(args) isa ExprColumn{typeof(kernel)}
         body = first(getargs(last(args)))
         if body isa _BRMInlineBody && !isnothing(body.source)
-            print(io, body.source)
+            _brm_print_documented_cell(io, body.source)
             return
         end
     end

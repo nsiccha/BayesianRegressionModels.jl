@@ -580,6 +580,18 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
         head = family isa ExprColumn ? getf(family) : nothing
         head === MixtureModel && _rk_mixture_value_weights(program, family) &&
             return true
+        # Heterogeneous and custom mixtures retain each component's ordinary
+        # value and source-graph boundary. The legacy formula planner has a
+        # fixed location/scale record and cannot carry these signatures.
+        if head === MixtureModel
+            components = first(getargs(family))
+            if components isa Union{AbstractVector,Tuple} && !isempty(components) &&
+                all(component -> component isa ExprColumn, components) &&
+                    (!allequal(map(getf, components)) ||
+                     any(component -> getf(component) isa Function, components))
+                return true
+            end
+        end
         # A categorical response owns fitted level coding and a whole simplex;
         # it is not a scalar response merely because it has no formula location.
         head === Categorical && continue
@@ -653,14 +665,29 @@ _rk_ast_value_distribution(callable, distribution, bindings, taken) =
     _rk_ast_value_call(callable, distribution, bindings, taken)
 
 function _rk_ast_value_distribution(::Type{MixtureModel}, distribution, bindings, taken)
-    length(distribution.args) in (1, 2) || error(
+    _rk_ast_mixture_distribution(distribution, bindings, taken) do _, component
+        _rk_ast_value_distribution(component, bindings, taken)
+    end
+end
+
+# One mixture/weight assembly for ordinary constructors and custom density
+# providers, preserving the same scalar, row, tuple and default-weight forms.
+function _rk_ast_mixture_distribution(component_expr, distribution, bindings, taken)
+    isempty(distribution.kwargs) && length(distribution.args) in (1, 2) || error(
         "RK backend: MixtureModel needs components and optional probabilities")
     components = first(distribution.args)
     entries = components isa Tuple ? components :
         components isa _BRMPreparedExpr && components.callable === Base.vect ?
         components.args : error("RK backend: MixtureModel components must be a vector or tuple")
-    component_rows = _rk_ast_dotted(:vcat,
-        (_rk_ast_value_distribution(component, bindings, taken) for component in entries)...)
+    isempty(entries) && error("RK backend: MixtureModel components must be nonempty")
+    component_calls = map(enumerate(entries)) do (k, component)
+        component isa _BRMPreparedExpr || error(
+            "RK backend: MixtureModel component $k must be a distribution call")
+        isempty(component.kwargs) || error(
+            "RK backend: MixtureModel component $k takes no constructor keywords")
+        component_expr(k, component)
+    end
+    component_rows = _rk_ast_dotted(:vcat, component_calls...)
     length(distribution.args) == 1 &&
         return _rk_ast_dotted(:MixtureModel, component_rows)
     weights = distribution.args[2]
@@ -694,7 +721,7 @@ end
 # RKPPL's explicit ordinal: tags by name, shared thresholds, positional
 # discrimination and one threshold-effect row per observation.
 function _rk_ast_value_distribution!(statements, ::Type{Ordinal}, observation,
-        distribution, bindings, taken; coordinates=nothing)
+        distribution, bindings, taken; coordinates=nothing, definitions=nothing)
     length(distribution.args) == 4 ||
         return _rk_ast_value_call(Ordinal, distribution, bindings, taken)
     structure, link, eta, thresholds = distribution.args
@@ -709,8 +736,22 @@ function _rk_ast_value_distribution!(statements, ::Type{Ordinal}, observation,
         _rk_value_expr!(bindings, distribution.kwargs.discrimination, taken), effects...)
 end
 _rk_ast_value_distribution!(statements, callable, observation, distribution, bindings,
-    taken; coordinates=nothing) = _rk_ast_value_distribution(callable, distribution,
+    taken; coordinates=nothing, definitions=nothing) = _rk_ast_value_distribution(callable, distribution,
     bindings, taken)
+
+# Keep the native RKPPL mixture head. Each component uses the same constructor
+# lowering or density-source provider as a plain observation; RK composes the
+# resulting graphs and owns their scheduling and shared-work hoisting.
+function _rk_ast_value_distribution!(statements, ::Type{<:MixtureModel}, observation,
+        distribution, bindings, taken; coordinates=nothing, definitions)
+    _rk_ast_mixture_distribution(distribution, bindings, taken) do k, component
+        entry = _rk_emit_density_source!(definitions, bindings, taken,
+            Symbol(observation.name, "_component_", k), component)
+        entry === nothing && return _rk_ast_value_distribution(component, bindings, taken)
+        _rk_ast_dotted(:LogDensity, entry,
+            (_rk_value_expr!(bindings, arg, taken) for arg in component.args)...)
+    end
+end
 
 _rk_ast_value_threshold_effects!(statements, response, eta, bindings, taken;
     coordinates=nothing) = (eta, ())
@@ -888,7 +929,23 @@ _rk_threshold_vector(name::Symbol, ::Type{_BRMThresholdPrior{false}}, n::Int) =
 
 Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         @nospecialize(program), @nospecialize(observations);
-        @nospecialize(kernels=()), @nospecialize(submodels=()))
+        @nospecialize(kernels=()), @nospecialize(submodels=()),
+        @nospecialize(value_roots=()), @nospecialize(external_inputs=()))
+    # Admission is independent of why this planner was selected: an earlier
+    # deterministic assignment may already have required the value route.
+    for observation in observations
+        family = observation.rhs
+        while family isa ExprColumn && getf(family) in
+                (weighted, censored, truncated, interval_censored) && !isempty(getargs(family))
+            family = first(getargs(family))
+        end
+        family isa ExprColumn && getf(family) === MixtureModel || continue
+        components = first(getargs(family))
+        components isa Union{AbstractVector,Tuple} && !isempty(components) &&
+            all(component -> component isa ExprColumn, components) || error(
+            "RK backend: MixtureModel components must be a nonempty vector of distribution calls")
+        _brm_check_heterogeneous_mixture(components; prefix="RK backend")
+    end
     context = program.context
     leveled = _rk_value_leveled_responses(observations, context.data)
     implicit = Pair{Symbol,Any}[parameter for entry in values(leveled)
@@ -908,6 +965,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     threshold_vectors = [_rk_threshold_vector(p) for p in prepared.parameters
         if p.name in implicit_names && !(p.name in coefficients)]
     roots = Set{Symbol}(observation.key for observation in observations)
+    union!(roots, value_roots)
     routes = (kernels..., submodels...)
     dependencies = Dict(op.name => op.dependencies for op in program.operations)
     for route in routes
@@ -930,10 +988,11 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     assignments = Tuple(operations[name] for name in program.order if haskey(operations, name))
     parameter_names = Set{Symbol}(p.name for p in prepared.parameters)
     assignment_names = Set{Symbol}(a.name for a in assignments)
+    union!(assignment_names, external_inputs)
     consts = _rk_data_constants!(Dict{Symbol,Float64}(a.name => Float64(a.expression)
         for a in ordinary_assignments if a.expression isa Number), context.data)
     parameters = _rk_plan_parameters!(prepared, context.data, consts,
-        Dict{Symbol,Symbol}(), parameter_names, assignment_names)
+        Dict{Symbol,Symbol}(), parameter_names, assignment_names; retain_lkj_inputs=true)
     vectors = [_rk_plan_vector_parameters!(prepared, context.data, consts,
         Dict{Symbol,Symbol}(), parameter_names, assignment_names); threshold_vectors]
     predictor_order = Symbol[op.name for op in program.operations
@@ -1102,7 +1161,9 @@ function _rk_kernel_output_names(plan::_RKValuePlan)
         for kernel in kernels)
 end
 
-function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
+function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, cell_sources=nothing,
+        documentation=())
+    documentation_owners = _brm_documentation_owners(documentation)
     reserved = Set{Symbol}(keys(plan.columns))
     union!(reserved, (first(binding) for binding in _rk_extent_bindings(plan)))
     union!(reserved, (a.name for a in plan.assignments))
@@ -1133,7 +1194,8 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         if assignment isa _RKPreparedKernelAssignment
             _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment;
                 arguments=get(hoisted.kernels, assignment.name, nothing), coordinates,
-                graph_outputs=kernel_outputs[assignment.name], cell_sources=cells)
+                graph_outputs=kernel_outputs[assignment.name], cell_sources=cells,
+                documentation=get(documentation_owners, assignment.name, ()))
             _rk_plate_output_cells!(cells, stmts, assignment, kernel_outputs[assignment.name])
         else
             _rk_emit_value_assignment!(defs, stmts, bindings, taken,
@@ -1143,8 +1205,9 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         # its target; the transport pairs them with the SB declaration's.
         assignment isa _RKPreparedSubmodelAssignment &&
             _rk_coordinate_record!(coordinates, (; kind=:submodel,
-                target=assignment.name))
+                target=assignment.name, component=assignment.component))
     end
+    cell_sources === nothing || merge!(cell_sources, cells)
     _rk_offset_scalar_cells!(defs, stmts, taken, plan, cells)
     for completion in plan.completions
         parts = _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)
@@ -1179,7 +1242,10 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
             _brm_prepare_expr(modifier.base)
         distribution isa _BRMPreparedExpr || error(
             "RK backend: response `$(observation.name)` needs a distribution call")
-        distribution = _rk_plate_cell_reads(distribution, cells,
+        # This call is the observation constructor, including caller-owned
+        # families. Only its arguments can be whole-value reads of cells;
+        # rewriting the constructor itself loses its identity and arguments.
+        distribution = _rk_plate_cell_arguments(distribution, cells,
             read -> _rk_plate_cell_value!(stmts, bindings, taken, read))
         isempty(distribution.kwargs) || distribution.callable === Ordinal || error(
             "RK backend: response `$(observation.name)` distribution keywords are unsupported")
@@ -1195,7 +1261,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         base = joint ? _rk_ast_value_call(distribution.callable, distribution,
             bindings, taken; joint=true) :
             _rk_ast_value_distribution!(stmts, distribution.callable, observation,
-                distribution, bindings, taken; coordinates)
+                distribution, bindings, taken; coordinates, definitions=defs)
         if modifier !== nothing
             lower = modifier.lower === nothing ? -Inf :
                 _rk_value_expr!(bindings, _brm_prepare_expr(modifier.lower), taken)
@@ -1218,9 +1284,25 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     authored = union(Set(a.name for a in plan.assignments),
         (p.name for p in plan.regression.predictors),
         Iterators.flatten(values(kernel_outputs)))
-    _rk_scalar_lone_intercepts(
+    densities = union(Set(c.source for c in plan.completions if c.totals !== nothing),
+        Set(a.name for a in plan.assignments if a isa _RKPreparedSubmodelAssignment &&
+            !isempty(a.observed)))
+    emitted = _rk_scalar_lone_intercepts(
         _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
             _rk_observed_names(plan); retained=authored, coordinates,
-            densities=Set(c.source for c in plan.completions if c.totals !== nothing)),
+            densities),
         lone_intercepts)
+    # A cell observation is emitted outside its value plate. Its prepared
+    # record supplies both the cell-local parameter and the response source.
+    docs = collect(documentation)
+    documentation_paths = _brm_documentation_index(documentation)
+    for kernel in plan.assignments
+        kernel isa _RKPreparedKernelAssignment || continue
+        for observation in kernel.observations,
+                (_, doc) in get(documentation_paths, (kernel.name, observation.param), ())
+            push!(docs, BRMDocumentation((observation.source,), observation.source,
+                doc.markdown, doc.statement, doc.file, doc.line))
+        end
+    end
+    _rk_documented_program(emitted, docs)
 end

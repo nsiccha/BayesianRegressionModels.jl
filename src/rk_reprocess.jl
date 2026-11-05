@@ -111,7 +111,8 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
     # The fit's program, translated once, binds the replay's data too, unless
     # a callable differs under the same name.
     program = _rk_same_callables(retained, replayed) ? rk.program : _RKOnce()
-    replay = RKBRMI(parent(rk), plan, rk.model; program, source=brm_source(rk))
+    replay = RKBRMI(parent(rk), plan, rk.model; program, source=brm_source(rk),
+        model_plan=rk.model_plan)
     # Same coordinates, so the fit's draws mean the same thing on the replay.
     # Resampled groups size their effects by the new data's levels.
     if isempty(groups)
@@ -362,6 +363,7 @@ _rk_prior_reads(emitted::_RKEmittedProgram, observed) = _rk_law_inputs(emitted.m
         for part in map(_rk_definition_parts, emitted.defs)), Dict{Symbol,Set{Symbol}}())
 
 function _rk_definition_parts(definition)
+    definition = _brm_undoc(definition)
     body = Meta.isexpr(definition, :macrocall) ?
         only(filter(arg -> !(arg isa LineNumberNode), definition.args[2:end])) : definition
     signature, statements = body.args
@@ -464,7 +466,7 @@ _rk_raw_data_columns!(columns, x::ExprColumn) =
     (_brm_foreach_child(a -> _rk_raw_data_columns!(columns, a), x); columns)
 
 function _rk_program_statements(emitted::_RKEmittedProgram)
-    text(x) = sprint(Base.show_unquoted, Base.remove_linenums!(deepcopy(x)))
+    text(x) = sprint(Base.show_unquoted, Base.remove_linenums!(_brm_strip_docs(x)))
     vcat(["definition: " * text(d) for d in emitted.defs],
         ["statement: " * text(s) for s in emitted.main.args if !(s isa LineNumberNode)],
         ["binding: " * string(first(b)) for b in emitted.bindings])

@@ -561,6 +561,16 @@ function _brm_plan_local_value(p::BRMSparseLaplaceProblem, state, terms, I, z, u
         i, j = cache.edges[e]
         total -= (z[i] - z[j])^2 / 2
     end
+    # A native GMRF field's −½ zᵀQz, as far as it depends on z[I]: a pair
+    # inside I once each way, a pair leaving I twice.
+    Q = cache.gmrf
+    if Q !== nothing
+        rows, vals = rowvals(Q), nonzeros(Q)
+        for i in I, k in nzrange(Q, i)
+            j = rows[k]
+            total -= (j in I ? 0.5 : 1.0) * z[i] * vals[k] * z[j]
+        end
+    end
     for c in unique(c for i in I for c in cache.soft_by_effect[i])
         δ = sum(z[i] - state.z[i] for i in I if i in cache.soft_members[c])
         total -= p.wλ[c] * (cache.soft_values[c] + δ)^2 / 2

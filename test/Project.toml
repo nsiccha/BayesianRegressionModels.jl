@@ -62,8 +62,8 @@ Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.20"
-Treebars = "0.1.1"
+StanBlocks = "0.2.26"
+Treebars = "0.1.5"
 Turing = "0.46"
 WarmupHMC = "0.2.11"
 julia = "1.10"
@@ -82,11 +82,11 @@ rev = "8f7d382df700d3780ed31d093bc4983d3734a6c6"
 
 [sources.DynamicObjects]
 url = "https://github.com/nsiccha/DynamicObjects.jl"
-rev = "bc23860cd85ee06ca39bc862c14b6ca9b0a55f08"
+rev = "c84047be45cd2bba8a1d02660af9408d4cdf58f4"
 
 [sources.HTMXObjects]
 url = "https://github.com/nsiccha/HTMXObjects.jl"
-rev = "d2a86956a221035c4f1b9ac629836e90ae77a2b5"
+rev = "1de5b7aa45bc8ed8e7cf3db86c7d376dd5e5c04e"
 
 [sources.HTMX]
 url = "https://github.com/nsiccha/HTMX.jl"
@@ -146,12 +146,19 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # helpers, used by the native GMRF normalized sparse density.
 # 009f4180 (0.2.19) adds indexed /= for its sparse solve and prior RNG.
 # 61fa161f (0.2.20) gives cell-owned bindings explicit lexical local scope.
-rev = "61fa161fb39065dd90e8f5f2a1151442b1af6491"
+# ef55b84f (0.2.21) predicts upper-only intervals with their response omitted.
+# b43fc26d (0.2.24) predicts censored responses whose bound is the omitted response.
+# dba65366 (0.2.25) preserves keyword labels when a plate renames its
+# inputs, including BRM component calls whose formal and actual names match.
+# ea1d64f0 (0.2.26) keeps EachCol/EachRow views through ordinary helpers.
+rev = "ea1d64f0c691092b9d4e7d8ad03ab83727671264"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
 # Includes cooperative interruption used by BRM's progress hooks.
-rev = "f071111945c165dbae097e94c5939b79103434ac"
+# Treebars 0.1.5 also satisfies the pinned ReactiveKernelsPPL extension floor.
+# 0.1.5: nested progress used by recoverable adaptive SMC pilots.
+rev = "44c37e60e22bab9e8a0d3ab88bd47b575dec6bb0"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
@@ -168,6 +175,7 @@ url = "https://github.com/nsiccha/OutputSignatures.jl"
 rev = "f971381f760e91986b3a728a719341e7e7761f55"
 
 [sources.ReactiveKernels]
+# RKPPL 0.1.89: read-only constrained parameter metadata for brm_model_view.
 url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK main: contains db4f16aa (lower Cholesky, graph allocation bounds,
 # native prepared-callback Reverse), e0930dcd (a declared-array element is a
@@ -292,20 +300,41 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 30d676c9 (RK 0.1.34 / PPL 0.1.28) repairs single-sum outer AD exemplars.
 # 260d9a94 (RK 0.1.35 / RKPPL 0.1.29): visible grouped kernels retain
 # their shape facts for strict local observation queries.
+# 4925e53d (RK 0.1.36 / RKPPL 0.1.30) includes homogeneous
+# empty/nonempty partition plans and scheduled-loop resets.
 # f851e008 (RK 0.1.37 / RKPPL 0.1.31) binds data-computed entry axes
 # before shape inference.
 # 81363978 (RK 0.1.38 / RKPPL 0.1.32) also binds visible tuple-geometry
 # metadata operands, keeping the full completion's NLME cells local.
 # 23d26ca1 (RK 0.1.39 / RKPPL 0.1.33) keeps indexed direct predictor
 # reads beside reductions local (sum-factor-outer-ca5cc80e).
+# RKPPL 0.1.34: optional SMC and data-only checkpoints.
+# 4df6564e (RK 0.1.40 / RKPPL 0.1.35): strict partitions preserve natural
+# scalar reads of predictor elements, including a separate row domain.
+# RKPPL 0.1.36: finite-state filtering, design rows and grouped scan outputs.
+# RKPPL 0.1.38 (RK 0.1.42): shared-prefix partition sampling and mixed
+# concrete partition-label plans.
+# 171f36b9 (RKPPL 0.1.39): strict cells and partitions keep shapes through
+# nested data-only helpers inside sampled expressions, such as a bounded
+# shares completion's `lower=lo[x_shares_free]` (RK snag
+# bounded-shares-g-792cef37); dc06acc8 is the RK main containing it.
+# 8f7832e7 (RK main after 0.1.42 / RKPPL 0.1.39, no version change) bounds
+# partition-plan and metadata compilation at Atlas size: value-only shape
+# reads stay out of plans and bookkeeping helper calls stay separate kernels
+# (RK snag full-atlas-value-740085e1).
 # RKPPL 0.1.37: exact nonfinite SMC diagnostics across mutation tasks.
 # RKPPL 0.1.42 (RK 0.1.44): independent SMC pilot tuning, adaptive pilots and
 # portable correlated references.
 # RKPPL 0.1.47 (RK 0.1.47): the learned reference fits inflated pilot moments
 # (`reference_inflation`, default 2); stage summaries add coordinate and
 # reference SDs (snag learned-smc-refe-cc5677a1).
+# RK 0.1.50 / RKPPL 0.1.52: shared-prefix queries, packed gathered-column
+# shapes, strict row reductions and whole-row gathers,
+# unchanged scan captures, and censored ragged cell-factor projections.
 # RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
 # helper calls, guarded captures and broadcast observation locations.
+# RKPPL 0.1.54 binds shared-prefix queries in the latest world and preserves
+# custom packed-vector storage and its local reads.
 # Guarded gathered reductions through typed aliases: RK 0.1.52 / PPL 0.1.55.
 # RK 0.1.57 / PPL 0.1.64: caller-owned joint density KernelSpecs and geometry.
 # RK 0.1.59 / PPL 0.1.66: property-based whole-parameter geometry dimensions.
@@ -322,5 +351,13 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK 0.1.70 / PPL 0.1.80: matrix-row helpers, vec of a row value, whole arrays read by index.
 # RK 0.1.73 / PPL 0.1.82: a producer plate cell and b[p, 2] of a computed matrix at their rows.
 # f17b6a24 (RK 0.1.67 / PPL 0.1.76): strict cell footprints of per-cell joint fields.
-# 1e43b1b8 (PPL 0.1.90): native row-dependent and computed shared mixture probabilities.
-rev = "1e43b1b844fa32d9d7e231e068e3e061bf67981f"
+# 725059f4 (RKPPL 0.1.89): read-only constrained parameter shapes.
+# 0ee20c70 (PPL 0.1.93): authored local and reusable-definition docs;
+# includes native row-dependent/shared mixture probabilities (0.1.90).
+# Also contains the recoverable adaptive pilot lifecycle introduced in RKPPL 0.1.91.
+# a9a7e9a2 (RKPPL 0.1.97): bound-data LKJ dimensions in reusable definitions.
+# Also contains RK 0.1.82 (b08cb894), which retains live broadcast fusion after
+# binding for batched cell readers.
+# b0ffcdc1 (RKPPL 0.1.98): generated-module-safe SMC checkpoint identities;
+# a9a7e9a2 plus that fix only (main from 8e67ee82: RK snag selective-carrie-1aa69e67).
+rev = "b0ffcdc1d915fc111988ddb6bceca8dabeede643"

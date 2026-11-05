@@ -12,6 +12,11 @@
 # methods are inlined, so a scalar output keeps its Stan source (snag
 # `sum-a-vector-pla-812e04d2`, decision `09e0gc5`).
 StanBlocks.@deffun begin
+    # A downstream plate iterates producer cells, not the storage's first
+    # dimension. Fixed-width vector cells occupy matrix columns; all other
+    # carriers already iterate one value per cell. EachCol is a compiler view.
+    @inline brm_plate_cells(x) = x
+    @inline brm_plate_cells(x::matrix[k, n]) = EachCol(x)
     @inline brm_plate_sum(x::vector[n]) = sum(x)
     @inline brm_plate_sum(x::int[n]) = sum(x)
     @inline brm_plate_sum(x::matrix[k, n]) = x * rep_vector(1.0, cols(x))
@@ -25,7 +30,8 @@ StanBlocks.@deffun begin
     @inline brm_plate_cell(x::vector[n], i) = x[i]
     @inline brm_plate_cell(x::int[n], i) = x[i]
     @inline brm_plate_cell(x::matrix[k, n], i::int) = col(x, i)
-    @inline brm_plate_cell(x::matrix[k, n], idx::int[m]) = x[:, idx]
+    # Several selected vector cells remain a collection at helper boundaries.
+    @inline brm_plate_cell(x::matrix[k, n], idx::int[m]) = EachCol(x[:, idx])
     @inline brm_plate_cell(x::RaggedVector, i) = x[i]
 end
 

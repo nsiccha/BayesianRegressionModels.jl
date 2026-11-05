@@ -83,7 +83,7 @@ function brm_fitted_state(rk::RKBRMI)
         sort!(collect(fit_inputs)), reads,
         Dict{Symbol,Symbol}(_rk_plan_fit_inputs(rk.plan)),
         _rk_recorded_fits(rk), _rk_fitted_constants(rk), _rk_fitted_scalars(rk),
-        sprint(show, brm_source(rk)),
+        sprint(show, brm_source(rk); context=:brm_documentation => false),
         _rk_program_statements(emitted), _rk_layout_coordinate_names(rk),
         _rk_fitted_column_types(rk),
         sort!(collect(_rk_response_names(rk.plan))), Tuple(_rk_held_out_names(rk.plan)))
@@ -157,9 +157,11 @@ function _rk_statement_reads(emitted, plan)
         _rk_source_assignments!(data, statement)
         _rk_source_outputs!(data, statement)
     end
-    [(statement, intersect(_rk_source_symbols!(Set{Symbol}(),
-            Meta.isexpr(statement, :(=), 2) ? statement.args[2] : statement), data))
-        for statement in emitted.main.args if statement isa Expr]
+    map(filter(statement -> statement isa Expr, emitted.main.args)) do statement
+        bare = _brm_undoc(statement)
+        rhs = Meta.isexpr(bare, :(=), 2) ? bare.args[2] : bare
+        (statement, intersect(_rk_source_symbols!(Set{Symbol}(), rhs), data))
+    end
 end
 
 # The definitions an emitted program fits from `inputs` alone: each `name = …`
@@ -168,6 +170,7 @@ end
 function _rk_fitted_definitions(emitted, plan, inputs::Set{Symbol})
     fitted = Dict{Symbol,Set{Symbol}}()
     for (statement, reads) in _rk_statement_reads(emitted, plan)
+        statement = _brm_undoc(statement)
         Meta.isexpr(statement, :(=), 2) && statement.args[1] isa Symbol &&
             !isempty(reads) && all(name -> name in inputs || haskey(fitted, name), reads) ||
             continue
@@ -176,9 +179,11 @@ function _rk_fitted_definitions(emitted, plan, inputs::Set{Symbol})
     end
     fitted
 end
-_rk_fitted_definition(statement, fitted) = Meta.isexpr(statement, :(=), 2) &&
-    statement.args[1] isa Symbol && haskey(fitted, statement.args[1]) ?
-    statement.args[1] : nothing
+function _rk_fitted_definition(statement, fitted)
+    statement = _brm_undoc(statement)
+    Meta.isexpr(statement, :(=), 2) && statement.args[1] isa Symbol &&
+        haskey(fitted, statement.args[1]) ? statement.args[1] : nothing
+end
 
 # The fits the planner computes in Julia, recorded while it plans the fit's own
 # data as a frozen replay of itself (`_brm_fitted`).
@@ -222,7 +227,7 @@ function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
     state.format == _BRM_FITTED_STATE_FORMAT || error(
         "$prefix: a format-$(state.format) fitted state; this BRM reads format " *
         "$_BRM_FITTED_STATE_FORMAT, so export it again from the fit")
-    declaration = sprint(show, template)
+    declaration = sprint(show, template; context=:brm_documentation => false)
     declaration == state.declaration || error(
         "$prefix: the fitted state was exported from another model:\n" *
         "  fitted: $(state.declaration)\n  replay: $declaration")
@@ -243,7 +248,7 @@ function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
         _brm_rk_plan(rebound; held_out,
             fitted_constants=(name, _source) -> get(state.constants, name, nothing))
     end
-    emitted = _rk_emit_ast(plan)
+    emitted = _rk_emit_ast(plan; documentation=brm_documentation(template))
     _rk_check_replay_program(state.program, _rk_program_statements(emitted); prefix)
     _rk_check_replay_priors(emitted, plan, state.scalars, new_data; prefix)
     _rk_check_replay_terms(plan; prefix)
@@ -259,7 +264,7 @@ function _rk_declare_scalars(brmi::BRMI, scalars)
     names = Tuple(sort!([name for name in keys(scalars) if !haskey(operations, name)]))
     isempty(names) && return brmi
     BRMI(merge(NamedTuple{names}(map(name -> NamedColumn(name, DataColumn(scalars[name])), names)),
-        operations))
+        operations), brmi.documentation)
 end
 
 """
@@ -316,8 +321,9 @@ function _rk_fitted_replay(template::BRMI, new_data, state::BRMFittedState;
     groups = Tuple(sort!(collect(groups)))
     frozen = _rk_frozen_subset(state, _rk_resampled_fit_inputs(state, groups))
     program, bound, model = _rk_fitted_build(emitted, plan, frozen, previous)
+    model_plan = previous !== nothing && model === previous.model ? previous.model_plan : plan
     backend = RKBRMI(_brm_resolve_optional_priors(template), plan, model;
-        program, bound, source=template, fitted=_RKFittedReplay(state, frozen, groups))
+        program, bound, source=template, fitted=_RKFittedReplay(state, frozen, groups), model_plan)
     if isempty(groups)
         names = _rk_layout_coordinate_names(backend)
         if coordinates === :growing

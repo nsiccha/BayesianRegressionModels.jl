@@ -4,6 +4,7 @@
 # Σ the field's FEM Matérn × OU × channel covariance, plus the population
 # priors, in value and native gradient.
 include("gmrf_laplace_oracles.jl")
+using Random
 
 @testset "Sparse Laplace integrates a model-scope gmrf field exactly" begin
     y = [0.4, -0.3, 0.2, 0.1]
@@ -110,10 +111,45 @@ end
             @test LDP.logdensity(target, point) ≈ oracle(point) atol=1e-7 rtol=1e-9
         end
         gmrf_laplace_gradient_check(target, oracle, φ)
+        # The plan's importance diagnostic weighs each cell block by its exact
+        # conditional, the field's prior included. With Normal rows that
+        # conditional is the Gaussian the proposal draws from, so all weights
+        # are equal and every block keeps all its draws.
+        state = BRM._brm_spl_mode!(target, φ)
+        ess = BRM._brm_plan_ess(target, state, declaration, 200, 0.5, Xoshiro(18))
+        @test ess.below == 0
+        @test ess.min ≈ ess.draws rtol=1e-8
+        # A local Gaussian diagnostic does not certify arbitrary cell algebra.
+        # Automatic planning retains the conservative structural admission rule.
+        plan = brm_laplace_plan(rk; ad_backend=DI.AutoEnzyme(; mode=Enzyme.Reverse),
+            integrate=:auto)
+        entry = only(e for e in plan.terms if e.declaration === declaration)
+        @test !entry.admitted && entry.importance_ess === nothing
+        @test plan.integrated_dimension == 0
+        # Applying a plan deep-copies its prepared problem and shares the read-only
+        # backend; a per-chain `deepcopy` copies the backend once. All of them hold
+        # the cells' lowered programs, and return what the direct target does.
+        ad_backend = DI.AutoEnzyme(; mode=Enzyme.Reverse)
+        named = brm_laplace_problem(rk; ad_backend,
+            integrate=brm_laplace_plan(rk; ad_backend, integrate=(declaration,)))
+        automatic = brm_laplace_problem(rk; ad_backend, integrate=:auto)
+        chain = deepcopy(target)
+        @test named.backend === rk && automatic.backend === rk && chain.backend !== rk
+        @test isempty(automatic.integrated)
+        @test LDP.dimension(automatic) == length(BRM._rk_layout_coordinate_names(rk))
+        full = rk_logdensity_problem(rk; ad_backend)
+        u = 0.1 .* cos.(1:LDP.dimension(full))
+        @test LDP.logdensity_and_gradient(automatic, u) ==
+            LDP.logdensity_and_gradient(full, u)
+        reference = LDP.logdensity_and_gradient(target, φ)
+        for copied in (named, chain)
+            @test copied.names == names
+            value, gradient = LDP.logdensity_and_gradient(copied, φ)
+            @test value ≈ reference[1] && gradient ≈ reference[2]
+        end
     end
 end
 
-using Random
 @testset "Laplace plans, conditional modes and draws of a gmrf field" begin
     y = [0.4, -0.3, 0.2, 0.1]
     input = merge(data, (; y))

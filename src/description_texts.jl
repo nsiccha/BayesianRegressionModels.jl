@@ -204,6 +204,7 @@ const _BRMD_TEXT_LOCALES = (
         # Coverage and the Markdown page.
         coverage_gap = "No scientific description for {callable} at {id}",
         complete_description = "Complete model description.",
+        authored_documentation = "Authored declaration documentation",
         incomplete_description = "Incomplete model description: {count} parts have no scientific description ({callables}); they are listed under “Coverage gaps” below.",
         incomplete_description_one = "Incomplete model description: 1 part has no scientific description ({callables}); it is listed under “Coverage gaps” below.",
         effective_priors = "Effective priors:",
@@ -408,6 +409,7 @@ const _BRMD_TEXT_LOCALES = (
         r2d2m2_budget = "Dieses R2D2M2/ICC-Budget verteilt einen Simplex über {n_phi} Anteile. Die SD eines Koeffizienten ist seine Referenzskala mal √(φR²/(1−R²)); dies unterscheidet sich von der Residualskala T√(1−R²) des gesamten Prädiktors. Nicht adressierte Koeffizienten behalten ihre separat inventarisierten A-priori-Verteilungen mit freier Skala.",
         coverage_gap = "Keine wissenschaftliche Beschreibung für {callable} bei {id}",
         complete_description = "Vollständige Modellbeschreibung.",
+        authored_documentation = "Dokumentation der Deklarationen aus dem Quelltext",
         incomplete_description = "Unvollständige Modellbeschreibung: {count} Teile haben keine wissenschaftliche Beschreibung ({callables}); sie sind unten unter „Abdeckungslücken“ aufgeführt.",
         incomplete_description_one = "Unvollständige Modellbeschreibung: 1 Teil hat keine wissenschaftliche Beschreibung ({callables}); er ist unten unter „Abdeckungslücken“ aufgeführt.",
         effective_priors = "Effektive A-priori-Verteilungen:",

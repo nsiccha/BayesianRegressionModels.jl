@@ -290,6 +290,33 @@ function _brm_car_shared_data(blocks, m)
     (; last, scale, weight)
 end
 
+# Each shared value as a sparse row of the original linear map. Independent
+# entries read themselves; a component's dependent last entry reads that
+# component. The rows hold 2m - ncomponents indices in total.
+function _brm_car_shared_rows(last)
+    rows = [[j] for j in eachindex(last)]
+    start = 1
+    for (j, l) in enumerate(last)
+        if j == l
+            rows[j] = collect(start:j)
+            start = j + 1
+        end
+    end
+    rows
+end
+
+function _brm_car_shared_coefficients(last, scale, weight)
+    coefficients = [[1.0] for _ in last]
+    start = 1
+    for (j, l) in enumerate(last)
+        if j == l
+            coefficients[j] = vcat(-weight[start:j-1], scale[j])
+            start = j + 1
+        end
+    end
+    coefficients
+end
+
 """
     _brm_car_shared_values(w, last, scale, weight)
 

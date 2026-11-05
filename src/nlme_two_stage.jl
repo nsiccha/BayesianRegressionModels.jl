@@ -94,22 +94,21 @@ function LogDensityProblems.logdensity_and_gradient(p::BRMNLMEUnitProblem, z)
     _brm_nlme_unit_prior(z) + value, transpose(p.factor) * gradient .- z
 end
 
-# A copy of `m` with its own prepared subject-cell queries and compact gradient
-# samplers, so units evaluate concurrently on another thread; everything else
-# is shared read-only. A nested model without subject cells evaluates unit
-# gradients through the whole-model sampler and has no per-cell workspace to
-# copy.
+# A worker owns its mutable value partition and AD sampler. The binding,
+# cell metadata and structural Hessian patterns are shared read-only.
 function _brm_nlme_worker_model(m::BRMNLMEModel)
     m.cell_gradient === nothing && _brm_nlme_error(
         "brm_two_stage_fit: units of a nested model without subject cells " *
         "evaluate through the whole-model sampler, which one thread owns; " *
         "use `threads = 1`")
-    cell_query = _brm_nlme_cell_queries(m.backend, m.cell_query)
-    # Fresh samplers and buffers (each worker owns its AD workspace) over the
-    # cell reads `m` measured once.
+    cell_query = m.cell_query
     (; reads, plan, patterns) = _brm_nlme_cell_state(m)
-    plan = _brm_nlme_worker_plan(plan, m.backend, m.cell_query, m.unit)
-    cell_gradient = (; state=Ref{Any}((; reads, plan, patterns)), lock=ReentrantLock())
+    g = m.cell_gradient
+    partition = (; g.context, query=_rk_nlme_partition_query(g.context, m.unit),
+        g.labels, g.footprints, point=copy(m.unit))
+    plan = _brm_nlme_worker_plan(plan, partition, m.unit)
+    cell_gradient = (; partition..., state=Ref{Any}((; reads, plan, patterns)),
+        lock=ReentrantLock())
     BRMNLMEModel(m.view, m.backend, m.sampler, m.pointwise, m.eta_hvp, m.attribution,
         m.theta, m.sigma, m.eta_blocks, m.unit, m.observations_query,
         m.observations_pushforward, m.observed, m.observation_attribution,
