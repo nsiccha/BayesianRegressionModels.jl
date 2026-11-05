@@ -382,7 +382,14 @@ const PINS = [
     # de016556 / libEnzyme c1743bf9 retains those fixes and frees constant
     # loop-count caches after Forward over Reverse. Repeated sparse Laplace
     # cell HVPs otherwise retain native memory (forward-over-rev-f93d10bc).
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "de016556e7b8f7b037736847fd58f6a12bc3701e"),  # dogfood
+    # d3189970 / libEnzyme 33709d12 keeps those and adds two repairs this
+    # branch's Laplace needs. Without the first, a forced bounded ODL plan's
+    # Forward over Reverse cell HVPs stop on "Mismatch codegen type" through
+    # a non-inlined `Base.unalias` (julia-1-10-unali-c91b1f15). Without the
+    # second, ordinary Reverse drops the input shadow of a non-inlined gather
+    # and the strict `mo1()` summand partition gradient segfaults
+    # (ordinary-autoenz-6cf1298d, RK monotonic-summan-c191e14a).
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "d31899704b6f5eab6e3843c9517a5486d2139740"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also
