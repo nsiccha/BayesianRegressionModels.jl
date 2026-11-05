@@ -191,7 +191,7 @@ Each row contributes `log_sum_exp(log(weights) + component_lpdf)`, with
 matching pointwise log likelihoods. On SBBRMI, posterior-predictive draws
 select a component per row and draw from it.
 
-Every component is scalar. Since BRM 0.2.173, SBBRMI and RKBRMI also accept
+Every component is scalar. Since BRM 0.2.174, SBBRMI and RKBRMI also accept
 different continuous families whose support is the whole real line, such as
 `MixtureModel([Normal(mu, sigma), Cauchy(mu, tau)], [1-w, w])`.
 Each family keeps its own argument count and parameterization, so a

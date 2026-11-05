@@ -2,6 +2,7 @@ module SMCTuningFixture
 
 using BayesianRegressionModels, Distributions
 using Random
+using WarmupHMC: MatrixFactorization, SuccessiveReflections
 
 # A normalized Gaussian regression with a narrow sum direction and a wider
 # difference direction. The oracle is scalar two-variable Gaussian algebra;
@@ -65,6 +66,11 @@ function checkpoint_equal(a, b)
     typeof(a) == typeof(b) || return false
     if a isa Random.Xoshiro
         return a == b && rand(copy(a), 16) == rand(copy(b), 16)
+    elseif a isa Union{MatrixFactorization,SuccessiveReflections}
+        # These lazy operators store factors but do not support getindex.
+        # Compare the complete stored state without materializing a matrix.
+        return all(checkpoint_equal(getfield(a, i), getfield(b, i))
+            for i in 1:fieldcount(typeof(a)))
     elseif a isa AbstractArray
         return axes(a) == axes(b) && all(checkpoint_equal(a[i], b[i]) for i in eachindex(a))
     elseif a isa AbstractDict

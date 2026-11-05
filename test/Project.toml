@@ -60,7 +60,7 @@ PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
 StanBlocks = "0.2.25"
-Treebars = "0.1.1"
+Treebars = "0.1.5"
 Turing = "0.46"
 WarmupHMC = "0.2.11"
 julia = "1.10"
@@ -154,7 +154,8 @@ rev = "dba6536683e8c226f2e74823856d0d85e7ad02a2"
 url = "https://github.com/nsiccha/Treebars.jl"
 # Includes cooperative interruption used by BRM's progress hooks.
 # Treebars 0.1.5 also satisfies the pinned ReactiveKernelsPPL extension floor.
-rev = "0c22ab3b1a38aad1df36c013f36aa923e0891975"
+# 0.1.5: nested progress used by recoverable adaptive SMC pilots.
+rev = "44c37e60e22bab9e8a0d3ab88bd47b575dec6bb0"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
@@ -319,6 +320,7 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # fbf65b46 (RK 0.1.65 / PPL 0.1.74): prepared queries holding modules deep-copy.
 # f17b6a24 (RK 0.1.67 / PPL 0.1.76): strict cell footprints of per-cell joint fields.
 # 1e43b1b8 (PPL 0.1.90): native row-dependent and computed shared mixture probabilities.
+# Includes the recoverable adaptive pilot lifecycle introduced in PPL 0.1.91.
 # e190bff0 (PPL 0.1.92): heterogeneous native mixture component graphs.
 # 0ee20c70 (PPL 0.1.93): authored local and reusable-definition docs.
 # 405190ae (RK 0.1.81 / PPL 0.1.94): same-model empty observation rebinding.
