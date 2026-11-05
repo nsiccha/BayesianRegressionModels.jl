@@ -8790,7 +8790,8 @@ function _sb_emit_vector_prior!(stmts, data, target, ::Type{<:LKJCholesky}, op)
         "that name is already used")
     data[n_key] = spec.K
     lhs = Expr(:(::), target, Expr(:ref, :cholesky_factor_corr, n_key))
-    push!(stmts, Expr(:call, :~, lhs, Expr(:call, :lkj_corr_cholesky, spec.eta)))
+    push!(stmts, Expr(:call, :~, lhs,
+        Expr(:call, :lkj_corr_cholesky, _sb_effect_prior_arg(spec.eta))))
     true
 end
 

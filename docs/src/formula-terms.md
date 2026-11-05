@@ -539,7 +539,9 @@ gives the regional slopes and the regional HSGP curves one shared, learned
 correlation between the 17 regions.
 
 - `Omega ~ LKJCholesky(K, eta)` is a sampled `cholesky_factor_corr[K]` under
-  the LKJ prior, with literal `K` (the number of levels of `g`) and `eta`.
+  the LKJ prior. `K` (the number of levels of `g`) and `eta` may be literals
+  or known data inputs; `K` is an integer at least one and `eta` is finite
+  and strictly positive.
   `cor=C` may instead name a known correlation matrix supplied as data.
 - A random-effect block `(effects | gr(g; cor=Omega))` multiplies its levels ×
   coefficients effects on the left by `L_Omega`: its law is `Omega ⊗ Sigma`,

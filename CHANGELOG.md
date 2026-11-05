@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.174
+## 0.2.175
 
 - Added: SVI units own ordinary sampled coordinates read only within that
   unit, with their authored priors, Jacobians and global hyperparameter
@@ -75,6 +75,14 @@ instead of failing at run time.
   custom packed vectors. Unit gradients use ordinary Enzyme Reverse, with the
   test bootstrap's Enzyme dogfood pin, which contains `68ed90fe`'s repair for
   matrix-window partition gradients on Julia 1.10.
+
+## 0.2.174
+
+- `LKJCholesky(K, eta)` accepts data-supplied scalar dimensions and
+  concentrations in `SBBRMI` and `RKBRMI`, including reusable and nested
+  `@brm function` components. RK source retains named inputs while coordinate
+  bookkeeping uses their bound dimension. The RK backend requires
+  ReactiveKernelsPPL 0.1.97 for data-supplied LKJ dimensions.
 
 ## 0.2.173
 

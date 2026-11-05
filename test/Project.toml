@@ -345,4 +345,5 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # Also contains the recoverable adaptive pilot lifecycle introduced in RKPPL 0.1.91.
 # c1f175d7 (RK 0.1.84 / PPL 0.1.96): batched authored queries share
 # binding validation and compact preparation metadata; event inventory borrows exemplars.
-rev = "c1f175d73fb6f934117eadcc0ddfa634f48b2141"
+# a9a7e9a2 (RKPPL 0.1.97): bound-data LKJ dimensions in reusable definitions.
+rev = "a9a7e9a2182ef2057c004a3c81dd74eef4f3a699"

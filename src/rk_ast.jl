@@ -2236,10 +2236,12 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         elseif parameter.family === :LKJCholesky
             # A level correlation's factor: its free values share Stan's
             # `cholesky_factor_corr` transform and carry over by name.
-            sampled = _rk_ast_sampled(parameter)
+            args = map(arg -> _rk_value_expr!(bindings, arg, taken), parameter.args)
+            sampled = Expr(:call, :~, parameter.name, Expr(:call, :LKJCholesky, args...))
             push!(stmts, sampled)
             _rk_coordinate_record!(coordinates, (; kind=:lkj_cholesky,
-                declaration=parameter.name, K=first(parameter.args)))
+                declaration=parameter.name,
+                K=something(parameter.dimension, first(parameter.args))))
         else
             sampled = _rk_ast_sampled(parameter)
             push!(stmts, sampled)

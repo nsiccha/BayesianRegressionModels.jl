@@ -310,7 +310,8 @@ const PINS = [
     # Also contains the adaptive pilot lifecycle introduced in RKPPL 0.1.91.
     # c1f175d7 (RK 0.1.84 / PPL 0.1.96): compact authored-query batches
     # share binding validation and exemplars; event inventory avoids full copies.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "c1f175d73fb6f934117eadcc0ddfa634f48b2141"),
+    # a9a7e9a2 (RKPPL 0.1.97): bound-data LKJ dimensions in reusable definitions.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a9a7e9a2182ef2057c004a3c81dd74eef4f3a699"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
