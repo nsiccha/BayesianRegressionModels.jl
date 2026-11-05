@@ -33,6 +33,7 @@ instead of failing at run time.
 - Not yet: a `VonMises` prior's prior-only program still asks for
   `brm_von_mises_lcdf`. Declaring its moving support `[mu - pi, mu + pi]` the
   same way needs StanBlocks snag `autokwargs-suppo-412811f6`.
+
 ## 0.2.197
 
 - Added: SVI units own ordinary sampled coordinates read only within that
