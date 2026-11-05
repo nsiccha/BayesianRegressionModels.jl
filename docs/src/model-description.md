@@ -23,8 +23,12 @@ Pass the bound model to the view:
 using HTMXObjects
 
 view = brm_model_view(model_view_demo; title="Regression model")
-repr("text/html", view)       # also text/markdown and text/plain
+repr("text/html", view)       # also text/markdown
 ```
+
+With HTMXObjects 0.1.60, the `text/plain` projection of a tabbed view exposes
+internal node representations. Use Markdown for readable text until the shared
+renderer fixes this limitation; HTML and PDF are unaffected.
 
 Use the result inside another semantic page or as an HTMXObjects route result.
 Source, roles/ranks and callable documentation have separate tabs. Callable

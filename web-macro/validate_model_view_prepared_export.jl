@@ -54,10 +54,10 @@ descriptor = brm_descriptor(PreparedExportFixture.simplex,
     (; x=[-1., 0., 1.], y=[0.1, 0.2, 0.3]))
 PreparedExportFixture.inspecting[] = true
 try
-    page = PreparedModelViewExportPage(;
-        rk_view=brm_model_view(rk; title="RK model with ragged parameters"),
-        descriptor_view=brm_model_view(descriptor; title="Regression with simplex weights"),
-        component_view=brm_model_view(PreparedExportFixture.optional_inputs; title="Component with defaults"))
+    page = PreparedModelViewExportPage(
+        brm_model_view(rk; title="RK model with ragged parameters"),
+        brm_model_view(descriptor; title="Regression with simplex weights"),
+        brm_model_view(PreparedExportFixture.optional_inputs; title="Component with defaults"))
     route!(page)
     vendorfiles()
     result = export_site(joinpath(output, "site", "prepared");
