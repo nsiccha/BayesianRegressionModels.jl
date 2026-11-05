@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.200
+
+- Fixed: a prior-only program (the response column omitted) with a
+  `VonMises` prior builds on SBBRMI and draws the prior with the family's own
+  RNG, a sampled mean included. Before, it failed at transpile: family
+  `brm_von_mises` requires companion `brm_von_mises_lcdf`. The family's own
+  support `[mu - pi, mu + pi]` is now declared through StanBlocks'
+  `autokwargs` hook, as `InverseGaussian`'s is since 0.2.198, not spelled as
+  bounds whose prior-only re-draw was the truncated draw (todo `0w0ukqc`). A
+  fitted program is unchanged: the parameter keeps its moving-support
+  declaration and the plain kernel; a bound that narrows the support still
+  restricts the prior.
+  - `[compat] StanBlocks = "0.2.30"`: StanBlocks reads the qualifier of an
+    argument-dependent support from 0.2.30 on (snag
+    `autokwargs-suppo-412811f6`).
+
 ## 0.2.199
 
 - Direct plate reads of component results use the returned cells' axis on both

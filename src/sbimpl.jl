@@ -2091,6 +2091,22 @@ StanBlocks.@deffun begin
         rv
     end
 end
+# The family's own support (stanblocks-use §8, "A bound may read the family's
+# arguments"), which its density and RNG honour: `[mu - pi, mu + pi]`, or
+# `[lo, hi)` for the principal interval. StanBlocks declares it on a prior's
+# parameter, a sampled `mu` included, and draws a prior-only value with
+# `brm_von_mises_rng`; spelled as bounds instead, the draw was a truncated
+# re-draw asking for an `_lccdf` companion the family does not have (todo
+# 0w0ukqc). Needs StanBlocks 0.2.30 (snag autokwargs-suppo-412811f6). Scalar
+# arguments only, as a prior's are; a per-row location keeps no declaration.
+function StanBlocks.autokwargs(x::StanBlocks.CanonicalExpr{typeof(brm_von_mises),
+        <:Tuple{Vararg{StanBlocks.StanExpr{<:Any,<:StanBlocks.StanType{<:Any,0}},5}}})
+    mu, _, lo, hi, principal = x.args
+    principal = StanBlocks.expr(principal)
+    principal === 1 && return (; lower=lo, upper=hi)
+    principal === 0 || return (;)
+    (; lower=StanBlocks.stan_call(-, mu, pi), upper=StanBlocks.stan_call(+, mu, pi))
+end
 
 # Inverse-Gaussian (Wald) density with the BRM support contract made explicit.
 # StanBlocks registers no `inverse_gaussian` builtin — neither the pinned
@@ -8479,24 +8495,28 @@ function _sb_emit_prior!(stmts, target, ::Type{<:Horseshoe}, op)
     true
 end
 
-# The prior uses the same exact density/RNG as an observation. Its declaration
-# additionally carries the distribution's support, including a sampled mean.
+# The prior uses the same exact density/RNG as an observation. The family
+# declares its support `[mu - pi, mu + pi]` itself, a sampled mean included
+# (`autokwargs` above), so only a bound that narrows it is spelled, intersected
+# with the support, and that one restricts the prior.
 function _sb_emit_prior!(stmts, target, ::Type{<:VonMises}, op)
     args = map(_sb_effect_prior_arg, getargs(op))
     mu, kappa = _sb_stan_dist_args(VonMises, args)
-    lower = mu isa Real ? mu - pi : :($mu - $(Float64(pi)))
-    upper = mu isa Real ? mu + pi : :($mu + $(Float64(pi)))
     bounds = _sb_prior_bound_keywords(target, VonMises, getkwargs(op))
     supplied = Dict(kw.args[1] => kw.args[2] for kw in bounds.args)
-    if haskey(supplied, :lower)
-        lower = _sb_bound_intersection(max, lower, supplied[:lower])
+    narrowing = Pair{Symbol,Any}[]
+    for (key, f, side) in ((:lower, max, :-), (:upper, min, :+))
+        haskey(supplied, key) || continue
+        support = mu isa Real ? (side === :- ? mu - pi : mu + pi) :
+            Expr(:call, side, mu, Float64(pi))
+        bound = _sb_bound_intersection(f, support, supplied[key])
+        bound isa Real && bound == support && continue
+        push!(narrowing, key => bound)
     end
-    if haskey(supplied, :upper)
-        upper = _sb_bound_intersection(min, upper, supplied[:upper])
-    end
-    declaration = _sb_prior_bound_keywords(target, VonMises, (; lower, upper))
-    push!(stmts, Expr(:call, :~, target,
-        Expr(:call, brm_von_mises, declaration, mu, kappa, 0.0, 0.0, 0)))
+    rhs = Expr(:call, brm_von_mises, mu, kappa, 0.0, 0.0, 0)
+    isempty(narrowing) || insert!(rhs.args, 2,
+        _sb_prior_bound_keywords(target, VonMises, (; narrowing...)))
+    push!(stmts, Expr(:call, :~, target, rhs))
     true
 end
 
