@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.198
+## 0.2.201
 
 - SMC worker parallelism from ReactiveKernelsPPL 0.1.100 (now the floor).
   Every `brm_smc_tune` method (initial, prepared Laplace, cumulative update,
@@ -24,6 +24,51 @@ instead of failing at run time.
   Every `brm_smc_resume` method (initial/update, Laplace, carried window) takes
   `nthreads=n` to replace a production checkpoint's saved worker cap; the
   resumed cloud does not depend on it.
+
+## 0.2.200
+
+- Fixed: a prior-only program (the response column omitted) with a
+  `VonMises` prior builds on SBBRMI and draws the prior with the family's own
+  RNG, a sampled mean included. Before, it failed at transpile: family
+  `brm_von_mises` requires companion `brm_von_mises_lcdf`. The family's own
+  support `[mu - pi, mu + pi]` is now declared through StanBlocks'
+  `autokwargs` hook, as `InverseGaussian`'s is since 0.2.198, not spelled as
+  bounds whose prior-only re-draw was the truncated draw (todo `0w0ukqc`). A
+  fitted program is unchanged: the parameter keeps its moving-support
+  declaration and the plain kernel; a bound that narrows the support still
+  restricts the prior.
+  - `[compat] StanBlocks = "0.2.30"`: StanBlocks reads the qualifier of an
+    argument-dependent support from 0.2.30 on (snag
+    `autokwargs-suppo-412811f6`).
+
+## 0.2.199
+
+- Direct plate reads of component results use the returned cells' axis on both
+  backends. Shared arrays inside a component no longer count as rows of a
+  formula predictor. Nested components and plates whose extent comes only
+  from the returned value keep the same direct indexing syntax.
+
+## 0.2.198
+
+- Fixed: a prior-only program (the response column omitted) with an
+  `InverseGaussian` prior builds on SBBRMI and draws the prior with the
+  family's own RNG. Before, it failed at transpile: family
+  `brm_inverse_gaussian` requires companion `brm_inverse_gaussian_lcdf`. The
+  positive half-line is now the family's declared support (StanBlocks'
+  `autokwargs` hook), not a bound whose prior-only re-draw was the truncated
+  draw (todo `0w0ukqc`). A fitted program is unchanged: the parameter keeps its
+  `real<lower=0>` declaration and the family's plain kernel. A bound that
+  narrows the support, `restricted(InverseGaussian(m, l); lower=0.5)`, still
+  restricts the prior.
+- The prior-program warning at construction no longer says that every
+  parameter forward-simulates when the program holds a `restricted` prior. It
+  names those priors and says that one whose mass inside its bounds moves with
+  a sampled argument or bound stays a sampled parameter, with what its bounds
+  and arguments read, so that program needs a sampler (StanBlocks' rule since
+  0.2.72).
+- Not yet: a `VonMises` prior's prior-only program still asks for
+  `brm_von_mises_lcdf`. Declaring its moving support `[mu - pi, mu + pi]` the
+  same way needs StanBlocks snag `autokwargs-suppo-412811f6`.
 
 ## 0.2.197
 

@@ -156,7 +156,9 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # dba65366 (0.2.25) preserves keyword labels when a plate renames its
 # inputs, including BRM component calls whose formal and actual names match.
 # ea1d64f0 (0.2.26) keeps EachCol/EachRow views through ordinary helpers.
-rev = "ea1d64f0c691092b9d4e7d8ad03ab83727671264"
+# 904e839a (0.2.30) makes a number passed to `stan_call` a data literal, which
+# `brm_von_mises`'s argument-dependent `autokwargs` support needs.
+rev = "904e839a2e6059f42f3387b3618c8cc17664835c"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
