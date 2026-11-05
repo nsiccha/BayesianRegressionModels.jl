@@ -637,9 +637,10 @@ function BRM._rk_nlme_partition_context(backend::BRM.RKBRMI, cells, keys, partit
 end
 
 # BRM supplies semantic ownership; the public RKPPL declaration assigns each
-# parameter's first axis to those same integer unit keys. Other axes repeat
-# that ownership in packed column-major order. Entirely shared entries stay
-# undeclared; a shared position inside a mixed entry has the RK label `missing`.
+# parameter's constrained first axis to those same integer unit keys. The
+# labels repeat cyclically over packed coordinates, including compressed
+# transforms with fewer packed coordinates than first-axis entries. Entirely
+# shared entries stay undeclared; shared positions in mixed entries use `missing`.
 BRM._rk_nlme_partitioned(backend::BRM.RKBRMI, view::BRM.BRMNLMEView) =
     BRM._rk_nlme_partitioned(backend, view.subject)
 
@@ -650,12 +651,14 @@ function BRM._rk_nlme_partitioned(backend::BRM.RKBRMI, owner::Vector{Int})
         owners = @view owner[positions]
         any(!iszero, owners) || continue
         n = isempty(entry.dims) ? entry.size : first(entry.dims)
-        0 < n <= length(owners) &&
-            all(j -> owners[j] == owners[mod1(j, n)], eachindex(owners)) ||
+        uniform = all(==(first(owners)), owners)
+        n > 0 && (uniform || (n <= length(owners) &&
+            all(j -> owners[j] == owners[mod1(j, n)], eachindex(owners)))) ||
             BRM._brm_nlme_error("brm_nlme_model: parameter `$(entry.name)` " *
                 "cannot represent its subject ownership on its first axis")
+        axis_owners = n > length(owners) ? fill(first(owners), n) : view(owners, 1:n)
         labels = Union{Missing,Int}[iszero(owner) ? missing : owner
-            for owner in @view owners[1:n]]
+            for owner in axis_owners]
         push!(declarations, entry.name => labels)
     end
     declarations

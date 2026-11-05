@@ -39,6 +39,10 @@ end
     @test metadata.ncoordinates == length(block) == 1
     @test all(iszero, m.view.coordinate_subject[block])
     original = deepcopy(m.view)
+    ownership = BRM._brm_svi_connected_ownership(m; separator=:auto)
+    @test all(==(1), ownership.owner[block])
+    declarations = Dict(BRM._rk_nlme_partitioned(rk, ownership.owner))
+    @test declarations[event.site] == [1, 1]
     target = BRM._brm_svi_target(m; separator=:auto)
     @test all(==(1), target.ownership.owner[block])
     @test m.view.subject_levels == original.subject_levels

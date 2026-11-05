@@ -14,6 +14,9 @@ instead of failing at run time.
 
 ## 0.2.174
 
+- Fixed: partition declarations for wholly unit-owned compressed transforms
+  use the constrained first-axis label count. A local 2×2 Cholesky factor
+  with one packed coordinate no longer fails the BRM ownership adapter.
 - Added: SVI units own ordinary sampled coordinates read only within that
   unit, with their authored priors, Jacobians and global hyperparameter
   gradients counted once. Structural supports close over joint laws and
