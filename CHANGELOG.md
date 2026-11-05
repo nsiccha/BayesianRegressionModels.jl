@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.175
+
+- Applying an explicitly selected Laplace plan over a per-cell `gmrf` field
+  and copying its target per chain preserve the direct target's coordinates,
+  value and gradient. The dependency floor now includes ReactiveKernels
+  0.1.70's supporting copy machinery; the ReactiveKernelsPPL floor is
+  unchanged.
+- The block importance diagnostic includes the `gmrf` precision prior in its
+  weights. For an exactly Gaussian conditional, every proposed draw retains
+  equal weight. This diagnostic does not change automatic eligibility:
+  unrecognized plate-cell algebra still requires explicit integration.
+- The count-field prior-median diagnostic fixture uses a declared log link,
+  retaining its ESS assertions under structural automatic selection.
+
 ## 0.2.174
 
 - `LKJCholesky(K, eta)` accepts data-supplied scalar dimensions and
