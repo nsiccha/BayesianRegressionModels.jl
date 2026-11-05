@@ -2641,3 +2641,56 @@ function brm_check_coordinate_transport(t::BRMCoordinateTransport, rk::RKBRMI,
        simplexes=length(t.simplexes), centered=length(t.centered),
        completions=length(t.completions), fields=length(t.fields), max_error)
 end
+
+# Multiresolution sampler coordinates identify shared spatial innovations,
+# channel labels, and the times retained by that innovation's readers.
+function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
+        ::Val{:gmrf_multiresolution}, record, rk, d, stan, stan_pos)
+    entry = _brm_term_entry(d, record.predictor,
+        e -> getf(e.value) === gmrf && _brm_transport_gmrf_axes(e.value) == record.axes,
+        "`gmrf$(record.axes)`")
+    base = (; kind=:gmrf_multiresolution, predictor=record.predictor, term=entry.term)
+    target = _sb_lp_emitted_name(record.predictor, entry.link)
+    prepared = only(e.const_.prepared for e in values(d.plan.preproc)
+        if e.kind === :gmrf && e.const_.prepared.state.target === target &&
+            e.const_.prepared.source == record.axes)
+    state = prepared.state
+    f, columns = record.fit, rk.plan.columns
+    native = brm_gmrf_multiresolution_support(columns[f.east], columns[f.north],
+        columns[f.time], columns[f.channel], record.multiresolution).geometry
+    g = state.support
+    record.multiresolution == state.multiresolution && native.times == g.times &&
+        native.spatial.conditionals.east == g.spatial.conditionals.east &&
+        native.spatial.conditionals.north == g.spatial.conditionals.north &&
+        native.spatial.basis_ptr == g.spatial.basis_ptr &&
+        native.spatial.basis_node == g.spatial.basis_node &&
+        native.paths.state_ptr == g.paths.state_ptr && native.paths.state_time == g.paths.state_time &&
+        Set(record.state_axes.channels) == Set(state.channels) ||
+        _brm_transport_error(:parameterization_mismatch,
+            "brm_coordinate_transport: GMRF $(base) has different shared OU coordinates")
+    C = length(state.channels)
+    channel_index = Dict(c => i for (i, c) in enumerate(state.channels))
+    for (parameter, local_name) in ((:sd, :sigma), (:spatial_length, :spatial_length),
+            (:temporal_length, :temporal_length), (:field, :field))
+        isnothing(_brm_term_known_value(d.plan.parent, record.predictor,
+            entry.value, parameter)) || continue
+        names = _brm_transport_elements(
+            _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
+            (; base..., parameter))
+        declaration = Symbol(record.declaration, ".", getproperty(record.locals, local_name))
+        if parameter === :field
+            length(names) == g.ncoordinates || _brm_transport_error(:parameterization_mismatch,
+                "brm_coordinate_transport: GMRF $(base) field coordinate count disagrees")
+            for j in 1:g.ncoordinates
+                coordinate = _brm_multiresolution_coordinate(native, record.state_axes.channels, j)
+                k = channel_index[coordinate.channel] + C * ((j - 1) ÷ C)
+                push!(pairs, BRMCoordinatePair((; base..., parameter, coordinate...),
+                    Symbol(declaration, ".", j), names[k], declaration, (j,), :identity))
+            end
+        else
+            push!(pairs, BRMCoordinatePair((; base..., parameter, index=1),
+                declaration, only(names), declaration, (), :identity))
+        end
+    end
+    nothing
+end

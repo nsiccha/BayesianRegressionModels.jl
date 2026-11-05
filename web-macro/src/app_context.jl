@@ -15,8 +15,6 @@ y1 ~ Normal(loc, err)
         :transform           => "2. Transform",
         :wrap                => "3. Wrap",
         :brmi                => "4. BRMI",
-        :vbrmi               => "5. VBRMI",
-        :bench               => "6. Benchmark",
         :slic_model          => "5a. SlicModel",
         :stan_code           => "5b. StanCode",
         :stan_compile        => "5c. StanCompile",

@@ -53,10 +53,10 @@ const TESTENV = @__DIR__
 # name => (github url, pinned commit)   — comment records the branch the commit
 # is on, for humans; the pin itself is the full SHA and needs no branch.
 const PINS = [
+    ("ReparametrizableDistributions", "https://github.com/nsiccha/ReparametrizableDistributions.jl.git", "8f7d382df700d3780ed31d093bc4983d3734a6c6"),  # 0.3.0: WarmupHMC dependency; BRM no longer depends on this directly
     ("PowerScaling", "https://github.com/nsiccha/PowerScaling.jl.git", "8d27c83f6928781a39c99c31fd3d528b50ef2dad"),  # 0.1.0: generic power-scaling sensitivity on PSIS.jl
-    ("ReparametrizableDistributions", "https://github.com/nsiccha/ReparametrizableDistributions.jl.git", "8f7d382df700d3780ed31d093bc4983d3734a6c6"),  # 0.3.0: shared parameter views, Cholesky and simplex transforms
     ("HTMX", "https://github.com/nsiccha/HTMX.jl.git", "0b8dc2f94e879bf31237bd28e751cf2ebc8d95f6"),
-    ("HTMXObjects", "https://github.com/nsiccha/HTMXObjects.jl.git", "1de5b7aa45bc8ed8e7cf3db86c7d376dd5e5c04e"), # 0.1.58: reusable semantic model views
+    ("HTMXObjects", "https://github.com/nsiccha/HTMXObjects.jl.git", "5853ba527ad09e733b6abee11728856becd628ec"), # 0.1.62: Julia documentation references and doctest highlighting
     ("DynamicObjects", "https://github.com/nsiccha/DynamicObjects.jl.git", "c84047be45cd2bba8a1d02660af9408d4cdf58f4"),
     ("TreeArrays", "https://github.com/nsiccha/TreeArrays.jl.git", "53cfd1b17ee4d1b726dcecfe151458ae41bd20a8"),
     ("AlgebraOfVega", "https://github.com/nsiccha/AlgebraOfVega.jl.git", "73695d5d563074bfd9ab1f98debf2ebe38d7bd00"),
@@ -440,18 +440,10 @@ function main()
     Pkg.develop(PackageSpec[
         PackageSpec(path=path) for (_name, path) in sort!(collect(paths))
     ])
-    # Older Julia 1.10 runtimes need a serial build of the sibling Turing
-    # extensions before the normal parallel pass. Julia 1.10.12 includes the
-    # loadable_exts fix and uses ordinary parallel precompilation directly.
     Pkg.instantiate(; allow_autoprecomp=false)
     # Before the first precompile, so Enzyme_jll builds against the declared
     # libEnzyme.
     apply_dogfood_libenzyme()
-    if v"1.10" <= VERSION < v"1.10.12"
-        withenv("JULIA_NUM_PRECOMPILE_TASKS" => "1") do
-            Pkg.precompile(["Pathfinder", "Turing"])
-        end
-    end
     Pkg.precompile()
     return nothing
 end

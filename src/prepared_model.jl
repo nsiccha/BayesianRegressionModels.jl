@@ -197,8 +197,8 @@ end
 # it to one of these families applies the link twice — silently fitting
 # `bernoulli_logit(logistic(eta))`, whose expressible probabilities collapse
 # to [0.5, 0.731] (snag logit-link-predi-e5d55be7). RK rejects this shape at
-# its own seam (`_rk_classify_response`); sbimpl and Turing share this
-# backend-neutral validator, each calling it with its own prefix right after
+# its own seam (`_rk_classify_response`); sbimpl uses this
+# backend-neutral validator, calling it with its own prefix right after
 # `_brm_prepare_model`. Only DIRECT predictor references are checked: an
 # explicit re-link (`Normal(log(Vc), sigma)`, a documented brm-use pattern)
 # maps back to the linear scale and keeps working, while nested arithmetic on
@@ -320,14 +320,6 @@ function _brm_prepare_expr(x, axes::AbstractDict{Symbol,Symbol})
 end
 
 _brm_prepare_expr(x; axes=Dict{Symbol,Symbol}()) = _brm_prepare_expr(x, axes)
-
-# A prior is constructed at its parameter site, outside observation loops.
-# Named data used by that call is a whole mathematical value, as are sampled
-# parameters and deterministic hyperparameters referenced by the prior.
-function _brm_prepare_prior_expr(expression)
-    references = _brm_operation_references!(Set{Symbol}(), expression)
-    _brm_prepare_expr(expression, Dict(name => :whole for name in references))
-end
 
 function _brm_prepare_call_expr(callable, expression, axes)
     args = map(arg -> _brm_prepare_expr(arg, axes), getargs(expression))

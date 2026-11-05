@@ -40,7 +40,6 @@ const BRM = BayesianRegressionModels
     @test Base.remove_linenums!(emitted) == Base.remove_linenums!(expected)
 end
 
-
 @testset "backend-neutral linked population predictor" begin
     df = (; x=[-1.0, 0.5, 2.0], y=[0, 2, 5])
     brmi = (@brm begin
@@ -62,31 +61,6 @@ end
     @test occursin("lambda = exp(log_lambda)", emitted)
 end
 
-
-@testset "generic Turing plan reuses backend-neutral predictors" begin
-    df = (;
-        x=[-1.0, 0.5, 2.0], z=[0.0, 1.0, -0.5],
-        trials=[4, 6, 5], y=[1, 4, 2])
-    brmi = (@brm begin
-        logit(mean) ~ 1 + x
-        log(precision) ~ 1 + z
-        y ~ BRM.BetaBinomial2(trials, mean, precision)
-    end)(df)
-    plan = BRM._brm_turing_plan(brmi)
-
-    mean = only(filter(p -> p.predictor.name === :mean, plan.predictors))
-    precision = only(filter(p -> p.predictor.name === :precision,
-                            plan.predictors))
-    @test mean.predictor.link_lhs_fn === logit
-    @test precision.predictor.link_lhs_fn === log
-    @test mean.design.matrix == hcat(ones(3), df.x)
-    @test precision.design.matrix == hcat(ones(3), df.z)
-    @test plan.distribution.callable === BRM.BetaBinomial2
-    @test plan.distribution.args[1] == BRM._BRMPreparedRef(:trials, :observation)
-    @test plan.response == df.y
-end
-
-
 @testset "backend-neutral plain random-intercept geometry" begin
     df = (;
         x=[-1.0, 0.5, 2.0, 0.25],
@@ -102,15 +76,12 @@ end
     block = only(BRM._brm_simple_random_effect_plans(
         brmi, :mu, context; required=true))
     sb = SBBRMI(brmi)
-    plan = BRM._brm_turing_plan(brmi)
 
     @test block.group === :subject
     @test block.levels == ["a", "b", "c"]
     @test block.indices == [2, 1, 2, 3]
     @test block.indices == sb.data[:subject_idx]
     @test length(block.levels) == sb.data[:n_subject]
-    @test plan.design.matrix == hcat(ones(4), df.x)
-    @test only(plan.random_effects).indices == block.indices
 
     sloped = (@brm begin
         sigma ~ Exponential(2)
@@ -138,7 +109,6 @@ end
     @test zero_block.matrix == sloped_block.matrix
     @test zero_block.indices == block.indices
 end
-
 
 @testset "backend-neutral fitted population transforms" begin
     df = (;
@@ -198,7 +168,6 @@ end
     @test replay.data[:standardize_q] ≈ (future.q .- q_mean) ./ q_scale
 end
 
-
 @testset "backend-neutral continuous interactions" begin
     df = (;
         x=[1.0, 2.0, 4.0],
@@ -240,7 +209,6 @@ end
     @test replay.data[:zscale_x] ≈ future_scaled
     @test replay.data[:int_zscale_x_x_w] ≈ future_scaled .* future.w
 end
-
 
 @testset "backend-neutral categorical treatment contrasts" begin
     df = (;
@@ -343,7 +311,6 @@ end
     end
 end
 
-
 @testset "backend-neutral categorical interactions" begin
     df = (;
         x=[1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
@@ -392,7 +359,6 @@ end
     @test replay.data[:int_g_lvl_3_x_h_lvl_2] ==
           (future.g .== 3) .* (future.h .== 2)
 end
-
 
 @testset "backend-neutral string treatment contrasts" begin
     df = (;
@@ -600,7 +566,6 @@ end
     @test refit.values.primary == Float64.(["x", "y", "z", "x"] .== "y")
 end
 
-
 @testset "backend-neutral pure expressions and fixed offsets" begin
     df = (;
         x=[1.0, 2.0, 4.0],
@@ -628,7 +593,7 @@ end
 
     # Pure coefficient-bearing data expressions use the exact same key and
     # replay record in StanBlocks. Offsets retain StanBlocks' direct
-    # coefficient-one expression while Turing consumes the shared fixed vector.
+    # coefficient-one expression.
     sb = SBBRMI(brmi)
     @test expression_label in keys(sb.data)
     @test sb.data[expression_label] == log.(df.x)
@@ -640,7 +605,6 @@ end
     @test replay.data[expression_label] == log.(future.x)
     @test replay.data[:exposure] == future.exposure
 end
-
 
 @testset "backend-neutral population effect-prior plan" begin
     df = (; x=[-1.0, 0.0, 1.0], y=[0.1, 0.2, 0.3])

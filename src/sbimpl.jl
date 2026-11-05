@@ -551,8 +551,8 @@ end
 
 # Monotonic effect contrast (Buerkner & Charpentier 2018). Returns the per-obs
 # contrast vector; the walker hcat's it as one column of X_pop so popefs
-# supplies the free beta (matches vimpl's free-beta `mo` variant, not `mo1`).
-# Named `_sb_mo` to avoid clashing with vimpl's marker function `mo`.
+# supplies the free beta (the free-beta `mo` variant, not `mo1`).
+# Named `_sb_mo` to avoid clashing with the marker function `mo`.
 # The Dirichlet concentration arrives as DATA rather than being built inline,
 # so `simplex(<lp|:>, mo1(c)) ~ Dirichlet(...)` configures this ONE submodel
 # instead of selecting a second copy of it. Julia supplies `rep_vector(1., K-1)`
@@ -562,9 +562,9 @@ _sb_mo = StanBlocks.@slic begin
     return cumulative_sum(append_row(0., simplex_incr))[x]
 end
 
-# (1 | g) random intercept. Mirrors vimpl's scalar grouped_normal + chol(n=1)
-# collapse: Part{chol}(1x1) -> log_scale ~ N(0,1), L[1,1] = exp(log_scale);
-# Part{grouped_normal}(n_groups, 1) -> xi ~ N(0,1), values = L[1,1] * xi;
+# (1 | g) random intercept: the scalar grouped-normal + 1x1 Cholesky
+# collapse: log_scale ~ N(0,1), L[1,1] = exp(log_scale);
+# xi ~ N(0,1), values = L[1,1] * xi;
 # per-obs contribution is values[group_idx]. No LKJ needed at n=1.
 #
 # `n_groups` is an ordinary kwarg, so the CALLER picks the size expression and
@@ -2347,7 +2347,7 @@ ranef_correlated_by_draws = StanBlocks.@slic begin
 end
 
 # Treatment-coded categorical predictor. Allocates K-1 free betas; reference
-# level 1 contributes 0. Mirrors vimpl's `AbstractVector{<:Integer}` dispatch.
+# level 1 contributes 0.
 # `x` is the per-row 1-based level index, `n_levels = K`.
 _sb_cat = StanBlocks.@slic begin
     beta ~ std_normal(; n=n_levels - 1)
@@ -3491,9 +3491,9 @@ _sb_hsgp_by_multigroup_inducing_lambda =
 _sb_hsgp_by_aniso_multigroup_inducing_lambda =
     _sb_multigroup_own_lambda(_sb_hsgp_by_aniso_multigroup_inducing)
 
-# Categorical -> (n_levels::Int, per-row level index::Vector{Int}). Mirrors
-# vimpl._level_index so the integer indices the walker stashes in `data`
-# agree with what the cimpl-side uses.
+# Categorical -> (n_levels::Int, per-row level index::Vector{Int}), the shared
+# `_brm_level_index`, so the integer indices the walker stashes in `data`
+# agree with the preparation layer's.
 _sb_level_index(raw::AbstractVector) = _brm_level_index(raw)
 
 # Fit/apply split for categorical level coding (factor / mo). `_sb_fit_levels`
@@ -4118,7 +4118,7 @@ end
 
 Return the [`BRMI`](@ref) model that `sb` lowered. This is the public, stable
 accessor for an `SBBRMI`'s underlying model; prefer it over the `sb.parent`
-field, which is an implementation detail. Mirrors [`parent(::TuringBRMI)`](@ref).
+field, which is an implementation detail.
 It is the BRMI `sb` was built from after prior-address resolution
 (`optional(...)` priors, grouping-column addresses); [`brm_source`](@ref)
 returns that BRMI exactly as passed.
@@ -4656,6 +4656,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing,
        _s2z_generated=nothing, _source::BRMI=brmi, _component_output=nothing)
     brmi = _brm_resolve_prior_addresses(brmi)
+    _brm_check_component_reads(brmi)
     # A frozen re-emission codes releveled factors over their fitted levels.
     isnothing(_frozen_preproc) || (brmi = _sb_fit_factor_levels(brmi, _frozen_preproc))
     source_parent = brmi
@@ -4961,8 +4962,10 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # A scoped component contributes its returned value to a parent's model;
     # its likelihood can therefore live entirely in that parent.
     if _component_output !== nothing
-        _brm_has_operation(brmi, _component_output) || error(
-            "sbimpl: component result `$_component_output` is not declared")
+        for output in (_component_output isa Symbol ? (_component_output,) : _component_output)
+            _brm_has_operation(brmi, output) || error(
+                "sbimpl: component result `$output` is not declared")
+        end
         return sb
     end
     triage = _sb_observation_triage(sb)
@@ -9422,15 +9425,14 @@ _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
 
 # Link-transformed LHS: `log(err) ~ 1 + d`, `logit(p) ~ 1 + x`, etc.
 # Sample the linear predictor on the linked scale, then invert to recover the
-# response. Mirrors vimpl's `inverse(getf(lhs))` path — any link whose Julia
+# response through `inverse(getf(lhs))` — any link whose Julia
 # `inverse` is a function with a Stan-known name (log/exp/logit/logistic/
 # sqrt/square, ...) works; unknown links error at transpile time.
 #
 # Generic LHS-of-tilde call `f(NamedColumn) ~ rhs`: link-function path. `f`
 # is treated as a link whose `InverseFunctions.inverse(f)` we can map to a
 # Stan name. Per-`typeof(f)` overrides (`mi`, future `cens`/`trunc`, …) live
-# as separate methods of `_sb_sampling!`, mirroring vimpl's
-# `vbroadcasted(::ExprColumn{typeof(F)})` extension idiom.
+# as separate methods of `_sb_sampling!`, one per `ExprColumn{typeof(F)}`.
 _sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2(), mod::Module=@__MODULE__) =
     _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs;
                                id_lookup, obs_n, cv_groups, centered_groups,
@@ -9474,8 +9476,7 @@ end
 # `mi(y) ~ <family>(args...)` — response with missing values modelled
 # jointly. The inner symbol stays as the merged response so other formulas
 # can reference it (e.g. `loc2 = ... + b * y`). One method on the same
-# `_sb_sampling!` dispatch surface — same shape as `vbroadcasted(::ExprColumn{typeof(protect)})`
-# and friends in vimpl.
+# `_sb_sampling!` dispatch surface.
 _sb_sampling!(stmts, data, key, lhs::ExprColumn{typeof(mi)}, rhs; id_lookup=_sb_empty_id_lookup(), kwargs...) =
     _sb_emit_mi!(stmts, data, key, lhs, rhs)
 
@@ -11261,7 +11262,7 @@ _popcoef_show(t::NamedColumn) = string(name(t))
 _popcoef_show(t) = string(t)
 
 # Classify a predictor term as "direct" (allocates its own parameters, no
-# popefs multiplication). Matches vimpl: integer-backed NamedColumns are
+# popefs multiplication). Integer-backed NamedColumns are
 # treated as treatment-coded categoricals; floats go through popefs.
 # Value-narrowing chain: returns the underlying integer/categorical level
 # vector if `t` is a NamedColumn over a DataColumn over a categorical-shaped
@@ -11680,7 +11681,7 @@ function _sb_ranef_lowered_terms(raw_terms)
 end
 
 # Collected ranef handling. Terms that share a grouping symbol are merged into
-# a single correlated block (matches vimpl / brms: `(1 | g) + (x | g)` is the
+# a single correlated block (as in brms: `(1 | g) + (x | g)` is the
 # same as `(1 + x | g)`; `(1 | g) + (0 + x | g)` also collapses -- the two
 # terms' LKJ and tau parameters are shared by design). Per-group we build:
 #   Z_<target>_<g> = hcat(<col_1>, <col_2>, ...)   # n x K
@@ -11690,7 +11691,7 @@ end
 # `(... | rhs)` -> walker-side group descriptor. Bare NamedColumn and `gr(g)`
 # (no kwargs) both collapse to the inner NamedColumn (plain correlated block);
 # `gr(g; by=b)` returns `(group, by)` so the emitter allocates the stratified
-# `ranef_correlated_by` block. Mirrors vimpl's `_normalize_group`. Also extracts
+# `ranef_correlated_by` block. Also extracts
 # brms's `gr(g, id=<sym|str>)`, producing an id Symbol which the caller carries
 # alongside the group descriptor to drive cross-formula bucket coalescing.
 _sb_id_sym(::Nothing) = nothing
@@ -11763,7 +11764,7 @@ function _sb_ranef_parts(rt::ExprColumn)
 end
 
 # Per-group level of `g` -> stratum level of `by`. Errors if any group level
-# straddles multiple strata. Ported from vimpl's `_stratum_idx`.
+# straddles multiple strata.
 _sb_stratum_idx(g_idx::AbstractVector{Int}, b_idx::AbstractVector{Int},
                  gname, bname) =
     _brm_group_strata(g_idx, b_idx, maximum(g_idx), Symbol(gname), Symbol(bname))
@@ -14581,7 +14582,6 @@ end
 # no shared correlation. Expand into N separate `(t_i | g_nocor_i)` ran
 # terms with synthetic group names so the ran-term coalescer in
 # `_sb_emit_ranefs!` keeps them as separate (degenerate K=1) blocks.
-# Mirrors vimpl's `vmeta_sampling_rhs(::ExprColumn{typeof(doublepipe)})`.
 #
 # The intercept-suppressing `0` (`0 + x || g` == "uncorrelated slope x, no
 # intercept") is the standard formula-language drop-intercept marker and
@@ -14671,7 +14671,7 @@ _sb_pop_cols_expr!(cols, ::typeof(&), t, data, stmts, _pop_terms=(); kwargs...) 
 #   cont x cont -> 1 column (elementwise product)
 #   cont x cat  -> K-1 columns (a .* (c == k ? 1 : 0) for k=2..K)
 #   cat  x cat  -> (K1-1)*(K2-1) columns (product of level-k1, level-k2 dummies)
-# Reference level is always 1 (treatment coding; matches brms / vimpl).
+# Reference level is always 1 (treatment coding; matches brms).
 # Observed operands are materialised at walker time. Completed covariates
 # remain Stan expressions, multiplied by observed vectors or factor contrasts
 # before their column references enter the downstream design matrix.
@@ -18063,6 +18063,9 @@ _sb_scalar_expr(x::ExprColumn, data) = begin
     # consumed directly — `state = scan(...); y ~ f(state.population_total)`.
     if f === getproperty
         obj, field = getargs(x)      # field is a QuoteNode(:name)
+        # A component's returned field reads its private label.
+        read = _brm_component_field_read(x)
+        read === nothing || (field = QuoteNode(read.result))
         return Expr(:., _sb_scalar_expr(obj, data), field)
     elseif f === getindex
         obj = first(getargs(x))

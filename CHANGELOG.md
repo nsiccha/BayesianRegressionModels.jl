@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.184
+## 0.2.191
 
 - Added: SVI units own ordinary sampled coordinates read only within that
   unit, with their authored priors, Jacobians and global hyperparameter
@@ -28,8 +28,98 @@ instead of failing at run time.
 - Compatibility: a unit's dormant scalar/vector branch differentiates under
   ordinary Reverse from Enzyme dogfood `0fa85df3` (repairs `74abe90` and
   `7ac58eb`), which the test bootstrap's `d3189970` (libEnzyme `33709d12`)
-  contains. With that Enzyme the test environment requires OptimizationBase
-  5.10.1 and DiffEqBase 7.21.6, whose Enzyme extensions load against it.
+  contains.
+
+## 0.2.190
+
+- Model views render callable and authored Julia documentation through the shared
+  HTMXObjects documentation projection. Unresolved Documenter references retain
+  their formatted labels without broken links, and doctest examples use Julia
+  highlighting in offline HTML. Original source and documentation records remain
+  unchanged. Requires HTMXObjects 0.1.62; both test pins select that release.
+
+## 0.2.189
+
+- Function-style components returning one internal plate's collected values
+  preserve one value per cell, including vector-valued cells, aliases and
+  nested component calls. Parent reads such as `field[row[i]][channel[i]]`
+  select the declared row and then its channel on both backends.
+  ReactiveKernels keeps selected-row locality instead of reading a flattened
+  whole; StanBlocks preserves the cell axis of its matrix storage. Formula
+  offsets still require scalar cells.
+
+## 0.2.188
+
+- **Breaking:** BRM now supports only `SBBRMI` (StanBlocks/Stan) and `RKBRMI`
+  (ReactiveKernelsPPL). Removed `TuringBRMI`, its Turing/WarmupHMC extensions,
+  the `turing_*` helpers, and `VBRMI` with its materialization/parameter-part
+  API (`MaterializedColumn`, `getbroadcast`, `Part`, `push_parts!!`, `nparams`,
+  `lprior!`, `vbroadcasted`, `vmeta_sampling_rhs`). Build one of the supported
+  backends from the same `BRMI`; use that backend's fitting, replay and
+  prediction APIs. Custom terms must use the StanBlocks or RK extension hooks.
+- Removed the retired backends' dependencies, tests and documentation. Shared
+  preparation and mixture-response checks remain on the supported paths. The
+  macro explorer now exposes its StanBlocks pipeline without the VBRMI stages.
+- Incomplete constrained-coordinate carriers now report their emitted output
+  and missing coverage instead of an undefined-variable error.
+- Refresh the test and macro-app HTMXObjects pins for the model-view floor.
+  The test environment requires DiffEqBase 7.21.6 and OptimizationBase 5.10.1
+  so their extensions load with the current Enzyme rule hooks.
+
+## 0.2.187
+
+- Added `gmrf((east, north), time[, channel]; multiresolution=m)`: a bounded
+  sparse Matérn-1 spatial basis of shared stationary OU paths. A position uses
+  the same normalized weights at every time, preserving exact temporal
+  exponential covariance, marginal SD and channel separability on irregular
+  reads. Spatial covariance remains approximate. Each innovation retains only
+  its readers' times; the representation does not complete a position × time
+  grid. It shares the existing hyperparameter addresses and priors.
+- The new model-scope form supports `RKBRMI` and `SBBRMI`, native analytic
+  derivatives, Stan prior draws, frozen replay and physical coordinate
+  transport. Its fitted support construction is part of the native graph.
+  Exact reader locality requires ReactiveKernels 0.1.83, now the RK floor.
+  Native Reverse needs Enzyme dogfood's literal-dictionary callback repair and,
+  from dogfood `7a1f689c`, its repeated-reader repair, without which gradient
+  cost grows with support metadata × reads. The test bootstrap's RK
+  `b0ffcdc1` and Enzyme `d3189970` pins contain both.
+- Clarified the `neighbors=` contract: local Matérn × OU kernel entries are
+  exact, but the implied joint temporal covariance is approximate on irregular
+  read support. Its numerical behavior is unchanged.
+
+## 0.2.186
+
+- Offset-only predictors on RK retain the declared rows of scalar plate or
+  component outputs and fixed data expressions before an explicit gather onto
+  observation rows. They no longer need a raw fixed offset or an estimated
+  coefficient to establish those rows.
+
+## 0.2.185
+
+- Added: a function-style `@brm` component may return several named values,
+  `return (; recovery, decay = exp(log_decay))`. The parent reads each one as a
+  property of the call, `kin.recovery`, in formulas, offsets, likelihoods and
+  model-scope bindings, on SBBRMI (a Stan tuple) and RKBRMI (the call's native
+  local). Each field keeps its own row axis, and the call's priors and
+  correlation blocks remain one scope. `brm_output(d, :decay; submodel=:kin)`
+  addresses a returned field. A plate cell reads a field through a model-scope
+  binding (`recovery = kin.recovery`, then `recovery[i]`).
+- Changed: a bare read of a named-return call, an unknown field, a positional
+  tuple return, a direct `kin.recovery[i]` plate read and a named-return
+  component called inside a plate cell are refused with the supported spelling.
+- Fixed: SBBRMI compiles a component whose formulas group by one of its inputs
+  (`(1 | p | unit)` with `unit` an input); the raw label column is no longer
+  passed to the Stan submodel, which reads its own index data. RKBRMI also
+  aligns a field grouped by a label input with the parent's rows, so it can
+  enter a formula offset.
+
+## 0.2.184
+
+- `brm_start` accepts top-level matrix parameters on their constrained scale
+  on both RK and compiled Stan. Initialize `L ~ LKJCholesky(K, eta)` with
+  `(; L=lower_factor)`, preserving its exact matrix shape. RK uses its native
+  transform without compiling Stan. Unaddressed base values and caller-owned
+  inputs are preserved, as for scalar, vector and component-local starts.
 
 ## 0.2.183
 

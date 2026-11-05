@@ -1,4 +1,5 @@
 [deps]
+Markdown = "d6f4376e-aef5-505a-96c1-9c027394607a"
 HTMX = "27f3e1ef-6ef8-44dc-9e9a-2fb23ed44e83"
 HTMXObjects = "b12ef442-5798-4353-80f3-9562b03a0cb6"
 DynamicObjects = "23d02862-63fe-4c6e-8fdb-1d52cbbd39d5"
@@ -42,7 +43,6 @@ Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 StatsFuns = "4c63d2b9-4356-54db-8cca-17b64c39e42c"
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
-Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 ZipFile = "a5390f91-8eb1-5f08-bee0-b1d1ffed6cea"
 
@@ -58,8 +58,7 @@ Enzyme = "0.13"
 # The pinned Enzyme dogfood (test/setup_env.jl) requires 0.0.301 and runs
 # against its own libEnzyme build instead of the jll's library.
 Enzyme_jll = "< 0.0.302, >= 0.0.303"
-# Enzyme dogfood since its upstream sync 9a46370 (so the bootstrap's d3189970)
-# carries upstream Enzyme.jl #3898, which split
+# Enzyme dogfood from 0fa85df3 carries upstream Enzyme.jl #3898, which split
 # `has_easy_rule` into `has_readonly_rule` / `has_attribute_preserving_rule`.
 # Older DiffEqBase and OptimizationBase extensions define the removed hook and
 # fail to load (SciMLSensitivity ODE gradients, Pathfinder starts); these
@@ -71,7 +70,6 @@ Revise = "3"
 SequentialMonteCarlo = "0.7"
 StanBlocks = "0.2.26"
 Treebars = "0.1.5"
-Turing = "0.46"
 WarmupHMC = "0.2.11"
 julia = "1.10"
 
@@ -93,7 +91,7 @@ rev = "c84047be45cd2bba8a1d02660af9408d4cdf58f4"
 
 [sources.HTMXObjects]
 url = "https://github.com/nsiccha/HTMXObjects.jl"
-rev = "1de5b7aa45bc8ed8e7cf3db86c7d376dd5e5c04e"
+rev = "5853ba527ad09e733b6abee11728856becd628ec"
 
 [sources.HTMX]
 url = "https://github.com/nsiccha/HTMX.jl"

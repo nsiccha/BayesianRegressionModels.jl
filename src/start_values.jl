@@ -53,8 +53,11 @@ the value a sampler takes as its initial position.
   or one per margin), `cor = ["small" => C]`, `ID = ["small" => Σ]`. Unlisted
   strata keep their values at `base`. Each listed level's `effects` hold
   under its own stratum's scales and correlation.
-- `name = value` sets a scalar parameter (`sigma ~ Exponential(1)`) or a vector
-  parameter (cutpoints, a `Dirichlet` simplex) on its constrained scale.
+- `name = value` sets a scalar parameter (`sigma ~ Exponential(1)`), vector
+  parameter (cutpoints, a `Dirichlet` simplex), or matrix parameter on its
+  constrained scale. For `L ~ LKJCholesky(K, eta)`, give the lower Cholesky
+  factor, e.g. `L = [1.0 0.0; 0.3 sqrt(0.91)]`, not a correlation matrix.
+  A matrix must have the parameter's exact shape.
 - `name = values` sets a latent declared in a `@plate` cell (`log_T ~
   Normal(loc, s)`) on its constrained scale: one flat vector, cell after cell,
   or one vector per cell when its length varies by cell (one number per cell
@@ -189,21 +192,26 @@ _brm_start_population_target(predictor, coefficient, value) = error(
     "level => value pairs for a categorical column; got $(repr(value))")
 
 _brm_start_parameter_value(name, value::Real) = _brm_start_real("`$name`", value)
-_brm_start_parameter_value(name, value::AbstractVector{<:Real}) =
-    [_brm_start_real("`$name`", x) for x in value]
+_brm_start_parameter_value(name, value::AbstractArray{<:Real}) =
+    map(x -> _brm_start_real("`$name`", x), value)
 # One vector per `@plate` cell, for a cell latent whose length varies by cell.
 _brm_start_parameter_value(name, value::AbstractVector{<:AbstractVector{<:Real}}) =
     [[_brm_start_real("`$name` in cell $g", x) for x in v] for (g, v) in enumerate(value)]
 _brm_start_parameter_value(name, value) = error(
     "brm_start: `$name` is neither a linear predictor (give its coefficients " *
     "as a NamedTuple) nor an `|ID|` block; as a named parameter it takes a " *
-    "real value or a vector, or one vector per cell for a `@plate` cell " *
+    "real value or an array, or one vector per cell for a `@plate` cell " *
     "latent, got $(repr(value))")
 
 # A parameter's values in its output's element order. Per-cell vectors are a
 # ragged cell latent's segments, cell after cell; anything else has no cells.
 _brm_start_flat_values(name, output, value::Real) = [value]
 _brm_start_flat_values(name, output, value::AbstractVector{<:Real}) = value
+function _brm_start_flat_values(name, output, value::AbstractArray{<:Real})
+    isnothing(output.dims) || size(value) == output.dims || throw(DimensionMismatch(
+        "brm_start: `$name` has size $(output.dims), got $(size(value))"))
+    vec(value)
+end
 function _brm_start_flat_values(name, output, value::AbstractVector{<:AbstractVector})
     ends = output.segments
     isnothing(ends) && error(
@@ -577,11 +585,11 @@ function _brm_rk_start_writes!(writes, ::Val{:parameter}, t, records, values)
         push!(writes, (r.declaration, (), _brm_rk_cell_latent_value(t.name, current, t.value)))
         return
     end
-    found = [r for r in records if r.kind in (:scalar, :vector) &&
+    found = [r for r in records if r.kind in (:scalar, :vector, :lkj_cholesky) &&
         r.declaration === t.name]
     if isempty(found)
         available = [r.kind === :cell_latent ? r.name : r.declaration
-            for r in records if r.kind in (:scalar, :vector, :cell_latent)]
+            for r in records if r.kind in (:scalar, :vector, :lkj_cholesky, :cell_latent)]
         error("brm_start: `$(t.name)` is not a linear predictor, an `|ID|` block or " *
             "a named parameter of this model. Named parameters: " *
             (isempty(available) ? "(none)" : join(string.(available), ", ")))
