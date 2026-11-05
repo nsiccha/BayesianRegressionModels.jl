@@ -275,6 +275,7 @@ _brmd_law(::typeof(brm_total)) = :exact_total
 _brmd_law(::typeof(brm_icar)) = :icar
 _brmd_law(::typeof(brm_gmrf)) = :gmrf
 _brmd_law(::typeof(brm_gmrf_vecchia)) = :gmrf_vecchia
+_brmd_law(::typeof(brm_gmrf_multiresolution)) = :gmrf_multiresolution
 # These are exact producer-owned StanBlocks bindings, never a name heuristic
 # applied to arbitrary user callables.
 for (name,law) in ((:normal,:normal_sd),(:std_normal,:standard_normal),
@@ -329,6 +330,8 @@ _brmd_law_prose(c,::Val{:standard_normal}) = _brmd_text(c,:law_standard_normal)
 _brmd_law_prose(c,::Val{:icar}) = _brmd_text(c,:law_icar)
 _brmd_law_prose(c,::Val{:gmrf}) = _brmd_text(c,:law_gmrf)
 _brmd_law_prose(c,::Val{:gmrf_vecchia}) = _brmd_text(c,:law_gmrf_vecchia)
+_brmd_law_prose(c,::Val{:gmrf_multiresolution}) = _brmd_text(c,:law_gmrf_multiresolution)
+_brmd_law_math(_c,::Val{:gmrf_multiresolution},_a) = "z_k(t)\\sim\\mathrm{OU}(0,\\Omega,\\ell_t)"
 _brmd_law_prose(c,::Val{:improper_flat}) = _brmd_text(c,:law_improper_flat)
 _brmd_law_prose(c,::Val{:allocation_only}) = _brmd_text(c,:law_allocation_only)
 _brmd_law_prose(c,::Val{:exponential_rate}) = _brmd_text(c,:law_exponential_rate)
@@ -756,7 +759,11 @@ _brmd_builtin_call(::typeof(ar),c)=BRMDescriptionFragment(
 _brmd_builtin_call(::typeof(cdar),c)=BRMDescriptionFragment(
     prose=(_brmd_text(c,:damped_walk),),
     equations=("\\delta_1=\\sigma Lz_1,\\quad\\delta_t=\\rho\\delta_{t-1}+\\sigma\\sqrt{1-\\rho^2}Lz_t,\\quad z_t\\sim\\mathcal N(0,I)",),covers=(c.id,))
-_brmd_builtin_call(::typeof(gmrf),c)=haskey(c.keywords,:neighbors) ? BRMDescriptionFragment(
+_brmd_builtin_call(::typeof(gmrf),c)=haskey(c.keywords,:multiresolution) ? BRMDescriptionFragment(
+    prose=(_brmd_text(c,:space_time_gmrf_multiresolution),),
+    equations=("f(s,t,c)=\\sigma\\sum_k b_{sk}(\\ell_s)z_k(t,c),\\quad\\sum_k b_{sk}^2=1",
+        "\\operatorname{Cov}(f(s,t,c),f(s',t',c'))=\\sigma^2(b_s^\\mathsf{T}b_{s'})\\exp(-|t-t'|/\\ell_t)\\Omega_{cc'},\\quad\\rho=2\\ell_s"),
+    covers=(c.id,)) : haskey(c.keywords,:neighbors) ? BRMDescriptionFragment(
     prose=(_brmd_text(c,:space_time_gmrf_vecchia),),
     equations=("K_{ij}=M_1(\\kappa r_{ij})\\exp(-|t_i-t_j|/\\ell_t),\\quad M_1(x)=xK_1(x),\\quad\\kappa=\\frac{\\sqrt2}{\\ell_s},\\quad\\rho=2\\ell_s",
         "x_i\\mid x_{N(i)}\\sim\\mathcal N(b_i^{\\mathsf T}x_{N(i)},F_i),\\quad b_i=K_{N(i)N(i)}^{-1}K_{N(i)i},\\quad F_i=1-K_{iN(i)}b_i",

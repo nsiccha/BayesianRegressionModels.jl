@@ -1,6 +1,9 @@
-using Test, BayesianRegressionModels, Distributions, Turing
+using Test, BayesianRegressionModels, Distributions
+using ReactiveKernels, ReactiveKernelsPPL
 
 const BRM = BayesianRegressionModels
+
+likelihood_query(backend) = prepare_query(backend.model, BRM.rk_bound_plan(backend), :likelihood)
 
 @testset "assignment axes follow dependency order" begin
     data = (; x=[-0.8, 0.3, 1.2], y=[0.1, -0.2, 0.7])
@@ -23,14 +26,12 @@ const BRM = BayesianRegressionModels
         assignments[:second_value].expression.args))
     @test first_reference.axis === :observation
 
-    parameters = (; shift=0.25)
-    backend = TuringBRMI(reordered)
-    mean = 2 .* (data.x .+ parameters.shift)
-    @test Turing.logjoint(backend.model, parameters) ≈
-          logpdf(Normal(), parameters.shift) +
+    # The reordered model still evaluates in dependency order.
+    rk = RKBRMI(reordered)
+    shift = 0.25
+    mean = 2 .* (data.x .+ shift)
+    @test Base.invokelatest(likelihood_query(rk), [shift]) ≈
           sum(logpdf.(Normal.(mean, 1), data.y))
-    @test turing_pointwise_loglikelihoods(backend, parameters).y ≈
-          logpdf.(Normal.(mean, 1), data.y)
 end
 
 @testset "response assignments keep their own row axes through replay" begin
@@ -43,19 +44,15 @@ end
         y_a ~ Normal(mean_a, 1)
         y_b ~ Normal(mean_b, 1)
     end
-    backend = TuringBRMI(builder(data))
-    parameters = (; shift=0.3)
+    backend = RKBRMI(builder(data))
+    shift = 0.3
     held_out = (; x=[-0.9, 0.1, 1.0], z=[0.6],
         y_a=[0.2, 0.4, -0.1], y_b=[0.5])
     for (model, rows) in ((backend, data), (reprocess(backend, held_out), held_out))
-        expected_a = logpdf.(Normal.(rows.x .+ parameters.shift, 1), rows.y_a)
-        expected_b = logpdf.(Normal.(2 .* rows.z .- parameters.shift, 1), rows.y_b)
-        pointwise = turing_pointwise_loglikelihoods(model, parameters)
-        @test pointwise.y_a ≈ expected_a
-        @test pointwise.y_b ≈ expected_b
-        @test Turing.loglikelihood(model.model, parameters) ≈
+        expected_a = logpdf.(Normal.(rows.x .+ shift, 1), rows.y_a)
+        expected_b = logpdf.(Normal.(2 .* rows.z .- shift, 1), rows.y_b)
+        @test model.model.layout.total == 1
+        @test Base.invokelatest(likelihood_query(model), [shift]) ≈
               sum(expected_a) + sum(expected_b)
-        @test Turing.logprior(model.model, parameters) ≈
-              logpdf(Normal(), parameters.shift)
     end
 end

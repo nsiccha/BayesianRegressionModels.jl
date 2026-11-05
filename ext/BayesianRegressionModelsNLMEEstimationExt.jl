@@ -1003,19 +1003,18 @@ function BRM.brm_two_stage_fit(sampler, x; minibatch_size=nothing, options=nothi
     n = NE.nsubjects(m)
     units = [BRM.brm_nlme_unit_problem(m, i, θ, σ, Ω) for i in 1:n]
     unit_draws = Vector{Matrix{Float64}}(undef, n)
-    # One task per worker model drains a shared queue of units; a failing
-    # sampler surfaces through `wait` as a TaskFailedException.
-    # A nested model without subject cells evaluates its units through its one
-    # whole-model sampler.
-    nworkers = m.cell_gradient === nothing ? 1 : min(threads, n)
-    workers = [m; [BRM._brm_nlme_worker_model(m) for _ in 2:nworkers]]
+    # `threads` tasks drain a shared queue of units; each model call takes its
+    # own evaluator from the model's pool (`BRM._brm_nlme_with_evaluator`). A
+    # failing sampler surfaces through `wait` as a TaskFailedException. A nested
+    # model without subject cells evaluates its units through its one
+    # whole-model sampler, so it keeps one task.
+    ntasks = m.cell_gradient === nothing ? 1 : min(threads, n)
     queue = Channel{Int}(n)
     foreach(i -> put!(queue, i), 1:n)
     close(queue)
-    tasks = map(workers) do worker
+    tasks = map(1:ntasks) do _
         Threads.@spawn for i in queue
-            unit = worker === m ? units[i] : BRM.brm_nlme_unit_problem(worker, i, θ, σ, Ω)
-            unit_draws[i] = Matrix{Float64}(sampler(unit))
+            unit_draws[i] = Matrix{Float64}(sampler(units[i]))
         end
     end
     foreach(wait, tasks)

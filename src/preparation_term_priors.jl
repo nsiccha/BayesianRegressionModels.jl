@@ -420,29 +420,3 @@ function _brm_simplex_concentration_expression(alpha::NamedColumn, n)
     ExprColumn(fill, alpha, n)
 end
 _brm_simplex_concentration_expression(alpha, n) = ExprColumn(fill, alpha, n)
-
-# The mathematical parameter is a simplex. Keep the exact prior density and
-# RNG; its coordinate transform is supplied by the backend's simplex adapter.
-struct _BRMSimplexPrior{D} <: ContinuousMultivariateDistribution
-    base::D
-    n::Int
-end
-function _brm_simplex_prior(prior::ContinuousMultivariateDistribution, n::Int)
-    length(prior) == n || error("BRM preparation: simplex prior has wrong dimension")
-    _BRMSimplexPrior(prior, n)
-end
-_brm_simplex_prior(prior, n::Int) = error(
-    "BRM preparation: simplex prior must be a continuous multivariate distribution, got $(typeof(prior))")
-Base.length(d::_BRMSimplexPrior) = d.n
-Base.size(d::_BRMSimplexPrior) = (d.n,)
-Base.eltype(::_BRMSimplexPrior) = Float64
-Distributions.insupport(d::_BRMSimplexPrior, x::AbstractVector) =
-    length(x) == d.n && all(>=(0), x) && isapprox(sum(x), one(sum(x))) &&
-    insupport(d.base, x)
-Distributions._logpdf(d::_BRMSimplexPrior, x::AbstractVector) =
-    insupport(d, x) ? logpdf(d.base, x) : oftype(sum(x), -Inf)
-function Random.rand(rng::AbstractRNG, d::_BRMSimplexPrior)
-    draw = rand(rng, d.base)
-    insupport(d, draw) || error("BRM preparation: configured simplex prior drew a value outside the simplex")
-    draw
-end

@@ -80,8 +80,7 @@ data = merge(rows, (; gen_pmf, delay_pmf, pop, dist_flat, C))   # shared fields 
   Latent (sampled) infections need a sequential sampling primitive
   (StanBlocks `@scan`) that the StanBlocks version pinned by this repository's
   test environment does not have.
-- StanBlocks backend only. The operators are Stan functions; `TuringBRMI`
-  refuses the assignments by name.
+- StanBlocks backend only. The operators are Stan functions.
 - The history before day 1 is the exponential seeding of the documentation page.
   A lag that reaches further back than `H` days counts as zero, so choose `H` at
   least as long as the longest kernel.

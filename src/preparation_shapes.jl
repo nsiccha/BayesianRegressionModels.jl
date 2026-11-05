@@ -174,8 +174,3 @@ function _brm_mvnormal_parts(target, op; prefix)
     end
     (; n, mean=mu_val, mean_arg=mu_arg, scale=scale_val, scale_arg)
 end
-
-# This is a backend extension seam; the common program retains the marker and
-# its complete prior call until the concrete backend chooses its geometry.
-function _brm_turing_covariance_prior end
-function _brm_turing_horseshoe_prior end

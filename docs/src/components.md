@@ -1,7 +1,8 @@
 # Reusable model components
 
 A function-style `@brm` definition declares explicit inputs, local model
-parameters and one returned value. Call it with `~` inside another BRM model.
+parameters and one returned value, or several named values. Call it with `~`
+inside another BRM model.
 StanBlocks and ReactiveKernels compile the same scientific declaration into
 their native submodel scopes.
 
@@ -38,7 +39,11 @@ There are six sampled scalars: each call owns its own `a` and `b`, both calls
 read the parent's `shared_scale`, and the likelihoods share `obs_sd`. A component call introduces no
 regression coefficient. The two input vectors need not have the same length.
 The result can be scalar or array valued; ordinary component statements can
-declare vector priors and call other components.
+declare vector priors and call other components. Formula priors read inputs as
+scalar priors do: `effect(value, Intercept) ~ Normal(center, 0.4)` and
+`sd(value, unit) ~ Exponential(scale)` may name inputs that the caller binds to
+its own parameters. `RKBRMI` admits only numeric constants and data as
+population-effect prior arguments, in a component as at model scope.
 
 An elementwise vector result retains its input row frame. It can be used in a formula
 offset or selected by a row index, including repeated or reordered indices:
@@ -99,6 +104,84 @@ prior and its `K * (K - 1) / 2` unconstrained coordinates. Native RK requires
 ReactiveKernelsPPL 0.1.97 or later and retains the named inputs in emitted
 component source.
 
+## Returning several named values
+
+One call can return several related quantities as a named tuple. The call keeps
+one scope: its priors and correlation blocks are declared once, and the parent
+reads each returned value as a property of the call. Here two linear predictors
+share one correlated unit effect, and the parent uses one in a likelihood and
+the other in a formula offset:
+
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:NamedComponentsDocs), raw"""
+using BayesianRegressionModels, Distributions
+
+"Recovery and decay rates whose unit effects share one correlation block."
+@brm function kinetics(x, unit)
+    recovery ~ 1 + x + (1 | p | unit)
+    decay ~ 1 + (1 | p | unit)
+    effect(recovery, :) ~ Normal(0, 1)
+    effect(decay, :) ~ Normal(0, 1)
+    return (; recovery, decay)
+end
+
+joint = @brm begin
+    kin ~ kinetics(x, unit)
+    y_recovery ~ Normal(kin.recovery, 0.5)
+    log(q) ~ 1 + offset(kin.decay)
+    effect(q, Intercept) ~ Normal(0, 1)
+    y_q ~ Normal(q, 0.5)
+end
+
+data = (; x=[-0.4, 0.2, 0.7, 0.1], unit=["a", "b", "a", "c"],
+        y_recovery=[0.1, 0.4, 0.8, 0.0], y_q=[1.2, 0.9, 1.4, 1.1])
+model = joint(data)
+""", :model; title="Two correlated predictors returned by one call", require_stan=true)
+```
+
+A field can be named after a local, `(; recovery)`, or computed in the return,
+`(; decay = exp(log_decay))`. Each field keeps its own row axis, so it can enter
+a formula offset or a likelihood, or be bound at model scope. A plate cell
+slices names, so bind the field first, `recovery = kin.recovery`, and read
+`recovery[i]` in the cell. Stan returns the values as one tuple; ReactiveKernels
+reads each from the call's own scope. The call itself is not a value: reading
+bare `kin`, an unknown field, or `kin.recovery[i]` inside a plate is refused
+with the supported spelling. A positional tuple return is refused, because the
+parent reads values by name.
+
+A component called inside a plate cell can return named values too. Each cell
+owns its call's locals and reads the fields in the cell:
+
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:NamedCellComponentsDocs), raw"""
+using BayesianRegressionModels, Distributions
+
+"Two related curves from one pair of local coefficients."
+@brm function bounds(x, scale)
+    a ~ Normal(0, scale)
+    b ~ Normal(1, 0.2)
+    return (; lo = a + b * x, hi = a - b * x)
+end
+
+per_cell = @brm begin
+    @plate for i in eachindex(x)
+        cell ~ bounds(x[i], scale)
+        y_lo[i] ~ Normal(cell.lo, 0.5)
+        y_sum[i] ~ Normal(cell.lo + cell.hi, 0.5)
+    end
+    scale ~ Exponential(1)
+end
+
+model = per_cell((; x=[-0.4, 0.2, 0.7], y_lo=[0.1, 0.4, 0.8],
+                    y_sum=[0.3, -0.1, 0.2]))
+""", :model; title="Named values from a call in each plate cell", require_stan=true)
+```
+
+As at model scope, a bare `cell` or an unknown field is refused inside the
+cell.
+
 The existing `@brm model(data) = begin … end` form still defines a data-to-model
 builder. `merge(builder_a, builder_b)` still combines statements in one
 namespace. Use a component when repeated calls should own separate locals.
@@ -137,7 +220,8 @@ brm_output(d, :a; submodel=:right)
 
 Each descriptor submodel retains its defining module, call target, own prior
 declarations and logical outputs. Use `submodel=` to address an internal
-value, including a tuple path for nested calls. Use
+value, including a tuple path for nested calls. A returned field is addressed
+by its name, `brm_output(d, :decay; submodel=:kin)`. Use
 `brm_coordinate_transport(rk, sb, stan_names)` to pair sampled coordinates
 between the backends.
 

@@ -5,31 +5,6 @@
 .brm-preset-btn { font-size: 0.8em; padding: 0.2rem 0.5rem; margin: 0; }
 .brm-formula-textarea { width: 100%; font-family: monospace; }
 
-/* BRMI / VBRMI cards. Bare <article> + <h6> section heads; the expr-list
-   adjacent to a section <h6> (vbrmi_card's materialized/blocks sections)
-   gets indented. The standalone list in brmi_card stays flush. */
-.brm-expr-list { font-family: monospace; font-size: 1.15em; line-height: 1.8; padding: 0.3rem 0; }
-h6:has(+ .brm-expr-list) { margin-bottom: 0.2rem; }
-h6 + .brm-expr-list { margin-left: 1rem; }
-.brm-block-part { color: var(--pico-muted-color, #999); margin-left: 1.5rem; }
-
-/* Styled AST rendering: every emitted token from html_expr.jl carries
-   only a data-kind attribute naming its syntactic role (number,
-   operator, function name, array/vector/matrix, shape annotation,
-   likelihood operator). Scoping is via the .brm-expr-list wrapper, so
-   the spans need no per-element class. Per-symbol color on .brm-sym
-   stays inline because the symbol space is unbounded. Muted
-   annotations are emitted as <small> and inherit Pico's small font-size. */
-.brm-expr-list [data-kind="num"]        { color: #666; }
-.brm-expr-list [data-kind="op"]         { color: #555; }
-.brm-expr-list [data-kind="likelihood"] { color: #333; }
-.brm-expr-list [data-kind="fname"]      { color: #777; }
-.brm-expr-list [data-kind="shape"]      { color: var(--pico-muted-color, #999); font-size: 0.85em; }
-.brm-expr-list [data-kind="arr"]        { font-style: italic; color: #888; }
-.brm-expr-list [data-kind="vec"]        { font-weight: bold; color: #888; }
-.brm-likelihood { text-decoration: underline; text-decoration-color: #aaa; text-underline-offset: 3px; }
-.brm-expr-list small { color: var(--pico-muted-color, #999); }
-
 /* Example cards. Border-left color reflects entry status (open/done/deprioritized).
    data-flash is set transiently by JS on stage-button success/error. */
 .brm-example-card { border-left: 6px solid #888; margin: 0.8rem 0; padding: 0.5rem 1rem; transition: background-color 0.3s ease, border-color 0.3s ease; }

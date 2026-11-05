@@ -351,12 +351,11 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     scope = _brm_inline_scope(first(getargs(rhs)))
     output_reads = _brm_kernel_output_reads(brmi)
     direct_lps = [argument for argument in arguments
-        if argument isa NamedColumn && parent(argument) isa ExprColumn{typeof(~)}]
-    # Assignments are already graph values, not formula declarations. Their
-    # array axis belongs to the expression (which may gather or concatenate
-    # predictors); walking its inputs as a formula would invent a grouping.
-    assigned_inputs = any(argument -> argument isa NamedColumn &&
-        parent(argument) isa ExprColumn{typeof(assign)}, arguments)
+        if argument isa NamedColumn && parent(argument) isa ExprColumn{typeof(~)} &&
+            !_brm_kernel_value_input(argument)]
+    # Assignments, components and producer plates own their result axes;
+    # walking their shared inputs as formula columns invents a row count.
+    value_inputs = any(_brm_kernel_value_input, arguments)
     ragged_cols = [argument for argument in arguments
         if argument isa ExprColumn && getf(argument) === ragged]
     buckets = _sb_kernel_lp_buckets(direct_lps; ragged_cols)
@@ -478,7 +477,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
     group_values === nothing && isempty(outer_lengths) && foreach(
         lp -> append!(outer_lengths, last.(_brm_kernel_lp_data_lengths(lp))), direct_lps)
     nsubjects = group_values === nothing ?
-        (isempty(outer_lengths) ? (assigned_inputs ? nothing :
+        (isempty(outer_lengths) ? (value_inputs ? nothing :
             error("RK backend: kernel `$name` needs a subject input")) : first(outer_lengths)) :
         length(group_values)
     all(==(nsubjects), outer_lengths) || error(
@@ -1426,6 +1425,14 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     # `<declared>[i] ~ _BRMShares{Family}(n, total, args...)`.
     locals_of = Dict{Symbol,Symbol}(get(reads, latent, latent) => declared[latent]
         for latent in (latents..., components...))
+    # A named-return component's field is a local of this cell's call:
+    # `cell.component_result_lo` reads `<declared>[i].component_result_lo`.
+    component_locals = Set{Symbol}(get(reads, c, c) for c in components)
+    field_read(x) = !(x isa Expr) ? x :
+        Meta.isexpr(x, :., 2) && x.args[1] in component_locals && x.args[2] isa QuoteNode ?
+            Expr(:., Expr(:ref, locals_of[x.args[1]], index), x.args[2]) :
+            Expr(x.head, map(field_read, x.args)...)
+    isempty(component_locals) || (body = Any[field_read(statement) for statement in body])
     body = mapreduce(vcat, body; init=Any[]) do statement
         if _rk_is_cell_component(statement)
             lhs, marker = statement.args

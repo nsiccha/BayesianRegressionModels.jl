@@ -8,7 +8,6 @@ using BayesianRegressionModels
 using Distributions
 using Statistics
 using StanBlocks
-using Turing
 
 const BRM = BayesianRegressionModels
 
@@ -98,13 +97,6 @@ end
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
 end
 
-@testset "Turing backend agrees the model is well-formed" begin
-    backend = TuringBRMI(regression_builder(regression_df))
-    params = (; lambda=1.0, beta_pop=[0.1, 0.2])
-    @test isfinite(Turing.logjoint(backend.model, params))
-    @test occursin("InverseGaussian", string(turing_model_source(backend)))
-end
-
 @testset "inverse-Gaussian validation is early and explicit" begin
     nonpositive = @brm begin
         y ~ InverseGaussian(1.0, 2.0)
@@ -168,4 +160,66 @@ end
     end
     @test_throws ErrorException SBBRMI(
         prior_bad_arity((; y=[1.0])); mod=@__MODULE__)
+end
+
+stan_block(code, name) = something(match(Regex("(?ms)^$name \\{\\n(.*?)^\\}"), code),
+    (; captures=[""])).captures[1]
+
+# The positive half-line is the family's own support, which StanBlocks declares
+# from `autokwargs`; it is not a bound whose prior-only re-draw would need a
+# `brm_inverse_gaussian_lccdf` companion (todo 0w0ukqc). A prior program, the
+# response column omitted, draws the prior with the family's RNG.
+@testset "InverseGaussian prior programs draw with the family's RNG" begin
+    programs = (
+        @brm(begin
+            sigma ~ InverseGaussian(1.0, 2.0)
+            y ~ Normal(0.0, sigma)
+        end),
+        @brm(begin
+            sigma ~ InverseGaussian(1.5)
+            y ~ Normal(0.0, sigma)
+        end),
+        @brm(begin
+            m ~ Exponential(1)
+            sigma ~ InverseGaussian(m, 2.0)
+            y ~ Normal(0.0, sigma)
+        end),
+    )
+    for builder in programs
+        code = BRM.stan_code(SBBRMI(builder((; dummy=[1.0])); mod=@__MODULE__))
+        @test StanBlocks.stanc_check(code).ok
+        @test isempty(strip(stan_block(code, "parameters")))
+        @test occursin("sigma = brm_inverse_gaussian_rng(", code)
+        @test !occursin("_lccdf", code) && !occursin("_lcdf", code)
+    end
+end
+
+@testset "a fitted InverseGaussian prior keeps its positive declaration and plain kernel" begin
+    fitted = @brm begin
+        m ~ Exponential(1)
+        sigma ~ InverseGaussian(m, 2.0)
+        y ~ Normal(0.0, sigma)
+    end
+    code = BRM.stan_code(SBBRMI(fitted((; y=[0.4, -0.2])); mod=@__MODULE__))
+    @test StanBlocks.stanc_check(code).ok
+    @test occursin(r"real<lower=0(\.0)?> sigma;", stan_block(code, "parameters"))
+    @test occursin("sigma ~ brm_inverse_gaussian(m, 2.0);", stan_block(code, "model"))
+
+    # A bound that narrows the support restricts the prior: it is declared and
+    # the model keeps the plain kernel. A bound at or below zero restates it.
+    narrowed = @brm begin
+        sigma ~ restricted(InverseGaussian(1.0, 2.0); lower=0.5, upper=3.0)
+        y ~ Normal(0.0, sigma)
+    end
+    code = BRM.stan_code(SBBRMI(narrowed((; y=[0.4, -0.2])); mod=@__MODULE__))
+    @test StanBlocks.stanc_check(code).ok
+    @test occursin(r"real<lower=0\.5, upper=3(\.0)?> sigma;", stan_block(code, "parameters"))
+    @test occursin("sigma ~ brm_inverse_gaussian(1.0, 2.0);", stan_block(code, "model"))
+    restating = @brm begin
+        sigma ~ restricted(InverseGaussian(1.0, 2.0); lower=0.0)
+        y ~ Normal(0.0, sigma)
+    end
+    code = BRM.stan_code(SBBRMI(restating((; dummy=[1.0])); mod=@__MODULE__))
+    @test StanBlocks.stanc_check(code).ok
+    @test occursin("sigma = brm_inverse_gaussian_rng(", code)
 end

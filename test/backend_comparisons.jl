@@ -1,8 +1,8 @@
-using Test, Markdown, BayesianRegressionModels, Distributions, Turing
+using Test, Markdown, BayesianRegressionModels, Distributions
 import StanBlocks
 Base.include(@__MODULE__, joinpath(@__DIR__, "..", "docs", "backend_comparisons.jl"))
 
-@testset "five-pane comparisons execute one model through both backends" begin
+@testset "four-pane comparisons emit one model through StanBlocks" begin
     sources = (
         """
         data = (; x=[-1.0, 0.0, 1.0], y=[0.2, 0.4, 0.7])
@@ -34,9 +34,9 @@ Base.include(@__MODULE__, joinpath(@__DIR__, "..", "docs", "backend_comparisons.
     for (i, source) in pairs(sources)
         mod = BRMDocsComparisons.example_module(Symbol(:refactoring_comparison_, i))
         panes = BRMDocsComparisons.comparison(mod, source, :model; require_stan=true)
-        @test length(panes.content) == 6
+        @test length(panes.content) == 5
         @test getfield.(panes.content, :language) ==
-              ["brm-comparison", "julia", "julia", "julia", "stan", "julia"]
+              ["brm-comparison", "julia", "julia", "julia", "stan"]
         @test panes.content[2].code == strip(source, '\n')
         ir_source = panes.content[3].code
         # The IR pane prints the parsed statements, not the bound data columns.
@@ -47,20 +47,6 @@ Base.include(@__MODULE__, joinpath(@__DIR__, "..", "docs", "backend_comparisons.
         # qualifies bindings invisible from the display context.
         @test !occursin("Distributions.", ir_source)
         @test StanBlocks.stanc_check(panes.content[5].code).ok
-        turing_source = panes.content[6].code
-        @test !occursin("unsupported", turing_source)
-        @test occursin("@model", turing_source)
-        @test occursin("~", turing_source)
-        backend = TuringBRMI(Core.eval(mod, :model))
-        params = i == 2 ? (; shape=1.3, beta_pop=[0.1, 0.2]) :
-                          (; sigma=0.8, beta_pop=[0.1, 0.2])
-        @test isfinite(Turing.logjoint(backend.model, params))
-        @test turing_model_source(backend) isa Expr
-        if i == 3
-            @test occursin("y_1", turing_source)
-            @test occursin("y_2", turing_source)
-            @test length(findall("@model", turing_source)) == 1
-        end
     end
 end
 

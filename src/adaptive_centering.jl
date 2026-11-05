@@ -1127,8 +1127,7 @@ _adaptive_stan_expr_value(x) = x
 # entry per coordinate for a per-coordinate bound (an anisotropic term's
 # `fmax(0.0, rho_lower_…)`, elementwise since StanBlocks c7293b88). A bound
 # that reads a parameter has no value without a draw and comes back `nothing`
-# for the caller to refuse. A descriptor without a Stan view (Turing) declares
-# its bounds as numbers already. A caller holding only the `GenerativePlan`
+# for the caller to refuse. A caller holding only the `GenerativePlan`
 # gets the view from its model, at the cost of one more `stan_descriptor`.
 # Shared by adaptive centering and `parameter_draws`.
 _brm_stan_view(d) = d.stan
@@ -2918,10 +2917,7 @@ _adaptive_block_cov_chol(x::AbstractVector, block::R2D2AdaptiveCenteringBlock) =
     adaptive_centering_problem(model, problem, ad_backend; kwargs...)
 
 Wrap a BRM `problem` in WarmupHMC's strictly-online adaptive-centering
-transform. Compiled models use BRM's WarmupHMC extension. A `TuringBRMI` uses
-the separate joint Turing+WarmupHMC extension and, for now, accepts only the
-identity-link, fixed-scale Gaussian model with one default noncentered scalar
-random-intercept geometry documented by that method.
+transform. Compiled models use BRM's WarmupHMC extension.
 """
 function adaptive_centering_problem end
 
@@ -2960,21 +2956,3 @@ chain leave the passed object at its initial controls (warmuphmc-use §5c).
 Pass `unc_names` when `adaptive` does not wrap a BridgeStan model.
 """
 function adaptive_centering_controls end
-
-function adaptive_centering_blocks(::TuringBRMI, _unc_names)
-    error(
-        "Turing backend: `adaptive_centering_blocks` describes compiled Stan " *
-        "unconstrained coordinates and does not apply to DynamicPPL models. " *
-        "Choose the executable endpoint with " *
-        "`TuringBRMI(brmi; centered_groups=...)`.")
-end
-
-function adaptive_centering_problem(::TuringBRMI, _problem, _ad_backend;
-                                    _kwargs...)
-    error(
-        "Turing backend: native online adaptive centering requires both " *
-        "Turing and WarmupHMC, a DynamicPPL.LogDensityFunction, " *
-        "and the supported fixed-scale Gaussian model with one default " *
-        "noncentered `(1 | group)` geometry. " *
-        "The compiled-Stan coordinate bridge does not apply to DynamicPPL models.")
-end

@@ -191,9 +191,8 @@ BRM adds:
   `nothing` for an output that belongs to no such block. Every
   `:random_effect` output of a StanBlocks (`SBBRMI`) descriptor has one, and
   so does a block's scale when it is its own statement (a known-value block's
-  sampled scales, an exact total block's scale). A Turing descriptor's
-  random-effect site is a whole block and carries `nothing`, as does a
-  sum-to-zero block (`s2z_groups`, role `:s2z_effect`):
+  sampled scales, an exact total block's scale). A sum-to-zero block
+  (`s2z_groups`, role `:s2z_effect`) carries `nothing`:
 
   | component | what it is |
   | --- | --- |
@@ -2261,12 +2260,25 @@ end
 # `_brm_submodels` assigns outputs to entries by.
 function _brm_submodel_carriers(d::BRMDescriptor, s::BRMSubmodel, name::Symbol)
     bound = _brm_submodel_bound_names(s)
+    # A BRM component's returned field (`return (; hi = expr)`) is carried by
+    # its local result; an authored local of the same name is the same value.
+    isnothing(bound) || name in bound || (name = _brm_submodel_returned_local(d, s, name))
     isnothing(bound) || name in bound || return BRMOutput[]
     owned = Set{Symbol}(o.name for o in s.outputs)
     resolved = Symbol(join((_brm_submodel_address(s)..., name), "_"))
     found = _brm_binding_carriers(d.stan, Set{Symbol}(o.name for o in d.stan.outputs),
                                   Set{Symbol}(keys(d.stan.model)), resolved, owned)
     BRMOutput[o for o in s.outputs if o.name in found]
+end
+
+function _brm_submodel_returned_local(d::BRMDescriptor, s::BRMSubmodel, name::Symbol)
+    address = (s.path..., s.target)
+    for call in brm_components(d.plan.parent)
+        call.path == address || continue
+        fields = _brm_component_fields(call.definition)
+        fields !== nothing && haskey(fields, name) && return fields[name]
+    end
+    name
 end
 
 _brm_symbols(name::Symbol) = (name,)
@@ -2531,7 +2543,7 @@ function _brm_element_coordinates_among(output::BRMOutput, candidates)
     end
     dims = ntuple(a -> maximum(k -> k[a], sorted_keys), arity)
     if prod(dims) != length(sorted_keys)
-        matched = [string(constrained_names[i]) for i in axis[order]]
+        matched = [string(stem, ".", join(key, ".")) for key in sorted_keys]
         error("brm_descriptor: emitted output `$(output.name)` matches " *
               "$(length(sorted_keys)) constrained elements $(Tuple(matched)), " *
               "which are not the complete element set of one carrier. " *

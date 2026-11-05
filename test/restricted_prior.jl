@@ -4,15 +4,15 @@
 # prior in its favour (decision 0q18o98, todo 2026-10-29T23-49-52-862-1e4wxe4).
 #
 # Covered: the spelling rewrites to the declaration-bound form the backends
-# read; the keyword form warns, `restricted` and `truncated` do not; Turing's
-# log joint is the plain kernel; RK emits RKPPL's `restricted`; SBBRMI declares
+# read; the keyword form warns, `restricted` and `truncated` do not; RK emits
+# RKPPL's `restricted`; SBBRMI declares
 # the bounds and keeps the plain statement (StanBlocks 0.2.7's `restricted`,
 # todo 2026-10-29T23-49-53-197-18t54wh); malformed spellings are refused.
 #
 # Run: julia --project=test test/restricted_prior.jl
 
 using Test
-using BayesianRegressionModels, Distributions, Turing, StanBlocks
+using BayesianRegressionModels, Distributions, StanBlocks
 using ReactiveKernels, ReactiveKernelsPPL
 const BRM = BayesianRegressionModels
 
@@ -79,20 +79,6 @@ end
     @test operations(@test_logs with_restricted(data)) == operations(with_keywords(data))
 end
 
-@testset "Turing evaluates the plain kernel" begin
-    model = @brm begin
-        location ~ Normal(0, 1)
-        bounded ~ restricted(Normal(0.2, 0.7), location, location + 2)
-        y ~ Normal(bounded, 1)
-    end
-    backend = TuringBRMI(model(DATA))
-    for (location, bounded) in ((0.3, 1.1), (-0.4, 0.0))
-        expected = logpdf(Normal(0, 1), location) + logpdf(Normal(0.2, 0.7), bounded) +
-            sum(logpdf.(Normal(bounded, 1), DATA.y))
-        @test Turing.logjoint(backend.model, (; location, bounded)) ≈ expected
-    end
-end
-
 @testset "RK emits RKPPL's restricted" begin
     model = @brm begin
         location ~ Normal(0, 1)
@@ -152,6 +138,45 @@ end
     end
     @test occursin("without `lower`/`upper` keywords of its own",
         message(() -> nested(DATA)))
+end
+
+# A prior-only program draws a `restricted` prior in generated quantities only
+# when its mass inside its bounds is constant; otherwise StanBlocks keeps it a
+# sampled parameter with what its bounds and arguments read (stanblocks-use
+# §8.1). The prior-program warning says so and names the restricted priors,
+# instead of claiming every parameter forward-simulates (todo 0mhtheb).
+@testset "the prior-program warning names restricted priors that can stay sampled" begin
+    moving = @brm begin
+        location ~ Normal(0, 1)
+        bounded ~ restricted(Normal(0.2, 0.7), location, location + 2)
+        y ~ Normal(bounded, 0.8)
+    end
+    sb = @test_logs (:warn, r"unconditioned \(prior\) program.*A `restricted` prior \(`bounded`\) whose mass inside its bounds moves.*stays a sampled parameter") SBBRMI(
+        moving((; dummy=[1.0])); mod=@__MODULE__)
+    code = BRM.stan_code(sb)
+    @test StanBlocks.stanc_check(code).ok
+    parameters = match(r"(?ms)^parameters \{\n(.*?)^\}", code).captures[1]
+    @test occursin("real location;", parameters)
+    @test occursin("> bounded;", parameters)
+
+    # Constant mass: drawn in generated quantities, which is exact. The
+    # warning still names the restricted prior, conditionally.
+    constant = @brm begin
+        bounded ~ restricted(Normal(0.2, 0.7), 0.0, 2.0)
+        y ~ Normal(bounded, 0.8)
+    end
+    sb = SBBRMI(constant((; dummy=[1.0])); mod=@__MODULE__)
+    code = BRM.stan_code(sb)
+    @test isempty(strip(match(r"(?ms)^parameters \{\n(.*?)^\}", code).captures[1]))
+    @test occursin("bounded = conditioning_normal_rng(", code)
+
+    # Without a restricted prior the warning does not mention one.
+    plain = @brm begin
+        location ~ Normal(0, 1)
+        y ~ Normal(location, 0.8)
+    end
+    @test_logs (:warn, r"^(?!.*restricted).*unconditioned \(prior\) program"s) SBBRMI(
+        plain((; dummy=[1.0])); mod=@__MODULE__)
 end
 
 println("restricted_prior.jl: all testsets passed")
