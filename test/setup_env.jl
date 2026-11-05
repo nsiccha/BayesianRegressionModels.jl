@@ -56,7 +56,7 @@ const PINS = [
     ("ReparametrizableDistributions", "https://github.com/nsiccha/ReparametrizableDistributions.jl.git", "8f7d382df700d3780ed31d093bc4983d3734a6c6"),  # 0.3.0: WarmupHMC dependency; BRM no longer depends on this directly
     ("PowerScaling", "https://github.com/nsiccha/PowerScaling.jl.git", "8d27c83f6928781a39c99c31fd3d528b50ef2dad"),  # 0.1.0: generic power-scaling sensitivity on PSIS.jl
     ("HTMX", "https://github.com/nsiccha/HTMX.jl.git", "0b8dc2f94e879bf31237bd28e751cf2ebc8d95f6"),
-    ("HTMXObjects", "https://github.com/nsiccha/HTMXObjects.jl.git", "5853ba527ad09e733b6abee11728856becd628ec"), # 0.1.62: Julia documentation references and doctest highlighting
+    ("HTMXObjects", "https://github.com/nsiccha/HTMXObjects.jl.git", "ee46e8d6bd381c8b066f3b26afa7ea3336e23146"), # 0.1.65: includes 0.1.62 model-view documentation projection
     ("DynamicObjects", "https://github.com/nsiccha/DynamicObjects.jl.git", "c84047be45cd2bba8a1d02660af9408d4cdf58f4"),
     ("TreeArrays", "https://github.com/nsiccha/TreeArrays.jl.git", "53cfd1b17ee4d1b726dcecfe151458ae41bd20a8"),
     ("AlgebraOfVega", "https://github.com/nsiccha/AlgebraOfVega.jl.git", "73695d5d563074bfd9ab1f98debf2ebe38d7bd00"),
@@ -316,10 +316,13 @@ const PINS = [
     # b0ffcdc1 (RKPPL 0.1.98, on RK main through 6ea1d4ca) normalizes
     # generated-module names in SMC checkpoint identities, so a fresh process
     # resumes an adaptive pilot of an RKBRMI model whose law is an emitted
-    # binding (a gmrf field). It is a9a7e9a2 plus that fix only: main from
-    # 8e67ee82 breaks the selective carried-window route
+    # binding (a gmrf field). df3eb8872 also fixes capture footprints through
+    # row-computed index lanes in selective carried-window tuning
     # (test/smc_window_selective_api.jl; RK snag selective-carrie-1aa69e67).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "b0ffcdc1d915fc111988ddb6bceca8dabeede643"),
+    # db6bca825 (RK 0.1.86 / RKPPL 0.1.99) includes both fixes and the
+    # follow-up scalar-observation gather-demand repair. Pin by SHA: these
+    # versions also label earlier commits without the footprint repair.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "db6bca825d257b09616a0962ffb75587a81a6bb8"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
