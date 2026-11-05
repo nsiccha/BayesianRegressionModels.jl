@@ -580,6 +580,9 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
         head = family isa ExprColumn ? getf(family) : nothing
         head === MixtureModel && _rk_mixture_value_weights(program, family) &&
             return true
+        # A censored delay observes through its BRM-owned law
+        # (`brm_censored_delay`, `censored_delays.jl`).
+        _brm_is_censored_delay(head) && return true
         # Heterogeneous and custom mixtures retain each component's ordinary
         # value and source-graph boundary. The legacy formula planner has a
         # fixed location/scale record and cannot carry these signatures.
