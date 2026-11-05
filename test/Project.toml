@@ -348,4 +348,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # a9a7e9a2 (RKPPL 0.1.97): bound-data LKJ dimensions in reusable definitions.
 # Also contains RK 0.1.82 (b08cb894), which retains live broadcast fusion after
 # binding for batched cell readers.
-rev = "a9a7e9a2182ef2057c004a3c81dd74eef4f3a699"
+# b0ffcdc1 (RKPPL 0.1.98): generated-module-safe SMC checkpoint identities;
+# a9a7e9a2 plus that fix only (main from 8e67ee82: RK snag selective-carrie-1aa69e67).
+rev = "b0ffcdc1d915fc111988ddb6bceca8dabeede643"

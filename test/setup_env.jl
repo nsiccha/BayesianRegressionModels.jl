@@ -313,7 +313,13 @@ const PINS = [
     # Also contains RK 0.1.82 (b08cb894), which retains live broadcast fusion
     # after data binding, so batched vector-cell readers reuse their result
     # buffers at every position.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a9a7e9a2182ef2057c004a3c81dd74eef4f3a699"),
+    # b0ffcdc1 (RKPPL 0.1.98, on RK main through 6ea1d4ca) normalizes
+    # generated-module names in SMC checkpoint identities, so a fresh process
+    # resumes an adaptive pilot of an RKBRMI model whose law is an emitted
+    # binding (a gmrf field). It is a9a7e9a2 plus that fix only: main from
+    # 8e67ee82 breaks the selective carried-window route
+    # (test/smc_window_selective_api.jl; RK snag selective-carrie-1aa69e67).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "b0ffcdc1d915fc111988ddb6bceca8dabeede643"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
@@ -360,7 +366,11 @@ const PINS = [
     # 6053067f / libEnzyme 3425ed9c types floating-point tuple stack slots
     # throughout Reverse, so derived-scale blocks wider than four margins
     # differentiate without changing BRM's block pass (reverse-untyped-a117a92b).
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "6053067f2fa33a4390aea2a365e9e24f83acb495"),  # dogfood
+    # d3189970 / libEnzyme 33709d12 contains 6053067f and repairs ordinary
+    # Reverse through returned memory (Enzyme snag ordinary-autoenz-6cf1298d):
+    # the ordinary AR/DAR and smooth readers in rk_values.jl segfaulted
+    # on Julia 1.10 under 6053067f.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "d31899704b6f5eab6e3843c9517a5486d2139740"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also
