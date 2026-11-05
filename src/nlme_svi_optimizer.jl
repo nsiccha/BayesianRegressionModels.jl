@@ -87,7 +87,9 @@ function _brm_svi_identity(t)
        grouping=(; group=m.view.group, nested=Tuple(keys(m.view.nested_groups)),
            shared=Tuple(m.view.shared_groups), unit_partition=m.view.unit_partition),
        ownership=_brm_svi_digest((m.view.levels, t.globals, t.units)),
-       fixed=_brm_svi_digest(fixed))
+       fixed=_brm_svi_digest(fixed),
+       global_coordinates=hasproperty(t, :ownership) ?
+           copy(m.view.coordinates[t.ownership.promoted]) : Symbol[])
 end
 
 _brm_svi_optimizer_state(t, previous, c, run) = BRMSVIOptimizerState(
@@ -281,6 +283,10 @@ function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
                 call..., description="BRM conditional Gaussian SVI resume", options...) do t, _
             _brm_svi_laplace_restored(t, state)
         end
+    end
+    if hasproperty(state.identity, :global_coordinates) &&
+            state.run isa _BRMSVIRun
+        options = merge((; global_coordinates=state.identity.global_coordinates), options)
     end
     _brm_svi_drive(save, x, state.previous; call..., description="BRM SVI resume",
             threads, options...) do t

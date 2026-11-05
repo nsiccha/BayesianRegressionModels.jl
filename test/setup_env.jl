@@ -294,6 +294,8 @@ const PINS = [
     # recovery and bounded-rank joint Gaussian carries.
     # RK 0.1.62 preserves inner row selection through array-valued producer
     # plate cells, including BRM's shared correlated random-effect predictors.
+    # RKPPL 0.1.72 reports a vector simplex or ordered prior's own block
+    # (plus sampled hyperparents) as its authored-factor support.
     # b5740888 (RKPPL 0.1.71) sizes a data-free replay from frozen whole
     # values, such as a gmrf support fitted from an indexed fit-role input.
     # fbf65b46 (RK 0.1.65 / RKPPL 0.1.74) deep-copies prepared queries whose

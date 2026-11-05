@@ -2,17 +2,18 @@
 # RK-lowered population model's own packed coordinates.
 #
 # The target is the RK sampler density p(u) over the packed unconstrained point
-# u = (g, z_1, …, z_N): g holds every coordinate that is not a subject draw
-# (population coefficients, estimated shared latents, scalars, random-effect
-# scales and correlation factors) and z_i is subject i's standardized draw
-# block. Given g the subjects are conditionally independent:
+# u = (g, z_1, …, z_N). Structural likelihood and prior supports assign each
+# estimated coordinate to one unit or the globals. Atomic prior/transform
+# blocks stay together; a unit includes its standardized subject draws and
+# ordinary sampled coordinates only it reads. Given g the units are
+# conditionally independent:
 #
-#     log p(u) = P(g) + Σ_i [log N(z_i; 0, I) + ℓ_i(g, z_i)],
+#     log p(u) = P(g) + Σ_i [U_i(g, z_i) + ℓ_i(g, z_i)],
 #
-# with P the authored priors and coordinate Jacobians at z = 0 (RK's `:prior`
-# and `:log_jacobian` queries minus the subject draws' N(0, 1) constants) and
-# ℓ_i the subject's observation cells. A batch of B subjects, its terms scaled
-# by N/B, is an unbiased estimate of that sum, and of its gradient.
+# with every authored prior and coordinate Jacobian in exactly one P or U_i
+# bucket, and ℓ_i the unit's observation cells. Standardized-draw-only units
+# retain the equivalent N(0, I) fast path. A batch of B units, its terms
+# scaled by N/B, is an unbiased estimate of that sum and its gradient.
 #
 # The variational family is Gaussian and factorizes into a global factor and
 # one factor per subject:
@@ -67,21 +68,23 @@ include("nlme_svi_units.jl")
 _brm_svi_globals(m::BRMNLMEModel) = sort!(vcat(m.theta, m.sigma,
     findall(r -> r === :subject_scale || r === :subject_correlation, m.view.role)))
 
-function _brm_svi_target(m::BRMNLMEModel)
+function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=nothing)
     m.cell_query === nothing && _brm_nlme_error(
         "brm_svi: minibatch SVI evaluates one subject at a time, on the " *
         "subject's own observation cells, and this model's observations have " *
         "no cells attributable to single subjects")
-    globals = _brm_svi_globals(m)
-    units = m.view.subject_coordinates
+    ownership = _brm_svi_ownership(m; global_coordinates, previous)
+    globals, units = ownership.globals, ownership.units
     # One strict partition sampler per worker; sparse selection metadata shares
     # globals and retains only each unit's local permutation and merge slots.
-    plan = _brm_nlme_partition_plan(m.cell_gradient, m.unit, globals, m.view)
+    plan = _brm_nlme_partition_plan(m.cell_gradient, m.unit, globals, m.view; units)
     layouts = [(; selection.order, selection.slots) for selection in plan.indices]
     width = length(globals) + maximum(length, units; init=0)
     work = [(; values=zeros(width), gradient=zeros(width))]
     nz = count(==(:subject_effect), m.view.role)
-    (; m, globals, units, plan, plans=[plan], work, layouts, prior=nothing,
+    prior = units == m.view.subject_coordinates ? nothing :
+        _brm_svi_authored_prior(m, globals, units; factors=ownership.factors)
+    (; m, globals, units, ownership, plan, plans=[plan], work, layouts, prior,
        z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
 end
 
@@ -159,13 +162,101 @@ function _brm_svi_unit_term!(gg, gz, t, i, g, z, plan=t.plan, work=first(t.work)
     fill!(gradient, 0.0)
     value = _brm_nlme_partition_sum!(gradient, plan, t.m.unit, i, values)
     _brm_svi_split_gradient!(gg, gz, layout, gradient)
-    value + _brm_svi_unit_prior!(gz, t.prior, i, z)
+    value + _brm_svi_unit_prior!(gg, gz, t.prior, t, i, g, z)
 end
 
-function _brm_svi_unit_prior!(gz, ::Nothing, i, z)
+# Unit i's prior term, its gradients added into `gg` (the globals) and `gz`
+# (the unit's block). A standardized subject draw's N(0, I) reads no global.
+function _brm_svi_unit_prior!(gg, gz, ::Nothing, t, i, g, z)
     gz .-= z
     -sum(abs2, z) / 2 - length(z) * log(2π) / 2
 end
+
+# ── Authored unit priors ─────────────────────────────────────────────────────
+
+# The exact prior split for units whose blocks hold ordinary sampled
+# coordinates, not only standardized subject draws: RK's authored prior and
+# coordinate-Jacobian factors (ReactiveKernelsPPL `density_factors`), each
+# assigned once by the coordinates it owns or reads. A factor touching unit i's
+# block is part of U_i(g, z_i), with its reads of the globals (a hyperparameter
+# such as `z ~ Normal(m, tau)`); a factor touching no unit is part of G(g). A
+# factor touching two units, such as a joint law or a coupled transform across
+# them, has no split into unit terms and is refused when the prior is built.
+#
+# `queries[1]` is the global term and `queries[1 + i]` unit i's, `nothing` when
+# empty. Each query differentiates its own structural support only. For its
+# k-th active coordinate, `places[b][k]` is p > 0 for `globals[p]`, -p for the
+# unit block's p-th coordinate, and 0 for a coordinate SVI does not move (a
+# fixed shared value), whose value `active[b][k]` holds from `base`.
+struct _BRMSVIAuthoredPrior{Q}
+    queries::Vector{Q}
+    places::Vector{Vector{Int}}
+    active::Vector{Vector{Float64}}
+    base::Vector{Float64}
+end
+
+# Implemented by the ReactiveKernels extension: the factor queries above for
+# `owner` (the unit owning each packed coordinate, 0 for none), the packed
+# coordinates each differentiates, and one query's value and compact gradient.
+function _rk_svi_factor_queries end
+function _rk_svi_factor_coordinates end
+function _rk_svi_factor_value_gradient end
+
+function _brm_svi_authored_prior(m::BRMNLMEModel, globals, units;
+        factors=_rk_svi_factors(m.backend, m.unit))
+    n = length(m.unit)
+    owner, place = zeros(Int, n), zeros(Int, n)
+    place[globals] .= eachindex(globals)
+    for (i, block) in enumerate(units)
+        allunique(block) || _brm_nlme_error("brm_svi: packed coordinate " *
+            "$(block[findfirst(j -> count(==(j), block) > 1, block)]) appears twice in unit $i")
+        clash = findfirst(j -> owner[j] != 0 || place[j] != 0, block)
+        clash === nothing || _brm_nlme_error("brm_svi: packed coordinate " *
+            "$(block[clash]) is assigned to unit $i and to " *
+            (owner[block[clash]] != 0 ? "unit $(owner[block[clash]])" : "the globals"))
+        owner[block] .= i
+        place[block] .= .-eachindex(block)
+    end
+    queries = _rk_svi_factor_queries(m.backend, m.unit,
+        m.population_prior.ad_backend, owner, length(units), factors)
+    places = map(enumerate(queries)) do (b, query)
+        query === nothing && return Int[]
+        map(_rk_svi_factor_coordinates(query)) do j
+            # The extension assigned each factor to one bucket by its reads, so a
+            # bucket only reads the globals, fixed values and its own unit.
+            owner[j] == 0 || owner[j] == b - 1 || error("brm_svi: the authored " *
+                "prior bucket $(b - 1) reads unit $(owner[j])'s coordinate $j")
+            place[j]
+        end
+    end
+    active = map(queries) do query
+        query === nothing ? Float64[] : m.unit[_rk_svi_factor_coordinates(query)]
+    end
+    _BRMSVIAuthoredPrior(queries, places, active, copy(m.unit))
+end
+
+# One bucket's value, its gradient added into `gg` and `gz`.
+function _brm_svi_factor_term!(gg, gz, prior::_BRMSVIAuthoredPrior, b, g, z)
+    query = prior.queries[b]
+    query === nothing && return 0.0
+    places, active = prior.places[b], copy(prior.active[b])
+    for (k, p) in enumerate(places)
+        p > 0 ? (active[k] = g[p]) : p < 0 && (active[k] = z[-p])
+    end
+    value, gradient = _rk_svi_factor_value_gradient(query, prior.base, active)
+    for (k, p) in enumerate(places)
+        p > 0 ? (gg[p] += gradient[k]) : p < 0 && (gz[-p] += gradient[k])
+    end
+    value
+end
+
+function _brm_svi_global_term(prior::_BRMSVIAuthoredPrior, t, g)
+    gradient = zeros(length(g))
+    _brm_svi_factor_term!(gradient, Float64[], prior, 1, g, Float64[]), gradient
+end
+
+_brm_svi_unit_prior!(gg, gz, prior::_BRMSVIAuthoredPrior, t, i, g, z) =
+    _brm_svi_factor_term!(gg, gz, prior, 1 + i, g, z)
 
 # ── Variational parameters ───────────────────────────────────────────────────
 
@@ -655,7 +746,8 @@ end
     brm_svi_fit([save,] x; laplace=nothing, batch_size=32, rng=Random.default_rng(),
         family=MeanFieldGlobal(), unit_sampling=:uniform, ndraws=1000, start=nothing, inits=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, progress=nothing,
+        nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing,
+        global_coordinates=nothing, progress=nothing,
         stop_after=nothing, checkpoint_every=nothing, threads=nothing,
         kwargs...) -> (; draws, coordinates, diagnostics)
 
@@ -706,7 +798,18 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   with multiplicity retained in the global density and gradient weight
   `countᵢ/(B*pᵢ)`. Every unit has positive probability. This changes the visit
   schedule and estimator variance; it does not guarantee faster convergence.
-- `start` / `inits` — where the globals' means start: the prior medians by
+- Inference ownership follows structural likelihood and authored-prior
+  supports, including dormant branches and zero coefficients. Ordinary
+  sampled coordinates read by only one unit join that unit; shared and
+  prior-only coordinates stay global. Joint prior and transform blocks stay
+  together. Each authored prior and Jacobian is counted once, including
+  gradients through global hyperparameters. Scientific NLME roles are unchanged.
+- `global_coordinates` — packed coordinate indices or names to keep global.
+  Promotion closes over joint blocks and dependent priors. It can include
+  standardized subject effects; it does not split an existing connected
+  observation partition. Diagnostics expose `globals`, `units` and `owner`
+  (zero for globals or fixed coordinates, otherwise the unit index).
+- `start` / `inits` — where the global and unit means start: prior medians by
   default, a full RK packed point, or initial values keyed by prior address as
   [`brm_start`](@ref) takes them (the rest at the prior medians).
 - `progress` — a Treebars node or backend symbol: one `BRM SVI fit` node with
@@ -854,7 +957,8 @@ end
 function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=1000,
         stop_after=nothing, checkpoint_every=nothing, progress=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, threads=nothing)
+        nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, threads=nothing,
+        global_coordinates=nothing)
     ndraws isa Integer && ndraws >= 0 || throw(ArgumentError(
         "$caller: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller, save, stop_after, checkpoint_every)
@@ -865,7 +969,8 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                 ad_backend, shared_point, subject_group, nested_groups, shared_groups, unit_partition)
             t, state = _brm_run_phase(phases.target) do phase
                 # SVI's partition sampler, on first use, reports under this phase.
-                t, state = init(_brm_with_cell_progress(() -> _brm_svi_target(m), phase))
+                t, state = init(_brm_with_cell_progress(
+                    () -> _brm_svi_target(m; global_coordinates, previous), phase))
                 _brm_svi_with_workers(t, min(threads, state.controls.batch_size), phase), state
             end
             run, c = state.run, state.controls
@@ -885,18 +990,23 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                 threads=length(t.plans),
                 elbo=run.trace, elbo_windows=first.(run.windows), run.converged,
                 finished=_brm_svi_finished(run, c), iterations=run.iteration, q,
-                globals=t.globals, seconds, model=m, source_id=_brm_svi_source_id(m.backend),
+                globals=t.globals, units=t.units, owner=t.ownership.owner,
+                global_coordinates=t.ownership.promoted,
+                seconds, model=m, source_id=_brm_svi_source_id(m.backend),
                 sampling=run.sampling, unit_gradient_calls=run.unit_gradient_calls,
-                streaming=_brm_svi_carried_state(previous, m, q), optimizer=state))
+                streaming=_brm_svi_carried_state(previous, t, q), optimizer=state))
         end
     end
 end
 
 _brm_svi_family(::Nothing, ::Nothing) = MeanFieldGlobal()
 _brm_svi_family(::Nothing, family::BRMSVIFamily) = family
-function _brm_svi_initialize(t, ::Nothing, family; start, inits, global_scale, unit_scale,
-        unit_dense_limit=64, unit_rank=8)
-    μ = _brm_svi_start(t.m, start, inits)[t.globals]
-    t, _brm_svi_params(t, μ, family; global_scale, unit_scale, unit_dense_limit, unit_rank)
+function _brm_svi_initialize(t, ::Nothing, family; start, inits, global_scale, unit_scale, unit_dense_limit=64, unit_rank=8)
+    point = _brm_svi_start(t.m, start, inits)
+    q = _brm_svi_params(t, point[t.globals], family; global_scale, unit_scale, unit_dense_limit, unit_rank)
+    for (i, block) in enumerate(t.units)
+        q.M[i] .= point[block]
+    end
+    t, q
 end
 _brm_svi_carried_state(::Nothing, m, q) = nothing

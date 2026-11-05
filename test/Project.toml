@@ -332,6 +332,7 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # PPL 0.1.60 / DistributionKernels 0.1.1: log-space interval masses and tails.
 # RK 0.1.61 / PPL 0.1.70: selective windows, recovery and bounded joint carries.
 # RK 0.1.62: strict selected rows through array-valued producer plate cells.
+# PPL 0.1.72: exact structural support for vector simplex/ordered factors.
 # b5740888 (RKPPL 0.1.71): data-free replay reads frozen whole values.
 # fbf65b46 (RK 0.1.65 / PPL 0.1.74): prepared queries holding modules deep-copy.
 # f17b6a24 (RK 0.1.67 / PPL 0.1.76): strict cell footprints of per-cell joint fields.
