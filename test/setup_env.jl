@@ -370,7 +370,11 @@ const PINS = [
     # Reverse through returned memory (Enzyme snag ordinary-autoenz-6cf1298d):
     # the ordinary AR/DAR and smooth readers in rk_values.jl segfaulted
     # on Julia 1.10 under 6053067f.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "d31899704b6f5eab6e3843c9517a5486d2139740"),  # dogfood
+    # b2bb4cb6 / libEnzyme f392eba5 contains d3189970 and caches a value that
+    # cannot change inside a loop once per loop entry (Enzyme snag
+    # reverse-generato-03b2003d), so a multiresolution gmrf reader's generator
+    # sum no longer tapes its captured arrays once per basis term.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "b2bb4cb628cf5f5ac4a897d4b7d83fcd2b5df97c"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also
