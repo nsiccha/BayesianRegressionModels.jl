@@ -9,7 +9,8 @@ row-length and scalar-cell checks. It accepts testset substring filters.
 `model_view_documentation.jl` checks authored Julia documentation in builder and
 bound-model views, plus callable docs after binding: references become formatted labels,
 ordinary URLs remain linked, doctest contents survive, and source/doc records
-remain unchanged. The bootstrap selects HTMXObjects 0.1.62 for this projection.
+remain unchanged. The bootstrap selects HTMXObjects 0.1.65, which also renders
+tabbed views as readable plain text without internal node representations.
 
 `heterogeneous_mixtures.jl` checks native mixtures of different full-real
 scalar families and custom component graphs against independent normalized
@@ -57,6 +58,14 @@ scales and simplexes, and preserves unaddressed values and top-level starts.
 Run it as a standalone script in the test environment; it compiles Stan even
 when the resulting point is consumed by RK.
 
+`component_prior_inputs.jl` checks component formula priors that read the
+caller's parameters through inputs: population-effect locations and scales and
+a component-local `|ID|` block's SD prior. It compares compiled Stan densities
+and gradients with an independent density, checks each input's contribution
+along its coordinate, and covers a nested call and a call whose input is a
+number. The SD case is also checked on `RKBRMI`. It accepts testset substring
+filters; run it as a standalone script in the test environment.
+
 `component_start_values.jl` checks native component-local starts, recursive
 scalar prior medians, repeated and nested call paths, constrained values,
 explicit precedence, numeric-base preservation and input immutability.
@@ -68,6 +77,14 @@ nonidentity factors, matrix shape and support, unchanged base values and input
 immutability. It also combines top-level matrices with scalar/vector starts,
 component-local factors and prior medians. Add `--stan` for independent
 compiled-Stan readback and physical coordinate parity.
+
+`component_formula_starts.jl` checks `component_inits` entries that name a
+component call's own linear predictors and shared `|ID|` blocks: link-scale
+coefficients, block scales, correlation, covariance and per-level effects in
+repeated and nested calls over different levels, component-local coefficient
+and scale prior medians, unchanged top-level values and refusals. The default
+run only builds RK models; `--stan` adds compiled readback of each call's
+predictor values and cross-backend physical-point parity.
 
 `smc_tuning_lifecycle.jl` checks adaptive pilot interruption before any draw and
 during a later grid pilot, nested Treebars progress, input ownership, endpoint
@@ -1225,6 +1242,38 @@ fit is compared with NUTS too. Starts (prior medians, a packed point,
 `inits`) and their refusals are covered as well. It runs in the test
 environment above.
 
+`nlme_svi_authored_factors.jl` checks the public RKPPL authored-factor API
+and production SVI ownership. On a
+six-subject model whose coefficient pair `z[2i-1], z[2i]` is read only by
+subject `i`, and on a variant with hyperparameter-dependent Normal, Exponential
+and Beta priors, it gives each pair (and each constrained coordinate) to its
+subject, keeps the hyperparameters' priors global although every subject reads
+them, and checks that each prior and Jacobian event lands in exactly one
+bucket. At three nonzero packed points the bucket values and compact gradients
+plus the likelihood equal the full RK sampler's value and Reverse gradient.
+It then checks SVI's authored prior term (`_BRMSVIAuthoredPrior`): on the
+strict subject units it equals the standard-normal split term by term, and
+with the subjects also owning their coefficients the global term plus every
+unit term equals RK's whole prior and Jacobian, with the units' reads of
+`tau` carried in the globals' gradient. A `Dirichlet` simplex, one atomic
+law and coupled transform, is refused once its two coordinates are given to
+different units, as is a coordinate assigned twice, while the strict subject
+units build with the simplex global. That needs RKPPL 0.1.72, which reports
+the constant Dirichlet's own block as its support (snag
+`ReactiveKernels/factor-support-r-2b8c2968`; 0.1.70 reported the whole packed
+vector). It also checks the production ownership split, public fits and
+draw packing. Run it alone in the test environment.
+
+`nlme_svi_owned.jl` covers structural ownership through dormant branches and
+zero coefficients, shared and prior-only coordinates, connected units,
+explicit global promotions, optimizer resume and streaming absent/returning
+units. Its density and native Reverse gradient oracle is the full RK sampler.
+The dormant scalar/vector branch's ordinary Reverse needs Enzyme dogfood from
+`0fa85df3` (repairs `74abe90` and `7ac58eb`, contained in the bootstrap's
+`b2bb4cb6`); earlier pins raise `IllegalTypeAnalysisException` there.
+`nlme_svi_ownership_algebra.jl` isolates atomic-block and directed-prior
+closure, including fixed coordinates and factors that own no coordinates.
+
 `nlme_svi_threads.jl` checks `brm_svi_fit(...; threads)` with real threads (run
 it with `--threads=4`; it refuses to run without them). The state after every
 iteration, whose Adam moments are the gradient trajectory, and the draws must equal
@@ -1235,6 +1284,21 @@ window fit. It also covers each worker's own samplers over shared read-only tabl
 how a failing unit stops the tasks, the BLAS pin and the refusals.
 `research/svi_threads/benchmark.jl` measures per-iteration time, GC share and retained
 worker memory against `threads`.
+
+`nlme_threads.jl` checks one-unit NLME calls from several tasks at once, which
+take their own evaluators from the model's pool. On flat, plate and nested
+models, the protocol's one-unit values, η gradients and population gradients,
+called from every thread in shuffled order, equal serial calls to the last bit,
+and the pool prepares more than one evaluator. `check_protocol(...; threads =
+true)` passes on a nested model. A seeded `WarmupHMCNUTS(threads = true)` SAEM fit
+of a 24-subject plate PK model gives the same bits in child processes with 1, 4
+and N threads (`BRM_NLME_THREADS_N`, default 8). Over six seeds its estimates
+agree with lockstep fits (`threads = false`) within twice the lockstep fits'
+spread, and both recover the simulated population values. Run it in the
+NLMEEstimation scratch environment below (NLMEEstimation 0.2.5 or later) with
+`--threads=4`; it refuses to run without threads.
+`research/nlme_threads/benchmark.jl` measures a round of one-unit calls and SAEM
+fits at the thread count it is started with.
 
 `nlme_svi_laplace_plan.jl` checks structural eligibility for
 `GaussianBlockLaplace`, including fixed HSGP fitting inputs, nonstandard
@@ -2570,6 +2634,11 @@ semantic projections. It verifies that viewing a model never evaluates a custom
 helper. The descriptor fixture checks constrained simplex dimensions and keeps
 logical quantities separate from generated carriers, without fitting or compiling
 Stan. Set `BRM_MODEL_VIEW_HTML` to an output path to save a browser preview.
+The model-view files share `model_view_plain_text_checks.jl`: titles and tab
+labels must occupy real lines, source remains multiline, default-input rows are
+readable fields, and renderer implementation dumps are absent. These checks cover
+builders, bound declarations, reusable components, descriptors and prepared RK
+views, retaining the helper/default non-evaluation guards.
 
 `julia --project=test test/model_view_edge_cases.jl` covers joint and transformed
 response roles, callable documentation inside mixture-component lists, optional
@@ -2592,11 +2661,9 @@ The browser script owns and closes its temporary server and Chrome process.
 For fresh RK, descriptor and component captures, also run
 `julia --project=<rk-env> web-macro/validate_model_view_prepared_export.jl <output-dir>`
 after the main export, then append `--prepared` to the browser command.
-With HTMXObjects 0.1.60 these additional fixtures expose unresolved Documenter
-`@ref` links (incomplete static export) and a missing `jldoctest` browser grammar.
-The checks intentionally fail on those upstream gaps; do not treat their
-screenshots as evidence of a complete prepared bundle. The base export and
-browser check remain independently runnable.
+The current dependency floor includes Julia-documentation projection and the
+shared Julia doctest grammar. Both the base and prepared bundles must pass strict
+export and browser checks; the base checks remain independently runnable.
 The RK environment must contain BRM, HTMXObjects, ReactiveKernels and
 ReactiveKernelsPPL. This explicitly prepares toy objects, then exports the
 supplied objects with helper evaluation guarded off. Browser checks cover

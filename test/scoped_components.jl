@@ -782,7 +782,25 @@ end
         sb_e = SBBRMI(expanded; mod=ScopedNamed, total_groups=())
         mapping = [pair.rk => pair.stan for pair in
             brm_coordinate_transport(rk_e, sb_e, stan_names_e).pairs]
+        # The component's own transport pairs the call's random-effect block
+        # (scales, factor and standardized draws by level label) exactly as
+        # the expansion's transport does, under the call prefix.
+        sb_c = SBBRMI(component; mod=ScopedNamed, total_groups=())
+        transport_c = brm_coordinate_transport(rk_c, sb_c, stan_names_c)
+        mapping_c = [pair.rk => pair.stan for pair in transport_c.pairs]
+        rk_index_e = Dict(n => i for (i, n) in enumerate(names_e))
+        stan_index_e = Dict(n => i for (i, n) in enumerate(stan_names_e))
+        @test Set(mapping_c) == Set(names_c[order[rk_index_e[rk]]] =>
+            stan_names_c[stan_order[stan_index_e[stan]]] for (rk, stan) in mapping)
+        @test Set(string(pair.address.level) for pair in transport_c.pairs
+            if pair.address.kind === :ranef_z && pair.address.scope == (:kin,)) ==
+            Set(data.unit)
         for point in (zeros(count), collect(range(-0.3, 0.4; length=count)))
+            check_consumer_stan(problem_c, stan_c, mapping_c, rk_c, point)
+            @test brm_stan_point_to_rk(transport_c,
+                brm_rk_point_to_stan(transport_c, point)) == point
+            @test brm_check_coordinate_transport(transport_c, rk_c, stan_c.model,
+                point).max_error <= 1e-12
             value_c, gradient_c = LogDensityProblems.logdensity_and_gradient(problem_c, point)
             value_e, gradient_e = LogDensityProblems.logdensity_and_gradient(problem_e,
                 point[order])
@@ -796,6 +814,107 @@ end
             @test sc ≈ se atol=2e-11 rtol=2e-11
             @test gc[stan_order] ≈ ge atol=2e-10 rtol=2e-10
             check_consumer_stan(problem_e, stan_e, mapping, rk_e, point[order])
+        end
+    end
+end
+
+module ScopedBlocks
+using BayesianRegressionModels, Distributions
+
+# One correlated block over two linear predictors whose margins have
+# different scale laws, so each margin's scale is its own RK declaration.
+@brm function linked_rates(unit)
+    log(rise) ~ 1 + (1 | rates | unit)
+    log(fall) ~ 1 + (1 | rates | unit)
+    effect(rise, Intercept) ~ Normal(-1.8, 0.4)
+    effect(fall, Intercept) ~ Normal(-1.6, 0.3)
+    sd(rise, rates) ~ Exponential(1)
+    sd(fall, rates) ~ Exponential(2)
+    cor(:, rates) ~ LKJCholesky(2, 2)
+    return rise + fall
+end
+
+@brm function wrapped_rates(unit)
+    inner ~ linked_rates(unit)
+    return inner
+end
+
+@brm function arm_slopes(x, subject, arm)
+    mu ~ 1 + x + (1 + x | p | gr(subject, by = arm))
+    effect(mu, :) ~ Normal(0, 1)
+    return mu
+end
+
+@brm function heavy_sites(site)
+    mu ~ 1 + (1 | heavy | site)
+    effect(mu, :) ~ Normal(0, 1)
+    ranef(:, heavy) ~ TDist(4)
+    return mu
+end
+
+# Repeated and nested calls over different groupings and level counts, beside
+# a model-scope block over yet another grouping.
+const rates = @brm begin
+    left ~ linked_rates(unit_l)
+    right ~ linked_rates(unit_r)
+    nested ~ wrapped_rates(unit_n)
+    mu ~ 1 + (1 | g)
+    effect(mu, :) ~ Normal(0, 1)
+    y_l ~ Normal(left, sigma)
+    y_r ~ Normal(right, sigma)
+    y_n ~ Normal(nested, sigma)
+    z ~ Normal(mu, sigma)
+    sigma ~ Exponential(1)
+end
+
+const strata = @brm begin
+    a ~ arm_slopes(x, subject, arm)
+    b ~ heavy_sites(site)
+    y ~ Normal(a, sigma)
+    y2 ~ Normal(b, sigma)
+    sigma ~ Exponential(1)
+end
+end
+
+@stestset "random-effect blocks declared inside components pair by call and level" begin
+    for (label, builder, data, levels) in (
+            ("rates", ScopedBlocks.rates,
+                (; unit_l=["a", "a", "b", "c"], unit_r=["u", "v", "v"],
+                    unit_n=["p", "q", "p", "r", "s"], g=["x", "y", "x", "y"],
+                    y_l=[0.3, 0.4, 0.2, 0.5], y_r=[0.1, 0.6, 0.2],
+                    y_n=[0.2, 0.3, 0.1, 0.4, 0.5], z=[0.1, 0.2, 0.3, 0.4]),
+                [(:left,) => ["a", "b", "c"], (:right,) => ["u", "v"],
+                    (:nested, :inner) => ["p", "q", "r", "s"]]),
+            ("strata", ScopedBlocks.strata,
+                (; x=[-0.4, 0.2, 0.7, 0.1, -0.3, 0.5],
+                    subject=["s1", "s2", "s1", "s3", "s4", "s3"],
+                    arm=["t", "c", "t", "c", "t", "c"],
+                    site=["k", "m", "k", "n", "m", "k"],
+                    y=[0.1, 0.4, 0.8, 0.0, -0.2, 0.3], y2=[0.3, -0.1, 0.2, 0.5, 0.1, 0.0]),
+                [(:a,) => ["s1", "s2", "s3", "s4"], (:b,) => ["k", "m", "n"]]))
+        println("COMPONENT_BLOCKS=", label); flush(stdout)
+        model = builder(data)
+        rk, problem = consumer_problem(model)
+        sb = SBBRMI(model; mod=ScopedBlocks, total_groups=())
+        stan = consumer_stan(model, "component-blocks-" * label; mod=ScopedBlocks)
+        stan_names = BridgeStan.param_unc_names(stan.model)
+        transport = brm_coordinate_transport(rk, sb, stan_names)
+        @test length(transport) == length(stan_names) == rk.model.layout.total
+        # Each call's standardized draws are addressed by its own levels.
+        for (scope, labels) in levels
+            @test sort!(unique(string(pair.address.level) for pair in transport.pairs
+                if pair.address.kind === :ranef_z &&
+                    get(pair.address, :scope, nothing) == scope)) == labels
+        end
+        mapping = [pair.rk => pair.stan for pair in transport.pairs]
+        n = length(transport)
+        for point in (collect(range(-0.3, 0.4; length=n)), 0.3 .* sin.(1:n))
+            check_consumer_stan(problem, stan, mapping, rk, point)
+            @test brm_stan_point_to_rk(transport,
+                brm_rk_point_to_stan(transport, point)) == point
+            checked = brm_check_coordinate_transport(transport, rk, stan.model, point)
+            @test checked.max_error <= 1e-12
+            @test checked.factors == (label == "rates" ? 3 : 2)
         end
     end
 end

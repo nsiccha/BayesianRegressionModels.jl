@@ -2209,6 +2209,13 @@ StanBlocks.@deffun begin
         rv
     end
 end
+# The positive half-line is the family's own support (stanblocks-use §8): its
+# density and RNG honour it. StanBlocks declares it on a prior's parameter and
+# draws a prior-only value with `brm_inverse_gaussian_rng`; spelled as a bound
+# instead, the draw was a truncated re-draw asking for an `_lccdf` companion
+# the family does not have (todo 0w0ukqc).
+StanBlocks.autokwargs(::StanBlocks.CanonicalExpr{typeof(brm_inverse_gaussian)}) =
+    (; lower=0.0)
 
 function addprop end
 
@@ -5030,6 +5037,24 @@ Base.@nospecializeinfer function _sb_observation_triage(@nospecialize(sb::SBBRMI
     (; bound, unbound, fresh_sources)
 end
 
+# The targets of the emitted priors that hold a `restricted(...)` law
+# (`_sb_restricted_prior!`), including a margin of a vector prior.
+_sb_restricted_targets!(out, _) = out
+function _sb_restricted_targets!(out, x::Expr)
+    if x.head === :call && length(x.args) == 3 && x.args[1] === :~ &&
+       _sb_holds_restricted(x.args[3])
+        name = x.args[2] isa Symbol ? x.args[2] : _sb_plan_lhs_name(x.args[2])
+        isnothing(name) || push!(out, name)
+        return out
+    end
+    foreach(a -> _sb_restricted_targets!(out, a), x.args)
+    out
+end
+_sb_holds_restricted(_) = false
+_sb_holds_restricted(x::Expr) =
+    (x.head === :call && !isempty(x.args) && x.args[1] === StanBlocks.restricted) ||
+    any(_sb_holds_restricted, x.args)
+
 Base.@nospecializeinfer function _sb_triage_emitted(@nospecialize(sb::SBBRMI),
                                                     triage=_sb_observation_triage(sb))
     (; bound, unbound, fresh_sources) = triage
@@ -5042,11 +5067,20 @@ Base.@nospecializeinfer function _sb_triage_emitted(@nospecialize(sb::SBBRMI),
                   "If one was meant to be fitted, its data column is missing " *
                   "or misnamed.")
         else
+            # A `restricted` prior whose mass inside its bounds moves with a
+            # sampled value stays sampled (StanBlocks' rule, stanblocks-use
+            # §8.1), so such a program keeps parameters (todo 0mhtheb).
+            restricted = unique!(_sb_restricted_targets!(Symbol[], sb.model.model))
+            kept = isempty(restricted) ? "" :
+                " A `restricted` prior (" * join(map(s -> "`$s`", restricted), ", ") *
+                ") whose mass inside its bounds moves with a sampled argument " *
+                "or bound stays a sampled parameter instead, with what its " *
+                "bounds and arguments read; that program needs a sampler."
             @warn("sbimpl: $names bind(s) no data column — building the " *
                   "unconditioned (prior) program: no likelihood reaches the " *
                   "model block, so parameters and responses forward-simulate " *
-                  "in generated quantities. If you meant to fit, the response " *
-                  "column is missing or misnamed.")
+                  "in generated quantities." * kept * " If you meant to fit, " *
+                  "the response column is missing or misnamed.")
         end
         return nothing
     end
@@ -8466,8 +8500,9 @@ function _sb_emit_prior!(stmts, target, ::Type{<:VonMises}, op)
     true
 end
 
-# The prior uses the same exact density/RNG as an observation. Its declaration
-# additionally carries the positive-half-line support.
+# The prior uses the same exact density/RNG as an observation. The family
+# declares its positive-half-line support itself (`autokwargs` above), so only a
+# bound that narrows it is spelled, and that one restricts the prior.
 function _sb_emit_prior!(stmts, target, ::Type{<:InverseGaussian}, op)
     length(getargs(op)) in (0, 1, 2) || error(
         "sbimpl: `InverseGaussian` expects `InverseGaussian()`, " *
@@ -8477,14 +8512,16 @@ function _sb_emit_prior!(stmts, target, ::Type{<:InverseGaussian}, op)
     mu, lambda = _sb_stan_dist_args(InverseGaussian, args)
     bounds = _sb_prior_bound_keywords(target, InverseGaussian, getkwargs(op))
     supplied = Dict(kw.args[1] => kw.args[2] for kw in bounds.args)
-    lower = 0.0
+    narrowing = Pair{Symbol,Any}[]
     if haskey(supplied, :lower)
-        lower = _sb_bound_intersection(max, lower, supplied[:lower])
+        lower = _sb_bound_intersection(max, 0.0, supplied[:lower])
+        lower == 0.0 || push!(narrowing, :lower => lower)
     end
-    decl_kwargs = haskey(supplied, :upper) ? (; lower, upper=supplied[:upper]) : (; lower)
-    declaration = _sb_prior_bound_keywords(target, InverseGaussian, decl_kwargs)
-    push!(stmts, Expr(:call, :~, target,
-        Expr(:call, brm_inverse_gaussian, declaration, mu, lambda)))
+    haskey(supplied, :upper) && push!(narrowing, :upper => supplied[:upper])
+    rhs = Expr(:call, brm_inverse_gaussian, mu, lambda)
+    isempty(narrowing) || insert!(rhs.args, 2,
+        _sb_prior_bound_keywords(target, InverseGaussian, (; narrowing...)))
+    push!(stmts, Expr(:call, :~, target, rhs))
     true
 end
 # Generic scalar prior via a Distributions.jl constructor on the RHS

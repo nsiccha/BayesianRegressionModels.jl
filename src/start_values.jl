@@ -91,14 +91,27 @@ A scope is the full tuple of authored call targets, or a target symbol when
 it identifies exactly one call. Each NamedTuple uses that call's local
 parameter names and constrained scalar or array values of the exact shape.
 Positive and bounded scalars, simplexes and correlation Cholesky factors use
-their physical values. Unknown, ambiguous or duplicate scopes, computed
-values, wrong shapes and invalid constraints are rejected. RK initialization
-uses its native layout and needs no compiled Stan model.
+their physical values. A key naming one of the call's own linear predictors or
+`|ID|` blocks takes the `inits` grammar above, resolved in the call:
+`rise = (; Intercept = log(1/6))` sets `effect(rise, Intercept)` on the link
+scale, and `rates = (; sd, cor, effects)` or `rates = Σ` sets the call's
+shared block, with `effects` keyed by the call's own levels:
+
+```julia
+component_inits = [:left => (; rise=(; Intercept=log(1/6)),
+                       rates=(; sd=[0.3, 0.5], cor=[1 0.4; 0.4 1],
+                              effects=["a" => [0.1, -0.2]]))]
+```
+
+Unknown, ambiguous or duplicate scopes, computed values, wrong shapes and
+invalid constraints are rejected. RK initialization uses its native layout and
+needs no compiled Stan model.
 
 `base=:prior_median` fills unaddressed scalar-prior parameters from finite
 medians within their effective bounds, including fitted length-scale floors.
-This includes scalar parameters recursively inside components, with the
-inputs bound separately at each call. Explicit `inits`, `term_inits` and
+This includes scalar parameters, population coefficients and `|ID|` block
+scales recursively inside components, with the inputs bound separately at each
+call. Explicit `inits`, `term_inits` and
 `component_inits` take precedence. Structured latent blocks
 (cell latents, innovations, ordered vectors, correlation factors, simplexes
 and joint shrinkage coordinates)
@@ -442,7 +455,8 @@ function brm_start(rk::RKBRMI, inits::NamedTuple;
     end
     term_targets = _brm_start_term_targets(parent(rk), term_inits)
     _brm_rk_start_terms!(writes, term_targets, records, values)
-    env = _brm_rk_start_components!(writes, rk, records, values, inits, component_inits, base)
+    env = _brm_rk_start_components!(writes, effects, rk, records, values, inits,
+        component_inits, base)
     if _brm_start_prior_requested(base)
         prior_writes = _brm_rk_start_prior_writes(rk, records, values, writes, inits, term_targets; env)
         append!(writes, prior_writes)
@@ -459,8 +473,10 @@ function _brm_rk_start_point(rk::RKBRMI, values, writes, effects=NamedTuple[])
     _brm_rk_check_distinct(writes)
     values = _brm_rk_start_apply(values, writes)
     z_writes = Tuple{Symbol,Tuple,Any}[]
-    for (; target, record) in effects
-        _brm_rk_effect_writes!(z_writes, rk, values, target, record)
+    # A component call's block takes its levels from the call's own columns.
+    for entry in effects
+        _brm_rk_effect_writes!(z_writes, get(entry, :owner, rk), values, entry.target,
+            entry.record)
     end
     values = _brm_rk_start_apply(values, z_writes)
     writes = [writes; z_writes]
@@ -473,8 +489,9 @@ function _brm_rk_start_point(rk::RKBRMI, values, writes, effects=NamedTuple[])
         _brm_start_check("RK value `$declaration`$(collect(index))",
             isempty(index) ? got : got[index...], value)
     end
-    for (; target, record) in effects
-        (; rows, P) = _brm_rk_effect_rows(rk, target, record)
+    for entry in effects
+        (; target, record) = entry
+        (; rows, P) = _brm_rk_effect_rows(get(entry, :owner, rk), target, record)
         E = _brm_rk_block_effects(check, record, length(P))
         _brm_start_check("effects of `|$(target.id)|`", E[rows, :],
             target.effects.values[:, P])
@@ -894,7 +911,8 @@ function brm_start(sb::SBBRMI, stan_model, inits::NamedTuple;
     term_targets = _brm_start_term_targets(parent(sb), term_inits)
     _brm_sb_start_terms!(writes, term_targets, d, names)
     _brm_sb_start_totals!(writes, deferred, sb, d, names, totals)
-    env = _brm_sb_start_components!(writes, sb, d, names, inits, component_inits, base)
+    env = _brm_sb_start_components!(writes, deferred, sb, d, names, inits,
+        component_inits, base)
     if _brm_start_prior_requested(base)
         append!(writes, _brm_sb_start_prior_writes(sb, d, names, writes, inits, term_targets; env))
     end
@@ -1293,18 +1311,26 @@ end
 # (snag brm-start-explic-aaf34bf9).
 function _brm_sb_start_block_effects(u, stan_model, d, pending)
     isempty(pending) && return u
-    unc = String.(BridgeStan.param_unc_names(stan_model))
-    index = _BRMNameIndex(BridgeStan.param_names(stan_model; include_tp=true))
-    full = Vector{Float64}(undef, length(index))
+    all_unc = String.(BridgeStan.param_unc_names(stan_model))
+    all_full = String.(BridgeStan.param_names(stan_model; include_tp=true))
+    full = Vector{Float64}(undef, length(all_full))
     u = copy(u)
     probe = similar(u)
-    for (; t, block, P) in pending
+    for entry in pending
+        (; t, block, P) = entry
+        # A component call's block is resolved by the call's own descriptor
+        # among its own (prefix-stripped) names, at the parent's positions.
+        prefix = get(entry, :prefix, nothing)
+        block_d = get(entry, :d, d)
+        unc = isnothing(prefix) ? all_unc : _brm_sb_component_local_names(all_unc, prefix)
+        index = _BRMNameIndex(isnothing(prefix) ? all_full :
+            _brm_sb_component_local_names(all_full, prefix))
         rows = _brm_start_level_positions(t.id, t.effects.levels, block.levels)
         D = t.effects.values[:, P]
         # Margins × given levels: the coordinates to solve for.
         position = ranef_coordinates(block, unc)[:, rows]
         # The given levels' effects, levels × margins, at an unconstrained point.
-        effects(x) = _brm_sb_start_effects_at(stan_model, d, block, x, rows, index, full)
+        effects(x) = _brm_sb_start_effects_at(stan_model, block_d, block, x, rows, index, full)
         E0 = effects(u)
         # Their response to a unit step of the given coordinates at `u`.
         function response(coordinates)

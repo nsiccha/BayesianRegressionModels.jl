@@ -219,32 +219,44 @@ Repeated calls have separate paths and share their definition identity.
 For a component definition itself, the first record has path `()` and no call.
 No backend compilation or manually maintained source registry is required.
 """
-function brm_components(model::BRMI)
+brm_components(model::BRMI) = map(_brm_public_component_record, _brm_component_records(model))
+brm_components(builder::BRMBuilder, data) = brm_components(builder(data))
+brm_components(component::BRMComponent) =
+    map(_brm_public_component_record, _brm_component_records(component))
+
+# The same discovery, keeping what the walk already built for each call: its
+# `instance` (the call's own declarations bound to its arguments) and whether
+# it runs once per plate iteration (`plate`). Read-only inspection such as the
+# model view lists those declarations from here instead of rebuilding them.
+function _brm_component_records(model::BRMI)
     records = NamedTuple[]
     _brm_component_calls!(records, model, ())
     Tuple(records)
 end
-brm_components(builder::BRMBuilder, data) = brm_components(builder(data))
-function brm_components(component::BRMComponent)
+function _brm_component_records(component::BRMComponent)
     placeholders = Dict(input => NamedColumn(input, _BRMComponentInput(input))
         for input in component.inputs)
     model = component.builder(_BRMCellFormulaInputs((;), placeholders))
     _brm_check_component_recursion(component)
     records = NamedTuple[(; path=(), definition=component,
-        source=brm_source(component), scope=component.scope, call=nothing)]
+        source=brm_source(component), scope=component.scope, call=nothing,
+        instance=model, plate=false)]
     _brm_component_calls!(records, model, ())
     Tuple(records)
 end
+_brm_public_component_record(record) =
+    (; record.path, record.definition, record.source, record.scope, record.call)
 
-function _brm_component_call!(records, target, component, call, path)
+function _brm_component_call!(records, target, component, call, path, plate)
     address = (path..., target)
+    instance = _brm_component_instance(component, call)
     push!(records, (; path=address, definition=component,
         source=brm_source(component), scope=component.scope,
-        call=Meta.parse(sprint(show, call))))
-    _brm_component_calls!(records, _brm_component_instance(component, call), address)
+        call=Meta.parse(sprint(show, call)), instance, plate))
+    _brm_component_calls!(records, instance, address, plate)
 end
 
-function _brm_component_calls!(records, model, path)
+function _brm_component_calls!(records, model, path, plate=false)
     for (target, column) in _brm_operation_entries(model)
         operation = column isa NamedColumn ? parent(column) : column
         operation isa ExprColumn{typeof(~)} || continue
@@ -252,7 +264,7 @@ function _brm_component_calls!(records, model, path)
         rhs isa ExprColumn || continue
         callee = getf(rhs)
         if callee isa BRMComponent
-            _brm_component_call!(records, target, callee, rhs, path)
+            _brm_component_call!(records, target, callee, rhs, path, plate)
         elseif callee === kernel && first(getargs(rhs)) isa _BRMInlineBody
             body = first(getargs(rhs))
             _brm_component_cell_calls!(records, _brm_inline_expr(body),
@@ -272,7 +284,7 @@ function _brm_component_cell_calls!(records, expression, scope, path)
                 Meta.isexpr(lhs, :ref) ? first(lhs.args) : nothing
             target isa Symbol || error("component call has no named target: $lhs")
             rhs = _brm_component_cell_ir(component, call, scope)
-            _brm_component_call!(records, target, component, rhs, path)
+            _brm_component_call!(records, target, component, rhs, path, true)
             return records
         end
     end
