@@ -68,6 +68,37 @@ the component's defining module, which can differ from its caller's module.
 The function-shaped declaration is a `BRMComponent`, a declarative model
 definition. It is called at a model binding, `result ~ component(...)`.
 
+Correlation dimensions and concentrations can be explicit data inputs. The
+same component definition can serve different sizes, including different
+sizes in one model:
+
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:LKJComponentsDocs), raw"""
+using BayesianRegressionModels, Distributions
+
+@brm function correlation(K, eta)
+    L ~ LKJCholesky(K, eta)
+    return L
+end
+
+paired = @brm begin
+    small ~ correlation(small_K, small_eta)
+    large ~ correlation(large_K, large_eta)
+    y ~ Normal(small[2, 1] + large[2, 1], 0.3)
+end
+model = paired((; small_K=2, small_eta=1.3,
+                  large_K=4, large_eta=2.3, y=0.1))
+""", :model; title="One correlation component at two sizes", require_stan=true)
+```
+
+`K` must resolve from known data to an integer at least one; `eta` must be
+finite and strictly positive. Data-derived expressions such as
+`length(channels)` also work. Both backends preserve the normalized LKJ
+prior and its `K * (K - 1) / 2` unconstrained coordinates. Native RK requires
+ReactiveKernelsPPL 0.1.97 or later and retains the named inputs in emitted
+component source.
+
 The existing `@brm model(data) = begin … end` form still defines a data-to-model
 builder. `merge(builder_a, builder_b)` still combines statements in one
 namespace. Use a component when repeated calls should own separate locals.

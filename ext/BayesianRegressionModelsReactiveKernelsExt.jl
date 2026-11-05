@@ -441,6 +441,11 @@ Base.@nospecializeinfer function BRM.RKBRMI(@nospecialize(source::BRM.BRMI); hel
         program=BRM._RKOnce(program), bound=BRM._RKOnce(bound), source)
 end
 
+# Do not call `_rk_translated` or `assign_layout` here: either may evaluate
+# model expressions. A reused build describes its original binding only.
+BRM._brm_view_rk_parameters(backend::BRM.RKBRMI) =
+    backend.model_plan === backend.plan ? parameter_metadata(backend.model) : nothing
+
 # LogDensityProblems shim over the thin-layer sampler query: the packed
 # unconstrained coordinates are the sampler space, so no transform sits
 # between the sampler and the kernel. The boundary plan re-derives from

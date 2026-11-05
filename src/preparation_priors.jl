@@ -47,7 +47,7 @@ function _brm_distribution_shape(::Type{<:MixtureModel}, args)
     components = first(args)
     components isa AbstractVector && !isempty(components) || error(
         "BRM preparation: MixtureModel components must be a nonempty vector")
-    shapes = map(_brm_distribution_shape, components)
+    shapes = map(_brm_mixture_component_shape, components)
     all(==(first(shapes)), shapes) || error(
         "BRM preparation: MixtureModel components must share one variate shape")
     first(shapes)
@@ -64,6 +64,61 @@ function _brm_distribution_shape(constructor, args)
     type isa Type && type <: Distribution || error(
         "BRM preparation: brm_distribution_type($constructor) must return a Distribution type or nothing")
     _brm_distribution_shape(type, args)
+end
+
+# Ordinary custom components already register their observation shape and
+# support in StanBlocks. Query typed arguments without evaluating live model
+# values, so bounds remain symbolic and no duplicate BRM shape trait is needed.
+function _brm_mixture_family_support(component::ExprColumn)
+    typed_args = map(enumerate(getargs(component))) do (j, arg)
+        arg isa Real && !(arg isa Bool) ? Float64(arg) :
+            Expr(:(::), Symbol(:arg, j), :real)
+    end
+    StanBlocks.family_support(getf(component), typed_args...)
+end
+
+function _brm_mixture_component_shape(component::ExprColumn)
+    getf(component) isa Function || return _brm_distribution_shape(component)
+    support = _brm_mixture_family_support(component)
+    isempty(support.size) || return nothing
+    support.kind === :continuous && support.type === :real &&
+        return (Distributions.Univariate, Distributions.Continuous)
+    support.kind === :discrete && support.type === :int &&
+        return (Distributions.Univariate, Distributions.Discrete)
+    nothing
+end
+
+function _brm_mixture_full_real(component::ExprColumn)
+    constructor = getf(component)
+    if constructor isa Function
+        support = _brm_mixture_family_support(component)
+        return support.kind === :continuous && support.type === :real &&
+            isempty(support.size) && isempty(support.support)
+    end
+    _brm_distribution_shape(component) ===
+        (Distributions.Univariate, Distributions.Continuous) || return false
+    constructor isa Type || return false
+    if constructor <: LocationScale
+        return _brm_mixture_full_real(last(getargs(component)))
+    end
+    type = brm_distribution_type(constructor)
+    isnothing(type) && return false
+    try
+        minimum(type) == -Inf && maximum(type) == Inf
+    catch err
+        err isa MethodError || rethrow()
+        false
+    end
+end
+
+function _brm_check_heterogeneous_mixture(components; prefix)
+    constructors = map(getf, components)
+    allequal(constructors) && all(constructor -> constructor isa Type, constructors) &&
+        return nothing
+    all(_brm_mixture_full_real, components) || error(
+        "$prefix: heterogeneous or custom MixtureModel components need known full-real " *
+        "scalar support; mixed, bounded and parameter-dependent supports are not supported")
+    nothing
 end
 
 function _brm_r2d2_prior(value, target)
@@ -277,7 +332,17 @@ function _brm_lkj_cholesky_spec(target::Symbol, op::ExprColumn;
     length(args) == 2 || error(
         "$prefix: `$target ~ LKJCholesky(K, eta)` needs a dimension and a " *
         "shape, got $(length(args)) arguments")
-    K, eta = args[1], _brm_prior_constant(args[2])
+    state = _BRMDataAssignments(prefix)
+    bound(arg) = _brm_data_assignment_value(arg, state, Set{Symbol}())
+    K = bound(args[1])
+    eta = _brm_prior_constant(args[2])
+    values = _brm_lkj_cholesky_values(target, K, bound(eta); prefix)
+    # Preserve a named concentration in Stan source; the resolved dimension
+    # is also used by BRM's grouping/coordinate checks.
+    (; K=values.K, eta=eta isa Real ? values.eta : eta)
+end
+
+function _brm_lkj_cholesky_values(target, K, eta; prefix="BRM preparation")
     K isa Integer && !(K isa Bool) && K >= 1 || error(
         "$prefix: `$target ~ LKJCholesky(K, eta)` needs an integer dimension " *
         ">= 1, got $(repr(K))")
