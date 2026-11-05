@@ -936,7 +936,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     consts = _rk_data_constants!(Dict{Symbol,Float64}(a.name => Float64(a.expression)
         for a in ordinary_assignments if a.expression isa Number), context.data)
     parameters = _rk_plan_parameters!(prepared, context.data, consts,
-        Dict{Symbol,Symbol}(), parameter_names, assignment_names)
+        Dict{Symbol,Symbol}(), parameter_names, assignment_names; retain_lkj_inputs=true)
     vectors = [_rk_plan_vector_parameters!(prepared, context.data, consts,
         Dict{Symbol,Symbol}(), parameter_names, assignment_names); threshold_vectors]
     predictor_order = Symbol[op.name for op in program.operations
