@@ -59,7 +59,7 @@ Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.14"
+StanBlocks = "0.2.24"
 Treebars = "0.1.1"
 Turing = "0.46"
 WarmupHMC = "0.2.11"
@@ -139,7 +139,13 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # ab3960bb (StanBlocks 0.2.12) registers stable hypot and its Base callable.
 # fac3385a (StanBlocks 0.2.14) supplies stable lower-truncated LogNormal
 # moments and both log-CDF tails for ordinary distribution statistics.
-rev = "fac3385a5cb9d0e894352c34f4d0e590e4f93328"
+# 0b42d636 (StanBlocks 0.2.18) implements segment in @juliacompat
+# helpers, used by the native GMRF normalized sparse density.
+# 009f4180 (0.2.19) adds indexed /= for its sparse solve and prior RNG.
+# 61fa161f (0.2.20) gives cell-owned bindings explicit lexical local scope.
+# ef55b84f (0.2.21) predicts upper-only intervals with their response omitted.
+# b43fc26d (0.2.24) predicts censored responses whose bound is the omitted response.
+rev = "b43fc26d78d3257860070317d2ec6e3d723d55f1"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
@@ -300,6 +306,14 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
 # helper calls, guarded captures and broadcast observation locations.
 # Guarded gathered reductions through typed aliases: RK 0.1.52 / PPL 0.1.55.
+# RK 0.1.57 / PPL 0.1.64: caller-owned joint density KernelSpecs and geometry.
+# RK 0.1.59 / PPL 0.1.66: property-based whole-parameter geometry dimensions.
 # PPL 0.1.60 / DistributionKernels 0.1.1: log-space interval masses and tails.
 # RK 0.1.61 / PPL 0.1.70: selective windows, recovery and bounded joint carries.
-rev = "f5628f179b7cd9e2c47568c82bf956c6ea43a8aa"
+# RK 0.1.62: strict selected rows through array-valued producer plate cells.
+# b5740888 (RKPPL 0.1.71): data-free replay reads frozen whole values.
+# fbf65b46 (RK 0.1.65 / PPL 0.1.74): prepared queries holding modules deep-copy.
+# f17b6a24 (RK 0.1.67 / PPL 0.1.76): strict cell footprints of per-cell joint fields.
+# 1e43b1b8 (PPL 0.1.90): native row-dependent and computed shared mixture probabilities.
+# eb1b62dc (RKPPL 0.1.93): authored declaration and reusable-definition metadata.
+rev = "eb1b62dc94003616851d4144e61bb1086409560d"

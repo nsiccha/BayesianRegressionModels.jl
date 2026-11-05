@@ -8,6 +8,7 @@ using ReactiveKernelsPPL
 const BRM = BayesianRegressionModels
 
 include("rk_statistical_gp.jl")
+include("rk_gmrf.jl")
 
 # Stan builtins a kernel cell calls, bound to their Julia equivalents. Stan's
 # conversions between vectors and one-dimensional arrays flatten column-major,
@@ -270,12 +271,7 @@ function _rk_emit_module(emitted::BRM._RKEmittedProgram)
         Core.eval(mod, Expr(:const, Expr(:(=), name, QuoteNode(value))))
     end
     for d in emitted.defs
-        if BRM._rk_source_definition(d).kind in (:function, :kernel)
-            Core.eval(mod, d)
-        else
-            Core.eval(mod, Expr(:macrocall, Symbol("@rkppl"),
-                LineNumberNode(0), d))
-        end
+        Core.eval(mod, BRM._rk_definition_expression(d))
     end
     mod
 end
@@ -321,7 +317,8 @@ end
 
 # A backend's program, translated once and shared with its replays.
 _rk_program(backend::BRM.RKBRMI) =
-    BRM._rk_once!(() -> _RKProgram(BRM._rk_emit_ast(backend.plan)), backend.program)
+    BRM._rk_once!(() -> _RKProgram(BRM._rk_emit_ast(backend.plan;
+        documentation=BRM.brm_documentation(BRM.brm_source(backend)))), backend.program)
 # A backend's binding of that program to its own data, bound once. Every
 # query of the backend reads it.
 _rk_translated(backend::BRM.RKBRMI) =
@@ -428,7 +425,7 @@ Base.@nospecializeinfer function BRM.RKBRMI(@nospecialize(source::BRM.BRMI); hel
     brmi = BRM._brm_resolve_optional_priors(source)
     plan = BRM._rk_plan_car_units(
         BRM._rk_plan_completions(BRM._brm_rk_plan(brmi; held_out), completions), car_units)
-    program = _RKProgram(BRM._rk_emit_ast(plan))
+    program = _RKProgram(BRM._rk_emit_ast(plan; documentation=BRM.brm_documentation(source)))
     bound = _rk_bind_program(program, plan)
     BRM.RKBRMI(brmi, plan, build_kernel(bound);
         program=BRM._RKOnce(program), bound=BRM._RKOnce(bound), source)
@@ -531,6 +528,10 @@ end
 # Cross-backend coordinate transport (src/coordinate_transport.jl).
 BRM._rk_layout_coordinate_names(backend::BRM.RKBRMI) =
     coordinate_names(backend.model.layout)
+# The declarations the layout holds at zero length, which name no coordinate:
+# a single-level treatment-coded factor's coefficient block, for one.
+BRM._rk_layout_empty_declarations(backend::BRM.RKBRMI) =
+    Set{Symbol}(entry.name for entry in backend.model.layout.entries if entry.size == 0)
 # Each packed coordinate's layout transform, in coordinate order.
 function BRM._rk_layout_coordinate_transforms(backend::BRM.RKBRMI)
     layout = backend.model.layout

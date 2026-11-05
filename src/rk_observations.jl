@@ -19,8 +19,16 @@ _rk_plan_summary(plan::_RKUnconditionedPlan) =
     "unconditioned program (zero fitted coordinates; " *
     string(length(plan.generative.declarations)) * " retained generative declarations)"
 _rk_observed_names(::_RKUnconditionedPlan) = ()
-_rk_emit_ast(::_RKUnconditionedPlan) =
+_rk_emit_ast(::_RKUnconditionedPlan; documentation=()) =
     _RKEmittedProgram(Expr[], Expr(:block), Pair{Symbol,Any}[])
+
+# The module authoring the model's cells, where the Stan program reads the
+# functions they call; no keyword without a cell.
+Base.@nospecializeinfer function _rk_cell_module(@nospecialize(brmi::BRMI))
+    operations = _rk_kernel_ops(brmi)
+    isempty(operations) && return (;)
+    (; mod=_brm_inline_scope(first(getargs(last(first(operations))))))
+end
 
 Base.@nospecializeinfer function _rk_unconditioned_plan(@nospecialize(brmi::BRMI))
     # Bound formula observations, including kernel-cell inputs, use the
@@ -45,7 +53,7 @@ Base.@nospecializeinfer function _rk_unconditioned_plan(@nospecialize(brmi::BRMI
     # The emitted declaration inventory also finds synthetic observations
     # (for example a modeled baseline). Endpoint absence alone must never
     # discard their densities or their inference coordinates.
-    generated = generative_plan(SBBRMI(brmi))
+    generated = generative_plan(SBBRMI(brmi; _rk_cell_module(brmi)...))
     any(d -> d.role === :observation && d.data_source !== nothing,
         generated.declarations) && return nothing
     _RKUnconditionedPlan(generated, Dict{Symbol,Any}(generated.data))
@@ -73,8 +81,10 @@ Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_ou
     # graph from its own inputs (user decision `1tb1jrg`).
     brmi, assignments = _brm_resolve_data_assignments(brmi; prefix="RK backend")
     selected = _rk_held_out_selection(brmi, held_out)
-    original = _brm_rk_unselected_plan(brmi)
+    known_scalars = Ref{Any}(nothing)
+    original = _brm_rk_unselected_plan(brmi, known_scalars)
     _rk_attach_data_assignments!(original, assignments, constants)
+    _rk_define_read_scalars!(original, known_scalars[])
     isempty(selected) ? original : _RKHeldOutPlan(original, selected)
 end
 
@@ -181,6 +191,7 @@ end
 _rk_emitted_observation_name(_) = nothing
 
 function _rk_source_symbols!(names, value)
+    value = _brm_undoc(value)
     value isa Symbol && push!(names, value)
     value isa Expr && foreach(arg -> _rk_source_symbols!(names, arg), value.args)
     names
@@ -196,6 +207,7 @@ end
 # A `@plate for` cell's bare locals belong to its plate (rkppl-use §13); its
 # model outputs are its indexed writes, declarations and observations.
 function _rk_source_outputs!(names, statement)
+    statement = _brm_undoc(statement)
     statement isa Expr || return names
     if statement.head === :(=)
         _rk_source_lhs!(names, first(statement.args))
@@ -205,6 +217,7 @@ function _rk_source_outputs!(names, statement)
     elseif Meta.isexpr(statement, :macrocall) && first(statement.args) === Symbol("@plate") &&
             Meta.isexpr(last(statement.args), :for)
         for cell in last(last(statement.args).args).args
+            cell = _brm_undoc(cell)
             Meta.isexpr(cell, :(=)) && !Meta.isexpr(first(cell.args), :ref) && continue
             _rk_source_outputs!(names, cell)
         end
@@ -310,6 +323,7 @@ function _rk_active_observation_source(emitted, conditioned, held_out)
     Expr(:block, statements[.!withheld]...)
 end
 function _rk_withheld_observation(statement, names)
+    statement = _brm_undoc(statement)
     statement isa Expr || return false
     statement.head === :call && length(statement.args) == 3 &&
         first(statement.args) in (:~, :.~) &&
@@ -318,8 +332,8 @@ function _rk_withheld_observation(statement, names)
     body = _rk_plate_body(statement)
     body !== nothing && !isempty(body) && all(s -> _rk_withheld_observation(s, names), body)
 end
-function _rk_emit_ast(plan::_RKHeldOutPlan; coordinates=nothing)
-    emitted = _rk_emit_ast(plan.parent; coordinates)
+function _rk_emit_ast(plan::_RKHeldOutPlan; coordinates=nothing, documentation=())
+    emitted = _rk_emit_ast(plan.parent; coordinates, documentation)
     conditioned = _rk_observed_names(plan.parent)
     main = _rk_active_observation_source(emitted, conditioned, plan.held_out)
     _RKEmittedProgram(emitted.defs, main, emitted.bindings)

@@ -81,8 +81,10 @@ end
     @test value ≈ expected rtol=1e-8
     @test gradient ≈ values_fd(x -> LogDensityProblems.logdensity(p, x), phi) rtol=2e-6 atol=2e-6
     plan = brm_laplace_plan(rk; ad_backend=NLME_AD, draws=30)
-    @test only(plan.terms).admitted
-    @test only(plan.terms).importance_ess.min ≈ 30 rtol=1e-8
+    @test !only(plan.terms).admitted
+    @test only(plan.terms).importance_ess === nothing
+    forced = brm_laplace_plan(rk; ad_backend=NLME_AD, integrate=:g)
+    @test only(forced.terms).admitted
 end
 
 @stestset "derived count observations agree with the same likelihood in plate cells" begin
@@ -111,8 +113,8 @@ end
     @test gradient ≈ refgradient rtol=1e-8 atol=1e-8
     @test gradient ≈ values_fd(x -> LogDensityProblems.logdensity(p, x), phi) rtol=2e-6 atol=2e-6
     plan = brm_laplace_plan(derived; ad_backend=NLME_AD, draws=30, ess_floor=0.01)
-    @test only(plan.terms).class === :gated
-    @test only(plan.terms).admitted
+    @test only(plan.terms).class === :sampled
+    @test !only(plan.terms).admitted
     @test occursin("model-value observations", only(plan.terms).reason)
     sampled = brm_laplace_plan(derived; ad_backend=NLME_AD, sample=:g)
     @test only(sampled.terms).class === :sampled

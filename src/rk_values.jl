@@ -578,6 +578,8 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
             family = first(getargs(family))
         end
         head = family isa ExprColumn ? getf(family) : nothing
+        head === MixtureModel && _rk_mixture_value_weights(program, family) &&
+            return true
         # A categorical response owns fitted level coding and a whole simplex;
         # it is not a scalar response merely because it has no formula location.
         head === Categorical && continue
@@ -611,6 +613,24 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
     false
 end
 
+# Shared literals, simplexes and sampled complements retain their structural
+# route. Computed/row weights use the ordinary value graph, whose reachability
+# includes predictors read only by the weights and their group-scale priors.
+function _rk_mixture_value_weights(program, family)
+    args = getargs(family)
+    length(args) == 2 || return false
+    weights = args[2]
+    parameters = Set(op.name for op in program.operations if op.role === :parameter)
+    weights isa NamedColumn && name(weights) in parameters && return false
+    if weights isa Union{AbstractVector,Tuple}
+        all(w -> w isa Real, weights) && return false
+        length(weights) == 2 &&
+            _rk_mixture_complement(weights[1], weights[2], parameters) !== nothing &&
+            return false
+    end
+    true
+end
+
 _rk_ast_value_distribution(distribution, bindings, taken) =
     _rk_ast_value_distribution(distribution.callable, distribution, bindings, taken)
 
@@ -631,6 +651,30 @@ end
 
 _rk_ast_value_distribution(callable, distribution, bindings, taken) =
     _rk_ast_value_call(callable, distribution, bindings, taken)
+
+function _rk_ast_value_distribution(::Type{MixtureModel}, distribution, bindings, taken)
+    length(distribution.args) in (1, 2) || error(
+        "RK backend: MixtureModel needs components and optional probabilities")
+    components = first(distribution.args)
+    entries = components isa Tuple ? components :
+        components isa _BRMPreparedExpr && components.callable === Base.vect ?
+        components.args : error("RK backend: MixtureModel components must be a vector or tuple")
+    component_rows = _rk_ast_dotted(:vcat,
+        (_rk_ast_value_distribution(component, bindings, taken) for component in entries)...)
+    length(distribution.args) == 1 &&
+        return _rk_ast_dotted(:MixtureModel, component_rows)
+    weights = distribution.args[2]
+    row_weights = weights isa Tuple ? any(_brm_has_row_ref, weights) :
+        _brm_has_row_ref(weights)
+    probabilities = if weights isa Tuple
+        entries = map(w -> _rk_value_expr!(bindings, w, taken), weights)
+        row_weights ? _rk_ast_dotted(:vcat, entries...) : Expr(:vect, entries...)
+    else
+        _rk_value_expr!(bindings, weights, taken)
+    end
+    row_weights || (probabilities = Expr(:call, :Ref, probabilities))
+    _rk_ast_dotted(:MixtureModel, component_rows, probabilities)
+end
 
 function _rk_ast_value_call(callable, distribution, bindings, taken; joint=false)
     callee = _rk_value_callee!(bindings, callable, taken)
@@ -723,6 +767,20 @@ function _rk_has_value_call(expression::_BRMPreparedExpr)
         any(_rk_has_value_call, values(expression.kwargs))
 end
 
+# The predictors a population prior may address: the plan's, and those of the
+# model it left out because no likelihood reaches them (an omitted response's).
+# A prior addressing one samples nothing here, and a name the model does not
+# declare still fails.
+Base.@nospecializeinfer function _rk_declared_predictors(@nospecialize(brmi::BRMI), predictor_order)
+    declared = Symbol[predictor_order...]
+    for (key, raw) in _brm_operation_entries(brmi)
+        operation = _named_op(raw)
+        operation isa ExprColumn{typeof(~)} && _brm_operation_role(operation) === :predictor &&
+            !(key in declared) && push!(declared, key)
+    end
+    Tuple(declared)
+end
+
 # Model-wide orchestration over already boxed plan carriers. Do not infer this
 # loop again from each source BRMI's NamedTuple type; term-level helpers still
 # dispatch on the expression values they consume.
@@ -737,9 +795,10 @@ Base.@nospecializeinfer function _rk_predictor_components(@nospecialize(brmi::BR
         brmi, context, predictor_order, columns, taken, derived)
     me_sources = Set{Symbol}()
     matched_defaults = Set{Int}()
+    available = _rk_declared_predictors(brmi, predictor_order)
     for target in predictor_order
         spec, term_priors, r2d2, hs = _rk_plan_predictor(
-            brmi, context, target, Tuple(predictor_order), columns, derived,
+            brmi, context, target, available, columns, derived,
             taken, lookup, me_sources; tolerant_default=true, matched_defaults)
         push!(predictors, spec)
         append!(priors, term_priors)
@@ -986,11 +1045,21 @@ _rk_value_expr!(bindings, values::Tuple, taken) =
 function _rk_value_expr!(bindings, expression::_BRMPreparedExpr, taken)
     args = map(arg -> _rk_value_expr!(bindings, arg, taken), expression.args)
     expression.callable === getindex && return Expr(:ref, args...)
-    expression.callable === Base.vect && return Expr(:vect, args...)
+    if expression.callable === Base.vect
+        # A formula vector containing row values is constructed once per row.
+        # Keeping this in the ordinary expression emitter also covers named
+        # probability vectors without transposing components and observations.
+        return _brm_has_row_ref(expression) ? _rk_ast_dotted(:vcat, args...) :
+            Expr(:vect, args...)
+    end
     # BRM expression arithmetic is elementwise. Ordinary RKPPL source must
     # state that explicitly, while reductions and authored whole-array calls
     # keep their own Julia semantics and exact callable bindings.
     if isempty(expression.kwargs)
+        # Unary negation is `-x` for scalars and arrays. The dotted operator
+        # spelling below belongs to binary subtraction in native source.
+        expression.callable === (-) && length(args) == 1 &&
+            return Expr(:call, :-, only(args))
         if haskey(_RK_DERIVED_BINOPS, expression.callable)
             return Expr(:call, _RK_DERIVED_BINOPS[expression.callable], args...)
         elseif haskey(_RK_DERIVED_CMP, expression.callable)
@@ -1033,7 +1102,8 @@ function _rk_kernel_output_names(plan::_RKValuePlan)
         for kernel in kernels)
 end
 
-function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
+function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing, documentation=())
+    documentation_owners = _brm_documentation_owners(documentation)
     reserved = Set{Symbol}(keys(plan.columns))
     union!(reserved, (first(binding) for binding in _rk_extent_bindings(plan)))
     union!(reserved, (a.name for a in plan.assignments))
@@ -1064,7 +1134,8 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
         if assignment isa _RKPreparedKernelAssignment
             _rk_emit_value_assignment!(defs, stmts, bindings, taken, assignment;
                 arguments=get(hoisted.kernels, assignment.name, nothing), coordinates,
-                graph_outputs=kernel_outputs[assignment.name], cell_sources=cells)
+                graph_outputs=kernel_outputs[assignment.name], cell_sources=cells,
+                documentation=get(documentation_owners, assignment.name, ()))
             _rk_plate_output_cells!(cells, stmts, assignment, kernel_outputs[assignment.name])
         else
             _rk_emit_value_assignment!(defs, stmts, bindings, taken,
@@ -1076,6 +1147,7 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
             _rk_coordinate_record!(coordinates, (; kind=:submodel,
                 target=assignment.name))
     end
+    _rk_offset_scalar_cells!(defs, stmts, taken, plan, cells)
     for completion in plan.completions
         parts = _rk_emit_missing_value!(defs, stmts, bindings, taken, completion)
         # `declaration` holds the completion's sampled coordinates: the missing
@@ -1148,9 +1220,22 @@ function _rk_emit_ast(plan::_RKValuePlan; coordinates=nothing)
     authored = union(Set(a.name for a in plan.assignments),
         (p.name for p in plan.regression.predictors),
         Iterators.flatten(values(kernel_outputs)))
-    _rk_scalar_lone_intercepts(
+    emitted = _rk_scalar_lone_intercepts(
         _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
             _rk_observed_names(plan); retained=authored, coordinates,
             densities=Set(c.source for c in plan.completions if c.totals !== nothing)),
         lone_intercepts)
+    # A cell observation is emitted outside its value plate. Its prepared
+    # record supplies both the cell-local parameter and the response source.
+    docs = collect(documentation)
+    documentation_paths = _brm_documentation_index(documentation)
+    for kernel in plan.assignments
+        kernel isa _RKPreparedKernelAssignment || continue
+        for observation in kernel.observations,
+                (_, doc) in get(documentation_paths, (kernel.name, observation.param), ())
+            push!(docs, BRMDocumentation((observation.source,), observation.source,
+                doc.markdown, doc.statement, doc.file, doc.line))
+        end
+    end
+    _rk_documented_program(emitted, docs)
 end

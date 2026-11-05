@@ -56,6 +56,8 @@ function _rk_model_value_axis(value::NamedColumn, backing::ExprColumn{typeof(~)}
     _brm_observation_name(lhs) === nothing || return _rk_model_value_axis(lhs, context)
     _brm_prior_expression(rhs) && return (
         _brm_parameter_reference_axis(rhs) === :scalar ? () : nothing)
+    rhs isa ExprColumn{typeof(kernel)} &&
+        return _rk_plate_offset_axis(value, rhs, context)
     context === nothing && return nothing
     # Reuse the predictor's actual geometry, including declared consumers and
     # group rows. The number of group levels is a coefficient axis, not this
@@ -65,7 +67,35 @@ function _rk_model_value_axis(value::NamedColumn, backing::ExprColumn{typeof(~)}
         tolerant_default=true)
     (; source=geometry.design.row_source, nrows=size(geometry.design.matrix, 1))
 end
+function _rk_model_value_axis(value::NamedColumn, ::MissingColumn, context)
+    context === nothing && return nothing
+    producer = get(_brm_kernel_output_reads(context.parent), name(value), nothing)
+    producer === nothing && return nothing
+    declaration = _named_op(_brm_operation(context.parent, producer))
+    _rk_plate_offset_axis(value, last(getargs(declaration)), context)
+end
 _rk_model_value_axis(::NamedColumn, _backing, _context) = nothing
+
+function _rk_plate_offset_axis(value, rhs, context)
+    args = getargs(rhs)
+    length(args) >= 2 || return nothing
+    body, anchor = args[1:2]
+    # Indexed outputs identify an authored `@plate`. Its first positional
+    # witnesses the cell count (the loop's range anchor before response pruning).
+    # The kernel planner validates that all retained inputs share that axis.
+    # A legacy kernel's first input has no such meaning.
+    isempty(_brm_inline_outputs(body)) && return nothing
+    axis = if anchor isa NamedColumn && parent(anchor) isa DataColumn &&
+            parent(parent(anchor)) isa AbstractVector
+        (; source=name(anchor), nrows=length(parent(parent(anchor))))
+    else
+        _rk_model_value_axis(anchor, context)
+    end
+    (axis === nothing || isempty(axis)) && return nothing
+    # This is the cell axis, not the possibly flattened result axis. Offset
+    # emission proves one real scalar per cell before using it as formula rows.
+    (; axis..., scalar_cells=(name(value),))
+end
 function _rk_model_value_axis(value::ExprColumn, context)
     callable = getf(value)
     (haskey(_RK_DERIVED_BINOPS, callable) ||
@@ -76,22 +106,34 @@ function _rk_model_value_axis(value::ExprColumn, context)
     rows = filter(!isempty, axes)
     isempty(rows) && return ()
     shape = Base.Broadcast.broadcast_shape(((row.nrows,) for row in rows)...)
-    rows[findfirst(row -> row.nrows == only(shape), rows)]
+    axis = rows[findfirst(row -> row.nrows == only(shape), rows)]
+    scalar_cells = Tuple(unique(Iterators.flatten(get(row, :scalar_cells, ()) for row in rows)))
+    isempty(scalar_cells) ? axis : (; axis..., scalar_cells)
 end
-# A gather `x[idx]` of a value with a known axis lies on its index's rows
-# (`c_b = c[pos_b]`, part 1's completed value on part 2's rows).
+# An explicit gather `x[idx]` lies on its index's rows, even when an opaque
+# helper produced `x`. The authored index establishes the axis; neither the
+# helper's inputs nor an evaluated output's length are a row declaration.
 function _rk_model_value_axis(value::ExprColumn{typeof(getindex)}, context)
     args = getargs(value)
     length(args) == 2 && isempty(getkwargs(value)) || return nothing
     source, index = args
-    _rk_model_value_axis(source, context) === nothing && return nothing
-    _rk_model_value_axis(index, context)
+    axis = _rk_model_value_axis(index, context)
+    if axis == ()
+        # Indexing an unknown array by a scalar does not prove its element is
+        # scalar: it could select a whole vector-valued cell.
+        source_axis = _rk_model_value_axis(source, context)
+        source_axis === nothing && return nothing
+        isempty(source_axis) || isempty(get(source_axis, :scalar_cells, ())) || return nothing
+    end
+    axis
 end
 
 function _rk_named_model_population_column(term::NamedColumn, context)
     parent(term) isa DataColumn && return nothing
     axis = _rk_model_value_axis(term, context)
     (axis === nothing || isempty(axis)) && return nothing
+    # Only offset emission currently proves this conditional scalar-cell axis.
+    isempty(get(axis, :scalar_cells, ())) || return nothing
     label = name(term)
     # Missing geometry marks values unavailable until graph execution. It is
     # never bound as data: the term consumes the emitted assignment by name.
@@ -219,6 +261,8 @@ end
 _rk_prepare_term(term, target, context) = _brm_prepare_term(term, target, context)
 _rk_prepare_term(term::ExprColumn{typeof(hsgp)}, target, context) =
     _brm_prepare_term(term, target, context; basis=_brm_hsgp_basis_geometry)
+_rk_prepare_term(term::ExprColumn{typeof(gmrf)}, target, context) =
+    _brm_prepare_term(term, target, context; geometry=false)
 
 function _rk_mi_downstream(program, key, source)
     any(operation -> operation.name !== key &&
@@ -626,6 +670,7 @@ end
 function _rk_block_free_reads(definitions)
     reads = Dict{Symbol,Set{Symbol}}()
     for definition in definitions
+        definition = _brm_undoc(definition)
         Meta.isexpr(definition, :(=), 2) || continue
         call, body = definition.args
         Meta.isexpr(call, :call) && Meta.isexpr(body, :block) || continue
@@ -642,6 +687,7 @@ end
 # An observation reads its response rather than defining it: a top-level `~`,
 # or a per-subject `@plate` holding only observations (`_rk_observation_statement`).
 function _rk_observation_source_statement(statement)
+    statement = _brm_undoc(statement)
     Meta.isexpr(statement, :call) && return first(statement.args) in (:~, :.~)
     body = _rk_plate_body(statement)
     body !== nothing && !isempty(body) && all(_rk_observation_source_statement, body)
@@ -649,6 +695,7 @@ end
 
 # The statements of an emitted `@plate for … end`, or `nothing`.
 function _rk_plate_body(statement)
+    statement = _brm_undoc(statement)
     Meta.isexpr(statement, :macrocall) && first(statement.args) === Symbol("@plate") &&
         Meta.isexpr(last(statement.args), :for) || return nothing
     [s for s in last(last(statement.args).args).args if !(s isa LineNumberNode)]

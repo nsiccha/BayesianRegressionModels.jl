@@ -32,12 +32,7 @@ end
 laplace_numerical_binding(p) = nothing
 function laplace_numerical_binding(p::BRM.BRMSparseLaplaceProblem)
     p.algebra === nothing && return nothing
-    references = map(p.algebra.references) do reference
-        reference === nothing && return nothing
-        L = parent(reference.lower)
-        (; dimensions=size(L), L.colptr, L.rowval, L.nzval,
-            reference.permutation, reference.inverse_scale, reference.logdet)
-    end
+    references = map(BRM._brm_reference_binding, p.algebra.references)
     (; p.algebra.large, p.algebra.probes, references)
 end
 

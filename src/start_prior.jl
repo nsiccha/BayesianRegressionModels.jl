@@ -6,10 +6,21 @@
 _brm_prior_law(x::Real, _value) = Float64(x)
 _brm_prior_law(x::Symbol, value) = value(x)
 function _brm_prior_law(x::Expr, value)
-    x.head === :call && first(x.args) isa Symbol || return nothing
-    args = Any[_brm_prior_law(a, value) for a in x.args[2:end]]
+    # The DSL broadcasts a prior's inner calls (`log(0.2)` arrives as `log.(0.2)`,
+    # `a * b` as `a .* b`), which mean the same on the scalars read here.
+    if x.head === :. && length(x.args) == 2 && x.args[1] isa Symbol &&
+            x.args[2] isa Expr && x.args[2].head === :tuple
+        call, inputs = x.args[1], x.args[2].args
+    elseif x.head === :call && first(x.args) isa Symbol
+        name = string(first(x.args))
+        call = startswith(name, ".") && length(name) > 1 ? Symbol(name[2:end]) : first(x.args)
+        inputs = x.args[2:end]
+    else
+        return nothing
+    end
+    args = Any[_brm_prior_law(a, value) for a in inputs]
     any(isnothing, args) && return nothing
-    _brm_prior_law(Val(first(x.args)), args...)
+    _brm_prior_law(Val(call), args...)
 end
 _brm_prior_law(_x, _value) = nothing
 
@@ -136,6 +147,9 @@ function _brm_start_term_prior(prepared, slot)
     prior = get(priors, role, nothing)
     slot.component === nothing ? prior : prior[findfirst(==(slot.component), (:rr, :rn, :nr))]
 end
+# Both of a field's lengths share the length-scale class: its laws go by slot.
+_brm_start_term_prior(prepared::_BRMPreparedTerm{typeof(gmrf)}, slot) =
+    _brm_term_prior_expressions(prepared)[slot.name]
 
 # An authored HSGP hyper prior is the log-scale intercept's law. The
 # unconfigured intercept is standard normal, not the shared scale's lognormal.

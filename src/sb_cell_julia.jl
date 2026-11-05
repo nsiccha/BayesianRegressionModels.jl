@@ -67,6 +67,11 @@ _sb_julia_stan_call(::typeof(ones), args) = _sb_julia_stan_call(fill, Any[1.0; a
 # Stan concatenates two values at a time.
 _sb_julia_stan_call(::typeof(vcat), args) = length(args) < 2 ? nothing :
     foldl((a, b) -> Expr(:call, :append_row, a, b), args)
+# The square matrix with a vector on its diagonal.
+_sb_julia_stan_call(::Type{Diagonal}, args) =
+    length(args) == 1 ? Expr(:call, :diag_matrix, args...) : nothing
+_sb_julia_stan_call(::typeof(diagm), args) =
+    length(args) == 1 ? Expr(:call, :diag_matrix, args...) : nothing
 
 _sb_cell_combinator(head) =
     head in (:censored, :truncated, :interval_censored, :weighted)
@@ -133,12 +138,48 @@ function _sb_cell_family(x, scope)
         positional = Tuple(filter(!_sb_cell_keyword_argument, args))
         keywords = foldl(_sb_cell_keywords!, filter(_sb_cell_keyword_argument, args);
             init=Pair{Symbol,Any}[])
-        return _sb_stan_distribution_call(callable, positional, NamedTuple(keywords))
+        return _sb_cell_distribution_call(callable, positional, NamedTuple(keywords))
     elseif head isa Symbol && _sb_cell_combinator(head)
         family = findfirst(!_sb_cell_keyword_argument, x.args[2:end])
         family === nothing || (args[family] = _sb_cell_family(x.args[1 + family], scope))
     end
     Expr(:call, head, args...)
+end
+
+# A Distributions constructor in a cell observation: the top-level table, except
+# for laws that only a cell observes.
+_sb_cell_distribution_call(callable, positional, keywords) =
+    _sb_stan_distribution_call(callable, positional, keywords)
+# `y[rows[i]] ~ MvNormal(location, covariance)` is one joint density of the
+# cell's slice. Julia gives an empty slice log density 0, which Stan's
+# `multi_normal` refuses, so the cell observes `brm_mvnormal` instead.
+function _sb_cell_distribution_call(::Type{<:MvNormal}, positional, keywords)
+    isempty(keywords) || error(
+        "sbimpl: an in-cell `MvNormal` observation takes no keywords, got ",
+        "$(collect(keys(keywords)))")
+    length(positional) == 2 || error(
+        "sbimpl: an in-cell observation `y[rows[i]] ~ MvNormal(location, covariance)` ",
+        "takes a location vector and a covariance matrix; got $(length(positional)) arguments")
+    Expr(:call, brm_mvnormal, positional...)
+end
+
+StanBlocks.@deffun begin
+    brm_mvnormal_rng(vector[n], location::vector[n], covariance::matrix[n, n])::vector[n] = begin
+        result::vector[n]
+        if n > 0
+            result = multi_normal_rng(location, covariance)
+        end
+        return result
+    end
+    brm_mvnormal_lpdfs(value::vector[n], location::vector[n], covariance::matrix[n, n])::real = begin
+        result::real = 0.0
+        if n > 0
+            result = multi_normal_lpdf(value, location, covariance)
+        end
+        return result
+    end
+    @lhs @lpxf brm_mvnormal_lpdf(value::vector[n], location::vector[n], covariance::matrix[n, n])::real =
+        brm_mvnormal_lpdfs(value, location, covariance)
 end
 
 # An unbound family token (`normal`) names the StanBlocks family of that name.
@@ -150,6 +191,8 @@ end
 
 _sb_cell_statement(x, scope) = _sb_cell_value(x, scope)
 function _sb_cell_statement(x::Expr, scope)
+    Meta.isexpr(x, :local, 1) &&
+        return Expr(:local, _sb_cell_statement(only(x.args), scope))
     # A cell's `@scan` block and its step loop hold statements of their own.
     _is_brm_scan(x) &&
         return Expr(:macrocall, x.args[1:end-1]..., _sb_cell_block(x.args[end], scope))
@@ -176,6 +219,69 @@ function _sb_cell_statements(statements, scope)
 end
 _sb_cell_block(x, scope) = Meta.isexpr(x, :block) ?
     Expr(:block, _sb_cell_statements(x.args, scope)...) : _sb_cell_statement(x, scope)
+
+# StanBlocks traces a cell in statement order. A bare local prior can be
+# authored after its readers, just like a model-scope prior. Schedule those
+# declarations through the shared dependency walk, retaining the relative
+# order of every other statement (including assignments and entire scans).
+# This operates on one cell only; it never moves a draw across a plate or
+# changes the sequential steps inside a scan.
+_sb_cell_unwrap_local(x) = Meta.isexpr(x, :local, 1) ? only(x.args) : x
+function _sb_cell_prior_order(statements, inputs)
+    assignments = Dict{Symbol,Vector{Int}}()
+    for (i, statement) in enumerate(statements)
+        s = _sb_cell_unwrap_local(statement)
+        Meta.isexpr(s, :(=), 2) || continue
+        name = _sb_bound_name(s.args[1])
+        name === nothing || push!(get!(assignments, name, Int[]), i)
+    end
+    declarations = Dict{Symbol,Int}()
+    for (i, statement) in enumerate(statements)
+        s = _sb_cell_unwrap_local(statement)
+        isxcall(s, :~) || continue
+        name = _sb_bound_name(s.args[2])
+        name === nothing && continue
+        # An input or an assigned value is observed, not a fresh draw. An
+        # explicit `local` declaration instead shadows that outer binding.
+        _sb_local_name(statement) === nothing &&
+            (name in inputs || haskey(assignments, name)) && continue
+        get!(declarations, name, i)
+    end
+    isempty(declarations) && return statements
+    priors = Set(values(declarations))
+    keys = [Symbol(:cell_statement_, i) for i in eachindex(statements)]
+    dependencies = [Set{Int}() for _ in statements]
+    previous = nothing
+    for (i, statement) in enumerate(statements)
+        prior = i in priors
+        s = _sb_cell_unwrap_local(statement)
+        refs = _brm_cell_value_refs!(Set{Symbol}(), prior ? s.args[3] : s)
+        union!(dependencies[i], (j for (name, j) in declarations if name in refs && j != i))
+        if prior
+            # Preserve the version of an ordinary cell value read by a prior:
+            # its preceding assignment stays before it, and the next write
+            # stays after it. A forward dependency is retained as well, so a
+            # real cycle fails instead of changing the law.
+            for name in refs
+                writers = get(assignments, name, Int[])
+                isempty(writers) && continue
+                before = findlast(<(i), writers)
+                producer = before === nothing ? first(writers) : writers[before]
+                push!(dependencies[i], producer)
+                after = findfirst(>(max(i, producer)), writers)
+                after === nothing || push!(dependencies[writers[after]], i)
+            end
+        else
+            previous === nothing || push!(dependencies[i], previous)
+            previous = i
+        end
+    end
+    operations = [_BRMPreparedOperation(keys[i], :cell, statement,
+        Tuple(keys[j] for j in sort!(collect(dependencies[i]))))
+        for (i, statement) in enumerate(statements)]
+    byname = Dict(op.name => op.expression for op in operations)
+    Any[byname[key] for key in _brm_operation_order(operations)]
+end
 
 # ---- `AR1Normal` in a cell: the BRM-owned AR(1) submodel ---------------------
 #

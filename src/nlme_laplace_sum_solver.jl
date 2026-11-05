@@ -130,24 +130,27 @@ function _brm_plan_cell_value(group::_BRMSumCellGroup, c, I, u, cache)
     Base.invokelatest(group.prepared.q.outer.value, u, sums, c.i)
 end
 
+# `weight` scales the cells' likelihood (values, gradient, local curvature D
+# and outer curvature W) as in `_brm_spl_assemble!`; the soft constraints
+# below are prior and keep their weight.
 function _brm_spl_assemble_sums!(fc, g, h, p, u; derivatives, third, fb, tv,
-        correction=nothing)
+        correction=nothing, weight::Float64=1.0)
     rest = 0.0
     parts = Any[]; jacobians = SparseMatrixCSC{Float64,Int}[]
     outers = SparseMatrixCSC{Float64,Int}[]
     offset = 0
-    for group in p.cells
+    for group in (weight == 0 ? empty(p.cells) : p.cells)
         group isa _BRMSumCellGroup || continue
         if derivatives
             part = _brm_spl_factor_curvature(group.prepared, u,
                 length(p.integrated), length(p.population))
-            g .+= part.gradient
+            g .+= weight .* part.gradient
             # Every local summand clique is already in the fixed D pattern.
             for j in axes(part.D, 2), k in nzrange(part.D, j)
-                h.D[rowvals(part.D)[k], j] += nonzeros(part.D)[k]
+                h.D[rowvals(part.D)[k], j] += weight * nonzeros(part.D)[k]
             end
             push!(parts, (; group, part, offset))
-            push!(jacobians, part.B); push!(outers, part.W)
+            push!(jacobians, part.B); push!(outers, weight == 1 ? part.W : weight * part.W)
             offset += size(part.B, 1)
         end
         for (k, c) in enumerate(group.cells)
@@ -159,10 +162,10 @@ function _brm_spl_assemble_sums!(fc, g, h, p, u; derivatives, third, fb, tv,
             if comp == 0
                 rest += value
             else
-                _brm_spl_add_value!(fc, correction, comp, value)
+                _brm_spl_add_value!(fc, correction, comp, weight * value)
                 if fb !== nothing
                     for a in p.tsbptr[c.term]:(p.tsbptr[c.term + 1] - 1)
-                        fb[p.tsb[a]] += value
+                        fb[p.tsb[a]] += weight * value
                     end
                 end
             end
@@ -198,7 +201,7 @@ _brm_spl_woodbury(p::BRMSparseLaplaceProblem, F::_BRMAugmentedFactor) = nothing
 function _brm_spl_factor!(p::BRMSparseLaplaceProblem, h::_BRMSumPrecision; shift=0.0)
     p.algebra === nothing || return _brm_operator_factor(p, h; shift)
     D = copy(h.D)
-    nonzeros(D)[p.diagonal] .+= shift
+    nonzeros(D)[p.diagonal] .+= _brm_spl_effect_shift(p, shift)
     K = _brm_spl_augmented_matrix(D, h.B, h.W)
     F = _brm_spl_augmented_factor(K, length(p.integrated); previous=p.factor[])
     p.factor[] = F
@@ -288,6 +291,17 @@ function _brm_spl_block_direction(p, h::SparseMatrixCSC, members, g)
         μ *= 10
     end
     issuccess(F) ? F \ g : nothing
+end
+# Component `members`' augmented block with D + μ I, restricted like
+# `_brm_spl_block_direction` below: whether it is positive definite.
+function _brm_spl_block_definite(p::BRMSparseLaplaceProblem, h::_BRMSumPrecision, members,
+        μ)
+    rows = sort!(unique!([rowvals(h.B)[k] for j in members for k in nzrange(h.B, j)]))
+    D = _brm_spl_submatrix(h.D, members, members)
+    B = _brm_spl_submatrix(h.B, rows, members)
+    W = _brm_spl_submatrix(h.W, rows, rows)
+    issuccess(_brm_spl_augmented_factor(_brm_spl_augmented_matrix(D + μ * I, B, W),
+        length(members)))
 end
 function _brm_spl_block_direction(p, h::_BRMSumPrecision, members, g)
     # Auxiliary rows that do not read this block have zero Jacobian here.

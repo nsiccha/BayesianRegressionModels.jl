@@ -123,6 +123,7 @@ end
 function _brm_start_prepared_term(prepared)
     # Keep laws and bounds, not a second copy of fitted design/basis arrays.
     keys = (:sd_prior, :sd_priors, :ar_prior, :sigma_prior, :rho_prior,
+        :spatial_prior, :temporal_prior,
         :mixing_prior, :latent_prior, :simplex_prior, :rho_lower, :type,
         :x_lower, :x_upper)
     state = (; (k => prepared.state[k] for k in keys if haskey(prepared.state, k))...)

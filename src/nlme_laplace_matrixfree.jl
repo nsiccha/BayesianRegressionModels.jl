@@ -4,32 +4,45 @@
 """
     MatrixFreeLaplace(; exact_limit=1024, probes=8, seed=20261102,
         solve_tolerance=1e-10, solve_maxiter=512,
-        logdet_step=1.0, logdet_extent=32.0,
-        preconditioner_memory=32, preconditioner_ridge=0.01)
+        preconditioner_memory=32, preconditioner_ridge=0.01, control_variate=true)
 
 Numerical policy for `brm_laplace_problem(...; solver=:auto)`. Components
-above `exact_limit` use preconditioned CG and a fixed Rademacher
-trace approximation to a rational approximation of `log`. `solver=:exact`
-retains sparse factorization; `solver=:matrixfree` forces the operator path.
-Seeds, probes, quadrature and iteration caps are fixed for a prepared target.
+above `exact_limit` use preconditioned CG and a fixed Rademacher trace
+approximation of `log`. `solver=:exact` retains sparse factorization;
+`solver=:matrixfree` forces the operator path. Seeds, probes and iteration caps
+are fixed for a prepared target.
 
-A bounded-fill LDL reference is prepared at zero population and latent
-coordinates, with `preconditioner_memory` extra factor entries per column and
-relative diagonal ridge `preconditioner_ridge`. It stays fixed during target
-evaluations. The reference transforms the determinant and its derivative
-together; it does not regularize the model's precision. Reduction cliques
-are not expanded to build it. Set `preconditioner_memory=nothing` to use
-diagonal Newton solves and an untransformed determinant instead.
+Every large component has a reference P = C*C', prepared once and fixed during
+target evaluations, at zero latent coordinates and zero population coordinates
+(a problem with a `gmrf` field: at its population prior medians). A component
+that is exactly one `gmrf` field uses that field's time-block reference
+(`src/gmrf_preconditioner.jl`), which sees the data's curvature. Any other
+component uses a bounded-fill LDL with `preconditioner_memory` extra factor
+entries per column and relative diagonal ridge `preconditioner_ridge`; reduction
+cliques are not expanded to build it. The reference transforms the determinant and its derivative together; it does
+not regularize the model's precision. Set `preconditioner_memory=nothing` to
+use no reference: diagonal Newton solves and an untransformed determinant.
 
-The quadrature is the trapezoidal rule in log(t) for
-`log(A) = integral_0^Inf ((1+t)^-1 I - (A+tI)^-1) dt`, where
-`A = C^-1 H C^-T` and `C C'` is the fixed reference. Its exact log determinant
-is added separately. Without a reference, `A = H`.
-Its derivative uses the *same* shifted solves. Probe error, finite quadrature
-error and solve error are distinct; none is an exact determinant certificate.
-Increasing dimension does not increase the work caps or guarantee accuracy.
-CG checks curvature in its search directions; this is not a proof of global
-positive definiteness for a nonconcave conditional density.
+The determinant is the reference's exact log determinant plus the mean over the
+probes r of `r' log(A) r`, `A = C^-1 H C^-T` (without a reference, `A = H`).
+Each r takes one Lanczos recurrence, A V = V T + β v e', stopped when the solve
+of `A x = r` it implies reaches `solve_tolerance`. On that space
+`r' log(A) r = ‖r‖² e₁' log(T) e₁`, and the determinant's sensitivity to H is
+`‖r‖² V G V'` in the same coordinates, G being the derivative of `log` at T in
+the direction e₁e₁'. No quadrature enters. Probe error and solve error are
+distinct; neither is an exact determinant certificate, and increasing dimension
+does not increase the work caps or guarantee accuracy. Lanczos checks curvature
+in its own directions; this is not a proof of global positive definiteness for
+a nonconcave conditional density. A recurrence retains its basis while its
+probe runs, so that probe's memory is the iteration count times the coordinates.
+
+Fixed probes leave noise in the gradient that does not shrink relative to the
+posterior as a field grows. With `control_variate=true` a field whose reference
+decouples its channels (one channel included) also rebuilds that reference at
+each point and estimates only the difference from it
+(`src/gmrf_tracked_reference.jl`). This costs about twice as much per probe and
+cuts the noise several times over. The value and its gradient stay one
+fixed-probe function and its exact derivative.
 """
 struct MatrixFreeLaplace
     exact_limit::Int
@@ -37,25 +50,21 @@ struct MatrixFreeLaplace
     seed::UInt64
     solve_tolerance::Float64
     solve_maxiter::Int
-    logdet_step::Float64
-    logdet_extent::Float64
     preconditioner_memory::Union{Nothing,Int}
     preconditioner_ridge::Float64
+    control_variate::Bool
     function MatrixFreeLaplace(; exact_limit=1024, probes=8, seed=20261102,
             solve_tolerance=1e-10, solve_maxiter=512,
-            logdet_step=1.0, logdet_extent=32.0,
-            preconditioner_memory=32, preconditioner_ridge=0.01)
+            preconditioner_memory=32, preconditioner_ridge=0.01, control_variate=true)
         exact_limit >= 0 && probes > 0 && solve_maxiter > 0 ||
             throw(ArgumentError("Laplace dimensions and iteration budgets must be positive"))
-        0 < solve_tolerance < 1 && isfinite(solve_tolerance) &&
-            0 < logdet_step <= 2 && isfinite(logdet_extent) &&
-            logdet_step <= logdet_extent <= 64 ||
+        0 < solve_tolerance < 1 && isfinite(solve_tolerance) ||
             throw(ArgumentError("invalid matrix-free Laplace numerical tolerances"))
         (preconditioner_memory === nothing || preconditioner_memory >= 0) &&
             isfinite(preconditioner_ridge) && preconditioner_ridge >= 0 ||
             throw(ArgumentError("invalid fixed conditional preconditioner policy"))
         new(exact_limit, probes, seed, solve_tolerance, solve_maxiter,
-            logdet_step, logdet_extent, preconditioner_memory, preconditioner_ridge)
+            preconditioner_memory, preconditioner_ridge, control_variate)
     end
 end
 export MatrixFreeLaplace
@@ -77,7 +86,7 @@ function _brm_spl_algebra!(p, solver, options::MatrixFreeLaplace)
         if options.preconditioner_memory !== nothing
             # One deterministic reference, independent of the first evaluated
             # point, caller RNG, mode-search history and later evaluations.
-            pop = _brm_spl_population(p, zeros(length(p.population)))
+            pop = _brm_spl_population(p, _brm_spl_reference_point(p))
             n = length(p.integrated)
             h = _brm_spl_precision(p)
             _brm_spl_assemble!(zeros(length(p.components)), zeros(n), h, p,
@@ -85,8 +94,7 @@ function _brm_spl_algebra!(p, solver, options::MatrixFreeLaplace)
             F = _brm_operator_factor(p, h)
             for (c, part) in enumerate(F.parts)
                 large[c] || continue
-                references[c] = _brm_fixed_reference(part.H, options.preconditioner_memory;
-                    ridge=options.preconditioner_ridge)
+                references[c] = _brm_component_reference(p, c, part.H, h, F.localindex, options)
             end
         end
     end
@@ -94,11 +102,18 @@ function _brm_spl_algebra!(p, solver, options::MatrixFreeLaplace)
     p
 end
 
+# Where a problem's reference is prepared. A field's curvature and prior move by
+# orders of magnitude between its lengths' priors and the unit point of the zero
+# coordinates, so a problem with a field takes its prior medians.
+_brm_spl_reference_point(p) = p.gmrf === nothing ? zeros(length(p.population)) :
+    _brm_laplace_prior_median(p)
+
 # Backtrack all unresolved components together, with a fixed cap. A local
 # Gauss-Seidel fallback would reassemble the whole field once per level.
 # Like the exact step, require finite derivatives and return them at the
 # accepted point for the next Newton iteration.
-function _brm_operator_step!(p, pop, z, direction, g, h, fc, converged)
+function _brm_operator_step!(p, pop, z, direction, g, h, fc, converged; weight::Float64=1.0,
+        search=nothing)
     accepted = copy(converged)
     decrement = [dot(view(g, I), view(direction, I)) for I in p.components]
     steps = ones(length(fc))
@@ -109,7 +124,7 @@ function _brm_operator_step!(p, pop, z, direction, g, h, fc, converged)
             accepted[c] || (trial[i] = z[i] + steps[c] * direction[i])
         end
         _brm_spl_assemble!(ft, gt, ht, p, pop.A, pop.C, trial;
-            derivatives=true, uA=pop.uA)
+            derivatives=true, uA=pop.uA, weight)
         valid = _brm_spl_finite_blocks(p, gt, ht)
         for c in eachindex(fc)
             accepted[c] && continue
@@ -119,6 +134,7 @@ function _brm_operator_step!(p, pop, z, direction, g, h, fc, converged)
                 accepted[c] = true
                 z[p.components[c]] .= trial[p.components[c]]
             else
+                search === nothing || steps[c] < 1 || (search.backtracks[c] += 1)
                 steps[c] /= 2
             end
         end
@@ -130,8 +146,8 @@ function _brm_operator_step!(p, pop, z, direction, g, h, fc, converged)
     false
 end
 
-struct _BRMConditionalOperator
-    D::SparseMatrixCSC{Float64,Int}
+struct _BRMConditionalOperator{P}
+    D::P
     B::SparseMatrixCSC{Float64,Int}
     W::SparseMatrixCSC{Float64,Int}
     diagonal::Vector{Float64}
@@ -141,7 +157,7 @@ struct _BRMConditionalOperator
 end
 Base.size(H::_BRMConditionalOperator) = size(H.D)
 Base.size(H::_BRMConditionalOperator, d::Integer) = size(H.D, d)
-Base.eltype(::Type{_BRMConditionalOperator}) = Float64
+Base.eltype(::Type{<:_BRMConditionalOperator}) = Float64
 Base.eltype(::_BRMConditionalOperator) = Float64
 function LinearAlgebra.mul!(y, H::_BRMConditionalOperator, x)
     mul!(y, H.D, x)
@@ -200,8 +216,11 @@ mutable struct _BRMOperatorFactor
     ready::Bool
     problem::Any
     curvature::Any
+    # Each part's control variate (`_BRMGMRFTracked`), once its determinant is computed.
+    tracked::Vector{Any}
 end
 
+# `shift`: one number, or one per component (each part takes its own).
 function _brm_operator_factor(p, h; shift=0.0)
     D = h isa _BRMSumPrecision ? h.D : h
     if h isa _BRMSumPrecision
@@ -221,15 +240,16 @@ function _brm_operator_factor(p, h; shift=0.0)
         Bc = _brm_spl_submatrix(B, rows, I)
         Wc = _brm_spl_submatrix(W, rows, rows)
         WB = Wc * Bc
-        diagonal = diag(Dc) .+ vec(sum(Bc .* WB; dims=1))
-        H = _BRMConditionalOperator(Dc, Bc, Wc, diagonal, shift,
+        diagonal = collect(diag(Dc) .+ vec(sum(Bc .* WB; dims=1)))
+        sc = shift isa AbstractVector ? Float64(shift[c]) : Float64(shift)
+        H = _BRMConditionalOperator(Dc, Bc, Wc, diagonal, sc,
             zeros(length(rows)), zeros(length(rows)))
         factor = if p.algebra.large[c]
             nothing
         else
             # Only a bounded component is ever materialized densely.
             dense = Matrix(Dc) + Matrix(Bc' * WB)
-            dense[diagind(dense)] .+= shift
+            dense[diagind(dense)] .+= sc
             cholesky(Symmetric(dense); check=false)
         end
         references = get(p.algebra, :references, nothing)
@@ -238,53 +258,173 @@ function _brm_operator_factor(p, h; shift=0.0)
         push!(parts, (; H, operator, factor, probes=p.algebra.probes[c]))
     end
     _BRMOperatorFactor(parts, p.components, p.component, localindex, p.algebra.options,
-        zeros(length(parts)), zeros(SparseArrays.nnz(p.pattern)), Dict{Int,Any}(), false, p, h)
+        zeros(length(parts)), zeros(SparseArrays.nnz(p.pattern)), Dict{Int,Any}(), false, p, h,
+        Any[nothing for _ in parts])
 end
 LinearAlgebra.issuccess(F::_BRMOperatorFactor) = all(F.parts) do part
     part.factor === nothing ? all(>(0), part.H.diagonal .+ part.H.shift) : issuccess(part.factor)
 end
+# A component whose right-hand side is not finite gets a nonfinite solution,
+# as a direct factor's solve gives, instead of a failed iterative solve: the
+# marginal gradient then reports the term that made it nonfinite
+# (`_brm_spl_nonfinite_gradient!`). Other components are unaffected.
 function Base.:\(F::_BRMOperatorFactor, b::AbstractVector)
     x = zeros(length(b))
     for (part, I) in zip(F.parts, F.components)
-        x[I] .= part.factor === nothing ? _brm_operator_solve(part.operator, b[I], F.options;
-            diagnostics=F.problem.algebra.diagnostics) :
-            part.factor \ b[I]
+        bI = b[I]
+        x[I] .= !all(isfinite, bI) ? NaN :
+            part.factor === nothing ? _brm_operator_solve(part.operator, bI, F.options;
+                diagnostics=F.problem.algebra.diagnostics) :
+            part.factor \ bI
     end
     x
 end
 _brm_spl_woodbury(p::BRMSparseLaplaceProblem, F::_BRMOperatorFactor) = nothing
 
+# The operator algebra's Newton direction and each component's shift
+# (`_brm_spl_shifted_direction`): every part tries 0 and then the shifts in
+# `_BRM_SPL_SHIFTS` on its own, so one part's curvature never damps another's.
 function _brm_operator_direction(p, h, g)
-    for shift in (0.0, (10.0^k for k in -4:7)...)
-        F = _brm_operator_factor(p, h; shift)
-        issuccess(F) || continue
-        try
-            return F \ g
-        catch err
-            err isa _BRMOperatorSolveFailure || rethrow()
-            p.algebra.diagnostics[:last_damped_solve_failure] = sprint(showerror, err)
+    nc = length(p.components)
+    x = zeros(length(g)); shift = zeros(nc); done = falses(nc)
+    for μ in (0.0, _BRM_SPL_SHIFTS...)
+        F = _brm_operator_factor(p, h; shift=[done[c] ? shift[c] : μ for c in 1:nc])
+        for (c, (part, I)) in enumerate(zip(F.parts, F.components))
+            done[c] && continue
+            definite = part.factor === nothing ?
+                all(>(0), part.H.diagonal .+ part.H.shift) : issuccess(part.factor)
+            definite || continue
+            try
+                x[I] .= part.factor === nothing ? _brm_operator_solve(part.operator, g[I],
+                    F.options; diagnostics=p.algebra.diagnostics) : part.factor \ g[I]
+                shift[c] = μ; done[c] = true
+            catch err
+                err isa _BRMOperatorSolveFailure || rethrow()
+                p.algebra.diagnostics[:last_damped_solve_failure] = sprint(showerror, err)
+            end
         end
+        all(done) && return (x, shift)
     end
     nothing
 end
 
-# Factor parts have different concrete operator/workspace types. Keep the
-# coordinate loop behind a function barrier so dynamic dispatch there does
-# not allocate boxed scalars once per coordinate, probe and quadrature node.
-function _brm_shifted_probe_statistics!(hx, operator, x, r, t)
-    mul!(hx, operator, x)
-    residual2 = 0.0; value = 0.0
-    @inbounds for i in eachindex(x)
-        residual2 += (hx[i] + t*x[i] - r[i])^2
-        value += r[i] * (hx[i] - x[i])
+# The eigen-decomposition of the derivative's small matrix drops directions
+# holding less than this share of its trace.
+const _BRM_LOGDET_RANK_TOLERANCE = 1e-12
+
+# The Loewner matrix of `log` is positive semidefinite, so G below is too: the
+# determinant's sensitivity stays a positive sum of rank-one terms.
+_brm_log_divided_difference(a, b) = a == b ? 1 / a : log1p((a - b) / b) / (a - b)
+
+# One probe's Lanczos recurrence on `operator`, stopped when the solve of
+# `A x = r` it implies reaches `rtol`, at `maxiter` iterations, or at nonpositive
+# curvature in its directions. That solve's residual is β_k |e_k' T_k⁻¹ e₁|, read
+# from T_k = L D L' as T grows, whose pivots also check the curvature.
+function _brm_lanczos_run(operator, r, rtol, maxiter)
+    iterator = KrylovKit.LanczosIterator(operator, collect(r), KrylovKit.ModifiedGramSchmidt())
+    state = KrylovKit.initialize(iterator; verbosity=0)
+    pivot = first(state.αs)
+    last_entry = 1.0
+    while true
+        k = length(state)
+        pivot > 0 && isfinite(pivot) || return (; state, residual=Inf, curved=false)
+        β = KrylovKit.normres(state)
+        residual = β * abs(last_entry) / pivot
+        (residual <= rtol || k >= maxiter) && return (; state, residual, curved=true)
+        KrylovKit.expand!(iterator, state; verbosity=0)
+        last_entry *= -β / pivot
+        pivot = state.αs[k + 1] - β^2 / pivot
     end
-    sqrt(residual2) / norm(r), value
 end
 
-# S is d(logdet approximation)/dH, not an independent inverse-trace
-# estimator. For each fixed probe r and quadrature node t,
-# d[-t r'(H+tI)^-1 r] = t x' dH x, x=(H+tI)^-1 r.
-# Stream these rank-one contributions; never retain n * probes * nodes.
+function _brm_lanczos(operator, r, options)
+    (; state, residual, curved) = _brm_lanczos_run(operator, r, options.solve_tolerance / 10,
+        options.solve_maxiter)
+    curved || throw(_BRMOperatorSolveFailure("conditional determinant recurrence found " *
+        "nonpositive curvature at iteration $(length(state))"))
+    residual <= options.solve_tolerance / 10 || throw(_BRMOperatorSolveFailure("conditional " *
+        "determinant recurrence failed within $(options.solve_maxiter) iterations: residual $residual"))
+    state
+end
+
+# `r' log(A) r` on r's Krylov space, the residual of the solve that recurrence
+# implies, and the factorization G = P Γ P' (scaled by ‖r‖²) of the sensitivity
+# ‖r‖² V G V', with `V G V'` the sensitivity of `e₁' log(T) e₁` to a change of A
+# (Daleckii–Krein: G = Q [log[θᵢ,θⱼ] cᵢ cⱼ] Q', T = Q Θ Q', c = Q'e₁).
+function _brm_lanczos_log(state, r)
+    T = KrylovKit.rayleighquotient(state)
+    k = length(state)
+    E = eigen(Symmetric(Matrix(T)))
+    θ, Q = E.values, E.vectors
+    all(>(0), θ) || throw(_BRMOperatorSolveFailure(
+        "conditional determinant recurrence found nonpositive curvature: smallest Ritz value $(first(θ))"))
+    c = view(Q, 1, :)
+    scale = dot(r, r)
+    value = scale * sum(i -> c[i]^2 * log(θ[i]), 1:k)
+    G = Q * [_brm_log_divided_difference(θ[i], θ[j]) * c[i] * c[j] for i in 1:k, j in 1:k] * Q'
+    Γ = eigen(Symmetric(G))
+    keep = _brm_lanczos_rank(Γ.values)
+    start = zeros(k); start[1] = sqrt(scale)
+    (; value, ritz=(first(θ), last(θ)), weights=scale .* Γ.values[keep],
+        directions=Γ.vectors[:, keep], solve=T \ start)
+end
+
+# Which eigenvalues of G to keep: the largest, down to a tail of a negligible
+# share of the trace. Rounding's tiny negative eigenvalues are never kept.
+function _brm_lanczos_rank(values)
+    total = sum(v -> max(v, 0.0), values)
+    tail = 0.0
+    first_kept = length(values)
+    for k in eachindex(values)
+        tail += max(values[k], 0.0)
+        tail > _BRM_LOGDET_RANK_TOLERANCE * total && (first_kept = k; break)
+    end
+    first_kept:length(values)
+end
+
+_brm_lanczos_combine!(out, V, coefficients) = begin
+    fill!(out, 0.0)
+    for (a, coefficient) in enumerate(coefficients)
+        axpy!(coefficient, V[a], out)
+    end
+    out
+end
+
+# This part's control variate, for a field or star whose references decouple their
+# channels. A sum's reductions stay out of the rebuilt reference, whose derivative
+# they would need.
+function _brm_operator_tracked(F, component, operator)
+    F.options.control_variate || return nothing
+    operator isa _BRMPreconditionedOperator || return nothing
+    F.curvature isa _BRMSumPrecision && return nothing
+    iszero(operator.h.shift) || return nothing
+    p = F.problem
+    hasproperty(p, :gmrf) && p.gmrf !== nothing || return nothing
+    if operator.reference isa _BRMGMRFTimeReference
+        field = _brm_gmrf_component_field(p, component)
+        return field === nothing ? nothing : _brm_gmrf_tracked(field, operator.reference, F.curvature)
+    elseif operator.reference isa _BRMGMRFStarReference
+        fields = _brm_gmrf_component_fields(p, component)
+        return fields === nothing ? nothing : _brm_gmrf_tracked(fields, operator.reference, F.curvature)
+    end
+    nothing
+end
+
+# S[k] += weight x[row] x[col] over the component's stored entries, without a
+# stored index per entry: those would outweigh the precision itself.
+function _brm_operator_sensitivity!(S, pattern, localindex, I, x, weight)
+    rows = rowvals(pattern)
+    @inbounds for (position, j) in enumerate(I)
+        scaled = weight * x[position]
+        for k in nzrange(pattern, j)
+            S[k] += scaled * x[localindex[rows[k]]]
+        end
+    end
+    S
+end
+
+# S is d(logdet approximation)/dH, not an independent inverse-trace estimator.
+# Stream its rank-one contributions; never retain n * probes vectors.
 function _brm_operator_logdet!(F::_BRMOperatorFactor)
     F.ready && return F
     p = F.problem
@@ -301,14 +441,8 @@ function _brm_operator_logdet!(F::_BRMOperatorFactor)
         end
     end
     for (component, (part, I)) in enumerate(zip(F.parts, F.components))
-        # Pattern positions and local indices are prepared once per component.
-        positions = [k for j in I for k in nzrange(p.pattern, j)]
-        rows = [F.localindex[rowvals(p.pattern)[k]] for k in positions]
-        cols = [F.localindex[j] for j in I for _ in nzrange(p.pattern, j)]
         function accumulate(x, weight)
-            @inbounds for a in eachindex(positions)
-                F.sensitivity[positions[a]] += weight * x[rows[a]] * x[cols[a]]
-            end
+            _brm_operator_sensitivity!(F.sensitivity, p.pattern, F.localindex, I, x, weight)
             for (; cs, cov, localrows) in sums[component]
                 localx = x[localrows]
                 projected = cs.B * localx
@@ -325,53 +459,66 @@ function _brm_operator_logdet!(F::_BRMOperatorFactor)
             continue
         end
         options = F.options
-        K = ceil(Int, options.logdet_extent / options.logdet_step)
         estimates = zeros(options.probes)
-        shifts = exp.(collect(-K:K) .* options.logdet_step)
         operator = part.operator
         transformed = operator isa _BRMPreconditionedOperator
-        probe_rhs = zeros(length(I)); hx = similar(probe_rhs); physical = similar(probe_rhs)
-        workspace = Krylov.CgLanczosShiftWorkspace(operator, probe_rhs, shifts)
+        direction = zeros(length(I)); physical = similar(direction); solve = similar(direction)
         max_residual = 0.0
         max_iterations = 0
+        max_rank = 0
+        smallest, largest = Inf, -Inf
+        tracked = _brm_operator_tracked(F, component, operator)
+        tracked_operator = tracked === nothing ? nothing :
+            _BRMPreconditionedOperator(tracked, operator.reference)
+        tracked_iterations = 0
         for (q, r) in enumerate(eachcol(part.probes))
-            # One common Krylov recurrence for every shift. This avoids one
-            # full field traversal per shift per iteration. The congruence
-            # reference is fixed; shifts are identities in these coordinates.
-            probe_rhs .= r
-            Krylov.cg_lanczos_shift!(workspace, operator, probe_rhs, shifts;
-                check_curvature=true, atol=0.0, rtol=options.solve_tolerance / 10,
-                itmax=options.solve_maxiter)
-            xs = Krylov.solution(workspace)
-            info = Krylov.statistics(workspace)
-            info.solved && info.niter <= options.solve_maxiter ||
-                throw(_BRMOperatorSolveFailure("conditional shifted solves failed " *
-                    "within $(options.solve_maxiter) iterations: $(info.status)"))
-            max_iterations = max(max_iterations, info.niter)
-            for (j, k) in enumerate(-K:K)
-                t = shifts[j]; x = xs[j]
-                residual, value = _brm_shifted_probe_statistics!(hx, operator, x, r, t)
-                max_residual = max(max_residual, residual)
-                residual <= options.solve_tolerance || throw(_BRMOperatorSolveFailure(
-                    "conditional shifted solve residual $residual exceeds $(options.solve_tolerance)"))
-                weight = options.logdet_step * (abs(k) == K ? 0.5 : 1.0)
-                # This equivalent form avoids cancellation of n-sized constants
-                # at large shifts, and is zero for an identity precision.
-                estimates[q] += weight * t / (1 + t) * value
+            state = _brm_lanczos(operator, r, options)
+            V = KrylovKit.basis(state)
+            log_r = _brm_lanczos_log(state, r)
+            _brm_lanczos_combine!(solve, V, log_r.solve)
+            residual = norm(operator(solve) .- r) / norm(r)
+            residual <= options.solve_tolerance || throw(_BRMOperatorSolveFailure(
+                "conditional determinant recurrence has solve residual $residual, " *
+                "exceeding $(options.solve_tolerance)"))
+            max_residual = max(max_residual, residual)
+            max_iterations = max(max_iterations, length(state))
+            max_rank = max(max_rank, length(log_r.weights))
+            smallest = min(smallest, first(log_r.ritz)); largest = max(largest, last(log_r.ritz))
+            estimates[q] = log_r.value
+            for (k, weight) in enumerate(log_r.weights)
+                _brm_lanczos_combine!(direction, V, view(log_r.directions, :, k))
                 if transformed
-                    _brm_to_physical!(physical, operator, x)
-                    accumulate(physical, weight * t / options.probes)
+                    _brm_to_physical!(physical, operator, direction)
+                    accumulate(physical, weight / options.probes)
                 else
-                    accumulate(x, weight * t / options.probes)
+                    accumulate(direction, weight / options.probes)
                 end
+            end
+            tracked === nothing && continue
+            state_m = _brm_lanczos(tracked_operator, r, options)
+            V_m = KrylovKit.basis(state_m)
+            log_m = _brm_lanczos_log(state_m, r)
+            estimates[q] -= log_m.value
+            tracked_iterations = max(tracked_iterations, length(state_m))
+            for (k, weight) in enumerate(log_m.weights)
+                _brm_lanczos_combine!(direction, V_m, view(log_m.directions, :, k))
+                _brm_to_physical!(physical, tracked_operator, direction)
+                _brm_gmrf_tracked_contract!(tracked, physical, -weight / options.probes)
             end
         end
         reference_logdet = transformed ? operator.reference.logdet : 0.0
-        F.logdets[component] = reference_logdet + mean(estimates)
+        F.logdets[component] = (tracked === nothing ? reference_logdet : tracked.logdet) + mean(estimates)
+        if tracked !== nothing
+            _brm_gmrf_tracked_exact!(tracked)
+            _brm_gmrf_tracked_sensitivity!(F.sensitivity, tracked, p, component)
+            F.tracked[component] = tracked
+        end
         p.algebra.diagnostics[Symbol("component_", component)] =
             (; logdet=F.logdets[component], probe_mcse=options.probes > 1 ?
                 std(estimates) / sqrt(options.probes) : NaN,
-                probes=options.probes, quadrature_nodes=2K+1,
+                probes=options.probes, gradient_rank=max_rank,
+                ritz=(smallest, largest), tracked_iterations,
+                tracked_shift=tracked === nothing ? 0.0 : tracked.shift,
                 max_solve_residual=max_residual, max_solve_iterations=max_iterations,
                 curvature_check=:krylov_directions,
                 reference_entries=transformed ? operator.reference.factor_entries : 0,
@@ -431,6 +578,16 @@ function _brm_operator_inverse_blocks(F, sets)
         end
         Matrix(Symmetric(S))
     end
+end
+
+# A square root of a sensitivity block and each column's sign: a control variate's
+# difference of estimates need not be positive semidefinite, as a sum of its own
+# rank-one terms is.
+_brm_spl_sensitivity_root(F, S) = (cholesky(Symmetric(S)).L, nothing)
+function _brm_spl_sensitivity_root(F::_BRMOperatorFactor, S)
+    all(isnothing, F.tracked) && return (_brm_spl_psd_root(S), nothing)
+    E = eigen(Symmetric(S))
+    (E.vectors * Diagonal(sqrt.(abs.(E.values))), sign.(E.values))
 end
 
 # Probe sensitivities can be rank deficient (e.g. H=I and fewer probes than

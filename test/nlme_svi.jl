@@ -13,27 +13,7 @@ include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_panel_fixture.jl"))
 using LinearAlgebra, LogDensityProblems, Random, Statistics, WarmupHMC
 
-# Correlated random intercept and slope, `nobs` Normal observations per subject.
-function svi_gauss_data(rng, N; nobs=5, a=1.0, b=0.5, sa=0.7, sb=0.3, rho=0.3,
-        sigma=0.5)
-    C = [sa^2 rho*sa*sb; rho*sa*sb sb^2]
-    L = cholesky(C).L
-    x = [randn(rng, nobs) for _ in 1:N]
-    y = map(1:N) do i
-        e = L * randn(rng, 2)
-        a + e[1] .+ (b + e[2]) .* x[i] .+ sigma .* randn(rng, nobs)
-    end
-    (; subject=["s$i" for i in 1:N], x, y)
-end
-
-svi_gauss_model(data) = @brm data begin
-    sigma ~ Exponential(1)
-    a ~ 1 + (1 | g | subject)
-    b ~ 1 + (1 | g | subject)
-    @plate for i in eachindex(a)
-        y[i] ~ Normal(a[i] .+ b[i] .* x[i], sigma)
-    end
-end
+include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))
 
 # Poisson counts with a log link and a random intercept.
 function svi_pois_data(rng, N; nobs=4, a=0.5, sa=0.6, b=0.3)
@@ -247,29 +227,6 @@ end
 
 # Daily rows of `G` probes, interleaved, with per-probe positions: a space-time
 # panel (snag brm-svi-fit-refu-be4efadf).
-function svi_spacetime_data(rng; G=6, T=12)
-    probe = String[]; day = Float64[]; c1 = Float64[]; trend = Float64[]
-    for d in 1:T, g in 1:G
-        push!(probe, "p$g"); push!(day, d); push!(c1, cos(2pi * d / 7)); push!(trend, d / T)
-    end
-    (; probe, day, c1, trend, y=3.0 .+ 0.5 .* c1 .+ 0.3 .* randn(rng, length(day)),
-       probe_x=[100.0 * cos(g) for g in 1:G], probe_y=[100.0 * sin(g) for g in 1:G])
-end
-
-# Per-probe random effects, a grouped HSGP over days and AR(1) noise in a
-# per-probe cell; `field` is the HSGP term and `extra` the declarations it reads.
-svi_spacetime_model(field, extra...) = BRM.brm(quote
-    $(extra...)
-    mu ~ 1 + c1 + (1 | lv | probe) + (0 + c1 | cc | probe) + $field
-    tr ~ 0 + trend + (0 + trend | tt | probe)
-    log(sigma) ~ 1 + (1 | ns | probe)
-    phi ~ Uniform(-1.0, 1.0)
-    @plate for p in groups(probe; order = day)
-        m = mu[p] .+ tr[p]
-        y[p] ~ AR1Normal(m, sigma[p], phi; time = day[p])
-    end
-end; mod=@__MODULE__)
-
 @stestset "a space-time panel with a grouped HSGP fits by minibatch SVI" begin
     # Long-format rows with a plate over each probe's rows: one AR(1) series
     # per probe is that probe's cell (snag brm-svi-fit-refu-be4efadf; before,

@@ -21,49 +21,94 @@ function _brm_svi_laplace_iteration!(rng,t,q,opt,lr)
     elbo
 end
 
-function _brm_svi_laplace_optimize!(rng,t,q;max_iterations,lr_global,node)
-    max_iterations isa Integer && max_iterations>0 || throw(ArgumentError(
-        "GaussianBlockLaplace: max_iterations must be a positive integer"))
-    isfinite(lr_global) && lr_global>0 || throw(ArgumentError(
-        "GaussianBlockLaplace: lr_global must be positive and finite"))
-    width=min(max_iterations,t.options.averaging_window)
-    initial=_brm_svi_global_vector(q)
-    history=Matrix{Float64}(undef,length(initial),width)
-    elbo=Vector{Float64}(undef,max_iterations)
-    opt=_BRMSVIAdam(length(initial),lr_global)
-    for k in 1:max_iterations
-        elbo[k]=_brm_svi_laplace_iteration!(rng,t,q,opt,lr_global)
-        history[:,mod1(k,width)]=_brm_svi_global_vector(q)
-        if k%50==0 || k==max_iterations
-            _brm_throw_if_interrupted(node)
-            _brm_update_progress!(node,"conditional Gaussian SVI update $k/$max_iterations")
-        end
-    end
-    result=deepcopy(q)
-    _brm_svi_set_global!(result,vec(mean(history;dims=2)))
-    (;q=result,elbo,elbo_windows=Float64[],iterations=max_iterations,converged=false,
-        stop_reason=:fixed_update_budget,budget_exhausted=true,
-        convergence_assessed=false,averaging_window=(max_iterations-width+1):max_iterations,
-        averaging=:raw_parameter_mean,lr_global)
+# Everything a fixed-budget update reads and writes besides the target, so a
+# run stops after any completed update and continues from a copy of it
+# (`BRMSVIOptimizerState`) exactly as if it had not stopped: the random stream,
+# the draw stream when it is a separate one (`nothing`: the draws continue
+# `rng`), the global factor, Adam, the ELBO so far, the averaging window of
+# global iterates, and the target's call counts and numerical records. During
+# optimization `counts` and `numerical` are the target's own containers.
+mutable struct _BRMSVILaplaceRun{Q}
+    rng::AbstractRNG
+    draw_rng::Union{Nothing,AbstractRNG}
+    q::Q
+    adam::_BRMSVIAdam
+    iteration::Int
+    elbo::Vector{Float64}
+    history::Matrix{Float64}
+    counts::Vector{Int}
+    numerical::Dict{Symbol,Float64}
 end
 
-_brm_svi_laplace_fit(x,previous,method;kwargs...)=throw(ArgumentError(
+function _brm_svi_laplace_run(rng,draw_rng,t,q,c)
+    n=length(_brm_svi_global_vector(q))
+    _BRMSVILaplaceRun(rng,draw_rng===rng ? nothing : draw_rng,q,_BRMSVIAdam(n,c.lr_global),
+        0,Float64[],zeros(n,c.width),t.counts,t.numerical)
+end
+
+_brm_svi_laplace_controls(method;max_iterations,lr_global)=
+    (;method,max_iterations,lr_global,width=min(max_iterations,method.averaging_window))
+
+_brm_svi_finished(run::_BRMSVILaplaceRun,c)=run.iteration>=c.max_iterations
+
+# Advance `run` by up to `stop_after` updates, with checkpoints as for the
+# minibatch engine (`_brm_svi_fit!`). The progress message and interrupt
+# check come every 50 updates and at the last.
+function _brm_svi_fit!(run::_BRMSVILaplaceRun,t,c;stop_after=typemax(Int),
+        checkpoint_every=50,save=nothing,snapshot=identity,node=nothing)
+    commit()=save===nothing || save(snapshot(run))
+    taken=0
+    while !_brm_svi_finished(run,c) && taken<stop_after
+        k=run.iteration+1
+        push!(run.elbo,_brm_svi_laplace_iteration!(run.rng,t,run.q,run.adam,c.lr_global))
+        run.history[:,mod1(k,c.width)]=_brm_svi_global_vector(run.q)
+        run.iteration=k
+        taken+=1
+        if k%50==0 || k==c.max_iterations
+            try
+                _brm_throw_if_interrupted(node)
+            catch
+                commit()
+                rethrow()
+            end
+            _brm_update_progress!(node,"conditional Gaussian SVI update $k/$(c.max_iterations)")
+        end
+        save===nothing || k%checkpoint_every!=0 || _brm_svi_finished(run,c) ||
+            taken>=stop_after || commit()
+    end
+    commit()
+    run
+end
+
+# The result of a run so far: its global factor at the mean of the averaging
+# window's iterates (those filled so far, for a run stopped early).
+function _brm_svi_laplace_result(run,c)
+    filled=min(run.iteration,c.width)
+    q=deepcopy(run.q)
+    filled>0 && _brm_svi_set_global!(q,vec(mean(view(run.history,:,1:filled);dims=2)))
+    finished=_brm_svi_finished(run,c)
+    (;q,elbo=run.elbo,elbo_windows=Float64[],iterations=run.iteration,converged=false,
+        finished,stop_reason=finished ? :fixed_update_budget : :stopped,
+        budget_exhausted=finished,convergence_assessed=false,
+        averaging_window=(run.iteration-filled+1):run.iteration,
+        averaging=:raw_parameter_mean,lr_global=c.lr_global)
+end
+
+_brm_svi_laplace_fit(save,x,previous,method;kwargs...)=throw(ArgumentError(
     "brm_svi_fit: laplace must be nothing or GaussianBlockLaplace()"))
 
-function _brm_svi_laplace_dispatch(x,previous,method;kwargs...)
+function _brm_svi_laplace_dispatch(save,x,previous,method;kwargs...)
     unsupported=intersect(keys(kwargs),(:batch_size,:unit_step,:unit_scale,
-        :polish_lr,:window,:patience,:min_windows,:polish_windows))
+        :polish_lr,:window,:patience,:min_windows,:polish_windows,:threads))
     isempty(unsupported) || throw(ArgumentError(
         "GaussianBlockLaplace: whole-window fixed-budget optimization does not use " *
         join(string.(unsupported),", ") * "; omit these options"))
-    _brm_svi_laplace_fit(x,previous,method;kwargs...)
+    _brm_svi_laplace_fit(save,x,previous,method;kwargs...)
 end
 
-function _brm_svi_laplace_fit(x,previous,method::GaussianBlockLaplace;
+function _brm_svi_laplace_fit(save,x,previous,method::GaussianBlockLaplace;
         rng=Random.default_rng(),draw_rng=rng,max_iterations=5000,family=nothing,
-        lr_global=.01,start=nothing,inits=nothing,ad_backend=nothing,
-        shared_point=nothing,subject_group=nothing,nested_groups=NamedTuple(),
-        shared_groups=(),global_scale=.2,ndraws=1000,progress=nothing)
+        lr_global=.01,start=nothing,inits=nothing,global_scale=.2,kwargs...)
     previous===nothing || previous isa BRMSVILaplaceState || throw(ArgumentError(
         "GaussianBlockLaplace: continuation requires a BRMSVILaplaceState"))
     family=family===nothing ? (previous===nothing ? MeanFieldGlobal() : previous.q.family) : family
@@ -83,8 +128,33 @@ function _brm_svi_laplace_fit(x,previous,method::GaussianBlockLaplace;
         "GaussianBlockLaplace: lr_global must be positive and finite"))
     isfinite(global_scale) && global_scale>0 || throw(ArgumentError(
         "GaussianBlockLaplace: global_scale must be positive and finite"))
+    c=_brm_svi_laplace_controls(method;max_iterations,lr_global)
+    _brm_svi_laplace_drive(save,x,previous,method;caller="brm_svi_fit",
+            description="BRM conditional Gaussian SVI",kwargs...) do t,layout
+        if previous===nothing
+            start_point=_brm_svi_start(t.m,start,inits)
+            q=_brm_svi_params(t,start_point[t.globals],family;global_scale,unit_scale=1.)
+        else
+            q=_brm_svi_params(t,previous.q.μ,family;global_scale=1.,unit_scale=1.)
+            q.ρ.=previous.q.ρ;q.Β.=previous.q.Β
+        end
+        _brm_svi_optimizer_state(t,previous,c,_brm_svi_laplace_run(rng,draw_rng,t,q,c))
+    end
+end
+
+# A GaussianBlockLaplace fit or resume through its progress phases. After the
+# target (with the carried prior of a window update) is prepared, `init(t,
+# layout)` returns the `BRMSVIOptimizerState` to advance; it refuses an
+# incompatible checkpoint before any update. The draws and the carry come from
+# copies of the run's draw stream and leave its call counts as they were, so a
+# stopped run's draws never change its continuation.
+function _brm_svi_laplace_drive(init,save,x,previous,method;caller,description,
+        ndraws=1000,stop_after=nothing,checkpoint_every=nothing,progress=nothing,
+        ad_backend=nothing,shared_point=nothing,subject_group=nothing,
+        nested_groups=NamedTuple(),shared_groups=())
     ndraws isa Integer && ndraws>=0 || throw(ArgumentError("GaussianBlockLaplace: ndraws must be a nonnegative integer"))
-    _brm_with_progress(progress;description="BRM conditional Gaussian SVI") do node
+    _brm_svi_check_interruption(caller,save,stop_after,checkpoint_every)
+    _brm_with_progress(progress;description) do node
         _brm_with_phases(node,_BRM_SVI_PHASES) do phases
             lowered=_brm_svi_lowered(x,phases.lower)
             # Refuse unsupported model structure before compiling AD for it.
@@ -96,23 +166,28 @@ function _brm_svi_laplace_fit(x,previous,method::GaussianBlockLaplace;
             end
             m=_brm_svi_model(lowered,phases.prepare;
                 ad_backend,shared_point,subject_group,nested_groups,shared_groups)
-            t,q,layout,active=_brm_run_phase(phases.target) do _
+            t,layout,active,state=_brm_run_phase(phases.target) do _
                 t=_brm_svi_laplace_target(m,method)
                 layout=_brm_svi_laplace_layout(t)
-                if previous===nothing
-                    start_point=_brm_svi_start(m,start,inits)
-                    q=_brm_svi_params(t,start_point[t.globals],family;global_scale,unit_scale=1.)
-                    return t,q,layout,nothing
+                active=nothing
+                if previous!==nothing
+                    carried=_brm_svi_laplace_active(t,previous,layout)
+                    t=_brm_svi_laplace_with_carry(t,carried.carry)
+                    active=carried.active
                 end
-                carried=_brm_svi_laplace_active(t,previous,layout)
-                t=_brm_svi_laplace_with_carry(t,carried.carry)
-                q=_brm_svi_params(t,previous.q.μ,family;global_scale=1.,unit_scale=1.)
-                q.ρ.=previous.q.ρ;q.Β.=previous.q.Β
-                t,q,layout,carried.active
+                t,layout,active,init(t,layout)
             end
-            seconds=@elapsed fit=_brm_enter_phase(phases.fit) do phase
-                _brm_svi_laplace_optimize!(rng,t,q;max_iterations,lr_global,node=phase)
+            run,c=state.run,state.controls
+            seconds=@elapsed _brm_enter_phase(phases.fit) do phase
+                _brm_svi_fit!(run,t,c;stop_after=something(stop_after,typemax(Int)),
+                    checkpoint_every=something(checkpoint_every,50),save,
+                    snapshot=_->_brm_svi_detach(state),node=phase)
             end
+            fit=_brm_svi_laplace_result(run,c)
+            # The run's counts and records stop here; the draws count in the
+            # target's own containers, which the diagnostics report.
+            run.counts=copy(t.counts);run.numerical=copy(t.numerical)
+            draw_rng=copy(something(run.draw_rng,run.rng))
             draws,checkpoint=_brm_run_phase(phases.draws) do phase
                 # Construct the next prior from a fixed prefix before optional
                 # output draws can advance the auxiliary-lift RNG stream.
@@ -125,7 +200,7 @@ function _brm_svi_laplace_fit(x,previous,method::GaussianBlockLaplace;
             end
             (;draws,coordinates=copy(m.view.coordinates),diagnostics=(;
                 fit...,globals=t.globals,seconds,model=m,source_id=_brm_svi_source_id(m.backend),
-                streaming=checkpoint,laplace=(;method,scope=merge(t.certificate.scope,
+                streaming=checkpoint,optimizer=state,laplace=(;method,scope=merge(t.certificate.scope,
                     (;streaming=previous!==nothing,
                       spectral_bound=previous===nothing ? :prior_precision : :conditional_carry_precision)),
                     integrated=copy(m.view.coordinates[t.certificate.latent]),

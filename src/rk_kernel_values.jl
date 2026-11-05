@@ -329,6 +329,14 @@ end
 _rk_push_outer_length!(lengths, values) = push!(lengths, length(values))
 _rk_push_outer_length!(lengths, ::_BRMAbsentResponse) = lengths
 
+# Whether a cell's positional argument is a response with no data: an unbound
+# name, or a `ragged` join of one. A name another cell writes is that cell's
+# output instead.
+_rk_kernel_omitted_response(argument, output_reads) = argument isa NamedColumn &&
+    parent(argument) isa MissingColumn && !(_rk_kernel_column_name(argument) in output_reads)
+_rk_kernel_omitted_response(argument::ExprColumn, output_reads) = getf(argument) === ragged &&
+    _rk_kernel_omitted_response(first(getargs(argument)), output_reads)
+
 Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BRMI), program, name, rhs)
     parts = _sb_kernel_lambda_parts(first(getargs(rhs)))
     parts === nothing && error("RK backend: kernel `$name` requires an inline cell body")
@@ -386,6 +394,13 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
         if argument isa ExprColumn && getf(argument) === ragged
             value, group = _brm_kernel_ragged_args(argument; prefix="RK backend")
             value isa NamedColumn || error("RK backend: ragged input must name a column or predictor")
+            if _rk_kernel_omitted_response(argument, keys(output_reads)) &&
+                    (params[i] in scanned || _sb_cell_param_observed(raw_body, params[i]))
+                # A long-format response with no data, as the unbound input below.
+                push!(inputs, (; source=_rk_kernel_column_name(value), kind=:omitted,
+                    rows=nothing, column=nothing))
+                continue
+            end
             (; into, order) = _brm_kernel_ragged_options(argument; prefix="RK backend")
             # Coverage and raw-response ports belong to this cell's
             # observations. Reading a completion or a response observed
@@ -472,6 +487,9 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
         bucket === nothing && _brm_kernel_check_subject_frame_lp(
             lp, nsubjects; prefix="RK backend")
     end
+    # A `gmrf` cell formula becomes its field marker (rk_gmrf.jl).
+    raw_body = _rk_kernel_cell_formulas(brmi, program, name, scope, raw_body, params,
+        inputs, columns, group_values)
     body = Any[]
     observations = Any[]
     # The observation statements the cell keeps; one whose response is
@@ -490,7 +508,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                 continue
             end
             argument = arguments[index]
-            argument isa NamedColumn && parent(argument) isa MissingColumn && continue
+            _rk_kernel_omitted_response(argument, keys(output_reads)) && continue
             # The emitter calls the AR(1) submodel in the cell, which observes
             # the response in place (`scan_observed`).
             _is_brm_ar1_normal(statement) && (push!(body, statement); continue)
@@ -635,17 +653,17 @@ function _rk_nested_cells!(cells, value::_BRMPreparedRef, context)
     data isa Real || (value.axis === :scalar && value.name in context.parameters)
 end
 function _rk_nested_cells!(cells, value::_BRMPreparedExpr, context)
-    callable = value.callable
-    isempty(value.kwargs) && (haskey(_RK_DERIVED_BINOPS, callable) ||
-        haskey(_RK_DERIVED_CMP, callable) || haskey(_RK_DERIVED_MATH, callable) ||
-        _rk_rowwise_callable(callable)) &&
+    isempty(value.kwargs) && _rk_rowwise_callable(value.callable) &&
         all(argument -> _rk_nested_cells!(cells, argument, context), value.args)
 end
 
 # A callable whose output entry `k` depends only on entry `k` of its
 # row-aligned inputs (and on shared values), so a subject cell may evaluate it
-# on that subject's rows alone. Opt in by method (`addprop`, `src/sbimpl.jl`).
-_rk_rowwise_callable(callable) = false
+# on that subject's rows alone, and a model-scope call reads a plate's flattened
+# rows rather than its cells. BRM's elementwise arithmetic is row-wise; any other
+# callable opts in by method (`addprop`, `src/sbimpl.jl`).
+_rk_rowwise_callable(callable) = haskey(_RK_DERIVED_BINOPS, callable) ||
+    haskey(_RK_DERIVED_CMP, callable) || haskey(_RK_DERIVED_MATH, callable)
 
 # The data columns observed by a likelihood: every authored response, and
 # every kernel input this cell observes. Each is flattened under its own name.
@@ -824,6 +842,7 @@ end
 function _rk_shared_definition!(defs, taken, template; kernel::Bool=false)
     call, body = template.args
     for definition in defs
+        definition = _brm_undoc(definition)
         Meta.isexpr(definition, :macrocall) == kernel || continue
         kernel && (definition = last(definition.args))
         Meta.isexpr(definition, :(=), 2) || continue
@@ -1116,12 +1135,14 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
             parent(node) isa ExprColumn{typeof(~)} &&
             _brm_observation_name(first(getargs(parent(node)))) !== nothing]
     submodels = _rk_prepare_submodel_values(program)
+    program, kernels = _rk_cells_under_omission(program, kernels, direct, submodels)
     plan = _brm_rk_value_plan(brmi, program, direct; kernels, submodels)
     observations = Any[plan.observations...]
     taken = union(Set{Symbol}(keys(plan.columns)),
         Set(spec.name for spec in plan.regression.derived),
         Set(assignment.name for assignment in plan.assignments),
         Set(kernel.cells for kernel in kernels))
+    _rk_plan_cell_gmrf!(kernels, plan, program.context.data, taken)
     for kernel in kernels, observation in kernel.observations
         raw = program.context.data[observation.source]
         distribution = _rk_kernel_observation_distribution(observation)
@@ -1268,7 +1289,7 @@ end
 # in the same order, because RK prepares a cell's data-only work once only when
 # bound data fix the plate's domain (rkppl-use §13 "Arrays per index").
 function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
-        rendered=(), defs=nothing, coordinates=nothing)
+        rendered=(), defs=nothing, coordinates=nothing, documentation=())
     # `rendered` outputs are already emitted program expressions (hoisted
     # observation arguments): their calls are bound, not cell source.
     written = Any[outputs..., rendered...]
@@ -1285,6 +1306,8 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
         if _rk_is_cell_latent(statement)]
     any(input -> input.kind === :omitted, slice.inputs) && error(
         "RK backend: kernel `$(kernel.name)` reads an unbound in-cell response outside its observation")
+    # Cell fields fit their supports at model scope, before the plate.
+    selected = _rk_emit_cell_gmrf_supports!(statements, bindings, taken, slice.body)
     cell = Any[[_rk_kernel_cell_statement(statement, slice, defs, bindings, taken)
         for statement in slice.body];
         [Expr(:(=), cells, _rk_kernel_bind_calls(value, kernel.scope, bindings, taken))
@@ -1391,6 +1414,8 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
     locals_of = Dict{Symbol,Symbol}(get(reads, latent, latent) => declared[latent]
         for latent in latents)
     body = mapreduce(vcat, body; init=Any[]) do statement
+        _rk_is_cell_gmrf(statement) && return _rk_expand_cell_gmrf(statement, index, selected,
+            defs, bindings, taken, avoid, coordinates, kernel.name)
         _rk_is_cell_latent(statement) || return Any[statement]
         lhs, marker = statement.args
         law = marker.args[2]
@@ -1401,9 +1426,14 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
                 law.args[2:end]...))
         Any[draw, Expr(:(=), lhs, entry)]
     end
+    names = Dict{Symbol,Symbol}(local_name => get(reads, local_name, local_name)
+        for local_name in locals)
+    merge!(names, declared)
+    documented_body = _rk_documentation_block(Expr(:block, body...), documentation;
+        path=(kernel.name,), names)
     push!(statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
         Expr(:for, Expr(:(=), index, Expr(:call, :eachindex, range)),
-            Expr(:block, body...))))
+            documented_body)))
 end
 
 # `<rows> = brm_ragged_rows([x, group, cell, axes...], group, cell, axes...)`
@@ -1519,6 +1549,34 @@ _rk_flatten_cells!(defs, taken, cells) =
     Expr(:call, _rk_shared_definition!(defs, taken, _RK_FLATTEN_CELLS_KERNEL; kernel=true),
         cells)
 
+# An offset whose declared row axis is the plate's cell axis consumes scalar
+# cells unchanged. A vector-valued cell has a different (possibly ragged) axis;
+# even an accidentally equal flattened length must not establish alignment.
+# Keep the type test in the graph so the live scalar arm remains an identity
+# for selected-row queries and reverse gradients.
+const _RK_OFFSET_CELLS_KERNEL = :(offset_cells(cells) = begin
+    values = eltype(cells) <: Real ? cells : throw(ArgumentError(
+        "RK backend: offset of a plate output requires one real scalar per cell; " *
+        "vector-valued cells need an explicit row selection"))
+    return values
+end)
+
+function _rk_offset_scalar_cells!(defs, statements, taken, plan, cells)
+    outputs = Set{Symbol}()
+    for predictor in plan.regression.predictors, term in predictor.terms
+        _rk_model_offset(term) && !_rk_scalar_model_offset(term) || continue
+        union!(outputs, get(term.options.axis, :scalar_cells, ()))
+    end
+    isempty(outputs) && return nothing
+    callee = _rk_shared_definition!(defs, taken, _RK_OFFSET_CELLS_KERNEL; kernel=true)
+    for statement in statements
+        Meta.isexpr(statement, :(=), 2) && statement.args[1] in outputs || continue
+        output = statement.args[1]
+        statement.args[2] = Expr(:call, callee, cells[output])
+    end
+    nothing
+end
+
 # A plate output at model scope is one value per cell, as the Julia loop leaves
 # it: `out[i]` is cell `i`'s value and `sum(out)` adds the cells. The graph
 # value of the output's name is its cells concatenated, which formula terms and
@@ -1557,8 +1615,8 @@ function _rk_plate_cell_reads(x::_BRMPreparedExpr, cells, bind=identity)
         map(value -> _rk_plate_cell_reads(value, cells, bind), x.kwargs))
 end
 # A whole-value call reads the original cells, including their inner array
-# axes. BRM's elementwise arithmetic and direct distribution arguments keep
-# their row-aligned representation.
+# axes. A row-wise callable and a direct distribution argument keep their
+# row-aligned representation.
 _rk_plate_cell_read(x::_BRMPreparedExpr, cells, bind) =
     (!isempty(x.args) || !isempty(x.kwargs)) ?
         _rk_plate_cell_read(x.callable, x, cells, bind) : nothing
@@ -1566,9 +1624,7 @@ _rk_plate_cell_read(callable, x, cells, bind) =
     _rk_plate_whole_cell_read(callable, x, cells, bind)
 _rk_plate_cell_read(::Type{<:Distribution}, x, cells, bind) = nothing
 function _rk_plate_whole_cell_read(callable, x, cells, bind)
-    isempty(x.kwargs) && (haskey(_RK_DERIVED_BINOPS, callable) ||
-        haskey(_RK_DERIVED_CMP, callable) || haskey(_RK_DERIVED_MATH, callable)) &&
-        return nothing
+    isempty(x.kwargs) && _rk_rowwise_callable(callable) && return nothing
     any(arg -> _rk_plate_cells_ref(arg, cells) !== nothing,
         (x.args..., values(x.kwargs)...)) || return nothing
     argument(arg) = let ref = _rk_plate_cells_ref(arg, cells)
@@ -1616,7 +1672,7 @@ _rk_kernel_scalar_response(kernel, observation) =
 # RKPPL runs it only in a query that reads it.
 function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         kernel::_RKPreparedKernelAssignment; arguments=nothing, coordinates=nothing,
-        graph_outputs=(), cell_sources=Dict{Symbol,Symbol}())
+        graph_outputs=(), cell_sources=Dict{Symbol,Symbol}(), documentation=())
     arguments === nothing || (kernel = _rk_kernel_with_arguments(kernel, arguments))
     kernel = _rk_kernel_input_cells(kernel, cell_sources)
     # A cell without a collected value writes only what its observations read.
@@ -1659,7 +1715,8 @@ function _rk_emit_value_assignment!(defs, statements, bindings, taken,
         end
     end
     _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
-        rendered=arguments === nothing ? () : arguments.outputs, defs, coordinates)
+        rendered=arguments === nothing ? () : arguments.outputs, defs, coordinates,
+        documentation)
     append!(statements, after)
 end
 
@@ -1769,19 +1826,30 @@ function _rk_nested_observation_reads(observation, distribution, reads)
         _BRMPreparedExpr(distribution.callable, args, distribution.kwargs)
 end
 
-# The program names a kernel depends on, for the plan's reachability: its own
-# dependencies except the positional sources only an omitted response's
-# observation reads (a source another kept statement reads stays one).
-function _rk_kernel_dependencies(kernel::_RKPreparedKernelAssignment, dependencies)
-    reads = Set{Symbol}()
-    foreach(statement -> _brm_cell_value_refs!(reads, statement), kernel.body)
-    kernel.collected === nothing || _brm_cell_value_refs!(reads, kernel.collected)
+# The names a cell's observations read.
+function _rk_kernel_observation_reads!(reads, kernel::_RKPreparedKernelAssignment)
     for observation in kernel.observations
         push!(reads, observation.param)
         foreach(argument -> _brm_cell_value_refs!(reads, argument), observation.arguments)
         observation.weight === nothing || _brm_cell_value_refs!(reads, observation.weight)
         foreach(bound -> _brm_cell_value_refs!(reads, bound.expression), observation.bounds)
     end
+    reads
+end
+
+# The names a cell reads: its statements, its collected value and its observations.
+function _rk_kernel_reads(kernel::_RKPreparedKernelAssignment)
+    reads = Set{Symbol}()
+    foreach(statement -> _brm_cell_value_refs!(reads, statement), kernel.body)
+    kernel.collected === nothing || _brm_cell_value_refs!(reads, kernel.collected)
+    _rk_kernel_observation_reads!(reads, kernel)
+end
+
+# The program names a kernel depends on, for the plan's reachability: its own
+# dependencies except the positional sources only an omitted response's
+# observation reads (a source another kept statement reads stays one).
+function _rk_kernel_dependencies(kernel::_RKPreparedKernelAssignment, dependencies)
+    reads = _rk_kernel_reads(kernel)
     unread = Set{Symbol}(input.source for (param, input) in zip(kernel.params, kernel.inputs)
         if !(param in reads))
     setdiff!(unread, reads)
@@ -1799,6 +1867,12 @@ function _rk_kernel_with_arguments(kernel::_RKPreparedKernelAssignment, argument
         kernel.cells, kernel.scan_observed, kernel.cell_column, kernel.outputs)
 end
 
+# The names a cell statement binds. Any other statement (an AR(1) submodel call
+# observing its response) binds none, and stays with everything it reads.
+_rk_cell_statement_writes(statement) = Meta.isexpr(statement, :(=)) ?
+    _rk_source_outputs!(Set{Symbol}(), statement) :
+    _is_brm_scan(statement) ? _rk_scan_writes(statement) : Set{Symbol}()
+
 # The cell restricted to what `value` reads: the body statements producing
 # its names, and the positional inputs and globals those statements read.
 # Only an assignment whose every recognized output is unread is left out; any
@@ -1807,9 +1881,7 @@ function _rk_kernel_value_slice(kernel::_RKPreparedKernelAssignment, value)
     needed = _brm_cell_value_refs!(Set{Symbol}(), value)
     body = Any[]
     for statement in Iterators.reverse(kernel.body)
-        outputs = Meta.isexpr(statement, :(=)) ?
-            _rk_source_outputs!(Set{Symbol}(), statement) :
-            _is_brm_scan(statement) ? _rk_scan_writes(statement) : Set{Symbol}()
+        outputs = _rk_cell_statement_writes(statement)
         !isempty(outputs) && isdisjoint(outputs, needed) && continue
         pushfirst!(body, statement)
         _brm_cell_value_refs!(needed, statement)

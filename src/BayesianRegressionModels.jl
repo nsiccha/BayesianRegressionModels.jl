@@ -3,6 +3,7 @@ module BayesianRegressionModels
 # @brm macro — parses a formula block, produces a BRMI (BRM
 # intermediate: expression tree + column metadata).
 using OrderedCollections
+include("authored_documentation.jl")
 include("macro.jl")
 include("builder_interpreter.jl")
 include("groups.jl")
@@ -22,6 +23,7 @@ using StaticArrays: SMatrix, SVector, MMatrix, MVector
 using ReparametrizableDistributions: advance!!, lkj_cholesky!, simplex!
 using SparseArrays: SparseMatrixCSC, sparse, spzeros, spdiagm, nonzeros, rowvals, nzrange, blockdiag
 using SelectedInversion: selinv_diag, selinv, selinv_extract
+using Bessels: besselk, besselk0, besselk1
 import SparseArrays, SelectedInversion, KLU, MUMPS
 import KrylovKit, PowerScaling
 import Krylov
@@ -36,6 +38,9 @@ include("likelihood_distributions.jl")
 include("preparation_basis.jl")
 include("preparation_hsgp.jl")
 include("formula_markers.jl")
+include("gmrf_precision.jl")
+include("gmrf_interpolation.jl")
+include("gmrf_vecchia.jl")
 include("formula_validation.jl")
 include("prepared_metadata.jl")
 include("preparation_replay.jl")
@@ -55,12 +60,15 @@ include("level_correlation.jl")
 include("preparation_terms.jl")
 include("car_separation.jl")
 include("preparation_gp.jl")
+include("preparation_gmrf.jl")
+include("preparation_cell_formulas.jl")
 include("preparation_structured.jl")
 include("turing_backend.jl")
 include("rk_backend.jl")
 include("rk_ast.jl")
 include("rk_callable_source.jl")
 include("rk_statistical.jl")
+include("rk_gmrf.jl")
 include("statistical_preparation.jl")
 include("statistical_models.jl")
 include("rk_missing_values.jl")
@@ -72,6 +80,7 @@ include("rk_observation_source.jl")
 include("rk_callable_terms.jl")
 include("rk_kernel_values.jl")
 include("rk_submodel_values.jl")
+include("rk_omitted_cells.jl")
 include("rk_structured.jl")
 include("rk_multigroup_replay.jl")
 include("rk_observations.jl")
@@ -87,8 +96,10 @@ include("vimpl.jl")
 # so it can be compiled by BridgeStan / fit via Stan.
 using StanBlocks
 include("sbimpl.jl")
+include("sb_gmrf.jl")
 include("sb_marginal_ranef.jl")
 include("sb_cell_julia.jl")
+include("sb_cell_formulas.jl")
 include("sb_distribution_statistics.jl")
 include("sb_plate_outputs.jl")
 # Fusion-append artifacts + SB reference numbers (RK-side driver inputs).
@@ -139,9 +150,12 @@ include("nlme_laplace_structured.jl")
 include("nlme_laplace_factors.jl")
 include("nlme_laplace_sparse.jl")
 include("nlme_laplace_gaussian.jl")
+include("nlme_laplace_gmrf.jl")
 include("nlme_laplace_sum_solver.jl")
 include("nlme_laplace_matrixfree.jl")
 include("nlme_laplace_preconditioner.jl")
+include("gmrf_preconditioner.jl")
+include("gmrf_tracked_reference.jl")
 include("nlme_laplace_width.jl")
 include("nlme_laplace_plan.jl")
 include("nlme_laplace_sampled.jl")
@@ -162,6 +176,7 @@ include("nlme_svi_laplace_carry.jl")
 include("nlme_svi_laplace_prior.jl")
 include("nlme_svi_laplace_streaming.jl")
 include("nlme_svi_laplace_fit.jl")
+include("nlme_svi_optimizer.jl")
 include("smc.jl")
 include("smc_streaming.jl")
 include("filter.jl")
@@ -207,7 +222,7 @@ export brm_total, brm_total_recover_rng, brm_total_deviations, brm_total_locatio
 export weighted, AbstractWeights, AnalyticWeights, FrequencyWeights,
        ProbabilityWeights, UnitWeights, Weights,
        aweights, fweights, pweights, uweights, weights
-export me, mi, s, t2, ar, dar, rw, cdar, car, mo, mo1, hsgp, multigroup, OrderedLogistic, Ordinal,
+export me, mi, s, t2, ar, dar, rw, cdar, car, gmrf, mo, mo1, hsgp, multigroup, OrderedLogistic, Ordinal,
        OrdinalStructure, Cumulative, StoppingRatio,
        OrdinalLink, LogitLink, ProbitLink, CloglogLink, Horseshoe,
        CategoricalLogit, ZeroInflatedPoisson, HurdlePoisson, NegativeBinomial2,
@@ -230,6 +245,7 @@ export rk_artifact_inputs
 export rk_bound_data, rk_bound_plan, rk_design_binder, RKDesignBinder
 export brm_fitted_state, BRMFittedState
 export BRMSVIState, BRMSVILaplaceState, GaussianBlockLaplace, brm_svi_checkpoint
+export BRMSVIOptimizerState, brm_svi_optimizer_checkpoint, brm_svi_resume
 export BRMSMCFit, brm_smc_fit, brm_smc_tune, brm_smc_update, brm_smc_checkpoint, brm_smc_resume
 export BRMSMCCarriedReference, BRMSMCWindowFit, brm_smc_carry
 export brm_smc_coordinates, brm_smc_recover
@@ -360,7 +376,8 @@ export outcomes, linear_predictor_op, linear_predictors, predictors,
        hierarchical_outcomes,
        linear_predictor_args, data_args, primary_lp, popcoefnames, effect_priors,
        ranef_effect_priors, r2d2_priors, term_priors, ranefcoefnames,
-       priors_of, structure_of, brm_source
+       priors_of, structure_of, brm_source,
+       BRMDocumentation, brm_documentation, brm_documentation_markdown
 
 # Extension API. Downstream packages add their own formula terms
 # by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and

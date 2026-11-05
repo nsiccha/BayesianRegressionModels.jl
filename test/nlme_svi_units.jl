@@ -9,9 +9,15 @@ struct GaussianUnits
     globals::Vector{Int}
     units::Vector{Vector{Int}}
     plan::NamedTuple
+    plans::Vector{NamedTuple}
+    work::Vector{Nothing}
 end
+GaussianUnits(globals, units, plan) =
+    GaussianUnits(globals, units, plan, [plan], [nothing])
+include("svi_arithmetic_support.jl")
+
 _brm_svi_global_term(::GaussianUnits, g) = (-sum(abs2, g) / 2, -g)
-function _brm_svi_unit_term!(gg, gz, t::GaussianUnits, i, g, z)
+function _brm_svi_unit_term!(gg, gz, t::GaussianUnits, i, g, z, plan, work)
     fill!(gg, 0.0)
     gz .= -(z .- i) .* (i + 1)
     -(i + 1) * sum(abs2, z .- i) / 2
@@ -145,7 +151,7 @@ end
         (; selections=[[[[1, 2]]], [[[1, 3, 4, 5, 6, 7]]]]))
     q = SU._brm_svi_params(t, [0.0], SU.MeanFieldGlobal();
         global_scale=1.0, unit_scale=1.0, unit_dense_limit=2, unit_rank=2)
-    fit = SU._brm_svi_fit!(Xoshiro(51), t, q; batch_size=2, max_iterations=40,
+    fit = SU.arithmetic_fit(Xoshiro(51), t, q; batch_size=2, max_iterations=40,
         lr_global=0.0, unit_step=0.05, polish_lr=0.0, window=2, patience=1,
         min_windows=2, polish_windows=2, unit_sampling=:work)
     @test all(isfinite, fit.elbo)

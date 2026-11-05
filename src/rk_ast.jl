@@ -20,6 +20,7 @@ _rk_source_macro(head, mod::Symbol, name::Symbol) = head === name ||
 # submodel is an @rkppl assignment definition, written bare or with its macro;
 # `_rk_canonical_source_definition` spells it bare.
 function _rk_source_definition(definition)
+    definition = _brm_undoc(definition)
     kind = :rkppl
     body = definition
     if Meta.isexpr(definition, :macrocall)
@@ -48,9 +49,58 @@ end
 # Emitted source spells a submodel as its bare assignment; evaluation applies
 # @rkppl to it once. Other definitions are already in their emitted spelling.
 function _rk_canonical_source_definition(definition)
+    if _brm_is_doc(definition)
+        result = deepcopy(definition)
+        result.args[4] = _rk_canonical_source_definition(definition.args[4])
+        return result
+    end
     Meta.isexpr(definition, :macrocall) &&
         _rk_source_definition(definition).kind === :rkppl || return definition
     only(filter(arg -> !(arg isa LineNumberNode), definition.args[2:end]))
+end
+
+# Julia owns definition documentation, so the wrapper stays outside @rkppl.
+# Native functions and @kernel definitions already carry their defining syntax.
+function _rk_definition_expression(definition)
+    if _brm_is_doc(definition)
+        result = deepcopy(definition)
+        result.args[4] = _rk_definition_expression(definition.args[4])
+        return result
+    end
+    _rk_source_definition(definition).kind === :rkppl || return definition
+    Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0),
+        _rk_canonical_source_definition(definition))
+end
+
+# Attach records only within the lexical scope selected by the emitter. The
+# optional mapping is supplied where names are chosen, never reconstructed
+# from flattened private names. Component emitters call this before renaming
+# their local declarations; plates supply their own enclosing authored path.
+function _rk_documentation_block(block::Expr, documentation; path=(),
+        names=Dict{Symbol,Symbol}())
+    isempty(documentation) && return block
+    by_target = Dict{Symbol,Vector{Tuple{Int,BRMDocumentation}}}()
+    for (i, doc) in enumerate(documentation)
+        length(doc.path) == length(path) + 1 &&
+            doc.path[1:length(path)] == path || continue
+        target = get(names, last(doc.path), last(doc.path))
+        push!(get!(Vector{Tuple{Int,BRMDocumentation}}, by_target, target), (i, doc))
+    end
+    statements = map(block.args) do statement
+        statement isa Expr || return statement
+        _brm_is_doc(statement) && return statement
+        lhs = _brm_statement_lhs(statement)
+        targets = _brm_documentation_lhs(lhs)
+        selected = _brm_documentation_records(by_target, targets)
+        isempty(selected) ? statement : _brm_documented_statement(statement, selected)
+    end
+    Expr(block.head, statements...)
+end
+
+function _rk_documented_program(emitted::_RKEmittedProgram, documentation; kwargs...)
+    isempty(documentation) && return emitted
+    _RKEmittedProgram(emitted.defs,
+        _rk_documentation_block(emitted.main, documentation; kwargs...), emitted.bindings)
 end
 
 # Source locations are not part of a definition's meaning, so two copies
@@ -156,6 +206,7 @@ _rk_ast_level_values(values) = Expr(:vect, (_rk_ast_level_value(value) for value
 
 function _rk_lower_assignment_expr(node, name::Symbol)
     node isa Number && return node
+    node isa AbstractVector{<:Real} && return Expr(:vect, node...)
     node isa _BRMPreparedRef && return node.name
     node isa _BRMPreparedExpr || error(
         "RK backend: internal: assignment `$name` holds an unlowerable node")
@@ -287,6 +338,7 @@ end
 function _rk_ast_block_call!(definitions, taken, base, block::_RKBlockBody, value)
     body = Expr(:block, block.statements..., Expr(:return, value))
     for definition in definitions
+        definition = _brm_undoc(definition)
         Meta.isexpr(definition, :(=), 2) || continue
         call = first(definition.args)
         Meta.isexpr(call, :call) && isequal(call.args[2:end], block.arguments) &&
@@ -352,7 +404,7 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
         elseif term.kind === :hsgp
             # The ordinary Hilbert basis/spectral product is a summand.
             push!(summands, refref[index])
-        elseif term.kind === :gp
+        elseif term.kind === :gp || term.kind === :gmrf
             push!(summands, refref[index])
         elseif term.kind === :ar
             # Scaled scan summand: the thin layer classifies
@@ -1681,7 +1733,7 @@ end
 # otherwise unchanged; an unrecorded declaration is refused by the transport.
 function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         values::Bool=false, reserved=(), coordinates=nothing,
-        lone_intercepts=Dict{Symbol,Any}())
+        lone_intercepts=Dict{Symbol,Any}(), documentation=())
     taken = union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
@@ -1886,7 +1938,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             end
             if kind === :monotonic_summand
                 refactual[index] = monotonic!(index, term, nothing, :mo1, false)
-            elseif kind === :spline || kind === :hsgp
+            elseif kind === :spline || kind === :hsgp || kind === :gmrf
                 refactual[index] = term.options.id
             elseif kind === :structured
                 refactual[index] = term.options.id
@@ -1948,7 +2000,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             end
             (kind === :offset || kind === :ranef_gather ||
                 kind === :spline || kind === :hsgp ||
-                kind === :structured ||
+                kind === :structured || kind === :gmrf ||
                 kind === :gp || kind === :dar || kind === :car || kind === :cdar ||
                 kind === :monotonic_summand) && continue
             hs_spec = get(hs_priors, (predictor.name, term.addressee),
@@ -2073,6 +2125,26 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             _rk_start_term_record!(coordinates, predictor.name, term, term.options.id,
                 (; length_scale=any(p -> p.hyper === :length_scale, hyper_plans) ? nothing : rho,
                    sigma=any(p -> p.hyper === :sd, hyper_plans) ? nothing : sigma))
+        end
+        for term in predictor.terms
+            term.kind === :gmrf || continue
+            locals = _rk_ast_gmrf!(defs, stmts, taken, bindings, term)
+            if term.options.neighbors === nothing
+                _rk_coordinate_record!(coordinates, (; kind=:gmrf,
+                    declaration=term.options.id, predictor=predictor.name,
+                    axes=term.options.source, state_axes=term.options.state_axes,
+                    mesh_inputs=(; term.options.vertices, term.options.cells),
+                    correlation=term.options.correlation, locals))
+            else
+                _rk_coordinate_record!(coordinates, (; kind=:gmrf_footprint,
+                    declaration=term.options.id, predictor=predictor.name,
+                    axes=term.options.source, state_axes=term.options.state_axes,
+                    neighbors=term.options.neighbors,
+                    correlation=term.options.correlation, locals))
+            end
+            _rk_start_term_record!(coordinates, predictor.name, term, term.options.id,
+                (; sigma=locals.sigma, spatial_length=locals.spatial_length,
+                   temporal_length=locals.temporal_length))
         end
         for term in predictor.terms
             term.kind === :gp || continue
@@ -2237,5 +2309,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     emitted = _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
         _rk_structural_responses(plan); retained=authored, coordinates)
     # A value plan resolves lone intercepts once its own readers are emitted.
-    values ? emitted : _rk_scalar_lone_intercepts(emitted, lone_intercepts)
+    emitted = values ? emitted : _rk_scalar_lone_intercepts(emitted, lone_intercepts)
+    # Linked predictors retain their response-scale authored name. The one
+    # identity predictor/data collision is renamed at the explicit site above.
+    names = Dict(p.name => get(rename, p.name, p.name) for p in plan.predictors
+        if p.link === :identity)
+    _rk_documented_program(emitted, documentation; names)
 end

@@ -32,8 +32,8 @@ what [`brm_fitted_state`](@ref) returns. It holds
   spline fits), keyed by what they fit;
 - `constants`: the `name = constant(expr)` values;
 - `scalars`: numeric scalar data inputs, including prior arguments and inputs
-  of `constant(...)`. Omitted fields take these fitted values; supplied prior
-  arguments must still reproduce the fitted program;
+  of `constant(...)`. Omitted fields take these fitted values; a supplied prior
+  argument must equal its fitted value, literal or read by name in the program;
 - `declaration`: the authored model (`show(brm_source(rk))`), which a replay's
   model must repeat;
 - `program`: the fit's emitted program, which a replay must reproduce;
@@ -83,7 +83,7 @@ function brm_fitted_state(rk::RKBRMI)
         sort!(collect(fit_inputs)), reads,
         Dict{Symbol,Symbol}(_rk_plan_fit_inputs(rk.plan)),
         _rk_recorded_fits(rk), _rk_fitted_constants(rk), _rk_fitted_scalars(rk),
-        sprint(show, brm_source(rk)),
+        sprint(show, brm_source(rk); context=:brm_documentation => false),
         _rk_program_statements(emitted), _rk_layout_coordinate_names(rk),
         _rk_fitted_column_types(rk),
         sort!(collect(_rk_response_names(rk.plan))), Tuple(_rk_held_out_names(rk.plan)))
@@ -157,9 +157,11 @@ function _rk_statement_reads(emitted, plan)
         _rk_source_assignments!(data, statement)
         _rk_source_outputs!(data, statement)
     end
-    [(statement, intersect(_rk_source_symbols!(Set{Symbol}(),
-            Meta.isexpr(statement, :(=), 2) ? statement.args[2] : statement), data))
-        for statement in emitted.main.args if statement isa Expr]
+    map(filter(statement -> statement isa Expr, emitted.main.args)) do statement
+        bare = _brm_undoc(statement)
+        rhs = Meta.isexpr(bare, :(=), 2) ? bare.args[2] : bare
+        (statement, intersect(_rk_source_symbols!(Set{Symbol}(), rhs), data))
+    end
 end
 
 # The definitions an emitted program fits from `inputs` alone: each `name = …`
@@ -168,6 +170,7 @@ end
 function _rk_fitted_definitions(emitted, plan, inputs::Set{Symbol})
     fitted = Dict{Symbol,Set{Symbol}}()
     for (statement, reads) in _rk_statement_reads(emitted, plan)
+        statement = _brm_undoc(statement)
         Meta.isexpr(statement, :(=), 2) && statement.args[1] isa Symbol &&
             !isempty(reads) && all(name -> name in inputs || haskey(fitted, name), reads) ||
             continue
@@ -176,9 +179,11 @@ function _rk_fitted_definitions(emitted, plan, inputs::Set{Symbol})
     end
     fitted
 end
-_rk_fitted_definition(statement, fitted) = Meta.isexpr(statement, :(=), 2) &&
-    statement.args[1] isa Symbol && haskey(fitted, statement.args[1]) ?
-    statement.args[1] : nothing
+function _rk_fitted_definition(statement, fitted)
+    statement = _brm_undoc(statement)
+    Meta.isexpr(statement, :(=), 2) && statement.args[1] isa Symbol &&
+        haskey(fitted, statement.args[1]) ? statement.args[1] : nothing
+end
 
 # The fits the planner computes in Julia, recorded while it plans the fit's own
 # data as a frozen replay of itself (`_brm_fitted`).
@@ -222,7 +227,7 @@ function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
     state.format == _BRM_FITTED_STATE_FORMAT || error(
         "$prefix: a format-$(state.format) fitted state; this BRM reads format " *
         "$_BRM_FITTED_STATE_FORMAT, so export it again from the fit")
-    declaration = sprint(show, template)
+    declaration = sprint(show, template; context=:brm_documentation => false)
     declaration == state.declaration || error(
         "$prefix: the fitted state was exported from another model:\n" *
         "  fitted: $(state.declaration)\n  replay: $declaration")
@@ -236,18 +241,30 @@ function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
         for name in state.responses
         if haskey(state.columns, name) && !_brm_df_has_column(new_data, name))
     merge!(absent, _rk_omitted_scalars(state.scalars, new_data))
-    rebound = _brm_rebind_brmi(_brm_resolve_optional_priors(template),
-        _BRMReplayData(new_data, absent))
+    rebound = _brm_rebind_brmi(_rk_declare_scalars(_brm_resolve_optional_priors(template),
+        state.scalars), _BRMReplayData(new_data, absent))
     frozen = _BRMFrozenReplay(state.scalars, groups, state.fits, record)
     plan = _brm_with_frozen_replay(frozen) do
         _brm_rk_plan(rebound; held_out,
             fitted_constants=(name, _source) -> get(state.constants, name, nothing))
     end
-    emitted = _rk_emit_ast(plan)
+    emitted = _rk_emit_ast(plan; documentation=brm_documentation(template))
     _rk_check_replay_program(state.program, _rk_program_statements(emitted); prefix)
+    _rk_check_replay_priors(emitted, plan, state.scalars, new_data; prefix)
     _rk_check_replay_terms(plan; prefix)
     _rk_check_replay_groupings(plan, groups; prefix)
     plan, emitted
+end
+
+# A builder declares a scalar a `@plate` cell reads only when its data holds it,
+# so a model built on a design that omitted one has no data field to rebind, on
+# this replay or on a later one of its backend.
+function _rk_declare_scalars(brmi::BRMI, scalars)
+    operations = brmi.operations
+    names = Tuple(sort!([name for name in keys(scalars) if !haskey(operations, name)]))
+    isempty(names) && return brmi
+    BRMI(merge(NamedTuple{names}(map(name -> NamedColumn(name, DataColumn(scalars[name])), names)),
+        operations), brmi.documentation)
 end
 
 """

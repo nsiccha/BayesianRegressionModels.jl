@@ -25,7 +25,7 @@
     brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), tol=1e-24, maxiter=50,
         structured=:auto, integrate=nothing, max_cell_width=128,
-        solver=:auto, matrixfree=MatrixFreeLaplace())
+        solver=:auto, matrixfree=MatrixFreeLaplace(), progress=nothing)
 
 Integrate every unit's standardized random effects out of an RK-lowered model
 by a Laplace approximation at their conditional mode, leaving the population
@@ -39,9 +39,12 @@ over the population coordinates, in packed order (`problem.names`). Its log
 density is the Laplace approximation of the model's marginal log posterior
 density in those unconstrained coordinates, exact when the model is Gaussian
 in the random effects and exact determinant algebra is selected (see `solver`
-below). Each evaluation finds every unit's mode by Newton's
-method with a per-unit backtracking line search, starting the standardized
-effects at zero on every evaluation, until every unit's Newton decrement gᵀ(−H)⁻¹g is at
+below). Each evaluation finds every unit's mode by continuation from the prior:
+it starts the effects at their prior's mode and follows each unit's mode while
+the likelihood's weight rises from 0 to 1 in 10 stages (one stage for a sparse
+component or structured unit whose density is known to be log-concave). Each
+stage uses Newton's method with a per-unit backtracking line search, until every
+unit's Newton decrement gᵀ(−H)⁻¹g is at
 most `tol`, or stops shrinking at rounding level. The log determinant moves
 with the modes to first order; the standardized draws' N(0, I) prior makes
 −H ≥ I for log-concave likelihoods, so the default `tol` keeps the modes to
@@ -55,7 +58,7 @@ reaches:
 - the model's density, gradient or unit Hessians overflow during the mode
   search, so that no finite Newton step exists (the full model's density there
   is not finite either); `problem.nonfinite` counts them;
-- the mode search has not converged after `maxiter` Newton steps, as when a
+- a stage of the mode search has not converged after `maxiter` Newton steps, as when a
   start lies far up an exponential's slope, where Newton gains about one unit
   per step; `problem.unconverged` counts them, and a warning names the point,
   the unit and its last decrements. At a point a sampler would accept this
@@ -63,8 +66,12 @@ reaches:
 
 A mode search must not depend on preceding evaluations: in a non-concave
 conditional density, a warm start can select a different local maximum and
-change the target. The fixed start defines a single-mode approximation; it
-does not sum over multiple conditional modes or guarantee a global maximum.
+change the target. Continuation from the prior defines a single-mode
+approximation at the mode connected to the prior's mode, which changes only
+where that mode ceases to exist; the marginal can jump there. `problem.folds`
+counts evaluations whose followed mode needed a modified Newton step after the
+first stage. This does not sum over multiple conditional modes or guarantee a
+global maximum.
 
 A problem holds the last result and prepared AD workspaces as mutable state: use one per chain
 (`deepcopy` gives a copy its own prepared AD workspaces).
@@ -88,7 +95,9 @@ coordinate and prior. Width screening applies to the whole vector.
 with its defaults): every term only Normal rows read, and every term read by
 counts, binomial rows or `@plate` cells whose per-block importance diagnostic
 admits it. `integrate = plan` takes a [`BRMLaplacePlan`](@ref) as given; the
-problem's `plan` field holds the plan it was built from.
+problem's `plan` field holds the plan it was built from. With `integrate`,
+`progress` reports the preparation through Treebars as in
+[`brm_laplace_plan`](@ref).
 
 `integrate = :g` or `integrate = (:g, :h, …)` instead integrates every level
 of the named grouping columns' latent blocks by one sparse Laplace, whatever
@@ -122,7 +131,7 @@ large-component gradient differentiates the reported finite determinant
 approximation, including its dependence on the conditional mode. Probes and
 policy stay fixed throughout a prepared target's use and copies.
 `problem.algebra.diagnostics` reports per-component determinant probe MCSE;
-this is not a bound on quadrature error or on the error of Laplace integration.
+this is not a bound on the error of Laplace integration.
 Operator curvature checks cover Krylov search directions; they do not certify
 global positive definiteness. Failed capped linear solves raise an error.
 
@@ -144,6 +153,9 @@ mutable struct BRMLaplaceProblem{M<:BRMNLMEModel,B}
     maxiter::Int
     nonfinite::Int
     unconverged::Int
+    # evaluations in which a unit's followed mode needed a modified Newton step
+    # after the continuation's first stage (`_brm_laplace_mode!`)
+    folds::Int
 end
 
 Base.show(io::IO, p::BRMLaplaceProblem) = print(io, "BRMLaplaceProblem(",
@@ -154,8 +166,10 @@ Base.show(io::IO, p::BRMLaplaceProblem) = print(io, "BRMLaplaceProblem(",
 function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), tol=1e-24, maxiter=50,
         structured=:auto, integrate=nothing, max_cell_width=128,
-        solver=nothing, matrixfree=nothing)
+        solver=nothing, matrixfree=nothing, progress=nothing)
     max_cell_width = _brm_spl_width_limit(max_cell_width)
+    integrate === nothing && progress !== nothing && throw(ArgumentError(
+        "brm_laplace_problem: `progress` reports the sparse Laplace's preparation, which needs `integrate`"))
     policy = integrate isa BRMLaplacePlan ? integrate.algebra_policy :
         (; solver=:auto, matrixfree=MatrixFreeLaplace())
     solver = something(solver, policy.solver)
@@ -169,13 +183,13 @@ function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
         integrate === :auto && return _brm_sparse_laplace_problem_from_plan(backend,
             _brm_laplace_plan(backend; ad_backend, integrate=:auto, sample=(),
                 ess_floor=0.5, draws=200, at=nothing, rng=Random.Xoshiro(20261031), tol,
-                maxiter, max_cell_width, solver, matrixfree); ad_backend, tol, maxiter,
-                solver, matrixfree)
+                maxiter, max_cell_width, solver, matrixfree, progress); ad_backend, tol, maxiter,
+                solver, matrixfree, progress)
         integrate isa BRMLaplacePlan && return _brm_sparse_laplace_problem_from_plan(
             backend, (; plan=integrate, problem=nothing); ad_backend, tol, maxiter,
-            solver, matrixfree)
+            solver, matrixfree, progress)
         return _brm_sparse_laplace_problem(backend, integrate; ad_backend, tol, maxiter,
-            max_cell_width, solver, matrixfree)
+            max_cell_width, solver, matrixfree, progress)
     end
     solver in (:auto, :exact) || throw(ArgumentError(
         "brm_laplace_problem: solver=:matrixfree applies to the integrate path"))
@@ -194,7 +208,8 @@ function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
         shared_groups)
     population = findall(!=(:subject_effect), m.view.role)
     BRMLaplaceProblem(m, ad_backend, population, m.view.coordinates[population],
-        Ref{Any}(nothing), copy(m.unit), Ref{Any}(nothing), Float64(tol), Int(maxiter), 0, 0)
+        Ref{Any}(nothing), copy(m.unit), Ref{Any}(nothing), Float64(tol), Int(maxiter),
+        0, 0, 0)
 end
 
 # Implemented by `BayesianRegressionModelsReactiveKernelsEnzymeExt`: a prepared
@@ -252,11 +267,62 @@ function _brm_laplace_step(block, g)
     E.vectors * ((E.vectors' * g) ./ max.(abs.(E.values), 1.0))
 end
 
+# The continuation density's unit value (`v` a unit's density) or gradient
+# (`v` its gradient) at stage s, for the unit's standardized effects z.
+_brm_laplace_blend(s, v::Real, z) = s * v - (1 - s) * sum(abs2, z) / 2
+_brm_laplace_blend(s, v::AbstractVector, z) = s .* v .- (1 - s) .* z
+
+# A Newton step for one unit (`_brm_laplace_step`) and whether it is the plain
+# Newton step.
+function _brm_laplace_step_exact(block, g)
+    F = _brm_laplace_factor(block)
+    F === nothing || return F \ g, true
+    _brm_laplace_step(block, g), false
+end
+
+# A plain Newton step's decrement below 1e-8 that has stopped shrinking fourfold
+# is either at the rounding floor the density's scale sets, or in a stretch where
+# Newton converges only linearly: on an exponential's slope it falls by a factor
+# e per step, along a stiff curved valley more slowly, and the gradient is far
+# from zero there. The gradient tells them apart. Moved a small fraction ξ along
+# the Newton direction, a gradient that curvature sets scales by 1 − ξ, up to
+# order ξ²; one that rounding sets stays put or jumps. So a candidate is at its
+# floor when r = g(z + ξδ) − (1 − ξ) g(z), in the decrement's norm, is at least
+# half the expected response ξ√λ.
+const _BRM_LAP_FLOOR_PROBE = 1 / 64
+_brm_lap_floor_candidate(λ, previous, tol) = tol < λ <= 1e-8 && λ >= previous / 4
+_brm_lap_at_floor(ρ, λ) = ρ >= (_BRM_LAP_FLOOR_PROBE / 2)^2 * λ
+
+# Which of the candidate units are at their rounding floor (above), by one
+# evaluation at every unit's probe point.
+function _brm_laplace_at_floor(m, s, u, current, hessians, steps, decrements, candidate)
+    blocks = m.view.subject_coordinates
+    ξ = _BRM_LAP_FLOOR_PROBE
+    probe_u = copy(u)
+    for (i, block) in enumerate(blocks)
+        probe_u[block] .+= ξ .* steps[i]
+    end
+    probe = _brm_laplace_evaluate(m, probe_u)
+    map(eachindex(blocks)) do i
+        candidate[i] || return false
+        block = blocks[i]
+        r = _brm_laplace_blend(s, view(probe.gradient, block), view(probe_u, block)) .-
+            (1 - ξ) .* _brm_laplace_blend(s, view(current.gradient, block), view(u, block))
+        all(isfinite, r) || return false
+        direction, _ = _brm_laplace_step_exact(s * hessians[i] - (1 - s) * I, r)
+        _brm_lap_at_floor(dot(r, direction), decrements[i])
+    end
+end
+
 """
     _brm_laplace_mode!(p::BRMLaplaceProblem, φ) -> state
 
-Every unit's conditional mode at population point `φ`, by Newton's method
-from zero standardized effects, independently of preceding evaluations.
+Every unit's conditional mode at population point `φ`, by continuation from
+zero standardized effects, independently of preceding evaluations: Newton's
+method on the continuation density (1 − s)·(−|z|²/2) + s·f, which is the
+standardized effects' prior plus s times the rest of the sampler density f,
+for each stage s of `_brm_lap_stages` in turn, each from the last stage's
+modes. The modes reached are the ones connected to the prior's mode.
 `state` holds the packed point `u`
 at the modes, the sampler density's `value` and `gradient` there, each unit's
 Hessian block, the Cholesky factor of its negation, and the number of Newton
@@ -275,68 +341,98 @@ function _brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector)
     current = _brm_laplace_evaluate(m, u)
     isfinite(current.value) && _brm_laplace_finite(current.gradient) ||
         return _brm_laplace_nonfinite!(p, u, 0)
-    previous = fill(Inf, length(blocks))
+    # The density is a black box here, so its concavity in the effects is
+    # unknown: every evaluation takes all stages.
+    stages = _brm_lap_stages(false)
+    total = 0
+    late = 0
     history = Vector{Float64}[]
-    for iteration in 1:p.maxiter
-        hessians = _brm_nlme_sampler_hessian_blocks(m, u)
-        all(_brm_laplace_finite, hessians) || return _brm_laplace_nonfinite!(p, u, iteration - 1)
-        steps = [_brm_laplace_step(hessians[i], current.gradient[block])
-            for (i, block) in enumerate(blocks)]
-        decrements = [dot(current.gradient[block], steps[i])
-            for (i, block) in enumerate(blocks)]
-        # A unit is at its mode once its Newton decrement is below `tol`, or
-        # once a full Newton step (below) no longer shrinks its decrement: in
-        # Newton's quadratic region that is the decrement's rounding floor,
-        # which the scale of the unit's density sets.
-        converged = all(eachindex(blocks)) do i
-            decrements[i] <= p.tol ||
-                (decrements[i] <= 1e-8 && decrements[i] >= previous[i] / 4)
-        end
-        previous = decrements
-        push!(history, decrements)
-        if converged
-            factors = map(_brm_laplace_factor, hessians)
-            any(isnothing, factors) && _brm_nlme_error(
-                "brm_laplace_problem: a unit's density has a stationary point that " *
-                "is not a maximum at this population point")
-            p.u = u
-            p.factors[] = factors
-            return (; u, value=current.value, gradient=current.gradient, hessians,
-                factors, finite=true, iterations=iteration - 1)
-        end
-        # Backtrack each unit on its own: units are conditionally independent,
-        # so one evaluation scores every unit's trial. A unit whose decrement
-        # is already small is in Newton's quadratic region, where its density
-        # gain (half the decrement) can lie below the density's rounding
-        # error; its full step is taken unchecked.
-        scale = ones(length(blocks))
-        trial_u = copy(u)
-        for (i, block) in enumerate(blocks)
-            trial_u[block] .+= steps[i]
-        end
-        trial = _brm_laplace_evaluate(m, trial_u)
-        for _ in 1:60
-            rejected = [i for i in eachindex(blocks) if !(isfinite(trial.units[i]) &&
-                _brm_laplace_finite(view(trial.gradient, blocks[i])) &&
-                (decrements[i] <= 1e-8 ||
-                 trial.units[i] >= current.units[i] + 1e-4 * scale[i] * decrements[i]))]
-            isempty(rejected) && break
-            for i in rejected
-                scale[i] /= 2
-                trial_u[blocks[i]] .= view(u, blocks[i]) .+ scale[i] .* steps[i]
+    hessians = nothing
+    for (stage, s) in enumerate(stages)
+        tol = s == 1 ? p.tol : max(p.tol, _BRM_LAP_STAGE_TOL)
+        previous = fill(Inf, length(blocks))
+        converged = false
+        for iteration in 1:p.maxiter
+            hessians = _brm_nlme_sampler_hessian_blocks(m, u)
+            all(_brm_laplace_finite, hessians) ||
+                return _brm_laplace_nonfinite!(p, u, total)
+            steps = Vector{Vector{Float64}}(undef, length(blocks))
+            exact = falses(length(blocks))
+            decrements = zeros(length(blocks))
+            for (i, block) in enumerate(blocks)
+                g = _brm_laplace_blend(s, view(current.gradient, block), view(u, block))
+                steps[i], exact[i] = _brm_laplace_step_exact(
+                    s * hessians[i] - (1 - s) * I, g)
+                decrements[i] = dot(g, steps[i])
+            end
+            # A unit is at its mode once its Newton decrement is below `tol`, or
+            # at its rounding floor on a plain Newton step
+            # (`_brm_lap_floor_candidate`, `_brm_laplace_at_floor`). A modified
+            # step's decrement can shrink slowly away from the mode. The search
+            # stops only when every unit does, so only then is the floor measured.
+            stopped = [decrements[i] <= tol for i in eachindex(blocks)]
+            candidate = [exact[i] && _brm_lap_floor_candidate(decrements[i], previous[i], tol)
+                for i in eachindex(blocks)]
+            if any(candidate) && all(stopped .| candidate)
+                stopped .|= _brm_laplace_at_floor(m, s, u, current, hessians, steps,
+                    decrements, candidate)
+            end
+            converged = all(stopped)
+            previous = [exact[i] ? decrements[i] : Inf for i in eachindex(blocks)]
+            push!(history, decrements)
+            converged && break
+            stage > 1 && !all(exact) && (late += 1)
+            # Backtrack each unit on its own: units are conditionally independent,
+            # so one evaluation scores every unit's trial. A unit whose decrement
+            # is already small is in Newton's quadratic region, where its density
+            # gain (half the decrement) can lie below the density's rounding
+            # error; its full step is taken unchecked.
+            scale = ones(length(blocks))
+            trial_u = copy(u)
+            for (i, block) in enumerate(blocks)
+                trial_u[block] .+= steps[i]
             end
             trial = _brm_laplace_evaluate(m, trial_u)
+            for _ in 1:60
+                rejected = [i for i in eachindex(blocks) if !(isfinite(trial.units[i]) &&
+                    _brm_laplace_finite(view(trial.gradient, blocks[i])) &&
+                    (decrements[i] <= 1e-8 ||
+                     _brm_laplace_blend(s, trial.units[i], view(trial_u, blocks[i])) >=
+                        _brm_laplace_blend(s, current.units[i], view(u, blocks[i])) +
+                        1e-4 * scale[i] * decrements[i]))]
+                isempty(rejected) && break
+                for i in rejected
+                    scale[i] /= 2
+                    trial_u[blocks[i]] .= view(u, blocks[i]) .+ scale[i] .* steps[i]
+                end
+                trial = _brm_laplace_evaluate(m, trial_u)
+            end
+            all(isfinite, trial.units) && _brm_laplace_finite(trial.gradient) ||
+                return _brm_laplace_nonfinite!(p, u, total + iteration)
+            u = trial_u
+            current = trial
+            total += 1
         end
-        all(isfinite, trial.units) && _brm_laplace_finite(trial.gradient) ||
-            return _brm_laplace_nonfinite!(p, u, iteration)
-        u = trial_u
-        current = trial
+        converged ||
+            return _brm_laplace_unconverged!(p, m, φ, u, history, stage, length(stages))
     end
+    late > 0 && (p.folds += 1)
+    factors = map(_brm_laplace_factor, hessians)
+    any(isnothing, factors) && _brm_nlme_error(
+        "brm_laplace_problem: a unit's density has a stationary point that " *
+        "is not a maximum at this population point")
+    p.u = u
+    p.factors[] = factors
+    (; u, value=current.value, gradient=current.gradient, hessians,
+        factors, finite=true, iterations=total)
+end
+
+function _brm_laplace_unconverged!(p::BRMLaplaceProblem, m, φ, u, history, stage, nstages)
     worst = argmax(last(history))
     @warn("brm_laplace_problem: the unit modes did not converge in " *
-        "$(p.maxiter) Newton iterations at population point $(repr(collect(φ))); " *
-        "its log density is -Inf. Unit $(repr(m.view.levels[worst]))'s Newton " *
-        "decrements, last iterations first: " *
+        "$(p.maxiter) Newton iterations of continuation stage $stage of $nstages at " *
+        "population point $(repr(collect(φ))); its log density is -Inf. Unit " *
+        "$(repr(m.view.levels[worst]))'s Newton decrements, last iterations first: " *
         "$(reverse([h[worst] for h in history[max(1, end - 5):end]])) " *
         "(tol = $(p.tol))", maxlog=3)
     p.unconverged += 1
@@ -405,7 +501,7 @@ resampled. All units' `k`-th proposals are scored by one model evaluation.
   `rk_restore_draws`) × draws; its population rows are `P`. Pass it to
   [`rk_restore_draws`](@ref) and the other readers of a full RK fit.
 - `diagnostics` — `newton_steps`, the Newton steps each draw's mode search
-  took from zero standardized effects; with `conditional > 0` also
+  took from the prior's mode; with `conditional > 0` also
   `importance_ess`, units × draws, each unit's effective number of proposals
   (`(Σw)²/Σw²`, at most `K`). A small value marks a unit whose conditional
   posterior is far from Gaussian, where more proposals are needed.

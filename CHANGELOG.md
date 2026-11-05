@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.141
+## 0.2.171
 
 - `brm_svi_fit` accepts `unit_sampling=:work` for positive work-weighted
   sampling with replacement and inverse-probability objective/global-gradient
@@ -30,11 +30,511 @@ instead of failing at run time.
 - Format-2 SVI checkpoints store structured local factors without optimizer
   moments. Resume preserves their distribution and family under coordinate
   reordering, accepts format-1 checkpoints, and retains carried dense factors.
-- SVI targets reuse a single global-plus-local workspace and store only local
+- SVI targets reuse one global-plus-local workspace per worker and store only local
   ordering metadata per unit. Cached entropy and lazy local polishing avoid
   visiting all local factors on every iteration. The underlying cell plan
   still determines structural-selection storage; full returned draws still
   scale with the complete parameter dimension.
+
+- Weighted batches, visit counts, cached entropy and lazy local polishing now
+  participate in optimizer checkpoints, preserving continuation across thread
+  counts. Structured local factors retain their Adam state on same-target resume.
+
+## 0.2.170
+
+- **Authored declaration documentation:** ordinary Julia docstrings in BRM
+  source survive binding, tuple expansion, model composition, source printing
+  and replay. `brm_documentation` returns copied `BRMDocumentation` records
+  with logical paths, raw Markdown, authored statements and file/line provenance,
+  including declarations inside plates and scans. Documentation stays separate
+  from executable operations and numerical model identity.
+- `brm_documentation_markdown` and scientific model descriptions include the
+  authored prose for HTML/PDF pipelines, without treating it as generated
+  scientific coverage. Emitted RK artifacts retain the same records in their
+  metadata.
+- The RK source retains ordinary declaration and plate-local docstrings using
+  the emitter's exact names; reusable definition wrappers remain intact during
+  lowering and replay. This requires ReactiveKernelsPPL 0.1.93. Complete BRM
+  records retain element-specific prior addresses when several coefficients
+  share one emitted array declaration.
+
+## 0.2.169
+
+- `SBBRMI` now accepts an omitted `interval_censored(D; upper=hi)` response
+  in the unchanged model. Retained bounds and family arguments determine the
+  predictive shape; draws use the uncoarsened base law, with no interval
+  likelihood or fabricated lower endpoints. Observed interval densities and
+  predictor-side interval terms retain their semantics.
+- A censored response may also omit its own endpoint: keep
+  `y ~ censored(D; lower=y)` or `upper=y` unchanged and omit `y`. Only that
+  endpoint disappears for prediction; independent retained bounds still clamp
+  the draw. Observed CDF/CCDF evidence and missing-independent-bound validation
+  are unchanged. Requires StanBlocks 0.2.24, now the package and
+  test-environment minimum.
+
+## 0.2.168
+
+- `RKBRMI` accepts scalar `@plate` outputs in `offset(field)`, including
+  non-last outputs and elementwise assignments over them. The offset reads
+  the declared field with coefficient one, preserving selected-row queries
+  and native reverse gradients. Vector-valued cells cannot establish row
+  alignment merely by having the same flattened length.
+- An explicit gather of an opaque helper's output, `field = whole[position]`,
+  supplies the index vector's row axis to a model-value offset. The helper
+  remains one graph value; its arguments and output length do not implicitly
+  declare the consumer's rows.
+
+## 0.2.167
+
+- `RKBRMI` accepts mixture probabilities computed from linked or hierarchical
+  predictors, including predictors used only in the weights. The ordinary
+  value graph retains their coefficients, group effects and authored priors.
+  Probability vectors may be shared or vary by observation; native density,
+  Reverse gradients, pointwise likelihood and printed-source replay use the
+  same normalized mixture. Requires ReactiveKernelsPPL 0.1.90.
+
+## 0.2.166
+
+- **Breaking: conservative automatic embedded Laplace.** `integrate=:auto`
+  now requires recognized conditional log-concavity. Affine Normal rows retain
+  exact integration with exact algebra; log-Poisson, logit-binomial/Bernoulli
+  and log-NegativeBinomial2 rows with sampled shape retain the local ESS gate.
+  Arbitrary plate cells and model-value observations stay sampled even if an
+  ESS check at one point would pass. To retain a previously automatic cell
+  partition, explicitly name its declarations/groupings in `integrate=(...)`
+  after assessing the approximation. Supported explicit selections remain
+  available, including effects on scale/shape. Automatic diagnostics now hold
+  rejected dispersion terms sampled. All model factors remain in the target;
+  no eligible terms gives the full sampled model. Structural concavity and
+  passing local ESS do not certify Gaussian approximation accuracy.
+
+## 0.2.165
+
+- **Structure first, priors last:** `SBBRMI` accepts a cell-local prior after
+  statements that read it, keeping the draw in its original plate. Prior
+  dependencies are emitted before their readers; ordinary cell statements and
+  scan steps retain their relative order. The authoring guide and executable
+  examples cover scalar, vector, coefficient, scale and correlation priors,
+  composed structural/prior builders, and complete printed-source replay.
+
+## 0.2.164
+
+- **Large `gmrf` fields under the sparse Laplace:** a warm value and gradient, at
+  the prior medians, with one Normal field and one CPU, took 13 s at 202,500 states
+  on 8 probes (was 93 s), and 134 s at 1,698,450 states on 4 probes. A component
+  that is exactly one `gmrf` field now has a reference that sees the data, built at
+  the prior medians, and the determinant takes one Lanczos recurrence per probe.
+- **Lower fixed-probe noise:** `MatrixFreeLaplace(control_variate=true)`, the default,
+  rebuilds a field's reference at each point and estimates only the difference from
+  it. At 10,000 states and 8 probes the gradient's SD across probe seeds fell from
+  about [9, 11, 14] to [2.2, 2.1, 1.6] at the same fixture, for a cost of about twice
+  as much per probe. The value and gradient stay one fixed-probe function and its
+  exact derivative. Correlated channels read at different places keep the plain
+  estimator.
+- **Fields read by the same rows** integrate through a reference that couples them
+  (two at 20,000 states 10 s against 24 s exact; three at 30,000 states 17 s against
+  83 s). Its control variate tracks only the fields' priors: a field's scale keeps
+  the plain estimator's noise.
+- **`brm_start(...; base=:prior_median)` and the Laplace default start** now read a
+  prior with an inner call, such as `LogNormal(log(0.2), 0.5)`. Those coordinates
+  used to keep the unit point, so such a model's starts change.
+- **Breaking:** `MatrixFreeLaplace` no longer takes `logdet_step` or `logdet_extent`:
+  remove them, there is no quadrature. `target.algebra.diagnostics` replaces
+  `quadrature_nodes` with `gradient_rank` and adds `ritz`, `tracked_iterations` and
+  `tracked_shift`. Matrix-free values change within their probe error, and a problem
+  with a `gmrf` field prepares its reference at the prior medians rather than at zero
+  coordinates, so an SMC checkpoint from an earlier version is refused.
+
+## 0.2.163
+
+- **Mesh `gmrf` densities at very short spatial lengths:** `RKBRMI` and `SBBRMI`
+  no longer produce `NaN` from an overflowing intermediate inverse-squared
+  length, such as `exp(-365)`. A rescaled sparse Matérn factor and normalized
+  quadratic retain the same proper prior, including its normalizer and
+  derivatives, without clipping lengths or changing their declared support.
+  Representable tail densities remain finite; a log density below Float64's
+  range evaluates to `-Inf`. The numerical precision operations and
+  Stan prior RNG use the same scaling.
+
+## 0.2.162
+
+- `RKBRMI` of a model with an omitted response now samples what `SBBRMI` samples,
+  so `brm_coordinate_transport` and `brm_nlme_joint_map` work for every partial
+  fit of a shared `|ID|` block whose laws they cover.
+  - A plate cell no longer keeps a predictor, margin, scale or cell latent that
+    no kept likelihood reaches because a local or a reported indexed output
+    still reads it (`loc = base[i] + …; z[i] = loc; y[i] ~ Normal(loc, s)`). A
+    statement reading only what kept likelihoods reach and data stays, reported
+    output included.
+  - A shared block `SBBRMI` cannot split stays whole on RK too: Student-t,
+    R2D2-derived or known scales, stratified `gr(g, by=b)` and blocks joining
+    several grouping columns. This replaces the two refusals of an R2D2 block
+    and of a joined block under an omitted response.
+  - A long-format response omitted in a cell (`y[rows[i]] ~ …`) now plans, and an
+    `effect(lp, …)` prior on a predictor only an omitted response reads no longer
+    fails planning.
+  - **Breaking:** on such a partial fit `RKBRMI` has fewer coordinates. Saved RK
+    draws of the old layout do not fit it, and a cell output computed from what no
+    kept likelihood reaches (`z[i]` above) is no longer in the RK program. Read
+    it from `SBBRMI`'s generated quantities, or fit with the response bound.
+    Fully observed programs and designs that omit a response the fit observed
+    (`reprocess`) are unchanged.
+
+## 0.2.161
+
+- **A Laplace mode search no longer stops short of the mode on a stiff
+  conditional:** the search stopped at a "rounding floor" whenever a plain
+  Newton step's decrement was below 1e-8 and had stopped shrinking fourfold.
+  Newton can converge that slowly far from the mode, on an exponential's slope
+  or along a stiff curved valley, so the marginal came from a point that was not
+  a mode, with no counter or warning. All three problems did this. A decrement
+  now counts as at its floor only when the gradient no longer follows the Newton
+  model; otherwise the search continues to `tol`, the floor, or `maxiter`, which
+  scores `-Inf` and counts in `unconverged`. Log densities and gradients change
+  at the points this affected: on one synthetic stiff fixture, values moved by
+  0.58 and 0.16 nats and the integrated gradient fell from 7.3 and 1.4 to below
+  1e-6. Values at five points of that fixture that had converged are identical.
+
+## 0.2.160
+
+- **`gmrf(...; neighbors=m)`, a space-time field bounded by its reads:** in place
+  of `mesh=`, a nearest-neighbour (Vecchia) sparse precision with one state per
+  channel at each distinct `(east, north, time)` the rows read. The covariance is
+  the exact continuum Matérn × OU at those reads: no mesh boundary inflation, no
+  resolution floor, no interpolation. The conditioning set is the approximation;
+  channels stay exactly separable, and positions read at the same times keep the
+  exact OU correlation across every gap. Same parameters, addresses and priors as
+  the mesh form, on SBBRMI and RKBRMI. Frozen replay reads fitted pairs only. One
+  model-scope field: not in `@plate` cells and not integrated by embedded Laplace.
+  Adds a dependency on Bessels.jl.
+- **A `gmrf` term with only default priors transpiles from any `mod`:** the mesh
+  form named its submodel in the caller's module and failed with `Could not find
+  _sb_gmrf`.
+## 0.2.159
+
+- **`RKBRMI`: a model-scope `gmrf` prior can read data.** `sd(field, gmrf(...))
+  ~ Exponential(scale)` and a `length_scale` law failed at construction with
+  `references unknown name scale`, naming the field's internal `sigma`, while
+  `SBBRMI` accepted them. These laws now take what the 0.2.156 priors take: a
+  numeric data scalar, an expression or element over numeric data fields, a
+  literal assignment or a `name = constant(expr)`. The prior-median and Laplace
+  default starts read the value, which stays in the fitted program: a design may
+  omit the field or repeat its value, and one that changes it is refused unless
+  `freeze_constants=false`.
+
+## 0.2.158
+
+- **Sparse Laplace cells that static Enzyme cannot take forward over reverse:**
+  `brm_laplace_problem`, NLMEEstimation's `laplace_marginals_and_gradient` and so
+  `check_protocol` no longer raise `EnzymeRuntimeActivityError` on such a `@plate`
+  cell. The cell group moves to reverse over forward the first time a product
+  raises that error, with a warning naming the group. Values are the same and the
+  group allocates up to about twice as much. Any other error still propagates. A
+  cell that reduces its data with `unique!(sort!(...))`, as a PK event reader's
+  step lengths do, needs this before Enzyme dogfood `0ed41342`, which takes that
+  cell forward over reverse itself.
+
+## 0.2.157
+
+- **NLME view of a single-level categorical:** `brm_nlme_view`, and with it
+  `brm_nlme_model` and `brm_nlme_fit`, no longer raise ``internal: declaration
+  `x` owns no packed coordinate`` on a model with a categorical term that
+  observes one level, such as `log(s) ~ 1 + g` with `g` an integer column holding
+  a single value. Any declaration the RK layout holds at zero length owns no
+  coordinate, so the model has the partition, likelihoods and gradients of the
+  same model without the term. The named estimates list the term with no levels
+  (`g = []`), and that value starts the model again through `inits`.
+
+## 0.2.156
+
+- **`RKBRMI` random-effect and term priors can read data.** A formula-route
+  prior such as `sd(:, p) ~ Exponential(prior_sd_scale)` failed at construction
+  with `references unknown name prior_sd_scale`, naming an internal array, while
+  `sigma ~ Exponential(prior_sd_scale)` and `SBBRMI` accepted it. Random-effect
+  scale priors (including per-margin, truncated and stratified blocks), Student-t
+  `ranef(:, id) ~ TDist(nu)` degrees of freedom, `hsgp` priors and an `r2d2`
+  `reference_scale` now take a numeric data scalar, an expression or element over
+  numeric data fields, a literal assignment (`rate = 1.7`) or a
+  `name = constant(expr)`. `SBBRMI` still refuses a data `reference_scale`. Data
+  of another type, such as a vector of labels, is refused naming the field.
+- `gp`, `car`, `cdar` and `dar` priors, which otherwise take literals only, now
+  take a numeric data scalar, an element of a data vector or a
+  `name = constant(expr)` as its number. `dar`'s scale prior stays `Normal`.
+- These values stay in the fitted program, as a scalar parameter's prior does. A
+  design may omit the field or repeat its value; one that changes it fails
+  `reprocess`'s program check unless `freeze_constants=false`, and no design binds
+  it. Value-route models (`@plate` cells and assignments reading predictors) still
+  bind these scalars as before.
+
+## 0.2.155
+
+- **In-cell `MvNormal` on `SBBRMI`:** a `@plate` cell may observe its slice
+  jointly, `y[rows[i]] ~ MvNormal(location, covariance)`, with the covariance
+  computed in the cell, inline or bound to a local. It lowers to the BRM-owned
+  family `brm_mvnormal`, which is Stan's `multi_normal` with log density 0 for
+  an empty slice, as in Julia. The pointwise log likelihood is one value per
+  cell and the predictive draw is the slice. Only the two-argument constructor
+  is accepted in a cell. `RKBRMI` already had this since 0.2.86, and both
+  backends now give the same density and gradient.
+- **`Diagonal(v)` and `diagm(v)` on `SBBRMI`:** both lower to `diag_matrix(v)`,
+  in a cell and in a model-scope expression.
+
+## 0.2.154
+
+- **A replay refuses a changed scalar a prior reads by name:** `reprocess`,
+  `RKBRMI(brmi, state)` and `rk_design_binder` accepted a design holding another
+  value of a numeric scalar the program reads by name, such as `s` in
+  `sd(:, p) ~ Exponential(s)` over a `@plate` model, and evaluated the new prior.
+  They now raise "changes the fitted RK program", naming the field, as they
+  already did for a scalar the program holds as a literal. This covers every
+  sampled parameter's law, a `@plate` cell latent's included, and a scalar read
+  through an assignment. A scalar only a cell's values or observations read
+  stays a design input. `freeze_constants=false` still rebuilds with the new
+  prior.
+- **`rk_design_binder` refuses what `reprocess` refuses for held scalars:** after
+  the first design of a kind, a design holding another value of a scalar the
+  program holds as a literal was accepted and the value ignored. It now replays
+  in full, which refuses it. An input read only by `constant(...)` still keeps
+  its fitted value.
+- **A data-free replay supplies an omitted scalar a `@plate` cell reads:**
+  `RKBRMI(builder(design), state)` on a design without such a scalar raised a
+  lowering error, because the builder had declared no data field for it. It now
+  takes the fitted value, as every other replay of an omitted scalar does.
+
+## 0.2.153
+
+- **The sparse Laplace compiles each `@plate` cell's Hessian block at a bounded
+  Enzyme batch width.** A cell's block used to compile one batch over all its
+  integrated coordinates, and that compile grows faster than the batch: a cell
+  integrating 121 coordinates had not compiled after 2 h 37 min. Cells now
+  compile batches of 4 directions and take as many as they need, so preparation
+  no longer depends on how many coordinates a cell integrates. Values and
+  gradients are unchanged.
+- **`brm_laplace_plan` and `brm_laplace_problem` take `progress`:** a Treebars
+  node or a backend symbol such as `:state`. It reports the width screening, the
+  importance diagnostic and each observation, with a node naming a Hessian
+  block's size for the time Enzyme compiles it. `brm_laplace_problem` accepts it
+  only with `integrate`, and raises otherwise.
+
+## 0.2.152
+
+- **Fix:** on RKBRMI, `addprop` over a plate output at model scope reads the
+  plate's rows again, assigned first (`scales = addprop(reads, a, b)`) or written
+  in the law. Since 0.2.125 it received one array per cell, so preparing the model
+  worked and evaluating it raised `MethodError: no method matching
+  ^(::Vector{Float64}, ::Int64)`. An authored whole-value helper still receives
+  one value per cell.
+
+## 0.2.151
+
+- **Periodic `hsgp` under strict type stability:** `NLMEEstimation.check_protocol`
+  on a model with `hsgp(x; cov=:periodic, period=...)` no longer raises
+  `TypeInstabilityError` in a project that sets ReactiveKernels'
+  `type_stability = :error`, at any `k`. The harmonics, and every value computed
+  from them, are unchanged.
+
+## 0.2.150
+
+- **`rk_draw_values` reads a `@plate` output per cell:** a draw's value has one
+  entry per cell in the cell's own shape (a number, a vector or a matrix), as
+  the model reads it, so `value[t][h]` is cell `t`'s entry `h`.
+- **`rk_draw_tree(rk, U, names)` labels a `@plate` output by cell:** `:draw`,
+  `:cell`, then `:element` for a vector cell or `:row` × `:column` for a matrix
+  cell.
+- **Breaking:** for vector and matrix cells, `value[i]` was the `i`-th entry of
+  the concatenation and is now cell `i`. `reduce(vcat, value)` gives the
+  previous vector for vector cells. Number cells hold the same values, and
+  their axis in `rk_draw_tree(rk, U, names)` is now `:cell` instead of
+  `:element`. `rk_draw_tree(values)` on an `rk_draw_values` result now raises
+  for vector and matrix cells, because it sees only shapes; use
+  `rk_draw_tree(rk, U, names)`. A raw ReactiveKernels query of the output's name
+  and `brm_cut_family((:conc,), …)` keep the concatenated value.
+
+## 0.2.149
+
+- **Prior-median starts of native fields:** `brm_start(rk, inits;
+  base=:prior_median)` and `brm_start(sb, model, inits; base=:prior_median)` no
+  longer raise on a model-scope `gmrf` term. Its SD and both lengths start at
+  their prior medians, the default `LogNormal(0, 1)` included; a known
+  hyperparameter stays known, `term_inits` wins, and the field keeps its neutral
+  coordinates.
+- **Laplace default start of native fields:** the default population point of
+  `brm_laplace_plan`, `brm_laplace_mode` and the ladder now takes the same
+  medians for those hyperparameters instead of holding them at one. A model with
+  a `gmrf` term can therefore start somewhere else than under 0.2.148.
+
+## 0.2.148
+
+- `rk_design_binder` keeps its cached lowering for a design that omits a numeric
+  scalar the program reads as data, such as the argument of a correlated block's
+  `sd(:, p) ~ Exponential(scale)`. The design takes the fit's value, as on
+  `reprocess`. It used to replay every design of that kind in full, on a training
+  fit and on a data-free `RKBRMI(builder(design), state)` alike.
+- **Fix:** when a design held another column equal by value to such an omitted
+  scalar, the binder read the scalar from that column, so a later design that
+  changed the column silently changed the scalar. A later design now binds the
+  fit's value, the same as `reprocess`.
+
+## 0.2.147
+
+- `brm_laplace_problem`'s conditional modes are found by continuation from
+  the prior, in all three problems (sparse, structured and whole-model). Every
+  evaluation starts the integrated effects at their prior's mode and follows
+  each unit's mode while the likelihood's weight rises from 0 to 1 in 10
+  stages. The marginal is evaluated at the mode connected to the prior's mode:
+  it still does not depend on earlier evaluations, and as the population
+  parameters vary it changes only where that mode ceases to exist. Before, a
+  search from zero effects with the full likelihood could reach a different
+  mode of a multimodal conditional at points millionths apart, so the marginal
+  jumped and an outer gradient sampler saw a discontinuous target.
+  Log-concave units and sparse components (closed-form rows with no effect on
+  a second parameter, no cells) take one stage; their values and gradients
+  are unchanged. `maxiter` now applies per stage.
+- `target.folds` counts evaluations in which a unit's followed mode needed a
+  modified Newton step after the first stage (the mode ceased to exist on the
+  way; the marginal can jump near such points). The sparse problem's
+  `target.search` records the last evaluation's stages, Newton steps,
+  shifted steps per stage, largest shift, refused full Newton steps
+  (`backtracks`), final decrements and `stop` reason (`:tol`, or `:floor` for
+  the rounding floor) per component.
+- The sparse problem damps each component's Newton step by its own shift
+  where its curvature is not positive definite, in exact and matrix-free
+  algebra. Before, one shift served all components, and a component damped by
+  another's curvature could stop early on its rounding-floor rule, about
+  1e-4 nats from its mode, with a gradient error of the same order. The
+  rounding-floor stop now applies only to plain Newton steps, in all three
+  problems.
+
+## 0.2.146
+
+- **`brm_svi_fit` and `brm_svi_resume` evaluate a batch on several tasks:**
+  `threads` (default `Threads.nthreads()`, capped at the batch size) divides an
+  iteration's unit terms and the units' factor steps over that many tasks, each
+  with its own compact cell samplers and buffers, as `brm_two_stage_fit` does.
+  A run does not depend on it: its draws stay on the one `rng`, in batch order,
+  and the units' results are summed in batch order, so the ELBO, the gradients,
+  the factors, the checkpoints and the draws are the same to the last bit at any
+  `threads`, and a resume may use another count. `fit.diagnostics.threads` records
+  the tasks a call used. Above one task the fit needs Enzyme's concurrent-GC repair
+  (dogfood from `72d5d25`): without it an explicit `threads` above one is refused,
+  naming `threads = 1`, and the default stays at one.
+  **Behavior:** with that repair, a process started with several threads now uses
+  them by default, and prepares a copy of the cell samplers per task before the first
+  iteration; pass `threads = 1` to keep one. `laplace=GaussianBlockLaplace()` refuses
+  `threads`: its updates evaluate the whole window.
+- **The minibatch fit holds BLAS at one thread** while it optimizes and draws, at any
+  `threads`, and restores the count afterwards. A process running with more BLAS
+  threads may see different last bits than before, and no longer depends on that
+  count, including when a run resumes in a new process.
+
+## 0.2.145
+
+- **Per-cell fields in the sparse embedded Laplace:** a `gmrf` formula inside
+  `@plate for p in groups(g)` is integrated per cell by
+  `brm_laplace_problem(rk; integrate=(declaration,))`, exact for Normal rows, with each cell's strict observation footprint (its
+  rows read only its own field). A cell's row reads are emitted as one dotted
+  per-row read over the plate's shared mesh locator, which ReactiveKernels
+  prepares at the cell's rows.
+- **Breaking:** requires ReactiveKernels 0.1.67 and ReactiveKernelsPPL 0.1.76.
+
+## 0.2.144
+
+- **Native space-time fields:** `field ~ 0 + gmrf((east, north), time[, channel];
+  mesh=(vertices=xy, cells=triangles)[, cor=Omega])` is a sparse-precision
+  Gaussian Markov random field: a mass-lumped finite-element Matérn (ν = 1)
+  field on a triangular mesh, stationary Ornstein–Uhlenbeck evolution over the
+  fitted times (exact transitions over irregular gaps), and an optional
+  channel correlation (`cor=` a known correlation matrix or an
+  `LKJCholesky` declaration). Each row reads three mesh vertices at its own
+  time and channel. Its normalized prior keeps the determinants that depend
+  on the learned SD, spatial length, temporal length and channel factor. The
+  term's addresses are `sd(field, gmrf(...))` and
+  `length_scale(field, gmrf(...), space|time)`; `= value` holds one fixed.
+  The spatial length ℓ_s has κ = √2/ℓ_s, so the practical range is 2ℓ_s.
+  Supported on SBBRMI and RKBRMI with density, gradient, coordinate-transport
+  and fitted-state parity, frozen replay of the fitted mesh, times and
+  channels, and scientific descriptions.
+- **Independent fields in plate cells:** a `gmrf` formula inside
+  `@plate for p in groups(g)` gives each cell its own field on that cell's
+  fitted times and channels, with the cell's own term hyperparameters and
+  priors that may read cell-local or model-scope values. On SBBRMI cell
+  declarations are `local` (StanBlocks 0.2.20), so caller data of the same
+  name never turns a cell prior into an observation. On RKBRMI the cell
+  formula is `0 + gmrf(...)` alone, a cell-local `LKJCholesky` correlation is
+  not lowered, and replay keeps the fit's cells.
+- **Sparse embedded Laplace over a model-scope field:**
+  `brm_laplace_problem(rk; integrate=(declaration,))` and
+  `brm_laplace_plan(rk; integrate=:auto)` integrate a model-scope `gmrf`
+  field (exact for Normal rows), with its precision moving with the lengths
+  and channel factor. `brm_laplace_problem(rk; integrate=plan)` applies a
+  plan to such a target, and `deepcopy` gives each chain its own copy.
+  Integrating per-cell fields waits on a ReactiveKernels fix (snag
+  `prepare-strict-o-332ad6b9`). No large-field performance is claimed:
+  measured cost grows superlinearly with the state dimension under both exact
+  and matrix-free algebra.
+- **Breaking:** requires StanBlocks 0.2.20, ReactiveKernels 0.1.65 and
+  ReactiveKernelsPPL 0.1.74 (deep copies of prepared queries whose generated
+  programs hold modules, as a `gmrf` field's do).
+
+## 0.2.143
+
+- A sparse embedded Laplace target (`brm_laplace_problem(...; integrate)`)
+  whose log density is finite and whose conditional modes all converged, but
+  whose gradient is not, now reports it: the new counter `nonfinite_gradient`
+  counts such evaluations, and a warning (at most three) names the population
+  point, how many population coordinates are nonfinite and the first nonfinite
+  term, for example "the third derivative of cell 1 of `y`". The gradient
+  itself is unchanged, so SMC still raises `SMCNonfiniteError` there and HMC
+  still rejects the step. Such a gradient needs a derivative the mode search
+  does not: typically a likelihood's third derivative that automatic
+  differentiation cannot represent in Float64 although the value and curvature
+  are finite. One known source is nested Enzyme Forward derivatives through
+  `log` of a value below about 1.5e-154, for example `log(erfc(t))` for `t`
+  above about 18.5 (snag `laplace-gradient-db992ae0`).
+- Matrix-free components (`solver = :matrixfree`, or `:auto` above 1,024
+  coordinates) give a nonfinite solution for a nonfinite right-hand side, as
+  exact algebra does, instead of raising "conditional solve failed".
+
+## 0.2.142
+
+- SVI runs can stop after any completed iteration and continue on
+  the same model and data exactly as if they had not stopped:
+  `brm_svi_resume([save,] model, checkpoint; stop_after, checkpoint_every,
+  ndraws, progress)` continues a `BRMSVIOptimizerState` (or a fit result) to
+  the same iterates, random stream, ELBO trace, stopping decision, polishing
+  average and draws. `brm_svi_optimizer_checkpoint(fit)` copies the state; it
+  holds the raw factors, global Adam moments, random stream, iteration,
+  stopping and polishing state, controls, a window fit's streaming carry and
+  the target's identity, but no observations or compiled model. Resume refuses
+  a changed program, callables, bound data, frozen preprocessing, coordinates,
+  groupings, subject coordinates or fixed shared values before any step.
+- `brm_svi_fit` and window fits `brm_svi_fit(previous, x_new)` take
+  `stop_after` (iterations in this call) and an optional first argument
+  `save`, called with a checkpoint every `checkpoint_every` iterations
+  (default once per window), when the call stops, and before a Treebars
+  interrupt propagates. Diagnostics add `finished` and `optimizer`.
+- The returned draws (and a GaussianBlockLaplace carry) come from a copy of
+  the run's stream: their values are unchanged, but they no longer advance the
+  caller's `rng` or `draw_rng`, and a stopped run's intermediate draws do not
+  change its continuation.
+- `laplace=GaussianBlockLaplace()` runs stop and resume the same way: the
+  state holds the global factor, Adam, the averaging window, the random and
+  draw streams, and the call counts and numerical records, so a continued
+  run's draws, carry and diagnostics equal the uninterrupted run's. A stopped
+  run's result averages the iterates of its window so far
+  (`stop_reason=:stopped`). `save` defaults to every 50 updates.
+- `brm_svi_checkpoint` remains the streaming carry for a new, disjoint window.
+- `BRM SMC` checkpoints identify their bindings through a shared helper; the
+  identities are unchanged, so existing SMC checkpoints still resume.
+
+## 0.2.141
+
+- Strict local cell queries and sparse Laplace planning support a plate
+  selecting rows from another plate's array-valued output, including outputs
+  built from shared correlated random effects.
+- **Breaking:** the RK backend requires ReactiveKernels 0.1.62 or later.
+  Update older pinned RK environments; the test bootstrap selects the
+  producer-plate locality repair.
 
 ## 0.2.140
 

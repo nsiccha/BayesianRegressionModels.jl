@@ -13,6 +13,9 @@ process. Recreate custom model functions in that process before loading it.
 Format 1 dense-unit states remain supported. Format 2 also stores local
 diagonal-plus-low-rank factors directly, without dense matrices or optimizer
 moments. Coordinate reordering preserves their covariance exactly.
+This carries a fitted approximation into a new, disjoint window; it holds no
+optimizer state. An interrupted optimization of the same model and data
+continues from [`brm_svi_optimizer_checkpoint`](@ref) instead.
 """
 struct BRMSVIState
     format::Int
@@ -35,7 +38,7 @@ _brm_svi_global_factor(q) = deepcopy((; q.family, q.μ, q.ρ, q.Β))
 function _brm_svi_source_id(rk)
     emitted = _rk_retained_program(rk)
     io = IOBuffer()
-    serialize(io, (sprint(show, brm_source(rk)), _rk_program_statements(emitted),
+    serialize(io, (sprint(show, brm_source(rk); context=:brm_documentation => false), _rk_program_statements(emitted),
         emitted.bindings))
     bytes2hex(sha256(take!(io)))
 end
@@ -200,10 +203,13 @@ function _brm_svi_unit_prior!(gz, prior::_BRMSVIStreamingPrior, i, z)
 end
 
 """
-    brm_svi_fit(previous, x_new; kwargs...)
+    brm_svi_fit([save,] previous, x_new; kwargs...)
 
 Continue on a disjoint new observation window. `previous` is an SVI result or
-a data-only [`BRMSVIState`](@ref). `x_new` is the same model on the new window:
+a data-only [`BRMSVIState`](@ref). To continue an interrupted optimization of
+the same model and data instead, use [`brm_svi_resume`](@ref); `save`,
+`stop_after` and `checkpoint_every` interrupt this window's fit as they do
+[`brm_svi_fit`](@ref)'s. `x_new` is the same model on the new window:
 a `BRMI` is lowered with the state's frozen preprocessing; an `RKBRMI` or
 prepared `BRMNLMEModel` must already have that preprocessing. A previous fit
 also accepts raw new data, rebinding its model declaration. A state resumed in
@@ -226,7 +232,11 @@ must stay fixed. For nested units, pass the new window's `nested_groups` map.
 Only new-window units are minibatched; diagnostics count their gradient calls.
 Checkpoint size grows with distinct units, not the number of observations.
 """
-function brm_svi_fit(previous, x_new; laplace=nothing, kwargs...)
+brm_svi_fit(previous, x_new; kwargs...) = _brm_svi_window_fit(nothing, previous, x_new; kwargs...)
+brm_svi_fit(save::Function, previous, x_new; kwargs...) =
+    _brm_svi_window_fit(save, previous, x_new; kwargs...)
+
+function _brm_svi_window_fit(save, previous, x_new; laplace=nothing, kwargs...)
     state = brm_svi_checkpoint(previous)
     collapsed = state isa BRMSVILaplaceState
     collapsed || laplace===nothing || throw(ArgumentError(
@@ -239,14 +249,21 @@ function brm_svi_fit(previous, x_new; laplace=nothing, kwargs...)
     else
         _brm_rebind_brmi(brm_source(previous.diagnostics.model.backend), x_new)
     end
+    x, options = _brm_svi_window_input(state, x, (; kwargs...); caller="brm_svi_fit")
+    collapsed && return _brm_svi_laplace_dispatch(save, x, state,
+        laplace===nothing ? state.method : laplace; options...)
+    _brm_svi_fit(save, x, state; options...)
+end
+
+# The new window's model under the carried state: a BRMI is lowered with the
+# state's frozen preprocessing, and the carried subject and shared groupings
+# are the defaults of a model not yet prepared.
+function _brm_svi_window_input(state, x, options; caller)
     if x isa BRMI
-        sprint(show, x) == state.preprocessing.declaration || throw(ArgumentError(
-            "brm_svi_fit: model source changed"))
+        sprint(show, x; context=:brm_documentation => false) == state.preprocessing.declaration || throw(ArgumentError(
+            "$caller: model source changed"))
         x = RKBRMI(x, state.preprocessing; resample_groups=(state.group, state.nested...))
     end
-    options = x isa BRMNLMEModel ? (; kwargs...) :
-        merge((; subject_group=state.group, shared_groups=state.shared), (; kwargs...))
-    collapsed && return _brm_svi_laplace_dispatch(x,state,
-        laplace===nothing ? state.method : laplace;options...)
-    _brm_svi_fit(x, state; options...)
+    x, x isa BRMNLMEModel ? options :
+        merge((; subject_group=state.group, shared_groups=state.shared), options)
 end

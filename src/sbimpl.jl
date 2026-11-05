@@ -886,6 +886,17 @@ _sb_bound_name(x::Symbol) = x
 _sb_bound_name(x::Expr) = Meta.isexpr(x, :(::)) ? _sb_bound_name(x.args[1]) : nothing
 _sb_bound_name(_) = nothing
 
+# A plate cell's `local x ~ …`, `local x = …` or `local x::T` (StanBlocks
+# 0.2.20) declares a fresh cell binding that shadows an outer `x` in the whole
+# cell. The name it declares, or `nothing` for any other statement.
+function _sb_local_name(x)
+    Meta.isexpr(x, :local, 1) || return nothing
+    s = only(x.args)
+    lhs = Meta.isexpr(s, :(=), 2) ? s.args[1] :
+        Meta.isexpr(s, :call, 3) && s.args[1] === :~ ? s.args[2] : s
+    _sb_bound_name(lhs)
+end
+
 function _sb_single_margin_ranef(base::StanBlocks.SlicModel; strict::Bool=true)
     # Read-only: `rewrite` builds fresh `Expr` nodes and shares the leaves. A
     # configured family's body holds values (a custom prior's `ValueUDF`, which
@@ -4082,6 +4093,7 @@ SBBRMI(parent::BRMI, model, data::AbstractDict, preproc::AbstractDict,
 # Bind semantic meaning at emission time. These records are removed from the
 # Stan data dictionary and carried with the emitted artifact through replay.
 const _SB_BINDINGS_KEY = :__brm_emission_bindings__
+const _SB_CELL_FORMULA_BINDINGS_KEY = :__brm_cell_formula_bindings__
 const _SB_THRESHOLD_LOCATED_KEY = :__brm_threshold_located__
 # Raw grouping columns the ranef pass replaced by a dense index, each with the
 # value it removed (see `_sb_note_group_column!`). Settled once emission is
@@ -4695,6 +4707,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # A data-only assignment becomes a data field the same way, evaluated here
     # from this model's data (user decision `1tb1jrg`).
     brmi, _ = _brm_resolve_data_assignments(brmi; prefix="sbimpl")
+    data[_SB_CELL_FORMULA_BINDINGS_KEY] = Dict(_brm_operation_entries(brmi))
     # Predictors whose intercept an ordinal response's thresholds supply: their
     # categorical terms stay treatment-coded (see `_brm_cellmeans_block`).
     data[_SB_THRESHOLD_LOCATED_KEY] = _brm_threshold_located_predictors(brmi)
@@ -4905,6 +4918,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # Pop the preproc side-channel BEFORE building the SlicModel so it never
     # pollutes Stan's data dict.
     bindings = pop!(data, _SB_BINDINGS_KEY)
+    pop!(data, _SB_CELL_FORMULA_BINDINGS_KEY)
     pop!(data, _SB_TOTAL_PLANS_KEY)
     pop!(data, _SB_S2Z_PLANS_KEY)
     pop!(data, _SB_HS_PLANS_KEY)
@@ -4914,6 +4928,8 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     pop!(data, _SB_SKIPPED_ROWS_KEY)
     preproc_ctx = pop!(data, _SB_PREPROC_KEY, Dict{Symbol,PreprocEntry}())
     preproc = preproc_ctx isa _SBPreprocContext ? preproc_ctx.recorded : preproc_ctx
+    _sb_prune_cell_formula_inputs!(data, preproc, stmts)
+    _sb_drop_shadowed_data!(data, preproc, stmts)
     # Drop leaked non-Stan data (raw `CategoricalVector`/string predictor columns
     # collected as reprocess provenance). See `_sb_is_stan_data_value`. This also
     # keeps `reprocess`'s pass-through (step 2) from re-leaking the raw column
@@ -5622,11 +5638,25 @@ function _sb_plan_observation_keys(body, data, @nospecialize(brmi), mod::Module)
             union!(varying, _sb_plan_param_names(stmt.args[end - 1]))
         elseif stmt.head === :call && !isempty(refs)
             target = _sb_plan_lhs_name(stmt.args[2])
+            # Scalar data constants can parameterize an observation-only law
+            # too. Its omission remains an observation, even without row data
+            # or fitted parameters to distinguish it from a parameter prior.
+            _sb_plan_observation_only(brmi, target) && continue
             (issubset(refs, constants) || target in read) &&
                 delete!(observable, target)
         end
     end
     observable
+end
+
+function _sb_plan_observation_only(@nospecialize(brmi), target)
+    target isa Symbol && _brm_has_operation(brmi, target) || return false
+    op = _named_op(_brm_operation(brmi, target))
+    op isa ExprColumn{typeof(~)} || return false
+    lhs, rhs = getargs(op, 2)
+    lhs isa NamedColumn && parent(lhs) isa MissingColumn && rhs isa ExprColumn ||
+        return false
+    _sb_observation_only_law(getf(rhs), rhs)
 end
 # A non-data name declared with a vector law, `x[1:n] .~ Family.(...)` or
 # `x ~ MvNormal(...)`, is a parameter: its data (the length, the mean, an
@@ -5696,6 +5726,11 @@ function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate
                                           obs_keys, plate_params, unbound_cell), x.args)
         return nothing
     end
+    # A cell's `local` binding is the statement it wraps; its plate removed the
+    # shadowed outer name from the cell's data scope.
+    x.head === :local && length(x.args) == 1 &&
+        return _sb_plan_collect!(declarations, only(x.args), data_scope, context,
+                                 obs_keys, plate_params, unbound_cell)
     # A cell's `@scan` writes each array it carries through its seeds and its
     # steps (`h[1] ~ …`, `h[t] ~ …`), and StanBlocks declares that array once:
     # one declaration per array, family `:scan` (a structural site, like
@@ -5784,6 +5819,12 @@ function _sb_plan_collect!(declarations, x, data_scope, context, obs_keys, plate
                 iterable isa Symbol || continue
                 source = get(data_scope, iterable, nothing)
                 isnothing(source) || (nested_scope[param] = source)
+            end
+            # A `local` cell binding is the cell's own value, never the outer
+            # data of that name: it is a prior, not an observation of the data.
+            for stmt in _sb_plan_statements(plate.body)
+                local_name = _sb_local_name(stmt)
+                isnothing(local_name) || delete!(nested_scope, local_name)
             end
             _sb_plan_collect!(declarations, plate.body, nested_scope, (context..., target),
                               obs_keys, nested_params, unbound_cell)
@@ -6645,13 +6686,13 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             new_data[key] = _sb_reprocess_column_length(df, columns[found],
                 "kernel per-subject column")
         else
-            subjects = _sb_reprocess_kernel_cells(df, e.raw_ref, e.const_)
+            subjects = _sb_reprocess_kernel_cells(df, e.raw_ref, e.const_; freeze)
             new_data[key] = length(subjects)
         end
         new_preproc[key] = e
     elseif e.kind === :kernel_ragged
         arg_name, event_group, subject_group = e.raw_ref
-        subjects = _sb_reprocess_kernel_cells(df, subject_group, e.const_)
+        subjects = _sb_reprocess_kernel_cells(df, subject_group, e.const_; freeze)
         event_groups = _sb_df_column(df, event_group)
         event_groups isa AbstractVector || error(
             "sbimpl: reprocess: kernel event grouping column `$event_group` " *
@@ -6826,6 +6867,8 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         # a forecast's record keeps the fitted grid: its parameters stay the fit's
         new_preproc[key] = freeze ? e :
             PreprocEntry(:rw, merge(e.const_, (; steps)), e.raw_ref, true)
+    elseif e.kind === :gmrf
+        _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
     elseif e.kind === :car
         # `car(area; edges=..., nodes=..., type=...)`: frozen, the graph and its
         # numbering are constants of the fit and each row must name a fitted
@@ -7194,7 +7237,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     # 1. Regenerate every independent transform-output key from its preproc
     #    record. Interactions wait until their raw/transformed operands exist.
     for (key, e) in sb.preproc
-        e.kind in (:interaction, :submodel_hook) && continue
+        e.kind in (:interaction, :submodel_hook, :cell_formulas) && continue
         _sb_reads_level_codes(e) && continue
         # A response a cell observes through a grouping (`y[rows[i]]`) is a
         # gathered key whose raw column the new data may lack. Its record is
@@ -7219,6 +7262,12 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
                 "joint response is not supported yet (todo `1fnt1zu`); include its outcome columns.")
         end
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
+    end
+    # Cell formulas read the ragged inputs regenerated above, and retain the
+    # field fitted to each semantic cell label.
+    for (key, e) in sb.preproc
+        e.kind === :cell_formulas || continue
+        _sb_replay_cell_formulas!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
     # 1a. A `by=` HSGP projection reads the level codes step 1 regenerated.
     for (key, e) in sb.preproc
@@ -7305,6 +7354,9 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
         e.kind === :interaction || continue
         _sb_reprocess_entry!(new_data, new_preproc, handled, key, e, new_df, freeze_constants)
     end
+    # The cell recipes above use raw labels/coordinates to regenerate their
+    # numeric inputs. StanBlocks types every data key, including unused ones.
+    _sb_prune_cell_formula_inputs!(new_data, new_preproc, sb.model.model.args)
     new_model = StanBlocks.SlicModel(sb.model.model, new_data, sb.model.mod, sb.model.observations)
     _sb_apply_held_out(
         SBBRMI(sb.parent, new_model, new_data, new_preproc, forecast, sb.bindings,
@@ -7401,12 +7453,14 @@ end
 # likelihood statement, arguments and family spelling included, which
 # StanBlocks forward-simulates from the fitted predictive law. `weighted` and
 # `censored` wrap only observations (a censored law puts mass on its bounds),
+# `interval_censored` supplies interval evidence rather than a parameter law,
 # and Stan has no discrete parameters, so a discrete law (`Poisson`,
 # `Binomial`, `BetaBinomial2`, ..., also under `truncated`) is one too. The
 # families whose outcome structure is read from response values keep their
 # refusal (`_SBValueStructuredFamily`).
 _sb_observation_only_law(_callable, _rhs) = false
-_sb_observation_only_law(::Union{typeof(weighted),typeof(censored)}, _rhs) = true
+_sb_observation_only_law(
+    ::Union{typeof(weighted),typeof(censored),typeof(interval_censored)}, _rhs) = true
 _sb_observation_only_law(::Type{D}, _rhs) where {D<:Distribution} =
     D <: Distribution{<:Distributions.VariateForm,Distributions.Discrete} &&
     !(D <: _SBValueStructuredFamily)
@@ -7713,7 +7767,8 @@ function _sb_subst_model_scope(x::Expr, from::Symbol, to)
         params = Meta.isexpr(x.args[1], :tuple) ? x.args[1].args : Any[x.args[1]]
         body = x.args[2]
         stmts = Meta.isexpr(body, :block) ? body.args : Any[body]
-        binds(s) = (Meta.isexpr(s, :(=), 2) || isxcall(s, :~)) && s.args[end-1] === from
+        binds(s) = _sb_local_name(s) === from ||
+            (Meta.isexpr(s, :(=), 2) || isxcall(s, :~)) && s.args[end-1] === from
         (from in params || any(binds, stmts)) && return x
     end
     x.head === :. && length(x.args) == 2 && x.args[2] isa QuoteNode &&
@@ -7752,11 +7807,19 @@ _sb_kernel_ragged_partition(a_name, grp_name, ev_vals, subject_vals; observed::B
 
 # A plate's cells on a replayed frame: the labels of its cell column, one per
 # row, or the distinct labels of its one grouping column.
-_sb_reprocess_kernel_cells(df, column, options) =
-    options isa NamedTuple && get(options, :distinct_labels, false) ?
+function _sb_reprocess_kernel_cells(df, column, options; freeze=false)
+    labels = options isa NamedTuple && get(options, :distinct_labels, false) ?
         _brm_kernel_distinct_labels(_sb_df_column(df, column), column;
             prefix="sbimpl: reprocess") :
         _sb_kernel_subject_values(_sb_df_column(df, column), column)
+    if freeze && options isa NamedTuple && haskey(options, :fitted_cell_labels)
+        fitted = options.fitted_cell_labels
+        all(label -> label in fitted, labels) || throw(ArgumentError(
+            "cell formula replay cannot introduce an unfitted cell; rebuild the model"))
+        return copy(fitted)
+    end
+    labels
+end
 
 function _sb_kernel_ragged_rows(data, arg_col, grp_arg, g_vals;
                                 allow_unbound_observation=false, order=nothing,
@@ -8191,7 +8254,12 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # so the plate is count-form over `outer` for them while bound positionals
     # keep slicing; the dropped cell parameter becomes a fresh per-cell `~`.
     kept_params = slice_params[kept]
+    body_stmts = _sb_cell_formulas!(body_stmts, data, target, kept_names, kept_params,
+        _brm_inline_scope(lam);
+        labels=isempty(grouped) && isempty(ragged_specs) ? (nsub === nothing ? () : 1:nsub) : g_vals,
+        group=isempty(grouped) && isempty(ragged_specs) ? nothing : name(group_col), distinct)
     _brm_check_cell_total_latents(body_stmts, params, _brm_inline_scope(lam); prefix="sbimpl")
+    body_stmts = _sb_cell_prior_order(body_stmts, kept_params)
     # The cell is Julia source; give StanBlocks its Stan spellings.
     body_stmts = _sb_cell_statements(_sb_cell_ar1_normal_calls(body_stmts, kept_params),
         _brm_inline_scope(lam))
@@ -16177,7 +16245,7 @@ end
 # of them, not just the preproc dict: with no observation bound, the fallback
 # tiers above would otherwise mistake a side-channel for a sizing column.
 _sb_is_side_channel_key(k::Symbol) =
-    k === _SB_PREPROC_KEY || k === _SB_BINDINGS_KEY ||
+    k === _SB_PREPROC_KEY || k === _SB_BINDINGS_KEY || k === _SB_CELL_FORMULA_BINDINGS_KEY ||
     k === _SB_THRESHOLD_LOCATED_KEY || k === _SB_HYPER_PLANS_KEY ||
     k === _SB_TOTAL_PLANS_KEY || k === _SB_S2Z_PLANS_KEY ||
     k === _SB_HS_PLANS_KEY || k === _SB_GROUP_COLUMNS_KEY ||
@@ -16225,9 +16293,7 @@ _sb_grouped_port_broadcasts(_argument, _actual, ::Nothing) = false
 # whole flattened argument, it would run once per group, every group's rows
 # each time.
 function _sb_grouped_argument_ports!(ports, argument::ExprColumn, lengths)
-    f = getf(argument)
-    (haskey(_RK_DERIVED_BINOPS, f) || haskey(_RK_DERIVED_CMP, f) ||
-        haskey(_RK_DERIVED_MATH, f) || _rk_rowwise_callable(f)) || return false
+    _rk_rowwise_callable(getf(argument)) || return false
     foreach(a -> _sb_grouped_argument_ports!(ports, a, lengths), getargs(argument))
     !isempty(ports)
 end
@@ -17138,6 +17204,15 @@ function _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, 
     push!(stmts, Expr(:call, :~, target, rhs))
 end
 
+# A censoring threshold can be the observation itself. When that observation
+# is omitted, its endpoint has no data to validate; the unchanged producer
+# statement still carries it so StanBlocks owns the generative interpretation.
+_sb_censored_validation_bound(bound, _target, _data) = bound
+function _sb_censored_validation_bound(bound::NamedColumn, target, data)
+    name(bound) === target && parent(bound) isa MissingColumn &&
+        !haskey(data, target) ? nothing : bound
+end
+
 function _sb_lik_composed!(stmts, target, wrapper, producer,
                            args, kwargs::NamedTuple, data)
     base = _sb_composed_family(wrapper, args)
@@ -17146,8 +17221,12 @@ function _sb_lik_composed!(stmts, target, wrapper, producer,
     isnothing(lower) && isnothing(upper) && error(
         "sbimpl: `$wrapper` needs at least one non-`nothing` bound")
 
-    _sb_validate_bounds(wrapper, target, lower, upper, data)
-    _sb_validate_composed_support(wrapper, target, lower, upper, base.kind, data)
+    validation_lower, validation_upper = wrapper === :censored ?
+        (_sb_censored_validation_bound(lower, target, data),
+         _sb_censored_validation_bound(upper, target, data)) : (lower, upper)
+    _sb_validate_bounds(wrapper, target, validation_lower, validation_upper, data)
+    _sb_validate_composed_support(wrapper, target, validation_lower,
+                                  validation_upper, base.kind, data)
     _sb_emit_optional_family!(stmts, target, producer, base, lower, upper, data)
 end
 
@@ -17158,8 +17237,8 @@ _sb_lik_family!(stmts, target, ::typeof(censored), args, kwargs::NamedTuple, dat
     _sb_lik_composed!(stmts, target, :censored, :censored, args, kwargs, data)
 
 # Genuine interval evidence uses the observed response as the lower endpoint.
-# Its producer call has no optional-bound encoding, so it is independent of the
-# one-sided truncation/censoring producer decision.
+# An omitted response keeps the upper-only call; StanBlocks draws the base
+# predictive law and sizes it from the retained family arguments and upper.
 function _sb_lik_family!(stmts, target, ::typeof(interval_censored),
                          args, kwargs::NamedTuple, data)
     length(args) == 1 || error(
@@ -17169,20 +17248,33 @@ function _sb_lik_family!(stmts, target, ::typeof(interval_censored),
         "the response column is the interval lower endpoint")
     base = _sb_composed_family(:interval_censored, args)
     upper = kwargs.upper
-    _sb_validate_bounds(:interval_censored, target, data[target], upper, data;
+    lower = get(data, target, nothing)
+    _sb_validate_bounds(:interval_censored, target, lower, upper, data;
                         check_order=false)
-    lo = _sb_composed_values(data[target])
-    hi = _sb_composed_values(_sb_bound_data(upper, data))
-    all(eachindex(lo)) do i
-        lo[i] < (hi isa AbstractVector ? hi[i] : hi)
-    end || error(
-        "sbimpl: `interval_censored` lower endpoints must be strictly below upper endpoints")
-    _sb_validate_composed_support(:interval_censored, target, data[target],
+    if !isnothing(lower)
+        lo = _sb_composed_values(lower)
+        hi = _sb_composed_values(_sb_bound_data(upper, data))
+        all(eachindex(lo)) do i
+            lo[i] < (hi isa AbstractVector ? hi[i] : hi)
+        end || error(
+            "sbimpl: `interval_censored` lower endpoints must be strictly below upper endpoints")
+    end
+    _sb_validate_composed_support(:interval_censored, target, lower,
                                   upper, base.kind, data)
     native = _sb_composed_stan_call!(stmts, target, base, data)
+    upper_expr = _sb_scalar_expr(upper, data)
+    if isnothing(lower)
+        # Preserve the observation law and its retained shape input. There is
+        # no lower endpoint to read: the producer must draw the fitted base
+        # predictive law, without conditioning on an invented interval.
+        rhs = Expr(:call, :interval_censored,
+            Expr(:parameters, Expr(:kw, :upper, upper_expr)),
+            Expr(:call, native.name, native.args...))
+        push!(stmts, Expr(:call, :~, target, rhs))
+        return nothing
+    end
     _sb_mixture_membership_evidence!(stmts, target, native, :interval_censored,
                                      nothing, upper, base.kind, data)
-    upper_expr = _sb_scalar_expr(upper, data)
     _sb_lik_stan_exprs!(stmts, target, :interval_censored,
                         (native.name, target, upper_expr, native.args...))
 end

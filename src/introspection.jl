@@ -450,7 +450,7 @@ Base.@nospecializeinfer function term_priors(@nospecialize(brmi::BRMI))
         isempty(address) && continue
         class = first(address)
         class in _TERM_PRIOR_CLASSES || continue
-        valid = class === :term_sd ? length(address) in (3, 4) : length(address) == 3
+        valid = class in (:term_sd, :term_length_scale) ? length(address) in (3, 4) : length(address) == 3
         valid || error(
             "term_priors: malformed term address " *
             "`effect($(join(address, ", ")))`")
@@ -548,7 +548,8 @@ end
 # order. The `(; pairs...)` splat keeps the NamedTuple key order, so each
 # fragment prints in the same order the statements were written.
 _select_ops(brmi::BRMI, keep) =
-    BRMI((; (k => v for (k, v) in pairs(brmi.operations) if keep(v))...))
+    _brm_select_documentation(brmi,
+        (; (k => v for (k, v) in pairs(brmi.operations) if keep(v))...))
 
 """
     priors_of(brmi::BRMI) -> BRMI

@@ -151,6 +151,13 @@ _brm_nlme_scalar_data(plan::_RKHeldOutPlan, name) = _brm_nlme_scalar_data(plan.p
 _brm_nlme_scalar_data(plan, name) = let x = get(plan.columns, name, nothing)
     x isa Real ? Float64(x) : nothing
 end
+# The regression plan defines a scalar it read by name (`_rk_define_read_scalars!`).
+function _brm_nlme_scalar_data(plan::_RKStructuralPlan, name)
+    index = findfirst(a -> a.name === name, plan.assignments)
+    index === nothing && return nothing
+    x = plan.assignments[index].expression
+    x isa Real ? Float64(x) : nothing
+end
 
 # The packed names a write addresses: `<declaration>.<index>`, or every
 # coordinate of the declaration.
@@ -209,6 +216,20 @@ function _brm_nlme_prior_writes!(writes, ::Val{:stratified_ranef}, record, value
     end
     writes
 end
+
+# A native field's sampled hyperparameters take the laws its block declares; a
+# known hyperparameter's literal has no median and no coordinate.
+function _brm_nlme_prior_writes!(writes, ::Val{:gmrf}, record, values, value)
+    for (slot, law) in pairs(record.locals.priors)
+        x = _brm_prior_median(_brm_prior_law(law, value))
+        x === nothing || push!(writes,
+            (Symbol(record.declaration, ".", record.locals[slot]), (), x))
+    end
+    writes
+end
+
+_brm_nlme_prior_writes!(writes, ::Val{:gmrf_footprint}, record, values, value) =
+    _brm_nlme_prior_writes!(writes, Val(:gmrf), record, values, value)
 
 # `m`'s unit point with its prior-median coordinates set, and the positions of
 # those coordinates. Every other coordinate keeps the unit point's exact value,

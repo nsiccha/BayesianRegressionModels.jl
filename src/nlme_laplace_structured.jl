@@ -155,7 +155,7 @@ _brm_lap_dlink(transform::Symbol, θ) = transform === :log ? inv(θ) : one(θ)
 The per-unit Laplace of a regression-shaped RK model, built on its rows; see
 [`brm_laplace_problem`](@ref). Same interface as [`BRMLaplaceProblem`](@ref):
 LogDensityProblems order 1 over `names` (packed positions `population`),
-[`brm_laplace_draws`](@ref), and the counters `nonfinite` and `unconverged`.
+[`brm_laplace_draws`](@ref), and the counters `nonfinite`, `unconverged` and `folds`.
 """
 mutable struct BRMStructuredLaplaceProblem{K}
     backend::RKBRMI
@@ -197,13 +197,16 @@ mutable struct BRMStructuredLaplaceProblem{K}
     jptr::Vector{Int}
     jcol::Vector{Int}
     jval::Vector{Float64}
-    # Warm start: the last converged modes and their factors.
+    # The last evaluation's modes and their factors (output state only).
     u::Vector{Float64}
     factors::Base.RefValue{Any}
     tol::Float64
     maxiter::Int
     nonfinite::Int
     unconverged::Int
+    # evaluations in which a unit's followed mode needed a modified Newton step
+    # after the continuation's first stage (`_brm_slap_unit_mode`)
+    folds::Int
 end
 
 Base.show(io::IO, p::BRMStructuredLaplaceProblem) = print(io,
@@ -325,7 +328,7 @@ function _brm_structured_laplace_problem(backend::RKBRMI, view::BRMNLMEView; ad_
         t.link, t.fixed, zeros(d, length(t.port)), Int[], Int[], Float64[], omega, false,
         u0[population],
         zeros(length(t.port)), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
-        Float64(tol), Int(maxiter), 0, 0)
+        Float64(tol), Int(maxiter), 0, 0, 0)
     _brm_slap_design!(p, u0)
     _brm_slap_population_design!(p, u0)
     _brm_slap_verify!(p, u0, t.response, t.row)
@@ -625,14 +628,18 @@ end
 # Unit i's density f_i(z) = Σ_t ℓ_t − |z|²/2 (less its terms in φ alone, see
 # `_brm_lap_row`), gradient and Hessian. Each term reads b = M z through its
 # few Z entries; the likelihood's gradient and Hessian accumulate in b (gb,
-# Hb) and map back once: g = Mᵀ gb − z, H = Mᵀ Hb M − I.
+# Hb) and map back once: g = Mᵀ gb − z, H = Mᵀ Hb M − I. `weight` multiplies
+# the likelihood Σ_t ℓ_t and leaves the prior −|z|²/2: the continuation
+# density of `_brm_slap_unit_mode`.
 function _brm_slap_unit(p::BRMStructuredLaplaceProblem, A, M::SMatrix{D,D,Float64},
-        i, z::SVector{D,Float64}) where {D}
+        i, z::SVector{D,Float64}; weight::Float64=1.0) where {D}
     b = M * z
     gb = zeros(MVector{D,Float64})
     Hb = zeros(MMatrix{D,D,Float64})
-    f = -dot(z, z) / 2
-    @inbounds for t in p.unit_terms[i]
+    f = 0.0
+    terms = p.unit_terms[i]
+    @inbounds for k in 1:(weight == 0 ? 0 : length(terms))
+        t = terms[k]
         e = p.entry[t]
         moving = p.moving[t]
         two = _brm_lap_width(p.family[t]) == 2
@@ -649,49 +656,81 @@ function _brm_slap_unit(p::BRMStructuredLaplaceProblem, A, M::SMatrix{D,D,Float6
             _brm_slap_zouter!(Hb, p, e + 1, e + 1, r.h22)
         end
     end
-    f, M' * SVector(gb) - z, M' * SMatrix(Hb) * M - I
+    weight * f - dot(z, z) / 2, weight * (M' * SVector(gb)) - z,
+        weight * (M' * SMatrix(Hb) * M) - I
 end
 
 # The Newton step (−H)⁻¹ g, or where −H is not positive definite the step along
-# −H with its eigenvalues reflected to their magnitudes and floored at 1.
+# −H with its eigenvalues reflected to their magnitudes and floored at 1; and
+# whether it is the plain Newton step.
 function _brm_slap_step(H::SMatrix, g::SVector)
     F = cholesky(Symmetric(-H); check=false)
-    issuccess(F) && return F \ g
+    issuccess(F) && return F \ g, true
     E = eigen(Symmetric(-H))
-    E.vectors * ((E.vectors' * g) ./ max.(abs.(E.values), 1.0))
+    E.vectors * ((E.vectors' * g) ./ max.(abs.(E.values), 1.0)), false
 end
 
-# Unit i's mode by Newton's method from zero: its own iterations, backtracking
-# and stop (Newton decrement at most `tol`, or at its rounding floor).
-# Returns (status, steps, mode, Hessian there).
+# Whether unit i's decrement λ, a candidate for its rounding floor, is at it
+# (`_brm_lap_floor_candidate` in nlme_laplace.jl).
+function _brm_slap_at_floor(p::BRMStructuredLaplaceProblem, A, M, i, z, step, g, H, λ;
+        weight)
+    ξ = _BRM_LAP_FLOOR_PROBE
+    _, gt, _ = _brm_slap_unit(p, A, M, i, z + ξ * step; weight)
+    r = gt - (1 - ξ) * g
+    all(isfinite, r) || return false
+    _brm_lap_at_floor(dot(r, first(_brm_slap_step(H, r))), λ)
+end
+
+# Unit i's mode by continuation from its prior's mode, zero: Newton's method on
+# the continuation density −|z|²/2 + s × likelihood for each stage s of
+# `_brm_lap_stages` (one stage when every term is log-concave in the effects:
+# no term's second parameter moves with them), each from the last stage's
+# mode, with its own iterations (at most `maxiter` per stage), backtracking
+# and stop (Newton decrement at most `tol`, `_BRM_LAP_STAGE_TOL` before the
+# last stage, or at its rounding floor on a plain Newton step). Returns
+# (status, steps, mode, Hessian there, modified steps after the first stage).
 function _brm_slap_unit_mode(p::BRMStructuredLaplaceProblem, A, M::SMatrix{D,D,Float64},
         i) where {D}
     z = zero(SVector{D,Float64})
-    f, g, H = _brm_slap_unit(p, A, M, i, z)
-    isfinite(f) && all(isfinite, g) || return :nonfinite, 0, z, H
-    previous = Inf
-    for iteration in 1:p.maxiter
-        all(isfinite, H) || return :nonfinite, iteration - 1, z, H
-        step = _brm_slap_step(H, g)
-        λ = dot(g, step)
-        (λ <= p.tol || (λ <= 1e-8 && λ >= previous / 4)) &&
-            return :converged, iteration - 1, z, H
-        previous = λ
-        t = 1.0
-        accepted = false
-        for _ in 1:60
-            trial = z + t * step
-            ft, gt, Ht = _brm_slap_unit(p, A, M, i, trial)
-            if isfinite(ft) && all(isfinite, gt) && (λ <= 1e-8 || ft >= f + 1e-4 * t * λ)
-                z, f, g, H = trial, ft, gt, Ht
-                accepted = true
+    stages = _brm_lap_stages(!any(t -> p.moving[t], p.unit_terms[i]))
+    steps = 0; late = 0
+    H = zero(SMatrix{D,D,Float64})
+    for (k, s) in enumerate(stages)
+        tol = s == 1 ? p.tol : max(p.tol, _BRM_LAP_STAGE_TOL)
+        f, g, H = _brm_slap_unit(p, A, M, i, z; weight=s)
+        isfinite(f) && all(isfinite, g) || return :nonfinite, steps, z, H, late
+        previous = Inf
+        converged = false
+        for iteration in 1:p.maxiter
+            all(isfinite, H) || return :nonfinite, steps, z, H, late
+            step, exact = _brm_slap_step(H, g)
+            λ = dot(g, step)
+            if λ <= tol || (exact && _brm_lap_floor_candidate(λ, previous, tol) &&
+                    _brm_slap_at_floor(p, A, M, i, z, step, g, H, λ; weight=s))
+                converged = true
                 break
             end
-            t /= 2
+            previous = exact ? λ : Inf
+            exact || k == 1 || (late += 1)
+            t = 1.0
+            accepted = false
+            for _ in 1:60
+                trial = z + t * step
+                ft, gt, Ht = _brm_slap_unit(p, A, M, i, trial; weight=s)
+                if isfinite(ft) && all(isfinite, gt) &&
+                        (λ <= 1e-8 || ft >= f + 1e-4 * t * λ)
+                    z, f, g, H = trial, ft, gt, Ht
+                    accepted = true
+                    break
+                end
+                t /= 2
+            end
+            steps += 1
+            accepted || return :nonfinite, steps, z, H, late
         end
-        accepted || return :nonfinite, iteration, z, H
+        converged || return :unconverged, steps, z, H, late
     end
-    :unconverged, p.maxiter, z, H
+    :converged, steps, z, H, late
 end
 
 # Every unit's mode at population point φ, from zero effects, and the
@@ -723,8 +762,10 @@ function _brm_slap_modes!(p::BRMStructuredLaplaceProblem, φ, uA, values, A,
     u = copy(uA)
     factors = Vector{typeof(cholesky(Symmetric(one(M))))}(undef, length(p.blocks))
     iterations = 0
+    late = 0
     for (i, block) in enumerate(p.blocks)
-        status, steps, z, H = _brm_slap_unit_mode(p, A, M, i)
+        status, steps, z, H, modified = _brm_slap_unit_mode(p, A, M, i)
+        late += modified
         if status !== :converged
             status === :nonfinite ? (p.nonfinite += 1) : (p.unconverged += 1)
             status === :unconverged && @warn("brm_laplace_problem: unit " *
@@ -741,6 +782,7 @@ function _brm_slap_modes!(p::BRMStructuredLaplaceProblem, φ, uA, values, A,
         factors[i] = F
         iterations = max(iterations, steps)
     end
+    late > 0 && (p.folds += 1)
     p.u = u
     p.factors[] = factors
     (; finite=true, u, uA, values, A, M, dM, factors, iterations)
