@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.177
+## 0.2.179
 
 - `SBBRMI` and `RKBRMI` compose heterogeneous scalar `MixtureModel`
   components with known full-real continuous support, including custom
@@ -26,6 +26,65 @@ instead of failing at run time.
 - Requires StanBlocks 0.2.25, ReactiveKernels 0.1.81 and
   ReactiveKernelsPPL 0.1.94. Bounded or mixed-support heterogeneous components
   remain outside the supported mixture contract.
+
+## 0.2.178
+
+- Added: explicit `unit_partition=:connected` for the NLME view and model,
+  NLME fits, SVI, per-unit Laplace and joint starts. Structural likelihood
+  supports join scientific subjects into complete inference units, retaining
+  their original labels, coordinates and every covariance-family instance.
+  The default `:subjects` keeps strict subject independence. Connected starts
+  carry unit membership; named estimates restore scientific subject labels.
+- Changed: SVI streaming retains the partition policy and refuses changed
+  membership of a carried connected unit before updating. Complete unchanged
+  units and wholly new units can continue.
+- **Breaking:** SVI streaming checkpoints use format 2 with explicit
+  `unit_partition`; serialize and reload with matching package versions.
+
+- Changed: NLME unit likelihoods and gradients use one strict RK plate
+  partition per unit. Preparation checks structural coordinate ownership,
+  including dormant branches, and names nonlocal producers or foreign unit
+  effects. Sparse curvature retains individual cell supports without numerical
+  probing or gradient-based pruning; repeated observations share one support
+  during pattern assembly instead of accumulating duplicate coordinate pairs.
+  Conditional subsets evaluate only their requested units; full-cohort and
+  population-gradient calls retain batching.
+- Changed: a one-unit value or gradient writes θ, σ and the unit's η into a
+  dense work point owned by its query or plan, instead of an overlay that RK
+  copied into a full packed vector on every call, so one unit's cost and
+  allocations no longer grow with the number of units.
+  `brm_nlme_loglikelihood_and_gradient`, which returns only the η gradient,
+  differentiates only the unit's own effects (RK `shared=false`).
+- Changed: NLME cell, partition and gradient queries declare their local
+  parameter ownership so RK/PPL can cache shared producers before strict
+  lowering. Correlated grouped HSGP values remain shared; local coordinates
+  retain their structural checks. Shared-coordinate changes refresh the cache.
+- Changed: separated CAR fields expose their shared values through row-local
+  graph computations, preserving their law, coordinates, inverse and Jacobian.
+- Changed: `cdar(...; cor=C)` emits its fixed correlation factor as a sparse
+  matrix, so a subject reads only the innovation groups its factor rows store.
+- Compatibility: ReactiveKernels 0.1.77 / ReactiveKernelsPPL 0.1.85 preserve
+  sparse factors, stratified group reads, grouped HSGP row forms and shared
+  plate computations across several observations in one unit partition.
+- Compatibility: the strict partitions need ReactiveKernels 0.1.51 and
+  ReactiveKernelsPPL 0.1.54 or later, within the new 0.1.77 / 0.1.85
+  floor. Scalar inference preserves ordinary indexed predictor expressions
+  under strict partitioning, and nested data-only helpers inside sampled
+  expressions, such as a lower-bounded shares completion's
+  `lower=lo[x_shares_free]`, keep their shapes through strict cell and
+  partition preparation. Strict queries also preserve local scan captures,
+  grouped-field row reductions and censored ragged factors. Shared-prefix
+  binding includes freshly emitted helpers and preserves local reads from
+  custom packed vectors. Unit gradients use ordinary Enzyme Reverse, with the
+  test bootstrap's Enzyme dogfood pin, which contains `68ed90fe`'s repair for
+  matrix-window partition gradients on Julia 1.10.
+
+## 0.2.177
+
+- Require ReactiveKernels 0.1.82 to restore buffer reuse when batched readers
+  evaluate vector-valued plate cells. Emitted and printed RK models retain
+  live broadcast fusion after binding data, avoiding a temporary vector per
+  cell and position.
 
 ## 0.2.176
 

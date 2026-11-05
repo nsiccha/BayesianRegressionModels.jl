@@ -222,6 +222,20 @@ end
             H = reduce(hcat, [u[b] for b in m.view.subject_coordinates])
             @test [brm_nlme_loglikelihood(m, i, θ, σ, H[:, i]) for i in axes(H, 2)] ≈
                 brm_nlme_loglikelihoods(m, θ, σ, H) rtol = 1e-12
+            # Reuse the same prepared queries across local moves, a shared
+            # move, and a return to the original point. Both value and AD
+            # paths must refresh shared intermediates without stale values.
+            for point in (u, u .+ 0.03, u)
+                θ, σ = point[m.theta], point[m.sigma]
+                H = reduce(hcat, [point[b] for b in m.view.subject_coordinates])
+                values, gradients = brm_nlme_loglikelihoods_and_gradients(m, θ, σ, H)
+                for i in (1, 4)
+                    value, gradient = brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, H[:, i])
+                    @test value ≈ values[i] rtol=1e-10
+                    @test gradient ≈ gradients[:, i] atol=1e-8 rtol=1e-9
+                    @test brm_nlme_loglikelihood(m, i, θ, σ, H[:, i]) ≈ values[i] rtol=1e-10
+                end
+            end
         end
     end
     rk = RKBRMI(last(first(variants))(data))
@@ -286,45 +300,50 @@ end
 
 const SVI_NESTED = (; subject_group=:subject, nested_groups=(unit=:obs_subject,))
 
-@stestset "nested units: subject blocks of different lengths" begin
+@stestset "nested units: structural footprints and target split" begin
     rng = Xoshiro(13)
     rk = RKBRMI(nested_model(NESTED_DATA))
     m = brm_nlme_model(rk; ad_backend=NLME_AD, SVI_NESTED...)
     @test sort(unique(length.(m.view.subject_coordinates))) == [2, 3, 4]
-    # The model prepares no compact sampler until a cell gradient is needed.
-    # Each cell's reads are then the η its value query reads, kept where its
-    # gradient touches them, without a whole-block selection (todo
-    # 2026-10-29T18-17-12-197-1xunf5b). They are the η a whole-block compact
-    # gradient touches at the same two probe points.
+    # The model prepares no compact sampler until a gradient is needed.
+    # Structural cell supports cover every derivative at changed points,
+    # including coordinates whose derivative is zero at the base point.
     @test m.cell_gradient.state[] === nothing
     st = BRM._brm_nlme_cell_state(m)
     globals = sort!(vcat(m.theta, m.sigma))
     for (i, block) in enumerate(m.view.subject_coordinates)
         selection = sort!(vcat(globals, block))
         slots = [searchsortedfirst(selection, j) for j in block]
-        points = [BRM._brm_nlme_read_point(m.unit, globals, block, selection, phase)
-            for phase in (1, 2)]
+        points = [m.unit[selection] .+ 0.2 .* randn(rng, length(selection))
+            for _ in 1:2]
         gradient = zeros(length(selection))
         for (g, cell) in enumerate(m.cell_query)
-            sampler = BRM._rk_nlme_compact_cell_sampler(m.backend, cell.names, m.unit,
+            sampler = compact_cell_oracle(m.backend, cell.names, m.unit,
                 selection)
             for (k, p) in enumerate(cell.positions[i])
                 touched = falses(length(block))
                 for active in points
-                    BRM._rk_nlme_compact_cell_value_and_gradient!(sampler, gradient,
+                    cell_value_and_gradient!(sampler, gradient,
                         m.unit, active, selection, p)
                     touched .|= .!iszero.(gradient[slots])
                 end
-                @test st.reads[i][g][k] == block[touched]
+                @test issubset(block[touched], st.reads[i][g][k])
+                footprint_query = BRM._rk_nlme_cell_footprint_query(cell.query)
+                for active in points
+                    # A footprint kernel takes the packed Vector it was
+                    # prepared from, as `_brm_nlme_structural_reads` passes it.
+                    point = copy(m.unit)
+                    point[selection] = active
+                    support = BRM._rk_nlme_cell_footprint(footprint_query, point, p)
+                    @test Set(st.reads[i][g][k]) == Set(intersect(block, support))
+                end
             end
         end
     end
-    # SVI prepares one compact sampler per cell group, selecting the globals
-    # and the draws each cell reads, whatever the subject's block length.
+    # SVI has its own partition workspace and activates the covariance
+    # coordinates too. The complete target split below checks those gradients.
     t = BRM._brm_svi_target(m)
-    @test length(t.plan.samplers) == length(m.cell_query)
-    @test all(i -> all(g -> all(sel -> length(sel) == length(t.plan.buffers[g].active),
-        t.plan.selections[i][g]), eachindex(m.cell_query)), eachindex(t.units))
+    @test t.plan.sampler !== st.plan.sampler
     check_svi_split(rk, m, m.unit .+ 0.3 .* randn(rng, length(m.unit)))
     # A regional panel: nested districts, municipalities and district-years,
     # completed (non-centred) covariate values, and district-year totals.
@@ -333,7 +352,9 @@ const SVI_NESTED = (; subject_group=:subject, nested_groups=(unit=:obs_subject,)
         nested_groups=PANEL_NESTED)
     check_svi_split(panel_rk, panel_m,
         panel_m.unit .+ 0.1 .* randn(rng, length(panel_m.unit)))
+end
 
+@stestset "nested units: subject blocks of different lengths fit" begin
     # The fit against NUTS: unit factors of every length settle.
     rk = RKBRMI(nested_model(svi_nested_data(Xoshiro(14), 30)))
     m = brm_nlme_model(rk; ad_backend=NLME_AD, SVI_NESTED...)

@@ -967,6 +967,17 @@ julia --startup-file=no --project=test test/rk_planning_specialization.jl
 
 ## NLME estimators
 
+`nlme_connected.jl` checks explicit `unit_partition=:connected` with generic
+Gaussian models: structural transitive connectivity, dormant branches and zero
+coefficients, indivisible joint observations, exact likelihood/gradient and
+prior accounting, complete-unit SVI minibatches, optimizer continuation,
+streaming membership checks, and a Laplace marginal against an analytic
+Gaussian marginal. `nlme_connected_fit.jl`, in the NLMEEstimation scratch
+environment below, checks repeated covariance families, protocol agreement,
+start transport, scientific labels and empirical Bayes modes against the
+analytic conditional Gaussian, plus a short SAEM call. Neither rewrites the
+authored model or uses numerical derivatives as an oracle.
+
 `nlme_joint_start.jl` checks a complete NLME estimate against the same
 BRMI's compiled Stan model: non-unit covariance and natural subject effects
 round-trip through Stan's unconstrained coordinates, fixed/free indices
@@ -1309,8 +1320,7 @@ environment above.
 
 `nlme_estimation_ext.jl` covers the NLMEEstimation.jl protocol extension:
 batched and single-subject evaluation (including `check_protocol` and online
-SAEM on ragged joins, and SAEM's batched population gradient for flat grouped
-rows), subject-cell population gradients,
+SAEM on ragged joins and flat grouped rows), unit-partition population gradients,
 analytic η Hessian blocks, Gaussian observation moments
 and colored η Jacobians, `check_protocol`, and Newton posthoc against
 independent oracles. Its Gaussian checks include arrays observed within plate
@@ -1334,6 +1344,41 @@ with one omitted: `check_protocol` and the Laplace value and gradient against th
 same lengths computed by `sort!(unique(...))`. A stub product checks that a cell
 group moves to reverse over forward on `EnzymeRuntimeActivityError` alone, whatever
 Enzyme can take today.
+
+`nlme_partition.jl` checks strict structural ownership before returning an
+NLME model, including a cross-unit dependency in a dormant branch, and a valid
+unit with no observations in one group. It also checks exact cell-wise
+curvature edges and bounds allocations when observations repeat a support.
+Its dense-point testset checks that a one-unit η gradient (RK's local-only
+`shared=false` route) equals the η entries of the full gradient, that the
+query and plan work points equal the unit point after every call, and that one
+unit's allocations do not grow with the number of units (3 against 300).
+`nlme_units_panel.jl` covers nested
+partition likelihoods, gradients, cell-based Hessian sparsity and allocation
+scaling. The `nlme_svi.jl` filters `minibatch split` and
+`structural footprints and target split` check the wider SVI gradients without
+running its longer sampling comparisons.
+
+`nlme_car_separator.jl` checks the separated CAR law, coordinate transport,
+replays and sparse unit supports. Its `car identity geometry` filter checks
+strict cell values and structural ownership independently of unit plans.
+The `strict car partitions` filter compares
+both shared and unit gradients with independent per-cell reverse passes for
+ICAR and BYM2, including CAR unit terms. Graph-visible identity geometry needs
+ReactiveKernels 0.1.33 / ReactiveKernelsPPL 0.1.27 or later; strict partition
+evaluation requires 0.1.36 / 0.1.30 for uniform empty/nonempty plans and
+scheduled-loop resets. Lower-bounded shares completions evaluated
+through strict partitions (`nlme_lower_shares.jl`) require 0.1.42 / 0.1.39,
+which keeps shapes through nested data-only helpers inside sampled
+expressions. Scan-captured sigma rows and censored ragged factors need the
+0.1.47 / 0.1.43 floors. Shared-prefix value queries and gradients need
+0.1.48 / 0.1.51; packed gathered-column shapes need 0.1.50 / 0.1.52.
+RKPPL 0.1.54 or later also keeps shared-prefix binding in the
+latest world and preserves custom packed-vector storage and local reads.
+The grouped HSGP variants in `nlme_svi.jl` check
+value/gradient parity and shared-cache refresh across changed points.
+Both partition fixtures use ordinary Enzyme Reverse
+with the repaired dogfood revision pinned by `setup_env.jl`.
 
 `nlme_laplace_capability.jl` checks an optional Laplace refusal using a toy
 recurrence whose selected outputs are summed. It verifies that the capability
@@ -2398,13 +2443,17 @@ Every one of these was paid for by a failed resolve; none is stylistic.
   static-activity repair from `7a886d9` (Enzyme snag
   `static-reverse-s-f9483e9c`) and the augmented-helper JIT-symbol repair
   (Enzyme snag `forward-over-rev-188051dc`), which preserves the `digamma`
-  partials used by negative-binomial cells. The exact pin and declared
+  partials used by negative-binomial cells. Strict partition gradients
+  need `a6458e9c` for constant plans and compact overlays; the ordinary
+  Reverse fixtures do not enable runtime activity. The exact pin and declared
   libEnzyme build come from `setup_env.jl`. The pin includes `3a89b497`'s compact
   nested-AD overlay repairs for sum factors and the dynamic-call Hessian
   repair needed by lower-bounded completion geometry. It also repairs
   positive-tail `erfcx` derivatives through third order (Enzyme snag
   `erfcx-positive-t-db1c8c84`), required by scaled-tail likelihoods in the
-  embedded Laplace.
+  embedded Laplace. Its libEnzyme also repairs the integer-division fold
+  that prevented grouped-HSGP partition gradients from compiling on Julia
+  1.10 with default bounds (Enzyme snag `enzyme-type-anal-b401ef8f`).
   `setup_env.jl` materializes the pinned dogfood commit from the KB host's
   Enzyme mirror when available, develops its nested `lib/EnzymeCore`
   0.8.27 beside it (Pkg 1.10 ignores Enzyme's `[sources]`; registered

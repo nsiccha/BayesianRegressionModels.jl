@@ -439,11 +439,24 @@ brm_lower_grouped_local(z, entry_ids, entry_group, entry_slot,
     return values
 end
     ),
-    # A separated `car` field's shared values from its shared coordinates
-    # (`car_separation.jl`): an ordinary function, linear in their count.
-    brm_car_shared_values = :(
-function brm_car_shared_values(w, last, scale, weight)
-    return BayesianRegressionModels._brm_car_shared_values(w, last, scale, weight)
+    # The data of a separated car field's shared-value map, computed once
+    # at binding, and its graph-visible row form.
+    brm_car_shared_rows = :(
+function brm_car_shared_rows(last)
+    return BayesianRegressionModels._brm_car_shared_rows(last)
+end
+    ),
+    brm_car_shared_coefficients = :(
+function brm_car_shared_coefficients(last, scale, weight)
+    return BayesianRegressionModels._brm_car_shared_coefficients(last, scale, weight)
+end
+    ),
+    brm_car_shared_local = :(
+brm_car_shared_local(w, rows, coefficients, row_ids) = begin
+    values = ReactiveKernels.plate(row_ids) do j
+        sum(w[rows[j]] .* coefficients[j])
+    end
+    return values
 end
     ),
     # An ordinary whole-value contrast composes with whole-value smooths.

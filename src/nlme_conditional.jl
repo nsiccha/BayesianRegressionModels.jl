@@ -183,7 +183,7 @@ function brm_nlme_conditional_problem(map::BRMNLMEJointMap, start::NamedTuple;
     margins = NamedTuple[]
     for k in frame.rk[free]
         i = view.subject[k]
-        push!(subjects, view.levels[i])
+        push!(subjects, view.subject_levels[view.coordinate_subject[k]])
         push!(margins, view.subject_margins[i][
             only(findall(==(k), view.subject_coordinates[i]))])
     end

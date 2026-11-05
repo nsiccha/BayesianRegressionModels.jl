@@ -253,20 +253,41 @@ const PINS = [
     # exemplars for a single sum, including empty reductions and selections.
     # 260d9a94 (RK 0.1.35 / RKPPL 0.1.29) preserves shape facts across
     # visible grouped kernels, so strict NLME cells read their owning group.
+    # 4925e53d (RK 0.1.36 / RKPPL 0.1.30) includes homogeneous
+    # empty/nonempty partition plans and scheduled-loop resets.
     # f851e008 (RK 0.1.37 / RKPPL 0.1.31) also binds data-computed entry
     # axes before shape inference (RK snag prepare-a-strict-13a9e1b8).
     # 81363978 (RK 0.1.38 / RKPPL 0.1.32) binds visible tuple-geometry
     # metadata operands before shape inference (prepare-one-resp-b1f58f91).
     # 23d26ca1 (RK 0.1.39 / RKPPL 0.1.33) keeps indexed direct predictor
     # reads beside reductions local (sum-factor-outer-ca5cc80e).
+    # RKPPL 0.1.34: optional SMC adapter and data-only checkpoints.
+    # 4df6564e (RK 0.1.40 / RKPPL 0.1.35) preserves natural scalar reads
+    # of predictor elements in strict partitions, including separate row domains.
+    # RKPPL 0.1.36: finite-state filtering, design rows and grouped scan outputs.
+    # RKPPL 0.1.38 (RK 0.1.42): shared-prefix partition sampling and mixed
+    # concrete partition-label plans.
+    # 171f36b9 (RKPPL 0.1.39) keeps shapes through nested data-only helpers
+    # inside sampled expressions, such as a bounded shares completion's
+    # `lower=lo[x_shares_free]` (RK snag bounded-shares-g-792cef37);
+    # dc06acc8 is the RK main containing it.
+    # 8f7832e7 (RK main after 0.1.42 / RKPPL 0.1.39, no version change) bounds
+    # partition-plan and metadata compilation at Atlas size: value-only shape
+    # reads stay out of plans and bookkeeping helper calls stay separate
+    # kernels (RK snag full-atlas-value-740085e1).
     # RKPPL 0.1.37: exact nonfinite SMC diagnostics across mutation tasks.
     # RKPPL 0.1.42 (RK 0.1.44): independent SMC pilot tuning, adaptive pilots and
     # portable correlated references.
     # RKPPL 0.1.47 (RK 0.1.47): the learned reference fits inflated pilot moments
     # (`reference_inflation`, default 2); stage summaries add coordinate and
     # reference SDs (snag learned-smc-refe-cc5677a1).
+    # RK 0.1.50 / RKPPL 0.1.52: shared-prefix queries, packed gathered-column
+    # shapes, strict row reductions and whole-row gathers,
+    # unchanged scan captures, and censored ragged cell-factor projections.
     # RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
     # helper calls, guarded captures and broadcast observation locations.
+    # RKPPL 0.1.54 binds shared-prefix queries in the latest world and preserves
+    # custom packed-vector storage and its local reads.
     # 5e9d2d03 contains 8b7caa90: guarded gathered sums retain reductions
     # through redundant typed aliases (RK 0.1.52 / RKPPL 0.1.55).
     # RKPPL 0.1.57: independent prepared-density SMC factories.
@@ -284,12 +305,13 @@ const PINS = [
     # generated programs hold modules, as a Laplace plan over a gmrf does.
     # f17b6a24 (RK 0.1.67 / RKPPL 0.1.76) prepares strict observation-cell
     # footprints of a per-cell joint field and its named-tuple row reads.
-    # 0.1.90 supplies row-dependent/shared probabilities; 0.1.92 composes native
-    # heterogeneous MixtureModel graphs; 0.1.93 retains authored documentation.
-    # Includes the recoverable adaptive pilot lifecycle introduced in PPL 0.1.91.
-    # 405190ae (RK 0.1.81 / RKPPL 0.1.94) preserves empty observation bindings.
-    # a9a7e9a2 (RK 0.1.84 / RKPPL 0.1.97) adds bound-data LKJ dimensions in
-    # reusable definitions and contains every revision above.
+    # 0ee20c70 (RKPPL 0.1.93): authored local and reusable-definition docs.
+    # Includes native row-dependent/shared mixture probabilities (0.1.90).
+    # Also contains the adaptive pilot lifecycle introduced in RKPPL 0.1.91.
+    # a9a7e9a2 (RKPPL 0.1.97): bound-data LKJ dimensions in reusable definitions.
+    # Also contains RK 0.1.82 (b08cb894), which retains live broadcast fusion
+    # after data binding, so batched vector-cell readers reuse their result
+    # buffers at every position.
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a9a7e9a2182ef2057c004a3c81dd74eef4f3a699"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
@@ -306,12 +328,18 @@ const PINS = [
     # plain Reverse when the sparse Laplace differentiates an `@plate` cell.
     # 3a89b497 includes the compact nested-AD overlay repairs; its declared
     # libEnzyme is 782c9d95, the sum-factor producer's tested native pair.
+    # a6458e9c (libEnzyme 782c9d95) repairs ordinary Reverse over
+    # constant plan fields and compact grouped overlays.
     # 0e251cfb (libEnzyme build 782c9d95) also fixes second derivatives
     # through dynamic calls on Julia 1.10 (Enzyme snag compute-an-ordin-902b6418),
     # including the lower-bounded completion's ParameterGeometry callbacks.
     # 5325554c keeps that libEnzyme build and repairs erfcx derivatives in
     # positive tails through third order (Enzyme snag erfcx-positive-t-db1c8c84).
     # Embedded Laplace needs those orders for scaled-tail likelihoods.
+    # 5325554c also contains the wide-plan tuple-field typing repair used by
+    # large compact partitions (32d31ca; same libEnzyme build 782c9d95).
+    # 68ed90fe declares libEnzyme 2063db12, repairing the integer division
+    # fold that stopped grouped-HSGP partition gradients on Julia 1.10.
     # ae936763 (libEnzyme build 0dd21172) includes 71c203f9: Julia 1.10
     # inference preserves nested reduction types during ordinary Reverse,
     # including sum(sum, columns) after matrix-valued plate helpers.
