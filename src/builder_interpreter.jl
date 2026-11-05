@@ -50,6 +50,8 @@ A named function definition, `f(df) = begin … end`, is not a builder value:
 write that with `@brm`.
 """
 function brm(source::Expr; mod::Module)
+    component = _brm_component_source(source)
+    component === nothing || return _brm_component(component, mod)
     (Meta.isexpr(source, :(=)) && !(source.args[1] isa Symbol)) && error(
         "brm: `$(sprint(Base.show_unquoted, source.args[1])) = …` defines a " *
         "function; pass the model block itself (`quote … end`), or write the " *

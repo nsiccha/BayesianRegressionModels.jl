@@ -38,10 +38,14 @@ struct _RKPreparedSubmodelAssignment
     columns::Dict{Symbol,Any}
     bindings::Vector{Pair{Symbol,Any}}
     globals::Vector{Symbol}
+    fit_inputs::Dict{Symbol,Symbol}
+    observed::Tuple{Vararg{Symbol}}
+    component::Any
 end
 
 function _rk_prepare_submodel_values(program)
     submodels = Any[]
+    available = Set(op.name for op in program.operations)
     for operation in program.operations
         operation.role === :predictor || continue
         rhs = last(getargs(operation.expression))
@@ -49,8 +53,11 @@ function _rk_prepare_submodel_values(program)
         getf(rhs) === kernel && continue
         definitions, statements = Expr[], Expr[]
         columns, bindings = Dict{Symbol,Any}(), Pair{Symbol,Any}[]
-        claimed = _rk_submodel_rhs!(definitions, statements, columns, bindings,
-            operation.name, getf(rhs), rhs)
+        claimed = getf(rhs) isa BRMComponent ?
+            _rk_submodel_rhs!(definitions, statements, columns, bindings,
+                operation.name, getf(rhs), rhs; reserved=available) :
+            _rk_submodel_rhs!(definitions, statements, columns, bindings,
+                operation.name, getf(rhs), rhs)
         claimed === nothing && continue
         definitions = Expr[_rk_canonical_source_definition(d) for d in definitions]
         outputs = Set{Symbol}()
@@ -59,12 +66,15 @@ function _rk_prepare_submodel_values(program)
             "RK backend: native submodel `$(operation.name)` did not emit its result binding")
         referenced = Set{Symbol}()
         foreach(statement -> _rk_source_symbols!(referenced, statement), statements)
-        available = Set(op.name for op in program.operations)
         globals = sort!(collect(intersect(
             setdiff(referenced, outputs, Set(keys(columns)), Set(first.(bindings))),
             available)))
         push!(submodels, _RKPreparedSubmodelAssignment(operation.name, definitions,
-            statements, columns, bindings, globals))
+            statements, columns, bindings, globals,
+            claimed isa NamedTuple ? get(claimed, :fit_inputs, Dict{Symbol,Symbol}()) :
+                Dict{Symbol,Symbol}(),
+            claimed isa NamedTuple ? get(claimed, :observed, ()) : (),
+            claimed isa NamedTuple ? get(claimed, :component, nothing) : nothing))
     end
     Tuple(submodels)
 end

@@ -63,6 +63,7 @@ makedocs(
     pages = [
         "Home" => "index.md",
         "Formula terms" => "formula-terms.md",
+        "Reusable components" => "components.md",
         "Space-time fields" => "space-time-fields.md",
         "Likelihoods" => "likelihoods.md",
         "Feature atlas" => "feature-atlas.md",

@@ -754,6 +754,11 @@ begin
 end
 """)
 _brm(x::Expr; df=nothing) = begin
+    component = _brm_component_source(x)
+    if component !== nothing
+        isnothing(df) || throw(ArgumentError("@brm: a component definition takes its inputs as arguments, not a data frame"))
+        return _brm_component_definition(component)
+    end
     (; named, lhs, body, source, columns) = _brm_builder_code(x; df)
     if isnothing(df) && named
         # named no-df: the caller's `f(df) = body` function definition.
@@ -3078,7 +3083,8 @@ struct BRMI{O<:NamedTuple}
 end
 BRMI(operations::NamedTuple) = BRMI(operations, ())
 BRMI(;kwargs...) = BRMI((;kwargs...))
-_brm_documentation(brmi::BRMI) = brmi.documentation
+_brm_documentation(brmi::BRMI) =
+    (brmi.documentation..., _brm_component_documentation(brmi)...)
 _brm_with_documentation(brmi::BRMI, docs) = BRMI(brmi.operations, Tuple(docs))
 
 # Planning reads a BRMI's operations as syntax. Their NamedTuple type spells

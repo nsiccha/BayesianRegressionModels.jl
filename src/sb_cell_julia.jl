@@ -133,6 +133,7 @@ function _sb_cell_family(x, scope)
     Meta.isexpr(x, :call) || return _sb_cell_value(x, scope)
     head = first(x.args)
     callable = _sb_cell_binding(scope, head)
+    callable isa BRMComponent && return _sb_component_cell_call(callable, x, scope)
     args = Any[_sb_cell_argument(a, scope) for a in x.args[2:end]]
     if callable isa Type && callable <: Distribution
         positional = Tuple(filter(!_sb_cell_keyword_argument, args))

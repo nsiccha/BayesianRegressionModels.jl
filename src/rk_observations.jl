@@ -30,7 +30,7 @@ Base.@nospecializeinfer function _rk_cell_module(@nospecialize(brmi::BRMI))
     (; mod=_brm_inline_scope(first(getargs(last(first(operations))))))
 end
 
-Base.@nospecializeinfer function _rk_unconditioned_plan(@nospecialize(brmi::BRMI))
+Base.@nospecializeinfer function _rk_has_bound_observation(@nospecialize(brmi::BRMI))
     # Bound formula observations, including kernel-cell inputs, use the
     # ordinary planner. Empty bound arrays still retain this fitted role.
     for node in _brm_operation_values(brmi)
@@ -38,7 +38,11 @@ Base.@nospecializeinfer function _rk_unconditioned_plan(@nospecialize(brmi::BRMI
         operation = parent(node)
         operation isa ExprColumn{typeof(~)} || continue
         lhs, rhs = getargs(operation, 2)
-        _brm_observation_name(lhs) === nothing || return nothing
+        _brm_observation_name(lhs) === nothing || return true
+        if rhs isa ExprColumn && getf(rhs) isa BRMComponent
+            nested = _brm_component_instance(getf(rhs), rhs)
+            _rk_has_bound_observation(nested) && return true
+        end
         rhs isa ExprColumn && getf(rhs) === kernel || continue
         args = getargs(rhs)
         isempty(args) && continue
@@ -47,9 +51,13 @@ Base.@nospecializeinfer function _rk_unconditioned_plan(@nospecialize(brmi::BRMI
         params, body = parts
         for (param, column) in zip(params, args[2:end])
             _sb_cell_param_observed(body, param) || continue
-            _brm_observation_name(column) === nothing || return nothing
+            _brm_observation_name(column) === nothing || return true
         end
     end
+    false
+end
+Base.@nospecializeinfer function _rk_unconditioned_plan(@nospecialize(brmi::BRMI))
+    _rk_has_bound_observation(brmi) && return nothing
     # The emitted declaration inventory also finds synthetic observations
     # (for example a modeled baseline). Endpoint absence alone must never
     # discard their densities or their inference coordinates.
@@ -261,7 +269,8 @@ end
 #
 # A statement defining one of `densities` stays whether or not a response
 # reads it: the grouped entries of `mi(x)::shares(total, rows)`, whose density
-# carries what their residuals say about the law.
+# carries what their residuals say about the law, or a component call whose
+# own observations contribute to the likelihood.
 function _rk_fitted_source(emitted, conditioned; retained=(), coordinates=nothing,
         densities=())
     isempty(conditioned) && return emitted
@@ -350,6 +359,8 @@ _rk_structural_responses(plan::_RKStructuralPlan) = Tuple(unique(
 # With the placeholders whose observation carries a non-centered
 # `mi(x)::shares(total, rows)` completion's group terms (`_rk_mi_grouped_arguments!`).
 _rk_observed_names(plan::_RKValuePlan) = (Tuple(o.name for o in plan.observations)...,
+    (name for assignment in plan.assignments if assignment isa _RKPreparedSubmodelAssignment
+        for name in assignment.observed)...,
     (c.totals.weights for c in plan.completions if c.noncentered && c.totals !== nothing)...,
     (_rk_mi_free_weight_name(c) for c in plan.completions if _rk_mi_free_weight_name(c) !== nothing)...,
     _rk_car_term_placeholders(plan)...)

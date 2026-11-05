@@ -68,6 +68,8 @@ end
 # not rows of a formula predictor (a covariance matrix has n² entries).
 function _brm_parameter_length(column::NamedColumn)
     declaration = parent(column)
+    declaration isa _BRMComponentInput && return (
+        declaration.value isa NamedColumn ? _brm_parameter_length(declaration.value) : nothing)
     declaration isa ExprColumn{typeof(~)} || return nothing
     lhs, prior = getargs(declaration, 2)
     lhs isa NamedColumn && parent(lhs) isa MissingColumn && prior isa ExprColumn ||
