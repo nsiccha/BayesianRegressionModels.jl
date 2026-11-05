@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.189
+## 0.2.195
 
 - Changed: one-unit NLME calls from several tasks run in parallel. Each call
   takes its own evaluator from the model's pool: the model's first, or one
@@ -28,6 +28,65 @@ instead of failing at run time.
   other threads unprotected. `brm_two_stage_fit` with `threads > 1` now
   samples its units through that pool instead of its own worker copies of the
   model, and therefore needs the repair as well.
+
+## 0.2.194
+
+- A function-style component's formula priors read its model-valued inputs on
+  `SBBRMI`, as its scalar priors already did: with `center` and `scale` bound
+  by the caller to parent parameters, `effect(value, Intercept) ~
+  Normal(center, 0.4)` and `sd(value, unit) ~ Exponential(scale)` build. They
+  failed with "model-level prior references `center`, a extension", so one
+  definition could not be called with different prior locations or scales.
+  `RKBRMI` already read such inputs in random-effect SD priors. Its
+  population-effect prior arguments remain numeric constants or data, in a
+  component as at model scope.
+
+## 0.2.193
+
+- Model views support readable `text/plain` output through HTMXObjects 0.1.65.
+  All eager tabs and disclosures retain their labels, source, documentation,
+  roles and dimensions without internal node dumps. Component defaults and
+  model helpers remain unevaluated. The dependency floor and test pins require
+  the shared renderer fix.
+
+## 0.2.192
+
+- `brm_coordinate_transport` pairs random-effect blocks declared inside a
+  function-style component call, plain or stratified `gr(g, by=b)`, including
+  per-margin scale laws, Student-t mixing weights, repeated calls over
+  different groupings and nested calls. Each call's scales, correlation factor
+  and standardized draws pair by its own level labels and margins, and their
+  addresses carry `scope = <call path>`. Such models previously refused with
+  unpaired `<call>.<block>.z` and `<call>_<block>_z_flat` coordinates.
+
+## 0.2.191
+
+- `brm_start`'s `component_inits` takes the top-level `inits` grammar for a
+  component call's own linear predictors and `|ID|` blocks on both backends:
+  `:left => (; rise=(; Intercept=v), rates=(; sd, cor, effects))` sets the
+  call's link-scale coefficients and its shared block's scales, correlation
+  (or covariance `rates = Σ`) and per-level effects, keyed by the call's own
+  levels. `base=:prior_median` also fills component-local population
+  coefficients and `|ID|` scales from their priors. RK still needs no
+  compiled Stan model.
+
+## 0.2.190
+
+- Model views render callable and authored Julia documentation through the shared
+  HTMXObjects documentation projection. Unresolved Documenter references retain
+  their formatted labels without broken links, and doctest examples use Julia
+  highlighting in offline HTML. Original source and documentation records remain
+  unchanged. Requires HTMXObjects 0.1.62; both test pins select that release.
+
+## 0.2.189
+
+- Function-style components returning one internal plate's collected values
+  preserve one value per cell, including vector-valued cells, aliases and
+  nested component calls. Parent reads such as `field[row[i]][channel[i]]`
+  select the declared row and then its channel on both backends.
+  ReactiveKernels keeps selected-row locality instead of reading a flattened
+  whole; StanBlocks preserves the cell axis of its matrix storage. Formula
+  offsets still require scalar cells.
 
 ## 0.2.188
 
@@ -131,9 +190,10 @@ instead of failing at run time.
   ReactiveKernels commit to `b0ffcdc1` or a descendant. Checkpoints written
   with ReactiveKernelsPPL 0.1.97 or earlier are not migrated: resume them with
   their original versions or write a new initialization checkpoint.
-- RK `main` from `8e67ee82` currently breaks selective carried-window tuning
-  (`coordinates=:auto`) with a `MethodError` in `_cell_joined_rows`; BRM's test
-  pin stays on `b0ffcdc1` until ReactiveKernels repairs it.
+- At this release, RK `main` from `8e67ee82` broke selective carried-window
+  tuning (`coordinates=:auto`) with a `MethodError` in `_cell_joined_rows`, so
+  BRM's test pin used `b0ffcdc1`. RK `df3eb8872` repaired the regression; the
+  test pin now includes that repair through `db6bca825`.
 
 ## 0.2.181
 

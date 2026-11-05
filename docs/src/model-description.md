@@ -4,7 +4,7 @@
 
 [`brm_model_view`](@ref) returns a reusable HTMXObjects semantic tree with the
 declaration, data/parameter roles, value ranks and dimensions. Load HTMXObjects
-0.1.60 or later; no web demo app is needed:
+0.1.65 or later; no web demo app is needed:
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
@@ -23,20 +23,19 @@ Pass the bound model to the view:
 using HTMXObjects
 
 view = brm_model_view(model_view_demo; title="Regression model")
-repr("text/html", view)       # also text/markdown
+repr("text/html", view)       # also text/markdown and text/plain
 ```
 
-With HTMXObjects 0.1.60, the `text/plain` projection of a tabbed view exposes
-internal node representations. Use Markdown for readable text until the shared
-renderer fixes this limitation; HTML and PDF are unaffected.
+The `text/plain` projection includes every eager tab and disclosure as readable
+text: labels, complete source, documentation, roles and dimensions. Component
+defaults remain source expressions and are never evaluated by inspection.
 
-Callable docstrings can also contain Documenter `@ref` links. Those references
-currently become unresolved local links outside Documenter, and `export_site`
-reports an incomplete bundle when it encounters them. Check the export result
-before distributing a static bundle.
-Julia `jldoctest` fences also request an unavailable browser highlighting grammar
-in this version. The text remains visible, but a strict no-failed-requests check
-reports the missing asset.
+Callable and authored docstrings use HTMXObjects' Julia documentation projection. Documenter
+`@ref` references without a known destination retain their formatted labels
+without becoming broken navigation links. Ordinary links retain their destinations.
+Julia `jldoctest` examples keep their code and expected output and use Julia
+highlighting. HTML and Markdown/PDF share this documentation projection; the
+original source and records from `brm_documentation` remain unchanged.
 
 Use the result inside another semantic page or as an HTMXObjects route result.
 Source, roles/ranks and callable documentation have separate tabs. Callable

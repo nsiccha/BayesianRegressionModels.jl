@@ -6,6 +6,12 @@ in-cell consumers. It compares physical values, normalized densities and native
 Reverse gradients with independent formulas and compiled Stan, and retains the
 row-length and scalar-cell checks. It accepts testset substring filters.
 
+`model_view_documentation.jl` checks authored Julia documentation in builder and
+bound-model views, plus callable docs after binding: references become formatted labels,
+ordinary URLs remain linked, doctest contents survive, and source/doc records
+remain unchanged. The bootstrap selects HTMXObjects 0.1.65, which also renders
+tabbed views as readable plain text without internal node representations.
+
 `heterogeneous_mixtures.jl` checks native mixtures of different full-real
 scalar families and custom component graphs against independent normalized
 densities and compiled Stan. It covers native Reverse, pointwise likelihood,
@@ -52,6 +58,14 @@ scales and simplexes, and preserves unaddressed values and top-level starts.
 Run it as a standalone script in the test environment; it compiles Stan even
 when the resulting point is consumed by RK.
 
+`component_prior_inputs.jl` checks component formula priors that read the
+caller's parameters through inputs: population-effect locations and scales and
+a component-local `|ID|` block's SD prior. It compares compiled Stan densities
+and gradients with an independent density, checks each input's contribution
+along its coordinate, and covers a nested call and a call whose input is a
+number. The SD case is also checked on `RKBRMI`. It accepts testset substring
+filters; run it as a standalone script in the test environment.
+
 `component_start_values.jl` checks native component-local starts, recursive
 scalar prior medians, repeated and nested call paths, constrained values,
 explicit precedence, numeric-base preservation and input immutability.
@@ -63,6 +77,14 @@ nonidentity factors, matrix shape and support, unchanged base values and input
 immutability. It also combines top-level matrices with scalar/vector starts,
 component-local factors and prior medians. Add `--stan` for independent
 compiled-Stan readback and physical coordinate parity.
+
+`component_formula_starts.jl` checks `component_inits` entries that name a
+component call's own linear predictors and shared `|ID|` blocks: link-scale
+coefficients, block scales, correlation, covariance and per-level effects in
+repeated and nested calls over different levels, component-local coefficient
+and scale prior medians, unchanged top-level values and refusals. The default
+run only builds RK models; `--stan` adds compiled readback of each call's
+predictor values and cross-backend physical-point parity.
 
 `smc_tuning_lifecycle.jl` checks adaptive pilot interruption before any draw and
 during a later grid pilot, nested Treebars progress, input ownership, endpoint
@@ -77,8 +99,9 @@ field model at initialization in one Julia process and resumes it in another,
 through `smc_generated_law_process.jl`. The field's law is bound in the
 generated RK program module, so the consumer first confirms that the raw law
 expression cannot be deserialized, then requires exact window and schedule
-replay from a serialized partial and from disk. It needs the ReactiveKernelsPPL
-0.1.98 pin from `setup_env.jl`.
+replay from a serialized partial and from disk. It needs ReactiveKernelsPPL
+0.1.98 or later. The `setup_env.jl` pin also carries the selective-window
+capture-footprint repair, covered by `smc_window_selective_api.jl`.
 
 `scoped_components.jl` checks function-style BRM components with independent
 local priors, explicit shared inputs, nested calls, vector results, and plate
@@ -90,6 +113,12 @@ retains component headers and local provenance at each nested call site.
 Run it as a standalone script in the test environment; StanBlocks 0.2.25
 preserves keyword labels when a component is called inside a plate, and
 ReactiveKernelsPPL 0.1.93 retains authored documentation.
+
+`component_cell_returns.jl` checks returned plate collections through direct,
+aliased and nested component calls. It
+verifies row/channel selection, strict per-row dependency footprints, emitted
+source replay, normalized densities and native gradients against compiled Stan.
+Run it as a standalone script in the same test environment.
 
 `authored_documentation.jl`, `authored_documentation_binding.jl`,
 `authored_documentation_printing.jl`, `authored_documentation_rk_source.jl`
@@ -2180,7 +2209,7 @@ equals the generic path's exactly and its gradient to rounding, that both agree
 with central differences, and that inputs are unchanged. A width has to be
 checked on its own: the pass works at four margins, and at five Enzyme raised
 `EnzymeNoTypeError` until the repair in Enzyme `6053067f`. The test bootstrap
-pins `d3189970`, which contains that repair and declares libEnzyme `33709d12`.
+pins `b2bb4cb6`, which contains that repair and declares libEnzyme `f392eba5`.
 
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, StanBlocks/BridgeStan density and gradient
@@ -2568,6 +2597,11 @@ semantic projections. It verifies that viewing a model never evaluates a custom
 helper. The descriptor fixture checks constrained simplex dimensions and keeps
 logical quantities separate from generated carriers, without fitting or compiling
 Stan. Set `BRM_MODEL_VIEW_HTML` to an output path to save a browser preview.
+The model-view files share `model_view_plain_text_checks.jl`: titles and tab
+labels must occupy real lines, source remains multiline, default-input rows are
+readable fields, and renderer implementation dumps are absent. These checks cover
+builders, bound declarations, reusable components, descriptors and prepared RK
+views, retaining the helper/default non-evaluation guards.
 
 `julia --project=test test/model_view_edge_cases.jl` covers joint and transformed
 response roles, callable documentation inside mixture-component lists, optional
@@ -2590,11 +2624,9 @@ The browser script owns and closes its temporary server and Chrome process.
 For fresh RK, descriptor and component captures, also run
 `julia --project=<rk-env> web-macro/validate_model_view_prepared_export.jl <output-dir>`
 after the main export, then append `--prepared` to the browser command.
-With HTMXObjects 0.1.60 these additional fixtures expose unresolved Documenter
-`@ref` links (incomplete static export) and a missing `jldoctest` browser grammar.
-The checks intentionally fail on those upstream gaps; do not treat their
-screenshots as evidence of a complete prepared bundle. The base export and
-browser check remain independently runnable.
+The current dependency floor includes Julia-documentation projection and the
+shared Julia doctest grammar. Both the base and prepared bundles must pass strict
+export and browser checks; the base checks remain independently runnable.
 The RK environment must contain BRM, HTMXObjects, ReactiveKernels and
 ReactiveKernelsPPL. This explicitly prepares toy objects, then exports the
 supplied objects with helper evaluation guarded off. Browser checks cover
