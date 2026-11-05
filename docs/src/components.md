@@ -147,9 +147,40 @@ slices names, so bind the field first, `recovery = kin.recovery`, and read
 `recovery[i]` in the cell. Stan returns the values as one tuple; ReactiveKernels
 reads each from the call's own scope. The call itself is not a value: reading
 bare `kin`, an unknown field, or `kin.recovery[i]` inside a plate is refused
-with the supported spelling. A component called inside a plate cell returns one
-value per cell. A positional tuple return is refused, because the parent reads
-values by name.
+with the supported spelling. A positional tuple return is refused, because the
+parent reads values by name.
+
+A component called inside a plate cell can return named values too. Each cell
+owns its call's locals and reads the fields in the cell:
+
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:NamedCellComponentsDocs), raw"""
+using BayesianRegressionModels, Distributions
+
+"Two related curves from one pair of local coefficients."
+@brm function bounds(x, scale)
+    a ~ Normal(0, scale)
+    b ~ Normal(1, 0.2)
+    return (; lo = a + b * x, hi = a - b * x)
+end
+
+per_cell = @brm begin
+    @plate for i in eachindex(x)
+        cell ~ bounds(x[i], scale)
+        y_lo[i] ~ Normal(cell.lo, 0.5)
+        y_sum[i] ~ Normal(cell.lo + cell.hi, 0.5)
+    end
+    scale ~ Exponential(1)
+end
+
+model = per_cell((; x=[-0.4, 0.2, 0.7], y_lo=[0.1, 0.4, 0.8],
+                    y_sum=[0.3, -0.1, 0.2]))
+""", :model; title="Named values from a call in each plate cell", require_stan=true)
+```
+
+As at model scope, a bare `cell` or an unknown field is refused inside the
+cell.
 
 The existing `@brm model(data) = begin … end` form still defines a data-to-model
 builder. `merge(builder_a, builder_b)` still combines statements in one

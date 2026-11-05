@@ -105,6 +105,14 @@ cumulative-update, selective carried-window and prepared sparse-Laplace targets
 using small synthetic models. Run `test/setup_env.jl` first for the pinned RKPPL recovery contract and
 Treebars 0.1.5, then `julia --project=test test/smc_tuning_lifecycle.jl`.
 
+`smc_worker_forwarding.jl` checks that BRM forwards ReactiveKernelsPPL 0.1.100's
+worker controls on the same four targets: `grid_start=:independent` reaches every
+`brm_smc_tune` route and gives the same schedule at one and several workers, and
+`nthreads` on every `brm_smc_resume` route replaces a production checkpoint's
+saved worker cap without changing the resumed cloud. Its assertions hold at any
+thread count; run `julia -t 4 --project=test test/smc_worker_forwarding.jl` to
+also exercise concurrent pilots and workers.
+
 `smc_generated_law_recovery.jl` stops an adaptive pilot of a small `gmrf(...)`
 field model at initialization in one Julia process and resumes it in another,
 through `smc_generated_law_process.jl`. The field's law is bound in the
@@ -130,6 +138,11 @@ aliased and nested component calls. It
 verifies row/channel selection, strict per-row dependency footprints, emitted
 source replay, normalized densities and native gradients against compiled Stan.
 Run it as a standalone script in the same test environment.
+
+`component_direct_rows.jl` checks direct downstream reads of component cells
+with shared matrix inputs, including nested calls and a component result as
+the plate's only extent. It compares physical values, normalized densities,
+native Reverse gradients, compiled Stan and strict selected-row dependencies.
 
 `authored_documentation.jl`, `authored_documentation_binding.jl`,
 `authored_documentation_printing.jl`, `authored_documentation_rk_source.jl`

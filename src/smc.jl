@@ -34,14 +34,14 @@ function _brm_validate_smc_fit end
     brm_smc_tune(model; rng, init, reference=nothing,
         temperatures=nothing, pilot_steps=64, pilot=nothing,
         max_reflections=nothing, recording_target=nothing, pilot_evaluations=nothing,
-        reference_inflation=nothing, progress=nothing, callback=nothing,
+        reference_inflation=nothing, grid_start=nothing, progress=nothing, callback=nothing,
         checkpoint_dir=nothing, resume=false, overwrite=false,
         options=SMCOptions(), ad_backend=AutoEnzyme(mode=Enzyme.Reverse))
     brm_smc_tune(completed_fit::BRMSMCFit, cumulative_data; rng, init,
         temperatures=nothing, pilot_steps=64, pilot=nothing,
         max_reflections=nothing, recording_target=nothing, pilot_evaluations=nothing,
-        progress=nothing, callback=nothing, checkpoint_dir=nothing, resume=false,
-        overwrite=false,
+        grid_start=nothing, progress=nothing, callback=nothing, checkpoint_dir=nothing,
+        resume=false, overwrite=false,
         options=SMCOptions())
 
 Prepare bridge-specific independent pilots before running production particles.
@@ -62,6 +62,18 @@ geometry and the recording pool; `pilot_evaluations` sets the initial work
 window, not a hard total-work budget. `nothing` leaves these controls and
 `pilot` at RKPPL's defaults. Pilot draws are discarded; retained pilot
 evaluation counts exclude initialization and the first step-size search.
+
+Pilots run one after another by default (`grid_start=nothing`, RKPPL's
+`:sequential`): each grid pilot starts at the previous knot's final position,
+and no thread count shortens tuning. With `pilot=:adaptive`,
+`grid_start=:independent` (ReactiveKernelsPPL 0.1.100) starts every grid pilot
+at its own copy of `init` and runs up to `options.nthreads` of them at once,
+capped by the available Julia threads and the unfinished knots. The reference
+pilot still finishes first. Knot seeds are reserved in grid order, so the
+completed schedule is the same for every worker count, but it generally
+differs from the sequential schedule. The continuous pilot is sequential only.
+Keep `grid_start` unchanged when resuming a tuning checkpoint; `options.nthreads`
+may change there.
 
 Production uses the nearest frozen temperature knot,
 with ties selecting the higher knot. `temperatures` must increase strictly
@@ -208,9 +220,11 @@ function brm_smc_update end
 """
     brm_smc_checkpoint(fit::BRMSMCFit)
     brm_smc_resume(template::RKBRMI, checkpoint;
-        data=nothing, previous_data=nothing, ad_backend=AutoEnzyme(mode=Enzyme.Reverse))
+        data=nothing, previous_data=nothing, nthreads=nothing,
+        ad_backend=AutoEnzyme(mode=Enzyme.Reverse))
     brm_smc_resume(laplace_problem, checkpoint;
-        current=laplace_problem, previous=nothing, ad_backend=AutoEnzyme(mode=Enzyme.Reverse))
+        current=laplace_problem, previous=nothing, nthreads=nothing,
+        ad_backend=AutoEnzyme(mode=Enzyme.Reverse))
 
 Create a data-only checkpoint or restore it against an explicitly rebuilt
 original training `template`. Persist the checkpoint with Julia Serialization
@@ -225,6 +239,15 @@ layout and endpoint-density checks. It restores without advancing; continue
 with `brm_smc_fit`. Exact replay requires the same Julia/package versions,
 model code, data and configuration. File writing and atomic replacement belong
 to the caller.
+
+The checkpoint keeps the worker cap `options.nthreads` it was written with.
+`nthreads=n` (ReactiveKernelsPPL 0.1.100) replaces only that cap, for example
+`nthreads=Threads.nthreads()` after moving to a process with more threads; the
+workers used stay bounded by the available Julia threads and the particle
+count. Particle positions, weights, temperatures and the normalizer do not
+depend on it; per-worker sums in the stage diagnostics and the recorded worker
+count do. The window-checkpoint method `brm_smc_resume(model::BRMI,
+checkpoint)` takes the same keyword.
 
 A Laplace checkpoint requires explicitly reconstructed equivalent problems:
 `current` is the cumulative endpoint and `previous` the previous endpoint
