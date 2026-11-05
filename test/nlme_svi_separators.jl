@@ -64,6 +64,14 @@ end
     @test chain.policy.status === :satisfied
     @test chain.policy.trials <= 8 * 16
     @test length(chain.layout.globals) <= 4
+    carried = _brm_svi_separator_plan(evaluate, blocks, incidence;
+        global_coordinates=[1], max_unit_coordinates=4,
+        max_promoted_coordinates=4, preserve_globals=true)
+    @test carried.layout.globals == [1]
+    @test carried.policy.status === :carried
+    @test carried.policy.trials == 0
+    @test carried.policy.max_promoted_coordinates == 4
+    @test carried.policy.after > 1
     # Promotion cost includes the closure, not only the requested coordinate.
     evaluate = separator_oracle(n, hub; atomic=vcat([[1, 2]], blocks[3:end]))
     coupled = _brm_svi_separator_plan(evaluate, [[1]], ones(Int, n);

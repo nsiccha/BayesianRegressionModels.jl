@@ -26,7 +26,7 @@ end
 function _brm_svi_separator_plan(evaluate, blocks, incidence;
         global_coordinates=Int[], separator=:auto, max_unit_coordinates=4096,
         max_unit_work=1_000_000, max_promoted_coordinates=128,
-        max_passes=8, candidate_limit=16)
+        max_passes=8, candidate_limit=16, preserve_globals=false)
     separator in (:auto, :none) || throw(ArgumentError("separator must be :auto or :none"))
     max_unit_coordinates isa Integer && max_unit_coordinates > 0 ||
         throw(ArgumentError("max_unit_coordinates must be a positive integer"))
@@ -45,8 +45,11 @@ function _brm_svi_separator_plan(evaluate, blocks, incidence;
     before = quality.maximum
     promotions = NamedTuple[]
     trials = 0
-    status = separator === :none ? :disabled : quality.maximum <= 1 ? :satisfied : :pass_limit
-    if separator === :auto && quality.maximum > 1
+    status = separator === :none ? :disabled : quality.maximum <= 1 ? :satisfied :
+        preserve_globals ? :carried : :pass_limit
+    # Streaming retains the global Gaussian's coordinate identity. An unmet
+    # structural budget cannot spend another promotion allowance each window.
+    if separator === :auto && quality.maximum > 1 && !preserve_globals
         for pass in 1:max_passes
             best, best_quality, chosen = nothing, quality, Int[]
             within_budget = false

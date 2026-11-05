@@ -148,7 +148,7 @@ function _brm_svi_connected_ownership(m; global_coordinates=nothing, previous=no
         estimated, axis_blocks, requested)
     chosen = _brm_svi_separator_plan(evaluate, blocks, incidence;
         global_coordinates=promoted, separator, max_unit_coordinates,
-        max_unit_work, max_promoted_coordinates)
+        max_unit_work, max_promoted_coordinates, preserve_globals=previous !== nothing)
     layout = chosen.layout
     # Preserve carried ordinary coordinates that have no current observations.
     # Reclose after applying their saved seeds; membership changes are refused

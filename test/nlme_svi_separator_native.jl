@@ -1,7 +1,8 @@
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_connected_fixture.jl"))
 include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))
-using LogDensityProblems, Random
+include(joinpath(@__DIR__, "nlme_svi_producer_audit.jl"))
+using LogDensityProblems, Random, Serialization
 using ReactiveKernelsPPL: density_factors, select_factors, factor_coordinates
 
 function check_separator_density(t)
@@ -71,6 +72,16 @@ end
     limited = BRM._brm_svi_target(m; max_unit_coordinates=2,
         max_promoted_coordinates=1)
     @test limited.ownership.separator.status === :promotion_budget
+    limited_fit = brm_svi_fit(m; max_unit_coordinates=2,
+        max_promoted_coordinates=1, max_iterations=0, ndraws=0, threads=1)
+    limited_carry = brm_svi_checkpoint(limited_fit)
+    continued = brm_svi_fit(limited_carry, m; max_iterations=0, ndraws=0, threads=1)
+    @test continued.diagnostics.globals == limited_fit.diagnostics.globals
+    @test continued.diagnostics.units == limited_fit.diagnostics.units
+    @test continued.diagnostics.q == limited_fit.diagnostics.q
+    @test continued.diagnostics.separator.status === :carried
+    @test continued.diagnostics.separator.trials == 0
+    @test continued.diagnostics.separator.max_promoted_coordinates == 1
     t = BRM._brm_svi_target(m; max_unit_coordinates=2,
         max_promoted_coordinates=promotion_budget)
     println("SVI_HUB_PROMOTION before=", m.view.coordinates[none.globals],
@@ -87,7 +98,17 @@ end
         eachindex(t.units))
     @test manual.units == t.units && manual.globals == t.globals
     @test length(none.units) == 1
-    check_separator_density(t)
+    audit = svi_producer_audit(t,
+        [[offset + 0.12sin(j) for j in eachindex(m.unit)] for offset in (-0.31, 0.19)])
+    @test length(audit.checks) == 2
+    @test audit.units == t.units
+    @test length(audit.factor_inventory) == length(t.ownership.factors.events)
+    @test length(audit.likelihood_inventory) == sum(length, values(t.ownership.attribution))
+    io = IOBuffer()
+    Serialization.serialize(io, audit)
+    seekstart(io)
+    @test isequal(Serialization.deserialize(io), audit)
+    @test t.plan.point == t.m.unit
     check_separator_density(manual)
     options = (; max_unit_coordinates=2, max_promoted_coordinates=promotion_budget,
         batch_size=4, max_iterations=9, ndraws=8, unit_dense_limit=0)
@@ -119,7 +140,14 @@ end
     n = 17
     m = brm_nlme_model(RKBRMI(connected_model(connected_data(n,
         collect(1:n-1), collect(2:n)))); ad_backend=NLME_AD, unit_partition=:connected)
-    t = BRM._brm_svi_target(m; max_unit_coordinates=4, max_promoted_coordinates=4)
+    # Three scientific cuts also promote their intercept and scale parents.
+    cuts = findall(in((5, 10, 15)), m.view.coordinate_subject)
+    manual = BRM._brm_svi_target(m; separator=:none, global_coordinates=cuts)
+    original = BRM._brm_svi_target(m; separator=:none)
+    budget = length(setdiff(manual.globals, original.globals))
+    @test budget == 5
+    @test maximum(length, manual.units) <= 4
+    t = BRM._brm_svi_target(m; max_unit_coordinates=4, max_promoted_coordinates=budget)
     @test maximum(length, t.units) <= 4
     @test t.ownership.separator.status === :satisfied
     @test t.ownership.separator.trials <= 128
