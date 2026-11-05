@@ -8055,7 +8055,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     dcol_names    = Symbol[]
     lp_cols       = Any[]
     read_outputs  = Symbol[]
-    assigned_inputs = Symbol[]
+    value_inputs = Symbol[]
     ragged_specs  = Any[]
     ragged_cols   = Any[]
     for (i, c) in enumerate(dcols[2:end])
@@ -8088,10 +8088,10 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         if parent(c) isa DataColumn
             v = parent(parent(c))
             data[k] = v
-        elseif parent(c) isa ExprColumn{typeof(assign)}
-            # Read the emitted value on its own axis. An assignment can
-            # change its inputs' axes, so it has no formula grouping to infer.
-            push!(assigned_inputs, k)
+        elseif _brm_kernel_value_input(c)
+            # Read assignments, components and producer plates on their own
+            # result axes, without inferring rows from their shared inputs.
+            push!(value_inputs, k)
         elseif parent(c) isa MissingColumn && k in get(data, _SB_KERNEL_OUTPUT_READS_KEY, ())
             # Another cell's non-collected indexed output, emitted before this
             # cell (`_brm_prepare_program`): sliced by name like a collected
@@ -8177,11 +8177,11 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         # The subject count is the common length of the pre-grouped data
         # columns or, when the cell slices only LPs (beside omitted outcomes),
         # of the per-subject columns those LPs read.
-        lp_names = union(Set(name(c) for c in lp_cols), read_outputs, assigned_inputs)
+        lp_names = union(Set(name(c) for c in lp_cols), read_outputs, value_inputs)
         counted = [(k, length(data[k])) for k in kept_names if k ∉ lp_names]
         isempty(counted) &&
             foreach(c -> append!(counted, _brm_kernel_lp_data_lengths(c)), lp_cols)
-        isempty(counted) && isempty(assigned_inputs) && error(
+        isempty(counted) && isempty(value_inputs) && error(
             "sbimpl: kernel(...) with no random-effect linear predictor needs at least ",
             "one pre-grouped per-subject data column to derive the subject count from; ",
             "omitted outcomes cannot supply it.")

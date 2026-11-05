@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.199
+
+- Direct plate reads of component results use the returned cells' axis on both
+  backends. Shared arrays inside a component no longer count as rows of a
+  formula predictor. Nested components and plates whose extent comes only
+  from the returned value keep the same direct indexing syntax.
+
 ## 0.2.198
 
 - Fixed: a prior-only program (the response column omitted) with an
