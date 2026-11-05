@@ -476,8 +476,7 @@ end
 # `log(besselix(j, a))/2` with no overflow at small `rho` (large `a`); the
 # BridgeStan gate in `test/gp_hsgp_periodic.jl` pins the Stan side to this
 # value at 1e-9. The online adaptive-centering path differentiates through
-# this (Enzyme 0.13 ships the `besselix` recurrence rule), and the Turing
-# ext's `_brm_hsgp_log_sqrt_spd` maps it over its harmonics: one formula,
+# this (Enzyme 0.13 ships the `besselix` recurrence rule): one formula,
 # every consumer.
 function _brm_hsgp_periodic_log_scale(harmonic::Real, sigma::Real, rho::Real)
     a = inv(rho^2)

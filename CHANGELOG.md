@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.179
+## 0.2.189
 
 - Changed: one-unit NLME calls from several tasks run in parallel. Each call
   takes its own evaluator from the model's pool: the model's first, or one
@@ -28,6 +28,166 @@ instead of failing at run time.
   other threads unprotected. `brm_two_stage_fit` with `threads > 1` now
   samples its units through that pool instead of its own worker copies of the
   model, and therefore needs the repair as well.
+
+## 0.2.188
+
+- **Breaking:** BRM now supports only `SBBRMI` (StanBlocks/Stan) and `RKBRMI`
+  (ReactiveKernelsPPL). Removed `TuringBRMI`, its Turing/WarmupHMC extensions,
+  the `turing_*` helpers, and `VBRMI` with its materialization/parameter-part
+  API (`MaterializedColumn`, `getbroadcast`, `Part`, `push_parts!!`, `nparams`,
+  `lprior!`, `vbroadcasted`, `vmeta_sampling_rhs`). Build one of the supported
+  backends from the same `BRMI`; use that backend's fitting, replay and
+  prediction APIs. Custom terms must use the StanBlocks or RK extension hooks.
+- Removed the retired backends' dependencies, tests and documentation. Shared
+  preparation and mixture-response checks remain on the supported paths. The
+  macro explorer now exposes its StanBlocks pipeline without the VBRMI stages.
+- Incomplete constrained-coordinate carriers now report their emitted output
+  and missing coverage instead of an undefined-variable error.
+- Refresh the test and macro-app HTMXObjects pins for the model-view floor.
+  The test environment requires DiffEqBase 7.21.6 and OptimizationBase 5.10.1
+  so their extensions load with the current Enzyme rule hooks.
+
+## 0.2.187
+
+- Added `gmrf((east, north), time[, channel]; multiresolution=m)`: a bounded
+  sparse Matérn-1 spatial basis of shared stationary OU paths. A position uses
+  the same normalized weights at every time, preserving exact temporal
+  exponential covariance, marginal SD and channel separability on irregular
+  reads. Spatial covariance remains approximate. Each innovation retains only
+  its readers' times; the representation does not complete a position × time
+  grid. It shares the existing hyperparameter addresses and priors.
+- The new model-scope form supports `RKBRMI` and `SBBRMI`, native analytic
+  derivatives, Stan prior draws, frozen replay and physical coordinate
+  transport. Its fitted support construction is part of the native graph.
+  Exact reader locality requires ReactiveKernels 0.1.83, now the RK floor.
+  Native Reverse needs Enzyme dogfood's literal-dictionary callback repair and,
+  from dogfood `7a1f689c`, its repeated-reader repair, without which gradient
+  cost grows with support metadata × reads. The test bootstrap's RK
+  `b0ffcdc1` and Enzyme `d3189970` pins contain both.
+- Clarified the `neighbors=` contract: local Matérn × OU kernel entries are
+  exact, but the implied joint temporal covariance is approximate on irregular
+  read support. Its numerical behavior is unchanged.
+
+## 0.2.186
+
+- Offset-only predictors on RK retain the declared rows of scalar plate or
+  component outputs and fixed data expressions before an explicit gather onto
+  observation rows. They no longer need a raw fixed offset or an estimated
+  coefficient to establish those rows.
+
+## 0.2.185
+
+- Added: a function-style `@brm` component may return several named values,
+  `return (; recovery, decay = exp(log_decay))`. The parent reads each one as a
+  property of the call, `kin.recovery`, in formulas, offsets, likelihoods and
+  model-scope bindings, on SBBRMI (a Stan tuple) and RKBRMI (the call's native
+  local). Each field keeps its own row axis, and the call's priors and
+  correlation blocks remain one scope. `brm_output(d, :decay; submodel=:kin)`
+  addresses a returned field. A plate cell reads a field through a model-scope
+  binding (`recovery = kin.recovery`, then `recovery[i]`).
+- Changed: a bare read of a named-return call, an unknown field, a positional
+  tuple return, a direct `kin.recovery[i]` plate read and a named-return
+  component called inside a plate cell are refused with the supported spelling.
+- Fixed: SBBRMI compiles a component whose formulas group by one of its inputs
+  (`(1 | p | unit)` with `unit` an input); the raw label column is no longer
+  passed to the Stan submodel, which reads its own index data. RKBRMI also
+  aligns a field grouped by a label input with the parent's rows, so it can
+  enter a formula offset.
+
+## 0.2.184
+
+- `brm_start` accepts top-level matrix parameters on their constrained scale
+  on both RK and compiled Stan. Initialize `L ~ LKJCholesky(K, eta)` with
+  `(; L=lower_factor)`, preserving its exact matrix shape. RK uses its native
+  transform without compiling Stan. Unaddressed base values and caller-owned
+  inputs are preserved, as for scalar, vector and component-local starts.
+
+## 0.2.183
+
+- Model views label every authored member of a joint response as response data,
+  without exposing the synthetic joint operation as a model quantity.
+- Component input tables distinguish positional and keyword arguments, required
+  inputs and optional defaults. Defaults are shown as source, never evaluated.
+- Unbound builders label potential data inputs without claiming that sampled
+  names must be supplied as data; their role depends on binding.
+- Callable documentation includes helpers nested in formula containers such as
+  mixture-component lists, without executing those helpers.
+- Helpers from modules with no documentation registry no longer crash a view.
+- Requires HTMXObjects 0.1.60 for code-block PDF tagging without whitespace-only
+  PAC Quality warnings, preserving complete source and syntax highlighting.
+- Empty input inventories explain their absence. Component-instance and authored
+  documentation headings use readable paths while retaining exact tuple paths in
+  provenance. Unknown derived shapes explain the limits of inspection.
+
+## 0.2.182
+
+- Fresh-process recovery of adaptive `brm_smc_tune` pilots (`resume=partial`
+  or `checkpoint_dir=dir, resume=true`) works for `RKBRMI` models whose laws
+  are bound in the generated RK program module, such as `gmrf(...)` fields.
+  Before, the checkpoint named that process-local module and a fresh process
+  failed with `UndefVarError: ##RKEmittedModels#…`. **Breaking:** the RK backend
+  now requires ReactiveKernelsPPL 0.1.98, which normalizes generated-module
+  names in SMC checkpoint identities; raise an environment pinning an older
+  ReactiveKernels commit to `b0ffcdc1` or a descendant. Checkpoints written
+  with ReactiveKernelsPPL 0.1.97 or earlier are not migrated: resume them with
+  their original versions or write a new initialization checkpoint.
+- RK `main` from `8e67ee82` currently breaks selective carried-window tuning
+  (`coordinates=:auto`) with a `MethodError` in `_cell_joined_rows`; BRM's test
+  pin stays on `b0ffcdc1` until ReactiveKernels repairs it.
+
+## 0.2.181
+
+- `brm_start` accepts `component_inits` on both backends, keyed by authored
+  component call paths and local parameter names. Repeated and nested calls
+  can set independent scalar, vector, simplex and correlation Cholesky starts
+  on the constrained scale; RK uses its native layout without compiling Stan.
+  `base=:prior_median` now visits component-local scalar priors recursively,
+  resolves each call's bound inputs and preserves explicit-start precedence.
+  Numeric bases retain every unaddressed value.
+
+
+## 0.2.180
+
+- `SBBRMI` and `RKBRMI` compose heterogeneous scalar `MixtureModel`
+  components with known full-real continuous support, including custom
+  function families with different argument counts. Each component retains
+  its ordinary parameterization and backend mapping.
+- RK preserves native component density graphs, including existing
+  `_rk_observation_source!` providers, for dependency-aware scheduling,
+  native Reverse gradients, pointwise likelihood and source replay.
+  Stan preserves component predictive draws and membership outputs.
+  Native RK mixture/custom-law predictive generation remains separate work.
+- Requires StanBlocks 0.2.25, ReactiveKernels 0.1.81 and
+  ReactiveKernelsPPL 0.1.94. Bounded or mixed-support heterogeneous components
+  remain outside the supported mixture contract.
+
+## 0.2.179
+
+- `brm_model_view(model)` with HTMXObjects shows data/parameter roles and value
+  ranks from the supplied declaration or prepared model. Unknown dimensions
+  stay explicit; descriptor carriers retain their own constrained shapes and
+  logical identities. Callable documentation and carrier details are accessible
+  by click and keyboard. The view performs no fit or implicit backend preparation.
+  The macro app and descriptor mount share this reusable view.
+- Source, roles/ranks and callable documentation use eager tabs, retaining all
+  content in Markdown/PDF and static HTML exports. Plate response labels reuse
+  the compiler's cell observation metadata. Export acceptance exercises the
+  standard HTMXObjects PDF and bundled-site exporters.
+- Authored declaration docstrings use the shared `brm_documentation` records
+  in the view, with formatted prose, exact paths and source provenance.
+- Source tabs automatically include reachable BRM component definitions from
+  `brm_components`, once per shared definition, with all call-instance paths.
+  Complete PDF and static HTML exports include every nested definition.
+- Component source and declaration details use the shared Julia source printer,
+  preserving readable docstrings without exposing internal doc wrappers.
+- The macro app's expression cards read `NamedColumn` parent values for their
+  data/parameter styling, matching the current column representation.
+- Prepared RK views use ReactiveKernelsPPL 0.1.89's read-only parameter metadata:
+  constrained shapes, ragged element shapes and free-coordinate counts remain
+  separate. Replays retain the build's binding provenance and show current
+  parameter dimensions as unresolved when they share an earlier layout.
+- Refresh the macro app's HTMXObjects dependency closure to 0.1.58 and its
+  StanBlocks/WarmupHMC pins to versions compatible with the current BRM package.
 
 ## 0.2.178
 

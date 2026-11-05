@@ -321,8 +321,9 @@ function _rk_fitted_replay(template::BRMI, new_data, state::BRMFittedState;
     groups = Tuple(sort!(collect(groups)))
     frozen = _rk_frozen_subset(state, _rk_resampled_fit_inputs(state, groups))
     program, bound, model = _rk_fitted_build(emitted, plan, frozen, previous)
+    model_plan = previous !== nothing && model === previous.model ? previous.model_plan : plan
     backend = RKBRMI(_brm_resolve_optional_priors(template), plan, model;
-        program, bound, source=template, fitted=_RKFittedReplay(state, frozen, groups))
+        program, bound, source=template, fitted=_RKFittedReplay(state, frozen, groups), model_plan)
     if isempty(groups)
         names = _rk_layout_coordinate_names(backend)
         if coordinates === :growing

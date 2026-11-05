@@ -1305,41 +1305,6 @@ function _brm_replay_population_column(column, data, cache)
     values
 end
 
-function _brm_replay_population_design(
-        training::_BRMPopulationDesign, context::_BRMBackendContext)
-    data = context.data
-    haskey(data, training.row_source) || error(
-        "BRM replay: row-axis source `$(training.row_source)` is absent")
-    n = length(data[training.row_source])
-    cache = Dict{Symbol,Vector{Float64}}()
-    columns = map(training.columns) do column
-        values = _brm_replay_population_column(column, data, cache)
-        isnothing(values) && (values = ones(Float64, n))
-        length(values) == n || error(
-            "BRM replay: population column `$(column.label)` has " *
-            "$(length(values)) rows; expected $n")
-        _BRMPopulationColumn(
-            column.label, column.effect_addresses, column.effect_block,
-            column.source, values, column.preprocess)
-    end
-    fixed_terms = map(training.fixed_terms) do term
-        values = collect(
-            Float64, _brm_replay_expression(term.preprocess.raw_ref, data))
-        length(values) == n || error(
-            "BRM replay: fixed term `$(term.label)` has $(length(values)) " *
-            "rows; expected $n")
-        _BRMPopulationFixedTerm(
-            term.label, term.source, values, term.preprocess)
-    end
-    fixed = zeros(Float64, n)
-    foreach(term -> fixed .+= term.values, fixed_terms)
-    matrix = isempty(columns) ? zeros(Float64, n, 0) :
-        hcat((column.values for column in columns)...)
-    _BRMPopulationDesign(
-        training.target, Tuple(columns), matrix, training.row_source,
-        Tuple(fixed_terms), fixed)
-end
-
 _brm_mm_group_names(term::MultiMembershipTerm) =
     Tuple(name(group) for group in getargs(term))
 _brm_mm_weight_names(term::MultiMembershipTerm) = begin
@@ -2844,9 +2809,8 @@ data-derived fixed `offset(...)` terms.
 Plain grouped terms are separated into `_BRMRandomEffectPlan` values rather
 than being mistaken for population columns.
 Returns `nothing` for a term requiring richer lowering unless `required=true`,
-in which case it fails loudly. SBBRMI and Turing consume the shared
-coefficient-bearing representation; Turing also consumes the materialized
-fixed-offset vector. Categorical columns reuse SBBRMI's established ordered
+in which case it fails loudly. SBBRMI and RKBRMI consume the shared
+coefficient-bearing representation. Categorical columns reuse SBBRMI's established ordered
 level-coding primitive.
 """
 function _brm_simple_population_design(target::Symbol, rhs,
@@ -2987,13 +2951,6 @@ struct _BRMPopulationPredictor{F,D<:_BRMPopulationDesign}
     link_lhs_fn::F
     emitted_name::Symbol
     design::D
-end
-
-function _brm_replay_population_predictor(
-        training::_BRMPopulationPredictor, context::_BRMBackendContext)
-    design = _brm_replay_population_design(training.design, context)
-    _BRMPopulationPredictor(
-        training.name, training.link_lhs_fn, training.emitted_name, design)
 end
 
 _brm_lp_emitted_name(name::Symbol, link_lhs_fn) =
@@ -3419,7 +3376,7 @@ end
     _brm_resolve_ranef_effect_overrides(specs, bucket_margins)
 
 Resolve public `sd(...)` and `cor(...)` statements against backend-supplied
-ordered `(predictor, coefficient)` margin axes. Both SBBRMI and direct Turing
+ordered `(predictor, coefficient)` margin axes. Both SBBRMI and RKBRMI
 use this precedence and validation engine; only their executable distributions
 differ.
 """

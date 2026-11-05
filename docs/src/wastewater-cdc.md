@@ -84,9 +84,6 @@ Main.BRMDocsComparisons.comparison(
 )
 ```
 
-The Turing pane is retained even though this structural kernel is outside the
-current Turing executor. Its construction error documents that backend boundary.
-
 ## What matches, and what does not yet match
 
 The example preserves the high-level causal order from CDC's

@@ -6,7 +6,7 @@
 # A downstream consumer that already holds the emitted `SBBRMI` (e.g. a web
 # preview that renders the SLIC listing) must be able to reach the wrapped
 # `BRMI` and split-print it WITHOUT reaching into the `SBBRMI.parent` field.
-# `parent(::SBBRMI)` is the stable seam (mirrors `parent(::TuringBRMI)`), and
+# `parent(::SBBRMI)` is the stable seam, and
 # `structure_of` / `priors_of` accept the wrapper directly, unwrapping through
 # it. Both accessors are also exported (`using BayesianRegressionModels`).
 

@@ -48,8 +48,7 @@ does not receive an additional population coefficient.
 
 Prediction and replay through [`reprocess`](@ref) or [`restan_data`](@ref) use
 the frozen training basis by default. This marker is implemented only by the
-StanBlocks backend; it is not a deterministic B-spline expansion and is not
-available to `VBRMI`.
+StanBlocks backend; it is not a deterministic B-spline expansion.
 
 See [Formula terms](@ref) for an example and a comparison with
 `bs(...)` formulas. Dispatch tag — see `_sb_s`.
@@ -211,8 +210,28 @@ those, and, when its own position was not read at the previous read time, its
 least `m`. The spatial correlation is the continuum
 `M₁(κ r) = κ r K₁(κ r)`, so there is no mesh boundary or resolution effect; the
 approximation is the conditioning set, which leaves the time factor exact on
-positions read at the same times. Frozen replay reads only fitted
+positions read at the same times. On irregular read support, the joint temporal
+covariance is approximate too. Frozen replay reads only fitted
 `(position, time)` pairs.
+
+    gmrf((east, north), time[, channel]; multiresolution=m, cor=Omega)
+
+A sparse spatial basis of shared stationary OU paths. The spatial basis uses
+Matérn-1 nearest-neighbour conditionals in a deterministic maximin order and
+retains at most `1 + m * (1 + floor(log2(P)))` inverse-factor entries per
+position. The same normalized coefficients read every time, so temporal
+covariance is exactly `exp(-abs(t-t′)/ℓ_t)` on irregular support, marginal SD
+is exactly `σ`, and channel covariance is `Ω`. Spatial covariance remains an
+approximation; measure its error on the read support. Larger `m` does not
+guarantee monotonically smaller pointwise error.
+
+Each innovation keeps only the union of its readers' times, without completing
+the position × time grid. Frozen replay retains these innovation identities
+and accepts fitted `(position, time, channel)` reads only. Both read-support
+forms are model-scope fields, support `RKBRMI` and `SBBRMI`, and accept integer
+`m` from 1 through 100. Select exactly one of `mesh=`, `neighbors=`, and
+`multiresolution=`. Hyperparameter addresses and priors are the same for all
+three forms.
 """
 function gmrf end
 

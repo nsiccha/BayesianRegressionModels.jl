@@ -49,7 +49,6 @@ BayesianRegressionModels.DataColumn
 BayesianRegressionModels.NamedColumn
 BayesianRegressionModels.ExprColumn
 BayesianRegressionModels.LikelihoodColumn
-BayesianRegressionModels.MaterializedColumn
 BayesianRegressionModels.Data
 BayesianRegressionModels.MaybeData
 BayesianRegressionModels.maybedata
@@ -63,7 +62,6 @@ BayesianRegressionModels.getf
 BayesianRegressionModels.getargs
 BayesianRegressionModels.getkwargs
 BayesianRegressionModels.getop
-BayesianRegressionModels.getbroadcast
 ```
 
 ## Formula-term markers
@@ -153,9 +151,7 @@ import or define it there.
 ## Backends
 
 ```@docs
-BayesianRegressionModels.VBRMI
 BayesianRegressionModels.SBBRMI
-BayesianRegressionModels.TuringBRMI
 BayesianRegressionModels.RKBRMI
 BayesianRegressionModels.rk_logdensity_problem
 BayesianRegressionModels.GenerativeDeclaration
@@ -195,8 +191,8 @@ BayesianRegressionModels.select_s2z_centeredness
 ### Concurrent construction and ownership
 
 After loading the backend packages and defining custom distribution families,
-tasks can independently construct `TuringBRMI(builder(data))` and
-`SBBRMI(builder(data))`. A formula builder and read-only input arrays may be
+tasks can independently construct `SBBRMI(builder(data))` and
+`RKBRMI(builder(data))`. A formula builder and read-only input arrays may be
 shared; custom callables used during construction must support concurrent calls.
 Keep each build's backend and mutable preparation state private to its task,
 and use BRM's `stan_code(sb)`, `stan_data(sb)`, and `stan_model(sb)` entries
@@ -213,12 +209,9 @@ a downstream environment.
 fix for generated model bindings, included in revision
 `cb9f9ab75c65df33c9c23e175f5fbdbb521c5fa4` and pinned in the test environment.
 Prepare a separate `rk_logdensity_problem` for each task; that interface also
-provides the world-age boundary for immediate first execution.
-
-`turing_model_source(backend)` returns an independent expression that can be
-edited without changing any backend. Give each inference task its own sampler
-state, mutable density/AD workspace, and explicit RNG; keep input arrays
-unchanged while another task uses them.
+provides the world-age boundary for immediate first execution. Give each
+inference task its own sampler state, mutable density/AD workspace, and
+explicit RNG; keep input arrays unchanged while another task uses them.
 
 ## Executable descriptors
 
@@ -245,6 +238,9 @@ BayesianRegressionModels.required_brm_inputs
 ## Introspection
 
 ```@docs
+BayesianRegressionModels.brm_model_view
+BayesianRegressionModels.BRMComponent
+BayesianRegressionModels.brm_components
 BayesianRegressionModels.outcomes
 BayesianRegressionModels.linear_predictor_op
 BayesianRegressionModels.linear_predictors
@@ -271,12 +267,6 @@ For downstream packages adding their own formula terms (e.g. via a gitignored
 `-ext.jl` extension):
 
 ```@docs
-BayesianRegressionModels.Part
-BayesianRegressionModels.push_parts!!
-BayesianRegressionModels.nparams
-BayesianRegressionModels.lprior!
-BayesianRegressionModels.vbroadcasted
-BayesianRegressionModels.vmeta_sampling_rhs
 BayesianRegressionModels._sb_submodel_rhs!
 BayesianRegressionModels._sb_emit_vector_prior!
 ```

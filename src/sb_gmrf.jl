@@ -349,11 +349,11 @@ _sb_term_slot_config(::Val{:spatial_length}, entry) =
 _sb_term_slot_config(::Val{:temporal_length}, entry) =
     _sb_gp_scale_prior(entry.spec, _sb_term_prior_spelling(entry))
 
-function _sb_gmrf_submodel_expr(overrides, term, footprint::Bool)
+function _sb_gmrf_submodel_expr(overrides, term, footprint::Bool; multiresolution::Bool=false)
     slots = (:sigma, :spatial_length, :temporal_length)
     cfgs = map(slot -> _sb_term_cfg(overrides, term, slot), slots)
     # The submodel itself, not its name: a caller's `mod` need not see this module.
-    base = footprint ? _sb_gmrf_vecchia : _sb_gmrf
+    base = multiresolution ? _sb_gmrf_multiresolution : footprint ? _sb_gmrf_vecchia : _sb_gmrf
     all(isnothing, cfgs) && return base
     _sb_configured_term_submodel(base, zip(slots, cfgs)...)
 end
@@ -389,7 +389,8 @@ function _brm_gmrf_footprint_data(f::_BRMGMRFFootprint)
        neighbor_ptr=f.neighbor_ptr, neighbor=Vector{Int}(f.neighbor), state_pattern, M=f.max_items)
 end
 
-_sb_gmrf_data(prepared) = prepared.state.neighbors === nothing ?
+_sb_gmrf_data(prepared) = get(prepared.state, :multiresolution, nothing) !== nothing ?
+    _sb_gmrf_multiresolution_data(prepared) : prepared.state.neighbors === nothing ?
     _sb_gmrf_mesh_data(prepared) : _sb_gmrf_footprint_data(prepared)
 
 function _sb_gmrf_footprint_data(prepared)
@@ -408,7 +409,20 @@ end
 function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
     training = e.const_.prepared
     rows = Dict{Symbol,Any}(s => _sb_df_column(df, s) for s in training.source)
-    if !freeze && training.state.neighbors !== nothing
+    if !freeze && get(training.state, :multiresolution, nothing) !== nothing
+        state = training.state
+        times = _brm_gmrf_times(rows[training.source[3]])
+        channels = length(training.source) == 3 ? [1] : _brm_fit_levels(rows[training.source[4]])
+        if state.correlation !== nothing
+            all(c -> c in state.channels, channels) || throw(ArgumentError(
+                "gmrf replay with channel correlation cannot introduce new channel labels"))
+            channels = state.channels
+        end
+        support = _brm_multiresolution_support(rows[training.source[1]], rows[training.source[2]],
+            rows[training.source[3]], length(channels); rank=state.multiresolution)
+        training = _BRMPreparedTerm(gmrf, training.source,
+            merge(state, (; times, channels, support)), training.dependencies)
+    elseif !freeze && training.state.neighbors !== nothing
         # A fresh fit's footprint is its own rows' read pairs.
         state = training.state
         times = _brm_gmrf_times(rows[training.source[3]])
@@ -454,7 +468,8 @@ function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
         new_data[e.const_.L_key] = Matrix{Float64}(I, length(s.channels), length(s.channels))
         push!(handled, e.const_.L_key)
     end
-    s.neighbors === nothing && push!(handled, s.vertices_source, s.cells_source)
+    s.neighbors === nothing && get(s, :multiresolution, nothing) === nothing &&
+        push!(handled, s.vertices_source, s.cells_source)
     new_preproc[key] = PreprocEntry(:gmrf, merge(e.const_, (; prepared)), e.raw_ref, true)
 end
 
@@ -462,9 +477,10 @@ function _sb_predictor_term!(stmts, data, ::typeof(gmrf), term;
         target::Symbol, term_overrides=Dict{Symbol,Any}(), kwargs...)
     arguments = _brm_gmrf_arguments(term)
     footprint = arguments.neighbors !== nothing
+    multiresolution = arguments.multiresolution !== nothing
     raw = (arguments.axes..., arguments.time,
         (arguments.channel === nothing ? () : (arguments.channel,))...,
-        (footprint ? () : (arguments.mesh.vertices, arguments.mesh.cells))...)
+        (footprint || multiresolution ? () : (arguments.mesh.vertices, arguments.mesh.cells))...)
     inner = Dict{Symbol,Any}(_sb_inner_data(:gmrf, value) for value in raw)
     prepared = _brm_prepare_term(term, target, (; data=inner))
     # Preparation here receives raw support data, while the resolved prior
@@ -504,9 +520,9 @@ function _sb_predictor_term!(stmts, data, ::typeof(gmrf), term;
         end
         _sb_level_correlation_factor!(data, state.correlation)
     end
-    _sb_record_preproc!(data, footprint ? keys_.index : keys_.index1, PreprocEntry(:gmrf,
+    _sb_record_preproc!(data, footprint || multiresolution ? keys_.index : keys_.index1, PreprocEntry(:gmrf,
         (; prepared, keys=keys_, L_key), prepared.source, true))
-    submodel = _sb_gmrf_submodel_expr(term_overrides, term, footprint)
+    submodel = _sb_gmrf_submodel_expr(term_overrides, term, footprint; multiresolution)
     push!(stmts, Expr(:call, :~, stem, _sb_term_model_call(submodel, term_overrides, term;
         data, stem, L=L_key, keys_...)))
     stem

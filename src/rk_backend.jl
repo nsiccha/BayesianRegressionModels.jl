@@ -575,14 +575,19 @@ struct RKBRMI{P<:BRMI,PL,M,S<:BRMI}
     # training data (a `BRMFittedState`), or `nothing` for a backend of its own
     # data or a replay of one.
     fitted::Any
+    # The BRM plan whose binding produced `model`'s retained layout. Frozen
+    # replays can share that build with a different plan. Inspection uses this
+    # provenance to avoid presenting the old layout's shapes as current.
+    model_plan::Any
     # The retained parent is the model the plan lowered: `optional(...)`
     # priors and grouping-column addresses are already resolved
     # (`_brm_resolve_prior_addresses`).
     function RKBRMI(parent::BRMI, plan, model; program::_RKOnce=_RKOnce(),
-            bound::_RKOnce=_RKOnce(), source::BRMI=parent, fitted=nothing)
+            bound::_RKOnce=_RKOnce(), source::BRMI=parent, fitted=nothing,
+            model_plan=plan)
         parent = _brm_resolve_prior_addresses(parent)
         new{typeof(parent),typeof(plan),typeof(model),typeof(source)}(parent,
-            plan, model, program, bound, source, fitted)
+            plan, model, program, bound, source, fitted, model_plan)
     end
 end
 
@@ -1859,8 +1864,7 @@ function _rk_classify_mixture(rhs::ExprColumn, candidates::Vector{Symbol},
         "$prefix: response `$response` `MixtureModel` components must " *
         "share one family (found " *
         "$(join(unique!(map(string, heads)), ", "))); heterogeneous " *
-        "mixtures are not supported because Stan rejects out-of-support " *
-        "values where Turing returns `-Inf`)")
+        "mixtures are not supported here)")
     classified = map(enumerate(components)) do (k, comp)
         _rk_classify_mixture_component(comp, k, candidates, predictor_link,
             parameters, assignments, consts, aliases, response)
@@ -3174,6 +3178,14 @@ function _rk_model_offset_expr(node, target::Symbol, data::AbstractDict,
         columns[source] = raw
         return source
     end
+    # One returned field of a component call, `kin.decay`: a native read of the
+    # call's local result (`_rk_component_return`).
+    if node isa ExprColumn{typeof(getproperty)}
+        read = _brm_component_field_read(node)
+        read === nothing || return Expr(:.,
+            _rk_model_offset_expr(first(getargs(node)), target, data, columns),
+            QuoteNode(read.result))
+    end
     node isa ExprColumn && isempty(getkwargs(node)) || error(
         "$prefix: predictor `$target` `offset()` argument " *
         "`$(repr(node))` is not elementwise arithmetic over data and model values")
@@ -3256,7 +3268,8 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
                 "$prefix: predictor `$target` offset column `$source` must " *
                 "be a real vector")
             columns[source] = raw
-            return _RKTermSpec[_RKTermSpec(:offset, [source], (;), source,
+            axis = _rk_model_value_axis(inner, context)
+            return _RKTermSpec[_RKTermSpec(:offset, [source], (; axis), source,
                 Symbol(:offset_, source))]
         end
         inner isa ExprColumn || error(
@@ -3278,7 +3291,9 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
             target, data, derived)
         _rk_push_derived!(derived, staged, lowered, staged, target)
         _rk_cross_derived_refs!(lowered, data, columns)
-        return _RKTermSpec[_RKTermSpec(:offset, [staged], (;), staged,
+        axis = something(_rk_model_value_axis(inner, context),
+            (; source=fixed.source, nrows=length(fixedvalues)))
+        return _RKTermSpec[_RKTermSpec(:offset, [staged], (; axis), staged,
             Symbol(:offset_, staged))]
     end
     if term isa ExprColumn && getf(term) === factor
@@ -4752,18 +4767,30 @@ end
 # raw column supplies the row axis.
 Base.@nospecializeinfer function _rk_plan_offset_only_predictor(@nospecialize(brmi::BRMI), context, target::Symbol,
         ordinary::Tuple, available::Tuple, link::Symbol,
-        terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec})
+        terms::Vector{_RKTermSpec}, derived::Vector{_RKDerivedSpec},
+        columns::Dict{Symbol,AbstractVector}, taken::Set{Symbol})
     prefix = "RK backend"
     isempty(terms) && error(
         "$prefix: internal: predictor `$target` has no term specs")
     raw_sources = [column for term in terms for column in term.columns
         if haskey(context.data, column)]
-    row_source = isempty(raw_sources) ?
-        get(context.target_obs, target, nothing) : first(raw_sources)
+    # A lowered expression's operands are dependencies, not its row axis:
+    # a plate output has its producer's rows, a gather has its index's rows,
+    # and a staged fixed expression is not itself a raw data column.
+    axes = [term.options.axis for term in terms
+        if haskey(term.options, :axis) && term.options.axis !== nothing &&
+            !isempty(term.options.axis)]
+    row_source = !isempty(axes) ? first(axes).source :
+        isempty(raw_sources) ? get(context.target_obs, target, nothing) : first(raw_sources)
     isnothing(row_source) && error(
         "$prefix: predictor `$target` has no data column from which to " *
         "determine its row axis")
-    design = _brm_population_design(target, ordinary, context.data,
+    data = copy(context.data)
+    # A declared model axis can be absent from materialized data. As in the
+    # ordinary predictor planner, retain only its extent as geometry metadata.
+    isempty(axes) || haskey(data, row_source) ||
+        (data[row_source] = Base.OneTo(first(axes).nrows))
+    design = _brm_population_design(target, ordinary, data,
         get(context.target_obs, target, nothing);
         required=true, row_source,
         implicit_intercept=target in _brm_threshold_located_predictors(brmi),
@@ -4780,7 +4807,8 @@ Base.@nospecializeinfer function _rk_plan_offset_only_predictor(@nospecialize(br
     isnothing(r2d2) || error(
         "$prefix: predictor `$target` `r2d2` decomposes nothing (no " *
         "coefficient columns); drop the `r2d2` statement")
-    _RKPredictorSpec(target, link, terms, target, design.row_source), priors, nothing, hs_priors
+    row_source = _rk_predictor_row_source!(design, context, columns, taken, target)
+    _RKPredictorSpec(target, link, terms, target, row_source), priors, nothing, hs_priors
 end
 
 # ---- spline smooth terms (s/t2; mirrors `_sb_s_generic`/`_sb_t2_generic`) ----
@@ -6259,7 +6287,7 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
         !isempty(dar_raw) || !isempty(ar_raw) || !isempty(me_raw) ||
         !isempty(other_structured) ||
         return _rk_plan_offset_only_predictor(
-        brmi, context, target, ordinary, available, link, terms, derived)
+        brmi, context, target, ordinary, available, link, terms, derived, columns, taken)
     geometry = _rk_model_predictor_geometry(
         brmi, context, target; available_predictors=available,
         tolerant_default, matched_defaults)
@@ -6365,6 +6393,11 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
         _rk_plan_r2d2_prior(brmi, design, r2plan, target, available,
             terms, taken, columns; data=context.data, derived)
     _rk_check_model_offset_rows(terms, size(design.matrix, 1), target)
+    row_source = _rk_predictor_row_source!(design, context, columns, taken, target)
+    _RKPredictorSpec(target, link, terms, target, row_source), priors, r2d2, hs_priors
+end
+
+function _rk_predictor_row_source!(design, context, columns, taken, target)
     row_source = design.row_source
     if !haskey(columns, row_source)
         raw = get(context.data, row_source, nothing)
@@ -6375,7 +6408,7 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
             columns[row_source] = Base.OneTo(size(design.matrix, 1))
         end
     end
-    _RKPredictorSpec(target, link, terms, target, row_source), priors, r2d2, hs_priors
+    row_source
 end
 
 function _rk_resolve_use_ref(name::Symbol, consts::Dict{Symbol,Float64},
@@ -7380,7 +7413,7 @@ end
 # `observed_values` under the response name plus the `Jobs_<response>`
 # index column, and the thin layer restricts the likelihood to
 # observed rows. Compositions SB never tested (weights, evidence) fail
-# closed, mirroring the Turing backend.
+# closed.
 Base.@nospecializeinfer function _rk_peel_mi_observation(@nospecialize(brmi::BRMI), observation, plan)
     prefix = "RK backend"
     _brm_mi_grouped(plan.totals) && error(

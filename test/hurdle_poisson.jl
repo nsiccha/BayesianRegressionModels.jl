@@ -56,11 +56,6 @@ semantic_builder = @brm begin
 end
 
 @testset "HurdlePoisson lowering is exact on every Stan path" begin
-    vbrmi = VBRMI(semantic_builder(semantic_df))
-    @test LogDensityProblems.dimension(vbrmi) == 0
-    @test LogDensityProblems.logdensity(vbrmi, Float64[]) ≈
-          sum(logpdf.(HurdlePoisson(2.3, 0.35), semantic_df.y)) atol=1e-10
-
     descriptor = brm_descriptor(semantic_builder, semantic_df; mod=@__MODULE__)
     code = brm_execute(descriptor, :transpile)
 

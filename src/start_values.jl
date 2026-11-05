@@ -11,8 +11,8 @@
 # constrained value, so standardized random-effect draws stay at the base.
 
 """
-    brm_start(rk::RKBRMI, inits::NamedTuple; base, term_inits=()) -> Vector{Float64}
-    brm_start(sb::SBBRMI, stan_model, inits::NamedTuple; base, term_inits=()) -> Vector{Float64}
+    brm_start(rk::RKBRMI, inits::NamedTuple; base, term_inits=(), component_inits=()) -> Vector{Float64}
+    brm_start(sb::SBBRMI, stan_model, inits::NamedTuple; base, term_inits=(), component_inits=()) -> Vector{Float64}
 
 Build a complete unconstrained starting point from initial values keyed by
 the model's prior addresses. The RK method returns a packed point of `rk`'s
@@ -53,8 +53,11 @@ the value a sampler takes as its initial position.
   or one per margin), `cor = ["small" => C]`, `ID = ["small" => Σ]`. Unlisted
   strata keep their values at `base`. Each listed level's `effects` hold
   under its own stratum's scales and correlation.
-- `name = value` sets a scalar parameter (`sigma ~ Exponential(1)`) or a vector
-  parameter (cutpoints, a `Dirichlet` simplex) on its constrained scale.
+- `name = value` sets a scalar parameter (`sigma ~ Exponential(1)`), vector
+  parameter (cutpoints, a `Dirichlet` simplex), or matrix parameter on its
+  constrained scale. For `L ~ LKJCholesky(K, eta)`, give the lower Cholesky
+  factor, e.g. `L = [1.0 0.0; 0.3 sqrt(0.91)]`, not a correlation matrix.
+  A matrix must have the parameter's exact shape.
 - `name = values` sets a latent declared in a `@plate` cell (`log_T ~
   Normal(loc, s)`) on its constrained scale: one flat vector, cell after cell,
   or one vector per cell when its length varies by cell (one number per cell
@@ -76,9 +79,27 @@ require positive entries summing to one. Known values may only be restated
 consistently. A predicted hyperparameter must be initialized through its
 predictor, since it has no independent sampled carrier.
 
+`component_inits` sets sampled parameters local to reusable component calls:
+
+```julia
+component_inits = [:left => (; a=0.7, z=[-0.2, 0.4]),
+                   (:nested, :inner) => (; a=0.9)]
+u = brm_start(rk, (; sigma=0.6); component_inits)
+```
+
+A scope is the full tuple of authored call targets, or a target symbol when
+it identifies exactly one call. Each NamedTuple uses that call's local
+parameter names and constrained scalar or array values of the exact shape.
+Positive and bounded scalars, simplexes and correlation Cholesky factors use
+their physical values. Unknown, ambiguous or duplicate scopes, computed
+values, wrong shapes and invalid constraints are rejected. RK initialization
+uses its native layout and needs no compiled Stan model.
+
 `base=:prior_median` fills unaddressed scalar-prior parameters from finite
 medians within their effective bounds, including fitted length-scale floors.
-Explicit `inits` and `term_inits` take precedence. Structured latent blocks
+This includes scalar parameters recursively inside components, with the
+inputs bound separately at each call. Explicit `inits`, `term_inits` and
+`component_inits` take precedence. Structured latent blocks
 (cell latents, innovations, ordered vectors, correlation factors, simplexes
 and joint shrinkage coordinates)
 keep the valid neutral coordinates of the zero base; these are not called
@@ -171,21 +192,26 @@ _brm_start_population_target(predictor, coefficient, value) = error(
     "level => value pairs for a categorical column; got $(repr(value))")
 
 _brm_start_parameter_value(name, value::Real) = _brm_start_real("`$name`", value)
-_brm_start_parameter_value(name, value::AbstractVector{<:Real}) =
-    [_brm_start_real("`$name`", x) for x in value]
+_brm_start_parameter_value(name, value::AbstractArray{<:Real}) =
+    map(x -> _brm_start_real("`$name`", x), value)
 # One vector per `@plate` cell, for a cell latent whose length varies by cell.
 _brm_start_parameter_value(name, value::AbstractVector{<:AbstractVector{<:Real}}) =
     [[_brm_start_real("`$name` in cell $g", x) for x in v] for (g, v) in enumerate(value)]
 _brm_start_parameter_value(name, value) = error(
     "brm_start: `$name` is neither a linear predictor (give its coefficients " *
     "as a NamedTuple) nor an `|ID|` block; as a named parameter it takes a " *
-    "real value or a vector, or one vector per cell for a `@plate` cell " *
+    "real value or an array, or one vector per cell for a `@plate` cell " *
     "latent, got $(repr(value))")
 
 # A parameter's values in its output's element order. Per-cell vectors are a
 # ragged cell latent's segments, cell after cell; anything else has no cells.
 _brm_start_flat_values(name, output, value::Real) = [value]
 _brm_start_flat_values(name, output, value::AbstractVector{<:Real}) = value
+function _brm_start_flat_values(name, output, value::AbstractArray{<:Real})
+    isnothing(output.dims) || size(value) == output.dims || throw(DimensionMismatch(
+        "brm_start: `$name` has size $(output.dims), got $(size(value))"))
+    vec(value)
+end
 function _brm_start_flat_values(name, output, value::AbstractVector{<:AbstractVector})
     ends = output.segments
     isnothing(ends) && error(
@@ -402,7 +428,8 @@ end
 function _rk_unconstrained_point end
 
 function brm_start(rk::RKBRMI, inits::NamedTuple;
-        base=zeros(Float64, length(_rk_layout_coordinate_names(rk))), term_inits=())
+        base=zeros(Float64, length(_rk_layout_coordinate_names(rk))), term_inits=(),
+        component_inits=())
     u0 = _brm_start_base_vector(base, length(_rk_layout_coordinate_names(rk)), "RK layout")
     records = [_brm_rk_start_record(rk, r) for r in _rk_coordinate_records(rk.plan; term_starts=true)]
     values = _rk_constrained_values(rk, u0)
@@ -415,8 +442,9 @@ function brm_start(rk::RKBRMI, inits::NamedTuple;
     end
     term_targets = _brm_start_term_targets(parent(rk), term_inits)
     _brm_rk_start_terms!(writes, term_targets, records, values)
+    env = _brm_rk_start_components!(writes, rk, records, values, inits, component_inits, base)
     if _brm_start_prior_requested(base)
-        prior_writes = _brm_rk_start_prior_writes(rk, records, values, writes, inits, term_targets)
+        prior_writes = _brm_rk_start_prior_writes(rk, records, values, writes, inits, term_targets; env)
         append!(writes, prior_writes)
     end
     _brm_rk_start_point(rk, values, writes, effects)
@@ -429,16 +457,12 @@ end
 # every written value and effect.
 function _brm_rk_start_point(rk::RKBRMI, values, writes, effects=NamedTuple[])
     _brm_rk_check_distinct(writes)
-    for (declaration, index, value) in writes
-        values = _brm_rk_set_declaration_value(values, declaration, index, value)
-    end
+    values = _brm_rk_start_apply(values, writes)
     z_writes = Tuple{Symbol,Tuple,Any}[]
     for (; target, record) in effects
         _brm_rk_effect_writes!(z_writes, rk, values, target, record)
     end
-    for (declaration, index, value) in z_writes
-        values = _brm_rk_set_declaration_value(values, declaration, index, value)
-    end
+    values = _brm_rk_start_apply(values, z_writes)
     writes = [writes; z_writes]
     _brm_rk_check_distinct(writes)
     u = Vector{Float64}(_rk_unconstrained_point(rk, values))
@@ -456,6 +480,43 @@ function _brm_rk_start_point(rk::RKBRMI, values, writes, effects=NamedTuple[])
             target.effects.values[:, P])
     end
     u
+end
+
+# Group writes by path before rebuilding the nested constrained NamedTuples.
+# Repeated component calls then copy each scope and modified array once,
+# rather than rebuilding all siblings for every local parameter.
+function _brm_rk_start_apply(values, writes)
+    tree = Dict{Symbol,Any}()
+    for (declaration, index, value) in writes
+        path = hasproperty(values, declaration) ? (declaration,) :
+            Tuple(Symbol.(split(String(declaration), '.')))
+        node = tree
+        for part in Base.front(path)
+            node = get!(Dict{Symbol,Any}, node, part)
+        end
+        push!(get!(() -> Tuple{Tuple,Any}[], node, last(path)), (index, value))
+    end
+    _brm_rk_start_apply_tree(values, tree)
+end
+
+function _brm_rk_start_apply_tree(values::NamedTuple, tree::AbstractDict)
+    all(k -> hasproperty(values, k), keys(tree)) || error(
+        "brm_start: a constrained declaration is absent from the RK layout")
+    NamedTuple{keys(values)}(map(keys(values)) do name
+        haskey(tree, name) ? _brm_rk_start_apply_tree(getproperty(values, name), tree[name]) :
+            getproperty(values, name)
+    end)
+end
+function _brm_rk_start_apply_tree(value, writes::AbstractVector)
+    if any(w -> isempty(first(w)), writes)
+        length(writes) == 1 || error("brm_start: overlapping whole-parameter and element starts")
+        return last(only(writes))
+    end
+    result = copy(value)
+    for (index, x) in writes
+        result[index...] = x
+    end
+    result
 end
 
 function _brm_rk_check_distinct(writes)
@@ -524,11 +585,11 @@ function _brm_rk_start_writes!(writes, ::Val{:parameter}, t, records, values)
         push!(writes, (r.declaration, (), _brm_rk_cell_latent_value(t.name, current, t.value)))
         return
     end
-    found = [r for r in records if r.kind in (:scalar, :vector) &&
+    found = [r for r in records if r.kind in (:scalar, :vector, :lkj_cholesky) &&
         r.declaration === t.name]
     if isempty(found)
         available = [r.kind === :cell_latent ? r.name : r.declaration
-            for r in records if r.kind in (:scalar, :vector, :cell_latent)]
+            for r in records if r.kind in (:scalar, :vector, :lkj_cholesky, :cell_latent)]
         error("brm_start: `$(t.name)` is not a linear predictor, an `|ID|` block or " *
             "a named parameter of this model. Named parameters: " *
             (isempty(available) ? "(none)" : join(string.(available), ", ")))
@@ -797,7 +858,8 @@ end
 # StanBlocks: descriptor resolvers + BridgeStan's inverse transform.
 
 function brm_start(sb::SBBRMI, stan_model, inits::NamedTuple;
-        base=zeros(Float64, BridgeStan.param_unc_num(stan_model)), term_inits=())
+        base=zeros(Float64, BridgeStan.param_unc_num(stan_model)), term_inits=(),
+        component_inits=())
     u0 = _brm_start_base_vector(base, BridgeStan.param_unc_num(stan_model), "compiled Stan model")
     names = String.(BridgeStan.param_names(stan_model))
     d = brm_descriptor(sb)
@@ -832,8 +894,9 @@ function brm_start(sb::SBBRMI, stan_model, inits::NamedTuple;
     term_targets = _brm_start_term_targets(parent(sb), term_inits)
     _brm_sb_start_terms!(writes, term_targets, d, names)
     _brm_sb_start_totals!(writes, deferred, sb, d, names, totals)
+    env = _brm_sb_start_components!(writes, sb, d, names, inits, component_inits, base)
     if _brm_start_prior_requested(base)
-        append!(writes, _brm_sb_start_prior_writes(sb, d, names, writes, inits, term_targets))
+        append!(writes, _brm_sb_start_prior_writes(sb, d, names, writes, inits, term_targets; env))
     end
     θ = BridgeStan.param_constrain(stan_model, u0)
     _brm_sb_start_apply!(θ, writes, names)

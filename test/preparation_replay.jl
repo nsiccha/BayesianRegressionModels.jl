@@ -1,6 +1,6 @@
 using Test
 using BayesianRegressionModels
-using Distributions, Turing
+using Distributions
 
 const BRM = BayesianRegressionModels
 
@@ -35,19 +35,12 @@ replay_calibration(x; shift=0.0, gain=1.0) = gain * x + shift
     expected(data) = (2 .* data.x .+ data.shift,
                      BRM._brm_apply_zscale(fitted, data.x .+ data.shift))
     sb = SBBRMI(builder(training); mod=@__MODULE__)
-    native = TuringBRMI(builder(training))
-    for (data, stan, turing) in ((training, sb, native),
-            (future, reprocess(sb, future), reprocess(native, future)))
+    for (data, stan) in ((training, sb), (future, reprocess(sb, future)))
         plain, scaled = expected(data)
-        @test turing.plan.design.matrix[:, 2] ≈ plain
-        @test turing.plan.design.matrix[:, 3] ≈ scaled
         plain_key = only(key for (key, entry) in stan.preproc if entry.kind === :protect)
         scale_key = only(key for (key, entry) in stan.preproc if entry.kind === :zscale)
         @test stan.data[plain_key] ≈ plain
         @test stan.data[scale_key] ≈ scaled
-        params = (; beta_pop=[0.1, 0.2, -0.3])
-        mu = 0.1 .+ 0.2 .* plain .- 0.3 .* scaled
-        @test Turing.loglikelihood(turing.model, params) ≈ sum(logpdf.(Normal.(mu, 1), data.y))
     end
 end
 

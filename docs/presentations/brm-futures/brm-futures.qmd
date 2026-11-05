@@ -81,7 +81,7 @@ The shared `pk` label allows clearance and volume effects to be correlated.
 ::::
 
 <div class="takeaway">Formulas and a custom calculation live in the same model declaration.</div>
-<div class="source-note"><strong>StanBlocks example.</strong> Turing currently rejects this ragged response. Body of the existing <code>@brm begin … end</code> declaration; complete code and data in appendix B. <code>@plate for</code> runs the calculation once per subject.</div>
+<div class="source-note"><strong>StanBlocks example.</strong> Body of the existing <code>@brm begin … end</code> declaration; complete code and data in appendix B. <code>@plate for</code> runs the calculation once per subject.</div>
 
 ::: {.notes}
 This is the body of the exact population_pk declaration from docs/src/feature-atlas.md. The Lua filter extracts it rather than maintaining a second copy. The structural equation is a one-compartment IV-bolus model: C(t) = dose/V * exp(-(CL/V)t). The log link is explicit on CL and V. Inside the @plate for cell, CL[i] and V[i] read subject i's evaluated values, and time[i] selects that subject's measurement times, grouped once at model scope by ragged(time, obs_subject). This demonstrates formula/custom-code composition without asserting that every Julia operation is supported by every backend.
@@ -148,7 +148,7 @@ Covariate and group effects combine with a population process and eight observat
 
 <span class="status stan">StanBlocks</span>
 
-<div class="small">Compilation checks on an example dataset; no completed posterior fit. Turing does not execute this structural model.</div>
+<div class="small">Compilation checks on an example dataset; no completed posterior fit.</div>
 :::
 ::::
 
@@ -182,7 +182,7 @@ brms is a mature, extensible modeling package. custom_family and stanvar are sup
 ::: {.card .accent-blue}
 **A Julia function or distribution**
 
-Turing can call ordinary Julia code retained by BRM.
+RKBRMI emits ordinary Julia calculations into RKPPL source.
 
 It still needs the operations used by the fit: a valid density, a supported gradient path, and sampling support when generating predictions.
 :::
@@ -191,7 +191,7 @@ It still needs the operations used by the fit: a valid density, a supported grad
 
 StanBlocks needs code it can translate to Stan.
 
-A function written only for that path needs a Julia implementation before Turing can use it.
+A calculation written only for Stan also needs a native implementation for RKBRMI.
 :::
 ::::
 
@@ -287,7 +287,7 @@ Choose explicitly how new group effects are generated. Check that the model and 
 <div class="source-note">Current operations have documented limits; this is not a claim that every custom component already supports every prediction task.</div>
 
 ::: {.notes}
-BRM's reprocess and descriptor/operation APIs retain fitted preparation. Unknown levels and unsupported extrapolation report a diagnostic. New-group resampling is an explicit operation for supported group structures. Warfarin's audit records limits on exposing all requested output arrays in one compiled model. Keep that distinction visible instead of promising automatic replay for arbitrary code. Sources: docs/refactoring.md and docs/src/turing-backend.md.
+BRM's reprocess and descriptor/operation APIs retain fitted preparation. Unknown levels and unsupported extrapolation report a diagnostic. New-group resampling is an explicit operation for supported group structures. Warfarin's audit records limits on exposing all requested output arrays in one compiled model. Keep that distinction visible instead of promising automatic replay for arbitrary code. Source: docs/refactoring.md.
 :::
 
 ## A possible future: Julia models on GPUs
@@ -315,7 +315,7 @@ Compatibility, gradients, and useful performance need to be demonstrated on actu
 <div class="source-note"><a href="https://enzymead.github.io/Reactant.jl/stable/">Reactant</a> · <a href="https://enzymead.github.io/Reactant.jl/stable/tutorials/probprog/">probabilistic programming</a> · <a href="https://enzymead.github.io/Reactant.jl/stable/tutorials/control-flow">control-flow requirements</a>. brms already exposes <a href="https://paulbuerkner.com/brms/reference/opencl.html">Stan/OpenCL support for some operations</a>; GPU access alone is not the proposed distinction.</div>
 
 ::: {.notes}
-This is a possible future BRM integration, not a delivered backend or a performance promise. Reactant's documented Julia-to-MLIR/XLA path supports accelerators, and Reactant.ProbProg offers generative and custom-log-density modes. A generated Turing model is not thereby proved Reactant-compatible. Traced arrays, supported operations, and control-flow handling matter. Broader compilation of suitable Julia model computations is the direction, rather than a claim that other packages cannot use GPUs. Primary documentation checked 2026-09-14; the README records the unresolved Wren attribution.
+This is a possible future BRM integration, not a delivered backend or a performance promise. Reactant's documented Julia-to-MLIR/XLA path supports accelerators, and Reactant.ProbProg offers generative and custom-log-density modes. A generated model is not thereby proved Reactant-compatible. Traced arrays, supported operations, and control-flow handling matter. Broader compilation of suitable Julia model computations is the direction, rather than a claim that other packages cannot use GPUs. Primary documentation checked 2026-09-14; the README records the unresolved Wren attribution.
 :::
 
 ## Simple formulas, room for custom models {.main-end}
@@ -337,16 +337,16 @@ The selling point is the authoring experience: retaining formula convenience wit
 <span class="appendix-badge">Appendix A</span>
 
 <div class="comparison-row header"><div>Model component</div><div>Execution</div><div>Current boundary</div></div>
-<div class="comparison-row"><div>Population and distributional regression</div><div><span class="status both">StanBlocks + Turing</span></div><div>Shared formulas, links, and prior addresses.</div></div>
+<div class="comparison-row"><div>Population and distributional regression</div><div><span class="status both">StanBlocks + RK(PPL)</span></div><div>Shared formulas, links, and prior addresses.</div></div>
 <div class="comparison-row"><div>Group effects, advanced terms, modified responses</div><div><span class="status both">Both, within limits</span></div><div>Individual features and their combinations have specific supported subsets.</div></div>
-<div class="comparison-row"><div>Ordinary Julia callables without a Stan translation</div><div><span class="status turing">Turing</span></div><div>Density, gradient, transform, and prediction requirements still apply.</div></div>
-<div class="comparison-row"><div>Custom structural code written for StanBlocks</div><div><span class="status stan">StanBlocks</span></div><div>A Julia implementation is needed before Turing can execute that code.</div></div>
-<div class="comparison-row"><div>Corrected HSGP centering study</div><div><span class="status stan">StanBlocks sampled</span></div><div>No corrected Turing samples; see the study-specific checks in appendix E.</div></div>
+<div class="comparison-row"><div>Ordinary Julia callables without a Stan translation</div><div><span class="status rk">RK(PPL)</span></div><div>Density, gradient, transform, and prediction requirements still apply.</div></div>
+<div class="comparison-row"><div>Custom structural code written for StanBlocks</div><div><span class="status stan">StanBlocks</span></div><div>A native implementation is needed for RK(PPL).</div></div>
+<div class="comparison-row"><div>Corrected HSGP centering study</div><div><span class="status stan">StanBlocks sampled</span></div><div>See the study-specific checks in appendix E.</div></div>
 
-<div class="source-note">This table covers the two paths discussed here. BRM also has vectorized Julia execution and a narrower experimental NativePPL path; neither is presented as a verified GPU backend.</div>
+<div class="source-note">BRM has two backends: StanBlocks and RK(PPL). Their supported operations and generated representations are checked separately.</div>
 
 ::: {.notes}
-Consult docs/src/turing-backend.md for the current combinations. Both does not mean identical generated code, parameter coordinates, or fitting performance. VBRMI and NativePPL exist but are not the focus of this deck; their presence should not be erased by presenting two paths as the complete BRM inventory. NativePPL's support is deliberately narrow. The HSGP restriction is study-specific and does not claim that every Turing model is blocked from sampling.
+Consult the backend documentation for the current combinations. Both does not mean identical generated code, parameter coordinates, or fitting performance. The recorded HSGP study uses StanBlocks.
 :::
 
 ## The complete PK example {.complete-example}
@@ -356,10 +356,10 @@ Consult docs/src/turing-backend.md for the current combinations. Both does not m
 ```{.julia brm-example="population_pk"}
 ```
 
-<div class="source-note"><strong>StanBlocks example; Turing does not yet support the ragged-response wrapper.</strong> Julia setup: <code>using BayesianRegressionModels, Distributions</code>. Code and data are read from <a href="https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/src/feature-atlas.md">the executable feature atlas</a>.</div>
+<div class="source-note"><strong>StanBlocks example.</strong> Julia setup: <code>using BayesianRegressionModels, Distributions</code>. Code and data are read from <a href="https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/src/feature-atlas.md">the executable feature atlas</a>.</div>
 
 ::: {.notes}
-This is the complete checked-in declaration with its data, not a handwritten sketch of a generated backend. The feature atlas executes it and derives the StanBlocks, Stan, and Turing views. Consult the generated view for any unsupported-backend error. This slide and the two main-talk excerpts share the same source and cannot drift independently.
+This is the complete checked-in declaration with its data, not a handwritten sketch of a generated backend. The feature atlas executes it and derives the intermediate representation, StanBlocks, and Stan views. This slide and the two main-talk excerpts share the same source and cannot drift independently.
 :::
 
 ## Inspect the actual model code
@@ -372,7 +372,7 @@ This is the complete checked-in declaration with its data, not a handwritten ske
 
 The [feature atlas](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/src/feature-atlas.md) executes each displayed model.
 
-Its four views show the BRM declaration, emitted StanBlocks code, generated Stan, and the Turing model or its construction error.
+Its four views show the BRM declaration, intermediate representation, emitted StanBlocks code, and generated Stan.
 :::
 ::: {.card .accent-teal}
 **Check the operation you need**
@@ -384,10 +384,10 @@ For new fitted terms, check new-data transformations too. For a second execution
 ::::
 
 <div class="takeaway">Read generated code from the executable example, not from a manually maintained illustration.</div>
-<div class="source-note"><a href="https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/backend_comparisons.jl">How the comparison is generated</a> · <a href="https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/src/turing-backend.md">Turing operations and limits</a> · <a href="https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/refactoring.md">Extension contracts</a></div>
+<div class="source-note"><a href="https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/backend_comparisons.jl">How the comparison is generated</a> · <a href="https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/docs/refactoring.md">Extension contracts</a></div>
 
 ::: {.notes}
-The previous deck showed explanatory fragments under a generated-code heading and disclosed that fact only in notes. This appendix instead points to the executable source of the comparison. No generated Stan or Turing fragment is invented here. The public Turing source is available through turing_model_source; the documentation generates its views from the same BRMI example.
+The previous deck showed explanatory fragments under a generated-code heading and disclosed that fact only in notes. This appendix instead points to the executable source of the comparison. The documentation generates its views from the same BRMI example.
 :::
 
 ## The centering study in detail
@@ -448,14 +448,14 @@ All 133 MASS::mcycle rows; acceleration divided by its sample standard deviation
 - Divergences: NCP {{< brm-hsgp ncp divergences >}}, CP {{< brm-hsgp cp divergences >}}, post-hoc {{< brm-hsgp posthoc_position divergences >}} / {{< brm-hsgp posthoc_gradient divergences >}}, online {{< brm-hsgp online_position divergences >}} / {{< brm-hsgp online_gradient divergences >}}.
 - Gradient counts are a compute proxy, not wall-clock speed.
 - No reliable ranking or general speed advantage is established.
-- No Turing posterior samples exist.
+- These fits use the StanBlocks backend.
 :::
 ::::
 
 <div class="source-note"><a href="https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/centering_refresh">Refresh harness</a> · <a href="https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/centering_refresh/results/hsgp">committed comparison, controls and checks</a> · <a href="https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/adaptive_centering/results/source-faithful">source reproduction and audits</a>.</div>
 
 ::: {.notes}
-The partial target was compared with the original adaptive Stan program at {{< brm-source-audit positions >}} saved posterior positions; maximum absolute density/gradient differences were {{< brm-source-audit max_density >}}/{{< brm-source-audit max_gradient >}}. The refreshed study reran the noncentered source audit and checked three saved draws of every fit for coordinate mapping, Jacobian-adjusted density and transformed gradients. Its post-hoc position selections are identical to the source reproduction's, which the render checks; its fits wrap the compiled noncentered target, whose saved draws those frame checks cover. A separate Turing gradient benchmark agrees with StanBlocks in density and gradient (test/receipts/turing_hsgp_gradients.tsv); it is not posterior-sampling evidence. Fits recorded before WarmupHMC's active-position transport repair are not used to rank online adaptation.
+The partial target was compared with the original adaptive Stan program at {{< brm-source-audit positions >}} saved posterior positions; maximum absolute density/gradient differences were {{< brm-source-audit max_density >}}/{{< brm-source-audit max_gradient >}}. The refreshed study reran the noncentered source audit and checked three saved draws of every fit for coordinate mapping, Jacobian-adjusted density and transformed gradients. Its post-hoc position selections are identical to the source reproduction's, which the render checks; its fits wrap the compiled noncentered target, whose saved draws those frame checks cover. Fits recorded before WarmupHMC's active-position transport repair are not used to rank online adaptation.
 :::
 
 ## Sources and reproduction {.smaller}

@@ -186,7 +186,7 @@ const BRM = BayesianRegressionModels
     @test_throws DomainError TruncatedNormal(0.0, 1.0, 2.0, -2.0)
 end
 
-@testset "real likelihood distributions share the VBRMI contract" begin
+@testset "real likelihood distributions match their Stan lowering" begin
     df_v = (;
         y_zip=[0, 1, 3],
         y_nb2=[0, 2, 5],
@@ -203,7 +203,6 @@ end
         y_blogit ~ BinomialLogit(5, -0.3)
         y_skew ~ SkewDoubleExponential(0.3, 1.4, 0.25)
     end
-    vbrmi = VBRMI(builder_v(df_v))
     expected =
         sum(logpdf.(ZeroInflatedPoisson(2.3, 0.25), df_v.y_zip)) +
         sum(logpdf.(NegativeBinomial2(3.2, 1.7), df_v.y_nb2)) +
@@ -211,8 +210,15 @@ end
         sum(logpdf.(CategoricalLogit(-0.3, 1.2), df_v.y_cat)) +
         sum(logpdf.(BinomialLogit(5, -0.3), df_v.y_blogit)) +
         sum(logpdf.(SkewDoubleExponential(0.3, 1.4, 0.25), df_v.y_skew))
-    @test LogDensityProblems.dimension(vbrmi) == 0
-    @test logpdf(vbrmi, Float64[]) ≈ expected
+    descriptor = brm_descriptor(builder_v, df_v; mod=@__MODULE__)
+    @test StanBlocks.stanc_check(brm_execute(descriptor, :transpile);
+        warn_pedantic=false).ok
+    mkpath(FAMILY_SURFACE_CACHE)
+    problem = brm_execute(descriptor, :instantiate;
+        path=joinpath(FAMILY_SURFACE_CACHE, string(descriptor.id) * ".stan"))
+    @test LogDensityProblems.dimension(problem) == 0
+    @test StanBlocks.BridgeStan.log_density(problem.model, Float64[];
+        propto=false, jacobian=false) ≈ expected
 end
 
 @testset "Distributions.jl constructor semantics map to native Stan" begin

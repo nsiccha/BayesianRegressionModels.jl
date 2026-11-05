@@ -4,7 +4,6 @@ using Distributions
 using LogDensityProblems
 using Statistics
 using StanBlocks
-using Turing
 
 const BRM = BayesianRegressionModels
 const BS = StanBlocks.BridgeStan
@@ -66,14 +65,6 @@ end
     @test occursin("mo1_c_simplex_incr ~ dirichlet(alpha);", vector_sb_code)
     @test !occursin("dirichlet(rep_vector(alpha", vector_sb_code)
     @test StanBlocks.stanc_check(vector_sb_code; warn_pedantic=false).ok
-
-    vector_turing = TuringBRMI(vector_concentration)
-    simplex_probe = [0.2, 0.3, 0.5]
-    beta_probe = [0.2]
-    @test Turing.logprior(vector_turing.model,
-        (; beta_pop=beta_probe, term_mu_1=(; simplex_incr=simplex_probe))) ≈
-        logpdf(Normal(), only(beta_probe)) +
-        logpdf(Dirichlet(vector_data.alpha), simplex_probe)
 
     fitted = @brm term_semantics_df begin
         y ~ Normal(mu, 1)

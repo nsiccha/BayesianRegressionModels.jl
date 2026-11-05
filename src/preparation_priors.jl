@@ -47,7 +47,7 @@ function _brm_distribution_shape(::Type{<:MixtureModel}, args)
     components = first(args)
     components isa AbstractVector && !isempty(components) || error(
         "BRM preparation: MixtureModel components must be a nonempty vector")
-    shapes = map(_brm_distribution_shape, components)
+    shapes = map(_brm_mixture_component_shape, components)
     all(==(first(shapes)), shapes) || error(
         "BRM preparation: MixtureModel components must share one variate shape")
     first(shapes)
@@ -64,6 +64,61 @@ function _brm_distribution_shape(constructor, args)
     type isa Type && type <: Distribution || error(
         "BRM preparation: brm_distribution_type($constructor) must return a Distribution type or nothing")
     _brm_distribution_shape(type, args)
+end
+
+# Ordinary custom components already register their observation shape and
+# support in StanBlocks. Query typed arguments without evaluating live model
+# values, so bounds remain symbolic and no duplicate BRM shape trait is needed.
+function _brm_mixture_family_support(component::ExprColumn)
+    typed_args = map(enumerate(getargs(component))) do (j, arg)
+        arg isa Real && !(arg isa Bool) ? Float64(arg) :
+            Expr(:(::), Symbol(:arg, j), :real)
+    end
+    StanBlocks.family_support(getf(component), typed_args...)
+end
+
+function _brm_mixture_component_shape(component::ExprColumn)
+    getf(component) isa Function || return _brm_distribution_shape(component)
+    support = _brm_mixture_family_support(component)
+    isempty(support.size) || return nothing
+    support.kind === :continuous && support.type === :real &&
+        return (Distributions.Univariate, Distributions.Continuous)
+    support.kind === :discrete && support.type === :int &&
+        return (Distributions.Univariate, Distributions.Discrete)
+    nothing
+end
+
+function _brm_mixture_full_real(component::ExprColumn)
+    constructor = getf(component)
+    if constructor isa Function
+        support = _brm_mixture_family_support(component)
+        return support.kind === :continuous && support.type === :real &&
+            isempty(support.size) && isempty(support.support)
+    end
+    _brm_distribution_shape(component) ===
+        (Distributions.Univariate, Distributions.Continuous) || return false
+    constructor isa Type || return false
+    if constructor <: LocationScale
+        return _brm_mixture_full_real(last(getargs(component)))
+    end
+    type = brm_distribution_type(constructor)
+    isnothing(type) && return false
+    try
+        minimum(type) == -Inf && maximum(type) == Inf
+    catch err
+        err isa MethodError || rethrow()
+        false
+    end
+end
+
+function _brm_check_heterogeneous_mixture(components; prefix)
+    constructors = map(getf, components)
+    allequal(constructors) && all(constructor -> constructor isa Type, constructors) &&
+        return nothing
+    all(_brm_mixture_full_real, components) || error(
+        "$prefix: heterogeneous or custom MixtureModel components need known full-real " *
+        "scalar support; mixed, bounded and parameter-dependent supports are not supported")
+    nothing
 end
 
 function _brm_r2d2_prior(value, target)
@@ -89,107 +144,6 @@ struct _BRMR2D2Plan{P,A,T}
     share_indices::Vector{Int}
     alpha::A
     total_scale::T
-end
-
-struct _BRMJointR2D2Predictor
-    plan_index::Int
-    predictor::Symbol
-    component_index::Int
-    block_index::Int
-    coefficient_shares::Vector{Int}
-    margin_shares::Vector{Int}
-end
-_BRMJointR2D2Predictor(predictor, component_index, block_index,
-                       coefficient_shares, margin_shares) =
-    _BRMJointR2D2Predictor(0, predictor, component_index, block_index,
-                           coefficient_shares, margin_shares)
-
-struct _BRMJointR2D2Plan{P,R}
-    id::Symbol
-    prior::P
-    alpha::Float64
-    reference_scale::R
-    n_shares::Int
-    predictors::Vector{_BRMJointR2D2Predictor}
-end
-
-function _brm_merge_joint_r2d2(plans, owners=eachindex(plans); prefix="Turing backend")
-    grouped = Dict{Symbol,Vector{Tuple{Int,Any}}}()
-    for (pi, plan) in pairs(plans), allocation in plan.joint_r2d2
-        owners[pi] == pi || continue
-        push!(get!(grouped, allocation.id, Tuple{Int,Any}[]), (pi, allocation))
-    end
-    Tuple(begin
-        first_plan = first(entries)[2]
-        all(e -> isequal(e[2].prior, first_plan.prior) &&
-                 e[2].alpha == first_plan.alpha &&
-                 isequal(e[2].reference_scale, first_plan.reference_scale), entries) ||
-            error("$prefix: shared joint R2D2 block `$(first_plan.id)` has inconsistent priors")
-        cursor = 0
-        mappings = _BRMJointR2D2Predictor[]
-        # Rebase every child's local simplex positions into one global simplex.
-        for (pi, allocation) in entries
-            offset = cursor
-            for mapping in allocation.predictors
-                push!(mappings, _BRMJointR2D2Predictor(pi, mapping.predictor,
-                    mapping.component_index, mapping.block_index,
-                    [s == 0 ? 0 : s + offset for s in mapping.coefficient_shares],
-                    [s + offset for s in mapping.margin_shares]))
-            end
-            cursor += allocation.n_shares
-        end
-        _BRMJointR2D2Plan(first_plan.id, first_plan.prior, first_plan.alpha,
-                          first_plan.reference_scale, cursor, mappings)
-    end for entries in values(grouped))
-end
-
-function _brm_joint_r2d2_plans(brmi::BRMI, components; prefix="BRM preparation")
-    specs = [s for s in ranef_effect_priors(brmi)
-             if s.class === :sd && s.family === r2d2 &&
-                isnothing(s.predictor) && isnothing(s.coefficient) &&
-                haskey(s.keywords, :include)]
-    out = _BRMJointR2D2Plan[]
-    for spec in specs
-        members = spec.keywords.include isa Symbol ? (spec.keywords.include,) : Tuple(spec.keywords.include)
-        :population in members || error("$prefix: joint R2D2 requires `include=:population`")
-        prior = if haskey(spec.keywords, :R2)
-            _brm_r2d2_prior(spec.keywords.R2, "sd(:, $(spec.id))")
-        else
-            m = _brm_numeric_constant(get(spec.keywords, :mean_R2, .5))
-            p = _brm_numeric_constant(get(spec.keywords, :prec_R2, 2.))
-            (isnothing(m) || isnothing(p)) && error("$prefix: joint R2D2 moments must be numeric")
-            Beta(Float64(m*p), Float64((1-m)*p))
-        end
-        alpha = _brm_numeric_constant(get(spec.keywords, :alpha, get(spec.keywords, :concentration, 1.)))
-        (isnothing(alpha) || alpha <= 0) && error("$prefix: joint R2D2 concentration must be positive")
-        reference = get(spec.keywords, :reference_scale, nothing)
-        isnothing(reference) && error("$prefix: joint R2D2 requires `reference_scale=`")
-        matches = Tuple{Int,Int,Any}[]
-        for (ci, component) in pairs(components), (bi, block) in pairs(component.random_effects)
-            block.id === spec.id && push!(matches, (ci, bi, block))
-        end
-        isempty(matches) && error("$prefix: `sd(:, $(spec.id))` matches no random-effect block")
-        cursor = 0
-        margins = Dict{Int,Vector{Int}}()
-        for (ci, _, block) in matches
-            shares = collect(cursor+1:cursor+length(block.columns)); cursor += length(shares)
-            margins[ci] = shares
-        end
-        mappings = _BRMJointR2D2Predictor[]
-        for (ci, bi, _) in matches
-            component = components[ci]
-            isnothing(component.r2d2) || error("$prefix: predictor `$(component.predictor.name)` has both whole and joint R2D2")
-            coeff = zeros(Int, length(component.design.columns))
-            for j in eachindex(coeff)
-                component.design.columns[j].label === :Intercept && continue
-                !isnothing(component.priors[j]) && error("$prefix: explicit coefficient prior conflicts with joint R2D2")
-                cursor += 1; coeff[j] = cursor
-            end
-            push!(mappings, _BRMJointR2D2Predictor(component.predictor.name, ci, bi, coeff, margins[ci]))
-        end
-        push!(out, _BRMJointR2D2Plan(spec.id, prior, Float64(alpha), reference, cursor, mappings))
-    end
-    Tuple(out)
 end
 
 Base.@nospecializeinfer function _brm_whole_predictor_r2d2(@nospecialize(brmi::BRMI), design, coefficient_priors;
