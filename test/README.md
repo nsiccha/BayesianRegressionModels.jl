@@ -1,5 +1,12 @@
 # Running the tests
 
+`plate_direct_outputs.jl` checks direct reads of complete cells from another
+plate, including fixed-width vectors, collected and non-last outputs, and
+observed or omitted responses. Square and non-square shapes compare compiled
+Stan densities and gradients with analytic references; prior draws check the
+same cell values. Scalar, ragged-vector and matrix cells supply shape controls.
+Run it as a standalone script in the test environment.
+
 `scoped_components.jl` checks function-style BRM components with independent
 local priors, explicit shared inputs, nested calls, vector results, and plate
 cells. It compares normalized densities and native Reverse gradients with

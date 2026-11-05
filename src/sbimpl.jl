@@ -8286,10 +8286,15 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     body_stmts = _sb_cell_statements(_sb_cell_ar1_normal_calls(body_stmts, kept_params),
         _brm_inline_scope(lam))
     plate_body = Expr(:block, body_stmts...)
-    plate_call = nsub_sym === nothing ? Expr(:call, :plate, kept_names...) :
+    # A producer's collected or indexed side output holds whole cells.
+    # In particular, fixed-width vectors are stored as matrix columns, so
+    # ordinary positional matrix slicing would select channels instead.
+    plate_inputs = Any[_sb_plate_output(dcols[j + 1], data) ?
+        Expr(:call, brm_plate_cells, dcol_names[j]) : dcol_names[j] for j in kept]
+    plate_call = nsub_sym === nothing ? Expr(:call, :plate, plate_inputs...) :
         Expr(:call, :plate,
             Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
-            kept_names...)
+            plate_inputs...)
     plate_do = Expr(:do, plate_call,
         Expr(:->, Expr(:tuple, kept_params...), plate_body))
     push!(stmts, :($target ~ $plate_do))
