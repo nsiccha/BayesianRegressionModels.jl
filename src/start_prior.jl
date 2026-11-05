@@ -61,6 +61,7 @@ end
 # This walks the model's captured calls; it never evals initializer addresses.
 _brm_start_law(x, value, floor=nothing) = x
 _brm_start_law(x::NamedColumn, value, floor=nothing) = value(name(x))
+_brm_start_law(x::DataColumn, value, floor=nothing) = parent(x)
 _brm_start_law(x::Symbol, value, floor=nothing) = value(x)
 _brm_start_law(x::_BRMLengthScaleFloor, value, floor=nothing) = floor
 function _brm_start_law(x::ExprColumn, value, floor=nothing)
@@ -106,7 +107,8 @@ end
 
 # Ordinary scalar dependencies read explicit values first, then their own
 # median, then deterministic assignments/data. No random draw is a fallback.
-function _brm_start_prior_values(brmi, inits; constants=(;))
+function _brm_start_prior_values(brmi, inits; constants=(;), inputs=Dict(),
+        component_value=key -> nothing)
     # A constant is a declaration marker, not a callable distribution argument.
     # Restore the backend's fitted values before traversing ordinary priors.
     brmi, _ = _brm_resolve_constants(brmi; prefix="brm_start",
@@ -122,14 +124,18 @@ function _brm_start_prior_values(brmi, inits; constants=(;))
     pending = Set{Symbol}()
     function value(key)
         haskey(cache, key) && return cache[key]
+        haskey(inputs, key) && return get!(inputs[key], cache, key)
         haskey(context.data, key) && return context.data[key]
         key === :Inf && return Inf
         key in pending && error("brm_start: cyclic prior dependency at `$key`")
         op = get(operations, key, nothing)
-        (op === nothing || !(op.role in (:parameter, :assignment))) && return nothing
-        push!(pending, key)
+        op === nothing && return nothing
+        op.role in (:parameter, :assignment, :predictor) || return nothing
         rhs = last(getargs(op.expression))
-        result = _brm_start_evaluate_law(rhs, value, key)
+        component = op.role === :predictor && rhs isa ExprColumn && getf(rhs) isa BRMComponent
+        (component || op.role in (:parameter, :assignment)) || return nothing
+        push!(pending, key)
+        result = component ? component_value(key) : _brm_start_evaluate_law(rhs, value, key)
         if op.role === :parameter
             result = _brm_start_median(result, key)
         end
@@ -221,13 +227,13 @@ end
 
 # Writes of scalar/broadcast laws on RK's emitted declarations. Read laws from
 # the same records the existing NLME median start consumes.
-function _brm_rk_start_prior_writes(rk, records, values, explicit, inits, term_targets)
+function _brm_rk_start_prior_writes(rk, records, values, explicit, inits, term_targets; env=nothing)
     chosen = Set((d, i) for (d, i, _) in explicit)
     covered(d, i) = (d, ()) in chosen || (d, i) in chosen
     writes = Tuple{Symbol,Tuple,Any}[]
     fitted = _rk_fitted_state(rk)
-    env = _brm_start_prior_values(parent(rk), inits;
-        constants=fitted === nothing ? (;) : fitted.constants)
+    env === nothing && (env = _brm_start_prior_values(parent(rk), inits;
+        constants=fitted === nothing ? (;) : fitted.constants))
     function add(d, i, prior, spelling; lower=-Inf, upper=Inf)
         covered(d, i) && return
         x = _brm_start_median(_brm_start_evaluate_law(prior, env.value, spelling), spelling; lower, upper)
@@ -277,10 +283,10 @@ function _brm_rk_start_prior_writes(rk, records, values, explicit, inits, term_t
     writes
 end
 
-function _brm_sb_start_prior_writes(sb, d, names, explicit, inits, term_targets)
+function _brm_sb_start_prior_writes(sb, d, names, explicit, inits, term_targets; env=nothing)
     chosen = Set(first(w) for w in explicit)
     writes = Tuple{Int,Float64}[]
-    env = _brm_start_prior_values(parent(sb), inits; constants=d.plan.data)
+    env === nothing && (env = _brm_start_prior_values(parent(sb), inits; constants=d.plan.data))
     bounds = _brm_sb_start_bounds(d, names)
     function add(indices, prior, spelling; lower=-Inf, upper=Inf)
         remaining = filter(i -> !(i in chosen), indices)
