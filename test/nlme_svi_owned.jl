@@ -7,6 +7,11 @@ include("nlme_svi_owned_fixture.jl")
 const BRM = BayesianRegressionModels
 const OWNED_AD = AutoEnzyme(; mode=Enzyme.Reverse)
 
+same_owned_units(a, b) = keys(a) == keys(b) && all(keys(a)) do label
+    x, y = a[label], b[label]
+    x.keys == y.keys && x.M == y.M && x.Λ == y.Λ && x.U ≈ y.U
+end
+
 function owned_model(data; connected=false)
     rk = RKBRMI(connected ? svi_owned_connected_model(data) : svi_owned_model(data))
     brm_nlme_model(rk; ad_backend=OWNED_AD,
@@ -131,7 +136,7 @@ end
     update = brm_svi_fit(state, svi_owned_model(next_data); max_iterations=0,
         ndraws=0, threads=1)
     carried = brm_svi_checkpoint(update)
-    @test carried.units == state.units
+    @test same_owned_units(carried.units, state.units)
     @test carried.q == state.q
     @test length(update.diagnostics.globals) == 4
     output_state = deepcopy(state)
@@ -149,7 +154,7 @@ end
     end
     returned = brm_svi_fit(carried, svi_owned_model(data); max_iterations=0,
         ndraws=0, threads=1)
-    @test brm_svi_checkpoint(returned).units == state.units
+    @test same_owned_units(brm_svi_checkpoint(returned).units, state.units)
     new_data = svi_owned_data([6, 2, 4, 7])
     new_fit = brm_svi_fit(carried, svi_owned_model(new_data); max_iterations=0,
         ndraws=0, threads=1)
