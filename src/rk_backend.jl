@@ -8498,7 +8498,7 @@ end
 
 # Emit a panel kernel model: globals (sampled params + assignments) as top-level
 # `@rkppl` statements, then the subject-plate cell subgraph.
-function _rk_emit_ast(plan::_RKKernelPlan)
+function _rk_emit_ast(plan::_RKKernelPlan; documentation=())
     stmts = Expr[]
     for parameter in plan.parameters
         push!(stmts, _rk_ast_sampled(parameter))
@@ -8509,7 +8509,7 @@ function _rk_emit_ast(plan::_RKKernelPlan)
     end
     append!(stmts, _rk_emit_kernel_ast(plan.kernel, union(Set(keys(plan.columns)),
         Set(p.name for p in plan.parameters), Set(a.name for a in plan.assignments))).args)
-    _RKEmittedProgram(Expr[], Expr(:block, stmts...))
+    _rk_documented_program(_RKEmittedProgram(Expr[], Expr(:block, stmts...)), documentation)
 end
 
 # A modeled ordinal scale feeds nothing else: a discrimination

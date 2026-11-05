@@ -280,7 +280,9 @@ const PINS = [
     # f17b6a24 (RK 0.1.67 / RKPPL 0.1.76) prepares strict observation-cell
     # footprints of a per-cell joint field and its named-tuple row reads.
     # 1e43b1b8 (RKPPL 0.1.90): native row-dependent and computed shared mixture probabilities.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "1e43b1b844fa32d9d7e231e068e3e061bf67981f"),
+    # eb1b62dc (RKPPL 0.1.93): ordinary authored documentation survives
+    # lowering, reusable definitions, binding and replay as metadata.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "eb1b62dc94003616851d4144e61bb1086409560d"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
