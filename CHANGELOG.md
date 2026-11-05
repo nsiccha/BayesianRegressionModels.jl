@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.172
+
+- `SBBRMI` preserves complete fixed-width vector cells in direct reads from
+  another `@plate`. Collected and non-last indexed outputs retain their outer
+  cell axis with observed responses and with responses omitted for prior
+  draws. Scalar, varying-width vector and matrix cells retain their existing
+  iteration behavior; model declarations and priors need no changes.
+
 ## 0.2.171
 
 - `@brm function component(inputs...) … return value end` defines a reusable
