@@ -58,6 +58,14 @@ scales and simplexes, and preserves unaddressed values and top-level starts.
 Run it as a standalone script in the test environment; it compiles Stan even
 when the resulting point is consumed by RK.
 
+`component_prior_inputs.jl` checks component formula priors that read the
+caller's parameters through inputs: population-effect locations and scales and
+a component-local `|ID|` block's SD prior. It compares compiled Stan densities
+and gradients with an independent density, checks each input's contribution
+along its coordinate, and covers a nested call and a call whose input is a
+number. The SD case is also checked on `RKBRMI`. It accepts testset substring
+filters; run it as a standalone script in the test environment.
+
 `component_start_values.jl` checks native component-local starts, recursive
 scalar prior medians, repeated and nested call paths, constrained values,
 explicit precedence, numeric-base preservation and input immutability.

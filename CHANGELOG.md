@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.194
+
+- A function-style component's formula priors read its model-valued inputs on
+  `SBBRMI`, as its scalar priors already did: with `center` and `scale` bound
+  by the caller to parent parameters, `effect(value, Intercept) ~
+  Normal(center, 0.4)` and `sd(value, unit) ~ Exponential(scale)` build. They
+  failed with "model-level prior references `center`, a extension", so one
+  definition could not be called with different prior locations or scales.
+  `RKBRMI` already read such inputs in random-effect SD priors. Its
+  population-effect prior arguments remain numeric constants or data, in a
+  component as at model scope.
+
 ## 0.2.193
 
 - Model views support readable `text/plain` output through HTMXObjects 0.1.65.
