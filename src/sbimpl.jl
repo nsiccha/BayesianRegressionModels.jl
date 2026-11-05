@@ -5037,6 +5037,24 @@ Base.@nospecializeinfer function _sb_observation_triage(@nospecialize(sb::SBBRMI
     (; bound, unbound, fresh_sources)
 end
 
+# The targets of the emitted priors that hold a `restricted(...)` law
+# (`_sb_restricted_prior!`), including a margin of a vector prior.
+_sb_restricted_targets!(out, _) = out
+function _sb_restricted_targets!(out, x::Expr)
+    if x.head === :call && length(x.args) == 3 && x.args[1] === :~ &&
+       _sb_holds_restricted(x.args[3])
+        name = x.args[2] isa Symbol ? x.args[2] : _sb_plan_lhs_name(x.args[2])
+        isnothing(name) || push!(out, name)
+        return out
+    end
+    foreach(a -> _sb_restricted_targets!(out, a), x.args)
+    out
+end
+_sb_holds_restricted(_) = false
+_sb_holds_restricted(x::Expr) =
+    (x.head === :call && !isempty(x.args) && x.args[1] === StanBlocks.restricted) ||
+    any(_sb_holds_restricted, x.args)
+
 Base.@nospecializeinfer function _sb_triage_emitted(@nospecialize(sb::SBBRMI),
                                                     triage=_sb_observation_triage(sb))
     (; bound, unbound, fresh_sources) = triage
@@ -5049,11 +5067,20 @@ Base.@nospecializeinfer function _sb_triage_emitted(@nospecialize(sb::SBBRMI),
                   "If one was meant to be fitted, its data column is missing " *
                   "or misnamed.")
         else
+            # A `restricted` prior whose mass inside its bounds moves with a
+            # sampled value stays sampled (StanBlocks' rule, stanblocks-use
+            # §8.1), so such a program keeps parameters (todo 0mhtheb).
+            restricted = unique!(_sb_restricted_targets!(Symbol[], sb.model.model))
+            kept = isempty(restricted) ? "" :
+                " A `restricted` prior (" * join(map(s -> "`$s`", restricted), ", ") *
+                ") whose mass inside its bounds moves with a sampled argument " *
+                "or bound stays a sampled parameter instead, with what its " *
+                "bounds and arguments read; that program needs a sampler."
             @warn("sbimpl: $names bind(s) no data column — building the " *
                   "unconditioned (prior) program: no likelihood reaches the " *
                   "model block, so parameters and responses forward-simulate " *
-                  "in generated quantities. If you meant to fit, the response " *
-                  "column is missing or misnamed.")
+                  "in generated quantities." * kept * " If you meant to fit, " *
+                  "the response column is missing or misnamed.")
         end
         return nothing
     end
