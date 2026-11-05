@@ -191,7 +191,7 @@ Each row contributes `log_sum_exp(log(weights) + component_lpdf)`, with
 matching pointwise log likelihoods. On SBBRMI, posterior-predictive draws
 select a component per row and draw from it.
 
-Every component is scalar. Since BRM 0.2.170, SBBRMI and RKBRMI also accept
+Every component is scalar. Since BRM 0.2.173, SBBRMI and RKBRMI also accept
 different continuous families whose support is the whole real line, such as
 `MixtureModel([Normal(mu, sigma), Cauchy(mu, tau)], [1-w, w])`.
 Each family keeps its own argument count and parameterization, so a
@@ -203,7 +203,7 @@ support. This requires StanBlocks 0.2.24.
 RK custom components use their existing `_rk_observation_source!` graphs.
 The emitted native mixture exposes each component to RK's scheduler;
 parameter-only transforms may execute once per call while observation work
-remains per row. ReactiveKernels 0.1.80 / ReactiveKernelsPPL 0.1.92 provide
+remains per row. ReactiveKernels 0.1.81 / ReactiveKernelsPPL 0.1.94 provide
 the native composition. Density, native Reverse, pointwise likelihood and
 source replay are supported; RK predictive generation for mixtures and
 caller-owned density laws remains separate work.

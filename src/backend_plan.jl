@@ -104,7 +104,7 @@ end
 function _brm_rebind_brmi(brmi::BRMI, df)
     operations = brmi.operations
     BRMI(NamedTuple{keys(operations)}(
-        map(value -> _brm_rebind_value(value, df), values(operations))))
+        map(value -> _brm_rebind_value(value, df), values(operations))), brmi.documentation)
 end
 
 # ---- `name = constant(expr)`: data-calibrated scalars and arrays ----------
@@ -715,7 +715,8 @@ formula tree; planners that only read them as syntax use the vector form,
 Base.@nospecializeinfer _brm_direct_observations(@nospecialize(brmi::BRMI); prefix="BRM backend lowering") =
     Tuple(_brm_direct_observation_list(brmi; prefix))
 
-Base.@nospecializeinfer function _brm_direct_observation_list(@nospecialize(brmi::BRMI); prefix="BRM backend lowering")
+Base.@nospecializeinfer function _brm_direct_observation_list(@nospecialize(brmi::BRMI);
+        prefix="BRM backend lowering", require_observation=true)
     found = Any[]
     for (key, op_nc) in _brm_operation_entries(brmi)
         op_nc isa NamedColumn || continue
@@ -725,7 +726,7 @@ Base.@nospecializeinfer function _brm_direct_observation_list(@nospecialize(brmi
         isnothing(_brm_observation_name(lhs)) && continue
         push!(found, (; key, lhs, rhs))
     end
-    isempty(found) && error(
+    require_observation && isempty(found) && error(
         "$prefix: direct execution requires at least one observed likelihood")
     found
 end

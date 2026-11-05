@@ -3,8 +3,10 @@ module BayesianRegressionModels
 # @brm macro — parses a formula block, produces a BRMI (BRM
 # intermediate: expression tree + column metadata).
 using OrderedCollections
+include("authored_documentation.jl")
 include("macro.jl")
 include("builder_interpreter.jl")
+include("components.jl")
 include("groups.jl")
 include("ar1_normal.jl")
 
@@ -101,6 +103,8 @@ include("sb_cell_julia.jl")
 include("sb_cell_formulas.jl")
 include("sb_distribution_statistics.jl")
 include("sb_plate_outputs.jl")
+include("component_backends.jl")
+include("component_cells.jl")
 # Fusion-append artifacts + SB reference numbers (RK-side driver inputs).
 # After sbimpl (SBBRMI) and the RK planner/AST above; RK-free — the
 # bound-plan translation lives in the ReactiveKernels extension.
@@ -209,6 +213,7 @@ include("draw_trees.jl")
 # Public surface. The macros and value types everything downstream
 # (web-macro, downstream extensions, tests) reaches for.
 export @brm, @n, @x, @getproperty
+export BRMComponent, brm_components
 export assign, effect, r2d2, doublepipe, gr, mm, gp, offset, zscale, center, standardize, constant, protect, factor
 export restricted
 export LKJCovarianceFactor, MvNormalCholesky
@@ -375,7 +380,8 @@ export outcomes, linear_predictor_op, linear_predictors, predictors,
        hierarchical_outcomes,
        linear_predictor_args, data_args, primary_lp, popcoefnames, effect_priors,
        ranef_effect_priors, r2d2_priors, term_priors, ranefcoefnames,
-       priors_of, structure_of, brm_source
+       priors_of, structure_of, brm_source,
+       BRMDocumentation, brm_documentation, brm_documentation_markdown
 
 # Extension API. Downstream packages add their own formula terms
 # by defining methods on `vmeta_sampling_rhs` + `_sb_submodel_rhs!` and

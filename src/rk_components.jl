@@ -13,6 +13,7 @@ function _rk_ast_shared_definition!(definitions, taken, base, arguments, body;
         kernel=false, head=:(=))
     arguments = collect(Any, arguments)
     for definition in definitions
+        definition = _brm_undoc(definition)
         kernel == Meta.isexpr(definition, :macrocall) || continue
         inner = kernel ? last(definition.args) : definition
         Meta.isexpr(inner, head, 2) || continue

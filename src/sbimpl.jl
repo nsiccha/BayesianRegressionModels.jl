@@ -4654,7 +4654,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        centered_groups=Set{Symbol}(), total_groups=(),
        s2z_groups=(), s2z_rho=nothing, s2z_coordinates=:contrasts, held_out=(),
        resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing,
-       _s2z_generated=nothing, _source::BRMI=brmi)
+       _s2z_generated=nothing, _source::BRMI=brmi, _component_output=nothing)
     brmi = _brm_resolve_prior_addresses(brmi)
     # A frozen re-emission codes releveled factors over their fitted levels.
     isnothing(_frozen_preproc) || (brmi = _sb_fit_factor_levels(brmi, _frozen_preproc))
@@ -4683,6 +4683,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
         "carry a cv taint; drop the group from `cv_groups`."))
     stmts = Any[]
     data = Dict{Symbol,Any}()
+    data[_SB_COMPONENT_NAMES_KEY] = Set{Symbol}(_brm_operation_names(brmi))
     isempty(fresh_covariates) || (data[_SB_FRESH_COVARIATES_KEY] = fresh_covariates)
     # Side-channel: transform emitters record their fit-time constant + raw
     # reference here (via `_sb_record_preproc!`); popped before `SlicModel` below
@@ -4918,6 +4919,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # Pop the preproc side-channel BEFORE building the SlicModel so it never
     # pollutes Stan's data dict.
     bindings = pop!(data, _SB_BINDINGS_KEY)
+    pop!(data, _SB_COMPONENT_NAMES_KEY)
     pop!(data, _SB_CELL_FORMULA_BINDINGS_KEY)
     pop!(data, _SB_TOTAL_PLANS_KEY)
     pop!(data, _SB_S2Z_PLANS_KEY)
@@ -4956,6 +4958,13 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     body = Expr(:block, stmts...)
     model = StanBlocks.SlicModel(body, data, mod, _sb_declared_observations(body, data, brmi, mod))
     sb = SBBRMI(source_parent, model, data, preproc, Set{Symbol}(), bindings, _source)
+    # A scoped component contributes its returned value to a parent's model;
+    # its likelihood can therefore live entirely in that parent.
+    if _component_output !== nothing
+        _brm_has_operation(brmi, _component_output) || error(
+            "sbimpl: component result `$_component_output` is not declared")
+        return sb
+    end
     triage = _sb_observation_triage(sb)
     # The activity probe's own build: no warnings, no held-out marks.
     _marginal_id_targets isa _SBMarginalProbe && return sb
@@ -5007,6 +5016,14 @@ Base.@nospecializeinfer function _sb_observation_triage(@nospecialize(sb::SBBRMI
     unbound = sort!(unique!(Symbol[d.target for d in declarations
                            if d.role === :observation && isnothing(d.data_source) &&
                               !(d.target in missing_sources) && !(d.target in fresh_sources)]))
+    for entry in values(sb.preproc)
+        entry.kind === :brm_component || continue
+        record = entry.const_
+        nested = _sb_observation_triage(record.fitted)
+        bound += nested.bound
+        append!(unbound, (Symbol(record.target, :., target) for target in nested.unbound))
+        union!(fresh_sources, (Symbol(record.target, :., target) for target in nested.fresh_sources))
+    end
     (; bound, unbound, fresh_sources)
 end
 
@@ -7237,7 +7254,7 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     # 1. Regenerate every independent transform-output key from its preproc
     #    record. Interactions wait until their raw/transformed operands exist.
     for (key, e) in sb.preproc
-        e.kind in (:interaction, :submodel_hook, :cell_formulas) && continue
+        e.kind in (:interaction, :submodel_hook, :cell_formulas, :brm_component) && continue
         _sb_reads_level_codes(e) && continue
         # A response a cell observes through a grouping (`y[rows[i]]`) is a
         # gathered key whose raw column the new data may lack. Its record is
@@ -7277,6 +7294,11 @@ function reprocess(sb::SBBRMI, new_df; freeze_constants::Bool=true,
     # 1b. Re-invoke each consumer `_sb_submodel_rhs!` term on the new frame; it
     #     re-derives every key it wrote, reading constants regenerated in step 1.
     for (key, e) in sb.preproc
+        if e.kind === :brm_component
+            _sb_replay_component!(new_data, new_preproc, handled, key, e, sb,
+                                  new_df, freeze_constants)
+            continue
+        end
         e.kind === :submodel_hook || continue
         _sb_reprocess_submodel_hook!(new_data, new_preproc, handled, key, e, sb,
                                      new_df, freeze_constants)
@@ -8264,10 +8286,15 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     body_stmts = _sb_cell_statements(_sb_cell_ar1_normal_calls(body_stmts, kept_params),
         _brm_inline_scope(lam))
     plate_body = Expr(:block, body_stmts...)
-    plate_call = nsub_sym === nothing ? Expr(:call, :plate, kept_names...) :
+    # A producer's collected or indexed side output holds whole cells.
+    # In particular, fixed-width vectors are stored as matrix columns, so
+    # ordinary positional matrix slicing would select channels instead.
+    plate_inputs = Any[_sb_plate_output(dcols[j + 1], data) ?
+        Expr(:call, brm_plate_cells, dcol_names[j]) : dcol_names[j] for j in kept]
+    plate_call = nsub_sym === nothing ? Expr(:call, :plate, plate_inputs...) :
         Expr(:call, :plate,
             Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
-            kept_names...)
+            plate_inputs...)
     plate_do = Expr(:do, plate_call,
         Expr(:->, Expr(:tuple, kept_params...), plate_body))
     push!(stmts, :($target ~ $plate_do))
@@ -16245,6 +16272,7 @@ end
 # of them, not just the preproc dict: with no observation bound, the fallback
 # tiers above would otherwise mistake a side-channel for a sizing column.
 _sb_is_side_channel_key(k::Symbol) =
+    k === _SB_COMPONENT_NAMES_KEY ||
     k === _SB_PREPROC_KEY || k === _SB_BINDINGS_KEY || k === _SB_CELL_FORMULA_BINDINGS_KEY ||
     k === _SB_THRESHOLD_LOCATED_KEY || k === _SB_HYPER_PLANS_KEY ||
     k === _SB_TOTAL_PLANS_KEY || k === _SB_S2Z_PLANS_KEY ||

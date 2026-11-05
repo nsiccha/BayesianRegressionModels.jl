@@ -59,7 +59,7 @@ Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.24"
+StanBlocks = "0.2.25"
 Treebars = "0.1.1"
 Turing = "0.46"
 WarmupHMC = "0.2.11"
@@ -146,12 +146,14 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # 0.2.24 includes typed family_support, callable identity and broadcast RNG names.
 # ef55b84f (0.2.21) predicts upper-only intervals with their response omitted.
 # b43fc26d (0.2.24) predicts censored responses whose bound is the omitted response.
-rev = "b43fc26d78d3257860070317d2ec6e3d723d55f1"
+# dba65366 (0.2.25) preserves keyword labels when a plate renames its
+# inputs, including BRM component calls whose formal and actual names match.
+rev = "dba6536683e8c226f2e74823856d0d85e7ad02a2"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
 # Includes cooperative interruption used by BRM's progress hooks.
-# Treebars 0.1.5 also satisfies the ReactiveKernelsPPL 0.1.92 extension floor.
+# Treebars 0.1.5 also satisfies the pinned ReactiveKernelsPPL extension floor.
 rev = "0c22ab3b1a38aad1df36c013f36aa923e0891975"
 
 [sources.WarmupHMC]
@@ -317,5 +319,7 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # fbf65b46 (RK 0.1.65 / PPL 0.1.74): prepared queries holding modules deep-copy.
 # f17b6a24 (RK 0.1.67 / PPL 0.1.76): strict cell footprints of per-cell joint fields.
 # 1e43b1b8 (PPL 0.1.90): native row-dependent and computed shared mixture probabilities.
-# e190bff0 (RK 0.1.80 / PPL 0.1.92): heterogeneous native mixture component graphs.
-rev = "e190bff05e433b65e8ba8e6a9cedee8d5198b65a"
+# e190bff0 (PPL 0.1.92): heterogeneous native mixture component graphs.
+# 0ee20c70 (PPL 0.1.93): authored local and reusable-definition docs.
+# 405190ae (RK 0.1.81 / PPL 0.1.94): same-model empty observation rebinding.
+rev = "405190ae85e0cee2f2f20a6741c1e821507b625b"

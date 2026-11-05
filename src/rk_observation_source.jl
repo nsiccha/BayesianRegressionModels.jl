@@ -58,6 +58,7 @@ _rk_observation_source!(definitions, bindings, entry, family, ::Val) =
 
 # The ports of a provider's `@kernel entry(ports...) = body` definition.
 function _rk_kernel_entry_ports(definition)
+    definition = _brm_undoc(definition)
     body = only(arg for arg in definition.args[2:end] if !(arg isa LineNumberNode))
     first(body.args).args[2:end]
 end

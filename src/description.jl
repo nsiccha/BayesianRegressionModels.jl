@@ -95,6 +95,8 @@ component, `(; id, prose, equations)` in that order, so a reader sees each
 part's equations right after its sentences; the Markdown is written from them.
 A description constructed without sections has one section holding all of
 `prose`, then all of `equations`.
+`documentation` retains authored declaration Markdown and provenance; it
+does not change scientific coverage or numerical identity.
 """
 struct BRMDescription
     model_id::String
@@ -108,7 +110,10 @@ struct BRMDescription
     complete::Bool
     texts::BRMDescriptionTexts
     sections::Tuple
+    documentation::Tuple{Vararg{BRMDocumentation}}
 end
+BRMDescription(model_id,components,prose,equations,notation,priors,coverage,diagnostics,complete,texts,sections) =
+    BRMDescription(model_id,components,prose,equations,notation,priors,coverage,diagnostics,complete,texts,sections,())
 # Without texts, a description is in the default English, as in brm_description.
 BRMDescription(model_id,components,prose,equations,notation,priors,coverage,diagnostics,complete) =
     BRMDescription(model_id,components,prose,equations,notation,priors,coverage,diagnostics,complete,_BRMD_EN_TEXTS)
@@ -124,6 +129,9 @@ it from its context to write its own prose in the same language, e.g. by
 dispatching on `brm_description_texts(context).locale`.
 """
 brm_description_texts(d::BRMDescription) = d.texts
+_brm_documentation(d::BRMDescription) = d.documentation
+_brm_documentation(d::BRMDescriptor) = _brm_documentation(d.plan.parent)
+_brm_documentation(d::GenerativePlan) = _brm_documentation(d.parent)
 function brm_description_texts(c::BRMDescriptionComponent)
     haskey(c.provenance,:description_texts) || throw(ArgumentError(
         "description component $(c.id) carries no description texts; build it with brm_description"))
