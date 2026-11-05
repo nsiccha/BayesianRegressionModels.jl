@@ -4656,6 +4656,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing,
        _s2z_generated=nothing, _source::BRMI=brmi, _component_output=nothing)
     brmi = _brm_resolve_prior_addresses(brmi)
+    _brm_check_component_reads(brmi)
     # A frozen re-emission codes releveled factors over their fitted levels.
     isnothing(_frozen_preproc) || (brmi = _sb_fit_factor_levels(brmi, _frozen_preproc))
     source_parent = brmi
@@ -4961,8 +4962,10 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # A scoped component contributes its returned value to a parent's model;
     # its likelihood can therefore live entirely in that parent.
     if _component_output !== nothing
-        _brm_has_operation(brmi, _component_output) || error(
-            "sbimpl: component result `$_component_output` is not declared")
+        for output in (_component_output isa Symbol ? (_component_output,) : _component_output)
+            _brm_has_operation(brmi, output) || error(
+                "sbimpl: component result `$output` is not declared")
+        end
         return sb
     end
     triage = _sb_observation_triage(sb)
@@ -18063,6 +18066,9 @@ _sb_scalar_expr(x::ExprColumn, data) = begin
     # consumed directly — `state = scan(...); y ~ f(state.population_total)`.
     if f === getproperty
         obj, field = getargs(x)      # field is a QuoteNode(:name)
+        # A component's returned field reads its private label.
+        read = _brm_component_field_read(x)
+        read === nothing || (field = QuoteNode(read.result))
         return Expr(:., _sb_scalar_expr(obj, data), field)
     elseif f === getindex
         obj = first(getargs(x))

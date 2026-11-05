@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.184
+## 0.2.187
 
 - Added `gmrf((east, north), time[, channel]; multiresolution=m)`: a bounded
   sparse Matérn-1 spatial basis of shared stationary OU paths. A position uses
@@ -32,6 +32,40 @@ instead of failing at run time.
 - Clarified the `neighbors=` contract: local Matérn × OU kernel entries are
   exact, but the implied joint temporal covariance is approximate on irregular
   read support. Its numerical behavior is unchanged.
+
+## 0.2.186
+
+- Offset-only predictors on RK retain the declared rows of scalar plate or
+  component outputs and fixed data expressions before an explicit gather onto
+  observation rows. They no longer need a raw fixed offset or an estimated
+  coefficient to establish those rows.
+
+## 0.2.185
+
+- Added: a function-style `@brm` component may return several named values,
+  `return (; recovery, decay = exp(log_decay))`. The parent reads each one as a
+  property of the call, `kin.recovery`, in formulas, offsets, likelihoods and
+  model-scope bindings, on SBBRMI (a Stan tuple) and RKBRMI (the call's native
+  local). Each field keeps its own row axis, and the call's priors and
+  correlation blocks remain one scope. `brm_output(d, :decay; submodel=:kin)`
+  addresses a returned field. A plate cell reads a field through a model-scope
+  binding (`recovery = kin.recovery`, then `recovery[i]`).
+- Changed: a bare read of a named-return call, an unknown field, a positional
+  tuple return, a direct `kin.recovery[i]` plate read and a named-return
+  component called inside a plate cell are refused with the supported spelling.
+- Fixed: SBBRMI compiles a component whose formulas group by one of its inputs
+  (`(1 | p | unit)` with `unit` an input); the raw label column is no longer
+  passed to the Stan submodel, which reads its own index data. RKBRMI also
+  aligns a field grouped by a label input with the parent's rows, so it can
+  enter a formula offset.
+
+## 0.2.184
+
+- `brm_start` accepts top-level matrix parameters on their constrained scale
+  on both RK and compiled Stan. Initialize `L ~ LKJCholesky(K, eta)` with
+  `(; L=lower_factor)`, preserving its exact matrix shape. RK uses its native
+  transform without compiling Stan. Unaddressed base values and caller-owned
+  inputs are preserved, as for scalar, vector and component-local starts.
 
 ## 0.2.183
 
