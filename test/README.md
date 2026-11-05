@@ -1,5 +1,11 @@
 # Running the tests
 
+`offset_only_axes.jl` checks coefficient-free formulas on scalar plate and
+component rows, fixed expressions, explicit gathers, changed-size replay and
+in-cell consumers. It compares physical values, normalized densities and native
+Reverse gradients with independent formulas and compiled Stan, and retains the
+row-length and scalar-cell checks. It accepts testset substring filters.
+
 `heterogeneous_mixtures.jl` checks native mixtures of different full-real
 scalar families and custom component graphs against independent normalized
 densities and compiled Stan. It covers native Reverse, pointwise likelihood,

@@ -12,6 +12,13 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.186
+
+- Offset-only predictors on RK retain the declared rows of scalar plate or
+  component outputs and fixed data expressions before an explicit gather onto
+  observation rows. They no longer need a raw fixed offset or an estimated
+  coefficient to establish those rows.
+
 ## 0.2.185
 
 - Added: a function-style `@brm` component may return several named values,
