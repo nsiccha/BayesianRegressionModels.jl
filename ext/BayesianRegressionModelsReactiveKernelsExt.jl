@@ -679,6 +679,8 @@ BRM._rk_nlme_cell_footprint_query(query::CellQuery) =
     partition_footprint_kernel(query.kernel)
 BRM._rk_nlme_cell_footprint(query, point, row) =
     _rk_nlme_footprint_indices(Base.invokelatest(query, point, row).unconstrained, point)
+BRM._rk_nlme_raw_cell_footprint(query, point, row) =
+    Base.invokelatest(query, point, row).unconstrained
 
 BRM._rk_retained_pointwise_sampler(backend::BRM.RKBRMI; ad_backend,
         u0=zeros(Float64, backend.model.layout.total)) =

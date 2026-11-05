@@ -85,7 +85,7 @@ function _brm_svi_identity(t)
     fixed = [(m.view.coordinates[i], m.unit[i]) for i in eachindex(m.unit) if !(i in estimated)]
     (; binding=_brm_rk_binding_identity(m.backend, "brm-svi-v1"),
        grouping=(; group=m.view.group, nested=Tuple(keys(m.view.nested_groups)),
-           shared=Tuple(m.view.shared_groups)),
+           shared=Tuple(m.view.shared_groups), unit_partition=m.view.unit_partition),
        ownership=_brm_svi_digest((m.view.levels, t.globals, t.units)),
        fixed=_brm_svi_digest(fixed))
 end
@@ -201,7 +201,7 @@ function _brm_svi_laplace_restored(t, s)
 end
 
 const _BRM_SVI_RESUME_MODEL_OPTIONS = (:ad_backend, :shared_point, :subject_group,
-    :nested_groups, :shared_groups)
+    :nested_groups, :shared_groups, :unit_partition)
 
 """
     brm_svi_resume([save,] x, checkpoint; stop_after=nothing,

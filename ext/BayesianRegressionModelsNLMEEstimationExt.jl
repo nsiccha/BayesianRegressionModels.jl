@@ -784,16 +784,16 @@ _fit_lowered(x, phase) = throw(ArgumentError(
     "brm_nlme_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
     "got $(typeof(x))"))
 _fit_model(x::BRM.RKBRMI, phase; ad_backend, shared_point, subject_group,
-        nested_groups, shared_groups) = BRM._brm_run_phase(phase) do node
+        nested_groups, shared_groups, unit_partition) = BRM._brm_run_phase(phase) do node
     BRM._brm_nlme_model(x, node;
         ad_backend=ad_backend === nothing ? AutoEnzyme(; mode=Enzyme.Reverse) : ad_backend,
         observation_ad_backend=nothing, shared_point, subject_group, nested_groups,
-        shared_groups)
+        shared_groups, unit_partition=something(unit_partition, :subjects))
 end
 function _fit_model(m::BRM.BRMNLMEModel, phase; ad_backend, shared_point,
-        subject_group, nested_groups, shared_groups)
+        subject_group, nested_groups, shared_groups, unit_partition)
     ad_backend === nothing && shared_point === nothing && subject_group === nothing &&
-        isempty(nested_groups) && isempty(shared_groups) || throw(ArgumentError(
+        isempty(nested_groups) && isempty(shared_groups) && unit_partition === nothing || throw(ArgumentError(
         "brm_nlme_fit: a prepared BRMNLMEModel already fixes its ad_backend, " *
         "shared_point and groupings; pass them to brm_nlme_model instead"))
     BRM._brm_reuse_phase!(phase)
@@ -814,6 +814,12 @@ _fit_start(m, u::AbstractVector{<:Real}) = BRM.brm_nlme_start(m, u)
 # column or compact vector per grouping level in `subjects`, all subjects
 # without it). Ω is derived from ω when the start does not carry it.
 function _fit_start(m, start::NamedTuple)
+    if haskey(start, :unit_partition)
+        start.unit_partition === m.view.unit_partition &&
+            get(start, :subject_levels, nothing) == m.view.subject_levels &&
+            get(start, :subject_unit, nothing) == m.view.subject_unit || throw(ArgumentError(
+                "brm_nlme_fit: the start's connected-unit partition differs from the model"))
+    end
     missing_fields = [k for k in (:theta, :sigma, :omega) if !haskey(start, k)]
     isempty(missing_fields) || throw(ArgumentError(
         "brm_nlme_fit: a start needs NLMEEstimation's population point " *
@@ -855,6 +861,28 @@ _eta_entries(H::AbstractMatrix, positions) = H[:, positions]
 _eta_entries(H::AbstractVector, positions) = H[positions]
 function _start_eta(m, start, subjects)
     own = get(start, :subjects, nothing)
+    if m.view.unit_partition === :connected && own !== nothing &&
+            !all(label -> label in m.view.levels, own)
+        # Named scientific subjects can initialize a complete unit; a missing
+        # member must never silently become a conditioned zero effect.
+        positions = Dict(label => i for (i, label) in enumerate(own))
+        length(positions) == length(own) || throw(ArgumentError("duplicate start subjects"))
+        all(label -> label in m.view.subject_levels, own) || throw(ArgumentError(
+            "brm_nlme_fit: the start names an unknown scientific subject"))
+        asked = subjects === nothing ? eachindex(m.view.levels) : subjects
+        effects = map(asked) do i
+            reduce(vcat, map(m.view.unit_members[i]) do s
+                label = m.view.subject_levels[s]
+                haskey(positions, label) || throw(ArgumentError(
+                    "brm_nlme_fit: start is missing subject $(repr(label)) of connected unit $i"))
+                value = BRM._brm_nlme_subject_eta(start.eta, positions[label])
+                length(value) == length(m.view.subject_ranges[s]) || throw(DimensionMismatch(
+                    "brm_nlme_fit: wrong effect width for subject $(repr(label))"))
+                value
+            end; init=Float64[])
+        end
+        return BRM._brm_nlme_ragged(m.view) ? effects : reduce(hcat, effects)
+    end
     own === nothing && subjects === nothing && return start.eta
     own = own === nothing ? (1:NE.nsubjects(m)) : _start_subject_ids(m, own)
     asked = subjects === nothing ? (1:NE.nsubjects(m)) : subjects
@@ -997,13 +1025,13 @@ end
 
 function BRM.brm_nlme_fit(x, estimator; start=nothing, inits=nothing, ebes=true,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple(), shared_groups=(), progress=nothing, kwargs...)
+        nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, progress=nothing, kwargs...)
     name = _fit_estimator_name(estimator)
     ebe_kwargs = _ebe_keywords(estimator, ebes) # refuse a bad `ebes` before fitting
     BRM._brm_with_progress(progress; description="BRM NLME fit") do node
         BRM._brm_with_phases(node, _fit_phases(name, ebe_kwargs)) do phases
             model = _fit_model(_fit_lowered(x, phases.lower), phases.prepare;
-                ad_backend, shared_point, subject_group, nested_groups, shared_groups)
+                ad_backend, shared_point, subject_group, nested_groups, shared_groups, unit_partition)
             s = BRM._brm_run_phase(_ -> _fit_start(model, start, inits), phases.start)
             result, ebe, estimates = _fit_run(estimator, model, s, ebe_kwargs, phases;
                 kwargs...)

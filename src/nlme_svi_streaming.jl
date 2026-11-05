@@ -16,6 +16,11 @@ moments. Coordinate reordering preserves their covariance exactly.
 This carries a fitted approximation into a new, disjoint window; it holds no
 optimizer state. An interrupted optimization of the same model and data
 continues from [`brm_svi_optimizer_checkpoint`](@ref) instead.
+
+The checkpoint retains `unit_partition`. Connected continuation accepts complete
+unchanged units and wholly new units; a retained subject whose component or
+member order changes is refused before optimization. New checkpoints use format 3
+and require the same package versions when serialized.
 """
 struct BRMSVIState
     format::Int
@@ -28,8 +33,15 @@ struct BRMSVIState
     nested::Tuple{Vararg{Symbol}}
     shared::Tuple{Vararg{Symbol}}
     fixed::Dict{Symbol,Float64}
+    unit_partition::Symbol
     updates::Int
 end
+
+# Construct a legacy dense/structured subject carry in the current process.
+# Serialized objects still require matching Julia and package versions.
+BRMSVIState(format, preprocessing, source_id, globals, q, units, group, nested,
+    shared, fixed, updates) = BRMSVIState(format, preprocessing, source_id,
+        globals, q, units, group, nested, shared, fixed, :subjects, updates)
 
 include("nlme_svi_unit_streaming.jl")
 
@@ -72,19 +84,19 @@ function brm_svi_checkpoint(fit)
     fixed = Dict(m.view.coordinates[i] => m.unit[i] for i in eachindex(m.unit)
         if !(i in estimated))
     units = _brm_svi_save_units!(Dict{Any,NamedTuple}(), m, d.q)
-    BRMSVIState(_brm_svi_state_format(units), deepcopy(state), _brm_svi_source_id(m.backend),
+    BRMSVIState(3, deepcopy(state), _brm_svi_source_id(m.backend),
         copy(m.view.coordinates[d.globals]), _brm_svi_global_factor(d.q),
         units, m.view.group,
-        Tuple(keys(m.view.nested_groups)), m.view.shared_groups, fixed, 0)
+        Tuple(keys(m.view.nested_groups)), m.view.shared_groups, fixed, m.view.unit_partition, 0)
 end
 brm_svi_checkpoint(state::BRMSVIState) = deepcopy(state)
 
 function _brm_svi_carried_state(previous::BRMSVIState, m, q)
     units = _brm_svi_save_units!(deepcopy(previous.units), m, q)
-    BRMSVIState(_brm_svi_state_format(units), deepcopy(previous.preprocessing), previous.source_id,
+    BRMSVIState(3, deepcopy(previous.preprocessing), previous.source_id,
         copy(previous.globals), _brm_svi_global_factor(q),
         units, previous.group,
-        previous.nested, previous.shared, copy(previous.fixed), previous.updates + 1)
+        previous.nested, previous.shared, copy(previous.fixed), previous.unit_partition, previous.updates + 1)
 end
 
 # Only grouping level fits may change. A transform of the grouping column
@@ -131,11 +143,26 @@ function _brm_svi_check_preprocessing(rk, previous)
     nothing
 end
 
+function _brm_svi_check_units(view, previous)
+    view.unit_partition === previous.unit_partition || throw(ArgumentError(
+        "brm_svi_fit: unit_partition changed since the checkpoint"))
+    view.unit_partition === :connected || return nothing
+    retained = Dict(subject => label for label in keys(previous.units) for subject in label)
+    for label in view.levels, subject in label
+        haskey(retained, subject) || continue
+        isequal(retained[subject], label) || throw(ArgumentError(
+            "brm_svi_fit: connected membership changed for subject $(repr(subject)); " *
+            "streaming requires complete unchanged connected units or wholly new units"))
+    end
+    nothing
+end
+
 function _brm_svi_check_model(m, previous)
-    previous.format in (1, 2) || throw(ArgumentError("brm_svi_fit: unsupported streaming state format"))
+    previous.format in (1, 2, 3) || throw(ArgumentError("brm_svi_fit: unsupported streaming state format"))
     m.view.group === previous.group && Tuple(keys(m.view.nested_groups)) == previous.nested &&
         m.view.shared_groups == previous.shared || throw(ArgumentError(
             "brm_svi_fit: subject/nested/shared grouping partition changed"))
+    _brm_svi_check_units(m.view, previous)
     _brm_svi_check_preprocessing(m.backend, previous)
     _brm_svi_source_id(m.backend) == previous.source_id || throw(ArgumentError(
         "brm_svi_fit: model source changed (declaration, emitted program or callable bindings)"))
@@ -265,5 +292,6 @@ function _brm_svi_window_input(state, x, options; caller)
         x = RKBRMI(x, state.preprocessing; resample_groups=(state.group, state.nested...))
     end
     x, x isa BRMNLMEModel ? options :
-        merge((; subject_group=state.group, shared_groups=state.shared), options)
+        merge((; subject_group=state.group, shared_groups=state.shared,
+            unit_partition=state.unit_partition), options)
 end

@@ -12,6 +12,48 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.173
+
+- `brm_svi_fit` accepts `unit_sampling=:work` for positive work-weighted
+  sampling with replacement and inverse-probability objective/global-gradient
+  weights. Repeated draws share one local update. Diagnostics distinguish
+  draws, visits, selection probabilities and actual gradient calls;
+  `:uniform` retains distinct-unit batches and remains the default.
+- **Breaking:** local SVI factors larger than 64 coordinates now use a
+  diagonal-plus-low-rank covariance instead of dense precision matrices.
+  `unit_dense_limit` (0:256) and `unit_rank` (0:32, default 8) control the
+  approximation. Small dense units retain their natural-gradient updates;
+  larger units use posterior-scaled path-gradient Adam updates. For those
+  units, diagnostic `q.Λ` and `q.U` are matrix operators and `q.U` is no
+  longer triangular: use multiplication rather than triangular indexing or
+  solves. Materializing an operator still requires a dense matrix.
+- Format-3 SVI checkpoints combine connected membership with structured local factors without optimizer
+  moments. Resume preserves their distribution and family under coordinate
+  reordering, accepts format-1 checkpoints, and retains carried dense factors.
+- SVI targets reuse one global-plus-local workspace per worker and store only local
+  ordering metadata per unit. Cached entropy and lazy local polishing avoid
+  visiting all local factors on every iteration. The underlying cell plan
+  still determines structural-selection storage; full returned draws still
+  scale with the complete parameter dimension.
+
+- Weighted batches, visit counts, cached entropy and lazy local polishing now
+  participate in optimizer checkpoints, preserving continuation across thread
+  counts. Structured local factors retain their Adam state on same-target resume.
+
+## 0.2.172
+
+- Added: explicit `unit_partition=:connected` for the NLME view and model,
+  NLME fits, SVI, per-unit Laplace and joint starts. Structural likelihood
+  supports join scientific subjects into complete inference units, retaining
+  their original labels, coordinates and every covariance-family instance.
+  The default `:subjects` keeps strict subject independence. Connected starts
+  carry unit membership; named estimates restore scientific subject labels.
+- Changed: SVI streaming retains the partition policy and refuses changed
+  membership of a carried connected unit before updating. Complete unchanged
+  units and wholly new units can continue.
+- **Breaking:** SVI streaming checkpoints use format 2 with explicit
+  `unit_partition`; serialize and reload with matching package versions.
+
 ## 0.2.171
 
 - Changed: NLME unit likelihoods and gradients use one strict RK plate
@@ -51,32 +93,6 @@ instead of failing at run time.
   custom packed vectors. Unit gradients use ordinary Enzyme Reverse, with the
   test bootstrap's Enzyme dogfood pin, which contains `68ed90fe`'s repair for
   matrix-window partition gradients on Julia 1.10.
-
-- `brm_svi_fit` accepts `unit_sampling=:work` for positive work-weighted
-  sampling with replacement and inverse-probability objective/global-gradient
-  weights. Repeated draws share one local update. Diagnostics distinguish
-  draws, visits, selection probabilities and actual gradient calls;
-  `:uniform` retains distinct-unit batches and remains the default.
-- **Breaking:** local SVI factors larger than 64 coordinates now use a
-  diagonal-plus-low-rank covariance instead of dense precision matrices.
-  `unit_dense_limit` (0:256) and `unit_rank` (0:32, default 8) control the
-  approximation. Small dense units retain their natural-gradient updates;
-  larger units use posterior-scaled path-gradient Adam updates. For those
-  units, diagnostic `q.Λ` and `q.U` are matrix operators and `q.U` is no
-  longer triangular: use multiplication rather than triangular indexing or
-  solves. Materializing an operator still requires a dense matrix.
-- Format-2 SVI checkpoints store structured local factors without optimizer
-  moments. Resume preserves their distribution and family under coordinate
-  reordering, accepts format-1 checkpoints, and retains carried dense factors.
-- SVI targets reuse one global-plus-local workspace per worker and store only local
-  ordering metadata per unit. Cached entropy and lazy local polishing avoid
-  visiting all local factors on every iteration. The underlying cell plan
-  still determines structural-selection storage; full returned draws still
-  scale with the complete parameter dimension.
-
-- Weighted batches, visit counts, cached entropy and lazy local polishing now
-  participate in optimizer checkpoints, preserving continuation across thread
-  counts. Structured local factors retain their Adam state on same-target resume.
 
 ## 0.2.170
 

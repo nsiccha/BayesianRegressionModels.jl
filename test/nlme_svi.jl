@@ -136,7 +136,7 @@ end
         @test all(sampling.probabilities .> 0)
         @test all(isfinite, fit.draws)
         state = brm_svi_checkpoint(fit)
-        @test state.format == (dense_limit == 0 ? 2 : 1)
+        @test state.format == 3
         update = brm_svi_fit(state, svi_gauss_model(svi_gauss_data(Xoshiro(119), 3));
             rng=Xoshiro(120), unit_sampling=method, max_iterations=2, ndraws=0)
         @test update.diagnostics.sampling.method == method

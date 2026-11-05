@@ -615,16 +615,16 @@ _brm_svi_lowered(x, phase) = throw(ArgumentError(
     "got $(typeof(x))"))
 
 _brm_svi_model(x::RKBRMI, phase; ad_backend, shared_point, subject_group,
-        nested_groups, shared_groups) =
+        nested_groups, shared_groups, unit_partition) =
     _brm_run_phase(phase) do node
         _brm_nlme_model(x, node; ad_backend=ad_backend === nothing ?
             _brm_rk_default_ad("brm_svi_fit", x) : ad_backend, observation_ad_backend=nothing,
-            shared_point, subject_group, nested_groups, shared_groups)
+            shared_point, subject_group, nested_groups, shared_groups, unit_partition=something(unit_partition, :subjects))
     end
 function _brm_svi_model(m::BRMNLMEModel, phase; ad_backend, shared_point,
-        subject_group, nested_groups, shared_groups)
+        subject_group, nested_groups, shared_groups, unit_partition)
     ad_backend === nothing && shared_point === nothing && subject_group === nothing &&
-        isempty(nested_groups) && isempty(shared_groups) || throw(ArgumentError(
+        isempty(nested_groups) && isempty(shared_groups) && unit_partition === nothing || throw(ArgumentError(
         "brm_svi_fit: a prepared BRMNLMEModel already fixes its ad_backend, " *
         "shared_point and subject groupings; pass them to brm_nlme_model instead"))
     _brm_reuse_phase!(phase)
@@ -655,7 +655,7 @@ end
     brm_svi_fit([save,] x; laplace=nothing, batch_size=32, rng=Random.default_rng(),
         family=MeanFieldGlobal(), unit_sampling=:uniform, ndraws=1000, start=nothing, inits=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple(), shared_groups=(), progress=nothing,
+        nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, progress=nothing,
         stop_after=nothing, checkpoint_every=nothing, threads=nothing,
         kwargs...) -> (; draws, coordinates, diagnostics)
 
@@ -854,7 +854,7 @@ end
 function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=1000,
         stop_after=nothing, checkpoint_every=nothing, progress=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple(), shared_groups=(), threads=nothing)
+        nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, threads=nothing)
     ndraws isa Integer && ndraws >= 0 || throw(ArgumentError(
         "$caller: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller, save, stop_after, checkpoint_every)
@@ -862,7 +862,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
     _brm_with_progress(progress; description) do node
         _brm_with_phases(node, _BRM_SVI_PHASES) do phases
             m = _brm_svi_model(_brm_svi_lowered(x, phases.lower), phases.prepare;
-                ad_backend, shared_point, subject_group, nested_groups, shared_groups)
+                ad_backend, shared_point, subject_group, nested_groups, shared_groups, unit_partition)
             t, state = _brm_run_phase(phases.target) do phase
                 # SVI's partition sampler, on first use, reports under this phase.
                 t, state = init(_brm_with_cell_progress(() -> _brm_svi_target(m), phase))
