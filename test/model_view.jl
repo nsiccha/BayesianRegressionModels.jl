@@ -1,6 +1,7 @@
 using Test
 using BayesianRegressionModels
 using HTMXObjects
+include("model_view_plain_text_checks.jl")
 
 const BRM = BayesianRegressionModels
 const ViewExt = Base.get_extension(BRM, :BayesianRegressionModelsHTMXObjectsExt)
@@ -86,6 +87,9 @@ end
         @test occursin("Not inferred", rendered)
     end
     @test ModelViewFixture.calls[] == 0
+    text = test_model_view_plain_text(brm_model_view(m; title="Bound regression"),
+        "Bound regression", ("Source", "Roles and ranks", "Documentation"))
+    @test "sigma ~ Exponential(1)" in strip.(split(text, '\n'))
     html = repr("text/html", brm_model_view(m))
     @test occursin("<details", html)
     @test occursin("<summary", html)
@@ -114,6 +118,9 @@ end
     @test ModelViewFixture.calls[] == 0
     for input in (builder, model)
         view = brm_model_view(input)
+        tabs = input === builder ? ("Source", "Potential data inputs", "Documentation") :
+            ("Source", "Roles and ranks", "Documentation")
+        test_model_view_plain_text(view, "Model", tabs)
         html = repr("text/html", view)
         @test occursin("Authored documentation", html)
         @test occursin("<strong>response scale</strong>", html)
@@ -159,6 +166,12 @@ end
         @test !occursin("Core.@doc", rendered)
     end
     markdown = repr("text/markdown", brm_model_view(model))
+    text = test_model_view_plain_text(brm_model_view(model), "Model",
+        ("Source", "Roles and ranks", "Documentation", "Model",
+            string(ModelViewFixture, ".leaf"), string(ModelViewFixture, ".nested")))
+    @test "shift ~ Normal(0, 1)" in strip.(split(text, '\n'))
+    @test occursin("(:left, :inner)", text)
+    @test occursin("(:right, :inner)", text)
     @test occursin("(:left, :inner)", markdown)
     @test occursin("(:right, :inner)", markdown)
     @test occursin("Derived · component result", markdown)
@@ -186,6 +199,10 @@ end
     @test occursin("Internal carrier", md)
     @test occursin("not the number of free parameters", md)
     @test all(o -> occursin(string(o.name), md), d.outputs)
+    text = test_model_view_plain_text(brm_model_view(d; title="Prepared regression"),
+        "Prepared regression", ("Source", "Roles and ranks", "Documentation"))
+    @test occursin("Vector · 3", text)
+    @test occursin("Carrier details", text)
     @test d.formula == string(d.plan.parent)
     @test data.x == [-1., 0., 1.]
     if haskey(ENV, "BRM_MODEL_VIEW_HTML")

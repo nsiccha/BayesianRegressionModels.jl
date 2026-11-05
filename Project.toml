@@ -1,7 +1,7 @@
 name = "BayesianRegressionModels"
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.2.190"
+version = "0.2.191"
 
 [deps]
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
@@ -67,7 +67,7 @@ BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 
 [compat]
 DataStructures = "0.18, 0.19"
-HTMXObjects = "0.1.62"
+HTMXObjects = "0.1.65"
 Markdown = "1"
 Bessels = "0.2"
 TreeArrays = "0.2.0"
