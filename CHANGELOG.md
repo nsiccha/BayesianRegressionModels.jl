@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.180
+
+- `SBBRMI` and `RKBRMI` compose heterogeneous scalar `MixtureModel`
+  components with known full-real continuous support, including custom
+  function families with different argument counts. Each component retains
+  its ordinary parameterization and backend mapping.
+- RK preserves native component density graphs, including existing
+  `_rk_observation_source!` providers, for dependency-aware scheduling,
+  native Reverse gradients, pointwise likelihood and source replay.
+  Stan preserves component predictive draws and membership outputs.
+  Native RK mixture/custom-law predictive generation remains separate work.
+- Requires StanBlocks 0.2.25, ReactiveKernels 0.1.81 and
+  ReactiveKernelsPPL 0.1.94. Bounded or mixed-support heterogeneous components
+  remain outside the supported mixture contract.
+
 ## 0.2.179
 
 - `brm_model_view(model)` with HTMXObjects shows data/parameter roles and value

@@ -1,5 +1,13 @@
 # Running the tests
 
+`heterogeneous_mixtures.jl` checks native mixtures of different full-real
+scalar families and custom component graphs against independent normalized
+densities and compiled Stan. It covers native Reverse, pointwise likelihood,
+printed-source replay, changed data, extreme log scales, Stan membership and
+predictive outputs, and measured shared/row work placement. It accepts testset
+substring filters through `testset_filter.jl`; empty-data rebinding has its own
+testset so other cases remain independently runnable.
+
 `lkj_data_inputs.jl` checks data-supplied correlation dimensions and concentrations
 at model scope and in reusable and nested BRM components, including two sizes
 in one model, derived data, frozen constants and correlated groupings. It compares normalized

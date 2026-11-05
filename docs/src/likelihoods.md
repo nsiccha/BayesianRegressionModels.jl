@@ -44,7 +44,7 @@ are rejected rather than silently treated as a standard beta likelihood.
 | `CircularVonMises(mu, kappa; interval=(-pi, pi))` | von Mises on a fixed principal interval |
 | `TruncatedNormal(mu, sigma, lower, upper)` | legacy censored-Normal marker; new models should use `censored` below |
 | `[y1, y2, ...] ~ MvNormalCholesky([mu1, mu2, ...], L)` | row-wise correlated Gaussian outcomes using a declared `LKJCovarianceFactor` |
-| `MixtureModel([D, ...], weights)` | finite mixture over K same-family scalar components |
+| `MixtureModel([D, ...], weights)` | finite mixture of scalar components; different families require full-real continuous support |
 
 ### Response compositions and modifiers
 
@@ -188,17 +188,33 @@ end)((;
 ```
 
 Each row contributes `log_sum_exp(log(weights) + component_lpdf)`, with
-matching pointwise log likelihoods and posterior-predictive draws (select a
-component per row, then draw from it). The contract is deliberately narrow.
-Every component must be a scalar (`Univariate`) call of ONE Julia family:
-heterogeneous families are rejected because Stan's discrete densities throw
-on out-of-support values where Turing returns `-Inf`, so mixed-support
-mixtures would crash Stan where Turing stays finite. The family must be
-directly Stan-mapped, or `NegativeBinomial2` / `BetaBinomial2` (which are
-native translations); bespoke families, `Uniform` / `Pareto`
-(parameter-dependent continuous support), and `Categorical` (simplex
-parameters) are rejected. Binomial-family components must share one
-identical trial-count expression. Weights are a numeric vector summing to 1,
+matching pointwise log likelihoods. On SBBRMI, posterior-predictive draws
+select a component per row and draw from it.
+
+Every component is scalar. Since BRM 0.2.180, SBBRMI and RKBRMI also accept
+different continuous families whose support is the whole real line, such as
+`MixtureModel([Normal(mu, sigma), Cauchy(mu, tau)], [1-w, w])`.
+Each family keeps its own argument count and parameterization, so a
+one-argument `TDist(nu)` may appear beside a two-argument `Normal(mu, sigma)`.
+Ordinary custom function families use their registered StanBlocks density,
+predictive and support definitions; they need scalar, continuous, unbounded
+support. This requires StanBlocks 0.2.24.
+
+RK custom components use their existing `_rk_observation_source!` graphs.
+The emitted native mixture exposes each component to RK's scheduler;
+parameter-only transforms may execute once per call while observation work
+remains per row. ReactiveKernels 0.1.81 / ReactiveKernelsPPL 0.1.94 provide
+the native composition. Density, native Reverse, pointwise likelihood and
+source replay are supported; RK predictive generation for mixtures and
+caller-owned density laws remains separate work.
+
+Heterogeneous bounded or discrete supports remain outside this contract:
+Stan may throw for a component outside its support. Existing same-family
+rules remain: distribution types must map directly to Stan or use the
+`NegativeBinomial2` / `BetaBinomial2` translations; unmapped bespoke types,
+`Uniform`, `Pareto`, `LocationScale`, ordinals and `Categorical` are refused.
+Binomial-family components share one identical trial-count expression.
+Weights are a numeric vector summing to 1,
 a length-`K` numeric data column, a Dirichlet-backed simplex parameter, or a
 vector of `K` model expressions such as `[1 - w, w]` (a sampled scalar, or a
 per-row linear predictor `logit(w) ~ 1 + x`); expression weights are checked
@@ -210,7 +226,7 @@ mixture, for example `censored(MixtureModel([...], [1 - w, w]); lower=lloq)`
 for assay data below a quantification limit: a censored row contributes the
 mixture's CDF at the limit, `log(sum_k w_k F_k(lloq))`.
 
-Every mixture response also emits `<response>_membership`, an `n × K`
+Every SBBRMI mixture response also emits `<response>_membership`, an `n × K`
 generated quantity whose row `i` is the posterior probability that
 observation `i` came from each component,
 `w_ik f_k(y_i) / sum_j w_ij f_j(y_i)`, evaluated per draw; a censored row
