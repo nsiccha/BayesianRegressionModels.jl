@@ -16,6 +16,47 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 
 module PlateOutputModels
 using BayesianRegressionModels, Distributions
+# Cells of every shape beside a model-scope helper's nested value, which the
+# cells read.
+group_values(values, indices) = [values[ix] for ix in indices]
+per_cell(d) = @brm d begin
+    sigma ~ Exponential(1)
+    log_k ~ Normal(0, 0.5)
+    state[1:n_state] .~ Normal.(0.0, 1.0)
+    background = group_values(state, path)
+    @plate for i in eachindex(dose)
+        conc[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
+        total[i] = sum(conc[i])
+        grid[i] = hcat(conc[i], 2.0 .* conc[i])
+        y[i] ~ Normal(conc[i] .+ background[i], sigma)
+    end
+end
+# A second response, so either one can be held out.
+two_responses(d) = @brm d begin
+    sigma ~ Exponential(1)
+    log_k ~ Normal(0, 0.5)
+    @plate for i in eachindex(dose)
+        m[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
+        y[i] ~ Normal(m[i], sigma)
+    end
+    w ~ Normal(log_k, sigma)
+end
+# No plate, no assignment: the structural plan.
+plain_regression(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x
+    y ~ Normal(mu, sigma)
+end
+# An authored output holds the name `m`'s cells would otherwise take.
+taken_cells(d) = @brm d begin
+    sigma ~ Exponential(1)
+    log_k ~ Normal(0, 0.5)
+    @plate for i in eachindex(dose)
+        m[i] = dose[i] .* exp.(-exp(log_k) .* t[i])
+        m_cells[i] = sum(m[i])
+        y[i] ~ Normal(m[i], sigma)
+    end
+end
 # Two indexed outputs; the observation reads the first.
 two_outputs(d) = @brm d begin
     sigma ~ Exponential(1)
@@ -220,4 +261,90 @@ end
         LogDensityProblems.logdensity_and_gradient(p, v)
     end
     @test PM.SHARED_CALLS[] == 0
+end
+
+# Snag `rk-draw-values-r-affbe0e1`: `rk_draw_values` reads a plate output as the
+# model does. Oracles use the draws' own `log_k` coordinate, never the plate.
+per_cell_data() = (; PK.subject, PK.dose, PK.t, PK.y, n_state=10,
+    path=[[1, 2, 3], [4, 5], [6, 7, 8, 9], [10]])
+draw_matrix(rk) = hcat(point(rk), zeros(rk.model.layout.total), fill(0.2, rk.model.layout.total))
+draw_rates(rk, U) = U[findfirst(==(:log_k), coordinate_names(rk.model.layout)), :]
+draw_conc(log_k) = [PK.dose[s] .* exp.(-exp(log_k) .* PK.t[s]) for s in eachindex(PK.dose)]
+
+@stestset "rk_draw_values reads a plate output per cell, in the cell's shape" begin
+    data = per_cell_data()
+    rk = RKBRMI(PM.per_cell(data))
+    U = draw_matrix(rk)
+    v = rk_draw_values(rk, U, (:conc, :total, :grid, :background, :log_k))
+    @test keys(v) == (:conc, :total, :grid, :background, :log_k)
+    for (k, log_k) in enumerate(draw_rates(rk, U))
+        expected = draw_conc(log_k)
+        # Vector cells of differing lengths. Reading after every draw is taken
+        # also shows that a draw's cells are its own, not a reused buffer.
+        @test v.conc[k] isa Vector{Vector{Float64}}
+        @test length.(v.conc[k]) == length.(PK.t)
+        @test v.conc[k] ≈ expected atol=1e-12 rtol=1e-12
+        # Number cells are one number per cell.
+        @test v.total[k] isa Vector{Float64}
+        @test v.total[k] ≈ sum.(expected) atol=1e-12 rtol=1e-12
+        # Matrix cells keep their rows and columns.
+        @test v.grid[k] isa Vector{Matrix{Float64}}
+        @test size.(v.grid[k]) == [(length(t), 2) for t in PK.t]
+        @test all(v.grid[k][s] ≈ hcat(expected[s], 2 .* expected[s]) for s in eachindex(expected))
+        # The plate output and the helper's nested value now read alike.
+        @test v.background[k] isa Vector{Vector{Float64}}
+        @test length.(v.background[k]) == length.(v.conc[k])
+        @test v.log_k[k] == log_k
+        # The graph value and the flat form are the same numbers.
+        @test only(graph_values(rk, (:conc,), U[:, k])) == reduce(vcat, v.conc[k])
+    end
+    @test length(unique(v.log_k)) == size(U, 2)
+    # A compiler-owned cells name still reads, alongside the authored one.
+    both = rk_draw_values(rk, U, (:conc, :conc_cells))
+    @test both.conc == both.conc_cells == v.conc
+end
+
+@stestset "rk_draw_values finds a plate output's cells when their usual name is taken" begin
+    rk = RKBRMI(PM.taken_cells((; PK.dose, PK.t, PK.y)))
+    U = draw_matrix(rk)
+    v = rk_draw_values(rk, U, (:m, :m_cells))
+    for (k, log_k) in enumerate(draw_rates(rk, U))
+        expected = draw_conc(log_k)
+        @test v.m[k] ≈ expected atol=1e-12 rtol=1e-12
+        @test v.m_cells[k] ≈ sum.(expected) atol=1e-12 rtol=1e-12
+    end
+end
+
+@stestset "every RK plan kind reads through rk_draw_values" begin
+    # A model with a held-out response keeps its plate outputs per cell,
+    # whichever response is held out.
+    data = (; PK.dose, PK.t, PK.y, w=[0.1, 0.2])
+    for hold in (:y, :w)
+        held = RKBRMI(PM.two_responses(data); held_out=hold)
+        @test held.plan isa BRM._RKHeldOutPlan
+        U = draw_matrix(held)
+        v = rk_draw_values(held, U, (:m,))
+        for (k, log_k) in enumerate(draw_rates(held, U))
+            @test v.m[k] ≈ draw_conc(log_k) atol=1e-12 rtol=1e-12
+        end
+    end
+    # A plain regression has no plate outputs: its values read as before.
+    plain = RKBRMI(PM.plain_regression((; x=[0.5, 1.0, 2.0], y=[0.1, 0.4, 0.3])))
+    @test plain.plan isa BRM._RKStructuralPlan
+    @test isempty(BRM._rk_plate_output_cell_names(plain))
+    w = rk_draw_values(plain, draw_matrix(plain), (:sigma,))
+    @test length(w.sigma) == 3
+    @test all(x -> x isa Float64 && x > 0, w.sigma)
+end
+
+@stestset "a replay on new rows reads its own cells" begin
+    rk = RKBRMI(PM.taken_cells((; PK.dose, PK.t, PK.y)))
+    keep = [3, 1]
+    replay = reprocess(rk, (; dose=PK.dose[keep], t=PK.t[keep], y=PK.y[keep]))
+    U = draw_matrix(rk)
+    v = rk_draw_values(replay, U, (:m,))
+    for (k, log_k) in enumerate(draw_rates(rk, U))
+        @test length.(v.m[k]) == length.(PK.t[keep])
+        @test v.m[k] ≈ draw_conc(log_k)[keep] atol=1e-12 rtol=1e-12
+    end
 end

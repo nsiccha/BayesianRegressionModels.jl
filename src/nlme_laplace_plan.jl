@@ -162,21 +162,32 @@ gated term's importance ESS so a reader can judge.
 `solver` and `matrixfree` select the conditional algebra as in
 [`brm_laplace_problem`](@ref). The plan retains that policy when applied to a
 target or replanned by [`brm_ladder_fit`](@ref); explicit target keywords override it.
+
+`progress` reports the plan through Treebars: a Treebars node, under which the
+plan builds its own, or a backend symbol such as `:state`. Each observation gets
+a node, and each ordinary cell group a node naming its Hessian block's size while
+Enzyme compiles it, so the node's time shows where preparation goes.
 """
 function brm_laplace_plan(backend::RKBRMI; ad_backend, integrate=:auto, sample=(),
         ess_floor::Real=0.5, draws::Integer=200, at=nothing,
         rng=Random.Xoshiro(20261031), tol=1e-24, maxiter=50, max_cell_width=128,
-        solver=:auto, matrixfree=MatrixFreeLaplace())
+        solver=:auto, matrixfree=MatrixFreeLaplace(), progress=nothing)
     _brm_laplace_plan(backend; ad_backend, integrate, sample, ess_floor=Float64(ess_floor),
-        draws=Int(draws), at, rng, tol, maxiter, max_cell_width, solver, matrixfree).plan
+        draws=Int(draws), at, rng, tol, maxiter, max_cell_width, solver, matrixfree,
+        progress).plan
 end
 
 # The plan and the sparse problem its diagnostic was measured on (over every
 # candidate term). The public plan retains it too, including when the
 # diagnostic admits only a subset of those terms.
-function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_floor,
+_brm_laplace_plan(backend::RKBRMI; progress=nothing, kwargs...) =
+    _brm_with_progress(progress; description="Laplace plan") do node
+        _brm_laplace_plan_steps(backend; progress=node, kwargs...)
+    end
+
+function _brm_laplace_plan_steps(backend::RKBRMI; ad_backend, integrate, sample, ess_floor,
         draws, at, rng, tol, maxiter, max_cell_width=128,
-        solver=:auto, matrixfree=MatrixFreeLaplace())
+        solver=:auto, matrixfree=MatrixFreeLaplace(), progress=nothing)
     max_cell_width = _brm_spl_width_limit(max_cell_width)
     forced = integrate === :auto ? Symbol[] : Symbol[_brm_plan_names(integrate)...]
     sampled = Symbol[_brm_plan_names(sample)...]
@@ -207,8 +218,10 @@ function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_f
     candidates = [t for t in terms if t.never === nothing && !named(t, sampled)]
     screen = isempty(candidates) ? (; active=Bool[], events=Dict{Symbol,NamedTuple}(),
         integrated_dimension=0, sampled_dimension=length(_rk_layout_coordinate_names(backend))) :
-        _brm_spl_screen(backend, candidates,
-            Set(t.declaration for t in candidates if named(t, forced)), max_cell_width)
+        _brm_with_progress(progress; description="Cell width screening") do _
+            _brm_spl_screen(backend, candidates,
+                Set(t.declaration for t in candidates if named(t, forced)), max_cell_width)
+        end
     candidates = candidates[screen.active]
     width_reason(t) = let e = screen.events[t.declaration]
         "observation `$(e.observation)`, cell $(e.cell), $(e.part) has integrated width $(e.width) above max_cell_width=$(e.bound); sampled whole term (contribution $(e.contribution))"
@@ -223,7 +236,7 @@ function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_f
     end
     p = _brm_sparse_laplace_problem(backend, unique(t.grouping for t in candidates);
         ad_backend, tol, maxiter, declarations=Set(t.declaration for t in candidates),
-        max_cell_width, screened=true, solver, matrixfree)
+        max_cell_width, screened=true, solver, matrixfree, progress)
     reads = _brm_plan_reads(p)
     gated = Dict{Symbol,Any}()
     for t in candidates
@@ -237,7 +250,8 @@ function _brm_laplace_plan(backend::RKBRMI; ad_backend, integrate, sample, ess_f
     measure = [t for t in candidates if get(gated, t.declaration, nothing) isa NamedTuple &&
         !named(t, forced)]
     ess = Dict{Symbol,Any}()
-    if !isempty(measure)
+    isempty(measure) || _brm_with_progress(progress;
+            description="Importance diagnostic of $(length(measure)) terms") do _
         # `at` over this problem's population coordinates, or a whole packed point
         φ = at === nothing ? _brm_laplace_prior_median(p) :
             length(at) == length(p.u) ? Float64.(at[p.population]) : collect(Float64, at)
@@ -451,7 +465,7 @@ end
 # A plan applied to another backend or AD configuration still builds that
 # backend's target, as does a manually constructed three-argument plan.
 function _brm_sparse_laplace_problem_from_plan(backend::RKBRMI, r; ad_backend, tol,
-        maxiter, solver=nothing, matrixfree=nothing)
+        maxiter, solver=nothing, matrixfree=nothing, progress=nothing)
     plan = _brm_plan_algebra_policy(r.plan, solver, matrixfree)
     (; solver, matrixfree) = plan.algebra_policy
     admitted = _brm_plan_admitted(plan)
@@ -469,7 +483,7 @@ function _brm_sparse_laplace_problem_from_plan(backend::RKBRMI, r; ad_backend, t
         p.tol = Float64(tol)
         p.maxiter = Int(maxiter)
         fill!(p.u, 0.0)
-        p.nonfinite = p.unconverged = p.blockwise = p.sweeps = 0
+        p.nonfinite = p.unconverged = p.nonfinite_gradient = p.blockwise = p.sweeps = p.folds = 0
         # A full copy already owns the same fixed probes and reference. Only
         # a changed selection or numerical policy needs new preparation.
         retain = !restricted && p.algebra !== nothing && p.algebra.solver === solver &&
@@ -478,7 +492,7 @@ function _brm_sparse_laplace_problem_from_plan(backend::RKBRMI, r; ad_backend, t
     else
         p = _brm_sparse_laplace_problem(backend, unique(t.grouping for t in admitted);
             ad_backend, tol, maxiter, declarations, max_cell_width=r.plan.max_cell_width,
-            solver, matrixfree)
+            solver, matrixfree, progress)
     end
     p.plan = plan
     p
@@ -554,10 +568,11 @@ function _brm_spl_restrict!(p::BRMSparseLaplaceProblem, declarations)
         p.gaussian = _BRMSPLGaussianPrior(blocks, g.ports, g.read, g.pullback,
             g.mean[oldz], g.precision[oldz], g.values)
     end
+    p.gmrf = _brm_spl_gmrf_restrict(p.gmrf, blockmap, zmap)
     p.population = setdiff(eachindex(p.u), p.integrated)
     p.names = _rk_layout_coordinate_names(p.backend)[p.population]
     p.blocks = [_BRMSlapBlock(b.declaration, b.group, b.K, zmap[b.z], b.omega,
-        b.edges, b.sums, b.λ) for b in p.blocks[keep]]
+        b.edges, b.sums, b.λ, b.prior) for b in p.blocks[keep]]
     p.integrate = unique(b.group for b in p.blocks)
     old = (; p.rptr, p.rblock, p.rlevel, p.rentry)
     p.rptr = [1]; p.rblock = Int[]; p.rlevel = Int[]; p.rentry = Int[]; p.coff = Int[]

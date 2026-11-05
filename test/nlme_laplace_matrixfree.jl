@@ -180,6 +180,11 @@ end
         @test gradient ≈ mf_fd(y -> LogDensityProblems.logdensity(p,y),x; h=1e-4) rtol=2e-4 atol=2e-4
     end
     @test p.nonfinite == 0
+    # The search record of the last evaluation, one entry per component.
+    @test length(p.search.stages) == BRM._BRM_LAP_STAGES
+    @test all(in((:tol, :floor)), p.search.stop)
+    @test size(p.search.stage_shifts) == (length(p.components), BRM._BRM_LAP_STAGES)
+    @test all(p.search.steps .>= p.search.backtracks .>= 0)
 end
 
 @stestset "matrix-free declared Gaussian priors retain moving mean and scale derivatives" begin

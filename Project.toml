@@ -1,9 +1,10 @@
 name = "BayesianRegressionModels"
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.2.142"
+version = "0.2.164"
 
 [deps]
+Bessels = "0e736298-9ec6-45e8-9647-e4fc86a2fe38"
 KLU = "ef3ab10e-7fda-4108-b977-705223b18434"
 MUMPS = "55d2b088-9f4e-11e9-26c0-150b02ea6a46"
 KrylovKit = "0b1a1467-8014-51b9-945f-bf0ae24f4b77"
@@ -67,6 +68,7 @@ BayesianRegressionModelsWarmupHMCEnzymeExt = ["WarmupHMC", "Enzyme"]
 BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 
 [compat]
+Bessels = "0.2"
 TreeArrays = "0.2.0"
 KLU = "0.6"
 MUMPS = "1.7"
@@ -82,13 +84,13 @@ NLMEEstimation = "0.2.4"
 Optim = "2"
 Pathfinder = "0.9, 0.10"
 PowerScaling = "0.1.0"
-ReactiveKernels = "0.1.62"
-ReactiveKernelsPPL = "0.1.72"
+ReactiveKernels = "0.1.77"
+ReactiveKernelsPPL = "0.1.85"
 ReparametrizableDistributions = "0.3"
 SequentialMonteCarlo = "0.7"
 RuntimeGeneratedFunctions = "0.5"
 SelectedInversion = "0.2.2"
-StanBlocks = "0.2.14"
+StanBlocks = "0.2.20"
 StaticArrays = "1"
 Treebars = "0.1.1"
 Turing = "0.46"

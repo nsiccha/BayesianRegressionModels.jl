@@ -72,6 +72,13 @@ likelihood_query(backend) = prepare_query(backend.model,
 
 const NLME_AD = AutoEnzyme(; mode=Enzyme.Reverse)
 
+# Independent per-cell AD oracle for the unit-partition implementation.
+# Production NLME code prepares only partition samplers.
+compact_cell_oracle(rk, observations, base, selected) =
+    prepare_compact_cell_sampler(rk.model, rk_bound_plan(rk), observations,
+        base, selected;
+        backend=AutoEnzyme(; mode=Enzyme.Reverse))
+
 # Independent oracle for the @plate population-PK model: every subject's
 # conditional log-likelihood, η gradient, and η Hessian, written out from the model's
 # equations. With CL = exp(a + η_CL), V = exp(b + η_V), k = CL / V and
@@ -290,3 +297,54 @@ function nested_mixed_observations(data)
         end
     end
 end
+
+# A single-level treatment-coded factor is a zero-length coefficient block
+# (test/rk_single_level_factor.jl), so each model below is its factor-free twin
+# plus nothing. `flat_level` reads a bare integer column on flat rows, `plate_level`
+# an integer and a string column read in a `@plate for` cell.
+const NLME_LEVEL_DATA = (; subject=NLME_DATA.subject, y=NLME_DATA.y, g=fill(1, 13))
+const NLME_PLATE_LEVEL_DATA = (; NLME_PLATE_DATA..., sex=fill("f", 3), src=fill(1, 3))
+
+function flat_level(data)
+    @brm data begin
+        log(s) ~ 1 + g
+        mu ~ 1 + (1 | subject)
+        y ~ Normal(mu, s)
+    end
+end
+function flat_no_level(data)
+    @brm data begin
+        log(s) ~ 1
+        mu ~ 1 + (1 | subject)
+        y ~ Normal(mu, s)
+    end
+end
+function plate_level(data)
+    @brm data begin
+        sigma ~ Exponential(2)
+        log_CL ~ 1 + weight + src + (1 | subject)
+        log_V ~ 1 + sex + (1 | subject)
+        @plate for i in eachindex(log_CL)
+            CL = exp(log_CL[i])
+            Vc = exp(log_V[i])
+            pred[i] = dose[i] / Vc .* exp.(-(CL / Vc) .* t[i])
+            dv[i] ~ normal(pred[i], sigma)
+        end
+    end
+end
+function plate_no_level(data)
+    @brm data begin
+        sigma ~ Exponential(2)
+        log_CL ~ 1 + weight + (1 | subject)
+        log_V ~ 1 + (1 | subject)
+        @plate for i in eachindex(log_CL)
+            CL = exp(log_CL[i])
+            Vc = exp(log_V[i])
+            pred[i] = dose[i] / Vc .* exp.(-(CL / Vc) .* t[i])
+            dv[i] ~ normal(pred[i], sigma)
+        end
+    end
+end
+const NLME_LEVEL_MODELS = (
+    (flat_level, flat_no_level, NLME_LEVEL_DATA, Set([:s_g])),
+    (plate_level, plate_no_level, NLME_PLATE_LEVEL_DATA, Set([:log_CL_src, :log_V_sex])))

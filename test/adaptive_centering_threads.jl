@@ -102,6 +102,24 @@ function _joint_problem(; scalar=false, learned=false, student_t=false)
     _with_controls(build(blocks, [hsgp], [r2d2], cells)..., d + (scalar ? n + 3 : 0))
 end
 
+# A joint plan of derived-scale random-effect cells alone takes the WarmupHMC/Enzyme
+# extension's block-level reverse pass (`_blockwise_objective`) rather than the
+# generic per-pair path the HSGP-carrying joint cases above take.
+function _blockwise_derived_problem()
+    K, G = 7, 10
+    reference, r2, simplex = 1, 2, collect(3:K + 1)
+    cholesky = collect(K + 2:K + 1 + K * (K - 1) ÷ 2)
+    effects = reshape(collect(last(cholesky) .+ (1:K*G)), K, G)
+    scales = [BRM._AdaptiveLogScale(0.0, [(1.0, reference)], [(0.5, 0.5, r2)],
+                  [BRM._AdaptiveSimplexLog(0.5, simplex, k)]) for k in 1:K]
+    ranef = BRM.RanefBlock(:r_r2d2, :correlated, :g, nothing, nothing, collect(1:G),
+                           K, G, :z_r2d2, true, false)
+    r2d2 = BRM.R2D2AdaptiveCenteringBlock(ranef, 0.0, effects, cholesky, scales)
+    _with_controls(AC_EXT._adaptive_joint_centering_reparametrizer(
+        BRM.AdaptiveCenteringBlock[], BRM._HSGPAdaptiveCenteringBlock[], [r2d2])...,
+        last(effects))
+end
+
 function _s2z_problem()
     J, K = 8, 6
     contrasts = reshape(collect(1:(J - 1) * K), J - 1, K)
@@ -246,6 +264,7 @@ function _scalar_problem()
 end
 
 const _CASES = ("ordinary" => _ordinary_problem, "joint" => _joint_problem,
+                "blockwise_derived" => _blockwise_derived_problem,
                 "joint_scalar" => () -> _joint_problem(; scalar=true),
                 "learned_order" => () -> _joint_problem(; scalar=true, learned=true),
                 "joint_student_t" => () -> _joint_problem(; scalar=true, student_t=true),

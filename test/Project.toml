@@ -59,7 +59,7 @@ Enzyme_jll = "< 0.0.302, >= 0.0.303"
 PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.14"
+StanBlocks = "0.2.20"
 Treebars = "0.1.1"
 Turing = "0.46"
 WarmupHMC = "0.2.11"
@@ -139,7 +139,11 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # ab3960bb (StanBlocks 0.2.12) registers stable hypot and its Base callable.
 # fac3385a (StanBlocks 0.2.14) supplies stable lower-truncated LogNormal
 # moments and both log-CDF tails for ordinary distribution statistics.
-rev = "fac3385a5cb9d0e894352c34f4d0e590e4f93328"
+# 0b42d636 (StanBlocks 0.2.18) implements segment in @juliacompat
+# helpers, used by the native GMRF normalized sparse density.
+# 009f4180 (0.2.19) adds indexed /= for its sparse solve and prior RNG.
+# 61fa161f (0.2.20) gives cell-owned bindings explicit lexical local scope.
+rev = "61fa161fb39065dd90e8f5f2a1151442b1af6491"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
@@ -285,23 +289,50 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 30d676c9 (RK 0.1.34 / PPL 0.1.28) repairs single-sum outer AD exemplars.
 # 260d9a94 (RK 0.1.35 / RKPPL 0.1.29): visible grouped kernels retain
 # their shape facts for strict local observation queries.
+# 4925e53d (RK 0.1.36 / RKPPL 0.1.30) includes homogeneous
+# empty/nonempty partition plans and scheduled-loop resets.
 # f851e008 (RK 0.1.37 / RKPPL 0.1.31) binds data-computed entry axes
 # before shape inference.
 # 81363978 (RK 0.1.38 / RKPPL 0.1.32) also binds visible tuple-geometry
 # metadata operands, keeping the full completion's NLME cells local.
 # 23d26ca1 (RK 0.1.39 / RKPPL 0.1.33) keeps indexed direct predictor
 # reads beside reductions local (sum-factor-outer-ca5cc80e).
+# RKPPL 0.1.34: optional SMC and data-only checkpoints.
+# 4df6564e (RK 0.1.40 / RKPPL 0.1.35): strict partitions preserve natural
+# scalar reads of predictor elements, including a separate row domain.
+# RKPPL 0.1.36: finite-state filtering, design rows and grouped scan outputs.
+# RKPPL 0.1.38 (RK 0.1.42): shared-prefix partition sampling and mixed
+# concrete partition-label plans.
+# 171f36b9 (RKPPL 0.1.39): strict cells and partitions keep shapes through
+# nested data-only helpers inside sampled expressions, such as a bounded
+# shares completion's `lower=lo[x_shares_free]` (RK snag
+# bounded-shares-g-792cef37); dc06acc8 is the RK main containing it.
+# 8f7832e7 (RK main after 0.1.42 / RKPPL 0.1.39, no version change) bounds
+# partition-plan and metadata compilation at Atlas size: value-only shape
+# reads stay out of plans and bookkeeping helper calls stay separate kernels
+# (RK snag full-atlas-value-740085e1).
 # RKPPL 0.1.37: exact nonfinite SMC diagnostics across mutation tasks.
 # RKPPL 0.1.42 (RK 0.1.44): independent SMC pilot tuning, adaptive pilots and
 # portable correlated references.
 # RKPPL 0.1.47 (RK 0.1.47): the learned reference fits inflated pilot moments
 # (`reference_inflation`, default 2); stage summaries add coordinate and
 # reference SDs (snag learned-smc-refe-cc5677a1).
+# RK 0.1.50 / RKPPL 0.1.52: shared-prefix queries, packed gathered-column
+# shapes, strict row reductions and whole-row gathers,
+# unchanged scan captures, and censored ragged cell-factor projections.
 # RK 0.1.51 / PPL 0.1.53 keeps scalar plate collectors local through
 # helper calls, guarded captures and broadcast observation locations.
+# RKPPL 0.1.54 binds shared-prefix queries in the latest world and preserves
+# custom packed-vector storage and its local reads.
 # Guarded gathered reductions through typed aliases: RK 0.1.52 / PPL 0.1.55.
+# RK 0.1.57 / PPL 0.1.64: caller-owned joint density KernelSpecs and geometry.
+# RK 0.1.59 / PPL 0.1.66: property-based whole-parameter geometry dimensions.
 # PPL 0.1.60 / DistributionKernels 0.1.1: log-space interval masses and tails.
 # RK 0.1.61 / PPL 0.1.70: selective windows, recovery and bounded joint carries.
 # RK 0.1.62: strict selected rows through array-valued producer plate cells.
 # PPL 0.1.72: exact structural support for vector simplex/ordered factors.
-rev = "cece76ee550ddf4fe948034ed109020e537332d1"
+# b5740888 (RKPPL 0.1.71): data-free replay reads frozen whole values.
+# fbf65b46 (RK 0.1.65 / PPL 0.1.74): prepared queries holding modules deep-copy.
+# 149a6cca (RK 0.1.77 / PPL 0.1.85): strict row forms, stratified reads,
+# sparse correlation factors and one plate-cell execution per unit partition.
+rev = "149a6ccaedca632a0163e7a1203655445b7c320f"

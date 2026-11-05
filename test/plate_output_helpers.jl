@@ -113,3 +113,41 @@ end
         end
     end
 end
+
+# `addprop` is row-wise, so it reads a plate output's rows as arithmetic does:
+# its law squares each location, which a whole cell cannot do. Assigned first or
+# written in the law, with a shared or a per-row additive scale.
+@stestset "RKBRMI addprop over a plate output keeps its flattened inputs" begin
+    data = (; xs=[[0.2, 0.7], [-0.4]], w=[1.0, 2.0, 0.5], y=[0.1, -0.2, 0.4])
+    rows = reduce(vcat, data.xs)
+    for (assigned, add, additive) in ((true, :a, (a, j) -> a), (false, :a, (a, j) -> a),
+                                      (true, :(a * w), (a, j) -> a * data.w[j]),
+                                      (false, :(a * w), (a, j) -> a * data.w[j]))
+        scale = :(addprop(out, $add, b))
+        readers = assigned ? [:(scales = $scale), :(y ~ Normal(out, scales))] :
+            [:(y ~ Normal(out, $scale))]
+        builder = brm(quote
+            m ~ Normal(0.0, 1.0)
+            a ~ Exponential(1.0)
+            b ~ Exponential(1.0)
+            @plate for g in eachindex(xs)
+                out[g] = m .* xs[g]
+            end
+            $(readers...)
+        end; mod=@__MODULE__)
+        backend, problem = consumer_problem(builder(data))
+        names = coordinate_names(backend.model.layout)
+        im, ia, ib = (coordinate(names, n) for n in (:m, :a, :b))
+        oracle(u) = begin
+            a, b = exp(u[ia]), exp(u[ib])
+            # Independent scalar law; no BRM helper is called here.
+            logpdf(Normal(), u[im]) - a - b + u[ia] + u[ib] + sum(eachindex(rows)) do j
+                loc = u[im] * rows[j]
+                logpdf(Normal(loc, sqrt(additive(a, j)^2 + (loc * b)^2)), data.y[j])
+            end
+        end
+        for u in (zeros(3), [0.6, -0.3, 0.2], [-0.7, 0.4, -0.1])
+            check_consumer_point(problem, u, oracle)
+        end
+    end
+end

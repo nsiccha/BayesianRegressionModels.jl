@@ -450,7 +450,7 @@ Base.@nospecializeinfer function term_priors(@nospecialize(brmi::BRMI))
         isempty(address) && continue
         class = first(address)
         class in _TERM_PRIOR_CLASSES || continue
-        valid = class === :term_sd ? length(address) in (3, 4) : length(address) == 3
+        valid = class in (:term_sd, :term_length_scale) ? length(address) in (3, 4) : length(address) == 3
         valid || error(
             "term_priors: malformed term address " *
             "`effect($(join(address, ", ")))`")

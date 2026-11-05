@@ -1620,6 +1620,7 @@ function _brm_descriptor(plan, stan, operations, titles, highlight_specs)
     outputs = _brm_ranef_components(outputs, plan, stan)
     outputs = _brm_output_dims(outputs, plan, stan)
     outputs = _brm_output_addresses(outputs, plan, stan)
+    outputs = _brm_cell_formula_output_addresses(outputs, plan, stan)
 
     # --- schema -------------------------------------------------------------
     columns = Tuple(sort!(collect(df_columns)))
@@ -1954,6 +1955,54 @@ function _brm_output_addresses(outputs, plan, stan)
                         isnothing(o.component) ? get(parts, o.name, nothing) : o.component,
                         o.dims, predictors(o), term_of(o))
               for o in outputs]
+end
+
+# Cell formulas retain the actual emission bindings beside their declaration
+# context. Resolve each role through the traced model so ragged promotion and
+# two plates using the same term name preserve their separate owners.
+function _brm_cell_formula_output_addresses(outputs, plan, stan)
+    output_names = Set{Symbol}(o.name for o in outputs)
+    model_names = Set{Symbol}(keys(stan.model))
+    addressed = copy(outputs)
+    for entry in values(plan.preproc)
+        entry.kind === :cell_formulas || continue
+        fit = entry.const_
+        for (target, binding) in fit.bindings
+            hasproperty(binding, :term_parameters) || continue
+            predictors = [p.logical for p in fit.predictors
+                if p.emitted === binding.term_predictor]
+            length(predictors) == 1 || error(
+                "brm_descriptor: scoped term `$target` has no unique predictor owner")
+            indices = findall(outputs) do o
+                d = o.declaration
+                d !== nothing && d.context == fit.context && d.target === target
+            end
+            isempty(indices) && continue
+            declaration = outputs[first(indices)].declaration
+            owned = Set{Symbol}(outputs[i].name for i in indices)
+            resolved = _brm_stan_name(declaration)
+            parts = Dict{Symbol,Symbol}()
+            for carrier in _brm_binding_carriers(stan, output_names, model_names, resolved, owned)
+                parts[carrier] = :value
+            end
+            for (role, local_name) in pairs(binding.term_parameters)
+                name = Symbol(resolved, :_, local_name)
+                for carrier in _brm_binding_carriers(stan, output_names, model_names, name, owned)
+                    haskey(parts, carrier) && parts[carrier] !== role && error(
+                        "brm_descriptor: scoped term `$target` has conflicting roles for `$carrier`")
+                    parts[carrier] = role
+                end
+            end
+            for i in indices
+                o = outputs[i]
+                addressed[i] = BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
+                    o.generative, o.source, o.role, o.declaration, o.logical, o.labels,
+                    o.segments, get(parts, o.name, :auxiliary), o.dims,
+                    (only(predictors),), binding.term_label)
+            end
+        end
+    end
+    addressed
 end
 
 # The component of a grouped term's per-group latent block.
@@ -2520,6 +2569,11 @@ _brm_term_label(::typeof(cdar), t, target) =
     Symbol(:cdar_, target, :_, name(_sb_named_inner(:cdar, only(getargs(t)))))
 _brm_term_label(::typeof(car), t, target) =
     Symbol(:car_, target, :_, name(_sb_named_inner(:car, only(getargs(t)))))
+function _brm_term_label(::typeof(gmrf), t, target)
+    a = _brm_gmrf_arguments(t)
+    columns = (a.axes..., a.time, (a.channel === nothing ? () : (a.channel,))...)
+    Symbol(:gmrf_, target, :_, join(name.(columns), "_"))
+end
 
 _brm_term_owner_labels(f, t, target) = (_brm_term_label(f, t, target),)
 # `mo`/`mo1` carriers disambiguate like `s`/`gp`/`hsgp`: the first occurrence
@@ -2599,6 +2653,8 @@ _brm_term_parameter_bindings(::typeof(rw), _t) =
     (; sd=:sigma, innovations=:z)
 _brm_term_parameter_bindings(::typeof(cdar), _t) =
     (; ar=:rho, sd=:sigma, innovations=:eta)
+_brm_term_parameter_bindings(::typeof(gmrf), _t) =
+    _BRM_GMRF_PARAMETER_BINDINGS
 # `effects` is the per-area field in the order of the fitted graph's sorted area
 # labels; `structured` / `unstructured` are BYM2's standardized `phi` / `theta`.
 _brm_term_parameter_bindings(::typeof(car), t) =
@@ -2617,6 +2673,7 @@ _brm_term_has_value(::typeof(dar)) = true
 _brm_term_has_value(::typeof(rw)) = true
 _brm_term_has_value(::typeof(cdar)) = true
 _brm_term_has_value(::typeof(car)) = true
+_brm_term_has_value(::typeof(gmrf)) = true
 
 # ---- hyper-predictor term roles ---------------------------------------------
 # A hyper-predictor statement replaces its hyper's shared sampled scalar with
@@ -2905,6 +2962,8 @@ end
 
 # The term-prior class behind each public parameter role a known value can hold.
 const _BRM_TERM_ROLE_CLASS = (; sd=:term_sd, length_scale=:term_length_scale,
+                               spatial_length=:term_length_scale,
+                               temporal_length=:term_length_scale,
                                ar=:term_ar, mixing=:term_mixing)
 
 """
@@ -2916,8 +2975,10 @@ function _brm_term_known_value(brmi::BRMI, logical::Symbol, term, parameter::Sym
     class = get(_BRM_TERM_ROLE_CLASS, parameter, nothing)
     isnothing(class) && return nothing
     term isa ExprColumn || return nothing
+    component = parameter === :spatial_length ? :space :
+                parameter === :temporal_length ? :time : nothing
     slots = [slot for slot in _brm_term_prior_slots(getf(term))
-             if slot.class === class && isnothing(slot.component)]
+             if slot.class === class && slot.component === component]
     length(slots) == 1 || return nothing
     per_term = _brm_term_override(
         get(_brm_resolve_term_priors(brmi), logical, Dict()), term)

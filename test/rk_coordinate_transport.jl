@@ -245,6 +245,89 @@ end
 # `|ID|` under a configured `sd(...)` law, and a three-margin block whose
 # margins' laws differ, so RK holds one scale vector per margin and each
 # stratum's factor has three packed coordinates.
+# A block or HSGP prior reading a numeric data scalar, directly, inside an
+# expression, or through a literal assignment (snag rk-sd-prior-data-fecc0c41:
+# the regression route left the name undefined, so binding failed with
+# "references unknown name").
+data_scale_one(data) = @brm data begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | p | subject)
+    sd(:, p) ~ Exponential(prior_sd_scale)
+    y ~ Normal(mu, sigma)
+end
+data_scale_named(data) = @brm data begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | subject)
+    sd(mu, subject) ~ Exponential(prior_sd_scale)
+    y ~ Normal(mu, sigma)
+end
+data_scale_correlated(data) = @brm data begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 + x | p | subject)
+    sd(:, p) ~ Exponential(prior_sd_scale)
+    y ~ Normal(mu, sigma)
+end
+data_scale_margin(data) = @brm data begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 + x | p | subject)
+    sd(mu, p, x) ~ Exponential(2 * prior_sd_scale)
+    y ~ Normal(mu, sigma)
+end
+data_scale_truncated(data) = @brm data begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | p | subject)
+    sd(:, p) ~ truncated(Normal(0, prior_sd_scale); lower=0)
+    y ~ Normal(mu, sigma)
+end
+data_scale_assigned(data) = @brm data begin
+    sigma ~ Exponential(1)
+    rate = 1.7
+    other = rate
+    mu ~ 1 + x + (1 | p | subject)
+    sd(:, p) ~ Exponential(other)
+    y ~ Normal(mu, sigma)
+end
+data_scale_constant(data) = @brm data begin
+    sigma ~ Exponential(1)
+    rate = constant(prior_sd_scale)
+    mu ~ 1 + x + (1 | p | subject)
+    sd(:, p) ~ Exponential(rate)
+    y ~ Normal(mu, sigma)
+end
+data_scale_alias_parameter(data) = @brm data begin
+    sigma ~ Exponential(1)
+    tau ~ Exponential(prior_sd_scale)
+    other = tau
+    mu ~ 1 + x + (1 | p | subject)
+    sd(:, p) ~ Exponential(other)
+    y ~ Normal(mu, sigma)
+end
+data_scale_student_t(data) = @brm data begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | p | subject)
+    ranef(:, p) ~ TDist(nu0)
+    y ~ Normal(mu, sigma)
+end
+data_scale_stratified(data) = @brm data begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | p | gr(subject, by = arm))
+    sd(:, p) ~ Exponential(prior_sd_scale)
+    y ~ Normal(mu, sigma)
+end
+data_scale_gmrf(data) = @brm data begin
+    field ~ 0 + gmrf((east, north), time; mesh=(vertices=xy, cells=triangles))
+    sd(field, gmrf((east, north), time)) ~ Exponential(prior_sd_scale)
+    length_scale(field, gmrf((east, north), time), space) ~ LogNormal(0.5, prior_sd_scale)
+    y ~ Normal(field, 0.2)
+end
+data_scale_hsgp(data) = @brm data begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + hsgp(x; k=3)
+    sd(:, hsgp(x)) ~ Exponential(prior_sd_scale)
+    length_scale(:, hsgp(x)) ~ LogNormal(0, prior_sd_scale)
+    y ~ Normal(mu, sigma)
+end
+
 function stratified_one(data)
     @brm data begin
         sigma ~ Exponential(1)
@@ -657,6 +740,45 @@ end
         check_coordinate_transport(fixture)
         @test isequal(data, saved)
     end
+end
+
+@stestset "coordinate transport block and term priors that read data scalars" begin
+    data = (; subject=[1,1,2,2,3,3,4,4], arm=["a","a","a","a","b","b","b","b"],
+        x=[0.1,0.4,-0.2,0.3,0.7,0.5,0.2,-0.1],
+        y=[1.4,0.9,1.6,0.7,1.2,0.5,1.1,0.4], prior_sd_scale=1.7, nu0=4.0)
+    saved = deepcopy(data)
+    for (build, name) in (
+            (PublicCoordinateTransport.data_scale_one, "data_scale_one"),
+            (PublicCoordinateTransport.data_scale_named, "data_scale_named"),
+            (PublicCoordinateTransport.data_scale_correlated, "data_scale_correlated"),
+            (PublicCoordinateTransport.data_scale_margin, "data_scale_margin"),
+            (PublicCoordinateTransport.data_scale_truncated, "data_scale_truncated"),
+            (PublicCoordinateTransport.data_scale_assigned, "data_scale_assigned"),
+            (PublicCoordinateTransport.data_scale_constant, "data_scale_constant"),
+            (PublicCoordinateTransport.data_scale_alias_parameter, "data_scale_alias_parameter"),
+            (PublicCoordinateTransport.data_scale_student_t, "data_scale_student_t"),
+            (PublicCoordinateTransport.data_scale_stratified, "data_scale_stratified"),
+            (PublicCoordinateTransport.data_scale_hsgp, "data_scale_hsgp"))
+        fixture = coordinate_transport_fixture(build(data), name)
+        check_coordinate_transport(fixture)
+        # The values stay in the fitted program; a design binds none of them.
+        @test isempty(intersect(keys(rk_bound_data(fixture.rk)),
+            (:prior_sd_scale, :nu0, :rate, :other)))
+        @test isequal(data, saved)
+    end
+end
+
+@stestset "coordinate transport gmrf priors that read a data scalar" begin
+    data = (; east=[0.1, 0.9, 0.7, 0.3], north=[0.2, 0.4, 0.8, 0.5],
+        time=[0.0, 0.3, 0.3, 1.7], y=[0.4, -0.3, 0.2, 0.1],
+        xy=[0.0 0.0; 1 0; 1 1; 0 1; 0.5 0.5], triangles=[1 2 5; 2 3 5; 3 4 5; 4 1 5],
+        prior_sd_scale=1.7)
+    saved = deepcopy(data)
+    fixture = coordinate_transport_fixture(PublicCoordinateTransport.data_scale_gmrf(data),
+        "data_scale_gmrf")
+    check_coordinate_transport(fixture)
+    @test :prior_sd_scale ∉ keys(rk_bound_data(fixture.rk))
+    @test isequal(data, saved)
 end
 
 @stestset "coordinate transport linked shared-design factor and plain slope" begin

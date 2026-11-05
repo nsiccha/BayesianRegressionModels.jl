@@ -173,6 +173,50 @@ name a fitted area. Dispatch tag — see `_sb_car_icar` / `_sb_car_bym2`.
 function car end
 
 """
+    gmrf((east, north), time[, channel]; mesh=(vertices=xy, cells=triangles),
+         spatial=:matern, temporal=:ou, cor=Omega)
+
+A space-time Gaussian Markov field on a supplied triangular mesh. `xy` has
+two columns in projected physical coordinates; each row of `triangles` has
+three vertex indices. An observation reads the piecewise-linear interpolation
+of three vertices at its time and channel. All distinct observation times form
+the state grid. Elapsed times retain their physical units, including gaps.
+
+The spatial law is the mass-lumped finite-element Matérn with smoothness ν=1
+and κ=√2/ℓ_space, with natural Neumann boundaries. Its amplitude is the
+continuum marginal SD; finite-mesh variances, especially near boundaries,
+need not equal that amplitude. Time has stationary OU correlation
+`exp(-abs(t-s)/ℓ_time)`. The optional `channel` column uses `cor`, a known
+correlation matrix or a declared `LKJCholesky` factor in fitted channel order.
+Omitting `cor` uses independent channels. Use `@plate` for independent fields.
+
+`sd(lp, gmrf((east, north), time))` addresses the amplitude;
+`length_scale(lp, gmrf((east, north), time), space)` and the corresponding
+`time` component address the two lengths. Each defaults to `LogNormal(0, 1)`
+in the coordinates' units. Include the channel argument in an address when
+present. The term adds its field directly, without a population coefficient.
+Frozen replay retains the mesh, times and channels, and can evaluate new
+spatial locations inside that mesh. New state times or channels require a
+conditional prediction law and are refused by frozen replay.
+
+    gmrf((east, north), time[, channel]; neighbors=m, cor=Omega)
+
+The same covariance without a mesh: a nearest-neighbour (Vecchia) sparse
+precision whose state is one coordinate per channel at each distinct
+`(east, north, time)` the rows read, so its size follows the data rather than
+vertices × times. A state conditions on its `m` nearest lower-order positions
+read at its own time, the previous read of its own position and of each of
+those, and, when its own position was not read at the previous read time, its
+`m` nearest among the latest earlier reads, reaching back until they hold at
+least `m`. The spatial correlation is the continuum
+`M₁(κ r) = κ r K₁(κ r)`, so there is no mesh boundary or resolution effect; the
+approximation is the conditioning set, which leaves the time factor exact on
+positions read at the same times. Frozen replay reads only fitted
+`(position, time)` pairs.
+"""
+function gmrf end
+
+"""
     Horseshoe
 
 Carvalho-Polson-Scott horseshoe shrinkage prior marker. Use as a prior

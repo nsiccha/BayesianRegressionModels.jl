@@ -22,6 +22,14 @@ _rk_observed_names(::_RKUnconditionedPlan) = ()
 _rk_emit_ast(::_RKUnconditionedPlan) =
     _RKEmittedProgram(Expr[], Expr(:block), Pair{Symbol,Any}[])
 
+# The module authoring the model's cells, where the Stan program reads the
+# functions they call; no keyword without a cell.
+Base.@nospecializeinfer function _rk_cell_module(@nospecialize(brmi::BRMI))
+    operations = _rk_kernel_ops(brmi)
+    isempty(operations) && return (;)
+    (; mod=_brm_inline_scope(first(getargs(last(first(operations))))))
+end
+
 Base.@nospecializeinfer function _rk_unconditioned_plan(@nospecialize(brmi::BRMI))
     # Bound formula observations, including kernel-cell inputs, use the
     # ordinary planner. Empty bound arrays still retain this fitted role.
@@ -45,7 +53,7 @@ Base.@nospecializeinfer function _rk_unconditioned_plan(@nospecialize(brmi::BRMI
     # The emitted declaration inventory also finds synthetic observations
     # (for example a modeled baseline). Endpoint absence alone must never
     # discard their densities or their inference coordinates.
-    generated = generative_plan(SBBRMI(brmi))
+    generated = generative_plan(SBBRMI(brmi; _rk_cell_module(brmi)...))
     any(d -> d.role === :observation && d.data_source !== nothing,
         generated.declarations) && return nothing
     _RKUnconditionedPlan(generated, Dict{Symbol,Any}(generated.data))
@@ -73,8 +81,10 @@ Base.@nospecializeinfer function _brm_rk_plan(@nospecialize(brmi::BRMI); held_ou
     # graph from its own inputs (user decision `1tb1jrg`).
     brmi, assignments = _brm_resolve_data_assignments(brmi; prefix="RK backend")
     selected = _rk_held_out_selection(brmi, held_out)
-    original = _brm_rk_unselected_plan(brmi)
+    known_scalars = Ref{Any}(nothing)
+    original = _brm_rk_unselected_plan(brmi, known_scalars)
     _rk_attach_data_assignments!(original, assignments, constants)
+    _rk_define_read_scalars!(original, known_scalars[])
     isempty(selected) ? original : _RKHeldOutPlan(original, selected)
 end
 

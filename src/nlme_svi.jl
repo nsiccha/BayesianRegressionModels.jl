@@ -31,6 +31,12 @@
 # bound SVI's natural-gradient steps). That step is Newton-like, so a subject's
 # factor settles in tens of visits, where plain gradient steps on its mean and
 # scale need hundreds.
+#
+# An iteration's unit work (the terms at the antithetic pair and the factor's
+# step) can run on several tasks, one prepared copy of the cell samplers per
+# task. Its random draws stay on the run's one stream, in batch order, and each
+# unit's result goes to its own slot and is summed in batch order, so a run is
+# the same to the last bit at any number of tasks.
 
 """
     MeanFieldGlobal()
@@ -64,18 +70,66 @@ function _brm_svi_target(m::BRMNLMEModel)
         "no cells attributable to single subjects")
     globals = _brm_svi_globals(m)
     units = m.view.subject_coordinates
-    # Compact cell gradients selecting the globals and the draws each cell
-    # reads (`_brm_nlme_cell_plan` over the reads `m` measured), so a cell
-    # costs its own coordinates, not its subject's whole block.
-    plan = _brm_nlme_cell_plan(m.backend, m.cell_query, m.unit, globals, units,
-        _brm_nlme_cell_state(m).reads)
+    # SVI owns one partition sampler and includes covariance coordinates in
+    # its active globals. Fixed shared values remain at the read-only base.
+    plan = _brm_nlme_partition_plan(m.cell_gradient, m.unit, globals, m.view)
     # For subject i, `order[i]` sorts [globals; units[i]] into packed order.
     order = [sortperm(vcat(globals, block)) for block in units]
     indices = [vcat(globals, block)[o] for (block, o) in zip(units, order)]
     work = [(; values=zeros(length(o)), gradient=zeros(length(o))) for o in order]
     nz = count(==(:subject_effect), m.view.role)
-    (; m, globals, units, plan, work, order, indices, prior=nothing,
+    (; m, globals, units, plan, plans=[plan], work, order, indices, prior=nothing,
        z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
+end
+
+# `t` with `n` partition plans, one per task that evaluates units. `t.plan` is
+# the first; each further one owns its sampler, gradients and work point
+# (`_brm_nlme_worker_plan`).
+function _brm_svi_with_workers(t, n, progress=nothing)
+    n == 1 && return t
+    workers = _brm_with_counter(progress, n - 1; description="Worker partition samplers") do node
+        map(1:n-1) do k
+            plan = _brm_nlme_worker_plan(t.plan, t.m.cell_gradient, t.m.unit)
+            _brm_update_progress!(node, k)
+            plan
+        end
+    end
+    merge(t, (; plans=vcat([t.plan], workers)))
+end
+
+# `f(plan, k)` for every `k` in `1:n`: in order on this task with one plan, or
+# with several on one task per plan, each taking the next `k` as it finishes
+# the last, so uneven units balance. `f` writes only to what belongs to `k`.
+function _brm_svi_each_unit(f, plans, n)
+    if length(plans) == 1
+        plan = only(plans)
+        for k in 1:n
+            f(plan, k)
+        end
+        return nothing
+    end
+    next = Threads.Atomic{Int}(1)
+    tasks = map(plans) do plan
+        Threads.@spawn begin
+            k = Threads.atomic_add!(next, 1)
+            while k <= n
+                f(plan, k)
+                k = Threads.atomic_add!(next, 1)
+            end
+        end
+    end
+    # Every task has stopped before a failure propagates: none of them is left
+    # writing to the run's factors or a plan's samplers.
+    failure = nothing
+    for task in tasks
+        try
+            wait(task)
+        catch e
+            failure === nothing && (failure = e)
+        end
+    end
+    failure === nothing || throw(failure)
+    nothing
 end
 
 # P(g) and its gradient: the RK prior and log-Jacobian at the packed point with
@@ -88,16 +142,17 @@ function _brm_svi_global_term(::Nothing, t, g)
     value - t.z_constant, gradient[t.globals]
 end
 
-# ℓ_i(g, z) + log N(z; 0, I) for subject i, with its gradients in g and z.
-function _brm_svi_unit_term!(gg, gz, t, i, g, z)
+# ℓ_i(g, z) + log N(z; 0, I) for subject i, with its gradients in g and z,
+# through `plan`. Concurrent calls need their own plans and different subjects:
+# `t.work[i]` is subject i's.
+function _brm_svi_unit_term!(gg, gz, t, i, g, z, plan=t.plan)
     D = length(t.globals)
     order = t.order[i]
     w = t.work[i]
     joint = vcat(g, z)
     w.values .= joint[order]
     fill!(w.gradient, 0.0)
-    value = _brm_nlme_cell_plan_sum!(w.gradient, t.plan, t.m.cell_query, t.m.unit,
-        i, w.values)
+    value = _brm_nlme_partition_sum!(w.gradient, plan, t.m.unit, i, w.values)
     joint_gradient = similar(joint)
     joint_gradient[order] .= w.gradient
     gg .= view(joint_gradient, 1:D)
@@ -373,6 +428,11 @@ end
 # minibatch ELBO gradient, an Adam step of the globals and a natural-gradient
 # step of each batch subject. Returns the minibatch estimate of E_q log p
 # (without the entropy).
+#
+# Whatever `t.plans` holds, the result is the same to the last bit: the draws
+# come from `rng` here, in batch order, before any unit is evaluated, each unit's
+# result stays in its own slot and is summed in batch order, and a unit's step
+# reads and writes only that unit's factor.
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false)
     D, N = length(t.globals), length(t.units)
@@ -380,26 +440,31 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
     P, gP = _brm_svi_global_term(t, g)
-    w = copy(gP)
-    gg₊, gg₋ = zeros(D), zeros(D)
-    batch_value = 0.0
-    steps = Vector{NTuple{3,Vector{Float64}}}(undef, length(batch))
-    for (k, i) in enumerate(batch)
-        εi = randn(rng, length(t.units[i]))
+    draws = [randn(rng, length(t.units[i])) for i in batch]
+    terms = Vector{@NamedTuple{value::Float64,gg::Vector{Float64},gz::Vector{Float64},
+        gd::Vector{Float64}}}(undef, length(batch))
+    _brm_svi_each_unit(t.plans, length(batch)) do plan, k
+        i, εi = batch[k], draws[k]
+        gg₊, gg₋ = zeros(D), zeros(D)
         gz₊, gz₋ = zeros(length(εi)), zeros(length(εi))
         m, δ = q.M[i], _brm_svi_unit_offset(q, i, εi)
-        batch_value += (_brm_svi_unit_term!(gg₊, gz₊, t, i, g, m .+ δ) +
-            _brm_svi_unit_term!(gg₋, gz₋, t, i, g, m .- δ)) / 2
-        w .+= (s / 2) .* (gg₊ .+ gg₋)
-        steps[k] = ((gz₊ .+ gz₋) ./ 2, (gz₊ .- gz₋) ./ 2, εi)
+        value = (_brm_svi_unit_term!(gg₊, gz₊, t, i, g, m .+ δ, plan) +
+            _brm_svi_unit_term!(gg₋, gz₋, t, i, g, m .- δ, plan)) / 2
+        terms[k] = (; value, gg=gg₊ .+ gg₋, gz=(gz₊ .+ gz₋) ./ 2, gd=(gz₊ .- gz₋) ./ 2)
+    end
+    w = copy(gP)
+    batch_value = 0.0
+    for term in terms
+        batch_value += term.value
+        w .+= (s / 2) .* term.gg
     end
     x = _brm_svi_global_vector(q)
     grad = _brm_svi_global_gradient(q, w, ε, η)
     whiten ? _brm_svi_whitened_global_step!(global_opt, q, x, grad, lr_global) :
         _brm_svi_step!(global_opt, x, grad, lr_global)
     _brm_svi_set_global!(q, x)
-    for (k, i) in enumerate(batch)
-        _brm_svi_unit_step!(q, i, steps[k]..., β)
+    _brm_svi_each_unit(t.plans, length(batch)) do _, k
+        _brm_svi_unit_step!(q, batch[k], terms[k].gz, terms[k].gd, draws[k], β)
     end
     P + s * batch_value
 end
@@ -617,8 +682,8 @@ end
         family=MeanFieldGlobal(), ndraws=1000, start=nothing, inits=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), progress=nothing,
-        stop_after=nothing, checkpoint_every=nothing, kwargs...)
-        -> (; draws, coordinates, diagnostics)
+        stop_after=nothing, checkpoint_every=nothing, threads=nothing,
+        kwargs...) -> (; draws, coordinates, diagnostics)
 
 Minibatch stochastic variational inference for a model whose subjects are
 conditionally independent given the population (the subjects of
@@ -654,9 +719,20 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   [`brm_start`](@ref) takes them (the rest at the prior medians).
 - `progress` — a Treebars node or backend symbol: one `BRM SVI fit` node with
   the phases Lower to ReactiveKernels, Prepare NLME model, Minibatch target
-  (the subjects' cell gradients and the start), Stochastic optimization (its
+  (the unit partition gradient and the start), Stochastic optimization (its
   message names the window, iteration and ELBO) and Draws from q. An interrupt raises `Treebars.ProgressInterrupted` at the
   next window.
+- `threads` — how many tasks evaluate a batch's subjects and step their factors,
+  capped at the batch size. Each further task prepares its own copy of the
+  compact cell samplers before the first iteration, which costs time and retained
+  memory. The default is `Threads.nthreads()`, or 1 on an Enzyme without the
+  concurrent-GC repair, which refuses an explicit `threads` above one.
+  The result does not depend on it: the draws come from the one `rng` in batch
+  order and the subjects' results are summed in batch order, so a run and its
+  checkpoints are the same to the last bit at any `threads`, and
+  [`brm_svi_resume`](@ref) can continue at another. The fit holds BLAS at one
+  thread while it optimizes and draws, and restores it afterwards. Not with
+  `laplace=GaussianBlockLaplace()`, whose updates evaluate the whole window.
 - Optimizer controls: `max_iterations`, `lr_global` (Adam on the globals),
   `unit_step` (the subjects' natural-gradient step; a step that would change a
   subject's precision more than 2.5-fold along some direction, or move its
@@ -679,8 +755,9 @@ unconstrained points (coordinates × draws, one column per draw, the order of
 the ELBO trace (`elbo`, `elbo_windows`, up to a constant), `converged`,
 `finished` (converged or `max_iterations` reached; `false` after `stop_after`),
 `iterations`, the variational parameters `q`, the packed positions of the
-global coordinates (`globals`), `seconds` of optimization in this call, the
-prepared `model`, and the run's `optimizer` state
+global coordinates (`globals`), `seconds` of optimization in this call,
+`threads` (the tasks this call used), the prepared `model`, and the run's
+`optimizer` state
 ([`brm_svi_optimizer_checkpoint`](@ref) copies it). The draws come from a copy
 of the optimizer's random stream: they do not advance `rng`, and a continued
 run is unaffected by them. The approximation is variational: posterior means
@@ -713,6 +790,52 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
     end
 end
 
+# Implemented by `BayesianRegressionModelsReactiveKernelsEnzymeExt`: whether a
+# reverse gradient of `ad_backend` (`nothing`: the default, reverse-mode Enzyme)
+# stays sound while another thread allocates. Only Enzyme's have that defect.
+_brm_concurrent_gradients(ad_backend) = true
+
+# The tasks a call uses: `threads`, or by default every thread of this process.
+# Without the repair, an Enzyme refuses several tasks a caller asked for and keeps
+# the serial loop for a caller who asked for none.
+function _brm_svi_threads(caller, threads, ad_backend;
+        repaired=_brm_concurrent_gradients(ad_backend))
+    threads === nothing && return repaired ? Threads.nthreads() : 1
+    threads isa Integer && !(threads isa Bool) && threads >= 1 || throw(ArgumentError(
+        "$caller: threads must be a positive integer, got $(repr(threads))"))
+    threads == 1 || repaired || throw(ArgumentError(
+        "$caller: threads = $threads takes reverse gradients on several threads, and " *
+        "this Enzyme lacks the concurrent-GC repair, so a gradient can use freed " *
+        "memory; use Enzyme's dogfood line (from 72d5d25) or pass threads = 1"))
+    Int(threads)
+end
+
+# BLAS's thread count is process-global, so the pin is shared: concurrent or
+# nested calls hold it together and the last to leave restores what the first
+# found.
+const _BRM_BLAS_PIN = (; lock=ReentrantLock(), depth=Ref(0), saved=Ref(1))
+
+# `f()` with one BLAS thread. Tasks that each run LAPACK on a multi-threaded BLAS
+# oversubscribe the host, and a BLAS thread count can change a factorization's
+# last bits, so a fit pins it whatever its number of tasks.
+function _brm_with_serial_blas(f)
+    lock(_BRM_BLAS_PIN.lock) do
+        if _BRM_BLAS_PIN.depth[] == 0
+            _BRM_BLAS_PIN.saved[] = BLAS.get_num_threads()
+            BLAS.set_num_threads(1)
+        end
+        _BRM_BLAS_PIN.depth[] += 1
+    end
+    try
+        f()
+    finally
+        lock(_BRM_BLAS_PIN.lock) do
+            _BRM_BLAS_PIN.depth[] -= 1
+            _BRM_BLAS_PIN.depth[] == 0 && BLAS.set_num_threads(_BRM_BLAS_PIN.saved[])
+        end
+    end
+end
+
 function _brm_svi_check_interruption(caller, save, stop_after, checkpoint_every)
     stop_after === nothing || stop_after isa Integer && stop_after >= 0 || throw(ArgumentError(
         "$caller: stop_after must be a nonnegative integer (iterations in this call) or nothing"))
@@ -733,28 +856,34 @@ end
 function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=1000,
         stop_after=nothing, checkpoint_every=nothing, progress=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
-        nested_groups=NamedTuple(), shared_groups=())
+        nested_groups=NamedTuple(), shared_groups=(), threads=nothing)
     ndraws isa Integer && ndraws >= 0 || throw(ArgumentError(
         "$caller: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller, save, stop_after, checkpoint_every)
+    threads = _brm_svi_threads(caller, threads, ad_backend)
     _brm_with_progress(progress; description) do node
         _brm_with_phases(node, _BRM_SVI_PHASES) do phases
             m = _brm_svi_model(_brm_svi_lowered(x, phases.lower), phases.prepare;
                 ad_backend, shared_point, subject_group, nested_groups, shared_groups)
             t, state = _brm_run_phase(phases.target) do phase
-                # The model's compact cell gradients, on first use, report here.
-                init(_brm_with_cell_progress(() -> _brm_svi_target(m), phase))
+                # SVI's partition sampler, on first use, reports under this phase.
+                t, state = init(_brm_with_cell_progress(() -> _brm_svi_target(m), phase))
+                _brm_svi_with_workers(t, min(threads, state.controls.batch_size), phase), state
             end
             run, c = state.run, state.controls
-            seconds = @elapsed _brm_enter_phase(phases.fit) do phase
-                _brm_svi_fit!(run, t, c; stop_after=something(stop_after, typemax(Int)),
-                    checkpoint_every=something(checkpoint_every, c.window), save,
-                    snapshot=_ -> _brm_svi_detach(state), node=phase)
+            seconds, draws = _brm_with_serial_blas() do
+                seconds = @elapsed _brm_enter_phase(phases.fit) do phase
+                    _brm_svi_fit!(run, t, c; stop_after=something(stop_after, typemax(Int)),
+                        checkpoint_every=something(checkpoint_every, c.window), save,
+                        snapshot=_ -> _brm_svi_detach(state), node=phase)
+                end
+                seconds, _brm_run_phase(phases.draws) do _
+                    _brm_svi_draws(copy(run.rng), t, _brm_svi_result_q(run), ndraws)
+                end
             end
             q = _brm_svi_result_q(run)
-            draws = _brm_run_phase(_ -> _brm_svi_draws(copy(run.rng), t, q, ndraws),
-                phases.draws)
             (; draws, coordinates=copy(m.view.coordinates), diagnostics=(;
+                threads=length(t.plans),
                 elbo=run.trace, elbo_windows=first.(run.windows), run.converged,
                 finished=_brm_svi_finished(run, c), iterations=run.iteration, q,
                 globals=t.globals, seconds, model=m, source_id=_brm_svi_source_id(m.backend),

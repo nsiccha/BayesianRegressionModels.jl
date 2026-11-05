@@ -2,11 +2,10 @@ module BayesianRegressionModelsNLMEEstimationExt
 
 # The NLMEEstimation.jl model protocol for an RK-lowered BRM population model
 # (`BRMNLMEModel`, from `brm_nlme_model`). The model declares
-# `BatchedEvaluation`: larger batches use one lockstep RK evaluation, while
-# singleton batches and explicit per-subject calls use one observation cell.
-# Online SAEM uses those cells for its population gradient, avoiding a reverse
-# derivative through the entire batched RK evaluator. The retained-draw
-# mixture keeps batched gradients to avoid repeating cell work for each draw.
+# `BatchedEvaluation`: the complete subject set uses one lockstep RK evaluation;
+# subsets and explicit per-subject calls evaluate the selected unit partitions.
+# Online SAEM keeps its existing population-gradient style selection. The
+# retained draw mixture shares batched gradients across all subjects.
 # Colored RK Hessian-vector products give all subjects' η Hessian
 # blocks in one pass per η coordinate, so `empirical_bayes` uses `NewtonEBE`.
 # Gaussian observations use one :observations query and colored forward
@@ -39,13 +38,10 @@ function NE.fixed_omega(m::BRM.BRMNLMEModel)
         for (f, family) in enumerate(m.view.families) if family.fixed !== nothing]
     isempty(pairs) ? nothing : pairs
 end
-# Only a prepared compact subject-cell sampler differentiates one subject's
-# population coordinates. An elementwise observation (a flat grouped response,
-# a completed covariate's observed values) has one cell, and so one compact
-# call, per row; when a subject has several, one lockstep sweep costs less
-# (80 subjects × 8 flat PK rows, 60 online SAEM iterations: 0.26 s batched
-# against 0.71 s per subject, with the same first fit). Those models, and
-# models without compact cells, use the lockstep batch.
+# Preserve SAEM's population-gradient selection. Partitions remove repeated
+# cell calls, but a full population pass still shares work: on 80 subjects ×
+# 8 flat PK rows, the partition loop takes 0.365 ms versus 0.083 ms batched.
+# This trait is separate from conditional subset routing below.
 NE.saem_population_gradient_style(m::BRM.BRMNLMEModel) =
     m.cell_gradient === nothing || any(m.cell_query) do cell
         cell.elementwise && any(p -> length(p) > 1, cell.positions)
@@ -57,7 +53,7 @@ NE.saem_population_gradient_style(::BRM.BRMNLMEModel, ::Val{:mixture}) =
 NE.provides_eta_hessian(::BRM.BRMNLMEModel) = true
 
 # A nested model with subject cells declares each subject's η Hessian pattern
-# (`BRM._brm_nlme_eta_sparsity`, measured on first request), so NLMEEstimation
+# (`BRM._brm_nlme_eta_sparsity`, built on first request), so NLMEEstimation
 # computes sparse η Hessians from batched η gradients instead of asking for
 # dense blocks; other models declare none.
 function NE.eta_hessian_sparsity(m::BRM.BRMNLMEModel, i::Integer)
@@ -409,26 +405,46 @@ function NE.observation_moments_and_jacobians(m::BRM.BRMNLMEModel,
     moments[subjects]
 end
 
-function _singleton_cell(m::BRM.BRMNLMEModel, subjects, H::AbstractMatrix)
-    length(subjects) == 1 && m.cell_query !== nothing || return nothing
-    size(H, 2) == 1 || throw(DimensionMismatch(
-        "η matrix has $(size(H, 2)) columns for 1 subject"))
+# A proper subset evaluates only its units. The complete subject set retains
+# the whole-model sweep, which shares work across every unit. This replaces
+# the old fixed rule that any batch of two or more swept the whole model.
+function _partition_batch(m::BRM.BRMNLMEModel, subjects, H::AbstractMatrix)
+    (m.cell_gradient === nothing || length(subjects) == length(m.view.levels)) &&
+        return nothing
+    BRM._brm_nlme_ragged(m.view) && throw(DimensionMismatch(
+        "ragged subjects need one compact η vector per subject, not a matrix"))
+    size(H, 2) == length(subjects) || throw(DimensionMismatch(
+        "η matrix has $(size(H, 2)) columns for $(length(subjects)) subjects"))
+    size(H, 1) == length(m.view.block_margins) || throw(DimensionMismatch(
+        "η matrix has $(size(H, 1)) rows, expected $(length(m.view.block_margins))"))
     _check_subjects(m, subjects)
-    only(subjects), view(H, :, 1)
+    [(i, view(H, :, k)) for (k, i) in enumerate(subjects)]
 end
 
-function _singleton_cell(m::BRM.BRMNLMEModel, subjects,
+function _partition_batch(m::BRM.BRMNLMEModel, subjects,
         H::AbstractVector{<:AbstractVector})
-    length(subjects) == 1 && m.cell_query !== nothing || return nothing
-    length(H) == 1 || throw(DimensionMismatch(
-        "η has $(length(H)) vectors for 1 subject"))
+    (m.cell_gradient === nothing || length(subjects) == length(m.view.levels)) &&
+        return nothing
+    length(H) == length(subjects) || throw(DimensionMismatch(
+        "η has $(length(H)) vectors for $(length(subjects)) subjects"))
     _check_subjects(m, subjects)
-    only(subjects), only(H)
+    [(i, H[k]) for (k, i) in enumerate(subjects)]
+end
+
+function _partition_batch(m, subjects, θ, σ, H)
+    units = _partition_batch(m, subjects, H)
+    units === nothing && return nothing
+    length(θ) == length(m.theta) || throw(DimensionMismatch(
+        "θ has length $(length(θ)), expected $(length(m.theta))"))
+    length(σ) == length(m.sigma) || throw(DimensionMismatch(
+        "σ has length $(length(σ)), expected $(length(m.sigma))"))
+    units
 end
 
 function NE.conditional_loglikelihoods(m::BRM.BRMNLMEModel, subjects, θ, σ, H)
-    cell = _singleton_cell(m, subjects, H)
-    cell === nothing || return [BRM.brm_nlme_loglikelihood(m, cell[1], θ, σ, cell[2])]
+    units = _partition_batch(m, subjects, θ, σ, H)
+    units === nothing || return Float64[BRM.brm_nlme_loglikelihood(m, i, θ, σ, η)
+        for (i, η) in units]
     values = BRM.brm_nlme_loglikelihoods(m, θ, σ, _batch_eta(m, subjects, H))
     values[subjects]
 end
@@ -440,7 +456,7 @@ NE.conditional_loglikelihood_and_gradient(m::BRM.BRMNLMEModel,
         i::Integer, θ, σ, η) =
     BRM.brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, η)
 
-# The same prepared subject-cell sampler also differentiates the population
+# The same prepared unit-partition sampler also differentiates the population
 # coordinates. SAEM can use this protocol method without compiling a reverse
 # derivative of the entire batched RK evaluation.
 function NE.conditional_loglikelihood_and_population_gradient(m::BRM.BRMNLMEModel,
@@ -453,11 +469,15 @@ function NE.conditional_loglikelihood_and_population_gradient(m::BRM.BRMNLMEMode
 end
 
 function NE.conditional_loglikelihoods_and_gradients(m::BRM.BRMNLMEModel, subjects, θ, σ, H)
-    cell = _singleton_cell(m, subjects, H)
-    if cell !== nothing
-        value, gradient = BRM.brm_nlme_loglikelihood_and_gradient(
-            m, cell[1], θ, σ, cell[2])
-        return [value], H isa AbstractMatrix ? reshape(gradient, :, 1) : [gradient]
+    units = _partition_batch(m, subjects, θ, σ, H)
+    if units !== nothing
+        result = [BRM.brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, η)
+            for (i, η) in units]
+        values = Float64[first(r) for r in result]
+        gradients = Vector{Float64}[last(r) for r in result]
+        G = H isa AbstractMatrix ? (isempty(gradients) ? zeros(size(H, 1), 0) :
+            hcat(gradients...)) : gradients
+        return values, G
     end
     values, G = BRM.brm_nlme_loglikelihoods_and_gradients(m, θ, σ, _batch_eta(m, subjects, H))
     values[subjects], G isa AbstractMatrix ? G[:, subjects] : G[subjects]

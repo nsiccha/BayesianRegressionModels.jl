@@ -156,6 +156,7 @@ _rk_ast_level_values(values) = Expr(:vect, (_rk_ast_level_value(value) for value
 
 function _rk_lower_assignment_expr(node, name::Symbol)
     node isa Number && return node
+    node isa AbstractVector{<:Real} && return Expr(:vect, node...)
     node isa _BRMPreparedRef && return node.name
     node isa _BRMPreparedExpr || error(
         "RK backend: internal: assignment `$name` holds an unlowerable node")
@@ -352,7 +353,7 @@ function _rk_ast_affine(predictor::_RKPredictorSpec, coefs::Dict{Int,Symbol},
         elseif term.kind === :hsgp
             # The ordinary Hilbert basis/spectral product is a summand.
             push!(summands, refref[index])
-        elseif term.kind === :gp
+        elseif term.kind === :gp || term.kind === :gmrf
             push!(summands, refref[index])
         elseif term.kind === :ar
             # Scaled scan summand: the thin layer classifies
@@ -1501,10 +1502,22 @@ function _rk_ast_car_separated!(definitions, taken, bindings, block, separation,
         push!(block.statements,
             Expr(:call, :~, Expr(:ref, w, Expr(:call, :(:), 1, m)),
                 Expr(:call, law, arguments.last, arguments.scale, arguments.weight,
-                    arguments.shared_first, arguments.shared_second)),
+                    arguments.shared_first, arguments.shared_second)))
+        # Expose the linear shared-value map by row. Its integer lists and
+        # coefficients depend only on data and are computed at binding; a
+        # partition computes just the shared values its areas read.
+        rows = _rk_block_local!(block, :shared_rows)
+        coefficients = _rk_block_local!(block, :shared_coefficients)
+        row_ids = _rk_block_local!(block, :shared_ids)
+        push!(block.statements,
+            Expr(:(=), rows, _rk_ast_statistical_call!(definitions, taken,
+                :brm_car_shared_rows, arguments.last)),
+            Expr(:(=), coefficients, _rk_ast_statistical_call!(definitions, taken,
+                :brm_car_shared_coefficients, arguments.last, arguments.scale,
+                arguments.weight)),
+            Expr(:(=), row_ids, Expr(:call, :eachindex, arguments.last)),
             Expr(:(=), x, _rk_ast_statistical_call!(definitions, taken,
-                :brm_car_shared_values, w, arguments.last, arguments.scale,
-                arguments.weight)))
+                :brm_car_shared_local, w, rows, coefficients, row_ids; kernel=true)))
     end
     z = map(separation.blocks) do b
         b.ndraws == 0 && return nothing
@@ -1619,7 +1632,14 @@ function _rk_ast_cdar_block!(definitions, taken, term, group_rows, step_rows)
     innovations = eta
     if factor_values !== nothing
         L = _rk_block_local!(block, :L)
-        push!(block.statements, Expr(:(=), L, Expr(:call, :reshape, factor_values, P, P)))
+        # Sparse, so the factor declares which groups it couples: a cell reads
+        # `eta` only at the columns its row stores (ReactiveKernels 0.1.77 / RKPPL 0.1.85), and a
+        # `cor=` coupling groups only within a unit stays local to that unit. A
+        # dense factor's zeros remove no read. The factor is built here because
+        # bound columns hold vectors.
+        push!(block.statements, Expr(:(=), L, Expr(:call,
+            Expr(:., :BayesianRegressionModels, QuoteNode(:sparse)),
+            Expr(:call, :reshape, factor_values, P, P))))
         innovations = _rk_block_local!(block, :correlated)
         push!(block.statements, Expr(:(=), innovations, Expr(:call, :*, L, eta)))
     end
@@ -1886,7 +1906,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             end
             if kind === :monotonic_summand
                 refactual[index] = monotonic!(index, term, nothing, :mo1, false)
-            elseif kind === :spline || kind === :hsgp
+            elseif kind === :spline || kind === :hsgp || kind === :gmrf
                 refactual[index] = term.options.id
             elseif kind === :structured
                 refactual[index] = term.options.id
@@ -1948,7 +1968,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             end
             (kind === :offset || kind === :ranef_gather ||
                 kind === :spline || kind === :hsgp ||
-                kind === :structured ||
+                kind === :structured || kind === :gmrf ||
                 kind === :gp || kind === :dar || kind === :car || kind === :cdar ||
                 kind === :monotonic_summand) && continue
             hs_spec = get(hs_priors, (predictor.name, term.addressee),
@@ -2073,6 +2093,26 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             _rk_start_term_record!(coordinates, predictor.name, term, term.options.id,
                 (; length_scale=any(p -> p.hyper === :length_scale, hyper_plans) ? nothing : rho,
                    sigma=any(p -> p.hyper === :sd, hyper_plans) ? nothing : sigma))
+        end
+        for term in predictor.terms
+            term.kind === :gmrf || continue
+            locals = _rk_ast_gmrf!(defs, stmts, taken, bindings, term)
+            if term.options.neighbors === nothing
+                _rk_coordinate_record!(coordinates, (; kind=:gmrf,
+                    declaration=term.options.id, predictor=predictor.name,
+                    axes=term.options.source, state_axes=term.options.state_axes,
+                    mesh_inputs=(; term.options.vertices, term.options.cells),
+                    correlation=term.options.correlation, locals))
+            else
+                _rk_coordinate_record!(coordinates, (; kind=:gmrf_footprint,
+                    declaration=term.options.id, predictor=predictor.name,
+                    axes=term.options.source, state_axes=term.options.state_axes,
+                    neighbors=term.options.neighbors,
+                    correlation=term.options.correlation, locals))
+            end
+            _rk_start_term_record!(coordinates, predictor.name, term, term.options.id,
+                (; sigma=locals.sigma, spatial_length=locals.spatial_length,
+                   temporal_length=locals.temporal_length))
         end
         for term in predictor.terms
             term.kind === :gp || continue

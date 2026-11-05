@@ -566,10 +566,9 @@ end
     @test gw ≈ g atol=1e-10
 end
 
-@stestset "an omitted response keeps the whole joined block on SB" begin
+@stestset "an omitted response keeps the whole joined block on both backends" begin
     # `b`'s totals omitted: SB samples the full block (its prior on `b`'s
-    # margin is exact), with no marginal split. RK's narrowed planning of a
-    # joined block is refused until it matches (snag a-correlated-kre-f027abd1).
+    # margin is exact), with no marginal split, and RK plans the same block.
     omitted = (; (k => v for (k, v) in pairs(SR.CELLS) if k !== :tb)...)
     full = SBBRMI(SR.cells(SR.CELLS); mod=SR, total_groups=())
     sb = SBBRMI(SR.cells(omitted); mod=SR, total_groups=())
@@ -578,8 +577,10 @@ end
                 BridgeStan.param_unc_names(stan_problem(sb, "omitted").model)) ==
           count(n -> startswith(n, "b_k_kreis_z_flat."),
                 BridgeStan.param_unc_names(stan_problem(full, "omitted_full").model))
-    @test_throws "narrowed to its read predictors is not implemented on RK" RKBRMI(
-        SR.cells(omitted))
+    # RK plans the same whole block.
+    rk = RKBRMI(SR.cells(omitted))
+    @test length(coordinate_names(rk.model.layout)) == BridgeStan.param_unc_num(
+        stan_problem(sb, "omitted").model)
 end
 
 @stestset "refusals" begin

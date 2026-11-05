@@ -67,6 +67,11 @@ _sb_julia_stan_call(::typeof(ones), args) = _sb_julia_stan_call(fill, Any[1.0; a
 # Stan concatenates two values at a time.
 _sb_julia_stan_call(::typeof(vcat), args) = length(args) < 2 ? nothing :
     foldl((a, b) -> Expr(:call, :append_row, a, b), args)
+# The square matrix with a vector on its diagonal.
+_sb_julia_stan_call(::Type{Diagonal}, args) =
+    length(args) == 1 ? Expr(:call, :diag_matrix, args...) : nothing
+_sb_julia_stan_call(::typeof(diagm), args) =
+    length(args) == 1 ? Expr(:call, :diag_matrix, args...) : nothing
 
 _sb_cell_combinator(head) =
     head in (:censored, :truncated, :interval_censored, :weighted)
@@ -133,12 +138,48 @@ function _sb_cell_family(x, scope)
         positional = Tuple(filter(!_sb_cell_keyword_argument, args))
         keywords = foldl(_sb_cell_keywords!, filter(_sb_cell_keyword_argument, args);
             init=Pair{Symbol,Any}[])
-        return _sb_stan_distribution_call(callable, positional, NamedTuple(keywords))
+        return _sb_cell_distribution_call(callable, positional, NamedTuple(keywords))
     elseif head isa Symbol && _sb_cell_combinator(head)
         family = findfirst(!_sb_cell_keyword_argument, x.args[2:end])
         family === nothing || (args[family] = _sb_cell_family(x.args[1 + family], scope))
     end
     Expr(:call, head, args...)
+end
+
+# A Distributions constructor in a cell observation: the top-level table, except
+# for laws that only a cell observes.
+_sb_cell_distribution_call(callable, positional, keywords) =
+    _sb_stan_distribution_call(callable, positional, keywords)
+# `y[rows[i]] ~ MvNormal(location, covariance)` is one joint density of the
+# cell's slice. Julia gives an empty slice log density 0, which Stan's
+# `multi_normal` refuses, so the cell observes `brm_mvnormal` instead.
+function _sb_cell_distribution_call(::Type{<:MvNormal}, positional, keywords)
+    isempty(keywords) || error(
+        "sbimpl: an in-cell `MvNormal` observation takes no keywords, got ",
+        "$(collect(keys(keywords)))")
+    length(positional) == 2 || error(
+        "sbimpl: an in-cell observation `y[rows[i]] ~ MvNormal(location, covariance)` ",
+        "takes a location vector and a covariance matrix; got $(length(positional)) arguments")
+    Expr(:call, brm_mvnormal, positional...)
+end
+
+StanBlocks.@deffun begin
+    brm_mvnormal_rng(vector[n], location::vector[n], covariance::matrix[n, n])::vector[n] = begin
+        result::vector[n]
+        if n > 0
+            result = multi_normal_rng(location, covariance)
+        end
+        return result
+    end
+    brm_mvnormal_lpdfs(value::vector[n], location::vector[n], covariance::matrix[n, n])::real = begin
+        result::real = 0.0
+        if n > 0
+            result = multi_normal_lpdf(value, location, covariance)
+        end
+        return result
+    end
+    @lhs @lpxf brm_mvnormal_lpdf(value::vector[n], location::vector[n], covariance::matrix[n, n])::real =
+        brm_mvnormal_lpdfs(value, location, covariance)
 end
 
 # An unbound family token (`normal`) names the StanBlocks family of that name.
@@ -150,6 +191,8 @@ end
 
 _sb_cell_statement(x, scope) = _sb_cell_value(x, scope)
 function _sb_cell_statement(x::Expr, scope)
+    Meta.isexpr(x, :local, 1) &&
+        return Expr(:local, _sb_cell_statement(only(x.args), scope))
     # A cell's `@scan` block and its step loop hold statements of their own.
     _is_brm_scan(x) &&
         return Expr(:macrocall, x.args[1:end-1]..., _sb_cell_block(x.args[end], scope))
