@@ -211,7 +211,11 @@ end # module SmokeModel
 
         formula = drive("/mount/formula"; headers=htmx_headers)
         @test formula.status == 200
-        @test occursin("y ~", String(formula.body))
+        formula_body = String(formula.body)
+        @test occursin("y ~", formula_body)
+        @test occursin("Model quantities", formula_body)
+        @test occursin("Data · response", formula_body)
+        @test occursin("Carrier details", formula_body)
     finally
         terminate()
     end

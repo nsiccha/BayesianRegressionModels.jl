@@ -37,7 +37,7 @@
 #   `../validate_descriptor_mount.jl` for the serving pattern.
 module DescriptorMount
 
-using BayesianRegressionModels: BRMDescriptor, BRMOperation, brm_operation, brm_execute
+using BayesianRegressionModels: BRMDescriptor, BRMOperation, brm_operation, brm_execute, brm_model_view
 using DynamicObjects
 using HTMXObjects
 import HTMXObjects: h, Raw
@@ -172,11 +172,7 @@ mount_problem_summary(title::AbstractString, id::AbstractString, dim::Integer,
 _dash(::Nothing) = "—"
 _dash(x) = string(x)
 
-mount_formula_node(d::BRMDescriptor) = SemanticSection(
-    "Formula",
-    SemanticFields(; model=string(d.name), descriptor_id=d.id),
-    SemanticCode(:julia, d.formula),
-)
+mount_formula_node(d::BRMDescriptor) = brm_model_view(d; title=string(d.name))
 
 _schema_rows(d::BRMDescriptor) = [(
     column=string(c),

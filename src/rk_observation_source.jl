@@ -33,8 +33,9 @@ from `entry` and called by that name
 defined with `ReactiveKernels.@kernel` in the consumer's module, where its
 names resolve, and bound as a child graph the entry calls.
 
-BRM calls the provider once per observation statement, each time with a fresh
-`entry`, and always through the second form: `N` is the number of constructor
+BRM calls the provider once per observation statement or native mixture
+component, each time with a fresh `entry`, and always through the second form:
+`N` is the number of constructor
 arguments that observation writes (`y ~ family(args...)` has `N =
 length(args)`; the response and an in-cell `weighted` weight are not counted).
 Its default forwards to the first form, so a family observed with one argument
@@ -45,7 +46,9 @@ its own law. The entry must take exactly `N + 1` ports; a mismatch is an error.
 The emitted observation `y .~ LogDensity.(entry, args...)`, or the whole-event
 `y ~ LogDensity(entry, args...)`, composes this graph inside RKPPL's observation
 plate. It adds no sampled coordinates and keeps the
-original observed response. Ordinary constructors and deterministic callable-source providers
+original observed response. A native mixture retains `MixtureModel` around its
+component `LogDensity` calls, so RKPPL owns the mixture graph composition.
+Ordinary constructors and deterministic callable-source providers
 remain available; neither certifies expansion of a density callback's body.
 Extend with `import BayesianRegressionModels: _rk_observation_source!`.
 """
@@ -60,9 +63,8 @@ function _rk_kernel_entry_ports(definition)
     first(body.args).args[2:end]
 end
 
-function _rk_emit_observation_source!(defs, statements, bindings, taken,
-        observation, distribution, response)
-    entry = _rk_ast_fresh_name(string(observation.name, "_scalar_logdensity"), taken)
+function _rk_emit_density_source!(defs, bindings, taken, name, distribution)
+    entry = _rk_ast_fresh_name(string(name, "_scalar_logdensity"), taken)
     supplied_defs = Expr[]
     supplied_bindings = Pair{Symbol,Any}[]
     arity = length(distribution.args)
@@ -79,14 +81,12 @@ function _rk_emit_observation_source!(defs, statements, bindings, taken,
                  _rk_callable_source!(Expr[], Pair{Symbol,Any}[], nameof(callable),
                                       callable) === nothing)
             family = callable isa StanBlocks.ValueFamily ? callable.label : nameof(callable)
-            error("RK source: `$(observation.name) ~ $family(...)` needs a scalar " *
+            error("RK source: `$name ~ $family(...)` needs a scalar " *
                 "`_rk_observation_source!` provider on the RK backend; " *
                 "this Stan-only family has no scalar Julia constructor")
         end
-        return false
+        return nothing
     end
-    observation.modifier === nothing || error(
-        "RK source: observation graph provider must include the exact response modifier")
     sources = _rk_source_definition.(supplied_defs)
     position = findfirst(source -> source.name === entry && source.kind === :kernel, sources)
     position === nothing && error(
@@ -94,7 +94,7 @@ function _rk_emit_observation_source!(defs, statements, bindings, taken,
     ports = length(_rk_kernel_entry_ports(supplied_defs[position]))
     family = nameof(distribution.callable)
     ports == arity + 1 || error(
-        "RK source: `$(observation.name) ~ $family(...)` writes $arity constructor " *
+        "RK source: `$name ~ $family(...)` writes $arity constructor " *
         "arguments, but its observation provider's entry `$entry` takes $ports ports " *
         "instead of the value plus $arity; define `_rk_observation_source!(definitions, " *
         "bindings, entry, ::typeof($family), ::Val{$arity})` for this argument count")
@@ -104,6 +104,15 @@ function _rk_emit_observation_source!(defs, statements, bindings, taken,
     append!(defs, supplied_defs)
     append!(bindings, supplied_bindings)
     union!(taken, (source.name for source in sources), first.(supplied_bindings))
+    entry
+end
+
+function _rk_emit_observation_source!(defs, statements, bindings, taken,
+        observation, distribution, response)
+    entry = _rk_emit_density_source!(defs, bindings, taken, observation.name, distribution)
+    entry === nothing && return false
+    observation.modifier === nothing || error(
+        "RK source: observation graph provider must include the exact response modifier")
 
     # The provider replaces the density implementation, not its event shape.
     # Use the same constructor trait as the ordinary observation route: a
