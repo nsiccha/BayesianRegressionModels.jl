@@ -1104,6 +1104,8 @@ _rk_value_expr!(bindings, values::Tuple, taken) =
 function _rk_value_expr!(bindings, expression::_BRMPreparedExpr, taken)
     args = map(arg -> _rk_value_expr!(bindings, arg, taken), expression.args)
     expression.callable === getindex && return Expr(:ref, args...)
+    # A component's returned field is a local of its call (`kin.label`).
+    expression.callable === _brm_component_field && return Expr(:., args...)
     if expression.callable === Base.vect
         # A formula vector containing row values is constructed once per row.
         # Keeping this in the ordinary expression emitter also covers named

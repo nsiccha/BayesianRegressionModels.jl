@@ -1268,6 +1268,14 @@ function _brm_plate_input_key(x)
        all(arg -> arg isa Symbol, args.positional)
         return (:ragged, args.positional..., args.into, args.order)
     end
+    # A property read, such as a component's returned field `kin.recovery`,
+    # is a model value: name it at model scope and slice that name.
+    if Meta.isexpr(x, :., 2) && x.args[2] isa QuoteNode
+        shown = sprint(Base.show_unquoted, x)
+        local_name = x.args[2].value
+        error("@brm: a kernel `@plate` slices names (`x[i]`); bind `$shown` at model " *
+            "scope, `$local_name = $shown`, and read `$local_name[i]` in the cell")
+    end
     error(
         "@brm: a kernel `@plate` slices formula and data names (`x[i]`), and reads a " *
         "vector indexed like another grouping vector through a model-scope binding, " *

@@ -2261,12 +2261,25 @@ end
 # `_brm_submodels` assigns outputs to entries by.
 function _brm_submodel_carriers(d::BRMDescriptor, s::BRMSubmodel, name::Symbol)
     bound = _brm_submodel_bound_names(s)
+    # A BRM component's returned field (`return (; hi = expr)`) is carried by
+    # its local result; an authored local of the same name is the same value.
+    isnothing(bound) || name in bound || (name = _brm_submodel_returned_local(d, s, name))
     isnothing(bound) || name in bound || return BRMOutput[]
     owned = Set{Symbol}(o.name for o in s.outputs)
     resolved = Symbol(join((_brm_submodel_address(s)..., name), "_"))
     found = _brm_binding_carriers(d.stan, Set{Symbol}(o.name for o in d.stan.outputs),
                                   Set{Symbol}(keys(d.stan.model)), resolved, owned)
     BRMOutput[o for o in s.outputs if o.name in found]
+end
+
+function _brm_submodel_returned_local(d::BRMDescriptor, s::BRMSubmodel, name::Symbol)
+    address = (s.path..., s.target)
+    for call in brm_components(d.plan.parent)
+        call.path == address || continue
+        fields = _brm_component_fields(call.definition)
+        fields !== nothing && haskey(fields, name) && return fields[name]
+    end
+    name
 end
 
 _brm_symbols(name::Symbol) = (name,)

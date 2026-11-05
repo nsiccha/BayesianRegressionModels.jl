@@ -3179,6 +3179,14 @@ function _rk_model_offset_expr(node, target::Symbol, data::AbstractDict,
         columns[source] = raw
         return source
     end
+    # One returned field of a component call, `kin.decay`: a native read of the
+    # call's local result (`_rk_component_return`).
+    if node isa ExprColumn{typeof(getproperty)}
+        read = _brm_component_field_read(node)
+        read === nothing || return Expr(:.,
+            _rk_model_offset_expr(first(getargs(node)), target, data, columns),
+            QuoteNode(read.result))
+    end
     node isa ExprColumn && isempty(getkwargs(node)) || error(
         "$prefix: predictor `$target` `offset()` argument " *
         "`$(repr(node))` is not elementwise arithmetic over data and model values")
