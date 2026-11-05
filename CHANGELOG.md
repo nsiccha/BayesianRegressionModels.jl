@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.177
+## 0.2.179
 
 - Added: SVI units own ordinary sampled coordinates read only within that
   unit, with their authored priors, Jacobians and global hyperparameter
@@ -25,6 +25,8 @@ instead of failing at run time.
 - Compatibility: authored SVI queries use the batched preparation API from
   ReactiveKernels 0.1.84 / ReactiveKernelsPPL 0.1.96, sharing binding validation
   and packed exemplars while retaining one derivative workspace per bucket.
+
+## 0.2.178
 
 - Added: explicit `unit_partition=:connected` for the NLME view and model,
   NLME fits, SVI, per-unit Laplace and joint starts. Structural likelihood
@@ -75,6 +77,13 @@ instead of failing at run time.
   custom packed vectors. Unit gradients use ordinary Enzyme Reverse, with the
   test bootstrap's Enzyme dogfood pin, which contains `68ed90fe`'s repair for
   matrix-window partition gradients on Julia 1.10.
+
+## 0.2.177
+
+- Require ReactiveKernels 0.1.82 to restore buffer reuse when batched readers
+  evaluate vector-valued plate cells. Emitted and printed RK models retain
+  live broadcast fusion after binding data, avoiding a temporary vector per
+  cell and position.
 
 ## 0.2.176
 

@@ -312,6 +312,9 @@ const PINS = [
     # c1f175d7 (RK 0.1.84 / PPL 0.1.96): compact authored-query batches
     # share binding validation and exemplars; event inventory avoids full copies.
     # a9a7e9a2 (RKPPL 0.1.97): bound-data LKJ dimensions in reusable definitions.
+    # Also contains RK 0.1.82 (b08cb894), which retains live broadcast fusion
+    # after data binding, so batched vector-cell readers reuse their result
+    # buffers at every position.
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "a9a7e9a2182ef2057c004a3c81dd74eef4f3a699"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
