@@ -23,6 +23,8 @@ instead of failing at run time.
   remain exact; the global/local split changes the variational approximation.
 - Streaming format 3 retains final inference-unit membership, separator controls
   and promoted global identities alongside dense or structured local factors.
+  Later windows retain the saved global set without spending another automatic
+  promotion allowance; an unmet structural budget is reported as `:carried`.
   Changed retained membership or global scientific identity is refused.
 
 - `brm_svi_fit` accepts `unit_sampling=:work` for positive work-weighted

@@ -37,7 +37,7 @@ function separator_simplex_model(data)
     end
 end
 
-@testset "explicit promotion closes a coupled prior and its transform" begin
+@stestset "explicit promotion closes a coupled prior and its transform" begin
     # Isolate prior/transform closure in one scientific subject. Hub and
     # chain fixtures below independently check the multi-subject regrouping.
     data = (; subject=fill("subject 1", 4), y=[-0.2, 0.1, 0.3, 0.5], extra=0.4)
@@ -55,7 +55,7 @@ end
     check_separator_density(promoted)
 end
 
-@testset "automatic hub separators rebuild exact inference partitions" begin
+@stestset "automatic hub separators rebuild exact inference partitions" begin
     n = 9
     data = connected_data(n, fill(1, n-1), collect(2:n))
     m = brm_nlme_model(RKBRMI(connected_model(data)); ad_backend=NLME_AD,
@@ -103,7 +103,8 @@ end
     @test length(audit.checks) == 2
     @test audit.units == t.units
     @test length(audit.factor_inventory) == length(t.ownership.factors.events)
-    @test length(audit.likelihood_inventory) == sum(length, values(t.ownership.attribution))
+    @test length(audit.likelihood_inventory) ==
+        sum(pair -> length(last(pair)), t.ownership.attribution)
     io = IOBuffer()
     Serialization.serialize(io, audit)
     seekstart(io)
@@ -136,7 +137,7 @@ end
     @test fit.diagnostics.streaming.updates == 1
 end
 
-@testset "chain separators retain the native target" begin
+@stestset "chain separators retain the native target" begin
     n = 17
     m = brm_nlme_model(RKBRMI(connected_model(connected_data(n,
         collect(1:n-1), collect(2:n)))); ad_backend=NLME_AD, unit_partition=:connected)
