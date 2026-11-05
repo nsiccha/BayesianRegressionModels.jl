@@ -12,6 +12,34 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.179
+
+- `brm_model_view(model)` with HTMXObjects shows data/parameter roles and value
+  ranks from the supplied declaration or prepared model. Unknown dimensions
+  stay explicit; descriptor carriers retain their own constrained shapes and
+  logical identities. Callable documentation and carrier details are accessible
+  by click and keyboard. The view performs no fit or implicit backend preparation.
+  The macro app and descriptor mount share this reusable view.
+- Source, roles/ranks and callable documentation use eager tabs, retaining all
+  content in Markdown/PDF and static HTML exports. Plate response labels reuse
+  the compiler's cell observation metadata. Export acceptance exercises the
+  standard HTMXObjects PDF and bundled-site exporters.
+- Authored declaration docstrings use the shared `brm_documentation` records
+  in the view, with formatted prose, exact paths and source provenance.
+- Source tabs automatically include reachable BRM component definitions from
+  `brm_components`, once per shared definition, with all call-instance paths.
+  Complete PDF and static HTML exports include every nested definition.
+- Component source and declaration details use the shared Julia source printer,
+  preserving readable docstrings without exposing internal doc wrappers.
+- The macro app's expression cards read `NamedColumn` parent values for their
+  data/parameter styling, matching the current column representation.
+- Prepared RK views use ReactiveKernelsPPL 0.1.89's read-only parameter metadata:
+  constrained shapes, ragged element shapes and free-coordinate counts remain
+  separate. Replays retain the build's binding provenance and show current
+  parameter dimensions as unresolved when they share an earlier layout.
+- Refresh the macro app's HTMXObjects dependency closure to 0.1.58 and its
+  StanBlocks/WarmupHMC pins to versions compatible with the current BRM package.
+
 ## 0.2.178
 
 - Added: explicit `unit_partition=:connected` for the NLME view and model,
