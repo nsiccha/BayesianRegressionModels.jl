@@ -3,9 +3,9 @@
 This page ports the semi-mechanistic renewal model behind
 [EpiSewer](https://github.com/adrian-lison/EpiSewer) and the CDC
 [`ww-inference-model`](https://github.com/CDCgov/ww-inference-model) onto the
-`@brm` formula surface, and renders it in the standard four-pane view: the exact
-BRM authoring source, the StanBlocks model it emits, the generated Stan, and the
-selected Turing model. The build reads the declaration directly from the
+`@brm` formula surface, and renders it in the standard comparison view: the exact
+BRM authoring source, its IR, the StanBlocks model it emits, and the generated
+Stan. The build reads the declaration directly from the
 checked-in reproduction script, so the displayed BRM source cannot drift from
 the executable source.
 
@@ -69,10 +69,6 @@ Main.BRMDocsComparisons.comparison(
     require_stan=true,
 )
 ```
-
-The Turing pane is intentionally retained even though this structural kernel is
-outside the current Turing executor; its build-time construction error is part of
-the comparison rather than being hidden.
 
 ## Provenance and scope
 

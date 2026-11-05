@@ -8,9 +8,9 @@ StanCon 2018 Warfarin program:
 - a [joint PK/PD model](#joint-pkpd-one-posterior), where both likelihoods
   contribute to one posterior over shared latent PK effects.
 
-Every displayed declaration uses the standard four-pane documentation view:
-the exact BRM authoring source, the StanBlocks model it emits, generated Stan,
-and the selected Turing model. The docs build reads the declarations directly
+Every displayed declaration uses the standard documentation comparison view:
+the exact BRM authoring source, its IR, the StanBlocks model it emits, and
+generated Stan. The docs build reads the declarations directly
 from the checked-in reproduction scripts, so the displayed BRM source cannot
 drift from the executable source. Unsupported backends remain visible and show
 their current construction error.
@@ -156,10 +156,6 @@ Main.BRMDocsComparisons.comparison(
     require_stan=true,
 )
 ```
-
-The Turing pane is intentionally retained even though this structural kernel
-is outside the current Turing executor. Its build-time construction error is
-part of the comparison rather than being hidden.
 
 ## Provenance boundary
 

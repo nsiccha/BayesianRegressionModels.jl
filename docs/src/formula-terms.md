@@ -55,36 +55,35 @@ priors.
 
 ## Catalogue
 
-Every term below lowers on the StanBlocks backend (`SBBRMI`); the
-`VBRMI` column marks the ones the pure-Julia backend also implements. The pages
+Every term below lowers on the StanBlocks backend (`SBBRMI`). The pages
 that follow document the terms whose behaviour is not obvious from the
 signature — the rest are covered by their docstrings on the [API](@ref) page.
 
 ### Predictor terms
 
-| Term | What it contributes | `VBRMI` |
-| --- | --- | --- |
-| `offset(x)` | `x` added with coefficient one — no `beta_pop` column | ✓ |
-| `s(x)` | rank-10 penalized thin-plate regression spline | — |
-| `t2(x, z)` | two-margin tensor-product smooth | — |
-| `gp(x…; cov=:exp_quad, iso=true, jitter=1e-9)` | exact latent Gaussian process, noncentered Cholesky draw | — |
-| `gp(x; cov=:periodic, period, jitter=1e-9)` | exact latent GP under Stan's periodic kernel, one axis | — |
-| `hsgp(x…; k=20, c=1.5, iso=true, by=nothing, domain=nothing, orthogonal_to=nothing, centeredness=0)` | Hilbert-space GP approximation over `prod(k)` basis functions; optional fixed partial centering | — |
-| `hsgp(x…; by=g, cor=Omega)` | grouped HSGP whose group weights are correlated across the levels of `g` by `Omega` ("Correlated levels of a grouping factor" below) | — |
-| `hsgp(x; k=20, cov=:periodic, period)` | periodic Hilbert-space basis: `k` harmonics, `2k` cosine/sine functions | — |
-| `ar(time; p=1)` | AR(p) noise process ordered by `time`; only `p=1` is emitted | — |
-| `dar(time; p=1)` | direct differenced-AR(1) trajectory with bounded persistence and scaled innovations | — |
-| `rw(time)` | direct random-walk trajectory: `dar` with the persistence fixed at zero | — |
-| `cdar(step; by=group, cor=C)` | per-group deviations following a damped walk over `step` with innovations correlated across groups by `C` | — |
-| `car(area; edges=(from, to), type=:icar \| :bym2)` | areal spatial effect over an adjacency graph: an intrinsic CAR field, alone or in the BYM2 convolution | — |
-| `gmrf((east, north), time[, channel]; mesh, cor=Omega)` | triangular-mesh Matérn field with stationary OU time evolution and optional channel correlation — see [Space-time fields](space-time-fields.md) | — |
-| `mo(c)`, `mo1(c)` | monotonic effect of an ordered factor via Dirichlet increments | — |
-| `me(x, sd)` | measurement-error covariate — `x` is observed with known `sd` | — |
-| `interval_censored(x; upper=lloq, lower=0)` | quantified/BLOQ covariate with bounded latent values on BLOQ rows | — |
-| `factor(c)`, a bare integer / `CategoricalArray` column | K−1 treatment contrasts under an intercept; K cell means as the first categorical term of a predictor without one ("Cell means" on the [overview page](index.md)) | ✓ |
-| `factor(c; ref=k)` | reference level `k` for the term's treatment contrasts | ✓ |
-| `factor(c; cmc=false)` | keep K−1 treatment contrasts even in a predictor without an intercept (brms' `cmc`, "cell-mean coding") | ✓ |
-| `protect(x)` | materialize a raw data expression as one literal column | ✓ |
+| Term | What it contributes |
+| --- | --- |
+| `offset(x)` | `x` added with coefficient one — no `beta_pop` column |
+| `s(x)` | rank-10 penalized thin-plate regression spline |
+| `t2(x, z)` | two-margin tensor-product smooth |
+| `gp(x…; cov=:exp_quad, iso=true, jitter=1e-9)` | exact latent Gaussian process, noncentered Cholesky draw |
+| `gp(x; cov=:periodic, period, jitter=1e-9)` | exact latent GP under Stan's periodic kernel, one axis |
+| `hsgp(x…; k=20, c=1.5, iso=true, by=nothing, domain=nothing, orthogonal_to=nothing, centeredness=0)` | Hilbert-space GP approximation over `prod(k)` basis functions; optional fixed partial centering |
+| `hsgp(x…; by=g, cor=Omega)` | grouped HSGP whose group weights are correlated across the levels of `g` by `Omega` ("Correlated levels of a grouping factor" below) |
+| `hsgp(x; k=20, cov=:periodic, period)` | periodic Hilbert-space basis: `k` harmonics, `2k` cosine/sine functions |
+| `ar(time; p=1)` | AR(p) noise process ordered by `time`; only `p=1` is emitted |
+| `dar(time; p=1)` | direct differenced-AR(1) trajectory with bounded persistence and scaled innovations |
+| `rw(time)` | direct random-walk trajectory: `dar` with the persistence fixed at zero |
+| `cdar(step; by=group, cor=C)` | per-group deviations following a damped walk over `step` with innovations correlated across groups by `C` |
+| `car(area; edges=(from, to), type=:icar \| :bym2)` | areal spatial effect over an adjacency graph: an intrinsic CAR field, alone or in the BYM2 convolution |
+| `gmrf((east, north), time[, channel]; mesh, cor=Omega)` | triangular-mesh Matérn field with stationary OU time evolution and optional channel correlation — see [Space-time fields](space-time-fields.md) |
+| `mo(c)`, `mo1(c)` | monotonic effect of an ordered factor via Dirichlet increments |
+| `me(x, sd)` | measurement-error covariate — `x` is observed with known `sd` |
+| `interval_censored(x; upper=lloq, lower=0)` | quantified/BLOQ covariate with bounded latent values on BLOQ rows |
+| `factor(c)`, a bare integer / `CategoricalArray` column | K−1 treatment contrasts under an intercept; K cell means as the first categorical term of a predictor without one ("Cell means" on the [overview page](index.md)) |
+| `factor(c; ref=k)` | reference level `k` for the term's treatment contrasts |
+| `factor(c; cmc=false)` | keep K−1 treatment contrasts even in a predictor without an intercept (brms' `cmc`, "cell-mean coding") |
+| `protect(x)` | materialize a raw data expression as one literal column |
 
 A plain RHS expression in raw data columns (`log(exposure)`, `x^2`) is treated
 as an implicit `protect(...)` and materialized the same way.
@@ -353,9 +352,9 @@ w = s^(1-c) u = s z
 ```
 
 Thus `c=0` is the default noncentered coordinate and `c=1` is centered;
-intermediate values partially center that frequency. Both StanBlocks and
-Turing use the same log-spectral-scale calculation and endpoint-safe `c=0`
-path, so a numerically vanished high-frequency scale cannot turn `0 * -Inf`
+intermediate values partially center that frequency. StanBlocks computes the
+spectral scale in log space and uses an endpoint-safe `c=0` path, so a
+numerically vanished high-frequency scale cannot turn `0 * -Inf`
 into `NaN`.
 
 [`select_hsgp_centeredness`](@ref) applies the pilot rule used in the
@@ -551,7 +550,7 @@ correlation between the 17 regions.
 - Terms naming the same `Omega` share it. An ID-less `gr(g; cor=…)` block
   lowers under its generated `|lp__g|` ID, and `sd(:, g)` addresses reach it.
 
-`SBBRMI` and `RKBRMI` implement it with equal densities; `VBRMI` refuses it.
+`SBBRMI` and `RKBRMI` implement it with equal densities.
 `brm_ranef_draws` reports each level-correlated block's `level_cor`. Not yet
 implemented, each refused by name: `cv_groups`, `centered_groups` and
 `resample_groups` on the grouping, Student-t and R2D2 blocks, `gr(g; by=b,
@@ -950,7 +949,7 @@ The recipe, for a term used in nested predictor position
    `_brm_prepare_term` delegates to `_brm_prepare_structured_term` and bakes
    the axis values the native effect needs into state; `_brm_replay_term`
    refreshes indices and axis values against the fitted levels.
-5. Assemble per-row values natively for Turing in
+5. Assemble per-row values natively in
    `_brm_native_structured_effect` — pure Julia math over the block row.
 6. Emit the Stan contribution in `_sb_predictor_term!`, reusing StanBlocks
    builtins (e.g. `biomarker_time_response`) and threading the preallocated
@@ -1035,9 +1034,8 @@ end
 end
 ```
 
-7. Fit through `SBBRMI(brmi; mod=DownstreamTerms)` or `TuringBRMI(brmi)`.
-   The Stan path lowers to stanc-clean code; the Turing path draws the same
-   non-centered LKJ block natively and assembles bit-exact effects —
+7. Fit through `SBBRMI(brmi; mod=DownstreamTerms)`. The Stan path lowers to
+   stanc-clean code, and the native effect's row math is bit-exact —
    `test/downstream_group_block_term.jl` verifies both against independent
    Julia math.
 
@@ -1100,7 +1098,6 @@ brmi = (@brm df begin
     y ~ Normal(mu, sigma)
 end)
 sb = SBBRMI(brmi; mod=DownstreamTerms)
-tb = TuringBRMI(brmi)
 ```
 
 Each shape owns its own per-group hierarchy (two LKJ blocks here):
@@ -1113,9 +1110,9 @@ prior statements (`sd(mu, transient(logt))`) are not addressed yet: the
 hierarchical scales keep their shared defaults, and naming a new term in a
 prior address needs core registration alongside `_TERM_HEADS`.
 
-Verified contract (`test/downstream_group_block_term.jl` pins all of it on
-both backends): stanc-clean Stan lowering, Turing effects bit-exact versus
-independent Julia math with finite joint densities, `brm_descriptor`, and
+Verified contract (`test/downstream_group_block_term.jl` pins all of it):
+stanc-clean Stan lowering, native row math bit-exact versus independent Julia
+math, `brm_descriptor`, and
 `reprocess` / `restan_data` on fitted group levels. Replaying a group level
 the fit never saw stays refused by the shared ranef floor — the fitted model
 has no coordinate for it, on any backend, for core grouped terms alike.
@@ -1232,9 +1229,7 @@ directly without an extra population coefficient.
 
 `reprocess(sb, new_df)` evaluates all four blocks against the frozen training
 knots, penalty decomposition, and intercept constraint. Passing
-`freeze_constants=false` re-estimates them from `new_df`. Like [`s`](@ref),
-`t2` is implemented by both the StanBlocks and Turing backends; it remains
-unavailable to `VBRMI`.
+`freeze_constants=false` re-estimates them from `new_df`.
 
 ## Term-internal priors
 
@@ -1494,8 +1489,7 @@ overriding bounds (`Uniform(0.84, 2)`) or accept the error knowingly.
 predictor's population block with a *joint* prior induced by a prior on that
 predictor's coefficient of determination. It is a separate statement in the
 formula block — addressed with [`effect`](@ref), never with a per-column
-`effect(lp, coef) ~ Normal(...)` — and is implemented by both the `SBBRMI`
-and `TuringBRMI` backends.
+`effect(lp, coef) ~ Normal(...)`.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
@@ -1824,16 +1818,14 @@ genuinely shared global scale requires a vector/group horseshoe declaration,
 which this marker does not imply. The standardized `raw` draw is intentionally
 not configurable because its scale would duplicate `lambda`/`tau`.
 
-Like other sbimpl prior surfaces, this is implemented by `SBBRMI`; do not
-assume `VBRMI` has the same marker-specific lowering.
+Like other sbimpl prior surfaces, this is implemented by `SBBRMI`.
 
 ## Simplex-valued parameter: `s ~ Dirichlet(...)`
 
 A non-data left-hand side with a `Dirichlet` right-hand side declares a
 **simplex-valued parameter** — Stan's `simplex[K]` — rather than a linear
 predictor. Like every other scalar-parameter prior declaration it is addressable
-by name anywhere later in the formula block, `kernel(...)` cells included. It is
-implemented by both `SBBRMI` and `TuringBRMI`.
+by name anywhere later in the formula block, `kernel(...)` cells included.
 
 The [multi-axis population PK kernel](@ref) shows the executable base shape:
 ordinary formula parameters feed a `@plate for` cell, which reads each
@@ -1899,8 +1891,6 @@ something else. Use `Dirichlet` when you want the simplex itself.
   `alpha` a sampled parameter is not supported.
 - `Dirichlet(K)` — no concentration — is not a `Distributions.jl` constructor
   and is rejected; write `Dirichlet(K, 1.0)` for the flat case.
-- Not available to `VBRMI`. [`s`](@ref), [`t2`](@ref), [`r2d2`](@ref), and
-  this simplex surface are supported by both `SBBRMI` and `TuringBRMI`.
 
 ## Vector-valued parameter: `x ~ MvNormal(...)`
 
@@ -1909,8 +1899,7 @@ A non-data left-hand side with an `MvNormal` right-hand side declares a
 predictor. It is addressable by name anywhere later in the formula block: as an
 argument of a `@deffun` in a top-level assignment, inside a custom family call,
 or in a `kernel(...)` cell. `SBBRMI` emits Stan's vector-parameter form
-(decision `187g4va`), while `TuringBRMI` lowers the retained generic callable
-directly.
+(decision `187g4va`).
 
 The inciting shape is a latent path whose innovations the formula wants to
 state directly — the log-reproduction-number random walk of a renewal model
@@ -1996,10 +1985,6 @@ statement is rejected with a message saying so.
 - `RKBRMI` builds the same statement with the same density: a covariance
   matrix as one `rho[1:n] ~ MvNormal(mean, Σ)` draw, every other scale as
   independent normals `rho[1:n] .~ Normal.(mean, σ)`.
-- Not available to `VBRMI`. `TuringBRMI` retains the generic callable, so the
-  same statement lowers there through its own path; [`Dirichlet`](@ref),
-  [`s`](@ref), and [`r2d2`](@ref) are likewise supported by both executable
-  backends.
 
 ## Declared vector parameter: `x[1:n] .~ Family.(...)`
 
@@ -2103,5 +2088,4 @@ and the call site passes what the body captured:
 
 The callee may live in another module — a package that ships `@deffun`
 operators — as long as the calling module imports it and is passed as `mod=`.
-This is a StanBlocks feature: `TuringBRMI` refuses the assignment by name, as
-it does for every Stan-only callee.
+This is a StanBlocks feature.

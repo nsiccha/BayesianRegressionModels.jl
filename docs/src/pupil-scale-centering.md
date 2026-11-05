@@ -58,7 +58,7 @@ brms S2Z uses orthonormal contrast coordinates and integrates out population mea
 
 ## BRM model and sampling interface
 
-The authoring pane below reads the exact declarations used by the sampling harness. The backend panes are regenerated during the docs build. The measurements use the StanBlocks/BridgeStan backend and WHMC; the Turing pane is a generated-model comparison only.
+The authoring pane below reads the exact declarations used by the sampling harness. The backend panes are regenerated during the docs build. The measurements use the StanBlocks/BridgeStan backend and WHMC.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__,

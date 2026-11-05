@@ -8,10 +8,8 @@ using Treebars: polling_fetchindex, initialize_progress!,
                 htmx_treebar_styles, htmx_treebar_script,
                 ThreadsafeDict
 using Random
-using Chairmarks
 using DataFrames
 using Statistics: quantile, median
-using FiniteDifferences: FiniteDifferences, central_fdm
 using BridgeStan: BridgeStan
 using StanLogDensityProblems: StanProblem
 using LogDensityProblems
@@ -29,14 +27,14 @@ using AlgebraOfVega: vega_head, vega_runtime, auto_remap_node, with_plot_caption
     ECDFPlot, VLines, nonnumeric, Scatter
 import AlgebraOfGraphics as AoG
 
-# The @brm macro and VBRMI / SBBRMI implementations now live in the main
+# The @brm macro and backend implementations live in the main
 # `BayesianRegressionModels` package (moved out of web-macro in `ns/devibe`
 # so a downstream package can consume them as a submodule without the web app deps).
 using BayesianRegressionModels
 # Pull in the types / functions the web app touches by unqualified name.
 using BayesianRegressionModels: AbstractColumn, MissingColumn, DataColumn,
-    NamedColumn, ExprColumn, LikelihoodColumn, MaterializedColumn,
-    Data, MaybeData, BRMI, VBRMI, SBBRMI,
+    NamedColumn, ExprColumn, LikelihoodColumn,
+    Data, MaybeData, BRMI, SBBRMI,
     assign, doublepipe, gr, mm, gp, hsgp, offset, zscale, center, standardize, protect,
     me, s, ar, OrderedLogistic, Ordinal, Cumulative, StoppingRatio,
     LogitLink, ProbitLink, CloglogLink,
@@ -57,18 +55,15 @@ using BayesianRegressionModels: AbstractColumn, MissingColumn, DataColumn,
     NegativeBinomial2,
     BetaBinomial, BetaBinomial2, CircularVonMises,
     # Accessors used unqualified by html_expr.jl and stan_compile code.
-    name, getargs, getf, getkwargs, getbroadcast, getop,
+    name, getargs, getf, getkwargs, getop,
     # Macro / pipeline entry points called by Formula + stan_code.
-    parse!, _brm, stan_code, maybedata,
-    # Part machinery and push_parts!! (called by a confidential -ext.jl unqualified).
-    Part, push_parts!!, vbroadcasted, llikelihood!
+    parse!, _brm, stan_code, maybedata
 # Extension hooks — use `import` (not `using`) so a confidential -ext.jl can
 # ADD methods to the same function binding rather than creating a shadowing
 # local function.
-import BayesianRegressionModels: _sb_submodel_rhs!, vmeta_sampling_rhs,
-    nparams, lprior!
+import BayesianRegressionModels: _sb_submodel_rhs!
 
-# Styled HTML rendering for BRMI / VBRMI cards stays web-side (pulls in
+# HTML rendering for BRMI cards stays web-side (pulls in
 # HTMX builders).
 include("html_expr.jl")
 

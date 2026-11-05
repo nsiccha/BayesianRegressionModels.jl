@@ -5,7 +5,7 @@
 # An interaction term is addressable the way the formula spells it:
 # `effect(mu, gen & mathz)` sets one shared Normal prior over every beta_pop
 # column the term emits, in either operand order. SBBRMI resolves the address
-# against the traced `&` terms; the backend-neutral design (Turing/RK path)
+# against the traced `&` terms; the backend-neutral design (RK path)
 # carries the same key as the columns' shared block.
 using Test
 using BayesianRegressionModels

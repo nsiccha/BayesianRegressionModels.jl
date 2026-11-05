@@ -4,8 +4,8 @@ BayesianRegressionModels lowers an `@brm` declaration in two stages. The first
 stage builds a backend-neutral source graph. It records data columns, sampled
 parameters, deterministic assignments, predictors, observations, dependencies,
 and the row shape of each value. The second stage supplies backend geometry:
-StanBlocks emits SLIC declarations and data, while the Turing extension builds
-native Julia submodels and distributions.
+StanBlocks emits SLIC declarations and data, while the ReactiveKernels extension
+emits an RKPPL program evaluated and differentiated in Julia.
 
 This separation is deliberate. The source graph decides what an expression
 means and when it can be evaluated. A backend decides how the corresponding
@@ -19,15 +19,8 @@ Both backends consume one ordered semantic source program for expression
 identities, dependencies, response evidence, and resolved prior addresses.
 Shared fit/apply helpers also define fitted transforms used by both paths. Each
 backend still prepares the geometry its executor requires: StanBlocks owns SLIC
-declarations, group prepasses, and named Stan data, while Turing builds
-population, term, and group geometry for DynamicPPL sample sites.
-
-The Turing emitter passes its generated body through DynamicPPL's own model
-compiler, then stores the evaluator as a `RuntimeGeneratedFunction`. This small
-compiler dependency makes a newly constructed model callable immediately from
-compiled Julia functions. Density and gradient evaluation do not use
-`invokelatest`. The public model source remains available through
-`turing_model_source(backend)`.
+declarations, group prepasses, and named Stan data, while RK emits the
+population, term, and group geometry of its RKPPL program.
 
 ## Prepared expressions and shapes
 
@@ -36,7 +29,7 @@ Their arguments contain constants, references to data or earlier operations,
 and other prepared expressions. Dependency ordering is computed before backend
 generation, including dependencies introduced by coefficient, group, and term
 priors. This permits priors such as `Normal(sampled_hyperparameter, 1)` to be
-constructed inside the generated Turing model, where the sampled value exists.
+constructed inside the generated model, where the sampled value exists.
 
 Every reference also carries its observation, event, group, or scalar axis.
 Shape hooks normalize vector-valued observations and let arbitrary Julia
@@ -49,8 +42,7 @@ When a function constructs a distribution, declare its result shape with
 `brm_distribution_type(::typeof(my_prior)) = Normal` (or the appropriate
 distribution type). This distinguishes a sampled declaration from a predictor
 formula without evaluating a factory whose arguments may be sampled values.
-Turing retains the factory call. StanBlocks additionally needs its normal
-distribution translation hook; the shape trait does not assert that arbitrary
+StanBlocks additionally needs its normal distribution translation hook; the shape trait does not assert that arbitrary
 Julia code has a Stan implementation.
 Use `_sb_stan_distribution_call(constructor, args, kwargs)` when that translation
 needs the complete call. It receives lowered argument expressions and returns
@@ -91,13 +83,8 @@ rules for both backends, and rejects misspelled, unsupported, or ambiguous
 addresses before emission. Backends consume the resolved semantic slots instead
 of independently searching the formula.
 
-Simplex-valued term parameters preserve the configured multivariate prior. The
-Turing adapter supplies simplex constrained geometry through the ordinary
-simplex bijector while delegating density, support, and random generation to the
-original distribution. Consequently a custom continuous multivariate prior is
-not approximated as a Dirichlet merely to obtain a transform. It must have the
-declared simplex dimension and implement valid density, support, and sampling
-behavior. StanBlocks support remains conditional on having a corresponding Stan
+Simplex-valued term parameters preserve the configured multivariate prior.
+StanBlocks support remains conditional on having a corresponding Stan
 translation for that distribution call.
 
 ## Specialized terms
@@ -113,11 +100,10 @@ isotropic axis and an explicit domain; they do not currently support periodic
 bases or grouping. Term-owned priors expose stable semantic roles and are
 constructed by the generated backend program.
 
-The Turing extension implements these prepared terms as native submodels. A
-structured term declares one or more normalized fields and supplies a
-callable-specific effect method; common samplers provide correlated normal, IID
-normal, and ordinary callable field priors. This preserves the public
-StanBlocks structured-field hooks for downstream SLIC emitters.
+A structured term declares one or more normalized fields and supplies a
+callable-specific effect method (`_brm_native_structured_effect`), which RK
+calls for its rows. This preserves the public StanBlocks structured-field hooks
+for downstream SLIC emitters.
 
 ## Responses and backend boundaries
 
@@ -127,23 +113,9 @@ plans, and the repository's typed ordinal and joint-response compositions.
 Special response shapes use dispatch and prepared shape metadata. They do not
 form a family admission list.
 
-Turing emits single- and multiple-response models through one response-graph
-emitter. It schedules shared parameters, assignments, predictors, group blocks,
-and observations once in dependency order, then attaches response-specific
-likelihood, evidence, weight, missing-row, and predictive operations. This is
-why a declaration shared by two responses is sampled once rather than copied
-into two generated model bodies.
-
-The descriptor adapter exposes this semantic plan through the same
-`brm_descriptor`, `brm_output`, `brm_outputs`, and `brm_execute` APIs used for
-Stan-backed descriptors. Turing descriptors report semantic parameters, linear
-predictors, posterior-predictive values, pointwise log likelihoods, and replay
-operations. Their `stan` field is `nothing`, and Stan source highlights are not
-available because no Stan program exists.
-
 SLIC bodies remain StanBlocks programs. The native backend does not interpret
 arbitrary SLIC syntax as Julia. A term that only defines a StanBlocks emission
 hook therefore continues to work with `SBBRMI` and produces an explicit
-"no native Julia implementation" diagnostic with `TuringBRMI`. To support both
-backends, keep the SLIC emitter and add a native effect or submodel method for
-the same shared prepared record.
+"no native Julia implementation" diagnostic with `RKBRMI`. To support both
+backends, keep the SLIC emitter and add a native effect method for the same
+shared prepared record.

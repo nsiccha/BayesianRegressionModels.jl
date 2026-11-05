@@ -25,15 +25,7 @@ source = read(joinpath(repo, "docs", "src", "feature-atlas.md"), String)
         sb, stan = BRMDocsComparisons.stan_emissions(model, example_mod; required=true)
         @test !isempty(sb)
         @test occursin("model", stan)
-        turing = BRMDocsComparisons.turing_emission(model)
-        if name == "gaussian"
-            @test !occursin("unsupported for this BRM example", turing)
-            println("verified example=gaussian StanBlocks+Stan+Turing emission")
-        else
-            @test occursin("Turing unsupported for this BRM example", turing)
-            @test occursin("response decorators other than `mi(response)` and response links are not yet supported", turing)
-            println("verified example=population_pk @plate for cell; StanBlocks+Stan emission; expected Turing ragged-response rejection")
-        end
+        println("verified example=$name StanBlocks+Stan emission")
     end
 end
 println("DECK_EXAMPLES_CHECK_COMPLETE")

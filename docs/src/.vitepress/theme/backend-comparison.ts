@@ -244,23 +244,23 @@ function materializeGeneratedComparisons(root: ParentNode) {
   sentinels.forEach((sentinel) => {
     const panes: HTMLElement[] = []
     let cursor = sentinel.nextElementSibling
-    while (cursor && panes.length < 5) {
+    while (cursor && panes.length < 4) {
       if (!(cursor instanceof HTMLElement) || !cursor.matches('div[class*="language-"]')) {
         break
       }
       panes.push(cursor)
       cursor = cursor.nextElementSibling
     }
-    if (panes.length !== 5) return
+    if (panes.length !== 4) return
 
     const title = sentinel.textContent?.trim() || 'BRM model comparison'
     const comparison = document.createElement('div')
     comparison.className = 'backend-comparison'
     comparison.dataset.backendComparison = ''
     comparison.dataset.comparisonTitle = title
-    comparison.dataset.paneIds = 'brm|ir|stanblocks|stan|turing'
+    comparison.dataset.paneIds = 'brm|ir|stanblocks|stan'
     comparison.dataset.paneLabels =
-      'BRM authoring|IR|StanBlocks model|Stan source|Turing model'
+      'BRM authoring|IR|StanBlocks model|Stan source'
     comparison.dataset.defaultOff = 'stan'
     sentinel.replaceWith(comparison)
     panes.forEach((pane) => comparison.appendChild(pane))

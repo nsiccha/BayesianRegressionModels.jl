@@ -1,4 +1,4 @@
-# Synthetic consumer integration: no Stan/Turing compilation or application data.
+# Synthetic consumer integration: no Stan compilation or application data.
 using Test, BayesianRegressionModels, Distributions, ReactiveKernels, ReactiveKernelsPPL
 using Enzyme, ADTypes, DifferentiationInterface, SequentialMonteCarlo, WarmupHMC
 using Random, Statistics, Serialization, LogDensityProblems, Treebars

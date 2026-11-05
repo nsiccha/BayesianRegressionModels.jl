@@ -15,7 +15,7 @@
 #
 # Run: julia --project=. test/conditional_effects.jl
 # (Everything here resolves in the root env: BRM + BridgeStan +
-# Distributions. No sampler, no Turing, no test-env bootstrap.)
+# Distributions. No sampler, no test-env bootstrap.)
 #
 # Exactly ONE Stan program is compiled (eleven outcomes sharing one source);
 # every error path is exercised without instantiating.

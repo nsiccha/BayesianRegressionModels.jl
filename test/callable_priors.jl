@@ -1,4 +1,4 @@
-using Test, BayesianRegressionModels, Distributions, Turing
+using Test, BayesianRegressionModels, Distributions
 using Random
 import StanBlocks
 import LogDensityProblems
@@ -194,8 +194,6 @@ end
         sum(logpdf.(Normal(params.theta, 1), data.y))
     @test StanBlocks.BridgeStan.log_density(problem.model, raw;
         propto=false, jacobian=false) ≈ expected
-    backend = TuringBRMI(builder(data))
-    @test Turing.logjoint(backend.model, params) ≈ expected
 
     draw = StanBlocks.BridgeStan.param_constrain(problem.model, zeros(3);
         rng=StanBlocks.BridgeStan.StanRNG(problem.model, 912))
@@ -427,16 +425,6 @@ end
         y ~ keyword_factory(theta, 1; shift=0.1, blend=-0.1)
     end
     data = (; y=[0.1, -0.2])
-
-    backend = TuringBRMI(builder(data))
-    params = (; location=0.1, scale=0.7, theta=0.25)
-    expected = logpdf(Normal(), params.location) +
-        logpdf(Exponential(2), params.scale) +
-        logpdf(keyword_factory(params.location, params.scale;
-            shift=0.2, blend=0.3), params.theta) +
-        sum(logpdf.(keyword_factory(params.theta, 1;
-            shift=0.1, blend=-0.1), data.y))
-    @test Turing.logjoint(backend.model, params) ≈ expected
 
     sb = SBBRMI(builder(data); mod=@__MODULE__)
     code = BRM.stan_code(sb)

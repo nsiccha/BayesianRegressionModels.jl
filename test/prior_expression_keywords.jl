@@ -1,4 +1,4 @@
-using Test, BayesianRegressionModels, Distributions, Turing
+using Test, BayesianRegressionModels, Distributions
 import StanBlocks
 
 StanBlocks.@deffun StanBlocks.@juliacompat prior_scale(
@@ -29,6 +29,4 @@ StanBlocks.@deffun StanBlocks.@juliacompat prior_scale(
             prior_scale(params.sigma; extra=0.1, gain=1.1)), data.y))
     @test StanBlocks.BridgeStan.log_density(problem.model, raw;
         propto=false, jacobian=false) ≈ expected
-    backend = TuringBRMI(builder(data))
-    @test Turing.logjoint(backend.model, params) ≈ expected
 end

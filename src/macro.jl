@@ -43,8 +43,8 @@ brmi = @brm df begin
 end
 ```
 
-The resulting `BRMI` feeds either backend: `VBRMI(brmi)` (vectorised
-Julia) or `SBBRMI(brmi)` (StanBlocks → Stan).
+The resulting `BRMI` feeds either backend: `SBBRMI(brmi)` (StanBlocks → Stan)
+or `RKBRMI(brmi)` (ReactiveKernels → RKPPL).
 """
 macro brm(x)
     esc(_brm(x))
@@ -381,8 +381,8 @@ function interval_censored end
 
 brms-style stratified grouping marker. `(1 | gr(subj, by=diagnosis))`
 gives each level of `by` its own random-effect covariance structure.
-Dispatch tag only — backend interpretation lives in `vmeta_sampling_rhs`
-(vimpl) / the sbimpl ranef walker.
+Dispatch tag only — backend interpretation lives in the shared preparation
+layer, the sbimpl ranef walker and the RK emitter.
 """
 function gr end
 
@@ -2763,9 +2763,9 @@ end
 Supertype of every column-shape token the `@brm` parser produces.
 Subtypes include [`MissingColumn`](@ref), [`DataColumn`](@ref),
 [`NamedColumn`](@ref), [`ExprColumn`](@ref), `MultiMembershipTerm`,
-[`LikelihoodColumn`](@ref), and [`MaterializedColumn`](@ref).
+and [`LikelihoodColumn`](@ref).
 
-Backend dispatchers (`vmeta_sampling_rhs`, `_sb_emit!`, the
+Backend dispatchers (`_sb_emit!`, the RK emitter, the
 introspection walkers) branch on this hierarchy rather than on
 `Symbol` tags.
 """
@@ -2830,6 +2830,10 @@ Return the formula-local name assigned to `x` (i.e. the LHS of the
 """
 name(x::NamedColumn) = getfield(x, :name)
 Base.parent(x::NamedColumn) = getfield(x, :parent)
+
+# `x` itself when it is a reference to a named value, `nothing` otherwise.
+_as_named_column(x::NamedColumn) = x
+_as_named_column(_) = nothing
 
 """
     _check_term_kwargs(f, kwargs) -> nothing
@@ -3060,8 +3064,7 @@ end
     LikelihoodColumn(parent, rhs)
 
 Pairs an observed-response `parent` ([`NamedColumn`](@ref) over a
-[`DataColumn`](@ref)) with its distributional `rhs`. vimpl's
-`llikelihood!` walks these.
+[`DataColumn`](@ref)) with its distributional `rhs`.
 """
 struct LikelihoodColumn{P,R} <: AbstractColumn
     parent::P
@@ -3077,7 +3080,7 @@ maybedists(lhs::AbstractColumn, x::AbstractColumn) = LikelihoodColumn(lhs, x)
 
 BRM Intermediate — the parsed formula. `operations` is a NamedTuple
 mapping each LHS name to its [`NamedColumn`](@ref). The two backends
-[`VBRMI`](@ref) and [`SBBRMI`](@ref) walk this representation.
+[`SBBRMI`](@ref) and [`RKBRMI`](@ref) walk this representation.
 
 A `BRMI` is what [`@brm`](@ref) ultimately returns (either directly,
 when `df` is baked in, or by calling the gensym'd model function on a
@@ -3551,7 +3554,7 @@ _brm_is_statement(op) = false
 _brm_is_statement(::ExprColumn{<:Union{typeof(~),typeof(assign)}}) = true
 # Top-level entries in a BRMI listing are either ExprColumns whose own show
 # already names the LHS (`loc ~ ...`, `(err = ...)`) or other column types
-# (DataColumn, MaterializedColumn, ...) whose show prints just the value with
+# (DataColumn, ...) whose show prints just the value with
 # no name. For the former we strip the outermost parens; for the latter we
 # prefix with the operation key so the name doesn't get lost.
 _show_top(io::IO, key, op) = print(io, key, ": ", op)

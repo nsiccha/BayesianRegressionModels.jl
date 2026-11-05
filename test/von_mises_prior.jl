@@ -1,4 +1,4 @@
-using Test, BayesianRegressionModels, Distributions, Turing, LogDensityProblems
+using Test, BayesianRegressionModels, Distributions, LogDensityProblems
 import StanBlocks
 const BRM = BayesianRegressionModels
 const BridgeStan = StanBlocks.BridgeStan
@@ -24,15 +24,20 @@ const BridgeStan = StanBlocks.BridgeStan
         mkpath(cache)
         problem = brm_execute(descriptor, :instantiate;
             path=joinpath(cache, string(descriptor.id) * ".stan"))
-        backend = TuringBRMI(builder(data))
         @test LogDensityProblems.dimension(problem) == 2
         for raw in ([7.0, 0.0], [6.8, -0.6])
             names = Symbol.(BridgeStan.param_names(problem.model))
             values = BridgeStan.param_constrain(problem.model, raw)
             parameters = NamedTuple{Tuple(names)}(Tuple(values))
             @test parameters.location - pi <= parameters.theta <= parameters.location + pi
+            # Declaration bounds keep the plain VonMises kernel (not renormalized
+            # on the window), as for any bounded prior declaration.
+            p = parameters
+            expected = logpdf(Normal(7.0, 1.0), p.location) +
+                logpdf(VonMises(p.location, 1.7), p.theta) +
+                sum(logpdf.(Normal(p.theta, 0.8), data.y))
             @test BridgeStan.log_density(problem.model, raw; propto=false, jacobian=false) ≈
-                Turing.logjoint(backend.model, parameters) atol=1e-10
+                expected atol=1e-10
         end
     end
 end

@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.188
+## 0.2.189
 
 - Function-style components returning one internal plate's collected values
   preserve one value per cell, including vector-valued cells, aliases and
@@ -21,6 +21,24 @@ instead of failing at run time.
   ReactiveKernels keeps selected-row locality instead of reading a flattened
   whole; StanBlocks preserves the cell axis of its matrix storage. Formula
   offsets still require scalar cells.
+
+## 0.2.188
+
+- **Breaking:** BRM now supports only `SBBRMI` (StanBlocks/Stan) and `RKBRMI`
+  (ReactiveKernelsPPL). Removed `TuringBRMI`, its Turing/WarmupHMC extensions,
+  the `turing_*` helpers, and `VBRMI` with its materialization/parameter-part
+  API (`MaterializedColumn`, `getbroadcast`, `Part`, `push_parts!!`, `nparams`,
+  `lprior!`, `vbroadcasted`, `vmeta_sampling_rhs`). Build one of the supported
+  backends from the same `BRMI`; use that backend's fitting, replay and
+  prediction APIs. Custom terms must use the StanBlocks or RK extension hooks.
+- Removed the retired backends' dependencies, tests and documentation. Shared
+  preparation and mixture-response checks remain on the supported paths. The
+  macro explorer now exposes its StanBlocks pipeline without the VBRMI stages.
+- Incomplete constrained-coordinate carriers now report their emitted output
+  and missing coverage instead of an undefined-variable error.
+- Refresh the test and macro-app HTMXObjects pins for the model-view floor.
+  The test environment requires DiffEqBase 7.21.6 and OptimizationBase 5.10.1
+  so their extensions load with the current Enzyme rule hooks.
 
 ## 0.2.187
 
