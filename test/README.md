@@ -9,7 +9,8 @@ row-length and scalar-cell checks. It accepts testset substring filters.
 `model_view_documentation.jl` checks authored Julia documentation in builder and
 bound-model views, plus callable docs after binding: references become formatted labels,
 ordinary URLs remain linked, doctest contents survive, and source/doc records
-remain unchanged. The bootstrap selects HTMXObjects 0.1.62 for this projection.
+remain unchanged. The bootstrap selects HTMXObjects 0.1.65, which also renders
+tabbed views as readable plain text without internal node representations.
 
 `heterogeneous_mixtures.jl` checks native mixtures of different full-real
 scalar families and custom component graphs against independent normalized
@@ -2573,6 +2574,11 @@ semantic projections. It verifies that viewing a model never evaluates a custom
 helper. The descriptor fixture checks constrained simplex dimensions and keeps
 logical quantities separate from generated carriers, without fitting or compiling
 Stan. Set `BRM_MODEL_VIEW_HTML` to an output path to save a browser preview.
+The model-view files share `model_view_plain_text_checks.jl`: titles and tab
+labels must occupy real lines, source remains multiline, default-input rows are
+readable fields, and renderer implementation dumps are absent. These checks cover
+builders, bound declarations, reusable components, descriptors and prepared RK
+views, retaining the helper/default non-evaluation guards.
 
 `julia --project=test test/model_view_edge_cases.jl` covers joint and transformed
 response roles, callable documentation inside mixture-component lists, optional
@@ -2595,11 +2601,9 @@ The browser script owns and closes its temporary server and Chrome process.
 For fresh RK, descriptor and component captures, also run
 `julia --project=<rk-env> web-macro/validate_model_view_prepared_export.jl <output-dir>`
 after the main export, then append `--prepared` to the browser command.
-With HTMXObjects 0.1.60 these additional fixtures expose unresolved Documenter
-`@ref` links (incomplete static export) and a missing `jldoctest` browser grammar.
-The checks intentionally fail on those upstream gaps; do not treat their
-screenshots as evidence of a complete prepared bundle. The base export and
-browser check remain independently runnable.
+The current dependency floor includes Julia-documentation projection and the
+shared Julia doctest grammar. Both the base and prepared bundles must pass strict
+export and browser checks; the base checks remain independently runnable.
 The RK environment must contain BRM, HTMXObjects, ReactiveKernels and
 ReactiveKernelsPPL. This explicitly prepares toy objects, then exports the
 supplied objects with helper evaluation guarded off. Browser checks cover

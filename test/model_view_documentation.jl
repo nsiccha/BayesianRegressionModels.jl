@@ -1,4 +1,5 @@
 using Test, Markdown, BayesianRegressionModels, HTMXObjects
+include("model_view_plain_text_checks.jl")
 
 module DocumentationViewFixture
 using BayesianRegressionModels
@@ -58,6 +59,10 @@ end
 
     for input in (builder, model)
         view = brm_model_view(input)
+        tabs = input === builder ? ("Source", "Potential data inputs", "Documentation") :
+            ("Source", "Roles and ranks", "Documentation")
+        plain = test_model_view_plain_text(view, "Model", tabs)
+        @test occursin("Authored reference to `Gamma`", plain)
         html = repr("text/html", view)
         markdown = repr("text/markdown", view)
         @test !occursin(r"href=\"[^\"]*@ref", html)
@@ -72,6 +77,8 @@ end
         # Callable identities are available after data binding. Unbound
         # builders expose their retained authored documentation only.
         if input === model
+            @test occursin("Callable reference to `sum`", plain)
+            @test occursin("julia> 1 + 1\n2", plain)
             @test occursin("Callable reference to <code>sum</code>", html)
             @test occursin("a <em>named</em> target", html)
             @test occursin("Callable reference to `sum`", markdown)
