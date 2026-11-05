@@ -1,5 +1,6 @@
 using Test, BayesianRegressionModels, HTMXObjects
 using ReactiveKernels, ReactiveKernelsPPL
+include("model_view_plain_text_checks.jl")
 
 const BRM = BayesianRegressionModels
 
@@ -31,6 +32,34 @@ grouped = @brm begin
     cor(:, block) ~ LKJCholesky(2, 2.0)
     y ~ Normal(mu, sigma)
 end
+@brm function vector_local(x)
+    z[1:length(x)] .~ Normal.(0, 1)
+    return x + z
+end
+vector_parent = @brm begin
+    z[1:n] .~ Normal.(0, 1)
+    left ~ vector_local(x)
+    y ~ Normal(left .+ sum(z), 1)
+end
+end
+
+@testset "RK model view enriches component-local parameters by exact path" begin
+    model = RKModelViewFixture.vector_parent((; x=[-1., 0., 1.], y=[0.1, 0.2, 0.3], n=2))
+    rk = RKBRMI(model)
+    rows = Dict(row.path => row for row in BRM._brm_view_rk_parameters(rk))
+    @test rows[(:z,)].shape == (2,)
+    @test rows[(:left, :z)].shape == (3,)
+    for mime in ("text/html", "text/markdown", "text/plain")
+        rendered = repr(mime, brm_model_view(rk))
+        @test occursin("left › z", rendered)
+        @test occursin("Vector · 3", rendered)
+        @test occursin("Vector · 2", rendered)
+    end
+    md = repr("text/markdown", brm_model_view(rk))
+    @test occursin("| z | Parameter | 1 | Vector · 2 |", md)
+    @test occursin("| left › z | Parameter | 1 | Vector · 3 |", md)
+    @test occursin("| (:left, :z) | Declared parameter | 1 | Vector · 3 |", md)
+    @test occursin("| (:z,) | Declared parameter | 1 | Vector · 2 |", md)
 end
 
 @testset "RK model view uses constrained parameter metadata" begin
@@ -45,6 +74,9 @@ end
     @test rows[(:p,)].ncoordinates == 2
     @test rows[(:theta,)].shape == (2,)
     before_bound = rk.bound.value
+    text = test_model_view_plain_text(brm_model_view(rk; title="Prepared RK regression"),
+        "Prepared RK regression", ("Source", "Roles and ranks", "Documentation"))
+    @test occursin("Prepared RK parameters", text)
     for mime in ("text/html", "text/markdown", "text/plain")
         rendered = repr(mime, brm_model_view(rk))
         @test occursin("Prepared RK parameters", rendered)
@@ -76,6 +108,11 @@ end
     @test latent.ncoordinates == 3
     RKModelViewFixture.inspecting[] = true
     try
+        text = test_model_view_plain_text(brm_model_view(rk), "Model",
+            ("Source", "Roles and ranks", "Documentation"))
+        @test occursin("Element shapes", text)
+        @test occursin("Vector · 0", text)
+        @test occursin("Sum a toy cell", text)
         html = repr("text/html", brm_model_view(rk))
         @test occursin("Sum a toy cell", html)
         @test occursin("Element shapes", html)
