@@ -14,6 +14,14 @@ scales and simplexes, and preserves unaddressed values and top-level starts.
 Run it as a standalone script in the test environment; it compiles Stan even
 when the resulting point is consumed by RK.
 
+`smc_tuning_lifecycle.jl` checks adaptive pilot interruption before any draw and
+during a later grid pilot, nested Treebars progress, input ownership, endpoint
+and configuration validation, and exact fresh-process replay from both a
+serialized partial and the latest disk checkpoint. It covers initial,
+cumulative-update, selective carried-window and prepared sparse-Laplace targets
+using small synthetic models. Run `test/setup_env.jl` first for the pinned RKPPL recovery contract and
+Treebars 0.1.5, then `julia --project=test test/smc_tuning_lifecycle.jl`.
+
 `scoped_components.jl` checks function-style BRM components with independent
 local priors, explicit shared inputs, nested calls, vector results, and plate
 cells. It compares normalized densities and native Reverse gradients with
