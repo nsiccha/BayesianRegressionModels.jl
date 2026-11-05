@@ -32,4 +32,6 @@ Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [compat]
+BayesianRegressionModels = "0.2.179"
+HTMXObjects = "0.1.58"
 BridgeStan = "2.9"

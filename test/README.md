@@ -2601,3 +2601,25 @@ The public-planner matrix is widths `(64,256)` crossed with cells `(100,400)`.
 These bounded fixtures do not establish full Atlas runtime, memory or fitting
 speed. Sparse factorization can still incur fill-in, sampled targets can be
 large, and raising `max_cell_width` permits genuinely dense local blocks.
+## Reusable model view
+
+`julia --project=test test/model_view.jl` checks declaration roles, scalar/vector/
+matrix/higher ranks, zero-length axes, callable documentation and all three
+semantic projections. It verifies that viewing a model never evaluates a custom
+helper. The descriptor fixture checks constrained simplex dimensions and keeps
+logical quantities separate from generated carriers, without fitting or compiling
+Stan. Set `BRM_MODEL_VIEW_HTML` to an output path to save a browser preview.
+
+`julia --project=test test/model_view_rk.jl` checks the RK extension with RKPPL
+0.1.93 or later: constrained simplex dimensions versus free-coordinate counts,
+ragged/empty cells, matrix parameters, custom helper documentation, existing-build
+wrappers without lazy binding, and both ordinary and data-free replay boundaries.
+It builds toy models but does not prepare a density query or fit them.
+
+`julia --project=web-macro web-macro/validate_model_view_export.jl <new-output-dir>`
+exports the same view as a Quarto PDF and a static HTML site. It verifies the
+PDF link and the documentation content without executing the fixture's helper.
+Run `kb-playwright-python web-macro/validate_model_view_browser.py <output-dir>`
+for real browser acceptance of bundled highlighting, touch/keyboard tabs,
+documentation disclosures and the PDF download in light and dark themes.
+The browser script owns and closes its temporary server and Chrome process.
