@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.174
+
+- Added: SVI units own ordinary sampled coordinates read only within that
+  unit, with their authored priors, Jacobians and global hyperparameter
+  gradients counted once. Structural supports close over joint laws and
+  transforms; `global_coordinates` explicitly promotes coordinates. Diagnostics
+  expose the inference ownership separately from scientific NLME roles.
+- Changed: SVI streaming and packed draws preserve ordinary coordinate
+  identities through absent, returning and new units. A retained unit's
+  Gaussian replaces its complete authored prior bucket.
+- Compatibility: authored SVI queries use the batched preparation API from
+  ReactiveKernels 0.1.84 / ReactiveKernelsPPL 0.1.96, sharing binding validation
+  and packed exemplars while retaining one derivative workspace per bucket.
+
 ## 0.2.173
 
 - Explicitly connected SVI defaults to bounded automatic separator selection

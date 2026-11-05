@@ -24,9 +24,16 @@ function BRM._rk_svi_factor_queries(backend::BRM.RKBRMI, unit::Vector{Float64},
         end
         push!(buckets[unit_owner + 1], event)
     end
-    map(buckets) do bucket
-        isempty(bucket) ? nothing : prepare_query_ad(prepare_ad, backend.model,
-            _rk_translated(backend), select_factors(factors.catalogue, bucket),
-            ad_backend, unit; coordinates=:support)
+    present = findall(!isempty, buckets)
+    isempty(present) && return fill(nothing, length(buckets))
+    selections = [select_factors(factors.catalogue, buckets[i]) for i in present]
+    # One public batch validates the binding and copies the packed exemplar
+    # once. Each nonempty bucket still owns its derivative workspace.
+    prepared = prepare_query_ad(prepare_ad, backend.model, _rk_translated(backend),
+        selections, ad_backend, unit; coordinates=:support)
+    queries = Vector{Union{Nothing,eltype(prepared)}}(nothing, length(buckets))
+    for (i, query) in zip(present, prepared)
+        queries[i] = query
     end
+    queries
 end
