@@ -295,7 +295,7 @@ end
         @test value ≈ cell_value rtol=1e-11 atol=1e-11
         @test gradient ≈ cell_gradient rtol=1e-9 atol=1e-9
     end
-    # The per-subject entry points use one plate cell, not a batch of one.
+    # The per-subject entry points evaluate their unit partition directly.
     η = [0.05, -0.1]
     oracle_H = full_eta(m, [2], reshape(η, 2, 1))
     @test conditional_loglikelihood(m, 2, θ, σ, η) ≈
@@ -315,9 +315,21 @@ end
     @test_throws ArgumentError conditional_loglikelihoods(m, [1, 1], θ, σ, zeros(2, 2))
     @test_throws ArgumentError conditional_loglikelihoods(m, [n + 1], θ, σ, zeros(2, 1))
     @test_throws DimensionMismatch conditional_loglikelihoods(m, [1, 2], θ, σ, zeros(2, 1))
+    empty_H = zeros(2, 0)
+    @test conditional_loglikelihoods(m, Int[], θ, σ, empty_H) isa Vector{Float64}
+    @test conditional_loglikelihoods(m, Int[], θ, σ, empty_H) == Float64[]
+    empty_values, empty_gradient = conditional_loglikelihoods_and_gradients(
+        m, Int[], θ, σ, empty_H)
+    @test empty_values isa Vector{Float64} && isempty(empty_values)
+    @test size(empty_gradient) == (2, 0)
+    for call in (conditional_loglikelihoods, conditional_loglikelihoods_and_gradients)
+        @test_throws DimensionMismatch call(m, Int[], θ[1:end-1], σ, empty_H)
+        @test_throws DimensionMismatch call(m, Int[], θ, σ, zeros(1, 0))
+        @test_throws ArgumentError call(m, [1, 1, 2], θ, σ, zeros(2, 3))
+    end
 end
 
-@stestset "a singleton protocol batch uses subject-local RK work" begin
+@stestset "protocol subsets preserve values and bounded allocations as units grow" begin
     measured = map((3, 9, 27)) do n
         d = NLME_PLATE_DATA
         data = (; subject=["s$j" for j in 1:n],
@@ -327,21 +339,28 @@ end
             dv=[d.dv[mod1(j, 3)] for j in 1:n])
         m = brm_nlme_model(RKBRMI(nlme_plate_pk(data)); ad_backend=NLME_AD)
         θ, σ = plate_pk_point(m)
-        i = findfirst(==("s2"), m.view.levels)
-        H = reshape([0.05, -0.1], 2, 1)
-        values() = conditional_loglikelihoods(m, [i], θ, σ, H)
-        gradients() = conditional_loglikelihoods_and_gradients(m, [i], θ, σ, H)
-        values(); gradients()
-        primal_bytes = minimum(@allocated(values()) for _ in 1:3)
-        gradient_bytes = minimum(@allocated(gradients()) for _ in 1:3)
-        (; result=gradients(), primal_bytes, gradient_bytes)
+        i, j = [findfirst(==(s), m.view.levels) for s in ("s2", "s3")]
+        map(([i], [i, j])) do subjects
+            H = repeat([0.05, -0.1], 1, length(subjects))
+            values() = conditional_loglikelihoods(m, subjects, θ, σ, H)
+            gradients() = conditional_loglikelihoods_and_gradients(m, subjects, θ, σ, H)
+            values(); gradients()
+            primal_bytes = minimum(@allocated(values()) for _ in 1:3)
+            gradient_bytes = minimum(@allocated(gradients()) for _ in 1:3)
+            (; result=gradients(), primal_bytes, gradient_bytes)
+        end
     end
-    @test all(x -> isapprox(x.result[1], measured[1].result[1]; rtol=1e-12), measured)
-    @test all(x -> isapprox(x.result[2], measured[1].result[2]; rtol=1e-10), measured)
-    @test maximum(x.primal_bytes for x in measured) <=
-        1.2minimum(x.primal_bytes for x in measured)
-    @test maximum(x.gradient_bytes for x in measured) <=
-        1.2minimum(x.gradient_bytes for x in measured)
+    for k in 1:2
+        batch = getindex.(measured, k)
+        @test all(x -> isapprox(x.result[1], batch[1].result[1]; rtol=1e-12), batch)
+        @test all(x -> isapprox(x.result[2], batch[1].result[2]; rtol=1e-10), batch)
+        # Bound growth as unrelated units are added. Different compiled
+        # shapes can reduce fixed workspace, which must not fail this check.
+        @test all(b.primal_bytes <= 1.2 * a.primal_bytes
+            for (a, b) in zip(batch[1:end-1], batch[2:end]))
+        @test all(b.gradient_bytes <= 1.2 * a.gradient_bytes
+            for (a, b) in zip(batch[1:end-1], batch[2:end]))
+    end
 end
 
 @stestset "declared mu-referencing holds on the density" begin
@@ -641,14 +660,13 @@ end
     @test all(isfinite, (fit.theta..., fit.sigma..., fit.omega...))
 end
 
-@stestset "flat grouped rows take SAEM's batched population gradient" begin
-    # Each flat row is a cell of its subject, one compact call per row, so with
-    # several rows per subject the lockstep batch is cheaper and SAEM uses it.
+@stestset "flat grouped rows keep SAEM's shared population sweep" begin
+    # Unit conditionals use partitions, while a full population-gradient pass
+    # keeps the existing shared sweep for this observation shape.
     m = brm_nlme_model(RKBRMI(nlme_pk(NLME_DATA)); ad_backend=NLME_AD)
     @test m.cell_gradient !== nothing && only(m.cell_query).elementwise
-    for mode in (Val(:online), Val(:mixture))
-        @test saem_population_gradient_style(m, mode) isa BatchedEvaluation
-    end
+    @test saem_population_gradient_style(m, Val(:online)) isa BatchedEvaluation
+    @test saem_population_gradient_style(m, Val(:mixture)) isa BatchedEvaluation
     θ = fill(0.1, length(m.theta))
     σ = [log(2.0)]
     fit = saem(m, θ, σ, zeros(3); rng=Random.Xoshiro(1),

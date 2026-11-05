@@ -379,19 +379,17 @@ end
             "Empirical Bayes (Newton)")
         @test get(rows, label, nothing) == '✓'
     end
-    # The cell queries count under their phase, and the compact cell gradients
-    # the estimator first needs report under the fit, each step counted.
-    for label in ("Cell queries", "Subject cell gradients", "Cell reads",
-            "Compact cell samplers", "Cell reads by gradient", "Cell plan check")
+    # Value/footprint queries count under construction; the one partition
+    # sampler is lazy and reports under the fit that first needs gradients.
+    for label in ("Cell queries", "Value partition", "Bind partition keys",
+            "Prepare partition kernel", "Check coordinate ownership", "Unit footprints",
+            "Unit partition gradients", "Partition sampler")
         @test get(rows, label, nothing) == '✓'
     end
     groups = length(f.model.cell_query)
-    steps = length(f.model.view.levels) * groups
     text = render_text(tree[])
     @test occursin("Cell queries ($groups/$groups)", text)
-    @test occursin("Compact cell samplers ($groups/$groups)", text)
-    @test occursin("Cell reads ($steps/$steps)", text)
-    @test occursin("Cell plan check ($steps/$steps)", text)
+    @test occursin("Partition sampler (1/1)", text)
     @test all(==('✓'), values(rows))
     # Reporting changes no number.
     g = brm_nlme_fit(f.model, saem; rng=Xoshiro(1), options)

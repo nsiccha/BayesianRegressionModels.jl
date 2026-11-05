@@ -148,9 +148,8 @@ end
               for k in 1:d]
         @test gradient ≈ fd atol=1e-5 rtol=1e-5
     end
-    # Nested units evaluate on their own cells, so each worker gets its own
-    # compact samplers, planned from the reads `m` measured, and the draws
-    # match one thread.
+    # Each worker owns a partition query and sampler, while sharing structural
+    # cell supports. Its draws must match the single-threaded run.
     @test m.cell_gradient !== nothing
     stage1 = brm_nlme_fit(rk, NE.saem; ebes=false, groups..., rng=Random.Xoshiro(2026),
         options=NE.SAEMOptions(iterations=3, burnin=1, mcmc_burnin=0,

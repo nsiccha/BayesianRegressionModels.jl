@@ -70,11 +70,9 @@ function _brm_svi_target(m::BRMNLMEModel)
         "no cells attributable to single subjects")
     globals = _brm_svi_globals(m)
     units = m.view.subject_coordinates
-    # Compact cell gradients selecting the globals and the draws each cell
-    # reads (`_brm_nlme_cell_plan` over the reads `m` measured), so a cell
-    # costs its own coordinates, not its subject's whole block.
-    plan = _brm_nlme_cell_plan(m.backend, m.cell_query, m.unit, globals, units,
-        _brm_nlme_cell_state(m).reads)
+    # SVI owns one partition sampler and includes covariance coordinates in
+    # its active globals. Fixed shared values remain at the read-only base.
+    plan = _brm_nlme_partition_plan(m.cell_gradient, m.unit, globals, m.view)
     # For subject i, `order[i]` sorts [globals; units[i]] into packed order.
     order = [sortperm(vcat(globals, block)) for block in units]
     indices = [vcat(globals, block)[o] for (block, o) in zip(units, order)]
@@ -84,13 +82,14 @@ function _brm_svi_target(m::BRMNLMEModel)
        z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
 end
 
-# `t` with `n` cell plans, one per task that evaluates units. `t.plan` is the
-# first; each further one owns its samplers and buffers (`_brm_nlme_worker_plan`).
+# `t` with `n` partition plans, one per task that evaluates units. `t.plan` is
+# the first; each further one owns its sampler, gradients and work point
+# (`_brm_nlme_worker_plan`).
 function _brm_svi_with_workers(t, n, progress=nothing)
     n == 1 && return t
-    workers = _brm_with_counter(progress, n - 1; description="Worker cell samplers") do node
+    workers = _brm_with_counter(progress, n - 1; description="Worker partition samplers") do node
         map(1:n-1) do k
-            plan = _brm_nlme_worker_plan(t.plan, t.m.backend, t.m.cell_query, t.m.unit)
+            plan = _brm_nlme_worker_plan(t.plan, t.m.cell_gradient, t.m.unit)
             _brm_update_progress!(node, k)
             plan
         end
@@ -153,8 +152,7 @@ function _brm_svi_unit_term!(gg, gz, t, i, g, z, plan=t.plan)
     joint = vcat(g, z)
     w.values .= joint[order]
     fill!(w.gradient, 0.0)
-    value = _brm_nlme_cell_plan_sum!(w.gradient, plan, t.m.cell_query, t.m.unit,
-        i, w.values)
+    value = _brm_nlme_partition_sum!(w.gradient, plan, t.m.unit, i, w.values)
     joint_gradient = similar(joint)
     joint_gradient[order] .= w.gradient
     gg .= view(joint_gradient, 1:D)
@@ -634,7 +632,7 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   [`brm_start`](@ref) takes them (the rest at the prior medians).
 - `progress` — a Treebars node or backend symbol: one `BRM SVI fit` node with
   the phases Lower to ReactiveKernels, Prepare NLME model, Minibatch target
-  (the subjects' cell gradients and the start), Stochastic optimization (its
+  (the unit partition gradient and the start), Stochastic optimization (its
   message names the window, iteration and ELBO) and Draws from q. An interrupt raises `Treebars.ProgressInterrupted` at the
   next window.
 - `threads` — how many tasks evaluate a batch's subjects and step their factors,
@@ -781,7 +779,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
             m = _brm_svi_model(_brm_svi_lowered(x, phases.lower), phases.prepare;
                 ad_backend, shared_point, subject_group, nested_groups, shared_groups)
             t, state = _brm_run_phase(phases.target) do phase
-                # The model's compact cell gradients, on first use, report here.
+                # SVI's partition sampler, on first use, reports under this phase.
                 t, state = init(_brm_with_cell_progress(() -> _brm_svi_target(m), phase))
                 _brm_svi_with_workers(t, min(threads, state.controls.batch_size), phase), state
             end

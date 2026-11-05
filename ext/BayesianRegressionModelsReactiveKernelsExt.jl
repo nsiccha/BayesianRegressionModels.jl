@@ -112,10 +112,20 @@ end
 
 # The shared coordinates of a `car_units` field (src/car_separation.jl): real,
 # packed as themselves, with the density of their separator edges and totals.
+# Explicit graph endpoints let strict partitions see the identity map. Keep
+# every positional argument in the boundary: splats use an opaque call path.
+@kernel _brm_car_shared_coordinates(u, shape, last, scale, weight, first_entry,
+        second_entry) = begin
+    return u
+end
+@kernel _brm_car_shared_logjac(u, shape, last, scale, weight, first_entry,
+        second_entry) = begin
+    return 0.0
+end
 ReactiveKernelsPPL.sampling_geometry(::Type{<:BRM._BRMCarShared}, args, shape) =
     ReactiveKernelsPPL.ParameterGeometry(shape, :(length($(args[1]))); support=:real,
-        constrain=(u, shape, rest...) -> u, unconstrain=(w, shape, rest...) -> w,
-        logjac=(u, shape, rest...) -> zero(eltype(u)))
+        constrain=_brm_car_shared_coordinates, unconstrain=_brm_car_shared_coordinates,
+        logjac=_brm_car_shared_logjac)
 ReactiveKernelsPPL.sampling_logdensity(d::BRM._BRMCarShared, w) =
     BRM._brm_car_shared_logdensity(w, d.last, d.scale, d.weight, d.first_entry,
         d.second_entry)
@@ -572,8 +582,9 @@ BRM._rk_unconstrained_point(backend::BRM.RKBRMI, values::NamedTuple) =
 BRM._rk_pointwise_query(backend::BRM.RKBRMI) =
     prepare_query(backend.model, _rk_translated(backend), :pointwise)
 BRM._rk_pointwise_values(query, u::AbstractVector) = Base.invokelatest(query, u)
-BRM._rk_nlme_cell_query(backend::BRM.RKBRMI, observations::Tuple) =
-    prepare_cell_query(backend.model, _rk_translated(backend), observations)
+BRM._rk_nlme_cell_query(backend::BRM.RKBRMI, observations::Tuple, partitioned, unit) =
+    prepare_cell_query(backend.model, _rk_translated(backend), observations;
+        locality=:error, partitioned, u0=unit)
 BRM._rk_nlme_cell_value(query::CellQuery, point::AbstractVector{Float64}, row::Int) =
     query(point, row)
 BRM._rk_spl_cell_footprint(query::CellQuery) = partition_footprint_kernel(query.kernel)
@@ -597,6 +608,78 @@ function BRM._rk_spl_factor_reads(q, u, args...)
     reads = Base.invokelatest(q.footprint, u, args...).unconstrained
     reads === :whole ? collect(eachindex(u)) : reads
 end
+# Supplied key columns extend the input program, so this binding needs its own
+# build. Lower the backend's existing emitted program and preserve frozen fit
+# values. Derived columns must not be rebound as supplied inputs.
+function BRM._rk_nlme_partition_context(backend::BRM.RKBRMI, cells, keys, partitioned)
+    unbound, columns = _rk_lower_program(_rk_program(backend), backend.plan;
+        frozen=_rk_frozen(backend))
+    taken = Set(Symbol.(Base.keys(BRM.rk_bound_data(backend))))
+    key_columns = Dict{Symbol,Any}()
+    by = Pair{Symbol,Symbol}[]
+    observations = Symbol[]
+    for (g, cell) in enumerate(cells)
+        key = Symbol("brm_nlme_unit_", g)
+        while key in taken
+            key = Symbol(key, "_")
+        end
+        push!(taken, key)
+        key_columns[key] = keys[g]
+        append!(observations, cell.names)
+        append!(by, (name => key for name in cell.names))
+    end
+    bound = bind_data(unbound, merge(columns, key_columns))
+    built = build_kernel(bound)
+    coordinate_names(built.layout) == coordinate_names(backend.model.layout) ||
+        BRM._brm_nlme_error("brm_nlme_model: adding observation partition keys " *
+            "changed the packed parameter layout")
+    (; built, bound, observations=Tuple(observations), by=(; by...), partitioned)
+end
+
+# BRM supplies semantic ownership; the public RKPPL declaration assigns each
+# parameter's first axis to those same integer unit keys. Other axes repeat
+# that ownership in packed column-major order. Entirely shared entries stay
+# undeclared; a shared position inside a mixed entry has the RK label `missing`.
+function BRM._rk_nlme_partitioned(backend::BRM.RKBRMI, view::BRM.BRMNLMEView)
+    declarations = Pair{Symbol,Vector{Union{Missing,Int}}}[]
+    for entry in backend.model.layout.entries
+        positions = entry.offset:(entry.offset + entry.size - 1)
+        owners = @view view.subject[positions]
+        any(!iszero, owners) || continue
+        n = isempty(entry.dims) ? entry.size : first(entry.dims)
+        0 < n <= length(owners) &&
+            all(j -> owners[j] == owners[mod1(j, n)], eachindex(owners)) ||
+            BRM._brm_nlme_error("brm_nlme_model: parameter `$(entry.name)` " *
+                "cannot represent its subject ownership on its first axis")
+        labels = Union{Missing,Int}[iszero(owner) ? missing : owner
+            for owner in @view owners[1:n]]
+        push!(declarations, entry.name => labels)
+    end
+    declarations
+end
+
+BRM._rk_nlme_partition_query(context, unit) =
+    prepare_partition(context.built, context.bound, context.observations;
+        by=context.by, locality=:error, partitioned=context.partitioned, u0=unit)
+BRM._rk_nlme_is_partition_separability_error(error) =
+    error isa ReactiveKernels.PartitionSeparabilityError
+BRM._rk_nlme_partition_labels(query) = partition_labels(query)
+BRM._rk_nlme_partition_value(query, point, label) = query(point, label)
+
+_rk_nlme_footprint_indices(read, point) =
+    read === :whole ? collect(eachindex(point)) : read
+
+# Public value-query footprint contract (rkppl-use §14). The last argument
+# fills the planned partition's plan port; footprint lowering does its own
+# bookkeeping. It is not an inspection of the query's private plans.
+BRM._rk_nlme_partition_query_footprint(query, point, label) =
+    _rk_nlme_footprint_indices(
+        partition_footprint(query.kernel, point, label, nothing).unconstrained, point)
+BRM._rk_nlme_cell_footprint_query(query::CellQuery) =
+    partition_footprint_kernel(query.kernel)
+BRM._rk_nlme_cell_footprint(query, point, row) =
+    _rk_nlme_footprint_indices(Base.invokelatest(query, point, row).unconstrained, point)
+
 BRM._rk_retained_pointwise_sampler(backend::BRM.RKBRMI; ad_backend,
         u0=zeros(Float64, backend.model.layout.total)) =
     prepare_sampler(backend.model, _rk_translated(backend), u0;

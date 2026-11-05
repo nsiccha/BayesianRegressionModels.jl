@@ -67,18 +67,23 @@ end
 BRM._rk_laplace_third(query, direction::Vector{Float64}, u::Vector{Float64}) =
     only(ad_third(query, (direction,), u))
 
-function BRM._rk_nlme_compact_cell_sampler(backend::BRM.RKBRMI,
-        observations::Tuple, base::Vector{Float64}, selected::Vector{Int})
-    rkext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
-    prepare_compact_cell_sampler(backend.model,
-        rkext._rk_translated(backend), observations, base, selected;
-        backend=AutoEnzyme(; mode=Enzyme.set_runtime_activity(Enzyme.Reverse)))
-end
-
-BRM._rk_nlme_compact_cell_value_and_gradient!(sampler::CompactCellSampler,
-        gradient::Vector{Float64}, base::Vector{Float64},
-        active::Vector{Float64}, selected::Vector{Int}, row::Int) =
-    cell_value_and_gradient!(sampler, gradient, base, active, selected, row)
+# The compact sampler uses ordinary Reverse with the repaired Enzyme dogfood
+# selected by the test bootstrap (rkppl-use §14).
+BRM._rk_nlme_partition_sampler(context, base::Vector{Float64}) =
+    prepare_partition_sampler(context.built, context.bound, context.observations,
+        base; by=context.by, locality=:error, compact=true, partitioned=context.partitioned,
+        backend=AutoEnzyme(; mode=Enzyme.Reverse))
+BRM._rk_nlme_partition_footprint(sampler, label) =
+    partition_footprint(sampler, label)
+BRM._rk_nlme_partition_value_and_gradient!(sampler, gradient, point, label) =
+    partition_value_and_gradient!(sampler, gradient, point, label)
+# The unit's own (declared `partitioned`) coordinates only, with the shared
+# coordinates and the values computed from them held fixed (rkppl-use §14,
+# "Reuse shared values").
+BRM._rk_nlme_partition_local_footprint(sampler, label) =
+    partition_footprint(sampler, label; shared=false)
+BRM._rk_nlme_partition_value_and_local_gradient!(sampler, gradient, point, label) =
+    partition_value_and_gradient!(sampler, gradient, point, label; shared=false)
 
 # The row-structured Laplace (src/nlme_laplace_structured.jl): the likelihood
 # parameters `ports` (natural scale, one value per row or a scalar) at a

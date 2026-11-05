@@ -160,13 +160,8 @@ function replicate_panel(d, k)
 end
 
 @stestset "one unit's work stays flat as regions are added" begin
-    # A region's value and gradient are its own, however many regions there
-    # are, and so is its work. The singular call takes the region's compact
-    # cell samplers, and those cost its own rows: a totals cell observes its
-    # one value per cell directly and RK computes the cell's reads at its rows
-    # (BRM todo 0ww46pb, ReactiveKernels 0.1.6, Enzyme dogfood for the `hcat`
-    # design read from views). Todo
-    # BayesianRegressionModels:scaling-svi/todos/2026-10-25T22-21-35-231-182pl0l.
+    # One compiled partition evaluates a region. Both its native NLME and
+    # wider SVI gradient must stay independent of the other regions' size.
     measured = map((1, 3)) do k
         rk = RKBRMI(panel(replicate_panel(PANEL, k)); completions=:noncentered)
         m = brm_nlme_model(rk; ad_backend=NLME_AD, subject_group=:region,
@@ -177,41 +172,19 @@ end
         η = 0.1 .* sin.(1:length(m.view.subject_coordinates[1]))
         gradient() = brm_nlme_loglikelihood_and_gradient(m, 1, θ, σ, η)
         gradient(); gradient()
-        # Region 1's compact cell gradients, one cell group at a time.
         t = BRM._brm_svi_target(m)
         g = first(BRM._brm_nlme_prior_median_point(m))[t.globals]
-        values = vcat(g, η)[t.order[1]]
-        cell_gradient = zeros(length(values))
-        cells = map(enumerate(m.cell_query)) do (k, cell)
-            run() = for (j, p) in enumerate(cell.positions[1])
-                BRM._brm_nlme_plan_cell!(cell_gradient, t.plan, m.unit, 1, k, j, p,
-                    values)
-            end
-            run(); run()
-            cell.names => minimum(@allocated(run()) for _ in 1:3)
-        end
-        # Each cell selects the globals and the draws it reads, not its
-        # region's whole block, so a call's work does not grow with the region.
-        for (k, cell) in enumerate(m.cell_query), j in eachindex(cell.positions[1])
-            @test length(t.plan.selections[1][k][j]) == length(t.plan.buffers[k].active)
-        end
-        @test all(b -> length(b.active) < length(t.indices[1]), t.plan.buffers)
         gg, gz = zeros(length(t.globals)), zeros(length(η))
+        unit() = BRM._brm_svi_unit_term!(gg, gz, t, 1, g, η)
+        unit(); unit()
         (; result=gradient(), bytes=minimum(@allocated(gradient()) for _ in 1:3),
-           cells, unit=(BRM._brm_svi_unit_term!(gg, gz, t, 1, g, η), copy(gg), copy(gz)))
+           unit_bytes=minimum(@allocated(unit()) for _ in 1:3),
+           unit=(unit(), copy(gg), copy(gz)))
     end
     @test measured[2].result[1] ≈ measured[1].result[1] rtol=1e-12
     @test measured[2].result[2] ≈ measured[1].result[2] rtol=1e-10
     @test measured[2].bytes <= 1.5measured[1].bytes
-    # Every cell group, the totals included, costs the same at 3 and 9 regions.
-    # With the totals' former emission (`ones(length(total[i])) .* s` cells,
-    # observed through `flatten_cells`) the totals group grew 632,016 B ->
-    # 1,624,032 B from 3 to 9 regions; now it is 141,888 B at both.
-    @test first.(measured[2].cells) == first.(measured[1].cells) ==
-        [(:total,), (:x1_obs,)]
-    for ((_, b1), (_, b3)) in zip(measured[1].cells, measured[2].cells)
-        @test b3 <= 1.1b1
-    end
+    @test measured[2].unit_bytes <= 1.5measured[1].unit_bytes
     @test measured[2].unit[1] ≈ measured[1].unit[1] rtol=1e-12
     @test measured[2].unit[3] ≈ measured[1].unit[3] rtol=1e-10
 end

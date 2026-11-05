@@ -676,11 +676,46 @@ end
         BRM._rk_layout_coordinate_names(backend))
     @test length(drawn) == count(ismissing, d.w)
     plate = m.cell_query[1]
+    footprint = BRM._rk_nlme_cell_footprint_query(plate.query)
+    own_drawn(i) = intersect(drawn, reduce(vcat,
+        [BRM._rk_nlme_cell_footprint(footprint, u, k) for k in plate.positions[i]]))
+    # The drawn entries are shared coordinates: the view gives them to no subject.
+    # The model's own query declares the subjects' effects `partitioned`, so RK
+    # caches what shared coordinates produce and compares each of them by value on
+    # every call (`prepare_cell_query`). A recording point cannot tell that
+    # comparison from a read by the cell, so the cell's reads are measured twice.
+    shared = findall(iszero, m.view.subject)
+    @test drawn ⊆ shared
+    # Without the declaration there is no cache: every recorded read is the cell's.
+    uncached = BRM._rk_nlme_cell_query(backend, plate.names, (), u)
     for i in 1:n
         point = BRM._BRMNLMERecordingPoint(u, Int[])
-        foreach(k -> BRM._rk_nlme_cell_value(plate.query, point, k), plate.positions[i])
+        foreach(k -> BRM._rk_nlme_cell_value(uncached, point, k), plate.positions[i])
         observed_here = !ismissing(d.w[findfirst(==(levels[i]), d.subject)])
         @test length(unique(intersect(point.seen, drawn))) == (observed_here ? 0 : 1)
+        @test Set(intersect(point.seen, drawn)) == Set(own_drawn(i))
+    end
+    # The model's own query at a filled cache: the comparison reads each shared
+    # coordinate once per call, and what is left is the cell's. It reads its
+    # subject's effects and no drawn entry, whose value comes from the cache.
+    for i in 1:n
+        rows = plate.positions[i]
+        foreach(k -> BRM._rk_nlme_cell_value(plate.query, u, k), rows)
+        point = BRM._BRMNLMERecordingPoint(u, Int[])
+        foreach(k -> BRM._rk_nlme_cell_value(plate.query, point, k), rows)
+        cell_reads = [j for j in unique(point.seen)
+            if count(==(j), point.seen) > (j in shared ? length(rows) : 0)]
+        @test Set(cell_reads) == Set(m.view.subject_coordinates[i])
+    end
+    # The cache never changes a value: moving an effect keeps it, moving a drawn
+    # entry refreshes it.
+    moved_effect = copy(u)
+    moved_effect[m.view.subject_coordinates[1]] .+= 0.25
+    moved_drawn = copy(moved_effect)
+    moved_drawn[drawn] .+= 0.5
+    for point in (moved_effect, moved_drawn), rows in plate.positions, k in rows
+        @test BRM._rk_nlme_cell_value(plate.query, point, k) ≈
+            BRM._rk_nlme_cell_value(uncached, point, k) rtol=1e-12
     end
 end
 
