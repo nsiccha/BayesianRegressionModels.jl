@@ -130,15 +130,28 @@ end
         y ~ Normal(mu, 0.5)
     end
     artifact = BRM.emit_rk_artifact(brmi; case_id="gensym-provider-binding")
-    @test length(artifact.bindings) == 1
-    stored_name = first(artifact.bindings).first
-    @test occursin(string(stored_name), sprint(show, artifact.defs))
+    # Emission also retains distribution constructors. Select the provider's
+    # leaf by callable identity, independently of other bindings and their order.
+    stored_bindings = filter(binding ->
+        last(binding) === ArtifactGensymBindingSource.native_affine, artifact.bindings)
+    @test length(stored_bindings) == 1
+    stored_name = first(only(stored_bindings))
+    @test (:Normal => Normal) in artifact.bindings
+    @test stored_name in BRM._rk_source_symbols!(Set{Symbol}(), artifact.defs)
     fresh = BRM._rk_emit_ast(artifact.plan)
-    @test length(fresh.bindings) == 1
-    @test first(fresh.bindings).first != stored_name
+    fresh_bindings = filter(binding ->
+        last(binding) === ArtifactGensymBindingSource.native_affine, fresh.bindings)
+    @test length(fresh_bindings) == 1
+    fresh_name = first(only(fresh_bindings))
+    @test fresh_name != stored_name
+    fresh_symbols = BRM._rk_source_symbols!(Set{Symbol}(), fresh.defs)
+    @test fresh_name in fresh_symbols
+    @test stored_name ∉ fresh_symbols
 
     roundtripped = BRM.read_rk_artifact(BRM.write_rk_artifact(
         joinpath(mktempdir(), "gensym-provider-binding.jls"), artifact))
+    @test _structural_equal(roundtripped.bindings, artifact.bindings)
+    @test roundtripped.defs == artifact.defs
     translated = BRM.rk_translate_artifact(roundtripped)
     model = build_kernel(translated)
     for u in ([0.0], [0.3], [-0.4])
