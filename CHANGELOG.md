@@ -12,6 +12,31 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.211
+
+- Changed: on `RKBRMI`, a data scalar a prior reads is a runtime input of the
+  program instead of a number folded into it (user principle `0ikeidi`). That
+  covers `sigma ~ Exponential(s)`, a declared vector `z[1:n] .~ LogNormal.(mu, sd)`,
+  an expression over scalars (`LogNormal(log(s), 0.3)`), a scalar an assignment
+  reads, population-effect priors, and the hyperparameter priors of `gp`, `hsgp`,
+  `car`, `cdar` and `dar` terms. Two data sets that differ only in such a value
+  emit the same program, lower to the same program and prepare the same
+  `prepare_query` type, and the densities are unchanged. `rk_bound_data` now holds
+  these names, and the emitted source spells them instead of their numbers.
+- Changed: a stated `cor(:, ID) ~ LKJCholesky(K, eta)` no longer spells `eta` in
+  the program on either backend. RKBRMI reads a data field by name and a literal
+  through a generated input; SBBRMI reads a generated data field,
+  `<block>_lkj_eta`. A frozen RK replay still refuses data holding another value
+  of a prior's scalar, `eta` included, and a fresh replay
+  (`freeze_constants=false`) takes it. A Stan replay keeps the fit's `eta`.
+- Not changed: a literal an author writes in a prior (`Exponential(1.7)`) stays in
+  that author's source. Truncation and restriction bounds, `Uniform` bounds,
+  `MvNormal` scale, `Dirichlet` concentration and `Horseshoe` scales are still
+  folded or refused. ReactiveKernels' `prepare_sampler` still specializes on a
+  bound scalar's value (ReactiveKernels snag `prepare-sampler-e69f1b38`), and
+  changed extents still change the lowered program
+  (`rkppl-sized-vect-69604d32`).
+
 ## 0.2.210
 
 - Fixed: on `RKBRMI`, a formula response whose law reads data, such as

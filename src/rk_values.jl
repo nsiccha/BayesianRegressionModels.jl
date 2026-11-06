@@ -12,6 +12,8 @@ end
 _RKValuePlan(regression, assignments, observations, columns) =
     _RKValuePlan(regression, assignments, observations, columns, ())
 _rk_extent_bindings(plan::_RKValuePlan) = _rk_extent_bindings(plan.regression)
+_rk_input_bindings(plan::_RKValuePlan) = _rk_input_bindings(plan.regression)
+_rk_generated_inputs(plan::_RKValuePlan) = _rk_generated_inputs(plan.regression)
 
 _rk_value_invlogit(x) = logistic(x)
 brm_invprobit(x) = 0.5erfc(-x / sqrt(2))
@@ -232,6 +234,9 @@ _rk_ast_student_t_nu(dist::_BRMRanefStudentT, bindings, taken) =
     dist.nu isa Real ? dist.nu :
         _rk_value_expr!(bindings, _brm_prepare_expr(dist.nu), taken)
 
+# The value a block's correlation prior reads (`_RKRanefBucket.eta_input`).
+_rk_bucket_eta(bucket) = something(bucket.eta_input, bucket.lkj_eta)
+
 function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings;
         level_indices, level_sources=Dict{Symbol,Symbol}(), predictors=(),
         population_priors=Dict(), coordinates=nothing)
@@ -251,7 +256,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
     if grouping.form === :gr
         priors = _rk_ast_bucket_scale_priors(bucket, bindings, taken)
         _rk_ast_stratified_group_component!(definitions, stmts, taken, draws,
-            group, grouping.by, K, bucket.lkj_eta, priors)
+            group, grouping.by, K, _rk_bucket_eta(bucket), priors)
         # One scale row and factor per stratum of `by`: `tau[levels(by), 1:K]`,
         # or one `tau_k[levels(by)]` per margin when the margins' laws differ
         # (`_rk_ast_stratum_scales`), and `L[levels(by)]`, one `K × K ×
@@ -273,7 +278,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         _rk_ast_ranef_r2d2!(definitions, stmts, bucket, tau, bindings, taken,
             predictors, population_priors; stem_base=draws)
         _rk_ast_group_component!(definitions, stmts, taken, draws, levels_of, K,
-            bucket.lkj_eta, (); scale_value=tau)
+            _rk_bucket_eta(bucket), (); scale_value=tau)
     else
         priors = _rk_ast_bucket_scale_priors(bucket, bindings, taken)
         # Known values (`sd(...) = value`, `cor(:, ID) = R`) are constants: a
@@ -290,7 +295,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
                 (Expr(:vect, factor[:, j]...) for j in axes(factor, 2))...)))
         end
         _rk_ast_group_component!(definitions, stmts, taken, draws, levels_of, K,
-            bucket.lkj_eta, priors;
+            _rk_bucket_eta(bucket), priors;
             nu=_rk_ast_student_t_nu(bucket.dist, bindings, taken), L_value)
         # Plain groups retain semantic transport metadata at their actual
         # component-owned declarations; other grouping forms remain unpaired.
@@ -1065,7 +1070,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     consts = _rk_data_constants!(Dict{Symbol,Float64}(a.name => Float64(a.expression)
         for a in ordinary_assignments if a.expression isa Number), context.data)
     parameters = _rk_plan_parameters!(prepared, context.data, consts,
-        Dict{Symbol,Symbol}(), parameter_names, assignment_names; retain_lkj_inputs=true)
+        Dict{Symbol,Symbol}(), parameter_names, assignment_names)
     vectors = [_rk_plan_vector_parameters!(prepared, context.data, consts,
         Dict{Symbol,Symbol}(), parameter_names, assignment_names); threshold_vectors]
     predictor_order = Symbol[op.name for op in program.operations
@@ -1140,7 +1145,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     regression = _RKStructuralPlan(_RKLikelihoodSpec[], components.predictors,
         components.priors, parameters, _RKAssignmentSpec[], derived, columns,
         0, components.buckets, vectors, components.r2d2_priors,
-        components.horseshoe_priors)
+        components.horseshoe_priors, _rk_scalar_inputs(context.data))
     _RKValuePlan(regression, assignments, obs, value_columns, Tuple(completions))
 end
 

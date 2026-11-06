@@ -169,8 +169,32 @@ function _rk_source_data_columns(plan, emitted)
             "RK source: vector extent input `$name` collides with another binding")
         columns[name] = value
     end
+    # A number the program reads by name is an input of it. A name bound to a
+    # number pins a declaration of that name, so those are never inputs.
+    inputs = _rk_input_bindings(plan)
+    if !isempty(inputs)
+        reads = _rk_program_value_reads(emitted)
+        declared = copy(computed)
+        foreach(statement -> _rk_source_outputs!(declared, statement), emitted.main.args)
+        for (name, value) in inputs
+            name in reads && !(name in declared) && !haskey(columns, name) &&
+                (columns[name] = value)
+        end
+    end
     columns
 end
+
+# The numbers a plan can bind: the data's numeric scalars, and a generated input
+# for a block's literal `lkj_eta`.
+_rk_input_bindings(_plan) = Dict{Symbol,Any}()
+function _rk_input_bindings(plan::_RKStructuralPlan)
+    generated = _rk_generated_inputs(plan)
+    isempty(generated) ? plan.inputs : merge(plan.inputs, generated)
+end
+_rk_generated_inputs(_plan) = Dict{Symbol,Any}()
+_rk_generated_inputs(plan::_RKStructuralPlan) = Dict{Symbol,Any}(
+    bucket.eta_input => bucket.lkj_eta for bucket in plan.ranef_buckets
+    if bucket.eta_input isa Symbol && !haskey(plan.inputs, bucket.eta_input))
 
 _rk_extent_bindings(_plan) = ()
 _rk_extent_bindings(plan::_RKStructuralPlan) =
@@ -1753,7 +1777,7 @@ end
 function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         values::Bool=false, reserved=(), coordinates=nothing,
         lone_intercepts=Dict{Symbol,Any}(), documentation=())
-    taken = union(Set(keys(plan.columns)),
+    taken = union(Set(keys(plan.columns)), Set(keys(_rk_input_bindings(plan))),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
         Set(p.name for p in plan.predictors),

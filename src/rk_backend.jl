@@ -415,7 +415,16 @@ struct _RKRanefBucket
     # (src/level_correlation.jl); the block's draws are multiplied on the left
     # by its Cholesky factor before the rows gather them.
     level_cor::Union{Nothing,_BRMLevelCorrelation}
+    # What the program reads for a stated `cor(:, ID) ~ LKJCholesky(K, eta)`: the
+    # data field by name (or an expression over it), or a generated input holding
+    # a literal `lkj_eta`. `nothing` for the default law, which reads no number
+    # of the model.
+    eta_input::Any
 end
+_RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping, sd_priors,
+        decomposition, dist, known_cor, level_cor) =
+    _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping,
+        sd_priors, decomposition, dist, known_cor, level_cor, nothing)
 _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping, sd_priors,
         decomposition, dist, known_cor) =
     _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping,
@@ -463,7 +472,17 @@ struct _RKStructuralPlan
     vector_parameters::Vector{_RKVectorParameter}
     r2d2_priors::Vector{_RKR2D2Prior}
     horseshoe_priors::Vector{_RKHorseshoePrior}
+    # The data's numeric scalars. A statement reads one by name, and
+    # `_rk_source_data_columns` binds those read: a number is a runtime input of
+    # the program, not a literal of it (user principle `0ikeidi`).
+    inputs::Dict{Symbol,Any}
 end
+_RKStructuralPlan(responses, predictors, population_priors, parameters, assignments,
+        derived, columns, n_obs, ranef_buckets, vector_parameters, r2d2_priors,
+        horseshoe_priors) =
+    _RKStructuralPlan(responses, predictors, population_priors, parameters, assignments,
+        derived, columns, n_obs, ranef_buckets, vector_parameters, r2d2_priors,
+        horseshoe_priors, Dict{Symbol,Any}())
 
 # A submodel-bearing emitted program: `defs` are surface-spelling
 # `sm(args...) = begin ... end` definitions (the extension evaluates
@@ -3535,7 +3554,7 @@ function _rk_materialize_effect_prior(expression, target::Symbol, label::Symbol;
     isfinite(scale) && scale > 0 || error(
         "$prefix: predictor `$target` population-effect `$head` scale " *
         "for `$label` must be finite and positive")
-    (nameof(head), (location, scale))
+    (nameof(head), (_rk_effect_spelling(raw[1], location), _rk_effect_spelling(raw[2], scale)))
 end
 
 function _rk_effect_studentt_args(expression::ExprColumn, target::Symbol,
@@ -3574,7 +3593,8 @@ function _rk_effect_studentt_args(expression::ExprColumn, target::Symbol,
     isfinite(s) && s > 0 || error(
         "$prefix: predictor `$target` population-effect StudentT " *
         "scale for `$label` must be finite and positive")
-    (:StudentT, (nu, mu, s))
+    (:StudentT, (_rk_effect_spelling(only(bargs), nu), _rk_effect_spelling(mu_raw, mu),
+        _rk_effect_spelling(s_raw, s)))
 end
 
 function _rk_effect_flat_args(expression::ExprColumn, target::Symbol,
@@ -4724,8 +4744,10 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
         end
         eta = override === nothing ? bucket.lkj_eta : override.lkj_eta
         sd_priors = override === nothing ? bucket.sd_priors : override.sd_prior
+        marginal = 0.0
         if reduced
-            eta += (length(all_margins) - length(bucket.margins)) / 2
+            marginal = (length(all_margins) - length(bucket.margins)) / 2
+            eta += marginal
             override === nothing || (sd_priors = sd_priors[positions])
         end
         known_cor = override === nothing ? nothing : override.known_cor
@@ -4748,13 +4770,27 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
             bucket.margins, bucket.slices, eta, bucket.label,
             bucket.grouping, sd_priors, decomposition, dist,
             known_cor !== nothing && size(known_cor, 1) >= 2 ? known_cor : nothing,
-            bucket.level_cor)
+            bucket.level_cor,
+            _rk_ranef_eta_input(bucket, override, known_cor, marginal, columns, taken))
         buckets[i] = replacement
         for (key, value) in lookup
             value === bucket && (lookup[key] = replacement)
         end
     end
     buckets, lookup
+end
+
+# What the program reads for a stated `cor(:, ID) ~ LKJCholesky(K, eta)` (user
+# principle `0ikeidi`): the data field by name, plus an omitted response's
+# marginal shift, or a generated input holding a literal's number. The default
+# law and a known correlation read none.
+function _rk_ranef_eta_input(bucket, override, known_cor, marginal, columns, taken)
+    (override === nothing || known_cor !== nothing || !override.has_cor ||
+        length(bucket.margins) < 2) && return nothing
+    source = override.lkj_eta_source
+    source === nothing && return _rk_mint_generated!(taken, columns,
+        string(bucket.label, "_lkj_eta"))
+    marginal == 0 ? source : Expr(:call, :+, source, marginal)
 end
 
 # Offset-only predictors (SB-admitted) carry no coefficient columns,
@@ -4953,9 +4989,19 @@ const _RK_GP_HYPER_ADMITTED = "LogNormal, InverseGamma, Gamma, Exponential, " *
 _rk_term_parameter(sampled, prior) = sampled(prior)
 _rk_term_parameter(_sampled, known::_BRMKnownTermValue) = known
 
-# A literal-only term prior takes a numeric data scalar as its number, as a
-# population prior does: `sd(:, gp(x)) ~ Exponential(scale)`.
+# A literal-only term prior takes a numeric data scalar at its number, for its
+# support checks, as a population prior does: `sd(:, gp(x)) ~ Exponential(scale)`.
 _rk_literal_prior_args(prior) = map(arg -> something(_brm_effect_number(arg), arg), getargs(prior))
+
+# How the program spells such an argument, once its number passed those checks:
+# a data scalar by name, so one program serves every value (user principle
+# `0ikeidi`); anything else at its number.
+_rk_effect_spelling(arg, value) = _rk_effect_spelling(arg, value, _brm_effect_number(arg))
+_rk_effect_spelling(arg, value, ::Nothing) = value
+_rk_effect_spelling(arg::NamedColumn, value, ::Real) =
+    parent(arg) isa DataColumn ? name(arg) : value
+_rk_effect_spelling(_arg, value, ::Real) = value
+_rk_effect_spellings(prior, values) = map(_rk_effect_spelling, Tuple(getargs(prior)), values)
 
 function _rk_gp_hyper_prior(prior, role::String, target::Symbol, axis::Symbol;
                             term::String="gp")
@@ -4982,7 +5028,8 @@ function _rk_gp_hyper_prior(prior, role::String, target::Symbol, axis::Symbol;
         scale isa Number && isfinite(Float64(scale)) || error(
             "$prefix: $where prior hyperparameters must be " *
             "finite literals")
-        return (:Normal, (0.0, Float64(scale)), :positive)
+        return (:Normal, (0.0, _rk_effect_spelling(getargs(prior)[2], Float64(scale))),
+            :positive)
     end
     (name === :LogNormal || name === :InverseGamma || name === :Gamma ||
         name === :Exponential) || error(
@@ -4998,7 +5045,7 @@ function _rk_gp_hyper_prior(prior, role::String, target::Symbol, axis::Symbol;
             "finite literals")
         Float64(arg)
     end
-    (name, Tuple(resolved), nothing)
+    (name, _rk_effect_spellings(prior, Tuple(resolved)), nothing)
 end
 
 # ---- areal fields (car; mirrors `_sb_car_icar` / `_sb_car_bym2`) ----
@@ -5026,7 +5073,7 @@ function _rk_car_mixing_prior(prior, target::Symbol, area::Symbol)
     lo, hi = Float64.(args)
     name === :Uniform && !(0 <= lo < hi <= 1) && error(
         "$prefix: $where prior `Uniform($lo, $hi)` must stay inside [0, 1]")
-    (name, (lo, hi), nothing)
+    (name, name === :Uniform ? (lo, hi) : _rk_effect_spellings(prior, (lo, hi)), nothing)
 end
 
 function _rk_plan_car_term!(prepared::_BRMPreparedTerm{typeof(car)},
@@ -5108,10 +5155,11 @@ function _rk_cdar_rho_prior(prior, target::Symbol, source::Symbol)
         "$prefix: $where prior `$name` needs two finite literal arguments")
     a, b = Float64.(args)
     # SB declares `rho` on [0, 1] beside the plain kernel
-    name === :Normal && return (:Normal, (a, b), (:restricted, 0.0, 1.0))
+    name === :Normal && return (:Normal, _rk_effect_spellings(prior, (a, b)),
+        (:restricted, 0.0, 1.0))
     name === :Uniform && !(0 <= a < b <= 1) && error(
         "$prefix: $where prior `Uniform($a, $b)` must stay inside [0, 1]")
-    (name, (a, b), nothing)
+    (name, name === :Uniform ? (a, b) : _rk_effect_spellings(prior, (a, b)), nothing)
 end
 
 function _rk_plan_cdar_term!(prepared::_BRMPreparedTerm{typeof(cdar)},
@@ -5985,7 +6033,7 @@ function _rk_dar_beta_prior(prior, target::Symbol, source::Symbol)
             "$prefix: $where prior hyperparameters must be finite literals")
         Float64(arg)
     end
-    (:Normal, (resolved[1], resolved[2]), :interval)
+    (:Normal, _rk_effect_spellings(prior, (resolved[1], resolved[2])), :interval)
 end
 
 function _rk_dar_sigma_prior(prior, target::Symbol, source::Symbol)
@@ -6011,7 +6059,7 @@ function _rk_dar_sigma_prior(prior, target::Symbol, source::Symbol)
         "slice 1 (a positive scale takes a half-Normal)")
     scale isa Number && isfinite(Float64(scale)) || error(
         "$prefix: $where prior hyperparameters must be finite literals")
-    (:Normal, (0.0, Float64(scale)), :positive)
+    (:Normal, (0.0, _rk_effect_spelling(getargs(prior)[2], Float64(scale))), :positive)
 end
 
 function _rk_plan_dar_term!(prepared::_BRMPreparedTerm{typeof(dar)},
@@ -6469,6 +6517,7 @@ function _rk_walk_assignment_expr!(node, name::Symbol,
             return nothing
         end
         ref in assign_names && return nothing # scalarity by the callee's walk
+        _rk_data_scalar(ref, data) && return nothing
         haskey(data, ref) && error(
             "$prefix: $origin references data column `$ref` " *
             "outside a reduction; assignments are scalar in slice 1 " *
@@ -6511,11 +6560,13 @@ function _rk_rewrite_assignment_refs!(node, consts::Dict{Symbol,Float64},
         assign_names::Set{Symbol}, data::AbstractDict, origin::String)
     node isa Number && return node
     if node isa _BRMPreparedRef
-        # Data refs pass through (the walk validates their positions);
-        # params/consts first so a data collision still resolves loudly
-        # at the name-hygiene gate rather than silently shadowing.
+        # Data refs pass through (the walk validates their positions), scalars
+        # included: the program reads those by name; params/consts first so a
+        # data collision still resolves loudly at the name-hygiene gate rather
+        # than silently shadowing.
         haskey(data, node.name) && node.name ∉ parameters &&
-            !haskey(consts, node.name) && !haskey(aliases, node.name) &&
+            (!haskey(consts, node.name) || _rk_data_scalar(node.name, data)) &&
+            !haskey(aliases, node.name) &&
             node.name ∉ assign_names && return node
         kind, value = _rk_resolve_use_ref(
             node.name, consts, aliases, parameters, assign_names, origin)
@@ -6537,7 +6588,7 @@ end
 
 function _rk_plan_parameters!(prepared, data::AbstractDict,
         consts::Dict{Symbol,Float64}, aliases::Dict{Symbol,Symbol},
-        parameters::Set{Symbol}, assign_names::Set{Symbol}; retain_lkj_inputs=false)
+        parameters::Set{Symbol}, assign_names::Set{Symbol}; retain_lkj_inputs=true)
     prefix = "RK backend"
     specs = _RKSampledParameter[]
     for parameter in prepared.parameters
@@ -6643,10 +6694,13 @@ function _rk_sampled_parameter(name::Symbol, prior::_BRMPreparedExpr,
                 parameters, assign_names,
                 "parameter `$name` prior")
             kind === :number || _rk_gate_literal_args(family, name)
-            push!(resolved, value)
+            # A data scalar stays a name, so one program serves every value.
+            push!(resolved, kind === :number && _rk_data_scalar(arg.name, data) &&
+                !(family in _RK_SAMPLED_LITERAL_ARGS) ? arg.name : value)
         else
             value = _rk_prior_argument_expr(arg, name, data,
-                consts, aliases, parameters, assign_names)
+                consts, aliases, parameters, assign_names;
+                fold=family in _RK_SAMPLED_LITERAL_ARGS)
             value isa Number || _rk_gate_literal_args(family, name)
             push!(resolved, value)
         end
@@ -6697,12 +6751,14 @@ _rk_gate_literal_args(family::Symbol, name::Symbol) =
         "values; sampled or assigned bounds are out of slice 1)")
 
 # A prior hyperparameter written as an expression (`LogNormal(log(0.7), 0.3)`)
-# has the value Julia gives it, as on SBBRMI. One reading only literals and data
-# is that number. One reading a sampled parameter or an assignment is a live
-# scalar expression in the emitted prior, which the RK graph evaluates.
+# has the value Julia gives it, as on SBBRMI. One reading only literals, or a
+# whole data column, is that number. One reading a data scalar, a sampled
+# parameter or an assignment is a live scalar expression in the emitted prior,
+# which the RK graph evaluates, so one program serves every value of the scalar
+# (`fold` asks for the number: a family whose layout reads it).
 function _rk_prior_argument_expr(arg, name::Symbol, data::AbstractDict,
         consts, aliases, parameters, assign_names;
-        origin::String="parameter `$name` prior")
+        origin::String="parameter `$name` prior", fold::Bool=false)
     rewritten = _rk_rewrite_assignment_refs!(arg, consts, aliases,
         parameters, assign_names, data, origin)
     _rk_walk_assignment_expr!(rewritten, name, data, parameters,
@@ -6715,7 +6771,8 @@ function _rk_prior_argument_expr(arg, name::Symbol, data::AbstractDict,
         isfinite(value) || error(
             "RK backend: $origin hyperparameters must be finite; " *
             "`$(_rk_lower_assignment_expr(rewritten, name))` is $value")
-        return value
+        (fold || isempty(refs) || !all(ref -> _rk_data_scalar(ref, data), refs)) &&
+            return value
     end
     _rk_lower_assignment_expr(rewritten, name)
 end
@@ -7104,13 +7161,19 @@ end
 
 # A scalar field of the data (including a resolved `name = constant(expr)`) is a
 # named numeric constant: a prior argument or bound may name it like a literal
-# assignment, and the graph holds its number.
+# assignment. `consts` holds its number for the planner's checks; the program
+# reads it by name (`_rk_data_scalar`, `_rk_scalar_inputs`).
 function _rk_data_constants!(consts::Dict{Symbol,Float64}, data::AbstractDict)
     for (key, value) in data
-        value isa Real && !(value isa Bool) && (consts[key] = Float64(value))
+        _rk_scalar_value(value) && (consts[key] = Float64(value))
     end
     consts
 end
+_rk_scalar_value(value) = value isa Real && !(value isa Bool)
+_rk_data_scalar(name::Symbol, data::AbstractDict) = _rk_scalar_value(get(data, name, nothing))
+# What `_RKStructuralPlan.inputs` holds.
+_rk_scalar_inputs(data::AbstractDict) = Dict{Symbol,Any}(key => value
+    for (key, value) in data if _rk_scalar_value(value))
 
 function _rk_fold_assignment_consts!(kept, data::AbstractDict,
         parameters::Set{Symbol})
@@ -8552,7 +8615,7 @@ Base.@nospecializeinfer function _brm_rk_kernel_plan(@nospecialize(brmi::BRMI))
     consts, aliases, exprs = _rk_fold_assignment_consts!(
         kept, ctx.data, parameter_names)
     parameters = _rk_plan_parameters!(prepared, ctx.data, consts, aliases,
-        parameter_names, assignment_names)
+        parameter_names, assignment_names; retain_lkj_inputs=false)
     assignments = _rk_plan_assignments!(kept, exprs, ctx.data, consts, aliases,
         parameter_names, assignment_names)
     _rk_gate_acyclic!(parameters, assignments)
@@ -9160,5 +9223,5 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     _RKStructuralPlan(response_specs, predictor_specs, prior_specs,
         parameters, assignments, derived, columns, n_obs, ranef_buckets,
         [vector_specs; implicit_vectors; components.vectors],
-        r2d2_specs, hs_specs)
+        r2d2_specs, hs_specs, _rk_scalar_inputs(context.data))
 end

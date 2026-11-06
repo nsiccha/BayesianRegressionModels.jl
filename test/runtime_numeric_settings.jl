@@ -14,10 +14,17 @@
 #   * a frozen replay keeps the fitted value and refuses a design holding
 #     another one; a fresh replay takes the new value.
 #
+# The prior path is checked the same way (todo `0njkjzr`): a data scalar a prior
+# reads, and a block's LKJ `eta`, are inputs. Besides the emitted source, the RK
+# lowering's program and prepared query type stay one across values, and one
+# retained build evaluates values A, B, A against an analytic oracle, so a stale
+# bound number would show. A literal is the positive control: it is part of the
+# author's source, so it does change the program and the query type.
+#
 # Run: julia --startup-file=no --project=test test/runtime_numeric_settings.jl
 
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
-using Random
+using Random, LinearAlgebra
 
 module RuntimeSettingsModels
 using BayesianRegressionModels, Distributions
@@ -56,6 +63,86 @@ domain_model(k, domain) = brm(:(begin
     sigma ~ Exponential(1)
     mu ~ 0 + hsgp(t; k=$k, domain=$domain)
     length_scale(:, hsgp(t)) ~ truncated(LogNormal(0, 1); lower=length_scale_floor, upper=24.0)
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
+isolator() = brm(:(begin
+    z[1:n] .~ LogNormal.(mu, sd)
+    y ~ Normal(z[idx], 0.2)
+end); mod=@__MODULE__)
+isolator_literal(mu, sd) = brm(:(begin
+    z[1:n] .~ LogNormal.($mu, $sd)
+    y ~ Normal(z[idx], 0.2)
+end); mod=@__MODULE__)
+# A prior's scalar argument on each route that plans one.
+scale_prior() = brm(:(begin
+    sigma ~ Exponential(s)
+    m ~ 1 + x
+    y ~ Normal(m, sigma)
+end); mod=@__MODULE__)
+scale_prior_literal(s) = brm(:(begin
+    sigma ~ Exponential($s)
+    m ~ 1 + x
+    y ~ Normal(m, sigma)
+end); mod=@__MODULE__)
+value_route_prior() = brm(:(begin
+    sigma ~ Exponential(s)
+    a ~ Normal(0, 1)
+    c = a + 1
+    y ~ Normal(c, sigma)
+end); mod=@__MODULE__)
+derived_prior() = brm(:(begin
+    sigma ~ LogNormal(log(s), 0.3)
+    m ~ 1 + x
+    y ~ Normal(m, sigma)
+end); mod=@__MODULE__)
+derived_prior_literal(s) = brm(:(begin
+    sigma ~ LogNormal(log($s), 0.3)
+    m ~ 1 + x
+    y ~ Normal(m, sigma)
+end); mod=@__MODULE__)
+assigned_prior() = brm(:(begin
+    rate = 2 * s
+    sigma ~ Exponential(rate)
+    m ~ 1 + x
+    y ~ Normal(m, sigma)
+end); mod=@__MODULE__)
+population_prior() = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x
+    effect(mu, x) ~ Normal(loc, scale)
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
+population_prior_literal(loc, scale) = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x
+    effect(mu, x) ~ Normal($loc, $scale)
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
+term_priors() = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 0 + hsgp(x; k=5)
+    sd(:, hsgp(x)) ~ Exponential(rate)
+    length_scale(:, hsgp(x)) ~ LogNormal(lm, ls)
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
+term_priors_literal(rate, lm, ls) = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 0 + hsgp(x; k=5)
+    sd(:, hsgp(x)) ~ Exponential($rate)
+    length_scale(:, hsgp(x)) ~ LogNormal($lm, $ls)
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
+block_sd_prior() = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 + x | p | subject)
+    sd(:, p) ~ Exponential(rate)
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
+stratified_lkj(K, eta) = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 + x | p | gr(subject, by=stratum))
+    sd(:, p) ~ Exponential(1)
+    cor(:, p) ~ LKJCholesky($K, $eta)
     y ~ Normal(mu, sigma)
 end); mod=@__MODULE__)
 end
@@ -184,4 +271,201 @@ end
     @test !isempty(support)
     @test all(k -> isequal(replayed[k], rebuilt[k]), support)
     @test !all(k -> isequal(BRM.stan_data(sb_field)[k], rebuilt[k]), support)
+end
+
+# ---- prior-read scalars and a block's LKJ eta (todo `0njkjzr`) ---------------
+
+const ISOLATOR = (; y=[0.3, 0.1, 0.2, 0.6], idx=[1, 2, 2, 3], n=3)
+const VALUE_A, VALUE_B = (; mu=0.1, sd=0.5), (; mu=0.7, sd=1.3)
+const STRATA = merge(LDATA, (; stratum=[1, 1, 1, 1, 2, 2]))
+
+emitted_program(rk) = BRM._rk_program_statements(BRM._rk_emit_ast(rk.plan))
+lowered_program(rk) = string(rk.model.program)
+sampler_query(rk) = ReactiveKernelsPPL.prepare_query(rk.model, rk_bound_plan(rk), :sampler)
+reverse_problem(rk) = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+
+# The models `build(d)` for `d` in `data` emit one source, lower to one program
+# and prepare one query type, read their numbers from bound inputs, and differ in
+# their density.
+function check_one_lowering(label, build, data, inputs)
+    @testset "$label" begin
+        models = [RKBRMI(build(d)) for d in data]
+        @test allequal(emitted_program(rk) for rk in models)
+        @test allequal(lowered_program(rk) for rk in models)
+        @test allequal(typeof(sampler_query(rk)) for rk in models)
+        for name in inputs
+            @test all(haskey(rk_bound_data(rk), name) for rk in models)
+        end
+        u = rk_point(first(models))
+        @test !allequal(sampler_query(rk)(u) for rk in models)
+    end
+end
+
+@stestset "a prior's data scalars are inputs: one source, program and query type" begin
+    check_one_lowering("declared vector, the isolator", RSM.isolator(),
+        [merge(ISOLATOR, VALUE_A), merge(ISOLATOR, VALUE_B)], (:mu, :sd))
+    check_one_lowering("scalar parameter", RSM.scale_prior(),
+        [merge(LDATA, (; s)) for s in (1.7, 2.9)], (:s,))
+    check_one_lowering("scalar parameter on the value route", RSM.value_route_prior(),
+        [(; y=LDATA.y, s) for s in (1.7, 2.9)], (:s,))
+    check_one_lowering("an expression over one", RSM.derived_prior(),
+        [merge(LDATA, (; s)) for s in (1.7, 2.9)], (:s,))
+    check_one_lowering("through an assignment", RSM.assigned_prior(),
+        [merge(LDATA, (; s)) for s in (1.7, 2.9)], (:s,))
+    check_one_lowering("population effect", RSM.population_prior(),
+        [merge(LDATA, v) for v in ((; loc=0.2, scale=1.1), (; loc=0.5, scale=1.9))], (:loc, :scale))
+    check_one_lowering("term hyperparameters", RSM.term_priors(),
+        [merge(LDATA, v) for v in ((; rate=1.7, lm=0.1, ls=0.5), (; rate=2.9, lm=0.2, ls=0.7))],
+        (:rate, :lm, :ls))
+    check_one_lowering("random-effect scale", RSM.block_sd_prior(),
+        [merge(LDATA, (; rate)) for rate in (1.7, 2.9)], (:rate,))
+end
+
+@stestset "a literal changes the program and the query type: the probes can fail" begin
+    # Positive control for the query-type and lowered-program identity above.
+    a = RKBRMI(RSM.isolator_literal(0.1, 0.5)(ISOLATOR))
+    b = RKBRMI(RSM.isolator_literal(0.7, 1.3)(ISOLATOR))
+    @test emitted_program(a) != emitted_program(b)
+    @test lowered_program(a) != lowered_program(b)
+    @test typeof(sampler_query(a)) != typeof(sampler_query(b))
+end
+
+@stestset "a data scalar prior is its literal twin" begin
+    for (field, literal) in (
+            (RSM.isolator()(merge(ISOLATOR, VALUE_B)), RSM.isolator_literal(0.7, 1.3)(ISOLATOR)),
+            (RSM.scale_prior()(merge(LDATA, (; s=1.7))), RSM.scale_prior_literal(1.7)(LDATA)),
+            (RSM.derived_prior()(merge(LDATA, (; s=1.7))), RSM.derived_prior_literal(1.7)(LDATA)),
+            (RSM.population_prior()(merge(LDATA, (; loc=0.2, scale=1.1))),
+                RSM.population_prior_literal(0.2, 1.1)(LDATA)),
+            (RSM.term_priors()(merge(LDATA, (; rate=1.7, lm=0.1, ls=0.5))),
+                RSM.term_priors_literal(1.7, 0.1, 0.5)(LDATA)))
+        rk_field, rk_literal = RKBRMI(field), RKBRMI(literal)
+        @test coordinate_names(rk_field.model.layout) == coordinate_names(rk_literal.model.layout)
+        u = rk_point(rk_literal)
+        @test rk_density(rk_field, u) ≈ rk_density(rk_literal, u) atol=1e-12 rtol=1e-12
+        check_rk_source_roundtrip(rk_field)
+    end
+end
+
+# The isolator's density on the unconstrained scale. `z = exp(u)`, so the prior
+# and its log Jacobian together are `Normal(mu, sd)` of `u`.
+function isolator_oracle(data, u)
+    z = exp.(u)
+    prior = sum(logpdf.(Normal(data.mu, data.sd), u))
+    prior + sum(logpdf.(Normal.(z[data.idx], 0.2), data.y))
+end
+function isolator_gradient(data, u)
+    z = exp.(u)
+    gradient = @. -(u - data.mu) / data.sd^2
+    for (y, j) in zip(data.y, data.idx)
+        gradient[j] += (y - z[j]) / 0.2^2 * z[j]
+    end
+    gradient
+end
+
+@stestset "one retained build reads the bound prior values: A, B, A" begin
+    build = RSM.isolator()
+    A, B = merge(ISOLATOR, VALUE_A), merge(ISOLATOR, VALUE_B)
+    rk = RKBRMI(build(A))
+    u = rk_point(rk)
+    backend = AutoEnzyme(; mode=Enzyme.Reverse)
+    replays = [reprocess(rk, d; freeze_constants=false) for d in (A, B, A)]
+    @test allequal(lowered_program(replay) for replay in replays)
+    @test all(replay -> typeof(replay.model) == typeof(rk.model), replays)
+    # The fit's build evaluates each binding (`rkppl-use` §14, "Rebinding").
+    plans = rk_bound_plan.(replays)
+    @test allequal(typeof.(plans))
+    @test allequal(typeof.(ReactiveKernelsPPL.prepare_query.(Ref(rk.model), plans, :sampler)))
+    queries = [ReactiveKernelsPPL.prepare_sampler(rk.model, plan, u; backend) for plan in plans]
+    # The same values prepare the same gradient query. Other values do not yet:
+    # RK's `prepare_sampler` splices a bound scalar into its generated body
+    # (ReactiveKernels snag `prepare-sampler-e69f1b38`).
+    @test typeof(queries[1]) == typeof(queries[3])
+    @test_broken typeof(queries[1]) == typeof(queries[2])
+    for (data, query) in zip((A, B, A), queries)
+        gradient = similar(u)
+        value, _ = ReactiveKernelsPPL.sampler_value_and_gradient!(query, gradient, u)
+        @test value ≈ isolator_oracle(data, u) atol=1e-11 rtol=1e-11
+        @test gradient ≈ isolator_gradient(data, u) atol=1e-10 rtol=1e-10
+    end
+    # A and B are different laws, so the return to A cannot pass on stale values.
+    @test !(isolator_oracle(A, u) ≈ isolator_oracle(B, u))
+    @test !(isolator_gradient(A, u) ≈ isolator_gradient(B, u))
+end
+
+@stestset "a frozen replay keeps a prior's values, a fresh one takes new ones" begin
+    build = RSM.isolator()
+    A, B = merge(ISOLATOR, VALUE_A), merge(ISOLATOR, VALUE_B)
+    rk = RKBRMI(build(A))
+    u = rk_point(rk)
+    @test_throws "prior input: mu = 0.7" reprocess(rk, B)
+    @test_throws "prior input: sd = 1.3" reprocess(rk, merge(A, (; sd=1.3)))
+    # Omitted or repeated values are the fit's.
+    omitted = (; y=ISOLATOR.y, idx=ISOLATOR.idx, n=ISOLATOR.n)
+    @test rk_density(reprocess(rk, omitted), u) == rk_density(rk, u)
+    @test rk_density(reprocess(rk, A), u) == rk_density(rk, u)
+    @test rk_density(reprocess(rk, B; freeze_constants=false), u) ≈
+        isolator_oracle(B, u) atol=1e-11 rtol=1e-11
+    # A data-free replay carries them in its state, and refuses others alike.
+    state = brm_fitted_state(rk)
+    @test rk_density(RKBRMI(build(omitted), state), u) == rk_density(rk, u)
+    @test_throws "prior input: mu = 0.7" RKBRMI(build(B), state)
+    # A design binder reuses them too.
+    binder = rk_design_binder(rk)
+    @test isequal(binder(omitted), rk_bound_data(reprocess(rk, omitted)))
+    @test_throws "changes the fitted RK program" binder(B)
+end
+
+lkj_data(eta) = merge(LDATA, (; K=2, eta))
+
+@stestset "one program for every LKJ eta, on both backends" begin
+    field = RSM.lkj_model(:K, :eta)
+    check_one_program("field", _ -> field, (1.7, 2.9); data=lkj_data)
+    check_one_program("literal", eta -> RSM.lkj_model(2, eta), (1.7, 2.9); data=_ -> LDATA)
+    check_one_lowering("field lowering", field, [lkj_data(1.7), lkj_data(2.9)], (:eta,))
+    check_one_lowering("literal lowering", eta -> RSM.lkj_model(2, eta)(LDATA), [1.7, 2.9], ())
+    @testset "stratified block" begin
+        check_one_lowering("field", RSM.stratified_lkj(:K, :eta),
+            [merge(STRATA, (; K=2, eta)) for eta in (1.7, 2.9)], (:eta,))
+    end
+    # Stan reads it as data: the value reaches the data block, not the program.
+    field_sb = stan_inputs(field(lkj_data(1.7))), stan_inputs(field(lkj_data(2.9)))
+    keys_eta = [k for k in keys(first(field_sb)) if endswith(string(k), "_lkj_eta")]
+    @test length(keys_eta) == 1
+    @test first(field_sb)[only(keys_eta)] == 1.7
+    @test last(field_sb)[only(keys_eta)] == 2.9
+    @test !occursin("1.7", stan_program(field(lkj_data(1.7))))
+end
+
+# A two-margin block's factor is `L[2, 1] = tanh(u)`, so two concentrations differ
+# by the LKJ density of that one coordinate at each.
+function lkj_coordinate_density(u, eta)
+    r = tanh(u)
+    logpdf(LKJCholesky(2, eta), Cholesky(LowerTriangular([1.0 0.0; r sqrt(1 - r^2)])))
+end
+
+@stestset "a block's eta reaches the density" begin
+    field = RSM.lkj_model(:K, :eta)
+    a, b = RKBRMI(field(lkj_data(1.7))), RKBRMI(field(lkj_data(2.9)))
+    names = coordinate_names(a.model.layout)
+    index = only(findall(name -> occursin(".L", string(name)), names))
+    u = rk_point(a)
+    @test rk_density(a, u) - rk_density(b, u) ≈
+        lkj_coordinate_density(u[index], 1.7) - lkj_coordinate_density(u[index], 2.9) atol=1e-11
+    @test rk_density(a, u) == rk_density(RKBRMI(RSM.lkj_model(2, 1.7)(LDATA)), u)
+    # A frozen replay refuses another eta and a fresh one takes it; the literal's
+    # generated input is the fit's on every replay.
+    @test_throws "prior input: eta = 2.9" reprocess(a, lkj_data(2.9))
+    @test rk_density(reprocess(a, lkj_data(2.9); freeze_constants=false), u) == rk_density(b, u)
+    literal = RKBRMI(RSM.lkj_model(2, 1.7)(LDATA))
+    @test rk_density(reprocess(literal, LDATA), u) == rk_density(a, u)
+    binder = rk_design_binder(literal)
+    design = (; subject=LDATA.subject, x=LDATA.x, y=LDATA.y)
+    @test isequal(binder(design), rk_bound_data(reprocess(literal, design)))
+    @test !occursin("replayed in full", sprint(show, binder))
+    # A Stan replay keeps the fit's value in its data, as it keeps its program.
+    sb = SBBRMI(field(lkj_data(1.7)); mod=RSM)
+    replayed = BRM.stan_data(reprocess(sb, lkj_data(1.7)))
+    key = only(k for k in keys(replayed) if endswith(string(k), "_lkj_eta"))
+    @test replayed[key] == 1.7
 end
