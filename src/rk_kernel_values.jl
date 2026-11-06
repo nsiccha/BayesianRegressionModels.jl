@@ -543,8 +543,10 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             # A response holding one array per subject is observed per subject
             # (RKPPL nested plates).
             input = inputs[index]
+            input.kind === :element && haskey(columns, input.source) &&
+                (columns[input.source] = _rk_cell_response_values(columns[input.source], callable))
             nested = input.kind === :gather || (input.kind === :element &&
-                _rk_cells_hold_arrays(get(columns, input.source, nothing)))
+                get(columns, input.source, nothing) isa AbstractVector{<:AbstractArray})
             push!(observations, (; source, param=lhs, callable,
                 arguments=values, argument_names, weight, weight_name, nested,
                 modifier, bounds, input))
@@ -1158,7 +1160,8 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
             # The response stays one array per subject. Each argument and the
             # weight is read per subject or shared, as the cell reads it.
             response = observation.input.kind === :gather ?
-                _rk_gather_rows(raw, kernel.columns[observation.input.rows]) : raw
+                _rk_gather_rows(raw, kernel.columns[observation.input.rows]) :
+                _rk_cell_response_values(raw, observation.callable)
             _rk_validate_cell_bounds(kernel, observation, response, program.context.data)
             plan.columns[observation.source] = response
             routes = [_rk_kernel_cell_argument(kernel, name, argument) for (name, argument)
@@ -1687,13 +1690,23 @@ function _rk_plate_cell_value!(statements, bindings, taken, read)
     _BRMPreparedRef(name, :whole)
 end
 
-# Whether an in-cell observation's response holds one array per cell, so each
-# cell observes its own array. An empty column whose element type is erased
-# (`Any[]`, which `DataColumn` cannot narrow) has no cells to say otherwise:
-# the authored plate runs zero cells on either route, and the per-cell route is
-# the one that observes no whole-vector event, as a typed `Vector{T}[]` does.
-_rk_cells_hold_arrays(values) = values isa AbstractVector{<:AbstractArray} ||
-    values isa AbstractVector{Any} && isempty(values)
+# An in-cell observation's response as its cells are read. An empty column
+# whose element type is erased (`Any[]`, which `DataColumn` cannot narrow) has
+# no cells to say what they hold; the cell's law does. It is read as an empty
+# column of the arrays that law observes per cell, of the law's value type, as
+# the same empty data written typed would be: a matrix per cell for a
+# matrix-variate law, otherwise a vector (a vector event, or an array of scalar
+# draws), of `Int` for a discrete law and `Float64` otherwise. The plate then
+# runs zero cells over concretely typed data: zero likelihood, the priors kept,
+# and a type-stable program for native reverse AD.
+_rk_cell_response_values(values, callable) = values
+function _rk_cell_response_values(values::AbstractVector{Any}, callable)
+    isempty(values) || return values
+    type = brm_distribution_type(callable)
+    law = type isa Type && type <: Distribution
+    T = law && type <: Distribution{<:VariateForm,Discrete} ? Int : Float64
+    (law && type <: Distribution{Matrixvariate} ? Matrix{T} : Vector{T})[]
+end
 
 # Whether a flattened in-cell observation's response holds one value per cell
 # (a totals cell's `total[i]`), read from the response's own port.
