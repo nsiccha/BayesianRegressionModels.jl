@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.224
+
+- `SBBRMI` builds a `gmrf(...)` field in a `@plate for` cell again. From 0.2.172
+  every such model stopped at transpilation with `plate: N do-block params vs M
+  positional iterables`, because the plate's iterables left out the inputs the
+  field prepares. Model declarations need no changes, and `RKBRMI` was not
+  affected. A cell can also read another plate's complete cells beside its field.
+
 ## 0.2.223
 
 - Fixed: one extreme draw could stop `brm_svi_fit`'s optimization of the globals
