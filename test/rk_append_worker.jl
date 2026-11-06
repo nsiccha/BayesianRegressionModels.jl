@@ -298,7 +298,7 @@ function _worker_pins()
             info === nothing && continue
             rev = info.git_revision
             if rev === nothing && hasproperty(info, :source)
-                # Path/dev deps (the .bootstrap RK checkout) carry no
+                # Path/dev deps (the RK checkout in the test store) carry no
                 # git_revision; resolve the clone's HEAD directly.
                 try
                     rev = readchomp(`git -C $(info.source) rev-parse HEAD`)
