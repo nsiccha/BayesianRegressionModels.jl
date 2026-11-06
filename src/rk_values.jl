@@ -419,10 +419,22 @@ function _rk_ast_value_spline(definitions, term, taken)
     fitted = !isempty(fit_columns)
     if fitted
         # A basis is fitted once to its fit-role axes, a fitted value of the
-        # program (`brm_fitted_state`), and evaluated at the rows from it.
+        # program (`brm_fitted_state`), and evaluated at the rows from it. A
+        # `t2` reads its sizes from their fit-role input, through a definition
+        # of its own where other values sit beside them.
         fit = _rk_ast_fresh_name(string(term.options.id, "_fit"), taken)
         fitter = term.options.kind === :t2 ? :brm_t2_fit : :brm_tps_fit
-        push!(stmts, Expr(:(=), fit, Expr(:call, fitter, fit_columns..., kval)))
+        k_fit = get(term.options, :k_fit, nothing)
+        if k_fit !== nothing
+            sizes(name) = Expr(:tuple, Expr(:ref, name, 1), Expr(:ref, name, 2))
+            kval = sizes(k_fit)
+            push!(stmts, Expr(:(=), fit, Expr(:call, fitter, fit_columns..., kval)))
+            local_k = _rk_ast_fresh_name(string(term.options.id, "_k"), taken)
+            push!(stmts, Expr(:(=), local_k, Expr(:call, :copy, k_fit)))
+            kval = sizes(local_k)
+        else
+            push!(stmts, Expr(:(=), fit, Expr(:call, fitter, fit_columns..., kval)))
+        end
         fit_columns = (fit,)
     end
     basis = term.options.kind === :t2 ? :brm_t2_basis :

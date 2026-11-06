@@ -761,9 +761,9 @@ end
             (PublicCoordinateTransport.data_scale_hsgp, "data_scale_hsgp"))
         fixture = coordinate_transport_fixture(build(data), name)
         check_coordinate_transport(fixture)
-        # The values stay in the fitted program; a design binds none of them.
-        @test isempty(intersect(keys(rk_bound_data(fixture.rk)),
-            (:prior_sd_scale, :nu0, :rate, :other)))
+        # The value is a bound input of the program, which no statement defines.
+        @test !any(s -> Meta.isexpr(s, :(=)) && first(s.args) === :prior_sd_scale,
+            BRM._rk_emit_ast(fixture.rk.plan).main.args)
         @test isequal(data, saved)
     end
 end

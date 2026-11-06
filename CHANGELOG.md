@@ -40,10 +40,15 @@ instead of failing at run time.
 - Changed: what identifies a fit for an SVI source, an SMC frame or carried source
   and a filter now states the numbers its priors read, because the program text no
   longer does. A resume with another prior value is still refused.
+- Added: `t2(x, z; k = kk)` takes its basis sizes from a data field on both
+  backends. RKBRMI reads them from the fit-role input `<id>_k_fit`, so one emitted
+  program serves every size; the coordinates follow the sizes, and RKPPL's layout
+  follows them too (`rkppl-sized-vect-69604d32`). A frozen replay refuses another
+  size.
 - Not changed: a literal an author writes in a prior (`Exponential(1.7)`) stays in
-  that author's source. `t2` and `multigroup` `k` are still literals, a data vector
-  or matrix a prior reads is still spelled in the program, and `Horseshoe` scales
-  still refuse data on RKBRMI. ReactiveKernels' `prepare_sampler` still specializes
+  that author's source. `multigroup` `k` is still a literal, a data vector or matrix
+  a prior reads is still spelled in the program, and `Horseshoe` scales still refuse
+  data on RKBRMI. ReactiveKernels' `prepare_sampler` still specializes
   on a bound scalar's value (ReactiveKernels snag `prepare-sampler-e69f1b38`), and
   changed extents still change the lowered program
   (`rkppl-sized-vect-69604d32`).

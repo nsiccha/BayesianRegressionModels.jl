@@ -4961,8 +4961,11 @@ function _rk_plan_spline_term!(prepared::_BRMPreparedTerm{typeof(t2)},
     id = _rk_mint_smooth_id!(taken, columns, base)
     fit_columns = Tuple(_rk_fit_twin!(derived, columns, taken, data, axis)
         for axis in (first_axis, second_axis))
+    # The basis sizes are a fit-role input, so the program spells neither.
+    k = prepared.state.fit.k
+    k_fit = _rk_fit_input!(derived, columns, taken, Symbol(id, :_k), collect(Int, k))
     _RKTermSpec(:spline, [first_axis, second_axis],
-        (; id, kind=:t2, k=prepared.state.fit.k, fit_columns), id, id)
+        (; id, kind=:t2, k, k_fit, fit_columns), id, id)
 end
 
 # ---- exact-GP latent terms (mirrors `_sb_gp`/`_sb_gp_aniso`) ----

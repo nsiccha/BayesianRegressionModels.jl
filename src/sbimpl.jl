@@ -6829,6 +6829,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         replay_and_bind(_sb_df_column(df, e.raw_ref), :primary => key,
                         :penalty => e.const_.zpen_key)
     elseif e.kind === :tensor_spline
+        _sb_check_replay_settings(df, :t2, get(e.const_, :setting_fields, ()))
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :t2)
         replay_and_bind(axes, :primary => key, :rr => e.const_.zrr_key,
                         :rn => e.const_.zrn_key, :nr => e.const_.znr_key)
@@ -15248,7 +15249,8 @@ _sb_predictor_term!(stmts, data, ::typeof(t2), t;
     data[Zrn_name] = Zrn
     data[Znr_name] = Znr
     _sb_record_preproc!(data, Xfixed_name, PreprocEntry(:tensor_spline,
-        (; fit, zrr_key=Zrr_name, zrn_key=Zrn_name, znr_key=Znr_name),
+        (; fit, zrr_key=Zrr_name, zrn_key=Zrn_name, znr_key=Znr_name,
+         setting_fields=_brm_setting_fields(getkwargs(t), (:k,))),
         names, false))
     col_name = Symbol(:t2_, suffix)
     prior = _sb_term_sd_submodel(term_overrides, t; mod, data, stem=col_name)

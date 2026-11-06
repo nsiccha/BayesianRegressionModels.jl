@@ -180,6 +180,11 @@ known_cor(C) = brm(:(begin
     cor(:, p) = $C
     y ~ Normal(mu, sigma)
 end); mod=@__MODULE__)
+tensor_smooth(k) = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + t2(t, s; k=$k)
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
 end
 const RSM = RuntimeSettingsModels
 
@@ -614,4 +619,28 @@ end
     binder = rk_design_binder(literal)
     @test isequal(binder(LDATA), rk_bound_data(reprocess(literal, LDATA)))
     @test !occursin("replayed in full", sprint(show, binder))
+end
+
+@stestset "a t2 basis size is an input" begin
+    check_one_program("literal", k -> RSM.tensor_smooth(k), ((4, 6), (5, 7)))
+    check_one_program("data field", _ -> RSM.tensor_smooth(:kk), ([4, 6], [5, 7]);
+        data=k -> merge(HDATA, (; kk=k)))
+    # A data field is the literal twin, and the parameter count follows it.
+    field, literal = RKBRMI(RSM.tensor_smooth(:kk)(merge(HDATA, (; kk=[4, 6])))),
+        RKBRMI(RSM.tensor_smooth((4, 6))(HDATA))
+    u = rk_point(literal)
+    @test rk_density(field, u) ≈ rk_density(literal, u) atol=1e-12 rtol=1e-12
+    larger = RKBRMI(RSM.tensor_smooth((5, 7))(HDATA))
+    @test larger.model.layout.total > literal.model.layout.total
+    # The layout follows the size until RK's extents land
+    # (ReactiveKernels snag `rkppl-sized-vect-69604d32`).
+    @test_broken lowered_program(larger) == lowered_program(literal)
+    @test_throws "frozen replay keeps the fitted t2" reprocess(field, merge(HDATA, (; kk=[5, 7])))
+    @test reprocess(field, merge(HDATA, (; kk=[4, 6]))) isa RKBRMI
+    @test reprocess(field, merge(HDATA, (; kk=[5, 7])); freeze_constants=false).model.layout.total ==
+        larger.model.layout.total
+    sb = SBBRMI(RSM.tensor_smooth(:kk)(merge(HDATA, (; kk=[4, 6]))); mod=RSM)
+    @test_throws "replay keeps the fitted t2" reprocess(sb, merge(HDATA, (; kk=[5, 7])))
+    @test_throws "must be a 2-tuple" RKBRMI(RSM.tensor_smooth((1, 6))(HDATA))
+    @test_throws "integers greater than 2" RKBRMI(RSM.tensor_smooth(:kk)(merge(HDATA, (; kk=[1, 6]))))
 end
