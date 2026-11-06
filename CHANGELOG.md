@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.205
+
+- Fixed: `brm_start` on RKBRMI writes an ungrouped anisotropic
+  `hsgp(...; iso=false)` length scale, as `fitting.md` documents, through
+  `term_inits` and `base=:prior_median`. A scalar broadcasts over the axes; a
+  vector holds one value per axis, in formula order. Before, both raised
+  `type NamedTuple has no field rho`.
+- Fixed: an ungrouped one-axis `hsgp(x; iso=false)` on RKBRMI. Its `brm_start`
+  raised the same error, and `brm_coordinate_transport` refused it because the
+  emission samples `rho_iso` while the record named `rho_1`.
+
 ## 0.2.204
 
 - Added: epidemiological delays with a censored primary event, a censored
