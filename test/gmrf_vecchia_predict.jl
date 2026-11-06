@@ -125,6 +125,15 @@ end
     @test_throws ArgumentError VP._brm_vecchia_predict!(zeros(1), q, state, 3.0, 5.0, L, f; channels=[3])
 end
 
+@testset "a footprint equals a copy of itself and differs from another" begin
+    east, north = [0.0, 1.0, 2.0, 3.0], [0.0, 1.0, 0.0, 1.0]
+    f = VP._brm_vecchia_footprint(east, north, zeros(4), 1; neighbors=2)
+    g = deepcopy(f)
+    @test isequal(f, g) && f == g && hash(f) == hash(g)
+    h = VP._brm_vecchia_footprint(east .+ 1, north, zeros(4), 1; neighbors=2)
+    @test !isequal(f, h) && f != h
+end
+
 @testset "refusals name what is wrong" begin
     f = VP._brm_vecchia_footprint([0.0, 1.0, 2.0], [0.0, 1.0, 0.0], zeros(3), 1; neighbors=2)
     @test_throws DimensionMismatch VP._brm_vecchia_predictor(f, [0.0], [0.0, 1.0], [0.0])
