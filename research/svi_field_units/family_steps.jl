@@ -11,10 +11,18 @@ include("family_oracle.jl")
 function steps_target(name, mesh, times, reads, θ, y, roots)
     A, λ = reads.A, 1 / θ.τ^2
     Q = Matrix(kron(temporal_q(times, θ.ℓt), spatial_q(mesh, θ.ℓs)))
-    R = name === :diagonal ? Matrix{Float64}(I, size(Q)...) : roots[name](θ)
-    AR = Matrix(A) * R .* θ.σ
-    # The target's precision and information in the family's coordinates.
-    prior = name === :diagonal ? Q : Matrix{Float64}(I, size(Q)...)
+    if name === :read_diag
+        # One state per read: the prior is K⁻¹ on those states, and R maps them to the field.
+        Y = Q \ Matrix(A')
+        K = Symmetric(Matrix(A) * Y)
+        prior = Matrix(inv(cholesky(K + 1e-10 * tr(K) / size(K, 1) * I)))
+        R, AR = Y * prior, Matrix{Float64}(I, size(A, 1), size(A, 1)) .* θ.σ
+    else
+        R = name === :diagonal ? Matrix{Float64}(I, size(Q)...) : roots[name](θ)
+        AR = Matrix(A) * R .* θ.σ
+        # The target's precision and information in the family's coordinates.
+        prior = name === :diagonal ? Q : Matrix{Float64}(I, size(Q)...)
+    end
     Π = Symmetric(prior + λ .* (AR' * AR))
     F = cholesky(Π)
     μ = F \ (λ .* (AR' * y))
@@ -33,7 +41,7 @@ function run_steps(name, tg, stations, S, y; lr, iterations, batch, seed=7, mark
     n = size(tg.AR, 2)
     rng = Xoshiro(seed)
     m, ρ = zeros(n), zeros(n)
-    name === :diagonal && (ρ .= log.(0.1))
+    name in (:diagonal, :read_diag) && (ρ .= log.(0.1))
     M, V = zeros(2n), zeros(2n)
     rows = [findall(==(s), stations) for s in 1:S]
     out = NamedTuple[]

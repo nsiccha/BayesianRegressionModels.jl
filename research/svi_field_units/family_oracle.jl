@@ -27,6 +27,12 @@
 #              this is an exact root for every ℓ_t on any lattice, and the prior cancels.
 #              Time costs O(T) with no dense matrix.
 #   hier_K     space_hier on the lowest K spatial modes, every other mode at its prior.
+#   read_diag  one state per distinct read (A z), each independent, with the unread states
+#              at their prior conditional: the read-pair form's family. It depends only on
+#              a unit's own reads. Exact mean, like every factorized family here.
+#   read_unit  the same read states, with one dense factor per station over its read states
+#              and its effect: a unit's field slice as the unit's own coordinates. Stations
+#              stay independent, and are coupled only through the prior's means.
 #   time_dct   like spectral, but time uses a fixed DCT-II basis Ψ scaled per ℓ_t so each
 #              coordinate's prior variance is one: T_t = Ψ S(ℓ_t). The prior no longer
 #              cancels exactly; its term stays closed form. It needs no eigenvector
@@ -116,7 +122,7 @@ function temporal_spectral_root(times, ℓ)
 end
 
 # Reads: each station sits at one position and reads a random subset of times.
-function toy_reads(mesh, times, stations, rows, rng)
+function toy_reads(mesh, times, stations, rows, rng; repeats=1)
     N, nt = length(mesh.mass), length(times)
     east, north = rand(rng, stations) .* 0.9 .+ 0.05, rand(rng, stations) .* 0.9 .+ 0.05
     (; indices, weights) = GM._brm_gmrf_interpolation(mesh, east, north)
@@ -129,9 +135,11 @@ function toy_reads(mesh, times, stations, rows, rng)
             push!(I, r); push!(J, indices[s, k] + N * (t - 1)); push!(V, weights[s, k])
         end
     end
-    A = sparse(I, J, V, r, N * nt)
-    Z = sparse(1:r, S, ones(r), r, stations)
-    (; A, Z)
+    A0 = sparse(I, J, V, r, N * nt)
+    Z0 = sparse(1:r, S, ones(r), r, stations)
+    A = reduce(vcat, [A0 for _ in 1:repeats])
+    Z = reduce(vcat, [Z0 for _ in 1:repeats])
+    (; A, Z, distinct=(; A=A0, Z=Z0, repeats=repeats, row=repeat(1:r, repeats)))
 end
 
 function target(mesh, times, reads, θ)
@@ -269,11 +277,40 @@ function _whitened_lowrank(tg, reads, ctx, r)
     (; H=AT, U, D, W, Di, logdetq, trace, apply)
 end
 
+# The read states' prior K = A Q⁻¹ Aᵀ and the target's precision over (reads, station
+# effects). Repeated rows of one read share one state, so `reads.distinct` indexes them.
+function _read_states(tg, reads)
+    Ar = reads.distinct.A
+    Y = cholesky(Symmetric(tg.Q)) \ Matrix(Ar')
+    K = Symmetric(Matrix(Ar * Y))
+    K = Symmetric(K + 1e-10 * tr(K) / size(K, 1) * I)
+    Ki = inv(cholesky(K))
+    data = tg.σ^2 * tg.λ .* reads.distinct.repeats
+    Z = Matrix(reads.distinct.Z)
+    Pff = Matrix(Ki) + data * I
+    Pfa = tg.σ * tg.λ .* (reads.distinct.repeats .* Z)
+    P = Symmetric([Pff Pfa; Pfa' Matrix(tg.Λaa)])
+    (; Ar, Y, K, Ki, P, diagf=diag(Pff))
+end
+
+# One block per station: its read states' positions and its effect's, in `_read_states`' P.
+function _read_blocks(reads)
+    Z = reads.distinct.Z
+    n, S = size(Z)
+    [vcat(findall(!iszero, Z[:, s]), n + s) for s in 1:S]
+end
+
 # KL(q* ‖ posterior) = ½(Σ_b log|Λ_bb| − log|Λ|), in the family's own coordinates.
 function family_gap(name, tg, reads, ctx)
     logΛaa = sum(log, diag(tg.Λaa))
     if name === :diagonal
         (sum(log, diag(tg.Λzz)) + logΛaa - tg.logdetΛ) / 2
+    elseif name === :read_diag
+        f = _read_states(tg, reads)
+        (sum(log, f.diagf) + logΛaa - logdet(cholesky(f.P))) / 2
+    elseif name === :read_unit
+        f = _read_states(tg, reads)
+        (sum(b -> logdet(cholesky(Symmetric(Matrix(f.P)[b, b]))), _read_blocks(reads)) - logdet(cholesky(f.P))) / 2
     elseif name in (:whitened, :spectral, :space_spectral, :space_hier)
         AT = reads.A * ctx.roots[name](tg.θ)
         P = 1 .+ tg.σ^2 * tg.λ .* vec(sum(abs2, AT; dims=1))
@@ -333,6 +370,29 @@ function family_sds(name, tg, reads, ctx, exact)
     if name === :exact
         Σ = exact.Σ
         return (; z=sqrt.(diag(Σ)), read=sqrt.(max.(0, diag(A * Σ * A'))))
+    elseif name === :read_unit
+        f = _read_states(tg, reads)
+        Σ0 = Matrix(inv(cholesky(Symmetric(Matrix(tg.Q)))))
+        W = f.Y * f.Ki
+        n = size(f.Ar, 1)
+        Σf = zeros(n, n)
+        Pd = Matrix(f.P)
+        for b in _read_blocks(reads)
+            C = inv(cholesky(Symmetric(Pd[b, b])))
+            local_rows = filter(<=(n), b)
+            Σf[local_rows, local_rows] .= Matrix(C)[1:length(local_rows), 1:length(local_rows)]
+        end
+        conditional = diag(Σ0) .- vec(sum(W .* f.Y; dims=2))
+        z = sqrt.(max.(conditional .+ vec(sum((W * Σf) .* W; dims=2)), 0.0))
+        return (; z, read=sqrt.(diag(Σf))[reads.distinct.row])
+    elseif name === :read_diag
+        f = _read_states(tg, reads)
+        # z | f has the prior's conditional; the factor adds diag(1/P) through the weights.
+        Σ0 = Matrix(inv(cholesky(Symmetric(Matrix(tg.Q)))))
+        W = f.Y * f.Ki
+        conditional = diag(Σ0) .- vec(sum(W .* f.Y; dims=2))
+        z = sqrt.(max.(conditional .+ vec(sum(W .^ 2 ./ f.diagf'; dims=2)), 0.0))
+        return (; z, read=(1 ./ sqrt.(f.diagf))[reads.distinct.row])
     elseif name === :diagonal
         s2 = 1 ./ diag(tg.Λzz)
         return (; z=sqrt.(s2), read=sqrt.(vec(sum(abs2, A; dims=2)' ) .* 0 .+ [dot(A[r, :] .^ 2, s2) for r in axes(A, 1)]))
@@ -436,13 +496,13 @@ function self_check(mesh, times, θ, T, rng)
     nothing
 end
 
-const ALL_FAMILIES = (:exact, :diagonal, :tile_2, :tile_4, :space_whitened, :whitened, :space_spectral, :spectral, :space_hier,
+const ALL_FAMILIES = (:exact, :diagonal, :read_diag, :read_unit, :tile_2, :tile_4, :space_whitened, :whitened, :space_spectral, :spectral, :space_hier,
     :hier_16, :hier_36, :hier_64, :time_dct, :dct_16, :dct_36, :truncated_16, :truncated_36, :truncated_64, :whitened_r8, :whitened_r32)
-function run_regime(label, truth; v=11, nt=16, stations=12, rows=8, seed=1, families=ALL_FAMILIES, irregular=false)
+function run_regime(label, truth; v=11, nt=16, stations=12, rows=8, seed=1, families=ALL_FAMILIES, irregular=false, repeats=1)
     mesh = grid_mesh(v)
     times = irregular ? cumsum(vcat(0.0, 0.25 .+ 2.5 .* rand(Xoshiro(99), nt - 1))) : collect(0.0:nt-1)
     rng = Xoshiro(seed)
-    reads = toy_reads(mesh, times, stations, rows, rng)
+    reads = toy_reads(mesh, times, stations, rows, rng; repeats)
     N = length(mesh.mass)
     nz = size(reads.A, 2)
     T(θ) = kron(temporal_root(times, θ.ℓt), spatial_root(mesh, θ.ℓs))
@@ -549,10 +609,13 @@ function main(out, which, nseeds, families=ALL_FAMILIES)
         ("slow, weakly informative", (; σ=1.0, ℓs=0.5, ℓt=10.0, τ=1.0, σα=0.5)),
         ("shorter, moderately informative", (; σ=1.0, ℓs=0.2, ℓt=3.0, τ=0.2, σα=0.5)),
         ("slow, irregular times", (; σ=1.0, ℓs=0.5, ℓt=10.0, τ=0.2, σα=0.5)),
+        ("slow, 8 rows per read", (; σ=1.0, ℓs=0.5, ℓt=10.0, τ=0.2, σα=0.5)),
+        ("shorter, 8 rows per read", (; σ=1.0, ℓs=0.2, ℓt=3.0, τ=0.2, σα=0.5)),
     ]
     results = []
     for (label, truth) in regimes[which], seed in 1:nseeds
-        t = @elapsed r = run_regime(label, truth; seed, families, irregular=occursin("irregular", label))
+        t = @elapsed r = run_regime(label, truth; seed, families, irregular=occursin("irregular", label),
+            repeats=occursin("8 rows", label) ? 8 : 1)
         push!(results, r)
         println("== ", label, " seed=", seed, " nz=", r.nz, " read states=", r.nread, " (", round(t; digits=1), " s)")
         @printf("  %-15s %9s %8s %24s %24s %24s %7s\n", "family", "KL", "mean err", "sd ratio read states", "sd ratio unread states", "sd ratio latent reads", "cover")
