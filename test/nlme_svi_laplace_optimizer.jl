@@ -31,6 +31,45 @@ function laplace_same_result(a, b)
         da.budget_exhausted == db.budget_exhausted && da.finished == db.finished
 end
 
+@testset "GaussianBlockLaplace runs are the same whether observed or not" begin
+    builder = laplace_window_builder()
+    method = GaussianBlockLaplace(averaging_window=3, carry_draws=12, carry_rank=3)
+    data = laplace_window_data([1, 2, 3])
+    options = (; laplace=method, ad_backend=LAPLACE_AD, family=LowRankGlobal(2),
+        max_iterations=8)
+    plain = brm_svi_fit(builder(data); options..., rng=Xoshiro(810), ndraws=5)
+    seen = NamedTuple[]
+    observed = brm_svi_fit(builder(data); options..., rng=Xoshiro(810), ndraws=5,
+        snapshot=s -> push!(seen, s), snapshot_every=1, snapshot_draws=2)
+    # Its draws evaluate the target, whose call counts and records the run keeps.
+    @test laplace_same_result(observed, plain)
+    @test laplace_same_run(brm_svi_optimizer_checkpoint(observed).run,
+        brm_svi_optimizer_checkpoint(plain).run)
+    @test observed.diagnostics.laplace.calls == plain.diagnostics.laplace.calls
+    @test [s.iteration for s in seen] == 1:8
+    @test all(s -> s.status === :running, seen[1:end-1]) && last(seen).status === :max_iterations
+    @test all(s -> s.phase === :fixed_budget && s.q_kind === :window_average, seen)
+    @test [s.averaged_iterations for s in seen] == [1, 2, 3, 3, 3, 3, 3, 3]
+    @test all(s -> !hasproperty(s, :finished) && !hasproperty(s, :converged), seen)
+    @test last(seen).q.μ == plain.diagnostics.q.μ && last(seen).elbo == last(plain.diagnostics.elbo)
+    # The draws are a stopped result's first draws, as a copy of the draw stream.
+    stopped = brm_svi_fit(builder(data); options..., rng=Xoshiro(810), stop_after=5, ndraws=2)
+    @test seen[5].draws == stopped.draws && seen[5].q.μ == stopped.diagnostics.q.μ
+    @test size(seen[5].draws) == (length(seen[5].coordinates), 2)
+    # A continuation observes on, and is the run that never stopped.
+    empty!(seen)
+    part = brm_svi_fit(builder(data); options..., rng=Xoshiro(810), stop_after=3, ndraws=0)
+    final = brm_svi_resume(builder(data), part; ad_backend=LAPLACE_AD, ndraws=5,
+        snapshot=s -> push!(seen, s), snapshot_every=2, snapshot_draws=1)
+    @test laplace_same_result(final, plain)
+    @test [s.iteration for s in seen] == [4, 6, 8]
+    # The default cadence is every 50 updates, and the last.
+    empty!(seen)
+    brm_svi_fit(builder(data); options..., rng=Xoshiro(810), ndraws=0, snapshot=s -> push!(seen, s))
+    @test [s.iteration for s in seen] == [8]
+    @test_throws "need a `snapshot`" brm_svi_fit(builder(data); options..., snapshot_every=2)
+end
+
 @testset "GaussianBlockLaplace runs continue exactly, initial and window updates" begin
     builder = laplace_window_builder()
     method = GaussianBlockLaplace(averaging_window=3, carry_draws=12, carry_rank=3)
