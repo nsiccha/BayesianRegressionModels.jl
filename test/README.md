@@ -2447,8 +2447,10 @@ Use `test/setup_env.jl` as the single bootstrap entry:
 julia --project=test test/setup_env.jl
 ```
 
-The script materializes every external dependency under the ignored
-`test/.bootstrap/` directory at an exact full-SHA revision. ReactiveKernels
+The script materializes every external dependency at an exact full-SHA revision
+in this host's package store,
+`~/.local/share/BayesianRegressionModels/package-sets/<pkg>-<sha12>`
+(`BRM_TEST_PACKAGE_STORE` overrides the directory). ReactiveKernels
 contributes its monorepo root **and** the nested
 `ReactiveKernelsDistributionKernels` and `ReactiveKernelsPPL` packages from
 that same checkout; those nested packages have no standalone repositories. All
@@ -2462,6 +2464,30 @@ When that mirror contains the exact revision, materialization uses it without
 contacting GitHub. An absent mirror or missing revision falls back to the pin's
 public origin. Mirror paths are derived from the pin list, so adding a dependency
 needs no separate mirror entry. Existing exact cached checkouts are reused.
+
+The store sits outside the checkout because Julia rejects a compiled image built
+from another source path. With a dependency at one stable path, a fresh worktree
+or job on the same pins reuses the images of those pins and their dependents, and
+rebuilds only BRM and its extensions, whose source really is that checkout's. Four
+things follow from sharing it across every run on a host:
+
+- **A checkout is read-only and never rewritten.** A fresh mtime rejects an image
+  even over identical bytes, and an edit would reach every run on the host. To
+  try a change to a pinned package, develop your own checkout of it instead.
+- **Each checkout holds one commit.** Its `.git` answers `git rev-parse HEAD`, and
+  it has no history to ask about. Read history from the mirror or the package's
+  own repository.
+- **Two runs may materialize one pin at once.** Each builds its own scratch
+  directory and renames it into place, and the later run validates the earlier
+  run's checkout and discards its own.
+- **An unused checkout is evicted.** Setup removes checkouts it has not used for 14
+  days, recorded in the store's `.last-used/`, and anything a killed run left
+  after a day. It touches no other name. If a test run says a package at a store
+  path is missing, its checkout was evicted: re-run `setup_env.jl`.
+
+A `test/.bootstrap/` left in an existing worktree is no longer read, and is safe
+to delete once that worktree has re-run `setup_env.jl`.
+
 The offline regression checks use small local Git repositories:
 
 ```sh
