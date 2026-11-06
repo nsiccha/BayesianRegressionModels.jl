@@ -935,7 +935,11 @@ cell expression or a collected output) each give every cell an empty slice. Each
 RK density and gradient equal a twin that never reads the empty axis.
 `reprocess` moves the same Stan program onto data with rows and back,
 recomputing the row count of a declared axis that sizes an intercept-only
-predictor, and a missing group label is still refused.
+predictor, and a missing group label is still refused. It also checks a plate
+with no cells at all, over `groups(g)` or `groups(g => cells)` with an empty
+column: each backend's density and gradient equal an independent formula for the
+priors, with the prior scale from data or written as a literal, and SBBRMI emits
+the same program as with rows and replays between the two in both directions.
 
 `hsgp_empty_axis_gather.jl` checks an HSGP with an explicit `domain=` (and a
 periodic one) over an axis with no rows, gathered per subject through
