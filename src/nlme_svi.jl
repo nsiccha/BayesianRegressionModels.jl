@@ -926,6 +926,8 @@ function _brm_svi_snapshot_run(run::_BRMSVIRun, t, c, draws)
        averaged_iterations=run.average === nothing ? 0 : run.iteration - run.polish_start,
        q=deepcopy((; q.μ, q.ρ, q.Β, q.M, q.Λ, q.U)),
        elbo_windows=first.(run.windows),
+       elbo_windows_trimmed=[w.center for w in run.windows],
+       clipped_steps=run.adam.clipped,
        elbo=isempty(run.trace) ? nothing : last(run.trace),
        draws=_brm_svi_draws(copy(run.rng), t, q, draws))
 end
@@ -1119,7 +1121,8 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
     of unit `levels[i]`.
   - `elbo_windows` (the mean ELBO per completed window; for GaussianBlockLaplace
     per 50 updates), `elbo` (the last iteration's value, `nothing` before the
-    first).
+    first). Without GaussianBlockLaplace also `elbo_windows_trimmed`, which the
+    stopping rule reads, and `clipped_steps`, as in `diagnostics`.
   - `draws`: coordinates × `snapshot_draws`, as the result's `draws`.
 
   BRM keeps no snapshot: the size of one is that of `q` and `draws` plus one number

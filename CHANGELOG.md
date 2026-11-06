@@ -21,7 +21,8 @@ instead of failing at run time.
   `snapshot_draws` (default none). A snapshot is one named tuple of plain arrays
   that loads without BRM or the model: `q`, what `q` is (`q_kind`:
   `:raw_iterate`, `:polished_average` or `:window_average`), the coordinates,
-  units and levels that name it, `iteration`, `phase`, the window ELBOs, `draws`,
+  units and levels that name it, `iteration`, `phase`, the window ELBOs and, outside
+  `GaussianBlockLaplace`, `elbo_windows_trimmed` and `clipped_steps`, `draws`,
   and a `status` that stays `:running` until the boundary where the call ends. An
   observed run is the same to the last bit as an unobserved one, and a snapshot's
   `q` and `draws` equal those of a result stopped at its iteration. BRM keeps none,

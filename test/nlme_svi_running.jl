@@ -194,6 +194,8 @@ end
             @test all(name -> isequal(getfield(s.q, name), getfield(d.q, name)),
                 (:μ, :ρ, :Β, :M, :Λ, :U))
             @test s.elbo == last(d.elbo) && s.elbo_windows == d.elbo_windows
+            @test s.elbo_windows_trimmed == d.elbo_windows_trimmed &&
+                s.clipped_steps == d.clipped_steps
             @test s.coordinates == stopped.coordinates && s.globals == d.globals &&
                 s.units == d.units && s.levels == d.model.view.levels
         end
@@ -216,6 +218,7 @@ end
                 fill!(s.globals, 0)
                 foreach(u -> fill!(u, 0), s.units)
                 fill!(s.elbo_windows, NaN)
+                fill!(s.elbo_windows_trimmed, NaN)
             end)
     @test svi_same_result(scribbled, reference)
 end
