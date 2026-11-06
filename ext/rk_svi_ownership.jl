@@ -37,3 +37,6 @@ function BRM._rk_svi_factor_queries(backend::BRM.RKBRMI, unit::Vector{Float64},
     end
     queries
 end
+
+BRM._rk_constrained_draw(backend::BRM.RKBRMI, u::AbstractVector) =
+    constrain(backend.model.layout, u)
