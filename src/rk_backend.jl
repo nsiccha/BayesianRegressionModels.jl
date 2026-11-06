@@ -2641,12 +2641,14 @@ function _rk_push_derived!(derived::Vector{_RKDerivedSpec}, name::Symbol,
     name
 end
 
-# Cross every raw data column a dotted definition touches (bind needs them).
+# Cross every raw data column a dotted definition touches (bind needs them). A
+# numeric scalar is no column: it binds as an input (`_RKStructuralPlan.inputs`).
 function _rk_cross_derived_refs!(expression, data::AbstractDict,
         columns::Dict{Symbol,AbstractVector})
     if expression isa Symbol
         if haskey(data, expression) && !haskey(columns, expression)
             raw = data[expression]
+            _rk_scalar_value(raw) && return nothing
             columns[expression] =
                 raw isa CA.CategoricalVector ? collect(raw) : raw
         end
@@ -2705,6 +2707,7 @@ function _rk_eval_dotted(value, data::AbstractDict,
     if value.head === :ref && length(value.args) == 2
         values, index = map(a -> _rk_eval_dotted(a, data, derived, memo),
             value.args)
+        index isa Integer && return values[index]
         return _brm_gather(values, index; prefix="RK backend")
     end
     if value.head === :call && !isempty(value.args)
@@ -2754,9 +2757,11 @@ function _rk_verify_derived_values!(expression, expected::AbstractVector,
 end
 
 # Lower a BRM scalar data-expression node to thin-layer dotted AST. Returns
-# (value, is_vector): bare names and dotted forms are vector-valued,
-# literals and reductions are scalar. Nested non-name reduction arguments
-# are staged as their own derived definitions automatically.
+# (value, is_vector): a column is vector-valued, a literal, a reduction and a
+# numeric scalar data field are scalar, and a form is vector-valued when an
+# input is. A scalar field stays a name, a runtime input of the program (user
+# principle `0ikeidi`). Nested non-name reduction arguments are staged as their
+# own derived definitions automatically.
 function _rk_lower_data_expr(node, target::Symbol, origin::String,
         data::AbstractDict, columns::Dict{Symbol,AbstractVector},
         derived::Vector{_RKDerivedSpec}, taken::Set{Symbol})
@@ -2769,12 +2774,13 @@ function _rk_lower_data_expr(node, target::Symbol, origin::String,
             "which is not a raw data column; slice 1 data expressions " *
             "take raw data columns only")
         raw = data[source]
+        _rk_scalar_value(raw) && return source, false
         raw isa AbstractVector && eltype(raw) <: Real &&
             !(eltype(raw) <: Bool) &&
             !(raw isa CA.CategoricalVector) || error(
             "$prefix: predictor `$target` $origin column `$source` must " *
-            "be a plain numeric vector for arithmetic; categorical " *
-            "columns enter data expressions through `factor()` " *
+            "be a plain numeric vector or a numeric scalar for arithmetic; " *
+            "categorical columns enter data expressions through `factor()` " *
             "comparisons in `&` interactions")
         return source, true
     end
@@ -2807,11 +2813,10 @@ function _rk_lower_data_expr(node, target::Symbol, origin::String,
         return Expr(:call, _RK_DERIVED_REDNAME[f], staged), false
     end
     if isempty(kwargs) && f isa Function && haskey(_RK_DERIVED_MATH, f)
-        lowered = map(args) do arg
-            first(_rk_lower_data_expr(arg, target, origin,
-                data, columns, derived, taken))
-        end
-        return _rk_ast_dotted(_RK_DERIVED_MATH[f], lowered...), true
+        lowered = map(arg -> _rk_lower_data_expr(arg, target, origin,
+            data, columns, derived, taken), args)
+        return _rk_ast_dotted(_RK_DERIVED_MATH[f], map(first, lowered)...),
+            any(last, lowered)
     end
     if isempty(kwargs) && f isa Function && haskey(_RK_DERIVED_BINOPS, f)
         if length(args) == 1
@@ -2820,29 +2825,26 @@ function _rk_lower_data_expr(node, target::Symbol, origin::String,
                 "`$(nameof(f))` is out of slice 1 (write `-1 * x`)")
             lowered, isvec = _rk_lower_data_expr(only(args), target,
                 origin, data, columns, derived, taken)
-            isvec || error(
-                "$prefix: predictor `$target` $origin unary minus needs " *
-                "a vector argument")
-            return Expr(:call, :.*, -1, lowered), true
+            return Expr(:call, :.*, -1, lowered), isvec
         end
-        length(args) == 2 || error(
+        # Julia parses `a * b * c` and `a + b + c` as one call.
+        length(args) == 2 || f === (*) || f === (+) || error(
             "$prefix: predictor `$target` $origin `$(nameof(f))` takes " *
             "exactly two arguments")
-        left, _ = _rk_lower_data_expr(args[1], target, origin,
-            data, columns, derived, taken)
-        right, _ = _rk_lower_data_expr(args[2], target, origin,
-            data, columns, derived, taken)
-        return Expr(:call, _RK_DERIVED_BINOPS[f], left, right), true
+        lowered = map(arg -> _rk_lower_data_expr(arg, target, origin,
+            data, columns, derived, taken), args)
+        return foldl((left, right) -> Expr(:call, _RK_DERIVED_BINOPS[f], left, right),
+            map(first, lowered)), any(last, lowered)
     end
     if isempty(kwargs) && f isa Function && haskey(_RK_DERIVED_CMP, f)
         length(args) == 2 || error(
             "$prefix: predictor `$target` $origin `$(nameof(f))` takes " *
             "exactly two arguments")
-        left, _ = _rk_lower_data_expr(args[1], target, origin,
+        left, lvec = _rk_lower_data_expr(args[1], target, origin,
             data, columns, derived, taken)
-        right, _ = _rk_lower_data_expr(args[2], target, origin,
+        right, rvec = _rk_lower_data_expr(args[2], target, origin,
             data, columns, derived, taken)
-        return Expr(:call, _RK_DERIVED_CMP[f], left, right), true
+        return Expr(:call, _RK_DERIVED_CMP[f], left, right), lvec || rvec
     end
     inputs = (args..., values(kwargs)...)
     lowered = map(value -> _rk_lower_data_expr(value, target, origin,
@@ -3120,6 +3122,8 @@ _rk_eval_data_preparation(::Val{recipe}, _args...) where {recipe} = error(
 function _rk_fit_twin!(derived::Vector{_RKDerivedSpec},
         columns::AbstractDict{Symbol}, taken::Set{Symbol},
         data::AbstractDict, vname::Symbol)
+    _rk_data_scalar(vname, data) && return _rk_fit_scalar!(derived, columns, taken,
+        vname, data[vname])
     label = _rk_fit_label(vname)
     for spec in derived
         spec.label === label && return spec.name
@@ -3154,6 +3158,12 @@ function _rk_fit_input!(derived::Vector{_RKDerivedSpec},
     push!(derived, _RKDerivedSpec(name, Expr(:_rk_fit_input, values), label))
     name
 end
+
+# The fit-role read of a numeric scalar: a one-element fit-role column, as a
+# term's fitted settings are (`_rk_ast_hsgp_settings!`), so it binds, freezes and
+# exports like any fit-role input and one program serves every value.
+_rk_fit_scalar!(derived, columns, taken, vname::Symbol, value) = Expr(:ref,
+    _rk_fit_input!(derived, columns, taken, vname, [_brm_fit_input_source(vname, value)]), 1)
 
 # A fit-role twin is labelled after the value it twins; the label is never a
 # design column.
@@ -3201,10 +3211,12 @@ function _rk_model_offset_expr(node, target::Symbol, data::AbstractDict,
         source = name(node)
         parent(node) isa DataColumn || return source
         raw = get(data, source, nothing)
+        _rk_scalar_value(raw) && return source
         raw isa AbstractVector{<:Real} && !(eltype(raw) <: Bool) &&
             !(raw isa CA.CategoricalVector) || error(
             "$prefix: predictor `$target` `offset()` reads data `$source`, " *
-            "which must be a numeric data column (a vector of reals)")
+            "which must be a numeric data column (a vector of reals) or a " *
+            "numeric scalar")
         columns[source] = raw
         return source
     end
@@ -3248,6 +3260,17 @@ end
 
 _rk_model_offset(term::_RKTermSpec) =
     term.kind === :offset && haskey(term.options, :expression)
+
+# An offset of scalar data fields alone has no rows of its own. Like a sampled
+# scalar it is one value on every row of its predictor, so it is the same
+# coefficient-free graph summand (`_rk_model_offset_spec`).
+_rk_reads_scalar_field(_x) = false
+_rk_reads_scalar_field(x::NamedColumn) =
+    parent(x) isa DataColumn && _rk_scalar_value(parent(parent(x)))
+_rk_reads_scalar_field(x::ExprColumn) = any(_rk_reads_scalar_field, getargs(x)) ||
+    any(_rk_reads_scalar_field, values(getkwargs(x)))
+_rk_offset_is_summand(inner) = _brm_reads_model_value(inner) ||
+    (_rk_reads_scalar_field(inner) && isempty(_brm_data_expression_sources(inner)))
 _rk_scalar_model_offset(term::_RKTermSpec) =
     _rk_model_offset(term) && term.options.axis == ()
 
@@ -3285,7 +3308,7 @@ function _rk_term_specs(term, target::Symbol, data::AbstractDict,
         isempty(getkwargs(term)) || error(
             "$prefix: predictor `$target` `offset()` takes no keywords")
         inner = only(args)
-        _brm_reads_model_value(inner) && return _RKTermSpec[
+        _rk_offset_is_summand(inner) && return _RKTermSpec[
             _rk_model_offset_spec(inner, target, data, columns, context)]
         if inner isa NamedColumn
             sources = _brm_data_expression_sources(inner)

@@ -414,9 +414,11 @@ and `cov=:periodic`; see [Periodic covariance](@ref) for the latter's contract.
 literal, a data field holding the scalar or per-axis value, or
 `name = constant(expr)`, as in `hsgp(x; k = kk, c = cc)` with `kk` and `cc` in
 the data. Models that differ only in these build one Stan program and emit one
-RK program. ReactiveKernelsPPL's lowering of that RK program still specializes
-on a changed basis size and on the fitted length-scale floor, which `c` and
-`domain` move.
+RK program. From ReactiveKernelsPPL 0.1.108 they also lower to one program and
+prepare one sampler type, as does new data that moves the fitted length-scale
+floor, so one process reuses its compiled gradient across these changes. Before
+0.1.108 the lowering specializes on a changed basis size and on that floor, which
+`c` and `domain` move.
 
 ### Periodic covariance
 
