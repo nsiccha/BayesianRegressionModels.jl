@@ -12,6 +12,40 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.213
+
+- Fixed: identical models were refused across processes when they call an
+  anonymous function or closure. A model's identity hashed such a callable by
+  what names it in the process: its generated name, the file and line of its
+  methods and Serialization's process-wide object numbers. One more anonymous
+  definition earlier in the driver, another line, or serializing another
+  anonymous function first changed the digest, so `brm_svi_resume` refused a
+  checkpoint on the same science and data, after preparing the whole model. In a
+  package module the callable was hashed by generated name alone, so a changed
+  body kept its digest. A generated function now enters by its methods' lowered
+  code and its captured values, nested ones included, with no line information.
+  This covers SVI optimizer checkpoints, the SVI and SMC streaming carries, SMC
+  and Laplace SMC identities and filter exports. A model with no generated
+  function keeps its exact identity, so its existing checkpoints stay valid.
+- Fixed: a fitted state's replay and a streaming SVI window compared the model's
+  declaration as text, where a callable outside a plate cell prints by its
+  generated name (`Normal(#3(mu), 0.8)`), so the rebuilt model was refused as
+  "exported from another model" or "model source changed". The comparison now
+  ignores generated names, also in text exported earlier. Like a named function
+  or a callable inside a plate cell, the body of such a callable is not compared
+  on replay, which reads only this text and the emitted program.
+- Changed: `brm_svi_resume` checks the program, callables, data and coordinates
+  right after lowering, before it prepares the model and target, and the refusal
+  names what differs: the emitted program, the callable's binding, the data
+  column, or the packed coordinates. New checkpoints hold these digests in
+  `state.identity.binding_parts`, of fixed size per callable and data column.
+- Compatibility: an SVI optimizer checkpoint written before this version is still
+  accepted when the old digest matches, which for a model with a generated
+  callable needs the old driver layout; its refusal cannot name the part. Its
+  continuation writes the new digests. An SVI or SMC streaming carry, an SMC
+  checkpoint or a filter export of a model with a generated callable, written
+  before this version, is not migrated and is refused as a changed model.
+
 ## 0.2.212
 
 - Fixed: a population prior that reads data is integrated by exact totals and

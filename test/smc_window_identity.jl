@@ -60,6 +60,73 @@ end
     @test E.streaming_identity(shared) != E.streaming_identity(independent)
 end
 
+# Rebuilds of one model around an anonymous callable: each evaluation of the
+# same source has another generated name.
+window_shift = nothing
+function window_callable_backend(source)
+    global window_shift = eval(source)
+    RKBRMI(BayesianRegressionModels.brm(quote
+        mu ~ 1 + (1 | g)
+        effect(mu, Intercept) ~ Normal(0, 1)
+        sd(mu, g) ~ LogNormal(log(0.7), 0.2)
+        y ~ Normal(window_shift(mu), 0.8)
+    end; mod=@__MODULE__)((; g=repeat(["a", "b", "c"], inner=2),
+        y=[0.3, 0.9, -0.5, 0.1, 1.1, 0.7])))
+end
+# In a cell, where a Laplace problem's partition can evaluate the callable by row.
+function window_callable_cell_backend(source)
+    global window_shift = eval(source)
+    RKBRMI(BayesianRegressionModels.brm(quote
+        mu ~ 1 + (1 | subject)
+        effect(mu, Intercept) ~ Normal(0, 1)
+        sd(mu, subject) ~ LogNormal(log(0.7), 0.2)
+        @plate for i in eachindex(mu)
+            y[i] ~ Normal(window_shift(mu[i]), 0.8)
+        end
+    end; mod=@__MODULE__)((; subject=["a", "b", "c"],
+        y=[[0.3, 0.9], [-0.5, 0.1], [1.1, 0.7]])))
+end
+
+@testset "Identities read what a generated callable computes, not what names it" begin
+    B = BayesianRegressionModels
+    F = Base.get_extension(B, :BayesianRegressionModelsFilterExt)
+    a = window_callable_backend(:(eta -> eta .+ 0.1))
+    b = window_callable_backend(:(eta -> eta .+ 0.1))
+    other = window_callable_backend(:(eta -> eta .+ 0.2))
+    # Positive controls: what names it tells the rebuilds apart, also as source text.
+    @test B._brm_rk_binding_identity(a, "t"; stable=false) !=
+        B._brm_rk_binding_identity(b, "t"; stable=false)
+    @test string(brm_source(a)) != string(brm_source(b))
+    for identity in (E.binding_identity, rk -> E.streaming_source(rk, nothing),
+            rk -> F.source_identity(rk, nothing, nothing), B._brm_svi_source_id)
+        @test identity(a) == identity(b)
+        @test identity(a) != identity(other)
+    end
+    frame(rk) = E.laplace_identity(E.laplace_frame(brm_laplace_problem(rk;
+        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), structured=false)))
+    cell_a = window_callable_cell_backend(:(eta -> eta .+ 0.1))
+    cell_b = window_callable_cell_backend(:(eta -> eta .+ 0.1))
+    cell_other = window_callable_cell_backend(:(eta -> eta .+ 0.2))
+    @test frame(cell_a) == frame(cell_b)
+    @test frame(cell_a) != frame(cell_other)
+    # A fitted state replays on the rebuilt declaration, also one exported as old
+    # text that holds its generated name.
+    state = brm_fitted_state(a)
+    @test !occursin("#", replace(state.declaration, "#generated" => ""))
+    @test RKBRMI(brm_source(b), state) isa RKBRMI
+    @test B._brm_stable_declaration(string(brm_source(a))) == state.declaration
+    @test_throws "exported from another model" RKBRMI(
+        brm_source(RKBRMI(W.normal((; y=[0.2, -0.1, 0.4])))), state)
+    # Without a generated callable each keeps the digest and the text it always had.
+    plain = RKBRMI(W.normal((; y=[0.2, -0.1, 0.4])))
+    @test B._brm_rk_binding_identity(plain, "t") ==
+        B._brm_rk_binding_identity(plain, "t"; stable=false)
+    @test B._brm_declaration_text(brm_source(plain)) ==
+        sprint(show, brm_source(plain); context=:brm_documentation => false)
+    @test B._brm_stable_declaration("y ~ Normal(#3(mu), f(#3#4, #inner#12), 0.8)") ==
+        "y ~ Normal(#generated(mu), f(#generated, #generated), 0.8)"
+end
+
 @testset "Copied carries preserve update, tuning and checkpoint validation" begin
     training = (; x=[-2.0, 0.0, 3.0], y=[-0.2, 0.1, 0.8])
     window = (; x=[-1.5, 0.5, 1.2, 3.0], y=[-0.1, 0.5, 0.7, 1.0])
