@@ -8,7 +8,11 @@
 #   2. the whole prior on every step,
 #   3. the dense global update (noise, Adam and the covariance operators over 2D).
 #
-#     julia --project=test research/svi_field_units/baseline.jl side times stations rows batch
+#     julia --project=test research/svi_field_units/baseline.jl side times stations rows batch [more groups of five]
+#
+# Runs on the tree of the commit that added this file: the next commit removes the
+# unit structures it times. Several sizes in one process separate first-use
+# compilation from what repeats.
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface, Random, Statistics, Printf, LinearAlgebra
 const BRM = BayesianRegressionModels
@@ -71,19 +75,29 @@ function cost(f, n=5)
 end
 rss_gb() = parse(Int, split(read("/proc/self/statm", String))[2]) * 4096 / 2^30
 peak_gb() = parse(Int, match(r"VmHWM:\s+(\d+)", read("/proc/self/status", String)).captures[1]) / 2^20
-report(name, x) = @printf("BASELINE %-26s %12.6f s %14.1f KB\n", name, x.seconds, x.bytes / 1024)
+report(name, x) = (@printf("BASELINE %-26s %12.6f s %14.1f KB\n", name, x.seconds, x.bytes / 1024); flush(stdout))
+step(f, name) = begin
+    timed = @timed f()
+    @printf("BASELINE step %-24s %9.1f s %10.1f MB allocated, rss %.2f GB\n", name, timed.time, timed.bytes / 2^20, rss_gb())
+    flush(stdout)
+    timed.value
+end
 
 function main(side, times, stations, rows, batch)
     println("BASELINE_TOY side=$side times=$times stations=$stations rows=$rows batch=$batch threads=$(Threads.nthreads())")
     data = field_toy_data(; side, times, stations, rows)
-    t0 = time()
-    rk = RKBRMI(field_toy_model(data))
-    m = brm_nlme_model(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), subject_group=:station,
-        unit_partition=:connected)
-    @printf("BASELINE prepare_model %.1f s, rss %.2f GB\n", time() - t0, rss_gb())
-    t1 = time()
-    t = BRM._brm_svi_target(m; separator=:none)
-    @printf("BASELINE prepare_target %.1f s, rss %.2f GB\n", time() - t1, rss_gb())
+    flush(stdout)
+    rk = step(() -> RKBRMI(field_toy_model(data)), "lower to RK")
+    m = step("brm_nlme_model") do
+        brm_nlme_model(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), subject_group=:station,
+            unit_partition=:connected)
+    end
+    # The target's parts, in its own order, then the target itself.
+    ownership = step(() -> BRM._brm_svi_connected_ownership(m; separator=:none), "ownership")
+    partition, view = step(() -> BRM._brm_svi_partition(m, ownership), "partition queries")
+    step(() -> BRM._brm_nlme_partition_plan(partition, m.unit, ownership.globals, view; units=ownership.units), "partition sampler")
+    step(() -> BRM._brm_svi_authored_prior(m, ownership.globals, ownership.units; factors=ownership.factors), "authored prior")
+    t = step(() -> BRM._brm_svi_target(m; separator=:none), "whole target")
     D = length(t.globals)
     field = count(n -> occursin(".field.", String(n)), m.view.coordinates)
     footprints = length.(t.plan.footprints)
@@ -137,4 +151,7 @@ function main(side, times, stations, rows, batch)
     @printf("BASELINE peak_rss %.2f GB\n", peak_gb())
 end
 
-main(parse.(Int, ARGS[1:5])...)
+BLAS.set_num_threads(1)
+for group in Iterators.partition(parse.(Int, ARGS), 5)
+    main(group...)
+end
