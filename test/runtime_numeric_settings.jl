@@ -769,11 +769,12 @@ end
     m1, m2 = [0.0, 0.1, 0.4], [0.5, 0.1, 0.9]
     with_m(m) = merge(LDATA, (; v=m))
     sum_prior, element_prior = RSM.summary_prior(; location=:(sum(v))), RSM.summary_prior(; location=:(v[2] + 1))
-    check_one_lowering("a reduction of an array", sum_prior, [with_m(m1), with_m(m2)], (:prior_sum_v,))
+    # The graph computes each prior's value from its input (user principle `0pde95i`).
+    check_one_lowering("a reduction of an array", sum_prior, [with_m(m1), with_m(m2)], (:prior_input_v,))
     check_one_lowering("one element of an array", RSM.summary_prior(; location=:(v[1])),
         [with_m(m1), with_m(m2)], (:prior_input_v,))
     check_one_lowering("a reduction of a design column", RSM.summary_prior(; location=:(mean(x))),
-        [LDATA, merge(LDATA, (; x=2 .* LDATA.x))], (:prior_mean_x,); differ=true)
+        [LDATA, merge(LDATA, (; x=2 .* LDATA.x))], (:x_fit,); differ=true)
     S1, S2 = [1.0 0.2; 0.2 1.0], [1.0 0.4; 0.4 1.0]
     whole(; mean=[0.0, 0.1], covariance=S1) = (; y=LDATA.y, a=mean, S=covariance)
     check_one_lowering("a whole mean", RSM.whole_covariance(:a, :S),
@@ -821,25 +822,39 @@ end
         @test reprocess(rk, fitted) isa RKBRMI
         @test reprocess(rk, changed; freeze_constants=false) isa RKBRMI
     end
-    # A prior read off a column is a number of the fit, as `standardize(x)` is: a
-    # replay on other rows keeps it, from the fit or from a state that holds no rows.
-    build_column = RSM.summary_prior(; location=:(mean(x)))
-    column_prior = RKBRMI(build_column(LDATA))
+    # A prior read off a column is a number of the fit, as `standardize(x)` is: the
+    # graph computes it from the column's fit-role copy, so a replay on other rows
+    # keeps it, from the fit or from a state that holds no rows. The oracle is the
+    # literal twin on the other rows; a fresh build on them is the positive control.
     other_rows = merge(LDATA, (; x=2 .* LDATA.x))
-    @test rk_bound_data(column_prior).prior_mean_x == sum(LDATA.x) / 6
-    @test rk_bound_data(reprocess(column_prior, other_rows)).prior_mean_x == sum(LDATA.x) / 6
-    state = brm_fitted_state(column_prior)
-    @test !any(value -> value isa AbstractVector && value == LDATA.x, values(state.scalars))
-    @test rk_bound_data(RKBRMI(build_column(other_rows), state)).prior_mean_x == sum(LDATA.x) / 6
-    # A prediction design binds the column and cannot move the fitted prior.
-    @test rk_design_binder(column_prior)(other_rows).prior_mean_x == sum(LDATA.x) / 6
+    for (location, fitted) in ((:(mean(x)), sum(LDATA.x) / 6), (:(x[2]), LDATA.x[2]))
+        build_column = RSM.summary_prior(; location)
+        column_prior = RKBRMI(build_column(LDATA))
+        kept = RKBRMI(RSM.summary_prior(; location=fitted)(other_rows))
+        u = rk_point(kept)
+        @test rk_density(column_prior, u) ≈ rk_density(RKBRMI(RSM.summary_prior(;
+            location=fitted)(LDATA)), u) atol=1e-12 rtol=1e-12
+        @test rk_density(reprocess(column_prior, other_rows), u) ≈ rk_density(kept, u) atol=1e-12 rtol=1e-12
+        @test !(rk_density(RKBRMI(build_column(other_rows)), u) ≈ rk_density(kept, u))
+        state = brm_fitted_state(column_prior)
+        @test !any(value -> value isa AbstractVector && value == LDATA.x, values(state.scalars))
+        @test rk_density(RKBRMI(build_column(other_rows), state), u) ≈ rk_density(kept, u) atol=1e-12 rtol=1e-12
+        # A prediction design binds the column and cannot move the fitted prior.
+        @test rk_design_binder(column_prior)(other_rows).x_fit == LDATA.x
+    end
+    # The state holds the fitted mean, not the rows it is computed from. Positive
+    # control: a prior reading the whole column has the rows as its fitted value.
+    fitted_of(location) = brm_fitted_state(RKBRMI(RSM.summary_prior(; location)(LDATA))).fitted.values
+    mean_fit = fitted_of(:(mean(x)))
+    @test keys(mean_fit) == (:prior_mean_x,) && mean_fit.prior_mean_x ≈ sum(LDATA.x) / 6
+    @test LDATA.x in values(fitted_of(:(x[2])))
     # An array only a prior reads travels with the state: a design may omit it, and
     # one holding another value is refused.
     sum_rk = RKBRMI(sum_prior(with_m(m1)))
     sum_state = brm_fitted_state(sum_rk)
     @test sum_state.scalars[:v] == m1
-    @test rk_bound_data(RKBRMI(sum_prior(LDATA), sum_state)).prior_sum_v == sum(m1)
-    @test rk_bound_data(reprocess(sum_rk, LDATA)).prior_sum_v == sum(m1)
+    @test rk_bound_data(RKBRMI(sum_prior(LDATA), sum_state)).prior_input_v == m1
+    @test rk_bound_data(reprocess(sum_rk, LDATA)).prior_input_v == m1
     @test_throws "changes the fitted RK program" RKBRMI(sum_prior(with_m(m2)), sum_state)
     # A checkpoint identity sees an array a prior reads.
     @test BRM._rk_identity_statements(RKBRMI(sum_prior(with_m(m1)))) !=

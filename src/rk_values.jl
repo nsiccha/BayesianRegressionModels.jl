@@ -1112,6 +1112,9 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     components = _rk_predictor_components(brmi, context, predictor_order,
         columns, derived, taken, parameters)
     append!(vectors, components.vectors)
+    # What priors read from data arrays, before the columns are copied below: a
+    # design column a prior reads adds its fit-role copy to them.
+    prior_reads = _rk_prior_read_values!(derived, columns, taken, prepared, context.data)
     # Regression columns each keep their own row axis. The PPL binder checks
     # their consumers; neither a subject nor a secondary axis is resized to y.
     value_columns = Dict{Symbol,Any}(columns)
@@ -1174,8 +1177,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     regression = _RKStructuralPlan(_RKLikelihoodSpec[], components.predictors,
         components.priors, parameters, _RKAssignmentSpec[], derived, columns,
         0, components.buckets, vectors, components.r2d2_priors,
-        components.horseshoe_priors, _rk_scalar_inputs(context.data),
-        _rk_prior_read_values!(derived, prepared, context.data))
+        components.horseshoe_priors, _rk_scalar_inputs(context.data), prior_reads)
     _RKValuePlan(regression, assignments, obs, value_columns, Tuple(completions))
 end
 

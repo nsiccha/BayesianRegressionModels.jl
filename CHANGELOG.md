@@ -26,16 +26,18 @@ More numbers are inputs of the program instead of text in it (user principle
   numbers: `multigroup_x_y_hsgp20_c1p5_center` is now `hsgp_t_by_g_grid_center`,
   and likewise for `_scale`, `_lambda_lower` and the new `_k`. Code that reads these
   from `stan_data` by name must change. Two terms no longer share one grid.
-- Changed: on `RKBRMI`, what a prior reads from a data array is an input. A reduction
-  (`Normal(sum(m), 1)`), an `MvNormal` mean, covariance or vector scale were
-  written into the program, and a size taken from such an array now reads as one
-  program too. `Dirichlet(a)` with a data vector and `Normal(m[1], 1)` used to be
-  refused on `RKBRMI`. They now match `SBBRMI`.
-- Changed: a prior computed from a design column, such as `Normal(mean(x), 1)`, is a
-  number of the fit, as `standardize(x)` is. A frozen replay on other rows keeps it,
-  where it used to be refused, and a fitted state holds that number and not the rows.
-  An array only a prior reads travels with the fitted state; a frozen replay refuses
-  another value of it.
+- Changed: on `RKBRMI`, what a prior reads from a data array is an input, and the
+  program computes the prior's value from it. A reduction (`Normal(sum(m), 1)`), an
+  `MvNormal` mean, covariance or vector scale were written into the program, and a
+  size taken from such an array now reads as one program too. `Dirichlet(a)` with a
+  data vector and `Normal(m[1], 1)` used to be refused on `RKBRMI`. They now match
+  `SBBRMI`.
+- Changed: a prior computed from a design column, such as `Normal(mean(x), 1)` or
+  `Normal(x[2], 1)`, is a number of the fit, as `standardize(x)` is: the program
+  computes it from the column's fit-role copy. A frozen replay on other rows and a
+  prediction design keep it, where a replay used to be refused, and a fitted state
+  holds the computed mean, not the rows. An array only a prior reads travels with
+  the fitted state; a frozen replay refuses another value of it.
 - Changed: `effect(m, x) ~ Horseshoe(local_scale = l, global_scale = g)` accepts data
   fields on both backends, read by name. `RKBRMI` shares one global scale per
   predictor, so it refuses by name a predictor whose terms read different global

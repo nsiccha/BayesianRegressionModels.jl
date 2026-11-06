@@ -105,13 +105,16 @@ function _rk_attach_data_assignments!(derived::Vector{_RKDerivedSpec}, columns,
     nothing
 end
 
-# What a prior reads from a data array is a generated input (user principle
-# `0ikeidi`): a reduction's value (`sum(m)` reads `prior_sum_m`) and a whole array
-# through a definition (`prior_m = copy(prior_input_m)`, as a known correlation's
-# factor). A frozen replay compares these beside the program
-# (`_rk_generated_statements`), and a design that binds a column cannot move them.
-# A summary of a design column is a fit of it, as `standardize(x)` is: a replay on
-# other rows keeps the fitted number, which a fitted state holds without the rows.
+# What a prior reads from a data array is an input of the program, and the graph
+# computes the prior's value from it (user principles `0ikeidi` and `0pde95i`). An
+# array only priors read is the generated input `prior_input_m`, defined as
+# `prior_m = copy(prior_input_m)` (as a known correlation's factor), and a reduction
+# of it is a definition over that (`prior_sum_m = sum(prior_m)`). A frozen replay
+# compares the input beside the program (`_rk_generated_statements`). A design
+# column a prior reads is read from its fit-role copy, as `standardize(x)`'s anchors
+# are (`prior_mean_x = mean(x_fit)`, `prior_x = copy(x_fit)`): a replay on other rows
+# and a prediction design keep the fit's value, and a fitted state holds what the
+# graph computes from it, as `frozen_values` record it.
 _rk_data_array(name::Symbol, data::AbstractDict) = get(data, name, nothing) isa AbstractArray{<:Real}
 _rk_prior_summary_name(reduction, source::Symbol) = Symbol(:prior_, nameof(reduction), :_, source)
 _rk_prior_array_name(source::Symbol) = Symbol(:prior_, source)
@@ -142,60 +145,75 @@ _rk_design_reads(prepared) = union!(
     (dependency for op in prepared.program.operations if op.role !== :parameter
         for dependency in op.dependencies))
 
-# Collects those inputs from the priors as authored, defining each array in
-# `derived`, which the emitter writes first. Each entry also names the data array
-# it reads and whether a design supplies it: `_rk_prior_arrays` keeps the others.
-function _rk_prior_read_values!(derived, prepared, data::AbstractDict)
-    values, arrays = Dict{Symbol,Any}(), Set{Symbol}()
-    design = _rk_design_reads(prepared)
-    foreach(parameter -> _rk_collect_prior_reads!(values, arrays, parameter.prior, data, design),
+# Defines what the priors as authored read from data arrays in `derived`, whose
+# data assignments the emitter writes first, and returns the generated inputs, each
+# with the data array it copies.
+function _rk_prior_read_values!(derived, columns, taken, prepared, data::AbstractDict)
+    arrays, summaries = Set{Symbol}(), Dict{Symbol,Tuple{Any,Symbol}}()
+    foreach(parameter -> _rk_collect_prior_reads!(arrays, summaries, parameter.prior, data),
         prepared.parameters)
-    for source in sort!(collect(arrays); by=string)
-        name, input = _rk_prior_array_name(source), _rk_prior_array_input(source)
-        values[input] = (; source, value=data[source], design=source in design)
-        push!(derived, _RKDerivedSpec(name,
-            Expr(:_rk_data_assignment, Expr(:call, :copy, input)), name))
+    design = _rk_design_reads(prepared)
+    # A reduction of an array only priors read sums the array's definition.
+    for (_reduction, source) in Base.values(summaries)
+        source in design || push!(arrays, source)
     end
-    for name in keys(values)
+    fit_copy(source) = _rk_fit_input!(derived, columns, taken, source,
+        _brm_fit_input_source(source, data[source]))
+    values, generated = Dict{Symbol,Any}(), Symbol[]
+    for source in sort!(collect(arrays); by=string)
+        name = _rk_prior_array_name(source)
+        operand = if source in design
+            fit_copy(source)
+        else
+            input = _rk_prior_array_input(source)
+            values[input] = (; source, value=data[source])
+            push!(generated, input)
+            input
+        end
+        push!(generated, name)
+        push!(derived, _RKDerivedSpec(name,
+            Expr(:_rk_data_assignment, Expr(:call, :copy, operand)), name))
+    end
+    for name in sort!(collect(keys(summaries)); by=string)
+        reduction, source = summaries[name]
+        operand = source in design ? fit_copy(source) : _rk_prior_array_name(source)
+        push!(generated, name)
+        push!(derived, _RKDerivedSpec(name, Expr(:_rk_data_assignment,
+            Expr(:call, _rk_whole_call(reduction, 1, ()), operand)), name))
+    end
+    for name in generated
         haskey(data, name) || haskey(prepared.source_operations, name) || continue
         error("RK backend: a prior reads a data array through the generated name " *
             "`$name`, which the model also uses; rename that field or declaration")
     end
     values
 end
-_rk_collect_prior_reads!(_values, _arrays, _node, _data, _design) = nothing
-function _rk_collect_prior_reads!(_values, arrays, node::_BRMPreparedRef, data, _design)
+_rk_collect_prior_reads!(_arrays, _summaries, _node, _data) = nothing
+function _rk_collect_prior_reads!(arrays, _summaries, node::_BRMPreparedRef, data)
     _rk_data_array(node.name, data) && push!(arrays, node.name)
     nothing
 end
-function _rk_collect_prior_reads!(values, arrays, node::_BRMPreparedExpr, data, design)
+function _rk_collect_prior_reads!(arrays, summaries, node::_BRMPreparedExpr, data)
     source = _rk_prior_summary_source(node, data)
     if source !== nothing
-        name = _rk_prior_summary_name(node.callable, source)
-        values[name] = source in design ?
-            (; source, design=true, value=_brm_fitted_value(:prior_summary, name) do
-                frozen = _brm_frozen_replay()
-                node.callable(frozen === nothing ? data[source] :
-                    get(frozen.training, source, data[source]))
-            end) : (; source, design=false, value=node.callable(data[source]))
+        summaries[_rk_prior_summary_name(node.callable, source)] = (node.callable, source)
         return nothing
     end
-    foreach(arg -> _rk_collect_prior_reads!(values, arrays, arg, data, design), node.args)
-    foreach(arg -> _rk_collect_prior_reads!(values, arrays, arg, data, design),
+    foreach(arg -> _rk_collect_prior_reads!(arrays, summaries, arg, data), node.args)
+    foreach(arg -> _rk_collect_prior_reads!(arrays, summaries, arg, data),
         Base.values(node.kwargs))
     nothing
 end
 
-# The data arrays a prior reads that no design supplies, which travel with the
-# fit's scalars: a replay or a fitted state rebuilds its prior from them. A design
-# column's rows stay out of the state; its summary is a recorded fit.
+# The data arrays only a prior reads, which travel with the fit's scalars: a replay
+# or a fitted state rebuilds its prior from them. A design column a prior reads is
+# a fit-role input instead, whose fitted values the state records.
 _rk_prior_arrays(_plan, _training) = Dict{Symbol,Any}()
 _rk_prior_arrays(plan::_RKValuePlan, training) = _rk_prior_arrays(plan.regression, training)
 _rk_prior_arrays(plan::_RKHeldOutPlan, training) = _rk_prior_arrays(plan.parent, training)
 _rk_prior_arrays(plan::_RKStructuralPlan, training) = Dict{Symbol,Any}(
     entry.source => deepcopy(training[entry.source])
-    for entry in Base.values(plan.prior_reads)
-    if !entry.design && haskey(training, entry.source))
+    for entry in Base.values(plan.prior_reads) if haskey(training, entry.source))
 
 # A data scalar a statement reads by name is a bound input of the program
 # (`_RKStructuralPlan.inputs`, user principle `0ikeidi`). What else a prior reads

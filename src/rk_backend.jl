@@ -9383,5 +9383,5 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
         parameters, assignments, derived, columns, n_obs, ranef_buckets,
         [vector_specs; implicit_vectors; components.vectors],
         r2d2_specs, hs_specs, _rk_scalar_inputs(context.data),
-        _rk_prior_read_values!(derived, prepared, context.data))
+        _rk_prior_read_values!(derived, columns, taken, prepared, context.data))
 end
