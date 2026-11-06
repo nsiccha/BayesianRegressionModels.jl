@@ -201,13 +201,13 @@ function _rk_plan_gmrf_term!(prepared, target, data, columns, taken; derived)
             time=_rk_fit_twin!(derived, columns, taken, data, sources[3]),
             channel=length(prepared.source) == 3 ?
                 _rk_fit_input!(derived, columns, taken, sources[4], [1]) :
-                _rk_fit_twin!(derived, columns, taken, data, sources[4]),
-            # The rank is an input of the program, not a number it spells: one
-            # program serves every rank (user principle `0ikeidi`).
-            rank=_rk_fit_input!(derived, columns, taken, Symbol(id, :_rank),
-                [state.multiresolution]))
+                _rk_fit_twin!(derived, columns, taken, data, sources[4]))
+        # The rank is an input of the program, not a number it spells: one
+        # program serves every rank (user principle `0ikeidi`).
+        rank = _rk_fit_input!(derived, columns, taken, Symbol(id, :_rank),
+            [state.multiresolution])
         return _RKTermSpec(:gmrf, sources,
-            (; id, neighbors=nothing, multiresolution=state.multiresolution, fit,
+            (; id, neighbors=nothing, multiresolution=state.multiresolution, fit, rank,
                source=prepared.source, correlation=state.correlation,
                nchannels=length(state.channels), priors=_brm_term_prior_expressions(prepared),
                state_axes=(; times=state.times, channels=state.channels)), id, id)
@@ -255,7 +255,7 @@ function _rk_ast_gmrf!(definitions, statements, taken, bindings, term)
     fit = if multiresolution
         Expr(:call, _rk_value_callee!(bindings, brm_gmrf_multiresolution_support, taken),
             options.fit.east, options.fit.north, options.fit.time, options.fit.channel,
-            Expr(:ref, options.fit.rank, 1))
+            Expr(:ref, options.rank, 1))
     elseif footprint
         Expr(:ref, options.fitted, 1)
     else

@@ -477,13 +477,14 @@ _rk_ast_replace_floor_marker(value, _floor) = value
 # The term's statements, and the sampled block locals of a grouped or
 # hyper-predicted term (`_rk_ast_hsgp_grouped`; `nothing` for an ungrouped one).
 function _rk_ast_value_hsgp(definitions, term, taken, bindings)
+    stmts = Expr[]
+    term = _rk_ast_hsgp_settings!(stmts, term, taken)
     options = term.options
     periodic = get(options, :cov, :exp_quad) === :periodic
     grouped = haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
     # The length-scale floor exists only where a prior or hyper-predictor reads it.
     floor_read = options.rho_truncated || get(options, :rho_floor_named, false) ||
         any(p -> p.hyper === :length_scale, get(options, :hyper_plans, ()))
-    stmts = Expr[]
     floors = nothing
     if periodic
         # The periodic basis is prepared data; its effect reads the matrix and
@@ -543,6 +544,19 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         rho_priors, sigma_prior, value, extent; truncated=options.rho_truncated,
         base=periodic ? "brm_periodic_hsgp_effect" : "brm_hsgp_effect")
     stmts, nothing
+end
+
+# The term's size and settings as fitted values of the program, from its
+# fit-role inputs alone (`<id>_modes = copy(<id>_modes_fit)`), so a fitted state
+# exports them like any other fit and every graph reads them by these names.
+function _rk_ast_hsgp_settings!(stmts, term, taken)
+    options = term.options
+    modes = _rk_ast_fresh_name(string(options.id, "_modes"), taken)
+    settings = _rk_ast_fresh_name(string(options.id, "_settings"), taken)
+    push!(stmts, Expr(:(=), modes, Expr(:call, :copy, options.modes)),
+        Expr(:(=), settings, Expr(:call, :copy, options.settings)))
+    _RKTermSpec(term.kind, term.columns, merge(options, (; modes, settings)),
+        term.addressee, term.label)
 end
 
 _rk_plan_summary(plan::_RKValuePlan) = string(

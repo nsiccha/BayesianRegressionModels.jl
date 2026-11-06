@@ -117,7 +117,8 @@ end
         @test modes == collect(K)
         @test settings[length(K)+1:end] == collect(Iterators.flatten(
             ((lo+hi)/2, (hi-lo)/2) for (lo,hi) in domains))
-        @test occursin("$(id) ~ brm_hsgp_effect($(columns), $(id)_modes_fit, $(id)_settings_fit",
+        @test occursin("$(id)_modes = copy($(id)_modes_fit)", main)
+        @test occursin("$(id) ~ brm_hsgp_effect($(columns), $(id)_modes, $(id)_settings",
             main)
         basis = Base.invokelatest(owner,(data.x,data.w)[1:length(K)]...,modes,settings)
         @test length(basis) == 2
@@ -133,8 +134,8 @@ end
             @test isempty(floor_statements)
         else
             # The floor reads the bound sizes and domain, not numbers of its own.
-            inputs = Expr(:block, (Expr(:(=), name, bound[name])
-                for name in (Symbol(id,"_modes_fit"), Symbol(id,"_settings_fit")))...)
+            inputs = Expr(:block, Expr(:(=), Symbol(id,"_modes"), modes),
+                Expr(:(=), Symbol(id,"_settings"), settings))
             @test Core.eval(mod,Expr(:let,inputs,last(only(floor_statements).args))) ≈
                 (iso ? maximum(floors) : floors) atol=2e-15 rtol=2e-15
         end

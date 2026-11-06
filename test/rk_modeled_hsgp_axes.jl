@@ -82,7 +82,7 @@ end
         # The effect reads the model-derived axis by name; its spectral graph
         # composes the basis graph. A bounded authored length-scale prior
         # reads no validity floor, so none is emitted.
-        @test occursin("hsgp_x ~ brm_hsgp_effect(x)", main)
+        @test occursin("hsgp_x ~ brm_hsgp_effect(x, hsgp_x_modes, hsgp_x_settings)", main)
         @test !occursin("rho_floor", main)
         definitions = join(sprint(Base.show_unquoted, d) for d in emitted.defs)
         # The basis size and fixed domain are inputs, not numbers of the
