@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.222
+
+- Fixed: `brm_svi_fit(...; laplace=GaussianBlockLaplace())` could stop with
+  `inconsistent quadrature bounds` on valid input, depending on the seed and the
+  host. On a 12-coordinate toy model at 8 updates, 6 of 17 seeds stopped this way.
+  The upper and lower bound of each log-determinant probe came from two separate
+  `eigen` calls, and near convergence their rounding, about `1e-12` there, exceeded
+  the true gap between the bounds. Both bounds now read one Cholesky factorization,
+  on which their order holds for the computed numbers. The 11 of those seeds that
+  already fitted move by at most `2e-13` in ELBO and take the same Krylov steps.
+  A precision too ill-conditioned to factor now always raises `ArgumentError`,
+  where it could also raise `nonpositive Radau node`. This fix does not make a
+  badly conditioned log determinant more accurate: `GaussianBlockLaplace` now
+  documents that rounding, which `logdet_quadrature_width` does not include.
+
 ## 0.2.221
 
 - Added: `brm_gmrf_predict(rk, draws, field; east, north, time)` gives a read-pair
