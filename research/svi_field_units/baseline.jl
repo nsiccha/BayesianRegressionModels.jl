@@ -122,8 +122,19 @@ function main(side, times, stations, rows, batch)
     end))
     report("  per-unit gradient buffers", cost(() -> (zeros(D), zeros(D), zeros(length(z)), zeros(length(z)))))
     report("  RK partition (footprint)", cost(() -> BRM._brm_nlme_partition_evaluate!(gradient, t.plan, i)))
-    # Problem 2: the whole prior, one evaluation per step.
-    report("global prior term", cost(() -> BRM._brm_svi_global_term(t, g)))
+    # Problem 2: the whole prior, one evaluation per step, through the model's whole-prior
+    # query. SVI's own compact factor query is timed too, and a failure there is reported:
+    # it stops the iteration below, not this measurement.
+    u = copy(m.unit)
+    report("whole prior (model query)", cost(() -> BRM._rk_nlme_population_prior_value_gradient(m.population_prior, u)))
+    compact = try
+        report("global prior term", cost(() -> BRM._brm_svi_global_term(t, g)))
+        true
+    catch error
+        println("BASELINE global prior term FAILED: ", first(split(sprint(showerror, error), '\n')))
+        flush(stdout)
+        false
+    end
     # Problem 3: the dense global update.
     family = MeanFieldGlobal()
     q = BRM._brm_svi_params(t, g, family; global_scale=0.1, unit_scale=1.0)
@@ -142,6 +153,11 @@ function main(side, times, stations, rows, batch)
     @printf("BASELINE variational state %.1f MB (global factor and units), Adam %.1f MB\n",
         Base.summarysize(q) / 2^20, Base.summarysize(opt) / 2^20)
     # One whole iteration, at a batch of `batch` units, and the public entry.
+    if !compact
+        @printf("BASELINE peak_rss %.2f GB\n", peak_gb())
+        flush(stdout)
+        return nothing
+    end
     batch_units = collect(1:min(batch, length(t.units)))
     adam = BRM._BRMSVIAdam(length(x), 1e-6)
     report("whole iteration (batch=$batch)", cost(() -> BRM._brm_svi_iteration!(rng, t, q, adam, batch_units, 1e-6, 0.0), 3))
