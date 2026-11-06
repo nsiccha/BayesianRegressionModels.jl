@@ -129,6 +129,11 @@ struct _BRMGMRFFootprintSupport{C}
     geometry::_BRMGMRFFootprint
     channels::C
 end
+Base.isequal(a::_BRMGMRFFootprintSupport, b::_BRMGMRFFootprintSupport) =
+    isequal(a.geometry, b.geometry) && isequal(a.channels, b.channels)
+Base.:(==)(a::_BRMGMRFFootprintSupport, b::_BRMGMRFFootprintSupport) =
+    a.geometry == b.geometry && a.channels == b.channels
+Base.hash(s::_BRMGMRFFootprintSupport, h::UInt) = hash(s.geometry, hash(_BRMGMRFFootprintSupport, h))
 
 function brm_gmrf_footprint_support(east, north, time, channel, neighbors)
     channels = _brm_fit_levels(channel)
