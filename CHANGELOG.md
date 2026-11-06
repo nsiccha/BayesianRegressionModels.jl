@@ -12,6 +12,36 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.218
+
+- Fixed: one extreme draw could stop `brm_svi_fit`'s optimization of the globals
+  without any sign of it. A draw that reaches a steep part of the density gives
+  a finite ELBO estimate of, say, -1e21, so `nonfinite=:error` never fires, and
+  its gradient stays in Adam's second moment for tens of thousands of iterations.
+  On one real fit of 7,379 globals, the draws of a single run left 95% of the
+  global means with a step more than 10 times too small when polishing ended, 85%
+  more than 1,000 times too small and 22% more than a million times too small, so
+  they had barely moved during polishing, and the ELBO looked flat as for a
+  converged fit. Each coordinate's gradient now enters Adam's moments limited to
+  `10 √(N / B)` times that coordinate's running rms. The bound is that wide
+  because a coordinate read by few subjects has a zero gradient in most batches;
+  a tighter one shrinks its scale without end. `laplace=GaussianBlockLaplace()`
+  is unchanged.
+- Changed: the stopping rule reads the 10% trimmed mean of each window and its
+  standard error (Yuen), not the mean and variance. One draw could decide the
+  test: its window's variance swamped every gap, whichever way the ELBO was moving.
+  Fits with no extreme draws can stop at a different window than before.
+- Added: `diagnostics.elbo_windows_trimmed`, what the stopping rule now reads, and
+  `diagnostics.clipped_steps`, how many global steps had a gradient limited.
+  `diagnostics.elbo_windows` stays the plain mean of each window, which a single
+  draw can dominate, and now includes the last polishing window, which it used to
+  omit. The progress message reports the trimmed mean.
+- **Breaking:** an optimizer checkpoint (`BRMSVIOptimizerState`) written by an
+  earlier version does not load, since the run's fields changed. As before, a
+  checkpoint needs the same package version; finish such a run on its own version
+  or restart it. A fit on a fixed seed differs from an earlier version's from the
+  first clipped step and from the stopping decision on.
+
 ## 0.2.217
 
 - Fixed: `gmrf(...; neighbors=m)` depended on the order of the rows wherever a
