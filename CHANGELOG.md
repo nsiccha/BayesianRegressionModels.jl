@@ -29,11 +29,13 @@ instead of failing at run time.
 
 ## 0.2.215
 
-- Fixed: `brm_svi_fit` and `brm_svi_resume` could not recover a dense unit
-  factor's weak direction. The single-draw curvature estimate is indefinite,
-  and where a direction's precision was far below its target the trust-limited
-  step kept widening it, on an exact Gaussian target too: a direction whose true
-  sd is 1, started at 36.7, ended between 155 and 3170 after 1100 visits. Draws
+- Fixed: `brm_svi_fit` and `brm_svi_resume` could not recover a weak direction
+  of a dense unit factor above about 20 coordinates. The single-draw curvature
+  estimate is indefinite, and where a direction's precision was far below its
+  target the trust-limited step kept widening it, on an exact Gaussian target
+  too: at 27 coordinates a direction whose true sd is 1, started at 36.7, ended
+  between 14.6 and 2760 after 1100 visits. At 13 and 15 coordinates it recovered;
+  at 19 and 21 most runs did; at 23 and above they did not. Draws
   then reach far enough out that the target overflows on both sides. The step
   now uses the positive part of the estimate, which needs no knowledge of the
   prior and equals the old estimate at a matched factor. No option, keyword,

@@ -434,9 +434,10 @@ const _BRM_SVI_UNIT_MEAN_TRUST = 1.0
 # direction v's precision is far below its target, v dominates the whitened
 # gradient difference, the trust region sets β from the estimate's largest
 # eigenvalue, and the negative one halves the precision along a vector holding
-# about half of v. v's marginal variance then grows on average, on an exact
-# Gaussian target too, and with it the draws, however strongly the target
-# curves along v. At a matched factor the estimate is εεᵀ, whose negative part
+# about half of v. In units above about 20 coordinates, measured on an exact
+# Gaussian target, v's sd then stays wide or grows, and with it the draws,
+# however strongly the target curves along v; at 13 and 15 coordinates it
+# recovered. At a matched factor the estimate is εεᵀ, whose negative part
 # is zero, so the positive part changes nothing there. It is biased towards
 # more precision wherever the two differ, including a target with negative
 # curvature, whose true fixed point it no longer reaches.
