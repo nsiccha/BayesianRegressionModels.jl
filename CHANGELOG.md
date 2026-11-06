@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.206
+
+- Added: `BRMSVINonfiniteError`. When an SVI iteration (`brm_svi_fit`,
+  `brm_svi_resume`) evaluates the target to a non-finite value or gradient at
+  its Monte Carlo draws, it now throws this error before changing the
+  variational factors or the optimizer. The error names the iteration, every
+  non-finite term (the global prior term or a unit), what was not finite (value
+  or gradient, and at which antithetic draw), the coordinates with non-finite
+  gradient entries, and whether the evaluated point itself was finite.
+  Previously the non-finite gradient reached a unit's natural-gradient step and
+  surfaced as LAPACK's `ArgumentError: matrix contains Infs or NaNs` from
+  `eigvals`, after the global step had already changed `q`. Continue from the
+  last checkpoint `save` received: the run in memory is not a checkpoint after
+  the error.
+
 ## 0.2.205
 
 - Fixed: `brm_start` on an unconditioned `RKBRMI` (every response omitted,
