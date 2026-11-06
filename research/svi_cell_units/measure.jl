@@ -7,7 +7,7 @@
 # comparable across layouts because its minibatch noise differs.
 #
 # RUN: julia --project=test research/svi_cell_units/measure.jl \
-#          <nsite> <nsensor> <batch> <updates> <window> <first seed> <last seed>
+#          <nsite> <nsensor> <batch> <updates> <long updates> <window> <first seed> <last seed>
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface: AutoEnzyme
 using LinearAlgebra, LogDensityProblems, Printf, Random, Statistics
@@ -121,37 +121,59 @@ function report_variance(label, u, targets, probabilities, batch)
     end
 end
 
-# The row weight: what one more row of a vector-valued cell costs, in units of what
-# one more read costs in an elementwise row. Rows and reads come from the toy's
-# own units, whose site cells differ only in rows.
-function report_cost_model(m, t, data)
-    terms = unit_gradients(t, copy(m.unit); repeats=15)
-    sites = eachindex(data.site_y)
-    rows = Float64.(length.(data.site_y))
-    seconds = [terms[i].seconds for i in sites]
-    per_row = cov(rows, seconds) / var(rows)
-    sensors = length(sites)+1:length(t.units)
+# Rows, rows beyond a cell's first, and reads, per unit. Units are in level order,
+# which is not data order, so everything goes through the attribution.
+function unit_structure(m, t)
     inventory = BRM._brm_svi_factor_inventory(m.view, length(m.unit);
         rows=BRM._brm_svi_observed_rows(m.backend, m.view))
     owners = Dict(t.ownership.attribution)
-    reads = zeros(length(t.units))
-    for ((name, cell), support) in zip(inventory.sources, inventory.supports)
-        reads[owners[name][cell]] += length(support)
+    N = length(t.units)
+    rows, extra, reads = zeros(N), zeros(N), zeros(N)
+    for ((name, cell), support, r) in zip(inventory.sources, inventory.supports, inventory.rows)
+        unit = owners[name][cell]
+        rows[unit] += r
+        extra[unit] += max(r - 1, 0)
+        reads[unit] += length(support)
     end
-    per_read = median(terms[i].seconds / reads[i] for i in sensors)
-    println("unit, rows in its cells, reads, work, measured gradient (ms):")
-    for i in eachindex(t.units)
-        n = i in sites ? length(data.site_y[i]) : count(==(i), owners[:row_y])
-        @printf("  %4d %5d %7.0f %9.0f %9.3f\n", i, n, reads[i], t.ownership.work[i], 1000terms[i].seconds)
-    end
-    @printf("cost model: %.2f µs per site row, %.3f µs per sensor-row read, row weight %.1f reads\n",
-        1e6per_row, 1e6per_read, per_row / per_read)
-    @printf("correlation of work with measured time over all units: %.3f; over sites: %.3f\n",
-        cor(t.ownership.work, [term.seconds for term in terms]),
-        cor(t.ownership.work[sites], seconds))
+    (; rows, extra, reads)
 end
 
-function main(nsite, nsensor, batch, updates, window, seeds)
+# Per-unit gradient time against rows and reads. This toy's vector-valued rows are
+# one BLAS product, far cheaper per row than a row that computes per-row
+# quantities, so it says little about what a row costs in general.
+function report_cost_model(m, t)
+    terms = unit_gradients(t, copy(m.unit); repeats=15)
+    s = unit_structure(m, t)
+    seconds = [term.seconds for term in terms]
+    sites = findall(>(0), s.extra)
+    sensors = setdiff(eachindex(t.units), sites)
+    println("unit, rows, reads, work, measured gradient (ms):")
+    for i in vcat(sites, first(sensors, 3))
+        @printf("  %4d %5.0f %7.0f %9.0f %9.4f\n", i, s.rows[i], s.reads[i], t.ownership.work[i], 1000seconds[i])
+    end
+    per_row = cov(s.rows[sites], seconds[sites]) / var(s.rows[sites])
+    per_read = median(seconds[i] / s.reads[i] for i in sensors)
+    @printf("cost model: %.4f µs per site row, %.4f µs per sensor-row read\n", 1e6per_row, 1e6per_read)
+    @printf("correlation of work with measured time: all units %.3f, sites %.3f\n",
+        cor(t.ownership.work, seconds), cor(t.ownership.work[sites], seconds[sites]))
+end
+
+# What the row term does to the estimator: the variance and expected time the
+# sampling law gives under each weight, at the same gradients.
+function report_row_weight(label, m, t, u, batch)
+    terms = unit_gradients(t, u)
+    s = unit_structure(m, t)
+    for weight in (0, 1, 4, 16, 64, 256)
+        work = t.ownership.work .+ (weight - BRM._BRM_SVI_ROW_WORK) .* s.extra
+        p = BRM._brm_svi_unit_sampler(:work, work).probabilities
+        V, _ = subsampling_variance(terms, p, batch)
+        update = expected_update_seconds(terms, p, batch)
+        @printf("row weight %-7s %4d  exact variance %.5g  expected update %.3f ms  variance×time %.5g  largest p %.3f\n",
+            label, weight, V, 1000update, V * update, maximum(p))
+    end
+end
+
+function main(nsite, nsensor, batch, updates, long_updates, window, seeds)
     rng = Xoshiro(20261106)
     data = cell_toy_data(rng; nsite, nsensor)
     m = brm_nlme_model(RKBRMI(cell_toy_model(data)); ad_backend=AD,
@@ -183,7 +205,7 @@ function main(nsite, nsensor, batch, updates, window, seeds)
             layout, offset, abs(value - expected), norm(gradient - native, Inf))
     end
 
-    report_cost_model(m, targets[:components], data)
+    report_cost_model(m, targets[:components])
     report_variance("start", copy(m.unit), targets, probabilities, batch)
 
     # Warm optimization under each layout: one short fit compiles, then each seed
@@ -207,9 +229,21 @@ function main(nsite, nsensor, batch, updates, window, seeds)
     end
     # One point for both layouts: the same global gradient, so the figures compare.
     report_variance("fitted", finals[:components], targets, probabilities, batch)
-    @printf("mean distance between the layouts' fitted means, in coordinates: %.4f\n",
-        norm(finals[:components] - finals[:first_unit], Inf))
+    report_row_weight("start", m, targets[:components], copy(m.unit), batch)
+    report_row_weight("fitted", m, targets[:components], finals[:components], batch)
+    # Where each layout ends up, given far more updates: the factorization's cost
+    # shows here, once slower convergence no longer can. Fewer windows, so the ELBO
+    # costs little beside the updates.
+    for layout in LAYOUTS, seed in seeds
+        t = targets[layout]
+        run = fit_trace(m, t, layout, globals, full; batch_size=batch, updates=long_updates,
+            window=long_updates ÷ 10, seed)
+        d = run.fit.diagnostics
+        @printf("long %-11s seed %d updates %d  optimizer seconds %.2f  final ELBO %.3f  second half mean %.3f\n",
+            layout, seed, d.iterations, d.seconds, run.rows[end].elbo,
+            mean(row.elbo for row in run.rows[end-4:end]))
+    end
 end
 
 args = parse.(Int, ARGS)
-main(args[1], args[2], args[3], args[4], args[5], args[6]:args[7])
+main(args[1], args[2], args[3], args[4], args[5], args[6], args[7]:args[8])

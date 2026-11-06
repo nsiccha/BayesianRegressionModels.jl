@@ -115,9 +115,7 @@ function brm_svi_checkpoint(fit)
         if !(i in estimated))
     levels = hasproperty(d, :unit_levels) ? d.unit_levels : m.view.levels
     units = _brm_svi_save_units!(Dict{Any,NamedTuple}(), m, d.q, blocks; levels)
-    options = d.separator === nothing ? (; separator=:none) :
-        (; (key => getproperty(d.separator, key) for key in
-            (:separator, :max_unit_coordinates, :max_unit_work, :max_promoted_coordinates))...)
+    options = d.separator === nothing ? (; separator=:none) : _brm_svi_policy_options(d.separator)
     layout = (; options, global_keys=_brm_svi_global_keys(m, d.globals))
     BRMSVIState(3, deepcopy(state), _brm_svi_source_id(m.backend),
         copy(m.view.coordinates[d.globals]), _brm_svi_global_factor(d.q),

@@ -165,6 +165,7 @@ end
     labels = first_fit.diagnostics.unit_levels
     @test count(level -> first(only(level)) === :cells, labels[4:end]) == length(labels) - 3
     state = brm_svi_checkpoint(first_fit)
+    # A carried layout must not fall back to the first unit in the next window.
     @test state.layout.options.cell_units === :components
     # Coordinates of sensor 5 have no reader in the first window: they stay global.
     # A later reader of a carried global cannot make it local.

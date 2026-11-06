@@ -239,14 +239,16 @@ function _brm_svi_partition(m, ownership)
 end
 
 _brm_svi_unit_levels(t) = hasproperty(t.ownership, :levels) ? t.ownership.levels : t.m.view.levels
-# `cell_units` is recorded only when it departs from the layout every earlier
-# checkpoint has, so those checkpoints keep their identity and replay unchanged.
-function _brm_svi_separator_options(t)
-    hasproperty(t.ownership, :separator) || return (; separator=:none)
-    policy = t.ownership.separator
+# The options that rebuild a layout, for resume and streaming alike. `cell_units`
+# is recorded only when it departs from the layout every earlier checkpoint has,
+# so those checkpoints keep their identity and replay unchanged.
+function _brm_svi_policy_options(policy)
     options = (; (key => getproperty(policy, key) for key in
         (:separator, :max_unit_coordinates, :max_unit_work, :max_promoted_coordinates))...)
-    policy.cell_units === :first_unit ? options : merge(options, (; policy.cell_units))
+    cell_units = get(policy, :cell_units, :first_unit)
+    cell_units === :first_unit ? options : merge(options, (; cell_units))
 end
+_brm_svi_separator_options(t) = hasproperty(t.ownership, :separator) ?
+    _brm_svi_policy_options(t.ownership.separator) : (; separator=:none)
 _brm_svi_requested_globals(t) = hasproperty(t.ownership, :separator) ?
     t.ownership.separator.requested : t.ownership.promoted
