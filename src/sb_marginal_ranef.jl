@@ -259,7 +259,8 @@ function _sb_emit_marginal_id_bucket!(stmts, data, bucket_name, n_terms_name,
     else
         push!(stmts, Expr(:call, :~,
             Expr(:(::), L_name, Expr(:ref, :cholesky_factor_corr, n_active)),
-            Expr(:call, :lkj_corr_cholesky, eta + m / 2)))
+            Expr(:call, :lkj_corr_cholesky,
+                _sb_lkj_eta_input!(data, bucket_name, eta + m / 2, a))))
     end
     scale = _sb_vector_prior_statement(tau_name, tau_name, resolved[active_cols],
         n_active; positive=true, mod, scope=@__MODULE__)

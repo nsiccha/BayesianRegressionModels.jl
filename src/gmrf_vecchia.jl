@@ -64,6 +64,15 @@ struct _BRMGMRFFootprint
     max_lags::Int
 end
 
+# A footprint is plain data, so it equals a copy of itself. Queries that keep a copy of
+# their bound data compare it this way, and a footprint is bound as a model input.
+_brm_vecchia_same_fields(same, a::T, b::T) where {T} =
+    all(name -> same(getfield(a, name), getfield(b, name)), fieldnames(T))
+Base.isequal(a::_BRMGMRFFootprint, b::_BRMGMRFFootprint) = _brm_vecchia_same_fields(isequal, a, b)
+Base.:(==)(a::_BRMGMRFFootprint, b::_BRMGMRFFootprint) = _brm_vecchia_same_fields(==, a, b)
+Base.hash(f::_BRMGMRFFootprint, h::UInt) =
+    hash(_BRMGMRFFootprint, hash(f.ncoordinates, hash(f.neighbors, hash(f.nchannels, h))))
+
 Base.show(io::IO, f::_BRMGMRFFootprint) = print(io, "_BRMGMRFFootprint(", length(f.position),
     " states, ", length(f.east), " positions, ", length(f.times), " times, ",
     length(f.pattern_ptr) - 1, " patterns, ", length(f.neighbor), " conditioning entries)")

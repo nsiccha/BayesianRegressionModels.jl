@@ -1,5 +1,15 @@
 # Running the tests
 
+`runtime_numeric_settings.jl` checks that sizes and numeric settings are inputs of
+the emitted programs (user principle `0ikeidi`): one Stan and one RK program across
+a `gmrf` or `hsgp` setting, a data scalar a prior reads, a block's LKJ `eta`, a
+factor's levels and a known correlation, with one lowered program and `prepare_query`
+type where RKPPL allows it and a literal as the positive control. One retained build
+evaluates values A, B, A against an analytic density and gradient. It also checks
+frozen and fresh replay and that checkpoint identities see a prior's numbers. The
+`@test_broken` lines name the ReactiveKernels snags they wait on. About 15 minutes;
+it accepts testset substring filters.
+
 `rk_data_law_arguments.jl` checks RKBRMI formula responses whose law reads
 data: a scalar data field, a `constant(...)` value, a plain alias and a per-row
 column as a Normal scale, a censored Normal, a Student-t scale, a LogNormal scale
@@ -1314,6 +1324,16 @@ three different lengths, and the regional panel of `nlme_panel_fixture.jl`
 fit is compared with NUTS too. Starts (prior medians, a packed point,
 `inits`) and their refusals are covered as well. It runs in the test
 environment above.
+
+`nlme_svi_heavy_tails.jl` checks what one extreme ELBO draw does to minibatch
+SVI, whose estimate can have an infinite expectation with every draw finite.
+With no bound, one gradient of 1e21 freezes its Adam coordinate (the control), and
+with `_brm_svi_clip` that coordinate keeps its step. A coordinate that most batches
+do not read keeps its scale under the `√(N / B)`-wide bound and loses it under a
+tighter one (the control). `_brm_svi_window`'s `spread / W` is the variance of its
+trimmed mean on Gaussian and skewed draws, and one draw moves neither. The stopping
+test neither stops a rising fit nor hides a stalled one on an extreme draw, where a
+test of means and variances does stop the rising fit.
 
 `nlme_svi_authored_factors.jl` checks the public RKPPL authored-factor API
 and production SVI ownership. On a
