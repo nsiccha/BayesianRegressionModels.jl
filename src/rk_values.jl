@@ -474,16 +474,29 @@ _rk_ast_replace_floor_marker(value::Expr, floor) =
     Expr(value.head, (_rk_ast_replace_floor_marker(a, floor) for a in value.args)...)
 _rk_ast_replace_floor_marker(value, _floor) = value
 
+# An ungrouped HSGP samples one length scale, `rho_iso`, when it is isotropic,
+# periodic or has a single axis, and otherwise one scalar `rho_j` per axis
+# (`_rk_ast_hsgp_component!`). Its `rho` vector only assembles those scalars,
+# so a start or transport addresses these carriers, never `rho`.
+_rk_hsgp_length_axes(term) = get(term.options, :cov, :exp_quad) === :periodic ||
+    term.options.iso ? 1 : length(term.columns)
+
+function _rk_hsgp_length_carriers(term)
+    axes = _rk_hsgp_length_axes(term)
+    axes == 1 ? :rho_iso : Tuple(Symbol(:rho_, j) for j in 1:axes)
+end
+
 # The term's statements, and the sampled block locals of a grouped or
 # hyper-predicted term (`_rk_ast_hsgp_grouped`; `nothing` for an ungrouped one).
 function _rk_ast_value_hsgp(definitions, term, taken, bindings)
+    stmts = Expr[]
+    term = _rk_ast_hsgp_settings!(stmts, term, taken)
     options = term.options
     periodic = get(options, :cov, :exp_quad) === :periodic
     grouped = haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
     # The length-scale floor exists only where a prior or hyper-predictor reads it.
     floor_read = options.rho_truncated || get(options, :rho_floor_named, false) ||
         any(p -> p.hyper === :length_scale, get(options, :hyper_plans, ()))
-    stmts = Expr[]
     floors = nothing
     if periodic
         # The periodic basis is prepared data; its effect reads the matrix and
@@ -494,10 +507,13 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         targets = floors === nothing ? (PHI, omega2) : (PHI, omega2, floors)
         # An anchored or masked basis passes its anchor and bound mask
         # (decision 1fk9b29).
+        # Its basis count, period and anchor are the `modes` and `settings`
+        # inputs, not numbers of the program (user principle `0ikeidi`).
         anchor, mask = get(options, :anchor, nothing), _rk_hsgp_mask(term)
         push!(stmts, Expr(:(=), Expr(:tuple, targets...), Expr(:call,
-            :brm_hsgp_periodic_basis, only(term.columns), options.k, options.period,
-            (anchor === nothing ? () : (only(anchor),))...,
+            :brm_hsgp_periodic_basis, only(term.columns), Expr(:ref, options.modes, 1),
+            Expr(:ref, options.settings, 1),
+            (anchor === nothing ? () : (Expr(:ref, options.settings, 2),))...,
             (mask === nothing ? () : (mask,))...)))
         inputs = Pair{Symbol,Any}[:PHI => PHI, :omega2 => omega2]
         extent = :(axes(PHI, 2))
@@ -514,7 +530,12 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         append!(inputs, (formal => actual for (formal, actual) in
             zip(_rk_hsgp_mask_formals(term), _rk_hsgp_mask_actuals(term))))
         fit === nothing || push!(inputs, :fit => fit)
-        extent = :(1:$(prod(_rk_hsgp_modes(options))))
+        # Then the size and settings the basis graph reads; the weights' extent
+        # is the basis size `prod(modes)`, an input's value.
+        settings = _rk_hsgp_basis_setting_formals(term)
+        append!(inputs, (formal => actual for (formal, actual) in
+            zip(settings, _rk_hsgp_setting_actuals(options, settings))))
+        extent = :(1:prod(modes))
     end
     if grouped
         call, locals = _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent,
@@ -522,7 +543,7 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         push!(stmts, Expr(:call, :~, options.id, call))
         return stmts, locals
     end
-    axes = periodic || options.iso ? 1 : length(term.columns)
+    axes = _rk_hsgp_length_axes(term)
     rho_priors = [_rk_ast_hsgp_rho_prior(options, floors, axes == 1 ? nothing : j,
         bindings, taken) for j in 1:axes]
     sigma_prior = _rk_ast_positive_prior(options.sigma_prior, bindings, taken)
@@ -535,6 +556,19 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         rho_priors, sigma_prior, value, extent; truncated=options.rho_truncated,
         base=periodic ? "brm_periodic_hsgp_effect" : "brm_hsgp_effect")
     stmts, nothing
+end
+
+# The term's size and settings as fitted values of the program, from its
+# fit-role inputs alone (`<id>_modes = copy(<id>_modes_fit)`), so a fitted state
+# exports them like any other fit and every graph reads them by these names.
+function _rk_ast_hsgp_settings!(stmts, term, taken)
+    options = term.options
+    modes = _rk_ast_fresh_name(string(options.id, "_modes"), taken)
+    settings = _rk_ast_fresh_name(string(options.id, "_settings"), taken)
+    push!(stmts, Expr(:(=), modes, Expr(:call, :copy, options.modes)),
+        Expr(:(=), settings, Expr(:call, :copy, options.settings)))
+    _RKTermSpec(term.kind, term.columns, merge(options, (; modes, settings)),
+        term.addressee, term.label)
 end
 
 _rk_plan_summary(plan::_RKValuePlan) = string(
@@ -580,6 +614,9 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
         head = family isa ExprColumn ? getf(family) : nothing
         head === MixtureModel && _rk_mixture_value_weights(program, family) &&
             return true
+        # A censored delay observes through its BRM-owned law
+        # (`brm_censored_delay`, `censored_delays.jl`).
+        _brm_is_censored_delay(head) && return true
         # Heterogeneous and custom mixtures retain each component's ordinary
         # value and source-graph boundary. The legacy formula planner has a
         # fixed location/scale record and cannot carry these signatures.

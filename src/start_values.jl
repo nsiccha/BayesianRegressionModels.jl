@@ -105,7 +105,9 @@ component_inits = [:left => (; rise=(; Intercept=log(1/6)),
 
 Unknown, ambiguous or duplicate scopes, computed values, wrong shapes and
 invalid constraints are rejected. RK initialization uses its native layout and
-needs no compiled Stan model.
+needs no compiled Stan model. An unconditioned `RKBRMI` (every response
+omitted) samples nothing: its start is the empty point, and an addressed value
+is refused because no coordinate holds it.
 
 `base=:prior_median` fills unaddressed scalar-prior parameters from finite
 medians within their effective bounds, including fitted length-scale floors.
@@ -444,6 +446,7 @@ function brm_start(rk::RKBRMI, inits::NamedTuple;
         base=zeros(Float64, length(_rk_layout_coordinate_names(rk))), term_inits=(),
         component_inits=())
     u0 = _brm_start_base_vector(base, length(_rk_layout_coordinate_names(rk)), "RK layout")
+    _brm_rk_start_unconditioned(rk.plan, inits, term_inits, component_inits)
     records = [_brm_rk_start_record(rk, r) for r in _rk_coordinate_records(rk.plan; term_starts=true)]
     values = _rk_constrained_values(rk, u0)
     writes = Tuple{Symbol,Tuple,Any}[]
@@ -462,6 +465,29 @@ function brm_start(rk::RKBRMI, inits::NamedTuple;
         append!(writes, prior_writes)
     end
     _brm_rk_start_point(rk, values, writes, effects)
+end
+
+# An unconditioned program (no response bound) samples nothing: RK emits an
+# empty fitted density, Stan a `fixed_param` program, and every declaration is
+# drawn in generated quantities. Its one start is the empty point, so an
+# addressed value is refused as unsampled rather than reported as unknown.
+_brm_rk_start_unconditioned(plan, inits, term_inits, component_inits) = nothing
+_brm_rk_start_unconditioned(::_RKUnconditionedPlan, inits, term_inits,
+        component_inits) = _brm_start_unsampled("this RKBRMI is an unconditioned " *
+    "program (no response is bound), so it", "rk", inits, term_inits, component_inits)
+
+function _brm_start_unsampled(what, call, inits, term_inits, component_inits)
+    addressed = ["`$key`" for key in keys(inits)]
+    isempty(term_inits) || push!(addressed, "`term_inits`")
+    isempty(component_inits) || push!(addressed, "`component_inits`")
+    isempty(addressed) && return nothing
+    error("brm_start: $what has zero sampled coordinates; " *
+        "$(join(addressed, ", ")) set" * (length(addressed) == 1 ? "s" : "") *
+        " no coordinate. An unconditioned program (every response omitted) " *
+        "draws each declaration in generated quantities, and its only start is " *
+        "the empty point, `brm_start($call, (;))`. To start a program at a prior " *
+        "draw, bind a response and transport the generated draw into that " *
+        "observed program (`brm_stan_point_to_rk`)")
 end
 
 # Write `(declaration, index, value)` constrained values into `values` (the
@@ -878,6 +904,8 @@ function brm_start(sb::SBBRMI, stan_model, inits::NamedTuple;
         base=zeros(Float64, BridgeStan.param_unc_num(stan_model)), term_inits=(),
         component_inits=())
     u0 = _brm_start_base_vector(base, BridgeStan.param_unc_num(stan_model), "compiled Stan model")
+    iszero(length(u0)) && _brm_start_unsampled("the compiled Stan model", "sb, stan_model",
+        inits, term_inits, component_inits)
     names = String.(BridgeStan.param_names(stan_model))
     d = brm_descriptor(sb)
     totals = total_effect_blocks(d.plan)

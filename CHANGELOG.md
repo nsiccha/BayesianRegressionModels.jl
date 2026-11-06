@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.204
+## 0.2.210
 
 - The sparse Laplace marginal gradient is correct at a stiff observation on the
   factor route. Its augmented system lost accuracy as the square of the outer
@@ -59,6 +59,114 @@ instead of failing at run time.
   a locality error, read a producer plate's cell whole under `partitioned`, and
   have no row forms for matrix-row helpers, `vec` of a row value, whole arrays
   read by index or `b[p, 2]` of a computed matrix.
+
+## 0.2.209
+
+- Added: `BRMSVINonfiniteError`. When an SVI iteration (`brm_svi_fit`,
+  `brm_svi_resume`) evaluates the target to a non-finite value or gradient at
+  its Monte Carlo draws, it now throws this error before changing the
+  variational factors or the optimizer. The error names the iteration, every
+  non-finite term (the global prior term or a unit), what was not finite (value
+  or gradient, and at which antithetic draw), the coordinates with non-finite
+  gradient entries, and whether the evaluated point itself was finite.
+  Previously the non-finite gradient reached a unit's natural-gradient step and
+  surfaced as LAPACK's `ArgumentError: matrix contains Infs or NaNs` from
+  `eigvals`, after the global step had already changed `q`. Continue from the
+  last checkpoint `save` received: the run in memory is not a checkpoint after
+  the error.
+
+## 0.2.208
+
+- Added: sizes and numeric settings are data. `gmrf(...; neighbors = nb)`,
+  `gmrf(...; multiresolution = m)` and `hsgp(...; k = kk, c = cc)` (and
+  `domain`, `period`, `anchor`) take a scalar or per-axis data field, or a
+  `name = constant(expr)`, besides a literal, so one declaration serves a
+  family of values (user principle `0ikeidi`).
+- Added: a random-effect block's correlation prior
+  `cor(:, ID) ~ LKJCholesky(K, eta)` reads `K` and `eta` from scalar data
+  fields as well as literals, on SBBRMI and RKBRMI (and in `prune_responses`);
+  `K` is still checked against the block width. Both backends emit `eta`'s
+  number into the program.
+- Changed: models that differ only in the `gmrf` and `hsgp` values build one
+  Stan program and emit one RK program. RKBRMI reads an `hsgp` term's basis
+  counts and settings from the bound fit-role inputs `<id>_modes_fit` and
+  `<id>_settings_fit` (as the fitted values `<id>_modes`, `<id>_settings`), and
+  a `multiresolution` rank from `<id>_rank_fit`, instead of spelling them in the
+  program; the basis size is `prod(modes)`. The densities are unchanged.
+  ReactiveKernelsPPL's lowering of the emitted program still specializes on a
+  changed basis size and on the fitted length-scale floor, which `c` and
+  `domain` move (ReactiveKernels snag `rkppl-sized-vect-69604d32`); a changed
+  `multiresolution` rank lowers to the same program.
+- Added: a frozen replay refuses data whose field holds another value of such
+  a setting than the fit used; a new build takes the new value, and so does a
+  fresh replay (`freeze_constants=false`) on RKBRMI and of an SBBRMI `gmrf`.
+  An SBBRMI `hsgp` replay refuses in either mode; its new build compiles the
+  same Stan program.
+
+## 0.2.207
+
+- Fixed: a data column whose element type is erased (`Any[...]`, as an empty
+  comprehension over a DataFrame column or `push!` onto `[]` produces) now
+  holds its entries' common type when the model is built, so it is read
+  exactly as the same values written typed: `Any[[0.5, -0.2], [1.3]]` is a
+  per-cell vector response like `[[0.5, -0.2], [1.3]]`, and `Any[0.3, -0.1]`
+  a scalar response like `[0.3, -0.1]`. The entries are not converted and the
+  caller's column is not replaced.
+- Fixed: on RKBRMI, an in-cell observation `y[i] ~ law(...)` in
+  `@plate for i in eachindex(y)` over an empty `y = Any[]` is bound as an
+  empty column of the arrays its law observes per cell (a matrix per cell
+  for a matrix-variate law, otherwise a vector; `Int` for a discrete law,
+  otherwise `Float64`), as `Vector{Float64}[]` would be. It observes zero
+  cells, contributes zero likelihood, keeps the priors and differentiates
+  under native Reverse. It previously became one whole-vector event and
+  failed when queries were prepared (`zero(::Type{Any})`). Other empty
+  columns a cell reads have no law to type them: their queries evaluate,
+  but native reverse AD needs them constructed with a concrete element type.
+
+## 0.2.206
+
+- Fixed: `brm_start` on RKBRMI writes an ungrouped anisotropic
+  `hsgp(...; iso=false)` length scale, as `fitting.md` documents, through
+  `term_inits` and `base=:prior_median`. A scalar broadcasts over the axes; a
+  vector holds one value per axis, in formula order. Before, both raised
+  `type NamedTuple has no field rho`.
+- Fixed: an ungrouped one-axis `hsgp(x; iso=false)` on RKBRMI. Its `brm_start`
+  raised the same error, and `brm_coordinate_transport` refused it because the
+  emission samples `rho_iso` while the record named `rho_1`.
+
+## 0.2.205
+
+- Fixed: `brm_start` on an unconditioned `RKBRMI` (every response omitted,
+  the prior spelling) died in a `MethodError` from an internal coordinate
+  lookup. Such a program has zero sampled coordinates, so
+  `brm_start(rk, (;))`, `base=:prior_median` and the start from the data
+  `brm_start(rk)` (`chains = n` too) now return the empty point, and
+  `brm_start(sb, model)` the empty Stan point. An initial value
+  (`brm_start(rk, (; z=...))`, `term_inits`, `component_inits`) is refused by
+  name on both backends, since every declaration is drawn in generated
+  quantities; before, SBBRMI refused a population coefficient with an
+  unrelated descriptor error. `brm_coordinate_transport` pairs the two empty
+  layouts instead of refusing the unconditioned plan, and reads BridgeStan's
+  `[""]`, its name list for a model without parameters, as no names.
+
+## 0.2.204
+
+- Added: epidemiological delays with a censored primary event, a censored
+  secondary event and truncation, epidist's marginal model, as two response
+  families spelled as in CensoredDistributions.jl:
+  `y ~ double_interval_censored(LogNormal(mu, sigma); primary_event =
+  Uniform(0, pwindow), lower, upper = obs_time, interval = swindow)` and
+  `y ~ primary_censored(dist, Uniform(a, b))` (exact secondary times). The
+  delay law is `LogNormal`, `Gamma` or `Weibull` (Julia parameterizations,
+  linear predictors allowed); windows and bounds are numbers or data
+  columns; `weighted(..., fweights(n))` takes aggregated rows. Closed-form
+  primary censoring, with upper-tail window probabilities taken from
+  survival differences. SBBRMI emits the Stan family `brm_censored_delay`;
+  RKBRMI observes the same Julia law with native Enzyme Reverse gradients.
+  Both check every observation window against its truncation bounds when the
+  model is built. The Julia objects `PrimaryCensored` and
+  `DoubleIntervalCensored` (exported) implement `cdf`, `ccdf`, `pdf`,
+  `logpdf` and `rand`.
 
 ## 0.2.203
 
