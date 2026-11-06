@@ -1340,7 +1340,8 @@ worker memory against `threads`.
 take their own evaluators from the model's pool. On flat, plate and nested
 models, the protocol's one-unit values, η gradients and population gradients,
 called from every thread in shuffled order, equal serial calls to the last bit,
-and the pool prepares more than one evaluator. `check_protocol(...; threads =
+and the pool prepares more than one evaluator, and at most one per Julia thread
+even when tasks holding one yield. `check_protocol(...; threads =
 true)` passes on a nested model. A seeded `WarmupHMCNUTS(threads = true)` SAEM fit
 of a 24-subject plate PK model gives the same bits in child processes with 1, 4
 and N threads (`BRM_NLME_THREADS_N`, default 8). Over six seeds its estimates
@@ -1348,8 +1349,8 @@ agree with lockstep fits (`threads = false`) within twice the lockstep fits'
 spread, and both recover the simulated population values. Run it in the
 NLMEEstimation scratch environment below (NLMEEstimation 0.2.5 or later) with
 `--threads=4`; it refuses to run without threads.
-`research/nlme_threads/benchmark.jl` measures a round of one-unit calls and SAEM
-fits at the thread count it is started with.
+`research/nlme_threads/benchmark.jl` measures a round of one-unit calls and paired
+SAEM fits of both routes at the thread count it is started with.
 
 `nlme_svi_laplace_plan.jl` checks structural eligibility for
 `GaussianBlockLaplace`, including fixed HSGP fitting inputs, nonstandard
@@ -1517,7 +1518,9 @@ curvature edges and bounds allocations when observations repeat a support.
 Its dense-point testset checks that a one-unit η gradient (RK's local-only
 `shared=false` route) equals the η entries of the full gradient, that the
 query and plan work points equal the unit point after every call, and that one
-unit's allocations do not grow with the number of units (3 against 300).
+unit's allocations do not grow with the number of units (3 against 300). A
+one-unit gradient allocates within 1 KB of RK's own call, so it does not copy
+the model to the heap.
 `nlme_units_panel.jl` covers nested
 partition likelihoods, gradients, cell-based Hessian sparsity and allocation
 scaling. The `nlme_svi.jl` filters `minibatch split` and
