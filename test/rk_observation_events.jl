@@ -181,20 +181,40 @@ end
     prior(u) = logpdf(Normal(), only(u))
     typed = (; y=Vector{Float64}[], means=Matrix{Float64}[], sigma=Vector{Float64}[],
         limit=Vector{Float64}[], log_weights=Vector{Float64}[])
-    for data in (typed, merge(typed, (; y=Any[])), map(_ -> Any[], typed))
-        before = deepcopy(data)
-        backend, problem = consumer_problem(group_model(data))
+    scalar_model(data) = @brm data begin
+        shift ~ Normal(0, 1)
+        @plate for i in eachindex(y)
+            y[i] ~ Normal(m[i] + shift, 1.0)
+        end
+    end
+    # An erased empty response is bound as its law's per-cell arrays, so it
+    # differentiates as the typed one does. Erased argument columns have no
+    # law to type them: queries evaluate, but native reverse AD needs their
+    # concrete types (brm-use, "Erased element types").
+    cases = ((group_model(typed), true), (group_model(merge(typed, (; y=Any[]))), true),
+        (scalar_model((; y=Any[], m=Float64[])), true),
+        (group_model(map(_ -> Any[], typed)), false))
+    for (model, gradient) in cases
+        backend = RKBRMI(model)
         plan = rk_bound_plan(backend)
+        @test plan.columns[:y] isa Vector{Vector{Float64}}
         likelihood, prior_query, pointwise = (prepare_query(backend.model, plan, preset)
             for preset in (:likelihood, :prior, :pointwise))
         for u in ([-0.3], [0.7])
             @test Base.invokelatest(likelihood, u) == 0.0
             @test Base.invokelatest(prior_query, u) ≈ prior(u)
             @test isempty(Base.invokelatest(pointwise, u).y)
+        end
+        gradient || continue
+        _, problem = consumer_problem(model)
+        for u in ([-0.3], [0.7])
             check_consumer_point(problem, u, prior)
         end
-        @test isequal(data, before)
     end
+    # The caller's column is read, never replaced.
+    erased = merge(typed, (; y=Any[]))
+    RKBRMI(group_model(erased))
+    @test erased.y isa Vector{Any} && isempty(erased.y)
 
     populated = (; y=[[0.5, -0.2], [1.3]], means=[[0.3 2.5; -0.4 2.2], [0.8 -0.6]],
         sigma=[[0.6, 0.8], [0.7]], limit=[[-Inf, -0.2], [-Inf]],

@@ -18,12 +18,19 @@ instead of failing at run time.
   comprehension over a DataFrame column or `push!` onto `[]` produces) now
   holds its entries' common type when the model is built, so it is read
   exactly as the same values written typed: `Any[[0.5, -0.2], [1.3]]` is a
-  per-cell vector response like `[[0.5, -0.2], [1.3]]`. The entries are not
-  converted. On RKBRMI, an in-cell observation `y[i] ~ law(...)` in
-  `@plate for i in eachindex(y)` over an empty `y = Any[]` now observes zero
-  cells, contributing zero likelihood and keeping the priors, as a typed
-  `Vector{Float64}[]` does. It previously became one whole-vector event and
-  failed when queries were prepared (`zero(::Type{Any})`).
+  per-cell vector response like `[[0.5, -0.2], [1.3]]`, and `Any[0.3, -0.1]`
+  a scalar response like `[0.3, -0.1]`. The entries are not converted and the
+  caller's column is not replaced.
+- Fixed: on RKBRMI, an in-cell observation `y[i] ~ law(...)` in
+  `@plate for i in eachindex(y)` over an empty `y = Any[]` is bound as an
+  empty column of the arrays its law observes per cell (a matrix per cell
+  for a matrix-variate law, otherwise a vector; `Int` for a discrete law,
+  otherwise `Float64`), as `Vector{Float64}[]` would be. It observes zero
+  cells, contributes zero likelihood, keeps the priors and differentiates
+  under native Reverse. It previously became one whole-vector event and
+  failed when queries were prepared (`zero(::Type{Any})`). Other empty
+  columns a cell reads have no law to type them: their queries evaluate,
+  but native reverse AD needs them constructed with a concrete element type.
 
 ## 0.2.205
 
