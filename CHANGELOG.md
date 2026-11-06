@@ -12,6 +12,65 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.219
+
+- The sparse Laplace marginal gradient is correct at a stiff observation on the
+  factor route. Its augmented system lost accuracy as the square of the outer
+  curvature, and the gradient keeps that residual on any population coordinate
+  aliased with an integrated effect: on a bounded ODL target with outer curvature
+  2e7, `odl_offset_Intercept` read 19214 for 395. The system now keeps its outer
+  inputs and their images as separate variables and refines each solve against
+  the conditional precision itself. Marginal values, definiteness and selected
+  covariances are unchanged. Conditional draws use the same solve.
+- The Laplace mode search's default Newton budget per continuation stage
+  (`maxiter` of `brm_laplace_problem`, `brm_laplace_plan` and the NLME
+  integrated families) rises from 50 to 200. Where a followed mode ceases to
+  exist between stages, the walk to the next mode can take more than 50 steps:
+  on the bounded ODL target a 38-effect component needed 56-59 at stage 4/10
+  and up to 122 at stage 5, with exact derivatives, so the default scored a
+  point that has a mode `-Inf`. A point that does not converge now costs up to
+  four times as many steps before it is `-Inf`. Pass `maxiter=50` for the
+  former budget.
+- Sparse Laplace supports model-scope helpers shared by ordinary or
+  sum-factored observation cells. Sampled-coordinate helper values are
+  reused across a cell sweep while their mixed derivatives remain part
+  of the marginal gradient. Integrated-coordinate helper reads retain
+  strict locality checks.
+- Preparation retains local integrated supports without expanding shared
+  sampled coordinates into every cell. Retained plans, sampled subsets,
+  independent problem copies and matrix-free contractions use the same
+  shared-derivative path.
+- A cell with no sums takes compact operators when every value it reads is
+  computed at its rows. Otherwise it takes its strict factor outer, and is refused
+  by name if that refuses it too.
+- A factor's Hessian block compiles at the same bounded Enzyme batch width as a
+  compact cell's, and takes as many batches as it needs.
+- A move of a cell group to reverse over forward on Enzyme's activity error
+  (0.2.158) restarts its Newton pass and resumes at the cell that raised, so no
+  cell counts twice.
+- A `mo()` or `mo1()` term read by a subject's `@plate` cell now plans: the
+  subjects' effects are declared partitioned, so its level table, which has no
+  row form, is computed once per population point in the shared prefix.
+- **Breaking:** under `locality = :error`, a matrix with no row form read as
+  `M[p, 2]` is now refused by name rather than computed whole in every cell.
+  Shared helpers need the RK repairs of ReactiveKernels 0.1.73 and
+  ReactiveKernelsPPL 0.1.90, which the current floors (0.1.82 / 0.1.98)
+  include: earlier releases refuse sum-factored cells over shared helpers with
+  a locality error, read a producer plate's cell whole under `partitioned`, and
+  have no row forms for matrix-row helpers, `vec` of a row value, whole arrays
+  read by index or `b[p, 2]` of a computed matrix.
+
+## 0.2.218
+
+- Added: `stan_data`, `stan_model` and `stan_instantiate` accept a
+  `GenerativePlan`, as `stan_code` already did. Each reads `plan.model`, so it
+  returns what the same call returns on the plan's `SBBRMI`, and `stan_model`
+  and `stan_instantiate` pass their keywords on. They raised `MethodError`
+  before, although `brm-use` said BRM added these methods. Code that reads
+  `plan.model` directly keeps working and gets the same results.
+- Added: `stan_data` accepts a `StanModel`, so `stan_data(stan_model(x))` works
+  on a plan and on an `SBBRMI`.
+
 ## 0.2.217
 
 - Fixed: `gmrf(...; neighbors=m)` depended on the order of the rows wherever a
@@ -175,9 +234,10 @@ instead of failing at run time.
   a data shape in Gamma's `mu/alpha`. Binomial trials keep their formula
   spelling, and the cutpoints or category predictors of a leveled response stay
   refused. An invalid value is refused when the backend is built, naming it
-  (`per-observation scale s must be finite positive numerics`), except that an
-  out-of-range per-row `zi` or Student-t `nu` is not refused yet: it reads as a
-  `-Inf` density.
+  (`per-observation scale s must be finite positive numerics`). An out-of-range
+  per-row `zi` or Student-t `nu` is refused that way only from ReactiveKernelsPPL
+  0.1.105, which BRM's compat floors do not require yet. Before it, the value
+  fails later, as a `-Inf` density or an internal error.
 - Changed: scalar-data Student-t degrees of freedom
   (`LocationScale(mu, s, TDist(nu))` with `nu` from data) are read the same
   way instead of being emitted as a numeric literal, so one program serves

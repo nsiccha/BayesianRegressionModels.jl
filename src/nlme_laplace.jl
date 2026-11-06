@@ -20,10 +20,18 @@
 # block (−H_i = C_i C_iᵀ; units never interact, so one colored direction per
 # within-unit position serves every unit), and w_i = (−H_i)⁻¹ Σ_m T_m[z_i].
 
+# The default Newton budget of one continuation stage. Where a unit's followed
+# mode ceases to exist between stages, the search walks to the next mode, and
+# that walk can be long: on the bounded ODL target (2 probes x 24 h, forced
+# trajectory/device plan) a 38-effect component needed 56-59 steps at stage
+# 4/10 and 68-122 at stage 5 under every step rule tried, with exact
+# derivatives, and every rule reached the same mode. 50 scored that point -Inf.
+const _BRM_LAP_MAXITER = 200
+
 """
     BRMLaplaceProblem
     brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
-        nested_groups=NamedTuple(), shared_groups=(), unit_partition=:subjects, tol=1e-24, maxiter=50,
+        nested_groups=NamedTuple(), shared_groups=(), unit_partition=:subjects, tol=1e-24, maxiter=200,
         structured=:auto, integrate=nothing, max_cell_width=128,
         solver=:auto, matrixfree=MatrixFreeLaplace(), progress=nothing)
 
@@ -58,9 +66,9 @@ reaches:
 - the model's density, gradient or unit Hessians overflow during the mode
   search, so that no finite Newton step exists (the full model's density there
   is not finite either); `problem.nonfinite` counts them;
-- a stage of the mode search has not converged after `maxiter` Newton steps, as when a
-  start lies far up an exponential's slope, where Newton gains about one unit
-  per step; `problem.unconverged` counts them, and a warning names the point,
+- a stage of the mode search has not converged after `maxiter` Newton steps
+  (default 200), as when a start lies far up an exponential's slope, where
+  Newton gains about one unit per step; `problem.unconverged` counts them, and a warning names the point,
   the unit and its last decrements. At a point a sampler would accept this
   marks a defect.
 
@@ -164,8 +172,8 @@ Base.show(io::IO, p::BRMLaplaceProblem) = print(io, "BRMLaplaceProblem(",
     sum(length, p.model.view.subject_coordinates), " integrated random effects)")
 
 function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
-        nested_groups=NamedTuple(), shared_groups=(), unit_partition=:subjects, tol=1e-24, maxiter=50,
-        structured=:auto, integrate=nothing, max_cell_width=128,
+        nested_groups=NamedTuple(), shared_groups=(), unit_partition=:subjects, tol=1e-24,
+        maxiter=_BRM_LAP_MAXITER, structured=:auto, integrate=nothing, max_cell_width=128,
         solver=nothing, matrixfree=nothing, progress=nothing)
     max_cell_width = _brm_spl_width_limit(max_cell_width)
     integrate === nothing && progress !== nothing && throw(ArgumentError(

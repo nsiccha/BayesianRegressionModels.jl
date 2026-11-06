@@ -8,7 +8,9 @@ compiled Stan (value and native Reverse gradient, through the coordinate
 transport), replays the printed source, checks that another value emits the same
 program, that binding refuses an invalid value, and frozen `reprocess` of a
 scalar field and of a constant. The further arguments of the other response
-families are checked against the oracle and finite differences. It accepts
+families are checked against the oracle and finite differences. A per-row `zi`
+or Student-t `nu` outside its support is checked as a refusal on
+ReactiveKernelsPPL 0.1.105 or later and as a `-Inf` density before it. It accepts
 testset substring filters.
 
 `rk_value_weighted_observations.jl` checks formula-level `fweights` and
@@ -284,6 +286,19 @@ accidentally matching flattened length must not establish a scalar row axis.
 compares retained plans with freshly prepared targets, including strict
 subsets of row, plate and sum factors. It checks marginal values, gradients,
 finite differences, independent workspaces and backend/AD changes.
+`laplace_shared_prefix.jl` checks helpers shared by ordinary and sum factors:
+exact mixed derivatives, strict local supports, retained subsets, independent
+copies and matrix-free covariance contractions. Synthetic scaling fixtures
+check that preparation retains only local supports and shared derivative
+sweeps allocate approximately in proportion to the number of cells.
+`laplace_cell_routes.jl` checks that both routes of a cell with no sums, compact
+operators and the factor outer, give the same marginal value and gradient,
+including a cell wider than the HVP batch, a retained plan and a copy. It forces
+the factor route for one testset by overriding the locality report, and a helper
+that hides its rows from both routes is refused by name. A stiff cell whose
+population intercept is aliased with an integrated effect keeps the factor route's
+gradient equal to the compact route's, whose Cholesky of h never sees the augmented
+system (it read -50401 for -2.16 on the rotated form).
 `plate_selected_outputs.jl` checks nested selection of shared vector outputs
 across plates with different cell counts: data-only and parameter-dependent
 outputs, fixed and varying widths, both output orders, reader-first composition,
@@ -318,7 +333,9 @@ automatic selection, marginal optimization, independent copies and scalar
 curvature sign changes. Indexed direct predictor reads beside sums retain
 four outer coordinates at 16, 64 and 4,096 effects (RK 0.1.39 / RKPPL 0.1.33).
 `laplace_factors.jl` checks the compact factor chain
-rule and bounded covariance square-root action. The end-to-end scaling
+rule and bounded covariance square-root action, and that outer curvature up to
+1e10 costs the augmented solve neither its residual nor the selected covariance
+blocks. The end-to-end scaling
 driver is `research/sparse_laplace_factors/fitting_scaling.jl`.
 
 Sum-cell tests require the fleet SelectedInversion revision recorded in
@@ -1143,8 +1160,11 @@ block over two predictors. RK prepares each strictly with the subjects' effects
 declared partitioned, and the level table, which has no row form, is computed
 once per population point. Cell values and full partition gradients match the
 whole model's pointwise densities and central differences, and no subject reads
-another subject's effect. `brm_nlme_model` matches the same reference. It runs
-in the test environment above.
+another subject's effect. `brm_nlme_model` matches the same reference. A planned
+sparse Laplace problem integrates the subjects' effects past the same term, one
+component per subject: its value matches a Laplace marginal computed from the
+whole model's density, and its gradient matches central differences. It runs in
+the test environment above.
 
 `nlme_nested.jl` uses a public synthetic model with interleaved observations
 and 1, 2, and 3 nested units per subject. It checks explicit ownership,

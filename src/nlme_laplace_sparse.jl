@@ -362,7 +362,8 @@ function _brm_spl_layout(backend, integrate; declarations=nothing)
     allunique(integrated) || _brm_nlme_error("brm_laplace_problem: internal: a draw " *
         "belongs to two integrated blocks")
     population = setdiff(1:length(names), integrated)
-    (; records, names, integrated, population, blocks, omega)
+    (; records, names, integrated, population, blocks, omega,
+        partitioned=_rk_spl_partitioned(backend, integrated))
 end
 
 function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol,
@@ -377,7 +378,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         "$(repr(Tuple(integrate))) needs every observation to be a regression row " *
         "of a closed-form family or an observation factor, but $refusal")
     responses = _brm_slap_responses(backend.plan)
-    (; records, names, integrated, population, blocks, omega) =
+    (; records, names, integrated, population, blocks, omega, partitioned) =
         _brm_spl_layout(backend, integrate; declarations)
     if !screened
         candidates = [(; declaration=_brm_spl_record_declaration(r),
@@ -416,7 +417,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
     cells = Set(_brm_slap_other_observations(backend.plan))
     _brm_slap_verify!(p, u0, t.response, t.row; cells)
     _brm_spl_verify_prior(p, u0)
-    _brm_spl_cells!(p, u0, sort!(collect(cells)), ad_backend; progress)
+    _brm_spl_cells!(p, u0, sort!(collect(cells)), ad_backend; partitioned, progress)
     _brm_spl_pattern!(p)
     _brm_spl_step_blocks!(p)
     _brm_spl_algebra!(p, solver, matrixfree)
@@ -662,21 +663,26 @@ end
 
 # Implemented by `BayesianRegressionModelsReactiveKernelsEnzymeExt`: one cell's
 # compact AD (`_rk_spl_cell_ad`), its gradient and Hessian block over its
-# selection (`_rk_spl_cell_block`), and one direction's HVP and third-order
-# product there (`_rk_spl_cell_third`). The correction requests just the third
-# product, then a gradient and one HVP along the solved implicit direction.
+# selection inside a Newton pass (`_rk_spl_cell_newton`, `_rk_spl_cell_block`),
+# and additive derivative contractions inside a shared pass (`_rk_spl_cell_pass`,
+# `_rk_spl_cell_accumulate`). The correction accumulates third-order products,
+# then a gradient and one HVP along the solved implicit direction.
 # The widest Enzyme batch one cell's Hessian block compiles; wider cells take
 # several batches (`_rk_spl_cell_ad`). On a 168-coordinate nonlinear cell the
 # first compile took 92, 107, 174 and 377 s at widths 2, 4, 8 and 16, with a
 # warm cost per direction of about 0.13 ms from width 4 on.
 const _BRM_SPL_CELL_HVP_WIDTH = 4
 function _rk_spl_cell_ad end
+function _rk_spl_cell_whole end
+function _rk_spl_cell_newton end
 function _rk_spl_cell_block end
-function _rk_spl_cell_third end
-function _rk_spl_cell_third_only end
-function _rk_spl_cell_implicit end
+function _rk_spl_cell_accumulate end
 function _rk_spl_cell_footprint end
 function _rk_spl_cell_reads end
+function _rk_spl_cell_batch end
+function _rk_spl_partitioned end
+function _rk_spl_cell_pass end
+function _rk_spl_cell_value end
 
 # Observation factors, including model-scope value observations: each cell's
 # selection (its structural packed-coordinate footprint; a cell with fewer
@@ -694,7 +700,8 @@ function _brm_spl_cell_directions!(dirs, lpos, v)
     dirs
 end
 
-function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend; progress=nothing)
+function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend; partitioned,
+        progress=nothing)
     isempty(names) && return p
     n = length(p.integrated)
     zof = zeros(Int, length(u0)); zof[p.integrated] .= 1:n
@@ -706,26 +713,31 @@ function _brm_spl_cells!(p::BRMSparseLaplaceProblem, u0, names, ad_backend; prog
         isempty(expected) && continue
         term = _brm_with_progress(progress;
                 description="Observation `$name`, $(length(expected)) cells") do node
-            _brm_spl_observation_cells!(p, u0, name, expected, term, zof, pof, ad_backend, node)
+            _brm_spl_observation_cells!(p, u0, name, expected, term, zof, pof, ad_backend, node;
+                partitioned)
         end
     end
     p
 end
 
 # One observation's factors. Returns the last term number it took.
-function _brm_spl_observation_cells!(p, u0, name, expected, term, zof, pof, ad_backend, progress)
-    query = _rk_nlme_cell_query(p.backend, (name,), (), u0)
-    factors = _rk_spl_factor_queries(p.backend, name)
+function _brm_spl_observation_cells!(p, u0, name, expected, term, zof, pof, ad_backend, progress;
+        partitioned)
+    # Only the compact route evaluates this query, and only with nothing computed whole.
+    query = _rk_nlme_cell_query(p.backend, (name,); partitioned, u0, locality=:ignore)
+    factors = _rk_spl_factor_queries(p.backend, name; partitioned, u0)
     prepared = _brm_spl_prepare_factors(p.backend, name, u0, length(expected),
-        p.integrated, p.population; query=factors)
+        p.integrated, p.population; query=factors, whole=_rk_spl_cell_whole(query))
     if prepared !== nothing
         prepared = _brm_spl_factor_operators(prepared, u0, ad_backend)
-        cells = map(prepared.cells) do c
-            value = _brm_spl_factor_values(prepared, u0, c).value
-            isapprox(value, sum(expected[c.i]); rtol=1e-9, atol=1e-9) ||
-                _brm_nlme_error("sum-factor density does not match cell $(c.i) of `$name`")
-            term += 1
-            merge(c, (; term))
+        cells = _rk_spl_cell_batch(factors.factors, u0) do batch
+            map(prepared.cells) do c
+                value = _brm_spl_factor_values(prepared, u0, c; context=batch).value
+                isapprox(value, sum(expected[c.i]); rtol=1e-9, atol=1e-9) ||
+                    _brm_nlme_error("sum-factor density does not match cell $(c.i) of `$name`")
+                term += 1
+                merge(c, (; term))
+            end
         end
         prepared = merge(prepared, (; cells))
         @debug "sparse Laplace sum-factor group" name cells=length(cells) maxrss_gib=Sys.maxrss() / 2^30
@@ -734,23 +746,27 @@ function _brm_spl_observation_cells!(p, u0, name, expected, term, zof, pof, ad_b
     end
     # An ordinary cell keeps its original graph: the factored outer can
     # conservatively widen captured arrays even when it has no sums.
-    footprint = _rk_spl_cell_footprint(query)
-    reads = map(eachindex(expected)) do i
-        _rk_spl_cell_reads(footprint, u0, i)
+    footprint = _rk_spl_cell_footprint(query; shared=false)
+    localdata = _rk_spl_cell_batch(query, u0) do batch
+        map(eachindex(expected)) do i
+            reads = _rk_spl_cell_reads(footprint, u0, i; context=batch)
+            value = _rk_nlme_cell_value(query, batch, i)
+            (; reads, value)
+        end
     end
     # (cells that read no coordinate still get a one-coordinate selection,
-    # so they are terms like the others)
-    m = max(1, maximum(length, reads; init=0))
+    # so they are terms like the others; a pad is always partitioned, and
+    # their population derivatives come from the accumulated prefix pullback)
+    m = max(1, maximum(d -> length(d.reads), localdata; init=0))
     cells = map(eachindex(expected)) do i
-        r = reads[i]
-        value = _rk_nlme_cell_value(query, u0, i)
+        r = localdata[i].reads
+        value = localdata[i].value
         isapprox(value, sum(expected[i]); rtol=1e-9, atol=1e-9) || _brm_nlme_error(
             "brm_laplace_problem: internal: cell $i of `$name` has value $value, " *
             "its pointwise density $(sum(expected[i]))")
         pad = Int[]
-        j = 0
-        while length(pad) < m - length(r)
-            j += 1
+        for j in p.integrated
+            length(pad) == m - length(r) && break
             insorted(j, r) || push!(pad, j)
         end
         sel = sort!(vcat(r, pad))
@@ -768,11 +784,22 @@ function _brm_spl_observation_cells!(p, u0, name, expected, term, zof, pof, ad_b
     # Gemeinde-level observation's cells.
     K = max(1, maximum(c -> length(c.lz), cells))
     dirs = ntuple(_ -> zeros(m), K)
-    ad = _rk_spl_cell_ad(p.backend, (name,), copy(u0), first(cells).sel, ad_backend, K)
+    ad = _rk_spl_cell_ad(p.backend, (name,), copy(u0), first(cells).sel, ad_backend, K;
+        partitioned)
     @debug "sparse Laplace cell group" name cells=length(cells) m K maxrss_gib=Sys.maxrss() / 2^30
     _brm_spl_compile_cell_block(progress, ad, dirs, u0, first(cells); m, K)
     push!(p.cells, (; name, query, ad, m, dirs, cells))
     term
+end
+
+# A cell's gradient and Hessian block, inside a Newton pass.
+function _brm_spl_cell_hessian(group, u, c, batch)
+    _brm_spl_cell_directions!(group.dirs, c.lpos, 1.0)
+    try
+        _rk_spl_cell_block(group.ad, group.dirs, u, c.sel, c.i; context=batch, used=length(c.lz))
+    finally
+        _brm_spl_cell_directions!(group.dirs, c.lpos, 0.0)
+    end
 end
 
 # Enzyme compiles a cell's Hessian block on its first use. With a progress
@@ -782,13 +809,33 @@ _brm_spl_compile_cell_block(::Nothing, ad, dirs, u, cell; m, K) = nothing
 function _brm_spl_compile_cell_block(progress, ad, dirs, u, cell; m, K)
     _brm_with_progress(progress;
             description="Compiling a Hessian block: $m coordinates, $K integrated") do _
-        _rk_spl_cell_block(ad, dirs, u, cell.sel, cell.i; used=1)
+        _rk_spl_cell_newton(ad, u) do batch
+            _rk_spl_cell_block(ad, dirs, u, cell.sel, cell.i; context=batch, used=1)
+        end
     end
     nothing
 end
 
 _brm_spl_nterms(p::BRMSparseLaplaceProblem) = length(p.family) +
     sum(g -> length(g.cells), p.cells; init=0)
+
+# Importance diagnostics perturb only local coordinates. Keep one active batch
+# per observation across the diagnostic, while compact active values supply
+# each perturbed cell point. Distinct observation families own distinct caches.
+function _brm_spl_cell_batches(f, p, u)
+    contexts = Dict{Symbol,Any}()
+    function enter(k)
+        k > length(p.cells) && return f(contexts)
+        group = p.cells[k]
+        ad = group isa _BRMSumCellGroup ? first(group.cells).outer : group.ad
+        result, _ = _rk_spl_cell_pass(ad, u) do batch
+            contexts[group.name] = batch
+            enter(k + 1)
+        end
+        result
+    end
+    enter(1)
+end
 
 # Footprints are sorted unique effect indices. Deduplicate them before visiting
 # pairs, then union each sparse column directly. Construction storage is the
@@ -1020,33 +1067,48 @@ function _brm_spl_assemble!(fc, g, hnz, p::BRMSparseLaplaceProblem, A, C, z;
     # `derivatives` its gradient and Hessian block over its selection.
     u = copy(uA)
     u[p.integrated] .= z
-    for group in (weight == 0 ? empty(p.cells) : p.cells), c in group.cells
+    for group in (weight == 0 ? empty(p.cells) : p.cells)
         group isa _BRMSumCellGroup && continue
-        comp = p.term_component[c.term]
-        comp == 0 && !third && continue
-        value = _rk_nlme_cell_value(group.query, u, c.i)
-        tv === nothing || (tv[c.term] = value)
-        if comp == 0
-            rest += value
-            continue
-        end
-        _brm_spl_add_value!(fc, correction, comp, weight * value)
-        if fb !== nothing
-            for k in p.tsbptr[c.term]:(p.tsbptr[c.term + 1] - 1)
-                fb[p.tsb[k]] += weight * value
+        # A move to reverse over forward restarts the Newton pass (`_rk_spl_cell_newton`).
+        # The sweep resumes at the cell that raised, which has changed nothing yet: its
+        # block comes before anything it adds.
+        next = 1
+        _rk_spl_cell_batch(group.query, u) do values
+            sweep = batch -> while next <= length(group.cells)
+                c = group.cells[next]
+                comp = p.term_component[c.term]
+                if comp == 0 && !third
+                    next += 1
+                    continue
+                end
+                value = _rk_nlme_cell_value(group.query, values, c.i)
+                tv === nothing || (tv[c.term] = value)
+                if comp == 0
+                    rest += value
+                    next += 1
+                    continue
+                end
+                block = derivatives ? _brm_spl_cell_hessian(group, u, c, batch) : nothing
+                _brm_spl_add_value!(fc, correction, comp, weight * value)
+                if fb !== nothing
+                    for k in p.tsbptr[c.term]:(p.tsbptr[c.term + 1] - 1)
+                        fb[p.tsb[k]] += weight * value
+                    end
+                end
+                if block !== nothing
+                    gsel, columns = block
+                    m = length(c.lz)
+                    for a in 1:m
+                        g[c.lz[a]] += weight * gsel[c.lpos[a]]
+                        for b in 1:m
+                            nz[_brm_spl_nzindex(p.pattern, c.lz[a], c.lz[b])] -=
+                                weight * columns[b][c.lpos[a]]
+                        end
+                    end
+                end
+                next += 1
             end
-        end
-        derivatives || continue
-        _brm_spl_cell_directions!(group.dirs, c.lpos, 1.0)
-        m = length(c.lz)
-        gsel, columns = _rk_spl_cell_block(group.ad, group.dirs, u, c.sel, c.i; used=m)
-        _brm_spl_cell_directions!(group.dirs, c.lpos, 0.0)
-        for a in 1:m
-            g[c.lz[a]] += weight * gsel[c.lpos[a]]
-            for b in 1:m
-                nz[_brm_spl_nzindex(p.pattern, c.lz[a], c.lz[b])] -=
-                    weight * columns[b][c.lpos[a]]
-            end
+            derivatives ? _rk_spl_cell_newton(sweep, group.ad, u) : sweep(nothing)
         end
     end
     rest + _brm_spl_assemble_sums!(fc, g, hnz, p, u; derivatives, third, fb, tv, correction,
@@ -1793,28 +1855,34 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
     # The cells: contract D³ℓ with S=d(logdet approximation)/dH on each
     # bounded selection. Its latent part goes into s and its population part
     # goes straight into the gradient. S is the inverse for exact algebra,
-    # or a positive semidefinite sum of shifted-solve outer products.
+    # or the signed sensitivity of the fixed-probe determinant.
     gcell = zeros(length(p.population))
     u = copy(state.uA)
     u[p.integrated] .= state.z
-    for group in p.cells, c in group.cells
+    for group in p.cells
         group isa _BRMSumCellGroup && continue
-        on(c.term) || continue
-        m = length(c.lz)
-        m == 0 && continue
-        Sb = [S[_brm_spl_nzindex(p.pattern, a, b)] for a in c.lz, b in c.lz]
-        Lb, signs = _brm_spl_sensitivity_root(state.F, Sb)
-        τsel = zeros(group.m)
-        for k in 1:m
-            direction = zeros(group.m)
-            direction[c.lpos] .= view(Lb, :, k)
-            tv = _rk_spl_cell_third_only(group.ad, direction, u, c.sel, c.i)
-            τsel .+= signs === nothing ? tv : signs[k] .* tv
+        _, correction = _rk_spl_cell_pass(group.ad, u) do batch
+            for c in group.cells
+                on(c.term) || continue
+                m = length(c.lz)
+                m == 0 && continue
+                Sb = [S[_brm_spl_nzindex(p.pattern, a, b)] for a in c.lz, b in c.lz]
+                Lb, signs = _brm_spl_sensitivity_root(state.F, Sb)
+                for k in 1:m
+                    direction = zeros(group.m)
+                    direction[c.lpos] .= view(Lb, :, k)
+                    weight = signs === nothing ? 0.5 : 0.5signs[k]
+                    _, tv = _rk_spl_cell_accumulate(batch, group.ad, 2, direction, weight,
+                        u, c.sel, c.i)
+                    bad === nothing && !all(isfinite, tv) &&
+                        (bad = "the third derivative of cell $(c.i) of `$(group.name)`")
+                end
+            end
         end
-        bad === nothing && !all(isfinite, τsel) &&
-            (bad = "the third derivative of cell $(c.i) of `$(group.name)`")
-        s[c.lz] .+= τsel[c.lpos] ./ 2
-        gcell[c.pidx] .+= τsel[c.ppos] ./ 2
+        bad === nothing && !all(isfinite, correction) &&
+            (bad = "the third derivatives of the shared values of `$(group.name)`")
+        s .+= correction[p.integrated]
+        gcell .+= correction[p.population]
     end
     _brm_spl_sum_gradient!(s, gcell, p, state, u, on)
     bad === nothing && !(all(isfinite, s) && all(isfinite, gcell)) &&
@@ -1828,16 +1896,27 @@ function _brm_spl_value_and_gradient(p::BRMSparseLaplaceProblem, state;
     # H_c[population, z] v_z directly, plus the cell's population gradient.
     # This replaces m HVPs and m identical gradients in the contractions above
     # with one of each, and needs no retained population-by-m matrix per cell.
-    for group in p.cells, c in group.cells
+    for group in p.cells
         group isa _BRMSumCellGroup && continue
-        on(c.term) || continue
-        direction = zeros(group.m)
-        direction[c.lpos] .= v[c.lz]
-        gsel, hv = _rk_spl_cell_implicit(group.ad, direction, u, c.sel, c.i)
-        bad === nothing && !(all(isfinite, gsel) && all(isfinite, hv)) &&
-            (bad = "the gradient or curvature-vector product of cell $(c.i) of " *
+        _, correction = _rk_spl_cell_pass(group.ad, u) do batch
+            for c in group.cells
+                on(c.term) || continue
+                direction = zeros(group.m)
+                direction[c.lpos] .= v[c.lz]
+                _, gsel = _rk_spl_cell_accumulate(batch, group.ad, 0, nothing, 1.0,
+                    u, c.sel, c.i)
+                gfinite = all(isfinite, gsel)
+                _, hv = _rk_spl_cell_accumulate(batch, group.ad, 1, direction, 1.0,
+                    u, c.sel, c.i)
+                bad === nothing && !(gfinite && all(isfinite, hv)) &&
+                    (bad = "the gradient or curvature-vector product of cell $(c.i) of " *
+                        "`$(group.name)` at the modes")
+            end
+        end
+        gcell .+= correction[p.population]
+        bad === nothing && !all(isfinite, correction) &&
+            (bad = "the gradient or curvature-vector products of the shared values of " *
                 "`$(group.name)` at the modes")
-        gcell[c.pidx] .+= gsel[c.ppos] .+ hv[c.ppos]
     end
     w = zeros(length(p.port))
     gω = zeros(length(p.omega))

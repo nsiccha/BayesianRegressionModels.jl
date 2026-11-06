@@ -396,3 +396,46 @@ factorizations; the cause within MUMPS remains for its maintainers to resolve.
 `mumps_control_trace.jl` preserves that diagnostic driver with shortened stack
 printing. It instruments only BRM's own wrapper in the research process;
 production code does not suppress the warning or substitute solver controls.
+
+## Stiff outer blocks: the rotation is gone (2026-11-06)
+
+This section supersedes the 45-degree rotation described above. The rotation was
+adopted for its two-copy B pattern, and stiffness accuracy was not among the
+measured gates. On a bounded ODL target with outer curvature 1.9e7 it left a
+residual of 0.83% in `h v = s`, which moved `odl_offset_Intercept`'s gradient from
+395 to 19214: that coordinate is aliased with an integrated effect, so its explicit
+and implicit terms cancel down to exactly this residual.
+
+The rotated variables are (q ± p) / sqrt(2) with p = B x and q = W p, so x is recovered
+from a difference of numbers of W's size and the residual grows as W². Residuals of
+`h x = b` on a rank-deficient outer block, 30 effects, 13 outer inputs:
+
+| outer curvature | rotated, first | rotated, refined | unrotated, first | unrotated, refined |
+|---:|---:|---:|---:|---:|
+| 1e7 | 49164 | 3.6e-9 (6 steps) | 1.57 | 4.4e-9 (2 steps) |
+| 1e8 | 1.9e7 | 3.7e-8 (16 steps) | 277 | 3.1e-8 (3 steps) |
+| 3e8 | 6.8e8 | 6.3e8 (no convergence) | 1907 | 9.0e-8 (3 steps) |
+| 1e9 | 2.8e10 | 2.8e10 (no convergence) | 28152 | 4.2e-7 (4 steps) |
+| 1e12 | 2.8e19 | 2.8e19 (no convergence) | 1.4e9 | 4.0e-4 (7 steps) |
+
+K is now `[D Z' B'; Z W -I; B -I 0]` on (x, p, q), with Z a zero-valued copy of B's
+pattern that requests [x,p] = S B'; [p,p] = B S B' sits in W's pattern. The unrotated
+columns above were measured before adding Z, which holds no values; the final form's
+residuals are asserted in `test/laplace_factors.jl` up to 1e10.
+
+On the final form, definiteness matches dense on that family and on five small cases
+(indefinite h, singular h, zero D, indefinite W, zero W), and selected blocks are as
+accurate as the rotated form's at every curvature. Log-determinant errors against dense
+are comparable up to 1e10 (5.3e-7 against 8.0e-7) and larger at 1e12 (1.1e-4 against
+2.2e-6).
+
+The UMFPACK rejection above does not apply: BRM factors with KLU. Costs at 512 / 4,096 /
+32,768 effects are identical on the arrow fixture. On overlapping three-effect cells
+at 32,768 effects, K has 524,288 entries against 819,200 and LU 983,023 against 1,212,394,
+and KLU took 0.021 s against 0.028 s, MUMPS 0.046 s against 0.053 s and selected
+inversion 0.028 s against 0.044 s.
+
+Each solve also refines against h itself while a step at least halves the residual,
+because the gradient keeps the absolute residual and even the unrotated first solve's
+grows with W. K's own residual is not the measure: its q rows bottom out at roundoff of
+W's size.

@@ -7,6 +7,8 @@ function _rk_spl_factor_reads end
 function _rk_spl_factor_ad end
 function _rk_spl_factor_block end
 function _rk_spl_factor_third end
+function _rk_spl_factor_value end
+function _rk_spl_factor_accumulate end
 
 struct _BRMSumCellGroup
     name::Symbol
@@ -54,7 +56,7 @@ function _brm_spl_inertia(K)
             copy(MUMPS.default_cntl64); backend=MUMPS.Sequential())
         try
             MUMPS.set_icntl!(m, 13, 1; displaylevel=0)
-            # The rotation can leave roundoff at an exactly singular Schur
+            # Elimination can leave roundoff at an exactly singular Schur
             # complement. Reject numerical null pivots at MUMPS's default
             # scale-aware tolerance, even if its remaining inertia is right.
             MUMPS.set_icntl!(m, 24, 1; displaylevel=0)
@@ -147,13 +149,13 @@ end
 # dispatching through q.terms in the inner loop erases their types and also
 # makes the selection/record construction allocate dynamically per summand.
 function _brm_spl_prepare_reduction(value::V, footprint::F, q, j, u0, ncells,
-        zof, pof, maps, layout) where {V,F}
+        zof, pof, maps, layout, context) where {V,F}
     sums = zeros(ncells)
     terms = map(1:ncells) do i
         map(eachindex(_rk_spl_factor_rows(q, j, i))) do t
-            sums[i] += value(u0, i, t)
-            reads = footprint(u0, i, t).unconstrained
-            reads = reads === :whole ? eachindex(u0) : reads
+            sums[i] += value(context, i, t)
+            reads = footprint(context, i, t).unconstrained
+            reads = reads === :whole ? (q.cached ? layout.integrated : eachindex(u0)) : reads
             merge((; j, t), _brm_spl_factor_selection(reads, zof, pof, maps, layout))
         end
     end
@@ -161,12 +163,12 @@ function _brm_spl_prepare_reduction(value::V, footprint::F, q, j, u0, ncells,
 end
 
 function _brm_spl_prepare_factor_cells(footprint::F, reductions, u0, ncells,
-        zof, pof, maps, layout) where {F}
+        zof, pof, maps, layout, cached, context) where {F}
     map(1:ncells) do i
-        sums = [r.sums[i] for r in reductions]
+        sums = Float64[r.sums[i] for r in reductions]
         terms = [r.terms[i] for r in reductions]
-        reads = footprint(u0, sums, i).unconstrained
-        reads = reads === :whole ? eachindex(u0) : reads
+        reads = footprint(context, sums, i).unconstrained
+        reads = reads === :whole ? (cached ? layout.integrated : eachindex(u0)) : reads
         direct = _brm_spl_factor_selection(reads, zof, pof, maps, layout)
         lz = sort!(unique!(vcat(direct.lz,
             [z for reduction in terms for term in reduction for z in term.lz])))
@@ -182,30 +184,40 @@ end
 
 # Discover support structurally before preparing AD. Numeric zeros therefore
 # cannot remove a coordinate, and empty sums need no exemplar term call.
+#
+# With no sums the outer is the original cell, and compact operators are cheaper
+# (`_rk_spl_cell_ad`), so such a cell has no factors here unless `whole`:
+# RK computes one of its values whole in a compact cell, and strict compact
+# preparation refuses it. Its strict outer then carries the cell, or refuses it by
+# name.
 function _brm_spl_prepare_factors(backend, name, u0, ncells, integrated, population;
-        query=nothing)
+        query=nothing, whole::Bool=false)
     q = query === nothing ? _rk_spl_factor_queries(backend, name) : query
-    isempty(q.terms) && return nothing
+    isempty(q.terms) && !whole && return nothing
     zof = Dict(i => k for (k, i) in enumerate(integrated))
     pof = Dict(i => k for (k, i) in enumerate(population))
     maps = Dict{Vector{Int},Vector{Int}}()
     layout = (; integrated=collect(Int, integrated), population=collect(Int, population))
-    reductions = map(eachindex(q.terms)) do j
-        term = q.terms[j]
-        Base.invokelatest(_brm_spl_prepare_reduction, term.value, term.footprint,
-            q, j, u0, ncells, zof, pof, maps, layout)
+    function prepare(context)
+        reductions = map(eachindex(q.terms)) do j
+            term = q.terms[j]
+            Base.invokelatest(_brm_spl_prepare_reduction, term.value, term.footprint,
+                q, j, u0, ncells, zof, pof, maps, layout, context)
+        end
+        cells = Base.invokelatest(_brm_spl_prepare_factor_cells, q.outer.footprint,
+            reductions, u0, ncells, zof, pof, maps, layout, q.cached, context)
+        (; q, cells)
     end
-    cells = Base.invokelatest(_brm_spl_prepare_factor_cells, q.outer.footprint,
-        reductions, u0, ncells, zof, pof, maps, layout)
-    (; q, cells)
+    q.cached ? _rk_spl_cell_batch(prepare, q.factors, u0) : prepare(u0)
 end
 
 # The Jacobian has one row per sum or direct outer input and one column per
 # effect this cell reads. No cell-wide Hessian is formed: second derivatives
 # remain the outer's small block and each summand's small block.
-function _brm_spl_factor_blocks(prepared, u, c)
-    values = _brm_spl_factor_values(prepared, u, c)
-    gf, hf = _rk_spl_factor_block(c.outer, u, c.direct.sel, c.i; sums=values.sums, columns=c.active)
+function _brm_spl_factor_blocks(prepared, u, c; context=u)
+    values = _brm_spl_factor_values(prepared, u, c; context)
+    gf, hf = _rk_spl_factor_block(c.outer, u, c.direct.sel, c.i;
+        sums=values.sums, columns=c.active, context)
     ri = Int[]; ci = Int[]; bv = Float64[]
     r = length(values.sums)
     for (k, loc) in enumerate(c.direct.loc)
@@ -214,7 +226,7 @@ function _brm_spl_factor_blocks(prepared, u, c)
     terms = map(c.terms) do reduction
         map(reduction) do t
             g, h = t.ad === nothing ? (Float64[], zeros(0, 0)) :
-                _rk_spl_factor_block(t.ad, u, t.sel, c.i; term=t.t, columns=t.lpos)
+                _rk_spl_factor_block(t.ad, u, t.sel, c.i; term=t.t, columns=t.lpos, context)
             for (k, loc) in zip(t.lpos, t.loc)
                 push!(ri, t.j); push!(ci, loc); push!(bv, g[k])
             end
@@ -236,13 +248,21 @@ end
 # are retained for selected inverse requests as the curvature changes sign.
 # This is shared by Newton assembly and the saved state for its derivatives.
 function _brm_spl_factor_curvature(prepared, u, n, np)
+    prepared.q.cached || return _brm_spl_factor_curvature(prepared, u, n, np, u)
+    result, _ = _rk_spl_cell_pass(first(prepared.cells).outer, u) do batch
+        _brm_spl_factor_curvature(prepared, u, n, np, batch)
+    end
+    result
+end
+
+function _brm_spl_factor_curvature(prepared, u, n, np, context)
     gradient = zeros(n); population = zeros(np)
     di = Int[]; dj = Int[]; dv = Float64[]
     bi = Int[]; bj = Int[]; bv = Float64[]
     wi = Int[]; wj = Int[]; wv = Float64[]
     rowptr = [1]
     states = map(prepared.cells) do c
-        state = _brm_spl_factor_blocks(prepared, u, c)
+        state = _brm_spl_factor_blocks(prepared, u, c; context)
         _brm_spl_factor_pullback!(gradient, population, c, state, state.gf)
         for reduction in state.terms, t in reduction
             for (b, j) in enumerate(t.lz), (a, i) in zip(t.lpos, t.lz)
@@ -329,10 +349,81 @@ function _brm_spl_factor_hvp!(z, population, c, state, direction)
     nothing
 end
 
-function _brm_spl_factor_values(prepared, u, cell)
-    sums = [sum(t -> Base.invokelatest(prepared.q.terms[j].value, u, cell.i, t.t),
+# Supplied sums are independent inputs to the outer factor. Its packed
+# pullback covers direct/shared operands; their sum cotangents must also pass
+# through the summands. All calls below add to one observation's batch.
+function _brm_spl_accumulate_sums!(batch, u, c, weights)
+    for reduction in c.terms, t in reduction
+        _rk_spl_factor_accumulate(batch, t.ad, 0, nothing, weights[t.j],
+            u, t.sel, c.i; term=t.t)
+    end
+    nothing
+end
+
+function _brm_spl_accumulate_gradient!(batch, u, c, state)
+    _, gf = _rk_spl_factor_accumulate(batch, c.outer, 0, nothing, 1.0,
+        u, c.direct.sel, c.i; sums=state.sums)
+    _brm_spl_accumulate_sums!(batch, u, c, gf)
+end
+
+function _brm_spl_accumulate_hvp!(batch, u, c, state, direction)
+    d = zeros(length(state.gf))
+    d[state.active] .= state.B * direction[c.lz]
+    _, hv = _rk_spl_factor_accumulate(batch, c.outer, 1, d, 1.0,
+        u, c.direct.sel, c.i; sums=state.sums)
+    _brm_spl_accumulate_sums!(batch, u, c, hv)
+    for reduction in c.terms, t in reduction
+        d = zeros(length(t.sel)); d[t.lpos] .= direction[t.lz]
+        _rk_spl_factor_accumulate(batch, t.ad, 1, d, state.gf[t.j],
+            u, t.sel, c.i; term=t.t)
+    end
+    nothing
+end
+
+# The same third-order chain rule as _brm_spl_factor_contraction!, but mixed
+# derivatives of shared operands go into RK's prefix cotangent storage rather
+# than a cell-by-population matrix. The covariance and directions are held fixed.
+function _brm_spl_accumulate_contraction!(batch, u, c, state, blocks, SB, BSB)
+    eig = eigen(Symmetric(BSB))
+    scale = max(1.0, maximum(abs, eig.values; init=0.0))
+    minimum(eig.values; init=0.0) >= -1e-10scale ||
+        error("sum-cell covariance projection is not positive semidefinite")
+    weights = zeros(length(state.sums))
+    for k in eachindex(eig.values)
+        eig.values[k] <= 0 && continue
+        d = zeros(length(state.gf))
+        d[state.active] .= sqrt(eig.values[k]) .* eig.vectors[:, k]
+        _, tv = _rk_spl_factor_accumulate(batch, c.outer, 2, d, 0.5,
+            u, c.direct.sel, c.i; sums=state.sums)
+        weights .+= view(tv, eachindex(weights))
+    end
+    traces = zeros(length(state.gf))
+    for (j, reduction) in enumerate(state.terms), (k, t) in enumerate(reduction)
+        isempty(t.lz) && continue
+        S = blocks[j][k]
+        traces[j] += sum(S .* t.h[t.lpos, :])
+        d = zeros(length(t.sel))
+        d[t.lpos] .= SB[t.loc, :] * state.hf[state.active, j]
+        _rk_spl_factor_accumulate(batch, t.ad, 1, d, 1.0,
+            u, t.sel, c.i; term=t.t)
+        L = _brm_spl_psd_root(S)
+        for a in axes(L, 2)
+            d = zeros(length(t.sel)); d[t.lpos] .= view(L, :, a)
+            _rk_spl_factor_accumulate(batch, t.ad, 2, d, 0.5state.gf[j],
+                u, t.sel, c.i; term=t.t)
+        end
+    end
+    _, hv = _rk_spl_factor_accumulate(batch, c.outer, 1, traces, 0.5,
+        u, c.direct.sel, c.i; sums=state.sums)
+    weights .+= view(hv, eachindex(weights))
+    _brm_spl_accumulate_sums!(batch, u, c, weights)
+    nothing
+end
+
+function _brm_spl_factor_values(prepared, u, cell; context=u)
+    sums = Float64[sum(t -> Base.invokelatest(prepared.q.terms[j].value, context, cell.i, t.t),
         terms; init=0.0) for (j, terms) in enumerate(cell.terms)]
-    value = Base.invokelatest(prepared.q.outer.value, u, sums, cell.i)
+    value = Base.invokelatest(prepared.q.outer.value, context, sums, cell.i)
     (; value, sums)
 end
 
@@ -348,7 +439,8 @@ function _brm_spl_factor_operators(prepared, u0, ad_backend)
         outer = operator(:outer, c.direct, length(active), c.i)
         terms = map(c.terms) do reduction
             map(reduction) do t
-                ad = isempty(t.sel) ? nothing : operator(t.j, t, length(t.lpos), c.i, t.t)
+                ad = isempty(t.sel) && !prepared.q.cached ? nothing :
+                    operator(t.j, t, length(t.lpos), c.i, t.t)
                 merge(t, (; ad))
             end
         end
@@ -357,14 +449,23 @@ function _brm_spl_factor_operators(prepared, u0, ad_backend)
     merge(prepared, (; cells))
 end
 
-# H = D + B' W B without materializing the outer cliques. The two auxiliary
-# blocks are a 45-degree rotation of [0 I; I W], whose inverse is [-W I; I 0].
-# Its determinant has magnitude one and its inertia is (r, r), even when W
-# is singular or indefinite. Thus K's Schur complement is H; H is positive
-# definite exactly when K has n+r positive and r negative pivots.
+# H = D + B' W B without materializing the outer cliques. With p = B x and q = W p,
 #
-# Keeping both copies of B in the input pattern also keeps the selected
-# inverse entries needed for S B' and B S B', including at zero curvature.
+#     K = [ D  Z' B'
+#           Z  W  -I
+#           B  -I  0 ]    on (x, p, q)
+#
+# has H as its Schur complement on x. The auxiliary block has determinant of
+# magnitude one and inertia (r, r), even when W is singular or indefinite, so H is
+# positive definite exactly when K has n+r positive and r negative pivots.
+#
+# Z is a zero-valued copy of B's pattern. It requests the selected inverse entries
+# [x,p] = S B' and, with W's own pattern, [p,p] = B S B', including at zero curvature.
+#
+# p and q stay separate variables: their sizes differ by W's scale. A rotation of the
+# auxiliary block stores (q ± p) / √2 and recovers x from a difference of numbers of
+# W's size, which costs a plain solve a residual growing as W² (0.8% at the 2e7 of a
+# bounded ODL target; no accuracy at all above about 1e8).
 function _brm_spl_augmented_matrix(D::SparseMatrixCSC, B::SparseMatrixCSC,
         W::SparseMatrixCSC)
     n = size(D, 1); r = size(B, 1)
@@ -374,38 +475,32 @@ function _brm_spl_augmented_matrix(D::SparseMatrixCSC, B::SparseMatrixCSC,
     # cancelled zeros, although their inverse entries are still needed by
     # derivatives at the cancellation point.
     ii = collect(1:(n + 2r)); jj = copy(ii); vv = zeros(n + 2r)
-    vv[(n + 1):(n + r)] .= 1.0
-    vv[(n + r + 1):end] .= -1.0
     for j in axes(D, 2), k in nzrange(D, j)
         push!(ii, rowvals(D)[k]); push!(jj, j); push!(vv, nonzeros(D)[k])
     end
     for j in axes(B, 2), k in nzrange(B, j)
-        i = rowvals(B)[k]; value = nonzeros(B)[k] / sqrt(2.0)
-        for a in (n + i, n + r + i)
-            push!(ii, a, j); push!(jj, j, a); push!(vv, value, value)
-        end
+        i = rowvals(B)[k]; value = nonzeros(B)[k]
+        push!(ii, n + r + i, j, n + i, j); push!(jj, j, n + r + i, j, n + i)
+        push!(vv, value, value, 0.0, 0.0)
     end
     for j in axes(W, 2), k in nzrange(W, j)
-        i = rowvals(W)[k]; value = nonzeros(W)[k] / 2
-        for (a,b,v) in ((n+i,n+j,value), (n+r+i,n+r+j,value),
-                (n+i,n+r+j,-value), (n+r+i,n+j,-value))
-            push!(ii,a); push!(jj,b); push!(vv,v)
-        end
+        push!(ii, n + rowvals(W)[k]); push!(jj, n + j); push!(vv, nonzeros(W)[k])
     end
-    sparse(ii,jj,vv,n+2r,n+2r)
+    for i in 1:r
+        push!(ii, n + i, n + r + i); push!(jj, n + r + i, n + i); push!(vv, -1.0, -1.0)
+    end
+    sparse(ii, jj, vv, n + 2r, n + 2r)
 end
 
 # Read the small covariance blocks needed by one cell's chain rule from
-# selected entries of the rotated augmented inverse. The original effects
-# are first, followed by the two copies of the outer-input rows.
+# selected entries of the augmented inverse, whose effects come first, then
+# the outer inputs p and their images q.
 function _brm_spl_factor_covariances(c, rows, selected, n, r)
     # CSC submatrix indexing allocates work arrays as long as the original
     # matrix. Read these small requested blocks directly, so doing this once
     # per cell never allocates a model-sized index map per cell.
-    SB = Float64[(selected[i,n+r+j] - selected[i,n+j]) / sqrt(2.0)
-        for i in c.lz, j in rows]
-    BSB = Float64[(selected[n+i,n+j] - selected[n+i,n+r+j] -
-        selected[n+r+i,n+j] + selected[n+r+i,n+r+j]) / 2 for i in rows, j in rows]
+    SB = Float64[selected[i, n + j] for i in c.lz, j in rows]
+    BSB = Float64[selected[n + i, n + j] for i in rows, j in rows]
     blocks = [[Matrix(Symmetric(_brm_spl_entries(selected,t.lz,t.lz))) for t in reduction]
         for reduction in c.terms]
     (; blocks, SB, BSB=Matrix(Symmetric(BSB)))
@@ -416,25 +511,25 @@ _brm_spl_entries(A, rows, cols) = Float64[A[i,j] for i in rows, j in cols]
 # Sparse restriction with workspace proportional to the requested rows and
 # columns, retaining stored zeros. Julia's general CSC indexing uses a row
 # map proportional to size(A,1), which is too costly inside per-level work.
-# A[rows, cols] in time linear in the entries read, with no per-entry lookup
-# table: `rows` is ascending wherever this runs over a large component.
+# Build sorted CSC columns directly when `rows` is ascending, in time linear
+# in the entries read. The row map stays proportional to the selection, so
+# repeated small restrictions do not allocate a full-component map per block.
 function _brm_spl_submatrix(A::SparseMatrixCSC, rows, cols)
-    rowof = zeros(Int, size(A, 1))
-    rowof[rows] .= eachindex(rows)
+    rowof = Dict(i => k for (k, i) in enumerate(rows))
     issorted(rows) || return _brm_spl_submatrix_unsorted(A, rowof, rows, cols)
     colptr = Vector{Int}(undef, length(cols) + 1)
     colptr[1] = 1
     count = 0
     for (j, col) in enumerate(cols)
         for k in nzrange(A, col)
-            rowof[rowvals(A)[k]] == 0 || (count += 1)
+            get(rowof, rowvals(A)[k], 0) == 0 || (count += 1)
         end
         colptr[j + 1] = count + 1
     end
     rowval = Vector{Int}(undef, count); nzval = Vector{Float64}(undef, count)
     next = 0
     for col in cols, k in nzrange(A, col)
-        i = rowof[rowvals(A)[k]]
+        i = get(rowof, rowvals(A)[k], 0)
         i == 0 && continue
         next += 1
         rowval[next] = i
@@ -445,7 +540,7 @@ end
 function _brm_spl_submatrix_unsorted(A, rowof, rows, cols)
     ii = Int[]; jj = Int[]; vv = Float64[]
     for (j, col) in enumerate(cols), k in nzrange(A, col)
-        i = rowof[rowvals(A)[k]]
+        i = get(rowof, rowvals(A)[k], 0)
         i == 0 && continue
         push!(ii, i); push!(jj, j); push!(vv, nonzeros(A)[k])
     end
@@ -476,10 +571,40 @@ function _brm_spl_selected(f::_BRMAugmentedFactor)
     f.selected
 end
 
+# H x, read from K's blocks: K (x, 0, 0) holds D x and B x, K (0, B x, 0) holds
+# W B x, and K (0, 0, W B x) holds B' W B x.
+function _brm_spl_augmented_action(factor, x)
+    K = factor.K; n = factor.n; r = (size(K, 1) - n) ÷ 2
+    y = K * vcat(x, zeros(2r))
+    Wp = (K * vcat(zeros(n), y[(n + r + 1):end], zeros(r)))[(n + 1):(n + r)]
+    y[1:n] .+ (K * vcat(zeros(n + r), Wp))[1:n]
+end
+
+# The marginal gradient cancels explicit against implicit terms on a population
+# coordinate aliased with an integrated effect, which leaves this solve's absolute
+# residual in the gradient, and a plain solve's residual grows with W. So refine
+# against H itself, while a step at least halves the residual. K's own residual is
+# not the measure: its q rows bottom out at roundoff of W's size.
 function _brm_spl_augmented_solve(factor, b::AbstractVector)
     length(b) == factor.n || throw(DimensionMismatch("wrong integrated-vector length"))
-    rhs = zeros(size(factor.F, 1)); rhs[1:factor.n] .= b
-    (factor.F \ rhs)[1:factor.n]
+    rhs = zeros(size(factor.F, 1))
+    function solve(v)
+        fill!(rhs, 0.0); rhs[1:factor.n] .= v
+        (factor.F \ rhs)[1:factor.n]
+    end
+    x = solve(b)
+    r = b .- _brm_spl_augmented_action(factor, x)
+    residual = norm(r)
+    while residual > 0
+        candidate = x .+ solve(r)
+        candidate_r = b .- _brm_spl_augmented_action(factor, candidate)
+        smaller = norm(candidate_r)
+        smaller < residual || break
+        halved = smaller <= residual / 2
+        x, r, residual = candidate, candidate_r, smaller
+        halved || break
+    end
+    x
 end
 
 # Apply S^(1/2) to a standard-normal vector through solves for S = H^(-1).
