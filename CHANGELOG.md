@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.218
+
+- Added: `stan_data`, `stan_model` and `stan_instantiate` accept a
+  `GenerativePlan`, as `stan_code` already did. Each reads `plan.model`, so it
+  returns what the same call returns on the plan's `SBBRMI`, and `stan_model`
+  and `stan_instantiate` pass their keywords on. They raised `MethodError`
+  before, although `brm-use` said BRM added these methods. Code that reads
+  `plan.model` directly keeps working and gets the same results.
+- Added: `stan_data` accepts a `StanModel`, so `stan_data(stan_model(x))` works
+  on a plan and on an `SBBRMI`.
+
 ## 0.2.217
 
 - Fixed: `gmrf(...; neighbors=m)` depended on the order of the rows wherever a

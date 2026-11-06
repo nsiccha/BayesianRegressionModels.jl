@@ -5233,6 +5233,15 @@ stan_data(model::StanBlocks.SlicModel) =
     Base.invokelatest(StanBlocks.stan_data, model)
 
 """
+    stan_data(model::StanBlocks.StanModel) -> Dict
+
+Return the prepared Stan data of a traced model, such as the result of
+`stan_model`, at the same world-age-safe boundary.
+"""
+stan_data(model::StanBlocks.StanModel) =
+    Base.invokelatest(StanBlocks.stan_data, model)
+
+"""
     stan_model(sb::SBBRMI; kwargs...) -> StanModel
 
 Trace `sb.model` end to end. Forwards to `StanBlocks.stan_model` in the
@@ -5485,8 +5494,9 @@ construction, while `declarations` inventories every emitted sampling site,
 including priors introduced inside `kernel(...)` plates and every observation
 in a multi-output model.
 
-Construct with [`generative_plan`](@ref). [`stan_code`](@ref) accepts a plan,
-and [`reprocess`](@ref) preserves the existing SBBRMI replay contract (including
+Construct with [`generative_plan`](@ref). [`stan_code`](@ref), `stan_data`,
+`stan_model` and `stan_instantiate` accept a plan and read its `model`, and
+[`reprocess`](@ref) preserves the existing SBBRMI replay contract (including
 its correct-or-loud unsupported cases).
 Plans constructed from a reusable `@brm` builder also retain that builder so
 `generative_plan(plan, new_df)` can rebuild the same declarations for genuinely
@@ -6085,7 +6095,14 @@ function generative_plan(plan::GenerativePlan, new_df;
     _generative_plan(sb,plan.builder,cv_groups)
 end
 
+# A plan retains the model its SBBRMI lowered, so it takes the same entries,
+# each reading `plan.model` at the same world-age-safe boundary.
 StanBlocks.stan_code(plan::GenerativePlan) = Base.invokelatest(StanBlocks.stan_code, plan.model)
+stan_data(plan::GenerativePlan) = Base.invokelatest(StanBlocks.stan_data, plan.model)
+StanBlocks.stan_model(plan::GenerativePlan; kwargs...) =
+    Base.invokelatest(StanBlocks.stan_model, plan.model; kwargs...)
+StanBlocks.stan_instantiate(plan::GenerativePlan; kwargs...) =
+    Base.invokelatest(StanBlocks.stan_instantiate, plan.model; kwargs...)
 
 Base.show(io::IO, plan::GenerativePlan) = begin
     nprior = count(d -> d.role === :prior, plan.declarations)
