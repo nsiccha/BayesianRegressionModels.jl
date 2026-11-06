@@ -9906,7 +9906,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
             elseif !isnothing(get(get(data, _SB_HS_PLANS_KEY, Dict()),
                     brmi_key, nothing))
                 hs_spec = data[_SB_HS_PLANS_KEY][brmi_key]
-                _sb_emit_horseshoe_popefs!(stmts, brmi_key, X_name, pop_name,
+                _sb_emit_horseshoe_popefs!(stmts, data, brmi_key, X_name, pop_name,
                     length(col_exprs), hs_spec, overrides)
             elseif isnothing(overrides)
                 push!(stmts, :($pop_name ~ popefs(; X=$X_name)))
@@ -13198,11 +13198,16 @@ end
 # Structured scales bake into the generated submodel as literals, so model
 # values are refused (the bare form allows them; the RK slice-1 mirror
 # requires literals everywhere, so this gate is cross-side symmetric).
-function _sb_hs_literal_scale(value, what)
-    value isa Real && return Float64(value)
-    error("sbimpl: structured Horseshoe $what must be a numeric constant " *
-          "in v1 (got a model value or expression)")
+# A literal's number, or the data field a program reads it from.
+function _sb_hs_structured_scale(value, target, key)
+    scale = _brm_horseshoe_structured_scale(target, key, value; prefix="sbimpl")
+    scale === nothing && error(
+        "sbimpl: structured Horseshoe `$target` `$key` must be a numeric constant " *
+        "or a data field in v1 (got a model value or expression)")
+    scale.source === nothing ? scale.number : (name=scale.source, value=scale.number)
 end
+_sb_hs_scale_name(scale::Real) = scale
+_sb_hs_scale_name(scale::NamedTuple) = scale.name
 
 function _sb_hs_literal_sibling_args!(expr, spelling)
     for arg in getargs(expr)
@@ -13257,17 +13262,15 @@ Base.@nospecializeinfer function _sb_horseshoe_overrides(@nospecialize(brmi::BRM
         length(pop) == length(labels) || error(
             "sbimpl: internal effect-prior alignment error for `$lp`: " *
             "$(length(pop)) priors for $(length(labels)) population labels")
-        hs = Vector{Union{Nothing,Tuple{Float64,Float64}}}(nothing, length(pop))
+        hs = Vector{Any}(nothing, length(pop))
         for (i, expr) in pairs(pop)
             isnothing(expr) && continue
             spelling = "effect($lp, $(labels[i]))"
             if expr isa ExprColumn && getf(expr) === Horseshoe
                 spec = _brm_horseshoe_spec(spelling, getargs(expr),
                     getkwargs(expr); prefix="sbimpl")
-                hs[i] = (_sb_hs_literal_scale(spec.local_scale,
-                        "`$spelling` `local_scale`"),
-                    _sb_hs_literal_scale(spec.global_scale,
-                        "`$spelling` `global_scale`"))
+                hs[i] = (_sb_hs_structured_scale(spec.local_scale, spelling, :local_scale),
+                    _sb_hs_structured_scale(spec.global_scale, spelling, :global_scale))
             else
                 (expr isa ExprColumn && _sb_is_scalar_prior(expr)) || error(
                     "sbimpl: `$spelling` combines Horseshoe with a sibling " *
@@ -13293,7 +13296,7 @@ function _sb_horseshoe_popefs_model(specs, overrides)
         infix = _sb_hs_temp_infix(specs.labels[i])
         if !isnothing(hspec)
             temp = Symbol(:hs_, i, :_, infix)
-            local_scale, global_scale = hspec
+            local_scale, global_scale = map(_sb_hs_scale_name, hspec)
             stmt = if local_scale == 1.0 && global_scale == 1.0
                 :($temp ~ _sb_horseshoe())
             else
@@ -13326,7 +13329,7 @@ function _sb_horseshoe_popefs_model(specs, overrides)
     StanBlocks.SlicModel(Expr(:block, body...), Dict{Symbol,Any}(), @__MODULE__)
 end
 
-function _sb_emit_horseshoe_popefs!(stmts, target, X_name, pop_name,
+function _sb_emit_horseshoe_popefs!(stmts, data, target, X_name, pop_name,
         n_cols, specs, overrides)
     n_cols == length(specs.labels) || error(
         "sbimpl: internal horseshoe alignment error for `$target`: " *
@@ -13336,8 +13339,12 @@ function _sb_emit_horseshoe_popefs!(stmts, target, X_name, pop_name,
         "$(length(overrides)) priors for $(length(specs.labels)) " *
         "population labels")
     model = _sb_horseshoe_popefs_model(specs, overrides)
-    push!(stmts, Expr(:call, :~, pop_name,
-        Expr(:call, model, Expr(:parameters, Expr(:kw, :X, X_name)))))
+    # A scale held in a data field is an input of the submodel.
+    fields = Dict{Symbol,Any}(scale.name => scale.value
+        for spec in specs.hs if !isnothing(spec) for scale in spec if scale isa NamedTuple)
+    foreach(((field, value),) -> _sb_static_level_datum!(data, field, value), fields)
+    push!(stmts, Expr(:call, :~, pop_name, Expr(:call, model, Expr(:parameters,
+        Expr(:kw, :X, X_name), (Expr(:kw, field, field) for field in sort!(collect(keys(fields))))...))))
 end
 
 # ---- group-block prepass (Prepass 2.5) ---------------------------------------

@@ -333,6 +333,9 @@ struct _RKHorseshoePrior
     addressee::Symbol
     local_scale::Float64
     global_scale::Float64
+    # The data fields the program reads them from, or `nothing` for a literal.
+    local_source::Union{Symbol,Nothing}
+    global_source::Union{Symbol,Nothing}
 end
 
 struct _RKSampledParameter
@@ -482,13 +485,15 @@ struct _RKStructuralPlan
     # `_rk_source_data_columns` binds those read: a number is a runtime input of
     # the program, not a literal of it (user principle `0ikeidi`).
     inputs::Dict{Symbol,Any}
+    # What priors read from the data's arrays (`_rk_prior_read_values!`).
+    prior_reads::Dict{Symbol,Any}
 end
 _RKStructuralPlan(responses, predictors, population_priors, parameters, assignments,
         derived, columns, n_obs, ranef_buckets, vector_parameters, r2d2_priors,
-        horseshoe_priors) =
+        horseshoe_priors, inputs=Dict{Symbol,Any}()) =
     _RKStructuralPlan(responses, predictors, population_priors, parameters, assignments,
         derived, columns, n_obs, ranef_buckets, vector_parameters, r2d2_priors,
-        horseshoe_priors, Dict{Symbol,Any}())
+        horseshoe_priors, inputs, Dict{Symbol,Any}())
 
 # A submodel-bearing emitted program: `defs` are surface-spelling
 # `sm(args...) = begin ... end` definitions (the extension evaluates
@@ -5815,27 +5820,28 @@ Base.@nospecializeinfer function _rk_horseshoe_priors(@nospecialize(brmi::BRMI),
             "needs one prior per addressee (address the source column, " *
             "not individual levels)")
         specs = map(hits) do i
-            _brm_horseshoe_spec("effect($target, $(labels[i]))",
+            spelling = "effect($target, $(labels[i]))"
+            spec = _brm_horseshoe_spec(spelling,
                 getargs(overrides[i]), getkwargs(overrides[i]); prefix)
+            function scale(key)
+                value = _brm_horseshoe_structured_scale(spelling, key,
+                    getproperty(spec, key); prefix)
+                value === nothing && error(
+                    "$prefix: `$spelling ~ Horseshoe(...)` `$key` must be a numeric " *
+                    "constant or a data field in slice 1")
+                value
+            end
+            (; local_scale=scale(:local_scale), global_scale=scale(:global_scale))
         end
-        for (i, spec) in zip(hits, specs)
-            spec.local_scale isa Real || error(
-                "$prefix: `effect($target, $(labels[i])) ~ Horseshoe(...)` " *
-                "`local_scale` must be a numeric constant in slice 1")
-            spec.global_scale isa Real || error(
-                "$prefix: `effect($target, $(labels[i])) ~ Horseshoe(...)` " *
-                "`global_scale` must be a numeric constant in slice 1")
-        end
-        first_local = Float64(specs[1].local_scale)
-        first_global = Float64(specs[1].global_scale)
-        all(s -> Float64(s.local_scale) == first_local &&
-                Float64(s.global_scale) == first_global, specs) || error(
+        first_spec = first(specs)
+        all(==(first_spec), specs) || error(
             "$prefix: predictor `$target` addressee `$addressee` has " *
             "disagreeing Horseshoe scales across its columns; slice 1 " *
             "needs one shared Horseshoe per addressee (address the source " *
             "column, not individual levels)")
-        push!(priors,
-            _RKHorseshoePrior(target, addressee, first_local, first_global))
+        push!(priors, _RKHorseshoePrior(target, addressee,
+            first_spec.local_scale.number, first_spec.global_scale.number,
+            first_spec.local_scale.source, first_spec.global_scale.source))
     end
     priors
 end
@@ -6567,6 +6573,13 @@ function _rk_assignment_expr_problem(node, name::Symbol,
         "admits pure scalar calls over parameters, assignments, and " *
         "whole-column reductions")
     callable = node.callable
+    # One element of a data array, at a fixed index.
+    if callable === getindex && isempty(node.kwargs) && !isempty(node.args) &&
+            first(node.args) isa _BRMPreparedRef && _rk_data_array(first(node.args).name, data)
+        all(index -> index isa Integer, Base.tail(Tuple(node.args))) && return nothing
+        return "$prefix: $origin reads data array `$(first(node.args).name)` at a " *
+            "computed index; slice 1 reads a data array at integer literals"
+    end
     callable in _RK_ASSIGNMENT_CALLABLES || return (
         "$prefix: $origin calls `$callable`; slice 1 admits " *
         "{+,-,*,/,^,log,log10,log1p,exp,expm1,sqrt,hypot,abs,sum,mean,std,var," *
@@ -6819,10 +6832,9 @@ function _rk_prior_argument_expr(arg, name::Symbol, data::AbstractDict,
         isfinite(value) || error(
             "RK backend: $origin hyperparameters must be finite; " *
             "`$(_rk_lower_assignment_expr(rewritten, name))` is $value")
-        (fold || isempty(refs) || !all(ref -> _rk_data_scalar(ref, data), refs)) &&
-            return value
+        (fold || isempty(refs)) && return value
     end
-    _rk_lower_assignment_expr(rewritten, name)
+    _rk_lower_assignment_expr(_rk_prior_read_expr(rewritten, data), name)
 end
 
 # How the program spells a support bound, once its number passed the checks: by
@@ -6835,8 +6847,8 @@ _rk_bound_spelling(bound::_BRMPreparedRef, value, data, _name) =
 function _rk_bound_spelling(bound::_BRMPreparedExpr, value, data, name)
     value isa Real || return value
     refs = _brm_prepared_references(bound)
-    !isempty(refs) && all(ref -> _rk_data_scalar(ref, data), refs) ?
-        _rk_lower_assignment_expr(bound, name) : value
+    !isempty(refs) && all(ref -> _rk_data_scalar(ref, data) || _rk_data_array(ref, data), refs) ?
+        _rk_lower_assignment_expr(_rk_prior_read_expr(bound, data), name) : value
 end
 
 # A `truncated` bound: a frozen number (as a declaration bound), or a live
@@ -6897,10 +6909,19 @@ const _RK_SLICE1_PRIOR_ARITY_KEYS =
 # integer dimension with a numeric (or folded-const) concentration, and
 # nothing else.
 function _rk_dirichlet_alpha(args, name::Symbol,
-        consts::Dict{Symbol,Float64})
+        consts::Dict{Symbol,Float64}, data::AbstractDict)
     prefix = "RK backend"
     if length(args) == 1
         arg = only(args)
+        if arg isa _BRMPreparedRef && _rk_data_array(arg.name, data)
+            alpha = Float64.(data[arg.name])
+            isempty(alpha) && error(
+                "$prefix: parameter `$name` `Dirichlet` concentration is empty")
+            all(isfinite, alpha) && all(>(0), alpha) || error(
+                "$prefix: parameter `$name` `Dirichlet` concentration must be " *
+                "finite and strictly positive")
+            return alpha
+        end
         arg isa _BRMPreparedExpr && arg.callable === Base.vect ||
             error("$prefix: parameter `$name` `Dirichlet` needs a numeric " *
                   "concentration vector literal (`Dirichlet([1.0, 2.0])`) " *
@@ -7058,11 +7079,13 @@ function _rk_plan_vector_parameters!(prepared, data::AbstractDict,
         if prior.callable === Dirichlet
             isempty(prior.kwargs) || error(
                 "$prefix: parameter `$name` `Dirichlet` takes no keywords")
-            alpha = _rk_dirichlet_alpha(prior.args, name, consts)
+            alpha = _rk_dirichlet_alpha(prior.args, name, consts, data)
             concentration = last(prior.args)
             spelled = length(prior.args) == 2 && concentration isa _BRMPreparedRef &&
                 _rk_data_scalar(concentration.name, data) ?
-                Expr(:call, :fill, concentration.name, first(prior.args)) : nothing
+                Expr(:call, :fill, concentration.name, first(prior.args)) :
+                length(prior.args) == 1 && concentration isa _BRMPreparedRef ?
+                _rk_prior_array_name(concentration.name) : nothing
             push!(specs, _RKVectorParameter(name, :simplex_dirichlet,
                 (alpha,), length(alpha), name, nothing, spelled))
         elseif prior.callable === _brm_vector_prior
@@ -7104,23 +7127,33 @@ function _rk_mvnormal_parameter(target, prior, prepared, data, consts, aliases,
         prefix="RK backend")
     covariance = scale isa AbstractMatrix && !(scale isa Diagonal)
     literal(x::AbstractVector) = Expr(:vect, Float64.(x)...)
-    mu = mean === :zero ? (covariance ? Expr(:call, :zeros, n) : 0.0) :
-        mean isa AbstractVector ? (mean_arg isa NamedColumn &&
-            parent(mean_arg) isa DataColumn ? name(mean_arg) : literal(mean)) :
+    mean_source = mean_arg isa NamedColumn && parent(mean_arg) isa DataColumn &&
+        _rk_data_array(name(mean_arg), data) ? name(mean_arg) : nothing
+    scale_arg = last(prior.args)
+    scale_source = scale_arg isa _BRMPreparedRef && _rk_data_array(scale_arg.name, data) &&
+        !(scale isa Diagonal) ? scale_arg.name : nothing
+    # A data array sizes the parameter as it does in the Stan program.
+    extent = isnothing(mean_source) && isnothing(scale_source) ? nothing :
+        Symbol(target, :_length)
+    mu = mean === :zero ? (covariance ? Expr(:call, :zeros, something(extent, n)) : 0.0) :
+        mean isa AbstractVector ? (isnothing(mean_source) ? literal(mean) :
+            _rk_prior_array_name(mean_source)) :
         _rk_prior_argument_expr(first(prior.args), target, data, consts, aliases,
             parameters, assign_names)
     if covariance
         rows = [Expr(:row, Float64.(scale[i, :])...) for i in axes(scale, 1)]
-        return _RKVectorParameter(target, :mvnormal, (mu, Expr(:vcat, rows...)), n, target)
+        sigma = isnothing(scale_source) ? Expr(:vcat, rows...) : _rk_prior_array_name(scale_source)
+        return _RKVectorParameter(target, :mvnormal, (mu, sigma), n, target, extent)
     end
     sigma = scale isa Diagonal ? literal(sqrt.(diag(scale))) :
         scale isa UniformScaling ? sqrt(Float64(scale.λ)) :
-        scale isa AbstractVector ? literal(scale) :
+        scale isa AbstractVector ? (isnothing(scale_source) ? literal(scale) :
+            _rk_prior_array_name(scale_source)) :
         scale isa Real ? _rk_bound_spelling(last(prior.args), Float64(scale), data, target) :
         _rk_resolve_mvnormal_scale(last(prior.args), target, data, consts, aliases,
             parameters, assign_names)
     element = _RKSampledParameter(target, :Normal, (mu, sigma), nothing, target)
-    _RKVectorParameter(target, :elementwise, (element,), n, target)
+    _RKVectorParameter(target, :elementwise, (element,), n, target, extent)
 end
 # A sampled scalar standard deviation, `MvNormal(zeros(k), sig)`.
 _rk_resolve_mvnormal_scale(arg::_BRMPreparedRef, name, data, consts, aliases,
@@ -9326,5 +9359,6 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     _RKStructuralPlan(response_specs, predictor_specs, prior_specs,
         parameters, assignments, derived, columns, n_obs, ranef_buckets,
         [vector_specs; implicit_vectors; components.vectors],
-        r2d2_specs, hs_specs, _rk_scalar_inputs(context.data))
+        r2d2_specs, hs_specs, _rk_scalar_inputs(context.data),
+        _rk_prior_read_values!(derived, prepared, context.data))
 end

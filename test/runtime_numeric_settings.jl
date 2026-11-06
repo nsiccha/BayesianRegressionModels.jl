@@ -190,6 +190,47 @@ multigroup_field(scale; k=3, c=1.5) = brm(:(begin
     mu ~ 0 + hsgp(t; k=3, by=g, cor=multigroup((sx, sy), $scale; k=$k, c=$c))
     y ~ Normal(mu, sigma)
 end); mod=@__MODULE__)
+summary_prior(; location) = brm(:(begin
+    sigma ~ Exponential(1)
+    b ~ Normal($location, 1)
+    m ~ 1 + x
+    y ~ Normal(m + b, sigma)
+end); mod=@__MODULE__)
+bounded_summary(lower) = brm(:(begin
+    sigma ~ truncated(Exponential(1); lower=$lower)
+    m ~ 1 + x
+    y ~ Normal(m, sigma)
+end); mod=@__MODULE__)
+whole_covariance(mean, covariance) = brm(:(begin
+    rho ~ MvNormal($mean, $covariance)
+    y ~ Normal(sum(rho), 1)
+end); mod=@__MODULE__)
+whole_scale(scale) = brm(:(begin
+    rho ~ MvNormal(zeros(2), $scale)
+    y ~ Normal(sum(rho), 1)
+end); mod=@__MODULE__)
+whole_concentration(concentration) = brm(:(begin
+    w ~ Dirichlet($concentration)
+    y ~ Categorical(w)
+end); mod=@__MODULE__)
+clashing_summary() = brm(:(begin
+    prior_sum_v ~ Exponential(1)
+    b ~ Normal(sum(v), 1)
+    y ~ Normal(b, prior_sum_v)
+end); mod=@__MODULE__)
+horseshoe_effect(; local_scale=1.0, global_scale=1.0) = brm(:(begin
+    sigma ~ Exponential(1)
+    m ~ 1 + x
+    effect(m, x) ~ Horseshoe(local_scale=$local_scale, global_scale=$global_scale)
+    y ~ Normal(m, sigma)
+end); mod=@__MODULE__)
+horseshoe_two(g1, g2) = brm(:(begin
+    sigma ~ Exponential(1)
+    m ~ 1 + x + z
+    effect(m, x) ~ Horseshoe(global_scale=$g1)
+    effect(m, z) ~ Horseshoe(global_scale=$g2)
+    y ~ Normal(m, sigma)
+end); mod=@__MODULE__)
 multigroup_gram(tau) = brm(:(begin
     sigma ~ Exponential(1)
     mu ~ 0 + hsgp(t; k=3, by=g, cor=multigroup(Omega, $tau))
@@ -721,4 +762,127 @@ end
     end
     @test_throws "needs an integer `k >= 2`" RKBRMI(RSM.multigroup_field(0.7; k=:kk)(fields(; kk=1)))
     @test_throws "needs a box factor `c > 1`" RKBRMI(RSM.multigroup_field(0.7; c=:cc)(fields(; cc=0.5)))
+end
+
+@stestset "what a prior reads from a data array is an input" begin
+    # A column the formula also reads, and an array only the prior reads.
+    m1, m2 = [0.0, 0.1, 0.4], [0.5, 0.1, 0.9]
+    with_m(m) = merge(LDATA, (; v=m))
+    sum_prior, element_prior = RSM.summary_prior(; location=:(sum(v))), RSM.summary_prior(; location=:(v[2] + 1))
+    check_one_lowering("a reduction of an array", sum_prior, [with_m(m1), with_m(m2)], (:prior_sum_v,))
+    check_one_lowering("one element of an array", RSM.summary_prior(; location=:(v[1])),
+        [with_m(m1), with_m(m2)], (:prior_input_v,))
+    check_one_lowering("a reduction of a design column", RSM.summary_prior(; location=:(mean(x))),
+        [LDATA, merge(LDATA, (; x=2 .* LDATA.x))], (:prior_mean_x,); differ=true)
+    S1, S2 = [1.0 0.2; 0.2 1.0], [1.0 0.4; 0.4 1.0]
+    whole(; mean=[0.0, 0.1], covariance=S1) = (; y=LDATA.y, a=mean, S=covariance)
+    check_one_lowering("a whole mean", RSM.whole_covariance(:a, :S),
+        [whole(), whole(; mean=[0.5, 0.1])], (:prior_input_a,))
+    check_one_lowering("a whole covariance", RSM.whole_covariance(:a, :S),
+        [whole(), whole(; covariance=S2)], (:prior_input_S,))
+    check_one_lowering("a whole scale", RSM.whole_scale(:s),
+        [(; y=LDATA.y, s=[1.0, 2.0]), (; y=LDATA.y, s=[1.5, 2.0])], (:prior_input_s,))
+    check_one_lowering("a whole concentration", RSM.whole_concentration(:a),
+        [(; y=[1, 2, 3, 1], a=[1.0, 2.0, 3.0]), (; y=[1, 2, 3, 1], a=[2.0, 2.0, 3.0])], (:prior_input_a,))
+    # A size from a data array is one emitted program, as in the Stan program.
+    sized = [RKBRMI(RSM.whole_covariance(:a, :S)(whole())),
+        RKBRMI(RSM.whole_covariance(:a, :S)(whole(; mean=[0.0, 0.1, 0.2],
+            covariance=[1.0 0.2 0.0; 0.2 1.0 0.0; 0.0 0.0 1.0])))]
+    @test allequal(emitted_program(rk) for rk in sized)
+    @test sized[1].model.layout.total + 1 == sized[2].model.layout.total
+    @test allequal(lowered_program(rk) for rk in sized) broken=!RK_BINDS_SIZES
+    # A summary as a support bound is read at lowering, as any other bound.
+    check_one_program("a bound over a reduction", _ -> RSM.bounded_summary(:(minimum(v))), (m1 .+ 1, m2 .+ 1);
+        data=v -> merge(LDATA, (; v)))
+
+    # Each is its literal twin: the same density at the same point.
+    twins = (
+        sum_prior(with_m(m1)) => RSM.summary_prior(; location=sum(m1))(LDATA),
+        RSM.summary_prior(; location=:(v[2] + 1))(with_m(m1)) => RSM.summary_prior(; location=m1[2] + 1)(LDATA),
+        RSM.summary_prior(; location=:(mean(x)))(LDATA) => RSM.summary_prior(; location=sum(LDATA.x) / 6)(LDATA),
+        RSM.whole_covariance(:a, :S)(whole()) => RSM.whole_covariance([0.0, 0.1], S1)((; y=LDATA.y)),
+        RSM.whole_scale(:s)((; y=LDATA.y, s=[1.0, 2.0])) => RSM.whole_scale([1.0, 2.0])((; y=LDATA.y)),
+        RSM.whole_concentration(:a)((; y=[1, 2, 3, 1], a=[1.0, 2.0, 3.0])) =>
+            RSM.whole_concentration([1.0, 2.0, 3.0])((; y=[1, 2, 3, 1])))
+    for (field, literal) in twins
+        rk_field, rk_literal = RKBRMI(field), RKBRMI(literal)
+        u = rk_point(rk_literal)
+        @test rk_density(rk_field, u) ≈ rk_density(rk_literal, u) atol=1e-12 rtol=1e-12
+    end
+
+    # A frozen replay refuses a changed array, as it does a changed scalar.
+    for (build, fitted, changed) in (
+            (sum_prior, with_m(m1), with_m(m2)),
+            (RSM.whole_covariance(:a, :S), whole(), whole(; covariance=S2)),
+            (RSM.whole_covariance(:a, :S), whole(), whole(; mean=[0.5, 0.1])),
+            (RSM.whole_scale(:s), (; y=LDATA.y, s=[1.0, 2.0]), (; y=LDATA.y, s=[1.5, 2.0])))
+        rk = RKBRMI(build(fitted))
+        @test_throws "changes the fitted RK program" reprocess(rk, changed)
+        @test reprocess(rk, fitted) isa RKBRMI
+        @test reprocess(rk, changed; freeze_constants=false) isa RKBRMI
+    end
+    # A prior read off a column is a number of the fit, as `standardize(x)` is: a
+    # replay on other rows keeps it, from the fit or from a state that holds no rows.
+    build_column = RSM.summary_prior(; location=:(mean(x)))
+    column_prior = RKBRMI(build_column(LDATA))
+    other_rows = merge(LDATA, (; x=2 .* LDATA.x))
+    @test rk_bound_data(column_prior).prior_mean_x == sum(LDATA.x) / 6
+    @test rk_bound_data(reprocess(column_prior, other_rows)).prior_mean_x == sum(LDATA.x) / 6
+    state = brm_fitted_state(column_prior)
+    @test !any(value -> value isa AbstractVector && value == LDATA.x, values(state.scalars))
+    @test rk_bound_data(RKBRMI(build_column(other_rows), state)).prior_mean_x == sum(LDATA.x) / 6
+    # An array only a prior reads travels with the state: a design may omit it, and
+    # one holding another value is refused.
+    sum_rk = RKBRMI(sum_prior(with_m(m1)))
+    sum_state = brm_fitted_state(sum_rk)
+    @test sum_state.scalars[:v] == m1
+    @test rk_bound_data(RKBRMI(sum_prior(LDATA), sum_state)).prior_sum_v == sum(m1)
+    @test rk_bound_data(reprocess(sum_rk, LDATA)).prior_sum_v == sum(m1)
+    @test_throws "changes the fitted RK program" RKBRMI(sum_prior(with_m(m2)), sum_state)
+    # A checkpoint identity sees an array a prior reads.
+    @test BRM._rk_identity_statements(RKBRMI(sum_prior(with_m(m1)))) !=
+        BRM._rk_identity_statements(RKBRMI(sum_prior(with_m(m2))))
+    # A generated name the model also uses is refused by name.
+    @test_throws "generated name `prior_sum_v`" RKBRMI(RSM.clashing_summary()((; y=LDATA.y, v=m1)))
+    # Positive control: a literal stays in its author's source.
+    @test rk_program(RSM.summary_prior(; location=1.7)(LDATA)) != rk_program(RSM.summary_prior(; location=2.9)(LDATA))
+end
+
+@stestset "a structured Horseshoe's scales are inputs" begin
+    fields(; values...) = merge(LDATA, (; values...))
+    check_one_lowering("global scale", RSM.horseshoe_effect(; global_scale=:g),
+        [fields(; g) for g in (0.1, 0.2)], (:g,))
+    check_one_lowering("local scale", RSM.horseshoe_effect(; local_scale=:l),
+        [fields(; l) for l in (0.5, 0.7)], (:l,))
+    check_one_program("both, on Stan and RK", _ -> RSM.horseshoe_effect(; local_scale=:l, global_scale=:g),
+        ((0.5, 0.1), (0.7, 0.2)); data=v -> fields(; l=v[1], g=v[2]))
+    # Each is its literal twin.
+    field, literal = RKBRMI(RSM.horseshoe_effect(; local_scale=:l, global_scale=:g)(fields(; l=0.5, g=0.2))),
+        RKBRMI(RSM.horseshoe_effect(; local_scale=0.5, global_scale=0.2)(LDATA))
+    u = rk_point(literal)
+    @test rk_density(field, u) == rk_density(literal, u)
+    stan_field = RSM.horseshoe_effect(; local_scale=:l, global_scale=:g)(fields(; l=0.5, g=0.2))
+    @test stan_inputs(stan_field)[:l] == 0.5 && stan_inputs(stan_field)[:g] == 0.2
+    # Two terms sharing one field share its scale; two fields have no shared scale
+    # a frozen replay could check, so they are refused by name. Literals still differ.
+    with_z = merge(LDATA, (; z=reverse(LDATA.x)))
+    shared = RKBRMI(RSM.horseshoe_two(:g, :g)(merge(with_z, (; g=0.2))))
+    @test rk_density(shared, rk_point(shared)) ==
+        rk_density(RKBRMI(RSM.horseshoe_two(0.2, 0.2)(with_z)), rk_point(shared))
+    @test_throws "reads its Horseshoe `global_scale`s from different values" RKBRMI(
+        RSM.horseshoe_two(:g, :h)(merge(with_z, (; g=0.2, h=0.3))))
+    @test RKBRMI(RSM.horseshoe_two(0.2, 0.3)(with_z)) isa RKBRMI
+    # A frozen replay refuses a changed scale; a fresh build follows it.
+    rk = RKBRMI(RSM.horseshoe_effect(; global_scale=:g)(fields(; g=0.1)))
+    @test_throws "changes the fitted RK program" reprocess(rk, fields(; g=0.2))
+    @test reprocess(rk, fields(; g=0.1)) isa RKBRMI
+    @test reprocess(rk, fields(; g=0.2); freeze_constants=false) isa RKBRMI
+    # A value out of support is refused, as a literal is.
+    @test_throws "finite and strictly positive" RKBRMI(RSM.horseshoe_effect(; global_scale=:g)(fields(; g=-1.0)))
+    @test_throws "finite and strictly positive" SBBRMI(RSM.horseshoe_effect(; global_scale=:g)(fields(; g=-1.0)); mod=RSM)
+    # Positive control: a literal stays in its author's source.
+    @test rk_program(RSM.horseshoe_effect(; global_scale=0.1)(LDATA)) !=
+        rk_program(RSM.horseshoe_effect(; global_scale=0.2)(LDATA))
+    @test stan_program(RSM.horseshoe_effect(; global_scale=0.1)(LDATA)) !=
+        stan_program(RSM.horseshoe_effect(; global_scale=0.2)(LDATA))
 end

@@ -1174,7 +1174,8 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     regression = _RKStructuralPlan(_RKLikelihoodSpec[], components.predictors,
         components.priors, parameters, _RKAssignmentSpec[], derived, columns,
         0, components.buckets, vectors, components.r2d2_priors,
-        components.horseshoe_priors, _rk_scalar_inputs(context.data))
+        components.horseshoe_priors, _rk_scalar_inputs(context.data),
+        _rk_prior_read_values!(derived, prepared, context.data))
     _RKValuePlan(regression, assignments, obs, value_columns, Tuple(completions))
 end
 
