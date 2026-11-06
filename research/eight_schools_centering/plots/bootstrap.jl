@@ -4,8 +4,8 @@
 #       research/eight_schools_centering/plots/bootstrap.jl [PLOTSENV]
 #
 # `PLOTSENV` defaults to this directory. Every unregistered dependency is
-# materialized at an exact pinned commit below the shared ignored
-# `test/.bootstrap/` cache through the canonical resolver
+# materialized at an exact pinned commit in the host's test package store
+# (`test_package_store()`) through the canonical resolver
 # (`resolve_git_revision_checkout` in `test/dependency_floors.jl`), then all
 # local checkouts enter ONE batched `Pkg.develop` call — the same shape as
 # `test/setup_env.jl`, which stays the authority for the six shared pins.
@@ -68,7 +68,7 @@ function main()
             "Bump both together; refusing to resolve a drifted plots env.")
     end
 
-    cache_root = joinpath(TESTENV, ".bootstrap")
+    cache_root = test_package_store()
     paths = Dict("BayesianRegressionModels" => REPO)
     for (name, url, rev) in vcat(TEST_PINS_MIRROR, PLOT_STACK_PINS)
         paths[name] = resolve_git_revision_checkout(

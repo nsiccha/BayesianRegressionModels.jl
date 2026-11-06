@@ -5,6 +5,8 @@
 #
 # - overlapping calls on flat, plate and nested models equal serial calls bit
 #   for bit, and the pool prepared more than one evaluator;
+# - the pool prepares at most one evaluator per Julia thread, also when tasks
+#   holding one yield;
 # - `check_protocol(...; threads = true)` passes on a nested model;
 # - a `threads = true` SAEM fit is the same bit for bit in processes with 1, 4
 #   and N Julia threads (N from `BRM_NLME_THREADS_N`, default 8);
@@ -69,6 +71,8 @@ end
 Threads.nthreads() >= 4 || error(
     "test/nlme_threads.jl needs real threads: run it with --threads=4")
 
+julia_threads() = Threads.nthreads(:default) + Threads.nthreads(:interactive)
+
 subject_eta(H::AbstractMatrix, i) = H[:, i]
 subject_eta(H::AbstractVector, i) = H[i]
 
@@ -109,9 +113,35 @@ end
         count = overlapping_calls_match(m, points)
         # More than one evaluator, or the calls never overlapped and this
         # testset checked nothing about concurrency.
-        @test 1 < count <= Threads.maxthreadid()
+        @test 1 < count <= julia_threads()
         @info "evaluators prepared" name count
     end
+end
+
+# A task that yields while it holds an evaluator lets its thread start another
+# task, so holders can outnumber threads. Further tasks wait for an evaluator
+# rather than prepare one, and every task finishes. `maxthreadid` is not the
+# bound: it also counts the GC threads, so these tasks took the pool to 5
+# evaluators at 4 threads before the pool was held to one per thread.
+@stestset "the pool prepares at most one evaluator per Julia thread" begin
+    m = threads_pk_model()
+    pool = m.cell_gradient.evaluators
+    limit = julia_threads()
+    @test Threads.maxthreadid() > limit  # or this cannot tell the two bounds apart
+    held, most = Threads.Atomic{Int}(0), Threads.Atomic{Int}(0)
+    @sync for _ in 1:8limit
+        Threads.@spawn BRM._brm_nlme_with_evaluator(m) do _
+            Threads.atomic_max!(most, Threads.atomic_add!(held, 1) + 1)
+            sleep(0.05)
+            Threads.atomic_sub!(held, 1)
+        end
+    end
+    @test 1 < most[] <= limit
+    @test 1 < pool.count[] <= limit
+    @test length(pool.idle) == pool.count[]  # every holder gave its evaluator back
+    # A pool that kept waiters waiting would have hung above; the pool still serves.
+    s = brm_nlme_start(m)
+    @test isfinite(first(NE.conditional_loglikelihood_and_gradient(m, 1, s.theta, s.sigma, s.eta[:, 1])))
 end
 
 @stestset "check_protocol with threads = true passes on a nested model" begin

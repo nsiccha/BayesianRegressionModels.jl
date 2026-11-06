@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.216
+## 0.2.217
 
 - Fixed: `gmrf(...; neighbors=m)` depended on the order of the rows wherever a
   step of its maximin position order had a tie, as on a regular lattice.
@@ -33,13 +33,30 @@ instead of failing at run time.
   without ties, rows already in sorted position order and `multiresolution=m`
   are unchanged, bit for bit.
 
+## 0.2.216
+
+- Fixed: a one-unit NLME gradient copied the whole model to the heap twice per
+  call, about 17 of the call's 20 KB on an 80-subject PK model, and most of its
+  time. `BRMNLMEModel` now keeps its fields behind a pointer, so passing it costs
+  nothing. Wall time of a 40-iteration SAEM fit on that model fell 1.3–2.2× under
+  lockstep and 1.7–2.9× under `WarmupHMCNUTS(threads = true)`. Seeded fits keep
+  the same bits. The type is a `mutable struct` whose fields are all `const`, so
+  its fields still cannot be assigned; `===` between two models now compares
+  identity.
+- Fixed: the evaluator pool of concurrent one-unit calls prepares at most one
+  evaluator per Julia thread, as brm-use states. A contended pool reached
+  `Threads.maxthreadid()`, which counts GC threads too: 18 evaluators at 13
+  threads, each about 0.35 s and 120 MiB allocated to prepare at that size.
+
 ## 0.2.215
 
-- Fixed: `brm_svi_fit` and `brm_svi_resume` could not recover a dense unit
-  factor's weak direction. The single-draw curvature estimate is indefinite,
-  and where a direction's precision was far below its target the trust-limited
-  step kept widening it, on an exact Gaussian target too: a direction whose true
-  sd is 1, started at 36.7, ended between 155 and 3170 after 1100 visits. Draws
+- Fixed: `brm_svi_fit` and `brm_svi_resume` could not recover a weak direction
+  of a dense unit factor above about 20 coordinates. The single-draw curvature
+  estimate is indefinite, and where a direction's precision was far below its
+  target the trust-limited step kept widening it, on an exact Gaussian target
+  too: at 27 coordinates a direction whose true sd is 1, started at 36.7, ended
+  between 14.6 and 2760 after 1100 visits. At 13 and 15 coordinates it recovered;
+  at 19 and 21 most runs did; at 23 and above they did not. Draws
   then reach far enough out that the target overflows on both sides. The step
   now uses the positive part of the estimate, which needs no knowledge of the
   prior and equals the old estimate at a matched factor. No option, keyword,
