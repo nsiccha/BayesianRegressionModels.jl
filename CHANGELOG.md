@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.212
+## 0.2.215
 
 - Fixed: `brm_svi_fit` and `brm_svi_resume` could not recover a dense unit
   factor's weak direction. The single-draw curvature estimate is indefinite,
@@ -27,6 +27,80 @@ instead of failing at run time.
   result. The estimate is biased towards more precision where the factor and
   target differ; on a Gaussian target the stationary sd is about 1.04-1.06 times
   the truth, against 1.11-1.14 before.
+
+## 0.2.214
+
+- Fixed: on SBBRMI, an `@plate for p in groups(g)` whose grouping column has no
+  rows. Generating its program failed with `Could not find kernel_<cell>_<x>_ragged`,
+  and replaying onto such data with `Do not know how to handle stan_type(…, Any[])`.
+  The plate now has no cells: it binds its inputs empty with their columns'
+  element types, emits the same program as the same model with rows, and its
+  density and gradient are exactly its priors'. `reprocess` moves the program
+  between rows and no rows in both directions. A random effect under
+  `total_groups=:auto` still picks its parameterization from the data, so its
+  program can differ on no rows; a replay keeps the fitted one. Pass the empty
+  columns typed (`x = Float64[]`, `day = Int[]`): Stan declares each as int or
+  real, and an `Any[]` has no entries to tell which, so SBBRMI still refuses it.
+- Fixed: a plate whose cells are named by an empty label column
+  (`rows = groups(g => cells)` with `cells = String[]`) was refused on both
+  backends as if it were long-format data. It now has no cells.
+
+## 0.2.213
+
+- Fixed: identical models were refused across processes when they call an
+  anonymous function or closure. A model's identity hashed such a callable by
+  what names it in the process: its generated name, the file and line of its
+  methods and Serialization's process-wide object numbers. One more anonymous
+  definition earlier in the driver, another line, or serializing another
+  anonymous function first changed the digest, so `brm_svi_resume` refused a
+  checkpoint on the same science and data, after preparing the whole model. In a
+  package module the callable was hashed by generated name alone, so a changed
+  body kept its digest. A generated function now enters by its methods' lowered
+  code and its captured values, nested ones included, with no line information.
+  This covers SVI optimizer checkpoints, the SVI and SMC streaming carries, SMC
+  and Laplace SMC identities and filter exports. A model with no generated
+  function keeps its exact identity, so its existing checkpoints stay valid.
+- Fixed: a fitted state's replay and a streaming SVI window compared the model's
+  declaration as text, where a callable outside a plate cell prints by its
+  generated name (`Normal(#3(mu), 0.8)`), so the rebuilt model was refused as
+  "exported from another model" or "model source changed". The comparison now
+  ignores generated names, also in text exported earlier. Like a named function
+  or a callable inside a plate cell, the body of such a callable is not compared
+  on replay, which reads only this text and the emitted program.
+- Changed: `brm_svi_resume` checks the program, callables, data and coordinates
+  right after lowering, before it prepares the model and target, and the refusal
+  names what differs: the emitted program, the callable's binding, the data
+  column, or the packed coordinates. New checkpoints hold these digests in
+  `state.identity.binding_parts`, of fixed size per callable and data column.
+- Compatibility: an SVI optimizer checkpoint written before this version is still
+  accepted when the old digest matches, which for a model with a generated
+  callable needs the old driver layout; its refusal cannot name the part. Its
+  continuation writes the new digests. An SVI or SMC streaming carry, an SMC
+  checkpoint or a filter export of a model with a generated callable, written
+  before this version, is not migrated and is refused as a changed model.
+
+## 0.2.212
+
+- Fixed: a population prior that reads data is integrated by exact totals and
+  sum-to-zero like the same prior with the numbers spelled out.
+  `effect(mu, Intercept) ~ Normal(m, s)` with `m` and `s` in the data was refused
+  by an explicit `total_groups` or `s2z_groups` request ("is not Normal, Student-t
+  or Flat", "unsupported population prior"). The arguments of a `Normal`,
+  `LocationScale(m, s, TDist(nu))` or `TDist(nu)` prior may now be literals, scalar
+  data fields, `constant(...)`s, elements `v[k]` of a data vector, data-only
+  assignments or calls over these. The values enter the program as data, so models
+  differing only in such a value compile one program, whose log density, gradient
+  and generated quantities equal those of the literal twin.
+- **Changed:** with `total_groups = :auto`, a model whose population priors read
+  data used to stay conventional without saying so; it now integrates its blocks,
+  as its literal twin always did. The posterior is unchanged, the coordinates are
+  not, so draws from such a fit do not transfer to a new build. Pass
+  `total_groups = ()` to keep the conventional representation. A frozen replay
+  of a fitted model is unaffected.
+- A prior that reads a sampled value is still not integrated, and the refusals now
+  say why ("arguments that read only numbers and data"). A data-only call that
+  fails names the call. The exact-total refusal no longer claims a block's `sd`
+  prior needs literal arguments; it already accepted data.
 
 ## 0.2.211
 

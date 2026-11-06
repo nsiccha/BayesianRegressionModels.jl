@@ -67,7 +67,7 @@ end
 function streaming_source(rk, preprocessing)
     emitted = BRM._rk_retained_program(rk)
     streaming_identity((; program=BRM._rk_program_statements(emitted),
-        callables=emitted.bindings, preprocessing))
+        callables=BRM._brm_stable_bindings(emitted.bindings), preprocessing))
 end
 
 function check_carried(carried::BRM.BRMSMCCarriedReference)

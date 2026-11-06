@@ -946,7 +946,11 @@ cell expression or a collected output) each give every cell an empty slice. Each
 RK density and gradient equal a twin that never reads the empty axis.
 `reprocess` moves the same Stan program onto data with rows and back,
 recomputing the row count of a declared axis that sizes an intercept-only
-predictor, and a missing group label is still refused.
+predictor, and a missing group label is still refused. It also checks a plate
+with no cells at all, over `groups(g)` or `groups(g => cells)` with an empty
+column: each backend's density and gradient equal an independent formula for the
+priors, with the prior scale from data or written as a literal, and SBBRMI emits
+the same program as with rows and replays between the two in both directions.
 
 `hsgp_empty_axis_gather.jl` checks an HSGP with an explicit `domain=` (and a
 periodic one) over an axis with no rows, gathered per subject through
@@ -1616,6 +1620,18 @@ refused; and a single `predictor => w` pair works:
 
 ```sh
 julia --project=test test/s2z_per_predictor_rho.jl
+```
+
+## Exact totals and sum-to-zero priors that read data
+
+`integrated_prior_data_fields.jl` builds each exact-total and sum-to-zero model
+twice, its population priors as numbers and as data fields, and checks one source
+across the values and equal blocks, coordinates, log density, gradient and
+generated quantities against the literal twin, the refusals of what cannot be
+integrated, and replay, rebuild and transport of the fitted prior:
+
+```sh
+julia --project=test test/integrated_prior_data_fields.jl
 ```
 
 ## Exact totals beside offsets

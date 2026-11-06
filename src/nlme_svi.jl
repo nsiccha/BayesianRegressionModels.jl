@@ -1010,14 +1010,16 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
         stop_after=nothing, checkpoint_every=nothing, progress=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, threads=nothing,
-        global_coordinates=nothing)
+        global_coordinates=nothing, check_lowered=Returns(nothing))
     ndraws isa Integer && ndraws >= 0 || throw(ArgumentError(
         "$caller: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller, save, stop_after, checkpoint_every)
     threads = _brm_svi_threads(caller, threads, ad_backend)
     _brm_with_progress(progress; description) do node
         _brm_with_phases(node, _BRM_SVI_PHASES) do phases
-            m = _brm_svi_model(_brm_svi_lowered(x, phases.lower), phases.prepare;
+            lowered = _brm_svi_lowered(x, phases.lower)
+            check_lowered(lowered)
+            m = _brm_svi_model(lowered, phases.prepare;
                 ad_backend, shared_point, subject_group, nested_groups, shared_groups, unit_partition)
             t, state = _brm_run_phase(phases.target) do phase
                 # SVI's partition sampler, on first use, reports under this phase.
