@@ -31,6 +31,15 @@ svi_gauss_changed_model(data) = @brm data begin
     end
 end
 
+# The callables of `svi_callable_model` (test/nlme_svi_optimizer_process.jl has
+# `svi_shift` from another driver).
+svi_shift_with(c) = eta -> eta .+ c
+const svi_shift = eta -> eta .+ 0.1
+const svi_shift_other = eta -> eta .+ 0.2
+const svi_shift_captured = svi_shift_with(0.1)
+const svi_shift_captured_other = svi_shift_with(0.2)
+svi_shift_slot = nothing
+
 # The uninterrupted reference run and its state after every iteration.
 function svi_reference(m; kwargs...)
     states = BRMSVIOptimizerState[]
@@ -176,6 +185,130 @@ end
     # refused: the two checkpoints are different objects for different targets.
     @test_throws "holds no optimizer state" brm_svi_resume(m, brm_svi_checkpoint(fit))
     @test_throws "brm_svi_resume(model, state)" brm_svi_checkpoint(state)
+end
+
+@stestset "a generated function's identity is what it computes, not what names it" begin
+    stable = BayesianRegressionModels._brm_stable_value
+    transport = BayesianRegressionModels._brm_value_digest
+    a, b = eval(:(x -> exp.(x) .+ 1)), eval(:(x -> exp.(x) .+ 1))
+    @test typeof(a) !== typeof(b)
+    @test stable(a) == stable(b)
+    @test transport(a) != transport(b)
+    @test stable(a) != stable(eval(:(x -> exp.(x) .+ 2)))
+    # Another file and line.
+    moved = include_string(Main, "\n\n\n\nx -> exp.(x) .+ 1", "another_driver.jl")
+    @test stable(a) == stable(moved)
+    # Captured values, whatever the local variable's name in the lowered code.
+    @test stable(svi_shift_with(1.0)) == stable(svi_shift_with(1.0))
+    @test stable(svi_shift_with(1.0)) != stable(svi_shift_with(2.0))
+    @test stable(svi_shift_with(1.0)) != stable(svi_shift_with(1))
+    # Nested generated functions, keyword and optional arguments, recursion.
+    for (same, other) in ((:(x -> map(y -> y + 1, x)), :(x -> map(y -> y + 2, x))),
+            (:((x; s=1) -> x + s), :((x; s=2) -> x + s)),
+            (:((x, s=1) -> x + s), :((x, s=2) -> x + s)),
+            (:(let; f(n) = n < 2 ? n : f(n - 1); f; end),
+             :(let; f(n) = n < 3 ? n : f(n - 1); f; end)))
+        @test stable(eval(same)) == stable(eval(same))
+        @test stable(eval(same)) != stable(eval(other))
+    end
+    # Held by another value, or as a type.
+    @test stable(Base.Fix1(a, 1)) == stable(Base.Fix1(b, 1))
+    @test stable(Base.Fix1(a, 1)) != stable(Base.Fix1(b, 2))
+    @test stable(a ∘ exp) == stable(b ∘ exp)
+    @test stable(Any[a, 1]) == stable(Any[b, 1])
+    @test stable(typeof(a)) == stable(typeof(b))
+    # A body in a module enters too, where serialization writes only its name.
+    inner = Module(:SviIdentityProbe)
+    @test stable(Core.eval(inner, :(x -> x + 1))) != stable(Core.eval(inner, :(x -> x + 2)))
+    # Everything without a generated function stays itself, so its bytes do too.
+    for value in (sin, Float64, [1.0, 2.0], [[1.0], [2.0]], (; a=1), "s", :s,
+            Base.Fix1(sin, 1), sum ∘ abs, Any[sin, Int])
+        @test stable(value) === value
+    end
+end
+
+@stestset "an anonymous callable resumes in another driver; a different one is named" begin
+    B = BayesianRegressionModels
+    data = svi_gauss_data(Xoshiro(801), 8)
+    tag = "brm-svi-v1"
+    rk = RKBRMI(svi_callable_model(data))
+    # A rebuilt model holds an equal function under another generated name.
+    # `svi_shift_slot` keeps the source text too, which the streaming id reads.
+    global svi_shift_slot = eval(:(eta -> eta .+ 0.1))
+    slot_a = RKBRMI(svi_callable_model(data, :svi_shift_slot))
+    a_identity = B._brm_rk_binding_identity(slot_a, tag)
+    a_source = B._brm_svi_source_id(slot_a)
+    global svi_shift_slot = eval(:(eta -> eta .+ 0.1))
+    slot_b = RKBRMI(svi_callable_model(data, :svi_shift_slot))
+    @test B._brm_rk_binding_identity(slot_a, tag; stable=false) !=
+        B._brm_rk_binding_identity(slot_b, tag; stable=false)
+    @test a_identity == B._brm_rk_binding_identity(slot_b, tag)
+    @test a_source == B._brm_svi_source_id(slot_b)
+    @test a_identity == B._brm_rk_binding_identity(rk, tag)
+    # A model with no generated function keeps its identity, so its old checkpoints do.
+    plain = RKBRMI(svi_gauss_model(data))
+    @test B._brm_rk_binding_identity(plain, tag) ==
+        B._brm_rk_binding_identity(plain, tag; stable=false)
+
+    controls = (; rng=Xoshiro(802), SVI_OPT..., ndraws=0)
+    start = brm_svi_fit(rk; controls..., stop_after=10)
+    full = brm_svi_fit(rk; controls..., rng=Xoshiro(802), stop_after=12)
+    state = brm_svi_optimizer_checkpoint(start)
+    resumed = brm_svi_resume(slot_b, state; stop_after=2, ndraws=0)
+    @test svi_same_state(brm_svi_optimizer_checkpoint(resumed), brm_svi_optimizer_checkpoint(full))
+
+    # Refused by name: another body, another captured value, other data.
+    calls = Ref(0)
+    tally(_) = (calls[] += 1)
+    @test_throws "its callables (brm_value_function)" brm_svi_resume(tally,
+        svi_callable_model(data, :svi_shift_other), state)
+    captured = brm_svi_optimizer_checkpoint(brm_svi_fit(
+        svi_callable_model(data, :svi_shift_captured); rng=Xoshiro(803), SVI_OPT...,
+        stop_after=1, ndraws=0))
+    @test_throws "its callables (brm_value_function)" brm_svi_resume(tally,
+        svi_callable_model(data, :svi_shift_captured_other), captured)
+    shifted = merge(data, (; x=[x .+ 1.0 for x in data.x]))
+    refusal = try
+        brm_svi_resume(tally, svi_callable_model(shifted), state)
+        nothing
+    catch error
+        sprint(showerror, error)
+    end
+    @test occursin("bound data or frozen preprocessing", refusal)
+    @test occursin("x", refusal) && !occursin("callables", refusal)
+    @test calls[] == 0
+
+    # Refused before preparation: an option preparation would refuse is not reached.
+    @test_throws "no_such_group" brm_svi_fit(RKBRMI(svi_callable_model(data));
+        subject_group=:no_such_group, stop_after=1, ndraws=0)
+    @test_throws "its callables" brm_svi_resume(
+        svi_callable_model(data, :svi_shift_other), state; subject_group=:no_such_group)
+
+    # A checkpoint from before `binding_parts`: its old digest, or nothing to name.
+    function legacy(binding)
+        identity = Base.structdiff(state.identity, NamedTuple{(:binding_parts,)})
+        BRMSVIOptimizerState(state.format, merge(identity, (; binding)), state.previous,
+            state.controls, state.run)
+    end
+    old = legacy(B._brm_rk_binding_identity(rk, tag; stable=false))
+    continued = brm_svi_resume(rk, old; stop_after=2, ndraws=0)
+    @test continued.diagnostics.iterations == 12
+    @test hasproperty(brm_svi_optimizer_checkpoint(continued).identity, :binding_parts)
+    @test_throws "emitted program, its callables" brm_svi_resume(rk, legacy("forged"))
+
+    # A fresh process, with another generated name, line and object numbers.
+    script = joinpath(@__DIR__, "nlme_svi_optimizer_process.jl")
+    julia = `$(Base.julia_cmd()) --project=$(dirname(Base.active_project())) $script`
+    mktempdir() do dir
+        input, output = joinpath(dir, "input.jls"), joinpath(dir, "output.jls")
+        serialize(input, (; mode=:callable, data, state, stop_after=2))
+        run(`$julia $input $output`)
+        fresh = deserialize(output)
+        @test fresh.callable != nameof(typeof(svi_shift))
+        # Positive control: the digest of the generated name refuses this process.
+        @test fresh.old_binding != B._brm_rk_binding_identity(rk, tag; stable=false)
+        @test svi_same_state(fresh.state, brm_svi_optimizer_checkpoint(full))
+    end
 end
 
 @stestset "fixed shared values are part of the target" begin

@@ -399,6 +399,23 @@ end
 
 # ── A subject's factor: one natural-gradient step ───────────────────────────
 
+# The positive eigenpair `(λ, e)` of the negative-Hessian estimate in the
+# factor's whitened coordinates. With w = -U⁻¹ gd the estimate reads sym(w εᵀ),
+# whose only nonzero eigenvalues are (wᵀε ± ‖w‖‖ε‖)/2, on ŵ ± ε̂, so it needs no
+# eigensolver and costs O(d²) for the triangular solve.
+function _brm_svi_unit_curvature(U, gd, εi)
+    w = -(U \ gd)
+    a, b = norm(w), norm(εi)
+    (iszero(a) || iszero(b)) && return 0.0, zero(w)
+    λ = (dot(w, εi) + a * b) / 2
+    isfinite(λ) || throw(ArgumentError(
+        "brm_svi: non-finite gradient difference in a unit's curvature estimate"))
+    e = w ./ a .+ εi ./ b
+    n = norm(e)
+    # ŵ = -ε̂: the estimate is negative semidefinite, its positive part zero.
+    iszero(n) ? (0.0, zero(w)) : (λ, e ./ n)
+end
+
 # The largest relative change of a subject's precision in one step: no
 # eigenvalue of U⁻¹ β G U⁻ᵀ exceeds it in magnitude, so along every direction
 # the precision changes by a factor between ½ and 1 + τ + τ²/2 (2.5).
@@ -434,17 +451,31 @@ const _BRM_SVI_UNIT_MEAN_TRUST = 1.0
 #   Λ_new = ½ (Uᵀ; U⁻¹A)ᵀ (Uᵀ; U⁻¹A), so the R of that stacked matrix's QR
 #   factorization is √2 times the new Cholesky factor, which is positive
 #   definite in floating point too.
+#
+# G uses only the positive part of the estimate, in the factor's whitened
+# coordinates (`_brm_svi_unit_curvature`). The full single-draw estimate is
+# indefinite, and its negative eigenvalue traps a weak direction: where a
+# direction v's precision is far below its target, v dominates the whitened
+# gradient difference, the trust region sets β from the estimate's largest
+# eigenvalue, and the negative one halves the precision along a vector holding
+# about half of v. v's marginal variance then grows on average, on an exact
+# Gaussian target too, and with it the draws, however strongly the target
+# curves along v. At a matched factor the estimate is εεᵀ, whose negative part
+# is zero, so the positive part changes nothing there. It is biased towards
+# more precision wherever the two differ, including a target with negative
+# curvature, whose true fixed point it no longer reaches.
 _brm_svi_unit_step!(q, i, gz, gd, εi, β) =
     _brm_svi_unit_step!(q.Λ[i], q, i, gz, gd, εi, β)
 function _brm_svi_unit_step!(::AbstractMatrix, q, i, gz, gd, εi, β)
     # Promoting all of a scientific subject's effects leaves an empty local
     # factor. Its observation term may still contribute to the globals.
     isempty(q.M[i]) && return q
-
     U = LowerTriangular(q.U[i])
-    H = gd * (U * εi)'
-    G = Symmetric(-(H + H') ./ 2 .- q.Λ[i])
-    r = maximum(abs, eigvals(Symmetric(U \ (U \ G)')))
+    λ, e = _brm_svi_unit_curvature(U, gd, εi)
+    v = U * e
+    G = Symmetric(λ .* (v * v') .- q.Λ[i])
+    # U⁻¹ G U⁻ᵀ = λ e eᵀ - I: its eigenvalues are λ - 1 and, above d = 1, -1.
+    r = max(abs(λ - 1), length(e) > 1 ? 1.0 : 0.0)
     β = min(β, _BRM_SVI_UNIT_TRUST / r)
     R = qr(vcat(Matrix(U'), U \ (q.Λ[i] .+ β .* G))).R
     L = LowerTriangular(R' * Diagonal(sign.(diag(R))) ./ sqrt(2))
@@ -1095,14 +1126,16 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, threads=nothing,
         global_coordinates=nothing, separator=nothing, max_unit_coordinates=4096,
-        max_unit_work=1_000_000, max_promoted_coordinates=128)
+        max_unit_work=1_000_000, max_promoted_coordinates=128, check_lowered=Returns(nothing))
     ndraws isa Integer && ndraws >= 0 || throw(ArgumentError(
         "$caller: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller, save, stop_after, checkpoint_every)
     threads = _brm_svi_threads(caller, threads, ad_backend)
     _brm_with_progress(progress; description) do node
         _brm_with_phases(node, _BRM_SVI_PHASES) do phases
-            m = _brm_svi_model(_brm_svi_lowered(x, phases.lower), phases.prepare;
+            lowered = _brm_svi_lowered(x, phases.lower)
+            check_lowered(lowered)
+            m = _brm_svi_model(lowered, phases.prepare;
                 ad_backend, shared_point, subject_group, nested_groups, shared_groups, unit_partition)
             t, state = _brm_run_phase(phases.target) do phase
                 # SVI's partition sampler, on first use, reports under this phase.
