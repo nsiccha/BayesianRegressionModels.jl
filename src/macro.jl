@@ -2789,6 +2789,13 @@ struct DataColumn{P} <: AbstractColumn
     parent::P
 end
 Base.parent(d::DataColumn) = getfield(d, :parent)
+# An array whose element type is erased (`Any[...]`: an empty comprehension
+# over a DataFrame column, `push!` onto `[]`) holds its entries' common type,
+# as the same values written typed would, so every reader sees the shape its
+# entries have. The entries themselves are not converted. An empty one has no
+# entries to take a type from and stays as it is.
+DataColumn(parent::AbstractArray{Any}) = (values = isempty(parent) ? parent :
+    map(identity, parent); DataColumn{typeof(values)}(values))
 
 """
     NestedPredictorFormula(parent)

@@ -164,3 +164,71 @@ end
         check_consumer_point(single_problem, u, single_oracle)
     end
 end
+
+# An empty comprehension over a DataFrame column infers `Any[]`. Its cells are
+# read as a typed `Vector{Float64}[]`'s are: a zero-group plate observes nothing
+# and keeps the priors, and a populated `Any[...]` column of arrays reads as its
+# typed twin (snag rkbrmi-on-a-brm-c7c1d415).
+group_model(data) = @brm data begin
+    shift ~ Normal(0, 1)
+    @plate for g in eachindex(y)
+        group_mean[g] = means[g] .+ shift
+        y[g] ~ shared_location(group_mean[g], sigma[g], limit[g], log_weights[g])
+    end
+end
+
+@stestset "Type-erased response columns read their cells" begin
+    prior(u) = logpdf(Normal(), only(u))
+    typed = (; y=Vector{Float64}[], means=Matrix{Float64}[], sigma=Vector{Float64}[],
+        limit=Vector{Float64}[], log_weights=Vector{Float64}[])
+    scalar_model(data) = @brm data begin
+        shift ~ Normal(0, 1)
+        @plate for i in eachindex(y)
+            y[i] ~ Normal(m[i] + shift, 1.0)
+        end
+    end
+    # An erased empty response is bound as its law's per-cell arrays, so it
+    # differentiates as the typed one does. Erased argument columns have no
+    # law to type them: queries evaluate, but native reverse AD needs their
+    # concrete types (brm-use, "Erased element types").
+    cases = ((group_model(typed), true), (group_model(merge(typed, (; y=Any[]))), true),
+        (scalar_model((; y=Any[], m=Float64[])), true),
+        (group_model(map(_ -> Any[], typed)), false))
+    for (model, gradient) in cases
+        backend = RKBRMI(model)
+        plan = rk_bound_plan(backend)
+        @test plan.columns[:y] isa Vector{Vector{Float64}}
+        likelihood, prior_query, pointwise = (prepare_query(backend.model, plan, preset)
+            for preset in (:likelihood, :prior, :pointwise))
+        for u in ([-0.3], [0.7])
+            @test Base.invokelatest(likelihood, u) == 0.0
+            @test Base.invokelatest(prior_query, u) ≈ prior(u)
+            @test isempty(Base.invokelatest(pointwise, u).y)
+        end
+        gradient || continue
+        _, problem = consumer_problem(model)
+        for u in ([-0.3], [0.7])
+            check_consumer_point(problem, u, prior)
+        end
+    end
+    # The caller's column is read, never replaced.
+    erased = merge(typed, (; y=Any[]))
+    RKBRMI(group_model(erased))
+    @test erased.y isa Vector{Any} && isempty(erased.y)
+
+    populated = (; y=[[0.5, -0.2], [1.3]], means=[[0.3 2.5; -0.4 2.2], [0.8 -0.6]],
+        sigma=[[0.6, 0.8], [0.7]], limit=[[-Inf, -0.2], [-Inf]],
+        log_weights=[log.([2.0, 3.0]), log.([4.0, 1.0])])
+    parts(u) = [event_density(y, m, s, l, w, only(u)) for (y, m, s, l, w) in
+        zip(populated.y, populated.means, populated.sigma, populated.limit,
+            populated.log_weights)]
+    for data in (populated, merge(populated, (; y=Any[populated.y...])),
+            map(column -> Any[column...], populated))
+        backend, problem = consumer_problem(group_model(data))
+        pointwise = prepare_query(backend.model, rk_bound_plan(backend), :pointwise)
+        for u in ([-0.3], [0.7])
+            check_consumer_point(problem, u, u -> prior(u) + sum(parts(u)))
+            @test Base.invokelatest(pointwise, u).y ≈ parts(u)
+        end
+    end
+end

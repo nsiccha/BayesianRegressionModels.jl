@@ -12,6 +12,26 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.207
+
+- Fixed: a data column whose element type is erased (`Any[...]`, as an empty
+  comprehension over a DataFrame column or `push!` onto `[]` produces) now
+  holds its entries' common type when the model is built, so it is read
+  exactly as the same values written typed: `Any[[0.5, -0.2], [1.3]]` is a
+  per-cell vector response like `[[0.5, -0.2], [1.3]]`, and `Any[0.3, -0.1]`
+  a scalar response like `[0.3, -0.1]`. The entries are not converted and the
+  caller's column is not replaced.
+- Fixed: on RKBRMI, an in-cell observation `y[i] ~ law(...)` in
+  `@plate for i in eachindex(y)` over an empty `y = Any[]` is bound as an
+  empty column of the arrays its law observes per cell (a matrix per cell
+  for a matrix-variate law, otherwise a vector; `Int` for a discrete law,
+  otherwise `Float64`), as `Vector{Float64}[]` would be. It observes zero
+  cells, contributes zero likelihood, keeps the priors and differentiates
+  under native Reverse. It previously became one whole-vector event and
+  failed when queries were prepared (`zero(::Type{Any})`). Other empty
+  columns a cell reads have no law to type them: their queries evaluate,
+  but native reverse AD needs them constructed with a concrete element type.
+
 ## 0.2.206
 
 - Fixed: `brm_start` on RKBRMI writes an ungrouped anisotropic
