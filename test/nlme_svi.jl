@@ -101,6 +101,46 @@ end
     end
 end
 
+@stestset "a non-finite unit evaluation is named before the iteration changes q" begin
+    # Snag connected-svi-un-45d04d2a: a non-finite unit gradient reached the
+    # dense natural-gradient step and surfaced as LAPACK's "matrix contains
+    # Infs or NaNs" after the global Adam step had already moved q.
+    rng = Xoshiro(3)
+    rk = RKBRMI(svi_pois_model(svi_pois_data(rng, 8)))
+    m = brm_nlme_model(rk; ad_backend=NLME_AD)
+    t = BRM._brm_svi_target(m)
+    q = BRM._brm_svi_params(t, m.unit[t.globals], MeanFieldGlobal();
+        global_scale=0.1, unit_scale=1.0)
+    # exp of the linear predictor overflows at this finite point.
+    q.M[3] .= 1e4
+    before = deepcopy(q)
+    opt = BRM._brm_svi_adam(q, 0.01)
+    e = try
+        BRM._brm_svi_iteration!(Xoshiro(4), t, q, opt, [5, 3], 0.01, 0.1)
+        nothing
+    catch err
+        err
+    end
+    @test e isa BRMSVINonfiniteError
+    @test length(e.terms) == 1
+    p = only(e.terms)
+    @test p.term === :unit && p.unit == 3 && p.draw_finite
+    @test :value_plus in p.quantities && :value_minus in p.quantities
+    # Nothing moved: the global factor, the optimizer and the other unit.
+    @test opt.t == 0 && q.μ == before.μ && q.ρ == before.ρ
+    @test q.M[5] == before.M[5] && q.Λ[5] == before.Λ[5]
+    @test occursin("unit 3", sprint(showerror, e))
+    # The run-level loop stamps the failing iteration.
+    c = BRM._brm_svi_controls(length(t.units); batch_size=length(t.units),
+        max_iterations=10, lr_global=0.01, unit_step=0.1, polish_lr=0.05,
+        window=nothing, patience=10, min_windows=40, polish_windows=20)
+    run = BRM._brm_svi_run(Xoshiro(5), q, c)
+    run.iteration = 7
+    @test_throws BRMSVINonfiniteError BRM._brm_svi_advance!(run, t, c)
+    stamped = try BRM._brm_svi_advance!(run, t, c) catch err err end
+    @test stamped.iteration == 8
+end
+
 @stestset "a unit step far from its data's scale stays positive definite and converges" begin
     # A unit whose rows pin it 30 to 3e5 times more tightly than its N(0, 1)
     # start, as a probe's year of daily rows does (snag
