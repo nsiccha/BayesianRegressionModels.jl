@@ -148,14 +148,13 @@ end
     # in the second, the others in both, with disjoint rows.
     data = cell_toy_data(Xoshiro(21); nsite=3, nsensor=5, nfield=6, nread=2,
         site_rows=[4], sensor_rows=6)
-    window(keep, sites) = let rows = findall(keep, data.row_sensor)
+    window(keep) = let rows = [k for k in eachindex(data.row_sensor) if keep(data.row_sensor[k], k)]
         merge(data, (; row_sensor=data.row_sensor[rows], row_state=data.row_state[rows],
             row_weight=data.row_weight[rows], row_y=data.row_y[rows],
-            site=data.site[sites], site_x=data.site_x[sites], site_phi=data.site_phi[sites],
-            site_y=data.site_y[sites]))
+            row_index=collect(eachindex(rows))))
     end
-    first_window = window(s -> s != 5, 1:3)
-    second_window = merge(window(s -> s != 3, 1:3), (;
+    first_window = window((s, k) -> s != 5 && isodd(k))
+    second_window = merge(window((s, k) -> s != 3 && iseven(k)), (;
         site=["later $g" for g in 1:3]))
     m1 = brm_nlme_model(RKBRMI(cell_toy_model(first_window)); ad_backend=NLME_AD,
         subject_group=:site, unit_partition=:connected)

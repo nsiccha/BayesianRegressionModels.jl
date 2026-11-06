@@ -7,7 +7,7 @@
 # comparable across layouts because its minibatch noise differs.
 #
 # RUN: julia --project=test research/svi_cell_units/measure.jl \
-#          <nsite> <nsensor> <batch> <updates> [window]
+#          <nsite> <nsensor> <batch> <updates> <window> <first seed> <last seed>
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface: AutoEnzyme
 using LinearAlgebra, LogDensityProblems, Printf, Random, Statistics
@@ -76,112 +76,140 @@ expected_update_seconds(terms, p, B) =
 
 function common_elbo(rng, t, q, full; draws=128)
     points = BRM._brm_svi_draws(rng, t, q, draws)
-    logp = mean(LogDensityProblems.logdensity(full, view(points, :, k)) for k in 1:draws)
+    logp = mean(LogDensityProblems.logdensity(full, points[:, k]) for k in 1:draws)
     logp + BRM._brm_svi_entropy(q)
 end
 
-function fit_trace(m, cell_units, globals, full; batch_size, updates, window, seed=1)
+# One optimization, with the common ELBO at every window. Evaluating it is left
+# out of `seconds`, which therefore counts only the optimizer's own time.
+function fit_trace(m, t, layout, globals, full; batch_size, updates, window, seed)
     rows = NamedTuple[]
-    excluded = Ref(0.0)
-    rng = Xoshiro(seed)
-    target_ref = Ref{Any}(nothing)
-    t0 = Ref(0.0)
+    excluded, t0 = Ref(0.0), Ref(0.0)
     save = state -> begin
         before = time()
-        target_ref[] === nothing && return nothing
         run = state.run
-        elbo = common_elbo(Xoshiro(99), target_ref[], run.q, full)
+        elbo = common_elbo(Xoshiro(99), t, run.q, full)
         push!(rows, (; iteration=run.iteration, seconds=before - t0[] - excluded[], elbo))
         excluded[] += time() - before
         nothing
     end
-    target_ref[] = BRM._brm_svi_target(m; separator=:none, global_coordinates=globals, cell_units)
     t0[] = time()
-    fit = brm_svi_fit(save, m; rng, batch_size, max_iterations=updates, ndraws=4,
-        separator=:none, global_coordinates=globals, cell_units, threads=1,
-        checkpoint_every=window, window=window, unit_sampling=:work)
+    fit = brm_svi_fit(save, m; rng=Xoshiro(seed), batch_size, max_iterations=updates, ndraws=4,
+        separator=:none, global_coordinates=globals, cell_units=layout, threads=1,
+        checkpoint_every=window, window, unit_sampling=:work)
     (; fit, rows)
 end
 
-function main(nsite, nsensor, batch, updates, window)
+packed_means(m, t, q) = let u = copy(m.unit)
+    u[t.globals] .= q.μ
+    for (i, block) in enumerate(t.units)
+        u[block] .= q.M[i]
+    end
+    u
+end
+
+function report_variance(label, u, targets, probabilities, batch)
+    for layout in LAYOUTS
+        terms = unit_gradients(targets[layout], u)
+        p = probabilities[layout]
+        V, total = subsampling_variance(terms, p, batch)
+        sampler = BRM._brm_svi_unit_sampler(:work, targets[layout].ownership.work)
+        E = empirical_variance(Xoshiro(3), terms, sampler, batch, total)
+        update = expected_update_seconds(terms, p, batch)
+        @printf("variance %-8s %-11s exact %.5g  sampled %.5g  ‖g‖² %.5g  expected update %.3f ms  variance×time %.5g\n",
+            label, layout, V, E, sum(abs2, total), 1000update, V * update)
+    end
+end
+
+# The row weight: what one more row of a vector-valued cell costs, in units of what
+# one more read costs in an elementwise row. Rows and reads come from the toy's
+# own units, whose site cells differ only in rows.
+function report_cost_model(m, t, data)
+    terms = unit_gradients(t, copy(m.unit); repeats=15)
+    sites = eachindex(data.site_y)
+    rows = Float64.(length.(data.site_y))
+    seconds = [terms[i].seconds for i in sites]
+    per_row = cov(rows, seconds) / var(rows)
+    sensors = length(sites)+1:length(t.units)
+    inventory = BRM._brm_svi_factor_inventory(m.view, length(m.unit);
+        rows=BRM._brm_svi_observed_rows(m.backend, m.view))
+    owners = Dict(t.ownership.attribution)
+    reads = zeros(length(t.units))
+    for ((name, cell), support) in zip(inventory.sources, inventory.supports)
+        reads[owners[name][cell]] += length(support)
+    end
+    per_read = median(terms[i].seconds / reads[i] for i in sensors)
+    println("unit, rows in its cells, reads, work, measured gradient (ms):")
+    for i in eachindex(t.units)
+        n = i in sites ? length(data.site_y[i]) : count(==(i), owners[:row_y])
+        @printf("  %4d %5d %7.0f %9.0f %9.3f\n", i, n, reads[i], t.ownership.work[i], 1000terms[i].seconds)
+    end
+    @printf("cost model: %.2f µs per site row, %.3f µs per sensor-row read, row weight %.1f reads\n",
+        1e6per_row, 1e6per_read, per_row / per_read)
+    @printf("correlation of work with measured time over all units: %.3f; over sites: %.3f\n",
+        cor(t.ownership.work, [term.seconds for term in terms]),
+        cor(t.ownership.work[sites], seconds))
+end
+
+function main(nsite, nsensor, batch, updates, window, seeds)
     rng = Xoshiro(20261106)
     data = cell_toy_data(rng; nsite, nsensor)
     m = brm_nlme_model(RKBRMI(cell_toy_model(data)); ad_backend=AD,
         subject_group=:site, unit_partition=:connected)
     globals = cell_toy_globals(m)
     full = rk_logdensity_problem(m.backend; ad_backend=AD)
-    println("toy nsite=$nsite nsensor=$nsensor rows=$(length(data.row_y)) site_rows=",
-        extrema(length.(data.site_y)), " coordinates=", length(m.unit), " promoted=", length(globals))
+    println("toy nsite=$nsite nsensor=$nsensor sensor_rows=$(length(data.row_y)) site_rows=",
+        extrema(length.(data.site_y)), " coordinates=", length(m.unit), " promoted=", length(globals),
+        " batch=$batch updates=$updates threads=1")
     targets = Dict(layout => BRM._brm_svi_target(m; separator=:none,
         global_coordinates=globals, cell_units=layout) for layout in LAYOUTS)
     probabilities = Dict(layout => report_layout(string(layout), targets[layout]) for layout in LAYOUTS)
 
     # Exactness: each layout's unit terms sum to the full density and gradient.
+    for layout in LAYOUTS, offset in (-0.31, 0.19)
+        t = targets[layout]
+        u = [offset + 0.12sin(j) for j in eachindex(m.unit)]
+        value, gg = BRM._brm_svi_global_term(t, u[t.globals])
+        gradient = zeros(length(u))
+        gradient[t.globals] .= gg
+        for (i, block) in enumerate(t.units)
+            gu, gz = zeros(length(t.globals)), zeros(length(block))
+            value += BRM._brm_svi_unit_term!(gu, gz, t, i, u[t.globals], u[block])
+            gradient[t.globals] .+= gu
+            gradient[block] .+= gz
+        end
+        expected, native = LogDensityProblems.logdensity_and_gradient(full, u)
+        @printf("exactness %-11s offset %+.2f  value error %.2e  gradient error %.2e\n",
+            layout, offset, abs(value - expected), norm(gradient - native, Inf))
+    end
+
+    report_cost_model(m, targets[:components], data)
+    report_variance("start", copy(m.unit), targets, probabilities, batch)
+
+    # Warm optimization under each layout: one short fit compiles, then each seed
+    # is measured. The ELBO trace is the common estimator above.
+    finals = Dict{Symbol,Any}()
     for layout in LAYOUTS
         t = targets[layout]
-        for offset in (-0.31, 0.19)
-            u = [offset + 0.12sin(j) for j in eachindex(m.unit)]
-            value, gg = BRM._brm_svi_global_term(t, u[t.globals])
-            gradient = zeros(length(u))
-            gradient[t.globals] .= gg
-            for (i, block) in enumerate(t.units)
-                gu, gz = zeros(length(t.globals)), zeros(length(block))
-                value += BRM._brm_svi_unit_term!(gu, gz, t, i, u[t.globals], u[block])
-                gradient[t.globals] .+= gu
-                gradient[block] .+= gz
+        fit_trace(m, t, layout, globals, full; batch_size=batch, updates=window, window, seed=1)
+        for seed in seeds
+            run = fit_trace(m, t, layout, globals, full; batch_size=batch, updates, window, seed)
+            d = run.fit.diagnostics
+            @printf("fit %-11s seed %d updates %d  optimizer seconds %.2f  per update %.2f ms  gradient calls %d\n",
+                layout, seed, d.iterations, d.seconds, 1000d.seconds / d.iterations, d.unit_gradient_calls)
+            println("  iteration seconds common-ELBO")
+            for row in run.rows
+                @printf("  %6d %8.2f %12.3f\n", row.iteration, row.seconds, row.elbo)
             end
-            expected, native = LogDensityProblems.logdensity_and_gradient(full, u)
-            @printf("exactness %-11s offset %+.2f  value error %.2e  gradient error %.2e\n",
-                layout, offset, abs(value - expected), norm(gradient - native, Inf))
+            println("  visits ", summarize(d.sampling.visits), "  draws ", summarize(d.sampling.draws))
+            finals[layout] = packed_means(m, t, d.q)
         end
     end
-
-    # Per-unit gradient time, then the variance and expected cost it implies.
-    points = Dict(:start => copy(m.unit))
-    terms = Dict(layout => unit_gradients(targets[layout], points[:start]) for layout in LAYOUTS)
-    for layout in LAYOUTS
-        p, t = probabilities[layout], targets[layout]
-        V, total = subsampling_variance(terms[layout], p, batch)
-        E = empirical_variance(Xoshiro(3), terms[layout], t === nothing ? nothing :
-            BRM._brm_svi_unit_sampler(:work, t.ownership.work), batch, total)
-        update = expected_update_seconds(terms[layout], p, batch)
-        @printf("start  %-11s exact variance %.4g  sampled %.4g  relative to ‖g‖² %.3f  expected update %.3f ms  variance×time %.4g\n",
-            layout, V, E, V / sum(abs2, total), 1000update, V * update)
-    end
-    println("per-unit gradient time (ms) by unit, rows and reads:")
-    t = targets[:components]
-    scientific = length(m.view.levels)
-    for i in eachindex(t.units)
-        i <= scientific || i <= scientific + 3 || continue
-        rows = i <= scientific ? length(data.site_y[i]) : count(==(i), Dict(t.ownership.attribution)[:row_y])
-        @printf("  unit %3d rows %4d work %8.0f time %8.3f ms\n", i, rows, t.ownership.work[i],
-            1000terms[:components][i].seconds)
-    end
-
-    # Warm optimization under each layout: compile first, then measure.
-    for layout in LAYOUTS
-        fit_trace(m, layout, globals, full; batch_size=batch, updates=window, window)
-        run = fit_trace(m, layout, globals, full; batch_size=batch, updates, window)
-        d = run.fit.diagnostics
-        @printf("fit %-11s updates %d  optimizer seconds %.2f  per update %.2f ms  gradient calls %d\n",
-            layout, d.iterations, d.seconds, 1000d.seconds / d.iterations, d.unit_gradient_calls)
-        println("  iteration seconds common-ELBO")
-        for row in run.rows
-            @printf("  %6d %8.2f %12.2f\n", row.iteration, row.seconds, row.elbo)
-        end
-        V, total = subsampling_variance(unit_gradients(targets[layout],
-            let u = copy(m.unit), q = BRM._brm_svi_result_q(d.optimizer.run)
-                u[targets[layout].globals] .= q.μ
-                for (i, block) in enumerate(targets[layout].units)
-                    u[block] .= q.M[i]
-                end
-                u
-            end; repeats=1), probabilities[layout], batch)
-        @printf("  at the fit's means: exact variance %.4g  relative to ‖g‖² %.3f\n",
-            V, V / max(sum(abs2, total), eps()))
-        println("  visits ", summarize(d.sampling.visits), "  draws ", summarize(d.sampling.draws))
-    end
+    # One point for both layouts: the same global gradient, so the figures compare.
+    report_variance("fitted", finals[:components], targets, probabilities, batch)
+    @printf("mean distance between the layouts' fitted means, in coordinates: %.4f\n",
+        norm(finals[:components] - finals[:first_unit], Inf))
 end
 
 args = parse.(Int, ARGS)
-main(args[1], args[2], args[3], args[4], length(args) >= 5 ? args[5] : 100)
+main(args[1], args[2], args[3], args[4], args[5], args[6]:args[7])
