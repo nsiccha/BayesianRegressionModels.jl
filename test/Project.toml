@@ -365,4 +365,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # db6bca825 (RK 0.1.86 / RKPPL 0.1.99) includes df3eb8872's selective-window
 # capture-footprint fix and the scalar-observation gather-demand repair.
 # Use the SHA: those versions alone do not identify the footprint fix.
-rev = "db6bca825d257b09616a0962ffb75587a81a6bb8"
+# 7dced1e5 (RK 0.1.89 / RKPPL 0.1.102) keeps selected-unit gradients
+# and shared-row storage compact as unrelated units are added.
+rev = "7dced1e52edb45bcbfe9e23d6b5904a0dbe66b56"

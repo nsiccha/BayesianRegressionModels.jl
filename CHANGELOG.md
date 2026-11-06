@@ -28,8 +28,12 @@ instead of failing at run time.
 - Compatibility: authored SVI queries use the batched preparation API from
   ReactiveKernels 0.1.84 / ReactiveKernelsPPL 0.1.98, sharing binding validation
   and packed exemplars while retaining one derivative workspace per bucket.
-  The pinned RKPPL candidate also preserves absent-observation demand through
-  scalar helpers and owned covariance blocks.
+  The pinned RKPPL revision also includes absent-observation demand repairs
+  for scalar helpers and owned covariance blocks.
+- Compatibility: require ReactiveKernels 0.1.89 / ReactiveKernelsPPL 0.1.102
+  for compact selected-unit gradients and shared-row storage. Warm unit-call
+  allocations no longer grow with unrelated units in the fixed-footprint
+  scaling checks.
 
 - Explicitly connected SVI defaults to bounded automatic separator selection
   and work-weighted unit batches. `separator=:none`, `global_coordinates`,

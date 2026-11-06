@@ -328,7 +328,9 @@ const PINS = [
     # db6bca825 (RK 0.1.86 / RKPPL 0.1.99) includes both fixes and the
     # follow-up scalar-observation gather-demand repair. Pin by SHA: these
     # versions also label earlier commits without the footprint repair.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "db6bca825d257b09616a0962ffb75587a81a6bb8"),
+    # 7dced1e5 (RK 0.1.89 / RKPPL 0.1.102) keeps selected-unit gradients
+    # and shared-row storage compact as unrelated units are added.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "7dced1e52edb45bcbfe9e23d6b5904a0dbe66b56"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
