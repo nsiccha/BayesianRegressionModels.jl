@@ -78,8 +78,10 @@ function _rk_attach_data_assignments!(derived::Vector{_RKDerivedSpec}, columns,
     # A fit-role twin reads the fit-role copy of every column and assignment.
     fit_twins = Dict{Symbol,Symbol}()
     twin(x::Symbol) = haskey(fit_twins, x) ? fit_twins[x] :
-        haskey(raw, x) && raw[x] isa AbstractArray ?
-            _rk_fit_input!(derived, columns, taken, x, _brm_fit_input_source(x, raw[x])) : x
+        !haskey(raw, x) ? x :
+        raw[x] isa AbstractArray ?
+            _rk_fit_input!(derived, columns, taken, x, _brm_fit_input_source(x, raw[x])) :
+        _rk_fit_scalar!(derived, columns, taken, x, raw[x])
     twin(x::Expr) = Expr(x.head, map(twin, x.args)...)
     twin(x) = x
     for name in order
@@ -182,8 +184,8 @@ end
 
 # A right-hand side with the model-scope semantics of `_rk_value_expr!`:
 # arithmetic, comparisons and built-in math per element, indexing and vector
-# literals as written, any other call on whole arrays. A data column or another
-# data-only assignment is read by name; a scalar data field is its value.
+# literals as written, any other call on whole arrays. A data column, another
+# data-only assignment and a numeric scalar data field are read by name.
 _rk_lower_data_assignment(x, _assignments, _constants, _raw, _used) = x
 function _rk_lower_data_assignment(x::NamedColumn, assignments, constants, raw, used)
     _brm_is_colon(x) && return :(:)
@@ -192,7 +194,7 @@ function _rk_lower_data_assignment(x::NamedColumn, assignments, constants, raw, 
     if backing isa DataColumn
         haskey(constants, key) && (push!(used, key); return key)
         value = parent(backing)
-        value isa AbstractArray || return value
+        value isa AbstractArray || _rk_scalar_value(value) || return value
         raw[key] = value
         return key
     end
