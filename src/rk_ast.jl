@@ -169,8 +169,57 @@ function _rk_source_data_columns(plan, emitted)
             "RK source: vector extent input `$name` collides with another binding")
         columns[name] = value
     end
+    # A number the program reads by name is an input of it. A name bound to a
+    # number pins a declaration of that name, so those are never inputs.
+    inputs = _rk_input_bindings(plan)
+    if !isempty(inputs)
+        reads = _rk_program_value_reads(emitted)
+        declared = copy(computed)
+        foreach(statement -> _rk_source_outputs!(declared, statement), emitted.main.args)
+        for (name, value) in inputs
+            name in reads && !(name in declared) && !haskey(columns, name) &&
+                (columns[name] = value)
+        end
+    end
+    # A generated input may size a declaration, which no value read counts.
+    for (name, value) in _rk_generated_inputs(plan)
+        name in read && (columns[name] = value)
+    end
     columns
 end
+
+# The numbers a plan can bind: the data's numeric scalars. The inputs the planner
+# generates (`_rk_generated_inputs`) hold what no data field names: a literal
+# `lkj_eta`, a known correlation's factor, a factor's fitted levels and count.
+_rk_input_bindings(_plan) = Dict{Symbol,Any}()
+_rk_input_bindings(plan::_RKStructuralPlan) = plan.inputs
+_rk_generated_inputs(_plan) = Dict{Symbol,Any}()
+function _rk_generated_inputs(plan::_RKStructuralPlan)
+    inputs = Dict{Symbol,Any}()
+    for bucket in plan.ranef_buckets
+        bucket.eta_input isa Symbol && !haskey(plan.inputs, bucket.eta_input) &&
+            (inputs[bucket.eta_input] = bucket.lkj_eta)
+        bucket.known_input === nothing || (inputs[bucket.known_input] =
+            Matrix{Float64}(cholesky(Symmetric(bucket.known_cor)).L))
+    end
+    for predictor in plan.predictors, term in predictor.terms
+        foreach(value -> _rk_level_factor_input!(inputs, value), values(term.options))
+        term.kind === :factor && haskey(term.options, :level_input) || continue
+        inputs[term.options.level_input] = collect(term.options.index_levels)
+        inputs[term.options.extent_input] = length(term.options.labels)
+    end
+    foreach(bucket -> _rk_level_factor_input!(inputs, bucket.level_cor), plan.ranef_buckets)
+    inputs
+end
+# A known level correlation's factor, wherever a term holds it.
+_rk_level_factor_name(lc) = Symbol("L_levelcor_", lc.name)
+_rk_level_factor_input!(_inputs, _value) = nothing
+function _rk_level_factor_input!(inputs, lc::_BRMLevelCorrelation)
+    lc.kind === :data && (inputs[_rk_level_factor_name(lc)] = lc.factor)
+    nothing
+end
+_rk_level_factor_input!(inputs, lc::_BRMMultigroupCorrelation) =
+    _rk_level_factor_input!(inputs, lc.base)
 
 _rk_extent_bindings(_plan) = ()
 _rk_extent_bindings(plan::_RKStructuralPlan) =
@@ -571,10 +620,15 @@ end
 # Always stated (factors have no default prior); the scalar args
 # broadcast over the LevelMap block. One family per block (the
 # thin-layer wide-block rule); the plan family symbol is the head.
+# A factor's fitted levels as the generated input holding them.
+struct _RKLevelInput
+    name::Symbol
+end
+
 function _rk_ast_factor_prior(coef::Symbol, col::Symbol,
         options::NamedTuple, K::Int, family::Symbol, args::Tuple)
     index = if haskey(options, :index)
-        Expr(:call, :(:), 1, length(options.labels))
+        Expr(:call, :(:), 1, options.extent_input)
     elseif options.coding === :fullrank
         Expr(:call, :levels, col)
     else
@@ -1261,7 +1315,7 @@ function _rk_ast_vector_parameter(parameter::_RKVectorParameter)
     parameter.family === :simplex_dirichlet || return nothing
     alpha = only(parameter.args)
     Expr(:call, :~, parameter.name,
-        Expr(:call, :Dirichlet, Expr(:vect, alpha...)))
+        Expr(:call, :Dirichlet, something(parameter.spelled, Expr(:vect, alpha...))))
 end
 
 # `restricted(Normal(a, b), lo, hi)` -> `restricted.(Normal.(a, b), lo, hi)`:
@@ -1753,7 +1807,8 @@ end
 function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         values::Bool=false, reserved=(), coordinates=nothing,
         lone_intercepts=Dict{Symbol,Any}(), documentation=())
-    taken = union(Set(keys(plan.columns)),
+    taken = union(Set(keys(plan.columns)), Set(keys(_rk_input_bindings(plan))),
+        Set(keys(_rk_generated_inputs(plan))),
         Set(p.name for p in plan.parameters),
         Set(a.name for a in plan.assignments),
         Set(p.name for p in plan.predictors),
@@ -1821,7 +1876,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             push!(stmts, Expr(:(=), only(term.columns),
                 Expr(:call, :zeros, Expr(:call, :length, term.options.zero_source))))
         elseif term.kind === :factor && haskey(term.options, :index)
-            index_sources[term.options.index] = (only(term.columns), term.options.index_levels)
+            index_sources[term.options.index] = (only(term.columns),
+                _RKLevelInput(term.options.level_input))
         elseif term.kind in (:monotonic, :monotonic_summand)
             index_sources[only(term.columns)] = (term.options.source, term.options.levels)
         elseif term.kind === :hsgp && haskey(term.options, :group_index)
@@ -1843,7 +1899,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     end
     for name in sort!(collect(keys(index_sources)); by=string)
         source, levels = index_sources[name]
-        level_value = levels isa Symbol ?
+        level_value = levels isa _RKLevelInput ? levels.name : levels isa Symbol ?
             _rk_ast_fitted_value!(stmts, taken, fitted, :brm_fit_levels,
                 Expr(:call, :brm_fit_levels, levels)) : _rk_ast_level_values(levels)
         call = _rk_ast_statistical_call!(defs, taken, :brm_prepared_indices,
@@ -2163,7 +2219,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 _rk_coordinate_record!(coordinates, (; kind=:gmrf_footprint,
                     declaration=term.options.id, predictor=predictor.name,
                     axes=term.options.source, state_axes=term.options.state_axes,
-                    neighbors=term.options.neighbors,
+                    neighbors=term.options.neighbors, fitted=term.options.fitted,
                     correlation=term.options.correlation, locals))
             end
             _rk_start_term_record!(coordinates, predictor.name, term, term.options.id,

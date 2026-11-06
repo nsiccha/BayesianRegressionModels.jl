@@ -242,7 +242,9 @@ function _rk_design_fitted(rk::RKBRMI, groups)
     fits = merge(_rk_plan_fit_inputs(rk.plan), _rk_plan_graph_inputs(rk.plan))
     constants = _rk_fit_constant_names(rk)
     frozen = rk.fitted !== nothing
+    generated = _rk_generated_inputs(rk.plan)
     names = sort!([name for name in keys(columns) if name in constants ||
+        haskey(generated, name) ||
         (!frozen && haskey(fits, name) && !(fits[name] in groups))])
     fitted = NamedTuple{Tuple(names)}(Tuple(columns[name] for name in names))
     frozen || return fitted

@@ -587,25 +587,50 @@ BRM._rk_unconstrained_point(backend::BRM.RKBRMI, values::NamedTuple) =
 BRM._rk_pointwise_query(backend::BRM.RKBRMI) =
     prepare_query(backend.model, _rk_translated(backend), :pointwise)
 BRM._rk_pointwise_values(query, u::AbstractVector) = Base.invokelatest(query, u)
+# Sparse Laplace passes RK's cell-query keywords through (its own locality,
+# shared-prefix `partitioned` and `u0`); NLME units and connected units name
+# their partition and unit point and always run strict.
+BRM._rk_nlme_cell_query(backend::BRM.RKBRMI, observations::Tuple; kwargs...) =
+    prepare_cell_query(backend.model, _rk_translated(backend), observations; kwargs...)
 BRM._rk_nlme_cell_query(backend::BRM.RKBRMI, observations::Tuple, partitioned, unit) =
-    prepare_cell_query(backend.model, _rk_translated(backend), observations;
-        locality=:error, partitioned, u0=unit)
-BRM._rk_nlme_cell_value(query::CellQuery, point::AbstractVector{Float64}, row::Int) =
+    BRM._rk_nlme_cell_query(backend, observations; locality=:error, partitioned, u0=unit)
+BRM._rk_spl_cell_whole(query::CellQuery) =
+    any(entry -> entry.status === :whole, ReactiveKernels.partition_locality(query))
+BRM._rk_nlme_cell_value(query::CellQuery, point, row::Int) =
     query(point, row)
-BRM._rk_spl_cell_footprint(query::CellQuery) = partition_footprint_kernel(query.kernel)
-function BRM._rk_spl_cell_reads(footprint, u, row)
-    reads = Base.invokelatest(footprint, u, row).unconstrained
+BRM._rk_spl_cell_batch(f, query, u) = with_cell_batch(f, query, u)
+# RK partitions whole layout entries by the name it gives them, which a cell
+# latent's entry does not share with its coordinates. Read that from the layout.
+function BRM._rk_spl_partitioned(backend::BRM.RKBRMI, integrated)
+    layout = backend.model.layout
+    marked = falses(layout.total)
+    marked[integrated] .= true
+    entries = [e for e in layout.entries if any(view(marked, e.offset:(e.offset + e.size - 1)))]
+    for e in entries
+        all(view(marked, e.offset:(e.offset + e.size - 1))) || BRM._brm_nlme_error(
+            "brm_laplace_problem: internal: layout entry `$(e.name)` is only partly integrated")
+    end
+    Tuple(e.name => collect(1:(isempty(e.dims) ? e.size : first(e.dims))) for e in entries)
+end
+BRM._rk_spl_cell_footprint(query::CellQuery; shared=true) =
+    shared ? partition_footprint_kernel(query.kernel) :
+        partition_footprint_kernel(query; shared=false)
+function BRM._rk_spl_cell_reads(footprint, u, row; context=u)
+    reads = Base.invokelatest(footprint, context, row).unconstrained
     reads === :whole ? collect(eachindex(u)) : reads
 end
-function BRM._rk_spl_factor_queries(backend::BRM.RKBRMI, observation::Symbol)
+function BRM._rk_spl_factor_queries(backend::BRM.RKBRMI, observation::Symbol;
+        partitioned=nothing, u0=nothing)
+    cache_options = partitioned === nothing ? (;) : (; partitioned, u0)
     factors = prepare_cell_factors(backend.model, _rk_translated(backend), observation;
-        locality=:error)
+        locality=:error, cache_options...)
     function query(part)
         value = prepare_cell_factor_query(factors, part)
-        footprint = partition_footprint_kernel(value.kernel)
+        footprint = partitioned === nothing ? partition_footprint_kernel(value.kernel) :
+            partition_footprint_kernel(value; shared=false)
         (; value, footprint)
     end
-    (; factors, outer=query(:outer),
+    (; factors, cached=partitioned !== nothing, outer=query(:outer),
         terms=[query(j) for j in eachindex(cell_reductions(factors))])
 end
 BRM._rk_spl_factor_rows(q, j, i) = reduction_rows(q.factors, j, i)

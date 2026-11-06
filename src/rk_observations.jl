@@ -6,6 +6,8 @@ struct _RKHeldOutPlan{P}
     held_out::Set{Symbol}
 end
 _rk_extent_bindings(plan::_RKHeldOutPlan) = _rk_extent_bindings(plan.parent)
+_rk_input_bindings(plan::_RKHeldOutPlan) = _rk_input_bindings(plan.parent)
+_rk_generated_inputs(plan::_RKHeldOutPlan) = _rk_generated_inputs(plan.parent)
 
 # An unconditioned BRM program forward-simulates on the Stan route. Its
 # declarations belong to generated quantities, not to an HMC coordinate pack.

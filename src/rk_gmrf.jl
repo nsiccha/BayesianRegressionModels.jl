@@ -129,6 +129,11 @@ struct _BRMGMRFFootprintSupport{C}
     geometry::_BRMGMRFFootprint
     channels::C
 end
+Base.isequal(a::_BRMGMRFFootprintSupport, b::_BRMGMRFFootprintSupport) =
+    isequal(a.geometry, b.geometry) && isequal(a.channels, b.channels)
+Base.:(==)(a::_BRMGMRFFootprintSupport, b::_BRMGMRFFootprintSupport) =
+    a.geometry == b.geometry && a.channels == b.channels
+Base.hash(s::_BRMGMRFFootprintSupport, h::UInt) = hash(s.geometry, hash(_BRMGMRFFootprintSupport, h))
 
 function brm_gmrf_footprint_support(east, north, time, channel, neighbors)
     channels = _brm_fit_levels(channel)
@@ -538,7 +543,7 @@ function _rk_expand_cell_gmrf(statement, index, selected, defs, bindings, taken,
         Expr(:call, _rk_value_callee!(bindings, brm_gmrf_identity_factor, taken),
             _rk_ast_property(support, :geometry)) :
         spec.correlation.kind === :parameter ? values[spec.correlation.name] :
-        _rk_ast_level_factor_value(spec.correlation)
+        _rk_ast_level_factor_constant(spec.correlation)
     L = _rk_block_argument!(block, :L, correlation)
     renamed = Dict{Symbol,Symbol}(name => _rk_block_argument!(block, name, values[name])
         for name in spec.inputs if spec.correlation === nothing ||

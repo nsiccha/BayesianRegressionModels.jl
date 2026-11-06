@@ -138,7 +138,7 @@ end
     @test occursin("b_p_subject_active_z_flat;", params)
     @test !occursin(r"\bb_p_subject_(L|tau|z_flat);", params)
     # LKJ(4, 1) restricted to three margins.
-    @test occursin("b_p_subject_active_L ~ lkj_corr_cholesky(1.5);", code)
+    @test occursin("b_p_subject_active_L ~ lkj_corr_cholesky(b_p_subject_lkj_eta);", code)
     gq = mr_block(code, "generated quantities")
     for name in ("b_p_subject_L", "b_p_subject_tau", "b_p_subject_z_flat", "b_p_subject")
         @test occursin(Regex("\\b$name ="), gq)
@@ -206,7 +206,7 @@ end
     sb = mr_build(MR_CONFIGURED, MR_OMIT_B)
     code = MR.stan_code(sb)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
-    @test occursin("b_p_subject_active_L ~ lkj_corr_cholesky(2.5);", code)
+    @test occursin("b_p_subject_active_L ~ lkj_corr_cholesky(b_p_subject_lkj_eta);", code)
     @test sb.data[:b_p_subject_onion_beta] == [2.0]
     # The active scales keep their block-wide Exponential(0.5) prior; only the
     # inactive `b_loc` margin reads Exponential(0.2).

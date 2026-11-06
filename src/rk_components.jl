@@ -443,11 +443,11 @@ end
 function _rk_ast_stratified_group_component!(definitions, statements, taken, name,
         group, stratum, K, eta, priors)
     priors, prior_inputs, prior_values = _rk_ast_component_prior_inputs(priors,
-        (:g, :s, :tau, :L, :k, :z, :b, :i, (Symbol(:tau_, j) for j in 1:K)...))
+        (:g, :s, :eta, :tau, :L, :k, :z, :b, :i, (Symbol(:tau_, j) for j in 1:K)...))
     index = Expr(:call, :(:), 1, K)
     body = Expr(:block, _rk_ast_stratum_scales(priors, index)...)
     if K > 1
-        cell = Expr(:call, :~, Expr(:ref, :L, :k), Expr(:call, :LKJCholesky, K, eta))
+        cell = Expr(:call, :~, Expr(:ref, :L, :k), Expr(:call, :LKJCholesky, K, :eta))
         push!(body.args, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
             Expr(:for, Expr(:(=), :k, Expr(:call, :levels, :s)), Expr(:block, cell))))
     end
@@ -461,10 +461,11 @@ function _rk_ast_stratified_group_component!(definitions, statements, taken, nam
     push!(body.args, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
         Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, :g)), Expr(:block, cell))))
     push!(body.args, Expr(:return, :b))
+    correlation = K > 1 ? (:eta,) : ()
     callee = _rk_ast_shared_definition!(definitions, taken,
-        "brm_stratified_group_effects", (:g, :s, prior_inputs...), body)
+        "brm_stratified_group_effects", (:g, :s, correlation..., prior_inputs...), body)
     push!(statements, _rk_ast_component_call(name, callee, group, stratum,
-        prior_values...))
+        (K > 1 ? (eta,) : ())..., prior_values...))
     name
 end
 

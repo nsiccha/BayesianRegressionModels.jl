@@ -201,6 +201,26 @@ end
     @test refusal !== nothing && occursin("not in the fitted footprint", refusal)
 end
 
+@testset "The same reads in another row order give the same coordinates and density" begin
+    # A tied lattice, where the maximin order has to break ties.
+    grid = [(Float64(i), Float64(j)) for i in 1:4 for j in 1:4]
+    times = [0.0, 1.0]
+    rows = [(g..., t) for g in grid for t in times]
+    rng = MersenneTwister(21)
+    data = (; east=[r[1] for r in rows], north=[r[2] for r in rows], time=[r[3] for r in rows],
+        y=0.3 .* randn(rng, length(rows)))
+    p = randperm(rng, length(rows))
+    builder = @brm begin
+        field ~ 0 + gmrf((east, north), time; neighbors=3)
+        y ~ Normal(field, 0.2)
+    end
+    a = vecchia_rk_backend(builder(data); case_id="gmrf-vecchia-rows")
+    b = vecchia_rk_backend(builder(map(column -> column[p], data)); case_id="gmrf-vecchia-permuted")
+    @test BRM._rk_layout_coordinate_names(a.rk) == BRM._rk_layout_coordinate_names(b.rk)
+    u = 0.1 .* randn(rng, a.built.layout.total)
+    @test LDP.logdensity(vecchia_rk_problem(a.rk), u) ≈ LDP.logdensity(vecchia_rk_problem(b.rk), u) atol=1e-9
+end
+
 @testset "Refused where the representation does not apply" begin
     data = vecchia_rk_data()
     # Exactly one representation.

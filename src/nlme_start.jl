@@ -151,11 +151,17 @@ end
 # in start_prior.jl. This NLME adapter retains its coordinate-selection policy.
 
 _brm_nlme_scalar_data(plan::_RKHeldOutPlan, name) = _brm_nlme_scalar_data(plan.parent, name)
-_brm_nlme_scalar_data(plan, name) = let x = get(plan.columns, name, nothing)
+function _brm_nlme_scalar_data(plan, name)
+    x = get(plan.columns, name, nothing)
+    x isa Real && return Float64(x)
+    x = get(_rk_input_bindings(plan), name, nothing)
     x isa Real ? Float64(x) : nothing
 end
-# The regression plan defines a scalar it read by name (`_rk_define_read_scalars!`).
+# The regression plan binds a data scalar it reads by name (`plan.inputs`) and
+# defines an assignment holding a literal (`_rk_define_read_scalars!`).
 function _brm_nlme_scalar_data(plan::_RKStructuralPlan, name)
+    x = get(plan.inputs, name, nothing)
+    x isa Real && return Float64(x)
     index = findfirst(a -> a.name === name, plan.assignments)
     index === nothing && return nothing
     x = plan.assignments[index].expression

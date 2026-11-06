@@ -5,6 +5,9 @@ _brm_svi_gaussian_error(message) = throw(ArgumentError("GaussianBlockLaplace: " 
 _brm_svi_gaussian_require(ok, message) = ok || _brm_svi_gaussian_error(message)
 
 _brm_svi_gaussian_literal(x) = x isa Real && isfinite(x)
+# A prior argument's number: a literal, or a data scalar the program reads by name.
+_brm_svi_gaussian_number(x, reg) = x isa Symbol ? get(reg.inputs, x, nothing) : x
+_brm_svi_gaussian_args(args, reg) = map(arg -> _brm_svi_gaussian_number(arg, reg), args)
 function _brm_svi_gaussian_fixed_prior(prior)
     # The random-effect emitter's missing override is its literal default
     # LogNormal(0, 1), not a model-dependent prior expression.
@@ -139,9 +142,9 @@ function _brm_svi_gaussian_certificate(backend::RKBRMI, view::BRMNLMEView)
     parameters = Set{Symbol}()
     for p in reg.parameters
         bounds = p.support_override
-        _brm_svi_gaussian_require(all(_brm_svi_gaussian_literal, p.args) &&
+        _brm_svi_gaussian_require(all(_brm_svi_gaussian_literal, _brm_svi_gaussian_args(p.args, reg)) &&
             (bounds === nothing || bounds isa Symbol || (bounds isa Tuple &&
-                all(x -> x isa Real, Base.tail(bounds)))),
+                all(x -> x isa Real, _brm_svi_gaussian_args(Base.tail(bounds), reg)))),
             "UncertifiedPrior: scalar prior must have literal arguments")
         push!(parameters, p.name)
     end
@@ -210,12 +213,13 @@ end
 function _brm_svi_gaussian_record!(prior, field, r, reg, view)
     if r.kind === :population
         ps = filter(p -> p.predictor === r.predictor && p.addressee === r.coefficient, reg.population_priors)
+        args = length(ps) == 1 ? _brm_svi_gaussian_args(only(ps).args, reg) : ()
         _brm_svi_gaussian_require(length(ps) == 1 && only(ps).family === :Normal &&
-            length(only(ps).args) == 2 && all(_brm_svi_gaussian_literal, only(ps).args) && only(ps).args[2] > 0,
+            length(args) == 2 && all(_brm_svi_gaussian_literal, args) && args[2] > 0,
             "UnsupportedPopulationPrior: requires an unbounded literal Normal prior")
         indices = findall(n -> _brm_nlme_owned(n, r.declaration), view.coordinates)
         _brm_svi_gaussian_require(length(indices) == 1, "UnsupportedPopulationPrior: nonscalar coefficient")
-        mu, sd = only(ps).args
+        mu, sd = args
         precision = inv(Float64(sd)^2)
         _brm_svi_gaussian_require(isfinite(precision) && precision > 0,
             "UnsupportedPopulationPrior: precision is not representable as positive finite Float64")
