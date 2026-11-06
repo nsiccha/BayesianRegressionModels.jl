@@ -17,9 +17,9 @@ function BRM._rk_slap_kernels(rk::RKBRMI, ports::Tuple, effects::Tuple,
     BRM._rk_slap_kernels(rk, ports, effects, omega, u, NLME_AD)
 end
 function BRM._rk_spl_cell_ad(rk::RKBRMI, obs::Tuple, u::Vector{Float64},
-        indices::Vector{Int}, ad::CountingLaplaceAD, K::Int)
+        indices::Vector{Int}, ad::CountingLaplaceAD, K::Int; kwargs...)
     ad.cells += 1
-    BRM._rk_spl_cell_ad(rk, obs, u, indices, NLME_AD, K)
+    BRM._rk_spl_cell_ad(rk, obs, u, indices, NLME_AD, K; kwargs...)
 end
 function BRM._rk_spl_factor_ad(q, part, u, indices, ad::CountingLaplaceAD; kwargs...)
     ad.factors += 1
@@ -45,7 +45,7 @@ function check_plan_reuse(rk, groups; partial=false, cellkind=:none)
     @test p.plan === plan && q.plan === plan
     @test p.backend === rk && q.backend === rk
     @test p.tol == 1e-20 && p.maxiter == 70
-    @test q.tol == 1e-24 && q.maxiter == 50
+    @test q.tol == 1e-24 && q.maxiter == 200
     @test p.factor[] === nothing && q.factor[] === nothing
     @test all(iszero, p.u) && all(iszero, q.u)
     # The derived-observation preparation uses one direction buffer tuple per

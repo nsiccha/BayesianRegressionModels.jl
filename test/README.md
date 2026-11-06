@@ -1,5 +1,15 @@
 # Running the tests
 
+`runtime_numeric_settings.jl` checks that sizes and numeric settings are inputs of
+the emitted programs (user principle `0ikeidi`): one Stan and one RK program across
+a `gmrf` or `hsgp` setting, a data scalar a prior reads, a block's LKJ `eta`, a
+factor's levels and a known correlation, with one lowered program and `prepare_query`
+type where RKPPL allows it and a literal as the positive control. One retained build
+evaluates values A, B, A against an analytic density and gradient. It also checks
+frozen and fresh replay and that checkpoint identities see a prior's numbers. The
+`@test_broken` lines name the ReactiveKernels snags they wait on. About 15 minutes;
+it accepts testset substring filters.
+
 `rk_data_law_arguments.jl` checks RKBRMI formula responses whose law reads
 data: a scalar data field, a `constant(...)` value, a plain alias and a per-row
 column as a Normal scale, a censored Normal, a Student-t scale, a LogNormal scale
@@ -8,7 +18,9 @@ compiled Stan (value and native Reverse gradient, through the coordinate
 transport), replays the printed source, checks that another value emits the same
 program, that binding refuses an invalid value, and frozen `reprocess` of a
 scalar field and of a constant. The further arguments of the other response
-families are checked against the oracle and finite differences. It accepts
+families are checked against the oracle and finite differences. A per-row `zi`
+or Student-t `nu` outside its support is checked as a refusal on
+ReactiveKernelsPPL 0.1.105 or later and as a `-Inf` density before it. It accepts
 testset substring filters.
 
 `rk_value_weighted_observations.jl` checks formula-level `fweights` and
@@ -284,6 +296,19 @@ accidentally matching flattened length must not establish a scalar row axis.
 compares retained plans with freshly prepared targets, including strict
 subsets of row, plate and sum factors. It checks marginal values, gradients,
 finite differences, independent workspaces and backend/AD changes.
+`laplace_shared_prefix.jl` checks helpers shared by ordinary and sum factors:
+exact mixed derivatives, strict local supports, retained subsets, independent
+copies and matrix-free covariance contractions. Synthetic scaling fixtures
+check that preparation retains only local supports and shared derivative
+sweeps allocate approximately in proportion to the number of cells.
+`laplace_cell_routes.jl` checks that both routes of a cell with no sums, compact
+operators and the factor outer, give the same marginal value and gradient,
+including a cell wider than the HVP batch, a retained plan and a copy. It forces
+the factor route for one testset by overriding the locality report, and a helper
+that hides its rows from both routes is refused by name. A stiff cell whose
+population intercept is aliased with an integrated effect keeps the factor route's
+gradient equal to the compact route's, whose Cholesky of h never sees the augmented
+system (it read -50401 for -2.16 on the rotated form).
 `plate_selected_outputs.jl` checks nested selection of shared vector outputs
 across plates with different cell counts: data-only and parameter-dependent
 outputs, fixed and varying widths, both output orders, reader-first composition,
@@ -318,7 +343,9 @@ automatic selection, marginal optimization, independent copies and scalar
 curvature sign changes. Indexed direct predictor reads beside sums retain
 four outer coordinates at 16, 64 and 4,096 effects (RK 0.1.39 / RKPPL 0.1.33).
 `laplace_factors.jl` checks the compact factor chain
-rule and bounded covariance square-root action. The end-to-end scaling
+rule and bounded covariance square-root action, and that outer curvature up to
+1e10 costs the augmented solve neither its residual nor the selected covariance
+blocks. The end-to-end scaling
 driver is `research/sparse_laplace_factors/fitting_scaling.jl`.
 
 Sum-cell tests require the fleet SelectedInversion revision recorded in
@@ -1143,8 +1170,11 @@ block over two predictors. RK prepares each strictly with the subjects' effects
 declared partitioned, and the level table, which has no row form, is computed
 once per population point. Cell values and full partition gradients match the
 whole model's pointwise densities and central differences, and no subject reads
-another subject's effect. `brm_nlme_model` matches the same reference. It runs
-in the test environment above.
+another subject's effect. `brm_nlme_model` matches the same reference. A planned
+sparse Laplace problem integrates the subjects' effects past the same term, one
+component per subject: its value matches a Laplace marginal computed from the
+whole model's density, and its gradient matches central differences. It runs in
+the test environment above.
 
 `nlme_nested.jl` uses a public synthetic model with interleaved observations
 and 1, 2, and 3 nested units per subject. It checks explicit ownership,
@@ -1464,10 +1494,12 @@ gradient against a central difference of the returned value.
 `gmrf_vecchia.jl` checks the footprint representation's numerical core without a
 backend: the exact Gaussian on a fully read grid with irregular gaps, the exact
 time factor on synchronized reads at any neighbour count, separable channels, shared solves, gap
-linkage, reverse derivatives against finite differences and refusals.
+linkage, reverse derivatives against finite differences, the same footprint under
+any row order on a tied lattice, and refusals.
 `gmrf_vecchia_rk.jl` checks the term on RKBRMI: density and native reverse rule,
 sampled channel factor, state plates under `locality = :error`, a strict
-partition, replay from a fitted state and refusals. `gmrf_vecchia_stan.jl` checks
+partition, replay from a fitted state, the same coordinates and density under
+another row order, and refusals. `gmrf_vecchia_stan.jl` checks
 valid Stan, the shared helper, RK/Stan parity through coordinate transport, replay
 and descriptions.
 
@@ -2470,8 +2502,10 @@ Use `test/setup_env.jl` as the single bootstrap entry:
 julia --project=test test/setup_env.jl
 ```
 
-The script materializes every external dependency under the ignored
-`test/.bootstrap/` directory at an exact full-SHA revision. ReactiveKernels
+The script materializes every external dependency at an exact full-SHA revision
+in this host's package store,
+`~/.local/share/BayesianRegressionModels/package-sets/<pkg>-<sha12>`
+(`BRM_TEST_PACKAGE_STORE` overrides the directory). ReactiveKernels
 contributes its monorepo root **and** the nested
 `ReactiveKernelsDistributionKernels` and `ReactiveKernelsPPL` packages from
 that same checkout; those nested packages have no standalone repositories. All
@@ -2485,6 +2519,30 @@ When that mirror contains the exact revision, materialization uses it without
 contacting GitHub. An absent mirror or missing revision falls back to the pin's
 public origin. Mirror paths are derived from the pin list, so adding a dependency
 needs no separate mirror entry. Existing exact cached checkouts are reused.
+
+The store sits outside the checkout because Julia rejects a compiled image built
+from another source path. With a dependency at one stable path, a fresh worktree
+or job on the same pins reuses the images of those pins and their dependents, and
+rebuilds only BRM and its extensions, whose source really is that checkout's. Four
+things follow from sharing it across every run on a host:
+
+- **A checkout is read-only and never rewritten.** A fresh mtime rejects an image
+  even over identical bytes, and an edit would reach every run on the host. To
+  try a change to a pinned package, develop your own checkout of it instead.
+- **Each checkout holds one commit.** Its `.git` answers `git rev-parse HEAD`, and
+  it has no history to ask about. Read history from the mirror or the package's
+  own repository.
+- **Two runs may materialize one pin at once.** Each builds its own scratch
+  directory and renames it into place, and the later run validates the earlier
+  run's checkout and discards its own.
+- **An unused checkout is evicted.** Setup removes checkouts it has not used for 14
+  days, recorded in the store's `.last-used/`, and anything a killed run left
+  after a day. It touches no other name. If a test run says a package at a store
+  path is missing, its checkout was evicted: re-run `setup_env.jl`.
+
+A `test/.bootstrap/` left in an existing worktree is no longer read, and is safe
+to delete once that worktree has re-run `setup_env.jl`.
+
 The offline regression checks use small local Git repositories:
 
 ```sh

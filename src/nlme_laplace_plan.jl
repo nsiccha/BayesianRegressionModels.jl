@@ -188,7 +188,7 @@ Enzyme compiles it, so the node's time shows where preparation goes.
 """
 function brm_laplace_plan(backend::RKBRMI; ad_backend, integrate=:auto, sample=(),
         ess_floor::Real=0.5, draws::Integer=200, at=nothing,
-        rng=Random.Xoshiro(20261031), tol=1e-24, maxiter=50, max_cell_width=128,
+        rng=Random.Xoshiro(20261031), tol=1e-24, maxiter=_BRM_LAP_MAXITER, max_cell_width=128,
         solver=:auto, matrixfree=MatrixFreeLaplace(), progress=nothing)
     _brm_laplace_plan(backend; ad_backend, integrate, sample, ess_floor=Float64(ess_floor),
         draws=Int(draws), at, rng, tol, maxiter, max_cell_width, solver, matrixfree,
@@ -471,12 +471,19 @@ end
 # touch it.
 function _brm_plan_ess(p::BRMSparseLaplaceProblem, state, declaration, draws, ess_floor,
         rng)
+    _brm_spl_cell_batches(p, state.u) do contexts
+        _brm_plan_ess(p, state, declaration, draws, ess_floor, rng, contexts)
+    end
+end
+
+function _brm_plan_ess(p::BRMSparseLaplaceProblem, state, declaration, draws, ess_floor,
+        rng, contexts)
     local_terms = _brm_plan_local_terms(p)
     u = copy(state.uA)
     u[p.integrated] .= state.z
     sets = [b.z[l, :] for b in p.blocks if _brm_nlme_owned(b.declaration, declaration)
         for l in axes(b.z, 1)]
-    cache = _brm_plan_local_cache(p, state)
+    cache = _brm_plan_local_cache(p, state; contexts)
     z = copy(state.z)
     values = map(sets) do I
         H = _brm_spl_precision_block(state.h, I)
@@ -539,7 +546,8 @@ function _brm_plan_local_value(p::BRMSparseLaplaceProblem, state, terms, I, z, u
         else
             group, c = cache.cells[t]
             u[p.integrated[I]] .= z[I]
-            total += _brm_plan_cell_value(group, c, I, u, cache.sums)
+            total += _brm_plan_cell_value(group, c, I, u, cache.sums;
+                context=get(cache.contexts, group.name, u))
             u[p.integrated[I]] .= state.z[I]
         end
     end

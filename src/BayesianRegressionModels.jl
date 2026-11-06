@@ -42,6 +42,7 @@ include("formula_markers.jl")
 include("gmrf_precision.jl")
 include("gmrf_interpolation.jl")
 include("gmrf_vecchia.jl")
+include("gmrf_vecchia_predict.jl")
 include("gmrf_multiresolution.jl")
 include("gmrf_multiresolution_reads.jl")
 include("formula_validation.jl")
@@ -92,6 +93,7 @@ include("rk_reprocess.jl")
 include("rk_design_binder.jl")
 include("rk_fitted_state.jl")
 include("cut.jl")
+include("rk_gmrf_predict.jl")
 
 # SBBRMI — StanBlocks backend. Lowers a BRMI into a StanBlocks SlicModel
 # so it can be compiled by BridgeStan / fit via Stan.
@@ -269,6 +271,7 @@ export BRMFilter, brm_filter, brm_filter_step, brm_filter_stream,
     brm_filter_checkpoint, brm_filter_resume
 export BRMFilterSMC, brm_filter_tune
 export BRMCutFamily, brm_cut_family, brm_cut_fit, brm_cut_point, brm_cut_propagate, rk_draw_values
+export brm_gmrf_predict
 export rkppl_model, rk_model
 # Re-export every Distributions.jl family BRM lowers so
 # `using BayesianRegressionModels` is the only import a model file needs — no
