@@ -1803,14 +1803,20 @@ end
 # caller at a time (rkppl-use §14). An evaluator owns one value query, its work
 # point and, from its first gradient, one gradient plan with its own sampler,
 # gradients and work point. The model keeps a pool of evaluators. A call takes
-# an idle one, prepares a new one while the pool has fewer than
-# `Threads.maxthreadid()`, or waits until one comes back. So one-unit calls from
-# several tasks run in parallel, as NLMEEstimation's
-# `WarmupHMCNUTS(threads = true)` and `check_protocol(...; threads = true)`
-# make them. A process whose calls never overlap prepares only the first
-# evaluator. Every evaluator runs the same compiled program, and a call restores
-# its point to `m.unit`, so a unit's result does not depend on which evaluator
-# ran it.
+# an idle one, prepares a new one while the pool has fewer than one per Julia
+# thread, or waits until one comes back. So one-unit calls from several tasks
+# run in parallel, as NLMEEstimation's `WarmupHMCNUTS(threads = true)` and
+# `check_protocol(...; threads = true)` make them. A process whose calls never
+# overlap prepares only the first evaluator. Every evaluator runs the same
+# compiled program, and a call restores its point to `m.unit`, so a unit's
+# result does not depend on which evaluator ran it.
+#
+# A task returning its evaluator can wait for the pool's lock and so let its
+# thread start another task, which is how holders come to outnumber threads.
+# `Threads.maxthreadid()` is not the bound: it counts the GC threads too, 18 for
+# 13 threads, and a contended pool reached it. A task past the bound only waits
+# as long as a holder takes to return, far less than preparing an evaluator.
+_brm_nlme_max_evaluators() = Threads.nthreads(:default) + Threads.nthreads(:interactive)
 mutable struct _BRMNLMEEvaluator
     const primary::Bool  # holds the model's own query, point and plan
     const query::Any
@@ -1836,7 +1842,7 @@ end
 
 function _brm_nlme_take_evaluator!(m, pool)
     evaluator = lock(pool.condition) do
-        while isempty(pool.idle) && pool.count[] >= Threads.maxthreadid()
+        while isempty(pool.idle) && pool.count[] >= _brm_nlme_max_evaluators()
             wait(pool.condition)
         end
         isempty(pool.idle) || return pop!(pool.idle)
