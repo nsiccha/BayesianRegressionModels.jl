@@ -1,0 +1,109 @@
+# epidist's marginal delay model on BRM and RKPPL: parity and timing
+
+[epidist](https://epidist.epinowcast.org/) (epinowcast, 1.0.0) estimates epidemiological
+delay distributions from line lists with double interval censoring (daily primary and
+secondary event windows) and right truncation (the observation time). It is a brms
+extension: a custom brms family per model, Stan through brms. Its recommended model,
+the *marginal* model, integrates the primary event time out analytically
+(primarycensored's closed form for a uniform primary window and a lognormal, gamma or
+Weibull delay) and aggregates identical rows into weighted ones.
+
+This directory compares that model across four implementations on epidist's own
+simulated data:
+
+| Target | What it is |
+|---|---|
+| `epidist (brms Stan)` | epidist's generated Stan program and Stan data, read through BridgeStan |
+| `BRM SBBRMI` | one `@brm` declaration lowered to Stan by StanBlocks |
+| `BRM RKBRMI` | the same `@brm` declaration lowered to an RKPPL program (ReactiveKernels, Enzyme reverse) |
+| `RKPPL @rkppl` | a hand-written `@rkppl` program with a caller-owned `LogDensity` law |
+
+All four use the same closed-form primary-censored lognormal likelihood and epidist's
+default priors, which are read from its generated program.
+
+## Files
+
+| File | Role |
+|---|---|
+| `epidist_reference.R` | Simulates epidist's "approximate inference" data (`simulate_gillespie(seed = 101)`, lognormal delay meanlog 1.8, sdlog 0.5, observation time 25, daily windows), prepares the marginal model, writes epidist's Stan program, Stan data and rows, and times epidist's own fit (brms + cmdstanr, 4 chains × 1000 + 1000, one core). |
+| `epidist_models.jl` | The stopgap likelihood in Julia and as StanBlocks `@deffun`s, the stopgap and native `@brm` declarations and the `@rkppl` program. |
+| `epidist_page.jl` | Source of the docs page "Epidemiological delays": epidist's rows and the native model. |
+| `epidist_parity.jl` | Density and gradient parity of all four targets at 200 points, density-plus-gradient timing, and (with `fit`) WarmupHMC fits of all four. |
+| `results/n200/`, `results/nall/` | The vignette's 200 cases (94 aggregated rows) and every observed case (2287 cases, 221 rows): epidist's program and data, `epidist_fit.json`, `parity.json`, `fits.json`, BRM's emitted Stan. `epidist_marginal.stan` is epidist's generated program verbatim; it embeds primarycensored 1.6.0's Stan functions (both packages MIT). |
+
+```sh
+# R library with epidist 1.0.0, brms 2.23.0, cmdstanr 0.9.0 (R_EPIDIST_LIB), CmdStan 2.40.0 (CMDSTAN)
+Rscript research/epidist/epidist_reference.R research/epidist/results/n200 200 101
+Rscript research/epidist/epidist_reference.R research/epidist/results/nall 1000000 101
+julia --project=test test/setup_env.jl
+julia --project=test research/epidist/epidist_parity.jl research/epidist/results/n200 fit
+julia --project=test research/epidist/epidist_parity.jl research/epidist/results/nall fit
+```
+
+## Results (2026-11-06, one CPU per run of a shared, loaded 32-core Linux host)
+
+Six targets: epidist's program; BRM SBBRMI and RKBRMI with the native family
+`double_interval_censored` (BRM 0.2.204, "native"); the same two with the
+pre-family stopgap (a computed row probability observed as `Binomial(n, p)`);
+a hand-written `@rkppl` program. Density parity in the posterior bulk (25 of
+200 random points) against epidist's program: max |Δ log density| 2.7e-12
+(200 cases) and 1.1e-10 (2287 cases), gradients to 2.9e-12 and 2.1e-11, for
+every BRM target; SBBRMI sits a constant 0.921586 higher (Stan's `~` drops the
+two normal priors' normalising constants). In the far tails epidist's program
+is non-finite at 2 and 5 of the 200 points; the native family at none.
+
+| | epidist (brms Stan) | native SBBRMI | native RKBRMI | stopgap SBBRMI | stopgap RKBRMI | `@rkppl` |
+|---|---|---|---|---|---|---|
+| density + gradient, 94 rows | 154 µs | 152 µs | 62 µs | 78 µs | 36 µs | 35 µs |
+| density + gradient, 221 rows | 378 µs | 384 µs | 164 µs | 186 µs | 94 µs | 89 µs |
+| WarmupHMC 4 × (1000 + 1000), 200 cases | 3.1 s | 2.8 s | 1.3 s | 1.4 s | 0.8 s | 0.6 s |
+| WarmupHMC 4 × (1000 + 1000), 2287 cases | 7.0 s | 7.7 s | 3.3 s | 3.7 s | 2.1 s | 1.8 s |
+
+The native family costs about twice the stopgap because it takes the upper
+tail from survival differences (and checks each window), which is what keeps
+it finite and accurate where the stopgap and epidist lose precision. Fits run
+after one untimed fit per target, chains in sequence, every chain kept
+(`min_completed = 4`). epidist's own fit (brms + cmdstanr NUTS, same
+iterations, chains in sequence) spent 10.6 s and 23.4 s in Stan's sampler.
+All fits recover meanlog 1.8 and log sdlog −0.693 inside their 90 % intervals,
+R-hat ≤ 1.003, bulk ESS 1800–3600 per 4000 draws. Numbers:
+`results/*/parity.json`, `results/*/fits.json`, `results/*/epidist_fit.json`.
+
+## The BRM spellings
+
+Since BRM 0.2.204 the model is one line (`epidist_brm_native`, and the docs
+page "Epidemiological delays", source `epidist_page.jl`):
+
+```julia
+delay_lwr ~ weighted(double_interval_censored(LogNormal(mu, sigma);
+    primary_event = Uniform(0, pwindow), upper = relative_obs_time,
+    interval = swindow), fweights(n))
+```
+
+Before it, the declaration computed each row's probability in a top-level
+assignment and observed it through a Binomial whose response equals its trial
+count (`log Binomial(n | n, p) = n log p`, the frequency-weighted row log
+probability), kept here as the "stopgap" targets:
+
+```julia
+@brm begin
+    mu ~ 1
+    log(sigma) ~ 1
+    effect(mu, Intercept) ~ Normal(prior_mu_location, prior_mu_scale)
+    effect(sigma, Intercept) ~ Normal(prior_sigma_location, prior_sigma_scale)
+    p = epidist_marginal_prob(delay_lwr, delay_upr, pwindow, relative_obs_time, mu, sigma)
+    count ~ Binomial(n, p)
+end
+```
+
+`epidist_marginal_prob` is a StanBlocks `@deffun` for SBBRMI with Julia methods of the
+same name for RKBRMI.
+
+## Limits of this comparison
+
+- The stopgap Julia/Stan helper is the plain closed form, `(G(d) − G(d − w)) / w` differenced
+  in linear space. It matches epidist to 1e-10 or better in the posterior bulk, but
+  loses precision deep in the tails, where epidist's log-space primarycensored code
+  is more careful (and, at a few extreme points, returns NaN where this one returns −Inf).
+- Timings come from a shared, loaded Linux host and one CPU per run; compare
+  them within one run.

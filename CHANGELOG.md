@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.204
+
+- Added: epidemiological delays with a censored primary event, a censored
+  secondary event and truncation, epidist's marginal model, as two response
+  families spelled as in CensoredDistributions.jl:
+  `y ~ double_interval_censored(LogNormal(mu, sigma); primary_event =
+  Uniform(0, pwindow), lower, upper = obs_time, interval = swindow)` and
+  `y ~ primary_censored(dist, Uniform(a, b))` (exact secondary times). The
+  delay law is `LogNormal`, `Gamma` or `Weibull` (Julia parameterizations,
+  linear predictors allowed); windows and bounds are numbers or data
+  columns; `weighted(..., fweights(n))` takes aggregated rows. Closed-form
+  primary censoring, with upper-tail window probabilities taken from
+  survival differences. SBBRMI emits the Stan family `brm_censored_delay`;
+  RKBRMI observes the same Julia law with native Enzyme Reverse gradients.
+  Both check every observation window against its truncation bounds when the
+  model is built. The Julia objects `PrimaryCensored` and
+  `DoubleIntervalCensored` (exported) implement `cdf`, `ccdf`, `pdf`,
+  `logpdf` and `rand`.
+
 ## 0.2.203
 
 - Added: RKBRMI lowers formula-level `weighted(family, fweights(n))` and

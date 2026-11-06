@@ -164,8 +164,17 @@ Base.@nospecializeinfer function _brm_prepare_model(@nospecialize(brmi::BRMI);
                     override.missing_response))
                 continue
             end
-            prepared = _brm_prepare_expr(rhs, axes)
+            delay = _brm_censored_delay_observation_plan(rhs)
             response = get(context.data, response_data_name, nothing)
+            if !isnothing(delay) && response isa AbstractVector
+                n = length(response)
+                _brm_censored_delay_check(delay, observation_name, response,
+                    x -> x isa Real ? x : _brm_materialize_response_bound(
+                        x, context.data, n, :bound; prefix="BRM preparation");
+                    prefix="BRM preparation")
+            end
+            rhs = _brm_canonical_censored_delay(rhs)
+            prepared = _brm_prepare_expr(rhs, axes)
             weight = isnothing(response) ? nothing :
                 _brm_observation_weight_plan(rhs, observation_name, response;
                     prefix="BRM preparation")

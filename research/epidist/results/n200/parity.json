@@ -1,0 +1,130 @@
+{
+  "N_linelist": 200,
+  "N_rows": 94,
+  "build_seconds": {
+    "brm_native_rk_build_s": 5.22440727,
+    "brm_native_sb_build_s": 17.603062201,
+    "brm_rk_build_s": 48.300862454,
+    "brm_sb_build_s": 28.306773884,
+    "epidist_stan_build_s": 0.114416468,
+    "rkppl_build_s": 3.451990839
+  },
+  "coordinates": {
+    "BRM RKBRMI": [
+      "mu_Intercept",
+      "sigma_Intercept"
+    ],
+    "BRM SBBRMI": [
+      "pop_mu_beta_pop.1",
+      "pop_log_sigma_beta_pop.1"
+    ],
+    "BRM native RKBRMI": [
+      "mu_Intercept",
+      "sigma_Intercept"
+    ],
+    "BRM native SBBRMI": [
+      "pop_mu_beta_pop.1",
+      "pop_log_sigma_beta_pop.1"
+    ],
+    "RKPPL @rkppl": [
+      "Intercept",
+      "Intercept_sigma"
+    ],
+    "epidist (brms Stan)": [
+      "Intercept",
+      "Intercept_sigma"
+    ]
+  },
+  "gradient_seconds": {
+    "BRM RKBRMI": 3.64049095e-5,
+    "BRM SBBRMI": 7.83216475e-5,
+    "BRM native RKBRMI": 6.24875885e-5,
+    "BRM native SBBRMI": 0.0001517708035,
+    "RKPPL @rkppl": 3.5092754499999996e-5,
+    "epidist (brms Stan)": 0.0001538350855
+  },
+  "parity": {
+    "BRM RKBRMI": {
+      "bulk_constant_offset": 1.7053025658242404e-13,
+      "bulk_max_abs_logdensity_diff": 2.3874235921539366e-12,
+      "bulk_max_abs_logdensity_diff_after_offset": 2.2168933355715126e-12,
+      "bulk_max_rel_gradient_diff": 2.2526425169644426e-12,
+      "max_abs_logdensity_diff": 0.33717818751961204,
+      "max_rel_gradient_diff": 0.01600149046354379,
+      "mean_logdensity_diff": 0.00170432591769607,
+      "nonfinite_logdensities": [
+        "-Inf",
+        "-Inf"
+      ],
+      "nonfinite_points": 2
+    },
+    "BRM SBBRMI": {
+      "bulk_constant_offset": 0.9215863345354478,
+      "bulk_max_abs_logdensity_diff": 0.9215863345381194,
+      "bulk_max_abs_logdensity_diff_after_offset": 2.6716406864579767e-12,
+      "bulk_max_rel_gradient_diff": 3.4303671014868087e-12,
+      "max_abs_logdensity_diff": 1.290458641712803,
+      "max_rel_gradient_diff": 0.01723492855884475,
+      "mean_logdensity_diff": 0.923450319844655,
+      "nonfinite_logdensities": [
+        "-Inf",
+        "-Inf"
+      ],
+      "nonfinite_points": 2
+    },
+    "BRM native RKBRMI": {
+      "bulk_constant_offset": 0.0,
+      "bulk_max_abs_logdensity_diff": 2.7284841053187847e-12,
+      "bulk_max_abs_logdensity_diff_after_offset": 2.7284841053187847e-12,
+      "bulk_max_rel_gradient_diff": 2.8692603848412546e-12,
+      "max_abs_logdensity_diff": 0.29579320591926717,
+      "max_rel_gradient_diff": 0.014322210231947933,
+      "mean_logdensity_diff": 0.0014950535743330053,
+      "nonfinite_logdensities": [],
+      "nonfinite_points": 0
+    },
+    "BRM native SBBRMI": {
+      "bulk_constant_offset": 0.9215863345352204,
+      "bulk_max_abs_logdensity_diff": 0.9215863345378921,
+      "bulk_max_abs_logdensity_diff_after_offset": 2.6716406864579767e-12,
+      "bulk_max_rel_gradient_diff": 3.394284853186491e-12,
+      "max_abs_logdensity_diff": 1.2173795404551129,
+      "max_rel_gradient_diff": 0.014322210231966672,
+      "mean_logdensity_diff": 0.9230813881094211,
+      "nonfinite_logdensities": [],
+      "nonfinite_points": 0
+    },
+    "RKPPL @rkppl": {
+      "bulk_constant_offset": 1.7053025658242404e-13,
+      "bulk_max_abs_logdensity_diff": 2.3874235921539366e-12,
+      "bulk_max_abs_logdensity_diff_after_offset": 2.2168933355715126e-12,
+      "bulk_max_rel_gradient_diff": 2.266298260167332e-12,
+      "max_abs_logdensity_diff": 0.33717818751961204,
+      "max_rel_gradient_diff": 0.016001490463543627,
+      "mean_logdensity_diff": 0.00170432591769607,
+      "nonfinite_logdensities": [
+        "-Inf",
+        "-Inf"
+      ],
+      "nonfinite_points": 2
+    },
+    "bulk_points": 25,
+    "epidist (brms Stan)": {
+      "bulk_constant_offset": 0.0,
+      "bulk_max_abs_logdensity_diff": 0.0,
+      "bulk_max_abs_logdensity_diff_after_offset": 0.0,
+      "bulk_max_rel_gradient_diff": 0.0,
+      "max_abs_logdensity_diff": 0.0,
+      "max_rel_gradient_diff": 0.0,
+      "mean_logdensity_diff": 0.0,
+      "nonfinite_logdensities": [
+        "NaN",
+        "NaN"
+      ],
+      "nonfinite_points": 2
+    },
+    "finite_everywhere": 198,
+    "points": 200
+  },
+  "threads": 1
+}
