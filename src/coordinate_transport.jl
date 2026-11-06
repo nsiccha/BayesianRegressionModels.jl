@@ -79,6 +79,10 @@ _rk_coordinate_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan
         term_starts || filter!(r -> r.kind !== :term_start, records)
         records
     end
+# An unconditioned program fits no declaration: each one is drawn in generated
+# quantities, so its inventory is empty, as the fitted pass leaves it for a
+# declaration no response reads (`_rk_drop_unfitted_records!`).
+_rk_coordinate_records(::_RKUnconditionedPlan; term_starts=false) = Any[]
 _rk_coordinate_records(plan) = _brm_transport_error(:unsupported_coverage,
     "brm_coordinate_transport: an RK plan of kind `$(nameof(typeof(plan)))` has " *
     "no cross-backend coordinate inventory")
@@ -441,7 +445,7 @@ function brm_coordinate_transport(rk::RKBRMI, sb::SBBRMI, stan_names::AbstractVe
     parent(rk) === parent(sb) || error(
         "brm_coordinate_transport: build both backends from the same BRMI instance")
     rk_names = Vector{Symbol}(_rk_layout_coordinate_names(rk))
-    stan = Vector{String}(String.(stan_names))
+    stan = _brm_stan_coordinate_names(stan_names)
     records = _rk_coordinate_records(rk.plan)
     d = brm_descriptor(sb)
     stan_pos = Dict{String,Int}(n => i for (i, n) in enumerate(stan))
@@ -468,6 +472,13 @@ function brm_coordinate_transport(rk::RKBRMI, sb::SBBRMI, stan_names::AbstractVe
         isempty(completions) ? nothing : _BRMCompletionLaws(rk, completions), fields)
     _brm_transport_centered_scales(rk, t)
     t
+end
+
+# BridgeStan names a model without parameters (an unconditioned program's
+# `fixed_param` model) `[""]`: no name, not one coordinate called "".
+function _brm_stan_coordinate_names(names)
+    stan = Vector{String}(String.(names))
+    stan == [""] ? String[] : stan
 end
 
 # The centered map rebuilds each block's scales (and a Student-t block's mixing
