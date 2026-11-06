@@ -831,6 +831,8 @@ end
     state = brm_fitted_state(column_prior)
     @test !any(value -> value isa AbstractVector && value == LDATA.x, values(state.scalars))
     @test rk_bound_data(RKBRMI(build_column(other_rows), state)).prior_mean_x == sum(LDATA.x) / 6
+    # A prediction design binds the column and cannot move the fitted prior.
+    @test rk_design_binder(column_prior)(other_rows).prior_mean_x == sum(LDATA.x) / 6
     # An array only a prior reads travels with the state: a design may omit it, and
     # one holding another value is refused.
     sum_rk = RKBRMI(sum_prior(with_m(m1)))

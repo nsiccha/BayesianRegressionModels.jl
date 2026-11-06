@@ -12,6 +12,42 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.225
+
+More numbers are inputs of the program instead of text in it (user principle
+`0ikeidi`). Densities are unchanged: each form is checked against its literal twin.
+
+- Changed: `multigroup` reads its numbers from data on both backends.
+  `multigroup((x, y), lambda; k = kk, c = cc)` accepts data fields for `k` and `c`,
+  which used to be refused. `lambda`, and `tau` in `multigroup(Omega, tau)`, were
+  accepted from data but written into the program, and are now read by name. A
+  literal `k` or `c` also gives one program across values.
+- **Breaking:** `SBBRMI` names a coordinate `multigroup` grid after its term, not its
+  numbers: `multigroup_x_y_hsgp20_c1p5_center` is now `hsgp_t_by_g_grid_center`,
+  and likewise for `_scale`, `_lambda_lower` and the new `_k`. Code that reads these
+  from `stan_data` by name must change. Two terms no longer share one grid.
+- Changed: on `RKBRMI`, what a prior reads from a data array is an input. A reduction
+  (`Normal(sum(m), 1)`), an `MvNormal` mean, covariance or vector scale were
+  written into the program, and a size taken from such an array now reads as one
+  program too. `Dirichlet(a)` with a data vector and `Normal(m[1], 1)` used to be
+  refused on `RKBRMI`. They now match `SBBRMI`.
+- Changed: a prior computed from a design column, such as `Normal(mean(x), 1)`, is a
+  number of the fit, as `standardize(x)` is. A frozen replay on other rows keeps it,
+  where it used to be refused, and a fitted state holds that number and not the rows.
+  An array only a prior reads travels with the fitted state; a frozen replay refuses
+  another value of it.
+- Changed: `effect(m, x) ~ Horseshoe(local_scale = l, global_scale = g)` accepts data
+  fields on both backends, read by name. `RKBRMI` shares one global scale per
+  predictor, so it refuses by name a predictor whose terms read different global
+  scale fields.
+- A fit or checkpoint from a model whose program text changes here is refused and
+  needs a fresh fit, as a frozen replay refuses any changed program.
+- Limits: `mo` and ordinal level counts are still spelled in the program on both
+  backends, and a categorical response's count is a true shape change, with one
+  predictor per class. One lowered program across sizes and bounds needs RKPPL
+  0.1.108 and one query type across values RKPPL 0.1.106. BRM's compat floors do not
+  require them: an older RK is correct but recompiles for each value.
+
 ## 0.2.224
 
 - `SBBRMI` builds a `gmrf(...)` field in a `@plate for` cell again. From 0.2.172
