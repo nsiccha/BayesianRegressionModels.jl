@@ -12,6 +12,47 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.220
+
+- Changed: on `RKBRMI`, a data scalar a prior reads is a runtime input of the
+  program instead of a number folded into it (user principle `0ikeidi`). That
+  covers `sigma ~ Exponential(s)`, a declared vector `z[1:n] .~ LogNormal.(mu, sd)`,
+  an expression over scalars (`LogNormal(log(s), 0.3)`), a scalar an assignment
+  reads, population-effect priors, and the hyperparameter priors of `gp`, `hsgp`,
+  `car`, `cdar` and `dar` terms. Two data sets that differ only in such a value
+  emit the same program, lower to the same program and prepare the same
+  `prepare_query` type, and the densities are unchanged. `rk_bound_data` now holds
+  these names, and the emitted source spells them instead of their numbers.
+- Changed: a stated `cor(:, ID) ~ LKJCholesky(K, eta)` no longer spells `eta` in
+  the program on either backend. RKBRMI reads a data field by name and a literal
+  through a generated input; SBBRMI reads a generated data field,
+  `<block>_lkj_eta`. A frozen RK replay still refuses data holding another value
+  of a prior's scalar, `eta` included, and a fresh replay
+  (`freeze_constants=false`) takes it. A Stan replay keeps the fit's `eta`.
+- Changed: a factor's fitted levels and coefficient count, a known correlation's
+  factor (`cor(:, ID) = C`, `gr(g; cor = R)`), a scalar `MvNormal` scale and the
+  concentration of `Dirichlet(K, a)` are inputs of the RK program too. A factor
+  with other labels but the same count lowers to the same program.
+- Changed: a data scalar in a `truncated` or `restricted` bound or a `Uniform` is
+  spelled by name in the emitted RK program. ReactiveKernelsPPL still reads such a
+  bound into its constrain transform, so the lowered program and query type follow
+  the value until ReactiveKernels snag `rkppl-sized-vect-69604d32` lands.
+- Changed: what identifies a fit for an SVI source, an SMC frame or carried source
+  and a filter now states the numbers its priors read, because the program text no
+  longer does. A resume with another prior value is still refused.
+- Added: `t2(x, z; k = kk)` takes its basis sizes from a data field on both
+  backends. RKBRMI reads them from the fit-role input `<id>_k_fit`, so one emitted
+  program serves every size; the coordinates follow the sizes, and RKPPL's layout
+  follows them too (`rkppl-sized-vect-69604d32`). A frozen replay refuses another
+  size.
+- Not changed: a literal an author writes in a prior (`Exponential(1.7)`) stays in
+  that author's source. `multigroup` `k` is still a literal, a data vector or matrix
+  a prior reads is still spelled in the program, and `Horseshoe` scales still refuse
+  data on RKBRMI. ReactiveKernels' `prepare_sampler` still specializes
+  on a bound scalar's value (ReactiveKernels snag `prepare-sampler-e69f1b38`), and
+  changed extents still change the lowered program
+  (`rkppl-sized-vect-69604d32`).
+
 ## 0.2.219
 
 - The sparse Laplace marginal gradient is correct at a stiff observation on the

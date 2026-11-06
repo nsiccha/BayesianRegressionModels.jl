@@ -1,5 +1,15 @@
 # Running the tests
 
+`runtime_numeric_settings.jl` checks that sizes and numeric settings are inputs of
+the emitted programs (user principle `0ikeidi`): one Stan and one RK program across
+a `gmrf` or `hsgp` setting, a data scalar a prior reads, a block's LKJ `eta`, a
+factor's levels and a known correlation, with one lowered program and `prepare_query`
+type where RKPPL allows it and a literal as the positive control. One retained build
+evaluates values A, B, A against an analytic density and gradient. It also checks
+frozen and fresh replay and that checkpoint identities see a prior's numbers. The
+`@test_broken` lines name the ReactiveKernels snags they wait on. About 15 minutes;
+it accepts testset substring filters.
+
 `rk_data_law_arguments.jl` checks RKBRMI formula responses whose law reads
 data: a scalar data field, a `constant(...)` value, a plain alias and a per-row
 column as a Normal scale, a censored Normal, a Student-t scale, a LogNormal scale

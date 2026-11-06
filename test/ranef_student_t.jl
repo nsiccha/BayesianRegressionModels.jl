@@ -107,7 +107,7 @@ end
     code = stan_code(sb)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
     @test occursin("b_p_subject_w ~ inv_gamma((0.5 * nu), (0.5 * nu));", code)
-    @test occursin("b_p_subject_L ~ lkj_corr_cholesky(2.0);", code)
+    @test occursin("b_p_subject_L ~ lkj_corr_cholesky(b_p_subject_lkj_eta);", code)
     @test occursin("b_p_subject_tau ~ exponential(", code)
     # The sampled df is declared before the block that reads it.
     @test findfirst("nu ~ gamma(", code).start < findfirst("b_p_subject_w ~", code).start

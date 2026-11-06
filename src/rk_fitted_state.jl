@@ -84,7 +84,7 @@ function brm_fitted_state(rk::RKBRMI)
         Dict{Symbol,Symbol}(_rk_plan_fit_inputs(rk.plan)),
         _rk_recorded_fits(rk), _rk_fitted_constants(rk), _rk_fitted_scalars(rk),
         _brm_declaration_text(brm_source(rk)),
-        _rk_program_statements(emitted), _rk_layout_coordinate_names(rk),
+        _rk_replay_statements(emitted, rk.plan), _rk_layout_coordinate_names(rk),
         _rk_fitted_column_types(rk),
         sort!(collect(_rk_response_names(rk.plan))), Tuple(_rk_held_out_names(rk.plan)))
 end
@@ -249,7 +249,7 @@ function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
             fitted_constants=(name, _source) -> get(state.constants, name, nothing))
     end
     emitted = _rk_emit_ast(plan; documentation=brm_documentation(template))
-    _rk_check_replay_program(state.program, _rk_program_statements(emitted); prefix)
+    _rk_check_replay_program(state.program, _rk_replay_statements(emitted, plan); prefix)
     _rk_check_replay_priors(emitted, plan, state.scalars, new_data; prefix)
     _rk_check_replay_terms(plan; prefix)
     _rk_check_replay_groupings(plan, groups; prefix)
