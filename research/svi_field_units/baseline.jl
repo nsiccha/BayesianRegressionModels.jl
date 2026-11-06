@@ -94,8 +94,8 @@ function main(side, times, stations, rows, batch)
     end
     # The target's parts, in its own order, then the target itself.
     ownership = step(() -> BRM._brm_svi_connected_ownership(m; separator=:none), "ownership")
-    partition, view = step(() -> BRM._brm_svi_partition(m, ownership), "partition queries")
-    step(() -> BRM._brm_nlme_partition_plan(partition, m.unit, ownership.globals, view; units=ownership.units), "partition sampler")
+    partition, partition_view = step(() -> BRM._brm_svi_partition(m, ownership), "partition queries")
+    step(() -> BRM._brm_nlme_partition_plan(partition, m.unit, ownership.globals, partition_view; units=ownership.units), "partition sampler")
     step(() -> BRM._brm_svi_authored_prior(m, ownership.globals, ownership.units; factors=ownership.factors), "authored prior")
     t = step(() -> BRM._brm_svi_target(m; separator=:none), "whole target")
     D = length(t.globals)
