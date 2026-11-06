@@ -3971,8 +3971,9 @@ S2Z (`s2z_groups`, `s2z_rho`, below) with WarmupHMC adaptive centering
 totals when the exact Gaussian conditional construction is available: one
 grouping structure per predictor, independent random-effect margins, and
 Normal, Flat, or Student-t population priors (Student-t uses its exact Gaussian
-scale mixture). Unmatched fixed effects and `offset(...)` terms remain explicit
-summands. Original population coefficients and deviations are recovered in
+scale mixture), whose arguments read only numbers and data; those values enter
+the program as data. Unmatched fixed effects and `offset(...)` terms remain
+explicit summands. Original population coefficients and deviations are recovered in
 generated quantities; inspect [`total_effect_blocks`](@ref). Naming a group
 explicitly requires every block of that group to be eligible and errors
 otherwise, naming each predictor whose block would stay conventional and why.

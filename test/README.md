@@ -1607,6 +1607,18 @@ refused; and a single `predictor => w` pair works:
 julia --project=test test/s2z_per_predictor_rho.jl
 ```
 
+## Exact totals and sum-to-zero priors that read data
+
+`integrated_prior_data_fields.jl` builds each exact-total and sum-to-zero model
+twice, its population priors as numbers and as data fields, and checks one source
+across the values and equal blocks, coordinates, log density, gradient and
+generated quantities against the literal twin, the refusals of what cannot be
+integrated, and replay, rebuild and transport of the fitted prior:
+
+```sh
+julia --project=test test/integrated_prior_data_fields.jl
+```
+
 ## Exact totals beside offsets
 
 `total_effects_offset.jl` checks that `offset(...)` terms, of data and of a
