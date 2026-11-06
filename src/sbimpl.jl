@@ -6790,7 +6790,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             isnothing(into) || (flat = _brm_kernel_rebase_index(
                 arg_name, flat, event_group, event_groups,
                 into, _sb_df_column(df, into); prefix="sbimpl: reprocess"))
-            new_data[key] = [flat[r] for r in rows]
+            new_data[key] = _brm_gather_cells(flat, rows)
         end
         new_preproc[key] = e
     elseif e.kind === :multi_membership
@@ -8314,8 +8314,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             body_stmts = Any[_sb_subst_sym(s, params[i], sliced) for s in body_stmts]
         else
             isnothing(flat) && (flat = parent(parent(arg_col)))
-            gathered = [flat[r] for r in rows]
-            data[gath_sym] = gathered
+            data[gath_sym] = _brm_gather_cells(flat, rows)
         end
         options = (; is_lp)
         isnothing(into) || (options = merge(options, (; into=name(into))))

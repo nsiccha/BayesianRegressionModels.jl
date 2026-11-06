@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.214
+
+- Fixed: on SBBRMI, an `@plate for p in groups(g)` whose grouping column has no
+  rows. Generating its program failed with `Could not find kernel_<cell>_<x>_ragged`,
+  and replaying onto such data with `Do not know how to handle stan_type(…, Any[])`.
+  The plate now has no cells: it binds its inputs empty with their columns'
+  element types, emits the same program as the same model with rows, and its
+  density and gradient are exactly its priors'. `reprocess` moves the program
+  between rows and no rows in both directions. A random effect under
+  `total_groups=:auto` still picks its parameterization from the data, so its
+  program can differ on no rows; a replay keeps the fitted one. Pass the empty
+  columns typed (`x = Float64[]`, `day = Int[]`): Stan declares each as int or
+  real, and an `Any[]` has no entries to tell which, so SBBRMI still refuses it.
+- Fixed: a plate whose cells are named by an empty label column
+  (`rows = groups(g => cells)` with `cells = String[]`) was refused on both
+  backends as if it were long-format data. It now has no cells.
+
 ## 0.2.213
 
 - Fixed: identical models were refused across processes when they call an
