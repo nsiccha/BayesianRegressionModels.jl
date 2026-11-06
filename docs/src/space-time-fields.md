@@ -148,7 +148,8 @@ With ``N`` vertices, ``C_h`` channels and ``T`` fitted times, there are
 observation reads reduce the cost of working with the prior, but do not
 remove this state dimension. The joint prior uses spatial factors and OU
 transitions without constructing a dense space-time covariance. When this state
-is far larger than the reads, use `neighbors=` below.
+is far larger than the reads, consider a read-support form below.
+`multiresolution=` preserves exact temporal covariance on irregular reads.
 
 Posterior inference must also account for the observation model and shared
 parameters. Sparse posterior factorization can have substantial fill, and a
@@ -194,22 +195,25 @@ Only ``b_i`` and ``F_i`` move with them, and reads with the same geometry share
 one solve, so a repeated observing pattern costs one solve per position and
 gap rather than one per read.
 
-**What it preserves.** The spatial correlation is the continuum Matérn at the
-actual positions: there is no mesh boundary inflation, no resolution floor at
-short ranges and no interpolation within triangles. Channels are exactly
-separable (``\Omega\otimes K``). On positions read at the same times, the
-implied covariance is the spatial approximation times the exact OU correlation
-across every gap. No time gap is cut: every read time conditions on earlier
-reads however long ago they were.
+**What it preserves.** The local conditioning matrices use the continuum
+Matérn × OU kernel at actual read positions, without mesh interpolation.
+Channels are exactly separable. On a synchronized position grid, the joint
+covariance retains the exact OU time factor across every gap.
 
-**What it approximates.** The conditioning set. Implied covariances differ from
-the exact covariance by an error that shrinks with `m`, is largest at distances
-near the range when the range is much longer than the read spacing, and grows
-for pairs linked only through a chain of sparsely read times. Measure it for your
-support and your range prior: on a network of about 1,600 positions, a range
-about five times the typical spacing has a largest covariance error of about
-0.04 at `m=20` and 0.015 at `m=30`. A conditioning set holds at most `2m+1`
-reads when its position was read at the previous read time, and `3m+1` otherwise.
+**What it approximates.** The joint covariance implied by the product of
+conditionals, including spatial correlations, marginal variances and the
+temporal factor on irregular read support. Exact kernel entries in a local
+conditional do not imply an exact joint covariance. With intermittent reads,
+parent states occur at different times, and even same-position temporal
+covariance can depart from the OU exponential. Increasing `m` does not
+guarantee smaller error for every pair. Measure the constructed covariance on
+the actual read support across the length priors. Distinguish the covariance
+ratio ``K_{ij}/K_{jj}`` from the Pearson correlation
+``K_{ij}/\sqrt{K_{ii}K_{jj}}`` when variances differ.
+
+A conditioning set holds at most `2m+1` reads when its position was read at the
+previous read time, and `3m+1` otherwise. Reads with the same conditioning
+geometry share the factorization.
 
 Lengths far beyond the read domain make a conditional correlation numerically
 singular, which raises a `DomainError` naming them. Positions a metre apart in a
@@ -220,6 +224,77 @@ Frozen replay reads only fitted `(position, time)` pairs, in any order and any
 subset. A new position or time needs a conditional prediction law and is
 refused. It is one model-scope field: use `mesh=` for independent fields in
 plate cells. Embedded Laplace does not integrate it.
+
+## Exact time covariance on irregular reads: `multiresolution=`
+
+Use `multiresolution=m` when the read support is irregular and its temporal
+covariance must remain exactly OU. It has the same hyperparameter addresses,
+priors and length convention as the other forms. Select exactly one of `mesh=`,
+`neighbors=`, and `multiresolution=`; the latter two take an integer literal
+from 1 through 100.
+
+```@eval
+Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+shared_ou_field = (@brm begin
+    Omega ~ LKJCholesky(2, 2.0)
+    field ~ 0 + gmrf((east, north), time, channel; multiresolution=3, cor=Omega)
+    sd(field, gmrf((east, north), time, channel)) ~ Exponential(0.7)
+    length_scale(field, gmrf((east, north), time, channel), space) ~ LogNormal(log(0.4), 0.4)
+    length_scale(field, gmrf((east, north), time, channel), time) ~ LogNormal(log(1.7), 0.4)
+    y ~ Normal(field, 0.2)
+end)((;
+    east=[0.1, 0.9, 0.1, 0.7, 0.9], north=[0.2, 0.4, 0.2, 0.8, 0.4],
+    time=[0.0, 0.3, 1.7, 72.0, 72.0], channel=["b", "a", "a", "b", "a"],
+    y=[0.2, -0.1, 0.3, 0.1, 0.2],
+))
+""", :shared_ou_field; title="A shared field on irregular read pairs", require_stan=true)
+```
+
+Each position uses a normalized sparse spatial basis of independent,
+channel-correlated OU innovation paths:
+
+```math
+f(s,t,c)=\sigma\sum_k b_{sk}(\ell_s)z_k(t,c),\qquad\sum_k b_{sk}^2=1,
+```
+
+```math
+\operatorname{Cov}(f(s,t,c),f(s',t',c'))=
+\sigma^2(b_s^{\mathsf T}b_{s'})\exp(-|t-t'|/\ell_t)\Omega_{cc'}.
+```
+
+The same coefficients apply at every time. The temporal exponential factor,
+channel separability and marginal SD ``\sigma`` are exact at all fitted reads.
+Spatial covariance remains an approximation to Matérn-1. Local spatial
+conditionals in a deterministic maximin ordering define a triangular factor;
+its sparse inverse retains the nearest `m` earlier innovations in each
+count-doubling band of that ordering. Each row has at most
+``1+m(1+\lfloor\log_2 P\rfloor)`` coefficients for ``P`` positions. Supports
+overlap across spatial regions. Normalize only after propagating the inverse
+rows. Check spatial accuracy on the actual positions across the range prior;
+rank increases do not guarantee monotone pointwise improvement.
+
+Each innovation stores only the union of its readers' observed times. Its
+initial state is stationary, with exact transitions across the actual gaps.
+There is no reset per observation, region or time block, and no completed
+position × time grid. Latent dimension can exceed the number of read pairs
+because several innovations contribute to each read. The normalized prior on
+these innovation coordinates depends on the temporal length and channel
+factor; the spatial length enters the deterministic read weights.
+
+The native backend supplies analytic derivatives of the spatial recurrence
+and OU density; Stan differentiates the same computations. Frozen replay keeps
+innovation position, time and channel identities under row permutations,
+subsets and duplicates, and accepts only fitted position/time pairs with known
+channels. Coordinate transport pairs these innovation identities across
+backends. Read the term output for field values; raw sampler coordinates are
+innovation states. For a nonlinear predictor such as log rain, read the
+weighted field first, then exponentiate, then average physical values over
+observation support.
+
+This is a model-scope field on `RKBRMI` and `SBBRMI`. Independent cell fields
+and embedded Laplace retain the mesh form. Very long spatial lengths can make
+a local correlation matrix numerically singular; such a failure is reported,
+without imposing a range floor or changing the prior.
 
 ## Independent fields in plate cells
 

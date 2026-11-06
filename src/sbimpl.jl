@@ -551,8 +551,8 @@ end
 
 # Monotonic effect contrast (Buerkner & Charpentier 2018). Returns the per-obs
 # contrast vector; the walker hcat's it as one column of X_pop so popefs
-# supplies the free beta (matches vimpl's free-beta `mo` variant, not `mo1`).
-# Named `_sb_mo` to avoid clashing with vimpl's marker function `mo`.
+# supplies the free beta (the free-beta `mo` variant, not `mo1`).
+# Named `_sb_mo` to avoid clashing with the marker function `mo`.
 # The Dirichlet concentration arrives as DATA rather than being built inline,
 # so `simplex(<lp|:>, mo1(c)) ~ Dirichlet(...)` configures this ONE submodel
 # instead of selecting a second copy of it. Julia supplies `rep_vector(1., K-1)`
@@ -562,9 +562,9 @@ _sb_mo = StanBlocks.@slic begin
     return cumulative_sum(append_row(0., simplex_incr))[x]
 end
 
-# (1 | g) random intercept. Mirrors vimpl's scalar grouped_normal + chol(n=1)
-# collapse: Part{chol}(1x1) -> log_scale ~ N(0,1), L[1,1] = exp(log_scale);
-# Part{grouped_normal}(n_groups, 1) -> xi ~ N(0,1), values = L[1,1] * xi;
+# (1 | g) random intercept: the scalar grouped-normal + 1x1 Cholesky
+# collapse: log_scale ~ N(0,1), L[1,1] = exp(log_scale);
+# xi ~ N(0,1), values = L[1,1] * xi;
 # per-obs contribution is values[group_idx]. No LKJ needed at n=1.
 #
 # `n_groups` is an ordinary kwarg, so the CALLER picks the size expression and
@@ -2091,6 +2091,22 @@ StanBlocks.@deffun begin
         rv
     end
 end
+# The family's own support (stanblocks-use §8, "A bound may read the family's
+# arguments"), which its density and RNG honour: `[mu - pi, mu + pi]`, or
+# `[lo, hi)` for the principal interval. StanBlocks declares it on a prior's
+# parameter, a sampled `mu` included, and draws a prior-only value with
+# `brm_von_mises_rng`; spelled as bounds instead, the draw was a truncated
+# re-draw asking for an `_lccdf` companion the family does not have (todo
+# 0w0ukqc). Needs StanBlocks 0.2.30 (snag autokwargs-suppo-412811f6). Scalar
+# arguments only, as a prior's are; a per-row location keeps no declaration.
+function StanBlocks.autokwargs(x::StanBlocks.CanonicalExpr{typeof(brm_von_mises),
+        <:Tuple{Vararg{StanBlocks.StanExpr{<:Any,<:StanBlocks.StanType{<:Any,0}},5}}})
+    mu, _, lo, hi, principal = x.args
+    principal = StanBlocks.expr(principal)
+    principal === 1 && return (; lower=lo, upper=hi)
+    principal === 0 || return (;)
+    (; lower=StanBlocks.stan_call(-, mu, pi), upper=StanBlocks.stan_call(+, mu, pi))
+end
 
 # Inverse-Gaussian (Wald) density with the BRM support contract made explicit.
 # StanBlocks registers no `inverse_gaussian` builtin — neither the pinned
@@ -2209,6 +2225,13 @@ StanBlocks.@deffun begin
         rv
     end
 end
+# The positive half-line is the family's own support (stanblocks-use §8): its
+# density and RNG honour it. StanBlocks declares it on a prior's parameter and
+# draws a prior-only value with `brm_inverse_gaussian_rng`; spelled as a bound
+# instead, the draw was a truncated re-draw asking for an `_lccdf` companion
+# the family does not have (todo 0w0ukqc).
+StanBlocks.autokwargs(::StanBlocks.CanonicalExpr{typeof(brm_inverse_gaussian)}) =
+    (; lower=0.0)
 
 function addprop end
 
@@ -2347,7 +2370,7 @@ ranef_correlated_by_draws = StanBlocks.@slic begin
 end
 
 # Treatment-coded categorical predictor. Allocates K-1 free betas; reference
-# level 1 contributes 0. Mirrors vimpl's `AbstractVector{<:Integer}` dispatch.
+# level 1 contributes 0.
 # `x` is the per-row 1-based level index, `n_levels = K`.
 _sb_cat = StanBlocks.@slic begin
     beta ~ std_normal(; n=n_levels - 1)
@@ -3491,9 +3514,9 @@ _sb_hsgp_by_multigroup_inducing_lambda =
 _sb_hsgp_by_aniso_multigroup_inducing_lambda =
     _sb_multigroup_own_lambda(_sb_hsgp_by_aniso_multigroup_inducing)
 
-# Categorical -> (n_levels::Int, per-row level index::Vector{Int}). Mirrors
-# vimpl._level_index so the integer indices the walker stashes in `data`
-# agree with what the cimpl-side uses.
+# Categorical -> (n_levels::Int, per-row level index::Vector{Int}), the shared
+# `_brm_level_index`, so the integer indices the walker stashes in `data`
+# agree with the preparation layer's.
 _sb_level_index(raw::AbstractVector) = _brm_level_index(raw)
 
 # Fit/apply split for categorical level coding (factor / mo). `_sb_fit_levels`
@@ -4118,7 +4141,7 @@ end
 
 Return the [`BRMI`](@ref) model that `sb` lowered. This is the public, stable
 accessor for an `SBBRMI`'s underlying model; prefer it over the `sb.parent`
-field, which is an implementation detail. Mirrors [`parent(::TuringBRMI)`](@ref).
+field, which is an implementation detail.
 It is the BRMI `sb` was built from after prior-address resolution
 (`optional(...)` priors, grouping-column addresses); [`brm_source`](@ref)
 returns that BRMI exactly as passed.
@@ -4656,6 +4679,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
        resample_covariates=(), _frozen_preproc=nothing, _marginal_id_targets=nothing,
        _s2z_generated=nothing, _source::BRMI=brmi, _component_output=nothing)
     brmi = _brm_resolve_prior_addresses(brmi)
+    _brm_check_component_reads(brmi)
     # A frozen re-emission codes releveled factors over their fitted levels.
     isnothing(_frozen_preproc) || (brmi = _sb_fit_factor_levels(brmi, _frozen_preproc))
     source_parent = brmi
@@ -4961,8 +4985,10 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     # A scoped component contributes its returned value to a parent's model;
     # its likelihood can therefore live entirely in that parent.
     if _component_output !== nothing
-        _brm_has_operation(brmi, _component_output) || error(
-            "sbimpl: component result `$_component_output` is not declared")
+        for output in (_component_output isa Symbol ? (_component_output,) : _component_output)
+            _brm_has_operation(brmi, output) || error(
+                "sbimpl: component result `$output` is not declared")
+        end
         return sb
     end
     triage = _sb_observation_triage(sb)
@@ -5027,6 +5053,24 @@ Base.@nospecializeinfer function _sb_observation_triage(@nospecialize(sb::SBBRMI
     (; bound, unbound, fresh_sources)
 end
 
+# The targets of the emitted priors that hold a `restricted(...)` law
+# (`_sb_restricted_prior!`), including a margin of a vector prior.
+_sb_restricted_targets!(out, _) = out
+function _sb_restricted_targets!(out, x::Expr)
+    if x.head === :call && length(x.args) == 3 && x.args[1] === :~ &&
+       _sb_holds_restricted(x.args[3])
+        name = x.args[2] isa Symbol ? x.args[2] : _sb_plan_lhs_name(x.args[2])
+        isnothing(name) || push!(out, name)
+        return out
+    end
+    foreach(a -> _sb_restricted_targets!(out, a), x.args)
+    out
+end
+_sb_holds_restricted(_) = false
+_sb_holds_restricted(x::Expr) =
+    (x.head === :call && !isempty(x.args) && x.args[1] === StanBlocks.restricted) ||
+    any(_sb_holds_restricted, x.args)
+
 Base.@nospecializeinfer function _sb_triage_emitted(@nospecialize(sb::SBBRMI),
                                                     triage=_sb_observation_triage(sb))
     (; bound, unbound, fresh_sources) = triage
@@ -5039,11 +5083,20 @@ Base.@nospecializeinfer function _sb_triage_emitted(@nospecialize(sb::SBBRMI),
                   "If one was meant to be fitted, its data column is missing " *
                   "or misnamed.")
         else
+            # A `restricted` prior whose mass inside its bounds moves with a
+            # sampled value stays sampled (StanBlocks' rule, stanblocks-use
+            # §8.1), so such a program keeps parameters (todo 0mhtheb).
+            restricted = unique!(_sb_restricted_targets!(Symbol[], sb.model.model))
+            kept = isempty(restricted) ? "" :
+                " A `restricted` prior (" * join(map(s -> "`$s`", restricted), ", ") *
+                ") whose mass inside its bounds moves with a sampled argument " *
+                "or bound stays a sampled parameter instead, with what its " *
+                "bounds and arguments read; that program needs a sampler."
             @warn("sbimpl: $names bind(s) no data column — building the " *
                   "unconditioned (prior) program: no likelihood reaches the " *
                   "model block, so parameters and responses forward-simulate " *
-                  "in generated quantities. If you meant to fit, the response " *
-                  "column is missing or misnamed.")
+                  "in generated quantities." * kept * " If you meant to fit, " *
+                  "the response column is missing or misnamed.")
         end
         return nothing
     end
@@ -7876,6 +7929,7 @@ end
 # `nothing` when the lambda is malformed. The emitter validates loudly on
 # `nothing`; formula walkers (which run where emission already succeeded) skip.
 function _sb_kernel_lambda_parts(lam)
+    scope = _brm_inline_scope(lam)
     lam = _brm_inline_expr(lam)
     lam isa Expr && lam.head === :-> && length(lam.args) >= 2 || return nothing
     ptuple = lam.args[1]
@@ -7893,7 +7947,8 @@ function _sb_kernel_lambda_parts(lam)
         statements = copy(statements)
         statements[final] = only(statements[final].args)
     end
-    (params, statements)
+    # A cell's reads of a named-return component's fields, for both backends.
+    (params, _brm_cell_component_reads(statements, scope))
 end
 
 # The column a kernel positional binds to its cell formal: the column itself,
@@ -8018,7 +8073,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     dcol_names    = Symbol[]
     lp_cols       = Any[]
     read_outputs  = Symbol[]
-    assigned_inputs = Symbol[]
+    value_inputs = Symbol[]
     ragged_specs  = Any[]
     ragged_cols   = Any[]
     for (i, c) in enumerate(dcols[2:end])
@@ -8051,10 +8106,10 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         if parent(c) isa DataColumn
             v = parent(parent(c))
             data[k] = v
-        elseif parent(c) isa ExprColumn{typeof(assign)}
-            # Read the emitted value on its own axis. An assignment can
-            # change its inputs' axes, so it has no formula grouping to infer.
-            push!(assigned_inputs, k)
+        elseif _brm_kernel_value_input(c)
+            # Read assignments, components and producer plates on their own
+            # result axes, without inferring rows from their shared inputs.
+            push!(value_inputs, k)
         elseif parent(c) isa MissingColumn && k in get(data, _SB_KERNEL_OUTPUT_READS_KEY, ())
             # Another cell's non-collected indexed output, emitted before this
             # cell (`_brm_prepare_program`): sliced by name like a collected
@@ -8140,11 +8195,11 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         # The subject count is the common length of the pre-grouped data
         # columns or, when the cell slices only LPs (beside omitted outcomes),
         # of the per-subject columns those LPs read.
-        lp_names = union(Set(name(c) for c in lp_cols), read_outputs, assigned_inputs)
+        lp_names = union(Set(name(c) for c in lp_cols), read_outputs, value_inputs)
         counted = [(k, length(data[k])) for k in kept_names if k ∉ lp_names]
         isempty(counted) &&
             foreach(c -> append!(counted, _brm_kernel_lp_data_lengths(c)), lp_cols)
-        isempty(counted) && isempty(assigned_inputs) && error(
+        isempty(counted) && isempty(value_inputs) && error(
             "sbimpl: kernel(...) with no random-effect linear predictor needs at least ",
             "one pre-grouped per-subject data column to derive the subject count from; ",
             "omitted outcomes cannot supply it.")
@@ -8442,29 +8497,34 @@ function _sb_emit_prior!(stmts, target, ::Type{<:Horseshoe}, op)
     true
 end
 
-# The prior uses the same exact density/RNG as an observation. Its declaration
-# additionally carries the distribution's support, including a sampled mean.
+# The prior uses the same exact density/RNG as an observation. The family
+# declares its support `[mu - pi, mu + pi]` itself, a sampled mean included
+# (`autokwargs` above), so only a bound that narrows it is spelled, intersected
+# with the support, and that one restricts the prior.
 function _sb_emit_prior!(stmts, target, ::Type{<:VonMises}, op)
     args = map(_sb_effect_prior_arg, getargs(op))
     mu, kappa = _sb_stan_dist_args(VonMises, args)
-    lower = mu isa Real ? mu - pi : :($mu - $(Float64(pi)))
-    upper = mu isa Real ? mu + pi : :($mu + $(Float64(pi)))
     bounds = _sb_prior_bound_keywords(target, VonMises, getkwargs(op))
     supplied = Dict(kw.args[1] => kw.args[2] for kw in bounds.args)
-    if haskey(supplied, :lower)
-        lower = _sb_bound_intersection(max, lower, supplied[:lower])
+    narrowing = Pair{Symbol,Any}[]
+    for (key, f, side) in ((:lower, max, :-), (:upper, min, :+))
+        haskey(supplied, key) || continue
+        support = mu isa Real ? (side === :- ? mu - pi : mu + pi) :
+            Expr(:call, side, mu, Float64(pi))
+        bound = _sb_bound_intersection(f, support, supplied[key])
+        bound isa Real && bound == support && continue
+        push!(narrowing, key => bound)
     end
-    if haskey(supplied, :upper)
-        upper = _sb_bound_intersection(min, upper, supplied[:upper])
-    end
-    declaration = _sb_prior_bound_keywords(target, VonMises, (; lower, upper))
-    push!(stmts, Expr(:call, :~, target,
-        Expr(:call, brm_von_mises, declaration, mu, kappa, 0.0, 0.0, 0)))
+    rhs = Expr(:call, brm_von_mises, mu, kappa, 0.0, 0.0, 0)
+    isempty(narrowing) || insert!(rhs.args, 2,
+        _sb_prior_bound_keywords(target, VonMises, (; narrowing...)))
+    push!(stmts, Expr(:call, :~, target, rhs))
     true
 end
 
-# The prior uses the same exact density/RNG as an observation. Its declaration
-# additionally carries the positive-half-line support.
+# The prior uses the same exact density/RNG as an observation. The family
+# declares its positive-half-line support itself (`autokwargs` above), so only a
+# bound that narrows it is spelled, and that one restricts the prior.
 function _sb_emit_prior!(stmts, target, ::Type{<:InverseGaussian}, op)
     length(getargs(op)) in (0, 1, 2) || error(
         "sbimpl: `InverseGaussian` expects `InverseGaussian()`, " *
@@ -8474,14 +8534,16 @@ function _sb_emit_prior!(stmts, target, ::Type{<:InverseGaussian}, op)
     mu, lambda = _sb_stan_dist_args(InverseGaussian, args)
     bounds = _sb_prior_bound_keywords(target, InverseGaussian, getkwargs(op))
     supplied = Dict(kw.args[1] => kw.args[2] for kw in bounds.args)
-    lower = 0.0
+    narrowing = Pair{Symbol,Any}[]
     if haskey(supplied, :lower)
-        lower = _sb_bound_intersection(max, lower, supplied[:lower])
+        lower = _sb_bound_intersection(max, 0.0, supplied[:lower])
+        lower == 0.0 || push!(narrowing, :lower => lower)
     end
-    decl_kwargs = haskey(supplied, :upper) ? (; lower, upper=supplied[:upper]) : (; lower)
-    declaration = _sb_prior_bound_keywords(target, InverseGaussian, decl_kwargs)
-    push!(stmts, Expr(:call, :~, target,
-        Expr(:call, brm_inverse_gaussian, declaration, mu, lambda)))
+    haskey(supplied, :upper) && push!(narrowing, :upper => supplied[:upper])
+    rhs = Expr(:call, brm_inverse_gaussian, mu, lambda)
+    isempty(narrowing) || insert!(rhs.args, 2,
+        _sb_prior_bound_keywords(target, InverseGaussian, (; narrowing...)))
+    push!(stmts, Expr(:call, :~, target, rhs))
     true
 end
 # Generic scalar prior via a Distributions.jl constructor on the RHS
@@ -9422,15 +9484,14 @@ _sb_sampling_backed!(stmts, data, key, backing, rhs; id_lookup, kwargs...) =
 
 # Link-transformed LHS: `log(err) ~ 1 + d`, `logit(p) ~ 1 + x`, etc.
 # Sample the linear predictor on the linked scale, then invert to recover the
-# response. Mirrors vimpl's `inverse(getf(lhs))` path — any link whose Julia
+# response through `inverse(getf(lhs))` — any link whose Julia
 # `inverse` is a function with a Stan-known name (log/exp/logit/logistic/
 # sqrt/square, ...) works; unknown links error at transpile time.
 #
 # Generic LHS-of-tilde call `f(NamedColumn) ~ rhs`: link-function path. `f`
 # is treated as a link whose `InverseFunctions.inverse(f)` we can map to a
 # Stan name. Per-`typeof(f)` overrides (`mi`, future `cens`/`trunc`, …) live
-# as separate methods of `_sb_sampling!`, mirroring vimpl's
-# `vbroadcasted(::ExprColumn{typeof(F)})` extension idiom.
+# as separate methods of `_sb_sampling!`, one per `ExprColumn{typeof(F)}`.
 _sb_sampling!(stmts, data, key, lhs::ExprColumn, rhs; id_lookup=_sb_empty_id_lookup(), obs_n=nothing, cv_groups=Set{Symbol}(), centered_groups=Set{Symbol}(), group_block_lookup=Dict(), effect_overrides=Dict{Symbol,Any}(), r2d2=_sb_empty_r2d2(), mod::Module=@__MODULE__) =
     _sb_sampling_through_link!(stmts, data, key, getf(lhs), only(getargs(lhs)), rhs;
                                id_lookup, obs_n, cv_groups, centered_groups,
@@ -9474,8 +9535,7 @@ end
 # `mi(y) ~ <family>(args...)` — response with missing values modelled
 # jointly. The inner symbol stays as the merged response so other formulas
 # can reference it (e.g. `loc2 = ... + b * y`). One method on the same
-# `_sb_sampling!` dispatch surface — same shape as `vbroadcasted(::ExprColumn{typeof(protect)})`
-# and friends in vimpl.
+# `_sb_sampling!` dispatch surface.
 _sb_sampling!(stmts, data, key, lhs::ExprColumn{typeof(mi)}, rhs; id_lookup=_sb_empty_id_lookup(), kwargs...) =
     _sb_emit_mi!(stmts, data, key, lhs, rhs)
 
@@ -11261,7 +11321,7 @@ _popcoef_show(t::NamedColumn) = string(name(t))
 _popcoef_show(t) = string(t)
 
 # Classify a predictor term as "direct" (allocates its own parameters, no
-# popefs multiplication). Matches vimpl: integer-backed NamedColumns are
+# popefs multiplication). Integer-backed NamedColumns are
 # treated as treatment-coded categoricals; floats go through popefs.
 # Value-narrowing chain: returns the underlying integer/categorical level
 # vector if `t` is a NamedColumn over a DataColumn over a categorical-shaped
@@ -11680,7 +11740,7 @@ function _sb_ranef_lowered_terms(raw_terms)
 end
 
 # Collected ranef handling. Terms that share a grouping symbol are merged into
-# a single correlated block (matches vimpl / brms: `(1 | g) + (x | g)` is the
+# a single correlated block (as in brms: `(1 | g) + (x | g)` is the
 # same as `(1 + x | g)`; `(1 | g) + (0 + x | g)` also collapses -- the two
 # terms' LKJ and tau parameters are shared by design). Per-group we build:
 #   Z_<target>_<g> = hcat(<col_1>, <col_2>, ...)   # n x K
@@ -11690,7 +11750,7 @@ end
 # `(... | rhs)` -> walker-side group descriptor. Bare NamedColumn and `gr(g)`
 # (no kwargs) both collapse to the inner NamedColumn (plain correlated block);
 # `gr(g; by=b)` returns `(group, by)` so the emitter allocates the stratified
-# `ranef_correlated_by` block. Mirrors vimpl's `_normalize_group`. Also extracts
+# `ranef_correlated_by` block. Also extracts
 # brms's `gr(g, id=<sym|str>)`, producing an id Symbol which the caller carries
 # alongside the group descriptor to drive cross-formula bucket coalescing.
 _sb_id_sym(::Nothing) = nothing
@@ -11763,7 +11823,7 @@ function _sb_ranef_parts(rt::ExprColumn)
 end
 
 # Per-group level of `g` -> stratum level of `by`. Errors if any group level
-# straddles multiple strata. Ported from vimpl's `_stratum_idx`.
+# straddles multiple strata.
 _sb_stratum_idx(g_idx::AbstractVector{Int}, b_idx::AbstractVector{Int},
                  gname, bname) =
     _brm_group_strata(g_idx, b_idx, maximum(g_idx), Symbol(gname), Symbol(bname))
@@ -14581,7 +14641,6 @@ end
 # no shared correlation. Expand into N separate `(t_i | g_nocor_i)` ran
 # terms with synthetic group names so the ran-term coalescer in
 # `_sb_emit_ranefs!` keeps them as separate (degenerate K=1) blocks.
-# Mirrors vimpl's `vmeta_sampling_rhs(::ExprColumn{typeof(doublepipe)})`.
 #
 # The intercept-suppressing `0` (`0 + x || g` == "uncorrelated slope x, no
 # intercept") is the standard formula-language drop-intercept marker and
@@ -14671,7 +14730,7 @@ _sb_pop_cols_expr!(cols, ::typeof(&), t, data, stmts, _pop_terms=(); kwargs...) 
 #   cont x cont -> 1 column (elementwise product)
 #   cont x cat  -> K-1 columns (a .* (c == k ? 1 : 0) for k=2..K)
 #   cat  x cat  -> (K1-1)*(K2-1) columns (product of level-k1, level-k2 dummies)
-# Reference level is always 1 (treatment coding; matches brms / vimpl).
+# Reference level is always 1 (treatment coding; matches brms).
 # Observed operands are materialised at walker time. Completed covariates
 # remain Stan expressions, multiplied by observed vectors or factor contrasts
 # before their column references enter the downstream design matrix.
@@ -18063,6 +18122,9 @@ _sb_scalar_expr(x::ExprColumn, data) = begin
     # consumed directly — `state = scan(...); y ~ f(state.population_total)`.
     if f === getproperty
         obj, field = getargs(x)      # field is a QuoteNode(:name)
+        # A component's returned field reads its private label.
+        read = _brm_component_field_read(x)
+        read === nothing || (field = QuoteNode(read.result))
         return Expr(:., _sb_scalar_expr(obj, data), field)
     elseif f === getindex
         obj = first(getargs(x))

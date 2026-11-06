@@ -86,7 +86,6 @@ makedocs(
         ],
         "Intermediate representation" => "intermediate-representation.md",
         "Scientific model descriptions" => "model-description.md",
-        "Turing backend" => "turing-backend.md",
         "Formulas and custom models: deck" => "feature-deck.md",
         "Gallery" => "gallery.md",
         "API" => "api.md",

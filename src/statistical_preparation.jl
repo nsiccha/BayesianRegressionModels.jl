@@ -1,7 +1,7 @@
 # Adopted from RKPPL smooth_bases.jl at e005f231c1feb93e4eb1c636f238ccb02fc1cb9e.
 # Input SHA256: 17be19680d104c30182cda3cd5cb4229a35d5e7cb6ace81af8fe76b4d033cd39.
 # Model preparation belongs to BRM; shared fitted spline primitives below are
-# the same ones used by BRM's Stan and Turing backends.
+# the same ones used by BRM's Stan backend.
 module StatisticalPreparation
 using LinearAlgebra, Statistics, SpecialFunctions
 const BRM = parentmodule(@__MODULE__)

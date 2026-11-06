@@ -1,6 +1,7 @@
 module BayesianRegressionModelsHTMXObjectsExt
 
 import BayesianRegressionModels as BRM
+import Markdown
 using HTMXObjects
 
 _role(role) = replace(string(role), '_' => ' ')
@@ -25,7 +26,7 @@ _shape_name(n) = n == 0 ? "Scalar" : n == 1 ? "Vector" : n == 2 ? "Matrix" : "$n
 function _rows(records)
     notes = any(r -> !isempty(r.detail), records)
     map(records) do r
-        row = (; quantity=string(r.name), role=_role(Val(r.role)), rank=_rank(r.rank),
+        row = (; quantity=_path_label(r.path), role=_role(Val(r.role)), rank=_rank(r.rank),
             shape=_shape(r.dims, r.rank))
         notes ? merge(row, (; note=r.detail)) : row
     end
@@ -57,7 +58,7 @@ function _documentation(callables)
     sort!(entries; by=first)
     isempty(entries) && return nothing
     SemanticSection("Callable documentation",
-        [SemanticDisclosure(name, SemanticProse(string(doc))) for (name, doc) in entries]...)
+        [SemanticDisclosure(name, SemanticProse(doc)) for (name, doc) in entries]...)
 end
 
 _path_label(path) = isempty(path) ? "Root" : join(
@@ -66,7 +67,7 @@ _path_label(path) = isempty(path) ? "Root" : join(
 function _authored_documentation(records)
     isempty(records) && return nothing
     SemanticSection("Authored documentation", [
-        SemanticSection(_path_label(doc.path), SemanticProse(doc.markdown),
+        SemanticSection(_path_label(doc.path), SemanticProse(Markdown.parse(doc.markdown)),
             SemanticDisclosure("Declaration and provenance",
                 SemanticCode(:julia, _source_text(doc.statement)),
                 SemanticFields(; path=repr(doc.path), owner=string(doc.owner),
@@ -196,16 +197,31 @@ function BRM.brm_model_view(component::BRM.BRMComponent; title="Model component"
         tabset(panels...; url_param=nothing, label=string(title, " details")))
 end
 
+_logical_role(output) = !(output.role in (:posterior_predictive, :pointwise_loglik, :membership))
+
+# The descriptor carriers of one declared quantity. A model-scope name matches
+# its logical outputs; a component-local name matches only the carriers its
+# exact call owns (`brm_output(d, name; submodel=call)`). A declaration made once
+# per plate iteration is never given a whole-model carrier's shape.
+function _descriptor_candidates(d, logical, row)
+    row.plate && return BRM.BRMOutput[]
+    length(row.path) == 1 && return get(logical, row.name, BRM.BRMOutput[])
+    call = row.path[1:end-1]
+    entries = [s for s in d.submodels if BRM._brm_submodel_address(s) == call]
+    length(entries) == 1 || return BRM.BRMOutput[]
+    filter(_logical_role, BRM._brm_submodel_carriers(d, only(entries), row.name))
+end
+
 function BRM.brm_model_view(d::BRM.BRMDescriptor; title="Model")
     facts = BRM._brm_view_facts(d.plan.parent)
     logical = Dict{Symbol,Vector{BRM.BRMOutput}}()
     for output in d.outputs
         isnothing(output.logical) && continue
-        output.role in (:posterior_predictive, :pointwise_loglik, :membership) && continue
+        _logical_role(output) || continue
         push!(get!(logical, output.logical, BRM.BRMOutput[]), output)
     end
     quantities = map(facts.quantities) do row
-        candidates = get(logical, row.name, BRM.BRMOutput[])
+        candidates = _descriptor_candidates(d, logical, row)
         length(candidates) == 1 && !isnothing(only(candidates).dims) || return row
         dims = only(candidates).dims
         merge(row, (; rank=length(dims), dims))
@@ -246,11 +262,13 @@ function BRM.brm_model_view(rk::BRM.RKBRMI; title="Model")
                  "the retained layout describes a different binding. Viewing does not bind " *
                  "or evaluate the replay to infer a new layout.")
     end
-    declared = Set(row.name for row in facts.quantities if row.role === :parameter)
+    # Exact authored paths: a component-local `(:left, :b)` enriches only its own
+    # row. A per-iteration declaration keeps its one-iteration rank.
+    declared = Set(row.path for row in facts.quantities if row.role === :parameter && !row.plate)
     bypath = Dict(row.path => row for row in parameters)
     quantities = map(facts.quantities) do row
-        metadata = get(bypath, (row.name,), nothing)
-        row.role === :parameter && !isnothing(metadata) || return row
+        metadata = get(bypath, row.path, nothing)
+        row.path in declared && !isnothing(metadata) || return row
         merge(row, (; rank=metadata.rank, dims=metadata.shape))
     end
     facts = merge(facts, (; quantities))
@@ -258,8 +276,7 @@ function BRM.brm_model_view(rk::BRM.RKBRMI; title="Model")
     # (:child, :b) is different from (Symbol("child.b"),).
     rows = [(
         parameter_path=repr(p.path),
-        role=length(p.path) == 1 && only(p.path) in declared ?
-            "Declared parameter" : "Backend parameter",
+        role=p.path in declared ? "Declared parameter" : "Backend parameter",
         rank=_rank(p.rank), shape=_shape(p.shape, p.rank),
         free_coordinates=p.ncoordinates,
     ) for p in parameters]

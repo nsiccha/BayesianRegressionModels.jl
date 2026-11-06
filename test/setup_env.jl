@@ -53,10 +53,10 @@ const TESTENV = @__DIR__
 # name => (github url, pinned commit)   — comment records the branch the commit
 # is on, for humans; the pin itself is the full SHA and needs no branch.
 const PINS = [
+    ("ReparametrizableDistributions", "https://github.com/nsiccha/ReparametrizableDistributions.jl.git", "8f7d382df700d3780ed31d093bc4983d3734a6c6"),  # 0.3.0: WarmupHMC dependency; BRM no longer depends on this directly
     ("PowerScaling", "https://github.com/nsiccha/PowerScaling.jl.git", "8d27c83f6928781a39c99c31fd3d528b50ef2dad"),  # 0.1.0: generic power-scaling sensitivity on PSIS.jl
-    ("ReparametrizableDistributions", "https://github.com/nsiccha/ReparametrizableDistributions.jl.git", "8f7d382df700d3780ed31d093bc4983d3734a6c6"),  # 0.3.0: shared parameter views, Cholesky and simplex transforms
     ("HTMX", "https://github.com/nsiccha/HTMX.jl.git", "0b8dc2f94e879bf31237bd28e751cf2ebc8d95f6"),
-    ("HTMXObjects", "https://github.com/nsiccha/HTMXObjects.jl.git", "a40208264286e176b4af92663060fbdbe8f20047"), # 0.1.60: reusable semantic model views; code-block PDF tagging (BRM's floor since 0.2.183)
+    ("HTMXObjects", "https://github.com/nsiccha/HTMXObjects.jl.git", "ee46e8d6bd381c8b066f3b26afa7ea3336e23146"), # 0.1.65: readable plain-text views; includes 0.1.62 documentation projection
     ("DynamicObjects", "https://github.com/nsiccha/DynamicObjects.jl.git", "c84047be45cd2bba8a1d02660af9408d4cdf58f4"),
     ("TreeArrays", "https://github.com/nsiccha/TreeArrays.jl.git", "53cfd1b17ee4d1b726dcecfe151458ae41bd20a8"),
     ("AlgebraOfVega", "https://github.com/nsiccha/AlgebraOfVega.jl.git", "73695d5d563074bfd9ab1f98debf2ebe38d7bd00"),
@@ -79,7 +79,13 @@ const PINS = [
     # 0.2.24 predicts censored responses bound by the omitted response itself.
     # StanBlocks 0.2.25 preserves component-call keyword labels inside plates.
     # StanBlocks 0.2.26 preserves EachCol/EachRow at ordinary helper boundaries.
-    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "ea1d64f0c691092b9d4e7d8ad03ab83727671264"),  # devibe: `restricted(family, args...; lower, upper)` declares the bounds and keeps the plain kernel (566bbc0f, StanBlocks 0.2.7, snag in-slic-declare-996328e0), which SBBRMI emits for every prior bound; a `truncated` draw succeeds whatever mass its window holds: after 100 misses it inverts the base CDF on the window (9a4fb3a6, StanBlocks 0.2.6, snag truncated-rng-re-bd555cae), which BRM's omitted truncated responses and `_gen` draws call; `rv[idx]` selects groups of a ragged value and `sum(rv)` adds its groups elementwise (ffbaff09, StanBlocks 0.2.2, snag selecting-severa-027a8191), which BRM's model-scope reads of a ragged plate output pass through; Stan's `sum_to_zero_constrain`/`_unconstrain`/`_jacobian` trace (8e57a83, snag sum-to-zero-cons-90a72024) and `head`/`tail`/`reverse` (359844e, snag stan-vector-buil-5792b9e5), which `T::shares(total)` cell latents call, both in f5e4650; a `Vector{Matrix}` data value ingests as a `RaggedMatrix` and `X[g]` reads the g-th matrix in a plate cell (c9504e99, snag ragged-matrix-da-163255e9); a plate cell may bind a matrix local of fixed or per-cell size (a57951eb, snag binding-a-per-ce-e16efa8d); a plate's Stan names follow from each value's own name, without the `__pl_mem_1` suffix (1d93a65), and `stan_interface` / `stan_data_json` describe the program (dc3f713), both in fd91d0c; tuple descriptor entries carry their components in `fields` (785edf4); ragged sizes are reported derived (9118764); a values-free `maybecv(:y)` marks an observation with no values as predicted given a fit (c4671eb, snag held-out-observa-58a2eb13); shared scan arguments read once per step, linear in series length (b97fc5a6); Stan's vectorised builtins (`fmax`, `fmin`, …) evaluate elementwise in the Julia layer, so a per-axis `fmax(0.0, lo)` bound reads one value per coordinate (c7293b88); descriptor inputs/outputs carry `constraint_values`, their bounds evaluated against the bound data (b233afbc); a `ValueFamily` as the base family of `weighted`/`truncated`/`censored`/`interval_censored` with `lcdf=`/`lccdf=` companions (94e414bb); descriptor outputs carry their value shape as `dims`; non-finite literals render as Stan infinity builtins; `weighted` over censored/truncated/interval_censored; an exchangeable ordered prior re-draws as the sorted iid draw; observed scans and per-cell scan lengths (82a954da), also through a do-cell parameter that shadows its data name (4ee6e0e8); integer step locals in nested scans (2f5b6203); a latent or observed `@scan` inside a called `@slic` submodel (e67bc314), observing a plate cell's group (d3483f11); `interval_censored`'s interval by keyword and unknown combinator keywords refused (897557c); typed `=` in `stan_descriptor` (204e5a7)
+    # StanBlocks 0.2.30 (904e839a) makes a number passed to `stan_call` a data
+    # literal, so `brm_von_mises`'s argument-dependent `autokwargs` support
+    # `[mu - pi, mu + pi]` has a qualifier `stan_descriptor` reads (snag
+    # autokwargs-suppo-412811f6).
+    # StanBlocks 0.2.31 collects tuple-valued plate cells as array[N] tuple(...),
+    # so a component called in a cell may return named values (b28164c).
+    ("StanBlocks",        "https://github.com/nsiccha/StanBlocks.jl.git",        "d9396ae6c66c7cb44d641989573b7008154de6c5"),  # devibe: `restricted(family, args...; lower, upper)` declares the bounds and keeps the plain kernel (566bbc0f, StanBlocks 0.2.7, snag in-slic-declare-996328e0), which SBBRMI emits for every prior bound; a `truncated` draw succeeds whatever mass its window holds: after 100 misses it inverts the base CDF on the window (9a4fb3a6, StanBlocks 0.2.6, snag truncated-rng-re-bd555cae), which BRM's omitted truncated responses and `_gen` draws call; `rv[idx]` selects groups of a ragged value and `sum(rv)` adds its groups elementwise (ffbaff09, StanBlocks 0.2.2, snag selecting-severa-027a8191), which BRM's model-scope reads of a ragged plate output pass through; Stan's `sum_to_zero_constrain`/`_unconstrain`/`_jacobian` trace (8e57a83, snag sum-to-zero-cons-90a72024) and `head`/`tail`/`reverse` (359844e, snag stan-vector-buil-5792b9e5), which `T::shares(total)` cell latents call, both in f5e4650; a `Vector{Matrix}` data value ingests as a `RaggedMatrix` and `X[g]` reads the g-th matrix in a plate cell (c9504e99, snag ragged-matrix-da-163255e9); a plate cell may bind a matrix local of fixed or per-cell size (a57951eb, snag binding-a-per-ce-e16efa8d); a plate's Stan names follow from each value's own name, without the `__pl_mem_1` suffix (1d93a65), and `stan_interface` / `stan_data_json` describe the program (dc3f713), both in fd91d0c; tuple descriptor entries carry their components in `fields` (785edf4); ragged sizes are reported derived (9118764); a values-free `maybecv(:y)` marks an observation with no values as predicted given a fit (c4671eb, snag held-out-observa-58a2eb13); shared scan arguments read once per step, linear in series length (b97fc5a6); Stan's vectorised builtins (`fmax`, `fmin`, …) evaluate elementwise in the Julia layer, so a per-axis `fmax(0.0, lo)` bound reads one value per coordinate (c7293b88); descriptor inputs/outputs carry `constraint_values`, their bounds evaluated against the bound data (b233afbc); a `ValueFamily` as the base family of `weighted`/`truncated`/`censored`/`interval_censored` with `lcdf=`/`lccdf=` companions (94e414bb); descriptor outputs carry their value shape as `dims`; non-finite literals render as Stan infinity builtins; `weighted` over censored/truncated/interval_censored; an exchangeable ordered prior re-draws as the sorted iid draw; observed scans and per-cell scan lengths (82a954da), also through a do-cell parameter that shadows its data name (4ee6e0e8); integer step locals in nested scans (2f5b6203); a latent or observed `@scan` inside a called `@slic` submodel (e67bc314), observing a plate cell's group (d3483f11); `interval_censored`'s interval by keyword and unknown combinator keywords refused (897557c); typed `=` in `stan_descriptor` (204e5a7)
     # Cooperative interruption used by BRM's progress hooks.
     # Treebars 0.1.5 satisfies the pinned ReactiveKernelsPPL extension floor.
     # Treebars 0.1.5: nested progress used by recoverable adaptive SMC pilots.
@@ -306,6 +312,8 @@ const PINS = [
     # types when preparing `partitioned` cell factors, so sparse Laplace
     # sum factors over shared model-scope helpers stay strict
     # (RK snag partitioned-cell-717ab7c7).
+    # RKPPL 0.1.72 reports a vector simplex or ordered prior's own block
+    # (plus sampled hyperparents) as its authored-factor support.
     # b5740888 (RKPPL 0.1.71) sizes a data-free replay from frozen whole
     # values, such as a gmrf support fitted from an indexed fit-role input.
     # fbf65b46 (RK 0.1.65 / RKPPL 0.1.74) deep-copies prepared queries whose
@@ -322,6 +330,8 @@ const PINS = [
     # 0ee20c70 (RKPPL 0.1.93): authored local and reusable-definition docs.
     # Includes native row-dependent/shared mixture probabilities (0.1.90).
     # Also contains the adaptive pilot lifecycle introduced in RKPPL 0.1.91.
+    # c1f175d7 (RK 0.1.84 / PPL 0.1.96): compact authored-query batches
+    # share binding validation and exemplars; event inventory avoids full copies.
     # a9a7e9a2 (RKPPL 0.1.97): bound-data LKJ dimensions in reusable definitions.
     # Also contains RK 0.1.82 (b08cb894), which retains live broadcast fusion
     # after data binding, so batched vector-cell readers reuse their result
@@ -329,10 +339,16 @@ const PINS = [
     # b0ffcdc1 (RKPPL 0.1.98, on RK main through 6ea1d4ca) normalizes
     # generated-module names in SMC checkpoint identities, so a fresh process
     # resumes an adaptive pilot of an RKBRMI model whose law is an emitted
-    # binding (a gmrf field). It is a9a7e9a2 plus that fix only: main from
-    # 8e67ee82 breaks the selective carried-window route
+    # binding (a gmrf field). df3eb8872 also fixes capture footprints through
+    # row-computed index lanes in selective carried-window tuning
     # (test/smc_window_selective_api.jl; RK snag selective-carrie-1aa69e67).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "b0ffcdc1d915fc111988ddb6bceca8dabeede643"),
+    # db6bca825 (RK 0.1.86 / RKPPL 0.1.99) includes both fixes and the
+    # follow-up scalar-observation gather-demand repair. Pin by SHA: these
+    # versions also label earlier commits without the footprint repair.
+    # cb3b33bd (RKPPL 0.1.100) adds opt-in independent adaptive grid pilots
+    # (`tune_smc(...; grid_start=:independent)`) and the production worker
+    # override `resume_smc(...; nthreads)`, which BRM forwards.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "cb3b33bd08da2b13c9105eb75a6c15473b72d467"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
@@ -390,7 +406,15 @@ const PINS = [
     # 842cbefe: without it, a forced bounded ODL plan's Forward over Reverse
     # cell HVPs stop on "Mismatch codegen type" through a non-inlined
     # `Base.unalias` (julia-1-10-unali-c91b1f15).
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "d31899704b6f5eab6e3843c9517a5486d2139740"),  # dogfood
+    # d3189970 also contains 0fa85df3's 74abe90/7ac58eb: ordinary Reverse of a mixed
+    # integer/Float64 select and of a guarded PHI joining scalar stack storage
+    # with a boxed broadcast wrapper, which an SVI unit's dormant scalar/vector
+    # branch reaches (ReactiveKernels snag brm-retained-poi-a68d4412).
+    # b2bb4cb6 / libEnzyme f392eba5 contains d3189970 and caches a value that
+    # cannot change inside a loop once per loop entry (Enzyme snag
+    # reverse-generato-03b2003d), so a multiresolution gmrf reader's generator
+    # sum no longer tapes its captured arrays once per basis term.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "b2bb4cb628cf5f5ac4a897d4b7d83fcd2b5df97c"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also
@@ -452,18 +476,10 @@ function main()
     Pkg.develop(PackageSpec[
         PackageSpec(path=path) for (_name, path) in sort!(collect(paths))
     ])
-    # Older Julia 1.10 runtimes need a serial build of the sibling Turing
-    # extensions before the normal parallel pass. Julia 1.10.12 includes the
-    # loadable_exts fix and uses ordinary parallel precompilation directly.
     Pkg.instantiate(; allow_autoprecomp=false)
     # Before the first precompile, so Enzyme_jll builds against the declared
     # libEnzyme.
     apply_dogfood_libenzyme()
-    if v"1.10" <= VERSION < v"1.10.12"
-        withenv("JULIA_NUM_PRECOMPILE_TASKS" => "1") do
-            Pkg.precompile(["Pathfinder", "Turing"])
-        end
-    end
     Pkg.precompile()
     return nothing
 end

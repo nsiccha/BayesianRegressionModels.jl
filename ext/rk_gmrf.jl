@@ -123,3 +123,51 @@ function ReactiveKernelsPPL.sampling_geometry(::Type{BRM._BRMGMRFVecchiaLaw}, ar
 end
 ReactiveKernelsPPL.sampling_distribution_graph(::Type{BRM._BRMGMRFVecchiaLaw}, args::Tuple) =
     _gmrf_vecchia_density_graph
+
+ReactiveKernels.@kernel function _gmrf_multiresolution_rule_graph(field::Vector{Float64},
+        spatial_length::Float64, temporal_length::Float64, L::Matrix{Float64},
+        geometry, density_bar::Float64)
+    density::Float64 = BRM._brm_multiresolution_density(field, temporal_length, L, geometry).value
+    gradient = BRM._brm_multiresolution_density(field, temporal_length, L, geometry; derivative=true)
+    field_bar::Vector{Float64} = density_bar .* gradient.field
+    spatial_length_bar::Float64 = 0.0
+    temporal_length_bar::Float64 = density_bar * gradient.temporal_length
+    L_bar::Matrix{Float64} = density_bar .* gradient.L
+    geometry_bar = nothing
+    return density, field_bar, spatial_length_bar, temporal_length_bar, L_bar, geometry_bar
+end
+const _gmrf_multiresolution_density = ReactiveKernels.derivative_rule(
+    _gmrf_multiresolution_rule_graph; primal=:density, covector=:density_bar,
+    cotangents=(field=:field_bar, spatial_length=:spatial_length_bar,
+        temporal_length=:temporal_length_bar, L=:L_bar, geometry=:geometry_bar),
+    name=:brm_gmrf_multiresolution_density)
+ReactiveKernels.@kernel function _gmrf_multiresolution_density_graph(field, spatial_length,
+        temporal_length, L, geometry)
+    return _gmrf_multiresolution_density(field, spatial_length, temporal_length, L, geometry)
+end
+function ReactiveKernelsPPL.sampling_geometry(::Type{BRM._BRMGMRFMultiresolutionLaw}, args, shape)
+    dimension = :($(args[4]).ncoordinates)
+    dimensions = isempty(shape) ? (dimension,) : shape
+    ParameterGeometry(dimensions, dimension; support=:real,
+        constrain=_gmrf_coordinates, unconstrain=_gmrf_coordinates, logjac=_gmrf_logjac)
+end
+ReactiveKernelsPPL.sampling_distribution_graph(::Type{BRM._BRMGMRFMultiresolutionLaw}, args::Tuple) =
+    _gmrf_multiresolution_density_graph
+
+# Only the spatial length is differentiated here. The sparse triangular
+# recurrence's analytic derivative avoids an archive-sized reverse tape.
+ReactiveKernels.@kernel function _gmrf_multiresolution_basis_rule(spatial_length::Float64,
+        geometry, weights_bar::Vector{Float64})
+    weights::Vector{Float64} = BRM._brm_multiresolution_basis(geometry.spatial, spatial_length).weights
+    partial::Vector{Float64} = BRM._brm_multiresolution_basis(
+        geometry.spatial, spatial_length; derivative=true).derivative
+    spatial_length_bar::Float64 = sum(weights_bar .* partial)
+    geometry_bar = nothing
+    return weights, spatial_length_bar, geometry_bar
+end
+const _gmrf_multiresolution_basis = ReactiveKernels.derivative_rule(
+    _gmrf_multiresolution_basis_rule; primal=:weights, covector=:weights_bar,
+    cotangents=(spatial_length=:spatial_length_bar, geometry=:geometry_bar),
+    name=:brm_gmrf_multiresolution_basis)
+
+BRM._rk_gmrf_multiresolution_basis() = _gmrf_multiresolution_basis

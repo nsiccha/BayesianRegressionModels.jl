@@ -252,16 +252,6 @@ end
     end
 end
 
-@stestset "VBRMI reads the per-group field" begin
-    data = indexed_data()
-    v = VBRMI(IT.known_scale(data))
-    twin = VBRMI(IT.known_scale_twin(twin_data(zscored(AGE)[SUBJECT])))
-    n = LogDensityProblems.dimension(v)
-    @test n == LogDensityProblems.dimension(twin)
-    u = collect(range(-0.4, 0.4; length=n))
-    @test LogDensityProblems.logdensity(v, u) ≈ LogDensityProblems.logdensity(twin, u)
-end
-
 @stestset "descriptor and description" begin
     data = indexed_data()
     d = brm_descriptor(IT.standardized, data; mod=IT, name=:indexed)
@@ -297,7 +287,7 @@ end
 end
 
 # refused: a keyword on `center`/`zscale`/`standardize` used to be dropped on
-# SBBRMI and VBRMI, silently keeping the row-level fit; the per-group fit is
+# SBBRMI, silently keeping the row-level fit; the per-group fit is
 # spelled `standardize(x)[g]` (snag `standardize-equa-a92391f2`, decision `0siic7u`).
 @stestset "a keyword on a transform is refused, never ignored" begin
     data = (; subject=SUBJECT, age=AGE[SUBJECT], x=X, y=Y, site=SITE)
@@ -306,7 +296,6 @@ end
     @test_throws message sbfit(IT.keyword, data)
     @test_throws message sbfit(IT.keyword_slope, data; total_groups=())
     @test_throws message RKBRMI(IT.keyword(data))
-    @test_throws message VBRMI(IT.keyword(data))
     @test_throws "standardize(x)[group]" sbfit(IT.keyword, data; total_groups=())
 end
 

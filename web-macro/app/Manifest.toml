@@ -187,7 +187,7 @@ uuid = "39de3d68-74b9-583c-8d2d-e117c070f3a9"
 version = "0.4.8"
 
 [[deps.BRMMacroWeb]]
-deps = ["AlgebraOfGraphics", "AlgebraOfVega", "BayesianRegressionModels", "BridgeStan", "CategoricalArrays", "Chairmarks", "DataFrames", "Distributions", "DynamicObjects", "ElasticArrays", "FiniteDifferences", "HTMX", "HTMXObjects", "InverseFunctions", "JSON", "LinearAlgebra", "LogDensityProblems", "LogExpFunctions", "OrderedCollections", "Random", "SpecialFunctions", "StanBlocks", "StanLogDensityProblems", "Statistics", "TestModules", "Treebars", "WarmupHMC"]
+deps = ["AlgebraOfGraphics", "AlgebraOfVega", "BayesianRegressionModels", "BridgeStan", "CategoricalArrays", "DataFrames", "Distributions", "DynamicObjects", "HTMX", "HTMXObjects", "InverseFunctions", "JSON", "LinearAlgebra", "LogDensityProblems", "LogExpFunctions", "OrderedCollections", "Random", "SpecialFunctions", "StanBlocks", "StanLogDensityProblems", "Statistics", "TestModules", "Treebars", "WarmupHMC"]
 path = ".."
 uuid = "cd55decf-6be8-4ea5-907a-b2dc35e4cc14"
 version = "0.1.0"
@@ -228,10 +228,10 @@ uuid = "9718e550-a3fa-408a-8086-8db961cd8217"
 version = "0.1.1"
 
 [[deps.BayesianRegressionModels]]
-deps = ["Bessels", "BridgeStan", "CategoricalArrays", "DataStructures", "Distributions", "ElasticArrays", "InverseFunctions", "KLU", "Krylov", "KrylovKit", "Libdl", "LimitedLDLFactorizations", "LinearAlgebra", "LogDensityProblems", "LogExpFunctions", "MUMPS", "OrderedCollections", "PowerScaling", "Random", "ReparametrizableDistributions", "RuntimeGeneratedFunctions", "SHA", "SelectedInversion", "Serialization", "SparseArrays", "SpecialFunctions", "StanBlocks", "StaticArrays", "Statistics", "StatsBase", "StatsFuns"]
+deps = ["Bessels", "BridgeStan", "CategoricalArrays", "DataStructures", "Distributions", "InverseFunctions", "KLU", "Krylov", "KrylovKit", "Libdl", "LimitedLDLFactorizations", "LinearAlgebra", "LogDensityProblems", "LogExpFunctions", "MUMPS", "OrderedCollections", "PowerScaling", "Random", "SHA", "SelectedInversion", "Serialization", "SparseArrays", "SpecialFunctions", "StanBlocks", "StaticArrays", "Statistics", "StatsBase", "StatsFuns"]
 path = "../.."
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
-version = "0.2.179"
+version = "0.2.188"
 
     [deps.BayesianRegressionModels.extensions]
     BayesianRegressionModelsAlgebraOfVegaExt = "AlgebraOfVega"
@@ -245,8 +245,6 @@ version = "0.2.179"
     BayesianRegressionModelsSMCExt = ["ReactiveKernels", "ReactiveKernelsPPL", "SequentialMonteCarlo", "WarmupHMC", "Enzyme", "ADTypes", "DifferentiationInterface"]
     BayesianRegressionModelsTreeArraysExt = "TreeArrays"
     BayesianRegressionModelsTreebarsExt = "Treebars"
-    BayesianRegressionModelsTuringExt = "Turing"
-    BayesianRegressionModelsTuringWarmupHMCExt = ["Turing", "WarmupHMC"]
     BayesianRegressionModelsWarmupHMCEnzymeExt = ["WarmupHMC", "Enzyme"]
     BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 
@@ -264,7 +262,6 @@ version = "0.2.179"
     SequentialMonteCarlo = "8c675823-c5d5-50f8-acb2-29aff48dfc1d"
     TreeArrays = "5daaa025-ac78-4e9a-8805-78946e672e43"
     Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
-    Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
     WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [[deps.Bessels]]
@@ -346,16 +343,6 @@ weakdeps = ["SparseArrays"]
 
     [deps.ChainRulesCore.extensions]
     ChainRulesCoreSparseArraysExt = "SparseArrays"
-
-[[deps.Chairmarks]]
-deps = ["Printf", "Random"]
-git-tree-sha1 = "9a49491e67e7a4d6f885c43d00bb101e6e5a434b"
-uuid = "0ca39b1e-fe0b-4e98-acfc-b1656634c4de"
-version = "1.3.1"
-weakdeps = ["Statistics"]
-
-    [deps.Chairmarks.extensions]
-    StatisticsChairmarksExt = ["Statistics"]
 
 [[deps.CodecZlib]]
 deps = ["TranscodingStreams", "Zlib_jll"]
@@ -822,12 +809,6 @@ version = "2.32.0"
     SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
     StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
-[[deps.FiniteDifferences]]
-deps = ["ChainRulesCore", "LinearAlgebra", "Printf", "Random", "Richardson", "SparseArrays", "StaticArrays"]
-git-tree-sha1 = "9321ce3c7720252efe0d2a8046c9a4498a5c9880"
-uuid = "26cc04aa-876d-5657-8c51-4c34ba976000"
-version = "0.12.34"
-
 [[deps.FixedPointNumbers]]
 deps = ["Random", "Statistics"]
 git-tree-sha1 = "59af96b98217c6ef4ae0dfe065ac7c20831d1a84"
@@ -998,11 +979,11 @@ version = "1.1.0"
 
 [[deps.HTMXObjects]]
 deps = ["CodecZlib", "CommonMark", "Dates", "DynamicObjects", "HTMX", "HTTP", "JSON", "LazyArtifacts", "LibGit2", "MIMEs", "Random", "ScopedValues", "Sockets", "Tables"]
-git-tree-sha1 = "b2dba65cb6799b7dac694c3dc3dcadcec0b86f31"
-repo-rev = "1de5b7aa45bc8ed8e7cf3db86c7d376dd5e5c04e"
+git-tree-sha1 = "9a7d49b30fbc3ddd230d6199d35c4bebe5d3baf4"
+repo-rev = "5105564146a3147d7429d3183f1c9744c766fc79"
 repo-url = "https://github.com/nsiccha/HTMXObjects.jl.git"
 uuid = "b12ef442-5798-4353-80f3-9562b03a0cb6"
-version = "0.1.58"
+version = "0.1.61"
 weakdeps = ["Treebars"]
 
     [deps.HTMXObjects.extensions]
@@ -2075,12 +2056,6 @@ deps = ["UUIDs"]
 git-tree-sha1 = "62389eeff14780bfe55195b7204c0d8738436d64"
 uuid = "ae029012-a4dd-5104-9daa-d747884805df"
 version = "1.3.1"
-
-[[deps.Richardson]]
-deps = ["LinearAlgebra"]
-git-tree-sha1 = "f153282474ad4dc2d3bdebcce810a5e40e757924"
-uuid = "708f8203-808e-40c0-ba2d-98a6953ed40d"
-version = "1.4.3"
 
 [[deps.Rmath]]
 deps = ["Random", "Rmath_jll"]

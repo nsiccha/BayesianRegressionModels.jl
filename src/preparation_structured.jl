@@ -37,7 +37,7 @@ _brm_structured_group_name(gspec, term) =
 
 function _brm_native_structured_effect end
 function _brm_native_structured_effect(term, _block, _field)
-    error("Turing backend: structured term `$(nameof(term.callable))` has no " *
+    error("RKBRMI: structured term `$(nameof(term.callable))` has no " *
           "native Julia implementation; define `_brm_native_structured_effect` " *
           "for this prepared callable")
 end

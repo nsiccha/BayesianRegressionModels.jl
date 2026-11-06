@@ -1,4 +1,4 @@
-using Test, BayesianRegressionModels, Distributions, Turing, LogDensityProblems
+using Test, BayesianRegressionModels, Distributions, LogDensityProblems
 import StanBlocks
 const BRM = BayesianRegressionModels
 const BridgeStan = StanBlocks.BridgeStan
@@ -22,7 +22,6 @@ const BridgeStan = StanBlocks.BridgeStan
         mkpath(cache)
         problem = brm_execute(descriptor, :instantiate;
             path=joinpath(cache, string(descriptor.id) * ".stan"))
-        backend = TuringBRMI(builder(data))
         @test LogDensityProblems.dimension(problem) == 2
         for raw in ([-0.3, 0.1], [0.4, -0.5])
             names = BridgeStan.param_names(problem.model)
@@ -34,7 +33,6 @@ const BridgeStan = StanBlocks.BridgeStan
             expected = logpdf(Normal(), parameters.location) +
                 logpdf(Normal(0.2, 0.7), parameters.bounded) +
                 sum(logpdf.(Normal(mean, 0.8), data.y))
-            @test Turing.logjoint(backend.model, parameters) ≈ expected
             @test BridgeStan.log_density(problem.model, raw; propto=false, jacobian=false) ≈ expected
         end
     end

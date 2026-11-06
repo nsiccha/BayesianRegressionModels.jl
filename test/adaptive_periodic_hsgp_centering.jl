@@ -2,8 +2,7 @@
 # adaptive centering (snag adaptive-centeri-96a06b1f).
 #
 # Run: julia --project=test test/adaptive_periodic_hsgp_centering.jl
-# (root-env deps only, so `julia --project=.` runs it too, minus the
-# Turing-ext parity testset, which skips without the Turing extension.)
+# (root-env deps only, so `julia --project=.` runs it too.)
 #
 # A model mixing an ordinary random-effect block with a periodic HSGP used to
 # refuse the whole `adaptive_centering_problem` wrapper: the HSGP resolver
@@ -134,18 +133,5 @@ end
         a = inv(rho^2)
         expected = sigma * sqrt(2 * besselix(j, a))
         @test exp(BRM._brm_hsgp_periodic_log_scale(j, sigma, rho)) ≈ expected rtol=1e-14
-    end
-end
-
-@testset "Turing ext log spectrum delegates to the shared helper" begin
-    ext = Base.get_extension(BRM, :BayesianRegressionModelsTuringExt)
-    if isnothing(ext)
-        @test_skip "Turing extension not loaded (run under --project=test)"
-    else
-        state = (; cov=:periodic, harmonics=[1.0, 2.0, 1.0, 2.0])
-        got = ext._brm_hsgp_log_sqrt_spd(state, 0.7, 52.0)
-        expected = [BRM._brm_hsgp_periodic_log_scale(j, 0.7, 52.0)
-                    for j in state.harmonics]
-        @test got ≈ expected atol=0
     end
 end

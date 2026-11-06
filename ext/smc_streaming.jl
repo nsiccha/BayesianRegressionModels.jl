@@ -176,14 +176,14 @@ the new target; it does not replace the carried posterior in that target.
 function BRM.brm_smc_tune(carried::BRM.BRMSMCCarriedReference, model::BRM.BRMI;
         rng, init, reference=nothing, temperatures=nothing, pilot_steps=64,
         pilot=nothing, max_reflections=nothing, recording_target=nothing,
-        pilot_evaluations=nothing, reference_inflation=nothing,
+        pilot_evaluations=nothing, reference_inflation=nothing, grid_start=nothing,
         progress=nothing, callback=nothing, checkpoint_dir=nothing, resume=false,
         overwrite=false,
         options=PPL.SMCOptions(), coordinates=nothing,
         ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
     _, _, target = prepare_window(deepcopy(carried), model, ad_backend; coordinates)
     controls = tuning_controls(; temperatures, pilot, max_reflections,
-        recording_target, pilot_evaluations, reference_inflation)
+        recording_target, pilot_evaluations, reference_inflation, grid_start)
     PPL.tune_smc(target; rng, init, reference, controls..., pilot_steps, options,
         progress, callback, checkpoint_dir, resume, overwrite)
 end
@@ -246,7 +246,7 @@ function BRM.brm_smc_checkpoint(fit::BRM.BRMSMCWindowFit)
 end
 
 function BRM.brm_smc_resume(model::BRM.BRMI, checkpoint;
-        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+        nthreads=nothing, ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
     checkpoint.format == 2 && checkpoint.kind === :window || throw(ArgumentError(
         "BRM SMC: a window declaration requires a window checkpoint"))
     previous = deepcopy(checkpoint.previous)
@@ -256,6 +256,6 @@ function BRM.brm_smc_resume(model::BRM.BRMI, checkpoint;
     rk, id, target = prepare_window(previous, model, ad_backend; coordinates)
     id == checkpoint.binding_id || throw(ArgumentError(
         "BRM SMC: the checkpoint's window data has changed"))
-    state = PPL.resume_smc(target, checkpoint.state)
+    state = PPL.resume_smc(target, checkpoint.state; nthreads)
     BRM.BRMSMCWindowFit(rk, previous, state, ad_backend, previous.model_id, id, coordinates)
 end

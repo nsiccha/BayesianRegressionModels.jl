@@ -11,7 +11,9 @@
 # 3,600-area grid too, with orthonormal draws and a bounded diagonally scaled
 # condition number there; the separated density against the default lowering's
 # at the same field (a constant difference); each cell's reads, logarithmic in
-# its unit (BRM 0.2.74, design decisions 1g11z26 and 1y5br8u);
+# its unit (BRM 0.2.74, design decisions 1g11z26 and 1y5br8u), and of the
+# shared coordinates `w` only the rows its shared values read (BRM 0.2.178,
+# todo 1d3kiv7);
 # the view's roles and owners; lockstep and unit-problem densities against the
 # full RK density, for ICAR and BYM2; the coordinate transport to SBBRMI's field
 # (points both ways, densities, gradients) and a full Stan start from NLME
@@ -482,6 +484,47 @@ end
     pattern = first(BRM._brm_nlme_eta_sparsity(m))
     @info "η pattern" size=size(pattern, 1) nonzeros=count(pattern)
     @test count(pattern) < size(pattern, 1)^2
+end
+
+@stestset "a cell reads only the shared coordinates its areas' shared values depend on" begin
+    # Up to BRM 0.2.177 the shared values `x` came from `w` through an opaque
+    # map with no row form, so every cell read all of a field's `w` (453 of an
+    # atlas cell's reads; todo 1d3kiv7). From 0.2.178 each `x` entry is a
+    # weighted gather row of `w`, so a cell reads only the `w` rows of the
+    # shared values its areas read. The structural footprint, dormant reads
+    # included, covers what each cell's value measurably depends on. For the
+    # observations it is exactly that dependence, so computing `x` whole again
+    # fails here. A unit term may read more: an edge inside one piece cancels
+    # its shared mean, which structural support keeps.
+    for side in (8, 16)
+        rk = RKBRMI(sep_icar(grid_data(side)); car_units=:subject)
+        m = brm_nlme_model(rk; ad_backend=NLME_AD)
+        w = findall(in(Set(shared_names(rk))), coordinate_names(rk))
+        point = m.unit .+ 0.1 .* randn(Xoshiro(side), length(m.unit))
+        observed = false
+        for cell in m.cell_query
+            footprint = BRM._rk_spl_cell_footprint(cell.query)
+            reads, depends = Vector{Int}[], Vector{Int}[]
+            for p in Iterators.flatten(cell.positions)
+                push!(reads, sort!(intersect(BRM._rk_spl_cell_reads(footprint, point, p), w)))
+                value = BRM._rk_nlme_cell_value(cell.query, point, p)
+                push!(depends, filter(w) do k
+                    moved = copy(point)
+                    moved[k] += 1e-3
+                    abs(BRM._rk_nlme_cell_value(cell.query, moved, p) - value) > 1e-12
+                end)
+            end
+            @test all(issubset.(depends, reads))
+            # On average a cell reads under half of `w`; only an area whose
+            # mean is a component's dependent last shared value reads all of it.
+            @test sum(length, reads) < length(reads) * length(w) / 2
+            if cell.names == (:y,)
+                observed = true
+                @test reads == depends
+            end
+        end
+        @test observed
+    end
 end
 
 @stestset "a separated field moves through the coordinate transport to Stan's field" begin

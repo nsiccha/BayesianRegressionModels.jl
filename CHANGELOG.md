@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.184
+## 0.2.204
 
 - The sparse Laplace marginal gradient is correct at a stiff observation on the
   factor route. Its augmented system lost accuracy as the square of the outer
@@ -60,6 +60,267 @@ instead of failing at run time.
   have no row forms for matrix-row helpers, `vec` of a row value, whole arrays
   read by index or `b[p, 2]` of a computed matrix.
 
+## 0.2.203
+
+- Added: RKBRMI lowers formula-level `weighted(family, fweights(n))` and
+  `weighted(family, weights(w))` on a response whose law reads an assigned
+  value (`p = reader(...)`, `loc = 2 * mu`), the reader route. The base family
+  is observed with each row's log density multiplied by its weight, as on the
+  regression route and in Stan; the weight column binds under its own name,
+  so `reprocess` and `rk_design_binder` rebind and check it from a new
+  design. A mixture with per-row component weights is on that route and
+  takes `fweights` too. Before, construction failed with "value-based
+  response weights need an authored response". Analytic `aweights`, a
+  weighted `mi()` response and a weighted response holding one array per
+  subject are refused with an RK-attributed error.
+
+## 0.2.202
+
+- Added: a function-style component called inside a `@plate` cell may return
+  named values. The cell reads each as a property of its call,
+  `cell ~ bounds(x[i], scale)` then `cell.lo` and `cell.lo + cell.hi`, on SBBRMI
+  and RKBRMI. Each cell owns its call's locals. Before, such a call was refused.
+- Changed: inside a cell, a bare read of a named-return call or an unknown
+  field is refused with the returned field names.
+- Compatibility: the StanBlocks floor and test pin advance to 0.2.31, which
+  collects a tuple-valued plate cell as an array of tuples.
+
+## 0.2.201
+
+- SMC worker parallelism from ReactiveKernelsPPL 0.1.100 (now the floor).
+  Every `brm_smc_tune` method (initial, prepared Laplace, cumulative update,
+  carried window) forwards `grid_start`: with `pilot=:adaptive`,
+  `grid_start=:independent` runs the grid pilots concurrently on up to
+  `options.nthreads` workers, each from its own copy of `init`, after the
+  reference pilot. The schedule is the same for every worker count but
+  generally differs from the default sequential one (`grid_start=nothing`).
+  Every `brm_smc_resume` method (initial/update, Laplace, carried window) takes
+  `nthreads=n` to replace a production checkpoint's saved worker cap; the
+  resumed cloud does not depend on it.
+
+## 0.2.200
+
+- Fixed: a prior-only program (the response column omitted) with a
+  `VonMises` prior builds on SBBRMI and draws the prior with the family's own
+  RNG, a sampled mean included. Before, it failed at transpile: family
+  `brm_von_mises` requires companion `brm_von_mises_lcdf`. The family's own
+  support `[mu - pi, mu + pi]` is now declared through StanBlocks'
+  `autokwargs` hook, as `InverseGaussian`'s is since 0.2.198, not spelled as
+  bounds whose prior-only re-draw was the truncated draw (todo `0w0ukqc`). A
+  fitted program is unchanged: the parameter keeps its moving-support
+  declaration and the plain kernel; a bound that narrows the support still
+  restricts the prior.
+  - `[compat] StanBlocks = "0.2.30"`: StanBlocks reads the qualifier of an
+    argument-dependent support from 0.2.30 on (snag
+    `autokwargs-suppo-412811f6`).
+
+## 0.2.199
+
+- Direct plate reads of component results use the returned cells' axis on both
+  backends. Shared arrays inside a component no longer count as rows of a
+  formula predictor. Nested components and plates whose extent comes only
+  from the returned value keep the same direct indexing syntax.
+
+## 0.2.198
+
+- Fixed: a prior-only program (the response column omitted) with an
+  `InverseGaussian` prior builds on SBBRMI and draws the prior with the
+  family's own RNG. Before, it failed at transpile: family
+  `brm_inverse_gaussian` requires companion `brm_inverse_gaussian_lcdf`. The
+  positive half-line is now the family's declared support (StanBlocks'
+  `autokwargs` hook), not a bound whose prior-only re-draw was the truncated
+  draw (todo `0w0ukqc`). A fitted program is unchanged: the parameter keeps its
+  `real<lower=0>` declaration and the family's plain kernel. A bound that
+  narrows the support, `restricted(InverseGaussian(m, l); lower=0.5)`, still
+  restricts the prior.
+- The prior-program warning at construction no longer says that every
+  parameter forward-simulates when the program holds a `restricted` prior. It
+  names those priors and says that one whose mass inside its bounds moves with
+  a sampled argument or bound stays a sampled parameter, with what its bounds
+  and arguments read, so that program needs a sampler (StanBlocks' rule since
+  0.2.72).
+- Not yet: a `VonMises` prior's prior-only program still asks for
+  `brm_von_mises_lcdf`. Declaring its moving support `[mu - pi, mu + pi]` the
+  same way needs StanBlocks snag `autokwargs-suppo-412811f6`.
+
+## 0.2.197
+
+- Added: SVI units own ordinary sampled coordinates read only within that
+  unit, with their authored priors, Jacobians and global hyperparameter
+  gradients counted once. Structural supports close over joint laws and
+  transforms; `global_coordinates` explicitly promotes coordinates. Diagnostics
+  expose the inference ownership separately from scientific NLME roles.
+- Changed: SVI streaming and packed draws preserve ordinary coordinate
+  identities through absent, returning and new units. A retained unit's
+  Gaussian replaces its complete authored prior bucket.
+- Compatibility: authored SVI queries use the batched preparation API from
+  ReactiveKernels 0.1.84 / ReactiveKernelsPPL 0.1.96, sharing binding validation
+  and packed exemplars while retaining one derivative workspace per bucket.
+- Compatibility: a unit's dormant scalar/vector branch differentiates under
+  ordinary Reverse from Enzyme dogfood `0fa85df3` (repairs `74abe90` and
+  `7ac58eb`), which the test bootstrap's `b2bb4cb6` (libEnzyme `f392eba5`)
+  contains.
+
+## 0.2.196
+
+- `brm_model_view` of a bound model lists each component call's own
+  declarations in Roles and ranks under the exact call path, such as
+  `left › b`, with the same roles and ranks as model-scope declarations. Before,
+  only the call's result row appeared. A local observation of a data input marks
+  the caller's column as response data. Locals of a call inside a plate cell are
+  marked as declared once per iteration. RK and descriptor views resolve a local
+  parameter's dimensions by its exact call path. `brm_components` records are
+  unchanged.
+
+## 0.2.195
+
+- Changed: one-unit NLME calls from several tasks run in parallel. Each call
+  takes its own evaluator from the model's pool: the model's first, or one
+  prepared when calls first overlap (its own partition query, compact sampler
+  and work points), at most one per Julia thread. Before, every call waited on
+  one lock. NLMEEstimation's `WarmupHMCNUTS(threads = true)` therefore runs
+  BRM subjects in parallel. A unit's value and gradient do not depend on which
+  evaluator computes them. The NLMEEstimation floor is 0.2.5, the first
+  release with `threads = true`.
+- Changed: overlapping one-unit calls need Enzyme's concurrent-GC repair
+  (dogfood from `72d5d25`). Without it, the first call that would prepare a
+  second evaluator raises a `BRMNLMEViewError` instead of running beside
+  other threads unprotected. `brm_two_stage_fit` with `threads > 1` now
+  samples its units through that pool instead of its own worker copies of the
+  model, and therefore needs the repair as well.
+
+## 0.2.194
+
+- A function-style component's formula priors read its model-valued inputs on
+  `SBBRMI`, as its scalar priors already did: with `center` and `scale` bound
+  by the caller to parent parameters, `effect(value, Intercept) ~
+  Normal(center, 0.4)` and `sd(value, unit) ~ Exponential(scale)` build. They
+  failed with "model-level prior references `center`, a extension", so one
+  definition could not be called with different prior locations or scales.
+  `RKBRMI` already read such inputs in random-effect SD priors. Its
+  population-effect prior arguments remain numeric constants or data, in a
+  component as at model scope.
+
+## 0.2.193
+
+- Model views support readable `text/plain` output through HTMXObjects 0.1.65.
+  All eager tabs and disclosures retain their labels, source, documentation,
+  roles and dimensions without internal node dumps. Component defaults and
+  model helpers remain unevaluated. The dependency floor and test pins require
+  the shared renderer fix.
+
+## 0.2.192
+
+- `brm_coordinate_transport` pairs random-effect blocks declared inside a
+  function-style component call, plain or stratified `gr(g, by=b)`, including
+  per-margin scale laws, Student-t mixing weights, repeated calls over
+  different groupings and nested calls. Each call's scales, correlation factor
+  and standardized draws pair by its own level labels and margins, and their
+  addresses carry `scope = <call path>`. Such models previously refused with
+  unpaired `<call>.<block>.z` and `<call>_<block>_z_flat` coordinates.
+
+## 0.2.191
+
+- `brm_start`'s `component_inits` takes the top-level `inits` grammar for a
+  component call's own linear predictors and `|ID|` blocks on both backends:
+  `:left => (; rise=(; Intercept=v), rates=(; sd, cor, effects))` sets the
+  call's link-scale coefficients and its shared block's scales, correlation
+  (or covariance `rates = Σ`) and per-level effects, keyed by the call's own
+  levels. `base=:prior_median` also fills component-local population
+  coefficients and `|ID|` scales from their priors. RK still needs no
+  compiled Stan model.
+
+## 0.2.190
+
+- Model views render callable and authored Julia documentation through the shared
+  HTMXObjects documentation projection. Unresolved Documenter references retain
+  their formatted labels without broken links, and doctest examples use Julia
+  highlighting in offline HTML. Original source and documentation records remain
+  unchanged. Requires HTMXObjects 0.1.62; both test pins select that release.
+
+## 0.2.189
+
+- Function-style components returning one internal plate's collected values
+  preserve one value per cell, including vector-valued cells, aliases and
+  nested component calls. Parent reads such as `field[row[i]][channel[i]]`
+  select the declared row and then its channel on both backends.
+  ReactiveKernels keeps selected-row locality instead of reading a flattened
+  whole; StanBlocks preserves the cell axis of its matrix storage. Formula
+  offsets still require scalar cells.
+
+## 0.2.188
+
+- **Breaking:** BRM now supports only `SBBRMI` (StanBlocks/Stan) and `RKBRMI`
+  (ReactiveKernelsPPL). Removed `TuringBRMI`, its Turing/WarmupHMC extensions,
+  the `turing_*` helpers, and `VBRMI` with its materialization/parameter-part
+  API (`MaterializedColumn`, `getbroadcast`, `Part`, `push_parts!!`, `nparams`,
+  `lprior!`, `vbroadcasted`, `vmeta_sampling_rhs`). Build one of the supported
+  backends from the same `BRMI`; use that backend's fitting, replay and
+  prediction APIs. Custom terms must use the StanBlocks or RK extension hooks.
+- Removed the retired backends' dependencies, tests and documentation. Shared
+  preparation and mixture-response checks remain on the supported paths. The
+  macro explorer now exposes its StanBlocks pipeline without the VBRMI stages.
+- Incomplete constrained-coordinate carriers now report their emitted output
+  and missing coverage instead of an undefined-variable error.
+- Refresh the test and macro-app HTMXObjects pins for the model-view floor.
+  The test environment requires DiffEqBase 7.21.6 and OptimizationBase 5.10.1
+  so their extensions load with the current Enzyme rule hooks.
+
+## 0.2.187
+
+- Added `gmrf((east, north), time[, channel]; multiresolution=m)`: a bounded
+  sparse Matérn-1 spatial basis of shared stationary OU paths. A position uses
+  the same normalized weights at every time, preserving exact temporal
+  exponential covariance, marginal SD and channel separability on irregular
+  reads. Spatial covariance remains approximate. Each innovation retains only
+  its readers' times; the representation does not complete a position × time
+  grid. It shares the existing hyperparameter addresses and priors.
+- The new model-scope form supports `RKBRMI` and `SBBRMI`, native analytic
+  derivatives, Stan prior draws, frozen replay and physical coordinate
+  transport. Its fitted support construction is part of the native graph.
+  Exact reader locality requires ReactiveKernels 0.1.83, now the RK floor.
+  Native Reverse needs Enzyme dogfood's literal-dictionary callback repair and,
+  from dogfood `7a1f689c`, its repeated-reader repair, without which gradient
+  cost grows with support metadata × reads. The test bootstrap's RK
+  `b0ffcdc1` and Enzyme `d3189970` pins contain both.
+- Clarified the `neighbors=` contract: local Matérn × OU kernel entries are
+  exact, but the implied joint temporal covariance is approximate on irregular
+  read support. Its numerical behavior is unchanged.
+
+## 0.2.186
+
+- Offset-only predictors on RK retain the declared rows of scalar plate or
+  component outputs and fixed data expressions before an explicit gather onto
+  observation rows. They no longer need a raw fixed offset or an estimated
+  coefficient to establish those rows.
+
+## 0.2.185
+
+- Added: a function-style `@brm` component may return several named values,
+  `return (; recovery, decay = exp(log_decay))`. The parent reads each one as a
+  property of the call, `kin.recovery`, in formulas, offsets, likelihoods and
+  model-scope bindings, on SBBRMI (a Stan tuple) and RKBRMI (the call's native
+  local). Each field keeps its own row axis, and the call's priors and
+  correlation blocks remain one scope. `brm_output(d, :decay; submodel=:kin)`
+  addresses a returned field. A plate cell reads a field through a model-scope
+  binding (`recovery = kin.recovery`, then `recovery[i]`).
+- Changed: a bare read of a named-return call, an unknown field, a positional
+  tuple return, a direct `kin.recovery[i]` plate read and a named-return
+  component called inside a plate cell are refused with the supported spelling.
+- Fixed: SBBRMI compiles a component whose formulas group by one of its inputs
+  (`(1 | p | unit)` with `unit` an input); the raw label column is no longer
+  passed to the Stan submodel, which reads its own index data. RKBRMI also
+  aligns a field grouped by a label input with the parent's rows, so it can
+  enter a formula offset.
+
+## 0.2.184
+
+- `brm_start` accepts top-level matrix parameters on their constrained scale
+  on both RK and compiled Stan. Initialize `L ~ LKJCholesky(K, eta)` with
+  `(; L=lower_factor)`, preserving its exact matrix shape. RK uses its native
+  transform without compiling Stan. Unaddressed base values and caller-owned
+  inputs are preserved, as for scalar, vector and component-local starts.
+
 ## 0.2.183
 
 - Model views label every authored member of a joint response as response data,
@@ -89,9 +350,10 @@ instead of failing at run time.
   ReactiveKernels commit to `b0ffcdc1` or a descendant. Checkpoints written
   with ReactiveKernelsPPL 0.1.97 or earlier are not migrated: resume them with
   their original versions or write a new initialization checkpoint.
-- RK `main` from `8e67ee82` currently breaks selective carried-window tuning
-  (`coordinates=:auto`) with a `MethodError` in `_cell_joined_rows`; BRM's test
-  pin stays on `b0ffcdc1` until ReactiveKernels repairs it.
+- At this release, RK `main` from `8e67ee82` broke selective carried-window
+  tuning (`coordinates=:auto`) with a `MethodError` in `_cell_joined_rows`, so
+  BRM's test pin used `b0ffcdc1`. RK `df3eb8872` repaired the regression; the
+  test pin now includes that repair through `db6bca825`.
 
 ## 0.2.181
 

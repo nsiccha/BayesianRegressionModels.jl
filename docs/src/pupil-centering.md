@@ -39,7 +39,7 @@ Flat priors apply to these population slopes because that is the source model's 
 
 ## BRM implementation
 
-The authoring pane reads the actual declarations used for the fits. Its backend panes are generated during the documentation build. The measurements use StanBlocks/BridgeStan and WHMC; the Turing pane is a generated-model comparison only.
+The authoring pane reads the actual declarations used for the fits. Its backend panes are generated during the documentation build. The measurements use StanBlocks/BridgeStan and WHMC.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__,

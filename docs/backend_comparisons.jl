@@ -4,12 +4,11 @@ using Markdown
 using BayesianRegressionModels
 using Distributions
 using StanBlocks
-using Turing
 
 const BRM = BayesianRegressionModels
 const EXAMPLE_MODULES = Dict{Symbol,Module}()
-const PANE_IDS = "brm|ir|stanblocks|stan|turing"
-const PANE_LABELS = "BRM authoring|IR|StanBlocks model|Stan source|Turing model"
+const PANE_IDS = "brm|ir|stanblocks|stan"
+const PANE_LABELS = "BRM authoring|IR|StanBlocks model|Stan source"
 const REPOSITORY_ROOT = normpath(joinpath(@__DIR__, ".."))
 
 """Return one stable evaluation module for all executable blocks on a page."""
@@ -133,23 +132,9 @@ function stan_emissions(brmi::BRM.BRMI, mod::Module;
     end
 end
 
-function turing_emission(brmi::BRM.BRMI)
-    try
-        backend = Base.invokelatest(BRM.TuringBRMI, brmi)
-        source = Base.invokelatest(BRM.turing_model_source, backend)
-        isnothing(source) && error("Turing lowering did not retain its generated source")
-        programs = source isa Tuple ? source : (source,)
-        return join((sprint(io -> Base.show_unquoted(io,
-                     Base.remove_linenums!(deepcopy(program))))
-                     for program in programs), "\n\n")
-    catch err
-        return exception_text("Turing", err)
-    end
-end
-
 """
-Evaluate one displayed BRM example and emit the fixed five-pane comparison.
-The IR, StanBlocks, Stan, and Turing panes are always derived during this build.
+Evaluate one displayed BRM example and emit the fixed four-pane comparison.
+The IR, StanBlocks and Stan panes are always derived during this build.
 """
 function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
                     title=replace(string(brmi_name), '_' => ' '),
@@ -163,21 +148,19 @@ function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
         "docs comparison `$brmi_name` did not evaluate to or construct a BRMI")
     ir_source = strip(sprint(show, brmi), '\n')
     sb_source, stan_source = stan_emissions(brmi, mod; required=require_stan, total_groups)
-    turing_source = turing_emission(brmi)
     return Markdown.MD([
         Markdown.Code("brm-comparison", string(title)),
         Markdown.Code("julia", displayed),
         Markdown.Code("julia", ir_source),
         Markdown.Code("julia", sb_source),
         Markdown.Code("stan", stan_source),
-        Markdown.Code("julia", turing_source),
     ])
 end
 
 """
 Render a StanBlocks-backend (`@slic`) model that is NOT expressed through the `@brm`
 formula surface: its exact model source (read from the repository, drift-proof) plus
-the generated Stan it emits. There is no `@brm` authoring pane or Turing pane because
+the generated Stan it emits. There is no `@brm` authoring pane because
 such a model does not go through the formula DSL — this is the honest two-pane view
 for a model that lives at BRM's backend layer. Errors if the emission fails.
 """
@@ -201,7 +184,7 @@ Render a StanBlocks `compile_slic_bundle` model (a multi-part `@slic`/`@deffun`
 workspace that is not a single `@brm` or `@slic` function): `include` its source file,
 show the parent-body source held in `body_name`, then the generated Stan from
 `builder_name()` (a zero-arg builder returning the bundle result with a `.code`
-field). Two panes — there is no `@brm` authoring pane or Turing pane. Errors closed.
+field). Two panes — there is no `@brm` authoring pane. Errors closed.
 """
 function bundle_model_panes(mod::Module, include_relpath::AbstractString,
                             body_name::Symbol, builder_name::Symbol; title)
@@ -256,7 +239,7 @@ function validate_generated_templates(paths)
             "$(basename(path)) contains no build-generated comparison")
         occursin("data-backend-comparison", source) && error(
             "$(basename(path)) hand-authors the comparison wrapper; " *
-            "BRMDocsComparisons.comparison owns the fixed five panes")
+            "BRMDocsComparisons.comparison owns the fixed four panes")
         occursin(r"(?m)^```stan\s*$", source) && error(
             "$(basename(path)) contains hand-authored Stan; generated examples " *
             "must call BRMDocsComparisons.comparison")
@@ -270,7 +253,7 @@ function validate_no_bypasses(paths)
     for path in paths
         source = read(path, String)
         occursin("BRMDocsComparisons.source_excerpt", source) && error(
-            "$path bypasses the build-generated five-pane comparison")
+            "$path bypasses the build-generated four-pane comparison")
         for block in eachmatch(r"(?ms)^```([^\n]*)\n(.*?)^```\s*$", source)
             info, code = block.captures
             fence_parts = split(strip(info))
@@ -279,13 +262,8 @@ function validate_no_bypasses(paths)
             occursin("@brm", code) || continue
             occursin("Main.BRMDocsComparisons.comparison(", code) && continue
             error("$path contains a standalone executable `@brm` example " *
-                  "in a `$language` fence; use the generated five-pane " *
+                  "in a `$language` fence; use the generated four-pane " *
                   "comparison")
-        end
-        if endswith(path, "turing-backend.md")
-            occursin("Main.BRMDocsComparisons.comparison", source) && error(
-                "backend-specific pages must be overview-only; move examples " *
-                "to a backend-neutral page")
         end
     end
     return nothing

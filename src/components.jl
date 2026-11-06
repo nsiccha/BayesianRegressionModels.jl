@@ -9,6 +9,11 @@ with `value ~ name(inputs...)`. Each call owns its declarations; its arguments
 refer to the parent's values. Both StanBlocks and ReactiveKernels lower the
 same component through their native submodel scopes.
 
+A component may return several named values as a named tuple,
+`return (; recovery, decay = exp(log_decay))`. The parent then reads each one
+as a property of the call, `kin.recovery`, with its own row axis; the call's
+priors and correlations remain one scope.
+
 The short definition `@brm model(df) = begin … end` retains its existing
 meaning: a data-to-model builder.
 """
@@ -19,11 +24,64 @@ struct BRMComponent <: Function
     defaults::Dict{Symbol,Any}
     source::Expr
     builder::BRMBuilder
-    result::Symbol
+    # One local result name, or a named tuple from each returned field to its
+    # local result name.
+    result::Union{Symbol,NamedTuple}
     scope::Module
 end
 
 const _SB_COMPONENT_NAMES_KEY = :__brm_component_names__
+
+"""The local result names of a component, one per returned value."""
+_brm_component_results(component::BRMComponent) =
+    component.result isa Symbol ? (component.result,) : Tuple(values(component.result))
+
+"""The returned fields of a component, or `nothing` for a single returned value."""
+_brm_component_fields(component::BRMComponent) =
+    component.result isa Symbol ? nothing : component.result
+
+# A returned named tuple is written `(; a, b = expr)` or `(a = x, b = y)`.
+# Its field names are the parent's property names; a positional tuple has none.
+function _brm_component_return_fields(value)
+    Meta.isexpr(value, :tuple) || return nothing
+    fields = Pair{Symbol,Any}[]
+    function field!(item)
+        if item isa Symbol
+            push!(fields, item => item)
+        elseif Meta.isexpr(item, (:kw, :(=)), 2) && first(item.args) isa Symbol
+            push!(fields, first(item.args) => last(item.args))
+        else
+            throw(ArgumentError("@brm: a component returns one value or a named tuple " *
+                "`(; a, b = expr)`; `$(sprint(Base.show_unquoted, item))` names no field"))
+        end
+    end
+    for arg in value.args
+        Meta.isexpr(arg, :parameters) ? foreach(field!, arg.args) :
+            Meta.isexpr(arg, :(=), 2) ? field!(arg) :
+            throw(ArgumentError("@brm: a component returns one value or a named tuple " *
+                "`(; a, b = expr)`; a positional tuple has no field names for the parent to read"))
+    end
+    isempty(fields) && throw(ArgumentError("@brm: a component returns at least one value"))
+    allunique(first.(fields)) || throw(ArgumentError(
+        "@brm: duplicate returned field in `$(sprint(Base.show_unquoted, value))`"))
+    fields
+end
+
+# Native return statements. A parent's `kin.recovery` reads the field's private
+# local result name (`_brm_component_field_read`). StanBlocks returns a Stan
+# tuple labelled by those names (`kin.1`). RKPPL reads a call's local directly
+# (`kin.component_result_recovery`, rkppl-use §12), so its submodel returns one
+# value and every field stays a local of the call.
+_sb_component_return(component::BRMComponent) = component.result isa Symbol ?
+    Expr(:return, component.result) :
+    Expr(:return, Expr(:tuple, Expr(:parameters,
+        (Expr(:kw, local_name, local_name) for local_name in values(component.result))...)))
+_rk_component_return(component::BRMComponent) =
+    Expr(:return, first(_brm_component_results(component)))
+
+# A prepared read of one returned field: the RK emitter spells it as a native
+# local read `call.label`.
+_brm_component_field(value, label::Symbol) = getproperty(value, label)
 
 function _brm_component_parts(source::Expr)
     source = _brm_normalize_docs(_brm_undoc(source))
@@ -101,11 +159,25 @@ function _brm_component(source::Expr, scope::Module)
     (; name, inputs, keywords, defaults, body, value) = _brm_component_parts(source)
     source = _brm_normalize_docs(source)
     occupied = _brm_cell_value_refs!(Set{Symbol}(inputs), _brm_undoc(source).args[2])
-    result = :component_result
-    while result in occupied
-        result = Symbol(result, :_)
+    function fresh(stem)
+        candidate = stem
+        while candidate in occupied
+            candidate = Symbol(candidate, :_)
+        end
+        push!(occupied, candidate)
+        candidate
     end
-    builder = brm(Expr(:block, body..., Expr(:(=), result, value)); mod=scope)
+    fields = _brm_component_return_fields(value)
+    if fields === nothing
+        result = fresh(:component_result)
+        assignments = Any[Expr(:(=), result, value)]
+    else
+        locals = Tuple(fresh(Symbol(:component_result_, field)) for field in first.(fields))
+        result = NamedTuple{Tuple(first.(fields))}(locals)
+        assignments = Any[Expr(:(=), local_name, expression)
+            for (local_name, expression) in zip(locals, last.(fields))]
+    end
+    builder = brm(Expr(:block, body..., assignments...); mod=scope)
     BRMComponent(name, inputs, keywords, defaults, source, builder, result, scope)
 end
 
@@ -147,32 +219,44 @@ Repeated calls have separate paths and share their definition identity.
 For a component definition itself, the first record has path `()` and no call.
 No backend compilation or manually maintained source registry is required.
 """
-function brm_components(model::BRMI)
+brm_components(model::BRMI) = map(_brm_public_component_record, _brm_component_records(model))
+brm_components(builder::BRMBuilder, data) = brm_components(builder(data))
+brm_components(component::BRMComponent) =
+    map(_brm_public_component_record, _brm_component_records(component))
+
+# The same discovery, keeping what the walk already built for each call: its
+# `instance` (the call's own declarations bound to its arguments) and whether
+# it runs once per plate iteration (`plate`). Read-only inspection such as the
+# model view lists those declarations from here instead of rebuilding them.
+function _brm_component_records(model::BRMI)
     records = NamedTuple[]
     _brm_component_calls!(records, model, ())
     Tuple(records)
 end
-brm_components(builder::BRMBuilder, data) = brm_components(builder(data))
-function brm_components(component::BRMComponent)
+function _brm_component_records(component::BRMComponent)
     placeholders = Dict(input => NamedColumn(input, _BRMComponentInput(input))
         for input in component.inputs)
     model = component.builder(_BRMCellFormulaInputs((;), placeholders))
     _brm_check_component_recursion(component)
     records = NamedTuple[(; path=(), definition=component,
-        source=brm_source(component), scope=component.scope, call=nothing)]
+        source=brm_source(component), scope=component.scope, call=nothing,
+        instance=model, plate=false)]
     _brm_component_calls!(records, model, ())
     Tuple(records)
 end
+_brm_public_component_record(record) =
+    (; record.path, record.definition, record.source, record.scope, record.call)
 
-function _brm_component_call!(records, target, component, call, path)
+function _brm_component_call!(records, target, component, call, path, plate)
     address = (path..., target)
+    instance = _brm_component_instance(component, call)
     push!(records, (; path=address, definition=component,
         source=brm_source(component), scope=component.scope,
-        call=Meta.parse(sprint(show, call))))
-    _brm_component_calls!(records, _brm_component_instance(component, call), address)
+        call=Meta.parse(sprint(show, call)), instance, plate))
+    _brm_component_calls!(records, instance, address, plate)
 end
 
-function _brm_component_calls!(records, model, path)
+function _brm_component_calls!(records, model, path, plate=false)
     for (target, column) in _brm_operation_entries(model)
         operation = column isa NamedColumn ? parent(column) : column
         operation isa ExprColumn{typeof(~)} || continue
@@ -180,7 +264,7 @@ function _brm_component_calls!(records, model, path)
         rhs isa ExprColumn || continue
         callee = getf(rhs)
         if callee isa BRMComponent
-            _brm_component_call!(records, target, callee, rhs, path)
+            _brm_component_call!(records, target, callee, rhs, path, plate)
         elseif callee === kernel && first(getargs(rhs)) isa _BRMInlineBody
             body = first(getargs(rhs))
             _brm_component_cell_calls!(records, _brm_inline_expr(body),
@@ -200,7 +284,7 @@ function _brm_component_cell_calls!(records, expression, scope, path)
                 Meta.isexpr(lhs, :ref) ? first(lhs.args) : nothing
             target isa Symbol || error("component call has no named target: $lhs")
             rhs = _brm_component_cell_ir(component, call, scope)
-            _brm_component_call!(records, target, component, rhs, path)
+            _brm_component_call!(records, target, component, rhs, path, true)
             return records
         end
     end

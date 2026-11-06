@@ -1,4 +1,4 @@
-using Test, BayesianRegressionModels, Distributions, Turing, LogDensityProblems
+using Test, BayesianRegressionModels, Distributions, LogDensityProblems
 import StanBlocks
 const BRM = BayesianRegressionModels
 const BridgeStan = StanBlocks.BridgeStan
@@ -20,7 +20,6 @@ const BridgeStan = StanBlocks.BridgeStan
     mkpath(cache)
     problem = brm_execute(descriptor, :instantiate;
         path=joinpath(cache, string(descriptor.id) * ".stan"))
-    backend = TuringBRMI(builder(data))
     @test LogDensityProblems.dimension(problem) == 4
     for raw in (zeros(4), [-0.3, 0.1, 0.4, -0.5])
         names = Symbol.(BridgeStan.param_names(problem.model))
@@ -29,7 +28,15 @@ const BridgeStan = StanBlocks.BridgeStan
         @test parameters.location <= parameters.bounded <= parameters.location + 2
         @test parameters.positive >= 0.2
         @test parameters.affine <= 1.5
+        # `truncated` is the normalized law on its bounds, also when they are
+        # sampled (`location`); the response's location sums the three.
+        p = parameters
+        expected = logpdf(Normal(0, 1), p.location) +
+            logpdf(truncated(Cauchy(0.2, 0.7); lower=p.location, upper=p.location + 2), p.bounded) +
+            logpdf(truncated(Gamma(2.0, 0.6); lower=0.2), p.positive) +
+            logpdf(truncated(LocationScale(0.3, 1.2, Laplace(0.1, 0.8)); upper=1.5), p.affine) +
+            sum(logpdf.(Normal(p.bounded + p.positive + p.affine, 0.8), data.y))
         @test BridgeStan.log_density(problem.model, raw; propto=false, jacobian=false) ≈
-            Turing.logjoint(backend.model, parameters) atol=1e-10
+            expected atol=1e-10
     end
 end

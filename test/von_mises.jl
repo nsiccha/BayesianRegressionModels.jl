@@ -165,3 +165,46 @@ end
     prior_model = SBBRMI(prior((; y=[0.5])); mod=@__MODULE__)
     @test StanBlocks.stanc_check(BRM.stan_code(prior_model)).ok
 end
+
+stan_block(code, name) = something(match(Regex("(?ms)^$name \\{\\n(.*?)^\\}"), code),
+    (; captures=[""])).captures[1]
+
+# `[mu - pi, mu + pi]` is the family's own support, which StanBlocks declares
+# from `autokwargs`, a sampled `mu` included; it is not a bound whose
+# prior-only re-draw would need a `brm_von_mises_lccdf` companion, nor one whose
+# mass would move with `mu` (todo 0w0ukqc). A prior program, the response
+# column omitted, draws the prior with the family's RNG. Needs StanBlocks
+# 0.2.30 (snag autokwargs-suppo-412811f6).
+@testset "VonMises prior programs draw with the family's RNG" begin
+    programs = (
+        @brm(begin
+            theta ~ VonMises(0.0, 1.0)
+            y ~ Normal(theta, 1.0)
+        end),
+        @brm(begin
+            m ~ Normal(0, 1)
+            theta ~ VonMises(m, 1.0)
+            y ~ Normal(theta, 1.0)
+        end),
+    )
+    for builder in programs
+        code = BRM.stan_code(SBBRMI(builder((; dummy=[1.0])); mod=@__MODULE__))
+        @test StanBlocks.stanc_check(code).ok
+        @test isempty(strip(stan_block(code, "parameters")))
+        @test occursin("theta = brm_von_mises_rng(", code)
+        @test !occursin("_lccdf", code) && !occursin("_lcdf", code)
+    end
+
+    # The fitted program keeps the moving-support declaration and plain kernel.
+    fitted = @brm begin
+        m ~ Normal(0, 1)
+        theta ~ VonMises(m, 1.0)
+        y ~ Normal(theta, 1.0)
+    end
+    code = BRM.stan_code(SBBRMI(fitted((; y=[0.5])); mod=@__MODULE__))
+    @test StanBlocks.stanc_check(code).ok
+    parameters = stan_block(code, "parameters")
+    @test occursin("lower=(m - 3.141592653589793)", parameters)
+    @test occursin("upper=(m + 3.141592653589793)", parameters)
+    @test occursin("theta ~ brm_von_mises(m, 1.0, 0.0, 0.0, 0);", stan_block(code, "model"))
+end
