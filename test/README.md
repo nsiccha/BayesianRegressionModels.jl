@@ -1323,6 +1323,16 @@ fit is compared with NUTS too. Starts (prior medians, a packed point,
 `inits`) and their refusals are covered as well. It runs in the test
 environment above.
 
+`nlme_svi_heavy_tails.jl` checks what one extreme ELBO draw does to minibatch
+SVI, whose estimate can have an infinite expectation with every draw finite.
+With no bound, one gradient of 1e21 freezes its Adam coordinate (the control), and
+with `_brm_svi_clip` that coordinate keeps its step. A coordinate that most batches
+do not read keeps its scale under the `√(N / B)`-wide bound and loses it under a
+tighter one (the control). `_brm_svi_window`'s `spread / W` is the variance of its
+trimmed mean on Gaussian and skewed draws, and one draw moves neither. The stopping
+test neither stops a rising fit nor hides a stalled one on an extreme draw, where a
+test of means and variances does stop the rising fit.
+
 `nlme_svi_authored_factors.jl` checks the public RKPPL authored-factor API
 and production SVI ownership. On a
 six-subject model whose coefficient pair `z[2i-1], z[2i]` is read only by

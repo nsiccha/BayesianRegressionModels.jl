@@ -335,11 +335,47 @@ mutable struct _BRMSVIAdam
     m::Vector{Float64}
     v::Vector{Float64}
     t::Int
+    clipped::Int
 end
-_BRMSVIAdam(n, lr) = _BRMSVIAdam(lr, 0.9, 0.999, zeros(n), zeros(n), 0)
+_BRMSVIAdam(n, lr) = _BRMSVIAdam(lr, 0.9, 0.999, zeros(n), zeros(n), 0, 0)
 
-# One ascent step of `x` along `g`.
-function _brm_svi_step!(opt::_BRMSVIAdam, x, g, lr=opt.lr)
+# How far a global's gradient may enter Adam's moments, in running rms of that
+# coordinate, for a batch that is the whole data; `_brm_svi_iteration!` widens it
+# by the square root of the scale-up N / B. A draw that reaches a steep part of
+# the density can give a gradient of 1e20 where the running rms is 1. The step
+# itself is bounded, but β2 = 0.999 keeps g² in `v` for ln(g²/1000)/0.001
+# iterations: a gradient 1e6 times the rms slows its coordinate for about 21,000
+# iterations, 1e20 for about 85,000, and a draw reaches every coordinate its term
+# reads. Measured on a run of 7,379 globals, 95% of them ended polishing with a
+# step more than ten times too small. Nothing in the trace shows it: the ELBO
+# then looks flat, as for a converged fit.
+#
+# A coordinate read by only a few units has a zero gradient in most batches, so
+# its gradient when one is drawn is about √(N/B) times its rms. A tighter bound
+# would shrink the rms and with it the next gradient's limit, without end.
+#
+# A clipped gradient is not unbiased: a term with a heavy-tailed gradient pushes
+# less than its expectation says. Where such a term's expectation is infinite
+# (`_brm_svi_window`), no estimate of it exists to be biased.
+const _BRM_SVI_GLOBAL_CLIP = 10.0
+
+# `g` with each coordinate limited to `clip` times its running rms before this
+# step. A coordinate with no gradient so far has no scale to compare with.
+function _brm_svi_clip(opt::_BRMSVIAdam, g, clip)
+    isfinite(clip) && opt.t > 0 || return g
+    b2 = 1 - opt.β2^opt.t
+    bounded = map(g, opt.v) do gi, vi
+        iszero(vi) && return gi
+        limit = clip * sqrt(vi / b2)
+        clamp(gi, -limit, limit)
+    end
+    bounded == g || (opt.clipped += 1)
+    bounded
+end
+
+# One ascent step of `x` along `g`, limited by `clip` (`_brm_svi_clip`).
+function _brm_svi_step!(opt::_BRMSVIAdam, x, g, lr=opt.lr; clip=Inf)
+    g = _brm_svi_clip(opt, g, clip)
     opt.t += 1
     @. opt.m = opt.β1 * opt.m + (1 - opt.β1) * g
     @. opt.v = opt.β2 * opt.v + (1 - opt.β2) * g^2
@@ -373,7 +409,7 @@ end
 # units of a square root of the global covariance and each Β row in units of
 # its scale, so Adam's step size means a fraction of the current posterior
 # scale, which stays meaningful when a global's posterior sd shrinks like 1/√N.
-function _brm_svi_whitened_global_step!(opt, q, x, grad, lr)
+function _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip=Inf)
     D = length(q.μ)
     C = _brm_svi_global_sqrt(_brm_svi_global_geometry(q))
     scale = vcat(ones(D), vec(repeat(exp.(q.ρ), 1, size(q.Β, 2))))
@@ -382,7 +418,7 @@ function _brm_svi_whitened_global_step!(opt, q, x, grad, lr)
     rest = D+1:length(x)
     grad[rest] .*= scale
     step = zeros(length(x))
-    _brm_svi_step!(opt, step, grad, lr)
+    _brm_svi_step!(opt, step, grad, lr; clip)
     x[1:D] .+= _brm_svi_global_sqrt_mul(C, view(step, 1:D))
     x[rest] .+= scale .* view(step, rest)
     x
@@ -608,8 +644,9 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     end
     x = _brm_svi_global_vector(q)
     grad = _brm_svi_global_gradient(q, w, ε, η)
-    whiten ? _brm_svi_whitened_global_step!(global_opt, q, x, grad, lr_global) :
-        _brm_svi_step!(global_opt, x, grad, lr_global)
+    clip = _BRM_SVI_GLOBAL_CLIP * sqrt(s)
+    whiten ? _brm_svi_whitened_global_step!(global_opt, q, x, grad, lr_global; clip) :
+        _brm_svi_step!(global_opt, x, grad, lr_global; clip)
     _brm_svi_set_global!(q, x)
     _brm_svi_each_unit(t.plans, length(batch)) do _, k
         _brm_svi_unit_step!(q, batch[k], terms[k].gz, terms[k].gd, draws[k], β)
@@ -634,16 +671,18 @@ const _BRM_SVI_PHASES = (lower="Lower to ReactiveKernels", prepare="Prepare NLME
 
 # Stochastic optimization in two phases. Exploration runs at constant step
 # sizes (`lr_global` for Adam, `unit_step` for the subjects' natural-gradient
-# steps) until the ELBO stops improving detectably: the mean over a window (one
-# pass over the subjects, at least 100 iterations) has risen, over the last
-# `patience` windows, by less than twice the standard error of that rise, after
-# at least `min_windows`. Comparing across several windows rather than
+# steps) until the ELBO stops improving detectably: the trimmed mean over a
+# window (one pass over the subjects, at least 100 iterations) has risen, over
+# the last `patience` windows, by less than twice the standard error of that
+# rise, after at least `min_windows` (`_brm_svi_window`). Comparing across several windows rather than
 # neighbouring ones lets a slow drift show above the minibatch noise. Polishing then restarts Adam on scale-preconditioned global
 # steps (`polish_lr`, a fraction of the current scale), decays every step size
 # as 1/√k over `polish_windows` windows, and returns the average of q over
 # those iterations (Polyak–Ruppert), which damps the noise a stochastic step
 # leaves.
 #
+const _BRMSVIWindow = NamedTuple{(:mean, :center, :spread),NTuple{3,Float64}}
+
 # Everything an iteration reads and writes besides the target lives in one
 # `_BRMSVIRun`, so a run stops after any completed iteration and continues from
 # a copy of it (`BRMSVIOptimizerState`, src/nlme_svi_optimizer.jl) exactly as
@@ -658,7 +697,7 @@ mutable struct _BRMSVIRun{Q}
     adam::_BRMSVIAdam
     iteration::Int
     trace::Vector{Float64}
-    windows::Vector{NamedTuple{(:mean, :var),Tuple{Float64,Float64}}}
+    windows::Vector{_BRMSVIWindow}
     polish_start::Int
     average::Union{Nothing,Q}
     converged::Bool
@@ -666,7 +705,37 @@ end
 
 _brm_svi_adam(q, lr) = _BRMSVIAdam(length(_brm_svi_global_vector(q)), lr)
 _brm_svi_run(rng, q, c) = _BRMSVIRun(rng, q, _brm_svi_adam(q, c.lr_global), 0, Float64[],
-    NamedTuple{(:mean, :var),Tuple{Float64,Float64}}[], 0, nothing, false)
+    _BRMSVIWindow[], 0, nothing, false)
+
+# The share of a window's iterations left out at each end of its statistics.
+const _BRM_SVI_WINDOW_TRIM = 0.1
+
+# What a window of ELBO estimates contributes to the stopping rule: `center`, its
+# trimmed mean, and `spread`, so that `spread / W` estimates the variance of the
+# center (the Winsorized variance over (1 - 2γ)², Yuen 1974). `mean` is the plain
+# mean, which `diagnostics.elbo_windows` reports.
+#
+# A single draw can move a mean by any amount: the estimate is finite, but its
+# expectation need not be. Under a Gaussian q over x and z, a density with a term
+# like -exp(exp(x) z) has E_q log p = -Inf. A log link over a field or random
+# effect whose sd sits on the log scale has such a term. So neither the mean nor
+# the variance of a window estimates anything there: on one run a single draw
+# took a window's mean to -1.25e19 while its median stayed at -12,076.
+#
+# Below 10 iterations per window nothing is trimmed, and this is the mean and
+# variance.
+function _brm_svi_window(w)
+    n = length(w)
+    k = floor(Int, _BRM_SVI_WINDOW_TRIM * n)
+    x = sort(w)
+    inner = view(x, k+1:n-k)
+    winsorized = vcat(fill(first(inner), k), inner, fill(last(inner), k))
+    (; mean=Statistics.mean(w), center=Statistics.mean(inner),
+       spread=Statistics.var(winsorized) / (1 - 2k / n)^2)
+end
+
+# Whether the ELBO has failed to rise detectably from window `a` to window `b`.
+_brm_svi_stalled(a, b, W) = b.center - a.center < 2 * sqrt((a.spread + b.spread) / W)
 
 # The optimizer controls of a run over `N` subjects, with the batch size and
 # window it actually uses. They are fixed for the run and its continuations.
@@ -701,24 +770,25 @@ function _brm_svi_advance!(run, t, c)
     end
     push!(run.trace, value + _brm_svi_entropy(q))
     run.iteration = it
+    polished = false
     if polishing
         k = it - run.polish_start
         for name in (:μ, :ρ, :Β, :M, :Λ)
             _brm_svi_average!(getfield(run.average, name), getfield(q, name), k)
         end
-        k >= c.polish_windows * W && (run.converged = true; return :converged)
+        polished = k >= c.polish_windows * W
     end
+    it % W == 0 && push!(run.windows, _brm_svi_window(view(run.trace, it-W+1:it)))
+    polished && (run.converged = true; return :converged)
     it % W == 0 || return :iteration
-    w = view(run.trace, it-W+1:it)
-    push!(run.windows, (; mean=Statistics.mean(w), var=Statistics.var(w)))
     windows = run.windows
-    if !polishing && length(windows) >= max(c.min_windows, c.patience + 1)
-        a, b = windows[end-c.patience], windows[end]
-        if b.mean - a.mean < 2 * sqrt((a.var + b.var) / W)
-            run.polish_start = it
-            run.average = deepcopy(q)
-            run.adam = _brm_svi_adam(q, c.polish_lr)
-        end
+    if !polishing && length(windows) >= max(c.min_windows, c.patience + 1) &&
+            _brm_svi_stalled(windows[end-c.patience], windows[end], W)
+        run.polish_start = it
+        run.average = deepcopy(q)
+        clipped = run.adam.clipped
+        run.adam = _brm_svi_adam(q, c.polish_lr)
+        run.adam.clipped = clipped
     end
     :window
 end
@@ -727,7 +797,7 @@ _brm_svi_progress_message(run, c) = string(
     _brm_svi_polishing(run) && run.polish_start < run.iteration ?
         "polishing $(run.iteration - run.polish_start)/$(c.polish_windows * c.window)" :
         "exploring, window $(length(run.windows))",
-    " · iteration $(run.iteration) · ELBO ≈ ", round(last(run.windows).mean; sigdigits=6))
+    " · iteration $(run.iteration) · ELBO ≈ ", round(last(run.windows).center; sigdigits=6))
 
 # Advance `run` until it converges, reaches `max_iterations`, or has taken
 # `stop_after` iterations in this call. `save(checkpoint)` receives a detached
@@ -921,7 +991,12 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
 Returns `draws`, `ndraws` draws from the fitted approximation as RK packed
 unconstrained points (coordinates × draws, one column per draw, the order of
 `coordinate_names(rk.model.layout)`), their `coordinates`, and `diagnostics`:
-the ELBO trace (`elbo`, `elbo_windows`, up to a constant), `converged`,
+the ELBO trace, up to a constant (`elbo`, per iteration; `elbo_windows`, the
+plain mean of each window, which a single draw can dominate; and
+`elbo_windows_trimmed`, the 10% trimmed mean of each window, which the stopping
+rule reads), `clipped_steps` (how many global steps had a coordinate's gradient
+limited to `10 √(N / B)` times its running rms, so that one extreme draw does not
+stop that coordinate's optimization), `converged`,
 `finished` (converged or `max_iterations` reached; `false` after `stop_after`),
 `iterations`, the variational parameters `q`, the packed positions of the
 global coordinates (`globals`), `seconds` of optimization in this call,
@@ -1057,7 +1132,9 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
             q = _brm_svi_result_q(run)
             (; draws, coordinates=copy(m.view.coordinates), diagnostics=(;
                 threads=length(t.plans),
-                elbo=run.trace, elbo_windows=first.(run.windows), run.converged,
+                elbo=run.trace, elbo_windows=first.(run.windows),
+                elbo_windows_trimmed=[w.center for w in run.windows],
+                clipped_steps=run.adam.clipped, run.converged,
                 finished=_brm_svi_finished(run, c), iterations=run.iteration, q,
                 globals=t.globals, units=t.units, owner=t.ownership.owner,
                 global_coordinates=t.ownership.promoted,
