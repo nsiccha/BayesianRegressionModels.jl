@@ -1,7 +1,19 @@
 _brm_gp_matrix(axes::Tuple) = Matrix{Float64}(hcat(axes...))
 
+# An approximation setting (`k`, `c`) is a number the model reads: a literal, or
+# a scalar or per-axis vector data field (or `name = constant(expr)`) holding
+# it, so one declaration serves every setting (user principle `0ikeidi`).
+_brm_axis_option_value(value) =
+    value isa NamedColumn && parent(value) isa DataColumn ? parent(parent(value)) : value
+
 function _brm_axis_option(label::Symbol, key::Symbol, value, n_axes::Int, pred, expectation::String)
-    values = value isa Tuple || value isa AbstractVector ? Tuple(value) : ntuple(_ -> value, n_axes)
+    value = _brm_axis_option_value(value)
+    value isa NamedColumn && error(
+        "sbimpl: `$label(...; $key=$(name(value)))` reads `$(name(value))`, which holds " *
+        "no data value here; pass it as a data field or declare it " *
+        "`$(name(value)) = constant(expr)`")
+    values = value isa Tuple || value isa AbstractVector ?
+        Tuple(map(_brm_axis_option_value, value)) : ntuple(_ -> value, n_axes)
     length(values) == n_axes || error(
         "sbimpl: `$label(...; $key=...)` needs one value per axis ($n_axes), got $(length(values))")
     all(pred, values) || error(
@@ -9,7 +21,43 @@ function _brm_axis_option(label::Symbol, key::Symbol, value, n_axes::Int, pred, 
     values
 end
 
+# A frozen replay keeps the fitted basis or support, which a setting's value
+# sized; a design holding another value of that setting's data field asks for
+# another one, which only a fresh build makes. Literal settings cannot differ.
+function _brm_check_frozen_setting(term::Symbol, key::Symbol, value)
+    frozen = _brm_frozen_replay()
+    frozen === nothing && return nothing
+    for item in (value isa Tuple ? value : (value,))
+        item isa NamedColumn && parent(item) isa DataColumn || continue
+        field = name(item)
+        (field in frozen.resample || !haskey(frozen.training, field)) && continue
+        fitted, fresh = frozen.training[field], parent(parent(item))
+        isequal(fitted, fresh) || throw(ArgumentError(
+            "`$term(...; $key=$field)`: the new data holds $field = $(repr(fresh)), but " *
+            "the fit used $field = $(repr(fitted)). A frozen replay keeps the fitted " *
+            "$term; rebuild, or reprocess with freeze_constants=false"))
+    end
+    nothing
+end
+
+# The data fields a term's numeric settings read, each with the value the fit
+# used: what a replay that keeps the fitted term checks its data against.
+function _brm_setting_fields(kw, keys)
+    fields = Pair{Symbol,Any}[]
+    for key in keys
+        value = get(kw, key, nothing)
+        for item in (value isa Tuple ? value : (value,))
+            item isa NamedColumn && parent(item) isa DataColumn &&
+                push!(fields, name(item) => parent(parent(item)))
+        end
+    end
+    Tuple(fields)
+end
+
 _brm_hsgp_options(kw, n_axes::Int) = begin
+    for key in (:k, :c, :domain, :period, :anchor)
+        _brm_check_frozen_setting(:hsgp, key, get(kw, key, nothing))
+    end
     K = _brm_axis_option(:hsgp, :k, get(kw, :k, 20), n_axes,
         x -> x isa Integer && !(x isa Bool) && x >= 1, "positive integers")
     c = _brm_axis_option(:hsgp, :c, get(kw, :c, 1.5), n_axes,
@@ -61,7 +109,8 @@ function _brm_hsgp_domain_fits(kw, n_axes::Int; required::Bool=false)
         "sbimpl: `hsgp(...; domain=...)` fixes the approximation boundary " *
         "directly and cannot also specify the data-derived expansion factor `c`")
 
-    raw = kw[:domain]
+    raw = _brm_axis_option_value(kw[:domain])
+    raw isa Tuple && (raw = map(_brm_axis_option_value, raw))
     is_pair(x) = (x isa Tuple || x isa AbstractVector) && length(x) == 2 &&
                  all(v -> v isa Real && isfinite(v), x)
     pairs = if n_axes == 1 && is_pair(raw)
@@ -125,7 +174,7 @@ function _brm_gp_period(kw, label::Symbol, cov::Symbol)
     haskey(kw, :period) || error(
         "sbimpl: `$label(...; cov=:periodic)` requires a numeric `period=` " *
         "formula constant (the kernel's period on the axis's own scale)")
-    period = kw[:period]
+    period = _brm_axis_option_value(kw[:period])
     (period isa Real && !(period isa Bool) && isfinite(period) && period > 0) || error(
         "sbimpl: `$label(...; period=...)` expects a finite positive numeric " *
         "formula constant, got $(repr(period))")
@@ -154,7 +203,8 @@ end
 # axis; a scalar serves a one-dimensional term.
 function _brm_hsgp_anchor(kw, n_axes::Int)
     haskey(kw, :anchor) || return nothing
-    raw = kw[:anchor]
+    raw = _brm_axis_option_value(kw[:anchor])
+    raw isa Tuple && (raw = map(_brm_axis_option_value, raw))
     values = if raw isa Real && !(raw isa Bool)
         n_axes == 1 || error(
             "sbimpl: `hsgp(...; anchor=...)` over $n_axes axes needs one value " *

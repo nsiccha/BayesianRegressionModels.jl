@@ -2091,6 +2091,22 @@ StanBlocks.@deffun begin
         rv
     end
 end
+# The family's own support (stanblocks-use §8, "A bound may read the family's
+# arguments"), which its density and RNG honour: `[mu - pi, mu + pi]`, or
+# `[lo, hi)` for the principal interval. StanBlocks declares it on a prior's
+# parameter, a sampled `mu` included, and draws a prior-only value with
+# `brm_von_mises_rng`; spelled as bounds instead, the draw was a truncated
+# re-draw asking for an `_lccdf` companion the family does not have (todo
+# 0w0ukqc). Needs StanBlocks 0.2.30 (snag autokwargs-suppo-412811f6). Scalar
+# arguments only, as a prior's are; a per-row location keeps no declaration.
+function StanBlocks.autokwargs(x::StanBlocks.CanonicalExpr{typeof(brm_von_mises),
+        <:Tuple{Vararg{StanBlocks.StanExpr{<:Any,<:StanBlocks.StanType{<:Any,0}},5}}})
+    mu, _, lo, hi, principal = x.args
+    principal = StanBlocks.expr(principal)
+    principal === 1 && return (; lower=lo, upper=hi)
+    principal === 0 || return (;)
+    (; lower=StanBlocks.stan_call(-, mu, pi), upper=StanBlocks.stan_call(+, mu, pi))
+end
 
 # Inverse-Gaussian (Wald) density with the BRM support contract made explicit.
 # StanBlocks registers no `inverse_gaussian` builtin — neither the pinned
@@ -2209,6 +2225,13 @@ StanBlocks.@deffun begin
         rv
     end
 end
+# The positive half-line is the family's own support (stanblocks-use §8): its
+# density and RNG honour it. StanBlocks declares it on a prior's parameter and
+# draws a prior-only value with `brm_inverse_gaussian_rng`; spelled as a bound
+# instead, the draw was a truncated re-draw asking for an `_lccdf` companion
+# the family does not have (todo 0w0ukqc).
+StanBlocks.autokwargs(::StanBlocks.CanonicalExpr{typeof(brm_inverse_gaussian)}) =
+    (; lower=0.0)
 
 function addprop end
 
@@ -5030,6 +5053,24 @@ Base.@nospecializeinfer function _sb_observation_triage(@nospecialize(sb::SBBRMI
     (; bound, unbound, fresh_sources)
 end
 
+# The targets of the emitted priors that hold a `restricted(...)` law
+# (`_sb_restricted_prior!`), including a margin of a vector prior.
+_sb_restricted_targets!(out, _) = out
+function _sb_restricted_targets!(out, x::Expr)
+    if x.head === :call && length(x.args) == 3 && x.args[1] === :~ &&
+       _sb_holds_restricted(x.args[3])
+        name = x.args[2] isa Symbol ? x.args[2] : _sb_plan_lhs_name(x.args[2])
+        isnothing(name) || push!(out, name)
+        return out
+    end
+    foreach(a -> _sb_restricted_targets!(out, a), x.args)
+    out
+end
+_sb_holds_restricted(_) = false
+_sb_holds_restricted(x::Expr) =
+    (x.head === :call && !isempty(x.args) && x.args[1] === StanBlocks.restricted) ||
+    any(_sb_holds_restricted, x.args)
+
 Base.@nospecializeinfer function _sb_triage_emitted(@nospecialize(sb::SBBRMI),
                                                     triage=_sb_observation_triage(sb))
     (; bound, unbound, fresh_sources) = triage
@@ -5042,11 +5083,20 @@ Base.@nospecializeinfer function _sb_triage_emitted(@nospecialize(sb::SBBRMI),
                   "If one was meant to be fitted, its data column is missing " *
                   "or misnamed.")
         else
+            # A `restricted` prior whose mass inside its bounds moves with a
+            # sampled value stays sampled (StanBlocks' rule, stanblocks-use
+            # §8.1), so such a program keeps parameters (todo 0mhtheb).
+            restricted = unique!(_sb_restricted_targets!(Symbol[], sb.model.model))
+            kept = isempty(restricted) ? "" :
+                " A `restricted` prior (" * join(map(s -> "`$s`", restricted), ", ") *
+                ") whose mass inside its bounds moves with a sampled argument " *
+                "or bound stays a sampled parameter instead, with what its " *
+                "bounds and arguments read; that program needs a sampler."
             @warn("sbimpl: $names bind(s) no data column — building the " *
                   "unconditioned (prior) program: no likelihood reaches the " *
                   "model block, so parameters and responses forward-simulate " *
-                  "in generated quantities. If you meant to fit, the response " *
-                  "column is missing or misnamed.")
+                  "in generated quantities." * kept * " If you meant to fit, " *
+                  "the response column is missing or misnamed.")
         end
         return nothing
     end
@@ -6773,10 +6823,12 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :gp)
         replay_and_bind(axes, :primary => key)
     elseif e.kind === :hsgp && get(e.const_, :cov, :exp_quad) === :periodic
+        _sb_check_replay_settings(df, :hsgp, get(e.const_, :setting_fields, ()))
         replay_and_bind(_sb_hsgp_replay_input(df, e; allow_empty=true), :primary => key,
                         :harmonics => e.const_.harmonics_key,
                         :rho_lower => e.const_.rho_lower_key)
     elseif e.kind === :hsgp
+        _sb_check_replay_settings(df, :hsgp, get(e.const_, :setting_fields, ()))
         input = _sb_hsgp_replay_input(df, e;
             allow_empty=!isnothing(get(e.const_, :domain_fits, nothing)))
         # A `by=` term's projection reads the replay rows' level codes, which
@@ -7879,6 +7931,7 @@ end
 # `nothing` when the lambda is malformed. The emitter validates loudly on
 # `nothing`; formula walkers (which run where emission already succeeded) skip.
 function _sb_kernel_lambda_parts(lam)
+    scope = _brm_inline_scope(lam)
     lam = _brm_inline_expr(lam)
     lam isa Expr && lam.head === :-> && length(lam.args) >= 2 || return nothing
     ptuple = lam.args[1]
@@ -7896,7 +7949,8 @@ function _sb_kernel_lambda_parts(lam)
         statements = copy(statements)
         statements[final] = only(statements[final].args)
     end
-    (params, statements)
+    # A cell's reads of a named-return component's fields, for both backends.
+    (params, _brm_cell_component_reads(statements, scope))
 end
 
 # The column a kernel positional binds to its cell formal: the column itself,
@@ -8021,7 +8075,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     dcol_names    = Symbol[]
     lp_cols       = Any[]
     read_outputs  = Symbol[]
-    assigned_inputs = Symbol[]
+    value_inputs = Symbol[]
     ragged_specs  = Any[]
     ragged_cols   = Any[]
     for (i, c) in enumerate(dcols[2:end])
@@ -8054,10 +8108,10 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         if parent(c) isa DataColumn
             v = parent(parent(c))
             data[k] = v
-        elseif parent(c) isa ExprColumn{typeof(assign)}
-            # Read the emitted value on its own axis. An assignment can
-            # change its inputs' axes, so it has no formula grouping to infer.
-            push!(assigned_inputs, k)
+        elseif _brm_kernel_value_input(c)
+            # Read assignments, components and producer plates on their own
+            # result axes, without inferring rows from their shared inputs.
+            push!(value_inputs, k)
         elseif parent(c) isa MissingColumn && k in get(data, _SB_KERNEL_OUTPUT_READS_KEY, ())
             # Another cell's non-collected indexed output, emitted before this
             # cell (`_brm_prepare_program`): sliced by name like a collected
@@ -8143,11 +8197,11 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
         # The subject count is the common length of the pre-grouped data
         # columns or, when the cell slices only LPs (beside omitted outcomes),
         # of the per-subject columns those LPs read.
-        lp_names = union(Set(name(c) for c in lp_cols), read_outputs, assigned_inputs)
+        lp_names = union(Set(name(c) for c in lp_cols), read_outputs, value_inputs)
         counted = [(k, length(data[k])) for k in kept_names if k ∉ lp_names]
         isempty(counted) &&
             foreach(c -> append!(counted, _brm_kernel_lp_data_lengths(c)), lp_cols)
-        isempty(counted) && isempty(assigned_inputs) && error(
+        isempty(counted) && isempty(value_inputs) && error(
             "sbimpl: kernel(...) with no random-effect linear predictor needs at least ",
             "one pre-grouped per-subject data column to derive the subject count from; ",
             "omitted outcomes cannot supply it.")
@@ -8445,29 +8499,34 @@ function _sb_emit_prior!(stmts, target, ::Type{<:Horseshoe}, op)
     true
 end
 
-# The prior uses the same exact density/RNG as an observation. Its declaration
-# additionally carries the distribution's support, including a sampled mean.
+# The prior uses the same exact density/RNG as an observation. The family
+# declares its support `[mu - pi, mu + pi]` itself, a sampled mean included
+# (`autokwargs` above), so only a bound that narrows it is spelled, intersected
+# with the support, and that one restricts the prior.
 function _sb_emit_prior!(stmts, target, ::Type{<:VonMises}, op)
     args = map(_sb_effect_prior_arg, getargs(op))
     mu, kappa = _sb_stan_dist_args(VonMises, args)
-    lower = mu isa Real ? mu - pi : :($mu - $(Float64(pi)))
-    upper = mu isa Real ? mu + pi : :($mu + $(Float64(pi)))
     bounds = _sb_prior_bound_keywords(target, VonMises, getkwargs(op))
     supplied = Dict(kw.args[1] => kw.args[2] for kw in bounds.args)
-    if haskey(supplied, :lower)
-        lower = _sb_bound_intersection(max, lower, supplied[:lower])
+    narrowing = Pair{Symbol,Any}[]
+    for (key, f, side) in ((:lower, max, :-), (:upper, min, :+))
+        haskey(supplied, key) || continue
+        support = mu isa Real ? (side === :- ? mu - pi : mu + pi) :
+            Expr(:call, side, mu, Float64(pi))
+        bound = _sb_bound_intersection(f, support, supplied[key])
+        bound isa Real && bound == support && continue
+        push!(narrowing, key => bound)
     end
-    if haskey(supplied, :upper)
-        upper = _sb_bound_intersection(min, upper, supplied[:upper])
-    end
-    declaration = _sb_prior_bound_keywords(target, VonMises, (; lower, upper))
-    push!(stmts, Expr(:call, :~, target,
-        Expr(:call, brm_von_mises, declaration, mu, kappa, 0.0, 0.0, 0)))
+    rhs = Expr(:call, brm_von_mises, mu, kappa, 0.0, 0.0, 0)
+    isempty(narrowing) || insert!(rhs.args, 2,
+        _sb_prior_bound_keywords(target, VonMises, (; narrowing...)))
+    push!(stmts, Expr(:call, :~, target, rhs))
     true
 end
 
-# The prior uses the same exact density/RNG as an observation. Its declaration
-# additionally carries the positive-half-line support.
+# The prior uses the same exact density/RNG as an observation. The family
+# declares its positive-half-line support itself (`autokwargs` above), so only a
+# bound that narrows it is spelled, and that one restricts the prior.
 function _sb_emit_prior!(stmts, target, ::Type{<:InverseGaussian}, op)
     length(getargs(op)) in (0, 1, 2) || error(
         "sbimpl: `InverseGaussian` expects `InverseGaussian()`, " *
@@ -8477,14 +8536,16 @@ function _sb_emit_prior!(stmts, target, ::Type{<:InverseGaussian}, op)
     mu, lambda = _sb_stan_dist_args(InverseGaussian, args)
     bounds = _sb_prior_bound_keywords(target, InverseGaussian, getkwargs(op))
     supplied = Dict(kw.args[1] => kw.args[2] for kw in bounds.args)
-    lower = 0.0
+    narrowing = Pair{Symbol,Any}[]
     if haskey(supplied, :lower)
-        lower = _sb_bound_intersection(max, lower, supplied[:lower])
+        lower = _sb_bound_intersection(max, 0.0, supplied[:lower])
+        lower == 0.0 || push!(narrowing, :lower => lower)
     end
-    decl_kwargs = haskey(supplied, :upper) ? (; lower, upper=supplied[:upper]) : (; lower)
-    declaration = _sb_prior_bound_keywords(target, InverseGaussian, decl_kwargs)
-    push!(stmts, Expr(:call, :~, target,
-        Expr(:call, brm_inverse_gaussian, declaration, mu, lambda)))
+    haskey(supplied, :upper) && push!(narrowing, :upper => supplied[:upper])
+    rhs = Expr(:call, brm_inverse_gaussian, mu, lambda)
+    isempty(narrowing) || insert!(rhs.args, 2,
+        _sb_prior_bound_keywords(target, InverseGaussian, (; narrowing...)))
+    push!(stmts, Expr(:call, :~, target, rhs))
     true
 end
 # Generic scalar prior via a Distributions.jl constructor on the RHS
@@ -15314,8 +15375,26 @@ end
 
 # Replay needs the options next to the frozen fit; a term that uses none of
 # them records nothing new, so its preprocessing record is unchanged.
+# An SBBRMI replay keeps a term's fitted basis, which its settings sized; data
+# whose setting field holds another value asks for another basis. The Stan
+# program does not depend on these values, so a new build from that data
+# compiles the same program.
+function _sb_check_replay_settings(df, term::Symbol, fields)
+    for (field, fitted) in fields
+        _sb_df_has_column(df, field) || continue
+        fresh = _sb_df_column(df, field)
+        isequal(fresh, fitted) || throw(ArgumentError(
+            "sbimpl: `$term(...)` reads `$field`: the new data holds $field = " *
+            "$(repr(fresh)), but the fit used $field = $(repr(fitted)). An SBBRMI " *
+            "replay keeps the fitted $term; build a new SBBRMI from the new data " *
+            "(its Stan program is the same)"))
+    end
+end
+
 function _sb_hsgp_option_const(options, support)
     out = (;)
+    isempty(options.setting_fields) ||
+        (out = merge(out, (; setting_fields=options.setting_fields)))
     isnothing(options.anchor) || (out = merge(out, (; anchor=options.anchor)))
     options.extrapolate === :clamp &&
         (out = merge(out, (; extrapolate=:clamp, support)))

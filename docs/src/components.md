@@ -39,7 +39,11 @@ There are six sampled scalars: each call owns its own `a` and `b`, both calls
 read the parent's `shared_scale`, and the likelihoods share `obs_sd`. A component call introduces no
 regression coefficient. The two input vectors need not have the same length.
 The result can be scalar or array valued; ordinary component statements can
-declare vector priors and call other components.
+declare vector priors and call other components. Formula priors read inputs as
+scalar priors do: `effect(value, Intercept) ~ Normal(center, 0.4)` and
+`sd(value, unit) ~ Exponential(scale)` may name inputs that the caller binds to
+its own parameters. `RKBRMI` admits only numeric constants and data as
+population-effect prior arguments, in a component as at model scope.
 
 An elementwise vector result retains its input row frame. It can be used in a formula
 offset or selected by a row index, including repeated or reordered indices:
@@ -143,9 +147,40 @@ slices names, so bind the field first, `recovery = kin.recovery`, and read
 `recovery[i]` in the cell. Stan returns the values as one tuple; ReactiveKernels
 reads each from the call's own scope. The call itself is not a value: reading
 bare `kin`, an unknown field, or `kin.recovery[i]` inside a plate is refused
-with the supported spelling. A component called inside a plate cell returns one
-value per cell. A positional tuple return is refused, because the parent reads
-values by name.
+with the supported spelling. A positional tuple return is refused, because the
+parent reads values by name.
+
+A component called inside a plate cell can return named values too. Each cell
+owns its call's locals and reads the fields in the cell:
+
+```@eval
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:NamedCellComponentsDocs), raw"""
+using BayesianRegressionModels, Distributions
+
+"Two related curves from one pair of local coefficients."
+@brm function bounds(x, scale)
+    a ~ Normal(0, scale)
+    b ~ Normal(1, 0.2)
+    return (; lo = a + b * x, hi = a - b * x)
+end
+
+per_cell = @brm begin
+    @plate for i in eachindex(x)
+        cell ~ bounds(x[i], scale)
+        y_lo[i] ~ Normal(cell.lo, 0.5)
+        y_sum[i] ~ Normal(cell.lo + cell.hi, 0.5)
+    end
+    scale ~ Exponential(1)
+end
+
+model = per_cell((; x=[-0.4, 0.2, 0.7], y_lo=[0.1, 0.4, 0.8],
+                    y_sum=[0.3, -0.1, 0.2]))
+""", :model; title="Named values from a call in each plate cell", require_stan=true)
+```
+
+As at model scope, a bare `cell` or an unknown field is refused inside the
+cell.
 
 The existing `@brm model(data) = begin … end` form still defines a data-to-model
 builder. `merge(builder_a, builder_b)` still combines statements in one

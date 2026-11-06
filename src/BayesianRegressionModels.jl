@@ -35,6 +35,7 @@ import CategoricalArrays as CA
 import StatsFuns
 using StatsFuns: normcdf, norminvcdf
 include("likelihood_distributions.jl")
+include("censored_delays.jl")
 include("preparation_basis.jl")
 include("preparation_hsgp.jl")
 include("formula_markers.jl")
@@ -111,6 +112,7 @@ include("component_cells.jl")
 using Serialization
 include("rk_artifact.jl")
 include("sb_affine.jl")
+include("sb_censored_delays.jl")
 include("cell_total_coordinates.jl")
 include("lower_bounded_shares.jl")
 include("total_effects.jl")
@@ -248,13 +250,16 @@ export brm_multinomial, brm_multinomial_lpmf, brm_multinomial_lpmfs, brm_multino
 # exact Distributions.jl functions; `interval_censored` is BRM's formula marker
 # for row-wise interval evidence on either a response or a predictor.
 export truncated, censored, interval_censored
+# Delays with a censored primary event, truncation and a censored secondary
+# event (epidist's marginal model); the CensoredDistributions.jl spellings.
+export primary_censored, double_interval_censored, PrimaryCensored, DoubleIntervalCensored
 # Fusion append API (cross-package: the RK reporter resolves this by name).
 export rk_translate_artifact
 export rk_artifact_inputs
 export rk_bound_data, rk_bound_plan, rk_design_binder, RKDesignBinder
 export brm_fitted_state, BRMFittedState
 export BRMSVIState, BRMSVILaplaceState, GaussianBlockLaplace, brm_svi_checkpoint
-export BRMSVIOptimizerState, brm_svi_optimizer_checkpoint, brm_svi_resume
+export BRMSVIOptimizerState, brm_svi_optimizer_checkpoint, brm_svi_resume, BRMSVINonfiniteError
 export BRMSMCFit, brm_smc_fit, brm_smc_tune, brm_smc_update, brm_smc_checkpoint, brm_smc_resume
 export BRMSMCCarriedReference, BRMSMCWindowFit, brm_smc_carry
 export brm_smc_coordinates, brm_smc_recover

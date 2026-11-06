@@ -1,5 +1,44 @@
 # Running the tests
 
+`rk_data_law_arguments.jl` checks RKBRMI formula responses whose law reads
+data: a scalar data field, a `constant(...)` value, a plain alias and a per-row
+column as a Normal scale, a censored Normal, a Student-t scale, a LogNormal scale
+and a model-scope `gmrf` readout. It compares an independent likelihood oracle and
+compiled Stan (value and native Reverse gradient, through the coordinate
+transport), replays the printed source, checks that another value emits the same
+program, that binding refuses an invalid value, and frozen `reprocess` of a
+scalar field and of a constant. The further arguments of the other response
+families are checked against the oracle and finite differences. It accepts
+testset substring filters.
+
+`rk_value_weighted_observations.jl` checks formula-level `fweights` and
+`weights` on RKBRMI responses whose law reads an assigned value: a Julia
+reader's probability under `weighted(Bernoulli(p), fweights(n))` against
+its `Binomial(n, p)` equivalent, power, frequency and censored Normal rows,
+a predictor read through an assignment and a mixture with per-row component
+weights. It compares normalized densities
+and native Reverse gradients with independent oracles and compiled Stan,
+checks printed-source replay, rebinding and value checks of a new design's
+weights, and the refused analytic, `mi()` and invalid-weight cases. It
+accepts testset substring filters.
+
+`epidist_docs_page.jl` evaluates every build-time block of the
+"Epidemiological delays" docs page (`docs/src/epidist.md`) in order, as
+Documenter does. It checks that the page's source markers resolve, its one backend
+comparison carries a Stan pane `stanc` accepts, and the two tables generated
+from `research/epidist/results/*/{parity,fits}.json` render. No sampling.
+
+`censored_delays.jl` checks `primary_censored` and `double_interval_censored`
+(epidist's marginal delay model). The closed-form primary-censored CDF and
+survival of lognormal, gamma and Weibull delays are compared with an
+independent 256-bit tanh-sinh quadrature of the convolution, including shapes
+below one. It also checks upper-tail window probabilities, truncation, windows,
+a shifted primary window and draws, and native Enzyme Reverse gradients. A
+weighted `@brm` model on SBBRMI and RKBRMI is compared with the Julia law in
+value and gradient for all three laws. The test also covers exact secondary
+times and the row checks. Run it with `julia --project=test
+test/censored_delays.jl`; about 3 minutes warm.
+
 `offset_only_axes.jl` checks coefficient-free formulas on scalar plate and
 component rows, fixed expressions, explicit gathers, changed-size replay and
 in-cell consumers. It compares physical values, normalized densities and native
@@ -9,7 +48,8 @@ row-length and scalar-cell checks. It accepts testset substring filters.
 `model_view_documentation.jl` checks authored Julia documentation in builder and
 bound-model views, plus callable docs after binding: references become formatted labels,
 ordinary URLs remain linked, doctest contents survive, and source/doc records
-remain unchanged. The bootstrap selects HTMXObjects 0.1.62 for this projection.
+remain unchanged. The bootstrap selects HTMXObjects 0.1.65, which also renders
+tabbed views as readable plain text without internal node representations.
 
 `heterogeneous_mixtures.jl` checks native mixtures of different full-real
 scalar families and custom component graphs against independent normalized
@@ -57,6 +97,14 @@ scales and simplexes, and preserves unaddressed values and top-level starts.
 Run it as a standalone script in the test environment; it compiles Stan even
 when the resulting point is consumed by RK.
 
+`component_prior_inputs.jl` checks component formula priors that read the
+caller's parameters through inputs: population-effect locations and scales and
+a component-local `|ID|` block's SD prior. It compares compiled Stan densities
+and gradients with an independent density, checks each input's contribution
+along its coordinate, and covers a nested call and a call whose input is a
+number. The SD case is also checked on `RKBRMI`. It accepts testset substring
+filters; run it as a standalone script in the test environment.
+
 `component_start_values.jl` checks native component-local starts, recursive
 scalar prior medians, repeated and nested call paths, constrained values,
 explicit precedence, numeric-base preservation and input immutability.
@@ -85,6 +133,14 @@ cumulative-update, selective carried-window and prepared sparse-Laplace targets
 using small synthetic models. Run `test/setup_env.jl` first for the pinned RKPPL recovery contract and
 Treebars 0.1.5, then `julia --project=test test/smc_tuning_lifecycle.jl`.
 
+`smc_worker_forwarding.jl` checks that BRM forwards ReactiveKernelsPPL 0.1.100's
+worker controls on the same four targets: `grid_start=:independent` reaches every
+`brm_smc_tune` route and gives the same schedule at one and several workers, and
+`nthreads` on every `brm_smc_resume` route replaces a production checkpoint's
+saved worker cap without changing the resumed cloud. Its assertions hold at any
+thread count; run `julia -t 4 --project=test test/smc_worker_forwarding.jl` to
+also exercise concurrent pilots and workers.
+
 `smc_generated_law_recovery.jl` stops an adaptive pilot of a small `gmrf(...)`
 field model at initialization in one Julia process and resumes it in another,
 through `smc_generated_law_process.jl`. The field's law is bound in the
@@ -110,6 +166,11 @@ aliased and nested component calls. It
 verifies row/channel selection, strict per-row dependency footprints, emitted
 source replay, normalized densities and native gradients against compiled Stan.
 Run it as a standalone script in the same test environment.
+
+`component_direct_rows.jl` checks direct downstream reads of component cells
+with shared matrix inputs, including nested calls and a component result as
+the plate's only extent. It compares physical values, normalized densities,
+native Reverse gradients, compiled Stan and strict selected-row dependencies.
 
 `authored_documentation.jl`, `authored_documentation_binding.jl`,
 `authored_documentation_printing.jl`, `authored_documentation_rk_source.jl`
@@ -1216,7 +1277,9 @@ density and gradient expectations, including repeated draws, the alias
 distribution, positive probabilities and bounded batch allocations.
 `nlme_svi_weighted_iteration.jl` exercises the production optimizer against
 an analytic target, including duplicate evaluation counts, reported visits,
-and lazy local averages against averages of every iterate.
+and lazy local averages against averages of every iterate. It also checks that
+a non-finite unit stops dense and structured factors under uniform and work
+batches before any update, with an unpoisoned control run that does update.
 `nlme_svi_workspace.jl` checks compact local layouts against independent dense
 gather/scatter arithmetic and storage independent of the global dimension.
 These three arithmetic scripts need only Julia's standard libraries.
@@ -1268,6 +1331,9 @@ draw packing. Run it alone in the test environment.
 zero coefficients, shared and prior-only coordinates, connected units,
 explicit global promotions, optimizer resume and streaming absent/returning
 units. Its density and native Reverse gradient oracle is the full RK sampler.
+The dormant scalar/vector branch's ordinary Reverse needs Enzyme dogfood from
+`0fa85df3` (repairs `74abe90` and `7ac58eb`, contained in the bootstrap's
+`b2bb4cb6`); earlier pins raise `IllegalTypeAnalysisException` there.
 `nlme_svi_ownership_algebra.jl` isolates atomic-block and directed-prior
 closure, including fixed coordinates and factors that own no coordinates.
 
@@ -1288,6 +1354,21 @@ window fit. It also covers each worker's own samplers over shared read-only tabl
 how a failing unit stops the tasks, the BLAS pin and the refusals.
 `research/svi_threads/benchmark.jl` measures per-iteration time, GC share and retained
 worker memory against `threads`.
+
+`nlme_threads.jl` checks one-unit NLME calls from several tasks at once, which
+take their own evaluators from the model's pool. On flat, plate and nested
+models, the protocol's one-unit values, η gradients and population gradients,
+called from every thread in shuffled order, equal serial calls to the last bit,
+and the pool prepares more than one evaluator. `check_protocol(...; threads =
+true)` passes on a nested model. A seeded `WarmupHMCNUTS(threads = true)` SAEM fit
+of a 24-subject plate PK model gives the same bits in child processes with 1, 4
+and N threads (`BRM_NLME_THREADS_N`, default 8). Over six seeds its estimates
+agree with lockstep fits (`threads = false`) within twice the lockstep fits'
+spread, and both recover the simulated population values. Run it in the
+NLMEEstimation scratch environment below (NLMEEstimation 0.2.5 or later) with
+`--threads=4`; it refuses to run without threads.
+`research/nlme_threads/benchmark.jl` measures a round of one-unit calls and SAEM
+fits at the thread count it is started with.
 
 `nlme_svi_laplace_plan.jl` checks structural eligibility for
 `GaussianBlockLaplace`, including fixed HSGP fitting inputs, nonstandard
@@ -2526,7 +2607,10 @@ toolchain, so a GitHub Actions job would be red by construction.
 # zero coordinates. Bound baseline observations keep their inference ancestors.
 # Controls cover normalized compiled same-BRMI Stan, ordinary native Reverse,
 # full source/artifact replay and input ownership; native generated draws are
-# unavailable.
+# unavailable. Both backends start such a program at the empty point
+# (`brm_start` with and without initial values, `base=:prior_median`, the start
+# from the data), the coordinate transport pairs the two empty layouts, and an
+# initial value is refused by name.
 
 ## Bounded sparse Laplace acceptance
 
@@ -2635,6 +2719,11 @@ semantic projections. It verifies that viewing a model never evaluates a custom
 helper. The descriptor fixture checks constrained simplex dimensions and keeps
 logical quantities separate from generated carriers, without fitting or compiling
 Stan. Set `BRM_MODEL_VIEW_HTML` to an output path to save a browser preview.
+The model-view files share `model_view_plain_text_checks.jl`: titles and tab
+labels must occupy real lines, source remains multiline, default-input rows are
+readable fields, and renderer implementation dumps are absent. These checks cover
+builders, bound declarations, reusable components, descriptors and prepared RK
+views, retaining the helper/default non-evaluation guards.
 
 `julia --project=test test/model_view_edge_cases.jl` covers joint and transformed
 response roles, callable documentation inside mixture-component lists, optional
@@ -2657,11 +2746,9 @@ The browser script owns and closes its temporary server and Chrome process.
 For fresh RK, descriptor and component captures, also run
 `julia --project=<rk-env> web-macro/validate_model_view_prepared_export.jl <output-dir>`
 after the main export, then append `--prepared` to the browser command.
-With HTMXObjects 0.1.60 these additional fixtures expose unresolved Documenter
-`@ref` links (incomplete static export) and a missing `jldoctest` browser grammar.
-The checks intentionally fail on those upstream gaps; do not treat their
-screenshots as evidence of a complete prepared bundle. The base export and
-browser check remain independently runnable.
+The current dependency floor includes Julia-documentation projection and the
+shared Julia doctest grammar. Both the base and prepared bundles must pass strict
+export and browser checks; the base checks remain independently runnable.
 The RK environment must contain BRM, HTMXObjects, ReactiveKernels and
 ReactiveKernelsPPL. This explicitly prepares toy objects, then exports the
 supplied objects with helper evaluation guarded off. Browser checks cover

@@ -456,6 +456,93 @@ function _brm_svi_unit_step!(::AbstractMatrix, q, i, gz, gd, εi, β)
     q
 end
 
+# ── Non-finite evaluations ───────────────────────────────────────────────────
+
+"""
+    BRMSVINonfiniteError
+
+Thrown by [`brm_svi_fit`](@ref) and [`brm_svi_resume`](@ref) when an
+iteration evaluates the target to a non-finite value or gradient at its Monte
+Carlo draws. It is raised after the draws are evaluated and before the
+iteration changes the variational factors or the optimizer. `iteration` is the
+iteration that failed, one past the last completed one. `terms` lists every
+non-finite term in batch order, each a named tuple with:
+
+- `term`: `:global` for the global prior term, `:unit` for a unit's term;
+- `unit`: the unit's index, 0 for the global term;
+- `quantities`: what was not finite, for example `:value_plus`,
+  `:global_gradient_minus` or `:unit_gradient_plus` (a unit is evaluated at
+  the antithetic pair of draws, plus and minus; the global term has `:value`
+  and `:global_gradient`);
+- `coordinates`: the names of the packed coordinates whose gradient entries
+  were not finite;
+- `draw_finite`: whether the point the term was evaluated at was finite.
+
+The run in memory is not a checkpoint after this error, because its random
+stream has advanced. Continue from the last checkpoint `save` received. A
+continuation repeats the run's random stream exactly, so resuming that
+checkpoint with unchanged controls reaches the same evaluation again.
+"""
+struct BRMSVINonfiniteError <: Exception
+    iteration::Int
+    terms::Vector{NamedTuple}
+end
+
+function Base.showerror(io::IO, e::BRMSVINonfiniteError)
+    print(io, "BRMSVINonfiniteError: iteration ", e.iteration, " evaluated the ",
+        "target to a non-finite value or gradient at its Monte Carlo draws, before ",
+        "changing the variational factors or the optimizer")
+    for p in e.terms
+        print(io, "\n  ", p.term === :global ? "global prior term" : "unit $(p.unit)",
+            ": ", join(p.quantities, ", "),
+            p.draw_finite ? "" : " (the evaluated point is not finite)")
+        isempty(p.coordinates) && continue
+        print(io, "; non-finite gradient in ", length(p.coordinates), " coordinate(s): ",
+            join(p.coordinates, ", "))
+    end
+    print(io, "\nThe run in memory is not a checkpoint after this error. Continue ",
+        "from the last checkpoint `save` received; resuming it with unchanged ",
+        "controls repeats the same random stream and reaches this evaluation again.")
+end
+
+# Unit i's terms at the antithetic pair `zs`: `nothing` when every value and
+# gradient is finite, else what was not. Gradient entries map to `t.globals`
+# (`ggs`) and `t.units[i]` (`gzs`).
+function _brm_svi_nonfinite_unit(t, i, g, zs, values, ggs, gzs)
+    all(isfinite, values) && all(x -> all(isfinite, x), ggs) &&
+        all(x -> all(isfinite, x), gzs) && return nothing
+    quantities, bad = Symbol[], Int[]
+    for (side, v, gg, gz) in zip((:plus, :minus), values, ggs, gzs)
+        isfinite(v) || push!(quantities, Symbol(:value_, side))
+        all(isfinite, gg) || (push!(quantities, Symbol(:global_gradient_, side));
+            append!(bad, t.globals[findall(!isfinite, gg)]))
+        all(isfinite, gz) || (push!(quantities, Symbol(:unit_gradient_, side));
+            append!(bad, t.units[i][findall(!isfinite, gz)]))
+    end
+    (; term=:unit, unit=i, quantities,
+       coordinates=t.m.view.coordinates[sort!(unique!(bad))],
+       draw_finite=all(isfinite, g) && all(z -> all(isfinite, z), zs))
+end
+
+# Throws `BRMSVINonfiniteError` (iteration 0, which the caller fills in) when
+# the global term `P`, `gP` at `g` or a unit's terms (`problems`) are not finite.
+function _brm_svi_check_finite(t, g, P, gP, problems)
+    found = NamedTuple[]
+    if !(isfinite(P) && all(isfinite, gP))
+        quantities = Symbol[]
+        isfinite(P) || push!(quantities, :value)
+        all(isfinite, gP) || push!(quantities, :global_gradient)
+        push!(found, (; term=:global, unit=0, quantities,
+            coordinates=t.m.view.coordinates[t.globals[findall(!isfinite, gP)]],
+            draw_finite=all(isfinite, g)))
+    end
+    for p in problems
+        p === nothing || push!(found, p)
+    end
+    isempty(found) || throw(BRMSVINonfiniteError(0, found))
+    nothing
+end
+
 # ── One minibatch iteration ──────────────────────────────────────────────────
 
 # One draw of the globals, an antithetic pair of draws per batch subject, the
@@ -476,16 +563,24 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     draws = [_brm_svi_unit_noise(rng, q.U[i]) for i in batch]
     terms = Vector{@NamedTuple{value::Float64,gg::Vector{Float64},gz::Vector{Float64},
         gd::Vector{Float64}}}(undef, length(batch))
+    problems = Vector{Union{Nothing,NamedTuple}}(nothing, length(batch))
     _brm_svi_each_unit(eachindex(t.plans), length(batch)) do worker, k
         plan, work = t.plans[worker], t.work[worker]
         i, εi = batch[k], draws[k]
         gg₊, gg₋ = zeros(D), zeros(D)
         gz₊, gz₋ = zeros(length(t.units[i])), zeros(length(t.units[i]))
         m, δ = q.M[i], _brm_svi_unit_offset(q, i, εi)
-        value = (_brm_svi_unit_term!(gg₊, gz₊, t, i, g, m .+ δ, plan, work) +
-            _brm_svi_unit_term!(gg₋, gz₋, t, i, g, m .- δ, plan, work)) / 2
-        terms[k] = (; value, gg=gg₊ .+ gg₋, gz=(gz₊ .+ gz₋) ./ 2, gd=(gz₊ .- gz₋) ./ 2)
+        z₊, z₋ = m .+ δ, m .- δ
+        v₊ = _brm_svi_unit_term!(gg₊, gz₊, t, i, g, z₊, plan, work)
+        v₋ = _brm_svi_unit_term!(gg₋, gz₋, t, i, g, z₋, plan, work)
+        problems[k] = _brm_svi_nonfinite_unit(t, i, g, (z₊, z₋), (v₊, v₋),
+            (gg₊, gg₋), (gz₊, gz₋))
+        terms[k] = (; value=(v₊ + v₋) / 2, gg=gg₊ .+ gg₋, gz=(gz₊ .+ gz₋) ./ 2,
+            gd=(gz₊ .- gz₋) ./ 2)
     end
+    # Before anything changes q or the optimizer.
+    _brm_svi_check_finite(t, g, P, gP, problems)
+
     w = copy(gP)
     batch_value = 0.0
     for (k, term) in enumerate(terms)
@@ -590,9 +685,14 @@ function _brm_svi_advance!(run, t, c)
         run.sampling.draws[i] += batch.multiplicities[k]
     end
     run.unit_gradient_calls += 2length(batch.indices)
-    value = _brm_svi_iteration!(run.rng, t, q, run.adam, batch.indices,
-        scale * (polishing ? c.polish_lr : c.lr_global), scale * c.unit_step;
-        whiten=polishing, weights=batch.weights)
+    value = try
+        _brm_svi_iteration!(run.rng, t, q, run.adam, batch.indices,
+            scale * (polishing ? c.polish_lr : c.lr_global), scale * c.unit_step;
+            whiten=polishing, weights=batch.weights)
+    catch e
+        e isa BRMSVINonfiniteError || rethrow()
+        throw(BRMSVINonfiniteError(it, e.terms))
+    end
     for i in batch.indices
         entropy = _brm_svi_unit_entropy(q, i)
         run.entropy_sum += entropy - run.unit_entropy[i]

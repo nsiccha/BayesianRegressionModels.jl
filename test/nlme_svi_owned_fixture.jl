@@ -23,8 +23,10 @@ end
 
 # Keep the branch-native regression independent of the non-branch ownership,
 # checkpoint and operation-cost cases. The mixed scalar/vector branch below
-# currently triggers RK/Enzyme IllegalTypeAnalysisException (co-report
-# ReactiveKernels/brm-retained-poi-a68d4412); do not rewrite it to hide that gap.
+# raised IllegalTypeAnalysisException under ordinary Reverse until Enzyme
+# dogfood 0fa85df3 (repairs 74abe90 and 7ac58eb; ReactiveKernels snag
+# brm-retained-poi-a68d4412). Keep the model unchanged: it is that repair's
+# consumer regression.
 function svi_owned_dormant_model(data)
     @brm data begin
         sigma ~ Exponential(1)

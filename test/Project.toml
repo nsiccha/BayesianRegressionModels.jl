@@ -68,7 +68,7 @@ OptimizationBase = "5.10.1"
 PowerScaling = "0.1.0"
 Revise = "3"
 SequentialMonteCarlo = "0.7"
-StanBlocks = "0.2.26"
+StanBlocks = "0.2.31"
 Treebars = "0.1.5"
 WarmupHMC = "0.2.11"
 julia = "1.10"
@@ -156,7 +156,12 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # dba65366 (0.2.25) preserves keyword labels when a plate renames its
 # inputs, including BRM component calls whose formal and actual names match.
 # ea1d64f0 (0.2.26) keeps EachCol/EachRow views through ordinary helpers.
-rev = "ea1d64f0c691092b9d4e7d8ad03ab83727671264"
+# 904e839a (0.2.30) makes a number passed to `stan_call` a data literal, which
+# `brm_von_mises`'s argument-dependent `autokwargs` support needs.
+# d9396ae6 (0.2.31) collects tuple-valued plate cells as `array[outer...] tuple(...)`
+# and reads `cell.lo` as `cell[i].1` (b28164c, snag plate-cell-submo-4867bc5b), which
+# BRM's named returns from a component called inside a plate cell lower to.
+rev = "d9396ae6c66c7cb44d641989573b7008154de6c5"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
@@ -365,6 +370,8 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # db6bca825 (RK 0.1.86 / RKPPL 0.1.99) includes df3eb8872's selective-window
 # capture-footprint fix and the scalar-observation gather-demand repair.
 # Use the SHA: those versions alone do not identify the footprint fix.
+# cb3b33bd (RKPPL 0.1.100): opt-in independent adaptive grid pilots
+# (`tune_smc(...; grid_start=:independent)`) and `resume_smc(...; nthreads)`.
 # 7dced1e5 (RK 0.1.89 / RKPPL 0.1.102) keeps selected-unit gradients
 # and shared-row storage compact as unrelated units are added.
 rev = "7dced1e52edb45bcbfe9e23d6b5904a0dbe66b56"

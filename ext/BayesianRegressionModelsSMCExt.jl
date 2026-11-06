@@ -66,14 +66,14 @@ function BRM.brm_smc_tune(model::Union{BRM.BRMI,BRM.RKBRMI,BRM._BRMSMCLaplacePro
         rng, init, reference=nothing,
         temperatures=nothing, pilot_steps=64, pilot=nothing,
         max_reflections=nothing, recording_target=nothing, pilot_evaluations=nothing,
-        reference_inflation=nothing, progress=nothing, callback=nothing,
+        reference_inflation=nothing, grid_start=nothing, progress=nothing, callback=nothing,
         checkpoint_dir=nothing, resume=false, overwrite=false,
         options=PPL.SMCOptions(), ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
     rk = smc_model(model)
     id = binding_identity(rk)
     target = prepare(rk, ad_backend, id, id)
     controls = tuning_controls(; temperatures, pilot, max_reflections,
-        recording_target, pilot_evaluations, reference_inflation)
+        recording_target, pilot_evaluations, reference_inflation, grid_start)
     PPL.tune_smc(target; rng, init, reference, controls..., pilot_steps, options,
         progress, callback, checkpoint_dir, resume, overwrite)
 end
@@ -81,8 +81,8 @@ end
 function BRM.brm_smc_tune(fit::BRM.BRMSMCFit, cumulative_data;
         rng, init, temperatures=nothing, pilot_steps=64, pilot=nothing,
         max_reflections=nothing, recording_target=nothing, pilot_evaluations=nothing,
-        progress=nothing, callback=nothing, checkpoint_dir=nothing, resume=false,
-        overwrite=false,
+        grid_start=nothing, progress=nothing, callback=nothing, checkpoint_dir=nothing,
+        resume=false, overwrite=false,
         options=PPL.SMCOptions())
     BRM._brm_validate_smc_fit(fit)
     fit.state.temperature == 1 || throw(ArgumentError(
@@ -92,7 +92,7 @@ function BRM.brm_smc_tune(fit::BRM.BRMSMCFit, cumulative_data;
     target = prepare(rk, fit.ad_backend, fit.model_id, id)
     previous = prepare(fit.backend, fit.ad_backend, fit.model_id, fit.binding_id)
     controls = tuning_controls(; temperatures, pilot, max_reflections,
-        recording_target, pilot_evaluations)
+        recording_target, pilot_evaluations, grid_start)
     PPL.tune_smc(target; rng, init, previous, controls..., pilot_steps, options,
         progress, callback, checkpoint_dir, resume, overwrite)
 end
@@ -146,7 +146,7 @@ function BRM.brm_smc_checkpoint(fit::BRM.BRMSMCFit)
 end
 
 function BRM.brm_smc_resume(template::BRM.RKBRMI, checkpoint;
-        data=nothing, previous_data=nothing,
+        data=nothing, previous_data=nothing, nthreads=nothing,
         ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
     checkpoint.format == 1 || throw(ArgumentError("unsupported BRM SMC checkpoint format"))
     check_identity(template, checkpoint.model_id, "training template")
@@ -164,7 +164,7 @@ function BRM.brm_smc_resume(template::BRM.RKBRMI, checkpoint;
     target = prepare(rk, ad_backend, checkpoint.model_id, checkpoint.binding_id)
     old_target = previous === nothing ? nothing :
         prepare(previous, ad_backend, checkpoint.model_id, checkpoint.previous_id)
-    state = PPL.resume_smc(target, checkpoint.state; previous=old_target)
+    state = PPL.resume_smc(target, checkpoint.state; previous=old_target, nthreads)
     BRM.BRMSMCFit(template, rk, previous, state, ad_backend,
         checkpoint.model_id, checkpoint.binding_id, checkpoint.previous_id)
 end

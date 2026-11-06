@@ -474,16 +474,29 @@ _rk_ast_replace_floor_marker(value::Expr, floor) =
     Expr(value.head, (_rk_ast_replace_floor_marker(a, floor) for a in value.args)...)
 _rk_ast_replace_floor_marker(value, _floor) = value
 
+# An ungrouped HSGP samples one length scale, `rho_iso`, when it is isotropic,
+# periodic or has a single axis, and otherwise one scalar `rho_j` per axis
+# (`_rk_ast_hsgp_component!`). Its `rho` vector only assembles those scalars,
+# so a start or transport addresses these carriers, never `rho`.
+_rk_hsgp_length_axes(term) = get(term.options, :cov, :exp_quad) === :periodic ||
+    term.options.iso ? 1 : length(term.columns)
+
+function _rk_hsgp_length_carriers(term)
+    axes = _rk_hsgp_length_axes(term)
+    axes == 1 ? :rho_iso : Tuple(Symbol(:rho_, j) for j in 1:axes)
+end
+
 # The term's statements, and the sampled block locals of a grouped or
 # hyper-predicted term (`_rk_ast_hsgp_grouped`; `nothing` for an ungrouped one).
 function _rk_ast_value_hsgp(definitions, term, taken, bindings)
+    stmts = Expr[]
+    term = _rk_ast_hsgp_settings!(stmts, term, taken)
     options = term.options
     periodic = get(options, :cov, :exp_quad) === :periodic
     grouped = haskey(options, :group_index) || !isempty(get(options, :hyper_plans, ()))
     # The length-scale floor exists only where a prior or hyper-predictor reads it.
     floor_read = options.rho_truncated || get(options, :rho_floor_named, false) ||
         any(p -> p.hyper === :length_scale, get(options, :hyper_plans, ()))
-    stmts = Expr[]
     floors = nothing
     if periodic
         # The periodic basis is prepared data; its effect reads the matrix and
@@ -494,10 +507,13 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         targets = floors === nothing ? (PHI, omega2) : (PHI, omega2, floors)
         # An anchored or masked basis passes its anchor and bound mask
         # (decision 1fk9b29).
+        # Its basis count, period and anchor are the `modes` and `settings`
+        # inputs, not numbers of the program (user principle `0ikeidi`).
         anchor, mask = get(options, :anchor, nothing), _rk_hsgp_mask(term)
         push!(stmts, Expr(:(=), Expr(:tuple, targets...), Expr(:call,
-            :brm_hsgp_periodic_basis, only(term.columns), options.k, options.period,
-            (anchor === nothing ? () : (only(anchor),))...,
+            :brm_hsgp_periodic_basis, only(term.columns), Expr(:ref, options.modes, 1),
+            Expr(:ref, options.settings, 1),
+            (anchor === nothing ? () : (Expr(:ref, options.settings, 2),))...,
             (mask === nothing ? () : (mask,))...)))
         inputs = Pair{Symbol,Any}[:PHI => PHI, :omega2 => omega2]
         extent = :(axes(PHI, 2))
@@ -514,7 +530,12 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         append!(inputs, (formal => actual for (formal, actual) in
             zip(_rk_hsgp_mask_formals(term), _rk_hsgp_mask_actuals(term))))
         fit === nothing || push!(inputs, :fit => fit)
-        extent = :(1:$(prod(_rk_hsgp_modes(options))))
+        # Then the size and settings the basis graph reads; the weights' extent
+        # is the basis size `prod(modes)`, an input's value.
+        settings = _rk_hsgp_basis_setting_formals(term)
+        append!(inputs, (formal => actual for (formal, actual) in
+            zip(settings, _rk_hsgp_setting_actuals(options, settings))))
+        extent = :(1:prod(modes))
     end
     if grouped
         call, locals = _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent,
@@ -522,7 +543,7 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         push!(stmts, Expr(:call, :~, options.id, call))
         return stmts, locals
     end
-    axes = periodic || options.iso ? 1 : length(term.columns)
+    axes = _rk_hsgp_length_axes(term)
     rho_priors = [_rk_ast_hsgp_rho_prior(options, floors, axes == 1 ? nothing : j,
         bindings, taken) for j in 1:axes]
     sigma_prior = _rk_ast_positive_prior(options.sigma_prior, bindings, taken)
@@ -535,6 +556,19 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         rho_priors, sigma_prior, value, extent; truncated=options.rho_truncated,
         base=periodic ? "brm_periodic_hsgp_effect" : "brm_hsgp_effect")
     stmts, nothing
+end
+
+# The term's size and settings as fitted values of the program, from its
+# fit-role inputs alone (`<id>_modes = copy(<id>_modes_fit)`), so a fitted state
+# exports them like any other fit and every graph reads them by these names.
+function _rk_ast_hsgp_settings!(stmts, term, taken)
+    options = term.options
+    modes = _rk_ast_fresh_name(string(options.id, "_modes"), taken)
+    settings = _rk_ast_fresh_name(string(options.id, "_settings"), taken)
+    push!(stmts, Expr(:(=), modes, Expr(:call, :copy, options.modes)),
+        Expr(:(=), settings, Expr(:call, :copy, options.settings)))
+    _RKTermSpec(term.kind, term.columns, merge(options, (; modes, settings)),
+        term.addressee, term.label)
 end
 
 _rk_plan_summary(plan::_RKValuePlan) = string(
@@ -580,6 +614,9 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
         head = family isa ExprColumn ? getf(family) : nothing
         head === MixtureModel && _rk_mixture_value_weights(program, family) &&
             return true
+        # A censored delay observes through its BRM-owned law
+        # (`brm_censored_delay`, `censored_delays.jl`).
+        _brm_is_censored_delay(head) && return true
         # Heterogeneous and custom mixtures retain each component's ordinary
         # value and source-graph boundary. The legacy formula planner has a
         # fixed location/scale record and cannot carry these signatures.
@@ -615,6 +652,9 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
             # assigned first (`mu = exp(dev) * s`), which this route lowers.
             any(arg -> _rk_computed_argument(program, head, arg, collect(predictors)),
                 getargs(family)) && return true
+            # A law argument read from data is a runtime input of the program.
+            any(((index, arg),) -> _rk_data_law_argument(program, head, index, arg, predictors),
+                enumerate(getargs(family))) && return true
         end
         # A formula response may put a shape before its location (Weibull,
         # Student-t, binomial trials). An assignment in that slot does not
@@ -791,6 +831,39 @@ function _rk_computed_argument(program, head, arg, predictors::Vector{Symbol})
         _brm_prepared_references(_brm_prepare_expr(arg)))
     any(op -> op.name in reachable, program.operations)
 end
+# A response law argument read from data — a scalar data field, a
+# `name = constant(expr)` value, a per-row column or a plain alias of one
+# (`sd_obs = s`), also inside a formula shape spelling such as Gamma's
+# `mu/alpha` — is a runtime input of the program: this route binds it by name
+# from the design (user principle `0ikeidi`: numeric values are never baked
+# into model source). The formula route reads data in a law only as binomial
+# trials; it refuses a data scale or shape, and would otherwise have to fold the
+# value into a literal. A predictor shadows a same-named data column, as in the
+# formula route's slots. The cutpoints and category predictors of a leveled
+# response are not scalar law arguments, and keep the formula route's refusal.
+function _rk_data_law_argument(program, head, index::Integer, arg, predictors)
+    index == 1 && head in (Binomial, BetaBinomial, BetaBinomial2) && return false
+    head in (OrderedLogistic, Ordinal, CategoricalLogit) && return false
+    _rk_reads_data(program, arg, predictors)
+end
+_rk_reads_data(_program, _arg, _predictors) = false
+function _rk_reads_data(program, arg::NamedColumn, predictors)
+    name(arg) in predictors && return false
+    parent(arg) isa DataColumn || _rk_is_data_alias(program, name(arg))
+end
+_rk_reads_data(program, arg::ExprColumn, predictors) =
+    any(a -> _rk_reads_data(program, a, predictors), getargs(arg))
+# An assignment that only renames a data field, directly or through other such
+# assignments. A literal or a computed assignment keeps the route it had.
+function _rk_is_data_alias(program, key::Symbol)
+    index = findfirst(op -> op.name === key, program.operations)
+    role = isnothing(index) ? :extension : program.operations[index].role
+    role === :extension && return haskey(program.context.data, key)
+    role === :assignment || return false
+    target = _brm_prepare_expr(last(getargs(program.operations[index].expression)))
+    target isa _BRMPreparedRef && _rk_is_data_alias(program, target.name)
+end
+
 _rk_formula_shape_argument(_head, _arg, _predictors) = false
 _rk_formula_shape_argument(::Type{<:LocationScale}, arg, _predictors) = getf(arg) === TDist
 _rk_formula_shape_argument(::Type{<:Gamma}, arg, predictors) =
@@ -1018,11 +1091,19 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     obs = Tuple(o for o in prepared.observations if o.name in roots)
     completions = _RKMissingValueSpec[]
     obs = map(obs) do original
+        # An `mi()` response plans no weight; its law still reads `weighted`.
+        original.missing_response === nothing ||
+            !(original.distribution isa _BRMPreparedExpr &&
+              original.distribution.callable === weighted) || error(
+            "RK backend: response `$(original.name)` combines `mi()` with " *
+            "`weighted(...)`; the reader route weights only fully observed responses")
         o = _rk_prepare_missing_value!(value_columns, taken, original, program, completions, derived)
-        o.weight === nothing || error(
-            "RK backend: value-based response `$(o.name)` weights need an authored response")
+        o = _rk_value_observation_weight(value_columns, o, o.weight)
         layout = isempty(kernels) ? (; values=o.response, lengths=nothing) :
             _rk_observed_layout(o.response)
+        o.weight === nothing || layout.lengths === nothing || error(
+            "RK backend: response `$(o.name)` holds one array per subject; " *
+            "`weighted(...)` takes one weight per row of a flat response")
         cells = isempty(kernels) ? nothing :
             _rk_nested_kernel_cells(o, layout, kernels, value_columns, parameter_names)
         if cells !== nothing
@@ -1137,6 +1218,34 @@ function _rk_value_expr!(bindings, expression::_BRMPreparedExpr, taken)
         insert!(call.args, 2, Expr(:parameters, kws...))
     end
     call
+end
+
+# A formula-level `weighted(family, fweights(n))` or `weights(w)` observation
+# on the reader route scales each row's log density by its weight, as the
+# regression route does (`_rk_plan_response_spec`): the base family is
+# observed, and the checked weight column binds unchanged under its own name,
+# so a replay design rebinds it like any other data input. Analytic weights
+# change a Normal's scale rather than its density's power; neither RK route
+# lowers them at formula level yet.
+_rk_value_observation_weight(columns, observation, ::Nothing) = observation
+_rk_value_observation_weight(columns, observation, ::_BRMPreparedRef) = observation
+function _rk_value_observation_weight(columns, observation,
+        weight::_BRMObservationWeightPlan)
+    weight.kind in (:frequency, :power) || error(
+        "RK backend: response `$(observation.name)` weights are $(weight.kind); " *
+        "RKBRMI admits frequency (`fweights`) and power (`weights`) weights")
+    law = observation.distribution
+    law isa _BRMPreparedExpr && law.callable === weighted || error(
+        "RK backend: internal: weighted response `$(observation.name)` has no " *
+        "`weighted(...)` law")
+    bound = get(columns, weight.source, nothing)
+    bound === nothing || isequal(bound, weight.column) || error(
+        "RK backend: internal: weight column `$(weight.source)` of response " *
+        "`$(observation.name)` is bound to other values")
+    columns[weight.source] = weight.column
+    _BRMPreparedObservation(observation.name, observation.lhs, first(law.args),
+        observation.response, observation.modifier,
+        _BRMPreparedRef(weight.source, :whole), observation.missing_response)
 end
 
 # An in-cell `weighted(family, weight, args...)` observation keeps RKPPL's

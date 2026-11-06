@@ -385,7 +385,7 @@ function _rk_design_checks(binder::RKDesignBinder, plan, design, derived)
     end
     # Responses bind as the design holds them: an ordered outcome lies in the
     # fitted levels, and weights are checked as the planner checks them.
-    weighted = Dict{Symbol,Symbol}()
+    weighted = Dict{Symbol,Symbol}(_rk_value_weight_sources(plan))
     for response in _rk_replay_responses(plan)
         key = response.response
         response.weights === nothing || (weighted[key] = response.weights)
@@ -422,6 +422,14 @@ function _rk_ordered_observation_levels(plan::_RKValuePlan)
     levels
 end
 
+# A reader-route response keeps its formula weight column under the column's
+# own name (`_rk_value_observation_weight`); in-cell weights are cell values.
+_rk_value_weight_sources(plan::_RKHeldOutPlan) = _rk_value_weight_sources(plan.parent)
+_rk_value_weight_sources(_plan) = Pair{Symbol,Symbol}[]
+_rk_value_weight_sources(plan::_RKValuePlan) = Pair{Symbol,Symbol}[
+    observation.name => observation.weight.name for observation in plan.observations
+    if observation isa _BRMPreparedObservation && observation.weight isa _BRMPreparedRef]
+
 # `weighted` maps each weighted response to its weight column. The weight kind
 # is the likelihood's syntax (`fweights(n)`), read off the fitted model.
 function _rk_design_weight_checks!(add, binder::RKDesignBinder, weighted, has)
@@ -430,6 +438,9 @@ function _rk_design_weight_checks!(add, binder::RKDesignBinder, weighted, has)
         target = observation.key
         source = get(weighted, target, nothing)
         source !== nothing && has(source) || continue
+        # `weighted` is this function's Dict argument here, not the combinator.
+        observation.rhs isa ExprColumn &&
+            getf(observation.rhs) === BayesianRegressionModels.weighted || continue
         # The fitted plan already validated the weight source. Read only the
         # constructor here: the authored source may be a data-only assignment.
         kind = _brm_observation_weight_kind(getf(last(getargs(observation.rhs))))

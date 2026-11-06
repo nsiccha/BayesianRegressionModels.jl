@@ -688,10 +688,26 @@ const bare_read = @brm begin
     y1 ~ Normal(k, 0.5)
     scale ~ Exponential(1)
 end
-const cell_call = @brm begin
+# A call inside a plate cell: each cell owns its locals and reads its fields.
+const cell_fields = @brm begin
     @plate for i in eachindex(x)
         cell ~ bounds(x[i], scale)
         y1[i] ~ Normal(cell.lo, 0.5)
+        y2[i] ~ Normal(cell.lo + cell.hi, 0.5)
+    end
+    scale ~ Exponential(1)
+end
+const cell_bare = @brm begin
+    @plate for i in eachindex(x)
+        cell ~ bounds(x[i], scale)
+        y1[i] ~ Normal(cell, 0.5)
+    end
+    scale ~ Exponential(1)
+end
+const cell_unknown = @brm begin
+    @plate for i in eachindex(x)
+        cell ~ bounds(x[i], scale)
+        y1[i] ~ Normal(cell.mid, 0.5)
     end
     scale ~ Exponential(1)
 end
@@ -919,6 +935,32 @@ end
     end
 end
 
+@stestset "a component called in a plate cell returns named values per cell" begin
+    data = (; x=[-0.4, 0.2, 0.7], y1=[0.1, 0.4, 0.8], y2=[0.3, -0.1, 0.2])
+    model = ScopedNamed.cell_fields(data)
+    rk, problem = consumer_problem(model)
+    names = coordinate_names(rk.model.layout)
+    @test length(names) == 7
+    is = coordinate(names, :scale)
+    intercepts = [coordinate(names, Symbol("cell.a.", i)) for i in eachindex(data.x)]
+    slopes = [coordinate(names, Symbol("cell.b.", i)) for i in eachindex(data.x)]
+    function oracle(u)
+        a, b = u[intercepts], u[slopes]
+        lo, hi = a .+ b .* data.x, a .- b .* data.x
+        logpdf(Exponential(1), exp(u[is])) + u[is] +
+            sum(logpdf.(Normal(0, exp(u[is])), a)) + sum(logpdf.(Normal(1, 0.2), b)) +
+            sum(logpdf.(Normal.(lo, 0.5), data.y1)) + sum(logpdf.(Normal.(lo .+ hi, 0.5), data.y2))
+    end
+    sb = SBBRMI(model; mod=ScopedNamed, total_groups=())
+    stan = consumer_stan(model, "named-component-cell"; mod=ScopedNamed)
+    mapping = [pair.rk => pair.stan for pair in
+        brm_coordinate_transport(rk, sb, BridgeStan.param_unc_names(stan.model)).pairs]
+    for point in (zeros(7), collect(range(-0.3, 0.4; length=7)))
+        check_consumer_point(problem, point, oracle)
+        check_consumer_stan(problem, stan, mapping, rk, point)
+    end
+end
+
 @stestset "named component returns refuse unread or unknown fields" begin
     data = (; x=[-0.4, 0.2, 0.7], y1=[0.1, 0.4, 0.8], y2=[0.3, -0.1, 0.2])
     for backend in (model -> SBBRMI(model; mod=ScopedNamed, total_groups=()), RKBRMI)
@@ -926,8 +968,10 @@ end
             ScopedNamed.unknown_field(data))
         @test_throws r"reads `k` as one value, .* read one field, such as `k.lo`" backend(
             ScopedNamed.bare_read(data))
-        @test_throws r"inside a `@plate` cell a component call binds one value" backend(
-            ScopedNamed.cell_call(data))
+        @test_throws r"cell reads `cell` as one value, .* such as `cell.lo`" backend(
+            ScopedNamed.cell_bare(data))
+        @test_throws r"cell reads field `mid` of `cell`, but `bounds` returns only `lo`, `hi`" backend(
+            ScopedNamed.cell_unknown(data))
     end
     @test_throws r"a positional tuple has no field names" brm(:(function pairwise(x)
         a ~ Normal(0, 1)

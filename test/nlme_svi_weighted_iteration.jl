@@ -33,10 +33,82 @@ function _brm_svi_unit_term!(gg, gz, t::QuadraticUnits, i, g, z, plan, work)
 end
 _brm_throw_if_interrupted(::Nothing) = nothing
 _brm_update_progress!(::Nothing, message) = nothing
+
+# Unit normals centered at 1, away from the zero-mean start, whose last gradient
+# entry can be made non-finite.
+struct PoisonableUnits
+    globals::Vector{Int}
+    units::Vector{Vector{Int}}
+    plan::NamedTuple
+    plans::Vector{NamedTuple}
+    work::Vector{Nothing}
+    m::NamedTuple
+    poisoned::Bool
+end
+
+_brm_svi_global_term(::PoisonableUnits, g) = (-sum(abs2, g) / 2, -g)
+function _brm_svi_unit_term!(gg, gz, t::PoisonableUnits, i, g, z, plan, work)
+    fill!(gg, 0.0)
+    gz .= 1 .- z
+    t.poisoned && (gz[end] = NaN)
+    -sum(abs2, z .- 1) / 2
+end
 end
 
 using Test, Random, LinearAlgebra
 const S = SVIArithmetic
+
+# BRMSVINonfiniteError's own test (test/nlme_svi.jl) reaches dense factors under
+# uniform batches. This covers the other local family and sampler: a structured
+# factor's optimizer and a work-weighted batch must also stay untouched.
+@testset "a non-finite unit stops every local family and sampler before any update" begin
+    names = ["g", "a1", "a2", "a3", "b1", "b2", "b3"]
+    target(poisoned) = S.PoisonableUnits([1], [[2, 3, 4], [5, 6, 7]],
+        (; footprints=[[1, 2, 3, 4], [1, 5, 6, 7]]),
+        [(; footprints=[[1, 2, 3, 4], [1, 5, 6, 7]])], [nothing],
+        (; view=(; coordinates=names)), poisoned)
+    for dense_limit in (64, 0), method in (:uniform, :work)
+        start() = S._brm_svi_params(target(false), [0.7], S.MeanFieldGlobal();
+            global_scale=0.2, unit_scale=1.0, unit_dense_limit=dense_limit, unit_rank=1)
+        controls = S._brm_svi_controls(2; batch_size=2, max_iterations=10,
+            lr_global=0.01, unit_step=0.1, polish_lr=0.05, window=100, patience=10,
+            min_windows=40, polish_windows=20, unit_sampling=method)
+        t, q = target(true), start()
+        before = deepcopy(q)
+        run = S._brm_svi_run(Xoshiro(5), q, controls, t)
+        run.iteration = 7
+        e = try
+            S._brm_svi_advance!(run, t, controls)
+            nothing
+        catch err
+            err
+        end
+        @test e isa S.BRMSVINonfiniteError
+        @test e.iteration == 8
+        for p in e.terms
+            @test p.term === :unit && p.draw_finite
+            @test :unit_gradient_plus in p.quantities
+            @test :unit_gradient_minus in p.quantities
+            @test p.coordinates == [names[t.units[p.unit][end]]]
+        end
+        @test !isempty(e.terms)
+        @test run.adam.t == 0 && q.μ == before.μ && q.ρ == before.ρ && q.Β == before.Β
+        @test q.M == before.M
+        @test all(Matrix(q.Λ[i]) == Matrix(before.Λ[i]) for i in 1:2)
+        @test all(o === nothing || o.t == 0 for o in q.unit_opt)
+        @test isempty(run.trace) && run.iteration == 7
+
+        # Positive control: the same run without the poison updates everything,
+        # so the checks above can tell a guarded iteration from an inert one.
+        t, q = target(false), start()
+        run = S._brm_svi_run(Xoshiro(5), q, controls, t)
+        @test S._brm_svi_advance!(run, t, controls) === :iteration
+        @test run.iteration == 1 && length(run.trace) == 1 && run.adam.t == 1
+        @test q.μ != before.μ
+        @test any(q.M[i] != before.M[i] for i in 1:2)
+        @test dense_limit > 0 || any(o !== nothing && o.t == 1 for o in q.unit_opt)
+    end
+end
 
 @testset "production SVI weighted iteration" begin
     t = S.QuadraticUnits([1], [[2], [3], [4]],

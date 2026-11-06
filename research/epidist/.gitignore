@@ -1,0 +1,4 @@
+# BridgeStan build products
+*.so
+*.hpp
+*.o
