@@ -313,6 +313,78 @@ and embedded Laplace retain the mesh form. Very long spatial lengths can make
 a local correlation matrix numerically singular; such a failure is reported,
 without imposing a range floor or changing the prior.
 
+### Evaluating units with a learned spatial length
+
+With the lengths fixed by `=`, the read weights are data, and a strict partition
+reads only each read's innovations. A learned spatial length makes the weights
+one whole value per length. They have no row form: a row is built from its
+parents' rows, so one row needs the local solves of 40 %, 31 % and 24 % of the
+positions at 400, 1,600 and 6,400 random positions (`m = 30`), a count that keeps
+growing with the positions.
+
+A partition that declares nothing therefore refuses, with a
+`PartitionLocalityError` naming `weights`. `locality = :warn` evaluates anyway by
+recomputing the whole basis for every unit, which is quadratic in the positions
+over a sweep. Hold the basis as one shared value instead, by passing `partitioned`
+and `u0`. ReactiveKernelsPPL then computes it once per length and refreshes it when
+the length changes. Name the coordinates the units own, or, if they own none, mark
+any parameter's levels all shared:
+
+```julia
+plan = rk_bound_plan(rk)
+# Units own effects:
+partitioned = (:unit_effect => unit_labels,)
+# Units own nothing, as in a model of the field alone:
+entry = first(rk.model.layout.entries)
+partitioned = (entry.name => fill(missing, isempty(entry.dims) ? entry.size : first(entry.dims)),)
+
+query = prepare_partition(rk.model, plan, :y; by=(; y=unit), locality=:error, partitioned, u0=u)
+query(u, label)
+```
+
+That makes a unit's value local, but not its whole gradient.
+`partition_value_and_gradient!` includes the spatial length's derivative, so each
+call runs one pullback of the whole basis, again quadratic over a sweep. Choose by
+what the step needs:
+
+- **A batch of units:** one pass over their cells, with one pullback for the batch.
+- **A unit's own coordinates, the shared ones held fixed:**
+  `partition_value_and_gradient!(sampler, g, u, label; shared=false)`.
+- **Every unit:** the whole-model gradient, which also pays one basis derivative
+  and is cheaper than a pass over all the cells.
+
+```julia
+backend = AutoEnzyme(; mode=Enzyme.Reverse)
+compact = prepare_compact_cell_ad(ReactiveKernels.prepare_ad, rk.model, plan, :y, u, Int[], backend;
+    partitioned, locality=:error)
+accumulator = prepare_cell_accumulator(compact, backend, u; order=0)
+pullback = prepare_cell_pullback(compact, backend, u)
+gradient = similar(u)
+total = Ref(0.0)
+cell_pullback!(gradient, pullback, u) do batch
+    for cell in batch_rows
+        total[] += first(accumulate_cell!(batch, accumulator, nothing, 1.0, Float64[], Int[], cell))
+    end
+end
+```
+
+`Int[]` selects no unit-owned coordinates, the only selection checked on this
+field. The gradient is the batch's full packed gradient, shared coordinates
+included. Queries and samplers hold the shared value, so prepare one per thread.
+
+| Warm cost, one CPU on a shared host | 400 positions | 1,600 positions |
+| --- | --- | --- |
+| Unit value, `locality = :warn` | 6.5 ms | 37 ms |
+| Unit value, shared basis | 40 µs | 80 µs |
+| Unit value and gradient, either way | 17 to 20 ms | 89 to 126 ms |
+| Cell pass over one unit | 18 ms | 98 ms |
+| Cell pass over every unit | 156 ms | 952 ms |
+| Whole-model value and gradient | 29 ms | 125 ms |
+
+These are from a toy: `m = 30`, about 4 reads per position, one unit per position,
+one Normal observation per read, ReactiveKernels 0.1.86 and ReactiveKernelsPPL
+0.1.100.
+
 ## Independent fields in plate cells
 
 Write the term inside `@plate for p in groups(g)` to give each cell its own

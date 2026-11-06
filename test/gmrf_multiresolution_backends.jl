@@ -188,6 +188,105 @@ end
     end
 end
 
+# Under a learned spatial length the basis is one whole value per length, not a
+# value with rows: a row is built from its parents' rows, so a row form would need
+# a large share of the support. A strict partition therefore holds it as a shared
+# value, refreshed when the length changes. A unit gradient pays one whole
+# pullback; a cell pass pays one for the whole batch.
+@stestset "Strict units under learned lengths read one shared basis" begin
+    data = multiresolution_data()
+    positions = Dict{Tuple{Float64,Float64},Int}()
+    unit = [get!(positions, p, length(positions) + 1) for p in zip(data.east, data.north)]
+    input = (; data..., state=collect(eachindex(data.y)))
+    model = @brm input begin
+        field ~ 0 + gmrf((east,north),time; multiresolution=3)
+        sd(field,gmrf((east,north),time)) ~ Exponential(0.7)
+        length_scale(field,gmrf((east,north),time),space) ~ LogNormal(log(3.0),0.4)
+        length_scale(field,gmrf((east,north),time),time) ~ LogNormal(log(13.0),0.4)
+        @plate for s in eachindex(state)
+            y[s] ~ Normal(exp(field[state[s]]),0.2)
+        end
+    end
+    fx = multiresolution_native(model; id="gmrf-multiresolution-learned-locality")
+    names = BRM._rk_layout_coordinate_names(fx.rk)
+    pos(s) = only(i for (i, n) in enumerate(names) if endswith(string(n), s))
+    states = [i for (i, n) in enumerate(names) if occursin(".field.", string(n))]
+    g = BRM._brm_multiresolution_support(data.east, data.north, data.time; rank=3)
+    reads, _ = BRM._brm_multiresolution_rows(g, [1], data.east, data.north, data.time, ones(Int, length(data.y)))
+    # An independent evaluation of a unit's reads from the core.
+    function oracle(u, rows)
+        sigma, ell = exp(u[pos(".sigma")]), exp(u[pos(".spatial_length")])
+        weights = BRM._brm_multiresolution_basis(g.spatial, ell).weights
+        sum(logpdf(Normal(exp(sigma * BRM._brm_multiresolution_value(u[states], weights, g, reads[r])), 0.2),
+            data.y[r]) for r in rows)
+    end
+    rows(label) = findall(==(label), unit)
+    u = 0.1 .* sin.(1:fx.built.layout.total)
+    labels = sort!(unique(unit))
+    # The spelling the guide gives for a model whose units own no coordinates:
+    # any parameter, with every level shared.
+    entry = first(fx.built.layout.entries)
+    shared = (entry.name => fill(missing, isempty(entry.dims) ? entry.size : first(entry.dims)),)
+    by = (; y=unit)
+
+    query = prepare_partition(fx.built, fx.bound, :y; by, locality=:error, partitioned=shared, u0=u)
+    weights = only(s for s in ReactiveKernels.partition_locality(query) if endswith(string(s.value), ".weights"))
+    @test weights.status === :input
+    for label in labels
+        @test query(u, label) ≈ oracle(u, rows(label)) atol=1e-10
+    end
+    # A new length refreshes the shared basis; so does coming back to the old one.
+    moved = copy(u)
+    moved[pos(".spatial_length")] += 0.7
+    @test !(oracle(moved, rows(labels[1])) ≈ oracle(u, rows(labels[1])))
+    for point in (moved, u)
+        for label in labels
+            @test query(point, label) ≈ oracle(point, rows(label)) atol=1e-10
+        end
+    end
+
+    backend = DI.AutoEnzyme(; mode=Enzyme.Reverse)
+    sampler = prepare_partition_sampler(fx.built, fx.bound, :y, u; by, backend, locality=:error, partitioned=shared)
+    h = 1e-6
+    function central(i, label)
+        plus, minus = copy(u), copy(u)
+        plus[i] += h; minus[i] -= h
+        (oracle(plus, rows(label)) - oracle(minus, rows(label))) / 2h
+    end
+    unit_gradients = zeros(length(u), length(labels))
+    for (k, label) in enumerate(labels)
+        footprint = partition_footprint(sampler, label)
+        expected = sort!(unique!([pos(".sigma"); pos(".spatial_length");
+            [states[BRM._brm_multiresolution_read_coordinate(g, reads[r], j)]
+                for r in rows(label) for j in BRM._brm_multiresolution_basis_range(g, reads[r])]]))
+        @test footprint == expected
+        gradient = zeros(length(footprint))
+        value, _ = partition_value_and_gradient!(sampler, gradient, u, label)
+        @test value ≈ oracle(u, rows(label)) atol=1e-10
+        unit_gradients[footprint, k] .= gradient
+        for i in eachindex(u)
+            @test unit_gradients[i, k] ≈ central(i, label) atol=2e-4 rtol=2e-5
+        end
+    end
+
+    # One pass over the batch's cells, one shared pullback, the same derivatives.
+    compact = prepare_compact_cell_ad(ReactiveKernels.prepare_ad, fx.built, fx.bound, :y, u, Int[], backend;
+        partitioned=shared, locality=:error)
+    accumulator = prepare_cell_accumulator(compact, backend, u; order=0)
+    pullback = prepare_cell_pullback(compact, backend, u)
+    for batch_labels in (labels[1:1], labels[2:3], labels)
+        gradient = zeros(length(u))
+        total = Ref(0.0)
+        cell_pullback!(gradient, pullback, u) do batch
+            for label in batch_labels, cell in rows(label)
+                total[] += first(accumulate_cell!(batch, accumulator, nothing, 1.0, Float64[], Int[], cell))
+            end
+        end
+        @test total[] ≈ sum(oracle(u, rows(label)) for label in batch_labels) atol=1e-10
+        @test gradient ≈ vec(sum(unit_gradients[:, findall(in(batch_labels), labels)]; dims=2)) atol=1e-10
+    end
+end
+
 @stestset "Frozen replay keeps shared coordinate identities; fresh fits rebuild their support" begin
     data = multiresolution_data()
     model = multiresolution_model(data)

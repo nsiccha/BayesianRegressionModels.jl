@@ -32,7 +32,11 @@ end
 function cell_block(ad, group, c, u)
     BRM._brm_spl_cell_directions!(group.dirs, c.lpos, 1.0)
     try
-        BRM._rk_spl_cell_block(ad, group.dirs, u, c.sel, c.i; used=length(c.lz))
+        BRM._rk_spl_cell_newton(ad, u) do batch
+            g, columns = BRM._rk_spl_cell_block(ad, group.dirs, u, c.sel, c.i;
+                context=batch, used=length(c.lz))
+            copy(g), map(copy, columns)
+        end
     finally
         BRM._brm_spl_cell_directions!(group.dirs, c.lpos, 0.0)
     end
@@ -49,7 +53,7 @@ end
     @test K == n
     @test group.ad.width === Val(width)
     wide = BRM._rk_spl_cell_ad(rk, (group.name,), copy(p.u), first(group.cells).sel, NLME_AD, K;
-        width=K)
+        width=K, partitioned=BRM._brm_spl_layout(rk, (:a,)).partitioned)
     @test wide.width === Val(K)
     @test length(group.cells) == 2
     @test sort(length.(getfield.(group.cells, :lz))) == [width + 1, n]
@@ -130,6 +134,42 @@ ReactiveKernels.ad_gradient_and_hvp(h::HVPWidthRaising, _directions, _base, _act
         @test length(columns_moved) == length(c.lz)
         @test all(k -> columns_moved[k] ≈ columns[k], eachindex(columns))
     end
+    @test all(iszero, Iterators.flatten(group.dirs))
+end
+
+# Forwards its first calls and then raises, so a move happens partway through a sweep.
+mutable struct HVPWidthRaisingLater{H,E}
+    hvp::H
+    err::E
+    calls::Int
+end
+function ReactiveKernels.ad_gradient_and_hvp(h::HVPWidthRaisingLater, directions, base, active,
+        indices, i)
+    h.calls == 0 && throw(h.err)
+    h.calls -= 1
+    ReactiveKernels.ad_gradient_and_hvp(h.hvp, directions, base, active, indices, i)
+end
+
+@stestset "a move partway through a sweep counts every cell once" begin
+    data = (; n=4, grid=collect(range(0.1, 0.9; length=4)), y=ones(Int, 4))
+    rk = RKBRMI(@brm data begin
+        beta ~ Normal(0, 1)
+        z[1:n] .~ Normal.(0, 1)
+        @plate for i in eachindex(grid)
+            y[i] ~ Poisson(exp(z[i] + beta * grid[i]))
+        end
+    end)
+    p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=(:z,))
+    group = only(g for g in p.cells if hasproperty(g, :dirs))
+    @test length(group.cells) == 4
+    φ = [0.2]
+    v, d = LDP.logdensity_and_gradient(p, φ)
+    activity = Enzyme.Compiler.EnzymeRuntimeActivityError("stub", nothing, nothing)
+    group.ad.hvp = HVPWidthRaisingLater(group.ad.hvp, activity, 2)
+    v_moved, d_moved = LDP.logdensity_and_gradient(p, φ)
+    @test group.ad.reverse_over_forward
+    @test v_moved ≈ v rtol=1e-10
+    @test d_moved ≈ d rtol=1e-8
     @test all(iszero, Iterators.flatten(group.dirs))
 end
 

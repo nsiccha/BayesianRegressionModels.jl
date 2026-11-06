@@ -245,8 +245,18 @@ function _brm_apply_t2(fit, x::AbstractVector{<:Real}, z::AbstractVector{<:Real}
     (_brm_center_block(raw.fixed, fit.fixed_center), raw.rr, raw.rn, raw.nr)
 end
 
-function _brm_t2_options(kw)
+# `k` is a number the model reads: a literal, or a data field holding one per
+# margin or a value for both (user principle `0ikeidi`). A name the formula does
+# not bind yet is checked when the term is prepared on its data.
+function _brm_t2_options(kw; bound=true)
     kval = get(kw, :k, (5, 5))
+    deferred(x) = x isa NamedColumn && !(parent(x) isa DataColumn)
+    if !bound && (deferred(kval) || (kval isa Tuple && any(deferred, kval)))
+        kval = (5, 5)
+    elseif kval isa NamedColumn || (kval isa Tuple && any(x -> x isa NamedColumn, kval))
+        kval = _brm_axis_option(:t2, :k, kval, 2,
+            x -> x isa Integer && !(x isa Bool) && x > 2, "integers greater than 2")
+    end
     kval isa Tuple && length(kval) == 2 || error(
         "t2: `k` must be a 2-tuple of integers greater than 2, got $(repr(kval))")
     all(x -> x isa Integer && !(x isa Bool) && x > 2, kval) || error(

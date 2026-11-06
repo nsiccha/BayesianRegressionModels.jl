@@ -12,9 +12,8 @@ const FLOOR_TARGETS = (
     "whole-model" => (rk, kw) -> brm_laplace_problem(rk; ad_backend=NLME_AD, structured=false, kw...),
     "structured" => (rk, kw) -> brm_laplace_problem(rk; ad_backend=NLME_AD, kw...),
     "sparse" => (rk, kw) -> brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=:g, kw...),
-    # The quadrature's extent has to reach the curvature, 3e20 at the first testset's point.
     "matrix-free" => (rk, kw) -> brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=:g,
-        solver=:matrixfree, matrixfree=MatrixFreeLaplace(; probes=4, logdet_extent=64.0), kw...),
+        solver=:matrixfree, matrixfree=MatrixFreeLaplace(; probes=4), kw...),
 )
 
 # The coordinates of the standardized effects, in the packed point.
