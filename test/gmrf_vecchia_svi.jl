@@ -45,7 +45,7 @@ end
 @testset "unit terms and the global term add up to the whole model" begin
     t = BRM._brm_svi_target(m)
     @test states ⊆ t.globals
-    sampler = prepare_sampler(rk.model, BRM._rk_translated(rk), m.unit; backend=FIELD_AD)
+    sampler = prepare_sampler(rk.model, rk_bound_plan(rk), m.unit; backend=FIELD_AD)
     for offset in (-0.2, 0.0, 0.25)
         u = [0.1sin(i) + offset for i in eachindex(m.unit)]
         g = u[t.globals]
