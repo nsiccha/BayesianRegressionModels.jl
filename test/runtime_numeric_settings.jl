@@ -220,6 +220,11 @@ const MGDATA = merge(HDATA, (; g=mod1.(eachindex(HDATA.t), 4),
     sx=[0.1, 0.5, 0.9, 1.3], sy=[0.2, 0.1, 0.6, 0.9],
     Omega=[1.0 0.3 0.1 0.0; 0.3 1.0 0.2 0.1; 0.1 0.2 1.0 0.3; 0.0 0.1 0.3 1.0]))
 
+# What the RKPPL under test keeps out of a query type and a lowered program, so a
+# move of the test pin switches these without an edit.
+const RK_BINDS_VALUES = pkgversion(ReactiveKernelsPPL) >= v"0.1.106"
+const RK_BINDS_SIZES = pkgversion(ReactiveKernelsPPL) >= v"0.1.108"
+
 stan_program(brmi) = StanBlocks.stan_code(SBBRMI(brmi; mod=RSM).model)
 stan_inputs(brmi) = BRM.stan_data(SBBRMI(brmi; mod=RSM))
 rk_program(brmi) = BRM._rk_program_statements(BRM._rk_emit_ast(RKBRMI(brmi).plan))
@@ -435,11 +440,11 @@ end
     @test allequal(typeof.(plans))
     @test allequal(typeof.(ReactiveKernelsPPL.prepare_query.(Ref(rk.model), plans, :sampler)))
     queries = [ReactiveKernelsPPL.prepare_sampler(rk.model, plan, u; backend) for plan in plans]
-    # The same values prepare the same gradient query. Other values do not yet:
-    # RK's `prepare_sampler` splices a bound scalar into its generated body
-    # (ReactiveKernels snag `prepare-sampler-e69f1b38`).
+    # The same values prepare the same gradient query, and other values do too
+    # from the release that stopped `prepare_sampler` splicing a bound scalar into
+    # its generated body (ReactiveKernels snag `prepare-sampler-e69f1b38`).
     @test typeof(queries[1]) == typeof(queries[3])
-    @test_broken typeof(queries[1]) == typeof(queries[2])
+    @test typeof(queries[1]) == typeof(queries[2]) broken=!RK_BINDS_VALUES
     for (data, query) in zip((A, B, A), queries)
         gradient = similar(u)
         value, _ = ReactiveKernelsPPL.sampler_value_and_gradient!(query, gradient, u)
@@ -561,7 +566,7 @@ end
         @testset "$label" begin
             models = [RKBRMI(field(merge(LDATA, v))) for v in values]
             @test allequal(emitted_program(rk) for rk in models)
-            @test_broken allequal(lowered_program(rk) for rk in models)
+            @test allequal(lowered_program(rk) for rk in models) broken=!RK_BINDS_SIZES
             for (v, rk) in zip(values, models)
                 twin = RKBRMI(literal(v)(LDATA))
                 u = rk_point(twin)
@@ -606,9 +611,9 @@ end
     models = [RKBRMI(build(merge(base, d))) for d in (labels("a", "b", "c"), (; f=["a", "a", "b", "b", "c", "d"]))]
     @test allequal(emitted_program(rk) for rk in models)
     @test models[1].model.layout.total + 1 == models[2].model.layout.total
-    # Positive control and the size RK owns: the layout spells the extent
+    # Positive control and the size RK owns: the layout spelled the extent
     # (ReactiveKernels snag `rkppl-sized-vect-69604d32`).
-    @test_broken allequal(lowered_program(rk) for rk in models)
+    @test allequal(lowered_program(rk) for rk in models) broken=!RK_BINDS_SIZES
     # A frozen replay keeps the fitted levels and refuses an unseen one.
     fit = first(models)
     @test rk_density(reprocess(fit, merge(base, labels("a", "b", "c"))), rk_point(fit)) ==
@@ -650,9 +655,9 @@ end
     @test rk_density(field, u) ≈ rk_density(literal, u) atol=1e-12 rtol=1e-12
     larger = RKBRMI(RSM.tensor_smooth((5, 7))(HDATA))
     @test larger.model.layout.total > literal.model.layout.total
-    # The layout follows the size until RK's extents land
+    # The layout followed the size until RK's extents
     # (ReactiveKernels snag `rkppl-sized-vect-69604d32`).
-    @test_broken lowered_program(larger) == lowered_program(literal)
+    @test (lowered_program(larger) == lowered_program(literal)) broken=!RK_BINDS_SIZES
     @test_throws "frozen replay keeps the fitted t2" reprocess(field, merge(HDATA, (; kk=[5, 7])))
     @test reprocess(field, merge(HDATA, (; kk=[4, 6]))) isa RKBRMI
     @test reprocess(field, merge(HDATA, (; kk=[5, 7])); freeze_constants=false).model.layout.total ==
@@ -695,12 +700,12 @@ end
     # Positive control: the approximation is a choice of the source, not a number.
     @test rk_program(RSM.multigroup_method(:hsgp)(MGDATA)) != rk_program(RSM.multigroup_method(:inducing)(MGDATA))
     @test stan_program(RSM.multigroup_field(0.7)(MGDATA)) != stan_program(RSM.multigroup_field(0.9)(MGDATA))
-    # The size is a layout change, which RK spells until its extents land
+    # The size is a layout change, which RK spelled until its extents
     # (ReactiveKernels snag `rkppl-sized-vect-69604d32`).
     small, large = RKBRMI(RSM.multigroup_field(0.7; k=:kk)(fields(; kk=3))),
         RKBRMI(RSM.multigroup_field(0.7; k=:kk)(fields(; kk=4)))
     @test small.model.layout.total < large.model.layout.total
-    @test_broken lowered_program(small) == lowered_program(large)
+    @test (lowered_program(small) == lowered_program(large)) broken=!RK_BINDS_SIZES
     # A frozen replay keeps the fitted term, on both backends; a fresh build follows.
     frozen = (
         (RSM.multigroup_field(0.7; k=:kk), fields(; kk=3), fields(; kk=4)),
