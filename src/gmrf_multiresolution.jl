@@ -24,10 +24,8 @@ end
 
 function _brm_multiresolution_spatial(east, north; rank::Integer=30)
     length(east) == length(north) || throw(DimensionMismatch("gmrf spatial columns differ in length"))
-    # Sorting before maximin makes tied positions independent of input row order.
-    positions = sort!(unique(collect(zip(Float64.(east), Float64.(north)))))
-    isempty(positions) && throw(ArgumentError("gmrf needs at least one read"))
-    f = _brm_vecchia_footprint(first.(positions), last.(positions), zeros(length(positions)); neighbors=rank)
+    isempty(east) && throw(ArgumentError("gmrf needs at least one read"))
+    f = _brm_vecchia_footprint(east, north, zeros(length(east)); neighbors=rank)
     x, y, n = f.east, f.north, length(f.east)
     rows = [Int32[] for _ in 1:n]
     nearest, distance = zeros(Int32, rank), zeros(rank)

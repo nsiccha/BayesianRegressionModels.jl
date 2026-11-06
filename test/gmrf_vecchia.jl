@@ -166,6 +166,36 @@ end
     @test BRM._brm_vecchia_logdensity(x, 2.3, 1.7, L, f) ≈ gaussian_logdensity(x, kron(K, Omega)) atol=1e-9
 end
 
+@testset "The same reads in another row order give the same footprint" begin
+    same_footprint(a, b) = all(name -> getfield(a, name) == getfield(b, name),
+        fieldnames(BRM._BRMGMRFFootprint))
+    # A regular lattice: four positions are nearest the centroid and most maximin
+    # steps have several farthest positions.
+    grid = [(Float64(i), Float64(j)) for i in 1:12 for j in 1:12]
+    east, north = first.(grid), last.(grid)
+    p = randperm(MersenneTwister(1), length(east))
+    physical_order(x, y) = (o = BRM._brm_vecchia_position_order(x, y); collect(zip(x[o], y[o])))
+    # These ties do resolve by list index, so the lattice tests what it claims to.
+    @test physical_order(east, north) != physical_order(east[p], north[p])
+    @test same_footprint(BRM._brm_vecchia_footprint(east, north, zeros(144); neighbors=4),
+        BRM._brm_vecchia_footprint(east[p], north[p], zeros(144); neighbors=4))
+    # Intermittent reads, two channels, and a read pair several rows repeat.
+    rng = MersenneTwister(2)
+    rows = [(i, j, t) for i in 1:10 for j in 1:10 for t in (0.0, 1.0, 2.0, 80.0) if rand(rng) < 0.6]
+    rows = vcat(rows, rows[1:20])
+    x, y, t = Float64[r[1] for r in rows], Float64[r[2] for r in rows], Float64[r[3] for r in rows]
+    f = BRM._brm_vecchia_footprint(x, y, t, 2; neighbors=6)
+    for seed in 1:3
+        q = randperm(MersenneTwister(seed), length(x))
+        @test same_footprint(f, BRM._brm_vecchia_footprint(x[q], y[q], t[q], 2; neighbors=6))
+    end
+    # Without ties the order is the positions' own, however the rows list them.
+    rng = MersenneTwister(3)
+    ux, uy = 100 .* rand(rng, 60), 100 .* rand(rng, 60)
+    q = randperm(rng, 60)
+    @test physical_order(ux, uy) == physical_order(ux[q], uy[q])
+end
+
 @testset "Unsupported inputs are refused with their reason" begin
     @test_throws ArgumentError BRM._brm_vecchia_footprint(Float64[], Float64[], Float64[], 1; neighbors=2)
     @test_throws ArgumentError BRM._brm_vecchia_footprint([1.0], [1.0], [1.0], 1; neighbors=0)

@@ -12,6 +12,27 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.217
+
+- Fixed: `gmrf(...; neighbors=m)` depended on the order of the rows wherever a
+  step of its maximin position order had a tie, as on a regular lattice.
+  Positions were numbered by first appearance in the rows and ties resolved by
+  that number, so the same reads in another row order gave another state order,
+  other conditioning sets and another implied covariance. The largest difference
+  on a 40 × 40 lattice at spacing 1 and spatial lengths 1, 5 and 20 was 0.15 to
+  0.30 at `m = 4` and 0.004 to 0.012 at `m = 30`, about the size of the
+  approximation's own error at that `m`. Positions are now sorted first, as
+  `multiresolution=m` already did, so the footprint is a function of the set of
+  read pairs. Build time is unchanged.
+- **Breaking:** on a support with ties, a model rebuilt from rows that do not
+  first read their positions in sorted `(east, north)` order now has another
+  state order and prior law than on an earlier version, under the same coordinate
+  names, so no error marks the change. Draws or starts saved from such a fit do
+  not transfer to a rebuilt model: refit, or replay the fit's saved
+  `brm_fitted_state`, which keeps the footprint it was fitted with. Supports
+  without ties, rows already in sorted position order and `multiresolution=m`
+  are unchanged, bit for bit.
+
 ## 0.2.216
 
 - Fixed: a one-unit NLME gradient copied the whole model to the heap twice per

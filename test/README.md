@@ -1443,10 +1443,12 @@ gradient against a central difference of the returned value.
 `gmrf_vecchia.jl` checks the footprint representation's numerical core without a
 backend: the exact Gaussian on a fully read grid with irregular gaps, the exact
 time factor on synchronized reads at any neighbour count, separable channels, shared solves, gap
-linkage, reverse derivatives against finite differences and refusals.
+linkage, reverse derivatives against finite differences, the same footprint under
+any row order on a tied lattice, and refusals.
 `gmrf_vecchia_rk.jl` checks the term on RKBRMI: density and native reverse rule,
 sampled channel factor, state plates under `locality = :error`, a strict
-partition, replay from a fitted state and refusals. `gmrf_vecchia_stan.jl` checks
+partition, replay from a fitted state, the same coordinates and density under
+another row order, and refusals. `gmrf_vecchia_stan.jl` checks
 valid Stan, the shared helper, RK/Stan parity through coordinate transport, replay
 and descriptions.
 
