@@ -4,14 +4,14 @@
 #
 #   Rscript research/epidist/epidist_reference.R <outdir> <sample_size> <seed>
 #
-# Library: an isolated R library holding epidist 1.0.0, brms, cmdstanr
-# (R_EPIDIST_LIB, default /home/niko/R/epidist-lib); CmdStan from CMDSTAN.
+# Library: epidist 1.0.0, brms and cmdstanr, optionally from an extra R library
+# named by R_EPIDIST_LIB; CmdStan from CMDSTAN (default ~/.cmdstan/cmdstan-2.40.0).
 args <- commandArgs(trailingOnly = TRUE)
 outdir <- if (length(args) >= 1) args[[1]] else "research/epidist/results/n200"
 sample_size <- if (length(args) >= 2) as.integer(args[[2]]) else 200L
 seed <- if (length(args) >= 3) as.integer(args[[3]]) else 101L
-lib <- Sys.getenv("R_EPIDIST_LIB", "/home/niko/R/epidist-lib")
-.libPaths(c(lib, .libPaths()))
+lib <- Sys.getenv("R_EPIDIST_LIB", "")
+if (nzchar(lib)) .libPaths(c(lib, .libPaths()))
 suppressPackageStartupMessages({
   library(epidist); library(dplyr); library(cmdstanr); library(jsonlite)
 })

@@ -40,7 +40,7 @@ julia --project=test research/epidist/epidist_parity.jl research/epidist/results
 julia --project=test research/epidist/epidist_parity.jl research/epidist/results/nall fit
 ```
 
-## Results (gordito, 2026-11-06, one CPU per run, loaded host)
+## Results (2026-11-06, one CPU per run of a shared, loaded 32-core Linux host)
 
 Six targets: epidist's program; BRM SBBRMI and RKBRMI with the native family
 `double_interval_censored` (BRM 0.2.204, "native"); the same two with the
@@ -105,5 +105,5 @@ same name for RKBRMI.
   in linear space. It matches epidist to 1e-10 or better in the posterior bulk, but
   loses precision deep in the tails, where epidist's log-space primarycensored code
   is more careful (and, at a few extreme points, returns NaN where this one returns −Inf).
-- Timings come from a shared, loaded fleet host (`gordito`) and one CPU per run; compare
+- Timings come from a shared, loaded Linux host and one CPU per run; compare
   them within one run.
