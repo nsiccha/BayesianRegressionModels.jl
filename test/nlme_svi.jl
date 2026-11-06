@@ -179,6 +179,57 @@ end
     @test sqrt(dot(e, P * e)) < 0.1
 end
 
+@stestset "a unit's curvature estimate is the positive part of the Stein estimate" begin
+    rng = Xoshiro(21)
+    for d in (1, 2, 5, 27), _ in 1:20
+        A = randn(rng, d, 2d)
+        U = LowerTriangular(Matrix(cholesky(Symmetric(A * A' + d * I)).L))
+        gd, ε = randn(rng, d), randn(rng, d)
+        λ, e = BRM._brm_svi_unit_curvature(U, gd, ε)
+        w = -(U \ gd)
+        F = eigen(Symmetric((w * ε' + ε * w') ./ 2))
+        @test λ .* (e * e') ≈ F.vectors * Diagonal(max.(F.values, 0.0)) * F.vectors' atol = 1e-10
+        # A matched factor's estimate is εεᵀ, which has no negative part.
+        λ, e = BRM._brm_svi_unit_curvature(U, -(U * ε), ε)
+        @test λ .* (e * e') ≈ ε * ε'
+    end
+    # No curvature information is zero, not an error; a NaN still fails loudly.
+    U = LowerTriangular(Matrix(1.0I, 3, 3))
+    @test BRM._brm_svi_unit_curvature(U, zeros(3), [1.0, 2.0, 3.0]) == (0.0, zeros(3))
+    @test BRM._brm_svi_unit_curvature(U, [1.0, 2.0, 3.0], [1.0, 2.0, 3.0]) == (0.0, zeros(3))
+    @test_throws ArgumentError BRM._brm_svi_unit_curvature(U, [NaN, 0.0, 0.0], ones(3))
+end
+
+@stestset "a unit factor's weak direction recovers on a Gaussian target" begin
+    # The true sd along v is 1; every other direction starts at its target. On
+    # this exact Gaussian target the full rank-two estimate left v's sd between
+    # 155 and 3170 after 1100 visits from the two wider starts, on all five seeds
+    # tried, and at 340 and 1820 from the narrowest on two of the five.
+    d = 27
+    spectrum = vcat(1.0, exp.(range(log(2.0), log(700.0); length=d - 1)))
+    for seed in 1:3, start_sd in (5.0, 36.7, 817.0)
+        rng = Xoshiro(seed)
+        Q = Matrix(qr(randn(rng, d, d)).Q)
+        P = Symmetric(Q * Diagonal(spectrum) * Q')
+        v = Q[:, 1]
+        start = copy(spectrum)
+        start[1] = 1 / start_sd^2
+        Λ = Matrix(Symmetric(Q * Diagonal(start) * Q'))
+        q = (; M=[start_sd / 8 .* v], Λ=[Λ], U=[Matrix(cholesky(Symmetric(Λ)).L)])
+        sds = Float64[]
+        for k in 1:400
+            ε = randn(rng, d)
+            δ = BRM._brm_svi_unit_offset(q, 1, ε)
+            g₊, g₋ = -(P * (q.M[1] .+ δ)), -(P * (q.M[1] .- δ))
+            BRM._brm_svi_unit_step!(q, 1, (g₊ .+ g₋) ./ 2, (g₊ .- g₋) ./ 2, ε, 0.1)
+            k > 200 && push!(sds, norm(LowerTriangular(q.U[1]) \ v))
+        end
+        @test 0.5 < median(sds) < 2
+        @test maximum(sds) < 5
+        @test abs(dot(q.M[1], v)) < 1
+    end
+end
+
 @stestset "Gaussian random effects: SVI means match NUTS" begin
     rk = RKBRMI(svi_gauss_model(svi_gauss_data(Xoshiro(2), 40)))
     m = brm_nlme_model(rk; ad_backend=NLME_AD)

@@ -83,7 +83,7 @@ function brm_fitted_state(rk::RKBRMI)
         sort!(collect(fit_inputs)), reads,
         Dict{Symbol,Symbol}(_rk_plan_fit_inputs(rk.plan)),
         _rk_recorded_fits(rk), _rk_fitted_constants(rk), _rk_fitted_scalars(rk),
-        sprint(show, brm_source(rk); context=:brm_documentation => false),
+        _brm_declaration_text(brm_source(rk)),
         _rk_program_statements(emitted), _rk_layout_coordinate_names(rk),
         _rk_fitted_column_types(rk),
         sort!(collect(_rk_response_names(rk.plan))), Tuple(_rk_held_out_names(rk.plan)))
@@ -227,8 +227,8 @@ function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
     state.format == _BRM_FITTED_STATE_FORMAT || error(
         "$prefix: a format-$(state.format) fitted state; this BRM reads format " *
         "$_BRM_FITTED_STATE_FORMAT, so export it again from the fit")
-    declaration = sprint(show, template; context=:brm_documentation => false)
-    declaration == state.declaration || error(
+    declaration = _brm_declaration_text(template)
+    declaration == _brm_stable_declaration(state.declaration) || error(
         "$prefix: the fitted state was exported from another model:\n" *
         "  fitted: $(state.declaration)\n  replay: $declaration")
     groups = _rk_resample_group_set(resample_groups; prefix)
