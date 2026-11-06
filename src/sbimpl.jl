@@ -959,6 +959,19 @@ _sb_ranef_model(model::StanBlocks.SlicModel, n_terms::Integer) = n_terms == 1 ?
 _sb_ranef_kwargs(kwargs, n_terms::Integer) = n_terms == 1 ?
     filter(kw -> !(Meta.isexpr(kw, :kw) && kw.args[1] === :lkj_eta), kwargs) : kwargs
 
+# The data field holding a block's LKJ concentration, so one Stan program serves
+# every value (user principle `0ikeidi`). A single margin reads none. A replay
+# keeps the fitted value, as it keeps the program of a fit that spelled it.
+function _sb_lkj_eta_input!(data, bucket_name, eta, n_terms::Integer)
+    n_terms == 1 && return eta
+    key = Symbol(bucket_name, :_lkj_eta)
+    haskey(data, key) && error(
+        "sbimpl: `$bucket_name` reserves data key `$key`, but that name is already used")
+    data[key] = Float64(eta)
+    _sb_record_static!(data, key)
+    key
+end
+
 # ---- R2D2: derived random-effect scales -----------------------------------
 #
 # The `effect(..., :) ~ r2d2(...)` family DERIVES the marginal scale
@@ -5233,6 +5246,15 @@ stan_data(model::StanBlocks.SlicModel) =
     Base.invokelatest(StanBlocks.stan_data, model)
 
 """
+    stan_data(model::StanBlocks.StanModel) -> Dict
+
+Return the prepared Stan data of a traced model, such as the result of
+`stan_model`, at the same world-age-safe boundary.
+"""
+stan_data(model::StanBlocks.StanModel) =
+    Base.invokelatest(StanBlocks.stan_data, model)
+
+"""
     stan_model(sb::SBBRMI; kwargs...) -> StanModel
 
 Trace `sb.model` end to end. Forwards to `StanBlocks.stan_model` in the
@@ -5485,8 +5507,9 @@ construction, while `declarations` inventories every emitted sampling site,
 including priors introduced inside `kernel(...)` plates and every observation
 in a multi-output model.
 
-Construct with [`generative_plan`](@ref). [`stan_code`](@ref) accepts a plan,
-and [`reprocess`](@ref) preserves the existing SBBRMI replay contract (including
+Construct with [`generative_plan`](@ref). [`stan_code`](@ref), `stan_data`,
+`stan_model` and `stan_instantiate` accept a plan and read its `model`, and
+[`reprocess`](@ref) preserves the existing SBBRMI replay contract (including
 its correct-or-loud unsupported cases).
 Plans constructed from a reusable `@brm` builder also retain that builder so
 `generative_plan(plan, new_df)` can rebuild the same declarations for genuinely
@@ -6085,7 +6108,14 @@ function generative_plan(plan::GenerativePlan, new_df;
     _generative_plan(sb,plan.builder,cv_groups)
 end
 
+# A plan retains the model its SBBRMI lowered, so it takes the same entries,
+# each reading `plan.model` at the same world-age-safe boundary.
 StanBlocks.stan_code(plan::GenerativePlan) = Base.invokelatest(StanBlocks.stan_code, plan.model)
+stan_data(plan::GenerativePlan) = Base.invokelatest(StanBlocks.stan_data, plan.model)
+StanBlocks.stan_model(plan::GenerativePlan; kwargs...) =
+    Base.invokelatest(StanBlocks.stan_model, plan.model; kwargs...)
+StanBlocks.stan_instantiate(plan::GenerativePlan; kwargs...) =
+    Base.invokelatest(StanBlocks.stan_instantiate, plan.model; kwargs...)
 
 Base.show(io::IO, plan::GenerativePlan) = begin
     nprior = count(d -> d.role === :prior, plan.declarations)
@@ -6817,6 +6847,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         replay_and_bind(_sb_df_column(df, e.raw_ref), :primary => key,
                         :penalty => e.const_.zpen_key)
     elseif e.kind === :tensor_spline
+        _sb_check_replay_settings(df, :t2, get(e.const_, :setting_fields, ()))
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :t2)
         replay_and_bind(axes, :primary => key, :rr => e.const_.zrr_key,
                         :rn => e.const_.zrn_key, :nr => e.const_.znr_key)
@@ -13970,7 +14001,8 @@ function _sb_emit_student_t_id_bucket!(stmts, data, bucket_name, n_terms_name,
         config = _sb_generic_ranef_submodel(ranef_effect.sd_prior, base; mod)
         model = config.model
         _sb_record_binding!(data, bucket_name, :random_effect, gname; family)
-        push!(kwargs, Expr(:kw, :lkj_eta, ranef_effect.lkj_eta))
+        push!(kwargs, Expr(:kw, :lkj_eta, _sb_lkj_eta_input!(data, bucket_name,
+            ranef_effect.lkj_eta, data[n_terms_name])))
         append!(kwargs, [Expr(:kw, k, v) for (k, v) in config.inputs])
     else
         model = centered ? :ranef_correlated_draws_centered_student_t :
@@ -14028,7 +14060,8 @@ function _sb_emit_known_id_bucket!(stmts, data, bucket_name, n_terms_name,
     kwargs = Any[Expr(:kw, :group_idx, idx_name), Expr(:kw, :n_groups, n_groups),
                  Expr(:kw, :n_terms, n_terms_name), Expr(:kw, :tau, tau)]
     if isnothing(known_cor)
-        push!(kwargs, Expr(:kw, :lkj_eta, ranef_effect.lkj_eta))
+        push!(kwargs, Expr(:kw, :lkj_eta, _sb_lkj_eta_input!(data, bucket_name,
+            ranef_effect.lkj_eta, data[n_terms_name])))
     else
         L_name = Symbol(bucket_name, :_L_known)
         data[L_name] = Matrix{Float64}(cholesky(Symmetric(known_cor)).L)
@@ -14165,7 +14198,7 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
         push!(stmts, _sb_ranef_statement(bucket_name, :ranef_correlated_draws_r2d2,
             Any[Expr(:kw, :group_idx, idx_name), Expr(:kw, :n_groups, n_groups),
                 Expr(:kw, :n_terms, n_terms_name), Expr(:kw, :tau, tau_name),
-                Expr(:kw, :lkj_eta, r2d2_lkj_eta)], K))
+                Expr(:kw, :lkj_eta, _sb_lkj_eta_input!(data, bucket_name, r2d2_lkj_eta, K))], K))
         _sb_record_single_margin!(data, bucket_name, gname, :ranef_correlated_draws_r2d2, K)
         return idx_name
     end
@@ -14211,7 +14244,8 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name, g:
         _sb_record_single_margin!(data, bucket_name, gname, family, K)
     else
         push!(stmts, _sb_ranef_statement(bucket_name, generic_model,
-            Any[kwargs..., Expr(:kw, :lkj_eta, lkj_eta), generic_dependency_kwargs...], K))
+            Any[kwargs..., Expr(:kw, :lkj_eta, _sb_lkj_eta_input!(data, bucket_name, lkj_eta, K)),
+                generic_dependency_kwargs...], K))
     end
     idx_name
 end
@@ -14262,7 +14296,8 @@ function _sb_emit_id_bucket_sampling!(stmts, data, bucket_name, n_terms_name,
         _sb_record_binding!(data, bucket_name, :random_effect, gname;
                             family=:ranef_correlated_by_draws_generic)
         push!(stmts, _sb_ranef_statement(bucket_name, config.model,
-            Any[kwargs..., Expr(:kw, :lkj_eta, ranef_effect.lkj_eta),
+            Any[kwargs..., Expr(:kw, :lkj_eta,
+                    _sb_lkj_eta_input!(data, bucket_name, ranef_effect.lkj_eta, K)),
                 (Expr(:kw, k, v) for (k, v) in config.inputs)...], K))
     end
     info.idx_name
@@ -15231,7 +15266,8 @@ _sb_predictor_term!(stmts, data, ::typeof(t2), t;
     data[Zrn_name] = Zrn
     data[Znr_name] = Znr
     _sb_record_preproc!(data, Xfixed_name, PreprocEntry(:tensor_spline,
-        (; fit, zrr_key=Zrr_name, zrn_key=Zrn_name, znr_key=Znr_name),
+        (; fit, zrr_key=Zrr_name, zrn_key=Zrn_name, znr_key=Znr_name,
+         setting_fields=_brm_setting_fields(getkwargs(t), (:k,))),
         names, false))
     col_name = Symbol(:t2_, suffix)
     prior = _sb_term_sd_submodel(term_overrides, t; mod, data, stem=col_name)

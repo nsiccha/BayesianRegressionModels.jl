@@ -43,7 +43,7 @@ end
     ]
     sb = SBBRMI(brmi; mod = @__MODULE__)
     code = BRM.stan_code(sb)
-    @test occursin("lkj_corr_cholesky(2.0)", code)
+    @test occursin(r"lkj_corr_cholesky\(\w+_lkj_eta\)", code)
     @test occursin("diag_pre_multiply", code)
     @test occursin("poisson", lowercase(code))
     @test StanBlocks.stanc_check(code; warn_pedantic = false).ok

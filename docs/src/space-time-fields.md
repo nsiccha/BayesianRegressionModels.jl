@@ -221,9 +221,24 @@ domain of about 1,000 km first fail at a range of about 5,000 km with a correlat
 time of ``10^5`` time units, or a range of ``10^6`` km at any correlation time.
 
 Frozen replay reads only fitted `(position, time)` pairs, in any order and any
-subset. A new position or time needs a conditional prediction law and is
-refused. It is one model-scope field: use `mesh=` for independent fields in
-plate cells. Embedded Laplace does not integrate it.
+subset, and refuses a new position or time: `brm_gmrf_predict` below gives the
+conditional law there. It is one model-scope field: use `mesh=` for independent fields
+in plate cells. Embedded Laplace does not integrate it.
+
+### At new positions and in minibatch SVI
+
+`brm_gmrf_predict(rk, draws, :field; east, north, time)` gives a read-pair field at
+points the fit need not have read, on the scale the model reads it. A point follows the
+covariance above given its nearest read positions at the read times around it. With
+`rng` each entry is a conditional draw; without it, a conditional mean. Marginals are the
+law's. Points are conditionally independent given the states, so a joint quantity over
+several new points, such as an areal total, is not.
+
+`brm_svi_fit` takes a read-pair field, each state with its own global Gaussian factor. On
+toys with several rows per state that factor stays close to the exact posterior, while
+the same factor on a mesh's states collapses the learned lengths, so `brm_svi_fit`
+refuses the mesh form. With few rows per state the read-pair form's spatial length can
+also come out short, so check the learned lengths against their prior.
 
 ## Exact time covariance on irregular reads: `multiresolution=`
 
@@ -297,6 +312,78 @@ This is a model-scope field on `RKBRMI` and `SBBRMI`. Independent cell fields
 and embedded Laplace retain the mesh form. Very long spatial lengths can make
 a local correlation matrix numerically singular; such a failure is reported,
 without imposing a range floor or changing the prior.
+
+### Evaluating units with a learned spatial length
+
+With the lengths fixed by `=`, the read weights are data, and a strict partition
+reads only each read's innovations. A learned spatial length makes the weights
+one whole value per length. They have no row form: a row is built from its
+parents' rows, so one row needs the local solves of 40 %, 31 % and 24 % of the
+positions at 400, 1,600 and 6,400 random positions (`m = 30`), a count that keeps
+growing with the positions.
+
+A partition that declares nothing therefore refuses, with a
+`PartitionLocalityError` naming `weights`. `locality = :warn` evaluates anyway by
+recomputing the whole basis for every unit, which is quadratic in the positions
+over a sweep. Hold the basis as one shared value instead, by passing `partitioned`
+and `u0`. ReactiveKernelsPPL then computes it once per length and refreshes it when
+the length changes. Name the coordinates the units own, or, if they own none, mark
+any parameter's levels all shared:
+
+```julia
+plan = rk_bound_plan(rk)
+# Units own effects:
+partitioned = (:unit_effect => unit_labels,)
+# Units own nothing, as in a model of the field alone:
+entry = first(rk.model.layout.entries)
+partitioned = (entry.name => fill(missing, isempty(entry.dims) ? entry.size : first(entry.dims)),)
+
+query = prepare_partition(rk.model, plan, :y; by=(; y=unit), locality=:error, partitioned, u0=u)
+query(u, label)
+```
+
+That makes a unit's value local, but not its whole gradient.
+`partition_value_and_gradient!` includes the spatial length's derivative, so each
+call runs one pullback of the whole basis, again quadratic over a sweep. Choose by
+what the step needs:
+
+- **A batch of units:** one pass over their cells, with one pullback for the batch.
+- **A unit's own coordinates, the shared ones held fixed:**
+  `partition_value_and_gradient!(sampler, g, u, label; shared=false)`.
+- **Every unit:** the whole-model gradient, which also pays one basis derivative
+  and is cheaper than a pass over all the cells.
+
+```julia
+backend = AutoEnzyme(; mode=Enzyme.Reverse)
+compact = prepare_compact_cell_ad(ReactiveKernels.prepare_ad, rk.model, plan, :y, u, Int[], backend;
+    partitioned, locality=:error)
+accumulator = prepare_cell_accumulator(compact, backend, u; order=0)
+pullback = prepare_cell_pullback(compact, backend, u)
+gradient = similar(u)
+total = Ref(0.0)
+cell_pullback!(gradient, pullback, u) do batch
+    for cell in batch_rows
+        total[] += first(accumulate_cell!(batch, accumulator, nothing, 1.0, Float64[], Int[], cell))
+    end
+end
+```
+
+`Int[]` selects no unit-owned coordinates, the only selection checked on this
+field. The gradient is the batch's full packed gradient, shared coordinates
+included. Queries and samplers hold the shared value, so prepare one per thread.
+
+| Warm cost, one CPU on a shared host | 400 positions | 1,600 positions |
+| --- | --- | --- |
+| Unit value, `locality = :warn` | 6.5 ms | 37 ms |
+| Unit value, shared basis | 40 µs | 80 µs |
+| Unit value and gradient, either way | 17 to 20 ms | 89 to 126 ms |
+| Cell pass over one unit | 18 ms | 98 ms |
+| Cell pass over every unit | 156 ms | 952 ms |
+| Whole-model value and gradient | 29 ms | 125 ms |
+
+These are from a toy: `m = 30`, about 4 reads per position, one unit per position,
+one Normal observation per read, ReactiveKernels 0.1.86 and ReactiveKernelsPPL
+0.1.100.
 
 ## Independent fields in plate cells
 

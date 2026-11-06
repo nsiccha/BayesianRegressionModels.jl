@@ -557,7 +557,7 @@ function _new_laplace_problem(m::BRM.BRMNLMEModel, key)
     groups = unique(Symbol[BRM._brm_spl_record_group(f.record) for f in families])
     declarations = Set(BRM._brm_spl_record_declaration(f.record) for f in families)
     p = BRM._brm_sparse_laplace_problem(m.backend, groups;
-        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), tol=1e-24, maxiter=50,
+        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), tol=1e-24, maxiter=BRM._BRM_LAP_MAXITER,
         declarations)
     # its integrated draws are exactly the families' instances
     mine = Int[]

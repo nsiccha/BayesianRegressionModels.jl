@@ -249,6 +249,22 @@ end
     @test all(abs.(vec(sum(abs2, z .- m; dims=2)) ./ size(z, 2) ./ diag(V) .- 1) .<= 0.15)
 end
 
+# RK partitions whole layout entries by the name it gives them. A cell latent's
+# entry is not named like its coordinates, so the declaration comes from the
+# layout; the wrong name is refused before any cell is evaluated.
+@testset "A per-cell gmrf field partitions its own layout entry" begin
+    rk = RKBRMI(gmrf_rk_cell_model(; sampled_correlation=false))
+    record = only(r for r in BRM._rk_coordinate_records(rk.plan) if r.kind === :cell_gmrf)
+    layout = BRM._brm_spl_layout(rk, (record.declaration,))
+    name, labels = only(layout.partitioned)
+    entry = only(e for e in rk.model.layout.entries if e.name === name)
+    @test entry.size == length(layout.integrated) == length(labels)
+    @test collect(entry.offset:(entry.offset + entry.size - 1)) == sort(layout.integrated)
+    u0 = zeros(rk.model.layout.total)
+    @test prepare_cell_query(rk.model, rk_bound_plan(rk), :y;
+        partitioned=layout.partitioned, u0, locality=:error) isa CellQuery
+end
+
 # Beyond the dense oracle's reach for a whole target: a moderate field against
 # the exact algebra, its data on a grid mesh at random positions. The returned
 # value must estimate exact within its own probe error, the gradient must

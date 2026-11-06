@@ -75,14 +75,18 @@ function _brm_spl_screen(backend, candidates, forced, max_cell_width)
     for name in sort!(collect(keys(pointwise)))
         ncells = length(pointwise[name])
         ncells == 0 && continue
-        q = _rk_spl_factor_queries(backend, name)
+        q = _rk_spl_factor_queries(backend, name; layout.partitioned, u0)
+        # The same choice of route as `_brm_spl_observation_cells!`.
+        query = _rk_nlme_cell_query(backend, (name,); layout.partitioned, u0, locality=:ignore)
         prepared = _brm_spl_prepare_factors(backend, name, u0, ncells,
-            layout.integrated, layout.population; query=q)
+            layout.integrated, layout.population; query=q, whole=_rk_spl_cell_whole(query))
         if prepared === nothing
-            query = _rk_nlme_cell_query(backend, (name,), (), u0)
-            footprint = _rk_spl_cell_footprint(query)
-            for i in 1:ncells
-                record!(name, i, :cell, _rk_spl_cell_reads(footprint, u0, i))
+            footprint = _rk_spl_cell_footprint(query; shared=false)
+            _rk_spl_cell_batch(query, u0) do batch
+                for i in 1:ncells
+                    record!(name, i, :cell,
+                        _rk_spl_cell_reads(footprint, u0, i; context=batch))
+                end
             end
         else
             for c in prepared.cells

@@ -78,6 +78,7 @@ function _brm_prepare_term(term::ExprColumn{typeof(t2)}, target::Symbol,
     args = getargs(term)
     length(args) == 2 || error(
         "BRM term preparation: `t2(x, z)` expects two positional margins")
+    _brm_check_frozen_setting(:t2, :k, get(getkwargs(term), :k, nothing))
     k, _, _ = _brm_t2_options(getkwargs(term))
     first_source, x = _brm_term_data(:t2, args[1], context)
     second_source, z = _brm_term_data(:t2, args[2], context)

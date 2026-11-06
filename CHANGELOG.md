@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.218
+## 0.2.223
 
 - Fixed: one extreme draw could stop `brm_svi_fit`'s optimization of the globals
   without any sign of it. A draw that reaches a steep part of the density gives
@@ -41,6 +41,133 @@ instead of failing at run time.
   checkpoint needs the same package version; finish such a run on its own version
   or restart it. A fit on a fixed seed differs from an earlier version's from the
   first clipped step and from the stopping decision on.
+
+## 0.2.222
+
+- Fixed: `brm_svi_fit(...; laplace=GaussianBlockLaplace())` could stop with
+  `inconsistent quadrature bounds` on valid input, depending on the seed and the
+  host. On a 12-coordinate toy model at 8 updates, 6 of 17 seeds stopped this way.
+  The upper and lower bound of each log-determinant probe came from two separate
+  `eigen` calls, and near convergence their rounding, about `1e-12` there, exceeded
+  the true gap between the bounds. Both bounds now read one Cholesky factorization,
+  on which their order holds for the computed numbers. The 11 of those seeds that
+  already fitted move by at most `2e-13` in ELBO and take the same Krylov steps.
+  A precision too ill-conditioned to factor now always raises `ArgumentError`,
+  where it could also raise `nonpositive Radau node`. This fix does not make a
+  badly conditioned log determinant more accurate: `GaussianBlockLaplace` now
+  documents that rounding, which `logdet_quadrature_width` does not include.
+
+## 0.2.221
+
+- Added: `brm_gmrf_predict(rk, draws, field; east, north, time)` gives a read-pair
+  field (`gmrf(...; neighbors=m)`) at positions and times the fit need not have read:
+  conditional means, or conditional draws with `rng`. Marginals are the law's; points are
+  conditionally independent given the states, so a joint quantity over several new
+  points, such as an areal total, is not.
+- Added: `brm_nlme_view`, `brm_nlme_model` and `brm_svi_fit` accept a model-scope `gmrf`
+  term. Its states and hyperparameters are shared latents. `brm_svi_fit` refuses the mesh
+  form by name: one independent factor per mesh state collapses the learned lengths on
+  toys. A read-pair field's states are one global factor each under `brm_svi_fit`.
+
+## 0.2.220
+
+- Changed: on `RKBRMI`, a data scalar a prior reads is a runtime input of the
+  program instead of a number folded into it (user principle `0ikeidi`). That
+  covers `sigma ~ Exponential(s)`, a declared vector `z[1:n] .~ LogNormal.(mu, sd)`,
+  an expression over scalars (`LogNormal(log(s), 0.3)`), a scalar an assignment
+  reads, population-effect priors, and the hyperparameter priors of `gp`, `hsgp`,
+  `car`, `cdar` and `dar` terms. Two data sets that differ only in such a value
+  emit the same program, lower to the same program and prepare the same
+  `prepare_query` type, and the densities are unchanged. `rk_bound_data` now holds
+  these names, and the emitted source spells them instead of their numbers.
+- Changed: a stated `cor(:, ID) ~ LKJCholesky(K, eta)` no longer spells `eta` in
+  the program on either backend. RKBRMI reads a data field by name and a literal
+  through a generated input; SBBRMI reads a generated data field,
+  `<block>_lkj_eta`. A frozen RK replay still refuses data holding another value
+  of a prior's scalar, `eta` included, and a fresh replay
+  (`freeze_constants=false`) takes it. A Stan replay keeps the fit's `eta`.
+- Changed: a factor's fitted levels and coefficient count, a known correlation's
+  factor (`cor(:, ID) = C`, `gr(g; cor = R)`), a scalar `MvNormal` scale and the
+  concentration of `Dirichlet(K, a)` are inputs of the RK program too. A factor
+  with other labels but the same count lowers to the same program.
+- Changed: a data scalar in a `truncated` or `restricted` bound or a `Uniform` is
+  spelled by name in the emitted RK program. ReactiveKernelsPPL still reads such a
+  bound into its constrain transform, so the lowered program and query type follow
+  the value until ReactiveKernels snag `rkppl-sized-vect-69604d32` lands.
+- Changed: what identifies a fit for an SVI source, an SMC frame or carried source
+  and a filter now states the numbers its priors read, because the program text no
+  longer does. A resume with another prior value is still refused.
+- Added: `t2(x, z; k = kk)` takes its basis sizes from a data field on both
+  backends. RKBRMI reads them from the fit-role input `<id>_k_fit`, so one emitted
+  program serves every size; the coordinates follow the sizes, and RKPPL's layout
+  follows them too (`rkppl-sized-vect-69604d32`). A frozen replay refuses another
+  size.
+- Not changed: a literal an author writes in a prior (`Exponential(1.7)`) stays in
+  that author's source. `multigroup` `k` is still a literal, a data vector or matrix
+  a prior reads is still spelled in the program, and `Horseshoe` scales still refuse
+  data on RKBRMI. ReactiveKernels' `prepare_sampler` still specializes
+  on a bound scalar's value (ReactiveKernels snag `prepare-sampler-e69f1b38`), and
+  changed extents still change the lowered program
+  (`rkppl-sized-vect-69604d32`).
+
+## 0.2.219
+
+- The sparse Laplace marginal gradient is correct at a stiff observation on the
+  factor route. Its augmented system lost accuracy as the square of the outer
+  curvature, and the gradient keeps that residual on any population coordinate
+  aliased with an integrated effect: on a bounded ODL target with outer curvature
+  2e7, `odl_offset_Intercept` read 19214 for 395. The system now keeps its outer
+  inputs and their images as separate variables and refines each solve against
+  the conditional precision itself. Marginal values, definiteness and selected
+  covariances are unchanged. Conditional draws use the same solve.
+- The Laplace mode search's default Newton budget per continuation stage
+  (`maxiter` of `brm_laplace_problem`, `brm_laplace_plan` and the NLME
+  integrated families) rises from 50 to 200. Where a followed mode ceases to
+  exist between stages, the walk to the next mode can take more than 50 steps:
+  on the bounded ODL target a 38-effect component needed 56-59 at stage 4/10
+  and up to 122 at stage 5, with exact derivatives, so the default scored a
+  point that has a mode `-Inf`. A point that does not converge now costs up to
+  four times as many steps before it is `-Inf`. Pass `maxiter=50` for the
+  former budget.
+- Sparse Laplace supports model-scope helpers shared by ordinary or
+  sum-factored observation cells. Sampled-coordinate helper values are
+  reused across a cell sweep while their mixed derivatives remain part
+  of the marginal gradient. Integrated-coordinate helper reads retain
+  strict locality checks.
+- Preparation retains local integrated supports without expanding shared
+  sampled coordinates into every cell. Retained plans, sampled subsets,
+  independent problem copies and matrix-free contractions use the same
+  shared-derivative path.
+- A cell with no sums takes compact operators when every value it reads is
+  computed at its rows. Otherwise it takes its strict factor outer, and is refused
+  by name if that refuses it too.
+- A factor's Hessian block compiles at the same bounded Enzyme batch width as a
+  compact cell's, and takes as many batches as it needs.
+- A move of a cell group to reverse over forward on Enzyme's activity error
+  (0.2.158) restarts its Newton pass and resumes at the cell that raised, so no
+  cell counts twice.
+- A `mo()` or `mo1()` term read by a subject's `@plate` cell now plans: the
+  subjects' effects are declared partitioned, so its level table, which has no
+  row form, is computed once per population point in the shared prefix.
+- **Breaking:** under `locality = :error`, a matrix with no row form read as
+  `M[p, 2]` is now refused by name rather than computed whole in every cell.
+  Shared helpers need the RK repairs of ReactiveKernels 0.1.73 and
+  ReactiveKernelsPPL 0.1.90, which the current floors (0.1.82 / 0.1.98)
+  include: earlier releases refuse sum-factored cells over shared helpers with
+  a locality error, read a producer plate's cell whole under `partitioned`, and
+  have no row forms for matrix-row helpers, `vec` of a row value, whole arrays
+  read by index or `b[p, 2]` of a computed matrix.
+
+## 0.2.218
+
+- Added: `stan_data`, `stan_model` and `stan_instantiate` accept a
+  `GenerativePlan`, as `stan_code` already did. Each reads `plan.model`, so it
+  returns what the same call returns on the plan's `SBBRMI`, and `stan_model`
+  and `stan_instantiate` pass their keywords on. They raised `MethodError`
+  before, although `brm-use` said BRM added these methods. Code that reads
+  `plan.model` directly keeps working and gets the same results.
+- Added: `stan_data` accepts a `StanModel`, so `stan_data(stan_model(x))` works
+  on a plan and on an `SBBRMI`.
 
 ## 0.2.217
 

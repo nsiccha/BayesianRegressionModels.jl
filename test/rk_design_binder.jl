@@ -492,7 +492,7 @@ end
     binder = check_binder(rk, new; resample_groups=[:subject], want=:conc,
         runtime=subject_effects)
     @test length(binder.classes) == 1
-    @test keys(binder.fitted) == (:weight_fit,)
+    @test keys(binder.fitted) == (:hsgp_base_time_modes_fit, :hsgp_base_time_settings_fit, :weight_fit)
     check_binder(rk, [pk_data(rng, 2, 3; labels=["n1", "n2"]),
         pk_data(rng, 3, 2; labels=["n1", "n2", "n3"])];
         resample_groups=[:subject], want=:conc, runtime=subject_effects)
@@ -725,7 +725,8 @@ end
     rng = Xoshiro(9)
     # Rows 2, 4, 6 and 8 are outside the mask, so their axis may be missing.
     holes(x) = Union{Missing,Float64}[i in (2, 4) ? missing : v for (i, v) in enumerate(x)]
-    for (build, fitted) in ((BM.masked, (:hsgp_x_rows_fit, :x_fit)), (BM.masked_periodic, ()))
+    for (build, fitted) in ((BM.masked, (:hsgp_x_modes_fit, :hsgp_x_rows_fit, :hsgp_x_settings_fit, :x_fit)),
+            (BM.masked_periodic, (:hsgp_x_modes_fit, :hsgp_x_settings_fit)))
         rk = RKBRMI(build(flat_data(rng, 12)))
         designs = [map(v -> v[rows], without(flat_data(rng, 12), :y)) for rows in (2:6, 3:9, 1:12)]
         missing_designs = [merge(d, (; x=holes(d.x))) for d in
