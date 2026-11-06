@@ -406,6 +406,14 @@ function _sb_gmrf_mesh_data(prepared)
        weight1=s.weights[:, 1], weight2=s.weights[:, 2], weight3=s.weights[:, 3])
 end
 
+# A fresh replay's read-support count: the new data's value of the field that
+# held it, else the fitted count (a literal, or a field the data omits).
+function _sb_gmrf_fresh_count(df, state, option::Symbol)
+    source = get(state, Symbol(option, :_source), nothing)
+    (source === nothing || !_brm_df_has_column(df, source)) && return getproperty(state, option)
+    _brm_gmrf_count(option, _sb_df_column(df, source))
+end
+
 function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
     training = e.const_.prepared
     rows = Dict{Symbol,Any}(s => _sb_df_column(df, s) for s in training.source)
@@ -418,10 +426,11 @@ function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
                 "gmrf replay with channel correlation cannot introduce new channel labels"))
             channels = state.channels
         end
+        multiresolution = _sb_gmrf_fresh_count(df, state, :multiresolution)
         support = _brm_multiresolution_support(rows[training.source[1]], rows[training.source[2]],
-            rows[training.source[3]], length(channels); rank=state.multiresolution)
+            rows[training.source[3]], length(channels); rank=multiresolution)
         training = _BRMPreparedTerm(gmrf, training.source,
-            merge(state, (; times, channels, support)), training.dependencies)
+            merge(state, (; times, channels, support, multiresolution)), training.dependencies)
     elseif !freeze && training.state.neighbors !== nothing
         # A fresh fit's footprint is its own rows' read pairs.
         state = training.state
@@ -432,10 +441,11 @@ function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
                 "gmrf replay with channel correlation cannot introduce new channel labels"))
             channels = state.channels
         end
+        neighbors = _sb_gmrf_fresh_count(df, state, :neighbors)
         footprint = _brm_vecchia_footprint(rows[training.source[1]], rows[training.source[2]],
-            rows[training.source[3]], length(channels); state.neighbors)
+            rows[training.source[3]], length(channels); neighbors)
         training = _BRMPreparedTerm(gmrf, training.source,
-            merge(state, (; times, channels, footprint)), training.dependencies)
+            merge(state, (; times, channels, footprint, neighbors)), training.dependencies)
     elseif !freeze
         state = training.state
         vertices = _sb_df_column(df, state.vertices_source)
@@ -457,6 +467,12 @@ function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
             merge(state, (; vertices, cells, mesh, times=layout.times, channels=layout.channels, layout,
                           nvertices=size(vertices, 1))), training.dependencies)
     end
+    # A frozen replay keeps the fitted support, which a data-valued count sized.
+    freeze && _sb_check_replay_settings(df, :gmrf, Tuple(
+        source => getproperty(training.state, option)
+        for option in (:neighbors, :multiresolution)
+        for source in (get(training.state, Symbol(option, :_source), nothing),)
+        if source !== nothing))
     prepared = _brm_replay_gmrf(training, (; data=rows))
     for (name, value) in pairs(_sb_gmrf_data(prepared))
         owned = e.const_.keys[name]

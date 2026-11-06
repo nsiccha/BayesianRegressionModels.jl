@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.206
+## 0.2.209
 
 - Added: `BRMSVINonfiniteError`. When an SVI iteration (`brm_svi_fit`,
   `brm_svi_resume`) evaluates the target to a non-finite value or gradient at
@@ -26,6 +26,65 @@ instead of failing at run time.
   `eigvals`, after the global step had already changed `q`. Continue from the
   last checkpoint `save` received: the run in memory is not a checkpoint after
   the error.
+
+## 0.2.208
+
+- Added: sizes and numeric settings are data. `gmrf(...; neighbors = nb)`,
+  `gmrf(...; multiresolution = m)` and `hsgp(...; k = kk, c = cc)` (and
+  `domain`, `period`, `anchor`) take a scalar or per-axis data field, or a
+  `name = constant(expr)`, besides a literal, so one declaration serves a
+  family of values (user principle `0ikeidi`).
+- Added: a random-effect block's correlation prior
+  `cor(:, ID) ~ LKJCholesky(K, eta)` reads `K` and `eta` from scalar data
+  fields as well as literals, on SBBRMI and RKBRMI (and in `prune_responses`);
+  `K` is still checked against the block width. Both backends emit `eta`'s
+  number into the program.
+- Changed: models that differ only in the `gmrf` and `hsgp` values build one
+  Stan program and emit one RK program. RKBRMI reads an `hsgp` term's basis
+  counts and settings from the bound fit-role inputs `<id>_modes_fit` and
+  `<id>_settings_fit` (as the fitted values `<id>_modes`, `<id>_settings`), and
+  a `multiresolution` rank from `<id>_rank_fit`, instead of spelling them in the
+  program; the basis size is `prod(modes)`. The densities are unchanged.
+  ReactiveKernelsPPL's lowering of the emitted program still specializes on a
+  changed basis size and on the fitted length-scale floor, which `c` and
+  `domain` move (ReactiveKernels snag `rkppl-sized-vect-69604d32`); a changed
+  `multiresolution` rank lowers to the same program.
+- Added: a frozen replay refuses data whose field holds another value of such
+  a setting than the fit used; a new build takes the new value, and so does a
+  fresh replay (`freeze_constants=false`) on RKBRMI and of an SBBRMI `gmrf`.
+  An SBBRMI `hsgp` replay refuses in either mode; its new build compiles the
+  same Stan program.
+
+## 0.2.207
+
+- Fixed: a data column whose element type is erased (`Any[...]`, as an empty
+  comprehension over a DataFrame column or `push!` onto `[]` produces) now
+  holds its entries' common type when the model is built, so it is read
+  exactly as the same values written typed: `Any[[0.5, -0.2], [1.3]]` is a
+  per-cell vector response like `[[0.5, -0.2], [1.3]]`, and `Any[0.3, -0.1]`
+  a scalar response like `[0.3, -0.1]`. The entries are not converted and the
+  caller's column is not replaced.
+- Fixed: on RKBRMI, an in-cell observation `y[i] ~ law(...)` in
+  `@plate for i in eachindex(y)` over an empty `y = Any[]` is bound as an
+  empty column of the arrays its law observes per cell (a matrix per cell
+  for a matrix-variate law, otherwise a vector; `Int` for a discrete law,
+  otherwise `Float64`), as `Vector{Float64}[]` would be. It observes zero
+  cells, contributes zero likelihood, keeps the priors and differentiates
+  under native Reverse. It previously became one whole-vector event and
+  failed when queries were prepared (`zero(::Type{Any})`). Other empty
+  columns a cell reads have no law to type them: their queries evaluate,
+  but native reverse AD needs them constructed with a concrete element type.
+
+## 0.2.206
+
+- Fixed: `brm_start` on RKBRMI writes an ungrouped anisotropic
+  `hsgp(...; iso=false)` length scale, as `fitting.md` documents, through
+  `term_inits` and `base=:prior_median`. A scalar broadcasts over the axes; a
+  vector holds one value per axis, in formula order. Before, both raised
+  `type NamedTuple has no field rho`.
+- Fixed: an ungrouped one-axis `hsgp(x; iso=false)` on RKBRMI. Its `brm_start`
+  raised the same error, and `brm_coordinate_transport` refused it because the
+  emission samples `rho_iso` while the record named `rho_1`.
 
 ## 0.2.205
 

@@ -39,21 +39,40 @@ function _brm_gmrf_arguments(term)
     mesh = get(kw, :mesh, nothing)
     neighbors = get(kw, :neighbors, nothing)
     multiresolution = get(kw, :multiresolution, nothing)
+    _brm_check_frozen_setting(:gmrf, :neighbors, neighbors)
+    _brm_check_frozen_setting(:gmrf, :multiresolution, multiresolution)
     count(!isnothing, (mesh, neighbors, multiresolution)) == 1 || throw(ArgumentError(
         "gmrf takes exactly one of mesh=(vertices=xy, cells=triangles), neighbors=m, or multiresolution=m"))
     if mesh !== nothing
         mesh isa NamedTuple && Set(keys(mesh)) == Set((:vertices, :cells)) || throw(ArgumentError(
             "gmrf needs mesh=(vertices=xy, cells=triangles)"))
     end
-    for (name, value) in ((:neighbors, neighbors), (:multiresolution, multiresolution))
-        value === nothing && continue
-        value isa Integer && 1 <= value <= 100 || throw(ArgumentError(
-            "gmrf $name must be an integer literal between 1 and 100; got $(repr(value))"))
-    end
     (; axes, time=args[2], channel=length(args) == 3 ? args[3] : nothing,
-       mesh, neighbors=neighbors === nothing ? nothing : Int(neighbors),
-       multiresolution=multiresolution === nothing ? nothing : Int(multiresolution), cor=get(kw, :cor, nothing))
+       mesh, neighbors=_brm_gmrf_count(:neighbors, neighbors),
+       neighbors_source=_brm_gmrf_count_source(neighbors),
+       multiresolution=_brm_gmrf_count(:multiresolution, multiresolution),
+       multiresolution_source=_brm_gmrf_count_source(multiresolution),
+       cor=get(kw, :cor, nothing))
 end
+
+# A read-support count (`neighbors=`, `multiresolution=`) is a number the model
+# reads, not part of its structure: an integer literal, or a scalar data field or
+# `name = constant(expr)` holding one, so one declaration serves every count.
+# The count sizes the fitted support only; neither backend's program spells it.
+# A name not yet bound to its value (a constant before resolution) stays a name:
+# structural readers (labels, axes) need no count, and preparation reads it bound.
+_brm_gmrf_count(::Symbol, ::Nothing) = nothing
+function _brm_gmrf_count(option::Symbol, value)
+    value isa NamedColumn && !(parent(value) isa DataColumn) && return value
+    raw = value isa NamedColumn ? parent(parent(value)) : value
+    raw isa Integer && !(raw isa Bool) && 1 <= raw <= 100 || throw(ArgumentError(
+        "gmrf $option must be an integer from 1 through 100, written as a literal or " *
+        "held by a scalar data field or constant; got " *
+        (value isa NamedColumn ? "`$(name(value))` = $(repr(raw))" : repr(raw))))
+    Int(raw)
+end
+_brm_gmrf_count_source(value) =
+    value isa NamedColumn && parent(value) isa DataColumn ? name(value) : nothing
 
 function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, context;
         geometry::Bool=true)
@@ -86,13 +105,21 @@ function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, conte
         temporal_prior=_brm_term_prior_expression(term, target, context, :term_length_scale;
             component=:time, default=ExprColumn(LogNormal, 0.0, 1.0)))
     correlation_source = correlation === nothing ? () : (correlation.name,)
+    for (option, count) in ((:neighbors, arguments.neighbors),
+            (:multiresolution, arguments.multiresolution))
+        count isa NamedColumn && throw(ArgumentError(
+            "gmrf $option reads `$(name(count))`, which holds no data value here; " *
+            "pass it as a scalar data field or declare it `$(name(count)) = constant(expr)`"))
+    end
     if arguments.multiresolution !== nothing
-        return _brm_prepare_gmrf_multiresolution(source, correlation_source, spatial, time,
-            row_channels, channels, correlation, times, priors, target, arguments.multiresolution, geometry)
+        return _brm_gmrf_count_sources(_brm_prepare_gmrf_multiresolution(source,
+            correlation_source, spatial, time, row_channels, channels, correlation, times,
+            priors, target, arguments.multiresolution, geometry), arguments)
     end
     if arguments.neighbors !== nothing
-        return _brm_prepare_gmrf_footprint(source, correlation_source, spatial, time,
-            row_channels, channels, correlation, times, priors, target, arguments.neighbors, geometry)
+        return _brm_gmrf_count_sources(_brm_prepare_gmrf_footprint(source,
+            correlation_source, spatial, time, row_channels, channels, correlation, times,
+            priors, target, arguments.neighbors, geometry), arguments)
     end
     vertices_source, vertices = _brm_term_data(:gmrf, arguments.mesh.vertices, context)
     cells_source, cells = _brm_term_data(:gmrf, arguments.mesh.cells, context)
@@ -113,6 +140,16 @@ function _brm_prepare_term(term::ExprColumn{typeof(gmrf)}, target::Symbol, conte
     indices = _brm_gmrf_state_indices(interpolation.indices, time, row_channels, layout)
     _BRMPreparedTerm(gmrf, source,
         merge(state, (; mesh, indices, weights=interpolation.weights)), dependencies)
+end
+
+# The data field that holds a read-support count, when one does: a fresh replay
+# reads the count from its own data, and the term reads that field.
+function _brm_gmrf_count_sources(prepared, arguments)
+    sources = (; neighbors_source=arguments.neighbors_source,
+        multiresolution_source=arguments.multiresolution_source)
+    read = Tuple(s for s in values(sources) if s !== nothing)
+    _BRMPreparedTerm(gmrf, prepared.source, merge(prepared.state, sources),
+        (prepared.dependencies..., read...))
 end
 
 # A footprint field has no mesh: its support is the training rows' read pairs,
