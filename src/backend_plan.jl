@@ -3287,17 +3287,22 @@ function _brm_ranef_lkj_eta(spec, n_terms::Int;
         "$prefix: `cor(:, ID) ~ LKJCholesky(...)` does not accept keywords")
     length(spec.arguments) == 2 || error(
         "$prefix: `LKJCholesky` correlation priors require dimension K and eta")
-    k = _brm_numeric_constant(spec.arguments[1])
-    eta = _brm_numeric_constant(spec.arguments[2])
+    # K and eta are numbers the model reads: literals, or scalar data fields (a
+    # resolved `name = constant(expr)` included) at their values, so one
+    # declaration serves every value (user principle `0ikeidi`).
+    k = _brm_effect_number(spec.arguments[1])
+    eta = _brm_effect_number(spec.arguments[2])
     isnothing(k) && error(
-        "$prefix: `LKJCholesky(K, eta)` dimension K must be an integer formula constant")
+        "$prefix: `LKJCholesky(K, eta)` dimension K must be an integer literal or " *
+        "scalar data field")
     isinteger(k) || error(
-        "$prefix: `LKJCholesky(K, eta)` dimension K must be an integer formula constant")
+        "$prefix: `LKJCholesky(K, eta)` dimension K must be an integer literal or " *
+        "scalar data field; got $k")
     Int(k) == n_terms || error(
         "$prefix: `LKJCholesky($(Int(k)), ...)` does not match the addressed " *
         "random-effect block width $n_terms")
     isnothing(eta) && error(
-        "$prefix: LKJ eta must be a numeric formula constant")
+        "$prefix: LKJ eta must be a numeric literal or scalar data field")
     isfinite(eta) && eta > 0 || error(
         "$prefix: LKJ eta must be finite and strictly positive, got $eta")
     eta

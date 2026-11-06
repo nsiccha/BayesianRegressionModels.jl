@@ -427,6 +427,106 @@ end
     @test cb[sigma] ≈ vb.sigma ≈ median(Exponential(.4))
 end
 
+@stestset "term starts: ungrouped anisotropic HSGP length scales" begin
+    # One prior address reaches both predictors, and every law reads bound data.
+    builder = @brm begin
+        a ~ 1 + hsgp(x, z, t; iso=false, k=(2, 2, 2),
+            domain=((-3., 3.), (-3., 3.), (-3., 3.)))
+        b ~ 1 + hsgp(x, z, t; iso=false, k=(2, 2, 2),
+            domain=((-3., 3.), (-3., 3.), (-3., 3.)))
+        sd(:, hsgp(x, z, t)) ~ Exponential(sd_mean)
+        length_scale(:, hsgp(x, z, t)) ~ LogNormal(length_mu, length_sd)
+        y_a ~ Normal(a, .4)
+        y_b ~ Normal(b, .4)
+    end
+    data = (; x=[-.3, .4], z=[.1, -.2], t=[-.2, .3], y_a=[.1, -.2], y_b=[.2, .3],
+        sd_mean=1., length_mu=.25, length_sd=.7)
+    f = start_fixture(builder, data, "anisotropic_hsgp")
+    address = :(length_scale(:, hsgp(x, z, t)))
+    function rk_lengths(u)
+        v = BRM._rk_constrained_values(f.rk, u)
+        map(w -> [w.rho_1, w.rho_2, w.rho_3], (v.hsgp_x_z_t, v.hsgp_x_z_t_2))
+    end
+    stan_lengths(u) = (term_values(f, u, :a, :hsgp_x_z_t, :length_scale),
+        term_values(f, u, :b, :hsgp_x_z_t, :length_scale))
+
+    # A scalar broadcasts over the axes, on both predictors.
+    inits = (; a=(; Intercept=.1))
+    r, s = start_pair(f, inits; term_inits=[address => 1.2])
+    @test all(≈(fill(1.2, 3)), rk_lengths(r))
+    @test all(≈(fill(1.2, 3)), stan_lengths(s))
+    @test isfinite(BridgeStan.log_density(f.model, s))
+    # Only the intercept and the six length scales leave the base.
+    @test count(!iszero, r .- brm_start(f.rk, (;))) == 7
+
+    # A vector holds one value per axis, in formula order, and a predictor's
+    # own address takes precedence over the wildcard.
+    r, s = start_pair(f; term_inits=[address => [.8, 1.2, 2.],
+        :(length_scale(b, hsgp(x, z, t))) => [3., .5, 1.1]])
+    @test rk_lengths(r)[1] ≈ [.8, 1.2, 2.]
+    @test rk_lengths(r)[2] ≈ [3., .5, 1.1]
+    @test stan_lengths(s)[1] ≈ [.8, 1.2, 2.]
+    @test stan_lengths(s)[2] ≈ [3., .5, 1.1]
+
+    for backend in ((args...; kw...) -> brm_start(f.rk, args...; kw...),
+                    (args...; kw...) -> brm_start(f.sb, f.model, args...; kw...))
+        @test_throws DimensionMismatch backend((;); term_inits=[address => [.8, 1.2]])
+        @test_throws "strictly positive" backend((;); term_inits=[address => [.8, 0., 1.2]])
+    end
+
+    # The prior base reaches the same carriers; explicit values still win.
+    medians = fill(exp(.25), 3)
+    r, s = start_pair(f; base=:prior_median)
+    @test all(≈(medians), rk_lengths(r))
+    @test all(≈(medians), stan_lengths(s))
+    r, s = start_pair(f; base=:prior_median,
+        term_inits=[:(length_scale(a, hsgp(x, z, t))) => [.8, 1.2, 2.]])
+    @test rk_lengths(r)[1] ≈ [.8, 1.2, 2.]
+    @test rk_lengths(r)[2] ≈ medians
+    @test stan_lengths(s)[2] ≈ medians
+
+    # Default laws keep one validity floor per axis.
+    defaults = @brm begin
+        mu ~ 0 + hsgp(x, z; iso=false, k=(3, 4))
+        y_a ~ Normal(mu, .4)
+    end
+    f = start_fixture(defaults, data, "anisotropic_hsgp_defaults")
+    address = :(length_scale(mu, hsgp(x, z)))
+    r, s = start_pair(f; term_inits=[address => [1.5, 2.5]])
+    @test term_values(f, s, :mu, :hsgp_x_z, :length_scale) ≈ [1.5, 2.5]
+    r, s = start_pair(f; base=:prior_median)
+    medians = term_values(f, s, :mu, :hsgp_x_z, :length_scale)
+    v = BRM._rk_constrained_values(f.rk, r).hsgp_x_z
+    @test [v.rho_1, v.rho_2] ≈ medians
+
+    # A single axis samples one scale, whatever `iso=` says.
+    one_axis = @brm begin
+        mu ~ 0 + hsgp(x; iso=false, k=3)
+        length_scale(mu, hsgp(x)) ~ LogNormal(0, .7)
+        y_a ~ Normal(mu, .4)
+    end
+    f = start_fixture(one_axis, data, "one_axis_iso_false")
+    r, s = start_pair(f; term_inits=[:(length_scale(mu, hsgp(x))) => 1.3])
+    @test only(term_values(f, s, :mu, :hsgp_x, :length_scale)) ≈ 1.3
+    @test BRM._rk_constrained_values(f.rk, r).hsgp_x.rho_iso ≈ 1.3
+
+    # Known axes hold no sampled carrier: they may only be restated.
+    known = @brm begin
+        mu ~ 0 + hsgp(x, z; iso=false, k=(2, 2))
+        length_scale(mu, hsgp(x, z)) = [.9, 1.4]
+        y_a ~ Normal(mu, .4)
+    end
+    f = start_fixture(known, data, "anisotropic_hsgp_known")
+    address = :(length_scale(mu, hsgp(x, z)))
+    base, _ = start_pair(f; base=:prior_median)
+    r, _ = start_pair(f; base=:prior_median, term_inits=[address => [.9, 1.4]])
+    @test r ≈ base
+    for backend in ((args...; kw...) -> brm_start(f.rk, args...; kw...),
+                    (args...; kw...) -> brm_start(f.sb, f.model, args...; kw...))
+        @test_throws "known at" backend((;); term_inits=[address => [.9, 1.5]])
+    end
+end
+
 @stestset "prior bases: derived CAR and CDAR inputs" begin
     source = quote
         area_sub = area[rows]
