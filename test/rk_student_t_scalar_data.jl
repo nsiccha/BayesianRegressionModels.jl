@@ -97,16 +97,28 @@ end
     original = deepcopy(scalar_t_data)
     literal = RKBRMI(literal_t_builder(scalar_t_data))
     fixed = RKBRMI(scalar_t_builder(merge(scalar_t_data, (; nu=6.0))))
-    fixed_program, literal_program = BRM._rk_emit_ast(fixed.plan), BRM._rk_emit_ast(literal.plan)
-    @test fixed_program.defs == literal_program.defs
-    @test fixed_program.main == literal_program.main
-    @test fixed.plan.columns == literal.plan.columns
     @test coordinate_names(fixed.model.layout) == coordinate_names(literal.model.layout)
+    # Scalar-data `nu` is a runtime input of the program (user principle
+    # `0ikeidi`; snag use-a-named-scal-99c4babc): another value emits the same
+    # program and binds the new value, where the literal spelling holds its
+    # number in the program.
     changed = RKBRMI(scalar_t_builder(merge(scalar_t_data, (; nu=3.5))))
-    stale_literal = RKBRMI(literal_t_builder(merge(scalar_t_data, (; nu=3.5))))
-    @test BRM._rk_emit_ast(changed.plan).main != BRM._rk_emit_ast(stale_literal.plan).main
-    @test only(changed.plan.responses).nu == 3.5
-    @test only(stale_literal.plan.responses).nu == 6.0
+    fixed_program, changed_program = BRM._rk_emit_ast(fixed.plan), BRM._rk_emit_ast(changed.plan)
+    @test fixed_program.defs == changed_program.defs
+    @test fixed_program.main == changed_program.main
+    @test fixed.plan.columns[:nu] == 6.0
+    @test changed.plan.columns[:nu] == 3.5
+    @test fixed_program.main != BRM._rk_emit_ast(literal.plan).main
+    @test !occursin("6.0", sprint(Base.show_unquoted, fixed_program.main))
+    # Binding refuses an invalid value, naming it (RKPPL's observation contract).
+    for nu in (0, -1)
+        @test_throws "nu data nu must be finite positive numerics" RKBRMI(
+            scalar_t_builder(merge(scalar_t_data, (; nu))))
+    end
+    for nu in (NaN, Inf, -Inf)
+        @test_throws "nu data nu must be finite real numerics" RKBRMI(
+            scalar_t_builder(merge(scalar_t_data, (; nu))))
+    end
 
     for (builder, nu, evidence) in ((scalar_t_builder, 6.0, :censored),
             (scalar_t_builder, 3.5, :censored), (unwrapped_t_builder, 12, :none),
@@ -129,7 +141,7 @@ end
             retyped_query = prepare_sampler(retyped, retyped_plan, zeros(2);
                 backend=AutoEnzyme(; mode=Enzyme.Reverse))
             @test LogDensityProblems.dimension(problem) == 2
-            @test isempty(backend.plan.parameters)
+            @test isempty(backend.plan.regression.parameters)
             @test coordinate_names(retyped.layout) == coordinate_names(backend.model.layout)
             stan = if builder === scalar_t_builder && nu == 6.0
                 # Compare the same BRMI, including normalization constants,

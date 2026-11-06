@@ -6824,10 +6824,12 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         axes = _sb_gp_axes_from_df(df, e.raw_ref, :gp)
         replay_and_bind(axes, :primary => key)
     elseif e.kind === :hsgp && get(e.const_, :cov, :exp_quad) === :periodic
+        _sb_check_replay_settings(df, :hsgp, get(e.const_, :setting_fields, ()))
         replay_and_bind(_sb_hsgp_replay_input(df, e; allow_empty=true), :primary => key,
                         :harmonics => e.const_.harmonics_key,
                         :rho_lower => e.const_.rho_lower_key)
     elseif e.kind === :hsgp
+        _sb_check_replay_settings(df, :hsgp, get(e.const_, :setting_fields, ()))
         input = _sb_hsgp_replay_input(df, e;
             allow_empty=!isnothing(get(e.const_, :domain_fits, nothing)))
         # A `by=` term's projection reads the replay rows' level codes, which
@@ -15374,8 +15376,26 @@ end
 
 # Replay needs the options next to the frozen fit; a term that uses none of
 # them records nothing new, so its preprocessing record is unchanged.
+# An SBBRMI replay keeps a term's fitted basis, which its settings sized; data
+# whose setting field holds another value asks for another basis. The Stan
+# program does not depend on these values, so a new build from that data
+# compiles the same program.
+function _sb_check_replay_settings(df, term::Symbol, fields)
+    for (field, fitted) in fields
+        _sb_df_has_column(df, field) || continue
+        fresh = _sb_df_column(df, field)
+        isequal(fresh, fitted) || throw(ArgumentError(
+            "sbimpl: `$term(...)` reads `$field`: the new data holds $field = " *
+            "$(repr(fresh)), but the fit used $field = $(repr(fitted)). An SBBRMI " *
+            "replay keeps the fitted $term; build a new SBBRMI from the new data " *
+            "(its Stan program is the same)"))
+    end
+end
+
 function _sb_hsgp_option_const(options, support)
     out = (;)
+    isempty(options.setting_fields) ||
+        (out = merge(out, (; setting_fields=options.setting_fields)))
     isnothing(options.anchor) || (out = merge(out, (; anchor=options.anchor)))
     options.extrapolate === :clamp &&
         (out = merge(out, (; extrapolate=:clamp, support)))

@@ -229,7 +229,10 @@ Each innovation keeps only the union of its readers' times, without completing
 the position × time grid. Frozen replay retains these innovation identities
 and accepts fitted `(position, time, channel)` reads only. Both read-support
 forms are model-scope fields, support `RKBRMI` and `SBBRMI`, and accept integer
-`m` from 1 through 100. Select exactly one of `mesh=`, `neighbors=`, and
+`m` from 1 through 100, written as a literal or held by a scalar data field or
+`name = constant(expr)` (`neighbors = nb`): the count sizes the fitted support
+only, so models that differ in it build one Stan program and emit one RK program,
+and a frozen replay refuses data holding another count. Select exactly one of `mesh=`, `neighbors=`, and
 `multiresolution=`. Hyperparameter addresses and priors are the same for all
 three forms.
 """

@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.206
+## 0.2.212
 
 - Fixed: a population prior that reads data is integrated by exact totals and
   sum-to-zero like the same prior with the numbers spelled out.
@@ -34,6 +34,124 @@ instead of failing at run time.
   say why ("arguments that read only numbers and data"). A data-only call that
   fails names the call. The exact-total refusal no longer claims a block's `sd`
   prior needs literal arguments; it already accepted data.
+
+## 0.2.211
+
+- Fixed: on `RKBRMI`, a model-scope `=` assignment that no response reads is
+  now a graph value of its authored name, as user decision `0kpugvc` already
+  documented. `rk_draw_values(rk, U, (:q,))` and `want=(:q,)` answer for
+  `mu ~ 1 + x; q = exp(mu - decay * elapsed); y ~ Normal(mu, 0.4)` instead of
+  raising `KeyError: kernel has no port :q`; so do scalars over sampled
+  parameters (`sigma ~ Exponential(1); variance = sigma^2`, a literal
+  `two = 2.0`, an alias `scale = sigma`). Coordinates and log densities are
+  unchanged; a gradient can move by one ulp where the extra statement changes
+  the compiled evaluation order. The sampler never runs such a value. An
+  assignment that needs a declaration no response reaches (`q = exp(z)` for
+  an unread `z ~ Normal(0, 1)`, or an unread formula predictor) stays out as
+  before. Still out: a data-only assignment no response reads, and one that
+  reads data but no formula predictor in a model none of whose assignments
+  reads a formula predictor (`spread = sigma * sum(elapsed)`): RK plans such a
+  model on a route that writes the data a statement reads into the program,
+  so keeping it would refuse a `reprocess` of other rows. A build of an
+  affected model emits one more statement, so its program identity (SMC and
+  SVI checkpoint tags) changes.
+
+## 0.2.210
+
+- Fixed: on `RKBRMI`, a formula response whose law reads data, such as
+  `y ~ Normal(mu, s)` with `s` a scalar data field, `sd_obs = constant(expr)`
+  or a plain alias `sd_obs = s` as the scale, or a per-row column
+  `y ~ Normal(mu, sv)`, was refused ("scale cannot be a data column", "assignment
+  `sd_obs` aliases data column `s`"). It now builds, and the program reads the
+  value by name as a runtime input: two data sets that differ only in the value
+  emit the same program, and the density follows the bound value. SBBRMI
+  already kept such a value as Stan data. This covers the further arguments of
+  every scalar response law, at top level or inside a law argument, for example
+  a data shape in Gamma's `mu/alpha`. Binomial trials keep their formula
+  spelling, and the cutpoints or category predictors of a leveled response stay
+  refused. An invalid value is refused when the backend is built, naming it
+  (`per-observation scale s must be finite positive numerics`), except that an
+  out-of-range per-row `zi` or Student-t `nu` is not refused yet: it reads as a
+  `-Inf` density.
+- Changed: scalar-data Student-t degrees of freedom
+  (`LocationScale(mu, s, TDist(nu))` with `nu` from data) are read the same
+  way instead of being emitted as a numeric literal, so one program serves
+  every value. An invalid `nu` is refused when the backend is built
+  (`nu data nu must be finite positive numerics`), not by the planner.
+
+## 0.2.209
+
+- Added: `BRMSVINonfiniteError`. When an SVI iteration (`brm_svi_fit`,
+  `brm_svi_resume`) evaluates the target to a non-finite value or gradient at
+  its Monte Carlo draws, it now throws this error before changing the
+  variational factors or the optimizer. The error names the iteration, every
+  non-finite term (the global prior term or a unit), what was not finite (value
+  or gradient, and at which antithetic draw), the coordinates with non-finite
+  gradient entries, and whether the evaluated point itself was finite.
+  Previously the non-finite gradient reached a unit's natural-gradient step and
+  surfaced as LAPACK's `ArgumentError: matrix contains Infs or NaNs` from
+  `eigvals`, after the global step had already changed `q`. Continue from the
+  last checkpoint `save` received: the run in memory is not a checkpoint after
+  the error.
+
+## 0.2.208
+
+- Added: sizes and numeric settings are data. `gmrf(...; neighbors = nb)`,
+  `gmrf(...; multiresolution = m)` and `hsgp(...; k = kk, c = cc)` (and
+  `domain`, `period`, `anchor`) take a scalar or per-axis data field, or a
+  `name = constant(expr)`, besides a literal, so one declaration serves a
+  family of values (user principle `0ikeidi`).
+- Added: a random-effect block's correlation prior
+  `cor(:, ID) ~ LKJCholesky(K, eta)` reads `K` and `eta` from scalar data
+  fields as well as literals, on SBBRMI and RKBRMI (and in `prune_responses`);
+  `K` is still checked against the block width. Both backends emit `eta`'s
+  number into the program.
+- Changed: models that differ only in the `gmrf` and `hsgp` values build one
+  Stan program and emit one RK program. RKBRMI reads an `hsgp` term's basis
+  counts and settings from the bound fit-role inputs `<id>_modes_fit` and
+  `<id>_settings_fit` (as the fitted values `<id>_modes`, `<id>_settings`), and
+  a `multiresolution` rank from `<id>_rank_fit`, instead of spelling them in the
+  program; the basis size is `prod(modes)`. The densities are unchanged.
+  ReactiveKernelsPPL's lowering of the emitted program still specializes on a
+  changed basis size and on the fitted length-scale floor, which `c` and
+  `domain` move (ReactiveKernels snag `rkppl-sized-vect-69604d32`); a changed
+  `multiresolution` rank lowers to the same program.
+- Added: a frozen replay refuses data whose field holds another value of such
+  a setting than the fit used; a new build takes the new value, and so does a
+  fresh replay (`freeze_constants=false`) on RKBRMI and of an SBBRMI `gmrf`.
+  An SBBRMI `hsgp` replay refuses in either mode; its new build compiles the
+  same Stan program.
+
+## 0.2.207
+
+- Fixed: a data column whose element type is erased (`Any[...]`, as an empty
+  comprehension over a DataFrame column or `push!` onto `[]` produces) now
+  holds its entries' common type when the model is built, so it is read
+  exactly as the same values written typed: `Any[[0.5, -0.2], [1.3]]` is a
+  per-cell vector response like `[[0.5, -0.2], [1.3]]`, and `Any[0.3, -0.1]`
+  a scalar response like `[0.3, -0.1]`. The entries are not converted and the
+  caller's column is not replaced.
+- Fixed: on RKBRMI, an in-cell observation `y[i] ~ law(...)` in
+  `@plate for i in eachindex(y)` over an empty `y = Any[]` is bound as an
+  empty column of the arrays its law observes per cell (a matrix per cell
+  for a matrix-variate law, otherwise a vector; `Int` for a discrete law,
+  otherwise `Float64`), as `Vector{Float64}[]` would be. It observes zero
+  cells, contributes zero likelihood, keeps the priors and differentiates
+  under native Reverse. It previously became one whole-vector event and
+  failed when queries were prepared (`zero(::Type{Any})`). Other empty
+  columns a cell reads have no law to type them: their queries evaluate,
+  but native reverse AD needs them constructed with a concrete element type.
+
+## 0.2.206
+
+- Fixed: `brm_start` on RKBRMI writes an ungrouped anisotropic
+  `hsgp(...; iso=false)` length scale, as `fitting.md` documents, through
+  `term_inits` and `base=:prior_median`. A scalar broadcasts over the axes; a
+  vector holds one value per axis, in formula order. Before, both raised
+  `type NamedTuple has no field rho`.
+- Fixed: an ungrouped one-axis `hsgp(x; iso=false)` on RKBRMI. Its `brm_start`
+  raised the same error, and `brm_coordinate_transport` refused it because the
+  emission samples `rho_iso` while the record named `rho_1`.
 
 ## 0.2.205
 

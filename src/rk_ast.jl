@@ -2131,15 +2131,14 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             _rk_coordinate_record!(coordinates, (; kind=:hsgp,
                 declaration=term.options.id, predictor=predictor.name,
                 axes=Tuple(term.columns),
-                iso=get(term.options, :cov, :exp_quad) === :periodic ||
-                    term.options.iso,
+                iso=_rk_hsgp_length_axes(term) == 1,
                 grouped=locals !== nothing,
                 group=get(term.options, :group_column, nothing),
                 levels=get(term.options, :group_levels, nothing),
                 level_correlation=get(term.options, :level_cor, nothing) !== nothing,
                 locals))
             hyper_plans = get(term.options, :hyper_plans, ())
-            rho = isnothing(locals) ? (get(term.options, :iso, true) ? :rho_iso : :rho) : locals.scales.length_scale
+            rho = isnothing(locals) ? _rk_hsgp_length_carriers(term) : locals.scales.length_scale
             sigma = isnothing(locals) ? :sigma : locals.scales.sd
             _rk_start_term_record!(coordinates, predictor.name, term, term.options.id,
                 (; length_scale=any(p -> p.hyper === :length_scale, hyper_plans) ? nothing : rho,
@@ -2331,8 +2330,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     Set(p.name for p in plan.predictors)), effects_name))
     end
     # A linked predictor's response-scale value is read by no response, and
-    # stays a graph value a query can ask for by its authored name.
-    authored = Set(p.name for p in plan.predictors if p.link !== :identity)
+    # stays a graph value a query can ask for by its authored name, as does an
+    # `=` assignment no response reads (`_rk_plan_unread_assignments`).
+    authored = union(Set(p.name for p in plan.predictors if p.link !== :identity),
+        (a.name for a in plan.assignments))
     emitted = _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
         _rk_structural_responses(plan); retained=authored, coordinates)
     # A value plan resolves lone intercepts once its own readers are emitted.

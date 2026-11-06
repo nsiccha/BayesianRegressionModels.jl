@@ -1,5 +1,16 @@
 # Running the tests
 
+`rk_data_law_arguments.jl` checks RKBRMI formula responses whose law reads
+data: a scalar data field, a `constant(...)` value, a plain alias and a per-row
+column as a Normal scale, a censored Normal, a Student-t scale, a LogNormal scale
+and a model-scope `gmrf` readout. It compares an independent likelihood oracle and
+compiled Stan (value and native Reverse gradient, through the coordinate
+transport), replays the printed source, checks that another value emits the same
+program, that binding refuses an invalid value, and frozen `reprocess` of a
+scalar field and of a constant. The further arguments of the other response
+families are checked against the oracle and finite differences. It accepts
+testset substring filters.
+
 `rk_value_weighted_observations.jl` checks formula-level `fweights` and
 `weights` on RKBRMI responses whose law reads an assigned value: a Julia
 reader's probability under `weighted(Bernoulli(p), fweights(n))` against

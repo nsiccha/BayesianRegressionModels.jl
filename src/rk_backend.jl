@@ -774,8 +774,8 @@ end
 # Returns `(scale, scale_predictor)` with exactly one side non-nothing: a
 # scalar (parameter/assignment/literal) or a distributional bare-predictor
 # reference. A predictor shadows a same-named data column here, matching
-# the location slot (a data column can never be a scale, so the LP reading
-# is the only useful one).
+# the location slot (a data scale takes the value route,
+# `_rk_data_law_argument`, so the LP reading is the only one left here).
 function _rk_scale_argument(arg, parameters::Set{Symbol},
         assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
         aliases::Dict{Symbol,Symbol}, response::Symbol, what::String,
@@ -5317,6 +5317,16 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         mask_source=isnothing(rows) ? nothing : rows.source,
         hyper_plans, rho_stated, sigma_stated, fit_axes, fit_mask,
         extrapolate=get(state, :extrapolate, :error))
+    # The basis sizes and the numeric settings are inputs of the program, never
+    # numbers it spells (user principle `0ikeidi`): `modes` holds each axis's
+    # basis count, `settings` each axis's boundary factor `c`, then a fixed
+    # domain's center and half-width per axis (`_rk_hsgp_setting_index`), or a
+    # periodic term's period. Fit-role inputs: a frozen replay keeps the fit's.
+    modes = _rk_fit_input!(derived, columns, taken, Symbol(id, :_modes),
+        collect(Int, state.K))
+    settings = _rk_fit_input!(derived, columns, taken, Symbol(id, :_settings),
+        _rk_hsgp_setting_values(state))
+    common = merge(common, (; modes, settings))
     if state.cov === :periodic
         return _RKTermSpec(:hsgp, collect(axes),
             (; id, k=only(state.K), cov=:periodic, period=state.period, common...), id, id)
@@ -5353,6 +5363,17 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         (; id, k, c, iso=state.iso, fits=state.fits,
             fixed_fits=state.explicit_domain ? state.fits : nothing,
             latent=state.latent, orthogonal, common..., grouped...), id, id)
+end
+
+# A term's `settings` input: a periodic term's period, then its anchor;
+# otherwise each axis's boundary factor, then each axis's fixed center and
+# half-width when its domain is fixed, then each axis's anchor when anchored
+# (`_rk_hsgp_boundary`, `_rk_hsgp_fixed_center`, `_rk_hsgp_anchor_value`).
+function _rk_hsgp_setting_values(state)
+    anchor = something(get(state, :anchor, nothing), ())
+    state.cov === :periodic && return Float64[state.period, anchor...]
+    Float64[state.c..., (state.explicit_domain ? Iterators.flatten(state.fits) : ())...,
+        anchor...]
 end
 
 # `orthogonal_to=` on a `by=` term is fitted per level (decision 15hn91t) on
@@ -6437,50 +6458,62 @@ end
 function _rk_walk_assignment_expr!(node, name::Symbol,
         data::AbstractDict, parameters::Set{Symbol}, assign_names::Set{Symbol};
         origin::String="assignment `$name`")
+    problem = _rk_assignment_expr_problem(node, name, data, parameters,
+        assign_names; origin)
+    problem === nothing || error(problem)
+    nothing
+end
+
+# Why the structural route cannot lower `node` as a slice-1 scalar assignment
+# expression, or `nothing` when it can.
+function _rk_assignment_expr_problem(node, name::Symbol,
+        data::AbstractDict, parameters::Set{Symbol}, assign_names::Set{Symbol};
+        origin::String="assignment `$name`")
     prefix = "RK backend"
     node isa Number && return nothing
     if node isa _BRMPreparedRef
         ref = node.name
         if ref in parameters
-            node.axis === :scalar || error(
+            node.axis === :scalar || return (
                 "$prefix: $origin references non-scalar " *
                 "parameter `$ref`; slice 1 admits scalar parameters only")
             return nothing
         end
         ref in assign_names && return nothing # scalarity by the callee's walk
-        haskey(data, ref) && error(
+        haskey(data, ref) && return (
             "$prefix: $origin references data column `$ref` " *
             "outside a reduction; assignments are scalar in slice 1 " *
             "(precompute the column)")
-        error("$prefix: $origin references unknown name `$ref`")
+        return "$prefix: $origin references unknown name `$ref`"
     end
-    node isa _BRMPreparedExpr || error(
+    node isa _BRMPreparedExpr || return (
         "$prefix: $origin is not a scalar expression; slice 1 " *
         "admits pure scalar calls over parameters, assignments, and " *
         "whole-column reductions")
     callable = node.callable
-    callable in _RK_ASSIGNMENT_CALLABLES || error(
+    callable in _RK_ASSIGNMENT_CALLABLES || return (
         "$prefix: $origin calls `$callable`; slice 1 admits " *
         "{+,-,*,/,^,log,log10,log1p,exp,expm1,sqrt,hypot,abs,sum,mean,std,var," *
         "minimum,maximum,length} only")
-    isempty(node.kwargs) || error(
+    isempty(node.kwargs) || return (
         "$prefix: $origin call keywords are out of slice 1")
     if callable in _RK_ASSIGNMENT_REDUCTIONS
         # Mirrors the thin layer: a reduction takes exactly one bare raw
         # column (no nesting, no scalars) or the plan fails validation.
-        length(node.args) == 1 || error(
+        length(node.args) == 1 || return (
             "$prefix: $origin reduction `$callable` takes " *
             "exactly one whole column")
         arg = only(node.args)
         arg isa _BRMPreparedRef && haskey(data, arg.name) &&
-            data[arg.name] isa AbstractVector || error(
+            data[arg.name] isa AbstractVector || return (
             "$prefix: $origin reduction `$callable` takes " *
             "exactly one whole column")
         return nothing
     end
     for arg in node.args
-        _rk_walk_assignment_expr!(arg, name, data, parameters, assign_names;
-            origin)
+        problem = _rk_assignment_expr_problem(arg, name, data, parameters,
+            assign_names; origin)
+        problem === nothing || return problem
     end
     nothing
 end
@@ -7133,6 +7166,39 @@ function _rk_plan_assignments!(kept, exprs::Dict{Symbol,Any},
         _rk_walk_assignment_expr!(rewritten, name, data,
             parameters, assign_names)
         push!(specs, _RKAssignmentSpec(name, rewritten, name))
+    end
+    specs
+end
+
+# The `=` assignments no response reads that `_rk_with_unread_assignments`
+# admits, each as its own statement so a query finds it by its authored name:
+# a literal or an alias is not folded away as a read one is. Nothing reads
+# them, so no other statement changes. One the structural route cannot lower
+# (`_rk_assignment_expr_problem`), or one reading such an assignment, stays
+# out as before rather than refusing a model whose likelihood never reads it.
+# So does one reading data: this route writes a data column or scalar that a
+# statement reads into the program as a literal (`_rk_define_read_scalars!`,
+# constant folding), so keeping it would make the program depend on the rows
+# and refuse a `reprocess` of other data.
+function _rk_plan_unread_assignments(prepared, admitted, referenced,
+        data::AbstractDict, consts::Dict{Symbol,Float64},
+        aliases::Dict{Symbol,Symbol}, parameters::Set{Symbol},
+        assign_names::Set{Symbol})
+    specs = _RKAssignmentSpec[]
+    names = copy(assign_names)
+    for assignment in prepared.assignments
+        name = assignment.name
+        name in admitted && !(name in referenced) || continue
+        any(ref -> haskey(data, ref), assignment.dependencies) && continue
+        all(ref -> ref in names || ref in parameters || haskey(consts, ref) ||
+            haskey(aliases, ref), assignment.dependencies) || continue
+        origin = "assignment `$name`"
+        expression = _rk_rewrite_assignment_refs!(assignment.expression, consts,
+            aliases, parameters, names, data, origin)
+        _rk_assignment_expr_problem(expression, name, data, parameters, names;
+            origin) === nothing || continue
+        push!(specs, _RKAssignmentSpec(name, expression, name))
+        push!(names, name)
     end
     specs
 end
@@ -8734,6 +8800,9 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
         spec.name => spec for spec in vector_specs)
     assignments = _rk_plan_assignments!(kept_assignments, exprs,
         context.data, consts, aliases, parameter_names, assignment_names)
+    append!(assignments, _rk_plan_unread_assignments(prepared,
+        _rk_with_unread_assignments(program, referenced), referenced,
+        context.data, consts, aliases, parameter_names, assignment_names))
     _rk_gate_acyclic!(parameters, assignments)
     # Phase 4: discover and plan predictors (deduped, first-referenced order).
     # A distributional response references two (location + scale/shape;
