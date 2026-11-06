@@ -190,7 +190,8 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho, requested;
         isnothing(all_priors) && (all_priors = fill(nothing, length(design.columns)))
         infos = map(_sb_total_population_prior, all_priors)
         any(i -> !isnothing(maps[i]) && isnothing(infos[i]), eachindex(maps)) &&
-            throw(ArgumentError("unsupported population prior"))
+            throw(ArgumentError("unsupported population prior (it must be Normal or Flat, " *
+                "with a positive scale and finite arguments that read only numbers and data)"))
         any(i -> !isnothing(maps[i]) && !isnothing(infos[i]) && !isnothing(infos[i].nu),
             eachindex(maps)) && throw(ArgumentError(
                 "Student-t population prior (mixture support follows in a later slice)"))
@@ -250,8 +251,6 @@ function _sb_s2z_plan(brmi, prepared, predictor, overrides, rho, requested;
             isempty(getkwargs(prior)) || throw(ArgumentError("unsupported scale prior"))
             getf(prior) in (Normal, LogNormal, Cauchy, Exponential, TDist, LocationScale, Gamma) ||
                 throw(ArgumentError("unsupported scale prior"))
-            isempty(_sb_prior_references(_sb_effect_prior_arg(prior))) ||
-                throw(ArgumentError("symbolic scale prior"))
         end
         weights = _s2z_resolve_rho(rho, J, K, group; coordinates)
         return (; target, group, columns, design, B, prior_info, scale_priors,

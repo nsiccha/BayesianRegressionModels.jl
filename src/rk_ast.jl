@@ -2330,8 +2330,10 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     Set(p.name for p in plan.predictors)), effects_name))
     end
     # A linked predictor's response-scale value is read by no response, and
-    # stays a graph value a query can ask for by its authored name.
-    authored = Set(p.name for p in plan.predictors if p.link !== :identity)
+    # stays a graph value a query can ask for by its authored name, as does an
+    # `=` assignment no response reads (`_rk_plan_unread_assignments`).
+    authored = union(Set(p.name for p in plan.predictors if p.link !== :identity),
+        (a.name for a in plan.assignments))
     emitted = _rk_fitted_source(_rk_source_program(defs, Expr(:block, stmts...), bindings, taken),
         _rk_structural_responses(plan); retained=authored, coordinates)
     # A value plan resolves lone intercepts once its own readers are emitted.

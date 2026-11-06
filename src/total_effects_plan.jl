@@ -297,30 +297,41 @@ function _select_scalar_centeredness(cells,draws::AbstractMatrix,names;
      losses=permutedims(hcat(losses...)),criterion)
 end
 
+# A hyperparameter of an integrated population prior as a number, or `nothing`
+# when it reads a model value: the closed-form total and sum-to-zero densities
+# need fixed prior moments. It may be a literal, a data field, an element of a
+# data vector, a data-only assignment or a call over these. Numbers and data
+# alike enter the program as the data vectors of `_sb_emit_total!` and
+# `_sb_emit_s2z!`, so a value from the data is never spelled in the Stan source.
+function _sb_total_prior_number(x)
+    value = _brm_data_assignment_value(x, _BRMDataAssignments("sbimpl"), Set{Symbol}())
+    value isa Real && !(value isa Bool) ? Float64(value) : nothing
+end
+
 function _sb_total_population_prior(prior)
     isnothing(prior) && return (; location=0., precision=1., nu=nothing)
     prior isa ExprColumn || return nothing
     isempty(getkwargs(prior)) || return nothing
     f = getf(prior)
-    args = map(_sb_effect_prior_arg, getargs(prior))
+    args = map(_sb_total_prior_number, getargs(prior))
     if f === Flat && isempty(args)
         return (; location=0., precision=0., nu=nothing)
-    elseif f === Normal && length(args) <= 2 && all(x -> x isa Real, args)
+    elseif f === Normal && length(args) <= 2 && !any(isnothing, args)
         loc = isempty(args) ? 0. : args[1]
         scale = length(args) < 2 ? 1. : args[2]
         scale > 0 && isfinite(scale) && isfinite(loc) || return nothing
-        return (; location=Float64(loc), precision=inv(Float64(scale)^2), nu=nothing)
+        return (; location=loc, precision=inv(scale^2), nu=nothing)
     elseif f === LocationScale && length(getargs(prior)) == 3
         loc, scale, base = getargs(prior)
-        loc, scale = _sb_effect_prior_arg(loc), _sb_effect_prior_arg(scale)
+        loc, scale = _sb_total_prior_number(loc), _sb_total_prior_number(scale)
         base isa ExprColumn && getf(base) === TDist || return nothing
         isempty(getkwargs(base)) || return nothing
-        nu = only(map(_sb_effect_prior_arg, getargs(base)))
-        all(x -> x isa Real && isfinite(x), (loc,scale,nu)) || return nothing
+        nu = _sb_total_prior_number(only(getargs(base)))
+        all(x -> !isnothing(x) && isfinite(x), (loc,scale,nu)) || return nothing
         scale > 0 && nu > 0 || return nothing
-        return (; location=Float64(loc), precision=inv(Float64(scale)^2), nu=Float64(nu))
-    elseif f === TDist && length(args) == 1 && only(args) isa Real && only(args) > 0
-        return (; location=0., precision=1., nu=Float64(only(args)))
+        return (; location=loc, precision=inv(scale^2), nu)
+    elseif f === TDist && length(args) == 1 && !isnothing(only(args)) && only(args) > 0
+        return (; location=0., precision=1., nu=only(args))
     end
     nothing
 end
@@ -406,7 +417,8 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
     infos = map(_sb_total_population_prior,all_priors)
     unsupported = findfirst(i -> !isnothing(maps[i]) && isnothing(infos[i]),eachindex(maps))
     isnothing(unsupported) || return ineligible(
-        "the prior on its `$(design.columns[unsupported].label)` coefficient is not Normal, Student-t or Flat")
+        "the prior on its `$(design.columns[unsupported].label)` coefficient is not Normal, Student-t or Flat, " *
+        "with a positive scale and finite arguments that read only numbers and data")
     matched = findall(i -> !isnothing(maps[i]) && !isnothing(infos[i]),eachindex(maps))
     isempty(matched) &&
         return ineligible("it has no population coefficient that matches a random-effect column")
@@ -472,24 +484,24 @@ function _sb_total_plan(brmi, prepared, predictor, overrides, buckets, sd_overri
     for (prior,id) in zip(scale_priors,column_ids)
         isnothing(prior) || _sb_total_scale_prior(prior) || return ineligible(
             "its $(isnothing(id) ? "random-effect" : "`sd(:, $id)`") prior `$prior` is not supported " *
-            "(supported: Normal, LogNormal, Cauchy, Exponential, TDist, LocationScale or Gamma " *
-            "with literal arguments, or one of them truncated at zero with no upper bound)")
+            "(supported: Normal, LogNormal, Cauchy, Exponential, TDist, LocationScale or Gamma, " *
+            "or one of them truncated at zero with no upper bound)")
     end
     (; target,group,columns,design,A,W,group_records,prior_info,scale_priors,column_ids,scale_configured,
        claimed,absorbed,remaining,remaining_priors=all_priors[remaining],passthrough=Tuple(direct),indices,levels)
 end
 
 # A random-effect scale prior exact totals support: a family on the positive
-# half-line with literal arguments, or one truncated at zero with no upper
-# bound. On the `lower=0` scale the truncation only renormalizes by a constant,
-# so the emitted support stays the ordinary positive half-line.
+# half-line, or one truncated at zero with no upper bound. On the `lower=0`
+# scale the truncation only renormalizes by a constant, so the emitted support
+# stays the ordinary positive half-line. Its arguments are read by the emitted
+# program (`_sb_merge_bound_vector_prior`), so they may be data.
 _sb_total_scale_prior(_prior) = false
 _sb_total_scale_prior(prior::ExprColumn) =
-    _sb_total_scale_prior(getf(prior), getargs(prior), getkwargs(prior), prior)
-_sb_total_scale_prior(f, _args, kwargs, prior) =
-    isempty(kwargs) && f in (Normal,LogNormal,Cauchy,Exponential,TDist,LocationScale,Gamma) &&
-    isempty(_sb_prior_references(_sb_effect_prior_arg(prior)))
-_sb_total_scale_prior(::typeof(truncated), args, kwargs, _prior) =
+    _sb_total_scale_prior(getf(prior), getargs(prior), getkwargs(prior))
+_sb_total_scale_prior(f, _args, kwargs) =
+    isempty(kwargs) && f in (Normal,LogNormal,Cauchy,Exponential,TDist,LocationScale,Gamma)
+_sb_total_scale_prior(::typeof(truncated), args, kwargs) =
     _sb_total_zero_truncation(args, kwargs) && _sb_total_scale_prior(first(args))
 # `truncated(F; lower = 0)` or `truncated(F, 0, Inf)`: a zero lower bound, no upper.
 function _sb_total_zero_truncation(args, kwargs)

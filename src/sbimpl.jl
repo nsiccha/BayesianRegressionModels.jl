@@ -3971,8 +3971,9 @@ S2Z (`s2z_groups`, `s2z_rho`, below) with WarmupHMC adaptive centering
 totals when the exact Gaussian conditional construction is available: one
 grouping structure per predictor, independent random-effect margins, and
 Normal, Flat, or Student-t population priors (Student-t uses its exact Gaussian
-scale mixture). Unmatched fixed effects and `offset(...)` terms remain explicit
-summands. Original population coefficients and deviations are recovered in
+scale mixture), whose arguments read only numbers and data; those values enter
+the program as data. Unmatched fixed effects and `offset(...)` terms remain
+explicit summands. Original population coefficients and deviations are recovered in
 generated quantities; inspect [`total_effect_blocks`](@ref). Naming a group
 explicitly requires every block of that group to be eligible and errors
 otherwise, naming each predictor whose block would stay conventional and why.
@@ -5232,6 +5233,15 @@ stan_data(model::StanBlocks.SlicModel) =
     Base.invokelatest(StanBlocks.stan_data, model)
 
 """
+    stan_data(model::StanBlocks.StanModel) -> Dict
+
+Return the prepared Stan data of a traced model, such as the result of
+`stan_model`, at the same world-age-safe boundary.
+"""
+stan_data(model::StanBlocks.StanModel) =
+    Base.invokelatest(StanBlocks.stan_data, model)
+
+"""
     stan_model(sb::SBBRMI; kwargs...) -> StanModel
 
 Trace `sb.model` end to end. Forwards to `StanBlocks.stan_model` in the
@@ -5484,8 +5494,9 @@ construction, while `declarations` inventories every emitted sampling site,
 including priors introduced inside `kernel(...)` plates and every observation
 in a multi-output model.
 
-Construct with [`generative_plan`](@ref). [`stan_code`](@ref) accepts a plan,
-and [`reprocess`](@ref) preserves the existing SBBRMI replay contract (including
+Construct with [`generative_plan`](@ref). [`stan_code`](@ref), `stan_data`,
+`stan_model` and `stan_instantiate` accept a plan and read its `model`, and
+[`reprocess`](@ref) preserves the existing SBBRMI replay contract (including
 its correct-or-loud unsupported cases).
 Plans constructed from a reusable `@brm` builder also retain that builder so
 `generative_plan(plan, new_df)` can rebuild the same declarations for genuinely
@@ -6084,7 +6095,14 @@ function generative_plan(plan::GenerativePlan, new_df;
     _generative_plan(sb,plan.builder,cv_groups)
 end
 
+# A plan retains the model its SBBRMI lowered, so it takes the same entries,
+# each reading `plan.model` at the same world-age-safe boundary.
 StanBlocks.stan_code(plan::GenerativePlan) = Base.invokelatest(StanBlocks.stan_code, plan.model)
+stan_data(plan::GenerativePlan) = Base.invokelatest(StanBlocks.stan_data, plan.model)
+StanBlocks.stan_model(plan::GenerativePlan; kwargs...) =
+    Base.invokelatest(StanBlocks.stan_model, plan.model; kwargs...)
+StanBlocks.stan_instantiate(plan::GenerativePlan; kwargs...) =
+    Base.invokelatest(StanBlocks.stan_instantiate, plan.model; kwargs...)
 
 Base.show(io::IO, plan::GenerativePlan) = begin
     nprior = count(d -> d.role === :prior, plan.declarations)
@@ -6789,7 +6807,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             isnothing(into) || (flat = _brm_kernel_rebase_index(
                 arg_name, flat, event_group, event_groups,
                 into, _sb_df_column(df, into); prefix="sbimpl: reprocess"))
-            new_data[key] = [flat[r] for r in rows]
+            new_data[key] = _brm_gather_cells(flat, rows)
         end
         new_preproc[key] = e
     elseif e.kind === :multi_membership
@@ -8313,8 +8331,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             body_stmts = Any[_sb_subst_sym(s, params[i], sliced) for s in body_stmts]
         else
             isnothing(flat) && (flat = parent(parent(arg_col)))
-            gathered = [flat[r] for r in rows]
-            data[gath_sym] = gathered
+            data[gath_sym] = _brm_gather_cells(flat, rows)
         end
         options = (; is_lp)
         isnothing(into) || (options = merge(options, (; into=name(into))))

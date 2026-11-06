@@ -187,6 +187,8 @@ BayesianRegressionModels.select_s2z_centeredness
 
 `stan_code` is re-exported from StanBlocks.jl. BRM extends that binding with
 `stan_code(sb::SBBRMI)`, which returns the transpiled Stan source for `sb.model`.
+`stan_data`, `stan_model` and `stan_instantiate` also take an `SBBRMI`, and all
+four take a `GenerativePlan`, where they read `plan.model`.
 
 ### Concurrent construction and ownership
 

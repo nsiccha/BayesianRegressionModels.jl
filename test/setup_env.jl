@@ -4,12 +4,20 @@
 #
 # The test env pins external source dependencies plus the unregistered
 # BRM root itself. Each pinned package is materialized at a specific GitHub
-# COMMIT under the ignored `test/.bootstrap/` cache; there is NO dependence on
-# any shared `~/github/nsiccha/<pkg>` checkout. A full-SHA revision is
-# branch-independent, so it does not matter that several of these live on a
-# `dev`/`devibe` branch rather than `main`; the commit only has to be pushed to
-# GitHub, except fleet revisions and unpublished review candidates,
+# COMMIT in this host's store (`test_package_store()`, outside the checkout);
+# there is NO dependence on any shared `~/github/nsiccha/<pkg>` checkout. A
+# full-SHA revision is branch-independent, so it does not matter that several of
+# these live on a `dev`/`devibe` branch rather than `main`; the commit only has to
+# be pushed to GitHub, except fleet revisions and unpublished review candidates,
 # which are materialized from their host mirrors (`MIRRORS`).
+#
+# The store is what lets a fresh worktree or job reuse compiled images: Julia
+# rejects an image built from another source path, so a dependency under the
+# checkout rebuilt with its whole reverse closure every time. Only BRM itself and
+# its extensions rebuild now, whose source really is this checkout's. Develop the
+# store's real path: an image built through a symlink in the checkout records that
+# path and dies with the checkout. Its checkouts are read-only and never rewritten
+# (a fresh mtime rejects an image too), and evicted after two unused weeks.
 #
 # Enzyme is the ecosystem's `dogfood` line (user pick on decision
 # `BayesianRegressionModels/decisions/2026-10-28T15-34-11-008-0n0kgfh`): reviewed
@@ -447,16 +455,20 @@ function apply_dogfood_libenzyme()
 end
 
 function main()
+    store = test_package_store()
     paths = Dict("BayesianRegressionModels" => REPO)
     for (name, url, rev) in PINS
         paths[name] = resolve_git_revision_checkout(
             name,
             rev;
-            cache_root=joinpath(TESTENV, ".bootstrap"),
+            cache_root=store,
             mirror=MIRRORS[name],
             origin=url,
         )
     end
+    # Before the precompile, which a run's time limit can stop. This run's pins
+    # were just marked used, so they are safe.
+    evict_unused_checkouts!(store)
     # Enzyme's EnzymeCore is its nested `lib/EnzymeCore` (Enzyme's
     # `[sources]`, which Pkg 1.10 ignores).
     paths["EnzymeCore"] = joinpath(paths["Enzyme"], "lib", "EnzymeCore")

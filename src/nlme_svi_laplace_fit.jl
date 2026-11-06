@@ -151,12 +151,13 @@ end
 function _brm_svi_laplace_drive(init,save,x,previous,method;caller,description,
         ndraws=1000,stop_after=nothing,checkpoint_every=nothing,progress=nothing,
         ad_backend=nothing,shared_point=nothing,subject_group=nothing,
-        nested_groups=NamedTuple(),shared_groups=(),unit_partition=nothing)
+        nested_groups=NamedTuple(),shared_groups=(),unit_partition=nothing,check_lowered=Returns(nothing))
     ndraws isa Integer && ndraws>=0 || throw(ArgumentError("GaussianBlockLaplace: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller,save,stop_after,checkpoint_every)
     _brm_with_progress(progress;description) do node
         _brm_with_phases(node,_BRM_SVI_PHASES) do phases
             lowered=_brm_svi_lowered(x,phases.lower)
+            check_lowered(lowered)
             # Refuse unsupported model structure before compiling AD for it.
             if lowered isa RKBRMI
                 view=brm_nlme_view(lowered;subject_group,nested_groups,shared_groups,unit_partition=something(unit_partition, :subjects))
