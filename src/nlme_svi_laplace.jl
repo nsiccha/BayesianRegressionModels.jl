@@ -15,6 +15,10 @@ from their model plan. This is conditional integration inside VI.
 Each update evaluates the entire current window. Krylov bases and probe counts
 have fixed caps; an exhausted numerical budget raises an error. Trace and
 log-determinant probes add Monte Carlo error, distinct from iterative error.
+Rounding is a third error: about `eps(Float64)*cond(H)*d` in a log-determinant
+probe for a `d`-coordinate conditional precision `H`, which the recorded
+`logdet_quadrature_width` does not include. A precision too ill-conditioned to
+factor in double precision, possible from about `cond(H)=1e16`, raises an error.
 Optimization runs the declared `max_iterations` at fixed `lr_global` and returns
 the mean of its final `averaging_window` parameter iterates. Completing that
 budget does not establish convergence or posterior accuracy.

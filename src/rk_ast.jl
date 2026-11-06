@@ -2230,7 +2230,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 _rk_coordinate_record!(coordinates, (; kind=:gmrf_footprint,
                     declaration=term.options.id, predictor=predictor.name,
                     axes=term.options.source, state_axes=term.options.state_axes,
-                    neighbors=term.options.neighbors,
+                    neighbors=term.options.neighbors, fitted=term.options.fitted,
                     correlation=term.options.correlation, locals))
             end
             _rk_start_term_record!(coordinates, predictor.name, term, term.options.id,
