@@ -377,4 +377,8 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # Use the SHA: those versions alone do not identify the footprint fix.
 # cb3b33bd (RKPPL 0.1.100): opt-in independent adaptive grid pilots
 # (`tune_smc(...; grid_start=:independent)`) and `resume_smc(...; nthreads)`.
-rev = "cb3b33bd08da2b13c9105eb75a6c15473b72d467"
+# 4640767b (RK 0.1.96 / RKPPL 0.1.107, RK main) contains 5cdc9ae7 (RK 0.1.93 /
+# RKPPL 0.1.105), the named refusal of a fixed per-row `zi` or Student-t `nu`
+# outside its support, which BRM's compat floors require. It needs Enzyme
+# cecb571a (test/setup_env.jl) on a unit with no cells of one observation group.
+rev = "4640767b8d0577fa3c6fbe98f41a0d0e72a67943"

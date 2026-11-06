@@ -19,9 +19,9 @@ transport), replays the printed source, checks that another value emits the same
 program, that binding refuses an invalid value, and frozen `reprocess` of a
 scalar field and of a constant. The further arguments of the other response
 families are checked against the oracle and finite differences. A per-row `zi`
-or Student-t `nu` outside its support is checked as a refusal on
-ReactiveKernelsPPL 0.1.105 or later and as a `-Inf` density before it. It accepts
-testset substring filters.
+or Student-t `nu` outside its support is checked as a refusal, which BRM's
+ReactiveKernelsPPL 0.1.105 compat floor guarantees. It accepts testset substring
+filters.
 
 `rk_value_weighted_observations.jl` checks formula-level `fweights` and
 `weights` on RKBRMI responses whose law reads an assigned value: a Julia
@@ -1361,7 +1361,7 @@ explicit global promotions, optimizer resume and streaming absent/returning
 units. Its density and native Reverse gradient oracle is the full RK sampler.
 The dormant scalar/vector branch's ordinary Reverse needs Enzyme dogfood from
 `0fa85df3` (repairs `74abe90` and `7ac58eb`, contained in the bootstrap's
-`b2bb4cb6`); earlier pins raise `IllegalTypeAnalysisException` there.
+`cecb571a`); earlier pins raise `IllegalTypeAnalysisException` there.
 `nlme_svi_ownership_algebra.jl` isolates atomic-block and directed-prior
 closure, including fixed coordinates and factors that own no coordinates.
 
@@ -2354,7 +2354,7 @@ equals the generic path's exactly and its gradient to rounding, that both agree
 with central differences, and that inputs are unchanged. A width has to be
 checked on its own: the pass works at four margins, and at five Enzyme raised
 `EnzymeNoTypeError` until the repair in Enzyme `6053067f`. The test bootstrap
-pins `b2bb4cb6`, which contains that repair and declares libEnzyme `f392eba5`.
+pins `cecb571a`, which contains that repair and declares libEnzyme `7f23cb72`.
 
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, StanBlocks/BridgeStan density and gradient

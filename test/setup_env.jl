@@ -356,7 +356,13 @@ const PINS = [
     # cb3b33bd (RKPPL 0.1.100) adds opt-in independent adaptive grid pilots
     # (`tune_smc(...; grid_start=:independent)`) and the production worker
     # override `resume_smc(...; nthreads)`, which BRM forwards.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "cb3b33bd08da2b13c9105eb75a6c15473b72d467"),
+    # 4640767b (RK 0.1.96 / RKPPL 0.1.107, RK main) contains 5cdc9ae7 (RK 0.1.93 /
+    # RKPPL 0.1.105), which refuses a fixed per-row `zi` or Student-t `nu` outside
+    # its support at binding; BRM's compat floors require that version. It also
+    # contains RK 0.1.89's compact unit rows, whose `_local_cell_rows` needs Enzyme
+    # cecb571a below on a unit with no cells of one observation group. Pin by SHA:
+    # RK versions also label several commits.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "4640767b8d0577fa3c6fbe98f41a0d0e72a67943"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
@@ -422,7 +428,12 @@ const PINS = [
     # cannot change inside a loop once per loop entry (Enzyme snag
     # reverse-generato-03b2003d), so a multiresolution gmrf reader's generator
     # sum no longer tapes its captured arrays once per basis term.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "b2bb4cb628cf5f5ac4a897d4b7d83fcd2b5df97c"),  # dogfood
+    # cecb571a / libEnzyme 7f23cb72 contains b2bb4cb6 and differentiates a read
+    # that picks between active data and data the function made under static
+    # Reverse (Enzyme snag static-reverse-m-c913effd), which RKPPL's
+    # `_local_cell_rows` does for a unit with no cells of one observation group
+    # (RK snag compact-cell-row-eb9bd95f).
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "cecb571a1037fbfd800153a3afd1aed3b1913421"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also

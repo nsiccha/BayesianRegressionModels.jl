@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.224
+
+- **Breaking:** BRM requires ReactiveKernels 0.1.93 and ReactiveKernelsPPL 0.1.105
+  (it required 0.1.84 and 0.1.100), so every `RKBRMI` user now gets a named refusal
+  of a fixed per-row `zi` or Student-t `nu` outside its support: `zi data z must lie
+  in [0, 1]` or `nu data nuc must be finite positive numerics`. So does a named or
+  computed value (`zz = z .- 0.1`), an offsets-only scale (`sd_obs = w .- 3`) and one
+  `Inf` row in a `nu` column. On earlier versions these failed later, as a `-Inf`
+  density or an internal error, and the `Inf` row gave a finite density. What to
+  change: move an environment pinned to an earlier ReactiveKernels, and correct a
+  model that bound such a value, which now fails at binding.
+- `brm_nlme_loglikelihood_and_gradient` on a model where one unit has no cells of an
+  observation group needs Enzyme dogfood `cecb571a` or later on these
+  ReactiveKernels versions. Earlier Enzyme raises `EnzymeRuntimeActivityError`
+  there. Dogfood commits do not change Enzyme's version, so no compat entry can
+  require this.
+- Test pins: ReactiveKernels `4640767b` (0.1.96 / RKPPL 0.1.107) and Enzyme dogfood
+  `cecb571a` (libEnzyme `7f23cb72`).
+
 ## 0.2.223
 
 - Fixed: one extreme draw could stop `brm_svi_fit`'s optimization of the globals
