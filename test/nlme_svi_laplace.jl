@@ -33,6 +33,68 @@ end
     @test !capped.converged
     @test_throws ErrorException BRM._brm_svi_laplace_logdet(Xoshiro(1),v->H*v,17;
         probes=2,spectral_lower=.4,maxdim=1,rtol=0.,atol=0.)
+    # A curvature the certificate rules out is refused, never given a log.
+    @test_throws ArgumentError BRM._brm_svi_laplace_logquadratic(
+        v->Diagonal([-1.,2.,3.])*v,ones(3);spectral_lower=.1)
+    @test_throws ArgumentError BRM._brm_svi_laplace_logquadratic(
+        v->Diagonal([.5,2.,3.])*v,ones(3);spectral_lower=1.)
+    # An unconverged step reads the same two rules as the textbook construction.
+    r=ones(17);a=.2;mass=sum(abs2,r)
+    it=BRM.KrylovKit.LanczosIterator(v->H*v,r,BRM.KrylovKit.ModifiedGramSchmidt2())
+    fact=BRM.KrylovKit.initialize(it)
+    for k in 1:5
+        k>1 && BRM.KrylovKit.expand!(it,fact)
+        T=BRM.KrylovKit.rayleighquotient(fact);beta=BRM.KrylovKit.normres(fact)
+        shifted=SymTridiagonal(T.dv.-a,copy(T.ev));rhs=zeros(k);rhs[end]=1.
+        radau=SymTridiagonal(vcat(T.dv,a+beta^2*(shifted\rhs)[end]),vcat(T.ev,beta))
+        E,R=eigen(T),eigen(radau)
+        @test minimum(R.values)≈a atol=1e-10
+        q=BRM._brm_svi_laplace_logquadratic(v->H*v,r;spectral_lower=2a,maxdim=k,rtol=0.,atol=0.)
+        @test q.upper≈mass*dot(abs2.(E.vectors[1,:]),log.(E.values)) atol=1e-10
+        @test q.lower≈mass*dot(abs2.(R.vectors[1,:]),log.(R.values)) atol=1e-10
+    end
+    # Two spectra on which independent rounding of the two rules crossed them. The
+    # shape of nearly exchangeable groups: an unobserved block at the bound, then
+    # near-duplicates. And a rank-deficient likelihood with a far larger observed
+    # direction beside that block.
+    clustered(top)=rng->begin
+        values=vcat(fill(1.,6),1 .+ [.0017,.0025,.003].*exp.(.3 .*randn(rng,3)),
+            3.92 .+ .007 .*randn(rng,2),top*exp(.1*randn(rng)))
+        Q=Matrix(qr(randn(rng,12,12)).Q)
+        Symmetric(Q*Diagonal(values)*Q')
+    end
+    wide(d,rank,bound,spread)=rng->begin
+        J=randn(rng,rank,d).*exp.(spread.*randn(rng,rank))
+        Symmetric(bound*I+J'J)
+    end
+    spectra=((1.,1000,clustered(22.3)),(1.,1000,clustered(500.)),(1.,300,wide(13,9,1.,3.)),
+        (1e-4,300,wide(13,9,1e-4,2.)),(1e-3,300,wide(25,9,1e-3,3.)),(1e-5,300,wide(64,20,1e-5,3.)))
+    @testset "the bounds stay ordered on spectrum $case" for case in eachindex(spectra)
+        bound,trials,spectrum=spectra[case]
+        rng=Xoshiro(case);failures=0;excess=-Inf;used=0
+        for _ in 1:trials
+            A=spectrum(rng);d=size(A,1);v=ifelse.(rand(rng,Bool,d),1.,-1.)
+            E=eigen(A)
+            # Past this, double precision cannot hold A: even the reference fails.
+            last(E.values)/bound<1e14 || continue
+            used+=1
+            exact=dot(abs2.(E.vectors'v),log.(E.values))
+            q=try
+                BRM._brm_svi_laplace_logquadratic(w->A*w,v;spectral_lower=bound,
+                    maxdim=min(d,32),rtol=1e-8,atol=1e-8)
+            catch e
+                e isa ErrorException || rethrow()
+                failures+=1;continue
+            end
+            # The bounds are exact-arithmetic ones: T's entries and the dense
+            # reference both still carry about eps*cond per unit of mass.
+            noise=2e-8+64eps()*d*last(E.values)/bound
+            excess=max(excess,abs(q.value-exact)-noise-(q.upper-q.lower))
+        end
+        @test used>=trials/2
+        @test failures==0
+        @test excess<=0
+    end
 end
 
 @testset "GaussianBlockLaplace native conditional target" begin

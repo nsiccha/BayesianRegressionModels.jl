@@ -108,7 +108,8 @@ function _brm_svi_lowrank_step!(mean, f, opt, gz, gd, ε, β)
     all(isfinite, gradient) || error("brm_svi_fit: nonfinite low-rank unit gradient")
     old = _brm_svi_global_vector(q)
     x = copy(old)
-    _brm_svi_whitened_global_step!(opt, q, x, gradient, β)
+    # A unit's own Adam steps only when the unit is drawn, so its bound needs no √w.
+    _brm_svi_whitened_global_step!(opt, q, x, gradient, β; clip=_BRM_SVI_GLOBAL_CLIP)
     Δ = x - old
     d = length(mean)
     h = _brm_svi_global_geometry(f)

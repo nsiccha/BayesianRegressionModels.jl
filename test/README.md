@@ -101,6 +101,8 @@ observed or omitted responses. Square and non-square shapes compare compiled
 Stan densities and gradients with analytic references; prior draws check the
 same cell values. Scalar, ragged-vector and matrix cells supply shape controls.
 Run it as a standalone script in the test environment.
+`gmrf_stan_plate_outputs.jl` reads such cells beside a `gmrf` formula in one
+plate cell, and compares the compiled density and gradient with a dense oracle.
 
 `component_start_descriptors.jl` checks exact initial values in repeated and
 nested components through the public descriptor, BridgeStan and coordinate
@@ -1338,6 +1340,19 @@ three different lengths, and the regional panel of `nlme_panel_fixture.jl`
 fit is compared with NUTS too. Starts (prior medians, a packed point,
 `inits`) and their refusals are covered as well. It runs in the test
 environment above.
+
+`nlme_svi_heavy_tails.jl` checks what one extreme ELBO draw does to minibatch
+SVI, whose estimate can have an infinite expectation with every draw finite.
+With no bound, one gradient of 1e21 freezes its Adam coordinate (the control), and
+with `_brm_svi_clip` that coordinate keeps its step. A coordinate that most batches
+do not read keeps its scale under the `√(N / B)`-wide bound and loses it under a
+tighter one (the control). `_brm_svi_window`'s `spread / W` is the variance of its
+trimmed mean on Gaussian and skewed draws, and one draw moves neither. The stopping
+test neither stops a rising fit nor hides a stalled one on an extreme draw, where a
+test of means and variances does stop the rising fit.
+A structured local factor's own Adam (above `unit_dense_limit`) is bounded the
+same way, and a work-weighted fit (`unit_sampling=:work`), whose bound widens by
+the batch's largest unit weight, keeps its globals moving on the same model.
 
 `nlme_svi_authored_factors.jl` checks the public RKPPL authored-factor API
 and production SVI ownership. On a
