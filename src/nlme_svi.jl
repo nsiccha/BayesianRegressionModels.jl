@@ -75,6 +75,9 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
         "brm_svi: minibatch SVI evaluates one subject at a time, on the " *
         "subject's own observation cells, and this model's observations have " *
         "no cells attributable to single subjects")
+    # A carried checkpoint brings its own separator policy, which a changed
+    # partition cannot use: name that change, not the policy it invalidates.
+    previous === nothing || _brm_svi_check_partition(m.view, previous)
     connected = m.view.unit_partition === :connected
     policy = something(separator, connected ? :auto : :none)
     !connected && policy !== :none && throw(ArgumentError(
