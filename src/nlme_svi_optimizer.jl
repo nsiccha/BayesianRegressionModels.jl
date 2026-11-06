@@ -289,7 +289,7 @@ function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
     end
     if hasproperty(state.identity, :global_coordinates) &&
             state.run isa _BRMSVIRun
-        options = merge(state.identity.separator,
+        options = merge((; cell_units=:first_unit), state.identity.separator,
             (; global_coordinates=state.identity.global_coordinates), options)
     end
     _brm_svi_drive(save, x, state.previous; call..., description="BRM SVI resume",

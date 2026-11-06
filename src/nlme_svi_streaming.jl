@@ -397,7 +397,7 @@ function _brm_svi_window_input(state, x, options; caller)
         x = RKBRMI(x, state.preprocessing; resample_groups=(state.group, state.nested...))
     end
     defaults = hasproperty(state, :layout) && hasproperty(state.layout, :options) ?
-        state.layout.options : NamedTuple()
+        merge((; cell_units=:first_unit), state.layout.options) : NamedTuple()
     x, x isa BRMNLMEModel ? merge(defaults, options) :
         merge(defaults, (; subject_group=state.group, shared_groups=state.shared,
             unit_partition=state.unit_partition), options)

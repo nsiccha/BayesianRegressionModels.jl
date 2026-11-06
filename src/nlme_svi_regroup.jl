@@ -1,10 +1,11 @@
 # SVI inference units may split a connected NLME component after separator
 # promotion. The scientific view stays intact: this metadata carries its own
 # unit labels, subject membership, observation attribution and packed owners.
-function _brm_svi_factor_inventory(view, ncoordinates)
+function _brm_svi_factor_inventory(view, ncoordinates; rows=(_, _) -> 1)
     names = sort!(collect(keys(view.factor_supports)))
     supports = Vector{Int}[]
     sources = Tuple{Symbol,Int}[]
+    row_counts = Int[]
     whole = nothing
     for name in names, (i, support) in enumerate(view.factor_supports[name])
         if support === :whole
@@ -14,9 +15,34 @@ function _brm_svi_factor_inventory(view, ncoordinates)
             push!(supports, support)
         end
         push!(sources, (name, i))
+        push!(row_counts, rows(name, i))
     end
-    (; names, supports, sources)
+    (; names, supports, sources, rows=row_counts)
 end
+
+# How many rows a cell evaluates: those a plate joins to it, or the length of its
+# observed element, so all of a unit's rows count when they form one cell. Its
+# footprint cannot say this, because rows reading coordinates other rows also
+# read add nothing to it.
+_brm_svi_cell_rows(element::AbstractArray) = length(element)
+_brm_svi_cell_rows(_) = 1
+function _brm_svi_observed_rows(backend, view)
+    plan, nrows = backend.plan, sum(length, view.rows; init=0)
+    joined = Dict{Symbol,Any}()
+    (name, cell) -> begin
+        rows = get!(() -> _brm_nlme_cell_rows(plan, name, view.group, nrows), joined, name)
+        rows !== nothing && checkbounds(Bool, rows, cell) && return length(rows[cell])
+        column = get(plan.columns, name, nothing)
+        column isa AbstractVector && checkbounds(Bool, column, cell) ?
+            _brm_svi_cell_rows(column[cell]) : 1
+    end
+end
+
+# A cell's structural work: one for the cell, one per coordinate it reads, and
+# `_BRM_SVI_ROW_WORK` for each row beyond its first. An elementwise row counts
+# what it always did.
+const _BRM_SVI_ROW_WORK = 16
+_brm_svi_cell_work(reads, rows) = 1 + reads + _BRM_SVI_ROW_WORK * max(rows - 1, 0)
 
 # RK's partition declaration assigns an entry's first axis. Coordinates in
 # the same axis slice must therefore move together when choosing a separator.
@@ -53,7 +79,7 @@ end
 # refinement limit, units may be coarser than necessary, but no factor crosses
 # local owners: the exact prior/likelihood split remains valid.
 function _brm_svi_regroup_layout(view, inventory, factors, estimated, axis_blocks,
-        promoted; refinement_passes=4)
+        promoted; refinement_passes=4, cell_units=:first_unit)
     n = length(estimated)
     shared = Set(promoted)
     owned = vcat(factors.owned, axis_blocks)
@@ -65,6 +91,8 @@ function _brm_svi_regroup_layout(view, inventory, factors, estimated, axis_block
         coordinate_subject = [j in shared ? 0 : view.coordinate_subject[j] for j in 1:n]
         mapping = _brm_nlme_connected_unit_map(length(view.subject_levels),
             coordinate_subject, inventory.supports)
+        cell_units === :components && (mapping = _brm_svi_cell_unit_map(mapping,
+            coordinate_subject, inventory.supports, owned, estimated, shared))
         seeds = [Int[] for _ in mapping.members]
         for j in 1:n
             s = coordinate_subject[j]
@@ -77,10 +105,13 @@ function _brm_svi_regroup_layout(view, inventory, factors, estimated, axis_block
         footprints = [sort!(collect(r)) for r in reads]
         owner = _brm_svi_coordinate_owners(footprints, seeds, owned, support,
             estimated; global_coordinates=collect(shared))
-        # Only a scientific effect promotion can split the component graph.
+        # A scientific effect promotion can split the component graph, and so
+        # can a global coordinate that joined subjectless cells in this pass.
+        joined = hasproperty(mapping, :linked) ? mapping.linked : falses(n)
         changed = false
         for j in 1:n
-            if estimated[j] && owner[j] == 0 && view.coordinate_subject[j] != 0 && !(j in shared)
+            if estimated[j] && owner[j] == 0 && !(j in shared) &&
+                    (view.coordinate_subject[j] != 0 || joined[j])
                 push!(shared, j)
                 changed = true
             end
@@ -97,7 +128,10 @@ function _brm_svi_regroup_layout(view, inventory, factors, estimated, axis_block
     # of its unit's parameter reads. Vector-valued cells remain indivisible.
     work = Float64.(length.(units))
     for (i, footprint) in enumerate(inventory.supports)
-        work[mapping.factor_unit[i]] += 1 + length(footprint)
+        # `:first_unit` reproduces earlier versions' work, so their layouts,
+        # separator trials and sampling replay unchanged.
+        work[mapping.factor_unit[i]] += _brm_svi_cell_work(length(footprint),
+            cell_units === :first_unit ? 1 : inventory.rows[i])
     end
     for reads in factors.support
         i = 0
@@ -108,7 +142,10 @@ function _brm_svi_regroup_layout(view, inventory, factors, estimated, axis_block
         end
         i == 0 || (work[i] += 1 + length(reads))
     end
-    levels = Any[Tuple(view.subject_levels[members]) for members in mapping.members]
+    scientific = maximum(mapping.subject_unit; init=0)
+    levels = Any[i <= scientific ? Tuple(view.subject_levels[members]) :
+        _brm_svi_cell_unit_level(view, units[i], i - scientific)
+        for (i, members) in enumerate(mapping.members)]
     attribution = Pair{Symbol,Vector{Int}}[
         name => zeros(Int, length(view.factor_supports[name])) for name in inventory.names]
     byname = Dict(attribution)
@@ -121,7 +158,7 @@ end
 
 function _brm_svi_connected_ownership(m; global_coordinates=nothing, previous=nothing,
         separator=:auto, max_unit_coordinates=4096, max_unit_work=1_000_000,
-        max_promoted_coordinates=128)
+        max_promoted_coordinates=128, cell_units=:components)
     factors = _rk_svi_factors(m.backend, m.unit)
     estimated = falses(length(m.unit))
     estimated[_brm_svi_globals(m)] .= true
@@ -137,7 +174,8 @@ function _brm_svi_connected_ownership(m; global_coordinates=nothing, previous=no
             intersect(previous.globals, m.view.coordinates)))
         sort!(unique!(promoted))
     end
-    inventory = _brm_svi_factor_inventory(m.view, length(m.unit))
+    inventory = _brm_svi_factor_inventory(m.view, length(m.unit);
+        rows=_brm_svi_observed_rows(m.backend, m.view))
     axis_blocks = _brm_svi_partition_blocks(m.backend)
     blocks = _brm_svi_atomic_blocks(length(m.unit), factors.owned, axis_blocks, estimated)
     incidence = zeros(Int, length(m.unit))
@@ -145,7 +183,7 @@ function _brm_svi_connected_ownership(m; global_coordinates=nothing, previous=no
         incidence[j] += 1
     end
     evaluate = requested -> _brm_svi_regroup_layout(m.view, inventory, factors,
-        estimated, axis_blocks, requested)
+        estimated, axis_blocks, requested; cell_units)
     chosen = _brm_svi_separator_plan(evaluate, blocks, incidence;
         global_coordinates=promoted, separator, max_unit_coordinates,
         max_unit_work, max_promoted_coordinates, preserve_globals=previous !== nothing)
@@ -179,7 +217,7 @@ function _brm_svi_connected_ownership(m; global_coordinates=nothing, previous=no
             "brm_svi_fit: a current prior reads an absent carried coordinate"))
     end
     merge(layout, (; factors, promoted=chosen.global_coordinates, absent,
-        separator=chosen.policy))
+        separator=merge(chosen.policy, (; cell_units))))
 end
 
 # Compile one final partition after all structural trials. The scientific
@@ -201,9 +239,14 @@ function _brm_svi_partition(m, ownership)
 end
 
 _brm_svi_unit_levels(t) = hasproperty(t.ownership, :levels) ? t.ownership.levels : t.m.view.levels
-_brm_svi_separator_options(t) = hasproperty(t.ownership, :separator) ?
-    (; (key => getproperty(t.ownership.separator, key) for key in
-        (:separator, :max_unit_coordinates, :max_unit_work, :max_promoted_coordinates))...) :
-    (; separator=:none)
+# `cell_units` is recorded only when it departs from the layout every earlier
+# checkpoint has, so those checkpoints keep their identity and replay unchanged.
+function _brm_svi_separator_options(t)
+    hasproperty(t.ownership, :separator) || return (; separator=:none)
+    policy = t.ownership.separator
+    options = (; (key => getproperty(policy, key) for key in
+        (:separator, :max_unit_coordinates, :max_unit_work, :max_promoted_coordinates))...)
+    policy.cell_units === :first_unit ? options : merge(options, (; policy.cell_units))
+end
 _brm_svi_requested_globals(t) = hasproperty(t.ownership, :separator) ?
     t.ownership.separator.requested : t.ownership.promoted

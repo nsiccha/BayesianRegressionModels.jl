@@ -70,7 +70,7 @@ _brm_svi_globals(m::BRMNLMEModel) = sort!(vcat(m.theta, m.sigma,
 
 function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=nothing,
         separator=nothing, max_unit_coordinates=4096, max_unit_work=1_000_000,
-        max_promoted_coordinates=128)
+        max_promoted_coordinates=128, cell_units=nothing)
     m.cell_query === nothing && _brm_nlme_error(
         "brm_svi: minibatch SVI evaluates one subject at a time, on the " *
         "subject's own observation cells, and this model's observations have " *
@@ -79,8 +79,10 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
     policy = something(separator, connected ? :auto : :none)
     !connected && policy !== :none && throw(ArgumentError(
         "brm_svi_fit: automatic separators require unit_partition=:connected"))
+    cell_units = _brm_svi_cell_units_option(cell_units, connected)
     ownership = connected ? _brm_svi_connected_ownership(m; global_coordinates, previous,
-        separator=policy, max_unit_coordinates, max_unit_work, max_promoted_coordinates) :
+        separator=policy, max_unit_coordinates, max_unit_work, max_promoted_coordinates,
+        cell_units) :
         _brm_svi_ownership(m; global_coordinates, previous)
     globals, units = ownership.globals, ownership.units
     # One strict partition sampler per worker; sparse selection metadata shares
@@ -919,12 +921,25 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   for selected blocks, reasons and whether budgets were achieved; the heuristic
   cannot promise an optimal cut or satisfy every budget. Changing ownership
   changes the variational approximation, never the model density.
+- `cell_units` — where connected mode puts likelihood cells that read no
+  subject's effect. `:components`, its default, gives them inference units of
+  their own, appended after the subjects' units, so a batch subsamples them:
+  cells reading a common ordinary coordinate that no subject's cell reads share
+  a unit, transitively, and cells with no such coordinate are grouped into about
+  √m units of √m cells. A coordinate that joins nearly all of them, such as a
+  shared population mean, joins them into one unit until it is promoted through
+  `global_coordinates` or `separator`. `:first_unit` keeps them all in the first
+  unit and counts unit work without rows, as earlier versions did, and is the
+  only choice with `unit_partition=:subjects`. Splitting these cells changes the
+  variational factorization and adds gradient variance from subsampling them,
+  never the density. Checkpoints keep the layout they were made with.
 - `unit_sampling` — defaults to `:work` in explicitly connected mode and
   `:uniform` otherwise. `:uniform` selects distinct units with weight `N/B`;
   `:work` makes `B` draws with replacement, with probabilities
   `pᵢ = (1/N + wᵢ/sum(w))/2`. The structural work proxy `wᵢ` counts local
-  coordinates and structural reads in the unit's likelihood/prior factors;
-  it is not measured runtime. All-zero work gives uniform probabilities.
+  coordinates, structural reads in the unit's likelihood/prior factors and
+  the rows of its vector-valued observation cells; it is not measured runtime.
+  All-zero work gives uniform probabilities.
   Repeated selections share one antithetic evaluation and one local update,
   with multiplicity retained in the global density and gradient weight
   `countᵢ/(B*pᵢ)`. Every unit has positive probability. This changes the visit
@@ -1095,7 +1110,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, threads=nothing,
         global_coordinates=nothing, separator=nothing, max_unit_coordinates=4096,
-        max_unit_work=1_000_000, max_promoted_coordinates=128)
+        max_unit_work=1_000_000, max_promoted_coordinates=128, cell_units=nothing)
     ndraws isa Integer && ndraws >= 0 || throw(ArgumentError(
         "$caller: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller, save, stop_after, checkpoint_every)
@@ -1108,7 +1123,8 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                 # SVI's partition sampler, on first use, reports under this phase.
                 t, state = init(_brm_with_cell_progress(
                     () -> _brm_svi_target(m; global_coordinates, previous, separator,
-                        max_unit_coordinates, max_unit_work, max_promoted_coordinates), phase))
+                        max_unit_coordinates, max_unit_work, max_promoted_coordinates,
+                        cell_units), phase))
                 _brm_svi_with_workers(t, min(threads, state.controls.batch_size), phase), state
             end
             run, c = state.run, state.controls
