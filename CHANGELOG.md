@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.205
+## 0.2.206
 
 - Fixed: `brm_start` on RKBRMI writes an ungrouped anisotropic
   `hsgp(...; iso=false)` length scale, as `fitting.md` documents, through
@@ -22,6 +22,21 @@ instead of failing at run time.
 - Fixed: an ungrouped one-axis `hsgp(x; iso=false)` on RKBRMI. Its `brm_start`
   raised the same error, and `brm_coordinate_transport` refused it because the
   emission samples `rho_iso` while the record named `rho_1`.
+
+## 0.2.205
+
+- Fixed: `brm_start` on an unconditioned `RKBRMI` (every response omitted,
+  the prior spelling) died in a `MethodError` from an internal coordinate
+  lookup. Such a program has zero sampled coordinates, so
+  `brm_start(rk, (;))`, `base=:prior_median` and the start from the data
+  `brm_start(rk)` (`chains = n` too) now return the empty point, and
+  `brm_start(sb, model)` the empty Stan point. An initial value
+  (`brm_start(rk, (; z=...))`, `term_inits`, `component_inits`) is refused by
+  name on both backends, since every declaration is drawn in generated
+  quantities; before, SBBRMI refused a population coefficient with an
+  unrelated descriptor error. `brm_coordinate_transport` pairs the two empty
+  layouts instead of refusing the unconditioned plan, and reads BridgeStan's
+  `[""]`, its name list for a model without parameters, as no names.
 
 ## 0.2.204
 

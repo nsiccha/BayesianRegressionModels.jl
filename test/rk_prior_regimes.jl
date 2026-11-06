@@ -63,10 +63,75 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
             propto=false, jacobian=true)
         @test sv == value
         @test isempty(sg)
+        # Both backends start at the empty point, and the coordinate
+        # transport pairs the two empty layouts.
+        sb = SBBRMI(brmi; mod=@__MODULE__, total_groups=())
+        for b in (:zero, :prior_median)
+            base = b === :zero ? Float64[] : b
+            @test brm_start(backend, (;); base) == Float64[]
+            @test brm_start(sb, stan.model, (;); base) == Float64[]
+        end
+        # BridgeStan names this model's parameters `[""]`: none.
+        t = brm_coordinate_transport(backend, sb, BridgeStan.param_unc_names(stan.model))
+        @test isempty(t.pairs) && isempty(t.rk_names) && isempty(t.stan_names)
+        @test brm_rk_to_stan(t, Float64[]) == Float64[]
+        @test brm_start(sb, stan.model; rk=backend, chains=2) == [Float64[], Float64[]]
+        given = Dict("prior-regression" => (; sigma=1.0),
+            "prior-direct-no-data" => (; a=0.1),
+            "prior-ragged-bounds" => (; sigma_add=0.2))[label]
+        for start in (() -> brm_start(backend, given), () -> brm_start(sb, stan.model, given))
+            err = try
+                start()
+            catch e
+                e
+            end
+            @test err isa ErrorException
+            @test occursin("zero sampled coordinates", err.msg)
+            @test occursin("`$(only(keys(given)))`", err.msg)
+        end
         artifact = BRM.emit_rk_artifact(brmi; case_id=label)
         rebuilt = build_kernel(BRM.rk_translate_artifact(artifact))
         @test isempty(coordinate_names(rebuilt.layout))
         @test isequal(data, before)
+    end
+end
+
+# An unconditioned program samples nothing, so every start is the empty point
+# and an initial value has no coordinate to set; snag unconditioned-br-7e674a7f
+# (before, `brm_start` died in a MethodError on the plan's coordinate records).
+@stestset "unconditioned BRM starts at the empty point and refuses initial values" begin
+    declared = @brm begin
+        z[1:n] .~ LogNormal.(mu, sd)
+        y ~ Normal(z, obs_sd)
+    end
+    grouped = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x + (1 | p | g)
+        y ~ Normal(mu, sigma)
+    end
+    for (label, brmi, inits, given) in (
+        ("declared-vector", declared((; n=2, mu=-0.2, sd=0.3, obs_sd=1.0)),
+            (; z=exp.([-0.3, 0.0])), ("`z`",)),
+        ("declared-vector-zero-extent", declared((; n=0, mu=-0.2, sd=0.3, obs_sd=1.0)),
+            (; z=Float64[]), ("`z`",)),
+        ("grouped", grouped((; x=[-0.2, 0.4, 0.8, 0.1], g=["a", "b", "a", "c"])),
+            (; mu=(; Intercept=0.1), sigma=1.2, p=(; sd=0.5)), ("`mu`", "`sigma`", "`p`")))
+        rk = RKBRMI(brmi)
+        @test rk.plan isa BRM._RKUnconditionedPlan
+        @test isempty(BRM._rk_coordinate_records(rk.plan; term_starts=true))
+        for base in (Float64[], :prior_median)
+            @test brm_start(rk, (;); base) == Float64[]
+        end
+        @test brm_start(rk) == Float64[]
+        @test brm_start(rk; chains=2) == [Float64[], Float64[]]
+        err = try
+            brm_start(rk, inits)
+        catch e
+            e
+        end
+        @test err isa ErrorException
+        @test occursin("unconditioned program", err.msg)
+        @test all(name -> occursin(name, err.msg), given)
     end
 end
 

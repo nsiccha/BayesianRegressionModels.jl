@@ -2573,7 +2573,10 @@ toolchain, so a GitHub Actions job would be red by construction.
 # zero coordinates. Bound baseline observations keep their inference ancestors.
 # Controls cover normalized compiled same-BRMI Stan, ordinary native Reverse,
 # full source/artifact replay and input ownership; native generated draws are
-# unavailable.
+# unavailable. Both backends start such a program at the empty point
+# (`brm_start` with and without initial values, `base=:prior_median`, the start
+# from the data), the coordinate transport pairs the two empty layouts, and an
+# initial value is refused by name.
 
 ## Bounded sparse Laplace acceptance
 
