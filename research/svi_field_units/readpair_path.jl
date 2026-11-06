@@ -3,11 +3,12 @@
 # truth is a Matérn ν = 1 field at the sites with known hyperparameters.
 #
 #     julia --project=test research/svi_field_units/readpair_path.jl sites rows iterations [more groups of three]
-using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme, Bessels
+using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface, LinearAlgebra, Random, Statistics, Printf
+using SpecialFunctions: besselk
 const BRM = BayesianRegressionModels
 
-matern1(d, ℓ) = d == 0 ? 1.0 : (x = sqrt(2) * d / ℓ; x * besselk1(x))
+matern1(d, ℓ) = d == 0 ? 1.0 : (x = sqrt(2) * d / ℓ; x * besselk(1, x))
 
 function site_data(sites, rows; σ=1.0, ℓ=0.3, τ=0.3, seed=1)
     rng = Xoshiro(seed)
@@ -18,8 +19,11 @@ function site_data(sites, rows; σ=1.0, ℓ=0.3, τ=0.3, seed=1)
     site = repeat(1:sites; inner=rows)
     x = randn(rng, length(site))
     y = f[site] .+ slope[site] .* x .+ τ .* randn(rng, length(site))
+    # The exact posterior mean of f at the true hyperparameters, given the slopes.
+    means = [mean(y[site .== s] .- slope[s] .* x[site .== s]) for s in 1:sites]
+    exact = σ^2 .* K * (cholesky(Symmetric(σ^2 .* K + (τ^2 / rows) * I)) \ means)
     (; east=px[site], north=py[site], time=zeros(length(site)), x, y, site=string.("s", site),
-       state=collect(eachindex(site)), nb=min(30, sites - 1)), f
+       state=collect(eachindex(site)), nb=min(30, sites - 1)), (; f, exact, first_row=1 .+ rows .* (0:sites-1))
 end
 
 function site_model(data)
@@ -60,19 +64,22 @@ function main(sites, rows, iterations)
     d = fit.diagnostics
     @printf("READPAIR %d iterations, %.4f s per step, finite ELBO %s, globals %d\n", d.iterations,
         d.seconds / max(d.iterations, 1), all(isfinite, d.elbo), length(d.globals))
-    # The field's coordinates are standardized; its read is the SD times the state.
-    hyper(key) = findfirst(n -> endswith(n, key), names)
-    constrained = [BRM.constrain(rk.model.layout, fit.draws[:, j]) for j in axes(fit.draws, 2)]
+    # The term's own output, on the scale the model reads it, at each site's first row.
+    picks = round.(Int, range(1, size(fit.draws, 2); length=min(100, size(fit.draws, 2))))
+    outputs = rk_draw_values(rk, fit.draws[:, picks], (:field,)).field
+    field = reduce(hcat, [o[truth.first_row] for o in outputs])
+    estimate, spread = vec(mean(field; dims=2)), vec(std(field; dims=2))
+    constrained = [constrain(rk.model.layout, fit.draws[:, j]) for j in picks]
     term = first(k for k in keys(constrained[1]) if startswith(String(k), "gmrf"))
     sd_draws = [getproperty(c[term], :sigma) for c in constrained]
     ℓ_draws = [getproperty(c[term], :spatial_length) for c in constrained]
-    field = reduce(hcat, [getproperty(c[term], :field) for c in constrained]) .* sd_draws'
-    position = unique(i -> (data.east[i], data.north[i]), eachindex(data.east))
-    order = sortperm([findfirst(==(string("s", s)), data.site) for s in 1:sites])
-    estimate = vec(mean(field; dims=2))
-    spread = vec(std(field; dims=2))
-    @printf("READPAIR field states %d, median posterior SD %.3f, field SD truth %.3f, sd draw mean %.3f, ℓ draw mean %.3f (truth 0.3)\n",
-        size(field, 1), median(spread), std(truth), mean(sd_draws), mean(ℓ_draws))
+    # The intercept and the field trade off, so compare centred.
+    centred(x) = x .- mean(x)
+    rmse(a, b) = sqrt(mean(abs2, centred(a) .- centred(b)))
+    @printf("READPAIR recovery rmse against truth %.3f, exact posterior mean against truth %.3f, against exact %.3f (field SD %.3f)\n",
+        rmse(estimate, truth.f), rmse(truth.exact, truth.f), rmse(estimate, truth.exact), std(truth.f))
+    @printf("READPAIR median posterior SD %.3f, sd draw mean %.3f (truth 1), ℓ draw mean %.3f (truth 0.3)\n",
+        median(spread), mean(sd_draws), mean(ℓ_draws))
     @printf("READPAIR peak_rss %.2f GB\n", parse(Int, match(r"VmHWM:\s+(\d+)", read("/proc/self/status", String)).captures[1]) / 2^20)
     flush(stdout)
     nothing
