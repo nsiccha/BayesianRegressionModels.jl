@@ -601,7 +601,7 @@ end
     changed = merge(train, (; scale=9.0))
     rk = RKBRMI(build(train))
     u = point(rk)
-    @test :scale ∉ keys(rk_bound_data(rk))
+    @test rk_bound_data(rk).scale == 1.7
     # A design may repeat the value or omit it.
     @test density(reprocess(rk, train), u) == density(rk, u)
     @test density(reprocess(rk, omitted), u) == density(rk, u)

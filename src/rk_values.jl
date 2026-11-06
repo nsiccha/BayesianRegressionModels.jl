@@ -403,7 +403,13 @@ _rk_ast_level_factor_constant(lc::_BRMLevelCorrelation) = Expr(:call, :hcat,
 _rk_ast_level_factor!(stmts, taken, lc::_BRMLevelCorrelation) =
     _rk_ast_level_factor!(stmts, taken, lc, Val(lc.kind))
 _rk_ast_level_factor!(_stmts, _taken, lc, ::Val{:parameter}) = lc.name
-_rk_ast_level_factor!(_stmts, _taken, lc, ::Val{:data}) = _rk_level_factor_name(lc)
+# RKPPL reads a bound matrix on its row axis. A definition over it is the block's
+# level factor, off that axis, as a literal factor's `hcat` definition was.
+function _rk_ast_level_factor!(stmts, taken, lc, ::Val{:data})
+    name = _rk_ast_fresh_name(string(_rk_level_factor_name(lc), "_value"), taken)
+    push!(stmts, Expr(:(=), name, Expr(:call, :copy, _rk_level_factor_name(lc))))
+    name
+end
 
 # A penalized smooth, as StanBlocks' `_sb_s_generic`/`_sb_t2_generic`: the
 # fitted bases stay caller-level values; one block allocates the unpenalized

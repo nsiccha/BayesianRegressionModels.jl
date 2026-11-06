@@ -777,7 +777,7 @@ end
     fixture = coordinate_transport_fixture(PublicCoordinateTransport.data_scale_gmrf(data),
         "data_scale_gmrf")
     check_coordinate_transport(fixture)
-    @test :prior_sd_scale ∉ keys(rk_bound_data(fixture.rk))
+    @test :prior_sd_scale in keys(rk_bound_data(fixture.rk))
     @test isequal(data, saved)
 end
 

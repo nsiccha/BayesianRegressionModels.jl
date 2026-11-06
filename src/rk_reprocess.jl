@@ -411,6 +411,12 @@ function _rk_law_reads!(reads, law, callees, inputs)
     used = get!(inputs, callee.name) do
         _rk_law_inputs(callee.statements, Set{Symbol}(callee.parameters), callees, inputs)
     end
+    # What its laws read that it neither takes nor defines is the caller's value:
+    # a block's law reads a prior's input freely (`_RKBlockBody`).
+    locals = _rk_source_symbols!(Set{Symbol}(), collect(Any, callee.parameters))
+    _rk_source_assignments!(locals, callee.statements)
+    _rk_source_outputs!(locals, callee.statements)
+    union!(reads, setdiff(used, locals))
     arguments = law.args[2:end]
     length(arguments) == length(callee.parameters) || return _rk_value_names!(reads, law)
     for (parameter, argument) in zip(callee.parameters, arguments)
