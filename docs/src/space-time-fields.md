@@ -190,8 +190,8 @@ conditioning set ``N(i)`` of a read holds:
 - when its own position was not read at the previous read time, its `m` nearest
   among the latest earlier reads, reaching back until they hold at least `m`.
 
-Selection depends only on the coordinates and `m`, never on the sampled lengths.
-Only ``b_i`` and ``F_i`` move with them, and reads with the same geometry share
+Selection depends only on the set of read pairs and `m`, never on the sampled
+lengths or the order of the rows. Only ``b_i`` and ``F_i`` move with them, and reads with the same geometry share
 one solve, so a repeated observing pattern costs one solve per position and
 gap rather than one per read.
 
@@ -230,8 +230,10 @@ plate cells. Embedded Laplace does not integrate it.
 Use `multiresolution=m` when the read support is irregular and its temporal
 covariance must remain exactly OU. It has the same hyperparameter addresses,
 priors and length convention as the other forms. Select exactly one of `mesh=`,
-`neighbors=`, and `multiresolution=`; the latter two take an integer literal
-from 1 through 100.
+`neighbors=`, and `multiresolution=`; the latter two take an integer from 1
+through 100, written as a literal or held by a scalar data field or
+`name = constant(expr)`, as in `neighbors = nb` with `nb` in the data. Models
+that differ only in the count build one Stan program and emit one RK program.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""

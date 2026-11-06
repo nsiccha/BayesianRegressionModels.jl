@@ -60,7 +60,8 @@ end
 function laplace_frame(p)
     rk = laplace_backend(p)
     emitted = BRM._rk_retained_program(rk)
-    (; program=BRM._rk_identity_statements(rk), callables=emitted.bindings,
+    (; program=BRM._rk_identity_statements(rk),
+       callables=BRM._brm_stable_bindings(emitted.bindings),
        preprocessing=laplace_preprocessing(rk), p.population, p.names,
        configuration=laplace_configuration(p))
 end

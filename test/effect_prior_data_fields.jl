@@ -159,7 +159,8 @@ const CASES = (
         brmi = case.model(merge(case.data, case.fields))
         program = code(brmi)
         @test compiles(brmi)
-        @test !occursin("~ normal_scale(", program)
+        # The bug's spelling, not StanBlocks' `std_normal_scaled_lcdf_tail` helper.
+        @test !occursin(r"\bnormal_scale\b", program)
         for (name, value) in pairs(case.fields)
             @test BRM.stan_data(sb(brmi))[name] == value
         end

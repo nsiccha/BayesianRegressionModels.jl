@@ -3984,8 +3984,9 @@ S2Z (`s2z_groups`, `s2z_rho`, below) with WarmupHMC adaptive centering
 totals when the exact Gaussian conditional construction is available: one
 grouping structure per predictor, independent random-effect margins, and
 Normal, Flat, or Student-t population priors (Student-t uses its exact Gaussian
-scale mixture). Unmatched fixed effects and `offset(...)` terms remain explicit
-summands. Original population coefficients and deviations are recovered in
+scale mixture), whose arguments read only numbers and data; those values enter
+the program as data. Unmatched fixed effects and `offset(...)` terms remain
+explicit summands. Original population coefficients and deviations are recovered in
 generated quantities; inspect [`total_effect_blocks`](@ref). Naming a group
 explicitly requires every block of that group to be eligible and errors
 otherwise, naming each predictor whose block would stay conventional and why.
@@ -6802,7 +6803,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             isnothing(into) || (flat = _brm_kernel_rebase_index(
                 arg_name, flat, event_group, event_groups,
                 into, _sb_df_column(df, into); prefix="sbimpl: reprocess"))
-            new_data[key] = [flat[r] for r in rows]
+            new_data[key] = _brm_gather_cells(flat, rows)
         end
         new_preproc[key] = e
     elseif e.kind === :multi_membership
@@ -8327,8 +8328,7 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
             body_stmts = Any[_sb_subst_sym(s, params[i], sliced) for s in body_stmts]
         else
             isnothing(flat) && (flat = parent(parent(arg_col)))
-            gathered = [flat[r] for r in rows]
-            data[gath_sym] = gathered
+            data[gath_sym] = _brm_gather_cells(flat, rows)
         end
         options = (; is_lp)
         isnothing(into) || (options = merge(options, (; into=name(into))))

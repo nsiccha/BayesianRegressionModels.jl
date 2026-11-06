@@ -31,7 +31,8 @@ Manifest*.toml
 !web-macro/Manifest.toml
 !web-macro/app/Manifest.toml
 
-# Reproducible develop-path checkouts materialized by test/setup_env.jl.
+# Develop-path checkouts an older test/setup_env.jl left in an existing worktree.
+# It now materializes them in a per-host store outside the checkout.
 test/.bootstrap/
 
 # Reproducible plotting checkouts materialized by

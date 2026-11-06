@@ -528,13 +528,39 @@ function rk_bound_data end
 # truncated display or just their shapes) and its packed coordinate names,
 # hashed under `tag`. SMC checkpoints identify their bindings with
 # `tag="brm-smc-v1"`, SVI optimizer checkpoints with `tag="brm-svi-v1"`.
-function _brm_rk_binding_identity(rk, tag)
+# A generated function enters through what it computes (src/callable_identity.jl).
+# `stable=false` is the formula that hashed its generated name, which old SVI
+# checkpoints of a model with such a callable hold.
+function _brm_rk_binding_identity(rk, tag; stable=true)
     emitted = _rk_retained_program(rk)
+    data = rk_bound_data(rk)
     io = IOBuffer()
     serialize(io, (format=1, program=_rk_program_statements(emitted),
-        callables=emitted.bindings, data=rk_bound_data(rk),
+        callables=stable ? _brm_stable_bindings(emitted.bindings) : emitted.bindings,
+        data=stable ? map(_brm_stable_value, data) : data,
         coordinates=_rk_bound_coordinate_names(rk)))
     "$tag:" * bytes2hex(sha256(take!(io)))
+end
+
+# The same identity by component, callables by name and data by column, so a
+# difference can be named.
+function _brm_rk_binding_parts(rk)
+    emitted = _rk_retained_program(rk)
+    digests(entries) = Pair{Symbol,String}[name => _brm_value_digest(_brm_stable_value(value))
+        for (name, value) in entries]
+    (; program=_brm_value_digest(_rk_program_statements(emitted)),
+       callables=digests(emitted.bindings),
+       data=digests(pairs(rk_bound_data(rk))),
+       coordinates=_brm_value_digest(_rk_bound_coordinate_names(rk)))
+end
+
+function _brm_rk_binding_differences(current, saved)
+    named(label, a, b) = (names = unique!(sort!(first.(symdiff(a, b))));
+        isempty(names) ? String[] : ["$label ($(join(names, ", ")))"])
+    String[(current.program == saved.program ? String[] : ["its emitted program"])...,
+        named("its callables", current.callables, saved.callables)...,
+        named("its bound data or frozen preprocessing", current.data, saved.data)...,
+        (current.coordinates == saved.coordinates ? String[] : ["its packed coordinates"])...]
 end
 
 """

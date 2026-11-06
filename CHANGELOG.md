@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.211
+## 0.2.218
 
 - Changed: on `RKBRMI`, a data scalar a prior reads is a runtime input of the
   program instead of a number folded into it (user principle `0ikeidi`). That
@@ -52,6 +52,154 @@ instead of failing at run time.
   on a bound scalar's value (ReactiveKernels snag `prepare-sampler-e69f1b38`), and
   changed extents still change the lowered program
   (`rkppl-sized-vect-69604d32`).
+## 0.2.217
+
+- Fixed: `gmrf(...; neighbors=m)` depended on the order of the rows wherever a
+  step of its maximin position order had a tie, as on a regular lattice.
+  Positions were numbered by first appearance in the rows and ties resolved by
+  that number, so the same reads in another row order gave another state order,
+  other conditioning sets and another implied covariance. The largest difference
+  on a 40 × 40 lattice at spacing 1 and spatial lengths 1, 5 and 20 was 0.15 to
+  0.30 at `m = 4` and 0.004 to 0.012 at `m = 30`, about the size of the
+  approximation's own error at that `m`. Positions are now sorted first, as
+  `multiresolution=m` already did, so the footprint is a function of the set of
+  read pairs. Build time is unchanged.
+- **Breaking:** on a support with ties, a model rebuilt from rows that do not
+  first read their positions in sorted `(east, north)` order now has another
+  state order and prior law than on an earlier version, under the same coordinate
+  names, so no error marks the change. Draws or starts saved from such a fit do
+  not transfer to a rebuilt model: refit, or replay the fit's saved
+  `brm_fitted_state`, which keeps the footprint it was fitted with. Supports
+  without ties, rows already in sorted position order and `multiresolution=m`
+  are unchanged, bit for bit.
+
+## 0.2.216
+
+- Fixed: a one-unit NLME gradient copied the whole model to the heap twice per
+  call, about 17 of the call's 20 KB on an 80-subject PK model, and most of its
+  time. `BRMNLMEModel` now keeps its fields behind a pointer, so passing it costs
+  nothing. Wall time of a 40-iteration SAEM fit on that model fell 1.3–2.2× under
+  lockstep and 1.7–2.9× under `WarmupHMCNUTS(threads = true)`. Seeded fits keep
+  the same bits. The type is a `mutable struct` whose fields are all `const`, so
+  its fields still cannot be assigned; `===` between two models now compares
+  identity.
+- Fixed: the evaluator pool of concurrent one-unit calls prepares at most one
+  evaluator per Julia thread, as brm-use states. A contended pool reached
+  `Threads.maxthreadid()`, which counts GC threads too: 18 evaluators at 13
+  threads, each about 0.35 s and 120 MiB allocated to prepare at that size.
+
+## 0.2.215
+
+- Fixed: `brm_svi_fit` and `brm_svi_resume` could not recover a weak direction
+  of a dense unit factor above about 20 coordinates. The single-draw curvature
+  estimate is indefinite, and where a direction's precision was far below its
+  target the trust-limited step kept widening it, on an exact Gaussian target
+  too: at 27 coordinates a direction whose true sd is 1, started at 36.7, ended
+  between 14.6 and 2760 after 1100 visits. At 13 and 15 coordinates it recovered;
+  at 19 and 21 most runs did; at 23 and above they did not. Draws
+  then reach far enough out that the target overflows on both sides. The step
+  now uses the positive part of the estimate, which needs no knowledge of the
+  prior and equals the old estimate at a matched factor. No option, keyword,
+  diagnostic or checkpoint format changes, but dense units' trajectories differ
+  from the first visit, so a fit on a fixed seed does not reproduce its earlier
+  result. The estimate is biased towards more precision where the factor and
+  target differ; on a Gaussian target the stationary sd is about 1.04-1.06 times
+  the truth, against 1.11-1.14 before.
+
+## 0.2.214
+
+- Fixed: on SBBRMI, an `@plate for p in groups(g)` whose grouping column has no
+  rows. Generating its program failed with `Could not find kernel_<cell>_<x>_ragged`,
+  and replaying onto such data with `Do not know how to handle stan_type(…, Any[])`.
+  The plate now has no cells: it binds its inputs empty with their columns'
+  element types, emits the same program as the same model with rows, and its
+  density and gradient are exactly its priors'. `reprocess` moves the program
+  between rows and no rows in both directions. A random effect under
+  `total_groups=:auto` still picks its parameterization from the data, so its
+  program can differ on no rows; a replay keeps the fitted one. Pass the empty
+  columns typed (`x = Float64[]`, `day = Int[]`): Stan declares each as int or
+  real, and an `Any[]` has no entries to tell which, so SBBRMI still refuses it.
+- Fixed: a plate whose cells are named by an empty label column
+  (`rows = groups(g => cells)` with `cells = String[]`) was refused on both
+  backends as if it were long-format data. It now has no cells.
+
+## 0.2.213
+
+- Fixed: identical models were refused across processes when they call an
+  anonymous function or closure. A model's identity hashed such a callable by
+  what names it in the process: its generated name, the file and line of its
+  methods and Serialization's process-wide object numbers. One more anonymous
+  definition earlier in the driver, another line, or serializing another
+  anonymous function first changed the digest, so `brm_svi_resume` refused a
+  checkpoint on the same science and data, after preparing the whole model. In a
+  package module the callable was hashed by generated name alone, so a changed
+  body kept its digest. A generated function now enters by its methods' lowered
+  code and its captured values, nested ones included, with no line information.
+  This covers SVI optimizer checkpoints, the SVI and SMC streaming carries, SMC
+  and Laplace SMC identities and filter exports. A model with no generated
+  function keeps its exact identity, so its existing checkpoints stay valid.
+- Fixed: a fitted state's replay and a streaming SVI window compared the model's
+  declaration as text, where a callable outside a plate cell prints by its
+  generated name (`Normal(#3(mu), 0.8)`), so the rebuilt model was refused as
+  "exported from another model" or "model source changed". The comparison now
+  ignores generated names, also in text exported earlier. Like a named function
+  or a callable inside a plate cell, the body of such a callable is not compared
+  on replay, which reads only this text and the emitted program.
+- Changed: `brm_svi_resume` checks the program, callables, data and coordinates
+  right after lowering, before it prepares the model and target, and the refusal
+  names what differs: the emitted program, the callable's binding, the data
+  column, or the packed coordinates. New checkpoints hold these digests in
+  `state.identity.binding_parts`, of fixed size per callable and data column.
+- Compatibility: an SVI optimizer checkpoint written before this version is still
+  accepted when the old digest matches, which for a model with a generated
+  callable needs the old driver layout; its refusal cannot name the part. Its
+  continuation writes the new digests. An SVI or SMC streaming carry, an SMC
+  checkpoint or a filter export of a model with a generated callable, written
+  before this version, is not migrated and is refused as a changed model.
+
+## 0.2.212
+
+- Fixed: a population prior that reads data is integrated by exact totals and
+  sum-to-zero like the same prior with the numbers spelled out.
+  `effect(mu, Intercept) ~ Normal(m, s)` with `m` and `s` in the data was refused
+  by an explicit `total_groups` or `s2z_groups` request ("is not Normal, Student-t
+  or Flat", "unsupported population prior"). The arguments of a `Normal`,
+  `LocationScale(m, s, TDist(nu))` or `TDist(nu)` prior may now be literals, scalar
+  data fields, `constant(...)`s, elements `v[k]` of a data vector, data-only
+  assignments or calls over these. The values enter the program as data, so models
+  differing only in such a value compile one program, whose log density, gradient
+  and generated quantities equal those of the literal twin.
+- **Changed:** with `total_groups = :auto`, a model whose population priors read
+  data used to stay conventional without saying so; it now integrates its blocks,
+  as its literal twin always did. The posterior is unchanged, the coordinates are
+  not, so draws from such a fit do not transfer to a new build. Pass
+  `total_groups = ()` to keep the conventional representation. A frozen replay
+  of a fitted model is unaffected.
+- A prior that reads a sampled value is still not integrated, and the refusals now
+  say why ("arguments that read only numbers and data"). A data-only call that
+  fails names the call. The exact-total refusal no longer claims a block's `sd`
+  prior needs literal arguments; it already accepted data.
+
+## 0.2.211
+
+- Fixed: on `RKBRMI`, a model-scope `=` assignment that no response reads is
+  now a graph value of its authored name, as user decision `0kpugvc` already
+  documented. `rk_draw_values(rk, U, (:q,))` and `want=(:q,)` answer for
+  `mu ~ 1 + x; q = exp(mu - decay * elapsed); y ~ Normal(mu, 0.4)` instead of
+  raising `KeyError: kernel has no port :q`; so do scalars over sampled
+  parameters (`sigma ~ Exponential(1); variance = sigma^2`, a literal
+  `two = 2.0`, an alias `scale = sigma`). Coordinates and log densities are
+  unchanged; a gradient can move by one ulp where the extra statement changes
+  the compiled evaluation order. The sampler never runs such a value. An
+  assignment that needs a declaration no response reaches (`q = exp(z)` for
+  an unread `z ~ Normal(0, 1)`, or an unread formula predictor) stays out as
+  before. Still out: a data-only assignment no response reads, and one that
+  reads data but no formula predictor in a model none of whose assignments
+  reads a formula predictor (`spread = sigma * sum(elapsed)`): RK plans such a
+  model on a route that writes the data a statement reads into the program,
+  so keeping it would refuse a `reprocess` of other rows. A build of an
+  affected model emits one more statement, so its program identity (SMC and
+  SVI checkpoint tags) changes.
 
 ## 0.2.210
 
@@ -67,9 +215,10 @@ instead of failing at run time.
   a data shape in Gamma's `mu/alpha`. Binomial trials keep their formula
   spelling, and the cutpoints or category predictors of a leveled response stay
   refused. An invalid value is refused when the backend is built, naming it
-  (`per-observation scale s must be finite positive numerics`), except that an
-  out-of-range per-row `zi` or Student-t `nu` is not refused yet: it reads as a
-  `-Inf` density.
+  (`per-observation scale s must be finite positive numerics`). An out-of-range
+  per-row `zi` or Student-t `nu` is refused that way only from ReactiveKernelsPPL
+  0.1.105, which BRM's compat floors do not require yet. Before it, the value
+  fails later, as a `-Inf` density or an internal error.
 - Changed: scalar-data Student-t degrees of freedom
   (`LocationScale(mu, s, TDist(nu))` with `nu` from data) are read the same
   way instead of being emitted as a numeric literal, so one program serves
