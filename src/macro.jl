@@ -441,9 +441,12 @@ frozen on replay; neither combines with `anchor=`.
 `k`, `c`, `domain`, `period` and `anchor` are numbers the model reads: a
 literal, or a data field holding the scalar or per-axis value (or
 `name = constant(expr)`), as `hsgp(t; k = kk, c = cc)` with `kk` and `cc` in the
-data. Models that differ only in them build one Stan program and one RK program
-(RKBRMI reads them as inputs); the basis has `prod(k)` functions. A frozen
-replay keeps the fitted values and refuses data that holds others.
+data. Models that differ only in them build one Stan program and emit one RK
+program (RKBRMI reads them as inputs); the basis has `prod(k)` functions.
+ReactiveKernelsPPL's lowering of that program still specializes on the basis
+size and on the fitted length-scale floor (ReactiveKernels snag
+`rkppl-sized-vect-69604d32`). A frozen replay keeps the fitted values and refuses
+data that holds others.
 
 `cov=:periodic` selects the periodic-kernel approximation of Riutort-Mayol et
 al. (2023) over exactly one raw-data axis: `k` harmonics of `2pi / period`

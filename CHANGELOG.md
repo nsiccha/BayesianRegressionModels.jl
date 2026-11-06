@@ -25,11 +25,15 @@ instead of failing at run time.
   `K` is still checked against the block width. Both backends emit `eta`'s
   number into the program.
 - Changed: models that differ only in the `gmrf` and `hsgp` values build one
-  Stan program and one RK program. RKBRMI reads an `hsgp` term's basis counts
-  and settings from the bound fit-role inputs `<id>_modes_fit` and
-  `<id>_settings_fit`, and a `multiresolution` rank from `<id>_rank_fit`,
-  instead of spelling them in the program; the basis size is `prod(modes)`.
-  The densities are unchanged.
+  Stan program and emit one RK program. RKBRMI reads an `hsgp` term's basis
+  counts and settings from the bound fit-role inputs `<id>_modes_fit` and
+  `<id>_settings_fit` (as the fitted values `<id>_modes`, `<id>_settings`), and
+  a `multiresolution` rank from `<id>_rank_fit`, instead of spelling them in the
+  program; the basis size is `prod(modes)`. The densities are unchanged.
+  ReactiveKernelsPPL's lowering of the emitted program still specializes on a
+  changed basis size and on the fitted length-scale floor, which `c` and
+  `domain` move (ReactiveKernels snag `rkppl-sized-vect-69604d32`); a changed
+  `multiresolution` rank lowers to the same program.
 - Added: a frozen replay refuses data whose field holds another value of such
   a setting than the fit used; a new build takes the new value, and so does a
   fresh replay (`freeze_constants=false`) on RKBRMI and of an SBBRMI `gmrf`.
