@@ -417,11 +417,11 @@ end
     @test allequal(typeof.(plans))
     @test allequal(typeof.(ReactiveKernelsPPL.prepare_query.(Ref(rk.model), plans, :sampler)))
     queries = [ReactiveKernelsPPL.prepare_sampler(rk.model, plan, u; backend) for plan in plans]
-    # The same values prepare the same gradient query. Other values do not yet:
-    # RK's `prepare_sampler` splices a bound scalar into its generated body
-    # (ReactiveKernels snag `prepare-sampler-e69f1b38`).
+    # Other values prepare the same gradient query too: a bound scalar's value
+    # keeps the prepared derivative's type from RK 172b4d83f (ReactiveKernels
+    # 0.1.95 / ReactiveKernelsPPL 0.1.106, snag `prepare-sampler-e69f1b38`).
     @test typeof(queries[1]) == typeof(queries[3])
-    @test_broken typeof(queries[1]) == typeof(queries[2])
+    @test typeof(queries[1]) == typeof(queries[2])
     for (data, query) in zip((A, B, A), queries)
         gradient = similar(u)
         value, _ = ReactiveKernelsPPL.sampler_value_and_gradient!(query, gradient, u)
