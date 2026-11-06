@@ -10,6 +10,9 @@
 # density and gradient, on both backends — and the same program must replay
 # onto data that has rows (and back) with `reprocess`, including the row
 # count of a declared axis that sizes a predictor with no data column.
+#
+# A plate can also have no cells at all, when the column naming its cells has no
+# rows. Its density is then exactly its priors, and it keeps the same program.
 
 include(joinpath(@__DIR__, "rk_consumer_support.jl"))
 
@@ -228,6 +231,195 @@ end
             @test BridgeStan.log_density(replayed.model, u; propto=false) ≈
                   BridgeStan.log_density(direct.model, u; propto=false) atol=1e-12
         end
+    end
+end
+
+# A plate with no cells at all: the column that names its cells has no rows, as
+# a schedule with no observations yet. The program must not depend on that, and
+# its density must be exactly its priors.
+const NO_CELLS = (;
+    block=String[], cell=String[], weight=Float64[], day=Int[], y=Float64[], x=Float64[],
+    level_sd=2.0)
+const TWO_SERIES = merge(NO_CELLS, (;
+    block=["b", "a", "a"], cell=["a", "b"], weight=[0.5, -0.5], day=[4, 3, 1],
+    y=[0.2, 0.3, 0.1], x=[1.0, -0.5, 0.5]))
+
+series_model(data) = @brm data begin
+    level ~ Normal(0.0, level_sd)
+    slope ~ Normal(0.1, 0.5)
+    log_sigma ~ Normal(0.0, 1.0)
+    sigma = exp(log_sigma)
+    phi ~ Uniform(-0.8, 0.9)
+    @plate for p in groups(block; order = day)
+        m = level .+ slope .* x[p]
+        y[p] ~ AR1Normal(m, sigma, phi; time = day[p])
+    end
+end
+
+# The same law with its data-supplied prior scale written as a literal.
+literal_series_model(data) = @brm data begin
+    level ~ Normal(0.0, 2.0)
+    slope ~ Normal(0.1, 0.5)
+    log_sigma ~ Normal(0.0, 1.0)
+    sigma = exp(log_sigma)
+    phi ~ Uniform(-0.8, 0.9)
+    @plate for p in groups(block; order = day)
+        m = level .+ slope .* x[p]
+        y[p] ~ AR1Normal(m, sigma, phi; time = day[p])
+    end
+end
+
+# Cells named by their own label column, rather than by the grouping's labels.
+labelled_cells_model(data) = @brm data begin
+    level ~ Normal(0.0, level_sd)
+    rows = groups(block => cell)
+    @plate for i in eachindex(weight)
+        y[rows[i]] ~ normal(level .+ weight[i] .+ x[rows[i]], 1.0)
+    end
+end
+
+# A random effect over the empty label column has no levels, and its scale and
+# the population intercept stay. With an explicit `total_groups` its program is
+# the populated twin's; `total_groups=:auto` picks a parameterization from the data.
+ranef_cells_model(data) = @brm data begin
+    log_rate ~ 1 + (1 | p | cell)
+    sigma ~ Exponential(1)
+    rows = groups(block => cell)
+    @plate for i in eachindex(log_rate)
+        y[rows[i]] ~ normal(exp(log_rate[i]) .* x[rows[i]], sigma)
+    end
+end
+
+no_cells_sb(model, data) = SBBRMI(model(data); mod=@__MODULE__, total_groups=:auto)
+
+# The independent density and gradient of `series_model`'s priors, in the
+# coordinate order `names` gives. Stan's transform of `phi` is checked through
+# `uniform_value` and its log Jacobian.
+function series_prior(names, q)
+    at(name) = coordinate(string.(names), name)
+    level, slope, log_sigma, u = q[at("level")], q[at("slope")], q[at("log_sigma")], q[at("phi")]
+    value = logpdf(Normal(0.0, 2.0), level) + logpdf(Normal(0.1, 0.5), slope) +
+        logpdf(Normal(0.0, 1.0), log_sigma) +
+        logpdf(Uniform(-0.8, 0.9), uniform_value(u, -0.8, 0.9)) + uniform_logjac(u, -0.8, 0.9)
+    gradient = zero(q)
+    gradient[at("level")] = -level / 4
+    gradient[at("slope")] = -(slope - 0.1) / 0.25
+    gradient[at("log_sigma")] = -log_sigma
+    gradient[at("phi")] = 1 - 2 * LogExpFunctions.logistic(u)
+    value, gradient
+end
+
+function check_series_prior(names, density)
+    @test sort(string.(names)) == ["level", "log_sigma", "phi", "slope"]
+    for q in points(4)
+        value, gradient = density(q)
+        expected, expected_gradient = series_prior(names, q)
+        @test value ≈ expected atol=1e-12
+        @test gradient ≈ expected_gradient atol=1e-10
+    end
+end
+check_series_prior(stan) = check_series_prior(BridgeStan.param_unc_names(stan.model),
+    q -> BridgeStan.log_density_gradient(stan.model, q; propto=false))
+
+@stestset "a plate with no cells is its priors on Stan" begin
+    saved = deepcopy(NO_CELLS)
+    sb = no_cells_sb(series_model, NO_CELLS)
+    # Typed as its populated twin's inputs, so the program cannot differ.
+    @test sb.data[:kernel_y_cell_x_ragged] isa Vector{Vector{Float64}}
+    @test sb.data[:kernel_y_cell_day_ragged] isa Vector{Vector{Int}}
+    @test isempty(sb.data[:kernel_y_cell_x_ragged])
+    @test sb.data[:kernel_nsub_y_cell] == 0
+    @test StanBlocks.stanc_check(BRM.stan_code(sb); warn_pedantic=false).ok
+    check_series_prior(BRM.stan_instantiate(sb; path=joinpath(STAN_DIR, "no-cells.stan")))
+
+    # The literal twin: the same law, whichever way its prior scale is written.
+    literal = no_cells_sb(literal_series_model, NO_CELLS)
+    check_series_prior(BRM.stan_instantiate(literal;
+        path=joinpath(STAN_DIR, "no-cells-literal.stan")))
+    @test isequal(NO_CELLS, saved)
+end
+
+@stestset "a plate's program does not depend on having cells" begin
+    for model in (series_model, literal_series_model)
+        empty = no_cells_sb(model, NO_CELLS)
+        direct = no_cells_sb(model, TWO_SERIES)
+        @test BRM.stan_code(empty) == BRM.stan_code(direct)
+
+        emptied = reprocess(direct, NO_CELLS)
+        @test BRM.stan_code(emptied) == BRM.stan_code(direct)
+        @test stan_data(emptied) == stan_data(empty)
+
+        filled = reprocess(empty, TWO_SERIES)
+        @test BRM.stan_code(filled) == BRM.stan_code(direct)
+        @test stan_data(filled) == stan_data(direct)
+    end
+    # The replayed programs evaluate like the ones built on their own data.
+    direct = no_cells_sb(series_model, TWO_SERIES)
+    check_series_prior(BRM.stan_instantiate(reprocess(direct, NO_CELLS);
+        path=joinpath(STAN_DIR, "no-cells-emptied.stan")))
+    filled = BRM.stan_instantiate(reprocess(no_cells_sb(series_model, NO_CELLS), TWO_SERIES);
+        path=joinpath(STAN_DIR, "no-cells-filled.stan"))
+    built = BRM.stan_instantiate(direct; path=joinpath(STAN_DIR, "two-series.stan"))
+    for q in points(4)
+        value = BridgeStan.log_density(built.model, q; propto=false)
+        @test isfinite(value)
+        @test BridgeStan.log_density(filled.model, q; propto=false) ≈ value atol=1e-12
+    end
+end
+
+@stestset "cells named by an empty label column are no cells on Stan" begin
+    sb = no_cells_sb(labelled_cells_model, NO_CELLS)
+    @test BRM.stan_code(sb) == BRM.stan_code(no_cells_sb(labelled_cells_model, TWO_SERIES))
+    stan = BRM.stan_instantiate(sb; path=joinpath(STAN_DIR, "no-labelled-cells.stan"))
+    @test BridgeStan.param_unc_names(stan.model) == ["level"]
+    for q in ([0.0], [0.7], [-1.3])
+        value, gradient = BridgeStan.log_density_gradient(stan.model, q; propto=false)
+        @test value ≈ logpdf(Normal(0.0, 2.0), only(q)) atol=1e-12
+        @test gradient ≈ [-only(q) / 4] atol=1e-10
+    end
+end
+
+@stestset "a plate with no cells is its priors on RK" begin
+    for model in (series_model, literal_series_model)
+        backend, problem = consumer_problem(model(NO_CELLS))
+        check_series_prior(coordinate_names(backend.model.layout),
+            q -> LogDensityProblems.logdensity_and_gradient(problem, q))
+    end
+    backend, problem = consumer_problem(labelled_cells_model(NO_CELLS))
+    @test coordinate_names(backend.model.layout) == [:level]
+    for q in ([0.0], [0.7], [-1.3])
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, q)
+        @test value ≈ logpdf(Normal(0.0, 2.0), only(q)) atol=1e-12
+        @test gradient ≈ [-only(q) / 4] atol=1e-10
+    end
+end
+
+@stestset "a random effect with no levels keeps its priors on both backends" begin
+    sb = SBBRMI(ranef_cells_model(NO_CELLS); mod=@__MODULE__, total_groups=())
+    direct = SBBRMI(ranef_cells_model(TWO_SERIES); mod=@__MODULE__, total_groups=())
+    @test BRM.stan_code(sb) == BRM.stan_code(direct)
+    # A replay keeps the fitted levels' coordinates, unobserved.
+    @test BRM.stan_code(reprocess(direct, NO_CELLS)) == BRM.stan_code(direct)
+    stan = BRM.stan_instantiate(sb; path=joinpath(STAN_DIR, "no-levels.stan"))
+    stan_names = BridgeStan.param_unc_names(stan.model)
+    @test sort(stan_names) == ["b_p_cell_tau.1", "pop_log_rate_beta_pop.1", "sigma"]
+
+    # The same three priors on RK, under its own coordinate names.
+    backend, problem = consumer_problem(ranef_cells_model(NO_CELLS))
+    rk_names = coordinate_names(backend.model.layout)
+    @test sort(string.(rk_names)) == ["b_p_cell.tau.1", "log_rate_Intercept", "sigma"]
+    to_stan = Dict("b_p_cell.tau.1" => "b_p_cell_tau.1",
+        "log_rate_Intercept" => "pop_log_rate_beta_pop.1", "sigma" => "sigma")
+    order = [coordinate(stan_names, to_stan[string(n)]) for n in rk_names]
+    for q in points(3)
+        value, gradient = LogDensityProblems.logdensity_and_gradient(problem, q)
+        stan_q = zero(q)
+        stan_q[order] = q
+        stan_value, stan_gradient = BridgeStan.log_density_gradient(stan.model, stan_q;
+            propto=false)
+        @test isfinite(value)
+        @test value ≈ stan_value atol=1e-10
+        @test gradient ≈ stan_gradient[order] atol=1e-8
     end
 end
 

@@ -1,5 +1,18 @@
 # Running the tests
 
+`rk_data_law_arguments.jl` checks RKBRMI formula responses whose law reads
+data: a scalar data field, a `constant(...)` value, a plain alias and a per-row
+column as a Normal scale, a censored Normal, a Student-t scale, a LogNormal scale
+and a model-scope `gmrf` readout. It compares an independent likelihood oracle and
+compiled Stan (value and native Reverse gradient, through the coordinate
+transport), replays the printed source, checks that another value emits the same
+program, that binding refuses an invalid value, and frozen `reprocess` of a
+scalar field and of a constant. The further arguments of the other response
+families are checked against the oracle and finite differences. A per-row `zi`
+or Student-t `nu` outside its support is checked as a refusal on
+ReactiveKernelsPPL 0.1.105 or later and as a `-Inf` density before it. It accepts
+testset substring filters.
+
 `rk_value_weighted_observations.jl` checks formula-level `fweights` and
 `weights` on RKBRMI responses whose law reads an assigned value: a Julia
 reader's probability under `weighted(Bernoulli(p), fweights(n))` against
@@ -935,7 +948,11 @@ cell expression or a collected output) each give every cell an empty slice. Each
 RK density and gradient equal a twin that never reads the empty axis.
 `reprocess` moves the same Stan program onto data with rows and back,
 recomputing the row count of a declared axis that sizes an intercept-only
-predictor, and a missing group label is still refused.
+predictor, and a missing group label is still refused. It also checks a plate
+with no cells at all, over `groups(g)` or `groups(g => cells)` with an empty
+column: each backend's density and gradient equal an independent formula for the
+priors, with the prior scale from data or written as a literal, and SBBRMI emits
+the same program as with rows and replays between the two in both directions.
 
 `hsgp_empty_axis_gather.jl` checks an HSGP with an explicit `domain=` (and a
 periodic one) over an axis with no rows, gathered per subject through
@@ -1329,7 +1346,8 @@ worker memory against `threads`.
 take their own evaluators from the model's pool. On flat, plate and nested
 models, the protocol's one-unit values, η gradients and population gradients,
 called from every thread in shuffled order, equal serial calls to the last bit,
-and the pool prepares more than one evaluator. `check_protocol(...; threads =
+and the pool prepares more than one evaluator, and at most one per Julia thread
+even when tasks holding one yield. `check_protocol(...; threads =
 true)` passes on a nested model. A seeded `WarmupHMCNUTS(threads = true)` SAEM fit
 of a 24-subject plate PK model gives the same bits in child processes with 1, 4
 and N threads (`BRM_NLME_THREADS_N`, default 8). Over six seeds its estimates
@@ -1337,8 +1355,8 @@ agree with lockstep fits (`threads = false`) within twice the lockstep fits'
 spread, and both recover the simulated population values. Run it in the
 NLMEEstimation scratch environment below (NLMEEstimation 0.2.5 or later) with
 `--threads=4`; it refuses to run without threads.
-`research/nlme_threads/benchmark.jl` measures a round of one-unit calls and SAEM
-fits at the thread count it is started with.
+`research/nlme_threads/benchmark.jl` measures a round of one-unit calls and paired
+SAEM fits of both routes at the thread count it is started with.
 
 `nlme_svi_laplace_plan.jl` checks structural eligibility for
 `GaussianBlockLaplace`, including fixed HSGP fitting inputs, nonstandard
@@ -1429,10 +1447,12 @@ gradient against a central difference of the returned value.
 `gmrf_vecchia.jl` checks the footprint representation's numerical core without a
 backend: the exact Gaussian on a fully read grid with irregular gaps, the exact
 time factor on synchronized reads at any neighbour count, separable channels, shared solves, gap
-linkage, reverse derivatives against finite differences and refusals.
+linkage, reverse derivatives against finite differences, the same footprint under
+any row order on a tied lattice, and refusals.
 `gmrf_vecchia_rk.jl` checks the term on RKBRMI: density and native reverse rule,
 sampled channel factor, state plates under `locality = :error`, a strict
-partition, replay from a fitted state and refusals. `gmrf_vecchia_stan.jl` checks
+partition, replay from a fitted state, the same coordinates and density under
+another row order, and refusals. `gmrf_vecchia_stan.jl` checks
 valid Stan, the shared helper, RK/Stan parity through coordinate transport, replay
 and descriptions.
 
@@ -1506,7 +1526,9 @@ curvature edges and bounds allocations when observations repeat a support.
 Its dense-point testset checks that a one-unit η gradient (RK's local-only
 `shared=false` route) equals the η entries of the full gradient, that the
 query and plan work points equal the unit point after every call, and that one
-unit's allocations do not grow with the number of units (3 against 300).
+unit's allocations do not grow with the number of units (3 against 300). A
+one-unit gradient allocates within 1 KB of RK's own call, so it does not copy
+the model to the heap.
 `nlme_units_panel.jl` covers nested
 partition likelihoods, gradients, cell-based Hessian sparsity and allocation
 scaling. The `nlme_svi.jl` filters `minibatch split` and
@@ -1609,6 +1631,18 @@ refused; and a single `predictor => w` pair works:
 
 ```sh
 julia --project=test test/s2z_per_predictor_rho.jl
+```
+
+## Exact totals and sum-to-zero priors that read data
+
+`integrated_prior_data_fields.jl` builds each exact-total and sum-to-zero model
+twice, its population priors as numbers and as data fields, and checks one source
+across the values and equal blocks, coordinates, log density, gradient and
+generated quantities against the literal twin, the refusals of what cannot be
+integrated, and replay, rebuild and transport of the fitted prior:
+
+```sh
+julia --project=test test/integrated_prior_data_fields.jl
 ```
 
 ## Exact totals beside offsets
@@ -2421,8 +2455,10 @@ Use `test/setup_env.jl` as the single bootstrap entry:
 julia --project=test test/setup_env.jl
 ```
 
-The script materializes every external dependency under the ignored
-`test/.bootstrap/` directory at an exact full-SHA revision. ReactiveKernels
+The script materializes every external dependency at an exact full-SHA revision
+in this host's package store,
+`~/.local/share/BayesianRegressionModels/package-sets/<pkg>-<sha12>`
+(`BRM_TEST_PACKAGE_STORE` overrides the directory). ReactiveKernels
 contributes its monorepo root **and** the nested
 `ReactiveKernelsDistributionKernels` and `ReactiveKernelsPPL` packages from
 that same checkout; those nested packages have no standalone repositories. All
@@ -2436,6 +2472,30 @@ When that mirror contains the exact revision, materialization uses it without
 contacting GitHub. An absent mirror or missing revision falls back to the pin's
 public origin. Mirror paths are derived from the pin list, so adding a dependency
 needs no separate mirror entry. Existing exact cached checkouts are reused.
+
+The store sits outside the checkout because Julia rejects a compiled image built
+from another source path. With a dependency at one stable path, a fresh worktree
+or job on the same pins reuses the images of those pins and their dependents, and
+rebuilds only BRM and its extensions, whose source really is that checkout's. Four
+things follow from sharing it across every run on a host:
+
+- **A checkout is read-only and never rewritten.** A fresh mtime rejects an image
+  even over identical bytes, and an edit would reach every run on the host. To
+  try a change to a pinned package, develop your own checkout of it instead.
+- **Each checkout holds one commit.** Its `.git` answers `git rev-parse HEAD`, and
+  it has no history to ask about. Read history from the mirror or the package's
+  own repository.
+- **Two runs may materialize one pin at once.** Each builds its own scratch
+  directory and renames it into place, and the later run validates the earlier
+  run's checkout and discards its own.
+- **An unused checkout is evicted.** Setup removes checkouts it has not used for 14
+  days, recorded in the store's `.last-used/`, and anything a killed run left
+  after a day. It touches no other name. If a test run says a package at a store
+  path is missing, its checkout was evicted: re-run `setup_env.jl`.
+
+A `test/.bootstrap/` left in an existing worktree is no longer read, and is safe
+to delete once that worktree has re-run `setup_env.jl`.
+
 The offline regression checks use small local Git repositories:
 
 ```sh
