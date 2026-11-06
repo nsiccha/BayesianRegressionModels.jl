@@ -201,6 +201,7 @@ const _BRM_SVI_RESUME_MODEL_OPTIONS = (:ad_backend, :shared_point, :subject_grou
 """
     brm_svi_resume([save,] x, checkpoint; stop_after=nothing,
         checkpoint_every=nothing, ndraws=1000, progress=nothing,
+        snapshot=nothing, snapshot_every=nothing, snapshot_draws=0,
         threads=nothing, ad_backend=nothing, shared_point=nothing,
         subject_group=nothing, nested_groups=NamedTuple(), shared_groups=())
         -> (; draws, coordinates, diagnostics)
@@ -224,9 +225,14 @@ the `@brm` model ([`BRMI`](@ref)), its [`RKBRMI`](@ref) or a prepared
 `previous`. The emitted program and callables, the bound data and frozen
 preprocessing, the packed coordinates, the groupings, the subjects and their
 coordinates, and the fixed shared values must equal the checkpoint's; a
-difference is refused before any optimization step.
+difference is refused before any optimization step. In the same process, pass
+`fit.diagnostics.model` (or the `BRMNLMEModel` the fit was given): it prepares
+neither the model nor its target and worker samplers again
+(`diagnostics.target.reused`, [`brm_svi_fit`](@ref)), whereas a `BRMI` or `RKBRMI`
+prepares both on every call.
 
-`save`, `stop_after`, `checkpoint_every`, `ndraws` and `progress` work as in
+`save`, `stop_after`, `checkpoint_every`, `ndraws`, `progress`, `snapshot`,
+`snapshot_every` and `snapshot_draws` work as in
 [`brm_svi_fit`](@ref); `save` again receives copies of the state. The result
 has the fit's shape: its diagnostics cover the whole run (`elbo`, `iterations`,
 `unit_gradient_calls`), except `seconds`, which counts this call. A cooperative
@@ -252,7 +258,8 @@ brm_svi_resume(save::Function, x, checkpoint; kwargs...) =
     _brm_svi_resume(save, x, checkpoint; kwargs...)
 
 function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
-        checkpoint_every=nothing, progress=nothing, threads=nothing, kwargs...)
+        checkpoint_every=nothing, progress=nothing, threads=nothing, snapshot=nothing,
+        snapshot_every=nothing, snapshot_draws=0, kwargs...)
     unknown = setdiff(keys(kwargs), _BRM_SVI_RESUME_MODEL_OPTIONS)
     isempty(unknown) || throw(ArgumentError("brm_svi_resume: unsupported options " *
         join(string.(unknown), ", ") * "; the checkpoint fixes the optimizer controls, " *
@@ -267,7 +274,8 @@ function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
     if state.previous !== nothing
         x, options = _brm_svi_window_input(state.previous, x, options; caller="brm_svi_resume")
     end
-    call = (; caller="brm_svi_resume", ndraws, stop_after, checkpoint_every, progress)
+    call = (; caller="brm_svi_resume", ndraws, stop_after, checkpoint_every, progress,
+        snapshot, snapshot_every, snapshot_draws)
     if state.run isa _BRMSVILaplaceRun
         threads === nothing || throw(ArgumentError(
             "GaussianBlockLaplace: whole-window fixed-budget optimization does not use " *

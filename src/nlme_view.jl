@@ -2105,6 +2105,20 @@ supported by RK's `:observations` preset, `observed` holds subject observation
 vectors in the same order as the prepared query. `observations_pushforward`
 uses one colored direction per random-effect margin across all subjects.
 """
+# What SVI prepared on a model, kept for the model's next fit or continuation in
+# this process (`_brm_svi_checkout!`, src/nlme_svi.jl). It is workspace, not part
+# of the model's value, so a copy or a serialized model starts with an empty slot.
+mutable struct _BRMSVITargetSlot
+    prepared::Any
+    lock::ReentrantLock
+    _BRMSVITargetSlot() = new(nothing, ReentrantLock())
+end
+Base.deepcopy_internal(::_BRMSVITargetSlot, ::IdDict) = _BRMSVITargetSlot()
+Serialization.serialize(s::Serialization.AbstractSerializer, ::_BRMSVITargetSlot) =
+    Serialization.serialize_type(s, _BRMSVITargetSlot)
+Serialization.deserialize(::Serialization.AbstractSerializer, ::Type{_BRMSVITargetSlot}) =
+    _BRMSVITargetSlot()
+
 struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J,C,G,P}
     view::BRMNLMEView
     backend::B
@@ -2130,6 +2144,7 @@ struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J,C,G,P}
     # The sparse Laplace problems of the integrated families, one per set of
     # families, built by the NLMEEstimation extension on first use.
     laplace::Dict{Vector{Int},Any}
+    svi_target::_BRMSVITargetSlot
 end
 
 Base.show(io::IO, m::BRMNLMEModel) = print(io, "BRMNLMEModel(",
@@ -2316,7 +2331,7 @@ function _brm_nlme_model(backend::RKBRMI, node; ad_backend, observation_ad_backe
             theta, sigma,
             eta_blocks, unit, observations_query, observations_pushforward,
             observed, observation_attribution, cell_query, cell_gradient,
-            population_prior, Ref{Any}(nothing), Dict{Vector{Int},Any}())
+            population_prior, Ref{Any}(nothing), Dict{Vector{Int},Any}(), _BRMSVITargetSlot())
     end
 end
 
