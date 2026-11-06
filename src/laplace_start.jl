@@ -50,6 +50,9 @@ reason. `integrate = (:g, …)` runs Pathfinder over the sparse Laplace of
 those groupings instead (`brm_laplace_problem`'s `integrate`: crossed or
 nested groupings, `cdar` walks, `car` fields), which needs no units, and
 draws the integrated effects jointly through its factor.
+
+An unconditioned program (every response omitted) has zero sampled
+coordinates, so each of its starts is the empty point.
 """
 function brm_start(rk::RKBRMI; chains::Union{Nothing,Integer}=nothing,
         rng::AbstractRNG=Random.default_rng(), ad_backend=nothing,
@@ -84,6 +87,8 @@ _brm_start_result(U::AbstractMatrix, ::Integer) = [U[:, k] for k in axes(U, 2)]
 # `n` complete RK packed points (coordinates × n).
 function _brm_laplace_start_draws(rk::RKBRMI, n; rng, ad_backend, subject_group,
         nested_groups, shared_groups, integrate=nothing)
+    # An unconditioned program samples nothing: every start is the empty point.
+    rk.plan isa _RKUnconditionedPlan && return zeros(Float64, 0, n)
     ad = ad_backend === nothing ? _brm_rk_default_ad("brm_start", rk) : ad_backend
     p = try
         integrate === nothing ?

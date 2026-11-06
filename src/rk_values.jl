@@ -474,6 +474,18 @@ _rk_ast_replace_floor_marker(value::Expr, floor) =
     Expr(value.head, (_rk_ast_replace_floor_marker(a, floor) for a in value.args)...)
 _rk_ast_replace_floor_marker(value, _floor) = value
 
+# An ungrouped HSGP samples one length scale, `rho_iso`, when it is isotropic,
+# periodic or has a single axis, and otherwise one scalar `rho_j` per axis
+# (`_rk_ast_hsgp_component!`). Its `rho` vector only assembles those scalars,
+# so a start or transport addresses these carriers, never `rho`.
+_rk_hsgp_length_axes(term) = get(term.options, :cov, :exp_quad) === :periodic ||
+    term.options.iso ? 1 : length(term.columns)
+
+function _rk_hsgp_length_carriers(term)
+    axes = _rk_hsgp_length_axes(term)
+    axes == 1 ? :rho_iso : Tuple(Symbol(:rho_, j) for j in 1:axes)
+end
+
 # The term's statements, and the sampled block locals of a grouped or
 # hyper-predicted term (`_rk_ast_hsgp_grouped`; `nothing` for an ungrouped one).
 function _rk_ast_value_hsgp(definitions, term, taken, bindings)
@@ -531,7 +543,7 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         push!(stmts, Expr(:call, :~, options.id, call))
         return stmts, locals
     end
-    axes = periodic || options.iso ? 1 : length(term.columns)
+    axes = _rk_hsgp_length_axes(term)
     rho_priors = [_rk_ast_hsgp_rho_prior(options, floors, axes == 1 ? nothing : j,
         bindings, taken) for j in 1:axes]
     sigma_prior = _rk_ast_positive_prior(options.sigma_prior, bindings, taken)

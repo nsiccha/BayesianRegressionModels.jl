@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.205
+## 0.2.208
 
 - Added: sizes and numeric settings are data. `gmrf(...; neighbors = nb)`,
   `gmrf(...; multiresolution = m)` and `hsgp(...; k = kk, c = cc)` (and
@@ -39,6 +39,52 @@ instead of failing at run time.
   fresh replay (`freeze_constants=false`) on RKBRMI and of an SBBRMI `gmrf`.
   An SBBRMI `hsgp` replay refuses in either mode; its new build compiles the
   same Stan program.
+
+## 0.2.207
+
+- Fixed: a data column whose element type is erased (`Any[...]`, as an empty
+  comprehension over a DataFrame column or `push!` onto `[]` produces) now
+  holds its entries' common type when the model is built, so it is read
+  exactly as the same values written typed: `Any[[0.5, -0.2], [1.3]]` is a
+  per-cell vector response like `[[0.5, -0.2], [1.3]]`, and `Any[0.3, -0.1]`
+  a scalar response like `[0.3, -0.1]`. The entries are not converted and the
+  caller's column is not replaced.
+- Fixed: on RKBRMI, an in-cell observation `y[i] ~ law(...)` in
+  `@plate for i in eachindex(y)` over an empty `y = Any[]` is bound as an
+  empty column of the arrays its law observes per cell (a matrix per cell
+  for a matrix-variate law, otherwise a vector; `Int` for a discrete law,
+  otherwise `Float64`), as `Vector{Float64}[]` would be. It observes zero
+  cells, contributes zero likelihood, keeps the priors and differentiates
+  under native Reverse. It previously became one whole-vector event and
+  failed when queries were prepared (`zero(::Type{Any})`). Other empty
+  columns a cell reads have no law to type them: their queries evaluate,
+  but native reverse AD needs them constructed with a concrete element type.
+
+## 0.2.206
+
+- Fixed: `brm_start` on RKBRMI writes an ungrouped anisotropic
+  `hsgp(...; iso=false)` length scale, as `fitting.md` documents, through
+  `term_inits` and `base=:prior_median`. A scalar broadcasts over the axes; a
+  vector holds one value per axis, in formula order. Before, both raised
+  `type NamedTuple has no field rho`.
+- Fixed: an ungrouped one-axis `hsgp(x; iso=false)` on RKBRMI. Its `brm_start`
+  raised the same error, and `brm_coordinate_transport` refused it because the
+  emission samples `rho_iso` while the record named `rho_1`.
+
+## 0.2.205
+
+- Fixed: `brm_start` on an unconditioned `RKBRMI` (every response omitted,
+  the prior spelling) died in a `MethodError` from an internal coordinate
+  lookup. Such a program has zero sampled coordinates, so
+  `brm_start(rk, (;))`, `base=:prior_median` and the start from the data
+  `brm_start(rk)` (`chains = n` too) now return the empty point, and
+  `brm_start(sb, model)` the empty Stan point. An initial value
+  (`brm_start(rk, (; z=...))`, `term_inits`, `component_inits`) is refused by
+  name on both backends, since every declaration is drawn in generated
+  quantities; before, SBBRMI refused a population coefficient with an
+  unrelated descriptor error. `brm_coordinate_transport` pairs the two empty
+  layouts instead of refusing the unconditioned plan, and reads BridgeStan's
+  `[""]`, its name list for a model without parameters, as no names.
 
 ## 0.2.204
 
