@@ -184,6 +184,43 @@ end
     @test all(label -> haskey(next.units, label), labels)
 end
 
+# The same rows with a response that reads the plate's vectors whole, not by index.
+# Units with no such rows must still read none of the sensors' effects.
+whole_read_model(data) = @brm data begin
+    noise ~ Exponential(1)
+    field[1:nfield] .~ Normal(0, 1)
+    gain_mean ~ Normal(0, 0.5)
+    gain_sd ~ Exponential(0.2)
+    scale_mean ~ Normal(-1, 0.5)
+    scale_sd ~ Exponential(0.2)
+    gain_z[1:nsensor] .~ Normal(0, 1)
+    scale_z[1:nsensor] .~ Normal(0, 1)
+    log_gain = gain_mean + gain_sd * gain_z
+    log_scale = scale_mean + scale_sd * scale_z
+    row_gain = exp(log_gain[row_sensor])
+    row_scale = exp(log_scale[row_sensor])
+    level ~ 1 + (1 | effect | site)
+    slope ~ 1 + (1 | effect | site)
+    @plate for g in eachindex(level)
+        site_y[g] ~ Normal(level[g] .+ slope[g] .* site_x[g] .+ site_phi[g] * field, noise)
+    end
+    @plate for i in eachindex(row_state)
+        row_mean[i] = row_gain[i] * sum(row_weight[i] .* field[row_state[i]])
+    end
+    row_y ~ Normal(row_mean, row_scale)
+end
+
+@stestset "a response reading a plate's vectors whole separates its sensors too" begin
+    data = cell_toy_data(Xoshiro(13); nsite=3, nsensor=4, nfield=6, nread=2,
+        site_rows=[3, 6], sensor_rows=6)
+    m = brm_nlme_model(RKBRMI(whole_read_model(data)); ad_backend=NLME_AD,
+        subject_group=:site, unit_partition=:connected)
+    t = BRM._brm_svi_target(m; separator=:none, global_coordinates=cell_toy_globals(m))
+    @test length(t.units) == 3 + 4
+    @test all(==(2), length.(t.units[4:end]))
+    check_cell_unit_density(t)
+end
+
 @stestset "`work` counts the rows of a vector-valued cell" begin
     (; data, m, globals) = toy_model(; nsite=4, site_rows=[3, 30])
     t = BRM._brm_svi_target(m; separator=:none, global_coordinates=globals)

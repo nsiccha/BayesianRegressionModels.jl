@@ -394,6 +394,11 @@ function _brm_svi_window_input(state, x, options; caller)
             "$caller: model source changed"))
         x = RKBRMI(x, state.preprocessing; resample_groups=(state.group, state.nested...))
     end
+    # Before the carried options apply: they are meaningless on another partition.
+    partition = x isa BRMNLMEModel ? x.view.unit_partition :
+        something(get(options, :unit_partition, nothing), state.unit_partition)
+    partition === state.unit_partition || throw(ArgumentError(
+        "$caller: unit_partition changed since the checkpoint"))
     defaults = hasproperty(state, :layout) && hasproperty(state.layout, :options) ?
         merge((; cell_units=:first_unit), state.layout.options) : NamedTuple()
     x, x isa BRMNLMEModel ? merge(defaults, options) :
