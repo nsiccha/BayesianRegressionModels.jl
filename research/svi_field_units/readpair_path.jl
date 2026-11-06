@@ -53,7 +53,8 @@ function main(sites, rows, iterations)
     data, truth = site_data(sites, rows)
     rk = step(() -> RKBRMI(site_model(data)), "lower to RK")
     m = step("brm_nlme_model") do
-        brm_nlme_model(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), subject_group=:site)
+        brm_nlme_model(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), subject_group=:site,
+            unit_partition=:connected)
     end
     names = String.(m.view.coordinates)
     states = findall(n -> occursin(".field.", n), names)
