@@ -1885,6 +1885,18 @@ function _brm_nlme_evaluator_plan!(m, evaluator::_BRMNLMEEvaluator)
         _brm_nlme_worker_plan(plan, m.cell_gradient, m.unit)
 end
 
+# Evaluate a unit on an evaluator's plan. A plan's type is settled by its first
+# gradient, so the evaluator holds it untyped: this is the one dynamic call a
+# one-unit gradient makes on it, and everything inside it is compiled for the plan.
+function _brm_nlme_on_plan!(evaluate!, gradient, plan, m, i, θ, σ, η)
+    _brm_nlme_write_unit!(plan.point, m, i, θ, σ, η)
+    try
+        evaluate!(gradient, plan, i)
+    finally
+        _brm_nlme_restore_unit!(plan.point, m, i)
+    end
+end
+
 function _brm_nlme_partition_queries(backend, cells, view, unit, partitioned, progress=nothing)
     _brm_with_phases(progress, (context="Bind partition keys",
             query="Prepare partition kernel", footprints="Check coordinate ownership")) do phases
@@ -1949,9 +1961,9 @@ function _brm_nlme_write!(point, positions, values)
 end
 _brm_nlme_unit_positions(m, i) = (m.theta, m.sigma, m.view.subject_coordinates[i])
 function _brm_nlme_write_unit!(point, m, i, θ, σ, η)
-    for (positions, values) in zip(_brm_nlme_unit_positions(m, i), (θ, σ, η))
-        _brm_nlme_write!(point, positions, values)
-    end
+    _brm_nlme_write!(point, m.theta, θ)
+    _brm_nlme_write!(point, m.sigma, σ)
+    _brm_nlme_write!(point, m.view.subject_coordinates[i], η)
     point
 end
 function _brm_nlme_restore_unit!(point, m, i)
@@ -2111,31 +2123,34 @@ supported by RK's `:observations` preset, `observed` holds subject observation
 vectors in the same order as the prepared query. `observations_pushforward`
 uses one colored direction per random-effect margin across all subjects.
 """
-struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J,C,G,P}
-    view::BRMNLMEView
-    backend::B
-    sampler::S
-    pointwise::Q
-    eta_hvp::V
-    attribution::Vector{Pair{Symbol,Vector{Int}}}
-    theta::Vector{Int}
-    sigma::Vector{Int}
-    eta_blocks::Vector{Int}
-    unit::Vector{Float64}
-    observations_query::O
-    observations_pushforward::J
-    observed::Vector{Vector{Float64}}
-    observation_attribution::Vector{Pair{Symbol,Vector{Int}}}
-    cell_query::C
-    cell_gradient::G
-    population_prior::P
+# A heap object whose fields never change, not an immutable struct: it holds its
+# prepared fields inline, so each dynamic call that passed an immutable one copied
+# the whole model to the heap (8.5 KB on an 80-subject PK model).
+mutable struct BRMNLMEModel{B<:RKBRMI,S,Q,V,O,J,C,G,P}
+    const view::BRMNLMEView
+    const backend::B
+    const sampler::S
+    const pointwise::Q
+    const eta_hvp::V
+    const attribution::Vector{Pair{Symbol,Vector{Int}}}
+    const theta::Vector{Int}
+    const sigma::Vector{Int}
+    const eta_blocks::Vector{Int}
+    const unit::Vector{Float64}
+    const observations_query::O
+    const observations_pushforward::J
+    const observed::Vector{Vector{Float64}}
+    const observation_attribution::Vector{Pair{Symbol,Vector{Int}}}
+    const cell_query::C
+    const cell_gradient::G
+    const population_prior::P
     # The population prior's coordinate structure (which packed coordinates
     # hold each covariance block's scales and correlation factor), built by
     # the NLMEEstimation extension on the first prior evaluation.
-    prior_structure::Base.RefValue{Any}
+    const prior_structure::Base.RefValue{Any}
     # The sparse Laplace problems of the integrated families, one per set of
     # families, built by the NLMEEstimation extension on first use.
-    laplace::Dict{Vector{Int},Any}
+    const laplace::Dict{Vector{Int},Any}
 end
 
 Base.show(io::IO, m::BRMNLMEModel) = print(io, "BRMNLMEModel(",
@@ -2475,13 +2490,8 @@ function _brm_nlme_cell_value_and_selected_gradient(m::BRMNLMEModel, i::Integer,
     indices = _brm_nlme_cell_state(m).plan.indices[i]
     selected_gradient = zeros(length(indices))
     value = _brm_nlme_with_evaluator(m) do evaluator
-        plan = _brm_nlme_evaluator_plan!(m, evaluator)
-        _brm_nlme_write_unit!(plan.point, m, i, θ, σ, η)
-        try
-            _brm_nlme_partition_evaluate!(selected_gradient, plan, i)
-        finally
-            _brm_nlme_restore_unit!(plan.point, m, i)
-        end
+        _brm_nlme_on_plan!(_brm_nlme_partition_evaluate!, selected_gradient,
+            _brm_nlme_evaluator_plan!(m, evaluator), m, i, θ, σ, η)
     end
     value, copy(indices), selected_gradient, block
 end
@@ -2510,13 +2520,8 @@ function brm_nlme_loglikelihood_and_gradient(m::BRMNLMEModel, i::Integer, θ, σ
     block = _brm_nlme_check_unit(m, i, θ, σ, η)
     gradient = zeros(length(block))
     value = _brm_nlme_with_evaluator(m) do evaluator
-        plan = _brm_nlme_evaluator_plan!(m, evaluator)
-        _brm_nlme_write_unit!(plan.point, m, i, θ, σ, η)
-        try
-            _brm_nlme_partition_eta!(gradient, plan, i)
-        finally
-            _brm_nlme_restore_unit!(plan.point, m, i)
-        end
+        _brm_nlme_on_plan!(_brm_nlme_partition_eta!, gradient,
+            _brm_nlme_evaluator_plan!(m, evaluator), m, i, θ, σ, η)
     end
     value, gradient
 end
