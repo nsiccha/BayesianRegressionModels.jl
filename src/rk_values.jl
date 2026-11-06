@@ -930,6 +930,26 @@ _rk_threshold_vector(name::Symbol, ::Type{_BRMThresholdPrior{true}}, n::Int) =
 _rk_threshold_vector(name::Symbol, ::Type{_BRMThresholdPrior{false}}, n::Int) =
     _RKVectorParameter(name, :vector_normal, (0.0, 1.0), n, name)
 
+# `referenced` plus every `=` assignment no response reads whose whole
+# dependency closure is assignments, data and names already in `referenced`
+# (user decision `0kpugvc`: an unread authored value stays a named graph
+# value). Such an assignment adds no parameter, predictor, coordinate or
+# density, and the fitted source keeps it only for a query (`retained` in
+# `_rk_fitted_source`). One that needs a declaration no response reaches stays
+# out, as before: the fitted program has no draw of that declaration.
+function _rk_with_unread_assignments(program, referenced)
+    roles = Dict(op.name => op.role for op in program.operations)
+    data = program.context.data
+    kept = Set{Symbol}(referenced)
+    for op in program.operations
+        op.role === :assignment && !(op.name in kept) || continue
+        closure = _brm_reachable_operations(program, (op.name,))
+        all(name -> name in kept || haskey(data, name) ||
+            get(roles, name, :assignment) === :assignment, closure) && union!(kept, closure)
+    end
+    kept
+end
+
 Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         @nospecialize(program), @nospecialize(observations);
         @nospecialize(kernels=()), @nospecialize(submodels=()),
@@ -982,7 +1002,8 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     # Scalars read only by a random-effect block's scale priors or Student-t
     # law are planned as on the formula route.
     program = _rk_with_ranef_prior_dependencies(brmi, program, roots)
-    referenced = _brm_reachable_operations(program, roots)
+    referenced = _rk_with_unread_assignments(program,
+        _brm_reachable_operations(program, roots))
     prepared = _BRMPreparedModel(program,
         Tuple(p for p in prepared.parameters if p.name in referenced),
         prepared.predictors, prepared.assignments, prepared.observations)

@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.206
+
+- Fixed: on `RKBRMI`, a model-scope `=` assignment that no response reads is
+  now a graph value of its authored name, as user decision `0kpugvc` already
+  documented. `rk_draw_values(rk, U, (:q,))` and `want=(:q,)` answer for
+  `mu ~ 1 + x; q = exp(mu - decay * elapsed); y ~ Normal(mu, 0.4)` instead of
+  raising `KeyError: kernel has no port :q`, on the value route and on the
+  structural route (`sigma ~ Exponential(1); variance = sigma^2`, a literal
+  `two = 2.0`, an alias `scale = sigma`). Coordinates, densities and
+  gradients are unchanged, and the sampler never runs such a value. An
+  assignment that needs a declaration no response reaches (`q = exp(z)` for
+  an unread `z ~ Normal(0, 1)`, or an unread formula predictor) stays out as
+  before. Still out: a data-only assignment no response reads, and a
+  structural-route assignment that reads a data column outside a reduction.
+  A build of such a model emits one more statement, so its program identity
+  (SMC and SVI checkpoint tags) changes.
+
 ## 0.2.205
 
 - Fixed: `brm_start` on an unconditioned `RKBRMI` (every response omitted,
