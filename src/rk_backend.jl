@@ -774,8 +774,8 @@ end
 # Returns `(scale, scale_predictor)` with exactly one side non-nothing: a
 # scalar (parameter/assignment/literal) or a distributional bare-predictor
 # reference. A predictor shadows a same-named data column here, matching
-# the location slot (a data column can never be a scale, so the LP reading
-# is the only useful one).
+# the location slot (a data scale takes the value route,
+# `_rk_data_law_argument`, so the LP reading is the only one left here).
 function _rk_scale_argument(arg, parameters::Set{Symbol},
         assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
         aliases::Dict{Symbol,Symbol}, response::Symbol, what::String,

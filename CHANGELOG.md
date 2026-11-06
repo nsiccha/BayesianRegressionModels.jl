@@ -12,6 +12,27 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.206
+
+- Fixed: on `RKBRMI`, a formula response whose law reads data, such as
+  `y ~ Normal(mu, s)` with `s` a scalar data field, `sd_obs = constant(expr)`
+  or a plain alias `sd_obs = s` as the scale, or a per-row column
+  `y ~ Normal(mu, sv)`, was refused ("scale cannot be a data column", "assignment
+  `sd_obs` aliases data column `s`"). It now builds, and the program reads the
+  value by name as a runtime input: two data sets that differ only in the value
+  emit the same program, and the density follows the bound value. SBBRMI
+  already kept such a value as Stan data. This covers the further arguments of
+  every scalar response law, at top level or inside a law argument, for example
+  a data shape in Gamma's `mu/alpha`. Binomial trials keep their formula
+  spelling, and the cutpoints or category predictors of a leveled response stay
+  refused. An invalid value is refused when the backend is built, naming it
+  (`per-observation scale s must be finite positive numerics`).
+- Changed: scalar-data Student-t degrees of freedom
+  (`LocationScale(mu, s, TDist(nu))` with `nu` from data) are read the same
+  way instead of being emitted as a numeric literal, so one program serves
+  every value. An invalid `nu` is refused when the backend is built
+  (`nu data nu must be finite positive numerics`), not by the planner.
+
 ## 0.2.205
 
 - Fixed: `brm_start` on an unconditioned `RKBRMI` (every response omitted,
