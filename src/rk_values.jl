@@ -652,6 +652,9 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
             # assigned first (`mu = exp(dev) * s`), which this route lowers.
             any(arg -> _rk_computed_argument(program, head, arg, collect(predictors)),
                 getargs(family)) && return true
+            # A law argument read from data is a runtime input of the program.
+            any(((index, arg),) -> _rk_data_law_argument(program, head, index, arg, predictors),
+                enumerate(getargs(family))) && return true
         end
         # A formula response may put a shape before its location (Weibull,
         # Student-t, binomial trials). An assignment in that slot does not
@@ -828,6 +831,39 @@ function _rk_computed_argument(program, head, arg, predictors::Vector{Symbol})
         _brm_prepared_references(_brm_prepare_expr(arg)))
     any(op -> op.name in reachable, program.operations)
 end
+# A response law argument read from data — a scalar data field, a
+# `name = constant(expr)` value, a per-row column or a plain alias of one
+# (`sd_obs = s`), also inside a formula shape spelling such as Gamma's
+# `mu/alpha` — is a runtime input of the program: this route binds it by name
+# from the design (user principle `0ikeidi`: numeric values are never baked
+# into model source). The formula route reads data in a law only as binomial
+# trials; it refuses a data scale or shape, and would otherwise have to fold the
+# value into a literal. A predictor shadows a same-named data column, as in the
+# formula route's slots. The cutpoints and category predictors of a leveled
+# response are not scalar law arguments, and keep the formula route's refusal.
+function _rk_data_law_argument(program, head, index::Integer, arg, predictors)
+    index == 1 && head in (Binomial, BetaBinomial, BetaBinomial2) && return false
+    head in (OrderedLogistic, Ordinal, CategoricalLogit) && return false
+    _rk_reads_data(program, arg, predictors)
+end
+_rk_reads_data(_program, _arg, _predictors) = false
+function _rk_reads_data(program, arg::NamedColumn, predictors)
+    name(arg) in predictors && return false
+    parent(arg) isa DataColumn || _rk_is_data_alias(program, name(arg))
+end
+_rk_reads_data(program, arg::ExprColumn, predictors) =
+    any(a -> _rk_reads_data(program, a, predictors), getargs(arg))
+# An assignment that only renames a data field, directly or through other such
+# assignments. A literal or a computed assignment keeps the route it had.
+function _rk_is_data_alias(program, key::Symbol)
+    index = findfirst(op -> op.name === key, program.operations)
+    role = isnothing(index) ? :extension : program.operations[index].role
+    role === :extension && return haskey(program.context.data, key)
+    role === :assignment || return false
+    target = _brm_prepare_expr(last(getargs(program.operations[index].expression)))
+    target isa _BRMPreparedRef && _rk_is_data_alias(program, target.name)
+end
+
 _rk_formula_shape_argument(_head, _arg, _predictors) = false
 _rk_formula_shape_argument(::Type{<:LocationScale}, arg, _predictors) = getf(arg) === TDist
 _rk_formula_shape_argument(::Type{<:Gamma}, arg, predictors) =
@@ -964,6 +1000,26 @@ _rk_threshold_vector(name::Symbol, ::Type{_BRMThresholdPrior{true}}, n::Int) =
 _rk_threshold_vector(name::Symbol, ::Type{_BRMThresholdPrior{false}}, n::Int) =
     _RKVectorParameter(name, :vector_normal, (0.0, 1.0), n, name)
 
+# `referenced` plus every `=` assignment no response reads whose whole
+# dependency closure is assignments, data and names already in `referenced`
+# (user decision `0kpugvc`: an unread authored value stays a named graph
+# value). Such an assignment adds no parameter, predictor, coordinate or
+# density, and the fitted source keeps it only for a query (`retained` in
+# `_rk_fitted_source`). One that needs a declaration no response reaches stays
+# out, as before: the fitted program has no draw of that declaration.
+function _rk_with_unread_assignments(program, referenced)
+    roles = Dict(op.name => op.role for op in program.operations)
+    data = program.context.data
+    kept = Set{Symbol}(referenced)
+    for op in program.operations
+        op.role === :assignment && !(op.name in kept) || continue
+        closure = _brm_reachable_operations(program, (op.name,))
+        all(name -> name in kept || haskey(data, name) ||
+            get(roles, name, :assignment) === :assignment, closure) && union!(kept, closure)
+    end
+    kept
+end
+
 Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         @nospecialize(program), @nospecialize(observations);
         @nospecialize(kernels=()), @nospecialize(submodels=()),
@@ -1016,7 +1072,8 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     # Scalars read only by a random-effect block's scale priors or Student-t
     # law are planned as on the formula route.
     program = _rk_with_ranef_prior_dependencies(brmi, program, roots)
-    referenced = _brm_reachable_operations(program, roots)
+    referenced = _rk_with_unread_assignments(program,
+        _brm_reachable_operations(program, roots))
     prepared = _BRMPreparedModel(program,
         Tuple(p for p in prepared.parameters if p.name in referenced),
         prepared.predictors, prepared.assignments, prepared.observations)

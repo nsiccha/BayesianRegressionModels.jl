@@ -75,18 +75,19 @@ function Base.show(io::IO, s::BRMSVIOptimizerState)
         c.max_iterations, ", ", phase, window, ")")
 end
 
-_brm_svi_digest(x) = (io = IOBuffer(); serialize(io, x); bytes2hex(sha256(take!(io))))
+const _BRM_SVI_BINDING_TAG = "brm-svi-v1"
 
 # What the run's target and coordinates depend on besides its streaming carry.
 function _brm_svi_identity(t)
     m = t.m
     estimated = Set(vcat(t.globals, reduce(vcat, t.units; init=Int[])))
     fixed = [(m.view.coordinates[i], m.unit[i]) for i in eachindex(m.unit) if !(i in estimated)]
-    (; binding=_brm_rk_binding_identity(m.backend, "brm-svi-v1"),
+    (; binding=_brm_rk_binding_identity(m.backend, _BRM_SVI_BINDING_TAG),
+       binding_parts=_brm_rk_binding_parts(m.backend),
        grouping=(; group=m.view.group, nested=Tuple(keys(m.view.nested_groups)),
            shared=Tuple(m.view.shared_groups), unit_partition=m.view.unit_partition),
-       ownership=_brm_svi_digest((m.view.levels, t.globals, t.units)),
-       fixed=_brm_svi_digest(fixed),
+       ownership=_brm_value_digest((m.view.levels, t.globals, t.units)),
+       fixed=_brm_value_digest(fixed),
        global_coordinates=hasproperty(t, :ownership) ?
            copy(m.view.coordinates[t.ownership.promoted]) : Symbol[])
 end
@@ -126,18 +127,36 @@ brm_svi_checkpoint(::BRMSVIOptimizerState) = throw(ArgumentError(
     "brm_svi_resume(model, state); a new window takes brm_svi_checkpoint of a fit result"))
 
 const _BRM_SVI_IDENTITY_PARTS = (
-    binding="the model's emitted program, its callables, its bound data or frozen " *
-        "preprocessing, or its packed coordinates",
     grouping="the subject, nested or shared groupings",
     ownership="the subjects or the coordinates each subject owns",
     fixed="the values of the fixed shared coordinates")
 
+_brm_svi_identity_refusal(description) = ArgumentError(
+    "brm_svi_resume: the model differs from the checkpoint's in $description; " *
+    "resume needs the same model, data and preparation options")
+
 function _brm_svi_check_identity(current, saved)
     for (part, description) in pairs(_BRM_SVI_IDENTITY_PARTS)
-        isequal(current[part], saved[part]) || throw(ArgumentError(
-            "brm_svi_resume: the model differs from the checkpoint's in $description; " *
-            "resume needs the same model, data and preparation options"))
+        isequal(current[part], saved[part]) || throw(_brm_svi_identity_refusal(description))
     end
+end
+
+_brm_svi_backend(x::RKBRMI) = x
+_brm_svi_backend(m::BRMNLMEModel) = m.backend
+
+# Reads only the lowered backend, so a different model is refused before its
+# preparation. A checkpoint older than `binding_parts` holds only the combined
+# digest, for a generated callable the one of its generated name.
+function _brm_svi_check_binding(rk, saved)
+    if hasproperty(saved, :binding_parts)
+        differences = _brm_rk_binding_differences(_brm_rk_binding_parts(rk), saved.binding_parts)
+        isempty(differences) || throw(_brm_svi_identity_refusal(join(differences, ", ")))
+    elseif !any(stable -> _brm_rk_binding_identity(rk, _BRM_SVI_BINDING_TAG; stable) == saved.binding,
+            (true, false))
+        throw(_brm_svi_identity_refusal("the model's emitted program, its callables, its bound " *
+            "data or frozen preprocessing, or its packed coordinates"))
+    end
+    nothing
 end
 
 function _brm_svi_check_run(t, s)
@@ -224,7 +243,13 @@ the `@brm` model ([`BRMI`](@ref)), its [`RKBRMI`](@ref) or a prepared
 `previous`. The emitted program and callables, the bound data and frozen
 preprocessing, the packed coordinates, the groupings, the subjects and their
 coordinates, and the fixed shared values must equal the checkpoint's; a
-difference is refused before any optimization step.
+difference is refused before any optimization step, and one in the program,
+callables, data or coordinates already after lowering, before the model is
+prepared. The refusal names the differing part, down to the callable's binding
+and the data column. An anonymous function or closure compares by its lowered
+code and captured values, so the same source continues in another driver, at
+another line or after other definitions; a named function compares by its module
+and name.
 
 `save`, `stop_after`, `checkpoint_every`, `ndraws` and `progress` work as in
 [`brm_svi_fit`](@ref); `save` again receives copies of the state. The result
@@ -267,7 +292,8 @@ function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
     if state.previous !== nothing
         x, options = _brm_svi_window_input(state.previous, x, options; caller="brm_svi_resume")
     end
-    call = (; caller="brm_svi_resume", ndraws, stop_after, checkpoint_every, progress)
+    call = (; caller="brm_svi_resume", ndraws, stop_after, checkpoint_every, progress,
+        check_lowered=lowered -> _brm_svi_check_binding(_brm_svi_backend(lowered), state.identity))
     if state.run isa _BRMSVILaplaceRun
         threads === nothing || throw(ArgumentError(
             "GaussianBlockLaplace: whole-window fixed-budget optimization does not use " *

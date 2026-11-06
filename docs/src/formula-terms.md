@@ -410,6 +410,14 @@ neither contributes a `beta_pop` coefficient. `jitter` belongs only to `gp`;
 `k`, `c` and `by` only to `hsgp`. Both support `cov=:exp_quad` (the default)
 and `cov=:periodic`; see [Periodic covariance](@ref) for the latter's contract.
 
+`k`, `c`, a fixed `domain`, `period` and `anchor` are numbers the model reads: a
+literal, a data field holding the scalar or per-axis value, or
+`name = constant(expr)`, as in `hsgp(x; k = kk, c = cc)` with `kk` and `cc` in
+the data. Models that differ only in these build one Stan program and emit one
+RK program. ReactiveKernelsPPL's lowering of that RK program still specializes
+on a changed basis size and on the fitted length-scale floor, which `c` and
+`domain` move.
+
 ### Periodic covariance
 
 `cov=:periodic` selects Stan's periodic kernel
@@ -1572,7 +1580,9 @@ All of these fail loudly rather than silently sampling something else:
 - A shared `(… | ID | g)` bucket is all-or-nothing: either every margin's
   predictor carries an `r2d2` statement or none does.
 - `cor(:, ID)` composes with a shared-ID decomposition and controls its LKJ
-  `eta`; the marginal scales remain derived.
+  `eta`; the marginal scales remain derived. `cor(:, ID) ~ LKJCholesky(K, eta)`
+  reads `K` and `eta` from scalar data fields as well as literals; `K` is still
+  checked against the block width.
 - Non-centred shared-ID `resample_groups` replay is supported. Adaptive
   centering (`centered_groups`), plain-group R2D2 resampling, stratified
   `gr(g, by=b)` groups, and `mm(...)` multi-membership terms remain unsupported.
