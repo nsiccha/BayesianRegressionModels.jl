@@ -62,8 +62,8 @@ end
                 from_state = RKBRMI(BRM._brm_rebind_brmi(model, fresh), state)
                 @test BRM._rk_layout_coordinate_names(replay) == BRM._rk_layout_coordinate_names(rk)
                 @test BRM._rk_layout_coordinate_names(from_state) == BRM._rk_layout_coordinate_names(rk)
-                @test BRM._rk_program_statements(BRM._rk_retained_program(replay)) == state.program
-                @test BRM._rk_program_statements(BRM._rk_retained_program(from_state)) == state.program
+                @test BRM._rk_replay_statements(BRM._rk_retained_program(replay), replay.plan) == state.program
+                @test BRM._rk_replay_statements(BRM._rk_retained_program(from_state), from_state.plan) == state.program
                 replay_lp = rk_logdensity_problem(replay; ad_backend=DI.AutoEnzyme(; mode=Enzyme.Reverse))
                 state_lp = rk_logdensity_problem(from_state; ad_backend=DI.AutoEnzyme(; mode=Enzyme.Reverse))
                 sb_replay = reprocess(sb, fresh)
