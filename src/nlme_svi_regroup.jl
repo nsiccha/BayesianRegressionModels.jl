@@ -234,7 +234,13 @@ function _brm_svi_partition(m, ownership)
         end
         (; names=(name,), positions, elementwise=true)
     end)
-    partition = _brm_nlme_partition_queries(m.backend, cells, view, m.unit, partitioned)
+    partition = try
+        _brm_nlme_partition_queries(m.backend, cells, view, m.unit, partitioned)
+    catch error
+        levels = hasproperty(ownership, :levels) ? ownership.levels : ()
+        error isa BRMNLMEViewError && any(_brm_svi_is_cell_unit_level, levels) || rethrow()
+        _brm_nlme_error(_brm_svi_cell_unit_refusal(error, levels))
+    end
     (; partition, view)
 end
 

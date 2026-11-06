@@ -185,7 +185,6 @@ end
 end
 
 # The same rows with a response that reads the plate's vectors whole, not by index.
-# Units with no such rows must still read none of the sensors' effects.
 whole_read_model(data) = @brm data begin
     noise ~ Exponential(1)
     field[1:nfield] .~ Normal(0, 1)
@@ -210,15 +209,24 @@ whole_read_model(data) = @brm data begin
     row_y ~ Normal(row_mean, row_scale)
 end
 
-@stestset "a response reading a plate's vectors whole separates its sensors too" begin
+# Its structural supports still separate the sensors, but ReactiveKernels then
+# partitions the response reading every sensor's scale (snag
+# whole-vector-res-64373f39), so the target is refused naming the cell units and
+# what avoids them; `:first_unit` builds. Once that snag is fixed this target
+# builds too: check its layout and density instead of the refusal.
+@stestset "a response reading a plate's vectors whole is refused by name" begin
     data = cell_toy_data(Xoshiro(13); nsite=3, nsensor=4, nfield=6, nread=2,
         site_rows=[3, 6], sensor_rows=6)
     m = brm_nlme_model(RKBRMI(whole_read_model(data)); ad_backend=NLME_AD,
         subject_group=:site, unit_partition=:connected)
-    t = BRM._brm_svi_target(m; separator=:none, global_coordinates=cell_toy_globals(m))
-    @test length(t.units) == 3 + 4
-    @test all(==(2), length.(t.units[4:end]))
-    check_cell_unit_density(t)
+    globals = cell_toy_globals(m)
+    ownership = BRM._brm_svi_connected_ownership(m; separator=:none, global_coordinates=globals)
+    @test length(ownership.units) == 3 + 4
+    @test all(==(2), length.(ownership.units[4:end]))
+    @test_throws r"units 4-7 of their own.*cell_units=:first_unit.*PartitionSeparabilityError" BRM._brm_svi_target(
+        m; separator=:none, global_coordinates=globals)
+    check_cell_unit_density(BRM._brm_svi_target(m; separator=:none,
+        global_coordinates=globals, cell_units=:first_unit))
 end
 
 @stestset "`work` counts the rows of a vector-valued cell" begin

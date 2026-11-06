@@ -93,6 +93,25 @@ end
 # units share a member under the streaming membership check.
 _brm_svi_cell_unit_level(view, block, position) =
     ((:cells, isempty(block) ? position : view.coordinates[first(block)]),)
+_brm_svi_is_cell_unit_level(level) = level isa Tuple && length(level) == 1 &&
+    first(level) isa Tuple && length(first(level)) == 2 && first(first(level)) === :cells
+
+# The supports that form cell units can show less than a unit's partition then
+# reads: a response reading a computed vector whole is partitioned reading every
+# row's entries (ReactiveKernels snag whole-vector-res-64373f39), while the same
+# read by a data index is not. The refusal speaks of subjects, so name the cell
+# units and what avoids them.
+function _brm_svi_cell_unit_refusal(error, levels)
+    cell = findall(_brm_svi_is_cell_unit_level, levels)
+    units = length(cell) == 1 ? "unit $(only(cell))" : "units $(first(cell))-$(last(cell))"
+    "brm_svi_fit: cell_units=:components gave likelihood cells that read no subject's " *
+    "effect $units of their own. If the partition refused below is one of those, its " *
+    "cells read another unit's coordinates beyond their structural supports, as a " *
+    "response reading a computed vector whole (`y ~ Normal(mu, sigma)`) does. Read it " *
+    "by a data index (`Normal(mu[idx], sigma[idx])`), or pass cell_units=:first_unit " *
+    "to keep these cells in the first unit, as earlier versions did. " *
+    sprint(showerror, error)
+end
 
 _brm_svi_cell_units_option(cell_units, connected) = begin
     cell_units === nothing && return connected ? :components : :first_unit
