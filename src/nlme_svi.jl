@@ -102,8 +102,7 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
     policy = something(separator, connected ? :auto : :none)
     !connected && policy !== :none && throw(ArgumentError(
         "brm_svi_fit: automatic separators require unit_partition=:connected"))
-    _brm_svi_check_fields(m)
-    inventory = field_states === :units ? _brm_svi_field_inventory(m) : ()
+    inventory =field_states === :units ? _brm_svi_field_inventory(m) : ()
     ownership = connected ? _brm_svi_connected_ownership(m; global_coordinates, previous,
         separator=policy, max_unit_coordinates, max_unit_work, max_promoted_coordinates,
         fields=inventory) :
