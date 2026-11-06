@@ -56,8 +56,8 @@ _brm_svi_global_factor(q) = deepcopy((; q.family, q.μ, q.ρ, q.Β))
 function _brm_svi_source_id(rk)
     emitted = _rk_retained_program(rk)
     io = IOBuffer()
-    serialize(io, (sprint(show, brm_source(rk); context=:brm_documentation => false), _rk_program_statements(emitted),
-        emitted.bindings))
+    serialize(io, (_brm_declaration_text(brm_source(rk)), _rk_program_statements(emitted),
+        _brm_stable_bindings(emitted.bindings)))
     bytes2hex(sha256(take!(io)))
 end
 
@@ -390,7 +390,7 @@ end
 # are the defaults of a model not yet prepared.
 function _brm_svi_window_input(state, x, options; caller)
     if x isa BRMI
-        sprint(show, x; context=:brm_documentation => false) == state.preprocessing.declaration || throw(ArgumentError(
+        _brm_declaration_text(x) == _brm_stable_declaration(state.preprocessing.declaration) || throw(ArgumentError(
             "$caller: model source changed"))
         x = RKBRMI(x, state.preprocessing; resample_groups=(state.group, state.nested...))
     end

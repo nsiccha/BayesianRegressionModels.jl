@@ -11,7 +11,7 @@ julia --project=test research/svi_cell_units/measure.jl 32 64 4 2000 20000 100 1
 ```
 
 Batch 4, `unit_sampling=:work`, `separator=:none`, one thread, 3 seeds, Julia 1.10.12,
-RK `7dced1e5`, on a loaded 32-CPU host. Times vary by about a factor of two between
+RK `7dced1e5`, at BRM `e52e3d7c` plus the checkpoint fix, on a loaded 32-CPU host. Times vary by about a factor of two between
 seeds, so read them as ranges. The ELBO is one estimator for both layouts:
 `E_q[log p] + H(q)`, with the full density at 128 draws from q.
 
@@ -30,7 +30,7 @@ seeds, so read them as ranges. The ELBO is one estimator for both layouts:
 
 Variance is exact for the sampling law, `(Σ‖gᵢ‖²/pᵢ − ‖Σgᵢ‖²)/B`, at one point for
 both layouts, and 4,000 sampled batches agree with it. Unit terms sum to the full
-density and gradient to within 3e-11.
+density and gradient to within 4e-11.
 
 **What this shows.** Subsampling these rows adds gradient variance per update, as
 expected, and costs far less per update, so the variance per unit of time falls.

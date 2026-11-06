@@ -946,7 +946,11 @@ cell expression or a collected output) each give every cell an empty slice. Each
 RK density and gradient equal a twin that never reads the empty axis.
 `reprocess` moves the same Stan program onto data with rows and back,
 recomputing the row count of a declared axis that sizes an intercept-only
-predictor, and a missing group label is still refused.
+predictor, and a missing group label is still refused. It also checks a plate
+with no cells at all, over `groups(g)` or `groups(g => cells)` with an empty
+column: each backend's density and gradient equal an independent formula for the
+priors, with the prior scale from data or written as a literal, and SBBRMI emits
+the same program as with rows and replays between the two in both directions.
 
 `hsgp_empty_axis_gather.jl` checks an HSGP with an explicit `domain=` (and a
 periodic one) over an axis with no rows, gathered per subject through
@@ -1359,7 +1363,8 @@ worker memory against `threads`.
 take their own evaluators from the model's pool. On flat, plate and nested
 models, the protocol's one-unit values, η gradients and population gradients,
 called from every thread in shuffled order, equal serial calls to the last bit,
-and the pool prepares more than one evaluator. `check_protocol(...; threads =
+and the pool prepares more than one evaluator, and at most one per Julia thread
+even when tasks holding one yield. `check_protocol(...; threads =
 true)` passes on a nested model. A seeded `WarmupHMCNUTS(threads = true)` SAEM fit
 of a 24-subject plate PK model gives the same bits in child processes with 1, 4
 and N threads (`BRM_NLME_THREADS_N`, default 8). Over six seeds its estimates
@@ -1367,8 +1372,8 @@ agree with lockstep fits (`threads = false`) within twice the lockstep fits'
 spread, and both recover the simulated population values. Run it in the
 NLMEEstimation scratch environment below (NLMEEstimation 0.2.5 or later) with
 `--threads=4`; it refuses to run without threads.
-`research/nlme_threads/benchmark.jl` measures a round of one-unit calls and SAEM
-fits at the thread count it is started with.
+`research/nlme_threads/benchmark.jl` measures a round of one-unit calls and paired
+SAEM fits of both routes at the thread count it is started with.
 
 `nlme_svi_laplace_plan.jl` checks structural eligibility for
 `GaussianBlockLaplace`, including fixed HSGP fitting inputs, nonstandard
@@ -1536,7 +1541,9 @@ curvature edges and bounds allocations when observations repeat a support.
 Its dense-point testset checks that a one-unit η gradient (RK's local-only
 `shared=false` route) equals the η entries of the full gradient, that the
 query and plan work points equal the unit point after every call, and that one
-unit's allocations do not grow with the number of units (3 against 300).
+unit's allocations do not grow with the number of units (3 against 300). A
+one-unit gradient allocates within 1 KB of RK's own call, so it does not copy
+the model to the heap.
 `nlme_units_panel.jl` covers nested
 partition likelihoods, gradients, cell-based Hessian sparsity and allocation
 scaling. The `nlme_svi.jl` filters `minibatch split` and
@@ -1639,6 +1646,18 @@ refused; and a single `predictor => w` pair works:
 
 ```sh
 julia --project=test test/s2z_per_predictor_rho.jl
+```
+
+## Exact totals and sum-to-zero priors that read data
+
+`integrated_prior_data_fields.jl` builds each exact-total and sum-to-zero model
+twice, its population priors as numbers and as data fields, and checks one source
+across the values and equal blocks, coordinates, log density, gradient and
+generated quantities against the literal twin, the refusals of what cannot be
+integrated, and replay, rebuild and transport of the fitted prior:
+
+```sh
+julia --project=test test/integrated_prior_data_fields.jl
 ```
 
 ## Exact totals beside offsets

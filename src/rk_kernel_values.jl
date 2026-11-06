@@ -257,11 +257,6 @@ function _rk_kernel_observation_modifier(observation, distribution, bound_names)
         bound(:lower), bound(:upper))
 end
 
-# Values grouped per subject by a row partition. An absent replay response
-# stays absent.
-_rk_gather_rows(values, rows) = [values[r] for r in rows]
-_rk_gather_rows(values::_BRMAbsentResponse, rows) = values
-
 # A bounded in-cell observation is checked against its data when the model is
 # built, as a formula response is: every entry of the response within its
 # bounds, and an interval's lower endpoint below its upper one. A bound the
@@ -286,7 +281,7 @@ function _rk_validate_cell_bounds(kernel, observation, response, data)
         input = only(slice.inputs)
         flat = get(kernel.columns, input.source, nothing)
         flat === nothing && return missing
-        cells = input.kind === :gather ? _rk_gather_rows(flat, kernel.columns[input.rows]) : flat
+        cells = input.kind === :gather ? _brm_gather_cells(flat, kernel.columns[input.rows]) : flat
         cells isa AbstractVector{<:AbstractVector} &&
             length.(cells) == length.(response) || return missing
         key = Symbol(:bound_, label)
@@ -412,7 +407,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                 # A response a scan observes is bound one series per subject
                 # and read in place, as RKPPL observes it.
                 column = _rk_kernel_scan_response(name, value, observed)
-                columns[column] = _rk_gather_rows(parent(parent(value)), partition.rows)
+                columns[column] = _brm_gather_cells(parent(parent(value)), partition.rows)
                 push!(inputs, (; source=column, kind=:element, rows=nothing, column))
                 # Its series' rows on the `group` axis attribute each cell's
                 # density to the subject owning them (`brm_nlme_view`).
@@ -1160,7 +1155,7 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
             # The response stays one array per subject. Each argument and the
             # weight is read per subject or shared, as the cell reads it.
             response = observation.input.kind === :gather ?
-                _rk_gather_rows(raw, kernel.columns[observation.input.rows]) :
+                _brm_gather_cells(raw, kernel.columns[observation.input.rows]) :
                 _rk_cell_response_values(raw, observation.callable)
             _rk_validate_cell_bounds(kernel, observation, response, program.context.data)
             plan.columns[observation.source] = response

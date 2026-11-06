@@ -228,3 +228,27 @@ end
     @test allocations[2].gradient <= 1.2allocations[1].gradient
     @test allocations[2].value <= 1.2allocations[1].value
 end
+
+# An evaluator holds its plan untyped, so calls on the plan are dynamic. A
+# dynamic call that passes an immutable model copies the whole model to the
+# heap, because the model holds its prepared fields inline: 8.5 KB twice per
+# call on an 80-subject PK model, 17 of the call's 20 KB and most of its time.
+@stestset "a one-unit gradient allocates what RK's call does, without copying the model" begin
+    m = brm_nlme_model(RKBRMI(nlme_plate_pk(NLME_PLATE_DATA)); ad_backend=NLME_AD)
+    θ, σ, block = m.unit[m.theta], m.unit[m.sigma], m.view.subject_coordinates[1]
+    η = m.unit[block]
+    plan = BRM._brm_nlme_cell_state(m).plan
+    public() = brm_nlme_loglikelihood_and_gradient(m, 1, θ, σ, η)
+    direct() = BRM._rk_nlme_partition_value_and_local_gradient!(plan.sampler,
+        plan.local_gradients[1], plan.point, 1)
+    public(), direct()
+    bytes(f) = minimum(@allocated(f()) for _ in 1:5)
+    @info "one-unit gradient allocations (bytes)" public=bytes(public) rk=bytes(direct)
+    @test bytes(public) - bytes(direct) <= 1024
+    selected() = BRM._brm_nlme_cell_value_and_selected_gradient(m, 1, θ, σ, η)
+    selected()
+    full() = BRM._rk_nlme_partition_value_and_gradient!(plan.sampler,
+        plan.gradients[1], plan.point, 1)
+    full()
+    @test bytes(selected) - bytes(full) <= 1024
+end

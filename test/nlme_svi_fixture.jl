@@ -54,6 +54,17 @@ svi_gauss_model(data) = @brm data begin
     end
 end
 
+# `svi_gauss_model` calling a callable of the including script's scope, by the
+# global name `shift`.
+svi_callable_model(data, shift=:svi_shift) = BayesianRegressionModels.brm(quote
+    sigma ~ Exponential(1)
+    a ~ 1 + (1 | g | subject)
+    b ~ 1 + (1 | g | subject)
+    @plate for i in eachindex(a)
+        y[i] ~ Normal($shift(a[i] .+ b[i] .* x[i]), sigma)
+    end
+end; mod=@__MODULE__)(data)
+
 function svi_spacetime_data(rng; G=6, T=12)
     probe = String[]; day = Float64[]; c1 = Float64[]; trend = Float64[]
     for d in 1:T, g in 1:G

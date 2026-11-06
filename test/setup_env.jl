@@ -339,7 +339,10 @@ const PINS = [
     # override `resume_smc(...; nthreads)`, which BRM forwards.
     # 7dced1e5 (RK 0.1.89 / RKPPL 0.1.102) keeps selected-unit gradients
     # and shared-row storage compact as unrelated units are added.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "7dced1e52edb45bcbfe9e23d6b5904a0dbe66b56"),
+    # 28d70c34 (RK 0.1.94 / RKPPL 0.1.105) runs a tuple plate's statements only
+    # at rows that read their entries, so automatic connected SVI units keep
+    # their own coordinates.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "28d70c344ba4a86602527890ab37f008216b66a2"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

@@ -120,12 +120,22 @@ function _brm_kernel_subject_values(raw, group::Symbol; prefix="BRM kernel prepa
         "$prefix: kernel(...) subject grouping column `$group` must be a vector, " *
         "got $(typeof(raw)).")
     values = collect(_brm_group_values(raw))
-    _brm_kernel_labels_rows(values) || error(
+    # No rows are no cells: the plate observes nothing and the priors stay.
+    isempty(values) || _brm_kernel_labels_rows(values) || error(
         "$prefix: kernel(...) needs pre-grouped per-subject data — `$group` must " *
         "list one non-missing unique subject per row. Repeated levels indicate " *
         "long-format data. Got $(values).")
     values
 end
+
+# Each cell's entries of a flat column. The result's type comes from the column,
+# not from the entries, so a plate with no cells binds the same element type as
+# its populated twin and emits the same program. An absent replay response stays
+# absent.
+_brm_gather_cells(values, rows) = [values[r] for r in rows]
+_brm_gather_cells(values::AbstractVector, rows) =
+    typeof(values[Int[]])[values[r] for r in rows]
+_brm_gather_cells(values::_BRMAbsentResponse, rows) = values
 
 # An empty `ev_vals` is a zero-row axis (a design with no rows on it, such as
 # no placebo observations): every cell gets an empty slice. A row whose label
