@@ -472,7 +472,7 @@ function _brm_prune_cor_prior(@nospecialize(op), w, marginalize::Bool)
     (!isnothing(T) && T <: LKJCholesky && length(getargs(spec)) == 2) || throw(ArgumentError(
         "prune_responses: shared block `$(join(getargs(lhs), ", "))` loses margins, and its " *
         "correlation prior is not `LKJCholesky(K, eta)`, whose restriction is exact"))
-    K, eta = map(_brm_numeric_constant, getargs(spec))
+    K, eta = map(_brm_effect_number, getargs(spec))
     (!isnothing(K) && Int(K) == w.K && !isnothing(eta)) || throw(ArgumentError(
         "prune_responses: shared block `$(join(getargs(lhs), ", "))` declares " *
         "`LKJCholesky($(getargs(spec)[1]), $(getargs(spec)[2]))`; pruning needs numeric " *
