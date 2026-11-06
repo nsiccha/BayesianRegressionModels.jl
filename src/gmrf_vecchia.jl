@@ -743,6 +743,57 @@ function _brm_vecchia_logdensity(field, spatial_length, temporal_length, L, f::_
     value - n * logL - n * C * log(2pi) / 2
 end
 
+# Adds the gradient of the listed states' conditionals of one solved pattern to `gz`, and
+# leaves in `v` what the length derivatives contract. Returns their sum of squared residuals.
+function _brm_vecchia_states_gradient!(gz, z, f::_BRMGMRFFootprint, states, C, m, F, b, v)
+    fill!(view(v, 1:m), 0.0)
+    q = 0.0
+    @inbounds for s in states
+        first_neighbor = f.neighbor_ptr[s]
+        for c in 1:C
+            r = z[c, s]
+            for a in 1:m
+                r -= b[a] * z[c, f.neighbor[first_neighbor + a - 1]]
+            end
+            q += r^2
+            g = r / F
+            gz[c, s] -= g
+            for a in 1:m
+                neighbor = f.neighbor[first_neighbor + a - 1]
+                gz[c, neighbor] += b[a] * g
+                v[a] += r * z[c, neighbor]
+            end
+        end
+    end
+    q
+end
+
+# The derivative of a solved pattern's term in κ and the temporal length, from the
+# sufficient statistics of its listed states: `q` and `work.v` above, `count` conditionals.
+function _brm_vecchia_length_gradient(work, f::_BRMGMRFFootprint, p, m, F, q, count)
+    dkappa, dtemporal = 0.0, 0.0
+    m == 0 && return (; kappa=dkappa, temporal=dtemporal)
+    v, w, b, A = work.v, work.w, work.b, work.A
+    copyto!(w, 1, v, 1, m)
+    _brm_vecchia_cholesky_solve!(w, A, m)
+    scale = (q / F - count) / (2F)
+    first_item = f.item_ptr[p]
+    space, dspace, timecor, dtime = work.space, work.dspace, work.time, work.dtime
+    @inbounds for a in 1:m
+        ua, la = f.item_position[first_item + a - 1], f.item_lag[first_item + a - 1]
+        weight = w[a] / F - 2scale * b[a]
+        dkappa += weight * dspace[1, ua] * timecor[1, la]
+        dtemporal += weight * space[1, ua] * dtime[1, la]
+        for e in 1:m
+            ue, le = f.item_position[first_item + e - 1], f.item_lag[first_item + e - 1]
+            weight = scale * b[a] * b[e] - w[a] * b[e] / F
+            dkappa += weight * dspace[ua, ue] * timecor[la, le]
+            dtemporal += weight * space[ua, ue] * dtime[la, le]
+        end
+    end
+    (; kappa=dkappa, temporal=dtemporal)
+end
+
 """
     _brm_vecchia_gradient(field, spatial_length, temporal_length, L, footprint)
 
@@ -763,51 +814,16 @@ function _brm_vecchia_gradient(field, spatial_length, temporal_length, L, f::_BR
     value = 0.0
     dkappa_total = 0.0
     dtemporal = 0.0
-    v, w = work.v, work.w
     for p in 1:(length(f.pattern_ptr) - 1)
         solved = _brm_vecchia_solve!(work, f, p, kappa, temporal_length, true)
         m, F = solved.m, solved.variance
-        b, A = work.b, work.A
-        fill!(view(v, 1:m), 0.0)
-        q = 0.0
-        @inbounds for slot in f.pattern_ptr[p]:(f.pattern_ptr[p + 1] - 1)
-            s = f.pattern_states[slot]
-            first_neighbor = f.neighbor_ptr[s]
-            for c in 1:C
-                r = z[c, s]
-                for a in 1:m
-                    r -= b[a] * z[c, f.neighbor[first_neighbor + a - 1]]
-                end
-                q += r^2
-                g = r / F
-                gz[c, s] -= g
-                for a in 1:m
-                    neighbor = f.neighbor[first_neighbor + a - 1]
-                    gz[c, neighbor] += b[a] * g
-                    v[a] += r * z[c, neighbor]
-                end
-            end
-        end
-        count = (f.pattern_ptr[p + 1] - f.pattern_ptr[p]) * C
+        states = view(f.pattern_states, f.pattern_ptr[p]:(f.pattern_ptr[p + 1] - 1))
+        q = _brm_vecchia_states_gradient!(gz, z, f, states, C, m, F, work.b, work.v)
+        count = length(states) * C
         value -= (count * log(F) + q / F) / 2
-        m == 0 && continue
-        copyto!(w, 1, v, 1, m)
-        _brm_vecchia_cholesky_solve!(w, A, m)
-        scale = (q / F - count) / (2F)
-        first_item = f.item_ptr[p]
-        space, dspace, timecor, dtime = work.space, work.dspace, work.time, work.dtime
-        @inbounds for a in 1:m
-            ua, la = f.item_position[first_item + a - 1], f.item_lag[first_item + a - 1]
-            weight = w[a] / F - 2scale * b[a]
-            dkappa_total += weight * dspace[1, ua] * timecor[1, la]
-            dtemporal += weight * space[1, ua] * dtime[1, la]
-            for e in 1:m
-                ue, le = f.item_position[first_item + e - 1], f.item_lag[first_item + e - 1]
-                weight = scale * b[a] * b[e] - w[a] * b[e] / F
-                dkappa_total += weight * dspace[ua, ue] * timecor[la, le]
-                dtemporal += weight * space[ua, ue] * dtime[la, le]
-            end
-        end
+        lengths = _brm_vecchia_length_gradient(work, f, p, m, F, q, count)
+        dkappa_total += lengths.kappa
+        dtemporal += lengths.temporal
     end
     logL = 0.0
     @inbounds for c in 1:C
