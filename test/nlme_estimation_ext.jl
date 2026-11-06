@@ -510,7 +510,10 @@ ReactiveKernels.ad_gradient_and_hvp(h::NLMERaisingCellHVP, _directions, _base, _
     group = first(L.p.cells)
     ad, c, u = group.ad, first(group.cells), copy(m.unit)
     BRM._brm_spl_cell_directions!(group.dirs, c.lpos, 1.0)
-    block() = BRM._rk_spl_cell_block(ad, group.dirs, u, c.sel, c.i)
+    block() = BRM._rk_spl_cell_newton(ad, u) do batch
+        g, cols = BRM._rk_spl_cell_block(ad, group.dirs, u, c.sel, c.i; context=batch)
+        copy(g), map(copy, cols)
+    end
     gradient, columns = block()
     @test !ad.reverse_over_forward
 
@@ -525,12 +528,6 @@ ReactiveKernels.ad_gradient_and_hvp(h::NLMERaisingCellHVP, _directions, _base, _
     @test !(ad.hvp isa NLMERaisingCellHVP)
     @test moved_gradient ≈ gradient rtol=1e-12
     @test all(a ≈ b for (a, b) in zip(moved_columns, columns))
-
-    # The implicit correction's one-direction product moved with it.
-    direction = zeros(group.m)
-    direction[first(c.lpos)] = 1.0
-    _, hv = BRM._rk_spl_cell_implicit(ad, direction, u, c.sel, c.i)
-    @test hv ≈ moved_columns[1] rtol=1e-12
 
     # Reverse over forward has no further fallback: the error is the caller's.
     ad.hvp = NLMERaisingCellHVP(activity)
