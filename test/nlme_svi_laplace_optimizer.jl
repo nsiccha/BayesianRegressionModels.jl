@@ -37,9 +37,9 @@ end
     data = laplace_window_data([1, 2, 3])
     options = (; laplace=method, ad_backend=LAPLACE_AD, family=LowRankGlobal(2),
         max_iterations=8)
-    plain = brm_svi_fit(builder(data); options..., rng=Xoshiro(910), ndraws=5)
+    plain = brm_svi_fit(builder(data); options..., rng=Xoshiro(810), ndraws=5)
     seen = NamedTuple[]
-    observed = brm_svi_fit(builder(data); options..., rng=Xoshiro(910), ndraws=5,
+    observed = brm_svi_fit(builder(data); options..., rng=Xoshiro(810), ndraws=5,
         snapshot=s -> push!(seen, s), snapshot_every=1, snapshot_draws=2)
     # Its draws evaluate the target, whose call counts and records the run keeps.
     @test laplace_same_result(observed, plain)
@@ -53,19 +53,19 @@ end
     @test all(s -> !hasproperty(s, :finished) && !hasproperty(s, :converged), seen)
     @test last(seen).q.μ == plain.diagnostics.q.μ && last(seen).elbo == last(plain.diagnostics.elbo)
     # The draws are a stopped result's first draws, as a copy of the draw stream.
-    stopped = brm_svi_fit(builder(data); options..., rng=Xoshiro(910), stop_after=5, ndraws=2)
+    stopped = brm_svi_fit(builder(data); options..., rng=Xoshiro(810), stop_after=5, ndraws=2)
     @test seen[5].draws == stopped.draws && seen[5].q.μ == stopped.diagnostics.q.μ
     @test size(seen[5].draws) == (length(seen[5].coordinates), 2)
     # A continuation observes on, and is the run that never stopped.
     empty!(seen)
-    part = brm_svi_fit(builder(data); options..., rng=Xoshiro(910), stop_after=3, ndraws=0)
+    part = brm_svi_fit(builder(data); options..., rng=Xoshiro(810), stop_after=3, ndraws=0)
     final = brm_svi_resume(builder(data), part; ad_backend=LAPLACE_AD, ndraws=5,
         snapshot=s -> push!(seen, s), snapshot_every=2, snapshot_draws=1)
     @test laplace_same_result(final, plain)
     @test [s.iteration for s in seen] == [4, 6, 8]
     # The default cadence is every 50 updates, and the last.
     empty!(seen)
-    brm_svi_fit(builder(data); options..., rng=Xoshiro(910), ndraws=0, snapshot=s -> push!(seen, s))
+    brm_svi_fit(builder(data); options..., rng=Xoshiro(810), ndraws=0, snapshot=s -> push!(seen, s))
     @test [s.iteration for s in seen] == [8]
     @test_throws "need a `snapshot`" brm_svi_fit(builder(data); options..., snapshot_every=2)
 end

@@ -215,9 +215,11 @@ end
 
 @stestset "a model keeps its workers for later calls, at any number of tasks" begin
     m = gauss_model_prepared(261, 12)
-    controls = (; rng=Xoshiro(262), SVI_THREADS..., ndraws=10)
-    reference, reference_states = svi_trajectory(gauss_model_prepared(261, 12); controls..., threads=1)
-    first_fit = brm_svi_fit(m; controls..., stop_after=30, threads=2)
+    # A fit advances the stream it is given, so each fresh run gets its own.
+    controls = (; SVI_THREADS..., ndraws=10)
+    reference, reference_states = svi_trajectory(gauss_model_prepared(261, 12); controls...,
+        rng=Xoshiro(262), threads=1)
+    first_fit = brm_svi_fit(m; controls..., rng=Xoshiro(262), stop_after=30, threads=2)
     @test !first_fit.diagnostics.target.reused && first_fit.diagnostics.target.workers_built == 1
     # More tasks build only the ones missing; fewer build none and keep the rest.
     wider = brm_svi_resume(m, first_fit; stop_after=30, ndraws=10, threads=4)
@@ -234,7 +236,7 @@ end
     # Snapshots are the same at any number of tasks, and leave the run alone.
     function snapshots(threads)
         seen = NamedTuple[]
-        fit = brm_svi_fit(m; controls..., stop_after=50, threads, snapshot=s -> push!(seen, s),
+        fit = brm_svi_fit(m; controls..., rng=Xoshiro(263), stop_after=50, threads, snapshot=s -> push!(seen, s),
             snapshot_every=7, snapshot_draws=3)
         fit, seen
     end
