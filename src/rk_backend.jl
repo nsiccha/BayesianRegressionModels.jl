@@ -774,8 +774,8 @@ end
 # Returns `(scale, scale_predictor)` with exactly one side non-nothing: a
 # scalar (parameter/assignment/literal) or a distributional bare-predictor
 # reference. A predictor shadows a same-named data column here, matching
-# the location slot (a data column can never be a scale, so the LP reading
-# is the only useful one).
+# the location slot (a data scale takes the value route,
+# `_rk_data_law_argument`, so the LP reading is the only one left here).
 function _rk_scale_argument(arg, parameters::Set{Symbol},
         assignments::Set{Symbol}, consts::Dict{Symbol,Float64},
         aliases::Dict{Symbol,Symbol}, response::Symbol, what::String,
@@ -5317,6 +5317,16 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         mask_source=isnothing(rows) ? nothing : rows.source,
         hyper_plans, rho_stated, sigma_stated, fit_axes, fit_mask,
         extrapolate=get(state, :extrapolate, :error))
+    # The basis sizes and the numeric settings are inputs of the program, never
+    # numbers it spells (user principle `0ikeidi`): `modes` holds each axis's
+    # basis count, `settings` each axis's boundary factor `c`, then a fixed
+    # domain's center and half-width per axis (`_rk_hsgp_setting_index`), or a
+    # periodic term's period. Fit-role inputs: a frozen replay keeps the fit's.
+    modes = _rk_fit_input!(derived, columns, taken, Symbol(id, :_modes),
+        collect(Int, state.K))
+    settings = _rk_fit_input!(derived, columns, taken, Symbol(id, :_settings),
+        _rk_hsgp_setting_values(state))
+    common = merge(common, (; modes, settings))
     if state.cov === :periodic
         return _RKTermSpec(:hsgp, collect(axes),
             (; id, k=only(state.K), cov=:periodic, period=state.period, common...), id, id)
@@ -5353,6 +5363,17 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
         (; id, k, c, iso=state.iso, fits=state.fits,
             fixed_fits=state.explicit_domain ? state.fits : nothing,
             latent=state.latent, orthogonal, common..., grouped...), id, id)
+end
+
+# A term's `settings` input: a periodic term's period, then its anchor;
+# otherwise each axis's boundary factor, then each axis's fixed center and
+# half-width when its domain is fixed, then each axis's anchor when anchored
+# (`_rk_hsgp_boundary`, `_rk_hsgp_fixed_center`, `_rk_hsgp_anchor_value`).
+function _rk_hsgp_setting_values(state)
+    anchor = something(get(state, :anchor, nothing), ())
+    state.cov === :periodic && return Float64[state.period, anchor...]
+    Float64[state.c..., (state.explicit_domain ? Iterators.flatten(state.fits) : ())...,
+        anchor...]
 end
 
 # `orthogonal_to=` on a `by=` term is fitted per level (decision 15hn91t) on
