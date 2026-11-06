@@ -12,6 +12,29 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.212
+
+- Fixed: a population prior that reads data is integrated by exact totals and
+  sum-to-zero like the same prior with the numbers spelled out.
+  `effect(mu, Intercept) ~ Normal(m, s)` with `m` and `s` in the data was refused
+  by an explicit `total_groups` or `s2z_groups` request ("is not Normal, Student-t
+  or Flat", "unsupported population prior"). The arguments of a `Normal`,
+  `LocationScale(m, s, TDist(nu))` or `TDist(nu)` prior may now be literals, scalar
+  data fields, `constant(...)`s, elements `v[k]` of a data vector, data-only
+  assignments or calls over these. The values enter the program as data, so models
+  differing only in such a value compile one program, whose log density, gradient
+  and generated quantities equal those of the literal twin.
+- **Changed:** with `total_groups = :auto`, a model whose population priors read
+  data used to stay conventional without saying so; it now integrates its blocks,
+  as its literal twin always did. The posterior is unchanged, the coordinates are
+  not, so draws from such a fit do not transfer to a new build. Pass
+  `total_groups = ()` to keep the conventional representation. A frozen replay
+  of a fitted model is unaffected.
+- A prior that reads a sampled value is still not integrated, and the refusals now
+  say why ("arguments that read only numbers and data"). A data-only call that
+  fails names the call. The exact-total refusal no longer claims a block's `sd`
+  prior needs literal arguments; it already accepted data.
+
 ## 0.2.211
 
 - Fixed: on `RKBRMI`, a model-scope `=` assignment that no response reads is
