@@ -12,6 +12,31 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.227
+
+- Fixed: `brm_svi_resume` refused a checkpoint as "the model differs from the
+  checkpoint's in its emitted program" when the same model was loaded from
+  another checkout, depot, host or BRM release. A model's program identity
+  printed every macro call with the file and line it was written at, and an
+  emitted `ReactiveKernels.@kernel` definition is one: BRM's own (with the depot
+  slug of this BRM installation and the line in its source) or a source
+  provider's (with the consumer's checkout directory). Every identity that
+  compares the program now reads it without those places: SVI optimizer
+  checkpoints, the SVI and SMC streaming carries, SMC and SMC Laplace
+  checkpoints, filter exports, and a fitted state's export and replay. A program
+  without such a macro call keeps its identity, so its checkpoints are
+  unchanged.
+- An SVI optimizer checkpoint written before 0.2.227 holds the digest with
+  those places. As before, a checkpoint resumes on the version that wrote it
+  (since 0.2.223 a later one does not load an earlier one). Where a later
+  version does load it, it resumes when its program has no such call;
+  otherwise the refusal says that its digest predates the place-free program
+  identity and that only the installation that wrote it reproduces it. An
+  older SMC checkpoint, streaming carry or filter export of such a model
+  differs from what this version computes, as it already did from any other
+  installation. A fitted state exported earlier replays, because it holds the
+  text itself.
+
 ## 0.2.226
 
 - Added: `brm_svi_fit` and `brm_svi_resume` hand out snapshots of a running fit
