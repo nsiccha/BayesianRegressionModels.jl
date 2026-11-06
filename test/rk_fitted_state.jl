@@ -159,7 +159,7 @@ end
 function check_planning(build, state, rk, design; resample_groups=())
     plan, emitted = BRM._rk_fitted_replay_plan(build(design), design, state; resample_groups)
     replay = reprocess(rk, design; resample_groups)
-    @test BRM._rk_program_statements(emitted) == state.program
+    @test BRM._rk_replay_statements(emitted, plan) == state.program
     @test isequal(design_inputs(plan, emitted, state),
         design_inputs(replay.plan, BRM._rk_retained_program(replay), state))
 end
@@ -325,12 +325,11 @@ end
     check_data_free(build, brm_fitted_state(prediction), rk, design)
 end
 
-@stestset "a block prior's data scalar stays a literal of the regression program" begin
+@stestset "a block prior's data scalar is an input of the regression program" begin
     # Snag `rk-sd-prior-data-fecc0c41`. A random-effect block reads its prior's
-    # inputs by name, and nothing defined that name on the regression route, so
-    # binding failed with "references unknown name". It takes the replay
-    # contract of `sigma ~ Exponential(prior_scale)` above: a literal no design
-    # binds, omitted or equal on a replay, and refused when changed.
+    # inputs by name. It takes the replay contract of
+    # `sigma ~ Exponential(prior_scale)` above: a bound input, omitted or equal
+    # on a replay, and refused when changed (user principle `0ikeidi`).
     build = brm(quote
         sigma ~ Exponential(1)
         mu ~ 1 + x + (1 + x | p | subject)
@@ -341,8 +340,8 @@ end
         prior_sd_scale=1.7)
     design = (; subject=[1, 2], x=[2.0, 5.0], y=[0.3, -0.4])
     rk = RKBRMI(build(train))
-    @test !haskey(rk_bound_data(rk), :prior_sd_scale)
-    @test :(prior_sd_scale = 1.7) in BRM._rk_emit_ast(rk.plan).main.args
+    @test rk_bound_data(rk).prior_sd_scale == 1.7
+    @test !(:(prior_sd_scale = 1.7) in BRM._rk_emit_ast(rk.plan).main.args)
     state = brm_fitted_state(rk)
     @test state.scalars == Dict(:prior_sd_scale => train.prior_sd_scale)
     free = check_data_free(build, state, rk, design)
@@ -356,11 +355,10 @@ end
         y ~ Normal(mu, sigma)
         z ~ Normal(eta, sigma)
     end
-    @test :(prior_sd_scale = 1.7) in BRM._rk_emit_ast(
-        RKBRMI(joint; held_out=(:z,)).plan).main.args
+    @test rk_bound_data(RKBRMI(joint; held_out=(:z,))).prior_sd_scale == 1.7
     predictive = RKBRMI(build((; subject=train.subject, x=train.x,
         prior_sd_scale=train.prior_sd_scale)))
-    @test !haskey(rk_bound_data(predictive), :prior_sd_scale)
+    @test rk_bound_data(predictive).prior_sd_scale == 1.7
     conflicting = merge(design, (; prior_sd_scale=9.0))
     for fitted in (rk, free)
         @test_throws "changes the fitted RK program" reprocess(fitted, conflicting)
@@ -374,12 +372,12 @@ end
     binder = rk_design_binder(rk)
     for held in (design, merge(design, (; x=[1.0, 3.0])))
         inputs = binder(held)
-        @test !haskey(inputs, :prior_sd_scale)
+        @test inputs.prior_sd_scale == 1.7
         @test Set(keys(inputs)) == Set(keys(rk_bound_data(reprocess(rk, held))))
     end
     @test !occursin("replayed in full", sprint(show, binder))
 
-    # The default start reads the emitted law's number: the median of the scale.
+    # The default start reads the bound input: the median of the scale.
     model = brm_nlme_model(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
     u = first(BRM._brm_nlme_prior_median_point(model))
     values = BRM._rk_constrained_values(rk, u)

@@ -66,7 +66,7 @@ end
 
 function streaming_source(rk, preprocessing)
     emitted = BRM._rk_retained_program(rk)
-    streaming_identity((; program=BRM._rk_program_statements(emitted),
+    streaming_identity((; program=BRM._rk_identity_statements(rk),
         callables=emitted.bindings, preprocessing))
 end
 

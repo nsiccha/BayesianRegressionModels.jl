@@ -145,6 +145,41 @@ stratified_lkj(K, eta) = brm(:(begin
     cor(:, p) ~ LKJCholesky($K, $eta)
     y ~ Normal(mu, sigma)
 end); mod=@__MODULE__)
+truncated_prior(lo, hi) = brm(:(begin
+    sigma ~ truncated(Normal(0.2, 1.1); lower=$lo, upper=$hi)
+    m ~ 1 + x
+    y ~ Normal(m, sigma)
+end); mod=@__MODULE__)
+restricted_prior(lo) = brm(:(begin
+    sigma ~ restricted(Normal(0.2, 1.1), $lo, Inf)
+    m ~ 1 + x
+    y ~ Normal(m, sigma)
+end); mod=@__MODULE__)
+uniform_prior(lo, hi) = brm(:(begin
+    sigma ~ Uniform($lo, $hi)
+    m ~ 1 + x
+    y ~ Normal(m, sigma)
+end); mod=@__MODULE__)
+mvnormal_scale(s) = brm(:(begin
+    w ~ MvNormal(zeros(3), $s)
+    y ~ Normal(sum(w), 0.5)
+end); mod=@__MODULE__)
+dirichlet_prior(a) = brm(:(begin
+    p ~ Dirichlet(3, $a)
+    y ~ Categorical(p)
+end); mod=@__MODULE__)
+factor_effects() = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + f
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
+known_cor(C) = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 + x | p | subject)
+    sd(:, p) ~ Exponential(1)
+    cor(:, p) = $C
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
 end
 const RSM = RuntimeSettingsModels
 
@@ -286,8 +321,8 @@ reverse_problem(rk) = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enz
 
 # The models `build(d)` for `d` in `data` emit one source, lower to one program
 # and prepare one query type, read their numbers from bound inputs, and differ in
-# their density.
-function check_one_lowering(label, build, data, inputs)
+# their density (unless `differ=false`: the values are labels of one law).
+function check_one_lowering(label, build, data, inputs; differ=true)
     @testset "$label" begin
         models = [RKBRMI(build(d)) for d in data]
         @test allequal(emitted_program(rk) for rk in models)
@@ -297,7 +332,7 @@ function check_one_lowering(label, build, data, inputs)
             @test all(haskey(rk_bound_data(rk), name) for rk in models)
         end
         u = rk_point(first(models))
-        @test !allequal(sampler_query(rk)(u) for rk in models)
+        @test differ != allequal(sampler_query(rk)(u) for rk in models)
     end
 end
 
@@ -468,4 +503,115 @@ end
     replayed = BRM.stan_data(reprocess(sb, lkj_data(1.7)))
     key = only(k for k in keys(replayed) if endswith(string(k), "_lkj_eta"))
     @test replayed[key] == 1.7
+end
+
+@stestset "a checkpoint identity sees a prior's numbers" begin
+    # The program no longer spells them, so what identifies a fit states them:
+    # a resumed SVI run, a carried SMC posterior and a filter compare this.
+    build = RSM.isolator()
+    a, b = RKBRMI(build(merge(ISOLATOR, VALUE_A))), RKBRMI(build(merge(ISOLATOR, VALUE_B)))
+    @test emitted_program(a) == emitted_program(b)
+    @test BRM._rk_identity_statements(a) != BRM._rk_identity_statements(b)
+    @test "prior input: mu = 0.1" in BRM._rk_identity_statements(a)
+    @test BRM._brm_svi_source_id(a) != BRM._brm_svi_source_id(b)
+    same = RKBRMI(build(merge(ISOLATOR, VALUE_A)))
+    @test BRM._brm_svi_source_id(a) == BRM._brm_svi_source_id(same)
+    # A number only the observation reads is the data's: it identifies no prior.
+    observed = brm(:(begin
+        z[1:n] .~ LogNormal.(0.1, 0.5)
+        y ~ Normal(z[idx], noise)
+    end); mod=RSM)
+    x1, x2 = RKBRMI(observed(merge(ISOLATOR, (; noise=0.2)))), RKBRMI(observed(merge(ISOLATOR, (; noise=0.4))))
+    @test BRM._rk_identity_statements(x1) == BRM._rk_identity_statements(x2)
+end
+
+@stestset "support bounds are spelled by name" begin
+    # The emitted program serves every value. RKPPL's lowering still reads a bound
+    # into the constrain transform (ReactiveKernels snag `rkppl-sized-vect-69604d32`).
+    for (label, field, literal, values) in (
+            ("truncated", RSM.truncated_prior(:lo, :hi), v -> RSM.truncated_prior(v.lo, v.hi),
+                ((; lo=0.1, hi=9.0), (; lo=0.05, hi=7.0))),
+            ("restricted", RSM.restricted_prior(:lo), v -> RSM.restricted_prior(v.lo),
+                ((; lo=0.1,), (; lo=0.2,))),
+            ("Uniform", RSM.uniform_prior(:lo, :hi), v -> RSM.uniform_prior(v.lo, v.hi),
+                ((; lo=0.1, hi=9.0), (; lo=0.2, hi=7.0))))
+        @testset "$label" begin
+            models = [RKBRMI(field(merge(LDATA, v))) for v in values]
+            @test allequal(emitted_program(rk) for rk in models)
+            @test_broken allequal(lowered_program(rk) for rk in models)
+            for (v, rk) in zip(values, models)
+                twin = RKBRMI(literal(v)(LDATA))
+                u = rk_point(twin)
+                @test rk_density(rk, u) ≈ rk_density(twin, u) atol=1e-12 rtol=1e-12
+                @test all(haskey(rk_bound_data(rk), name) for name in keys(v))
+            end
+            u = rk_point(first(models))
+            @test rk_density(first(models), u) != rk_density(last(models), u)
+            first_value = first(values)
+            changed = map(x -> x + 0.01, first_value)
+            @test_throws "prior input:" reprocess(first(models), merge(LDATA, first_value, changed))
+        end
+    end
+    # The plan still reads the numbers for its support checks.
+    @test_throws "lower < upper" RKBRMI(RSM.truncated_prior(:lo, :hi)(merge(LDATA, (; lo=2.0, hi=1.0))))
+    @test_throws "`Uniform` bounds must be finite" RKBRMI(
+        RSM.uniform_prior(:lo, :hi)(merge(LDATA, (; lo=2.0, hi=1.0))))
+end
+
+@stestset "a law's array built from scalars is an input" begin
+    check_one_lowering("MvNormal scale", RSM.mvnormal_scale(:s),
+        [(; y=[0.3, 0.1], s) for s in (1.7, 2.9)], (:s,))
+    check_one_lowering("Dirichlet concentration", RSM.dirichlet_prior(:a),
+        [(; y=[1, 2, 3, 1], a) for a in (1.7, 2.9)], (:a,))
+    for (field, literal) in (
+            (RSM.mvnormal_scale(:s)((; y=[0.3, 0.1], s=1.7)), RSM.mvnormal_scale(1.7)((; y=[0.3, 0.1]))),
+            (RSM.dirichlet_prior(:a)((; y=[1, 2, 3, 1], a=1.7)), RSM.dirichlet_prior(1.7)((; y=[1, 2, 3, 1]))))
+        rk_field, rk_literal = RKBRMI(field), RKBRMI(literal)
+        u = rk_point(rk_literal)
+        @test rk_density(rk_field, u) ≈ rk_density(rk_literal, u) atol=1e-12 rtol=1e-12
+    end
+end
+
+@stestset "a factor's levels and count are inputs" begin
+    base = (; y=LDATA.y)
+    labels(a, b, c) = (; f=[a, a, b, b, c, c])
+    build = RSM.factor_effects()
+    # The same count under other labels: one emitted and one lowered program.
+    check_one_lowering("other labels", build,
+        [merge(base, labels("a", "b", "c")), merge(base, labels("a", "b", "z"))], ();
+        differ=false)
+    models = [RKBRMI(build(merge(base, d))) for d in (labels("a", "b", "c"), (; f=["a", "a", "b", "b", "c", "d"]))]
+    @test allequal(emitted_program(rk) for rk in models)
+    @test models[1].model.layout.total + 1 == models[2].model.layout.total
+    # Positive control and the size RK owns: the layout spells the extent
+    # (ReactiveKernels snag `rkppl-sized-vect-69604d32`).
+    @test_broken allequal(lowered_program(rk) for rk in models)
+    # A frozen replay keeps the fitted levels and refuses an unseen one.
+    fit = first(models)
+    @test rk_density(reprocess(fit, merge(base, labels("a", "b", "c"))), rk_point(fit)) ==
+        rk_density(fit, rk_point(fit))
+    @test_throws "is not a training level" reprocess(fit, merge(base, labels("a", "b", "unseen")))
+    binder = rk_design_binder(fit)
+    design = merge(base, labels("a", "b", "c"))
+    @test isequal(binder(design), rk_bound_data(reprocess(fit, design)))
+    @test !occursin("replayed in full", sprint(show, binder))
+end
+
+@stestset "a known correlation's factor is an input" begin
+    C(c) = [1.0 c; c 1.0]
+    check_one_lowering("data field", RSM.known_cor(:C),
+        [merge(LDATA, (; C=C(c))) for c in (0.3, 0.5)], ())
+    check_one_lowering("literal", c -> RSM.known_cor(:([1 $c; $c 1]))(LDATA), [0.3, 0.5], ())
+    field, literal = RKBRMI(RSM.known_cor(:C)(merge(LDATA, (; C=C(0.3))))),
+        RKBRMI(RSM.known_cor(:([1 0.3; 0.3 1]))(LDATA))
+    u = rk_point(literal)
+    @test rk_density(field, u) ≈ rk_density(literal, u) atol=1e-12 rtol=1e-12
+    # Another matrix on a frozen replay is another fit.
+    @test_throws "changes the fitted RK program" reprocess(field, merge(LDATA, (; C=C(0.5))))
+    @test reprocess(field, merge(LDATA, (; C=C(0.3)))) isa RKBRMI
+    state = brm_fitted_state(field)
+    @test_throws "changes the fitted RK program" RKBRMI(RSM.known_cor(:C)(merge(LDATA, (; C=C(0.5)))), state)
+    binder = rk_design_binder(literal)
+    @test isequal(binder(LDATA), rk_bound_data(reprocess(literal, LDATA)))
+    @test !occursin("replayed in full", sprint(show, binder))
 end

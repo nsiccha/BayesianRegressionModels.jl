@@ -285,15 +285,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         # known scale is its number in `tau`, a known correlation a constant
         # Cholesky factor in place of the LKJ draw.
         known = any(_brm_is_known_scale, bucket.sd_priors)
-        L_value = nothing
-        if bucket.known_cor !== nothing
-            L_value = _rk_ast_fresh_name(string(draws, "_L"), taken)
-            factor = Matrix{Float64}(cholesky(Symmetric(bucket.known_cor)).L)
-            # RKPPL takes pure calls only, so the constant is `hcat` of its
-            # columns rather than a matrix literal.
-            push!(stmts, Expr(:(=), L_value, Expr(:call, :hcat,
-                (Expr(:vect, factor[:, j]...) for j in axes(factor, 2))...)))
-        end
+        L_value = bucket.known_input
         _rk_ast_group_component!(definitions, stmts, taken, draws, levels_of, K,
             _rk_bucket_eta(bucket), priors;
             nu=_rk_ast_student_t_nu(bucket.dist, bindings, taken), L_value)
@@ -397,23 +389,21 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
 end
 
 # A level correlation's factor as a pure call argument: the sampled
-# declaration's name, or the known factor's `hcat` constant inline.
+# declaration's name, or the generated input holding the known factor.
 _rk_ast_level_factor_value(lc::_BRMLevelCorrelation) =
-    lc.kind === :parameter ? lc.name : Expr(:call, :hcat,
-        (Expr(:vect, lc.factor[:, j]...) for j in axes(lc.factor, 2))...)
+    lc.kind === :parameter ? lc.name : _rk_level_factor_name(lc)
+# A plate cell's field is planned inside its kernel, where no plan-level input
+# reaches it, so a known factor stays a `hcat` constant there.
+_rk_ast_level_factor_constant(lc::_BRMLevelCorrelation) = Expr(:call, :hcat,
+    (Expr(:vect, lc.factor[:, j]...) for j in axes(lc.factor, 2))...)
 
 # The RK value of a level correlation's lower Cholesky factor: the sampled
 # `LKJCholesky` declaration by name, or a known correlation's factor as a
-# constant (RKPPL takes pure calls, so `hcat` of its columns), like a known
-# `cor(:, ID) = R`.
+# generated input, like a known `cor(:, ID) = R` (`_rk_generated_inputs`).
 _rk_ast_level_factor!(stmts, taken, lc::_BRMLevelCorrelation) =
     _rk_ast_level_factor!(stmts, taken, lc, Val(lc.kind))
 _rk_ast_level_factor!(_stmts, _taken, lc, ::Val{:parameter}) = lc.name
-function _rk_ast_level_factor!(stmts, taken, lc, ::Val{:data})
-    name = _rk_ast_fresh_name(string("L_levelcor_", lc.name), taken)
-    push!(stmts, Expr(:(=), name, _rk_ast_level_factor_value(lc)))
-    name
-end
+_rk_ast_level_factor!(_stmts, _taken, lc, ::Val{:data}) = _rk_level_factor_name(lc)
 
 # A penalized smooth, as StanBlocks' `_sb_s_generic`/`_sb_t2_generic`: the
 # fitted bases stay caller-level values; one block allocates the unpenalized

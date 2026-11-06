@@ -29,11 +29,22 @@ instead of failing at run time.
   `<block>_lkj_eta`. A frozen RK replay still refuses data holding another value
   of a prior's scalar, `eta` included, and a fresh replay
   (`freeze_constants=false`) takes it. A Stan replay keeps the fit's `eta`.
+- Changed: a factor's fitted levels and coefficient count, a known correlation's
+  factor (`cor(:, ID) = C`, `gr(g; cor = R)`), a scalar `MvNormal` scale and the
+  concentration of `Dirichlet(K, a)` are inputs of the RK program too. A factor
+  with other labels but the same count lowers to the same program.
+- Changed: a data scalar in a `truncated` or `restricted` bound or a `Uniform` is
+  spelled by name in the emitted RK program. ReactiveKernelsPPL still reads such a
+  bound into its constrain transform, so the lowered program and query type follow
+  the value until ReactiveKernels snag `rkppl-sized-vect-69604d32` lands.
+- Changed: what identifies a fit for an SVI source, an SMC frame or carried source
+  and a filter now states the numbers its priors read, because the program text no
+  longer does. A resume with another prior value is still refused.
 - Not changed: a literal an author writes in a prior (`Exponential(1.7)`) stays in
-  that author's source. Truncation and restriction bounds, `Uniform` bounds,
-  `MvNormal` scale, `Dirichlet` concentration and `Horseshoe` scales are still
-  folded or refused. ReactiveKernels' `prepare_sampler` still specializes on a
-  bound scalar's value (ReactiveKernels snag `prepare-sampler-e69f1b38`), and
+  that author's source. `t2` and `multigroup` `k` are still literals, a data vector
+  or matrix a prior reads is still spelled in the program, and `Horseshoe` scales
+  still refuse data on RKBRMI. ReactiveKernels' `prepare_sampler` still specializes
+  on a bound scalar's value (ReactiveKernels snag `prepare-sampler-e69f1b38`), and
   changed extents still change the lowered program
   (`rkppl-sized-vect-69604d32`).
 

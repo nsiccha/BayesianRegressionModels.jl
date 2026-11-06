@@ -144,7 +144,7 @@ function _brm_svi_gaussian_certificate(backend::RKBRMI, view::BRMNLMEView)
         bounds = p.support_override
         _brm_svi_gaussian_require(all(_brm_svi_gaussian_literal, _brm_svi_gaussian_args(p.args, reg)) &&
             (bounds === nothing || bounds isa Symbol || (bounds isa Tuple &&
-                all(x -> x isa Real, Base.tail(bounds)))),
+                all(x -> x isa Real, _brm_svi_gaussian_args(Base.tail(bounds), reg)))),
             "UncertifiedPrior: scalar prior must have literal arguments")
         push!(parameters, p.name)
     end

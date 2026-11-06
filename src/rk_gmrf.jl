@@ -538,7 +538,7 @@ function _rk_expand_cell_gmrf(statement, index, selected, defs, bindings, taken,
         Expr(:call, _rk_value_callee!(bindings, brm_gmrf_identity_factor, taken),
             _rk_ast_property(support, :geometry)) :
         spec.correlation.kind === :parameter ? values[spec.correlation.name] :
-        _rk_ast_level_factor_value(spec.correlation)
+        _rk_ast_level_factor_constant(spec.correlation)
     L = _rk_block_argument!(block, :L, correlation)
     renamed = Dict{Symbol,Symbol}(name => _rk_block_argument!(block, name, values[name])
         for name in spec.inputs if spec.correlation === nothing ||

@@ -18,7 +18,7 @@ end
 _rk_attach_data_assignments!(plan::_RKUnconditionedPlan, _assignments, _constants) = plan
 
 _rk_plan_taken(plan::_RKStructuralPlan) = union!(Set{Symbol}(keys(plan.columns)),
-    keys(_rk_input_bindings(plan)),
+    keys(_rk_input_bindings(plan)), keys(_rk_generated_inputs(plan)),
     (d.name for d in plan.derived), (p.name for p in plan.parameters),
     (p.name for p in plan.predictors), (a.name for a in plan.assignments),
     (v.name for v in plan.vector_parameters),

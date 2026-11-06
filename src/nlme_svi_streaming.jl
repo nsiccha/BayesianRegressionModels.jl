@@ -39,7 +39,7 @@ _brm_svi_global_factor(q) = deepcopy((; q.family, q.μ, q.ρ, q.Β))
 function _brm_svi_source_id(rk)
     emitted = _rk_retained_program(rk)
     io = IOBuffer()
-    serialize(io, (sprint(show, brm_source(rk); context=:brm_documentation => false), _rk_program_statements(emitted),
+    serialize(io, (sprint(show, brm_source(rk); context=:brm_documentation => false), _rk_identity_statements(rk),
         emitted.bindings))
     bytes2hex(sha256(take!(io)))
 end

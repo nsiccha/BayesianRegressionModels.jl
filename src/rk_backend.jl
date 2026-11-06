@@ -411,20 +411,23 @@ struct _RKRanefBucket
     # constant Cholesky factor instead of an LKJ draw. Known scales
     # (`sd(...) = value`) ride `sd_priors` as `_BRMKnownScale` entries.
     known_cor::Union{Nothing,Matrix{Float64}}
-    # `gr(g; cor=Omega)`: the correlation of the block's LEVELS
-    # (src/level_correlation.jl); the block's draws are multiplied on the left
-    # by its Cholesky factor before the rows gather them.
-    level_cor::Union{Nothing,_BRMLevelCorrelation}
     # What the program reads for a stated `cor(:, ID) ~ LKJCholesky(K, eta)`: the
     # data field by name (or an expression over it), or a generated input holding
     # a literal `lkj_eta`. `nothing` for the default law, which reads no number
     # of the model.
     eta_input::Any
+    # The generated input holding `known_cor`'s lower Cholesky factor.
+    known_input::Union{Nothing,Symbol}
+    # `gr(g; cor=Omega)`: the correlation of the block's LEVELS
+    # (src/level_correlation.jl); the block's draws are multiplied on the left
+    # by its Cholesky factor before the rows gather them. Stays the last field:
+    # planning a level-correlated block rebuilds its bucket field by field.
+    level_cor::Union{Nothing,_BRMLevelCorrelation}
 end
 _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping, sd_priors,
         decomposition, dist, known_cor, level_cor) =
     _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping,
-        sd_priors, decomposition, dist, known_cor, level_cor, nothing)
+        sd_priors, decomposition, dist, known_cor, nothing, nothing, level_cor)
 _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping, sd_priors,
         decomposition, dist, known_cor) =
     _RKRanefBucket(id, group, kind, margins, slices, lkj_eta, label, grouping,
@@ -455,9 +458,12 @@ struct _RKVectorParameter
     # A data-owned extent is bound as a validated integer shape input.
     # `size` describes this binding for BRM's shape checks.
     extent::Union{Nothing,Symbol}
+    # The argument the program reads for a law `args` holds the numbers of:
+    # `Dirichlet(K, a)` with a data `a`. `nothing` spells `args`.
+    spelled::Any
 end
-_RKVectorParameter(name, family, args, size, label) =
-    _RKVectorParameter(name, family, args, size, label, nothing)
+_RKVectorParameter(name, family, args, size, label, extent=nothing) =
+    _RKVectorParameter(name, family, args, size, label, extent, nothing)
 
 struct _RKStructuralPlan
     responses::Vector{_RKLikelihoodSpec}
@@ -3798,8 +3804,13 @@ function _rk_shared_factor_spec(term, target, data, columns, taken; cellmeans)
     block = source
     # `level_values` names the fitted level of each coefficient, in order,
     # for the cross-backend coordinate transport (src/coordinate_transport.jl).
+    # The program reads the fitted levels and the coefficient count as inputs
+    # (`_rk_generated_inputs`), so it spells neither.
     options = (; coding=cellmeans ? :fullrank : :subset, levels=:shared,
-        index, index_levels, labels=Tuple(c.label for c in shared), level_values)
+        index, index_levels, labels=Tuple(c.label for c in shared), level_values,
+        level_input=_rk_mint_generated!(taken, columns, string(base, "s")),
+        extent_input=_rk_mint_generated!(taken, columns,
+            string(first(named).effect_block, "_n")))
     [_RKTermSpec(:factor, [source], options, block, block)]
 end
 
@@ -4766,12 +4777,14 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
                   "`$(bucket.group)` (`gr(...; cor=...)`), and its block is " *
                   (dist !== nothing ? "Student-t" : "an `r2d2` decomposition") *
                   "; that combination is not implemented")
+        known = known_cor !== nothing && size(known_cor, 1) >= 2 ? known_cor : nothing
         replacement = _RKRanefBucket(bucket.id, bucket.group, bucket.kind,
             bucket.margins, bucket.slices, eta, bucket.label,
-            bucket.grouping, sd_priors, decomposition, dist,
-            known_cor !== nothing && size(known_cor, 1) >= 2 ? known_cor : nothing,
-            bucket.level_cor,
-            _rk_ranef_eta_input(bucket, override, known_cor, marginal, columns, taken))
+            bucket.grouping, sd_priors, decomposition, dist, known,
+            _rk_ranef_eta_input(bucket, override, known_cor, marginal, columns, taken),
+            known === nothing ? nothing : _rk_mint_generated!(taken, columns,
+                string(bucket.label, "_known_L")),
+            bucket.level_cor)
         buckets[i] = replacement
         for (key, value) in lookup
             value === bucket && (lookup[key] = replacement)
@@ -5073,7 +5086,7 @@ function _rk_car_mixing_prior(prior, target::Symbol, area::Symbol)
     lo, hi = Float64.(args)
     name === :Uniform && !(0 <= lo < hi <= 1) && error(
         "$prefix: $where prior `Uniform($lo, $hi)` must stay inside [0, 1]")
-    (name, name === :Uniform ? (lo, hi) : _rk_effect_spellings(prior, (lo, hi)), nothing)
+    (name, _rk_effect_spellings(prior, (lo, hi)), nothing)
 end
 
 function _rk_plan_car_term!(prepared::_BRMPreparedTerm{typeof(car)},
@@ -5159,7 +5172,7 @@ function _rk_cdar_rho_prior(prior, target::Symbol, source::Symbol)
         (:restricted, 0.0, 1.0))
     name === :Uniform && !(0 <= a < b <= 1) && error(
         "$prefix: $where prior `Uniform($a, $b)` must stay inside [0, 1]")
-    (name, name === :Uniform ? (a, b) : _rk_effect_spellings(prior, (a, b)), nothing)
+    (name, _rk_effect_spellings(prior, (a, b)), nothing)
 end
 
 function _rk_plan_cdar_term!(prepared::_BRMPreparedTerm{typeof(cdar)},
@@ -6639,11 +6652,12 @@ function _rk_sampled_parameter(name::Symbol, prior::_BRMPreparedExpr,
     family_prior = declaration_bounds ? _BRMPreparedExpr(callable,
         prior.args, (; (key => value for (key, value) in pairs(prior.kwargs)
             if !(key in (:lower, :upper)))...)) : prior
+    spell(bound, value) = _rk_bound_spelling(bound, value, data, name)
     family, args, support_override = if callable === truncated
         # Keyword bounds are validated inside the truncated gate.
         _rk_truncated_prior(prior, name, (bound, side) ->
             _rk_truncation_bound(bound, name, side, data,
-                consts, aliases, parameters, assign_names))
+                consts, aliases, parameters, assign_names), spell)
     elseif callable === LocationScale
         _rk_locationscale_studentt(family_prior, name)
     else
@@ -6670,43 +6684,51 @@ function _rk_sampled_parameter(name::Symbol, prior::_BRMPreparedExpr,
             lower < upper || error("$prefix: parameter `$name` " *
                 "declaration bounds require lower < upper")
         end
-        support_override = (:restricted, lower, upper)
+        support_override = (:restricted, spell(get(prior.kwargs, :lower, nothing), lower),
+            spell(get(prior.kwargs, :upper, nothing), upper))
     end
     expected = _RK_SLICE1_PRIOR_ARITY[family]
     length(args) == expected || error(
         "$prefix: parameter `$name` prior `$family` needs " *
         "$expected argument(s), got $(length(args))")
     resolved = Any[]
+    # Each argument's number where it has one: a family's checks read those,
+    # while the program reads a data scalar by name (one program for every value).
+    numbers = Any[]
     for arg in args
         vector = isnothing(elements) ? nothing :
             _rk_vector_prior_arg(arg, name, data, elements)
         if !isnothing(vector)
             _rk_gate_literal_args(family, name)
             push!(resolved, vector)
+            push!(numbers, vector)
         elseif arg isa Number
             value = Float64(arg)
             isfinite(value) || error(
                 "$prefix: parameter `$name` prior " *
                 "hyperparameters must be finite")
             push!(resolved, value)
+            push!(numbers, value)
         elseif arg isa _BRMPreparedRef
             kind, value = _rk_resolve_use_ref(arg.name, consts, aliases,
                 parameters, assign_names,
                 "parameter `$name` prior")
             kind === :number || _rk_gate_literal_args(family, name)
-            # A data scalar stays a name, so one program serves every value.
-            push!(resolved, kind === :number && _rk_data_scalar(arg.name, data) &&
-                !(family in _RK_SAMPLED_LITERAL_ARGS) ? arg.name : value)
+            push!(resolved, kind === :number && _rk_data_scalar(arg.name, data) ?
+                arg.name : value)
+            push!(numbers, value)
         else
             value = _rk_prior_argument_expr(arg, name, data,
-                consts, aliases, parameters, assign_names;
-                fold=family in _RK_SAMPLED_LITERAL_ARGS)
-            value isa Number || _rk_gate_literal_args(family, name)
+                consts, aliases, parameters, assign_names)
+            number = family in _RK_SAMPLED_LITERAL_ARGS ? _rk_prior_argument_expr(arg, name,
+                data, consts, aliases, parameters, assign_names; fold=true) : value
+            number isa Number || _rk_gate_literal_args(family, name)
             push!(resolved, value)
+            push!(numbers, number)
         end
     end
     family === :Uniform &&
-        _rk_check_uniform_bounds(resolved, name)
+        _rk_check_uniform_bounds(numbers, name)
     # A zero-location Normal/Cauchy half keeps its `HalfNormal`/
     # `HalfCauchy` spelling; both spellings have the normalized density.
     if (family === :Normal || family === :Cauchy) &&
@@ -6775,6 +6797,20 @@ function _rk_prior_argument_expr(arg, name::Symbol, data::AbstractDict,
             return value
     end
     _rk_lower_assignment_expr(rewritten, name)
+end
+
+# How the program spells a support bound, once its number passed the checks: by
+# the data scalars it reads, so the emitted program serves every value. RKPPL
+# still reads the value into the constrain transform when it lowers, so the lowered
+# program follows it (ReactiveKernels snag `rkppl-sized-vect-69604d32`).
+_rk_bound_spelling(_bound, value, _data, _name) = value
+_rk_bound_spelling(bound::_BRMPreparedRef, value, data, _name) =
+    value isa Real && _rk_data_scalar(bound.name, data) ? bound.name : value
+function _rk_bound_spelling(bound::_BRMPreparedExpr, value, data, name)
+    value isa Real || return value
+    refs = _brm_prepared_references(bound)
+    !isempty(refs) && all(ref -> _rk_data_scalar(ref, data), refs) ?
+        _rk_lower_assignment_expr(bound, name) : value
 end
 
 # A `truncated` bound: a frozen number (as a declaration bound), or a live
@@ -6997,8 +7033,12 @@ function _rk_plan_vector_parameters!(prepared, data::AbstractDict,
             isempty(prior.kwargs) || error(
                 "$prefix: parameter `$name` `Dirichlet` takes no keywords")
             alpha = _rk_dirichlet_alpha(prior.args, name, consts)
+            concentration = last(prior.args)
+            spelled = length(prior.args) == 2 && concentration isa _BRMPreparedRef &&
+                _rk_data_scalar(concentration.name, data) ?
+                Expr(:call, :fill, concentration.name, first(prior.args)) : nothing
             push!(specs, _RKVectorParameter(name, :simplex_dirichlet,
-                (alpha,), length(alpha), name))
+                (alpha,), length(alpha), name, nothing, spelled))
         elseif prior.callable === _brm_vector_prior
             # `name[1:n] .~ law` (decision `19ssmud`): `n` elements of `law`.
             len, law = prior.args
@@ -7050,7 +7090,7 @@ function _rk_mvnormal_parameter(target, prior, prepared, data, consts, aliases,
     sigma = scale isa Diagonal ? literal(sqrt.(diag(scale))) :
         scale isa UniformScaling ? sqrt(Float64(scale.λ)) :
         scale isa AbstractVector ? literal(scale) :
-        scale isa Real ? Float64(scale) :
+        scale isa Real ? _rk_bound_spelling(last(prior.args), Float64(scale), data, target) :
         _rk_resolve_mvnormal_scale(last(prior.args), target, data, consts, aliases,
             parameters, assign_names)
     element = _RKSampledParameter(target, :Normal, (mu, sigma), nothing, target)
@@ -7112,7 +7152,8 @@ end
 # or a live scalar expression (`_rk_truncation_bound`). A zero-location Normal/Cauchy half keeps the
 # legacy `:positive` override after its arguments resolve (byte-identical
 # `HalfNormal`/`HalfCauchy` emission, `_rk_plan_parameters!`).
-function _rk_truncated_prior(prior::_BRMPreparedExpr, name::Symbol, bound)
+function _rk_truncated_prior(prior::_BRMPreparedExpr, name::Symbol, bound,
+        spell=(_bound, value) -> value)
     prefix = "RK backend"
     args, kwargs = prior.args, prior.kwargs
     lower, upper = if length(args) == 3 && isempty(kwargs)
@@ -7156,7 +7197,7 @@ function _rk_truncated_prior(prior::_BRMPreparedExpr, name::Symbol, bound)
     !(lo isa Real && hi isa Real) || lo < hi || error(
         "$prefix: parameter `$name` truncated prior bounds require " *
         "lower < upper, got [$lo, $hi]")
-    (family, base_args, (:truncated, lo, hi))
+    (family, base_args, (:truncated, spell(lower, lo), spell(upper, hi)))
 end
 
 # A scalar field of the data (including a resolved `name = constant(expr)`) is a
