@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.216
+
+- Fixed: a one-unit NLME gradient copied the whole model to the heap twice per
+  call, about 17 of the call's 20 KB on an 80-subject PK model, and most of its
+  time. `BRMNLMEModel` now keeps its fields behind a pointer, so passing it costs
+  nothing. Wall time of a 40-iteration SAEM fit on that model fell 1.3–2.2× under
+  lockstep and 1.7–2.9× under `WarmupHMCNUTS(threads = true)`. Seeded fits keep
+  the same bits. The type is a `mutable struct` whose fields are all `const`, so
+  its fields still cannot be assigned; `===` between two models now compares
+  identity.
+- Fixed: the evaluator pool of concurrent one-unit calls prepares at most one
+  evaluator per Julia thread, as brm-use states. A contended pool reached
+  `Threads.maxthreadid()`, which counts GC threads too: 18 evaluators at 13
+  threads, each about 0.35 s and 120 MiB allocated to prepare at that size.
+
 ## 0.2.215
 
 - Fixed: `brm_svi_fit` and `brm_svi_resume` could not recover a dense unit
