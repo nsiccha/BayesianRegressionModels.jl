@@ -2,26 +2,27 @@ using Test
 include(joinpath(@__DIR__, "..", "src", "nlme_selection.jl"))
 include(joinpath(@__DIR__, "..", "src", "nlme_svi_workspace.jl"))
 
-@testset "SVI compact unit layouts" begin
-    for globals in (Int[], [1, 4, 9]), block in (Int[], [6], [8, 2, 5])
-        layout = _brm_svi_unit_layout(globals, block)
-        indices = vcat(globals, block)
-        order = sortperm(indices)
-        g, z = 0.3 .* globals, -0.7 .* block
-        # Independent old dense gather/scatter as a small-array oracle.
-        oracle = vcat(g, z)[order]
-        values = fill(NaN, length(indices))
-        @test _brm_svi_joint!(values, layout, g, z) == oracle
-        gradient = cos.(indices[order])
-        joint_gradient = similar(gradient)
-        joint_gradient[order] = gradient
-        gg, gz = similar(g), similar(z)
-        _brm_svi_split_gradient!(gg, gz, layout, gradient)
-        @test vcat(gg, gz) == joint_gradient
-    end
-    small = _brm_svi_unit_layout(collect(1:100), [103, 101, 102])
-    large = _brm_svi_unit_layout(collect(1:100_000), [103, 101, 102] .+ 100_000)
+@testset "a unit's places follow its footprint, not the globals" begin
+    # Packed 1:12: globals 2, 4, 7; unit 1 owns 11, 1, 8; unit 2 owns 3, 9; the rest
+    # (5, 6, 10, 12) are fixed values a footprint may read.
+    globals, units = [2, 4, 7], [[11, 1, 8], [3, 9]]
+    footprints = [[1, 2, 5, 8, 11], [3, 7, 9, 12]]
+    places = _brm_svi_footprint_places(footprints, globals, units, 12)
+    @test places == [[-2, 1, 0, -3, -1], [-1, 3, -2, 0]]
+    # The packed-length table is temporary: no unit keeps it or another unit's entries.
+    @test _brm_svi_footprint_places([[1], [1]], [1], [Int[], Int[]], 1) == [[1], [1]]
+    small = _brm_svi_footprint_places(footprints, globals, units, 12)
+    large = _brm_svi_footprint_places(footprints, vcat(globals, 13:100_000), units, 100_000)
     @test Base.summarysize(small) == Base.summarysize(large)
+    # Touched globals: the footprint's, and the prior bucket's reads of the globals.
+    @test _brm_svi_touched_globals(places, nothing) == [[1], [3]]
+    prior = (; places=[[1], [3, 1, -1, 0, 3], Int[]])
+    @test _brm_svi_touched_globals(places, prior) == [[1, 3], [3]]
+    # A worker's buffers start at zero and are one pair per worker.
+    buffers = _brm_svi_worker_buffers(globals)
+    @test buffers.plus == buffers.minus == zeros(3) && buffers.plus !== buffers.minus
+    @test _brm_svi_global_buffers(buffers, 3) === (buffers.plus, buffers.minus)
+    @test _brm_svi_global_buffers(nothing, 2) == (zeros(2), zeros(2))
 end
 
 @testset "partition selections share globals and iterate the exact sorted union" begin

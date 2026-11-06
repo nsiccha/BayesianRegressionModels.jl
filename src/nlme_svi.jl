@@ -88,16 +88,16 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
     partition, partition_view = connected ? _brm_svi_partition(m, ownership) :
         (m.cell_gradient, m.view)
     plan = _brm_nlme_partition_plan(partition, m.unit, globals, partition_view; units)
-    layouts = [(; selection.order, selection.slots) for selection in plan.indices]
-    width = length(globals) + maximum(length, units; init=0)
-    work = [(; values=zeros(width), gradient=zeros(width))]
+    places = _brm_svi_footprint_places(plan.footprints, globals, units, length(m.unit))
+    work = [_brm_svi_worker_buffers(globals)]
     nz = count(==(:subject_effect), m.view.role)
     # Connected targets use selected authored buckets even for standardized
     # draws: the legacy global-prior path traverses every local prior at zero.
     prior = !connected && sum(length, units; init=0) == nz &&
         all(j -> m.view.role[j] === :subject_effect, Iterators.flatten(units)) ? nothing :
         _brm_svi_authored_prior(m, globals, units; factors=ownership.factors)
-    (; m, globals, units, ownership, previous, partition, plan, plans=[plan], work, layouts, prior,
+    (; m, globals, units, ownership, previous, partition, plan, plans=[plan], work, places,
+       touched=_brm_svi_touched_globals(places, prior), prior,
        z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
 end
 
@@ -113,9 +113,7 @@ function _brm_svi_with_workers(t, n, progress=nothing)
             plan
         end
     end
-    width = length(first(t.work).values)
-    work = vcat([first(t.work)],
-        [(; values=zeros(width), gradient=zeros(width)) for _ in workers])
+    work = vcat([first(t.work)], [_brm_svi_worker_buffers(t.globals) for _ in workers])
     merge(t, (; plans=vcat([t.plan], workers), work))
 end
 
@@ -164,18 +162,44 @@ function _brm_svi_global_term(::Nothing, t, g)
     value - t.z_constant, gradient[t.globals]
 end
 
-# Each worker owns its plan and one G + max(d_i) workspace. Unit layout
-# metadata stores local positions only; globals are never repeated per unit.
+# Unit i's term with its gradients in `gg` (the globals) and `gz` (its block), both
+# overwritten: the whole of `gg`, so this costs the globals' length. An iteration
+# evaluates through `_brm_svi_unit_local!`, which does not.
 function _brm_svi_unit_term!(gg, gz, t, i, g, z, plan=t.plan, work=first(t.work))
-    D = length(t.globals)
-    layout = t.layouts[i]
-    values = view(work.values, 1:D+length(z))
-    gradient = view(work.gradient, 1:D+length(z))
-    _brm_svi_joint!(values, layout, g, z)
-    fill!(gradient, 0.0)
-    value = _brm_nlme_partition_sum!(gradient, plan, t.m.unit, i, values)
-    _brm_svi_split_gradient!(gg, gz, layout, gradient)
+    fill!(gg, 0.0)
+    fill!(gz, 0.0)
+    _brm_svi_unit_local!(gg, gz, t, i, g, z, plan, work)
+end
+# An analytic test target has only the term above.
+_brm_svi_unit_local!(gg, gz, t, i, g, z, plan, work) =
+    _brm_svi_unit_term!(gg, gz, t, i, g, z, plan, work)
+
+# The same, costing the unit's footprint and prior support, not the globals. It adds
+# into `gg` and `gz`, reads and writes only `t.places[i]` and `t.touched[i]`, and
+# restores the plan's point. The partition reads nothing else (`locality=:error`).
+function _brm_svi_unit_local!(gg, gz, t::NamedTuple, i, g, z, plan, work)
+    value = i in plan.labels ?
+        _brm_svi_partition_local!(gg, gz, plan, t.m.unit, plan.footprints[i], t.places[i], i, g, z) : 0.0
     value + _brm_svi_unit_prior!(gg, gz, t.prior, t, i, g, z)
+end
+
+function _brm_svi_partition_local!(gg, gz, plan, unit, footprint, places, i, g, z)
+    point, gradient = plan.point, plan.gradients[i]
+    @inbounds for (k, j) in enumerate(footprint)
+        p = places[k]
+        p > 0 ? (point[j] = g[p]) : p < 0 && (point[j] = z[-p])
+    end
+    try
+        value = first(_rk_nlme_partition_value_and_gradient!(plan.sampler, gradient, point, i))
+        @inbounds for (k, p) in enumerate(places)
+            p > 0 ? (gg[p] += gradient[k]) : p < 0 && (gz[-p] += gradient[k])
+        end
+        value
+    finally
+        @inbounds for (k, j) in enumerate(footprint)
+            places[k] == 0 || (point[j] = unit[j])
+        end
+    end
 end
 
 # Unit i's prior term, its gradients added into `gg` (the globals) and `gz`
@@ -507,15 +531,16 @@ end
 
 # Unit i's terms at the antithetic pair `zs`: `nothing` when every value and
 # gradient is finite, else what was not. Gradient entries map to `t.globals`
-# (`ggs`) and `t.units[i]` (`gzs`).
-function _brm_svi_nonfinite_unit(t, i, g, zs, values, ggs, gzs)
-    all(isfinite, values) && all(x -> all(isfinite, x), ggs) &&
+# (`ggs`, read only at `touched`) and `t.units[i]` (`gzs`).
+function _brm_svi_nonfinite_unit(t, i, g, zs, values, ggs, gzs, touched=eachindex(t.globals))
+    finite(gg) = all(p -> isfinite(gg[p]), touched)
+    all(isfinite, values) && all(finite, ggs) &&
         all(x -> all(isfinite, x), gzs) && return nothing
     quantities, bad = Symbol[], Int[]
     for (side, v, gg, gz) in zip((:plus, :minus), values, ggs, gzs)
         isfinite(v) || push!(quantities, Symbol(:value_, side))
-        all(isfinite, gg) || (push!(quantities, Symbol(:global_gradient_, side));
-            append!(bad, t.globals[findall(!isfinite, gg)]))
+        finite(gg) || (push!(quantities, Symbol(:global_gradient_, side));
+            append!(bad, t.globals[filter(p -> !isfinite(gg[p]), collect(touched))]))
         all(isfinite, gz) || (push!(quantities, Symbol(:unit_gradient_, side));
             append!(bad, t.units[i][findall(!isfinite, gz)]))
     end
@@ -567,16 +592,21 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     _brm_svi_each_unit(eachindex(t.plans), length(batch)) do worker, k
         plan, work = t.plans[worker], t.work[worker]
         i, εi = batch[k], draws[k]
-        gg₊, gg₋ = zeros(D), zeros(D)
+        touched = _brm_svi_unit_touched(t, i)
+        gg₊, gg₋ = _brm_svi_global_buffers(work, D)
         gz₊, gz₋ = zeros(length(t.units[i])), zeros(length(t.units[i]))
         m, δ = q.M[i], _brm_svi_unit_offset(q, i, εi)
         z₊, z₋ = m .+ δ, m .- δ
-        v₊ = _brm_svi_unit_term!(gg₊, gz₊, t, i, g, z₊, plan, work)
-        v₋ = _brm_svi_unit_term!(gg₋, gz₋, t, i, g, z₋, plan, work)
+        v₊ = _brm_svi_unit_local!(gg₊, gz₊, t, i, g, z₊, plan, work)
+        v₋ = _brm_svi_unit_local!(gg₋, gz₋, t, i, g, z₋, plan, work)
         problems[k] = _brm_svi_nonfinite_unit(t, i, g, (z₊, z₋), (v₊, v₋),
-            (gg₊, gg₋), (gz₊, gz₋))
-        terms[k] = (; value=(v₊ + v₋) / 2, gg=gg₊ .+ gg₋, gz=(gz₊ .+ gz₋) ./ 2,
-            gd=(gz₊ .- gz₋) ./ 2)
+            (gg₊, gg₋), (gz₊, gz₋), touched)
+        gg = [gg₊[p] + gg₋[p] for p in touched]
+        # The buffers are the worker's, zero again for its next unit.
+        for p in touched
+            gg₊[p] = gg₋[p] = 0.0
+        end
+        terms[k] = (; value=(v₊ + v₋) / 2, gg, gz=(gz₊ .+ gz₋) ./ 2, gd=(gz₊ .- gz₋) ./ 2)
     end
     # Before anything changes q or the optimizer.
     _brm_svi_check_finite(t, g, P, gP, problems)
@@ -585,7 +615,10 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     batch_value = 0.0
     for (k, term) in enumerate(terms)
         batch_value += weights[k] * term.value
-        w .+= (weights[k] / 2) .* term.gg
+        scale = weights[k] / 2
+        for (entry, p) in enumerate(_brm_svi_unit_touched(t, batch[k]))
+            w[p] += scale * term.gg[entry]
+        end
     end
     x = _brm_svi_global_vector(q)
     grad = _brm_svi_global_gradient(q, w, ε, η)
