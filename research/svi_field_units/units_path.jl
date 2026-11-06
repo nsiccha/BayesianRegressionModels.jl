@@ -9,7 +9,10 @@
 #   moderate      several rows per state, blocks within the dense limit
 #   weak          one noisy row per state: does a learned length stay off its limit?
 #   lowrank       stations with more reads than the dense limit, so low-rank unit factors
+#   lowrank_dense the same data with `unit_dense_limit=128`: dense unit factors under `:units`
 #   scale         step cost and memory at growing state counts (no exact reference)
+#   multires      the moderate data through `multiresolution=3` under `:global`: do the learned
+#                 lengths stay near the truth, against the read-pair fit of the same data?
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface, LinearAlgebra, Random, Statistics, Printf
 using SpecialFunctions: besselk
@@ -66,6 +69,22 @@ function station_model(data)
     end
 end
 
+# The same data through a `multiresolution=` field, which `field_states=:units` refuses;
+# `:global` holds its shared innovations as global coordinates.
+function multiresolution_model(data)
+    @brm data begin
+        sigma ~ Exponential(1)
+        field ~ 0 + gmrf((east, north), time; multiresolution=3)
+        sd(field, gmrf((east, north), time)) ~ Exponential(1)
+        length_scale(field, gmrf((east, north), time), space) ~ LogNormal(log(0.3), 0.7)
+        length_scale(field, gmrf((east, north), time), time) ~ LogNormal(log(3.0), 0.7)
+        mu ~ 1 + (0 + x | site)
+        @plate for s in eachindex(state)
+            y[s] ~ Normal(mu[s] .+ field[s], sigma)
+        end
+    end
+end
+
 peak_rss() = parse(Int, match(r"VmHWM:\s+(\d+)", read("/proc/self/status", String)).captures[1]) / 2^20
 
 centred(x) = x .- mean(x)
@@ -88,9 +107,10 @@ function score(rk, fit, truth)
        sd=value(:sigma), spatial=value(:spatial_length), temporal=value(:temporal_length), noise)
 end
 
-function recover(label; iterations, batch_size=8, modes=(:global, :units), shape...)
+function recover(label; iterations, batch_size=8, modes=(:global, :units), build=station_model,
+        fit_options=(;), shape...)
     data, truth = station_data(; shape...)
-    rk = RKBRMI(station_model(data))
+    rk = RKBRMI(build(data))
     m = brm_nlme_model(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse), subject_group=:site,
         unit_partition=:connected)
     states = length(truth.f)
@@ -104,7 +124,7 @@ function recover(label; iterations, batch_size=8, modes=(:global, :units), shape
     flush(stdout)
     for mode in modes
         timed = @timed brm_svi_fit(m; batch_size, max_iterations=iterations, ndraws=200, threads=1,
-            rng=Xoshiro(3), separator=:none, field_states=mode)
+            rng=Xoshiro(3), separator=:none, field_states=mode, fit_options...)
         fit = timed.value
         s = score(rk, fit, truth)
         d = fit.diagnostics
@@ -146,7 +166,13 @@ const REGIMES = Dict(
         iterations=4000, stations=64, times=8, reads=4, rows=1, τ=1.0, ℓs=0.5),
     "lowrank" => () -> recover("more reads per station than the dense limit";
         iterations=4000, stations=8, times=100, reads=80, rows=2, τ=0.3, ℓt=10.0),
+    "lowrank_dense" => () -> recover("lowrank's data with dense unit factors";
+        iterations=4000, stations=8, times=100, reads=80, rows=2, τ=0.3, ℓt=10.0,
+        modes=(:units,), fit_options=(; unit_dense_limit=128)),
     "scale" => () -> scale((64, 256, 1024, 4096)),
+    "multires" => () -> recover("a multiresolution field on the moderate data";
+        iterations=2000, modes=(:global,), build=multiresolution_model,
+        stations=64, times=8, reads=4, rows=4, τ=0.3),
 )
 
 BLAS.set_num_threads(1)
