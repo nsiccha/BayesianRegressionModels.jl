@@ -13853,15 +13853,19 @@ end
 # (no `cor=`), the constant (ICM) correlation, or the frequency-dependent
 # multigroup coherence.
 _sb_hsgp_level_submodel(::Nothing, iso) = iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso
-_sb_hsgp_level_arguments!(_data, ::Nothing) = (;)
+_sb_hsgp_level_arguments!(_data, ::Nothing, _term) = (;)
 _sb_hsgp_level_submodel(::_BRMLevelCorrelation, iso) =
     iso ? :_sb_hsgp_by_levelcor : :_sb_hsgp_by_aniso_levelcor
 _sb_hsgp_level_submodel(::_BRMMultigroupCorrelation, iso) =
     iso ? :_sb_hsgp_by_multigroup : :_sb_hsgp_by_aniso_multigroup
-_sb_hsgp_level_arguments!(data, lc::_BRMLevelCorrelation) =
+_sb_hsgp_level_arguments!(data, lc::_BRMLevelCorrelation, _term) =
     (; L_level=_sb_level_correlation_factor!(data, lc))
-_sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCorrelation) =
-    (; L_level=_sb_level_correlation_factor!(data, lc.base), tau_level=lc.tau)
+_sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCorrelation, _term) =
+    (; L_level=_sb_level_correlation_factor!(data, lc.base),
+       tau_level=_sb_multigroup_scale!(data, lc.tau_source, lc.tau))
+# A scale held in a data field is read by that name.
+_sb_multigroup_scale!(_data, ::Nothing, scale) = scale
+_sb_multigroup_scale!(data, source::Symbol, scale) = _sb_static_level_datum!(data, source, scale)
 function _sb_hsgp_level_submodel(lc::_BRMMultigroupCoordinates, iso)
     base = Symbol(:_sb_hsgp_by_, iso ? "" : "aniso_", :multigroup_,
                   isempty(lc.positions) ? :coordinates : :inducing)
@@ -13870,7 +13874,9 @@ end
 # The coordinates and the grid geometry they fit are data, computed once in
 # Julia and replayed frozen, like a known correlation's factor. Free inducing
 # positions are data the same way, or the declared vector parameters by name.
-function _sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCoordinates)
+# The grid is named after its term, not its numbers, so one Stan program serves
+# every `k` and `c` (user principle `0ikeidi`).
+function _sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCoordinates, term)
     stem = Symbol(:multigroup_, join(lc.axes, "_"))
     isempty(lc.positions) || return (;
         coordinates_level=_sb_static_level_datum!(data, Symbol(stem, :_coordinates),
@@ -13880,19 +13886,19 @@ function _sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCoordinates)
             join((p.name for p in lc.positions), "_")), stem, lc)...)
     method = _brm_multigroup_method_code(lc.method)
     center, scale, _ = brm_multigroup_coordinate_grid(lc.coordinates, lc.k, method, lc.c)
-    # One grid per method, size and (for a box) factor: `multigroup_x_y_inducing20`.
-    grid = Symbol(stem, :_, lc.method, lc.k,
-                  lc.method === :hsgp ? "_c" * replace(string(lc.c), "." => "p") : "")
+    grid = Symbol(term, :_grid)
     (; coordinates_level=_sb_static_level_datum!(data, Symbol(stem, :_coordinates),
                                                  lc.coordinates),
        center_level=_sb_static_level_datum!(data, Symbol(grid, :_center), center),
        scale_level=_sb_static_level_datum!(data, Symbol(grid, :_scale), scale),
-       _sb_multigroup_lambda!(data, grid, stem, lc)..., k_level=lc.k, method_level=method)
+       _sb_multigroup_lambda!(data, grid, stem, lc)...,
+       k_level=_sb_static_level_datum!(data, Symbol(grid, :_k), lc.k), method_level=method)
 end
 # The spatial scale: the declared parameter or constant, or the term's own
 # prior's location (per coordinates) and lower bound (per approximation).
 function _sb_multigroup_lambda!(data, approximation, stem, lc)
-    isnothing(lc.lambda) || return (; lambda_level=lc.lambda)
+    isnothing(lc.lambda) ||
+        return (; lambda_level=_sb_multigroup_scale!(data, lc.lambda_source, lc.lambda))
     (; location, lower) = _brm_multigroup_default_lambda(lc)
     (; lambda_location=_sb_static_level_datum!(data, Symbol(stem, :_lambda_location), location),
        lambda_lower=_sb_static_level_datum!(data, Symbol(approximation, :_lambda_lower), lower))
@@ -15639,7 +15645,7 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
                                          what, group=gname, prefix="sbimpl")
             _brm_check_hyper_level_correlation(lc, hyper_plans; what, prefix="sbimpl")
         end
-        level_arguments = _sb_hsgp_level_arguments!(data, lc)
+        level_arguments = _sb_hsgp_level_arguments!(data, lc, col_name)
         if isnothing(rho_plan) && isnothing(sigma_plan)
             submodel = _sb_gp_submodel_expr(_sb_hsgp_level_submodel(lc, iso),
                                             term_overrides, t)

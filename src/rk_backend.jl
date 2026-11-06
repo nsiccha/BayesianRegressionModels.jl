@@ -5488,8 +5488,15 @@ function _rk_plan_level_coordinates!(lc::_BRMMultigroupCoordinates, data, column
     for axis in lc.axes
         columns[axis] = data[axis]
     end
-    coordinate_fit_columns = isempty(lc.positions) || isnothing(lc.lambda) ?
+    fits_coordinates = isempty(lc.positions) || isnothing(lc.lambda)
+    coordinate_fit_columns = fits_coordinates ?
         Tuple(_rk_fit_twin!(derived, columns, taken, data, axis) for axis in lc.axes) : ()
+    # Its numbers are inputs, as an hsgp term's `k` and `c` are, so one program
+    # serves every setting (user principle `0ikeidi`).
+    coordinate_k_fit, coordinate_c_fit = fits_coordinates ?
+        (_rk_fit_input!(derived, columns, taken, Symbol(id, :_coordinate_k), [lc.k]),
+         _rk_fit_input!(derived, columns, taken, Symbol(id, :_coordinate_c), [lc.c])) :
+        (nothing, nothing)
     position_fit_columns = Tuple(isnothing(p.values) ? nothing :
         _rk_fit_twin!(derived, columns, taken, data, p.name) for p in lc.positions)
     position_columns = Tuple(isnothing(input) ? p.name :
@@ -5498,6 +5505,10 @@ function _rk_plan_level_coordinates!(lc::_BRMMultigroupCoordinates, data, column
     (; coordinate_columns=Tuple(lc.axes), coordinate_fit_columns,
        coordinate_grid=_rk_mint_generated!(taken, columns, string(id, "_coordinate_grid")),
        coordinate_prior=_rk_mint_generated!(taken, columns, string(id, "_coordinate_prior")),
+       coordinate_points=_rk_mint_generated!(taken, columns, string(id, "_coordinate_points")),
+       coordinate_points_fit=_rk_fit_input!(derived, columns, taken,
+           Symbol(id, :_coordinate_points), [lc.n_points]),
+       coordinate_k_fit, coordinate_c_fit,
        group_fit_source=_rk_fit_twin!(derived, columns, taken, data, source),
        position_columns, position_fit_columns, multigroup_fit=fit)
 end

@@ -185,6 +185,21 @@ tensor_smooth(k) = brm(:(begin
     mu ~ 1 + t2(t, s; k=$k)
     y ~ Normal(mu, sigma)
 end); mod=@__MODULE__)
+multigroup_field(scale; k=3, c=1.5) = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 0 + hsgp(t; k=3, by=g, cor=multigroup((sx, sy), $scale; k=$k, c=$c))
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
+multigroup_gram(tau) = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 0 + hsgp(t; k=3, by=g, cor=multigroup(Omega, $tau))
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
+multigroup_method(method) = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 0 + hsgp(t; k=3, by=g, cor=multigroup((sx, sy), 0.7; k=3, method=$(QuoteNode(method))))
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
 end
 const RSM = RuntimeSettingsModels
 
@@ -201,6 +216,9 @@ const LDATA = (; subject=[1, 1, 2, 2, 3, 3], x=[-1.0, 0.5, 0.2, 1.1, -0.4, 0.9],
 const HDATA = let rng = MersenneTwister(3), t = collect(range(0.0, 5.0; length=24))
     (; t, s=cos.(t), y=sin.(t) .+ 0.1 .* randn(rng, length(t)))
 end
+const MGDATA = merge(HDATA, (; g=mod1.(eachindex(HDATA.t), 4),
+    sx=[0.1, 0.5, 0.9, 1.3], sy=[0.2, 0.1, 0.6, 0.9],
+    Omega=[1.0 0.3 0.1 0.0; 0.3 1.0 0.2 0.1; 0.1 0.2 1.0 0.3; 0.0 0.1 0.3 1.0]))
 
 stan_program(brmi) = StanBlocks.stan_code(SBBRMI(brmi; mod=RSM).model)
 stan_inputs(brmi) = BRM.stan_data(SBBRMI(brmi; mod=RSM))
@@ -643,4 +661,59 @@ end
     @test_throws "replay keeps the fitted t2" reprocess(sb, merge(HDATA, (; kk=[5, 7])))
     @test_throws "must be a 2-tuple" RKBRMI(RSM.tensor_smooth((1, 6))(HDATA))
     @test_throws "integers greater than 2" RKBRMI(RSM.tensor_smooth(:kk)(merge(HDATA, (; kk=[1, 6]))))
+end
+
+@stestset "a multigroup term's numbers are inputs" begin
+    fields(; values...) = merge(MGDATA, (; values...))
+    # One Stan and one emitted RK program for every size and box factor.
+    check_one_program("k literal", k -> RSM.multigroup_field(0.7; k), (3, 4); data=_ -> MGDATA)
+    check_one_program("k field", _ -> RSM.multigroup_field(0.7; k=:kk), (3, 4);
+        data=kk -> fields(; kk))
+    check_one_program("c field", _ -> RSM.multigroup_field(0.7; c=:cc), (1.5, 2.0);
+        data=cc -> fields(; cc))
+    # A scale is one lowered program and query type, and reaches the density.
+    check_one_lowering("lambda field", RSM.multigroup_field(:lam),
+        [fields(; lam) for lam in (0.7, 0.9)], (:lam,))
+    check_one_lowering("tau field", RSM.multigroup_gram(:tt),
+        [fields(; tt) for tt in (0.5, 0.8)], (:tt,))
+    # Each data field is its literal twin: the same density at the same point.
+    twins = (
+        RSM.multigroup_field(0.7; k=:kk)(fields(; kk=4)) => RSM.multigroup_field(0.7; k=4)(MGDATA),
+        RSM.multigroup_field(0.7; c=:cc)(fields(; cc=2.0)) => RSM.multigroup_field(0.7; c=2.0)(MGDATA),
+        RSM.multigroup_field(:lam)(fields(; lam=0.9)) => RSM.multigroup_field(0.9)(MGDATA),
+        RSM.multigroup_gram(:tt)(fields(; tt=0.8)) => RSM.multigroup_gram(0.8)(MGDATA))
+    for (field, literal) in twins
+        rk_field, rk_literal = RKBRMI(field), RKBRMI(literal)
+        u = rk_point(rk_literal)
+        @test rk_density(rk_field, u) == rk_density(rk_literal, u)
+    end
+    # Stan reads each number by name.
+    @test stan_inputs(RSM.multigroup_field(:lam)(fields(; lam=0.9)))[:lam] == 0.9
+    @test stan_inputs(RSM.multigroup_gram(:tt)(fields(; tt=0.8)))[:tt] == 0.8
+    sized = stan_inputs(RSM.multigroup_field(0.7; k=:kk)(fields(; kk=4)))
+    @test sized[:hsgp_t_by_g_grid_k] == 4 && sized[:n_rows_hsgpw_t_g] == 16
+    # Positive control: the approximation is a choice of the source, not a number.
+    @test rk_program(RSM.multigroup_method(:hsgp)(MGDATA)) != rk_program(RSM.multigroup_method(:inducing)(MGDATA))
+    @test stan_program(RSM.multigroup_field(0.7)(MGDATA)) != stan_program(RSM.multigroup_field(0.9)(MGDATA))
+    # The size is a layout change, which RK spells until its extents land
+    # (ReactiveKernels snag `rkppl-sized-vect-69604d32`).
+    small, large = RKBRMI(RSM.multigroup_field(0.7; k=:kk)(fields(; kk=3))),
+        RKBRMI(RSM.multigroup_field(0.7; k=:kk)(fields(; kk=4)))
+    @test small.model.layout.total < large.model.layout.total
+    @test_broken lowered_program(small) == lowered_program(large)
+    # A frozen replay keeps the fitted term, on both backends; a fresh build follows.
+    frozen = (
+        (RSM.multigroup_field(0.7; k=:kk), fields(; kk=3), fields(; kk=4)),
+        (RSM.multigroup_field(0.7; c=:cc), fields(; cc=1.5), fields(; cc=2.0)),
+        (RSM.multigroup_field(:lam), fields(; lam=0.7), fields(; lam=0.9)),
+        (RSM.multigroup_gram(:tt), fields(; tt=0.5), fields(; tt=0.8)))
+    for (build, fitted, changed) in frozen
+        rk = RKBRMI(build(fitted))
+        @test_throws "A frozen replay keeps the fitted multigroup" reprocess(rk, changed)
+        @test reprocess(rk, fitted) isa RKBRMI
+        @test reprocess(rk, changed; freeze_constants=false) isa RKBRMI
+        @test_throws "replay keeps the fitted hsgp" reprocess(SBBRMI(build(fitted); mod=RSM), changed)
+    end
+    @test_throws "needs an integer `k >= 2`" RKBRMI(RSM.multigroup_field(0.7; k=:kk)(fields(; kk=1)))
+    @test_throws "needs a box factor `c > 1`" RKBRMI(RSM.multigroup_field(0.7; c=:cc)(fields(; cc=0.5)))
 end
