@@ -40,33 +40,61 @@ end
 
 # The read of a batch and its adjoint at full typed speed: one pass per read vertex
 # over the retained modes, on an e_t already through the OU recursion.
-function spectral_read!(out, U, D, state, verts, weights, rtime)
-    k = size(U, 2)
+function spectral_read!(out, Ut, D, state, verts, weights, rtime)
+    k = size(Ut, 1)
     @inbounds for r in eachindex(out)
         t, value = rtime[r], 0.0
         for c in 1:3
             i, w = verts[r, c], weights[r, c]
             @simd for j in 1:k
-                value += w * U[i, j] * D[j] * state[j, t]
+                value += w * Ut[j, i] * D[j] * state[j, t]
             end
         end
         out[r] = value
     end
     out
 end
-function spectral_adjoint!(g, U, D, out, verts, weights, rtime)
-    k = size(U, 2)
+function spectral_adjoint!(g, Ut, D, out, verts, weights, rtime)
+    k = size(Ut, 1)
     fill!(g, 0.0)
     @inbounds for r in eachindex(out)
         t, value = rtime[r], out[r]
         for c in 1:3
             i, w = verts[r, c], weights[r, c]
             @simd for j in 1:k
-                g[j, t] += w * value * U[i, j] * D[j]
+                g[j, t] += w * value * Ut[j, i] * D[j]
             end
         end
     end
     g
+end
+# The prior tail at a batch's reads: a whole-field prior draw through sparse solves
+# per time, less its K low modes' part, read at the batch's vertices.
+function tail_draw!(out, rng, white, work, coefficients, Ut, D, C12, B, a, vv, verts, weights, rtime)
+    N, T = size(white)
+    randn!(rng, white)
+    for t in 1:T
+        @views work[:, t] .= sqrt(2π) .* (B \ (C12 .* white[:, t]))
+    end
+    # Low-mode coefficients of the same noise: u_kᵀ C^½ w, scaled like the modes.
+    mul!(coefficients, Ut, C12 .* white)
+    coefficients .*= D
+    ou!(work, a, vv)
+    ou!(coefficients, a, vv)
+    k = size(Ut, 1)
+    @inbounds for r in eachindex(out)
+        t, value = rtime[r], 0.0
+        for c in 1:3
+            i, w = verts[r, c], weights[r, c]
+            low = 0.0
+            @simd for j in 1:k
+                low += Ut[j, i] * coefficients[j, t]
+            end
+            value += w * (work[i, t] - low)
+        end
+        out[r] = value
+    end
+    out
 end
 function adam_like!(x, m, v)
     @. m = 0.9 * m + 0.1 * x
@@ -74,12 +102,12 @@ function adam_like!(x, m, v)
     @. x += 0.01 * m / (sqrt(v) + 1e-8)
     x
 end
-function spectral_step!(rng, state, g, out, m, v, U, D, a, vv, verts, weights, rtime, C)
+function spectral_step!(rng, state, g, out, m, v, Ut, D, a, vv, verts, weights, rtime, C)
     for _ in 1:C
         randn!(rng, state)
         ou!(state, a, vv)
-        spectral_read!(out, U, D, state, verts, weights, rtime)
-        spectral_adjoint!(g, U, D, out, verts, weights, rtime)
+        spectral_read!(out, Ut, D, state, verts, weights, rtime)
+        spectral_adjoint!(g, Ut, D, out, verts, weights, rtime)
         ou_adjoint!(g, a, vv)
         adam_like!(g, m, v)
     end
@@ -106,7 +134,7 @@ function bench(N1, T, C; K=N1^2, reads=2432, spectral=true)
         results[:spectral_setup_seconds] = setup
         k = min(K, N)
         D = sqrt(2π) ./ (1 / ℓs .+ ℓs .* modes.μ[1:k] ./ 2)
-        U = modes.U[:, 1:k]
+        U = Matrix(modes.U[:, 1:k]')
         state = randn(rng, k, T)
         out = zeros(reads)
         g, mm, vv2 = zeros(k, T), zeros(k, T), zeros(k, T)
@@ -114,6 +142,17 @@ function bench(N1, T, C; K=N1^2, reads=2432, spectral=true)
             spectral_step!(rng, state, g, out, mm, vv2, U, D, a, v, verts, weights, rtime, C)
         end
         results[:space_spectral] = (; cost..., retained_state_bytes=C * k * T * 8 * 6 + sizeof(U))
+        if k < N
+            B0 = cholesky(Symmetric(spatial_b(mesh, ℓs)))
+            white, workspace, coefficients = zeros(N, T), zeros(N, T), zeros(k, T)
+            C12 = sqrt.(mesh.mass)
+            tail = timed() do
+                for _ in 1:C
+                    tail_draw!(out, rng, white, workspace, coefficients, U, D, C12, B0, a, v, verts, weights, rtime)
+                end
+            end
+            results[:prior_tail] = (; tail..., retained_state_bytes=0)
+        end
     end
 
     # Whitened: the whole field per draw, one pair of sparse solves per time.
@@ -163,11 +202,11 @@ function bench(N1, T, C; K=N1^2, reads=2432, spectral=true)
 end
 
 for (N1, T, C, K, spectral) in ((52, 40, 1, 2704, true), (52, 122, 1, 2704, true), (52, 122, 9, 2704, true),
-        (52, 122, 9, 256, true), (107, 122, 1, 256, false))
+        (52, 122, 9, 256, true), (107, 122, 1, 256, true))
     r = bench(N1, T, C; K, spectral)
     @printf("states=%-9d vertices=%-6d times=%-4d channels=%-2d reads=%d modes=%d\n", r[:states], r[:vertices], r[:times], r[:channels], r[:reads], K)
     haskey(r, :spectral_setup_seconds) && @printf("   space_spectral setup (dense eigendecomposition): %.1f s\n", r[:spectral_setup_seconds])
-    for key in (:space_spectral, :whitened, :diagonal_whole_prior)
+    for key in (:space_spectral, :prior_tail, :whitened, :diagonal_whole_prior)
         haskey(r, key) || continue
         x = r[key]
         @printf("   %-22s %9.4f s per step  %9.1f MB allocated  %9.1f MB state\n", key, x.seconds, x.bytes / 1e6, x.retained_state_bytes / 1e6)
