@@ -1,5 +1,16 @@
 # Running the tests
 
+`rk_data_law_arguments.jl` checks RKBRMI formula responses whose law reads
+data: a scalar data field, a `constant(...)` value, a plain alias and a per-row
+column as a Normal scale, a censored Normal, a Student-t scale, a LogNormal scale
+and a model-scope `gmrf` readout. It compares an independent likelihood oracle and
+compiled Stan (value and native Reverse gradient, through the coordinate
+transport), replays the printed source, checks that another value emits the same
+program, that binding refuses an invalid value, and frozen `reprocess` of a
+scalar field and of a constant. The further arguments of the other response
+families are checked against the oracle and finite differences. It accepts
+testset substring filters.
+
 `rk_value_weighted_observations.jl` checks formula-level `fweights` and
 `weights` on RKBRMI responses whose law reads an assigned value: a Julia
 reader's probability under `weighted(Bernoulli(p), fweights(n))` against
@@ -1605,6 +1616,18 @@ refused; and a single `predictor => w` pair works:
 
 ```sh
 julia --project=test test/s2z_per_predictor_rho.jl
+```
+
+## Exact totals and sum-to-zero priors that read data
+
+`integrated_prior_data_fields.jl` builds each exact-total and sum-to-zero model
+twice, its population priors as numbers and as data fields, and checks one source
+across the values and equal blocks, coordinates, log density, gradient and
+generated quantities against the literal twin, the refusals of what cannot be
+integrated, and replay, rebuild and transport of the fitted prior:
+
+```sh
+julia --project=test test/integrated_prior_data_fields.jl
 ```
 
 ## Exact totals beside offsets

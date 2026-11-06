@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.210
+## 0.2.213
 
 - Fixed: identical models were refused across processes when they call an
   anonymous function or closure. A model's identity hashed such a callable by
@@ -45,6 +45,73 @@ instead of failing at run time.
   continuation writes the new digests. An SVI or SMC streaming carry, an SMC
   checkpoint or a filter export of a model with a generated callable, written
   before this version, is not migrated and is refused as a changed model.
+
+## 0.2.212
+
+- Fixed: a population prior that reads data is integrated by exact totals and
+  sum-to-zero like the same prior with the numbers spelled out.
+  `effect(mu, Intercept) ~ Normal(m, s)` with `m` and `s` in the data was refused
+  by an explicit `total_groups` or `s2z_groups` request ("is not Normal, Student-t
+  or Flat", "unsupported population prior"). The arguments of a `Normal`,
+  `LocationScale(m, s, TDist(nu))` or `TDist(nu)` prior may now be literals, scalar
+  data fields, `constant(...)`s, elements `v[k]` of a data vector, data-only
+  assignments or calls over these. The values enter the program as data, so models
+  differing only in such a value compile one program, whose log density, gradient
+  and generated quantities equal those of the literal twin.
+- **Changed:** with `total_groups = :auto`, a model whose population priors read
+  data used to stay conventional without saying so; it now integrates its blocks,
+  as its literal twin always did. The posterior is unchanged, the coordinates are
+  not, so draws from such a fit do not transfer to a new build. Pass
+  `total_groups = ()` to keep the conventional representation. A frozen replay
+  of a fitted model is unaffected.
+- A prior that reads a sampled value is still not integrated, and the refusals now
+  say why ("arguments that read only numbers and data"). A data-only call that
+  fails names the call. The exact-total refusal no longer claims a block's `sd`
+  prior needs literal arguments; it already accepted data.
+
+## 0.2.211
+
+- Fixed: on `RKBRMI`, a model-scope `=` assignment that no response reads is
+  now a graph value of its authored name, as user decision `0kpugvc` already
+  documented. `rk_draw_values(rk, U, (:q,))` and `want=(:q,)` answer for
+  `mu ~ 1 + x; q = exp(mu - decay * elapsed); y ~ Normal(mu, 0.4)` instead of
+  raising `KeyError: kernel has no port :q`; so do scalars over sampled
+  parameters (`sigma ~ Exponential(1); variance = sigma^2`, a literal
+  `two = 2.0`, an alias `scale = sigma`). Coordinates and log densities are
+  unchanged; a gradient can move by one ulp where the extra statement changes
+  the compiled evaluation order. The sampler never runs such a value. An
+  assignment that needs a declaration no response reaches (`q = exp(z)` for
+  an unread `z ~ Normal(0, 1)`, or an unread formula predictor) stays out as
+  before. Still out: a data-only assignment no response reads, and one that
+  reads data but no formula predictor in a model none of whose assignments
+  reads a formula predictor (`spread = sigma * sum(elapsed)`): RK plans such a
+  model on a route that writes the data a statement reads into the program,
+  so keeping it would refuse a `reprocess` of other rows. A build of an
+  affected model emits one more statement, so its program identity (SMC and
+  SVI checkpoint tags) changes.
+
+## 0.2.210
+
+- Fixed: on `RKBRMI`, a formula response whose law reads data, such as
+  `y ~ Normal(mu, s)` with `s` a scalar data field, `sd_obs = constant(expr)`
+  or a plain alias `sd_obs = s` as the scale, or a per-row column
+  `y ~ Normal(mu, sv)`, was refused ("scale cannot be a data column", "assignment
+  `sd_obs` aliases data column `s`"). It now builds, and the program reads the
+  value by name as a runtime input: two data sets that differ only in the value
+  emit the same program, and the density follows the bound value. SBBRMI
+  already kept such a value as Stan data. This covers the further arguments of
+  every scalar response law, at top level or inside a law argument, for example
+  a data shape in Gamma's `mu/alpha`. Binomial trials keep their formula
+  spelling, and the cutpoints or category predictors of a leveled response stay
+  refused. An invalid value is refused when the backend is built, naming it
+  (`per-observation scale s must be finite positive numerics`), except that an
+  out-of-range per-row `zi` or Student-t `nu` is not refused yet: it reads as a
+  `-Inf` density.
+- Changed: scalar-data Student-t degrees of freedom
+  (`LocationScale(mu, s, TDist(nu))` with `nu` from data) are read the same
+  way instead of being emitted as a numeric literal, so one program serves
+  every value. An invalid `nu` is refused when the backend is built
+  (`nu data nu must be finite positive numerics`), not by the planner.
 
 ## 0.2.209
 
