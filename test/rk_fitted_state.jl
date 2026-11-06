@@ -358,7 +358,8 @@ end
     @test rk_bound_data(RKBRMI(joint; held_out=(:z,))).prior_sd_scale == 1.7
     predictive = RKBRMI(build((; subject=train.subject, x=train.x,
         prior_sd_scale=train.prior_sd_scale)))
-    @test rk_bound_data(predictive).prior_sd_scale == 1.7
+    # With nothing observed, its program is empty and reads no input.
+    @test !haskey(rk_bound_data(predictive), :prior_sd_scale)
     conflicting = merge(design, (; prior_sd_scale=9.0))
     for fitted in (rk, free)
         @test_throws "changes the fitted RK program" reprocess(fitted, conflicting)

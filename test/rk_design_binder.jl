@@ -725,7 +725,8 @@ end
     rng = Xoshiro(9)
     # Rows 2, 4, 6 and 8 are outside the mask, so their axis may be missing.
     holes(x) = Union{Missing,Float64}[i in (2, 4) ? missing : v for (i, v) in enumerate(x)]
-    for (build, fitted) in ((BM.masked, (:hsgp_x_rows_fit, :x_fit)), (BM.masked_periodic, ()))
+    for (build, fitted) in ((BM.masked, (:hsgp_x_modes_fit, :hsgp_x_rows_fit, :hsgp_x_settings_fit, :x_fit)),
+            (BM.masked_periodic, (:hsgp_x_modes_fit, :hsgp_x_settings_fit)))
         rk = RKBRMI(build(flat_data(rng, 12)))
         designs = [map(v -> v[rows], without(flat_data(rng, 12), :y)) for rows in (2:6, 3:9, 1:12)]
         missing_designs = [merge(d, (; x=holes(d.x))) for d in

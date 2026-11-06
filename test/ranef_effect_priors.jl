@@ -71,7 +71,7 @@ end
     @test !occursin("brm_ranef_sd", code)
     # The concentration is data: one program serves every value.
     @test occursin("b_p_subject_L ~ lkj_corr_cholesky(b_p_subject_lkj_eta);", code)
-    @test BRM.stan_data(sb)[:b_p_subject_lkj_eta] == 2.0
+    @test BayesianRegressionModels.stan_data(sb)[:b_p_subject_lkj_eta] == 2.0
     @test occursin("b_p_subject_tau ~ exponential([1.5, 1.5, 3.0, 1.5, 5.0, 4.0]');", code)
 
     plan = generative_plan(sb)
@@ -139,7 +139,7 @@ end
     @test !occursin(r"brm_vector_prior_[0-9a-f]+", partial_code)
     partial_decl = only(d for d in generative_plan(partial).declarations
                         if d.target === :b_p_subject)
-    @test partial_decl.keywords.lkj_eta == 1.0
+    @test partial_decl.keywords.lkj_eta === :b_p_subject_lkj_eta
 
     centered = SBBRMI(partial_brmi; mod=@__MODULE__, total_groups=(), centered_groups=[:subject])
     centered_code = BayesianRegressionModels.stan_code(centered)

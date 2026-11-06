@@ -113,7 +113,7 @@ end
     check_vector_case(vp_elementwise, vp_data, "elementwise", oracle;
         declaration=(; name=:w, text="vector<lower=0.0>[w_n] w;"),
         statement="w ~ normal(0.0, ws);",
-        rk_source="w[1:4] .~ restricted.(Normal.(0.0, ws), 0.0, Inf)")
+        rk_source="w[1:w_length] .~ restricted.(Normal.(0.0, ws), 0.0, Inf)")
     # A data-only expression is evaluated at build time and shipped as data.
     computed = @brm begin
         w[1:n] .~ Normal.(fill(0.5, n), ws ./ 2)
@@ -132,7 +132,7 @@ end
     check_vector_case(vp_hierarchical, vp_data, "hierarchical", oracle;
         declaration=(; name=:z, text="vector[z_n] z;"),
         statement="z ~ normal(-0.5, tau);",
-        rk_source="z[1:4] .~ Normal.(-0.5, tau)")
+        rk_source="z[1:4] .~ Normal.(z_prior_mean, z_prior_scale)")
 end
 
 @stestset "normalized truncation as the element law" begin
@@ -143,7 +143,7 @@ end
     check_vector_case(vp_truncated, vp_data, "truncated", oracle;
         declaration=(; name=:s, text="vector<lower=0.0>[s_n] s;"),
         statement="s ~ lower_conditioning_normal(0.0, 0.0, 1.0);",
-        rk_source="s[1:4] .~ HalfNormal.(1.0)")
+        rk_source="s[1:s_length] .~ HalfNormal.(1.0)")
 end
 
 @stestset "MvNormal vector parameters are priors and build on RKBRMI" begin
@@ -151,7 +151,7 @@ end
     check_vector_case(vp_mvnormal, vp_data, "mvnormal", oracle_iso;
         declaration=(; name=:rho, text="vector[rho_n] rho;"),
         statement="rho ~ normal(rho_mu, 1.0);",
-        rk_source="rho[1:4] .~ Normal.([-0.5, -0.5, -0.5, -0.5], 1.0)")
+        rk_source="rho[1:4] .~ Normal.(rho_prior_mean, rho_prior_scale)")
     oracle_cov(u) = logpdf(MvNormal(zeros(4), vp_cov), u) + likelihood(u, 1.0)
     check_vector_case(vp_mvnormal_cov, vp_data, "mvnormal-cov", oracle_cov;
         declaration=(; name=:rho, text="vector[rho_n] rho;"),
