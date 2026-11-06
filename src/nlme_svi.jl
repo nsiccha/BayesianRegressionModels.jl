@@ -118,7 +118,7 @@ end
 # slot holds at most one target, the last call's.
 function _brm_svi_checkout!(m; global_coordinates, previous)
     requested = _brm_svi_global_coordinates(m, global_coordinates)
-    carry = previous === nothing ? nothing : _brm_svi_digest(previous)
+    carry = previous === nothing ? nothing : _brm_value_digest(previous)
     slot = m.svi_target
     prepared = lock(slot.lock) do
         held = slot.prepared

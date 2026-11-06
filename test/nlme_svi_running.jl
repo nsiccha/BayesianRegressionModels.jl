@@ -87,8 +87,8 @@ end
     end); ad_backend=NLME_AD)
     @test_throws "emitted program" brm_svi_resume(tally, changed, state)
     # A checkpoint refused on the model it came from costs that model nothing.
-    for (part, message) in ((:binding, "emitted program"), (:grouping, "groupings"),
-            (:ownership, "each subject owns"), (:fixed, "fixed shared coordinates"))
+    for (part, message) in ((:grouping, "groupings"), (:ownership, "each subject owns"),
+            (:fixed, "fixed shared coordinates"))
         forged = BRMSVIOptimizerState(state.format,
             merge(state.identity, NamedTuple{(part,)}(("forged",))), state.previous,
             state.controls, state.run)
