@@ -91,6 +91,8 @@ observed or omitted responses. Square and non-square shapes compare compiled
 Stan densities and gradients with analytic references; prior draws check the
 same cell values. Scalar, ragged-vector and matrix cells supply shape controls.
 Run it as a standalone script in the test environment.
+`gmrf_stan_plate_outputs.jl` reads such cells beside a `gmrf` formula in one
+plate cell, and compares the compiled density and gradient with a dense oracle.
 
 `component_start_descriptors.jl` checks exact initial values in repeated and
 nested components through the public descriptor, BridgeStan and coordinate

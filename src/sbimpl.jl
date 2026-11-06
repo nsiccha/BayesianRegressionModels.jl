@@ -8363,8 +8363,12 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # A producer's collected or indexed side output holds whole cells.
     # In particular, fixed-width vectors are stored as matrix columns, so
     # ordinary positional matrix slicing would select channels instead.
-    plate_inputs = Any[_sb_plate_output(dcols[j + 1], data) ?
-        Expr(:call, brm_plate_cells, dcol_names[j]) : dcol_names[j] for j in kept]
+    # `kept_names` is authoritative here: `_sb_cell_formulas!` has added each
+    # formula cell's prepared inputs and removed the positionals it consumed,
+    # so an output is recognised by its name, not by its authored position.
+    outputs = Set(dcol_names[j] for j in kept if _sb_plate_output(dcols[j + 1], data))
+    plate_inputs = Any[input in outputs ? Expr(:call, brm_plate_cells, input) : input
+        for input in kept_names]
     plate_call = nsub_sym === nothing ? Expr(:call, :plate, plate_inputs...) :
         Expr(:call, :plate,
             Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
