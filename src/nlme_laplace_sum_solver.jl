@@ -79,19 +79,23 @@ end
 # Cache baseline sums and incidence once. A block diagnostic changes only
 # the summands reading that block, rather than re-evaluating a large cell
 # once per level. The prior's edges and soft constraints use the same rule.
-function _brm_plan_local_cache(p, state)
+function _brm_plan_local_cache(p, state; contexts=Dict{Symbol,Any}())
     cells = Dict(c.term => (group, c) for group in p.cells for c in group.cells)
     sums = Dict{Int,Any}()
     for group in p.cells
         group isa _BRMSumCellGroup || continue
         for c in group.cells
+            context = get(contexts, group.name, state.u)
             entries = [(; t, value=Base.invokelatest(group.prepared.q.terms[t.j].value,
-                state.u, c.i, t.t)) for reduction in c.terms for t in reduction]
+                context, c.i, t.t)) for reduction in c.terms for t in reduction]
             by_effect = Dict{Int,Vector{Int}}()
             for (k, entry) in enumerate(entries), i in entry.t.lz
                 push!(get!(by_effect, i, Int[]), k)
             end
-            values = _brm_spl_factor_values(group.prepared, state.u, c).sums
+            values = zeros(length(c.terms))
+            for entry in entries
+                values[entry.t.j] += entry.value
+            end
             sums[c.term] = (; entries, by_effect, values)
         end
     end
@@ -115,20 +119,21 @@ function _brm_plan_local_cache(p, state)
     for (c, cols) in enumerate(p.wcols), i in cols
         push!(soft_by_effect[i], c)
     end
-    (; cells, sums, identity, edges, edges_by_effect, soft_by_effect,
+    (; cells, sums, contexts, identity, edges, edges_by_effect, soft_by_effect,
         gmrf=_brm_spl_gmrf_sparse(p, n),
         soft_members=Set.(p.wcols), soft_values=[sum(state.z[cols]) for cols in p.wcols],
         mmax=maximum(t -> p.tptr[t + 1] - p.tptr[t], eachindex(p.family); init=0))
 end
-_brm_plan_cell_value(group, c, I, u, cache) = _rk_nlme_cell_value(group.query, u, c.i)
-function _brm_plan_cell_value(group::_BRMSumCellGroup, c, I, u, cache)
+_brm_plan_cell_value(group, c, I, u, cache; context=u) =
+    _rk_spl_cell_value(group.ad, u, c.sel, c.i; context)
+function _brm_plan_cell_value(group::_BRMSumCellGroup, c, I, u, cache; context=u)
     cached = cache[c.term]
     sums = copy(cached.values)
     for k in unique(k for i in I for k in get(cached.by_effect, i, Int[]))
         (; t, value) = cached.entries[k]
-        sums[t.j] += Base.invokelatest(group.prepared.q.terms[t.j].value, u, c.i, t.t) - value
+        sums[t.j] += _rk_spl_factor_value(t.ad, u, t.sel, c.i; term=t.t, context) - value
     end
-    Base.invokelatest(group.prepared.q.outer.value, u, sums, c.i)
+    _rk_spl_factor_value(c.outer, u, c.direct.sel, c.i; sums, context)
 end
 
 # `weight` scales the cells' likelihood (values, gradient, local curvature D
@@ -154,11 +159,21 @@ function _brm_spl_assemble_sums!(fc, g, h, p, u; derivatives, third, fb, tv,
             push!(jacobians, part.B); push!(outers, weight == 1 ? part.W : weight * part.W)
             offset += size(part.B, 1)
         end
+        values = if derivatives
+            [s.value for s in part.states]
+        elseif group.prepared.q.cached
+            result, _ = _rk_spl_cell_pass(first(group.cells).outer, u) do batch
+                [_brm_spl_factor_values(group.prepared, u, c; context=batch).value
+                    for c in group.cells]
+            end
+            result
+        else
+            [_brm_spl_factor_values(group.prepared, u, c).value for c in group.cells]
+        end
         for (k, c) in enumerate(group.cells)
             comp = p.term_component[c.term]
             comp == 0 && !third && continue
-            value = derivatives ? part.states[k].value :
-                _brm_spl_factor_values(group.prepared, u, c).value
+            value = values[k]
             tv === nothing || (tv[c.term] = value)
             if comp == 0
                 rest += value
@@ -224,6 +239,29 @@ function _brm_spl_sum_gradient!(s, gradient, p, state, u, on)
     n = length(s); r = size(state.h.B, 1)
     scratch = zeros(n); tz = zeros(n); tp = zeros(length(gradient))
     for (; group, part, offset) in state.h.parts
+        if group.prepared.q.cached
+            _, packed = _rk_spl_cell_pass(first(group.cells).outer, u) do batch
+                for (k, c) in enumerate(group.cells)
+                    on(c.term) || continue
+                    _brm_spl_accumulate_gradient!(batch, u, c, part.states[k])
+                end
+            end
+            gradient .+= packed[p.population]
+            _, packed = _rk_spl_cell_pass(first(group.cells).outer, u) do batch
+                for (k, c) in enumerate(group.cells)
+                    on(c.term) || continue
+                    rows = (offset + part.rowptr[k]):(offset + part.rowptr[k + 1] - 1)
+                    cov = state.F isa _BRMOperatorFactor ?
+                        _brm_operator_sum_covariances(p, state.F, c) :
+                        _brm_spl_factor_covariances(c, rows, selected, n, r)
+                    _brm_spl_accumulate_contraction!(batch, u, c, part.states[k],
+                        cov.blocks, cov.SB, cov.BSB)
+                end
+            end
+            s .+= packed[p.integrated]
+            gradient .+= packed[p.population]
+            continue
+        end
         for (k, c) in enumerate(group.cells)
             on(c.term) || continue
             cs = part.states[k]
@@ -243,9 +281,21 @@ end
 function _brm_spl_sum_implicit!(gradient, p, state, v, on)
     state.h isa _BRMSumPrecision || return
     z = zeros(length(v))
-    for (; group, part) in state.h.parts, (k, c) in enumerate(group.cells)
-        on(c.term) || continue
-        _brm_spl_factor_hvp!(z, gradient, c, part.states[k], v)
+    for (; group, part) in state.h.parts
+        if group.prepared.q.cached
+            _, packed = _rk_spl_cell_pass(first(group.cells).outer, state.u) do batch
+                for (k, c) in enumerate(group.cells)
+                    on(c.term) || continue
+                    _brm_spl_accumulate_hvp!(batch, state.u, c, part.states[k], v)
+                end
+            end
+            gradient .+= packed[p.population]
+        else
+            for (k, c) in enumerate(group.cells)
+                on(c.term) || continue
+                _brm_spl_factor_hvp!(z, gradient, c, part.states[k], v)
+            end
+        end
     end
 end
 

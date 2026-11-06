@@ -69,8 +69,8 @@ _brm_svi_globals(m::BRMNLMEModel) = sort!(vcat(m.theta, m.sigma,
     findall(r -> r === :subject_scale || r === :subject_correlation, m.view.role)))
 
 # One independent Gaussian per mesh state drives a learned field's lengths to their
-# limit, because a shorter field makes that factorization more nearly exact
-# (research/svi_field_units/family_oracle.jl and tuesday_shape.jl, on toys). A read-pair
+# limit, because a shorter field makes that factorization more nearly exact (on toys
+# with closed-form optima, a spatial length of 0.017 where the truth was 0.5). A read-pair
 # field's states sit where the data is, so the same factor stays close to the posterior.
 function _brm_svi_check_fields(m::BRMNLMEModel)
     for record in _brm_nlme_records(m.backend.plan)
@@ -94,6 +94,10 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
         "brm_svi: minibatch SVI evaluates one subject at a time, on the " *
         "subject's own observation cells, and this model's observations have " *
         "no cells attributable to single subjects")
+    _brm_svi_check_fields(m)
+    # A carried checkpoint brings its own separator policy, which a changed
+    # partition cannot use: name that change, not the policy it invalidates.
+    previous === nothing || _brm_svi_check_partition(m.view, previous)
     connected = m.view.unit_partition === :connected
     policy = something(separator, connected ? :auto : :none)
     !connected && policy !== :none && throw(ArgumentError(
@@ -512,9 +516,10 @@ const _BRM_SVI_UNIT_MEAN_TRUST = 1.0
 # direction v's precision is far below its target, v dominates the whitened
 # gradient difference, the trust region sets β from the estimate's largest
 # eigenvalue, and the negative one halves the precision along a vector holding
-# about half of v. v's marginal variance then grows on average, on an exact
-# Gaussian target too, and with it the draws, however strongly the target
-# curves along v. At a matched factor the estimate is εεᵀ, whose negative part
+# about half of v. In units above about 20 coordinates, measured on an exact
+# Gaussian target, v's sd then stays wide or grows, and with it the draws,
+# however strongly the target curves along v; at 13 and 15 coordinates it
+# recovered. At a matched factor the estimate is εεᵀ, whose negative part
 # is zero, so the positive part changes nothing there. It is biased towards
 # more precision wherever the two differ, including a target with negative
 # curvature, whose true fixed point it no longer reaches.

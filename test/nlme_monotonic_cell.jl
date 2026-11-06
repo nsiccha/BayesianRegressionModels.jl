@@ -8,7 +8,11 @@
 # it once per population point, in the shared prefix, and each cell gathers from
 # it at its own rows. These are toy data: a cell reads a per-event predictor
 # through `groups`.
+#
+# The same partition is what lets a sparse Laplace plan integrate the subjects'
+# effects: without it, a factor query refuses the table for having no row form.
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
+using LinearAlgebra, LogDensityProblems
 
 const MONOTONIC_CELL_DATA = (; subject=[1, 2, 3, 4], weight=[0.1, -0.2, 0.3, 0.0],
     event_subject=[1, 1, 2, 2, 3, 4, 4, 3],
@@ -134,6 +138,57 @@ end
                 @test gradient ≈ monotonic_cell_fd(
                     η -> brm_nlme_loglikelihood(m, subject, θ, σ, η),
                     H[:, subject], eachindex(H[:, subject])) rtol=1e-6
+            end
+        end
+    end
+end
+
+# The Laplace marginal of the whole model at population point `phi`, with no cell
+# or factor path involved: Newton over the integrated coordinates on the full
+# density's gradient, and a central-difference Hessian of that gradient.
+function monotonic_cell_laplace(full, u, phi, population, integrated; h=1e-5)
+    point(z) = (v = copy(u); v[population] .= phi; v[integrated] .= z; v)
+    gradient(z) = LogDensityProblems.logdensity_and_gradient(full, point(z))[2][integrated]
+    function negative_hessian(z)
+        H = zeros(length(z), length(z))
+        for j in eachindex(z)
+            e = zeros(length(z)); e[j] = h
+            H[:, j] = (gradient(z - e) - gradient(z + e)) / (2h)
+        end
+        Symmetric((H + H') / 2)
+    end
+    z = zeros(length(integrated))
+    for _ in 1:50
+        g = gradient(z)
+        norm(g, Inf) < 1e-10 && break
+        z += negative_hessian(z) \ g
+    end
+    norm(gradient(z), Inf) < 1e-8 || error("the reference Newton iteration did not converge")
+    LogDensityProblems.logdensity(full, point(z)) + length(z) * log(2pi) / 2 -
+        logdet(negative_hessian(z)) / 2
+end
+
+@stestset "a planned Laplace problem integrates the subjects' effects past a mo() term" begin
+    for (shape, (predictors, exponent)) in pairs(MONOTONIC_CELL_SHAPES)
+        @testset "$shape" begin
+            rk = monotonic_cell_model(predictors, exponent)
+            plan = brm_laplace_plan(rk; ad_backend=NLME_AD, integrate=(:subject,))
+            @test plan.integrated_dimension == 4
+            p = brm_laplace_problem(rk; ad_backend=NLME_AD, integrate=plan)
+            names = String.(coordinate_names(rk.model.layout))
+            @test all(n -> startswith(n, "b_pk_subject.z."), names[p.integrated])
+            @test any(n -> occursin(".simplex_incr.", n), names[p.population])
+            # One component per subject: no subject's cell reads another's effect.
+            @test length(p.components) == 4
+
+            full = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+            base = 0.1 .* sin.(eachindex(p.population))
+            for phi in (zero(base), base, -2 .* base)
+                value, gradient = LogDensityProblems.logdensity_and_gradient(p, phi)
+                @test value ≈ monotonic_cell_laplace(full, p.u, phi, p.population,
+                    p.integrated) rtol=1e-8
+                @test gradient ≈ monotonic_cell_fd(x -> LogDensityProblems.logdensity(p, x),
+                    phi, eachindex(phi)) rtol=1e-6 atol=1e-6
             end
         end
     end

@@ -104,7 +104,8 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
     end
     retained = _rk_retained_program(rk)
     replayed = _rk_emit_ast(plan)
-    _rk_check_replay_program(retained, replayed; prefix)
+    _rk_check_replay_program(_rk_replay_statements(retained, rk.plan),
+        _rk_replay_statements(replayed, plan); prefix)
     _rk_check_replay_priors(replayed, plan, _rk_scalar_data(parent(rk)), new_data; prefix)
     _rk_check_replay_terms(plan; prefix)
     _rk_check_replay_groupings(plan, groups; prefix)
@@ -410,6 +411,12 @@ function _rk_law_reads!(reads, law, callees, inputs)
     used = get!(inputs, callee.name) do
         _rk_law_inputs(callee.statements, Set{Symbol}(callee.parameters), callees, inputs)
     end
+    # What its laws read that it neither takes nor defines is the caller's value:
+    # a block's law reads a prior's input freely (`_RKBlockBody`).
+    locals = _rk_source_symbols!(Set{Symbol}(), collect(Any, callee.parameters))
+    _rk_source_assignments!(locals, callee.statements)
+    _rk_source_outputs!(locals, callee.statements)
+    union!(reads, setdiff(used, locals))
     arguments = law.args[2:end]
     length(arguments) == length(callee.parameters) || return _rk_value_names!(reads, law)
     for (parameter, argument) in zip(callee.parameters, arguments)
@@ -472,9 +479,26 @@ function _rk_program_statements(emitted::_RKEmittedProgram)
         ["binding: " * string(first(b)) for b in emitted.bindings])
 end
 
-_rk_check_replay_program(retained::_RKEmittedProgram, replayed::_RKEmittedProgram;
-    prefix) = _rk_check_replay_program(_rk_program_statements(retained),
-        _rk_program_statements(replayed); prefix)
+# The program's text no longer holds its generated inputs (a literal `lkj_eta`, a
+# known correlation factor, a factor's fitted levels), so a frozen replay
+# compares them beside it.
+_rk_generated_statements(plan) = String["input: $name = $(repr(value))"
+    for (name, value) in sort!(collect(_rk_generated_inputs(plan)); by=first)]
+_rk_replay_statements(emitted, plan) =
+    vcat(_rk_program_statements(emitted), _rk_generated_statements(plan))
+
+# What identifies a fit's model, for a checkpoint, a carried posterior or a
+# filter that holds on to it: the program, its generated inputs and the numbers
+# its priors read by name. A number only an observation reads is the data's.
+function _rk_identity_statements(rk)
+    emitted = _rk_retained_program(rk)
+    scalars = _rk_fitted_scalars(rk)
+    reads = _rk_prior_reads(emitted, _rk_response_names(rk.plan))
+    vcat(_rk_replay_statements(emitted, rk.plan),
+        String["prior input: $name = $(repr(scalars[name]))"
+            for name in sort!(collect(intersect(reads, keys(scalars))))])
+end
+
 function _rk_check_replay_program(fitted::Vector{String}, replay::Vector{String}; prefix)
     fitted == replay && return nothing
     k = something(findfirst(i -> i > length(replay) || fitted[i] != replay[i],

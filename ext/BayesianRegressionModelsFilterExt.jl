@@ -26,7 +26,7 @@ end
 function source_identity(rk, frozen, configuration)
     emitted = BRM._rk_retained_program(rk)
     io = IOBuffer()
-    serialize(io, (format=1, program=BRM._rk_program_statements(emitted),
+    serialize(io, (format=1, program=BRM._rk_identity_statements(rk),
         callables=BRM._brm_stable_bindings(emitted.bindings), frozen, configuration))
     "brm-filter-v1:" * bytes2hex(sha256(take!(io)))
 end

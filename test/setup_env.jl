@@ -4,12 +4,20 @@
 #
 # The test env pins external source dependencies plus the unregistered
 # BRM root itself. Each pinned package is materialized at a specific GitHub
-# COMMIT under the ignored `test/.bootstrap/` cache; there is NO dependence on
-# any shared `~/github/nsiccha/<pkg>` checkout. A full-SHA revision is
-# branch-independent, so it does not matter that several of these live on a
-# `dev`/`devibe` branch rather than `main`; the commit only has to be pushed to
-# GitHub, except fleet revisions and unpublished review candidates,
+# COMMIT in this host's store (`test_package_store()`, outside the checkout);
+# there is NO dependence on any shared `~/github/nsiccha/<pkg>` checkout. A
+# full-SHA revision is branch-independent, so it does not matter that several of
+# these live on a `dev`/`devibe` branch rather than `main`; the commit only has to
+# be pushed to GitHub, except fleet revisions and unpublished review candidates,
 # which are materialized from their host mirrors (`MIRRORS`).
+#
+# The store is what lets a fresh worktree or job reuse compiled images: Julia
+# rejects an image built from another source path, so a dependency under the
+# checkout rebuilt with its whole reverse closure every time. Only BRM itself and
+# its extensions rebuild now, whose source really is this checkout's. Develop the
+# store's real path: an image built through a symlink in the checkout records that
+# path and dies with the checkout. Its checkouts are read-only and never rewritten
+# (a fresh mtime rejects an image too), and evicted after two unused weeks.
 #
 # Enzyme is the ecosystem's `dogfood` line (user pick on decision
 # `BayesianRegressionModels/decisions/2026-10-28T15-34-11-008-0n0kgfh`): reviewed
@@ -301,16 +309,29 @@ const PINS = [
     # RK 0.1.59 / PPL 0.1.66: property-based whole-parameter geometry dimensions.
     # PPL 0.1.60 / DistributionKernels 0.1.1 keeps Normal interval masses
     # and native Reverse gradients finite in both extreme tails.
+    # Shared-prefix mixed derivatives, batched values and local supports
+    # require RK 0.1.58 / PPL 0.1.65. RK 0.1.59 / PPL 0.1.66 also keeps
+    # the broadcast domain through cached factor projection.
     # RK 0.1.61 / PPL 0.1.70: selective growing-window targets, conditional
     # recovery and bounded-rank joint Gaussian carries.
     # RK 0.1.62 preserves inner row selection through array-valued producer
     # plate cells, including BRM's shared correlated random-effect predictors.
+    # RK 0.1.63 (57f9a59a; PPL 0.1.73) keeps the shared-prefix cut's frontier
+    # types when preparing `partitioned` cell factors, so sparse Laplace
+    # sum factors over shared model-scope helpers stay strict
+    # (RK snag partitioned-cell-717ab7c7).
     # RKPPL 0.1.72 reports a vector simplex or ordered prior's own block
     # (plus sampled hyperparents) as its authored-factor support.
     # b5740888 (RKPPL 0.1.71) sizes a data-free replay from frozen whole
     # values, such as a gmrf support fitted from an indexed fit-role input.
     # fbf65b46 (RK 0.1.65 / RKPPL 0.1.74) deep-copies prepared queries whose
     # generated programs hold modules, as a Laplace plan over a gmrf does.
+    # RK 0.1.66 / RKPPL 0.1.75 computes per-position helpers at a strict
+    # cell's rows; f17b6a24 (RK 0.1.67 / RKPPL 0.1.76) also reads joint cell
+    # latents and storage fields there. RK 0.1.70 / RKPPL 0.1.80 gives strict
+    # cells row forms for matrix-row helpers, `vec` of a row value and whole
+    # arrays read by index. 38421748 (RK 0.1.73 / RKPPL 0.1.82) also computes a
+    # producer plate's cell and `b[p, 2]` of a computed matrix at their rows.
     # f17b6a24 (RK 0.1.67 / RKPPL 0.1.76) prepares strict observation-cell
     # footprints of a per-cell joint field and its named-tuple row reads.
     # 725059f4 (RKPPL 0.1.89): read-only constrained parameter shapes.
@@ -341,8 +362,9 @@ const PINS = [
     # and shared-row storage compact as unrelated units are added.
     # 28d70c34 (RK 0.1.94 / RKPPL 0.1.105) runs a tuple plate's statements only
     # at rows that read their entries, so automatic connected SVI units keep
-    # their own coordinates.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "28d70c344ba4a86602527890ab37f008216b66a2"),
+    # their own coordinates. b9342dca (RK 0.1.96 / RKPPL 0.1.106) is the
+    # revision measured with Enzyme cecb571a below.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "b9342dcae0cf19a6f0664ebb953ea33ed38a85b9"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
@@ -389,10 +411,17 @@ const PINS = [
     # 6053067f / libEnzyme 3425ed9c types floating-point tuple stack slots
     # throughout Reverse, so derived-scale blocks wider than four margins
     # differentiate without changing BRM's block pass (reverse-untyped-a117a92b).
+    # de016556 / libEnzyme c1743bf9 retains those fixes and frees constant
+    # loop-count caches after Forward over Reverse. Repeated sparse Laplace
+    # cell HVPs otherwise retain native memory (forward-over-rev-f93d10bc).
     # d3189970 / libEnzyme 33709d12 contains 6053067f and repairs ordinary
     # Reverse through returned memory (Enzyme snag ordinary-autoenz-6cf1298d):
     # the ordinary AR/DAR and smooth readers in rk_values.jl segfaulted
-    # on Julia 1.10 under 6053067f.
+    # on Julia 1.10 under 6053067f, as did the strict `mo1()` summand
+    # partition gradient (RK monotonic-summan-c191e14a). It also keeps
+    # 842cbefe: without it, a forced bounded ODL plan's Forward over Reverse
+    # cell HVPs stop on "Mismatch codegen type" through a non-inlined
+    # `Base.unalias` (julia-1-10-unali-c91b1f15).
     # d3189970 also contains 0fa85df3's 74abe90/7ac58eb: ordinary Reverse of a mixed
     # integer/Float64 select and of a guarded PHI joining scalar stack storage
     # with a boxed broadcast wrapper, which an SVI unit's dormant scalar/vector
@@ -404,7 +433,9 @@ const PINS = [
     # cannot change inside a loop once per loop entry (Enzyme snag
     # reverse-generato-03b2003d), so a multiresolution gmrf reader's generator
     # sum no longer tapes its captured arrays once per basis term.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "b2bb4cb628cf5f5ac4a897d4b7d83fcd2b5df97c"),  # dogfood
+    # cecb571a / libEnzyme 7f23cb72 contains b2bb4cb6 and repairs a static Reverse
+    # failure on a unit problem from RK 0.1.92 on (RK snag unit-problem-act-e546d3bd).
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "cecb571a1037fbfd800153a3afd1aed3b1913421"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also
@@ -437,16 +468,20 @@ function apply_dogfood_libenzyme()
 end
 
 function main()
+    store = test_package_store()
     paths = Dict("BayesianRegressionModels" => REPO)
     for (name, url, rev) in PINS
         paths[name] = resolve_git_revision_checkout(
             name,
             rev;
-            cache_root=joinpath(TESTENV, ".bootstrap"),
+            cache_root=store,
             mirror=MIRRORS[name],
             origin=url,
         )
     end
+    # Before the precompile, which a run's time limit can stop. This run's pins
+    # were just marked used, so they are safe.
+    evict_unused_checkouts!(store)
     # Enzyme's EnzymeCore is its nested `lib/EnzymeCore` (Enzyme's
     # `[sources]`, which Pkg 1.10 ignores).
     paths["EnzymeCore"] = joinpath(paths["Enzyme"], "lib", "EnzymeCore")

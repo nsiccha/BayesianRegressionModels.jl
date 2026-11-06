@@ -21,10 +21,21 @@ using LogDensityProblems, LinearAlgebra
             end
         end)
         options = MatrixFreeLaplace(; probes=4)
-        # Force a into the target, while the deliberately impossible ESS
-        # threshold keeps b sampled after preparing both candidates.
-        plan = brm_laplace_plan(rk; ad_backend=NLME_AD, integrate=(:a,),
+        # The Poisson term b is prepared, then rejected by the impossible ESS
+        # threshold. Nonlinear sum cells require explicit admission of both
+        # terms; retain only a afterward to exercise the same strict subset.
+        candidate = brm_laplace_plan(rk; ad_backend=NLME_AD,
+            integrate=sums ? (:a, :b) : (:a,),
             draws=8, ess_floor=1.1, solver=:matrixfree, matrixfree=options)
+        plan = if sums
+            terms = NamedTuple[merge(t, (; admitted=t.grouping === :a))
+                for t in candidate.terms]
+            BRMLaplacePlan(terms, candidate.ess_floor, candidate.draws,
+                candidate.max_cell_width, candidate.width_events, -1, -1,
+                candidate.prepared, candidate.algebra_policy)
+        else
+            candidate
+        end
         template = plan.prepared.problem
         original_probes = deepcopy(template.algebra.probes)
         original_lower = [copy(r.lower) for r in template.algebra.references]

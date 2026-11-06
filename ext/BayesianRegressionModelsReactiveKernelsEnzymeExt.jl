@@ -241,22 +241,23 @@ BRM._rk_slap_prior(k, u::Vector{Float64}) =
 BRM._rk_slap_prior_gradient(k, u::Vector{Float64}) =
     BRM._rk_nlme_population_prior_value_gradient(k.prior, u)
 
-# The sparse Laplace's `@plate` cells (src/nlme_laplace_sparse.jl): one cell
-# of `observations` differentiated over a compact selection of packed
-# coordinates (ReactiveKernelsPPL 0.1.22): its gradient and HVPs along `K`
-# directions (the Hessian's columns at its integrated draws), and one
-# direction's HVP and third-order product `D³ℓ[v, v, ·]`, each over the
-# selection.
+# The sparse Laplace's `@plate` cells (src/nlme_laplace_sparse.jl): one cell of
+# `observations` differentiated over a compact selection of partitioned
+# coordinates, conditional on the shared ones. RK gives every compact operator
+# its own shared cache. Newton's HVP therefore runs in its own pass, and the
+# third-order operator owns the additive accumulators, whose
+# shared pullback restores the mixed population derivatives. Reference identity
+# keeps the nested RK records out of every cell group.
 #
 # Enzyme compiles a batch of `W` forward-over-reverse directions as one program
-# `W` lanes wide, and that compile grows faster than `W`. So the operator is
+# `W` lanes wide, and that compile grows faster than `W`. So Newton's HVP is
 # prepared at a bounded width, and `_rk_spl_cell_block` covers a cell's `K`
 # directions in as many batches as it takes: compile cost does not depend on
 # how many coordinates a cell integrates, and run time stays linear in them.
 #
 # Ordinary cells have one active vector and a fixed direction-tuple arity, and
 # forward over reverse allocates less than reverse over forward for their Newton
-# and implicit HVPs, about half from four directions up (`cc0dee14`, and
+# HVPs, about half from four directions up (`cc0dee14`, and
 # reactivekernels-use §7a2's measurement). Static Enzyme cannot take it
 # through every cell, though. Before dogfood `0ed41342`, a cell that sorts and
 # uniques its data, as a PK reader's step lengths do, raised
@@ -265,35 +266,37 @@ BRM._rk_slap_prior_gradient(k, u::Vector{Float64}) =
 # still open. The error sits on a path of the compiled derivative, so only running
 # a cell shows it, and one cell passing clears no other. The group therefore moves to
 # reverse over forward, at the same width, the first time a product raises it.
-mutable struct _SPLCellAD{T,W,B,O}
+mutable struct _SPLCellAD{A,P,W,B,O,Q}
     hvp::Any
-    single::Any
-    const third::T
+    newton::Any
+    const accumulators::A
+    const pullback::P
     const width::W
+    # A partial last batch keeps the prepared arity through this zero direction.
     const padding::Vector{Float64}
     const backend::B
     const observations::O
     const base0::Vector{Float64}
     const indices0::Vector{Int}
     const ad_backend::Any
+    const partitioned::Q
     reverse_over_forward::Bool
 end
 
-function _rk_spl_cell_hvps(backend, observations, base0, indices0, second, ::Val{W}) where {W}
+# Newton's bounded-width HVP and the pullback that runs its pass.
+function _rk_spl_cell_hvp(backend, observations, base0, indices0, second, reverse, ::Val{W};
+        partitioned) where {W}
     rkext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     built, plan = backend.model, rkext._rk_translated(backend)
     m = length(indices0)
     hvp = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_hvp, built, plan,
-        observations, base0, indices0, second, ntuple(_ -> zeros(Float64, m), W))
-    # The implicit correction needs only H*v after the global solve. Keep its
-    # one-direction preparation separate from the Newton Hessian block.
-    single = W == 1 ? hvp : Base.invokelatest(prepare_compact_cell_ad, prepare_ad_hvp,
-        built, plan, observations, base0, indices0, second, (zeros(Float64, m),))
-    hvp, single
+        observations, base0, indices0, second, ntuple(_ -> zeros(Float64, m), W);
+        partitioned, locality=:error)
+    hvp, Base.invokelatest(prepare_cell_pullback, hvp, reverse, base0)
 end
 
 function BRM._rk_spl_cell_ad(backend::BRM.RKBRMI, observations::Tuple,
-        base0::Vector{Float64}, indices0::Vector{Int}, ad_backend, K::Int;
+        base0::Vector{Float64}, indices0::Vector{Int}, ad_backend, K::Int; partitioned,
         width::Int=BRM._BRM_SPL_CELL_HVP_WIDTH)
     rkext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
     built, plan = backend.model, rkext._rk_translated(backend)
@@ -301,62 +304,74 @@ function BRM._rk_spl_cell_ad(backend::BRM.RKBRMI, observations::Tuple,
     forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
     reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
     W = Val(min(K, width))
-    hvp, single = _rk_spl_cell_hvps(backend, observations, base0, indices0,
-        SecondOrder(forward, reverse), W)
-    # Keep the supported reverse-over-forward-over-forward third derivative.
-    third = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_third, built, plan,
-        observations, base0, indices0, SecondOrder(SecondOrder(reverse, forward), forward),
-        (zeros(Float64, m),))
-    # A partial last batch keeps the prepared arity through this zero direction.
-    _SPLCellAD(hvp, single, third, W, zeros(Float64, m), backend, observations, base0,
-        indices0, ad_backend, false)
+    hvp, newton = _rk_spl_cell_hvp(backend, observations, base0, indices0,
+        SecondOrder(forward, reverse), reverse, W; partitioned)
+    # RK's accumulators take reverse over forward for order 1 and the supported
+    # reverse over forward over forward for order 2.
+    second = SecondOrder(reverse, forward)
+    third = SecondOrder(second, forward)
+    owner = Base.invokelatest(prepare_compact_cell_ad, prepare_ad_third, built, plan,
+        observations, base0, indices0, third, (zeros(Float64, m),);
+        partitioned, locality=:error)
+    accumulators = (
+        Base.invokelatest(prepare_cell_accumulator, owner, reverse, base0; order=0),
+        Base.invokelatest(prepare_cell_accumulator, owner, second, base0; order=1),
+        Base.invokelatest(prepare_cell_accumulator, owner, third, base0; order=2),
+    )
+    _SPLCellAD(hvp, newton, accumulators,
+        Base.invokelatest(prepare_cell_pullback, owner, reverse, base0), W, zeros(Float64, m),
+        backend, observations, base0, indices0, ad_backend, partitioned, false)
 end
 
 function _rk_spl_cell_reverse_over_forward!(ad::_SPLCellAD, err)
     @warn "sparse Laplace: forward-over-reverse Hessian-vector products of the cells of " *
         "$(ad.observations) raised $(nameof(typeof(err))); this group uses reverse over " *
         "forward from now on, with the same values and up to about twice the allocations"
-    second = SecondOrder(
-        AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad.ad_backend)),
+    reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad.ad_backend))
+    second = SecondOrder(reverse,
         AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad.ad_backend)))
-    ad.hvp, ad.single = _rk_spl_cell_hvps(ad.backend, ad.observations, ad.base0,
-        ad.indices0, second, ad.width)
+    ad.hvp, ad.newton = _rk_spl_cell_hvp(ad.backend, ad.observations, ad.base0, ad.indices0,
+        second, reverse, ad.width; ad.partitioned)
     ad.reverse_over_forward = true
     ad
 end
 
-# `product(ad)`, moving the group to reverse over forward if forward over reverse
-# raises the activity error. Every other error, and that error from reverse over
-# forward, is the caller's. A product holds no state past its call, so a block
-# that raised in a later batch restarts from its first.
-function _rk_spl_cell_product(product, ad::_SPLCellAD)
+# A Newton pass `f(batch)`, moving the group to reverse over forward if forward over
+# reverse raises the activity error. The move starts a new pass, so `f` runs again and
+# must resume rather than repeat (`_brm_spl_assemble!` resumes at the cell that raised).
+# Every other error, and that error from reverse over forward, is the caller's.
+function BRM._rk_spl_cell_newton(f, ad::_SPLCellAD, base)
+    function pass(ad)
+        result = nothing
+        cell_pullback!(zeros(length(base)), ad.newton, base) do batch
+            result = f(batch)
+        end
+        result
+    end
     try
-        product(ad)
+        pass(ad)
     catch err
         err isa Enzyme.Compiler.EnzymeRuntimeActivityError && !ad.reverse_over_forward ||
             rethrow()
-        product(_rk_spl_cell_reverse_over_forward!(ad, err))
+        pass(_rk_spl_cell_reverse_over_forward!(ad, err))
     end
 end
 
 # The gradient at the point and the Hessian columns of the first `used`
-# directions. `used` also bounds the batches a cell with fewer integrated draws
-# than its group's widest pays for.
-function BRM._rk_spl_cell_block(ad, directions::Tuple, base::Vector{Float64},
-        indices::Vector{Int}, i::Int; used::Int=length(directions))
-    _rk_spl_cell_product(ad) do ad
-        _rk_spl_cell_batches(ad, ad.width, directions, base, base[indices], indices, i, used)
-    end
-end
+# directions, inside a Newton pass (`context`). `used` also bounds the batches a
+# cell with fewer integrated draws than its group's widest pays for.
+BRM._rk_spl_cell_block(ad::_SPLCellAD, directions::Tuple, base::Vector{Float64},
+    indices::Vector{Int}, i::Int; context, used::Int=length(directions)) =
+    _rk_spl_cell_batches(ad, ad.width, directions, context, base[indices], indices, i, used)
 
 function _rk_spl_cell_batches(ad, ::Val{W}, directions::NTuple{K,Vector{Float64}},
-        base, active, indices, i, used) where {W,K}
-    K == W && return ad_gradient_and_hvp(ad.hvp, directions, base, active, indices, i)
+        context, active, indices, i, used) where {W,K}
+    K == W && return ad_gradient_and_hvp(ad.hvp, directions, context, active, indices, i)
     gradient = Float64[]
     columns = Vector{Vector{Float64}}(undef, used)
     for first_direction in 1:W:max(used, 1)
         batch = ntuple(k -> (d = first_direction + k - 1; d <= K ? directions[d] : ad.padding), Val(W))
-        g, results = ad_gradient_and_hvp(ad.hvp, batch, base, active, indices, i)
+        g, results = ad_gradient_and_hvp(ad.hvp, batch, context, active, indices, i)
         first_direction == 1 && (gradient = g)
         for k in 1:W
             d = first_direction + k - 1
@@ -366,24 +381,25 @@ function _rk_spl_cell_batches(ad, ::Val{W}, directions::NTuple{K,Vector{Float64}
     gradient, columns
 end
 
-function BRM._rk_spl_cell_third(ad, direction::Vector{Float64}, base::Vector{Float64},
-        indices::Vector{Int}, i::Int)
-    gradient, (hv,), (tv,) = ad_gradient_hvp_and_third(ad.third, (direction,), base,
-        base[indices], indices, i)
-    gradient, hv, tv
-end
-
-BRM._rk_spl_cell_third_only(ad, direction::Vector{Float64}, base::Vector{Float64},
-    indices::Vector{Int}, i::Int) =
-    only(ad_third(ad.third, (direction,), base, base[indices], indices, i))
-
-function BRM._rk_spl_cell_implicit(ad, direction::Vector{Float64}, base::Vector{Float64},
-        indices::Vector{Int}, i::Int)
-    gradient, (hv,) = _rk_spl_cell_product(ad) do ad
-        ad_gradient_and_hvp(ad.single, (direction,), base, base[indices], indices, i)
+function BRM._rk_spl_cell_pass(f, ad::_SPLCellAD, base)
+    packed = zeros(length(base))
+    result = nothing
+    cell_pullback!(packed, ad.pullback, base) do batch
+        result = f(batch)
     end
-    gradient, hv
+    result, packed
 end
+
+BRM._rk_spl_cell_accumulate(batch, ad::_SPLCellAD, order, direction, weight, base,
+        indices, cell) =
+    accumulate_cell!(batch, ad.accumulators[order + 1], direction, weight,
+        base[indices], indices, cell)
+
+
+# Diagnostics perturb the compact active values inside one pass and discard its
+# accumulated gradient. Order zero's weighted contraction is the cell's value.
+BRM._rk_spl_cell_value(ad::_SPLCellAD, base, indices, cell; context) =
+    first(BRM._rk_spl_cell_accumulate(context, ad, 0, nothing, 1.0, base, indices, cell))
 
 # A factor's complete derivative block is small: the outer sums and direct
 # reads, or one summand's own reads. Operators are shared only across factors
@@ -391,43 +407,61 @@ end
 # Give the shared preparation reference identity. Its nested immutable RK
 # records otherwise get embedded into every term and repeatedly boxed when
 # walking heterogeneous cell states (over 3 KB per record in the sum fixture).
-mutable struct _SPLFactorAD{H,T,D}
+mutable struct _SPLFactorAD{H,T,D,G,A,P}
     const hvp::H
     const third::T
     const dirs::D
     const r::Int
     const outer::Bool
+    const gradient::G
+    const accumulators::A
+    const pullback::P
 end
 
-function BRM._rk_spl_factor_ad(q, part, base, indices, ad_backend; cell0=1, term0=1, K=nothing)
+function BRM._rk_spl_factor_ad(q, part, base, indices, ad_backend; cell0=1, term0=1, K=nothing,
+        width::Int=BRM._BRM_SPL_CELL_HVP_WIDTH)
     r = part === :outer ? length(q.terms) : 0
     m = length(indices)
     shape(v) = part === :outer ? (v[1:r], v[(r + 1):end]) : v
     K = K === nothing ? r + m : K
-    dirs = ntuple(_ -> shape(zeros(r + m)), K)
+    # A bounded Enzyme batch, as for a compact cell: `_rk_spl_factor_block` takes
+    # as many as a block's columns need.
+    dirs = ntuple(_ -> shape(zeros(r + m)), min(K, width))
     forward = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Forward, ad_backend))
-    second = SecondOrder(AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse,
-        ad_backend)), forward)
+    reverse = AutoEnzyme(; mode=BRM._brm_enzyme_mode(Enzyme.Reverse, ad_backend))
+    # An outer factor's active point is the `(sums, active)` tuple, and a
+    # forward-over-reverse HVP over a tuple selector fails inside
+    # DifferentiationInterface (reactivekernels-use §7a2 Boundaries).
+    second = SecondOrder(reverse, forward)
     hvp = K == 0 ? nothing : Base.invokelatest(prepare_cell_factor_ad, prepare_ad_hvp, q.factors,
         part, base, indices, second, dirs; cell0, term0)
     third = Base.invokelatest(prepare_cell_factor_ad, prepare_ad_third, q.factors,
         part, base, indices, SecondOrder(second, forward), (shape(zeros(r + m)),);
         cell0, term0)
-    _SPLFactorAD(hvp, third, dirs, r, part === :outer)
+    gradient = Base.invokelatest(prepare_cell_factor_ad, prepare_ad, q.factors,
+        part, base, indices, reverse; cell0, term0)
+    cached = hasproperty(q, :cached) && q.cached
+    accumulators = cached ? (
+        Base.invokelatest(prepare_cell_accumulator, gradient, reverse, base; order=0),
+        Base.invokelatest(prepare_cell_accumulator, third, second, base; order=1),
+        Base.invokelatest(prepare_cell_accumulator, third, SecondOrder(second, forward), base; order=2),
+    ) : nothing
+    pullback = cached ? Base.invokelatest(prepare_cell_pullback, q.factors, reverse, base) : nothing
+    _SPLFactorAD(hvp, third, dirs, r, part === :outer, gradient, accumulators, pullback)
 end
 
 _spl_factor_flat(v::Tuple) = vcat(v...)
 _spl_factor_flat(v::AbstractVector) = v
-_spl_factor_point(ad, base, indices, cell, sums, term) = ad.outer ?
-    (base, sums, base[indices], indices, cell) :
-    (base, base[indices], indices, cell, term)
+_spl_factor_point(ad, base, indices, cell, sums, term, context=base) = ad.outer ?
+    (context, sums, base[indices], indices, cell) :
+    (context, base[indices], indices, cell, term)
 
 function BRM._rk_spl_factor_block(ad, base, indices, cell; sums=nothing, term=1,
-        columns=collect(1:(ad.r + length(indices))))
-    point = _spl_factor_point(ad, base, indices, cell, sums, term)
+        columns=collect(1:(ad.r + length(indices))), context=base)
+    point = _spl_factor_point(ad, base, indices, cell, sums, term, context)
     if isempty(columns)
-        g, _, _ = BRM._rk_spl_factor_third(ad, zeros(ad.r + length(indices)),
-            base, indices, cell; sums, term)
+        _, g = ad_value_and_gradient(ad.gradient, point...)
+        g = _spl_factor_flat(g)
         return g, zeros(length(g), 0)
     end
     function set!(v, k, value)
@@ -437,27 +471,66 @@ function BRM._rk_spl_factor_block(ad, base, indices, cell; sums=nothing, term=1,
             v[k] = value
         end
     end
-    for (v, k) in zip(ad.dirs, columns)
-        set!(v, k, 1.0)
-    end
-    try
-        g, cols = ad_gradient_and_hvp(ad.hvp, ad.dirs, point...)
-        # A reused plan can restrict the integrated set without preparing AD
-        # again. Its original direction tuple then has a zero unused suffix.
-        _spl_factor_flat(g), hcat(map(_spl_factor_flat, cols[1:length(columns)])...)
-    finally
-        for (v, k) in zip(ad.dirs, columns)
-            set!(v, k, 0.0)
+    function batch(selected)
+        for (v, k) in zip(ad.dirs, selected)
+            set!(v, k, 1.0)
+        end
+        try
+            g, cols = ad_gradient_and_hvp(ad.hvp, ad.dirs, point...)
+            # A reused plan can restrict the integrated set without preparing AD
+            # again, and a last batch can be partial. The direction tuple then has
+            # a zero unused suffix.
+            _spl_factor_flat(g), hcat(map(_spl_factor_flat, cols[1:length(selected)])...)
+        finally
+            for (v, k) in zip(ad.dirs, selected)
+                set!(v, k, 0.0)
+            end
         end
     end
+    W = length(ad.dirs)
+    length(columns) <= W && return batch(columns)
+    blocks = [batch(view(columns, first:min(first + W - 1, length(columns))))
+        for first in 1:W:length(columns)]
+    # The gradient does not depend on the directions.
+    copy(blocks[1][1]), reduce(hcat, last.(blocks))
 end
 
 function BRM._rk_spl_factor_third(ad, direction, base, indices, cell;
-        sums=nothing, term=1)
+        sums=nothing, term=1, context=base)
     d = ad.outer ? (direction[1:ad.r], direction[(ad.r + 1):end]) : direction
-    point = _spl_factor_point(ad, base, indices, cell, sums, term)
+    point = _spl_factor_point(ad, base, indices, cell, sums, term, context)
     g, (hv,), (tv,) = ad_gradient_hvp_and_third(ad.third, (d,), point...)
     _spl_factor_flat(g), _spl_factor_flat(hv), _spl_factor_flat(tv)
+end
+
+# A whole observation shares one cache. Enter it once per sweep, then pass the
+# batch to every local operation, so validation never scans shared coordinates
+# once per cell. The returned packed cotangent includes the prefix pullback.
+function BRM._rk_spl_cell_pass(f, ad::_SPLFactorAD, base)
+    packed = zeros(length(base))
+    result = nothing
+    cell_pullback!(packed, ad.pullback, base) do batch
+        result = f(batch)
+    end
+    result, packed
+end
+
+function BRM._rk_spl_factor_accumulate(batch, ad::_SPLFactorAD, order, direction,
+        weight, base, indices, cell; sums=nothing, term=1)
+    d = direction === nothing ? nothing : ad.outer ?
+        (direction[1:ad.r], direction[(ad.r + 1):end]) : direction
+    tail = ad.outer ? (sums, base[indices], indices, cell) :
+        (base[indices], indices, cell, term)
+    value, local_gradient = accumulate_cell!(batch, ad.accumulators[order + 1],
+        d, weight, tail...)
+    value, _spl_factor_flat(local_gradient)
+end
+
+function BRM._rk_spl_factor_value(ad::_SPLFactorAD, base, indices, cell;
+        sums=nothing, term=1, context=base)
+    value, _ = ad_value_and_gradient(ad.gradient,
+        _spl_factor_point(ad, base, indices, cell, sums, term, context)...)
+    value
 end
 
 include("rk_svi_laplace.jl")

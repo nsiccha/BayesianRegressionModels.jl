@@ -642,8 +642,11 @@ end
         source = sprint(Base.show_unquoted, emitted.main)
         @test BRM._rk_validate_source_definitions(emitted) === nothing
         for definition in emitted.defs
-            @test strip_source_lines(Meta.parse(sprint(Base.show_unquoted, definition))) ==
-                strip_source_lines(definition)
+            # By its text: a `@kernel` definition holds its macro as a `GlobalRef`,
+            # which parses back as a qualified name.
+            @test sprint(Base.show_unquoted, strip_source_lines(
+                    Meta.parse(sprint(Base.show_unquoted, definition)))) ==
+                sprint(Base.show_unquoted, strip_source_lines(definition))
         end
         @test strip_source_lines(Meta.parse(source)) == strip_source_lines(emitted.main)
         @test !occursin("popefs", source)

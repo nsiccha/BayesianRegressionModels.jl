@@ -18,6 +18,7 @@ end
 _rk_attach_data_assignments!(plan::_RKUnconditionedPlan, _assignments, _constants) = plan
 
 _rk_plan_taken(plan::_RKStructuralPlan) = union!(Set{Symbol}(keys(plan.columns)),
+    keys(_rk_input_bindings(plan)), keys(_rk_generated_inputs(plan)),
     (d.name for d in plan.derived), (p.name for p in plan.parameters),
     (p.name for p in plan.predictors), (a.name for a in plan.assignments),
     (v.name for v in plan.vector_parameters),
@@ -102,20 +103,21 @@ function _rk_attach_data_assignments!(derived::Vector{_RKDerivedSpec}, columns,
     nothing
 end
 
-# The regression plan folds every value a prior reads into a literal
-# (`sigma ~ Exponential(1.7)`, `_rk_scalar_data`), but a component's prior reads
-# its inputs by name (`b ~ brm_group_effects(g, scale)`), and folding removed
-# the assignment that would define `scale`. Define each name the program reads
-# in its main block. The value stays in the fitted program, as a folded prior's
-# does: no design binds it, and a replay that changes it fails the program
-# identity check. The value plan instead binds these (`_brm_rk_value_plan`).
+# A data scalar a statement reads by name is a bound input of the program
+# (`_RKStructuralPlan.inputs`, user principle `0ikeidi`). What else a prior reads
+# by name has no such input: an assignment holding a literal (`rate = 1.7`) folded
+# out of the plan, or a data vector, whose whole value a component's prior reads
+# (`b ~ brm_group_effects(g, v[1])`). Define those in the main block: such a value
+# stays in the fitted program, no design binds it, and a replay that changes it
+# fails the program identity check. The value plan binds its columns instead
+# (`_brm_rk_value_plan`).
 _rk_define_read_scalars!(plan, _known) = plan
 function _rk_define_read_scalars!(plan::_RKStructuralPlan, known)
     (; consts, aliases, parameters, assignments, data) = known
     # Whether a statement reads one by name takes an emission to tell. A model
-    # all of whose data are columns, with no folded assignment, has none. Prior
-    # dependencies cannot decide it: they omit an R2D2 `reference_scale`.
-    candidate(name) = !haskey(plan.columns, name) &&
+    # all of whose data are columns or inputs, with no folded assignment, has
+    # none. Prior dependencies cannot decide it: they omit an R2D2 `reference_scale`.
+    candidate(name) = !haskey(plan.columns, name) && !haskey(plan.inputs, name) &&
         (haskey(consts, name) || haskey(aliases, name) || haskey(data, name))
     any(candidate, Iterators.flatten((keys(consts), keys(aliases), keys(data)))) ||
         return plan
@@ -127,8 +129,7 @@ function _rk_define_read_scalars!(plan::_RKStructuralPlan, known)
         _rk_source_assignments!(defined, statement)
         _rk_source_outputs!(defined, statement)
     end
-    reads = _rk_value_reads!(Set{Symbol}(), main)
-    foreach(definition -> _rk_free_reads!(reads, definition), emitted.defs)
+    reads = _rk_program_value_reads(emitted)
     for name in sort!(collect(setdiff(reads, defined)); by=string)
         candidate(name) || continue
         expression = if haskey(consts, name) || haskey(aliases, name)
@@ -146,6 +147,14 @@ function _rk_define_read_scalars!(plan::_RKStructuralPlan, known)
         push!(plan.assignments, _RKAssignmentSpec(name, expression, name))
     end
     plan
+end
+
+# The names a program reads as values: its main block's, and its submodels' free
+# reads.
+function _rk_program_value_reads(emitted)
+    reads = _rk_value_reads!(Set{Symbol}(), emitted.main)
+    foreach(definition -> _rk_free_reads!(reads, definition), emitted.defs)
+    reads
 end
 
 # What a submodel reads from its caller: a block's law reads a prior's input

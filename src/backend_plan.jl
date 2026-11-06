@@ -3150,6 +3150,11 @@ function _brm_effect_number(x::ExprColumn{typeof(getindex)})
     value isa Real && !(value isa Bool) ? Float64(value) : nothing
 end
 
+# The scalar data field a prior argument names, or `nothing`.
+_brm_data_scalar_name(_x) = nothing
+_brm_data_scalar_name(x::NamedColumn) =
+    parent(x) isa DataColumn && !isnothing(_brm_effect_number(x)) ? name(x) : nothing
+
 # ---- shared random-effect prior resolution ---------------------------------
 
 function _brm_ranef_sd_prior(spec, spelling::AbstractString;
@@ -3414,6 +3419,7 @@ function _brm_resolve_ranef_effect_overrides(
                 :sd_default => nothing,
                 :sd_overrides => Dict{Int,Tuple{Any,Int}}(),
                 :lkj_eta => nothing,
+                :lkj_eta_source => nothing,
                 :known_cor => nothing,
                 :dist => missing)
         end
@@ -3435,6 +3441,7 @@ function _brm_resolve_ranef_effect_overrides(
                 state[:known_cor] = _brm_known_ranef_cor(spec, length(margins); prefix)
             else
                 state[:lkj_eta] = _brm_ranef_lkj_eta(spec, length(margins); prefix)
+                state[:lkj_eta_source] = _brm_data_scalar_name(spec.arguments[2])
             end
             continue
         end
@@ -3476,6 +3483,7 @@ function _brm_resolve_ranef_effect_overrides(
                             !isempty(state[:sd_overrides])),
                     has_cor=!isnothing(state[:lkj_eta]) || !isnothing(state[:known_cor]),
                     lkj_eta=isnothing(state[:lkj_eta]) ? 1.0 : state[:lkj_eta],
+                    lkj_eta_source=state[:lkj_eta_source],
                     known_cor=state[:known_cor],
                     dist=coalesce(state[:dist], nothing),
                     margins)
