@@ -56,7 +56,7 @@ function _brm_spl_inertia(K)
             copy(MUMPS.default_cntl64); backend=MUMPS.Sequential())
         try
             MUMPS.set_icntl!(m, 13, 1; displaylevel=0)
-            # The rotation can leave roundoff at an exactly singular Schur
+            # Elimination can leave roundoff at an exactly singular Schur
             # complement. Reject numerical null pivots at MUMPS's default
             # scale-aware tolerance, even if its remaining inertia is right.
             MUMPS.set_icntl!(m, 24, 1; displaylevel=0)
@@ -449,14 +449,23 @@ function _brm_spl_factor_operators(prepared, u0, ad_backend)
     merge(prepared, (; cells))
 end
 
-# H = D + B' W B without materializing the outer cliques. The two auxiliary
-# blocks are a 45-degree rotation of [0 I; I W], whose inverse is [-W I; I 0].
-# Its determinant has magnitude one and its inertia is (r, r), even when W
-# is singular or indefinite. Thus K's Schur complement is H; H is positive
-# definite exactly when K has n+r positive and r negative pivots.
+# H = D + B' W B without materializing the outer cliques. With p = B x and q = W p,
 #
-# Keeping both copies of B in the input pattern also keeps the selected
-# inverse entries needed for S B' and B S B', including at zero curvature.
+#     K = [ D  Z' B'
+#           Z  W  -I
+#           B  -I  0 ]    on (x, p, q)
+#
+# has H as its Schur complement on x. The auxiliary block has determinant of
+# magnitude one and inertia (r, r), even when W is singular or indefinite, so H is
+# positive definite exactly when K has n+r positive and r negative pivots.
+#
+# Z is a zero-valued copy of B's pattern. It requests the selected inverse entries
+# [x,p] = S B' and, with W's own pattern, [p,p] = B S B', including at zero curvature.
+#
+# p and q stay separate variables: their sizes differ by W's scale. A rotation of the
+# auxiliary block stores (q ± p) / √2 and recovers x from a difference of numbers of
+# W's size, which costs a plain solve a residual growing as W² (0.8% at the 2e7 of a
+# bounded ODL target; no accuracy at all above about 1e8).
 function _brm_spl_augmented_matrix(D::SparseMatrixCSC, B::SparseMatrixCSC,
         W::SparseMatrixCSC)
     n = size(D, 1); r = size(B, 1)
@@ -466,38 +475,32 @@ function _brm_spl_augmented_matrix(D::SparseMatrixCSC, B::SparseMatrixCSC,
     # cancelled zeros, although their inverse entries are still needed by
     # derivatives at the cancellation point.
     ii = collect(1:(n + 2r)); jj = copy(ii); vv = zeros(n + 2r)
-    vv[(n + 1):(n + r)] .= 1.0
-    vv[(n + r + 1):end] .= -1.0
     for j in axes(D, 2), k in nzrange(D, j)
         push!(ii, rowvals(D)[k]); push!(jj, j); push!(vv, nonzeros(D)[k])
     end
     for j in axes(B, 2), k in nzrange(B, j)
-        i = rowvals(B)[k]; value = nonzeros(B)[k] / sqrt(2.0)
-        for a in (n + i, n + r + i)
-            push!(ii, a, j); push!(jj, j, a); push!(vv, value, value)
-        end
+        i = rowvals(B)[k]; value = nonzeros(B)[k]
+        push!(ii, n + r + i, j, n + i, j); push!(jj, j, n + r + i, j, n + i)
+        push!(vv, value, value, 0.0, 0.0)
     end
     for j in axes(W, 2), k in nzrange(W, j)
-        i = rowvals(W)[k]; value = nonzeros(W)[k] / 2
-        for (a,b,v) in ((n+i,n+j,value), (n+r+i,n+r+j,value),
-                (n+i,n+r+j,-value), (n+r+i,n+j,-value))
-            push!(ii,a); push!(jj,b); push!(vv,v)
-        end
+        push!(ii, n + rowvals(W)[k]); push!(jj, n + j); push!(vv, nonzeros(W)[k])
     end
-    sparse(ii,jj,vv,n+2r,n+2r)
+    for i in 1:r
+        push!(ii, n + i, n + r + i); push!(jj, n + r + i, n + i); push!(vv, -1.0, -1.0)
+    end
+    sparse(ii, jj, vv, n + 2r, n + 2r)
 end
 
 # Read the small covariance blocks needed by one cell's chain rule from
-# selected entries of the rotated augmented inverse. The original effects
-# are first, followed by the two copies of the outer-input rows.
+# selected entries of the augmented inverse, whose effects come first, then
+# the outer inputs p and their images q.
 function _brm_spl_factor_covariances(c, rows, selected, n, r)
     # CSC submatrix indexing allocates work arrays as long as the original
     # matrix. Read these small requested blocks directly, so doing this once
     # per cell never allocates a model-sized index map per cell.
-    SB = Float64[(selected[i,n+r+j] - selected[i,n+j]) / sqrt(2.0)
-        for i in c.lz, j in rows]
-    BSB = Float64[(selected[n+i,n+j] - selected[n+i,n+r+j] -
-        selected[n+r+i,n+j] + selected[n+r+i,n+r+j]) / 2 for i in rows, j in rows]
+    SB = Float64[selected[i, n + j] for i in c.lz, j in rows]
+    BSB = Float64[selected[n + i, n + j] for i in rows, j in rows]
     blocks = [[Matrix(Symmetric(_brm_spl_entries(selected,t.lz,t.lz))) for t in reduction]
         for reduction in c.terms]
     (; blocks, SB, BSB=Matrix(Symmetric(BSB)))
@@ -568,10 +571,40 @@ function _brm_spl_selected(f::_BRMAugmentedFactor)
     f.selected
 end
 
+# H x, read from K's blocks: K (x, 0, 0) holds D x and B x, K (0, B x, 0) holds
+# W B x, and K (0, 0, W B x) holds B' W B x.
+function _brm_spl_augmented_action(factor, x)
+    K = factor.K; n = factor.n; r = (size(K, 1) - n) ÷ 2
+    y = K * vcat(x, zeros(2r))
+    Wp = (K * vcat(zeros(n), y[(n + r + 1):end], zeros(r)))[(n + 1):(n + r)]
+    y[1:n] .+ (K * vcat(zeros(n + r), Wp))[1:n]
+end
+
+# The marginal gradient cancels explicit against implicit terms on a population
+# coordinate aliased with an integrated effect, which leaves this solve's absolute
+# residual in the gradient, and a plain solve's residual grows with W. So refine
+# against H itself, while a step at least halves the residual. K's own residual is
+# not the measure: its q rows bottom out at roundoff of W's size.
 function _brm_spl_augmented_solve(factor, b::AbstractVector)
     length(b) == factor.n || throw(DimensionMismatch("wrong integrated-vector length"))
-    rhs = zeros(size(factor.F, 1)); rhs[1:factor.n] .= b
-    (factor.F \ rhs)[1:factor.n]
+    rhs = zeros(size(factor.F, 1))
+    function solve(v)
+        fill!(rhs, 0.0); rhs[1:factor.n] .= v
+        (factor.F \ rhs)[1:factor.n]
+    end
+    x = solve(b)
+    r = b .- _brm_spl_augmented_action(factor, x)
+    residual = norm(r)
+    while residual > 0
+        candidate = x .+ solve(r)
+        candidate_r = b .- _brm_spl_augmented_action(factor, candidate)
+        smaller = norm(candidate_r)
+        smaller < residual || break
+        halved = smaller <= residual / 2
+        x, r, residual = candidate, candidate_r, smaller
+        halved || break
+    end
+    x
 end
 
 # Apply S^(1/2) to a standard-normal vector through solves for S = H^(-1).

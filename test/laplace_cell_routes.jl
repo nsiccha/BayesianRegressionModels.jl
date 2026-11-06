@@ -43,6 +43,22 @@ function route_wide()
     end), (:a,)
 end
 
+# A stiff observation whose mean is nonlinear in its integrated effects, with a
+# population intercept aliased with an integrated one. The log determinant is very
+# sensitive to the stiff coordinate, and its explicit and implicit derivatives cancel on
+# the intercept, so only an accurate solve of h v = s leaves that cancellation.
+function route_stiff()
+    data = (; n=4, m=2, rows=[[1, 2], [3, 4]], y=[0.2, 0.3])
+    RKBRMI(@brm data begin
+        off ~ Normal(0, 1)
+        cal[1:m] .~ Normal.(0, 1)
+        z[1:n] .~ Normal.(0, 1)
+        @plate for k in eachindex(rows)
+            y[k] ~ Normal(off + cal[k] + 0.5 * dot(z[rows[k]], z[rows[k]]), 3e-4)
+        end
+    end), (:cal, :z)
+end
+
 is_factor(group) = group isa BRM._BRMSumCellGroup
 
 @stestset "both routes of a no-sums cell are the same target" begin
@@ -75,6 +91,32 @@ is_factor(group) = group isa BRM._BRMSumCellGroup
                 copied = Base.invokelatest(LDP.logdensity_and_gradient, deepcopy(reused), points[2])
                 @test all(isapprox.(copied, compact[2]; rtol=1e-6, atol=1e-6))
             end
+        end
+    finally
+        @eval BRM._rk_spl_cell_whole(query::ReactiveKernelsPPL.CellQuery) =
+            any(entry -> entry.status === :whole, ReactiveKernels.partition_locality(query))
+    end
+end
+
+# The compact route's Cholesky of h never sees the factor route's augmented system,
+# so it is an independent reference. Reported on a bounded ODL target, where a
+# residual of 0.8% in that system moved a gradient of 395 to 19214 (snag
+# sparse-laplace-c-b7cc5e58); on this fixture it gave -50401 for -2.16.
+@stestset "a stiff cell's factor route keeps the marginal gradient" begin
+    rk, integrate = route_stiff()
+    p = brm_laplace_problem(rk; integrate, ad_backend=NLME_AD)
+    @test !any(is_factor, p.cells)
+    points = [0.1 .* sin.(eachindex(p.population)), -0.2 .* cos.(eachindex(p.population))]
+    compact = [LDP.logdensity_and_gradient(p, phi) for phi in points]
+    @eval BRM._rk_spl_cell_whole(::ReactiveKernelsPPL.CellQuery) = true
+    try
+        q = Base.invokelatest(brm_laplace_problem, rk; integrate, ad_backend=NLME_AD)
+        @test all(is_factor, q.cells)
+        for (phi, (value, gradient)) in zip(points, compact)
+            v, g = Base.invokelatest(LDP.logdensity_and_gradient, q, phi)
+            @test v ≈ value rtol=1e-8
+            @test g ≈ gradient rtol=1e-6
+            @test g ≈ route_fd(x -> Base.invokelatest(LDP.logdensity, q, x), phi) rtol=1e-4
         end
     finally
         @eval BRM._rk_spl_cell_whole(query::ReactiveKernelsPPL.CellQuery) =

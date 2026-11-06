@@ -14,6 +14,14 @@ instead of failing at run time.
 
 ## 0.2.184
 
+- The sparse Laplace marginal gradient is correct at a stiff observation on the
+  factor route. Its augmented system lost accuracy as the square of the outer
+  curvature, and the gradient keeps that residual on any population coordinate
+  aliased with an integrated effect: on a bounded ODL target with outer curvature
+  2e7, `odl_offset_Intercept` read 19214 for 395. The system now keeps its outer
+  inputs and their images as separate variables and refines each solve against
+  the conditional precision itself. Marginal values, definiteness and selected
+  covariances are unchanged. Conditional draws use the same solve.
 - The Laplace mode search's default Newton budget per continuation stage
   (`maxiter` of `brm_laplace_problem`, `brm_laplace_plan` and the NLME
   integrated families) rises from 50 to 200. Where a followed mode ceases to

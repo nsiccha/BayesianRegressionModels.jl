@@ -193,7 +193,10 @@ sweeps allocate approximately in proportion to the number of cells.
 operators and the factor outer, give the same marginal value and gradient,
 including a cell wider than the HVP batch, a retained plan and a copy. It forces
 the factor route for one testset by overriding the locality report, and a helper
-that hides its rows from both routes is refused by name.
+that hides its rows from both routes is refused by name. A stiff cell whose
+population intercept is aliased with an integrated effect keeps the factor route's
+gradient equal to the compact route's, whose Cholesky of h never sees the augmented
+system (it read -50401 for -2.16 on the rotated form).
 `plate_selected_outputs.jl` checks nested selection of shared vector outputs
 across plates with different cell counts: data-only and parameter-dependent
 outputs, fixed and varying widths, both output orders, reader-first composition,
@@ -228,7 +231,9 @@ automatic selection, marginal optimization, independent copies and scalar
 curvature sign changes. Indexed direct predictor reads beside sums retain
 four outer coordinates at 16, 64 and 4,096 effects (RK 0.1.39 / RKPPL 0.1.33).
 `laplace_factors.jl` checks the compact factor chain
-rule and bounded covariance square-root action. The end-to-end scaling
+rule and bounded covariance square-root action, and that outer curvature up to
+1e10 costs the augmented solve neither its residual nor the selected covariance
+blocks. The end-to-end scaling
 driver is `research/sparse_laplace_factors/fitting_scaling.jl`.
 
 Sum-cell tests require the fleet SelectedInversion revision recorded in
