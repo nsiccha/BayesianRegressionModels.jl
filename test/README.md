@@ -8,7 +8,9 @@ compiled Stan (value and native Reverse gradient, through the coordinate
 transport), replays the printed source, checks that another value emits the same
 program, that binding refuses an invalid value, and frozen `reprocess` of a
 scalar field and of a constant. The further arguments of the other response
-families are checked against the oracle and finite differences. It accepts
+families are checked against the oracle and finite differences. A per-row `zi`
+or Student-t `nu` outside its support is checked as a refusal on
+ReactiveKernelsPPL 0.1.105 or later and as a `-Inf` density before it. It accepts
 testset substring filters.
 
 `rk_value_weighted_observations.jl` checks formula-level `fweights` and

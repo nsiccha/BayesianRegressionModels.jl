@@ -154,9 +154,10 @@ instead of failing at run time.
   a data shape in Gamma's `mu/alpha`. Binomial trials keep their formula
   spelling, and the cutpoints or category predictors of a leveled response stay
   refused. An invalid value is refused when the backend is built, naming it
-  (`per-observation scale s must be finite positive numerics`), except that an
-  out-of-range per-row `zi` or Student-t `nu` is not refused yet: it reads as a
-  `-Inf` density.
+  (`per-observation scale s must be finite positive numerics`). An out-of-range
+  per-row `zi` or Student-t `nu` is refused that way only from ReactiveKernelsPPL
+  0.1.105, which BRM's compat floors do not require yet. Before it, the value
+  fails later, as a `-Inf` density or an internal error.
 - Changed: scalar-data Student-t degrees of freedom
   (`LocationScale(mu, s, TDist(nu))` with `nu` from data) are read the same
   way instead of being emitted as a numeric literal, so one program serves
