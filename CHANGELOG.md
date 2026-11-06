@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.215
+
+- Fixed: `brm_svi_fit` and `brm_svi_resume` could not recover a dense unit
+  factor's weak direction. The single-draw curvature estimate is indefinite,
+  and where a direction's precision was far below its target the trust-limited
+  step kept widening it, on an exact Gaussian target too: a direction whose true
+  sd is 1, started at 36.7, ended between 155 and 3170 after 1100 visits. Draws
+  then reach far enough out that the target overflows on both sides. The step
+  now uses the positive part of the estimate, which needs no knowledge of the
+  prior and equals the old estimate at a matched factor. No option, keyword,
+  diagnostic or checkpoint format changes, but dense units' trajectories differ
+  from the first visit, so a fit on a fixed seed does not reproduce its earlier
+  result. The estimate is biased towards more precision where the factor and
+  target differ; on a Gaussian target the stationary sd is about 1.04-1.06 times
+  the truth, against 1.11-1.14 before.
+
 ## 0.2.214
 
 - Fixed: on SBBRMI, an `@plate for p in groups(g)` whose grouping column has no
