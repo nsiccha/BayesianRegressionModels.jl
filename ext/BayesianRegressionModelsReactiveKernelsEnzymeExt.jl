@@ -67,6 +67,12 @@ end
 BRM._rk_laplace_third(query, direction::Vector{Float64}, u::Vector{Float64}) =
     only(ad_third(query, (direction,), u))
 
+# An LKJ channel factor and the Jacobian of its entries, for a read-pair field held by units.
+function BRM._rk_svi_lkj_value_jacobian(segment::Vector{Float64}, K::Int)
+    jacobian = only(Enzyme.jacobian(Enzyme.Forward, s -> vec(lkj_chol_constrain(s, K)), segment))
+    lkj_chol_constrain(segment, K), jacobian
+end
+
 # The compact sampler uses ordinary Reverse with the repaired Enzyme dogfood
 # selected by the test bootstrap (rkppl-use §14).
 BRM._rk_nlme_partition_sampler(context, base::Vector{Float64}) =

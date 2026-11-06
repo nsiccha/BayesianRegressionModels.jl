@@ -32,6 +32,8 @@ _brm_svi_unit_touched(t::NamedTuple, i) = t.touched[i]
 
 # One pair of zeroed global gradients per worker, for the antithetic pair. A unit
 # clears what it touched, so no unit pays for the globals' length.
-_brm_svi_worker_buffers(globals) = (; plus=zeros(length(globals)), minus=zeros(length(globals)))
+_brm_svi_worker_buffers(globals, fields=nothing) = (; plus=zeros(length(globals)),
+    minus=zeros(length(globals)), fields=_brm_svi_field_work(fields))
+_brm_svi_field_work(::Nothing) = ()
 _brm_svi_global_buffers(work, D) = (work.plus, work.minus)
 _brm_svi_global_buffers(::Nothing, D) = (zeros(D), zeros(D))
