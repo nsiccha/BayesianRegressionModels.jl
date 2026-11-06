@@ -323,9 +323,10 @@ end
         final = deserialize(path)
         @test final.iteration == 205 && final.status === :stopped
         @test final.draws == plain.draws
-        # Bounded: a run's file grows by one number per window, not by iterations.
+        # Bounded: a run's file grows by two numbers per window (the plain and the
+        # trimmed window ELBO), not by iterations; here one window per snapshot.
         @test maximum(diff(sizes)) <= 32
-        @test last(sizes) - first(sizes) <= 8 * length(sizes) + 64
+        @test last(sizes) - first(sizes) <= 16 * length(sizes) + 64
 
         # Plain data: a process with neither BRM nor the model reads every field.
         script = """

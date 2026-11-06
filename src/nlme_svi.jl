@@ -1125,8 +1125,9 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
     stopping rule reads, and `clipped_steps`, as in `diagnostics`.
   - `draws`: coordinates × `snapshot_draws`, as the result's `draws`.
 
-  BRM keeps no snapshot: the size of one is that of `q` and `draws` plus one number
-  per window, and a path holds only the latest. To keep more, pass a function.
+  BRM keeps no snapshot: the size of one is that of `q` and `draws` plus two numbers
+  per window (one for GaussianBlockLaplace), and a path holds only the latest. To
+  keep more, pass a function.
 
 Returns `draws`, `ndraws` draws from the fitted approximation as RK packed
 unconstrained points (coordinates × draws, one column per draw, the order of
