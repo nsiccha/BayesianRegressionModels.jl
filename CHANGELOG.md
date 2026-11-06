@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.218
+
+- Added: `brm_gmrf_predict(rk, draws, field; east, north, time)` gives a read-pair
+  field (`gmrf(...; neighbors=m)`) at positions and times the fit need not have read:
+  conditional means, or conditional draws with `rng`. Marginals are the law's; points are
+  conditionally independent given the states, so a joint quantity over several new
+  points, such as an areal total, is not.
+- Added: `brm_nlme_view`, `brm_nlme_model` and `brm_svi_fit` accept a model-scope `gmrf`
+  term. Its states and hyperparameters are shared latents. `brm_svi_fit` refuses the mesh
+  form by name: one independent factor per mesh state collapses the learned lengths on
+  toys. A read-pair field's states are one global factor each under `brm_svi_fit`.
+
 ## 0.2.217
 
 - Fixed: `gmrf(...; neighbors=m)` depended on the order of the rows wherever a

@@ -750,6 +750,10 @@ function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             claim_declaration!(record.declaration, :population)
         elseif kind === :scalar
             claim_declaration!(record.declaration, :scalar)
+        elseif kind in (:gmrf, :gmrf_footprint, :gmrf_multiresolution)
+            # A model-scope field's states and hyperparameters: shared, like a
+            # shared HSGP's. Per-cell fields of a `@plate` declare no such record.
+            claim_declaration!(record.declaration, :shared_latent)
         elseif kind === :lkj_cholesky
             # A declared level correlation (`Omega ~ LKJCholesky(K, eta)`),
             # which only a grouped HSGP's `cor=` can read here (a random-effect

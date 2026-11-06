@@ -64,11 +64,26 @@ _brm_svi_rank(f::LowRankGlobal) = f.rank
 _brm_svi_globals(m::BRMNLMEModel) = sort!(vcat(m.theta, m.sigma,
     findall(r -> r === :subject_scale || r === :subject_correlation, m.view.role)))
 
+# One independent Gaussian per mesh state drives a learned field's lengths to their
+# limit, because a shorter field makes that factorization more nearly exact
+# (research/svi_field_units/family_oracle.jl and tuesday_shape.jl, on toys). A read-pair
+# field's states sit where the data is, so the same factor stays close to the posterior.
+function _brm_svi_check_fields(m::BRMNLMEModel)
+    for record in _brm_nlme_records(m.backend.plan)
+        record.kind === :gmrf || continue
+        _brm_nlme_error("brm_svi_fit: `$(record.predictor)` is a mesh `gmrf` field. Its " *
+            "independent factors per mesh state drive the learned lengths to collapse, so " *
+            "this fit would mislead; use `gmrf(...; neighbors=m)`, whose states are its reads")
+    end
+    nothing
+end
+
 function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=nothing)
     m.cell_query === nothing && _brm_nlme_error(
         "brm_svi: minibatch SVI evaluates one subject at a time, on the " *
         "subject's own observation cells, and this model's observations have " *
         "no cells attributable to single subjects")
+    _brm_svi_check_fields(m)
     ownership = _brm_svi_ownership(m; global_coordinates, previous)
     globals, units = ownership.globals, ownership.units
     # SVI owns one partition sampler and includes covariance coordinates in

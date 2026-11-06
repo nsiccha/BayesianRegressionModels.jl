@@ -221,9 +221,24 @@ domain of about 1,000 km first fail at a range of about 5,000 km with a correlat
 time of ``10^5`` time units, or a range of ``10^6`` km at any correlation time.
 
 Frozen replay reads only fitted `(position, time)` pairs, in any order and any
-subset. A new position or time needs a conditional prediction law and is
-refused. It is one model-scope field: use `mesh=` for independent fields in
-plate cells. Embedded Laplace does not integrate it.
+subset, and refuses a new position or time: `brm_gmrf_predict` below gives the
+conditional law there. It is one model-scope field: use `mesh=` for independent fields
+in plate cells. Embedded Laplace does not integrate it.
+
+### At new positions and in minibatch SVI
+
+`brm_gmrf_predict(rk, draws, :field; east, north, time)` gives a read-pair field at
+points the fit need not have read, on the scale the model reads it. A point follows the
+covariance above given its nearest read positions at the read times around it. With
+`rng` each entry is a conditional draw; without it, a conditional mean. Marginals are the
+law's. Points are conditionally independent given the states, so a joint quantity over
+several new points, such as an areal total, is not.
+
+`brm_svi_fit` takes a read-pair field, each state with its own global Gaussian factor. On
+toys with several rows per state that factor stays close to the exact posterior, while
+the same factor on a mesh's states collapses the learned lengths, so `brm_svi_fit`
+refuses the mesh form. With few rows per state the read-pair form's spatial length can
+also come out short, so check the learned lengths against their prior.
 
 ## Exact time covariance on irregular reads: `multiresolution=`
 
