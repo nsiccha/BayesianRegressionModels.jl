@@ -806,7 +806,6 @@ instead of failing at run time.
 - **A `gmrf` term with only default priors transpiles from any `mod`:** the mesh
   form named its submodel in the caller's module and failed with `Could not find
   _sb_gmrf`.
-
 ## 0.2.159
 
 - **`RKBRMI`: a model-scope `gmrf` prior can read data.** `sd(field, gmrf(...))
@@ -841,7 +840,6 @@ instead of failing at run time.
   coordinate, so the model has the partition, likelihoods and gradients of the
   same model without the term. The named estimates list the term with no levels
   (`g = []`), and that value starts the model again through `inits`.
-
 
 ## 0.2.156
 
