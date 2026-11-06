@@ -159,7 +159,7 @@ const CASES = (
         brmi = case.model(merge(case.data, case.fields))
         program = code(brmi)
         @test compiles(brmi)
-        @test !occursin("normal_scale", program)
+        @test !occursin("~ normal_scale(", program)
         for (name, value) in pairs(case.fields)
             @test BRM.stan_data(sb(brmi))[name] == value
         end

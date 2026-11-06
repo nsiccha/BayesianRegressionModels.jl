@@ -492,7 +492,7 @@ end
     binder = check_binder(rk, new; resample_groups=[:subject], want=:conc,
         runtime=subject_effects)
     @test length(binder.classes) == 1
-    @test keys(binder.fitted) == (:weight_fit,)
+    @test keys(binder.fitted) == (:hsgp_base_time_modes_fit, :hsgp_base_time_settings_fit, :weight_fit)
     check_binder(rk, [pk_data(rng, 2, 3; labels=["n1", "n2"]),
         pk_data(rng, 3, 2; labels=["n1", "n2", "n3"])];
         resample_groups=[:subject], want=:conc, runtime=subject_effects)

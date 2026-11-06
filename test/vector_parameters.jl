@@ -88,7 +88,7 @@ likelihood(mu, sigma) = sum(logpdf.(Normal.(mu, sigma), vp_data.y))
     brmi = check_vector_case(vp_bounded, vp_data, "bounded", oracle;
         declaration=(; name=:phi, text="vector<lower=0.0, upper=2.0>[phi_n] phi;"),
         statement="phi ~ normal(0.0, 0.5);",
-        rk_source="phi[1:4] .~ restricted.(Normal.(0.0, 0.5), 0.0, 2.0)")
+        rk_source="phi[1:phi_length] .~ restricted.(Normal.(0.0, 0.5), 0.0, 2.0)")
     @test string(brmi) == "phi[1:n] .~ Normal.(0.0, 0.5; lower=0.0, upper=2.0)\ny ~ Normal(phi, 1.0)"
     # A declaration is model structure, like a scalar parameter's.
     @test occursin("phi[1:n] .~", string(structure_of(brmi)))
