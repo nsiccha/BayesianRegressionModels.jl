@@ -18,16 +18,20 @@ instead of failing at run time.
   now a graph value of its authored name, as user decision `0kpugvc` already
   documented. `rk_draw_values(rk, U, (:q,))` and `want=(:q,)` answer for
   `mu ~ 1 + x; q = exp(mu - decay * elapsed); y ~ Normal(mu, 0.4)` instead of
-  raising `KeyError: kernel has no port :q`, on the value route and on the
-  structural route (`sigma ~ Exponential(1); variance = sigma^2`, a literal
-  `two = 2.0`, an alias `scale = sigma`). Coordinates, densities and
-  gradients are unchanged, and the sampler never runs such a value. An
+  raising `KeyError: kernel has no port :q`; so do scalars over sampled
+  parameters (`sigma ~ Exponential(1); variance = sigma^2`, a literal
+  `two = 2.0`, an alias `scale = sigma`). Coordinates and log densities are
+  unchanged; a gradient can move by one ulp where the extra statement changes
+  the compiled evaluation order. The sampler never runs such a value. An
   assignment that needs a declaration no response reaches (`q = exp(z)` for
   an unread `z ~ Normal(0, 1)`, or an unread formula predictor) stays out as
-  before. Still out: a data-only assignment no response reads, and a
-  structural-route assignment that reads a data column outside a reduction.
-  A build of such a model emits one more statement, so its program identity
-  (SMC and SVI checkpoint tags) changes.
+  before. Still out: a data-only assignment no response reads, and one that
+  reads data but no formula predictor in a model none of whose assignments
+  reads a formula predictor (`spread = sigma * sum(elapsed)`): RK plans such a
+  model on a route that writes the data a statement reads into the program,
+  so keeping it would refuse a `reprocess` of other rows. A build of an
+  affected model emits one more statement, so its program identity (SMC and
+  SVI checkpoint tags) changes.
 
 ## 0.2.205
 

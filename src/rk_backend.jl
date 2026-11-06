@@ -7155,6 +7155,10 @@ end
 # them, so no other statement changes. One the structural route cannot lower
 # (`_rk_assignment_expr_problem`), or one reading such an assignment, stays
 # out as before rather than refusing a model whose likelihood never reads it.
+# So does one reading data: this route writes a data column or scalar that a
+# statement reads into the program as a literal (`_rk_define_read_scalars!`,
+# constant folding), so keeping it would make the program depend on the rows
+# and refuse a `reprocess` of other data.
 function _rk_plan_unread_assignments(prepared, admitted, referenced,
         data::AbstractDict, consts::Dict{Symbol,Float64},
         aliases::Dict{Symbol,Symbol}, parameters::Set{Symbol},
@@ -7164,8 +7168,9 @@ function _rk_plan_unread_assignments(prepared, admitted, referenced,
     for assignment in prepared.assignments
         name = assignment.name
         name in admitted && !(name in referenced) || continue
+        any(ref -> haskey(data, ref), assignment.dependencies) && continue
         all(ref -> ref in names || ref in parameters || haskey(consts, ref) ||
-            haskey(aliases, ref) || haskey(data, ref), assignment.dependencies) || continue
+            haskey(aliases, ref), assignment.dependencies) || continue
         origin = "assignment `$name`"
         expression = _rk_rewrite_assignment_refs!(assignment.expression, consts,
             aliases, parameters, names, data, origin)

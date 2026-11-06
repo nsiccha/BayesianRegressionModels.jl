@@ -52,7 +52,6 @@ scalars(d) = @brm d begin
     two = 2.0
     scale = sigma
     doubled = two * sigma
-    spread = sigma * mean(elapsed)
     y ~ Normal(mu, sigma)
 end
 plain_scale(d) = @brm d begin
@@ -72,12 +71,16 @@ unreached(d) = @brm d begin
     sigma ~ Exponential(1)
     y ~ Normal(mu, sigma)
 end
-# Stays out: a structural-route assignment reading a data column outside a
-# reduction, which that route also refuses when a response reads it.
+# Stays out: a structural-route assignment reading data. That route writes
+# the data a statement reads into the program as a literal, so keeping it would
+# refuse a replay of other rows; elementwise (`w`) it is refused even when a
+# response reads it.
 column_scale(d) = @brm d begin
     mu ~ 1 + x
     sigma ~ Exponential(1)
     w = sigma .* elapsed
+    spread = sigma * sum(elapsed)
+    scaled = sigma * decay
     y ~ Normal(mu, sigma)
 end
 end
@@ -85,6 +88,7 @@ const UM = UnreadModels
 
 unread_data() = (; x=[-0.4, 0.1, 0.7, 1.2], decay=0.02, elapsed=[1.0, 2.0, 3.0, 4.0],
     y=[0.1, -0.2, 0.3, 0.5])
+replay_data() = (; x=[0.3, -0.2, 0.9], decay=0.02, elapsed=[5.0, 6.0, 7.0], y=[0.0, 0.1, 0.2])
 draws(rk) = hcat(collect(range(-0.6, 0.8; length=rk.model.layout.total)),
     zeros(rk.model.layout.total), fill(0.3, rk.model.layout.total))
 problem(rk) = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
@@ -122,7 +126,8 @@ end
     same_density(RKBRMI(UM.mixed(data)), RKBRMI(UM.plain_scale(data)))
     # A frozen replay of other rows answers for its own rows.
     rk = RKBRMI(UM.decayed(data))
-    new = (; x=[0.3, -0.2, 0.9], decay=0.02, elapsed=[5.0, 6.0, 7.0], y=[0.0, 0.1, 0.2])
+    # Another `decay` too: the graph binds it, so the replay uses it.
+    new = merge(replay_data(), (; decay=0.05))
     replay = reprocess(rk, new)
     U = draws(replay)
     values = rk_draw_values(replay, U, (:q, :mu))
@@ -156,15 +161,18 @@ end
     @test rk.plan isa BRM._RKStructuralPlan
     same_density(rk, RKBRMI(UM.plain_scale(data)))
     U = draws(rk)
-    v = rk_draw_values(rk, U, (:variance, :two, :scale, :doubled, :spread, :sigma))
+    v = rk_draw_values(rk, U, (:variance, :two, :scale, :doubled, :sigma))
     for k in axes(U, 2)
         sigma = v.sigma[k]
         @test v.variance[k] == sigma^2
         @test v.two[k] == 2.0
         @test v.scale[k] == sigma
         @test v.doubled[k] == 2.0 * sigma
-        @test v.spread[k] == sigma * (sum(data.elapsed) / length(data.elapsed))
     end
+    # The program reads no data it did not read before: other rows replay.
+    replay = reprocess(rk, replay_data())
+    v = rk_draw_values(replay, U, (:variance, :sigma))
+    @test v.variance == v.sigma .^ 2
 end
 
 @stestset "a value needing a declaration no response reaches stays out" begin
@@ -180,5 +188,10 @@ end
     rk = RKBRMI(UM.column_scale(data))
     @test rk.plan isa BRM._RKStructuralPlan
     same_density(rk, RKBRMI(UM.plain_scale(data)))
-    @test_throws "kernel has no port :w" rk_draw_values(rk, draws(rk), (:w,))
+    for name in (:w, :spread, :scaled)
+        @test_throws "kernel has no port :$name" rk_draw_values(rk, draws(rk), (name,))
+    end
+    # Other rows, and another scalar data value, replay as before.
+    replay = reprocess(rk, merge(replay_data(), (; decay=0.05)))
+    @test coordinate_names(replay.model.layout) == coordinate_names(rk.model.layout)
 end
