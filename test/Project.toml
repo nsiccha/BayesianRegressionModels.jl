@@ -349,11 +349,18 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RK 0.1.57 / PPL 0.1.64: caller-owned joint density KernelSpecs and geometry.
 # RK 0.1.59 / PPL 0.1.66: property-based whole-parameter geometry dimensions.
 # PPL 0.1.60 / DistributionKernels 0.1.1: log-space interval masses and tails.
+# RK 0.1.58 / PPL 0.1.65: batched values and local shared-prefix footprints.
+# RK 0.1.59 / PPL 0.1.66: cached factors retain their broadcast domains.
 # RK 0.1.61 / PPL 0.1.70: selective windows, recovery and bounded joint carries.
 # RK 0.1.62: strict selected rows through array-valued producer plate cells.
+# RK 0.1.63 / PPL 0.1.73: partitioned cell factors keep shared-prefix types.
 # PPL 0.1.72: exact structural support for vector simplex/ordered factors.
 # b5740888 (RKPPL 0.1.71): data-free replay reads frozen whole values.
 # fbf65b46 (RK 0.1.65 / PPL 0.1.74): prepared queries holding modules deep-copy.
+# RK 0.1.66 / PPL 0.1.75: per-position helpers run at a strict cell's rows.
+# RK 0.1.67 / PPL 0.1.76: joint cell latents and storage fields read at rows.
+# RK 0.1.70 / PPL 0.1.80: matrix-row helpers, vec of a row value, whole arrays read by index.
+# RK 0.1.73 / PPL 0.1.82: a producer plate cell and b[p, 2] of a computed matrix at their rows.
 # f17b6a24 (RK 0.1.67 / PPL 0.1.76): strict cell footprints of per-cell joint fields.
 # 725059f4 (RKPPL 0.1.89): read-only constrained parameter shapes.
 # 0ee20c70 (PPL 0.1.93): authored local and reusable-definition docs;

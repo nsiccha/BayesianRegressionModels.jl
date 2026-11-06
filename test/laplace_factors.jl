@@ -5,6 +5,22 @@ using LinearAlgebra, Random
 using SparseArrays
 using DifferentiationInterface: SecondOrder
 
+@stestset "sparse restrictions retain values and selection-sized workspace" begin
+    allocations = Int[]
+    for n in (100, 100_000)
+        A = sparse([1, 3, n], [1, 2, 3], [0.0, 2.0, -1.0], n, 3)
+        for rows in ([1, 3, n], [n, 1, 3], Int[]), cols in ([1, 2, 3], [3, 1], Int[])
+            selected = BRM._brm_spl_submatrix(A, rows, cols)
+            @test selected == A[rows, cols]
+            @test nnz(selected) == nnz(A[rows, cols])
+        end
+        rows, cols = [1, 3], [1, 2]
+        BRM._brm_spl_submatrix(A, rows, cols)
+        push!(allocations, minimum(@allocated(BRM._brm_spl_submatrix(A, rows, cols)) for _ in 1:3))
+    end
+    @test allocations[2] <= allocations[1] + 10_000
+end
+
 function spl_sum_fixture(n; rows=[collect(1:n)])
     data = (; unit=["u$i" for i in 1:n], rows,
         y=[1.2length(r) + 0.1 for r in rows])
@@ -42,13 +58,46 @@ end
     f = BRM._brm_spl_augmented_factor(K, 3)
     Z = BRM._brm_spl_selected(f)
     for (j, i, _) in zip(findnz(B)...)
-        @test (Z[i, 3 + 2 + j] - Z[i, 3 + j]) / sqrt(2) ≈ (D \ B')[i, j]
+        @test Z[i, 3 + j] ≈ (D \ B')[i, j]
     end
-    # Both a zero local diagonal and cancelled auxiliary diagonals remain
+    # Both a zero local diagonal and the zero auxiliary diagonal remain
     # explicit requests; a pivoting backend must see this symbolic pattern.
     K = BRM._brm_spl_augmented_matrix(sparse([0.0;;]), sparse([1.0;;]), sparse([2.0;;]))
     @test nnz(K) == 9
     @test K[1,1] == K[3,3] == 0
+end
+
+# The marginal gradient cancels explicit against implicit terms on a population
+# coordinate aliased with an integrated effect, so its absolute error is the
+# absolute residual of h v = s. A stiff observation must not cost that accuracy.
+# Reported on a bounded ODL target whose outer curvature reaches 2e7 (snag
+# sparse-laplace-c-b7cc5e58): a residual of 0.8% moved a gradient of 395 to 19214.
+@stestset "a stiff outer block keeps the augmented solve and covariances accurate" begin
+    rng = Xoshiro(11)
+    n, r = 30, 13
+    B = sparse(Matrix(1.0I, r, n) .+ 0.2 .* randn(rng, r, n))
+    Q = Matrix(qr(randn(rng, r, r)).Q)
+    x = randn(rng, n)
+    for w in (1e3, 1e5, 1e7, 3e7, 1e8, 1e9, 1e10)
+        # Rank deficient: stiff, moderate and exactly zero outer curvature together.
+        W = sparse((Q .* vcat(w, 0.7w, 0.3w, fill(1.0, 5), zeros(r - 8))') * Q')
+        W = (W + W') / 2
+        D = sparse(1.0I, n, n)
+        H = Symmetric(Matrix(D + B' * W * B))
+        factor = BRM._brm_spl_augmented_factor(BRM._brm_spl_augmented_matrix(D, B, W), n)
+        @test factor.positive_definite
+        @test factor.logdet ≈ logdet(H) atol=1e-6
+        b = H * x
+        v = factor \ b
+        @test norm(b - H * v) <= 1e-14 * norm(b)
+        # Forward accuracy is bounded by conditioning, whatever the solver.
+        @test v ≈ x rtol=1e3 * eps() * cond(H)
+        selected = BRM._brm_spl_selected(factor)
+        block = BRM._brm_spl_factor_covariances((; lz=collect(1:n), terms=[]), 1:r, selected, n, r)
+        S = inv(H)
+        @test block.SB ≈ S * Matrix(B)' rtol=1e-6
+        @test block.BSB ≈ Matrix(B) * S * Matrix(B)' rtol=1e-6
+    end
 end
 
 @stestset "augmented covariance draws have a bounded square-root error" begin
