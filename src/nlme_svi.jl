@@ -65,8 +65,8 @@ _brm_svi_globals(m::BRMNLMEModel) = sort!(vcat(m.theta, m.sigma,
     findall(r -> r === :subject_scale || r === :subject_correlation, m.view.role)))
 
 # One independent Gaussian per mesh state drives a learned field's lengths to their
-# limit, because a shorter field makes that factorization more nearly exact
-# (research/svi_field_units/family_oracle.jl and tuesday_shape.jl, on toys). A read-pair
+# limit, because a shorter field makes that factorization more nearly exact (on toys
+# with closed-form optima, a spatial length of 0.017 where the truth was 0.5). A read-pair
 # field's states sit where the data is, so the same factor stays close to the posterior.
 function _brm_svi_check_fields(m::BRMNLMEModel)
     for record in _brm_nlme_records(m.backend.plan)
