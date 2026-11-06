@@ -1365,6 +1365,10 @@ The dormant scalar/vector branch's ordinary Reverse needs Enzyme dogfood from
 `nlme_svi_ownership_algebra.jl` isolates atomic-block and directed-prior
 closure, including fixed coordinates and factors that own no coordinates.
 
+`nlme_svi_running.jl` checks a prepared model's reuse of its target and workers
+across calls (`diagnostics.target`), and `snapshot` / `snapshot_every` /
+`snapshot_draws`, against a run on a fresh model that nothing observes.
+
 `nlme_svi_threads.jl` checks `brm_svi_fit(...; threads)` with real threads (run
 it with `--threads=4`; it refuses to run without them). The state after every
 iteration, whose Adam moments are the gradient trajectory, and the draws must equal
