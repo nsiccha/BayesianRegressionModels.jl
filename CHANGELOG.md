@@ -12,6 +12,34 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.221
+
+- Fixed: on `RKBRMI`, a data expression can read a numeric scalar data field, as
+  on `SBBRMI`. `mu ~ 1 + offset(slope * x)` with `slope` a scalar field was refused
+  ("column `slope` must be a plain numeric vector for arithmetic"). It now builds,
+  and so do a coefficient's column (`mu ~ 1 + slope * x`), a fitted transform
+  (`standardize(slope * x)`), an interaction operand, a random slope, a data call's
+  argument, a scalar alone (`offset(slope)`, `offset(2 * slope)`, one value on every
+  row) and a model-value offset (`offset(theta * slope * x)`, which brm-use told
+  consumers to spell with a literal). A product or sum of three or more,
+  `offset(a * b * c)`, was refused as "`*` takes exactly two arguments" and now
+  builds on `RKBRMI` too.
+- Fixed: on `SBBRMI`, a coefficient's column or a fitted transform that multiplies
+  a column by a scalar field (`mu ~ 1 + slope * x`, `center(slope * x)`,
+  `(slope * x) & factor(g)`) was refused ("mixes row axes of lengths 1 and 4"): the
+  scalar was taken for the row axis. It now builds.
+- Changed: the program reads such a scalar by name as a runtime input, so two data
+  sets that differ only in its value emit the same program, and the density follows
+  the bound value. That includes the data-only assignment `sx = slope * x`, which
+  used to fold the number into the program, so **a model of that spelling emits a
+  different program** and its SMC and SVI checkpoint tags change. On a frozen
+  `reprocess` a scalar read only by a data expression is a design input: omitted,
+  it keeps the fitted value; supplied, the design's. The anchors of a fitted
+  transform keep the fit's value either way, and a scalar a prior also reads still
+  refuses a new value.
+- Unchanged: `RKBRMI` refuses a `Bool` field inside a data expression, as it refuses
+  a `Bool` column. `SBBRMI` accepts one.
+
 ## 0.2.220
 
 - Changed: on `RKBRMI`, a data scalar a prior reads is a runtime input of the
