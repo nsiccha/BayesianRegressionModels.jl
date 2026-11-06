@@ -544,7 +544,7 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             # (RKPPL nested plates).
             input = inputs[index]
             nested = input.kind === :gather || (input.kind === :element &&
-                get(columns, input.source, nothing) isa AbstractVector{<:AbstractArray})
+                _rk_cells_hold_arrays(get(columns, input.source, nothing)))
             push!(observations, (; source, param=lhs, callable,
                 arguments=values, argument_names, weight, weight_name, nested,
                 modifier, bounds, input))
@@ -1686,6 +1686,14 @@ function _rk_plate_cell_value!(statements, bindings, taken, read)
     push!(statements, Expr(:(=), name, _rk_value_expr!(bindings, read, taken)))
     _BRMPreparedRef(name, :whole)
 end
+
+# Whether an in-cell observation's response holds one array per cell, so each
+# cell observes its own array. An empty column whose element type is erased
+# (`Any[]`, which `DataColumn` cannot narrow) has no cells to say otherwise:
+# the authored plate runs zero cells on either route, and the per-cell route is
+# the one that observes no whole-vector event, as a typed `Vector{T}[]` does.
+_rk_cells_hold_arrays(values) = values isa AbstractVector{<:AbstractArray} ||
+    values isa AbstractVector{Any} && isempty(values)
 
 # Whether a flattened in-cell observation's response holds one value per cell
 # (a totals cell's `total[i]`), read from the response's own port.

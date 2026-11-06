@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.206
+
+- Fixed: a data column whose element type is erased (`Any[...]`, as an empty
+  comprehension over a DataFrame column or `push!` onto `[]` produces) now
+  holds its entries' common type when the model is built, so it is read
+  exactly as the same values written typed: `Any[[0.5, -0.2], [1.3]]` is a
+  per-cell vector response like `[[0.5, -0.2], [1.3]]`. The entries are not
+  converted. On RKBRMI, an in-cell observation `y[i] ~ law(...)` in
+  `@plate for i in eachindex(y)` over an empty `y = Any[]` now observes zero
+  cells, contributing zero likelihood and keeping the priors, as a typed
+  `Vector{Float64}[]` does. It previously became one whole-vector event and
+  failed when queries were prepared (`zero(::Type{Any})`).
+
 ## 0.2.205
 
 - Fixed: `brm_start` on an unconditioned `RKBRMI` (every response omitted,
