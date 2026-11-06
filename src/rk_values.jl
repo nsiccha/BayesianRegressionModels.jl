@@ -12,6 +12,8 @@ end
 _RKValuePlan(regression, assignments, observations, columns) =
     _RKValuePlan(regression, assignments, observations, columns, ())
 _rk_extent_bindings(plan::_RKValuePlan) = _rk_extent_bindings(plan.regression)
+_rk_input_bindings(plan::_RKValuePlan) = _rk_input_bindings(plan.regression)
+_rk_generated_inputs(plan::_RKValuePlan) = _rk_generated_inputs(plan.regression)
 
 _rk_value_invlogit(x) = logistic(x)
 brm_invprobit(x) = 0.5erfc(-x / sqrt(2))
@@ -232,6 +234,9 @@ _rk_ast_student_t_nu(dist::_BRMRanefStudentT, bindings, taken) =
     dist.nu isa Real ? dist.nu :
         _rk_value_expr!(bindings, _brm_prepare_expr(dist.nu), taken)
 
+# The value a block's correlation prior reads (`_RKRanefBucket.eta_input`).
+_rk_bucket_eta(bucket) = something(bucket.eta_input, bucket.lkj_eta)
+
 function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindings;
         level_indices, level_sources=Dict{Symbol,Symbol}(), predictors=(),
         population_priors=Dict(), coordinates=nothing)
@@ -251,7 +256,7 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
     if grouping.form === :gr
         priors = _rk_ast_bucket_scale_priors(bucket, bindings, taken)
         _rk_ast_stratified_group_component!(definitions, stmts, taken, draws,
-            group, grouping.by, K, bucket.lkj_eta, priors)
+            group, grouping.by, K, _rk_bucket_eta(bucket), priors)
         # One scale row and factor per stratum of `by`: `tau[levels(by), 1:K]`,
         # or one `tau_k[levels(by)]` per margin when the margins' laws differ
         # (`_rk_ast_stratum_scales`), and `L[levels(by)]`, one `K × K ×
@@ -273,24 +278,16 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
         _rk_ast_ranef_r2d2!(definitions, stmts, bucket, tau, bindings, taken,
             predictors, population_priors; stem_base=draws)
         _rk_ast_group_component!(definitions, stmts, taken, draws, levels_of, K,
-            bucket.lkj_eta, (); scale_value=tau)
+            _rk_bucket_eta(bucket), (); scale_value=tau)
     else
         priors = _rk_ast_bucket_scale_priors(bucket, bindings, taken)
         # Known values (`sd(...) = value`, `cor(:, ID) = R`) are constants: a
         # known scale is its number in `tau`, a known correlation a constant
         # Cholesky factor in place of the LKJ draw.
         known = any(_brm_is_known_scale, bucket.sd_priors)
-        L_value = nothing
-        if bucket.known_cor !== nothing
-            L_value = _rk_ast_fresh_name(string(draws, "_L"), taken)
-            factor = Matrix{Float64}(cholesky(Symmetric(bucket.known_cor)).L)
-            # RKPPL takes pure calls only, so the constant is `hcat` of its
-            # columns rather than a matrix literal.
-            push!(stmts, Expr(:(=), L_value, Expr(:call, :hcat,
-                (Expr(:vect, factor[:, j]...) for j in axes(factor, 2))...)))
-        end
+        L_value = bucket.known_input
         _rk_ast_group_component!(definitions, stmts, taken, draws, levels_of, K,
-            bucket.lkj_eta, priors;
+            _rk_bucket_eta(bucket), priors;
             nu=_rk_ast_student_t_nu(bucket.dist, bindings, taken), L_value)
         # Plain groups retain semantic transport metadata at their actual
         # component-owned declarations; other grouping forms remain unpaired.
@@ -392,21 +389,25 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
 end
 
 # A level correlation's factor as a pure call argument: the sampled
-# declaration's name, or the known factor's `hcat` constant inline.
+# declaration's name, or the generated input holding the known factor.
 _rk_ast_level_factor_value(lc::_BRMLevelCorrelation) =
-    lc.kind === :parameter ? lc.name : Expr(:call, :hcat,
-        (Expr(:vect, lc.factor[:, j]...) for j in axes(lc.factor, 2))...)
+    lc.kind === :parameter ? lc.name : _rk_level_factor_name(lc)
+# A plate cell's field is planned inside its kernel, where no plan-level input
+# reaches it, so a known factor stays a `hcat` constant there.
+_rk_ast_level_factor_constant(lc::_BRMLevelCorrelation) = Expr(:call, :hcat,
+    (Expr(:vect, lc.factor[:, j]...) for j in axes(lc.factor, 2))...)
 
 # The RK value of a level correlation's lower Cholesky factor: the sampled
 # `LKJCholesky` declaration by name, or a known correlation's factor as a
-# constant (RKPPL takes pure calls, so `hcat` of its columns), like a known
-# `cor(:, ID) = R`.
+# generated input, like a known `cor(:, ID) = R` (`_rk_generated_inputs`).
 _rk_ast_level_factor!(stmts, taken, lc::_BRMLevelCorrelation) =
     _rk_ast_level_factor!(stmts, taken, lc, Val(lc.kind))
 _rk_ast_level_factor!(_stmts, _taken, lc, ::Val{:parameter}) = lc.name
+# RKPPL reads a bound matrix on its row axis. A definition over it is the block's
+# level factor, off that axis, as a literal factor's `hcat` definition was.
 function _rk_ast_level_factor!(stmts, taken, lc, ::Val{:data})
-    name = _rk_ast_fresh_name(string("L_levelcor_", lc.name), taken)
-    push!(stmts, Expr(:(=), name, _rk_ast_level_factor_value(lc)))
+    name = _rk_ast_fresh_name(string(_rk_level_factor_name(lc), "_value"), taken)
+    push!(stmts, Expr(:(=), name, Expr(:call, :copy, _rk_level_factor_name(lc))))
     name
 end
 
@@ -424,10 +425,22 @@ function _rk_ast_value_spline(definitions, term, taken)
     fitted = !isempty(fit_columns)
     if fitted
         # A basis is fitted once to its fit-role axes, a fitted value of the
-        # program (`brm_fitted_state`), and evaluated at the rows from it.
+        # program (`brm_fitted_state`), and evaluated at the rows from it. A
+        # `t2` reads its sizes from their fit-role input, through a definition
+        # of its own where other values sit beside them.
         fit = _rk_ast_fresh_name(string(term.options.id, "_fit"), taken)
         fitter = term.options.kind === :t2 ? :brm_t2_fit : :brm_tps_fit
-        push!(stmts, Expr(:(=), fit, Expr(:call, fitter, fit_columns..., kval)))
+        k_fit = get(term.options, :k_fit, nothing)
+        if k_fit !== nothing
+            sizes(name) = Expr(:tuple, Expr(:ref, name, 1), Expr(:ref, name, 2))
+            kval = sizes(k_fit)
+            push!(stmts, Expr(:(=), fit, Expr(:call, fitter, fit_columns..., kval)))
+            local_k = _rk_ast_fresh_name(string(term.options.id, "_k"), taken)
+            push!(stmts, Expr(:(=), local_k, Expr(:call, :copy, k_fit)))
+            kval = sizes(local_k)
+        else
+            push!(stmts, Expr(:(=), fit, Expr(:call, fitter, fit_columns..., kval)))
+        end
         fit_columns = (fit,)
     end
     basis = term.options.kind === :t2 ? :brm_t2_basis :
@@ -1086,7 +1099,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     consts = _rk_data_constants!(Dict{Symbol,Float64}(a.name => Float64(a.expression)
         for a in ordinary_assignments if a.expression isa Number), context.data)
     parameters = _rk_plan_parameters!(prepared, context.data, consts,
-        Dict{Symbol,Symbol}(), parameter_names, assignment_names; retain_lkj_inputs=true)
+        Dict{Symbol,Symbol}(), parameter_names, assignment_names)
     vectors = [_rk_plan_vector_parameters!(prepared, context.data, consts,
         Dict{Symbol,Symbol}(), parameter_names, assignment_names); threshold_vectors]
     predictor_order = Symbol[op.name for op in program.operations
@@ -1161,7 +1174,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     regression = _RKStructuralPlan(_RKLikelihoodSpec[], components.predictors,
         components.priors, parameters, _RKAssignmentSpec[], derived, columns,
         0, components.buckets, vectors, components.r2d2_priors,
-        components.horseshoe_priors)
+        components.horseshoe_priors, _rk_scalar_inputs(context.data))
     _RKValuePlan(regression, assignments, obs, value_columns, Tuple(completions))
 end
 

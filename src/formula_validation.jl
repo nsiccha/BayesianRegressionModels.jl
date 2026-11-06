@@ -84,6 +84,6 @@ function _check_term_kwargs(::typeof(t2), kw)
     isempty(unknown) || error(
         "t2: unsupported keyword(s): $(join(unknown, ", ")); " *
         "supported keywords are `k`, `basis`, and `full`")
-    _brm_t2_options(kw)
+    _brm_t2_options(kw; bound=false)
     nothing
 end
