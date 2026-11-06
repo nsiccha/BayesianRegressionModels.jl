@@ -520,11 +520,9 @@ end
         @testset "$label" begin
             a, b = RKBRMI(read), RKBRMI(stated)
             @test BRM._rk_layout_coordinate_names(a) == BRM._rk_layout_coordinate_names(b)
-            # Not a design input: the binding may evaluate a data-only vector
-            # definition, as it does a design matrix.
-            @test isempty(intersect(
-                keys(BRM._rk_source_data_columns(a.plan, BRM._rk_emit_ast(a.plan))),
-                (:scale, :rates, :half, :low)))
+            # A scalar it reads is an input of the program. A vector it reduces is
+            # that number, and binds nothing.
+            @test !(:rates in keys(BRM._rk_source_data_columns(a.plan, BRM._rk_emit_ast(a.plan))))
             for u in (point(a), zeros(a.model.layout.total))
                 @test density(a, u) ≈ density(b, u) rtol=1e-13
             end

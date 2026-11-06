@@ -94,7 +94,7 @@ end
     @test occursin("b_p_subject_w ~ inv_gamma((0.5 * 4.0), (0.5 * 4.0));", code)
     @test occursin("sqrt(b_p_subject_w)", code)
     # The Gaussian part is the default draws submodel, unchanged.
-    @test occursin("b_p_subject_L ~ lkj_corr_cholesky(b_p_subject_lkj_eta);", code)
+    @test occursin("b_p_subject_L ~ lkj_corr_cholesky(1.0);", code)
     @test occursin("b_p_subject_tau ~ std_normal();", code)
     block = only(ranef_blocks(sb))
     @test block.family === :ranef_correlated_draws_student_t
