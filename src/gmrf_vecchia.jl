@@ -187,7 +187,8 @@ end
 # Greedy maximin order: each position is the one farthest from all chosen so
 # far, starting from the position nearest the centroid. Distances only shrink,
 # so a stale heap entry is an upper bound and is re-queried only when it reaches
-# the top. A function of the positions alone, ties resolved by input index.
+# the top. A function of the positions as listed, ties resolved by list index,
+# which `_brm_vecchia_footprint` fixes by listing them sorted.
 function _brm_vecchia_position_order(east::Vector{Float64}, north::Vector{Float64})
     n = length(east)
     n == 0 && return Int32[]
@@ -326,8 +327,10 @@ end
     _brm_vecchia_footprint(east, north, time, nchannels; neighbors)
 
 The footprint of rows reading `(east[i], north[i], time[i])`: one state per
-distinct read pair. Data only; log-linear in the rows (one sort and one tree
-query per state, a neighbour search once per distinct set of read positions).
+distinct read pair. Data only, and a function of the set of read pairs: the
+same reads in another row order give the same footprint. Log-linear in the rows
+(one sort and one tree query per state, a neighbour search once per distinct set
+of read positions).
 """
 function _brm_vecchia_footprint(east::AbstractVector, north::AbstractVector, time::AbstractVector,
         nchannels::Integer=1; neighbors::Integer=10)
@@ -343,23 +346,15 @@ function _brm_vecchia_footprint(east::AbstractVector, north::AbstractVector, tim
     # conditioning set of 3m + 1 reads costs the cube of that in every solve.
     neighbors <= 100 || throw(ArgumentError("gmrf neighbors is limited to 100; got $neighbors"))
     nchannels >= 1 || throw(ArgumentError("gmrf needs at least one channel"))
-    # Positions, in the fixed maximin order.
-    seen = Dict{Tuple{Float64,Float64},Int32}()
-    input_east, input_north = Float64[], Float64[]
-    row_position = Vector{Int32}(undef, n)
+    # Positions, in the fixed maximin order. Sorted first, so a tied step of that
+    # order resolves the same way whatever order the rows read them in.
+    seen = Set{Tuple{Float64,Float64}}()
     for i in 1:n
-        key = (Float64(east[i]), Float64(north[i]))
-        row_position[i] = get!(seen, key) do
-            push!(input_east, key[1])
-            push!(input_north, key[2])
-            Int32(length(input_east))
-        end
+        push!(seen, (Float64(east[i]), Float64(north[i])))
     end
+    positions = sort!(collect(seen))
+    input_east, input_north = first.(positions), last.(positions)
     order = _brm_vecchia_position_order(input_east, input_north)
-    rank = Vector{Int32}(undef, length(order))
-    for (r, i) in enumerate(order)
-        rank[i] = r
-    end
     position_east, position_north = input_east[order], input_north[order]
     position_index = Dict{Tuple{Float64,Float64},Int32}(
         (position_east[r], position_north[r]) => Int32(r) for r in eachindex(order))
@@ -374,7 +369,8 @@ function _brm_vecchia_footprint(east::AbstractVector, north::AbstractVector, tim
     keys = Vector{Int64}(undef, n)
     npos = Int64(length(order))
     for i in 1:n
-        keys[i] = (Int64(time_rows[i]) - 1) * npos + (Int64(rank[row_position[i]]) - 1)
+        keys[i] = (Int64(time_rows[i]) - 1) * npos +
+            (Int64(position_index[(Float64(east[i]), Float64(north[i]))]) - 1)
     end
     sort!(keys)
     unique!(keys)

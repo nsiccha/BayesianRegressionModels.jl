@@ -190,8 +190,8 @@ conditioning set ``N(i)`` of a read holds:
 - when its own position was not read at the previous read time, its `m` nearest
   among the latest earlier reads, reaching back until they hold at least `m`.
 
-Selection depends only on the coordinates and `m`, never on the sampled lengths.
-Only ``b_i`` and ``F_i`` move with them, and reads with the same geometry share
+Selection depends only on the set of read pairs and `m`, never on the sampled
+lengths or the order of the rows. Only ``b_i`` and ``F_i`` move with them, and reads with the same geometry share
 one solve, so a repeated observing pattern costs one solve per position and
 gap rather than one per read.
 
