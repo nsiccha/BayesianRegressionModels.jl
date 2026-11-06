@@ -1,5 +1,13 @@
 # Running the tests
 
+`rk_data_expression_scalars.jl` checks a numeric scalar data field read by an RKBRMI
+data expression: offsets of many shapes, a coefficient's column, fitted transforms,
+an interaction operand, a random slope, a data-only assignment, a component's
+argument and model-value offsets. It compares an independent likelihood oracle and
+compiled Stan (value and native Reverse gradient), replays the printed source, checks
+that another value emits the same program, and covers frozen and data-free replay, a
+design binder, a held-out response and the forms that stay refused. It accepts testset
+substring filters.
 `runtime_numeric_settings.jl` checks that sizes and numeric settings are inputs of
 the emitted programs (user principle `0ikeidi`): one Stan and one RK program across
 a `gmrf` or `hsgp` setting, a data scalar a prior reads, a block's LKJ `eta`, a
