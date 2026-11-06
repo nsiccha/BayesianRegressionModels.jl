@@ -2,10 +2,12 @@
   "N_linelist": 2287,
   "N_rows": 221,
   "build_seconds": {
-    "brm_rk_build_s": 65.160917206,
-    "brm_sb_build_s": 54.925658771,
-    "epidist_stan_build_s": 0.303172897,
-    "rkppl_build_s": 6.988373982
+    "brm_native_rk_build_s": 5.255558239,
+    "brm_native_sb_build_s": 17.755384501,
+    "brm_rk_build_s": 53.087082726,
+    "brm_sb_build_s": 40.272296512,
+    "epidist_stan_build_s": 0.265047376,
+    "rkppl_build_s": 3.630277301
   },
   "coordinates": {
     "BRM RKBRMI": [
@@ -13,6 +15,14 @@
       "sigma_Intercept"
     ],
     "BRM SBBRMI": [
+      "pop_mu_beta_pop.1",
+      "pop_log_sigma_beta_pop.1"
+    ],
+    "BRM native RKBRMI": [
+      "mu_Intercept",
+      "sigma_Intercept"
+    ],
+    "BRM native SBBRMI": [
       "pop_mu_beta_pop.1",
       "pop_log_sigma_beta_pop.1"
     ],
@@ -26,10 +36,12 @@
     ]
   },
   "gradient_seconds": {
-    "BRM RKBRMI": 0.000132075267,
-    "BRM SBBRMI": 0.0002457099585,
-    "RKPPL @rkppl": 0.0001198777545,
-    "epidist (brms Stan)": 0.0005137270084999999
+    "BRM RKBRMI": 9.40704015e-5,
+    "BRM SBBRMI": 0.000185768937,
+    "BRM native RKBRMI": 0.00016425133,
+    "BRM native SBBRMI": 0.00038382821649999996,
+    "RKPPL @rkppl": 8.874653200000001e-5,
+    "epidist (brms Stan)": 0.0003784445925
   },
   "parity": {
     "BRM RKBRMI": {
@@ -63,6 +75,28 @@
         "-Inf"
       ],
       "nonfinite_points": 4
+    },
+    "BRM native RKBRMI": {
+      "bulk_constant_offset": -1.8189894035458565e-12,
+      "bulk_max_abs_logdensity_diff": 1.1004885891452432e-10,
+      "bulk_max_abs_logdensity_diff_after_offset": 1.0822986951097846e-10,
+      "bulk_max_rel_gradient_diff": 2.0706260464956317e-11,
+      "max_abs_logdensity_diff": 0.675967109404155,
+      "max_rel_gradient_diff": 0.0040304298171519055,
+      "mean_logdensity_diff": 0.002791162422214163,
+      "nonfinite_logdensities": [],
+      "nonfinite_points": 0
+    },
+    "BRM native SBBRMI": {
+      "bulk_constant_offset": 0.9215863345334583,
+      "bulk_max_abs_logdensity_diff": 0.9215863345980324,
+      "bulk_max_abs_logdensity_diff_after_offset": 1.0913936421275139e-10,
+      "bulk_max_rel_gradient_diff": 2.076146313980259e-11,
+      "max_abs_logdensity_diff": 1.5975534439348849,
+      "max_rel_gradient_diff": 0.004030429817150183,
+      "mean_logdensity_diff": 0.9243774969559523,
+      "nonfinite_logdensities": [],
+      "nonfinite_points": 0
     },
     "RKPPL @rkppl": {
       "bulk_constant_offset": -1.8189894035458565e-12,

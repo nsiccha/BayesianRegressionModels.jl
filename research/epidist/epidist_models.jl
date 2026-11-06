@@ -97,6 +97,21 @@ epidist_brm = @brm begin
 end
 
 # ---------------------------------------------------------------------------
+# 1b. The same model with BRM's native censored-delay family (BRM 0.2.204+):
+#     epidist's marginal likelihood is `double_interval_censored`, the
+#     CensoredDistributions.jl spelling; frequency weights wrap it.
+# ---------------------------------------------------------------------------
+epidist_brm_native = @brm begin
+    mu ~ 1
+    log(sigma) ~ 1
+    effect(mu, Intercept) ~ Normal(prior_mu_location, prior_mu_scale)
+    effect(sigma, Intercept) ~ Normal(prior_sigma_location, prior_sigma_scale)
+    delay_lwr ~ weighted(double_interval_censored(LogNormal(mu, sigma);
+        primary_event = Uniform(0, pwindow), upper = relative_obs_time,
+        interval = swindow), fweights(n))
+end
+
+# ---------------------------------------------------------------------------
 # 2. The hand-written RKPPL program
 # ---------------------------------------------------------------------------
 using ReactiveKernelsPPL

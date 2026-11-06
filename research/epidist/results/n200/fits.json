@@ -2,7 +2,7 @@
   "fits": {
     "BRM RKBRMI": {
       "chains": 4,
-      "first_fit_wall_s": 30.795717702,
+      "first_fit_wall_s": 17.99913724,
       "log_sigma": {
         "ess": 3205.1757080007364,
         "mean": -0.6852123977457076,
@@ -20,11 +20,11 @@
       "omitted": [],
       "stan_first_exception": "",
       "stan_model_exceptions_rejected": 0,
-      "wall_s": 1.136994802
+      "wall_s": 0.797553138
     },
     "BRM SBBRMI": {
       "chains": 4,
-      "first_fit_wall_s": 5.792376676,
+      "first_fit_wall_s": 3.488625488,
       "log_sigma": {
         "ess": 2845.688424371998,
         "mean": -0.6886676143005286,
@@ -42,11 +42,55 @@
       "omitted": [],
       "stan_first_exception": "",
       "stan_model_exceptions_rejected": 0,
-      "wall_s": 2.046236614
+      "wall_s": 1.447142947
+    },
+    "BRM native RKBRMI": {
+      "chains": 4,
+      "first_fit_wall_s": 4.136701953,
+      "log_sigma": {
+        "ess": 2572.121118295573,
+        "mean": -0.6854620663510095,
+        "q5": -0.8019966886840636,
+        "q95": -0.564703606634276,
+        "rhat": 0.9999815886624538
+      },
+      "mu": {
+        "ess": 2154.7706551915962,
+        "mean": 1.7920583443453706,
+        "q5": 1.710169752758821,
+        "q95": 1.8839610281550108,
+        "rhat": 1.0016813953267665
+      },
+      "omitted": [],
+      "stan_first_exception": "",
+      "stan_model_exceptions_rejected": 0,
+      "wall_s": 1.289935675
+    },
+    "BRM native SBBRMI": {
+      "chains": 4,
+      "first_fit_wall_s": 3.234044552,
+      "log_sigma": {
+        "ess": 2840.349284455379,
+        "mean": -0.6848137148115817,
+        "q5": -0.7996399115090271,
+        "q95": -0.5635312043549988,
+        "rhat": 1.0003958687467585
+      },
+      "mu": {
+        "ess": 2736.979825409429,
+        "mean": 1.7936472621204433,
+        "q5": 1.7047607644648193,
+        "q95": 1.8952622685187142,
+        "rhat": 1.0006294968387253
+      },
+      "omitted": [],
+      "stan_first_exception": "",
+      "stan_model_exceptions_rejected": 0,
+      "wall_s": 2.838105152
     },
     "RKPPL @rkppl": {
       "chains": 4,
-      "first_fit_wall_s": 5.33508189,
+      "first_fit_wall_s": 3.16957899,
       "log_sigma": {
         "ess": 3179.5584003177155,
         "mean": -0.6845523764090176,
@@ -64,11 +108,11 @@
       "omitted": [],
       "stan_first_exception": "",
       "stan_model_exceptions_rejected": 0,
-      "wall_s": 0.868164745
+      "wall_s": 0.624911615
     },
     "epidist (brms Stan)": {
       "chains": 4,
-      "first_fit_wall_s": 6.66697668,
+      "first_fit_wall_s": 5.497616344,
       "log_sigma": {
         "ess": 2098.1843376730235,
         "mean": -0.6859113548965198,
@@ -86,7 +130,7 @@
       "omitted": [],
       "stan_first_exception": "",
       "stan_model_exceptions_rejected": 0,
-      "wall_s": 4.406073428
+      "wall_s": 3.055352432
     }
   },
   "threads": 1,

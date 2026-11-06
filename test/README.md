@@ -11,6 +11,23 @@ checks printed-source replay, rebinding and value checks of a new design's
 weights, and the refused analytic, `mi()` and invalid-weight cases. It
 accepts testset substring filters.
 
+`epidist_docs_page.jl` evaluates every build-time block of the
+"Epidemiological delays" docs page (`docs/src/epidist.md`) in order, as
+Documenter does. It checks that the page's source markers resolve, its one backend
+comparison carries a Stan pane `stanc` accepts, and the two tables generated
+from `research/epidist/results/*/{parity,fits}.json` render. No sampling.
+
+`censored_delays.jl` checks `primary_censored` and `double_interval_censored`
+(epidist's marginal delay model). The closed-form primary-censored CDF and
+survival of lognormal, gamma and Weibull delays are compared with an
+independent 256-bit tanh-sinh quadrature of the convolution, including shapes
+below one. It also checks upper-tail window probabilities, truncation, windows,
+a shifted primary window and draws, and native Enzyme Reverse gradients. A
+weighted `@brm` model on SBBRMI and RKBRMI is compared with the Julia law in
+value and gradient for all three laws. The test also covers exact secondary
+times and the row checks. Run it with `julia --project=test
+test/censored_delays.jl`; about 3 minutes warm.
+
 `offset_only_axes.jl` checks coefficient-free formulas on scalar plate and
 component rows, fixed expressions, explicit gathers, changed-size replay and
 in-cell consumers. It compares physical values, normalized densities and native

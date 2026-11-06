@@ -146,7 +146,10 @@ _cd_check_delay(dist) = throw(ArgumentError(
 
 # (F(q), S(q), E[X; X <= q], E[X; X > q]) of the delay at q > 0, from the
 # family parameters. Kept parameter-level (not `Distributions` objects) so the
-# RK law and the Stan functions share one argument order.
+# RK law and the Stan functions share one argument order. One function for all
+# four (not a lower and an upper pair): measured faster on RKBRMI, where the
+# unused values are dropped after inlining (64 against 109 µs per gradient on
+# epidist's 94 rows).
 function _cd_lognormal_parts(q, mu, sigma)
     z = (log(q) - mu) / sigma
     m = exp(mu + sigma^2 / 2)
@@ -172,63 +175,88 @@ _cd_mean(::typeof(_cd_gamma_parts), shape, scale) = shape * scale
 _cd_mean(::typeof(_cd_weibull_parts), shape, scale) =
     scale * SpecialFunctions.gamma(1 + 1 / shape)
 
-# G(q) = ∫_0^q F, H(q) = ∫_q^∞ S.
-function _cd_G(parts, q, a, b)
-    q <= 0 && return zero(float(promote_type(typeof(q), typeof(a), typeof(b))))
-    F, _, M, _ = parts(q, a, b)
-    q * F - M
-end
-function _cd_H(parts, q, a, b)
-    q <= 0 && return _cd_mean(parts, a, b) - q
-    _, S, _, Mc = parts(q, a, b)
-    Mc - q * S
-end
-# Primary-censored CDF and survival at d (measured from the window start).
-_cd_cdf(parts, d, w, a, b) = d <= 0 ? zero(float(promote_type(typeof(d), typeof(a)))) :
-    isinf(d) ? one(float(promote_type(typeof(w), typeof(a)))) :
-    (_cd_G(parts, d, a, b) - _cd_G(parts, d - w, a, b)) / w
-_cd_ccdf(parts, d, w, a, b) = d <= 0 ? one(float(promote_type(typeof(d), typeof(a)))) :
-    isinf(d) ? zero(float(promote_type(typeof(w), typeof(a)))) :
-    (_cd_H(parts, d - w, a, b) - _cd_H(parts, d, a, b)) / w
-
-# P(l <= D <= u), l <= u, from whichever side subtracts small numbers.
-function _cd_mass(parts, l, u, w, a, b)
-    lower = _cd_cdf(parts, l, w, a, b)
-    lower <= 0.5 ? _cd_cdf(parts, u, w, a, b) - lower :
-        _cd_ccdf(parts, l, w, a, b) - _cd_ccdf(parts, u, w, a, b)
-end
-# Density of D at d: (F(d) - F(d - w)) / w, or the survival form above the median.
-function _cd_density(parts, d, w, a, b)
-    d <= 0 && return zero(float(promote_type(typeof(d), typeof(a))))
-    F, S, _, _ = parts(d, a, b)
-    if F <= 0.5
-        lo = d - w <= 0 ? zero(F) : first(parts(d - w, a, b))
-        (F - lo) / w
-    else
-        hi = d - w <= 0 ? one(S) : parts(d - w, a, b)[2]
-        (hi - S) / w
+# The law, stamped out once per family with its parts and mean called
+# directly: ReactiveKernels traces these bodies into the RKBRMI program, and a
+# call through a function-valued argument (or a `typeof`/`promote_type`
+# computed in a branch) is one it cannot infer statically, which turns every
+# row into a dynamically dispatched call (measured 45x slower). The generic
+# names below (`_cd_cdf(parts, ...)`, `censored_delay_logpdf(parts, ...)`)
+# dispatch to these by the parts function's type.
+for (family, parts) in ((:lognormal, :_cd_lognormal_parts), (:gamma, :_cd_gamma_parts),
+                        (:weibull, :_cd_weibull_parts))
+    G, H = Symbol(:_cd_G_, family), Symbol(:_cd_H_, family)
+    cdf_, ccdf_ = Symbol(:_cd_cdf_, family), Symbol(:_cd_ccdf_, family)
+    mass, density = Symbol(:_cd_mass_, family), Symbol(:_cd_density_, family)
+    logpdf_ = Symbol(:_cd_logpdf_, family)
+    @eval begin
+        # G(q) = ∫_0^q F and H(q) = ∫_q^∞ S.
+        function $G(q, a, b)
+            q <= 0 && return zero(q * a * b)
+            F, _, M, _ = $parts(q, a, b)
+            q * F - M
+        end
+        function $H(q, a, b)
+            q <= 0 && return _cd_mean($parts, a, b) - q
+            _, S, _, Mc = $parts(q, a, b)
+            Mc - q * S
+        end
+        # Primary-censored CDF and survival at d (measured from the window start).
+        function $cdf_(d, w, a, b)
+            d <= 0 && return zero(d * w * a * b)
+            isinf(d) && return one(d * w * a * b)
+            ($G(d, a, b) - $G(d - w, a, b)) / w
+        end
+        function $ccdf_(d, w, a, b)
+            d <= 0 && return one(d * w * a * b)
+            isinf(d) && return zero(d * w * a * b)
+            ($H(d - w, a, b) - $H(d, a, b)) / w
+        end
+        # P(l <= D <= u), l <= u, from whichever side subtracts small numbers.
+        function $mass(l, u, w, a, b)
+            lower = $cdf_(l, w, a, b)
+            lower <= 0.5 && return $cdf_(u, w, a, b) - lower
+            $ccdf_(l, w, a, b) - $ccdf_(u, w, a, b)
+        end
+        # Density of D at d: (F(d) - F(d - w)) / w, or the survival form above the median.
+        function $density(d, w, a, b)
+            d <= 0 && return zero(d * w * a * b)
+            F, S, _, _ = $parts(d, a, b)
+            if F <= 0.5
+                lo = d - w <= 0 ? zero(F) : first($parts(d - w, a, b))
+                return (F - lo) / w
+            end
+            hi = d - w <= 0 ? one(S) : $parts(d - w, a, b)[2]
+            (hi - S) / w
+        end
+        # Log density of one observation; y, lower, upper from the window start.
+        function $logpdf_(y, w, lower, upper, interval, a, b)
+            hi = interval > 0 ? y + interval : y
+            (lower <= y && hi <= upper) || return oftype(y * w * a * b, -Inf)
+            numerator = interval > 0 ? $mass(y, hi, w, a, b) : $density(y, w, a, b)
+            normaliser = lower <= 0 && isinf(upper) ? one(numerator) :
+                $mass(max(lower, zero(lower)), upper, w, a, b)
+            (numerator > 0 && normaliser > 0) || return oftype(numerator, -Inf)
+            log(numerator) - log(normaliser)
+        end
+        _cd_G(::typeof($parts), q, a, b) = $G(q, a, b)
+        _cd_H(::typeof($parts), q, a, b) = $H(q, a, b)
+        _cd_cdf(::typeof($parts), d, w, a, b) = $cdf_(d, w, a, b)
+        _cd_ccdf(::typeof($parts), d, w, a, b) = $ccdf_(d, w, a, b)
+        _cd_mass(::typeof($parts), l, u, w, a, b) = $mass(l, u, w, a, b)
+        _cd_density(::typeof($parts), d, w, a, b) = $density(d, w, a, b)
+        censored_delay_logpdf(::typeof($parts), y, w, lower, upper, interval, a, b) =
+            $logpdf_(y, w, lower, upper, interval, a, b)
     end
 end
 
-"""
+@doc """
     censored_delay_logpdf(parts, y, primary_width, lower, upper, interval, a, b)
 
 Log density of one double interval censored delay observation, shared by
 RKBRMI and the Julia methods: `parts` names the delay family
 (`_cd_lognormal_parts`, `_cd_gamma_parts`, `_cd_weibull_parts`) with parameters
 `(a, b)`; `y`, `lower` and `upper` are measured from the primary window's start.
-"""
-function censored_delay_logpdf(parts, y, primary_width, lower, upper, interval, a, b)
-    T = float(promote_type(typeof(y), typeof(a), typeof(b), typeof(primary_width)))
-    hi = interval > 0 ? y + interval : y
-    (lower <= y && hi <= upper) || return T(-Inf)
-    numerator = interval > 0 ? _cd_mass(parts, y, hi, primary_width, a, b) :
-        _cd_density(parts, y, primary_width, a, b)
-    normaliser = lower <= 0 && isinf(upper) ? one(T) :
-        _cd_mass(parts, max(lower, zero(lower)), upper, primary_width, a, b)
-    (numerator > 0 && normaliser > 0) || return T(-Inf)
-    log(numerator) - log(normaliser)
-end
+""" censored_delay_logpdf
 
 _cd_parts(::Distributions.LogNormal) = _cd_lognormal_parts
 _cd_parts(::Distributions.Gamma) = _cd_gamma_parts
@@ -416,7 +444,7 @@ end
 # The RKBRMI observation law: the Julia closed forms, selected by family id.
 function _brm_censored_delay_logpdf(y, fam, p_lo, p_hi, lower, upper, interval, a, b)
     w, d, lo, hi = p_hi - p_lo, y - p_lo, lower - p_lo, upper - p_lo
-    fam == 1 ? censored_delay_logpdf(_cd_lognormal_parts, d, w, lo, hi, interval, a, b) :
-    fam == 2 ? censored_delay_logpdf(_cd_gamma_parts, d, w, lo, hi, interval, a, b) :
-               censored_delay_logpdf(_cd_weibull_parts, d, w, lo, hi, interval, a, b)
+    fam == 1 && return _cd_logpdf_lognormal(d, w, lo, hi, interval, a, b)
+    fam == 2 && return _cd_logpdf_gamma(d, w, lo, hi, interval, a, b)
+    _cd_logpdf_weibull(d, w, lo, hi, interval, a, b)
 end

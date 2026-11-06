@@ -27,6 +27,8 @@ meta = JSON.parsefile(joinpath(DIR, "marginal_rows.json"))
 standata = JSON.parsefile(joinpath(DIR, "epidist_marginal.data.json"))
 delay_lwr = num.(standata["Y"])
 relative_obs_time, pwindow, delay_upr = num.(standata["vreal1"]), num.(standata["vreal2"]), num.(standata["vreal4"])
+swindow = num.(standata["vreal3"])
+swindow == delay_upr .- delay_lwr || error("epidist's secondary windows are not delay_upr - delay_lwr")
 n = round.(Int, num.(standata["weights"]))
 all(iszero, num.(standata["vreal5"])) || error("delay_min ≠ 0 is not covered by this script")
 N = length(delay_lwr)
@@ -42,7 +44,7 @@ prior_mu_location, prior_mu_scale = normal_prior(stan_code, "Intercept")
 prior_sigma_location, prior_sigma_scale = normal_prior(stan_code, "Intercept_sigma")
 @info "epidist data" N linelist = meta["n_linelist"] prior_mu_location prior_mu_scale prior_sigma_location prior_sigma_scale
 
-df = (; delay_lwr, delay_upr, pwindow, relative_obs_time, n, count = copy(n),
+df = (; delay_lwr, delay_upr, pwindow, swindow, relative_obs_time, n, count = copy(n),
         prior_mu_location, prior_mu_scale, prior_sigma_location, prior_sigma_scale)
 
 # ---------------------------------------------------------------- targets
@@ -118,6 +120,22 @@ timings["brm_rk_build_s"] = @elapsed begin
 end
 targets["BRM RKBRMI"] = rk_problem
 names_of["BRM RKBRMI"] = string.(coordinate_names(build_kernel(rk_bound_plan(rk)).layout))
+
+# BRM's native censored-delay family, both backends
+native = epidist_brm_native(df)
+timings["brm_native_sb_build_s"] = @elapsed begin
+    sb_native = SBBRMI(native; mod = @__MODULE__)
+    sb_native_problem = stan_instantiate(sb_native)
+end
+write(joinpath(DIR, "brm_native_sbbrmi.stan"), string(StanBlocks.stan_code(sb_native)))
+targets["BRM native SBBRMI"] = sb_native_problem
+names_of["BRM native SBBRMI"] = BridgeStan.param_unc_names(sb_native_problem.model)
+timings["brm_native_rk_build_s"] = @elapsed begin
+    rk_native = RKBRMI(native)
+    rk_native_problem = rk_logdensity_problem(rk_native; ad_backend = AD)
+end
+targets["BRM native RKBRMI"] = rk_native_problem
+names_of["BRM native RKBRMI"] = string.(coordinate_names(build_kernel(rk_bound_plan(rk_native)).layout))
 
 # hand-written RKPPL
 timings["rkppl_build_s"] = @elapsed begin
