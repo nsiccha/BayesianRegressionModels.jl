@@ -3018,7 +3018,7 @@ end
     @test value_observation(@brm df begin
         eta ~ 1 + x
         b ~ Bernoulli(1 - exp(-exp(eta)))
-    end) == "b .~ Bernoulli.(1 .- exp.((.-)(exp.(eta))))"
+    end) == "b .~ Bernoulli.(1 .- exp.(-(exp.(eta))))"
     @test_throws ErrorException BRM._brm_rk_plan(@brm dfp begin
         logit(mu) ~ 1 + x
         kappa ~ Gamma(2.0, 1000.0)
@@ -3084,16 +3084,18 @@ end
         mu ~ 1 + x
         y ~ LocationScale(mu, 1, TDist(nu))
     end
-    for nu in (1, 6.0, Float32(7.5), 9 // 2)
+    # Scalar-data `nu` is a runtime input of the program (user principle
+    # `0ikeidi`; snag use-a-named-scal-99c4babc): the value route reads it by
+    # name, so every value plans one program and no sampled parameter.
+    programs = map((1, 6.0, Float32(7.5), 9 // 2)) do nu
         plan = BRM._brm_rk_plan(builder(merge(df, (; nu))))
-        @test only(plan.responses).nu == Float64(nu)
-        @test isnothing(only(plan.responses).nu_predictor)
-        @test isempty(plan.parameters)
+        @test plan isa BRM._RKValuePlan
+        @test plan.columns[:nu] == nu
+        @test isempty(plan.regression.parameters)
+        BRM._rk_emit_ast(plan).main
     end
-    for nu in (0, -1, NaN, Inf, -Inf)
-        @test_throws "degrees of freedom must be finite and positive" BRM._brm_rk_plan(
-            builder(merge(df, (; nu))))
-    end
+    @test allequal(programs)
+    # Binding refuses an invalid value: test/rk_student_t_scalar_data.jl.
 end
 
 # Group-B scope edges: the TDist base is the only admitted
@@ -3124,11 +3126,13 @@ end
         mu ~ 1 + x
         y ~ LocationScale(mu, 2.0, TDist(mu))
     end)
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # Per-row data degrees of freedom are a runtime input: the value route
+    # (test/rk_data_law_arguments.jl).
+    @test BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         s ~ Exponential(1)
         y ~ LocationScale(mu, s, TDist(n))
-    end)
+    end) isa BRM._RKValuePlan
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         y ~ LocationScale(mu, 2.0, TDist(0.0))
@@ -3175,11 +3179,12 @@ end
         log(lambda) ~ 1 + x
         c ~ HurdlePoisson(lambda, 0.0)
     end)
-    # A data column is never a scalar p_zero.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # A data p_zero is a runtime input: the value route
+    # (test/rk_data_law_arguments.jl).
+    @test BRM._brm_rk_plan(@brm df begin
         log(lambda) ~ 1 + x
         c ~ HurdlePoisson(lambda, z)
-    end)
+    end) isa BRM._RKValuePlan
     # The location predictor cannot feed the p_zero slot too (the
     # logit-link pin fires first).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
@@ -3222,11 +3227,12 @@ end
         log(lambda) ~ 1 + x
         c ~ ZeroInflatedPoisson(lambda, lambda)
     end)
-    # Data-column zi.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # A data zi is a runtime input: the value route
+    # (test/rk_data_law_arguments.jl).
+    @test BRM._brm_rk_plan(@brm df begin
         log(lambda) ~ 1 + x
-        c ~ ZeroInflatedPoisson(lambda, n)
-    end)
+        c ~ ZeroInflatedPoisson(lambda, z)
+    end) isa BRM._RKValuePlan
     # Out-of-range literal zi.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         log(lambda) ~ 1 + x
@@ -3267,12 +3273,12 @@ end
         p ~ 1 + x
         c ~ NegativeBinomial(r, p)
     end)
-    # Data-column p: out of v1 (the SB-established spelling stays
-    # SB-only until the column-p follow-up slice).
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # A data p is a runtime input: the value route
+    # (test/rk_data_law_arguments.jl).
+    @test BRM._brm_rk_plan(@brm df begin
         log(r) ~ 1 + x
-        c ~ NegativeBinomial(r, n)
-    end)
+        c ~ NegativeBinomial(r, z)
+    end) isa BRM._RKValuePlan
     # Out-of-range literal p.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         log(r) ~ 1 + x
@@ -3307,11 +3313,12 @@ end
         log(k) ~ 1 + x
         z ~ Weibull(k, mu)
     end)
-    # Data-column shape: out of slice.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # A data shape is a runtime input: the value route
+    # (test/rk_data_law_arguments.jl).
+    @test BRM._brm_rk_plan(@brm df begin
         log(mu) ~ 1 + x
         z ~ Weibull(n, mu)
-    end)
+    end) isa BRM._RKValuePlan
     # Non-positive literal shape.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         log(mu) ~ 1 + x
@@ -3370,11 +3377,12 @@ end
         log(mu) ~ 1 + x
         z ~ InverseGaussian(mu, -2.0)
     end)
-    # A data column is never a scalar shape.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # A data shape is a runtime input: the value route
+    # (test/rk_data_law_arguments.jl).
+    @test BRM._brm_rk_plan(@brm df begin
         log(mu) ~ 1 + x
         z ~ InverseGaussian(mu, n)
-    end)
+    end) isa BRM._RKValuePlan
     # Arity: the 1- and 3-argument Distributions spellings stay closed.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         log(mu) ~ 1 + x
@@ -3493,11 +3501,12 @@ end
         logit(mu) ~ 1 + x
         b ~ BetaBinomial2(h, mu, -2.0)
     end)
-    # A data column is never a scalar precision.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # A data precision is a runtime input: the value route
+    # (test/rk_data_law_arguments.jl).
+    @test BRM._brm_rk_plan(@brm df begin
         logit(mu) ~ 1 + x
         b ~ BetaBinomial2(h, mu, z)
-    end)
+    end) isa BRM._RKValuePlan
     # Precision submodel must be log-link (only log inverts into
     # (0, Inf)).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
@@ -3592,11 +3601,12 @@ end
         mu ~ 1 + x
         y ~ VonMises(mu, 0.0)
     end)
-    # A data column is never a scalar kappa.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # A data kappa is a runtime input: the value route
+    # (test/rk_data_law_arguments.jl).
+    @test BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         y ~ VonMises(mu, z)
-    end)
+    end) isa BRM._RKValuePlan
     # The location predictor cannot feed the kappa slot too (the
     # log-link pin fires first).
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
@@ -3674,11 +3684,12 @@ end
         mu ~ 1 + x
         z ~ LogNormal(mu, -2.0)
     end)
-    # A data column is never a scalar scale.
-    @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
+    # A data scale is a runtime input: the value route
+    # (test/rk_data_law_arguments.jl).
+    @test BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
         z ~ LogNormal(mu, n)
-    end)
+    end) isa BRM._RKValuePlan
     # Arity: the 1- and 3-argument Distributions spellings stay closed.
     @test_throws ErrorException BRM._brm_rk_plan(@brm df begin
         mu ~ 1 + x
