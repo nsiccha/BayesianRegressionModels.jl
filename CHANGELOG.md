@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.222
+## 0.2.225
 
 - Fixed: partition declarations for wholly unit-owned compressed transforms
   use the constrained first-axis label count. A local 2×2 Cholesky factor
@@ -64,6 +64,65 @@ instead of failing at run time.
 - `BRMSVINonfiniteError` (0.2.209) also covers structured local factors and
   work-weighted batches: the iteration is named before it changes `q` or the
   optimizer, whichever local family or sampler the unit uses.
+- The 0.2.223 gradient bound covers work-weighted batches and structured local
+  factors. Under `unit_sampling=:work` it is `10 √w` times a global's running rms,
+  with `w` the batch's largest unit weight (`N / B` for a uniform batch, as
+  before), because a unit drawn with chance π carries weight about 1 / π. A local
+  factor above `unit_dense_limit` steps with its own Adam only when its unit is
+  drawn, so its gradient is limited to `10` times its own running rms.
+
+## 0.2.224
+
+- `SBBRMI` builds a `gmrf(...)` field in a `@plate for` cell again. From 0.2.172
+  every such model stopped at transpilation with `plate: N do-block params vs M
+  positional iterables`, because the plate's iterables left out the inputs the
+  field prepares. Model declarations need no changes, and `RKBRMI` was not
+  affected. A cell can also read another plate's complete cells beside its field.
+
+## 0.2.223
+
+- Fixed: one extreme draw could stop `brm_svi_fit`'s optimization of the globals
+  without any sign of it. A draw that reaches a steep part of the density gives
+  a finite ELBO estimate of, say, -1e21, so `nonfinite=:error` never fires, and
+  its gradient stays in Adam's second moment for tens of thousands of iterations.
+  On one real fit of 7,379 globals, the draws of a single run left 95% of the
+  global means with a step more than 10 times too small when polishing ended, 85%
+  more than 1,000 times too small and 22% more than a million times too small, so
+  they had barely moved during polishing, and the ELBO looked flat as for a
+  converged fit. Each coordinate's gradient now enters Adam's moments limited to
+  `10 √(N / B)` times that coordinate's running rms. The bound is that wide
+  because a coordinate read by few subjects has a zero gradient in most batches;
+  a tighter one shrinks its scale without end. `laplace=GaussianBlockLaplace()`
+  is unchanged.
+- Changed: the stopping rule reads the 10% trimmed mean of each window and its
+  standard error (Yuen), not the mean and variance. One draw could decide the
+  test: its window's variance swamped every gap, whichever way the ELBO was moving.
+  Fits with no extreme draws can stop at a different window than before.
+- Added: `diagnostics.elbo_windows_trimmed`, what the stopping rule now reads, and
+  `diagnostics.clipped_steps`, how many global steps had a gradient limited.
+  `diagnostics.elbo_windows` stays the plain mean of each window, which a single
+  draw can dominate, and now includes the last polishing window, which it used to
+  omit. The progress message reports the trimmed mean.
+- **Breaking:** an optimizer checkpoint (`BRMSVIOptimizerState`) written by an
+  earlier version does not load, since the run's fields changed. As before, a
+  checkpoint needs the same package version; finish such a run on its own version
+  or restart it. A fit on a fixed seed differs from an earlier version's from the
+  first clipped step and from the stopping decision on.
+
+## 0.2.222
+
+- Fixed: `brm_svi_fit(...; laplace=GaussianBlockLaplace())` could stop with
+  `inconsistent quadrature bounds` on valid input, depending on the seed and the
+  host. On a 12-coordinate toy model at 8 updates, 6 of 17 seeds stopped this way.
+  The upper and lower bound of each log-determinant probe came from two separate
+  `eigen` calls, and near convergence their rounding, about `1e-12` there, exceeded
+  the true gap between the bounds. Both bounds now read one Cholesky factorization,
+  on which their order holds for the computed numbers. The 11 of those seeds that
+  already fitted move by at most `2e-13` in ELBO and take the same Krylov steps.
+  A precision too ill-conditioned to factor now always raises `ArgumentError`,
+  where it could also raise `nonpositive Radau node`. This fix does not make a
+  badly conditioned log determinant more accurate: `GaussianBlockLaplace` now
+  documents that rounding, which `logdet_quadrature_width` does not include.
 
 ## 0.2.221
 
