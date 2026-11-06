@@ -494,10 +494,13 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         targets = floors === nothing ? (PHI, omega2) : (PHI, omega2, floors)
         # An anchored or masked basis passes its anchor and bound mask
         # (decision 1fk9b29).
+        # Its basis count, period and anchor are the `modes` and `settings`
+        # inputs, not numbers of the program (user principle `0ikeidi`).
         anchor, mask = get(options, :anchor, nothing), _rk_hsgp_mask(term)
         push!(stmts, Expr(:(=), Expr(:tuple, targets...), Expr(:call,
-            :brm_hsgp_periodic_basis, only(term.columns), options.k, options.period,
-            (anchor === nothing ? () : (only(anchor),))...,
+            :brm_hsgp_periodic_basis, only(term.columns), Expr(:ref, options.modes, 1),
+            Expr(:ref, options.settings, 1),
+            (anchor === nothing ? () : (Expr(:ref, options.settings, 2),))...,
             (mask === nothing ? () : (mask,))...)))
         inputs = Pair{Symbol,Any}[:PHI => PHI, :omega2 => omega2]
         extent = :(axes(PHI, 2))
@@ -514,7 +517,12 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
         append!(inputs, (formal => actual for (formal, actual) in
             zip(_rk_hsgp_mask_formals(term), _rk_hsgp_mask_actuals(term))))
         fit === nothing || push!(inputs, :fit => fit)
-        extent = :(1:$(prod(_rk_hsgp_modes(options))))
+        # Then the size and settings the basis graph reads; the weights' extent
+        # is the basis size `prod(modes)`, an input's value.
+        settings = _rk_hsgp_basis_setting_formals(term)
+        append!(inputs, (formal => actual for (formal, actual) in
+            zip(settings, _rk_hsgp_setting_actuals(options, settings))))
+        extent = :(1:prod(modes))
     end
     if grouped
         call, locals = _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent,

@@ -110,7 +110,16 @@ end
         ext = Base.get_extension(BRM,:BayesianRegressionModelsReactiveKernelsExt)
         mod = ext._rk_emit_module(emitted)
         owner = getfield(mod,:brm_hsgp_basis_graph)
-        basis = Base.invokelatest(owner,(data.x,data.w)[1:length(K)]...)
+        # The basis sizes and fixed domain are bound inputs of the program
+        # (user principle `0ikeidi`), passed after the axes.
+        bound = rk_bound_data(backend)
+        modes, settings = bound[Symbol(id,"_modes_fit")], bound[Symbol(id,"_settings_fit")]
+        @test modes == collect(K)
+        @test settings[length(K)+1:end] == collect(Iterators.flatten(
+            ((lo+hi)/2, (hi-lo)/2) for (lo,hi) in domains))
+        @test occursin("$(id) ~ brm_hsgp_effect($(columns), $(id)_modes_fit, $(id)_settings_fit",
+            main)
+        basis = Base.invokelatest(owner,(data.x,data.w)[1:length(K)]...,modes,settings)
         @test length(basis) == 2
         for (actual, expected) in zip(basis,(PHI,omega2))
             @test actual ≈ expected atol=2e-15 rtol=2e-15
@@ -123,13 +132,16 @@ end
         if all(==(1),K)
             @test isempty(floor_statements)
         else
-            @test Core.eval(mod,last(only(floor_statements).args)) ≈
+            # The floor reads the bound sizes and domain, not numbers of its own.
+            inputs = Expr(:block, (Expr(:(=), name, bound[name])
+                for name in (Symbol(id,"_modes_fit"), Symbol(id,"_settings_fit")))...)
+            @test Core.eval(mod,Expr(:let,inputs,last(only(floor_statements).args))) ≈
                 (iso ? maximum(floors) : floors) atol=2e-15 rtol=2e-15
         end
         new_axes = ([0.9,-0.8,0.1,0.3],[-0.7,0.2,0.4,-0.3])[1:length(K)]
         new_expected = first(fixed_hsgp_oracle(new_axes,K,domains))
-        @test first(Base.invokelatest(owner,new_axes...)) ≈ new_expected atol=2e-15 rtol=2e-15
-        @test first(Base.invokelatest(owner,map(x->view(x,:),new_axes)...)) ≈ new_expected atol=2e-15 rtol=2e-15
+        @test first(Base.invokelatest(owner,new_axes...,modes,settings)) ≈ new_expected atol=2e-15 rtol=2e-15
+        @test first(Base.invokelatest(owner,map(x->view(x,:),new_axes)...,modes,settings)) ≈ new_expected atol=2e-15 rtol=2e-15
         names = coordinate_names(backend.model.layout)
         position(name) = only(findall(==(Symbol(name)),names))
         # The HSGP component owns its hyperparameters and basis weights.

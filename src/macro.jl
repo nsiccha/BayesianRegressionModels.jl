@@ -438,6 +438,13 @@ projections are fitted per level: each group's basis is centered (and, for
 to zero over its rows. Both projections are fitted on the training rows and
 frozen on replay; neither combines with `anchor=`.
 
+`k`, `c`, `domain`, `period` and `anchor` are numbers the model reads: a
+literal, or a data field holding the scalar or per-axis value (or
+`name = constant(expr)`), as `hsgp(t; k = kk, c = cc)` with `kk` and `cc` in the
+data. Models that differ only in them build one Stan program and one RK program
+(RKBRMI reads them as inputs); the basis has `prod(k)` functions. A frozen
+replay keeps the fitted values and refuses data that holds others.
+
 `cov=:periodic` selects the periodic-kernel approximation of Riutort-Mayol et
 al. (2023) over exactly one raw-data axis: `k` harmonics of `2pi / period`
 give `2k` cosine/sine basis functions whose spectral weights come from the
