@@ -117,7 +117,12 @@ push!(RESULT, (; step="its first iteration", seconds=fit.diagnostics.seconds, co
 warm = record("100 warm iterations", @counted brm_svi_resume(m, fit; stop_after=100, ndraws=0))
 draws = record("first draws", @counted brm_svi_resume(m, warm; stop_after=0, ndraws=20))
 digest = bytes2hex(reinterpret(UInt8, warm.diagnostics.q.μ))[1:32]
-facts = string("image_repair=", isdefined(Enzyme.Compiler, :image_split_thunks), " q=", digest,
+# Linked from the image against compiled in this process, on an Enzyme that keeps them.
+retained = isdefined(Enzyme.Compiler, :retained_derivative_stats) ?
+    Enzyme.Compiler.retained_derivative_stats() : nothing
+linked = retained === nothing ? "n/a" : string("compiled=", retained.compiled, " materialized=", retained.materialized,
+    " rejected=", retained.rejected, " absent=", retained.absent)
+facts = string("image_repair=", isdefined(Enzyme.Compiler, :image_split_thunks), " ", linked, " q=", digest,
     " coordinates=", length(m.unit), " reused=", warm.diagnostics.target.reused)
 open(OUT, "a") do io
     for r in RESULT
