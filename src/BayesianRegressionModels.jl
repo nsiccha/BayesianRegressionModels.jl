@@ -112,6 +112,7 @@ include("component_cells.jl")
 # After sbimpl (SBBRMI) and the RK planner/AST above; RK-free — the
 # bound-plan translation lives in the ReactiveKernels extension.
 using Serialization
+include("callable_identity.jl")
 include("rk_artifact.jl")
 include("sb_affine.jl")
 include("sb_censored_delays.jl")

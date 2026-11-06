@@ -374,4 +374,7 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # (`tune_smc(...; grid_start=:independent)`) and `resume_smc(...; nthreads)`.
 # 7dced1e5 (RK 0.1.89 / RKPPL 0.1.102) keeps selected-unit gradients
 # and shared-row storage compact as unrelated units are added.
-rev = "7dced1e52edb45bcbfe9e23d6b5904a0dbe66b56"
+# 28d70c34 (RK 0.1.94 / RKPPL 0.1.105) runs a tuple plate's statements only at
+# rows that read their entries, so automatic connected SVI units keep their own
+# coordinates.
+rev = "28d70c344ba4a86602527890ab37f008216b66a2"
