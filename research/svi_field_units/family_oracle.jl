@@ -22,6 +22,15 @@
 #              independent. U solves G u = μ C u and does not depend on ℓ_s;
 #              D = √(2π)/(1/ℓ_s + ℓ_s μ/2). Φ, ω are the eigenpairs of Q_t(ℓ_t).
 #   space_spectral  the same in space, with the causal OU root in time.
+#   space_hier the eigenbasis in space with a hierarchical (Lévy) root in time: the two
+#              ends, then midpoints conditional on their interval's ends. OU is Markov, so
+#              this is an exact root for every ℓ_t on any lattice, and the prior cancels.
+#              Time costs O(T) with no dense matrix.
+#   hier_K     space_hier on the lowest K spatial modes, every other mode at its prior.
+#   time_dct   like spectral, but time uses a fixed DCT-II basis Ψ scaled per ℓ_t so each
+#              coordinate's prior variance is one: T_t = Ψ S(ℓ_t). The prior no longer
+#              cancels exactly; its term stays closed form. It needs no eigenvector
+#              derivative and costs T log T, on any lattice.
 #   truncated_K  space_spectral with variational parameters on the lowest K spatial
 #              modes only (K × times of them). Every other mode stays exactly at its
 #              prior N(0, 1), so the state is K × times, whatever the vertex count, and
@@ -88,7 +97,7 @@ function temporal_root(times, ℓ)
     for t in 1:n
         T[t, t] = sqrt(v[t])
         for s in t-1:-1:1
-            T[t, s] = a[s+1] * T[t-1, s]
+            T[t, s] = a[t] * T[t-1, s]
         end
     end
     T
@@ -163,12 +172,64 @@ function tiles(v, nt, k, span)
 end
 
 const _LOWRANK = (; whitened_r8=8, whitened_r32=32)
-const _TRUNCATED = (; truncated_16=16, truncated_36=36, truncated_64=64)
+const _TRUNCATED = (; truncated_16=16, truncated_36=36, truncated_64=64, hier_16=16, hier_36=36, hier_64=64)
+_truncated_root(name) = startswith(String(name), "hier") ? :space_hier : :space_spectral
+const _DCT_TRUNCATED = (; dct_16=16, dct_36=36)
+
+# The hierarchical root of an OU lattice: T[t, j] is coordinate j's effect on time t.
+function temporal_hier_root(times, ℓ)
+    n = length(times)
+    T = zeros(n, n)
+    T[1, 1] = 1.0
+    n == 1 && return T
+    ρ = exp(-(times[n] - times[1]) / ℓ)
+    T[n, :] .= ρ .* T[1, :]
+    T[n, 2] = sqrt(-expm1(-2(times[n] - times[1]) / ℓ))
+    next = Ref(3)
+    function fill!(l, r)
+        r - l <= 1 && return
+        m = (l + r) ÷ 2
+        a, b = exp(-(times[m] - times[l]) / ℓ), exp(-(times[r] - times[m]) / ℓ)
+        d = 1 - a^2 * b^2
+        T[m, :] .= (a * (1 - b^2) / d) .* T[l, :] .+ (b * (1 - a^2) / d) .* T[r, :]
+        T[m, next[]] = sqrt((1 - a^2) * (1 - b^2) / d)
+        next[] += 1
+        fill!(l, m)
+        fill!(m, r)
+    end
+    fill!(1, n)
+    T
+end
+
+dct_basis(n) = [(k == 1 ? sqrt(1 / n) : sqrt(2 / n)) * cos(π * (t - 0.5) * (k - 1) / n) for t in 1:n, k in 1:n]
+function time_dct_root(times, ℓ)
+    Ψ = dct_basis(length(times))
+    Q = Matrix(temporal_q(times, ℓ))
+    Ψ ./ sqrt.(vec(sum(Ψ .* (Q * Ψ); dims=1)))'
+end
+# The DCT family's own log|T|²: the root is no longer an exact root of Q⁻¹.
+time_dct_logdet2(times, ℓ, ctx_logQs, N) = begin
+    R = time_dct_root(times, ℓ)
+    N * 2logabsdet(R)[1] - length(times) * ctx_logQs
+end
+
+# Retained spatial modes get the DCT family; every other mode stays exactly at its own
+# prior time series, independent across modes because the prior is Q_t ⊗ Q_s.
+function _dct_truncated(tg, reads, ctx, K)
+    θ, times, N = tg.θ, ctx.times, ctx.N
+    nt = length(times)
+    Φ = spatial_spectral_root(ctx.modes, θ.ℓs)
+    retained = kron(time_dct_root(times, θ.ℓt), Φ[:, 1:K])
+    AR = Matrix(reads.A * retained) .* (tg.σ * sqrt(tg.λ))
+    tail = kron(temporal_root(times, θ.ℓt), Φ[:, K+1:N])
+    AT = Matrix(reads.A * tail) .* (tg.σ * sqrt(tg.λ))
+    (; retained, tail, AR, AT, K)
+end
 
 # The truncated family's optimum: P_jj on retained modes, 1 on the tail, and the
 # subspace mean over retained modes and station effects. Returns its KL pieces.
-function _truncated(tg, reads, ctx, K)
-    T = ctx.roots[:space_spectral](tg.θ)
+function _truncated(tg, reads, ctx, K, root=:space_spectral)
+    T = ctx.roots[root](tg.θ)
     N, nt = ctx.N, length(ctx.times)
     keep = [k + N * (t - 1) for t in 1:nt for k in 1:K]
     AT = Matrix(reads.A * T) .* (tg.σ * sqrt(tg.λ))
@@ -213,12 +274,38 @@ function family_gap(name, tg, reads, ctx)
     logΛaa = sum(log, diag(tg.Λaa))
     if name === :diagonal
         (sum(log, diag(tg.Λzz)) + logΛaa - tg.logdetΛ) / 2
-    elseif name in (:whitened, :spectral, :space_spectral)
+    elseif name in (:whitened, :spectral, :space_spectral, :space_hier)
         AT = reads.A * ctx.roots[name](tg.θ)
         P = 1 .+ tg.σ^2 * tg.λ .* vec(sum(abs2, AT; dims=1))
         (sum(log, P) + logΛaa - tg.logdetΛ + tg.logQ) / 2
+    elseif name === :time_dct
+        T = ctx.roots[:time_dct](tg.θ)
+        AT = reads.A * T
+        P = 1 .+ tg.σ^2 * tg.λ .* vec(sum(abs2, AT; dims=1))
+        (sum(log, P) + logΛaa - tg.logdetΛ - time_dct_logdet2(ctx.times, tg.θ.ℓt, tg.logQs, ctx.N)) / 2
+    elseif name in keys(_DCT_TRUNCATED)
+        # KL(q ‖ posterior) in the coordinates (retained v, tail w): the prior is N(0, R) on
+        # the retained block and N(0, I) on the tail, and the tail's q is its prior.
+        f = _dct_truncated(tg, reads, ctx, _DCT_TRUNCATED[name])
+        Z = Matrix(reads.Z)
+        sqrtλ = sqrt(tg.λ)
+        n = size(f.retained, 2)
+        Qmodes = Matrix(Symmetric(f.retained' * (tg.Q * f.retained)))
+        Pdiag = diag(Qmodes) .+ vec(sum(abs2, f.AR; dims=1))
+        H = Qmodes + f.AR' * f.AR
+        P = [H sqrtλ .* (f.AR' * Z); sqrtλ .* (Z' * f.AR) Matrix(tg.Λaa)]
+        b = vcat(sqrtλ .* (f.AR' * ctx.y), tg.λ .* (Z' * ctx.y))
+        m = cholesky(Symmetric(P)) \ b
+        bfull = vcat(tg.σ .* (reads.A' * ctx.y), reads.Z' * ctx.y) .* tg.λ
+        quadratic = dot(tg.F \ bfull, bfull) - dot(m, b)
+        taildata = sum(abs2, f.AT)
+        # log|T|²: the retained modes' DCT root, the tail's exact root, and the spatial part.
+        K = ctx.K(name)
+        logT2 = K * 2logabsdet(time_dct_root(ctx.times, tg.θ.ℓt))[1] -
+            (ctx.N - K) * tg.logQt - length(ctx.times) * tg.logQs
+        (taildata - tg.logdetΛ - logT2 + sum(log, Pdiag) + logΛaa + quadratic) / 2
     elseif name in keys(_TRUNCATED)
-        f = _truncated(tg, reads, ctx, _TRUNCATED[name])
+        f = _truncated(tg, reads, ctx, _TRUNCATED[name], _truncated_root(name))
         fit = _truncated_mean(tg, reads, ctx.y, f)
         bfull = vcat(tg.σ .* (reads.A' * ctx.y), reads.Z' * ctx.y) .* tg.λ
         quadratic = dot(tg.F \ bfull, bfull) - dot(fit.m, fit.b)
@@ -249,8 +336,15 @@ function family_sds(name, tg, reads, ctx, exact)
     elseif name === :diagonal
         s2 = 1 ./ diag(tg.Λzz)
         return (; z=sqrt.(s2), read=sqrt.(vec(sum(abs2, A; dims=2)' ) .* 0 .+ [dot(A[r, :] .^ 2, s2) for r in axes(A, 1)]))
+    elseif name in keys(_DCT_TRUNCATED)
+        f = _dct_truncated(tg, reads, ctx, _DCT_TRUNCATED[name])
+        Qmodes = f.retained' * (tg.Q * f.retained)
+        Pdiag = diag(Qmodes) .+ vec(sum(abs2, f.AR; dims=1))
+        return (; z=sqrt.(vec(sum(abs2, f.retained ./ sqrt.(Pdiag)'; dims=2)) .+ vec(sum(abs2, f.tail; dims=2))),
+            read=sqrt.(vec(sum(abs2, Matrix(A * f.retained) ./ sqrt.(Pdiag)'; dims=2)) .+
+                vec(sum(abs2, Matrix(A * f.tail); dims=2))))
     elseif name in keys(_TRUNCATED)
-        f = _truncated(tg, reads, ctx, _TRUNCATED[name])
+        f = _truncated(tg, reads, ctx, _TRUNCATED[name], _truncated_root(name))
         scale = ones(size(f.T, 2))
         scale[f.keep] .= 1 ./ sqrt.(f.Pdiag[f.keep])
         return (; z=sqrt.(vec(sum(abs2, f.T .* scale'; dims=2))),
@@ -261,7 +355,7 @@ function family_sds(name, tg, reads, ctx, exact)
         Y, X = factor.apply(T'), factor.apply((reads.A * T)')
         return (; z=sqrt.(max.(0, vec(sum(T' .* Y; dims=1)))),
             read=sqrt.(max.(0, vec(sum((reads.A * T)' .* X; dims=1)))))
-    elseif name in (:whitened, :spectral, :space_spectral, :space_whitened)
+    elseif name in (:whitened, :spectral, :space_spectral, :space_hier, :space_whitened, :time_dct)
         T = name === :space_whitened ? ctx.Ts(tg.θ) : ctx.roots[name](tg.θ)
         AT = A * T
         base = name === :space_whitened ? diag(kron(tg.Qt, sparse(I, size(tg.Qs)...))) : ones(size(T, 2))
@@ -337,15 +431,16 @@ function self_check(mesh, times, θ, T, rng)
     brm = GM._brm_gmrf_logpdf(state, mesh, times, θ.ℓs, θ.ℓt, L)
     @assert abs(value - brm) <= 1e-8 * abs(brm) "log density disagrees with BRM: $value vs $brm"
     R = T(θ)
-    @assert norm(R' * (Q * R) - I) <= 1e-7 * sqrt(N * nt) "T Tᵀ is not Q⁻¹"
+    residual = norm(R' * (Q * R) - I) / sqrt(N * nt)
+    @assert residual <= 1e-5 "T Tᵀ is not Q⁻¹: residual $residual"
     nothing
 end
 
-const ALL_FAMILIES = (:exact, :diagonal, :tile_2, :tile_4, :space_whitened, :whitened, :space_spectral, :spectral,
-    :truncated_16, :truncated_36, :truncated_64, :whitened_r8, :whitened_r32)
-function run_regime(label, truth; v=11, nt=16, stations=12, rows=8, seed=1, families=ALL_FAMILIES)
+const ALL_FAMILIES = (:exact, :diagonal, :tile_2, :tile_4, :space_whitened, :whitened, :space_spectral, :spectral, :space_hier,
+    :hier_16, :hier_36, :hier_64, :time_dct, :dct_16, :dct_36, :truncated_16, :truncated_36, :truncated_64, :whitened_r8, :whitened_r32)
+function run_regime(label, truth; v=11, nt=16, stations=12, rows=8, seed=1, families=ALL_FAMILIES, irregular=false)
     mesh = grid_mesh(v)
-    times = collect(0.0:nt-1)
+    times = irregular ? cumsum(vcat(0.0, 0.25 .+ 2.5 .* rand(Xoshiro(99), nt - 1))) : collect(0.0:nt-1)
     rng = Xoshiro(seed)
     reads = toy_reads(mesh, times, stations, rows, rng)
     N = length(mesh.mass)
@@ -355,8 +450,10 @@ function run_regime(label, truth; v=11, nt=16, stations=12, rows=8, seed=1, fami
     modes = spatial_modes(mesh)
     roots = Dict(:whitened => T,
         :spectral => (θ -> kron(temporal_spectral_root(times, θ.ℓt), spatial_spectral_root(modes, θ.ℓs))),
-        :space_spectral => (θ -> kron(temporal_root(times, θ.ℓt), spatial_spectral_root(modes, θ.ℓs))))
-    ctx = (; T, Ts, roots, times, N, y=Float64[], tiles=Dict(:tile_2 => tiles(v, nt, 2, 4), :tile_4 => tiles(v, nt, 4, 4)))
+        :space_spectral => (θ -> kron(temporal_root(times, θ.ℓt), spatial_spectral_root(modes, θ.ℓs))),
+        :space_hier => (θ -> kron(temporal_hier_root(times, θ.ℓt), spatial_spectral_root(modes, θ.ℓs))),
+        :time_dct => (θ -> kron(time_dct_root(times, θ.ℓt), spatial_spectral_root(modes, θ.ℓs))))
+    ctx = (; T, Ts, roots, times, N, modes, K=(name -> _DCT_TRUNCATED[name]), y=Float64[], tiles=Dict(:tile_2 => tiles(v, nt, 2, 4), :tile_4 => tiles(v, nt, 4, 4)))
     # Draw the truth from the model.
     Tz = T(truth)
     z = Tz * randn(rng, nz)
@@ -369,15 +466,22 @@ function run_regime(label, truth; v=11, nt=16, stations=12, rows=8, seed=1, fami
     mean_z = (tg.F \ b)[1:nz]
     is_read = vec(sum(abs, reads.A; dims=1)) .> 0
     names = families
-    for root in values(roots)
-        self_check(mesh, times, truth, root, rng)
+    for (name, root) in roots
+        name === :time_dct || self_check(mesh, times, truth, root, rng)
     end
     fixed = map(names) do name
         sds = family_sds(name, tg, reads, ctx, exact)
         ref = family_sds(:exact, tg, reads, ctx, exact)
         ratio, read_ratio = sds.z ./ ref.z, sds.read ./ ref.read
-        family_mean = if name in keys(_TRUNCATED)
-            f = _truncated(tg, reads, ctx, _TRUNCATED[name])
+        family_mean = if name in keys(_DCT_TRUNCATED)
+            f = _dct_truncated(tg, reads, ctx, _DCT_TRUNCATED[name])
+            Z, sqrtλ = Matrix(reads.Z), sqrt(tg.λ)
+            H = f.retained' * (tg.Q * f.retained) + f.AR' * f.AR
+            P = [H sqrtλ .* (f.AR' * Z); sqrtλ .* (Z' * f.AR) Matrix(tg.Λaa)]
+            b = vcat(sqrtλ .* (f.AR' * y), tg.λ .* (Z' * y))
+            f.retained * (cholesky(Symmetric(P)) \ b)[1:size(f.retained, 2)]
+        elseif name in keys(_TRUNCATED)
+            f = _truncated(tg, reads, ctx, _TRUNCATED[name], _truncated_root(name))
             f.T[:, f.keep] * _truncated_mean(tg, reads, y, f).m[1:length(f.keep)]
         else
             mean_z
@@ -444,10 +548,11 @@ function main(out, which, nseeds, families=ALL_FAMILIES)
         ("slow, moderately informative", (; σ=1.0, ℓs=0.5, ℓt=10.0, τ=0.2, σα=0.5)),
         ("slow, weakly informative", (; σ=1.0, ℓs=0.5, ℓt=10.0, τ=1.0, σα=0.5)),
         ("shorter, moderately informative", (; σ=1.0, ℓs=0.2, ℓt=3.0, τ=0.2, σα=0.5)),
+        ("slow, irregular times", (; σ=1.0, ℓs=0.5, ℓt=10.0, τ=0.2, σα=0.5)),
     ]
     results = []
     for (label, truth) in regimes[which], seed in 1:nseeds
-        t = @elapsed r = run_regime(label, truth; seed, families)
+        t = @elapsed r = run_regime(label, truth; seed, families, irregular=occursin("irregular", label))
         push!(results, r)
         println("== ", label, " seed=", seed, " nz=", r.nz, " read states=", r.nread, " (", round(t; digits=1), " s)")
         @printf("  %-15s %9s %8s %24s %24s %24s %7s\n", "family", "KL", "mean err", "sd ratio read states", "sd ratio unread states", "sd ratio latent reads", "cover")

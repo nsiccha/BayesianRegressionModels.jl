@@ -76,6 +76,7 @@ function main_steps()
     roots = Dict(
         :whitened => (θ -> kron(temporal_root(times, θ.ℓt), spatial_root(mesh, θ.ℓs))),
         :space_spectral => (θ -> kron(temporal_root(times, θ.ℓt), spatial_spectral_root(modes, θ.ℓs))),
+        :space_hier => (θ -> kron(temporal_hier_root(times, θ.ℓt), spatial_spectral_root(modes, θ.ℓs))),
         :spectral => (θ -> kron(temporal_spectral_root(times, θ.ℓt), spatial_spectral_root(modes, θ.ℓs))))
     z = roots[:whitened](θ) * randn(rng, size(reads.A, 2))
     y = θ.σ .* (reads.A * z) .+ θ.τ .* randn(rng, size(reads.A, 1))
