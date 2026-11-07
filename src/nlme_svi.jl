@@ -59,6 +59,7 @@ _brm_svi_rank(f::LowRankGlobal) = f.rank
 include("nlme_svi_sampling.jl")
 include("nlme_svi_workspace.jl")
 include("nlme_svi_units.jl")
+include("nlme_svi_sites.jl")
 
 # ── The minibatch target ─────────────────────────────────────────────────────
 
@@ -479,7 +480,9 @@ _BRMSVIAdam(n, lr) = _BRMSVIAdam(lr, 0.9, 0.999, zeros(n), zeros(n), 0, 0)
 #
 # A coordinate read by only a few units has a zero gradient in most batches, so
 # its gradient when one is drawn is about √(N/B) times its rms. A tighter bound
-# would shrink the rms and with it the next gradient's limit, without end.
+# would shrink the rms and with it the next gradient's limit, without end. One
+# whose readers are drawn less than once per batch on average takes them from
+# their sites instead (src/nlme_svi_sites.jl), so the bound only meets its prior.
 #
 # A clipped gradient is not unbiased: a term with a heavy-tailed gradient pushes
 # less than its expectation says. Where such a term's expectation is infinite
@@ -744,7 +747,8 @@ end
 _brm_svi_field_prepare!(rng, t, q, g, batch) = nothing
 
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
-        whiten=false, weights=fill(length(t.units) / length(batch), length(batch)))
+        whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
+        sites=nothing, site_scale=1.0)
     D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
@@ -776,17 +780,20 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     # Before anything changes q or the optimizer.
     _brm_svi_check_finite(t, g, P, gP, problems)
 
+    # A sparse global takes its readers from their sites (src/nlme_svi_sites.jl),
+    # not from N / B times this batch's.
     w = copy(gP)
     batch_value = 0.0
     for (k, term) in enumerate(terms)
         batch_value += weights[k] * term.value
         scale = weights[k] / 2
         for (entry, p) in enumerate(_brm_svi_unit_touched(t, batch[k]))
-            w[p] += scale * term.gg[entry]
+            _brm_svi_minibatch_global(sites, p) && (w[p] += scale * term.gg[entry])
         end
     end
+    _brm_svi_update_sites!(sites, t, q, g, ε, batch, terms, β, site_scale)
     x = _brm_svi_global_vector(q)
-    grad = _brm_svi_global_gradient(q, w, ε, η)
+    grad = _brm_svi_add_site_gradient!(_brm_svi_global_gradient(q, w, ε, η), sites, q)
     # `N / B` for a uniform batch; under work sampling a unit drawn with chance π
     # carries weight about 1 / π, so its coordinates' gradients are about √w times
     # their rms when drawn, and the batch's largest weight bounds every unit in it.
@@ -841,6 +848,7 @@ mutable struct _BRMSVIRun{Q}
     averaged_through::Vector{Int}
     unit_entropy::Vector{Float64}
     entropy_sum::Float64
+    sites::Union{Nothing,_BRMSVISites}
 end
 
 _brm_svi_adam(q, lr) = _BRMSVIAdam(length(_brm_svi_global_vector(q)), lr)
@@ -856,7 +864,8 @@ function _brm_svi_run(rng, q, c, t)
     entropy = [_brm_svi_unit_entropy(q, i) for i in 1:N]
     _BRMSVIRun(rng, q, _brm_svi_adam(q, c.lr_global), 0, Float64[],
         _BRMSVIWindow[], 0, nothing, false,
-        sampler, sampling, 0, zeros(Int, N), entropy, sum(entropy))
+        sampler, sampling, 0, zeros(Int, N), entropy, sum(entropy),
+        _brm_svi_sites(t, c.batch_size, sampler.probabilities))
 end
 
 # The share of a window's iterations left out at each end of its statistics.
@@ -922,7 +931,7 @@ function _brm_svi_advance!(run, t, c)
     value = try
         _brm_svi_iteration!(run.rng, t, q, run.adam, batch.indices,
             scale * (polishing ? c.polish_lr : c.lr_global), scale * c.unit_step;
-            whiten=polishing, weights=batch.weights)
+            whiten=polishing, weights=batch.weights, sites=run.sites, site_scale=scale)
     catch e
         e isa BRMSVINonfiniteError || rethrow()
         throw(BRMSVINonfiniteError(it, e.terms))
@@ -1569,6 +1578,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                     unit_families=_brm_svi_unit_description.(q.U),
                     seconds, model=m, source_id=_brm_svi_source_id(m.backend),
                     sampling=run.sampling, unit_gradient_calls=run.unit_gradient_calls,
+                    sparse_globals=_brm_svi_sites_diagnostics(run.sites, t),
                     start=get(t, :start_receipt, nothing),
                     streaming=_brm_svi_carried_state(previous, t, q), optimizer=state))
             finally
