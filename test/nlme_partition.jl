@@ -214,7 +214,10 @@ end
         brm_nlme_loglikelihood(m, 1, θ, σ, H[1])
         # Control, logged and not asserted: the lazy overlay 0.2.122 passed,
         # which RK's partition gradient copies into a full packed vector.
-        overlay = BRM._BRMNLMEPoint(m.unit, plan.indices[1], m.unit[plan.indices[1]],
+        # `indices[i]` is a `_BRMNLMEUnitSelection` since 0.2.231; the overlay
+        # takes its positions as a `Vector{Int}`.
+        positions = collect(plan.indices[1])
+        overlay = BRM._BRMNLMEPoint(m.unit, positions, m.unit[positions],
             Int[], Float64[], Int[], Float64[])
         BRM._rk_nlme_partition_value_and_gradient!(plan.sampler, plan.gradients[1], overlay, 1)
         (; packed=length(m.unit),

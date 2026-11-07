@@ -80,8 +80,9 @@ function svi_window_exact(rk)
         H = zeros(n, n)
         for j in 1:n
             δ = j in scale ? 1e-4 : 1.0
-            x = copy(x0); x[j] += δ
-            H[:, j] .= -(LogDensityProblems.logdensity_and_gradient(p, x)[2] .- g0) ./ δ
+            # Not `x`: that would assign the enclosing function's iterate.
+            xp = copy(x0); xp[j] += δ
+            H[:, j] .= -(LogDensityProblems.logdensity_and_gradient(p, xp)[2] .- g0) ./ δ
         end
         Symmetric((H + H') / 2), g0
     end
@@ -90,7 +91,9 @@ function svi_window_exact(rk)
         H, g = hessian(x)
         x = x .+ (cholesky(H) \ g)
     end
-    H, _ = hessian(x)
+    H, g = hessian(x)
+    # Control: the mean is the mode, where the gradient vanishes.
+    @test maximum(abs, g) < 1e-2
     (; H, μ=x, names)
 end
 
@@ -236,7 +239,10 @@ svi_window_nlme() = brm_nlme_model(SVI_WINDOW_RK;
     BRM._brm_svi_fit!(run, t, c)
     old = svi_boundaries(SVI_WINDOW_EXACT, BRM._brm_svi_result_q(run), t.globals)
     @info "minibatch" mean_err_rms=sqrt(mean(abs2, old.z)) sd_median=median(old.r) sd_range=extrema(old.r)
-    @test maximum(old.r) > 2 * maximum(b.r)
+    # The control fails the bound the sites run passes. From BRM 0.2.242 settling
+    # (test/nlme_svi_settling.jl) also narrows the boundaries without sites: their
+    # largest sd ratio was 5.1 under 0.2.241's schedule and 2.5 with settling.
+    @test maximum(old.r) > 1.4 > maximum(b.r)
     @test sqrt(mean(abs2, old.z)) > sqrt(mean(abs2, b.z))
 end
 

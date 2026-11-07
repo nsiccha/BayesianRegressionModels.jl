@@ -78,9 +78,7 @@ function Base.show(io::IO, s::BRMSVIOptimizerState)
         "GaussianBlockLaplace, iteration ", run.iteration, " of ", c.max_iterations, window, ")")
     phase = run.converged ? "converged" :
         run.iteration >= c.max_iterations ? "reached max_iterations" :
-        _brm_svi_polishing(run) ?
-            "polishing $(run.iteration - run.polish_start)/$(c.polish_windows * c.window)" :
-            "exploring, window $(length(run.windows))"
+        _brm_svi_phase_text(run, c)
     print(io, "BRMSVIOptimizerState(iteration ", run.iteration, " of at most ",
         c.max_iterations, ", ", phase, window, ")")
 end

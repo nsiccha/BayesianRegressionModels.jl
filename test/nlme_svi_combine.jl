@@ -326,7 +326,26 @@ end
         max_iterations=0, ndraws=0)
 end
 
-@stestset "slice combination: a low-rank slice enters through its marginal variances" begin
+# The joint product over `keys` (no shared level's draws among them): each
+# slice's factor covariance diag(e^{2ρ}) + ΒΒᵀ over the keys its data reached,
+# inverted, less the prior's projection, with its negative part dropped.
+function slice_expected_joint(states, keys, m0, p0)
+    P, η = Matrix(Diagonal(p0)), p0 .* m0
+    for st in states
+        J = [findfirst(isequal(key), st.q.keys) for key in keys]
+        R = [r for r in eachindex(keys) if J[r] !== nothing && st.q.informed[J[r]]]
+        isempty(R) && continue
+        Js = Int.(J[R])
+        Ps = inv(Symmetric(Matrix(Diagonal(exp.(2 .* st.q.ρ[Js])) + st.q.Β[Js, :] * st.q.Β[Js, :]')))
+        E = eigen(Symmetric(Ps - Diagonal(p0[R])))
+        V, λ = E.vectors[:, E.values .> 0], E.values[E.values .> 0]
+        P[R, R] .+= V * Diagonal(λ) * V'
+        η[R] .+= V * (V' * (Ps * st.q.μ[Js] - p0[R] .* m0[R]))
+    end
+    P \ η, P
+end
+
+@stestset "slice combination: a low-rank slice's sites are joint" begin
     data = svi_slice_data(Xoshiro(55), SVI_SLICE_REGIONS, SVI_SLICE_CLASSES, 4)
     full = slice_model(data)
     fit = brm_svi_fit(svi_slice_model(svi_slice_region(data, "east")); rng=Xoshiro(2),
@@ -337,12 +356,92 @@ end
     state = brm_svi_checkpoint(fit)
     start = brm_svi_combine(full, [state])
     r = start.receipt.globals
+    @test r.joint === :joint && start.receipt.slice_rank == [1]
     gkeys = BRM._brm_svi_coordinate_keys(full)[BRM._brm_svi_globals(full)]
-    for (k, key) in enumerate(start.globals.keys)
-        j = findfirst(isequal(key), gkeys)
-        _, μ, σ = slice_expected([state], key, r.prior_mean[j], r.prior_sd[j])
-        @test start.globals.σ[k] ≈ σ
+    # `a` and the two scales combine jointly; the class draws are carried.
+    joined = findall(j -> !r.carried[j] && r.informed[j] > 0, eachindex(gkeys))
+    @test length(joined) == 3
+    μ, P = slice_expected_joint([state], gkeys[joined], r.prior_mean[joined],
+        1 ./ r.prior_sd[joined] .^ 2)
+    order = [findfirst(isequal(key), start.globals.keys) for key in gkeys[joined]]
+    @test start.globals.μ[order] ≈ μ
+    @test start.globals.σ[order] ≈ 1 ./ sqrt.(diag(P))
+    block = only(start.globals.correlated)
+    @test block.positions == order && block.precision ≈ P
+    @test !isdiag(P)
+    C_class(s) = exp(slice_mean(start, "class.tau") - slice_mean(state, "class.tau"))
+    for j in findall(r.carried)
+        k = findfirst(isequal(gkeys[j]), start.globals.keys)
+        k === nothing && continue
+        μc, σc = slice_expected_carried([state], gkeys[j], r.prior_mean[j], r.prior_sd[j], C_class)
+        @test start.globals.μ[k] ≈ μc && start.globals.σ[k] ≈ σc
     end
+    # A mean-field fit starts at the mean-field part; a rank-1 fit's rank part
+    # takes the direction in which P is widest relative to it.
+    globals = BRM._brm_svi_globals(full)
+    rows = [findfirst(isequal(key), gkeys) for key in gkeys[joined]]
+    meanfield = brm_svi_fit(full; start, max_iterations=0, ndraws=0).diagnostics.q
+    @test meanfield.ρ[rows] ≈ log.(1 ./ sqrt.(diag(P)))
+    lowrank = brm_svi_fit(full; start, max_iterations=0, ndraws=0,
+        family=LowRankGlobal(1)).diagnostics.q
+    d = 1 ./ sqrt.(diag(P))
+    E = eigen(Symmetric(d .* P .* d'))
+    ω, u = E.values[1], E.vectors[:, 1]
+    @test ω < 1
+    Σq = Diagonal(exp.(2 .* lowrank.ρ[rows])) + lowrank.Β[rows, :] * lowrank.Β[rows, :]'
+    @test Σq ≈ Diagonal(d .^ 2) + (1 / ω - 1) * (d .* u) * (d .* u)'
+    @test iszero(lowrank.Β[setdiff(eachindex(globals), rows), :])
+    # Along that direction the start's variance is the product's.
+    @test (u ./ d)' * Σq * (u ./ d) ≈ 1 / ω
+end
+
+@stestset "slice combination: joint sites land where the slices' ridges cross" begin
+    data = svi_slice_ridge_data(Xoshiro(7))
+    groups = (; subject_group=:subject)
+    full = brm_nlme_model(RKBRMI(svi_slice_ridge_model(data)); ad_backend=SLICE_AD, groups...)
+    opts = (; batch_size=4, ndraws=0)
+    slices = [brm_svi_fit(svi_slice_ridge_model(svi_slice_rows(data, data.region .== r));
+        rng=Xoshiro(10 + k), family=LowRankGlobal(2), opts..., groups...)
+        for (k, r) in enumerate(("plus", "minus"))]
+    # Each slice is a ridge: "plus" pins a + b, "minus" pins a - b.
+    for (fit, sign) in zip(slices, (-1, 1))
+        Σ = BRM._brm_svi_global_covariance(fit.diagnostics.q)
+        @test sign * Σ[1, 2] / sqrt(Σ[1, 1] * Σ[2, 2]) > 0.95
+    end
+    # The coordinate-by-coordinate product: each slice's rank part folded into
+    # its marginal variances.
+    fold(fit) = let state = deepcopy(brm_svi_checkpoint(fit))
+        state.q.ρ .= log.(sqrt.(diag(BRM._brm_svi_global_covariance(state.q))))
+        state.q.Β .= 0
+        state
+    end
+    joint, diagonal = brm_svi_combine(full, slices), brm_svi_combine(full, fold.(slices))
+    @test joint.receipt.globals.joint === :joint && joint.receipt.slice_rank == [2, 2]
+    @test diagonal.receipt.globals.joint === :diagonal && isempty(diagonal.globals.correlated)
+    reference = brm_svi_fit(full; rng=Xoshiro(99), family=LowRankGlobal(2), opts...).diagnostics
+    gkeys = BRM._brm_svi_coordinate_keys(full)[reference.globals]
+    sd = sqrt.(diag(BRM._brm_svi_global_covariance(reference.q)))
+    distance(start) = abs.(start.globals.μ[[findfirst(isequal(key), start.globals.keys)
+        for key in gkeys]] .- reference.q.μ) ./ sd
+    # The joint product lands where the ridges cross; the diagonal one between
+    # the slices' means, many posterior sds off (measured 0.12, 0.05 against
+    # 19.3, 13.2).
+    @test all(distance(joint)[1:2] .< 0.5)
+    @test all(distance(diagonal)[1:2] .> 5)
+    first_window(start, family) = brm_svi_fit(full; rng=Xoshiro(80), start, family,
+        max_iterations=50, window=50, opts...).diagnostics.elbo_windows_trimmed[1]
+    for family in (MeanFieldGlobal(), LowRankGlobal(2))
+        cold, warm, diag_warm = first_window(nothing, family), first_window(joint, family),
+            first_window(diagonal, family)
+        @info "first-window trimmed ELBO" family cold joint = warm diagonal = diag_warm
+        @test warm > diag_warm && warm > cold
+    end
+    # A fit from the start is itself a slice of its data, so the combination
+    # nests (sub-slices -> slice -> whole): alone, it returns the start's means.
+    again = brm_svi_combine(full, [brm_svi_fit(full; start=joint, family=LowRankGlobal(2),
+        max_iterations=0, ndraws=0)])
+    @test again.receipt.globals.joint === :joint
+    @test again.globals.keys == joint.globals.keys && again.globals.μ ≈ joint.globals.μ
 end
 
 @stestset "slice combination: real slice fits start the full fit near its optimum" begin
