@@ -73,7 +73,10 @@ end
     end
     fitted_sb = SBBRMI(fitted; mod=@__MODULE__)
     fitted_code = BRM.stan_code(fitted_sb)
-    @test occursin("simplex[3] mo1_c_simplex_incr;", fitted_code)
+    # The simplex is sized by the term's concentration datum (user principle
+    # `0ikeidi`), three increments here.
+    @test occursin("simplex[mo1_c_alpha_n] mo1_c_simplex_incr;", fitted_code)
+    @test fitted_sb.data[:mo1_c_alpha] == ones(3)
     @test occursin(
         "mo1_c_simplex_incr ~ asymmetric_simplex(1, 2, 4);", fitted_code)
     @test StanBlocks.stanc_check(fitted_code; warn_pedantic=false).ok

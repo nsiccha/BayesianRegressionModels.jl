@@ -273,7 +273,7 @@ end
     # Executable preparation precedes allocating calls in the main graph. The
     # group block sizes its levels by the fitted levels of `g`'s fit-role copy.
     @test :(b_p_g ~ brm_correlated_group_effects(g_fit_levels, 2, 3.0)) in main.args
-    @test :(mo_c ~ brm_monotonic_effect(c_idx, [1.0, 1.0, 1.0], 0.0, 1.0)) in main.args
+    @test :(mo_c ~ brm_monotonic_effect(c_idx, mo_c_alpha, 0.0, 1.0)) in main.args
     @test :(X_mu = hcat(ones(length(c)), x)) in main.args
     @test :(pop_mu ~ brm_population_effects(X_mu, 2, 0.0, 1.0)) in main.args
     definitions = Dict(submodel_name(d) => strip_lines(d) for d in submodels(emitted))

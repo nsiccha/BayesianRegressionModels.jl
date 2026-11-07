@@ -10951,10 +10951,16 @@ function _sb_mo_concentration_expr(value::ExprColumn)
 end
 _sb_mo_concentration_expr(value) = _sb_effect_prior_arg(value)
 
-function _sb_mo_prior_plan(term_overrides, t, n_levels)
+# The concentration is data named after the term (`<term>_alpha`), never text of
+# the program, so one Stan program serves every level count (user principle
+# `0ikeidi`); a frozen replay keeps the fitted levels and so the same datum.
+_sb_mo_alpha!(data, name, alpha::AbstractVector{<:Real}) =
+    _sb_static_level_datum!(data, Symbol(name, :_alpha), collect(Float64, alpha))
+_sb_mo_alpha!(_data, _name, alpha) = alpha
+function _sb_mo_prior_plan(term_overrides, t, n_levels, data, name)
     k = n_levels - 1
     cfg = _sb_term_cfg(term_overrides, t, :simplex)
-    default_alpha = :(rep_vector(1., $k))
+    default_alpha = _sb_mo_alpha!(data, name, ones(k))
     isnothing(cfg) && return (; model=:_sb_mo, alpha=default_alpha)
 
     prior = _brm_normalize_simplex_prior(cfg.spec.expression, k)
@@ -10964,12 +10970,12 @@ function _sb_mo_prior_plan(term_overrides, t, n_levels)
         isempty(getkwargs(prior)) || error("sbimpl: normalized Dirichlet simplex prior has keywords")
         original_args = getargs(cfg.spec.expression)
         alpha = if length(original_args) == 1 && only(original_args) isa Real
-            concentration = only(original_args)
-            concentration = concentration isa Real ? Float64(concentration) :
-                            _sb_effect_prior_arg(concentration)
-            Expr(:call, :rep_vector, concentration, k)
+            _sb_mo_alpha!(data, name, fill(Float64(only(original_args)), k))
         else
-            _sb_mo_concentration_expr(only(getargs(prior)))
+            concentration = only(getargs(prior))
+            concentration isa AbstractVector{<:Real} ?
+                _sb_mo_alpha!(data, name, concentration) :
+                _sb_mo_concentration_expr(concentration)
         end
         return (; model=:_sb_mo, alpha)
     end
@@ -11499,7 +11505,7 @@ function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, su
     end
     idx_name = Symbol(inner_name, :_idx)
     data[idx_name] = idx
-    prior = _sb_mo_prior_plan(term_overrides, t, n_levels)
+    prior = _sb_mo_prior_plan(term_overrides, t, n_levels, data, col_name)
     push!(stmts, Expr(:call, :~, col_name,
         _sb_term_model_call(prior.model, term_overrides, t;
                             x=idx_name, alpha=prior.alpha)))
@@ -15092,7 +15098,7 @@ _sb_predictor_term!(stmts, data, ::typeof(mo), t;
     end
     data[idx_name] = prepared.state.idx
     _sb_record_preproc!(data, idx_name, PreprocEntry(:mo, levels, inner_name, true))
-    prior = _sb_mo_prior_plan(term_overrides, t, n_levels)
+    prior = _sb_mo_prior_plan(term_overrides, t, n_levels, data, col_name)
     push!(stmts, Expr(:call, :~, col_name,
         _sb_term_model_call(prior.model, term_overrides, t;
                             x=idx_name, alpha=prior.alpha)))
@@ -16660,12 +16666,18 @@ function _sb_lik_family!(stmts, target, ::Type{<:OrderedLogistic}, args::Tuple{A
     # constructs; `ordered_logistic_lpmf(1 | eta, empty)` contributes 0). A
     # single-level outcome degenerates to a zero-information likelihood rather
     # than a shape-conditional error.
-    n_cut = n_levels - 1
     cut_name = Symbol(target, :_cutpoints)
+    n_cut = _sb_threshold_count!(data, cut_name, n_levels - 1)
     push!(stmts, :($cut_name::ordered[$n_cut] ~ std_normal()))
     eta_expr = _sb_scalar_expr(args[1], data)
     push!(stmts, :($target ~ ordered_logistic($eta_expr, $cut_name)))
 end
+
+# An ordinal response's threshold count, the level count minus one, is data named
+# after its thresholds (`<thresholds>_length`), so one Stan program serves every
+# level count (user principle `0ikeidi`).
+_sb_threshold_count!(data, thresholds::Symbol, n::Int) =
+    _sb_static_level_datum!(data, Symbol(thresholds, :_length), n)
 
 _sb_ordinal_structure_code(::Cumulative) = 1
 _sb_ordinal_structure_code(::StoppingRatio) = 2
@@ -16759,12 +16771,12 @@ function _sb_lik_family!(stmts, target, ::Type{<:Ordinal},
     # `n_cut == 0` — `ordered[0]`/`vector[0]` thresholds and an empty
     # `rep_matrix(0., N, 0)` threshold effect, all Stan-valid, degenerating to a
     # zero-information likelihood rather than a shape-conditional error.
-    n_cut = n_levels - 1
     data[target] = prepared_response.response
     _sb_record_preproc!(data, target, PreprocEntry(
         :ordinal_outcome, (; levels, n_levels), target, true))
 
     cut_name = Symbol(target, :_thresholds)
+    n_cut = _sb_threshold_count!(data, cut_name, n_levels - 1)
     if structure == 1
         push!(stmts, :($cut_name::ordered[$n_cut] ~ std_normal()))
     else

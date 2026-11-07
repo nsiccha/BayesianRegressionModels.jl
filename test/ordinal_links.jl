@@ -98,8 +98,11 @@ end
     checked.ok || @error "stanc rejected ordinal model" output=checked.output
     @test checked.ok
 
-    @test occursin("ordered[2] y_cumulative_thresholds;", code)
-    @test occursin("vector[2] y_stopping_thresholds;", code)
+    # The threshold count is data (user principle `0ikeidi`).
+    @test occursin("ordered[y_cumulative_thresholds_length] y_cumulative_thresholds;", code)
+    @test occursin("vector[y_stopping_thresholds_length] y_stopping_thresholds;", code)
+    @test sb.data[:y_cumulative_thresholds_length] == 2
+    @test sb.data[:y_stopping_thresholds_length] == 2
     @test occursin("y_stopping_threshold_beta", code)
     @test occursin("multi_std_normal", code)
     @test occursin("brm_ordinal_lpmf", code)
