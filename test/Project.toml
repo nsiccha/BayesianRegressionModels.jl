@@ -383,8 +383,12 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # and shared-row storage compact as unrelated units are added.
 # 28d70c34 (RK 0.1.94 / RKPPL 0.1.105) runs a tuple plate's statements only at
 # rows that read their entries, so automatic connected SVI units keep their own
-# coordinates. b9342dca (RK 0.1.96 / RKPPL 0.1.106) is the revision measured with
-# Enzyme cecb571a, which repairs the static Reverse failure its guards exposed.
+# coordinates. b9342dca (RK 0.1.96 / RKPPL 0.1.106) splits a destructuring outside
+# a plate around its data-only nodes, so a periodic hsgp's cell factors prepare;
+# 79f0a7cb (RKPPL 0.1.107) keeps a partitioned cell's shared prefix that reads only
+# some shared coordinates working after its first call.
 # 7b53c65f (RK 0.1.104 / RKPPL 0.1.114) prepares partition kernels from `u0`, so
 # a response reading a `@plate`-computed vector whole partitions per cell unit.
+# From RK 0.1.96 a compact cell's matrix product reaches BLAS, so it needs the
+# Enzyme dogfood pinned in test/setup_env.jl.
 rev = "7b53c65fa2c09feda513eefdb9e04fb463787820"

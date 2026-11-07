@@ -180,9 +180,14 @@ end
         @test all(s -> !hasproperty(s, :finished) && !hasproperty(s, :converged), snapshots)
         @test all(s -> s.status === :running, snapshots[1:end-1])
         @test last(snapshots).status === :converged
-        # What q is, by iteration.
+        # What q is, by iteration. Settling starts with the window at which
+        # exploration's test passed and holds the raw iterate, as exploring does.
+        E = reference.diagnostics.stages.exploring
+        @test 0 < E < P && reference.diagnostics.stages.settling == P - E
         @test all(s -> s.phase === :exploring && s.q_kind === :raw_iterate &&
-            s.averaged_iterations == 0, snapshots[1:P-1])
+            s.averaged_iterations == 0, snapshots[1:E-1])
+        @test all(s -> s.phase === :settling && s.q_kind === :raw_iterate &&
+            s.averaged_iterations == 0, snapshots[E:P-1])
         @test all(s -> s.phase === :polishing && s.q_kind === :polished_average &&
             s.averaged_iterations == s.iteration - P, snapshots[P:n])
         # A snapshot is what a result stopped at its iteration reports.

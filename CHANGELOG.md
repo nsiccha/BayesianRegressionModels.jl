@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.242
+## 0.2.244
 
 - New: learned partial centering in minibatch SVI,
   `brm_svi_fit(x; centering=LearnedCentering())` (Gorinova, Moore and Hoffman
@@ -27,7 +27,7 @@ instead of failing at run time.
   law arguments stay RK graph values, read once and pulled back once per
   iteration. Each unit's controls take an Adam step (`LearnedCentering(;
   start=0.5, step=0.05)`) whenever the unit is in the batch, while SVI
-  explores, and stay fixed while it polishes. Draws stay packed RK points. `fit.diagnostics.centering` reports
+  explores, and stay fixed while it settles and polishes. Draws stay packed RK points. `fit.diagnostics.centering` reports
   every cell's `c` and what stays uncentred, with the reason: Student-t,
   fixed-covariance and field families (HSGP weights, `cdar`, `car`,
   completions) and shared field weights. Omitting `centering` keeps the
@@ -50,6 +50,60 @@ instead of failing at run time.
   there includes the chain through its cells' locations and scales (the sd of a
   `gr(g, by=b)` stratum few units belong to, say). That chain term reaches every
   other global through the batch's one pullback, as before.
+
+## 0.2.243
+
+- Fixed: a model reading `hsgp(t; cov=:periodic)` in a plate cell stopped with
+  `ArgumentError: Tuple contains 2 elements` when NLMEEstimation's
+  `check_protocol` prepared its sparse Laplace, and `prepare_cell_factors` raised
+  the same error. The repair is in ReactiveKernels 0.1.96. ReactiveKernelsPPL
+  0.1.106 alone, the first with that repair, raises a `BoundsError` in
+  `_refresh_cell_shared!` on the second call of a partitioned cell whose shared
+  prefix reads only some shared coordinates, which NLMEEstimation's
+  `check_protocol` reaches with integrated families; 0.1.107 repairs it. 0.2.239's
+  floors (ReactiveKernels 0.1.104, ReactiveKernelsPPL 0.1.114) carry both, and
+  `test/runtime_numeric_settings.jl` now checks that model's cell factors against
+  its whole likelihood in the test environment.
+- **Breaking**, from 0.2.239's ReactiveKernels 0.1.104 floor and in any
+  environment on ReactiveKernels 0.1.96 or later: a compact cell's Laplace
+  Hessian-vector product (Forward over Reverse) differentiates a matrix product
+  that reaches BLAS `gemm!`. On an Enzyme before dogfood `0cdbe188` (libEnzyme
+  `3a825a54`) it raises `EnzymeRuntimeException` ("The original primal code hits
+  this error condition"), which stops `check_protocol` on a cell that sorts its
+  data and on a censored ragged join beside an in-cell observation. Use Enzyme
+  dogfood `0cdbe188` or later, as BRM's test environment now does (0.2.239 pinned
+  `cecb571a`). That libEnzyme build is for Linux x86_64 only.
+- Changed: 0.2.239's floors also guarantee the reuse 0.2.227 left to the
+  environment. One lowered program serves every size and support bound
+  (ReactiveKernelsPPL 0.1.108), and one gradient query type every value of a
+  bound number (0.1.106), so an RK fit no longer recompiles when only such a value
+  changes. The `hsgp` docstring and the support-bound comment in
+  `src/rk_backend.jl` now say so.
+
+## 0.2.242
+
+- Added: `brm_svi_fit` settles before it polishes. Exploration's stop test finds
+  the ELBO flat at exploration's own step, and that step moves a global mean by
+  `lr_global` in the coordinate's units whatever its posterior sd, so a tight
+  global (sd 7e-4 on a synthetic model) jitters by tens of sds and the ELBO sits on
+  that noise floor. Polishing's first windows then climbed from it, and the
+  returned Polyak average included the climb. Settling runs the scale-relative step
+  `polish_lr` at a constant size, without averaging, until the same trimmed-ELBO
+  test passes on its own windows, for at most `settle_windows` windows (new keyword,
+  default 100). Polishing then continues that step and its Adam moments. On an
+  exactly Gaussian model with 32 tight globals the returned factor came 62 nats
+  from the family's optimum instead of 111, at 16% more iterations; with 8, 56
+  instead of 75. On 400-unit synthetic models (3 seeds each) the returned
+  factor's ELBO rose by 4.4 to 5.6 nats (Gaussian random effects), 0.3 to 1.2
+  (Poisson) and 1.4 to 2.3 (a weakly read log-scale field), at 18% more
+  iterations. `settle_windows=0` restores the earlier schedule exactly.
+- Added: `diagnostics.stages` (and in snapshots): the iterations spent exploring,
+  settling and polishing, and `settled`, whether settling ended on its test rather
+  than its cap. `converged` with `settled = false` means polishing averaged
+  iterates that were still rising. A snapshot's `phase` can read `:settling`.
+- Changed: a fit on a fixed seed differs from 0.2.241's from the window at which
+  exploration stops. A checkpoint of 0.2.240 or 0.2.241 still resumes, with its
+  own schedule (no settling): it records no `settle_windows`.
 
 ## 0.2.241
 

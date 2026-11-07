@@ -1374,6 +1374,17 @@ fit is compared with NUTS too. Starts (prior medians, a packed point,
 `inits`) and their refusals are covered as well. It runs in the test
 environment above.
 
+`nlme_svi_settling.jl` checks the settling stage between exploration and
+polishing (BRM 0.2.242). Settling starts at the window where exploration's test
+passed, both schedules explore identically to the bit until then, it ends on its
+own test or at `settle_windows` (and `stages.settled` says which), and
+`settle_windows=0` polishes straight away. A run stopped while settling continues
+exactly, and a checkpoint whose controls predate `settle_windows` keeps the earlier
+schedule. On an exactly Gaussian target with 32 tight globals every unit reads,
+where q* is known, settling brings the returned factor closer to q* and its global
+means within half an optimal sd (the earlier schedule: about one). About 6 minutes
+warm, most of it the exact Hessian; it accepts testset substring filters.
+
 `nlme_svi_heavy_tails.jl` checks what one extreme ELBO draw does to minibatch
 SVI, whose estimate can have an infinite expectation with every draw finite.
 With no bound, one gradient of 1e21 freezes its Adam coordinate (the control), and
@@ -1618,7 +1629,9 @@ independent oracles. Its Gaussian checks include arrays observed within plate
 cells and a modeled scale shared by the observations in each cell. A periodic
 `hsgp` read in a subject cell passes `check_protocol` with every preparation
 checked at `type_stability = :error`, the sparse Laplace probe's data prefix
-included.
+included. `runtime_numeric_settings.jl` checks that model's cell factors against
+its whole likelihood in the test environment, so a landing that runs only that
+environment still reaches them.
 NLMEEstimation.jl is not part of `test/Project.toml`. Run the file from a
 copy of this environment that develops a local NLMEEstimation checkout:
 

@@ -346,16 +346,15 @@ A partition that declares nothing therefore refuses, with a
 recomputing the whole basis for every unit, which is quadratic in the positions
 over a sweep. Hold the basis as one shared value instead, by passing `partitioned`
 and `u0`. ReactiveKernelsPPL then computes it once per length and refreshes it when
-the length changes. Name the coordinates the units own, or, if they own none, mark
-any parameter's levels all shared:
+the length changes. Name the coordinates the units own, or declare that they own
+none (ReactiveKernelsPPL 0.1.111, which BRM's floor includes):
 
 ```julia
 plan = rk_bound_plan(rk)
 # Units own effects:
 partitioned = (:unit_effect => unit_labels,)
-# Units own nothing, as in a model of the field alone:
-entry = first(rk.model.layout.entries)
-partitioned = (entry.name => fill(missing, isempty(entry.dims) ? entry.size : first(entry.dims)),)
+# Units own nothing, as in a model of the field alone: every coordinate is shared.
+partitioned = :none
 
 query = prepare_partition(rk.model, plan, :y; by=(; y=unit), locality=:error, partitioned, u0=u)
 query(u, label)
@@ -366,7 +365,11 @@ That makes a unit's value local, but not its whole gradient.
 call runs one pullback of the whole basis, again quadratic over a sweep. Choose by
 what the step needs:
 
-- **A batch of units:** one pass over their cells, with one pullback for the batch.
+- **A batch of units:** one call for the batch, with one pullback of the basis:
+  `partition_batch_value_and_gradient!(sampler, g, u, labels; weights)` returns the
+  units' summed value and their summed packed gradient (`g` has the packed length;
+  `weights`, one per label, scale each unit's term). A pass over the batch's cells
+  does the same at the level of cells, below.
 - **A unit's own coordinates, the shared ones held fixed:**
   `partition_value_and_gradient!(sampler, g, u, label; shared=false)`.
 - **Every unit:** the whole-model gradient, which also pays one basis derivative
@@ -374,6 +377,14 @@ what the step needs:
 
 ```julia
 backend = AutoEnzyme(; mode=Enzyme.Reverse)
+sampler = prepare_partition_sampler(rk.model, plan, :y, u; by=(; y=unit), backend,
+    locality=:error, partitioned)
+value, g = partition_batch_value_and_gradient!(sampler, zeros(length(u)), u, batch_labels)
+```
+
+The pass over the batch's cells:
+
+```julia
 compact = prepare_compact_cell_ad(ReactiveKernels.prepare_ad, rk.model, plan, :y, u, Int[], backend;
     partitioned, locality=:error)
 accumulator = prepare_cell_accumulator(compact, backend, u; order=0)
@@ -393,11 +404,23 @@ included. Queries and samplers hold the shared value, so prepare one per thread.
 
 | Warm cost, one CPU on a shared host | 400 positions | 1,600 positions |
 | --- | --- | --- |
-| Unit value, `locality = :warn` | 6.5 ms | 37 ms |
-| Unit value, shared basis | 40 µs | 80 µs |
-| Unit value and gradient, either way | 17 to 20 ms | 89 to 126 ms |
-| Cell pass over one unit | 18 ms | 98 ms |
-| Cell pass over every unit | 156 ms | 952 ms |
+| Unit value, `locality = :warn` ¹ | 6.5 ms | 37 ms |
+| Unit value, shared basis | 20 to 26 µs | 33 to 64 µs |
+| Unit value and gradient | 11.5 ms | 60 to 62 ms |
+| Batch call, one unit | 11.6 ms | 64 ms |
+| Batch call, 16 units | 13.2 ms | 67 ms |
+| Batch call, every unit | 45 ms | 310 ms |
+| Cell pass over one unit ¹ | 18 ms | 98 ms |
+| Cell pass over every unit ¹ | 156 ms | 952 ms |
+| Whole-model value and gradient | 14.6 ms | 83 ms |
+
+The basis pullback dominates: a batch of 16 units costs about as much as one
+unit's value and gradient, so about 14 times less than 16 unit calls. The toy
+has one Normal read per row, one unit per position, 6 times and `m = 30`.
+¹ Measured on BRM 0.2.217 (ReactiveKernels 0.1.86, ReactiveKernelsPPL 0.1.100).
+The other rows were measured on BRM 0.2.241 (ReactiveKernels 0.1.104,
+ReactiveKernelsPPL 0.1.114), on gordito at load 15 to 18 of 16 cores, with
+units owning nothing (`partitioned = :none`).
 | Whole-model value and gradient | 29 ms | 125 ms |
 
 These are from a toy: `m = 30`, about 4 reads per position, one unit per position,

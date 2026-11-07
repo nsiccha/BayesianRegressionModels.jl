@@ -832,7 +832,8 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     _brm_svi_each_unit(t.plans, length(batch)) do _, k
         _brm_svi_unit_step!(q, batch[k], terms[k].gz, terms[k].gd, draws[k], β)
     end
-    # The controls move while exploring; polishing averages q in one fixed frame.
+    # The controls move while exploring; settling and polishing step q in one fixed
+    # frame, which polishing averages.
     centering === nothing || whiten || _brm_svi_control_steps!(q, batch, centered)
     P + batch_value
 end
@@ -840,17 +841,33 @@ end
 const _BRM_SVI_PHASES = (lower="Lower to ReactiveKernels", prepare="Prepare NLME model",
     target="Minibatch target", fit="Stochastic optimization", draws="Draws from q")
 
-# Stochastic optimization in two phases. Exploration runs at constant step
+# Stochastic optimization in three phases. Exploration runs at constant step
 # sizes (`lr_global` for Adam, `unit_step` for the subjects' natural-gradient
 # steps) until the ELBO stops improving detectably: the trimmed mean over a
 # window (one pass over the subjects, at least 100 iterations) has risen, over
 # the last `patience` windows, by less than twice the standard error of that
 # rise, after at least `min_windows` (`_brm_svi_window`). Comparing across several windows rather than
-# neighbouring ones lets a slow drift show above the minibatch noise. Polishing then restarts Adam on scale-preconditioned global
-# steps (`polish_lr`, a fraction of the current scale), decays every step size
-# as 1/√k over `polish_windows` windows, and returns the average of q over
-# those iterations (Polyak–Ruppert), which damps the noise a stochastic step
-# leaves.
+# neighbouring ones lets a slow drift show above the minibatch noise.
+#
+# What that test finds stationary is the iterate at exploration's step, and
+# that can be far from the optimum. `lr_global` moves a global mean by an
+# absolute amount, whatever its posterior sd: at 0.01 a coordinate with sd 7e-4
+# jitters by tens of sds, and the ELBO sits flat on that noise floor. On an
+# exactly Gaussian toy with 32 such globals exploration stopped 2,554 nats from
+# the family's optimum, and the first polishing windows took that to about 100
+# (snag svi-exploration-036fd59f; ODL's union stood in for 190,000 nats).
+# Settling therefore restarts Adam on scale-preconditioned global steps
+# (`polish_lr`, a fraction of the current scale) at a constant size, with no
+# averaging, until the same test stalls on its own windows (or for
+# `settle_windows` windows at most). Polishing then continues that step, decays
+# every step size as 1/√k over `polish_windows` windows, and returns the average
+# of q over those iterations (Polyak–Ruppert), which damps the noise a
+# stochastic step leaves, starting from an iterate that has stopped rising.
+#
+# The phase is not stored: settling began at the first window at which
+# exploration's test passed (`_brm_svi_explored`), which the run's windows
+# record, so a checkpoint's layout is unchanged. A run whose controls predate
+# `settle_windows` (a checkpoint of BRM 0.2.240 or 0.2.241) does not settle.
 #
 const _BRMSVIWindow = NamedTuple{(:mean, :center, :spread),NTuple{3,Float64}}
 
@@ -931,15 +948,54 @@ _brm_svi_stalled(a, b, W) = b.center - a.center < 2 * sqrt((a.spread + b.spread)
 # The optimizer controls of a run over `N` subjects, with the batch size and
 # window it actually uses. They are fixed for the run and its continuations.
 function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
-        polish_lr, window, patience, min_windows, polish_windows, unit_sampling=:uniform)
+        polish_lr, window, patience, min_windows, polish_windows, unit_sampling=:uniform,
+        settle_windows=_BRM_SVI_SETTLE_WINDOWS)
     B = min(batch_size, N)
     (; batch_size=B, window=window === nothing ? max(cld(N, B), 100) : window,
        max_iterations, lr_global, unit_step, polish_lr, patience, min_windows,
-       polish_windows, unit_sampling)
+       polish_windows, unit_sampling, settle_windows)
 end
+
+# At most this many windows of settling by default.
+const _BRM_SVI_SETTLE_WINDOWS = 100
 
 _brm_svi_finished(run, c) = run.converged || run.iteration >= c.max_iterations
 _brm_svi_polishing(run) = run.polish_start > 0
+# Controls written before settling existed (a resumed checkpoint) never settle.
+_brm_svi_settle_windows(c) = get(c, :settle_windows, 0)
+
+# The window at which exploration's test first passed, or 0 while exploring. A
+# pure function of the run's windows, so it needs no field of its own.
+function _brm_svi_explored(run, c)
+    windows = run.windows
+    for w in max(c.min_windows, c.patience + 1):length(windows)
+        _brm_svi_stalled(windows[w-c.patience], windows[w], c.window) && return w
+    end
+    0
+end
+_brm_svi_settling(run, c) = !_brm_svi_polishing(run) && _brm_svi_explored(run, c) > 0
+
+# Whether a settling run that has completed its windows up to `length(windows)`
+# stops settling: the test on windows of settling alone, or the cap.
+function _brm_svi_settled(windows, explored, c)
+    n = length(windows) - explored
+    n >= c.patience + 1 &&
+        _brm_svi_stalled(windows[end-c.patience], windows[end], c.window)
+end
+
+# Where the run's phases began and whether settling ended on its test, from
+# its windows: `exploring`, `settling` and `polishing` iterations, and
+# `settled` (`false` when settling reached `settle_windows`, or has not ended).
+function _brm_svi_stages(run, c)
+    W, E = c.window, _brm_svi_explored(run, c)
+    E == 0 && return (; exploring=run.iteration, settling=0, polishing=0,
+        settled=false, settle_windows=_brm_svi_settle_windows(c))
+    P = _brm_svi_polishing(run) ? run.polish_start ÷ W : 0
+    settled = P == E || (P > E && _brm_svi_settled(view(run.windows, 1:P), E, c))
+    (; exploring=E * W, settling=(P == 0 ? run.iteration : P * W) - E * W,
+       polishing=P == 0 ? 0 : run.iteration - P * W, settled,
+       settle_windows=_brm_svi_settle_windows(c))
+end
 
 # One iteration of the run, including the stopping rule's bookkeeping at the
 # end of a window. Returns `:converged` when polishing completed with it,
@@ -948,6 +1004,7 @@ function _brm_svi_advance!(run, t, c)
     N, W = length(t.units), c.window
     it = run.iteration + 1
     polishing = _brm_svi_polishing(run)
+    settling = !polishing && _brm_svi_settling(run, c)
     scale = polishing ? 1 / sqrt(1 + (it - run.polish_start) / W) : 1.0
     q = run.q
     batch = _brm_svi_batch(run.rng, run.sampler, c.batch_size)
@@ -960,8 +1017,9 @@ function _brm_svi_advance!(run, t, c)
     run.unit_gradient_calls += 2length(batch.indices)
     value = try
         _brm_svi_iteration!(run.rng, t, q, run.adam, batch.indices,
-            scale * (polishing ? c.polish_lr : c.lr_global), scale * c.unit_step;
-            whiten=polishing, weights=batch.weights, sites=run.sites, site_scale=scale)
+            scale * (polishing || settling ? c.polish_lr : c.lr_global), scale * c.unit_step;
+            whiten=polishing || settling, weights=batch.weights, sites=run.sites,
+            site_scale=scale)
     catch e
         e isa BRMSVINonfiniteError || rethrow()
         throw(BRMSVINonfiniteError(it, e.terms))
@@ -986,22 +1044,42 @@ function _brm_svi_advance!(run, t, c)
     polished && (run.converged = true; return :converged)
     it % W == 0 || return :iteration
     windows = run.windows
-    if !polishing && length(windows) >= max(c.min_windows, c.patience + 1) &&
+    polishing && return :window
+    if settling
+        explored = _brm_svi_explored(run, c)
+        # Polishing continues settling's step and its Adam moments.
+        (_brm_svi_settled(windows, explored, c) ||
+            length(windows) - explored >= _brm_svi_settle_windows(c)) &&
+            _brm_svi_start_polishing!(run, q, it)
+    elseif length(windows) >= max(c.min_windows, c.patience + 1) &&
             _brm_svi_stalled(windows[end-c.patience], windows[end], W)
-        run.polish_start = it
-        run.average = _brm_svi_average_start(q)
+        # Exploration ends: Adam restarts on the scale-preconditioned step.
         clipped = run.adam.clipped
         run.adam = _brm_svi_adam(q, c.polish_lr)
         run.adam.clipped = clipped
+        _brm_svi_settle_windows(c) > 0 || _brm_svi_start_polishing!(run, q, it)
     end
     :window
 end
 
-_brm_svi_progress_message(run, c) = string(
+function _brm_svi_start_polishing!(run, q, it)
+    run.polish_start = it
+    run.average = _brm_svi_average_start(q)
+    run
+end
+
+_brm_svi_progress_message(run, c) = string(_brm_svi_phase_text(run, c),
+    " · iteration $(run.iteration) · ELBO ≈ ", round(last(run.windows).center; sigdigits=6))
+
+_brm_svi_phase_text(run, c) =
     _brm_svi_polishing(run) && run.polish_start < run.iteration ?
         "polishing $(run.iteration - run.polish_start)/$(c.polish_windows * c.window)" :
-        "exploring, window $(length(run.windows))",
-    " · iteration $(run.iteration) · ELBO ≈ ", round(last(run.windows).center; sigdigits=6))
+    _brm_svi_settling(run, c) ?
+        "settling, window $(length(run.windows) - _brm_svi_explored(run, c))" :
+        "exploring, window $(length(run.windows))"
+
+_brm_svi_phase(run, c) = _brm_svi_polishing(run) ? :polishing :
+    _brm_svi_settling(run, c) ? :settling : :exploring
 
 # Advance `run` until it converges, reaches `max_iterations`, or has taken
 # `stop_after` iterations in this call. `save(checkpoint)` receives a detached
@@ -1089,7 +1167,7 @@ end
 function _brm_svi_snapshot_run(run::_BRMSVIRun, t, c, draws)
     q = _brm_svi_result_q(run)
     (; iteration=run.iteration, max_iterations=c.max_iterations,
-       phase=_brm_svi_polishing(run) ? :polishing : :exploring,
+       phase=_brm_svi_phase(run, c), stages=_brm_svi_stages(run, c),
        q_kind=run.average === nothing ? :raw_iterate : :polished_average,
        averaged_iterations=run.average === nothing ? 0 : run.iteration - run.polish_start,
        q=(; μ=copy(q.μ), ρ=copy(q.ρ), Β=copy(q.Β), M=copy.(q.M),
@@ -1358,13 +1436,21 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   [`brm_svi_resume`](@ref) can continue at another. The fit holds BLAS at one
   thread while it optimizes and draws, and restores it afterwards. Not with
   `laplace=GaussianBlockLaplace()`, whose updates evaluate the whole window.
-- Optimizer controls: `max_iterations`, `lr_global` (Adam on the globals),
+- Optimizer controls: `max_iterations`, `lr_global` (Adam on the globals while
+  exploring, in the coordinates' own units),
   `unit_step` (the subjects' natural-gradient step; a step that would change a
   subject's precision more than 2.5-fold along some direction, or move its
   mean more than one sd of its factor, is shortened for that subject),
-  `polish_lr`, `window`,
-  `patience`, `min_windows`, `polish_windows`, `global_scale` and `unit_scale`
-  (initial factor scales).
+  `polish_lr` (Adam on the globals while settling and polishing, as a fraction
+  of each global's current scale), `window`,
+  `patience`, `min_windows`, `settle_windows`, `polish_windows`, `global_scale`
+  and `unit_scale` (initial factor scales). The run explores at constant steps
+  until the trimmed ELBO has not risen detectably over `patience` windows (after
+  at least `min_windows`), settles at the constant scale-relative step until the
+  same test passes on settling's own windows (for at most `settle_windows`
+  windows; `0` skips settling, the schedule of BRM 0.2.241 and earlier), then
+  polishes for `polish_windows` windows with decaying steps and returns the
+  average of the polished iterates.
 - Interruptible runs: `stop_after` ends this call after that many iterations
   (the run continues with [`brm_svi_resume`](@ref) on the same model and
   data; the stopping rule and step-size schedule are unaffected). An optional
@@ -1392,8 +1478,8 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   - `iteration`, `max_iterations`, `seconds` (since optimization started in this
     call), `threads`, `format`, and `model_identity`, which names the emitted
     program, bound data and packed coordinates.
-  - `phase`: `:exploring` or `:polishing`; for GaussianBlockLaplace,
-    `:fixed_budget`.
+  - `phase`: `:exploring`, `:settling` or `:polishing`; for GaussianBlockLaplace,
+    `:fixed_budget`. `stages`, as in `diagnostics`.
   - `q`: `μ`, `ρ`, `Β`, `M`, `Λ` and `U`, as in `diagnostics.q`. `q_kind` says
     what it is: `:raw_iterate`, `:polished_average` (the Polyak–Ruppert average,
     `averaged_iterations` of them, 0 at the iteration polishing starts) or, for
@@ -1424,7 +1510,10 @@ limited to `10 √w` times its running rms, with `w` the batch's largest unit
 weight, `N / B` for uniform sampling, so that one extreme draw does not stop that
 coordinate's optimization), `converged`,
 `finished` (converged or `max_iterations` reached; `false` after `stop_after`),
-`iterations`, the variational parameters `q`, the packed positions of the
+`iterations`, `stages` (the iterations spent `exploring`, `settling` and
+`polishing`, and `settled`: whether settling ended on its test rather than at
+`settle_windows`; `converged` with `settled = false` means polishing averaged
+iterates that were still rising), the variational parameters `q`, the packed positions of the
 global coordinates (`globals`), `seconds` of optimization in this call,
 `threads` (the tasks this call used), `target` (below), the units' sampling
 probabilities, work, visits and draw counts (`sampling`), the actual
@@ -1464,8 +1553,12 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         unit_dense_limit=64, unit_rank=8,
         lr_global=0.01, unit_step=0.1, start=nothing, inits=nothing,
         global_scale=0.1, unit_scale=1.0, polish_lr=0.05, window=nothing,
-        patience=10, min_windows=40, polish_windows=20, centering=nothing, kwargs...)
+        patience=10, min_windows=40, polish_windows=20,
+        settle_windows=_BRM_SVI_SETTLE_WINDOWS, centering=nothing, kwargs...)
     family = _brm_svi_family(previous, family)
+    settle_windows isa Integer && settle_windows >= 0 || throw(ArgumentError(
+        "brm_svi_fit: settle_windows must be a nonnegative integer (0: polish straight " *
+        "after exploration)"))
     centering === nothing || centering isa LearnedCentering || throw(ArgumentError(
         "brm_svi_fit: centering must be LearnedCentering() or nothing, got $(repr(centering))"))
     previous === nothing || centering === nothing || throw(ArgumentError(
@@ -1487,7 +1580,7 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         centering === nothing || ((t, q) = _brm_svi_with_centering(t, q, centering))
         c = _brm_svi_controls(length(t.units); batch_size, max_iterations, lr_global,
             unit_step, polish_lr, window, patience, min_windows, polish_windows,
-            unit_sampling=something(unit_sampling,
+            settle_windows=Int(settle_windows), unit_sampling=something(unit_sampling,
                 t.m.view.unit_partition === :connected ? :work : :uniform))
         t, _brm_svi_optimizer_state(t, previous, c, _brm_svi_run(rng, q, c, t))
     end
@@ -1616,7 +1709,8 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                     elbo=run.trace, elbo_windows=first.(run.windows),
                     elbo_windows_trimmed=[w.center for w in run.windows],
                     clipped_steps=run.adam.clipped, run.converged,
-                    finished=_brm_svi_finished(run, c), iterations=run.iteration, q,
+                    finished=_brm_svi_finished(run, c), iterations=run.iteration,
+                    stages=_brm_svi_stages(run, c), q,
                     globals=t.globals, units=t.units, owner=t.ownership.owner,
                     global_coordinates=t.ownership.promoted,
                     unit_levels=_brm_svi_unit_levels(t),
