@@ -1,5 +1,13 @@
 # Running the tests
 
+`rk_data_expression_scalars.jl` checks a numeric scalar data field read by an RKBRMI
+data expression: offsets of many shapes, a coefficient's column, fitted transforms,
+an interaction operand, a random slope, a data-only assignment, a component's
+argument and model-value offsets. It compares an independent likelihood oracle and
+compiled Stan (value and native Reverse gradient), replays the printed source, checks
+that another value emits the same program, and covers frozen and data-free replay, a
+design binder, a held-out response and the forms that stay refused. It accepts testset
+substring filters.
 `runtime_numeric_settings.jl` checks that sizes and numeric settings are inputs of
 the emitted programs (user principle `0ikeidi`): one Stan and one RK program across
 a `gmrf` or `hsgp` setting, a data scalar a prior reads, a block's LKJ `eta`, a
@@ -1382,7 +1390,7 @@ explicit global promotions, optimizer resume and streaming absent/returning
 units. Its density and native Reverse gradient oracle is the full RK sampler.
 The dormant scalar/vector branch's ordinary Reverse needs Enzyme dogfood from
 `0fa85df3` (repairs `74abe90` and `7ac58eb`, contained in the bootstrap's
-`b2bb4cb6`); earlier pins raise `IllegalTypeAnalysisException` there.
+`74ce4afc`); earlier pins raise `IllegalTypeAnalysisException` there.
 `nlme_svi_ownership_algebra.jl` isolates atomic-block and directed-prior
 closure, including fixed coordinates and factors that own no coordinates.
 
@@ -1392,6 +1400,10 @@ packed coordinate but a two-by-two constrained shape. Both local ownership
 and explicit global promotion must preserve the scientific grouping and
 the full native density, Reverse gradient and authored-factor accounting.
 Run this standalone script in the test environment.
+
+`nlme_svi_running.jl` checks a prepared model's reuse of its target and workers
+across calls (`diagnostics.target`), and `snapshot` / `snapshot_every` /
+`snapshot_draws`, against a run on a fresh model that nothing observes.
 
 `nlme_svi_threads.jl` checks `brm_svi_fit(...; threads)` with real threads (run
 it with `--threads=4`; it refuses to run without them). The state after every
@@ -2382,7 +2394,7 @@ equals the generic path's exactly and its gradient to rounding, that both agree
 with central differences, and that inputs are unchanged. A width has to be
 checked on its own: the pass works at four margins, and at five Enzyme raised
 `EnzymeNoTypeError` until the repair in Enzyme `6053067f`. The test bootstrap
-pins `b2bb4cb6`, which contains that repair and declares libEnzyme `f392eba5`.
+pins `74ce4afc`, which contains that repair and declares libEnzyme `08f0e8d9`.
 
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, StanBlocks/BridgeStan density and gradient
@@ -2799,9 +2811,18 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
 - `julia --project=test test/nlme_svi_separator_native.jl`: actual hub/chain
   repartition, full-density/native Reverse-gradient equality at nonzero points,
   automatic work sampling, optimizer continuation and structured streaming carry.
+  A prepared model reuses its SVI target only under the same separator policy and
+  budgets, a resume finds it again, and snapshots name the inference units.
 - `julia --project=test --threads=2 test/nlme_svi_weighted_resume.jl`: exact
   trajectories for uniform/work batches and dense/structured local factors,
   lazy polishing, thread-count changes and a fresh-process checkpoint resume.
+- `julia --project=test --threads=2 test/nlme_svi_field_units.jl`: a read-pair
+  field's states in units' own factors (`field_states=:units`). Unit and global
+  terms add up to the whole model in value and gradient (`check_whole_model`).
+  The public fit resumes to the same trajectory and is the same at one or two
+  tasks. A held target is reused only under the same `field_states`, a resume
+  finds it again, and a `:units` snapshot loads without BRM. Mesh fields and
+  streaming windows are refused by name.
 
 ## Reusable model view
 

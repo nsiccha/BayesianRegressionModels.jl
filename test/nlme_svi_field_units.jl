@@ -111,6 +111,37 @@ end
     @test resumed.draws == fit.draws
 end
 
+@testset "a held target is reused only under the same field_states" begin
+    # `_brm_svi_checkout!` keys the model's held target on `field_states`: a `:units`
+    # target holds read states in units' blocks, with the field prior split by owner.
+    m = brm_nlme_model(rk; ad_backend=FIELD_AD, subject_group=:site, unit_partition=:connected)
+    controls = (; batch_size=3, max_iterations=6, ndraws=0, separator=:none, threads=1)
+    units = brm_svi_fit(m; rng=Xoshiro(6), controls..., field_states=:units)
+    @test !units.diagnostics.target.reused
+    again = brm_svi_fit(m; rng=Xoshiro(6), controls..., field_states=:units)
+    @test again.diagnostics.target.reused
+    @test again.diagnostics.elbo == units.diagnostics.elbo
+    global_fit = brm_svi_fit(m; rng=Xoshiro(6), controls..., field_states=:global)
+    @test !global_fit.diagnostics.target.reused
+    @test length(global_fit.diagnostics.globals) > length(units.diagnostics.globals)
+    # A resume passes the saved field_states and finds its target again.
+    part = brm_svi_fit(m; rng=Xoshiro(7), controls..., field_states=:units, stop_after=2)
+    @test !part.diagnostics.target.reused
+    rest = brm_svi_resume(m, part; ndraws=0, threads=1)
+    @test rest.diagnostics.target.reused
+    @test rest.diagnostics.units == units.diagnostics.units
+    # A `:units` snapshot is plain data like any other: a process without BRM reads it.
+    mktempdir() do dir
+        path = joinpath(dir, "latest.jls")
+        brm_svi_fit(m; rng=Xoshiro(8), controls..., field_states=:units, snapshot=path)
+        script = "using Serialization; s = deserialize(ARGS[1]); " *
+            "print(length(s.q.M), ' ', isdefined(Main, :BayesianRegressionModels))"
+        cmd = addenv(`$(Base.julia_cmd()) --startup-file=no -e $script $path`,
+            "JULIA_LOAD_PATH" => "@stdlib")
+        @test read(cmd, String) == "$(length(units.diagnostics.units)) false"
+    end
+end
+
 Threads.nthreads() > 1 && @testset "a run is the same at any number of tasks" begin
     m = brm_nlme_model(rk; ad_backend=FIELD_AD, subject_group=:site, unit_partition=:connected)
     controls = (; batch_size=3, max_iterations=25, ndraws=4, separator=:none, field_states=:units)

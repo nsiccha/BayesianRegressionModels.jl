@@ -137,6 +137,57 @@ end
     @test fit.diagnostics.streaming.updates == 1
 end
 
+@stestset "a connected model reuses its target only under the same separator policy" begin
+    # A held target (`_brm_svi_checkout!`) carries the units its separator policy
+    # built, so another policy or budget must build its own.
+    n = 9
+    data = connected_data(n, fill(1, n-1), collect(2:n))
+    m = brm_nlme_model(RKBRMI(connected_model(data)); ad_backend=NLME_AD,
+        unit_partition=:connected)
+    @test length(m.view.levels) == 1
+    controls = (; max_unit_coordinates=2, max_iterations=4, batch_size=2, ndraws=0,
+        threads=1)
+    first_fit = brm_svi_fit(m; rng=Xoshiro(81), controls...)
+    @test !first_fit.diagnostics.target.reused
+    @test length(first_fit.diagnostics.units) == n
+    again = brm_svi_fit(m; rng=Xoshiro(81), controls...)
+    @test again.diagnostics.target.reused
+    @test again.diagnostics.units == first_fit.diagnostics.units
+    none = brm_svi_fit(m; rng=Xoshiro(81), controls..., separator=:none)
+    @test !none.diagnostics.target.reused
+    @test length(none.diagnostics.units) == 1
+    budget = brm_svi_fit(m; rng=Xoshiro(81), controls..., max_promoted_coordinates=1)
+    @test !budget.diagnostics.target.reused
+    @test budget.diagnostics.separator.status === :promotion_budget
+    # A resume passes the saved request and policy, and finds the target again.
+    part = brm_svi_fit(m; rng=Xoshiro(82), controls..., stop_after=2)
+    @test !part.diagnostics.target.reused
+    rest = brm_svi_resume(m, part; ndraws=0, threads=1)
+    @test rest.diagnostics.target.reused
+    @test rest.diagnostics.units == first_fit.diagnostics.units
+    # Snapshots name a connected fit's inference units, not its one scientific subject.
+    seen = NamedTuple[]
+    observed = brm_svi_fit(m; rng=Xoshiro(83), controls..., snapshot=s -> push!(seen, s))
+    @test !isempty(seen)
+    @test last(seen).levels == observed.diagnostics.unit_levels
+    @test length(last(seen).levels) == length(last(seen).units) == n
+    # Structured unit factors are plain data too: a process without BRM reads them.
+    mktempdir() do dir
+        path = joinpath(dir, "latest.jls")
+        structured = brm_svi_fit(m; rng=Xoshiro(84), controls..., unit_dense_limit=0,
+            snapshot=path)
+        s = deserialize(path)
+        factor = structured.diagnostics.q.U[1].factor
+        @test s.q.Λ[1].family === s.q.U[1].family === :diagonal_lowrank
+        @test s.q.U[1].ρ == factor.ρ && s.q.U[1].Β == factor.Β
+        script = "using Serialization; s = deserialize(ARGS[1]); " *
+            "print(s.q.U[1].family, ' ', isdefined(Main, :BayesianRegressionModels))"
+        cmd = addenv(`$(Base.julia_cmd()) --startup-file=no -e $script $path`,
+            "JULIA_LOAD_PATH" => "@stdlib")
+        @test read(cmd, String) == "diagonal_lowrank false"
+    end
+end
+
 @stestset "chain separators retain the native target" begin
     n = 17
     m = brm_nlme_model(RKBRMI(connected_model(connected_data(n,

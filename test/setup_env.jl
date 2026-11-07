@@ -433,8 +433,10 @@ const PINS = [
     # cannot change inside a loop once per loop entry (Enzyme snag
     # reverse-generato-03b2003d), so a multiresolution gmrf reader's generator
     # sum no longer tapes its captured arrays once per basis term.
-    # cecb571a / libEnzyme 7f23cb72 contains b2bb4cb6 and repairs a static Reverse
-    # failure on a unit problem from RK 0.1.92 on (RK snag unit-problem-act-e546d3bd).
+    # cecb571a / libEnzyme 7f23cb72 contains 74ce4afc / libEnzyme 08f0e8d9, which
+    # proves that the reader cannot reach a fresh output array (Enzyme snag
+    # residual-per-ter-5c58955b), and repairs a static Reverse failure on a unit
+    # problem from RK 0.1.92 on (RK snag unit-problem-act-e546d3bd).
     ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "cecb571a1037fbfd800153a3afd1aed3b1913421"),  # dogfood
 ]
 

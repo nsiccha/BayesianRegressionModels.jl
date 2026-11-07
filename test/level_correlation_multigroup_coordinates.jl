@@ -246,25 +246,27 @@ end
     code = flat(BRM.stan_code(sb))
     @test occursin("real<lower=230.0> lambda;", code)
     @test occursin("brm_hsgp_multigroup_coordinate_weights(b_hsgpw_t_g, omega2_hsgp_t_by_g, " *
-                   "hsgp_t_by_g_rho, multigroup_sx_sy_coordinates, multigroup_sx_sy_hsgp6_c1p5_center, " *
-                   "multigroup_sx_sy_hsgp6_c1p5_scale, lambda, 6, 2)", code)
+                   "hsgp_t_by_g_rho, multigroup_sx_sy_coordinates, hsgp_t_by_g_grid_center, " *
+                   "hsgp_t_by_g_grid_scale, lambda, hsgp_t_by_g_grid_k, 2)", code)
     @test occursin("hsgp_t_by_g_beta_scaled = diag_post_multiply(hsgp_t_by_g_beta_level, hsgp_t_by_g_sqrt_spd);", code)
     # The standardized weights live on the 6 x 6 grid, not one row per level.
     @test sb.data[:n_rows_hsgpw_t_g] == KG^2
     @test sb.data[:multigroup_sx_sy_coordinates] == hcat(df.sx, df.sy)
     center, L0, _ = brm_multigroup_coordinate_grid(hcat(df.sx, df.sy), KG, 2, 1.5)
-    @test sb.data[:multigroup_sx_sy_hsgp6_c1p5_center] == center
-    @test sb.data[:multigroup_sx_sy_hsgp6_c1p5_scale] == L0
+    @test sb.data[:hsgp_t_by_g_grid_center] == center
+    @test sb.data[:hsgp_t_by_g_grid_scale] == L0
+    @test sb.data[:hsgp_t_by_g_grid_k] == KG
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
     # A constant spatial scale is inline; the default basis has 20 functions per axis.
     code = flat(stan(fixed(df)))
-    @test occursin("multigroup_sx_sy_hsgp20_c1p5_scale, 80.0, 20, 2)", code)
+    @test occursin("hsgp_t_by_g_grid_scale, 80.0, hsgp_t_by_g_grid_k, 2)", code)
+    @test SBBRMI(fixed(df); mod=@__MODULE__).data[:hsgp_t_by_g_grid_k] == 20
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
     # Inducing points: their own grid geometry and method code 1.
     sb = SBBRMI(mgi(df); mod=@__MODULE__)
     code = flat(BRM.stan_code(sb))
-    @test occursin("multigroup_sx_sy_inducing6_scale, lambda, 6, 1)", code)
-    @test sb.data[:multigroup_sx_sy_inducing6_scale] ==
+    @test occursin("hsgp_t_by_g_grid_scale, lambda, hsgp_t_by_g_grid_k, 1)", code)
+    @test sb.data[:hsgp_t_by_g_grid_scale] ==
         brm_multigroup_coordinate_grid(hcat(df.sx, df.sy), KG, 1)[2]
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
     # Free positions: one weight row per position, read from a data matrix or
@@ -287,7 +289,7 @@ end
     s = hcat(df.sx, df.sy)
     @test sb.data[:multigroup_sx_sy_lambda_location] ≈
         log(maximum(maximum(c) - minimum(c) for c in eachcol(s)))
-    @test sb.data[:multigroup_sx_sy_hsgp6_c1p5_lambda_lower] ≈
+    @test sb.data[:hsgp_t_by_g_grid_lambda_lower] ≈
         2sqrt(log(100)) * brm_multigroup_coordinate_grid(s, KG, 2, 1.5)[3]
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
 end
