@@ -57,7 +57,7 @@ function _rk_separate_car_fields(plan::_RKStructuralPlan, units;
     _RKStructuralPlan(plan.responses, predictors, plan.population_priors,
         plan.parameters, plan.assignments, plan.derived, columns, plan.n_obs,
         plan.ranef_buckets, plan.vector_parameters, plan.r2d2_priors,
-        plan.horseshoe_priors, plan.inputs)
+        plan.horseshoe_priors, plan.inputs, plan.prior_reads)
 end
 
 # Which fields `car_units` separates, and the units of each: one entry for

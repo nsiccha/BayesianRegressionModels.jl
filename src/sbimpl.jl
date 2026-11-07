@@ -8377,8 +8377,12 @@ function _sb_kernel_doblock!(stmts, data, target::Symbol, dcols, kw)
     # A producer's collected or indexed side output holds whole cells.
     # In particular, fixed-width vectors are stored as matrix columns, so
     # ordinary positional matrix slicing would select channels instead.
-    plate_inputs = Any[_sb_plate_output(dcols[j + 1], data) ?
-        Expr(:call, brm_plate_cells, dcol_names[j]) : dcol_names[j] for j in kept]
+    # `kept_names` is authoritative here: `_sb_cell_formulas!` has added each
+    # formula cell's prepared inputs and removed the positionals it consumed,
+    # so an output is recognised by its name, not by its authored position.
+    outputs = Set(dcol_names[j] for j in kept if _sb_plate_output(dcols[j + 1], data))
+    plate_inputs = Any[input in outputs ? Expr(:call, brm_plate_cells, input) : input
+        for input in kept_names]
     plate_call = nsub_sym === nothing ? Expr(:call, :plate, plate_inputs...) :
         Expr(:call, :plate,
             Expr(:parameters, Expr(:kw, :outer, Expr(:tuple, nsub_sym))),
@@ -9906,7 +9910,7 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
             elseif !isnothing(get(get(data, _SB_HS_PLANS_KEY, Dict()),
                     brmi_key, nothing))
                 hs_spec = data[_SB_HS_PLANS_KEY][brmi_key]
-                _sb_emit_horseshoe_popefs!(stmts, brmi_key, X_name, pop_name,
+                _sb_emit_horseshoe_popefs!(stmts, data, brmi_key, X_name, pop_name,
                     length(col_exprs), hs_spec, overrides)
             elseif isnothing(overrides)
                 push!(stmts, :($pop_name ~ popefs(; X=$X_name)))
@@ -13198,11 +13202,16 @@ end
 # Structured scales bake into the generated submodel as literals, so model
 # values are refused (the bare form allows them; the RK slice-1 mirror
 # requires literals everywhere, so this gate is cross-side symmetric).
-function _sb_hs_literal_scale(value, what)
-    value isa Real && return Float64(value)
-    error("sbimpl: structured Horseshoe $what must be a numeric constant " *
-          "in v1 (got a model value or expression)")
+# A literal's number, or the data field a program reads it from.
+function _sb_hs_structured_scale(value, target, key)
+    scale = _brm_horseshoe_structured_scale(target, key, value; prefix="sbimpl")
+    scale === nothing && error(
+        "sbimpl: structured Horseshoe `$target` `$key` must be a numeric constant " *
+        "or a data field in v1 (got a model value or expression)")
+    scale.source === nothing ? scale.number : (name=scale.source, value=scale.number)
 end
+_sb_hs_scale_name(scale::Real) = scale
+_sb_hs_scale_name(scale::NamedTuple) = scale.name
 
 function _sb_hs_literal_sibling_args!(expr, spelling)
     for arg in getargs(expr)
@@ -13257,17 +13266,15 @@ Base.@nospecializeinfer function _sb_horseshoe_overrides(@nospecialize(brmi::BRM
         length(pop) == length(labels) || error(
             "sbimpl: internal effect-prior alignment error for `$lp`: " *
             "$(length(pop)) priors for $(length(labels)) population labels")
-        hs = Vector{Union{Nothing,Tuple{Float64,Float64}}}(nothing, length(pop))
+        hs = Vector{Any}(nothing, length(pop))
         for (i, expr) in pairs(pop)
             isnothing(expr) && continue
             spelling = "effect($lp, $(labels[i]))"
             if expr isa ExprColumn && getf(expr) === Horseshoe
                 spec = _brm_horseshoe_spec(spelling, getargs(expr),
                     getkwargs(expr); prefix="sbimpl")
-                hs[i] = (_sb_hs_literal_scale(spec.local_scale,
-                        "`$spelling` `local_scale`"),
-                    _sb_hs_literal_scale(spec.global_scale,
-                        "`$spelling` `global_scale`"))
+                hs[i] = (_sb_hs_structured_scale(spec.local_scale, spelling, :local_scale),
+                    _sb_hs_structured_scale(spec.global_scale, spelling, :global_scale))
             else
                 (expr isa ExprColumn && _sb_is_scalar_prior(expr)) || error(
                     "sbimpl: `$spelling` combines Horseshoe with a sibling " *
@@ -13293,7 +13300,7 @@ function _sb_horseshoe_popefs_model(specs, overrides)
         infix = _sb_hs_temp_infix(specs.labels[i])
         if !isnothing(hspec)
             temp = Symbol(:hs_, i, :_, infix)
-            local_scale, global_scale = hspec
+            local_scale, global_scale = map(_sb_hs_scale_name, hspec)
             stmt = if local_scale == 1.0 && global_scale == 1.0
                 :($temp ~ _sb_horseshoe())
             else
@@ -13326,7 +13333,7 @@ function _sb_horseshoe_popefs_model(specs, overrides)
     StanBlocks.SlicModel(Expr(:block, body...), Dict{Symbol,Any}(), @__MODULE__)
 end
 
-function _sb_emit_horseshoe_popefs!(stmts, target, X_name, pop_name,
+function _sb_emit_horseshoe_popefs!(stmts, data, target, X_name, pop_name,
         n_cols, specs, overrides)
     n_cols == length(specs.labels) || error(
         "sbimpl: internal horseshoe alignment error for `$target`: " *
@@ -13336,8 +13343,12 @@ function _sb_emit_horseshoe_popefs!(stmts, target, X_name, pop_name,
         "$(length(overrides)) priors for $(length(specs.labels)) " *
         "population labels")
     model = _sb_horseshoe_popefs_model(specs, overrides)
-    push!(stmts, Expr(:call, :~, pop_name,
-        Expr(:call, model, Expr(:parameters, Expr(:kw, :X, X_name)))))
+    # A scale held in a data field is an input of the submodel.
+    fields = Dict{Symbol,Any}(scale.name => scale.value
+        for spec in specs.hs if !isnothing(spec) for scale in spec if scale isa NamedTuple)
+    foreach(((field, value),) -> _sb_static_level_datum!(data, field, value), fields)
+    push!(stmts, Expr(:call, :~, pop_name, Expr(:call, model, Expr(:parameters,
+        Expr(:kw, :X, X_name), (Expr(:kw, field, field) for field in sort!(collect(keys(fields))))...))))
 end
 
 # ---- group-block prepass (Prepass 2.5) ---------------------------------------
@@ -13853,15 +13864,19 @@ end
 # (no `cor=`), the constant (ICM) correlation, or the frequency-dependent
 # multigroup coherence.
 _sb_hsgp_level_submodel(::Nothing, iso) = iso ? :_sb_hsgp_by : :_sb_hsgp_by_aniso
-_sb_hsgp_level_arguments!(_data, ::Nothing) = (;)
+_sb_hsgp_level_arguments!(_data, ::Nothing, _term) = (;)
 _sb_hsgp_level_submodel(::_BRMLevelCorrelation, iso) =
     iso ? :_sb_hsgp_by_levelcor : :_sb_hsgp_by_aniso_levelcor
 _sb_hsgp_level_submodel(::_BRMMultigroupCorrelation, iso) =
     iso ? :_sb_hsgp_by_multigroup : :_sb_hsgp_by_aniso_multigroup
-_sb_hsgp_level_arguments!(data, lc::_BRMLevelCorrelation) =
+_sb_hsgp_level_arguments!(data, lc::_BRMLevelCorrelation, _term) =
     (; L_level=_sb_level_correlation_factor!(data, lc))
-_sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCorrelation) =
-    (; L_level=_sb_level_correlation_factor!(data, lc.base), tau_level=lc.tau)
+_sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCorrelation, _term) =
+    (; L_level=_sb_level_correlation_factor!(data, lc.base),
+       tau_level=_sb_multigroup_scale!(data, lc.tau_source, lc.tau))
+# A scale held in a data field is read by that name.
+_sb_multigroup_scale!(_data, ::Nothing, scale) = scale
+_sb_multigroup_scale!(data, source::Symbol, scale) = _sb_static_level_datum!(data, source, scale)
 function _sb_hsgp_level_submodel(lc::_BRMMultigroupCoordinates, iso)
     base = Symbol(:_sb_hsgp_by_, iso ? "" : "aniso_", :multigroup_,
                   isempty(lc.positions) ? :coordinates : :inducing)
@@ -13870,7 +13885,9 @@ end
 # The coordinates and the grid geometry they fit are data, computed once in
 # Julia and replayed frozen, like a known correlation's factor. Free inducing
 # positions are data the same way, or the declared vector parameters by name.
-function _sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCoordinates)
+# The grid is named after its term, not its numbers, so one Stan program serves
+# every `k` and `c` (user principle `0ikeidi`).
+function _sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCoordinates, term)
     stem = Symbol(:multigroup_, join(lc.axes, "_"))
     isempty(lc.positions) || return (;
         coordinates_level=_sb_static_level_datum!(data, Symbol(stem, :_coordinates),
@@ -13880,19 +13897,19 @@ function _sb_hsgp_level_arguments!(data, lc::_BRMMultigroupCoordinates)
             join((p.name for p in lc.positions), "_")), stem, lc)...)
     method = _brm_multigroup_method_code(lc.method)
     center, scale, _ = brm_multigroup_coordinate_grid(lc.coordinates, lc.k, method, lc.c)
-    # One grid per method, size and (for a box) factor: `multigroup_x_y_inducing20`.
-    grid = Symbol(stem, :_, lc.method, lc.k,
-                  lc.method === :hsgp ? "_c" * replace(string(lc.c), "." => "p") : "")
+    grid = Symbol(term, :_grid)
     (; coordinates_level=_sb_static_level_datum!(data, Symbol(stem, :_coordinates),
                                                  lc.coordinates),
        center_level=_sb_static_level_datum!(data, Symbol(grid, :_center), center),
        scale_level=_sb_static_level_datum!(data, Symbol(grid, :_scale), scale),
-       _sb_multigroup_lambda!(data, grid, stem, lc)..., k_level=lc.k, method_level=method)
+       _sb_multigroup_lambda!(data, grid, stem, lc)...,
+       k_level=_sb_static_level_datum!(data, Symbol(grid, :_k), lc.k), method_level=method)
 end
 # The spatial scale: the declared parameter or constant, or the term's own
 # prior's location (per coordinates) and lower bound (per approximation).
 function _sb_multigroup_lambda!(data, approximation, stem, lc)
-    isnothing(lc.lambda) || return (; lambda_level=lc.lambda)
+    isnothing(lc.lambda) ||
+        return (; lambda_level=_sb_multigroup_scale!(data, lc.lambda_source, lc.lambda))
     (; location, lower) = _brm_multigroup_default_lambda(lc)
     (; lambda_location=_sb_static_level_datum!(data, Symbol(stem, :_lambda_location), location),
        lambda_lower=_sb_static_level_datum!(data, Symbol(approximation, :_lambda_lower), lower))
@@ -15639,7 +15656,7 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
                                          what, group=gname, prefix="sbimpl")
             _brm_check_hyper_level_correlation(lc, hyper_plans; what, prefix="sbimpl")
         end
-        level_arguments = _sb_hsgp_level_arguments!(data, lc)
+        level_arguments = _sb_hsgp_level_arguments!(data, lc, col_name)
         if isnothing(rho_plan) && isnothing(sigma_plan)
             submodel = _sb_gp_submodel_expr(_sb_hsgp_level_submodel(lc, iso),
                                             term_overrides, t)

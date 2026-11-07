@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.223
+## 0.2.232
 
 - Added: `brm_svi_fit(...; cell_units)` for connected units. Likelihood cells that
   read no subject's effect used to land in the first unit, with every ordinary
@@ -23,6 +23,7 @@ instead of failing at run time.
   subject's cell reads share a unit, and cells with no such coordinate form about
   √m units of √m cells. A coordinate that joins nearly all of them joins them into
   one unit until it is promoted. Scientific roles and the density are unchanged.
+  A prepared model's retained SVI target (0.2.226) is also keyed by `cell_units`.
 - Changed: under `:components`, unit `work` also counts the rows of a vector-valued
   cell, so `unit_sampling=:work` visits data-rich units more. It is a sampling
   weight, not a time estimate.
@@ -41,7 +42,7 @@ instead of failing at run time.
   updates. Its sensors are nearly independent given the globals, so this does not
   show the cost of dropping a real correlation between them.
 
-## 0.2.222
+## 0.2.231
 
 - Fixed: partition declarations for wholly unit-owned compressed transforms
   use the constrained first-axis label count. A local 2×2 Cholesky factor
@@ -93,6 +94,245 @@ instead of failing at run time.
 - `BRMSVINonfiniteError` (0.2.209) also covers structured local factors and
   work-weighted batches: the iteration is named before it changes `q` or the
   optimizer, whichever local family or sampler the unit uses.
+- The 0.2.223 gradient bound covers work-weighted batches and structured local
+  factors. Under `unit_sampling=:work` it is `10 √w` times a global's running rms,
+  with `w` the batch's largest unit weight (`N / B` for a uniform batch, as
+  before), because a unit drawn with chance π carries weight about 1 / π. A local
+  factor above `unit_dense_limit` steps with its own Adam only when its unit is
+  drawn, so its gradient is limited to `10` times its own running rms.
+- A prepared model's retained SVI target (0.2.226) is keyed by the separator policy
+  and budgets as well as the requested globals and streaming carry, so a connected
+  fit never reuses a partition built under another policy. Snapshots report a
+  connected fit's inference units in `levels`, as `diagnostics.unit_levels` does.
+  A snapshot's `q.Λ` and `q.U` are plain data: a dense unit's matrix, or a
+  structured unit's `(; family=:diagonal_lowrank, ρ, Β)`, so a saved snapshot
+  still loads without BRM.
+  `diagnostics.unit_gradient_calls` counts actual evaluations: a unit drawn twice
+  in one work-weighted batch is evaluated once.
+## 0.2.230
+
+- Fixed: on `RKBRMI`, a `gmrf((east, north), time, channel)` field without `cor`
+  spelled its identity channel factor as a literal sized by the channel count
+  (`hcat(vect(1.0, 0.0), vect(0.0, 1.0))` for two channels), so fields that
+  differ only in their number of channels emitted different programs. The
+  program now reads the identity from the fitted support
+  (`brm_gmrf_identity_factor(support.geometry)`, as per-cell fields already did),
+  so one program serves every channel count on the mesh, `neighbors=` and
+  `multiresolution=` forms (user principle `0ikeidi`). From ReactiveKernelsPPL
+  0.1.113 they also lower to one program. Densities and gradients are
+  unchanged; `SBBRMI` already read the identity from its data. Snag
+  `gmrf-channel-ide-f3e0758e`.
+- Changed: **a model with such a field emits a different program**, a field
+  without a `channel` column included (its one-channel factor was
+  `hcat(vect(1.0))`), and its SMC and SVI checkpoint tags change. A fitted state
+  an earlier version wrote for it is refused at replay ("changes the fitted RK
+  program") and needs a fresh fit.
+
+## 0.2.229
+
+- Fixed: on the NLME paths, an `mi(x)` completion whose law reads the units'
+  draws (`mi(x1) ~ LogNormal(mu_x, sigma_x)` with `mu_x ~ ... + (1 | region)` and
+  `region` the subjects) gave routes that silently disagreed under the default
+  centred lowering. The missing entries were shared coordinates in θ, so their
+  law was a prior term: each unit's values and one-unit gradient
+  (`brm_nlme_loglikelihood(_and_gradient)`) omitted it, the population prior
+  evaluated it with every unit draw at zero, and the lockstep gradient
+  (`brm_nlme_loglikelihoods_and_gradients`) and the η Hessian carried it. On the
+  regional panel the lockstep gradient differed from the gradient of the values
+  by up to 4.6, so an NLMEEstimation fit saw a subject's gradient change with its
+  batch. Snag `brm-nlme-loglike-7c4b209b`.
+- Changed: `brm_nlme_fit`, `brm_two_stage_fit` and `brm_svi_fit` given a `@brm`
+  model lower exactly the completions whose law reads the units' draws
+  non-centered. Their missing entries are then unit draws, integrated with their
+  unit, whose law's density joins the unit's conditional. They also lower the
+  grouped entries of `mi(x)::shares(total, rows)` non-centered, whose centred
+  reading `brm_nlme_view` has always refused. Every other completion keeps the
+  centred reading.
+- **Breaking:** `brm_nlme_view` (and so `brm_nlme_model`, `brm_laplace_problem`
+  and the fits given an `RKBRMI`) refuses a centred completion whose law reads
+  the units' draws, naming `RKBRMI(brmi; completions = :noncentered)` or
+  `completions = (:x,)`. Lower the backend that way, or pass the `@brm` model to
+  the fit. A submodel's sampled declaration whose law reads the units' draws is
+  refused by name too. A fit that lowered such a model from its `@brm` model
+  now samples `x.z_mis` where it sampled `x.y_mis`, and θ no longer holds the
+  missing entries.
+- Added: `RKBRMI(brmi; completions = :noncentered)` takes every continuous
+  univariate law. A law without a location and scale keeps its support transform
+  on the standard-normal draw (`lower + exp(z)`, `upper - exp(z)`, a scaled
+  logistic on an interval, `z` on the real line: the coordinate the centred
+  lowering samples) and observes its exact density remainder in `:pointwise`;
+  it used to be refused ("needs a location-scale law"). `completions` also takes
+  a collection of `mi` sources, `completions = (:x,)`, to non-center those
+  completions only. A regression-plan `mi(y)` response, which samples none of its
+  missing entries, accepts every spelling instead of refusing `:noncentered`.
+
+## 0.2.228
+
+- Fixed: `brm_svi_resume` refused a checkpoint as "the model differs from the
+  checkpoint's in its emitted program" when the same model was loaded from
+  another checkout, depot, host or BRM release. A model's program identity
+  printed every macro call with the file and line it was written at, and an
+  emitted `ReactiveKernels.@kernel` definition is one: BRM's own (with the depot
+  slug of this BRM installation and the line in its source) or a source
+  provider's (with the consumer's checkout directory). Every identity that
+  compares the program now reads it without those places: SVI optimizer
+  checkpoints, the SVI and SMC streaming carries, SMC and SMC Laplace
+  checkpoints, filter exports, and a fitted state's export and replay. A program
+  without such a macro call keeps its identity, so its checkpoints are
+  unchanged.
+- An SVI optimizer checkpoint written before 0.2.228 holds the digest with
+  those places. As before, a checkpoint resumes on the version that wrote it
+  (since 0.2.223 a later one does not load an earlier one). Where a later
+  version does load it, it resumes when its program has no such call;
+  otherwise the refusal says that its digest predates the place-free program
+  identity and that only the installation that wrote it reproduces it. An
+  older SMC checkpoint, streaming carry or filter export of such a model
+  differs from what this version computes, as it already did from any other
+  installation. A fitted state exported earlier replays, because it holds the
+  text itself.
+
+## 0.2.227
+
+More numbers are inputs of the program instead of text in it (user principle
+`0ikeidi`). Densities are unchanged: each form is checked against its literal twin.
+
+- Changed: `multigroup` reads its numbers from data on both backends.
+  `multigroup((x, y), lambda; k = kk, c = cc)` accepts data fields for `k` and `c`,
+  which used to be refused. `lambda`, and `tau` in `multigroup(Omega, tau)`, were
+  accepted from data but written into the program, and are now read by name. A
+  literal `k` or `c` also gives one program across values.
+- **Breaking:** `SBBRMI` names a coordinate `multigroup` grid after its term, not its
+  numbers: `multigroup_x_y_hsgp20_c1p5_center` is now `hsgp_t_by_g_grid_center`,
+  and likewise for `_scale`, `_lambda_lower` and the new `_k`. Code that reads these
+  from `stan_data` by name must change. Two terms no longer share one grid.
+- Changed: on `RKBRMI`, what a prior reads from a data array is an input, and the
+  program computes the prior's value from it. A reduction (`Normal(sum(m), 1)`), an
+  `MvNormal` mean, covariance or vector scale were written into the program, and a
+  size taken from such an array now reads as one program too. `Dirichlet(a)` with a
+  data vector and `Normal(m[1], 1)` used to be refused on `RKBRMI`. They now match
+  `SBBRMI`.
+- Changed: a prior computed from a design column, such as `Normal(mean(x), 1)` or
+  `Normal(x[2], 1)`, is a number of the fit, as `standardize(x)` is: the program
+  computes it from the column's fit-role copy. A frozen replay on other rows and a
+  prediction design keep it, where a replay used to be refused, and a fitted state
+  holds the computed mean, not the rows. An array only a prior reads travels with
+  the fitted state; a frozen replay refuses another value of it.
+- Changed: `effect(m, x) ~ Horseshoe(local_scale = l, global_scale = g)` accepts data
+  fields on both backends, read by name. `RKBRMI` shares one global scale per
+  predictor, so it refuses by name a predictor whose terms read different global
+  scale fields.
+- A fit or checkpoint from a model whose program text changes here is refused and
+  needs a fresh fit, as a frozen replay refuses any changed program.
+- Limits: `mo` and ordinal level counts are still spelled in the program on both
+  backends, and a categorical response's count is a true shape change, with one
+  predictor per class. One lowered program across sizes and bounds needs RKPPL
+  0.1.108 and one query type across values RKPPL 0.1.106. BRM's compat floors do not
+  require them: an older RK is correct but recompiles for each value.
+
+## 0.2.226
+
+- Added: `brm_svi_fit` and `brm_svi_resume` hand out snapshots of a running fit
+  without returning: `snapshot` (a function, or a file path the run rewrites
+  atomically, so it always holds the latest complete snapshot), `snapshot_every`
+  (default once per window, or every 50 updates with `GaussianBlockLaplace`) and
+  `snapshot_draws` (default none). A snapshot is one named tuple of plain arrays
+  that loads without BRM or the model: `q`, what `q` is (`q_kind`:
+  `:raw_iterate`, `:polished_average` or `:window_average`), the coordinates,
+  units and levels that name it, `iteration`, `phase`, the window ELBOs and, outside
+  `GaussianBlockLaplace`, `elbo_windows_trimmed` and `clipped_steps`, `draws`,
+  and a `status` that stays `:running` until the boundary where the call ends. An
+  observed run is the same to the last bit as an unobserved one, and a snapshot's
+  `q` and `draws` equal those of a result stopped at its iteration. BRM keeps none,
+  so a long run's memory and files do not grow with snapshots.
+- Changed: a prepared `BRMNLMEModel` keeps its minibatch target and worker samplers
+  for its next `brm_svi_fit` or `brm_svi_resume` in this process, so a continuation
+  on `fit.diagnostics.model` no longer prepares them again. `diagnostics.target`
+  reports it: `reused`, `workers_built` and the phase's `seconds`. Results and
+  checkpoints are unchanged, and a changed model is still refused by resume's
+  identity check. The model retains the target for as long as it lives; a copy or a
+  serialized model holds none. `GaussianBlockLaplace` still prepares its target on
+  every call.
+
+## 0.2.225
+
+- Fixed: on `RKBRMI`, a data expression can read a numeric scalar data field, as
+  on `SBBRMI`. `mu ~ 1 + offset(slope * x)` with `slope` a scalar field was refused
+  ("column `slope` must be a plain numeric vector for arithmetic"). It now builds,
+  and so do a coefficient's column (`mu ~ 1 + slope * x`), a fitted transform
+  (`standardize(slope * x)`), an interaction operand, a random slope, a data call's
+  argument, a scalar alone (`offset(slope)`, `offset(2 * slope)`, one value on every
+  row) and a model-value offset (`offset(theta * slope * x)`, which brm-use told
+  consumers to spell with a literal). A product or sum of three or more,
+  `offset(a * b * c)`, was refused as "`*` takes exactly two arguments" and now
+  builds on `RKBRMI` too.
+- Fixed: on `SBBRMI`, a coefficient's column or a fitted transform that multiplies
+  a column by a scalar field (`mu ~ 1 + slope * x`, `center(slope * x)`,
+  `(slope * x) & factor(g)`) was refused ("mixes row axes of lengths 1 and 4"): the
+  scalar was taken for the row axis. It now builds.
+- Changed: the program reads such a scalar by name as a runtime input, so two data
+  sets that differ only in its value emit the same program, and the density follows
+  the bound value. That includes the data-only assignment `sx = slope * x`, which
+  used to fold the number into the program, so **a model of that spelling emits a
+  different program** and its SMC and SVI checkpoint tags change. On a frozen
+  `reprocess` a scalar read only by a data expression is a design input: omitted,
+  it keeps the fitted value; supplied, the design's. The anchors of a fitted
+  transform keep the fit's value either way, and a scalar a prior also reads still
+  refuses a new value.
+- Unchanged: `RKBRMI` refuses a `Bool` field inside a data expression, as it refuses
+  a `Bool` column. `SBBRMI` accepts one.
+
+## 0.2.224
+
+- `SBBRMI` builds a `gmrf(...)` field in a `@plate for` cell again. From 0.2.172
+  every such model stopped at transpilation with `plate: N do-block params vs M
+  positional iterables`, because the plate's iterables left out the inputs the
+  field prepares. Model declarations need no changes, and `RKBRMI` was not
+  affected. A cell can also read another plate's complete cells beside its field.
+
+## 0.2.223
+
+- Fixed: one extreme draw could stop `brm_svi_fit`'s optimization of the globals
+  without any sign of it. A draw that reaches a steep part of the density gives
+  a finite ELBO estimate of, say, -1e21, so `nonfinite=:error` never fires, and
+  its gradient stays in Adam's second moment for tens of thousands of iterations.
+  On one real fit of 7,379 globals, the draws of a single run left 95% of the
+  global means with a step more than 10 times too small when polishing ended, 85%
+  more than 1,000 times too small and 22% more than a million times too small, so
+  they had barely moved during polishing, and the ELBO looked flat as for a
+  converged fit. Each coordinate's gradient now enters Adam's moments limited to
+  `10 √(N / B)` times that coordinate's running rms. The bound is that wide
+  because a coordinate read by few subjects has a zero gradient in most batches;
+  a tighter one shrinks its scale without end. `laplace=GaussianBlockLaplace()`
+  is unchanged.
+- Changed: the stopping rule reads the 10% trimmed mean of each window and its
+  standard error (Yuen), not the mean and variance. One draw could decide the
+  test: its window's variance swamped every gap, whichever way the ELBO was moving.
+  Fits with no extreme draws can stop at a different window than before.
+- Added: `diagnostics.elbo_windows_trimmed`, what the stopping rule now reads, and
+  `diagnostics.clipped_steps`, how many global steps had a gradient limited.
+  `diagnostics.elbo_windows` stays the plain mean of each window, which a single
+  draw can dominate, and now includes the last polishing window, which it used to
+  omit. The progress message reports the trimmed mean.
+- **Breaking:** an optimizer checkpoint (`BRMSVIOptimizerState`) written by an
+  earlier version does not load, since the run's fields changed. As before, a
+  checkpoint needs the same package version; finish such a run on its own version
+  or restart it. A fit on a fixed seed differs from an earlier version's from the
+  first clipped step and from the stopping decision on.
+
+## 0.2.222
+
+- Fixed: `brm_svi_fit(...; laplace=GaussianBlockLaplace())` could stop with
+  `inconsistent quadrature bounds` on valid input, depending on the seed and the
+  host. On a 12-coordinate toy model at 8 updates, 6 of 17 seeds stopped this way.
+  The upper and lower bound of each log-determinant probe came from two separate
+  `eigen` calls, and near convergence their rounding, about `1e-12` there, exceeded
+  the true gap between the bounds. Both bounds now read one Cholesky factorization,
+  on which their order holds for the computed numbers. The 11 of those seeds that
+  already fitted move by at most `2e-13` in ELBO and take the same Krylov steps.
+  A precision too ill-conditioned to factor now always raises `ArgumentError`,
+  where it could also raise `nonpositive Radau node`. This fix does not make a
+  badly conditioned log determinant more accurate: `GaussianBlockLaplace` now
+  documents that rounding, which `logdet_quadrature_width` does not include.
 
 ## 0.2.221
 

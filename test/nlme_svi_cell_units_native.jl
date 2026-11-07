@@ -132,11 +132,15 @@ end
     @test resumed.diagnostics.elbo == straight.diagnostics.elbo
     @test resumed.draws == straight.draws
     # A checkpoint of the first-unit layout stays on it, without being told.
+    # The model holds the components target from the fits above
+    # (`_brm_svi_checkout!`); the other layout must build its own.
     old = brm_svi_fit(m; rng=Xoshiro(2), max_iterations=30, stop_after=12,
         cell_units=:first_unit, options...)
+    @test !old.diagnostics.target.reused
     @test !hasproperty(old.diagnostics.optimizer.identity.separator, :cell_units)
     @test length(old.diagnostics.unit_levels) == 4
     continued = brm_svi_resume(m, brm_svi_optimizer_checkpoint(old); threads=1, ndraws=8)
+    @test continued.diagnostics.target.reused
     @test length(continued.diagnostics.unit_levels) == 4
     @test continued.diagnostics.iterations == 30
     # Sampling stays unbiased: draws over batch and probabilities are the fit's own.

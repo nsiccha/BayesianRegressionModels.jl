@@ -1961,8 +1961,11 @@ _brm_apply_zscale(c::Tuple, v::AbstractVector{<:Real}) =
 _brm_fit_center(v::AbstractVector{<:Real}) = sum(v) / length(v)
 _brm_apply_center(mu::Real, v::AbstractVector{<:Real}) = v .- mu
 
+# The data columns an expression's rows come from. A scalar field is one value on
+# every row, so it never gives a row axis.
 _brm_data_expression_sources!(sources, term::NamedColumn) = begin
-    parent(term) isa DataColumn && push!(sources, name(term))
+    parent(term) isa DataColumn && !(parent(parent(term)) isa Number) &&
+        push!(sources, name(term))
     sources
 end
 _brm_data_expression_sources!(sources, term::ExprColumn) = begin
@@ -1970,6 +1973,11 @@ _brm_data_expression_sources!(sources, term::ExprColumn) = begin
     foreach(arg -> _brm_data_expression_sources!(sources, arg), values(getkwargs(term)))
     sources
 end
+# A gather `x[i]` lies on its index's rows; `x` keeps its own axis.
+_brm_data_expression_sources!(sources, term::ExprColumn{typeof(getindex)}) =
+    length(getargs(term)) == 2 ?
+        _brm_data_expression_sources!(sources, last(getargs(term))) :
+        invoke(_brm_data_expression_sources!, Tuple{Any,ExprColumn}, sources, term)
 _brm_data_expression_sources!(sources, _term) = sources
 _brm_data_expression_sources(term) =
     _brm_data_expression_sources!(Symbol[], term)
@@ -2185,6 +2193,8 @@ function _brm_population_fixed_term(term)
     # for the backend's `population_columns` hook (below by default).
     _brm_reads_model_value(inner) && return nothing
     values = _brm_materialize_data_expression(inner)
+    # Nor has a scalar field's: it is one value on every row of the predictor.
+    values isa Real && return nothing
     values isa AbstractVector{<:Real} || _brm_data_offset_error()
     sources = _brm_data_expression_sources(inner)
     isempty(sources) && error(
@@ -2694,13 +2704,14 @@ _brm_population_columns(term; cellmeans::Bool=false, fitted=_brm_unfitted) =
     let column = _brm_population_column(term, fitted)
         isnothing(column) ? nothing : (column,)
     end
-# An offset of a model value reaches the column hook instead of the fixed data
-# terms. A backend that lowers it as graph math (RK) passes its own hook; the
-# rest refuse it here, as before.
+# An offset of a model value or of scalars alone reaches the column hook instead
+# of the fixed data terms. A backend that lowers it as graph math (RK) passes its
+# own hook; the rest refuse it here, as before.
 function _brm_population_columns(term::ExprColumn{typeof(offset)}; cellmeans::Bool=false,
                                  fitted=_brm_unfitted)
     args = getargs(term)
-    length(args) == 1 && _brm_reads_model_value(only(args)) && _brm_data_offset_error()
+    length(args) == 1 && (_brm_reads_model_value(only(args)) ||
+        _brm_materialize_data_expression(only(args)) isa Real) && _brm_data_offset_error()
     invoke(_brm_population_columns, Tuple{Any}, term; cellmeans, fitted)
 end
 _brm_data_offset_error() = error(

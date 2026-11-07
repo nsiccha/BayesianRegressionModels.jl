@@ -1,5 +1,13 @@
 # Running the tests
 
+`rk_data_expression_scalars.jl` checks a numeric scalar data field read by an RKBRMI
+data expression: offsets of many shapes, a coefficient's column, fitted transforms,
+an interaction operand, a random slope, a data-only assignment, a component's
+argument and model-value offsets. It compares an independent likelihood oracle and
+compiled Stan (value and native Reverse gradient), replays the printed source, checks
+that another value emits the same program, and covers frozen and data-free replay, a
+design binder, a held-out response and the forms that stay refused. It accepts testset
+substring filters.
 `runtime_numeric_settings.jl` checks that sizes and numeric settings are inputs of
 the emitted programs (user principle `0ikeidi`): one Stan and one RK program across
 a `gmrf` or `hsgp` setting, a data scalar a prior reads, a block's LKJ `eta`, a
@@ -101,6 +109,8 @@ observed or omitted responses. Square and non-square shapes compare compiled
 Stan densities and gradients with analytic references; prior draws check the
 same cell values. Scalar, ragged-vector and matrix cells supply shape controls.
 Run it as a standalone script in the test environment.
+`gmrf_stan_plate_outputs.jl` reads such cells beside a `gmrf` formula in one
+plate cell, and compares the compiled density and gradient with a dense oracle.
 
 `component_start_descriptors.jl` checks exact initial values in repeated and
 nested components through the public descriptor, BridgeStan and coordinate
@@ -601,8 +611,9 @@ Snag `mi-completion-wi-54222432`. It also checks
 `RKBRMI(brmi; completions = :noncentered)` on such a completion: the same
 coordinates and density as the centred lowering, its group terms in
 `:pointwise`, SBBRMI agreement through the transport (LogNormal, an unread
-completion, Gamma's value), and the location-scale rule for free entries.
-Snag `nlme-view-shares-f1cfaa71`.
+completion, Gamma's value), and a Gamma law's free entries through their
+support transform and density remainder (value, gradient and transport against
+Stan). Snags `nlme-view-shares-f1cfaa71`, `brm-nlme-loglike-7c4b209b`.
 
 `mi_lower_totals.jl` checks lower support declared by `truncated` or
 `restricted` on shared completions, ordinary imputation and cell shares.
@@ -656,6 +667,18 @@ and SVI. Its panel lives in `nlme_shares_fixture.jl`.
 coordinates' family in `NLMEEstimation.fixed_omega`, `check_protocol` (with
 the η Hessian blocks) and a short SAEM fit. Run it in the NLMEEstimation
 scratch environment described below. Snag `nlme-view-shares-f1cfaa71`.
+
+`nlme_completion_laws.jl` (test environment) checks `mi(...)` completions
+whose law reads the units' draws on the NLME paths: `brm_nlme_view` refuses
+their centred reading by name; the fits' `@brm` entry
+(`BRM._brm_nlme_lowered`) non-centers exactly those completions, any
+continuous univariate law (an interval Beta law here) keeping the centred
+coordinates and density; one-unit and lockstep values, gradients and η Hessian
+blocks agree with each other and with central differences, on the reported
+panel (a region with no observed entry) among others; a completion whose law
+reads no unit's draws stays centred and is accepted; and a regression-plan
+`mi(y)` response lowers the same under every spelling. Snag
+`brm-nlme-loglike-7c4b209b`.
 
 `nlme_completion_axes.jl` checks gathered completion ownership on a shorter
 response and on a reordered response with the same length as the subject
@@ -1222,7 +1245,10 @@ district-years) as region units. It checks that a stratified
 municipality in its class's family and its region; that
 `RKBRMI(...; completions=:noncentered)` makes each missing cell of an `mi(...)`
 completion a unit draw in a family fixed at unit variance (and that the
-default keeps them shared, and a non-location-scale law is refused); that
+default centred reading, whose law reads the regions' effects, is refused by
+name while the fits' `@brm` entry lowers it non-centered; a Gamma law is
+non-centered by its support transform, with the centred density and agreeing
+lockstep and one-unit routes); that
 district-year totals cells are attributed to the region owning their rows;
 and that every region's unit problem differs from the full RK density by its
 own unit alone, in value and gradient. It also checks each region's η Hessian
@@ -1339,6 +1365,19 @@ fit is compared with NUTS too. Starts (prior medians, a packed point,
 `inits`) and their refusals are covered as well. It runs in the test
 environment above.
 
+`nlme_svi_heavy_tails.jl` checks what one extreme ELBO draw does to minibatch
+SVI, whose estimate can have an infinite expectation with every draw finite.
+With no bound, one gradient of 1e21 freezes its Adam coordinate (the control), and
+with `_brm_svi_clip` that coordinate keeps its step. A coordinate that most batches
+do not read keeps its scale under the `√(N / B)`-wide bound and loses it under a
+tighter one (the control). `_brm_svi_window`'s `spread / W` is the variance of its
+trimmed mean on Gaussian and skewed draws, and one draw moves neither. The stopping
+test neither stops a rising fit nor hides a stalled one on an extreme draw, where a
+test of means and variances does stop the rising fit.
+A structured local factor's own Adam (above `unit_dense_limit`) is bounded the
+same way, and a work-weighted fit (`unit_sampling=:work`), whose bound widens by
+the batch's largest unit weight, keeps its globals moving on the same model.
+
 `nlme_svi_authored_factors.jl` checks the public RKPPL authored-factor API
 and production SVI ownership. On a
 six-subject model whose coefficient pair `z[2i-1], z[2i]` is read only by
@@ -1367,7 +1406,7 @@ explicit global promotions, optimizer resume and streaming absent/returning
 units. Its density and native Reverse gradient oracle is the full RK sampler.
 The dormant scalar/vector branch's ordinary Reverse needs Enzyme dogfood from
 `0fa85df3` (repairs `74abe90` and `7ac58eb`, contained in the bootstrap's
-`b2bb4cb6`); earlier pins raise `IllegalTypeAnalysisException` there.
+`74ce4afc`); earlier pins raise `IllegalTypeAnalysisException` there.
 `nlme_svi_ownership_algebra.jl` isolates atomic-block and directed-prior
 closure, including fixed coordinates and factors that own no coordinates.
 
@@ -1377,6 +1416,10 @@ packed coordinate but a two-by-two constrained shape. Both local ownership
 and explicit global promotion must preserve the scientific grouping and
 the full native density, Reverse gradient and authored-factor accounting.
 Run this standalone script in the test environment.
+
+`nlme_svi_running.jl` checks a prepared model's reuse of its target and workers
+across calls (`diagnostics.target`), and `snapshot` / `snapshot_every` /
+`snapshot_draws`, against a run on a fresh model that nothing observes.
 
 `nlme_svi_threads.jl` checks `brm_svi_fit(...; threads)` with real threads (run
 it with `--threads=4`; it refuses to run without them). The state after every
@@ -1404,6 +1447,10 @@ NLMEEstimation scratch environment below (NLMEEstimation 0.2.5 or later) with
 `--threads=4`; it refuses to run without threads.
 `research/nlme_threads/benchmark.jl` measures a round of one-unit calls and paired
 SAEM fits of both routes at the thread count it is started with.
+`research/nlme_threads/unit_cost.jl` measures what one subject's one-unit value and
+gradient cost against its share of the whole-cohort sweep, on a cheap plate PK model
+and a joint model with a second response, and how much of it is RK's partition call
+(brm-use nlme.md, "Subjects on threads"). Run it in the same environment.
 
 `nlme_svi_laplace_plan.jl` checks structural eligibility for
 `GaussianBlockLaplace`, including fixed HSGP fitting inputs, nonstandard
@@ -1617,8 +1664,14 @@ on a Normal and a Poisson nested model compares the values, modes and
 covariance blocks with NLMEEstimation's own Laplace and the gradients with
 central differences. Laplace-EM on a Gaussian nested panel reaches the direct
 L-BFGS maximum of the same objective, and SAEM sampling the subjects with the
-units integrated ends within half a log-likelihood unit of it. Run it in the
-same scratch environment. NLMEEstimation 0.2.4 needs WarmupHMC 0.2.8 and a
+units integrated ends within half a log-likelihood unit of it.
+`brm_ladder_fit`'s rung 3 runs two SAEM phases with replanning between them on
+that model written as formula rows, whose affine Normal reads the automatic plan
+certifies, so both families are integrated and SAEM is Laplace-EM. Written with
+a `@plate` cell (`nested_model`), the automatic plan samples both families (it
+does not certify a cell's log-concavity), so rung 3 is ordinary SAEM and needs
+`burnin < iterations`; naming the groupings in `integrate` opts them in. Run it
+in the same scratch environment. NLMEEstimation 0.2.4 needs WarmupHMC 0.2.8 and a
 Treebars with `ProgressInterrupted`, so develop those checkouts in the same
 `Pkg.develop` call as NLMEEstimation.
 
@@ -2367,7 +2420,7 @@ equals the generic path's exactly and its gradient to rounding, that both agree
 with central differences, and that inputs are unchanged. A width has to be
 checked on its own: the pass works at four margins, and at five Enzyme raised
 `EnzymeNoTypeError` until the repair in Enzyme `6053067f`. The test bootstrap
-pins `b2bb4cb6`, which contains that repair and declares libEnzyme `f392eba5`.
+pins `74ce4afc`, which contains that repair and declares libEnzyme `08f0e8d9`.
 
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, StanBlocks/BridgeStan density and gradient
@@ -2784,6 +2837,8 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
 - `julia --project=test test/nlme_svi_separator_native.jl`: actual hub/chain
   repartition, full-density/native Reverse-gradient equality at nonzero points,
   automatic work sampling, optimizer continuation and structured streaming carry.
+  A prepared model reuses its SVI target only under the same separator policy and
+  budgets, a resume finds it again, and snapshots name the inference units.
 - `julia --project=test --threads=2 test/nlme_svi_weighted_resume.jl`: exact
   trajectories for uniform/work batches and dense/structured local factors,
   lazy polishing, thread-count changes and a fresh-process checkpoint resume.

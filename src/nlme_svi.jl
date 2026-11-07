@@ -123,20 +123,73 @@ end
 
 # `t` with `n` partition plans, one per task that evaluates units. `t.plan` is
 # the first; each further one owns its sampler, gradients and work point
-# (`_brm_nlme_worker_plan`).
-function _brm_svi_with_workers(t, n, progress=nothing)
+# (`_brm_nlme_worker_plan`). `workers` holds plans an earlier call on this target
+# prepared; the ones this call still needs are added to it.
+function _brm_svi_with_workers(t, n, progress=nothing; workers=typeof(t.plan)[])
     n == 1 && return t
-    workers = _brm_with_counter(progress, n - 1; description="Worker partition samplers") do node
-        map(1:n-1) do k
+    missing_plans = n - 1 - length(workers)
+    missing_plans > 0 && append!(workers, _brm_with_counter(progress, missing_plans;
+            description="Worker partition samplers") do node
+        map(1:missing_plans) do k
             plan = _brm_nlme_worker_plan(t.plan, t.partition, t.m.unit)
             _brm_update_progress!(node, k)
             plan
         end
-    end
+    end)
+    # Each task's point and gradient buffers; the first is the target's own.
     width = length(first(t.work).values)
     work = vcat([first(t.work)],
-        [(; values=zeros(width), gradient=zeros(width)) for _ in workers])
-    merge(t, (; plans=vcat([t.plan], workers), work))
+        [(; values=zeros(width), gradient=zeros(width)) for _ in 1:n-1])
+    merge(t, (; plans=vcat([t.plan], workers[1:n-1]), work))
+end
+
+# ── A model's retained target ───────────────────────────────────────────────
+
+# The target and worker plans for one call on `m`: the ones the model holds when
+# they were prepared for the same ownership, separator policy and streaming carry,
+# otherwise new ones. Nothing in them depends on the optimizer's state: `t` holds the model's
+# read-only tables and work arrays each evaluation overwrites, and a run's factors,
+# Adam moments and random stream live in `_BRMSVIRun`. So a continuation on them
+# is the same run as one that never returned.
+#
+# The call takes them out of the slot, because its samplers and work arrays belong
+# to one call at a time: a fit running at the same time on the same model finds
+# the slot empty and prepares its own. `_brm_svi_checkin!` puts them back, so the
+# slot holds at most one target, the last call's.
+#
+# A connected target also depends on its separator policy, which promotes more
+# coordinates than were requested: its key is the request and the policy, which
+# is what a resume passes (`_brm_svi_identity`). A strict target's promoted set
+# is a closure of its request, so a request equal to it finds the same target.
+function _brm_svi_checkout!(m; global_coordinates, previous, separator=nothing,
+        max_unit_coordinates=4096, max_unit_work=1_000_000, max_promoted_coordinates=128,
+        cell_units=nothing)
+    requested = _brm_svi_global_coordinates(m, global_coordinates)
+    carry = previous === nothing ? nothing : _brm_value_digest(previous)
+    connected = m.view.unit_partition === :connected
+    cell_units = _brm_svi_cell_units_option(cell_units, connected)
+    policy = connected ? (; separator=something(separator, :auto), max_unit_coordinates,
+        max_unit_work, max_promoted_coordinates, cell_units) :
+        (; separator=something(separator, :none))
+    slot = m.svi_target
+    prepared = lock(slot.lock) do
+        held = slot.prepared
+        held !== nothing && isequal(held.carry, carry) && isequal(held.policy, policy) &&
+            (requested == held.requested || !connected &&
+                requested == held.target.ownership.promoted) || return nothing
+        slot.prepared = nothing
+        held
+    end
+    prepared !== nothing && return prepared, true
+    t = _brm_svi_target(m; global_coordinates, previous, separator, max_unit_coordinates,
+        max_unit_work, max_promoted_coordinates, cell_units)
+    (; requested, carry, policy, target=t, workers=typeof(t.plan)[]), false
+end
+
+function _brm_svi_checkin!(m, prepared)
+    slot = m.svi_target
+    lock(() -> (slot.prepared = prepared), slot.lock)
+    nothing
 end
 
 # `f(plan, k)` for every `k` in `1:n`: in order on this task with one plan, or
@@ -364,11 +417,47 @@ mutable struct _BRMSVIAdam
     m::Vector{Float64}
     v::Vector{Float64}
     t::Int
+    clipped::Int
 end
-_BRMSVIAdam(n, lr) = _BRMSVIAdam(lr, 0.9, 0.999, zeros(n), zeros(n), 0)
+_BRMSVIAdam(n, lr) = _BRMSVIAdam(lr, 0.9, 0.999, zeros(n), zeros(n), 0, 0)
 
-# One ascent step of `x` along `g`.
-function _brm_svi_step!(opt::_BRMSVIAdam, x, g, lr=opt.lr)
+# How far a global's gradient may enter Adam's moments, in running rms of that
+# coordinate, for a batch that is the whole data; `_brm_svi_iteration!` widens it
+# by the square root of the scale-up N / B. A draw that reaches a steep part of
+# the density can give a gradient of 1e20 where the running rms is 1. The step
+# itself is bounded, but β2 = 0.999 keeps g² in `v` for ln(g²/1000)/0.001
+# iterations: a gradient 1e6 times the rms slows its coordinate for about 21,000
+# iterations, 1e20 for about 85,000, and a draw reaches every coordinate its term
+# reads. Measured on a run of 7,379 globals, 95% of them ended polishing with a
+# step more than ten times too small. Nothing in the trace shows it: the ELBO
+# then looks flat, as for a converged fit.
+#
+# A coordinate read by only a few units has a zero gradient in most batches, so
+# its gradient when one is drawn is about √(N/B) times its rms. A tighter bound
+# would shrink the rms and with it the next gradient's limit, without end.
+#
+# A clipped gradient is not unbiased: a term with a heavy-tailed gradient pushes
+# less than its expectation says. Where such a term's expectation is infinite
+# (`_brm_svi_window`), no estimate of it exists to be biased.
+const _BRM_SVI_GLOBAL_CLIP = 10.0
+
+# `g` with each coordinate limited to `clip` times its running rms before this
+# step. A coordinate with no gradient so far has no scale to compare with.
+function _brm_svi_clip(opt::_BRMSVIAdam, g, clip)
+    isfinite(clip) && opt.t > 0 || return g
+    b2 = 1 - opt.β2^opt.t
+    bounded = map(g, opt.v) do gi, vi
+        iszero(vi) && return gi
+        limit = clip * sqrt(vi / b2)
+        clamp(gi, -limit, limit)
+    end
+    bounded == g || (opt.clipped += 1)
+    bounded
+end
+
+# One ascent step of `x` along `g`, limited by `clip` (`_brm_svi_clip`).
+function _brm_svi_step!(opt::_BRMSVIAdam, x, g, lr=opt.lr; clip=Inf)
+    g = _brm_svi_clip(opt, g, clip)
     opt.t += 1
     @. opt.m = opt.β1 * opt.m + (1 - opt.β1) * g
     @. opt.v = opt.β2 * opt.v + (1 - opt.β2) * g^2
@@ -402,7 +491,7 @@ end
 # units of a square root of the global covariance and each Β row in units of
 # its scale, so Adam's step size means a fraction of the current posterior
 # scale, which stays meaningful when a global's posterior sd shrinks like 1/√N.
-function _brm_svi_whitened_global_step!(opt, q, x, grad, lr)
+function _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip=Inf)
     D = length(q.μ)
     C = _brm_svi_global_sqrt(_brm_svi_global_geometry(q))
     scale = vcat(ones(D), vec(repeat(exp.(q.ρ), 1, size(q.Β, 2))))
@@ -411,7 +500,7 @@ function _brm_svi_whitened_global_step!(opt, q, x, grad, lr)
     rest = D+1:length(x)
     grad[rest] .*= scale
     step = zeros(length(x))
-    _brm_svi_step!(opt, step, grad, lr)
+    _brm_svi_step!(opt, step, grad, lr; clip)
     x[1:D] .+= _brm_svi_global_sqrt_mul(C, view(step, 1:D))
     x[rest] .+= scale .* view(step, rest)
     x
@@ -641,8 +730,12 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     end
     x = _brm_svi_global_vector(q)
     grad = _brm_svi_global_gradient(q, w, ε, η)
-    whiten ? _brm_svi_whitened_global_step!(global_opt, q, x, grad, lr_global) :
-        _brm_svi_step!(global_opt, x, grad, lr_global)
+    # `N / B` for a uniform batch; under work sampling a unit drawn with chance π
+    # carries weight about 1 / π, so its coordinates' gradients are about √w times
+    # their rms when drawn, and the batch's largest weight bounds every unit in it.
+    clip = _BRM_SVI_GLOBAL_CLIP * sqrt(maximum(weights))
+    whiten ? _brm_svi_whitened_global_step!(global_opt, q, x, grad, lr_global; clip) :
+        _brm_svi_step!(global_opt, x, grad, lr_global; clip)
     _brm_svi_set_global!(q, x)
     _brm_svi_each_unit(t.plans, length(batch)) do _, k
         _brm_svi_unit_step!(q, batch[k], terms[k].gz, terms[k].gd, draws[k], β)
@@ -655,16 +748,18 @@ const _BRM_SVI_PHASES = (lower="Lower to ReactiveKernels", prepare="Prepare NLME
 
 # Stochastic optimization in two phases. Exploration runs at constant step
 # sizes (`lr_global` for Adam, `unit_step` for the subjects' natural-gradient
-# steps) until the ELBO stops improving detectably: the mean over a window (one
-# pass over the subjects, at least 100 iterations) has risen, over the last
-# `patience` windows, by less than twice the standard error of that rise, after
-# at least `min_windows`. Comparing across several windows rather than
+# steps) until the ELBO stops improving detectably: the trimmed mean over a
+# window (one pass over the subjects, at least 100 iterations) has risen, over
+# the last `patience` windows, by less than twice the standard error of that
+# rise, after at least `min_windows` (`_brm_svi_window`). Comparing across several windows rather than
 # neighbouring ones lets a slow drift show above the minibatch noise. Polishing then restarts Adam on scale-preconditioned global
 # steps (`polish_lr`, a fraction of the current scale), decays every step size
 # as 1/√k over `polish_windows` windows, and returns the average of q over
 # those iterations (Polyak–Ruppert), which damps the noise a stochastic step
 # leaves.
 #
+const _BRMSVIWindow = NamedTuple{(:mean, :center, :spread),NTuple{3,Float64}}
+
 # Everything an iteration reads and writes besides the target lives in one
 # `_BRMSVIRun`, so a run stops after any completed iteration and continues from
 # a copy of it (`BRMSVIOptimizerState`, src/nlme_svi_optimizer.jl) exactly as
@@ -679,7 +774,7 @@ mutable struct _BRMSVIRun{Q}
     adam::_BRMSVIAdam
     iteration::Int
     trace::Vector{Float64}
-    windows::Vector{NamedTuple{(:mean, :var),Tuple{Float64,Float64}}}
+    windows::Vector{_BRMSVIWindow}
     polish_start::Int
     average::Union{Nothing,Q}
     converged::Bool
@@ -703,9 +798,39 @@ function _brm_svi_run(rng, q, c, t)
         visits=zeros(Int, N), draws=zeros(Int, N))
     entropy = [_brm_svi_unit_entropy(q, i) for i in 1:N]
     _BRMSVIRun(rng, q, _brm_svi_adam(q, c.lr_global), 0, Float64[],
-        NamedTuple{(:mean, :var),Tuple{Float64,Float64}}[], 0, nothing, false,
+        _BRMSVIWindow[], 0, nothing, false,
         sampler, sampling, 0, zeros(Int, N), entropy, sum(entropy))
 end
+
+# The share of a window's iterations left out at each end of its statistics.
+const _BRM_SVI_WINDOW_TRIM = 0.1
+
+# What a window of ELBO estimates contributes to the stopping rule: `center`, its
+# trimmed mean, and `spread`, so that `spread / W` estimates the variance of the
+# center (the Winsorized variance over (1 - 2γ)², Yuen 1974). `mean` is the plain
+# mean, which `diagnostics.elbo_windows` reports.
+#
+# A single draw can move a mean by any amount: the estimate is finite, but its
+# expectation need not be. Under a Gaussian q over x and z, a density with a term
+# like -exp(exp(x) z) has E_q log p = -Inf. A log link over a field or random
+# effect whose sd sits on the log scale has such a term. So neither the mean nor
+# the variance of a window estimates anything there: on one run a single draw
+# took a window's mean to -1.25e19 while its median stayed at -12,076.
+#
+# Below 10 iterations per window nothing is trimmed, and this is the mean and
+# variance.
+function _brm_svi_window(w)
+    n = length(w)
+    k = floor(Int, _BRM_SVI_WINDOW_TRIM * n)
+    x = sort(w)
+    inner = view(x, k+1:n-k)
+    winsorized = vcat(fill(first(inner), k), inner, fill(last(inner), k))
+    (; mean=Statistics.mean(w), center=Statistics.mean(inner),
+       spread=Statistics.var(winsorized) / (1 - 2k / n)^2)
+end
+
+# Whether the ELBO has failed to rise detectably from window `a` to window `b`.
+_brm_svi_stalled(a, b, W) = b.center - a.center < 2 * sqrt((a.spread + b.spread) / W)
 
 # The optimizer controls of a run over `N` subjects, with the batch size and
 # window it actually uses. They are fixed for the run and its continuations.
@@ -753,24 +878,25 @@ function _brm_svi_advance!(run, t, c)
     push!(run.trace, value + run.entropy_sum +
         _brm_svi_global_logdet(_brm_svi_global_geometry(q)) / 2)
     run.iteration = it
+    polished = false
     if polishing
         k = it - run.polish_start
         for name in (:μ, :ρ, :Β)
             _brm_svi_average!(getfield(run.average, name), getfield(q, name), k)
         end
-        k >= c.polish_windows * W && (run.converged = true; return :converged)
+        polished = k >= c.polish_windows * W
     end
+    it % W == 0 && push!(run.windows, _brm_svi_window(view(run.trace, it-W+1:it)))
+    polished && (run.converged = true; return :converged)
     it % W == 0 || return :iteration
-    w = view(run.trace, it-W+1:it)
-    push!(run.windows, (; mean=Statistics.mean(w), var=Statistics.var(w)))
     windows = run.windows
-    if !polishing && length(windows) >= max(c.min_windows, c.patience + 1)
-        a, b = windows[end-c.patience], windows[end]
-        if b.mean - a.mean < 2 * sqrt((a.var + b.var) / W)
-            run.polish_start = it
-            run.average = deepcopy(q)
-            run.adam = _brm_svi_adam(q, c.polish_lr)
-        end
+    if !polishing && length(windows) >= max(c.min_windows, c.patience + 1) &&
+            _brm_svi_stalled(windows[end-c.patience], windows[end], W)
+        run.polish_start = it
+        run.average = deepcopy(q)
+        clipped = run.adam.clipped
+        run.adam = _brm_svi_adam(q, c.polish_lr)
+        run.adam.clipped = clipped
     end
     :window
 end
@@ -779,17 +905,19 @@ _brm_svi_progress_message(run, c) = string(
     _brm_svi_polishing(run) && run.polish_start < run.iteration ?
         "polishing $(run.iteration - run.polish_start)/$(c.polish_windows * c.window)" :
         "exploring, window $(length(run.windows))",
-    " · iteration $(run.iteration) · ELBO ≈ ", round(last(run.windows).mean; sigdigits=6))
+    " · iteration $(run.iteration) · ELBO ≈ ", round(last(run.windows).center; sigdigits=6))
 
 # Advance `run` until it converges, reaches `max_iterations`, or has taken
 # `stop_after` iterations in this call. `save(checkpoint)` receives a detached
-# `BRMSVIOptimizerState` (`snapshot(run)`) after every iteration that is a
+# `BRMSVIOptimizerState` (`checkpoint(run)`) after every iteration that is a
 # multiple of `checkpoint_every`, before an interrupt requested at the end of
-# a window propagates, and when this call stops. A checkpoint copies the run;
-# it never advances the random stream.
+# a window propagates, and when this call stops. `observe(status)` follows at the
+# same three points, at multiples of `observe_every` (`_brm_svi_observer`).
+# Neither advances the random stream or writes to the run.
 function _brm_svi_fit!(run, t, c; stop_after=typemax(Int), checkpoint_every=c.window,
-        save=nothing, snapshot=identity, node=nothing)
-    commit() = save === nothing || save(snapshot(run))
+        save=nothing, checkpoint=identity, node=nothing, observe=nothing,
+        observe_every=c.window)
+    commit() = save === nothing || save(checkpoint(run))
     taken = 0
     while !_brm_svi_finished(run, c) && taken < stop_after
         status = _brm_svi_advance!(run, t, c)
@@ -799,15 +927,82 @@ function _brm_svi_fit!(run, t, c; stop_after=typemax(Int), checkpoint_every=c.wi
                 _brm_throw_if_interrupted(node)
             catch
                 commit()
+                observe === nothing || observe(:interrupted)
                 rethrow()
             end
             _brm_update_progress!(node, _brm_svi_progress_message(run, c))
         end
-        save === nothing || run.iteration % checkpoint_every != 0 ||
-            _brm_svi_finished(run, c) || taken >= stop_after || commit()
+        (_brm_svi_finished(run, c) || taken >= stop_after) && continue
+        save === nothing || run.iteration % checkpoint_every != 0 || commit()
+        observe === nothing || run.iteration % observe_every != 0 || observe(:running)
     end
     commit()
+    observe === nothing || observe(_brm_svi_end_status(run, c))
     run
+end
+
+_brm_svi_end_status(run, c) = !_brm_svi_finished(run, c) ? :stopped :
+    run.converged ? :converged : :max_iterations
+
+# ── Snapshots of a running fit ───────────────────────────────────────────────
+
+const _BRM_SVI_SNAPSHOT_FORMAT = 1
+
+# Before any preparation, so that a mistake here costs no model or target.
+function _brm_svi_check_snapshot(caller, snapshot, every, draws)
+    snapshot === nothing && (every !== nothing || draws != 0) && throw(ArgumentError(
+        "$caller: snapshot_every and snapshot_draws need a `snapshot` function or path"))
+    every === nothing || every isa Integer && every >= 1 || throw(ArgumentError(
+        "$caller: snapshot_every must be a positive integer or nothing"))
+    draws isa Integer && draws >= 0 || throw(ArgumentError(
+        "$caller: snapshot_draws must be a nonnegative integer"))
+    snapshot === nothing || snapshot isa AbstractString || !isempty(methods(snapshot)) ||
+        throw(ArgumentError("$caller: snapshot must be a function or a file path, " *
+            "got $(repr(snapshot))"))
+    snapshot isa AbstractString && mkpath(dirname(abspath(snapshot)))
+    nothing
+end
+
+# Called with a status at each boundary of the run in `state` on target `t`. The
+# fields below are plain Julia data, so a saved snapshot loads without BRM or the
+# model. Nothing here writes to what the run reads next, and draws come from a
+# copy of the stream: an observed run is the run an unobserved one is.
+_brm_svi_observer(::Nothing, t, state, draws) = nothing
+function _brm_svi_observer(snapshot, t, state, draws)
+    started = time()
+    function (status)
+        _brm_svi_deliver(snapshot, merge((; format=_BRM_SVI_SNAPSHOT_FORMAT, status,
+                seconds=time() - started, threads=hasproperty(t, :plans) ? length(t.plans) : 1,
+                model_identity=state.identity.binding,
+                coordinates=copy(t.m.view.coordinates),
+                # A connected fit's inference units, not its scientific subjects.
+                levels=copy(hasproperty(t, :ownership) ? _brm_svi_unit_levels(t) : t.m.view.levels),
+                globals=copy(t.globals), units=copy.(t.units)),
+            _brm_svi_snapshot_run(state.run, t, state.controls, draws)))
+    end
+end
+
+_brm_svi_deliver(f, snapshot) = (f(snapshot); nothing)
+function _brm_svi_deliver(path::AbstractString, snapshot)
+    temporary = path * ".partial"
+    open(io -> serialize(io, snapshot), temporary, "w")
+    mv(temporary, path; force=true)
+    nothing
+end
+
+function _brm_svi_snapshot_run(run::_BRMSVIRun, t, c, draws)
+    q = _brm_svi_result_q(run)
+    (; iteration=run.iteration, max_iterations=c.max_iterations,
+       phase=_brm_svi_polishing(run) ? :polishing : :exploring,
+       q_kind=run.average === nothing ? :raw_iterate : :polished_average,
+       averaged_iterations=run.average === nothing ? 0 : run.iteration - run.polish_start,
+       q=(; μ=copy(q.μ), ρ=copy(q.ρ), Β=copy(q.Β), M=copy.(q.M),
+          Λ=_brm_svi_plain_units(q.Λ), U=_brm_svi_plain_units(q.U)),
+       elbo_windows=first.(run.windows),
+       elbo_windows_trimmed=[w.center for w in run.windows],
+       clipped_steps=run.adam.clipped,
+       elbo=isempty(run.trace) ? nothing : last(run.trace),
+       draws=_brm_svi_draws(copy(run.rng), t, q, draws))
 end
 
 # The approximation a run currently stands for: its raw iterate, or while and
@@ -872,9 +1067,11 @@ _brm_svi_fill_absent_draws!(rng, draws, t, ::Nothing) = draws
 
 # The model through its preparation phases, as for `brm_nlme_fit`: lowering to
 # RK and `brm_nlme_model`. A stage `x` has already passed is reused.
-_brm_svi_lowered(x::BRMI, phase) = _brm_run_phase(_ -> RKBRMI(x), phase)
-_brm_svi_lowered(x::Union{RKBRMI,BRMNLMEModel}, phase) = (_brm_reuse_phase!(phase); x)
-_brm_svi_lowered(x, phase) = throw(ArgumentError(
+_brm_svi_lowered(x::BRMI, phase; groups...) =
+    _brm_run_phase(_ -> _brm_nlme_lowered(x; groups...), phase)
+_brm_svi_lowered(x::Union{RKBRMI,BRMNLMEModel}, phase; groups...) =
+    (_brm_reuse_phase!(phase); x)
+_brm_svi_lowered(x, phase; groups...) = throw(ArgumentError(
     "brm_svi_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
     "got $(typeof(x))"))
 
@@ -946,7 +1143,9 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   `shared_point`, `subject_group`, `nested_groups` and `shared_groups`, as
   [`brm_nlme_model`](@ref) takes them; a nested model passes `subject_group`
   and `nested_groups`, a model with a grouping crossed with the subjects
-  `shared_groups`. Every observation must belong to one subject's cells: a
+  `shared_groups`. A BRMI's `mi(...)` completions whose law reads the units'
+  draws are lowered non-centered, as by [`brm_nlme_fit`](@ref). Every
+  observation must belong to one subject's cells: a
   cell of a `@plate for` over the subjects or over their rows, or a row of a
   flat-row response grouped by the subjects.
 - `family` — the global factor: `MeanFieldGlobal()` (diagonal) or
@@ -1042,22 +1241,80 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   `checkpoint_every` (default: once per window), when this call stops, and
   before an interrupt propagates. With `laplace=GaussianBlockLaplace()` the
   default is every 50 updates, and the interrupt is checked every 50 updates.
+- Watching a running fit: `snapshot` is a function, or a file path that the run
+  rewrites atomically so it always holds the latest complete snapshot. It
+  receives a detached copy of the current approximation and diagnostics, without
+  the call returning and without decoding a checkpoint, after every iteration
+  that is a multiple of `snapshot_every` (default: once per window, or every 50
+  updates with `laplace=GaussianBlockLaplace()`), when this call stops, and before
+  an interrupt propagates. `snapshot_draws`
+  adds that many draws (default none); each snapshot costs drawing them plus a
+  copy of the factors. The run is the same to the last bit whether it is observed
+  or not: draws come from a copy of the random stream, and a snapshot's `q` and
+  `draws` equal those of a result stopped at its iteration. A snapshot is one
+  named tuple of plain arrays, so a saved one loads without BRM or the model:
+
+  - `status`: `:running` while the call continues. Only the boundary where the
+    call ends says more: `:converged`, `:max_iterations`, `:stopped` (`stop_after`
+    was reached; the run can continue) or `:interrupted`.
+  - `iteration`, `max_iterations`, `seconds` (since optimization started in this
+    call), `threads`, `format`, and `model_identity`, which names the emitted
+    program, bound data and packed coordinates.
+  - `phase`: `:exploring` or `:polishing`; for GaussianBlockLaplace,
+    `:fixed_budget`.
+  - `q`: `μ`, `ρ`, `Β`, `M`, `Λ` and `U`, as in `diagnostics.q`. `q_kind` says
+    what it is: `:raw_iterate`, `:polished_average` (the Polyak–Ruppert average,
+    `averaged_iterations` of them, 0 at the iteration polishing starts) or, for
+    GaussianBlockLaplace, `:window_average`. A unit above `unit_dense_limit` appears
+    in `Λ` and `U` as `(; family=:diagonal_lowrank, ρ, Β)`, its covariance being
+    `Diagonal(exp.(2ρ)) + Β * Β'`, so that no BRM type is needed to read it.
+  - `coordinates`, `levels`, `globals` and `units`: `q.μ[k]` is coordinate
+    `coordinates[globals[k]]`, `q.M[i][k]` is coordinate `coordinates[units[i][k]]`,
+    of unit `levels[i]`.
+  - `elbo_windows` (the mean ELBO per completed window; for GaussianBlockLaplace
+    per 50 updates), `elbo` (the last iteration's value, `nothing` before the
+    first). Without GaussianBlockLaplace also `elbo_windows_trimmed`, which the
+    stopping rule reads, and `clipped_steps`, as in `diagnostics`.
+  - `draws`: coordinates × `snapshot_draws`, as the result's `draws`.
+
+  BRM keeps no snapshot: the size of one is that of `q` and `draws` plus two numbers
+  per window (one for GaussianBlockLaplace), and a path holds only the latest. To
+  keep more, pass a function.
 
 Returns `draws`, `ndraws` draws from the fitted approximation as RK packed
 unconstrained points (coordinates × draws, one column per draw, the order of
 `coordinate_names(rk.model.layout)`), their `coordinates`, and `diagnostics`:
-the ELBO trace (`elbo`, `elbo_windows`, up to a constant), `converged`,
+the ELBO trace, up to a constant (`elbo`, per iteration; `elbo_windows`, the
+plain mean of each window, which a single draw can dominate; and
+`elbo_windows_trimmed`, the 10% trimmed mean of each window, which the stopping
+rule reads), `clipped_steps` (how many global steps had a coordinate's gradient
+limited to `10 √w` times its running rms, with `w` the batch's largest unit
+weight, `N / B` for uniform sampling, so that one extreme draw does not stop that
+coordinate's optimization), `converged`,
 `finished` (converged or `max_iterations` reached; `false` after `stop_after`),
 `iterations`, the variational parameters `q`, the packed positions of the
 global coordinates (`globals`), `seconds` of optimization in this call,
-`threads` (the tasks this call used), the prepared `model`, and the run's
-`optimizer` state, sampling probabilities/work/visits/draw counts (`sampling`),
-and actual `unit_gradient_calls`. The
+`threads` (the tasks this call used), `target` (below), the units' sampling
+probabilities, work, visits and draw counts (`sampling`), the actual
+`unit_gradient_calls`, the prepared `model`, and the run's `optimizer` state
 ([`brm_svi_optimizer_checkpoint`](@ref) copies it). The draws come from a copy
 of the optimizer's random stream: they do not advance `rng`, and a continued
 run is unaffected by them. The approximation is variational: posterior means
 are close, and the spread of the population, scale and correlation coordinates
 is too narrow.
+
+The prepared `model` keeps its minibatch target and worker samplers for its next
+fit or continuation in this process, so passing `diagnostics.model` (or the
+[`BRMNLMEModel`](@ref) you prepared) prepares neither again.
+`diagnostics.target` reports what this call did: `reused` (it took the model's
+target), `workers_built` and the `seconds` of that phase. A connected model's
+target is reused only for the same `global_coordinates`, separator policy and
+budgets, since those decide its units. The model holds one
+target, the size of its partition samplers and work arrays, for as long as the
+model lives; a copy or a serialized model holds none. A call that throws while
+optimizing does not put its target back, and concurrent calls on one model each
+use their own. Not with `laplace=GaussianBlockLaplace()`, which prepares its
+target on every call.
 """
 brm_svi_fit(x; kwargs...) = _brm_svi_initial_fit(nothing, x; kwargs...)
 brm_svi_fit(save::Function, x; kwargs...) = _brm_svi_initial_fit(save, x; kwargs...)
@@ -1157,6 +1414,7 @@ end
 # stream a later continuation reads.
 function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=1000,
         stop_after=nothing, checkpoint_every=nothing, progress=nothing,
+        snapshot=nothing, snapshot_every=nothing, snapshot_draws=0,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, threads=nothing,
         global_coordinates=nothing, separator=nothing, max_unit_coordinates=4096,
@@ -1165,48 +1423,70 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
     ndraws isa Integer && ndraws >= 0 || throw(ArgumentError(
         "$caller: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller, save, stop_after, checkpoint_every)
+    _brm_svi_check_snapshot(caller, snapshot, snapshot_every, snapshot_draws)
     threads = _brm_svi_threads(caller, threads, ad_backend)
     _brm_with_progress(progress; description) do node
         _brm_with_phases(node, _BRM_SVI_PHASES) do phases
-            lowered = _brm_svi_lowered(x, phases.lower)
+            lowered = _brm_svi_lowered(x, phases.lower; subject_group, nested_groups,
+                shared_groups, unit_partition)
             check_lowered(lowered)
             m = _brm_svi_model(lowered, phases.prepare;
                 ad_backend, shared_point, subject_group, nested_groups, shared_groups, unit_partition)
-            t, state = _brm_run_phase(phases.target) do phase
-                # SVI's partition sampler, on first use, reports under this phase.
-                t, state = init(_brm_with_cell_progress(
-                    () -> _brm_svi_target(m; global_coordinates, previous, separator,
-                        max_unit_coordinates, max_unit_work, max_promoted_coordinates,
-                        cell_units), phase))
-                _brm_svi_with_workers(t, min(threads, state.controls.batch_size), phase), state
-            end
-            run, c = state.run, state.controls
-            seconds, draws, q = _brm_with_serial_blas() do
-                seconds = @elapsed _brm_enter_phase(phases.fit) do phase
-                    _brm_svi_fit!(run, t, c; stop_after=something(stop_after, typemax(Int)),
-                        checkpoint_every=something(checkpoint_every, c.window), save,
-                        snapshot=_ -> _brm_svi_detach(state), node=phase)
+            prepared = Ref{Any}(nothing)
+            optimizing = false
+            try
+                started = time()
+                t, state, reuse = _brm_run_phase(phases.target) do phase
+                    # SVI's partition sampler, on first use, reports under this phase.
+                    prepared[], reused = _brm_with_cell_progress(() -> _brm_svi_checkout!(m;
+                        global_coordinates, previous, separator, max_unit_coordinates,
+                        max_unit_work, max_promoted_coordinates, cell_units), phase)
+                    reused && _brm_update_progress!(phase, "reusing this model's prepared target")
+                    t, state = init(prepared[].target)
+                    workers = prepared[].workers
+                    before = length(workers)
+                    t = _brm_svi_with_workers(t, min(threads, state.controls.batch_size), phase;
+                        workers)
+                    t, state, (; reused, workers_built=length(workers) - before)
                 end
+                target_seconds = time() - started
+                optimizing = true
+                run, c = state.run, state.controls
+                seconds, draws = _brm_with_serial_blas() do
+                    seconds = @elapsed _brm_enter_phase(phases.fit) do phase
+                        _brm_svi_fit!(run, t, c; stop_after=something(stop_after, typemax(Int)),
+                            checkpoint_every=something(checkpoint_every, c.window), save,
+                            checkpoint=_ -> _brm_svi_detach(state), node=phase,
+                            observe=_brm_svi_observer(snapshot, t, state, snapshot_draws),
+                            observe_every=something(snapshot_every, c.window))
+                    end
+                    seconds, _brm_run_phase(phases.draws) do _
+                        _brm_svi_draws(copy(run.rng), t, _brm_svi_result_q(run), ndraws)
+                    end
+                end
+                optimizing = false
                 q = _brm_svi_result_q(run)
-                draws = _brm_run_phase(phases.draws) do _
-                    _brm_svi_draws(copy(run.rng), t, q, ndraws)
-                end
-                seconds, draws, q
+                (; draws, coordinates=copy(m.view.coordinates), diagnostics=(;
+                    threads=length(t.plans), target=(; reuse..., seconds=target_seconds),
+                    elbo=run.trace, elbo_windows=first.(run.windows),
+                    elbo_windows_trimmed=[w.center for w in run.windows],
+                    clipped_steps=run.adam.clipped, run.converged,
+                    finished=_brm_svi_finished(run, c), iterations=run.iteration, q,
+                    globals=t.globals, units=t.units, owner=t.ownership.owner,
+                    global_coordinates=t.ownership.promoted,
+                    unit_levels=_brm_svi_unit_levels(t),
+                    subject_unit=hasproperty(t.ownership, :subject_unit) ?
+                        t.ownership.subject_unit : m.view.subject_unit,
+                    separator=hasproperty(t.ownership, :separator) ? t.ownership.separator : nothing,
+                    unit_families=_brm_svi_unit_description.(q.U),
+                    seconds, model=m, source_id=_brm_svi_source_id(m.backend),
+                    sampling=run.sampling, unit_gradient_calls=run.unit_gradient_calls,
+                    streaming=_brm_svi_carried_state(previous, t, q), optimizer=state))
+            finally
+                # A refused checkpoint leaves the target as it found it; an exception
+                # while optimizing may have left an AD workspace mid-evaluation.
+                prepared[] === nothing || optimizing || _brm_svi_checkin!(m, prepared[])
             end
-            (; draws, coordinates=copy(m.view.coordinates), diagnostics=(;
-                threads=length(t.plans),
-                elbo=run.trace, elbo_windows=first.(run.windows), run.converged,
-                finished=_brm_svi_finished(run, c), iterations=run.iteration, q,
-                globals=t.globals, units=t.units, owner=t.ownership.owner,
-                global_coordinates=t.ownership.promoted,
-                unit_levels=_brm_svi_unit_levels(t),
-                subject_unit=hasproperty(t.ownership, :subject_unit) ?
-                    t.ownership.subject_unit : m.view.subject_unit,
-                separator=hasproperty(t.ownership, :separator) ? t.ownership.separator : nothing,
-                unit_families=_brm_svi_unit_description.(q.U),
-                seconds, model=m, source_id=_brm_svi_source_id(m.backend),
-                sampling=run.sampling, unit_gradient_calls=run.unit_gradient_calls,
-                streaming=_brm_svi_carried_state(previous, t, q), optimizer=state))
         end
     end
 end

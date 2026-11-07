@@ -215,7 +215,7 @@ function _rk_model_population_columns(term; cellmeans=false, context=nothing)
     # An offset of a model value is a coefficient-free graph summand
     # (`_rk_model_offset_spec`): it adds no design column.
     term isa ExprColumn && getf(term) === offset && length(getargs(term)) == 1 &&
-        _brm_reads_model_value(only(getargs(term))) && return ()
+        _rk_offset_is_summand(only(getargs(term))) && return ()
     column = _rk_model_population_column(term, context)
     column === nothing ? _brm_population_columns(term; cellmeans) : (column,)
 end
@@ -340,10 +340,12 @@ function _rk_prepare_missing_value!(columns, taken, observation, program, comple
             Expr(:_rk_data_preparation, :brm_covariate_missing_rows, present), jmis))
         # As for the shares weights, a submodel may observe only an argument
         # bound to data. The missing/free row indices are data preparations,
-        # so they cannot double as the observation's placeholder.
+        # so they cannot double as the observation's placeholder. Every law
+        # but a location-scale one observes its free entries' density
+        # remainder when non-centered (`_rk_mi_free_part`).
         nfree = totals === nothing ? length(plan.missing_indices) :
             totals.downstream ? length(columns[totals.free_rows]) : 0
-        free_weights = if _brm_lower_family(distribution.callable) && nfree > 0
+        free_weights = if !_rk_location_scale_law(distribution) && nfree > 0
             name = _rk_ast_fresh_name(string(plan.source, "_free_weights"), taken)
             columns[name] = zeros(nfree)
             name
@@ -466,8 +468,8 @@ end
 # say about the law.
 #
 # Non-centered (`RKBRMI(brmi; completions = :noncentered)`), free entries are
-# standard normal draws standardized by the law's location and scale, as for
-# any completion, and the grouped entries' coordinates are standard normal
+# standard normal draws as for any completion (`_rk_mi_free_part`), and the
+# grouped entries' coordinates are standard normal
 # draws whose groups each observe the rest of the joint latent's density
 # (`_BRMGroupShareWeight`). The coordinates and the density are the
 # centred ones; only the prior/likelihood split differs.
@@ -509,21 +511,27 @@ function _rk_emit_missing_shares!(definitions, statements, bindings, taken, comp
     ((; sampled, standardized=nothing),)
 end
 
-# The free entries' law, gathered onto their rows: their law as written, or
-# its location and scale when non-centered. A non-centered completion with no
-# free entries may have any law (`_rk_noncentered_completion`); its empty free
-# entries stay under the law as written.
+# The free entries' law, gathered onto their rows: their law as written, or,
+# non-centered, its location and scale (`Normal`/`LogNormal(location, scale)`),
+# or its arguments with the support transform and density remainder of any
+# other law (`_BRMLowerEntryWeight` for a lower-bounded one,
+# `_BRMSupportEntryValue`/`_BRMSupportEntryWeight` otherwise).
 function _rk_mi_free_part(bindings, taken, completion, rows=completion.totals.free_rows)
     distribution = _rk_mi_gather(completion.distribution, rows)
-    if completion.noncentered && distribution.callable in _RK_NONCENTERED_LAWS
+    if completion.noncentered && _rk_location_scale_law(distribution)
         location, scale = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
         return (; noncentered=true, bounded=false, callable=distribution.callable, location, scale,
             reads=Expr(:tuple, location, scale))
-    elseif completion.noncentered && _brm_lower_family(distribution.callable)
+    elseif completion.noncentered
+        F = distribution.callable
+        lower = _brm_lower_family(F)
         arguments = map(arg -> _rk_value_expr!(bindings, arg, taken), distribution.args)
         return (; noncentered=true, bounded=true, arguments,
             placeholder=completion.free_weights,
-            weight=_rk_value_callee!(bindings, _BRMLowerEntryWeight{distribution.callable}(), taken),
+            # A lower-bounded law's value is `lower + exp(z)` from its first argument.
+            value=lower ? nothing : _rk_value_callee!(bindings, _BRMSupportEntryValue{F}(), taken),
+            weight=_rk_value_callee!(bindings,
+                lower ? _BRMLowerEntryWeight{F}() : _BRMSupportEntryWeight{F}(), taken),
             logweight=_rk_value_callee!(bindings, _BRMLogWeight, taken),
             reads=Expr(:tuple, arguments...))
     end
@@ -539,8 +547,9 @@ function _rk_emit_mi_free!(block, part, free_rows; draws=:z_free, value=:y_free)
                 Expr(:ref, sampled, Expr(:call, :axes, free_rows, 1)),
                 _rk_ast_dotted(:Normal, 0, 1)))
             free = _rk_block_local!(block, value)
-            push!(block.statements, Expr(:(=), free,
-                Expr(:call, :.+, first(part.arguments), _rk_ast_dotted(:exp, sampled))))
+            push!(block.statements, Expr(:(=), free, part.value === nothing ?
+                Expr(:call, :.+, first(part.arguments), _rk_ast_dotted(:exp, sampled)) :
+                _rk_ast_dotted(part.value, sampled, part.arguments...)))
             if part.placeholder !== nothing
                 observed = _rk_block_argument!(block, :free_weights, part.placeholder)
                 weights = _rk_block_local!(block, Symbol(value, :_weights))
