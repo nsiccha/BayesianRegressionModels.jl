@@ -1197,6 +1197,15 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   by prior address as [`brm_start`](@ref) takes them. Declarations without a
   recorded median, including ordinary model-scope vectors, retain the packed
   unit point; entries not supplied in `inits` retain that default point.
+  `start` may instead be a factor-level start: a [`BRMSVIStart`](@ref) from
+  [`brm_svi_combine`](@ref), or fits or states of the same declaration on
+  slices of the data (a vector, or one), combined as `brm_svi_combine` does
+  with its defaults. It sets the mean and scale of every global and the factor
+  of every unit it holds, matched by semantic coordinate identity; the rest
+  keeps the default start, the global rank part starts at zero and Adam's
+  moments start fresh. It is a start, not a prior: the target is unchanged.
+  `diagnostics.start` holds its receipt, with `applied` counting the globals
+  and units it started (`nothing` for any other start).
 - `progress` — a Treebars node or backend symbol: one `BRM SVI fit` node with
   the phases Lower to ReactiveKernels, Prepare NLME model, Minibatch target
   (the unit partition gradient and the start), Stochastic optimization (its
@@ -1468,6 +1477,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                     unit_families=_brm_svi_unit_description.(q.U),
                     seconds, model=m, source_id=_brm_svi_source_id(m.backend),
                     sampling=run.sampling, unit_gradient_calls=run.unit_gradient_calls,
+                    start=get(t, :start_receipt, nothing),
                     streaming=_brm_svi_carried_state(previous, t, q), optimizer=state))
             finally
                 # A refused checkpoint leaves the target as it found it; an exception
@@ -1481,6 +1491,8 @@ end
 _brm_svi_family(::Nothing, ::Nothing) = MeanFieldGlobal()
 _brm_svi_family(::Nothing, family::BRMSVIFamily) = family
 function _brm_svi_initialize(t, ::Nothing, family; start, inits, global_scale, unit_scale, unit_dense_limit=64, unit_rank=8)
+    _brm_svi_factor_start(start) && return _brm_svi_factor_initialize(t, start, family;
+        inits, global_scale, unit_scale, unit_dense_limit, unit_rank)
     point = _brm_svi_start(t.m, start, inits)
     q = _brm_svi_params(t, point[t.globals], family; global_scale, unit_scale, unit_dense_limit, unit_rank)
     for (i, block) in enumerate(t.units)
