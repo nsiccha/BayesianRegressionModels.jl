@@ -158,8 +158,8 @@ end
 
 function _brm_svi_connected_ownership(m; global_coordinates=nothing, previous=nothing,
         separator=:auto, max_unit_coordinates=4096, max_unit_work=1_000_000,
-        max_promoted_coordinates=128, cell_units=:components)
-    factors = _rk_svi_factors(m.backend, m.unit)
+        max_promoted_coordinates=128, cell_units=:components, fields=())
+    factors = _brm_svi_strip_fields(_rk_svi_factors(m.backend, m.unit), fields)
     estimated = falses(length(m.unit))
     estimated[_brm_svi_globals(m)] .= true
     for block in m.view.subject_coordinates

@@ -2873,6 +2873,13 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
   density and native gradient, separators, zero-dimensional units, fits,
   resume from `:first_unit` checkpoints, streaming windows, row-counted `work`
   and the refusal under `:subjects`. About 15-20 minutes on a busy host.
+- `julia --project=test --threads=2 test/nlme_svi_field_units.jl`: a read-pair
+  field's states in units' own factors (`field_states=:units`). Unit and global
+  terms add up to the whole model in value and gradient (`check_whole_model`).
+  The public fit resumes to the same trajectory and is the same at one or two
+  tasks. A held target is reused only under the same `field_states`, a resume
+  finds it again, and a `:units` snapshot loads without BRM. Mesh fields and
+  streaming windows are refused by name.
 
 ## Reusable model view
 

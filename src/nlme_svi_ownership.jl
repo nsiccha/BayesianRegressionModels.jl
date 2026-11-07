@@ -107,8 +107,8 @@ function _rk_svi_factors end
 
 _brm_svi_previous_ownership!(estimated, seeds, promoted, m, ::Nothing; levels=m.view.levels) = Int[]
 
-function _brm_svi_ownership(m; global_coordinates=nothing, previous=nothing)
-    factors = _rk_svi_factors(m.backend, m.unit)
+function _brm_svi_ownership(m; global_coordinates=nothing, previous=nothing, fields=())
+    factors = _brm_svi_strip_fields(_rk_svi_factors(m.backend, m.unit), fields)
     estimated = falses(length(m.unit))
     estimated[_brm_svi_globals(m)] .= true
     for block in m.view.subject_coordinates
