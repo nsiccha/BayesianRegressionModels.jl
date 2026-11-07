@@ -511,8 +511,10 @@ declares (`x ~ Normal(loc[i], s)`, brm-use `kernel.md`), and the sampled locals
 of a component called in a cell, are `:shared_latent` coordinates, read as the
 entries of a top-level vector `x[1:n] .~ Law` are: their authored law stays in
 the population prior, they enter θ (or are fixed by `shared_point`), and
-`brm_svi_fit` gives each cell's coordinates to the unit whose cells read them.
-A cell latent whose law reads the units' draws is refused like such a submodel.
+`brm_svi_fit` gives each cell's coordinates to the unit whose cells read them
+(a dotted latent's stay global until ReactiveKernels reports its reads per cell,
+snag rkppl-dotted-pla-1629a747). A cell latent whose law reads a value the model
+computes per cell (`m[i]`) is refused by name with the same model's rewrite.
 A declaration of zero
 length, such as the coefficient block of a single-level treatment-coded factor,
 owns no coordinate and is not a refusal. See [`BRMNLMEView`](@ref).
@@ -571,7 +573,28 @@ function _brm_nlme_unit_reading_priors(backend::RKBRMI, view)
         unit[block] .= true
     end
     any(unit) || return none
-    _rk_nlme_unit_reading_factors(backend, shared, unit)
+    try
+        _rk_nlme_unit_reading_factors(backend, shared, unit)
+    catch error
+        latents = unique!(Symbol[r.name for r in _brm_nlme_records(backend.plan)
+            if r.kind === :cell_latent])
+        _rk_nlme_is_partition_locality_error(error) && !isempty(latents) || rethrow()
+        # RKPPL flattens a dotted cell latent's per-cell law arguments with a
+        # helper that has no row form, so a law reading a value the model
+        # computes per cell cannot be evaluated one cell at a time, and the
+        # factors' reads are unknown (ReactiveKernels snag
+        # rkppl-dotted-pla-1629a747).
+        _brm_nlme_error("brm_nlme_view: the law of the `@plate` cell latent " *
+            join(("`$name`" for name in latents), ", ") * " reads a value the " *
+            "model computes per cell (such as a formula predictor `m[i]`), and " *
+            "ReactiveKernels cannot yet evaluate that law one cell at a time " *
+            "(ReactiveKernels snag rkppl-dotted-pla-1629a747), so no NLME route can " *
+            "tell whether its prior reads the units' draws. For a location law, " *
+            "keep only data and sampled scalars in the law and add the rest where " *
+            "the cell reads the latent (`d ~ Normal(loc[i], s)`, then " *
+            "`x = m[i] .+ d`): the same model. ReactiveKernels reported: " *
+            sprint(showerror, error))
+    end
 end
 # Implemented by the ReactiveKernels extension.
 function _rk_nlme_unit_reading_factors end
@@ -1759,6 +1782,7 @@ function _rk_nlme_partitioned end
 function _rk_nlme_partition_context end
 function _rk_nlme_partition_query end
 function _rk_nlme_is_partition_separability_error end
+function _rk_nlme_is_partition_locality_error end
 function _rk_nlme_partition_labels end
 function _rk_nlme_partition_value end
 function _rk_nlme_partition_query_footprint end

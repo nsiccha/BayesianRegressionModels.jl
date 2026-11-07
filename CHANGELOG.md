@@ -19,15 +19,19 @@ instead of failing at run time.
   function-style component, whose sampled locals are per cell. `brm_nlme_view`
   reads those coordinates as `:shared_latent`, the reading a top-level vector's
   entries get (`x[1:n] .~ Law`, read at the cell as `x[ids[i]]`): their law stays
-  in the population prior, they enter θ (or are fixed by `shared_point`), each
-  unit's conditional likelihood reads its own cells' latents, and `brm_svi_fit`
-  gives each cell's coordinates, with their prior factors, to the unit whose cells
-  read them. Before, `brm_nlme_view` refused with "coordinate record kind
-  `cell_latent` has no NLME role". A cell latent whose law reads the units' draws
-  (`x ~ Normal(m[i] .+ loc[i], s)` with `m ~ 1 + (1 | g)`) is refused by name,
-  as a submodel's is; the message names the same model written without that
-  read (`d ~ Normal(loc[i], s)`, then `x = m[i] .+ d`) (snag
-  `brm-nlme-view-re-ed98959b`).
+  in the population prior, they enter θ (or are fixed by `shared_point`), and
+  each unit's conditional likelihood reads its own cells' latents. Before,
+  `brm_nlme_view` refused with "coordinate record kind `cell_latent` has no NLME
+  role". `brm_svi_fit` gives a cell component's locals, with their prior
+  factors, to the unit whose cells read them. A dotted cell latent stays a global
+  of the fit for now: ReactiveKernels reports each unit's footprint as reading
+  every cell's latent block (ReactiveKernels snag `rkppl-dotted-pla-1629a747`); the
+  split is exact either way, and the same model with a top-level vector read as
+  `x[ids[i]]` is owned per unit already. A cell latent whose law reads a value the
+  model computes per cell (`x ~ Normal(m[i] .+ loc[i], s)`) is refused by name,
+  since that law's reads cannot be localized yet; the message names the same
+  model written without the read (`d ~ Normal(loc[i], s)`, then `x = m[i] .+ d`)
+  (snag `brm-nlme-view-re-ed98959b`).
 
 ## 0.2.242
 

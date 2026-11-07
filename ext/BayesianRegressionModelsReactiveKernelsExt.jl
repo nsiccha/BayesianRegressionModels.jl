@@ -699,6 +699,8 @@ BRM._rk_nlme_partition_query(context, unit) =
         by=context.by, locality=:error, partitioned=context.partitioned, u0=unit)
 BRM._rk_nlme_is_partition_separability_error(error) =
     error isa ReactiveKernels.PartitionSeparabilityError
+BRM._rk_nlme_is_partition_locality_error(error) =
+    error isa ReactiveKernels.PartitionLocalityError
 BRM._rk_nlme_partition_labels(query) = partition_labels(query)
 BRM._rk_nlme_partition_value(query, point, label) = query(point, label)
 
