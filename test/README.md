@@ -1146,6 +1146,15 @@ start transport, scientific labels and empirical Bayes modes against the
 analytic conditional Gaussian, plus a short SAEM call. Neither rewrites the
 authored model or uses numerical derivatives as an oracle.
 
+`nlme_laplace_coloring.jl` checks the whole-model Laplace's structural
+coloring on connected units: a unit of subjects that all read one hub subject
+needs the same few colors at 5 and 13 subjects, and on hub and chain units with
+Gaussian and Poisson cells the colored unit Hessians, Laplace values and
+gradients match the same problem under the position coloring. A pattern cut
+short of the cells' reads is caught by the first assembly's check, which warns
+and falls back to the position coloring. Subjects no cell couples, and the
+strict partition, keep the position coloring.
+
 `nlme_joint_start.jl` checks a complete NLME estimate against the same
 BRMI's compiled Stan model: non-unit covariance and natural subject effects
 round-trip through Stan's unconstrained coordinates, fixed/free indices
