@@ -179,7 +179,8 @@ function _brm_svi_laplace_drive(init,save,x,previous,method;caller,description,
     _brm_svi_check_snapshot(caller,snapshot,snapshot_every,snapshot_draws)
     _brm_with_progress(progress;description) do node
         _brm_with_phases(node,_BRM_SVI_PHASES) do phases
-            lowered=_brm_svi_lowered(x,phases.lower)
+            lowered=_brm_svi_lowered(x,phases.lower;subject_group,nested_groups,
+                shared_groups,unit_partition)
             check_lowered(lowered)
             # Refuse unsupported model structure before compiling AD for it.
             if lowered isa RKBRMI

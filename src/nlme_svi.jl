@@ -963,9 +963,11 @@ _brm_svi_fill_absent_draws!(rng, draws, t, ::Nothing) = draws
 
 # The model through its preparation phases, as for `brm_nlme_fit`: lowering to
 # RK and `brm_nlme_model`. A stage `x` has already passed is reused.
-_brm_svi_lowered(x::BRMI, phase) = _brm_run_phase(_ -> RKBRMI(x), phase)
-_brm_svi_lowered(x::Union{RKBRMI,BRMNLMEModel}, phase) = (_brm_reuse_phase!(phase); x)
-_brm_svi_lowered(x, phase) = throw(ArgumentError(
+_brm_svi_lowered(x::BRMI, phase; groups...) =
+    _brm_run_phase(_ -> _brm_nlme_lowered(x; groups...), phase)
+_brm_svi_lowered(x::Union{RKBRMI,BRMNLMEModel}, phase; groups...) =
+    (_brm_reuse_phase!(phase); x)
+_brm_svi_lowered(x, phase; groups...) = throw(ArgumentError(
     "brm_svi_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
     "got $(typeof(x))"))
 
@@ -1037,7 +1039,9 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   `shared_point`, `subject_group`, `nested_groups` and `shared_groups`, as
   [`brm_nlme_model`](@ref) takes them; a nested model passes `subject_group`
   and `nested_groups`, a model with a grouping crossed with the subjects
-  `shared_groups`. Every observation must belong to one subject's cells: a
+  `shared_groups`. A BRMI's `mi(...)` completions whose law reads the units'
+  draws are lowered non-centered, as by [`brm_nlme_fit`](@ref). Every
+  observation must belong to one subject's cells: a
   cell of a `@plate for` over the subjects or over their rows, or a row of a
   flat-row response grouped by the subjects.
 - `family` — the global factor: `MeanFieldGlobal()` (diagonal) or
@@ -1262,7 +1266,8 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
     threads = _brm_svi_threads(caller, threads, ad_backend)
     _brm_with_progress(progress; description) do node
         _brm_with_phases(node, _BRM_SVI_PHASES) do phases
-            lowered = _brm_svi_lowered(x, phases.lower)
+            lowered = _brm_svi_lowered(x, phases.lower; subject_group, nested_groups,
+                shared_groups, unit_partition)
             check_lowered(lowered)
             m = _brm_svi_model(lowered, phases.prepare;
                 ad_backend, shared_point, subject_group, nested_groups, shared_groups, unit_partition)

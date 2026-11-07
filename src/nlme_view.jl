@@ -496,7 +496,14 @@ grouped entries of
 `mi(x)::shares(total, rows)` are unit draws of the subject owning each
 group's rows when the backend is non-centered
 (`RKBRMI(brmi; completions = :noncentered)`); centred they are refused, since
-their density reads the law and with it the units' draws. A declaration of zero
+their density reads the law and with it the units' draws. So is the centred
+completion of any `mi(x)` whose law reads the units' draws, and a submodel's
+sampled declaration whose law reads them: each unit's conditional would omit
+that prior term while the lockstep gradient carries it. Lowered
+non-centered, such a completion's missing entries are unit draws observing
+their law's density in their unit's conditional; the fits that take a `@brm`
+model ([`brm_nlme_fit`](@ref), `brm_two_stage_fit`, `brm_svi_fit`) lower
+exactly those completions non-centered themselves. A declaration of zero
 length, such as the coefficient block of a single-level treatment-coded factor,
 owns no coordinate and is not a refusal. See [`BRMNLMEView`](@ref).
 
@@ -518,6 +525,99 @@ completion or one with a group whose missing entries lie on rows of several
 subjects, or any coordinate the semantic inventory does not cover.
 """
 function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
+        nested_groups=NamedTuple(), shared_groups=(), unit_partition=:subjects)
+    view = _brm_nlme_view(backend; subject_group, nested_groups, shared_groups,
+        unit_partition)
+    _brm_nlme_refuse_unit_reading_priors(backend, view)
+    view
+end
+
+# Factors of the prior (authored sampling statements and coordinate Jacobians,
+# RKPPL `density_factors`) that own no unit draw but structurally read one,
+# as `site => entries`. Each unit's conditional omits such a factor (its values
+# and one-unit gradients come from `:pointwise`), the population prior
+# evaluates it with every unit draw at zero, and the lockstep gradient and the
+# η Hessian, taken from the whole sampler, carry its η-derivative: so no NLME
+# route reads it exactly, and they disagree silently (snag
+# brm-nlme-loglike-7c4b209b). The factors scanned are those owned by shared
+# latents, and only in a model with a shared latent sampled under a law the
+# model's author wrote: a centred completion's missing entries or a
+# submodel's declarations. BRM's own shared constructions (HSGP components,
+# crossed random effects, fields, walks) have priors that read their
+# hyperparameters only. Population, scalar and Ω priors are not scanned:
+# their laws are written in numbers and population coordinates. The catalogue
+# and its supports cost about a minute of compilation in a fresh process on
+# the regional panel, and seconds after that.
+function _brm_nlme_unit_reading_priors(backend::RKBRMI, view)
+    none = Pair{Symbol,Int}[]
+    any(r -> r.kind === :submodel || (r.kind === :missing_value && !r.noncentered),
+        _brm_nlme_records(backend.plan)) || return none
+    shared = view.role .=== :shared_latent
+    any(shared) || return none
+    unit = falses(length(view.role))
+    for block in view.subject_coordinates
+        unit[block] .= true
+    end
+    any(unit) || return none
+    _rk_nlme_unit_reading_factors(backend, shared, unit)
+end
+# Implemented by the ReactiveKernels extension.
+function _rk_nlme_unit_reading_factors end
+
+# The centred completions among those factors' sites, by `mi` source.
+function _brm_nlme_unit_reading_completions(backend::RKBRMI, readers)
+    declarations = Dict{Symbol,Symbol}(record.declaration => record.target
+        for record in _brm_nlme_records(backend.plan)
+        if record.kind === :missing_value && !record.noncentered)
+    unique!(Symbol[declarations[site] for (site, _) in readers if haskey(declarations, site)])
+end
+
+function _brm_nlme_refuse_unit_reading_priors(backend::RKBRMI, view)
+    readers = _brm_nlme_unit_reading_priors(backend, view)
+    isempty(readers) && return nothing
+    completions = _brm_nlme_unit_reading_completions(backend, readers)
+    if !isempty(completions)
+        sources = join(("`mi($s)`" for s in completions), ", ")
+        spelling = length(completions) == 1 ? "(:$(only(completions)),)" :
+            "(" * join((":$s" for s in completions), ", ") * ")"
+        _brm_nlme_error("brm_nlme_view: the law of $sources reads the units' " *
+            "draws, and its missing entries are centred: their density is then a " *
+            "prior term on shared coordinates, which each unit's conditional " *
+            "omits while the lockstep gradient carries it, so no NLME route reads " *
+            "it exactly. Lower the model with `RKBRMI(brmi; completions = " *
+            ":noncentered)` (or `completions = $spelling`), the same model, whose " *
+            "missing entries are then unit draws observing their density; " *
+            "`brm_nlme_fit`, `brm_two_stage_fit` and `brm_svi_fit` do so " *
+            "themselves when given the `@brm` model.")
+    end
+    _brm_nlme_error("brm_nlme_view: the prior of the shared " *
+        join(("`$site` ($n " * (n == 1 ? "entry" : "entries") * ")" for (site, n) in readers),
+            ", ") *
+        " reads the units' draws without owning any: each unit's conditional omits " *
+        "it, the population prior evaluates it with every unit draw at zero and the " *
+        "lockstep gradient carries it, so no NLME route reads it exactly")
+end
+
+# A `@brm` model lowered for the NLME paths (`brm_nlme_fit`, `brm_two_stage_fit`,
+# `brm_svi_fit`): centred, except the completions whose law reads the units'
+# draws, which are non-centered so that their density joins their units'
+# conditionals, and the grouped entries of `mi(x)::shares(total, rows)`,
+# whose centred reading `brm_nlme_view` refuses whatever their law reads.
+# Other completions keep the centred reading.
+function _brm_nlme_lowered(brmi::BRMI; subject_group=nothing, nested_groups=NamedTuple(),
+        shared_groups=(), unit_partition=nothing)
+    rk = RKBRMI(brmi)
+    shares = unique!(Symbol[r.target for r in _brm_nlme_records(rk.plan)
+        if r.kind === :missing_value && !r.noncentered &&
+            get(r, :bijection, nothing) === :shares])
+    isempty(shares) || (rk = RKBRMI(brmi; completions=shares))
+    view = _brm_nlme_view(rk; subject_group, nested_groups, shared_groups,
+        unit_partition=something(unit_partition, :subjects))
+    sources = _brm_nlme_unit_reading_completions(rk, _brm_nlme_unit_reading_priors(rk, view))
+    isempty(sources) ? rk : RKBRMI(brmi; completions=union(shares, sources))
+end
+
+function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), unit_partition=:subjects)
     unit_partition in (:subjects, :connected) || throw(ArgumentError(
         "unit_partition must be :subjects or :connected"))
