@@ -122,7 +122,11 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
     prior = !connected && sum(length, units; init=0) == nz &&
         all(j -> m.view.role[j] === :subject_effect, Iterators.flatten(units)) ? nothing :
         _brm_svi_authored_prior(m, globals, units; factors=ownership.factors)
-    (; m, globals, units, ownership, previous, partition, plan, plans=[plan], work, places,
+    # Worker plans build their samplers from the partition's bound context, which is all
+    # the target keeps of it: a connected partition's value query, its footprints (the
+    # plan holds its own) and its evaluator pool are per unit and served the plan.
+    (; m, globals, units, ownership, previous, partition=(; partition.context), plan,
+       plans=[plan], work, places,
        touched=_brm_svi_field_touched!(_brm_svi_touched_globals(places, prior), fields), prior,
        fields, z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
 end

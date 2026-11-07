@@ -17,9 +17,9 @@ states elsewhere conditioning on one of its own, `states` everything either read
 struct _BRMVecchiaLocalPlan
     owned::Vector{Int32}
     patterns::Vector{Int32}
-    own_ptr::Vector{Int}
+    own_ptr::Vector{Int32}
     own::Vector{Int32}
-    other_ptr::Vector{Int}
+    other_ptr::Vector{Int32}
     other::Vector{Int32}
     states::Vector{Int32}
 end
@@ -70,7 +70,7 @@ function _brm_vecchia_local_plans(f::_BRMGMRFFootprint, owner::AbstractVector{<:
 end
 
 function _brm_vecchia_by_pattern(patterns, states, pattern)
-    ptr = zeros(Int, length(patterns) + 1)
+    ptr = zeros(Int32, length(patterns) + 1)
     ptr[1] = 1
     place(p) = searchsortedfirst(patterns, p)
     for s in states

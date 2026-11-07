@@ -114,42 +114,47 @@ function _brm_svi_field_law(field, g)
 end
 
 # `(positions in the field, place in a block or the globals)` of what one owner reads.
+# Kept per unit, so stored once: a plan's coordinates are its states' channels, read
+# through `plan.states`, and `blanket[i + 1]`, the other units owner `i` reads, is
+# joined over the fields as it is built.
 function _brm_svi_unit_fields(m, ownership, inventory, globals, units)
     N = length(units)
     slot = zeros(Int, length(m.unit))
     for block in units
         slot[block] .= eachindex(block)
     end
+    blanket = [Int32[] for _ in 0:N]
     fields = map(inventory) do field
         f = field.footprint
         C = f.nchannels
         owner_of = [ownership.owner[field.positions[C * (s - 1) + 1]] for s in 1:length(f.position)]
         plans = _brm_vecchia_local_plans(f, owner_of, N)
-        coordinates = [Int32[c + C * (s - 1) for s in plan.states for c in 1:C] for plan in plans]
         unit_slots = map(enumerate(plans)) do (i, plan)
             [(c + C * (s - 1), slot[field.positions[c + C * (s - 1)]]) for s in plan.owned for c in 1:C
                 if i > 1]
         end
-        global_slots = map(coordinates) do list
+        global_slots = map(plans) do plan
             pairs = Tuple{Int,Int}[]
-            for k in list
+            for s in plan.states, c in 1:C
+                k = c + C * (s - 1)
                 p = _brm_sorted_slot(globals, field.positions[k])
                 p == 0 || push!(pairs, (k, p))
             end
             pairs
         end
-        blanket = map(enumerate(plans)) do (i, plan)
-            sort!(unique!([owner_of[s] for s in plan.states if owner_of[s] != 0 && owner_of[s] != i - 1]))
+        for (i, plan) in enumerate(plans), s in plan.states
+            o = owner_of[s]
+            o != 0 && o != i - 1 && push!(blanket[i], o)
         end
         spatial = _brm_svi_field_length(m, field.record, :spatial_length, globals)
         temporal = _brm_svi_field_length(m, field.record, :temporal_length, globals)
         factor = _brm_svi_field_factor(m, field.record, f, globals)
         global_states = [(field.positions[k], _brm_sorted_slot(globals, field.positions[k]))
             for k in 1:f.ncoordinates if _brm_sorted_slot(globals, field.positions[k]) != 0]
-        (; f, field.positions, plans, coordinates, unit_slots, global_slots, blanket, spatial,
+        (; f, field.positions, plans, unit_slots, global_slots, spatial,
            temporal, factor, global_states, law=Ref{Any}(nothing))
     end
-    blanket = [sort!(unique!(reduce(vcat, (field.blanket[i] for field in fields); init=Int[]))) for i in 1:(N + 1)]
+    foreach(list -> sort!(unique!(list)), blanket)
     (; fields=Tuple(fields), blanket, others=copy(m.unit))
 end
 
@@ -192,6 +197,7 @@ function _brm_svi_field_prepare!(rng, t::NamedTuple, q, g, batch)
     end
     readers = reduce(vcat, (state.blanket[i + 1] for i in batch); init=copy(state.blanket[1]))
     for u in sort!(unique!(readers))
+        u = Int(u)
         state.others[t.units[u]] .= _brm_svi_draw_unit(q, u, _brm_svi_unit_noise(rng, q.U[u]))
     end
     nothing
@@ -203,7 +209,9 @@ function _brm_svi_field_piece!(gg, gz, field, i, z, others, work)
     plan = field.plans[i + 1]
     isempty(plan.states) && return 0.0
     x, local_work = work.x, work.local_work
-    @inbounds for k in field.coordinates[i + 1]
+    C = field.f.nchannels
+    @inbounds for s in plan.states, c in 1:C
+        k = c + C * (s - 1)
         x[k] = others[field.positions[k]]
     end
     unit_slots = field.unit_slots[i + 1]
