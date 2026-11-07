@@ -12,6 +12,36 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.239
+
+- Added: `brm_svi_fit(...; cell_units)` for connected units. Likelihood cells that
+  read no subject's effect used to land in the first unit, with every ordinary
+  coordinate only they read, so that unit was evaluated on almost every update
+  whatever the batch size. `:components`, the new default under
+  `unit_partition=:connected`, gives them inference units of their own, appended
+  after the subjects' units: cells reading a common ordinary coordinate no
+  subject's cell reads share a unit, and cells with no such coordinate form about
+  √m units of √m cells. A coordinate that joins nearly all of them joins them into
+  one unit until it is promoted. Scientific roles and the density are unchanged.
+  A prepared model's retained SVI target (0.2.226) is also keyed by `cell_units`.
+- Changed: under `:components`, unit `work` also counts the rows of a vector-valued
+  cell, so `unit_sampling=:work` visits data-rich units more. It is a sampling
+  weight, not a time estimate.
+- **Breaking:** a fresh connected SVI fit has a different layout, factorization and
+  sampling law, so its results differ. `cell_units=:first_unit` restores the earlier
+  layout and work. Checkpoints keep the layout they were made with, and earlier
+  checkpoints continue on `:first_unit` without being told.
+- Changed: the ReactiveKernels and ReactiveKernelsPPL floors rise to 0.1.104 and
+  0.1.114. From those versions a response that reads a `@plate`-computed vector
+  whole, such as `y ~ Normal(mu, sigma)` with `mu[i]` set in a `@plate`, splits
+  into cell units as its indexed form does. Earlier versions prepared its partition
+  without the unit's point and refused it under `:components` (ReactiveKernels snag
+  `whole-vector-res-64373f39`).
+- Measured on a synthetic model, in `research/svi_cell_units/`: 2.5-2.8× the gradient
+  variance per update, far less time per update, and a higher ELBO after 20,000
+  updates. Its sensors are nearly independent given the globals, so this does not
+  show the cost of dropping a real correlation between them.
+
 ## 0.2.238
 
 - `brm_svi_fit` polishing averages a dense unit factor's covariance instead

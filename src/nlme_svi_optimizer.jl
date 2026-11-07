@@ -393,7 +393,7 @@ function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
     end
     if hasproperty(state.identity, :global_coordinates) &&
             state.run isa _BRMSVIRun
-        options = merge(state.identity.separator,
+        options = merge((; cell_units=:first_unit), state.identity.separator,
             (; global_coordinates=state.identity.global_coordinates,
              field_states=get(state.identity, :field_states, :global)), options)
     end
