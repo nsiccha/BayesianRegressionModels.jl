@@ -23,8 +23,10 @@ instead of failing at run time.
   costs what its units read: 0.034 to 0.046 s per step from 256 to 16,384
   states on a synthetic station field, where `:global` (the default, unchanged)
   rose to 0.60 s. With ReactiveKernelsPPL 0.1.116 or later, the prepared target
-  takes about 50 KB per unit on that toy (35 KB under `:global`): 239 MB at
-  16,384 states, with peak RSS 3.2 GB. Earlier RKPPL took 0.8 MB per unit.
+  holds 22.7 KB per unit on that toy beyond the model's own (15.5 KB under
+  `:global`), counting each heap object once; 9.6 KB of it is BRM's own
+  records, 6.5 KB of those the field's conditionals. Earlier RKPPL copied the
+  model's graph into every unit's prior query, about 0.8 MB per unit.
   `:units` is refused for streaming windows, `multiresolution=` fields, and
   fields whose lengths or correlation factor are not global coordinates.
   Checkpoints carry `field_states`; a resume keeps it. A model's held SVI target

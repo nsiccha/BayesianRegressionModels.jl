@@ -248,9 +248,10 @@ next to its effects, and a state read by several units stays global. The field's
 becomes one conditional per state, owned by the state's owner, so the objective is the
 same and a minibatch of units estimates it without bias. A step then costs what its
 units read: on a synthetic station field it stayed between 0.034 and 0.046 s from 256 to
-16,384 states, while the global form rose to 0.60 s. The prepared target still holds one
-prepared prior query per unit, about 0.8 MB per unit on that toy, so memory follows the
-number of units. On those toys the field's mean came closer
+16,384 states, while the global form rose to 0.60 s. Memory follows the number of units:
+with ReactiveKernelsPPL 0.1.116 or later the prepared target holds about 23 KB per unit
+on that toy beyond the model's own, where earlier versions copied the model's graph into
+each unit's prior query, about 0.8 MB per unit. On those toys the field's mean came closer
 to the exact posterior than with the global form, and σ came out low (0.79 to 0.89 for
 a truth of 1). A unit with more coordinates than `unit_dense_limit` gets a low-rank
 factor, which made σ and the temporal length lower still, so raise the limit to cover
