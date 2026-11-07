@@ -101,6 +101,51 @@ end
     end
 end
 
+@stestset "work-weighted native target and public fit" begin
+    rng = Xoshiro(117)
+    rk = RKBRMI(svi_gauss_model(svi_gauss_data(rng, 3)))
+    m = brm_nlme_model(rk; ad_backend=NLME_AD)
+    u = m.unit .+ 0.2randn(rng, length(m.unit))
+    (; t, P, gP, terms, value, gradient) = check_svi_split(rk, m, u)
+    p = BRM._brm_svi_unit_sampler(:work, [1.0, 7, 40]).probabilities
+    expected_value, expected_gradient = 0.0, zeros(length(u))
+    for pair in Iterators.product(1:3, 1:3)
+        batch = BRM._brm_svi_weighted_batch(pair, p)
+        v, grad = P, zeros(length(u))
+        grad[t.globals] .= gP
+        for (k, i) in enumerate(batch.indices)
+            weight = batch.weights[k]
+            v += weight * terms[i].value
+            grad[t.globals] .+= weight .* terms[i].gg
+            grad[t.units[i]] .+= weight .* terms[i].gz
+        end
+        probability = prod(p[i] for i in pair)
+        expected_value += probability * v
+        expected_gradient .+= probability .* grad
+    end
+    @test expected_value ≈ value rtol=1e-11
+    @test expected_gradient ≈ gradient rtol=1e-10
+    for method in (:uniform, :work), dense_limit in (64, 0)
+        fit = brm_svi_fit(m; rng=Xoshiro(118), unit_sampling=method,
+            batch_size=3, max_iterations=6, ndraws=2,
+            unit_dense_limit=dense_limit, unit_rank=1)
+        sampling = fit.diagnostics.sampling
+        @test sampling.method == method
+        @test sum(sampling.draws) == 18
+        @test fit.diagnostics.unit_gradient_calls == 2sum(sampling.visits)
+        @test all(sampling.probabilities .> 0)
+        @test all(isfinite, fit.draws)
+        state = brm_svi_checkpoint(fit)
+        @test state.format == 3
+        update = brm_svi_fit(state, svi_gauss_model(svi_gauss_data(Xoshiro(119), 3));
+            rng=Xoshiro(120), unit_sampling=method, max_iterations=2, ndraws=0)
+        @test update.diagnostics.sampling.method == method
+        @test brm_svi_checkpoint(update).updates == 1
+        @test update.diagnostics.unit_families == fit.diagnostics.unit_families
+    end
+    @test_throws ArgumentError brm_svi_fit(m; unit_sampling=:unknown)
+end
+
 @stestset "a non-finite unit evaluation is named before the iteration changes q" begin
     # Snag connected-svi-un-45d04d2a: a non-finite unit gradient reached the
     # dense natural-gradient step and surfaced as LAPACK's "matrix contains
@@ -134,7 +179,7 @@ end
     c = BRM._brm_svi_controls(length(t.units); batch_size=length(t.units),
         max_iterations=10, lr_global=0.01, unit_step=0.1, polish_lr=0.05,
         window=nothing, patience=10, min_windows=40, polish_windows=20)
-    run = BRM._brm_svi_run(Xoshiro(5), q, c)
+    run = BRM._brm_svi_run(Xoshiro(5), q, c, t)
     run.iteration = 7
     @test_throws BRMSVINonfiniteError BRM._brm_svi_advance!(run, t, c)
     stamped = try BRM._brm_svi_advance!(run, t, c) catch err err end

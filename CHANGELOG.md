@@ -12,6 +12,73 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.231
+
+- Fixed: partition declarations for wholly unit-owned compressed transforms
+  use the constrained first-axis label count. A local 2×2 Cholesky factor
+  with one packed coordinate no longer fails the BRM ownership adapter.
+- Compatibility: require ReactiveKernels 0.1.94 / ReactiveKernelsPPL 0.1.105.
+  A tuple plate's statements run only at rows that read their entries, so
+  automatic connected units read no other unit's coordinates. Selected-unit
+  gradients and shared-row storage stay compact: warm unit-call allocations
+  no longer grow with unrelated units in the fixed-footprint scaling checks.
+  From ReactiveKernels 0.1.92, native Reverse on a unit problem can raise
+  `EnzymeRuntimeActivityError` on Enzyme dogfood before `cecb571a` (libEnzyme
+  `7f23cb72`); the test bootstrap pins that commit. Runtime activity is not needed.
+- Explicitly connected SVI defaults to bounded automatic separator selection
+  and work-weighted unit batches. `separator=:none`, `global_coordinates`,
+  `max_unit_coordinates`, `max_unit_work` and `max_promoted_coordinates`
+  control promotion. The final partition is rebuilt from structural supports;
+  scientific subject identity stays intact. Diagnostics report actual unit
+  ownership, promotion reasons and unmet budgets. All authored density factors
+  remain exact; the global/local split changes the variational approximation.
+- Streaming format 3 retains final inference-unit membership, separator controls
+  and promoted global identities alongside dense or structured local factors.
+  Later windows retain the saved global set without spending another automatic
+  promotion allowance; an unmet structural budget is reported as `:carried`.
+  Changed retained membership or global scientific identity is refused.
+- `brm_svi_fit` accepts `unit_sampling=:work` for positive work-weighted
+  sampling with replacement and inverse-probability objective/global-gradient
+  weights. Repeated draws share one local update. Diagnostics distinguish
+  draws, visits, selection probabilities and actual gradient calls;
+  `:uniform` retains distinct-unit batches and remains the subject-mode default.
+- **Breaking:** local SVI factors larger than 64 coordinates now use a
+  diagonal-plus-low-rank covariance instead of dense precision matrices.
+  `unit_dense_limit` (0:256) and `unit_rank` (0:32, default 8) control the
+  approximation. Small dense units retain their natural-gradient updates;
+  larger units use posterior-scaled path-gradient Adam updates. For those
+  units, diagnostic `q.Λ` and `q.U` are matrix operators and `q.U` is no
+  longer triangular: use multiplication rather than triangular indexing or
+  solves. Materializing an operator still requires a dense matrix.
+- Format-3 SVI checkpoints combine connected membership with structured local factors without optimizer
+  moments. Resume preserves their distribution and family under coordinate
+  reordering, accepts format-1 checkpoints, and retains carried dense factors.
+- SVI targets reuse one global-plus-local workspace per worker and store only local
+  ordering metadata per unit. Cached entropy and lazy local polishing avoid
+  visiting all local factors on every iteration. The underlying cell plan
+  still determines structural-selection storage; full returned draws still
+  scale with the complete parameter dimension.
+- Weighted batches, visit counts, cached entropy and lazy local polishing now
+  participate in optimizer checkpoints, preserving continuation across thread
+  counts. Structured local factors retain their Adam state on same-target resume.
+- `BRMSVINonfiniteError` (0.2.209) also covers structured local factors and
+  work-weighted batches: the iteration is named before it changes `q` or the
+  optimizer, whichever local family or sampler the unit uses.
+- The 0.2.223 gradient bound covers work-weighted batches and structured local
+  factors. Under `unit_sampling=:work` it is `10 √w` times a global's running rms,
+  with `w` the batch's largest unit weight (`N / B` for a uniform batch, as
+  before), because a unit drawn with chance π carries weight about 1 / π. A local
+  factor above `unit_dense_limit` steps with its own Adam only when its unit is
+  drawn, so its gradient is limited to `10` times its own running rms.
+- A prepared model's retained SVI target (0.2.226) is keyed by the separator policy
+  and budgets as well as the requested globals and streaming carry, so a connected
+  fit never reuses a partition built under another policy. Snapshots report a
+  connected fit's inference units in `levels`, as `diagnostics.unit_levels` does.
+  A snapshot's `q.Λ` and `q.U` are plain data: a dense unit's matrix, or a
+  structured unit's `(; family=:diagonal_lowrank, ρ, Β)`, so a saved snapshot
+  still loads without BRM.
+  `diagnostics.unit_gradient_calls` counts actual evaluations: a unit drawn twice
+  in one work-weighted batch is evaluated once.
 ## 0.2.230
 
 - Fixed: on `RKBRMI`, a `gmrf((east, north), time, channel)` field without `cor`

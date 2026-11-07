@@ -22,7 +22,8 @@ another process. For the minibatch engine it holds the raw variational factors
 (also while polishing, next to the running average the result reports), the
 global Adam moments and step count, the random stream, the iteration, the
 ELBO trace and window statistics of the stopping rule and the polishing
-state. For `laplace=GaussianBlockLaplace()` it holds the global factor, Adam,
+state, the weighted sampler, per-unit visits, cached entropy, lazy-average
+counters and structured-unit Adam moments. For `laplace=GaussianBlockLaplace()` it holds the global factor, Adam,
 the ELBO so far, the averaging window of global iterates, the random stream
 and a separate `draw_rng`, and the call counts and numerical records. Both
 hold the optimizer controls, the streaming carry of a window fit, and the
@@ -86,10 +87,11 @@ function _brm_svi_identity(t)
        binding_parts=_brm_rk_binding_parts(m.backend),
        grouping=(; group=m.view.group, nested=Tuple(keys(m.view.nested_groups)),
            shared=Tuple(m.view.shared_groups), unit_partition=m.view.unit_partition),
-       ownership=_brm_value_digest((m.view.levels, t.globals, t.units)),
+       ownership=_brm_value_digest((hasproperty(t, :ownership) ? _brm_svi_unit_levels(t) : m.view.levels, t.globals, t.units)),
        fixed=_brm_value_digest(fixed),
        global_coordinates=hasproperty(t, :ownership) ?
-           copy(m.view.coordinates[t.ownership.promoted]) : Symbol[])
+           copy(m.view.coordinates[_brm_svi_requested_globals(t)]) : Symbol[],
+       separator=hasproperty(t, :ownership) ? _brm_svi_separator_options(t) : (; separator=:none))
 end
 
 _brm_svi_optimizer_state(t, previous, c, run) = BRMSVIOptimizerState(
@@ -129,7 +131,9 @@ brm_svi_checkpoint(::BRMSVIOptimizerState) = throw(ArgumentError(
 const _BRM_SVI_IDENTITY_PARTS = (
     grouping="the subject, nested or shared groupings",
     ownership="the subjects or the coordinates each subject owns",
-    fixed="the values of the fixed shared coordinates")
+    fixed="the values of the fixed shared coordinates",
+    global_coordinates="the requested global-coordinate promotion",
+    separator="the separator policy and budgets")
 
 const _BRM_SVI_LOCATED_PROGRAM = " (the checkpoint's program digest predates " *
     "BRM's place-free program identity: it included the file and line each macro " *
@@ -190,13 +194,19 @@ function _brm_svi_consistent(run::_BRMSVIRun, t, c)
     D, N = length(t.globals), length(t.units)
     factors = (q, something(run.average, q))
     all(f -> length(f.μ) == D && length(f.ρ) == D && size(f.Β, 1) == D &&
-            length(f.M) == length(f.Λ) == length(f.U) == N &&
+            length(f.M) == length(f.Λ) == length(f.U) == length(f.unit_opt) == N &&
             all(i -> length(f.M[i]) == size(f.Λ[i], 1) == size(f.U[i], 1) ==
                 length(t.units[i]), 1:N), factors) &&
         length(run.adam.m) == length(run.adam.v) == length(_brm_svi_global_vector(q)) &&
         length(run.trace) == run.iteration && 0 <= run.polish_start <= run.iteration &&
         (run.average === nothing) == (run.polish_start == 0) &&
-        length(run.windows) <= run.iteration ÷ c.window
+        length(run.windows) <= run.iteration ÷ c.window &&
+        length(run.sampler.probabilities) == length(run.sampling.visits) ==
+            length(run.sampling.draws) == length(run.averaged_through) ==
+            length(run.unit_entropy) == N &&
+        run.sampling.method == c.unit_sampling &&
+        run.unit_gradient_calls == 2sum(run.sampling.visits) &&
+        sum(run.sampling.draws) == c.batch_size * run.iteration
 end
 
 # The resumed run on `t`: the streaming prior from the checkpoint's carry, the
@@ -328,7 +338,8 @@ function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
     end
     if hasproperty(state.identity, :global_coordinates) &&
             state.run isa _BRMSVIRun
-        options = merge((; global_coordinates=state.identity.global_coordinates), options)
+        options = merge(state.identity.separator,
+            (; global_coordinates=state.identity.global_coordinates), options)
     end
     _brm_svi_drive(save, x, state.previous; call..., description="BRM SVI resume",
             threads, options...) do t
