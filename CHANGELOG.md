@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.234
+## 0.2.235
 
 - `brm_svi_fit(...; field_states=:units)` holds a read-pair field's states
   (`gmrf(...; neighbors=m)`) in units' own Gaussian factors. A state read by one
@@ -37,6 +37,25 @@ instead of failing at run time.
   restore over every global, are gone, so a step no longer grows with the
   number of globals. Results are unchanged: seeded fits are bit-identical to
   0.2.217's.
+
+## 0.2.234
+
+- Fixed: `brm_svi_resume` of a `@brm` model read the grouping options before it
+  compared the model with the checkpoint. Since 0.2.229 the `@brm` entry of the
+  NLME fits chooses which `mi(...)` completions to lower non-centered from the
+  groupings, and it built the subject view to choose even for a model without
+  a centred completion. So resuming a different model with a wrong grouping
+  option failed on the grouping (`brm_nlme_view: subject_group ... is not ...`)
+  instead of naming the difference, contrary to resume's contract of comparing
+  the model right after lowering. An SVI checkpoint now records which
+  completions its model lowered non-centered (`identity.completions`, the
+  mode `RKBRMI(brmi; completions)` takes), and resume lowers a `@brm` model
+  that way, as `reprocess` keeps a backend's parametrization, so the comparison
+  reads no grouping option; preparation then checks the groupings. A model
+  without a centred completion is lowered without reading the groupings in
+  every fit. A checkpoint written before this records no parametrization and
+  is lowered from the grouping options as before. Snag
+  `resume-identity-90a2f094`.
 
 ## 0.2.233
 
