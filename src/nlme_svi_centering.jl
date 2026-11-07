@@ -601,6 +601,42 @@ function _brm_svi_centering_batch_gradient(plan::_BRMSVICenteringPlan, t, frame,
     _brm_svi_centering_gradient(plan, t, frame, Ā, terms) .+ locations
 end
 
+# A sparse global's site stands for its reader's whole term (src/nlme_svi_sites.jl),
+# which under centering reads the global through its cells' locations and scales
+# as well: a window's first state located at its boundary, say. At c = 1 that
+# chain term all but cancels the term's direct gradient there, so the site must
+# see both. Adds each batch unit's chain term, summed over its antithetic pair as
+# `gg` is, at its sparse entries. `chain` is the batch's weighted sum
+# (`_brm_svi_centering_batch_gradient`), and a cell's locations and scales are
+# read by its own unit's term, so a sparse global with one reader in the batch
+# takes the sum whole; one with several takes each reader's own pullback.
+_brm_svi_centering_site_terms!(terms, ::Nothing, plan, t, frame, centered, batch, weights,
+    chain) = terms
+function _brm_svi_centering_site_terms!(terms, sites::_BRMSVISites, plan, t, frame,
+        centered, batch, weights, chain)
+    readers = zeros(Int, length(sites.globals))
+    for i in batch, entry in sites.entries[i]
+        readers[sites.slot[_brm_svi_unit_touched(t, i)[entry]]] += 1
+    end
+    for (k, i) in enumerate(batch)
+        entries = sites.entries[i]
+        isempty(entries) && continue
+        touched = _brm_svi_unit_touched(t, i)
+        own = nothing
+        for entry in entries
+            p = touched[entry]
+            terms[k].gg[entry] += if readers[sites.slot[p]] == 1
+                2chain[p] / weights[k]
+            else
+                own === nothing && (own = _brm_svi_centering_batch_gradient(plan, t, frame,
+                    (centered[k],), (2.0,)))
+                own[p]
+            end
+        end
+    end
+    terms
+end
+
 # One Adam ascent step of each batch unit's control logits along its own term's
 # gradient (∂/∂x = ∂/∂c · c (1 - c)), as its factor steps on its own term.
 function _brm_svi_control_steps!(q, batch, centered)

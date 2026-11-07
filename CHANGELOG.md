@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.240
+## 0.2.241
 
 - New: learned partial centering in minibatch SVI,
   `brm_svi_fit(x; centering=LearnedCentering())` (Gorinova, Moore and Hoffman
@@ -41,6 +41,51 @@ instead of failing at run time.
   controls do not reinterpret old factors; `brm_svi_resume` continues a
   centered optimizer checkpoint.
 - Compatibility: depends on ReparametrizableDistributions 0.3 (git source).
+- Learned centering and reader sites (0.2.240) compose: a sparse global's
+  site stands for its reader's whole centered term, so the reader's gradient
+  there includes the chain through its cells' locations and scales (a window's
+  first state located at its boundary, say). That chain term reaches every other
+  global through the batch's one pullback, as before.
+
+## 0.2.240
+
+- Fixed: `brm_svi_fit` left globals that few units read far from the family's
+  optimum: a time window's boundary states, a read-pair field's states, a
+  separator. Such a coordinate has a likelihood gradient only when one of its
+  readers is in the batch, then N/B times the reader's own, and Adam gave it a
+  noise-driven walk; restarting Adam for polishing widened its sd and pulled its
+  mean towards the prior until a reader came round. On window units of OU chains
+  whose boundary states two units read (1,024 units, batch 8) the fit ended
+  229,317 nats below the family's optimum, the boundaries' sds 4.1 times the
+  optimal (median; up to 39) and their means 15 optimal sds off (rms). Each
+  reader of such a coordinate now keeps a Gaussian site for it (its curvature and
+  pull, refreshed when the reader is visited, its precision bounded per visit as a
+  unit's own step is), and the coordinate steps on its prior plus the sum of its readers'
+  sites. On that toy the fit ends 941 nats below the optimum, 718 of them the
+  units' own widths; the boundaries' sds are 1.01 times the optimal (5-95%:
+  0.84-1.24) and their means 1.2 optimal sds off (rms), 0.53 after a later stop
+  (`min_windows=120`). On the snag's own case (2,048 window units with learned OU
+  and field hyperparameters and a read-pair `gmrf` field whose states 16 units
+  read; batch 8) the fit ends 17,645 nats below the family's best factor at its
+  own hyperparameters, against 268,852: boundary sds 1.06 times the optimal
+  (6.27 before), boundary means 1.14 optimal sds off (11.3), field states 0.98
+  and 1.94 (1.47 and 4.26). Most of what remains is the units' own widths. The
+  fitted OU length is 17.7 against 13.6 before (family optimum 40.9), but its
+  hyperparameters cost 1,595 nats against the optimum's, 856 before. A later
+  stop (`min_windows=200`) lowered that fit's ELBO by 88,477 nats; it now costs
+  769, from the units' widths alone, while its states and hyperparameters improve.
+- A global is stepped this way when its readers are drawn less than once per
+  batch on average (`batch_size` times the sum of its readers' sampling
+  probabilities below one). Population coefficients and hyperparameters that
+  every unit reads keep the minibatch estimate. The objective, the ELBO trace,
+  the units' steps and `laplace=GaussianBlockLaplace()` are unchanged.
+- Added: `diagnostics.sparse_globals`, the packed positions of the globals
+  stepped on reader sites, their reader counts and expected reader draws per
+  batch.
+- **Breaking:** an optimizer checkpoint (`BRMSVIOptimizerState`) written by an
+  earlier version does not load, since the run's fields changed; finish such a
+  run on its own version or restart it. A fit with sparse globals on a fixed
+  seed differs from an earlier version's from its first iteration.
 
 ## 0.2.239
 
