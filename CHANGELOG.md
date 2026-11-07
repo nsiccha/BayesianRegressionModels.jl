@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.230
+## 0.2.232
 
 - `brm_svi_fit(...; field_states=:units)` holds a read-pair field's states
   (`gmrf(...; neighbors=m)`) in units' own Gaussian factors. A state read by one
@@ -36,7 +36,7 @@ instead of failing at run time.
   number of globals. Results are unchanged: seeded fits are bit-identical to
   0.2.217's.
 
-## 0.2.229
+## 0.2.231
 
 - Fixed: partition declarations for wholly unit-owned compressed transforms
   use the constrained first-axis label count. A local 2×2 Cholesky factor
@@ -103,6 +103,62 @@ instead of failing at run time.
   still loads without BRM.
   `diagnostics.unit_gradient_calls` counts actual evaluations: a unit drawn twice
   in one work-weighted batch is evaluated once.
+## 0.2.230
+
+- Fixed: on `RKBRMI`, a `gmrf((east, north), time, channel)` field without `cor`
+  spelled its identity channel factor as a literal sized by the channel count
+  (`hcat(vect(1.0, 0.0), vect(0.0, 1.0))` for two channels), so fields that
+  differ only in their number of channels emitted different programs. The
+  program now reads the identity from the fitted support
+  (`brm_gmrf_identity_factor(support.geometry)`, as per-cell fields already did),
+  so one program serves every channel count on the mesh, `neighbors=` and
+  `multiresolution=` forms (user principle `0ikeidi`). From ReactiveKernelsPPL
+  0.1.113 they also lower to one program. Densities and gradients are
+  unchanged; `SBBRMI` already read the identity from its data. Snag
+  `gmrf-channel-ide-f3e0758e`.
+- Changed: **a model with such a field emits a different program**, a field
+  without a `channel` column included (its one-channel factor was
+  `hcat(vect(1.0))`), and its SMC and SVI checkpoint tags change. A fitted state
+  an earlier version wrote for it is refused at replay ("changes the fitted RK
+  program") and needs a fresh fit.
+
+## 0.2.229
+
+- Fixed: on the NLME paths, an `mi(x)` completion whose law reads the units'
+  draws (`mi(x1) ~ LogNormal(mu_x, sigma_x)` with `mu_x ~ ... + (1 | region)` and
+  `region` the subjects) gave routes that silently disagreed under the default
+  centred lowering. The missing entries were shared coordinates in θ, so their
+  law was a prior term: each unit's values and one-unit gradient
+  (`brm_nlme_loglikelihood(_and_gradient)`) omitted it, the population prior
+  evaluated it with every unit draw at zero, and the lockstep gradient
+  (`brm_nlme_loglikelihoods_and_gradients`) and the η Hessian carried it. On the
+  regional panel the lockstep gradient differed from the gradient of the values
+  by up to 4.6, so an NLMEEstimation fit saw a subject's gradient change with its
+  batch. Snag `brm-nlme-loglike-7c4b209b`.
+- Changed: `brm_nlme_fit`, `brm_two_stage_fit` and `brm_svi_fit` given a `@brm`
+  model lower exactly the completions whose law reads the units' draws
+  non-centered. Their missing entries are then unit draws, integrated with their
+  unit, whose law's density joins the unit's conditional. They also lower the
+  grouped entries of `mi(x)::shares(total, rows)` non-centered, whose centred
+  reading `brm_nlme_view` has always refused. Every other completion keeps the
+  centred reading.
+- **Breaking:** `brm_nlme_view` (and so `brm_nlme_model`, `brm_laplace_problem`
+  and the fits given an `RKBRMI`) refuses a centred completion whose law reads
+  the units' draws, naming `RKBRMI(brmi; completions = :noncentered)` or
+  `completions = (:x,)`. Lower the backend that way, or pass the `@brm` model to
+  the fit. A submodel's sampled declaration whose law reads the units' draws is
+  refused by name too. A fit that lowered such a model from its `@brm` model
+  now samples `x.z_mis` where it sampled `x.y_mis`, and θ no longer holds the
+  missing entries.
+- Added: `RKBRMI(brmi; completions = :noncentered)` takes every continuous
+  univariate law. A law without a location and scale keeps its support transform
+  on the standard-normal draw (`lower + exp(z)`, `upper - exp(z)`, a scaled
+  logistic on an interval, `z` on the real line: the coordinate the centred
+  lowering samples) and observes its exact density remainder in `:pointwise`;
+  it used to be refused ("needs a location-scale law"). `completions` also takes
+  a collection of `mi` sources, `completions = (:x,)`, to non-center those
+  completions only. A regression-plan `mi(y)` response, which samples none of its
+  missing entries, accepts every spelling instead of refusing `:noncentered`.
 
 ## 0.2.228
 

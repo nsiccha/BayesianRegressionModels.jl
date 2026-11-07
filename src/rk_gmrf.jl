@@ -274,8 +274,13 @@ function _rk_ast_gmrf!(definitions, statements, taken, bindings, term)
     block = _rk_block_body(prior...)
     geometry = _rk_block_argument!(block, :geometry, _rk_ast_property(support, :geometry))
     reads = _rk_block_argument!(block, :rows, rows)
+    # Without `cor` the channels are independent: the identity is sized by the
+    # fitted support's channel count, read from data like the cell fields', so
+    # one program serves every channel count (user principle `0ikeidi`).
     correlation = options.correlation === nothing ?
-        _rk_ast_identity_factor(options.nchannels) : _rk_ast_level_factor_value(options.correlation)
+        Expr(:call, _rk_value_callee!(bindings, brm_gmrf_identity_factor, taken),
+            _rk_ast_property(support, :geometry)) :
+        _rk_ast_level_factor_value(options.correlation)
     L = _rk_block_argument!(block, :L, correlation)
     multiresolution_functions = multiresolution ?
         (; basis=_rk_value_callee!(bindings, _rk_gmrf_multiresolution_basis(), taken),
@@ -288,8 +293,6 @@ function _rk_ast_gmrf!(definitions, statements, taken, bindings, term)
 end
 
 _rk_ast_property(value, name) = Expr(:., value, QuoteNode(name))
-_rk_ast_identity_factor(n) = Expr(:call, :hcat, (Expr(:vect, (i == j ? 1.0 : 0.0 for i in 1:n)...)
-    for j in 1:n)...)
 
 # One field's block: its hyperparameters under their priors, its joint law on
 # `geometry`, and the rows' three-vertex reads scaled by its SD, as the call of
@@ -565,6 +568,8 @@ function _rk_expand_cell_gmrf(statement, index, selected, defs, bindings, taken,
         Expr(:(=), lhs, entry)]
 end
 
+# The channel factor of a field without `cor`, model scope or cell: the identity
+# at the fitted geometry's channel count, so the program never spells that count.
 brm_gmrf_identity_factor(geometry) = Matrix{Float64}(I, geometry.nchannels, geometry.nchannels)
 
 
