@@ -314,9 +314,11 @@ const MGDATA = merge(HDATA, (; g=mod1.(eachindex(HDATA.t), 4),
 # move of the test pin switches these without an edit.
 const RK_BINDS_VALUES = pkgversion(ReactiveKernelsPPL) >= v"0.1.106"
 const RK_BINDS_SIZES = pkgversion(ReactiveKernelsPPL) >= v"0.1.108"
-# A lone simplex's Dirichlet check reads a bound concentration's length from 0.1.117
-# (ReactiveKernels snag `rkppl-dirichlet-09d87c95`); before, it writes the count.
-const RK_READS_DIRICHLET_LENGTH = pkgversion(ReactiveKernelsPPL) >= v"0.1.117"
+# A lone simplex's Dirichlet check reads a bound concentration's length from 0.1.121
+# (ReactiveKernels snag `rkppl-dirichlet-09d87c95`); before, it writes the count. The
+# fix was claimed as 0.1.117 and landed as 0.1.121 (RK d916b305): RKPPL 0.1.117 to
+# 0.1.120 are other landings that still write it.
+const RK_READS_DIRICHLET_LENGTH = pkgversion(ReactiveKernelsPPL) >= v"0.1.121"
 
 stan_program(brmi) = StanBlocks.stan_code(SBBRMI(brmi; mod=RSM).model)
 stan_inputs(brmi) = BRM.stan_data(SBBRMI(brmi; mod=RSM))
