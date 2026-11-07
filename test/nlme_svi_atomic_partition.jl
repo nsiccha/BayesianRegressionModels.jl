@@ -4,8 +4,10 @@ using ReactiveKernelsPPL: density_factors, select_factors, factor_coordinates,
     parameter_metadata
 
 # Two independent scientific axes, as in the bounded ODL soil hierarchy.
-# Soil cells have no trajectory parent; their shared-only likelihood is
-# assigned once to inference unit 1. Its covariance may then be unit-owned.
+# Soil cells have no trajectory parent. Connected SVI gives their shared-only
+# likelihood a unit of its own after the two trajectories' (`cell_units`
+# default `:components`); `:first_unit` assigns it to unit 1. Either way its
+# covariance may be unit-owned, whole.
 function svi_atomic_partition_model(data)
     @brm data begin
         mu ~ 1 + (1 | trajectory | subject)
@@ -39,12 +41,14 @@ end
     @test metadata.ncoordinates == length(block) == 1
     @test all(iszero, m.view.coordinate_subject[block])
     original = deepcopy(m.view)
-    ownership = BRM._brm_svi_connected_ownership(m; separator=:auto)
-    @test all(==(1), ownership.owner[block])
-    declarations = Dict(BRM._rk_nlme_partitioned(rk, ownership.owner))
-    @test declarations[event.site] == [1, 1]
+    for (cell_units, unit) in ((:components, 3), (:first_unit, 1))
+        ownership = BRM._brm_svi_connected_ownership(m; separator=:auto, cell_units)
+        @test all(==(unit), ownership.owner[block])
+        declarations = Dict(BRM._rk_nlme_partitioned(rk, ownership.owner))
+        @test declarations[event.site] == [unit, unit]
+    end
     target = BRM._brm_svi_target(m; separator=:auto)
-    @test all(==(1), target.ownership.owner[block])
+    @test all(==(3), target.ownership.owner[block])
     @test m.view.subject_levels == original.subject_levels
     @test m.view.coordinate_subject == original.coordinate_subject
     promoted = BRM._brm_svi_target(m; separator=:none,

@@ -176,8 +176,11 @@ end
 @testset "lazy local averages equal averages of every iterate" begin
     rng = Xoshiro(82)
     q = (; M=[randn(rng, d) for d in 1:5],
-        Λ=[Matrix{Float64}(I, d, d) for d in 1:5])
-    lazy, eager = deepcopy(q), deepcopy(q)
+        Λ=[Matrix{Float64}(I, d, d) for d in 1:5],
+        U=[Matrix{Float64}(I, d, d) for d in 1:5])
+    # A dense unit's slot of the running average holds its covariance.
+    lazy, eager = S._brm_svi_average_start(q), deepcopy(q)
+    @test all(isapprox.(lazy.Λ, q.Λ))  # the inverse of an identity precision
     through = zeros(Int, 5)
     # Unit 5 is never visited; other units have different gaps between visits.
     for k in 1:31
@@ -185,10 +188,11 @@ end
         S._brm_svi_average_units!(lazy, q, through, batch, k - 1)
         for i in batch
             q.M[i] .+= 0.1randn(rng, i)
-            q.Λ[i] .+= 0.1Matrix{Float64}(I, i, i)
+            A = randn(rng, i, i)
+            q.Λ[i] .+= 0.1 .* (A * A' + I)
         end
         S._brm_svi_average!(eager.M, q.M, k)
-        S._brm_svi_average!(eager.Λ, q.Λ, k)
+        S._brm_svi_average!(eager.Λ, [inv(Symmetric(Λ)) for Λ in q.Λ], k)
     end
     S._brm_svi_average_units!(lazy, q, through, 1:5, 31)
     @test all(isapprox.(lazy.M, eager.M))
@@ -198,4 +202,11 @@ end
     before = deepcopy(lazy)
     S._brm_svi_average_units!(lazy, q, through, 1:5, 31)
     @test lazy == before
+    # The result's precision is the inverse of the averaged covariance, with
+    # its Cholesky factor.
+    S._brm_svi_factor!(lazy)
+    for i in 1:5
+        @test lazy.Λ[i] ≈ inv(Symmetric(eager.Λ[i]))
+        @test LowerTriangular(lazy.U[i]) * LowerTriangular(lazy.U[i])' ≈ lazy.Λ[i]
+    end
 end

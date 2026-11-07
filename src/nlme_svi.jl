@@ -85,7 +85,7 @@ end
 
 function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=nothing,
         separator=nothing, max_unit_coordinates=4096, max_unit_work=1_000_000,
-        max_promoted_coordinates=128, field_states=:global)
+        max_promoted_coordinates=128, cell_units=nothing, field_states=:global)
     field_states in (:global, :units) || throw(ArgumentError(
         "brm_svi_fit: field_states must be :global or :units, got $(repr(field_states))"))
     field_states === :units && previous !== nothing && throw(ArgumentError(
@@ -103,10 +103,11 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
     policy = something(separator, connected ? :auto : :none)
     !connected && policy !== :none && throw(ArgumentError(
         "brm_svi_fit: automatic separators require unit_partition=:connected"))
+    cell_units = _brm_svi_cell_units_option(cell_units, connected)
     inventory =field_states === :units ? _brm_svi_field_inventory(m) : ()
     ownership = connected ? _brm_svi_connected_ownership(m; global_coordinates, previous,
         separator=policy, max_unit_coordinates, max_unit_work, max_promoted_coordinates,
-        fields=inventory) :
+        cell_units, fields=inventory) :
         _brm_svi_ownership(m; global_coordinates, previous, fields=inventory)
     globals, units = ownership.globals, ownership.units
     # One strict partition sampler per worker; sparse selection metadata shares
@@ -175,12 +176,14 @@ end
 # differ in their units and prior.
 function _brm_svi_checkout!(m; global_coordinates, previous, separator=nothing,
         max_unit_coordinates=4096, max_unit_work=1_000_000, max_promoted_coordinates=128,
-        field_states=:global)
+        cell_units=nothing, field_states=:global)
     requested = _brm_svi_global_coordinates(m, global_coordinates)
     carry = previous === nothing ? nothing : _brm_value_digest(previous)
     connected = m.view.unit_partition === :connected
+    cell_units = _brm_svi_cell_units_option(cell_units, connected)
     policy = connected ? (; separator=something(separator, :auto), max_unit_coordinates,
-        max_unit_work, max_promoted_coordinates) : (; separator=something(separator, :none))
+        max_unit_work, max_promoted_coordinates, cell_units) :
+        (; separator=something(separator, :none))
     slot = m.svi_target
     prepared = lock(slot.lock) do
         held = slot.prepared
@@ -192,7 +195,7 @@ function _brm_svi_checkout!(m; global_coordinates, previous, separator=nothing,
     end
     prepared !== nothing && return prepared, true
     t = _brm_svi_target(m; global_coordinates, previous, separator, max_unit_coordinates,
-        max_unit_work, max_promoted_coordinates, field_states)
+        max_unit_work, max_promoted_coordinates, cell_units, field_states)
     (; requested, carry, policy, field_states, target=t, workers=typeof(t.plan)[]), false
 end
 
@@ -968,7 +971,7 @@ function _brm_svi_advance!(run, t, c)
     if !polishing && length(windows) >= max(c.min_windows, c.patience + 1) &&
             _brm_svi_stalled(windows[end-c.patience], windows[end], W)
         run.polish_start = it
-        run.average = deepcopy(q)
+        run.average = _brm_svi_average_start(q)
         clipped = run.adam.clipped
         run.adam = _brm_svi_adam(q, c.polish_lr)
         run.adam.clipped = clipped
@@ -1081,8 +1084,8 @@ function _brm_svi_snapshot_run(run::_BRMSVIRun, t, c, draws)
 end
 
 # The approximation a run currently stands for: its raw iterate, or while and
-# after polishing the average of the polished iterates with the Cholesky
-# factors of the averaged precisions. The run itself is left unchanged, so it
+# after polishing the average of the polished iterates, a dense unit's precision
+# being the inverse of its averaged covariance. The run itself is left unchanged, so it
 # stays exactly continuable and its checkpoints do not depend on whether a
 # result was read from it.
 function _brm_svi_result_q(run)
@@ -1099,8 +1102,17 @@ _brm_svi_average!(a::AbstractArray{<:Real}, x, k) = (@. a += (x - a) / k; a)
 _brm_svi_average!(a::AbstractVector{<:AbstractArray}, x, k) =
     (foreach((ai, xi) -> _brm_svi_average!(ai, xi, k), a, x); a)
 
+# Where polishing's running average starts: a copy of q in which each dense
+# unit's `Λ` holds its covariance (`_brm_svi_unit_average!`).
+function _brm_svi_average_start(q)
+    average = deepcopy(q)
+    foreach(_brm_svi_unit_average_start!, average.Λ)
+    average
+end
+
 # Weighted running averages over stretches during which a unit was unchanged.
-# Dense factors average precision; structured factors average log scales and
+# Dense factors average covariance (the inverse of their precision, src/
+# nlme_svi_units.jl says why); structured factors average log scales and
 # factor loadings, retaining their bounded rank and positive covariance.
 # This equals visiting every unit at every polishing iteration, but touches
 # only the selected units until the single final flush.
@@ -1111,16 +1123,17 @@ function _brm_svi_average_units!(average, q, through, indices, iteration)
         weight = count / iteration
         a, x = average.M[i], q.M[i]
         @. a += weight * (x - a)
-        _brm_svi_unit_average_precision!(average.Λ[i], q.Λ[i], weight)
+        _brm_svi_unit_average!(average.Λ[i], q.Λ[i], weight)
         through[i] = iteration
     end
     average
 end
 
-# The subjects' Cholesky factors of an averaged precision.
+# The subjects' precisions and Cholesky factors from a running average (a dense
+# unit's averaged covariance in its `Λ`), in place.
 function _brm_svi_factor!(q)
     for i in eachindex(q.Λ)
-        _brm_svi_unit_refactor!(q.U[i], q.Λ[i])
+        _brm_svi_unit_from_average!(q.U[i], q.Λ[i])
     end
     q
 end
@@ -1242,7 +1255,7 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   columns (default 8, allowed 0:32, clipped to the unit dimension). Rank zero
   gives a diagonal factor. Their reparameterized ELBO gradients use Adam with
   posterior-scale preconditioning and bounded relative steps. Polishing
-  averages their log scales and loadings; dense units average precisions.
+  averages their log scales and loadings; dense units average covariances.
   `diagnostics.unit_families` reports each unit's family, dimension and rank.
   A streaming update preserves existing units' families and ranks; these
   controls apply to new units. The factor restriction changes the
@@ -1256,12 +1269,25 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   for selected blocks, reasons and whether budgets were achieved; the heuristic
   cannot promise an optimal cut or satisfy every budget. Changing ownership
   changes the variational approximation, never the model density.
+- `cell_units` — where connected mode puts likelihood cells that read no
+  subject's effect. `:components`, its default, gives them inference units of
+  their own, appended after the subjects' units, so a batch subsamples them:
+  cells reading a common ordinary coordinate that no subject's cell reads share
+  a unit, transitively, and cells with no such coordinate are grouped into about
+  √m units of √m cells. A coordinate that joins nearly all of them, such as a
+  shared population mean, joins them into one unit until it is promoted through
+  `global_coordinates` or `separator`. `:first_unit` keeps them all in the first
+  unit and counts unit work without rows, as earlier versions did, and is the
+  only choice with `unit_partition=:subjects`. Splitting these cells changes the
+  variational factorization and adds gradient variance from subsampling them,
+  never the density. Checkpoints keep the layout they were made with.
 - `unit_sampling` — defaults to `:work` in explicitly connected mode and
   `:uniform` otherwise. `:uniform` selects distinct units with weight `N/B`;
   `:work` makes `B` draws with replacement, with probabilities
   `pᵢ = (1/N + wᵢ/sum(w))/2`. The structural work proxy `wᵢ` counts local
-  coordinates and structural reads in the unit's likelihood/prior factors;
-  it is not measured runtime. All-zero work gives uniform probabilities.
+  coordinates, structural reads in the unit's likelihood/prior factors and
+  the rows of its vector-valued observation cells; it is not measured runtime.
+  All-zero work gives uniform probabilities.
   Repeated selections share one antithetic evaluation and one local update,
   with multiplicity retained in the global density and gradient weight
   `countᵢ/(B*pᵢ)`. Every unit has positive probability. This changes the visit
@@ -1396,9 +1422,9 @@ fit or continuation in this process, so passing `diagnostics.model` (or the
 [`BRMNLMEModel`](@ref) you prepared) prepares neither again.
 `diagnostics.target` reports what this call did: `reused` (it took the model's
 target), `workers_built` and the `seconds` of that phase. A connected model's
-target is reused only for the same `global_coordinates`, separator policy and
-budgets, since those decide its units, and any model's only for the same
-`field_states`. The model holds one
+target is reused only for the same `global_coordinates`, separator policy,
+budgets and `cell_units`, since those decide its units, and any model's only for
+the same `field_states`. The model holds one
 target, the size of its partition samplers and work arrays, for as long as the
 model lives; a copy or a serialized model holds none. A call that throws while
 optimizing does not put its target back, and concurrent calls on one model each
@@ -1518,8 +1544,8 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, threads=nothing,
         global_coordinates=nothing, separator=nothing, max_unit_coordinates=4096,
-        max_unit_work=1_000_000, max_promoted_coordinates=128, check_lowered=Returns(nothing),
-        checkpoint_completions=nothing, field_states=:global)
+        max_unit_work=1_000_000, max_promoted_coordinates=128, cell_units=nothing,
+        check_lowered=Returns(nothing), checkpoint_completions=nothing, field_states=:global)
     ndraws isa Integer && ndraws >= 0 || throw(ArgumentError(
         "$caller: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller, save, stop_after, checkpoint_every)
@@ -1540,7 +1566,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                     # SVI's partition sampler, on first use, reports under this phase.
                     prepared[], reused = _brm_with_cell_progress(() -> _brm_svi_checkout!(m;
                         global_coordinates, previous, separator, max_unit_coordinates,
-                        max_unit_work, max_promoted_coordinates, field_states), phase)
+                        max_unit_work, max_promoted_coordinates, cell_units, field_states), phase)
                     reused && _brm_update_progress!(phase, "reusing this model's prepared target")
                     t, state = init(prepared[].target)
                     workers = prepared[].workers

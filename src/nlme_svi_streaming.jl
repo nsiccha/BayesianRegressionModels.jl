@@ -126,9 +126,7 @@ function brm_svi_checkpoint(fit)
         if !(i in estimated))
     levels = hasproperty(d, :unit_levels) ? d.unit_levels : m.view.levels
     units = _brm_svi_save_units!(Dict{Any,NamedTuple}(), m, d.q, blocks; levels)
-    options = d.separator === nothing ? (; separator=:none) :
-        (; (key => getproperty(d.separator, key) for key in
-            (:separator, :max_unit_coordinates, :max_unit_work, :max_promoted_coordinates))...)
+    options = d.separator === nothing ? (; separator=:none) : _brm_svi_policy_options(d.separator)
     layout = (; options, global_keys=_brm_svi_global_keys(m, d.globals),
         _brm_svi_centering_layout(d.q)...)
     factors = _rk_svi_factors(m.backend, m.unit)
@@ -254,9 +252,9 @@ function _brm_svi_check_preprocessing(rk, old::BRMFittedState, groups;
     nothing
 end
 
-_brm_svi_check_partition(view, previous) =
+_brm_svi_check_partition(view, previous; caller="brm_svi_fit") =
     view.unit_partition === previous.unit_partition || throw(ArgumentError(
-        "brm_svi_fit: unit_partition changed since the checkpoint"))
+        "$caller: unit_partition changed since the checkpoint"))
 
 function _brm_svi_check_units(view, previous)
     _brm_svi_check_partition(view, previous)
@@ -426,8 +424,12 @@ function _brm_svi_window_input(state, x, options; caller)
             "$caller: model source changed"))
         x = RKBRMI(x, state.preprocessing; resample_groups=(state.group, state.nested...))
     end
+    # Before the carried options apply: they are meaningless on another partition.
+    partition = x isa BRMNLMEModel ? x.view.unit_partition :
+        something(get(options, :unit_partition, nothing), state.unit_partition)
+    _brm_svi_check_partition((; unit_partition=partition), state; caller)
     defaults = hasproperty(state, :layout) && hasproperty(state.layout, :options) ?
-        state.layout.options : NamedTuple()
+        merge((; cell_units=:first_unit), state.layout.options) : NamedTuple()
     x, x isa BRMNLMEModel ? merge(defaults, options) :
         merge(defaults, (; subject_group=state.group, shared_groups=state.shared,
             unit_partition=state.unit_partition), options)

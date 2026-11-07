@@ -385,4 +385,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # rows that read their entries, so automatic connected SVI units keep their own
 # coordinates. b9342dca (RK 0.1.96 / RKPPL 0.1.106) is the revision measured with
 # Enzyme cecb571a, which repairs the static Reverse failure its guards exposed.
-rev = "b9342dcae0cf19a6f0664ebb953ea33ed38a85b9"
+# 7b53c65f (RK 0.1.104 / RKPPL 0.1.114) prepares partition kernels from `u0`, so
+# a response reading a `@plate`-computed vector whole partitions per cell unit.
+rev = "7b53c65fa2c09feda513eefdb9e04fb463787820"
