@@ -19,6 +19,9 @@
 # where T_m = D³f[v_m, v_m, ·], v_m holds column m of C_i⁻ᵀ in every unit's
 # block (−H_i = C_i C_iᵀ; units never interact, so one colored direction per
 # within-unit position serves every unit), and w_i = (−H_i)⁻¹ Σ_m T_m[z_i].
+# Connected units, whose size grows with the subjects a few shared effects join,
+# take a structural coloring of their cells' supports for both sums instead
+# (src/nlme_laplace_coloring.jl).
 
 # The default Newton budget of one continuation stage. Where a unit's followed
 # mode ceases to exist between stages, the search walks to the next mode, and
@@ -94,6 +97,16 @@ is one reverse sweep of the likelihood parameters. Otherwise it is a
 `BRMLaplaceProblem`, which differentiates the whole model. `structured=true`
 requires the first (refusing with the reason), `false` forces the second.
 
+A `BRMLaplaceProblem` assembles the units' Hessians from η Hessian-vector
+products and its gradient from third-order contractions, each one pass over
+the whole model. By default it takes one of each per within-unit position, so
+their number follows the largest unit. With `unit_partition = :connected`, a
+unit can join many subjects through a few effects they all read (one site's
+effect read with every path through the site), and it then takes one product
+per color of a star coloring of its likelihood cells' structural supports, and
+two contractions per color: their number follows the effects one cell couples,
+not the unit's size. It falls back to positions where they are fewer.
+
 Declared independent Gaussian vectors can also be named by declaration, e.g.
 `integrate = (:field,)` for `field[1:n] .~ Normal.(mean, scale)`. Their means
 and scales can depend on outer coordinates; each element retains its authored
@@ -164,6 +177,9 @@ mutable struct BRMLaplaceProblem{M<:BRMNLMEModel,B}
     # evaluations in which a unit's followed mode needed a modified Newton step
     # after the continuation's first stage (`_brm_laplace_mode!`)
     folds::Int
+    # a structural coloring of the units' η Hessian, or `nothing` for one
+    # direction per within-unit position (src/nlme_laplace_coloring.jl)
+    coloring::Union{Nothing,_BRMLaplaceColoring}
 end
 
 Base.show(io::IO, p::BRMLaplaceProblem) = print(io, "BRMLaplaceProblem(",
@@ -217,7 +233,7 @@ function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
     population = findall(!=(:subject_effect), m.view.role)
     BRMLaplaceProblem(m, ad_backend, population, m.view.coordinates[population],
         Ref{Any}(nothing), copy(m.unit), Ref{Any}(nothing), Float64(tol), Int(maxiter),
-        0, 0, 0)
+        0, 0, 0, _brm_laplace_coloring(m.view))
 end
 
 # Implemented by `BayesianRegressionModelsReactiveKernelsEnzymeExt`: a prepared
@@ -361,7 +377,7 @@ function _brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector)
         previous = fill(Inf, length(blocks))
         converged = false
         for iteration in 1:p.maxiter
-            hessians = _brm_nlme_sampler_hessian_blocks(m, u)
+            hessians = _brm_laplace_hessian_blocks(p, u)
             all(_brm_laplace_finite, hessians) ||
                 return _brm_laplace_nonfinite!(p, u, total)
             steps = Vector{Vector{Float64}}(undef, length(blocks))
@@ -451,11 +467,39 @@ _brm_laplace_value(state) = state.finite ? state.value +
     sum(F -> size(F, 1) / 2 * log(2π) - logdet(F) / 2, state.factors; init=0.0) :
     state.value
 
+# The units' Hessian blocks of the sampler density at `u`: one HVP per color of
+# the problem's structural coloring, or per within-unit position without one.
+# The first colored assembly is checked against one more HVP; a pattern that
+# misses curvature is dropped for the position coloring, which is exact for any
+# unit, with a warning, since it is a BRM defect that costs the speed.
+function _brm_laplace_hessian_blocks(p::BRMLaplaceProblem, u::Vector{Float64})
+    c = p.coloring
+    c === nothing && return _brm_nlme_sampler_hessian_blocks(p.model, u)
+    blocks = _brm_laplace_colored_hessian_blocks(p.model, c, u)
+    c.checked[] && return blocks
+    difference = _brm_laplace_coloring_error(p.model, blocks, u)
+    if difference <= sqrt(eps(Float64))
+        c.checked[] = true
+        return blocks
+    end
+    @warn "BRMLaplaceProblem: the units' η Hessian has curvature outside its " *
+        "likelihood cells' structural supports (relative difference $difference along " *
+        "a test direction), so it takes one Hessian-vector product per " *
+        "within-unit position instead of one per color. Values are exact, but " *
+        "each evaluation costs as many model passes as the largest unit has " *
+        "effects. This is a BayesianRegressionModels defect; please report it " *
+        "with the model."
+    p.coloring = nothing
+    _brm_nlme_sampler_hessian_blocks(p.model, u)
+end
+
 # `D³f[v_m, v_m, ·]` summed over the colored directions v_m: column m of every
-# unit's C⁻ᵀ.
+# unit's C⁻ᵀ, or the same sum over the structural coloring's colors.
 function _brm_laplace_third_sum(p::BRMLaplaceProblem, state)
     blocks = p.model.view.subject_coordinates
     query = _brm_laplace_third_query(p)
+    p.coloring !== nothing && p.coloring.third &&
+        return _brm_laplace_colored_third_sum(p.coloring, query, state.factors, state.u)
     total = zeros(length(state.u))
     for k in 1:maximum(length, blocks)
         direction = zeros(length(state.u))
