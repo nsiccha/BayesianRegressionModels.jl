@@ -276,6 +276,14 @@ end
     @test_throws ArgumentError brm_svi_fit(m; centering=:learned)
     @test_throws ArgumentError brm_svi_fit(m; centering=LearnedCentering(),
         laplace=GaussianBlockLaplace())
+    # A slice combination multiplies unit factors over the packed draws; a centered
+    # fit's are over its learned coordinates, so it is refused, as a slice and as a start.
+    @test_throws "is a learned-centering fit" brm_svi_combine(m, [whole])
+    @test_throws "is a learned-centering fit" brm_svi_combine(m, [brm_svi_checkpoint(whole)])
+    @test_throws "is a learned-centering fit" brm_svi_fit(m; start=whole, max_iterations=0,
+        ndraws=0)
+    plain = brm_svi_fit(m; rng=Xoshiro(7), batch_size=4, max_iterations=50, ndraws=0)
+    @test brm_svi_combine(m, [plain]) isa BRMSVIStart
 end
 
 @stestset "a centered window carries its controls and transports its prior" begin

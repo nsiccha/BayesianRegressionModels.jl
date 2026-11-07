@@ -130,6 +130,13 @@ struct _BRMSVISource
 end
 
 function _brm_svi_source(caller, state::BRMSVIState, which)
+    # A learned-centering fit's unit factors are over its learned coordinates
+    # (src/nlme_svi_centering.jl), whose map to the packed draws moves with the
+    # globals, so they are no Gaussian site of those draws.
+    hasproperty(state.layout, :centering) && throw(ArgumentError(
+        "$caller: $which is a learned-centering fit (centering=LearnedCentering()), whose " *
+        "unit factors are over its learned coordinates, not the packed draws a " *
+        "combination multiplies; fit the slices without centering"))
     q = state.q
     hasproperty(q, :keys) && hasproperty(q, :informed) &&
         all(u -> hasproperty(u, :semantic), values(state.units)) || throw(ArgumentError(

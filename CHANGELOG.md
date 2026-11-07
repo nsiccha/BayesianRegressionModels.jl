@@ -40,6 +40,10 @@ instead of failing at run time.
   unit's prior is its factor through the old controls' map, so relearned
   controls do not reinterpret old factors; `brm_svi_resume` continues a
   centered optimizer checkpoint.
+- `brm_svi_combine`, and a factor-level `start=`, refuse a centered fit or
+  checkpoint: its unit factors are over the learned coordinates, whose map to
+  the packed draws moves with the globals, so they are no site of those draws.
+  Fit slices to be combined without centering.
 - Compatibility: depends on ReparametrizableDistributions 0.3 (git source).
 - Learned centering and reader sites (0.2.240) compose: a sparse global's
   site stands for its reader's whole centered term, so the reader's gradient
