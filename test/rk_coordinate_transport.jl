@@ -881,7 +881,7 @@ end
     # The coefficient-free `mo1(q)` effects are one joint value block too.
     main = string(BRM._rk_emit_ast(BRM._brm_rk_plan(
         PublicCoordinateTransport.joint_monotonic(data))).main)
-    # The concentration and increment count are generated inputs (BRM 0.2.228).
+    # The concentration and increment count are generated inputs (BRM 0.2.231).
     @test occursin("mo1_q ~ brm_joint_monotonic_values(mo1_q_alpha, mo1_q_nincr, 2)", main)
     @test isequal(data, saved)
 end

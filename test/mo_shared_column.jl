@@ -117,7 +117,7 @@ end
     sb = SBBRMI(builder(mo_df); mod=@__MODULE__)
     code = BRM.stan_code(sb)
     # Each predictor's own Dirichlet concentration reaches its own carrier.
-    # Each term's concentration is its own Stan datum (BRM 0.2.228).
+    # Each term's concentration is its own Stan datum (BRM 0.2.231).
     @test occursin("mo_g_simplex_incr ~ dirichlet(mo_g_alpha);", code)
     @test occursin("mo_b_g_simplex_incr ~ dirichlet(mo_b_g_alpha);", code)
     @test sb.data[:mo_g_alpha] == [1.0, 2.0, 3.0]

@@ -776,11 +776,14 @@ _fit_phases(name, ebe_kwargs) = merge(
     ebe_kwargs === nothing ? (;) : (ebes="Posthoc EBEs",))
 
 # The model through its two preparation phases: lowering to RK and
-# `brm_nlme_model`. A stage `x` has already passed is reused.
-_fit_lowered(x::BRM.BRMI, phase) = BRM._brm_run_phase(_ -> BRM.RKBRMI(x), phase)
-_fit_lowered(x::Union{BRM.RKBRMI,BRM.BRMNLMEModel}, phase) =
+# `brm_nlme_model`. A stage `x` has already passed is reused. A `@brm` model's
+# completions whose law reads the units' draws are lowered non-centered
+# (`BRM._brm_nlme_lowered`).
+_fit_lowered(x::BRM.BRMI, phase; groups...) =
+    BRM._brm_run_phase(_ -> BRM._brm_nlme_lowered(x; groups...), phase)
+_fit_lowered(x::Union{BRM.RKBRMI,BRM.BRMNLMEModel}, phase; groups...) =
     (BRM._brm_reuse_phase!(phase); x)
-_fit_lowered(x, phase) = throw(ArgumentError(
+_fit_lowered(x, phase; groups...) = throw(ArgumentError(
     "brm_nlme_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
     "got $(typeof(x))"))
 _fit_model(x::BRM.RKBRMI, phase; ad_backend, shared_point, subject_group,
@@ -1029,7 +1032,8 @@ function BRM.brm_nlme_fit(x, estimator; start=nothing, inits=nothing, ebes=true,
     ebe_kwargs = _ebe_keywords(estimator, ebes) # refuse a bad `ebes` before fitting
     BRM._brm_with_progress(progress; description="BRM NLME fit") do node
         BRM._brm_with_phases(node, _fit_phases(name, ebe_kwargs)) do phases
-            model = _fit_model(_fit_lowered(x, phases.lower), phases.prepare;
+            model = _fit_model(_fit_lowered(x, phases.lower; subject_group,
+                    nested_groups, shared_groups, unit_partition), phases.prepare;
                 ad_backend, shared_point, subject_group, nested_groups, shared_groups, unit_partition)
             s = BRM._brm_run_phase(_ -> _fit_start(model, start, inits), phases.start)
             result, ebe, estimates = _fit_run(estimator, model, s, ebe_kwargs, phases;

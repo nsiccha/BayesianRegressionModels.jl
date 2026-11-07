@@ -36,6 +36,16 @@ nested_poisson(data) = @brm data begin
     end
 end
 
+# `nested_model`'s Normal model with each row's predictor reading both
+# families directly, without a `@plate` cell. The automatic plan certifies
+# such affine Normal rows and integrates both families; it samples
+# `nested_model`'s, whose cell it does not certify (BRM 0.2.166).
+nested_rows(data) = @brm (; data.obs_subject, data.unit, data.y) begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + (1 | p | obs_subject) + (1 | u | unit)
+    y ~ Normal(mu, sigma)
+end
+
 # `ns` subjects with `units` nested units of `rows` rows each, interleaved.
 function nested_panel(ns; units=3, rows=3, counts=false, rng=Xoshiro(5))
     subject = ["s$i" for i in 1:ns]
@@ -135,14 +145,15 @@ end
 
 @stestset "brm_ladder_fit's rung 3: SAEM over the units from rung 2's point" begin
     data = nested_panel(20)
-    rk = RKBRMI(nested_model(data))
+    rk = RKBRMI(nested_rows(data))
     fit = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=4, draws=20, rng=Xoshiro(5),
-        subject_group=:subject, nested_groups=(unit=:obs_subject,),
+        subject_group=:obs_subject, nested_groups=(unit=:obs_subject,),
         saem_options=(SAEMOptions(iterations=100), SAEMOptions(iterations=100)))
     @test [r.rung for r in fit.rungs] == [1, 2, 3, 4]
     c = fit.ladder[3]
-    # every family is Normal-read, so the plan integrates both and SAEM is
-    # Laplace-EM
+    # every row reading either family is affine Normal, so the plan integrates
+    # both and SAEM is Laplace-EM
+    @test all(t -> t.admitted && t.class === :integrated, fit.plan.terms)
     @test c.kernel == :laplace_em && c.integrated == [1, 2]
     # rung 2 is the Laplace target's maximum; rung 3's MAP, taken in
     # NLMEEstimation's coordinates, sits at or below it
@@ -157,12 +168,29 @@ end
     @test Set(b.declaration for b in fit.problem.blocks) ==
         Set(t.declaration for t in fit.plan.terms if t.admitted)
 
-    # Explicit groupings have no automatic plan. They still tell SAEM which
-    # families to integrate, including when units are supplied on continuation.
-    first = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=4, draws=2,
+    # The same model read in a `@plate` cell (`nested_model`): the automatic
+    # plan does not certify a cell's conditional log-concavity, so it samples
+    # both families and rung 3 is ordinary SAEM over every unit's effects,
+    # whose step-size schedule needs burnin < iterations.
+    plate = RKBRMI(nested_model(data))
+    sampled = brm_ladder_fit(plate; ad_backend=NLME_AD, upto=3, rng=Xoshiro(6),
+        subject_group=:subject, nested_groups=(unit=:obs_subject,),
+        saem_options=SAEMOptions(iterations=20, burnin=10))
+    @test sampled.automatic && !isempty(sampled.plan.terms)
+    @test all(t -> !t.admitted && t.class === :sampled &&
+        occursin("not structurally certified", t.reason), sampled.plan.terms)
+    @test isempty(sampled.problem.blocks)
+    s = sampled.ladder[3]
+    @test isempty(s.integrated) && s.kernel != :laplace_em && s.iterations == 20
+    @test isfinite(s.gap)
+
+    # Explicit groupings opt in: they have no automatic plan and still tell
+    # SAEM which families to integrate, including when units are supplied on
+    # continuation.
+    first = brm_ladder_fit(plate; ad_backend=NLME_AD, upto=4, draws=2,
         integrate=(:subject, :unit), rng=Xoshiro(8))
     @test first.plan === nothing && first.ladder[3].skipped
-    continued = brm_ladder_fit(rk; ad_backend=NLME_AD, upto=4, draws=20,
+    continued = brm_ladder_fit(plate; ad_backend=NLME_AD, upto=4, draws=20,
         continue_from=first, subject_group=:subject,
         nested_groups=(unit=:obs_subject,), rng=Xoshiro(9),
         saem_options=SAEMOptions(iterations=200))

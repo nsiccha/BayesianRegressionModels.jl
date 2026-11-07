@@ -41,7 +41,7 @@ end
     end
     scalar_sb = SBBRMI(scalar; mod=@__MODULE__)
     scalar_code = BRM.stan_code(scalar_sb)
-    # The concentration is a Stan datum (BRM 0.2.228), one value per increment.
+    # The concentration is a Stan datum (BRM 0.2.231), one value per increment.
     @test scalar_sb.data[:mo1_c_alpha] == fill(2.0, 3)
     @test occursin(
         "mo1_c_simplex_incr ~ dirichlet(mo1_c_alpha);", scalar_code)

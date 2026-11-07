@@ -532,22 +532,35 @@ is loaded. Implemented only by that extension; the generic here lets the core
 validate and materialise plans without loading RK.
 `held_out` selects a strict subset of response names whose likelihoods are
 withheld. Authored priors and sampled coordinates remain in the program.
-`completions` parametrizes the `mi(...)` completions of a model with
-assignments or `@plate` cells: `:centered` samples each missing value under
-its law; `:noncentered` samples one standard-normal draw per missing value
-and computes the value from its law's location and scale (`Normal`,
-`LogNormal`; other laws are refused). Both are the same model. A
+`completions` parametrizes the `mi(...)` completions of a model:
+`:centered` samples each missing value under its law; `:noncentered`
+samples one standard-normal draw `z` per missing value. A
+`Normal(location, scale)` value is `location + scale * z` (its `exp` for
+`LogNormal`); any other continuous univariate law's value is its support
+transform of the draw (`lower + exp(z)` above a lower bound, `upper - exp(z)`
+below an upper one, a scaled logistic on an interval, `z` itself on the real
+line, the coordinate the centred lowering samples), and each entry observes the
+exact density remainder `logpdf(law, x) + log|T'(z)| - log N(z; 0, 1)` in
+`:pointwise`. A collection of `mi` sources (`completions = (:x,)`)
+non-centers those completions only. All are the same model. A
 non-centered completion whose rows lie on the subject grouping axis is a unit
 draw of [`brm_nlme_view`](@ref) (two-stage, SVI, Laplace and the NLME
-estimators) instead of a shared latent; it has no Stan counterpart in
-[`brm_coordinate_transport`](@ref). [`reprocess`](@ref) keeps the backend's
+estimators) instead of a shared latent. A centred completion whose law reads
+the units' draws is refused there, since its density would then be a prior
+term reading them; the fits that take a `@brm` model lower exactly such
+completions non-centered themselves. An `mi(y)` response that nothing else
+reads lowers to the regression plan, which samples none of its missing
+entries, so it lowers the same way under every spelling.
+[`brm_coordinate_transport`](@ref) pairs the non-centered draws with Stan's
+centred entries. [`reprocess`](@ref) keeps the backend's
 parametrization. The grouped entries of `mi(x)::shares(total, rows)` take
 `:noncentered` under any law: their coordinates (the centred ones, which
 the transport pairs with Stan's) are standard-normal draws, and each group
 observes the rest of their density, the law at its entries and the shares'
 log-Jacobian less the draws' standard-normal density. The density is the
 centred one; `:pointwise` holds those group terms as the observation of a
-placeholder per group. The entries of no group need a location-scale law.
+placeholder per group. The entries of no group are non-centered like any
+other completion's.
 `car_units` samples `car(...)` fields by their unit border separator: unit
 labels row-aligned with a field's rows (the name of a column the model reads,
 or the labels themselves) give each area the unit of its rows. One such entry
