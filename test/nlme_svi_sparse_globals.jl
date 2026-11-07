@@ -80,8 +80,9 @@ function svi_window_exact(rk)
         H = zeros(n, n)
         for j in 1:n
             δ = j in scale ? 1e-4 : 1.0
-            x = copy(x0); x[j] += δ
-            H[:, j] .= -(LogDensityProblems.logdensity_and_gradient(p, x)[2] .- g0) ./ δ
+            # Not `x`: that would assign the enclosing function's iterate.
+            xp = copy(x0); xp[j] += δ
+            H[:, j] .= -(LogDensityProblems.logdensity_and_gradient(p, xp)[2] .- g0) ./ δ
         end
         Symmetric((H + H') / 2), g0
     end
@@ -90,7 +91,9 @@ function svi_window_exact(rk)
         H, g = hessian(x)
         x = x .+ (cholesky(H) \ g)
     end
-    H, _ = hessian(x)
+    H, g = hessian(x)
+    # Control: the mean is the mode, where the gradient vanishes.
+    @test maximum(abs, g) < 1e-2
     (; H, μ=x, names)
 end
 
