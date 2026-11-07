@@ -1146,6 +1146,15 @@ start transport, scientific labels and empirical Bayes modes against the
 analytic conditional Gaussian, plus a short SAEM call. Neither rewrites the
 authored model or uses numerical derivatives as an oracle.
 
+`nlme_laplace_coloring.jl` checks the whole-model Laplace's structural
+coloring on connected units: a unit of subjects that all read one hub subject
+needs the same few colors at 5 and 13 subjects, and on hub and chain units with
+Gaussian and Poisson cells the colored unit Hessians, Laplace values and
+gradients match the same problem under the position coloring. A pattern cut
+short of the cells' reads is caught by the first assembly's check, which warns
+and falls back to the position coloring. Subjects no cell couples, and the
+strict partition, keep the position coloring.
+
 `nlme_joint_start.jl` checks a complete NLME estimate against the same
 BRMI's compiled Stan model: non-unit covariance and natural subject effects
 round-trip through Stan's unconstrained coordinates, fixed/free indices
@@ -1420,6 +1429,20 @@ Run this standalone script in the test environment.
 `nlme_svi_running.jl` checks a prepared model's reuse of its target and workers
 across calls (`diagnostics.target`), and `snapshot` / `snapshot_every` /
 `snapshot_draws`, against a run on a fresh model that nothing observes.
+
+`nlme_svi_combine.jl` checks `brm_svi_combine` and `brm_svi_fit(x; start)` from
+fits on regional slices of a synthetic panel (subjects nested in regions, a
+class grouping crossed with them): the prior projection against the closed form,
+the product of sites against an independent oracle, informed and dropped sites,
+units matched by label and carried to the combined hyperparameters (an exact
+one-margin oracle with a mu-referenced intercept, and totals kept for
+correlated, stratified and unit-held shared blocks, read back through the NLME
+view), a global held inside two slices' units, frozen-replay slices, a low-rank
+slice, the refusals, `brm_start` effects addressed by level on a frozen replay
+that lacks some levels, slices whose scales differ 40-fold under a log link
+(carried, the first window beats a cold start and the old copy), and that real
+slice fits start the full fit near its optimum. About 15 minutes with loading
+on one CPU; it accepts testset substring filters.
 
 `nlme_svi_threads.jl` checks `brm_svi_fit(...; threads)` with real threads (run
 it with `--threads=4`; it refuses to run without them). The state after every
@@ -2842,6 +2865,13 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
 - `julia --project=test --threads=2 test/nlme_svi_weighted_resume.jl`: exact
   trajectories for uniform/work batches and dense/structured local factors,
   lazy polishing, thread-count changes and a fresh-process checkpoint resume.
+- `julia --project=test --threads=2 test/nlme_svi_field_units.jl`: a read-pair
+  field's states in units' own factors (`field_states=:units`). Unit and global
+  terms add up to the whole model in value and gradient (`check_whole_model`).
+  The public fit resumes to the same trajectory and is the same at one or two
+  tasks. A held target is reused only under the same `field_states`, a resume
+  finds it again, and a `:units` snapshot loads without BRM. Mesh fields and
+  streaming windows are refused by name.
 
 ## Reusable model view
 

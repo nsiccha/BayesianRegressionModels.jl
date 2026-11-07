@@ -93,7 +93,10 @@ end
         y, μ, ℓ, _ = forward(f, g, u, c, f.frame)
         gy, gg, gc = F_y(g, y), F_g(g, y), zeros(6)
         adjoint = BRM._BRMSVICenteringAdjoint(f.frame)
-        BRM._brm_svi_unit_centering_backward!(gy, gc, adjoint, gg, y, μ, ℓ, f.inst, c, f.frame)
+        BRM._brm_svi_unit_centering_backward!(gy, gc, adjoint, y, μ, ℓ, f.inst, c, f.frame)
+        for (k, v) in adjoint.globals
+            gg[k] += v
+        end
         @test gy ≈ fd(x -> target(f, g, x, c, f.frame), u) rtol = 1e-6 atol = 1e-8
         @test gc ≈ fd(x -> target(f, g, u, x, f.frame), c) rtol = 1e-6 atol = 1e-8
         @test gg ≈ fd(x -> target(f, x, u, c, f.frame), g) rtol = 1e-6 atol = 1e-8

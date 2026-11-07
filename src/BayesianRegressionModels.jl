@@ -43,6 +43,7 @@ include("gmrf_precision.jl")
 include("gmrf_interpolation.jl")
 include("gmrf_vecchia.jl")
 include("gmrf_vecchia_predict.jl")
+include("gmrf_vecchia_local.jl")
 include("gmrf_multiresolution.jl")
 include("gmrf_multiresolution_reads.jl")
 include("formula_validation.jl")
@@ -153,6 +154,7 @@ include("nlme_connected.jl")
 include("nlme_joint_start.jl")
 include("nlme_conditional.jl")
 include("nlme_start.jl")
+include("nlme_laplace_coloring.jl")
 include("nlme_laplace.jl")
 include("nlme_laplace_structured.jl")
 include("nlme_laplace_factors.jl")
@@ -180,6 +182,7 @@ include("nlme_svi_ownership.jl")
 include("nlme_svi_separators.jl")
 include("nlme_svi_regroup.jl")
 include("nlme_svi.jl")
+include("nlme_svi_fields.jl")
 include("nlme_svi_streaming.jl")
 include("nlme_svi_laplace_plan.jl")
 include("nlme_svi_laplace_quadrature.jl")
@@ -189,6 +192,7 @@ include("nlme_svi_laplace_prior.jl")
 include("nlme_svi_laplace_streaming.jl")
 include("nlme_svi_laplace_fit.jl")
 include("nlme_svi_optimizer.jl")
+include("nlme_svi_slices.jl")
 include("smc.jl")
 include("smc_streaming.jl")
 include("filter.jl")
@@ -262,6 +266,7 @@ export rk_artifact_inputs
 export rk_bound_data, rk_bound_plan, rk_design_binder, RKDesignBinder
 export brm_fitted_state, BRMFittedState
 export BRMSVIState, BRMSVILaplaceState, GaussianBlockLaplace, brm_svi_checkpoint
+export BRMSVIStart, brm_svi_combine
 export BRMSVIOptimizerState, brm_svi_optimizer_checkpoint, brm_svi_resume, BRMSVINonfiniteError
 export BRMSMCFit, brm_smc_fit, brm_smc_tune, brm_smc_update, brm_smc_checkpoint, brm_smc_resume
 export BRMSMCCarriedReference, BRMSMCWindowFit, brm_smc_carry

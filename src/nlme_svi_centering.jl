@@ -188,20 +188,22 @@ _brm_svi_packed_centering(::_BRMSVICenteringBlock) = 0.0
 _brm_svi_packed_centering(::_BRMSVICenteringVector) = 1.0
 
 # The adjoints a unit's reverse sweep leaves for the batch: one per family's
-# natural factor, and sparse (port, element, value) terms of the vector laws'
-# mean and scale ports (element 0 for a scalar port).
+# natural factor, sparse (port, element, value) terms of the vector laws' mean
+# and scale ports (element 0 for a scalar port), and (global, value) terms of
+# the locations' population coefficients. The batch adds them to the global
+# gradient, so a unit never writes a global outside its own touched set.
 struct _BRMSVICenteringAdjoint
     A::Vector{Matrix{Float64}}
     ports::Vector{Tuple{Int,Int,Float64}}
+    globals::Vector{Tuple{Int,Float64}}
 end
-_BRMSVICenteringAdjoint(frame) =
-    _BRMSVICenteringAdjoint([zeros(size(A)) for A in frame.A], Tuple{Int,Int,Float64}[])
+_BRMSVICenteringAdjoint(frame) = _BRMSVICenteringAdjoint([zeros(size(A)) for A in frame.A],
+    Tuple{Int,Int,Float64}[], Tuple{Int,Float64}[])
 
 # The reverse sweep of `_brm_svi_centering_forward!` plus its log-Jacobian. On
 # entry `gy` holds ∂F/∂y over the unit's block; on return it holds ∂F_c/∂u. Adds
-# ∂F_c/∂c into `gc`, the locations' global adjoints into `gg` and the scale and
-# location adjoints into `adjoint`.
-function _brm_svi_centering_backward!(gy, gc, adjoint, gg, y, μ, ℓ,
+# ∂F_c/∂c into `gc` and the scale and location adjoints into `adjoint`.
+function _brm_svi_centering_backward!(gy, gc, adjoint, y, μ, ℓ,
         inst::_BRMSVICenteringInstance, c, frame)
     c0 = _brm_svi_packed_centering(inst)
     for n in reverse(eachindex(inst.positions))
@@ -209,7 +211,7 @@ function _brm_svi_centering_backward!(gy, gc, adjoint, gg, y, μ, ℓ,
         ū, c̄, μ̄, ℓ̄ = _brm_svi_cell_adjoint(c0, c[cell], y[p], μ[cell], ℓ[cell], gy[p])
         gy[p] = ū
         gc[cell] += c̄
-        _brm_svi_location_adjoint!(gy, gg, adjoint, inst, n, μ̄, ℓ̄, y, ℓ, frame)
+        _brm_svi_location_adjoint!(gy, adjoint, inst, n, μ̄, ℓ̄, y, ℓ, frame)
     end
     nothing
 end
@@ -226,9 +228,9 @@ function _brm_svi_unit_centering!(y, u, instances, ncells, c, frame, g, base)
     logjac, μ, ℓ
 end
 
-function _brm_svi_unit_centering_backward!(gy, gc, adjoint, gg, y, μ, ℓ, instances, c, frame)
+function _brm_svi_unit_centering_backward!(gy, gc, adjoint, y, μ, ℓ, instances, c, frame)
     for inst in Iterators.reverse(instances)
-        _brm_svi_centering_backward!(gy, gc, adjoint, gg, y, μ, ℓ, inst, c, frame)
+        _brm_svi_centering_backward!(gy, gc, adjoint, y, μ, ℓ, inst, c, frame)
     end
     nothing
 end
@@ -408,13 +410,18 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
     globals = Set(t.globals)
     for record in _brm_nlme_records(m.backend.plan)
         record.kind in (:hsgp, :gmrf_footprint, :car, :cdar) || continue
-        coordinates = [p for (p, name) in enumerate(view.coordinates)
-            if _brm_nlme_owned(name, record.declaration) && p in globals &&
-                view.role[p] === :shared_latent]
-        isempty(coordinates) || push!(uncentered, (; kind=record.kind,
-            record.declaration, level=nothing, coordinates=view.coordinates[coordinates],
+        owned = [p for (p, name) in enumerate(view.coordinates)
+            if _brm_nlme_owned(name, record.declaration)]
+        shared = [p for p in owned if p in globals && view.role[p] === :shared_latent]
+        isempty(shared) || push!(uncentered, (; kind=record.kind,
+            record.declaration, level=nothing, coordinates=view.coordinates[shared],
             reason="a shared field's coordinates are global, and its weights' scales " *
                 "are computed inside its kernel, not read as graph values"))
+        local_states = [p for p in owned if owner[p] > 0]
+        isempty(local_states) || push!(uncentered, (; kind=record.kind,
+            record.declaration, level=nothing, coordinates=view.coordinates[local_states],
+            reason="a field's unit-owned states have conditional scales computed inside " *
+                "its kernel, not read as graph values"))
     end
     names = Tuple(ports)
     read = isempty(names) ? nothing : _rk_value_reader(m.backend, names)
@@ -535,25 +542,29 @@ function _brm_svi_learned_coordinates(plan::_BRMSVICenteringPlan, frame, q, i, g
 end
 
 # Unit i's centered term at learned coordinates u: F's unit term at y = T(u)
-# plus the log-Jacobian. Writes ∂/∂u into `gu` and the global gradient into `gg`
-# as the unit term does, and returns the value, ∂/∂c and the scale adjoints.
-function _brm_svi_centered_unit_term!(gg, gu, plan::_BRMSVICenteringPlan, frame, t, q, i, g,
-        u, args...)
+# plus the log-Jacobian. Adds ∂/∂u into `gu` (zero on entry) and the unit term's
+# global gradient into `gg`, as `_brm_svi_unit_local!` does, and returns the
+# value, ∂/∂c and the scale and location adjoints. A carried streaming unit's
+# prior is its transported factor, in `_brm_svi_unit_local!`'s order.
+function _brm_svi_centered_unit_term!(gg, gu, centering::_BRMSVICenteringPlan, frame, t, q,
+        i, g, u, plan=t.plan, work=first(t.work))
     c = _brm_svi_unit_controls(q, i)
     y = similar(u)
-    logjac, μ, ℓ = _brm_svi_unit_centering!(y, u, plan.instances[i], plan.ncells[i], c,
-        frame, g, plan.base)
-    gc = zeros(plan.ncells[i])
+    logjac, μ, ℓ = _brm_svi_unit_centering!(y, u, centering.instances[i],
+        centering.ncells[i], c, frame, g, centering.base)
+    gc = zeros(centering.ncells[i])
     adjoint = _BRMSVICenteringAdjoint(frame)
     prior = t.prior
     value = if prior isa _BRMSVIStreamingPrior && prior.carried[i]
-        _brm_svi_unit_likelihood!(gg, gu, t, i, g, y, args...) +
-            _brm_svi_transported_prior!(gu, gg, adjoint, plan, frame, prior.units, i, g, y,
-                prior.controls[i])
+        _brm_svi_unit_partition!(gg, gu, t, i, g, y, plan) +
+            _brm_svi_transported_prior!(gu, adjoint, centering, frame, prior.units, i, g, y,
+                prior.controls[i]) +
+            _brm_svi_field_term!(gg, gu, t, i, y, work)
     else
-        _brm_svi_unit_term!(gg, gu, t, i, g, y, args...)
+        _brm_svi_unit_local!(gg, gu, t, i, g, y, plan, work)
     end
-    _brm_svi_unit_centering_backward!(gu, gc, adjoint, gg, y, μ, ℓ, plan.instances[i], c, frame)
+    _brm_svi_unit_centering_backward!(gu, gc, adjoint, y, μ, ℓ, centering.instances[i], c,
+        frame)
     value + logjac, gc, adjoint
 end
 
@@ -572,6 +583,7 @@ function _brm_svi_centering_batch_gradient(plan::_BRMSVICenteringPlan, t, frame,
         weights)
     Ā = [zeros(size(A)) for A in frame.A]
     terms = Tuple{Int,Int,Float64}[]
+    locations = zeros(length(t.globals))
     for (k, unit) in enumerate(centered)
         w = weights[k] / 2
         for a in unit.adjoints
@@ -581,9 +593,12 @@ function _brm_svi_centering_batch_gradient(plan::_BRMSVICenteringPlan, t, frame,
             for (p, j, v) in a.ports
                 push!(terms, (p, j, w * v))
             end
+            for (p, v) in a.globals
+                locations[p] += w * v
+            end
         end
     end
-    _brm_svi_centering_gradient(plan, t, frame, Ā, terms)
+    _brm_svi_centering_gradient(plan, t, frame, Ā, terms) .+ locations
 end
 
 # One Adam ascent step of each batch unit's control logits along its own term's
@@ -648,9 +663,9 @@ end
 # where none was learned, which is that coordinate's packed frame). As a density
 # over the packed y it is q_old(T_old⁻¹(y)) |∂T_old⁻¹/∂y|, whatever the current
 # controls; this returns its value, adds its gradient into `gy` and its scale and
-# location adjoints into `gg` and `adjoint`. Only the last window's frame is
+# location adjoints into `adjoint`. Only the last window's frame is
 # carried: each window's factors are its next window's whole prior.
-function _brm_svi_transported_prior!(gy, gg, adjoint, plan::_BRMSVICenteringPlan, frame,
+function _brm_svi_transported_prior!(gy, adjoint, plan::_BRMSVICenteringPlan, frame,
         units, i, g, y, x_old)
     n = plan.ncells[i]
     c = zeros(n)
@@ -675,17 +690,17 @@ function _brm_svi_transported_prior!(gy, gg, adjoint, plan::_BRMSVICenteringPlan
         ȳ, _, μ̄, ℓ̄ = _brm_svi_cell_adjoint(c[cell], _brm_svi_packed_centering(inst), u[p],
             μ[cell], ℓ[cell], ū[p])
         gy[p] += ȳ - ū[p]
-        _brm_svi_location_adjoint!(gy, gg, adjoint, inst, k, μ̄, ℓ̄, y, ℓ, frame)
+        _brm_svi_location_adjoint!(gy, adjoint, inst, k, μ̄, ℓ̄, y, ℓ, frame)
     end
     value
 end
 
 # A cell's location and log-scale adjoints μ̄, ℓ̄ onto what they read.
-function _brm_svi_location_adjoint!(gy, gg, adjoint, inst::_BRMSVICenteringBlock, m, μ̄, ℓ̄,
+function _brm_svi_location_adjoint!(gy, adjoint, inst::_BRMSVICenteringBlock, m, μ̄, ℓ̄,
         y, ℓ, frame)
     A, Ā = frame.A[inst.family], adjoint.A[inst.family]
     for (k, w) in inst.location[m]
-        k > 0 && (gg[k] += w * μ̄)
+        k > 0 && push!(adjoint.globals, (k, w * μ̄))
     end
     for k in 1:(m - 1)
         Ā[m, k] += μ̄ * y[inst.positions[k]]
@@ -694,7 +709,7 @@ function _brm_svi_location_adjoint!(gy, gg, adjoint, inst::_BRMSVICenteringBlock
     Ā[m, m] += ℓ̄ / A[m, m]
     nothing
 end
-function _brm_svi_location_adjoint!(gy, gg, adjoint, inst::_BRMSVICenteringVector, n, μ̄, ℓ̄,
+function _brm_svi_location_adjoint!(gy, adjoint, inst::_BRMSVICenteringVector, n, μ̄, ℓ̄,
         y, ℓ, frame)
     j = inst.elements[n]
     push!(adjoint.ports, (inst.mean, j, μ̄), (inst.scale, j, ℓ̄ / exp(ℓ[inst.cells[n]])))

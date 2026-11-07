@@ -134,6 +134,11 @@ function _brm_svi_laplace_fit(save,x,previous,method::GaussianBlockLaplace;
         "GaussianBlockLaplace: continuation requires a BRMSVILaplaceState"))
     family=family===nothing ? (previous===nothing ? MeanFieldGlobal() : previous.q.family) : family
     family isa BRMSVIFamily || throw(ArgumentError("GaussianBlockLaplace: invalid variational family"))
+    # Its target integrates the units and Gaussian coefficients, which therefore
+    # have no factors to start; only a packed point sets where it begins.
+    _brm_svi_factor_start(start) && throw(ArgumentError(
+        "GaussianBlockLaplace: a factor-level start (BRMSVIStart, slice fits or states) " *
+        "starts the minibatch engine (laplace=nothing); pass a packed point or inits here"))
     if previous!==nothing
         start===nothing && inits===nothing || throw(ArgumentError(
             "GaussianBlockLaplace: continuation starts from the previous factor; omit start and inits"))
