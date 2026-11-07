@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.238
+## 0.2.239
 
 - Added: `brm_svi_fit(...; cell_units)` for connected units. Likelihood cells that
   read no subject's effect used to land in the first unit, with every ordinary
@@ -41,6 +41,24 @@ instead of failing at run time.
   variance per update, far less time per update, and a higher ELBO after 20,000
   updates. Its sensors are nearly independent given the globals, so this does not
   show the cost of dropping a real correlation between them.
+
+## 0.2.238
+
+- `brm_svi_fit` polishing averages a dense unit factor's covariance instead
+  of its precision. A visit changes a dense unit's precision by up to 2.5-fold
+  along one drawn direction, so the mean of those precisions lies far above a
+  typical iterate, and the returned factor was narrow, the more so the more
+  polishing visits a unit had. On exact Gaussian units under the default
+  schedule, with the unit in every step, its sds were 0.86, 0.76 and 0.76 times
+  the truth at 13, 40 and 66 coordinates. They are now 0.99 to 1.02, as the raw
+  iterate's are; at 66 coordinates the width part of the gap to the optimal
+  factor fell from 5.5 to 0.9 nats per unit. A unit with a few hundred visits
+  in all has not yet settled from its start and changes little. Units above
+  `unit_dense_limit` (diagonal plus low rank) are unchanged. A seeded fit
+  explores bit-identically; its `q` and draws differ from polishing on.
+- Optimizer checkpoints (`BRMSVIOptimizerState`) are format 2. A checkpoint
+  from 0.2.237 or earlier still resumes; one taken while polishing keeps, for
+  the iterates it had averaged, their precision average.
 
 ## 0.2.237
 

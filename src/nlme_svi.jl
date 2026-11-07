@@ -950,7 +950,7 @@ function _brm_svi_advance!(run, t, c)
     if !polishing && length(windows) >= max(c.min_windows, c.patience + 1) &&
             _brm_svi_stalled(windows[end-c.patience], windows[end], W)
         run.polish_start = it
-        run.average = deepcopy(q)
+        run.average = _brm_svi_average_start(q)
         clipped = run.adam.clipped
         run.adam = _brm_svi_adam(q, c.polish_lr)
         run.adam.clipped = clipped
@@ -1063,8 +1063,8 @@ function _brm_svi_snapshot_run(run::_BRMSVIRun, t, c, draws)
 end
 
 # The approximation a run currently stands for: its raw iterate, or while and
-# after polishing the average of the polished iterates with the Cholesky
-# factors of the averaged precisions. The run itself is left unchanged, so it
+# after polishing the average of the polished iterates, a dense unit's precision
+# being the inverse of its averaged covariance. The run itself is left unchanged, so it
 # stays exactly continuable and its checkpoints do not depend on whether a
 # result was read from it.
 function _brm_svi_result_q(run)
@@ -1081,8 +1081,17 @@ _brm_svi_average!(a::AbstractArray{<:Real}, x, k) = (@. a += (x - a) / k; a)
 _brm_svi_average!(a::AbstractVector{<:AbstractArray}, x, k) =
     (foreach((ai, xi) -> _brm_svi_average!(ai, xi, k), a, x); a)
 
+# Where polishing's running average starts: a copy of q in which each dense
+# unit's `Λ` holds its covariance (`_brm_svi_unit_average!`).
+function _brm_svi_average_start(q)
+    average = deepcopy(q)
+    foreach(_brm_svi_unit_average_start!, average.Λ)
+    average
+end
+
 # Weighted running averages over stretches during which a unit was unchanged.
-# Dense factors average precision; structured factors average log scales and
+# Dense factors average covariance (the inverse of their precision, src/
+# nlme_svi_units.jl says why); structured factors average log scales and
 # factor loadings, retaining their bounded rank and positive covariance.
 # This equals visiting every unit at every polishing iteration, but touches
 # only the selected units until the single final flush.
@@ -1093,16 +1102,17 @@ function _brm_svi_average_units!(average, q, through, indices, iteration)
         weight = count / iteration
         a, x = average.M[i], q.M[i]
         @. a += weight * (x - a)
-        _brm_svi_unit_average_precision!(average.Λ[i], q.Λ[i], weight)
+        _brm_svi_unit_average!(average.Λ[i], q.Λ[i], weight)
         through[i] = iteration
     end
     average
 end
 
-# The subjects' Cholesky factors of an averaged precision.
+# The subjects' precisions and Cholesky factors from a running average (a dense
+# unit's averaged covariance in its `Λ`), in place.
 function _brm_svi_factor!(q)
     for i in eachindex(q.Λ)
-        _brm_svi_unit_refactor!(q.U[i], q.Λ[i])
+        _brm_svi_unit_from_average!(q.U[i], q.Λ[i])
     end
     q
 end
@@ -1218,7 +1228,7 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   columns (default 8, allowed 0:32, clipped to the unit dimension). Rank zero
   gives a diagonal factor. Their reparameterized ELBO gradients use Adam with
   posterior-scale preconditioning and bounded relative steps. Polishing
-  averages their log scales and loadings; dense units average precisions.
+  averages their log scales and loadings; dense units average covariances.
   `diagnostics.unit_families` reports each unit's family, dimension and rank.
   A streaming update preserves existing units' families and ranks; these
   controls apply to new units. The factor restriction changes the

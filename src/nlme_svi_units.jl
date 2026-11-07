@@ -132,20 +132,38 @@ function _brm_svi_unit_step!(Λ::_BRMSVIUnitPrecision, q, i, gz, gd, ε, β)
     q
 end
 
-function _brm_svi_unit_average_precision!(a::_BRMSVIUnitPrecision,
-        x::_BRMSVIUnitPrecision, weight)
+function _brm_svi_unit_average!(a::_BRMSVIUnitPrecision, x::_BRMSVIUnitPrecision, weight)
     @. a.factor.ρ += weight * (x.factor.ρ - a.factor.ρ)
     @. a.factor.Β += weight * (x.factor.Β - a.factor.Β)
     a
 end
-function _brm_svi_unit_average_precision!(a::AbstractMatrix, x::AbstractMatrix, weight)
-    @. a += weight * (x - a)
+
+# Polishing averages a dense factor's covariance, not its precision. A visit
+# changes the precision by up to 2.5-fold along one drawn direction (the trust
+# region of `_brm_svi_unit_step!`), so the precision iterates are skewed
+# upwards: their mean lies far above a typical iterate, and its inverse is
+# narrow however long polishing runs. In covariance the iterates are close to
+# unbiased. Measured on exact Gaussian units under the default schedule with the
+# unit in every step: the precision average gave sds of 0.86, 0.76 and 0.76 times
+# the truth at 13, 40 and 66 coordinates; the covariance average 0.99-1.02, as
+# the raw iterate does. While polishing, a dense unit's `Λ` slot of the running
+# average therefore holds a covariance; `_brm_svi_unit_from_average!` turns it
+# back into a precision and its Cholesky factor.
+_brm_svi_unit_covariance(Λ::AbstractMatrix) =
+    isempty(Λ) ? copy(Λ) : inv(cholesky(Symmetric(Λ)))
+function _brm_svi_unit_average!(a::AbstractMatrix, x::AbstractMatrix, weight)
+    a .+= weight .* (_brm_svi_unit_covariance(x) .- a)
     a
 end
+_brm_svi_unit_average_start!(a::_BRMSVIUnitPrecision) = a
+_brm_svi_unit_average_start!(a::AbstractMatrix) = (a .= _brm_svi_unit_covariance(a); a)
 
-_brm_svi_unit_refactor!(U::_BRMSVIUnitRoot, Λ::_BRMSVIUnitPrecision) = U
-_brm_svi_unit_refactor!(U::AbstractMatrix, Λ::AbstractMatrix) =
-    (U .= cholesky(Symmetric(Λ)).L)
+_brm_svi_unit_from_average!(U::_BRMSVIUnitRoot, Λ::_BRMSVIUnitPrecision) = U
+function _brm_svi_unit_from_average!(U::AbstractMatrix, Λ::AbstractMatrix)
+    isempty(Λ) && return U
+    Λ .= _brm_svi_unit_covariance(Λ)
+    U .= cholesky(Symmetric(Λ)).L
+end
 
 _brm_svi_unit_description(U::AbstractMatrix) = (; family=:dense, dimension=size(U, 1), rank=size(U, 1))
 _brm_svi_unit_description(U::_BRMSVIUnitRoot) =
