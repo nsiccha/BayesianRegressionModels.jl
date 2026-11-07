@@ -221,7 +221,8 @@ end
             frame = BRM_._brm_svi_centering_frame(t.centering, t, g)
             y = BRM_._brm_svi_centered_coordinates(t.centering, frame, q, i, g, u)
             gg, gy = zeros(length(g)), zeros(length(y))
-            lik = BRM_._brm_svi_unit_likelihood!(gg, gy, t, i, g, y)
+            lik = BRM_._brm_svi_unit_partition!(gg, gy, t, i, g, y, t.plan) +
+                BRM_._brm_svi_field_term!(gg, gy, t, i, y, first(t.work))
             Σ = inv(old.Λ)
             @test r.v ≈ lik + logpdf(MvNormal(old.M, Symmetric(Σ)), u) rtol = 1e-10
             # Moved controls: the prior goes through the frame transport.
