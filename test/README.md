@@ -1421,6 +1421,10 @@ NLMEEstimation scratch environment below (NLMEEstimation 0.2.5 or later) with
 `--threads=4`; it refuses to run without threads.
 `research/nlme_threads/benchmark.jl` measures a round of one-unit calls and paired
 SAEM fits of both routes at the thread count it is started with.
+`research/nlme_threads/unit_cost.jl` measures what one subject's one-unit value and
+gradient cost against its share of the whole-cohort sweep, on a cheap plate PK model
+and a joint model with a second response, and how much of it is RK's partition call
+(brm-use nlme.md, "Subjects on threads"). Run it in the same environment.
 
 `nlme_svi_laplace_plan.jl` checks structural eligibility for
 `GaussianBlockLaplace`, including fixed HSGP fitting inputs, nonstandard
