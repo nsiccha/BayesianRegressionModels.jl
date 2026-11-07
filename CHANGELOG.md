@@ -12,6 +12,27 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.227
+
+- `brm_svi_fit(...; field_states=:units)` holds a read-pair field's states
+  (`gmrf(...; neighbors=m)`) in units' own Gaussian factors. A state read by one
+  unit joins that unit's block, next to its effects; one read by several units
+  stays global, and a read's channels stay together. The field's joint prior is
+  replaced by one conditional per state, owned by the state's owner, so the
+  objective is unchanged and a batch of units estimates it without bias. A step
+  costs what its units read: 0.034 to 0.046 s per step from 256 to 16,384
+  states on a synthetic station field, where `:global` (the default, unchanged)
+  rose to 0.60 s. The prepared target still holds one prepared prior query per
+  unit (about 0.8 MB per unit on that toy). `:units` is refused for streaming windows, `multiresolution=` fields,
+  and fields whose lengths or correlation factor are not global coordinates.
+  Checkpoints carry `field_states`; a resume keeps it.
+- A unit's SVI evaluation writes and reads only its footprint at the plan's
+  point and keeps its global gradient as a compact list over the globals it
+  touched. Two globals-long buffers per unit per step, and the write and
+  restore over every global, are gone, so a step no longer grows with the
+  number of globals. Results are unchanged: seeded fits are bit-identical to
+  0.2.217's.
+
 ## 0.2.225
 
 - Fixed: partition declarations for wholly unit-owned compressed transforms
