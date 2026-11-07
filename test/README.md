@@ -1640,7 +1640,9 @@ independent oracles. Its Gaussian checks include arrays observed within plate
 cells and a modeled scale shared by the observations in each cell. A periodic
 `hsgp` read in a subject cell passes `check_protocol` with every preparation
 checked at `type_stability = :error`, the sparse Laplace probe's data prefix
-included.
+included. `runtime_numeric_settings.jl` checks that model's cell factors against
+its whole likelihood in the test environment, so a landing that runs only that
+environment still reaches them.
 NLMEEstimation.jl is not part of `test/Project.toml`. Run the file from a
 copy of this environment that develops a local NLMEEstimation checkout:
 
