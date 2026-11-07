@@ -24,14 +24,21 @@ include(joinpath(@__DIR__, "rk_consumer_support.jl"))
         y5 ~ Normal(pa, s)
         y6 ~ Normal(pb, s)
     end
-    main = string(BRM._rk_emit_ast(BRM._brm_rk_plan(brmi)).main)
+    plan = BRM._brm_rk_plan(brmi)
+    main = string(BRM._rk_emit_ast(plan).main)
     # No indicator columns: every effect reads its level's coefficient.
     @test !occursin("brm_factor_dummy", main)
     @test !occursin(r"\* (mu|nu|eta|zeta)_g", main)
     # Treatment coding (`mu`, `nu`) and cell means (`zeta`) over the same level
-    # order share one index; `ref=3` lists its reference first.
-    @test count("brm_prepared_indices(g, [1, 2, 3])", main) == 1
-    @test count("brm_prepared_indices(g, [3, 2, 1])", main) == 1
+    # order share one index; `ref=3` gets its own, listing its reference first.
+    # The level values are bound inputs, not literals in the program (5d76ad5b).
+    index_levels = Dict(Symbol(m[1]) => Symbol(m[2]) for m in
+        eachmatch(r"(\w+) = brm_prepared_indices\(g, (\w+)\)", main))
+    @test count("brm_prepared_indices(", main) == 2
+    @test Set(keys(index_levels)) == Set([:g_level, :g__ref_3_level])
+    bound = BRM._rk_generated_inputs(plan)
+    @test bound[index_levels[:g_level]] == [1, 2, 3]
+    @test bound[index_levels[:g__ref_3_level]] == [3, 2, 1]
     @test occursin("(vcat(0.0, mu_g))[g_level]", main)
     @test occursin("(vcat(0.0, nu_g))[g_level]", main)
     @test occursin("(vcat(0.0, eta_g))[g__ref_3_level]", main)
