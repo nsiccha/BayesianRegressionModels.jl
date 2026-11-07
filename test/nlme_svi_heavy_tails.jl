@@ -90,6 +90,26 @@ end
     @test svi_sparse_rms(1000.0; clip=3.0) < 1e-3 * svi_sparse_rms(1000.0; clip=Inf)
 end
 
+@stestset "a structured local factor's own Adam is bounded too" begin
+    # Above `unit_dense_limit` a unit steps by its own Adam (src/nlme_svi_units.jl),
+    # which one extreme draw of that unit's term would freeze the same way.
+    d, rank = 6, 2
+    rng = Xoshiro(3)
+    _, root, opt = BRM._brm_svi_unit_factors(d, 1.0, 0, rank)
+    f, m = root.factor, zeros(d)
+    step!(gz) = BRM._brm_svi_lowrank_step!(m, f, opt, gz, zeros(d), randn(rng, d + rank), 0.01)
+    for _ in 1:300
+        step!(randn(rng, d))
+    end
+    before, clipped = copy(opt.v), opt.clipped
+    @test all(>(0), before)
+    step!(fill(1e21, d))
+    @test opt.clipped == clipped + 1
+    # Unbounded, this g² would raise the means' second moments by about 1e39.
+    @test maximum(opt.v ./ before) < 2
+    @test all(isfinite, m)
+end
+
 @stestset "a window's statistics: trimmed mean and its standard error" begin
     rng = Xoshiro(3)
     # Below 10 iterations nothing is trimmed: the mean and the variance.
@@ -176,22 +196,29 @@ svi_weak_field_model(data) = @brm data begin
     end
 end
 
+svi_weak_field_target() = brm_nlme_model(
+    RKBRMI(svi_weak_field_model(svi_weak_field_data(Xoshiro(10), 12))); ad_backend=NLME_AD)
+
+# The share of the globals whose last Adam step is more than ten times too small.
+function svi_frozen_share(d)
+    adam = d.optimizer.run.adam
+    b1, b2 = 1 - adam.β1^adam.t, 1 - adam.β2^adam.t
+    healthy = sqrt((1 - adam.β1) / (1 + adam.β1))
+    step = @. (abs(adam.m / b1) / healthy) / sqrt(adam.v / b2)
+    mean(step[1:length(d.q.μ)] .< 0.1)
+end
+
 @stestset "a fit whose draws reach the steep part of the density keeps moving" begin
     # On this seed a run without the bound ends with every global's step more than
     # ten times too small. A healthy coordinate reads that 8% of the time, by
     # chance, since |m| averages only about ten draws.
-    m = brm_nlme_model(RKBRMI(svi_weak_field_model(svi_weak_field_data(Xoshiro(10), 12)));
-        ad_backend=NLME_AD)
+    m = svi_weak_field_target()
     controls = (; batch_size=4, window=100, ndraws=0, max_iterations=20_000)
     fit = brm_svi_fit(m; rng=Xoshiro(1000), controls...)
     d = fit.diagnostics
     @test d.converged
     @test d.clipped_steps > 0
-    adam = d.optimizer.run.adam
-    b1, b2 = 1 - adam.β1^adam.t, 1 - adam.β2^adam.t
-    healthy = sqrt((1 - adam.β1) / (1 + adam.β1))
-    step = @. (abs(adam.m / b1) / healthy) / sqrt(adam.v / b2)
-    @test mean(step[1:length(d.q.μ)] .< 0.1) < 0.5
+    @test svi_frozen_share(d) < 0.5
     # Every window is reported, the last polishing one too, by both statistics.
     @test d.iterations % 100 == 0
     @test length(d.elbo_windows) == length(d.elbo_windows_trimmed) == d.iterations ÷ 100
@@ -204,4 +231,15 @@ end
     @test svi_same_state(d.optimizer, resumed.diagnostics.optimizer)
     @test resumed.diagnostics.clipped_steps == d.clipped_steps
     @test resumed.diagnostics.elbo_windows_trimmed == d.elbo_windows_trimmed
+end
+
+@stestset "work-weighted batches keep the globals moving too" begin
+    # Under `unit_sampling=:work` the bound widens by the batch's largest unit
+    # weight rather than N / B (`_brm_svi_iteration!`).
+    fit = brm_svi_fit(svi_weak_field_target(); rng=Xoshiro(1000), batch_size=4,
+        window=100, ndraws=0, max_iterations=20_000, unit_sampling=:work)
+    d = fit.diagnostics
+    @test d.sampling.method === :work
+    @test d.clipped_steps > 0
+    @test svi_frozen_share(d) < 0.5
 end

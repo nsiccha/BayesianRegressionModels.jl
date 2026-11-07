@@ -338,6 +338,8 @@ const PINS = [
     # 0ee20c70 (RKPPL 0.1.93): authored local and reusable-definition docs.
     # Includes native row-dependent/shared mixture probabilities (0.1.90).
     # Also contains the adaptive pilot lifecycle introduced in RKPPL 0.1.91.
+    # f8ab474a (RK 0.1.84 / PPL 0.1.97) preserves absent-observation
+    # demand through scalar helpers and owned covariance blocks.
     # c1f175d7 (RK 0.1.84 / PPL 0.1.96): compact authored-query batches
     # share binding validation and exemplars; event inventory avoids full copies.
     # a9a7e9a2 (RKPPL 0.1.97): bound-data LKJ dimensions in reusable definitions.
@@ -356,7 +358,13 @@ const PINS = [
     # cb3b33bd (RKPPL 0.1.100) adds opt-in independent adaptive grid pilots
     # (`tune_smc(...; grid_start=:independent)`) and the production worker
     # override `resume_smc(...; nthreads)`, which BRM forwards.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "cb3b33bd08da2b13c9105eb75a6c15473b72d467"),
+    # 7dced1e5 (RK 0.1.89 / RKPPL 0.1.102) keeps selected-unit gradients
+    # and shared-row storage compact as unrelated units are added.
+    # 28d70c34 (RK 0.1.94 / RKPPL 0.1.105) runs a tuple plate's statements only
+    # at rows that read their entries, so automatic connected SVI units keep
+    # their own coordinates. b9342dca (RK 0.1.96 / RKPPL 0.1.106) is the
+    # revision measured with Enzyme cecb571a below.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "b9342dcae0cf19a6f0664ebb953ea33ed38a85b9"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
@@ -418,15 +426,18 @@ const PINS = [
     # integer/Float64 select and of a guarded PHI joining scalar stack storage
     # with a boxed broadcast wrapper, which an SVI unit's dormant scalar/vector
     # branch reaches (ReactiveKernels snag brm-retained-poi-a68d4412).
+    # 3de90eeb / libEnzyme 33709d12 reuses retained constant-parent shadows
+    # in ordinary Reverse, removing the selected-partition allocation slope
+    # without changing the model or enabling runtime activity.
     # b2bb4cb6 / libEnzyme f392eba5 contains d3189970 and caches a value that
     # cannot change inside a loop once per loop entry (Enzyme snag
     # reverse-generato-03b2003d), so a multiresolution gmrf reader's generator
     # sum no longer tapes its captured arrays once per basis term.
-    # 74ce4afc / libEnzyme 08f0e8d9 contains b2bb4cb6 and proves that the
-    # reader cannot reach a fresh output array (Enzyme snag
-    # residual-per-ter-5c58955b), so that reader no longer tapes each term's
-    # field value and weight.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "74ce4afcce4144ebd71d6374a5293aff1996ceb7"),  # dogfood
+    # cecb571a / libEnzyme 7f23cb72 contains 74ce4afc / libEnzyme 08f0e8d9, which
+    # proves that the reader cannot reach a fresh output array (Enzyme snag
+    # residual-per-ter-5c58955b), and repairs a static Reverse failure on a unit
+    # problem from RK 0.1.92 on (RK snag unit-problem-act-e546d3bd).
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "cecb571a1037fbfd800153a3afd1aed3b1913421"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also

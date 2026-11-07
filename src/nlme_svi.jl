@@ -56,6 +56,10 @@ end
 _brm_svi_rank(::MeanFieldGlobal) = 0
 _brm_svi_rank(f::LowRankGlobal) = f.rank
 
+include("nlme_svi_sampling.jl")
+include("nlme_svi_workspace.jl")
+include("nlme_svi_units.jl")
+
 # ── The minibatch target ─────────────────────────────────────────────────────
 
 # Packed positions of the global coordinates: everything the NLME model
@@ -78,25 +82,40 @@ function _brm_svi_check_fields(m::BRMNLMEModel)
     nothing
 end
 
-function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=nothing)
+function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=nothing,
+        separator=nothing, max_unit_coordinates=4096, max_unit_work=1_000_000,
+        max_promoted_coordinates=128)
     m.cell_query === nothing && _brm_nlme_error(
         "brm_svi: minibatch SVI evaluates one subject at a time, on the " *
         "subject's own observation cells, and this model's observations have " *
         "no cells attributable to single subjects")
     _brm_svi_check_fields(m)
-    ownership = _brm_svi_ownership(m; global_coordinates, previous)
+    # A carried checkpoint brings its own separator policy, which a changed
+    # partition cannot use: name that change, not the policy it invalidates.
+    previous === nothing || _brm_svi_check_partition(m.view, previous)
+    connected = m.view.unit_partition === :connected
+    policy = something(separator, connected ? :auto : :none)
+    !connected && policy !== :none && throw(ArgumentError(
+        "brm_svi_fit: automatic separators require unit_partition=:connected"))
+    ownership = connected ? _brm_svi_connected_ownership(m; global_coordinates, previous,
+        separator=policy, max_unit_coordinates, max_unit_work, max_promoted_coordinates) :
+        _brm_svi_ownership(m; global_coordinates, previous)
     globals, units = ownership.globals, ownership.units
-    # SVI owns one partition sampler and includes covariance coordinates in
-    # its active globals. Fixed shared values remain at the read-only base.
-    plan = _brm_nlme_partition_plan(m.cell_gradient, m.unit, globals, m.view; units)
-    # For subject i, `order[i]` sorts [globals; units[i]] into packed order.
-    order = [sortperm(vcat(globals, block)) for block in units]
-    indices = [vcat(globals, block)[o] for (block, o) in zip(units, order)]
-    work = [(; values=zeros(length(o)), gradient=zeros(length(o))) for o in order]
+    # One strict partition sampler per worker; sparse selection metadata shares
+    # globals and retains only each unit's local permutation and merge slots.
+    partition, partition_view = connected ? _brm_svi_partition(m, ownership) :
+        (m.cell_gradient, m.view)
+    plan = _brm_nlme_partition_plan(partition, m.unit, globals, partition_view; units)
+    layouts = [(; selection.order, selection.slots) for selection in plan.indices]
+    width = length(globals) + maximum(length, units; init=0)
+    work = [(; values=zeros(width), gradient=zeros(width))]
     nz = count(==(:subject_effect), m.view.role)
-    prior = units == m.view.subject_coordinates ? nothing :
+    # Connected targets use selected authored buckets even for standardized
+    # draws: the legacy global-prior path traverses every local prior at zero.
+    prior = !connected && sum(length, units; init=0) == nz &&
+        all(j -> m.view.role[j] === :subject_effect, Iterators.flatten(units)) ? nothing :
         _brm_svi_authored_prior(m, globals, units; factors=ownership.factors)
-    (; m, globals, units, ownership, previous, plan, plans=[plan], work, order, indices, prior,
+    (; m, globals, units, ownership, previous, partition, plan, plans=[plan], work, layouts, prior,
        z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
 end
 
@@ -110,19 +129,23 @@ function _brm_svi_with_workers(t, n, progress=nothing; workers=typeof(t.plan)[])
     missing_plans > 0 && append!(workers, _brm_with_counter(progress, missing_plans;
             description="Worker partition samplers") do node
         map(1:missing_plans) do k
-            plan = _brm_nlme_worker_plan(t.plan, t.m.cell_gradient, t.m.unit)
+            plan = _brm_nlme_worker_plan(t.plan, t.partition, t.m.unit)
             _brm_update_progress!(node, k)
             plan
         end
     end)
-    merge(t, (; plans=vcat([t.plan], workers[1:n-1])))
+    # Each task's point and gradient buffers; the first is the target's own.
+    width = length(first(t.work).values)
+    work = vcat([first(t.work)],
+        [(; values=zeros(width), gradient=zeros(width)) for _ in 1:n-1])
+    merge(t, (; plans=vcat([t.plan], workers[1:n-1]), work))
 end
 
 # ── A model's retained target ───────────────────────────────────────────────
 
 # The target and worker plans for one call on `m`: the ones the model holds when
-# they were prepared for the same ownership and streaming carry, otherwise new
-# ones. Nothing in them depends on the optimizer's state: `t` holds the model's
+# they were prepared for the same ownership, separator policy and streaming carry,
+# otherwise new ones. Nothing in them depends on the optimizer's state: `t` holds the model's
 # read-only tables and work arrays each evaluation overwrites, and a run's factors,
 # Adam moments and random stream live in `_BRMSVIRun`. So a continuation on them
 # is the same run as one that never returned.
@@ -131,20 +154,31 @@ end
 # to one call at a time: a fit running at the same time on the same model finds
 # the slot empty and prepares its own. `_brm_svi_checkin!` puts them back, so the
 # slot holds at most one target, the last call's.
-function _brm_svi_checkout!(m; global_coordinates, previous)
+#
+# A connected target also depends on its separator policy, which promotes more
+# coordinates than were requested: its key is the request and the policy, which
+# is what a resume passes (`_brm_svi_identity`). A strict target's promoted set
+# is a closure of its request, so a request equal to it finds the same target.
+function _brm_svi_checkout!(m; global_coordinates, previous, separator=nothing,
+        max_unit_coordinates=4096, max_unit_work=1_000_000, max_promoted_coordinates=128)
     requested = _brm_svi_global_coordinates(m, global_coordinates)
     carry = previous === nothing ? nothing : _brm_value_digest(previous)
+    connected = m.view.unit_partition === :connected
+    policy = connected ? (; separator=something(separator, :auto), max_unit_coordinates,
+        max_unit_work, max_promoted_coordinates) : (; separator=something(separator, :none))
     slot = m.svi_target
     prepared = lock(slot.lock) do
         held = slot.prepared
-        held !== nothing && isequal(held.carry, carry) && (requested == held.requested ||
-            requested == held.target.ownership.promoted) || return nothing
+        held !== nothing && isequal(held.carry, carry) && isequal(held.policy, policy) &&
+            (requested == held.requested || !connected &&
+                requested == held.target.ownership.promoted) || return nothing
         slot.prepared = nothing
         held
     end
     prepared !== nothing && return prepared, true
-    t = _brm_svi_target(m; global_coordinates, previous)
-    (; requested, carry, target=t, workers=typeof(t.plan)[]), false
+    t = _brm_svi_target(m; global_coordinates, previous, separator, max_unit_coordinates,
+        max_unit_work, max_promoted_coordinates)
+    (; requested, carry, policy, target=t, workers=typeof(t.plan)[]), false
 end
 
 function _brm_svi_checkin!(m, prepared)
@@ -198,21 +232,17 @@ function _brm_svi_global_term(::Nothing, t, g)
     value - t.z_constant, gradient[t.globals]
 end
 
-# ℓ_i(g, z) + log N(z; 0, I) for subject i, with its gradients in g and z,
-# through `plan`. Concurrent calls need their own plans and different subjects:
-# `t.work[i]` is subject i's.
-function _brm_svi_unit_term!(gg, gz, t, i, g, z, plan=t.plan)
+# Each worker owns its plan and one G + max(d_i) workspace. Unit layout
+# metadata stores local positions only; globals are never repeated per unit.
+function _brm_svi_unit_term!(gg, gz, t, i, g, z, plan=t.plan, work=first(t.work))
     D = length(t.globals)
-    order = t.order[i]
-    w = t.work[i]
-    joint = vcat(g, z)
-    w.values .= joint[order]
-    fill!(w.gradient, 0.0)
-    value = _brm_nlme_partition_sum!(w.gradient, plan, t.m.unit, i, w.values)
-    joint_gradient = similar(joint)
-    joint_gradient[order] .= w.gradient
-    gg .= view(joint_gradient, 1:D)
-    gz .= view(joint_gradient, D+1:length(joint))
+    layout = t.layouts[i]
+    values = view(work.values, 1:D+length(z))
+    gradient = view(work.gradient, 1:D+length(z))
+    _brm_svi_joint!(values, layout, g, z)
+    fill!(gradient, 0.0)
+    value = _brm_nlme_partition_sum!(gradient, plan, t.m.unit, i, values)
+    _brm_svi_split_gradient!(gg, gz, layout, gradient)
     value + _brm_svi_unit_prior!(gg, gz, t.prior, t, i, g, z)
 end
 
@@ -312,13 +342,20 @@ _brm_svi_unit_prior!(gg, gz, prior::_BRMSVIAuthoredPrior, t, i, g, z) =
 # ── Variational parameters ───────────────────────────────────────────────────
 
 # Subject i's factor is `M[i]`, `Λ[i]` and `U[i]`, sized by its own block.
-function _brm_svi_params(t, μ, family::BRMSVIFamily; global_scale, unit_scale)
+# Large units use bounded-rank operators; only small units store dense arrays.
+function _brm_svi_params(t, μ, family::BRMSVIFamily; global_scale, unit_scale,
+        unit_dense_limit=64, unit_rank=8)
+    _brm_svi_unit_options(unit_dense_limit, unit_rank)
+    isfinite(unit_scale) && unit_scale > 0 || throw(ArgumentError(
+        "brm_svi_fit: unit_scale must be finite and positive"))
     D = length(t.globals)
-    eye(block) = Matrix{Float64}(I, length(block), length(block))
+    factors = [_brm_svi_unit_factors(length(b), unit_scale, unit_dense_limit, unit_rank)
+        for b in t.units]
     (; family, μ=Vector{Float64}(μ), ρ=fill(log(global_scale), D),
        Β=zeros(D, _brm_svi_rank(family)), M=[zeros(length(b)) for b in t.units],
-       Λ=[eye(b) ./ unit_scale^2 for b in t.units],
-       U=[eye(b) ./ unit_scale for b in t.units])
+       Λ=Union{Matrix{Float64},_BRMSVIUnitPrecision}[f[1] for f in factors],
+       U=Union{Matrix{Float64},_BRMSVIUnitRoot}[f[2] for f in factors],
+       unit_opt=Union{Nothing,_BRMSVIAdam}[f[3] for f in factors])
 end
 
 _brm_svi_global_covariance(q) = Diagonal(exp.(2 .* q.ρ)) + q.Β * q.Β'
@@ -357,12 +394,14 @@ end
 _brm_svi_draw_global(q, ε, η) = q.μ .+ exp.(q.ρ) .* ε .+ q.Β * η
 # A draw of subject i from ε_i: m_i + U_i⁻ᵀ ε_i, with U_i the lower Cholesky
 # factor of the precision Λ_i.
-_brm_svi_unit_offset(q, i, εi) = LowerTriangular(q.U[i])' \ εi
+_brm_svi_unit_offset(U::AbstractMatrix, ε) = LowerTriangular(U)' \ ε
+_brm_svi_unit_offset(q, i, εi) = _brm_svi_unit_offset(q.U[i], εi)
 _brm_svi_draw_unit(q, i, εi) = q.M[i] .+ _brm_svi_unit_offset(q, i, εi)
 
 # The entropy of q, up to the constant (D + Σ d_i)(1 + log 2π)/2.
 _brm_svi_entropy(q) = _brm_svi_global_logdet(_brm_svi_global_geometry(q)) / 2 -
-    sum(U -> sum(log, diag(U); init=0.0), q.U; init=0.0)
+    sum(_brm_svi_unit_logdet_root, q.U; init=0.0)
+_brm_svi_unit_entropy(q, i) = -_brm_svi_unit_logdet_root(q.U[i])
 
 # ── The global factor: Adam ──────────────────────────────────────────────────
 
@@ -530,8 +569,12 @@ const _BRM_SVI_UNIT_MEAN_TRUST = 1.0
 # is zero, so the positive part changes nothing there. It is biased towards
 # more precision wherever the two differ, including a target with negative
 # curvature, whose true fixed point it no longer reaches.
-function _brm_svi_unit_step!(q, i, gz, gd, εi, β)
-    isempty(gz) && return q
+_brm_svi_unit_step!(q, i, gz, gd, εi, β) =
+    _brm_svi_unit_step!(q.Λ[i], q, i, gz, gd, εi, β)
+function _brm_svi_unit_step!(::AbstractMatrix, q, i, gz, gd, εi, β)
+    # Promoting all of a scientific subject's effects leaves an empty local
+    # factor. Its observation term may still contribute to the globals.
+    isempty(q.M[i]) && return q
     U = LowerTriangular(q.U[i])
     λ, e = _brm_svi_unit_curvature(U, gd, εi)
     v = U * e
@@ -648,24 +691,24 @@ end
 # result stays in its own slot and is summed in batch order, and a unit's step
 # reads and writes only that unit's factor.
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
-        whiten=false)
-    D, N = length(t.globals), length(t.units)
-    s = N / length(batch)
+        whiten=false, weights=fill(length(t.units) / length(batch), length(batch)))
+    D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
     P, gP = _brm_svi_global_term(t, g)
-    draws = [randn(rng, length(t.units[i])) for i in batch]
+    draws = [_brm_svi_unit_noise(rng, q.U[i]) for i in batch]
     terms = Vector{@NamedTuple{value::Float64,gg::Vector{Float64},gz::Vector{Float64},
         gd::Vector{Float64}}}(undef, length(batch))
     problems = Vector{Union{Nothing,NamedTuple}}(nothing, length(batch))
-    _brm_svi_each_unit(t.plans, length(batch)) do plan, k
+    _brm_svi_each_unit(eachindex(t.plans), length(batch)) do worker, k
+        plan, work = t.plans[worker], t.work[worker]
         i, εi = batch[k], draws[k]
         gg₊, gg₋ = zeros(D), zeros(D)
-        gz₊, gz₋ = zeros(length(εi)), zeros(length(εi))
+        gz₊, gz₋ = zeros(length(t.units[i])), zeros(length(t.units[i]))
         m, δ = q.M[i], _brm_svi_unit_offset(q, i, εi)
         z₊, z₋ = m .+ δ, m .- δ
-        v₊ = _brm_svi_unit_term!(gg₊, gz₊, t, i, g, z₊, plan)
-        v₋ = _brm_svi_unit_term!(gg₋, gz₋, t, i, g, z₋, plan)
+        v₊ = _brm_svi_unit_term!(gg₊, gz₊, t, i, g, z₊, plan, work)
+        v₋ = _brm_svi_unit_term!(gg₋, gz₋, t, i, g, z₋, plan, work)
         problems[k] = _brm_svi_nonfinite_unit(t, i, g, (z₊, z₋), (v₊, v₋),
             (gg₊, gg₋), (gz₊, gz₋))
         terms[k] = (; value=(v₊ + v₋) / 2, gg=gg₊ .+ gg₋, gz=(gz₊ .+ gz₋) ./ 2,
@@ -676,32 +719,23 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
 
     w = copy(gP)
     batch_value = 0.0
-    for term in terms
-        batch_value += term.value
-        w .+= (s / 2) .* term.gg
+    for (k, term) in enumerate(terms)
+        batch_value += weights[k] * term.value
+        w .+= (weights[k] / 2) .* term.gg
     end
     x = _brm_svi_global_vector(q)
     grad = _brm_svi_global_gradient(q, w, ε, η)
-    clip = _BRM_SVI_GLOBAL_CLIP * sqrt(s)
+    # `N / B` for a uniform batch; under work sampling a unit drawn with chance π
+    # carries weight about 1 / π, so its coordinates' gradients are about √w times
+    # their rms when drawn, and the batch's largest weight bounds every unit in it.
+    clip = _BRM_SVI_GLOBAL_CLIP * sqrt(maximum(weights))
     whiten ? _brm_svi_whitened_global_step!(global_opt, q, x, grad, lr_global; clip) :
         _brm_svi_step!(global_opt, x, grad, lr_global; clip)
     _brm_svi_set_global!(q, x)
     _brm_svi_each_unit(t.plans, length(batch)) do _, k
         _brm_svi_unit_step!(q, batch[k], terms[k].gz, terms[k].gd, draws[k], β)
     end
-    P + s * batch_value
-end
-
-# `B` distinct subjects drawn uniformly from `1:N` in O(B) (Floyd's algorithm),
-# so choosing a batch does not scale with the number of subjects.
-function _brm_svi_batch(rng, N, B)
-    chosen = Set{Int}()
-    sizehint!(chosen, B)
-    for j in N-B+1:N
-        k = rand(rng, 1:j)
-        push!(chosen, k in chosen ? j : k)
-    end
-    collect(chosen)
+    P + batch_value
 end
 
 const _BRM_SVI_PHASES = (lower="Lower to ReactiveKernels", prepare="Prepare NLME model",
@@ -739,11 +773,29 @@ mutable struct _BRMSVIRun{Q}
     polish_start::Int
     average::Union{Nothing,Q}
     converged::Bool
+    sampler::_BRMSVIUnitSampler
+    sampling::NamedTuple
+    unit_gradient_calls::Int
+    averaged_through::Vector{Int}
+    unit_entropy::Vector{Float64}
+    entropy_sum::Float64
 end
 
 _brm_svi_adam(q, lr) = _BRMSVIAdam(length(_brm_svi_global_vector(q)), lr)
-_brm_svi_run(rng, q, c) = _BRMSVIRun(rng, q, _brm_svi_adam(q, c.lr_global), 0, Float64[],
-    _BRMSVIWindow[], 0, nothing, false)
+function _brm_svi_run(rng, q, c, t)
+    N = length(t.units)
+    # Structural work proxy, not a measured runtime.
+    work = hasproperty(t, :ownership) && hasproperty(t.ownership, :work) ?
+        copy(t.ownership.work) :
+        [Float64(length(t.units[i]) + length(t.plan.footprints[i])) for i in 1:N]
+    sampler = _brm_svi_unit_sampler(c.unit_sampling, work)
+    sampling = (; method=c.unit_sampling, work, probabilities=sampler.probabilities,
+        visits=zeros(Int, N), draws=zeros(Int, N))
+    entropy = [_brm_svi_unit_entropy(q, i) for i in 1:N]
+    _BRMSVIRun(rng, q, _brm_svi_adam(q, c.lr_global), 0, Float64[],
+        _BRMSVIWindow[], 0, nothing, false,
+        sampler, sampling, 0, zeros(Int, N), entropy, sum(entropy))
+end
 
 # The share of a window's iterations left out at each end of its statistics.
 const _BRM_SVI_WINDOW_TRIM = 0.1
@@ -778,11 +830,11 @@ _brm_svi_stalled(a, b, W) = b.center - a.center < 2 * sqrt((a.spread + b.spread)
 # The optimizer controls of a run over `N` subjects, with the batch size and
 # window it actually uses. They are fixed for the run and its continuations.
 function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
-        polish_lr, window, patience, min_windows, polish_windows)
+        polish_lr, window, patience, min_windows, polish_windows, unit_sampling=:uniform)
     B = min(batch_size, N)
     (; batch_size=B, window=window === nothing ? max(cld(N, B), 100) : window,
        max_iterations, lr_global, unit_step, polish_lr, patience, min_windows,
-       polish_windows)
+       polish_windows, unit_sampling)
 end
 
 _brm_svi_finished(run, c) = run.converged || run.iteration >= c.max_iterations
@@ -797,21 +849,34 @@ function _brm_svi_advance!(run, t, c)
     polishing = _brm_svi_polishing(run)
     scale = polishing ? 1 / sqrt(1 + (it - run.polish_start) / W) : 1.0
     q = run.q
+    batch = _brm_svi_batch(run.rng, run.sampler, c.batch_size)
+    polishing && _brm_svi_average_units!(run.average, q, run.averaged_through,
+        batch.indices, it - run.polish_start - 1)
+    for (k, i) in enumerate(batch.indices)
+        run.sampling.visits[i] += 1
+        run.sampling.draws[i] += batch.multiplicities[k]
+    end
+    run.unit_gradient_calls += 2length(batch.indices)
     value = try
-        _brm_svi_iteration!(run.rng, t, q, run.adam,
-            _brm_svi_batch(run.rng, N, c.batch_size),
+        _brm_svi_iteration!(run.rng, t, q, run.adam, batch.indices,
             scale * (polishing ? c.polish_lr : c.lr_global), scale * c.unit_step;
-            whiten=polishing)
+            whiten=polishing, weights=batch.weights)
     catch e
         e isa BRMSVINonfiniteError || rethrow()
         throw(BRMSVINonfiniteError(it, e.terms))
     end
-    push!(run.trace, value + _brm_svi_entropy(q))
+    for i in batch.indices
+        entropy = _brm_svi_unit_entropy(q, i)
+        run.entropy_sum += entropy - run.unit_entropy[i]
+        run.unit_entropy[i] = entropy
+    end
+    push!(run.trace, value + run.entropy_sum +
+        _brm_svi_global_logdet(_brm_svi_global_geometry(q)) / 2)
     run.iteration = it
     polished = false
     if polishing
         k = it - run.polish_start
-        for name in (:μ, :ρ, :Β, :M, :Λ)
+        for name in (:μ, :ρ, :Β)
             _brm_svi_average!(getfield(run.average, name), getfield(q, name), k)
         end
         polished = k >= c.polish_windows * W
@@ -904,7 +969,9 @@ function _brm_svi_observer(snapshot, t, state, draws)
         _brm_svi_deliver(snapshot, merge((; format=_BRM_SVI_SNAPSHOT_FORMAT, status,
                 seconds=time() - started, threads=hasproperty(t, :plans) ? length(t.plans) : 1,
                 model_identity=state.identity.binding,
-                coordinates=copy(t.m.view.coordinates), levels=copy(t.m.view.levels),
+                coordinates=copy(t.m.view.coordinates),
+                # A connected fit's inference units, not its scientific subjects.
+                levels=copy(hasproperty(t, :ownership) ? _brm_svi_unit_levels(t) : t.m.view.levels),
                 globals=copy(t.globals), units=copy.(t.units)),
             _brm_svi_snapshot_run(state.run, t, state.controls, draws)))
     end
@@ -924,7 +991,8 @@ function _brm_svi_snapshot_run(run::_BRMSVIRun, t, c, draws)
        phase=_brm_svi_polishing(run) ? :polishing : :exploring,
        q_kind=run.average === nothing ? :raw_iterate : :polished_average,
        averaged_iterations=run.average === nothing ? 0 : run.iteration - run.polish_start,
-       q=deepcopy((; q.μ, q.ρ, q.Β, q.M, q.Λ, q.U)),
+       q=(; μ=copy(q.μ), ρ=copy(q.ρ), Β=copy(q.Β), M=copy.(q.M),
+          Λ=_brm_svi_plain_units(q.Λ), U=_brm_svi_plain_units(q.U)),
        elbo_windows=first.(run.windows),
        elbo_windows_trimmed=[w.center for w in run.windows],
        clipped_steps=run.adam.clipped,
@@ -937,14 +1005,45 @@ end
 # factors of the averaged precisions. The run itself is left unchanged, so it
 # stays exactly continuable and its checkpoints do not depend on whether a
 # result was read from it.
-_brm_svi_result_q(run) = run.average === nothing ? run.q :
-    merge(run.average, (; U=[Matrix(cholesky(Symmetric(Λ)).L) for Λ in run.average.Λ]))
+function _brm_svi_result_q(run)
+    run.average === nothing && return run.q
+    average = deepcopy(run.average)
+    _brm_svi_average_units!(average, run.q, copy(run.averaged_through),
+        eachindex(run.q.M), run.iteration - run.polish_start)
+    _brm_svi_factor!(average)
+end
 
 # The running mean `a` of iterates `x`, at the k-th: an array, or one array
 # per subject.
 _brm_svi_average!(a::AbstractArray{<:Real}, x, k) = (@. a += (x - a) / k; a)
 _brm_svi_average!(a::AbstractVector{<:AbstractArray}, x, k) =
     (foreach((ai, xi) -> _brm_svi_average!(ai, xi, k), a, x); a)
+
+# Weighted running averages over stretches during which a unit was unchanged.
+# Dense factors average precision; structured factors average log scales and
+# factor loadings, retaining their bounded rank and positive covariance.
+# This equals visiting every unit at every polishing iteration, but touches
+# only the selected units until the single final flush.
+function _brm_svi_average_units!(average, q, through, indices, iteration)
+    for i in indices
+        count = iteration - through[i]
+        count == 0 && continue
+        weight = count / iteration
+        a, x = average.M[i], q.M[i]
+        @. a += weight * (x - a)
+        _brm_svi_unit_average_precision!(average.Λ[i], q.Λ[i], weight)
+        through[i] = iteration
+    end
+    average
+end
+
+# The subjects' Cholesky factors of an averaged precision.
+function _brm_svi_factor!(q)
+    for i in eachindex(q.Λ)
+        _brm_svi_unit_refactor!(q.U[i], q.Λ[i])
+    end
+    q
+end
 
 # `n` draws from q as packed RK points, one per column.
 function _brm_svi_draws(rng, t, q, n)
@@ -953,7 +1052,7 @@ function _brm_svi_draws(rng, t, q, n)
         U[t.globals, j] .= _brm_svi_draw_global(q, randn(rng, length(q.μ)),
             randn(rng, size(q.Β, 2)))
         for (i, block) in enumerate(t.units)
-            U[block, j] .= _brm_svi_draw_unit(q, i, randn(rng, length(block)))
+            U[block, j] .= _brm_svi_draw_unit(q, i, _brm_svi_unit_noise(rng, q.U[i]))
         end
     end
     _brm_svi_fill_absent_draws!(rng, U, t, t.previous)
@@ -1010,7 +1109,7 @@ end
 
 """
     brm_svi_fit([save,] x; laplace=nothing, batch_size=32, rng=Random.default_rng(),
-        family=MeanFieldGlobal(), ndraws=1000, start=nothing, inits=nothing,
+        family=MeanFieldGlobal(), unit_sampling=nothing, ndraws=1000, start=nothing, inits=nothing,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing,
         global_coordinates=nothing, progress=nothing,
@@ -1045,9 +1144,37 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   cell of a `@plate for` over the subjects or over their rows, or a row of a
   flat-row response grouped by the subjects.
 - `family` — the global factor: `MeanFieldGlobal()` (diagonal) or
-  `LowRankGlobal(r)` (diagonal plus rank `r`). Each subject has its own
-  full-covariance Gaussian factor over its block, whose length can differ
-  between the subjects of a nested model.
+  `LowRankGlobal(r)` (diagonal plus rank `r`).
+- `unit_dense_limit` — units with at most this many coordinates use a dense
+  Gaussian and natural-gradient updates (default 64, allowed 0:256).
+  Larger units use a diagonal-plus-low-rank covariance with `unit_rank`
+  columns (default 8, allowed 0:32, clipped to the unit dimension). Rank zero
+  gives a diagonal factor. Their reparameterized ELBO gradients use Adam with
+  posterior-scale preconditioning and bounded relative steps. Polishing
+  averages their log scales and loadings; dense units average precisions.
+  `diagnostics.unit_families` reports each unit's family, dimension and rank.
+  A streaming update preserves existing units' families and ranks; these
+  controls apply to new units. The factor restriction changes the
+  approximation, not the model density.
+- `separator` — defaults to `:auto` in explicitly connected mode and `:none`
+  otherwise. Automatic promotion uses bounded structural trials if a unit
+  exceeds `max_unit_coordinates=4096` or `max_unit_work=1_000_000`, with at
+  most `max_promoted_coordinates=128` extra globals including block closure.
+  `separator=:none` retains explicit `global_coordinates` promotion. Prior,
+  transform and partition-axis blocks remain intact. Inspect `diagnostics.separator`
+  for selected blocks, reasons and whether budgets were achieved; the heuristic
+  cannot promise an optimal cut or satisfy every budget. Changing ownership
+  changes the variational approximation, never the model density.
+- `unit_sampling` — defaults to `:work` in explicitly connected mode and
+  `:uniform` otherwise. `:uniform` selects distinct units with weight `N/B`;
+  `:work` makes `B` draws with replacement, with probabilities
+  `pᵢ = (1/N + wᵢ/sum(w))/2`. The structural work proxy `wᵢ` counts local
+  coordinates and structural reads in the unit's likelihood/prior factors;
+  it is not measured runtime. All-zero work gives uniform probabilities.
+  Repeated selections share one antithetic evaluation and one local update,
+  with multiplicity retained in the global density and gradient weight
+  `countᵢ/(B*pᵢ)`. Every unit has positive probability. This changes the visit
+  schedule and estimator variance; it does not guarantee faster convergence.
 - Inference ownership follows structural likelihood and authored-prior
   supports, including dormant branches and zero coefficients. Ordinary
   sampled coordinates read by only one unit join that unit; shared and
@@ -1056,8 +1183,9 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   gradients through global hyperparameters. Scientific NLME roles are unchanged.
 - `global_coordinates` — packed coordinate indices or names to keep global.
   Promotion closes over joint blocks and dependent priors. It can include
-  standardized subject effects; it does not split an existing connected
-  observation partition. Diagnostics expose `globals`, `units` and `owner`
+  standardized subject effects. In connected mode the observation partition
+  is rebuilt after promotion; the scientific model view stays unchanged.
+  Diagnostics expose `globals`, `units`, `unit_levels` and `owner`
   (zero for globals or fixed coordinates, otherwise the unit index).
 - `start` / `inits` — where the global and unit means start: BRM's prior-median
   starting point by default, a full RK packed point `start`, or values keyed
@@ -1119,7 +1247,9 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   - `q`: `μ`, `ρ`, `Β`, `M`, `Λ` and `U`, as in `diagnostics.q`. `q_kind` says
     what it is: `:raw_iterate`, `:polished_average` (the Polyak–Ruppert average,
     `averaged_iterations` of them, 0 at the iteration polishing starts) or, for
-    GaussianBlockLaplace, `:window_average`.
+    GaussianBlockLaplace, `:window_average`. A unit above `unit_dense_limit` appears
+    in `Λ` and `U` as `(; family=:diagonal_lowrank, ρ, Β)`, its covariance being
+    `Diagonal(exp.(2ρ)) + Β * Β'`, so that no BRM type is needed to read it.
   - `coordinates`, `levels`, `globals` and `units`: `q.μ[k]` is coordinate
     `coordinates[globals[k]]`, `q.M[i][k]` is coordinate `coordinates[units[i][k]]`,
     of unit `levels[i]`.
@@ -1140,13 +1270,15 @@ the ELBO trace, up to a constant (`elbo`, per iteration; `elbo_windows`, the
 plain mean of each window, which a single draw can dominate; and
 `elbo_windows_trimmed`, the 10% trimmed mean of each window, which the stopping
 rule reads), `clipped_steps` (how many global steps had a coordinate's gradient
-limited to `10 √(N / B)` times its running rms, so that one extreme draw does not
-stop that coordinate's optimization), `converged`,
+limited to `10 √w` times its running rms, with `w` the batch's largest unit
+weight, `N / B` for uniform sampling, so that one extreme draw does not stop that
+coordinate's optimization), `converged`,
 `finished` (converged or `max_iterations` reached; `false` after `stop_after`),
 `iterations`, the variational parameters `q`, the packed positions of the
 global coordinates (`globals`), `seconds` of optimization in this call,
-`threads` (the tasks this call used), `target` (below), the prepared `model`, and
-the run's `optimizer` state
+`threads` (the tasks this call used), `target` (below), the units' sampling
+probabilities, work, visits and draw counts (`sampling`), the actual
+`unit_gradient_calls`, the prepared `model`, and the run's `optimizer` state
 ([`brm_svi_optimizer_checkpoint`](@ref) copies it). The draws come from a copy
 of the optimizer's random stream: they do not advance `rng`, and a continued
 run is unaffected by them. The approximation is variational: posterior means
@@ -1157,7 +1289,9 @@ The prepared `model` keeps its minibatch target and worker samplers for its next
 fit or continuation in this process, so passing `diagnostics.model` (or the
 [`BRMNLMEModel`](@ref) you prepared) prepares neither again.
 `diagnostics.target` reports what this call did: `reused` (it took the model's
-target), `workers_built` and the `seconds` of that phase. The model holds one
+target), `workers_built` and the `seconds` of that phase. A connected model's
+target is reused only for the same `global_coordinates`, separator policy and
+budgets, since those decide its units. The model holds one
 target, the size of its partition samplers and work arrays, for as long as the
 model lives; a copy or a serialized model holds none. A call that throws while
 optimizing does not put its target back, and concurrent calls on one model each
@@ -1171,11 +1305,15 @@ _brm_svi_initial_fit(save, x; laplace=nothing, kwargs...) = laplace === nothing 
     _brm_svi_laplace_dispatch(save, x, nothing, laplace; kwargs...)
 
 function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32,
-        max_iterations=100_000, family=nothing,
+        max_iterations=100_000, family=nothing, unit_sampling=nothing,
+        unit_dense_limit=64, unit_rank=8,
         lr_global=0.01, unit_step=0.1, start=nothing, inits=nothing,
         global_scale=0.1, unit_scale=1.0, polish_lr=0.05, window=nothing,
         patience=10, min_windows=40, polish_windows=20, kwargs...)
     family = _brm_svi_family(previous, family)
+    _brm_svi_unit_options(unit_dense_limit, unit_rank)
+    unit_sampling in (nothing, :uniform, :work) || throw(ArgumentError(
+        "brm_svi_fit: unit_sampling must be :uniform or :work"))
     batch_size >= 1 || throw(ArgumentError("brm_svi_fit: batch_size must be positive"))
     max_iterations >= 0 || throw(ArgumentError("brm_svi_fit: max_iterations must be nonnegative"))
     window === nothing || window >= 1 || throw(ArgumentError("brm_svi_fit: window must be positive"))
@@ -1183,10 +1321,13 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         "brm_svi_fit: a streaming update starts from the previous factors; omit start and inits"))
     _brm_svi_drive(save, x, previous; caller="brm_svi_fit", description="BRM SVI fit",
             kwargs...) do t
-        t, q = _brm_svi_initialize(t, previous, family; start, inits, global_scale, unit_scale)
+        t, q = _brm_svi_initialize(t, previous, family; start, inits, global_scale, unit_scale,
+            unit_dense_limit, unit_rank)
         c = _brm_svi_controls(length(t.units); batch_size, max_iterations, lr_global,
-            unit_step, polish_lr, window, patience, min_windows, polish_windows)
-        t, _brm_svi_optimizer_state(t, previous, c, _brm_svi_run(rng, q, c))
+            unit_step, polish_lr, window, patience, min_windows, polish_windows,
+            unit_sampling=something(unit_sampling,
+                t.m.view.unit_partition === :connected ? :work : :uniform))
+        t, _brm_svi_optimizer_state(t, previous, c, _brm_svi_run(rng, q, c, t))
     end
 end
 
@@ -1258,7 +1399,8 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
         snapshot=nothing, snapshot_every=nothing, snapshot_draws=0,
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, threads=nothing,
-        global_coordinates=nothing, check_lowered=Returns(nothing))
+        global_coordinates=nothing, separator=nothing, max_unit_coordinates=4096,
+        max_unit_work=1_000_000, max_promoted_coordinates=128, check_lowered=Returns(nothing))
     ndraws isa Integer && ndraws >= 0 || throw(ArgumentError(
         "$caller: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller, save, stop_after, checkpoint_every)
@@ -1278,7 +1420,8 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                 t, state, reuse = _brm_run_phase(phases.target) do phase
                     # SVI's partition sampler, on first use, reports under this phase.
                     prepared[], reused = _brm_with_cell_progress(() -> _brm_svi_checkout!(m;
-                        global_coordinates, previous), phase)
+                        global_coordinates, previous, separator, max_unit_coordinates,
+                        max_unit_work, max_promoted_coordinates), phase)
                     reused && _brm_update_progress!(phase, "reusing this model's prepared target")
                     t, state = init(prepared[].target)
                     workers = prepared[].workers
@@ -1312,8 +1455,13 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                     finished=_brm_svi_finished(run, c), iterations=run.iteration, q,
                     globals=t.globals, units=t.units, owner=t.ownership.owner,
                     global_coordinates=t.ownership.promoted,
+                    unit_levels=_brm_svi_unit_levels(t),
+                    subject_unit=hasproperty(t.ownership, :subject_unit) ?
+                        t.ownership.subject_unit : m.view.subject_unit,
+                    separator=hasproperty(t.ownership, :separator) ? t.ownership.separator : nothing,
+                    unit_families=_brm_svi_unit_description.(q.U),
                     seconds, model=m, source_id=_brm_svi_source_id(m.backend),
-                    unit_gradient_calls=2c.batch_size * run.iteration,
+                    sampling=run.sampling, unit_gradient_calls=run.unit_gradient_calls,
                     streaming=_brm_svi_carried_state(previous, t, q), optimizer=state))
             finally
                 # A refused checkpoint leaves the target as it found it; an exception
@@ -1326,9 +1474,9 @@ end
 
 _brm_svi_family(::Nothing, ::Nothing) = MeanFieldGlobal()
 _brm_svi_family(::Nothing, family::BRMSVIFamily) = family
-function _brm_svi_initialize(t, ::Nothing, family; start, inits, global_scale, unit_scale)
+function _brm_svi_initialize(t, ::Nothing, family; start, inits, global_scale, unit_scale, unit_dense_limit=64, unit_rank=8)
     point = _brm_svi_start(t.m, start, inits)
-    q = _brm_svi_params(t, point[t.globals], family; global_scale, unit_scale)
+    q = _brm_svi_params(t, point[t.globals], family; global_scale, unit_scale, unit_dense_limit, unit_rank)
     for (i, block) in enumerate(t.units)
         q.M[i] .= point[block]
     end
