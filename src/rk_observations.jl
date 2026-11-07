@@ -126,7 +126,7 @@ function _rk_plan_completions(plan, mode)
 end
 # `sources === nothing` non-centers every completion.
 function _rk_noncentered_completions(plan::_RKValuePlan, sources)
-    _rk_check_completion_sources(sources, (c.source for c in plan.completions))
+    _rk_check_completion_sources(sources, _rk_completion_sources(plan))
     _RKValuePlan(plan.regression, plan.assignments, plan.observations, plan.columns,
         map(c -> sources === nothing || c.source in sources ?
             _rk_noncentered_completion(c) : c, plan.completions))
@@ -137,10 +137,15 @@ _rk_noncentered_completions(plan::_RKHeldOutPlan, sources) =
 # missing rows are integrated out of the likelihood, which reads the observed
 # rows only, and sample no coordinate. Nothing is left to non-center.
 function _rk_noncentered_completions(plan::_RKStructuralPlan, sources)
-    _rk_check_completion_sources(sources,
-        (r.response for r in plan.responses if r.mi_jobs !== nothing))
+    _rk_check_completion_sources(sources, _rk_completion_sources(plan))
     plan
 end
+# The `mi` sources a `completions` collection may name in a plan.
+_rk_completion_sources(plan::_RKValuePlan) = (c.source for c in plan.completions)
+_rk_completion_sources(plan::_RKHeldOutPlan) = _rk_completion_sources(plan.parent)
+_rk_completion_sources(plan::_RKStructuralPlan) =
+    (r.response for r in plan.responses if r.mi_jobs !== nothing)
+_rk_completion_sources(plan) = ()
 function _rk_check_completion_sources(sources, completions)
     sources === nothing && return nothing
     known = Set{Symbol}(completions)
