@@ -218,6 +218,31 @@ clashing_summary() = brm(:(begin
     b ~ Normal(sum(v), 1)
     y ~ Normal(b, prior_sum_v)
 end); mod=@__MODULE__)
+# Level counts (todo `1rv5dd8`): a monotonic term's increments and an ordinal
+# response's thresholds are sized by the data.
+monotonic(head) = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + $head(op)
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
+joint_monotonic() = brm(:(begin
+    sigma ~ Exponential(1)
+    a ~ 0 + x + mo(op)
+    b ~ 0 + x + mo(op)
+    y ~ Normal(a + b, sigma)
+end); mod=@__MODULE__)
+cumulative() = brm(:(begin
+    eta ~ 0 + x
+    c ~ Ordinal(Cumulative(), LogitLink(), eta)
+end); mod=@__MODULE__)
+stopping() = brm(:(begin
+    eta ~ 0 + x
+    c ~ Ordinal(StoppingRatio(), CloglogLink(), eta; per_threshold=(t,))
+end); mod=@__MODULE__)
+ordered_logit() = brm(:(begin
+    eta ~ 0 + x
+    c ~ OrderedLogistic(eta)
+end); mod=@__MODULE__)
 horseshoe_effect(; local_scale=1.0, global_scale=1.0) = brm(:(begin
     sigma ~ Exponential(1)
     m ~ 1 + x
@@ -878,6 +903,46 @@ end
     @test_throws "generated name `prior_sum_v`" RKBRMI(RSM.clashing_summary()((; y=LDATA.y, v=m1)))
     # Positive control: a literal stays in its author's source.
     @test rk_program(RSM.summary_prior(; location=1.7)(LDATA)) != rk_program(RSM.summary_prior(; location=2.9)(LDATA))
+end
+
+@stestset "a level count is an input" begin
+    # Three and four levels of one ordinal column, and of one response. The
+    # densities are RK-against-Stan parity's (`rk_parity.jl`, `mo_shared_column.jl`).
+    three = merge(LDATA, (; op=[1, 2, 3, 1, 2, 3], c=[1, 2, 3, 1, 2, 3], t=[0.0, 1, 0, 1, 0, 1]))
+    four = merge(LDATA, (; op=[1, 2, 3, 4, 2, 3], c=[1, 2, 3, 4, 2, 3], t=[0.0, 1, 0, 1, 0, 1]))
+    # An ordinal response's threshold count is Stan data; RKPPL's ordinal lowering
+    # takes it as an input once ReactiveKernels snag `rkppl-threshold-932a2e27`
+    # lands, so RK still spells it (`ordinal = true`).
+    cases = (("mo", RSM.monotonic(:mo), false), ("mo1", RSM.monotonic(:mo1), false),
+        ("mo over one column in two predictors", RSM.joint_monotonic(), false),
+        ("cumulative thresholds", RSM.cumulative(), true),
+        ("stopping-ratio thresholds and per-threshold effects", RSM.stopping(), true),
+        ("ordered logistic cutpoints", RSM.ordered_logit(), true))
+    for (label, build, ordinal) in cases
+        @testset "$label" begin
+            # One Stan program; the count is Stan data.
+            @test stan_program(build(three)) == stan_program(build(four))
+            small, large = RKBRMI(build(three)), RKBRMI(build(four))
+            # One emitted program; the layout follows the count.
+            @test (emitted_program(small) == emitted_program(large)) broken=ordinal
+            @test small.model.layout.total < large.model.layout.total
+            # The lowered program follows the size until RK's extents
+            # (ReactiveKernels snag `rkppl-sized-vect-69604d32`).
+            @test (lowered_program(small) == lowered_program(large)) broken=!RK_BINDS_SIZES || ordinal
+            # A frozen replay keeps the fitted levels: the same layout and density.
+            u = rk_point(small)
+            frozen = reprocess(small, three)
+            @test frozen.model.layout.total == small.model.layout.total
+            @test rk_density(frozen, u) == rk_density(small, u)
+            # A fresh replay takes the new count.
+            @test reprocess(small, four; freeze_constants=false).model.layout.total ==
+                large.model.layout.total
+        end
+    end
+    # Positive control: a change of the model's form is a change of its program.
+    @test rk_program(RSM.monotonic(:mo)(three)) != rk_program(RSM.monotonic(:mo1)(three))
+    @test rk_program(RSM.cumulative()(three)) != rk_program(RSM.ordered_logit()(three))
+    @test stan_program(RSM.monotonic(:mo)(three)) != stan_program(RSM.monotonic(:mo1)(three))
 end
 
 @stestset "a structured Horseshoe's scales are inputs" begin

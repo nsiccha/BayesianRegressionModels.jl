@@ -39,18 +39,23 @@ end
         mu ~ 0 + mo1(c)
         simplex(mu, mo1(c)) ~ Dirichlet(2)
     end
-    scalar_code = BRM.stan_code(SBBRMI(scalar; mod=@__MODULE__))
+    scalar_sb = SBBRMI(scalar; mod=@__MODULE__)
+    scalar_code = BRM.stan_code(scalar_sb)
+    # The concentration is a Stan datum (BRM 0.2.233), one value per increment.
+    @test scalar_sb.data[:mo1_c_alpha] == fill(2.0, 3)
     @test occursin(
-        "mo1_c_simplex_incr ~ dirichlet(rep_vector(2.0, 3));", scalar_code)
+        "mo1_c_simplex_incr ~ dirichlet(mo1_c_alpha);", scalar_code)
 
     variadic = @brm term_semantics_df begin
         y ~ Normal(mu, 1)
         mu ~ 0 + mo1(c)
         simplex(mu, mo1(c)) ~ Dirichlet(1, 2, 4)
     end
-    variadic_code = BRM.stan_code(SBBRMI(variadic; mod=@__MODULE__))
+    variadic_sb = SBBRMI(variadic; mod=@__MODULE__)
+    variadic_code = BRM.stan_code(variadic_sb)
+    @test variadic_sb.data[:mo1_c_alpha] == [1.0, 2.0, 4.0]
     @test occursin(
-        "mo1_c_simplex_incr ~ dirichlet([1.0, 2.0, 4.0]');", variadic_code)
+        "mo1_c_simplex_incr ~ dirichlet(mo1_c_alpha);", variadic_code)
     @test StanBlocks.stanc_check(variadic_code; warn_pedantic=false).ok
 
     vector_data = merge(term_semantics_df, (; alpha=[1.0, 2.0, 4.0]))
@@ -73,7 +78,10 @@ end
     end
     fitted_sb = SBBRMI(fitted; mod=@__MODULE__)
     fitted_code = BRM.stan_code(fitted_sb)
-    @test occursin("simplex[3] mo1_c_simplex_incr;", fitted_code)
+    # The simplex is sized by the term's concentration datum (user principle
+    # `0ikeidi`), three increments here.
+    @test occursin("simplex[mo1_c_alpha_n] mo1_c_simplex_incr;", fitted_code)
+    @test fitted_sb.data[:mo1_c_alpha] == ones(3)
     @test occursin(
         "mo1_c_simplex_incr ~ asymmetric_simplex(1, 2, 4);", fitted_code)
     @test StanBlocks.stanc_check(fitted_code; warn_pedantic=false).ok
@@ -101,7 +109,7 @@ end
     end
     prior_sb = SBBRMI(prior; mod=@__MODULE__)
     prior_code = BRM.stan_code(prior_sb)
-    @test occursin("asymmetric_simplex_simplex_rng(3, 1, 2, 4)", prior_code)
+    @test occursin("asymmetric_simplex_simplex_rng(mo1_c_alpha_n, 1, 2, 4)", prior_code)
     @test occursin(r"parameters\s*\{\s*\}", prior_code)
     @test StanBlocks.stanc_check(prior_code; warn_pedantic=false).ok
 
