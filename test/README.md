@@ -1402,7 +1402,11 @@ the batch's largest unit weight, keeps its globals moving on the same model.
 (`_brm_svi_exploration_global_step!`): two coordinates with scales 1 and 0.01
 given the same gradient on their rows of Β move them 1 : 0.01, μ and ρ step
 exactly as `_brm_svi_step!` steps them, and with no rank part the step is
-`_brm_svi_step!` to the last bit. On `svi_gauss_model` (200 subjects, batches of
+`_brm_svi_step!` to the last bit. Its polishing step
+(`_brm_svi_polish_global_step!`) moves μ 1 : 0.01 too where a rank column couples
+the two coordinates (the whitened step moves the second along the column, more
+than ten times as far), and with no rank part it is
+`_brm_svi_whitened_global_step!` to the last bit. On `svi_gauss_model` (200 subjects, batches of
 4), 15,000 iterations of exploration leave every global's sd below 1.2 times the
 NUTS sd and its mean within one NUTS sd; with the absolute step (0.2.242 and earlier) one
 sd read 1.53 times (2.30, 2.39 and 1.00 on seeds 2-4, against 0.66-0.86).

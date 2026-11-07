@@ -1,7 +1,9 @@
-# LowRankGlobal's exploration step (src/nlme_svi.jl,
-# `_brm_svi_exploration_global_step!`): each row of the global rank part Β moves
-# in units of its coordinate's scale exp(ρ_k), as polishing steps it, while μ and
-# ρ step exactly as before.
+# LowRankGlobal's global steps (src/nlme_svi.jl). In exploration
+# (`_brm_svi_exploration_global_step!`) each row of the global rank part Β moves
+# in units of its coordinate's scale exp(ρ_k) while μ and ρ step exactly as
+# before; in polishing (`_brm_svi_polish_global_step!`) μ moves in units of
+# exp(ρ_k) too, not of a square root of the whole covariance. A mean-field factor
+# steps as before in both.
 #
 # Β's gradient w ηᵀ carries the minibatch noise of w, so Adam's normalized step is
 # mostly a random walk of one step size per iteration. Before 0.2.243 that step
@@ -60,6 +62,33 @@ end
         r == 0 && @test isequal(xa, xb) && isequal(a.m, b.m) && isequal(a.v, b.v) &&
             a.clipped == b.clipped
     end
+end
+
+@stestset "a low-rank polishing step moves μ in units of its diagonal scale" begin
+    # A rank column couples the two coordinates. The whitened step moves μ along
+    # it, the polishing step in units of each coordinate's own scale only.
+    s = [1.0, 0.01]
+    q = svi_rank_q(s, 1)
+    q.Β .= [0.0, 5.0]
+    g = [1.0, 1.0, 0, 0, 0, 0]
+    x = BRM._brm_svi_global_vector(q)
+    BRM._brm_svi_polish_global_step!(BRM._BRMSVIAdam(6, 0.05), q, x, g, 0.05)
+    @test x[2] / x[1] ≈ 0.01 rtol=1e-6
+    w = BRM._brm_svi_global_vector(q)
+    BRM._brm_svi_whitened_global_step!(BRM._BRMSVIAdam(6, 0.05), q, w, g, 0.05)
+    @test abs(w[2]) > 10 * abs(x[2])
+    # Without a rank part the polishing step is the whitened step to the last bit.
+    rng = Xoshiro(3)
+    q = svi_rank_q(exp.(randn(rng, 4)), 0)
+    q.μ .= randn(rng, 4)
+    a, b = BRM._BRMSVIAdam(8, 0.05), BRM._BRMSVIAdam(8, 0.05)
+    xa, xb = BRM._brm_svi_global_vector(q), BRM._brm_svi_global_vector(q)
+    for _ in 1:50
+        g = 10 .* randn(rng, 8)
+        BRM._brm_svi_whitened_global_step!(a, q, xa, g, 0.05; clip=10.0)
+        BRM._brm_svi_polish_global_step!(b, q, xb, g, 0.05; clip=10.0)
+    end
+    @test isequal(xa, xb) && isequal(a.m, b.m) && isequal(a.v, b.v)
 end
 
 # The NUTS reference of `rk`'s target: coordinates × draws.

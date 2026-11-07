@@ -23,11 +23,20 @@ instead of failing at run time.
   hyperparameters overflow a few sds out, typical draws reached a non-finite
   density and the fit stopped with `BRMSVINonfiniteError`. Each Β row now steps
   in units of its coordinate's scale `exp(ρ_k)` in exploration too, as it
-  already did in polishing.
-- Unchanged: `MeanFieldGlobal` fits, to the last bit, and μ and ρ under
-  `LowRankGlobal`. A `LowRankGlobal` fit on a fixed seed differs from its first
-  exploration step on. A low-rank optimizer checkpoint written by an earlier
-  version resumes and continues under the new step.
+  already did in polishing. A ridge a slice's data leave to the prior therefore
+  grows over more iterations: fit `LowRankGlobal` slices for `brm_svi_combine`
+  with a longer exploration (a larger `min_windows`) than the default 40 windows.
+- Fixed: a `LowRankGlobal(r)` fit no longer breaks down when polishing starts.
+  Polishing moved μ in units of a square root of the whole global covariance,
+  and the restarted Adam's first steps, each about its step size in every
+  whitened coordinate, added up along the rank part's directions. On a model with
+  1,094 globals the trimmed ELBO fell by two thirds within a few hundred
+  polishing iterations, and draws went non-finite. μ now moves in units of its
+  diagonal scale `exp(ρ_k)` when polishing a low-rank factor.
+- Unchanged: `MeanFieldGlobal` fits, to the last bit, and μ and ρ in a
+  `LowRankGlobal` exploration. A `LowRankGlobal` fit on a fixed seed differs from
+  its first exploration step on. A low-rank optimizer checkpoint written by an
+  earlier version resumes and continues under the new steps.
 
 ## 0.2.242
 
