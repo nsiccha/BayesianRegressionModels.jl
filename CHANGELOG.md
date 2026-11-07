@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.226
+## 0.2.227
 
 More numbers are inputs of the program instead of text in it (user principle
 `0ikeidi`). Densities are unchanged: each form is checked against its literal twin.
@@ -49,6 +49,30 @@ More numbers are inputs of the program instead of text in it (user principle
   predictor per class. One lowered program across sizes and bounds needs RKPPL
   0.1.108 and one query type across values RKPPL 0.1.106. BRM's compat floors do not
   require them: an older RK is correct but recompiles for each value.
+
+## 0.2.226
+
+- Added: `brm_svi_fit` and `brm_svi_resume` hand out snapshots of a running fit
+  without returning: `snapshot` (a function, or a file path the run rewrites
+  atomically, so it always holds the latest complete snapshot), `snapshot_every`
+  (default once per window, or every 50 updates with `GaussianBlockLaplace`) and
+  `snapshot_draws` (default none). A snapshot is one named tuple of plain arrays
+  that loads without BRM or the model: `q`, what `q` is (`q_kind`:
+  `:raw_iterate`, `:polished_average` or `:window_average`), the coordinates,
+  units and levels that name it, `iteration`, `phase`, the window ELBOs and, outside
+  `GaussianBlockLaplace`, `elbo_windows_trimmed` and `clipped_steps`, `draws`,
+  and a `status` that stays `:running` until the boundary where the call ends. An
+  observed run is the same to the last bit as an unobserved one, and a snapshot's
+  `q` and `draws` equal those of a result stopped at its iteration. BRM keeps none,
+  so a long run's memory and files do not grow with snapshots.
+- Changed: a prepared `BRMNLMEModel` keeps its minibatch target and worker samplers
+  for its next `brm_svi_fit` or `brm_svi_resume` in this process, so a continuation
+  on `fit.diagnostics.model` no longer prepares them again. `diagnostics.target`
+  reports it: `reused`, `workers_built` and the phase's `seconds`. Results and
+  checkpoints are unchanged, and a changed model is still refused by resume's
+  identity check. The model retains the target for as long as it lives; a copy or a
+  serialized model holds none. `GaussianBlockLaplace` still prepares its target on
+  every call.
 
 ## 0.2.225
 

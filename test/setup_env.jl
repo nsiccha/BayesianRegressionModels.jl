@@ -422,7 +422,11 @@ const PINS = [
     # cannot change inside a loop once per loop entry (Enzyme snag
     # reverse-generato-03b2003d), so a multiresolution gmrf reader's generator
     # sum no longer tapes its captured arrays once per basis term.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "b2bb4cb628cf5f5ac4a897d4b7d83fcd2b5df97c"),  # dogfood
+    # 74ce4afc / libEnzyme 08f0e8d9 contains b2bb4cb6 and proves that the
+    # reader cannot reach a fresh output array (Enzyme snag
+    # residual-per-ter-5c58955b), so that reader no longer tapes each term's
+    # field value and weight.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "74ce4afcce4144ebd71d6374a5293aff1996ceb7"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also
