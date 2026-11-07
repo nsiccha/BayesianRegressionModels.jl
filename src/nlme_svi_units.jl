@@ -150,3 +150,14 @@ _brm_svi_unit_refactor!(U::AbstractMatrix, Λ::AbstractMatrix) =
 _brm_svi_unit_description(U::AbstractMatrix) = (; family=:dense, dimension=size(U, 1), rank=size(U, 1))
 _brm_svi_unit_description(U::_BRMSVIUnitRoot) =
     (; family=:diagonal_lowrank, dimension=size(U, 1), rank=size(U.factor.Β, 2))
+
+# Unit factors as plain data, so a snapshot loads without BRM (`_brm_svi_snapshot_run`):
+# a dense unit's matrix, or a structured unit's log scales `ρ` and loadings `Β`,
+# whose covariance is `Diagonal(exp.(2ρ)) + Β * Β'`, as `brm_svi_checkpoint` stores
+# it. The element type names no BRM type either, even when every unit is dense.
+const _BRMSVIPlainUnit = Union{Matrix{Float64},
+    @NamedTuple{family::Symbol,ρ::Vector{Float64},Β::Matrix{Float64}}}
+_brm_svi_plain_unit(x::Matrix{Float64}) = copy(x)
+_brm_svi_plain_unit(x::_BRMSVIUnitOperator) =
+    (; family=:diagonal_lowrank, ρ=copy(x.factor.ρ), Β=copy(x.factor.Β))
+_brm_svi_plain_units(xs) = _BRMSVIPlainUnit[_brm_svi_plain_unit(x) for x in xs]

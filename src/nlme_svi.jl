@@ -991,7 +991,8 @@ function _brm_svi_snapshot_run(run::_BRMSVIRun, t, c, draws)
        phase=_brm_svi_polishing(run) ? :polishing : :exploring,
        q_kind=run.average === nothing ? :raw_iterate : :polished_average,
        averaged_iterations=run.average === nothing ? 0 : run.iteration - run.polish_start,
-       q=deepcopy((; q.μ, q.ρ, q.Β, q.M, q.Λ, q.U)),
+       q=(; μ=copy(q.μ), ρ=copy(q.ρ), Β=copy(q.Β), M=copy.(q.M),
+          Λ=_brm_svi_plain_units(q.Λ), U=_brm_svi_plain_units(q.U)),
        elbo_windows=first.(run.windows),
        elbo_windows_trimmed=[w.center for w in run.windows],
        clipped_steps=run.adam.clipped,
@@ -1242,7 +1243,9 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   - `q`: `μ`, `ρ`, `Β`, `M`, `Λ` and `U`, as in `diagnostics.q`. `q_kind` says
     what it is: `:raw_iterate`, `:polished_average` (the Polyak–Ruppert average,
     `averaged_iterations` of them, 0 at the iteration polishing starts) or, for
-    GaussianBlockLaplace, `:window_average`.
+    GaussianBlockLaplace, `:window_average`. A unit above `unit_dense_limit` appears
+    in `Λ` and `U` as `(; family=:diagonal_lowrank, ρ, Β)`, its covariance being
+    `Diagonal(exp.(2ρ)) + Β * Β'`, so that no BRM type is needed to read it.
   - `coordinates`, `levels`, `globals` and `units`: `q.μ[k]` is coordinate
     `coordinates[globals[k]]`, `q.M[i][k]` is coordinate `coordinates[units[i][k]]`,
     of unit `levels[i]`.

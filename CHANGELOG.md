@@ -74,6 +74,9 @@ instead of failing at run time.
   and budgets as well as the requested globals and streaming carry, so a connected
   fit never reuses a partition built under another policy. Snapshots report a
   connected fit's inference units in `levels`, as `diagnostics.unit_levels` does.
+  A snapshot's `q.Λ` and `q.U` are plain data: a dense unit's matrix, or a
+  structured unit's `(; family=:diagonal_lowrank, ρ, Β)`, so a saved snapshot
+  still loads without BRM.
   `diagnostics.unit_gradient_calls` counts actual evaluations: a unit drawn twice
   in one work-weighted batch is evaluated once.
 

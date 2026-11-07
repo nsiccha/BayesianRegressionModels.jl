@@ -171,6 +171,21 @@ end
     @test !isempty(seen)
     @test last(seen).levels == observed.diagnostics.unit_levels
     @test length(last(seen).levels) == length(last(seen).units) == n
+    # Structured unit factors are plain data too: a process without BRM reads them.
+    mktempdir() do dir
+        path = joinpath(dir, "latest.jls")
+        structured = brm_svi_fit(m; rng=Xoshiro(84), controls..., unit_dense_limit=0,
+            snapshot=path)
+        s = deserialize(path)
+        factor = structured.diagnostics.q.U[1].factor
+        @test s.q.Λ[1].family === s.q.U[1].family === :diagonal_lowrank
+        @test s.q.U[1].ρ == factor.ρ && s.q.U[1].Β == factor.Β
+        script = "using Serialization; s = deserialize(ARGS[1]); " *
+            "print(s.q.U[1].family, ' ', isdefined(Main, :BayesianRegressionModels))"
+        cmd = addenv(`$(Base.julia_cmd()) --startup-file=no -e $script $path`,
+            "JULIA_LOAD_PATH" => "@stdlib")
+        @test read(cmd, String) == "diagonal_lowrank false"
+    end
 end
 
 @stestset "chain separators retain the native target" begin
