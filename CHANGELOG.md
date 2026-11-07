@@ -22,9 +22,11 @@ instead of failing at run time.
   objective is unchanged and a batch of units estimates it without bias. A step
   costs what its units read: 0.034 to 0.046 s per step from 256 to 16,384
   states on a synthetic station field, where `:global` (the default, unchanged)
-  rose to 0.60 s. The prepared target still holds one prepared prior query per
-  unit (about 0.8 MB per unit on that toy). `:units` is refused for streaming windows, `multiresolution=` fields,
-  and fields whose lengths or correlation factor are not global coordinates.
+  rose to 0.60 s. With ReactiveKernelsPPL 0.1.116 or later, the prepared target
+  takes about 50 KB per unit on that toy (35 KB under `:global`): 239 MB at
+  16,384 states, with peak RSS 3.2 GB. Earlier RKPPL took 0.8 MB per unit.
+  `:units` is refused for streaming windows, `multiresolution=` fields, and
+  fields whose lengths or correlation factor are not global coordinates.
   Checkpoints carry `field_states`; a resume keeps it. A model's held SVI target
   is reused only for the same `field_states`.
 - A unit's SVI evaluation writes and reads only its footprint at the plan's
