@@ -6948,6 +6948,23 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             new_data[n_name] = length(levels)
             push!(handled, n_name)
         end
+    elseif e.kind === :mo_alpha
+        # A monotonic term's concentration (`_sb_mo_alpha!`), over the levels its
+        # column replays with: the fitted ones, or under `freeze_constants=false`
+        # the new frame's. One concentration for every level follows the count; a
+        # per-level one must match it.
+        v = _sb_factor_replay_values(e.raw_ref, df)
+        levels = freeze ? e.const_.levels : _sb_factor_refit_levels(e.raw_ref, v)
+        alpha, k = e.const_.alpha, length(levels) - 1
+        if length(alpha) != k
+            allequal(alpha) || error("sbimpl: reprocess: `$key` holds a Dirichlet " *
+                "concentration for $(length(alpha) + 1) levels of `$(e.raw_ref)`, but " *
+                "the replay has $(k + 1); give `simplex(...)` one concentration for " *
+                "every level, or rebuild the model")
+            alpha = fill(first(alpha), k)
+        end
+        new_data[key] = alpha
+        new_preproc[key] = PreprocEntry(:mo_alpha, (; levels, alpha), e.raw_ref, true)
     elseif e.kind === :ragged_gather || e.kind === :ragged_rows
         # Written only by the formula-level `ragged(y, group) ~ …` observation,
         # which `@brm` refuses since 570403f6 (todo `1nfukuv`).
@@ -10953,14 +10970,20 @@ _sb_mo_concentration_expr(value) = _sb_effect_prior_arg(value)
 
 # The concentration is data named after the term (`<term>_alpha`), never text of
 # the program, so one Stan program serves every level count (user principle
-# `0ikeidi`); a frozen replay keeps the fitted levels and so the same datum.
-_sb_mo_alpha!(data, name, alpha::AbstractVector{<:Real}) =
-    _sb_static_level_datum!(data, Symbol(name, :_alpha), collect(Float64, alpha))
-_sb_mo_alpha!(_data, _name, alpha) = alpha
-function _sb_mo_prior_plan(term_overrides, t, n_levels, data, name)
-    k = n_levels - 1
+# `0ikeidi`). Its `:mo_alpha` record replays it over the levels the column
+# replays with (`reprocess`).
+function _sb_mo_alpha!(data, name, alpha::AbstractVector{<:Real}, raw_ref, levels)
+    key = Symbol(name, :_alpha)
+    data[key] = collect(Float64, alpha)
+    _sb_record_preproc!(data, key, PreprocEntry(:mo_alpha,
+        (; levels=collect(levels), alpha=data[key]), raw_ref, true))
+    key
+end
+_sb_mo_alpha!(_data, _name, alpha, _raw_ref, _levels) = alpha
+function _sb_mo_prior_plan(term_overrides, t, levels, data, name, raw_ref)
+    k = length(levels) - 1
     cfg = _sb_term_cfg(term_overrides, t, :simplex)
-    default_alpha = _sb_mo_alpha!(data, name, ones(k))
+    default_alpha = _sb_mo_alpha!(data, name, ones(k), raw_ref, levels)
     isnothing(cfg) && return (; model=:_sb_mo, alpha=default_alpha)
 
     prior = _brm_normalize_simplex_prior(cfg.spec.expression, k)
@@ -10970,11 +10993,11 @@ function _sb_mo_prior_plan(term_overrides, t, n_levels, data, name)
         isempty(getkwargs(prior)) || error("sbimpl: normalized Dirichlet simplex prior has keywords")
         original_args = getargs(cfg.spec.expression)
         alpha = if length(original_args) == 1 && only(original_args) isa Real
-            _sb_mo_alpha!(data, name, fill(Float64(only(original_args)), k))
+            _sb_mo_alpha!(data, name, fill(Float64(only(original_args)), k), raw_ref, levels)
         else
             concentration = only(getargs(prior))
             concentration isa AbstractVector{<:Real} ?
-                _sb_mo_alpha!(data, name, concentration) :
+                _sb_mo_alpha!(data, name, concentration, raw_ref, levels) :
                 _sb_mo_concentration_expr(concentration)
         end
         return (; model=:_sb_mo, alpha)
@@ -11505,7 +11528,8 @@ function _sb_emit_direct_expr!(stmts, data, target::Symbol, ::typeof(mo1), t, su
     end
     idx_name = Symbol(inner_name, :_idx)
     data[idx_name] = idx
-    prior = _sb_mo_prior_plan(term_overrides, t, n_levels, data, col_name)
+    prior = _sb_mo_prior_plan(term_overrides, t, prepared.state.levels, data,
+        col_name, inner_name)
     push!(stmts, Expr(:call, :~, col_name,
         _sb_term_model_call(prior.model, term_overrides, t;
                             x=idx_name, alpha=prior.alpha)))
@@ -15098,7 +15122,7 @@ _sb_predictor_term!(stmts, data, ::typeof(mo), t;
     end
     data[idx_name] = prepared.state.idx
     _sb_record_preproc!(data, idx_name, PreprocEntry(:mo, levels, inner_name, true))
-    prior = _sb_mo_prior_plan(term_overrides, t, n_levels, data, col_name)
+    prior = _sb_mo_prior_plan(term_overrides, t, levels, data, col_name, inner_name)
     push!(stmts, Expr(:call, :~, col_name,
         _sb_term_model_call(prior.model, term_overrides, t;
                             x=idx_name, alpha=prior.alpha)))
@@ -16676,8 +16700,11 @@ end
 # An ordinal response's threshold count, the level count minus one, is data named
 # after its thresholds (`<thresholds>_length`), so one Stan program serves every
 # level count (user principle `0ikeidi`).
-_sb_threshold_count!(data, thresholds::Symbol, n::Int) =
-    _sb_static_level_datum!(data, Symbol(thresholds, :_length), n)
+function _sb_threshold_count!(data, thresholds::Symbol, n::Int)
+    key = Symbol(thresholds, :_length)
+    data[key] = n
+    key
+end
 
 _sb_ordinal_structure_code(::Cumulative) = 1
 _sb_ordinal_structure_code(::StoppingRatio) = 2

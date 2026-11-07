@@ -272,7 +272,8 @@ end
     main = strip_lines(emitted.main)
     # Executable preparation precedes allocating calls in the main graph. The
     # group block sizes its levels by the fitted levels of `g`'s fit-role copy.
-    @test :(b_p_g ~ brm_correlated_group_effects(g_fit_levels, 2, 3.0)) in main.args
+    # The block's LKJ eta is an input of the program (BRM 0.2.220), not text of it.
+    @test :(b_p_g ~ brm_correlated_group_effects(g_fit_levels, 2, bucket_p_g_lkj_eta)) in main.args
     @test :(mo_c ~ brm_monotonic_effect(c_idx, mo_c_alpha, 0.0, 1.0)) in main.args
     @test :(X_mu = hcat(ones(length(c)), x)) in main.args
     @test :(pop_mu ~ brm_population_effects(X_mu, 2, 0.0, 1.0)) in main.args

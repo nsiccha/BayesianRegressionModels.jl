@@ -48,7 +48,9 @@ end
     prior=only(filter(p->last(p.id)===:rho_iso,r.priors))
     @test prior.distribution.arguments==(0.8,2.0)
     @test prior.support.lower==0.8 && prior.support.upper==2.0
-    @test any(c->c.callable===StanBlocks.stan.builtin.rep_vector,brm_description_components(r))
+    # `mo(g)`'s concentration is Stan data (`mo_g_alpha`, BRM 0.2.228), so no
+    # `rep_vector(1., K-1)` helper call spells the level count any more.
+    @test !any(c->c.callable===StanBlocks.stan.builtin.rep_vector,brm_description_components(r))
     @test any(e->occursin("\\beta_{mu,mo",e),r.equations)
     @test any(e->occursin("\\sqrt{0.5^2+",e),r.equations)
     @test any(e->occursin("f_Z",e) && occursin("\\frac{1}",e),r.equations)
