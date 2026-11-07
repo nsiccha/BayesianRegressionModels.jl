@@ -1870,7 +1870,7 @@ parameterization preserved:
 
 | spelling | meaning |
 |---|---|
-| `Dirichlet(alpha)` | concentration vector literal, e.g. `Dirichlet([2.0, 1.5, 3.0])` |
+| `Dirichlet(alpha)` | concentration vector: a literal, e.g. `Dirichlet([2.0, 1.5, 3.0])`, or a data field |
 | `Dirichlet(K, a)` | symmetric: `K` components, each concentration `a` |
 
 `@brm` is a macro over the formula block, so a bare Julia symbol on the
@@ -1978,7 +1978,8 @@ The mean is a numeric vector literal, a **data column**, or a data-only
 expression over data columns (`zeros(length(time) - 1)`, `fill(c, k)`) —
 evaluated in Julia at build time and shipped as data. The scale may be a
 literal, a data column, or a **sampled scalar parameter** (`MvNormal(zeros(k), sig)`
-emits `normal(eps_mu, sig)`). The dimension comes from the mean, from a
+emits `normal(eps_mu, sig)`). A mean or scale held in a data field is an input of
+the program on both backends, so one program serves every value. The dimension comes from the mean, from a
 vector/matrix scale, or from the integer form; when the mean itself involves a
 parameter and the scale is a scalar, there is no data-determinable size and the
 statement is rejected with a message saying so.

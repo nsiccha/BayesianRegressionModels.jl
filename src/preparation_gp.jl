@@ -140,7 +140,8 @@ function _brm_hsgp_extended_options(kw, n_axes::Int, cov::Symbol;
         "sbimpl: `hsgp(...; rows=...)` with `orthogonal_to=:linear` is not " *
         "built: the projection would have to be restricted to the masked rows")
     (; extrapolate, anchor, rows,
-       setting_fields=_brm_setting_fields(kw, (:k, :c, :domain, :period, :anchor)))
+       setting_fields=(_brm_setting_fields(kw, (:k, :c, :domain, :period, :anchor))...,
+                       _brm_multigroup_setting_fields(get(kw, :cor, nothing))...))
 end
 
 function _brm_prepare_term(term::ExprColumn{typeof(gp)}, target::Symbol, context)

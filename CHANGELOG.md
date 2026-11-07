@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.226
+## 0.2.229
 
 - Fixed: on the NLME paths, an `mi(x)` completion whose law reads the units'
   draws (`mi(x1) ~ LogNormal(mu_x, sigma_x)` with `mu_x ~ ... + (1 | region)` and
@@ -49,6 +49,93 @@ instead of failing at run time.
   a collection of `mi` sources, `completions = (:x,)`, to non-center those
   completions only. A regression-plan `mi(y)` response, which samples none of its
   missing entries, accepts every spelling instead of refusing `:noncentered`.
+
+## 0.2.228
+
+- Fixed: `brm_svi_resume` refused a checkpoint as "the model differs from the
+  checkpoint's in its emitted program" when the same model was loaded from
+  another checkout, depot, host or BRM release. A model's program identity
+  printed every macro call with the file and line it was written at, and an
+  emitted `ReactiveKernels.@kernel` definition is one: BRM's own (with the depot
+  slug of this BRM installation and the line in its source) or a source
+  provider's (with the consumer's checkout directory). Every identity that
+  compares the program now reads it without those places: SVI optimizer
+  checkpoints, the SVI and SMC streaming carries, SMC and SMC Laplace
+  checkpoints, filter exports, and a fitted state's export and replay. A program
+  without such a macro call keeps its identity, so its checkpoints are
+  unchanged.
+- An SVI optimizer checkpoint written before 0.2.228 holds the digest with
+  those places. As before, a checkpoint resumes on the version that wrote it
+  (since 0.2.223 a later one does not load an earlier one). Where a later
+  version does load it, it resumes when its program has no such call;
+  otherwise the refusal says that its digest predates the place-free program
+  identity and that only the installation that wrote it reproduces it. An
+  older SMC checkpoint, streaming carry or filter export of such a model
+  differs from what this version computes, as it already did from any other
+  installation. A fitted state exported earlier replays, because it holds the
+  text itself.
+
+## 0.2.227
+
+More numbers are inputs of the program instead of text in it (user principle
+`0ikeidi`). Densities are unchanged: each form is checked against its literal twin.
+
+- Changed: `multigroup` reads its numbers from data on both backends.
+  `multigroup((x, y), lambda; k = kk, c = cc)` accepts data fields for `k` and `c`,
+  which used to be refused. `lambda`, and `tau` in `multigroup(Omega, tau)`, were
+  accepted from data but written into the program, and are now read by name. A
+  literal `k` or `c` also gives one program across values.
+- **Breaking:** `SBBRMI` names a coordinate `multigroup` grid after its term, not its
+  numbers: `multigroup_x_y_hsgp20_c1p5_center` is now `hsgp_t_by_g_grid_center`,
+  and likewise for `_scale`, `_lambda_lower` and the new `_k`. Code that reads these
+  from `stan_data` by name must change. Two terms no longer share one grid.
+- Changed: on `RKBRMI`, what a prior reads from a data array is an input, and the
+  program computes the prior's value from it. A reduction (`Normal(sum(m), 1)`), an
+  `MvNormal` mean, covariance or vector scale were written into the program, and a
+  size taken from such an array now reads as one program too. `Dirichlet(a)` with a
+  data vector and `Normal(m[1], 1)` used to be refused on `RKBRMI`. They now match
+  `SBBRMI`.
+- Changed: a prior computed from a design column, such as `Normal(mean(x), 1)` or
+  `Normal(x[2], 1)`, is a number of the fit, as `standardize(x)` is: the program
+  computes it from the column's fit-role copy. A frozen replay on other rows and a
+  prediction design keep it, where a replay used to be refused, and a fitted state
+  holds the computed mean, not the rows. An array only a prior reads travels with
+  the fitted state; a frozen replay refuses another value of it.
+- Changed: `effect(m, x) ~ Horseshoe(local_scale = l, global_scale = g)` accepts data
+  fields on both backends, read by name. `RKBRMI` shares one global scale per
+  predictor, so it refuses by name a predictor whose terms read different global
+  scale fields.
+- A fit or checkpoint from a model whose program text changes here is refused and
+  needs a fresh fit, as a frozen replay refuses any changed program.
+- Limits: `mo` and ordinal level counts are still spelled in the program on both
+  backends, and a categorical response's count is a true shape change, with one
+  predictor per class. One lowered program across sizes and bounds needs RKPPL
+  0.1.108 and one query type across values RKPPL 0.1.106. BRM's compat floors do not
+  require them: an older RK is correct but recompiles for each value.
+
+## 0.2.226
+
+- Added: `brm_svi_fit` and `brm_svi_resume` hand out snapshots of a running fit
+  without returning: `snapshot` (a function, or a file path the run rewrites
+  atomically, so it always holds the latest complete snapshot), `snapshot_every`
+  (default once per window, or every 50 updates with `GaussianBlockLaplace`) and
+  `snapshot_draws` (default none). A snapshot is one named tuple of plain arrays
+  that loads without BRM or the model: `q`, what `q` is (`q_kind`:
+  `:raw_iterate`, `:polished_average` or `:window_average`), the coordinates,
+  units and levels that name it, `iteration`, `phase`, the window ELBOs and, outside
+  `GaussianBlockLaplace`, `elbo_windows_trimmed` and `clipped_steps`, `draws`,
+  and a `status` that stays `:running` until the boundary where the call ends. An
+  observed run is the same to the last bit as an unobserved one, and a snapshot's
+  `q` and `draws` equal those of a result stopped at its iteration. BRM keeps none,
+  so a long run's memory and files do not grow with snapshots.
+- Changed: a prepared `BRMNLMEModel` keeps its minibatch target and worker samplers
+  for its next `brm_svi_fit` or `brm_svi_resume` in this process, so a continuation
+  on `fit.diagnostics.model` no longer prepares them again. `diagnostics.target`
+  reports it: `reused`, `workers_built` and the phase's `seconds`. Results and
+  checkpoints are unchanged, and a changed model is still refused by resume's
+  identity check. The model retains the target for as long as it lives; a copy or a
+  serialized model holds none. `GaussianBlockLaplace` still prepares its target on
+  every call.
 
 ## 0.2.225
 
