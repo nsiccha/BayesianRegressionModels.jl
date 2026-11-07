@@ -4149,6 +4149,32 @@ function _sb_record_binding!(data, key, role, logical; family=nothing, metadata.
     nothing
 end
 
+# The carrier of one formula occurrence of a structured term on `target`. The
+# descriptor resolves a term to its carrier from these fields alone
+# (`_brm_term_owners`), so they must tell apart every carrier one predictor
+# emits for the same term:
+# - `term_scope`: `:population` for a summand of the predictor itself,
+#   `:group` for a column inside a random-effect block, whose design the
+#   `|ID|` bucket prepass can emit before any population term;
+# - `term_occurrence`: which repeat of `term_key` in that scope, counted in
+#   emission order. A predictor emits its population and direct terms in
+#   formula order, and the terms sharing a key are all of one kind, so for
+#   `:population` this is the term's rank among its formula's repeats
+#   (`a ~ mo(g) + mo(g)`; snag brm-descriptor-r-2331ddd1).
+function _sb_record_term_binding!(data, key, target, term; scope::Symbol=:population,
+                                  metadata...)
+    bindings = get(data, _SB_BINDINGS_KEY, nothing)
+    isnothing(bindings) && return nothing
+    term_key = _brm_term_full_key(term)
+    occurrence = 1 + count(bindings) do (other, b)
+        other !== key && get(b, :term_predictor, nothing) === target &&
+            get(b, :term_key, nothing) === term_key &&
+            get(b, :term_scope, nothing) === scope
+    end
+    _sb_record_binding!(data, key, :parameter, key; term_key, term_predictor=target,
+                        term_scope=scope, term_occurrence=occurrence, metadata...)
+end
+
 
 """
     parent(sb::SBBRMI) -> BRMI
@@ -11733,11 +11759,14 @@ _sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(car)}, gterms=(); kwargs
 # `MethodError: no method matching &(::Float64, ::Float64)`.
 _sb_ranef_cols!(cols, data, stmts, t::ExprColumn{typeof(&)}, gterms=(); kwargs...) =
     _sb_interaction_cols!(cols, t, data, stmts)
+# A structured term inside the block records its carrier as `:group` scope
+# (`_sb_record_term_binding!`), never as an occurrence of the predictor's own
+# population term of the same spelling.
 _sb_ranef_cols_dispatch!(cols, data, stmts, t, ::Nothing, gterms=();
                          group_idx=nothing, term_overrides=Dict{Symbol,Any}(),
                          target=nothing) =
     _sb_maybe_push_col!(cols, _sb_predictor_col(
-        t, data, stmts, gterms; group_idx, term_overrides, target))
+        t, data, stmts, gterms; group_idx, term_overrides, target, term_scope=:group))
 function _sb_ranef_cols_dispatch!(cols, data, _stmts, t, levels, _gterms=();
                                   group_idx=nothing, term_overrides=nothing,
                                   target=nothing)
@@ -15088,7 +15117,7 @@ end
 # beta label, never a minted carrier — real emission always passes `target`.
 _sb_predictor_term!(stmts, data, ::typeof(mo), t;
                     term_overrides=Dict{Symbol,Any}(), target=nothing,
-                    kwargs...) = begin
+                    term_scope::Symbol=:population, kwargs...) = begin
     inner_name, raw = _sb_inner_data(:mo, only(getargs(t)))
     idx_name = Symbol(inner_name, :_idx)
     # The FITTED level set drives the increment-simplex dimension. On a frozen
@@ -15110,7 +15139,7 @@ _sb_predictor_term!(stmts, data, ::typeof(mo), t;
     n_levels = length(levels)
     col_name = isnothing(target) ? Symbol(:mo_, inner_name) :
         last(_sb_unique_structured_term_names(
-            stmts, :mo, string(inner_name), target; data, term=t))
+            stmts, :mo, string(inner_name), target; data, term=t, scope=term_scope))
     if n_levels < 2
         # Single-level factor: 0 increments -> the free-beta monotonic effect is
         # identically 0. Contribute NO column (returning `nothing`, which
@@ -15231,13 +15260,15 @@ end
 # predictor or twice in one -- takes `s_<target>_<x>` (+ serial).
 _sb_predictor_term!(stmts, data, ::typeof(s), t;
                     term_overrides=Dict{Symbol,Any}(), target=nothing,
-                    mod::Module=@__MODULE__, kwargs...) = begin
+                    mod::Module=@__MODULE__, term_scope::Symbol=:population,
+                    kwargs...) = begin
     args = getargs(t)
     length(args) == 1 || error("sbimpl: `s(x)` expects 1 positional arg, got $(length(args))")
     isempty(getkwargs(t)) || error("sbimpl: `s(x)` does not support keyword arguments yet")
     xname, raw = _sb_inner_data(:s, only(args))
     v = _sb_real_vec(:s, xname, raw)
-    suffix, col_name = _sb_unique_structured_term_names(stmts, :s, string(xname), target; data, term=t)
+    suffix, col_name = _sb_unique_structured_term_names(stmts, :s, string(xname), target;
+                                                        data, term=t, scope=term_scope)
     Xnull_name = Symbol(:Xnull_, suffix)
     Zpen_name = Symbol(:Zpen_, suffix)
     frozen = _sb_frozen_preproc_entry(data, Xnull_name, :spline, xname)
@@ -15332,14 +15363,15 @@ end
 # spelling while allowing two distributional predictors to use the same axis.
 # `tail` is the fixed ending of the carrier (`_by_<g>` for a grouped `hsgp`):
 # the collision check is on the carrier actually bound, `<family>_<suffix><tail>`,
-# and the returned suffix excludes it.
+# and the returned suffix excludes it. `scope` is the occurrence's
+# `term_scope` (`_sb_record_term_binding!`).
 function _sb_unique_structured_term_names(stmts, family::Symbol,
                                           suffix::AbstractString, target;
-                                          tail::AbstractString="", data=nothing, term=nothing)
+                                          tail::AbstractString="", data=nothing, term=nothing,
+                                          scope::Symbol=:population)
     function recorded(suffix, col)
         if data !== nothing && term !== nothing && target !== nothing
-            _sb_record_binding!(data, col, :parameter, col;
-                term_key=_brm_term_full_key(term), term_predictor=target)
+            _sb_record_term_binding!(data, col, target, term; scope)
         end
         String(suffix), col
     end
@@ -15363,12 +15395,13 @@ end
 # delegates covariance construction + non-centred sampling to `_sb_gp` (one
 # shared length scale) or `_sb_gp_aniso` (one per axis).
 _sb_predictor_term!(stmts, data, ::typeof(gp), t; group_block_lookup=Dict(),
-                    term_overrides=Dict{Symbol,Any}(), target=nothing, kwargs...) = begin
+                    term_overrides=Dict{Symbol,Any}(), target=nothing,
+                    term_scope::Symbol=:population, kwargs...) = begin
     args = getargs(t); kw = getkwargs(t)
     _check_term_kwargs(gp, kw)
     names, axes = _sb_gp_axes(:gp, args)
     suffix, col_name = _sb_unique_structured_term_names(
-        stmts, :gp, join(string.(names), "_"), target; data, term=t)
+        stmts, :gp, join(string.(names), "_"), target; data, term=t, scope=term_scope)
     X_name = Symbol(:X_gp_, suffix)
     term_data = Dict{Symbol,Any}(names[j] => axes[j] for j in eachindex(names))
     prepared = _brm_prepare_term(
@@ -15527,7 +15560,8 @@ _sb_hsgp_check_explicit_domain(fits, axes) =
     _brm_check_hsgp_domain(fits, axes; prefix="sbimpl")
 
 _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
-                    term_overrides=Dict{Symbol,Any}(), target=nothing, kwargs...) = begin
+                    term_overrides=Dict{Symbol,Any}(), target=nothing,
+                    term_scope::Symbol=:population, kwargs...) = begin
     args = getargs(t); kw = getkwargs(t)
     # Hyper-predictor plans for this term (B1 validated them; each branch
     # below lowers or loudly refuses its shape). A plan can never silently
@@ -15551,10 +15585,14 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
     options = _brm_hsgp_extended_options(kw, n_axes, cov; latent=!is_raw)
     cov === :periodic && return _sb_hsgp_periodic_term!(
         stmts, data, t, names, raw, is_raw, K, kw, period, term_overrides,
-        target, options)
+        target, options; scope=term_scope)
     axes_suffix = join(string.(names), "_")
+    # A grouped term's carrier is `hsgp_<axes>_by_<g>`, named and recorded in
+    # its `by=` branch below; this ungrouped name is never bound for it, so it
+    # records nothing (a second record would count as a second occurrence).
     suffix, col_name = _sb_unique_structured_term_names(
-        stmts, :hsgp, axes_suffix, target; data, term=t)
+        stmts, :hsgp, axes_suffix, target;
+        data=haskey(kw, :by) ? nothing : data, term=t, scope=term_scope)
     centeredness = _brm_hsgp_centeredness(kw, prod(K))
     partial = any(!iszero, centeredness)
     domain_fits = _sb_hsgp_domain_fits(kw, n_axes; required=!is_raw)
@@ -15645,7 +15683,8 @@ _sb_predictor_term!(stmts, data, ::typeof(hsgp), t; group_block_lookup=Dict(),
         # A repeat over the same axes and group on another predictor takes
         # `hsgp_<target>_<axes>_by_<g>`, like the ungrouped carrier.
         suffix, col_name = _sb_unique_structured_term_names(
-            stmts, :hsgp, axes_suffix, target; tail="_by_$gname", data, term=t)
+            stmts, :hsgp, axes_suffix, target; tail="_by_$gname", data, term=t,
+            scope=term_scope)
         PHI_name = Symbol(:PHI_hsgp_, suffix, :_by_, gname)
         omega2_name = Symbol(:omega2_hsgp_, suffix, :_by_, gname)
         rho_lower_name = Symbol(:rho_lower_hsgp_, suffix, :_by_, gname)
@@ -15773,7 +15812,8 @@ end
 # than silently ignored.
 function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
                                  period, term_overrides, target=nothing,
-                                 options=_brm_hsgp_extended_options(kw, length(names), :periodic))
+                                 options=_brm_hsgp_extended_options(kw, length(names), :periodic);
+                                 scope::Symbol=:population)
     n_axes = length(names)
     n_axes == 1 || error(
         "sbimpl: `hsgp(...; cov=:periodic)` supports exactly one axis, got $n_axes")
@@ -15803,7 +15843,7 @@ function _sb_hsgp_periodic_term!(stmts, data, t, names, raw, is_raw, K, kw,
     # `hsgp(x; cov=:periodic)` keeps `hsgp_<x>`; a repeat over the same axis
     # takes `hsgp_<target>_<x>` (snag periodic-hsgp-sh-2b41252b).
     suffix, col_name = _sb_unique_structured_term_names(
-        stmts, :hsgp, string(x), target; data, term=t)
+        stmts, :hsgp, string(x), target; data, term=t, scope)
     PHI_name = Symbol(:PHI_hsgp_, suffix)
     harmonics_name = Symbol(:harmonics_hsgp_, suffix)
     rho_lower_name = Symbol(:rho_lower_hsgp_, suffix)

@@ -117,7 +117,7 @@ end
     sb = SBBRMI(builder(mo_df); mod=@__MODULE__)
     code = BRM.stan_code(sb)
     # Each predictor's own Dirichlet concentration reaches its own carrier.
-    # Each term's concentration is its own Stan datum (BRM 0.2.231).
+    # Each term's concentration is its own Stan datum (BRM 0.2.233).
     @test occursin("mo_g_simplex_incr ~ dirichlet(mo_g_alpha);", code)
     @test occursin("mo_b_g_simplex_incr ~ dirichlet(mo_b_g_alpha);", code)
     @test sb.data[:mo_g_alpha] == [1.0, 2.0, 3.0]
@@ -159,13 +159,49 @@ end
     @test occursin("mo_g_simplex_incr ~ dirichlet", code)
     @test occursin("mo_a_g_simplex_incr ~ dirichlet", code)
     @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    # The descriptor builds: each occurrence owns its own carrier (snag
+    # brm-descriptor-r-2331ddd1, where both occurrences claimed both carriers).
     d = brm_descriptor(sb)
+    byname = Dict(o.name => o for o in d.outputs)
+    for carrier in (:mo_g_simplex_incr, :mo_a_g_simplex_incr)
+        @test byname[carrier].predictors == (:a,)
+        @test byname[carrier].term === :mo_g
+        @test byname[carrier].component === :simplex
+    end
     # ... but one public term label cannot address two carriers: fail closed
     # with the entry count rather than picking by descriptor order. (The
     # entries check runs before constrained names are touched, so no
     # BridgeStan compile is needed for this refusal.)
     @test_throws "occurs 2 times" brm_term_coordinates(
         d, :a, String[]; term=:mo_g, parameter=:simplex)
+end
+
+@testset "a population mo beside the same mo in a random effect" begin
+    # Snag brm-descriptor-r-2331ddd1: the random-effect column's carrier
+    # recorded the same predictor and term key as the population term, so the
+    # one population `mo(g)` resolved to two carriers and `brm_descriptor`
+    # refused. The population term owns the carrier of its population column.
+    rdf = (; mo_df..., subject=[1, 1, 2, 2, 3, 3, 4, 4])
+    builder = @brm begin
+        a ~ 0 + mo(g) + (mo(g) | subject)
+        ya ~ Normal(a, 1.0)
+    end
+    sb = SBBRMI(builder(rdf); mod=@__MODULE__)
+    code = BRM.stan_code(sb)
+    @test occursin("mo_g_simplex_incr ~ dirichlet", code)
+    @test occursin("mo_a_g_simplex_incr ~ dirichlet", code)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    d = brm_descriptor(sb)
+    byname = Dict(o.name => o for o in d.outputs)
+    @test byname[:mo_g_simplex_incr].term === :mo_g
+    @test byname[:mo_g_simplex_incr].component === :simplex
+    @test byname[:mo_a_g_simplex_incr].term === nothing
+    # `term=:mo_g` names the population simplex, never the block's own one.
+    names = vcat(["mo_a_g_simplex_incr.$i" for i in 1:3],
+                 ["mo_g_simplex_incr.$i" for i in 1:3])
+    c = brm_term_coordinates(d, :a, names; term=:mo_g, parameter=:simplex)
+    @test c.output.name === :mo_g_simplex_incr
+    @test c.coordinates == [4, 5, 6]
 end
 
 @testset "shared mo column in random effects builds per predictor" begin
