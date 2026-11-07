@@ -135,7 +135,8 @@ of the same [`BRMI`](@ref):
   draw `z` of a non-centered missing-value completion against the Stan entry
   `s = location + scale * z` of the same position; see below),
   `:bounded_completion` (the same support-unconstrained coordinate on both
-  sides, with the computed value `lower + exp(z)` compared), or
+  sides, with the computed value compared: `lower + exp(z)`, or the support
+  transform of a non-centered completion law with no location and scale), or
   `:car_separated` (one coordinate of a `car(...)` field lowered by its unit
   border separator, `RKBRMI(brmi; car_units)`: a shared or unit draw on RK
   against one area of Stan's field; see below);

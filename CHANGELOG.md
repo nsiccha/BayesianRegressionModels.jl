@@ -12,6 +12,44 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.226
+
+- Fixed: on the NLME paths, an `mi(x)` completion whose law reads the units'
+  draws (`mi(x1) ~ LogNormal(mu_x, sigma_x)` with `mu_x ~ ... + (1 | region)` and
+  `region` the subjects) gave routes that silently disagreed under the default
+  centred lowering. The missing entries were shared coordinates in θ, so their
+  law was a prior term: each unit's values and one-unit gradient
+  (`brm_nlme_loglikelihood(_and_gradient)`) omitted it, the population prior
+  evaluated it with every unit draw at zero, and the lockstep gradient
+  (`brm_nlme_loglikelihoods_and_gradients`) and the η Hessian carried it. On the
+  regional panel the lockstep gradient differed from the gradient of the values
+  by up to 4.6, so an NLMEEstimation fit saw a subject's gradient change with its
+  batch. Snag `brm-nlme-loglike-7c4b209b`.
+- Changed: `brm_nlme_fit`, `brm_two_stage_fit` and `brm_svi_fit` given a `@brm`
+  model lower exactly the completions whose law reads the units' draws
+  non-centered. Their missing entries are then unit draws, integrated with their
+  unit, whose law's density joins the unit's conditional. They also lower the
+  grouped entries of `mi(x)::shares(total, rows)` non-centered, whose centred
+  reading `brm_nlme_view` has always refused. Every other completion keeps the
+  centred reading.
+- **Breaking:** `brm_nlme_view` (and so `brm_nlme_model`, `brm_laplace_problem`
+  and the fits given an `RKBRMI`) refuses a centred completion whose law reads
+  the units' draws, naming `RKBRMI(brmi; completions = :noncentered)` or
+  `completions = (:x,)`. Lower the backend that way, or pass the `@brm` model to
+  the fit. A submodel's sampled declaration whose law reads the units' draws is
+  refused by name too. A fit that lowered such a model from its `@brm` model
+  now samples `x.z_mis` where it sampled `x.y_mis`, and θ no longer holds the
+  missing entries.
+- Added: `RKBRMI(brmi; completions = :noncentered)` takes every continuous
+  univariate law. A law without a location and scale keeps its support transform
+  on the standard-normal draw (`lower + exp(z)`, `upper - exp(z)`, a scaled
+  logistic on an interval, `z` on the real line: the coordinate the centred
+  lowering samples) and observes its exact density remainder in `:pointwise`;
+  it used to be refused ("needs a location-scale law"). `completions` also takes
+  a collection of `mi` sources, `completions = (:x,)`, to non-center those
+  completions only. A regression-plan `mi(y)` response, which samples none of its
+  missing entries, accepts every spelling instead of refusing `:noncentered`.
+
 ## 0.2.225
 
 - Fixed: on `RKBRMI`, a data expression can read a numeric scalar data field, as

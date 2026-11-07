@@ -384,11 +384,19 @@ end
     # A Gamma law with every entry grouped (value and gradient, on the Enzyme
     # dogfood as above).
     check_against_stan(totals_gamma(grouped), "rk_nc_gamma"; completions=:noncentered)
-    # Free entries are standardized by their law's location and scale, as for
-    # any non-centered completion: a Gamma law has none.
-    message(f) = try f(); "" catch e; sprint(showerror, e) end
-    @test occursin("needs a location-scale law", message(() ->
-        RKBRMI(totals_gamma(data); completions=:noncentered)))
+    # A Gamma law has no location and scale: its free entries keep the
+    # support transform `exp(z)` (Stan's own coordinate) and observe their
+    # density remainder, so value, gradient and transport agree with Stan
+    # (snag brm-nlme-loglike-7c4b209b).
+    gamma_free = check_against_stan(totals_gamma(data), "rk_nc_gamma_free";
+        completions=:noncentered)
+    @test isempty(gamma_free.t.completions)
+    pointwise = BRM._rk_pointwise_values(BRM._rk_pointwise_query(gamma_free.rk),
+        0.3 .* randn(Xoshiro(29), LogDensityProblems.dimension(gamma_free.problem)))
+    # One remainder term per free entry.
+    plan = gamma_free.rk.plan
+    @test length(pointwise.v_free_weights) ==
+        length(plan.columns[only(plan.completions).totals.free_rows])
     # With free entries, the free draws `v.z_free` pair with Stan's entries
     # `v_y_free` through their law's location and scale (snag
     # coordinate-trans-23993804).
