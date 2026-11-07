@@ -1430,6 +1430,20 @@ Run this standalone script in the test environment.
 across calls (`diagnostics.target`), and `snapshot` / `snapshot_every` /
 `snapshot_draws`, against a run on a fresh model that nothing observes.
 
+`nlme_svi_combine.jl` checks `brm_svi_combine` and `brm_svi_fit(x; start)` from
+fits on regional slices of a synthetic panel (subjects nested in regions, a
+class grouping crossed with them): the prior projection against the closed form,
+the product of sites against an independent oracle, informed and dropped sites,
+units matched by label and carried to the combined hyperparameters (an exact
+one-margin oracle with a mu-referenced intercept, and totals kept for
+correlated, stratified and unit-held shared blocks, read back through the NLME
+view), a global held inside two slices' units, frozen-replay slices, a low-rank
+slice, the refusals, `brm_start` effects addressed by level on a frozen replay
+that lacks some levels, slices whose scales differ 40-fold under a log link
+(carried, the first window beats a cold start and the old copy), and that real
+slice fits start the full fit near its optimum. About 15 minutes with loading
+on one CPU; it accepts testset substring filters.
+
 `nlme_svi_threads.jl` checks `brm_svi_fit(...; threads)` with real threads (run
 it with `--threads=4`; it refuses to run without them). The state after every
 iteration, whose Adam moments are the gradient trajectory, and the draws must equal
