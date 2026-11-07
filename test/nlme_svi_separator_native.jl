@@ -177,11 +177,17 @@ end
         structured = brm_svi_fit(m; rng=Xoshiro(84), controls..., unit_dense_limit=0,
             snapshot=path)
         s = deserialize(path)
-        factor = structured.diagnostics.q.U[1].factor
-        @test s.q.Λ[1].family === s.q.U[1].family === :diagonal_lowrank
-        @test s.q.U[1].ρ == factor.ρ && s.q.U[1].Β == factor.Β
+        # The hub's own unit is empty once its coordinate is global, and an empty
+        # unit keeps a 0 × 0 dense factor.
+        i = findfirst(!isempty, structured.diagnostics.units)
+        empty = findfirst(isempty, structured.diagnostics.units)
+        @test empty !== nothing && s.q.U[empty] == zeros(0, 0)
+        @test s.q.U[i] isa NamedTuple
+        factor = structured.diagnostics.q.U[i].factor
+        @test s.q.Λ[i].family === s.q.U[i].family === :diagonal_lowrank
+        @test s.q.U[i].ρ == factor.ρ && s.q.U[i].Β == factor.Β
         script = "using Serialization; s = deserialize(ARGS[1]); " *
-            "print(s.q.U[1].family, ' ', isdefined(Main, :BayesianRegressionModels))"
+            "print(s.q.U[$i].family, ' ', isdefined(Main, :BayesianRegressionModels))"
         cmd = addenv(`$(Base.julia_cmd()) --startup-file=no -e $script $path`,
             "JULIA_LOAD_PATH" => "@stdlib")
         @test read(cmd, String) == "diagonal_lowrank false"
