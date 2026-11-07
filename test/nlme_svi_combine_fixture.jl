@@ -119,3 +119,30 @@ function svi_slice_device_model(data)
     end
 end
 svi_slice_devices(data) = merge(data, (; device=["d" * s for s in data.subject]))
+
+# Two globals that each region's data pins only in one combination: `x` is +1
+# in "plus" and -1 in "minus", so "plus" pins a + b and "minus" pins a - b.
+# Each slice's posterior is a ridge along the direction its data leaves to
+# the prior, and only the union pins both.
+function svi_slice_ridge_model(data)
+    @brm data begin
+        a ~ Normal(0, 3)
+        b ~ Normal(0, 3)
+        mu ~ 0 + (1 | subject)
+        sd(mu, subject) ~ LogNormal(log(0.3), 0.3)
+        mean_y = a + b * x + mu
+        y ~ Normal(mean_y, 0.3)
+    end
+end
+
+function svi_slice_ridge_data(rng; subjects=6, n=6, a=2.0, b=1.5)
+    subject, region, x = String[], String[], Float64[]
+    for (r, sign) in ("plus" => 1.0, "minus" => -1.0), i in 1:subjects, _ in 1:n
+        push!(subject, string(r, i))
+        push!(region, r)
+        push!(x, sign)
+    end
+    effect(s) = 0.3 * sin(sum(Int, codeunits(s)))
+    y = [a + b * xi + effect(s) + 0.3randn(rng) for (s, xi) in zip(subject, x)]
+    (; subject, region, x, y)
+end

@@ -12,6 +12,32 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.241
+
+- Changed: `brm_svi_combine` multiplies the slices' global sites jointly. A
+  slice's site is the inverse of its global factor's covariance over the
+  coordinates its data reaches, `diag(s²) + ΒΒᵀ`, less the prior's projection, so
+  a `LowRankGlobal` slice's rank part enters as correlation, where it used to
+  enter only through the marginal variances. A ridge in a slice (a direction its
+  data leaves to the prior, such as a level two coefficients share) keeps a small
+  precision along it, and the product lands where the slices' ridges cross. A
+  site's negative part is dropped by eigen-direction, the joint form of the
+  dropped coordinate site. `MeanFieldGlobal` slices hold no correlation and give
+  the same start as before. Above the new `joint_limit` (default 4096) informed
+  globals the product stays coordinate by coordinate.
+- Added: a `BRMSVIStart` keeps the product's precision where it is correlated
+  (`globals.correlated`: `positions` into `globals.keys` and a dense
+  `precision`), and `globals.σ` is its mean-field part `1/√P_kk`. A
+  `LowRankGlobal(r)` fit from it starts its rank part on the `r` directions in
+  which that precision is widest relative to `σ`, where it used to start at zero.
+  A shared level's carried draws keep their level's product precision too; their
+  `σ` is now `1/√P_kk` as well, which is unchanged for one-margin blocks. A start
+  combined by an earlier BRM still starts a fit, with a zero rank part.
+- Added: `receipt.globals.joint` (`:joint`, `:diagonal` when no slice has a rank
+  part, `:limit`, `:indefinite` when the joint product was not positive definite
+  and the coordinate-by-coordinate one was used) and `receipt.slice_rank`;
+  `clamped` counts dropped site directions, each at the coordinate it weighs most.
+
 ## 0.2.240
 
 - Fixed: `brm_svi_fit` left globals that few units read far from the family's
