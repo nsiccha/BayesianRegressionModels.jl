@@ -281,6 +281,15 @@ function channel_field(form::Symbol; cor::Bool=false)
         y ~ Normal(field, 0.2)
     end); mod=@__MODULE__)
 end
+periodic_cell_model(k, period) = brm(:(begin
+    sigma ~ Exponential(1)
+    base ~ 1 + (1 | subject)
+    daily ~ 0 + hsgp(t; k=$k, cov=:periodic, period=$period)
+    rows = groups(row_subject => subject)
+    @plate for i in eachindex(base)
+        y[rows[i]] ~ Normal(base[i] .+ daily[rows[i]], sigma)
+    end
+end); mod=@__MODULE__)
 end
 const RSM = RuntimeSettingsModels
 
@@ -305,9 +314,11 @@ const MGDATA = merge(HDATA, (; g=mod1.(eachindex(HDATA.t), 4),
 # move of the test pin switches these without an edit.
 const RK_BINDS_VALUES = pkgversion(ReactiveKernelsPPL) >= v"0.1.106"
 const RK_BINDS_SIZES = pkgversion(ReactiveKernelsPPL) >= v"0.1.108"
-# A lone simplex's Dirichlet check reads a bound concentration's length from 0.1.117
-# (ReactiveKernels snag `rkppl-dirichlet-09d87c95`); before, it writes the count.
-const RK_READS_DIRICHLET_LENGTH = pkgversion(ReactiveKernelsPPL) >= v"0.1.117"
+# A lone simplex's Dirichlet check reads a bound concentration's length from 0.1.121
+# (ReactiveKernels snag `rkppl-dirichlet-09d87c95`); before, it writes the count. The
+# fix was claimed as 0.1.117 and landed as 0.1.121 (RK d916b305): RKPPL 0.1.117 to
+# 0.1.120 are other landings that still write it.
+const RK_READS_DIRICHLET_LENGTH = pkgversion(ReactiveKernelsPPL) >= v"0.1.121"
 
 stan_program(brmi) = StanBlocks.stan_code(SBBRMI(brmi; mod=RSM).model)
 stan_inputs(brmi) = BRM.stan_data(SBBRMI(brmi; mod=RSM))
@@ -377,6 +388,40 @@ end
     wide = RKBRMI(RSM.hsgp_model(6, 2.5)(HDATA))
     u = rk_point(small)
     @test rk_density(small, u) != rk_density(wide, u)
+end
+
+# A periodic hsgp's settings are read inside the statement that destructures its
+# basis: `(PHI, omega2, floor) = brm_hsgp_periodic_basis(t, modes[1], settings[1])`.
+# The sparse Laplace factors each subject's cell, so it prepares that statement
+# too, which `check_protocol` reaches through `provides_laplace_gradient`. This
+# file runs in the test environment; `nlme_estimation_ext.jl`, which first caught
+# it, needs NLMEEstimation (snag periodic-hsgp-la-ed00f34a). Oracle: the factors
+# over all cells are the whole model's likelihood, read from the density without
+# the prior and the Jacobian.
+@stestset "a periodic hsgp's settings reach the sparse Laplace's cell factors" begin
+    data = (; subject=["a", "b", "c", "d"],
+        row_subject=["a", "b", "a", "c", "d", "b", "c", "a", "d", "c", "b", "d"],
+        t=[0.0, 5.0, 10.0, 2.0, 1.0, 15.0, 18.0, 25.0, 22.0, 30.0, 29.0, 34.0],
+        y=[0.1, 0.9, 0.4, -0.2, 1.4, 0.6, 0.0, 0.8, 1.7, -0.4, 1.1, 1.5])
+    for brmi in (RSM.periodic_cell_model(2, 24.0)(data),
+            RSM.periodic_cell_model(:kk, :pp)(merge(data, (; kk=2, pp=24.0))))
+        rk = RKBRMI(brmi)
+        plan = rk_bound_plan(rk)
+        factors = prepare_cell_factors(rk.model, plan, :y; locality=:error)
+        outer = prepare_cell_factor_query(factors, :outer)
+        terms = [prepare_cell_factor_query(factors, j) for j in eachindex(cell_reductions(factors))]
+        u = rk_point(rk)
+        cells = sum(eachindex(data.subject)) do i
+            sums = [sum(p -> Base.invokelatest(terms[j], u, i, p),
+                        eachindex(reduction_rows(factors, j, i)); init=0.0)
+                    for j in eachindex(terms)]
+            Base.invokelatest(outer, u, sums, i)
+        end
+        prior = prepare_query(rk.model, plan, :prior)
+        jacobian = prepare_query(rk.model, plan, :log_jacobian)
+        @test cells ≈ rk_density(rk, u) - Base.invokelatest(prior, u) -
+            Base.invokelatest(jacobian, u) atol=1e-10
+    end
 end
 
 @stestset "a data-field LKJ dimension is checked against the block" begin
