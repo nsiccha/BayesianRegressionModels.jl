@@ -256,7 +256,7 @@ function _rk_ast_monotonic_component!(definitions, statements, taken, name, inde
         body = _rk_ast_component_body(simplex, Expr(:return, contrast))
         callee = _rk_ast_shared_definition!(definitions, taken,
             "brm_monotonic_value", (:c, :alpha), body)
-        push!(statements, _rk_ast_component_call(name, callee, index, Expr(:vect, alpha...)))
+        push!(statements, _rk_ast_component_call(name, callee, index, _rk_ast_alpha(alpha)))
         return name
     end
     family, args = prior
@@ -271,9 +271,12 @@ function _rk_ast_monotonic_component!(definitions, statements, taken, name, inde
         string("brm_monotonic_effect_", lowercase(string(family)))
     callee = _rk_ast_shared_definition!(definitions, taken, base, (:c, :alpha, roles...), body)
     push!(statements, _rk_ast_component_call(name, callee, index,
-        Expr(:vect, alpha...), args...))
+        _rk_ast_alpha(alpha), args...))
     name
 end
+# A concentration as the program reads it: a generated input's name, or a literal.
+_rk_ast_alpha(alpha::AbstractVector) = Expr(:vect, alpha...)
+_rk_ast_alpha(alpha) = alpha
 
 # Several predictors' monotonic effects of one column, as one component: one
 # increment simplex per predictor (the columns of `simplex_incr`), one
@@ -285,7 +288,8 @@ end
 # statement per predictor. A shared Dirichlet concentration is one vector;
 # per-predictor concentrations are the columns of an increments x predictors
 # matrix (`Dirichlet.(eachcol(alpha))`).
-function _rk_ast_joint_monotonic_component!(definitions, taken, name, alphas, priors)
+function _rk_ast_joint_monotonic_component!(definitions, taken, name, alphas, priors;
+        spelled=nothing, nincr=length(first(alphas)))
     ntargets = length(priors)
     shared = all(isequal(first(alphas)), alphas)
     law = shared ? Expr(:call, :Dirichlet, :alpha) :
@@ -293,11 +297,14 @@ function _rk_ast_joint_monotonic_component!(definitions, taken, name, alphas, pr
     simplex = Expr(:call, :.~, Expr(:call, :eachcol, Expr(:ref, :simplex_incr,
             Expr(:call, :(:), 1, :nincr), Expr(:call, :(:), 1, :ntargets))), law)
     table = :(cumsum(vcat(zeros(1, ntargets), simplex_incr); dims=1))
-    alpha = shared ? Expr(:vect, first(alphas)...) :
+    # `spelled` names each predictor's concentration input; the columns of their
+    # `hcat` are the per-predictor concentrations.
+    alpha = spelled !== nothing ? (shared ? first(spelled) : Expr(:call, :hcat, spelled...)) :
+        shared ? Expr(:vect, first(alphas)...) :
         Expr(:vcat, (Expr(:row, (alphas[t][i] for t in 1:ntargets)...)
             for i in eachindex(first(alphas)))...)
     suffix = shared ? "" : "_by_column"
-    inputs = (alpha, length(first(alphas)), ntargets)
+    inputs = (alpha, nincr, ntargets)
     if all(isnothing, priors)
         body = _rk_ast_component_body(simplex, Expr(:return, table))
         callee = _rk_ast_shared_definition!(definitions, taken,

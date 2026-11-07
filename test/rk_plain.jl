@@ -284,7 +284,10 @@ public_prior_reader(a, b, row) = a[row] .+ b[row]
     source = sprint(Base.show_unquoted, Expr(:block, artifact.defs..., artifact.ast))
     @test occursin("Exponential.(0.7)", source)
     @test occursin("L ~ LKJCholesky(K, eta)", source)
-    @test occursin("b_shared_group ~ brm_correlated_group_effects(group_fit_levels, 2, 3.0)", source)
+    # The block's LKJ eta is an input of the program (user principle `0ikeidi`,
+    # BRM 0.2.220), bound to the authored 3.0.
+    @test occursin("b_shared_group ~ brm_correlated_group_effects(group_fit_levels, 2, bucket_shared_group_lkj_eta)", source)
+    @test rk_bound_data(backend).bucket_shared_group_lkj_eta == 3.0
     @test coordinate_names(backend.model.layout) == coordinate_names(default_backend.model.layout)
     check_plain_gradient(backend)
     ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)

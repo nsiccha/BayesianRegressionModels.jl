@@ -1716,7 +1716,12 @@ function _brm_print_source(io::IO, x::Expr, outer::Int=0; left::Bool=false)
     elseif Meta.isexpr(x, :vect)
         _brm_print_arguments(io, x.args, "[", "]")
     elseif Meta.isexpr(x, :(=), 2)
-        if Meta.isexpr(first(x.args), :call) && Meta.isexpr(last(x.args), :block)
+        # Julia parses `sd(:, p) = 0.3` like a short function definition, its
+        # value a one-statement block, so only a body of several statements or
+        # a documented one prints as a definition; a one-statement value prints
+        # as written, through the block branch below.
+        if Meta.isexpr(first(x.args), :call) && Meta.isexpr(last(x.args), :block) &&
+                !_brm_is_short_form_value(last(x.args))
             return Base.show_unquoted(io,
                 _brm_display_source(x, get(io, :brm_documentation, true)))
         end
@@ -1732,6 +1737,12 @@ function _brm_print_source(io::IO, x::Expr, outer::Int=0; left::Bool=false)
     else
         Base.show_unquoted(io, _brm_display_source(x, get(io, :brm_documentation, true)))
     end
+end
+# The right-hand side of `lhs = value` as Julia parses a call on the left: a
+# block of one undocumented statement, line numbers aside.
+function _brm_is_short_form_value(body::Expr)
+    statements = filter(a -> !(a isa LineNumberNode), body.args)
+    length(statements) == 1 && !_brm_is_doc(only(statements))
 end
 function _brm_source_infix(x::Expr)
     x.head in (:||, :&&) && return x.head
