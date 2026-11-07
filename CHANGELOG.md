@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.235
+
+- Faster: the whole-model embedded Laplace (`BRMLaplaceProblem`, from
+  `brm_laplace_problem`) on connected units (`unit_partition = :connected`) no
+  longer costs one η Hessian-vector product and one third-order contraction per
+  coordinate of its largest unit. A connected unit joins every subject a
+  likelihood cell couples, so where a few effects are read with many subjects
+  (one site effect read with each path through the site) the largest unit grew
+  with the data, and with it the cost of every evaluation, contrary to "units do
+  not change the ratio" in brm-use's Laplace guide. The units' Hessian blocks now
+  come from one product per color of a star coloring of the cells' structural
+  supports (SparseMatrixColorings.jl, a new dependency), and the gradient's
+  third-order sum from two contractions per color; the position coloring stays
+  where it needs fewer passes, as for strict subject units. Values and gradients
+  are unchanged up to rounding. The first assembly checks the pattern against
+  one more product; curvature outside it warns and falls back to positions.
+
 ## 0.2.234
 
 - Fixed: `brm_svi_resume` of a `@brm` model read the grouping options before it
