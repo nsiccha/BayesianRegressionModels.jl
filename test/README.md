@@ -1357,6 +1357,16 @@ reparameterized gradients, linear allocation and checkpoint growth at fixed
 rank, covariance preservation under coordinate reordering, and an independent
 correlated Gaussian fitting oracle. It also needs only standard libraries.
 
+`nlme_svi_unit_curvature.jl` checks a dense unit's step on an orthogonal design
+(`unit_curvature = :orthogonal`, BRM 0.2.243): the design is d pairs at radius √d
+under a uniformly random rotation; its Stein estimate is a quadratic unit's whole
+curvature and its gradient and value the exact expectations; the full step reaches
+such a unit's optimum within the trust regions; and, through the production run
+loop, a prior scale that reads 32 units of 48 coordinates reaches its profile
+optimum with the units' factors at theirs, where the single pair (`:pair`, the
+control) leaves both off. Controls without `unit_curvature` keep the pair. About a
+minute; standard libraries only.
+
 `nlme_svi.jl` checks minibatch stochastic variational inference
 (`brm_svi_fit`). The minibatch split of the RK target is checked first: the
 global prior and Jacobian term plus every subject's cell term equal the full

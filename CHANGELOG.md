@@ -12,6 +12,35 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.243
+
+- Changed: `brm_svi_fit`'s dense units (at most `unit_dense_limit` coordinates)
+  estimate their whole curvature on every visit. A visit used to evaluate the
+  unit at one antithetic pair of draws, whose Stein estimate is a rank-one
+  product, and move the precision a tenth of the way (`unit_step = 0.1`) along
+  that one direction; a unit of tens of coordinates then stopped unsettled after
+  the visits a minibatch run gives it, and the hyperparameters followed its
+  factor. On an OU chain cut into window units of 66 coordinates (128 units,
+  batch 8, about 500 visits each) the fitted length scale came out 1.4 (states
+  as latents) and 11.4 (states from innovations) against about 61, 411 and 113
+  nats below the family's optimum. Now a visit evaluates d mutually orthogonal
+  antithetic pairs (2d unit gradients for d coordinates; a randomly rotated
+  spherical-radial cubature rule), whose Stein estimate is the unit's expected
+  curvature, exact when its term is quadratic in its coordinates, and takes the
+  whole natural-gradient step (`unit_step` now defaults to 1), inside the same
+  trust regions. A pure test with 32 units of 48 coordinates whose prior scale
+  is the one global:
+  log σ 0.0345 against the optimum 0.0334, the units' factors 0.002 nats from
+  their optimum in all, where the single pair ended at 0.507 and 100.6 nats.
+  Structured units (above `unit_dense_limit`) are unchanged.
+- Added: `unit_curvature`, `:orthogonal` (default) or `:pair`. `unit_curvature =
+  :pair` with `unit_step = 0.1` is 0.2.242's step exactly, and `unit_step`'s
+  default follows `unit_curvature`.
+- Changed: a dense unit's visit costs 2d unit gradient evaluations instead of 2,
+  and `diagnostics.unit_gradient_calls` counts them. A fit on a fixed seed
+  differs from 0.2.242's from its first dense unit visit. A checkpoint of 0.2.242
+  or earlier still resumes, with the single pair: it records no `unit_curvature`.
+
 ## 0.2.242
 
 - Added: `brm_svi_fit` settles before it polishes. Exploration's stop test finds
