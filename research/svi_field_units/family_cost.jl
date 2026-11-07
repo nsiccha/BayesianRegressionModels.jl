@@ -4,7 +4,7 @@
 # A batch reads `reads` (vertex triple, time) rows with synthetic stations. Prior
 # terms are the families': whitened ones have KL(q(v) ‖ N(0, I)) in closed form;
 # `diagonal` evaluates E log p(z | θ) through BRM's separable operator, which is
-# what a hand-written mesh rule would cost, not the RK graph's measured 10-14 s.
+# what a hand-written mesh rule would cost, not what the RK graph costs.
 #
 #     julia --startup-file=no research/svi_field_units/family_cost.jl
 using LinearAlgebra, SparseArrays, Random, Statistics, Printf
@@ -201,8 +201,9 @@ function bench(N1, T, C; K=N1^2, reads=2432, spectral=true)
     results
 end
 
-for (N1, T, C, K, spectral) in ((52, 40, 1, 2704, true), (52, 122, 1, 2704, true), (52, 122, 9, 2704, true),
-        (52, 122, 9, 256, true), (107, 122, 1, 256, true))
+# Generic synthetic sizes: a 48 x 48 or 100 x 100 grid, 40 or 120 times, 1 or 8 channels.
+for (N1, T, C, K, spectral) in ((48, 40, 1, 2304, true), (48, 120, 1, 2304, true), (48, 120, 8, 2304, true),
+        (48, 120, 8, 256, true), (100, 120, 1, 256, true))
     r = bench(N1, T, C; K, spectral)
     @printf("states=%-9d vertices=%-6d times=%-4d channels=%-2d reads=%d modes=%d\n", r[:states], r[:vertices], r[:times], r[:channels], r[:reads], K)
     haskey(r, :spectral_setup_seconds) && @printf("   space_spectral setup (dense eigendecomposition): %.1f s\n", r[:spectral_setup_seconds])
