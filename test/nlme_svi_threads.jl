@@ -213,6 +213,55 @@ end
     @test allequal(values)
 end
 
+@stestset "a model keeps its workers for later calls, at any number of tasks" begin
+    m = gauss_model_prepared(261, 12)
+    # A fit advances the stream it is given, so each fresh run gets its own.
+    controls = (; SVI_THREADS..., ndraws=10)
+    reference, reference_states = svi_trajectory(gauss_model_prepared(261, 12); controls...,
+        rng=Xoshiro(262), threads=1)
+    first_fit = brm_svi_fit(m; controls..., rng=Xoshiro(262), stop_after=30, threads=2)
+    @test !first_fit.diagnostics.target.reused && first_fit.diagnostics.target.workers_built == 1
+    # More tasks build only the ones missing; fewer build none and keep the rest.
+    wider = brm_svi_resume(m, first_fit; stop_after=30, ndraws=10, threads=4)
+    @test wider.diagnostics.target.reused && wider.diagnostics.target.workers_built == 2
+    workers = copy(m.svi_target.prepared.workers)
+    @test length(workers) == 3
+    narrower = brm_svi_resume(m, wider; stop_after=30, ndraws=10, threads=2)
+    @test narrower.diagnostics.threads == 2 && narrower.diagnostics.target.workers_built == 0
+    @test all(m.svi_target.prepared.workers .=== workers)
+    final = brm_svi_resume(m, narrower; ndraws=10, threads=4)
+    @test final.diagnostics.target.workers_built == 0
+    @test svi_same_result(final, reference)
+    @test svi_same_state(brm_svi_optimizer_checkpoint(final), last(reference_states))
+    # Snapshots are the same at any number of tasks, and leave the run alone.
+    function snapshots(threads)
+        seen = NamedTuple[]
+        fit = brm_svi_fit(m; controls..., rng=Xoshiro(263), stop_after=50, threads, snapshot=s -> push!(seen, s),
+            snapshot_every=7, snapshot_draws=3)
+        fit, seen
+    end
+    (one, a), (four, b) = snapshots(1), snapshots(4)
+    @test svi_same_result(one, four)
+    @test all(s -> (s[1].draws, s[1].q) == (s[2].draws, s[2].q), zip(a, b))
+    @test all(s -> s.threads == 4, b)
+end
+
+@stestset "concurrent fits on one model use their own targets" begin
+    m = gauss_model_prepared(271, 12)
+    controls = (; SVI_THREADS..., max_iterations=60, ndraws=5, threads=2)
+    references = [brm_svi_fit(gauss_model_prepared(271, 12); controls..., rng=Xoshiro(s))
+        for s in 272:275]
+    brm_svi_fit(m; controls..., rng=Xoshiro(272), stop_after=1)
+    @test m.svi_target.prepared !== nothing
+    fits = fetch.([Threads.@spawn brm_svi_fit(m; controls..., rng=Xoshiro(s)) for s in 272:275])
+    # One found the model's target, and the others found the slot empty.
+    @test count(f -> f.diagnostics.target.reused, fits) >= 1
+    @test count(f -> !f.diagnostics.target.reused, fits) >= 1
+    @test all(svi_same_result.(fits, references))
+    # The slot holds one target, whichever finished last.
+    @test m.svi_target.prepared.target.m === m
+end
+
 @stestset "BLAS stays at one thread during a fit and is given back" begin
     m = gauss_model_prepared(261, 12)
     controls = (; SVI_THREADS..., max_iterations=60, ndraws=10)

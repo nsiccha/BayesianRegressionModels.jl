@@ -428,7 +428,11 @@ const PINS = [
     # cannot change inside a loop once per loop entry (Enzyme snag
     # reverse-generato-03b2003d), so a multiresolution gmrf reader's generator
     # sum no longer tapes its captured arrays once per basis term.
-    # cecb571a / libEnzyme 7f23cb72 contains b2bb4cb6 and differentiates a read
+    # 74ce4afc / libEnzyme 08f0e8d9 contains b2bb4cb6 and proves that the
+    # reader cannot reach a fresh output array (Enzyme snag
+    # residual-per-ter-5c58955b), so that reader no longer tapes each term's
+    # field value and weight.
+    # cecb571a / libEnzyme 7f23cb72 contains 74ce4afc and differentiates a read
     # that picks between active data and data the function made under static
     # Reverse (Enzyme snag static-reverse-m-c913effd), which RKPPL's
     # `_local_cell_rows` does for a unit with no cells of one observation group

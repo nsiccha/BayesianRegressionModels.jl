@@ -611,8 +611,9 @@ Snag `mi-completion-wi-54222432`. It also checks
 `RKBRMI(brmi; completions = :noncentered)` on such a completion: the same
 coordinates and density as the centred lowering, its group terms in
 `:pointwise`, SBBRMI agreement through the transport (LogNormal, an unread
-completion, Gamma's value), and the location-scale rule for free entries.
-Snag `nlme-view-shares-f1cfaa71`.
+completion, Gamma's value), and a Gamma law's free entries through their
+support transform and density remainder (value, gradient and transport against
+Stan). Snags `nlme-view-shares-f1cfaa71`, `brm-nlme-loglike-7c4b209b`.
 
 `mi_lower_totals.jl` checks lower support declared by `truncated` or
 `restricted` on shared completions, ordinary imputation and cell shares.
@@ -666,6 +667,18 @@ and SVI. Its panel lives in `nlme_shares_fixture.jl`.
 coordinates' family in `NLMEEstimation.fixed_omega`, `check_protocol` (with
 the η Hessian blocks) and a short SAEM fit. Run it in the NLMEEstimation
 scratch environment described below. Snag `nlme-view-shares-f1cfaa71`.
+
+`nlme_completion_laws.jl` (test environment) checks `mi(...)` completions
+whose law reads the units' draws on the NLME paths: `brm_nlme_view` refuses
+their centred reading by name; the fits' `@brm` entry
+(`BRM._brm_nlme_lowered`) non-centers exactly those completions, any
+continuous univariate law (an interval Beta law here) keeping the centred
+coordinates and density; one-unit and lockstep values, gradients and η Hessian
+blocks agree with each other and with central differences, on the reported
+panel (a region with no observed entry) among others; a completion whose law
+reads no unit's draws stays centred and is accepted; and a regression-plan
+`mi(y)` response lowers the same under every spelling. Snag
+`brm-nlme-loglike-7c4b209b`.
 
 `nlme_completion_axes.jl` checks gathered completion ownership on a shorter
 response and on a reordered response with the same length as the subject
@@ -1232,7 +1245,10 @@ district-years) as region units. It checks that a stratified
 municipality in its class's family and its region; that
 `RKBRMI(...; completions=:noncentered)` makes each missing cell of an `mi(...)`
 completion a unit draw in a family fixed at unit variance (and that the
-default keeps them shared, and a non-location-scale law is refused); that
+default centred reading, whose law reads the regions' effects, is refused by
+name while the fits' `@brm` entry lowers it non-centered; a Gamma law is
+non-centered by its support transform, with the centred density and agreeing
+lockstep and one-unit routes); that
 district-year totals cells are attributed to the region owning their rows;
 and that every region's unit problem differs from the full RK density by its
 own unit alone, in value and gradient. It also checks each region's η Hessian
@@ -1374,6 +1390,10 @@ The dormant scalar/vector branch's ordinary Reverse needs Enzyme dogfood from
 `cecb571a`); earlier pins raise `IllegalTypeAnalysisException` there.
 `nlme_svi_ownership_algebra.jl` isolates atomic-block and directed-prior
 closure, including fixed coordinates and factors that own no coordinates.
+
+`nlme_svi_running.jl` checks a prepared model's reuse of its target and workers
+across calls (`diagnostics.target`), and `snapshot` / `snapshot_every` /
+`snapshot_draws`, against a run on a fresh model that nothing observes.
 
 `nlme_svi_threads.jl` checks `brm_svi_fit(...; threads)` with real threads (run
 it with `--threads=4`; it refuses to run without them). The state after every

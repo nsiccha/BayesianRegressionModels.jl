@@ -131,6 +131,12 @@ const _BRM_SVI_IDENTITY_PARTS = (
     ownership="the subjects or the coordinates each subject owns",
     fixed="the values of the fixed shared coordinates")
 
+const _BRM_SVI_LOCATED_PROGRAM = " (the checkpoint's program digest predates " *
+    "BRM's place-free program identity: it included the file and line each macro " *
+    "call, such as an emitted `@kernel`, was loaded from, so the same model loaded " *
+    "from another checkout, depot, host or BRM version differs there, and only that " *
+    "installation can resume it)"
+
 _brm_svi_identity_refusal(description) = ArgumentError(
     "brm_svi_resume: the model differs from the checkpoint's in $description; " *
     "resume needs the same model, data and preparation options")
@@ -146,11 +152,17 @@ _brm_svi_backend(m::BRMNLMEModel) = m.backend
 
 # Reads only the lowered backend, so a different model is refused before its
 # preparation. A checkpoint older than `binding_parts` holds only the combined
-# digest, for a generated callable the one of its generated name.
+# digest, for a generated callable the one of its generated name. Parts before
+# format 2 (0.2.228) digest the program with the file and line of each macro
+# call, which only the installation that wrote them reproduces.
 function _brm_svi_check_binding(rk, saved)
     if hasproperty(saved, :binding_parts)
-        differences = _brm_rk_binding_differences(_brm_rk_binding_parts(rk), saved.binding_parts)
-        isempty(differences) || throw(_brm_svi_identity_refusal(join(differences, ", ")))
+        parts = saved.binding_parts
+        differences = _brm_rk_binding_differences(_brm_rk_binding_parts(rk), parts)
+        isempty(differences) && return nothing
+        get(parts, :format, 1) < 2 && replace!(differences,
+            "its emitted program" => "its emitted program" * _BRM_SVI_LOCATED_PROGRAM)
+        throw(_brm_svi_identity_refusal(join(differences, ", ")))
     elseif !any(stable -> _brm_rk_binding_identity(rk, _BRM_SVI_BINDING_TAG; stable) == saved.binding,
             (true, false))
         throw(_brm_svi_identity_refusal("the model's emitted program, its callables, its bound " *
@@ -220,6 +232,7 @@ const _BRM_SVI_RESUME_MODEL_OPTIONS = (:ad_backend, :shared_point, :subject_grou
 """
     brm_svi_resume([save,] x, checkpoint; stop_after=nothing,
         checkpoint_every=nothing, ndraws=1000, progress=nothing,
+        snapshot=nothing, snapshot_every=nothing, snapshot_draws=0,
         threads=nothing, ad_backend=nothing, shared_point=nothing,
         subject_group=nothing, nested_groups=NamedTuple(), shared_groups=())
         -> (; draws, coordinates, diagnostics)
@@ -249,9 +262,17 @@ prepared. The refusal names the differing part, down to the callable's binding
 and the data column. An anonymous function or closure compares by its lowered
 code and captured values, so the same source continues in another driver, at
 another line or after other definitions; a named function compares by its module
-and name.
+and name. In the same process, pass `fit.diagnostics.model` (or the `BRMNLMEModel`
+the fit was given): it prepares neither the model nor its target and worker samplers
+again (`diagnostics.target.reused`, [`brm_svi_fit`](@ref)), whereas a `BRMI` or
+`RKBRMI` prepares both on every call.
+The program compares without the file and line of its macro calls (an emitted
+`@kernel` definition), so the same model also continues from another checkout,
+depot, host or BRM version. A checkpoint from an earlier version digested those
+places, and only the installation that wrote it resumes a program that has one.
 
-`save`, `stop_after`, `checkpoint_every`, `ndraws` and `progress` work as in
+`save`, `stop_after`, `checkpoint_every`, `ndraws`, `progress`, `snapshot`,
+`snapshot_every` and `snapshot_draws` work as in
 [`brm_svi_fit`](@ref); `save` again receives copies of the state. The result
 has the fit's shape: its diagnostics cover the whole run (`elbo`, `iterations`,
 `unit_gradient_calls`), except `seconds`, which counts this call. A cooperative
@@ -277,7 +298,8 @@ brm_svi_resume(save::Function, x, checkpoint; kwargs...) =
     _brm_svi_resume(save, x, checkpoint; kwargs...)
 
 function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
-        checkpoint_every=nothing, progress=nothing, threads=nothing, kwargs...)
+        checkpoint_every=nothing, progress=nothing, threads=nothing, snapshot=nothing,
+        snapshot_every=nothing, snapshot_draws=0, kwargs...)
     unknown = setdiff(keys(kwargs), _BRM_SVI_RESUME_MODEL_OPTIONS)
     isempty(unknown) || throw(ArgumentError("brm_svi_resume: unsupported options " *
         join(string.(unknown), ", ") * "; the checkpoint fixes the optimizer controls, " *
@@ -293,6 +315,7 @@ function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
         x, options = _brm_svi_window_input(state.previous, x, options; caller="brm_svi_resume")
     end
     call = (; caller="brm_svi_resume", ndraws, stop_after, checkpoint_every, progress,
+        snapshot, snapshot_every, snapshot_draws,
         check_lowered=lowered -> _brm_svi_check_binding(_brm_svi_backend(lowered), state.identity))
     if state.run isa _BRMSVILaplaceRun
         threads === nothing || throw(ArgumentError(

@@ -135,7 +135,8 @@ function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, 
     # A periodic extent reads its prepared basis argument.
     extent = _rk_ast_hsgp_substitute(extent, Dict(arguments))
     level_cor = get(options, :level_cor, nothing)
-    weights = grouped ? (Expr(:call, :(:), 1, _rk_ast_hsgp_weight_rows(level_cor, G)),
+    weights = grouped ? (Expr(:call, :(:), 1,
+                              _rk_ast_hsgp_weight_rows!(block, level_cor, options, G)),
                          extent) : (extent,)
     push!(block.statements, Expr(:call, :.~, Expr(:ref, z, weights...),
         _rk_ast_dotted(:Normal, 0, 1)))
@@ -187,7 +188,7 @@ function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMLevelCorrelation, _option
 end
 function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMMultigroupCorrelation, _options)
     L = _rk_block_argument!(block, :L_level, _rk_ast_level_factor_value(lc.base))
-    tau = _rk_block_argument!(block, :tau_level, lc.tau)
+    tau = _rk_block_argument!(block, :tau_level, something(lc.tau_source, lc.tau))
     (z, (; weights=:(brm_hsgp_multigroup_weights(z, omega2, rho, L_level, tau_level)),
            formals=[:L_level, :tau_level], values=Any[L, tau]))
 end
@@ -199,7 +200,7 @@ function _rk_ast_hsgp_level_weights!(block, z, lc::_BRMMultigroupCoordinates, op
                     for (j, column) in enumerate(get(options, :position_columns, ()))]
     own = isnothing(lc.lambda)
     lambda = own ? _rk_multigroup_own_lambda!(block, options.coordinate_prior) :
-        _rk_block_argument!(block, :lambda_level, lc.lambda)
+        _rk_block_argument!(block, :lambda_level, something(lc.lambda_source, lc.lambda))
     # The term's own spatial scale is a sampled local of the block.
     own_lambda = own ? (; lambda) : (;)
     formals = [Symbol(:coordinate_, j) for j in eachindex(columns)]
@@ -240,8 +241,9 @@ end
 # The rows of a grouped HSGP's standardized weights: one per level, or one per
 # grid point, basis function or inducing position for
 # `multigroup(coordinates, lambda; ...)`.
-_rk_ast_hsgp_weight_rows(_level_cor, n_groups) = n_groups
-_rk_ast_hsgp_weight_rows(lc::_BRMMultigroupCoordinates, _n_groups) = lc.n_points
+_rk_ast_hsgp_weight_rows!(_block, _level_cor, _options, n_groups) = n_groups
+_rk_ast_hsgp_weight_rows!(block, ::_BRMMultigroupCoordinates, options, _n_groups) =
+    Expr(:call, :prod, _rk_block_argument!(block, :points_level, options.coordinate_points))
 function _rk_ast_structured_block(definitions, field, taken, bindings)
     K, G = field.n_per_group, length(field.levels)
     K isa Integer && K > 0 || error("RK backend: structured field needs a positive width")

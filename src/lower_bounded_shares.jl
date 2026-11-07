@@ -31,6 +31,43 @@ function (::_BRMLowerEntryWeight{F})(z, x, args...) where {F}
     logpdf(F(args...), x) + z + (z * z + log(2pi)) / 2
 end
 
+# Any other continuous univariate completion law, non-centered: the law's own
+# support transform carries a standard normal draw to its value, `x = T(z)`, by
+# the standard unconstraining maps read from the law's support at the point
+# (the identity on the real line, `lo + exp(z)` above a lower bound,
+# `hi - exp(z)` below an upper one, `lo + (hi - lo) * logistic(z)` on an
+# interval). Each entry observes the exact density remainder
+# `logpdf(law, x) + log|T'(z)| - log N(z; 0, 1)`. These are the coordinates the
+# centred lowering samples (and SBBRMI's unconstrained entries), so the density
+# is the centred one; only the prior/likelihood split differs, which puts a law
+# that reads the units' draws into their units' conditionals.
+#
+# `Vararg{Any,N}` specializes on the arguments' count: a bare `args...`
+# leaves the law's constructor dispatched at run time.
+struct _BRMSupportEntryValue{F} end
+(::_BRMSupportEntryValue{F})(z, args::Vararg{Any,N}) where {F,N} =
+    first(_brm_support_transform(F(args...), z))
+struct _BRMSupportEntryWeight{F} end
+function (::_BRMSupportEntryWeight{F})(z, x, args::Vararg{Any,N}) where {F,N}
+    d = F(args...)
+    logpdf(d, x) + last(_brm_support_transform(d, z)) + (z * z + log(2pi)) / 2
+end
+# `(T(z), log|T'(z)|)` for the support of `d`.
+function _brm_support_transform(d, z)
+    lo, hi = minimum(d), maximum(d)
+    if isfinite(lo) && isfinite(hi)
+        width = hi - lo
+        (lo + width * LogExpFunctions.logistic(z),
+            log(width) - LogExpFunctions.log1pexp(-z) - LogExpFunctions.log1pexp(z))
+    elseif isfinite(lo)
+        (lo + exp(z), z)
+    elseif isfinite(hi)
+        (hi - exp(z), z)
+    else
+        (z, zero(z))
+    end
+end
+
 function _brm_lower_parts(f, args, kwargs)
     f in (truncated, restricted) || return nothing
     length(args) in (1, 3) || error("@brm: a bounded completion needs a base law and lower/upper bounds")

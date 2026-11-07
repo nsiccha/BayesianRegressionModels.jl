@@ -101,53 +101,86 @@ end
 # The completion parametrization a lowering asks for: `:centered` (the default)
 # samples each missing value under its law; `:noncentered` samples a standard
 # normal draw per missing value, so a completion is a unit draw for the NLME
-# paths (`brm_nlme_view`). Location-scale laws directly have that form;
-# bounded free entries retain their support transform and observe the exact
-# density remainder. The
+# paths (`brm_nlme_view`); a collection of `mi` sources non-centers those
+# completions only. Location-scale laws (`Normal`/`LogNormal(location, scale)`)
+# directly have that form. Every other continuous univariate law keeps its
+# support transform on the draw (the coordinates are the centred ones) and its
+# free entries observe the exact density remainder (`_rk_mi_free_part`). The
 # grouped entries of `mi(x)::shares(total, rows)` take it under any law: their
 # coordinates are standard normal draws, and each group observes the rest of
-# its density (`_rk_emit_missing_totals!`).
-_rk_plan_completions(plan, mode::Symbol) =
-    mode === :centered ? plan : mode === :noncentered ? _rk_noncentered_completions(plan) :
-    throw(ArgumentError("completions must be :centered or :noncentered, got :$mode"))
-_rk_noncentered_completions(plan::_RKValuePlan) = _RKValuePlan(plan.regression,
-    plan.assignments, plan.observations, plan.columns,
-    map(c -> _rk_noncentered_completion(c, plan.columns), plan.completions))
-_rk_noncentered_completions(plan::_RKHeldOutPlan) =
-    _RKHeldOutPlan(_rk_noncentered_completions(plan.parent), plan.held_out)
-function _rk_noncentered_completions(plan::_RKStructuralPlan)
-    any(r -> r.mi_jobs !== nothing, plan.responses) && error(
-        "RK backend: completions=:noncentered is built for models whose `mi(...)` " *
-        "completions lower to a value plan (models with assignments or `@plate` " *
-        "cells); this model's completions lower to the regression plan")
+# its density (`_rk_emit_missing_totals!`). The density is the centred one in
+# every case; only its split into prior and pointwise terms differs.
+function _rk_plan_completions(plan, mode)
+    mode === :centered && return plan
+    mode === :noncentered && return _rk_noncentered_completions(plan, nothing)
+    mode isa Symbol && throw(ArgumentError("completions must be :centered, " *
+        ":noncentered or a collection of `mi` sources to non-center, got :$mode"))
+    sources = Set{Symbol}()
+    for source in mode
+        source isa Symbol || throw(ArgumentError("completions: a collection names " *
+            "`mi` sources as Symbols, got $(repr(source))"))
+        push!(sources, source)
+    end
+    isempty(sources) && return plan
+    _rk_noncentered_completions(plan, sources)
+end
+# `sources === nothing` non-centers every completion.
+function _rk_noncentered_completions(plan::_RKValuePlan, sources)
+    _rk_check_completion_sources(sources, (c.source for c in plan.completions))
+    _RKValuePlan(plan.regression, plan.assignments, plan.observations, plan.columns,
+        map(c -> sources === nothing || c.source in sources ?
+            _rk_noncentered_completion(c) : c, plan.completions))
+end
+_rk_noncentered_completions(plan::_RKHeldOutPlan, sources) =
+    _RKHeldOutPlan(_rk_noncentered_completions(plan.parent, sources), plan.held_out)
+# The regression plan's `mi(y)` responses feed nothing downstream: their
+# missing rows are integrated out of the likelihood, which reads the observed
+# rows only, and sample no coordinate. Nothing is left to non-center.
+function _rk_noncentered_completions(plan::_RKStructuralPlan, sources)
+    _rk_check_completion_sources(sources,
+        (r.response for r in plan.responses if r.mi_jobs !== nothing))
     plan
 end
+function _rk_check_completion_sources(sources, completions)
+    sources === nothing && return nothing
+    known = Set{Symbol}(completions)
+    unknown = sort!(collect(setdiff(sources, known)))
+    isempty(unknown) || throw(ArgumentError("completions names " *
+        join(("`$s`" for s in unknown), ", ") * ", which " *
+        (length(unknown) == 1 ? "is not a completion" : "are not completions") *
+        " with sampled missing entries in this model" * (isempty(known) ? "" :
+            "; those are " * join(("`$s`" for s in sort!(collect(known))), ", "))))
+    nothing
+end
 const _RK_NONCENTERED_LAWS = (Normal, LogNormal)
-function _rk_noncentered_completion(c::_RKMissingValueSpec, columns)
+_rk_location_scale_law(d) =
+    d.callable in _RK_NONCENTERED_LAWS && isempty(d.kwargs) && length(d.args) == 2
+function _rk_noncentered_completion(c::_RKMissingValueSpec)
     d = c.distribution
-    # Bounded coordinates retain the authored support transform and carry
-    # its exact density remainder as a pointwise observation.
-    _brm_lower_family(d.callable) && return _RKMissingValueSpec(c.source, c.observed,
-        c.observed_rows, c.missing_rows, c.observed_component, c.order, c.nmissing,
-        d, true, c.totals, c.free_weights)
-    # Free entries are standardized by the law's location and scale.
-    c.totals === nothing || !isempty(columns[c.totals.free_rows]) ||
-        return _RKMissingValueSpec(c.source, c.observed, c.observed_rows, c.missing_rows,
-            c.observed_component, c.order, c.nmissing, d, true,
-            c.totals, c.free_weights)
-    d.callable in _RK_NONCENTERED_LAWS && isempty(d.kwargs) && length(d.args) == 2 ||
-        error("RK backend: completions=:noncentered needs a location-scale law " *
-            "(`Normal(location, scale)` or `LogNormal(location, scale)`) for " *
-            "`mi($(c.source))`" * (c.totals === nothing ? "" :
-                "'s $(length(columns[c.totals.free_rows])) missing entries of no " *
-                "group with a total") * "; its law is `$(d.callable)`")
+    F = d.callable
+    # Free entries (all of a plain completion's; those of no group with a
+    # total) keep the law's support transform and observe its density
+    # remainder, which need a continuous univariate law of positional
+    # arguments. Grouped entries alone take any shares law (their group terms).
+    free = c.totals === nothing || c.free_weights !== nothing
+    !free || _rk_location_scale_law(d) || _brm_lower_family(F) ||
+        (!(F isa Type) || F <: ContinuousUnivariateDistribution) && isempty(d.kwargs) ||
+        error("RK backend: completions=:noncentered draws `mi($(c.source))`'s " *
+            "missing entries as standard normal draws carried to the law's support, " *
+            "which needs a continuous univariate law of positional arguments; " *
+            "its law is `$F`" * (isempty(d.kwargs) ? "" :
+                " with keywords $(join(keys(d.kwargs), ", "))"))
     _RKMissingValueSpec(c.source, c.observed, c.observed_rows, c.missing_rows,
         c.observed_component, c.order, c.nmissing, d, true,
         c.totals, c.free_weights)
 end
-# The completion parametrization of an existing plan, which a replay keeps.
-_rk_completion_mode(plan::_RKValuePlan) =
-    any(c -> c.noncentered, plan.completions) ? :noncentered : :centered
+# The completion parametrization of an existing plan, which a replay keeps:
+# `:centered`, `:noncentered`, or the non-centered sources when only some are.
+function _rk_completion_mode(plan::_RKValuePlan)
+    noncentered = Symbol[c.source for c in plan.completions if c.noncentered]
+    isempty(noncentered) ? :centered :
+        length(noncentered) == length(plan.completions) ? :noncentered : Tuple(noncentered)
+end
 _rk_completion_mode(plan::_RKHeldOutPlan) = _rk_completion_mode(plan.parent)
 _rk_completion_mode(plan) = :centered
 

@@ -41,33 +41,40 @@ function _rk_ast_multigroup_fit!(definitions, statements, taken, term)
     options = term.options
     lc = get(options, :level_cor, nothing)
     lc isa _BRMMultigroupCoordinates || return
+    # The weights' size reads a fitted value, as an hsgp term's `modes` does.
+    push!(taken, options.coordinate_points)
+    push!(statements, Expr(:(=), options.coordinate_points,
+        Expr(:call, :copy, options.coordinate_points_fit)))
     if isempty(lc.positions)
         name = options.coordinate_grid
         push!(taken, name)
         coordinates = Expr(:call, :hcat, options.coordinate_fit_columns...)
         call = Expr(:call, :brm_multigroup_coordinate_grid, coordinates,
-            lc.k, _brm_multigroup_method_code(lc.method), lc.c)
+            Expr(:ref, options.coordinate_k_fit, 1), _brm_multigroup_method_code(lc.method),
+            Expr(:ref, options.coordinate_c_fit, 1))
         push!(statements, Expr(:(=), name, call))
     end
     if isnothing(lc.lambda)
         name = options.coordinate_prior
         push!(taken, name)
         formals = [Symbol(:coordinate_, j) for j in eachindex(options.coordinate_fit_columns)]
-        method, n_points = _brm_multigroup_method_code(lc.method),
-            isempty(lc.positions) ? 0 : lc.n_points
+        method = _brm_multigroup_method_code(lc.method)
+        n_points = isempty(lc.positions) ? 0 : :(points_level[1])
         # A data kernel materializes the prior's two numbers at binding, as
         # the temporal rho-floor kernel does. Layout construction reads the
         # frozen lower bound without traversing absent fit-role columns.
         body = quote
             coordinates = hcat($(formals...))
-            prior = brm_multigroup_coordinate_prior(coordinates, $(lc.k),
-                $method, $(lc.c), $n_points)
+            prior = brm_multigroup_coordinate_prior(coordinates, k_level[1],
+                $method, c_level[1], $n_points)
             values = [prior[1], prior[2]]
             return values
         end
         entry = _rk_ast_shared_definition!(definitions, taken,
-            "brm_multigroup_prior_graph", formals, body; kernel=true)
-        call = Expr(:call, entry, options.coordinate_fit_columns...)
+            "brm_multigroup_prior_graph", [formals; :k_level; :c_level; :points_level],
+            body; kernel=true)
+        call = Expr(:call, entry, options.coordinate_fit_columns...,
+            options.coordinate_k_fit, options.coordinate_c_fit, options.coordinate_points_fit)
         push!(statements, Expr(:(=), name, call))
     end
     for (name, input) in zip(options.position_columns, options.position_fit_columns)

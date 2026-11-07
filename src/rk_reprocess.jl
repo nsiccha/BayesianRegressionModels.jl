@@ -93,7 +93,7 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
         for name in _rk_response_names(rk.plan)
         if haskey(training, name) && !_brm_df_has_column(new_data, name))
     merge!(absent, _rk_car_fitted_edges(parent(rk), new_data, training))
-    merge!(absent, _rk_omitted_scalars(_rk_scalar_data(parent(rk)), new_data))
+    merge!(absent, _rk_omitted_scalars(_rk_replay_scalars(rk), new_data))
     rebound = _brm_rebind_brmi(parent(rk), _BRMReplayData(new_data, absent))
     _, fitted = _brm_resolve_constants(parent(rk); prefix)
     constants = Dict{Symbol,Any}(c.name => c.value for c in fitted)
@@ -352,6 +352,8 @@ end
 # change; where the program reads it by name, `_rk_check_replay_priors` does.
 _rk_scalar_data(brmi::BRMI) = Dict{Symbol,Any}(name => deepcopy(value)
     for (name, value) in _rk_training_columns(brmi) if value isa Real)
+_rk_replay_scalars(rk) = merge(_rk_scalar_data(parent(rk)),
+    _rk_prior_arrays(rk.plan, _rk_training_columns(parent(rk))))
 _rk_omitted_scalars(scalars, new_data) = Dict{Symbol,Any}(name => value
     for (name, value) in scalars if !_brm_df_has_column(new_data, name))
 
@@ -472,12 +474,34 @@ end
 _rk_raw_data_columns!(columns, x::ExprColumn) =
     (_brm_foreach_child(a -> _rk_raw_data_columns!(columns, a), x); columns)
 
+# The program as text, for every identity and replay check that compares it.
+# A macro call keeps the place it was written (`#= file:line =#`), which
+# `remove_linenums!` leaves in place. For an emitted `ReactiveKernels.@kernel`
+# that is BRM's own source file in this installation (its depot slug, its line)
+# or a source provider's file in the consumer's checkout, so the same model read
+# differently from another checkout, depot, host or BRM release. The text puts
+# every macro call at `LineNumberNode(0)`, as the emitter's generated calls
+# already are; a program without such a call keeps its text.
 function _rk_program_statements(emitted::_RKEmittedProgram)
-    text(x) = sprint(Base.show_unquoted, Base.remove_linenums!(_brm_strip_docs(x)))
+    text(x) = sprint(Base.show_unquoted,
+        _rk_unlocated(Base.remove_linenums!(_brm_strip_docs(x))))
     vcat(["definition: " * text(d) for d in emitted.defs],
         ["statement: " * text(s) for s in emitted.main.args if !(s isa LineNumberNode)],
         ["binding: " * string(first(b)) for b in emitted.bindings])
 end
+
+_rk_unlocated(x) = x
+function _rk_unlocated(x::Expr)
+    args = Any[_rk_unlocated(a) for a in x.args]
+    x.head === :macrocall && length(args) >= 2 && args[2] isa LineNumberNode &&
+        (args[2] = LineNumberNode(0))
+    Expr(x.head, args...)
+end
+
+# A statement stored with its macro calls' places (a fitted state exported
+# before 0.2.228), as `_rk_program_statements` now writes it.
+_rk_unlocated_statement(statement::AbstractString) =
+    replace(statement, r"#= (?:line \d+|[^\n]*?:\d+) =#" => "#= line 0 =#")
 
 # The program's text no longer holds its generated inputs (a literal `lkj_eta`, a
 # known correlation factor, a factor's fitted levels), so a frozen replay
@@ -543,12 +567,13 @@ function _brm_rk_binding_identity(rk, tag; stable=true)
 end
 
 # The same identity by component, callables by name and data by column, so a
-# difference can be named.
+# difference can be named. Format 2 (0.2.228) digests the program without its
+# macro calls' places; parts without `format` hold the digest with them.
 function _brm_rk_binding_parts(rk)
     emitted = _rk_retained_program(rk)
     digests(entries) = Pair{Symbol,String}[name => _brm_value_digest(_brm_stable_value(value))
         for (name, value) in entries]
-    (; program=_brm_value_digest(_rk_program_statements(emitted)),
+    (; format=2, program=_brm_value_digest(_rk_program_statements(emitted)),
        callables=digests(emitted.bindings),
        data=digests(pairs(rk_bound_data(rk))),
        coordinates=_brm_value_digest(_rk_bound_coordinate_names(rk)))
