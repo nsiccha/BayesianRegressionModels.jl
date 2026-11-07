@@ -12,6 +12,31 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.242
+
+- Added: `brm_svi_fit` settles before it polishes. Exploration's stop test finds
+  the ELBO flat at exploration's own step, and that step moves a global mean by
+  `lr_global` in the coordinate's units whatever its posterior sd, so a tight
+  global (sd 7e-4 on a synthetic model) jitters by tens of sds and the ELBO sits on
+  that noise floor. Polishing's first windows then climbed from it, and the
+  returned Polyak average included the climb. Settling runs the scale-relative step
+  `polish_lr` at a constant size, without averaging, until the same trimmed-ELBO
+  test passes on its own windows, for at most `settle_windows` windows (new keyword,
+  default 100). Polishing then continues that step and its Adam moments. On an
+  exactly Gaussian model with 32 tight globals the returned factor came 62 nats
+  from the family's optimum instead of 111, at 16% more iterations; with 8, 56
+  instead of 75. On 400-unit synthetic models (3 seeds each) the returned
+  factor's ELBO rose by 4.4 to 5.6 nats (Gaussian random effects), 0.3 to 1.2
+  (Poisson) and 1.4 to 2.3 (a weakly read log-scale field), at 18% more
+  iterations. `settle_windows=0` restores the earlier schedule exactly.
+- Added: `diagnostics.stages` (and in snapshots): the iterations spent exploring,
+  settling and polishing, and `settled`, whether settling ended on its test rather
+  than its cap. `converged` with `settled = false` means polishing averaged
+  iterates that were still rising. A snapshot's `phase` can read `:settling`.
+- Changed: a fit on a fixed seed differs from 0.2.241's from the window at which
+  exploration stops. A checkpoint of 0.2.240 or 0.2.241 still resumes, with its
+  own schedule (no settling): it records no `settle_windows`.
+
 ## 0.2.241
 
 - Changed: `brm_svi_combine` multiplies the slices' global sites jointly. A
