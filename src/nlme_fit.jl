@@ -279,6 +279,11 @@ Requires NLMEEstimation and Enzyme to be loaded.
   `ad_backend` (default reverse-mode `AutoEnzyme`) and the `shared_point`,
   `subject_group`, `nested_groups`, `shared_groups` and `unit_partition` of
   [`brm_nlme_model`](@ref); passing those to a prepared model is refused.
+  A BRMI is lowered centred, except the `mi(...)` completions whose law reads
+  the units' draws, which are lowered non-centered (`RKBRMI(brmi; completions
+  = (:x,))`) so their density belongs to their units' conditionals, and the
+  grouped entries of `mi(x)::shares(total, rows)`; an RKBRMI with such a
+  completion centred is refused by [`brm_nlme_view`](@ref).
 - `estimator` — `NLMEEstimation.saem`, `NLMEEstimation.focei`, or
   `NLMEEstimation.empirical_bayes` (equivalently `posthoc`, which estimates
   the subject effects at the start's population values). `kwargs` pass

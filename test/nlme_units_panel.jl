@@ -54,25 +54,71 @@ end
             count(r -> PANEL.region[r] == i, missing_rows)
     end
     @test count(==(:shared_latent), v.role) == 0
-    # The default (centered) completion stays shared by all units.
-    centered = panel_view(RKBRMI(panel(PANEL)))
-    @test count(==(:shared_latent), centered.role) == length(missing_rows)
-    @test all(f -> f.fixed === nothing, centered.families)
+    # Centred, the completion's law (it reads the regions' effects) would be a
+    # prior term on shared coordinates, which each unit's conditional omits
+    # while the lockstep gradient carries it: refused by name (snag
+    # brm-nlme-loglike-7c4b209b).
+    @test_throws "`mi(x1)` reads the units' draws" panel_view(RKBRMI(panel(PANEL)))
+    @test_throws "completions = (:x1,)" panel_view(RKBRMI(panel(PANEL)))
+    # The `@brm` entry of the fits lowers exactly that completion non-centered.
+    rk = BRM._brm_nlme_lowered(panel(PANEL); subject_group=:region,
+        nested_groups=PANEL_NESTED)
+    @test BRM._rk_completion_mode(rk.plan) === :noncentered
+    @test BRM._rk_completion_mode(RKBRMI(panel(PANEL); completions=(:x1,)).plan) ===
+        :noncentered
+    @test_throws "`nope`, which is not a completion" RKBRMI(panel(PANEL);
+        completions=(:nope,))
 end
 
-@stestset "a non-location-scale completion law is refused when non-centered" begin
-    gamma_completion(data) = @brm data begin
-        mu ~ 1 + z + (1 | region)
-        mi(x1) ~ Gamma(2.0, exp(mu))
-        c_x = log(x1)
-        log_w ~ 1 + c_x
-        sigma_t ~ Exponential(0.03)
-        rows_t = groups(district_year => dy_obs)
-        @plate for k in eachindex(total)
-            total[k] ~ Normal(sum(exp.(log_w[rows_t[k]])), sigma_t * total[k])
-        end
+gamma_completion(data) = @brm data begin
+    mu ~ 1 + z + (1 | region)
+    mi(x1) ~ Gamma(2.0, exp(mu))
+    c_x = log(x1)
+    log_w ~ 1 + c_x
+    sigma_t ~ Exponential(0.03)
+    rows_t = groups(district_year => dy_obs)
+    @plate for k in eachindex(total)
+        total[k] ~ Normal(sum(exp.(log_w[rows_t[k]])), sigma_t * total[k])
     end
-    @test_throws "location-scale law" RKBRMI(gamma_completion(PANEL); completions=:noncentered)
+end
+
+@stestset "a Gamma completion law is non-centered by its support transform" begin
+    centred = RKBRMI(gamma_completion(PANEL))
+    rk = RKBRMI(gamma_completion(PANEL); completions=:noncentered)
+    # The centred coordinates (`log(x)`), now standard-normal draws, and the
+    # same density.
+    @test replace.(String.(BRM._rk_layout_coordinate_names(centred)), ".y_mis" => ".z_mis") ==
+        String.(BRM._rk_layout_coordinate_names(rk))
+    u = 0.3 .* randn(Xoshiro(3), length(BRM._rk_layout_coordinate_names(rk)))
+    a, ga = LogDensityProblems.logdensity_and_gradient(
+        rk_logdensity_problem(centred; ad_backend=NLME_AD), u)
+    b, gb = LogDensityProblems.logdensity_and_gradient(
+        rk_logdensity_problem(rk; ad_backend=NLME_AD), u)
+    @test a ≈ b rtol=1e-12
+    @test ga ≈ gb atol=1e-10
+    # Its only grouping is the regions.
+    @test_throws "`mi(x1)` reads the units' draws" brm_nlme_view(centred;
+        subject_group=:region)
+    # Each missing cell is a unit draw of the region owning it, in a family
+    # fixed at unit variance.
+    v = brm_nlme_view(rk; subject_group=:region)
+    @test count(==(:shared_latent), v.role) == 0
+    completion = only(f for f in v.families if f.fixed !== nothing)
+    @test completion.fixed == fill(1.0, 1, 1)
+    @test sum(i -> count(==(findfirst(f -> f.fixed !== nothing, v.families)),
+        v.subject_families[i]), eachindex(v.levels)) == count(ismissing, PANEL.x1)
+    # The lockstep and one-unit routes compute one function: the values'.
+    m = brm_nlme_model(rk; ad_backend=NLME_AD, subject_group=:region)
+    rng = Xoshiro(42)
+    θ = 0.1 .* randn(rng, length(m.theta))
+    σ = 0.1 .* randn(rng, length(m.sigma))
+    H = [0.2 .* randn(rng, length(b)) for b in m.view.subject_coordinates]
+    values, G = brm_nlme_loglikelihoods_and_gradients(m, θ, σ, H)
+    for i in eachindex(H)
+        value, g = brm_nlme_loglikelihood_and_gradient(m, i, θ, σ, H[i])
+        @test value ≈ values[i] rtol=1e-12
+        @test g ≈ G[i] atol=1e-8
+    end
 end
 
 @stestset "district-year totals belong to the region owning their rows" begin

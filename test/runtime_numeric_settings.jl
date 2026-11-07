@@ -241,6 +241,21 @@ multigroup_method(method) = brm(:(begin
     mu ~ 0 + hsgp(t; k=3, by=g, cor=multigroup((sx, sy), 0.7; k=3, method=$(QuoteNode(method))))
     y ~ Normal(mu, sigma)
 end); mod=@__MODULE__)
+# A channelled field of each form, without `cor` or with a known `Omega`.
+const CHANNEL_FORMS = (; mesh=:(mesh = (vertices=xy, cells=triangles)),
+    footprint=:(neighbors = 3), multiresolution=:(multiresolution = 2))
+function channel_field(form::Symbol; cor::Bool=false)
+    option = Expr(:kw, getproperty(CHANNEL_FORMS, form).args...)
+    options = cor ? (option, Expr(:kw, :cor, :Omega)) : (option,)
+    term = Expr(:call, :gmrf, Expr(:parameters, options...), :((east, north)), :time, :channel)
+    brm(:(begin
+        field ~ 0 + $term
+        sd(field, gmrf((east, north), time, channel)) ~ Exponential(0.7)
+        length_scale(field, gmrf((east, north), time, channel), space) ~ LogNormal(log(0.4), 0.4)
+        length_scale(field, gmrf((east, north), time, channel), time) ~ LogNormal(log(1.7), 0.4)
+        y ~ Normal(field, 0.2)
+    end); mod=@__MODULE__)
+end
 end
 const RSM = RuntimeSettingsModels
 
@@ -902,4 +917,49 @@ end
         rk_program(RSM.horseshoe_effect(; global_scale=0.2)(LDATA))
     @test stan_program(RSM.horseshoe_effect(; global_scale=0.1)(LDATA)) !=
         stan_program(RSM.horseshoe_effect(; global_scale=0.2)(LDATA))
+end
+
+# ---- a gmrf field's channel count (snag `gmrf-channel-ide-f3e0758e`) ---------
+
+# Reads at six positions and three times on each of `C` channels, inside the
+# unit-square mesh the mesh form reads.
+function channel_data(C; seed=5)
+    rng = MersenneTwister(seed)
+    npositions, times = 6, [0.0, 1.0, 2.5]
+    x, y = 0.1 .+ 0.8 .* rand(rng, npositions), 0.1 .+ 0.8 .* rand(rng, npositions)
+    n = npositions * length(times)
+    reads(v) = repeat(v; inner=C)
+    (; east=reads(repeat(x; outer=length(times))), north=reads(repeat(y; outer=length(times))),
+       time=reads(repeat(times; inner=npositions)), channel=repeat(["a", "b", "c"][1:C]; outer=n),
+       y=0.3 .* randn(rng, n * C),
+       xy=[0.0 0.0; 1 0; 1 1; 0 1; 0.5 0.5], triangles=[1 2 5; 2 3 5; 3 4 5; 4 1 5])
+end
+# RKPPL 0.1.113 reads an external law's packed extent from the data, so a field
+# of another size lowers to the same program.
+const RK_BINDS_FIELD_EXTENT = pkgversion(ReactiveKernelsPPL) >= v"0.1.113"
+
+@stestset "a gmrf field's channel count is a data size" begin
+    # Without `cor` the channels are independent. Their identity factor is read
+    # from the fitted support, so a field on 1, 2 or 3 channels emits one RK
+    # program, as Stan reads its identity from the data.
+    for form in keys(RSM.CHANNEL_FORMS)
+        @testset "$form" begin
+            builds = [RSM.channel_field(form)(channel_data(C)) for C in 1:3]
+            models = map(RKBRMI, builds)
+            @test allequal(emitted_program(rk) for rk in models)
+            @test allequal(lowered_program(rk) for rk in models) broken=!RK_BINDS_FIELD_EXTENT
+            @test allequal(stan_program(b) for b in builds)
+            # It is the law of a known identity correlation: the same coordinates,
+            # density and native Reverse gradient.
+            free = last(models)
+            known = RKBRMI(RSM.channel_field(form; cor=true)(
+                merge(channel_data(3), (; Omega=Matrix(1.0I, 3, 3)))))
+            @test coordinate_names(free.model.layout) == coordinate_names(known.model.layout)
+            u = rk_point(free)
+            value, gradient = LogDensityProblems.logdensity_and_gradient(reverse_problem(free), u)
+            twin_value, twin_gradient = LogDensityProblems.logdensity_and_gradient(reverse_problem(known), u)
+            @test value ≈ twin_value rtol=1e-12
+            @test gradient ≈ twin_gradient rtol=1e-10
+        end
+    end
 end
