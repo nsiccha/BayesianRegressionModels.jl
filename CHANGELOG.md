@@ -30,12 +30,12 @@ instead of failing at run time.
   sampling law, so its results differ. `cell_units=:first_unit` restores the earlier
   layout and work. Checkpoints keep the layout they were made with, and earlier
   checkpoints continue on `:first_unit` without being told.
-- **Breaking:** under `:components`, a response that reads a computed row vector
-  whole (`y ~ Normal(mu, sigma)`, with `sigma` computed per row) is refused when its
-  rows fall in different cell units, because its partition reads every row's
-  entries (ReactiveKernels snag `whole-vector-res-64373f39`). The refusal names the
-  cell units. Read the vector by a data index (`Normal(mu[idx], sigma[idx])`), or
-  pass `cell_units=:first_unit`.
+- Changed: the ReactiveKernels and ReactiveKernelsPPL floors rise to 0.1.104 and
+  0.1.114. From those versions a response that reads a `@plate`-computed vector
+  whole, such as `y ~ Normal(mu, sigma)` with `mu[i]` set in a `@plate`, splits
+  into cell units as its indexed form does. Earlier versions prepared its partition
+  without the unit's point and refused it under `:components` (ReactiveKernels snag
+  `whole-vector-res-64373f39`).
 - Measured on a synthetic model, in `research/svi_cell_units/`: 2.5-2.8× the gradient
   variance per update, far less time per update, and a higher ELBO after 20,000
   updates. Its sensors are nearly independent given the globals, so this does not

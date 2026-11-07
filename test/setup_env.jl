@@ -363,8 +363,11 @@ const PINS = [
     # 28d70c34 (RK 0.1.94 / RKPPL 0.1.105) runs a tuple plate's statements only
     # at rows that read their entries, so automatic connected SVI units keep
     # their own coordinates. b9342dca (RK 0.1.96 / RKPPL 0.1.106) is the
-    # revision measured with Enzyme cecb571a below.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "b9342dcae0cf19a6f0664ebb953ea33ed38a85b9"),
+    # revision measured with Enzyme cecb571a below. 7b53c65f (RK 0.1.104 /
+    # RKPPL 0.1.114) prepares partition kernels from `u0`, so a response that
+    # reads a `@plate`-computed vector whole (BRM's `flatten_cells`) partitions
+    # per cell unit (RK snag whole-vector-res-64373f39).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "7b53c65fa2c09feda513eefdb9e04fb463787820"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
