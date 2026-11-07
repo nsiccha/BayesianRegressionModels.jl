@@ -6,7 +6,7 @@
 # steps as before in both.
 #
 # Β's gradient w ηᵀ carries the minibatch noise of w, so Adam's normalized step is
-# mostly a random walk of one step size per iteration. Before 0.2.243 that step
+# mostly a random walk of one step size per iteration. Before 0.2.245 that step
 # was `lr_global` in absolute units for every coordinate: through a long
 # exploration Β's rows grew to several times their coordinates' own sds, the
 # factor came out wider than the posterior, and on a real target typical draws
