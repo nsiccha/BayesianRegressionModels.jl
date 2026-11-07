@@ -59,6 +59,7 @@ _brm_svi_rank(f::LowRankGlobal) = f.rank
 include("nlme_svi_sampling.jl")
 include("nlme_svi_workspace.jl")
 include("nlme_svi_units.jl")
+include("nlme_svi_centering.jl")
 
 # ── The minibatch target ─────────────────────────────────────────────────────
 
@@ -234,7 +235,12 @@ end
 
 # Each worker owns its plan and one G + max(d_i) workspace. Unit layout
 # metadata stores local positions only; globals are never repeated per unit.
-function _brm_svi_unit_term!(gg, gz, t, i, g, z, plan=t.plan, work=first(t.work))
+_brm_svi_unit_term!(gg, gz, t, i, g, z, plan=t.plan, work=first(t.work)) =
+    _brm_svi_unit_likelihood!(gg, gz, t, i, g, z, plan, work) +
+        _brm_svi_unit_prior!(gg, gz, t.prior, t, i, g, z)
+
+# Unit i's observation cells alone; writes (not adds) both gradients.
+function _brm_svi_unit_likelihood!(gg, gz, t, i, g, z, plan=t.plan, work=first(t.work))
     D = length(t.globals)
     layout = t.layouts[i]
     values = view(work.values, 1:D+length(z))
@@ -243,7 +249,7 @@ function _brm_svi_unit_term!(gg, gz, t, i, g, z, plan=t.plan, work=first(t.work)
     fill!(gradient, 0.0)
     value = _brm_nlme_partition_sum!(gradient, plan, t.m.unit, i, values)
     _brm_svi_split_gradient!(gg, gz, layout, gradient)
-    value + _brm_svi_unit_prior!(gg, gz, t.prior, t, i, g, z)
+    value
 end
 
 # Unit i's prior term, its gradients added into `gg` (the globals) and `gz`
@@ -700,6 +706,11 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     terms = Vector{@NamedTuple{value::Float64,gg::Vector{Float64},gz::Vector{Float64},
         gd::Vector{Float64}}}(undef, length(batch))
     problems = Vector{Union{Nothing,NamedTuple}}(nothing, length(batch))
+    # Learned centering: the factors are over each unit's learned coordinates u,
+    # and the unit terms read y = T(u) (src/nlme_svi_centering.jl).
+    centering = _brm_svi_centering(t)
+    frame = centering === nothing ? nothing : _brm_svi_centering_frame(centering, t, g)
+    centered = Vector{Any}(nothing, length(batch))
     _brm_svi_each_unit(eachindex(t.plans), length(batch)) do worker, k
         plan, work = t.plans[worker], t.work[worker]
         i, εi = batch[k], draws[k]
@@ -707,8 +718,16 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         gz₊, gz₋ = zeros(length(t.units[i])), zeros(length(t.units[i]))
         m, δ = q.M[i], _brm_svi_unit_offset(q, i, εi)
         z₊, z₋ = m .+ δ, m .- δ
-        v₊ = _brm_svi_unit_term!(gg₊, gz₊, t, i, g, z₊, plan, work)
-        v₋ = _brm_svi_unit_term!(gg₋, gz₋, t, i, g, z₋, plan, work)
+        if centering === nothing
+            v₊ = _brm_svi_unit_term!(gg₊, gz₊, t, i, g, z₊, plan, work)
+            v₋ = _brm_svi_unit_term!(gg₋, gz₋, t, i, g, z₋, plan, work)
+        else
+            v₊, gc₊, a₊ = _brm_svi_centered_unit_term!(gg₊, gz₊, centering, frame, t, q, i,
+                g, z₊, plan, work)
+            v₋, gc₋, a₋ = _brm_svi_centered_unit_term!(gg₋, gz₋, centering, frame, t, q, i,
+                g, z₋, plan, work)
+            centered[k] = (; gc=(gc₊ .+ gc₋) ./ 2, adjoints=(a₊, a₋))
+        end
         problems[k] = _brm_svi_nonfinite_unit(t, i, g, (z₊, z₋), (v₊, v₋),
             (gg₊, gg₋), (gz₊, gz₋))
         terms[k] = (; value=(v₊ + v₋) / 2, gg=gg₊ .+ gg₋, gz=(gz₊ .+ gz₋) ./ 2,
@@ -723,6 +742,8 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         batch_value += weights[k] * term.value
         w .+= (weights[k] / 2) .* term.gg
     end
+    centering === nothing || (w .+= _brm_svi_centering_batch_gradient(centering, t, frame,
+        centered, weights))
     x = _brm_svi_global_vector(q)
     grad = _brm_svi_global_gradient(q, w, ε, η)
     # `N / B` for a uniform batch; under work sampling a unit drawn with chance π
@@ -735,6 +756,8 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     _brm_svi_each_unit(t.plans, length(batch)) do _, k
         _brm_svi_unit_step!(q, batch[k], terms[k].gz, terms[k].gd, draws[k], β)
     end
+    # The controls move while exploring; polishing averages q in one fixed frame.
+    centering === nothing || whiten || _brm_svi_control_steps!(q, batch, centered)
     P + batch_value
 end
 
@@ -1045,14 +1068,20 @@ function _brm_svi_factor!(q)
     q
 end
 
-# `n` draws from q as packed RK points, one per column.
+# `n` draws from q as packed RK points, one per column. Under learned centering
+# each unit's draw of its learned coordinates is mapped back to the packed ones
+# at that column's globals.
 function _brm_svi_draws(rng, t, q, n)
     U = repeat(t.m.unit, 1, n)
+    centering = _brm_svi_centering(t)
     for j in 1:n
-        U[t.globals, j] .= _brm_svi_draw_global(q, randn(rng, length(q.μ)),
-            randn(rng, size(q.Β, 2)))
+        g = _brm_svi_draw_global(q, randn(rng, length(q.μ)), randn(rng, size(q.Β, 2)))
+        U[t.globals, j] .= g
+        frame = centering === nothing ? nothing : _brm_svi_centering_frame(centering, t, g)
         for (i, block) in enumerate(t.units)
-            U[block, j] .= _brm_svi_draw_unit(q, i, _brm_svi_unit_noise(rng, q.U[i]))
+            u = _brm_svi_draw_unit(q, i, _brm_svi_unit_noise(rng, q.U[i]))
+            U[block, j] .= centering === nothing ? u :
+                _brm_svi_centered_coordinates(centering, frame, q, i, g, u)
         end
     end
     _brm_svi_fill_absent_draws!(rng, U, t, t.previous)
@@ -1300,17 +1329,27 @@ target on every call.
 """
 brm_svi_fit(x; kwargs...) = _brm_svi_initial_fit(nothing, x; kwargs...)
 brm_svi_fit(save::Function, x; kwargs...) = _brm_svi_initial_fit(save, x; kwargs...)
-_brm_svi_initial_fit(save, x; laplace=nothing, kwargs...) = laplace === nothing ?
-    _brm_svi_fit(save, x, nothing; kwargs...) :
+function _brm_svi_initial_fit(save, x; laplace=nothing, kwargs...)
+    laplace === nothing && return _brm_svi_fit(save, x, nothing; kwargs...)
+    get(kwargs, :centering, nothing) === nothing || throw(ArgumentError(
+        "brm_svi_fit: learned centering moves the minibatch engine's unit factors; " *
+        "laplace=GaussianBlockLaplace() integrates them instead, so pass only one of them"))
     _brm_svi_laplace_dispatch(save, x, nothing, laplace; kwargs...)
+end
 
 function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32,
         max_iterations=100_000, family=nothing, unit_sampling=nothing,
         unit_dense_limit=64, unit_rank=8,
         lr_global=0.01, unit_step=0.1, start=nothing, inits=nothing,
         global_scale=0.1, unit_scale=1.0, polish_lr=0.05, window=nothing,
-        patience=10, min_windows=40, polish_windows=20, kwargs...)
+        patience=10, min_windows=40, polish_windows=20, centering=nothing, kwargs...)
     family = _brm_svi_family(previous, family)
+    centering === nothing || centering isa LearnedCentering || throw(ArgumentError(
+        "brm_svi_fit: centering must be LearnedCentering() or nothing, got $(repr(centering))"))
+    previous === nothing || centering === nothing || throw(ArgumentError(
+        "brm_svi_fit: a streaming update carries the previous fit's centering; omit centering"))
+    previous isa BRMSVIState && hasproperty(previous.layout, :centering) &&
+        (centering = LearnedCentering(; previous.layout.centering...))
     _brm_svi_unit_options(unit_dense_limit, unit_rank)
     unit_sampling in (nothing, :uniform, :work) || throw(ArgumentError(
         "brm_svi_fit: unit_sampling must be :uniform or :work"))
@@ -1323,6 +1362,7 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
             kwargs...) do t
         t, q = _brm_svi_initialize(t, previous, family; start, inits, global_scale, unit_scale,
             unit_dense_limit, unit_rank)
+        centering === nothing || ((t, q) = _brm_svi_with_centering(t, q, centering))
         c = _brm_svi_controls(length(t.units); batch_size, max_iterations, lr_global,
             unit_step, polish_lr, window, patience, min_windows, polish_windows,
             unit_sampling=something(unit_sampling,
@@ -1447,6 +1487,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                 end
                 optimizing = false
                 q = _brm_svi_result_q(run)
+                centering = _brm_svi_centering(t)
                 (; draws, coordinates=copy(m.view.coordinates), diagnostics=(;
                     threads=length(t.plans), target=(; reuse..., seconds=target_seconds),
                     elbo=run.trace, elbo_windows=first.(run.windows),
@@ -1462,7 +1503,9 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                     unit_families=_brm_svi_unit_description.(q.U),
                     seconds, model=m, source_id=_brm_svi_source_id(m.backend),
                     sampling=run.sampling, unit_gradient_calls=run.unit_gradient_calls,
-                    streaming=_brm_svi_carried_state(previous, t, q), optimizer=state))
+                    streaming=_brm_svi_carried_state(previous, t, q), optimizer=state,
+                    centering=centering === nothing ? nothing :
+                        _brm_svi_centering_report(centering, q, _brm_svi_unit_levels(t))))
             finally
                 # A refused checkpoint leaves the target as it found it; an exception
                 # while optimizing may have left an AD workspace mid-evaluation.

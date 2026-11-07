@@ -216,6 +216,8 @@ function _brm_svi_restore(t, s::BRMSVIOptimizerState)
         t, _ = _brm_svi_initialize(t, s.previous, s.previous.q.family;
             start=nothing, inits=nothing, global_scale=1.0, unit_scale=1.0)
     end
+    s.run isa _BRMSVIRun && hasproperty(s.run.q, :centering) &&
+        (t = _brm_svi_centered_target(t, s.run.q))
     t, _brm_svi_restored(t, s)
 end
 

@@ -94,11 +94,18 @@ function _brm_svi_save_units!(units, m, q, blocks=m.view.subject_coordinates;
         levels=m.view.levels)
     scientific = _brm_svi_scientific_keys(m)
     for (i, label) in enumerate(levels)
-        units[label] = _brm_svi_saved_unit(
+        saved = _brm_svi_saved_unit(
             _brm_svi_owned_unit_keys(m, blocks, i; scientific), q.M[i], q.Λ[i], q.U[i])
+        # A centered fit's unit factor is over its learned coordinates: its
+        # controls, one logit per coordinate, define that frame.
+        units[label] = hasproperty(q, :centering) ? merge(saved,
+            (; centering=_brm_svi_coordinate_controls(q, i, length(q.M[i])))) : saved
     end
     units
 end
+
+_brm_svi_centering_layout(q) = hasproperty(q, :centering) ?
+    (; centering=(; q.centering.start, q.centering.step)) : NamedTuple()
 
 function brm_svi_checkpoint(fit)
     hasproperty(fit, :diagnostics) && hasproperty(fit.diagnostics, :q) ||
@@ -118,7 +125,8 @@ function brm_svi_checkpoint(fit)
     options = d.separator === nothing ? (; separator=:none) :
         (; (key => getproperty(d.separator, key) for key in
             (:separator, :max_unit_coordinates, :max_unit_work, :max_promoted_coordinates))...)
-    layout = (; options, global_keys=_brm_svi_global_keys(m, d.globals))
+    layout = (; options, global_keys=_brm_svi_global_keys(m, d.globals),
+        _brm_svi_centering_layout(d.q)...)
     BRMSVIState(3, deepcopy(state), _brm_svi_source_id(m.backend),
         copy(m.view.coordinates[d.globals]), _brm_svi_global_factor(d.q),
         units, m.view.group,
@@ -161,7 +169,8 @@ function _brm_svi_carried_state(previous::BRMSVIState, t, q)
             levels=_brm_svi_unit_levels(t)), previous.group,
         previous.nested, previous.shared, copy(previous.fixed),
         previous.unit_partition, (; options=_brm_svi_separator_options(t),
-            global_keys=_brm_svi_global_keys(m, t.globals)), previous.updates + 1)
+            global_keys=_brm_svi_global_keys(m, t.globals), _brm_svi_centering_layout(q)...),
+        previous.updates + 1)
 end
 
 # Model-scope arrays can retain coordinates of absent units. The target
@@ -180,8 +189,12 @@ function _brm_svi_fill_absent_draws!(rng, draws, t, previous::BRMSVIState)
             push!(destination, j)
         end
         isempty(source) && continue
+        centering = _brm_svi_centering(t)
         for draw in axes(draws, 2)
             z = _brm_svi_saved_unit_draw(rng, unit)
+            centering === nothing || _brm_svi_absent_draw!(z, centering,
+                _brm_svi_centering_frame(centering, t, draws[t.globals, draw]), unit,
+                source, destination)
             draws[destination, draw] .= z[source]
         end
     end
@@ -289,6 +302,9 @@ struct _BRMSVIStreamingPrior{G,H,Q,P}
     units::Q
     carried::BitVector
     authored::P
+    # A centered checkpoint's per-coordinate control logits of each carried
+    # unit (`nothing` for a new unit or an uncentered checkpoint).
+    controls::Vector{Union{Nothing,Vector{Float64}}}
 end
 
 function _brm_svi_initialize(t, previous::BRMSVIState, family;
@@ -304,6 +320,7 @@ function _brm_svi_initialize(t, previous::BRMSVIState, family;
         q.M[i] .= median[block]
     end
     carried = falses(length(t.units))
+    controls = Vector{Union{Nothing,Vector{Float64}}}(nothing, length(t.units))
     scientific = _brm_svi_scientific_keys(t.m)
     for (i, label) in enumerate(_brm_svi_unit_levels(t))
         keys = _brm_svi_owned_unit_keys(t.m, t.units, i; scientific)
@@ -316,9 +333,10 @@ function _brm_svi_initialize(t, previous::BRMSVIState, family;
                 "coordinate layout; streaming carries persistent unit statics"))
         perm = [index[k] for k in keys]
         _brm_svi_restore_unit!(q, i, old, perm)
+        hasproperty(old, :centering) && (controls[i] = old.centering[perm])
     end
     prior = _BRMSVIStreamingPrior(_brm_svi_global_factor(q),
-        _brm_svi_global_geometry(q), deepcopy((; q.M, q.Λ, q.U)), carried, t.prior)
+        _brm_svi_global_geometry(q), deepcopy((; q.M, q.Λ, q.U)), carried, t.prior, controls)
     merge(t, (; prior)), q
 end
 
