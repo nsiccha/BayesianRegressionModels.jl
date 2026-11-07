@@ -2811,6 +2811,8 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
 - `julia --project=test test/nlme_svi_separator_native.jl`: actual hub/chain
   repartition, full-density/native Reverse-gradient equality at nonzero points,
   automatic work sampling, optimizer continuation and structured streaming carry.
+  A prepared model reuses its SVI target only under the same separator policy and
+  budgets, a resume finds it again, and snapshots name the inference units.
 - `julia --project=test --threads=2 test/nlme_svi_weighted_resume.jl`: exact
   trajectories for uniform/work batches and dense/structured local factors,
   lazy polishing, thread-count changes and a fresh-process checkpoint resume.
