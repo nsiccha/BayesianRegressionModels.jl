@@ -6882,9 +6882,9 @@ function _rk_prior_argument_expr(arg, name::Symbol, data::AbstractDict,
 end
 
 # How the program spells a support bound, once its number passed the checks: by
-# the data scalars it reads, so the emitted program serves every value. RKPPL
-# still reads the value into the constrain transform when it lowers, so the lowered
-# program follows it (ReactiveKernels snag `rkppl-sized-vect-69604d32`).
+# the data scalars it reads, so the emitted program serves every value, and from
+# RKPPL 0.1.108 (below BRM's floor) so does the lowered one: the constrain transform
+# reads the bound at run time (ReactiveKernels snag `rkppl-sized-vect-69604d32`).
 _rk_bound_spelling(_bound, value, _data, _name) = value
 _rk_bound_spelling(bound::_BRMPreparedRef, value, data, _name) =
     value isa Real && _rk_data_scalar(bound.name, data) ? bound.name : value

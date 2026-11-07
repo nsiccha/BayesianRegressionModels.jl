@@ -12,6 +12,35 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.241
+
+- Fixed: a model reading `hsgp(t; cov=:periodic)` in a plate cell stopped with
+  `ArgumentError: Tuple contains 2 elements` when NLMEEstimation's
+  `check_protocol` prepared its sparse Laplace, and `prepare_cell_factors` raised
+  the same error. The repair is in ReactiveKernels 0.1.96. ReactiveKernelsPPL
+  0.1.106 alone, the first with that repair, raises a `BoundsError` in
+  `_refresh_cell_shared!` on the second call of a partitioned cell whose shared
+  prefix reads only some shared coordinates, which NLMEEstimation's
+  `check_protocol` reaches with integrated families; 0.1.107 repairs it. 0.2.239's
+  floors (ReactiveKernels 0.1.104, ReactiveKernelsPPL 0.1.114) carry both, and
+  `test/runtime_numeric_settings.jl` now checks that model's cell factors against
+  its whole likelihood in the test environment.
+- **Breaking**, from 0.2.239's ReactiveKernels 0.1.104 floor and in any
+  environment on ReactiveKernels 0.1.96 or later: a compact cell's Laplace
+  Hessian-vector product (Forward over Reverse) differentiates a matrix product
+  that reaches BLAS `gemm!`. On an Enzyme before dogfood `0cdbe188` (libEnzyme
+  `3a825a54`) it raises `EnzymeRuntimeException` ("The original primal code hits
+  this error condition"), which stops `check_protocol` on a cell that sorts its
+  data and on a censored ragged join beside an in-cell observation. Use Enzyme
+  dogfood `0cdbe188` or later, as BRM's test environment now does (0.2.239 pinned
+  `cecb571a`). That libEnzyme build is for Linux x86_64 only.
+- Changed: 0.2.239's floors also guarantee the reuse 0.2.227 left to the
+  environment. One lowered program serves every size and support bound
+  (ReactiveKernelsPPL 0.1.108), and one gradient query type every value of a
+  bound number (0.1.106), so an RK fit no longer recompiles when only such a value
+  changes. The `hsgp` docstring and the support-bound comment in
+  `src/rk_backend.jl` now say so.
+
 ## 0.2.240
 
 - Fixed: `brm_svi_fit` left globals that few units read far from the family's

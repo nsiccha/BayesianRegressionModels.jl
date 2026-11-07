@@ -362,11 +362,18 @@ const PINS = [
     # and shared-row storage compact as unrelated units are added.
     # 28d70c34 (RK 0.1.94 / RKPPL 0.1.105) runs a tuple plate's statements only
     # at rows that read their entries, so automatic connected SVI units keep
-    # their own coordinates. b9342dca (RK 0.1.96 / RKPPL 0.1.106) is the
-    # revision measured with Enzyme cecb571a below. 7b53c65f (RK 0.1.104 /
-    # RKPPL 0.1.114) prepares partition kernels from `u0`, so a response that
-    # reads a `@plate`-computed vector whole (BRM's `flatten_cells`) partitions
-    # per cell unit (RK snag whole-vector-res-64373f39).
+    # their own coordinates. b9342dca (RK 0.1.96 / RKPPL 0.1.106) splits a
+    # destructuring outside a plate around its data-only nodes, so a periodic
+    # `hsgp`'s cell factors prepare with its settings read from data (RK snag
+    # prepare-cell-fac-469bcafb). 79f0a7cb (RKPPL 0.1.107): a partitioned cell
+    # whose shared prefix reads only some shared coordinates no longer throws a
+    # BoundsError in `_refresh_cell_shared!` after its first call (RK snag
+    # value-calls-of-p-b695f414). 7b53c65f (RK 0.1.104 / RKPPL 0.1.114) prepares
+    # partition kernels from `u0`, so a response that reads a `@plate`-computed
+    # vector whole (BRM's `flatten_cells`) partitions per cell unit (RK snag
+    # whole-vector-res-64373f39). From RK 0.1.96 a compact cell's
+    # `z_rows * transpose(tau .* L)` is strided and reaches BLAS `gemm!`, so its
+    # Laplace HVP needs Enzyme 0cdbe188 below (RK snag brm-sorted-cell-e201f8d9).
     ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "7b53c65fa2c09feda513eefdb9e04fb463787820"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
@@ -440,7 +447,12 @@ const PINS = [
     # proves that the reader cannot reach a fresh output array (Enzyme snag
     # residual-per-ter-5c58955b), and repairs a static Reverse failure on a unit
     # problem from RK 0.1.92 on (RK snag unit-problem-act-e546d3bd).
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "cecb571a1037fbfd800153a3afd1aed3b1913421"),  # dogfood
+    # 0cdbe188 / libEnzyme 3a825a54 contains cecb571a and adds Forward and Reverse
+    # rules for LAPACK `lascl`, so Forward over Reverse works through a Julia
+    # matrix product that reaches BLAS `gemm!`, `syrk!` or `symm!` (Enzyme snag
+    # forward-over-rev-dd37e57b). A compact cell's Laplace HVP reaches `gemm!`
+    # from RK 0.1.96 on. libEnzyme 3a825a54 is built for Linux x86_64 only.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "0cdbe1888f153736d7ecef0fcf007dfdb88079c8"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also
