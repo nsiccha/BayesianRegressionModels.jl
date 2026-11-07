@@ -239,7 +239,10 @@ svi_window_nlme() = brm_nlme_model(SVI_WINDOW_RK;
     BRM._brm_svi_fit!(run, t, c)
     old = svi_boundaries(SVI_WINDOW_EXACT, BRM._brm_svi_result_q(run), t.globals)
     @info "minibatch" mean_err_rms=sqrt(mean(abs2, old.z)) sd_median=median(old.r) sd_range=extrema(old.r)
-    @test maximum(old.r) > 2 * maximum(b.r)
+    # The control fails the bound the sites run passes. From BRM 0.2.242 settling
+    # (test/nlme_svi_settling.jl) also narrows the boundaries without sites: their
+    # largest sd ratio was 5.1 under 0.2.241's schedule and 2.5 with settling.
+    @test maximum(old.r) > 1.4 > maximum(b.r)
     @test sqrt(mean(abs2, old.z)) > sqrt(mean(abs2, b.z))
 end
 
