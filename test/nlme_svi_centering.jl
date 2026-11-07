@@ -6,8 +6,10 @@
 # globals, the learned coordinates and the controls, through RK's own scale,
 # correlation and law-argument values: a correlated block located at its
 # population coefficients, a scalar block on a Poisson model, and an authored
-# Gaussian vector the units own. A fit learns controls that rise with a unit's
-# data, returns draws in the packed RK coordinates, and resumes bit for bit.
+# Gaussian vector the units own. A sparse global that is a centred cell's scale
+# steps on sites that see its readers' whole centered terms. A fit learns
+# controls that rise with a unit's data, returns draws in the packed RK
+# coordinates, and resumes bit for bit.
 #
 # RUN: julia --project=test test/nlme_svi_centering.jl [testset-filter...]
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
@@ -121,6 +123,102 @@ end
     plan = BRM_._brm_svi_centering_plan(BRM_._brm_svi_target(m), LearnedCentering())
     @test all(cells -> count(c -> c.kind === :vector, cells) == 2, plan.cells)
     check_centered_terms(m; kinds=(:ranef, :vector))
+end
+
+# Sixteen units, two of them in a stratum of their own with 30 rows each. At
+# batch 2 that stratum's sd has fewer than one reader per batch on average, so
+# it steps on its readers' sites (src/nlme_svi_sites.jl), and it is the scale of
+# both readers' centred cells.
+function svi_centering_strat_data(; seed=1, common=14, rare=2, nc=3, nr=30)
+    rng = Xoshiro(seed)
+    stratum = vcat(fill("common", common), fill("rare", rare))
+    nobs = vcat(fill(nc, common), fill(nr, rare))
+    u = [s == "rare" ? 1.5randn(rng) : 0.3randn(rng) for s in stratum]
+    (; subject=["s$i" for i in eachindex(stratum)], stratum,
+       y=[1.0 + u[i] .+ 0.5 .* randn(rng, nobs[i]) for i in eachindex(stratum)])
+end
+
+svi_centering_strat_model(data) = @brm data begin
+    sigma ~ Exponential(1)
+    a ~ 1 + (1 | gr(subject, by=stratum))
+    @plate for i in eachindex(a)
+        y[i] ~ Normal(a[i], sigma)
+    end
+end
+
+# Measured with this data (seeds 11 and 12, 2026-11-07): the rare stratum's sd
+# came out 0.08 and 0.10 NUTS sds off with an sd 1.01 and 0.96 times NUTS's, as
+# with every global on the minibatch estimate (0.04, 0.12; 1.02, 0.94), and the
+# plain fit 1.02 and 0.87 off at 0.14 times. The rare units' controls were
+# 0.95-0.97, the others' 0.31-0.55. At the probe's point below, the unit term's
+# direct gradient in that sd was -10.6 and +5.3, the complete one -2.4 and -0.006.
+@stestset "a sparse global's site sees its reader's whole centered term" begin
+    data = svi_centering_strat_data()
+    rk = RKBRMI(svi_centering_strat_model(data))
+    m = brm_nlme_model(rk; ad_backend=NLME_AD)
+    names = string.(coordinate_names(rk.model.layout))
+    t0 = BRM_._brm_svi_target(m)
+    N = length(t0.units)
+    sites = BRM_._brm_svi_sites(t0, 2, fill(1 / N, N))
+    @test names[t0.globals[sites.globals]] == ["b_subject__by__stratum.tau.2.1"]
+    rare = findall(!isempty, sites.entries)
+    common = findfirst(isempty, sites.entries)
+    @test sort(BRM_._brm_svi_unit_levels(t0)[rare]) == ["s15", "s16"]
+
+    # Each reader's site gradient is its complete centered gradient: the batch's
+    # sum for a lone reader, its own pullback when both are drawn.
+    plan = BRM_._brm_svi_centering_plan(t0, LearnedCentering())
+    t, q = centered_target(m, [fill(0.85, k) for k in plan.ncells])
+    u0 = first(BRM_._brm_nlme_prior_median_point(m)) .+ 0.3 .* randn(Xoshiro(3), length(m.unit))
+    g = u0[t.globals]
+    frame = BRM_._brm_svi_centering_frame(plan, t, g)
+    function pieces(i)
+        u = u0[t.units[i]]
+        gg, gu = zeros(length(g)), zeros(length(u))
+        v, gc, a = BRM_._brm_svi_centered_unit_term!(gg, gu, plan, frame, t, q, i, g, u)
+        touched = BRM_._brm_svi_unit_touched(t, i)
+        (; term=(; value=v, gg=2 .* gg[touched], gz=gu, gd=zero(gu)),
+           centered=(; gc, adjoints=(a, a)), direct=gg, complete=centered_term(t, q, i, g, u).gg,
+           touched)
+    end
+    for batch in ([rare[1], common], rare, [common, rare[2], rare[1]])
+        rs = pieces.(batch)
+        terms = [r.term for r in rs]
+        weights = fill(N / length(batch), length(batch))
+        centered = [r.centered for r in rs]
+        chain = BRM_._brm_svi_centering_batch_gradient(plan, t, frame, centered, weights)
+        BRM_._brm_svi_centering_site_terms!(terms, sites, plan, t, frame, centered, batch,
+            weights, chain)
+        for (k, i) in enumerate(batch), entry in sites.entries[i]
+            p = rs[k].touched[entry]
+            @test terms[k].gg[entry] / 2 ≈ rs[k].complete[p] rtol = 1e-10 atol = 1e-12
+            # The direct gradient alone is not it: the check tells them apart.
+            @test abs(rs[k].direct[p] - rs[k].complete[p]) > 1
+        end
+    end
+    check_centered_terms(m; units=rare, kinds=(:ranef,))
+
+    # A centered fit steps the sd on its readers' sites and recovers it.
+    problem = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+    x0 = first(BRM_._brm_nlme_prior_median_point(m))
+    reference = reduce(hcat, map(1:4) do chain
+        run = adaptive_warmup_mcmc(Xoshiro(100 + chain), problem;
+            init=(; position=copy(x0), squared_scale=ones(length(x0))), n_draws=1000)
+        convert(Matrix{Float64}, run.posterior_position)
+    end)
+    μr, σr = vec(mean(reference; dims=2)), vec(std(reference; dims=2))
+    fit = brm_svi_fit(m; batch_size=2, threads=1, unit_sampling=:uniform, ndraws=10,
+        rng=Xoshiro(11), centering=LearnedCentering())
+    d = fit.diagnostics
+    sd = t0.globals[only(sites.globals)]
+    @test d.sparse_globals.coordinates == [sd]
+    k = findfirst(==(sd), d.globals)
+    @test abs(d.q.μ[k] - μr[sd]) / σr[sd] < 0.3
+    @test 0.8 < exp(d.q.ρ[k]) / σr[sd] < 1.25
+    rare_levels = BRM_._brm_svi_unit_levels(t0)[rare]
+    c_rare = [cell.c for cell in d.centering.cells if cell.unit in rare_levels]
+    c_common = [cell.c for cell in d.centering.cells if !(cell.unit in rare_levels)]
+    @test minimum(c_rare) > maximum(c_common) + 0.2
 end
 
 # Measured with this data (seeds 5 and 6, 2026-11-07): the plain mean-field fit

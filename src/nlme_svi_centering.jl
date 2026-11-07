@@ -603,7 +603,7 @@ end
 
 # A sparse global's site stands for its reader's whole term (src/nlme_svi_sites.jl),
 # which under centering reads the global through its cells' locations and scales
-# as well: a window's first state located at its boundary, say. At c = 1 that
+# as well: the sd of a `gr(g, by=b)` stratum few units belong to, say. At c = 1 that
 # chain term all but cancels the term's direct gradient there, so the site must
 # see both. Adds each batch unit's chain term, summed over its antithetic pair as
 # `gg` is, at its sparse entries. `chain` is the batch's weighted sum

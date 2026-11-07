@@ -43,9 +43,9 @@ instead of failing at run time.
 - Compatibility: depends on ReparametrizableDistributions 0.3 (git source).
 - Learned centering and reader sites (0.2.240) compose: a sparse global's
   site stands for its reader's whole centered term, so the reader's gradient
-  there includes the chain through its cells' locations and scales (a window's
-  first state located at its boundary, say). That chain term reaches every other
-  global through the batch's one pullback, as before.
+  there includes the chain through its cells' locations and scales (the sd of a
+  `gr(g, by=b)` stratum few units belong to, say). That chain term reaches every
+  other global through the batch's one pullback, as before.
 
 ## 0.2.240
 
