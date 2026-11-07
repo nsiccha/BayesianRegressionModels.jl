@@ -117,10 +117,14 @@ end
 
 # ── Sources: what a slice state, or a start, says about each coordinate ─────
 
+# A source's global factor is N(mean, diag(scale²) + ΒΒᵀ); `var` is its
+# diagonal, the marginal variances.
 struct _BRMSVISource
     keys::Vector{Any}
     mean::Vector{Float64}
     var::Vector{Float64}
+    scale::Vector{Float64}
+    Β::Matrix{Float64}
     informed::Vector{Bool}
     units::Dict{Any,NamedTuple}
 end
@@ -135,7 +139,8 @@ function _brm_svi_source(caller, state::BRMSVIState, which)
     var = exp.(2 .* q.ρ) .+ vec(sum(abs2, q.Β; dims=2))
     units = Dict{Any,NamedTuple}(label => (; keys=collect(Any, u.semantic), M=u.M,
         Λ=_brm_svi_saved_precision(u)) for (label, u) in state.units)
-    _BRMSVISource(collect(Any, q.keys), copy(q.μ), var, collect(q.informed), units)
+    _BRMSVISource(collect(Any, q.keys), copy(q.μ), var, exp.(q.ρ), Matrix{Float64}(q.Β),
+        collect(q.informed), units)
 end
 
 # A saved unit factor's precision as a dense matrix: a dense unit's own, or the
@@ -488,9 +493,10 @@ end
 # carried to the combined hyperparameters first: in z_c, slice s's diagonal
 # site (λ_s, h_s) is Cᵀ diag(λ_s) C, Cᵀ (h_s − λ_s d) with C = A_s⁻¹ A_c and
 # d = A_s⁻¹ δ_s. `sites[k]` lists draw k's (slice, mean, variance);
-# `carry(s)` is slice s's `(A_s, δ_s)`. Returns the marginal means and sds, the
-# dropped sites per draw and the spread (as for any global, in the carried
-# coordinates), or `nothing` when the product is not positive definite.
+# `carry(s)` is slice s's `(A_s, δ_s)`. Returns the means, the product's
+# precision, the dropped sites per draw and the spread (as for any global, in
+# the carried coordinates), or `nothing` when the product is not positive
+# definite.
 function _brm_svi_carry_shared(sites, p0, m0, A_c, carry)
     K = length(sites)
     slices = sort!(unique!([s for draw in sites for (s, _, _) in draw]))
@@ -509,10 +515,10 @@ function _brm_svi_carry_shared(sites, p0, m0, A_c, carry)
         (; s, P=C' * Diagonal(λ) * C, η=C' * (h - λ .* d))
     end
     P0, η0 = Diagonal(p0), p0 .* m0
-    F = cholesky(Symmetric(P0 + sum(c.P for c in carried)); check=false)
+    precision = Matrix(Symmetric(P0 + sum(c.P for c in carried)))
+    F = cholesky(Symmetric(precision); check=false)
     issuccess(F) || return nothing
     μ = F \ (η0 + sum(c.η for c in carried))
-    Σ = inv(F)
     spread, spread_slice = fill(NaN, K), zeros(Int, K)
     for k in 1:K
         length(sites[k]) >= 2 || continue
@@ -525,7 +531,76 @@ function _brm_svi_carry_shared(sites, p0, m0, A_c, carry)
                 (spread[k] = distance; spread_slice[k] = c.s)
         end
     end
-    (; μ, σ=sqrt.(diag(Σ)), clamped, spread, spread_slice)
+    (; μ, precision, clamped, spread, spread_slice)
+end
+
+# ── Joint sites over the globals ─────────────────────────────────────────────
+
+# The product of the slices' sites over the globals `ks` (positions into
+# `gkeys`), each slice's site joint over the coordinates its data reaches.
+# Slice s's global factor is N(m_s, Σ_s), Σ_s = diag(s²) + ΒΒᵀ; over its
+# reached coordinates R its site is
+#
+#     S_s = Σ_s[R, R]⁻¹ − P₀[R],    h_s = Σ_s[R, R]⁻¹ m_s[R] − P₀[R] m₀[R],
+#
+# with the prior's diagonal projection (m₀, P₀) counted once in the product
+# P = P₀ + Σ_s S_s. Where a slice's factor is wider than the prior in some
+# direction (its site has a negative eigenvalue there), that direction is
+# dropped, `S_s⁺ = V₊ Λ₊ V₊ᵀ`, `h_s⁺ = V₊ V₊ᵀ h_s`: the joint form of a dropped
+# global site, and the same drop for a diagonal Σ_s. Each dropped direction is
+# counted at the coordinate it weighs most. A global that a slice holds inside
+# one of its units enters through that unit factor's marginal, as a site of
+# its own. A ridge in Σ_s (a direction the slice's data leaves to the prior,
+# such as a level that two coefficients share) keeps a small site precision
+# along the ridge, so the product lands where the slices' ridges cross.
+function _brm_svi_joint_product(index, gkeys, ks, p0, m0)
+    n = length(ks)
+    row = Dict(gkeys[k] => r for (r, k) in enumerate(ks))
+    P, η = Matrix{Float64}(Diagonal(p0)), p0 .* m0
+    clamped = zeros(Int, n)
+    for source in index.sources
+        R, J = Int[], Int[]
+        for (j, key) in enumerate(source.keys)
+            source.informed[j] || continue
+            r = get(row, key, 0)
+            r == 0 || (push!(R, r); push!(J, j))
+        end
+        isempty(R) && continue
+        Β = source.Β[J, :]
+        if iszero(Β)
+            for (r, j) in zip(R, J)
+                λ = 1 / source.var[j] - p0[r]
+                λ < 0 && (clamped[r] += 1; continue)
+                P[r, r] += λ
+                η[r] += source.mean[j] / source.var[j] - p0[r] * m0[r]
+            end
+            continue
+        end
+        Ps = inv(cholesky(Symmetric(Diagonal(source.scale[J] .^ 2) + Β * Β')))
+        S = Symmetric(Ps - Diagonal(p0[R]))
+        h = Ps * source.mean[J] - p0[R] .* m0[R]
+        E = eigen(S)
+        keep = E.values .> 0
+        for i in findall(!, keep)
+            clamped[R[argmax(abs.(view(E.vectors, :, i)))]] += 1
+        end
+        V = E.vectors[:, keep]
+        P[R, R] .+= V * Diagonal(E.values[keep]) * V'
+        η[R] .+= V * (V' * h)
+    end
+    # Globals held inside a slice's units: their marginals, one site each.
+    for (r, k) in enumerate(ks)
+        _brm_svi_label_key(gkeys[k]) || continue
+        for (s, label, j) in get(index.units, gkeys[k], ())
+            v = _brm_svi_unit_covariance(index, s, label)[j, j]
+            1 / v - p0[r] < 0 && (clamped[r] += 1; continue)
+            P[r, r] += 1 / v - p0[r]
+            η[r] += index.sources[s].units[label].M[j] / v - p0[r] * m0[r]
+        end
+    end
+    F = cholesky(Symmetric(P); check=false)
+    issuccess(F) || return nothing
+    (; μ=F \ η, precision=Matrix(Symmetric(P)), clamped)
 end
 
 # ── The combined start ───────────────────────────────────────────────────────
@@ -534,8 +609,10 @@ end
     BRMSVIStart
 
 A factor-level start for [`brm_svi_fit`](@ref), from [`brm_svi_combine`](@ref):
-the means and log-standard deviations of the global coordinates it informs,
-keyed by semantic coordinate identity, the unit factors (mean and precision)
+the means and mean-field standard deviations of the global coordinates it
+informs, keyed by semantic coordinate identity, with the precision of each
+block of them that is correlated (`globals.correlated`, `positions` into
+`globals.keys` and a dense `precision`), the unit factors (mean and precision)
 keyed by unit label and semantic identity, the identity of the model it was
 combined for, and `receipt`, which says where every number came from.
 It holds no data and no compiled model, so it serializes like a
@@ -596,7 +673,7 @@ end
 # The product of the sites for every global coordinate of `t`, and the units'
 # factors, from the slices' states.
 function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshiro(1),
-        prior_pairs=16, prior_iterations=150)
+        prior_pairs=16, prior_iterations=150, joint_limit=4096)
     isempty(states) && throw(ArgumentError("$caller: no slices"))
     m = t.m
     m.view.unit_partition === :subjects || throw(ArgumentError(
@@ -632,10 +709,12 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
     for inst in shared, j in inst.positions
         later[global_index[j]] = true
     end
+    marginals = Dict{Int,Vector{Tuple{Int,Float64,Float64}}}()
     for (k, key) in enumerate(gkeys)
         later[k] && continue
         sites = _brm_svi_marginals(index, key)
         isempty(sites) && continue
+        marginals[k] = sites
         p0, m0 = prior.precision[k], prior.mean[k]
         P, η = p0, p0 * m0
         for (_, ms, vs) in sites
@@ -646,12 +725,36 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
         end
         informed[k] = length(sites)
         μ[k] = η / P
-        if length(sites) >= 2
-            distances = [abs(ms - μ[k]) / sqrt(vs) for (_, ms, vs) in sites]
-            spread[k], at = findmax(distances)
-            spread_slice[k] = first(sites[at])
-        end
         σ[k] = 1 / sqrt(P)
+    end
+    # Where a slice's global factor has a rank part, its sites are joint: the
+    # product above, coordinate by coordinate, is then replaced by the product
+    # of the joint sites, up to `joint_limit` coordinates. `correlated` lists
+    # the blocks of the start's precision that are not diagonal.
+    correlated = NamedTuple[]
+    joined = sort!(collect(keys(marginals)))
+    joint = if !any(source -> !iszero(source.Β), sources) || isempty(joined)
+        :diagonal
+    elseif length(joined) > joint_limit
+        :limit
+    else
+        result = _brm_svi_joint_product(index, gkeys, joined, prior.precision[joined],
+            prior.mean[joined])
+        if result === nothing
+            :indefinite
+        else
+            μ[joined] .= result.μ
+            σ[joined] .= 1 ./ sqrt.(diag(result.precision))
+            clamped[joined] .= result.clamped
+            push!(correlated, (; globals=joined, precision=result.precision))
+            :joint
+        end
+    end
+    for (k, sites) in marginals
+        length(sites) >= 2 || continue
+        distances = [abs(ms - μ[k]) / sqrt(vs) for (_, ms, vs) in sites]
+        spread[k], at = findmax(distances)
+        spread_slice[k] = first(sites[at])
     end
     median = _brm_svi_start(m, nothing, nothing)
     assembled = Dict{Int,Any}()
@@ -713,11 +816,16 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
                 end
                 μ[k], σ[k] = η / P, 1 / sqrt(P)
             else
-                μ[k], σ[k] = result.μ[r], result.σ[r]
+                μ[k], σ[k] = result.μ[r], 1 / sqrt(result.precision[r, r])
                 clamped[k] = result.clamped[r]
                 spread[k], spread_slice[k] = result.spread[r], result.spread_slice[r]
                 carried_globals[k] = true
             end
+        end
+        if result !== nothing && !isdiag(result.precision)
+            informing = findall(!isempty, sites)
+            push!(correlated, (; globals=ks[informing],
+                precision=result.precision[informing, informing]))
         end
     end
     # Each unit's draws carried from its slice's hyperparameters.
@@ -766,28 +874,66 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
         units[label] = (; keys=ukeys[sourced], M=M[sourced], Λ=Λ[sourced, sourced])
     end
     kept = findall(!isnan, μ)
+    position = Dict(k => p for (p, k) in enumerate(kept))
     names = m.view.coordinates[t.globals]
     receipt = (; slices=length(states),
         globals=(; coordinates=names, informed, clamped, spread, spread_slice,
-            carried=collect(carried_globals),
+            carried=collect(carried_globals), joint,
             prior_mean=prior.mean, prior_sd=[p > 0 ? 1 / sqrt(p) : Inf for p in prior.precision]),
         units=(; copied, partial, cold, carried=carried_units, dropped, mapped),
-        prior=(; pairs=prior.pairs, iterations=prior.iterations, flat=names[prior.flat]))
-    BRMSVIStart(1, _brm_svi_source_id(m.backend), deepcopy(brm_fitted_state(m.backend)),
+        prior=(; pairs=prior.pairs, iterations=prior.iterations, flat=names[prior.flat]),
+        slice_rank=[size(source.Β, 2) for source in sources])
+    BRMSVIStart(2, _brm_svi_source_id(m.backend), deepcopy(brm_fitted_state(m.backend)),
         m.view.group, Tuple(keys(m.view.nested_groups)), m.view.shared_groups,
-        (; keys=gkeys[kept], μ=μ[kept], σ=σ[kept]), units, receipt)
+        (; keys=gkeys[kept], μ=μ[kept], σ=σ[kept],
+            correlated=[(; positions=[position[k] for k in block.globals], block.precision)
+                for block in correlated]),
+        units, receipt)
 end
 
-# The start as a source: its globals informed, its units as they are.
+# The start's global factor projected onto a diagonal-plus-rank-`rank` one, for
+# the globals at `rows` of the fit (`rows[p]` for the start's global p, 0 where
+# the fit has no such global). The diagonal is the conditional variance
+# 1/P_kk of the start's precision P: the mean-field factor closest to it (in
+# KL(q‖p)), and the start's σ. The rank part follows the directions where P is
+# widest relative to that diagonal: with D = diag(1/P_kk) and the eigenpairs
+# (ω, u) of D^{1/2} P D^{1/2}, each ω < 1 is a direction wider than the
+# diagonal says, and Β takes the `rank` smallest, D^{1/2} u √(1/ω − 1), which
+# for a fixed diagonal minimizes KL(q‖p) column by column. Blocks are
+# independent, so a column lives in one block.
+function _brm_svi_start_rank(start, rows, rank)
+    candidates = Tuple{Float64,Vector{Int},Vector{Float64}}[]
+    for block in get(start.globals, :correlated, ())
+        found = findall(p -> rows[p] != 0, block.positions)
+        length(found) >= 2 || continue
+        P = block.precision[found, found]
+        d = 1 ./ sqrt.(diag(P))
+        E = eigen(Symmetric(d .* P .* d'))
+        for i in eachindex(E.values)
+            ω = E.values[i]
+            0 < ω < 1 - sqrt(eps()) || continue
+            push!(candidates, (ω, rows[block.positions[found]],
+                d .* E.vectors[:, i] .* sqrt(1 / ω - 1)))
+        end
+    end
+    sort!(candidates; by=first)
+    candidates[1:min(rank, length(candidates))]
+end
+
+# The start as a source: its globals informed, with their mean-field scales,
+# its units as they are.
 _brm_svi_source(start::BRMSVIStart) = _BRMSVISource(collect(Any, start.globals.keys),
-    copy(start.globals.μ), start.globals.σ .^ 2, fill(true, length(start.globals.keys)),
+    copy(start.globals.μ), start.globals.σ .^ 2, copy(start.globals.σ),
+    zeros(length(start.globals.keys), 0), fill(true, length(start.globals.keys)),
     start.units)
 
 # q for `t` from a factor-level start: each global's mean and scale from the
 # start's factor for its key, each unit's factor from the start's factors for
 # its keys; everything the start does not hold keeps the ordinary default (the
-# prior-median point, `global_scale`, `unit_scale`). The global rank part
-# starts at zero, as in a cold fit.
+# prior-median point, `global_scale`, `unit_scale`). A `LowRankGlobal` fit's
+# rank part takes the start's widest correlated directions
+# (`_brm_svi_start_rank`); without correlated blocks it starts at zero, as in
+# a cold fit.
 function _brm_svi_factor_initialize(t, start, family; inits, global_scale, unit_scale,
         unit_dense_limit=64, unit_rank=8, caller="brm_svi_fit")
     inits === nothing || throw(ArgumentError(
@@ -804,13 +950,20 @@ function _brm_svi_factor_initialize(t, start, family; inits, global_scale, unit_
     index = _brm_svi_source_index([_brm_svi_source(combined)])
     coordinate_keys = _brm_svi_coordinate_keys(m)
     started = 0
+    rows = zeros(Int, length(combined.globals.keys))
     for (k, key) in enumerate(coordinate_keys[t.globals])
         sites = _brm_svi_marginals(index, key)
         isempty(sites) && continue
         _, μk, vk = only(sites)
         q.μ[k] = μk
         q.ρ[k] = log(vk) / 2
+        for (_, p) in get(index.globals, key, ())
+            rows[p] = k
+        end
         started += 1
+    end
+    for (c, (_, R, b)) in enumerate(_brm_svi_start_rank(combined, rows, size(q.Β, 2)))
+        q.Β[R, c] .= b
     end
     units_started = 0
     for (i, block) in enumerate(t.units)
@@ -838,10 +991,10 @@ const _BRM_SVI_COMBINE_PHASES = (lower="Lower to ReactiveKernels", prepare="Prep
 
 """
     brm_svi_combine(x, slices; rng=Random.Xoshiro(1), prior_pairs=16,
-        prior_iterations=150, ad_backend=nothing, shared_point=nothing,
-        subject_group=nothing, nested_groups=NamedTuple(), shared_groups=(),
-        unit_partition=nothing, global_coordinates=nothing, progress=nothing)
-        -> BRMSVIStart
+        prior_iterations=150, joint_limit=4096, ad_backend=nothing,
+        shared_point=nothing, subject_group=nothing, nested_groups=NamedTuple(),
+        shared_groups=(), unit_partition=nothing, global_coordinates=nothing,
+        progress=nothing) -> BRMSVIStart
 
 Combine [`brm_svi_fit`](@ref) fits of one declaration on slices of the data
 into a factor-level start for the fit of `x`, the same declaration on all of
@@ -872,19 +1025,32 @@ for example). A unit's packed-name coordinate matches only that unit's factor
 in a slice, since an entry of a vector indexed by the units sits at another
 position in another binding; where the names differ it keeps the default.
 
-- **Global coordinates** combine as a product of Gaussian sites, coordinate by
-  coordinate in unconstrained coordinates, `P = P₀ + Σ_s (P_s − P₀)` and
-  `P m = P₀ m₀ + Σ_s (P_s m_s − P₀ m₀)`, with the prior counted once. `(m₀,
-  P₀)` is the diagonal Gaussian projection of the global prior (the factor a
-  fit on no data reaches, from `prior_iterations` natural-gradient steps on
+- **Global coordinates** combine as a product of Gaussian sites in
+  unconstrained coordinates, `P = P₀ + Σ_s (P_s − P₀)` and `P m = P₀ m₀ +
+  Σ_s (P_s m_s − P₀ m₀)`, with the prior counted once. `(m₀, P₀)` is the
+  diagonal Gaussian projection of the global prior (the factor a fit on no
+  data reaches, from `prior_iterations` natural-gradient steps on
   `prior_pairs` antithetic draws of `rng`); a flat prior has `P₀ = 0`. A slice
   contributes a site only where its data reaches the coordinate (an
   observation reads it, or a prior of a reached coordinate does); a slice
   holding a global inside one of its units contributes that unit factor's
-  marginal. Each slice factor enters through its marginal variance, so a
-  `LowRankGlobal` slice's rank part enters the diagonal, and the start's rank
-  part is zero. A site whose precision would be negative (the slice's factor
-  wider than the prior's projection) is dropped and counted.
+  marginal. `P_s` is the inverse of the slice factor's covariance over the
+  coordinates it reaches, so a `LowRankGlobal` slice's rank part enters as
+  correlation: a ridge in a slice (a direction its data leaves to the prior,
+  such as a level two coefficients share) stays wide in its site, and the
+  product lands where the slices' ridges cross, which a coordinate-by-coordinate
+  product cannot find. `MeanFieldGlobal` slices hold no correlation, so their
+  sites are diagonal; fit the slices with `LowRankGlobal(r)`, `r` at least the
+  number of such directions, where they disagree. A site's negative part (the
+  slice's factor wider than the prior's projection in some direction) is
+  dropped and counted. The joint product is dense in the informed globals
+  (other than shared levels' draws); above `joint_limit` of them the globals
+  combine coordinate by coordinate through their marginal variances. The
+  start keeps the product's precision (`globals.correlated`) where it is not
+  diagonal; its `σ` is the mean-field part, `1/√P_kk`. A `LowRankGlobal(r)`
+  fit from it starts its rank part on the `r` directions in which that
+  precision is widest relative to `σ`, and `MeanFieldGlobal` fits start at
+  `σ`.
 - **Draws are carried to the combined hyperparameters.** A random-effect draw
   `z` is standardized: its level's effect is `A z`, `A = √w diag(τ) L`, and a
   margin's total adds the population coefficients its block absorbs: those
@@ -899,9 +1065,10 @@ position in another binding; where the names differ it keeps the default.
   scales, correlation and coefficients, `A_c` at the combined ones, `δ` the
   change of the absorbed coefficients times their design), which keeps the
   effects and totals. A shared level that is a global coordinate has its
-  sites carried before they multiply, per level, keeping the marginal of each
-  draw; one that only a single unit reads is that unit's coordinate and is
-  carried with it.
+  sites (each draw's marginal) carried before they multiply, per level, after
+  the other globals; the level's product precision joins
+  `globals.correlated` when the carry correlates its draws. One that only a
+  single unit reads is that unit's coordinate and is carried with it.
 - **Units** take their slice's factor (mean and precision, or the marginal of
   the coordinates the slice holds), carried as a site: the factor is the
   draws' `N(0, I)` prior times the site of the unit's data, and the site moves
@@ -930,18 +1097,23 @@ many of those were dropped; `spread`, the largest distance of a slice's mean
 from the combined mean in that slice's standard deviations (`NaN` below two
 sites; for a carried draw, both in the combined hyperparameters), with
 `spread_slice` naming that slice, so a large value marks slices that
-disagree, which a product cannot reconcile; `carried`, whether its sites were
-carried (a shared level's draw); and the prior projection's `prior_mean` and
-`prior_sd` (`Inf` where flat). `receipt.units` counts the units `copied`
+disagree on that coordinate's marginal (along a ridge they may still agree
+jointly); `carried`, whether its sites were carried (a shared level's draw);
+`joint`, how the globals combined (`:joint`, `:diagonal` when no slice has a
+rank part, `:limit` above `joint_limit`, `:indefinite` when the joint product
+was not positive definite and the coordinate-by-coordinate one was used); and
+the prior projection's `prior_mean` and `prior_sd` (`Inf` where flat).
+`clamped` counts dropped site directions, each at the coordinate it weighs
+most. `receipt.slice_rank` lists each slice's global rank. `receipt.units` counts the units `copied`
 whole and `carried` (some draws carried), and lists the `partial` and `cold`
 (in no slice) labels, the `dropped` ones (a negative site part dropped) and
 the `mapped` ones (carried as a change of variables); `receipt.prior` records
 the projection's draws and its `flat` coordinates.
 """
 function brm_svi_combine(x, slices; rng=Random.Xoshiro(1), prior_pairs=16,
-        prior_iterations=150, progress=nothing, ad_backend=nothing, shared_point=nothing,
-        subject_group=nothing, nested_groups=NamedTuple(), shared_groups=(),
-        unit_partition=nothing, global_coordinates=nothing)
+        prior_iterations=150, joint_limit=4096, progress=nothing, ad_backend=nothing,
+        shared_point=nothing, subject_group=nothing, nested_groups=NamedTuple(),
+        shared_groups=(), unit_partition=nothing, global_coordinates=nothing)
     caller = "brm_svi_combine"
     slices isa Union{AbstractVector,Tuple} || throw(ArgumentError(
         "$caller: pass the slices' fits or states as a vector"))
@@ -949,6 +1121,8 @@ function brm_svi_combine(x, slices; rng=Random.Xoshiro(1), prior_pairs=16,
     prior_pairs isa Integer && prior_pairs >= 1 && prior_iterations isa Integer &&
         prior_iterations >= 2 || throw(ArgumentError(
         "$caller: prior_pairs must be positive and prior_iterations at least 2"))
+    joint_limit isa Integer && joint_limit >= 0 || throw(ArgumentError(
+        "$caller: joint_limit must be a nonnegative integer"))
     _brm_with_progress(progress; description="BRM SVI combine") do node
         _brm_with_phases(node, _BRM_SVI_COMBINE_PHASES) do phases
             lowered = _brm_svi_lowered(x, phases.lower; subject_group, nested_groups,
@@ -961,7 +1135,7 @@ function brm_svi_combine(x, slices; rng=Random.Xoshiro(1), prior_pairs=16,
             end
             start = _brm_run_phase(phases.combine) do _
                 _brm_svi_combine(prepared.target, states; caller, rng, prior_pairs,
-                    prior_iterations)
+                    prior_iterations, joint_limit)
             end
             # As after a fit: a call that throws keeps no target.
             _brm_svi_checkin!(m, prepared)
