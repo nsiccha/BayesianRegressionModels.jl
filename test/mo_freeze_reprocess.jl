@@ -43,10 +43,12 @@ to  = reprocess(fit, future; freeze_constants = true, resample_groups = [:subjec
 @testset "mo freeze subset — monotonic dimension is the FITTED one" begin
     fit_code = StanBlocks.stan_code(fit.model)
     to_code  = StanBlocks.stan_code(to.model)
-    # Fitted 3-level mo => increment simplex[2]; the frozen target keeps it.
-    @test occursin("simplex[2]", fit_code)
-    @test occursin("simplex[2]", to_code)
-    @test !occursin("simplex[1]", to_code)
+    # Fitted 3-level mo => two increments; the frozen target keeps them. The
+    # count is the concentration datum's length, not program text (user
+    # principle `0ikeidi`).
+    @test fit.data[:mo_op_diet_alpha] == ones(2)
+    @test to.data[:mo_op_diet_alpha] == ones(2)
+    @test !occursin(r"simplex\[\d", fit_code) && !occursin(r"simplex\[\d", to_code)
     # Frozen idx maps the subset through the fitted code, so it still holds a 3.
     @test to.data[:op_diet_idx] == [1, 3, 1, 3, 1, 3, 1, 3]
     # Target stays stanc-valid.
@@ -55,7 +57,7 @@ to  = reprocess(fit, future; freeze_constants = true, resample_groups = [:subjec
     # frame (fresh-fit semantics), so the two-level subset shrinks to simplex[1].
     to_fresh = reprocess(fit, future; freeze_constants = false,
                          resample_groups = [:subject])
-    @test occursin("simplex[1]", StanBlocks.stan_code(to_fresh.model))
+    @test to_fresh.data[:mo_op_diet_alpha] == ones(1)
 end
 
 if PRED_RUNTIME

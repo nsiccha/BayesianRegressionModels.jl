@@ -1332,6 +1332,22 @@ the `resample_groups` route. It also checks the ambiguity message for an
 unqualified hyper-predictor. `BRM_PRED_RUNTIME=0` skips the compiled-model
 sets.
 
+`nlme_svi_sampling.jl` checks work-weighted batches by exact enumeration of
+density and gradient expectations, including repeated draws, the alias
+distribution, positive probabilities and bounded batch allocations.
+`nlme_svi_weighted_iteration.jl` exercises the production optimizer against
+an analytic target, including duplicate evaluation counts, reported visits,
+and lazy local averages against averages of every iterate. It also checks that
+a non-finite unit stops dense and structured factors under uniform and work
+batches before any update, with an unpoisoned control run that does update.
+`nlme_svi_workspace.jl` checks compact local layouts against independent dense
+gather/scatter arithmetic and storage independent of the global dimension.
+These three arithmetic scripts need only Julia's standard libraries.
+`nlme_svi_units.jl` checks the bounded local Gaussian operators, exact
+reparameterized gradients, linear allocation and checkpoint growth at fixed
+rank, covariance preservation under coordinate reordering, and an independent
+correlated Gaussian fitting oracle. It also needs only standard libraries.
+
 `nlme_svi.jl` checks minibatch stochastic variational inference
 (`brm_svi_fit`). The minibatch split of the RK target is checked first: the
 global prior and Jacobian term plus every subject's cell term equal the full
@@ -1358,6 +1374,9 @@ tighter one (the control). `_brm_svi_window`'s `spread / W` is the variance of i
 trimmed mean on Gaussian and skewed draws, and one draw moves neither. The stopping
 test neither stops a rising fit nor hides a stalled one on an extreme draw, where a
 test of means and variances does stop the rising fit.
+A structured local factor's own Adam (above `unit_dense_limit`) is bounded the
+same way, and a work-weighted fit (`unit_sampling=:work`), whose bound widens by
+the batch's largest unit weight, keeps its globals moving on the same model.
 
 `nlme_svi_authored_factors.jl` checks the public RKPPL authored-factor API
 and production SVI ownership. On a
@@ -1390,6 +1409,13 @@ The dormant scalar/vector branch's ordinary Reverse needs Enzyme dogfood from
 `cecb571a`); earlier pins raise `IllegalTypeAnalysisException` there.
 `nlme_svi_ownership_algebra.jl` isolates atomic-block and directed-prior
 closure, including fixed coordinates and factors that own no coordinates.
+
+`nlme_svi_atomic_partition.jl` checks a two-margin correlated soil hierarchy
+with no trajectory parent. Its local atomic Cholesky parameter has one
+packed coordinate but a two-by-two constrained shape. Both local ownership
+and explicit global promotion must preserve the scientific grouping and
+the full native density, Reverse gradient and authored-factor accounting.
+Run this standalone script in the test environment.
 
 `nlme_svi_running.jl` checks a prepared model's reuse of its target and workers
 across calls (`diagnostics.target`), and `snapshot` / `snapshot_every` /
@@ -2803,6 +2829,20 @@ The public-planner matrix is widths `(64,256)` crossed with cells `(100,400)`.
 These bounded fixtures do not establish full Atlas runtime, memory or fitting
 speed. Sparse factorization can still incur fill-in, sampled targets can be
 large, and raising `max_cell_width` permits genuinely dense local blocks.
+
+### Connected SVI separators and weighted continuation
+
+- `julia --startup-file=no test/nlme_svi_separators.jl`: bounded deterministic
+  hub/chain policy, explicit overrides and atomic promotion budgets.
+- `julia --project=test test/nlme_svi_separator_native.jl`: actual hub/chain
+  repartition, full-density/native Reverse-gradient equality at nonzero points,
+  automatic work sampling, optimizer continuation and structured streaming carry.
+  A prepared model reuses its SVI target only under the same separator policy and
+  budgets, a resume finds it again, and snapshots name the inference units.
+- `julia --project=test --threads=2 test/nlme_svi_weighted_resume.jl`: exact
+  trajectories for uniform/work batches and dense/structured local factors,
+  lazy polishing, thread-count changes and a fresh-process checkpoint resume.
+
 ## Reusable model view
 
 `julia --project=test test/model_view.jl` checks declaration roles, scalar/vector/

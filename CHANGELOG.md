@@ -12,25 +12,109 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.233
+
+- Changed: a monotonic term's level count is an input of the program on both
+  backends (user principle `0ikeidi`). `mo(x)` and `mo1(x)` wrote their fitted
+  levels and the increment simplex's Dirichlet concentration into the program
+  (`brm_prepared_indices(x, [1, 2, 3])`, `Dirichlet([1.0, 1.0])`,
+  `simplex[2]`), so a column with another number of levels was another program.
+  `RKBRMI` now reads them from generated inputs, as a factor's levels are; `SBBRMI`
+  reads the concentration as Stan data named after the term (`mo_x_alpha`) and sizes
+  the simplex by it. Densities are unchanged.
+- Changed: on `SBBRMI`, an ordinal response's threshold count is Stan data,
+  `<response>_thresholds_length` (`<response>_cutpoints_length` for
+  `OrderedLogistic`), not a literal `ordered[K-1]`.
+- Unchanged: `RKBRMI` still writes an ordinal response's threshold count into the
+  program. RKPPL's ordinal lowering does not yet take a bound name for that size
+  (ReactiveKernels snag `rkppl-threshold-932a2e27`).
+- A fit or checkpoint of a model whose program text changes here is refused by a
+  frozen replay and needs a fresh fit.
+
+## 0.2.232
+
+- Fixed: on `SBBRMI`, `brm_descriptor` refused a predictor that repeats one
+  structured term (`a ~ 0 + mo(g) + mo(g)`, `mu ~ 1 + hsgp(t) + hsgp(t)`) or
+  carries the same term both as a summand and inside a random effect
+  (`a ~ 0 + mo(g) + (mo(g) | subject)`), with "term `mo_g` on logical predictor
+  `a` has 2 logical output owners". Structured carriers (`mo`, `mo1`, `s`,
+  `gp`, `hsgp`, `gmrf`) record their predictor and term (since 0.2.103), and
+  those two fields did not tell such carriers apart. Each carrier now also records
+  whether it is the predictor's own summand or a column inside a random-effect
+  block, and which repeat of the term it is, so every formula occurrence owns
+  exactly its own carrier. The label of a repeated term still names no single
+  carrier (`brm_term_coordinates(d, :a, names; term=:mo_g, ...)` refuses with
+  "occurs 2 times"), and beside a random effect `term=:mo_g` names the
+  population term's simplex. Emitted programs are unchanged. Snag
+  `brm-descriptor-r-2331ddd1`.
+
 ## 0.2.231
 
-- **Breaking:** BRM requires ReactiveKernels 0.1.93 and ReactiveKernelsPPL 0.1.105
-  (it required 0.1.84 and 0.1.100), so every `RKBRMI` user now gets a named refusal
-  of a fixed per-row `zi` or Student-t `nu` outside its support: `zi data z must lie
-  in [0, 1]` or `nu data nuc must be finite positive numerics`. So does a named or
-  computed value (`zz = z .- 0.1`), an offsets-only scale (`sd_obs = w .- 3`) and one
-  `Inf` row in a `nu` column. On earlier versions these failed later, as a `-Inf`
-  density or an internal error, and the `Inf` row gave a finite density. What to
-  change: move an environment pinned to an earlier ReactiveKernels, and correct a
-  model that bound such a value, which now fails at binding.
-- `brm_nlme_loglikelihood_and_gradient` on a model where one unit has no cells of an
-  observation group needs Enzyme dogfood `cecb571a` or later on these
-  ReactiveKernels versions. Earlier Enzyme raises `EnzymeRuntimeActivityError`
-  there. Dogfood commits do not change Enzyme's version, so no compat entry can
-  require this.
-- Test pins: ReactiveKernels `4640767b` (0.1.96 / RKPPL 0.1.107) and Enzyme dogfood
-  `cecb571a` (libEnzyme `7f23cb72`), which contains the previous pin `74ce4afc`.
-
+- Fixed: partition declarations for wholly unit-owned compressed transforms
+  use the constrained first-axis label count. A local 2×2 Cholesky factor
+  with one packed coordinate no longer fails the BRM ownership adapter.
+- Compatibility: require ReactiveKernels 0.1.94 / ReactiveKernelsPPL 0.1.105.
+  A tuple plate's statements run only at rows that read their entries, so
+  automatic connected units read no other unit's coordinates. Selected-unit
+  gradients and shared-row storage stay compact: warm unit-call allocations
+  no longer grow with unrelated units in the fixed-footprint scaling checks.
+  From ReactiveKernels 0.1.92, native Reverse on a unit problem can raise
+  `EnzymeRuntimeActivityError` on Enzyme dogfood before `cecb571a` (libEnzyme
+  `7f23cb72`); the test bootstrap pins that commit. Runtime activity is not needed.
+- Explicitly connected SVI defaults to bounded automatic separator selection
+  and work-weighted unit batches. `separator=:none`, `global_coordinates`,
+  `max_unit_coordinates`, `max_unit_work` and `max_promoted_coordinates`
+  control promotion. The final partition is rebuilt from structural supports;
+  scientific subject identity stays intact. Diagnostics report actual unit
+  ownership, promotion reasons and unmet budgets. All authored density factors
+  remain exact; the global/local split changes the variational approximation.
+- Streaming format 3 retains final inference-unit membership, separator controls
+  and promoted global identities alongside dense or structured local factors.
+  Later windows retain the saved global set without spending another automatic
+  promotion allowance; an unmet structural budget is reported as `:carried`.
+  Changed retained membership or global scientific identity is refused.
+- `brm_svi_fit` accepts `unit_sampling=:work` for positive work-weighted
+  sampling with replacement and inverse-probability objective/global-gradient
+  weights. Repeated draws share one local update. Diagnostics distinguish
+  draws, visits, selection probabilities and actual gradient calls;
+  `:uniform` retains distinct-unit batches and remains the subject-mode default.
+- **Breaking:** local SVI factors larger than 64 coordinates now use a
+  diagonal-plus-low-rank covariance instead of dense precision matrices.
+  `unit_dense_limit` (0:256) and `unit_rank` (0:32, default 8) control the
+  approximation. Small dense units retain their natural-gradient updates;
+  larger units use posterior-scaled path-gradient Adam updates. For those
+  units, diagnostic `q.Λ` and `q.U` are matrix operators and `q.U` is no
+  longer triangular: use multiplication rather than triangular indexing or
+  solves. Materializing an operator still requires a dense matrix.
+- Format-3 SVI checkpoints combine connected membership with structured local factors without optimizer
+  moments. Resume preserves their distribution and family under coordinate
+  reordering, accepts format-1 checkpoints, and retains carried dense factors.
+- SVI targets reuse one global-plus-local workspace per worker and store only local
+  ordering metadata per unit. Cached entropy and lazy local polishing avoid
+  visiting all local factors on every iteration. The underlying cell plan
+  still determines structural-selection storage; full returned draws still
+  scale with the complete parameter dimension.
+- Weighted batches, visit counts, cached entropy and lazy local polishing now
+  participate in optimizer checkpoints, preserving continuation across thread
+  counts. Structured local factors retain their Adam state on same-target resume.
+- `BRMSVINonfiniteError` (0.2.209) also covers structured local factors and
+  work-weighted batches: the iteration is named before it changes `q` or the
+  optimizer, whichever local family or sampler the unit uses.
+- The 0.2.223 gradient bound covers work-weighted batches and structured local
+  factors. Under `unit_sampling=:work` it is `10 √w` times a global's running rms,
+  with `w` the batch's largest unit weight (`N / B` for a uniform batch, as
+  before), because a unit drawn with chance π carries weight about 1 / π. A local
+  factor above `unit_dense_limit` steps with its own Adam only when its unit is
+  drawn, so its gradient is limited to `10` times its own running rms.
+- A prepared model's retained SVI target (0.2.226) is keyed by the separator policy
+  and budgets as well as the requested globals and streaming carry, so a connected
+  fit never reuses a partition built under another policy. Snapshots report a
+  connected fit's inference units in `levels`, as `diagnostics.unit_levels` does.
+  A snapshot's `q.Λ` and `q.U` are plain data: a dense unit's matrix, or a
+  structured unit's `(; family=:diagonal_lowrank, ρ, Β)`, so a saved snapshot
+  still loads without BRM.
+  `diagnostics.unit_gradient_calls` counts actual evaluations: a unit drawn twice
+  in one work-weighted batch is evaluated once.
 ## 0.2.230
 
 - Fixed: on `RKBRMI`, a `gmrf((east, north), time, channel)` field without `cor`

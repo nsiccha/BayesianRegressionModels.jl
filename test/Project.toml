@@ -366,6 +366,8 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 0ee20c70 (PPL 0.1.93): authored local and reusable-definition docs;
 # includes native row-dependent/shared mixture probabilities (0.1.90).
 # Also contains the recoverable adaptive pilot lifecycle introduced in RKPPL 0.1.91.
+# f8ab474a (RK 0.1.84 / PPL 0.1.97) preserves absent-observation
+# demand through scalar helpers and owned covariance blocks.
 # c1f175d7 (RK 0.1.84 / PPL 0.1.96): batched authored queries share
 # binding validation and compact preparation metadata; event inventory borrows exemplars.
 # a9a7e9a2 (RKPPL 0.1.97): bound-data LKJ dimensions in reusable definitions.
@@ -377,8 +379,10 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # Use the SHA: those versions alone do not identify the footprint fix.
 # cb3b33bd (RKPPL 0.1.100): opt-in independent adaptive grid pilots
 # (`tune_smc(...; grid_start=:independent)`) and `resume_smc(...; nthreads)`.
-# 4640767b (RK 0.1.96 / RKPPL 0.1.107, RK main) contains 5cdc9ae7 (RK 0.1.93 /
-# RKPPL 0.1.105), the named refusal of a fixed per-row `zi` or Student-t `nu`
-# outside its support, which BRM's compat floors require. It needs Enzyme
-# cecb571a (test/setup_env.jl) on a unit with no cells of one observation group.
-rev = "4640767b8d0577fa3c6fbe98f41a0d0e72a67943"
+# 7dced1e5 (RK 0.1.89 / RKPPL 0.1.102) keeps selected-unit gradients
+# and shared-row storage compact as unrelated units are added.
+# 28d70c34 (RK 0.1.94 / RKPPL 0.1.105) runs a tuple plate's statements only at
+# rows that read their entries, so automatic connected SVI units keep their own
+# coordinates. b9342dca (RK 0.1.96 / RKPPL 0.1.106) is the revision measured with
+# Enzyme cecb571a, which repairs the static Reverse failure its guards exposed.
+rev = "b9342dcae0cf19a6f0664ebb953ea33ed38a85b9"

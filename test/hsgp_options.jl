@@ -512,3 +512,25 @@ end
         y ~ Normal(mu, 1)
     end), df)
 end
+
+@testset "identical same-axis terms each own their own carrier" begin
+    # Snag brm-descriptor-r-2331ddd1: two identical `hsgp(t)` terms on one
+    # predictor recorded the same predictor and term key, so each resolved to
+    # both carriers and `brm_descriptor` refused. Each occurrence owns the
+    # carrier emitted for it; the shared label stays ambiguous.
+    twice = options_model(@brm(begin
+        mu ~ 1 + hsgp(t; k=4) + hsgp(t; k=4)
+        y ~ Normal(mu, 1)
+    end), options_df())
+    code = BRM.stan_code(twice)
+    @test occursin("hsgp_t_rho_iso", code)
+    @test occursin("hsgp_mu_t_rho_iso", code)
+    d = brm_descriptor(twice)
+    byname = Dict(o.name => o for o in d.outputs)
+    for carrier in (:hsgp_t_rho_iso, :hsgp_mu_t_rho_iso)
+        @test byname[carrier].predictors == (:mu,)
+        @test byname[carrier].term === :hsgp_t
+        @test byname[carrier].component === :length_scale
+    end
+    @test_throws "occurs 2 times" brm_length_scale_floor(d, :mu; term=:hsgp_t)
+end
