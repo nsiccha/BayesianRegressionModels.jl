@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.232
+
+- Fixed: on `SBBRMI`, `brm_descriptor` refused a predictor that repeats one
+  structured term (`a ~ 0 + mo(g) + mo(g)`, `mu ~ 1 + hsgp(t) + hsgp(t)`) or
+  carries the same term both as a summand and inside a random effect
+  (`a ~ 0 + mo(g) + (mo(g) | subject)`), with "term `mo_g` on logical predictor
+  `a` has 2 logical output owners". Structured carriers (`mo`, `mo1`, `s`,
+  `gp`, `hsgp`, `gmrf`) record their predictor and term (since 0.2.103), and
+  those two fields did not tell such carriers apart. Each carrier now also records
+  whether it is the predictor's own summand or a column inside a random-effect
+  block, and which repeat of the term it is, so every formula occurrence owns
+  exactly its own carrier. The label of a repeated term still names no single
+  carrier (`brm_term_coordinates(d, :a, names; term=:mo_g, ...)` refuses with
+  "occurs 2 times"), and beside a random effect `term=:mo_g` names the
+  population term's simplex. Emitted programs are unchanged. Snag
+  `brm-descriptor-r-2331ddd1`.
+
 ## 0.2.231
 
 - Fixed: partition declarations for wholly unit-owned compressed transforms

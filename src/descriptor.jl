@@ -2742,14 +2742,20 @@ function _brm_term_coordinate_entries(brmi, logical::Symbol)
     link = only(predictors).link_lhs_fn
     target = _sb_lp_emitted_name(logical, link)
     entries = NamedTuple[]
+    # `occurrence` ranks the term among the predictor's terms of the same full
+    # key in formula order (the address map keeps that order within a key), the
+    # rank its carrier records as `term_occurrence` (`_brm_term_owners`).
+    entry(label, t) = (; term=label, value=t, link,
+        occurrence=1 + count(e -> _brm_term_full_key(e.value) ===
+                                  _brm_term_full_key(t), entries))
     for terms in values(_sb_term_address_map(brmi, logical)), t in terms
-        push!(entries, (; term=_brm_term_label(getf(t), t, target), value=t, link))
+        push!(entries, entry(_brm_term_label(getf(t), t, target), t))
     end
     # `ar` has no configurable prior, so the prior address map omits it; its
     # carriers are the predictor's all the same.
     for t in _brm_additive_terms(last(getargs(linear_predictor_op(brmi, logical), 2)))
         t isa ExprColumn && getf(t) === ar || continue
-        push!(entries, (; term=_brm_term_label(ar, t, target), value=t, link))
+        push!(entries, entry(_brm_term_label(ar, t, target), t))
     end
     entries
 end
@@ -2955,11 +2961,21 @@ end
 function _brm_term_owners(d, logical::Symbol, entry)
     emitted_lp = _sb_lp_emitted_name(logical, entry.link)
     # Repeated axes can belong to distinct qualified terms. The emitter
-    # records the exact source key beside the carrier it actually chose.
-    recorded = Set(k for (k, b) in d.plan.bindings if
-        get(b, :term_predictor, nothing) === emitted_lp &&
-        get(b, :term_key, nothing) === _brm_term_full_key(entry.value))
-    if !isempty(recorded)
+    # records the exact source key beside the carrier it actually chose, and
+    # which occurrence of that key it carries (`_sb_record_term_binding!`): the
+    # entry's own rank among the predictor's population terms, never a
+    # repeat's carrier (`a ~ mo(g) + mo(g)`) or the same term's column inside a
+    # random-effect block (`a ~ mo(g) + (mo(g) | s)`). A binding recorded
+    # before those fields existed (a replayed artifact) matches as it did then.
+    # Once the term recorded anything, its owners come from the records alone.
+    key = _brm_term_full_key(entry.value)
+    records = [(k, b) for (k, b) in d.plan.bindings if
+               get(b, :term_predictor, nothing) === emitted_lp &&
+               get(b, :term_key, nothing) === key]
+    if !isempty(records)
+        recorded = Set(k for (k, b) in records if
+            get(b, :term_scope, :population) === :population &&
+            get(b, :term_occurrence, entry.occurrence) == entry.occurrence)
         return BRMOutput[o for o in d.outputs if o.logical in recorded &&
             o.declaration !== nothing && o.declaration.target in recorded]
     end
