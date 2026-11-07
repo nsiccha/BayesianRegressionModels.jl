@@ -44,7 +44,10 @@ The field is a direct predictor contribution: its amplitude is the addressed
 intercept explicitly with `1 + gmrf(...)` when the model needs one.
 
 Omit `channel` for a single field. With a channel column, omitting `cor` gives
-independent channels conditional on their shared field hyperparameters.
+independent channels conditional on their shared field hyperparameters. Their
+identity factor is read from the fitted channels, so models that differ only in
+the number of channels build one Stan program and emit one RK program (BRM
+0.2.230). From ReactiveKernelsPPL 0.1.113 they also lower to one program.
 `cor=Omega` accepts either a known correlation matrix in the data or an
 `Omega ~ LKJCholesky(K, eta)` declaration. Its dimension must match the fitted
 channel count. A matrix supplied as data contains correlations; a sampled

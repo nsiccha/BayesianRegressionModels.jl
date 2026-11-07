@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.230
+## 0.2.231
 
 - **Breaking:** BRM requires ReactiveKernels 0.1.93 and ReactiveKernelsPPL 0.1.105
   (it required 0.1.84 and 0.1.100), so every `RKBRMI` user now gets a named refusal
@@ -30,6 +30,25 @@ instead of failing at run time.
   require this.
 - Test pins: ReactiveKernels `4640767b` (0.1.96 / RKPPL 0.1.107) and Enzyme dogfood
   `cecb571a` (libEnzyme `7f23cb72`), which contains the previous pin `74ce4afc`.
+
+## 0.2.230
+
+- Fixed: on `RKBRMI`, a `gmrf((east, north), time, channel)` field without `cor`
+  spelled its identity channel factor as a literal sized by the channel count
+  (`hcat(vect(1.0, 0.0), vect(0.0, 1.0))` for two channels), so fields that
+  differ only in their number of channels emitted different programs. The
+  program now reads the identity from the fitted support
+  (`brm_gmrf_identity_factor(support.geometry)`, as per-cell fields already did),
+  so one program serves every channel count on the mesh, `neighbors=` and
+  `multiresolution=` forms (user principle `0ikeidi`). From ReactiveKernelsPPL
+  0.1.113 they also lower to one program. Densities and gradients are
+  unchanged; `SBBRMI` already read the identity from its data. Snag
+  `gmrf-channel-ide-f3e0758e`.
+- Changed: **a model with such a field emits a different program**, a field
+  without a `channel` column included (its one-channel factor was
+  `hcat(vect(1.0))`), and its SMC and SVI checkpoint tags change. A fitted state
+  an earlier version wrote for it is refused at replay ("changes the fitted RK
+  program") and needs a fresh fit.
 
 ## 0.2.229
 

@@ -1421,6 +1421,10 @@ NLMEEstimation scratch environment below (NLMEEstimation 0.2.5 or later) with
 `--threads=4`; it refuses to run without threads.
 `research/nlme_threads/benchmark.jl` measures a round of one-unit calls and paired
 SAEM fits of both routes at the thread count it is started with.
+`research/nlme_threads/unit_cost.jl` measures what one subject's one-unit value and
+gradient cost against its share of the whole-cohort sweep, on a cheap plate PK model
+and a joint model with a second response, and how much of it is RK's partition call
+(brm-use nlme.md, "Subjects on threads"). Run it in the same environment.
 
 `nlme_svi_laplace_plan.jl` checks structural eligibility for
 `GaussianBlockLaplace`, including fixed HSGP fitting inputs, nonstandard
@@ -1634,8 +1638,14 @@ on a Normal and a Poisson nested model compares the values, modes and
 covariance blocks with NLMEEstimation's own Laplace and the gradients with
 central differences. Laplace-EM on a Gaussian nested panel reaches the direct
 L-BFGS maximum of the same objective, and SAEM sampling the subjects with the
-units integrated ends within half a log-likelihood unit of it. Run it in the
-same scratch environment. NLMEEstimation 0.2.4 needs WarmupHMC 0.2.8 and a
+units integrated ends within half a log-likelihood unit of it.
+`brm_ladder_fit`'s rung 3 runs two SAEM phases with replanning between them on
+that model written as formula rows, whose affine Normal reads the automatic plan
+certifies, so both families are integrated and SAEM is Laplace-EM. Written with
+a `@plate` cell (`nested_model`), the automatic plan samples both families (it
+does not certify a cell's log-concavity), so rung 3 is ordinary SAEM and needs
+`burnin < iterations`; naming the groupings in `integrate` opts them in. Run it
+in the same scratch environment. NLMEEstimation 0.2.4 needs WarmupHMC 0.2.8 and a
 Treebars with `ProgressInterrupted`, so develop those checkouts in the same
 `Pkg.develop` call as NLMEEstimation.
 
