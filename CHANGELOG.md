@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.232
+## 0.2.235
 
 - New: learned partial centering in minibatch SVI,
   `brm_svi_fit(x; centering=LearnedCentering())` (Gorinova, Moore and Hoffman
@@ -41,6 +41,61 @@ instead of failing at run time.
   controls do not reinterpret old factors; `brm_svi_resume` continues a
   centered optimizer checkpoint.
 - Compatibility: depends on ReparametrizableDistributions 0.3 (git source).
+
+## 0.2.234
+
+- Fixed: `brm_svi_resume` of a `@brm` model read the grouping options before it
+  compared the model with the checkpoint. Since 0.2.229 the `@brm` entry of the
+  NLME fits chooses which `mi(...)` completions to lower non-centered from the
+  groupings, and it built the subject view to choose even for a model without
+  a centred completion. So resuming a different model with a wrong grouping
+  option failed on the grouping (`brm_nlme_view: subject_group ... is not ...`)
+  instead of naming the difference, contrary to resume's contract of comparing
+  the model right after lowering. An SVI checkpoint now records which
+  completions its model lowered non-centered (`identity.completions`, the
+  mode `RKBRMI(brmi; completions)` takes), and resume lowers a `@brm` model
+  that way, as `reprocess` keeps a backend's parametrization, so the comparison
+  reads no grouping option; preparation then checks the groupings. A model
+  without a centred completion is lowered without reading the groupings in
+  every fit. A checkpoint written before this records no parametrization and
+  is lowered from the grouping options as before. Snag
+  `resume-identity-90a2f094`.
+
+## 0.2.233
+
+- Changed: a monotonic term's level count is an input of the program on both
+  backends (user principle `0ikeidi`). `mo(x)` and `mo1(x)` wrote their fitted
+  levels and the increment simplex's Dirichlet concentration into the program
+  (`brm_prepared_indices(x, [1, 2, 3])`, `Dirichlet([1.0, 1.0])`,
+  `simplex[2]`), so a column with another number of levels was another program.
+  `RKBRMI` now reads them from generated inputs, as a factor's levels are; `SBBRMI`
+  reads the concentration as Stan data named after the term (`mo_x_alpha`) and sizes
+  the simplex by it. Densities are unchanged.
+- Changed: on `SBBRMI`, an ordinal response's threshold count is Stan data,
+  `<response>_thresholds_length` (`<response>_cutpoints_length` for
+  `OrderedLogistic`), not a literal `ordered[K-1]`.
+- Unchanged: `RKBRMI` still writes an ordinal response's threshold count into the
+  program. RKPPL's ordinal lowering does not yet take a bound name for that size
+  (ReactiveKernels snag `rkppl-threshold-932a2e27`).
+- A fit or checkpoint of a model whose program text changes here is refused by a
+  frozen replay and needs a fresh fit.
+
+## 0.2.232
+
+- Fixed: on `SBBRMI`, `brm_descriptor` refused a predictor that repeats one
+  structured term (`a ~ 0 + mo(g) + mo(g)`, `mu ~ 1 + hsgp(t) + hsgp(t)`) or
+  carries the same term both as a summand and inside a random effect
+  (`a ~ 0 + mo(g) + (mo(g) | subject)`), with "term `mo_g` on logical predictor
+  `a` has 2 logical output owners". Structured carriers (`mo`, `mo1`, `s`,
+  `gp`, `hsgp`, `gmrf`) record their predictor and term (since 0.2.103), and
+  those two fields did not tell such carriers apart. Each carrier now also records
+  whether it is the predictor's own summand or a column inside a random-effect
+  block, and which repeat of the term it is, so every formula occurrence owns
+  exactly its own carrier. The label of a repeated term still names no single
+  carrier (`brm_term_coordinates(d, :a, names; term=:mo_g, ...)` refuses with
+  "occurs 2 times"), and beside a random effect `term=:mo_g` names the
+  population term's simplex. Emitted programs are unchanged. Snag
+  `brm-descriptor-r-2331ddd1`.
 
 ## 0.2.231
 

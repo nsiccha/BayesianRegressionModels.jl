@@ -28,8 +28,9 @@ the ELBO so far, the averaging window of global iterates, the random stream
 and a separate `draw_rng`, and the call counts and numerical records. Both
 hold the optimizer controls, the streaming carry of a window fit, and the
 identity of the target (the emitted program and callables, the bound data and
-frozen preprocessing, the packed coordinates, the subject groupings and
-coordinate ownership, and the fixed shared values). It holds no observations,
+frozen preprocessing, the packed coordinates, which `mi(...)` completions are
+non-centered, the subject groupings and coordinate ownership, and the fixed
+shared values). It holds no observations,
 compiled model or AD workspace. Its size is that of the variational factors
 (twice while polishing; plus the averaging window for GaussianBlockLaplace)
 plus one ELBO value per iteration so far; a run keeps no history of
@@ -85,6 +86,7 @@ function _brm_svi_identity(t)
     fixed = [(m.view.coordinates[i], m.unit[i]) for i in eachindex(m.unit) if !(i in estimated)]
     (; binding=_brm_rk_binding_identity(m.backend, _BRM_SVI_BINDING_TAG),
        binding_parts=_brm_rk_binding_parts(m.backend),
+       completions=_rk_completion_mode(m.backend.plan),
        grouping=(; group=m.view.group, nested=Tuple(keys(m.view.nested_groups)),
            shared=Tuple(m.view.shared_groups), unit_partition=m.view.unit_partition),
        ownership=_brm_value_digest((hasproperty(t, :ownership) ? _brm_svi_unit_levels(t) : m.view.levels, t.globals, t.units)),
@@ -153,6 +155,22 @@ end
 
 _brm_svi_backend(x::RKBRMI) = x
 _brm_svi_backend(m::BRMNLMEModel) = m.backend
+
+# A `@brm` model lowered with its checkpoint's completion parametrization (the
+# `completions` its identity records), as `reprocess` keeps a
+# backend's: the lowering then reads no grouping option, so the identity is
+# compared before any grouping is (preparation checks them). A source the
+# checkpoint non-centred that this model does not sample is a different model.
+function _brm_svi_checkpoint_lowered(x::BRMI, completions)
+    completions isa Symbol && return RKBRMI(x; completions)
+    rk = RKBRMI(x)
+    missing_sources = setdiff(completions, _rk_completion_sources(rk.plan))
+    isempty(missing_sources) || throw(_brm_svi_identity_refusal("its emitted program " *
+        "(the checkpoint's model samples the missing entries of " *
+        join(("`$s`" for s in sort!(collect(missing_sources))), ", ") *
+        ", this one does not)"))
+    RKBRMI(x; completions)
+end
 
 # Reads only the lowered backend, so a different model is refused before its
 # preparation. A checkpoint older than `binding_parts` holds only the combined
@@ -271,7 +289,14 @@ coordinates, and the fixed shared values must equal the checkpoint's; a
 difference is refused before any optimization step, and one in the program,
 callables, data or coordinates already after lowering, before the model is
 prepared. The refusal names the differing part, down to the callable's binding
-and the data column. An anonymous function or closure compares by its lowered
+and the data column. A `@brm` model is lowered with the checkpoint's
+parametrization of its `mi(...)` completions (which ones the fit lowered
+non-centered), so that comparison reads no grouping option: a different model
+is refused by name even when a grouping option is also wrong, and preparation
+then checks the groupings. An older checkpoint that records no
+parametrization lowers its `@brm` model from the grouping options, which are
+then read (and an invalid one refused) before the comparison when the model has
+a centred completion. An anonymous function or closure compares by its lowered
 code and captured values, so the same source continues in another driver, at
 another line or after other definitions; a named function compares by its module
 and name. In the same process, pass `fit.diagnostics.model` (or the `BRMNLMEModel`
@@ -326,8 +351,12 @@ function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
     if state.previous !== nothing
         x, options = _brm_svi_window_input(state.previous, x, options; caller="brm_svi_resume")
     end
+    # A `@brm` model is lowered as its checkpoint's was; an older checkpoint
+    # records no parametrization and is lowered from the grouping options.
+    checkpoint_completions = x isa BRMI && hasproperty(state.identity, :completions) ?
+        state.identity.completions : nothing
     call = (; caller="brm_svi_resume", ndraws, stop_after, checkpoint_every, progress,
-        snapshot, snapshot_every, snapshot_draws,
+        snapshot, snapshot_every, snapshot_draws, checkpoint_completions,
         check_lowered=lowered -> _brm_svi_check_binding(_brm_svi_backend(lowered), state.identity))
     if state.run isa _BRMSVILaplaceRun
         threads === nothing || throw(ArgumentError(

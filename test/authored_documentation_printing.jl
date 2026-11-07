@@ -57,3 +57,19 @@ const DOC_PRINT_BRM = BayesianRegressionModels
         @test !occursin("A nested definition.", hidden)
     end
 end
+
+# Julia parses a known value `sd(:, p) = 0.3` like a short function definition,
+# its value a one-statement block; it prints as written, not as a `begin … end`
+# definition (snag split-models-sho-9b868d6b).
+@testset "A one-statement short form prints as written" begin
+    for (source, written) in (
+            (quote sd(:, p) = 0.3 end, "sd(:, p) = 0.3"),
+            (quote sd(log_ka, pk, x) = 0.3 end, "sd(log_ka, pk, x) = 0.3"),
+            (quote optional(sd(:, p)) = 0.4 end, "optional(sd(:, p)) = 0.4"),
+            (quote scale(x) = 2 * x + 1 end, "scale(x) = 2 * x + 1"))
+        statement = only(filter(x -> !(x isa LineNumberNode), source.args))
+        @test sprint(DOC_PRINT_BRM._brm_print_source, statement) == written
+        @test Base.remove_linenums!(Meta.parse(written)) ==
+              Base.remove_linenums!(deepcopy(statement))
+    end
+end

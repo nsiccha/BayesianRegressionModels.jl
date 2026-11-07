@@ -5741,8 +5741,18 @@ function _rk_plan_monotonic_core!(head::Symbol,
         "$(length(alpha_vec)) entries for $K levels")
     increments = _rk_mint_generated!(
         taken, columns, string(head, "_", source, "_simplex_incr"))
-    (; source, idx_name, increments, alpha=alpha_vec, levels=collect(prepared.state.levels))
+    # The fitted levels, the concentration and its length are generated inputs, not
+    # program text, so one program serves every level count (user principle
+    # `0ikeidi`), as a factor's levels are.
+    level_input = _rk_mint_generated!(taken, columns, string(head, "_", source, "_levels"))
+    alpha_input = _rk_mint_generated!(taken, columns, string(head, "_", source, "_alpha"))
+    nincr_input = _rk_mint_generated!(taken, columns, string(head, "_", source, "_nincr"))
+    (; source, idx_name, increments, alpha=alpha_vec, level_input, alpha_input,
+        nincr_input, levels=collect(prepared.state.levels))
 end
+_rk_monotonic_options(core) = (; increments=core.increments, alpha=core.alpha,
+    level_input=core.level_input, alpha_input=core.alpha_input,
+    nincr_input=core.nincr_input, source=core.source, levels=core.levels)
 
 function _rk_plan_mo_term!(prepared::_BRMPreparedTerm{typeof(mo)},
         target::Symbol, columns::Dict{Symbol,AbstractVector},
@@ -5754,8 +5764,7 @@ function _rk_plan_mo_term!(prepared::_BRMPreparedTerm{typeof(mo)},
     # no `simplex[0]`). A lone `0 + mo(c)` is re-inflated to a zeros offset
     # after the geometry loop (SB's scalar `0.0`, vector-shaped).
     isnothing(core) && return nothing
-    _RKTermSpec(:monotonic, [core.idx_name],
-        (; increments=core.increments, alpha=core.alpha, source=core.source, levels=core.levels),
+    _RKTermSpec(:monotonic, [core.idx_name], _rk_monotonic_options(core),
         core.idx_name, Symbol(:mo_, target, :_, core.source))
 end
 
@@ -5774,8 +5783,7 @@ function _rk_plan_mo1_term!(prepared::_BRMPreparedTerm{typeof(mo1)},
         columns[zero] = zeros(length(prepared.state.idx))
         return _RKTermSpec(:offset, [zero], (; zero_source=prepared.source), zero, Symbol(:offset_, zero))
     end
-    _RKTermSpec(:monotonic_summand, [core.idx_name],
-        (; increments=core.increments, alpha=core.alpha, source=core.source, levels=core.levels),
+    _RKTermSpec(:monotonic_summand, [core.idx_name], _rk_monotonic_options(core),
         label, label)
 end
 

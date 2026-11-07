@@ -1090,12 +1090,17 @@ end
 _brm_svi_fill_absent_draws!(rng, draws, t, ::Nothing) = draws
 
 # The model through its preparation phases, as for `brm_nlme_fit`: lowering to
-# RK and `brm_nlme_model`. A stage `x` has already passed is reused.
-_brm_svi_lowered(x::BRMI, phase; groups...) =
-    _brm_run_phase(_ -> _brm_nlme_lowered(x; groups...), phase)
-_brm_svi_lowered(x::Union{RKBRMI,BRMNLMEModel}, phase; groups...) =
+# RK and `brm_nlme_model`. A stage `x` has already passed is reused. A resume
+# passes its checkpoint's completion parametrization (`completions`), which
+# fixes the lowering without reading the groupings.
+_brm_svi_lowered(x::BRMI, phase; completions=nothing, groups...) =
+    _brm_run_phase(phase) do _
+        completions === nothing ? _brm_nlme_lowered(x; groups...) :
+            _brm_svi_checkpoint_lowered(x, completions)
+    end
+_brm_svi_lowered(x::Union{RKBRMI,BRMNLMEModel}, phase; completions=nothing, groups...) =
     (_brm_reuse_phase!(phase); x)
-_brm_svi_lowered(x, phase; groups...) = throw(ArgumentError(
+_brm_svi_lowered(x, phase; completions=nothing, groups...) = throw(ArgumentError(
     "brm_svi_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
     "got $(typeof(x))"))
 
@@ -1440,7 +1445,8 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
         ad_backend=nothing, shared_point=nothing, subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, threads=nothing,
         global_coordinates=nothing, separator=nothing, max_unit_coordinates=4096,
-        max_unit_work=1_000_000, max_promoted_coordinates=128, check_lowered=Returns(nothing))
+        max_unit_work=1_000_000, max_promoted_coordinates=128, check_lowered=Returns(nothing),
+        checkpoint_completions=nothing)
     ndraws isa Integer && ndraws >= 0 || throw(ArgumentError(
         "$caller: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller, save, stop_after, checkpoint_every)
@@ -1448,8 +1454,8 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
     threads = _brm_svi_threads(caller, threads, ad_backend)
     _brm_with_progress(progress; description) do node
         _brm_with_phases(node, _BRM_SVI_PHASES) do phases
-            lowered = _brm_svi_lowered(x, phases.lower; subject_group, nested_groups,
-                shared_groups, unit_partition)
+            lowered = _brm_svi_lowered(x, phases.lower; completions=checkpoint_completions,
+                subject_group, nested_groups, shared_groups, unit_partition)
             check_lowered(lowered)
             m = _brm_svi_model(lowered, phases.prepare;
                 ad_backend, shared_point, subject_group, nested_groups, shared_groups, unit_partition)
