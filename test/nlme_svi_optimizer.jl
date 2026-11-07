@@ -76,6 +76,21 @@ end
     @test svi_same_result(final, full)
     @test svi_same_state(brm_svi_optimizer_checkpoint(final),
         brm_svi_optimizer_checkpoint(full))
+    # A format-1 checkpoint (BRM 0.2.237 and earlier) held a dense unit's
+    # averaged precision while polishing. It resumes from the covariance that
+    # stands for, to rounding, and the caller's checkpoint is left unchanged.
+    @test s3.format == 2
+    old = brm_svi_optimizer_checkpoint(s3)
+    @test all(Λ -> Λ isa Matrix, old.run.average.Λ)
+    foreach(Λ -> Λ .= inv(Symmetric(Λ)), old.run.average.Λ)
+    old = BRMSVIOptimizerState(1, old.identity, old.previous, old.controls, old.run)
+    kept = deepcopy(old.run.average.Λ)
+    upgraded = brm_svi_resume(m, old; ndraws=40)
+    @test old.format == 1 && old.run.average.Λ == kept
+    @test brm_svi_optimizer_checkpoint(upgraded).format == 2
+    @test upgraded.diagnostics.iterations == final.diagnostics.iterations
+    @test all(isapprox.(upgraded.diagnostics.q.Λ, final.diagnostics.q.Λ; rtol=1e-8))
+    @test isapprox(upgraded.draws, final.draws; rtol=1e-6)
     # The checkpoints taken along the way are unchanged by their continuation.
     @test svi_same_state(s1, states[37]) && svi_same_state(s3, states[P+13])
     # A finished checkpoint does no iterations and reproduces the draws.

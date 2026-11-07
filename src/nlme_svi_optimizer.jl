@@ -10,7 +10,10 @@
 # (`BRMSVIState`): that turns a fitted approximation into the prior of a new
 # window, whose observations then enter once.
 
-const _BRM_SVI_OPTIMIZER_FORMAT = 1
+# Format 2 (0.2.238): a dense unit's slot of the polishing average holds its
+# averaged covariance; format 1 held its averaged precision
+# (`_brm_svi_upgrade_optimizer_state`).
+const _BRM_SVI_OPTIMIZER_FORMAT = 2
 
 """
     BRMSVIOptimizerState
@@ -51,6 +54,11 @@ function save_checkpoint(path, state)
     mv(temporary, path; force=true)
 end
 ```
+
+A checkpoint written by BRM 0.2.237 or earlier still resumes. One taken while
+polishing keeps, for the iterates it had averaged, the narrower average of dense
+units' precision those versions returned; later iterates are averaged in
+covariance.
 
 The streaming carry [`brm_svi_checkpoint`](@ref) is a different object: it
 continues on a new, disjoint window and holds no optimizer state.
@@ -130,6 +138,19 @@ brm_svi_optimizer_checkpoint(::Union{BRMSVIState,BRMSVILaplaceState}) = throw(Ar
 brm_svi_checkpoint(::BRMSVIOptimizerState) = throw(ArgumentError(
     "brm_svi_checkpoint: an optimizer checkpoint continues the same model and data with " *
     "brm_svi_resume(model, state); a new window takes brm_svi_checkpoint of a fit result"))
+
+# A format-1 checkpoint (before 0.2.238) averaged a dense unit's precision while
+# polishing. One taken while polishing continues from the covariance that
+# precision average stands for: the iterates averaged before the resume keep
+# their narrower average, those after it are averaged in covariance. Before
+# polishing the two formats are the same. `state` must be the caller's own copy.
+function _brm_svi_upgrade_optimizer_state(state::BRMSVIOptimizerState)
+    state.format == 1 || return state
+    run = state.run
+    run isa _BRMSVIRun && run.average !== nothing &&
+        foreach(_brm_svi_unit_average_start!, run.average.Λ)
+    BRMSVIOptimizerState(2, state.identity, state.previous, state.controls, run)
+end
 
 const _BRM_SVI_IDENTITY_PARTS = (
     grouping="the subject, nested or shared groupings",
@@ -347,7 +368,7 @@ function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
     x isa Union{BRMI,RKBRMI,BRMNLMEModel} || throw(ArgumentError(
         "brm_svi_resume: expected the checkpoint's model rebuilt on its data (a BRMI, " *
         "an RKBRMI or a BRMNLMEModel), got $(typeof(x))"))
-    state = brm_svi_optimizer_checkpoint(checkpoint)
+    state = _brm_svi_upgrade_optimizer_state(brm_svi_optimizer_checkpoint(checkpoint))
     state.format == _BRM_SVI_OPTIMIZER_FORMAT || throw(ArgumentError(
         "brm_svi_resume: unsupported optimizer checkpoint format $(state.format)"))
     options = (; kwargs...)
