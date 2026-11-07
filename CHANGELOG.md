@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.243
+
+- Fixed: a `LowRankGlobal(r)` fit's rank part no longer random-walks during
+  exploration. Its rows took constant Adam steps of `lr_global` in absolute
+  units, the same for every coordinate, while their gradient is mostly
+  minibatch noise, so over a long exploration (a large `min_windows`) they grew
+  to several times their coordinates' own sds: the factor came out wider than
+  the posterior, its trimmed ELBO fell, and on a model whose log-scale
+  hyperparameters overflow a few sds out, typical draws reached a non-finite
+  density and the fit stopped with `BRMSVINonfiniteError`. Each Β row now steps
+  in units of its coordinate's scale `exp(ρ_k)` in exploration too, as it
+  already did in polishing.
+- Unchanged: `MeanFieldGlobal` fits, to the last bit, and μ and ρ under
+  `LowRankGlobal`. A `LowRankGlobal` fit on a fixed seed differs from its first
+  exploration step on. A low-rank optimizer checkpoint written by an earlier
+  version resumes and continues under the new step.
+
 ## 0.2.242
 
 - Added: `brm_svi_fit` settles before it polishes. Exploration's stop test finds

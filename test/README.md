@@ -1398,6 +1398,15 @@ A structured local factor's own Adam (above `unit_dense_limit`) is bounded the
 same way, and a work-weighted fit (`unit_sampling=:work`), whose bound widens by
 the batch's largest unit weight, keeps its globals moving on the same model.
 
+`nlme_svi_rank_step.jl` checks `LowRankGlobal`'s exploration step
+(`_brm_svi_exploration_global_step!`): two coordinates with scales 1 and 0.01
+given the same gradient on their rows of Β move them 1 : 0.01, μ and ρ step
+exactly as `_brm_svi_step!` steps them, and with no rank part the step is
+`_brm_svi_step!` to the last bit. On `svi_gauss_model` (200 subjects, batches of
+4), 15,000 iterations of exploration leave every global's sd below 1.2 times the
+NUTS sd and its mean within one NUTS sd; with the absolute step (0.2.242 and earlier) one
+sd read 1.53 times (2.30, 2.39 and 1.00 on seeds 2-4, against 0.66-0.86).
+
 `nlme_svi_authored_factors.jl` checks the public RKPPL authored-factor API
 and production SVI ownership. On a
 six-subject model whose coefficient pair `z[2i-1], z[2i]` is read only by

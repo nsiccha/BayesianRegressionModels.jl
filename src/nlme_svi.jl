@@ -554,6 +554,38 @@ function _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip=Inf)
     x
 end
 
+# The exploration step: Adam on [μ; ρ; Β] at a constant step size, with each Β
+# row in units of its coordinate's scale exp(ρ_k), as polishing steps it. μ and
+# ρ step as they always have, so a `MeanFieldGlobal` run is unchanged to the
+# last bit.
+#
+# Β's gradient w ηᵀ carries the minibatch noise of w, all of it independent of
+# Β, so in most coordinates Adam's normalized step is a random walk of about a
+# step size per iteration. A step of `lr_global` in absolute units, the same for
+# every coordinate, moved Β's entries by about 0.2 in 400 iterations and 0.45 in
+# 15,000, with rows several times the scale of a coordinate whose sd is 0.03:
+# marginal variances 10 to 25 times the factor's own and correlations the target
+# has no use for. On a model whose log-scale hyperparameters overflow a few sds
+# out, the trimmed ELBO then fell after some 8,000 iterations and typical draws
+# reached a non-finite density (4 of 4 fits, at 12,000 to 21,000 iterations; ρ
+# moves on the log scale, so a mean-field factor never walks off that way). In
+# units of exp(ρ_k) the walk is a fraction of each coordinate's own scale, and Β
+# grows only where the gradient keeps pushing it.
+function _brm_svi_exploration_global_step!(opt, q, x, grad, lr; clip=Inf)
+    r = size(q.Β, 2)
+    r == 0 && return _brm_svi_step!(opt, x, grad, lr; clip)
+    D = length(q.μ)
+    scale = repeat(exp.(q.ρ), r)
+    rank = 2D+1:length(x)
+    grad = copy(grad)
+    grad[rank] .*= scale
+    step = zeros(length(x))
+    _brm_svi_step!(opt, step, grad, lr; clip)
+    x[1:2D] .+= view(step, 1:2D)
+    x[rank] .+= scale .* view(step, rank)
+    x
+end
+
 # ── A subject's factor: one natural-gradient step ───────────────────────────
 
 # The positive eigenpair `(λ, e)` of the negative-Hessian estimate in the
@@ -799,7 +831,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     # their rms when drawn, and the batch's largest weight bounds every unit in it.
     clip = _BRM_SVI_GLOBAL_CLIP * sqrt(maximum(weights))
     whiten ? _brm_svi_whitened_global_step!(global_opt, q, x, grad, lr_global; clip) :
-        _brm_svi_step!(global_opt, x, grad, lr_global; clip)
+        _brm_svi_exploration_global_step!(global_opt, q, x, grad, lr_global; clip)
     _brm_svi_set_global!(q, x)
     _brm_svi_each_unit(t.plans, length(batch)) do _, k
         _brm_svi_unit_step!(q, batch[k], terms[k].gz, terms[k].gd, draws[k], β)
