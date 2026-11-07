@@ -185,6 +185,62 @@ tensor_smooth(k) = brm(:(begin
     mu ~ 1 + t2(t, s; k=$k)
     y ~ Normal(mu, sigma)
 end); mod=@__MODULE__)
+multigroup_field(scale; k=3, c=1.5) = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 0 + hsgp(t; k=3, by=g, cor=multigroup((sx, sy), $scale; k=$k, c=$c))
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
+summary_prior(; location) = brm(:(begin
+    sigma ~ Exponential(1)
+    b ~ Normal($location, 1)
+    m ~ 1 + x
+    y ~ Normal(m + b, sigma)
+end); mod=@__MODULE__)
+bounded_summary(lower) = brm(:(begin
+    sigma ~ truncated(Exponential(1); lower=$lower)
+    m ~ 1 + x
+    y ~ Normal(m, sigma)
+end); mod=@__MODULE__)
+whole_covariance(mean, covariance) = brm(:(begin
+    rho ~ MvNormal($mean, $covariance)
+    y ~ Normal(sum(rho), 1)
+end); mod=@__MODULE__)
+whole_scale(scale) = brm(:(begin
+    rho ~ MvNormal(zeros(2), $scale)
+    y ~ Normal(sum(rho), 1)
+end); mod=@__MODULE__)
+whole_concentration(concentration) = brm(:(begin
+    w ~ Dirichlet($concentration)
+    y ~ Categorical(w)
+end); mod=@__MODULE__)
+clashing_summary() = brm(:(begin
+    prior_sum_v ~ Exponential(1)
+    b ~ Normal(sum(v), 1)
+    y ~ Normal(b, prior_sum_v)
+end); mod=@__MODULE__)
+horseshoe_effect(; local_scale=1.0, global_scale=1.0) = brm(:(begin
+    sigma ~ Exponential(1)
+    m ~ 1 + x
+    effect(m, x) ~ Horseshoe(local_scale=$local_scale, global_scale=$global_scale)
+    y ~ Normal(m, sigma)
+end); mod=@__MODULE__)
+horseshoe_two(g1, g2) = brm(:(begin
+    sigma ~ Exponential(1)
+    m ~ 1 + x + z
+    effect(m, x) ~ Horseshoe(global_scale=$g1)
+    effect(m, z) ~ Horseshoe(global_scale=$g2)
+    y ~ Normal(m, sigma)
+end); mod=@__MODULE__)
+multigroup_gram(tau) = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 0 + hsgp(t; k=3, by=g, cor=multigroup(Omega, $tau))
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
+multigroup_method(method) = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 0 + hsgp(t; k=3, by=g, cor=multigroup((sx, sy), 0.7; k=3, method=$(QuoteNode(method))))
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
 end
 const RSM = RuntimeSettingsModels
 
@@ -201,6 +257,14 @@ const LDATA = (; subject=[1, 1, 2, 2, 3, 3], x=[-1.0, 0.5, 0.2, 1.1, -0.4, 0.9],
 const HDATA = let rng = MersenneTwister(3), t = collect(range(0.0, 5.0; length=24))
     (; t, s=cos.(t), y=sin.(t) .+ 0.1 .* randn(rng, length(t)))
 end
+const MGDATA = merge(HDATA, (; g=mod1.(eachindex(HDATA.t), 4),
+    sx=[0.1, 0.5, 0.9, 1.3], sy=[0.2, 0.1, 0.6, 0.9],
+    Omega=[1.0 0.3 0.1 0.0; 0.3 1.0 0.2 0.1; 0.1 0.2 1.0 0.3; 0.0 0.1 0.3 1.0]))
+
+# What the RKPPL under test keeps out of a query type and a lowered program, so a
+# move of the test pin switches these without an edit.
+const RK_BINDS_VALUES = pkgversion(ReactiveKernelsPPL) >= v"0.1.106"
+const RK_BINDS_SIZES = pkgversion(ReactiveKernelsPPL) >= v"0.1.108"
 
 stan_program(brmi) = StanBlocks.stan_code(SBBRMI(brmi; mod=RSM).model)
 stan_inputs(brmi) = BRM.stan_data(SBBRMI(brmi; mod=RSM))
@@ -417,11 +481,11 @@ end
     @test allequal(typeof.(plans))
     @test allequal(typeof.(ReactiveKernelsPPL.prepare_query.(Ref(rk.model), plans, :sampler)))
     queries = [ReactiveKernelsPPL.prepare_sampler(rk.model, plan, u; backend) for plan in plans]
-    # The same values prepare the same gradient query. Other values do not yet:
-    # RK's `prepare_sampler` splices a bound scalar into its generated body
-    # (ReactiveKernels snag `prepare-sampler-e69f1b38`).
+    # The same values prepare the same gradient query, and other values do too
+    # from the release that stopped `prepare_sampler` splicing a bound scalar into
+    # its generated body (ReactiveKernels snag `prepare-sampler-e69f1b38`).
     @test typeof(queries[1]) == typeof(queries[3])
-    @test_broken typeof(queries[1]) == typeof(queries[2])
+    @test typeof(queries[1]) == typeof(queries[2]) broken=!RK_BINDS_VALUES
     for (data, query) in zip((A, B, A), queries)
         gradient = similar(u)
         value, _ = ReactiveKernelsPPL.sampler_value_and_gradient!(query, gradient, u)
@@ -543,7 +607,7 @@ end
         @testset "$label" begin
             models = [RKBRMI(field(merge(LDATA, v))) for v in values]
             @test allequal(emitted_program(rk) for rk in models)
-            @test_broken allequal(lowered_program(rk) for rk in models)
+            @test allequal(lowered_program(rk) for rk in models) broken=!RK_BINDS_SIZES
             for (v, rk) in zip(values, models)
                 twin = RKBRMI(literal(v)(LDATA))
                 u = rk_point(twin)
@@ -588,9 +652,9 @@ end
     models = [RKBRMI(build(merge(base, d))) for d in (labels("a", "b", "c"), (; f=["a", "a", "b", "b", "c", "d"]))]
     @test allequal(emitted_program(rk) for rk in models)
     @test models[1].model.layout.total + 1 == models[2].model.layout.total
-    # Positive control and the size RK owns: the layout spells the extent
+    # Positive control and the size RK owns: the layout spelled the extent
     # (ReactiveKernels snag `rkppl-sized-vect-69604d32`).
-    @test_broken allequal(lowered_program(rk) for rk in models)
+    @test allequal(lowered_program(rk) for rk in models) broken=!RK_BINDS_SIZES
     # A frozen replay keeps the fitted levels and refuses an unseen one.
     fit = first(models)
     @test rk_density(reprocess(fit, merge(base, labels("a", "b", "c"))), rk_point(fit)) ==
@@ -632,9 +696,9 @@ end
     @test rk_density(field, u) ≈ rk_density(literal, u) atol=1e-12 rtol=1e-12
     larger = RKBRMI(RSM.tensor_smooth((5, 7))(HDATA))
     @test larger.model.layout.total > literal.model.layout.total
-    # The layout follows the size until RK's extents land
+    # The layout followed the size until RK's extents
     # (ReactiveKernels snag `rkppl-sized-vect-69604d32`).
-    @test_broken lowered_program(larger) == lowered_program(literal)
+    @test (lowered_program(larger) == lowered_program(literal)) broken=!RK_BINDS_SIZES
     @test_throws "frozen replay keeps the fitted t2" reprocess(field, merge(HDATA, (; kk=[5, 7])))
     @test reprocess(field, merge(HDATA, (; kk=[4, 6]))) isa RKBRMI
     @test reprocess(field, merge(HDATA, (; kk=[5, 7])); freeze_constants=false).model.layout.total ==
@@ -643,4 +707,199 @@ end
     @test_throws "replay keeps the fitted t2" reprocess(sb, merge(HDATA, (; kk=[5, 7])))
     @test_throws "must be a 2-tuple" RKBRMI(RSM.tensor_smooth((1, 6))(HDATA))
     @test_throws "integers greater than 2" RKBRMI(RSM.tensor_smooth(:kk)(merge(HDATA, (; kk=[1, 6]))))
+end
+
+@stestset "a multigroup term's numbers are inputs" begin
+    fields(; values...) = merge(MGDATA, (; values...))
+    # One Stan and one emitted RK program for every size and box factor.
+    check_one_program("k literal", k -> RSM.multigroup_field(0.7; k), (3, 4); data=_ -> MGDATA)
+    check_one_program("k field", _ -> RSM.multigroup_field(0.7; k=:kk), (3, 4);
+        data=kk -> fields(; kk))
+    check_one_program("c field", _ -> RSM.multigroup_field(0.7; c=:cc), (1.5, 2.0);
+        data=cc -> fields(; cc))
+    # A scale is one lowered program and query type, and reaches the density.
+    check_one_lowering("lambda field", RSM.multigroup_field(:lam),
+        [fields(; lam) for lam in (0.7, 0.9)], (:lam,))
+    check_one_lowering("tau field", RSM.multigroup_gram(:tt),
+        [fields(; tt) for tt in (0.5, 0.8)], (:tt,))
+    # Each data field is its literal twin: the same density at the same point.
+    twins = (
+        RSM.multigroup_field(0.7; k=:kk)(fields(; kk=4)) => RSM.multigroup_field(0.7; k=4)(MGDATA),
+        RSM.multigroup_field(0.7; c=:cc)(fields(; cc=2.0)) => RSM.multigroup_field(0.7; c=2.0)(MGDATA),
+        RSM.multigroup_field(:lam)(fields(; lam=0.9)) => RSM.multigroup_field(0.9)(MGDATA),
+        RSM.multigroup_gram(:tt)(fields(; tt=0.8)) => RSM.multigroup_gram(0.8)(MGDATA))
+    for (field, literal) in twins
+        rk_field, rk_literal = RKBRMI(field), RKBRMI(literal)
+        u = rk_point(rk_literal)
+        @test rk_density(rk_field, u) == rk_density(rk_literal, u)
+    end
+    # Stan reads each number by name.
+    @test stan_inputs(RSM.multigroup_field(:lam)(fields(; lam=0.9)))[:lam] == 0.9
+    @test stan_inputs(RSM.multigroup_gram(:tt)(fields(; tt=0.8)))[:tt] == 0.8
+    sized = stan_inputs(RSM.multigroup_field(0.7; k=:kk)(fields(; kk=4)))
+    @test sized[:hsgp_t_by_g_grid_k] == 4 && sized[:n_rows_hsgpw_t_g] == 16
+    # Positive control: the approximation is a choice of the source, not a number.
+    @test rk_program(RSM.multigroup_method(:hsgp)(MGDATA)) != rk_program(RSM.multigroup_method(:inducing)(MGDATA))
+    @test stan_program(RSM.multigroup_field(0.7)(MGDATA)) != stan_program(RSM.multigroup_field(0.9)(MGDATA))
+    # The size is a layout change, which RK spelled until its extents
+    # (ReactiveKernels snag `rkppl-sized-vect-69604d32`).
+    small, large = RKBRMI(RSM.multigroup_field(0.7; k=:kk)(fields(; kk=3))),
+        RKBRMI(RSM.multigroup_field(0.7; k=:kk)(fields(; kk=4)))
+    @test small.model.layout.total < large.model.layout.total
+    @test (lowered_program(small) == lowered_program(large)) broken=!RK_BINDS_SIZES
+    # A frozen replay keeps the fitted term, on both backends; a fresh build follows.
+    frozen = (
+        (RSM.multigroup_field(0.7; k=:kk), fields(; kk=3), fields(; kk=4)),
+        (RSM.multigroup_field(0.7; c=:cc), fields(; cc=1.5), fields(; cc=2.0)),
+        (RSM.multigroup_field(:lam), fields(; lam=0.7), fields(; lam=0.9)),
+        (RSM.multigroup_gram(:tt), fields(; tt=0.5), fields(; tt=0.8)))
+    for (build, fitted, changed) in frozen
+        rk = RKBRMI(build(fitted))
+        @test_throws "A frozen replay keeps the fitted multigroup" reprocess(rk, changed)
+        @test reprocess(rk, fitted) isa RKBRMI
+        @test reprocess(rk, changed; freeze_constants=false) isa RKBRMI
+        @test_throws "replay keeps the fitted hsgp" reprocess(SBBRMI(build(fitted); mod=RSM), changed)
+    end
+    @test_throws "needs an integer `k >= 2`" RKBRMI(RSM.multigroup_field(0.7; k=:kk)(fields(; kk=1)))
+    @test_throws "needs a box factor `c > 1`" RKBRMI(RSM.multigroup_field(0.7; c=:cc)(fields(; cc=0.5)))
+end
+
+@stestset "what a prior reads from a data array is an input" begin
+    # A column the formula also reads, and an array only the prior reads.
+    m1, m2 = [0.0, 0.1, 0.4], [0.5, 0.1, 0.9]
+    with_m(m) = merge(LDATA, (; v=m))
+    sum_prior, element_prior = RSM.summary_prior(; location=:(sum(v))), RSM.summary_prior(; location=:(v[2] + 1))
+    # The graph computes each prior's value from its input (user principle `0pde95i`).
+    check_one_lowering("a reduction of an array", sum_prior, [with_m(m1), with_m(m2)], (:prior_input_v,))
+    check_one_lowering("one element of an array", RSM.summary_prior(; location=:(v[1])),
+        [with_m(m1), with_m(m2)], (:prior_input_v,))
+    check_one_lowering("a reduction of a design column", RSM.summary_prior(; location=:(mean(x))),
+        [LDATA, merge(LDATA, (; x=2 .* LDATA.x))], (:x_fit,); differ=true)
+    S1, S2 = [1.0 0.2; 0.2 1.0], [1.0 0.4; 0.4 1.0]
+    whole(; mean=[0.0, 0.1], covariance=S1) = (; y=LDATA.y, a=mean, S=covariance)
+    check_one_lowering("a whole mean", RSM.whole_covariance(:a, :S),
+        [whole(), whole(; mean=[0.5, 0.1])], (:prior_input_a,))
+    check_one_lowering("a whole covariance", RSM.whole_covariance(:a, :S),
+        [whole(), whole(; covariance=S2)], (:prior_input_S,))
+    check_one_lowering("a whole scale", RSM.whole_scale(:s),
+        [(; y=LDATA.y, s=[1.0, 2.0]), (; y=LDATA.y, s=[1.5, 2.0])], (:prior_input_s,))
+    check_one_lowering("a whole concentration", RSM.whole_concentration(:a),
+        [(; y=[1, 2, 3, 1], a=[1.0, 2.0, 3.0]), (; y=[1, 2, 3, 1], a=[2.0, 2.0, 3.0])], (:prior_input_a,))
+    # A size from a data array is one emitted program, as in the Stan program.
+    sized = [RKBRMI(RSM.whole_covariance(:a, :S)(whole())),
+        RKBRMI(RSM.whole_covariance(:a, :S)(whole(; mean=[0.0, 0.1, 0.2],
+            covariance=[1.0 0.2 0.0; 0.2 1.0 0.0; 0.0 0.0 1.0])))]
+    @test allequal(emitted_program(rk) for rk in sized)
+    @test sized[1].model.layout.total + 1 == sized[2].model.layout.total
+    @test allequal(lowered_program(rk) for rk in sized) broken=!RK_BINDS_SIZES
+    # A summary as a support bound is read at lowering, as any other bound.
+    check_one_program("a bound over a reduction", _ -> RSM.bounded_summary(:(minimum(v))), (m1 .+ 1, m2 .+ 1);
+        data=v -> merge(LDATA, (; v)))
+
+    # Each is its literal twin: the same density at the same point.
+    twins = (
+        sum_prior(with_m(m1)) => RSM.summary_prior(; location=sum(m1))(LDATA),
+        RSM.summary_prior(; location=:(v[2] + 1))(with_m(m1)) => RSM.summary_prior(; location=m1[2] + 1)(LDATA),
+        RSM.summary_prior(; location=:(mean(x)))(LDATA) => RSM.summary_prior(; location=sum(LDATA.x) / 6)(LDATA),
+        RSM.whole_covariance(:a, :S)(whole()) => RSM.whole_covariance([0.0, 0.1], S1)((; y=LDATA.y)),
+        RSM.whole_scale(:s)((; y=LDATA.y, s=[1.0, 2.0])) => RSM.whole_scale([1.0, 2.0])((; y=LDATA.y)),
+        RSM.whole_concentration(:a)((; y=[1, 2, 3, 1], a=[1.0, 2.0, 3.0])) =>
+            RSM.whole_concentration([1.0, 2.0, 3.0])((; y=[1, 2, 3, 1])))
+    for (field, literal) in twins
+        rk_field, rk_literal = RKBRMI(field), RKBRMI(literal)
+        u = rk_point(rk_literal)
+        @test rk_density(rk_field, u) ≈ rk_density(rk_literal, u) atol=1e-12 rtol=1e-12
+    end
+
+    # A frozen replay refuses a changed array, as it does a changed scalar.
+    for (build, fitted, changed) in (
+            (sum_prior, with_m(m1), with_m(m2)),
+            (RSM.whole_covariance(:a, :S), whole(), whole(; covariance=S2)),
+            (RSM.whole_covariance(:a, :S), whole(), whole(; mean=[0.5, 0.1])),
+            (RSM.whole_scale(:s), (; y=LDATA.y, s=[1.0, 2.0]), (; y=LDATA.y, s=[1.5, 2.0])))
+        rk = RKBRMI(build(fitted))
+        @test_throws "changes the fitted RK program" reprocess(rk, changed)
+        @test reprocess(rk, fitted) isa RKBRMI
+        @test reprocess(rk, changed; freeze_constants=false) isa RKBRMI
+    end
+    # A prior read off a column is a number of the fit, as `standardize(x)` is: the
+    # graph computes it from the column's fit-role copy, so a replay on other rows
+    # keeps it, from the fit or from a state that holds no rows. The oracle is the
+    # literal twin on the other rows; a fresh build on them is the positive control.
+    other_rows = merge(LDATA, (; x=2 .* LDATA.x))
+    for (location, fitted) in ((:(mean(x)), sum(LDATA.x) / 6), (:(x[2]), LDATA.x[2]))
+        build_column = RSM.summary_prior(; location)
+        column_prior = RKBRMI(build_column(LDATA))
+        kept = RKBRMI(RSM.summary_prior(; location=fitted)(other_rows))
+        u = rk_point(kept)
+        @test rk_density(column_prior, u) ≈ rk_density(RKBRMI(RSM.summary_prior(;
+            location=fitted)(LDATA)), u) atol=1e-12 rtol=1e-12
+        @test rk_density(reprocess(column_prior, other_rows), u) ≈ rk_density(kept, u) atol=1e-12 rtol=1e-12
+        @test !(rk_density(RKBRMI(build_column(other_rows)), u) ≈ rk_density(kept, u))
+        state = brm_fitted_state(column_prior)
+        @test !any(value -> value isa AbstractVector && value == LDATA.x, values(state.scalars))
+        @test rk_density(RKBRMI(build_column(other_rows), state), u) ≈ rk_density(kept, u) atol=1e-12 rtol=1e-12
+        # A prediction design binds the column and cannot move the fitted prior.
+        @test rk_design_binder(column_prior)(other_rows).x_fit == LDATA.x
+    end
+    # The state holds the fitted mean, not the rows it is computed from. Positive
+    # control: a prior reading the whole column has the rows as its fitted value.
+    fitted_of(location) = brm_fitted_state(RKBRMI(RSM.summary_prior(; location)(LDATA))).fitted.values
+    mean_fit = fitted_of(:(mean(x)))
+    @test keys(mean_fit) == (:prior_mean_x,) && mean_fit.prior_mean_x ≈ sum(LDATA.x) / 6
+    @test LDATA.x in values(fitted_of(:(x[2])))
+    # An array only a prior reads travels with the state: a design may omit it, and
+    # one holding another value is refused.
+    sum_rk = RKBRMI(sum_prior(with_m(m1)))
+    sum_state = brm_fitted_state(sum_rk)
+    @test sum_state.scalars[:v] == m1
+    @test rk_bound_data(RKBRMI(sum_prior(LDATA), sum_state)).prior_input_v == m1
+    @test rk_bound_data(reprocess(sum_rk, LDATA)).prior_input_v == m1
+    @test_throws "changes the fitted RK program" RKBRMI(sum_prior(with_m(m2)), sum_state)
+    # A checkpoint identity sees an array a prior reads.
+    @test BRM._rk_identity_statements(RKBRMI(sum_prior(with_m(m1)))) !=
+        BRM._rk_identity_statements(RKBRMI(sum_prior(with_m(m2))))
+    # A generated name the model also uses is refused by name.
+    @test_throws "generated name `prior_sum_v`" RKBRMI(RSM.clashing_summary()((; y=LDATA.y, v=m1)))
+    # Positive control: a literal stays in its author's source.
+    @test rk_program(RSM.summary_prior(; location=1.7)(LDATA)) != rk_program(RSM.summary_prior(; location=2.9)(LDATA))
+end
+
+@stestset "a structured Horseshoe's scales are inputs" begin
+    fields(; values...) = merge(LDATA, (; values...))
+    check_one_lowering("global scale", RSM.horseshoe_effect(; global_scale=:g),
+        [fields(; g) for g in (0.1, 0.2)], (:g,))
+    check_one_lowering("local scale", RSM.horseshoe_effect(; local_scale=:l),
+        [fields(; l) for l in (0.5, 0.7)], (:l,))
+    check_one_program("both, on Stan and RK", _ -> RSM.horseshoe_effect(; local_scale=:l, global_scale=:g),
+        ((0.5, 0.1), (0.7, 0.2)); data=v -> fields(; l=v[1], g=v[2]))
+    # Each is its literal twin.
+    field, literal = RKBRMI(RSM.horseshoe_effect(; local_scale=:l, global_scale=:g)(fields(; l=0.5, g=0.2))),
+        RKBRMI(RSM.horseshoe_effect(; local_scale=0.5, global_scale=0.2)(LDATA))
+    u = rk_point(literal)
+    @test rk_density(field, u) == rk_density(literal, u)
+    stan_field = RSM.horseshoe_effect(; local_scale=:l, global_scale=:g)(fields(; l=0.5, g=0.2))
+    @test stan_inputs(stan_field)[:l] == 0.5 && stan_inputs(stan_field)[:g] == 0.2
+    # Two terms sharing one field share its scale; two fields have no shared scale
+    # a frozen replay could check, so they are refused by name. Literals still differ.
+    with_z = merge(LDATA, (; z=reverse(LDATA.x)))
+    shared = RKBRMI(RSM.horseshoe_two(:g, :g)(merge(with_z, (; g=0.2))))
+    @test rk_density(shared, rk_point(shared)) ==
+        rk_density(RKBRMI(RSM.horseshoe_two(0.2, 0.2)(with_z)), rk_point(shared))
+    @test_throws "reads its Horseshoe `global_scale`s from different values" RKBRMI(
+        RSM.horseshoe_two(:g, :h)(merge(with_z, (; g=0.2, h=0.3))))
+    @test RKBRMI(RSM.horseshoe_two(0.2, 0.3)(with_z)) isa RKBRMI
+    # A frozen replay refuses a changed scale; a fresh build follows it.
+    rk = RKBRMI(RSM.horseshoe_effect(; global_scale=:g)(fields(; g=0.1)))
+    @test_throws "changes the fitted RK program" reprocess(rk, fields(; g=0.2))
+    @test reprocess(rk, fields(; g=0.1)) isa RKBRMI
+    @test reprocess(rk, fields(; g=0.2); freeze_constants=false) isa RKBRMI
+    # A value out of support is refused, as a literal is.
+    @test_throws "finite and strictly positive" RKBRMI(RSM.horseshoe_effect(; global_scale=:g)(fields(; g=-1.0)))
+    @test_throws "finite and strictly positive" SBBRMI(RSM.horseshoe_effect(; global_scale=:g)(fields(; g=-1.0)); mod=RSM)
+    # Positive control: a literal stays in its author's source.
+    @test rk_program(RSM.horseshoe_effect(; global_scale=0.1)(LDATA)) !=
+        rk_program(RSM.horseshoe_effect(; global_scale=0.2)(LDATA))
+    @test stan_program(RSM.horseshoe_effect(; global_scale=0.1)(LDATA)) !=
+        stan_program(RSM.horseshoe_effect(; global_scale=0.2)(LDATA))
 end

@@ -51,12 +51,13 @@ _brm_svi_laplace_controls(method;max_iterations,lr_global)=
 
 _brm_svi_finished(run::_BRMSVILaplaceRun,c)=run.iteration>=c.max_iterations
 
-# Advance `run` by up to `stop_after` updates, with checkpoints as for the
-# minibatch engine (`_brm_svi_fit!`). The progress message and interrupt
+# Advance `run` by up to `stop_after` updates, with checkpoints and snapshots as
+# for the minibatch engine (`_brm_svi_fit!`). The progress message and interrupt
 # check come every 50 updates and at the last.
 function _brm_svi_fit!(run::_BRMSVILaplaceRun,t,c;stop_after=typemax(Int),
-        checkpoint_every=50,save=nothing,snapshot=identity,node=nothing)
-    commit()=save===nothing || save(snapshot(run))
+        checkpoint_every=50,save=nothing,checkpoint=identity,node=nothing,
+        observe=nothing,observe_every=50)
+    commit()=save===nothing || save(checkpoint(run))
     taken=0
     while !_brm_svi_finished(run,c) && taken<stop_after
         k=run.iteration+1
@@ -69,15 +70,35 @@ function _brm_svi_fit!(run::_BRMSVILaplaceRun,t,c;stop_after=typemax(Int),
                 _brm_throw_if_interrupted(node)
             catch
                 commit()
+                observe===nothing || observe(:interrupted)
                 rethrow()
             end
             _brm_update_progress!(node,"conditional Gaussian SVI update $k/$(c.max_iterations)")
         end
-        save===nothing || k%checkpoint_every!=0 || _brm_svi_finished(run,c) ||
-            taken>=stop_after || commit()
+        (_brm_svi_finished(run,c) || taken>=stop_after) && continue
+        save===nothing || k%checkpoint_every!=0 || commit()
+        observe===nothing || k%observe_every!=0 || observe(:running)
     end
     commit()
+    observe===nothing || observe(_brm_svi_finished(run,c) ? :max_iterations : :stopped)
     run
+end
+
+# A fixed budget has no stopping rule, so its end status is only ever the budget.
+# The draws evaluate the target, which counts in the run's own containers during
+# optimization, so what they count is taken back afterwards.
+function _brm_svi_snapshot_run(run::_BRMSVILaplaceRun,t,c,draws)
+    fit=_brm_svi_laplace_result(run,c)
+    counts,numerical=copy(t.counts),copy(t.numerical)
+    output=_brm_svi_draws(copy(something(run.draw_rng,run.rng)),t,fit.q,draws)
+    t.counts.=counts;merge!(empty!(t.numerical),numerical)
+    n=run.iteration
+    (;iteration=n,max_iterations=c.max_iterations,phase=:fixed_budget,
+        q_kind=isempty(fit.averaging_window) ? :raw_iterate : :window_average,
+        averaged_iterations=length(fit.averaging_window),
+        q=(;fit.q.μ,fit.q.ρ,fit.q.Β,fit.q.M,fit.q.Λ,fit.q.U),
+        elbo_windows=[mean(view(run.elbo,i:min(i+49,n))) for i in 1:50:n],
+        elbo=isempty(run.elbo) ? nothing : last(run.elbo),draws=output)
 end
 
 # The result of a run so far: its global factor at the mean of the averaging
@@ -150,10 +171,12 @@ end
 # stopped run's draws never change its continuation.
 function _brm_svi_laplace_drive(init,save,x,previous,method;caller,description,
         ndraws=1000,stop_after=nothing,checkpoint_every=nothing,progress=nothing,
+        snapshot=nothing,snapshot_every=nothing,snapshot_draws=0,
         ad_backend=nothing,shared_point=nothing,subject_group=nothing,
         nested_groups=NamedTuple(),shared_groups=(),unit_partition=nothing,check_lowered=Returns(nothing))
     ndraws isa Integer && ndraws>=0 || throw(ArgumentError("GaussianBlockLaplace: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller,save,stop_after,checkpoint_every)
+    _brm_svi_check_snapshot(caller,snapshot,snapshot_every,snapshot_draws)
     _brm_with_progress(progress;description) do node
         _brm_with_phases(node,_BRM_SVI_PHASES) do phases
             lowered=_brm_svi_lowered(x,phases.lower)
@@ -182,7 +205,9 @@ function _brm_svi_laplace_drive(init,save,x,previous,method;caller,description,
             seconds=@elapsed _brm_enter_phase(phases.fit) do phase
                 _brm_svi_fit!(run,t,c;stop_after=something(stop_after,typemax(Int)),
                     checkpoint_every=something(checkpoint_every,50),save,
-                    snapshot=_->_brm_svi_detach(state),node=phase)
+                    checkpoint=_->_brm_svi_detach(state),node=phase,
+                    observe=_brm_svi_observer(snapshot,t,state,snapshot_draws),
+                    observe_every=something(snapshot_every,50))
             end
             fit=_brm_svi_laplace_result(run,c)
             # The run's counts and records stop here; the draws count in the

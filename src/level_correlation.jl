@@ -117,11 +117,13 @@ end
 
 The resolved `cor = multigroup(Omega, tau)` of a grouped HSGP: the level
 correlation `base` (as for `cor = Omega`) and the Gram scale `tau`, either the
-name of a declared scalar parameter or a positive constant.
+name of a declared scalar parameter or a positive constant. `tau_source` names
+the data field holding a constant `tau`, which a program reads by that name.
 """
 struct _BRMMultigroupCorrelation
     base::_BRMLevelCorrelation
     tau::Union{Symbol,Float64}
+    tau_source::Union{Symbol,Nothing}
 end
 
 """
@@ -136,7 +138,8 @@ axis `k`, the approximation
 `inducing = (ux, uy)`, `positions` holds one entry per axis, `(; name, values)`
 with the data values or `nothing` for a declared vector parameter, and
 `n_points` their common length; otherwise `positions` is empty and `n_points`
-the grid's `k^D`.
+the grid's `k^D`. `lambda_source` names the data field holding a constant
+`lambda`, which a program reads by that name.
 """
 struct _BRMMultigroupCoordinates
     axes::Vector{Symbol}
@@ -147,6 +150,7 @@ struct _BRMMultigroupCoordinates
     c::Float64
     positions::Vector{NamedTuple{(:name, :values),Tuple{Symbol,Union{Nothing,Vector{Float64}}}}}
     n_points::Int
+    lambda_source::Union{Symbol,Nothing}
 end
 
 const _BRM_MULTIGROUP_COORDINATE_K = 20
@@ -166,8 +170,10 @@ function _brm_level_correlation(value::ExprColumn{typeof(multigroup)}; what::Abs
         "and a positive Gram scale, no keywords; or " *
         "`multigroup((x, y), lambda; k = $(_BRM_MULTIGROUP_COORDINATE_K))`: " *
         "the levels' coordinates and a positive spatial scale")
+    _brm_check_frozen_setting(:multigroup, :tau, last(args))
     _BRMMultigroupCorrelation(_brm_level_correlation(first(args); what, prefix),
-                              _brm_multigroup_scale(last(args), :tau; what, prefix))
+                              _brm_multigroup_scale(last(args), :tau; what, prefix),
+                              _brm_multigroup_scale_source(last(args)))
 end
 
 # `multigroup(coordinates, lambda; k)` names its coordinates as a tuple of
@@ -184,7 +190,7 @@ function _brm_multigroup_grid_size(value)
         return _brm_multigroup_position_count(getkwargs(value)[:inducing],
             length(first(getargs(value))); what="multigroup(coordinates, lambda; inducing)",
             prefix="BRM backend lowering")
-    k = get(getkwargs(value), :k, _BRM_MULTIGROUP_COORDINATE_K)
+    k = _brm_axis_option_value(get(getkwargs(value), :k, _BRM_MULTIGROUP_COORDINATE_K))
     k isa Integer && k >= 2 || error(
         "BRM backend lowering: `multigroup(coordinates, lambda; k)` needs an " *
         "integer `k >= 2` functions per axis, got `$(repr(k))`")
@@ -210,7 +216,11 @@ function _brm_multigroup_coordinates(value; what, prefix)
     method === :inducing && haskey(kw, :c) && error(
         "$prefix: `$what` takes the box factor `c` only with `method = :hsgp`; " *
         "the inducing grid spans the coordinates themselves")
-    c = get(kw, :c, _BRM_MULTIGROUP_HSGP_C)
+    for key in (:k, :c)
+        _brm_check_frozen_setting(:multigroup, key, get(kw, key, nothing))
+    end
+    length(args) == 2 && _brm_check_frozen_setting(:multigroup, :lambda, last(args))
+    c = _brm_axis_option_value(get(kw, :c, _BRM_MULTIGROUP_HSGP_C))
     c isa Real && isfinite(c) && c > 1 || error(
         "$prefix: `$what` needs a box factor `c > 1`, got `$(repr(c))`")
     fields = first(args)
@@ -229,7 +239,7 @@ function _brm_multigroup_coordinates(value; what, prefix)
     allequal(length.(columns)) || error(
         "$prefix: `$what` coordinate fields have different lengths " *
         "($(join(length.(columns), ", "))); each holds one value per level")
-    k = get(kw, :k, _BRM_MULTIGROUP_COORDINATE_K)
+    k = _brm_axis_option_value(get(kw, :k, _BRM_MULTIGROUP_COORDINATE_K))
     k isa Integer && k >= 2 || error(
         "$prefix: `$what` needs an integer `k >= 2` functions per axis, " *
         "got `$(repr(k))`")
@@ -240,8 +250,19 @@ function _brm_multigroup_coordinates(value; what, prefix)
                                   _brm_multigroup_scale(last(args), :lambda; what, prefix),
                               Int(k), method, Float64(c), positions,
                               isempty(positions) ? Int(k)^length(fields) :
-                                  _brm_multigroup_position_count(kw[:inducing], length(fields); what, prefix))
+                                  _brm_multigroup_position_count(kw[:inducing], length(fields); what, prefix),
+                              length(args) == 1 ? nothing : _brm_multigroup_scale_source(last(args)))
 end
+
+# The data fields a `multigroup` term's numbers read, each with the value the
+# fit used: `_brm_setting_fields` for its keywords and its scale.
+function _brm_multigroup_setting_fields(cor::ExprColumn{typeof(multigroup)})
+    args = getargs(cor)
+    fields = Pair{Symbol,Any}[_brm_setting_fields(getkwargs(cor), (:k, :c))...]
+    length(args) == 2 && append!(fields, _brm_setting_fields((; scale=last(args)), (:scale,)))
+    Tuple(fields)
+end
+_brm_multigroup_setting_fields(_cor) = ()
 
 # `lambda / r₀` at which a frequency the approximation cannot resolve has at
 # most 1/100 of the zero-frequency spectral amplitude: `exp(-ratio² / 4) = 1/100`.
@@ -358,6 +379,11 @@ _brm_multigroup_scale(value, label; what, prefix) = error(
     "$prefix: `$what` needs a declared scalar parameter or a positive " *
     "constant as `$label`, got `$(repr(value))`")
 _brm_multigroup_scale_noun(label) = label === :tau ? "Gram scale" : "spatial scale"
+# The data field holding a constant scale, so a program reads it by name instead
+# of holding its number (user principle `0ikeidi`). A parameter's name is the
+# scale itself.
+_brm_multigroup_scale_source(value) =
+    value isa NamedColumn && parent(value) isa DataColumn ? name(value) : nothing
 
 # A level correlation fits a grouping of `n_levels` levels exactly.
 _brm_check_level_correlation(lc::_BRMMultigroupCorrelation, n_levels::Integer; kwargs...) =
