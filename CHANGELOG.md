@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.243
+
+- Added: the NLME paths take a model whose `@plate` cell declares a latent
+  (`x ~ Normal(loc[i], s)`, one draw per cell or per entry) or calls a
+  function-style component, whose sampled locals are per cell. `brm_nlme_view`
+  reads those coordinates as `:shared_latent`, the reading a top-level vector's
+  entries get (`x[1:n] .~ Law`, read at the cell as `x[ids[i]]`): their law stays
+  in the population prior, they enter θ (or are fixed by `shared_point`), each
+  unit's conditional likelihood reads its own cells' latents, and `brm_svi_fit`
+  gives each cell's coordinates, with their prior factors, to the unit whose cells
+  read them. Before, `brm_nlme_view` refused with "coordinate record kind
+  `cell_latent` has no NLME role". A cell latent whose law reads the units' draws
+  (`x ~ Normal(m[i] .+ loc[i], s)` with `m ~ 1 + (1 | g)`) is refused by name,
+  as a submodel's is; the message names the same model written without that
+  read (`d ~ Normal(loc[i], s)`, then `x = m[i] .+ d`) (snag
+  `brm-nlme-view-re-ed98959b`).
+
 ## 0.2.242
 
 - Added: `brm_svi_fit` settles before it polishes. Exploration's stop test finds

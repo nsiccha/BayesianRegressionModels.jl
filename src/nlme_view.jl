@@ -44,10 +44,11 @@ unconstrained coordinate vector (`coordinates`, in packed order).
   monotonic simplexes, ordinal thresholds and vector parameters),
   `:shared_latent` (sampled coordinates shared by the units: HSGP components,
   missing-value completions, submodels, `car(...)` fields (only their separator
-  draws, scale and mixing share when lowered with `car_units`), and every
-  coordinate of a random-effect block over a grouping in `shared_groups`; a
-  grouped HSGP or `cdar` walk whose levels are the units shares only its
-  hyperparameters),
+  draws, scale and mixing share when lowered with `car_units`), the latents a
+  `@plate` cell declares and the sampled locals of a component called in a
+  cell, and every coordinate of a random-effect block over a grouping in
+  `shared_groups`; a grouped HSGP or `cdar` walk whose levels are the units
+  shares only its hyperparameters),
   `:scalar` (other sampled scalars such as residual scales),
   `:subject_scale` / `:subject_correlation` (the random-effect scales and
   Cholesky correlation factors, i.e. Ω), or `:subject_effect` /
@@ -505,7 +506,14 @@ that prior term while the lockstep gradient carries it. Lowered
 non-centered, such a completion's missing entries are unit draws observing
 their law's density in their unit's conditional; the fits that take a `@brm`
 model ([`brm_nlme_fit`](@ref), `brm_two_stage_fit`, `brm_svi_fit`) lower
-exactly those completions non-centered themselves. A declaration of zero
+exactly those completions non-centered themselves. A latent a `@plate` cell
+declares (`x ~ Normal(loc[i], s)`, brm-use `kernel.md`), and the sampled locals
+of a component called in a cell, are `:shared_latent` coordinates, read as the
+entries of a top-level vector `x[1:n] .~ Law` are: their authored law stays in
+the population prior, they enter θ (or are fixed by `shared_point`), and
+`brm_svi_fit` gives each cell's coordinates to the unit whose cells read them.
+A cell latent whose law reads the units' draws is refused like such a submodel.
+A declaration of zero
 length, such as the coefficient block of a single-level treatment-coded factor,
 owns no coordinate and is not a refusal. See [`BRMNLMEView`](@ref).
 
@@ -543,8 +551,9 @@ end
 # route reads it exactly, and they disagree silently (snag
 # brm-nlme-loglike-7c4b209b). The factors scanned are those owned by shared
 # latents, and only in a model with a shared latent sampled under a law the
-# model's author wrote: a centred completion's missing entries or a
-# submodel's declarations. BRM's own shared constructions (HSGP components,
+# model's author wrote: a centred completion's missing entries, a submodel's
+# declarations, or a `@plate` cell's latents and its components' sampled
+# locals. BRM's own shared constructions (HSGP components,
 # crossed random effects, fields, walks) have priors that read their
 # hyperparameters only. Population, scalar and Ω priors are not scanned:
 # their laws are written in numbers and population coordinates. The catalogue
@@ -552,7 +561,8 @@ end
 # the regional panel, and seconds after that.
 function _brm_nlme_unit_reading_priors(backend::RKBRMI, view)
     none = Pair{Symbol,Int}[]
-    any(r -> r.kind === :submodel || (r.kind === :missing_value && !r.noncentered),
+    any(r -> r.kind in (:submodel, :cell_latent, :cell_component) ||
+            (r.kind === :missing_value && !r.noncentered),
         _brm_nlme_records(backend.plan)) || return none
     shared = view.role .=== :shared_latent
     any(shared) || return none
@@ -574,6 +584,13 @@ function _brm_nlme_unit_reading_completions(backend::RKBRMI, readers)
     unique!(Symbol[declarations[site] for (site, _) in readers if haskey(declarations, site)])
 end
 
+# The `@plate` cell latents among those factors' sites, by authored name.
+function _brm_nlme_unit_reading_cell_latents(backend::RKBRMI, readers)
+    declarations = Dict{Symbol,Symbol}(record.declaration => record.name
+        for record in _brm_nlme_records(backend.plan) if record.kind === :cell_latent)
+    unique!(Symbol[declarations[site] for (site, _) in readers if haskey(declarations, site)])
+end
+
 function _brm_nlme_refuse_unit_reading_priors(backend::RKBRMI, view)
     readers = _brm_nlme_unit_reading_priors(backend, view)
     isempty(readers) && return nothing
@@ -591,6 +608,18 @@ function _brm_nlme_refuse_unit_reading_priors(backend::RKBRMI, view)
             "missing entries are then unit draws observing their density; " *
             "`brm_nlme_fit`, `brm_two_stage_fit` and `brm_svi_fit` do so " *
             "themselves when given the `@brm` model.")
+    end
+    latents = _brm_nlme_unit_reading_cell_latents(backend, readers)
+    if !isempty(latents)
+        _brm_nlme_error("brm_nlme_view: the law of the `@plate` cell latent " *
+            join(("`$name`" for name in latents), ", ") * " reads the units' " *
+            "draws (such as a per-cell predictor with a random effect, `m[i]`): " *
+            "its density is a prior term on shared coordinates, which each unit's " *
+            "conditional omits while the lockstep gradient carries it, so no NLME " *
+            "route reads it exactly. For a location law, keep the part of the " *
+            "location that reads no unit draw in the law and add the rest where " *
+            "the cell reads the latent (`d ~ Normal(loc[i], s)`, then " *
+            "`x = m[i] .+ d`): the same model, whose law reads no unit draw.")
     end
     _brm_nlme_error("brm_nlme_view: the prior of the shared " *
         join(("`$site` ($n " * (n == 1 ? "entry" : "entries") * ")" for (site, n) in readers),
@@ -1050,6 +1079,19 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             for (i, name) in enumerate(names)
                 _brm_nlme_owned(name, record.target) && claim!(i, :shared_latent)
             end
+        elseif kind in (:cell_latent, :cell_component)
+            # A latent a `@plate` cell declares (`x ~ Law(...)`, one draw per
+            # cell or per entry, `x.<cell>…`), or the sampled locals of a
+            # function-style component called in a cell (`cell.<name>.<cell>`).
+            # Its law is authored and stays in the model's prior, so it is no
+            # draw of the estimators' Gaussian unit family: it is shared, read
+            # like a completion's or a submodel's coordinates, the same reading
+            # the entries of a top-level vector `x[1:n] .~ Law` get. SVI's
+            # ownership then gives each cell's coordinates to the unit whose
+            # cells read them, with their prior factors (`_brm_svi_ownership`).
+            # A law reading the units' draws is refused below
+            # (`_brm_nlme_refuse_unit_reading_priors`).
+            claim_declaration!(record.declaration, :shared_latent)
         elseif kind === :car && get(record, :separation, nothing) === nothing
             # An areal field couples its areas through its edges, so the
             # whole field is shared by the subjects, whatever its area column.
@@ -1116,8 +1158,9 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
         "$(join(string.(unclaimed), ", ")). The view reads population " *
         "coefficients, scalars and vectors, random-effect blocks on a plain " *
         "`(... | group)` or stratified `gr(group, by=stratum)` grouping, HSGP " *
-        "terms, `cdar` walks, `car(...)` fields, missing-value completions and " *
-        "submodels; other terms, such as `mm(...)` blocks, file no coordinate record.")
+        "terms, `cdar` walks, `car(...)` fields, missing-value completions, " *
+        "submodels and `@plate` cell latents; other terms, such as `mm(...)` " *
+        "blocks, file no coordinate record.")
     labels = map(_brm_transport_level, backend.plan.columns[group])
     # Build row ownership once, rather than scanning every row for each subject.
     row_index = Dict(_brm_transport_level(level) => i for (i, level) in enumerate(levels))
