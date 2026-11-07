@@ -195,7 +195,7 @@ _rk_input_bindings(_plan) = Dict{Symbol,Any}()
 _rk_input_bindings(plan::_RKStructuralPlan) = plan.inputs
 _rk_generated_inputs(_plan) = Dict{Symbol,Any}()
 function _rk_generated_inputs(plan::_RKStructuralPlan)
-    inputs = Dict{Symbol,Any}()
+    inputs = Dict{Symbol,Any}(name => entry.value for (name, entry) in plan.prior_reads)
     for bucket in plan.ranef_buckets
         bucket.eta_input isa Symbol && !haskey(plan.inputs, bucket.eta_input) &&
             (inputs[bucket.eta_input] = bucket.lkj_eta)
@@ -268,6 +268,7 @@ function _rk_lower_assignment_expr(node, name::Symbol)
     lowered = map(node.args) do arg
         _rk_lower_assignment_expr(arg, name)
     end
+    node.callable === getindex && return Expr(:ref, lowered...)
     Expr(:call, nameof(node.callable), lowered...)
 end
 
@@ -323,6 +324,7 @@ _rk_fit_of(_fit_sources, value) = value
 function _rk_ast_horseshoe_block!(definitions, taken, local_scale, tau, ratio)
     block = _rk_block_body()
     global_scale = _rk_block_argument!(block, :tau, tau)
+    local_scale isa Symbol && (local_scale = _rk_block_argument!(block, :local_scale, local_scale))
     lambda, raw = _rk_block_local!(block, :lambda), _rk_block_local!(block, :raw)
     push!(block.statements, Expr(:call, :~, lambda, Expr(:call, :HalfCauchy, local_scale)),
         Expr(:call, :~, raw, Expr(:call, :Normal, 0, 1)))
@@ -1309,7 +1311,7 @@ function _rk_ast_vector_parameter(parameter::_RKVectorParameter)
             Expr(:call, :(:), 1, extent)), _rk_ast_broadcast_law(law))
     elseif parameter.family === :mvnormal
         return Expr(:call, :~, Expr(:ref, parameter.name,
-            Expr(:call, :(:), 1, parameter.size)),
+            Expr(:call, :(:), 1, something(parameter.extent, parameter.size))),
             Expr(:call, :MvNormal, parameter.args...))
     end
     parameter.family === :simplex_dirichlet || return nothing
@@ -1858,7 +1860,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     ranef_draws, ranef_effects = _rk_ast_ranef_names!(plan, taken)
     r2d2s = Dict(rp.predictor => rp for rp in plan.r2d2_priors)
     hs_priors = Dict((p.predictor, p.addressee) =>
-        (p.local_scale, p.global_scale) for p in plan.horseshoe_priors)
+        (something(p.local_source, p.local_scale), something(p.global_source, p.global_scale))
+        for p in plan.horseshoe_priors)
     hs_predictors =
         Set{Symbol}(p.predictor for p in plan.horseshoe_priors)
     response_for = Dict{Symbol,Symbol}()
@@ -1954,9 +1957,16 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         hs_tau = nothing
         hs_scale = 1.0
         if predictor.name in hs_predictors
-            scales = [p.global_scale for p in plan.horseshoe_priors
-                if p.predictor === predictor.name]
-            hs_scale = all(==(first(scales)), scales) ? first(scales) : 1.0
+            scales = [something(p.global_source, p.global_scale)
+                for p in plan.horseshoe_priors if p.predictor === predictor.name]
+            shared = all(==(first(scales)), scales)
+            # A coefficient's ratio to the shared scale reads no law, so a frozen
+            # replay could not see a data field change it.
+            shared || !any(scale -> scale isa Symbol, scales) || error(
+                "RK backend: predictor `$(predictor.name)` reads its Horseshoe " *
+                "`global_scale`s from different values ($(join(unique(scales), ", "))); " *
+                "give its terms one data field, or literal scales")
+            hs_scale = shared ? first(scales) : 1.0
             hs_tau = _rk_ast_fresh_name(string(predictor.name, "_tau"), taken)
             push!(stmts, Expr(:call, :~, hs_tau, Expr(:call, :HalfCauchy, hs_scale)))
         end
@@ -2153,8 +2163,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     coef = _rk_ast_coef_name(
                         string(predictor.name, "_", term.addressee), taken)
                     coefs[index] = coef
+                    ratio = hs_scale isa Symbol ? 1.0 : hs_spec[2] / hs_scale
                     push!(scalar_stmts, Expr(:call, :~, coef, _rk_ast_horseshoe_block!(
-                        defs, taken, hs_spec[1], hs_tau, hs_spec[2] / hs_scale)))
+                        defs, taken, hs_spec[1], hs_tau, ratio)))
                 else
                     push!(scalar_stmts, scalar_coefficient!(index, term, override))
                 end

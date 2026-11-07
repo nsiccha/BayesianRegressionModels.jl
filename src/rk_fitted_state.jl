@@ -32,7 +32,8 @@ what [`brm_fitted_state`](@ref) returns. It holds
   spline fits), keyed by what they fit;
 - `constants`: the `name = constant(expr)` values;
 - `scalars`: numeric scalar data inputs, including prior arguments and inputs
-  of `constant(...)`. Omitted fields take these fitted values; a supplied prior
+  of `constant(...)`, and the data arrays only a prior reads. Omitted fields take
+  these fitted values; a supplied prior
   argument must equal its fitted value, literal or read by name in the program;
 - `declaration`: the authored model (`show(brm_source(rk))`), which a replay's
   model must repeat;
@@ -90,7 +91,7 @@ function brm_fitted_state(rk::RKBRMI)
 end
 
 _rk_fitted_scalars(rk::RKBRMI) = rk.fitted === nothing ?
-    _rk_scalar_data(parent(rk)) : deepcopy(rk.fitted.state.scalars)
+    _rk_replay_scalars(rk) : deepcopy(rk.fitted.state.scalars)
 
 function _rk_fitted_column_types(rk::RKBRMI)
     columns = rk.fitted === nothing ? Dict{Symbol,Any}() : copy(rk.fitted.state.columns)

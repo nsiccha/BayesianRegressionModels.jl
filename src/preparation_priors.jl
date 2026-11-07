@@ -37,6 +37,17 @@ function _brm_horseshoe_spec(target, args, kwargs; prefix="BRM preparation")
                                        get(kwargs, :global_scale, 1.0); prefix))
 end
 
+# A structured Horseshoe's scale for a backend that plans its coefficients: the
+# validated number, a literal's or a data field's, and that field's name, which a
+# program reads instead of the number (user principle `0ikeidi`). `nothing` when it
+# holds neither, as a sampled value does.
+function _brm_horseshoe_structured_scale(target, key, scale; prefix)
+    number = _brm_axis_option_value(scale)
+    number isa Real || return nothing
+    (; number=_brm_horseshoe_scale(target, key, number; prefix),
+       source=scale isa NamedColumn ? name(scale) : nothing)
+end
+
 # Shape/support traits describe distributions and composition, rather than a
 # catalogue of constructors accepted by one backend.
 _brm_distribution_shape(::Type{D}, _args) where {D<:Distribution} =
