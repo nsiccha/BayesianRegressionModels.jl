@@ -400,8 +400,12 @@ end
     groups = (; subject_group=:subject)
     full = brm_nlme_model(RKBRMI(svi_slice_ridge_model(data)); ad_backend=SLICE_AD, groups...)
     opts = (; batch_size=4, ndraws=0)
+    # A slice's rank part steps in units of its coordinates' scales (BRM 0.2.242),
+    # here a few hundredths along a ridge whose sd is near 0.8, so the ridge needs a
+    # longer exploration than the default 40 windows: at the default the slices'
+    # ridge sds read 0.18-0.24 and the joint start lands 0.3-0.76 sds off.
     slices = [brm_svi_fit(svi_slice_ridge_model(svi_slice_rows(data, data.region .== r));
-        rng=Xoshiro(10 + k), family=LowRankGlobal(2), opts..., groups...)
+        rng=Xoshiro(10 + k), family=LowRankGlobal(2), min_windows=200, opts..., groups...)
         for (k, r) in enumerate(("plus", "minus"))]
     # Each slice is a ridge: "plus" pins a + b, "minus" pins a - b.
     for (fit, sign) in zip(slices, (-1, 1))

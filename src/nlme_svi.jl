@@ -535,10 +535,12 @@ function _brm_svi_global_gradient(q, w, ε, η)
     vcat(w, gρ, vec(gΒ))
 end
 
-# A scale-preconditioned ("whitened") global step for polishing: μ moves in
-# units of a square root of the global covariance and each Β row in units of
-# its scale, so Adam's step size means a fraction of the current posterior
-# scale, which stays meaningful when a global's posterior sd shrinks like 1/√N.
+# A scale-preconditioned ("whitened") step: μ moves in units of a square root of
+# the factor's covariance and each Β row in units of its scale, so Adam's step
+# size means a fraction of the current posterior scale, which stays meaningful
+# when a global's posterior sd shrinks like 1/√N. It polishes a mean-field global
+# factor (`_brm_svi_polish_global_step!`) and steps a structured unit factor
+# (`_brm_svi_lowrank_step!`).
 function _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip=Inf)
     D = length(q.μ)
     C = _brm_svi_global_sqrt(_brm_svi_global_geometry(q))
@@ -551,6 +553,65 @@ function _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip=Inf)
     _brm_svi_step!(opt, step, grad, lr; clip)
     x[1:D] .+= _brm_svi_global_sqrt_mul(C, view(step, 1:D))
     x[rest] .+= scale .* view(step, rest)
+    x
+end
+
+# The exploration step: Adam on [μ; ρ; Β] at a constant step size, with each Β
+# row in units of its coordinate's scale exp(ρ_k), as polishing steps it. μ and
+# ρ step as they always have, so a `MeanFieldGlobal` run is unchanged to the
+# last bit.
+#
+# Β's gradient w ηᵀ carries the minibatch noise of w, all of it independent of
+# Β, so in most coordinates Adam's normalized step is a random walk of about a
+# step size per iteration. A step of `lr_global` in absolute units, the same for
+# every coordinate, moved Β's entries by about 0.2 in 400 iterations and 0.45 in
+# 15,000, with rows several times the scale of a coordinate whose sd is 0.03:
+# marginal variances 10 to 25 times the factor's own and correlations the target
+# has no use for. On a model whose log-scale hyperparameters overflow a few sds
+# out, the trimmed ELBO then fell after some 8,000 iterations and typical draws
+# reached a non-finite density (4 of 4 fits, at 12,000 to 21,000 iterations; ρ
+# moves on the log scale, so a mean-field factor never walks off that way). In
+# units of exp(ρ_k) the walk is a fraction of each coordinate's own scale, and Β
+# grows only where the gradient keeps pushing it.
+function _brm_svi_exploration_global_step!(opt, q, x, grad, lr; clip=Inf)
+    r = size(q.Β, 2)
+    r == 0 && return _brm_svi_step!(opt, x, grad, lr; clip)
+    D = length(q.μ)
+    scale = repeat(exp.(q.ρ), r)
+    rank = 2D+1:length(x)
+    grad = copy(grad)
+    grad[rank] .*= scale
+    step = zeros(length(x))
+    _brm_svi_step!(opt, step, grad, lr; clip)
+    x[1:2D] .+= view(step, 1:2D)
+    x[rank] .+= scale .* view(step, rank)
+    x
+end
+
+# The settling and polishing step of the global factor. With no rank part it is
+# `_brm_svi_whitened_global_step!`, unchanged. With one, μ moves in units of its
+# diagonal scale exp(ρ_k), as Β's rows do, instead of a square root of the whole
+# covariance.
+#
+# Settling restarts Adam, and a fresh Adam's first steps are about ± its step
+# size in every coordinate it steps. Whitened by the covariance root, those
+# coordinates mix the rank part's directions, and the steps add up along each of
+# them: up to √D step sizes of q's own sd at once where the gradient's signs agree
+# with a column. On ODL's Bayern slice (1,094 globals, rank 8) the trimmed ELBO
+# fell from 51,500 at the end of exploration to 15,000-25,000 within a few
+# hundred polishing iterations (BRM 0.2.241, before settling, when polishing
+# restarted Adam), and Niedersachsen and Rheinland-Pfalz evaluated non-finite
+# draws there. In units of exp(ρ) it stayed at 48,400-50,100 from the same state.
+# The structured unit factors' Adam keeps the whitened step.
+function _brm_svi_polish_global_step!(opt, q, x, grad, lr; clip=Inf)
+    r = size(q.Β, 2)
+    r == 0 && return _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip)
+    D = length(q.μ)
+    s = exp.(q.ρ)
+    scale = vcat(s, ones(D), repeat(s, r))
+    step = zeros(length(x))
+    _brm_svi_step!(opt, step, grad .* scale, lr; clip)
+    x .+= scale .* step
     x
 end
 
@@ -798,8 +859,8 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     # carries weight about 1 / π, so its coordinates' gradients are about √w times
     # their rms when drawn, and the batch's largest weight bounds every unit in it.
     clip = _BRM_SVI_GLOBAL_CLIP * sqrt(maximum(weights))
-    whiten ? _brm_svi_whitened_global_step!(global_opt, q, x, grad, lr_global; clip) :
-        _brm_svi_step!(global_opt, x, grad, lr_global; clip)
+    whiten ? _brm_svi_polish_global_step!(global_opt, q, x, grad, lr_global; clip) :
+        _brm_svi_exploration_global_step!(global_opt, q, x, grad, lr_global; clip)
     _brm_svi_set_global!(q, x)
     _brm_svi_each_unit(t.plans, length(batch)) do _, k
         _brm_svi_unit_step!(q, batch[k], terms[k].gz, terms[k].gd, draws[k], β)
