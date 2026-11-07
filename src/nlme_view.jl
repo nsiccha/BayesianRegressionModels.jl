@@ -1,3 +1,5 @@
+include("nlme_selection.jl")
+
 # src/nlme_view.jl — the nonlinear-mixed-effects reading of an RK-lowered model.
 #
 # NLME estimators (posthoc/EBE, FOCEI, SAEM; the separate NLMEEstimation
@@ -1892,7 +1894,7 @@ end
 
 # BRM owns the packed-coordinate attribution, including nested/ragged blocks.
 # Structural reads may include shared values and this unit's effects only.
-function _brm_nlme_check_partition_ownership(view::BRMNLMEView, i, footprint)
+function _brm_nlme_check_partition_ownership(view, i, footprint)
     foreign = [j for j in footprint if view.subject[j] != 0 && view.subject[j] != i]
     isempty(foreign) && return nothing
     names = join(string.(view.coordinates[foreign]), ", ")
@@ -2083,7 +2085,7 @@ end
 function _brm_nlme_partition_plan(partition, unit, globals, view;
         units=view.subject_coordinates)
     sampler = _rk_nlme_partition_sampler(partition.context, unit)
-    indices = [sort!(vcat(globals, block)) for block in units]
+    indices = [_brm_nlme_unit_selection(globals, block) for block in units]
     footprints = map(eachindex(indices)) do i
         i in partition.labels || return Int[]
         footprint = _rk_nlme_partition_footprint(sampler, i)

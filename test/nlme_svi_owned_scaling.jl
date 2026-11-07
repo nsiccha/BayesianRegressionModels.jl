@@ -37,7 +37,8 @@ end
             fill!(gz, 0)
             BRM._brm_svi_unit_prior!(gg, gz, t.prior, t, 1, g, z)
         end
-        packed = vcat(g, z)[t.order[1]]
+        packed = zeros(length(g) + length(z))
+        BRM._brm_svi_joint!(packed, t.layouts[1], g, z)
         packed_gradient = similar(packed)
         likelihood_work = owned_work_measure() do
             BRM._brm_nlme_partition_sum!(packed_gradient, t.plan, m.unit, 1, packed)
