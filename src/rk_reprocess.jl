@@ -93,7 +93,7 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
         for name in _rk_response_names(rk.plan)
         if haskey(training, name) && !_brm_df_has_column(new_data, name))
     merge!(absent, _rk_car_fitted_edges(parent(rk), new_data, training))
-    merge!(absent, _rk_omitted_scalars(_rk_scalar_data(parent(rk)), new_data))
+    merge!(absent, _rk_omitted_scalars(_rk_replay_scalars(rk), new_data))
     rebound = _brm_rebind_brmi(parent(rk), _BRMReplayData(new_data, absent))
     _, fitted = _brm_resolve_constants(parent(rk); prefix)
     constants = Dict{Symbol,Any}(c.name => c.value for c in fitted)
@@ -352,6 +352,8 @@ end
 # change; where the program reads it by name, `_rk_check_replay_priors` does.
 _rk_scalar_data(brmi::BRMI) = Dict{Symbol,Any}(name => deepcopy(value)
     for (name, value) in _rk_training_columns(brmi) if value isa Real)
+_rk_replay_scalars(rk) = merge(_rk_scalar_data(parent(rk)),
+    _rk_prior_arrays(rk.plan, _rk_training_columns(parent(rk))))
 _rk_omitted_scalars(scalars, new_data) = Dict{Symbol,Any}(name => value
     for (name, value) in scalars if !_brm_df_has_column(new_data, name))
 
@@ -497,7 +499,7 @@ function _rk_unlocated(x::Expr)
 end
 
 # A statement stored with its macro calls' places (a fitted state exported
-# before 0.2.227), as `_rk_program_statements` now writes it.
+# before 0.2.228), as `_rk_program_statements` now writes it.
 _rk_unlocated_statement(statement::AbstractString) =
     replace(statement, r"#= (?:line \d+|[^\n]*?:\d+) =#" => "#= line 0 =#")
 
@@ -565,7 +567,7 @@ function _brm_rk_binding_identity(rk, tag; stable=true)
 end
 
 # The same identity by component, callables by name and data by column, so a
-# difference can be named. Format 2 (0.2.227) digests the program without its
+# difference can be named. Format 2 (0.2.228) digests the program without its
 # macro calls' places; parts without `format` hold the digest with them.
 function _brm_rk_binding_parts(rk)
     emitted = _rk_retained_program(rk)

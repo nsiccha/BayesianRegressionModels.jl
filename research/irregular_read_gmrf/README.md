@@ -85,8 +85,11 @@ Its two-channel control uses independent channels.
 the small native reverse checks pass, with sampled LKJ correlation for multiple
 channels. It also compares the native Reverse gradient with central differences
 of the native primal along two unit directions: a dense one, and one
-concentrated on the hyperparameter and correlation coordinates. Its existence
-is not a passed measurement.
+concentrated on the hyperparameter and correlation coordinates. Each direction
+prints the relative error at steps `1e-2` to `1e-5` and must agree within `1e-4`
+at one of them, because rounding in a density of this size divided by the
+smallest step can exceed that tolerance. Its existence is not a passed
+measurement.
 
 The small backend tests separately cover compiled Stan, sampled LKJ channels,
 coordinate transport, nonlinear read locality, multiple fields and replay.

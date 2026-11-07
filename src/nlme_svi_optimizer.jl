@@ -153,7 +153,7 @@ _brm_svi_backend(m::BRMNLMEModel) = m.backend
 # Reads only the lowered backend, so a different model is refused before its
 # preparation. A checkpoint older than `binding_parts` holds only the combined
 # digest, for a generated callable the one of its generated name. Parts before
-# format 2 (0.2.227) digest the program with the file and line of each macro
+# format 2 (0.2.228) digest the program with the file and line of each macro
 # call, which only the installation that wrote them reproduces.
 function _brm_svi_check_binding(rk, saved)
     if hasproperty(saved, :binding_parts)

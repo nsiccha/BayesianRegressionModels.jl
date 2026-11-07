@@ -96,23 +96,27 @@ function _brm_multigroup_coordinate_term(d::BRMDescriptor, predictor)
     k = x.keywords
     data = d.plan.data
     coordinates = data[k.coordinates_level]
+    # A constant `lambda` held in a data field is read by that name.
+    lambda = haskey(k, :lambda_level) ? get(data, k.lambda_level, k.lambda_level) :
+        _brm_multigroup_own_lambda(x.target)
     common = (; target=x.target, predictor=_brm_multigroup_term_predictor(d, x),
         iso=_brm_multigroup_iso(x),
         omega2=_brm_multigroup_matrix(data[k.omega2]),
         fits=d.plan.preproc[k.PHI].const_.fits, K=d.plan.preproc[k.PHI].const_.K,
         coordinates, block=k.beta, n_basis=size(data[k.omega2], 1),
         # a declared or constant `lambda`, or the term's own (`<term>_lambda`)
-        lambda=haskey(k, :lambda_level) ? k.lambda_level : _brm_multigroup_own_lambda(x.target))
+        lambda)
     if _brm_multigroup_free(x)
         n_points = _brm_multigroup_position_rows(k.positions_level, data)
         return (; common..., free=true, positions=k.positions_level, data, n_points,
                 r_min=brm_multigroup_inducing_resolution(coordinates, n_points))
     end
+    grid_k = data[k.k_level]
     (; common..., free=false, center=data[k.center_level], scale=data[k.scale_level],
        r_min=_brm_multigroup_resolution(_brm_multigroup_approximation(k.method_level),
-                                        data[k.center_level], data[k.scale_level], k.k_level),
-       grid_k=k.k_level, method=k.method_level,
-       n_points=k.k_level^size(coordinates, 2))
+                                        data[k.center_level], data[k.scale_level], grid_k),
+       grid_k, method=k.method_level,
+       n_points=grid_k^size(coordinates, 2))
 end
 
 # Free inducing positions as emitted (src/sbimpl.jl `_sb_multigroup_positions!`):
