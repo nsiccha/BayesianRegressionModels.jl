@@ -223,10 +223,8 @@ end
     rows(label) = findall(==(label), unit)
     u = 0.1 .* sin.(1:fx.built.layout.total)
     labels = sort!(unique(unit))
-    # The spelling the guide gives for a model whose units own no coordinates:
-    # any parameter, with every level shared.
-    entry = first(fx.built.layout.entries)
-    shared = (entry.name => fill(missing, isempty(entry.dims) ? entry.size : first(entry.dims)),)
+    # Units that own no coordinate: every coordinate is shared (RKPPL 0.1.111).
+    shared = :none
     by = (; y=unit)
 
     query = prepare_partition(fx.built, fx.bound, :y; by, locality=:error, partitioned=shared, u0=u)
@@ -267,6 +265,19 @@ end
         for i in eachindex(u)
             @test unit_gradients[i, k] ≈ central(i, label) atol=2e-4 rtol=2e-5
         end
+    end
+
+    # A batch of units through the sampler: one shared pullback, the summed
+    # values and unit gradients, weighted per unit.
+    for batch_labels in (labels[1:1], labels[2:3], labels)
+        columns = findall(in(batch_labels), labels)
+        value, gradient = partition_batch_value_and_gradient!(sampler, zeros(length(u)), u, batch_labels)
+        @test value ≈ sum(oracle(u, rows(label)) for label in batch_labels) atol=1e-10
+        @test gradient ≈ vec(sum(unit_gradients[:, columns]; dims=2)) atol=1e-10
+        w = collect(1.0:length(batch_labels))
+        value, gradient = partition_batch_value_and_gradient!(sampler, zeros(length(u)), u, batch_labels; weights=w)
+        @test value ≈ sum(w[k] * oracle(u, rows(label)) for (k, label) in enumerate(batch_labels)) atol=1e-10
+        @test gradient ≈ unit_gradients[:, columns] * w atol=1e-10
     end
 
     # One pass over the batch's cells, one shared pullback, the same derivatives.
