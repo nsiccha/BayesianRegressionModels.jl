@@ -176,3 +176,26 @@ end
     @test all(isfinite, SU._brm_svi_draw_unit(fit.q, 2,
         SU._brm_svi_unit_noise(Xoshiro(52), fit.q.U[2])))
 end
+
+@testset "a dense factor's polishing average is not narrowed by the step's spread" begin
+    # One exact Gaussian unit of 40 coordinates (precision 2I) under the
+    # default schedule, the unit in every step. A visit changes the precision
+    # by up to 2.5-fold along one drawn direction, so an average of precisions
+    # is narrow: it returned sds of 0.75-0.77 times the truth here (snag
+    # svi-dense-unit-f-71edf0f6). The covariance average is not.
+    d = 40
+    t = SU.GaussianUnits([1], [collect(2:d+1)], (; footprints=[collect(1:d+1)]))
+    for seed in 1:3
+        q = SU._brm_svi_params(t, [0.0], SU.MeanFieldGlobal();
+            global_scale=1.0, unit_scale=1.0, unit_dense_limit=64)
+        fit = SU.arithmetic_fit(Xoshiro(seed), t, q; batch_size=1,
+            max_iterations=20_000, lr_global=0.01, unit_step=0.1, polish_lr=0.05,
+            window=100, patience=10, min_windows=40, polish_windows=20)
+        @test fit.converged
+        Λ = fit.q.Λ[1]
+        @test LowerTriangular(fit.q.U[1]) * LowerTriangular(fit.q.U[1])' ≈ Λ
+        sd_ratio = sqrt(tr(2 .* inv(Symmetric(Λ))) / d)
+        @test 0.93 < sd_ratio < 1.08
+        @test maximum(abs, fit.q.M[1] .- 1) < 1e-8
+    end
+end

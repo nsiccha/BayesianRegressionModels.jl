@@ -2865,6 +2865,14 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
 - `julia --project=test --threads=2 test/nlme_svi_weighted_resume.jl`: exact
   trajectories for uniform/work batches and dense/structured local factors,
   lazy polishing, thread-count changes and a fresh-process checkpoint resume.
+- `julia --project=test test/nlme_svi_cell_units.jl`: pure `cell_units`
+  ownership on a hand-built layout: which subjectless cells share a unit, what
+  may join them, `:first_unit`'s old layout, and cost linear in the supports.
+- `julia --project=test test/nlme_svi_cell_units_native.jl`: the same on
+  `research/svi_cell_units/toy.jl`'s sensor model: unit terms sum to the full
+  density and native gradient, separators, zero-dimensional units, fits,
+  resume from `:first_unit` checkpoints, streaming windows, row-counted `work`
+  and the refusal under `:subjects`. About 15-20 minutes on a busy host.
 - `julia --project=test --threads=2 test/nlme_svi_field_units.jl`: a read-pair
   field's states in units' own factors (`field_states=:units`). Unit and global
   terms add up to the whole model in value and gradient (`check_whole_model`).
