@@ -490,7 +490,8 @@ function _sb_replay_gmrf!(new_data, new_preproc, handled, key, e, df, freeze)
 end
 
 function _sb_predictor_term!(stmts, data, ::typeof(gmrf), term;
-        target::Symbol, term_overrides=Dict{Symbol,Any}(), kwargs...)
+        target::Symbol, term_overrides=Dict{Symbol,Any}(),
+        term_scope::Symbol=:population, kwargs...)
     arguments = _brm_gmrf_arguments(term)
     footprint = arguments.neighbors !== nothing
     multiresolution = arguments.multiresolution !== nothing
@@ -512,9 +513,8 @@ function _sb_predictor_term!(stmts, data, ::typeof(gmrf), term;
         merge(prepared.state, NamedTuple{prior_keys}(priors)), prepared.dependencies)
     state = prepared.state
     stem = Symbol("gmrf_", target, "_", join(prepared.source, "_"))
-    _sb_record_binding!(data, stem, :parameter, stem; family=:gmrf,
-        term_key=_brm_term_full_key(term), term_predictor=target,
-        term_label=stem, term_parameters=_BRM_GMRF_PARAMETER_BINDINGS)
+    _sb_record_term_binding!(data, stem, target, term; scope=term_scope,
+        family=:gmrf, term_label=stem, term_parameters=_BRM_GMRF_PARAMETER_BINDINGS)
     field_data = _sb_gmrf_data(prepared)
     keys_ = NamedTuple{keys(field_data)}(map(key -> Symbol(stem, :_, key), keys(field_data)))
     for (name, value) in pairs(field_data)

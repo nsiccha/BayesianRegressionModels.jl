@@ -204,6 +204,11 @@ function _rk_generated_inputs(plan::_RKStructuralPlan)
     end
     for predictor in plan.predictors, term in predictor.terms
         foreach(value -> _rk_level_factor_input!(inputs, value), values(term.options))
+        if term.kind in (:monotonic, :monotonic_summand)
+            inputs[term.options.level_input] = term.options.levels
+            inputs[term.options.alpha_input] = term.options.alpha
+            inputs[term.options.nincr_input] = length(term.options.alpha)
+        end
         term.kind === :factor && haskey(term.options, :level_input) || continue
         inputs[term.options.level_input] = collect(term.options.index_levels)
         inputs[term.options.extent_input] = length(term.options.labels)
@@ -1213,7 +1218,9 @@ function _rk_ast_emit_joint_monotonic!(definitions, statements, groups, taken, c
         entries = sort(group.entries; by=e -> e.column)
         priors = [entry.prior for entry in entries]
         call, betas = _rk_ast_joint_monotonic_component!(definitions, taken,
-            group.block, [entry.alpha for entry in entries], priors)
+            group.block, [entry.alpha for entry in entries], priors;
+            spelled=[entry.alpha_input for entry in entries],
+            nincr=first(entries).nincr_input)
         first_read = findfirst(s -> any(e -> s === e.read, entries), statements)
         insert!(statements, first_read, call)
         for (entry, beta) in zip(entries, betas)
@@ -1882,7 +1889,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             index_sources[term.options.index] = (only(term.columns),
                 _RKLevelInput(term.options.level_input))
         elseif term.kind in (:monotonic, :monotonic_summand)
-            index_sources[only(term.columns)] = (term.options.source, term.options.levels)
+            index_sources[only(term.columns)] = (term.options.source,
+                _RKLevelInput(term.options.level_input))
         elseif term.kind === :hsgp && haskey(term.options, :group_index)
             index_sources[term.options.group_index] =
                 (term.options.group_source,
@@ -1988,12 +1996,14 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     Expr(:ref, joint.group.block, joint.group.column, joint.column))
                 push!(stmts, read)
                 push!(joint.group.entries, (; column=joint.column, predictor=predictor.name,
-                    prior, beta, read, alpha=monotonic_alpha(term), start_term=term))
+                    prior, beta, read, alpha=monotonic_alpha(term),
+                    alpha_input=term.options.alpha_input,
+                    nincr_input=term.options.nincr_input, start_term=term))
                 return joint.name
             end
             name = _rk_ast_monotonic_component!(defs, stmts, taken,
                 _rk_ast_monotonic_name(term, predictor, taken), only(term.columns),
-                monotonic_alpha(term), prior)
+                term.options.alpha_input, prior)
             _rk_coordinate_record!(coordinates, (; kind=:monotonic,
                 declaration=name, predictor=predictor.name,
                 head, source=term.options.source, beta))
