@@ -2865,6 +2865,13 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
 - `julia --project=test --threads=2 test/nlme_svi_weighted_resume.jl`: exact
   trajectories for uniform/work batches and dense/structured local factors,
   lazy polishing, thread-count changes and a fresh-process checkpoint resume.
+- `julia --project=test --threads=2 test/nlme_svi_field_units.jl`: a read-pair
+  field's states in units' own factors (`field_states=:units`). Unit and global
+  terms add up to the whole model in value and gradient (`check_whole_model`).
+  The public fit resumes to the same trajectory and is the same at one or two
+  tasks. A held target is reused only under the same `field_states`, a resume
+  finds it again, and a `:units` snapshot loads without BRM. Mesh fields and
+  streaming windows are refused by name.
 
 ## Reusable model view
 

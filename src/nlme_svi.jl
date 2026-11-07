@@ -84,7 +84,12 @@ end
 
 function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=nothing,
         separator=nothing, max_unit_coordinates=4096, max_unit_work=1_000_000,
-        max_promoted_coordinates=128)
+        max_promoted_coordinates=128, field_states=:global)
+    field_states in (:global, :units) || throw(ArgumentError(
+        "brm_svi_fit: field_states must be :global or :units, got $(repr(field_states))"))
+    field_states === :units && previous !== nothing && throw(ArgumentError(
+        "brm_svi_fit: field_states=:units has no streaming form: a new window adds states the " *
+        "carried factors cannot name. Fit the window with field_states=:global, or refit"))
     m.cell_query === nothing && _brm_nlme_error(
         "brm_svi: minibatch SVI evaluates one subject at a time, on the " *
         "subject's own observation cells, and this model's observations have " *
@@ -97,26 +102,33 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
     policy = something(separator, connected ? :auto : :none)
     !connected && policy !== :none && throw(ArgumentError(
         "brm_svi_fit: automatic separators require unit_partition=:connected"))
+    inventory =field_states === :units ? _brm_svi_field_inventory(m) : ()
     ownership = connected ? _brm_svi_connected_ownership(m; global_coordinates, previous,
-        separator=policy, max_unit_coordinates, max_unit_work, max_promoted_coordinates) :
-        _brm_svi_ownership(m; global_coordinates, previous)
+        separator=policy, max_unit_coordinates, max_unit_work, max_promoted_coordinates,
+        fields=inventory) :
+        _brm_svi_ownership(m; global_coordinates, previous, fields=inventory)
     globals, units = ownership.globals, ownership.units
     # One strict partition sampler per worker; sparse selection metadata shares
     # globals and retains only each unit's local permutation and merge slots.
     partition, partition_view = connected ? _brm_svi_partition(m, ownership) :
         (m.cell_gradient, m.view)
     plan = _brm_nlme_partition_plan(partition, m.unit, globals, partition_view; units)
-    layouts = [(; selection.order, selection.slots) for selection in plan.indices]
-    width = length(globals) + maximum(length, units; init=0)
-    work = [(; values=zeros(width), gradient=zeros(width))]
+    places = _brm_svi_footprint_places(plan.footprints, globals, units, length(m.unit))
+    fields = isempty(inventory) ? nothing : _brm_svi_unit_fields(m, ownership, inventory, globals, units)
+    work = [_brm_svi_worker_buffers(globals, fields)]
     nz = count(==(:subject_effect), m.view.role)
     # Connected targets use selected authored buckets even for standardized
     # draws: the legacy global-prior path traverses every local prior at zero.
     prior = !connected && sum(length, units; init=0) == nz &&
         all(j -> m.view.role[j] === :subject_effect, Iterators.flatten(units)) ? nothing :
         _brm_svi_authored_prior(m, globals, units; factors=ownership.factors)
-    (; m, globals, units, ownership, previous, partition, plan, plans=[plan], work, layouts, prior,
-       z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
+    # Worker plans build their samplers from the partition's bound context, which is all
+    # the target keeps of it: a connected partition's value query, its footprints (the
+    # plan holds its own) and its evaluator pool are per unit and served the plan.
+    (; m, globals, units, ownership, previous, partition=(; partition.context), plan,
+       plans=[plan], work, places,
+       touched=_brm_svi_field_touched!(_brm_svi_touched_globals(places, prior), fields), prior,
+       fields, z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
 end
 
 # `t` with `n` partition plans, one per task that evaluates units. `t.plan` is
@@ -134,10 +146,8 @@ function _brm_svi_with_workers(t, n, progress=nothing; workers=typeof(t.plan)[])
             plan
         end
     end)
-    # Each task's point and gradient buffers; the first is the target's own.
-    width = length(first(t.work).values)
-    work = vcat([first(t.work)],
-        [(; values=zeros(width), gradient=zeros(width)) for _ in 1:n-1])
+    # Each task's global gradient and field buffers; the first is the target's own.
+    work = vcat([first(t.work)], [_brm_svi_worker_buffers(t.globals, t.fields) for _ in 1:n-1])
     merge(t, (; plans=vcat([t.plan], workers[1:n-1]), work))
 end
 
@@ -159,8 +169,12 @@ end
 # coordinates than were requested: its key is the request and the policy, which
 # is what a resume passes (`_brm_svi_identity`). A strict target's promoted set
 # is a closure of its request, so a request equal to it finds the same target.
+# `field_states` is part of the key too: under `:units` a read-pair field's states
+# sit in units' blocks and their prior is split by owner, so the two targets
+# differ in their units and prior.
 function _brm_svi_checkout!(m; global_coordinates, previous, separator=nothing,
-        max_unit_coordinates=4096, max_unit_work=1_000_000, max_promoted_coordinates=128)
+        max_unit_coordinates=4096, max_unit_work=1_000_000, max_promoted_coordinates=128,
+        field_states=:global)
     requested = _brm_svi_global_coordinates(m, global_coordinates)
     carry = previous === nothing ? nothing : _brm_value_digest(previous)
     connected = m.view.unit_partition === :connected
@@ -170,15 +184,15 @@ function _brm_svi_checkout!(m; global_coordinates, previous, separator=nothing,
     prepared = lock(slot.lock) do
         held = slot.prepared
         held !== nothing && isequal(held.carry, carry) && isequal(held.policy, policy) &&
-            (requested == held.requested || !connected &&
+            held.field_states === field_states && (requested == held.requested || !connected &&
                 requested == held.target.ownership.promoted) || return nothing
         slot.prepared = nothing
         held
     end
     prepared !== nothing && return prepared, true
     t = _brm_svi_target(m; global_coordinates, previous, separator, max_unit_coordinates,
-        max_unit_work, max_promoted_coordinates)
-    (; requested, carry, policy, target=t, workers=typeof(t.plan)[]), false
+        max_unit_work, max_promoted_coordinates, field_states)
+    (; requested, carry, policy, field_states, target=t, workers=typeof(t.plan)[]), false
 end
 
 function _brm_svi_checkin!(m, prepared)
@@ -225,6 +239,12 @@ end
 # P(g) and its gradient: the RK prior and log-Jacobian at the packed point with
 # every subject draw at zero, minus those draws' N(0, 1) constants.
 _brm_svi_global_term(t, g) = _brm_svi_global_term(t.prior, t, g)
+# With unit-owned field states, the conditionals of states no single unit owns.
+function _brm_svi_global_term(t::NamedTuple, g)
+    value, gradient = _brm_svi_global_term(t.prior, t, g)
+    get(t, :fields, nothing) === nothing && return value, gradient
+    value + _brm_svi_field_term!(gradient, Float64[], t, 0, Float64[], first(t.work)), gradient
+end
 function _brm_svi_global_term(::Nothing, t, g)
     u = t.prior_point
     u[t.globals] .= g
@@ -232,18 +252,45 @@ function _brm_svi_global_term(::Nothing, t, g)
     value - t.z_constant, gradient[t.globals]
 end
 
-# Each worker owns its plan and one G + max(d_i) workspace. Unit layout
-# metadata stores local positions only; globals are never repeated per unit.
+# Unit i's term with its gradients in `gg` (the globals) and `gz` (its block), both
+# overwritten: the whole of `gg`, so this costs the globals' length. An iteration
+# evaluates through `_brm_svi_unit_local!`, which does not.
 function _brm_svi_unit_term!(gg, gz, t, i, g, z, plan=t.plan, work=first(t.work))
-    D = length(t.globals)
-    layout = t.layouts[i]
-    values = view(work.values, 1:D+length(z))
-    gradient = view(work.gradient, 1:D+length(z))
-    _brm_svi_joint!(values, layout, g, z)
-    fill!(gradient, 0.0)
-    value = _brm_nlme_partition_sum!(gradient, plan, t.m.unit, i, values)
-    _brm_svi_split_gradient!(gg, gz, layout, gradient)
-    value + _brm_svi_unit_prior!(gg, gz, t.prior, t, i, g, z)
+    fill!(gg, 0.0)
+    fill!(gz, 0.0)
+    _brm_svi_unit_local!(gg, gz, t, i, g, z, plan, work)
+end
+# An analytic test target has only the term above.
+_brm_svi_unit_local!(gg, gz, t, i, g, z, plan, work) =
+    _brm_svi_unit_term!(gg, gz, t, i, g, z, plan, work)
+
+# The same, costing the unit's footprint and prior support, not the globals. It adds
+# into `gg` and `gz`, reads and writes only `t.places[i]` and `t.touched[i]`, and
+# restores the plan's point. The partition reads nothing else (`locality=:error`).
+function _brm_svi_unit_local!(gg, gz, t::NamedTuple, i, g, z, plan, work)
+    value = i in plan.labels ?
+        _brm_svi_partition_local!(gg, gz, plan, t.m.unit, plan.footprints[i], t.places[i], i, g, z) : 0.0
+    value + _brm_svi_unit_prior!(gg, gz, t.prior, t, i, g, z) +
+        _brm_svi_field_term!(gg, gz, t, i, z, work)
+end
+
+function _brm_svi_partition_local!(gg, gz, plan, unit, footprint, places, i, g, z)
+    point, gradient = plan.point, plan.gradients[i]
+    @inbounds for (k, j) in enumerate(footprint)
+        p = places[k]
+        p > 0 ? (point[j] = g[p]) : p < 0 && (point[j] = z[-p])
+    end
+    try
+        value = first(_rk_nlme_partition_value_and_gradient!(plan.sampler, gradient, point, i))
+        @inbounds for (k, p) in enumerate(places)
+            p > 0 ? (gg[p] += gradient[k]) : p < 0 && (gz[-p] += gradient[k])
+        end
+        value
+    finally
+        @inbounds for (k, j) in enumerate(footprint)
+            places[k] == 0 || (point[j] = unit[j])
+        end
+    end
 end
 
 # Unit i's prior term, its gradients added into `gg` (the globals) and `gz`
@@ -643,15 +690,16 @@ end
 
 # Unit i's terms at the antithetic pair `zs`: `nothing` when every value and
 # gradient is finite, else what was not. Gradient entries map to `t.globals`
-# (`ggs`) and `t.units[i]` (`gzs`).
-function _brm_svi_nonfinite_unit(t, i, g, zs, values, ggs, gzs)
-    all(isfinite, values) && all(x -> all(isfinite, x), ggs) &&
+# (`ggs`, read only at `touched`) and `t.units[i]` (`gzs`).
+function _brm_svi_nonfinite_unit(t, i, g, zs, values, ggs, gzs, touched=eachindex(t.globals))
+    finite(gg) = all(p -> isfinite(gg[p]), touched)
+    all(isfinite, values) && all(finite, ggs) &&
         all(x -> all(isfinite, x), gzs) && return nothing
     quantities, bad = Symbol[], Int[]
     for (side, v, gg, gz) in zip((:plus, :minus), values, ggs, gzs)
         isfinite(v) || push!(quantities, Symbol(:value_, side))
-        all(isfinite, gg) || (push!(quantities, Symbol(:global_gradient_, side));
-            append!(bad, t.globals[findall(!isfinite, gg)]))
+        finite(gg) || (push!(quantities, Symbol(:global_gradient_, side));
+            append!(bad, t.globals[filter(p -> !isfinite(gg[p]), collect(touched))]))
         all(isfinite, gz) || (push!(quantities, Symbol(:unit_gradient_, side));
             append!(bad, t.units[i][findall(!isfinite, gz)]))
     end
@@ -690,11 +738,14 @@ end
 # come from `rng` here, in batch order, before any unit is evaluated, each unit's
 # result stays in its own slot and is summed in batch order, and a unit's step
 # reads and writes only that unit's factor.
+_brm_svi_field_prepare!(rng, t, q, g, batch) = nothing
+
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false, weights=fill(length(t.units) / length(batch), length(batch)))
     D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
+    _brm_svi_field_prepare!(rng, t, q, g, batch)
     P, gP = _brm_svi_global_term(t, g)
     draws = [_brm_svi_unit_noise(rng, q.U[i]) for i in batch]
     terms = Vector{@NamedTuple{value::Float64,gg::Vector{Float64},gz::Vector{Float64},
@@ -703,16 +754,21 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     _brm_svi_each_unit(eachindex(t.plans), length(batch)) do worker, k
         plan, work = t.plans[worker], t.work[worker]
         i, εi = batch[k], draws[k]
-        gg₊, gg₋ = zeros(D), zeros(D)
+        touched = _brm_svi_unit_touched(t, i)
+        gg₊, gg₋ = _brm_svi_global_buffers(work, D)
         gz₊, gz₋ = zeros(length(t.units[i])), zeros(length(t.units[i]))
         m, δ = q.M[i], _brm_svi_unit_offset(q, i, εi)
         z₊, z₋ = m .+ δ, m .- δ
-        v₊ = _brm_svi_unit_term!(gg₊, gz₊, t, i, g, z₊, plan, work)
-        v₋ = _brm_svi_unit_term!(gg₋, gz₋, t, i, g, z₋, plan, work)
+        v₊ = _brm_svi_unit_local!(gg₊, gz₊, t, i, g, z₊, plan, work)
+        v₋ = _brm_svi_unit_local!(gg₋, gz₋, t, i, g, z₋, plan, work)
         problems[k] = _brm_svi_nonfinite_unit(t, i, g, (z₊, z₋), (v₊, v₋),
-            (gg₊, gg₋), (gz₊, gz₋))
-        terms[k] = (; value=(v₊ + v₋) / 2, gg=gg₊ .+ gg₋, gz=(gz₊ .+ gz₋) ./ 2,
-            gd=(gz₊ .- gz₋) ./ 2)
+            (gg₊, gg₋), (gz₊, gz₋), touched)
+        gg = [gg₊[p] + gg₋[p] for p in touched]
+        # The buffers are the worker's, zero again for its next unit.
+        for p in touched
+            gg₊[p] = gg₋[p] = 0.0
+        end
+        terms[k] = (; value=(v₊ + v₋) / 2, gg, gz=(gz₊ .+ gz₋) ./ 2, gd=(gz₊ .- gz₋) ./ 2)
     end
     # Before anything changes q or the optimizer.
     _brm_svi_check_finite(t, g, P, gP, problems)
@@ -721,7 +777,10 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     batch_value = 0.0
     for (k, term) in enumerate(terms)
         batch_value += weights[k] * term.value
-        w .+= (weights[k] / 2) .* term.gg
+        scale = weights[k] / 2
+        for (entry, p) in enumerate(_brm_svi_unit_touched(t, batch[k]))
+            w[p] += scale * term.gg[entry]
+        end
     end
     x = _brm_svi_global_vector(q)
     grad = _brm_svi_global_gradient(q, w, ε, η)
@@ -1192,6 +1251,12 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   is rebuilt after promotion; the scientific model view stays unchanged.
   Diagnostics expose `globals`, `units`, `unit_levels` and `owner`
   (zero for globals or fixed coordinates, otherwise the unit index).
+- `field_states` — how a read-pair field (`gmrf(...; neighbors=m)`) is held. `:global`
+  (default) gives each state its own global Gaussian factor. `:units` puts a state read
+  by one unit into that unit's factor, next to its effects, so its cost and storage follow
+  the unit's reads, and a state read by several units stays global. It reads the field's
+  lengths from the globals, and has no streaming form. A mesh `gmrf` is refused either way:
+  one factor per mesh state collapses the learned lengths.
 - `start` / `inits` — where the global and unit means start: BRM's prior-median
   starting point by default, a full RK packed point `start`, or values keyed
   by prior address as [`brm_start`](@ref) takes them. Declarations without a
@@ -1305,7 +1370,8 @@ fit or continuation in this process, so passing `diagnostics.model` (or the
 `diagnostics.target` reports what this call did: `reused` (it took the model's
 target), `workers_built` and the `seconds` of that phase. A connected model's
 target is reused only for the same `global_coordinates`, separator policy and
-budgets, since those decide its units. The model holds one
+budgets, since those decide its units, and any model's only for the same
+`field_states`. The model holds one
 target, the size of its partition samplers and work arrays, for as long as the
 model lives; a copy or a serialized model holds none. A call that throws while
 optimizing does not put its target back, and concurrent calls on one model each
@@ -1415,7 +1481,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
         nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, threads=nothing,
         global_coordinates=nothing, separator=nothing, max_unit_coordinates=4096,
         max_unit_work=1_000_000, max_promoted_coordinates=128, check_lowered=Returns(nothing),
-        checkpoint_completions=nothing)
+        checkpoint_completions=nothing, field_states=:global)
     ndraws isa Integer && ndraws >= 0 || throw(ArgumentError(
         "$caller: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller, save, stop_after, checkpoint_every)
@@ -1436,7 +1502,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                     # SVI's partition sampler, on first use, reports under this phase.
                     prepared[], reused = _brm_with_cell_progress(() -> _brm_svi_checkout!(m;
                         global_coordinates, previous, separator, max_unit_coordinates,
-                        max_unit_work, max_promoted_coordinates), phase)
+                        max_unit_work, max_promoted_coordinates, field_states), phase)
                     reused && _brm_update_progress!(phase, "reusing this model's prepared target")
                     t, state = init(prepared[].target)
                     workers = prepared[].workers

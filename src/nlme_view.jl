@@ -2152,17 +2152,6 @@ function _brm_nlme_partition_evaluate!(gradient, plan, i)
     value
 end
 
-# The same with `values` at `indices[i]` and `unit` everywhere else.
-function _brm_nlme_partition_sum!(gradient, plan, unit, i, values)
-    positions = plan.indices[i]
-    _brm_nlme_write!(plan.point, positions, values)
-    try
-        _brm_nlme_partition_evaluate!(gradient, plan, i)
-    finally
-        _brm_nlme_restore!(plan.point, unit, positions)
-    end
-end
-
 # The unit's value and its η gradient in block order, at the plan's point.
 function _brm_nlme_partition_eta!(gradient, plan, i)
     fill!(gradient, 0.0)

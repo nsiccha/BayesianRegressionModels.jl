@@ -243,6 +243,22 @@ the same factor on a mesh's states collapses the learned lengths, so `brm_svi_fi
 refuses the mesh form. With few rows per state the read-pair form's spatial length can
 also come out short, so check the learned lengths against their prior.
 
+With `field_states=:units`, a state read by one unit joins that unit's Gaussian factor,
+next to its effects, and a state read by several units stays global. The field's prior
+becomes one conditional per state, owned by the state's owner, so the objective is the
+same and a minibatch of units estimates it without bias. A step then costs what its
+units read: on a synthetic station field it stayed between 0.034 and 0.046 s from 256 to
+16,384 states, while the global form rose to 0.60 s. Memory follows the number of units:
+with ReactiveKernelsPPL 0.1.116 or later the prepared target holds about 23 KB per unit
+on that toy beyond the model's own, where earlier versions copied the model's graph into
+each unit's prior query, about 0.8 MB per unit. On those toys the field's mean came closer
+to the exact posterior than with the global form, and σ came out low (0.79 to 0.89 for
+a truth of 1). A unit with more coordinates than `unit_dense_limit` gets a low-rank
+factor, which made σ and the temporal length lower still, so raise the limit to cover
+a station's reads when that is affordable. `:units` has no streaming form and needs the
+field's lengths and correlation factor to be global. `multiresolution=` runs only under
+the global form, where learned lengths make each unit pay for the whole basis.
+
 ## Exact time covariance on irregular reads: `multiresolution=`
 
 Use `multiresolution=m` when the read support is irregular and its temporal

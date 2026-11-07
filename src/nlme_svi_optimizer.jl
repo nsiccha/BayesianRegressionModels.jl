@@ -93,7 +93,8 @@ function _brm_svi_identity(t)
        fixed=_brm_value_digest(fixed),
        global_coordinates=hasproperty(t, :ownership) ?
            copy(m.view.coordinates[_brm_svi_requested_globals(t)]) : Symbol[],
-       separator=hasproperty(t, :ownership) ? _brm_svi_separator_options(t) : (; separator=:none))
+       separator=hasproperty(t, :ownership) ? _brm_svi_separator_options(t) : (; separator=:none),
+       field_states=get(t, :fields, nothing) === nothing ? :global : :units)
 end
 
 _brm_svi_optimizer_state(t, previous, c, run) = BRMSVIOptimizerState(
@@ -151,6 +152,10 @@ function _brm_svi_check_identity(current, saved)
     for (part, description) in pairs(_BRM_SVI_IDENTITY_PARTS)
         isequal(current[part], saved[part]) || throw(_brm_svi_identity_refusal(description))
     end
+    # A checkpoint older than `field_states` held every state in the global factor.
+    isequal(get(current, :field_states, :global), get(saved, :field_states, :global)) ||
+        throw(_brm_svi_identity_refusal("how a read-pair field's states are held"))
+    nothing
 end
 
 _brm_svi_backend(x::RKBRMI) = x
@@ -368,7 +373,8 @@ function _brm_svi_resume(save, x, checkpoint; ndraws=1000, stop_after=nothing,
     if hasproperty(state.identity, :global_coordinates) &&
             state.run isa _BRMSVIRun
         options = merge(state.identity.separator,
-            (; global_coordinates=state.identity.global_coordinates), options)
+            (; global_coordinates=state.identity.global_coordinates,
+             field_states=get(state.identity, :field_states, :global)), options)
     end
     _brm_svi_drive(save, x, state.previous; call..., description="BRM SVI resume",
             threads, options...) do t

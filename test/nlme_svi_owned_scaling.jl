@@ -37,11 +37,9 @@ end
             fill!(gz, 0)
             BRM._brm_svi_unit_prior!(gg, gz, t.prior, t, 1, g, z)
         end
-        packed = zeros(length(g) + length(z))
-        BRM._brm_svi_joint!(packed, t.layouts[1], g, z)
-        packed_gradient = similar(packed)
         likelihood_work = owned_work_measure() do
-            BRM._brm_nlme_partition_sum!(packed_gradient, t.plan, m.unit, 1, packed)
+            BRM._brm_svi_partition_local!(gg, gz, t.plan, m.unit, t.plan.footprints[1],
+                t.places[1], 1, g, z)
         end
         global_prior_work = owned_work_measure(() -> BRM._brm_svi_global_term(t, g))
         q = BRM._brm_svi_params(t, g, MeanFieldGlobal(); global_scale=0.1, unit_scale=1.0)
