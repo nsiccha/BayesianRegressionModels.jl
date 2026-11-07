@@ -26,13 +26,15 @@ instead of failing at run time.
   already did in polishing. A ridge a slice's data leave to the prior therefore
   grows over more iterations: fit `LowRankGlobal` slices for `brm_svi_combine`
   with a longer exploration (a larger `min_windows`) than the default 40 windows.
-- Fixed: a `LowRankGlobal(r)` fit no longer breaks down when polishing starts.
-  Polishing moved μ in units of a square root of the whole global covariance,
-  and the restarted Adam's first steps, each about its step size in every
-  whitened coordinate, added up along the rank part's directions. On a model with
-  1,094 globals the trimmed ELBO fell by two thirds within a few hundred
-  polishing iterations, and draws went non-finite. μ now moves in units of its
-  diagonal scale `exp(ρ_k)` when polishing a low-rank factor.
+- Fixed: a `LowRankGlobal(r)` fit no longer breaks down when its
+  scale-relative steps start (settling, then polishing). They moved μ in units of
+  a square root of the whole global covariance, and the restarted Adam's first
+  steps, each about its step size in every whitened coordinate, added up along
+  the rank part's directions. On a model with 1,094 globals the trimmed ELBO fell
+  by two thirds within a few hundred iterations of the switch (measured on 0.2.241's
+  schedule, where polishing restarted Adam), and draws went non-finite. μ now moves
+  in units of its diagonal scale `exp(ρ_k)` when settling or polishing a low-rank
+  factor.
 - Unchanged: `MeanFieldGlobal` fits, to the last bit, and μ and ρ in a
   `LowRankGlobal` exploration. A `LowRankGlobal` fit on a fixed seed differs from
   its first exploration step on. A low-rank optimizer checkpoint written by an

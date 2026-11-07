@@ -105,8 +105,8 @@ end
 @stestset "a long low-rank exploration stays narrower than the posterior" begin
     # 15,000 iterations at the exploration step size (min_windows keeps polishing
     # away), 200 subjects in batches of 4. A variational factor of this family
-    # comes out narrower than the posterior; with the absolute step of 0.2.242 and earlier one global's sd
-    # read 1.53 times the NUTS sd here, against 0.67 now.
+    # comes out narrower than the posterior; with the absolute step of 0.2.242
+    # and earlier one global's sd read 1.53 times the NUTS sd here, against 0.67.
     rk = RKBRMI(svi_gauss_model(svi_gauss_data(Xoshiro(1), 200)))
     m = brm_nlme_model(rk; ad_backend=NLME_AD)
     reference = svi_rank_nuts(rk, m; seed=20)

@@ -588,20 +588,21 @@ function _brm_svi_exploration_global_step!(opt, q, x, grad, lr; clip=Inf)
     x
 end
 
-# The polishing step of the global factor. With no rank part it is
+# The settling and polishing step of the global factor. With no rank part it is
 # `_brm_svi_whitened_global_step!`, unchanged. With one, μ moves in units of its
 # diagonal scale exp(ρ_k), as Β's rows do, instead of a square root of the whole
 # covariance.
 #
-# Polishing restarts Adam, and a fresh Adam's first steps are about ± its step
+# Settling restarts Adam, and a fresh Adam's first steps are about ± its step
 # size in every coordinate it steps. Whitened by the covariance root, those
 # coordinates mix the rank part's directions, and the steps add up along each of
 # them: up to √D step sizes of q's own sd at once where the gradient's signs agree
 # with a column. On ODL's Bayern slice (1,094 globals, rank 8) the trimmed ELBO
 # fell from 51,500 at the end of exploration to 15,000-25,000 within a few
-# hundred polishing iterations, and Niedersachsen and Rheinland-Pfalz evaluated
-# non-finite draws there. In units of exp(ρ) it stayed at 48,400-50,100 from the
-# same state. The structured unit factors' Adam keeps the whitened step.
+# hundred polishing iterations (BRM 0.2.241, before settling, when polishing
+# restarted Adam), and Niedersachsen and Rheinland-Pfalz evaluated non-finite
+# draws there. In units of exp(ρ) it stayed at 48,400-50,100 from the same state.
+# The structured unit factors' Adam keeps the whitened step.
 function _brm_svi_polish_global_step!(opt, q, x, grad, lr; clip=Inf)
     r = size(q.Β, 2)
     r == 0 && return _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip)
