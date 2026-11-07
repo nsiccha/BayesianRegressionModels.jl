@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.234
+## 0.2.237
 
 - Added: `brm_svi_fit(...; cell_units)` for connected units. Likelihood cells that
   read no subject's effect used to land in the first unit, with every ordinary
@@ -41,6 +41,88 @@ instead of failing at run time.
   variance per update, far less time per update, and a higher ELBO after 20,000
   updates. Its sensors are nearly independent given the globals, so this does not
   show the cost of dropping a real correlation between them.
+
+## 0.2.236
+
+- Added: a factor-level SVI start from fits of the same declaration on slices of
+  the data. `brm_svi_combine(x, slices)` returns a `BRMSVIStart` for the full
+  model `x`, and `brm_svi_fit(x; start)` takes it, or the slices' fits or
+  `BRMSVIState`s directly. Global coordinates combine as a product of Gaussian
+  sites with the prior counted once (`P = P₀ + Σ_s (P_s − P₀)`, one sweep of
+  expectation propagation on partitioned data), where `(m₀, P₀)` is the
+  diagonal Gaussian projection of the global prior. Only slices whose data
+  reaches a coordinate contribute; a negative site precision is dropped and
+  counted. Random-effect draws are standardized, so each slice's factor over a
+  level's draws is carried from the slice's scales, correlation factor and
+  absorbed population coefficients (mu-referenced into the units' block, or
+  repeated by a shared grouping's block) to the combined ones by the map that
+  keeps the level's effects and totals (`z_s = A_s⁻¹(A_c z_c + δ)`): a unit
+  takes its slice's mean and precision carried as a site, with its `N(0, I)`
+  prior applied once, so a data-rich unit keeps its totals, and carries the
+  shared levels only it reads with it; a global shared level's sites are
+  carried before they multiply. A slice unit's diagonal-plus-low-rank factor
+  enters through its precision; a full-model unit above `unit_dense_limit`
+  starts from the start's marginal sds with its rank part at zero. Connected
+  units (`unit_partition=:connected`) are refused. Coordinates match by semantic
+  identity: a random-effect draw of the units, a nested or a shared grouping by
+  block, margin and level label, any other coordinate by its packed name. A
+  slice's preprocessing must equal the full model's except those groupings'
+  level tables. `receipt` reports per global coordinate how many slices
+  informed it, how many sites were dropped, whether they were carried and the
+  slices' standardized spread, and per unit which were carried;
+  `diagnostics.start` carries it with the counts applied. The start is not a
+  prior; Adam's moments and the global rank part start fresh. `GaussianBlockLaplace`
+  refuses a factor-level start. Snag `partitioned-svi-9ced532c`.
+- Fixed: on a frozen replay (`RKBRMI(brmi, state)`, `reprocess`, a streaming
+  window) whose rows lack some levels of a grouping it does not resample, the
+  rows of that grouping's random-effect draws were read from the replayed
+  column while the layout keeps the training's level table. `brm_start` then
+  wrote a level's effect into another level's draw (`effects=["k3" => v]` into
+  the training's `k2`), and coordinate transport, `brm_nlme_fit`'s level names
+  and the sparse Laplace level count read the same wrong table. They now read
+  the training's table; a fresh binding, or a block that resamples any of its
+  columns, is unchanged.
+- Changed: `brm_svi_checkpoint` states record, inside `q`, each global's
+  semantic key (`keys`) and whether the binding's data reached it (`informed`),
+  and each unit's `semantic` keys. The struct and the streaming carry are
+  unchanged; a state from an earlier version still carries, but
+  `brm_svi_combine` refuses it.
+
+## 0.2.235
+
+- Faster: the whole-model embedded Laplace (`BRMLaplaceProblem`, from
+  `brm_laplace_problem`) on connected units (`unit_partition = :connected`) no
+  longer costs one η Hessian-vector product and one third-order contraction per
+  coordinate of its largest unit. A connected unit joins every subject a
+  likelihood cell couples, so where a few effects are read with many subjects
+  (one site effect read with each path through the site) the largest unit grew
+  with the data, and with it the cost of every evaluation, contrary to "units do
+  not change the ratio" in brm-use's Laplace guide. The units' Hessian blocks now
+  come from one product per color of a star coloring of the cells' structural
+  supports (SparseMatrixColorings.jl, a new dependency), and the gradient's
+  third-order sum from two contractions per color; the position coloring stays
+  where it needs fewer passes, as for strict subject units. Values and gradients
+  are unchanged up to rounding. The first assembly checks the pattern against
+  one more product; curvature outside it warns and falls back to positions.
+
+## 0.2.234
+
+- Fixed: `brm_svi_resume` of a `@brm` model read the grouping options before it
+  compared the model with the checkpoint. Since 0.2.229 the `@brm` entry of the
+  NLME fits chooses which `mi(...)` completions to lower non-centered from the
+  groupings, and it built the subject view to choose even for a model without
+  a centred completion. So resuming a different model with a wrong grouping
+  option failed on the grouping (`brm_nlme_view: subject_group ... is not ...`)
+  instead of naming the difference, contrary to resume's contract of comparing
+  the model right after lowering. An SVI checkpoint now records which
+  completions its model lowered non-centered (`identity.completions`, the
+  mode `RKBRMI(brmi; completions)` takes), and resume lowers a `@brm` model
+  that way, as `reprocess` keeps a backend's parametrization, so the comparison
+  reads no grouping option; preparation then checks the groupings. A model
+  without a centred completion is lowered without reading the groupings in
+  every fit. A checkpoint written before this records no parametrization and
+  is lowered from the grouping options as before. Snag
+  `resume-identity-90a2f094`.
 
 ## 0.2.233
 

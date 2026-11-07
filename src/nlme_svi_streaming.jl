@@ -90,12 +90,16 @@ function _brm_svi_owned_unit_keys(m, blocks, i; scientific=_brm_svi_scientific_k
     result
 end
 
+# `keys` is what the streaming carry matches; `semantic` names every
+# random-effect draw by its level label, as `brm_svi_combine` matches slices.
 function _brm_svi_save_units!(units, m, q, blocks=m.view.subject_coordinates;
         levels=m.view.levels)
     scientific = _brm_svi_scientific_keys(m)
+    semantic = _brm_svi_coordinate_keys(m)
     for (i, label) in enumerate(levels)
-        units[label] = _brm_svi_saved_unit(
-            _brm_svi_owned_unit_keys(m, blocks, i; scientific), q.M[i], q.Λ[i], q.U[i])
+        units[label] = merge(_brm_svi_saved_unit(
+            _brm_svi_owned_unit_keys(m, blocks, i; scientific), q.M[i], q.Λ[i], q.U[i]),
+            (; semantic=semantic[blocks[i]]))
     end
     units
 end
@@ -117,8 +121,10 @@ function brm_svi_checkpoint(fit)
     units = _brm_svi_save_units!(Dict{Any,NamedTuple}(), m, d.q, blocks; levels)
     options = d.separator === nothing ? (; separator=:none) : _brm_svi_policy_options(d.separator)
     layout = (; options, global_keys=_brm_svi_global_keys(m, d.globals))
+    factors = _rk_svi_factors(m.backend, m.unit)
     BRMSVIState(3, deepcopy(state), _brm_svi_source_id(m.backend),
-        copy(m.view.coordinates[d.globals]), _brm_svi_global_factor(d.q),
+        copy(m.view.coordinates[d.globals]),
+        _brm_svi_global_record(m, d.q, d.globals, factors),
         units, m.view.group,
         Tuple(keys(m.view.nested_groups)), m.view.shared_groups, fixed,
         m.view.unit_partition, layout, 0)
@@ -154,7 +160,8 @@ end
 function _brm_svi_carried_state(previous::BRMSVIState, t, q)
     m = t.m
     BRMSVIState(3, deepcopy(previous.preprocessing), previous.source_id,
-        copy(previous.globals), _brm_svi_global_factor(q),
+        copy(previous.globals), _brm_svi_global_record(m, q, t.globals, t.ownership.factors;
+            previous=previous.q),
         _brm_svi_save_units!(deepcopy(previous.units), m, q, t.units;
             levels=_brm_svi_unit_levels(t)), previous.group,
         previous.nested, previous.shared, copy(previous.fixed),
@@ -202,20 +209,22 @@ function _brm_svi_level_values(rk, groups)
     names
 end
 
-function _brm_svi_check_preprocessing(rk, previous)
-    old = previous.preprocessing
+_brm_svi_check_preprocessing(rk, previous) = _brm_svi_check_preprocessing(rk,
+    previous.preprocessing, (previous.group, previous.nested...))
+
+# `rk`'s preprocessing equals `old` except the level tables of `groups`.
+function _brm_svi_check_preprocessing(rk, old::BRMFittedState, groups;
+        caller="brm_svi_fit", hint="replay with the previous frozen preprocessing")
     isequal(_rk_fitted_constants(rk), old.constants) || throw(ArgumentError(
-        "brm_svi_fit: preprocessing changed: constant(...) values differ"))
+        "$caller: preprocessing changed: constant(...) values differ; $hint"))
     names, _ = _rk_fitted_value_names(rk; prefix="brm_svi_fit")
     values = _rk_frozen_values(rk, names).values
-    groups = (previous.group, previous.nested...)
     allowed = _brm_svi_level_values(rk, groups)
     for name in union(keys(old.fitted.values), keys(values))
         name in allowed && continue
         haskey(old.fitted.values, name) && haskey(values, name) &&
             isequal(old.fitted.values[name], values[name]) || throw(ArgumentError(
-                "brm_svi_fit: preprocessing changed: fitted value `$name` differs; " *
-                "replay with the previous frozen preprocessing"))
+                "$caller: preprocessing changed: fitted value `$name` differs; $hint"))
     end
     # A data-free replay uses its original planner fits. Exporting its current
     # graph values is useful above, but recording fits from its current rows
@@ -225,7 +234,7 @@ function _brm_svi_check_preprocessing(rk, previous)
         first(key) === :levels && last(key) in groups && continue
         haskey(old.fits, key) && haskey(fits, key) &&
             isequal(old.fits[key], fits[key]) || throw(ArgumentError(
-                "brm_svi_fit: preprocessing changed: fitted transform $(repr(key)) differs"))
+                "$caller: preprocessing changed: fitted transform $(repr(key)) differs; $hint"))
     end
     nothing
 end

@@ -89,11 +89,23 @@ _rk_coordinate_records(plan) = _brm_transport_error(:unsupported_coverage,
 
 # The levels of a random-effect record's grouping, the rows of its
 # standardized draws `z`. A joined `|ID|` block's levels are its columns'
-# joint levels.
-_rk_ranef_record_levels(rk, record) = _rk_grouping_levels(
-    haskey(record, :joint_columns) ?
+# joint levels. A frozen replay (`RKBRMI(brmi, state)`, `reprocess`) lays out a
+# block none of whose columns it resamples by the training's fitted level
+# table, which can hold levels the replayed rows lack, so its rows are read
+# from that table and not from the replayed column.
+function _rk_ranef_record_levels(rk, record)
+    columns = haskey(record, :joint_columns) ? Tuple(record.joint_columns) : (record.group,)
+    if rk.fitted !== nothing && !any(c -> c in rk.fitted.resample, columns)
+        fitted = [get(rk.fitted.state.fits, (:levels, c), nothing) for c in columns]
+        all(!isnothing, fitted) && return haskey(record, :joint_columns) ?
+            _rk_grouping_levels(brm_joint_fit_levels(fitted...)) : collect(only(fitted))
+    end
+    # Fresh, or resampled: a block that resamples any of its columns refits its
+    # (joint) level table from the replayed columns.
+    _rk_grouping_levels(haskey(record, :joint_columns) ?
         brm_joint_fit_levels((rk.plan.columns[c] for c in record.joint_columns)...) :
         rk.plan.columns[record.group])
+end
 
 # Implemented by `BayesianRegressionModelsReactiveKernelsExt`: the built
 # layout's coordinate names, the declarations it holds at zero length, each

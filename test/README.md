@@ -27,9 +27,9 @@ transport), replays the printed source, checks that another value emits the same
 program, that binding refuses an invalid value, and frozen `reprocess` of a
 scalar field and of a constant. The further arguments of the other response
 families are checked against the oracle and finite differences. A per-row `zi`
-or Student-t `nu` outside its support is checked as a refusal on
-ReactiveKernelsPPL 0.1.105 or later and as a `-Inf` density before it. It accepts
-testset substring filters.
+or Student-t `nu` outside its support is checked as a refusal, which BRM's
+ReactiveKernelsPPL 0.1.105 compat floor guarantees. It accepts testset substring
+filters.
 
 `rk_value_weighted_observations.jl` checks formula-level `fweights` and
 `weights` on RKBRMI responses whose law reads an assigned value: a Julia
@@ -1146,6 +1146,15 @@ start transport, scientific labels and empirical Bayes modes against the
 analytic conditional Gaussian, plus a short SAEM call. Neither rewrites the
 authored model or uses numerical derivatives as an oracle.
 
+`nlme_laplace_coloring.jl` checks the whole-model Laplace's structural
+coloring on connected units: a unit of subjects that all read one hub subject
+needs the same few colors at 5 and 13 subjects, and on hub and chain units with
+Gaussian and Poisson cells the colored unit Hessians, Laplace values and
+gradients match the same problem under the position coloring. A pattern cut
+short of the cells' reads is caught by the first assembly's check, which warns
+and falls back to the position coloring. Subjects no cell couples, and the
+strict partition, keep the position coloring.
+
 `nlme_joint_start.jl` checks a complete NLME estimate against the same
 BRMI's compiled Stan model: non-unit covariance and natural subject effects
 round-trip through Stan's unconstrained coordinates, fixed/free indices
@@ -1406,7 +1415,7 @@ explicit global promotions, optimizer resume and streaming absent/returning
 units. Its density and native Reverse gradient oracle is the full RK sampler.
 The dormant scalar/vector branch's ordinary Reverse needs Enzyme dogfood from
 `0fa85df3` (repairs `74abe90` and `7ac58eb`, contained in the bootstrap's
-`74ce4afc`); earlier pins raise `IllegalTypeAnalysisException` there.
+`cecb571a`); earlier pins raise `IllegalTypeAnalysisException` there.
 `nlme_svi_ownership_algebra.jl` isolates atomic-block and directed-prior
 closure, including fixed coordinates and factors that own no coordinates.
 
@@ -1420,6 +1429,20 @@ Run this standalone script in the test environment.
 `nlme_svi_running.jl` checks a prepared model's reuse of its target and workers
 across calls (`diagnostics.target`), and `snapshot` / `snapshot_every` /
 `snapshot_draws`, against a run on a fresh model that nothing observes.
+
+`nlme_svi_combine.jl` checks `brm_svi_combine` and `brm_svi_fit(x; start)` from
+fits on regional slices of a synthetic panel (subjects nested in regions, a
+class grouping crossed with them): the prior projection against the closed form,
+the product of sites against an independent oracle, informed and dropped sites,
+units matched by label and carried to the combined hyperparameters (an exact
+one-margin oracle with a mu-referenced intercept, and totals kept for
+correlated, stratified and unit-held shared blocks, read back through the NLME
+view), a global held inside two slices' units, frozen-replay slices, a low-rank
+slice, the refusals, `brm_start` effects addressed by level on a frozen replay
+that lacks some levels, slices whose scales differ 40-fold under a log link
+(carried, the first window beats a cold start and the old copy), and that real
+slice fits start the full fit near its optimum. About 15 minutes with loading
+on one CPU; it accepts testset substring filters.
 
 `nlme_svi_threads.jl` checks `brm_svi_fit(...; threads)` with real threads (run
 it with `--threads=4`; it refuses to run without them). The state after every
@@ -2420,7 +2443,7 @@ equals the generic path's exactly and its gradient to rounding, that both agree
 with central differences, and that inputs are unchanged. A width has to be
 checked on its own: the pass works at four margins, and at five Enzyme raised
 `EnzymeNoTypeError` until the repair in Enzyme `6053067f`. The test bootstrap
-pins `74ce4afc`, which contains that repair and declares libEnzyme `08f0e8d9`.
+pins `cecb571a`, which contains that repair and declares libEnzyme `7f23cb72`.
 
 `adaptive_hsgp_centering.jl` checks pilot-selection under spectral underflow,
 the partial-coordinate Jacobian, StanBlocks/BridgeStan density and gradient

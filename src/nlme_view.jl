@@ -613,6 +613,11 @@ function _brm_nlme_lowered(brmi::BRMI; subject_group=nothing, nested_groups=Name
         if r.kind === :missing_value && !r.noncentered &&
             get(r, :bijection, nothing) === :shares])
     isempty(shares) || (rk = RKBRMI(brmi; completions=shares))
+    # Only a centred completion's parametrization depends on the groupings; a
+    # model without one is lowered without reading them (preparation checks
+    # them), so a resume compares its identity first.
+    any(r -> r.kind === :missing_value && !r.noncentered, _brm_nlme_records(rk.plan)) ||
+        return rk
     view = _brm_nlme_view(rk; subject_group, nested_groups, shared_groups,
         unit_partition=something(unit_partition, :subjects))
     sources = _brm_nlme_unit_reading_completions(rk, _brm_nlme_unit_reading_priors(rk, view))

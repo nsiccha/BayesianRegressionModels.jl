@@ -311,6 +311,82 @@ end
     end
 end
 
+# `a`'s law reads the regions' effects, so the `@brm` entry lowers it
+# non-centered; `b`'s reads none, so it stays centred (a shared latent).
+svi_mi_data(rng; regions=6, rows=8) = let n = regions * rows
+    region = repeat(1:regions, inner=rows)
+    a = Vector{Union{Missing,Float64}}(randn(rng, n))
+    b = Vector{Union{Missing,Float64}}(exp.(0.5 .+ 0.3 .* randn(rng, n)))
+    y = coalesce.(a, 0.0) .+ log.(coalesce.(b, 1.6)) .+ 0.3 .* randn(rng, n)
+    a[rand(rng, n) .< 0.25] .= missing
+    b[rand(rng, n) .< 0.25] .= missing
+    (; region, a, b, y)
+end
+svi_mi_model(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu_a ~ 1 + (1 | region)
+    mi(a) ~ Normal(mu_a, 1.0)
+    eta ~ 1 + a + (1 | region)
+    y ~ Normal(eta, sigma)
+end
+svi_mi_two_model(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu_a ~ 1 + (1 | region)
+    mi(a) ~ Normal(mu_a, 1.0)
+    mi(b) ~ LogNormal(0.5, 0.3)
+    lb = log(b)
+    eta ~ 1 + a + lb + (1 | region)
+    y ~ Normal(eta, sigma)
+end
+
+@stestset "a @brm model resumes with its checkpoint's completion parametrization" begin
+    B = BayesianRegressionModels
+    data = svi_mi_data(Xoshiro(901))
+    one = (; data.region, data.a, data.y)
+    controls = (; rng=Xoshiro(902), SVI_OPT..., ndraws=0)
+    start = brm_svi_fit(svi_mi_model(one); controls..., stop_after=10)
+    state = brm_svi_optimizer_checkpoint(start)
+    @test state.identity.completions === :noncentered
+    full = brm_svi_fit(svi_mi_model(one); controls..., rng=Xoshiro(902), stop_after=12)
+    resumed = brm_svi_resume(svi_mi_model(one), state; stop_after=2, ndraws=0)
+    @test svi_same_state(brm_svi_optimizer_checkpoint(resumed), brm_svi_optimizer_checkpoint(full))
+
+    # The comparison reads no grouping option: another model is named even
+    # when a grouping option is wrong too; preparation then checks the groupings.
+    calls = Ref(0)
+    tally(_) = (calls[] += 1)
+    shifted = merge(one, (; y=one.y .+ 1.0))
+    @test_throws "bound data or frozen preprocessing" brm_svi_resume(tally,
+        svi_mi_model(shifted), state; subject_group=:no_such_group)
+    @test_throws "subject_group `no_such_group` is not `region`" brm_svi_resume(tally,
+        svi_mi_model(one), state; subject_group=:no_such_group)
+    # A source the checkpoint non-centred that the model does not sample.
+    forged = BRMSVIOptimizerState(state.format, merge(state.identity, (; completions=(:a, :c))),
+        state.previous, state.controls, state.run)
+    @test_throws "samples the missing entries of `c`, this one does not" brm_svi_resume(tally,
+        svi_mi_model(one), forged)
+    @test calls[] == 0
+
+    # A partial parametrization (only `a` of two completions) lowers to the
+    # program the `@brm` entry chooses, without reading the groupings.
+    two = svi_mi_two_model(data)
+    entry = B._brm_nlme_lowered(two; subject_group=:region)
+    @test B._rk_completion_mode(entry.plan) == (:a,)
+    @test B._brm_rk_binding_parts(B._brm_svi_checkpoint_lowered(two, (:a,))) ==
+        B._brm_rk_binding_parts(entry)
+
+    # A checkpoint without the parametrization is lowered from the options, as
+    # before: the same model resumes, and the grouping is read before the comparison.
+    old = BRMSVIOptimizerState(state.format,
+        Base.structdiff(state.identity, NamedTuple{(:completions,)}), state.previous,
+        state.controls, state.run)
+    continued = brm_svi_resume(svi_mi_model(one), old; stop_after=2, ndraws=0)
+    @test svi_same_state(brm_svi_optimizer_checkpoint(continued), brm_svi_optimizer_checkpoint(full))
+    @test_throws "subject_group `no_such_group` is not `region`" brm_svi_resume(tally,
+        svi_mi_model(shifted), old; subject_group=:no_such_group)
+    @test calls[] == 0
+end
+
 @stestset "fixed shared values are part of the target" begin
     data = svi_spacetime_data(Xoshiro(501))
     rk = RKBRMI(svi_spacetime_model(

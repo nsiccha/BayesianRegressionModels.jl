@@ -1066,12 +1066,17 @@ end
 _brm_svi_fill_absent_draws!(rng, draws, t, ::Nothing) = draws
 
 # The model through its preparation phases, as for `brm_nlme_fit`: lowering to
-# RK and `brm_nlme_model`. A stage `x` has already passed is reused.
-_brm_svi_lowered(x::BRMI, phase; groups...) =
-    _brm_run_phase(_ -> _brm_nlme_lowered(x; groups...), phase)
-_brm_svi_lowered(x::Union{RKBRMI,BRMNLMEModel}, phase; groups...) =
+# RK and `brm_nlme_model`. A stage `x` has already passed is reused. A resume
+# passes its checkpoint's completion parametrization (`completions`), which
+# fixes the lowering without reading the groupings.
+_brm_svi_lowered(x::BRMI, phase; completions=nothing, groups...) =
+    _brm_run_phase(phase) do _
+        completions === nothing ? _brm_nlme_lowered(x; groups...) :
+            _brm_svi_checkpoint_lowered(x, completions)
+    end
+_brm_svi_lowered(x::Union{RKBRMI,BRMNLMEModel}, phase; completions=nothing, groups...) =
     (_brm_reuse_phase!(phase); x)
-_brm_svi_lowered(x, phase; groups...) = throw(ArgumentError(
+_brm_svi_lowered(x, phase; completions=nothing, groups...) = throw(ArgumentError(
     "brm_svi_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
     "got $(typeof(x))"))
 
@@ -1210,6 +1215,15 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   by prior address as [`brm_start`](@ref) takes them. Declarations without a
   recorded median, including ordinary model-scope vectors, retain the packed
   unit point; entries not supplied in `inits` retain that default point.
+  `start` may instead be a factor-level start: a [`BRMSVIStart`](@ref) from
+  [`brm_svi_combine`](@ref), or fits or states of the same declaration on
+  slices of the data (a vector, or one), combined as `brm_svi_combine` does
+  with its defaults. It sets the mean and scale of every global and the factor
+  of every unit it holds, matched by semantic coordinate identity; the rest
+  keeps the default start, the global rank part starts at zero and Adam's
+  moments start fresh. It is a start, not a prior: the target is unchanged.
+  `diagnostics.start` holds its receipt, with `applied` counting the globals
+  and units it started (`nothing` for any other start).
 - `progress` — a Treebars node or backend symbol: one `BRM SVI fit` node with
   the phases Lower to ReactiveKernels, Prepare NLME model, Minibatch target
   (the unit partition gradient and the start), Stochastic optimization (its
@@ -1419,7 +1433,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
         nested_groups=NamedTuple(), shared_groups=(), unit_partition=nothing, threads=nothing,
         global_coordinates=nothing, separator=nothing, max_unit_coordinates=4096,
         max_unit_work=1_000_000, max_promoted_coordinates=128, cell_units=nothing,
-        check_lowered=Returns(nothing))
+        check_lowered=Returns(nothing), checkpoint_completions=nothing)
     ndraws isa Integer && ndraws >= 0 || throw(ArgumentError(
         "$caller: ndraws must be a nonnegative integer"))
     _brm_svi_check_interruption(caller, save, stop_after, checkpoint_every)
@@ -1427,8 +1441,8 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
     threads = _brm_svi_threads(caller, threads, ad_backend)
     _brm_with_progress(progress; description) do node
         _brm_with_phases(node, _BRM_SVI_PHASES) do phases
-            lowered = _brm_svi_lowered(x, phases.lower; subject_group, nested_groups,
-                shared_groups, unit_partition)
+            lowered = _brm_svi_lowered(x, phases.lower; completions=checkpoint_completions,
+                subject_group, nested_groups, shared_groups, unit_partition)
             check_lowered(lowered)
             m = _brm_svi_model(lowered, phases.prepare;
                 ad_backend, shared_point, subject_group, nested_groups, shared_groups, unit_partition)
@@ -1481,6 +1495,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                     unit_families=_brm_svi_unit_description.(q.U),
                     seconds, model=m, source_id=_brm_svi_source_id(m.backend),
                     sampling=run.sampling, unit_gradient_calls=run.unit_gradient_calls,
+                    start=get(t, :start_receipt, nothing),
                     streaming=_brm_svi_carried_state(previous, t, q), optimizer=state))
             finally
                 # A refused checkpoint leaves the target as it found it; an exception
@@ -1494,6 +1509,8 @@ end
 _brm_svi_family(::Nothing, ::Nothing) = MeanFieldGlobal()
 _brm_svi_family(::Nothing, family::BRMSVIFamily) = family
 function _brm_svi_initialize(t, ::Nothing, family; start, inits, global_scale, unit_scale, unit_dense_limit=64, unit_rank=8)
+    _brm_svi_factor_start(start) && return _brm_svi_factor_initialize(t, start, family;
+        inits, global_scale, unit_scale, unit_dense_limit, unit_rank)
     point = _brm_svi_start(t.m, start, inits)
     q = _brm_svi_params(t, point[t.globals], family; global_scale, unit_scale, unit_dense_limit, unit_rank)
     for (i, block) in enumerate(t.units)

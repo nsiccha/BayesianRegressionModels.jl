@@ -318,13 +318,8 @@ end
 
 # A fixed per-row `zi` or Student-t `nu` outside its support has no density at
 # any coordinate, so binding refuses it by name (RKPPL's `LikelihoodSpec`
-# contract, rkppl-use §9; RK snag rkppl-per-row-zi-50240087). That refusal ships
-# in ReactiveKernelsPPL 0.1.105. BRM's test pin stays before it, and its compat
-# floors still admit earlier versions, because RK 0.1.89 and later break
-# test/nlme_partition.jl (RK snag compact-cell-row-eb9bd95f). Earlier versions
-# read such a value as a `-Inf` density, as brm-use states. Both sides are
-# asserted so the documented claim holds on either pin, and the pin move switches
-# this testset to the refusals without an edit.
+# contract, rkppl-use §9; RK snag rkppl-per-row-zi-50240087). BRM's compat floor,
+# ReactiveKernelsPPL 0.1.105, is the first version that does.
 @stestset "a fixed per-row zi or nu outside its support" begin
     family, data = law_family_data(), law_data()
     zip_row = @brm begin
@@ -345,35 +340,29 @@ end
         (STUDENT_ROW_NU, merge(data, (; nuv=[-1.0; data.nuv[2:end]])),
             "nu data nuv must be finite positive numerics"),
     )
-    if pkgversion(ReactiveKernelsPPL) < v"0.1.105"
-        for (builder, bound, _) in outside
-            @test lp(RKBRMI(builder(bound))) == -Inf
-        end
-    else
-        for (builder, bound, message) in outside
-            @test_throws message RKBRMI(builder(bound))
-        end
-        # The same refusal reaches a named or offsets-only value, and one infinite
-        # `nu` row, which used to give a finite density. In-support twins still build.
-        zip_named = @brm begin
-            log(lambda) ~ 1 + x
-            zz = zv .- 0.1
-            c ~ ZeroInflatedPoisson(lambda, zz)
-        end
-        offset_scale = @brm begin
-            mu ~ 1 + x
-            sd_obs = sv .- 3
-            y ~ Normal(mu, sd_obs)
-        end
-        @test isfinite(lp(RKBRMI(zip_named(family))))
-        @test_throws "zi data zz must lie in [0, 1]" RKBRMI(
-            zip_named(merge(family, (; zv=[0.05; family.zv[2:end]]))))
-        @test isfinite(lp(RKBRMI(offset_scale(merge(data, (; sv=data.sv .+ 4))))))
-        @test_throws "per-observation scale sd_obs must be finite positive numerics" RKBRMI(
-            offset_scale(data))
-        @test_throws "nu data nuv must be finite real numerics" RKBRMI(
-            STUDENT_ROW_NU(merge(data, (; nuv=[Inf; data.nuv[2:end]]))))
+    for (builder, bound, message) in outside
+        @test_throws message RKBRMI(builder(bound))
     end
+    # The same refusal reaches a named or offsets-only value, and one infinite
+    # `nu` row, which used to give a finite density. In-support twins still build.
+    zip_named = @brm begin
+        log(lambda) ~ 1 + x
+        zz = zv .- 0.1
+        c ~ ZeroInflatedPoisson(lambda, zz)
+    end
+    offset_scale = @brm begin
+        mu ~ 1 + x
+        sd_obs = sv .- 3
+        y ~ Normal(mu, sd_obs)
+    end
+    @test isfinite(lp(RKBRMI(zip_named(family))))
+    @test_throws "zi data zz must lie in [0, 1]" RKBRMI(
+        zip_named(merge(family, (; zv=[0.05; family.zv[2:end]]))))
+    @test isfinite(lp(RKBRMI(offset_scale(merge(data, (; sv=data.sv .+ 4))))))
+    @test_throws "per-observation scale sd_obs must be finite positive numerics" RKBRMI(
+        offset_scale(data))
+    @test_throws "nu data nuv must be finite real numerics" RKBRMI(
+        STUDENT_ROW_NU(merge(data, (; nuv=[Inf; data.nuv[2:end]]))))
 end
 
 # The cutpoints and category predictors of a leveled response are not scalar law
