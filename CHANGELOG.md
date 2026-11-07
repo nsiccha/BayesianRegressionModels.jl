@@ -180,7 +180,6 @@ instead of failing at run time.
   still loads without BRM.
   `diagnostics.unit_gradient_calls` counts actual evaluations: a unit drawn twice
   in one work-weighted batch is evaluated once.
-
 ## 0.2.230
 
 - Fixed: on `RKBRMI`, a `gmrf((east, north), time, channel)` field without `cor`
