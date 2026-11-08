@@ -22,8 +22,9 @@ instead of failing at run time.
   does: `diagnostics.target.reused` is `true` and nothing is prepared
   (`laplace=GaussianBlockLaplace()` reuses the model and still prepares its
   target on every call). Before,
-  each call on an `RKBRMI` prepared the model and its target again; on a
-  downstream 33-unit target a warm call spent about 50 s of its 53 s doing so.
+  each call on an `RKBRMI` prepared the model and its target again: on a
+  downstream 33-unit target a repeated 20-update call took 58 s, and takes
+  0.18 s now.
   Results are unchanged: a reused model's run equals a fresh model's to the
   last bit. Other options prepare another model, which the backend then keeps
   instead. A copy or a serialized backend keeps none. A `BRMI` is still
@@ -40,9 +41,12 @@ instead of failing at run time.
   read the sampler; a nested model's η sparsity and a refused partition's
   diagnosis read the cell queries. A unit's values and gradients, minibatch
   SVI's included, come from the observation partition, so a fit that reads
-  neither compiles neither: on a 33-unit, 890-coordinate model they were
-  75 s and 84 s of a 413 s cold preparation. The progress tree no longer has a
-  `Cell queries` counter. Values, gradients and refusals are unchanged; an
+  neither prepares neither. On a downstream 33-unit, 890-coordinate model the
+  two steps took 75 s and 84 s of a 413 s cold preparation, but most of that
+  was compiling planner code the partition steps then compile instead: the
+  cold `brm_nlme_model` fell from 471 s to 440 s, a warm rebuild by about 10 s
+  of 23 s, and its allocation from 16.1 GB to 12.5 GB. The progress tree no
+  longer has a `Cell queries` counter. Values, gradients and refusals are unchanged; an
   `ad_backend` the sampler cannot use is refused when the sampler is first
   read.
 
