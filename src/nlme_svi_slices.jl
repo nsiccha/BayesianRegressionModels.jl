@@ -867,11 +867,56 @@ function _brm_svi_check_slice(caller, m, which, source_id, preprocessing, group,
             "resample_groups))")
 end
 
+# What `exclude=` may be: nothing to leave out, a name (Symbol or String), a
+# collection of names, or a function of a coordinate's name. Checked before the
+# full model is prepared, so a wrong argument costs no preparation.
+function _brm_svi_check_exclude(caller, exclude)
+    exclude isa Union{Function,Symbol,AbstractString} && return nothing
+    exclude isa Union{AbstractVector,Tuple,AbstractSet} &&
+        all(e -> e isa Union{Symbol,AbstractString}, exclude) && return nothing
+    throw(ArgumentError("$caller: exclude takes coordinate names (a Symbol or String, " *
+        "or a vector of them) or a function of a coordinate's name; got $(repr(exclude))"))
+end
+
+# Which of the global coordinates `names` (the full model's, aligned with
+# `receipt.globals.coordinates`) `exclude` leaves out of the product. A name
+# selects the coordinate of that name and every coordinate under it, its name
+# followed by `.`: `natural_field` selects `natural_field.amplitude` and
+# `natural_field.z.3`, `natural_field.z` only the latter. A function selects the
+# names for which it returns `true`. A selection of nothing is refused, since a
+# misspelt name would otherwise leave the start as it was without a word.
+function _brm_svi_excluded(caller, names, exclude)
+    hit = falses(length(names))
+    strings = String.(names)
+    if exclude isa Function
+        for (k, name) in enumerate(names)
+            chosen = exclude(name)
+            chosen isa Bool || throw(ArgumentError("$caller: exclude's function returned " *
+                "$(repr(chosen)) for $(repr(name)); it must return true or false"))
+            hit[k] = chosen
+        end
+        any(hit) || throw(ArgumentError("$caller: exclude's function selects no global " *
+            "coordinate of the full model (receipt.globals.coordinates lists them)"))
+        return hit
+    end
+    for selector in (exclude isa Union{Symbol,AbstractString} ? (exclude,) : exclude)
+        s = String(selector)
+        found = [n == s || startswith(n, s * ".") for n in strings]
+        any(found) || throw(ArgumentError("$caller: exclude names $(repr(selector)), which " *
+            "is no global coordinate of the full model and no declaration of one " *
+            "(receipt.globals.coordinates lists them)"))
+        hit .|= found
+    end
+    hit
+end
+
 # The product of the sites for every global coordinate of `t`, and the units'
-# factors, from the slices' states.
+# factors, from the slices' states. A coordinate `exclude` selects takes no site:
+# it starts as one no slice informs.
 function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshiro(1),
-        prior_pairs=16, prior_iterations=150, joint_limit=4096, carry_all=false)
+        prior_pairs=16, prior_iterations=150, joint_limit=4096, carry_all=false, exclude=())
     isempty(states) && throw(ArgumentError("$caller: no slices"))
+    _brm_svi_check_exclude(caller, exclude)
     m = t.m
     m.view.unit_partition === :subjects || throw(ArgumentError(
         "$caller: the full model's units are connected components " *
@@ -891,6 +936,8 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
     gkeys = coordinate_keys[t.globals]
     allunique(gkeys) || error("brm_svi_combine: internal: two global coordinates share " *
         "the semantic key $(repr(gkeys[findfirst(k -> count(isequal(k), gkeys) > 1, gkeys)]))")
+    names = m.view.coordinates[t.globals]
+    excluded = _brm_svi_excluded(caller, names, exclude)
     prior = _brm_svi_prior_projection(t; rng, pairs=prior_pairs, iterations=prior_iterations)
     D = length(t.globals)
     informed, clamped = zeros(Int, D), zeros(Int, D)
@@ -912,6 +959,8 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
         later[k] && continue
         sites = _brm_svi_marginals(index, key)
         isempty(sites) && continue
+        # Left out: counted as informed, it keeps no site and takes the default.
+        excluded[k] && (informed[k] = length(sites); continue)
         marginals[k] = sites
         p0, m0 = prior.precision[k], prior.mean[k]
         heterogeneity[k] = _brm_svi_heterogeneity(index, key, p0, m0)
@@ -997,6 +1046,11 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
     for inst in shared
         ks = [global_index[j] for j in inst.positions]
         sites = [_brm_svi_marginals(index, gkeys[k]) for k in ks]
+        for (r, k) in enumerate(ks)
+            excluded[k] || continue
+            informed[k] = length(sites[r])
+            sites[r] = similar(sites[r], 0)
+        end
         any(!isempty, sites) || continue
         result = _brm_svi_carry_shared(sites, prior.precision[ks], prior.mean[ks],
             _brm_svi_draw_factor(combined, inst),
@@ -1093,10 +1147,10 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
     end
     kept = findall(!isnan, μ)
     position = Dict(k => p for (p, k) in enumerate(kept))
-    names = m.view.coordinates[t.globals]
     receipt = (; slices=length(states),
         globals=(; coordinates=names, informed, clamped, spread, spread_slice,
             carried=collect(carried_globals), joint, heterogeneity, outlying=collect(outlying),
+            excluded=collect(excluded),
             prior_mean=prior.mean, prior_sd=[p > 0 ? 1 / sqrt(p) : Inf for p in prior.precision]),
         units=(; copied, partial, cold, carried=carried_units, dropped, mapped, uncarried),
         prior=(; pairs=prior.pairs, iterations=prior.iterations, flat=names[prior.flat]),
@@ -1208,7 +1262,7 @@ const _BRM_SVI_COMBINE_PHASES = (lower="Lower to ReactiveKernels", prepare="Prep
     target="Minibatch target", combine="Combine slice factors")
 
 """
-    brm_svi_combine(x, slices; rng=Random.Xoshiro(1), prior_pairs=16,
+    brm_svi_combine(x, slices; exclude=(), rng=Random.Xoshiro(1), prior_pairs=16,
         prior_iterations=150, joint_limit=4096, ad_backend=nothing,
         shared_point=nothing, subject_group=nothing, nested_groups=NamedTuple(),
         shared_groups=(), unit_partition=nothing, global_coordinates=nothing,
@@ -1288,6 +1342,23 @@ position in another binding; where the names differ it keeps the default.
   fit from it starts its rank part on the `r` directions in which that
   precision is widest relative to `σ`, and `MeanFieldGlobal` fits start at
   `σ`.
+- **Coordinates left out** (`exclude`). A global coordinate whose meaning
+  depends on the slice's domain is no estimate of the full model's: a spatial
+  field's amplitude fitted on one region measures the field's variation inside
+  that region, so slices that partition space all put it low. `spread` and the
+  between-slice variance compare the slices with each other, so neither can see
+  a bias they share, and the product starts it among them. `exclude` names
+  such coordinates, and each takes no site and starts as a coordinate no slice
+  informs: at the full model's default start (the prior-median point, with the
+  fit's `global_scale`), exactly as if every slice had left it uninformed, a
+  joint site included (its marginal over the other coordinates). Draws are
+  carried to that default where it is one of their hyperparameters. A name
+  (a Symbol or String) selects that coordinate and every coordinate under it:
+  `exclude=[:natural_field]` leaves out `natural_field.amplitude` and every
+  `natural_field.z.*`; a function of a name selects where it returns `true`. A
+  selection of nothing, or a name of no global coordinate, is refused.
+  `receipt.globals.excluded` marks them, and `informed` still counts their
+  slices' sites.
 - **Draws are carried to the combined hyperparameters.** A random-effect draw
   `z` is standardized: its level's effect is `A z`, `A = √w diag(τ) L`, and a
   margin's total adds the population coefficients its block absorbs: those
@@ -1326,7 +1397,12 @@ position in another binding; where the names differ it keeps the default.
 
 The combination is a start: the fit's target is the full model. SVI's global
 factors are narrower than the posterior, so the product of many slices' sites
-starts the globals narrower still; the fit's optimizer widens them.
+starts the globals narrower still; the fit's optimizer widens them. SVI is a
+local optimizer, so the start can decide which optimum the fit reaches: a
+coordinate the slices bias the same way (a domain-dependent scale) can hold the
+fit in an optimum where other coordinates (the units' effects) carry what it
+should, even at a higher ELBO than a cold fit's. Compare the fit with a cold
+one on held-out data, not only by its ELBO.
 
 `receipt` reports, per global coordinate of `x` (`receipt.globals`, aligned
 with `coordinates`): `informed`, how many slices had a site; `clamped`, how
@@ -1341,8 +1417,9 @@ rank part, `:limit` above `joint_limit`; `:indefinite` when the joint product
 was not positive definite and `:outlying` when one of its means left the range
 above, where the coordinate-by-coordinate one was used); `heterogeneity`, the
 between-slice variance added to that coordinate's sites; `outlying`, which
-coordinates' joint means left that range; and the prior projection's `prior_mean`
-and `prior_sd` (`Inf` where flat).
+coordinates' joint means left that range; `excluded`, which coordinates `exclude`
+left out; and the prior projection's `prior_mean` and `prior_sd` (`Inf` where
+flat).
 `clamped` counts dropped site directions, each at the coordinate it weighs
 most. `receipt.slice_rank` lists each slice's global rank. `receipt.units` counts the units `copied`
 whole and `carried` (some draws carried), and lists the `partial` and `cold`
@@ -1352,13 +1429,14 @@ density at the combined globals is clearly better, by over half a nat per draw, 
 their slice's draws as they were); `receipt.prior` records
 the projection's draws and its `flat` coordinates.
 """
-function brm_svi_combine(x, slices; rng=Random.Xoshiro(1), prior_pairs=16,
+function brm_svi_combine(x, slices; exclude=(), rng=Random.Xoshiro(1), prior_pairs=16,
         prior_iterations=150, joint_limit=4096, progress=nothing, ad_backend=nothing,
         shared_point=nothing, subject_group=nothing, nested_groups=NamedTuple(),
         shared_groups=(), unit_partition=nothing, global_coordinates=nothing)
     caller = "brm_svi_combine"
     slices isa Union{AbstractVector,Tuple} || throw(ArgumentError(
         "$caller: pass the slices' fits or states as a vector"))
+    _brm_svi_check_exclude(caller, exclude)
     states = [_brm_svi_slice_state(caller, s, "slice $i") for (i, s) in enumerate(slices)]
     prior_pairs isa Integer && prior_pairs >= 1 && prior_iterations isa Integer &&
         prior_iterations >= 2 || throw(ArgumentError(
@@ -1377,7 +1455,7 @@ function brm_svi_combine(x, slices; rng=Random.Xoshiro(1), prior_pairs=16,
             end
             start = _brm_run_phase(phases.combine) do _
                 _brm_svi_combine(prepared.target, states; caller, rng, prior_pairs,
-                    prior_iterations, joint_limit)
+                    prior_iterations, joint_limit, exclude)
             end
             # As after a fit: a call that throws keeps no target.
             _brm_svi_checkin!(m, prepared)
