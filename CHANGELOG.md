@@ -12,6 +12,31 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.250
+
+- Fixed: `brm_nlme_view`, and so `brm_nlme_model`, `brm_nlme_fit`,
+  `brm_two_stage_fit`, `brm_svi_fit` and `brm_nlme_joint_map`, reads a
+  random-effect block declared inside a function-style component call
+  (`kin ~ kinetics(subject)` with `(1 | pk | subject)` in its body) as the same
+  block at model scope, over the column the call passes for the grouping
+  input. That column is one of the model's groupings: name it as
+  `subject_group`, in `nested_groups` or in `shared_groups` like any other.
+  The block's `|ID|` and margins carry the call's path (`kin.pk`, predictor
+  `kin.CL`), as its coordinates already did (`kin.b_pk_subject.z`); nested
+  calls compose their paths, and an input named otherwise than the model's
+  column is followed to it. Every coordinate of a component call was a
+  `:shared_latent` before, so such a grouping was no grouping of the model
+  (naming it in `shared_groups` was refused: "no random-effect block ...
+  groups by") and a model scoping its subject effects in a component had no
+  subjects. The
+  call's other sampled locals, its population coefficients included, stay
+  `:shared_latent`; so does a block whose grouping input is passed an
+  expression, or whose call reads other levels of the column than the model.
+  Prior-median starts read the blocks' scale laws with the call's own data.
+  **Breaking:** a component grouping other than the subject grouping must now
+  be named in `nested_groups` or `shared_groups`; `shared_groups = (:g,)`
+  restores the former, all-shared reading of its block.
+
 ## 0.2.249
 
 - Fixed: `brm_svi_fit(...; centering=LearnedCentering())` centres the levels of a
