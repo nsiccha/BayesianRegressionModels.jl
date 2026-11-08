@@ -53,6 +53,22 @@ gauss_model_prepared(seed, N) = brm_nlme_model(
     @test capped.diagnostics.threads == SVI_THREADS.batch_size
 end
 
+@stestset "a learned-centering run is the same to the last bit at 1 and at several tasks" begin
+    m = gauss_model_prepared(251, 16)
+    options = (; SVI_THREADS..., ndraws=40, centering=LearnedCentering())
+    serial, serial_states = svi_trajectory(m; rng=Xoshiro(252), options..., threads=1)
+    @test serial.diagnostics.centering !== nothing
+    @test serial.diagnostics.optimizer.run.polish_start > 0
+    controls(states) = [s.run.q.centering.x for s in states]
+    for threads in (2, 4)
+        fit, states = svi_trajectory(m; rng=Xoshiro(252), options..., threads)
+        @test fit.diagnostics.threads == threads
+        @test svi_same_trajectory(states, serial_states)
+        @test controls(states) == controls(serial_states)
+        @test svi_same_result(fit, serial)
+    end
+end
+
 @stestset "several tasks run on several threads and each unit once" begin
     n = 200
     seen = zeros(Int, n)
