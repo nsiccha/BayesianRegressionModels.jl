@@ -94,7 +94,7 @@ end
 @stestset "settling and polishing step Β no faster than exploration" begin
     # At the defaults Β's rows step a fifth as far as μ's in settling and
     # polishing: lr_global over polish_lr, never above one.
-    @test BRM._brm_svi_rank_step_ratio((; lr_global=0.01, polish_lr=0.05)) == 0.2
+    @test BRM._brm_svi_rank_step_ratio((; lr_global=0.01, polish_lr=0.05)) ≈ 0.2
     @test BRM._brm_svi_rank_step_ratio((; lr_global=0.01, polish_lr=0.005)) == 1.0
     s = [1.0, 0.01]
     move(rank) = let q = svi_rank_q(s, 1), x = BRM._brm_svi_global_vector(q)
@@ -103,7 +103,7 @@ end
     end
     full, capped = move(1.0), move(0.2)
     @test capped[1:4] == full[1:4]
-    @test capped[5:6] ≈ 0.2 .* full[5:6]
+    @test capped[5:6] ≈ 0.2 .* full[5:6] rtol=1e-5  # Adam's 1e-8 meets a fifth of the gradient
     # A mean-field factor has no rank part, and its step ignores the factor.
     q = svi_rank_q(s, 0)
     a, b = BRM._brm_svi_global_vector(q), BRM._brm_svi_global_vector(q)
