@@ -2945,6 +2945,29 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
   finds it again, and a `:units` snapshot loads without BRM. Mesh fields and
   streaming windows are refused by name.
 
+### A unit's whole series under one law; units under a known population law
+
+- `julia --project=test test/nlme_svi_series_law.jl`: each station's series is
+  one observation under a consumer-written law, an exact Kalman filter's log
+  likelihood bound as a leaf of a whole-event observation provider (snag
+  `odlplaus-margina-60bc212b`). The filter equals the dense Gaussian of the
+  readings, the RK target's native Reverse gradient equals central differences,
+  each pointwise term is its station's oracle, and `brm_svi_fit` with the
+  stations as units (factors of three statics each) is compared with NUTS on
+  the same target. One station under a known population law (known means by
+  `offset(...)`, every SD and the correlation known) is one unit whose block
+  packs no scale or correlation coordinate: its density equals an independent
+  oracle, its SVI fit is compared with NUTS, and a partly known block is still
+  refused by name. Two chained windows carry each station's filter state as
+  data. The NUTS references make it the longest part.
+- `julia --project=<NLMEEstimation scratch env> test/nlme_known_blocks_fit.jl`:
+  NLMEEstimation on a linear Gaussian model whose block is fully known. The
+  block is one `fixed_omega` family at the identity, the start and
+  `brm_nlme_estimates` name its known values, conditional likelihoods equal
+  the Normal oracle at η, `check_protocol` passes, the empirical Bayes modes
+  equal the closed-form conditional modes, and FOCE(I) and SAEM fit the
+  population with the block held.
+
 ## Reusable model view
 
 `julia --project=test test/model_view.jl` checks declaration roles, scalar/vector/

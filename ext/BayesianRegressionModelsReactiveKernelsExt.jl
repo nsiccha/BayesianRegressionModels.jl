@@ -720,10 +720,28 @@ BRM._rk_nlme_cell_footprint(query, point, row) =
 BRM._rk_nlme_raw_cell_footprint(query, point, row) =
     Base.invokelatest(query, point, row).unconstrained
 
+# The whole-model sampler is prepared on first use. Only the lockstep gradients
+# (`brm_nlme_loglikelihoods_and_gradients`) and the per-unit Laplace read it, so a
+# model that SVI, SAEM's per-subject route or the unit problems fit never compiles
+# it: on a 33-unit, 890-coordinate model its preparation was 75 s of the model's
+# cold preparation, 70 s of it compilation.
 BRM._rk_retained_pointwise_sampler(backend::BRM.RKBRMI; ad_backend,
         u0=zeros(Float64, backend.model.layout.total)) =
-    prepare_sampler(backend.model, _rk_translated(backend), u0;
-        backend=ad_backend, retain=(:pointwise,))
+    (; backend, ad_backend, u0, cached=Ref{Any}(nothing), lock=ReentrantLock())
+
+function _rk_retained_pointwise_prepared(state)
+    lock(state.lock) do
+        state.cached[] === nothing || return state.cached[]
+        state.cached[] = prepare_sampler(state.backend.model,
+            _rk_translated(state.backend), state.u0; backend=state.ad_backend,
+            retain=(:pointwise,))
+    end
+end
+
+BRM._rk_value_gradient_and_pointwise!(state::NamedTuple, gradient::Vector{Float64},
+        u::Vector{Float64}) =
+    BRM._rk_value_gradient_and_pointwise!(_rk_retained_pointwise_prepared(state),
+        gradient, u)
 function BRM._rk_value_gradient_and_pointwise!(query::SamplerQuery,
         gradient::Vector{Float64}, u::Vector{Float64})
     value, gradient, retained = sampler_value_gradient_and_retained!(query, gradient, u)

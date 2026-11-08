@@ -1495,13 +1495,30 @@ _brm_svi_lowered(x, phase; completions=nothing, groups...) = throw(ArgumentError
     "brm_svi_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
     "got $(typeof(x))"))
 
-_brm_svi_model(x::RKBRMI, phase; ad_backend, shared_point, subject_group,
-        nested_groups, shared_groups, unit_partition) =
-    _brm_run_phase(phase) do node
-        _brm_nlme_model(x, node; ad_backend=ad_backend === nothing ?
-            _brm_rk_default_ad("brm_svi_fit", x) : ad_backend, observation_ad_backend=nothing,
-            shared_point, subject_group, nested_groups, shared_groups, unit_partition=something(unit_partition, :subjects))
+# An `RKBRMI` keeps the model this prepared for it (`x.prepared.nlme`), so a later call on
+# the same backend with the same options reuses it, and the target it holds,
+# as a call on the returned `diagnostics.model` does. The options are its key
+# because they decide the model; nothing a fit changes lives in it.
+function _brm_svi_model(x::RKBRMI, phase; ad_backend, shared_point, subject_group,
+        nested_groups, shared_groups, unit_partition)
+    ad_backend = ad_backend === nothing ? _brm_rk_default_ad("brm_svi_fit", x) : ad_backend
+    unit_partition = something(unit_partition, :subjects)
+    key = (; ad_backend, shared_point=shared_point === nothing ? nothing :
+        Vector{Float64}(shared_point), subject_group, nested_groups, shared_groups,
+        unit_partition)
+    slot = x.prepared
+    held = lock(() -> slot.nlme, slot.lock)
+    if held !== nothing && isequal(held.key, key)
+        _brm_reuse_phase!(phase)
+        return held.model
     end
+    m = _brm_run_phase(phase) do node
+        _brm_nlme_model(x, node; ad_backend, observation_ad_backend=nothing,
+            shared_point, subject_group, nested_groups, shared_groups, unit_partition)
+    end
+    lock(() -> (slot.nlme = (; key, model=m)), slot.lock)
+    m
+end
 function _brm_svi_model(m::BRMNLMEModel, phase; ad_backend, shared_point,
         subject_group, nested_groups, shared_groups, unit_partition)
     ad_backend === nothing && shared_point === nothing && subject_group === nothing &&
@@ -1764,7 +1781,12 @@ is too narrow.
 
 The prepared `model` keeps its minibatch target and worker samplers for its next
 fit or continuation in this process, so passing `diagnostics.model` (or the
-[`BRMNLMEModel`](@ref) you prepared) prepares neither again.
+[`BRMNLMEModel`](@ref) you prepared) prepares neither again. An `RKBRMI` keeps
+the model a call prepared from it, the last one: a later call on the same backend
+with the same `ad_backend`, `shared_point`, groupings and `unit_partition` takes
+that model and its target, and other options prepare another model, which the
+backend then keeps instead. A copy or a serialized backend keeps none. A `BRMI`
+is lowered to a new `RKBRMI`, and so prepared, on every call.
 `diagnostics.target` reports what this call did: `reused` (it took the model's
 target), `workers_built` and the `seconds` of that phase. A connected model's
 target is reused only for the same `global_coordinates`, separator policy,
