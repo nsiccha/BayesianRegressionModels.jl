@@ -1357,6 +1357,16 @@ reparameterized gradients, linear allocation and checkpoint growth at fixed
 rank, covariance preservation under coordinate reordering, and an independent
 correlated Gaussian fitting oracle. It also needs only standard libraries.
 
+`nlme_svi_unit_curvature.jl` checks a dense unit's step on an orthogonal design
+(`unit_curvature = :orthogonal`): the design is d pairs at radius √d
+under a uniformly random rotation; its Stein estimate is a quadratic unit's whole
+curvature and its gradient and value the exact expectations; the full step reaches
+such a unit's optimum within the trust regions; and, through the production run
+loop, a prior scale that reads 32 units of 48 coordinates reaches its profile
+optimum with the units' factors at theirs, where the single pair (`:pair`, the
+control) leaves both off. Controls without `unit_curvature` keep the pair. About a
+minute; standard libraries only.
+
 `nlme_svi.jl` checks minibatch stochastic variational inference
 (`brm_svi_fit`). The minibatch split of the RK target is checked first: the
 global prior and Jacobian term plus every subject's cell term equal the full
@@ -2919,6 +2929,29 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
   tasks. A held target is reused only under the same `field_states`, a resume
   finds it again, and a `:units` snapshot loads without BRM. Mesh fields and
   streaming windows are refused by name.
+
+### A unit's whole series under one law; units under a known population law
+
+- `julia --project=test test/nlme_svi_series_law.jl`: each station's series is
+  one observation under a consumer-written law, an exact Kalman filter's log
+  likelihood bound as a leaf of a whole-event observation provider (snag
+  `odlplaus-margina-60bc212b`). The filter equals the dense Gaussian of the
+  readings, the RK target's native Reverse gradient equals central differences,
+  each pointwise term is its station's oracle, and `brm_svi_fit` with the
+  stations as units (factors of three statics each) is compared with NUTS on
+  the same target. One station under a known population law (known means by
+  `offset(...)`, every SD and the correlation known) is one unit whose block
+  packs no scale or correlation coordinate: its density equals an independent
+  oracle, its SVI fit is compared with NUTS, and a partly known block is still
+  refused by name. Two chained windows carry each station's filter state as
+  data. The NUTS references make it the longest part.
+- `julia --project=<NLMEEstimation scratch env> test/nlme_known_blocks_fit.jl`:
+  NLMEEstimation on a linear Gaussian model whose block is fully known. The
+  block is one `fixed_omega` family at the identity, the start and
+  `brm_nlme_estimates` name its known values, conditional likelihoods equal
+  the Normal oracle at η, `check_protocol` passes, the empirical Bayes modes
+  equal the closed-form conditional modes, and FOCE(I) and SAEM fit the
+  population with the block held.
 
 ## Reusable model view
 

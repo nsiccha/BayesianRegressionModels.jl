@@ -182,7 +182,11 @@ Returns `(; point, eta)`:
   - a sampled scalar under its name, constrained (`point.sigma`, not its log);
   - a random-effect block under its `|ID|` (`point.pk`), or
     `var"<predictor>|<group>"` for a block without one, as
-    `(; group, margins, covariance, sd, cor)` on the η scale; a stratified
+    `(; group, margins, covariance, sd, cor)` on the η scale; a block whose
+    every scale and whose correlation are known (`sd(...) = value`,
+    `cor(:, ID) = R`) as `(; group, margins, known = true, covariance, sd,
+    cor)` with its known values (its η are its standardized draws, under a
+    covariance held at the identity, and its effects `diag(sd) L η`); a stratified
     `gr(g, by=b)` block as `(; group, by, margins, strata)`, whose `strata`
     pairs each level of `b` with its stratum's `(; covariance, sd, cor)`. A
     block over a grouping in `shared_groups` (its coordinates are θ) adds
@@ -215,8 +219,17 @@ function brm_nlme_estimates(m::BRMNLMEModel, θ::AbstractVector, σ::AbstractVec
     end
     blocks = Pair{Symbol,Any}[]
     for (; family, record, stratum, fixed, indices) in _brm_nlme_families(backend, view)
-        # A fixed family (a completion's unit draws) is no random-effect block.
-        fixed === nothing || continue
+        if fixed !== nothing
+            # A block whose every value is known is a random-effect block with
+            # its known covariance, `known = true`. Other fixed families (a
+            # completion's unit draws, HSGP weights) are no random-effect block.
+            _brm_nlme_known_block(record) || continue
+            A = _brm_nlme_crossed_factor(values, record, length(indices))
+            push!(blocks, _brm_nlme_block_key(record) => (; group=record.group,
+                margins=_brm_nlme_margins(record), known=true,
+                _brm_nlme_covariance(A * A')...))
+            continue
+        end
         _brm_nlme_add_block!(blocks, record, stratum,
             _brm_nlme_ragged(view) ? Ω[family] : Ω[indices, indices], backend)
     end

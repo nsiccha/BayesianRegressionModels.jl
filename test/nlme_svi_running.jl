@@ -51,7 +51,7 @@ svi_held(m) = m.svi_target.prepared
 
     # A model in the result of an unprepared input continues the same way. An
     # RKBRMI keeps the model it prepared, so a later call on it with the same
-    # options prepares neither the model nor its target (BRM 0.2.248); a BRMI
+    # options prepares neither the model nor its target (BRM 0.2.251); a BRMI
     # lowers to a new RKBRMI, and so prepares both, on every call.
     rk = RKBRMI(svi_gauss_model(data))
     started = brm_svi_fit(rk; ad_backend=NLME_AD, rng=Xoshiro(102), SVI_RUN...,

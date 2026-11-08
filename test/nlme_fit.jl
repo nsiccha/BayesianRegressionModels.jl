@@ -381,7 +381,7 @@ end
     end
     # The value partition counts under construction; the one partition sampler
     # is lazy and reports under the fit that first needs gradients. Cell queries
-    # are prepared when first read (BRM 0.2.248), which this fit never does.
+    # are prepared when first read (BRM 0.2.251), which this fit never does.
     for label in ("Value partition", "Bind partition keys",
             "Prepare partition kernel", "Check coordinate ownership", "Unit footprints",
             "Unit partition gradients", "Partition sampler")

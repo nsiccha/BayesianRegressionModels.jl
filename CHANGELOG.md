@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.248
+## 0.2.251
 
 - Changed: an `RKBRMI` keeps the `BRMNLMEModel` that `brm_svi_fit`,
   `brm_svi_resume` and their slice and Laplace forms prepared from it, the last
@@ -49,6 +49,80 @@ instead of failing at run time.
   longer has a `Cell queries` counter. Values, gradients and refusals are unchanged; an
   `ad_backend` the sampler cannot use is refused when the sampler is first
   read.
+
+## 0.2.250
+
+- New: a subject block whose every scale and whose correlation are known
+  (`sd(...) = value` on every margin, and `cor(:, ID) = R` or one margin) has
+  an NLME reading. `brm_nlme_view` reads it as one covariance family held at
+  the identity (NLMEEstimation's `FixedOmega`): its standardized draws are η
+  and the model maps them to the effects with the known `diag(sd) L`. So
+  `brm_svi_fit` and NLMEEstimation's estimators fit a unit under a known
+  population law (known means through `offset(...)`), and
+  `brm_nlme_estimates` names the block with `known = true` and its known
+  `covariance`, `sd` and `cor`. Before, the view refused every known-value
+  block. A block that mixes known and sampled values (or a Student-t block
+  with known values) is still refused, now naming what is sampled (todo
+  `0840h34`).
+- Tested: a unit's whole series under one consumer-written law, a filter's
+  log likelihood bound as a leaf of a whole-event observation provider, is
+  one observation of its unit under `brm_nlme_view` and `brm_svi_fit`
+  (`test/nlme_svi_series_law.jl`, snag `odlplaus-margina-60bc212b`).
+
+## 0.2.249
+
+- Fixed: `brm_svi_fit(...; centering=LearnedCentering())` centres the levels of a
+  random-effect block over a `shared_groups` grouping whose draws one unit owns,
+  as it does a unit's own block, and lists the others in
+  `fit.diagnostics.centering.uncentered` with the reason. Such a block was in
+  neither `cells` nor `uncentered` before. A level's cells are located at the
+  population coefficients its margins absorb (`(1 | device)` takes the
+  intercept unless a units' block already does), at 0 without one. A level two
+  units read is global (`"its draws are not one unit's"`), and Student-t,
+  level-correlated (`gr(g; cor=...)`) and known-scale shared blocks are listed
+  with their own reasons. A streaming window maps an absent carried unit's
+  centred level through that unit's controls. A centred fit of a model with such
+  a block differs from its first step on; models without one are unchanged.
+
+## 0.2.248
+
+- Changed: `brm_svi_fit`'s dense units (at most `unit_dense_limit` coordinates)
+  estimate their whole curvature on every visit. A visit used to evaluate the
+  unit at one antithetic pair of draws, whose Stein estimate is a rank-one
+  product, and move the precision a tenth of the way (`unit_step = 0.1`) along
+  that one direction; a unit of tens of coordinates then stopped unsettled after
+  the visits a minibatch run gives it, and the hyperparameters followed its
+  factor. Now a visit evaluates d mutually orthogonal antithetic pairs (2d unit
+  gradients for d coordinates; a randomly rotated spherical-radial cubature
+  rule), whose Stein estimate is the unit's expected curvature, exact when its
+  term is quadratic in its coordinates, and takes the whole natural-gradient
+  step (`unit_step` now defaults to 1), inside the same trust regions.
+  Structured units (above `unit_dense_limit`) are unchanged.
+- Measured on an OU chain cut into window units, with exact oracles. 128 units
+  of 66 coordinates (about 500 visits each): the length scale ℓ came out 48.0
+  (states as latents) and 65.6 (states from innovations), against 1.4 and 11.4
+  before and about 61 at the family's optimum. 2,048 units of 64-65 coordinates
+  (about 72 visits each): 18.2 and 20.5 against 0.6 and 18.1 before, 802 and 227
+  nats below the family's optimum against 24,756 and 1,440; the rest of that gap
+  is a ridge between the hyperparameters and the windows' states, which a unit's
+  step does not cross. A pure test with 32 units of 48 coordinates whose prior
+  scale is the one global: log σ 0.0345 against the optimum 0.0334, the units'
+  factors 0.002 nats from their optimum in all, where the single pair ended at
+  0.507 and 100.6 nats.
+- Added: `unit_curvature`, `:orthogonal` (default) or `:pair`. `unit_curvature =
+  :pair` with `unit_step = 0.1` is the earlier single-pair step exactly, and `unit_step`'s
+  default follows `unit_curvature`.
+- Changed: a dense unit's visit costs 2d unit gradient evaluations instead of 2,
+  and `diagnostics.unit_gradient_calls` counts them. On the toys above a fit took
+  4 to 13 times as long. A fit on a fixed seed differs from the single pair's
+  from its first dense unit visit. A checkpoint written before this version
+  still resumes, with the single pair: it records no `unit_curvature`.
+- Unchanged: a sparse global's reader sites keep their precision step 0.1 under
+  `:orthogonal` (their curvature still comes from the one global draw; the unit
+  step 1 put a window toy's boundaries 88 optimal sds off). With
+  `centering=LearnedCentering()`, each of a dense unit's 2d draws is the centered
+  term and the controls' gradient and the location and scale adjoints are averaged
+  over them.
 
 ## 0.2.247
 
