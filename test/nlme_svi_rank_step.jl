@@ -91,6 +91,27 @@ end
     @test isequal(xa, xb) && isequal(a.m, b.m) && isequal(a.v, b.v)
 end
 
+@stestset "settling and polishing step Β no faster than exploration" begin
+    # At the defaults Β's rows step a fifth as far as μ's in settling and
+    # polishing: lr_global over polish_lr, never above one.
+    @test BRM._brm_svi_rank_step_ratio((; lr_global=0.01, polish_lr=0.05)) == 0.2
+    @test BRM._brm_svi_rank_step_ratio((; lr_global=0.01, polish_lr=0.005)) == 1.0
+    s = [1.0, 0.01]
+    move(rank) = let q = svi_rank_q(s, 1), x = BRM._brm_svi_global_vector(q)
+        BRM._brm_svi_polish_global_step!(BRM._BRMSVIAdam(6, 0.05), q, x, [1.0, 1, 0, 0, 1, 1], 0.05; rank)
+        x
+    end
+    full, capped = move(1.0), move(0.2)
+    @test capped[1:4] == full[1:4]
+    @test capped[5:6] ≈ 0.2 .* full[5:6]
+    # A mean-field factor has no rank part, and its step ignores the factor.
+    q = svi_rank_q(s, 0)
+    a, b = BRM._brm_svi_global_vector(q), BRM._brm_svi_global_vector(q)
+    BRM._brm_svi_polish_global_step!(BRM._BRMSVIAdam(4, 0.05), q, a, [1.0, 1, 1, 1], 0.05; rank=0.2)
+    BRM._brm_svi_whitened_global_step!(BRM._BRMSVIAdam(4, 0.05), q, b, [1.0, 1, 1, 1], 0.05)
+    @test isequal(a, b)
+end
+
 # The NUTS reference of `rk`'s target: coordinates × draws.
 function svi_rank_nuts(rk, m; seed, n_draws=1000, chains=4)
     problem = rk_logdensity_problem(rk; ad_backend=NLME_AD)

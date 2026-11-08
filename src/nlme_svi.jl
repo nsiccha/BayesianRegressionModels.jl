@@ -603,17 +603,29 @@ end
 # restarted Adam), and Niedersachsen and Rheinland-Pfalz evaluated non-finite
 # draws there. In units of exp(ρ) it stayed at 48,400-50,100 from the same state.
 # The structured unit factors' Adam keeps the whitened step.
-function _brm_svi_polish_global_step!(opt, q, x, grad, lr; clip=Inf)
+#
+# Β's rows step `rank` times as far, so that they never move faster than in
+# exploration (`_brm_svi_rank_step_ratio`). Settling holds `polish_lr` for up to
+# `settle_windows` windows and polishing starts there, five times `lr_global` at
+# the defaults, and Β's gradient is the same noise in every phase: on ODL's
+# Thüringen slice the fit evaluated non-finite draws 154 iterations into
+# settling (191 into polishing with `settle_windows=0`), and with Β at
+# exploration's rate it settled and polished cleanly (as with Β frozen).
+function _brm_svi_polish_global_step!(opt, q, x, grad, lr; clip=Inf, rank=1.0)
     r = size(q.Β, 2)
     r == 0 && return _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip)
     D = length(q.μ)
     s = exp.(q.ρ)
-    scale = vcat(s, ones(D), repeat(s, r))
+    scale = vcat(s, ones(D), rank .* repeat(s, r))
     step = zeros(length(x))
     _brm_svi_step!(opt, step, grad .* scale, lr; clip)
     x .+= scale .* step
     x
 end
+
+# How far a low-rank factor's Β rows step in settling and polishing relative to
+# μ, so that they never step further than at exploration's `lr_global`.
+_brm_svi_rank_step_ratio(c) = min(1.0, c.lr_global / c.polish_lr)
 
 # ── A subject's factor: one natural-gradient step ───────────────────────────
 
@@ -809,7 +821,7 @@ _brm_svi_field_prepare!(rng, t, q, g, batch) = nothing
 
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
-        sites=nothing, site_scale=1.0)
+        sites=nothing, site_scale=1.0, rank_step=1.0)
     D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
@@ -859,7 +871,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     # carries weight about 1 / π, so its coordinates' gradients are about √w times
     # their rms when drawn, and the batch's largest weight bounds every unit in it.
     clip = _BRM_SVI_GLOBAL_CLIP * sqrt(maximum(weights))
-    whiten ? _brm_svi_polish_global_step!(global_opt, q, x, grad, lr_global; clip) :
+    whiten ? _brm_svi_polish_global_step!(global_opt, q, x, grad, lr_global; clip, rank=rank_step) :
         _brm_svi_exploration_global_step!(global_opt, q, x, grad, lr_global; clip)
     _brm_svi_set_global!(q, x)
     _brm_svi_each_unit(t.plans, length(batch)) do _, k
@@ -1049,7 +1061,8 @@ function _brm_svi_advance!(run, t, c)
         _brm_svi_iteration!(run.rng, t, q, run.adam, batch.indices,
             scale * (polishing || settling ? c.polish_lr : c.lr_global), scale * c.unit_step;
             whiten=polishing || settling, weights=batch.weights, sites=run.sites,
-            site_scale=scale)
+            site_scale=scale,
+            rank_step=polishing || settling ? _brm_svi_rank_step_ratio(c) : 1.0)
     catch e
         e isa BRMSVINonfiniteError || rethrow()
         throw(BRMSVINonfiniteError(it, e.terms))
