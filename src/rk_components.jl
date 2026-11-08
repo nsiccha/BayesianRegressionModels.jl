@@ -352,16 +352,18 @@ end
 
 # One shared positive prior broadcasts over the margins; distinct priors are
 # stated per margin and collected into the same `tau` vector. A known scale
-# (`sd(...) = value`) arrives as its number and enters `tau` as a constant.
+# (`sd(...) = value`) arrives as the name of its input and enters `tau` as that
+# value; only a law is sampled.
 function _rk_ast_group_scales(priors, index)
-    if all(isequal(first(priors)), priors) && !(first(priors) isa Real)
+    held(prior) = prior isa Union{Real,Symbol}
+    if all(isequal(first(priors)), priors) && !held(first(priors))
         prior = first(priors)
         return Expr[Expr(:call, :.~, Expr(:ref, :tau, index),
             _rk_ast_dotted(prior.args[1], prior.args[2:end]...))]
     end
-    scales = Any[prior isa Real ? prior : Symbol(:tau_, j) for (j, prior) in pairs(priors)]
+    scales = Any[held(prior) ? prior : Symbol(:tau_, j) for (j, prior) in pairs(priors)]
     statements = Expr[Expr(:call, :~, scale, prior)
-                      for (scale, prior) in zip(scales, priors) if !(prior isa Real)]
+                      for (scale, prior) in zip(scales, priors) if !held(prior)]
     push!(statements, Expr(:(=), :tau, Expr(:vect, scales...)))
     statements
 end

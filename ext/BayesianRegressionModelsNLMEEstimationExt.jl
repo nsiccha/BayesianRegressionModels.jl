@@ -32,10 +32,18 @@ NE.nlme_layout(m::BRM.BRMNLMEModel) = BRM._brm_nlme_ragged(m.view) ?
 NE.evaluation_style(::BRM.BRMNLMEModel) = NE.BatchedEvaluation()
 
 # Families whose covariance the model fixes (a non-centered completion's unit
-# variance); NLMEEstimation estimates the others.
+# variance) or whose margins' SDs it holds (a block with known scales under a
+# sampled correlation); NLMEEstimation estimates the rest.
 function NE.fixed_omega(m::BRM.BRMNLMEModel)
-    pairs = [f => NE.FixedOmega(family.fixed)
-        for (f, family) in enumerate(m.view.families) if family.fixed !== nothing]
+    pairs = Pair{Int,NE.FixedOmega}[]
+    for (f, family) in enumerate(m.view.families)
+        if family.fixed !== nothing
+            push!(pairs, f => NE.FixedOmega(family.fixed))
+        else
+            held = BRM._brm_nlme_held_sd(family.record)
+            held === nothing || push!(pairs, f => NE.FixedOmega(; sd=held))
+        end
+    end
     isempty(pairs) ? nothing : pairs
 end
 # Preserve SAEM's population-gradient selection. Partitions remove repeated
@@ -111,19 +119,23 @@ function _read_prior_structure(m::BRM.BRMNLMEModel)
     # The view's covariance families, in NLMELayout order: one per block, or
     # one per stratum of a stratified block.
     # A fixed family (a completion's unit variance) has no BRM coordinates: its
-    # ω entries hold the fixed values and carry no prior.
+    # ω entries hold the fixed values and carry no prior. A family that holds some
+    # margins' SDs has no scale coordinate at those margins (`held[i]`).
     families = map(m.view.families) do family
         K = family.size
         fixed = family.fixed !== nothing
-        fixed || length(family.scales) == K &&
+        declared = BRM._brm_nlme_held_sd(family.record)
+        held = declared === nothing ? falses(K) : BitVector(!isnothing(s) for s in declared)
+        fixed || length(family.scales) == K - count(held) &&
             length(family.factor) == K * (K - 1) ÷ 2 || BRM._brm_nlme_error(
             "population prior: scale or correlation coordinates do not match the random-effect block")
-        (; K, fixed, scale_positions=family.scales, factor_positions=family.factor)
+        (; K, fixed, held, partial=any(held), scale_positions=family.scales,
+            factor_positions=family.factor)
     end
     omega_positions = reduce(vcat,
         (vcat(f.scale_positions, f.factor_positions) for f in families); init=Int[])
     length(omega_positions) == NE.nomega(NE.nlme_layout(m)) -
-            sum(f -> f.K * (f.K + 1) ÷ 2, filter(f -> f.fixed, families); init=0) ||
+            sum(f -> f.fixed ? f.K * (f.K + 1) ÷ 2 : count(f.held), families; init=0) ||
         BRM._brm_nlme_error("population prior: BRM covariance coordinates do not match NLME ω")
     families = map(families) do family
         scale_entries = map(family.scale_positions) do position
@@ -177,7 +189,7 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, structure, θ, σ, ω)
     margin_start = 1
     omega_start = 1
     urow = 1
-    for (family, (; K, fixed, scale_positions, factor_positions, scale_entries)) in
+    for (family, (; K, fixed, held, partial, scale_positions, factor_positions, scale_entries)) in
             enumerate(structure.families)
         if fixed
             margin_start += K
@@ -188,9 +200,29 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, structure, θ, σ, ω)
             C[margin_start:(margin_start + K - 1), margin_start:(margin_start + K - 1)]
         τ = [norm(view(block, i, 1:i)) for i in 1:K]
         local_omega = [omega_start + i * (i - 1) ÷ 2 + j - 1 for i in 1:K, j in 1:K]
+        nscales = length(scale_positions)
+        scale_row = 0
         for i in 1:K
-            scale_position = scale_positions[i]
-            entry = scale_entries[i]
+            # The density's measure, row by row, as a log ω_ii and log τ_i. An
+            # unconstrained family is estimated in ω: |d(τ_i, L_i)/dω_i| =
+            # C_ii² / τ_i^i. A family that holds some margins' SDs is estimated in
+            # NLMEEstimation's (log sd, m), with m_ij = L_ij / L_ii: |dL_i/dm_i| =
+            # L_ii^(i+1) for a held row and τ_i L_ii^(i+1) for a free one, so its
+            # density is one over the free coordinates the search moves.
+            diagonal = local_omega[i, i]
+            ω_power = partial ? i + 1 : 2
+            τ_power = partial && held[i] ? i + 1 : i
+            log_omega_jacobian += ω_power * ω[diagonal] - τ_power * log(τ[i])
+            for j in 1:i
+                col = local_omega[i, j]
+                dC = j == i ? block[i, i] : 1.0
+                log_omega_jacobian_gradient[col] +=
+                    (j == i ? ω_power : 0.0) - τ_power * block[i, j] * dC / τ[i]^2
+            end
+            held[i] && continue
+            scale_row += 1
+            scale_position = scale_positions[scale_row]
+            entry = scale_entries[scale_row]
             mapped[scale_position] = RKPPL._unconstrain_elt(entry, τ[i])
             scale_logjac = RKPPL._logjac_elt(entry, mapped[scale_position])
             log_coordinate_jacobian += scale_logjac
@@ -198,14 +230,10 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, structure, θ, σ, ω)
                 _scale_jacobian_derivative(entry, mapped[scale_position]))
             inverse_derivative = (entry.transform === :upper ? -1.0 : 1.0) *
                 exp(-scale_logjac)
-            diagonal = local_omega[i, i]
-            log_omega_jacobian += 2ω[diagonal] - i * log(τ[i])
             for j in 1:i
                 col = local_omega[i, j]
                 dC = j == i ? block[i, i] : 1.0
-                J[urow + i - 1, col] = inverse_derivative * block[i, j] * dC / τ[i]
-                log_omega_jacobian_gradient[col] +=
-                    (j == i ? 2.0 : 0.0) - i * block[i, j] * dC / τ[i]^2
+                J[urow + scale_row - 1, col] = inverse_derivative * block[i, j] * dC / τ[i]
             end
         end
         factor_index = 1
@@ -227,7 +255,7 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, structure, θ, σ, ω)
                 col = local_omega[i, k]
                 du_dC = k == j ? inv(sqrt(S)) :
                     -block[i, j] * block[i, k] / (sqrt(S) * T)
-                J[urow + K + factor_index - 1, col] =
+                J[urow + nscales + factor_index - 1, col] =
                     du_dC * (k == i ? block[i, i] : 1.0)
             end
             factor_index += 1
@@ -237,7 +265,7 @@ function _prior_omega_map(m::BRM.BRMNLMEModel, structure, θ, σ, ω)
         end
         margin_start += K
         omega_start += K * (K + 1) ÷ 2
-        urow += K * (K + 1) ÷ 2
+        urow += nscales + K * (K - 1) ÷ 2
     end
     correction = log_omega_jacobian - log_coordinate_jacobian
     (; mapped, omega_positions, J, omega_logjac_gradient,
@@ -744,7 +772,7 @@ function NE.mu_referencing(m::BRM.BRMNLMEModel)
     design = [zeros(Float64, sum(m.eta_blocks), length(refs))
         for _ in m.view.levels]
     for (j, r) in enumerate(refs), i in eachindex(design)
-        design[i][r.subject, j] = r.design[i]
+        design[i][r.subject, j] = r.design[i] / r.eta_scale
     end
     NE.MuReferencing([findfirst(==(r.population), m.theta) for r in refs],
         design)

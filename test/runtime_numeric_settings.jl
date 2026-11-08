@@ -180,6 +180,19 @@ known_cor(C) = brm(:(begin
     cor(:, p) = $C
     y ~ Normal(mu, sigma)
 end); mod=@__MODULE__)
+known_sd(s) = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 + x | p | subject)
+    sd(mu, p, Intercept) = $s
+    sd(mu, p, x) ~ Exponential(1)
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
+known_sd_all(s) = brm(:(begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | p | subject)
+    sd(:, p) = $s
+    y ~ Normal(mu, sigma)
+end); mod=@__MODULE__)
 tensor_smooth(k) = brm(:(begin
     sigma ~ Exponential(1)
     mu ~ 1 + t2(t, s; k=$k)
@@ -752,6 +765,27 @@ end
     design = merge(base, labels("a", "b", "c"))
     @test isequal(binder(design), rk_bound_data(reprocess(fit, design)))
     @test !occursin("replayed in full", sprint(show, binder))
+end
+
+@stestset "a known scale is an input" begin
+    for (label, model) in (("next to a sampled scale", RSM.known_sd),
+            ("the block's only margin", RSM.known_sd_all))
+        @testset "$label" begin
+            check_one_lowering("data field", model(:s),
+                [merge(LDATA, (; s)) for s in (0.3, 0.5)], ())
+            check_one_lowering("literal", s -> model(s)(LDATA), [0.3, 0.5], ())
+            field, literal = RKBRMI(model(:s)(merge(LDATA, (; s=0.3)))), RKBRMI(model(0.3)(LDATA))
+            u = rk_point(literal)
+            @test rk_density(field, u) ≈ rk_density(literal, u) atol=1e-12 rtol=1e-12
+            # Another value on a frozen replay is another fit.
+            @test_throws "changes the fitted RK program" reprocess(field, merge(LDATA, (; s=0.5)))
+            @test reprocess(field, merge(LDATA, (; s=0.3))) isa RKBRMI
+            state = brm_fitted_state(field)
+            @test_throws "changes the fitted RK program" RKBRMI(model(:s)(merge(LDATA, (; s=0.5))), state)
+            binder = rk_design_binder(literal)
+            @test isequal(binder(LDATA), rk_bound_data(reprocess(literal, LDATA)))
+        end
+    end
 end
 
 @stestset "a known correlation's factor is an input" begin

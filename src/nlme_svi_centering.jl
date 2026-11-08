@@ -340,7 +340,7 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
     family_slot = Dict{Any,Int}()
     function family!(key, record, K, stratum; spectral=false)
         get!(family_slot, key) do
-            foreach(port!, isnothing(record.scales) ? (record.scale,) : record.scales)
+            foreach(port!, _brm_nlme_scale_declarations(record))
             isnothing(record.L) || port!(record.L)
             push!(families, (; record, K, stratum, spectral))
             length(families)
@@ -616,6 +616,7 @@ function _brm_svi_centering_gradient(plan::_BRMSVICenteringPlan, t, frame, Ā, t
             end
         else
             for (k, name) in enumerate(record.scales)
+                name === nothing && continue    # a known margin's scale is no port
                 p = slot(name)
                 stratum === nothing ? (cot[p] += s̄[k]) : (cot[p][stratum] += s̄[k])
             end

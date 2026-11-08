@@ -3182,13 +3182,16 @@ end
 
 A random-effect marginal scale held at a known value by `sd(...) = value`
 (nlmixr2's `fix()` on an omega): a positive finite SD that the backends emit
-as data or a constant, never as a sampled parameter. It occupies the margin's
-`sd_prior` slot, so `sd` addresses keep one most-specific-wins resolution
-whether a margin is sampled or known.
+as data, never as a sampled parameter. It occupies the margin's `sd_prior`
+slot, so `sd` addresses keep one most-specific-wins resolution whether a margin
+is sampled or known. `input` is the generated input that carries the value into
+an RK program (`nothing` before RK planning mints one); Stan emits its own data.
 """
 struct _BRMKnownScale
     value::Float64
+    input::Union{Nothing,Symbol}
 end
+_BRMKnownScale(value) = _BRMKnownScale(value, nothing)
 
 # The number or matrix a known-value statement names: a numeric formula
 # constant (literal arithmetic is evaluated with Julia semantics, as for prior
