@@ -38,13 +38,13 @@ instead of failing at run time.
   factors 0.002 nats from their optimum in all, where the single pair ended at
   0.507 and 100.6 nats.
 - Added: `unit_curvature`, `:orthogonal` (default) or `:pair`. `unit_curvature =
-  :pair` with `unit_step = 0.1` is 0.2.242's step exactly, and `unit_step`'s
+  :pair` with `unit_step = 0.1` is the earlier single-pair step exactly, and `unit_step`'s
   default follows `unit_curvature`.
 - Changed: a dense unit's visit costs 2d unit gradient evaluations instead of 2,
   and `diagnostics.unit_gradient_calls` counts them. On the toys above a fit took
   4 to 13 times as long. A fit on a fixed seed differs from the single pair's
-  from its first dense unit visit. A checkpoint of 0.2.247 or earlier still
-  resumes, with the single pair: it records no `unit_curvature`.
+  from its first dense unit visit. A checkpoint written before this version
+  still resumes, with the single pair: it records no `unit_curvature`.
 - Unchanged: a sparse global's reader sites keep their precision step 0.1 under
   `:orthogonal` (their curvature still comes from the one global draw; the unit
   step 1 put a window toy's boundaries 88 optimal sds off). With

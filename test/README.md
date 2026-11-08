@@ -1358,7 +1358,7 @@ rank, covariance preservation under coordinate reordering, and an independent
 correlated Gaussian fitting oracle. It also needs only standard libraries.
 
 `nlme_svi_unit_curvature.jl` checks a dense unit's step on an orthogonal design
-(`unit_curvature = :orthogonal`, BRM 0.2.248): the design is d pairs at radius √d
+(`unit_curvature = :orthogonal`): the design is d pairs at radius √d
 under a uniformly random rotation; its Stein estimate is a quadratic unit's whole
 curvature and its gradient and value the exact expectations; the full step reaches
 such a unit's optimum within the trust regions; and, through the production run
