@@ -861,7 +861,7 @@ _brm_svi_field_prepare!(rng, t, q, g, batch) = nothing
 
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
-        sites=nothing, site_scale=1.0, curvature=:pair)
+        sites=nothing, site_scale=1.0, curvature=:pair, site_step=β)
     D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
@@ -913,7 +913,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
             _brm_svi_minibatch_global(sites, p) && (w[p] += scale * term.gg[entry])
         end
     end
-    _brm_svi_update_sites!(sites, t, q, g, ε, batch, terms, β, site_scale)
+    _brm_svi_update_sites!(sites, t, q, g, ε, batch, terms, site_step, site_scale)
     x = _brm_svi_global_vector(q)
     grad = _brm_svi_add_site_gradient!(_brm_svi_global_gradient(q, w, ε, η), sites, q)
     # `N / B` for a uniform batch; under work sampling a unit drawn with chance π
@@ -1118,7 +1118,8 @@ function _brm_svi_advance!(run, t, c)
         _brm_svi_iteration!(run.rng, t, q, run.adam, batch.indices,
             scale * (polishing || settling ? c.polish_lr : c.lr_global), scale * c.unit_step;
             whiten=polishing || settling, weights=batch.weights, sites=run.sites,
-            site_scale=scale, curvature=_brm_svi_unit_curvature_mode(c))
+            site_scale=scale, curvature=_brm_svi_unit_curvature_mode(c),
+            site_step=scale * _brm_svi_site_step(c))
     catch e
         e isa BRMSVINonfiniteError || rethrow()
         throw(BRMSVINonfiniteError(it, e.terms))
