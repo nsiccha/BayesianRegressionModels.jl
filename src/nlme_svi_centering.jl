@@ -641,15 +641,30 @@ function _brm_svi_cell_positions(plan::_BRMSVICenteringPlan, i)
     positions
 end
 
+# The highest control an HSGP weight's cell starts from. Its log scale moves
+# steeply with the length scale on the high modes, by ρ ω² / 2 per unit of ρ, so
+# with c well above 0 the factor over u makes z = u s^-c swing with every draw of
+# ρ. The ELBO answers by collapsing q(ρ), and once ρ is narrow nothing pushes c
+# down: from 0.5 a toy's length scale ended 1.7 NUTS sds off with an sd of 0.02
+# NUTS's, and the ELBO 5-6 nats below the plain fit's. From a low start the modes
+# the data inform climb to about 0.8 and the others stay near 0. Measured on
+# `hsgp_fit`'s toy in test/nlme_svi_centering.jl: 0.05 and 0.1 gave the same
+# ELBO, about 2 nats above plain, and the collapse begins by 0.2.
+const _BRM_SVI_SPECTRAL_START = 0.1
+
+_brm_svi_cell_start(plan::_BRMSVICenteringPlan, cell) =
+    cell.kind === :hsgp ? min(plan.start, _BRM_SVI_SPECTRAL_START) : plan.start
+
 # The controls of a target's cells: their logits, one Adam per unit and each
 # cell's position in its unit's block. A carried unit's cells start from its
 # previous logits, one per coordinate (`NaN` where none was learned).
 function _brm_svi_centering_controls(plan::_BRMSVICenteringPlan; carried=nothing)
-    x0 = _brm_svi_control_logit(plan.start)
     positions = [_brm_svi_cell_positions(plan, i) for i in eachindex(plan.ncells)]
     x = map(eachindex(positions)) do i
         old = carried === nothing ? nothing : carried[i]
-        [old === nothing || isnan(old[p]) ? x0 : old[p] for p in positions[i]]
+        [old === nothing || isnan(old[p]) ?
+            _brm_svi_control_logit(_brm_svi_cell_start(plan, plan.cells[i][k])) : old[p]
+            for (k, p) in enumerate(positions[i])]
     end
     (; plan.start, plan.step, x, opt=[_BRMSVIAdam(n, plan.step) for n in plan.ncells],
        positions)
