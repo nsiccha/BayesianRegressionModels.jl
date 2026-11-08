@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.258
+## 0.2.259
 
 - Changed: `brm_svi_fit` gives a `@plate` cell latent's entries
   (`x ~ Normal(loc[i], s)` in a cell, one draw per cell or per entry) to the
@@ -31,6 +31,37 @@ instead of failing at run time.
   ReactiveKernels reads its constrained block whole. A cell latent whose law
   reads a value the model computes per cell is still refused by name with its
   rewrite.
+
+## 0.2.258
+
+- New: `brm_svi_fit(x; centering=LearnedCentering())` also centres the weights of
+  a grouped HSGP whose levels are the units (`hsgp(t; by=subject)`): each level's
+  standardized weights are cells located at 0 and scaled by the term's spectral
+  scales, per level when a hyper-predictor scales `sd` or `length_scale` by
+  level. `fit.diagnostics.centering.cells` lists them with `kind=:hsgp`. A mode
+  whose scale underflows is floored in log scale, as WarmupHMC's adaptive HSGP
+  centering floors it, so its frame stays finite; the floor moves coordinates,
+  not the target.
+- An HSGP cell's control starts from `min(start, 0.1)`; other cells keep
+  `LearnedCentering(; start)`. A high mode's log scale moves steeply with the
+  length scale, so from 0.5 a centred weight swings with every draw of it and
+  the ELBO answers by collapsing q(length scale). On a 12-unit toy (6 units with
+  40 rows, 6 with 3, against 4×1000 NUTS draws) that left the length scale 1.7
+  NUTS sds off with 0.02 of NUTS's sd, 5–6 nats below the plain fit. From 0.1,
+  over three seeds and against centring the `(1 | subject)` cells alone, the
+  length scale's mean moves from 0.52–0.58 NUTS sds low to 0.14–0.25, the HSGP
+  `sd`'s from 0.83–0.86 to 0.54–0.69, the weights' rms error from 0.16–0.17 to
+  0.10–0.13 NUTS sds, and the ELBO rises by 0.2–0.4 nats. The length scale's sd
+  narrows, from 0.31–0.33 of NUTS's to 0.22–0.25.
+- Still uncentred, and listed in `uncentered` with the reason: levels correlated
+  by `cor=` (`cor=Omega`, `multigroup`) and an HSGP's weights shared by the units,
+  which are global coordinates. `brm_svi_centeredness` hands WarmupHMC random-effect
+  cells only; its HSGP rows keep their current values.
+- **Breaking:** every HSGP term's emitted program changes, because its spectral
+  scales are now a value of the program, `<id>.spectral_scale`. Values and
+  gradients are unchanged, but an existing SVI or SMC optimizer checkpoint or
+  streaming state of an HSGP model is refused, as for any changed program, whether
+  or not it uses centering. Finish such a run on its own version or restart it.
 
 ## 0.2.257
 

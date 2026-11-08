@@ -2209,7 +2209,9 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             # under its id. A grouped or hyper-predicted term (`grouped`) also
             # names its `by` column, levels and sampled block locals, which
             # the NLME view and the Stan transport read; `level_correlation`
-            # marks a `cor=` that couples its levels.
+            # marks a `cor=` that couples its levels. `spectral` is the local
+            # holding the weights' spectral scales (modes, or levels × modes),
+            # the value `<declaration>.<spectral>` of the program.
             _rk_coordinate_record!(coordinates, (; kind=:hsgp,
                 declaration=term.options.id, predictor=predictor.name,
                 axes=Tuple(term.columns),
@@ -2218,6 +2220,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 group=get(term.options, :group_column, nothing),
                 levels=get(term.options, :group_levels, nothing),
                 level_correlation=get(term.options, :level_cor, nothing) !== nothing,
+                spectral=isnothing(locals) ? :spectral_scale : locals.spectral,
                 locals))
             hyper_plans = get(term.options, :hyper_plans, ())
             rho = isnothing(locals) ? _rk_hsgp_length_carriers(term) : locals.scales.length_scale

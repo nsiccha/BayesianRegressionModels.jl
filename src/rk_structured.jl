@@ -141,12 +141,15 @@ function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, 
     push!(block.statements, Expr(:call, :.~, Expr(:ref, z, weights...),
         _rk_ast_dotted(:Normal, 0, 1)))
     weights_value, multigroup = _rk_ast_hsgp_level_weights!(block, z, level_cor, options)
+    # The weights' spectral scales are a value of the block (`spectral`).
+    spectral = _rk_block_local!(block, :spectral_scale)
     value = _rk_block_local!(block, :value)
-    push!(block.statements, Expr(:(=), value, _rk_ast_hsgp_value_graph!(definitions,
-        term, taken, arguments, sigma, rho, weights_value; group_index, multigroup)))
+    scales_call, value_call = _rk_ast_hsgp_value_graph!(definitions, term, taken, arguments,
+        sigma, rho, weights_value, spectral; group_index, multigroup)
+    push!(block.statements, Expr(:(=), spectral, scales_call), Expr(:(=), value, value_call))
     _rk_ast_block_call!(definitions, taken, "brm_grouped_hsgp", block, value),
         (; weights=z, hypers=(length_scale=rho_effects, sd=sigma_effects),
-           scales=(length_scale=rho_sampled, sd=sigma_sampled),
+           scales=(length_scale=rho_sampled, sd=sigma_sampled), spectral,
            lambda=isnothing(multigroup) ? nothing : get(multigroup, :lambda, nothing))
 end
 
