@@ -675,7 +675,9 @@ function _brm_svi_centering_batch_gradient(plan::_BRMSVICenteringPlan, t, frame,
     terms = Tuple{Int,Int,Float64}[]
     locations = zeros(length(t.globals))
     for (k, unit) in enumerate(centered)
-        w = weights[k] / 2
+        # A unit evaluated on an orthogonal design (`unit_curvature = :orthogonal`)
+        # brings 2d draws, each weighted 1/d of a pair's draw.
+        w = weights[k] / 2 * (hasproperty(unit, :weight) ? unit.weight : 1.0)
         for a in unit.adjoints
             for (ϕ, x) in enumerate(a.A)
                 Ā[ϕ] .+= w .* x
