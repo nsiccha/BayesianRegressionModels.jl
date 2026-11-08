@@ -374,16 +374,18 @@ const PINS = [
     # whole-vector-res-64373f39). From RK 0.1.96 a compact cell's
     # `z_rows * transpose(tau .* L)` is strided and reaches BLAS `gemm!`, so its
     # Laplace HVP needs Enzyme 0cdbe188 below (RK snag brm-sorted-cell-e201f8d9).
-    # d6be1927 (RK 0.1.115 / RKPPL 0.1.127, landed as RK main 30da0b7f) reads a
-    # dotted `@plate` cell latent's block through a bound table of ranges
-    # (cd58495a, RKPPL 0.1.126, RK snag rkppl-dotted-pla-1629a747) and maps a
-    # typed view of it to its parent's positions when the cell also reads a
-    # computed location (RK snag dotted-cell-late-3789b8ea), so a cell's
-    # footprint is its own block and `brm_svi_fit` gives the latent to its
-    # unit. It also carries the guarded-fill fix 78b564bd (RK 0.1.109) that
-    # `nlme_completion_laws.jl` needs, and the RKPPL threshold-count and
-    # Dirichlet-length fixes 9b90eeac and d916b305.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d6be1927c29db2f6498f08563e4477f1f72ac030"),
+    # 29711427 (RK main, RK 0.1.120 / RKPPL 0.1.128) reads a dotted `@plate` cell
+    # latent's block through a bound table of ranges (cd58495a, RKPPL 0.1.126, RK
+    # snag rkppl-dotted-pla-1629a747) and maps a typed view of it to its parent's
+    # positions when the cell also reads a computed location (d6be1927, RKPPL
+    # 0.1.127, RK snag dotted-cell-late-3789b8ea), so a cell's footprint is its own
+    # block and `brm_svi_fit` gives the latent to its unit. A rule's data structure
+    # reaches the rule `Const` in a planned body of 128 or more wrapped statements
+    # (RK snag derivativerule-r-0d7e245c), which a gmrf field's prior needs once
+    # such a latent's unit takes the authored-prior route. It also carries the
+    # guarded-fill fix 78b564bd (RK 0.1.109) that `nlme_completion_laws.jl` needs,
+    # and the RKPPL threshold-count and Dirichlet-length fixes 9b90eeac and d916b305.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "297114272297b93a9370d61947ea160d20ba428d"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
