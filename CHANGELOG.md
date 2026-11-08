@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.247
+
+- Fixed: a `LowRankGlobal(r)` fit's rank part steps no faster in settling and
+  polishing than in exploration. Both phases step at `polish_lr` (by default five
+  times `lr_global`), settling at that size for up to `settle_windows` windows,
+  and Β's gradient is minibatch noise in every phase, so its rows random-walked
+  again: on a model with 1,094 globals 4 of 10 low-rank fits evaluated non-finite
+  draws while settling (three within its first five windows) and a fifth while
+  polishing, and with `settle_windows=0` one did in polishing. Β's rows now step `min(1, lr_global / polish_lr)` times as far as μ
+  in units of their coordinates' scales. μ, ρ and `MeanFieldGlobal` fits are
+  unchanged; a `LowRankGlobal` fit on a fixed seed differs from its first
+  settling step on.
+
 ## 0.2.246
 
 - New: learned partial centering in minibatch SVI,
