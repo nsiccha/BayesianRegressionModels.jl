@@ -28,6 +28,18 @@ instead of failing at run time.
   last bit. Other options prepare another model, which the backend then keeps
   instead. A copy or a serialized backend keeps none. A `BRMI` is still
   lowered, and so prepared, on every call.
+- Changed: `brm_nlme_model` prepares the whole-model sampler that retains the
+  pointwise densities, and each subject-cell group's cell query, the first time
+  something reads them, instead of while preparing the model. The lockstep
+  gradients (`brm_nlme_loglikelihoods_and_gradients`) and the per-unit Laplace
+  read the sampler; a nested model's η sparsity and a refused partition's
+  diagnosis read the cell queries. A unit's values and gradients, minibatch
+  SVI's included, come from the observation partition, so a fit that reads
+  neither compiles neither: on a 33-unit, 890-coordinate model they were
+  75 s and 84 s of a 413 s cold preparation. The progress tree no longer has a
+  `Cell queries` counter. Values, gradients and refusals are unchanged; an
+  `ad_backend` the sampler cannot use is refused when the sampler is first
+  read.
 
 ## 0.2.247
 

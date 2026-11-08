@@ -1921,16 +1921,35 @@ function _brm_nlme_plate_observations(plan::_RKValuePlan)
     union!(names, (o.name for o in plan.observations if o isa _RKNestedObservation))
 end
 
-# One prepared cell query per group of `_brm_nlme_subject_cells`, counted under
-# `progress`: each one prepares a program of its own (on ArbeitsplatzAtlas's
-# model, 32 groups at 48–127 s each).
+# One cell query per group of `_brm_nlme_subject_cells`, prepared the first
+# time it is read. Each one prepares a program of its own (on ArbeitsplatzAtlas's
+# model, 32 groups at 48–127 s each; on a 33-unit model, three groups at 84 s
+# together, 80 s of it compilation), and only the structural reads of a nested
+# model (`_brm_nlme_cell_state`, for NLME estimators' η sparsity) and a refused
+# partition's diagnosis read them: a unit's values and gradients, SVI's included,
+# come from the observation partition (`_brm_nlme_partition_queries`), which
+# checks the same strict locality.
+mutable struct _BRMNLMECellQuery
+    const prepare::Any
+    const lock::ReentrantLock
+    query::Any
+end
+_BRMNLMECellQuery(prepare) = _BRMNLMECellQuery(prepare, ReentrantLock(), nothing)
+_brm_nlme_cell_query(q::_BRMNLMECellQuery) = lock(q.lock) do
+    q.query === nothing && (q.query = q.prepare())
+    q.query
+end
+_brm_nlme_cell_query(query) = query
+_rk_nlme_cell_footprint_query(q::_BRMNLMECellQuery) =
+    _rk_nlme_cell_footprint_query(_brm_nlme_cell_query(q))
+_rk_nlme_cell_value(q::_BRMNLMECellQuery, point, row) =
+    _rk_nlme_cell_value(_brm_nlme_cell_query(q), point, row)
+
 _brm_nlme_cell_queries(backend::RKBRMI, cells, partitioned, unit, progress=nothing) =
-    _brm_with_counter(progress, length(cells); description="Cell queries") do node
-        map(ntuple(identity, length(cells)), cells) do g, cell
-            query = _rk_nlme_cell_query(backend, cell.names, partitioned, unit)
-            _brm_update_progress!(node, g)
-            (; cell.names, cell.positions, cell.elementwise, query)
-        end
+    map(cells) do cell
+        query = _BRMNLMECellQuery(() -> _rk_nlme_cell_query(backend, cell.names,
+            partitioned, unit))
+        (; cell.names, cell.positions, cell.elementwise, query)
     end
 
 # A point that notes each packed position read through it: evaluating a cell's
@@ -2357,9 +2376,12 @@ pointwise densities (first-order, reverse-mode Enzyme: `ad_backend` must be
 `AutoEnzyme(; mode=Enzyme.Reverse)`), a reverse-over-forward sampler HVP query,
 its pointwise densities, and the subject attribution of every observed density.
 
-The HVP query is prepared the first time it is used: by the dense η Hessian
-blocks (`NLMEEstimation.conditional_loglikelihood_hessian_blocks`) and by the
-per-unit Laplace. With ReactiveKernels before 0.1.12 its preparation holds 8n²
+The sampler query is prepared the first time it is used: by the lockstep
+gradients ([`brm_nlme_loglikelihoods_and_gradients`](@ref)) and by the per-unit
+Laplace. So is the HVP query: by the dense η Hessian blocks
+(`NLMEEstimation.conditional_loglikelihood_hessian_blocks`) and by the per-unit
+Laplace. A fit that reads neither (minibatch SVI, the per-subject unit problems)
+compiles neither. With ReactiveKernels before 0.1.12 its preparation holds 8n²
 bytes for the n packed coordinates (n one-hot basis vectors of length n), 200
 GB at 158,343 coordinates; from 0.1.12 it is linear in n. No step of the
 preparation copies the model per thread.

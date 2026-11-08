@@ -379,16 +379,17 @@ end
             "Empirical Bayes (Newton)")
         @test get(rows, label, nothing) == '✓'
     end
-    # Value/footprint queries count under construction; the one partition
-    # sampler is lazy and reports under the fit that first needs gradients.
-    for label in ("Cell queries", "Value partition", "Bind partition keys",
+    # The value partition counts under construction; the one partition sampler
+    # is lazy and reports under the fit that first needs gradients. Cell queries
+    # are prepared when first read (BRM 0.2.248), which this fit never does.
+    for label in ("Value partition", "Bind partition keys",
             "Prepare partition kernel", "Check coordinate ownership", "Unit footprints",
             "Unit partition gradients", "Partition sampler")
         @test get(rows, label, nothing) == '✓'
     end
-    groups = length(f.model.cell_query)
+    @test !haskey(rows, "Cell queries")
+    @test all(cell -> cell.query.query === nothing, f.model.cell_query)
     text = render_text(tree[])
-    @test occursin("Cell queries ($groups/$groups)", text)
     @test occursin("Partition sampler (1/1)", text)
     @test all(==('✓'), values(rows))
     # Reporting changes no number.
