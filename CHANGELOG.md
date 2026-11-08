@@ -12,6 +12,40 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.250
+
+- Fixed: `brm_svi_fit`'s structured units (above `unit_dense_limit`) default to
+  `unit_step = 0.1` under either `unit_curvature`. BRM 0.2.248 and 0.2.249 gave them
+  the dense units' default of 1 under `:orthogonal`, though the entry for 0.2.248
+  called them unchanged: their step is Adam's step size, not a natural-gradient step
+  to take whole. A step you pass still applies to both families.
+- Changed: a structured unit's rank part steps a tenth as far as its mean and log
+  scales, the rate of the global factor's rows at the default steps. At the unit's
+  whole step Β's rows walk past the marginal the target wants, ρ falls below them
+  to make up for it, and the rows' own step, in units of exp(ρ), falls with it, so
+  they cannot come back. A rank-8 factor then ended below the diagonal it contains.
+- Measured on one station's unit of 295-304 coordinates under a known population
+  law, a whole series under a Julia leaf, three stations, ELBO of the returned factor
+  over 1,000 draws. Before, rank 8 stopped with `BRMSVINonfiniteError` at iterations
+  569, 802 and 2,128 on draws 571, 599 and 2,683 prior sds out, and mean-field
+  converged. At `unit_step = 0.1` alone rank 8 converged at 343, -204 and 425 with
+  marginal sds of 8, 31 and 4 under an N(0, 1) prior, against mean-field's 481, 455
+  and 470. With both changes rank 8 reads 486, 466 and 476 with every sd near 1. On
+  exact Gaussian units with a low-rank covariance the rank part at this rate beats
+  the best diagonal at every size and visit count measured (500 to 8,000 visits) and
+  at the whole step loses to it.
+- Changed: a fit of a model with a structured unit differs from its first visit of
+  such a unit, its rank part from then on in every version, its mean and scales
+  against 0.2.248 and 0.2.249. Mean-field fits read higher ELBOs too (one station's
+  trimmed window 62-68 against 20-34). Dense units and checkpoints are unchanged: a
+  checkpoint written before this version resumes at the steps it ran with.
+- Added: `BRMSVINonfiniteError`'s `terms` carry the evaluated points. Each term has
+  `points`, packed as a fit's `draws` (`plus` and `minus` for a unit, `draw` for the
+  global term), so `LogDensityProblems.logdensity_and_gradient(problem, term.points.minus)`
+  replays the evaluation in the model, and `largest`, its largest coordinate as
+  `(; coordinate, value)`, which the message prints. Under `centering=LearnedCentering()`
+  the points are the packed coordinates, not the factor's learned ones.
+
 ## 0.2.249
 
 - Fixed: `brm_svi_fit(...; centering=LearnedCentering())` centres the levels of a
