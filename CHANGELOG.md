@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.250
+
+- New: a subject block whose every scale and whose correlation are known
+  (`sd(...) = value` on every margin, and `cor(:, ID) = R` or one margin) has
+  an NLME reading. `brm_nlme_view` reads it as one covariance family held at
+  the identity (NLMEEstimation's `FixedOmega`): its standardized draws are η
+  and the model maps them to the effects with the known `diag(sd) L`. So
+  `brm_svi_fit` and NLMEEstimation's estimators fit a unit under a known
+  population law (known means through `offset(...)`), and
+  `brm_nlme_estimates` names the block with `known = true` and its known
+  `covariance`, `sd` and `cor`. Before, the view refused every known-value
+  block. A block that mixes known and sampled values (or a Student-t block
+  with known values) is still refused, now naming what is sampled (todo
+  `0840h34`).
+- Tested: a unit's whole series under one consumer-written law, a filter's
+  log likelihood bound as a leaf of a whole-event observation provider, is
+  one observation of its unit under `brm_nlme_view` and `brm_svi_fit`
+  (`test/nlme_svi_series_law.jl`, snag `odlplaus-margina-60bc212b`).
+
 ## 0.2.249
 
 - Fixed: `brm_svi_fit(...; centering=LearnedCentering())` centres the levels of a
