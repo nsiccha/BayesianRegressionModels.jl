@@ -247,7 +247,8 @@ function _brm_svi_consistent(run::_BRMSVIRun, t, c)
             length(run.sampling.draws) == length(run.averaged_through) ==
             length(run.unit_entropy) == N &&
         run.sampling.method == c.unit_sampling &&
-        run.unit_gradient_calls == 2sum(run.sampling.visits) &&
+        run.unit_gradient_calls ==
+            sum(i -> run.sampling.visits[i] * _brm_svi_unit_calls(q, i, c), 1:N; init=0) &&
         sum(run.sampling.draws) == c.batch_size * run.iteration
 end
 
@@ -258,6 +259,8 @@ function _brm_svi_restore(t, s::BRMSVIOptimizerState)
         t, _ = _brm_svi_initialize(t, s.previous, s.previous.q.family;
             start=nothing, inits=nothing, global_scale=1.0, unit_scale=1.0)
     end
+    s.run isa _BRMSVIRun && hasproperty(s.run.q, :centering) &&
+        (t = _brm_svi_centered_target(t, s.run.q))
     t, _brm_svi_restored(t, s)
 end
 

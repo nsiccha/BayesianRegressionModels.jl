@@ -132,7 +132,10 @@ end
         sampling = fit.diagnostics.sampling
         @test sampling.method == method
         @test sum(sampling.draws) == 18
-        @test fit.diagnostics.unit_gradient_calls == 2sum(sampling.visits)
+        # 2d evaluations per visit of a dense unit of d coordinates (the default
+        # orthogonal design), 2 per visit of any other.
+        calls = [U isa Matrix ? 2max(size(U, 1), 1) : 2 for U in fit.diagnostics.q.U]
+        @test fit.diagnostics.unit_gradient_calls == sum(sampling.visits .* calls)
         @test all(sampling.probabilities .> 0)
         @test all(isfinite, fit.draws)
         state = brm_svi_checkpoint(fit)

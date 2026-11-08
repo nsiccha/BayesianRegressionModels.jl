@@ -42,7 +42,10 @@ Threads.nthreads() >= 2 || error("weighted resume checks require --threads=2")
         @test svi_same_state(brm_svi_optimizer_checkpoint(final), full_state)
         @test svi_same_state(saved, states[P+7])
         @test saved.controls.unit_sampling === method
-        @test full_state.run.unit_gradient_calls == 2sum(full_state.run.sampling.visits)
+        # 2d evaluations per visit of a dense unit of d coordinates (the default
+        # orthogonal design), 2 per visit of any other.
+        calls = [U isa Matrix ? 2max(size(U, 1), 1) : 2 for U in full_state.run.q.U]
+        @test full_state.run.unit_gradient_calls == sum(full_state.run.sampling.visits .* calls)
         @test sum(full_state.run.sampling.draws) == controls.batch_size * full_state.run.iteration
         if method === :work
             @test any(full_state.run.sampling.draws .> full_state.run.sampling.visits)
