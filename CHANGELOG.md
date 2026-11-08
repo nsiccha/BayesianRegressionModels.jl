@@ -38,7 +38,7 @@ instead of failing at run time.
   restores the former, all-shared reading of its block.
 - Fixed: `brm_coordinate_transport` and `brm_start(...; component_inits)` with a
   formula key read a random-effect block declared inside a component again.
-  Both died with `type NamedTuple has no field fitted` from 0.2.235 to 0.2.249.
+  Both died with `type NamedTuple has no field fitted`.
 
 ## 0.2.249
 
