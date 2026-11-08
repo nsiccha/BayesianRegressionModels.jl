@@ -271,14 +271,39 @@ end
 # Why a family of standardized draws with a fixed identity covariance stays
 # uncentred: its draws' scale is computed inside a kernel, not read as a value.
 function _brm_svi_fixed_family_reason(block)
-    hasproperty(block, :hsgp) && return "an HSGP weight's spectral scale is computed " *
-        "inside its basis kernel and is not read as a graph value"
+    hasproperty(block, :hsgp) && return "its levels are correlated by `cor=`, so a " *
+        "level's weights are not scaled by their spectral scales alone"
     hasproperty(block, :cdar) && return "a walk innovation's scale is computed inside " *
         "its kernel and is not read as a graph value"
     hasproperty(block, :car) && return "a car field draw's scale is not read as a graph value"
     get(block, :completion, false) === true && return "a completion's law scale is not " *
         "read as a graph value"
     "its covariance is fixed"
+end
+
+# A grouped HSGP's family as the centering reads it: a diagonal natural factor
+# whose scales are the term's spectral scales, the value `<declaration>.<spectral>`
+# of the program, taking `level`'s row of it when a hyper-predictor scales `sd`
+# or `length_scale` by level (levels × modes).
+function _brm_svi_spectral_family(record, level)
+    stratum = any(!isnothing, values(record.locals.hypers)) ?
+        findfirst(isequal(level), record.levels) : nothing
+    stratum === nothing && any(!isnothing, values(record.locals.hypers)) && error(
+        "brm_svi_fit: internal: $(repr(level)) is not a level of HSGP `$(record.declaration)`")
+    (; scale=Symbol(record.declaration, ".", record.spectral), scales=nothing, L=nothing,
+       record.group), stratum
+end
+
+# A spectral scale as its cell reads it: floored smoothly in log scale, exactly as
+# WarmupHMC's adaptive HSGP centering floors it (`_adaptive_hsgp_floor`), so a
+# high mode whose scale underflows to zero keeps a normal Float64 frame for every
+# control. The map, its inverse and its log-Jacobian all read the floored scale,
+# so the floor moves coordinates, never the target. `_brm_svi_spectral_slope` is
+# its derivative in the scale, 1 above the floor's exact range and at zero.
+_brm_svi_spectral_floor(s) = exp(_adaptive_hsgp_floor(log(s)))
+function _brm_svi_spectral_slope(s)
+    s > 0 && log(s) <= _ADAPTIVE_HSGP_LOG_SCALE_EXACT || return 1.0
+    _brm_svi_spectral_floor(s) / s / (1 + exp(_ADAPTIVE_HSGP_LOG_SCALE_FLOOR - log(s)))
 end
 
 # The cells of target `t`: each instance of an estimated random-effect family
@@ -299,7 +324,7 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
         length(ports)
     end
     families = NamedTuple[]
-    family_slot = Dict{Int,Int}()
+    family_slot = Dict{Tuple{Int,Any},Int}()
     N = length(t.units)
     instances = [_BRMSVICenteringInstance[] for _ in 1:N]
     ncells = zeros(Int, N)
@@ -322,7 +347,13 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
             margins = [k for (k, b) in enumerate(view.block_margins)
                 if isequal(b.block, family.block) && b.coefficient !== :mixing]
             location = [Tuple{Int,Float64}[] for _ in 1:K]
-            reason = family.fixed !== nothing ? _brm_svi_fixed_family_reason(family.block) :
+            # A grouped HSGP whose levels are the units: each level's standardized
+            # weights, scaled by the term's spectral scales (`<id>.spectral_scale`,
+            # a row per level when a hyper-predictor scales them by level).
+            hsgp = family.fixed !== nothing && hasproperty(family.block, :hsgp) &&
+                !family.record.level_correlation
+            reason = family.fixed !== nothing && !hsgp ?
+                    _brm_svi_fixed_family_reason(family.block) :
                 get(family.record, :mixing, nothing) !== nothing ?
                     "a Student-t block's scale reads its unit's mixing weights" :
                 i == 0 || any(j -> owner[j] != i, packed) ? "its draws are not one unit's" :
@@ -342,15 +373,17 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
                 end
             end
             if reason !== nothing
-                push!(uncentered, (; kind=:ranef, block=family.block,
-                    level=first(labels).level, coordinates=view.coordinates[packed], reason))
+                push!(uncentered, (; kind=hasproperty(family.block, :hsgp) ? :hsgp : :ranef,
+                    block=family.block, level=first(labels).level,
+                    coordinates=view.coordinates[packed], reason))
                 continue
             end
-            slot = get!(family_slot, f) do
-                record = family.record
+            record, stratum = hsgp ? _brm_svi_spectral_family(family.record,
+                first(labels).level) : (family.record, family.stratum)
+            slot = get!(family_slot, (f, stratum)) do
                 foreach(port!, isnothing(record.scales) ? (record.scale,) : record.scales)
                 isnothing(record.L) || port!(record.L)
-                push!(families, (; family=f, record, K, family.stratum))
+                push!(families, (; family=f, record, K, stratum, spectral=hsgp))
                 length(families)
             end
             cellrange = (ncells[i] + 1):(ncells[i] + K)
@@ -358,8 +391,8 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
             push!(instances[i], _BRMSVICenteringBlock(slot,
                 [local_index[i][j] for j in packed], cellrange, location))
             for k in 1:K
-                push!(cells[i], (; kind=:ranef, labels[k].block, labels[k].predictor,
-                    labels[k].coefficient, labels[k].level,
+                push!(cells[i], (; kind=hsgp ? :hsgp : :ranef, labels[k].block,
+                    labels[k].predictor, labels[k].coefficient, labels[k].level,
                     coordinate=view.coordinates[packed[k]], located=!isempty(location[k])))
             end
         end
@@ -405,11 +438,25 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
             end
         end
     end
-    # Shared field weights are global coordinates, read through scales that are
-    # computed inside their kernels.
+    # Shared field weights are global coordinates. A gmrf/car/cdar field's scales
+    # are computed inside its kernel; an HSGP's are a graph value, but its shared
+    # weights are globals, and a grouped HSGP whose levels are the units is a
+    # family above.
     globals = Set(t.globals)
     for record in _brm_nlme_records(m.backend.plan)
         record.kind in (:hsgp, :gmrf_footprint, :car, :cdar) || continue
+        if record.kind === :hsgp
+            weights = Symbol(record.declaration, ".",
+                record.grouped ? record.locals.weights : :beta_raw)
+            shared = [p for (p, name) in enumerate(view.coordinates)
+                if _brm_nlme_owned(name, weights) && p in globals]
+            isempty(shared) || push!(uncentered, (; kind=:hsgp, record.declaration,
+                level=nothing, coordinates=view.coordinates[shared],
+                reason="an HSGP term's weights are shared by the units (global " *
+                    "coordinates); learned centering covers a grouped HSGP whose " *
+                    "levels are the units"))
+            continue
+        end
         owned = [p for (p, name) in enumerate(view.coordinates)
             if _brm_nlme_owned(name, record.declaration)]
         shared = [p for p in owned if p in globals && view.role[p] === :shared_latent]
@@ -436,13 +483,20 @@ function _brm_svi_centering_frame(plan::_BRMSVICenteringPlan, t, g)
     point = copy(plan.base)
     point[t.globals] .= g
     plan.read === nothing && return (; point, nt=NamedTuple(), values=(), A=Matrix{Float64}[],
-        scales=Vector{Float64}[], L=Matrix{Float64}[])
+        scales=Vector{Float64}[], L=Matrix{Float64}[], raw=Vector{Float64}[])
     nt = plan.read(point)
-    scales = [_brm_nlme_joint_scale(nt, f.record, f.K, f.stratum) for f in plan.families]
-    A = [Matrix{Float64}(_brm_nlme_natural_factor(nt, f.record, f.K, f.stratum))
-        for f in plan.families]
+    # An HSGP family's scales are its spectral scales, floored; `raw` keeps them
+    # unfloored for the floor's slope in the gradient.
+    raw = [f.spectral ? _brm_nlme_stratum_scales(Float64.(_brm_rk_declaration_value(nt,
+        f.record.scale)), f.stratum) : Float64[] for f in plan.families]
+    scales = [f.spectral ? _brm_svi_spectral_floor.(r) :
+        _brm_nlme_joint_scale(nt, f.record, f.K, f.stratum)
+        for (f, r) in zip(plan.families, raw)]
+    A = [f.spectral ? Matrix{Float64}(Diagonal(s)) :
+        Matrix{Float64}(_brm_nlme_natural_factor(nt, f.record, f.K, f.stratum))
+        for (f, s) in zip(plan.families, scales)]
     L = [Diagonal(1 ./ s) * a for (s, a) in zip(scales, A)]
-    (; point, nt, values=Tuple(nt), A, scales, L)
+    (; point, nt, values=Tuple(nt), A, scales, L, raw)
 end
 
 # The gradient over the globals of the batch's summed scale and location
@@ -456,6 +510,8 @@ function _brm_svi_centering_gradient(plan::_BRMSVICenteringPlan, t, frame, Ā, t
     for (ϕ, f) in enumerate(plan.families)
         record, stratum = f.record, f.stratum
         s̄ = vec(sum(Ā[ϕ] .* frame.L[ϕ]; dims=2))
+        # Through the floor of an HSGP family's spectral scales.
+        f.spectral && (s̄ .*= _brm_svi_spectral_slope.(frame.raw[ϕ]))
         if isnothing(record.scales)
             p = slot(record.scale)
             if stratum === nothing

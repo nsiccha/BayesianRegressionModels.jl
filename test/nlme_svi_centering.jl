@@ -18,6 +18,7 @@ using LinearAlgebra, Random, Statistics, WarmupHMC
 include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))
 include(joinpath(@__DIR__, "nlme_svi_owned_fixture.jl"))
 include(joinpath(@__DIR__, "nlme_svi_streaming_fixture.jl"))
+include(joinpath(@__DIR__, "nlme_grouped_hsgp_fixture.jl"))
 using Serialization
 
 const BRM_ = BayesianRegressionModels
@@ -76,11 +77,12 @@ function check_centered_terms(m; rng=Xoshiro(3), units=1:2, kinds)
         n = plan.ncells[i]
         @test n > 0
         u = u0[t0.units[i]]
-        # Zero controls: a draw cell is its packed coordinate; a vector element
-        # is standardized against its law.
+        # Zero controls: a draw cell (a random effect's or an HSGP level's
+        # standardized weight) is its packed coordinate; a vector element is
+        # standardized against its law.
         t, q = centered_target(m, [zeros(k) for k in plan.ncells])
         r = centered_term(t, q, i, g, u)
-        if all(c -> c.kind === :ranef, plan.cells[i])
+        if all(c -> c.kind in (:ranef, :hsgp), plan.cells[i])
             gg, gz = zeros(length(g)), zeros(length(u))
             v = BRM_._brm_svi_unit_term!(gg, gz, t0, i, g, u)
             @test r.v ≈ v rtol = 1e-12
@@ -219,6 +221,45 @@ end
     c_rare = [cell.c for cell in d.centering.cells if cell.unit in rare_levels]
     c_common = [cell.c for cell in d.centering.cells if !(cell.unit in rare_levels)]
     @test minimum(c_rare) > maximum(c_common) + 0.2
+end
+
+# Grouped HSGPs whose levels are the units (test/nlme_grouped_hsgp_fixture.jl):
+# each level's standardized weights are cells scaled by the term's spectral
+# scales, the program value `<id>.spectral_scale`, a row per level when a
+# hyper-predictor scales `sd` by level.
+@stestset "a grouped HSGP's weights scaled by its spectral scales" begin
+    for (brmi, rows) in ((flat_hsgp(GH_FLAT), false), (plate_hyper(GH_PLATE), true))
+        m = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
+        t = BRM_._brm_svi_target(m)
+        plan = BRM_._brm_svi_centering_plan(t, LearnedCentering())
+        hsgp = [cell for cells in plan.cells for cell in cells if cell.kind === :hsgp]
+        @test length(hsgp) == 3length(t.units)
+        @test all(cell -> !cell.located, hsgp)
+        spectral = only(f for f in plan.families if f.spectral && f.stratum === nothing ||
+            f.spectral && rows && f.stratum == 1)
+        @test endswith(string(spectral.record.scale), ".spectral_scale")
+        @test count(f -> f.spectral, plan.families) == (rows ? length(t.units) : 1)
+        @test !any(r -> r.kind === :hsgp && any(c -> occursin(".z.", string(c)),
+            r.coordinates), plan.uncentered)
+        check_centered_terms(m; kinds=(:ranef, :hsgp))
+    end
+    # The floor: exact above exp(-110), exp(-150) at zero, slope 1 at both ends.
+    @test BRM_._brm_svi_spectral_floor(1e-20) == exp(log(1e-20))
+    @test BRM_._brm_svi_spectral_floor(0.0) ≈ exp(-150.0)
+    @test BRM_._brm_svi_spectral_slope(0.0) == 1.0
+    @test BRM_._brm_svi_spectral_slope(0.3) == 1.0
+    for s in (exp(-140.0), exp(-150.0), exp(-155.0))
+        h = 1e-6 * s
+        fd = (BRM_._brm_svi_spectral_floor(s + h) - BRM_._brm_svi_spectral_floor(s - h)) / 2h
+        @test BRM_._brm_svi_spectral_slope(s) ≈ fd rtol = 1e-5
+    end
+    # A centered fit learns a control per weight.
+    m = brm_nlme_model(RKBRMI(flat_hsgp(GH_FLAT)); ad_backend=NLME_AD)
+    fit = brm_svi_fit(m; batch_size=2, max_iterations=400, ndraws=20, rng=Xoshiro(9),
+        centering=LearnedCentering())
+    c = [cell.c for cell in fit.diagnostics.centering.cells if cell.kind === :hsgp]
+    @test length(c) == 12 && all(0 .< c .< 1)
+    @test all(isfinite, fit.draws)
 end
 
 # Measured with this data (seeds 5 and 6, 2026-11-07): the plain mean-field fit
