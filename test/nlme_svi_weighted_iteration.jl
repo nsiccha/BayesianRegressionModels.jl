@@ -66,7 +66,7 @@ const S = SVIArithmetic
     target(poisoned) = S.PoisonableUnits([1], [[2, 3, 4], [5, 6, 7]],
         (; footprints=[[1, 2, 3, 4], [1, 5, 6, 7]]),
         [(; footprints=[[1, 2, 3, 4], [1, 5, 6, 7]])], [nothing],
-        (; view=(; coordinates=names)), poisoned)
+        (; view=(; coordinates=names), unit=fill(-1.0, 7)), poisoned)
     for dense_limit in (64, 0), method in (:uniform, :work)
         start() = S._brm_svi_params(target(false), [0.7], S.MeanFieldGlobal();
             global_scale=0.2, unit_scale=1.0, unit_dense_limit=dense_limit, unit_rank=1)
@@ -90,6 +90,16 @@ const S = SVIArithmetic
             @test :unit_gradient_plus in p.quantities
             @test :unit_gradient_minus in p.quantities
             @test p.coordinates == [names[t.units[p.unit][end]]]
+            # The evaluated pair, packed: the globals' draw, the unit's own draws
+            # around its mean, the rest at the model's point.
+            own = t.units[p.unit]
+            @test (p.points.plus[own] .+ p.points.minus[own]) ./ 2 ≈ before.M[p.unit]
+            @test p.points.plus[1] == p.points.minus[1] != before.μ[1]
+            rest = setdiff(1:7, 1, own)
+            @test p.points.plus[rest] == p.points.minus[rest] == fill(-1.0, length(rest))
+            @test p.largest.coordinate in names[vcat(1, own)]
+            @test abs(p.largest.value) == maximum(abs, vcat(p.points.plus[vcat(1, own)],
+                p.points.minus[vcat(1, own)]))
         end
         @test !isempty(e.terms)
         @test run.adam.t == 0 && q.μ == before.μ && q.ρ == before.ρ && q.Β == before.Β
@@ -97,6 +107,30 @@ const S = SVIArithmetic
         @test all(Matrix(q.Λ[i]) == Matrix(before.Λ[i]) for i in 1:2)
         @test all(o === nothing || o.t == 0 for o in q.unit_opt)
         @test isempty(run.trace) && run.iteration == 7
+
+        # A dense unit on an orthogonal design reports the pair that failed, the first.
+        if dense_limit > 0
+            orthogonal = merge(controls, (; unit_curvature=:orthogonal))
+            t, q = target(true), start()
+            run = S._brm_svi_run(Xoshiro(5), q, orthogonal, t)
+            e = try S._brm_svi_advance!(run, t, orthogonal); nothing catch err err end
+            @test e isa S.BRMSVINonfiniteError
+            for p in e.terms
+                own = t.units[p.unit]
+                @test (p.points.plus[own] .+ p.points.minus[own]) ./ 2 ≈ q.M[p.unit]
+                @test norm(p.points.plus[own] .- q.M[p.unit]) ≈ sqrt(length(own))
+            end
+        end
+
+        # The global term has one point, its draw.
+        t, q = target(false), start()
+        e = try S._brm_svi_check_finite(t, [2.5], NaN, [NaN], [nothing]); nothing catch err err end
+        @test e isa S.BRMSVINonfiniteError
+        p = only(e.terms)
+        @test p.term === :global && keys(p.points) == (:draw,)
+        @test p.points.draw == vcat(2.5, fill(-1.0, 6))
+        @test p.largest == (; coordinate="g", value=2.5)
+        @test occursin("largest coordinate: g = 2.5", sprint(showerror, e))
 
         # Positive control: the same run without the poison updates everything,
         # so the checks above can tell a guarded iteration from an inert one.

@@ -111,6 +111,23 @@ end
     @test resumed.draws == fit.draws
 end
 
+@testset "a non-finite unit's point holds this iteration's field states" begin
+    m = brm_nlme_model(rk; ad_backend=FIELD_AD, subject_group=:site, unit_partition=:connected)
+    t = BRM._brm_svi_target(m; separator=:none, field_states=:units)
+    @test t.fields !== nothing
+    t.fields.others .= 0.1 .* eachindex(m.unit)
+    g = fill(0.25, length(t.globals)); z = fill(-3.0, length(t.units[2]))
+    u = BRM._brm_svi_term_point(t, g, t.units[2], z)
+    @test u[t.globals] == g && u[t.units[2]] == z
+    other = setdiff(eachindex(u), t.globals, t.units[2])
+    @test !isempty(other) && u[other] == t.fields.others[other]
+    # A plain target's rest is the model's point, and the reading is left alone.
+    @test t.fields.others == 0.1 .* eachindex(m.unit)
+    plain = BRM._brm_svi_target(m; separator=:none)
+    @test BRM._brm_svi_term_point(plain, fill(0.25, length(plain.globals)))[
+        setdiff(eachindex(m.unit), plain.globals)] == m.unit[setdiff(eachindex(m.unit), plain.globals)]
+end
+
 @testset "a held target is reused only under the same field_states" begin
     # `_brm_svi_checkout!` keys the model's held target on `field_states`: a `:units`
     # target holds read states in units' blocks, with the field prior split by owner.

@@ -15,7 +15,7 @@
 #
 # RUN: julia --project=test test/nlme_svi_centering.jl [testset-filter...]
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
-using LinearAlgebra, Random, Statistics, WarmupHMC
+using LinearAlgebra, LogDensityProblems, Random, Statistics, WarmupHMC
 
 include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))
 include(joinpath(@__DIR__, "nlme_svi_owned_fixture.jl"))
@@ -162,6 +162,39 @@ const SVI_CENTERING_DEVICES = (; subject_group=:subject, shared_groups=(:device,
 
 # snag svi-learned-cent-4ab361d3: a shared grouping's block was in neither
 # `cells` nor `uncentered`.
+@stestset "a non-finite centered term carries packed points, not learned coordinates" begin
+    rng = Xoshiro(2)
+    rk = RKBRMI(svi_centering_pois_model(svi_centering_pois_data(rng, [2, 3, 30, 4, 25, 1])))
+    m = brm_nlme_model(rk; ad_backend=NLME_AD)
+    plan = BRM_._brm_svi_centering_plan(BRM_._brm_svi_target(m), LearnedCentering())
+    t, q = centered_target(m, [fill(0.6, k) for k in plan.ncells])
+    full = merge(q, BRM_._brm_svi_params(t, m.unit[t.globals], MeanFieldGlobal();
+        global_scale=0.1, unit_scale=1.0))
+    # exp of the linear predictor overflows at this finite point of unit 3.
+    full.M[3] .= 1e4
+    e = try
+        BRM_._brm_svi_iteration!(Xoshiro(4), t, full, BRM_._brm_svi_adam(full, 0.01), [5, 3],
+            0.01, 0.1)
+        nothing
+    catch err
+        err
+    end
+    @test e isa BRMSVINonfiniteError
+    p = only(e.terms)
+    @test p.unit == 3 && p.draw_finite
+    # The packed points are the map of the factor's draws: back through the learned
+    # coordinates they are a pair around the factor's mean at the point's own globals.
+    g = p.points.plus[t.globals]
+    frame = BRM_._brm_svi_centering_frame(plan, t, g)
+    u₊ = BRM_._brm_svi_learned_coordinates(plan, frame, full, 3, g, p.points.plus[t.units[3]])
+    u₋ = BRM_._brm_svi_learned_coordinates(plan, frame, full, 3, g, p.points.minus[t.units[3]])
+    @test (u₊ .+ u₋) ./ 2 ≈ full.M[3]
+    # Positive control: the map moves them, so a point holding the learned coordinates fails.
+    @test p.points.plus[t.units[3]] != u₊
+    problem = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+    @test !isfinite(LogDensityProblems.logdensity(problem, p.points.plus))
+end
+
 @stestset "a shared grouping's levels a unit owns are centred in that unit" begin
     subjects = ["s$i" for i in 1:6]
     data = svi_centering_device_data(Xoshiro(41), subjects; shared=("s5", "s6"))
