@@ -76,7 +76,7 @@ svi_held(m) = m.svi_target.prepared
         rng=Xoshiro(103), SVI_RUN..., stop_after=1, ndraws=0)
     @test grouped.diagnostics.model !== started.diagnostics.model
     @test !grouped.diagnostics.target.reused
-    @test rk.nlme.held.model === grouped.diagnostics.model
+    @test rk.prepared.nlme.model === grouped.diagnostics.model
     @test !brm_svi_fit(rk; ad_backend=NLME_AD, rng=Xoshiro(103), SVI_RUN...,
         stop_after=1, ndraws=0).diagnostics.target.reused
     # A BRMI prepares on every call.
@@ -85,13 +85,20 @@ svi_held(m) = m.svi_target.prepared
         stop_after=1, ndraws=0).diagnostics.target.reused
     @test !brm_svi_fit(brmi; ad_backend=NLME_AD, rng=Xoshiro(103), SVI_RUN...,
         stop_after=1, ndraws=0).diagnostics.target.reused
+    # One authored-factor catalogue per backend serves the view's scan and every
+    # target's ownership, so no later preparation plans the program for it again.
+    catalogue = rk.prepared.factors.value
+    @test catalogue !== nothing
+    @test BRM._rk_svi_factors(rk, started.diagnostics.model.unit).catalogue === catalogue
+    @test grouped.diagnostics.model.backend === rk
     # The model does not travel with the backend's value.
-    @test rk.nlme.held !== nothing
-    @test deepcopy(rk).nlme.held === nothing
+    @test rk.prepared.nlme !== nothing
+    @test deepcopy(rk).prepared.nlme === nothing
+    @test deepcopy(rk).prepared.factors.value === nothing
     io = IOBuffer()
-    serialize(io, rk.nlme)
+    serialize(io, rk.prepared)
     @test position(io) < 200
-    @test deserialize(seekstart(io)).held === nothing
+    @test deserialize(seekstart(io)).nlme === nothing
 end
 
 @stestset "a changed model is refused, and a refusal keeps the target" begin

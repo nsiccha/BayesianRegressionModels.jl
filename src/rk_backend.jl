@@ -521,19 +521,27 @@ _rk_once!(compute, once::_RKOnce) = lock(once.lock) do
     once.value
 end
 
-# The NLME model the minibatch fits prepared from this backend (`brm_svi_fit`,
-# `brm_svi_resume` and their slice and Laplace forms, src/nlme_svi.jl), with the
-# options that decided it: at most one, the last call's. A later call with the
-# same options takes it, and with it the target it holds, instead of preparing
-# both again. A copy or a serialized backend starts empty (its `Serialization`
-# methods sit beside `_BRMSVITargetSlot`'s): the model holds AD workspaces and
-# compiled programs, which belong to one process.
-mutable struct _BRMNLMEModelSlot
-    held::Any
+# What this process prepared from a backend's program and binding, for the next
+# call that would prepare it again. A copy or a serialized backend starts empty
+# (its `Serialization` methods sit beside `_BRMSVITargetSlot`'s): these hold AD
+# workspaces and compiled programs, which belong to one process.
+#
+# - `nlme`: the NLME model the minibatch fits prepared from this backend
+#   (`brm_svi_fit`, `brm_svi_resume` and their slice and Laplace forms,
+#   src/nlme_svi.jl), with the options that decided it: at most one, the last
+#   call's. A later call with the same options takes it, and with it the target
+#   it holds, instead of preparing both again.
+# - `factors`: the backend's authored density-factor catalogue (RKPPL
+#   `density_factors`), built on first use. `brm_nlme_view`'s scan of factors
+#   that read a unit and every SVI target's ownership read it; each build
+#   plans the whole program again (about 5 s warm on a 33-unit model).
+mutable struct _BRMPreparedSlot
+    nlme::Any
     const lock::ReentrantLock
-    _BRMNLMEModelSlot() = new(nothing, ReentrantLock())
+    const factors::_RKOnce
+    _BRMPreparedSlot() = new(nothing, ReentrantLock(), _RKOnce())
 end
-Base.deepcopy_internal(::_BRMNLMEModelSlot, ::IdDict) = _BRMNLMEModelSlot()
+Base.deepcopy_internal(::_BRMPreparedSlot, ::IdDict) = _BRMPreparedSlot()
 
 """
     RKBRMI(brmi; held_out=(), completions=:centered, car_units=nothing)
@@ -636,8 +644,8 @@ struct RKBRMI{P<:BRMI,PL,M,S<:BRMI}
     # replays can share that build with a different plan. Inspection uses this
     # provenance to avoid presenting the old layout's shapes as current.
     model_plan::Any
-    # The NLME model the minibatch fits last prepared from this backend.
-    nlme::_BRMNLMEModelSlot
+    # What this process prepared from the backend (`_BRMPreparedSlot`).
+    prepared::_BRMPreparedSlot
     # The retained parent is the model the plan lowered: `optional(...)`
     # priors and grouping-column addresses are already resolved
     # (`_brm_resolve_prior_addresses`).
@@ -647,7 +655,7 @@ struct RKBRMI{P<:BRMI,PL,M,S<:BRMI}
         parent = _brm_resolve_prior_addresses(parent)
         new{typeof(parent),typeof(plan),typeof(model),typeof(source)}(parent,
             plan, model, program, bound, source, fitted, model_plan,
-            _BRMNLMEModelSlot())
+            _BRMPreparedSlot())
     end
 end
 

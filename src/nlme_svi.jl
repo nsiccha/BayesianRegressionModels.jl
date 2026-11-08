@@ -1344,7 +1344,7 @@ _brm_svi_lowered(x, phase; completions=nothing, groups...) = throw(ArgumentError
     "brm_svi_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
     "got $(typeof(x))"))
 
-# An `RKBRMI` keeps the model this prepared for it (`x.nlme`), so a later call on
+# An `RKBRMI` keeps the model this prepared for it (`x.prepared.nlme`), so a later call on
 # the same backend with the same options reuses it, and the target it holds,
 # as a call on the returned `diagnostics.model` does. The options are its key
 # because they decide the model; nothing a fit changes lives in it.
@@ -1355,8 +1355,8 @@ function _brm_svi_model(x::RKBRMI, phase; ad_backend, shared_point, subject_grou
     key = (; ad_backend, shared_point=shared_point === nothing ? nothing :
         Vector{Float64}(shared_point), subject_group, nested_groups, shared_groups,
         unit_partition)
-    slot = x.nlme
-    held = lock(() -> slot.held, slot.lock)
+    slot = x.prepared
+    held = lock(() -> slot.nlme, slot.lock)
     if held !== nothing && isequal(held.key, key)
         _brm_reuse_phase!(phase)
         return held.model
@@ -1365,7 +1365,7 @@ function _brm_svi_model(x::RKBRMI, phase; ad_backend, shared_point, subject_grou
         _brm_nlme_model(x, node; ad_backend, observation_ad_backend=nothing,
             shared_point, subject_group, nested_groups, shared_groups, unit_partition)
     end
-    lock(() -> (slot.held = (; key, model=m)), slot.lock)
+    lock(() -> (slot.nlme = (; key, model=m)), slot.lock)
     m
 end
 function _brm_svi_model(m::BRMNLMEModel, phase; ad_backend, shared_point,

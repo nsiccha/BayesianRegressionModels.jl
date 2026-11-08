@@ -28,6 +28,11 @@ instead of failing at run time.
   last bit. Other options prepare another model, which the backend then keeps
   instead. A copy or a serialized backend keeps none. A `BRMI` is still
   lowered, and so prepared, on every call.
+- Changed: an `RKBRMI` builds its authored density-factor catalogue (RKPPL
+  `density_factors`) once, on first use, for every reader: `brm_nlme_view`'s
+  scan of shared factors that read a unit and each minibatch SVI target's
+  ownership. Each built it again before, planning the whole program each time
+  (about 5 s warm on a 33-unit model).
 - Changed: `brm_nlme_model` prepares the whole-model sampler that retains the
   pointwise densities, and each subject-cell group's cell query, the first time
   something reads them, instead of while preparing the model. The lockstep
