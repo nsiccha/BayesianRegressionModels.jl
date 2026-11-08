@@ -12,6 +12,43 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.254
+
+- Fixed: `brm_svi_combine` no longer turns slices that contradict each other into a
+  start the full fit cannot run from. The joint product put means far outside anything
+  the slices or the prior support, and both products held a contradicted coordinate as
+  narrow as the narrowest slice, where few slices put it. Ridges still cross where they
+  did, and slices that do not contradict each other and hold no rank part give the
+  start they gave.
+  - A coordinate's sites widen by the slices' between-slice variance, as in a
+    random-effects meta-analysis, in the joint and the coordinate-by-coordinate product
+    alike, so the coordinate sits among the slices, and it starts no wider than a cold
+    fit's default 0.1. It is a Paule-Mandel
+    estimate over the slices that pin the coordinate by themselves, where Cochran's Q
+    says they contradict (at 0.999, allowing for sds a quarter of the posterior's, as
+    SVI's can be), and `receipt.globals.heterogeneity` reports it. A
+    slice pins a coordinate if it narrows it (marginal variance below 0.8 of the prior
+    projection's) and the rank part does not carry it (below 0.8 of that variance), or
+    if its marginal variance is below 0.01 of the prior projection's.
+  - A slice's joint site holds only the coordinates it narrows, or carries along a
+    ridge (below 1.2 of the prior's variance, with at least 0.8 of it in the rank part).
+    Other coordinates have a marginal site where they are narrower than the prior and
+    none otherwise.
+  - A joint mean outside the range that supports it (from the lowest to the highest
+    of 3 sds around each counted site's mean and the prior's) makes the
+    coordinate-by-coordinate product stand, with `receipt.globals.joint === :outlying`
+    and `receipt.globals.outlying` marking the coordinates.
+  - A unit starts from its carried draws unless its own density at the combined globals
+    is clearly better (by over half a nat per draw) with its slice's draws as they
+    were, and `receipt.units.uncarried` lists those. Carrying keeps a unit's totals, which
+    can take draws no prior allows: a block whose scale a model pins at 1e-6 would need
+    a draw of 1,000 for a location change of 0.001.
+- Changed: `globals.correlated` holds only the coordinates in joint sites, so
+  `joint_limit` now bounds those and not every informed global, and `joint_limit=0`
+  still asks for the coordinate-by-coordinate product. A site's directions wider than
+  the prior are now those of the prior-relative eigenproblem, which a rescaling of the
+  coordinates leaves alone, and `clamped` follows them and the marginal sites.
+
 ## 0.2.253
 
 - Fixed: `brm_svi_fit`'s structured units (above `unit_dense_limit`) default to
