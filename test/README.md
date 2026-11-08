@@ -1223,6 +1223,14 @@ component per subject: its value matches a Laplace marginal computed from the
 whole model's density, and its gradient matches central differences. It runs in
 the test environment above.
 
+`rk_batched_field_cells.jl` checks a paired Fourier field with channel mixing written as array cells (BRM todo `07y7ghy`, from RK snag `plate-of-per-row-d1b4ed43`). The cell is `phase = frequency_t * (coordinates[s] ./ lengths)`, then products of shared coefficient matrices with `cos.(phase)` and `sin.(phase)`, then `correlation * raw`. It is checked against the same field written as ODLPlaus writes it, one `@deffun @juliacompat` call per row, on three counts:
+
+- RK gives both the same coordinates, density and native Reverse gradient.
+- RK plans the array cell's plate as matrix products (log group `:plate_batching`) and the per-row plate as a cell loop.
+- SBBRMI's compiled Stan density and gradient equal RK's.
+
+ReactiveKernels batches plates from 0.1.127 (RK `fa3deb83`). On this environment's RK pin `29711427` (RK 0.1.120) the batched-plan check is `broken`; everything else passes on both. Each spelling rule in the file's header was found by a refusal. It runs in the test environment, about 3 minutes on one CPU.
+
 `rk_plate_invariant_output.jl` checks an RKBRMI `@plate` output whose cell reads
 no per-index value, `decay[g] = exp(log_a)`, over three cells (BRM snag
 `retained-pointwi-fa27bc37`). At model scope `decay`, `sum(decay)` and
