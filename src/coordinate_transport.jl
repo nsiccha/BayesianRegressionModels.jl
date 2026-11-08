@@ -1749,8 +1749,10 @@ function _brm_transport_component_block!(blocks, simplexes, centered, record, pl
     local_pairs, local_correlations = BRMCoordinatePair[], NamedTuple[]
     local_centered = NamedTuple[]
     call_descriptor = _brm_call_descriptor(local_descriptor, index.kinds, stan_prefix)
+    # The call's levels are its own plan's: no fitted level table reaches here.
     _brm_transport_pairs!(local_pairs, local_correlations, simplexes, local_centered,
-        Val(record.kind), scoped_record, (; plan), call_descriptor, names, local_pos)
+        Val(record.kind), scoped_record, (; plan, fitted=nothing), call_descriptor, names,
+        local_pos)
     for pair in local_pairs
         push!(blocks.pairs, BRMCoordinatePair(
             merge((; kind=pair.address.kind, scope=path), pair.address),
