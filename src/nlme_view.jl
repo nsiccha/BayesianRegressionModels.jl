@@ -357,9 +357,11 @@ end
 
 # The stratum position (into `strata`, the `by` column's levels) of each level
 # of a stratified block's grouping column. Every level lies in one stratum;
-# `fail` throws the refusal of one that does not, prefixed by `caller`.
+# `fail` throws the refusal of one that does not, prefixed by `caller`. A level
+# with no row is an internal error, or `unseen` when one is given (a frozen
+# level table can hold levels the bound rows lack).
 function _brm_level_strata(groups, by, levels, strata, record;
-        caller="brm_nlme_view", fail=_brm_nlme_error)
+        caller="brm_nlme_view", fail=_brm_nlme_error, unseen=nothing)
     index = Dict(_brm_transport_level(level) => s for (s, level) in enumerate(strata))
     stratum = Dict{Any,Int}()
     for (g, b) in zip(groups, by)
@@ -370,6 +372,7 @@ function _brm_level_strata(groups, by, levels, strata, record;
             "`gr($(record.group), by=$(record.by))` has no single stratum for it")
     end
     Int[get(stratum, _brm_transport_level(level)) do
+            unseen === nothing || return unseen
             error("$caller: internal: level $(repr(level)) of " *
                 "`$(record.group)` has no row")
         end for level in levels]
