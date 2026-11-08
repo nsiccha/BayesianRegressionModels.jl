@@ -1384,7 +1384,13 @@ curvature and its gradient and value the exact expectations; the full step reach
 such a unit's optimum within the trust regions; and, through the production run
 loop, a prior scale that reads 32 units of 48 coordinates reaches its profile
 optimum with the units' factors at theirs, where the single pair (`:pair`, the
-control) leaves both off. Controls without `unit_curvature` keep the pair. About a
+control) leaves both off. Controls without `unit_curvature` keep the pair. The step
+takes the estimate's positive part: on saturating rows, whose target has precision
+exactly 1 off their span, the whole estimate (the control) has nearly symmetric
+eigenvalues and falls below 0.01 where the positive part stays at 1 and reaches the
+rows' stiffness; through the production loop, controls without `unit_positive_part`
+keep the whole estimate, so an old checkpoint resumes as it ran. A direction whose
+curvature lies below the factor's still widens, exactly on a Gaussian. About a
 minute; standard libraries only.
 
 `nlme_svi.jl` checks minibatch stochastic variational inference

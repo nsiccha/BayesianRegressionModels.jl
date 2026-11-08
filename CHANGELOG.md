@@ -12,6 +12,30 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.255
+
+- Fixed: under `unit_curvature = :orthogonal`, a dense unit's step takes the
+  positive part of its curvature estimate. On a saturating or redescending term the
+  estimate is mostly noise with nearly symmetric eigenvalues until the unit's stiff
+  directions are resolved: the trust region shortened the step from their size, and
+  the negative part halved the precision along a new direction each visit. A unit's
+  factor could become far wider than its target in a direction, and its stiff
+  directions came slowly. A saturating toy whose precision off its stiff subspace is
+  exactly 1 fell to 3e-4 and stayed there, with a top eigenvalue of 75 against the
+  target's 1.65e8; now it stays at 1 and reaches 1.65e8. On a downstream target of 67
+  stiff units of up to 17 coordinates, a unit's smallest precision eigenvalue at
+  update 60 was 0.013 where the estimate read 223 along that direction on average;
+  now it is 0.6, and the largest eigenvalue at update 100 is 26,670 against 3,045.
+  The estimate is exact on a quadratic term and has no negative part there, so such
+  a unit's step is unchanged to the last bit. A direction whose curvature really lies
+  below the factor's still widens, by up to half per visit. Against Gaussian optima
+  known exactly, at 17 coordinates, no visit's estimate had a negative eigenvalue on
+  Student-t (3 and 5 degrees of freedom), logistic or Poisson terms, so those steps
+  are unchanged; a Cauchy term, negative on 45% of visits, moved the rms sd ratio
+  from 0.951 to 0.950. The step adds one eigendecomposition per visit beside its 2d
+  unit gradients. A fit with dense units whose estimate goes indefinite differs from
+  earlier versions from that visit on. A checkpoint written before this resumes at
+  the step it ran with.
 ## 0.2.254
 
 - Fixed: `brm_svi_combine` no longer turns slices that contradict each other into a
