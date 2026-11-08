@@ -31,8 +31,10 @@
 #   depend on ε and would only add noise);
 # - gradient at the mean: G + λ (x - μ), with the precision from before this
 #   draw, so that the correction is uncorrelated with ε.
-# The precision moves by the unit step β; the gradient at the mean by
-# `_BRM_SVI_SITE_PULL_STEP`, which decays in polishing as β does. A first visit
+# The precision moves by the site step β (`_brm_svi_site_step`: the unit step
+# under `unit_curvature = :pair`, `_BRM_SVI_SITE_STEP` under `:orthogonal`, whose
+# whole unit step would replace a site's precision with one draw's estimate); the
+# gradient at the mean by `_BRM_SVI_SITE_PULL_STEP`, which decays in polishing as β does. A first visit
 # takes both whole. Like a unit's own step, one visit changes the coordinate's
 # precision at most 2.5-fold up or by half. Without that bound a site's Stein
 # estimate, whose noise grows as 1/s, drove a few precisions up without end (1e15
@@ -61,6 +63,13 @@
 # a sparse coordinate's rows of Β follow its prior and the sites' diagonal.
 
 const _BRM_SVI_SITE_PULL_STEP = 0.5
+# A site's precision step when the units take their whole step (`unit_curvature =
+# :orthogonal`). A site's curvature still comes from the one global draw ε, so it
+# keeps the step it had with BRM 0.2.240's default `unit_step`. Handing it the
+# unit step 1 left the boundaries of a window toy 88 optimal sds off (rms).
+const _BRM_SVI_SITE_STEP = 0.1
+_brm_svi_site_step(c) =
+    _brm_svi_unit_curvature_mode(c) === :orthogonal ? _BRM_SVI_SITE_STEP : c.unit_step
 # The largest relative change of a sparse coordinate's precision in one visit:
 # down to ½, up to 1 + 1.5 = 2.5 times, as for a unit's factor.
 const _BRM_SVI_SITE_SHRINK = 0.5
