@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.248
+
+- Changed: an `RKBRMI` keeps the `BRMNLMEModel` that `brm_svi_fit`,
+  `brm_svi_resume` and their slice and Laplace forms prepared from it, the last
+  one. A later call on the same backend with the same `ad_backend`,
+  `shared_point`, groupings and `unit_partition` takes that model, and with it
+  the target and worker samplers it holds, as a call on `diagnostics.model`
+  does: `diagnostics.target.reused` is `true` and nothing is prepared
+  (`laplace=GaussianBlockLaplace()` reuses the model and still prepares its
+  target on every call). Before,
+  each call on an `RKBRMI` prepared the model and its target again; on a
+  downstream 33-unit target a warm call spent about 50 s of its 53 s doing so.
+  Results are unchanged: a reused model's run equals a fresh model's to the
+  last bit. Other options prepare another model, which the backend then keeps
+  instead. A copy or a serialized backend keeps none. A `BRMI` is still
+  lowered, and so prepared, on every call.
+
 ## 0.2.247
 
 - Fixed: a `LowRankGlobal(r)` fit's rank part steps no faster in settling and

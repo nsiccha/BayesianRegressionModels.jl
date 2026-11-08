@@ -2303,6 +2303,10 @@ Serialization.serialize(s::Serialization.AbstractSerializer, ::_BRMSVITargetSlot
     Serialization.serialize_type(s, _BRMSVITargetSlot)
 Serialization.deserialize(::Serialization.AbstractSerializer, ::Type{_BRMSVITargetSlot}) =
     _BRMSVITargetSlot()
+Serialization.serialize(s::Serialization.AbstractSerializer, ::_BRMNLMEModelSlot) =
+    Serialization.serialize_type(s, _BRMNLMEModelSlot)
+Serialization.deserialize(::Serialization.AbstractSerializer, ::Type{_BRMNLMEModelSlot}) =
+    _BRMNLMEModelSlot()
 
 # A heap object whose fields never change, not an immutable struct: it holds its
 # prepared fields inline, so each dynamic call that passed an immutable one copied
