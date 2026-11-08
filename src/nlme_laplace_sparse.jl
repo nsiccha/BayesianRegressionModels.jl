@@ -678,6 +678,8 @@ function _rk_spl_cell_newton end
 function _rk_spl_cell_block end
 function _rk_spl_cell_accumulate end
 function _rk_spl_cell_footprint end
+_rk_spl_cell_footprint(q::_BRMNLMECellQuery; kwargs...) =
+    _rk_spl_cell_footprint(_brm_nlme_cell_query(q); kwargs...)
 function _rk_spl_cell_reads end
 function _rk_spl_cell_batch end
 function _rk_spl_partitioned end

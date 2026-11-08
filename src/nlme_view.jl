@@ -21,9 +21,11 @@ include("nlme_selection.jl")
 A model that has no nonlinear-mixed-effects reading in [`brm_nlme_view`](@ref):
 no subject-level random effects, a grouping named in neither `nested_groups`
 nor `shared_groups`, a unit-owned grouping that couples its levels
-(`gr(...; cor=...)`), an `mm(...)` block, or a coordinate the semantic
+(`gr(...; cor=...)`), an `mm(...)` block, a unit-owned block that holds known
+values next to sampled ones, or a coordinate the semantic
 inventory does not cover. A stratified `gr(g, by=b)` block is read as one
-covariance family per stratum. `message` names the offending declaration or coordinates.
+covariance family per stratum, and a block whose every value is known as one
+family of fixed identity covariance. `message` names the offending declaration or coordinates.
 """
 struct BRMNLMEViewError <: Exception
     message::String
@@ -43,7 +45,9 @@ unconstrained coordinate vector (`coordinates`, in packed order).
 - `role[c]` — `:population` (population coefficients, categorical contrasts,
   monotonic simplexes, ordinal thresholds and vector parameters),
   `:shared_latent` (sampled coordinates shared by the units: HSGP components,
-  missing-value completions, submodels, `car(...)` fields (only their separator
+  missing-value completions, submodels (a function-style component call's
+  sampled locals other than its random-effect blocks, which are read as
+  model-scope blocks), `car(...)` fields (only their separator
   draws, scale and mixing share when lowered with `car_units`), the latents a
   `@plate` cell declares and the sampled locals of a component called in a
   cell, and every coordinate of a random-effect block over a grouping in
@@ -175,7 +179,103 @@ Base.show(io::IO, v::BRMNLMEView) = print(io, "BRMNLMEView(",
 # no semantic inventory. Closure-style `kernel(...) do` cells instead use the
 # value plan, like `@plate for` cells.
 _brm_nlme_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan}) =
-    _rk_coordinate_records(plan)
+    _brm_nlme_component_blocks(plan, _rk_coordinate_records(plan))
+
+# A random-effect block a function-style component call declares
+# (`kin ~ f(subject)`, with `(1 | pk | subject)` in `f`) is read as the same
+# block at model scope, over the column the call passes for the grouping
+# input: it is filed again here, before the call's `:submodel` record, with its
+# coordinates, its `|ID|` and its margins' predictors under the call's path
+# (`kin.b_pk_subject.z`, `kin.pk`, `kin.CL`) and its grouping, `by` and joined
+# columns renamed to the caller's. Nested calls compose paths and names. Its
+# draws are indexed by the call's levels of the grouping, so a block keeps the
+# call's shared reading when an argument is no column of the model (an
+# expression) or when the call's levels of it are not the model's.
+function _brm_nlme_component_blocks(plan, records)
+    any(_brm_nlme_component_call, records) || return records
+    columns = plan.columns
+    caller(name) = haskey(columns, name) ? name : nothing
+    out = Any[]
+    for record in records
+        _brm_nlme_component_call(record) &&
+            _brm_nlme_component_blocks!(out, record.component, (record.target,), caller,
+                columns)
+        push!(out, record)
+    end
+    out
+end
+_brm_nlme_component_call(record) =
+    record.kind === :submodel && get(record, :component, nothing) !== nothing
+
+function _brm_nlme_component_blocks!(out, metadata, path, caller, columns)
+    inputs = get(metadata, :inputs, nothing)
+    inputs === nothing && return out
+    # The model's column that a column local to this call is, or `nothing`.
+    outer(column) = let name = get(inputs, column, nothing)
+        name === nothing ? nothing : caller(name)
+    end
+    for record in metadata.coordinates
+        if _brm_nlme_component_call(record)
+            _brm_nlme_component_blocks!(out, record.component, (path..., record.target),
+                outer, columns)
+        elseif record.kind in (:ranef, :stratified_ranef)
+            block = _brm_nlme_component_block(record, metadata.plan, path, outer, columns)
+            block === nothing || push!(out, block)
+        end
+    end
+    out
+end
+
+function _brm_nlme_component_block(record, plan, path, outer, columns)
+    locals = Symbol[(haskey(record, :joint_columns) ? record.joint_columns : (record.group,))...]
+    record.kind === :stratified_ranef && push!(locals, record.by)
+    renamed = Dict{Symbol,Symbol}()
+    for column in locals
+        name = outer(column)
+        name === nothing && return nothing
+        values = get(plan.columns, column, nothing)
+        values === nothing && return nothing
+        isequal(_rk_grouping_levels(values), _rk_grouping_levels(columns[name])) ||
+            return nothing
+        renamed[column] = name
+    end
+    scoped(::Nothing) = nothing
+    scoped(name::Symbol) = Symbol(join((path..., name), "."))
+    scoped(names::Tuple) = map(scoped, names)
+    fields = (; group=renamed[record.group], id=scoped(record.id),
+        margins=map(((predictor, coefficient),) -> (scoped(predictor), coefficient),
+            record.margins),
+        scale=scoped(record.scale), scales=scoped(record.scales), z=scoped(record.z),
+        L=scoped(record.L),
+        scale_priors=map(law -> _brm_nlme_component_law(law, plan), record.scale_priors),
+        # The call's own address of the block, as the coordinate transport
+        # pairs it (`brm_nlme_joint_map`).
+        scope=path, call_block=(; record.group, record.id, record.margins))
+    haskey(record, :by) && (fields = (; fields..., by=renamed[record.by]))
+    haskey(record, :joint_columns) && (fields = (; fields...,
+        joint_columns=map(column -> renamed[column], record.joint_columns)))
+    haskey(record, :mixing) && (fields = (; fields..., mixing=scoped(record.mixing)))
+    haskey(record, :level_correlation) && (fields = (; fields...,
+        level_correlation=scoped(record.level_correlation)))
+    merge(record, fields)
+end
+
+# A component block's scale law with the call's bound data scalars in place:
+# the model's names are not the call's. A law reading anything else (a sampled
+# value of the call) has no model-scope reading and starts no scale.
+_brm_nlme_component_law(law::Real, plan) = law
+_brm_nlme_component_law(law::Symbol, plan) = _brm_nlme_scalar_data(plan, law)
+function _brm_nlme_component_law(law::Expr, plan)
+    head = law.head === :call ? 1 : law.head === :. ? 1 : 0
+    args = Any[law.args[1:head]...]
+    for arg in law.args[(head + 1):end]
+        value = _brm_nlme_component_law(arg, plan)
+        value === nothing && return nothing
+        push!(args, value)
+    end
+    Expr(law.head, args...)
+end
+_brm_nlme_component_law(law, plan) = nothing
 _brm_nlme_records(plan) = _brm_nlme_error(
     "brm_nlme_view: an RK plan of kind `$(nameof(typeof(plan)))` has no " *
     "semantic coordinate inventory, so its NLME partition cannot be read. " *
@@ -195,6 +295,14 @@ function _brm_nlme_declaration_coordinates(names, declaration, empty)
         "declaration `$declaration` owns no packed coordinate")
     hits
 end
+
+# A plain Gaussian random-effect block whose every scale is known
+# (`sd(...) = value`) and whose correlation is known (`cor(:, ID) = R`) or
+# absent (one margin). Its draws are standardized effects under a fixed
+# identity covariance; the known `diag(sd) L` stays in the model.
+_brm_nlme_known_block(record) = get(record, :kind, nothing) === :ranef &&
+    haskey(record, :known_scales) && !haskey(record, :mixing) &&
+    all(!isnothing, record.known_scales) && isnothing(record.L)
 
 # A random-effect block's identity: its grouping and `|ID|`. A block without an
 # ID belongs to one predictor, and several predictors can each own one over the
@@ -234,8 +342,12 @@ end
 # A population column is mu-referenced through a random slope when its actual
 # emitted Z column is identical. A subject-constant column can instead be
 # absorbed through an intercept, including a covariate slope without a random
-# slope. Both cases preserve the whole predictor row by row.
-function _brm_nlme_mu_references(backend, block_margins, population, rows, nrows)
+# slope. Both cases preserve the whole predictor row by row. The margins of a
+# block in `known` (every value known) take none: their η are standardized
+# draws the model maps through the known `diag(sd) L`, so `η -= X δ` would not
+# undo `θ += δ`.
+function _brm_nlme_mu_references(backend, block_margins, population, rows, nrows;
+        known=())
     plan = _brm_nlme_regression(backend.plan)
     references = NamedTuple[]
     for ((predictor, coefficient), position) in sort!(collect(population); by=x -> last(x))
@@ -247,6 +359,7 @@ function _brm_nlme_mu_references(backend, block_margins, population, rows, nrows
         matched = false
         for (k, margin) in enumerate(block_margins)
             margin.predictor === predictor && margin.coefficient === coefficient || continue
+            margin.block in known && continue
             recipes = [r.z for bucket in plan.ranef_buckets
                 if bucket.group === margin.block.group && bucket.id === margin.block.id
                 for r in bucket.margins if r.predictor === predictor &&
@@ -265,6 +378,7 @@ function _brm_nlme_mu_references(backend, block_margins, population, rows, nrows
         matched && continue
         for (k, margin) in enumerate(block_margins)
             margin.predictor === predictor && margin.coefficient === :Intercept || continue
+            margin.block in known && continue
             values = Float64[]
             for subject_rows in rows
                 isempty(subject_rows) && break
@@ -492,7 +606,18 @@ draws, scales, correlation factor and Student-t mixing weights, for any block
 form) is a `:shared_latent`, and so is a grouped `hsgp(x; by = g)` or a
 `cdar(step; by = g)` walk with `g` in `shared_groups`.
 `nested_groups` may also name the `by` grouping of a `cdar` or grouped `hsgp`
-term that no random effect uses, so that its levels are units. A `car(...)`
+term that no random effect uses, so that its levels are units. A
+random-effect block declared inside a function-style component call
+(`kin ~ f(subject)`, with `(1 | pk | subject)` in `f`'s body) is read as the
+same block at model scope over the column the call passes for the grouping
+input: that column is one of the model's groupings, named as `subject_group`,
+in `nested_groups` or in `shared_groups` like any other, and the block's `|ID|`
+and margins carry the call's path (`kin.pk`, predictor `kin.CL`), as its
+coordinates do (`kin.b_pk_subject.z`). Nested calls compose their paths. The
+call's other sampled locals, its population coefficients included, are
+`:shared_latent`, and so is a block whose grouping input is passed an
+expression rather than a column, or whose call reads other levels of the
+column than the model does. A `car(...)`
 field is shared, since its edges couple its areas, unless the backend was
 lowered by the field's unit border separator with the subject labels
 (`RKBRMI(brmi; car_units = :subject)`): then only its separator draws, scale
@@ -535,7 +660,11 @@ below.
 Refuses with [`BRMNLMEViewError`](@ref) when the model has no such reading:
 no random effects over the subjects, a grouping named in neither
 `nested_groups` nor `shared_groups` (the message names it), a subject-owned
-grouping that couples its levels, a `car(...)` field lowered with `car_units`
+grouping that couples its levels, a subject-owned block that holds known
+values next to sampled ones (a block whose every `sd(...) = value` and whose
+`cor(:, ID) = R`, or one margin, are known is read: its standardized draws are
+η under a fixed identity covariance, NLMEEstimation's `FixedOmega`), a
+`car(...)` field lowered with `car_units`
 that are not the subjects, a centred `mi(x)::shares(total, rows)`
 completion or one with a group whose missing entries lie on rows of several
 subjects, or any coordinate the semantic inventory does not cover.
@@ -699,8 +828,10 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
         "brm_nlme_view: the model has no subject-level random effects; an NLME " *
         "reading needs at least one `(... | group)` block" *
         (isempty(shared_groups) ? "" : " over a grouping not in `shared_groups`"))
-    # NLMEEstimation can hold a family fixed (`FixedOmega`), but known-value
-    # blocks are not handed to it yet (todo 2026-10-16T18-16-39-760-0840h34).
+    # A block whose every scale and whose correlation are known is a family
+    # NLMEEstimation holds fixed (`FixedOmega`); a block that mixes known and
+    # sampled values is not handed to it yet (todo
+    # 2026-10-16T18-16-39-760-0840h34).
     for r in ranefs
         r.kind === :ranef || continue
         # Correlated levels (`gr(g; cor=...)`) couple the subjects, which an
@@ -710,13 +841,18 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             "of `$(r.group)` with each other (`gr($(r.group); cor=$(r.level_correlation))`), " *
             "so its subjects are not independent and the model has no NLME " *
             "reading. Fit it with the Stan or RK sampler.")
-        haskey(r, :known_scales) && _brm_nlme_error(
+        haskey(r, :known_scales) && !_brm_nlme_known_block(r) && _brm_nlme_error(
             "brm_nlme_view: random-effect block `|$(r.id)|` (group `$(r.group)`) " *
-            "holds a known scale or correlation (`sd(...) = value` / " *
-            "`cor(:, ID) = R`). BRM does not yet hand known-value blocks to " *
-            "NLMEEstimation's fixed covariance families (BRM todo " *
-            "2026-10-16T18-16-39-760-0840h34), so this model has no NLME reading. " *
-            "Estimate the block, or fit it with the Stan or RK sampler.")
+            "holds known values next to sampled ones: " *
+            (haskey(r, :mixing) ? "a Student-t block's per-level mixing weights" :
+                any(isnothing, r.known_scales) ? "a sampled scale" :
+                    "a sampled correlation") *
+            ". An NLME reading covers a block whose every scale " *
+            "(`sd(...) = value`) and whose correlation (`cor(:, ID) = R`, or one " *
+            "margin) are known; a block that mixes known and sampled values is not " *
+            "covered yet (BRM todo 2026-10-16T18-16-39-760-0840h34). Hold every " *
+            "value of the block, estimate the block, or fit it with the Stan or " *
+            "RK sampler.")
     end
     groups = unique(r.group for r in ranefs)
     if length(groups) == 1
@@ -800,6 +936,33 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             # coordinate of its component (standardized draws, scales,
             # correlation factor, mixing weights) is shared by the subjects.
             claim_declaration!(_brm_nlme_ranef_declaration(record), :shared_latent)
+        elseif kind === :ranef && _brm_nlme_known_block(record)
+            # Every scale and the correlation are known: the model computes
+            # the effects as the known `diag(sd) L` times the standardized
+            # draws, so the draws are the family's η under a fixed identity
+            # covariance (as a completion's or an HSGP weight's).
+            family = length(families) + 1
+            block = _brm_nlme_block_identity(record)
+            K = length(record.margins)
+            push!(families, (; block, record, stratum=nothing, size=K,
+                scales=Int[], factor=Int[], fixed=Matrix{Float64}(I, K, K)))
+            for (k, (predictor, coefficient)) in enumerate(record.margins)
+                push!(block_margins, (; block, predictor, coefficient))
+                for g in eachindex(group_levels[record.group])
+                    i = coordinate(Symbol(record.z, ".", g, ".", k))
+                    claim!(i, :subject_effect)
+                    subject[i] = owner[record.group][g]
+                end
+            end
+            for g in eachindex(group_levels[record.group])
+                i = owner[record.group][g]
+                push!(subject_families[i], family)
+                for (k, (predictor, coefficient)) in enumerate(record.margins)
+                    push!(blocks[i], coordinate(Symbol(record.z, ".", g, ".", k)))
+                    push!(subject_margins[i], (; block, predictor, coefficient,
+                        level=group_levels[record.group][g]))
+                end
+            end
         elseif kind === :ranef
             family = length(families) + 1
             block = _brm_nlme_block_identity(record)
@@ -1102,9 +1265,12 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             end
         elseif kind === :submodel
             # A provider may be deterministic and own no packed coordinates.
-            # Its sampled declarations are scoped under its target.
+            # Its sampled declarations are scoped under its target. The
+            # random-effect blocks of a component call were read above, as
+            # model-scope blocks (`_brm_nlme_records`); the rest is shared.
             for (i, name) in enumerate(names)
-                _brm_nlme_owned(name, record.target) && claim!(i, :shared_latent)
+                role[i] === :unclaimed && _brm_nlme_owned(name, record.target) &&
+                    claim!(i, :shared_latent)
             end
         elseif kind in (:cell_latent, :cell_component)
             # A latent a `@plate` cell declares (`x ~ Law(...)`, one draw per
@@ -1203,7 +1369,8 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
         !allequal(subject_families)
     mu_references = ragged ? NamedTuple[] :
         _brm_nlme_mu_references(backend, block_margins, population,
-            rows, length(labels))
+            rows, length(labels);
+            known=Set(f.block for f in families if _brm_nlme_known_block(f.record)))
     view = BRMNLMEView(group, levels, names, role, subject, blocks, block_margins,
         mu_references, rows, Int[f.size for f in families],
         subject_families, subject_margins, nested_groups, shared_groups, families,
@@ -1925,16 +2092,35 @@ function _brm_nlme_plate_observations(plan::_RKValuePlan)
     union!(names, (o.name for o in plan.observations if o isa _RKNestedObservation))
 end
 
-# One prepared cell query per group of `_brm_nlme_subject_cells`, counted under
-# `progress`: each one prepares a program of its own (on ArbeitsplatzAtlas's
-# model, 32 groups at 48–127 s each).
+# One cell query per group of `_brm_nlme_subject_cells`, prepared the first
+# time it is read. Each one prepares a program of its own (on ArbeitsplatzAtlas's
+# model, 32 groups at 48–127 s each; on a 33-unit model, three groups at 84 s
+# together, 80 s of it compilation), and only the structural reads of a nested
+# model (`_brm_nlme_cell_state`, for NLME estimators' η sparsity) and a refused
+# partition's diagnosis read them: a unit's values and gradients, SVI's included,
+# come from the observation partition (`_brm_nlme_partition_queries`), which
+# checks the same strict locality.
+mutable struct _BRMNLMECellQuery
+    const prepare::Any
+    const lock::ReentrantLock
+    query::Any
+end
+_BRMNLMECellQuery(prepare) = _BRMNLMECellQuery(prepare, ReentrantLock(), nothing)
+_brm_nlme_cell_query(q::_BRMNLMECellQuery) = lock(q.lock) do
+    q.query === nothing && (q.query = q.prepare())
+    q.query
+end
+_brm_nlme_cell_query(query) = query
+_rk_nlme_cell_footprint_query(q::_BRMNLMECellQuery) =
+    _rk_nlme_cell_footprint_query(_brm_nlme_cell_query(q))
+_rk_nlme_cell_value(q::_BRMNLMECellQuery, point, row) =
+    _rk_nlme_cell_value(_brm_nlme_cell_query(q), point, row)
+
 _brm_nlme_cell_queries(backend::RKBRMI, cells, partitioned, unit, progress=nothing) =
-    _brm_with_counter(progress, length(cells); description="Cell queries") do node
-        map(ntuple(identity, length(cells)), cells) do g, cell
-            query = _rk_nlme_cell_query(backend, cell.names, partitioned, unit)
-            _brm_update_progress!(node, g)
-            (; cell.names, cell.positions, cell.elementwise, query)
-        end
+    map(cells) do cell
+        query = _BRMNLMECellQuery(() -> _rk_nlme_cell_query(backend, cell.names,
+            partitioned, unit))
+        (; cell.names, cell.positions, cell.elementwise, query)
     end
 
 # A point that notes each packed position read through it: evaluating a cell's
@@ -2307,6 +2493,10 @@ Serialization.serialize(s::Serialization.AbstractSerializer, ::_BRMSVITargetSlot
     Serialization.serialize_type(s, _BRMSVITargetSlot)
 Serialization.deserialize(::Serialization.AbstractSerializer, ::Type{_BRMSVITargetSlot}) =
     _BRMSVITargetSlot()
+Serialization.serialize(s::Serialization.AbstractSerializer, ::_BRMPreparedSlot) =
+    Serialization.serialize_type(s, _BRMPreparedSlot)
+Serialization.deserialize(::Serialization.AbstractSerializer, ::Type{_BRMPreparedSlot}) =
+    _BRMPreparedSlot()
 
 # A heap object whose fields never change, not an immutable struct: it holds its
 # prepared fields inline, so each dynamic call that passed an immutable one copied
@@ -2357,9 +2547,12 @@ pointwise densities (first-order, reverse-mode Enzyme: `ad_backend` must be
 `AutoEnzyme(; mode=Enzyme.Reverse)`), a reverse-over-forward sampler HVP query,
 its pointwise densities, and the subject attribution of every observed density.
 
-The HVP query is prepared the first time it is used: by the dense η Hessian
-blocks (`NLMEEstimation.conditional_loglikelihood_hessian_blocks`) and by the
-per-unit Laplace. With ReactiveKernels before 0.1.12 its preparation holds 8n²
+The sampler query is prepared the first time it is used: by the lockstep
+gradients ([`brm_nlme_loglikelihoods_and_gradients`](@ref)) and by the per-unit
+Laplace. So is the HVP query: by the dense η Hessian blocks
+(`NLMEEstimation.conditional_loglikelihood_hessian_blocks`) and by the per-unit
+Laplace. A fit that reads neither (minibatch SVI, the per-subject unit problems)
+compiles neither. With ReactiveKernels before 0.1.12 its preparation holds 8n²
 bytes for the n packed coordinates (n one-hot basis vectors of length n), 200
 GB at 158,343 coordinates; from 0.1.12 it is linear in n. No step of the
 preparation copies the model per thread.

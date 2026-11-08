@@ -178,6 +178,26 @@ end
     @test opt.t == 0 && q.μ == before.μ && q.ρ == before.ρ
     @test q.M[5] == before.M[5] && q.Λ[5] == before.Λ[5]
     @test occursin("unit 3", sprint(showerror, e))
+    # The error carries the evaluated points, packed as a fit's draws: the antithetic
+    # pair around the unit's mean at the iteration's one draw of the globals, the rest
+    # at the model's point. The model's own density reproduces the failure there.
+    (; plus, minus) = p.points
+    @test length(plus) == length(minus) == length(m.unit)
+    @test (plus[t.units[3]] .+ minus[t.units[3]]) ./ 2 ≈ q.M[3]
+    @test plus[t.units[3]] != minus[t.units[3]]
+    @test plus[t.globals] == minus[t.globals] && plus[t.globals] != q.μ
+    others = setdiff(eachindex(m.unit), t.globals, t.units[3])
+    @test !isempty(others) && plus[others] == m.unit[others]
+    problem = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+    @test !isfinite(LogDensityProblems.logdensity(problem, plus))
+    @test !isfinite(LogDensityProblems.logdensity(problem, minus))
+    # Positive control: the model is finite at the unit's start, the same point otherwise.
+    fine = copy(plus); fine[t.units[3]] .= 0.0
+    @test isfinite(LogDensityProblems.logdensity(problem, fine))
+    # `largest` names the extreme coordinate in the message a log keeps.
+    @test abs(p.largest.value) > 9000
+    @test p.largest.coordinate in m.view.coordinates[t.units[3]]
+    @test occursin("largest coordinate: $(p.largest.coordinate)", sprint(showerror, e))
     # The run-level loop stamps the failing iteration.
     c = BRM._brm_svi_controls(length(t.units); batch_size=length(t.units),
         max_iterations=10, lr_global=0.01, unit_step=0.1, polish_lr=0.05,

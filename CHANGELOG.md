@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.250
+## 0.2.256
 
 - Changed: `brm_svi_fit` gives a `@plate` cell latent's entries
   (`x ~ Normal(loc[i], s)` in a cell, one draw per cell or per entry) to the
@@ -31,6 +31,186 @@ instead of failing at run time.
   ReactiveKernels reads its constrained block whole. A cell latent whose law
   reads a value the model computes per cell is still refused by name with its
   rewrite.
+## 0.2.255
+
+- Fixed: under `unit_curvature = :orthogonal`, a dense unit's step takes the
+  positive part of its curvature estimate. On a saturating or redescending term the
+  estimate is mostly noise with nearly symmetric eigenvalues until the unit's stiff
+  directions are resolved: the trust region shortened the step from their size, and
+  the negative part halved the precision along a new direction each visit. A unit's
+  factor could become far wider than its target in a direction, and its stiff
+  directions came slowly. A saturating toy whose precision off its stiff subspace is
+  exactly 1 fell to 3e-4 and stayed there, with a top eigenvalue of 75 against the
+  target's 1.65e8; now it stays at 1 and reaches 1.65e8. On a downstream target of 67
+  stiff units of up to 17 coordinates, a unit's smallest precision eigenvalue at
+  update 60 was 0.013 where the estimate read 223 along that direction on average;
+  now it is 0.6, and the largest eigenvalue at update 100 is 26,670 against 3,045.
+  The estimate is exact on a quadratic term and has no negative part there, so such
+  a unit's step is unchanged to the last bit. A direction whose curvature really lies
+  below the factor's still widens, by up to half per visit. Against Gaussian optima
+  known exactly, at 17 coordinates, no visit's estimate had a negative eigenvalue on
+  Student-t (3 and 5 degrees of freedom), logistic or Poisson terms, so those steps
+  are unchanged; a Cauchy term, negative on 45% of visits, moved the rms sd ratio
+  from 0.951 to 0.950. The step adds one eigendecomposition per visit beside its 2d
+  unit gradients. A fit with dense units whose estimate goes indefinite differs from
+  earlier versions from that visit on. A checkpoint written before this resumes at
+  the step it ran with.
+## 0.2.254
+
+- Fixed: `brm_svi_combine` no longer turns slices that contradict each other into a
+  start the full fit cannot run from. The joint product put means far outside anything
+  the slices or the prior support, and both products held a contradicted coordinate as
+  narrow as the narrowest slice, where few slices put it. Ridges still cross where they
+  did, and slices that do not contradict each other and hold no rank part give the
+  start they gave.
+  - A coordinate's sites widen by the slices' between-slice variance, as in a
+    random-effects meta-analysis, in the joint and the coordinate-by-coordinate product
+    alike, so the coordinate sits among the slices, and it starts no wider than a cold
+    fit's default 0.1. It is a Paule-Mandel
+    estimate over the slices that pin the coordinate by themselves, where Cochran's Q
+    says they contradict (at 0.999, allowing for sds a quarter of the posterior's, as
+    SVI's can be), and `receipt.globals.heterogeneity` reports it. A
+    slice pins a coordinate if it narrows it (marginal variance below 0.8 of the prior
+    projection's) and the rank part does not carry it (below 0.8 of that variance), or
+    if its marginal variance is below 0.01 of the prior projection's.
+  - A slice's joint site holds only the coordinates it narrows, or carries along a
+    ridge (below 1.2 of the prior's variance, with at least 0.8 of it in the rank part).
+    Other coordinates have a marginal site where they are narrower than the prior and
+    none otherwise.
+  - A joint mean outside the range that supports it (from the lowest to the highest
+    of 3 sds around each counted site's mean and the prior's) makes the
+    coordinate-by-coordinate product stand, with `receipt.globals.joint === :outlying`
+    and `receipt.globals.outlying` marking the coordinates.
+  - A unit starts from its carried draws unless its own density at the combined globals
+    is clearly better (by over half a nat per draw) with its slice's draws as they
+    were, and `receipt.units.uncarried` lists those. Carrying keeps a unit's totals, which
+    can take draws no prior allows: a block whose scale a model pins at 1e-6 would need
+    a draw of 1,000 for a location change of 0.001.
+- Changed: `globals.correlated` holds only the coordinates in joint sites, so
+  `joint_limit` now bounds those and not every informed global, and `joint_limit=0`
+  still asks for the coordinate-by-coordinate product. A site's directions wider than
+  the prior are now those of the prior-relative eigenproblem, which a rescaling of the
+  coordinates leaves alone, and `clamped` follows them and the marginal sites.
+
+## 0.2.253
+
+- Fixed: `brm_svi_fit`'s structured units (above `unit_dense_limit`) default to
+  `unit_step = 0.1` under either `unit_curvature`. BRM 0.2.248 through 0.2.252 gave them
+  the dense units' default of 1 under `:orthogonal`, though the entry for 0.2.248
+  called them unchanged: their step is Adam's step size, not a natural-gradient step
+  to take whole. A step you pass still applies to both families.
+- Changed: a structured unit's rank part steps a tenth as far as its mean and log
+  scales, the rate of the global factor's rows at the default steps. At the unit's
+  whole step Β's rows walk past the marginal the target wants, ρ falls below them
+  to make up for it, and the rows' own step, in units of exp(ρ), falls with it, so
+  they cannot come back. A rank-8 factor then ended below the diagonal it contains.
+- Measured on one station's unit of 295-304 coordinates under a known population
+  law, a whole series under a Julia leaf, three stations, ELBO of the returned factor
+  over 1,000 draws. Before, rank 8 stopped with `BRMSVINonfiniteError` at iterations
+  569, 802 and 2,128 on draws 571, 599 and 2,683 prior sds out, and mean-field
+  converged. At `unit_step = 0.1` alone rank 8 converged at 343, -204 and 425 with
+  marginal sds of 8, 31 and 4 under an N(0, 1) prior, against mean-field's 481, 455
+  and 470. With both changes rank 8 reads 486, 466 and 476 with every sd near 1. On
+  exact Gaussian units with a low-rank covariance the rank part at this rate beat
+  the best diagonal in all 7 settings measured (500 to 8,000 visits per unit), and
+  at the whole step lost to it in 6 of them.
+- Changed: a fit of a model with a structured unit differs from its first visit of
+  such a unit, its rank part from then on in every version, its mean and scales
+  against 0.2.248 through 0.2.252. Mean-field fits read higher ELBOs too (one station's
+  trimmed window 62-68 against 20-34). Dense units and checkpoints are unchanged: a
+  checkpoint written before this version resumes at the steps it ran with.
+- Added: `BRMSVINonfiniteError`'s `terms` carry the evaluated points. Each term has
+  `points`, packed as a fit's `draws` (`plus` and `minus` for a unit, `draw` for the
+  global term), so `LogDensityProblems.logdensity_and_gradient(problem, term.points.minus)`
+  replays the evaluation in the model, and `largest`, its largest coordinate as
+  `(; coordinate, value)`, which the message prints. Under `centering=LearnedCentering()`
+  the points are the packed coordinates, not the factor's learned ones.
+
+## 0.2.252
+
+- Fixed: `brm_nlme_view`, and so `brm_nlme_model`, `brm_nlme_fit`,
+  `brm_two_stage_fit`, `brm_svi_fit` and `brm_nlme_joint_map`, reads a
+  random-effect block declared inside a function-style component call
+  (`kin ~ kinetics(subject)` with `(1 | pk | subject)` in its body) as the same
+  block at model scope, over the column the call passes for the grouping
+  input. That column is one of the model's groupings: name it as
+  `subject_group`, in `nested_groups` or in `shared_groups` like any other.
+  The block's `|ID|` and margins carry the call's path (`kin.pk`, predictor
+  `kin.CL`), as its coordinates already did (`kin.b_pk_subject.z`); nested
+  calls compose their paths, and an input named otherwise than the model's
+  column is followed to it. Every coordinate of a component call was a
+  `:shared_latent` before, so such a grouping was no grouping of the model
+  (naming it in `shared_groups` was refused: "no random-effect block ...
+  groups by") and a model scoping its subject effects in a component had no
+  subjects. The
+  call's other sampled locals, its population coefficients included, stay
+  `:shared_latent`; so does a block whose grouping input is passed an
+  expression, or whose call reads other levels of the column than the model.
+  Prior-median starts read the blocks' scale laws with the call's own data.
+  **Breaking:** a component grouping other than the subject grouping must now
+  be named in `nested_groups` or `shared_groups`; `shared_groups = (:g,)`
+  restores the former, all-shared reading of its block.
+- Fixed: `brm_coordinate_transport` and `brm_start(...; component_inits)` with a
+  formula key read a random-effect block declared inside a component again.
+  Both died with `type NamedTuple has no field fitted`.
+
+## 0.2.251
+
+- Changed: an `RKBRMI` keeps the `BRMNLMEModel` that `brm_svi_fit`,
+  `brm_svi_resume` and their slice and Laplace forms prepared from it, the last
+  one. A later call on the same backend with the same `ad_backend`,
+  `shared_point`, groupings and `unit_partition` takes that model, and with it
+  the target and worker samplers it holds, as a call on `diagnostics.model`
+  does: `diagnostics.target.reused` is `true` and nothing is prepared
+  (`laplace=GaussianBlockLaplace()` reuses the model and still prepares its
+  target on every call). Before,
+  each call on an `RKBRMI` prepared the model and its target again: on a
+  downstream 33-unit target a repeated 20-update call took 58 s, and takes
+  0.18 s now.
+  Results are unchanged: a reused model's run equals a fresh model's to the
+  last bit. Other options prepare another model, which the backend then keeps
+  instead. A copy or a serialized backend keeps none. A `BRMI` is still
+  lowered, and so prepared, on every call.
+- Changed: an `RKBRMI` builds its authored density-factor catalogue (RKPPL
+  `density_factors`) once, on first use, for every reader: `brm_nlme_view`'s
+  scan of shared factors that read a unit and each minibatch SVI target's
+  ownership. Each built it again before, planning the whole program each time
+  (about 5 s warm on a 33-unit model).
+- Changed: `brm_nlme_model` prepares the whole-model sampler that retains the
+  pointwise densities, and each subject-cell group's cell query, the first time
+  something reads them, instead of while preparing the model. The lockstep
+  gradients (`brm_nlme_loglikelihoods_and_gradients`) and the per-unit Laplace
+  read the sampler; a nested model's η sparsity and a refused partition's
+  diagnosis read the cell queries. A unit's values and gradients, minibatch
+  SVI's included, come from the observation partition, so a fit that reads
+  neither prepares neither. On a downstream 33-unit, 890-coordinate model the
+  two steps took 75 s and 84 s of a 413 s cold preparation, but most of that
+  was compiling planner code the partition steps then compile instead: the
+  cold `brm_nlme_model` fell from 471 s to 440 s, a warm rebuild by about 10 s
+  of 23 s, and its allocation from 16.1 GB to 12.5 GB. The progress tree no
+  longer has a `Cell queries` counter. Values, gradients and refusals are unchanged; an
+  `ad_backend` the sampler cannot use is refused when the sampler is first
+  read.
+
+## 0.2.250
+
+- New: a subject block whose every scale and whose correlation are known
+  (`sd(...) = value` on every margin, and `cor(:, ID) = R` or one margin) has
+  an NLME reading. `brm_nlme_view` reads it as one covariance family held at
+  the identity (NLMEEstimation's `FixedOmega`): its standardized draws are η
+  and the model maps them to the effects with the known `diag(sd) L`. So
+  `brm_svi_fit` and NLMEEstimation's estimators fit a unit under a known
+  population law (known means through `offset(...)`), and
+  `brm_nlme_estimates` names the block with `known = true` and its known
+  `covariance`, `sd` and `cor`. Before, the view refused every known-value
+  block. A block that mixes known and sampled values (or a Student-t block
+  with known values) is still refused, now naming what is sampled (todo
+  `0840h34`).
+- Tested: a unit's whole series under one consumer-written law, a filter's
+  log likelihood bound as a leaf of a whole-event observation provider, is
+  one observation of its unit under `brm_nlme_view` and `brm_svi_fit`
+  (`test/nlme_svi_series_law.jl`, snag `odlplaus-margina-60bc212b`).
+
 ## 0.2.249
 
 - Fixed: `brm_svi_fit(...; centering=LearnedCentering())` centres the levels of a
