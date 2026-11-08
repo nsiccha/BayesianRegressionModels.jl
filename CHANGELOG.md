@@ -36,6 +36,9 @@ instead of failing at run time.
   **Breaking:** a component grouping other than the subject grouping must now
   be named in `nested_groups` or `shared_groups`; `shared_groups = (:g,)`
   restores the former, all-shared reading of its block.
+- Fixed: `brm_coordinate_transport` and `brm_start(...; component_inits)` with a
+  formula key read a random-effect block declared inside a component again.
+  Both died with `type NamedTuple has no field fitted` from 0.2.235 to 0.2.249.
 
 ## 0.2.249
 
