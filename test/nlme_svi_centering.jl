@@ -9,9 +9,10 @@
 # Gaussian vector the units own, and a block over a `shared_groups` grouping
 # whose levels units own (an absent carried unit's level mapped through its
 # controls in the next window). A sparse global that is a centred cell's scale
-# steps on sites that see its readers' whole centered terms. A fit learns
-# controls that rise with a unit's data, returns draws in the packed RK
-# coordinates, and resumes bit for bit.
+# steps on sites that see its readers' whole centered terms. A grouped HSGP's
+# weights are cells scaled by its spectral scales, and its centered fit beats
+# the plain one against NUTS. A fit learns controls that rise with a unit's
+# data, returns draws in the packed RK coordinates, and resumes bit for bit.
 #
 # RUN: julia --project=test test/nlme_svi_centering.jl [testset-filter...]
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
@@ -20,6 +21,7 @@ using LinearAlgebra, LogDensityProblems, Random, Statistics, WarmupHMC
 include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))
 include(joinpath(@__DIR__, "nlme_svi_owned_fixture.jl"))
 include(joinpath(@__DIR__, "nlme_svi_streaming_fixture.jl"))
+include(joinpath(@__DIR__, "nlme_grouped_hsgp_fixture.jl"))
 using Serialization
 
 const BRM_ = BayesianRegressionModels
@@ -78,11 +80,12 @@ function check_centered_terms(m; rng=Xoshiro(3), units=1:2, kinds)
         n = plan.ncells[i]
         @test n > 0
         u = u0[t0.units[i]]
-        # Zero controls: a draw cell is its packed coordinate; a vector element
-        # is standardized against its law.
+        # Zero controls: a draw cell (a random effect's or an HSGP level's
+        # standardized weight) is its packed coordinate; a vector element is
+        # standardized against its law.
         t, q = centered_target(m, [zeros(k) for k in plan.ncells])
         r = centered_term(t, q, i, g, u)
-        if all(c -> c.kind === :ranef, plan.cells[i])
+        if all(c -> c.kind in (:ranef, :hsgp), plan.cells[i])
             gg, gz = zeros(length(g)), zeros(length(u))
             v = BRM_._brm_svi_unit_term!(gg, gz, t0, i, g, u)
             @test r.v ≈ v rtol = 1e-12
@@ -362,6 +365,103 @@ end
     c_rare = [cell.c for cell in d.centering.cells if cell.unit in rare_levels]
     c_common = [cell.c for cell in d.centering.cells if !(cell.unit in rare_levels)]
     @test minimum(c_rare) > maximum(c_common) + 0.2
+end
+
+# Grouped HSGPs whose levels are the units (test/nlme_grouped_hsgp_fixture.jl):
+# each level's standardized weights are cells scaled by the term's spectral
+# scales, the program value `<id>.spectral_scale`, a row per level when a
+# hyper-predictor scales `sd` by level.
+@stestset "a grouped HSGP's weights scaled by its spectral scales" begin
+    for (brmi, rows) in ((flat_hsgp(GH_FLAT), false), (plate_hyper(GH_PLATE), true))
+        m = brm_nlme_model(RKBRMI(brmi); ad_backend=NLME_AD)
+        t = BRM_._brm_svi_target(m)
+        plan = BRM_._brm_svi_centering_plan(t, LearnedCentering())
+        hsgp = [cell for cells in plan.cells for cell in cells if cell.kind === :hsgp]
+        @test length(hsgp) == 3length(t.units)
+        @test all(cell -> !cell.located, hsgp)
+        spectral = only(f for f in plan.families if f.spectral && f.stratum === nothing ||
+            f.spectral && rows && f.stratum == 1)
+        @test endswith(string(spectral.record.scale), ".spectral_scale")
+        @test count(f -> f.spectral, plan.families) == (rows ? length(t.units) : 1)
+        @test !any(r -> r.kind === :hsgp && any(c -> occursin(".z.", string(c)),
+            r.coordinates), plan.uncentered)
+        check_centered_terms(m; kinds=(:ranef, :hsgp))
+    end
+    # The floor: exact above exp(-110), exp(-150) at zero, slope 1 at both ends.
+    @test BRM_._brm_svi_spectral_floor(1e-20) == exp(log(1e-20))
+    @test BRM_._brm_svi_spectral_floor(0.0) ≈ exp(-150.0)
+    @test BRM_._brm_svi_spectral_slope(0.0) == 1.0
+    @test BRM_._brm_svi_spectral_slope(0.3) == 1.0
+    for s in (exp(-140.0), exp(-150.0), exp(-155.0))
+        h = 1e-6 * s
+        fd = (BRM_._brm_svi_spectral_floor(s + h) - BRM_._brm_svi_spectral_floor(s - h)) / 2h
+        @test BRM_._brm_svi_spectral_slope(s) ≈ fd rtol = 1e-5
+    end
+    # A centered fit learns a control per weight.
+    m = brm_nlme_model(RKBRMI(flat_hsgp(GH_FLAT)); ad_backend=NLME_AD)
+    fit = brm_svi_fit(m; batch_size=2, max_iterations=400, ndraws=20, rng=Xoshiro(9),
+        centering=LearnedCentering())
+    c = [cell.c for cell in fit.diagnostics.centering.cells if cell.kind === :hsgp]
+    @test length(c) == 12 && all(0 .< c .< 1)
+    @test all(isfinite, fit.draws)
+end
+
+# Curves by subject, alternating 40 and 3 rows: a grouped HSGP's weights are
+# informed on the rich units and near their prior on the poor ones.
+function svi_centering_curve_data(; seed=1, N=12, rich=40, poor=3)
+    rng = Xoshiro(seed)
+    subject, t, y = String[], Float64[], Float64[]
+    for i in 1:N
+        n = isodd(i) ? rich : poor
+        a, b, c = 0.8randn(rng), 0.8randn(rng), 0.5randn(rng)
+        for _ in 1:n
+            x = 2rand(rng) - 1
+            push!(subject, "s$i"); push!(t, x)
+            push!(y, a * sin(pi * x) + b * cos(pi * x / 2) + c * x + 0.3randn(rng))
+        end
+    end
+    (; subject, t, y)
+end
+svi_centering_curve_model(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + hsgp(t; by=subject, k=5, domain=(-1.0, 1.0)) + (1 | subject)
+    y ~ Normal(mu, sigma)
+end
+
+# Measured with this data against 4x1000 NUTS draws (seeds 5, 6, 7, 2026-11-08).
+# With every cell starting at 0.5, the length scale ended 1.7 NUTS sds off with
+# 0.02 of NUTS's sd and the ELBO 5-6 nats below the plain fit's: HSGP cells start
+# from min(start, 0.1). With that start the length scale was 0.14-0.25 NUTS sds
+# off (plain 0.44-0.49) with 0.22-0.25 of NUTS's sd, the HSGP sd 0.54-0.69 off
+# (plain 0.79-0.84), the unit coordinates' rms error 0.10-0.13 (plain 0.17-0.18),
+# and the ELBO 1.7-2.1 nats above plain.
+@stestset "a grouped HSGP's centered fit against NUTS" begin
+    rk = RKBRMI(svi_centering_curve_model(svi_centering_curve_data()))
+    m = brm_nlme_model(rk; ad_backend=NLME_AD)
+    problem = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+    u0 = first(BRM_._brm_nlme_prior_median_point(m))
+    reference = reduce(hcat, map(1:4) do chain
+        run = adaptive_warmup_mcmc(Xoshiro(100 + chain), problem;
+            init=(; position=copy(u0), squared_scale=ones(length(u0))), n_draws=1000)
+        convert(Matrix{Float64}, run.posterior_position)
+    end)
+    μr, σr = vec(mean(reference; dims=2)), vec(std(reference; dims=2))
+    names = string.(coordinate_names(rk.model.layout))
+    rho, sd = findfirst(==("hsgp_t.rho"), names), findfirst(==("hsgp_t.sigma"), names)
+    options = (; batch_size=4, ndraws=2000)
+    plain = brm_svi_fit(m; options..., rng=Xoshiro(5))
+    fit = brm_svi_fit(m; options..., rng=Xoshiro(5), centering=LearnedCentering())
+    c = [cell.c for cell in fit.diagnostics.centering.cells if cell.kind === :hsgp]
+    @test length(c) == 5 * 12
+    mean_error(f) = abs.(vec(mean(f.draws; dims=2)) .- μr) ./ σr
+    ratio(f) = vec(std(f.draws; dims=2)) ./ σr
+    elbo(f) = mean(f.diagnostics.elbo[end-99:end])
+    locals = setdiff(eachindex(μr), fit.diagnostics.globals)
+    @test mean_error(fit)[rho] < 0.35 < mean_error(plain)[rho]
+    @test ratio(fit)[rho] > 0.15
+    @test mean_error(fit)[sd] < mean_error(plain)[sd]
+    @test sqrt(mean(abs2, mean_error(fit)[locals])) < 0.15
+    @test elbo(fit) > elbo(plain) + 1
 end
 
 # Measured with this data (seeds 5 and 6, 2026-11-07): the plain mean-field fit
