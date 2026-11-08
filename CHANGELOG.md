@@ -12,6 +12,44 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.251
+
+- Changed: an `RKBRMI` keeps the `BRMNLMEModel` that `brm_svi_fit`,
+  `brm_svi_resume` and their slice and Laplace forms prepared from it, the last
+  one. A later call on the same backend with the same `ad_backend`,
+  `shared_point`, groupings and `unit_partition` takes that model, and with it
+  the target and worker samplers it holds, as a call on `diagnostics.model`
+  does: `diagnostics.target.reused` is `true` and nothing is prepared
+  (`laplace=GaussianBlockLaplace()` reuses the model and still prepares its
+  target on every call). Before,
+  each call on an `RKBRMI` prepared the model and its target again: on a
+  downstream 33-unit target a repeated 20-update call took 58 s, and takes
+  0.18 s now.
+  Results are unchanged: a reused model's run equals a fresh model's to the
+  last bit. Other options prepare another model, which the backend then keeps
+  instead. A copy or a serialized backend keeps none. A `BRMI` is still
+  lowered, and so prepared, on every call.
+- Changed: an `RKBRMI` builds its authored density-factor catalogue (RKPPL
+  `density_factors`) once, on first use, for every reader: `brm_nlme_view`'s
+  scan of shared factors that read a unit and each minibatch SVI target's
+  ownership. Each built it again before, planning the whole program each time
+  (about 5 s warm on a 33-unit model).
+- Changed: `brm_nlme_model` prepares the whole-model sampler that retains the
+  pointwise densities, and each subject-cell group's cell query, the first time
+  something reads them, instead of while preparing the model. The lockstep
+  gradients (`brm_nlme_loglikelihoods_and_gradients`) and the per-unit Laplace
+  read the sampler; a nested model's η sparsity and a refused partition's
+  diagnosis read the cell queries. A unit's values and gradients, minibatch
+  SVI's included, come from the observation partition, so a fit that reads
+  neither prepares neither. On a downstream 33-unit, 890-coordinate model the
+  two steps took 75 s and 84 s of a 413 s cold preparation, but most of that
+  was compiling planner code the partition steps then compile instead: the
+  cold `brm_nlme_model` fell from 471 s to 440 s, a warm rebuild by about 10 s
+  of 23 s, and its allocation from 16.1 GB to 12.5 GB. The progress tree no
+  longer has a `Cell queries` counter. Values, gradients and refusals are unchanged; an
+  `ad_backend` the sampler cannot use is refused when the sampler is first
+  read.
+
 ## 0.2.250
 
 - New: a subject block whose every scale and whose correlation are known
