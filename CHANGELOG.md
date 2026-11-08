@@ -12,6 +12,45 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.246
+
+- New: learned partial centering in minibatch SVI,
+  `brm_svi_fit(x; centering=LearnedCentering())` (Gorinova, Moore and Hoffman
+  2020's VIP). Each eligible cell gets a control `c ∈ (0, 1)`, optimized with
+  the variational factors by the ELBO: `c = 0` is the non-centred coordinate,
+  `c = 1` the centred one. Cells are the standardized draws of estimated
+  random-effect blocks a unit owns (located at the unit's mu-referenced
+  population coefficients; a correlated block is centred margin by margin on
+  its conditional mean) and authored Gaussian vector elements a unit owns
+  (`z[1:n] .~ Normal(m, tau)`, located at the law's mean). The map is
+  ReparametrizableDistributions' `reparam`; scales, correlation factors and
+  law arguments stay RK graph values, read once and pulled back once per
+  iteration. Each unit's controls take an Adam step (`LearnedCentering(;
+  start=0.5, step=0.05)`) whenever the unit is in the batch, while SVI
+  explores, and stay fixed while it settles and polishes. Draws stay packed RK points. `fit.diagnostics.centering` reports
+  every cell's `c` and what stays uncentred, with the reason: Student-t,
+  fixed-covariance and field families (HSGP weights, `cdar`, `car`,
+  completions) and shared field weights. Omitting `centering` keeps the
+  existing fit.
+- New: `brm_svi_centeredness(fit, adaptive_centering_controls(adaptive, sb))`
+  returns a centered fit's controls as `adaptive_centering_problem`'s
+  `centeredness` vector, a start for WarmupHMC's own adaptation.
+- A centered fit's `brm_svi_checkpoint` stores each unit's controls, and a
+  streaming update inherits the centering (pass no `centering`). A carried
+  unit's prior is its factor through the old controls' map, so relearned
+  controls do not reinterpret old factors; `brm_svi_resume` continues a
+  centered optimizer checkpoint.
+- `brm_svi_combine`, and a factor-level `start=`, refuse a centered fit or
+  checkpoint: its unit factors are over the learned coordinates, whose map to
+  the packed draws moves with the globals, so they are no site of those draws.
+  Fit slices to be combined without centering.
+- Compatibility: depends on ReparametrizableDistributions 0.3 (git source).
+- Learned centering and reader sites (0.2.240) compose: a sparse global's
+  site stands for its reader's whole centered term, so the reader's gradient
+  there includes the chain through its cells' locations and scales (the sd of a
+  `gr(g, by=b)` stratum few units belong to, say). That chain term reaches every
+  other global through the batch's one pullback, as before.
+
 ## 0.2.245
 
 - Fixed: a `LowRankGlobal(r)` fit's rank part no longer random-walks during
