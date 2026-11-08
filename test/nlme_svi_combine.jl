@@ -59,9 +59,9 @@ end
 # its N(0, 1) prior is applied once.
 # The combination with every unit carried, whatever its density says. Factors set by hand
 # are not what a unit's data would give, so they test the map and not the choice.
-function slice_all_carried(full, states)
+function slice_all_carried(full, states; kwargs...)
     prepared, _ = BRM._brm_svi_checkout!(full; global_coordinates=nothing, previous=nothing)
-    start = BRM._brm_svi_combine(prepared.target, states; carry_all=true)
+    start = BRM._brm_svi_combine(prepared.target, states; carry_all=true, kwargs...)
     BRM._brm_svi_checkin!(full, prepared)
     start
 end
@@ -1010,4 +1010,116 @@ end
             start.units, label) ≈ total(slice_mean(st, "mu_Intercept"),
             slice_mean(st, "device.tau"), units, label) rtol = 1e-6
     end
+end
+
+# The slices with the global coordinates whose keys are in `drop` marked as
+# informed by none of them: what leaving those coordinates out must give.
+function slice_uninformed(states, drop)
+    map(states) do state
+        state = deepcopy(state)
+        for (k, key) in enumerate(state.q.keys)
+            any(isequal(key), drop) && (state.q.informed[k] = false)
+        end
+        state
+    end
+end
+
+function slice_same_start(a, b)
+    @test a.globals.keys == b.globals.keys
+    @test a.globals.μ == b.globals.μ && a.globals.σ == b.globals.σ
+    @test length(a.globals.correlated) == length(b.globals.correlated)
+    for (x, y) in zip(a.globals.correlated, b.globals.correlated)
+        @test x.positions == y.positions && x.precision == y.precision
+    end
+    @test Set(keys(a.units)) == Set(keys(b.units))
+    for (label, u) in a.units
+        @test u.keys == b.units[label].keys && u.M == b.units[label].M && u.Λ == b.units[label].Λ
+    end
+end
+
+@stestset "slice combination: an excluded coordinate starts as if no slice informed it" begin
+    # A coordinate whose meaning depends on the slice's domain (a field's
+    # amplitude fitted on one region) is no estimate of the full model's, and a
+    # bias every slice shares is invisible to measures that compare slices.
+    # `exclude` leaves it to the default start (snag brm-svi-combine-eae08338).
+    data = svi_slice_data(Xoshiro(60), SVI_SLICE_REGIONS, SVI_SLICE_CLASSES, 4)
+    regions = first.(SVI_SLICE_REGIONS)
+    full = slice_model(data)
+    fits = [brm_svi_fit(svi_slice_model(svi_slice_region(data, r)); rng=Xoshiro(s),
+        family=LowRankGlobal(1), SVI_SLICE_QUICK...) for (s, r) in enumerate(regions)]
+    # Recognizable factors, narrower than the prior, each with a rank part, so the
+    # globals' sites are joint.
+    for (s, fit) in enumerate(fits)
+        q = fit.diagnostics.q
+        q.μ .= 0.1s .+ 0.05 .* eachindex(q.μ)
+        q.ρ .= log(0.1)
+        q.Β .= 0.05 .* (1:length(q.μ))
+        for i in eachindex(q.M)
+            q.M[i] .= 0.3s + 0.1i
+            q.Λ[i] .= 4.0 + s + i
+            q.U[i] .= sqrt.(q.Λ[i])
+        end
+    end
+    states = brm_svi_checkpoint.(fits)
+    globals = BRM._brm_svi_globals(full)
+    gkeys = BRM._brm_svi_coordinate_keys(full)[globals]
+    point = BRM._brm_svi_start(full, nothing, nothing)
+    base = brm_svi_combine(full, states)
+    names = String.(base.receipt.globals.coordinates)
+    @test base.receipt.globals.joint === :joint      # the joint product is what is tested
+    @test !any(base.receipt.globals.excluded)
+    a = findfirst(==("a"), names)
+    tau = findfirst(n -> occursin("subject.tau", n), names)
+    class = first(split(names[findfirst(n -> occursin("class.tau", n), names)], ".tau"))
+    in_class = findall(n -> startswith(n, class * "."), names)
+    @test length(in_class) == 5                      # its scale and its four levels' draws
+    @test any(block -> a in block.positions, base.globals.correlated) &&
+        any(isequal(gkeys[a]), base.globals.keys)
+
+    # One coordinate inside the joint block, by Symbol.
+    start = brm_svi_combine(full, states; exclude=[:a])
+    r = start.receipt.globals
+    @test r.excluded == (eachindex(names) .== a)
+    @test r.informed == base.receipt.globals.informed   # its slices' sites are still counted
+    @test isnan(r.spread[a]) && r.heterogeneity[a] == 0
+    @test !any(isequal(gkeys[a]), start.globals.keys)
+    slice_same_start(start, brm_svi_combine(full, slice_uninformed(states, [gkeys[a]])))
+    @test slice_uninformed(states, [gkeys[a]])[1].q.informed != states[1].q.informed
+    # The fit starts it at the default: the prior-median point and `global_scale`.
+    d = brm_svi_fit(full; start, max_iterations=0, ndraws=0, global_scale=0.3).diagnostics
+    @test d.q.μ[a] == point[globals[a]] && d.q.ρ[a] == log(0.3)
+    @test d.start.applied.globals ==
+        brm_svi_fit(full; start=base, max_iterations=0, ndraws=0).diagnostics.start.applied.globals - 1
+
+    # The units' scale, by String: the units' draws are carried to its default,
+    # keeping each unit's effect.
+    scale = brm_svi_combine(full, states; exclude=names[tau])
+    @test findall(scale.receipt.globals.excluded) == [tau]
+    slice_same_start(scale, brm_svi_combine(full, slice_uninformed(states, [gkeys[tau]])))
+    carried = slice_all_carried(full, states; exclude=names[tau])
+    for (s, st) in enumerate(states), (label, u) in st.units
+        C = exp(point[globals[tau]] - slice_mean(st, "subject.tau"))
+        M, Λ = slice_carried_unit(only(u.M), only(u.Λ), C, 0.0)
+        @test only(carried.units[label].M) ≈ M
+        @test only(carried.units[label].Λ) ≈ Λ
+    end
+
+    # A declaration's name leaves out every coordinate under it: the shared
+    # class block's scale and its levels' draws, whose sites are carried.
+    block = brm_svi_combine(full, states; exclude=[Symbol(class)])
+    @test findall(block.receipt.globals.excluded) == in_class
+    @test any(base.receipt.globals.carried[in_class])
+    slice_same_start(block, brm_svi_combine(full, slice_uninformed(states, gkeys[in_class])))
+    slice_same_start(block, brm_svi_combine(full, states;
+        exclude=n -> startswith(String(n), class * ".")))
+
+    # A selection that names nothing is refused, rather than leaving the start
+    # as it was without a word.
+    @test_throws "is no global coordinate of the full model" brm_svi_combine(full, states;
+        exclude=[:a, :no_such_coordinate])
+    @test_throws "is no global coordinate" brm_svi_combine(full, states; exclude="cla")
+    @test_throws "selects no global coordinate" brm_svi_combine(full, states;
+        exclude=n -> false)
+    @test_throws "must return true or false" brm_svi_combine(full, states; exclude=n -> 1)
+    @test_throws "exclude takes coordinate names" brm_svi_combine(full, states; exclude=[1])
 end

@@ -190,7 +190,8 @@ end
 
 # The numbers a plan can bind: the data's numeric scalars. The inputs the planner
 # generates (`_rk_generated_inputs`) hold what no data field names: a literal
-# `lkj_eta`, a known correlation's factor, a factor's fitted levels and count.
+# `lkj_eta`, a known correlation's factor, a known scale, a factor's fitted
+# levels and count.
 _rk_input_bindings(_plan) = Dict{Symbol,Any}()
 _rk_input_bindings(plan::_RKStructuralPlan) = plan.inputs
 _rk_generated_inputs(_plan) = Dict{Symbol,Any}()
@@ -201,6 +202,10 @@ function _rk_generated_inputs(plan::_RKStructuralPlan)
             (inputs[bucket.eta_input] = bucket.lkj_eta)
         bucket.known_input === nothing || (inputs[bucket.known_input] =
             Matrix{Float64}(cholesky(Symmetric(bucket.known_cor)).L))
+        for prior in bucket.sd_priors
+            prior isa _BRMKnownScale && prior.input !== nothing &&
+                (inputs[prior.input] = prior.value)
+        end
     end
     for predictor in plan.predictors, term in predictor.terms
         foreach(value -> _rk_level_factor_input!(inputs, value), values(term.options))

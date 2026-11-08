@@ -21,11 +21,13 @@ include("nlme_selection.jl")
 A model that has no nonlinear-mixed-effects reading in [`brm_nlme_view`](@ref):
 no subject-level random effects, a grouping named in neither `nested_groups`
 nor `shared_groups`, a unit-owned grouping that couples its levels
-(`gr(...; cor=...)`), an `mm(...)` block, a unit-owned block that holds known
-values next to sampled ones, or a coordinate the semantic
-inventory does not cover. A stratified `gr(g, by=b)` block is read as one
-covariance family per stratum, and a block whose every value is known as one
-family of fixed identity covariance. `message` names the offending declaration or coordinates.
+(`gr(...; cor=...)`), an `mm(...)` block, a unit-owned Student-t block that holds
+known values, or a coordinate the semantic inventory does not cover. A stratified
+`gr(g, by=b)` block is read as one covariance family per stratum; a block with a
+known correlation, or whose every value is known, as one family of fixed identity
+covariance; and a block with known scales under a sampled correlation as one
+family that holds those margins' SDs. `message` names the offending declaration
+or coordinates.
 """
 struct BRMNLMEViewError <: Exception
     message::String
@@ -47,7 +49,8 @@ unconstrained coordinate vector (`coordinates`, in packed order).
   `:shared_latent` (sampled coordinates shared by the units: HSGP components,
   missing-value completions, submodels (a function-style component call's
   sampled locals other than its random-effect blocks, which are read as
-  model-scope blocks), `car(...)` fields (only their separator
+  model-scope blocks), the sampled scales of a block with a known correlation,
+  `car(...)` fields (only their separator
   draws, scale and mixing share when lowered with `car_units`), the latents a
   `@plate` cell declares and the sampled locals of a component called in a
   cell, and every coordinate of a random-effect block over a grouping in
@@ -110,10 +113,12 @@ unconstrained coordinate vector (`coordinates`, in packed order).
 - `subject_margins[i]` — the compact coordinates' family margin and grouping
   level labels for subject `i`.
 - `mu_references` — one `(; predictor, coefficient, link, population, subject,
-  design)` per population coefficient that can be absorbed into a subject
-  margin. `population` is the coefficient's packed position, `subject` the
-  margin's position in a flat subject block, and `design[i]` its multiplier
-  for subject `i`. Nested models currently expose no such references.
+  design, eta_scale)` per population coefficient that can be absorbed into a
+  subject margin. `population` is the coefficient's packed position, `subject`
+  the margin's position in a flat subject block, and `design[i]` its multiplier
+  for subject `i`. `eta_scale` is the margin's known SD (1 for a sampled margin):
+  the effect is `eta_scale` times η, so η absorbs `design[i] / eta_scale`. Nested
+  models currently expose no such references.
 - `rows[i]` — the rows of the grouping column that belong to subject `i`.
 - `nested_groups`, `shared_groups` — the groupings the caller named as owned
   by a unit and as crossed with the units.
@@ -304,6 +309,49 @@ _brm_nlme_known_block(record) = get(record, :kind, nothing) === :ranef &&
     haskey(record, :known_scales) && !haskey(record, :mixing) &&
     all(!isnothing, record.known_scales) && isnothing(record.L)
 
+# A block whose correlation is known and that samples a scale. The known factor
+# sits between its scales and its draws (`diag(sd) L z`), so `z` cannot be the
+# natural effects at any unit point. Its draws are standardized effects under a
+# fixed identity covariance too, and its sampled scales are population
+# coordinates, read through `shared_latent`.
+_brm_nlme_known_correlation_block(record) = get(record, :kind, nothing) === :ranef &&
+    !haskey(record, :mixing) && get(record, :known_cor, nothing) !== nothing &&
+    !_brm_nlme_known_block(record)
+
+# The blocks read as draws under a fixed identity covariance.
+_brm_nlme_standardized_block(record) = _brm_nlme_known_block(record) ||
+    _brm_nlme_known_correlation_block(record)
+
+# The SDs an estimated family's η holds, for a block with known scales under a
+# sampled correlation: 1 at a known margin, `nothing` at a sampled one. At the
+# unit point the block's effects are its known scales times η (sampled scales 1,
+# correlation factor the identity), so a known margin's η is its effect over its
+# known SD: unit variance, correlated with the others by the sampled correlation.
+# `nothing` for any other record.
+function _brm_nlme_held_sd(record)
+    known = get(record, :known_scales, nothing)
+    (known === nothing || haskey(record, :mixing) ||
+        _brm_nlme_standardized_block(record)) && return nothing
+    Union{Nothing,Float64}[k === nothing ? nothing : 1.0 for k in known]
+end
+
+# The declarations of a block's sampled scales: its one scale vector, or its
+# per-margin scales without a known margin's (`nothing`).
+_brm_nlme_scale_declarations(record) = isnothing(record.scales) ? (record.scale,) :
+    filter(!isnothing, record.scales)
+
+# The known SD of each margin of the families that hold some, by margin.
+function _brm_nlme_eta_scales(families)
+    scales = Dict{Any,Float64}()
+    for f in families
+        _brm_nlme_held_sd(f.record) === nothing && continue
+        for ((predictor, coefficient), k) in zip(f.record.margins, f.record.known_scales)
+            k === nothing || (scales[(f.block, predictor, coefficient)] = k)
+        end
+    end
+    scales
+end
+
 # A random-effect block's identity: its grouping and `|ID|`. A block without an
 # ID belongs to one predictor, and several predictors can each own one over the
 # same grouping, so its owning predictor completes the identity.
@@ -343,11 +391,13 @@ end
 # emitted Z column is identical. A subject-constant column can instead be
 # absorbed through an intercept, including a covariate slope without a random
 # slope. Both cases preserve the whole predictor row by row. The margins of a
-# block in `known` (every value known) take none: their η are standardized
-# draws the model maps through the known `diag(sd) L`, so `η -= X δ` would not
-# undo `θ += δ`.
+# block in `known` (read as standardized draws) take none: the model maps their
+# η through a known factor, so `η -= X δ` would not undo `θ += δ`. A known margin
+# under a sampled correlation does take one: at the unit point its effect is its
+# known SD (`eta_scales`) times η alone, so `design` stays the effect's multiplier
+# and η absorbs `design / eta_scale`.
 function _brm_nlme_mu_references(backend, block_margins, population, rows, nrows;
-        known=())
+        known=(), eta_scales=Dict{Any,Float64}())
     plan = _brm_nlme_regression(backend.plan)
     references = NamedTuple[]
     for ((predictor, coefficient), position) in sort!(collect(population); by=x -> last(x))
@@ -371,7 +421,8 @@ function _brm_nlme_mu_references(backend, block_margins, population, rows, nrows
             z === nothing && continue
             length(z) == nrows && all(isequal.(column, z)) || continue
             push!(references, (; predictor, coefficient, link, population=position,
-                subject=k, design=ones(Float64, length(rows))))
+                subject=k, design=ones(Float64, length(rows)),
+                eta_scale=get(eta_scales, (margin.block, predictor, coefficient), 1.0)))
             matched = true
             break
         end
@@ -388,7 +439,8 @@ function _brm_nlme_mu_references(backend, block_margins, population, rows, nrows
             end
             length(values) == length(rows) || continue
             push!(references, (; predictor, coefficient, link, population=position,
-                subject=k, design=values))
+                subject=k, design=values,
+                eta_scale=get(eta_scales, (margin.block, predictor, :Intercept), 1.0)))
             break
         end
     end
@@ -660,14 +712,19 @@ below.
 Refuses with [`BRMNLMEViewError`](@ref) when the model has no such reading:
 no random effects over the subjects, a grouping named in neither
 `nested_groups` nor `shared_groups` (the message names it), a subject-owned
-grouping that couples its levels, a subject-owned block that holds known
-values next to sampled ones (a block whose every `sd(...) = value` and whose
-`cor(:, ID) = R`, or one margin, are known is read: its standardized draws are
-η under a fixed identity covariance, NLMEEstimation's `FixedOmega`), a
-`car(...)` field lowered with `car_units`
+grouping that couples its levels, a subject-owned Student-t block that holds
+known values, a `car(...)` field lowered with `car_units`
 that are not the subjects, a centred `mi(x)::shares(total, rows)`
 completion or one with a group whose missing entries lie on rows of several
 subjects, or any coordinate the semantic inventory does not cover.
+
+Known values on a subject-owned Gaussian block (`sd(...) = value`,
+`cor(:, ID) = R`) stay in the model as inputs, and NLMEEstimation's `FixedOmega`
+holds what they fix. Known scales under a sampled correlation are one family that
+holds those margins' SDs at 1: a known margin's η is its effect over its known SD,
+and the free SDs and the correlation are estimated. A block with a known
+correlation, or whose every value is known, is one family held at the identity:
+its standardized draws are η, and any sampled scale is a `:shared_latent`.
 """
 function brm_nlme_view(backend::RKBRMI; subject_group=nothing,
         nested_groups=NamedTuple(), shared_groups=(), unit_partition=:subjects)
@@ -828,10 +885,8 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
         "brm_nlme_view: the model has no subject-level random effects; an NLME " *
         "reading needs at least one `(... | group)` block" *
         (isempty(shared_groups) ? "" : " over a grouping not in `shared_groups`"))
-    # A block whose every scale and whose correlation are known is a family
-    # NLMEEstimation holds fixed (`FixedOmega`); a block that mixes known and
-    # sampled values is not handed to it yet (todo
-    # 2026-10-16T18-16-39-760-0840h34).
+    # Known values are read by the blocks' families below; only a Student-t
+    # block's mixing weights keep it out.
     for r in ranefs
         r.kind === :ranef || continue
         # Correlated levels (`gr(g; cor=...)`) couple the subjects, which an
@@ -841,18 +896,12 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             "of `$(r.group)` with each other (`gr($(r.group); cor=$(r.level_correlation))`), " *
             "so its subjects are not independent and the model has no NLME " *
             "reading. Fit it with the Stan or RK sampler.")
-        haskey(r, :known_scales) && !_brm_nlme_known_block(r) && _brm_nlme_error(
+        haskey(r, :known_scales) && haskey(r, :mixing) && _brm_nlme_error(
             "brm_nlme_view: random-effect block `|$(r.id)|` (group `$(r.group)`) " *
-            "holds known values next to sampled ones: " *
-            (haskey(r, :mixing) ? "a Student-t block's per-level mixing weights" :
-                any(isnothing, r.known_scales) ? "a sampled scale" :
-                    "a sampled correlation") *
-            ". An NLME reading covers a block whose every scale " *
-            "(`sd(...) = value`) and whose correlation (`cor(:, ID) = R`, or one " *
-            "margin) are known; a block that mixes known and sampled values is not " *
-            "covered yet (BRM todo 2026-10-16T18-16-39-760-0840h34). Hold every " *
-            "value of the block, estimate the block, or fit it with the Stan or " *
-            "RK sampler.")
+            "holds known values next to a Student-t block's per-level mixing " *
+            "weights. NLME estimators own a Gaussian random-effect prior, so " *
+            "`brm_nlme_model` covers no Student-t block. Make the block Gaussian, " *
+            "or fit it with the Stan or RK sampler.")
     end
     groups = unique(r.group for r in ranefs)
     if length(groups) == 1
@@ -936,11 +985,14 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             # coordinate of its component (standardized draws, scales,
             # correlation factor, mixing weights) is shared by the subjects.
             claim_declaration!(_brm_nlme_ranef_declaration(record), :shared_latent)
-        elseif kind === :ranef && _brm_nlme_known_block(record)
-            # Every scale and the correlation are known: the model computes
-            # the effects as the known `diag(sd) L` times the standardized
-            # draws, so the draws are the family's η under a fixed identity
-            # covariance (as a completion's or an HSGP weight's).
+        elseif kind === :ranef && _brm_nlme_standardized_block(record)
+            # The model computes the effects as `diag(sd) L` times the
+            # standardized draws, with a known `L` (and, with every value known,
+            # known `sd`), so the draws are the family's η under a fixed identity
+            # covariance (as a completion's or an HSGP weight's). Any sampled
+            # scale is a population coordinate.
+            foreach(declaration -> claim_declaration!(declaration, :shared_latent),
+                _brm_nlme_scale_declarations(record))
             family = length(families) + 1
             block = _brm_nlme_block_identity(record)
             K = length(record.margins)
@@ -967,13 +1019,15 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             family = length(families) + 1
             block = _brm_nlme_block_identity(record)
             scales = reduce(vcat, (claim_declaration!(declaration, :subject_scale)
-                for declaration in (isnothing(record.scales) ? (record.scale,) : record.scales)))
+                for declaration in _brm_nlme_scale_declarations(record)); init=Int[])
             factor = isnothing(record.L) ? Int[] :
                 claim_declaration!(record.L, :subject_correlation)
-            length(scales) == length(record.margins) || error(
+            held = _brm_nlme_held_sd(record)
+            sampled = held === nothing ? length(record.margins) : count(isnothing, held)
+            length(scales) == sampled || error(
                 "brm_nlme_view: internal: block `|$(record.id)|` has $(length(scales)) " *
-                "scale coordinates for $(length(record.margins)) margins")
-            push!(families, (; block, record, stratum=nothing, size=length(scales),
+                "scale coordinates for $sampled sampled margins")
+            push!(families, (; block, record, stratum=nothing, size=length(record.margins),
                 scales, factor, fixed=nothing))
             mixing = get(record, :mixing, nothing)
             for (k, (predictor, coefficient)) in enumerate(record.margins)
@@ -1370,7 +1424,8 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
     mu_references = ragged ? NamedTuple[] :
         _brm_nlme_mu_references(backend, block_margins, population,
             rows, length(labels);
-            known=Set(f.block for f in families if _brm_nlme_known_block(f.record)))
+            known=Set(f.block for f in families if _brm_nlme_standardized_block(f.record)),
+            eta_scales=_brm_nlme_eta_scales(families))
     view = BRMNLMEView(group, levels, names, role, subject, blocks, block_margins,
         mu_references, rows, Int[f.size for f in families],
         subject_families, subject_margins, nested_groups, shared_groups, families,
@@ -1404,7 +1459,7 @@ function _brm_nlme_unit_point(backend::RKBRMI, view::BRMNLMEView;
     end
     values = _rk_constrained_values(backend, u)
     for record in unique(f.record for f in view.families if f.fixed === nothing)
-        for declaration in (isnothing(record.scales) ? (record.scale,) : record.scales)
+        for declaration in _brm_nlme_scale_declarations(record)
             scale = _brm_rk_declaration_value(values, declaration)
             all(isequal(1), scale) || _brm_nlme_error(
                 "brm_nlme_model: random-effect scale `$declaration` is $(scale), not 1, " *

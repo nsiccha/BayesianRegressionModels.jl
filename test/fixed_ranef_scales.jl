@@ -515,12 +515,23 @@ end
         @test !any(in((:subject_scale, :subject_correlation)), view.role)
         @test BRM._brm_nlme_known_block(family.record)
     end
-    # A block that mixes known and sampled values still has no NLME reading
-    # (todo 2026-10-16T18-16-39-760-0840h34), named by what is sampled.
-    @test_throws "holds known values next to sampled ones: a sampled scale" brm_nlme_view(
-        RKBRMI(mixed_builder(DF)))
-    @test_throws "holds known values next to sampled ones: a sampled scale" brm_nlme_view(
-        RKBRMI(cor_builder(DF)))
+    # Known scales under a sampled correlation are one family that holds those
+    # margins' SDs: the free scale and the correlation stay estimated (snag
+    # `brm-nlme-view-re-2fd0380d`).
+    view = brm_nlme_view(RKBRMI(mixed_builder(DF)))
+    family = only(view.families)
+    @test family.fixed === nothing
+    @test length(family.scales) == 1 && length(family.factor) == 1
+    @test isequal(BRM._brm_nlme_held_sd(family.record), [1.0, nothing])
+    @test count(==(:subject_scale), view.role) == 1
+    # A known correlation sits between the scales and the draws: its block's draws
+    # are η under a fixed identity, and its sampled scales population coordinates.
+    view = brm_nlme_view(RKBRMI(cor_builder(DF)))
+    family = only(view.families)
+    @test family.fixed == Matrix{Float64}(I, 2, 2)
+    @test count(==(:shared_latent), view.role) == 2
+    @test !any(in((:subject_scale, :subject_correlation)), view.role)
+    # NLME estimators own a Gaussian prior, so a Student-t block stays out.
     @test_throws "a Student-t block's per-level mixing weights" brm_nlme_view(
         RKBRMI(studentt_builder(DF)))
     # Adaptive centering describes a known-value block in derived-scale form:
