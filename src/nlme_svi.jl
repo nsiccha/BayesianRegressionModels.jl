@@ -34,7 +34,8 @@
 # curvature (exactly for a quadratic term), and takes the whole step; a single
 # pair, BRM 0.2.242's step, sees one direction per visit, and units of tens of
 # coordinates did not settle in the visits a minibatch run gives them
-# (`unit_curvature`, below).
+# (`unit_curvature`, below). Either way only the positive part of the estimate
+# enters the step.
 #
 # An iteration's unit work (the terms at the antithetic pair and the factor's
 # step) can run on several tasks, one prepared copy of the cell samplers per
@@ -776,19 +777,42 @@ _brm_svi_unit_calls(q, i, c) =
 # Controls written before `unit_curvature` existed (a checkpoint of BRM 0.2.242
 # or earlier) keep the single pair.
 _brm_svi_unit_curvature_mode(c) = get(c, :unit_curvature, :pair)
+# Controls written before the orthogonal step took its estimate's positive part
+# keep the whole estimate, so such a checkpoint resumes the run it was.
+_brm_svi_unit_positive_part(c) = get(c, :unit_positive_part, false)
 
 # The natural-gradient step of `_brm_svi_unit_step!` with a full curvature
-# estimate `S` (whitened, symmetric): G = U (S - I) Uᵀ, the same trust regions
-# and square-root update. No positive part is taken: the estimate is not one
-# draw's rank-one product, whose spurious negative eigenvalue that part removes,
-# and the improved rule keeps the precision positive definite for any G.
-function _brm_svi_unit_step_full!(q, i, gz, S, β)
+# estimate `S` (whitened, symmetric): G = U (S₊ - I) Uᵀ for S₊ the estimate's
+# positive part, with the same trust regions and square-root update.
+#
+# On a term quadratic in the unit's coordinates S is the exact curvature and S₊ is
+# S. On a saturating or redescending term, a pair's gradient difference is not
+# proportional to its draw, and while a stiff direction is far from resolved S is
+# mostly noise whose eigenvalues come in nearly symmetric pairs ±λ with λ ≫ 1. The
+# trust region then sets β ≈ 1/λ from their size, so the whole estimate halves the
+# precision along each visit's negative eigenvector while it leaves that direction's
+# true curvature unread: the same trap as the single pair's negative eigenvalue
+# above, and it compounds over a different direction each visit. Measured at a
+# saturating toy's exact unit precision of 1, the factor fell to 3e-4 and stayed
+# there (test/nlme_svi_unit_curvature.jl); on a stiff unit of 17 coordinates a
+# direction fell to 0.013 by its 18th visit while S itself read 223 along it on
+# average (1 = the factor already matches), and logp fell by up to 2,500 nats within
+# 4 of the factor's sds along it. With S₊ the same β leaves those directions alone
+# (a factor of about 1 - β).
+#
+# A direction whose curvature really lies below the factor's still widens: S₊ reads
+# its estimate, or zero where that is negative, and the precision halves per visit
+# at most, once no other direction shortens the step. `positive = false` is the
+# whole estimate, which checkpoints without the control keep
+# (`_brm_svi_unit_positive_part`).
+function _brm_svi_unit_step_full!(q, i, gz, S, β; positive=true)
     isempty(q.M[i]) && return q
     U = LowerTriangular(q.U[i])
-    Ĝ = Symmetric((S .+ S') ./ 2 - I)
-    r = maximum(abs, eigvals(Ĝ))
-    isfinite(r) || throw(ArgumentError(
+    all(isfinite, S) || throw(ArgumentError(
         "brm_svi: non-finite gradient difference in a unit's curvature estimate"))
+    Ŝ = Symmetric((S .+ S') ./ 2)
+    Ĝ = Symmetric((positive ? _brm_svi_positive_part(Ŝ) : Ŝ) - I)
+    r = maximum(abs, eigvals(Ĝ))
     β = r > 0 ? min(β, _BRM_SVI_UNIT_TRUST / r) : β
     # U⁻¹(Λ + βG) = (I + βĜ) Uᵀ.
     R = qr(vcat(Matrix(U'), (I + β .* Ĝ) * Matrix(U'))).R
@@ -799,6 +823,13 @@ function _brm_svi_unit_step_full!(q, i, gz, S, β)
     q.Λ[i] .= L * L'
     q.M[i] .+= Δ
     q
+end
+
+# A symmetric matrix's positive part; itself, to the last bit, when it has no
+# negative eigenvalue.
+function _brm_svi_positive_part(S::Symmetric)
+    F = eigen(S)
+    first(F.values) >= 0 ? S : Symmetric(F.vectors * Diagonal(max.(F.values, 0.0)) * F.vectors')
 end
 
 # Unit i's terms on the orthogonal design `E` (columns ε_k): the value and the
@@ -1000,7 +1031,7 @@ _brm_svi_field_prepare!(rng, t, q, g, batch) = nothing
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
         sites=nothing, site_scale=1.0, rank_step=1.0, curvature=:pair, site_step=β,
-        structured_step=β, structured_rank=1.0)
+        structured_step=β, structured_rank=1.0, positive_part=true)
     D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
@@ -1094,7 +1125,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
             _brm_svi_unit_step!(q, batch[k], terms[k].gz, terms[k].gd, draws[k],
                 q.U[batch[k]] isa _BRMSVIUnitRoot ? structured_step : β;
                 rank=structured_rank) :
-            _brm_svi_unit_step_full!(q, batch[k], terms[k].gz, S, β)
+            _brm_svi_unit_step_full!(q, batch[k], terms[k].gz, S, β; positive=positive_part)
     end
     # The controls move while exploring; settling and polishing step q in one fixed
     # frame, which polishing averages.
@@ -1214,12 +1245,12 @@ _brm_svi_stalled(a, b, W) = b.center - a.center < 2 * sqrt((a.spread + b.spread)
 function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
         polish_lr, window, patience, min_windows, polish_windows, unit_sampling=:uniform,
         settle_windows=_BRM_SVI_SETTLE_WINDOWS, unit_curvature=:pair,
-        structured_unit_step=unit_step, structured_rank_step=1.0)
+        structured_unit_step=unit_step, structured_rank_step=1.0, unit_positive_part=true)
     B = min(batch_size, N)
     (; batch_size=B, window=window === nothing ? max(cld(N, B), 100) : window,
        max_iterations, lr_global, unit_step, polish_lr, patience, min_windows,
        polish_windows, unit_sampling, settle_windows, unit_curvature, structured_unit_step,
-       structured_rank_step)
+       structured_rank_step, unit_positive_part)
 end
 
 # A dense unit's step when the caller names none: the whole natural-gradient
@@ -1327,6 +1358,7 @@ function _brm_svi_advance!(run, t, c)
             scale * (polishing || settling ? c.polish_lr : c.lr_global), scale * c.unit_step;
             whiten=polishing || settling, weights=batch.weights, sites=run.sites,
             site_scale=scale, curvature=_brm_svi_unit_curvature_mode(c),
+            positive_part=_brm_svi_unit_positive_part(c),
             site_step=scale * _brm_svi_site_step(c),
             structured_step=scale * _brm_svi_structured_unit_step(c),
             structured_rank=_brm_svi_structured_rank_step(c),
@@ -1681,7 +1713,11 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   evaluations for d coordinates; a randomly rotated spherical-radial cubature
   rule), whose Stein estimate is its whole expected curvature, exact when the
   unit's term is quadratic in its coordinates, and the step defaults to
-  `unit_step = 1`. `:pair`: one antithetic pair (2 evaluations) and its
+  `unit_step = 1`. The step reads the estimate's positive part, which on a
+  quadratic term is all of it: on a saturating term the estimate is mostly noise
+  with nearly symmetric eigenvalues until the unit's stiff directions are resolved,
+  and its negative part would shrink the factor's precision far below the target's
+  curvature. `:pair`: one antithetic pair (2 evaluations) and its
   rank-one estimate's positive part, with `unit_step = 0.1`, BRM 0.2.242's step;
   a unit of tens of coordinates then needs far more visits to settle than a
   minibatch run gives it, and the hyperparameters follow its unsettled factor.
