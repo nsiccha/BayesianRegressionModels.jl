@@ -1384,7 +1384,13 @@ curvature and its gradient and value the exact expectations; the full step reach
 such a unit's optimum within the trust regions; and, through the production run
 loop, a prior scale that reads 32 units of 48 coordinates reaches its profile
 optimum with the units' factors at theirs, where the single pair (`:pair`, the
-control) leaves both off. Controls without `unit_curvature` keep the pair. About a
+control) leaves both off. Controls without `unit_curvature` keep the pair. The step
+takes the estimate's positive part: on saturating rows, whose target has precision
+exactly 1 off their span, the whole estimate (the control) has nearly symmetric
+eigenvalues and falls below 0.01 where the positive part stays at 1 and reaches the
+rows' stiffness; through the production loop, controls without `unit_positive_part`
+keep the whole estimate, so an old checkpoint resumes as it ran. A direction whose
+curvature lies below the factor's still widens, exactly on a Gaussian. About a
 minute; standard libraries only.
 
 `nlme_svi.jl` checks minibatch stochastic variational inference
@@ -1505,7 +1511,11 @@ units matched by label and carried to the combined hyperparameters (an exact
 one-margin oracle with a mu-referenced intercept, and totals kept for
 correlated, stratified and unit-held shared blocks, read back through the NLME
 view), a global held inside two slices' units, frozen-replay slices, a low-rank
-slice, the refusals, `brm_start` effects addressed by level on a frozen replay
+slice, a joint site's factor and its widening against closed forms, the between-slice
+variance, slices that contradict each other in either product (the plain product as
+the positive control), ridges that cross under priors they sit far from or of very
+different widths and from fits that left them too narrow, the fallback when a joint
+mean leaves what supports it, the refusals, `brm_start` effects addressed by level on a frozen replay
 that lacks some levels, slices whose scales differ 40-fold under a log link
 (carried, the first window beats a cold start and the old copy), and that real
 slice fits start the full fit near its optimum. About 15 minutes with loading

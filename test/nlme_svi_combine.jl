@@ -1,7 +1,7 @@
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_svi_combine_fixture.jl"))
 include(joinpath(@__DIR__, "nlme_svi_owned_fixture.jl"))
-using LinearAlgebra, Serialization
+using LinearAlgebra, Serialization, Statistics
 
 const SLICE_AD = AutoEnzyme(; mode=Enzyme.Reverse)
 slice_model(data) = brm_nlme_model(RKBRMI(svi_slice_model(data)); ad_backend=SLICE_AD,
@@ -57,6 +57,15 @@ end
 
 # A one-draw unit factor (M, Λ) carried by z_s = C z_c + d: its site moves,
 # its N(0, 1) prior is applied once.
+# The combination with every unit carried, whatever its density says. Factors set by hand
+# are not what a unit's data would give, so they test the map and not the choice.
+function slice_all_carried(full, states)
+    prepared, _ = BRM._brm_svi_checkout!(full; global_coordinates=nothing, previous=nothing)
+    start = BRM._brm_svi_combine(prepared.target, states; carry_all=true)
+    BRM._brm_svi_checkin!(full, prepared)
+    start
+end
+
 function slice_carried_unit(M, Λ, C, d)
     Λc = C^2 * (Λ - 1) + 1
     (C * (Λ * M - (Λ - 1) * d) / Λc, Λc)
@@ -81,7 +90,7 @@ end
     end
     states = brm_svi_checkpoint.(fits)
     @test all(st -> length(st.q.keys) == length(st.q.μ) == length(st.q.informed), states)
-    start = brm_svi_combine(full, states)
+    start = slice_all_carried(full, states)
     r = start.receipt
     @test r.slices == 3
     # The projection of this Gaussian global prior: a ~ Normal(0, 2), the log
@@ -138,8 +147,9 @@ end
         @test d.q.U[i] ≈ cholesky(Symmetric(start.units[label].Λ)).L
     end
     # The shorthand combines inline with the same defaults.
-    inline = brm_svi_fit(full; start=fits, max_iterations=0, ndraws=0)
-    @test inline.diagnostics.q.μ == d.q.μ && inline.diagnostics.q.M == d.q.M
+    inline = brm_svi_fit(full; start=fits, max_iterations=0, ndraws=0).diagnostics.q
+    public = brm_svi_fit(full; start=brm_svi_combine(full, states), max_iterations=0, ndraws=0).diagnostics.q
+    @test inline.μ == public.μ == d.q.μ && inline.M == public.M
     # A start is data-only: it serializes and starts a fit in place of the original.
     io = IOBuffer()
     serialize(io, start)
@@ -351,8 +361,9 @@ end
     fit = brm_svi_fit(svi_slice_model(svi_slice_region(data, "east")); rng=Xoshiro(2),
         family=LowRankGlobal(1), SVI_SLICE_QUICK...)
     q = fit.diagnostics.q
-    q.ρ .= log(0.2)
-    q.Β .= 0.1 .* (1:length(q.μ))
+    # Narrower than the prior everywhere, so all of them are in the joint site.
+    q.ρ .= log(0.1)
+    q.Β .= 0.05 .* (1:length(q.μ))
     state = brm_svi_checkpoint(fit)
     start = brm_svi_combine(full, [state])
     r = start.receipt.globals
@@ -393,6 +404,313 @@ end
     @test iszero(lowrank.Β[setdiff(eachindex(globals), rows), :])
     # Along that direction the start's variance is the product's.
     @test (u ./ d)' * Σq * (u ./ d) ≈ 1 / ω
+end
+
+# A slice's factor over named coordinates, without a model.
+slice_source(keys, mean, scale, Β) = BRM._BRMSVISource(collect(Any, keys), mean,
+    scale .^ 2 .+ vec(sum(abs2, Β; dims=2)), scale, Β, fill(true, length(keys)), Dict{Any,NamedTuple}())
+# The exact posterior of one linear-Gaussian row under a diagonal prior, as a rank-1 factor.
+function slice_ridge_source(keys, row, y, σy, p0)
+    Σ = inv(Symmetric(Diagonal(p0) + row * row' / σy^2))
+    E = eigen(Symmetric(Matrix(Σ)))
+    floor_ = minimum(E.values) * 0.999
+    Β = sqrt(E.values[end] - floor_) * E.vectors[:, end:end]
+    slice_source(keys, Σ * row * y / σy^2, fill(sqrt(floor_), length(keys)), Β)
+end
+function slice_joint(sources, p0, m0; limit=4096)
+    keys = collect(Any, first(sources).keys)
+    index = BRM._brm_svi_source_index(sources)
+    T = [BRM._brm_svi_heterogeneity(index, key, p0[k], m0[k]) for (k, key) in enumerate(keys)]
+    merge(BRM._brm_svi_joint_product(index, keys, collect(eachindex(keys)), p0, m0, T, limit),
+        (; heterogeneity=T))
+end
+
+# The joint product a plain reading gives: `slice_expected_joint`'s formula on sources.
+function slice_plain_joint(sources, p0, m0)
+    P, η = Matrix(Diagonal(p0)), p0 .* m0
+    for s in sources
+        Ps = inv(Symmetric(Diagonal(s.scale .^ 2) + s.Β * s.Β'))
+        E = eigen(Symmetric(Ps - Diagonal(p0)))
+        V, λ = E.vectors[:, E.values .> 0], E.values[E.values .> 0]
+        P .+= V * Diagonal(λ) * V'
+        η .+= V * (V' * (Ps * s.mean - p0 .* m0))
+    end
+    P \ η
+end
+
+# A slice whose fit left its ridge narrower than the prior: sharp across the ridge, with
+# the rank part carrying the ridge, as `LowRankGlobal` fits do.
+function slice_svi_ridge_source(keys, row, y; ridge_sd=0.8, sharp=0.04)
+    along = [row[2], -row[1]] ./ sqrt(sum(abs2, row))
+    slice_source(keys, row .* y ./ sum(abs2, row), fill(sharp, 2), (ridge_sd * sqrt(2)) .* along[:, :])
+end
+
+@stestset "slice combination: a site's factor, its widening and the between-slice variance" begin
+    # The Paule-Mandel estimate has a closed form at equal site variances: the sample
+    # variance of the means, less that variance.
+    c = [1.0, 2.0, 3.0, 8.0]
+    @test BRM._brm_svi_paule_mandel([(x, 0.1) for x in c]) ≈ var(c) - 0.1
+    @test BRM._brm_svi_paule_mandel([(1.0, 0.1), (9.0, 0.1)]) ≈ 32 - 0.1
+    # Below the contradiction level it is 0, though Q is above K - 1 (Q(0) = 4).
+    @test BRM._brm_svi_paule_mandel([(1.0, 0.5), (3.0, 0.5)]) == 0
+    # So where SVI's sds being a quarter of the posterior's would explain the gap: Q(0) = 64,
+    # far past the level at these sds, but 4 at four times them.
+    @test BRM._brm_svi_paule_mandel([(1.0, 0.5), (9.0, 0.5)]) == 0
+    @test BRM._brm_svi_paule_mandel([(1.0, 1e-4)]) == 0
+    @test BRM._brm_svi_paule_mandel(Tuple{Float64,Float64}[]) == 0
+
+    rng = Xoshiro(3)
+    n, Β = 6, 0.15 .* randn(rng, 6, 2)
+    scale, mean, m0 = 0.1 .+ 0.2 .* rand(rng, n), randn(rng, n), randn(rng, n)
+    p0 = [0.5, 1.0, 0.25, 2.0, 0.0, 1.5]  # one flat coordinate
+    clamped = zeros(Int, n)
+    site = BRM._brm_svi_site_factor(collect(1:n), mean, scale, Β, p0, m0, clamped)
+    Ps = inv(Symmetric(Diagonal(scale .^ 2) + Β * Β'))
+    S, h = Ps - Diagonal(p0), Ps * mean - p0 .* m0
+    @test isposdef(Symmetric(S)) && iszero(clamped)
+    # The plain site at T = 0, and the same site with T added to its variance.
+    plain = BRM._brm_svi_site_widened(site, zeros(n), m0)
+    @test plain.S ≈ S
+    @test plain.h ≈ h
+    T = [0.1, 0.0, 2.0, 0.5, 0.0, 0.3]
+    wide = BRM._brm_svi_site_widened(site, T, m0)
+    @test wide.S ≈ inv(inv(Symmetric(S)) + Diagonal(T))
+    @test wide.h ≈ wide.S * (S \ h)
+    # A rescaling of the coordinates rescales the site, also with a direction dropped:
+    # a prior sd of 1e-6 beside one of 1 does not decide the directions.
+    Β2 = copy(Β)
+    Β2[1, :] .*= 10
+    d = [1e-6, 1.0, 1e3, 1.0, 1.0, 1e-3]
+    a = BRM._brm_svi_site_factor(collect(1:n), mean, scale, Β2, p0, m0, clamped)
+    @test sum(clamped) == 1
+    b = BRM._brm_svi_site_factor(collect(1:n), d .* mean, d .* scale, d .* Β2, p0 ./ d .^ 2,
+        d .* m0, zeros(Int, n))
+    @test size(a.W, 2) == n - 1 == size(b.W, 2)
+    @test b.W * b.W' ≈ (a.W * a.W') ./ (d * d') rtol = 1e-8
+    # What it drops is the site's negative part, so what it keeps is above the site.
+    S2 = inv(Symmetric(Diagonal(scale .^ 2) + Β2 * Β2')) - Diagonal(p0)
+    @test !isposdef(Symmetric(S2))
+    @test all(>=(-1e-8), eigvals(Symmetric(a.W * a.W' - S2)))
+    # A slice wider than the prior in every direction has no site left, and its
+    # coordinate stays at the prior.
+    none = BRM._brm_svi_site_factor([1], [0.3], [2.0], zeros(1, 1), [1.0], [0.0], zeros(Int, 1))
+    @test size(none.W, 2) == 0 && isempty(none.d)
+    @test iszero(BRM._brm_svi_site_widened(none, [0.5], [0.0]).S)
+    r = slice_joint([slice_source([:x], [0.3], [2.0], [1.0;;])], [1.0], [0.0])
+    @test r.status === :joint && r.μ ≈ [0.0] && r.diagonal ≈ [1.0]
+    # Who pins a coordinate: narrowed and not carried by the rank part, or far below the prior.
+    @test BRM._brm_svi_pins(0.5, 0.1) && BRM._brm_svi_pins(0.001, 0.99)
+    @test !BRM._brm_svi_pins(0.5, 0.99) && !BRM._brm_svi_pins(0.9, 0.1)
+end
+
+@stestset "slice combination: slices that contradict do not move coordinates they leave at the prior" begin
+    # A sharply informed coordinate on which the slices disagree by hundreds of their
+    # sds, and coordinates no slice informs, with the small rank rows SVI's noise
+    # leaves on them (their marginals scatter around the prior's, as a fit's do).
+    rng = Xoshiro(11)
+    d, K = 40, 8
+    keys = [:l; [Symbol(:z, j) for j in 1:d]]
+    p0, m0 = ones(d + 1), zeros(d + 1)
+    locations = range(-1, 1; length=K)
+    sources = map(1:K) do s
+        Β = zeros(d + 1, 2)
+        Β[1, 1] = 0.004
+        Β[2:end, :] .= 0.15 .* randn(rng, d, 2)
+        scale = [0.01; sqrt.(max.(1 .+ 0.06 .* randn(rng, d) .- vec(sum(abs2, Β[2:end, :]; dims=2)), 0.01))]
+        slice_source(keys, [locations[s]; 0.05 .* randn(rng, d)], scale, Β)
+    end
+    plain = slice_plain_joint(sources, p0, m0)
+    r = slice_joint(sources, p0, m0)
+    @test r.status === :joint
+    # The positive control: the plain product carries the contradiction far out.
+    @test maximum(abs, plain[2:end]) > 5
+    @test maximum(abs, r.μ[2:end]) < 1
+    @test median(abs.(r.μ[2:end])) < 0.25
+    # The block is what the slices narrow, and the contradiction has its variance.
+    @test r.block == [1] && size(r.precision) == (1, 1)
+    @test r.heterogeneity[1] ≈ var(locations) - 0.0108^2 rtol = 0.02
+    @test all(iszero, r.heterogeneity[2:end])
+    @test minimum(locations) < r.μ[1] < maximum(locations)
+    # It sits among the slices and stays wide: a product of random effects, not of widths.
+    @test 1 / sqrt(r.diagonal[1]) ≈ sqrt(1 / (1 + K / r.heterogeneity[1])) rtol = 0.05
+    # So does a coordinate whose narrow marginal the rank part carries.
+    carried = map(sources) do s
+        Β = copy(s.Β)
+        Β[1, 1] = 0.01
+        slice_source(s.keys, s.mean, [0.001; s.scale[2:end]], Β)
+    end
+    @test sum(abs2, carried[1].Β[1, :]) / carried[1].var[1] > 0.8
+    c = slice_joint(carried, p0, m0)
+    @test c.heterogeneity[1] > 0.3 && maximum(abs, c.μ[2:end]) < 1
+    @test 1 / sqrt(c.diagonal[1]) > 0.1
+end
+
+@stestset "slice combination: ridges that reconcile cross exactly, wherever the truth sits" begin
+    keys = [:a, :b]
+    ridge(truth, sd) = let p0 = 1 ./ sd .^ 2
+        (p0, [slice_ridge_source(keys, row, row' * truth, 0.05, p0) for row in ([1.0, 1.0], [1.0, -1.0])])
+    end
+    # Each slice pins one direction, so where they cross neither has a residual, also
+    # where the slices' marginals read as a contradiction: truth (2, 5) under N(0, 3²)
+    # gives `a` marginals at 3.5 and -1.5, each of sd 2.1.
+    for truth in ([2.0, 1.5], [2.0, 5.0], [6.0, 5.0], [9.0, -7.0])
+        p0, sources = ridge(truth, [3.0, 3.0])
+        r = slice_joint(sources, p0, zeros(2))
+        @test r.status === :joint
+        @test r.μ ≈ slice_plain_joint(sources, p0, zeros(2)) atol = 1e-3
+        @test r.μ ≈ truth atol = 0.05
+        @test iszero(r.heterogeneity)
+    end
+    # So with a fit's ridge narrower than the prior: its marginals are narrow enough to
+    # read as a contradiction, but the rank part carries them.
+    for truth in ([2.0, 1.5], [2.0, 5.0], [6.0, 5.0], [9.0, -7.0])
+        p0 = fill(1 / 9, 2)
+        sources = [slice_svi_ridge_source(keys, row, row' * truth) for row in ([1.0, 1.0], [1.0, -1.0])]
+        r = slice_joint(sources, p0, zeros(2))
+        @test r.status === :joint && iszero(r.heterogeneity)
+        @test r.μ ≈ truth atol = 0.05
+    end
+    # A ridge's narrow-prior side is in the site though the slice barely narrows it:
+    # its variance is along the ridge.
+    for truth in ([0.0, 2.0], [3.0, 2.0], [1.0, -1.0])
+        p0, sources = ridge(truth, [10.0, 1.0])
+        @test sources[1].var[2] * p0[2] > 0.95
+        r = slice_joint(sources, p0, zeros(2))
+        @test r.status === :joint && r.block == [1, 2] && iszero(r.heterogeneity)
+        @test r.μ ≈ truth atol = 0.05
+    end
+    # A third slice contradicting one of them along its own ridge: the mean sits between
+    # what the slices say.
+    p0, sources = ridge([2.0, 5.0], [3.0, 3.0])
+    push!(sources, slice_ridge_source(keys, [1.0, 1.0], 9.0, 0.05, p0))
+    r = slice_joint(sources, p0, zeros(2))
+    @test r.status === :joint
+    @test 7.1 < sum(r.μ) < 8.9
+end
+
+@stestset "slice combination: contradicting mean-field slices stay wide, in a fit's start" begin
+    data = svi_slice_ridge_data(Xoshiro(7))
+    groups = (; subject_group=:subject)
+    full = brm_nlme_model(RKBRMI(svi_slice_ridge_model(data)); ad_backend=SLICE_AD, groups...)
+    states = [brm_svi_checkpoint(brm_svi_fit(svi_slice_ridge_model(svi_slice_rows(data, data.region .== r));
+        rng=Xoshiro(10 + k), family=MeanFieldGlobal(), max_iterations=0, ndraws=0, batch_size=4, groups...))
+        for (k, r) in enumerate(("plus", "minus"))]
+    at = findfirst(==("a"), String.(first(states).globals))
+    # Two slices that each pin `a`, 200 of their sds apart, both with confidence.
+    for (state, location) in zip(states, (-1.0, 1.0))
+        state.q.μ[at] = location
+        state.q.ρ[at] = log(0.01)
+    end
+    start = brm_svi_combine(full, states)
+    r = start.receipt.globals
+    @test r.joint === :diagonal
+    name = String.(r.coordinates)
+    k = findfirst(==("a"), name)
+    # Between the slices, with their disagreement for a variance (T = 2 less 0.01², two
+    # sites), and starting as wide as a cold fit, where the product's sd is 0.9.
+    @test r.heterogeneity[k] ≈ 2 atol = 0.01
+    key = BRM._brm_svi_coordinate_keys(full)[BRM._brm_svi_globals(full)][k]
+    g = findfirst(isequal(key), start.globals.keys)
+    @test abs(start.globals.μ[g]) < 0.05
+    @test start.globals.σ[g] ≈ 0.1
+    @test r.spread[k] > 50
+    # A fit from it takes those.
+    q = brm_svi_fit(full; start, max_iterations=0, ndraws=0).diagnostics.q
+    @test exp(q.ρ[k]) ≈ start.globals.σ[g]
+end
+
+@stestset "slice combination: a unit keeps its slice's draws where carrying them costs it" begin
+    # Slices that disagree on the intercept their subjects' block absorbs, whose scale is
+    # pinned near 0: a unit's total could only be kept by a draw far beyond its prior.
+    data = svi_slice_data(Xoshiro(57), SVI_SLICE_REGIONS, SVI_SLICE_CLASSES, 4)
+    regions = first.(SVI_SLICE_REGIONS)
+    full = brm_nlme_model(RKBRMI(svi_slice_intercept_model(data)); ad_backend=SLICE_AD,
+        SVI_SLICE_GROUPS...)
+    fits = [slice_quick(svi_slice_intercept_model(svi_slice_region(data, r))) for r in regions]
+    for (s, fit) in enumerate(fits)
+        q = fit.diagnostics.q
+        names = string.(fit.diagnostics.model.view.coordinates[fit.diagnostics.globals])
+        q.μ[findfirst(==("mu_Intercept"), names)] = Float64(s) - 2
+        q.μ[findfirst(n -> occursin("subject.tau", n), names)] = log(1e-6)
+        q.ρ .= log(0.05)
+        for i in eachindex(q.M)    # units with a site of their own, or nothing moves
+            q.M[i] .= 0.0
+            q.Λ[i] .= 10.0
+            q.U[i] .= sqrt(10.0)
+        end
+    end
+    states = brm_svi_checkpoint.(fits)
+    # The positive control: carried regardless, the outer regions' draws run to a million.
+    @test maximum(abs, reduce(vcat, [u.M for u in values(slice_all_carried(full, states).units)])) > 1e5
+    start = brm_svi_combine(full, states)
+    r = start.receipt.units
+    # The middle region's intercept is the combination's, so it carries as it would have;
+    # the others' are not, so they keep their draws.
+    @test !isempty(r.uncarried) && r.carried > 0
+    @test r.carried + length(r.uncarried) == 9
+    for st in states, (label, u) in st.units
+        label in r.uncarried || continue
+        @test start.units[label].M ≈ u.M
+        @test start.units[label].Λ ≈ BRM._brm_svi_saved_precision(u)
+    end
+    @test maximum(abs, reduce(vcat, [u.M for u in values(start.units)])) < 100
+    # The density reads no value as none, and a draw far out as worse than one near.
+    prepared, _ = BRM._brm_svi_checkout!(full; global_coordinates=nothing, previous=nothing)
+    t = prepared.target
+    g = BRM._brm_svi_start(full, nothing, nothing)[t.globals]
+    near, far = BRM._brm_svi_unit_density(t, 1, g, [0.0]), BRM._brm_svi_unit_density(t, 1, g, [1e6])
+    @test isfinite(near) && near > far
+    @test BRM._brm_svi_unit_density(t, 1, g, [NaN]) == -Inf
+    BRM._brm_svi_checkin!(full, prepared)
+end
+
+@stestset "slice combination: a joint mean nothing supports falls back" begin
+    data = svi_slice_ridge_data(Xoshiro(7))
+    groups = (; subject_group=:subject)
+    full = brm_nlme_model(RKBRMI(svi_slice_ridge_model(data)); ad_backend=SLICE_AD, groups...)
+    states = [brm_svi_checkpoint(brm_svi_fit(svi_slice_ridge_model(svi_slice_rows(data, data.region .== r));
+        rng=Xoshiro(10 + k), family=LowRankGlobal(1), max_iterations=0, ndraws=0, batch_size=4, groups...))
+        for (k, r) in enumerate(("plus", "minus"))]
+    ab = [findfirst(==(c), String.(first(states).globals)) for c in ("a", "b")]
+    prior_sd = 3.0
+    # Exact slices pinning two nearly parallel directions consistently, at a crossing
+    # the priors make implausible: neither the slices' marginals nor their sites
+    # disagree, so only the range catches it.
+    far = [-30.0, 30.0]
+    for (state, row) in zip(states, ([1.0, 1.0], [1.0, 1.01]))
+        p0 = fill(1 / prior_sd^2, 2)
+        source = slice_ridge_source([:a, :b], row, row' * far, 0.002, p0)
+        state.q.μ[ab] .= source.mean
+        state.q.ρ[ab] .= log.(source.scale)
+        state.q.Β[ab, :] .= source.Β
+    end
+    start = brm_svi_combine(full, states)
+    r = start.receipt.globals
+    @test r.joint === :outlying
+    names = String.(r.coordinates)
+    @test sort(names[r.outlying]) == ["a", "b"]
+    @test isempty(start.globals.correlated)
+    @test all(iszero, r.heterogeneity)
+    # What stands is the coordinate-by-coordinate product: it matches the same slices
+    # with the rank parts folded into their marginals.
+    fold(state) = let s = deepcopy(state)
+        s.q.ρ .= log.(sqrt.(exp.(2 .* s.q.ρ) .+ vec(sum(abs2, s.q.Β; dims=2))))
+        s.q.Β .= 0
+        s
+    end
+    diagonal = brm_svi_combine(full, fold.(states))
+    @test diagonal.receipt.globals.joint === :diagonal
+    gkeys = BRM._brm_svi_coordinate_keys(full)[BRM._brm_svi_globals(full)]
+    for c in ("a", "b")
+        key = gkeys[findfirst(==(c), names)]
+        μs, μd = (s.globals.μ[findfirst(isequal(key), s.globals.keys)] for s in (start, diagonal))
+        @test μs ≈ μd
+        @test abs(μs) < 3prior_sd
+    end
+    # `joint_limit` bounds what the joint sites hold, not every informed global.
+    limited = brm_svi_combine(full, states; joint_limit=1)
+    @test limited.receipt.globals.joint === :limit
+    @test brm_svi_combine(full, states; joint_limit=0).receipt.globals.joint === :limit
 end
 
 @stestset "slice combination: joint sites land where the slices' ridges cross" begin
@@ -510,7 +828,7 @@ slice_full_point(m, start::BRMSVIStart) = slice_full_point(m, start.globals.keys
         end
     end
     states = brm_svi_checkpoint.(fits)
-    start = brm_svi_combine(full, states)
+    start = slice_all_carried(full, states)
     b_c, logτ_c = slice_mean(start, "mu_Intercept"), slice_mean(start, "subject.tau")
     for (s, st) in enumerate(states), (label, u) in st.units
         b_s, logτ_s = slice_mean(st, "mu_Intercept"), slice_mean(st, "subject.tau")
@@ -531,7 +849,7 @@ slice_full_point(m, start::BRMSVIStart) = slice_full_point(m, start.globals.keys
         fit.diagnostics.q.U[i] .= 1e4
     end
     rich = brm_svi_checkpoint.(fits)
-    start = brm_svi_combine(full, rich)
+    start = slice_all_carried(full, rich)
     b_c, τ_c = slice_mean(start, "mu_Intercept"), exp(slice_mean(start, "subject.tau"))
     for st in rich, (label, u) in st.units
         total = slice_mean(st, "mu_Intercept") + exp(slice_mean(st, "subject.tau")) * only(u.M)
@@ -558,7 +876,7 @@ end
         end
     end
     states = brm_svi_checkpoint.(fits)
-    start = brm_svi_combine(full, states)
+    start = slice_all_carried(full, states)
     @test start.receipt.units.carried == 9
     # The natural effects BRM's NLME view reads at a point, plus the
     # mu-referenced coefficients, at each slice's point and at the start's.
@@ -596,7 +914,7 @@ end
     end
     @test any(fit -> any(M -> length(M) == 2, fit.diagnostics.q.M), fits)
     states = brm_svi_checkpoint.(fits)
-    start = brm_svi_combine(full, states)
+    start = slice_all_carried(full, states)
     @test start.receipt.units.carried == 9
     families = BRM._brm_nlme_families(rk, view)
     intercept = only(findall(==(:mu_Intercept), view.coordinates))
@@ -679,7 +997,7 @@ end
         end
     end
     states = brm_svi_checkpoint.(fits)
-    start = brm_svi_combine(full, states)
+    start = slice_all_carried(full, states)
     # Every unit holds its device's draw, which is no global.
     @test all(u -> count(device_key, u.keys) == 1, values(start.units))
     @test !any(device_key, start.globals.keys)

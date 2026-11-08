@@ -465,6 +465,27 @@ function _brm_svi_location_change(instance, references, i, after, before)
     δ
 end
 
+# Unit i's density at the globals `g` and its draws `z`, the draws' prior included; -Inf
+# where it has no finite value. Carrying keeps a unit's totals under the combined
+# coefficients, which is right while a draw can express that: under a log link, slices
+# whose scales differ 40-fold read -1,367 carried and -189,452 copied. It is wrong where
+# a draw cannot: ODL pins its device blocks' scales at 1e-6, so a location change of 0.001
+# would need a draw of 1,000, and the units' median |z| went from 0.24 to 10 and the
+# start's density to -Inf, which copying them left at -2e5 and an ELBO above a cold fit's
+# by 7 orders of magnitude. No threshold on the draws tells these apart, and the
+# density does, per unit, at two evaluations each. Carrying stands unless it costs more
+# than d/2 for its d draws, which is what a draw from the unit's own factor reads below
+# the factor's mode.
+function _brm_svi_unit_density(t, i, g, z)
+    value = try
+        _brm_svi_unit_term!(zeros(length(g)), zeros(length(z)), t, i, g, z)
+    catch e
+        e isa DomainError || rethrow()
+        -Inf
+    end
+    isfinite(value) ? value : -Inf
+end
+
 # A unit's factor (M, Λ) carried by x_s = T x_c + d. The factor is the prior of
 # the carried draws, N(0, I), times the site of its data; the site moves with
 # the map and the prior is applied once more:
@@ -542,30 +563,191 @@ function _brm_svi_carry_shared(sites, p0, m0, A_c, carry)
     (; μ, precision, clamped, spread, spread_slice)
 end
 
-# ── Joint sites over the globals ─────────────────────────────────────────────
+# ── Sites over the globals ───────────────────────────────────────────────────
 
-# The product of the slices' sites over the globals `ks` (positions into
-# `gkeys`), each slice's site joint over the coordinates its data reaches.
-# Slice s's global factor is N(m_s, Σ_s), Σ_s = diag(s²) + ΒΒᵀ; over its
-# reached coordinates R its site is
+# A slice's factor over its globals is N(m_s, Σ_s), Σ_s = diag(s²) + ΒΒᵀ. Its site
+# over coordinates R is what the slice's data added to the prior's diagonal
+# projection (m₀, P₀), counted once in the product:
 #
-#     S_s = Σ_s[R, R]⁻¹ − P₀[R],    h_s = Σ_s[R, R]⁻¹ m_s[R] − P₀[R] m₀[R],
+#     S_s = Σ_s[R, R]⁻¹ − P₀[R],    h_s = Σ_s[R, R]⁻¹ m_s[R] − P₀[R] m₀[R].
 #
-# with the prior's diagonal projection (m₀, P₀) counted once in the product
-# P = P₀ + Σ_s S_s. Where a slice's factor is wider than the prior in some
-# direction (its site has a negative eigenvalue there), that direction is
-# dropped, `S_s⁺ = V₊ Λ₊ V₊ᵀ`, `h_s⁺ = V₊ V₊ᵀ h_s`: the joint form of a dropped
-# global site, and the same drop for a diagonal Σ_s. Each dropped direction is
-# counted at the coordinate it weighs most. A global that a slice holds inside
-# one of its units enters through that unit factor's marginal, as a site of
-# its own. A ridge in Σ_s (a direction the slice's data leaves to the prior,
-# such as a level that two coefficients share) keeps a small site precision
-# along the ridge, so the product lands where the slices' ridges cross.
-function _brm_svi_joint_product(index, gkeys, ks, p0, m0)
+# Three things separate that from the plain product of these sites, which reads
+# noise and contradiction as information. On ODL's 16 Länder it put 629 of 1,090 means
+# over 3 prior sds out, field coefficients no Land informs up to 25 sds out and a length
+# 51, and the fit from there died at its first draw. Coordinate by coordinate it stayed
+# near the priors but held a rate's scale at 1.67 ± 0.009 where the Länder range from
+# −4.06 to 2.28, and that fit died at iteration 13 (snag svi-combine-join-6aabb60b).
+#
+# Which coordinates. Data can only narrow a prior, Σ_s ≼ P₀⁻¹, and a coordinate at
+# τ = Σ_s[k, k] P₀[k, k] = 1 has no row in S_s at all. An uninformed coordinate's τ
+# scatters around 1 under SVI (ODL: 0.85 to 1.16 from the 1st to the 99th percentile,
+# 46% above 1), so there a rank row is noise, and a coupling read from it pulls with
+# the full precision of whatever it couples to. A coordinate joins a slice's joint
+# site if the slice narrows it beyond that scatter, or if the rank part carries it
+# (a ridge's narrow-prior side: a slice pinning a + b, a's prior 10 times b's, leaves
+# b at τ = 0.99 with all its variance along the ridge). Elsewhere it has a marginal
+# site where τ < 1, and none where τ ≥ 1, as in the coordinate-by-coordinate product.
+# Taking the sub-block of Σ_s marginalizes the other coordinates out of the slice.
+#
+# Which directions. A direction wider than the prior has no site. "Wider" is the
+# generalized eigenproblem of (P₀, Σ_s⁻¹), so with Σ_s = L Lᵀ and Lᵀ P₀ L = Y K Yᵀ the
+# site is S⁺ = W Wᵀ, W = L⁻ᵀ Y₊ (I − K₊)^{1/2}, over the eigenvalues below 1, with
+# h⁺ about m₀ = W d, d = (I − K₊)^{-1/2} Y₊ᵀ L⁻¹ (m_s − m₀). That is invariant under
+# a rescaling of the coordinates, needs no case for a flat prior, and does not let a
+# prior sd of 1e-6 decide the directions, as an eigenbasis of S itself does.
+#
+# How far to trust them. Slices can contradict each other by thousands of their own
+# sds (ODL: 4,953 on one correlation coordinate). The product then resolves that
+# through whatever small cross-covariance it finds: a slice's correlation of 0.2
+# between a coordinate j and one it pins, l, and a gap of 70 slice sds on l, moves j by
+# 14 of its sds. And it sits where the narrowest slices put it, as narrow as they are.
+# So the slices are read as random effects, as in a random-effects meta-analysis:
+# each one's own x_s ~ N(x, T), T diagonal, which adds T to a site's variance,
+# S' = W (I + Wᵀ T W)⁻¹ Wᵀ, h' = W (I + Wᵀ T W)⁻¹ d (about m₀), the plain site at T = 0.
+# The coordinate then sits among the slices, and no narrower than a cold fit starts,
+# for the fit to settle.
+#
+# T_k is the Paule-Mandel estimate over the marginal sites of the slices that pin k by
+# themselves, where Cochran's Q says they contradict, more than SVI's narrow sds explain.
+# Those slices are what keeps ridges: a slice's marginal along its own ridge says little about the coordinate,
+# so two slices pinning a + b and a − b can read as contradicting in their marginals
+# (truth (2, 5) under N(0, 3²) gives `a` means 3.5 and −1.5, each of sd 2.1) though
+# their ridges cross exactly. So a slice pins k if it narrows k beyond the scatter and
+# the rank part does not carry k, or if its marginal is so narrow that no ridge of its
+# own moves k far (τ < `_BRM_SVI_PINNED`). This cannot see a contradiction along a
+# ridge, which a diagonal T could not express anyway, and which no longer reaches
+# coordinates outside the sites; a mean that leaves what supports it falls back.
+#
+# A global that a slice holds inside one of its units enters through that unit
+# factor's marginal, as a site of its own.
+
+# How far an uninformed coordinate's τ scatters around 1 under SVI, and how much of a
+# ridge's variance the rank part holds.
+const _BRM_SVI_SITE_SCATTER = 0.2
+# A marginal this far below the prior's variance, in τ (a tenth of its sd), pins a
+# coordinate whatever carries it.
+const _BRM_SVI_PINNED = 0.01
+# Cochran's Q beyond this quantile of its χ² is a contradiction, not sampling noise, once
+# Q allows for SVI's sds running narrower than the posterior's, down to this fraction of
+# NUTS's: three slices of one truth then read 3 of their sds apart.
+const _BRM_SVI_CONTRADICTION_LEVEL = 0.999
+const _BRM_SVI_SD_NARROWNESS = 0.25
+# A joint mean is supported within this many sds of a counted site or of the prior.
+const _BRM_SVI_SUPPORT_SDS = 3
+# A contradicted coordinate starts no wider than a cold fit's default `global_scale`:
+# its between-slice width is what the slices say about x, not how a first draw should
+# scatter, which on a scale under a log link multiplies through the exponential.
+const _BRM_SVI_CONTRADICTED_SD = 0.1
+
+_brm_svi_in_joint_site(τ, rank_share) = τ < 1 - _BRM_SVI_SITE_SCATTER ||
+    (τ < 1 + _BRM_SVI_SITE_SCATTER && rank_share > 1 - _BRM_SVI_SITE_SCATTER)
+_brm_svi_pins(τ, rank_share) = τ < 1 - _BRM_SVI_SITE_SCATTER &&
+    (rank_share <= 1 - _BRM_SVI_SITE_SCATTER || τ < _BRM_SVI_PINNED)
+
+# A coordinate's marginal site, as its mean and variance: what the slice's marginal
+# (mean, var) added to the prior's (m0, 1/p0). `nothing` where the slice is not narrower.
+function _brm_svi_marginal_site(mean, var, p0, m0)
+    τ = var * p0
+    τ < 1 || return nothing
+    (m0 + (mean - m0) / (1 - τ), var / (1 - τ))
+end
+
+# The between-slice variance T that brings Q(T) = Σ w (c − θ)², w = 1/(v + T), θ the
+# w-weighted mean, to K − 1 (Paule and Mandel 1982); 0 where Q(0) is no contradiction,
+# allowing for sds that narrow.
+function _brm_svi_paule_mandel(sites)
+    K = length(sites)
+    K < 2 && return 0.0
+    c, v = first.(sites), last.(sites)
+    Q(T) = let w = 1 ./ (v .+ T), θ = sum(w .* c) / sum(w)
+        sum(w .* (c .- θ) .^ 2)
+    end
+    Q(0.0) * _BRM_SVI_SD_NARROWNESS^2 <= quantile(Chisq(K - 1), _BRM_SVI_CONTRADICTION_LEVEL) && return 0.0
+    lo, hi = 0.0, (maximum(c) - minimum(c))^2
+    while Q(hi) > K - 1
+        hi *= 2
+    end
+    for _ in 1:80
+        mid = (lo + hi) / 2
+        Q(mid) > K - 1 ? (lo = mid) : (hi = mid)
+    end
+    (lo + hi) / 2
+end
+
+# The between-slice variance of global `key`, from the slices that pin it by themselves.
+function _brm_svi_heterogeneity(index, key, p0, m0)
+    sites = Tuple{Float64,Float64}[]
+    for (s, k) in get(index.globals, key, ())
+        source = index.sources[s]
+        _brm_svi_pins(source.var[k] * p0, sum(abs2, view(source.Β, k, :)) / source.var[k]) &&
+            push!(sites, _brm_svi_marginal_site(source.mean[k], source.var[k], p0, m0))
+    end
+    if _brm_svi_label_key(key)
+        for (s, label, k) in get(index.units, key, ())
+            var = _brm_svi_unit_covariance(index, s, label)[k, k]
+            _brm_svi_pins(var * p0, 0.0) && push!(sites,
+                _brm_svi_marginal_site(index.sources[s].units[label].M[k], var, p0, m0))
+        end
+    end
+    _brm_svi_paule_mandel(sites)
+end
+
+# A slice's joint site over the rows `R`, as (W, d) above; `clamped` counts each dropped
+# direction at the coordinate it weighs most, in that coordinate's marginal sds.
+function _brm_svi_site_factor(R, mean, scale, Β, p0, m0, clamped)
+    Σ = Symmetric(Diagonal(scale .^ 2) + Β * Β')
+    L = cholesky(Σ).L
+    E = eigen(Symmetric(L' * (p0 .* Matrix(L))))
+    keep = E.values .< 1
+    sd = sqrt.(diag(Σ))
+    for i in findall(!, keep)
+        clamped[R[argmax(abs.(L * view(E.vectors, :, i)) ./ sd)]] += 1
+    end
+    V = L' \ E.vectors[:, keep]
+    root = sqrt.(1 .- E.values[keep])
+    (; R, W=V .* root', d=(V' * (mean .- m0)) ./ root)
+end
+
+# A site's precision and natural parameter at between-slice variance `T`.
+function _brm_svi_site_widened(site, T, m0)
+    F = cholesky(Symmetric(I + site.W' * (T[site.R] .* site.W)))
+    G = site.W / F.U
+    S = G * G'
+    (; S, h=site.W * (F \ site.d) .+ S * m0[site.R])
+end
+
+# The rows of `A` whose product mean lies outside everything that supports it: the
+# interval from the lowest to the highest of the counted sites' and the prior's ranges.
+# A flat prior supports anything. A slice wider than the prior has no site, so a
+# runaway slice widens nothing.
+function _brm_svi_joint_outlying(index, gkeys, ks, A, μ, p0, m0)
+    filter(A) do r
+        p0[r] > 0 || return false
+        lo, hi = m0[r] - _BRM_SVI_SUPPORT_SDS / sqrt(p0[r]), m0[r] + _BRM_SVI_SUPPORT_SDS / sqrt(p0[r])
+        for (_, ms, vs) in _brm_svi_marginals(index, gkeys[ks[r]])
+            vs * p0[r] < 1 || continue
+            lo, hi = min(lo, ms - _BRM_SVI_SUPPORT_SDS * sqrt(vs)), max(hi, ms + _BRM_SVI_SUPPORT_SDS * sqrt(vs))
+        end
+        !(lo <= μ[r] <= hi)
+    end
+end
+
+# The product of the slices' sites over the globals `ks` (positions into `gkeys`) at
+# between-slice variances `T`, as described above: dense over the block `A` of rows in
+# joint sites, diagonal elsewhere. `status` is `:joint`, or why the
+# coordinate-by-coordinate product stands instead: `:limit` (more than `limit`
+# coordinates in joint sites), `:indefinite` (not positive definite), `:outlying` (a
+# mean no site and not the prior supports).
+function _brm_svi_joint_product(index, gkeys, ks, p0, m0, T, limit)
     n = length(ks)
     row = Dict(gkeys[k] => r for (r, k) in enumerate(ks))
-    P, η = Matrix{Float64}(Diagonal(p0)), p0 .* m0
     clamped = zeros(Int, n)
+    marginal = [Tuple{Float64,Float64}[] for _ in 1:n]
+    function count_marginal!(r, ms, vs)
+        site = _brm_svi_marginal_site(ms, vs, p0[r], m0[r])
+        site === nothing ? (clamped[r] += 1) : push!(marginal[r], site)
+    end
+    members = NamedTuple[]
     for source in index.sources
         R, J = Int[], Int[]
         for (j, key) in enumerate(source.keys)
@@ -575,40 +757,47 @@ function _brm_svi_joint_product(index, gkeys, ks, p0, m0)
         end
         isempty(R) && continue
         Β = source.Β[J, :]
-        if iszero(Β)
-            for (r, j) in zip(R, J)
-                λ = 1 / source.var[j] - p0[r]
-                λ < 0 && (clamped[r] += 1; continue)
-                P[r, r] += λ
-                η[r] += source.mean[j] / source.var[j] - p0[r] * m0[r]
-            end
-            continue
+        inside = iszero(Β) ? falses(length(R)) : _brm_svi_in_joint_site.(source.var[J] .* p0[R],
+            vec(sum(abs2, Β; dims=2)) ./ source.var[J])
+        for (q, (r, j)) in enumerate(zip(R, J))
+            inside[q] || count_marginal!(r, source.mean[j], source.var[j])
         end
-        Ps = inv(cholesky(Symmetric(Diagonal(source.scale[J] .^ 2) + Β * Β')))
-        S = Symmetric(Ps - Diagonal(p0[R]))
-        h = Ps * source.mean[J] - p0[R] .* m0[R]
-        E = eigen(S)
-        keep = E.values .> 0
-        for i in findall(!, keep)
-            clamped[R[argmax(abs.(view(E.vectors, :, i)))]] += 1
-        end
-        V = E.vectors[:, keep]
-        P[R, R] .+= V * Diagonal(E.values[keep]) * V'
-        η[R] .+= V * (V' * h)
+        any(inside) && push!(members, (; source, R=R[inside], J=J[inside]))
     end
-    # Globals held inside a slice's units: their marginals, one site each.
     for (r, k) in enumerate(ks)
         _brm_svi_label_key(gkeys[k]) || continue
         for (s, label, j) in get(index.units, gkeys[k], ())
-            v = _brm_svi_unit_covariance(index, s, label)[j, j]
-            1 / v - p0[r] < 0 && (clamped[r] += 1; continue)
-            P[r, r] += 1 / v - p0[r]
-            η[r] += index.sources[s].units[label].M[j] / v - p0[r] * m0[r]
+            count_marginal!(r, index.sources[s].units[label].M[j],
+                _brm_svi_unit_covariance(index, s, label)[j, j])
         end
     end
+    A = sort!(unique!(reduce(vcat, (m.R for m in members); init=Int[])))
+    (limit == 0 || length(A) > limit) && return (; status=:limit)
+    position = zeros(Int, n)
+    position[A] .= eachindex(A)
+    diagonal, η = copy(p0), p0 .* m0
+    for (r, sites_r) in enumerate(marginal), (c, v) in sites_r
+        diagonal[r] += 1 / (v + T[r])
+        η[r] += c / (v + T[r])
+    end
+    P = Matrix(Diagonal(diagonal[A]))
+    ηA = η[A]
+    for m in members
+        site = _brm_svi_site_factor(m.R, m.source.mean[m.J], m.source.scale[m.J], m.source.Β[m.J, :],
+            p0[m.R], m0[m.R], clamped)
+        w = _brm_svi_site_widened(site, T, m0)
+        b = position[m.R]
+        P[b, b] .+= w.S
+        ηA[b] .+= w.h
+    end
     F = cholesky(Symmetric(P); check=false)
-    issuccess(F) || return nothing
-    (; μ=F \ η, precision=Matrix(Symmetric(P)), clamped)
+    issuccess(F) || return (; status=:indefinite)
+    μ = η ./ diagonal
+    μ[A] .= F \ ηA
+    diagonal[A] .= diag(P)
+    outlying = _brm_svi_joint_outlying(index, gkeys, ks, A, μ, p0, m0)
+    isempty(outlying) || return (; status=:outlying, outlying)
+    (; status=:joint, μ, diagonal, block=A, precision=Matrix(Symmetric(P)), clamped)
 end
 
 # ── The combined start ───────────────────────────────────────────────────────
@@ -681,7 +870,7 @@ end
 # The product of the sites for every global coordinate of `t`, and the units'
 # factors, from the slices' states.
 function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshiro(1),
-        prior_pairs=16, prior_iterations=150, joint_limit=4096)
+        prior_pairs=16, prior_iterations=150, joint_limit=4096, carry_all=false)
     isempty(states) && throw(ArgumentError("$caller: no slices"))
     m = t.m
     m.view.unit_partition === :subjects || throw(ArgumentError(
@@ -718,18 +907,20 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
         later[global_index[j]] = true
     end
     marginals = Dict{Int,Vector{Tuple{Int,Float64,Float64}}}()
+    heterogeneity = zeros(D)
     for (k, key) in enumerate(gkeys)
         later[k] && continue
         sites = _brm_svi_marginals(index, key)
         isempty(sites) && continue
         marginals[k] = sites
         p0, m0 = prior.precision[k], prior.mean[k]
+        heterogeneity[k] = _brm_svi_heterogeneity(index, key, p0, m0)
         P, η = p0, p0 * m0
         for (_, ms, vs) in sites
-            ps = 1 / vs
-            ps - p0 < 0 && (clamped[k] += 1; continue)
-            P += ps - p0
-            η += ps * ms - p0 * m0
+            site = _brm_svi_marginal_site(ms, vs, p0, m0)
+            site === nothing && (clamped[k] += 1; continue)
+            P += 1 / (last(site) + heterogeneity[k])
+            η += first(site) / (last(site) + heterogeneity[k])
         end
         informed[k] = length(sites)
         μ[k] = η / P
@@ -737,26 +928,29 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
     end
     # Where a slice's global factor has a rank part, its sites are joint: the
     # product above, coordinate by coordinate, is then replaced by the product
-    # of the joint sites, up to `joint_limit` coordinates. `correlated` lists
-    # the blocks of the start's precision that are not diagonal.
+    # of the joint sites, up to `joint_limit` coordinates in them. `correlated`
+    # lists the blocks of the start's precision that are not diagonal.
     correlated = NamedTuple[]
     joined = sort!(collect(keys(marginals)))
+    outlying = falses(D)
     joint = if !any(source -> !iszero(source.Β), sources) || isempty(joined)
         :diagonal
-    elseif length(joined) > joint_limit
-        :limit
     else
         result = _brm_svi_joint_product(index, gkeys, joined, prior.precision[joined],
-            prior.mean[joined])
-        if result === nothing
-            :indefinite
-        else
+            prior.mean[joined], heterogeneity[joined], joint_limit)
+        if result.status === :joint
             μ[joined] .= result.μ
-            σ[joined] .= 1 ./ sqrt.(diag(result.precision))
+            σ[joined] .= 1 ./ sqrt.(result.diagonal)
             clamped[joined] .= result.clamped
-            push!(correlated, (; globals=joined, precision=result.precision))
-            :joint
+            isdiag(result.precision) || push!(correlated,
+                (; globals=joined[result.block], precision=result.precision))
+        elseif result.status === :outlying
+            outlying[joined[result.outlying]] .= true
         end
+        result.status
+    end
+    for k in findall(>(0), heterogeneity)
+        σ[k] = min(σ[k], _BRM_SVI_CONTRADICTED_SD)
     end
     for (k, sites) in marginals
         length(sites) >= 2 || continue
@@ -848,7 +1042,16 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
     end
     units = Dict{Any,NamedTuple}()
     copied, partial, cold = 0, Any[], Any[]
-    carried_units, dropped, mapped = 0, Any[], Any[]
+    carried_units, dropped, mapped, uncarried = 0, Any[], Any[], Any[]
+    # The combined globals, for reading what a unit's density says of its candidates.
+    combined_globals = median[t.globals]
+    let known = findall(!isnan, μ)
+        combined_globals[known] .= μ[known]
+    end
+    _brm_svi_field_joint!(t, let u = copy(median)
+        u[t.globals] .= combined_globals
+        u
+    end)
     for (i, label) in enumerate(m.view.levels)
         ukeys = coordinate_keys[t.units[i]]
         M, Λ, sourced, origin = assembled[i]
@@ -874,10 +1077,17 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
             carry[P] .= true
         end
         if any(carry)
-            M, Λ, how = _brm_svi_carry_unit(M, Λ, T, d, carry)
-            carried_units += 1
-            how === :dropped && push!(dropped, label)
-            how === :mapped && push!(mapped, label)
+            Mc, Λc, how = _brm_svi_carry_unit(M, Λ, T, d, carry)
+            value = carry_all ? 0.0 : _brm_svi_unit_density(t, i, combined_globals, Mc)
+            if carry_all || (isfinite(value) &&
+                    value >= _brm_svi_unit_density(t, i, combined_globals, M) - count(carry) / 2)
+                M, Λ = Mc, Λc
+                carried_units += 1
+                how === :dropped && push!(dropped, label)
+                how === :mapped && push!(mapped, label)
+            else
+                push!(uncarried, label)
+            end
         end
         units[label] = (; keys=ukeys[sourced], M=M[sourced], Λ=Λ[sourced, sourced])
     end
@@ -886,9 +1096,9 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
     names = m.view.coordinates[t.globals]
     receipt = (; slices=length(states),
         globals=(; coordinates=names, informed, clamped, spread, spread_slice,
-            carried=collect(carried_globals), joint,
+            carried=collect(carried_globals), joint, heterogeneity, outlying=collect(outlying),
             prior_mean=prior.mean, prior_sd=[p > 0 ? 1 / sqrt(p) : Inf for p in prior.precision]),
-        units=(; copied, partial, cold, carried=carried_units, dropped, mapped),
+        units=(; copied, partial, cold, carried=carried_units, dropped, mapped, uncarried),
         prior=(; pairs=prior.pairs, iterations=prior.iterations, flat=names[prior.flat]),
         slice_rank=[size(source.Β, 2) for source in sources])
     BRMSVIStart(2, _brm_svi_source_id(m.backend), deepcopy(brm_fitted_state(m.backend)),
@@ -1049,11 +1259,30 @@ position in another binding; where the names differ it keeps the default.
   product lands where the slices' ridges cross, which a coordinate-by-coordinate
   product cannot find. `MeanFieldGlobal` slices hold no correlation, so their
   sites are diagonal; fit the slices with `LowRankGlobal(r)`, `r` at least the
-  number of such directions, where they disagree. A site's negative part (the
-  slice's factor wider than the prior's projection in some direction) is
-  dropped and counted. The joint product is dense in the informed globals
-  (other than shared levels' draws); above `joint_limit` of them the globals
-  combine coordinate by coordinate through their marginal variances. The
+  number of such directions, where they disagree. A joint site holds the
+  coordinates a slice narrows (a marginal variance below 0.8 of the prior
+  projection's) or carries along a ridge (below 1.2, with at least 0.8 of it in the
+  rank part); a rank row on a coordinate the slice leaves at its prior is noise,
+  so there the coordinate has a marginal site where it is narrower than the prior
+  and none otherwise. A site's directions wider than the prior's projection are
+  dropped and counted. The product is dense in the coordinates in joint sites; above
+  `joint_limit` of them (or at 0) the globals combine coordinate by coordinate
+  through their marginal variances, and they do the same if a joint mean leaves
+  the range that supports it: from the lowest to the highest of 3 sds around each
+  counted site's mean and the prior's.
+  Slices can contradict each other by thousands of their own sds, on a coordinate
+  each pins by itself. A plain product would hold that coordinate as narrow as the
+  narrowest slice, where few of them put it, and through small correlations move
+  coordinates no slice informs. So the slices are read as random effects, as in a
+  random-effects meta-analysis, in either product: where Cochran's Q says the
+  slices that pin a coordinate contradict (at 0.999, allowing for sds a quarter of
+  the posterior's, as SVI's can be), their between-slice variance
+  (a Paule-Mandel estimate, `receipt.globals.heterogeneity`) is added to the sites'
+  variance, and the coordinate sits among the slices, starting no narrower than the
+  product says and no wider than a cold fit's default 0.1. A slice pins a
+  coordinate if it narrows it and the rank part does not carry it, or if its
+  marginal variance is below 0.01 of the prior projection's; a ridge's marginals
+  say little about their coordinates, so ridges that cross keep it at 0. The
   start keeps the product's precision (`globals.correlated`) where it is not
   diagonal; its `σ` is the mean-field part, `1/√P_kk`. A `LowRankGlobal(r)`
   fit from it starts its rank part on the `r` directions in which that
@@ -1108,14 +1337,19 @@ sites; for a carried draw, both in the combined hyperparameters), with
 disagree on that coordinate's marginal (along a ridge they may still agree
 jointly); `carried`, whether its sites were carried (a shared level's draw);
 `joint`, how the globals combined (`:joint`, `:diagonal` when no slice has a
-rank part, `:limit` above `joint_limit`, `:indefinite` when the joint product
-was not positive definite and the coordinate-by-coordinate one was used); and
-the prior projection's `prior_mean` and `prior_sd` (`Inf` where flat).
+rank part, `:limit` above `joint_limit`; `:indefinite` when the joint product
+was not positive definite and `:outlying` when one of its means left the range
+above, where the coordinate-by-coordinate one was used); `heterogeneity`, the
+between-slice variance added to that coordinate's sites; `outlying`, which
+coordinates' joint means left that range; and the prior projection's `prior_mean`
+and `prior_sd` (`Inf` where flat).
 `clamped` counts dropped site directions, each at the coordinate it weighs
 most. `receipt.slice_rank` lists each slice's global rank. `receipt.units` counts the units `copied`
 whole and `carried` (some draws carried), and lists the `partial` and `cold`
-(in no slice) labels, the `dropped` ones (a negative site part dropped) and
-the `mapped` ones (carried as a change of variables); `receipt.prior` records
+(in no slice) labels, the `dropped` ones (a negative site part dropped), the
+`mapped` ones (carried as a change of variables) and the `uncarried` ones (whose own
+density at the combined globals is clearly better, by over half a nat per draw, with
+their slice's draws as they were); `receipt.prior` records
 the projection's draws and its `flat` coordinates.
 """
 function brm_svi_combine(x, slices; rng=Random.Xoshiro(1), prior_pairs=16,
