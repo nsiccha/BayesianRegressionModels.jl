@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.244
+## 0.2.246
 
 - New: learned partial centering in minibatch SVI,
   `brm_svi_fit(x; centering=LearnedCentering())` (Gorinova, Moore and Hoffman
@@ -50,6 +50,55 @@ instead of failing at run time.
   there includes the chain through its cells' locations and scales (the sd of a
   `gr(g, by=b)` stratum few units belong to, say). That chain term reaches every
   other global through the batch's one pullback, as before.
+
+## 0.2.245
+
+- Fixed: a `LowRankGlobal(r)` fit's rank part no longer random-walks during
+  exploration. Its rows took constant Adam steps of `lr_global` in absolute
+  units, the same for every coordinate, while their gradient is mostly
+  minibatch noise, so over a long exploration (a large `min_windows`) they grew
+  to several times their coordinates' own sds: the factor came out wider than
+  the posterior, its trimmed ELBO fell, and on a model whose log-scale
+  hyperparameters overflow a few sds out, typical draws reached a non-finite
+  density and the fit stopped with `BRMSVINonfiniteError`. Each Β row now steps
+  in units of its coordinate's scale `exp(ρ_k)` in exploration too, as it
+  already did in polishing. A ridge a slice's data leave to the prior therefore
+  grows over more iterations: fit `LowRankGlobal` slices for `brm_svi_combine`
+  with a longer exploration (a larger `min_windows`) than the default 40 windows.
+- Fixed: a `LowRankGlobal(r)` fit no longer breaks down when its
+  scale-relative steps start (settling, then polishing). They moved μ in units of
+  a square root of the whole global covariance, and the restarted Adam's first
+  steps, each about its step size in every whitened coordinate, added up along
+  the rank part's directions. On a model with 1,094 globals the trimmed ELBO fell
+  by two thirds within a few hundred iterations of the switch (measured on 0.2.241's
+  schedule, where polishing restarted Adam), and draws went non-finite. μ now moves
+  in units of its diagonal scale `exp(ρ_k)` when settling or polishing a low-rank
+  factor.
+- Unchanged: `MeanFieldGlobal` fits, to the last bit, and μ and ρ in a
+  `LowRankGlobal` exploration. A `LowRankGlobal` fit on a fixed seed differs from
+  its first exploration step on. A low-rank optimizer checkpoint written by an
+  earlier version resumes and continues under the new steps.
+
+## 0.2.244
+
+- Added: the NLME paths take a model whose `@plate` cell declares a latent
+  (`x ~ Normal(loc[i], s)`, one draw per cell or per entry) or calls a
+  function-style component, whose sampled locals are per cell. `brm_nlme_view`
+  reads those coordinates as `:shared_latent`, the reading a top-level vector's
+  entries get (`x[1:n] .~ Law`, read at the cell as `x[ids[i]]`): their law stays
+  in the population prior, they enter θ (or are fixed by `shared_point`), and
+  each unit's conditional likelihood reads its own cells' latents. Before,
+  `brm_nlme_view` refused with "coordinate record kind `cell_latent` has no NLME
+  role". `brm_svi_fit` gives a cell component's locals, with their prior
+  factors, to the unit whose cells read them. A dotted cell latent stays a global
+  of the fit for now: ReactiveKernels reports each unit's footprint as reading
+  every cell's latent block (ReactiveKernels snag `rkppl-dotted-pla-1629a747`); the
+  split is exact either way, and the same model with a top-level vector read as
+  `x[ids[i]]` is owned per unit already. A cell latent whose law reads a value the
+  model computes per cell (`x ~ Normal(m[i] .+ loc[i], s)`) is refused by name,
+  since that law's reads cannot be localized yet; the message names the same
+  model written without the read (`d ~ Normal(loc[i], s)`, then `x = m[i] .+ d`)
+  (snag `brm-nlme-view-re-ed98959b`).
 
 ## 0.2.243
 

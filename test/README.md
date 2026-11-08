@@ -1398,6 +1398,19 @@ A structured local factor's own Adam (above `unit_dense_limit`) is bounded the
 same way, and a work-weighted fit (`unit_sampling=:work`), whose bound widens by
 the batch's largest unit weight, keeps its globals moving on the same model.
 
+`nlme_svi_rank_step.jl` checks `LowRankGlobal`'s exploration step
+(`_brm_svi_exploration_global_step!`): two coordinates with scales 1 and 0.01
+given the same gradient on their rows of Β move them 1 : 0.01, μ and ρ step
+exactly as `_brm_svi_step!` steps them, and with no rank part the step is
+`_brm_svi_step!` to the last bit. Its polishing step
+(`_brm_svi_polish_global_step!`) moves μ 1 : 0.01 too where a rank column couples
+the two coordinates (the whitened step moves the second along the column, more
+than ten times as far), and with no rank part it is
+`_brm_svi_whitened_global_step!` to the last bit. On `svi_gauss_model` (200 subjects, batches of
+4), 15,000 iterations of exploration leave every global's sd below 1.2 times the
+NUTS sd and its mean within one NUTS sd; with the absolute step (0.2.242 and earlier) one
+sd read 1.53 times (2.30, 2.39 and 1.00 on seeds 2-4, against 0.66-0.86).
+
 `nlme_svi_authored_factors.jl` checks the public RKPPL authored-factor API
 and production SVI ownership. On a
 six-subject model whose coefficient pair `z[2i-1], z[2i]` is read only by
@@ -1429,6 +1442,17 @@ The dormant scalar/vector branch's ordinary Reverse needs Enzyme dogfood from
 `cecb571a`); earlier pins raise `IllegalTypeAnalysisException` there.
 `nlme_svi_ownership_algebra.jl` isolates atomic-block and directed-prior
 closure, including fixed coordinates and factors that own no coordinates.
+
+`nlme_cell_latents.jl` checks `@plate` cell latents (vector and scalar) and a
+component called in a cell on the NLME paths: their coordinates are
+`:shared_latent` in θ, each unit's conditional likelihood is the likelihood
+query's share and moves only with its own cell's latents, `shared_point` fixes
+them, and the SVI split equals the full RK sampler's density and native Reverse
+gradient. SVI gives a cell component's locals to their unit; a dotted cell
+latent's per-unit ownership is a `@test_broken` until ReactiveKernels reports
+its reads per cell (snag `rkppl-dotted-pla-1629a747`). A latent whose law reads
+a per-cell model value is refused naming its rewrite, which builds. Run it in
+the test environment; about 8 minutes on one CPU.
 
 `nlme_svi_atomic_partition.jl` checks a two-margin correlated soil hierarchy
 with no trajectory parent. Its local atomic Cholesky parameter has one
