@@ -1370,7 +1370,12 @@ These three arithmetic scripts need only Julia's standard libraries.
 `nlme_svi_units.jl` checks the bounded local Gaussian operators, exact
 reparameterized gradients, linear allocation and checkpoint growth at fixed
 rank, covariance preservation under coordinate reordering, and an independent
-correlated Gaussian fitting oracle. It also needs only standard libraries.
+correlated Gaussian fitting oracle. It also checks a structured unit's own steps:
+the default does not follow `unit_curvature`, controls saved before them keep what
+they ran with, on an exact Gaussian with tight coordinates the default converges
+where step 1 leaves the target (the control), and on one with low-rank covariance
+the rank part at its default rate beats the best diagonal, where at the unit's whole
+step it loses to it. It also needs only standard libraries.
 
 `nlme_svi_unit_curvature.jl` checks a dense unit's step on an orthogonal design
 (`unit_curvature = :orthogonal`): the design is d pairs at radius √d

@@ -102,14 +102,14 @@ function _brm_svi_lowrank_gradient(f, gz, gd, ε)
     vcat(gz, score .* h.s .* e, vec(score * η'))
 end
 
-function _brm_svi_lowrank_step!(mean, f, opt, gz, gd, ε, β)
+function _brm_svi_lowrank_step!(mean, f, opt, gz, gd, ε, β; rank=1.0)
     q = (; μ=mean, f.ρ, f.Β)
     gradient = _brm_svi_lowrank_gradient(f, gz, gd, ε)
     all(isfinite, gradient) || error("brm_svi_fit: nonfinite low-rank unit gradient")
     old = _brm_svi_global_vector(q)
     x = copy(old)
     # A unit's own Adam steps only when the unit is drawn, so its bound needs no √w.
-    _brm_svi_whitened_global_step!(opt, q, x, gradient, β; clip=_BRM_SVI_GLOBAL_CLIP)
+    _brm_svi_whitened_global_step!(opt, q, x, gradient, β; clip=_BRM_SVI_GLOBAL_CLIP, rank)
     Δ = x - old
     d = length(mean)
     h = _brm_svi_global_geometry(f)
@@ -127,8 +127,8 @@ function _brm_svi_lowrank_step!(mean, f, opt, gz, gd, ε, β)
     nothing
 end
 
-function _brm_svi_unit_step!(Λ::_BRMSVIUnitPrecision, q, i, gz, gd, ε, β)
-    _brm_svi_lowrank_step!(q.M[i], Λ.factor, q.unit_opt[i], gz, gd, ε, β)
+function _brm_svi_unit_step!(Λ::_BRMSVIUnitPrecision, q, i, gz, gd, ε, β; rank=1.0)
+    _brm_svi_lowrank_step!(q.M[i], Λ.factor, q.unit_opt[i], gz, gd, ε, β; rank)
     q
 end
 
