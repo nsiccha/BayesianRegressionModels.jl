@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.253
+## 0.2.256
 
 - Added: `brm_nlme_view`, and so `brm_nlme_model`, `brm_nlme_fit`,
   `brm_two_stage_fit`, `brm_svi_fit` and `brm_nlme_joint_map`, reads a subject
@@ -47,6 +47,101 @@ instead of failing at run time.
   correlation's factor already was. Another value is the same emitted and lowered
   program, on subject blocks and on `shared_groups` blocks. A frozen replay with
   another value is refused as another fit.
+
+## 0.2.255
+
+- Fixed: under `unit_curvature = :orthogonal`, a dense unit's step takes the
+  positive part of its curvature estimate. On a saturating or redescending term the
+  estimate is mostly noise with nearly symmetric eigenvalues until the unit's stiff
+  directions are resolved: the trust region shortened the step from their size, and
+  the negative part halved the precision along a new direction each visit. A unit's
+  factor could become far wider than its target in a direction, and its stiff
+  directions came slowly. A saturating toy whose precision off its stiff subspace is
+  exactly 1 fell to 3e-4 and stayed there, with a top eigenvalue of 75 against the
+  target's 1.65e8; now it stays at 1 and reaches 1.65e8. On a downstream target of 67
+  stiff units of up to 17 coordinates, a unit's smallest precision eigenvalue at
+  update 60 was 0.013 where the estimate read 223 along that direction on average;
+  now it is 0.6, and the largest eigenvalue at update 100 is 26,670 against 3,045.
+  The estimate is exact on a quadratic term and has no negative part there, so such
+  a unit's step is unchanged to the last bit. A direction whose curvature really lies
+  below the factor's still widens, by up to half per visit. Against Gaussian optima
+  known exactly, at 17 coordinates, no visit's estimate had a negative eigenvalue on
+  Student-t (3 and 5 degrees of freedom), logistic or Poisson terms, so those steps
+  are unchanged; a Cauchy term, negative on 45% of visits, moved the rms sd ratio
+  from 0.951 to 0.950. The step adds one eigendecomposition per visit beside its 2d
+  unit gradients. A fit with dense units whose estimate goes indefinite differs from
+  earlier versions from that visit on. A checkpoint written before this resumes at
+  the step it ran with.
+## 0.2.254
+
+- Fixed: `brm_svi_combine` no longer turns slices that contradict each other into a
+  start the full fit cannot run from. The joint product put means far outside anything
+  the slices or the prior support, and both products held a contradicted coordinate as
+  narrow as the narrowest slice, where few slices put it. Ridges still cross where they
+  did, and slices that do not contradict each other and hold no rank part give the
+  start they gave.
+  - A coordinate's sites widen by the slices' between-slice variance, as in a
+    random-effects meta-analysis, in the joint and the coordinate-by-coordinate product
+    alike, so the coordinate sits among the slices, and it starts no wider than a cold
+    fit's default 0.1. It is a Paule-Mandel
+    estimate over the slices that pin the coordinate by themselves, where Cochran's Q
+    says they contradict (at 0.999, allowing for sds a quarter of the posterior's, as
+    SVI's can be), and `receipt.globals.heterogeneity` reports it. A
+    slice pins a coordinate if it narrows it (marginal variance below 0.8 of the prior
+    projection's) and the rank part does not carry it (below 0.8 of that variance), or
+    if its marginal variance is below 0.01 of the prior projection's.
+  - A slice's joint site holds only the coordinates it narrows, or carries along a
+    ridge (below 1.2 of the prior's variance, with at least 0.8 of it in the rank part).
+    Other coordinates have a marginal site where they are narrower than the prior and
+    none otherwise.
+  - A joint mean outside the range that supports it (from the lowest to the highest
+    of 3 sds around each counted site's mean and the prior's) makes the
+    coordinate-by-coordinate product stand, with `receipt.globals.joint === :outlying`
+    and `receipt.globals.outlying` marking the coordinates.
+  - A unit starts from its carried draws unless its own density at the combined globals
+    is clearly better (by over half a nat per draw) with its slice's draws as they
+    were, and `receipt.units.uncarried` lists those. Carrying keeps a unit's totals, which
+    can take draws no prior allows: a block whose scale a model pins at 1e-6 would need
+    a draw of 1,000 for a location change of 0.001.
+- Changed: `globals.correlated` holds only the coordinates in joint sites, so
+  `joint_limit` now bounds those and not every informed global, and `joint_limit=0`
+  still asks for the coordinate-by-coordinate product. A site's directions wider than
+  the prior are now those of the prior-relative eigenproblem, which a rescaling of the
+  coordinates leaves alone, and `clamped` follows them and the marginal sites.
+
+## 0.2.253
+
+- Fixed: `brm_svi_fit`'s structured units (above `unit_dense_limit`) default to
+  `unit_step = 0.1` under either `unit_curvature`. BRM 0.2.248 through 0.2.252 gave them
+  the dense units' default of 1 under `:orthogonal`, though the entry for 0.2.248
+  called them unchanged: their step is Adam's step size, not a natural-gradient step
+  to take whole. A step you pass still applies to both families.
+- Changed: a structured unit's rank part steps a tenth as far as its mean and log
+  scales, the rate of the global factor's rows at the default steps. At the unit's
+  whole step Β's rows walk past the marginal the target wants, ρ falls below them
+  to make up for it, and the rows' own step, in units of exp(ρ), falls with it, so
+  they cannot come back. A rank-8 factor then ended below the diagonal it contains.
+- Measured on one station's unit of 295-304 coordinates under a known population
+  law, a whole series under a Julia leaf, three stations, ELBO of the returned factor
+  over 1,000 draws. Before, rank 8 stopped with `BRMSVINonfiniteError` at iterations
+  569, 802 and 2,128 on draws 571, 599 and 2,683 prior sds out, and mean-field
+  converged. At `unit_step = 0.1` alone rank 8 converged at 343, -204 and 425 with
+  marginal sds of 8, 31 and 4 under an N(0, 1) prior, against mean-field's 481, 455
+  and 470. With both changes rank 8 reads 486, 466 and 476 with every sd near 1. On
+  exact Gaussian units with a low-rank covariance the rank part at this rate beat
+  the best diagonal in all 7 settings measured (500 to 8,000 visits per unit), and
+  at the whole step lost to it in 6 of them.
+- Changed: a fit of a model with a structured unit differs from its first visit of
+  such a unit, its rank part from then on in every version, its mean and scales
+  against 0.2.248 through 0.2.252. Mean-field fits read higher ELBOs too (one station's
+  trimmed window 62-68 against 20-34). Dense units and checkpoints are unchanged: a
+  checkpoint written before this version resumes at the steps it ran with.
+- Added: `BRMSVINonfiniteError`'s `terms` carry the evaluated points. Each term has
+  `points`, packed as a fit's `draws` (`plus` and `minus` for a unit, `draw` for the
+  global term), so `LogDensityProblems.logdensity_and_gradient(problem, term.points.minus)`
+  replays the evaluation in the model, and `largest`, its largest coordinate as
+  `(; coordinate, value)`, which the message prints. Under `centering=LearnedCentering()`
+  the points are the packed coordinates, not the factor's learned ones.
 
 ## 0.2.252
 

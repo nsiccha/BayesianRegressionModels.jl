@@ -1223,6 +1223,23 @@ component per subject: its value matches a Laplace marginal computed from the
 whole model's density, and its gradient matches central differences. It runs in
 the test environment above.
 
+`rk_plate_invariant_output.jl` checks an RKBRMI `@plate` output whose cell reads
+no per-index value, `decay[g] = exp(log_a)`, over three cells (BRM snag
+`retained-pointwi-fa27bc37`). At model scope `decay`, `sum(decay)` and
+`length(decay)` see every cell, and the likelihood matches `Distributions.logpdf`.
+A second plate reads `decay[g]` per subject. Its pointwise densities match the
+same oracle. Its whole-model density and native Reverse gradient match a
+model-scope `fill` of the same values and central differences. `brm_nlme_model`
+gives each subject's likelihood and η gradient. A one-cell binding is the
+positive control. ReactiveKernelsPPL fixed the shape in 0.1.129 (RK `b6196f114`,
+ReactiveKernels snag `plate-output-of-c4a0ca87`). On older RKPPL, including this
+environment's RK pin `7b53c65f` (RKPPL 0.1.114), the output is one number. There
+the three-cell checks are `broken`: a later `decay[2]` raises a `BoundsError`,
+and `sum` and `length` return one cell's value. The one-cell count, total and
+likelihood pass on both. Its `decay` is `broken` there too, because one number is
+not a one-entry array. It accepts
+testset substring filters; about 5 minutes warm on gordito.
+
 `nlme_nested.jl` uses a public synthetic model with interleaved observations
 and 1, 2, and 3 nested units per subject. It checks explicit ownership,
 compact η likelihoods and gradients against an independent Normal oracle,
@@ -1370,7 +1387,12 @@ These three arithmetic scripts need only Julia's standard libraries.
 `nlme_svi_units.jl` checks the bounded local Gaussian operators, exact
 reparameterized gradients, linear allocation and checkpoint growth at fixed
 rank, covariance preservation under coordinate reordering, and an independent
-correlated Gaussian fitting oracle. It also needs only standard libraries.
+correlated Gaussian fitting oracle. It also checks a structured unit's own steps:
+the default does not follow `unit_curvature`, controls saved before them keep what
+they ran with, on an exact Gaussian with tight coordinates the default converges
+where step 1 leaves the target (the control), and on one with low-rank covariance
+the rank part at its default rate beats the best diagonal, where at the unit's whole
+step it loses to it. It also needs only standard libraries.
 
 `nlme_svi_unit_curvature.jl` checks a dense unit's step on an orthogonal design
 (`unit_curvature = :orthogonal`): the design is d pairs at radius √d
@@ -1379,7 +1401,13 @@ curvature and its gradient and value the exact expectations; the full step reach
 such a unit's optimum within the trust regions; and, through the production run
 loop, a prior scale that reads 32 units of 48 coordinates reaches its profile
 optimum with the units' factors at theirs, where the single pair (`:pair`, the
-control) leaves both off. Controls without `unit_curvature` keep the pair. About a
+control) leaves both off. Controls without `unit_curvature` keep the pair. The step
+takes the estimate's positive part: on saturating rows, whose target has precision
+exactly 1 off their span, the whole estimate (the control) has nearly symmetric
+eigenvalues and falls below 0.01 where the positive part stays at 1 and reaches the
+rows' stiffness; through the production loop, controls without `unit_positive_part`
+keep the whole estimate, so an old checkpoint resumes as it ran. A direction whose
+curvature lies below the factor's still widens, exactly on a Gaussian. About a
 minute; standard libraries only.
 
 `nlme_svi.jl` checks minibatch stochastic variational inference
@@ -1500,7 +1528,11 @@ units matched by label and carried to the combined hyperparameters (an exact
 one-margin oracle with a mu-referenced intercept, and totals kept for
 correlated, stratified and unit-held shared blocks, read back through the NLME
 view), a global held inside two slices' units, frozen-replay slices, a low-rank
-slice, the refusals, `brm_start` effects addressed by level on a frozen replay
+slice, a joint site's factor and its widening against closed forms, the between-slice
+variance, slices that contradict each other in either product (the plain product as
+the positive control), ridges that cross under priors they sit far from or of very
+different widths and from fits that left them too narrow, the fallback when a joint
+mean leaves what supports it, the refusals, `brm_start` effects addressed by level on a frozen replay
 that lacks some levels, slices whose scales differ 40-fold under a log link
 (carried, the first window beats a cold start and the old copy), and that real
 slice fits start the full fit near its optimum. About 15 minutes with loading

@@ -45,6 +45,35 @@ function _brm_svi_unit_term!(gg, gz, t::ScaledUnits, i, g, z, plan, work)
     gz .= .-Cz ./ s2 .+ r
     -quad / (2s2) - d * g[1] - sum(abs2, r) / 2
 end
+
+# Units whose terms saturate: a unit prior on every coordinate, plus rows
+# -(A tanh(aⱼ'z / s))² / 2 whose directions aⱼ span a subspace, so a pair's gradient
+# difference is not proportional to its draw. The rows are flat away from z = 0, and
+# stiff (A / s)² at it: outside span(a) the target's precision is exactly 1.
+struct SaturatingUnits
+    globals::Vector{Int}
+    units::Vector{Vector{Int}}
+    plan::NamedTuple
+    plans::Vector{NamedTuple}
+    work::Vector{Nothing}
+    a::Matrix{Float64}
+    s::Float64
+    A::Float64
+end
+function SaturatingUnits(a, s, A, N)
+    d = size(a, 1)
+    units = [collect(1+(i-1)*d+1:1+i*d) for i in 1:N]
+    plan = (; footprints=[vcat(1, u) for u in units])
+    SaturatingUnits([1], units, plan, [plan], [nothing], a, s, A)
+end
+_brm_svi_global_term(::SaturatingUnits, g) = (-g[1]^2 / 2, [-g[1]])
+function _brm_svi_unit_term!(gg, gz, t::SaturatingUnits, i, g, z, plan, work)
+    r = t.a' * z ./ t.s
+    h = t.A .* tanh.(r)
+    fill!(gg, 0.0)
+    gz .= .-z .- t.a * (h .* (t.A / t.s) .* sech.(r) .^ 2)
+    -sum(abs2, z) / 2 - sum(abs2, h) / 2
+end
 _brm_throw_if_interrupted(::Nothing) = nothing
 _brm_update_progress!(::Nothing, message) = nothing
 end
@@ -182,6 +211,98 @@ end
     # and the scale off, so this testset fails on that step.
     @test p.kl > 10
     @test abs(p.s - s_opt) > 0.2
+end
+
+# On a saturating term the design's estimate is mostly noise with nearly symmetric
+# eigenvalues until the stiff directions are resolved. The unit's precision off
+# span(a) is exactly 1. Measured over 8 seeds, 80 visits: the whole estimate falls
+# to 3e-4 and stays there with a top eigenvalue of 75; the positive part never
+# leaves 1 and reaches the rows' stiffness, 1.65e8.
+function saturating_rows(d, stiff, rows)
+    G = randn(Xoshiro(8), stiff, rows)
+    Matrix(qr(randn(Xoshiro(7), d, stiff)).Q) * (G ./ sqrt.(sum(abs2, G; dims=1)))
+end
+function saturating_visits(t, positive; visits=80, seed=1)
+    rng, d = Xoshiro(seed), size(t.a, 1)
+    q = UC._brm_svi_params(t, [0.0], UC.MeanFieldGlobal(); global_scale=1.0, unit_scale=1.0)
+    lowest, ratios = Inf, Float64[]
+    for visit in 1:visits
+        E = UC._brm_svi_unit_design(rng, d)
+        r = UC._brm_svi_unit_design_terms(t, q, 1, [0.0], E, t.plan, nothing, 1:1, 1)
+        ev = eigvals(Symmetric((r.S .+ r.S') ./ 2))
+        visit <= 10 && push!(ratios, abs(first(ev)) / last(ev))
+        UC._brm_svi_unit_step_full!(q, 1, r.gz, r.S, 1.0; positive)
+        lowest = min(lowest, eigvals(Symmetric(q.Λ[1]))[1])
+    end
+    ev = eigvals(Symmetric(q.Λ[1]))
+    (; lowest, smallest=first(ev), largest=last(ev), ratio=median(ratios), mean=norm(q.M[1]))
+end
+
+@testset "a saturating term's noise does not collapse a dense unit's factor" begin
+    t = UC.SaturatingUnits(saturating_rows(17, 5, 64), 0.01, 30.0, 1)
+    for seed in 1:4
+        whole = saturating_visits(t, false; seed)
+        positive = saturating_visits(t, true; seed)
+        # Control: the whole estimate shows the defect, so this testset fails on that
+        # step. Its eigenvalues are nearly symmetric, which is the mechanism.
+        @test whole.ratio > 0.8
+        @test whole.lowest < 0.01
+        @test whole.largest < 1e3
+        # The target's precision off span(a) is 1, and the positive part keeps it.
+        @test positive.lowest > 0.9
+        @test positive.smallest ≈ 1 atol=0.01
+        @test positive.largest > 1e7
+        @test positive.mean < 1e-6
+    end
+end
+
+@testset "the production step takes the positive part, and old controls keep the whole estimate" begin
+    d, N = 17, 8
+    t = UC.SaturatingUnits(saturating_rows(d, 5, 64), 0.01, 30.0, N)
+    kwargs = (; batch_size=N, max_iterations=60, lr_global=0.01, unit_step=1.0, polish_lr=0.05,
+        window=nothing, patience=10, min_windows=40, polish_windows=20, unit_curvature=:orthogonal)
+    smallest(q) = minimum(i -> eigvals(Symmetric(q.Λ[i]))[1], 1:N)
+    fresh() = UC._brm_svi_params(t, [0.0], UC.MeanFieldGlobal(); global_scale=0.1, unit_scale=1.0)
+    @test smallest(UC.arithmetic_fit(Xoshiro(15), t, fresh(); kwargs...).q) > 0.9
+    # A checkpoint written before the control has no field, so it resumes the run it was.
+    c = UC._brm_svi_controls(N; kwargs...)
+    @test UC._brm_svi_unit_positive_part(c) === true
+    old = NamedTuple{filter(!=(:unit_positive_part), keys(c))}(c)
+    @test UC._brm_svi_unit_positive_part(old) === false
+    run = UC._brm_svi_run(Xoshiro(15), fresh(), old, t)
+    UC._brm_svi_fit!(run, t, old)
+    @test smallest(run.q) < 0.1
+end
+
+@testset "a direction whose curvature lies below the factor's still widens" begin
+    d = 17
+    # Exact on a Gaussian, beside a direction a million times stiffer than the factor.
+    h = ones(d); h[1], h[2] = 0.01, 1e6
+    q = (; M=[zeros(d)], U=[Matrix(1.0I, d, d)], Λ=[Matrix(1.0I, d, d)])
+    rng = Xoshiro(16)
+    for visit in 1:40
+        E = UC._brm_svi_unit_design(rng, d)
+        W = Diagonal(h) * (LowerTriangular(q.U[1])' \ E)
+        W = LowerTriangular(q.U[1]) \ W
+        UC._brm_svi_unit_step_full!(q, 1, zeros(d), (W * E' .+ E * W') ./ 2d, 1.0)
+    end
+    @test diag(q.Λ[1]) ≈ h rtol=1e-6
+    # A negative estimate widens at the bound and no faster.
+    q = (; M=[zeros(3)], U=[Matrix(1.0I, 3, 3)], Λ=[Matrix(1.0I, 3, 3)])
+    UC._brm_svi_unit_step_full!(q, 1, zeros(3), Diagonal([-5.0, 1.0, 1.0]), 1.0)
+    @test q.Λ[1] ≈ Diagonal([0.5, 1.0, 1.0])
+end
+
+@testset "a matrix's positive part" begin
+    S = Symmetric([2.0 0.5; 0.5 1.0])
+    # No negative eigenvalue: the matrix itself, so a quadratic unit's step is unchanged.
+    @test UC._brm_svi_positive_part(S) === S
+    F = eigen(Symmetric([1.0 2.0; 2.0 1.0]))
+    P = UC._brm_svi_positive_part(Symmetric([1.0 2.0; 2.0 1.0]))
+    @test P ≈ F.vectors[:, 2] * F.values[2] * F.vectors[:, 2]'
+    @test minimum(eigvals(P)) >= -1e-12
+    q = (; M=[zeros(2)], U=[Matrix(1.0I, 2, 2)], Λ=[Matrix(1.0I, 2, 2)])
+    @test_throws ArgumentError UC._brm_svi_unit_step_full!(q, 1, zeros(2), [NaN 0.0; 0.0 1.0], 1.0)
 end
 
 @testset "controls without unit_curvature keep the single pair" begin
