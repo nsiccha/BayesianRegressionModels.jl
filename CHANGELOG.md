@@ -12,6 +12,26 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.259
+
+- Changed: `brm_svi_fit` gives a `@plate` cell latent's entries
+  (`x ~ Normal(loc[i], s)` in a cell, one draw per cell or per entry) to the
+  unit whose cells read them, as it already did a cell component's locals.
+  Before, every unit's footprint read every cell's latent block, so the latents
+  were globals of the fit (exact, but not per unit). This needs
+  ReactiveKernelsPPL 0.1.127 (ReactiveKernels snags `rkppl-dotted-pla-1629a747`
+  and `dotted-cell-late-3789b8ea`) and, beside a `gmrf(...; neighbors=)` field,
+  ReactiveKernels 0.1.120 (snag `derivativerule-r-0d7e245c`), so the floors rise
+  to ReactiveKernels 0.1.120 and ReactiveKernelsPPL 0.1.128. On Julia 1.10 these
+  need Enzyme dogfood `bcefef27` or later, without which `brm_svi_fit` can abort
+  the process (`LLVM ERROR: function failed verification`, Enzyme snag
+  `native-reverse-p-1a4ac06d`); the test environment pins dogfood `9b573c63`,
+  whose libEnzyme `48fe7ef5` is built for Linux x86_64 only. A cell latent under a transformed law
+  (`LogNormal` and other positive or bounded families) still stays global, since
+  ReactiveKernels reads its constrained block whole. A cell latent whose law
+  reads a value the model computes per cell is still refused by name with its
+  rewrite.
+
 ## 0.2.258
 
 - New: `brm_svi_fit(x; centering=LearnedCentering())` also centres the weights of

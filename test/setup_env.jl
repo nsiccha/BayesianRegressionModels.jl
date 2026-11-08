@@ -374,7 +374,18 @@ const PINS = [
     # whole-vector-res-64373f39). From RK 0.1.96 a compact cell's
     # `z_rows * transpose(tau .* L)` is strided and reaches BLAS `gemm!`, so its
     # Laplace HVP needs Enzyme 0cdbe188 below (RK snag brm-sorted-cell-e201f8d9).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "7b53c65fa2c09feda513eefdb9e04fb463787820"),
+    # 29711427 (RK main, RK 0.1.120 / RKPPL 0.1.128) reads a dotted `@plate` cell
+    # latent's block through a bound table of ranges (cd58495a, RKPPL 0.1.126, RK
+    # snag rkppl-dotted-pla-1629a747) and maps a typed view of it to its parent's
+    # positions when the cell also reads a computed location (d6be1927, RKPPL
+    # 0.1.127, RK snag dotted-cell-late-3789b8ea), so a cell's footprint is its own
+    # block and `brm_svi_fit` gives the latent to its unit. A rule's data structure
+    # reaches the rule `Const` in a planned body of 128 or more wrapped statements
+    # (RK snag derivativerule-r-0d7e245c), which a gmrf field's prior needs once
+    # such a latent's unit takes the authored-prior route. It also carries the
+    # guarded-fill fix 78b564bd (RK 0.1.109) that `nlme_completion_laws.jl` needs,
+    # and the RKPPL threshold-count and Dirichlet-length fixes 9b90eeac and d916b305.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "297114272297b93a9370d61947ea160d20ba428d"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
@@ -452,7 +463,16 @@ const PINS = [
     # matrix product that reaches BLAS `gemm!`, `syrk!` or `symm!` (Enzyme snag
     # forward-over-rev-dd37e57b). A compact cell's Laplace HVP reaches `gemm!`
     # from RK 0.1.96 on. libEnzyme 3a825a54 is built for Linux x86_64 only.
-    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "0cdbe1888f153736d7ecef0fcf007dfdb88079c8"),  # dogfood
+    # 9b573c63 / libEnzyme 48fe7ef5 contains 0cdbe188 and carries 979b679a, the
+    # fix for an LLVM verifier abort on Julia 1.10 when `view` of a `SubArray` of
+    # a custom array held on the stack reaches `jl_object_id_`, which RK's
+    # `_partition_array_call` meets in `brm_svi_fit` from RK cd58495a on (Enzyme
+    # snag native-reverse-p-1a4ac06d); 42a2ee9a, a wrong `ReverseWithPrimal` value
+    # when the forward pass skips a call (snag enzyme-autodiff-e13097c4); and
+    # 48fe7ef5, a Reverse gradient lost through a fresh array a call fills, as
+    # RKPPL's MvNormal slice priors do (snag rkppl-mvnormal-s-1df3d9b3). Linux
+    # x86_64 only, like 3a825a54.
+    ("Enzyme",            "https://github.com/nsiccha/Enzyme.jl.git",            "9b573c631bbaae8bed2df3104244563f1d93efea"),  # dogfood
 ]
 
 # Derive every host mirror from the pins so newly added dependencies also
