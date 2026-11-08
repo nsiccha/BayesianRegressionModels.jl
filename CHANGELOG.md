@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.246
+
+- Changed: `brm_svi_fit` gives a `@plate` cell latent's entries
+  (`x ~ Normal(loc[i], s)` in a cell, one draw per cell or per entry) to the
+  unit whose cells read them, as it already did a cell component's locals.
+  Before, every unit's footprint read every cell's latent block, so the latents
+  were globals of the fit (exact, but not per unit). This needs
+  ReactiveKernelsPPL 0.1.127 (ReactiveKernels snags `rkppl-dotted-pla-1629a747`
+  and `dotted-cell-late-3789b8ea`), so the floors rise to ReactiveKernels 0.1.115
+  and ReactiveKernelsPPL 0.1.127. A cell latent under a transformed law
+  (`LogNormal` and other positive or bounded families) still stays global, since
+  ReactiveKernels reads its constrained block whole. A cell latent whose law
+  reads a value the model computes per cell is still refused by name with its
+  rewrite.
+
 ## 0.2.245
 
 - Fixed: a `LowRankGlobal(r)` fit's rank part no longer random-walks during

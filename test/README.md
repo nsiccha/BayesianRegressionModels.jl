@@ -1448,11 +1448,14 @@ component called in a cell on the NLME paths: their coordinates are
 `:shared_latent` in θ, each unit's conditional likelihood is the likelihood
 query's share and moves only with its own cell's latents, `shared_point` fixes
 them, and the SVI split equals the full RK sampler's density and native Reverse
-gradient. SVI gives a cell component's locals to their unit; a dotted cell
-latent's per-unit ownership is a `@test_broken` until ReactiveKernels reports
-its reads per cell (snag `rkppl-dotted-pla-1629a747`). A latent whose law reads
-a per-cell model value is refused naming its rewrite, which builds. Run it in
-the test environment; about 8 minutes on one CPU.
+gradient. SVI gives a cell component's locals and a dotted cell latent's
+entries to their unit (the latter from RKPPL 0.1.127, RK snags
+`rkppl-dotted-pla-1629a747` and `dotted-cell-late-3789b8ea`); a `LogNormal`
+cell latent's per-unit ownership is a `@test_broken` until ReactiveKernels reads
+a transformed block per cell (RK todo `0sr6ilc`). A latent
+whose law reads a per-cell model value is refused naming its rewrite, which
+builds (RK todo `1olsblw`). Run it in the test environment; about 8 minutes on
+one CPU.
 
 `nlme_svi_atomic_partition.jl` checks a two-margin correlated soil hierarchy
 with no trajectory parent. Its local atomic Cholesky parameter has one

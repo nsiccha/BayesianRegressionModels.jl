@@ -512,9 +512,10 @@ of a component called in a cell, are `:shared_latent` coordinates, read as the
 entries of a top-level vector `x[1:n] .~ Law` are: their authored law stays in
 the population prior, they enter θ (or are fixed by `shared_point`), and
 `brm_svi_fit` gives each cell's coordinates to the unit whose cells read them
-(a dotted latent's stay global until ReactiveKernels reports its reads per cell,
-snag rkppl-dotted-pla-1629a747). A cell latent whose law reads a value the model
-computes per cell (`m[i]`) is refused by name with the same model's rewrite.
+(a latent under a transformed law, such as `LogNormal`, stays global until
+ReactiveKernels reads its constrained block per cell). A cell latent whose law
+reads a value the model computes per cell (`m[i]`) is refused by name with the
+same model's rewrite.
 A declaration of zero
 length, such as the coefficient block of a single-level treatment-coded factor,
 owns no coordinate and is not a refusal. See [`BRMNLMEView`](@ref).
@@ -582,13 +583,13 @@ function _brm_nlme_unit_reading_priors(backend::RKBRMI, view)
         # RKPPL flattens a dotted cell latent's per-cell law arguments with a
         # helper that has no row form, so a law reading a value the model
         # computes per cell cannot be evaluated one cell at a time, and the
-        # factors' reads are unknown (ReactiveKernels snag
-        # rkppl-dotted-pla-1629a747).
+        # factors' reads are unknown (ReactiveKernels todo 1olsblw; RKPPL
+        # 0.1.126 localized the cell's read of the latent, not its law).
         _brm_nlme_error("brm_nlme_view: the law of the `@plate` cell latent " *
             join(("`$name`" for name in latents), ", ") * " reads a value the " *
             "model computes per cell (such as a formula predictor `m[i]`), and " *
             "ReactiveKernels cannot yet evaluate that law one cell at a time " *
-            "(ReactiveKernels snag rkppl-dotted-pla-1629a747), so no NLME route can " *
+            "(ReactiveKernels todo 1olsblw), so no NLME route can " *
             "tell whether its prior reads the units' draws. For a location law, " *
             "keep only data and sampled scalars in the law and add the rest where " *
             "the cell reads the latent (`d ~ Normal(loc[i], s)`, then " *

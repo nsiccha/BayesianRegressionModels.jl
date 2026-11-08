@@ -7,11 +7,12 @@
 # coordinates as `:shared_latent`, the reading the entries of a top-level
 # vector `x[1:n] .~ Law` get: they enter θ, each unit's conditional likelihood
 # reads its own cells' latents, and the SVI split into unit terms is exact.
-# `brm_svi_fit` gives a cell component's locals to their unit; a dotted cell
-# latent's per-unit ownership waits on ReactiveKernels (`@test_broken` below).
-# A latent whose law reads a value the model computes per cell is refused by
-# name. Snag brm-nlme-view-re-ed98959b (before it: "coordinate record kind
-# `cell_latent` has no NLME role").
+# `brm_svi_fit` gives a cell component's locals and, from RKPPL 0.1.127, a
+# dotted cell latent's entries to their unit. A latent under a transformed law
+# (`LogNormal`) stays global until ReactiveKernels reads a constrained block per
+# cell (`@test_broken` below). A latent whose law reads a value the model
+# computes per cell is refused by name. Snag brm-nlme-view-re-ed98959b (before
+# it: "coordinate record kind `cell_latent` has no NLME role").
 #
 # Run: julia --startup-file=no --project=test test/nlme_cell_latents.jl [filter...]
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
@@ -49,6 +50,17 @@ cell_component_model(data) = @brm data begin
     @plate for i in eachindex(mu)
         cell ~ cell_calibration(wc[i], s)
         y[i] ~ Normal(mu[i] .+ cell .* w[i], sigma)
+    end
+end
+
+# A positive latent: its law transforms its coordinates.
+positive_cell_latent_model(data) = @brm data begin
+    sigma ~ Exponential(1)
+    s ~ Exponential(1)
+    mu ~ 1 + (1 | win)
+    @plate for i in eachindex(mu)
+        x ~ LogNormal(loc[i], s)
+        y[i] ~ Normal(mu[i] .+ log.(x), sigma)
     end
 end
 
@@ -184,18 +196,19 @@ owns_cells(t, m, owned) = all(eachindex(m.view.levels)) do c
     sort(setdiff(t.units[c], m.view.subject_coordinates[c])) == sort(owned(c))
 end
 
-# Each unit's partition footprint reads every cell's latent block today: RKPPL
-# reads a dotted cell latent's block through a range computed in the cell
-# (`_ppl_cell_latent_block`), which the structural footprint cannot narrow
-# (ReactiveKernels snag rkppl-dotted-pla-1629a747). SVI then keeps the latents
-# global, which is exact (the split below) but not per unit. The same model
-# with a top-level vector read as `x[ids[i]]` is owned per unit already.
-@stestset "SVI takes cell latents; per-unit ownership waits on RK footprints" begin
+# RKPPL reads a dotted cell latent's block through a bound table of ranges
+# (0.1.126, ReactiveKernels snag rkppl-dotted-pla-1629a747) and, when the cell
+# also reads a computed location such as `mu[i]`, maps the typed view of that
+# block to its parent's positions (0.1.127, snag dotted-cell-late-3789b8ea).
+# Before, every unit's partition footprint read every cell's block, and SVI kept
+# the latents global (exact, but not per unit).
+@stestset "SVI gives each unit its cells' latents" begin
     data = CELL_LATENT_DATA
     m = brm_nlme_model(RKBRMI(cell_latent_model(data)); ad_backend=NLME_AD)
     t = BRM._brm_svi_target(m)
-    @test_broken owns_cells(t, m,
+    @test owns_cells(t, m,
         c -> vcat(cell_coordinates(m.view, :x, c), cell_coordinates(m.view, :a, c)))
+    @test !any(j -> startswith(String(m.view.coordinates[j]), r"[xa]\."), t.globals)
     check_cell_split(t)
     fit = brm_svi_fit(m; rng=Xoshiro(11), batch_size=2, max_iterations=6, ndraws=4,
         threads=1)
@@ -217,11 +230,23 @@ end
     check_cell_split(t)
 end
 
-# Both readings are refused today because RKPPL cannot evaluate such a law
-# one cell at a time (ReactiveKernels snag rkppl-dotted-pla-1629a747); once it
-# can, the unit-reading one is refused for reading the units' draws and the
-# population-reading one has a reading. Either message names the latent and the
-# rewrite.
+# A transformed law's latent block is a constrained vector computed over every
+# cell, which ReactiveKernels reads whole in each cell's footprint (RK todo
+# 0sr6ilc), so SVI keeps it global. The split is exact either way.
+@stestset "a positive cell latent stays global until RK reads it per cell" begin
+    data = CELL_LATENT_DATA
+    m = brm_nlme_model(RKBRMI(positive_cell_latent_model(data)); ad_backend=NLME_AD)
+    @test count(==(:shared_latent), m.view.role) == sum(length, data.loc)
+    t = BRM._brm_svi_target(m)
+    @test_broken owns_cells(t, m, c -> cell_coordinates(m.view, :x, c))
+    check_cell_split(t)
+end
+
+# Both readings are refused because RKPPL 0.1.126 still cannot evaluate such a
+# law one cell at a time (RK todo 1olsblw: the per-cell law arguments are
+# flattened without a row form); once it can, the unit-reading one is refused
+# for reading the units' draws and the population-reading one has a reading.
+# Either message names the latent and the rewrite.
 @stestset "a cell latent whose law reads a per-cell model value is refused by name" begin
     data = CELL_LATENT_DATA
     for model in (unit_reading_latent_model, population_reading_latent_model)
