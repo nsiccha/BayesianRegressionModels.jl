@@ -2966,7 +2966,11 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
   margins' SDs at 1 (`FixedOmega(sd = ...)`, a known margin's η its effect over its
   known SD); a known correlation is a family at the identity with its sampled
   scales in θ. It checks conditional likelihoods and empirical Bayes modes against
-  closed forms, `check_protocol`, a packed point read back, the population prior
+  closed forms, `check_protocol`, the embedded Laplace hook on the family that
+  holds an SD (its value against NLMEEstimation's own Laplace, its gradient
+  against central differences, its marginals' sum against the exact marginal),
+  a packed point
+  read back, the population prior
   against the named densities over the free coordinates (value, gradient and that
   it integrates to one), FOCE(I) at the exact objective's stationary point and
   SAEM near it, `brm_nlme_joint_start`, `brm_svi_fit` against NUTS next to a known

@@ -333,6 +333,22 @@ end
     end
 end
 
+# The embedded Laplace hook takes the same coordinates: the protocol compares its
+# value with the package's own Laplace and its gradient with central differences.
+# On this linear Gaussian model the Laplace marginal is the exact one.
+@stestset "the Laplace hook on a family that holds an SD" begin
+    m = nlme(held_first)
+    start = brm_nlme_start(m)
+    θ, σ, ω = start.theta, start.sigma, start.omega
+    H = 0.2 .* randn(Xoshiro(6), 2, length(m.view.levels))
+    @test check_protocol(m, θ, σ, ω; η=H[:, 1:4], subjects=1:4, population_gradient=true)
+    ℓ, gθ, gσ, gω = NE.laplace_marginals_and_gradient(m, collect(1:length(m.view.levels)),
+        θ, σ, ω, H)
+    named = brm_nlme_estimates(m, θ, σ, start.omega_matrix)
+    @test sum(ℓ) ≈ exact_marginal([named.point.mu.Intercept, named.point.mu.x],
+        named.point.sigma, named.point.p.covariance) rtol = 1e-6
+end
+
 # The exact log posterior in the search's coordinates, and its gradient norm in
 # them by central differences, for a family holding the first margin's SD.
 function held_first_objective(m, θ, σ, ω)
