@@ -45,7 +45,9 @@ unconstrained coordinate vector (`coordinates`, in packed order).
 - `role[c]` — `:population` (population coefficients, categorical contrasts,
   monotonic simplexes, ordinal thresholds and vector parameters),
   `:shared_latent` (sampled coordinates shared by the units: HSGP components,
-  missing-value completions, submodels, `car(...)` fields (only their separator
+  missing-value completions, submodels (a function-style component call's
+  sampled locals other than its random-effect blocks, which are read as
+  model-scope blocks), `car(...)` fields (only their separator
   draws, scale and mixing share when lowered with `car_units`), the latents a
   `@plate` cell declares and the sampled locals of a component called in a
   cell, and every coordinate of a random-effect block over a grouping in
@@ -177,7 +179,103 @@ Base.show(io::IO, v::BRMNLMEView) = print(io, "BRMNLMEView(",
 # no semantic inventory. Closure-style `kernel(...) do` cells instead use the
 # value plan, like `@plate for` cells.
 _brm_nlme_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan}) =
-    _rk_coordinate_records(plan)
+    _brm_nlme_component_blocks(plan, _rk_coordinate_records(plan))
+
+# A random-effect block a function-style component call declares
+# (`kin ~ f(subject)`, with `(1 | pk | subject)` in `f`) is read as the same
+# block at model scope, over the column the call passes for the grouping
+# input: it is filed again here, before the call's `:submodel` record, with its
+# coordinates, its `|ID|` and its margins' predictors under the call's path
+# (`kin.b_pk_subject.z`, `kin.pk`, `kin.CL`) and its grouping, `by` and joined
+# columns renamed to the caller's. Nested calls compose paths and names. Its
+# draws are indexed by the call's levels of the grouping, so a block keeps the
+# call's shared reading when an argument is no column of the model (an
+# expression) or when the call's levels of it are not the model's.
+function _brm_nlme_component_blocks(plan, records)
+    any(_brm_nlme_component_call, records) || return records
+    columns = plan.columns
+    caller(name) = haskey(columns, name) ? name : nothing
+    out = Any[]
+    for record in records
+        _brm_nlme_component_call(record) &&
+            _brm_nlme_component_blocks!(out, record.component, (record.target,), caller,
+                columns)
+        push!(out, record)
+    end
+    out
+end
+_brm_nlme_component_call(record) =
+    record.kind === :submodel && get(record, :component, nothing) !== nothing
+
+function _brm_nlme_component_blocks!(out, metadata, path, caller, columns)
+    inputs = get(metadata, :inputs, nothing)
+    inputs === nothing && return out
+    # The model's column that a column local to this call is, or `nothing`.
+    outer(column) = let name = get(inputs, column, nothing)
+        name === nothing ? nothing : caller(name)
+    end
+    for record in metadata.coordinates
+        if _brm_nlme_component_call(record)
+            _brm_nlme_component_blocks!(out, record.component, (path..., record.target),
+                outer, columns)
+        elseif record.kind in (:ranef, :stratified_ranef)
+            block = _brm_nlme_component_block(record, metadata.plan, path, outer, columns)
+            block === nothing || push!(out, block)
+        end
+    end
+    out
+end
+
+function _brm_nlme_component_block(record, plan, path, outer, columns)
+    locals = Symbol[(haskey(record, :joint_columns) ? record.joint_columns : (record.group,))...]
+    record.kind === :stratified_ranef && push!(locals, record.by)
+    renamed = Dict{Symbol,Symbol}()
+    for column in locals
+        name = outer(column)
+        name === nothing && return nothing
+        values = get(plan.columns, column, nothing)
+        values === nothing && return nothing
+        isequal(_rk_grouping_levels(values), _rk_grouping_levels(columns[name])) ||
+            return nothing
+        renamed[column] = name
+    end
+    scoped(::Nothing) = nothing
+    scoped(name::Symbol) = Symbol(join((path..., name), "."))
+    scoped(names::Tuple) = map(scoped, names)
+    fields = (; group=renamed[record.group], id=scoped(record.id),
+        margins=map(((predictor, coefficient),) -> (scoped(predictor), coefficient),
+            record.margins),
+        scale=scoped(record.scale), scales=scoped(record.scales), z=scoped(record.z),
+        L=scoped(record.L),
+        scale_priors=map(law -> _brm_nlme_component_law(law, plan), record.scale_priors),
+        # The call's own address of the block, as the coordinate transport
+        # pairs it (`brm_nlme_joint_map`).
+        scope=path, call_block=(; record.group, record.id, record.margins))
+    haskey(record, :by) && (fields = (; fields..., by=renamed[record.by]))
+    haskey(record, :joint_columns) && (fields = (; fields...,
+        joint_columns=map(column -> renamed[column], record.joint_columns)))
+    haskey(record, :mixing) && (fields = (; fields..., mixing=scoped(record.mixing)))
+    haskey(record, :level_correlation) && (fields = (; fields...,
+        level_correlation=scoped(record.level_correlation)))
+    merge(record, fields)
+end
+
+# A component block's scale law with the call's bound data scalars in place:
+# the model's names are not the call's. A law reading anything else (a sampled
+# value of the call) has no model-scope reading and starts no scale.
+_brm_nlme_component_law(law::Real, plan) = law
+_brm_nlme_component_law(law::Symbol, plan) = _brm_nlme_scalar_data(plan, law)
+function _brm_nlme_component_law(law::Expr, plan)
+    head = law.head === :call ? 1 : law.head === :. ? 1 : 0
+    args = Any[law.args[1:head]...]
+    for arg in law.args[(head + 1):end]
+        value = _brm_nlme_component_law(arg, plan)
+        value === nothing && return nothing
+        push!(args, value)
+    end
+    Expr(law.head, args...)
+end
+_brm_nlme_component_law(law, plan) = nothing
 _brm_nlme_records(plan) = _brm_nlme_error(
     "brm_nlme_view: an RK plan of kind `$(nameof(typeof(plan)))` has no " *
     "semantic coordinate inventory, so its NLME partition cannot be read. " *
@@ -508,7 +606,18 @@ draws, scales, correlation factor and Student-t mixing weights, for any block
 form) is a `:shared_latent`, and so is a grouped `hsgp(x; by = g)` or a
 `cdar(step; by = g)` walk with `g` in `shared_groups`.
 `nested_groups` may also name the `by` grouping of a `cdar` or grouped `hsgp`
-term that no random effect uses, so that its levels are units. A `car(...)`
+term that no random effect uses, so that its levels are units. A
+random-effect block declared inside a function-style component call
+(`kin ~ f(subject)`, with `(1 | pk | subject)` in `f`'s body) is read as the
+same block at model scope over the column the call passes for the grouping
+input: that column is one of the model's groupings, named as `subject_group`,
+in `nested_groups` or in `shared_groups` like any other, and the block's `|ID|`
+and margins carry the call's path (`kin.pk`, predictor `kin.CL`), as its
+coordinates do (`kin.b_pk_subject.z`). Nested calls compose their paths. The
+call's other sampled locals, its population coefficients included, are
+`:shared_latent`, and so is a block whose grouping input is passed an
+expression rather than a column, or whose call reads other levels of the
+column than the model does. A `car(...)`
 field is shared, since its edges couple its areas, unless the backend was
 lowered by the field's unit border separator with the subject labels
 (`RKBRMI(brmi; car_units = :subject)`): then only its separator draws, scale
@@ -1155,9 +1264,12 @@ function _brm_nlme_view(backend::RKBRMI; subject_group=nothing,
             end
         elseif kind === :submodel
             # A provider may be deterministic and own no packed coordinates.
-            # Its sampled declarations are scoped under its target.
+            # Its sampled declarations are scoped under its target. The
+            # random-effect blocks of a component call were read above, as
+            # model-scope blocks (`_brm_nlme_records`); the rest is shared.
             for (i, name) in enumerate(names)
-                _brm_nlme_owned(name, record.target) && claim!(i, :shared_latent)
+                role[i] === :unclaimed && _brm_nlme_owned(name, record.target) &&
+                    claim!(i, :shared_latent)
             end
         elseif kind in (:cell_latent, :cell_component)
             # A latent a `@plate` cell declares (`x ~ Law(...)`, one draw per
