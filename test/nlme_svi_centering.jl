@@ -5,15 +5,17 @@
 # zero (draw cells) and against central finite differences of its value in the
 # globals, the learned coordinates and the controls, through RK's own scale,
 # correlation and law-argument values: a correlated block located at its
-# population coefficients, a scalar block on a Poisson model, and an authored
-# Gaussian vector the units own. A sparse global that is a centred cell's scale
+# population coefficients, a scalar block on a Poisson model, an authored
+# Gaussian vector the units own, and a block over a `shared_groups` grouping
+# whose levels units own (an absent carried unit's level mapped through its
+# controls in the next window). A sparse global that is a centred cell's scale
 # steps on sites that see its readers' whole centered terms. A fit learns
 # controls that rise with a unit's data, returns draws in the packed RK
 # coordinates, and resumes bit for bit.
 #
 # RUN: julia --project=test test/nlme_svi_centering.jl [testset-filter...]
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
-using LinearAlgebra, Random, Statistics, WarmupHMC
+using LinearAlgebra, LogDensityProblems, Random, Statistics, WarmupHMC
 
 include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))
 include(joinpath(@__DIR__, "nlme_svi_owned_fixture.jl"))
@@ -125,6 +127,147 @@ end
     plan = BRM_._brm_svi_centering_plan(BRM_._brm_svi_target(m), LearnedCentering())
     @test all(cells -> count(c -> c.kind === :vector, cells) == 2, plan.cells)
     check_centered_terms(m; kinds=(:ranef, :vector))
+end
+
+# A device grouping crossed with the subjects (`shared_groups`): each subject's
+# rows read a device of its own, except the subjects in `shared`, whose rows all
+# read "dshared".
+function svi_centering_device_data(rng, subjects; n=8, shared=())
+    subject, device, x, y = String[], String[], Float64[], Float64[]
+    for s in subjects, _ in 1:n
+        h = sum(Int, codeunits(s))
+        push!(subject, s)
+        push!(device, s in shared ? "dshared" : "d" * s)
+        push!(x, randn(rng))
+        push!(y, 0.8 + 0.4sin(h) + 0.3cos(h) * x[end] + 0.5randn(rng))
+    end
+    (; subject, device, x, y)
+end
+
+# The units' block has no intercept, so the population intercept is the device
+# block's location: a device's total is `mu_Intercept + τ z`.
+svi_centering_device_model(data) = @brm data begin
+    mu ~ 1 + (1 | device) + (0 + x | subject)
+    sd(mu, device) ~ LogNormal(log(0.5), 0.4)
+    y ~ Normal(mu, 0.5)
+end
+
+# Here the units' block absorbs the intercept, so the device block's cells are
+# located at 0.
+svi_centering_device_subject_model(data) = @brm data begin
+    mu ~ 1 + (1 | subject) + (1 | device)
+    sd(mu, device) ~ LogNormal(log(0.5), 0.4)
+    y ~ Normal(mu, 0.5)
+end
+
+const SVI_CENTERING_DEVICES = (; subject_group=:subject, shared_groups=(:device,))
+
+# snag svi-learned-cent-4ab361d3: a shared grouping's block was in neither
+# `cells` nor `uncentered`.
+@stestset "a non-finite centered term carries packed points, not learned coordinates" begin
+    rng = Xoshiro(2)
+    rk = RKBRMI(svi_centering_pois_model(svi_centering_pois_data(rng, [2, 3, 30, 4, 25, 1])))
+    m = brm_nlme_model(rk; ad_backend=NLME_AD)
+    plan = BRM_._brm_svi_centering_plan(BRM_._brm_svi_target(m), LearnedCentering())
+    t, q = centered_target(m, [fill(0.6, k) for k in plan.ncells])
+    full = merge(q, BRM_._brm_svi_params(t, m.unit[t.globals], MeanFieldGlobal();
+        global_scale=0.1, unit_scale=1.0))
+    # exp of the linear predictor overflows at this finite point of unit 3.
+    full.M[3] .= 1e4
+    e = try
+        BRM_._brm_svi_iteration!(Xoshiro(4), t, full, BRM_._brm_svi_adam(full, 0.01), [5, 3],
+            0.01, 0.1)
+        nothing
+    catch err
+        err
+    end
+    @test e isa BRMSVINonfiniteError
+    p = only(e.terms)
+    @test p.unit == 3 && p.draw_finite
+    # The packed points are the map of the factor's draws: back through the learned
+    # coordinates they are a pair around the factor's mean at the point's own globals.
+    g = p.points.plus[t.globals]
+    frame = BRM_._brm_svi_centering_frame(plan, t, g)
+    u₊ = BRM_._brm_svi_learned_coordinates(plan, frame, full, 3, g, p.points.plus[t.units[3]])
+    u₋ = BRM_._brm_svi_learned_coordinates(plan, frame, full, 3, g, p.points.minus[t.units[3]])
+    @test (u₊ .+ u₋) ./ 2 ≈ full.M[3]
+    # Positive control: the map moves them, so a point holding the learned coordinates fails.
+    @test p.points.plus[t.units[3]] != u₊
+    problem = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+    @test !isfinite(LogDensityProblems.logdensity(problem, p.points.plus))
+end
+
+@stestset "a shared grouping's levels a unit owns are centred in that unit" begin
+    subjects = ["s$i" for i in 1:6]
+    data = svi_centering_device_data(Xoshiro(41), subjects; shared=("s5", "s6"))
+    for (model, located) in ((svi_centering_device_model, true),
+            (svi_centering_device_subject_model, false))
+        m = brm_nlme_model(RKBRMI(model(data)); ad_backend=NLME_AD, SVI_CENTERING_DEVICES...)
+        t = BRM_._brm_svi_target(m)
+        @test BRM_._brm_svi_unit_levels(t) == subjects
+        plan = BRM_._brm_svi_centering_plan(t, LearnedCentering())
+        # Every unit keeps its own block's cell; units 1-4 add their device's.
+        for (i, cells) in enumerate(plan.cells)
+            devices = [c for c in cells if c.block.group === :device]
+            @test count(c -> c.block.group === :subject, cells) == 1
+            @test [c.level for c in devices] == (i <= 4 ? ["d" * subjects[i]] : String[])
+            @test all(c -> c.located == located && c.coefficient === :Intercept, devices)
+        end
+        # The device two units read is global, and says so.
+        @test length(plan.uncentered) == 1
+        row = only(plan.uncentered)
+        @test (row.kind, row.block.group, row.level) == (:ranef, :device, "dshared")
+        @test row.reason == "its draws are not one unit's"
+        @test only(row.coordinates) in m.view.coordinates[t.globals]
+        check_centered_terms(m; units=(1, 5), kinds=(:ranef,))
+    end
+    # The fit's report: four device cells, the shared device uncentred.
+    m = brm_nlme_model(RKBRMI(svi_centering_device_model(data)); ad_backend=NLME_AD,
+        SVI_CENTERING_DEVICES...)
+    fit = brm_svi_fit(m; batch_size=2, max_iterations=200, ndraws=10, rng=Xoshiro(42),
+        centering=LearnedCentering())
+    report = fit.diagnostics.centering
+    @test sort([c.level for c in report.cells if c.block.group === :device]) ==
+        ["ds1", "ds2", "ds3", "ds4"]
+    @test [r.level for r in report.uncentered] == ["dshared"]
+    @test all(c -> 0 < c.c < 1, report.cells)
+end
+
+# A window keeps the shared grouping's level table, so a carried unit absent
+# from it still holds its device's draw, by packed name, with no reader. Its
+# draws reach the packed coordinates through its own controls, at the draw's
+# location and scale: z = (u - c μ) / τ^c.
+@stestset "an absent unit's centred shared level maps through its controls" begin
+    first_window = svi_centering_device_data(Xoshiro(43), ["a", "b", "c"])
+    initial = brm_svi_fit(svi_centering_device_model(first_window); rng=Xoshiro(44),
+        max_iterations=300, ndraws=0, batch_size=2, centering=LearnedCentering(),
+        SVI_CENTERING_DEVICES...)
+    state = brm_svi_checkpoint(initial)
+    unit = state.units["b"]
+    k = only(findall(key -> hasproperty(key, :coordinate), unit.keys))
+    @test !isnan(unit.centering[k])
+    next = svi_centering_device_model(svi_centering_device_data(Xoshiro(45), ["c", "a"]))
+    update = brm_svi_fit(state, next; rng=Xoshiro(46), max_iterations=0, ndraws=20)
+    m = update.diagnostics.model
+    j = findfirst(==(unit.keys[k].coordinate), m.view.coordinates)
+    @test j !== nothing
+    @test all(isfinite, update.draws[j, :])
+    t = BRM_._brm_svi_target(m; previous=state)
+    @test j in t.ownership.absent
+    plan = BRM_._brm_svi_centering_plan(t, LearnedCentering())
+    @test haskey(plan.absent_blocks, j)
+    @test isempty(plan.uncentered)
+    names = string.(m.view.coordinates[t.globals])
+    g = first(BRM_._brm_nlme_prior_median_point(m))[t.globals] .+
+        0.3 .* randn(Xoshiro(47), length(t.globals))
+    frame = BRM_._brm_svi_centering_frame(plan, t, g)
+    μ = g[findfirst(==("mu_Intercept"), names)]
+    τ = exp(g[findfirst(n -> occursin("device.tau", n), names)])
+    c = BRM_._brm_svi_control(unit.centering[k])
+    z = randn(Xoshiro(48), length(unit.keys))
+    expected = copy(z)
+    expected[k] = (z[k] - c * μ) / τ^c
+    @test BRM_._brm_svi_absent_draw!(copy(z), plan, frame, unit, [k], [j]) ≈ expected
 end
 
 # Sixteen units, two of them in a stratum of their own with 30 rows each. At

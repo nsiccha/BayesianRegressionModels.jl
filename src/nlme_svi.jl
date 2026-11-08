@@ -25,13 +25,16 @@
 # (`LowRankGlobal(r)`, Β is D × r); Adam moves it every iteration along the
 # minibatch ELBO gradient. A subject's factor moves only when the subject is in
 # the batch, by a natural-gradient step: the improved Bayesian learning rule of
-# Lin, Schmidt and Khan (2020), whose curvature estimate comes from the same
-# antithetic pair of reparameterized draws (Stein's lemma) and whose precision
+# Lin, Schmidt and Khan (2020), whose curvature estimate comes from the
+# reparameterized draws themselves (Stein's lemma) and whose precision
 # update stays positive definite, inside a per-subject trust region on the
 # precision's relative change and the mean's move (as Theis and Hoffman (2015)
-# bound SVI's natural-gradient steps). That step is Newton-like, so a subject's
-# factor settles in tens of visits, where plain gradient steps on its mean and
-# scale need hundreds.
+# bound SVI's natural-gradient steps). By default a dense subject evaluates d
+# mutually orthogonal antithetic pairs per visit, which estimate its whole
+# curvature (exactly for a quadratic term), and takes the whole step; a single
+# pair, BRM 0.2.242's step, sees one direction per visit, and units of tens of
+# coordinates did not settle in the visits a minibatch run gives them
+# (`unit_curvature`, below).
 #
 # An iteration's unit work (the terms at the antithetic pair and the factor's
 # step) can run on several tasks, one prepared copy of the cell samplers per
@@ -545,10 +548,10 @@ end
 # when a global's posterior sd shrinks like 1/√N. It polishes a mean-field global
 # factor (`_brm_svi_polish_global_step!`) and steps a structured unit factor
 # (`_brm_svi_lowrank_step!`).
-function _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip=Inf)
+function _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip=Inf, rank=1.0)
     D = length(q.μ)
     C = _brm_svi_global_sqrt(_brm_svi_global_geometry(q))
-    scale = vcat(ones(D), vec(repeat(exp.(q.ρ), 1, size(q.Β, 2))))
+    scale = vcat(ones(D), rank .* vec(repeat(exp.(q.ρ), 1, size(q.Β, 2))))
     grad = copy(grad)
     grad[1:D] .= _brm_svi_global_sqrt_tmul(C, view(grad, 1:D))
     rest = D+1:length(x)
@@ -699,9 +702,9 @@ const _BRM_SVI_UNIT_MEAN_TRUST = 1.0
 # is zero, so the positive part changes nothing there. It is biased towards
 # more precision wherever the two differ, including a target with negative
 # curvature, whose true fixed point it no longer reaches.
-_brm_svi_unit_step!(q, i, gz, gd, εi, β) =
-    _brm_svi_unit_step!(q.Λ[i], q, i, gz, gd, εi, β)
-function _brm_svi_unit_step!(::AbstractMatrix, q, i, gz, gd, εi, β)
+_brm_svi_unit_step!(q, i, gz, gd, εi, β; rank=1.0) =
+    _brm_svi_unit_step!(q.Λ[i], q, i, gz, gd, εi, β; rank)
+function _brm_svi_unit_step!(::AbstractMatrix, q, i, gz, gd, εi, β; rank=1.0)
     # Promoting all of a scientific subject's effects leaves an empty local
     # factor. Its observation term may still contribute to the globals.
     isempty(q.M[i]) && return q
@@ -720,6 +723,134 @@ function _brm_svi_unit_step!(::AbstractMatrix, q, i, gz, gd, εi, β)
     q.Λ[i] .= L * L'
     q.M[i] .+= Δ
     q
+end
+
+# ── A dense unit's curvature on an orthogonal design (`unit_curvature`) ──────
+#
+# The single antithetic pair above estimates the curvature along one drawn
+# direction of the factor per visit, so a dense unit of d coordinates corrects
+# its precision about one direction per visit, at `unit_step` 0.1 a tenth of the
+# way, and a minibatch run gives each unit tens to a few hundred visits. Units of
+# 64-129 coordinates then stop unsettled, and the hyperparameters follow them:
+# on an OU chain cut into window units the fitted length scale came out 1.4 and
+# 11.4 against about 61 (centered and non-centered states), 113-411 nats below
+# the family's optimum, while the same fits with the unit's exact curvature
+# reached it (snag brm-svi-fit-hype-47cb328e).
+#
+# `unit_curvature = :orthogonal` (the default) evaluates the same estimator on d
+# antithetic pairs whose whitened draws are the columns of E = √d Q, Q a uniformly
+# random rotation: a randomly rotated third-degree spherical-radial cubature rule
+# (Genz & Monahan 1998, "Stochastic integration rules for infinite regions";
+# Arasaratnam & Haykin 2009, "Cubature Kalman filters"). The pairs' mean gradient estimates
+# E_q ∇ log p, and (1/d) Σ_k sym(w_k ε_kᵀ), w_k = -U⁻¹ gd_k, estimates the
+# whitened E_q[-∇² log p] by Stein's lemma: both exactly when the unit's term is
+# quadratic in its coordinates (EEᵀ = d I), and unbiased over Q for terms of
+# degree three. Every draw has radius √d, the typical radius of a pair's N(0, I)
+# draw, so the design pushes no coordinate further out than the pair does. It
+# costs 2d gradient evaluations of the unit per visit instead of 2.
+# `unit_curvature = :pair` is the single pair, BRM 0.2.242's step.
+
+# Whether unit i has a dense factor with coordinates (the step above), as
+# opposed to a structured one (above `unit_dense_limit`) or none.
+_brm_svi_dense_unit(q, i) = !(q.U[i] isa _BRMSVIUnitRoot) && !isempty(q.M[i])
+
+# The whitened draws of unit i for one iteration: a vector for a pair, the
+# d × d design E = √d Q for an orthogonal design. Drawn in batch order from the
+# run's `rng`, before any unit is evaluated.
+_brm_svi_unit_draws(rng, q, i, curvature) =
+    curvature === :orthogonal && _brm_svi_dense_unit(q, i) ?
+        _brm_svi_unit_design(rng, length(q.M[i])) : _brm_svi_unit_noise(rng, q.U[i])
+
+function _brm_svi_unit_design(rng, d)
+    F = qr(randn(rng, d, d))
+    # Q from Householder QR is Haar-distributed once each column takes the sign
+    # of R's diagonal (Mezzadri 2007, "How to generate random matrices from the
+    # classical compact groups").
+    Matrix(F.Q) .* (sqrt(d) .* [r < 0 ? -1.0 : 1.0 for r in diag(F.R)]')
+end
+
+# Unit gradient evaluations per visit of unit i under the run's controls.
+_brm_svi_unit_calls(q, i, c) =
+    _brm_svi_unit_curvature_mode(c) === :orthogonal && _brm_svi_dense_unit(q, i) ?
+        2length(q.M[i]) : 2
+# Controls written before `unit_curvature` existed (a checkpoint of BRM 0.2.242
+# or earlier) keep the single pair.
+_brm_svi_unit_curvature_mode(c) = get(c, :unit_curvature, :pair)
+
+# The natural-gradient step of `_brm_svi_unit_step!` with a full curvature
+# estimate `S` (whitened, symmetric): G = U (S - I) Uᵀ, the same trust regions
+# and square-root update. No positive part is taken: the estimate is not one
+# draw's rank-one product, whose spurious negative eigenvalue that part removes,
+# and the improved rule keeps the precision positive definite for any G.
+function _brm_svi_unit_step_full!(q, i, gz, S, β)
+    isempty(q.M[i]) && return q
+    U = LowerTriangular(q.U[i])
+    Ĝ = Symmetric((S .+ S') ./ 2 - I)
+    r = maximum(abs, eigvals(Ĝ))
+    isfinite(r) || throw(ArgumentError(
+        "brm_svi: non-finite gradient difference in a unit's curvature estimate"))
+    β = r > 0 ? min(β, _BRM_SVI_UNIT_TRUST / r) : β
+    # U⁻¹(Λ + βG) = (I + βĜ) Uᵀ.
+    R = qr(vcat(Matrix(U'), (I + β .* Ĝ) * Matrix(U'))).R
+    L = LowerTriangular(R' * Diagonal(sign.(diag(R))) ./ sqrt(2))
+    Δ = β .* (L' \ (L \ gz))
+    Δ .*= min(1.0, _BRM_SVI_UNIT_MEAN_TRUST / norm(U' * Δ))
+    q.U[i] .= L
+    q.Λ[i] .= L * L'
+    q.M[i] .+= Δ
+    q
+end
+
+# Unit i's terms on the orthogonal design `E` (columns ε_k): the value and the
+# gradients averaged over the 2d draws, `gg` in the pair's convention (the sum
+# over a pair, so half of it is the mean gradient), and the whitened curvature
+# estimate. `problems` holds the first pair that was not finite, if any; the
+# worker's global buffers are zero again at `touched` on return. Under learned
+# centering every draw is the centered term (src/nlme_svi_centering.jl), and
+# `centered` holds the controls' gradient averaged over the draws and every
+# draw's adjoints, each weighted 1/d where a pair's are weighted 1
+# (`_brm_svi_centering_batch_gradient`).
+function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
+        centering=nothing, frame=nothing)
+    d = size(E, 1)
+    U, m = LowerTriangular(q.U[i]), q.M[i]
+    gg₊, gg₋ = _brm_svi_global_buffers(work, D)
+    gz₊, gz₋ = zeros(d), zeros(d)
+    value, gz, gg, W = 0.0, zeros(d), zeros(length(touched)), zeros(d, d)
+    gc, adjoints = nothing, Any[]
+    problem = nothing
+    for k in 1:d
+        δ = U' \ view(E, :, k)
+        z₊, z₋ = m .+ δ, m .- δ
+        fill!(gz₊, 0.0)
+        fill!(gz₋, 0.0)
+        if centering === nothing
+            v₊ = _brm_svi_unit_local!(gg₊, gz₊, t, i, g, z₊, plan, work)
+            v₋ = _brm_svi_unit_local!(gg₋, gz₋, t, i, g, z₋, plan, work)
+        else
+            v₊, gc₊, a₊ = _brm_svi_centered_unit_term!(gg₊, gz₊, centering, frame, t, q, i,
+                g, z₊, plan, work)
+            v₋, gc₋, a₋ = _brm_svi_centered_unit_term!(gg₋, gz₋, centering, frame, t, q, i,
+                g, z₋, plan, work)
+            gc = something(gc, zero(gc₊))
+            gc .+= (gc₊ .+ gc₋) ./ 2d
+            push!(adjoints, a₊, a₋)
+        end
+        problem = _brm_svi_nonfinite_unit(t, i, g, (z₊, z₋), (v₊, v₋),
+            (gg₊, gg₋), (gz₊, gz₋), touched; packed=_brm_svi_packed_draw(centering, frame, q, i, g))
+        for (entry, p) in enumerate(touched)
+            gg[entry] += (gg₊[p] + gg₋[p]) / d
+            gg₊[p] = gg₋[p] = 0.0
+        end
+        problem === nothing || break
+        value += (v₊ + v₋) / 2d
+        gz .+= (gz₊ .+ gz₋) ./ 2d
+        W[:, k] .= -(U \ ((gz₊ .- gz₋) ./ 2))
+    end
+    S = (W * E' .+ E * W') ./ 2d
+    centered = centering === nothing ? nothing :
+        (; gc=something(gc, Float64[]), adjoints=Tuple(adjoints), weight=1 / d)
+    (; value, gg, gz, S, problem, centered)
 end
 
 # ── Non-finite evaluations ───────────────────────────────────────────────────
@@ -742,7 +873,18 @@ non-finite term in batch order, each a named tuple with:
   and `:global_gradient`);
 - `coordinates`: the names of the packed coordinates whose gradient entries
   were not finite;
-- `draw_finite`: whether the point the term was evaluated at was finite.
+- `draw_finite`: whether the point the term was evaluated at was finite;
+- `points`: the packed point(s) the term was evaluated at, in the order of
+  `coordinate_names(rk.model.layout)`, as the columns of a fit's `draws`: `plus`
+  and `minus` for a unit (under `unit_curvature = :orthogonal`, the pair that
+  failed), `draw` for the global term. A coordinate the term does not read holds
+  the value the fit holds for it there: the model's start, or a field state's
+  draw of this iteration. Evaluating the model's density and gradient at a point
+  replays the term's evaluation, so a consumer can look for the cause in its
+  own model;
+- `largest`: the term's coordinate of largest magnitude across `points`, among
+  the globals and the unit's own, as `(; coordinate, value)` (`nothing` for a term
+  with no coordinates).
 
 The run in memory is not a checkpoint after this error, because its random
 stream has advanced. Continue from the last checkpoint `save` received. A
@@ -762,19 +904,47 @@ function Base.showerror(io::IO, e::BRMSVINonfiniteError)
         print(io, "\n  ", p.term === :global ? "global prior term" : "unit $(p.unit)",
             ": ", join(p.quantities, ", "),
             p.draw_finite ? "" : " (the evaluated point is not finite)")
-        isempty(p.coordinates) && continue
-        print(io, "; non-finite gradient in ", length(p.coordinates), " coordinate(s): ",
-            join(p.coordinates, ", "))
+        isempty(p.coordinates) || print(io, "; non-finite gradient in ",
+            length(p.coordinates), " coordinate(s): ", join(p.coordinates, ", "))
+        p.largest === nothing ||
+            print(io, "; largest coordinate: ", p.largest.coordinate, " = ", p.largest.value)
     end
-    print(io, "\nThe run in memory is not a checkpoint after this error. Continue ",
-        "from the last checkpoint `save` received; resuming it with unchanged ",
+    print(io, "\nEach term's `points` holds the packed point(s) it was evaluated at, to ",
+        "replay in the model. The run in memory is not a checkpoint after this error. ",
+        "Continue from the last checkpoint `save` received; resuming it with unchanged ",
         "controls repeats the same random stream and reaches this evaluation again.")
 end
 
+# The packed point a term was evaluated at, packed as `_brm_svi_draws` packs a draw.
+# What the term does not read is what the fit holds for it: the model's start or, with
+# unit-owned field states, this iteration's reading of them.
+function _brm_svi_term_point(t, g, block=Int[], z=Float64[])
+    fields = hasproperty(t, :fields) ? t.fields : nothing
+    u = copy(fields === nothing ? t.m.unit : fields.others)
+    u[t.globals] .= g
+    u[block] .= z
+    u
+end
+
+# The largest coordinate in magnitude, among `positions`, of the term's `points`.
+function _brm_svi_term_largest(t, points, positions)
+    isempty(positions) && return nothing
+    (_, entry), side = findmax(u -> findmax(p -> abs(u[p]), positions), points)
+    (; coordinate=t.m.view.coordinates[positions[entry]], value=points[side][positions[entry]])
+end
+
+# A draw of unit i's factor → its packed coordinates, as `_brm_svi_draws` maps it.
+_brm_svi_packed_draw(::Nothing, frame, q, i, g) = identity
+_brm_svi_packed_draw(centering, frame, q, i, g) =
+    z -> _brm_svi_centered_coordinates(centering, frame, q, i, g, z)
+
 # Unit i's terms at the antithetic pair `zs`: `nothing` when every value and
 # gradient is finite, else what was not. Gradient entries map to `t.globals`
-# (`ggs`, read only at `touched`) and `t.units[i]` (`gzs`).
-function _brm_svi_nonfinite_unit(t, i, g, zs, values, ggs, gzs, touched=eachindex(t.globals))
+# (`ggs`, read only at `touched`) and `t.units[i]` (`gzs`). `packed` maps a draw of
+# the unit's factor to its packed coordinates (learned centering's factors are over
+# other ones).
+function _brm_svi_nonfinite_unit(t, i, g, zs, values, ggs, gzs, touched=eachindex(t.globals);
+        packed=identity)
     finite(gg) = all(p -> isfinite(gg[p]), touched)
     all(isfinite, values) && all(finite, ggs) &&
         all(x -> all(isfinite, x), gzs) && return nothing
@@ -786,9 +956,11 @@ function _brm_svi_nonfinite_unit(t, i, g, zs, values, ggs, gzs, touched=eachinde
         all(isfinite, gz) || (push!(quantities, Symbol(:unit_gradient_, side));
             append!(bad, t.units[i][findall(!isfinite, gz)]))
     end
+    points = NamedTuple{(:plus, :minus)}(map(z -> _brm_svi_term_point(t, g, t.units[i], packed(z)), zs))
     (; term=:unit, unit=i, quantities,
        coordinates=t.m.view.coordinates[sort!(unique!(bad))],
-       draw_finite=all(isfinite, g) && all(z -> all(isfinite, z), zs))
+       draw_finite=all(isfinite, g) && all(z -> all(isfinite, z), zs), points,
+       largest=_brm_svi_term_largest(t, points, vcat(t.globals, t.units[i])))
 end
 
 # Throws `BRMSVINonfiniteError` (iteration 0, which the caller fills in) when
@@ -799,9 +971,11 @@ function _brm_svi_check_finite(t, g, P, gP, problems)
         quantities = Symbol[]
         isfinite(P) || push!(quantities, :value)
         all(isfinite, gP) || push!(quantities, :global_gradient)
+        points = (; draw=_brm_svi_term_point(t, g))
         push!(found, (; term=:global, unit=0, quantities,
             coordinates=t.m.view.coordinates[t.globals[findall(!isfinite, gP)]],
-            draw_finite=all(isfinite, g)))
+            draw_finite=all(isfinite, g), points,
+            largest=_brm_svi_term_largest(t, points, t.globals)))
     end
     for p in problems
         p === nothing || push!(found, p)
@@ -825,15 +999,18 @@ _brm_svi_field_prepare!(rng, t, q, g, batch) = nothing
 
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
-        sites=nothing, site_scale=1.0, rank_step=1.0)
+        sites=nothing, site_scale=1.0, rank_step=1.0, curvature=:pair, site_step=β,
+        structured_step=β, structured_rank=1.0)
     D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
     _brm_svi_field_prepare!(rng, t, q, g, batch)
     P, gP = _brm_svi_global_term(t, g)
-    draws = [_brm_svi_unit_noise(rng, q.U[i]) for i in batch]
+    draws = [_brm_svi_unit_draws(rng, q, i, curvature) for i in batch]
     terms = Vector{@NamedTuple{value::Float64,gg::Vector{Float64},gz::Vector{Float64},
         gd::Vector{Float64}}}(undef, length(batch))
+    # The whitened curvature estimate of a unit on an orthogonal design.
+    curvatures = Vector{Union{Nothing,Matrix{Float64}}}(nothing, length(batch))
     problems = Vector{Union{Nothing,NamedTuple}}(nothing, length(batch))
     # Learned centering: the factors are over each unit's learned coordinates u,
     # and the unit terms read y = T(u) (src/nlme_svi_centering.jl).
@@ -844,6 +1021,15 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         plan, work = t.plans[worker], t.work[worker]
         i, εi = batch[k], draws[k]
         touched = _brm_svi_unit_touched(t, i)
+        if εi isa AbstractMatrix
+            r = _brm_svi_unit_design_terms(t, q, i, g, εi, plan, work, touched, D;
+                centering, frame)
+            problems[k] = r.problem
+            terms[k] = (; r.value, r.gg, r.gz, gd=Float64[])
+            curvatures[k] = r.S
+            centered[k] = r.centered
+            return
+        end
         gg₊, gg₋ = _brm_svi_global_buffers(work, D)
         gz₊, gz₋ = zeros(length(t.units[i])), zeros(length(t.units[i]))
         m, δ = q.M[i], _brm_svi_unit_offset(q, i, εi)
@@ -859,7 +1045,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
             centered[k] = (; gc=(gc₊ .+ gc₋) ./ 2, adjoints=(a₊, a₋))
         end
         problems[k] = _brm_svi_nonfinite_unit(t, i, g, (z₊, z₋), (v₊, v₋),
-            (gg₊, gg₋), (gz₊, gz₋), touched)
+            (gg₊, gg₋), (gz₊, gz₋), touched; packed=_brm_svi_packed_draw(centering, frame, q, i, g))
         gg = [gg₊[p] + gg₋[p] for p in touched]
         # The buffers are the worker's, zero again for its next unit.
         for p in touched
@@ -892,7 +1078,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         _brm_svi_centering_site_terms!(terms, sites, centering, t, frame, centered, batch,
             weights, chain)
     end
-    _brm_svi_update_sites!(sites, t, q, g, ε, batch, terms, β, site_scale)
+    _brm_svi_update_sites!(sites, t, q, g, ε, batch, terms, site_step, site_scale)
     x = _brm_svi_global_vector(q)
     grad = _brm_svi_add_site_gradient!(_brm_svi_global_gradient(q, w, ε, η), sites, q)
     # `N / B` for a uniform batch; under work sampling a unit drawn with chance π
@@ -903,7 +1089,12 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         _brm_svi_exploration_global_step!(global_opt, q, x, grad, lr_global; clip)
     _brm_svi_set_global!(q, x)
     _brm_svi_each_unit(t.plans, length(batch)) do _, k
-        _brm_svi_unit_step!(q, batch[k], terms[k].gz, terms[k].gd, draws[k], β)
+        S = curvatures[k]
+        S === nothing ?
+            _brm_svi_unit_step!(q, batch[k], terms[k].gz, terms[k].gd, draws[k],
+                q.U[batch[k]] isa _BRMSVIUnitRoot ? structured_step : β;
+                rank=structured_rank) :
+            _brm_svi_unit_step_full!(q, batch[k], terms[k].gz, S, β)
     end
     # The controls move while exploring; settling and polishing step q in one fixed
     # frame, which polishing averages.
@@ -1022,12 +1213,55 @@ _brm_svi_stalled(a, b, W) = b.center - a.center < 2 * sqrt((a.spread + b.spread)
 # window it actually uses. They are fixed for the run and its continuations.
 function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
         polish_lr, window, patience, min_windows, polish_windows, unit_sampling=:uniform,
-        settle_windows=_BRM_SVI_SETTLE_WINDOWS)
+        settle_windows=_BRM_SVI_SETTLE_WINDOWS, unit_curvature=:pair,
+        structured_unit_step=unit_step, structured_rank_step=1.0)
     B = min(batch_size, N)
     (; batch_size=B, window=window === nothing ? max(cld(N, B), 100) : window,
        max_iterations, lr_global, unit_step, polish_lr, patience, min_windows,
-       polish_windows, unit_sampling, settle_windows)
+       polish_windows, unit_sampling, settle_windows, unit_curvature, structured_unit_step,
+       structured_rank_step)
 end
+
+# A dense unit's step when the caller names none: the whole natural-gradient
+# step on the orthogonal design's full curvature (the trust regions still bound
+# it), a tenth of it on the single pair's rank-one estimate (BRM 0.2.242).
+_brm_svi_default_unit_step(unit_curvature) = unit_curvature === :orthogonal ? 1.0 : 0.1
+
+# A structured unit's step when the caller names none. `unit_curvature` does not
+# reach these units: they have no natural-gradient step to take whole, only Adam
+# on [μ; ρ; Β] in units of their scale (src/nlme_svi_units.jl), and this is Adam's
+# step size. Above about 0.1 the unit leaves its target. On an exact Gaussian unit of
+# 300 coordinates, 15 of them tight (`test/nlme_svi_units.jl`), Β's rows reached 27
+# target sds within 100 iterations at step 1 and stayed there, then steps 1 and 0.3
+# diverged as the gradient vanished near the optimum and Adam's normalized step did
+# not (KL 1e5 and 1e10 at 5,000 iterations), where 0.1 reached 2e-8. On a real
+# station's unit, step 1 reached draws 571 sds out within 569 iterations (snag
+# svi-nonfinite-er-0923561d).
+const _BRM_SVI_STRUCTURED_UNIT_STEP = 0.1
+
+# How far a structured unit's Β rows step relative to its μ and ρ: at the default step,
+# 0.01 of the coordinate's scale, the rate of the global factor's rows
+# (`lr_global`, `_brm_svi_exploration_global_step!`). Β's gradient is the same noise
+# here, and at the unit's whole step it walks: rows pass the marginal the target wants,
+# ρ falls below them to make up for it, and the row's own step, in units of exp(ρ_k),
+# falls with it, so it cannot come back. On three stations' units of 295-304
+# coordinates under a known population law, a mean-field fit's factor read ELBOs of
+# 481, 455 and 470; at the whole step rank 8 read 343, -204 and 425 with coordinates at
+# marginal sd 8, 31 and 4 under an N(0, 1) prior, and at this ratio 486, 466 and 476
+# with every sd near 1 (same snag).
+const _BRM_SVI_STRUCTURED_RANK_STEP = 0.1
+
+# The step of each family of units from `brm_svi_fit`'s `unit_step` and
+# `unit_curvature`. A step the caller names is both families'.
+_brm_svi_unit_steps(unit_step, unit_curvature) = (;
+    unit_step=something(unit_step, _brm_svi_default_unit_step(unit_curvature)),
+    structured_unit_step=something(unit_step, _BRM_SVI_STRUCTURED_UNIT_STEP),
+    structured_rank_step=_BRM_SVI_STRUCTURED_RANK_STEP)
+
+# Controls written before structured units had their own steps keep the ones they ran
+# with, so a checkpoint's resume stays exact.
+_brm_svi_structured_unit_step(c) = get(c, :structured_unit_step, c.unit_step)
+_brm_svi_structured_rank_step(c) = get(c, :structured_rank_step, 1.0)
 
 # At most this many windows of settling by default.
 const _BRM_SVI_SETTLE_WINDOWS = 100
@@ -1087,12 +1321,15 @@ function _brm_svi_advance!(run, t, c)
         run.sampling.visits[i] += 1
         run.sampling.draws[i] += batch.multiplicities[k]
     end
-    run.unit_gradient_calls += 2length(batch.indices)
+    run.unit_gradient_calls += sum(i -> _brm_svi_unit_calls(q, i, c), batch.indices; init=0)
     value = try
         _brm_svi_iteration!(run.rng, t, q, run.adam, batch.indices,
             scale * (polishing || settling ? c.polish_lr : c.lr_global), scale * c.unit_step;
             whiten=polishing || settling, weights=batch.weights, sites=run.sites,
-            site_scale=scale,
+            site_scale=scale, curvature=_brm_svi_unit_curvature_mode(c),
+            site_step=scale * _brm_svi_site_step(c),
+            structured_step=scale * _brm_svi_structured_unit_step(c),
+            structured_rank=_brm_svi_structured_rank_step(c),
             rank_step=polishing || settling ? _brm_svi_rank_step_ratio(c) : 1.0)
     catch e
         e isa BRMSVINonfiniteError || rethrow()
@@ -1344,13 +1581,30 @@ _brm_svi_lowered(x, phase; completions=nothing, groups...) = throw(ArgumentError
     "brm_svi_fit: expected a @brm model (BRMI), an RKBRMI or a BRMNLMEModel, " *
     "got $(typeof(x))"))
 
-_brm_svi_model(x::RKBRMI, phase; ad_backend, shared_point, subject_group,
-        nested_groups, shared_groups, unit_partition) =
-    _brm_run_phase(phase) do node
-        _brm_nlme_model(x, node; ad_backend=ad_backend === nothing ?
-            _brm_rk_default_ad("brm_svi_fit", x) : ad_backend, observation_ad_backend=nothing,
-            shared_point, subject_group, nested_groups, shared_groups, unit_partition=something(unit_partition, :subjects))
+# An `RKBRMI` keeps the model this prepared for it (`x.prepared.nlme`), so a later call on
+# the same backend with the same options reuses it, and the target it holds,
+# as a call on the returned `diagnostics.model` does. The options are its key
+# because they decide the model; nothing a fit changes lives in it.
+function _brm_svi_model(x::RKBRMI, phase; ad_backend, shared_point, subject_group,
+        nested_groups, shared_groups, unit_partition)
+    ad_backend = ad_backend === nothing ? _brm_rk_default_ad("brm_svi_fit", x) : ad_backend
+    unit_partition = something(unit_partition, :subjects)
+    key = (; ad_backend, shared_point=shared_point === nothing ? nothing :
+        Vector{Float64}(shared_point), subject_group, nested_groups, shared_groups,
+        unit_partition)
+    slot = x.prepared
+    held = lock(() -> slot.nlme, slot.lock)
+    if held !== nothing && isequal(held.key, key)
+        _brm_reuse_phase!(phase)
+        return held.model
     end
+    m = _brm_run_phase(phase) do node
+        _brm_nlme_model(x, node; ad_backend, observation_ad_backend=nothing,
+            shared_point, subject_group, nested_groups, shared_groups, unit_partition)
+    end
+    lock(() -> (slot.nlme = (; key, model=m)), slot.lock)
+    m
+end
 function _brm_svi_model(m::BRMNLMEModel, phase; ad_backend, shared_point,
         subject_group, nested_groups, shared_groups, unit_partition)
     ad_backend === nothing && shared_point === nothing && subject_group === nothing &&
@@ -1421,6 +1675,18 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   `LowRankGlobal(r)` (diagonal plus rank `r`).
 - `unit_dense_limit` — units with at most this many coordinates use a dense
   Gaussian and natural-gradient updates (default 64, allowed 0:256).
+- `unit_curvature` — how a dense unit's step estimates its curvature.
+  `:orthogonal` (default): on each visit the unit is evaluated at d mutually
+  orthogonal antithetic pairs of draws from its factor (2d gradient
+  evaluations for d coordinates; a randomly rotated spherical-radial cubature
+  rule), whose Stein estimate is its whole expected curvature, exact when the
+  unit's term is quadratic in its coordinates, and the step defaults to
+  `unit_step = 1`. `:pair`: one antithetic pair (2 evaluations) and its
+  rank-one estimate's positive part, with `unit_step = 0.1`, BRM 0.2.242's step;
+  a unit of tens of coordinates then needs far more visits to settle than a
+  minibatch run gives it, and the hyperparameters follow its unsettled factor.
+  Structured units (above `unit_dense_limit`) are unaffected: they evaluate one
+  pair, and `unit_step` defaults to 0.1 for them either way.
   Larger units use a diagonal-plus-low-rank covariance with `unit_rank`
   columns (default 8, allowed 0:32, clipped to the unit dimension). Rank zero
   gives a diagonal factor. Their reparameterized ELBO gradients use Adam with
@@ -1512,9 +1778,13 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   `laplace=GaussianBlockLaplace()`, whose updates evaluate the whole window.
 - Optimizer controls: `max_iterations`, `lr_global` (Adam on the globals while
   exploring, in the coordinates' own units),
-  `unit_step` (the subjects' natural-gradient step; a step that would change a
+  `unit_step` (the subjects' natural-gradient step, by default 1 under
+  `unit_curvature = :orthogonal` and 0.1 under `:pair`; a step that would change a
   subject's precision more than 2.5-fold along some direction, or move its
-  mean more than one sd of its factor, is shortened for that subject),
+  mean more than one sd of its factor, is shortened for that subject. A structured
+  unit's Adam takes it as the step size of its mean and log scales, by default 0.1
+  under either curvature, and its rank part steps a tenth as far; a value you pass
+  applies to both families),
   `polish_lr` (Adam on the globals while settling and polishing, as a fraction
   of each global's current scale), `window`,
   `patience`, `min_windows`, `settle_windows`, `polish_windows`, `global_scale`
@@ -1591,7 +1861,8 @@ iterates that were still rising), the variational parameters `q`, the packed pos
 global coordinates (`globals`), `seconds` of optimization in this call,
 `threads` (the tasks this call used), `target` (below), the units' sampling
 probabilities, work, visits and draw counts (`sampling`), the actual
-`unit_gradient_calls`, the prepared `model`, and the run's `optimizer` state
+`unit_gradient_calls` (2 per visit of a unit, 2d per visit of a dense unit of
+d coordinates under `unit_curvature = :orthogonal`), the prepared `model`, and the run's `optimizer` state
 ([`brm_svi_optimizer_checkpoint`](@ref) copies it). The draws come from a copy
 of the optimizer's random stream: they do not advance `rng`, and a continued
 run is unaffected by them. The approximation is variational: posterior means
@@ -1600,7 +1871,12 @@ is too narrow.
 
 The prepared `model` keeps its minibatch target and worker samplers for its next
 fit or continuation in this process, so passing `diagnostics.model` (or the
-[`BRMNLMEModel`](@ref) you prepared) prepares neither again.
+[`BRMNLMEModel`](@ref) you prepared) prepares neither again. An `RKBRMI` keeps
+the model a call prepared from it, the last one: a later call on the same backend
+with the same `ad_backend`, `shared_point`, groupings and `unit_partition` takes
+that model and its target, and other options prepare another model, which the
+backend then keeps instead. A copy or a serialized backend keeps none. A `BRMI`
+is lowered to a new `RKBRMI`, and so prepared, on every call.
 `diagnostics.target` reports what this call did: `reused` (it took the model's
 target), `workers_built` and the `seconds` of that phase. A connected model's
 target is reused only for the same `global_coordinates`, separator policy,
@@ -1625,14 +1901,17 @@ end
 function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32,
         max_iterations=100_000, family=nothing, unit_sampling=nothing,
         unit_dense_limit=64, unit_rank=8,
-        lr_global=0.01, unit_step=0.1, start=nothing, inits=nothing,
-        global_scale=0.1, unit_scale=1.0, polish_lr=0.05, window=nothing,
+        lr_global=0.01, unit_step=nothing, unit_curvature=:orthogonal, start=nothing,
+        inits=nothing, global_scale=0.1, unit_scale=1.0, polish_lr=0.05, window=nothing,
         patience=10, min_windows=40, polish_windows=20,
         settle_windows=_BRM_SVI_SETTLE_WINDOWS, centering=nothing, kwargs...)
     family = _brm_svi_family(previous, family)
     settle_windows isa Integer && settle_windows >= 0 || throw(ArgumentError(
         "brm_svi_fit: settle_windows must be a nonnegative integer (0: polish straight " *
         "after exploration)"))
+    unit_curvature in (:orthogonal, :pair) || throw(ArgumentError(
+        "brm_svi_fit: unit_curvature must be :orthogonal or :pair, got $(repr(unit_curvature))"))
+    steps = _brm_svi_unit_steps(unit_step, unit_curvature)
     centering === nothing || centering isa LearnedCentering || throw(ArgumentError(
         "brm_svi_fit: centering must be LearnedCentering() or nothing, got $(repr(centering))"))
     previous === nothing || centering === nothing || throw(ArgumentError(
@@ -1653,8 +1932,9 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
             unit_dense_limit, unit_rank)
         centering === nothing || ((t, q) = _brm_svi_with_centering(t, q, centering))
         c = _brm_svi_controls(length(t.units); batch_size, max_iterations, lr_global,
-            unit_step, polish_lr, window, patience, min_windows, polish_windows,
-            settle_windows=Int(settle_windows), unit_sampling=something(unit_sampling,
+            steps..., polish_lr, window, patience, min_windows, polish_windows,
+            settle_windows=Int(settle_windows), unit_curvature,
+            unit_sampling=something(unit_sampling,
                 t.m.view.unit_partition === :connected ? :work : :uniform))
         t, _brm_svi_optimizer_state(t, previous, c, _brm_svi_run(rng, q, c, t))
     end

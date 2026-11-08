@@ -354,8 +354,9 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     body = _rk_rename_symbols(Expr(:block, local_statements...), renames)
     push!(body.args, _rk_component_return(component))
     params = Symbol[component.inputs...]
+    arguments = _brm_component_arguments(component, call)
     args = Any[_rk_value_expr!(bindings, _brm_prepare_expr(value), taken)
-        for value in _brm_component_arguments(component, call)]
+        for value in arguments]
     columns = merge(_rk_source_data_columns(plan, emitted), Dict(_rk_extent_bindings(plan)))
     column_names = Dict{Symbol,Any}(input => arg for (input, arg) in zip(params, args))
     local_reads = _rk_source_symbols!(Set{Symbol}(), body)
@@ -403,8 +404,13 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
                 NamedTuple{keys(record)}(Tuple(get(renames, value, value) for value in values(record)))
         end
     end
+    # The caller's name for each input the call passes a named value to
+    # (`kin ~ f(subject)`): the NLME view reads a block the component groups by
+    # that input as a block over the caller's column (`_brm_nlme_records`).
+    inputs = Dict{Symbol,Symbol}(input => name(value)
+        for (input, value) in zip(component.inputs, arguments) if value isa NamedColumn)
     metadata = (; definition=component, source=instance, plan, entry, renames, row_cells,
-        coordinates)
+        coordinates, inputs)
     (; kind=:component, fit_inputs=outer_fits, observed, component=metadata)
 end
 

@@ -20,8 +20,11 @@
 # population coefficients, zero without one). In the block's margin order, cell
 # m given the earlier cells has location μ_m = μ0_m + Σ_{k<m} A[m, k] z_k and log
 # scale ℓ_m = log A[m, m]; the map is applied cell by cell in that order, so it
-# stays triangular. Authored Gaussian vectors read their law's mean and scale per
-# element, `<x>_prior_mean` and `<x>_prior_scale`, which RK names for them.
+# stays triangular. A level of a block over a `shared_groups` grouping whose
+# draws one unit owns is centred in that unit the same way, located at the
+# population coefficients its margins absorb (zero without one). Authored
+# Gaussian vectors read their law's mean and scale per element,
+# `<x>_prior_mean` and `<x>_prior_scale`, which RK names for them.
 #
 # SVI fits q over u and the controls jointly by the ELBO of
 #
@@ -254,6 +257,11 @@ struct _BRMSVICenteringPlan{R,P}
     # Authored vector elements of carried units absent from this window, by
     # packed position: (mean port, scale port, element).
     absent::Dict{Int,NTuple{3,Int}}
+    # The same for a shared grouping's levels (`shared_groups`), whose draws a
+    # carried unit holds by packed name: position => (instance, margin), each
+    # instance over its level's margins 1:K, located through the frame's point.
+    absent_blocks::Dict{Int,Tuple{Int,Int}}
+    absent_instances::Vector{_BRMSVICenteringBlock}
     read::R
     pullback::P
     base::Vector{Float64}
@@ -308,8 +316,10 @@ end
 
 # The cells of target `t`: each instance of an estimated random-effect family
 # whose draws one unit owns, located at its mu-referenced population coefficients
-# (`BRMNLMEView.mu_references`), and each authored Gaussian vector element a unit
-# owns whose law reads no unit coordinate.
+# (`BRMNLMEView.mu_references`); each level of a block over a `shared_groups`
+# grouping whose draws one unit owns, located at the coefficients its margins
+# absorb (`_brm_svi_location_references`); and each authored Gaussian vector
+# element a unit owns whose law reads no unit coordinate.
 function _brm_svi_centering_plan(t, centering::LearnedCentering)
     m = t.m
     view = m.view
@@ -324,7 +334,18 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
         length(ports)
     end
     families = NamedTuple[]
-    family_slot = Dict{Tuple{Int,Any},Int}()
+    # Keyed by the view's family for a unit's own block, by (family, level row) for
+    # a grouped HSGP's, whose by-level scales are one family per level, and by
+    # (draws, stratum) for a shared grouping's block, which the view gives no family.
+    family_slot = Dict{Any,Int}()
+    function family!(key, record, K, stratum; spectral=false)
+        get!(family_slot, key) do
+            foreach(port!, isnothing(record.scales) ? (record.scale,) : record.scales)
+            isnothing(record.L) || port!(record.L)
+            push!(families, (; record, K, stratum, spectral))
+            length(families)
+        end
+    end
     N = length(t.units)
     instances = [_BRMSVICenteringInstance[] for _ in 1:N]
     ncells = zeros(Int, N)
@@ -378,13 +399,11 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
                     coordinates=view.coordinates[packed], reason))
                 continue
             end
-            record, stratum = hsgp ? _brm_svi_spectral_family(family.record,
-                first(labels).level) : (family.record, family.stratum)
-            slot = get!(family_slot, (f, stratum)) do
-                foreach(port!, isnothing(record.scales) ? (record.scale,) : record.scales)
-                isnothing(record.L) || port!(record.L)
-                push!(families, (; family=f, record, K, stratum, spectral=hsgp))
-                length(families)
+            slot = if hsgp
+                record, stratum = _brm_svi_spectral_family(family.record, first(labels).level)
+                family!((f, stratum), record, K, stratum; spectral=true)
+            else
+                family!(f, family.record, K, family.stratum)
             end
             cellrange = (ncells[i] + 1):(ncells[i] + K)
             ncells[i] += K
@@ -397,8 +416,84 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
             end
         end
     end
-    absent = Dict{Int,NTuple{3,Int}}()
     absent_set = Set(hasproperty(t.ownership, :absent) ? t.ownership.absent : Int[])
+    # Blocks over a grouping crossed with the units (`shared_groups`): the view
+    # reads every draw as a shared latent, but inference ownership gives a level
+    # that one unit reads to that unit, so its draws are centred there as a
+    # unit's own block's are. A level a carried absent unit holds keeps an
+    # instance over its margins, so its draws map through that unit's controls.
+    absent_blocks = Dict{Int,Tuple{Int,Int}}()
+    absent_instances = _BRMSVICenteringBlock[]
+    shared_records = [r for r in _brm_nlme_records(m.backend.plan)
+        if r.kind in (:ranef, :stratified_ranef) && r.group in view.shared_groups]
+    references = isempty(shared_records) ? nothing : _brm_svi_location_references(m)
+    position = Dict(name => j for (j, name) in enumerate(view.coordinates))
+    columns = m.backend.plan.columns
+    for record in shared_records
+        K = length(record.margins)
+        levels = _rk_ranef_record_levels(m.backend, record)
+        record_block = _brm_nlme_block_identity(record)
+        stratified = record.kind === :stratified_ranef
+        strata = stratified ? Any[_rk_grouping_levels(columns[record.by])...] : nothing
+        stratum_of = stratified ? _brm_level_strata(columns[record.group], columns[record.by],
+            levels, strata, record; caller="brm_svi_fit", unseen=0) : nothing
+        # The view checks none of these for a shared grouping's block.
+        block_reason = get(record, :mixing, nothing) !== nothing ?
+                "a Student-t block's scale reads its levels' mixing weights" :
+            haskey(record, :level_correlation) ?
+                "its levels are correlated with each other (`gr(...; cor=...)`)" :
+            haskey(record, :known_scales) || haskey(record, :known_cor) ?
+                "its scale or correlation is a known value, not read as a graph value" :
+                nothing
+        for (g, level) in enumerate(levels)
+            packed = [get(position, Symbol(record.z, ".", g, ".", k), 0) for k in 1:K]
+            any(iszero, packed) && continue    # not a packed draw of this binding
+            s = stratified ? stratum_of[g] : nothing
+            block = stratified && s != 0 ? (; record_block..., stratum=strata[s]) : record_block
+            i = owner[first(packed)]
+            absent = all(in(absent_set), packed)
+            reason = block_reason !== nothing ? block_reason :
+                s == 0 ? "its level has no row, so its stratum is unknown" :
+                absent ? nothing :
+                i == 0 || any(j -> owner[j] != i, packed) ? "its draws are not one unit's" :
+                    nothing
+            location = [Tuple{Int,Float64}[] for _ in 1:K]
+            for (k, (predictor, coefficient)) in enumerate(record.margins), (p, _) in
+                    get(references, _brm_svi_margin_key(record_block, predictor, coefficient), ())
+                reason === nothing || break
+                # A shared level's design is 1 (`_brm_svi_location_change`). An
+                # absent level reads its location from the frame's whole point.
+                if absent || owner[p] == 0
+                    push!(location[k], (absent || !haskey(global_index, p) ? -p :
+                        global_index[p], 1.0))
+                else
+                    reason = "its population location is a unit coordinate"
+                end
+            end
+            if reason !== nothing
+                push!(uncentered, (; kind=:ranef, block, level,
+                    coordinates=view.coordinates[packed], reason))
+                continue
+            end
+            slot = family!((record.z, s), record, K, s)
+            if absent
+                push!(absent_instances, _BRMSVICenteringBlock(slot, collect(1:K), 1:K, location))
+                for k in 1:K
+                    absent_blocks[packed[k]] = (length(absent_instances), k)
+                end
+                continue
+            end
+            cellrange = (ncells[i] + 1):(ncells[i] + K)
+            ncells[i] += K
+            push!(instances[i], _BRMSVICenteringBlock(slot,
+                [local_index[i][j] for j in packed], cellrange, location))
+            for (k, (predictor, coefficient)) in enumerate(record.margins)
+                push!(cells[i], (; kind=:ranef, block, predictor, coefficient, level,
+                    coordinate=view.coordinates[packed[k]], located=!isempty(location[k])))
+            end
+        end
+    end
+    absent = Dict{Int,NTuple{3,Int}}()
     for record in _brm_nlme_records(m.backend.plan)
         record.kind === :vector && get(record, :gaussian, nothing) !== nothing || continue
         owned = Dict{Int,Vector{Tuple{Int,Int}}}()
@@ -474,7 +569,7 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
     read = isempty(names) ? nothing : _rk_value_reader(m.backend, names)
     pullback = isempty(names) ? nothing : _rk_value_pullback(m.backend, names, copy(m.unit))
     _BRMSVICenteringPlan(centering.start, centering.step, names, families, instances, ncells, cells,
-        uncentered, absent, read, pullback, copy(m.unit))
+        uncentered, absent, absent_blocks, absent_instances, read, pullback, copy(m.unit))
 end
 
 # The values every cell of an iteration reads, at the globals `g`: the ports'
@@ -641,7 +736,9 @@ function _brm_svi_centering_batch_gradient(plan::_BRMSVICenteringPlan, t, frame,
     terms = Tuple{Int,Int,Float64}[]
     locations = zeros(length(t.globals))
     for (k, unit) in enumerate(centered)
-        w = weights[k] / 2
+        # A unit evaluated on an orthogonal design (`unit_curvature = :orthogonal`)
+        # brings 2d draws, each weighted 1/d of a pair's draw.
+        w = weights[k] / 2 * (hasproperty(unit, :weight) ? unit.weight : 1.0)
         for a in unit.adjoints
             for (ϕ, x) in enumerate(a.A)
                 Ā[ϕ] .+= w .* x
@@ -809,16 +906,37 @@ function _brm_svi_location_adjoint!(gy, adjoint, inst::_BRMSVICenteringVector, n
 end
 
 # An absent carried unit's draw `z` in its learned frame, mapped to the packed
-# coordinates at `destination` (the draw's frame): its centered vector elements.
+# coordinates at `destination` (the draw's frame): its centered vector elements,
+# and its centred levels of a shared grouping's block, each in margin order.
 function _brm_svi_absent_draw!(z, plan::_BRMSVICenteringPlan, frame, unit, source, destination)
     hasproperty(unit, :centering) || return z
+    levels = Dict{Int,Vector{Int}}()
     for (k, j) in zip(source, destination)
         x = unit.centering[k]
         isnan(x) && continue
+        if haskey(plan.absent_blocks, j)
+            b, n = plan.absent_blocks[j]
+            get!(() -> zeros(Int, length(plan.absent_instances[b].positions)), levels, b)[n] = k
+            continue
+        end
+        haskey(plan.absent, j) || throw(ArgumentError("brm_svi_fit: the absent " *
+            "carried unit's coordinate `$(unit.keys[k].coordinate)` was centred, but " *
+            "this window cannot centre it, so its carried factor cannot be mapped to " *
+            "the packed draws"))
         mean, scale, element = plan.absent[j]
         _, z[k] = _brm_svi_cell(1.0, _brm_svi_control(x), z[k],
             _brm_svi_element(frame.values[mean], element),
             log(_brm_svi_element(frame.values[scale], element)))
+    end
+    for (b, ks) in levels
+        all(>(0), ks) || error("brm_svi_fit: internal: an absent unit's centred level " *
+            "carries controls for only some of its margins")
+        u = z[ks]
+        y = similar(u)
+        μ, ℓ = zero(u), zero(u)
+        _brm_svi_centering_forward!(y, μ, ℓ, u, plan.absent_instances[b],
+            _brm_svi_control.(unit.centering[ks]), frame, nothing, frame.point)
+        z[ks] .= y
     end
     z
 end

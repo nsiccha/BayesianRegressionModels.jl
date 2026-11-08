@@ -71,20 +71,26 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
         key = _brm_nlme_block_identity(record)
         stratum = isnothing(family.stratum) ? nothing : _brm_transport_level(
             _rk_grouping_levels(rk.plan.columns[record.by])[family.stratum])
+        # The transport addresses a component call's block by the call's own
+        # grouping, `|ID|` and margins under its path (`scope`).
+        address = get(record, :call_block, (; record.group, record.id, record.margins))
+        scope = get(record, :scope, ())
         scales = BRMCoordinatePair[]
-        for margin in record.margins
+        for (margin, call_margin) in zip(record.margins, address.margins)
             matches = [p for p in transport.pairs
                 if p.address.kind === :ranef_scale &&
-                   p.address.group === record.group && isequal(p.address.id, record.id) &&
+                   p.address.group === address.group && isequal(p.address.id, address.id) &&
+                   isequal(get(p.address, :scope, ()), scope) &&
                    isequal(get(p.address, :stratum, nothing), stratum) &&
-                   p.address.margin == margin]
+                   p.address.margin == call_margin]
             length(matches) == 1 || _brm_nlme_error(
                 "brm_nlme_joint_map: random-effect scale for $key / $margin " *
                 "has $(length(matches)) semantic Stan matches")
             push!(scales, only(matches))
         end
         factors = [f for f in transport.correlations
-            if f.group === record.group && isequal(f.id, record.id) &&
+            if f.group === address.group && isequal(f.id, address.id) &&
+               isequal(get(f, :scope, ()), scope) &&
                isequal(get(f, :stratum, nothing), stratum)]
         length(factors) == (isnothing(record.L) ? 0 : 1) || _brm_nlme_error(
             "brm_nlme_joint_map: correlation factor for $key is not paired")

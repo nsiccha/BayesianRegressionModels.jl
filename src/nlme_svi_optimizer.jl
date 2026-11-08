@@ -247,7 +247,8 @@ function _brm_svi_consistent(run::_BRMSVIRun, t, c)
             length(run.sampling.draws) == length(run.averaged_through) ==
             length(run.unit_entropy) == N &&
         run.sampling.method == c.unit_sampling &&
-        run.unit_gradient_calls == 2sum(run.sampling.visits) &&
+        run.unit_gradient_calls ==
+            sum(i -> run.sampling.visits[i] * _brm_svi_unit_calls(q, i, c), 1:N; init=0) &&
         sum(run.sampling.draws) == c.batch_size * run.iteration
 end
 
@@ -325,8 +326,9 @@ code and captured values, so the same source continues in another driver, at
 another line or after other definitions; a named function compares by its module
 and name. In the same process, pass `fit.diagnostics.model` (or the `BRMNLMEModel`
 the fit was given): it prepares neither the model nor its target and worker samplers
-again (`diagnostics.target.reused`, [`brm_svi_fit`](@ref)), whereas a `BRMI` or
-`RKBRMI` prepares both on every call.
+again (`diagnostics.target.reused`, [`brm_svi_fit`](@ref)). So does an `RKBRMI` an
+earlier call prepared a model from with the same `ad_backend`, `shared_point` and
+groupings, since it keeps that model; a `BRMI` prepares both on every call.
 The program compares without the file and line of its macro calls (an emitted
 `@kernel` definition), so the same model also continues from another checkout,
 depot, host or BRM version. A checkpoint from an earlier version digested those

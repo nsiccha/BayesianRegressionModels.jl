@@ -49,16 +49,56 @@ svi_held(m) = m.svi_target.prepared
     @test svi_same_result(other, brm_svi_fit(svi_prepared(data); rng=Xoshiro(103), SVI_RUN...,
         stop_after=50, ndraws=5))
 
-    # A model in the result of an unprepared input continues the same way, and
-    # an RKBRMI or BRMI prepares a model, and so a target, on every call.
+    # A model in the result of an unprepared input continues the same way. An
+    # RKBRMI keeps the model it prepared, so a later call on it with the same
+    # options prepares neither the model nor its target (BRM 0.2.251); a BRMI
+    # lowers to a new RKBRMI, and so prepares both, on every call.
     rk = RKBRMI(svi_gauss_model(data))
     started = brm_svi_fit(rk; ad_backend=NLME_AD, rng=Xoshiro(102), SVI_RUN...,
         stop_after=37, ndraws=0)
     @test !started.diagnostics.target.reused
     @test brm_svi_resume(started.diagnostics.model, started; stop_after=1,
         ndraws=0).diagnostics.target.reused
-    @test !brm_svi_resume(rk, started; ad_backend=NLME_AD, stop_after=1,
-        ndraws=0).diagnostics.target.reused
+    again = brm_svi_resume(rk, started; ad_backend=NLME_AD, stop_after=1, ndraws=0)
+    @test again.diagnostics.model === started.diagnostics.model
+    @test again.diagnostics.target.reused
+    # It is the run on a model prepared for it alone.
+    fresh = brm_svi_resume(svi_prepared(data), started; stop_after=1, ndraws=0)
+    @test svi_same_result(again, fresh)
+    # Another fit on the backend reuses them too, and gives a fresh model's run.
+    refit = brm_svi_fit(rk; ad_backend=NLME_AD, rng=Xoshiro(103), SVI_RUN...,
+        stop_after=50, ndraws=5)
+    @test refit.diagnostics.model === started.diagnostics.model
+    @test refit.diagnostics.target.reused
+    @test svi_same_result(refit, other)
+    # Other options decide another model: the backend then holds that one.
+    grouped = brm_svi_fit(rk; ad_backend=NLME_AD, subject_group=:subject,
+        rng=Xoshiro(103), SVI_RUN..., stop_after=1, ndraws=0)
+    @test grouped.diagnostics.model !== started.diagnostics.model
+    @test !grouped.diagnostics.target.reused
+    @test rk.prepared.nlme.model === grouped.diagnostics.model
+    @test !brm_svi_fit(rk; ad_backend=NLME_AD, rng=Xoshiro(103), SVI_RUN...,
+        stop_after=1, ndraws=0).diagnostics.target.reused
+    # A BRMI prepares on every call.
+    brmi = svi_gauss_model(data)
+    @test !brm_svi_fit(brmi; ad_backend=NLME_AD, rng=Xoshiro(103), SVI_RUN...,
+        stop_after=1, ndraws=0).diagnostics.target.reused
+    @test !brm_svi_fit(brmi; ad_backend=NLME_AD, rng=Xoshiro(103), SVI_RUN...,
+        stop_after=1, ndraws=0).diagnostics.target.reused
+    # One authored-factor catalogue per backend serves the view's scan and every
+    # target's ownership, so no later preparation plans the program for it again.
+    catalogue = rk.prepared.factors.value
+    @test catalogue !== nothing
+    @test BRM._rk_svi_factors(rk, started.diagnostics.model.unit).catalogue === catalogue
+    @test grouped.diagnostics.model.backend === rk
+    # The model does not travel with the backend's value.
+    @test rk.prepared.nlme !== nothing
+    @test deepcopy(rk).prepared.nlme === nothing
+    @test deepcopy(rk).prepared.factors.value === nothing
+    io = IOBuffer()
+    serialize(io, rk.prepared)
+    @test position(io) < 200
+    @test deserialize(seekstart(io)).nlme === nothing
 end
 
 @stestset "a changed model is refused, and a refusal keeps the target" begin
