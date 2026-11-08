@@ -100,7 +100,9 @@ function _brm_svi_identity(t)
        global_coordinates=hasproperty(t, :ownership) ?
            copy(m.view.coordinates[_brm_svi_requested_globals(t)]) : Symbol[],
        separator=hasproperty(t, :ownership) ? _brm_svi_separator_options(t) : (; separator=:none),
-       field_states=get(t, :fields, nothing) === nothing ? :global : :units)
+       # The minibatch engine's target is a NamedTuple; GaussianBlockLaplace's is a
+       # struct, with no unit-owned field states and no `get`.
+       field_states=hasproperty(t, :fields) && getproperty(t, :fields) !== nothing ? :units : :global)
 end
 
 _brm_svi_optimizer_state(t, previous, c, run) = BRMSVIOptimizerState(
