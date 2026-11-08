@@ -15,7 +15,7 @@ instead of failing at run time.
 ## 0.2.253
 
 - Fixed: `brm_svi_fit`'s structured units (above `unit_dense_limit`) default to
-  `unit_step = 0.1` under either `unit_curvature`. BRM 0.2.248 and 0.2.249 gave them
+  `unit_step = 0.1` under either `unit_curvature`. BRM 0.2.248 through 0.2.252 gave them
   the dense units' default of 1 under `:orthogonal`, though the entry for 0.2.248
   called them unchanged: their step is Adam's step size, not a natural-gradient step
   to take whole. A step you pass still applies to both families.
@@ -36,7 +36,7 @@ instead of failing at run time.
   at the whole step lost to it in 6 of them.
 - Changed: a fit of a model with a structured unit differs from its first visit of
   such a unit, its rank part from then on in every version, its mean and scales
-  against 0.2.248 and 0.2.249. Mean-field fits read higher ELBOs too (one station's
+  against 0.2.248 through 0.2.252. Mean-field fits read higher ELBOs too (one station's
   trimmed window 62-68 against 20-34). Dense units and checkpoints are unchanged: a
   checkpoint written before this version resumes at the steps it ran with.
 - Added: `BRMSVINonfiniteError`'s `terms` carry the evaluated points. Each term has
