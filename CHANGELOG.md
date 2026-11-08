@@ -12,6 +12,38 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.260
+
+- New, **a stopgap**: in minibatch SVI (`brm_svi_fit` and its resume), a global
+  whose prior reads no other coordinate no longer drifts far wider than that
+  prior. Adam steps a coordinate by about its step size whatever its gradient
+  noise, so where the noise dwarfs the prior's pull the factor's scale and rank
+  row random-walk, and where the gradient grows with the draw (a log length
+  inside a random-feature phase) a wider factor meets larger noise: one such log
+  length under a N(-1.386, 0.5) prior reached a marginal sd of 378 in
+  exploration and overflowed the density. Its marginal sd under q, `√(exp(2ρ_k)
+  + |Β_k|²)`, is now held at most `sd_bound` (a new keyword, default `2`) times
+  the sd of the Gaussian closest to its prior (the factor a fit on no data would
+  reach). This treats the symptom: the optimizer still does not see the prior
+  through that noise, the mean can still wander, and where a posterior is wider
+  than the bound (a heavy-tailed prior under prior-data conflict, a periodic or
+  multimodal likelihood) q is held too narrow. So a fit that ends with a global
+  at its bound warns and names it, `diagnostics.sd_bound` reports the `factor`,
+  each global's `bound` and those `at_bound` (with `stopgap = true`), and
+  `sd_bound=nothing` turns the bound off. Globals whose prior reads others
+  (centered field states, their lengths) and flat priors have no bound. A fit
+  whose factor stays inside the bound is unchanged to the last bit, checkpoints
+  keep their layout, and a checkpoint written before this version resumes with
+  the default bound. A global whose prior sd is below half of `global_scale`
+  (0.1 by default), where every global starts, is at its bound from the first
+  step on instead of shrinking there over hundreds of iterations, so such a fit
+  differs from its first step: on one model a coordinate with prior sd 1e-6
+  still had sd 0.008 after 2,000 iterations.
+- Fixed: every `GaussianBlockLaplace` fit failed while building its optimizer
+  state, with `MethodError: no method matching get(::_BRMSVILaplaceTarget,
+  ...)`, since the unit-owned field states of `field_states=:units` (BRM
+  0.2.237).
+
 ## 0.2.259
 
 - Changed: `brm_svi_fit` gives a `@plate` cell latent's entries

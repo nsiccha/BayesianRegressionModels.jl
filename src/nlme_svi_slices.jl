@@ -268,12 +268,17 @@ const _BRM_SVI_PRIOR_FLOOR = 1e-8
 # natural-gradient rule the units use: precision from Stein's lemma on an
 # antithetic pair, mean by a Newton step, each damped and trust-bounded, and
 # Polyak-averaged over the second half. A coordinate whose prior gradient is
-# zero at every draw has a flat prior: precision 0.
-function _brm_svi_prior_projection(t; rng, pairs=16, iterations=150, step=0.5)
+# zero at every draw has a flat prior: precision 0. A gradient that is not
+# finite at a draw throws (`nonfinite=:error`, for `brm_svi_combine`), or, with
+# `nonfinite=:flat`, leaves that coordinate out of the projection as if flat.
+# `term(t, g)` evaluates P(g) and its gradient.
+function _brm_svi_prior_projection(t; rng, pairs=16, iterations=150, step=0.5,
+        nonfinite=:error, term=_brm_svi_global_term)
     D = length(t.globals)
     m = _brm_svi_start(t.m, nothing, nothing)[t.globals]
     p = ones(D)
     flat = trues(D)
+    excluded = falses(D)
     mean_sum, precision_sum, averaged = zeros(D), zeros(D), 0
     G, H = zeros(D), zeros(D)
     for iteration in 1:iterations
@@ -283,12 +288,21 @@ function _brm_svi_prior_projection(t; rng, pairs=16, iterations=150, step=0.5)
         for _ in 1:pairs
             ε = randn(rng, D)
             δ = ε ./ root
-            _, up = _brm_svi_global_term(t, m .+ δ)
-            _, down = _brm_svi_global_term(t, m .- δ)
-            all(isfinite, up) && all(isfinite, down) || throw(ArgumentError(
-                "brm_svi_combine: the prior gradient is not finite at a draw of its " *
-                "Gaussian projection, at " * join(string.(t.m.view.coordinates[t.globals[
-                findall(j -> !(isfinite(up[j]) && isfinite(down[j])), 1:D)]]), ", ")))
+            _, up = term(t, m .+ δ)
+            _, down = term(t, m .- δ)
+            if !(all(isfinite, up) && all(isfinite, down))
+                bad = findall(j -> !(isfinite(up[j]) && isfinite(down[j])), 1:D)
+                nonfinite === :flat || throw(ArgumentError(
+                    "brm_svi_combine: the prior gradient is not finite at a draw of its " *
+                    "Gaussian projection, at " * join(string.(t.m.view.coordinates[
+                    t.globals[bad]]), ", ")))
+                excluded[bad] .= true
+            end
+            if any(excluded)
+                up, down = copy(up), copy(down)
+                up[excluded] .= 0.0
+                down[excluded] .= 0.0
+            end
             @. flat &= (up == 0) & (down == 0)
             @. G += (up + down) / 2
             @. H -= (up - down) / 2 * ε * root
@@ -306,6 +320,7 @@ function _brm_svi_prior_projection(t; rng, pairs=16, iterations=150, step=0.5)
         end
     end
     precision = precision_sum ./ averaged
+    flat .|= excluded
     precision[flat] .= 0.0
     (; mean=mean_sum ./ averaged, precision, flat, pairs, iterations)
 end

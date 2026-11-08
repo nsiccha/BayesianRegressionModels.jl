@@ -5,6 +5,8 @@ struct RKBRMI end
 struct BRMNLMEModel end
 include(joinpath(@__DIR__, "..", "src", "nlme_selection.jl"))
 include(joinpath(@__DIR__, "..", "src", "nlme_svi.jl"))
+# The iteration reads the sd bound (a stopgap); a target without `sd_prior` has none.
+include(joinpath(@__DIR__, "..", "src", "nlme_svi_sd_bound.jl"))
 include(joinpath(@__DIR__, "..", "src", "nlme_svi_unit_streaming.jl"))
 struct GaussianUnits
     globals::Vector{Int}
