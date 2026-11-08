@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.249
+
+- Fixed: `brm_svi_fit(...; centering=LearnedCentering())` centres the levels of a
+  random-effect block over a `shared_groups` grouping whose draws one unit owns,
+  as it does a unit's own block, and lists the others in
+  `fit.diagnostics.centering.uncentered` with the reason. Such a block was in
+  neither `cells` nor `uncentered` before. A level's cells are located at the
+  population coefficients its margins absorb (`(1 | device)` takes the
+  intercept unless a units' block already does), at 0 without one. A level two
+  units read is global (`"its draws are not one unit's"`), and Student-t,
+  level-correlated (`gr(g; cor=...)`) and known-scale shared blocks are listed
+  with their own reasons. A streaming window maps an absent carried unit's
+  centred level through that unit's controls. A centred fit of a model with such
+  a block differs from its first step on; models without one are unchanged.
+
 ## 0.2.248
 
 - Changed: `brm_svi_fit`'s dense units (at most `unit_dense_limit` coordinates)
