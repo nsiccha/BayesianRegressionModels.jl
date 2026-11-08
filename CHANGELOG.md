@@ -12,6 +12,26 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.254
+
+- New: `brm_svi_fit(x; centering=LearnedCentering())` also centres the weights of
+  a grouped HSGP whose levels are the units (`hsgp(t; by=subject)`): each level's
+  standardized weights are cells located at 0 and scaled by the term's spectral
+  scales, per level when a hyper-predictor scales `sd` or `length_scale` by
+  level. `fit.diagnostics.centering.cells` lists them with `kind=:hsgp`. A mode
+  whose scale underflows is floored in log scale, as WarmupHMC's adaptive HSGP
+  centering floors it, so its frame stays finite; the floor moves coordinates,
+  not the target.
+- Still uncentred, and listed in `uncentered` with the reason: levels correlated
+  by `cor=` (`cor=Omega`, `multigroup`) and an HSGP's weights shared by the units,
+  which are global coordinates. `brm_svi_centeredness` hands WarmupHMC random-effect
+  cells only; its HSGP rows keep their current values.
+- **Breaking:** every HSGP term's emitted program changes, because its spectral
+  scales are now a value of the program, `<id>.spectral_scale`. Values and
+  gradients are unchanged, but an existing SVI or SMC optimizer checkpoint or
+  streaming state of an HSGP model is refused, as for any changed program, whether
+  or not it uses centering. Finish such a run on its own version or restart it.
+
 ## 0.2.253
 
 - Fixed: `brm_svi_fit`'s structured units (above `unit_dense_limit`) default to
