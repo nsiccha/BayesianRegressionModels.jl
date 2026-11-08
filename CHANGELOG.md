@@ -33,9 +33,10 @@ instead of failing at run time.
     the model gets a `shared_point`. No population coefficient is mu-referenced
     through it, and SVI leaves its draws uncentred. SAEM moves those scales by its
     numerical M-step alone. On a 30-subject linear Gaussian model at the default
-    options it ended 0.10 to 0.97 log marginal likelihood units below FOCE(I)'s exact
-    maximum over four seeds (0.006 to 0.43 at 1600 iterations over three), against
-    0.01 to 0.12 for known scales under a sampled correlation.
+    options its estimate's log marginal likelihood ended 0.10 to 0.97 units below
+    that of FOCE(I)'s estimate, which sits at the exact log posterior's maximum, over
+    four seeds (0.006 to 0.43 at 1600 iterations over three), against 0.01 to 0.12
+    for known scales under a sampled correlation.
   - `brm_nlme_estimates` names such a block in natural units with `known_sd` (each
     margin's known SD, `nothing` at a sampled one) and `known_cor = true`, as they
     apply. Its `sd` and `cor` go back through `brm_start`.
