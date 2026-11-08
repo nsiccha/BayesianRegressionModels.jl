@@ -9,9 +9,10 @@
 # Gaussian vector the units own, and a block over a `shared_groups` grouping
 # whose levels units own (an absent carried unit's level mapped through its
 # controls in the next window). A sparse global that is a centred cell's scale
-# steps on sites that see its readers' whole centered terms. A fit learns
-# controls that rise with a unit's data, returns draws in the packed RK
-# coordinates, and resumes bit for bit.
+# steps on sites that see its readers' whole centered terms. A grouped HSGP's
+# weights are cells scaled by its spectral scales, and its centered fit beats
+# the plain one against NUTS. A fit learns controls that rise with a unit's
+# data, returns draws in the packed RK coordinates, and resumes bit for bit.
 #
 # RUN: julia --project=test test/nlme_svi_centering.jl [testset-filter...]
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
@@ -403,6 +404,64 @@ end
     c = [cell.c for cell in fit.diagnostics.centering.cells if cell.kind === :hsgp]
     @test length(c) == 12 && all(0 .< c .< 1)
     @test all(isfinite, fit.draws)
+end
+
+# Curves by subject, alternating 40 and 3 rows: a grouped HSGP's weights are
+# informed on the rich units and near their prior on the poor ones.
+function svi_centering_curve_data(; seed=1, N=12, rich=40, poor=3)
+    rng = Xoshiro(seed)
+    subject, t, y = String[], Float64[], Float64[]
+    for i in 1:N
+        n = isodd(i) ? rich : poor
+        a, b, c = 0.8randn(rng), 0.8randn(rng), 0.5randn(rng)
+        for _ in 1:n
+            x = 2rand(rng) - 1
+            push!(subject, "s$i"); push!(t, x)
+            push!(y, a * sin(pi * x) + b * cos(pi * x / 2) + c * x + 0.3randn(rng))
+        end
+    end
+    (; subject, t, y)
+end
+svi_centering_curve_model(d) = @brm d begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + hsgp(t; by=subject, k=5, domain=(-1.0, 1.0)) + (1 | subject)
+    y ~ Normal(mu, sigma)
+end
+
+# Measured with this data against 4x1000 NUTS draws (seeds 5, 6, 7, 2026-11-08).
+# With every cell starting at 0.5, the length scale ended 1.7 NUTS sds off with
+# 0.02 of NUTS's sd and the ELBO 5-6 nats below the plain fit's: HSGP cells start
+# from min(start, 0.1). With that start the length scale was 0.14-0.25 NUTS sds
+# off (plain 0.44-0.49) with 0.22-0.25 of NUTS's sd, the HSGP sd 0.54-0.69 off
+# (plain 0.79-0.84), the unit coordinates' rms error 0.10-0.13 (plain 0.17-0.18),
+# and the ELBO 1.7-2.1 nats above plain.
+@stestset "a grouped HSGP's centered fit against NUTS" begin
+    rk = RKBRMI(svi_centering_curve_model(svi_centering_curve_data()))
+    m = brm_nlme_model(rk; ad_backend=NLME_AD)
+    problem = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+    u0 = first(BRM_._brm_nlme_prior_median_point(m))
+    reference = reduce(hcat, map(1:4) do chain
+        run = adaptive_warmup_mcmc(Xoshiro(100 + chain), problem;
+            init=(; position=copy(u0), squared_scale=ones(length(u0))), n_draws=1000)
+        convert(Matrix{Float64}, run.posterior_position)
+    end)
+    μr, σr = vec(mean(reference; dims=2)), vec(std(reference; dims=2))
+    names = string.(coordinate_names(rk.model.layout))
+    rho, sd = findfirst(==("hsgp_t.rho"), names), findfirst(==("hsgp_t.sigma"), names)
+    options = (; batch_size=4, ndraws=2000)
+    plain = brm_svi_fit(m; options..., rng=Xoshiro(5))
+    fit = brm_svi_fit(m; options..., rng=Xoshiro(5), centering=LearnedCentering())
+    c = [cell.c for cell in fit.diagnostics.centering.cells if cell.kind === :hsgp]
+    @test length(c) == 5 * 12
+    mean_error(f) = abs.(vec(mean(f.draws; dims=2)) .- μr) ./ σr
+    ratio(f) = vec(std(f.draws; dims=2)) ./ σr
+    elbo(f) = mean(f.diagnostics.elbo[end-99:end])
+    locals = setdiff(eachindex(μr), fit.diagnostics.globals)
+    @test mean_error(fit)[rho] < 0.35 < mean_error(plain)[rho]
+    @test ratio(fit)[rho] > 0.15
+    @test mean_error(fit)[sd] < mean_error(plain)[sd]
+    @test sqrt(mean(abs2, mean_error(fit)[locals])) < 0.15
+    @test elbo(fit) > elbo(plain) + 1
 end
 
 # Measured with this data (seeds 5 and 6, 2026-11-07): the plain mean-field fit
