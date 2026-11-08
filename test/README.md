@@ -1532,7 +1532,9 @@ slice, a joint site's factor and its widening against closed forms, the between-
 variance, slices that contradict each other in either product (the plain product as
 the positive control), ridges that cross under priors they sit far from or of very
 different widths and from fits that left them too narrow, the fallback when a joint
-mean leaves what supports it, the refusals, `brm_start` effects addressed by level on a frozen replay
+mean leaves what supports it, coordinates `exclude` leaves out (each start equals the
+one from the same slices with those coordinates uninformed in every slice, joint sites
+and carried draws included), the refusals, `brm_start` effects addressed by level on a frozen replay
 that lacks some levels, slices whose scales differ 40-fold under a log link
 (carried, the first window beats a cold start and the old copy), and that real
 slice fits start the full fit near its optimum. About 15 minutes with loading

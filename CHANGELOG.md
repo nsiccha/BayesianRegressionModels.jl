@@ -12,6 +12,28 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.257
+
+- Added: `brm_svi_combine(x, slices; exclude)` leaves named global coordinates out
+  of the product of the slices' sites. Each starts as a coordinate no slice
+  informs, at the full model's default start (the prior-median point with the
+  fit's `global_scale`), exactly as if every slice had marked it uninformed, its
+  joint sites included, and draws are carried to that default where it is one of
+  their scales. It is for a coordinate whose meaning depends on the slice's
+  domain: a spatial field's amplitude fitted on one region measures the field's
+  variation inside that region, so regional slices all put it low, and the
+  between-slice variance and `spread`, which compare the slices with each other,
+  cannot see a bias they share. On a downstream
+  all-Germany model the 16 regional slices put such an amplitude at log −7.6
+  against a prior projection of −1.2, and the full fit from that start climbed
+  back only to −3.9 against −2.4 and −2.1 cold, with a higher ELBO but worse
+  held-out prediction at new stations. A name selects that coordinate and every
+  coordinate under it (`exclude=[:natural_field]` selects `natural_field.amplitude`
+  and `natural_field.z.3`); a function of a name selects where it returns `true`.
+  A name of no global coordinate, or a selection of nothing, is refused.
+  `receipt.globals.excluded` marks them; `informed` still counts their slices'
+  sites. Without `exclude` the start is unchanged.
+
 ## 0.2.256
 
 - Added: `brm_nlme_view`, and so `brm_nlme_model`, `brm_nlme_fit`,
