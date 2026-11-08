@@ -1485,7 +1485,11 @@ units matched by label and carried to the combined hyperparameters (an exact
 one-margin oracle with a mu-referenced intercept, and totals kept for
 correlated, stratified and unit-held shared blocks, read back through the NLME
 view), a global held inside two slices' units, frozen-replay slices, a low-rank
-slice, the refusals, `brm_start` effects addressed by level on a frozen replay
+slice, a joint site's factor and its widening against closed forms, the between-slice
+variance, slices that contradict each other in either product (the plain product as
+the positive control), ridges that cross under priors they sit far from or of very
+different widths and from fits that left them too narrow, the fallback when a joint
+mean leaves what supports it, the refusals, `brm_start` effects addressed by level on a frozen replay
 that lacks some levels, slices whose scales differ 40-fold under a log link
 (carried, the first window beats a cold start and the old copy), and that real
 slice fits start the full fit near its optimum. About 15 minutes with loading
