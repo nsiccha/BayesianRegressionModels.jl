@@ -4837,6 +4837,13 @@ Base.@nospecializeinfer function _rk_plan_ranef_buckets(@nospecialize(brmi::BRMI
                 "$prefix: `|$(bucket.id)|` holds a known scale or correlation over " *
                 "a `$(bucket.grouping.form)` grouping; known values are " *
                 "implemented for ordinary grouping factors only")
+            # A known scale reaches the program as an input, as a known
+            # correlation's factor does (user principle `0ikeidi`): the program
+            # stays the same across its values.
+            sd_priors = Any[p isa _BRMKnownScale ? _BRMKnownScale(p.value,
+                    _rk_mint_generated!(taken, columns,
+                        string(bucket.label, "_known_sd_", k))) : p
+                for (k, p) in enumerate(sd_priors)]
         end
         bucket.level_cor !== nothing && (dist !== nothing || decomposition !== nothing) &&
             error("$prefix: `|$(bucket.id)|` correlates the levels of " *

@@ -64,7 +64,8 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
     # has neither; the transport moves its draws.
     for family in _brm_nlme_families(rk, view)
         if family.fixed !== nothing
-            push!(blocks, (; family..., scales=BRMCoordinatePair[], factor=nothing))
+            push!(blocks, (; family..., scales=BRMCoordinatePair[], scale_margins=Int[],
+                factor=nothing))
             continue
         end
         record = family.record
@@ -76,7 +77,12 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
         address = get(record, :call_block, (; record.group, record.id, record.margins))
         scope = get(record, :scope, ())
         scales = BRMCoordinatePair[]
-        for (margin, call_margin) in zip(record.margins, address.margins)
+        # A known margin's scale is data on both sides; only a sampled one pairs.
+        held = _brm_nlme_held_sd(record)
+        scale_margins = held === nothing ? collect(eachindex(record.margins)) :
+            findall(isnothing, held)
+        for k in scale_margins
+            margin, call_margin = record.margins[k], address.margins[k]
             matches = [p for p in transport.pairs
                 if p.address.kind === :ranef_scale &&
                    p.address.group === address.group && isequal(p.address.id, address.id) &&
@@ -94,7 +100,7 @@ function brm_nlme_joint_map(rk::RKBRMI, sb::SBBRMI; path,
                isequal(get(f, :stratum, nothing), stratum)]
         length(factors) == (isnothing(record.L) ? 0 : 1) || _brm_nlme_error(
             "brm_nlme_joint_map: correlation factor for $key is not paired")
-        push!(blocks, (; family..., scales,
+        push!(blocks, (; family..., scales, scale_margins,
             factor=isempty(factors) ? nothing : only(factors)))
     end
     BRMNLMEJointMap(rk, sb, problem, stan_model, view, transport, blocks)
@@ -154,8 +160,10 @@ function _brm_nlme_joint_scale(values, record, K, stratum=nothing)
         value = _brm_rk_declaration_value(values, record.scale)
         _brm_nlme_stratum_scales(value, stratum)
     else
-        [_brm_nlme_stratum_entry(_brm_rk_declaration_value(values, name), stratum)
-            for name in record.scales]
+        known = get(record, :known_scales, nothing)
+        [isnothing(name) ? known[k] :
+            _brm_nlme_stratum_entry(_brm_rk_declaration_value(values, name), stratum)
+            for (k, name) in enumerate(record.scales)]
     end
     length(scales) == K || _brm_nlme_error(
         "NLME covariance: random-effect scale of `$(record.group)` has " *
@@ -177,20 +185,33 @@ _brm_nlme_stratum_entry(value, ::Nothing) = value
 _brm_nlme_stratum_entry(value::AbstractVector, stratum::Int) = value[stratum]
 _brm_nlme_stratum_entry(value::AbstractArray{<:Any,3}, stratum::Int) = value[:, :, stratum]
 
-# `diag(scale) L` of an estimated family at the constrained values.
+# `diag(scale) L` of a block at the constrained values, its known scales and
+# correlation included (a known margin's scale is its number; a known
+# correlation's factor the Cholesky factor of the matrix).
 function _brm_nlme_natural_factor(values, record, K, stratum)
     scale = _brm_nlme_joint_scale(values, record, K, stratum)
-    L = isnothing(record.L) ? Matrix{Float64}(I, K, K) :
-        Matrix{Float64}(_brm_nlme_stratum_entry(
-            _brm_rk_declaration_value(values, record.L), stratum))
+    known_cor = get(record, :known_cor, nothing)
+    L = !isnothing(record.L) ? Matrix{Float64}(_brm_nlme_stratum_entry(
+            _brm_rk_declaration_value(values, record.L), stratum)) :
+        !isnothing(known_cor) ? Matrix{Float64}(cholesky(Symmetric(known_cor)).L) :
+        Matrix{Float64}(I, K, K)
     size(L) == (K, K) || _brm_nlme_error(
         "NLME covariance: correlation factor of `$(record.group)` has size " *
         "$(size(L)), expected ($K, $K)")
     Diagonal(scale) * L
 end
 
-# The natural covariance of every family and the natural subject effects at a
-# full RK unconstrained point: η = diag(scale) L z for each block instance.
+# The factor taking a family's standardized draws to its η: `diag(scale) L`, where
+# a known margin's η is its effect over its known SD, so its scale here is 1.
+function _brm_nlme_eta_factor(values, record, K, stratum)
+    A = _brm_nlme_natural_factor(values, record, K, stratum)
+    known = get(record, :known_scales, nothing)
+    known === nothing ? A : Diagonal([k === nothing ? 1.0 : inv(k) for k in known]) * A
+end
+
+# The covariance of every family and the subject effects at a full RK
+# unconstrained point, on the estimators' scale: η = diag(scale) L z for each block
+# instance (`_brm_nlme_eta_factor`), the natural effects at every sampled margin.
 # `omega` is one matrix per family for a nested view and one block-diagonal
 # matrix otherwise; `eta` follows the view's subject order and compact layout.
 function _brm_nlme_natural(rk::RKBRMI, view::BRMNLMEView, families, u::AbstractVector)
@@ -204,7 +225,7 @@ function _brm_nlme_natural(rk::RKBRMI, view::BRMNLMEView, families, u::AbstractV
     for (; family, record, stratum, fixed, indices) in families
         K = length(indices)
         A = fixed !== nothing ? Matrix{Float64}(cholesky(Symmetric(fixed)).L) :
-            _brm_nlme_natural_factor(values, record, K, stratum)
+            _brm_nlme_eta_factor(values, record, K, stratum)
         if ragged
             omega[family] = A * A'
         else
@@ -231,9 +252,10 @@ Read a complete Stan unconstrained point back as
 population coordinates; `shared` contains the names and unconstrained values
 of shared latent coordinates in RK order, whether they were fitted or fixed.
 `omega` is the covariance matrix
-of natural effects; columns of `eta` follow `subjects` in the NLME view's
-grouping-level order. The inverse uses the validated semantic transport and
-the actual RK constrained scale/correlation values.
+of natural effects (a known margin's η is its effect over its known SD); columns of
+`eta` follow `subjects` in the NLME view's grouping-level order. The inverse uses
+the validated semantic transport and the actual RK constrained scale/correlation
+values.
 """
 function brm_nlme_joint_values(map::BRMNLMEJointMap, stan_u::AbstractVector)
     t, view = map.transport, map.view
@@ -380,10 +402,10 @@ function brm_nlme_joint_start(map::BRMNLMEJointMap; theta, sigma, omega, eta,
         constrained[i] = value
     end
     for (; block, scales, Lcorr) in covariance
-        for (pair, scale) in zip(block.scales, scales)
+        for (pair, k) in zip(block.scales, block.scale_margins)
             pair.relation in (:identity, :exp) || _brm_nlme_error(
                 "brm_nlme_joint_start: unsupported scale relation $(pair.relation)")
-            put!(pair.stan_value, pair.relation === :exp ? log(scale) : scale)
+            put!(pair.stan_value, pair.relation === :exp ? log(scales[k]) : scales[k])
         end
         isnothing(block.factor) && continue
         for i in axes(Lcorr, 1), j in axes(Lcorr, 2)

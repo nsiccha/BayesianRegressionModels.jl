@@ -11,7 +11,7 @@ substring filters.
 `runtime_numeric_settings.jl` checks that sizes and numeric settings are inputs of
 the emitted programs (user principle `0ikeidi`): one Stan and one RK program across
 a `gmrf` or `hsgp` setting, a data scalar a prior reads, a block's LKJ `eta`, a
-factor's levels and a known correlation, with one lowered program and `prepare_query`
+factor's levels, a known scale and a known correlation, with one lowered program and `prepare_query`
 type where RKPPL allows it and a literal as the positive control. One retained build
 evaluates values A, B, A against an analytic density and gradient. It also checks
 frozen and fresh replay and that checkpoint identities see a prior's numbers. The
@@ -2989,9 +2989,24 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
   the same target. One station under a known population law (known means by
   `offset(...)`, every SD and the correlation known) is one unit whose block
   packs no scale or correlation coordinate: its density equals an independent
-  oracle, its SVI fit is compared with NUTS, and a partly known block is still
-  refused by name. Two chained windows carry each station's filter state as
+  oracle, its SVI fit is compared with NUTS, and a partly known block holds its
+  known margin's SD. Two chained windows carry each station's filter state as
   data. The NUTS references make it the longest part.
+- `julia --project=<NLMEEstimation scratch env> test/nlme_partly_known_blocks.jl`:
+  a subject block that holds some of its values known, on a linear Gaussian
+  model. Known scales under a sampled correlation are one family holding those
+  margins' SDs at 1 (`FixedOmega(sd = ...)`, a known margin's η its effect over its
+  known SD); a known correlation is a family at the identity with its sampled
+  scales in θ. It checks conditional likelihoods and empirical Bayes modes against
+  closed forms, `check_protocol`, the embedded Laplace hook on the family that
+  holds an SD (its value against NLMEEstimation's own Laplace, its gradient
+  against central differences, its marginals' sum against the exact marginal),
+  a packed point
+  read back, the population prior
+  against the named densities over the free coordinates (value, gradient and that
+  it integrates to one), FOCE(I) at the exact objective's stationary point and
+  SAEM near it, `brm_nlme_joint_start`, `brm_svi_fit` against NUTS next to a known
+  shared block, and that another held value is the same program.
 - `julia --project=<NLMEEstimation scratch env> test/nlme_known_blocks_fit.jl`:
   NLMEEstimation on a linear Gaussian model whose block is fully known. The
   block is one `fixed_omega` family at the identity, the start and

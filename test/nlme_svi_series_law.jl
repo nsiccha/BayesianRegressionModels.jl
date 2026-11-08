@@ -255,7 +255,8 @@ end
         round.(mo.mean_error; digits=2), ", sd ratio ", round.(mo.sd_ratio; digits=2))
     @test maximum(mo.mean_error) < 0.3
     @test all(r -> 0.6 < r < 1.3, mo.sd_ratio)
-    # A block that mixes known and sampled values is still refused, by name.
+    # A block that mixes known and sampled values holds the known margin's SD and
+    # estimates the rest (test/nlme_partly_known_blocks.jl fits one).
     mixed = @brm one begin
         a ~ Uniform(0, 1)
         level ~ 0 + offset(mu_level) + (1 | st | station)
@@ -265,7 +266,9 @@ end
             y[s] ~ series_kf(level[s], exp(log_gain[s]), 0.4, a, m0[s], P0[s])
         end
     end
-    @test_throws "holds known values next to sampled ones: a sampled scale" brm_nlme_view(RKBRMI(mixed))
+    held = only(brm_nlme_view(RKBRMI(mixed)).families)
+    @test held.fixed === nothing
+    @test isequal(BRM._brm_nlme_held_sd(held.record), [1.0, nothing])
 end
 
 @stestset "chained windows carry each station's filter state as data" begin

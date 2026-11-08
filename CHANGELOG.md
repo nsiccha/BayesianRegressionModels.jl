@@ -12,6 +12,42 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.256
+
+- Added: `brm_nlme_view`, and so `brm_nlme_model`, `brm_nlme_fit`,
+  `brm_two_stage_fit`, `brm_svi_fit` and `brm_nlme_joint_map`, reads a subject
+  block that holds only some of its values known. They refused it before, naming
+  BRM todo `0840h34`.
+  - **Known scales under a sampled correlation** (`sd(a, p) = input` next to
+    `sd(b, p) ~ Exponential(...)` and `cor(:, p) ~ LKJCholesky(...)`) are one
+    covariance family that holds those margins' SDs, NLMEEstimation's
+    `FixedOmega(sd = [1, nothing])`. The free SDs and the correlation are estimated,
+    and SVI keeps them as globals and centres the block as it does an estimated one.
+    A known margin's η, in `H`, `omega_matrix` and the EBEs, is its effect over its
+    known SD, so its variance there is 1. Population coefficients stay mu-referenced
+    through it. `population_logprior` is the authored prior over the free coordinates
+    `(log sd, m)` that the estimators search.
+  - **A known correlation next to sampled scales** is one family held at the
+    identity, whose standardized draws are η. The sampled scales are
+    `:shared_latent`, so θ in NLMEEstimation and globals in SVI; they stay fixed when
+    the model gets a `shared_point`. No population coefficient is mu-referenced
+    through it, and SVI leaves its draws uncentred. SAEM moves those scales by its
+    numerical M-step alone. On a 30-subject linear Gaussian model at the default
+    options its estimate's log marginal likelihood ended 0.10 to 0.97 units below
+    that of FOCE(I)'s estimate, which sits at the exact log posterior's maximum, over
+    four seeds (0.006 to 0.43 at 1600 iterations over three), against 0.01 to 0.12
+    for known scales under a sampled correlation.
+  - `brm_nlme_estimates` names such a block in natural units with `known_sd` (each
+    margin's known SD, `nothing` at a sampled one) and `known_cor = true`, as they
+    apply. Its `sd` and `cor` go back through `brm_start`.
+  - A Student-t block holding known values stays refused: `brm_nlme_model` covers no
+    Student-t block.
+- Fixed: on RKBRMI, a known scale (`sd(...) = value`) is a generated input of the
+  program instead of a literal in its source (user principle `0ikeidi`), as a known
+  correlation's factor already was. Another value is the same emitted and lowered
+  program, on subject blocks and on `shared_groups` blocks. A frozen replay with
+  another value is refused as another fit.
+
 ## 0.2.255
 
 - Fixed: under `unit_curvature = :orthogonal`, a dense unit's step takes the

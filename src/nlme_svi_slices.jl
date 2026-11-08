@@ -431,7 +431,7 @@ function _brm_svi_location_references(m::BRMNLMEModel)
     end
     rows, nrows = view.rows, length(rk.plan.columns[view.group])
     units = view.ragged ? _brm_nlme_mu_references(rk, view.block_margins, population, rows, nrows;
-            known=Set(f.block for f in view.families if _brm_nlme_known_block(f.record))) :
+            known=Set(f.block for f in view.families if _brm_nlme_standardized_block(f.record))) :
         view.mu_references
     absorbed = Set(ref.population for ref in units)
     shared = [(; block=_brm_nlme_block_identity(r), predictor, coefficient)
