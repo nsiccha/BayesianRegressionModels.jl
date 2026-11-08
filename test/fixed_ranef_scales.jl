@@ -502,10 +502,27 @@ end
     known = [p for p in description.priors if get(p.source, :kind, nothing) === :known]
     @test length(known) == 1
 
-    # Known gap: NLMEEstimation holds families fixed (`FixedOmega`), but
-    # brm_nlme_view does not hand it known-value blocks yet (todo
-    # 2026-10-16T18-16-39-760-0840h34).
-    @test_broken (brm_nlme_view(RKBRMI(mixed_builder(DF))); true)
+    # A block whose every value is known is one family held at the identity:
+    # its standardized draws are η, its known `diag(sd) L` stays in the model,
+    # and it packs no scale or correlation coordinate (snag
+    # `odlplaus-margina-60bc212b`).
+    for (builder, K) in ((known_builder, 2), (single_builder, 1))
+        view = brm_nlme_view(RKBRMI(builder(DF)))
+        family = only(view.families)
+        @test family.fixed == Matrix{Float64}(I, K, K)
+        @test isempty(family.scales) && isempty(family.factor)
+        @test count(==(:subject_effect), view.role) == K * 6
+        @test !any(in((:subject_scale, :subject_correlation)), view.role)
+        @test BRM._brm_nlme_known_block(family.record)
+    end
+    # A block that mixes known and sampled values still has no NLME reading
+    # (todo 2026-10-16T18-16-39-760-0840h34), named by what is sampled.
+    @test_throws "holds known values next to sampled ones: a sampled scale" brm_nlme_view(
+        RKBRMI(mixed_builder(DF)))
+    @test_throws "holds known values next to sampled ones: a sampled scale" brm_nlme_view(
+        RKBRMI(cor_builder(DF)))
+    @test_throws "a Student-t block's per-level mixing weights" brm_nlme_view(
+        RKBRMI(studentt_builder(DF)))
     # Adaptive centering describes a known-value block in derived-scale form:
     # a known SD is a constant log-scale, a sampled one its coordinate, and a
     # known correlation a constant factor with no Cholesky coordinates.

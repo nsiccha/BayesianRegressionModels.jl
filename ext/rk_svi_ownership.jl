@@ -1,8 +1,15 @@
+# The backend's authored density-factor catalogue, one per backend and process
+# (`_BRMPreparedSlot`): building it plans the whole program, and its support
+# kernels, which it caches per graph segment, are compiled once for every reader.
+_rk_density_catalogue(backend::BRM.RKBRMI) = BRM._rk_once!(backend.prepared.factors) do
+    density_factors(backend.model, _rk_translated(backend))
+end
+
 # Public RKPPL authored factors supply both atomic ownership and transitive
 # structural reads. Keep the catalogue with the target so ownership discovery
 # and native Reverse query preparation use the same snapshot.
 function BRM._rk_svi_factors(backend::BRM.RKBRMI, unit::Vector{Float64})
-    catalogue = density_factors(backend.model, _rk_translated(backend))
+    catalogue = _rk_density_catalogue(backend)
     events = collect(catalogue)
     owned = [factor_coordinates(catalogue, event) for event in events]
     support = [factor_support(catalogue, event; u0=unit) for event in events]
@@ -14,7 +21,7 @@ end
 # refusal).
 function BRM._rk_nlme_unit_reading_factors(backend::BRM.RKBRMI,
         shared::AbstractVector{Bool}, unit::AbstractVector{Bool})
-    catalogue = density_factors(backend.model, _rk_translated(backend))
+    catalogue = _rk_density_catalogue(backend)
     readers = Pair{Symbol,Int}[]
     for event in catalogue
         owned = factor_coordinates(catalogue, event)

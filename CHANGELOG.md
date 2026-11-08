@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.250
+## 0.2.253
 
 - Fixed: `brm_svi_fit`'s structured units (above `unit_dense_limit`) default to
   `unit_step = 0.1` under either `unit_curvature`. BRM 0.2.248 and 0.2.249 gave them
@@ -45,6 +45,91 @@ instead of failing at run time.
   replays the evaluation in the model, and `largest`, its largest coordinate as
   `(; coordinate, value)`, which the message prints. Under `centering=LearnedCentering()`
   the points are the packed coordinates, not the factor's learned ones.
+
+## 0.2.252
+
+- Fixed: `brm_nlme_view`, and so `brm_nlme_model`, `brm_nlme_fit`,
+  `brm_two_stage_fit`, `brm_svi_fit` and `brm_nlme_joint_map`, reads a
+  random-effect block declared inside a function-style component call
+  (`kin ~ kinetics(subject)` with `(1 | pk | subject)` in its body) as the same
+  block at model scope, over the column the call passes for the grouping
+  input. That column is one of the model's groupings: name it as
+  `subject_group`, in `nested_groups` or in `shared_groups` like any other.
+  The block's `|ID|` and margins carry the call's path (`kin.pk`, predictor
+  `kin.CL`), as its coordinates already did (`kin.b_pk_subject.z`); nested
+  calls compose their paths, and an input named otherwise than the model's
+  column is followed to it. Every coordinate of a component call was a
+  `:shared_latent` before, so such a grouping was no grouping of the model
+  (naming it in `shared_groups` was refused: "no random-effect block ...
+  groups by") and a model scoping its subject effects in a component had no
+  subjects. The
+  call's other sampled locals, its population coefficients included, stay
+  `:shared_latent`; so does a block whose grouping input is passed an
+  expression, or whose call reads other levels of the column than the model.
+  Prior-median starts read the blocks' scale laws with the call's own data.
+  **Breaking:** a component grouping other than the subject grouping must now
+  be named in `nested_groups` or `shared_groups`; `shared_groups = (:g,)`
+  restores the former, all-shared reading of its block.
+- Fixed: `brm_coordinate_transport` and `brm_start(...; component_inits)` with a
+  formula key read a random-effect block declared inside a component again.
+  Both died with `type NamedTuple has no field fitted`.
+
+## 0.2.251
+
+- Changed: an `RKBRMI` keeps the `BRMNLMEModel` that `brm_svi_fit`,
+  `brm_svi_resume` and their slice and Laplace forms prepared from it, the last
+  one. A later call on the same backend with the same `ad_backend`,
+  `shared_point`, groupings and `unit_partition` takes that model, and with it
+  the target and worker samplers it holds, as a call on `diagnostics.model`
+  does: `diagnostics.target.reused` is `true` and nothing is prepared
+  (`laplace=GaussianBlockLaplace()` reuses the model and still prepares its
+  target on every call). Before,
+  each call on an `RKBRMI` prepared the model and its target again: on a
+  downstream 33-unit target a repeated 20-update call took 58 s, and takes
+  0.18 s now.
+  Results are unchanged: a reused model's run equals a fresh model's to the
+  last bit. Other options prepare another model, which the backend then keeps
+  instead. A copy or a serialized backend keeps none. A `BRMI` is still
+  lowered, and so prepared, on every call.
+- Changed: an `RKBRMI` builds its authored density-factor catalogue (RKPPL
+  `density_factors`) once, on first use, for every reader: `brm_nlme_view`'s
+  scan of shared factors that read a unit and each minibatch SVI target's
+  ownership. Each built it again before, planning the whole program each time
+  (about 5 s warm on a 33-unit model).
+- Changed: `brm_nlme_model` prepares the whole-model sampler that retains the
+  pointwise densities, and each subject-cell group's cell query, the first time
+  something reads them, instead of while preparing the model. The lockstep
+  gradients (`brm_nlme_loglikelihoods_and_gradients`) and the per-unit Laplace
+  read the sampler; a nested model's η sparsity and a refused partition's
+  diagnosis read the cell queries. A unit's values and gradients, minibatch
+  SVI's included, come from the observation partition, so a fit that reads
+  neither prepares neither. On a downstream 33-unit, 890-coordinate model the
+  two steps took 75 s and 84 s of a 413 s cold preparation, but most of that
+  was compiling planner code the partition steps then compile instead: the
+  cold `brm_nlme_model` fell from 471 s to 440 s, a warm rebuild by about 10 s
+  of 23 s, and its allocation from 16.1 GB to 12.5 GB. The progress tree no
+  longer has a `Cell queries` counter. Values, gradients and refusals are unchanged; an
+  `ad_backend` the sampler cannot use is refused when the sampler is first
+  read.
+
+## 0.2.250
+
+- New: a subject block whose every scale and whose correlation are known
+  (`sd(...) = value` on every margin, and `cor(:, ID) = R` or one margin) has
+  an NLME reading. `brm_nlme_view` reads it as one covariance family held at
+  the identity (NLMEEstimation's `FixedOmega`): its standardized draws are η
+  and the model maps them to the effects with the known `diag(sd) L`. So
+  `brm_svi_fit` and NLMEEstimation's estimators fit a unit under a known
+  population law (known means through `offset(...)`), and
+  `brm_nlme_estimates` names the block with `known = true` and its known
+  `covariance`, `sd` and `cor`. Before, the view refused every known-value
+  block. A block that mixes known and sampled values (or a Student-t block
+  with known values) is still refused, now naming what is sampled (todo
+  `0840h34`).
+- Tested: a unit's whole series under one consumer-written law, a filter's
+  log likelihood bound as a leaf of a whole-event observation provider, is
+  one observation of its unit under `brm_nlme_view` and `brm_svi_fit`
+  (`test/nlme_svi_series_law.jl`, snag `odlplaus-margina-60bc212b`).
 
 ## 0.2.249
 

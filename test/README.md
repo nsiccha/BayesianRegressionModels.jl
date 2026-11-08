@@ -1188,6 +1188,21 @@ covariate's observed entries join their subject's cell.
 Flat-row grouped models retain lockstep evaluation and refuse
 the single-subject method by name. It runs in the test environment above.
 
+`nlme_component_blocks.jl` checks that `brm_nlme_view` reads a random-effect
+block declared inside a function-style component call (`kin ~ kinetics(subject)`
+with `(1 | pk | subject)` in its body) as the same block at model scope, over
+the column the call passes. A model whose subject block and a crossed device
+block are declared in components has its model-scope twin's partition under
+the calls' paths, except that the components' population coefficients stay
+shared latents; its lockstep likelihoods equal the twin's at the same point and
+the full RK density, with η gradients, and its SVI split is the RK target. A
+component grouping named nowhere is refused by name; either grouping can be the
+units. A nested call through a renamed input composes paths and names, the
+blocks' scale laws read the calls' own data for prior-median starts, and
+`brm_nlme_estimates`, `brm_svi_fit` with connected units and
+`brm_nlme_joint_map` (a compiled Stan model and a checked full start) read the
+blocks. It runs in the test environment above. Snag `nlme-view-does-n-4a5e64ce`.
+
 A single-level treatment-coded factor owns no packed coordinate: `nlme_view.jl`
 checks that such a model has the partition, likelihoods and η gradients of the
 same model without the factor, on flat rows and in a `@plate for` cell, and that
@@ -2934,6 +2949,29 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
   tasks. A held target is reused only under the same `field_states`, a resume
   finds it again, and a `:units` snapshot loads without BRM. Mesh fields and
   streaming windows are refused by name.
+
+### A unit's whole series under one law; units under a known population law
+
+- `julia --project=test test/nlme_svi_series_law.jl`: each station's series is
+  one observation under a consumer-written law, an exact Kalman filter's log
+  likelihood bound as a leaf of a whole-event observation provider (snag
+  `odlplaus-margina-60bc212b`). The filter equals the dense Gaussian of the
+  readings, the RK target's native Reverse gradient equals central differences,
+  each pointwise term is its station's oracle, and `brm_svi_fit` with the
+  stations as units (factors of three statics each) is compared with NUTS on
+  the same target. One station under a known population law (known means by
+  `offset(...)`, every SD and the correlation known) is one unit whose block
+  packs no scale or correlation coordinate: its density equals an independent
+  oracle, its SVI fit is compared with NUTS, and a partly known block is still
+  refused by name. Two chained windows carry each station's filter state as
+  data. The NUTS references make it the longest part.
+- `julia --project=<NLMEEstimation scratch env> test/nlme_known_blocks_fit.jl`:
+  NLMEEstimation on a linear Gaussian model whose block is fully known. The
+  block is one `fixed_omega` family at the identity, the start and
+  `brm_nlme_estimates` name its known values, conditional likelihoods equal
+  the Normal oracle at η, `check_protocol` passes, the empirical Bayes modes
+  equal the closed-form conditional modes, and FOCE(I) and SAEM fit the
+  population with the block held.
 
 ## Reusable model view
 
