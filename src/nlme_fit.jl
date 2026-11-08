@@ -81,12 +81,33 @@ end
 _brm_nlme_margins(record) =
     [(; predictor, coefficient) for (predictor, coefficient) in record.margins]
 
+# What a block's entry says of its known values: `known = true` when every value is
+# known, otherwise `known_sd` (the known SD of each margin, `nothing` at a sampled
+# one) and `known_cor = true`, each only when it applies.
+function _brm_nlme_known_fields(record)
+    _brm_nlme_known_block(record) && return (; known=true)
+    known = get(record, :known_scales, nothing)
+    known === nothing && return (;)
+    sd = any(!isnothing, known) ? (; known_sd=collect(known)) : (;)
+    get(record, :known_cor, nothing) === nothing ? sd : (; sd..., known_cor=true)
+end
+
+# An estimated family's covariance in natural units: a known margin's η is its
+# effect over its known SD.
+function _brm_nlme_natural_covariance(record, Ω)
+    known = get(record, :known_scales, nothing)
+    known === nothing && return Ω
+    S = Diagonal([k === nothing ? 1.0 : k for k in known])
+    S * Ω * S
+end
+
 # A block under its key: `(; group, margins, covariance, sd, cor)`. A
 # stratified block is one entry, `(; group, by, margins, strata)`, whose
 # `strata` pairs each `by` level with that stratum's `(; covariance, sd, cor)`.
 function _brm_nlme_add_block!(blocks, record, ::Nothing, Ω, backend)
     push!(blocks, _brm_nlme_block_key(record) => (; group=record.group,
-        margins=_brm_nlme_margins(record), _brm_nlme_covariance(Ω)...))
+        margins=_brm_nlme_margins(record), _brm_nlme_known_fields(record)...,
+        _brm_nlme_covariance(_brm_nlme_natural_covariance(record, Ω))...))
 end
 function _brm_nlme_add_block!(blocks, record, stratum::Int, Ω, backend)
     key = _brm_nlme_block_key(record)
@@ -143,22 +164,8 @@ end
 _brm_nlme_level_effects(levels, effects) =
     Pair{Any,Vector{Float64}}[level => effects[g, :] for (g, level) in enumerate(levels)]
 
-# `diag(scale) L` of a plain block, its known scales and correlation included
-# (a known margin's scale is its number; a known correlation's factor is the
-# Cholesky factor of the matrix).
-function _brm_nlme_crossed_factor(values, record, K)
-    known = get(record, :known_scales, nothing)
-    known === nothing && record.L !== nothing && return _brm_nlme_natural_factor(
-        values, record, K, nothing)
-    scale = known === nothing ? _brm_nlme_joint_scale(values, record, K) :
-        Float64[k === nothing ? _brm_rk_declaration_value(values, record.scales[j]) : k
-            for (j, k) in enumerate(known)]
-    cor = get(record, :known_cor, nothing)
-    L = record.L !== nothing ? Matrix{Float64}(_brm_rk_declaration_value(values, record.L)) :
-        cor !== nothing ? Matrix{Float64}(cholesky(Symmetric(cor)).L) :
-        Matrix{Float64}(I, K, K)
-    Diagonal(scale) * L
-end
+# `diag(scale) L` of a plain block over a shared grouping.
+_brm_nlme_crossed_factor(values, record, K) = _brm_nlme_natural_factor(values, record, K, nothing)
 
 """
     brm_nlme_estimates(m::BRMNLMEModel, θ, σ, Ω[, ebes])
@@ -186,7 +193,12 @@ Returns `(; point, eta)`:
     every scale and whose correlation are known (`sd(...) = value`,
     `cor(:, ID) = R`) as `(; group, margins, known = true, covariance, sd,
     cor)` with its known values (its η are its standardized draws, under a
-    covariance held at the identity, and its effects `diag(sd) L η`); a stratified
+    covariance held at the identity, and its effects `diag(sd) L η`); a block
+    with some known values adds `known_sd` (each margin's known SD, `nothing` at
+    a sampled one) and `known_cor = true` as they apply, with `covariance`, `sd`
+    and `cor` in natural units (a known margin's η is its effect over its known
+    SD; a known correlation's η are its standardized draws, its effects
+    `diag(sd) L η`); a stratified
     `gr(g, by=b)` block as `(; group, by, margins, strata)`, whose `strata`
     pairs each level of `b` with its stratum's `(; covariance, sd, cor)`. A
     block over a grouping in `shared_groups` (its coordinates are θ) adds
@@ -220,13 +232,13 @@ function brm_nlme_estimates(m::BRMNLMEModel, θ::AbstractVector, σ::AbstractVec
     blocks = Pair{Symbol,Any}[]
     for (; family, record, stratum, fixed, indices) in _brm_nlme_families(backend, view)
         if fixed !== nothing
-            # A block whose every value is known is a random-effect block with
-            # its known covariance, `known = true`. Other fixed families (a
+            # A block read as standardized draws is a random-effect block with
+            # its natural covariance at the point. Other fixed families (a
             # completion's unit draws, HSGP weights) are no random-effect block.
-            _brm_nlme_known_block(record) || continue
+            _brm_nlme_standardized_block(record) || continue
             A = _brm_nlme_crossed_factor(values, record, length(indices))
             push!(blocks, _brm_nlme_block_key(record) => (; group=record.group,
-                margins=_brm_nlme_margins(record), known=true,
+                margins=_brm_nlme_margins(record), _brm_nlme_known_fields(record)...,
                 _brm_nlme_covariance(A * A')...))
             continue
         end

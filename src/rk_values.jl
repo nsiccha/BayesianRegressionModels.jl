@@ -234,6 +234,11 @@ _rk_ast_student_t_nu(dist::_BRMRanefStudentT, bindings, taken) =
     dist.nu isa Real ? dist.nu :
         _rk_value_expr!(bindings, _brm_prepare_expr(dist.nu), taken)
 
+# What a block's `tau` reads for a margin: a known scale's input, or its law.
+_rk_known_scale_read(prior::_BRMKnownScale, law) =
+    prior.input === nothing ? law : prior.input
+_rk_known_scale_read(_prior, law) = law
+
 # The value a block's correlation prior reads (`_RKRanefBucket.eta_input`).
 _rk_bucket_eta(bucket) = something(bucket.eta_input, bucket.lkj_eta)
 
@@ -281,13 +286,15 @@ function _rk_ast_value_bucket(definitions, bucket, draws, effects, taken, bindin
             _rk_bucket_eta(bucket), (); scale_value=tau)
     else
         priors = _rk_ast_bucket_scale_priors(bucket, bindings, taken)
-        # Known values (`sd(...) = value`, `cor(:, ID) = R`) are constants: a
-        # known scale is its number in `tau`, a known correlation a constant
-        # Cholesky factor in place of the LKJ draw.
+        # Known values (`sd(...) = value`, `cor(:, ID) = R`) are inputs: a known
+        # scale is its generated input in `tau`, a known correlation a Cholesky
+        # factor input in place of the LKJ draw.
         known = any(_brm_is_known_scale, bucket.sd_priors)
         L_value = bucket.known_input
         _rk_ast_group_component!(definitions, stmts, taken, draws, levels_of, K,
-            _rk_bucket_eta(bucket), priors;
+            _rk_bucket_eta(bucket),
+            known ? Any[_rk_known_scale_read(p, law)
+                for (p, law) in zip(bucket.sd_priors, priors)] : priors;
             nu=_rk_ast_student_t_nu(bucket.dist, bindings, taken), L_value)
         # Plain groups retain semantic transport metadata at their actual
         # component-owned declarations; other grouping forms remain unpaired.
