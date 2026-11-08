@@ -482,12 +482,12 @@ end
 # squared-exponential term, or a periodic term's prepared basis and
 # frequencies. The validity floor is passed in where a prior reads it.
 function _rk_ast_hsgp_component!(definitions, statements, taken, name, inputs,
-        floors, rho_priors, sigma_prior, value, extent; truncated=true,
+        floors, rho_priors, sigma_prior, value, extent; scales, truncated=true,
         base="brm_hsgp_effect")
     formals = first.(inputs)
     priors, prior_inputs, prior_values = _rk_ast_component_prior_inputs(
         [rho_priors; sigma_prior],
-        (formals..., :rho_floor, :rho_iso, :rho, :sigma, :beta_raw,
+        (formals..., :rho_floor, :rho_iso, :rho, :sigma, :beta_raw, :spectral_scale,
             (Symbol(:rho_, j) for j in eachindex(rho_priors))...))
     rho_priors, sigma_prior = priors[1:end-1], last(priors)
     body = Expr(:block)
@@ -510,6 +510,9 @@ function _rk_ast_hsgp_component!(definitions, statements, taken, name, inputs,
     push!(body.args, _rk_ast_hyper_statement(:sigma, sigma_prior))
     push!(body.args, Expr(:call, :.~, Expr(:ref, :beta_raw, extent),
         _rk_ast_dotted(:Normal, 0, 1)))
+    # The weights' spectral scales, a value of the component that learned SVI
+    # centering reads (src/nlme_svi_centering.jl).
+    push!(body.args, Expr(:(=), :spectral_scale, scales))
     push!(body.args, Expr(:return, value))
     callee = _rk_ast_shared_definition!(definitions, taken, base,
         (formals..., floor_argument..., prior_inputs...), body)
