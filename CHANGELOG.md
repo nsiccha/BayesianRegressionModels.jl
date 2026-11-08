@@ -31,9 +31,9 @@ instead of failing at run time.
   converged. At `unit_step = 0.1` alone rank 8 converged at 343, -204 and 425 with
   marginal sds of 8, 31 and 4 under an N(0, 1) prior, against mean-field's 481, 455
   and 470. With both changes rank 8 reads 486, 466 and 476 with every sd near 1. On
-  exact Gaussian units with a low-rank covariance the rank part at this rate beats
-  the best diagonal at every size and visit count measured (500 to 8,000 visits) and
-  at the whole step loses to it.
+  exact Gaussian units with a low-rank covariance the rank part at this rate beat
+  the best diagonal in all 7 settings measured (500 to 8,000 visits per unit), and
+  at the whole step lost to it in 6 of them.
 - Changed: a fit of a model with a structured unit differs from its first visit of
   such a unit, its rank part from then on in every version, its mean and scales
   against 0.2.248 and 0.2.249. Mean-field fits read higher ELBOs too (one station's
