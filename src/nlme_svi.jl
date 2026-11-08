@@ -63,6 +63,7 @@ include("nlme_svi_sampling.jl")
 include("nlme_svi_workspace.jl")
 include("nlme_svi_units.jl")
 include("nlme_svi_sites.jl")
+include("nlme_svi_centering.jl")
 
 # ── The minibatch target ─────────────────────────────────────────────────────
 
@@ -275,11 +276,14 @@ _brm_svi_unit_local!(gg, gz, t, i, g, z, plan, work) =
 # into `gg` and `gz`, reads and writes only `t.places[i]` and `t.touched[i]`, and
 # restores the plan's point. The partition reads nothing else (`locality=:error`).
 function _brm_svi_unit_local!(gg, gz, t::NamedTuple, i, g, z, plan, work)
-    value = i in plan.labels ?
-        _brm_svi_partition_local!(gg, gz, plan, t.m.unit, plan.footprints[i], t.places[i], i, g, z) : 0.0
+    value = _brm_svi_unit_partition!(gg, gz, t, i, g, z, plan)
     value + _brm_svi_unit_prior!(gg, gz, t.prior, t, i, g, z) +
         _brm_svi_field_term!(gg, gz, t, i, z, work)
 end
+
+# The unit's observation cells alone, added into `gg` and `gz` as above.
+_brm_svi_unit_partition!(gg, gz, t, i, g, z, plan) = i in plan.labels ?
+    _brm_svi_partition_local!(gg, gz, plan, t.m.unit, plan.footprints[i], t.places[i], i, g, z) : 0.0
 
 function _brm_svi_partition_local!(gg, gz, plan, unit, footprint, places, i, g, z)
     point, gradient = plan.point, plan.gradients[i]
@@ -538,10 +542,12 @@ function _brm_svi_global_gradient(q, w, ε, η)
     vcat(w, gρ, vec(gΒ))
 end
 
-# A scale-preconditioned ("whitened") global step for polishing: μ moves in
-# units of a square root of the global covariance and each Β row in units of
-# its scale, so Adam's step size means a fraction of the current posterior
-# scale, which stays meaningful when a global's posterior sd shrinks like 1/√N.
+# A scale-preconditioned ("whitened") step: μ moves in units of a square root of
+# the factor's covariance and each Β row in units of its scale, so Adam's step
+# size means a fraction of the current posterior scale, which stays meaningful
+# when a global's posterior sd shrinks like 1/√N. It polishes a mean-field global
+# factor (`_brm_svi_polish_global_step!`) and steps a structured unit factor
+# (`_brm_svi_lowrank_step!`).
 function _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip=Inf)
     D = length(q.μ)
     C = _brm_svi_global_sqrt(_brm_svi_global_geometry(q))
@@ -556,6 +562,77 @@ function _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip=Inf)
     x[rest] .+= scale .* view(step, rest)
     x
 end
+
+# The exploration step: Adam on [μ; ρ; Β] at a constant step size, with each Β
+# row in units of its coordinate's scale exp(ρ_k), as polishing steps it. μ and
+# ρ step as they always have, so a `MeanFieldGlobal` run is unchanged to the
+# last bit.
+#
+# Β's gradient w ηᵀ carries the minibatch noise of w, all of it independent of
+# Β, so in most coordinates Adam's normalized step is a random walk of about a
+# step size per iteration. A step of `lr_global` in absolute units, the same for
+# every coordinate, moved Β's entries by about 0.2 in 400 iterations and 0.45 in
+# 15,000, with rows several times the scale of a coordinate whose sd is 0.03:
+# marginal variances 10 to 25 times the factor's own and correlations the target
+# has no use for. On a model whose log-scale hyperparameters overflow a few sds
+# out, the trimmed ELBO then fell after some 8,000 iterations and typical draws
+# reached a non-finite density (4 of 4 fits, at 12,000 to 21,000 iterations; ρ
+# moves on the log scale, so a mean-field factor never walks off that way). In
+# units of exp(ρ_k) the walk is a fraction of each coordinate's own scale, and Β
+# grows only where the gradient keeps pushing it.
+function _brm_svi_exploration_global_step!(opt, q, x, grad, lr; clip=Inf)
+    r = size(q.Β, 2)
+    r == 0 && return _brm_svi_step!(opt, x, grad, lr; clip)
+    D = length(q.μ)
+    scale = repeat(exp.(q.ρ), r)
+    rank = 2D+1:length(x)
+    grad = copy(grad)
+    grad[rank] .*= scale
+    step = zeros(length(x))
+    _brm_svi_step!(opt, step, grad, lr; clip)
+    x[1:2D] .+= view(step, 1:2D)
+    x[rank] .+= scale .* view(step, rank)
+    x
+end
+
+# The settling and polishing step of the global factor. With no rank part it is
+# `_brm_svi_whitened_global_step!`, unchanged. With one, μ moves in units of its
+# diagonal scale exp(ρ_k), as Β's rows do, instead of a square root of the whole
+# covariance.
+#
+# Settling restarts Adam, and a fresh Adam's first steps are about ± its step
+# size in every coordinate it steps. Whitened by the covariance root, those
+# coordinates mix the rank part's directions, and the steps add up along each of
+# them: up to √D step sizes of q's own sd at once where the gradient's signs agree
+# with a column. On ODL's Bayern slice (1,094 globals, rank 8) the trimmed ELBO
+# fell from 51,500 at the end of exploration to 15,000-25,000 within a few
+# hundred polishing iterations (BRM 0.2.241, before settling, when polishing
+# restarted Adam), and Niedersachsen and Rheinland-Pfalz evaluated non-finite
+# draws there. In units of exp(ρ) it stayed at 48,400-50,100 from the same state.
+# The structured unit factors' Adam keeps the whitened step.
+#
+# Β's rows step `rank` times as far, so that they never move faster than in
+# exploration (`_brm_svi_rank_step_ratio`). Settling holds `polish_lr` for up to
+# `settle_windows` windows and polishing starts there, five times `lr_global` at
+# the defaults, and Β's gradient is the same noise in every phase: on ODL's
+# Thüringen slice the fit evaluated non-finite draws 154 iterations into
+# settling (191 into polishing with `settle_windows=0`), and with Β at
+# exploration's rate it settled and polished cleanly (as with Β frozen).
+function _brm_svi_polish_global_step!(opt, q, x, grad, lr; clip=Inf, rank=1.0)
+    r = size(q.Β, 2)
+    r == 0 && return _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip)
+    D = length(q.μ)
+    s = exp.(q.ρ)
+    scale = vcat(s, ones(D), rank .* repeat(s, r))
+    step = zeros(length(x))
+    _brm_svi_step!(opt, step, grad .* scale, lr; clip)
+    x .+= scale .* step
+    x
+end
+
+# How far a low-rank factor's Β rows step in settling and polishing relative to
+# μ, so that they never step further than at exploration's `lr_global`.
+_brm_svi_rank_step_ratio(c) = min(1.0, c.lr_global / c.polish_lr)
 
 # ── A subject's factor: one natural-gradient step ───────────────────────────
 
@@ -728,21 +805,37 @@ end
 # gradients averaged over the 2d draws, `gg` in the pair's convention (the sum
 # over a pair, so half of it is the mean gradient), and the whitened curvature
 # estimate. `problems` holds the first pair that was not finite, if any; the
-# worker's global buffers are zero again at `touched` on return.
-function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D)
+# worker's global buffers are zero again at `touched` on return. Under learned
+# centering every draw is the centered term (src/nlme_svi_centering.jl), and
+# `centered` holds the controls' gradient averaged over the draws and every
+# draw's adjoints, each weighted 1/d where a pair's are weighted 1
+# (`_brm_svi_centering_batch_gradient`).
+function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
+        centering=nothing, frame=nothing)
     d = size(E, 1)
     U, m = LowerTriangular(q.U[i]), q.M[i]
     gg₊, gg₋ = _brm_svi_global_buffers(work, D)
     gz₊, gz₋ = zeros(d), zeros(d)
     value, gz, gg, W = 0.0, zeros(d), zeros(length(touched)), zeros(d, d)
+    gc, adjoints = nothing, Any[]
     problem = nothing
     for k in 1:d
         δ = U' \ view(E, :, k)
         z₊, z₋ = m .+ δ, m .- δ
         fill!(gz₊, 0.0)
         fill!(gz₋, 0.0)
-        v₊ = _brm_svi_unit_local!(gg₊, gz₊, t, i, g, z₊, plan, work)
-        v₋ = _brm_svi_unit_local!(gg₋, gz₋, t, i, g, z₋, plan, work)
+        if centering === nothing
+            v₊ = _brm_svi_unit_local!(gg₊, gz₊, t, i, g, z₊, plan, work)
+            v₋ = _brm_svi_unit_local!(gg₋, gz₋, t, i, g, z₋, plan, work)
+        else
+            v₊, gc₊, a₊ = _brm_svi_centered_unit_term!(gg₊, gz₊, centering, frame, t, q, i,
+                g, z₊, plan, work)
+            v₋, gc₋, a₋ = _brm_svi_centered_unit_term!(gg₋, gz₋, centering, frame, t, q, i,
+                g, z₋, plan, work)
+            gc = something(gc, zero(gc₊))
+            gc .+= (gc₊ .+ gc₋) ./ 2d
+            push!(adjoints, a₊, a₋)
+        end
         problem = _brm_svi_nonfinite_unit(t, i, g, (z₊, z₋), (v₊, v₋),
             (gg₊, gg₋), (gz₊, gz₋), touched)
         for (entry, p) in enumerate(touched)
@@ -755,7 +848,9 @@ function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D)
         W[:, k] .= -(U \ ((gz₊ .- gz₋) ./ 2))
     end
     S = (W * E' .+ E * W') ./ 2d
-    (; value, gg, gz, S, problem)
+    centered = centering === nothing ? nothing :
+        (; gc=something(gc, Float64[]), adjoints=Tuple(adjoints), weight=1 / d)
+    (; value, gg, gz, S, problem, centered)
 end
 
 # ── Non-finite evaluations ───────────────────────────────────────────────────
@@ -861,7 +956,7 @@ _brm_svi_field_prepare!(rng, t, q, g, batch) = nothing
 
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
-        sites=nothing, site_scale=1.0, curvature=:pair, site_step=β)
+        sites=nothing, site_scale=1.0, rank_step=1.0, curvature=:pair, site_step=β)
     D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
@@ -873,23 +968,38 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     # The whitened curvature estimate of a unit on an orthogonal design.
     curvatures = Vector{Union{Nothing,Matrix{Float64}}}(nothing, length(batch))
     problems = Vector{Union{Nothing,NamedTuple}}(nothing, length(batch))
+    # Learned centering: the factors are over each unit's learned coordinates u,
+    # and the unit terms read y = T(u) (src/nlme_svi_centering.jl).
+    centering = _brm_svi_centering(t)
+    frame = centering === nothing ? nothing : _brm_svi_centering_frame(centering, t, g)
+    centered = Vector{Any}(nothing, length(batch))
     _brm_svi_each_unit(eachindex(t.plans), length(batch)) do worker, k
         plan, work = t.plans[worker], t.work[worker]
         i, εi = batch[k], draws[k]
         touched = _brm_svi_unit_touched(t, i)
         if εi isa AbstractMatrix
-            r = _brm_svi_unit_design_terms(t, q, i, g, εi, plan, work, touched, D)
+            r = _brm_svi_unit_design_terms(t, q, i, g, εi, plan, work, touched, D;
+                centering, frame)
             problems[k] = r.problem
             terms[k] = (; r.value, r.gg, r.gz, gd=Float64[])
             curvatures[k] = r.S
+            centered[k] = r.centered
             return
         end
         gg₊, gg₋ = _brm_svi_global_buffers(work, D)
         gz₊, gz₋ = zeros(length(t.units[i])), zeros(length(t.units[i]))
         m, δ = q.M[i], _brm_svi_unit_offset(q, i, εi)
         z₊, z₋ = m .+ δ, m .- δ
-        v₊ = _brm_svi_unit_local!(gg₊, gz₊, t, i, g, z₊, plan, work)
-        v₋ = _brm_svi_unit_local!(gg₋, gz₋, t, i, g, z₋, plan, work)
+        if centering === nothing
+            v₊ = _brm_svi_unit_local!(gg₊, gz₊, t, i, g, z₊, plan, work)
+            v₋ = _brm_svi_unit_local!(gg₋, gz₋, t, i, g, z₋, plan, work)
+        else
+            v₊, gc₊, a₊ = _brm_svi_centered_unit_term!(gg₊, gz₊, centering, frame, t, q, i,
+                g, z₊, plan, work)
+            v₋, gc₋, a₋ = _brm_svi_centered_unit_term!(gg₋, gz₋, centering, frame, t, q, i,
+                g, z₋, plan, work)
+            centered[k] = (; gc=(gc₊ .+ gc₋) ./ 2, adjoints=(a₊, a₋))
+        end
         problems[k] = _brm_svi_nonfinite_unit(t, i, g, (z₊, z₋), (v₊, v₋),
             (gg₊, gg₋), (gz₊, gz₋), touched)
         gg = [gg₊[p] + gg₋[p] for p in touched]
@@ -913,6 +1023,17 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
             _brm_svi_minibatch_global(sites, p) && (w[p] += scale * term.gg[entry])
         end
     end
+    # Learned centering's chain terms through the cells' locations and scales: the
+    # batch's one pullback steps the minibatch globals, and a sparse global's site
+    # takes its reader's own (src/nlme_svi_centering.jl).
+    if centering !== nothing
+        chain = _brm_svi_centering_batch_gradient(centering, t, frame, centered, weights)
+        for p in eachindex(chain)
+            _brm_svi_minibatch_global(sites, p) && (w[p] += chain[p])
+        end
+        _brm_svi_centering_site_terms!(terms, sites, centering, t, frame, centered, batch,
+            weights, chain)
+    end
     _brm_svi_update_sites!(sites, t, q, g, ε, batch, terms, site_step, site_scale)
     x = _brm_svi_global_vector(q)
     grad = _brm_svi_add_site_gradient!(_brm_svi_global_gradient(q, w, ε, η), sites, q)
@@ -920,8 +1041,8 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     # carries weight about 1 / π, so its coordinates' gradients are about √w times
     # their rms when drawn, and the batch's largest weight bounds every unit in it.
     clip = _BRM_SVI_GLOBAL_CLIP * sqrt(maximum(weights))
-    whiten ? _brm_svi_whitened_global_step!(global_opt, q, x, grad, lr_global; clip) :
-        _brm_svi_step!(global_opt, x, grad, lr_global; clip)
+    whiten ? _brm_svi_polish_global_step!(global_opt, q, x, grad, lr_global; clip, rank=rank_step) :
+        _brm_svi_exploration_global_step!(global_opt, q, x, grad, lr_global; clip)
     _brm_svi_set_global!(q, x)
     _brm_svi_each_unit(t.plans, length(batch)) do _, k
         S = curvatures[k]
@@ -929,6 +1050,9 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
             _brm_svi_unit_step!(q, batch[k], terms[k].gz, terms[k].gd, draws[k], β) :
             _brm_svi_unit_step_full!(q, batch[k], terms[k].gz, S, β)
     end
+    # The controls move while exploring; settling and polishing step q in one fixed
+    # frame, which polishing averages.
+    centering === nothing || whiten || _brm_svi_control_steps!(q, batch, centered)
     P + batch_value
 end
 
@@ -1119,7 +1243,8 @@ function _brm_svi_advance!(run, t, c)
             scale * (polishing || settling ? c.polish_lr : c.lr_global), scale * c.unit_step;
             whiten=polishing || settling, weights=batch.weights, sites=run.sites,
             site_scale=scale, curvature=_brm_svi_unit_curvature_mode(c),
-            site_step=scale * _brm_svi_site_step(c))
+            site_step=scale * _brm_svi_site_step(c),
+            rank_step=polishing || settling ? _brm_svi_rank_step_ratio(c) : 1.0)
     catch e
         e isa BRMSVINonfiniteError || rethrow()
         throw(BRMSVINonfiniteError(it, e.terms))
@@ -1334,14 +1459,20 @@ function _brm_svi_factor!(q)
     q
 end
 
-# `n` draws from q as packed RK points, one per column.
+# `n` draws from q as packed RK points, one per column. Under learned centering
+# each unit's draw of its learned coordinates is mapped back to the packed ones
+# at that column's globals.
 function _brm_svi_draws(rng, t, q, n)
     U = repeat(t.m.unit, 1, n)
+    centering = _brm_svi_centering(t)
     for j in 1:n
-        U[t.globals, j] .= _brm_svi_draw_global(q, randn(rng, length(q.μ)),
-            randn(rng, size(q.Β, 2)))
+        g = _brm_svi_draw_global(q, randn(rng, length(q.μ)), randn(rng, size(q.Β, 2)))
+        U[t.globals, j] .= g
+        frame = centering === nothing ? nothing : _brm_svi_centering_frame(centering, t, g)
         for (i, block) in enumerate(t.units)
-            U[block, j] .= _brm_svi_draw_unit(q, i, _brm_svi_unit_noise(rng, q.U[i]))
+            u = _brm_svi_draw_unit(q, i, _brm_svi_unit_noise(rng, q.U[i]))
+            U[block, j] .= centering === nothing ? u :
+                _brm_svi_centered_coordinates(centering, frame, q, i, g, u)
         end
     end
     _brm_svi_fill_absent_draws!(rng, U, t, t.previous)
@@ -1647,9 +1778,13 @@ target on every call.
 """
 brm_svi_fit(x; kwargs...) = _brm_svi_initial_fit(nothing, x; kwargs...)
 brm_svi_fit(save::Function, x; kwargs...) = _brm_svi_initial_fit(save, x; kwargs...)
-_brm_svi_initial_fit(save, x; laplace=nothing, kwargs...) = laplace === nothing ?
-    _brm_svi_fit(save, x, nothing; kwargs...) :
+function _brm_svi_initial_fit(save, x; laplace=nothing, kwargs...)
+    laplace === nothing && return _brm_svi_fit(save, x, nothing; kwargs...)
+    get(kwargs, :centering, nothing) === nothing || throw(ArgumentError(
+        "brm_svi_fit: learned centering moves the minibatch engine's unit factors; " *
+        "laplace=GaussianBlockLaplace() integrates them instead, so pass only one of them"))
     _brm_svi_laplace_dispatch(save, x, nothing, laplace; kwargs...)
+end
 
 function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32,
         max_iterations=100_000, family=nothing, unit_sampling=nothing,
@@ -1657,7 +1792,7 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         lr_global=0.01, unit_step=nothing, unit_curvature=:orthogonal, start=nothing,
         inits=nothing, global_scale=0.1, unit_scale=1.0, polish_lr=0.05, window=nothing,
         patience=10, min_windows=40, polish_windows=20,
-        settle_windows=_BRM_SVI_SETTLE_WINDOWS, kwargs...)
+        settle_windows=_BRM_SVI_SETTLE_WINDOWS, centering=nothing, kwargs...)
     family = _brm_svi_family(previous, family)
     settle_windows isa Integer && settle_windows >= 0 || throw(ArgumentError(
         "brm_svi_fit: settle_windows must be a nonnegative integer (0: polish straight " *
@@ -1665,6 +1800,12 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
     unit_curvature in (:orthogonal, :pair) || throw(ArgumentError(
         "brm_svi_fit: unit_curvature must be :orthogonal or :pair, got $(repr(unit_curvature))"))
     unit_step = something(unit_step, _brm_svi_default_unit_step(unit_curvature))
+    centering === nothing || centering isa LearnedCentering || throw(ArgumentError(
+        "brm_svi_fit: centering must be LearnedCentering() or nothing, got $(repr(centering))"))
+    previous === nothing || centering === nothing || throw(ArgumentError(
+        "brm_svi_fit: a streaming update carries the previous fit's centering; omit centering"))
+    previous isa BRMSVIState && hasproperty(previous.layout, :centering) &&
+        (centering = LearnedCentering(; previous.layout.centering...))
     _brm_svi_unit_options(unit_dense_limit, unit_rank)
     unit_sampling in (nothing, :uniform, :work) || throw(ArgumentError(
         "brm_svi_fit: unit_sampling must be :uniform or :work"))
@@ -1677,6 +1818,7 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
             kwargs...) do t
         t, q = _brm_svi_initialize(t, previous, family; start, inits, global_scale, unit_scale,
             unit_dense_limit, unit_rank)
+        centering === nothing || ((t, q) = _brm_svi_with_centering(t, q, centering))
         c = _brm_svi_controls(length(t.units); batch_size, max_iterations, lr_global,
             unit_step, polish_lr, window, patience, min_windows, polish_windows,
             settle_windows=Int(settle_windows), unit_curvature,
@@ -1803,6 +1945,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                 end
                 optimizing = false
                 q = _brm_svi_result_q(run)
+                centering = _brm_svi_centering(t)
                 (; draws, coordinates=copy(m.view.coordinates), diagnostics=(;
                     threads=length(t.plans), target=(; reuse..., seconds=target_seconds),
                     elbo=run.trace, elbo_windows=first.(run.windows),
@@ -1821,7 +1964,9 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                     sampling=run.sampling, unit_gradient_calls=run.unit_gradient_calls,
                     sparse_globals=_brm_svi_sites_diagnostics(run.sites, t),
                     start=get(t, :start_receipt, nothing),
-                    streaming=_brm_svi_carried_state(previous, t, q), optimizer=state))
+                    streaming=_brm_svi_carried_state(previous, t, q), optimizer=state,
+                    centering=centering === nothing ? nothing :
+                        _brm_svi_centering_report(centering, q, _brm_svi_unit_levels(t))))
             finally
                 # A refused checkpoint leaves the target as it found it; an exception
                 # while optimizing may have left an AD workspace mid-evaluation.

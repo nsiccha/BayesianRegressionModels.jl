@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.243
+## 0.2.248
 
 - Changed: `brm_svi_fit`'s dense units (at most `unit_dense_limit` coordinates)
   estimate their whole curvature on every visit. A visit used to evaluate the
@@ -20,26 +20,167 @@ instead of failing at run time.
   product, and move the precision a tenth of the way (`unit_step = 0.1`) along
   that one direction; a unit of tens of coordinates then stopped unsettled after
   the visits a minibatch run gives it, and the hyperparameters followed its
-  factor. On an OU chain cut into window units of 66 coordinates (128 units,
-  batch 8, about 500 visits each) the fitted length scale came out 1.4 (states
-  as latents) and 11.4 (states from innovations) against about 61, 411 and 113
-  nats below the family's optimum. Now a visit evaluates d mutually orthogonal
-  antithetic pairs (2d unit gradients for d coordinates; a randomly rotated
-  spherical-radial cubature rule), whose Stein estimate is the unit's expected
-  curvature, exact when its term is quadratic in its coordinates, and takes the
-  whole natural-gradient step (`unit_step` now defaults to 1), inside the same
-  trust regions. A pure test with 32 units of 48 coordinates whose prior scale
-  is the one global:
-  log σ 0.0345 against the optimum 0.0334, the units' factors 0.002 nats from
-  their optimum in all, where the single pair ended at 0.507 and 100.6 nats.
+  factor. Now a visit evaluates d mutually orthogonal antithetic pairs (2d unit
+  gradients for d coordinates; a randomly rotated spherical-radial cubature
+  rule), whose Stein estimate is the unit's expected curvature, exact when its
+  term is quadratic in its coordinates, and takes the whole natural-gradient
+  step (`unit_step` now defaults to 1), inside the same trust regions.
   Structured units (above `unit_dense_limit`) are unchanged.
+- Measured on an OU chain cut into window units, with exact oracles. 128 units
+  of 66 coordinates (about 500 visits each): the length scale ℓ came out 48.0
+  (states as latents) and 65.6 (states from innovations), against 1.4 and 11.4
+  before and about 61 at the family's optimum. 2,048 units of 64-65 coordinates
+  (about 72 visits each): 18.2 and 20.5 against 0.6 and 18.1 before, 802 and 227
+  nats below the family's optimum against 24,756 and 1,440; the rest of that gap
+  is a ridge between the hyperparameters and the windows' states, which a unit's
+  step does not cross. A pure test with 32 units of 48 coordinates whose prior
+  scale is the one global: log σ 0.0345 against the optimum 0.0334, the units'
+  factors 0.002 nats from their optimum in all, where the single pair ended at
+  0.507 and 100.6 nats.
 - Added: `unit_curvature`, `:orthogonal` (default) or `:pair`. `unit_curvature =
   :pair` with `unit_step = 0.1` is 0.2.242's step exactly, and `unit_step`'s
   default follows `unit_curvature`.
 - Changed: a dense unit's visit costs 2d unit gradient evaluations instead of 2,
-  and `diagnostics.unit_gradient_calls` counts them. A fit on a fixed seed
-  differs from 0.2.242's from its first dense unit visit. A checkpoint of 0.2.242
-  or earlier still resumes, with the single pair: it records no `unit_curvature`.
+  and `diagnostics.unit_gradient_calls` counts them. On the toys above a fit took
+  4 to 13 times as long. A fit on a fixed seed differs from the single pair's
+  from its first dense unit visit. A checkpoint of 0.2.247 or earlier still
+  resumes, with the single pair: it records no `unit_curvature`.
+- Unchanged: a sparse global's reader sites keep their precision step 0.1 under
+  `:orthogonal` (their curvature still comes from the one global draw; the unit
+  step 1 put a window toy's boundaries 88 optimal sds off). With
+  `centering=LearnedCentering()`, each of a dense unit's 2d draws is the centered
+  term and the controls' gradient and the location and scale adjoints are averaged
+  over them.
+
+## 0.2.247
+
+- Fixed: a `LowRankGlobal(r)` fit's rank part steps no faster in settling and
+  polishing than in exploration. Both phases step at `polish_lr` (by default five
+  times `lr_global`), settling at that size for up to `settle_windows` windows,
+  and Β's gradient is minibatch noise in every phase, so its rows random-walked
+  again: on a model with 1,094 globals 4 of 10 low-rank fits evaluated non-finite
+  draws while settling (three within its first five windows) and a fifth while
+  polishing, and with `settle_windows=0` one did in polishing. Β's rows now step `min(1, lr_global / polish_lr)` times as far as μ
+  in units of their coordinates' scales. μ, ρ and `MeanFieldGlobal` fits are
+  unchanged; a `LowRankGlobal` fit on a fixed seed differs from its first
+  settling step on.
+
+## 0.2.246
+
+- New: learned partial centering in minibatch SVI,
+  `brm_svi_fit(x; centering=LearnedCentering())` (Gorinova, Moore and Hoffman
+  2020's VIP). Each eligible cell gets a control `c ∈ (0, 1)`, optimized with
+  the variational factors by the ELBO: `c = 0` is the non-centred coordinate,
+  `c = 1` the centred one. Cells are the standardized draws of estimated
+  random-effect blocks a unit owns (located at the unit's mu-referenced
+  population coefficients; a correlated block is centred margin by margin on
+  its conditional mean) and authored Gaussian vector elements a unit owns
+  (`z[1:n] .~ Normal(m, tau)`, located at the law's mean). The map is
+  ReparametrizableDistributions' `reparam`; scales, correlation factors and
+  law arguments stay RK graph values, read once and pulled back once per
+  iteration. Each unit's controls take an Adam step (`LearnedCentering(;
+  start=0.5, step=0.05)`) whenever the unit is in the batch, while SVI
+  explores, and stay fixed while it settles and polishes. Draws stay packed RK points. `fit.diagnostics.centering` reports
+  every cell's `c` and what stays uncentred, with the reason: Student-t,
+  fixed-covariance and field families (HSGP weights, `cdar`, `car`,
+  completions) and shared field weights. Omitting `centering` keeps the
+  existing fit.
+- New: `brm_svi_centeredness(fit, adaptive_centering_controls(adaptive, sb))`
+  returns a centered fit's controls as `adaptive_centering_problem`'s
+  `centeredness` vector, a start for WarmupHMC's own adaptation.
+- A centered fit's `brm_svi_checkpoint` stores each unit's controls, and a
+  streaming update inherits the centering (pass no `centering`). A carried
+  unit's prior is its factor through the old controls' map, so relearned
+  controls do not reinterpret old factors; `brm_svi_resume` continues a
+  centered optimizer checkpoint.
+- `brm_svi_combine`, and a factor-level `start=`, refuse a centered fit or
+  checkpoint: its unit factors are over the learned coordinates, whose map to
+  the packed draws moves with the globals, so they are no site of those draws.
+  Fit slices to be combined without centering.
+- Compatibility: depends on ReparametrizableDistributions 0.3 (git source).
+- Learned centering and reader sites (0.2.240) compose: a sparse global's
+  site stands for its reader's whole centered term, so the reader's gradient
+  there includes the chain through its cells' locations and scales (the sd of a
+  `gr(g, by=b)` stratum few units belong to, say). That chain term reaches every
+  other global through the batch's one pullback, as before.
+
+## 0.2.245
+
+- Fixed: a `LowRankGlobal(r)` fit's rank part no longer random-walks during
+  exploration. Its rows took constant Adam steps of `lr_global` in absolute
+  units, the same for every coordinate, while their gradient is mostly
+  minibatch noise, so over a long exploration (a large `min_windows`) they grew
+  to several times their coordinates' own sds: the factor came out wider than
+  the posterior, its trimmed ELBO fell, and on a model whose log-scale
+  hyperparameters overflow a few sds out, typical draws reached a non-finite
+  density and the fit stopped with `BRMSVINonfiniteError`. Each Β row now steps
+  in units of its coordinate's scale `exp(ρ_k)` in exploration too, as it
+  already did in polishing. A ridge a slice's data leave to the prior therefore
+  grows over more iterations: fit `LowRankGlobal` slices for `brm_svi_combine`
+  with a longer exploration (a larger `min_windows`) than the default 40 windows.
+- Fixed: a `LowRankGlobal(r)` fit no longer breaks down when its
+  scale-relative steps start (settling, then polishing). They moved μ in units of
+  a square root of the whole global covariance, and the restarted Adam's first
+  steps, each about its step size in every whitened coordinate, added up along
+  the rank part's directions. On a model with 1,094 globals the trimmed ELBO fell
+  by two thirds within a few hundred iterations of the switch (measured on 0.2.241's
+  schedule, where polishing restarted Adam), and draws went non-finite. μ now moves
+  in units of its diagonal scale `exp(ρ_k)` when settling or polishing a low-rank
+  factor.
+- Unchanged: `MeanFieldGlobal` fits, to the last bit, and μ and ρ in a
+  `LowRankGlobal` exploration. A `LowRankGlobal` fit on a fixed seed differs from
+  its first exploration step on. A low-rank optimizer checkpoint written by an
+  earlier version resumes and continues under the new steps.
+
+## 0.2.244
+
+- Added: the NLME paths take a model whose `@plate` cell declares a latent
+  (`x ~ Normal(loc[i], s)`, one draw per cell or per entry) or calls a
+  function-style component, whose sampled locals are per cell. `brm_nlme_view`
+  reads those coordinates as `:shared_latent`, the reading a top-level vector's
+  entries get (`x[1:n] .~ Law`, read at the cell as `x[ids[i]]`): their law stays
+  in the population prior, they enter θ (or are fixed by `shared_point`), and
+  each unit's conditional likelihood reads its own cells' latents. Before,
+  `brm_nlme_view` refused with "coordinate record kind `cell_latent` has no NLME
+  role". `brm_svi_fit` gives a cell component's locals, with their prior
+  factors, to the unit whose cells read them. A dotted cell latent stays a global
+  of the fit for now: ReactiveKernels reports each unit's footprint as reading
+  every cell's latent block (ReactiveKernels snag `rkppl-dotted-pla-1629a747`); the
+  split is exact either way, and the same model with a top-level vector read as
+  `x[ids[i]]` is owned per unit already. A cell latent whose law reads a value the
+  model computes per cell (`x ~ Normal(m[i] .+ loc[i], s)`) is refused by name,
+  since that law's reads cannot be localized yet; the message names the same
+  model written without the read (`d ~ Normal(loc[i], s)`, then `x = m[i] .+ d`)
+  (snag `brm-nlme-view-re-ed98959b`).
+
+## 0.2.243
+
+- Fixed: a model reading `hsgp(t; cov=:periodic)` in a plate cell stopped with
+  `ArgumentError: Tuple contains 2 elements` when NLMEEstimation's
+  `check_protocol` prepared its sparse Laplace, and `prepare_cell_factors` raised
+  the same error. The repair is in ReactiveKernels 0.1.96. ReactiveKernelsPPL
+  0.1.106 alone, the first with that repair, raises a `BoundsError` in
+  `_refresh_cell_shared!` on the second call of a partitioned cell whose shared
+  prefix reads only some shared coordinates, which NLMEEstimation's
+  `check_protocol` reaches with integrated families; 0.1.107 repairs it. 0.2.239's
+  floors (ReactiveKernels 0.1.104, ReactiveKernelsPPL 0.1.114) carry both, and
+  `test/runtime_numeric_settings.jl` now checks that model's cell factors against
+  its whole likelihood in the test environment.
+- **Breaking**, from 0.2.239's ReactiveKernels 0.1.104 floor and in any
+  environment on ReactiveKernels 0.1.96 or later: a compact cell's Laplace
+  Hessian-vector product (Forward over Reverse) differentiates a matrix product
+  that reaches BLAS `gemm!`. On an Enzyme before dogfood `0cdbe188` (libEnzyme
+  `3a825a54`) it raises `EnzymeRuntimeException` ("The original primal code hits
+  this error condition"), which stops `check_protocol` on a cell that sorts its
+  data and on a censored ragged join beside an in-cell observation. Use Enzyme
+  dogfood `0cdbe188` or later, as BRM's test environment now does (0.2.239 pinned
+  `cecb571a`). That libEnzyme build is for Linux x86_64 only.
+- Changed: 0.2.239's floors also guarantee the reuse 0.2.227 left to the
+  environment. One lowered program serves every size and support bound
+  (ReactiveKernelsPPL 0.1.108), and one gradient query type every value of a
+  bound number (0.1.106), so an RK fit no longer recompiles when only such a value
+  changes. The `hsgp` docstring and the support-bound comment in
+  `src/rk_backend.jl` now say so.
 
 ## 0.2.242
 
