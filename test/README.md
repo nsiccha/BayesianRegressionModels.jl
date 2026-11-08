@@ -1223,6 +1223,23 @@ component per subject: its value matches a Laplace marginal computed from the
 whole model's density, and its gradient matches central differences. It runs in
 the test environment above.
 
+`rk_plate_invariant_output.jl` checks an RKBRMI `@plate` output whose cell reads
+no per-index value, `decay[g] = exp(log_a)`, over three cells (BRM snag
+`retained-pointwi-fa27bc37`). At model scope `decay`, `sum(decay)` and
+`length(decay)` see every cell, and the likelihood matches `Distributions.logpdf`.
+A second plate reads `decay[g]` per subject. Its pointwise densities match the
+same oracle. Its whole-model density and native Reverse gradient match a
+model-scope `fill` of the same values and central differences. `brm_nlme_model`
+gives each subject's likelihood and η gradient. A one-cell binding is the
+positive control. ReactiveKernelsPPL fixed the shape in 0.1.129 (RK `b6196f114`,
+ReactiveKernels snag `plate-output-of-c4a0ca87`). On older RKPPL, including this
+environment's RK pin `7b53c65f` (RKPPL 0.1.114), the output is one number. There
+the three-cell checks are `broken`: a later `decay[2]` raises a `BoundsError`,
+and `sum` and `length` return one cell's value. The one-cell count, total and
+likelihood pass on both. Its `decay` is `broken` there too, because one number is
+not a one-entry array. It accepts
+testset substring filters; about 5 minutes warm on gordito.
+
 `nlme_nested.jl` uses a public synthetic model with interleaved observations
 and 1, 2, and 3 nested units per subject. It checks explicit ownership,
 compact η likelihoods and gradients against an independent Normal oracle,
