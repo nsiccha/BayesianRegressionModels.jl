@@ -12,6 +12,36 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.261
+
+- Fixed: two bindings of one program now give `brm_nlme_model` the same subject
+  cell groups in the same order, so a later binding reuses the code an earlier
+  one compiled. Before, the groups followed the data. A plate observation whose
+  density count equalled the subject grouping's row count was read by those rows
+  and joined the plate group, which went first; in a binding where the counts
+  differed it was measured and became a group of its own, after the observations
+  before it. The groups' order set the partition keys' order (`brm_nlme_unit_<g>`
+  and the partition's `by`), so the model's type changed and the later binding
+  compiled its NLME model and first SVI fit again. On the test's toy, in one
+  process, the second binding compiled 2.7 s preparing the model and 8.0 s in its
+  first `brm_svi_fit`; it now compiles 0.01 s in each. A downstream report, on
+  BRM 0.2.242, measured 118.9 s of compilation for such a second binding (76.7 s
+  with a pending ReactiveKernels fix for the same order on its side), against
+  1.1 s for one whose plates were empty in the same places.
+- The groups are now the program's: the observations of one authored
+  `@plate for` cell (with the series its `@scan`s observe, and the formula
+  observations of its output observed per subject) share one group, measured or
+  not; every other observation is a group of its own; the groups follow the
+  program's pointwise order. A group whose observations attribute their cells
+  differently is split into one group per observation. Two `@plate for` cells
+  over the subjects are now two groups (before, every plate observation read by
+  rows shared one), so a nested model's structural reads prepare one cell query
+  per plate, and its η Hessian patterns are those of each plate's own cells.
+  Values, gradients and attribution are unchanged.
+- `test/nlme_binding_cell_groups.jl` covers both bindings: the same groups,
+  order, partition keys and model type, and lockstep, per-subject and unit
+  values against the full density.
+
 ## 0.2.260
 
 - New, **a stopgap**: in minibatch SVI (`brm_svi_fit` and its resume), a global

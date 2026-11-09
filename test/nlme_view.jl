@@ -639,11 +639,12 @@ end
     backend = RKBRMI(nlme_imputed_join(d))
     m = brm_nlme_model(backend; ad_backend=NLME_AD)
     @test m.cell_query !== nothing && m.cell_gradient !== nothing
-    # Groups of different sizes: the plate's two observations, then the
-    # covariate's observed values.
-    @test Set(m.cell_query[1].names) == Set([:conc, :marker])
-    @test m.cell_query[2].names == (:w_obs,)
-    observed = m.cell_query[2]
+    # Groups of different sizes: the plate's two observations, and the
+    # covariate's observed values, in the program's pointwise order.
+    @test Set(Set(c.names) for c in m.cell_query) == Set([Set([:conc, :marker]), Set([:w_obs])])
+    order = collect(keys(Base.invokelatest(pointwise_query(backend), m.unit)))
+    @test reduce(vcat, collect.(c.names for c in m.cell_query)) == order
+    observed = only(c for c in m.cell_query if c.names == (:w_obs,))
     n = length(m.view.levels)
     levels = string.(m.view.levels)
     @test [length(observed.positions[i]) for i in 1:n] ==
@@ -675,7 +676,7 @@ end
     drawn = findall(c -> occursin("y_mis", String(c)),
         BRM._rk_layout_coordinate_names(backend))
     @test length(drawn) == count(ismissing, d.w)
-    plate = m.cell_query[1]
+    plate = only(c for c in m.cell_query if :conc in c.names)
     footprint = BRM._rk_nlme_cell_footprint_query(plate.query)
     own_drawn(i) = intersect(drawn, reduce(vcat,
         [BRM._rk_nlme_cell_footprint(footprint, u, k) for k in plate.positions[i]]))

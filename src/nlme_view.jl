@@ -2071,17 +2071,32 @@ function Base.getindex(p::_BRMNLMEPoint, j::Int)
 end
 
 # A subject's conditional density is a sum of RK query cells, in groups that
-# share cell positions. The subject plate group holds the observations with one
-# cell per subject row: in-cell observations and formula observations of kernel
-# output observed per subject (`_RKNestedObservation`). Every other observation
-# is observed elementwise with one density per row it was observed on: a flat
-# grouped response (one per row of the grouping column) or a completed
-# covariate's observed values. Each density is then a cell of its own, owned by
-# the subject of its row, and the observation forms one group. So does an
-# observation on rows of its own (`measured`), whose cells, plate iterations
-# included, belong to the subjects the attribution measured. Returns
+# share cell positions. Which observations share a group is the program's, not
+# the data's (`_brm_nlme_cell_groups`): the observations of one authored
+# `@plate for` cell, with the series its `@scan`s observe and the formula
+# observations of its output observed per subject (`_RKNestedObservation`),
+# share its iterations; every other observation is a group of its own. The
+# groups follow the program's pointwise order, the order of `attribution`. So
+# every binding of one program has the same groups in the same order, and so
+# the same partition keys, partition context and model type, and it reuses the
+# code another binding compiled (snag odl-s-ladder-brm-d114c22c: an observation
+# whose density count equalled the grouping's row count in one binding, and was
+# measured in another, used to join or leave the plate group, which went
+# first).
+#
+# A plate observation whose cells were read from the subjects' rows has one
+# cell per subject row: the subjects themselves (one grouping row per subject),
+# or the cells of a plate over the subjects' rows (long-format data, such as
+# `groups(g; order = t)`); otherwise the model has no subject cells. A flat
+# grouped response (one density per row of the grouping column) and a
+# completed covariate's observed values have one cell per density, owned by
+# the subject of its row; an observation on rows of its own (`measured`) has
+# one per density too, owned by the subject the attribution measured. A
+# group's observations share one key, so they must attribute their cells
+# alike; when they do not, each is a group of its own. Returns
 # `(; names, positions, elementwise)` per group, `positions[i]` being subject
-# `i`'s cells, or `nothing`.
+# `i`'s cells, `elementwise` whether its cells are single densities rather
+# than plate cells read from the subjects' rows, or `nothing`.
 function _brm_nlme_subject_cells(backend::RKBRMI, view::BRMNLMEView, attribution,
         measured)
     plan = backend.plan
@@ -2098,39 +2113,76 @@ function _brm_nlme_subject_cells(backend::RKBRMI, view::BRMNLMEView, attribution
             (; names=(name,), positions, elementwise=true)
         end)
     end
-    plate_observations = setdiff(_brm_nlme_plate_observations(plan), measured)
+    plate = _brm_nlme_plate_observations(plan)
     n = length(view.levels)
     L = sum(length, view.rows)
-    plate = [entry for entry in attribution if first(entry) in plate_observations]
-    groups = Any[]
-    if !isempty(plate)
-        positions = if all(rows -> length(rows) == 1, view.rows)
-            # One grouping row per subject: the plate's cells are the subjects.
-            rows = [only(group_rows) for group_rows in view.rows]
-            all(subjects -> length(subjects) == n &&
-                all(i -> subjects[rows[i]] == i, 1:n), last.(plate)) || return nothing
-            [[row] for row in rows]
+    subjects = Dict(attribution)
+    rows = all(r -> length(r) == 1, view.rows) ? [only(r) for r in view.rows] : nothing
+    # A plate observation attributed by its rows, not measured, is a plate over
+    # the subjects' rows.
+    on_rows(name) = name in plate && !(name in measured)
+    for name in first.(attribution)
+        on_rows(name) || continue
+        s = subjects[name]
+        if rows !== nothing
+            length(s) == n && all(i -> s[rows[i]] == i, 1:n) || return nothing
         else
-            # Several rows per subject (long-format data): every plate
-            # observation has one density per cell of a plate over the
-            # subjects' rows, such as `groups(g; order = t)`, and attributes
-            # its cells alike.
-            cells = last(first(plate))
-            all(plate) do (name, subjects)
-                cell_rows = _brm_nlme_cell_rows(plan, name, view.group, L)
-                subjects == cells && cell_rows !== nothing &&
-                    length(cell_rows) == length(cells)
-            end || return nothing
-            [findall(==(i), cells) for i in 1:n]
+            cell_rows = _brm_nlme_cell_rows(plan, name, view.group, L)
+            cell_rows !== nothing && length(cell_rows) == length(s) || return nothing
         end
-        push!(groups, (; names=Tuple(first.(plate)), positions, elementwise=false))
     end
-    for (name, subjects) in attribution
-        name in plate_observations && continue
-        push!(groups, (; names=(name,),
-            positions=[findall(==(i), subjects) for i in 1:n], elementwise=true))
+    group(names) = (; names=Tuple(names),
+        positions=[findall(==(i), subjects[first(names)]) for i in 1:n],
+        elementwise=!any(on_rows, names))
+    groups = Any[]
+    for names in _brm_nlme_cell_groups(plan, first.(attribution))
+        if all(name -> subjects[name] == subjects[first(names)], names)
+            push!(groups, group(names))
+        else
+            append!(groups, (group([name]) for name in names))
+        end
     end
     Tuple(groups)
+end
+
+# The observations among `names` (in the program's pointwise order) that share
+# cells by construction, as groups in that order, each in that order too. The
+# observations of one authored `@plate for` cell and the series its `@scan`s
+# observe share its iterations, and so does a formula observation of its output
+# observed per subject (`_RKNestedObservation`, which reads the plate's
+# collected cells); one that reads the cells of several plates joins them all.
+# Every other observation is a group of its own.
+function _brm_nlme_cell_groups(plan, names)
+    parent = collect(eachindex(names))
+    root(k) = parent[k] == k ? k : (parent[k] = root(parent[k]))
+    join!(j, k) = (a = root(j); b = root(k); parent[max(a, b)] = min(a, b))
+    index = Dict(name => k for (k, name) in enumerate(names))
+    if plan isa _RKValuePlan
+        plates = [a for a in plan.assignments if a isa _RKPreparedKernelAssignment]
+        # A plate, by the graph value holding its collected cells, and the
+        # first observation seen of it, which every other one joins.
+        member = Dict{Symbol,Int}()
+        link!(cells, k) = haskey(member, cells) ? join!(member[cells], k) :
+            (member[cells] = k)
+        for a in plates, o in (a.observations..., a.scan_observed...)
+            haskey(index, o.source) && link!(a.cells, index[o.source])
+        end
+        collected = Set(a.cells for a in plates)
+        for o in plan.observations
+            o isa _RKNestedObservation && haskey(index, o.name) || continue
+            for cells in values(o.cells)
+                cells in collected && link!(cells, index[o.name])
+            end
+        end
+    end
+    groups = Dict{Int,Vector{Symbol}}()
+    order = Int[]
+    for (k, name) in enumerate(names)
+        r = root(k)
+        haskey(groups, r) || (groups[r] = Symbol[]; push!(order, r))
+        push!(groups[r], name)
+    end
+    [groups[r] for r in order]
 end
 
 # Plans whose observations RK evaluates cell by cell.
