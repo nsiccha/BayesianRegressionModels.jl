@@ -132,10 +132,13 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
     # Worker plans build their samplers from the partition's bound context, which is all
     # the target keeps of it: a connected partition's value query, its footprints (the
     # plan holds its own) and its evaluator pool are per unit and served the plan.
-    (; m, globals, units, ownership, previous, partition=(; partition.context), plan,
+    t = (; m, globals, units, ownership, previous, partition=(; partition.context), plan,
        plans=[plan], work, places,
        touched=_brm_svi_field_touched!(_brm_svi_touched_globals(places, prior), fields), prior,
        fields, z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
+    # From the model's own prior, before a streaming fit puts its carried factor
+    # there: what the sd bound, a stopgap, multiplies (src/nlme_svi_sd_bound.jl).
+    merge(t, (; sd_prior=_brm_svi_sd_prior(t)))
 end
 
 # `t` with `n` partition plans, one per task that evaluates units. `t.plan` is
@@ -1031,7 +1034,7 @@ _brm_svi_field_prepare!(rng, t, q, g, batch) = nothing
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
         sites=nothing, site_scale=1.0, rank_step=1.0, curvature=:pair, site_step=β,
-        structured_step=β, structured_rank=1.0, positive_part=true)
+        structured_step=β, structured_rank=1.0, positive_part=true, sd_bound=nothing)
     D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
@@ -1119,6 +1122,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     whiten ? _brm_svi_polish_global_step!(global_opt, q, x, grad, lr_global; clip, rank=rank_step) :
         _brm_svi_exploration_global_step!(global_opt, q, x, grad, lr_global; clip)
     _brm_svi_set_global!(q, x)
+    _brm_svi_bound_sd!(q, _brm_svi_sd_prior_of(t), sd_bound)
     _brm_svi_each_unit(t.plans, length(batch)) do _, k
         S = curvatures[k]
         S === nothing ?
@@ -1245,12 +1249,13 @@ _brm_svi_stalled(a, b, W) = b.center - a.center < 2 * sqrt((a.spread + b.spread)
 function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
         polish_lr, window, patience, min_windows, polish_windows, unit_sampling=:uniform,
         settle_windows=_BRM_SVI_SETTLE_WINDOWS, unit_curvature=:pair,
-        structured_unit_step=unit_step, structured_rank_step=1.0, unit_positive_part=true)
+        structured_unit_step=unit_step, structured_rank_step=1.0, unit_positive_part=true,
+        sd_bound=_BRM_SVI_SD_BOUND)
     B = min(batch_size, N)
     (; batch_size=B, window=window === nothing ? max(cld(N, B), 100) : window,
        max_iterations, lr_global, unit_step, polish_lr, patience, min_windows,
        polish_windows, unit_sampling, settle_windows, unit_curvature, structured_unit_step,
-       structured_rank_step, unit_positive_part)
+       structured_rank_step, unit_positive_part, sd_bound)
 end
 
 # A dense unit's step when the caller names none: the whole natural-gradient
@@ -1362,7 +1367,8 @@ function _brm_svi_advance!(run, t, c)
             site_step=scale * _brm_svi_site_step(c),
             structured_step=scale * _brm_svi_structured_unit_step(c),
             structured_rank=_brm_svi_structured_rank_step(c),
-            rank_step=polishing || settling ? _brm_svi_rank_step_ratio(c) : 1.0)
+            rank_step=polishing || settling ? _brm_svi_rank_step_ratio(c) : 1.0,
+            sd_bound=_brm_svi_sd_bound_factor(c))
     catch e
         e isa BRMSVINonfiniteError || rethrow()
         throw(BRMSVINonfiniteError(it, e.terms))
@@ -1831,6 +1837,15 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   windows; `0` skips settling, the schedule of BRM 0.2.241 and earlier), then
   polishes for `polish_windows` windows with decaying steps and returns the
   average of the polished iterates.
+- `sd_bound` (default `2`), **a stopgap**: after every global step,
+  a global whose prior reads no other coordinate has its marginal sd under q held
+  at most `sd_bound` times the sd of its prior's Gaussian projection, so a global
+  whose gradient is mostly noise cannot random-walk wide and overflow the density.
+  It treats the symptom, not the optimizer's blindness to the prior under that
+  noise, and it holds q too narrow where a posterior is wider than the bound. A
+  fit that ends with a global at its bound warns and names it
+  (`diagnostics.sd_bound`); `sd_bound=nothing` turns the bound off. A resumed
+  checkpoint keeps its own factor, `2` for one written before `sd_bound` existed.
 - Interruptible runs: `stop_after` ends this call after that many iterations
   (the run continues with [`brm_svi_resume`](@ref) on the same model and
   data; the stopping rule and step-size schedule are unaffected). An optional
@@ -1888,7 +1903,10 @@ plain mean of each window, which a single draw can dominate; and
 rule reads), `clipped_steps` (how many global steps had a coordinate's gradient
 limited to `10 √w` times its running rms, with `w` the batch's largest unit
 weight, `N / B` for uniform sampling, so that one extreme draw does not stop that
-coordinate's optimization), `converged`,
+coordinate's optimization), `sd_bound` (`factor`, `nothing` when off, and per
+global `coordinates` and `bound`, `Inf` where it has none, `at_bound`, the
+globals whose marginal sd in the last iterate is at it, and `stopgap = true`),
+`converged`,
 `finished` (converged or `max_iterations` reached; `false` after `stop_after`),
 `iterations`, `stages` (the iterations spent `exploring`, `settling` and
 `polishing`, and `settled`: whether settling ended on its test rather than at
@@ -1940,8 +1958,10 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         lr_global=0.01, unit_step=nothing, unit_curvature=:orthogonal, start=nothing,
         inits=nothing, global_scale=0.1, unit_scale=1.0, polish_lr=0.05, window=nothing,
         patience=10, min_windows=40, polish_windows=20,
-        settle_windows=_BRM_SVI_SETTLE_WINDOWS, centering=nothing, kwargs...)
+        settle_windows=_BRM_SVI_SETTLE_WINDOWS, centering=nothing, sd_bound=_BRM_SVI_SD_BOUND,
+        kwargs...)
     family = _brm_svi_family(previous, family)
+    sd_bound = _brm_svi_check_sd_bound(sd_bound)
     settle_windows isa Integer && settle_windows >= 0 || throw(ArgumentError(
         "brm_svi_fit: settle_windows must be a nonnegative integer (0: polish straight " *
         "after exploration)"))
@@ -1969,7 +1989,7 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         centering === nothing || ((t, q) = _brm_svi_with_centering(t, q, centering))
         c = _brm_svi_controls(length(t.units); batch_size, max_iterations, lr_global,
             steps..., polish_lr, window, patience, min_windows, polish_windows,
-            settle_windows=Int(settle_windows), unit_curvature,
+            settle_windows=Int(settle_windows), unit_curvature, sd_bound,
             unit_sampling=something(unit_sampling,
                 t.m.view.unit_partition === :connected ? :work : :uniform))
         t, _brm_svi_optimizer_state(t, previous, c, _brm_svi_run(rng, q, c, t))
@@ -2094,11 +2114,14 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                 optimizing = false
                 q = _brm_svi_result_q(run)
                 centering = _brm_svi_centering(t)
+                bound = _brm_svi_sd_bound_report(t, run.q, _brm_svi_sd_bound_factor(c))
+                _brm_svi_warn_sd_bound(bound; caller)
                 (; draws, coordinates=copy(m.view.coordinates), diagnostics=(;
                     threads=length(t.plans), target=(; reuse..., seconds=target_seconds),
                     elbo=run.trace, elbo_windows=first.(run.windows),
                     elbo_windows_trimmed=[w.center for w in run.windows],
-                    clipped_steps=run.adam.clipped, run.converged,
+                    clipped_steps=run.adam.clipped, sd_bound=bound,
+                    run.converged,
                     finished=_brm_svi_finished(run, c), iterations=run.iteration,
                     stages=_brm_svi_stages(run, c), q,
                     globals=t.globals, units=t.units, owner=t.ownership.owner,

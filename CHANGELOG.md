@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.259
+## 0.2.261
 
 - Fixed: two bindings of one program now give `brm_nlme_model` the same subject
   cell groups in the same order, so a later binding reuses the code an earlier
@@ -41,6 +41,58 @@ instead of failing at run time.
 - `test/nlme_binding_cell_groups.jl` covers both bindings: the same groups,
   order, partition keys and model type, and lockstep, per-subject and unit
   values against the full density.
+
+## 0.2.260
+
+- New, **a stopgap**: in minibatch SVI (`brm_svi_fit` and its resume), a global
+  whose prior reads no other coordinate no longer drifts far wider than that
+  prior. Adam steps a coordinate by about its step size whatever its gradient
+  noise, so where the noise dwarfs the prior's pull the factor's scale and rank
+  row random-walk, and where the gradient grows with the draw (a log length
+  inside a random-feature phase) a wider factor meets larger noise: one such log
+  length under a N(-1.386, 0.5) prior reached a marginal sd of 378 in
+  exploration and overflowed the density. Its marginal sd under q, `√(exp(2ρ_k)
+  + |Β_k|²)`, is now held at most `sd_bound` (a new keyword, default `2`) times
+  the sd of the Gaussian closest to its prior (the factor a fit on no data would
+  reach). This treats the symptom: the optimizer still does not see the prior
+  through that noise, the mean can still wander, and where a posterior is wider
+  than the bound (a heavy-tailed prior under prior-data conflict, a periodic or
+  multimodal likelihood) q is held too narrow. So a fit that ends with a global
+  at its bound warns and names it, `diagnostics.sd_bound` reports the `factor`,
+  each global's `bound` and those `at_bound` (with `stopgap = true`), and
+  `sd_bound=nothing` turns the bound off. Globals whose prior reads others
+  (centered field states, their lengths) and flat priors have no bound. A fit
+  whose factor stays inside the bound is unchanged to the last bit, checkpoints
+  keep their layout, and a checkpoint written before this version resumes with
+  the default bound. A global whose prior sd is below half of `global_scale`
+  (0.1 by default), where every global starts, is at its bound from the first
+  step on instead of shrinking there over hundreds of iterations, so such a fit
+  differs from its first step: on one model a coordinate with prior sd 1e-6
+  still had sd 0.008 after 2,000 iterations.
+- Fixed: every `GaussianBlockLaplace` fit failed while building its optimizer
+  state, with `MethodError: no method matching get(::_BRMSVILaplaceTarget,
+  ...)`, since the unit-owned field states of `field_states=:units` (BRM
+  0.2.237).
+
+## 0.2.259
+
+- Changed: `brm_svi_fit` gives a `@plate` cell latent's entries
+  (`x ~ Normal(loc[i], s)` in a cell, one draw per cell or per entry) to the
+  unit whose cells read them, as it already did a cell component's locals.
+  Before, every unit's footprint read every cell's latent block, so the latents
+  were globals of the fit (exact, but not per unit). This needs
+  ReactiveKernelsPPL 0.1.127 (ReactiveKernels snags `rkppl-dotted-pla-1629a747`
+  and `dotted-cell-late-3789b8ea`) and, beside a `gmrf(...; neighbors=)` field,
+  ReactiveKernels 0.1.120 (snag `derivativerule-r-0d7e245c`), so the floors rise
+  to ReactiveKernels 0.1.120 and ReactiveKernelsPPL 0.1.128. On Julia 1.10 these
+  need Enzyme dogfood `bcefef27` or later, without which `brm_svi_fit` can abort
+  the process (`LLVM ERROR: function failed verification`, Enzyme snag
+  `native-reverse-p-1a4ac06d`); the test environment pins dogfood `9b573c63`,
+  whose libEnzyme `48fe7ef5` is built for Linux x86_64 only. A cell latent under a transformed law
+  (`LogNormal` and other positive or bounded families) still stays global, since
+  ReactiveKernels reads its constrained block whole. A cell latent whose law
+  reads a value the model computes per cell is still refused by name with its
+  rewrite.
 
 ## 0.2.258
 

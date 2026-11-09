@@ -391,4 +391,8 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # a response reading a `@plate`-computed vector whole partitions per cell unit.
 # From RK 0.1.96 a compact cell's matrix product reaches BLAS, so it needs the
 # Enzyme dogfood pinned in test/setup_env.jl.
-rev = "7b53c65fa2c09feda513eefdb9e04fb463787820"
+# 29711427 (RK 0.1.120 / RKPPL 0.1.128) reads a dotted `@plate` cell latent's
+# block per cell, beside a computed location too, so its footprint and SVI
+# ownership are per unit, and keeps a rule's data structure `Const` in a wide
+# planned body.
+rev = "297114272297b93a9370d61947ea160d20ba428d"

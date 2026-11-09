@@ -1223,6 +1223,14 @@ component per subject: its value matches a Laplace marginal computed from the
 whole model's density, and its gradient matches central differences. It runs in
 the test environment above.
 
+`rk_batched_field_cells.jl` checks a paired Fourier field with channel mixing written as array cells (BRM todo `07y7ghy`, from RK snag `plate-of-per-row-d1b4ed43`). The cell is `phase = frequency_t * (coordinates[s] ./ lengths)`, then products of shared coefficient matrices with `cos.(phase)` and `sin.(phase)`, then `correlation * raw`. It is checked against the same field written as ODLPlaus writes it, one `@deffun @juliacompat` call per row, on three counts:
+
+- RK gives both the same coordinates, density and native Reverse gradient.
+- RK plans the array cell's plate as matrix products (log group `:plate_batching`) and the per-row plate as a cell loop.
+- SBBRMI's compiled Stan density and gradient equal RK's.
+
+ReactiveKernels batches plates from 0.1.127 (RK `fa3deb83`). On this environment's RK pin `29711427` (RK 0.1.120) the batched-plan check is `broken`; everything else passes on both. Each spelling rule in the file's header was found by a refusal. It runs in the test environment, about 3 minutes on one CPU.
+
 `rk_plate_invariant_output.jl` checks an RKBRMI `@plate` output whose cell reads
 no per-index value, `decay[g] = exp(log_a)`, over three cells (BRM snag
 `retained-pointwi-fa27bc37`). At model scope `decay`, `sum(decay)` and
@@ -1503,11 +1511,14 @@ component called in a cell on the NLME paths: their coordinates are
 `:shared_latent` in θ, each unit's conditional likelihood is the likelihood
 query's share and moves only with its own cell's latents, `shared_point` fixes
 them, and the SVI split equals the full RK sampler's density and native Reverse
-gradient. SVI gives a cell component's locals to their unit; a dotted cell
-latent's per-unit ownership is a `@test_broken` until ReactiveKernels reports
-its reads per cell (snag `rkppl-dotted-pla-1629a747`). A latent whose law reads
-a per-cell model value is refused naming its rewrite, which builds. Run it in
-the test environment; about 8 minutes on one CPU.
+gradient. SVI gives a cell component's locals and a dotted cell latent's
+entries to their unit (the latter from RKPPL 0.1.127, RK snags
+`rkppl-dotted-pla-1629a747` and `dotted-cell-late-3789b8ea`); a `LogNormal`
+cell latent's per-unit ownership is a `@test_broken` until ReactiveKernels reads
+a transformed block per cell (RK todo `0sr6ilc`). A latent
+whose law reads a per-cell model value is refused naming its rewrite, which
+builds (RK todo `1olsblw`). Run it in the test environment; about 8 minutes on
+one CPU.
 
 `nlme_svi_atomic_partition.jl` checks a two-margin correlated soil hierarchy
 with no trajectory parent. Its local atomic Cholesky parameter has one
