@@ -1,4 +1,4 @@
-# Exploration's trend test in minibatch SVI (src/nlme_svi.jl, BRM 0.2.262; snag
+# Exploration's trend test in minibatch SVI (src/nlme_svi.jl, BRM 0.2.264; snag
 # brm-svi-fit-rkbr-f41cb255). Exploration used to end at the first window whose
 # trimmed ELBO had not risen detectably since `patience` windows before. Two windows
 # cannot see a rise below about twice their noise, and a global that meets every
@@ -32,7 +32,7 @@ svi_trend_windows(c, v) = [(; mean=x, center=x, spread=v) for x in c]
     run = (; windows=ws)
     @test BRM._brm_svi_explored(run, c) == 0
     # Off (`trend_windows = 0`) and in controls written before the keyword, the
-    # two-window test alone decides, as in BRM 0.2.261.
+    # two-window test alone decides, as in BRM 0.2.263.
     old = Base.structdiff(c, NamedTuple{(:trend_windows,)})
     first_pass = findfirst(w -> BRM._brm_svi_stalled(ws[w-P], ws[w], W), 40:200) + 39
     @test BRM._brm_svi_trend_windows(old) == 0
@@ -153,7 +153,7 @@ end
     state = brm_svi_optimizer_checkpoint(part)
     @test state.controls.trend_windows == 41
     @test svi_same_result(brm_svi_resume(rk, state; subject_group=:unit, ndraws=200), full)
-    # A checkpoint of BRM 0.2.261 or earlier records no `trend_windows`: it ends
+    # A checkpoint of BRM 0.2.263 or earlier records no `trend_windows`: it ends
     # exploration on the two-window test, as it would have.
     controls = Base.structdiff(state.controls, NamedTuple{(:trend_windows,)})
     old = BRMSVIOptimizerState(state.format, state.identity, state.previous, controls, state.run)

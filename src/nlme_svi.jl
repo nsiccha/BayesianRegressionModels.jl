@@ -1146,8 +1146,8 @@ const _BRM_SVI_PHASES = (lower="Lower to ReactiveKernels", prepare="Prepare NLME
 # window (one pass over the subjects, at least 100 iterations) has risen, over
 # the last `patience` windows, by less than twice the standard error of that
 # rise, after at least `min_windows` (`_brm_svi_window`). Comparing across several windows rather than
-# neighbouring ones lets a slow drift show above the minibatch noise. Since BRM
-# 0.2.262 the slope over the last `trend_windows` windows (default
+# neighbouring ones lets a slow drift show above the minibatch noise. Since
+# BRM 0.2.264 the slope over the last `trend_windows` windows (default
 # `4 patience + 1`) must also not be significantly positive (`_brm_svi_rising`):
 # two windows alone miss a rise below about twice their noise.
 #
@@ -1170,7 +1170,7 @@ const _BRM_SVI_PHASES = (lower="Lower to ReactiveKernels", prepare="Prepare NLME
 # exploration's test passed (`_brm_svi_explored`), which the run's windows
 # record, so a checkpoint's layout is unchanged. A run whose controls predate
 # `settle_windows` (a checkpoint of BRM 0.2.240 or 0.2.241) does not settle, and
-# one whose controls predate `trend_windows` (BRM 0.2.261 and earlier) ends
+# one whose controls predate `trend_windows` (BRM 0.2.263 and earlier) ends
 # exploration on the two-window test alone, so its phases read as they were run.
 #
 const _BRMSVIWindow = NamedTuple{(:mean, :center, :spread),NTuple{3,Float64}}
@@ -1882,7 +1882,7 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   constant steps until the trimmed ELBO has not risen detectably over `patience`
   windows (after at least `min_windows`) and its least-squares slope over the last
   `trend_windows` windows (default `4 patience + 1`; `0` turns this off, the rule of
-  BRM 0.2.261 and earlier) is not above twice its standard error, settles at the
+  BRM 0.2.263 and earlier) is not above twice its standard error, settles at the
   constant scale-relative step until the
   same test passes on settling's own windows (for at most `settle_windows`
   windows; `0` skips settling, the schedule of BRM 0.2.241 and earlier), then

@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.262
+## 0.2.264
 
 - Changed: `brm_svi_fit`'s exploration ends only where the trimmed ELBO's
   least-squares slope over the last `trend_windows` windows (new keyword,
@@ -32,7 +32,7 @@ instead of failing at run time.
   `brm-svi-fit-rkbr-f41cb255`). On stationary window noise the trend test delays
   the stop in about 1% of runs. `trend_windows=0` restores the earlier rule. A
   fit on a fixed seed explores identically until the earlier rule's stop and may
-  run longer from there. An optimizer checkpoint from BRM 0.2.261 or earlier
+  run longer from there. An optimizer checkpoint from BRM 0.2.263 or earlier
   records no `trend_windows` and continues on the two-window test it ran with.
   `laplace=GaussianBlockLaplace()` is unchanged and refuses the keyword.
 

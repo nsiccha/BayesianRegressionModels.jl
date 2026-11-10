@@ -227,7 +227,7 @@ svi_window_nlme() = brm_nlme_model(SVI_WINDOW_RK;
 
     # Control: the same run with the boundaries on the minibatch estimate, as
     # before the sites. It shows this check tells the two apart. It stops
-    # exploring on the two-window test alone (`trend_windows=0`, BRM 0.2.261's
+    # exploring on the two-window test alone (`trend_windows=0`, BRM 0.2.263's
     # rule): the trend stop explores this toy 56 windows instead of 40, and that
     # also narrows the boundaries without sites, to a largest sd ratio of 1.24
     # (2.49 on the two-window stop), so the bound no longer tells the two apart
