@@ -2104,6 +2104,23 @@ python -m venv <jaxenv> && <jaxenv>/bin/pip install "jax[cpu]"
 RK_JAX_PYTHON=<jaxenv>/bin/python julia --project=test test/rk_jax.jl
 ```
 
+`rk_jax_models.jl` is the model-level parity suite. Through
+`jax_module_driver.jl` it runs each module once in Python over several
+datasets and points and compares, against the native RKPPL queries of the
+same binding: `log_density`, `log_prior`, `log_likelihood` and `log_jacobian`
+(eager, `jax.jit` with the prepared data closed over, and `jax.jit` with them
+traced as arguments), `jax.grad` against the native Enzyme gradient, and
+`constrain` and `values=` outputs. One module also evaluates a second dataset
+with other sizes and other prior values given as data, whose RKPPL program is
+identical. Constructs that do not translate yet are `@test_broken`, each
+naming its gap. `BRM_JAX_REQUIRE=1` turns a missing `RK_JAX_PYTHON` into a
+failure instead of a skip; `BRM_JAX_WORKDIR=<dir>` keeps each run's module,
+inputs and Python stderr.
+
+```sh
+RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/rk_jax_models.jl
+```
+
 ## Chunking heavy suites
 
 `rk_retained_transport.jl` attaches `RKBRMI(brmi, artifact.plan, built)` to
