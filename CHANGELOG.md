@@ -12,6 +12,28 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.267
+
+- Added: an RKBRMI fit with an `mi(x)` covariate forecasts new rows.
+  `reprocess(rk, design; resample_covariates=[:x], keep_observed=true)`
+  uses the design's observed `x` values as given and makes its missing
+  entries coordinates of the replay, in place of the fit's training gaps;
+  every other coordinate is the fit's. The new RKBRMI method
+  `transport_draws(rk, replay, draws; resample_covariates=[:x], rng)` maps the
+  fit's posterior draws onto the replay. It copies shared coordinates by name
+  and draws the design's missing entries from their law, which is exact for a
+  non-centered `Normal` or `LogNormal` completion without group totals
+  (`RKBRMI(model; completions=[:x])`). The replay builds its own kernel for
+  its coordinates and evaluates natively and through `jax_source`. Other completions, `keep_observed=false` (SBBRMI's
+  population prediction, which draws every row) and data-free replays of a
+  fitted state are refused by name. Before, `reprocess` refused any design
+  whose missing entries differed from the fit's.
+- Tests: the test environment pins ReactiveKernels `main` `88813eb3` (RK
+  0.1.132 / RKPPL 0.1.141). `test/rk_jax_models.jl` now requires the
+  multi-axis and level-correlated HSGP terms, which RK 0.1.132 translates,
+  and checks a forecast replay's module. `test/rk_mi_forecast.jl` checks
+  the forecast natively.
+
 ## 0.2.266
 
 - Added: a data-only assignment, a formula column and a model-scope

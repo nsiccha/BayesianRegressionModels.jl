@@ -564,6 +564,9 @@ BRM._rk_bound_coordinate_names(backend::BRM.RKBRMI) =
 # Geometry arguments belong to this binding. A replay shares the executable
 # graph, but its bounds and totals may differ from the original layout's data.
 _rk_bound_layout(backend::BRM.RKBRMI) = assign_layout(_rk_translated(backend))
+# A forecast replay (`reprocess(...; resample_covariates)`) has coordinates of
+# its own, so it builds the kernel of its own binding.
+BRM._rk_rebuild_model(backend::BRM.RKBRMI) = build_kernel(_rk_translated(backend))
 # Each packed coordinate's constrained lower bound under a `:floored`
 # transform (`lo + exp(u)`); `NaN` for other transforms or an unresolved bound.
 function BRM._rk_layout_coordinate_floors(backend::BRM.RKBRMI)

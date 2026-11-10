@@ -366,6 +366,29 @@ end
     check_model(RKBRMI(JMS.ar1_residuals((; S.y, S.x, S.g, S.day))))
 end
 
+# A forecast of later rows of an `mi()` fit (`reprocess(...; resample_covariates,
+# keep_observed=true)`): the replay's module evaluates the design with its own
+# missing entries as coordinates, and the fit's draws transported onto it
+# (`transport_draws`) give the same values in Python as natively.
+@testset "forecast of an mi() covariate on new rows" begin
+    S = station_data()
+    rk = RKBRMI(JMS.missing_covariate((; S.y, S.rain, S.g)); completions = [:rain])
+    D = station_data(; n = 20, rng = Xoshiro(77))
+    design = (; D.y, rain = Union{Missing,Float64}[i in (4, 11) ? missing : r
+        for (i, r) in enumerate(coalesce.(D.rain, 0.0))], D.g)
+    replay = reprocess(rk, design; resample_covariates = [:rain], keep_observed = true)
+    check_model(replay; values = (:mu,))
+    if brm_jax_require_python()
+        draws = reduce(vcat, permutedims.(points(rk)))
+        moved = transport_draws(rk, replay, draws; resample_covariates = [:rain],
+            rng = Xoshiro(78))
+        us = [moved[d, :] for d in axes(moved, 1)]
+        src = jax_source(replay.model, rk_bound_plan(replay); values = (:mu,))
+        run = brm_jax_run(src, [brm_jax_inputs(replay, src)], [us])
+        check_parity(replay, run, 1, us; values = (:mu,))
+    end
+end
+
 # Networks of 2, 6 and 12 stations with other prior scales and period. Their
 # programs are not identical yet: RKBRMI's `cdar` emission writes the
 # stations' and days' levels and the counts P and W into the program, and its
