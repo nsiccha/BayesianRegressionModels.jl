@@ -255,6 +255,30 @@ end
     end
 end
 
+@stestset "a cdar walk beside the block passes through" begin
+    df = panel(; G=6, n=10, seed=9)
+    data = merge(df, (; step=repeat(1:10, 6), I_g=Matrix(1.0I, 6, 6)))
+    brmi = @brm data begin
+        mu ~ 1 + t + (1 + t || g) + cdar(step; by = g, cor = I_g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(:, g) ~ Exponential(30.0)
+        y ~ Normal(mu, se)
+    end
+    rk = RKBRMI(brmi)
+    names = layout_names(rk)
+    blocks = adaptive_centering_blocks(rk)
+    @test length(blocks) == 2
+    @test any(n -> occursin(".eta.", n), names)
+    margins = BRM._rk_adaptive_margins(rk)
+    locations = BRM._adaptive_ranef_locations(rk, blocks, names)
+    problem = rk_logdensity_problem(rk; ad_backend=AD)
+    loc(x, y, b, k, g) = x[only(locations[b].coefficient)]
+    controls = rand(Xoshiro(10), 12)
+    adaptive = adaptive_centering_problem(rk, problem, AD; centeredness=controls)
+    # Every walk coordinate is outside the rewritten set and passes through.
+    check_exact(rk, adaptive, blocks, controls, loc)
+end
+
 @stestset "blocks the RKBRMI wrapper does not build raise" begin
     df = panel()
     student = @brm df begin
