@@ -390,20 +390,31 @@ end
     end
 end
 
-# Networks of 2, 6 and 12 stations with other prior scales and period. Their
-# programs are not identical yet: RKBRMI's `cdar` emission writes the
-# stations' and days' levels and the counts P and W into the program, and its
-# lag, mask and decay are W × W (O(P W^2) per evaluation); BRM todo for a
-# scan with fit-role level inputs. So each network has its own module here.
-# Not built yet either: a station with no days, which needs the stations as
-# a level table read through positions (brm-use formulas, "Labels from a
-# level table").
+# Networks of 2, 6 and 12 stations with other prior scales and period are one
+# program: the `cdar` walk's stations and days are fitted values of fit-role
+# inputs, P and W their lengths, and the walk is one O(P W) recurrence per
+# station (BRM 0.2.273; before it the levels and counts were written into the
+# program and the walk was a W × W product). So the 6-station fit's module
+# evaluates all three networks. Not built yet: a station with no days, which
+# needs the stations as a level table read through positions (brm-use
+# formulas, "Labels from a level table").
 @testset "odl_station_daily: networks of 2, 6 and 12 stations" begin
     datasets = (station_daily_data(6), station_daily_data(2; sigma_scale = 0.2, period = 300.0),
         station_daily_data(12; station_scale = 0.5))
     rks = [RKBRMI(JMS.station_daily(d)) for d in datasets]
-    @test allequal(string(rk.model.program) for rk in rks) broken = true
-    foreach(check_model, rks)
+    @test allequal(string(rk.model.program) for rk in rks)
+    src = jax_source(rks[1].model, rk_bound_plan(rks[1]))
+    @test src isa JAXSource
+    @test all(rk -> without_layout_constants(jax_source(rk.model, rk_bound_plan(rk))) ==
+        without_layout_constants(src), rks)
+    if brm_jax_require_python()
+        uss = map(points, rks)
+        run = brm_jax_run(src, [brm_jax_inputs(rk, src) for rk in rks], uss)
+        @test run.x64_after_import
+        for (k, rk) in enumerate(rks)
+            check_parity(rk, run, k, uss[k])
+        end
+    end
     check_model(RKBRMI(JMS.station_daily_censored(station_daily_data(6; lod = 0.1))))
 end
 
