@@ -122,3 +122,39 @@ end
     end)
     check_bound(rk, (:xm => complete,), [merge(data, (; xm=1.1 .* complete))])
 end
+
+# A complete column emits the program of a column with gaps: its missing
+# block runs over an empty row axis, so the missing count is data (user
+# principle `0ikeidi`), and one program (and one `jax_source` module) binds a
+# fit with gaps and a design without. Oracle: the complete model's density and
+# gradient equal a twin that observes a copy of the column under the same law,
+# and it has the twin's coordinates (the empty block adds none).
+@stestset "a complete mi() column emits the program of one with gaps" begin
+    complete = exp.(0.5 .+ 0.3 .* X)
+    gapped = Union{Missing,Float64}[i % 4 == 0 ? missing : v for (i, v) in enumerate(complete)]
+    builder = @brm begin
+        sigma ~ Exponential(1)
+        mi(xm) ~ LogNormal(0.5, 0.6)
+        mu ~ 1 + xm
+        y ~ Normal(mu, sigma)
+    end
+    twin = @brm (; x=X, xm=complete, y=Y) begin
+        sigma ~ Exponential(1)
+        xo = copy(xm)
+        xo ~ LogNormal(0.5, 0.6)
+        mu ~ 1 + xm
+        y ~ Normal(mu, sigma)
+    end
+    rk = RKBRMI(builder((; x=X, xm=Union{Missing,Float64}[complete...], y=Y)))
+    @test string(rk.model.program) == string(RKBRMI(builder((; x=X, xm=gapped, y=Y))).model.program)
+    rt = RKBRMI(twin)
+    @test coordinate_names(rk.model.layout) == coordinate_names(rt.model.layout)
+    p = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    pt = rk_logdensity_problem(rt; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    for u in (zeros(3), [0.1, -0.2, 0.3], [-0.4, 0.25, -0.15])
+        v, g = LogDensityProblems.logdensity_and_gradient(p, u)
+        vt, gt = LogDensityProblems.logdensity_and_gradient(pt, u)
+        @test v ≈ vt rtol=1e-12
+        @test g ≈ gt rtol=1e-12
+    end
+end

@@ -283,7 +283,7 @@ end
 # line searches reach from a random start: `exp(-750.0) == 0.0` and
 # `exp(-720.0)` is subnormal, while the plain RK density can still be finite.
 # At the compiled centring (`c = 0`, the default start) the wrapper is that
-# density: map, value and gradient. Before BRM 0.2.265 a cell's log scale was
+# density: map, value and gradient. Before BRM 0.2.268 a cell's log scale was
 # `log(tau * stick) = log(0.0) = -Inf`, and `-Inf` times the zero exponent
 # `t - c` made the map, and so the density, `NaN` there: the wrapped density's
 # Pathfinder start was not the plain density's (snag rkbrmi-adaptive-326587b2).

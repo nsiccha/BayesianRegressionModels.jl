@@ -716,6 +716,23 @@ const _RK_AR1_NORMAL_SUBMODELS = (
         return y
     end),
 )
+const _RK_AR1_NORMAL_DOCS = (
+    timed=@_rk_definition_doc("""
+        One series of an `AR1Normal` response observed at integer times `time`.
+
+        The exact stationary AR(1) density: `y[1] ~ Normal(mu[1], sigma[1] / sqrt(1 - phi[1]^2))`,
+        then for a gap of `k = time[t] - time[t - 1]` steps
+        `y[t] ~ Normal(mu[t] + phi[t]^k * (y[t - 1] - mu[t - 1]), sigma[t] * sqrt((1 - phi[t]^(2k)) / (1 - phi[t]^2)))`.
+        `mu`, `sigma` and `phi` give the mean, innovation scale and persistence per step.
+        Returns the series `y`, which the caller observes."""),
+    stepped=@_rk_definition_doc("""
+        One series of an `AR1Normal` response observed one step apart.
+
+        The exact stationary AR(1) density: `y[1] ~ Normal(mu[1], sigma[1] / sqrt(1 - phi[1]^2))`,
+        then `y[t] ~ Normal(mu[t] + phi[t] * (y[t - 1] - mu[t - 1]), sigma[t])`.
+        `mu`, `sigma` and `phi` give the mean, innovation scale and persistence per step.
+        Returns the series `y`, which the caller observes."""),
+)
 
 # A `~` on a bare cell name that is no formal and no `=`-bound local declares a
 # latent of the cell (brm-use kernel.md "Latents in a cell"): one draw per cell,
@@ -829,8 +846,9 @@ function _rk_kernel_ar1_normal_call!(statement, kernel, defs, bindings, taken)
         "RK backend: internal: kernel `$(kernel.name)` emits an `AR1Normal` cell " *
         "without the program's definitions")
     spec = _brm_kernel_ar1_normal(statement, kernel.params, kernel.body)
-    submodel = _rk_shared_definition!(defs, taken,
-        _RK_AR1_NORMAL_SUBMODELS[spec.time === nothing ? :stepped : :timed])
+    variant = spec.time === nothing ? :stepped : :timed
+    submodel = _rk_shared_definition!(defs, taken, _RK_AR1_NORMAL_SUBMODELS[variant];
+        doc=_RK_AR1_NORMAL_DOCS[variant])
     arguments = Any[_brm_ar1_normal_series(spec, :fill)...]
     spec.time === nothing || push!(arguments, spec.time)
     bound = Any[_rk_kernel_bind_calls(argument, kernel.scope, bindings, taken)
@@ -842,7 +860,7 @@ end
 # adding it under a name free in the program when absent. A `kernel`
 # template is defined as a ReactiveKernels `@kernel`, an `@rkppl` submodel
 # otherwise.
-function _rk_shared_definition!(defs, taken, template; kernel::Bool=false)
+function _rk_shared_definition!(defs, taken, template; kernel::Bool=false, doc=nothing)
     call, body = template.args
     for definition in defs
         definition = _brm_undoc(definition)
@@ -855,7 +873,8 @@ function _rk_shared_definition!(defs, taken, template; kernel::Bool=false)
     end
     name = _rk_ast_fresh_name(string(first(call.args)), taken)
     definition = Expr(:(=), Expr(:call, name, call.args[2:end]...), body)
-    push!(defs, kernel ? :(ReactiveKernels.@kernel $definition) : definition)
+    push!(defs, _rk_documented_definition(
+        kernel ? :(ReactiveKernels.@kernel $definition) : definition, doc))
     name
 end
 
@@ -1568,9 +1587,14 @@ const _RK_FLATTEN_CELLS_KERNEL = :(flatten_cells(cells) = begin
         brm_flatten_cells(cells)
     return values
 end)
+const _RK_FLATTEN_CELLS_DOC = @_rk_definition_doc """
+    A plate's cell values, concatenated in cell order.
+
+    Scalar cells are returned as they are; vector cells are joined with
+    `reduce(vcat, cells)` (an empty vector when there are no cells)."""
 _rk_flatten_cells!(defs, taken, cells) =
-    Expr(:call, _rk_shared_definition!(defs, taken, _RK_FLATTEN_CELLS_KERNEL; kernel=true),
-        cells)
+    Expr(:call, _rk_shared_definition!(defs, taken, _RK_FLATTEN_CELLS_KERNEL; kernel=true,
+        doc=_RK_FLATTEN_CELLS_DOC), cells)
 
 # An offset whose declared row axis is the plate's cell axis consumes scalar
 # cells unchanged. A vector-valued cell has a different (possibly ragged) axis;
@@ -1591,7 +1615,12 @@ function _rk_offset_scalar_cells!(defs, statements, taken, plan, cells)
         union!(outputs, get(term.options.axis, :scalar_cells, ()))
     end
     isempty(outputs) && return nothing
-    callee = _rk_shared_definition!(defs, taken, _RK_OFFSET_CELLS_KERNEL; kernel=true)
+    callee = _rk_shared_definition!(defs, taken, _RK_OFFSET_CELLS_KERNEL; kernel=true,
+        doc=@_rk_definition_doc("""
+            A plate output used as an offset: its cells, one real scalar per cell.
+
+            Raises an `ArgumentError` for vector-valued cells, which need an explicit
+            row selection."""))
     for statement in statements
         Meta.isexpr(statement, :(=), 2) && statement.args[1] in outputs || continue
         output = statement.args[1]

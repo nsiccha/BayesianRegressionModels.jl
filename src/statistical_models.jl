@@ -161,6 +161,16 @@ end
 Return a BRM-owned statistical submodel by name, or the captured RKPPL source
 of an existing RK backend. Load ReactiveKernels and ReactiveKernelsPPL first.
 
+Available names: `:varying_coefs`, `:varying_coefs_correlated`,
+`:varying_coefs_centered`, `:varying_coefs_centered_correlated`,
+`:varying_stratified`, `:varying_stratified_correlated`, `:horseshoe_coefs`,
+`:r2d2_coefs`, `:penalized_smooth`, `:t2_smooth`, `:hsgp_effect`,
+`:hsgp_periodic_effect`, `:hsgp_grouped_effect`, `:monotonic`,
+`:differenced_ar1` and `:ordered_logistic`. Their data come from
+`StatisticalPreparation` (`tps_basis`, `cr_basis`, `t2_basis`, `hsgp_basis`,
+`hsgp_periodic_basis`). An areal (ICAR/BYM2) field has no body yet; write its
+`ICAR` statements over `StatisticalPreparation.car_graph`.
+
 The backend overload captures its retained emitted declarations in the same
 module as their submodels, callable bindings and kernel definitions. It is
 cached once per emitted program and shared by replays that share that program.
@@ -465,4 +475,104 @@ end
         first(definition.args).args[1] = :brm_monotonic_contrast
         Expr(:function, definition.args...)
     end,
+)
+
+# The docstrings of those graphs, by the same names: what each computes, for a
+# reader of the emitted program or its Python/JAX module.
+const _BRM_STATISTICAL_VALUE_DOCS = (
+    brm_multinomial_cell = @_rk_definition_doc("""
+        The multinomial log probability of one row.
+
+        `columns[k][row]` is the row's count in category `k`, `totals` its number of
+        trials (one integer for all rows, or one per row) and `probs` the category
+        probabilities: `loggamma(total + 1) + sum(count * log(p) - loggamma(count + 1))`."""),
+    brm_multinomial_scores = @_rk_definition_doc("""
+        Each row's multinomial log probability, `cell(row, count_columns, trials, probabilities)`
+        over the rows of the count columns."""),
+    brm_covariate_mean = @_rk_definition_doc("""
+        The mean of the training values that a `center(x)` term subtracts.
+
+        Raises an error for no values or a non-finite value."""),
+    brm_covariate_sd = @_rk_definition_doc("""
+        The sample standard deviation of the training values that a `zscale(x)` term divides by.
+
+        Raises an error for fewer than two values or a non-finite value."""),
+    brm_covariate_var = @_rk_definition_doc("""
+        The sample variance of a covariate's training values, by which an R2D2 budget allocates."""),
+    brm_matrix_column = @_rk_definition_doc("""
+        Column `column` of the single prepared matrix in `inputs`, as integers."""),
+    brm_covariate_observed = @_rk_definition_doc("""
+        The observed entries of a partly missing covariate: `values` where `present` is true."""),
+    brm_covariate_observed_rows = @_rk_definition_doc("""
+        The rows at which a partly missing covariate is observed (`present` is true)."""),
+    brm_covariate_missing_rows = @_rk_definition_doc("""
+        The rows at which a partly missing covariate is missing (`present` is false)."""),
+    brm_covariate_total_rows = @_rk_definition_doc("""
+        The missing rows of an `mi(x)::shares(total, rows)` covariate, free rows first and then
+        the rows of each group with a known total."""),
+    brm_covariate_total_free_rows = @_rk_definition_doc("""
+        The missing rows of an `mi(x)::shares(total, rows)` covariate that no known total constrains."""),
+    brm_covariate_total_grouped_rows = @_rk_definition_doc("""
+        The missing rows of an `mi(x)::shares(total, rows)` covariate that belong to a group with a
+        known total, group after group."""),
+    brm_covariate_total_ends = @_rk_definition_doc("""
+        The last position of each group among the grouped missing entries of an
+        `mi(x)::shares(total, rows)` covariate."""),
+    brm_covariate_total_residuals = @_rk_definition_doc("""
+        Each group's known total minus its observed entries: the amount its missing entries share."""),
+    brm_covariate_total_coordinates = @_rk_definition_doc("""
+        The coordinate axis of the grouped missing entries of an `mi(x)::shares(total, rows)`
+        covariate: `K - 1` coordinates for a group of `K` entries."""),
+    brm_structured_inputs = @_rk_definition_doc("""
+        A structured term's prepared input with each field's row indices set to `indices`."""),
+    brm_factor_dummy = @_rk_definition_doc("""
+        The indicator column of one factor level: `1.0` where `values` equals `level`, else `0.0`."""),
+    brm_prepared_indices = @_rk_definition_doc("""
+        Each value's position (1-based) in `level_values`: the level codes of a grouping or factor."""),
+    brm_sorted_positions = @_rk_definition_doc("""
+        Each value's position among the sorted levels `sorted_levels`, by binary search (`car` node labels)."""),
+    brm_positions = @_rk_definition_doc("""
+        A generated column of positions, as integers."""),
+    brm_values = @_rk_definition_doc("""
+        A generated column of numbers, as floating-point values."""),
+    brm_hsgp_row_mask = @_rk_definition_doc("""
+        An HSGP `rows=` column as a 0/1 mask: `1.0` where the term applies to the row."""),
+    brm_hsgp_masked_axis = @_rk_definition_doc("""
+        An HSGP input axis with missing entries read as `0.0`; the `rows=` mask zeroes those rows' basis."""),
+    brm_covariate_geometry = @_rk_definition_doc("""
+        The layout of a completed covariate.
+
+        Returns `(observed_component, order)`: the observed values on the covariate's rows
+        (`0.0` at a missing row), and each row's position in `vcat(observed_component, missing)`,
+        its own row when observed and its missing entry's (after the rows) when missing."""),
+    brm_r2d2m2_scale = @_rk_definition_doc("""
+        One effect's prior scale under an R2D2M2 prior.
+
+        `reference * sqrt(phi[share] * r2 / ((1 - r2) * variance))`: the effect's share `phi[share]`
+        of the explained variance `r2`, relative to the residual variance."""),
+    brm_completed_covariate = @_rk_definition_doc("""
+        A partly missing covariate with its missing entries filled in: `vcat(observed, missing)[order]`,
+        so an observed row reads its observed value and a missing row its drawn entry."""),
+    brm_grouped_shares_layout = @_rk_definition_doc("""
+        Part `part` of the index layout of grouped missing entries whose groups end at `ends`
+        (data only, prepared once)."""),
+    brm_grouped_shares_local = @_rk_definition_doc("""
+        The grouped missing entries of an `mi(x)::shares(...)` covariate, one per entry.
+
+        Each entry is its slot's share of its group's total, from its group's coordinates `z[entry_coords[e]]`."""),
+    brm_lower_grouped_local = @_rk_definition_doc("""
+        The grouped missing entries of an `mi(x)::shares(...)` covariate with lower bounds `lo`.
+
+        Group `k`'s coordinates `z[group_coords[k]]` give its entries, which add up to its residual
+        `residuals[k]` and lie above their lower bounds; the result has one value per entry."""),
+    brm_car_shared_rows = @_rk_definition_doc("""
+        Each shared value of a separated `car` field as a row of the original linear map
+        (the indices it reads)."""),
+    brm_car_shared_coefficients = @_rk_definition_doc("""
+        The coefficients of each shared value's row of a separated `car` field."""),
+    brm_car_shared_local = @_rk_definition_doc("""
+        The shared values of a separated `car` field: `sum(w[rows[j]] .* coefficients[j])` for each row `j`."""),
+    brm_monotonic_contrast = @_rk_definition_doc("""
+        A monotonic effect's contrast: `cumsum(vcat(0.0, zeta))[c]` for the ordinal codes `c`
+        and the simplex of increments `zeta`."""),
 )

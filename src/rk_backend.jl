@@ -119,19 +119,24 @@ const _RK_SLICE1_PRIOR_ARITY = Dict{Symbol,Int}(
 # Sampled families whose args must be static literals (no sampled/
 # assignment refs): the thin-layer layout derives support from values.
 const _RK_SAMPLED_LITERAL_ARGS = Set{Symbol}([:Uniform])
-const _RK_ASSIGNMENT_CALLABLES = Set{Any}([+, -, *, /, ^, log, log10, log1p,
-    exp, expm1, sqrt, hypot, abs, sum, mean, std, var, minimum, maximum, length])
+# Smooth elementwise Base math: a formula column, a model-scope assignment and
+# a data-only assignment apply each per element, and its name resolves
+# unqualified in emitted source. One list for both tables below, so a cyclic
+# covariate (`sinpi(2 * day / period)`) is accepted wherever `log(x)` is.
+const _RK_ELEMENTWISE_MATH = (log, log10, log1p, log2, exp, expm1, exp2, sqrt,
+    cbrt, hypot, abs, abs2, sin, cos, tan, sinpi, cospi, sinh, cosh, tanh, asin,
+    acos, atan)
+const _RK_ASSIGNMENT_CALLABLES = Set{Any}([+, -, *, /, ^, _RK_ELEMENTWISE_MATH...,
+    sum, mean, std, var, minimum, maximum, length])
 const _RK_ASSIGNMENT_REDUCTIONS = Set{Any}(
     [sum, mean, std, var, minimum, maximum, length])
 
-# Provisional derived lowering: BRM scalar data-expression heads admitted in
-# predictor terms, mapped to the thin-layer dotted vocabulary (mirrors the
-# thin-layer ELEMENTWISE_OPS/ELEMENTWISE_FNS/REDUCTION_FNS allowlists).
+# BRM scalar data-expression heads admitted in predictor terms, mapped to the
+# dotted spelling RKBRMI emits.
 const _RK_DERIVED_BINOPS = Dict{Function,Symbol}(
     (+) => :.+, (-) => :.-, (*) => :.*, (/) => :./, (^) => :.^, (%) => :.%)
 const _RK_DERIVED_MATH = Dict{Function,Symbol}(
-    log => :log, log10 => :log10, log1p => :log1p, exp => :exp,
-    expm1 => :expm1, sqrt => :sqrt, hypot => :hypot, abs => :abs, logistic => :logistic)
+    (f => nameof(f) for f in _RK_ELEMENTWISE_MATH)..., logistic => :logistic)
 const _RK_DERIVED_CMP = Dict{Function,Symbol}(
     (==) => :.==, (!=) => :.!=, (<) => :.<, (>) => :.>,
     (<=) => :.<=, (>=) => :.>=)
@@ -6660,9 +6665,8 @@ function _rk_assignment_expr_problem(node, name::Symbol,
             "computed index; slice 1 reads a data array at integer literals"
     end
     callable in _RK_ASSIGNMENT_CALLABLES || return (
-        "$prefix: $origin calls `$callable`; slice 1 admits " *
-        "{+,-,*,/,^,log,log10,log1p,exp,expm1,sqrt,hypot,abs,sum,mean,std,var," *
-        "minimum,maximum,length} only")
+        "$prefix: $origin calls `$callable`; slice 1 admits {" *
+        join(sort!(string.(nameof.(collect(_RK_ASSIGNMENT_CALLABLES)))), ",") * "} only")
     isempty(node.kwargs) || return (
         "$prefix: $origin call keywords are out of slice 1")
     if callable in _RK_ASSIGNMENT_REDUCTIONS

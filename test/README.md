@@ -1,5 +1,13 @@
 # Running the tests
 
+`linear_predictor_entries.jl` checks that an entry of `linear_predictors(brmi)`
+is a predictor address: `popcoefnames`, `predictors`, `grouping_factors`,
+`dependencies` and `linear_predictor_op` give for the `(; name, link_lhs_fn)`
+record what they give for its name, on a formula predictor, a linked one and a
+declared parameter, and the documented `popcoefnames` scan needs no filtering.
+It builds no backend; run it with `julia --startup-file=no --project=.
+test/linear_predictor_entries.jl`.
+
 `rk_adaptive_centering.jl` checks `adaptive_centering_problem(rk, problem,
 backend)` on RKBRMI random effects: the blocks name the RK layout's draws, scales
 and correlation-factor coordinates; each cell is located on its population
@@ -1243,7 +1251,7 @@ the test environment above.
 - RK plans the array cell's plate as matrix products (log group `:plate_batching`) and the per-row plate as a cell loop.
 - SBBRMI's compiled Stan density and gradient equal RK's.
 
-ReactiveKernels batches plates from 0.1.127 (RK `fa3deb83`). On this environment's RK pin `29711427` (RK 0.1.120) the batched-plan check is `broken`; everything else passes on both. Each spelling rule in the file's header was found by a refusal. It runs in the test environment, about 3 minutes on one CPU.
+ReactiveKernels batches plates from 0.1.127 (RK `fa3deb83`). Below it the batched-plan check is `broken`; this environment's RK pin `ddc30859` (RK 0.1.130) requires it. Everything else passes on both. Each spelling rule in the file's header was found by a refusal. It runs in the test environment, about 3 minutes on one CPU.
 
 `rk_plate_invariant_output.jl` checks an RKBRMI `@plate` output whose cell reads
 no per-index value, `decay[g] = exp(log_a)`, over three cells (BRM snag
@@ -1254,8 +1262,8 @@ same oracle. Its whole-model density and native Reverse gradient match a
 model-scope `fill` of the same values and central differences. `brm_nlme_model`
 gives each subject's likelihood and η gradient. A one-cell binding is the
 positive control. ReactiveKernelsPPL fixed the shape in 0.1.129 (RK `b6196f114`,
-ReactiveKernels snag `plate-output-of-c4a0ca87`). On older RKPPL, including this
-environment's RK pin `7b53c65f` (RKPPL 0.1.114), the output is one number. There
+ReactiveKernels snag `plate-output-of-c4a0ca87`), which this environment's RK pin
+`ddc30859` (RKPPL 0.1.140) carries. On older RKPPL the output is one number. There
 the three-cell checks are `broken`: a later `decay[2]` raises a `BoundsError`,
 and `sum` and `length` return one cell's value. The one-cell count, total and
 likelihood pass on both. Its `decay` is `broken` there too, because one number is
@@ -2128,6 +2136,48 @@ standard pin carries:
 ```sh
 python -m venv <jaxenv> && <jaxenv>/bin/pip install "jax[cpu]"
 RK_JAX_PYTHON=<jaxenv>/bin/python julia --project=test test/rk_jax.jl
+```
+
+`rk_jax_models.jl` is the model-level parity suite. Through
+`jax_module_driver.jl` it runs each module once in Python over several
+datasets and points and compares, against the native RKPPL queries of the
+same binding: `log_density`, `log_prior`, `log_likelihood` and `log_jacobian`
+(eager, `jax.jit` with the prepared data closed over, and `jax.jit` with them
+traced as arguments), `jax.grad` against the native Enzyme gradient, and
+`constrain` and `values=` outputs. One module also evaluates a second dataset
+with other sizes and other prior values given as data, whose RKPPL program is
+identical. Constructs that do not translate yet are `@test_broken`, each
+naming its gap. `BRM_JAX_REQUIRE=1` turns a missing `RK_JAX_PYTHON` into a
+failure instead of a skip; `BRM_JAX_WORKDIR=<dir>` keeps each run's module,
+inputs and Python stderr.
+
+```sh
+RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/rk_jax_models.jl
+```
+
+The file requires ReactiveKernels' JAX lowering as it landed on RK main
+`ddc30859` (RK 0.1.130 / RKPPL 0.1.140, the test pin) and refuses to run below
+it. On that pin the CDF-based laws, jit with the prepared data traced as
+arguments, size-generic modules, per-group AR(1) scans and nested `constrain`
+are required checks. Its testset "every definition BRM emits is documented"
+also checks, natively, that every definition RKBRMI emits carries a docstring
+and that `rkppl_documentation` keeps each submodel's.
+
+`rk_jax_inference.jl` takes one representative model (a synthetic station
+network: ragged per-station series, a covariate with gaps through `mi()`, a
+seasonal `hsgp`, correlated station levels and sensitivities, log-normal
+readings). It checks parity first, then samples the posterior natively
+(WarmupHMC's quorum sampler) and in Python (NumPyro's NUTS on the module's
+`log_density`, which needs `numpyro` in the same Python). It compares every
+scalar constrained quantity: the two means must agree within 4.5 combined
+Monte Carlo standard errors. It also compares predictions at posterior draws.
+About 10 minutes on one CPU; `BRM_JAX_RUN_DIR=<dir>` writes the fixture,
+versions and results as a run directory (`manifest.json`, `parity.json`,
+`fit.json`, `predictive.json`).
+
+```sh
+<jaxenv>/bin/pip install numpyro
+RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/rk_jax_inference.jl
 ```
 
 ## Chunking heavy suites

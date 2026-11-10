@@ -112,3 +112,71 @@ end
         end
     end
 end
+
+# `StatisticalPreparation.car_graph` over `test/car_term.jl`'s graph: component
+# {a, b, c, d, h} (h has no rows), component {e, f}, island g (rows, no neighbours).
+# Then the hand-written BYM2 recipe brm-use documents (references/rkppl-bodies.md):
+# the graph bound as data, one soft sum-to-zero on a connected graph, against an
+# independent oracle of the car term's documented law (terms.md, "Areal spatial
+# effects").
+@stestset "StatisticalPreparation.car_graph and a hand-written BYM2" begin
+    area = ["a", "b", "c", "d", "e", "f", "g", "a", "e"]
+    from, to = ["a", "b", "c", "a", "d", "e"], ["b", "c", "d", "c", "h", "f"]
+    graph = Prep.car_graph(area, from, to)
+    @test graph.nodes == ["a", "b", "c", "d", "e", "f", "g", "h"]
+    @test graph.n_nodes == 8 && graph.area == [1, 2, 3, 4, 5, 6, 7, 1, 5]
+    @test (graph.n_struct, graph.n_comp, graph.comp_start, graph.comp_size) == (7, 2, [1, 6], [5, 2])
+    @test graph.struct_pos[7] == graph.n_struct + 1 && graph.is_struct[7] == 0.0 &&
+        graph.inv_scale[7] == 0.0
+    @test sort(collect(zip(min.(graph.node1, graph.node2), max.(graph.node1, graph.node2)))) ==
+        [(1, 2), (1, 3), (2, 3), (3, 4), (4, 5), (6, 7)]
+    @test graph.scaling ≈ [BRM._brm_car_scaling_factor(5, [(1, 2), (2, 3), (3, 4), (1, 3), (4, 5)]),
+        BRM._brm_car_scaling_factor(2, [(1, 2)])]
+    @test graph.inv_scale[1:6] ≈ [fill(1 / graph.scaling[1], 4); fill(1 / graph.scaling[2], 2)]
+    @test Prep.car_graph([1, 2], [1], [3]; nodes=[1, 2, 3, 4]).nodes == [1, 2, 3, 4]
+    @test_throws ErrorException Prep.car_graph(["a"], ["a"], ["a"])
+
+    station = ["s1", "s2", "s3", "s4", "s5", "s6", "s1", "s4"]
+    sfrom, sto = ["s1", "s2", "s3", "s4", "s5", "s1"], ["s2", "s3", "s4", "s5", "s6", "s3"]
+    y = collect(range(-0.3, 0.4; length=length(station)))
+    G = Prep.car_graph(station, sfrom, sto)
+    @test G.n_comp == 1 && all(==(1.0), G.is_struct)
+    columns = (; y, station_pos=G.area, node1=G.node1, node2=G.node2, n_nodes=G.n_nodes,
+        n_struct=G.n_struct, inv_scale=G.inv_scale, sum_scale=0.001 * G.n_struct)
+    body = :(begin
+        b0 ~ Normal(0, 1)
+        sigma ~ truncated(Normal(0, 1), 0, Inf)
+        rho ~ Beta(0.5, 0.5)
+        theta[1:n_nodes] .~ Normal.(0, 1)
+        phi[1:n_struct] ~ ICAR(node1, node2)
+        phi_sum = sum(phi)
+        phi_sum ~ Normal(0, sum_scale)
+        effects = sigma .* (sqrt(rho) .* sqrt.(inv_scale) .* phi .+ sqrt(1 - rho) .* theta)
+        y .~ Normal.(b0 .+ effects[station_pos], 1)
+    end)
+    mod = Module(gensym(:BRMHandBYM2))
+    Core.eval(mod, :(using ReactiveKernelsPPL))
+    bound = bind_data(lower_rkppl(body, columns; mod, conditioned=(:y,)), columns)
+    built = build_kernel(bound)
+    u = collect(range(-0.17, 0.21; length=built.layout.total))
+    nt = constrain(built.layout, u)
+    effects = nt.sigma .* (sqrt(nt.rho) .* sqrt.(G.inv_scale) .* nt.phi .+ sqrt(1 - nt.rho) .* nt.theta)
+    prior = logpdf(Normal(0, 1), nt.b0) + logpdf(truncated(Normal(), 0, Inf), nt.sigma) +
+        logpdf(Beta(0.5, 0.5), nt.rho) + sum(logpdf.(Normal(), nt.theta)) -
+        0.5 * sum(abs2, nt.phi[G.node1] .- nt.phi[G.node2]) +
+        logpdf(Normal(0, 0.001 * G.n_struct), sum(nt.phi))
+    @test Base.invokelatest(prepare_query(built, bound, :prior), u) ≈ prior rtol=1e-12
+    @test Base.invokelatest(prepare_query(built, bound, :likelihood), u) ≈
+        sum(logpdf.(Normal.(nt.b0 .+ effects[G.area], 1), y)) rtol=1e-12
+    q = prepare_sampler(built, bound, u; backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    g = similar(u)
+    value, _ = sampler_value_and_gradient!(q, g, u)
+    @test isfinite(value)
+    h = 1e-5
+    fd = map(eachindex(u)) do j
+        plus, minus = copy(u), copy(u)
+        plus[j] += h; minus[j] -= h
+        (q(plus) - q(minus)) / (2h)
+    end
+    @test g ≈ fd atol=2e-5 rtol=2e-5
+end

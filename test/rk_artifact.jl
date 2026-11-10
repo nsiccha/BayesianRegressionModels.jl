@@ -94,7 +94,7 @@ end
     @test a.ast isa Expr && a.ast.head === :block
     # The population effects are one self-contained component submodel.
     @test a.defs isa Vector{Expr} &&
-        [first(first(d.args).args) for d in a.defs] == [:brm_population_effects]
+        [BRM._rk_source_definition(d).name for d in a.defs] == [:brm_population_effects]
     @test a.bindings isa Vector{Pair{Symbol,Any}}
     @test a.plan isa BRM._RKStructuralPlan
     @test a.plan.n_obs == 6
@@ -171,7 +171,7 @@ end
         y ~ weighted(Normal(mu, sigma), fweights(n))
     end
     a = BRM.emit_rk_artifact(brmi; case_id="fixture-weighted")
-    @test [first(first(d.args).args) for d in a.defs] == [:brm_population_effects]
+    @test [BRM._rk_source_definition(d).name for d in a.defs] == [:brm_population_effects]
     b = BRM.read_rk_artifact(
         BRM.write_rk_artifact(joinpath(mktempdir(), "w.jls"), a))
     @test b.defs == a.defs

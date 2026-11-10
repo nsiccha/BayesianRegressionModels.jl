@@ -65,8 +65,10 @@ end
         brm(DOC_NATIVE_BRM._brm_strip_docs(source); mod=@__MODULE__)(data);
         case_id="plain-plate")
     @test DOC_NATIVE_BRM._brm_strip_docs(artifact.ast) == control.ast
+    # BRM documents its own definitions in both (`@_rk_definition_doc`); only
+    # the authored prose differs.
     @test DOC_NATIVE_BRM._brm_strip_docs(Expr(:block, artifact.defs...)) ==
-        Expr(:block, control.defs...)
+        DOC_NATIVE_BRM._brm_strip_docs(Expr(:block, control.defs...))
     records = rkppl_documentation(rk_translate_artifact(artifact))
     @test Set(d.markdown for d in records) ==
         Set(["Global slope.", "Cell mean.", "Cell output.", "Cell response."])
