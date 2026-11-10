@@ -42,7 +42,7 @@ include("jax_module_driver.jl")
 # under `jax.jit(f)(u, **prepared)`), an observed `@scan` runs per group and
 # `constrain` nests by scope, as native `constrain` does. RK 0.1.132 (`88813eb3`)
 # also translates multi-axis and level-correlated HSGP terms; the test pin is
-# RK 0.1.138 (`51e6404f`).
+# RK 0.1.143 (`1701fb2e`).
 pkgversion(ReactiveKernels) >= v"0.1.132" && pkgversion(ReactiveKernelsPPL) >= v"0.1.140" ||
     error("test/rk_jax_models.jl needs ReactiveKernels 0.1.132 and ReactiveKernelsPPL " *
         "0.1.140 or later (run test/setup_env.jl)")
