@@ -62,8 +62,8 @@ end
                 @test occursin("eta_Intercept ~ Normal", source)
                 @test !occursin("X_eta =", source)
             end
-            @test any(d -> d.head === :function, emitted.defs)
-            @test any(d -> d.head === :(=), emitted.defs)
+            @test any(d -> BRM._brm_undoc(d).head === :function, emitted.defs)
+            @test any(d -> BRM._brm_undoc(d).head === :(=), emitted.defs)
             @test !any(p -> last(p) === PublicComposedSource.original_affine,
                 emitted.bindings)
             @test any(p -> last(p) === PublicComposedSource.native_scale,

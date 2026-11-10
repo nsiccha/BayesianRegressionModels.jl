@@ -51,6 +51,19 @@ through [`rk_bound_plan`](@ref).
   subjects). Its effects are not the fit's, so supply them in `have`
   (`have=(:unconstrained, :b_p_g, ports...)`); everything else stays frozen.
 - `held_out`: the response hold-outs of the replay, as in `RKBRMI`.
+- `resample_covariates=[:x], keep_observed=true`: forecast new rows of a fit
+  with an `mi(x)` covariate. The design's observed `x` values are used as
+  given; its missing entries are coordinates of the replay, in place of the
+  fit's training gaps, and every other coordinate is the fit's.
+  [`transport_draws`](@ref)`(rk, replay, draws; resample_covariates=[:x])`
+  maps the fit's posterior draws onto the replay, drawing the design's
+  missing entries from their law. It needs a non-centered `Normal` or
+  `LogNormal` completion without group totals (`RKBRMI(model;
+  completions=[:x])`), whose missing entries are standard normal draws of
+  that law. Its coordinates are its own, so the replay builds its own kernel
+  (one compilation) rather than sharing `rk.model`. `keep_observed=false`
+  (drawing every row of `x`) is SBBRMI's population prediction and is
+  refused here.
 
 `new_data` supplies every data column the model reads. With
 `freeze_constants=true` it may omit numeric scalar inputs (their fitted values
@@ -68,8 +81,16 @@ observations read (a dose, a known observation scale) is a design input, and
 takes the design's value.
 """
 function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
-        resample_groups=(), held_out=_rk_held_out_names(rk.plan))
+        resample_groups=(), resample_covariates=(), keep_observed::Bool=false,
+        held_out=_rk_held_out_names(rk.plan))
     prefix = "RK reprocess"
+    covariates = _rk_forecast_covariates(rk.plan, resample_covariates, keep_observed; prefix)
+    isempty(covariates) || freeze_constants || throw(ArgumentError("$prefix: " *
+        "`resample_covariates` forecasts with the fit's frozen constants; " *
+        "`freeze_constants=false` rebuilds the model instead"))
+    isempty(covariates) || rk.fitted === nothing || throw(ArgumentError("$prefix: " *
+        "`resample_covariates` needs the fit's data-bound backend; a data-free " *
+        "replay of a fitted state does not forecast `mi()` covariates yet"))
     car_units = _rk_fitted_car_units(rk.plan)
     freeze_constants || return RKBRMI(_brm_rebind_brmi(parent(rk), new_data); held_out,
         completions=_rk_completion_mode(rk.plan),
@@ -115,14 +136,116 @@ function reprocess(rk::RKBRMI, new_data; freeze_constants::Bool=true,
     replay = RKBRMI(parent(rk), plan, rk.model; program, source=brm_source(rk),
         model_plan=rk.model_plan)
     # Same coordinates, so the fit's draws mean the same thing on the replay.
-    # Resampled groups size their effects by the new data's levels.
+    # Resampled groups size their effects by the new data's levels; a
+    # forecast covariate's missing entries are the design's.
     if isempty(groups)
-        fitted_names = _rk_layout_coordinate_names(rk)
-        replay_names = _rk_bound_coordinate_names(replay)
+        fitted_names = _rk_without_covariate_coordinates(
+            _rk_layout_coordinate_names(rk), covariates)
+        replay_names = _rk_without_covariate_coordinates(
+            _rk_bound_coordinate_names(replay), covariates)
         fitted_names == replay_names || _rk_refuse_replay_coordinates(plan,
             fitted_names, replay_names; prefix)
     end
-    replay
+    isempty(covariates) && return replay
+    # A forecast replay's coordinates are its own (the design's missing
+    # entries in place of the fit's), and a reused build describes its
+    # original binding only: build the kernel for this binding, sharing the
+    # fit's translated program.
+    RKBRMI(parent(rk), plan, _rk_rebuild_model(replay); program=replay.program,
+        bound=replay.bound, source=brm_source(rk), model_plan=plan)
+end
+
+# The kernel of a backend's own binding (ReactiveKernels package extension).
+function _rk_rebuild_model end
+
+# The `mi()` covariates a forecast replay takes the design's missing entries of
+# (`resample_covariates` with `keep_observed=true`). Each must be a
+# non-centered location-scale completion without group totals: its missing
+# entries are standard normal draws of its law (`_rk_emit_standardized!`), so
+# `transport_draws` draws them exactly, whatever the posterior draw.
+function _rk_forecast_covariates(plan, resample_covariates, keep_observed; prefix)
+    names = Set{Symbol}()
+    for name in (resample_covariates isa Symbol ? (resample_covariates,) : resample_covariates)
+        name isa Symbol || throw(ArgumentError("$prefix: `resample_covariates` names " *
+            "`mi()` covariates as Symbols, got $(repr(name))"))
+        push!(names, name)
+    end
+    if isempty(names)
+        keep_observed && throw(ArgumentError("$prefix: `keep_observed=true` needs " *
+            "`resample_covariates` naming the `mi()` covariates whose missing " *
+            "entries the design draws"))
+        return names
+    end
+    keep_observed || throw(ArgumentError("$prefix: RKBRMI's `resample_covariates` " *
+        "keeps the design's observed values and draws only its missing entries: " *
+        "pass `keep_observed=true`. Drawing every row of a covariate fresh is " *
+        "SBBRMI's population prediction (`reprocess(sb, rows; resample_covariates=...)`)."))
+    completions = Dict(c.source => c for c in _rk_value_completions(plan))
+    for name in sort!(collect(names))
+        c = get(completions, name, nothing)
+        c === nothing && throw(ArgumentError("$prefix: `resample_covariates` names " *
+            "`$name`, which is not an `mi()` covariate with sampled missing entries " *
+            "in this model" * (isempty(completions) ? "" : "; those are " *
+                join(("`$s`" for s in sort!(collect(keys(completions)))), ", "))))
+        c.noncentered && c.totals === nothing && _rk_location_scale_law(c.distribution) ||
+            throw(ArgumentError("$prefix: forecasting `mi($name)` on new rows draws " *
+                "its missing entries as standard normal draws of its law, which " *
+                "needs a non-centered `Normal` or `LogNormal` completion without " *
+                "group totals: fit with `RKBRMI(model; completions=[:$name])`"))
+    end
+    names
+end
+_rk_value_completions(plan::_RKValuePlan) = plan.completions
+_rk_value_completions(plan::_RKHeldOutPlan) = _rk_value_completions(plan.parent)
+_rk_value_completions(plan) = ()
+
+# Coordinate names without the missing entries of the named covariates: a
+# completion's coordinates are scoped under its source (`x.<draws>…`).
+_rk_without_covariate_coordinates(names, covariates) = isempty(covariates) ? names :
+    filter(name -> !(_rk_record_root(name) in covariates), names)
+
+"""
+    transport_draws(rk::RKBRMI, replay::RKBRMI, draws::AbstractMatrix;
+                    resample_covariates, rng=Random.default_rng()) -> Matrix
+
+Map posterior draws of the RK fit `rk` (one draw per row, the fit's
+unconstrained coordinates in layout order) onto a forecast `replay =
+reprocess(rk, design; resample_covariates, keep_observed=true)`. Every
+coordinate the two share is copied by name. The missing entries of each
+covariate in `resample_covariates` are the design's, so they are drawn fresh
+for each draw: standard normal draws of their non-centered `Normal` /
+`LogNormal` law, which given that draw's parameters is exactly the law of the
+design's missing values. Pass the same `resample_covariates` as to
+`reprocess`: a missing-entry coordinate of the replay never inherits the
+fit's draw of the same name, which belongs to a training row.
+
+The result evaluates natively (`prepare_query(replay.model,
+rk_bound_plan(replay), (:mu,))`) and through `jax_source(replay.model,
+rk_bound_plan(replay))`. Different `rng` streams give different missing
+values and the same values at observed rows.
+"""
+function transport_draws(rk::RKBRMI, replay::RKBRMI, draws::AbstractMatrix;
+        resample_covariates, rng::AbstractRNG=Random.default_rng())
+    prefix = "transport_draws"
+    covariates = _rk_forecast_covariates(replay.plan, resample_covariates, true; prefix)
+    from = _rk_layout_coordinate_names(rk)
+    to = _rk_bound_coordinate_names(replay)
+    size(draws, 2) == length(from) || throw(DimensionMismatch("$prefix: `draws` has " *
+        "$(size(draws, 2)) columns, the fit has $(length(from)) coordinates"))
+    column = Dict(name => j for (j, name) in enumerate(from))
+    out = Matrix{promote_type(eltype(draws), Float64)}(undef, size(draws, 1), length(to))
+    for (k, name) in enumerate(to)
+        if _rk_record_root(name) in covariates
+            randn!(rng, view(out, :, k))
+        else
+            j = get(column, name, nothing)
+            j === nothing && throw(ArgumentError("$prefix: the replay's coordinate " *
+                "`$name` is not one of the fit's; is `replay` a forecast " *
+                "`reprocess` of `rk`?"))
+            out[:, k] .= view(draws, :, j)
+        end
+    end
+    out
 end
 
 # A replay whose coordinates differ from the fit's. A `@plate` cell latent has

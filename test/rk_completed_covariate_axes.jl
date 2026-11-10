@@ -116,7 +116,10 @@ end
     @test name != :brm_completed_covariate
     mod = Module(gensym(:CompletionGraph))
     Core.eval(mod,:(using ReactiveKernels))
-    graph = Core.eval(mod,definition)
+    # The definition carries BRM's docstring (`Core.@doc`), so evaluating it
+    # returns its documentation binding: read the graph by its name.
+    Core.eval(mod,definition)
+    graph = getfield(mod,name)
     @test graph isa ReactiveKernels.KernelSpec
     # These are named graph ports, rather than algebra hidden in a callback:
     # each row's position in `vcat(observed, missing)` (BRM 0.2.74).

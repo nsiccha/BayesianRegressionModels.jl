@@ -79,8 +79,8 @@ end
     end
     emitted = BRM._rk_emit_ast(backend.plan)
     @test any(p -> last(p) === PublicSourceExtension.native_location, emitted.bindings)
-    @test any(d -> d.head === :function, emitted.defs)
-    definition_name = first(first(emitted.defs).args[1].args)
+    @test any(d -> BRM._brm_undoc(d).head === :function, emitted.defs)
+    definition_name = BRM._rk_source_definition(first(emitted.defs)).name
     collision = BRM._RKEmittedProgram(emitted.defs, emitted.main,
         [emitted.bindings; definition_name => PublicSourceExtension.native_location])
     ext = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
@@ -232,7 +232,8 @@ end
         end
     end
     bare = emitted[:bare]
-    @test !any(d -> Meta.isexpr(d, :macrocall), bare.defs)
+    # Beneath BRM's own docstrings (`Core.@doc`), no definition carries a macro.
+    @test !any(d -> Meta.isexpr(BRM._brm_undoc(d), :macrocall), bare.defs)
     for spelling in (:qualified, :macro)
         @test length(emitted[spelling].defs) == length(bare.defs)
         @test all(splat(BRM._rk_source_equal), zip(emitted[spelling].defs, bare.defs))
