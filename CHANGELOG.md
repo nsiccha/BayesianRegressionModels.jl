@@ -12,6 +12,30 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.262
+
+- Changed: `brm_svi_fit`'s exploration ends only where the trimmed ELBO's
+  least-squares slope over the last `trend_windows` windows (new keyword,
+  default `4 patience + 1`, 41 at the defaults) is not above twice its standard
+  error, as well as where the two-window test has passed. The error is read from
+  the residuals about that line, each window one batch. Two windows `patience`
+  apart cannot see a rise below about twice their noise, and a global that meets
+  every unit on a ridge climbs that slowly: a non-centred step `m + s z_i` that
+  each unit's data pin only in sum lets the spread `s` fall only as fast as every
+  `z_i` grows. On such a toy (8 and 16 units of 100 rows, batch 4, 5 seeds each)
+  the two-window test ended exploration at the 40-window floor every time, with
+  `exp(m)` at 0.90 to 0.98 where 400 windows put it at 1.17 to 1.19. The trend
+  test explored 112 to 136 windows, its factor was 14.6 to 36.2 nats better on
+  shared draws and within 0.5 nats of the 400-window run's, at about 2.1 times
+  the iterations. A downstream model of that shape gave a step 0.95 against
+  NUTS's 1.19 under the two-window test and NUTS's value under this one (snag
+  `brm-svi-fit-rkbr-f41cb255`). On stationary window noise the trend test delays
+  the stop in about 1% of runs. `trend_windows=0` restores the earlier rule. A
+  fit on a fixed seed explores identically until the earlier rule's stop and may
+  run longer from there. An optimizer checkpoint from BRM 0.2.261 or earlier
+  records no `trend_windows` and continues on the two-window test it ran with.
+  `laplace=GaussianBlockLaplace()` is unchanged and refuses the keyword.
+
 ## 0.2.261
 
 - Fixed: two bindings of one program now give `brm_nlme_model` the same subject
