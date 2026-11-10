@@ -405,3 +405,65 @@ end
         end
     end
 end
+
+# Whether a module emits and runs in Python (prepare_data and log_density at
+# one point), for a construct tested as broken until RK translates it.
+function runs_in_python(rk)
+    try
+        src = jax_source(rk.model, rk_bound_plan(rk))
+        brm_jax_available() || return false
+        brm_jax_run(src, [brm_jax_inputs(rk, src)], [points(rk)[1:1]])
+        true
+    catch e
+        e isa Union{JAXEmissionError,ArgumentError,ErrorException} || rethrow()
+        false
+    end
+end
+
+# The shared fields of ODL-shaped models (synthetic data). `hsgp(t)`
+# translates. These do not translate yet; each is an RK lowering gap reported
+# to ReactiveKernels:JAX on RK 0.1.130 / RKPPL 0.1.136 (`9cbe68ee`):
+# - levels correlated by an LKJ factor of data-valued size: "`keep` names
+#   `_ppl_last_Omega`, which is no data-only value of the program";
+# - `orthogonal_to = :linear`: `prepare_data` indexes a Python list as a
+#   matrix (`raw_basis[:, b - 1]`);
+# - multi-axis bases: "`checked_sdiv_int` has no JAX translation".
+@testset "ODL-shaped shared fields: HSGP terms" begin
+    rng = Xoshiro(6)
+    n = 30
+    e, nn, t = randn(rng, n), randn(rng, n), collect(range(0, 3; length = n))
+    y = sin.(e) .+ 0.1 .* randn(rng, n)
+    region = string.("r", mod1.(1:n, 3))
+    check_model(RKBRMI(@brm (; y, t) begin
+        s ~ Exponential(1)
+        mu ~ 1 + hsgp(t)
+        y ~ Normal(mu, s)
+    end); jit_args = false)
+    brm_jax_require_python() || return
+    gaps = (
+        RKBRMI(@brm (; y, t, region, K = 3, eta = 2.0) begin
+            s ~ Exponential(1)
+            Omega ~ LKJCholesky(K, eta)
+            mu ~ 1 + hsgp(t; by = region, cor = Omega)
+            y ~ Normal(mu, s)
+        end),
+        RKBRMI(@brm (; y, t, region, cb = 5, cc = 1.5) begin
+            s ~ Exponential(1)
+            mu ~ 1 + t + hsgp(t; k = cb, c = cc, by = region, orthogonal_to = :linear)
+            y ~ Normal(mu, s)
+        end),
+        RKBRMI(@brm (; y, e, nn) begin
+            s ~ Exponential(1)
+            mu ~ 1 + hsgp(e, nn)
+            y ~ Normal(mu, s)
+        end),
+        RKBRMI(@brm (; y, e, nn, t) begin
+            s ~ Exponential(1)
+            mu ~ 1 + hsgp(e, nn, t; iso = false)
+            y ~ Normal(mu, s)
+        end),
+    )
+    for rk in gaps
+        @test_broken runs_in_python(rk)
+    end
+end
