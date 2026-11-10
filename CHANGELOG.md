@@ -12,6 +12,24 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.262
+
+- Added: `adaptive_centering_problem(rk::RKBRMI, problem, ad_backend;
+  centeredness, ranef_order)` wraps `rk_logdensity_problem(rk; ad_backend)` in
+  WarmupHMC's adaptive partial centring of random effects, as the SBBRMI method
+  does for a compiled Stan problem. Every ordinary Gaussian random-effect block
+  with sampled scales (scalar, correlated, `||`, `|ID|`) gets one control per
+  level and term, `c = 0` being RK's standardized draw and `c = 1` the level's
+  total: a cell is centred on its predictor's population coefficient, and a
+  grouping nested in a coarser one also on that grouping's effect. The map,
+  Jacobian and gradients are exact; draws stay in the RK layout's frame.
+  `adaptive_centering_blocks(rk)` lists the blocks by RK layout position, and
+  `adaptive_centering_controls(adaptive, rk)` reports the cells. Student-t,
+  known-value, stratified and level-correlated blocks and bounded scales raise
+  on RKBRMI; multi-membership and R2D2-scaled blocks and HSGP, `car`, `cdar`
+  and `gmrf` coordinates keep the emitted frame. Before, an RKBRMI could only
+  be sampled non-centred under NUTS.
+
 ## 0.2.261
 
 - Fixed: two bindings of one program now give `brm_nlme_model` the same subject
