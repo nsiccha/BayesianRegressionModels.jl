@@ -1,65 +1,53 @@
-# julia --project=research/adaptive_centering/plots research/space_time_fields/figures.jl
-using AlgebraOfVega, CairoMakie, CSV, Tables
-import AlgebraOfGraphics
+# AlgebraOfVega specifications evaluated by docs/src/spatial-fields.md.
+# No image or specification is written to the repository.
+using AlgebraOfVega
 
-function spatial_figures()
-    results = joinpath(@__DIR__, "results")
-    grid = collect(Tables.namedtupleiterator(CSV.File(joinpath(results, "field_grid.tsv"))))
-    observations = collect(Tables.namedtupleiterator(CSV.File(joinpath(results, "observations.tsv"))))
-    times = sort(unique(r.time for r in grid))
-    output = normpath(joinpath(@__DIR__, "..", "..", "docs", "src", "assets", "space-time-fields"))
-    mkpath(output)
-    set_theme!(Theme(; fontsize=17, textcolor="#30343b", backgroundcolor=:white,
-        Axis=(; xgridvisible=false, ygridvisible=false, topspinevisible=false, rightspinevisible=false)))
-
-    extent = maximum(max(abs(r.truth), abs(r.q50)) for r in grid)
-    bound = ceil(2extent) / 2
-    sdmax = ceil(10maximum(r.sd for r in grid)) / 10
-    fig = Figure(; size=(1120, 1110))
-    Label(fig[0, 1:3], "A moving field, recovered from fixed stations";
-        fontsize=25, font=:bold, tellwidth=false)
-    for (row, time) in enumerate(times)
-        cells = filter(r -> r.time == time, grid)
-        points = unique([(east=r.east, north=r.north) for r in observations if r.time == time])
-        for (col, (value, title)) in enumerate(((:truth, "Truth and stations"), (:q50, "Posterior median"), (:sd, "Posterior SD")))
-            scale = value == :sd ? (colorrange=(0, sdmax), colormap=:Blues) :
-                                  (colorrange=(-bound, bound), colormap=:vik)
-            spec = data(cells) * mapping(:east => "East (km)", :north => "North (km)", value => "") * visual(Heatmap)
-            if value == :truth
-                spec += data(points) * mapping(:east, :north) *
-                    visual(Scatter; color="#30343b", markersize=8, strokewidth=2, strokecolor=:white)
-            end
-            spec *= config(axis=(; title=string(title, " · time ", Int(time)), aspect=DataAspect(),
-                xlabel="East (km)", ylabel="North (km)",
-                limits=(0, 100, 0, 100), xticks=[0, 50, 100], yticks=[0, 50, 100]),
-                scales=scales(Color=scale))
-            sdraw!(fig[row, col], spec)
-        end
-    end
-    Colorbar(fig[4, 1:2]; colormap=:vik, limits=(-bound, bound), vertical=false,
-        label="Field value · shared scale for truth and median", height=16)
-    Colorbar(fig[4, 3]; colormap=:Blues, limits=(0, sdmax), vertical=false,
-        label="Posterior SD", height=16)
-    rowgap!(fig.layout, 15)
-    save(joinpath(output, "field-maps.png"), fig; px_per_unit=1.5)
-
-    section = Figure(; size=(1200, 390))
-    Label(section[0, 1:3], "A slice through the maps at north = 50 km";
-        fontsize=24, font=:bold, tellwidth=false)
-    for (i, time) in enumerate(times)
-        rows = filter(r -> r.time == time && r.north == 50, grid)
-        band = data(rows) * mapping(:east => "East (km)", :q50 => "Field value") *
-            lineribbon(bands=[:q025 => :q975, :q25 => :q75]) * visual(; color="#2a78d6")
-        truth = data(rows) * mapping(:east, :truth) * visual(Lines; color="#30343b", linestyle=:dash, linewidth=2)
-        sdraw!(section[1, i], (band + truth) * config(axis=(; title="Time $(Int(time))",
-            xlabel="East (km)", ylabel="Field value", limits=(0, 100, -bound, bound))))
-    end
-    Label(section[2, 1:3], "Solid: posterior median   ·   Shading: 50% and 95% intervals   ·   Dashed: truth";
-        fontsize=16, tellwidth=false)
-    save(joinpath(output, "field-slices.png"), section; px_per_unit=1.5)
-    println("FIGURES ", output)
+function numeric_rows(name; root=joinpath(@__DIR__, "results"))
+    lines = readlines(joinpath(root, name * ".tsv"))
+    names = Tuple(Symbol.(split(first(lines), '\t')))
+    [NamedTuple{names}(Tuple(parse.(Float64, split(line, '\t')))) for line in lines[2:end]]
 end
 
-if abspath(PROGRAM_FILE) == @__FILE__
-    spatial_figures()
+time_label(t) = "Time $(Int(t))"
+
+function field_maps(grid=numeric_rows("field_grid"), observations=numeric_rows("observations"))
+    times = time_label.(sort(unique(r.time for r in grid)))
+    panels = ["Generating field", "Posterior median"]
+    cells = [(; r.east, r.north, time=time_label(r.time), panel,
+        value=panel == first(panels) ? r.truth : r.q50) for r in grid for panel in panels]
+    stations = unique([(; r.east, r.north, time=time_label(r.time), panel=first(panels))
+        for r in observations])
+    bound = ceil(2maximum(abs(r.value) for r in cells)) / 2
+    field = data(cells) * mapping(:east => "East (km)", :north => "North (km)",
+        :value => "Field value"; row=:time => sorter(times), col=:panel => sorter(panels)) * visual(Heatmap)
+    points = data(stations) * mapping(:east => "East (km)", :north => "North (km)";
+        row=:time => sorter(times), col=:panel => sorter(panels)) *
+        visual(Scatter; color="#0b0b0b", markersize=8, strokewidth=2, strokecolor=:white)
+    (field + points) * config(width=230, height=230,
+        axis=(; xlabel="East (km)", ylabel="North (km)", limits=((0, 100), (0, 100))),
+        scales=scales(Color=(; colormap=:blueorange, colorrange=(-bound, bound))))
+end
+
+function uncertainty_maps(grid=numeric_rows("field_grid"))
+    times = time_label.(sort(unique(r.time for r in grid)))
+    cells = [(; r.east, r.north, time=time_label(r.time), r.sd) for r in grid]
+    bound = ceil(10maximum(r.sd for r in cells)) / 10
+    data(cells) * mapping(:east => "East (km)", :north => "North (km)", :sd => "Field SD";
+        col=:time => sorter(times)) * visual(Heatmap) *
+        config(width=165, height=165,
+            axis=(; xlabel="East (km)", ylabel="North (km)", limits=((0, 100), (0, 100))),
+            scales=scales(Color=(; colormap=:blues, colorrange=(0, bound))))
+end
+
+function field_slices(grid=numeric_rows("field_grid"))
+    times = time_label.(sort(unique(r.time for r in grid)))
+    center = (minimum(r.north for r in grid) + maximum(r.north for r in grid)) / 2
+    rows = [(; r..., time=time_label(r.time)) for r in grid if r.north == center]
+    bands = data(rows) * mapping(:east => "East (km)", :q50 => "Field value";
+        col=:time => sorter(times)) * lineribbon(bands=[:q025 => :q975, :q25 => :q75]) *
+        visual(; color="#2a78d6")
+    truth = data(rows) * mapping(:east => "East (km)", :truth => "Field value";
+        col=:time => sorter(times)) * visual(Lines; color="#eb6834", linestyle=:dash, linewidth=2)
+    (bands + truth) * config(width=165, height=180,
+        axis=(; xlabel="East (km)", ylabel="Field value", limits=((0, 100), nothing)))
 end
