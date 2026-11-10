@@ -400,7 +400,7 @@ function _rk_statistical_model_module()
         helpers = (:tps_basis, :cr_basis, :t2_basis, :hsgp_basis, :hsgp_periodic_basis,
             :hsgp_matern_sqrt_spd, :hsgp_sqrt_spd, :hsgp_grouped_sqrt_spd,
             :hsgp_periodic_sqrt_spd, :hsgp_periodic_grouped_sqrt_spd,
-            :hsgp_rho_floors, :hsgp_periodic_rho_floor)
+            :hsgp_rho_floors, :hsgp_periodic_rho_floor, :car_graph)
         bindings = Pair{Symbol,Any}[name => getproperty(prep, name) for name in helpers]
         mod = _rk_emit_module(BRM._RKEmittedProgram(collect(values(BRM._BRM_STATISTICAL_MODELS)),
             Expr(:block), bindings))
