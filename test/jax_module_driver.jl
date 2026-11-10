@@ -79,6 +79,10 @@ def enc(x):
     flat = [(v if math.isfinite(v) else repr(v)) for v in a.astype(np.float64).flatten(order="F").tolist()]
     return {"shape": list(a.shape), "data": flat, "dtype": str(a.dtype)}
 
+def untranslated(u):
+    pairs = u.items() if isinstance(u, dict) else ((x, "") for x in u)
+    return {str(k): str(v) for k, v in pairs}
+
 FUNCS = ["log_density", "log_prior", "log_likelihood", "log_jacobian"]
 # `jit_args`: one executable per function, the prepared data traced as
 # arguments (new data of the same shapes reuse it). Its failure is recorded,
@@ -90,8 +94,12 @@ out = {
                  "jaxlib": jaxlib.__version__, "numpy": np.__version__,
                  "devices": [str(d) for d in jax.devices()]},
     "x64_before_import": x64_before, "x64_after_import": x64_module,
-    "module": {"DIMENSION": int(m.DIMENSION), "DATA": list(m.DATA),
-               "PREPARED": list(m.PREPARED), "INPUTS": [str(i) for i in m.INPUTS]},
+    # `DIMENSION` exists when no parameter size depends on the data; from
+    # RKPPL 0.1.134 `m.dimension(prepared)` gives it for every binding.
+    "module": {"DIMENSION": int(m.DIMENSION) if hasattr(m, "DIMENSION") else None,
+               "DATA": list(m.DATA), "PREPARED": list(m.PREPARED),
+               "INPUTS": [str(i) for i in m.INPUTS],
+               "UNTRANSLATED": untranslated(getattr(m, "UNTRANSLATED", {}))},
     "datasets": [],
 }
 
@@ -101,13 +109,22 @@ def attempt(thunk):
     except Exception as e:
         return {"ok": False, "error": (type(e).__name__ + ": " + str(e))[:600]}
 
+# `prepare_data` takes the bound columns by name. A name that is no Python
+# identifier (a dotted submodel binding) has no keyword spelling, so then the
+# call is positional, in `m.DATA`'s order.
+def prepare(data):
+    if all(k.isidentifier() for k in data):
+        return m.prepare_data(**data), "by_name"
+    return m.prepare_data(*[data[k] for k in m.DATA]), "positional"
+
 for data, points in zip(DATASETS, POINTS):
-    prepared = m.prepare_data(**data)
+    prepared, called = prepare(data)
     # `jit`: the documented sampler form, the prepared data closed over
     # (brm-use: `potential = lambda u: -m.log_density(u, **prepared)`).
     jit = {f: jax.jit(lambda u, f=f: getattr(m, f)(u, **prepared)) for f in FUNCS + ["constrain"]}
     grad = jax.jit(jax.grad(lambda u: m.log_density(u, **prepared)))
-    r = {"prepared": {k: list(np.shape(v)) for k, v in prepared.items()}, "points": []}
+    r = {"prepared": {k: list(np.shape(v)) for k, v in prepared.items()}, "called": called,
+         "dimension": int(m.dimension(prepared)) if hasattr(m, "dimension") else None, "points": []}
     for u in points:
         u = jnp.asarray(u, dtype=jnp.float64)
         p = {}
@@ -152,7 +169,8 @@ function brm_jax_run(src, datasets, points)
     write(module_path, src)
     lines = ["DATASETS = ["]
     for d in datasets
-        push!(lines, "  dict(" * join(("$k=$(_py(v))" for (k, v) in pairs(d)), ", ") * "),")
+        # A dict literal: a bound name may hold a dot (`cdar_mu_day.cell`).
+        push!(lines, "  {" * join(("$(repr(String(k))): $(_py(v))" for (k, v) in pairs(d)), ", ") * "},")
     end
     push!(lines, "]", "POINTS = [")
     for us in points
@@ -184,4 +202,71 @@ function brm_jax_inputs(rk, src)
     bound = rk_bound_data(rk)
     names = [Symbol(first(i)) for i in only(f for f in src.functions if f.name == "prepare_data").inputs]
     NamedTuple{Tuple(names)}(Tuple(bound[n] for n in names))
+end
+
+const _BRM_JAX_NUTS_DRIVER = raw"""
+import importlib.util, json, math, platform, sys, time
+import numpy as np
+import jax
+spec = importlib.util.spec_from_file_location("brm_jax_module", sys.argv[1])
+m = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(m)
+jax.config.update("jax_enable_x64", True)
+import jax.numpy as jnp
+import numpyro
+from numpyro.infer import MCMC, NUTS
+exec(open(sys.argv[2]).read())  # DATA, INIT, SETTINGS
+prepared = (m.prepare_data(**DATA) if all(k.isidentifier() for k in DATA)
+            else m.prepare_data(*[DATA[k] for k in m.DATA]))
+potential = jax.jit(lambda u: -m.log_density(u, **prepared))
+kernel = NUTS(potential_fn=potential, target_accept_prob=SETTINGS["target_accept"])
+mcmc = MCMC(kernel, num_warmup=SETTINGS["warmup"], num_samples=SETTINGS["samples"],
+            num_chains=SETTINGS["chains"], chain_method="sequential", progress_bar=False)
+start = time.time()
+mcmc.run(jax.random.PRNGKey(SETTINGS["seed"]), init_params=jnp.asarray(INIT, dtype=jnp.float64),
+         extra_fields=("diverging",))
+elapsed = time.time() - start
+u = np.asarray(mcmc.get_samples(group_by_chain=True))     # chains x draws x d
+div = np.asarray(mcmc.get_extra_fields(group_by_chain=True)["diverging"])
+out = {"versions": {"python": platform.python_version(), "jax": jax.__version__,
+                    "numpyro": numpyro.__version__, "numpy": np.__version__,
+                    "devices": [str(d) for d in jax.devices()]},
+       "elapsed_seconds": elapsed, "shape": list(u.shape),
+       "draws": u.flatten(order="F").tolist(), "divergences": int(div.sum())}
+print("BRM_JAX_RESULT " + json.dumps(out))
+"""
+
+"""
+    brm_jax_nuts(src, data, init; chains, warmup, samples, seed, target_accept = 0.8)
+
+Sample the module's `log_density` with NumPyro's NUTS (`potential_fn`, the
+prepared data closed over) in Python, from `init[k]` for chain `k`. Returns
+the unconstrained draws as a `d × draws × chains` array, the divergence count,
+the versions and the sampling time.
+"""
+function brm_jax_nuts(src, data, init; chains, warmup, samples, seed, target_accept=0.8)
+    dir = haskey(ENV, "BRM_JAX_WORKDIR") ?
+        mktempdir(mkpath(ENV["BRM_JAX_WORKDIR"]); cleanup=false) : mktempdir()
+    module_path = joinpath(dir, "brm_jax_module.py")
+    write(module_path, src)
+    args_path = joinpath(dir, "brm_jax_inputs.py")
+    write(args_path, "DATA = {" * join(("$(repr(String(k))): $(_py(v))" for (k, v) in pairs(data)), ", ") * "}\n" *
+        "INIT = [" * join(("[" * join(map(_py, u), ", ") * "]" for u in init), ", ") * "]\n" *
+        "SETTINGS = dict(chains=$chains, warmup=$warmup, samples=$samples, seed=$seed, target_accept=$target_accept)\n")
+    driver = joinpath(dir, "brm_jax_nuts.py")
+    write(driver, _BRM_JAX_NUTS_DRIVER)
+    errors = joinpath(dir, "stderr.txt")
+    output = try
+        read(pipeline(`$BRM_JAX_PYTHON $driver $module_path $args_path`; stderr=errors), String)
+    catch e
+        e isa ProcessFailedException || rethrow()
+        error("NUTS on the emitted module failed in Python (module at ", module_path, "):\n",
+            join(last(readlines(errors), 40), "\n"))
+    end
+    line = only(l for l in split(output, '\n') if startswith(l, "BRM_JAX_RESULT "))
+    raw = JSON.parse(line[length("BRM_JAX_RESULT ")+1:end])
+    C, N, d = Int.(raw["shape"])
+    u = reshape(Float64.(raw["draws"]), C, N, d)          # column-major of the C×N×d array
+    (; draws=permutedims(u, (3, 2, 1)), divergences=raw["divergences"],
+        versions=raw["versions"], elapsed=raw["elapsed_seconds"], dir)
 end

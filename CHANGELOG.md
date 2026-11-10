@@ -12,6 +12,29 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.262
+
+- Added: a data-only assignment, a formula column and a model-scope
+  expression apply the smooth Base functions `sin`, `cos`, `tan`, `sinpi`,
+  `cospi`, `sinh`, `cosh`, `tanh`, `asin`, `acos`, `atan`, `log2`, `exp2`,
+  `cbrt` and `abs2` per element, as they already did `log`, `exp`, `sqrt` and
+  `abs`. A cyclic covariate from a period held as data,
+  `cycle = sinpi(2 * day / period)`, is now a data column at every site that
+  takes one, on RKBRMI as on SBBRMI. Before, RKBRMI refused it as "not a data
+  column". RKBRMI computes it in its graph, so `jax_source` puts it in the
+  module's `prepare_data`.
+- Fixed: RKBRMI writes a negated data-only expression (`exp2(-abs(t))`) as
+  `-x`. Before, it wrote the dotted `.-x`, which ReactiveKernelsPPL refuses
+  ("function (.-) not in the slice-1 assignment allowlist").
+- Changed: an `mi()` column without missing entries emits the same RK program
+  as one with gaps, its missing block over an empty row axis, so its missing
+  count is data (user principle `0ikeidi`). A fit with gaps and a design
+  without them now share one program and one `jax_source` module. Densities,
+  gradients and coordinates are unchanged: the empty block adds no coordinate
+  and contributes 0.
+- Tests: `test/rk_jax_models.jl` and `test/rk_jax_inference.jl` check RKBRMI's
+  `jax_source` modules in a real Python process against the native model.
+
 ## 0.2.261
 
 - Fixed: two bindings of one program now give `brm_nlme_model` the same subject

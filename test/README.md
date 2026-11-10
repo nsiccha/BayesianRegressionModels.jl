@@ -2121,6 +2121,30 @@ inputs and Python stderr.
 RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/rk_jax_models.jl
 ```
 
+Some constructs need fixes from ReactiveKernels' JAX lowering that the test
+pin does not carry yet: the CDF-based laws (RK 0.1.130), and jit with the
+prepared data as arguments plus data-dependent sizes (RKPPL 0.1.134). The file
+tests them as `broken` below those versions and requires them from those
+versions on (`RK_JAX_CDF`, `RK_JAX_STATIC_SIZES`), so it runs unchanged on a
+candidate pin.
+
+`rk_jax_inference.jl` takes one representative model (a synthetic station
+network: ragged per-station series, a covariate with gaps through `mi()`, a
+seasonal `hsgp`, correlated station levels and sensitivities, log-normal
+readings). It checks parity first, then samples the posterior natively
+(WarmupHMC's quorum sampler) and in Python (NumPyro's NUTS on the module's
+`log_density`, which needs `numpyro` in the same Python). It compares every
+scalar constrained quantity: the two means must agree within 4.5 combined
+Monte Carlo standard errors. It also compares predictions at posterior draws.
+About 10 minutes on one CPU; `BRM_JAX_RUN_DIR=<dir>` writes the fixture,
+versions and results as a run directory (`manifest.json`, `parity.json`,
+`fit.json`, `predictive.json`).
+
+```sh
+<jaxenv>/bin/pip install numpyro
+RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/rk_jax_inference.jl
+```
+
 ## Chunking heavy suites
 
 `rk_retained_transport.jl` attaches `RKBRMI(brmi, artifact.plan, built)` to

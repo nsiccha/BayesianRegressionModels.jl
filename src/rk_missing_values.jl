@@ -406,10 +406,10 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
         completion.missing_rows; kernel=true)
     push!(statements, Expr(:(=), Expr(:tuple, completion.observed_component,
         completion.order), geometry))
-    if completion.nmissing == 0
-        push!(statements, Expr(:(=), completion.source, completion.observed_component))
-        return nothing
-    end
+    # A complete column emits the same program, its missing block over an
+    # empty row axis, so its missing count is data: a fit and a design
+    # without missing entries (a forecast) share one program, and a module
+    # emitted for one binds the other (user principle `0ikeidi`).
     completion.totals === nothing ||
         return _rk_emit_missing_totals!(definitions, statements, bindings, taken, completion)
     # One block, as StanBlocks' `_sb_mi_response`: the missing entries with

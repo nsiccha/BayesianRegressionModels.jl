@@ -323,6 +323,9 @@ function _rk_lower_data_assignment(x::ExprColumn, assignments, constants, raw, u
     if isempty(kwargs)
         f === getindex && return Expr(:ref, args...)
         f === Base.vect && return Expr(:vect, args...)
+        # Negation is `-x`, as `_rk_value_expr!` writes it: RKPPL admits the
+        # dotted `.-` as subtraction only.
+        f === (-) && length(args) == 1 && return Expr(:call, :-, only(args))
         haskey(_RK_DERIVED_BINOPS, f) && return Expr(:call, _RK_DERIVED_BINOPS[f], args...)
         haskey(_RK_DERIVED_CMP, f) && return Expr(:call, _RK_DERIVED_CMP[f], args...)
         haskey(_RK_DERIVED_MATH, f) && return _rk_ast_dotted(_RK_DERIVED_MATH[f], args...)
