@@ -1,7 +1,7 @@
 # Group identity and event-row partitions shared by kernel emitters.
 # This layer owns no SLIC statements or backend data cleanup.
+# (Any other vector's labels are the vector itself, `ragged_rows.jl`.)
 _brm_group_values(raw::CA.CategoricalVector) = CA.unwrap.(raw)
-_brm_group_values(raw::AbstractVector) = raw
 
 # Computed values own their result axes. Their inputs can be shared arrays,
 # or live on entirely different axes, and are not a formula's row columns.
@@ -115,18 +115,10 @@ function _brm_kernel_labels_rows(raw::AbstractVector)
 end
 _brm_kernel_labels_rows(_raw) = false
 
-function _brm_kernel_subject_values(raw, group::Symbol; prefix="BRM kernel preparation")
-    raw isa AbstractVector || error(
-        "$prefix: kernel(...) subject grouping column `$group` must be a vector, " *
-        "got $(typeof(raw)).")
-    values = collect(_brm_group_values(raw))
-    # No rows are no cells: the plate observes nothing and the priors stay.
-    isempty(values) || _brm_kernel_labels_rows(values) || error(
-        "$prefix: kernel(...) needs pre-grouped per-subject data — `$group` must " *
-        "list one non-missing unique subject per row. Repeated levels indicate " *
-        "long-format data. Got $(values).")
-    values
-end
+# No rows are no cells: the plate observes nothing and the priors stay
+# (`_brm_cell_labels`, `ragged_rows.jl`).
+_brm_kernel_subject_values(raw, group::Symbol; prefix="BRM kernel preparation") =
+    collect(_brm_cell_labels(raw, group, prefix))
 
 # Each cell's entries of a flat column. The result's type comes from the column,
 # not from the entries, so a plate with no cells binds the same element type as
@@ -143,24 +135,18 @@ _brm_gather_cells(values::_BRMAbsentResponse, rows) = values
 # group (decision `0z97g0b`). An `observed` response is the exception: an
 # entry no cell observes would be an observation carried into the fit
 # unconditioned (`_brm_kernel_unobserved_entries`). Each cell holds its rows
-# ascending. The RK graph computes this on every call of a reader whose design
-# is a runtime input, so it builds the label lookup once, counts every cell's
-# rows and then fills each cell, allocating nothing per row beyond the cells.
+# ascending. The partition is `_brm_ragged_partition` (`ragged_rows.jl`), the
+# one the RK graph computes on every call of a reader whose design is a
+# runtime input: it builds the label lookup once, counts every cell's rows and
+# then fills each cell, allocating nothing per row beyond the cells.
 function _brm_kernel_ragged_partition(a_name::Symbol, grp_name::Symbol,
                                      ev_vals::AbstractVector,
                                      subject_vals::AbstractVector;
                                      prefix="BRM kernel preparation", observed::Bool=false)
-    _brm_kernel_check_missing_labels(a_name, grp_name, ev_vals; prefix)
-    lookup = _brm_label_lookup(ev_vals, subject_vals)
-    counts = zeros(Int, length(subject_vals))
-    _brm_each_label_position((_, i) -> i == 0 || (counts[i] += 1), ev_vals, lookup)
-    observed && sum(counts) != length(ev_vals) &&
+    rows = _brm_ragged_partition(a_name, grp_name, ev_vals, subject_vals, prefix)
+    observed && sum(length, rows; init=0) != length(ev_vals) &&
         _brm_kernel_unobserved_entries(a_name, grp_name, ev_vals,
             _brm_label_positions(ev_vals, subject_vals); prefix)
-    rows = [Vector{Int}(undef, n) for n in counts]
-    fill!(counts, 0)
-    _brm_each_label_position((r, i) -> i == 0 || (rows[i][counts[i] += 1] = r),
-        ev_vals, lookup)
     rows
 end
 
@@ -171,17 +157,13 @@ function _brm_kernel_check_ragged_partition(a_name::Symbol, grp_name::Symbol,
                                            ev_vals::AbstractVector,
                                            subject_vals::AbstractVector;
                                            prefix="BRM kernel preparation", observed::Bool=false)
-    _brm_kernel_check_missing_labels(a_name, grp_name, ev_vals; prefix)
+    _brm_check_missing_labels(a_name, grp_name, ev_vals, prefix)
     observed && !_brm_labels_name_cells(ev_vals, subject_vals) &&
         _brm_kernel_unobserved_entries(a_name, grp_name, ev_vals,
             _brm_label_positions(ev_vals, subject_vals); prefix)
     nothing
 end
 
-_brm_kernel_check_missing_labels(a_name, grp_name, ev_vals; prefix) =
-    _brm_has_missing(ev_vals) && error(
-        "$prefix: kernel(...) `ragged($a_name, $grp_name)`: `$grp_name` must be a " *
-        "column with no missing labels.")
 # refused: a response entry in no cell is an observation the fit would carry
 # without conditioning on it — the row mask the user removed (`1bwqnxs`); a
 # fit receives only the observations it conditions on (`0q8hcwq`).
@@ -195,80 +177,23 @@ function _brm_kernel_unobserved_entries(a_name, grp_name, ev_vals, cell; prefix)
         "observe, and predict the others by replaying the fit (`reprocess`).")
 end
 
-_brm_has_missing(values::AbstractVector) = Missing <: eltype(values) && any(ismissing, values)
-
 # The position of each value's label in `labels` (`0` when none matches, the
-# last match when a label repeats), compared by `isequal`.
-function _brm_label_positions(values::AbstractVector, labels::AbstractVector)
-    positions = Vector{Int}(undef, length(values))
-    _brm_each_label_position((r, i) -> positions[r] = i, values, labels)
-    positions
-end
+# last match when a label repeats), compared by `isequal`: the lookup
+# `_brm_ragged_partition` uses (`ragged_rows.jl`).
+_brm_label_positions(values::AbstractVector, labels::AbstractVector) =
+    _brm_with_label_table(values, labels) do table, lo, hi
+        Int[_brm_label_position(table, lo, hi, v) for v in values]
+    end
 # Whether every value's label is in `labels`, without recording positions.
-function _brm_labels_name_cells(values::AbstractVector, labels::AbstractVector)
-    unknown = Ref(false)
-    _brm_each_label_position((_, i) -> i == 0 && (unknown[] = true), values, labels)
-    !unknown[]
-end
-
-# Where each label sits in `labels`, built once for every walk over the
-# values. Machine-integer labels over a compact range index a dense table; any
-# others a hash table keyed by the labels' own element type.
-struct _BRMDenseLabels{T}
-    table::Vector{Int}
-    lo::T
-    hi::T
-end
-struct _BRMHashedLabels{K}
-    position::Dict{K,Int}
-end
-function _brm_label_lookup(values::AbstractVector{<:Base.BitInteger},
-                           labels::AbstractVector{<:Base.BitInteger})
-    T = eltype(labels)
-    # No label: every value lies outside the empty range.
-    isempty(labels) && return _BRMDenseLabels{T}(Int[], one(T), zero(T))
-    lo, hi = extrema(labels)
-    span = Int128(hi) - Int128(lo) + 1
-    span <= 4 * length(labels) + 64 || return _brm_hashed_labels(labels)
-    table = zeros(Int, Int(span))
-    for (i, v) in enumerate(labels)
-        table[Int(Int128(v) - lo) + 1] = i
+_brm_labels_name_cells(values::AbstractVector, labels::AbstractVector) =
+    _brm_with_label_table(values, labels) do table, lo, hi
+        all(v -> _brm_label_position(table, lo, hi, v) != 0, values)
     end
-    _BRMDenseLabels{T}(table, lo, hi)
-end
-_brm_label_lookup(values::AbstractVector, labels::AbstractVector) = _brm_hashed_labels(labels)
-function _brm_hashed_labels(labels)
-    position = Dict{eltype(labels),Int}()
-    for (i, v) in enumerate(labels)
-        position[v] = i
-    end
-    _BRMHashedLabels(position)
-end
-
-# Calls `f(row, position)` for each value.
-_brm_each_label_position(f, values::AbstractVector, labels::AbstractVector) =
-    _brm_each_label_position(f, values, _brm_label_lookup(values, labels))
-function _brm_each_label_position(f, values, lookup::_BRMDenseLabels)
-    (; table, lo, hi) = lookup
-    for (r, v) in enumerate(values)
-        f(r, lo <= v <= hi ? table[Int(Int128(v) - lo) + 1] : 0)
-    end
-end
-# Rows usually arrive grouped by label, so a row repeating the previous row's
-# label reuses its lookup.
-function _brm_each_label_position(f, values, lookup::_BRMHashedLabels)
-    position = lookup.position
-    isempty(values) && return
-    previous = first(values)
-    at = get(position, previous, 0)
-    for (r, v) in enumerate(values)
-        if !isequal(v, previous)
-            previous = v
-            at = get(position, v, 0)
-        end
-        f(r, at)
-    end
-end
+_brm_with_label_table(f, values, labels) =
+    eltype(values) <: Base.BitInteger && eltype(labels) <: Base.BitInteger &&
+        _brm_dense_labels(labels) ?
+        f(_brm_dense_label_table(labels), minimum(labels), maximum(labels)) :
+        f(_brm_hashed_label_table(labels), nothing, nothing)
 
 # `ragged(x, group)` or `ragged(x, group, cells)` — the kernel positional a
 # model-scope `ragged(x, group => cells)` lowers to.
@@ -420,96 +345,40 @@ end
 function _brm_kernel_check_ragged_axis(a_name, grp_name, lens, n_ev;
                                        prefix="BRM kernel preparation")
     for (nm, L) in lens
-        L == n_ev || error(
-            "$prefix: `$a_name` read through `$grp_name`: `$a_name` has $L entries ",
-            "(data vector `$nm`) but `$grp_name` has $n_ev. The grouping column must ",
-            "label EVERY entry of `$a_name`; an entry whose label names no cell is ",
-            "read by no cell.")
+        _brm_check_ragged_axis(a_name, grp_name, nm, L, n_ev, prefix)
     end
     nothing
 end
 
-# The same partition computed in the RK graph from the bound columns (emitted
-# by `_rk_emit_kernel_plate!`), so a design's row geometry is a graph value of
-# its raw columns rather than a planned input. `names` is
-# `[x, group, cell, axis...]` (plus the `order` column before the axes in the
-# ordered form); `axes` are the row-wise data columns of `x`'s own frame, each
-# checked against `groups` as `_brm_kernel_ragged_rows` checks them. A row in
-# no cell is skipped here; a response's coverage is refused where its data is
-# bound (`_rk_prepare_kernel_value`, `_rk_design_cell_check`), not in the graph.
-# Keep the axis arity in the specialization. Forwarding a long mixed-type
-# vararg tail otherwise leaves the call to the graph helper dynamically
-# dispatched when RK prepares a factor's data-only prefix.
-function brm_ragged_rows(names, groups, cells, axes::Vararg{Any,N}) where {N}
-    x, group, cell = names[1], names[2], names[3]
-    _brm_ragged_rows_graph(x, group, groups, cell, cells, names[4:end], axes)
-end
-function brm_ragged_rows_ordered(names, groups, cells, order,
-        axes::Vararg{Any,N}) where {N}
-    x, group, cell, order_name = names[1], names[2], names[3], names[4]
-    rows = _brm_ragged_rows_graph(x, group, groups, cell, cells, names[5:end], axes)
-    _brm_kernel_order_rows!(rows, order, order_name, group, length(groups);
-        prefix="RK backend")
-end
-function _brm_ragged_rows_graph(x, group, groups, cell, cells, axis_names, axes)
-    ev_vals, labels = _brm_ragged_rows_labels(x, group, groups, cell, cells, axis_names, axes)
-    _brm_kernel_ragged_partition(x, group, ev_vals, labels; prefix="RK backend")
-end
-# Another column read through a join whose partition `rows` an earlier graph
-# statement computed (`brm_ragged_rows` or `brm_ragged_rows_ordered` over the
-# same group, cell and order columns). `names` is `[x, group, axes...]`; `x`'s
-# axes are checked against `groups` as `brm_ragged_rows` checks them, and the
-# partition is returned as it is, so the graph partitions each join once
-# however many columns its cells read through it.
-function brm_ragged_rows_shared(rows, names, groups, axes::Vararg{Any,N}) where {N}
-    _brm_kernel_check_ragged_axis(names[1], names[2],
-        ((names[k + 2], length(axes[k])) for k in eachindex(axes)), length(groups);
-        prefix="RK backend")
-    rows
-end
+# The RK graph computes the same partition from the bound columns
+# (`brm_ragged_rows` and its variants, `ragged_rows.jl`, emitted by
+# `_rk_emit_kernel_partition!`), so a design's row geometry is a graph value of
+# its raw columns rather than a planned input. A row in no cell is skipped
+# there; a response's coverage is refused where its data is bound
+# (`_rk_prepare_kernel_value`, `_rk_design_cell_check`), not in the graph.
+#
 # Refuses what `brm_ragged_rows` refuses (`brm_ragged_rows_ordered` given
 # `order` and its `times`), with the same messages, without building the
 # partition; with `observed`, also a response entry in no cell.
 function _brm_check_ragged_rows(x, group, groups, cell, cells, axis_names, axes;
                                order=nothing, times=nothing, observed::Bool=false)
-    ev_vals, labels = _brm_ragged_rows_labels(x, group, groups, cell, cells, axis_names, axes)
-    _brm_kernel_check_ragged_partition(x, group, ev_vals, labels; prefix="RK backend",
-        observed)
-    order === nothing ||
-        _brm_kernel_check_order(times, order, group, length(groups); prefix="RK backend")
-    nothing
-end
-# The join's row labels and its cells' labels, once the cell labels and the
-# join's axis lengths are checked.
-function _brm_ragged_rows_labels(x, group, groups, cell, cells, axis_names, axes)
     prefix = "RK backend"
-    labels = _brm_kernel_subject_values(cells, cell; prefix)
+    labels = _brm_cell_labels(cells, cell, prefix)
     ev_vals = _brm_group_values(groups)
-    _brm_kernel_check_ragged_axis(x, group,
-        Tuple{Symbol,Int}[(nm, length(a)) for (nm, a) in zip(axis_names, axes)],
-        length(ev_vals); prefix)
-    ev_vals, labels
+    for (nm, a) in zip(axis_names, axes)
+        _brm_check_ragged_axis(x, group, nm, length(a), length(ev_vals), prefix)
+    end
+    _brm_kernel_check_ragged_partition(x, group, ev_vals, labels; prefix, observed)
+    order === nothing || _brm_check_order(times, order, group, length(groups), prefix)
+    nothing
 end
 
 # `ragged(x, group; order=time)`: each cell's rows in ascending `time`, ties in
-# row order.
+# row order (`_brm_order_cells`, `ragged_rows.jl`).
 function _brm_kernel_order_rows!(rows, times, order::Symbol, group::Symbol, nrows;
                                  prefix="BRM kernel preparation")
-    _brm_kernel_check_order(times, order, group, nrows; prefix)
-    for cell in rows
-        sort!(cell; by=r -> times[r], alg=Base.Sort.DEFAULT_STABLE)
-    end
-    rows
-end
-function _brm_kernel_check_order(times, order::Symbol, group::Symbol, nrows;
-                                prefix="BRM kernel preparation")
-    got = times isa AbstractVector ? "$(length(times)) rows" : typeof(times)
-    times isa AbstractVector && length(times) == nrows || error(
-        "$prefix: kernel(...) `ragged(…, $group; order=$order)`: `$order` must be a ",
-        "column on `$group`'s $nrows rows; got $got.")
-    any(ismissing, times) && error(
-        "$prefix: kernel(...) `ragged(…, $group; order=$order)`: `$order` has missing values.")
-    nothing
+    _brm_check_order(times, order, group, nrows, prefix)
+    copyto!(rows, _brm_order_cells(rows, times))
 end
 
 # The `into=` target and `order=` column of a `ragged(...)` kernel positional,

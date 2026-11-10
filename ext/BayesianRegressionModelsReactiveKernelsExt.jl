@@ -10,6 +10,19 @@ const BRM = BayesianRegressionModels
 include("rk_statistical_gp.jl")
 include("rk_gmrf.jl")
 
+# BRM's ragged-join row partition (`src/ragged_rows.jl`) as ReactiveKernels
+# `@traceable` source, so `jax_source` translates an RK program's partition
+# into the module's `prepare_data`. Every `@_brm_traceable` definition is
+# defined once more here with untyped formals: BRM's typed method stays the
+# one Julia calls, and RK reads this method's recorded source. The bodies call
+# each other by name, so those names are imported first.
+for name in BRM._brm_traceable_callees()
+    @eval import BayesianRegressionModels: $name
+end
+for def in BRM._BRM_TRACEABLE_DEFINITIONS
+    @eval ReactiveKernels.@traceable $(BRM._brm_untyped_definition(def))
+end
+
 # Stan builtins a kernel cell calls, bound to their Julia equivalents. Stan's
 # conversions between vectors and one-dimensional arrays flatten column-major,
 # as `vec` does. Its ODE solvers run RK's native bridges, which return the

@@ -12,6 +12,24 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.270
+
+- Changed: an RKBRMI's ragged-join row partition — `brm_ragged_rows`,
+  `brm_ragged_rows_ordered` and `brm_ragged_rows_shared`, emitted for a grouped
+  read `x[rows[i]]` with `rows = groups(group => cells)` — takes the columns
+  read through the join as one tuple, `brm_ragged_rows(names, group, cell,
+  (a, b))`, instead of trailing arguments. The partition, its refusals and the
+  ordered join's sort are one source (`src/ragged_rows.jl`) shared by
+  planning, `rk_design_binder` and the RK graph, which BRM's ReactiveKernels
+  extension registers as RK `@traceable` source: `jax_source(rk.model,
+  rk_bound_plan(rk))` translates the partition into the module's
+  `prepare_data` instead of raising `JAXEmissionError: eachindex of
+  IndexLinear` at it. Partitions, refusals and messages are unchanged, and a
+  partition still allocates only its cells; the ordered join now sorts with
+  its own stable merge sort, which orders as Base's stable sort by `isless`
+  does except that a -0.0 and a 0.0 tie. (Snag `jax-source-brm-r-f6503407`,
+  decision `1fg2s0z`.)
+
 ## 0.2.269
 
 - Added: an RKBRMI fit with an `mi(x)` covariate forecasts new rows.

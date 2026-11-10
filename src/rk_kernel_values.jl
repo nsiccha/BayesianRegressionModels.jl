@@ -1478,15 +1478,16 @@ function _rk_emit_kernel_plate!(statements, bindings, taken, kernel, outputs;
             documented_body)))
 end
 
-# `<rows> = brm_ragged_rows([x, group, cell, axes...], group, cell, axes...)`
+# `<rows> = brm_ragged_rows([x, group, cell, axes...], group, cell, (axes...,))`
 # (`brm_ragged_rows_ordered` with `order=`), once per join: a column read
 # through a join (its group, cell and order columns) that an earlier statement
 # of the program already partitions reads that partition,
-# `<rows> = brm_ragged_rows_shared(<earlier rows>, [x, group, axes...], group, axes...)`,
+# `<rows> = brm_ragged_rows_shared(<earlier rows>, [x, group, axes...], group, (axes...,))`,
 # which checks only its own axes. A cell reading several columns through one
 # `groups(g => labels)` binding thus computes the partition once per
 # evaluation, not once per column. A partition without a graph source stays a
-# planned input.
+# planned input. The axes travel as one tuple: the helpers keep a fixed arity,
+# which `jax_source` needs to read their source (`ragged_rows.jl`).
 function _rk_emit_kernel_partition!(statements, input)
     source = get(input, :partition, nothing)
     source === nothing && return
@@ -1498,7 +1499,7 @@ function _rk_emit_kernel_partition!(statements, input)
         push!(statements, Expr(:(=), input.rows, Expr(:call, :brm_ragged_rows_shared,
             first(statements[earlier].args),
             Expr(:vect, QuoteNode.(Symbol[source.x, source.group, source.axes...])...),
-            source.group, source.axes...)))
+            source.group, Expr(:tuple, source.axes...))))
         return
     end
     names = Symbol[source.x, source.group, source.cell,
@@ -1506,7 +1507,7 @@ function _rk_emit_kernel_partition!(statements, input)
     push!(statements, Expr(:(=), input.rows, Expr(:call,
         ordered ? :brm_ragged_rows_ordered : :brm_ragged_rows,
         Expr(:vect, QuoteNode.(names)...), source.group, source.cell,
-        (ordered ? (source.order,) : ())..., source.axes...)))
+        (ordered ? (source.order,) : ())..., Expr(:tuple, source.axes...))))
 end
 
 # The join `(group, cell, order)` a partition statement computes, `nothing`

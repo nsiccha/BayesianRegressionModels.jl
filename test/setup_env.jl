@@ -393,7 +393,15 @@ const PINS = [
     # / RKPPL 0.1.141) contains it and lands ReactiveKernels:JAX's pin 6
     # (6c8a9297): mixtures, multi-axis `hsgp` (integer `div`), a correlated
     # treatment dummy's host helper and `stack` of a host plate translate.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "88813eb3daae68c56afb5190fb0cf0c8d5d1dcdf"),
+    # 51e6404f (RK main, RK 0.1.138 / RKPPL 0.1.142) contains it: `prepare_data`
+    # writes an element of a list of arrays its source built in place and
+    # translates only the taken arm of a decided type test (RK 0.1.136, snag
+    # jax-host-nested-6a304948), and a gather through a ragged row keeps the
+    # row's lengths, so reductions mask its padding (RK 0.1.138, snag
+    # jax-ragged-index-b8420d16). `test/rk_jax.jl`'s grouped-read case, whose
+    # row partition (`src/ragged_rows.jl`) is `prepare_data` host code, needs
+    # both.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "51e6404fa91946693ebfcac9ae4f175da41f6b2a"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
