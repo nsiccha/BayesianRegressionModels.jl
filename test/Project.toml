@@ -409,4 +409,7 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # RKPPL 0.1.145) contains 51e6404f and admits a density factor on a
 # parameter-derived vector definition, which test/rk_statistical_library.jl's
 # car bodies require.
-rev = "1701fb2e1dd30d01305506d7c081486ac6496fcf"
+# 298eaff0 (RK 0.1.152 / RKPPL 0.1.150) contains 1701fb2e; its jax_source takes a
+# field-read untranslatable definition as a prepare_data input, which the car
+# bodies' module needs.
+rev = "298eaff0967c446936fbb212e8b92322e6a2876c"
