@@ -226,13 +226,18 @@ svi_window_nlme() = brm_nlme_model(SVI_WINDOW_RK;
     @test 0.7 < minimum(b.r) && maximum(b.r) < 1.4
 
     # Control: the same run with the boundaries on the minibatch estimate, as
-    # before the sites. It shows this check tells the two apart.
+    # before the sites. It shows this check tells the two apart. It stops
+    # exploring on the two-window test alone (`trend_windows=0`, BRM 0.2.263's
+    # rule): the trend stop explores this toy 56 windows instead of 40, and that
+    # also narrows the boundaries without sites, to a largest sd ratio of 1.24
+    # (2.49 on the two-window stop), so the bound no longer tells the two apart
+    # there, while the sites still put the means closer (rms 0.43 against 0.63).
     t = BRM._brm_svi_target(m)
     t, q = BRM._brm_svi_initialize(t, nothing, MeanFieldGlobal(); start=nothing,
         inits=nothing, global_scale=0.1, unit_scale=1.0)
     c = BRM._brm_svi_controls(length(t.units); batch_size=2, max_iterations=100_000,
         lr_global=0.01, unit_step=0.1, polish_lr=0.05, window=nothing, patience=10,
-        min_windows=40, polish_windows=20, unit_sampling=:uniform)
+        min_windows=40, polish_windows=20, unit_sampling=:uniform, trend_windows=0)
     run = BRM._brm_svi_run(Xoshiro(101), q, c, t)
     @test run.sites !== nothing
     run.sites = nothing
