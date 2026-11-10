@@ -358,26 +358,41 @@ same(a, b) = typeof(a) == typeof(b) && (absent(a) ?
 same_inputs(x, y) = Set(keys(x)) == Set(keys(y)) && all(n -> same(x[n], y[n]), keys(y))
 
 point(rk) = collect(range(-0.6, 0.8; length=rk.model.layout.total))
-function graph_value(rk, inputs, want, runtime...)
+function graph_value(rk, inputs, want, runtime...; u=point(rk))
     names = first.(runtime)
     query = ReactiveKernels.prepare(rk.model.spec;
         have=(:unconstrained, names..., keys(inputs)...), want=(want,), bound=inputs)
-    value = Base.invokelatest(query, point(rk), last.(runtime)...)
+    value = Base.invokelatest(query, u, last.(runtime)...)
     value isa Tuple ? only(value) : value
 end
 
 # Every design binds to what the planned replay binds, and its graph value is
-# the planned replay's.
+# the planned replay's. With `resample_groups` the binder's inputs hold the
+# fit's level set of each resampled grouping, so a draw of the fit keeps the
+# fit's coordinates, while the planned replay is a model of its own rows (snag
+# `rk-replay-with-r-bf059724`). With the new levels' effects given, its value at
+# that draw, carried onto its own coordinates by name, is the binder's.
 function check_binder(rk, designs; resample_groups=(), want, runtime=d -> ())
     binder = rk_design_binder(rk; resample_groups)
     for design in designs
         inputs = binder(design)
-        planned = rk_bound_data(reprocess(rk, design; resample_groups))
-        @test same_inputs(inputs, planned)
-        @test graph_value(rk, inputs, want, runtime(design)...) ==
-            graph_value(rk, planned, want, runtime(design)...)
+        replay = reprocess(rk, design; resample_groups)
+        planned = rk_bound_data(replay)
+        @test same_inputs(inputs, merge(planned, binder.levels.values))
+        @test graph_value(rk, inputs, want, runtime(design)...) ≈
+            graph_value(rk, planned, want, runtime(design)...; u=own_point(rk, replay)) atol=1e-12
     end
     binder
+end
+# The fit's draw `point(rk)` on the replay's own coordinates: shared names keep
+# their values, a new level's standardized draw (which the given effects make
+# unused) is zero.
+function own_point(rk, replay)
+    fitted, u = BRM._rk_layout_coordinate_names(rk), point(rk)
+    map(BRM._rk_bound_coordinate_names(replay)) do name
+        i = findfirst(==(name), fitted)
+        i === nothing ? 0.0 : u[i]
+    end
 end
 
 subject_effects(design) = (:b_p_subject => 0.1 .* reshape(
@@ -401,8 +416,8 @@ subject_effects(design) = (:b_p_subject => 0.1 .* reshape(
         base = first(designs)
         # Repeat a changed design of the same kind: the lowering stays fixed.
         changed = merge(base, (; x=reverse(base.x)))
-        @test same_inputs(binder(changed), rk_bound_data(reprocess(rk, changed;
-            resample_groups=[:group])))
+        @test same_inputs(binder(changed), merge(rk_bound_data(reprocess(rk, changed;
+            resample_groups=[:group])), binder.levels.values))
         @test only(values(binder.classes)).lowering === lowering
         if build === BM.derived_rows
             for x in ([8., 0.2, 0.7], [Inf, 0.2, 0.7])
@@ -441,8 +456,8 @@ end
         runtime=d -> (:b_group => reshape(0.1 .* collect(1:length(d.group)), :, 1),))
     @test length(binder.classes) == 1
     @test !occursin("replayed in full", sprint(show, binder))
-    @test same_inputs(binder(first(designs)), rk_bound_data(reprocess(rk, first(designs);
-        resample_groups=[:group])))
+    @test same_inputs(binder(first(designs)), merge(rk_bound_data(reprocess(rk, first(designs);
+        resample_groups=[:group])), binder.levels.values))
 end
 
 @stestset "derived masks and fitted levels retain replay validation" begin
@@ -492,7 +507,10 @@ end
     binder = check_binder(rk, new; resample_groups=[:subject], want=:conc,
         runtime=subject_effects)
     @test length(binder.classes) == 1
-    @test keys(binder.fitted) == (:hsgp_base_time_modes_fit, :hsgp_base_time_settings_fit, :weight_fit)
+    # The resampled grouping's fitted level set is fitted too (snag
+    # `rk-replay-with-r-bf059724`).
+    @test keys(binder.fitted) == (:hsgp_base_time_modes_fit, :hsgp_base_time_settings_fit,
+        :weight_fit, :subject_fit_levels)
     check_binder(rk, [pk_data(rng, 2, 3; labels=["n1", "n2"]),
         pk_data(rng, 3, 2; labels=["n1", "n2", "n3"])];
         resample_groups=[:subject], want=:conc, runtime=subject_effects)
@@ -535,8 +553,8 @@ end
     binder(design(2))
     before = BM.EMISSIONS[]
     for n in (1, 3, 5)
-        @test same_inputs(binder(design(n)), rk_bound_data(reprocess(rk, design(n);
-            resample_groups=[:subject])))
+        @test same_inputs(binder(design(n)), merge(rk_bound_data(reprocess(rk, design(n);
+            resample_groups=[:subject])), binder.levels.values))
     end
     # Each planned replay emits once; the binder's three designs emitted nothing.
     @test BM.EMISSIONS[] == before + 3

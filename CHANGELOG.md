@@ -46,7 +46,10 @@ instead of failing at run time.
   block, a data-free fit and the `gr` refusal, against the fit's own values and
   closed forms at a draw whose coordinates all differ. The resampled-replay
   checks in `rk_reprocess.jl`, `rk_predictive.jl` and `rk_multigroup_replay.jl`
-  read the binder's inputs.
+  read the binder's inputs. `rk_design_binder.jl` and `rk_fitted_state.jl` compare
+  a resampling binder's inputs with the replay's plus the fit's level set, and
+  `rk_design_binder.jl` checks the binder's value at a draw of the fit against
+  the replay's value at that draw carried onto its own coordinates by name.
 
 ## 0.2.270
 
