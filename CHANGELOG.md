@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.271
+## 0.2.272
 
 - Fixed: `rk_design_binder(rk; resample_groups=[:g])` gives the inputs of a cut
   at a draw `u` of the fit again, for any number of new levels of `g`.
@@ -50,6 +50,27 @@ instead of failing at run time.
   a resampling binder's inputs with the replay's plus the fit's level set, and
   `rk_design_binder.jl` checks the binder's value at a draw of the fit against
   the replay's value at that draw carried onto its own coordinates by name.
+
+## 0.2.271
+
+- Added: `rkppl_model(:car_icar)` and `rkppl_model(:car_bym2)`, the areal field
+  of the `car(area; edges=(from, to), type=:icar | :bym2)` term as BRM-owned
+  `@rkppl` bodies over raw labels, `r ~ body(area, from, to)`. Each prepares
+  its graph in the model with `StatisticalPreparation.car_graph`, gives
+  `phi ~ ICAR(node1, node2)` one soft sum-to-zero `Normal(0, 0.001 n_c)` per
+  connected component (one vector density factor, so the body does not depend
+  on the graph), reads 0 on an island under ICAR and `sigma * theta` under
+  BYM2, and returns each row's effect. Priors: `sigma ~ HalfNormal(1)`,
+  `rho ~ Beta(0.5, 0.5)`. The BYM2 body spells the structured scale
+  `sqrt(rho) .* sqrt.(inv_scale)`, finite in its derivative on an island.
+  Lowering them needs ReactiveKernelsPPL 0.1.145, which admits a density
+  factor on a parameter-derived vector definition; on older RKPPL they are
+  refused when lowered and the other bodies are unaffected. `jax_source`
+  does not translate a model calling them yet (ReactiveKernels snag
+  `jax-source-refus-8c6ed1ec`); the same statements over `car_graph`'s
+  fields bound as data give the same densities and translate. The test
+  environment pins RK main `1701fb2e` (RK 0.1.143 / RKPPL 0.1.145).
+  (Todo `067oh9l`, from snag `rkppl-model-cata-3a839597`.)
 
 ## 0.2.270
 
