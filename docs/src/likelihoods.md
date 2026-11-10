@@ -509,7 +509,7 @@ helpers.
 ## Median regression with `Laplace`
 
 The StanBlocks backend accepts `Distributions.Laplace` as an ordinary
-likelihood. For example, a robust regression for the conditional median can be
+likelihood. For example, a regression of the conditional median can be
 written as:
 
 ```@eval

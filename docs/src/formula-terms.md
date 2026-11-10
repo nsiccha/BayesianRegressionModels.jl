@@ -836,7 +836,7 @@ the same cells from compiled-frame pilot draws, using the same losses as
 `adaptive_centering_problem` and fit with `nonlinear_adapt=false`, or recompile
 with `s2z_rho=reshape(centeredness, J, K)`.
 
-Starting from the noncentered frame is the robust default. A fully centered
+Starting from the noncentered frame is the default. A fully centered
 start on a weakly identified scale can spend warmup in the funnel before
 adaptation moves away from it.
 
@@ -1318,7 +1318,7 @@ spelled identically. `term_priors(brmi)` returns the captured statements
 The standardized raw innovations these submodels sample — `b_pen_raw`, `z`,
 `beta_raw` — stay iid standard normal and are deliberately NOT configurable.
 For a smooth, `Cov(f_pen | sd) = sd² Zpen Zpen'`, so a scale on the raw
-coefficients would simply duplicate the smoothing SD and confound the two. The
+coefficients would duplicate the smoothing SD and confound the two. The
 configurable parameters are the ones that mean something on the model's own
 scale.
 
@@ -1454,7 +1454,7 @@ the length scale falls below
 ```
 
 and the failure is **silent**: the model transpiles, passes `stanc`, samples,
-and returns finite draws that simply are not that Gaussian process. On the
+and returns finite draws that are not that Gaussian process. On the
 default `LogNormal(0, 1)` at `L = 1.5` that region holds 42.9 % of the prior
 mass at `k = 5`, 18.8 % at `k = 10` and 5.7 % at `k = 20`.
 

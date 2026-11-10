@@ -1,61 +1,65 @@
 # Grey-seal IPM on the `@brm` formula surface
 
-This page ports the **full** Baltic grey-seal integrated population model — a joint
-state-space model of an age/sex-structured population fit to **eight** heterogeneous
-observation streams — onto the `@brm` **formula surface**. It is a faithful port of the
-verbatim SlicTranspiler research model (the same one rendered as a
-[StanBlocks-native case study](https://nsiccha.github.io/StanBlocks.jl/dev/examples/case-studies/grey-seal-ipm)):
-every regression / random-effect / covariate piece is hoisted onto a brms-style
-formula, while the mechanistic core stays a `@deffun` scan — exactly as the
-[CDC ww-inference model](wastewater-cdc.md) keeps its renewal scan in a `@deffun`. It is
-rendered in the standard four-pane view and verified (transpile + `stanc` + `compiles`)
-by `test/seal_brm.jl`.
+This page writes the full Baltic grey-seal integrated population model, a
+state-space model of an age- and sex-structured population fitted to eight
+observation streams, as one `@brm` declaration. It is a port of the
+SlicTranspiler research model that the
+[StanBlocks case study](https://nsiccha.github.io/StanBlocks.jl/dev/examples/case-studies/grey-seal-ipm)
+renders in StanBlocks' own idiom: every regression, random effect and
+covariate becomes a brms-style formula, and the mechanistic core stays a
+`@deffun` scan, as the [CDC ww-inference model](wastewater-cdc.md) keeps its
+renewal scan. `test/seal_brm.jl` checks that the model transpiles, passes
+`stanc` and compiles.
 
-## What is a brms formula here
+## What is a formula here
 
 Hoisted from the upstream `@slic` parent onto the formula surface:
 
-- **Birth-rate covariate regression** — `bbr_logit ~ 1 + herring_index_1 + herring_index_2`
-  (the upstream `compute_baseline_birth_rate` logistic-on-herring), bounded inside the
-  scan.
-- **Per-year process/effort random effects, with *estimated* group SDs** —
+- the birth-rate covariate regression,
+  `bbr_logit ~ 1 + herring_index_1 + herring_index_2` (the upstream
+  `compute_baseline_birth_rate`, logistic in the herring indices), bounded
+  inside the scan;
+- per-year process and effort random effects with estimated group SDs,
   `eps_birth ~ 0 + (1|year)`, `eps_sex`, `eps_h_sw`, `eps_h_fi`, `eps_ca`,
-  `eps_placental`. The upstream `epsilon_*` fixed-unit `std_normal` innovations become
-  proper `(1|year)` random effects; the estimated group SD is the brms upgrade (and the
-  reason the `@brm` form has a few more parameters than the `@slic` one).
-- **Per-demographic-class hunting selectivity + bycatch bias** — `hs_sw ~ 0 + (1|demo)`,
-  `hs_fi`, `bycatch_bias`.
-- **Per-cell transition process noise** — `tnoise ~ 0 + (1|noise_cell)`, a crossed
-  cell random effect reshaped into the transition-noise matrix in the scan.
+  `eps_placental`. The upstream `epsilon_*` innovations have a fixed unit
+  scale; here they are `(1|year)` random effects whose SD is estimated, which
+  is why the `@brm` form has a few more parameters than the `@slic` one;
+- per-demographic-class hunting selectivity and bycatch bias,
+  `hs_sw ~ 0 + (1|demo)`, `hs_fi`, `bycatch_bias`;
+- per-cell transition process noise, `tnoise ~ 0 + (1|noise_cell)`, a crossed
+  cell random effect that the scan reshapes into the transition-noise matrix.
 
-These live on **four different frames** (`year`, `demo`, `noise_cell`, plus the herring
-covariate frame) simultaneously — multi-frame is fine on the formula surface.
+These live on four frames at once (`year`, `demo`, `noise_cell` and the
+herring covariate frame), which the formula surface allows.
 
 ## What stays a `@deffun` scan
 
-The carried-state recurrence — the right home for it, as CDC's renewal is: the
-**verbatim** `run_state_process` (Leslie aging, size-structured mortality,
-density-dependent births, a within-year hunting ODE `ode_rk45_tol` on `dH_dt`, and a
-`multinomial_allocation` logistic-normal survived/bycatch/hunted split) and its twelve
-verbatim UDFs. A `seal_state` wrapper runs the parent's transformed quantities + the
-scan and returns a **NamedTuple** of carriers, each observation reading a **named
-field** (`state.population_total`, `state.hunted_sweden`, …) via `@brm` body field
-access — one scan, exactly as the `@slic` seal reads its `run_state_process` struct.
+The carried-state recurrence: the verbatim `run_state_process` (Leslie aging,
+size-structured mortality, density-dependent births, a within-year hunting
+ODE solved with `ode_rk45_tol`, and a `multinomial_allocation`
+logistic-normal split into survived, bycaught and hunted) with its twelve
+helper functions. A `seal_state` wrapper runs the parent's transformed
+quantities and the scan and returns a named tuple of carriers; each
+observation reads a named field (`state.population_total`,
+`state.hunted_sweden`, ...) through field access in the `@brm` body. One scan
+serves all eight streams, as the `@slic` seal reads its `run_state_process`
+struct.
 
 ## The eight observation streams
 
-Each is a `@brm` family likelihood reading a `state.<field>` indexed to that stream's
-observation years, on its own frame:
+Each is a `@brm` family likelihood of a `state.<field>` indexed to that
+stream's observation years, on its own frame:
 
-- **aerial pup counts** — `NegativeBinomial2` on `state.population_total`;
-- **Swedish / Finnish harvest bags** — `Normal` (cv-scaled sd) on the hunting-bag totals;
-- **Swedish / Finnish hunting age-composition, bycatch composition, reproductive-signs
-  composition** — per-row `Multinomial` on the per-year simplices derived from the
-  hunted / bycatch / reproductive carriers;
-- **pregnancy counts** — `Binomial` on `state.pregnancy_rate`.
+- aerial pup counts: `NegativeBinomial2` on `state.population_total`;
+- Swedish and Finnish harvest bags: `Normal` with a cv-scaled SD on the
+  hunting-bag totals;
+- Swedish and Finnish hunting age composition, bycatch composition and
+  reproductive-signs composition: per-row `Multinomial` on the per-year
+  simplices derived from the hunted, bycatch and reproductive carriers;
+- pregnancy counts: `Binomial` on `state.pregnancy_rate`.
 
-The hidden setup below evaluates the `@deffun` scan + helpers and the fixture from the
-checked-in source before the declaration is rendered.
+The hidden setup below evaluates the scan, its helpers and the fixture from
+the checked-in source before the declaration is rendered.
 
 ```@eval
 Main.BRMDocsComparisons.evaluate_source_prelude(
@@ -67,9 +71,9 @@ Main.BRMDocsComparisons.evaluate_source_prelude(
 nothing
 ```
 
-The declaration below is extracted verbatim from `grey_seal_brm_model` in the reviewed
-source, followed by the StanBlocks model it emits, the generated Stan (whose `functions
-{}` block carries the verbatim scan + UDFs + the composition densities).
+The declaration is read from `grey_seal_brm_model`; the Stan program's
+`functions {}` block carries the scan, the helpers and the composition
+densities.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(
@@ -85,19 +89,19 @@ Main.BRMDocsComparisons.comparison(
 
 ## Provenance and scope
 
-Reproduction: [`research/seal/grey_seal_brm.jl`](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/main/research/seal/grey_seal_brm.jl),
-gated by `test/seal_brm.jl`. The 13 state-process UDFs and `run_state_process` are
-verbatim from the SlicTranspiler research model; the fixture is its example dataset
-(3 age classes × 2 sexes × 3 state years). Verified at the **same level as the `@slic`
-reference** — transpile + `stanc` + `compiles`. Like the reference it is **not sampled**:
-the mechanistic scan's simplex constraints make a naive init degenerate for both forms
-(the `@slic` reference is non-finite at the origin too), so the deliverable is the model.
-The [StanBlocks-native case study](https://nsiccha.github.io/StanBlocks.jl/dev/examples/case-studies/grey-seal-ipm)
-carries the same model in its own idiom.
+The script
+[`research/seal/grey_seal_brm.jl`](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/seal/grey_seal_brm.jl)
+is checked by `test/seal_brm.jl`. The thirteen state-process functions and
+`run_state_process` are verbatim from the SlicTranspiler research model; the
+fixture is its example dataset (3 age classes × 2 sexes × 3 state years). The
+checks are the same as for the `@slic` reference: transpile, `stanc`,
+compile. Like the reference, the model is not fitted on this page: the
+scan's simplex constraints make a naive initial value degenerate for both
+forms (the `@slic` reference is non-finite at the origin too).
 
-## Run the reproduction
+## Run the checks
 
-After bootstrapping the repository's test environment:
+From the repository root, with the test environment bootstrapped:
 
 ```sh
 julia --startup-file=no --project=test test/seal_brm.jl

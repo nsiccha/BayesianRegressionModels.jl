@@ -213,41 +213,21 @@ end)((;
     time=[0.5, 0.25, 1.5, 1.0, 3.0],
     concentration=[8.1, 7.6, 5.2, 4.9, 2.1],
 ))
-""", :population_pk; title="Multi-axis population PK kernel")
+""", :population_pk; title="Multi-axis population PK kernel", jax=true)
 ```
 
-## Verified public Warfarin PK/PD reproduction
+The JAX module pane shows the same model as a Python module: `prepare_data`
+computes the per-subject row partition the binding declares, and
+`log_density` runs the plate as a batched JAX computation.
 
-The repository includes a complete executable translation of Sebastian
-Weber's public StanCon 2018 Warfarin programs: a first-stage one-compartment
-oral PK model with lag, allometry, four independent subject effects, and
-Gamma overdispersion; followed by a turnover PD ODE conditioned on the public
-PK posterior medians, with three independent PD subject effects and the same
-observation family.
+## Warfarin PK/PD
 
-The [reproduction script](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/warfarin/reproduce.jl)
-contains the typed ODE and likelihood definitions, a public two-subject data
-slice, both `@brm` declarations, `stanc` checks, and finite BridgeStan density
-and gradient checks. The accompanying [audit notes](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/warfarin/README.md)
-map every retained prior, structural equation, solver tolerance, and known
-generated-quantity difference back to the public source.
-
-The [Warfarin PK/PD page](warfarin.md) also renders the separately specified
-joint model: one posterior in which shared subject-level PK effects feed both
-the PK and PD likelihoods, so PK uncertainty propagates into PD and PD data can
-update PK quantities.
-
-```julia
-include("research/warfarin/reproduce.jl")
-models = warfarin_sbbrmis()
-```
-
-This is the strongest identifiable public match to the Warfarin model
-mentioned in [brms issue #1509](https://github.com/paul-buerkner/brms/issues/1509#issuecomment-1598639613),
-but the issue itself provides no equations or citation, so identity with the
-commenter's private working model cannot be proved. The public StanCon model
-is two separate scalar-Gamma stages; it does not need the correlated Gaussian
-outcome surface above.
+The [Warfarin PK/PD page](warfarin.md) fits Sebastian Weber's StanCon 2018
+example on its public 32-subject data: a one-compartment oral PK model with a
+lag and allometric weight scaling, a turnover PD model solved as an ODE
+conditional on each subject's PK medians, and a joint model of both channels,
+each with its estimates, sampling diagnostics and posterior predictive
+checks.
 
 ## Categorical population terms
 

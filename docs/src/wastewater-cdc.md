@@ -3,11 +3,11 @@
 This page maps the four coupled components of CDC's
 [`ww-inference-model`](https://github.com/CDCgov/ww-inference-model) onto the
 `@brm` formula surface: infection renewal, subpopulation variation, wastewater
-measurements, and interval-valued count streams. It is an executable **structural port**, not
-a drop-in or numerically equivalent reproduction of the current CDC model. The
-comparison below is verified through transpilation, `stanc`, and a finite
-BridgeStan density/gradient by `test/cdc_ww_inference.jl`; those gates establish a
-working model artifact, not posterior parity with CDC.
+measurements, and interval-valued count streams. It is an executable structural
+port, not a drop-in or numerically equivalent reproduction of the current CDC
+model. `test/cdc_ww_inference.jl` checks that the model transpiles, passes
+`stanc`, and gives a finite BridgeStan density and gradient; those checks
+establish a working model, not posterior parity with CDC.
 
 For a smaller introduction to the renewal and shedding pieces, start with the
 [single-catchment wastewater example](wastewater.md). A parallel StanBlocks-native
@@ -89,12 +89,12 @@ Main.BRMDocsComparisons.comparison(
 The example preserves the high-level causal order from CDC's
 [`model_definition.md`](https://github.com/CDCgov/ww-inference-model/blob/main/model_definition.md):
 
-- **Transmission:** unadjusted reproduction numbers drive feedback-adjusted renewal incidence.
-- **Subpopulations:** trajectories vary around a shared process and aggregate by
+- Transmission: unadjusted reproduction numbers drive feedback-adjusted renewal incidence.
+- Subpopulations: trajectories vary around a shared process and aggregate by
   population weight.
-- **Wastewater:** shedding-convolved subpopulation incidence drives censored wastewater
+- Wastewater: shedding-convolved subpopulation incidence drives censored wastewater
   measurements.
-- **Counts:** delay-convolved mapped incidence drives weekday-adjusted interval counts.
+- Counts: delay-convolved mapped incidence drives weekday-adjusted interval counts.
 
 The current fixture now includes the CDC model's distinct latent and observation
 axes: a 50-day unobserved period, an uncovered reference population, sparse and
@@ -104,7 +104,7 @@ first-observed incidence and growth with CDC's seeding back-calculation, bounded
 stationary subpopulation AR deviations, the weekly differenced-AR reference process,
 and a mean-one simplex weekday multiplier.
 
-It does **not** yet reproduce these defining CDC details:
+It does not yet reproduce these defining CDC details:
 
 - CDC's exact mean-reverting IHR parameterization;
 - the exact upstream hyperprior values supplied by CDC's R interface; or
@@ -151,8 +151,8 @@ The fixture carries one row per observed interval:
 
 The default fixture deliberately crosses two shapes: daily jurisdiction hospital
 admissions and weekly totals over only the sampled catchments. Adding another count
-source is therefore a data extension—append a stream column and its records—rather
-than a second hand-written likelihood.
+source is a data extension (append a stream column and its records), not a
+second hand-written likelihood.
 
 Forecast mappings use the same deterministic functions but are not responses in the
 calibration likelihood. The emitted Stan descriptor owns three named generated
