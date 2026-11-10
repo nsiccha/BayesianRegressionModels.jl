@@ -1,5 +1,13 @@
 # Running the tests
 
+`linear_predictor_entries.jl` checks that an entry of `linear_predictors(brmi)`
+is a predictor address: `popcoefnames`, `predictors`, `grouping_factors`,
+`dependencies` and `linear_predictor_op` give for the `(; name, link_lhs_fn)`
+record what they give for its name, on a formula predictor, a linked one and a
+declared parameter, and the documented `popcoefnames` scan needs no filtering.
+It builds no backend; run it with `julia --startup-file=no --project=.
+test/linear_predictor_entries.jl`.
+
 `rk_adaptive_centering.jl` checks `adaptive_centering_problem(rk, problem,
 backend)` on RKBRMI random effects: the blocks name the RK layout's draws, scales
 and correlation-factor coordinates; each cell is located on its population

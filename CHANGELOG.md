@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.265
+
+- Added: an entry of `linear_predictors(brmi)`, the `(; name, link_lhs_fn)`
+  record, is a predictor address. `popcoefnames`, `predictors`,
+  `grouping_factors`, `dependencies` and `linear_predictor_op` each take it and
+  read it as its `name`, so a scan passes every entry on as it comes:
+  `Dict(lp.name => popcoefnames(brmi, lp) for lp in linear_predictors(brmi))`
+  answers `nothing` for a declared parameter or a `kernel(...)` binding. Before,
+  each helper took only a `Symbol`, and passing an entry raised a `MethodError`.
+  Calls with a `Symbol` are unchanged.
+
 ## 0.2.264
 
 - Changed: `brm_svi_fit`'s exploration ends only where the trimmed ELBO's

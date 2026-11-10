@@ -10197,6 +10197,7 @@ _popcoef_submodel(::ExprColumn{typeof(kernel)}) = true
 
 """
     popcoefnames(brmi::BRMI, lhs::Symbol) -> Union{Vector{Symbol}, Nothing}
+    popcoefnames(brmi::BRMI, entry) -> Union{Vector{Symbol}, Nothing}
 
 Ordered labels of the population-level `beta_pop` coefficient columns for
 linear predictor `lhs`, as emitted by the sbimpl backend (`SBBRMI`). The
@@ -10239,8 +10240,9 @@ when `lhs` names no population formula of `brmi`: an unknown name, or a
 binding sbimpl emits as its own declaration rather than a `beta_pop` design —
 a declared parameter (`lhs ~ Normal(0, 1)`), an assignment (`lhs = …`), an
 observation, or a `kernel(...)` submodel binding. `linear_predictors` lists
-declared parameters and `kernel(...)` bindings too, so scanning it with
-`popcoefnames` needs no prior filtering.
+declared parameters and `kernel(...)` bindings too, and an `entry` of it reads
+as its `name`, so a scan passes each entry as it comes and needs no filtering:
+`Dict(lp.name => popcoefnames(brmi, lp) for lp in linear_predictors(brmi))`.
 
 These are the labels the `effect(lhs, label) ~ Normal(...)` prior address
 resolves against — with ONE addition that is deliberately not listed here,
@@ -10259,6 +10261,7 @@ column the term emits, in either operand order; a direct `int_…` label
 address refines it on that column alone.
 """
 popcoefnames(brmi::BRMI, lhs::Symbol) = _sb_popcoefnames(brmi, lhs)
+popcoefnames(brmi::BRMI, lp::_LinearPredictorEntry) = popcoefnames(brmi, lp.name)
 
 # `frozen_preproc` is the fitted record a frozen re-emission
 # (`reprocess(...; freeze_constants=true, resample_groups=...)`) builds its
