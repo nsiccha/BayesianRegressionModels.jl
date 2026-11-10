@@ -10,6 +10,7 @@ import { enhanceAppWithTabs } from 'vitepress-plugin-tabs/client'
 // — edit the upstream and re-run make.jl.
 import { setupHtmxoEmbed } from './htmxo-embed'
 import { setupBackendComparisons } from './backend-comparison'
+import { setupFigures } from './figures'
 
 import './style.css'
 
@@ -18,6 +19,7 @@ export const Theme: ThemeConfig = {
   setup() {
     // Tab enhancement moves SSR code blocks; wait until Vue has hydrated them.
     onMounted(setupBackendComparisons)
+    onMounted(setupFigures)
   },
   enhanceApp({ app, router }) {
     enhanceAppWithTabs(app);

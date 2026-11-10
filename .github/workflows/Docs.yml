@@ -60,8 +60,8 @@ jobs:
         # BRM's nsiccha-org runtime dependencies must be developed explicitly:
         # Julia 1.10 ignores Project.toml's `[sources]`. Clone the public
         # sources and Pkg.develop the whole closure in one batch (see /ci §5).
-        # HTMXObjects is private and not needed by the docs build — see
-        # make.jl's conditional theme install.
+        # AlgebraOfVega renders the figures; its web dependencies use the
+        # same public source pins as the tested BRM environment.
         #
         # `devibe`, NOT `dev`. StanBlocks' active line moved to `devibe`
         # and `dev` is now a strict ancestor 303 commits behind it
@@ -93,7 +93,8 @@ jobs:
             end
             pinned = [PackageSpec(path=checkout(name, release[name]))
                       for name in ["PowerScaling", "ReparametrizableDistributions"]]
-            for name in ["OutputSignatures", "MutatingFunctions"]
+            for name in ["OutputSignatures", "MutatingFunctions", "AlgebraOfVega",
+                         "DynamicObjects", "HTMXObjects", "HTMX", "Treebars"]
               push!(pinned, PackageSpec(path=checkout(name, testenv[name])))
             end
             rk = checkout("ReactiveKernels", testenv["ReactiveKernels"])
