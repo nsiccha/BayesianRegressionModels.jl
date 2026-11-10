@@ -226,8 +226,10 @@ if abspath(PROGRAM_FILE) == @__FILE__
             @test StanBlocks.stan.transpiles(sb.model)
             @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
             @test occursin("warfarin_gamma2_overdisp_lpdf", code)
-            @test occursin("brm_ranef_sd", code)
-            @test occursin("[2]'", code)
+            # One between-subject SD vector per independent subject effect, and
+            # the plate reads each subject's ragged slice of the sampling times.
+            @test count("_bsv_subject_tau;", code) == (tag === :pk ? 4 : 3)
+            @test occursin("ragged_start($(tag)_time.2", code)
             @test !occursin("vector[\"", code)
 
             if get(ENV, "BRM_WARFARIN_RUNTIME", "1") != "0"
