@@ -5224,9 +5224,10 @@ end
 # A `:cdar` term carries the walk's fitted grid: its sorted group levels and
 # steps, which the program looks each row's group and step up in, and as
 # generated data columns the step lags `max(w - v, 0)` and the mask `w >= v` of
-# the `W × W` decay matrix, the first-step indicator and, unless `cor = I`, the
-# flattened Cholesky factor of `cor`. The priors follow the SB declarations:
-# the marginal SD `sigma` keeps its `lower=0` kernel
+# the `W × W` decay matrix, the first-step indicator and, unless the levels are
+# independent (no `cor`, or `cor = I`), the flattened Cholesky factor of `cor`.
+# The priors follow the SB declarations: the marginal SD `sigma` keeps its
+# `lower=0` kernel
 # (`restricted(Normal(0, s), 0, Inf)`), the persistence `rho` its
 # `lower=0, upper=1` one. A replay is refused (`_rk_check_replay_terms`).
 function _rk_cdar_rho_prior(prior, target::Symbol, source::Symbol)
@@ -5270,8 +5271,10 @@ function _rk_plan_cdar_term!(prepared::_BRMPreparedTerm{typeof(cdar)},
     grid = (; lag=column(:lag, Float64.(vec(max.(lags, 0)))),
         mask=column(:mask, Float64.(vec(lags .>= 0))),
         first=column(:first, Float64.((1:W) .== 1)))
-    # `cor = I` couples no groups: the walk reads its innovations as they are
-    factor = state.L == LinearAlgebra.I ? nothing : column(:L, vec(state.L))
+    # independent levels (no `cor`, `cor = I`, or a dense identity) couple no
+    # groups: the walk reads its innovations as they are
+    factor = isnothing(state.L) || state.L == LinearAlgebra.I ? nothing :
+        column(:L, vec(state.L))
     value = _rk_mint_generated!(taken, columns, stem)
     sigma_param = _rk_term_parameter(state.sd_prior) do prior
         family, args, support = _rk_gp_hyper_prior(prior, "marginal scale", target, source;

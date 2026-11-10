@@ -2563,13 +2563,14 @@ end
 # the fitted ones, rows `P + 1:P + Q`: their innovations are those of the fitted
 # levels mapped by `A` plus `Lc` times their own `eta_lev` (column-major `Q × W`),
 # the conditional law given the fitted levels the replay keeps. A fit has Q = 0.
+# Independent levels (no `cor=`, or `cor=I`) read `eta` and `eta_lev` as they are,
+# with no factor, so a walk costs `O((P + Q) W)`: `independent_damped_walk`.
+# Both run the one recurrence, `brm_damped_walk_cells`, on the `(P + Q) × W`
+# innovations `U`.
 StanBlocks.@deffun begin
-    correlated_damped_walk(sigma::real, rho::real, eta::vector[PW], eta_lev::vector[QW],
-                           L::matrix[P, P], A::matrix[Q, P], Lc::matrix[Q, Q], W::int,
-                           group_idx::int[N], step_idx::int[N])::vector[N] = begin
-        V = L * to_matrix(eta, P, W)
-        U = append_row(V, A * V + Lc * to_matrix(eta_lev, Q, W))
-        delta::matrix[P + Q, W]
+    brm_damped_walk_cells(sigma::real, rho::real, U::matrix[R, W],
+                          group_idx::int[N], step_idx::int[N])::vector[N] = begin
+        delta::matrix[R, W]
         prev = sigma * col(U, 1)
         delta[:, 1] = prev
         scale = sigma * sqrt(1.0 - rho * rho)
@@ -2583,6 +2584,19 @@ StanBlocks.@deffun begin
         end
         out
     end
+    correlated_damped_walk(sigma::real, rho::real, eta::vector[PW], eta_lev::vector[QW],
+                           L::matrix[P, P], A::matrix[Q, P], Lc::matrix[Q, Q], W::int,
+                           group_idx::int[N], step_idx::int[N])::vector[N] = begin
+        V = L * to_matrix(eta, P, W)
+        brm_damped_walk_cells(sigma, rho, append_row(V, A * V + Lc * to_matrix(eta_lev, Q, W)),
+                              group_idx, step_idx)
+    end
+    independent_damped_walk(sigma::real, rho::real, eta::vector[PW], eta_lev::vector[QW],
+                            P::int, Q::int, W::int,
+                            group_idx::int[N], step_idx::int[N])::vector[N] =
+        brm_damped_walk_cells(sigma, rho,
+                              append_row(to_matrix(eta, P, W), to_matrix(eta_lev, Q, W)),
+                              group_idx, step_idx)
 end
 
 # `eta_new` are the appended steps' innovations, as `z_new` of `_sb_rw1`; the
@@ -2598,6 +2612,17 @@ _sb_cdar = StanBlocks.@slic begin
     eta_lev ~ std_normal(; n=n_new_groups * (n_steps + n_new_steps))
     return correlated_damped_walk(sigma, rho, append_row(eta, eta_new), eta_lev, L, A_new,
                                   L_new, n_steps + n_new_steps, group_idx, step_idx)
+end
+# `_sb_cdar` with independent levels: the same parameters and the same law as
+# `_sb_cdar` with `L = I`, `A_new = 0` and `L_new = I`, none of which is data.
+_sb_cdar_iid = StanBlocks.@slic begin
+    sigma ~ normal(0., 0.2; lower=0.)
+    rho ~ normal(0.5, 0.2; lower=0., upper=1.)
+    eta ~ std_normal(; n=n_groups * n_steps)
+    eta_new ~ std_normal(; n=n_groups * n_new_steps)
+    eta_lev ~ std_normal(; n=n_new_groups * (n_steps + n_new_steps))
+    return independent_damped_walk(sigma, rho, append_row(eta, eta_new), eta_lev, n_groups,
+                                   n_new_groups, n_steps + n_new_steps, group_idx, step_idx)
 end
 
 # Areal `car(area; edges=..., type=...)`. `phi` lives on the STRUCTURED nodes
@@ -6497,13 +6522,16 @@ function _sb_walk_new_steps!(new_data, handled, keys, n_new::Int, term::Symbol)
 end
 
 # A `cdar` replay that redraws no level binds the fit's own empty new-level data.
-# A term built before redrawn levels existed has no such keys and needs none.
+# A term built before redrawn levels existed has no such keys and needs none, and
+# independent levels have no factors (`_sb_cdar_iid`).
 function _sb_cdar_redraw_none!(new_data, handled, keys, n_groups::Int)
     haskey(keys, :n_new_groups) || return
     new_data[keys.n_new_groups] = 0
+    push!(handled, keys.n_new_groups)
+    haskey(keys, :A_new) || return
     new_data[keys.A_new] = zeros(0, n_groups)
     new_data[keys.L_new] = zeros(0, 0)
-    push!(handled, keys.n_new_groups, keys.A_new, keys.L_new)
+    push!(handled, keys.A_new, keys.L_new)
     nothing
 end
 
@@ -6515,9 +6543,11 @@ end
 # and with `C` the level correlation the redrawn innovations are drawn given theirs:
 # `v_R = A v_F + Lc u_R` with `A = C[R, K] C[K, K]^{-1}` (zero on redrawn fitted
 # levels), `Lc = chol(C[R, R] - A C[K, R])` and `u_R ~ N(0, I)`, the exact
-# conditional of the joint stationary walk; `C = I` gives independent levels. A level
-# the fit did not see needs `C` over the sorted union of fitted and replay levels,
-# read from the replay's `cor` field, whose fitted block must be the fit's `C`.
+# conditional of the joint stationary walk. A level the fit did not see needs `C`
+# over the sorted union of fitted and replay levels, read from the replay's `cor`
+# field, whose fitted block must be the fit's `C`. Independent levels (no `cor=`,
+# or `cor=I`) have no factors: every redrawn level, seen or not, draws its own
+# innovations (`_sb_cdar_iid`), and no `cor` is read.
 # Rows index the redrawn levels after the P fitted ones.
 function _sb_cdar_redraw!(new_data, handled, e::PreprocEntry, df, step_raw, steps, group_raw)
     k = e.const_.keys
@@ -6529,12 +6559,15 @@ function _sb_cdar_redraw!(new_data, handled, e::PreprocEntry, df, step_raw, step
         "and refit.")
     fitted = e.const_.groups
     redrawn = _brm_cdar_levels(group_raw)
-    A, Lc = _sb_cdar_redraw_factors(e, df, fitted, redrawn)
     n_lev = length(redrawn)
     new_data[k.n_new_groups] = n_lev == 0 ? 0 : StanBlocks.stan.maybecv(k.n_new_groups, n_lev)
-    new_data[k.A_new] = A
-    new_data[k.L_new] = Lc
-    push!(handled, k.n_new_groups, k.A_new, k.L_new)
+    push!(handled, k.n_new_groups)
+    if haskey(k, :A_new)
+        A, Lc = _sb_cdar_redraw_factors(e, df, fitted, redrawn)
+        new_data[k.A_new] = A
+        new_data[k.L_new] = Lc
+        push!(handled, k.A_new, k.L_new)
+    end
     step_idx, lev_idx = _brm_cdar_indices(step_raw, steps, group_raw, redrawn;
                                           prefix="sbimpl: reprocess")
     step_idx, lev_idx .+ length(fitted)
@@ -7040,7 +7073,7 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         nodes_col === nothing || push!(handled, nodes_col)
         new_preproc[key] = PreprocEntry(:car, merge(e.const_, (; graph)), e.raw_ref, true)
     elseif e.kind === :cdar
-        # `cdar(step; by=group, cor=C)`: levels and `L` are frozen from the fit (the
+        # `cdar(step; by=group, cor=C)`: levels and `L` (if any) are frozen from the fit (the
         # correlation is a hyperparameter of the term — rebuild the model to change
         # it or the level set); a forecast appends steps past the fitted grid, and a
         # resample replay (`resample_groups` naming the `by` column) redraws every
@@ -7065,10 +7098,11 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_data[k.n_groups] = length(e.const_.groups)
         new_data[k.n_steps] = length(steps) - n_new
         _sb_walk_new_steps!(new_data, handled, k, n_new, :cdar)
-        new_data[k.L] = e.const_.L
+        # independent levels (`_sb_cdar_iid`) have no factor key
+        haskey(k, :L) && (new_data[k.L] = e.const_.L; push!(handled, k.L))
         new_data[k.group_idx] = group_idx
         new_data[k.step_idx] = step_idx
-        for other in (k.n_groups, k.n_steps, k.L, k.group_idx)
+        for other in (k.n_groups, k.n_steps, k.group_idx)
             push!(handled, other)
         end
         # a forecast's record keeps the fitted grid: its parameters stay the fit's
@@ -11285,11 +11319,12 @@ function _sb_car_submodel_expr(term_overrides, t, type::Symbol)
         (:rho, rho_cfg), (:sigma, sigma_cfg))
 end
 
-function _sb_cdar_submodel_expr(term_overrides, t)
+function _sb_cdar_submodel_expr(term_overrides, t; independent::Bool=false)
     rho_cfg = _sb_term_cfg(term_overrides, t, :ar)
     sigma_cfg = _sb_term_cfg(term_overrides, t, :sigma)
-    (isnothing(rho_cfg) && isnothing(sigma_cfg)) && return :_sb_cdar
-    _sb_configured_term_submodel(_sb_cdar, (:rho, rho_cfg), (:sigma, sigma_cfg))
+    (isnothing(rho_cfg) && isnothing(sigma_cfg)) && return independent ? :_sb_cdar_iid : :_sb_cdar
+    _sb_configured_term_submodel(independent ? _sb_cdar_iid : _sb_cdar,
+        (:rho, rho_cfg), (:sigma, sigma_cfg))
 end
 
 # The single carrier every prior surface rides on. Folding the term dict into
@@ -15955,43 +15990,56 @@ _sb_predictor_term!(stmts, data, ::typeof(rw), t;
 end
 # `cdar(step; by=group, cor=C)`: the grouped correlated damped walk. The shared
 # preparation resolves the step grid, the group levels, the index maps and the
-# Cholesky factor; they ride as data under the term's own name.
+# Cholesky factor; they ride as data under the term's own name. Independent
+# levels (no `cor=`, or `cor=I`) have no factor: `_sb_cdar_iid` and no
+# `L` / `A_new` / `L_new` keys.
 _sb_predictor_term!(stmts, data, ::typeof(cdar), t;
                     target::Symbol, term_overrides=Dict{Symbol,Any}(), kwargs...) = begin
     args, kw = getargs(t), getkwargs(t)
     length(args) == 1 || error("sbimpl: `cdar(step; by=group, cor=C)` needs exactly one step axis")
     haskey(kw, :by) || error("sbimpl: `cdar(step; by=group, cor=C)` needs `by=`")
-    haskey(kw, :cor) || error("sbimpl: `cdar(step; by=group, cor=C)` needs `cor=`")
     xname, raw = _sb_inner_data(:cdar, only(args))
     gname, graw = _sb_inner_data(:cdar, kw.by)
     ctx = Dict{Symbol,Any}(xname => raw, gname => graw)
     cname = nothing
-    if kw.cor isa NamedColumn
+    if haskey(kw, :cor) && kw.cor isa NamedColumn
         cname, craw = _sb_inner_data(:cdar, kw.cor)
         ctx[cname] = craw
-        # the prepass stashed the raw matrix field; it is a fitted constant of this term
-        # (its factor is frozen on replay), so it replays as one
-        haskey(data, cname) && _sb_record_preproc!(data, cname, PreprocEntry(:static, craw, nothing, false))
+        if craw isa LinearAlgebra.UniformScaling
+            # `cor = I`: independent levels, no matrix and no Stan data; a redraw
+            # of unseen levels reads no `cor` either
+            delete!(data, cname)
+            cname = nothing
+        else
+            # the prepass stashed the raw matrix field; it is a fitted constant of this
+            # term (its factor is frozen on replay), so it replays as one
+            haskey(data, cname) && _sb_record_preproc!(data, cname,
+                PreprocEntry(:static, craw, nothing, false))
+        end
     end
     prepared = _brm_prepare_term(t, target, (; data=ctx))
     st = prepared.state
     col_name = Symbol(:cdar_, target, :_, xname)
+    independent = isnothing(st.L)
+    factor_keys = independent ? (;) :
+        (; L=Symbol(col_name, :_L), A_new=Symbol(col_name, :_A_new),
+           L_new=Symbol(col_name, :_L_new))
     keys_ = (; n_groups=Symbol(col_name, :_n_groups), n_steps=Symbol(col_name, :_n_steps),
                n_new_steps=Symbol(col_name, :_n_new_steps),
-               n_new_groups=Symbol(col_name, :_n_new_groups),
-               L=Symbol(col_name, :_L), A_new=Symbol(col_name, :_A_new),
-               L_new=Symbol(col_name, :_L_new), group_idx=Symbol(col_name, :_group_idx),
-               step_idx=Symbol(col_name, :_step_idx))
+               n_new_groups=Symbol(col_name, :_n_new_groups), factor_keys...,
+               group_idx=Symbol(col_name, :_group_idx), step_idx=Symbol(col_name, :_step_idx))
     for key in values(keys_)
         haskey(data, key) && error("sbimpl: `cdar` reserves data key `$key`, but that name is already used")
     end
     data[keys_.n_groups] = st.n_groups
     data[keys_.n_steps] = st.n_steps
     data[keys_.n_new_steps] = 0
-    data[keys_.L] = st.L
     data[keys_.n_new_groups] = 0
-    data[keys_.A_new] = zeros(0, st.n_groups)
-    data[keys_.L_new] = zeros(0, 0)
+    if !independent
+        data[keys_.L] = st.L
+        data[keys_.A_new] = zeros(0, st.n_groups)
+        data[keys_.L_new] = zeros(0, 0)
+    end
     data[keys_.group_idx] = st.group_idx
     data[keys_.step_idx] = st.step_idx
     # replay: the group levels and the factor are constants of the fitted term; a
@@ -16001,7 +16049,7 @@ _sb_predictor_term!(stmts, data, ::typeof(cdar), t;
     _sb_record_preproc!(data, keys_.step_idx, PreprocEntry(:cdar,
         (; steps=st.steps, groups=st.groups, L=st.L, keys=keys_, cor_key=cname),
         (xname, gname), true))
-    submodel = _sb_cdar_submodel_expr(term_overrides, t)
+    submodel = _sb_cdar_submodel_expr(term_overrides, t; independent)
     push!(stmts, Expr(:call, :~, col_name, _sb_term_model_call(
         submodel, term_overrides, t; data, stem=col_name, keys_...)))
     col_name

@@ -116,6 +116,7 @@ function rw end
 
 """
     cdar(step; by=group, cor=C)
+    cdar(step; by=group)
 
 Grouped, correlated, stationary AR(1) deviation marker. For every level `g`
 of the `by` group column and every distinct value `w` of the `step` column
@@ -129,7 +130,10 @@ matrix `C` — a `P × P` matrix given as a data field or a literal, `P` the num
 of group levels — `0 <= rho <= 1`, `sigma > 0`, and standardized innovations
 `eta`. Every level starts at its stationary law, so `sigma * sqrt(C[g, g])` is
 the marginal SD of each deviation and `sigma * sqrt(1 - rho^2)` scales the
-innovations; `C = I` gives independent levels. Each row contributes
+innovations. Without `cor` (or with `cor = I`, a data field holding
+`LinearAlgebra.I`) the levels are independent, the `C = I` walk with no
+`P × P` matrix (`_sb_cdar_iid`), so its data and its cost are linear in the
+number of levels. Each row contributes
 `delta[group(row), step(row)]` directly, with no additional population
 coefficient, and a level-step without rows is a latent state on the grid.
 `sd(lp, cdar(step))` addresses `sigma` and `ar(lp, cdar(step))` addresses
@@ -138,8 +142,8 @@ after the last fitted one are appended (a forecast): their innovations are drawn
 in generated quantities, so each level continues from its fitted state. A replay
 with `resample_groups=[:<by column>]` redraws the levels its rows name, also
 levels the fit did not see, given the fitted levels it does not name (`C` over
-the union of levels comes from the replay data); see [`reprocess`](@ref).
-Dispatch tag — see `_sb_cdar`.
+the union of levels comes from the replay data; independent levels read none);
+see [`reprocess`](@ref). Dispatch tag — see `_sb_cdar` and `_sb_cdar_iid`.
 """
 function cdar end
 
