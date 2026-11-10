@@ -93,6 +93,10 @@ const FLAT_PK = (; subject=["s1", "s2", "s3", "s4"], weight=[61.0, 75.0, 68.0, 8
     obs_subject=["s1", "s3", "s2", "s1", "s4", "s2", "s3", "s4", "s1"],
     obs_time=[0.5, 0.5, 0.5, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0],
     y=[0.9, 0.6, 1.4, 0.7, 0.2, 0.8, 0.3, 0.1, 0.4])
+# The ordered join reads each subject's first dose in `dose_rank` order, so
+# every subject has one here.
+const FLAT_PK_ORDERED = merge(FLAT_PK, (; dose_subject=[FLAT_PK.dose_subject; "s4"],
+    log_dose=[FLAT_PK.log_dose; log(1.6)], dose_rank=[FLAT_PK.dose_rank; 1]))
 
 point(rk) = collect(range(-0.6, 0.8; length=rk.model.layout.total))
 jax_function(src, name) = only(f for f in src.functions if f.name == name)
@@ -202,8 +206,8 @@ end
 # labels and `jax_source` fails with `type TypeofBottom has no field
 # parameters`; any other failure is an error.
 @testset "a grouped read's row partition is prepare_data host code" begin
-    for model in (JM.flat_pk, JM.flat_pk_ordered)
-        rk = RKBRMI(model(FLAT_PK))
+    for (model, data) in ((JM.flat_pk, FLAT_PK), (JM.flat_pk_ordered, FLAT_PK_ORDERED))
+        rk = RKBRMI(model(data))
         src = try
             jax_source(rk.model, rk_bound_plan(rk))
         catch e
