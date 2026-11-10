@@ -74,7 +74,7 @@ signature — the rest are covered by their docstrings on the [API](@ref) page.
 | `ar(time; p=1)` | AR(p) noise process ordered by `time`; only `p=1` is emitted |
 | `dar(time; p=1)` | direct differenced-AR(1) trajectory with bounded persistence and scaled innovations |
 | `rw(time)` | direct random-walk trajectory: `dar` with the persistence fixed at zero |
-| `cdar(step; by=group, cor=C)` | per-group deviations following a damped walk over `step` with innovations correlated across groups by `C` |
+| `cdar(step; by=group, cor=C)` | per-group deviations following a damped walk over `step` with innovations correlated across groups by `C`; without `cor` the groups are independent |
 | `car(area; edges=(from, to), type=:icar \| :bym2)` | areal spatial effect over an adjacency graph: an intrinsic CAR field, alone or in the BYM2 convolution |
 | `gmrf((east, north), time[, channel]; mesh, cor=Omega)` | triangular-mesh Matérn field with stationary OU time evolution and optional channel correlation — see [Space-time fields](space-time-fields.md) |
 | `mo(c)`, `mo1(c)` | monotonic effect of an ordered factor via Dirichlet increments |
@@ -165,7 +165,7 @@ end)((;
 `cdar(step; by=group, cor=C)` gives every level of `group` its own stationary
 AR(1) deviation over the sorted distinct values of `step`, with a shared
 persistence `rho` and innovations that are correlated **across groups** through
-the Cholesky factor `L` of `C` (`L L' = C`; `C = I` for independent groups):
+the Cholesky factor `L` of `C` (`L L' = C`):
 
 ```
 delta[:, 1] = sigma * L * eta[:, 1]
@@ -178,7 +178,12 @@ plus spatially correlated weekly patch deviations — the six-patch model of
 [Epidemic renewal models](renewal.md), stated on the formula surface. `C` is a `P × P`
 symmetric positive-definite matrix, `P` the number of group levels, supplied as
 a data field (a matrix-valued field is accepted) or a literal; it is a fixed
-hyperparameter, not a sampled covariance. The term samples `sigma > 0`
+hyperparameter, not a sampled covariance. **Independent groups** leave `cor`
+out, `cdar(step; by=group)`, or write `cor=I` with a data field holding
+`LinearAlgebra.I`: the term is then the `C = I` walk with no `P × P` matrix
+anywhere, so its data and its cost per evaluation are linear in the number of
+levels, `O(P W)`, where a dense `C` costs `O(P² W)` per evaluation and an
+`O(P³)` factorization. The term samples `sigma > 0`
 (default `Normal(0, 0.2)` truncated at zero), the marginal SD of each
 deviation (its innovations scale with `sigma * sqrt(1 - rho^2)`), `rho` on
 `[0, 1]` (default `Normal(0.5, 0.2)` truncated), and `P·W` standardized
@@ -193,7 +198,7 @@ that `rows` names, unseen levels included, drawing each level's whole path in
 generated quantities from the fitted `sigma` and `rho`, given the fitted levels
 `rows` does not name (independent levels for `C = I`). A level the fit did not
 see reads `C` over the sorted union of the fitted and the replay's levels from
-the replay data.
+the replay data; with independent groups (no `cor`) nothing is read.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""

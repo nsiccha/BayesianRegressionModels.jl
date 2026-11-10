@@ -284,8 +284,9 @@ _brm_replay_term(::typeof(rw), training, fresh::_BRMPreparedTerm, context) =
 
 # `cdar(step; by=group, cor=C)`: per-group deviations that follow a damped walk
 # over the sorted distinct `step` values with innovations correlated across
-# groups by the Cholesky factor of `C`. The row contribution is the deviation
-# of the row's group at the row's step, so the term needs both index maps.
+# groups by the Cholesky factor of `C` (independent without `cor`, or `cor=I`).
+# The row contribution is the deviation of the row's group at the row's step, so
+# the term needs both index maps.
 _brm_cdar_levels(values) = sort!(unique(collect(values)))
 function _brm_cdar_levels(values::AbstractVector{<:AbstractString})
     sort!(unique(collect(String, values)))
@@ -307,6 +308,9 @@ function _brm_walk_replay_steps(fitted, raw, term::Symbol; prefix="BRM term repl
     end
     vcat(fitted, fresh), length(fresh)
 end
+# `cor` read as data: a field (its key and value) or a literal (no key). The
+# identity, `LinearAlgebra.I`, is independent levels and stays `nothing`: no
+# `P × P` matrix is formed, so the term's cost is linear in the levels.
 function _brm_cdar_cor(value, context)
     if value isa NamedColumn
         key, raw = _brm_term_data(:cdar, value, context)
@@ -316,7 +320,15 @@ function _brm_cdar_cor(value, context)
 end
 const _BRM_CDAR_COR = "cdar(...; cor=...)"
 _brm_cdar_cor_matrix(x) = _brm_correlation_matrix(x; what=_BRM_CDAR_COR)
+function _brm_cdar_cor_matrix(x::LinearAlgebra.UniformScaling)
+    isone(x.λ) || error(
+        "BRM term preparation: `$_BRM_CDAR_COR` got `$(x.λ) * I`; a correlation has ",
+        "a unit diagonal, so independent levels are `I` (or no `cor=`), and ",
+        "`sd(lp, cdar(step))` is the walk's scale")
+    nothing
+end
 _brm_cdar_factor(C) = _brm_correlation_factor(C; what=_BRM_CDAR_COR)
+_brm_cdar_factor(::Nothing) = nothing
 
 # A known correlation matrix supplied as data: a matrix, or a flattened square
 # matrix (one data-frame column), checked and factored once in Julia. Shared by
@@ -355,8 +367,9 @@ function _brm_cdar_indices(step_raw, steps, group_raw, groups; prefix="BRM term 
         step_idx[i] = j
     end
     group_idx = Vector{Int}(undef, length(group_raw))
+    position = Dict(g => j for (j, g) in enumerate(groups))
     for (i, g) in enumerate(group_raw)
-        j = findfirst(==(g), groups)
+        j = get(position, g, nothing)
         isnothing(j) && error("$prefix: `cdar` group `$g` is not a fitted group level",
             isnothing(by) ? "" : "; `resample_groups=[:$by]` draws the levels of " *
             "`$by` from the fitted law, a level the fit did not see included")
@@ -364,23 +377,24 @@ function _brm_cdar_indices(step_raw, steps, group_raw, groups; prefix="BRM term 
     end
     step_idx, group_idx
 end
+# Without `cor=`, or with `cor=I`, the levels are independent: `cor` and `L` are
+# `nothing` and no `P × P` matrix exists anywhere downstream.
 function _brm_prepare_term(term::ExprColumn{typeof(cdar)}, target::Symbol, context)
     args, kw = getargs(term), getkwargs(term)
     length(args) == 1 || error(
         "BRM term preparation: `cdar(step; by=group, cor=C)` needs exactly one step axis")
     haskey(kw, :by) || error("BRM term preparation: `cdar(step; by=group, cor=C)` needs `by=`")
-    haskey(kw, :cor) || error("BRM term preparation: `cdar(step; by=group, cor=C)` needs `cor=`")
     extra = setdiff(keys(kw), (:by, :cor))
     isempty(extra) || error(
         "BRM term preparation: `cdar` takes only `by=` and `cor=`, got $(collect(extra))")
     source, step_raw = _brm_term_data(:cdar, only(args), context)
     group_source, group_raw = _brm_term_data(:cdar, kw.by, context)
-    cor_source, C = _brm_cdar_cor(kw.cor, context)
+    cor_source, C = haskey(kw, :cor) ? _brm_cdar_cor(kw.cor, context) : (nothing, nothing)
     all(isfinite, step_raw) || error("BRM term preparation: `cdar` step axis must be finite")
     steps = _brm_cdar_levels(step_raw)
     groups = _brm_cdar_levels(group_raw)
     P, W = length(groups), length(steps)
-    size(C) == (P, P) || error(
+    isnothing(C) || size(C) == (P, P) || error(
         "BRM term preparation: `cdar(...; cor=...)` is $(size(C)) but `by` has $P levels")
     L = _brm_cdar_factor(C)
     step_idx, group_idx = _brm_cdar_indices(step_raw, steps, group_raw, groups)

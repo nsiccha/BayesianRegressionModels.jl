@@ -5,8 +5,9 @@ using Test
 using BayesianRegressionModels
 using StanBlocks
 using LogDensityProblems
-using LinearAlgebra: I, cholesky, Symmetric
+using LinearAlgebra: LinearAlgebra, I, cholesky, Symmetric
 using Distributions: Normal
+import Random
 import StanBlocks.stan: transpiles
 
 const CDAR_RUNTIME = get(ENV, "BRM_CDAR_RUNTIME", "1") != "0"
@@ -148,6 +149,99 @@ end
         @test constrained[value.coordinates] ≈ mu
     else
         @info "Skipping BridgeStan cdar runtime gate (BRM_CDAR_RUNTIME=0)"
+        @test true
+    end
+end
+
+# Independent levels (snag independent-per-e13d14f0): no `cor=`, or `cor=I` as a
+# `LinearAlgebra.I` data field, is the `C = I` walk without any `P × P` matrix:
+# `_sb_cdar_iid` ships no `L` / `A_new` / `L_new` and runs no factor product.
+cdar_iid_model(df=cdar_df()) = @brm df begin
+    mu ~ 1 + cdar(week; by=patch)
+    y ~ Normal(mu, 1.0)
+end
+
+@testset "cdar independent levels: no cor, or cor = I, forms no P × P matrix" begin
+    sb = SBBRMI(cdar_iid_model(); mod=@__MODULE__)
+    code = StanBlocks.stan_code(sb.model)
+    @test occursin("independent_damped_walk", code)
+    @test !occursin("cdar_mu_week_L", code) && !occursin("cdar_mu_week_A_new", code)
+    for key in (:cdar_mu_week_L, :cdar_mu_week_A_new, :cdar_mu_week_L_new)
+        @test !haskey(sb.data, key)
+    end
+    @test sb.data[:cdar_mu_week_n_groups] == 2
+    @test sb.data[:cdar_mu_week_n_new_groups] == 0
+    @test sb.data[:cdar_mu_week_group_idx] == [1, 2, 1, 2]
+    @test sb.data[:cdar_mu_week_step_idx] == [1, 1, 2, 2]
+    @test transpiles(sb.model)
+    @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
+    # `cor = C` with `C = I` (a `UniformScaling` field) is the same program
+    field = SBBRMI(cdar_model(cdar_df(; C=I)); mod=@__MODULE__)
+    @test StanBlocks.stan_code(field.model) == code
+    @test !haskey(field.data, :cdar_mu_week_L)
+    @test !any(v -> v isa LinearAlgebra.UniformScaling, values(field.data))
+    # a scaled identity is not a correlation
+    @test_throws "unit diagonal" SBBRMI(cdar_model(cdar_df(; C=2.0I)); mod=@__MODULE__)
+    # the scale and persistence stay addressable
+    configured = @brm cdar_df() begin
+        mu ~ 1 + cdar(week; by=patch)
+        sd(:, cdar(week)) ~ Normal(0.0, 0.3)
+        ar(:, cdar(week)) ~ Beta(2, 2)
+        y ~ Normal(mu, 1.0)
+    end
+    ccode = stan(configured)
+    @test occursin("independent_damped_walk", ccode)
+    @test occursin("cdar_mu_week_sigma ~ normal(0.0, 0.3)", ccode)
+    @test occursin("cdar_mu_week_rho ~ beta(", ccode)
+    @test StanBlocks.stanc_check(ccode; warn_pedantic=false).ok
+    # replay: a forecast appends steps, frozen levels, still no factor
+    longer = reprocess(sb, cdar_df(; steps=3))
+    @test StanBlocks.getvalue(longer.data[:cdar_mu_week_n_new_steps]) == 1
+    @test !haskey(longer.data, :cdar_mu_week_L)
+    @test StanBlocks.stan_code(reprocess(sb, cdar_df()).model) == code
+    # many levels: the data carries no matrix (a dense `L` alone would be 32 MB),
+    # and every row finds its level by lookup, linear in rows plus levels
+    P = 2000
+    many = (; week=repeat(1:3; inner=P), patch=repeat(string.("g", 1:P); outer=3),
+              y=zeros(3P))
+    big = SBBRMI(cdar_iid_model(many); mod=@__MODULE__)
+    @test big.data[:cdar_mu_week_n_groups] == P
+    @test !haskey(big.data, :cdar_mu_week_L)
+    @test Base.summarysize(big.data) < 1_000_000
+    @test big.data[:cdar_mu_week_group_idx] == repeat(sortperm(string.("g", 1:P)) |>
+        invperm; outer=3)
+    # the model description states independent levels and no factor `L`
+    md = brm_description_markdown(brm_description(sb))
+    @test occursin("independent levels", md)
+    @test !occursin("correlation factor L", md)
+    @test occursin("correlation factor L", brm_description_markdown(brm_description(
+        SBBRMI(cdar_model(); mod=@__MODULE__))))
+    @test occursin("unabhängige Stufen", brm_description_markdown(brm_description(sb;
+        texts=description_texts(:de))))
+end
+
+@testset "cdar independent levels: BridgeStan density and gradient equal the dense C = I walk" begin
+    if CDAR_RUNTIME
+        isdir(CDAR_CACHE) || mkpath(CDAR_CACHE)
+        inst(sb) = StanBlocks.stan_instantiate(sb.model;
+            path=joinpath(CDAR_CACHE, string(hash(StanBlocks.stan_code(sb.model))) * ".stan"))
+        dense = inst(SBBRMI(cdar_model(cdar_df(; steps=3)); mod=@__MODULE__))
+        iid = inst(SBBRMI(cdar_iid_model(cdar_df(; steps=3)); mod=@__MODULE__))
+        field = inst(SBBRMI(cdar_model(cdar_df(; C=I, steps=3)); mod=@__MODULE__))
+        @test String.(BS.param_unc_names(iid.model)) == String.(BS.param_unc_names(dense.model))
+        D = LogDensityProblems.dimension(dense)
+        @test D == 3 + 6
+        for seed in 1:5
+            q = 0.7 .* randn(Random.Xoshiro(seed), D)
+            lp, g = LogDensityProblems.logdensity_and_gradient(dense, q)
+            for problem in (iid, field)
+                lp2, g2 = LogDensityProblems.logdensity_and_gradient(problem, q)
+                @test lp2 ≈ lp rtol=1e-12
+                @test g2 ≈ g rtol=1e-10
+            end
+        end
+    else
+        @info "Skipping BridgeStan independent cdar gate (BRM_CDAR_RUNTIME=0)"
         @test true
     end
 end

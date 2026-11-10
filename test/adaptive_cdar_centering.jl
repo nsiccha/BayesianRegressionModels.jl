@@ -93,6 +93,23 @@ end
 
     missing = filter(!=("cdar_mu_week_eta.4"), names)
     @test_throws "innovations" BRM._adaptive_cdar_centering_blocks(sb, missing)
+
+    # independent levels (no `cor=`, snag independent-per-e13d14f0): no factor
+    # data, unit marginal variances, the same cells
+    iid_data = Base.structdiff(CDAR_AC_DATA, NamedTuple{(:C,)})
+    iid = SBBRMI(@brm(iid_data, begin
+        mu ~ 1 + cdar(week; by=patch)
+        y ~ Normal(mu, 0.1)
+    end); mod=@__MODULE__)
+    @test !haskey(iid.data, :cdar_mu_week_L)
+    iid_block = only(BRM._adaptive_cdar_centering_blocks(iid, names))
+    @test iid_block.cdiag == [1.0, 1.0]
+    @test iid_block.effects == block.effects
+    expected_iid = manual_cdar_scales(0.1, 0.5, [1.0, 1.0], 2, 2)
+    for pair in 1:4
+        @test exp(BRM._adaptive_cdar_log_scale(x, iid_block, pair)) ≈
+              expected_iid[pair] atol=2e-14
+    end
 end
 
 function set_cdar_sources!(state, ir, controls)

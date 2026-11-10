@@ -503,6 +503,8 @@ function _brm_nlme_cdar_units(record, group, subject_index, owner, group_levels,
         "innovations", group, subject_index, owner, group_levels, nested_groups,
         shared_groups)
     units === nothing && return nothing
+    # independent levels (no `cor`) have no factor and couple no groups
+    record.cor_factor === nothing && return units
     all(c -> iszero(record.cor_factor[c]) || units[c[1]] == units[c[2]],
         CartesianIndices(record.cor_factor)) || return nothing
     units

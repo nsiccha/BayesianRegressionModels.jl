@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.262
+
+- `cdar(step; by = group)` without `cor` is now the walk with independent
+  levels, and so is `cor = I_g` with a data field holding `LinearAlgebra.I`.
+  Neither forms a `P × P` matrix: SBBRMI emits `_sb_cdar_iid` (Stan function
+  `independent_damped_walk`), which ships no `L`, `A_new` or `L_new` data and
+  multiplies by no factor, so the data and the work per evaluation are linear
+  in the number of levels, `O(P W)`. Before, `cor` was required and independent
+  levels needed a dense identity: for 1,700 levels, 2.9 M entries (23 MB) of
+  data, an `O(P³)` Cholesky factorization at build and `O(P² W)` work per
+  evaluation. The law, the coordinates (`sigma`, `rho`, `eta`), forecasts and
+  `resample_groups` redraws are those of a dense `cor = I`; a redraw of levels
+  the fit did not see reads no `cor`. RKBRMI, adaptive centring and
+  `brm_nlme_view` take the term the same way. A scaled identity `c * I` is
+  refused, since `sd(lp, cdar(step))` is the scale. Snag
+  `independent-per-e13d14f0`.
+- Fixed: preparing a `cdar` term looked each row's level up with a scan over
+  the levels, `O(N P)` for `N` rows; it is now a hash lookup, `O(N + P)`.
+
 ## 0.2.261
 
 - Fixed: two bindings of one program now give `brm_nlme_model` the same subject
