@@ -70,9 +70,13 @@ function _rk_ast_multigroup_fit!(definitions, statements, taken, term)
             values = [prior[1], prior[2]]
             return values
         end
+        doc = @_rk_definition_doc """
+            The two numbers of a multigroup HSGP's coordinate prior, from the training
+            coordinates and the basis settings (`k`, `c`, number of points); computed once
+            when the data are bound."""
         entry = _rk_ast_shared_definition!(definitions, taken,
             "brm_multigroup_prior_graph", [formals; :k_level; :c_level; :points_level],
-            body; kernel=true)
+            body; kernel=true, doc)
         call = Expr(:call, entry, options.coordinate_fit_columns...,
             options.coordinate_k_fit, options.coordinate_c_fit, options.coordinate_points_fit)
         push!(statements, Expr(:(=), name, call))

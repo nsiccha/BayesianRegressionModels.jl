@@ -236,8 +236,15 @@ function _rk_ast_hsgp_fit!(definitions, statements, term, taken)
         end
     end
     push!(body.args, :(fit = $value), :(return fit))
+    doc = @_rk_definition_doc """
+        The fitted interval of an HSGP term's basis, from its training (fit-role) axes.
+
+        Returns one vector `fit`: each axis's center and half-width$(_rk_hsgp_clamped(options) ?
+            ", its observed lower and upper bounds" : "")$(orthogonal === nothing ? "" :
+            ", and the basis columns' means and projections for `orthogonal_to`"). The basis and
+        length-scale floor graphs read it, so a prediction uses the training interval."""
     entry = _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_fit_graph",
-        collect(formals), body; kernel=true)
+        collect(formals), body; kernel=true, doc)
     name = _rk_ast_fresh_name(string(options.id, "_fit"), taken)
     push!(statements, Expr(:(=), name, Expr(:call, entry, _rk_hsgp_fit_actuals(term)...)))
     name
@@ -448,11 +455,17 @@ function _rk_ast_hsgp_basis_graph!(definitions, term, taken)
         push!(body.args, :(PHI = stack(basis_rows; dims=1)))
     end
     push!(body.args, Expr(:return, Expr(:tuple, :PHI, :omega2)))
+    doc = @_rk_definition_doc """
+        The Hilbert-space basis of an HSGP term at the rows.
+
+        Returns `(PHI, omega2)`: `PHI` holds one column per basis function, the Laplacian
+        eigenfunctions on the term's interval evaluated at each row's axes, and `omega2`
+        the matching squared frequencies, which the spectral density reads."""
     _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_basis_graph",
         [inputs; _rk_hsgp_mask_formals(term)...; _rk_hsgp_fit_formals(term)...;
          _rk_hsgp_basis_setting_formals(term)...;
          (level_projected ? (:group_index,) : ())...],
-        body; kernel=true)
+        body; kernel=true, doc)
 end
 
 # The length-scale validity floor `(4L/pi) * sqrt(log(100) / (k^2 - 1))` per
@@ -483,8 +496,14 @@ function _rk_ast_hsgp_floor!(definitions, statements, term, taken; fit=nothing)
         actuals = fitted ? (fit, _rk_hsgp_setting_actuals(options, settings)...) :
             (term.columns..., _rk_hsgp_mask_actuals(term)...,
              _rk_hsgp_setting_actuals(options, settings)...)
+        doc = @_rk_definition_doc """
+            The smallest length scale an HSGP term's basis resolves, per axis.
+
+            For `m` basis functions on an axis of half-width `L` the floor is
+            `(4L / pi) * sqrt(log(threshold) / (m^2 - 1))` (`0.0` for one function), below
+            which the omitted frequencies would carry too much weight."""
         entry = _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_rho_floor_graph",
-            formals, body; kernel=true)
+            formals, body; kernel=true, doc)
         push!(statements, Expr(:(=), name, Expr(:call, entry, actuals...)))
     else
         fits = Dict{Symbol,Any}(widths[j] =>
@@ -555,8 +574,12 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho,
             :(exponent = (rho .^ 2) .* frequencies),
             :(spectra = scale .* exp.(-0.25 .* exponent)), :(return spectra))
     end
+    doc = @_rk_definition_doc """
+        The weight of each HSGP basis function: the square root of the covariance's
+        spectral density at its frequency, for the marginal scale `sigma` and length
+        scale `rho`$(by_group ? " (one column per group)" : "")."""
     scale_entry = _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_spectral_scales",
-        scale_arguments, scale_body; kernel=true)
+        scale_arguments, scale_body; kernel=true, doc)
     scale_values = Any[last.(inputs)..., sigma, rho]
     projected && push!(scale_values, group_index)
 
@@ -594,8 +617,12 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho,
     # The call below passes these last, after `group_index`.
     multigroup === nothing || append!(arguments, multigroup.formals)
     # Terms with the same spectral shape share one explicit numerical graph.
+    doc = @_rk_definition_doc """
+        An HSGP term's value at each row: the basis `PHI` times the basis weights `scales`
+        times the standardized coefficients `z`$(group_index === nothing ? ", `PHI * (scales .* z)`" :
+            ", each row reading its group's weights")."""
     entry = _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_spectral_graph",
-        arguments, body; kernel=true)
+        arguments, body; kernel=true, doc)
     values = Any[last.(inputs)..., scales, z]
     multigroup === nothing || push!(values, rho)
     group_index === nothing || push!(values, group_index)

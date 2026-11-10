@@ -271,6 +271,39 @@ function without_layout_constants(src)
         split(src.text, '\n')), '\n')
 end
 
+# BRM's half of a readable module (user requirement: the generated JAX is
+# readable and documented by itself): every definition BRM emits into the
+# program carries a docstring, and RKPPL keeps each submodel's as its
+# definition record, which RK's JAX export turns into the Python function's
+# docstring.
+@testset "every definition BRM emits is documented" begin
+    S = station_data()
+    t = collect(range(0, 3; length = 20))
+    rks = (RKBRMI(JMS.regression(regression_data(9, 3))),
+        RKBRMI(JMS.missing_covariate((; S.y, S.rain, S.g))),
+        RKBRMI(JMS.series(series_data([3, 2, 4]))),
+        RKBRMI(JMS.differenced_walk((; S.y, day_grid = collect(1.0:9.0), day_idx = Int.(S.day)))),
+        RKBRMI(JMS.ar1_residuals((; S.y, S.x, S.g, S.day))),
+        RKBRMI(JMS.station_daily(station_daily_data(3))),
+        RKBRMI(@brm (; y = sin.(t), t) begin
+            s ~ Exponential(1)
+            mu ~ 1 + hsgp(t)
+            y ~ Normal(mu, s)
+        end))
+    for rk in rks
+        emitted = BayesianRegressionModels._rk_emit_ast(rk.plan)
+        records = rkppl_documentation(rk_bound_plan(rk))
+        for definition in emitted.defs
+            source = BayesianRegressionModels._rk_source_definition(definition)
+            @test BayesianRegressionModels._brm_is_doc(definition)
+            @test !isempty(strip(definition.args[3]))
+            source.kind === :rkppl || continue
+            @test any(r -> r.definition === source.name && r.markdown == definition.args[3],
+                records)
+        end
+    end
+end
+
 @testset "one module serves datasets of other sizes and prior values" begin
     A = regression_data(9, 3)
     B = regression_data(23, 5; sigma_rate = 2.5, b0_loc = 0.7, b0_scale = 3.0, sd_rate = 0.4)

@@ -147,7 +147,15 @@ function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, 
     scales_call, value_call = _rk_ast_hsgp_value_graph!(definitions, term, taken, arguments,
         sigma, rho, weights_value, spectral; group_index, multigroup)
     push!(block.statements, Expr(:(=), spectral, scales_call), Expr(:(=), value, value_call))
-    _rk_ast_block_call!(definitions, taken, "brm_grouped_hsgp", block, value),
+    doc = @_rk_definition_doc """
+        An HSGP term$(G > 1 ? " with $G groups" : "") whose length scale and marginal scale may vary by group.
+
+        Draws the length scale(s) `$rho` and marginal scale(s) `$sigma` with their
+        priors (and their group-level effects, when they have predictors), and the
+        standardized basis coefficients `$z ~ Normal(0, 1)`. Each basis function is weighted
+        by the square root of the covariance's spectral density (`$spectral`); the term at
+        each row is its basis times the weighted coefficients of its group."""
+    _rk_ast_block_call!(definitions, taken, "brm_grouped_hsgp", block, value; doc),
         (; weights=z, hypers=(length_scale=rho_effects, sd=sigma_effects),
            scales=(length_scale=rho_sampled, sd=sigma_sampled), spectral,
            lambda=isnothing(multigroup) ? nothing : get(multigroup, :lambda, nothing))

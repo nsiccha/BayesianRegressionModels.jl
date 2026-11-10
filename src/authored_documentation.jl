@@ -145,6 +145,24 @@ function _brm_documented_statement(statement::Expr, docs)
     result
 end
 
+# BRM's own documentation of a definition it emits into an RKPPL program (a
+# component submodel, a block, a statistical helper). RKPPL retains it as the
+# definition's record (`rkppl_documentation`, owner `:definition`), and RK's
+# JAX export renders it as the docstring of that definition's Python function.
+# The text is written where the definition's body is built, so it describes
+# exactly that body; `@_rk_definition_doc` records that line of BRM's source.
+struct _RKDefinitionDoc
+    markdown::String
+    location::LineNumberNode
+end
+macro _rk_definition_doc(markdown)
+    file = Symbol("BayesianRegressionModels/src/", basename(String(__source__.file)))
+    :(_RKDefinitionDoc($(esc(markdown)), $(QuoteNode(LineNumberNode(__source__.line, file)))))
+end
+_rk_documented_definition(definition, ::Nothing) = definition
+_rk_documented_definition(definition, doc::_RKDefinitionDoc) = Expr(:macrocall,
+    GlobalRef(Core, Symbol("@doc")), doc.location, doc.markdown, definition)
+
 # An outer `"doc" @brm function ... end` belongs to Julia's documentation
 # macro. Read its original strings rather than re-rendering Markdown. This is
 # Julia's existing store, and autoinit=false makes this a strictly read-only

@@ -596,7 +596,9 @@ strip_source_lines(x::Expr) = Expr(x.head,
     end
     emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(model))
     # The population component owns its coefficient vector, as SBBRMI's popefs.
-    @test strip_source_lines.(emitted.defs) == [strip_source_lines(:(
+    # Its docstring aside (testset "every definition BRM emits is documented",
+    # test/rk_jax_models.jl).
+    @test strip_source_lines.(BRM._brm_undoc.(emitted.defs)) == [strip_source_lines(:(
         brm_population_effects(X, ncoef, loc, scale) = begin
             beta_pop[1:ncoef] .~ Normal.(loc, scale)
             return X * beta_pop
@@ -619,7 +621,7 @@ end
         y2 ~ Normal(mu, 1.0)
     end
     emitted = BRM._rk_emit_ast(BRM._brm_rk_plan(model))
-    definition = strip_source_lines(only(emitted.defs))
+    definition = strip_source_lines(BRM._brm_undoc(only(emitted.defs)))
     @test first(first(definition.args).args) === :brm_mixed_population_effects
     @test Expr(:call, :~, :beta_pop_2, Expr(:call, :Laplace, 0.0, 2.0)) in last(definition.args).args
     @test count(a -> Meta.isexpr(a, :(=)) && a.args[1] === :mu, emitted.main.args) == 1

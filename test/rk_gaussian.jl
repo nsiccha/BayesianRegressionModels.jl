@@ -50,7 +50,8 @@ function check_gaussian_emission(n)
     # Reference order (a, b, log sigma) inside the layout's coordinate order.
     order = Int.(indexin([population; :sigma], names))
     source = BayesianRegressionModels.emit_rk_artifact(brmi; case_id="gaussian-$n")
-    @test [first(first(d.args).args) for d in source.defs] == [:brm_population_effects]
+    @test [BayesianRegressionModels._rk_source_definition(d).name for d in source.defs] ==
+        [:brm_population_effects]
     @test !occursin("NormalIDGLM", sprint(Base.show_unquoted, source.ast))
     cache = joinpath(tempdir(), "brm-rk-gaussian")
     mkpath(cache)

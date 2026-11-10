@@ -32,8 +32,25 @@ instead of failing at run time.
   without them now share one program and one `jax_source` module. Densities,
   gradients and coordinates are unchanged: the empty block adds no coordinate
   and contributes 0.
+- Added: every definition RKBRMI emits into its RKPPL program carries a
+  docstring that says what it computes. This covers component submodels
+  (`brm_population_effects`, `brm_group_effects`, `brm_hsgp_effect`, …),
+  blocks (`brm_cdar`, `brm_differenced_ar1`, `brm_gmrf`, `brm_car_icar`,
+  `brm_missing_covariate`, …) and statistical helpers (`brm_prepared_indices`,
+  `brm_covariate_mean`, the HSGP basis graphs, …). The text is written where
+  BRM builds the definition's body, and the record names that line of BRM's
+  source. `ReactiveKernelsPPL.rkppl_documentation(rk_bound_plan(backend))`
+  now holds an `owner = :definition` record for each instantiated submodel,
+  at its instance path (`(:pop_mu,)`), beside the authored declarations'
+  records. ReactiveKernels' JAX export renders these records as the
+  docstrings of the module's functions. The printed program shows the
+  docstrings. Program identities (`_rk_program_statements`, fitted-state
+  replay, SVI and SMC checkpoints) read the program without them, so they
+  are unchanged, as are densities, gradients and coordinates.
 - Tests: `test/rk_jax_models.jl` and `test/rk_jax_inference.jl` check RKBRMI's
   `jax_source` modules in a real Python process against the native model.
+  The test environment pins ReactiveKernels `main` `ddc30859` (RK 0.1.130 /
+  RKPPL 0.1.140), which carries RK's JAX lowering.
 
 ## 0.2.261
 
