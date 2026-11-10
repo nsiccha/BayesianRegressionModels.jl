@@ -20,4 +20,12 @@ path = ".."
 
 [sources.AlgebraOfVega]
 url = "https://github.com/nsiccha/AlgebraOfVega.jl"
-rev = "73695d5d563074bfd9ab1f98debf2ebe38d7bd00"
+rev = "f96a064557589494d2a1b6ae75c16449758009fb"
+
+[sources.HTMXObjects]
+url = "https://github.com/nsiccha/HTMXObjects.jl"
+rev = "0dce4099357c224236ca9b9a2f7d2dfd0e3334b7"
+
+[sources.DynamicObjects]
+url = "https://github.com/nsiccha/DynamicObjects.jl"
+rev = "fc41273bce8b3aaf736bb0b23c36c97e773a1c7c"

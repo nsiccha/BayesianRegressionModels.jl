@@ -21,8 +21,8 @@ html_attribute(value) = replace(string(value), '&' => "&amp;", '"' => "&quot;",
     figure(spec; caption, alt=caption)
 
 Embed an AlgebraOfVega figure in a Documenter `@eval` block. The page carries
-the generated Vega-Lite JSON; the theme calls `vegaEmbed` after hydration and
-redraws on a light/dark switch. No rendered asset is written to the repository.
+the generated Vega-Lite JSON; the theme calls AlgebraOfVega's browser runtime
+after hydration. It follows light/dark switches. No rendered asset is committed.
 """
 function figure(spec; caption::AbstractString, alt::AbstractString=caption)
     json = AlgebraOfVega.to_json(spec)
