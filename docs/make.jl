@@ -18,6 +18,7 @@ const GENERATED_EXAMPLE_PAGES = [
     joinpath(@__DIR__, "src", "seal-brm.md"),
     joinpath(@__DIR__, "src", "state-space-models.md"),
     joinpath(@__DIR__, "src", "monster.md"),
+    joinpath(@__DIR__, "src", "variational-inference.md"),
     joinpath(@__DIR__, "src", "adaptive-centering.md"),
     joinpath(@__DIR__, "src", "eight-schools-centering.md"),
     joinpath(@__DIR__, "src", "radon-centering.md"),
@@ -77,6 +78,7 @@ makedocs(
         "Grey-seal IPM" => "seal-brm.md",
         "State-space models" => "state-space-models.md",
         "Monster PBPK model" => "monster.md",
+        "Variational inference" => "variational-inference.md",
         "Adaptive centering" => [
             "Motorcycle HSGP" => "adaptive-centering.md",
             "Eight schools" => "eight-schools-centering.md",
@@ -119,6 +121,11 @@ BRMDocsComparisons.validate_required_stan_outputs(
 BRMDocsComparisons.validate_required_stan_outputs(
     joinpath(@__DIR__, "build", ".documenter", "monster.md"),
     (:monster_brmi,),
+)
+
+BRMDocsComparisons.validate_required_stan_outputs(
+    joinpath(@__DIR__, "build", ".documenter", "variational-inference.md"),
+    (:site_counts_model,),
 )
 
 BRMDocsComparisons.validate_required_stan_outputs(
