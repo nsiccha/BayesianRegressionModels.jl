@@ -166,11 +166,20 @@ end
 
 # ---- linear predictors (intermediate `~` ops, non-data LHS) ---------------
 
+# One `linear_predictors(brmi)` entry, `(; name, link_lhs_fn)`. Every helper
+# that takes a linear predictor's name (`linear_predictor_op`, `predictors`,
+# `grouping_factors`, `dependencies`, `popcoefnames`) also takes such an entry
+# and reads it as its `name`, so a scan over `linear_predictors` passes each
+# entry on as it comes (snag scanned-linear-p-5415909b).
+const _LinearPredictorEntry = NamedTuple{(:name, :link_lhs_fn),<:Tuple{Symbol,Any}}
+
 """
     linear_predictor_op(brmi::BRMI, name::Symbol) -> Union{ExprColumn,Nothing}
+    linear_predictor_op(brmi::BRMI, entry) -> Union{ExprColumn,Nothing}
 
 The `~` ExprColumn that defines `<name> ~ <rhs>`, or `nothing` if
-`name` isn't a `~`-bound entry in `brmi.operations`.
+`name` isn't a `~`-bound entry in `brmi.operations`. An `entry` of
+`linear_predictors(brmi)` reads as its `name`.
 """
 Base.@nospecializeinfer function linear_predictor_op(@nospecialize(brmi::BRMI), n::Symbol)
     _brm_has_operation(brmi, n) || return nothing
@@ -183,6 +192,8 @@ Base.@nospecializeinfer function linear_predictor_op(@nospecialize(brmi::BRMI), 
     (f === (~) || f === assign) || return nothing
     op
 end
+Base.@nospecializeinfer linear_predictor_op(@nospecialize(brmi::BRMI), lp::_LinearPredictorEntry) =
+    linear_predictor_op(brmi, lp.name)
 
 # Helper: peel the optional unary link wrap on a LP's LHS. `loc ~ ...`
 # returns (identity, :loc); `log(err) ~ ...` returns (log, :err).
@@ -206,6 +217,14 @@ entry is `(; name::Symbol, link_lhs_fn::Function)` where `name` is the
 underlying parameter name (e.g. `:err` for `log(err) ~ ...`) and
 `link_lhs_fn` is the link applied to the LHS (e.g. `log`; `identity`
 when bare).
+
+Declared parameters (`sigma ~ Exponential(1)`) and `kernel(...)` bindings are
+entries too. Pass an entry as it is to `popcoefnames`, `predictors`,
+`grouping_factors`, `dependencies` or `linear_predictor_op`: each reads it as
+its `name`, so
+`Dict(lp.name => popcoefnames(brmi, lp) for lp in linear_predictors(brmi))`
+needs no filtering (`popcoefnames` answers `nothing` for an entry that is not
+a population formula).
 """
 Base.@nospecializeinfer function linear_predictors(@nospecialize(brmi::BRMI))
     out = NamedTuple[]
@@ -672,8 +691,10 @@ function brm_source end
 
 """
     predictors(brmi::BRMI, lhs::Symbol) -> Union{NamedTuple,Nothing}
+    predictors(brmi::BRMI, entry) -> Union{NamedTuple,Nothing}
 
-For a linear-predictor LHS, classify the RHS into:
+For a linear-predictor LHS (or an `entry` of `linear_predictors(brmi)`, read
+as its `name`), classify the RHS into:
 
 - `intercept::Bool`
 - `continuous::Vector{Symbol}` -- bare predictors over `Real` data columns.
@@ -698,6 +719,8 @@ Base.@nospecializeinfer function predictors(@nospecialize(brmi::BRMI), lhs::Symb
     # summand kind (Number / NamedColumn / RE) the same way.
     _walk_predictors(_sum_summands(rhs_expr))
 end
+Base.@nospecializeinfer predictors(@nospecialize(brmi::BRMI), lp::_LinearPredictorEntry) =
+    predictors(brmi, lp.name)
 
 # Find the first data-column NamedColumn reachable in `x`'s subtree
 # (returning the NamedColumn itself), or `nothing` if no data leaf is
@@ -829,10 +852,12 @@ _gp_by_group_kw(_by) = nothing
 
 """
     grouping_factors(brmi::BRMI, lhs::Symbol) -> Vector{Symbol}
+    grouping_factors(brmi::BRMI, entry) -> Vector{Symbol}
 
 The grouping-factor symbols in `<lhs> ~ ...`: the last arg of every
 `(... | g)` term plus the `by=` group of every `hsgp(x, by=g)` term. Empty if
-no grouping term or the LP isn't introspectable.
+no grouping term or the LP isn't introspectable. An `entry` of
+`linear_predictors(brmi)` reads as its `name`.
 """
 Base.@nospecializeinfer function grouping_factors(@nospecialize(brmi::BRMI), lhs::Symbol)
     p = predictors(brmi, lhs)
@@ -848,11 +873,14 @@ Base.@nospecializeinfer function grouping_factors(@nospecialize(brmi::BRMI), lhs
     gp_groups = Symbol[g for g in (_gp_by_group(s) for s in _sum_summands(rhs_expr)) if !isnothing(g)]
     unique!(vcat(re_groups, gp_groups))
 end
+Base.@nospecializeinfer grouping_factors(@nospecialize(brmi::BRMI), lp::_LinearPredictorEntry) =
+    grouping_factors(brmi, lp.name)
 
 # ---- DAG traversal --------------------------------------------------------
 
 """
     dependencies(brmi::BRMI, name::Symbol) -> NamedTuple
+    dependencies(brmi::BRMI, entry) -> NamedTuple
 
 Recursively walk the `~` body of `name`, collecting every data column
 + intermediate LP it transitively references:
@@ -862,7 +890,8 @@ Recursively walk the `~` body of `name`, collecting every data column
 For `y1 ~ Normal(loc, err)` with `loc ~ 1 + a + (1|g1)` and
 `log(err) ~ 1 + b`, `dependencies(brmi, :y1)` returns
 `(; data=[:a, :g1, :b], intermediates=[:loc, :err])`. RE grouping
-factors count as data deps.
+factors count as data deps. An `entry` of `linear_predictors(brmi)` reads as
+its `name`.
 """
 Base.@nospecializeinfer function dependencies(@nospecialize(brmi::BRMI), n::Symbol)
     data = OrderedSet{Symbol}()
@@ -871,6 +900,8 @@ Base.@nospecializeinfer function dependencies(@nospecialize(brmi::BRMI), n::Symb
     _trace!(brmi, n, data, intermediates, seen)
     (; data=collect(data), intermediates=collect(intermediates))
 end
+Base.@nospecializeinfer dependencies(@nospecialize(brmi::BRMI), lp::_LinearPredictorEntry) =
+    dependencies(brmi, lp.name)
 
 Base.@nospecializeinfer function _trace!(@nospecialize(brmi::BRMI), n::Symbol, data, intermediates, seen)
     n in seen && return
