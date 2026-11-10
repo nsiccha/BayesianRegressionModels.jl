@@ -12,6 +12,45 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.272
+
+- Fixed: `rk_design_binder(rk; resample_groups=[:g])` gives the inputs of a cut
+  at a draw `u` of the fit again, for any number of new levels of `g`.
+  Since ReactiveKernelsPPL 0.1.108 a query unpacks `u` with its binding's
+  layout. The design's binding sized `g`'s standardized draws by the design's
+  levels, so every coordinate after the block was read at a shifted position,
+  with no error: with 2 new subjects on a 12-subject fit, the intercept came
+  from a subject's standardized draw. `binder(design)` and `binder.fitted` now
+  hold the fit's level set of `g` (`g_fit_levels`, or a multi-membership
+  block's `b_mm_..._groups`), which sizes the block as in the fit, while the
+  rows read the design's own levels by position (`g_level`). The new levels'
+  effects come in HAVE as before. A data-free fit takes the level set from its
+  fitted state.
+- Changed: `binder(design)` with `resample_groups` no longer equals
+  `rk_bound_data(reprocess(rk, design; resample_groups))`. That replay is a model
+  of its own rows, whose coordinates hold the new levels' standardized draws,
+  which SVI windows and slices (`RKBRMI(builder(slice), state;
+  resample_groups)`) fit. A draw of the fit does not apply to it: its density
+  refuses one by length, and RKPPL's whole-model queries over `rk_bound_plan`
+  read the replay's own coordinates. **Breaking:** a caller that evaluated a fit
+  draw with `rk_bound_data(reprocess(rk, d; resample_groups))` (brm-use's
+  earlier recipe) takes its inputs from `rk_design_binder(rk; resample_groups)(d)`
+  instead. The earlier recipe has misread the draw since RKPPL 0.1.108.
+- Refused: on a binder design that gives a `gr(g, by = s)` block, or a data-free
+  fit's multi-membership block, other levels than the fit's. Those blocks size
+  their draws by the design's own columns, which no fitted level set replaces,
+  so a draw of the fit does not apply. With the fit's level counts they bind as
+  before.
+- Tests: `test/rk_resample_binder.jl` checks fewer, as many and more new levels
+  than the fit, a correlated block shared by two predictors, a multi-membership
+  block, a data-free fit and the `gr` refusal, against the fit's own values and
+  closed forms at a draw whose coordinates all differ. The resampled-replay
+  checks in `rk_reprocess.jl`, `rk_predictive.jl` and `rk_multigroup_replay.jl`
+  read the binder's inputs. `rk_design_binder.jl` and `rk_fitted_state.jl` compare
+  a resampling binder's inputs with the replay's plus the fit's level set, and
+  `rk_design_binder.jl` checks the binder's value at a draw of the fit against
+  the replay's value at that draw carried onto its own coordinates by name.
+
 ## 0.2.271
 
 - Added: `rkppl_model(:car_icar)` and `rkppl_model(:car_bym2)`, the areal field

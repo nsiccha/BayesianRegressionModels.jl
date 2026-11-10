@@ -353,6 +353,13 @@ and compiled Stan/native density and gradient agreement with an independent orac
 windows, including data-free state serialization, shared weight identities,
 new and returning labels, reordered levels, cached binder validation, frozen
 prior preprocessing, and dense tensor-field values and native gradients.
+`rk_resample_binder.jl` checks a draw of the fit on designs that resample
+groupings through `rk_design_binder` (snag `rk-replay-with-r-bf059724`): fewer,
+as many and more new levels than the fit, a correlated block shared by two
+predictors, a multi-membership block and a data-free fit, against the fit's own
+values and closed forms at a draw whose coordinates all differ, and the refusal
+of a `gr(g, by = s)` design with other level counts. Run it with
+`julia --project=test test/rk_resample_binder.jl`; it needs no Enzyme.
 `rk_grouped_anisotropic_hsgp.jl` checks per-axis length scales of grouped
 HSGPs: independent, sampled, known and multigroup correlations, default and
 explicit floor bounds, fixed scales, term starts, shared readers and frozen
