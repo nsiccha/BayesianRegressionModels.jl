@@ -204,6 +204,7 @@ export modeled_covariates
 using SHA: sha256
 include("description.jl")
 include("adaptive_centering.jl")
+include("rk_adaptive_centering.jl")
 include("posterior_diagnostics.jl")
 # Per-draw random-effect SDs, correlations and per-level effects, read from
 # the emitted carriers through the descriptor and the description metadata.
