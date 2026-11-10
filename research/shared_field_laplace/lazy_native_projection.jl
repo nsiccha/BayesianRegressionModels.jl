@@ -2,7 +2,7 @@
 # draw/rank/shrinkage budget. No fit, new posterior draws, or reference tuning.
 include("lazy_core_probe.jl")
 const LAZY_CARRY_RESEARCH=isfile(joinpath(@__DIR__,"block_projection_probe.jl")) ? (@__DIR__) :
-    "/home/niko/.local/state/kb-agents-worktrees/BayesianRegressionModels-scaling-laplace/research/shared_field_laplace"
+    @__DIR__
 include(joinpath(LAZY_CARRY_RESEARCH,"block_projection_probe.jl"))
 using SHA
 
@@ -22,7 +22,7 @@ function auxiliary_active_carry(core,store,order)
 end
 
 @testset "fixed auxiliary representation of native fitted carry" begin
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     draw_record=deserialize(joinpath(base,"native-fixed-rate-fit-v1/draws.jls"))
     fit=deserialize(joinpath(base,"native-fixed-rate-fit-v1/comparison.jls"))
     reference=deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))

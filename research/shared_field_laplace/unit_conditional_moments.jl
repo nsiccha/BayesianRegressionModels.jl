@@ -2,7 +2,7 @@
 # sampled hyperparameters/intercept/field. Dense algebra is a bounded oracle.
 const UNIT_MOMENT_RESEARCH=isfile(joinpath(@__DIR__,"carry_conditional_moments.jl")) &&
     isfile(joinpath(@__DIR__,"gaussian_block_comparison.jl")) ? (@__DIR__) :
-    "/home/niko/.local/state/kb-agents-worktrees/BayesianRegressionModels-scaling-laplace/research/shared_field_laplace"
+    @__DIR__
 include(joinpath(UNIT_MOMENT_RESEARCH,"carry_conditional_moments.jl"))
 
 # Reuse the validated fixed-M Gram projection. Increasing its numerical
@@ -41,7 +41,7 @@ function native_unit_conditional(m,full,u)
 end
 
 @stestset "same draw unit conditional moments" begin
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     directory=joinpath(base,"unit-conditional-moments-v1")
     ispath(directory) && error("preserve unit moment diagnostic")
     previous_path=joinpath(base,"carry-conditional-moments-v1/comparison.jls")

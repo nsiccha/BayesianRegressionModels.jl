@@ -10,7 +10,7 @@
 #   - EKF / statistical-linearization update for the Bernoulli indicator
 # HMC then touches only the physical parameters — no per-timepoint innovations.
 #
-# VERIFIED (strato2, StanBlocks bec23bc3c523), T=30, stanc + BridgeStan finite
+# VERIFIED (a Linux fleet host, StanBlocks bec23bc3c523), T=30, stanc + BridgeStan finite
 # log-density + gradient:
 #   full EMA  sampled (2·T innovations) : dim 76
 #            EKF-marginalized            : dim 14   <- states integrated out

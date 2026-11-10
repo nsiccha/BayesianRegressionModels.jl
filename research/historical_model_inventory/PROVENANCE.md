@@ -80,7 +80,7 @@ bodies; the override TSV has SHA-256
   `38398527e0406ad31aeaec3efe24d581a18a269e`; its result is preserved as a
   comparison receipt, not represented as this run's package SHA.
 - Julia 1.10.11; BridgeStan 2.9.0 at its default
-  `~/.bridgestan/bridgestan-2.9.0`; `KB_HOST=strato2`.
+  `~/.bridgestan/bridgestan-2.9.0`; `KB_HOST=a Linux fleet host`.
 
 The corpus probe records generated Stan and Stan-data hashes. A result is fanned
 out only when the normalized current BRM body, declared data columns, grouping
@@ -149,7 +149,7 @@ HTMXObjects semantic lock for the recorded SbPMX release:
   `40934aa56fc86b56684d8a8ebfa903b5117c44f2639f124308f86728d35663e3`.
 - Matrix SHA-256:
   `929dbc0a131a8ae9fa108e287c9080574eab4784309c3607d0a219ada9b43ca7`.
-- Deployment: `strato2`, `http://127.0.0.1:8129/`; unrelated listeners on
+- Deployment: `a Linux fleet host`, `http://127.0.0.1:8129/`; unrelated listeners on
   8127--8128 were left untouched.
 - Initial, post-restart, and focused pre-landing root checks returned HTTP 200
   with exactly 359 semantic cards. The focused artifact's confirmed-source,

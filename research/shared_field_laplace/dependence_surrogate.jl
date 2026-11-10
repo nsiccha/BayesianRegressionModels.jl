@@ -72,7 +72,7 @@ function dependence_controls(X)
 end
 
 function run_dependence_surrogate()
-    base = "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base = joinpath(@__DIR__, "results")
     directory = joinpath(base,"dependence-surrogate-v1")
     ispath(directory) && error("preserve existing surrogate results")
     reference = deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))

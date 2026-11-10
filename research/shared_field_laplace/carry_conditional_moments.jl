@@ -1,7 +1,7 @@
 # Bounded diagnostic of the first carry failure. Same retained 128 hyper draws,
 # rank 8 and shrinkage .01; no fit, posterior resampling or production claim.
 const CARRY_RESEARCH = isfile(joinpath(@__DIR__,"gaussian_block_comparison.jl")) ? (@__DIR__) :
-    "/home/niko/.local/state/kb-agents-worktrees/BayesianRegressionModels-scaling-laplace/research/shared_field_laplace"
+    @__DIR__
 include(joinpath(CARRY_RESEARCH,"gaussian_block_comparison.jl"))
 include(joinpath(CARRY_RESEARCH,"block_projection_probe.jl"))
 
@@ -16,7 +16,7 @@ function bounded_moment_projection(mu,C,blocks,reference;rank,shrinkage)
 end
 
 @stestset "fixed carry conditional moments" begin
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     directory=joinpath(base,"carry-conditional-moments-v1")
     ispath(directory) && error("preserve carry conditional moment audit")
     draw_path=joinpath(base,"native-fixed-rate-fit-v1/draws.jls")

@@ -42,7 +42,7 @@ end
     @test control.decomposition_error<1e-14
     @test control.alignment_covariance_error<1e-14
     @test minimum(eigvals(Symmetric(control.factor_gap)))>=-1e-14
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     fit_path=joinpath(base,"native-path-derivative-fit-v1/fit.jls")
     saved=deserialize(fit_path)
     saved.identity.julia==string(VERSION) || error("saved Julia version differs")

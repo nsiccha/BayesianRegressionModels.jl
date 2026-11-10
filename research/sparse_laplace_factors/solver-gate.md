@@ -295,8 +295,8 @@ a separate two-thread process verified all 192 concurrent-workspace assertions
 0 at 21:33:12Z: 247 sum-cell, 333 factor, 26 plan, 44 ladder, 158 existing
 sparse-engine, four changelog and seven dependency-floor checks (819 total).
 The command included those seven standalone test files in separate modules.
-Its retained gordito receipt is `kb-run-compact.2EF1fc` under
-`/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-snag.level-wise-neste-c77d3cd1/`.
+Its retained a Linux fleet host receipt is `kb-run-compact.2EF1fc` under
+`<local path omitted>`.
 The later block-fallback review restricted its auxiliary system to the rows
 incident on that block. It previously retained all auxiliary rows even when
 most had zero Jacobian on the block. Six added checks cover reordered block
@@ -311,7 +311,7 @@ checks. The later complete run below includes these six checks and the
 indexed outer-footprint regression.
 
 `fitting_scaling.jl` measures the public value/gradient path, including Newton
-steps, factorization and selected inversion. On gordito with a one-CPU cap,
+steps, factorization and selected inversion. On a Linux fleet host with a one-CPU cap,
 source `9b229e3a`, RK `23d26ca1`, Enzyme `0e251cfb` and SelectedInversion
 `8b1ee107`:
 
@@ -360,8 +360,8 @@ On source `9b229e3a628d8c11064dc3f1c9985ad6f9b5eee7`, all 831 regression
 assertions passed: 253 sum-cell, 339 factor, 26 plan, 44 ladder, 158 existing
 sparse-engine, four changelog and seven dependency-floor checks. The separate
 scaling script also repeats 201 scalar-curvature assertions. The retained
-gordito receipt is `rk139-acceptance.log` under
-`/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-snag.level-wise-neste-c77d3cd1/`.
+a Linux fleet host receipt is `rk139-acceptance.log` under
+`<local path omitted>`.
 The benchmark reports intermittent MUMPS out-of-core warnings despite the
 requested in-core controls. Separate public-API probes completed 3,300
 factorizations, including GC/allocation stress, with ICNTL(22)=0, ICNTL(16)=1

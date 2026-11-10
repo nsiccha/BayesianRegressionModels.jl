@@ -78,3 +78,15 @@ research/**/*_pairs.png
 research/**/selection_losses.tsv
 research/**/ppc_intervals.tsv
 docs/**/*.csv.gz
+
+# Generated JAX module (rebuilt for docs downloads)
+research/jax/model.py
+
+# Research outputs: regenerate locally; documentation consumes small summaries.
+research/**/results/**/*.png
+research/**/results/**/*.svg
+research/**/results/**/*.jls.gz
+research/**/results/**/*.rds.gz
+research/**/results/**/*.aov.json
+research/**/results/**/*.aov.json.gz
+research/shared_field_laplace/results/

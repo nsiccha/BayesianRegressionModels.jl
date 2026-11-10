@@ -37,9 +37,9 @@ The optional third serving argument selects another compatible matrix path.
 `served_smoke.tsv` records the exact Strato2 commit, matrix/source hashes,
 listener URL, restart, HTTP statuses, and observed card/filter counts.
 
-## Service operation (strato2)
+## Service operation (a Linux fleet host)
 
-The `historical-brm-gallery.service` user unit serves this gallery on strato2
+The `historical-brm-gallery.service` user unit serves this gallery on a Linux fleet host
 (`WorkingDirectory` the `BayesianRegressionModels.jl` checkout,
 `julia --startup-file=no --project=web-macro
 research/historical_model_inventory/gallery/serve.jl 8129 127.0.0.1`).

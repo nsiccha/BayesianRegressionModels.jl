@@ -5,11 +5,11 @@ using Treebars, Serialization, Statistics
 
 @stestset "SVI versus exact reference" begin
     reference_dir = get(ENV,"KB_LAPLACE_REFERENCE_DIR",
-        "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace/exact-reference-v1")
+        joinpath(@__DIR__, "results", "exact-reference-v1"))
     reference = deserialize(joinpath(reference_dir,"reference-summary.jls"))
     reference.reference_ok || error("saved reference failed its diagnostic gate")
     directory = get(ENV,"KB_LAPLACE_FIT_DIR",
-        "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace/joint-fit-v1")
+        joinpath(@__DIR__, "results", "joint-fit-v1"))
     mkpath(directory)
     files = [@__FILE__,joinpath(@__DIR__,"joint_svi_probe.jl"),
         joinpath(@__DIR__,"operator_probe.jl"),joinpath(@__DIR__,"trace_probe.jl"),

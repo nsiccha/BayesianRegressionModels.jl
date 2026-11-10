@@ -10,7 +10,7 @@
 # Writes a machine-readable summary next to the log (RECOVER_OUT, default: this directory's
 # scratch dir given by the env var, else a temp dir).
 #
-# VERIFIED (strato2, StanBlocks pin 9a958f97, 1000 draws, seed 1):
+# VERIFIED (a Linux fleet host, StanBlocks pin 9a958f97, 1000 draws, seed 1):
 #   single_kernel_rw  δ=0.8: 23s, 59 divergences, min ESS 34,  R̂ 1.057 — every scalar (init, sig, log_I0,
 #                     cluster) inside its 90% interval; R path 40/56, Y 45/56 inside 90% intervals.
 #                     δ=0.9:  8s, 18 divergences, min ESS 57,  R̂ 1.013 — all scalars in; R 41/56, Y 46/56.
