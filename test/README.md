@@ -14,8 +14,13 @@ and correlation-factor coordinates; each cell is located on its population
 coefficient, and a nested grouping on its parent's effect; the wrapped density,
 Jacobian and native Reverse gradient match an independent map of the plain RK log
 density (with central differences) at zero, one and random controls, for `||`,
-correlated and nested blocks; and the blocks it does not build raise. About 4
-minutes warm; it accepts testset substring filters.
+correlated and nested blocks; and the blocks it does not build raise. At the
+default start (`c = 0`) the wrapper's map, log density and gradient equal the
+plain RK density's where a block's log scale is -750 (`exp` underflows to 0)
+and that density is finite, for `||`, correlated, three-margin and nested
+blocks, through BRM's own reverse passes and WarmupHMC's generic one (snag
+`rkbrmi-adaptive-326587b2`). About 4 minutes warm; it accepts testset substring
+filters.
 
 `rk_data_expression_scalars.jl` checks a numeric scalar data field read by an RKBRMI
 data expression: offsets of many shapes, a coefficient's column, fitted transforms,
