@@ -28,11 +28,13 @@ end
 
 "One panel per subject: the posterior predictive median with its 50 % and 95 % bands, and the observations."
 function ppc(outdir, name; model, response, ylabel, title, subjects=nothing, size=(1500, 1100))
-    rows = [r for r in table("ppc.tsv") if r.model == model && r.response == response]
+    rows = [(; r..., panel="subject $(r.source_subject)")
+            for r in table("ppc.tsv") if r.model == model && r.response == response]
     isnothing(subjects) || (rows = [r for r in rows if r.source_subject in subjects])
-    order = AlgebraOfGraphics.sorter(unique(r.source_subject for r in rows))
+    # Facet on a string label in natural order: the ribbon layer facets on the
+    # raw column values, so a `sorter` on the point layer would not merge with it.
     xlabel = "time after the dose (h)"
-    facet = :source_subject => order => "subject"
+    facet = :panel => ""
     band = data(rows) * mapping(:time => xlabel, :q50 => ylabel; layout=facet) *
            lineribbon(bands=[:q025 => :q975, :q25 => :q75]) * visual(; color=BLUE)
     observed = data(rows) * mapping(:time => xlabel, :observed => ylabel; layout=facet) *
@@ -62,7 +64,9 @@ function population(outdir)
     fig = Figure(; size=(1500, 900), fontsize=14)
     Label(fig[0, 1], "Population estimates of the two-stage fits (blue) and the joint model (orange): median and 95 % interval";
           fontsize=18, font=:bold, tellwidth=false)
-    sdraw!(fig[1, 1], layers; facet=(; linkyaxes=:none))
+    # Plain AlgebraOfGraphics marks, drawn by AlgebraOfGraphics itself so each
+    # quantity's panel keeps its own y axis.
+    AlgebraOfGraphics.draw!(fig[1, 1], layers; facet=(; linkyaxes=:none))
     save_figure(outdir, "population", fig)
 end
 

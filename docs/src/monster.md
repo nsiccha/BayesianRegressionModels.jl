@@ -50,7 +50,9 @@ with BridgeStan 2.9 (Stan 2.39).
 
 ## The model
 
-**Physiology.** Four tissue compartments hold the solvent: well-perfused
+### Physiology
+
+Four tissue compartments hold the solvent: well-perfused
 tissue (`wp`), poorly perfused tissue (`pp`), fat (`f`) and liver (`l`).
 Blood flow exchanges it between tissues and lungs. During the four-hour
 exposure, inhalation adds a source; Michaelis–Menten metabolism in the liver
@@ -68,7 +70,9 @@ removes it. Each person has fifteen positive quantities:
 Lean body mass, fat fraction and pulmonary flow were measured for each person
 and enter as data. Fat volume is derived from them.
 
-**Hierarchy.** On the log scale, each person's quantity is the population
+### Hierarchy
+
+On the log scale, each person's quantity is the population
 geometric mean plus a deviation whose standard deviation is the log of the
 population geometric standard deviation (GSD). The flow fractions and the
 `Vwp`/`Vpp` split are hierarchical before normalization, so their overall
@@ -77,13 +81,17 @@ scale is identified only by the prior (see
 `tau^2 ~ Scaled-Inv-χ²(nu, s^2)` with `nu = 4`. All prior locations and scales
 come from the source data file.
 
-**Measurements.** Venous concentrations and exhaled-air concentrations are
+### Measurements
+
+Venous concentrations and exhaled-air concentrations are
 lognormal around the predictions, with one scale each. Both scales have the
 improper prior `p(sigma) ∝ 1/sigma`. Venous blood was not sampled at 245 and
 270 minutes; those exhaled-air values are used and no venous value is
 invented.
 
-**What `nu` means.** It is the degrees of freedom of the prior on the squared
+### The degrees of freedom `nu`
+
+`nu` is the degrees of freedom of the prior on the squared
 log GSDs. Gelman, Bois and Jiang used `nu = 2`. The source repository reports
 that with `nu = 2` divergences could not be removed, and that `nu ≥ 3` fits
 cleanly. Its `cfg/nu=4` and `cfg/nu=8` data files differ only in this value
@@ -168,6 +176,44 @@ Main.BRMDocsComparisons.comparison(
 )
 ```
 
+## The fit
+
+Four chains of WarmupHMC's quorum sampler, 1000 draws each, on the generated
+program (`research/monster/fit.jl`); the run keeps the first three chains
+that finish. The table gives the population geometric mean and geometric
+standard deviation of each of the fifteen quantities, and the two noise
+scales: posterior median, 95 % interval, split R-hat, bulk and tail effective
+sample sizes. The flow fractions and the `Vwp`/`Vpp` split are normalized
+inside the plate, so their population means are identified only through the
+prior and are not themselves fractions.
+
+```@eval
+Main.BRMDocsComparisons.results_table(
+    "research/monster/results/population.tsv";
+    columns=[:quantity => "quantity", :description => "",
+             :median => "median", :q025 => "2.5 %", :q975 => "97.5 %",
+             :rhat => "R-hat", :ess_bulk => "bulk ESS", :ess_tail => "tail ESS"],
+)
+```
+
+[![Posterior predictive bands and measurements per person and exposure](assets/monster/ppc.png)](assets/monster/ppc.png)
+
+Each panel is one person at one exposure. The bands are the posterior
+predictive median with its 50 % and 95 % intervals at the sampling times, in
+venous blood (blue) and exhaled air (orange); the points are the
+measurements. Both axes are logarithmic: the samples span a week and the
+concentrations three orders of magnitude.
+
+```@eval
+Main.BRMDocsComparisons.results_table(
+    "research/monster/results/fits.tsv";
+    columns=[:dimension => "parameters", :chains_requested => "chains run",
+             :chains_kept => "chains kept", :omitted_chains => "omitted",
+             :draws => "draws", :divergent => "divergent",
+             :divergent_pct => "divergent %", :seconds => "seconds"],
+)
+```
+
 ## Two corrections to the source program
 
 The source program differs from the published model in two places. Both are
@@ -227,9 +273,17 @@ matter when comparing results:
   [MCSim example](https://www.gnu.org/software/mcsim/mcsim.html#perc_002emodel)
   rather than that of the papers.
 
-## Reproduce the comparison
+## Reproduce
+
+From the repository root, with the test environment bootstrapped
+(`julia --project=test test/setup_env.jl`):
 
 ```sh
-julia --project=<environment with BayesianRegressionModels, StanBlocks, BridgeStan, JSON> \
-    research/monster/compare_to_source.jl
+julia --startup-file=no --project=test research/monster/compare_to_source.jl
+julia -t 4 --startup-file=no --project=test research/monster/fit.jl
+julia --startup-file=no --project=research/adaptive_centering/plots research/monster/figures.jl
 ```
+
+The first command checks the generated program against the corrected source
+program; the second writes the tables under `research/monster/results/`, the
+third the figure under `docs/src/assets/monster/`.

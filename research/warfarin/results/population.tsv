@@ -1,0 +1,37 @@
+model	quantity	unit	description	median	q025	q975	rhat	ess_bulk	ess_tail
+two-stage PK	tlag	h	population lag time	0.8811	0.7227	0.9554	1.005	622	1089
+two-stage PK	ka	1/h	population absorption rate	1.093	0.7022	1.742	1.001	1410	1770
+two-stage PK	CL	L/h	population clearance at 70 kg	0.1337	0.1213	0.1484	1.0	3587	2072
+two-stage PK	V	L	population volume at 70 kg	8.052	7.602	8.528	1.004	2957	1935
+two-stage PK	sd(logit tlag)		between-subject SD of the lag logit	0.6255	0.04198	1.413	1.014	246	263
+two-stage PK	sd(log ka)		between-subject SD of log ka	0.9531	0.6524	1.376	1.004	1071	1402
+two-stage PK	sd(log CL)		between-subject SD of log CL	0.2777	0.219	0.3652	1.002	3639	2041
+two-stage PK	sd(log V)		between-subject SD of log V	0.1348	0.09097	0.1934	1.001	2069	1771
+two-stage PK	sigma_pk	mg/L	additive PK noise scale	0.3403	0.2481	0.4544	1.001	1401	1376
+two-stage PK	kappa_pk		PK overdispersion (times 25)	3.654	2.697	5.214	1.002	1586	1736
+two-stage PD	R0	%	population baseline prothrombin complex activity	99.06	95.13	103.0	1.004	896	1205
+two-stage PD	1/kout	h	population turnover time	18.27	17.15	19.41	1.001	2220	2305
+two-stage PD	EC50	mg/L	population concentration of half-maximal inhibition	1.124	0.9445	1.34	1.0	2681	1910
+two-stage PD	sd(log R0)		between-subject SD of log R0	0.02364	0.001528	0.06905	1.005	316	548
+two-stage PD	sd(log 1/kout)		between-subject SD of log turnover time	0.1288	0.07767	0.1886	1.001	1465	948
+two-stage PD	sd(log EC50)		between-subject SD of log EC50	0.4617	0.3601	0.6211	1.0	4130	2199
+two-stage PD	sigma_pd	%	additive PD noise scale	0.9107	0.04573	2.671	1.006	499	641
+two-stage PD	kappa_pd		PD overdispersion (times 625)	0.1187	0.08937	0.2307	1.006	761	730
+joint	tlag	h	population lag time	0.8879	0.7524	0.9524	1.003	1202	1529
+joint	ka	1/h	population absorption rate	1.066	0.6948	1.713	1.001	2278	1916
+joint	CL	L/h	population clearance at 70 kg	0.1347	0.1221	0.1491	1.001	3918	2043
+joint	V	L	population volume at 70 kg	7.972	7.527	8.487	1.0	3747	2559
+joint	sd(logit tlag)		between-subject SD of the lag logit	0.5744	0.03057	1.322	1.013	502	468
+joint	sd(log ka)		between-subject SD of log ka	0.9323	0.6402	1.337	1.0	2170	2194
+joint	sd(log CL)		between-subject SD of log CL	0.271	0.2106	0.3601	1.001	4521	2081
+joint	sd(log V)		between-subject SD of log V	0.149	0.1066	0.2094	1.0	3408	2380
+joint	sigma_pk	mg/L	additive PK noise scale	0.3709	0.2804	0.488	1.002	1583	1962
+joint	kappa_pk		PK overdispersion (times 25)	3.824	2.811	5.438	1.0	2537	2208
+joint	R0	%	population baseline prothrombin complex activity	98.98	95.36	102.9	1.0	1901	1981
+joint	1/kout	h	population turnover time	18.33	17.31	19.34	1.001	3073	2421
+joint	EC50	mg/L	population concentration of half-maximal inhibition	1.115	0.9464	1.327	1.0	3401	1780
+joint	sd(log R0)		between-subject SD of log R0	0.01968	0.0006916	0.0652	1.006	573	513
+joint	sd(log 1/kout)		between-subject SD of log turnover time	0.1158	0.06999	0.177	1.002	1982	1524
+joint	sd(log EC50)		between-subject SD of log EC50	0.4461	0.3462	0.5923	1.002	3844	2120
+joint	sigma_pd	%	additive PD noise scale	0.8083	0.04547	2.365	1.004	1184	1164
+joint	kappa_pd		PD overdispersion (times 625)	0.13	0.09854	0.2319	1.003	1497	925
