@@ -1,7 +1,7 @@
 ````@raw html
 ---
 title: Continuous-time state-space models
-description: "Hierarchical continuous-time state-space models in BRM: latent states sampled, or integrated out per subject by a Kalman, extended Kalman or moment-matched filter inside a kernel cell; recovery, an importance-sampling check of the filter's precision, and replication."
+description: "Hierarchical continuous-time state-space models in BRM: latent states sampled, or integrated out per subject by a Kalman, extended Kalman or moment-matched filter inside a plate cell; recovery, an importance-sampling check of the filter's precision, and replication."
 ---
 ````
 
@@ -50,10 +50,10 @@ Every model on this page divides the work the same way:
 | layer | holds | written as |
 | --- | --- | --- |
 | **formula surface** | the population model: covariates and (correlated) random effects on subject-level parameters | `b0 ~ 1 + age + treatment + (1 \| p \| subject)` |
-| **`kernel(...)` cell** | one subject: that subject's series and that subject's parameter values | `pred ~ kernel(dt, stressReport, …, b0, …) do … end` |
+| **`@plate for` cell** | one subject: that subject's series and that subject's parameter values | `@plate for i in eachindex(b0) … end`, reading `stressReport[i]`, `dt[i]`, `b0[i]` |
 | **`@deffun`** | the recurrence — a loop with carried state, emitted as a Stan function | an SDE path, or a filter |
 
-`kernel(...)` lowers to a loop over subjects whose body is the cell. What differs between
+`@plate for` lowers to a loop over subjects whose body is the cell. What differs between
 the four models is only **what the cell does with the latent path**: sample it, or
 integrate it out. The population model on the formula surface is untouched by that choice.
 
@@ -212,7 +212,7 @@ Main.BRMDocsComparisons.source_code_region(
 ```
 
 All parameters are shared across subjects here, so there is no random-effect grouping;
-the kernel takes the subject count from the pre-grouped (vector-of-vectors) columns.
+the plate iterates `eachindex(dt)`, the pre-grouped (vector-of-vectors) columns.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(
@@ -373,7 +373,7 @@ julia --project=research/adaptive_centering/plots research/ema_ctsem/figures.jl
 ```
 
 `research/ema_ctsem/ema_brm.jl` builds the model of section 1 up incrementally, from the
-pure formula surface to the kernel cell. The measured tables behind the figures are in
+pure formula surface to the plate cell. The measured tables behind the figures are in
 `research/ema_ctsem/results/`.
 
 ## References

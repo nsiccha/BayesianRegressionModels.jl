@@ -875,7 +875,7 @@ different thing from `weighted(...)`, which scales the likelihood.
 
 | Term | What it does |
 | --- | --- |
-| `kernel(args…) do …` | a per-subject model cell — the PMX/PKPD surface |
+| `@plate for i in eachindex(lp) … end` | a per-subject model cell, the PMX/PKPD surface: the body runs once per subject with `lp[i]` that subject's predictor value and `x[i]` its slice of a pre-grouped column |
 | `rows = groups(group => subjects)` | a model-scope binding: for each entry of `subjects`, the indices of `group` that hold it; an `@plate for i in …` cell reads a vector at them, `x[rows[i]]` |
 
 `x` may be a linear predictor declared in the same `@brm` block or a data
@@ -1119,7 +1119,7 @@ Each shape owns its own per-group hierarchy (two LKJ blocks here):
 parameters correlate within a shape, not across shapes. A model that needs
 the bump and the sigmoid parameters jointly correlated (all six in one
 covariance) wants one joint term with `n_per_group=6` instead, or the
-shared-bucket + `kernel(...)` composition; which one fits is decided per
+shared-bucket + `@plate for` composition; which one fits is decided per
 model. Term-internal
 prior statements (`sd(mu, transient(logt))`) are not addressed yet: the
 hierarchical scales keep their shared defaults, and naming a new term in a
@@ -1842,7 +1842,7 @@ Like other sbimpl prior surfaces, this is implemented by `SBBRMI`.
 A non-data left-hand side with a `Dirichlet` right-hand side declares a
 **simplex-valued parameter** — Stan's `simplex[K]` — rather than a linear
 predictor. Like every other scalar-parameter prior declaration it is addressable
-by name anywhere later in the formula block, `kernel(...)` cells included.
+by name anywhere later in the formula block, `@plate for` cells included.
 
 The [multi-axis population PK kernel](@ref) shows the executable base shape:
 ordinary formula parameters feed a `@plate for` cell, which reads each
@@ -1915,7 +1915,7 @@ A non-data left-hand side with an `MvNormal` right-hand side declares a
 **vector-valued parameter** — Stan's `vector[n]` — rather than a linear
 predictor. It is addressable by name anywhere later in the formula block: as an
 argument of a `@deffun` in a top-level assignment, inside a custom family call,
-or in a `kernel(...)` cell. `SBBRMI` emits Stan's vector-parameter form
+or in a `@plate for` cell. `SBBRMI` emits Stan's vector-parameter form
 (decision `187g4va`).
 
 The inciting shape is a latent path whose innovations the formula wants to
@@ -1924,8 +1924,6 @@ written with explicit innovations, `eps ~ MvNormal(zeros(T - 1), 1.0)`, or a
 vector of per-group seeds, `log_I0 ~ MvNormal(seed_mean, 0.25 * I)`. (The
 [Epidemic renewal models](renewal.md) page states the same walk with the
 `rw(time)` term and the seeds as cell means.)
-Before this seam the only way to get such a vector was a one-cell `kernel(...)`
-with a dummy grouping random effect.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
@@ -2049,9 +2047,8 @@ not `@brm` syntax and is refused with a pointer to this spelling.
 
 A top-level assignment may hand a **function** to a higher-order `@deffun`:
 written inline as the first argument, or as a trailing `do` block, which is the
-same thing — `@brm` folds the block in as the first positional argument, as
-`kernel(...) do … end` already does. Higher-order functions therefore take
-their function argument **first**.
+same thing: `@brm` folds the block in as the first positional argument.
+Higher-order functions therefore take their function argument **first**.
 
 The body is Stan-side code, resolved by StanBlocks as a closure. It may read
 
@@ -2059,7 +2056,7 @@ The body is Stan-side code, resolved by StanBlocks as a closure. It may read
 - **sampled model parameters** (`rate`) — they are passed into the generated
   Stan function as arguments, so they are estimated, not frozen in, and
 - **shared data vectors** by name: a free name that is a data field and not a
-  formula name is registered as Stan data, the way a `kernel(...)` cell body
+  formula name is registered as Stan data, the way a `@plate for` cell body
   captures one.
 
 The example is a distributed lag whose weights decay at a sampled rate — a

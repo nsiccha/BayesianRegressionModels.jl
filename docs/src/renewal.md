@@ -81,7 +81,7 @@ written as one: `StanBlocks.@deffun` turns the Julia-syntax definitions below
 into Stan functions that a model can call by name. Sizes such as `T` and `G` in
 the signatures are bound from the arguments. (The
 [wastewater page](wastewater.md) runs a similar recursion inside a
-`kernel(...)` cell, one independent site per cell; here the patches are coupled,
+`@plate for` cell, one independent site per cell; here the patches are coupled,
 so the function takes the whole predictor vector through a top-level
 assignment.)
 

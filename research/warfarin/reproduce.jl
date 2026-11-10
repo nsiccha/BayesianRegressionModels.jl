@@ -134,44 +134,12 @@ StanBlocks.@deffun begin
     end
 end
 
-"""Two-subject slice copied from the public Warfarin data and PD Stan dump."""
-function warfarin_fixture()
-    return (
-        # Dense grouping indices preserve the row order required by kernel;
-        # source_subject records the original public-data labels.
-        subject = [1, 2],
-        source_subject = [100, 2],
-        dose = [100.0, 100.0],
-        log_weight_ratio = log.([66.7, 66.7] ./ 70.0),
-        pk_time = [
-            [1.0, 2.0, 3.0, 6.0, 9.0, 12.0, 24.0, 36.0, 48.0, 72.0],
-            [2.0, 3.0, 6.0, 12.0, 24.0, 36.0, 48.0, 72.0, 96.0, 120.0],
-        ],
-        pk_dv = [
-            [1.9, 3.3, 6.6, 9.1, 10.8, 8.6, 5.6, 4.0, 2.7, 0.8],
-            [8.4, 9.7, 9.8, 11.0, 8.3, 7.7, 6.3, 4.1, 3.0, 1.4],
-        ],
-        pd_time = [
-            [24.0, 36.0, 48.0, 72.0, 96.0, 120.0, 144.0],
-            [0.0, 24.0, 36.0, 48.0, 72.0, 96.0, 120.0, 144.0],
-        ],
-        pd_dv = [
-            [44.0, 27.0, 28.0, 31.0, 60.0, 65.0, 71.0],
-            [100.0, 46.0, 22.0, 19.0, 20.0, 42.0, 49.0, 54.0],
-        ],
-        # Fixed subject-specific parameter medians from the public PD model's
-        # stan_data.R dump. Columns 1 and 3 correspond to original IDs 100 and
-        # 2, matching this fixture. These are already log(tlag), log(ka),
-        # allometric log(CL), and allometric log(V), not standardized effects.
-        pk_log_tlag = [-0.161353257334516, -0.125956102587045],
-        pk_log_ka = [-1.12518262665871, -0.00274334970440031],
-        pk_log_cl = [-1.27221940132543, -2.04962147951756],
-        pk_log_v = [2.05396166702831, 2.10767454410602],
-    )
-end
+# The public 32-subject data, and the PD stage's data with the first stage's
+# per-subject PK medians (written by fit.jl).
+include(joinpath(@__DIR__, "data.jl"))
 
 """Exact first-stage population PK model from the public Weber program."""
-function warfarin_pk_brmi(data = warfarin_fixture())
+function warfarin_pk_brmi(data = warfarin_data())
     return @brm data begin
         sigma_pk ~ Normal(0.0, 2.0; lower=0.0)
         kappa_pk ~ Gamma(0.2, 5.0)
@@ -192,27 +160,21 @@ function warfarin_pk_brmi(data = warfarin_fixture())
         sd(:, cl_bsv) ~ Normal(0.0, 0.5)
         sd(:, v_bsv) ~ Normal(0.0, 0.5)
 
-        pk_pred ~ kernel(
-            pk_time, dose, pk_dv,
-            lag_logit, log_ka, log_cl0, log_v0,
-        ) do times, dose_i, observed,
-             lag_i, lka_i, lcl_i, lv_i
-            # log_cl0 / log_v0 already carry the allometric offset (formula term above),
-            # so the cell uses them directly — no weight scaling hand-wired here.
-            log_tlag_i = log_inv_logit(lag_i)
-            prediction = exp(warfarin_pk_logconcentration(
-                times, log(dose_i), lka_i, lcl_i, lv_i, log_tlag_i,
-            )) + 1e-5
-            observed ~ warfarin_gamma2_overdisp(
-                prediction, sigma_pk, kappa_pk * 25.0,
-            )
-            prediction
+        # One cell per subject: its sampling times, dose and observed
+        # concentrations, and its own values of the four linear predictors.
+        # log_cl0 / log_v0 already carry the allometric offset (formula term above).
+        @plate for i in eachindex(lag_logit)
+            log_tlag = -log1pexp(-lag_logit[i])    # log(tlag), tlag = logistic(lag_logit) < tlagMax = 1
+            pk_pred[i] = exp.(warfarin_pk_logconcentration(
+                pk_time[i], log(dose[i]), log_ka[i], log_cl0[i], log_v0[i], log_tlag,
+            )) .+ 1e-5
+            pk_dv[i] ~ warfarin_gamma2_overdisp(pk_pred[i], sigma_pk, kappa_pk * 25.0)
         end
     end
 end
 
 """Exact second-stage PD model, conditioned on the public PK posterior medians."""
-function warfarin_pd_brmi(data = warfarin_fixture())
+function warfarin_pd_brmi(data = warfarin_pd_data())
     return @brm data begin
         sigma_pd ~ Normal(0.0, 10.0; lower=0.0)
         kappa_pd ~ Gamma(0.2, 5.0)
@@ -228,29 +190,22 @@ function warfarin_pd_brmi(data = warfarin_fixture())
         sd(:, kout_bsv) ~ Normal(0.0, 0.5)
         sd(:, ec50_bsv) ~ Normal(0.0, 0.5)
 
-        pd_pred ~ kernel(
-            pd_time, dose, pd_dv,
-            pk_log_tlag, pk_log_ka, pk_log_cl, pk_log_v,
-            log_r0, log_inv_kout, log_ec50,
-        ) do times, dose_i, observed,
-             log_tlag_i, log_ka_i, log_cl_i, log_v_i,
-             lr0_i, linvkout_i, lec50_i
-            prediction = warfarin_turnover_prediction(
-                times, log(dose_i), log_ka_i, log_cl_i, log_v_i,
-                log_tlag_i, lr0_i, linvkout_i, lec50_i,
+        # One cell per subject. pk_log_* are that subject's fixed PK posterior
+        # medians from the first stage: data columns, one value per subject.
+        @plate for i in eachindex(log_r0)
+            pd_pred[i] = warfarin_turnover_prediction(
+                pd_time[i], log(dose[i]), pk_log_ka[i], pk_log_cl[i], pk_log_v[i],
+                pk_log_tlag[i], log_r0[i], log_inv_kout[i], log_ec50[i],
             )
-            observed ~ warfarin_gamma2_overdisp(
-                prediction, sigma_pd, kappa_pd * 625.0,
-            )
-            prediction
+            pd_dv[i] ~ warfarin_gamma2_overdisp(pd_pred[i], sigma_pd, kappa_pd * 625.0)
         end
     end
 end
 
-function warfarin_sbbrmis(data = warfarin_fixture())
+function warfarin_sbbrmis()
     return (
-        pk = SBBRMI(warfarin_pk_brmi(data); mod=@__MODULE__),
-        pd = SBBRMI(warfarin_pd_brmi(data); mod=@__MODULE__),
+        pk = SBBRMI(warfarin_pk_brmi(); mod=@__MODULE__),
+        pd = SBBRMI(warfarin_pd_brmi(); mod=@__MODULE__),
     )
 end
 

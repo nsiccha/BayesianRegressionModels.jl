@@ -19,7 +19,7 @@ The model has three EpiSewer modules:
 1. **Infection model** — a renewal process. Latent incidence follows
    `I(t) = Rt(t) · Σ_{s} g(s) · I(t-s)`, seeded by a per-site initial level over
    the first window. `g` is the (fixed, known) generation-interval PMF, passed as
-   **data** and captured into the kernel cell. The reproduction number is a smooth
+   **data** and captured into the plate cell. The reproduction number is a smooth
    latent over time (here an `hsgp` prior on `log Rt`).
 2. **Shedding-load model** — infections are convolved with a fecal shedding-load
    PMF `sh` (also data): `load(t) = Σ_{s} sh(s) · I(t-s+1)`.
@@ -30,7 +30,7 @@ Multiple sites share `sigma_obs` / `log_scale` and the smooth `log Rt`; each sit
 carries its own seeding. The renewal and shedding recurrences are **carried-state
 sequential scans** — which `plate` deliberately cannot express — so they live in
 `@deffun` Stan functions (`ww_renewal`, `ww_shed`), called loop-free from the
-`kernel(...)` cell exactly as the PMX pages call `ode_rk45`.
+`@plate for` cell exactly as the PMX pages call `ode_rk45`.
 
 The hidden setup below evaluates those two `@deffun` helpers and the fixtures from
 the checked-in source before the declaration is rendered.
@@ -48,15 +48,16 @@ nothing
 ## The model
 
 The generation-interval PMF `g` and the shedding PMF `sh` are ordinary data
-columns referenced by name inside the `kernel(...)` do-block; the kernel-cell
-data-vector capture registers them as shared Stan data, so they are re-bindable
-without editing the model — no baked-in constants. A per-timepoint smooth `log Rt`
-enters the cell as a `ragged(log_rt, time_site)` secondary axis; each site's
-seeding is a `(1 | site)` random effect.
+columns referenced by name inside the `@plate for` cell; the cell's data-vector
+capture registers them as shared Stan data, so they are re-bindable without
+editing the model, with no baked-in constants. The smooth `log Rt` lives on the
+flat time frame (`time_x`, one row per site and day): `rows = groups(time_site =>
+site)` binds each site's rows of it, and the cell reads `log_rt[rows[i]]`. Each
+site's seeding is a `(1 | site)` random effect.
 
 The declaration below is extracted verbatim from `wastewater_brm_model` in the
-reviewed source. Its `kernel(...)` cell threads one ragged concentration-time
-course per site through the renewal and shedding scans.
+reviewed source. Its `@plate for` cell threads one concentration-time course per
+site through the renewal and shedding scans.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(

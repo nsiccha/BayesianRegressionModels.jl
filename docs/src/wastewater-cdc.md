@@ -23,10 +23,10 @@ the formula surface, while the sequential numerical kernels are ordinary
 - **Shared reference log-Rᵘ** — `log_ru_week ~ 1 + dar(week_grid; p=1)` is
   expanded onto the daily latent axis and closed over inside each
   per-subpopulation cell.
-- **Latent subpopulation hierarchy** — `I_mat ~ kernel(t_grid, is_reference,
-  logit_I0, initial_growth) do … end` broadcasts only the renewal process. Each
-  cell draws an AR(1) deviation and returns its infection trajectory; the uncovered
-  reference cell suppresses that deviation.
+- **Latent subpopulation hierarchy** — `@plate for k in eachindex(logit_I0)`
+  broadcasts only the renewal process. Each cell draws an AR(1) deviation and
+  collects its infection trajectory as `I_mat[k]`; the uncovered reference cell
+  suppresses that deviation.
 - **Infection feedback and renewal** — `renewal_feedback` performs the carried-state
   scan inside each cell.
 - **Sparse wastewater measurements** — `ww_expected_log` gathers arbitrary
@@ -42,8 +42,8 @@ the formula surface, while the sequential numerical kernels are ordinary
   multi-day intervals; a mean-one simplex weekday effect and negative-binomial
   likelihood finish the component.
 
-The carried-state scans cannot be written as formula statements or `kernel`
-control flow. `wsum` similarly owns the cross-cell matrix multiplication because
+The carried-state scans cannot be written as formula statements or `@plate`
+cell control flow. `wsum` similarly owns the cross-cell matrix multiplication because
 `*` at formula level is the Wilkinson interaction operator. These are the
 interesting numerical kernels, so their exact checked-in Julia definitions are
 shown rather than left as opaque calls:
@@ -120,7 +120,7 @@ parameterizations, data axes, or priors are identical.
 
 The reproduction file also carries a pure-StanBlocks `@slic` companion,
 `cdc_ww_inference_model`. It uses the differenced-AR helper directly and broadcasts
-subpopulation parameters with `plate`. The `@brm` `kernel` term serves the same
+subpopulation parameters with `plate`. The `@brm` `@plate for` cell serves the same
 sampling role: parameters such as subpopulation innovations and initial incidence
 are introduced per cell, while `@deffun` owns only deterministic recurrence.
 

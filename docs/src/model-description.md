@@ -336,8 +336,7 @@ authored internal parameter. Its record contains `name`, `role`, `value`,
 `prior_ids` and, in an included submodel, `path`. Render `value` with
 `brm_description_math`; use [`brm_description_prior`](@ref) on each exact prior
 ID. Repeated nested names can be addressed by an authored tuple path.
-Kernel lambda aliases point to actual model arguments. No generated prefix or
-declaration-order assumption is needed.
+No generated prefix or declaration-order assumption is needed.
 Reference-valued keywords use the same math API, including identity aliases.
 
 A `@plate for` cell is described as written, in its own index. A read `x[i]`
@@ -350,10 +349,9 @@ set, `sum(exp.(x[rows[i]]))`, renders as the sum over `j` in `rows_i` of
 `exp(x_j)`. An output `y[i] = …` renders as `y_i`. A cell latent's law is one
 of the cell's statements, and its prior row reads in the cell's names. The
 cell's sentence states its index and its row sets; its statements follow as
-their own parts. A deprecated `kernel(...) do` cell has no authored plate and
-keeps the grouped input mapping below.
+their own parts.
 
-Kernel equations show the grouped input mapping; scientific child hooks provide
+Cell equations show the grouped input mapping; scientific child hooks provide
 their recurrences without inserting lambda or block syntax into the equation.
 Cell assignments emit separate indexing and arithmetic relations, and the
 mapping connects to the cell's returned quantity. Cell-local names are scoped
