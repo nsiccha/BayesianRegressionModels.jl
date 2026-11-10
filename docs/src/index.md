@@ -71,7 +71,7 @@ end)((;
     subj=[1, 1, 2, 2, 3, 3],
     y=[0.2, 1.1, -0.4, 0.7, 1.4, 1.0],
 ))
-""", :intro_model; title="BRM regression model")
+""", :intro_model; title="BRM regression model", jax=true)
 ```
 
 ## Coming from brms

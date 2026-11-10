@@ -1,9 +1,11 @@
 module BRMDocsComparisons
 
 using Markdown
+using JSON
 using BayesianRegressionModels
 using Distributions
 using StanBlocks
+import ReactiveKernels, ReactiveKernelsPPL
 
 const BRM = BayesianRegressionModels
 const EXAMPLE_MODULES = Dict{Symbol,Module}()
@@ -132,13 +134,90 @@ function stan_emissions(brmi::BRM.BRMI, mod::Module;
     end
 end
 
+const JAX_JULIA_USAGE = """
+using ReactiveKernels, ReactiveKernelsPPL
+rk = RKBRMI(model)
+write("model.py", jax_source(rk.model, rk_bound_plan(rk)))
+inputs = rk_bound_data(rk)   # the data prepare_data reads, by name"""
+
+const JAX_PYTHON_USAGE = """
+import jax
+import model as m
+
+prepared = m.prepare_data(**{k: inputs[k] for k in m.DATA})
+lp = m.log_density(u, **prepared)               # u: unconstrained, length m.dimension(prepared)
+lp = jax.jit(m.log_density)(u, **prepared)      # one compiled function for every dataset of these shapes"""
+
+# The module's `UNTRANSLATED` entries, name => reason, or nothing when empty.
+# The module writes the dict as a JSON object.
+function jax_untranslated(text::AbstractString)
+    found = match(r"(?m)^UNTRANSLATED\s*=\s*(\{.*\})\s*$", text)
+    isnothing(found) && return nothing
+    entries = JSON.parse(found.captures[1])
+    isempty(entries) && return nothing
+    return sort!([String(k) => String(v) for (k, v) in entries]; by=first)
+end
+
+# Wrap a sentence into comment lines of at most `width` characters.
+function comment_lines(text::AbstractString; width=84)
+    lines = String[]
+    current = ""
+    for word in split(text)
+        candidate = isempty(current) ? word : current * " " * word
+        if length(candidate) > width && !isempty(current)
+            push!(lines, current)
+            current = word
+        else
+            current = candidate
+        end
+    end
+    isempty(current) || push!(lines, current)
+    return lines
+end
+
+function jax_untranslated_note(entries)
+    lines = ["", "# prepare_data takes these data-only values as inputs, from rk_bound_data(rk),",
+             "# because they have no Python translation (m.UNTRANSLATED):"]
+    for (name, reason) in entries
+        wrapped = comment_lines(reason; width=80)
+        push!(lines, "#   $name: $(wrapped[1])")
+        append!(lines, "#       " .* wrapped[2:end])
+    end
+    return join(lines, '\n')
+end
+
 """
-Evaluate one displayed BRM example and emit the fixed four-pane comparison.
-The IR, StanBlocks and Stan panes are always derived during this build.
+The JAX pane of a comparison: how to write the module, how Python calls it,
+and the module `jax_source` emits for this model's RKBRMI. A model that does
+not translate shows the `JAXEmissionError` (or other construction error).
+"""
+function jax_pane(brmi::BRM.BRMI)
+    module_text = try
+        rk = Base.invokelatest(BRM.RKBRMI, brmi)
+        plan = Base.invokelatest(BRM.rk_bound_plan, rk)
+        string(Base.invokelatest(ReactiveKernelsPPL.jax_source, rk.model, plan))
+    catch err
+        return [Markdown.Code("julia", JAX_JULIA_USAGE),
+                Markdown.Code("text", "This model has no JAX module yet.\n\n" *
+                                      sprint(showerror, err))]
+    end
+    untranslated = jax_untranslated(module_text)
+    usage = isnothing(untranslated) ? JAX_PYTHON_USAGE :
+        JAX_PYTHON_USAGE * "\n" * jax_untranslated_note(untranslated)
+    return [Markdown.Code("julia", JAX_JULIA_USAGE),
+            Markdown.Code("python", usage),
+            Markdown.Code("python", strip(module_text, '\n'))]
+end
+
+"""
+Evaluate one displayed BRM example and emit the build-generated comparison:
+BRM authoring, IR, StanBlocks model and Stan source, plus the JAX module of
+its RKBRMI with `jax=true`. Every pane but the first is derived during this
+build.
 """
 function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
                     title=replace(string(brmi_name), '_' => ' '),
-                    require_stan::Bool=false, total_groups=())
+                    require_stan::Bool=false, total_groups=(), jax::Bool=false)
     displayed = strip(code, '\n')
     Core.eval(mod, :(using BayesianRegressionModels, Distributions))
     evaluate_source(mod, displayed)
@@ -148,12 +227,17 @@ function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
         "docs comparison `$brmi_name` did not evaluate to or construct a BRMI")
     ir_source = strip(sprint(show, brmi), '\n')
     sb_source, stan_source = stan_emissions(brmi, mod; required=require_stan, total_groups)
+    jax_blocks = jax ? jax_pane(brmi) : Markdown.Code[]
+    sentinel = string(title)
+    isempty(jax_blocks) ||
+        (sentinel *= "\npanes: brm|ir|stanblocks|stan|jax:$(length(jax_blocks))")
     return Markdown.MD([
-        Markdown.Code("brm-comparison", string(title)),
+        Markdown.Code("brm-comparison", sentinel),
         Markdown.Code("julia", displayed),
         Markdown.Code("julia", ir_source),
         Markdown.Code("julia", sb_source),
         Markdown.Code("stan", stan_source),
+        jax_blocks...,
     ])
 end
 
