@@ -18,7 +18,6 @@ const GENERATED_EXAMPLE_PAGES = [
     joinpath(@__DIR__, "src", "seal-brm.md"),
     joinpath(@__DIR__, "src", "state-space-models.md"),
     joinpath(@__DIR__, "src", "monster.md"),
-    joinpath(@__DIR__, "src", "variational-inference.md"),
     joinpath(@__DIR__, "src", "adaptive-centering.md"),
     joinpath(@__DIR__, "src", "eight-schools-centering.md"),
     joinpath(@__DIR__, "src", "radon-centering.md"),
@@ -42,17 +41,6 @@ BRMDocsComparisons.validate_no_bypasses(DOCS_MARKDOWN_PAGES)
 # `repo`, and the CI-equivalent docs wrapper validates the same static target.
 # A legacy JuliaBayes workflow therefore cannot create a drifting second site.
 const DOCS_DEVBRANCH = "ns/devibe"
-
-# Note: BRM's docs must build without the private HTMXObjects.jl repo — the
-# CI cannot clone it without repository-specific credentials. So `htmxo-embed.ts`
-# is committed in-tree (see docs/src/.vitepress/theme/) rather than synced from
-# HTMXObjects via `HTMXObjects.vitepress_theme_install` at build time. Local
-# edits to the canonical upstream file should be hand-copied; see
-# /docs-vitepress §8.
-@static if Base.find_package("HTMXObjects") !== nothing
-    @eval import HTMXObjects
-    @eval HTMXObjects.vitepress_theme_install(joinpath(@__DIR__, "src", ".vitepress", "theme"))
-end
 
 makedocs(
     sitename = "BayesianRegressionModels.jl",
@@ -78,7 +66,6 @@ makedocs(
         "Grey-seal IPM" => "seal-brm.md",
         "State-space models" => "state-space-models.md",
         "Monster PBPK model" => "monster.md",
-        "Variational inference" => "variational-inference.md",
         "Adaptive centering" => [
             "Motorcycle HSGP" => "adaptive-centering.md",
             "Eight schools" => "eight-schools-centering.md",
@@ -124,11 +111,6 @@ BRMDocsComparisons.validate_required_stan_outputs(
 )
 
 BRMDocsComparisons.validate_required_stan_outputs(
-    joinpath(@__DIR__, "build", ".documenter", "variational-inference.md"),
-    (:site_counts_model,),
-)
-
-BRMDocsComparisons.validate_required_stan_outputs(
     joinpath(@__DIR__, "build", ".documenter", "adaptive-centering.md"),
     (:adaptive_motorcycle_model,),
 )
@@ -169,6 +151,12 @@ let mod = Module(:MonsterDownloads)
     Base.include(mod, joinpath(@__DIR__, "..", "research", "monster", "reproduce.jl"))
     Base.invokelatest(getfield(mod, :write_monster_stan_files),
         joinpath(@__DIR__, "build", ".documenter", "public", "downloads"))
+end
+
+# Publish the pinned plotting runtime as build output, never as tracked assets.
+let vendor = joinpath(@__DIR__, "build", ".documenter", "public", "vendor")
+    mkpath(dirname(vendor))
+    cp(BRMDocsComparisons.AlgebraOfVega.vega_vendor_dir(), vendor; force=true)
 end
 
 DocumenterVitepress.build_docs(joinpath(@__DIR__, "build"))

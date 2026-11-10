@@ -1,4 +1,23 @@
-/* Minimal theme overrides for BRM docs. Most styling comes from
- * VitePress's default theme; the gallery embed styling lives in the
- * gallery.md page or in BRM's own brm-macro.css served via the
- * /live-brm proxy. */
+/* The plots share the page's font and light/dark ink through AoV. */
+:root {
+  --vp-c-brand-1: #2a78d6;
+  --vp-c-brand-2: #2a78d6;
+  --vp-c-brand-3: #2a78d6;
+  --aov-category: #2a78d6, #eb6834, #888888;
+}
+
+.brm-figure {
+  margin: 1.5rem 0;
+  max-width: 100%;
+}
+.brm-figure-plot {
+  overflow-x: auto;
+  max-width: 100%;
+  padding: 0.25rem 0;
+}
+.brm-figure figcaption {
+  margin-top: 0.5rem;
+  color: var(--vp-c-text-2);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}

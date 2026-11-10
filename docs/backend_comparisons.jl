@@ -19,8 +19,8 @@ html_attribute(value) = replace(string(value), '&' => "&amp;", '"' => "&quot;",
     figure(spec; caption, alt=caption)
 
 Embed an AlgebraOfVega figure in a Documenter `@eval` block. The page carries
-the generated Vega-Lite JSON; the theme calls `vegaEmbed` after hydration and
-redraws on a light/dark switch. No rendered asset is written to the repository.
+the generated Vega-Lite JSON; the theme calls AlgebraOfVega's browser runtime
+after hydration. It follows light/dark switches. No rendered asset is committed.
 """
 function figure(spec; caption::AbstractString, alt::AbstractString=caption)
     json = AlgebraOfVega.to_json(spec)
@@ -37,7 +37,10 @@ end
 
 """Return one stable evaluation module for all executable blocks on a page."""
 example_module(name::Symbol) = get!(EXAMPLE_MODULES, name) do
-    Module(name)
+    m = Module(name)
+    # A bare module has no `include`; a repository script may include a sibling.
+    Core.eval(m, :(include(path) = Base.include($m, path)))
+    m
 end
 
 function evaluate_source(mod::Module, displayed::AbstractString)
@@ -108,6 +111,30 @@ function source_region(relative_path::AbstractString;
     return strip(SubString(source, start, stop), '\n')
 end
 
+"""
+Render rows of a tab-separated results file as a Markdown table, so a page
+states only numbers its scripts wrote. `columns` pairs each column with its
+heading; `select` keeps the rows it returns `true` for.
+"""
+function results_table(relative_path::AbstractString;
+                       columns::Vector{<:Pair{Symbol,<:AbstractString}},
+                       select=row -> true)
+    lines = readlines(normpath(joinpath(REPOSITORY_ROOT, relative_path)))
+    header = Symbol.(split(lines[1], '\t'))
+    rows = [NamedTuple{Tuple(header)}(Tuple(String.(split(line, '\t'))))
+            for line in lines[2:end]]
+    kept = Base.filter(select, rows)
+    isempty(kept) && error("$relative_path: no rows selected")
+    for (column, _) in columns
+        column in header || error("$relative_path has no column $column")
+    end
+    cells = [[String(label) for (_, label) in columns]]
+    for row in kept
+        push!(cells, [getproperty(row, column) for (column, _) in columns])
+    end
+    return Markdown.MD([Markdown.Table(cells, fill(:l, length(columns)))])
+end
+
 """Render a drift-proof repository source region as a documentation code block."""
 source_code_region(relative_path::AbstractString; language="julia", kwargs...) =
     Markdown.MD([Markdown.Code(language, source_region(relative_path; kwargs...))])
@@ -125,8 +152,9 @@ function evaluate_source_prelude(mod::Module, relative_path::AbstractString;
         source = SubString(source, first(only(matches)), lastindex(source))
     end
     Core.eval(mod, :(using BayesianRegressionModels, Distributions, StanBlocks))
+    # An absolute file name makes the script's `@__DIR__` its real directory.
     parsed = Meta.parseall(source;
-                           filename=relative_path)
+                           filename=normpath(joinpath(REPOSITORY_ROOT, relative_path)))
     expressions = parsed.head === :toplevel ? parsed.args : Any[parsed]
     for expression in expressions
         expression isa LineNumberNode && continue
