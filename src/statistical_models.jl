@@ -64,6 +64,34 @@ hsgp_grouped_effect(PHI, lambda, g) = begin
     return PHI * (hsgp_grouped_sqrt_spd(lambda, sigma, rho) .* z)
 end
     ),
+    car_icar = :(
+car_icar(area, from, to) = begin
+    graph = car_graph(area, from, to)
+    sigma ~ HalfNormal(1)
+    phi[1:graph.n_struct] ~ ICAR(graph.node1, graph.node2)
+    cs = cumsum(vcat(0.0, phi))
+    phi_sums = cs[graph.comp_start .+ graph.comp_size] .- cs[graph.comp_start]
+    phi_sums .~ Normal.(0, 0.001 .* graph.comp_size)
+    effects = sigma .* vcat(phi, 0.0)[graph.struct_pos]
+    return effects[graph.area]
+end
+    ),
+    car_bym2 = :(
+car_bym2(area, from, to) = begin
+    graph = car_graph(area, from, to)
+    sigma ~ HalfNormal(1)
+    rho ~ Beta(0.5, 0.5)
+    theta[1:graph.n_nodes] .~ Normal.(0, 1)
+    phi[1:graph.n_struct] ~ ICAR(graph.node1, graph.node2)
+    cs = cumsum(vcat(0.0, phi))
+    phi_sums = cs[graph.comp_start .+ graph.comp_size] .- cs[graph.comp_start]
+    phi_sums .~ Normal.(0, 0.001 .* graph.comp_size)
+    field = vcat(phi, 0.0)[graph.struct_pos]
+    effects = sigma .* (sqrt(rho) .* sqrt.(graph.inv_scale) .* field .+
+        sqrt.(1 .- rho .* graph.is_struct) .* theta)
+    return effects[graph.area]
+end
+    ),
     monotonic = :(
 monotonic(c, zeta) = begin
     return cumsum(vcat(0.0, zeta))[c]
@@ -165,11 +193,27 @@ Available names: `:varying_coefs`, `:varying_coefs_correlated`,
 `:varying_coefs_centered`, `:varying_coefs_centered_correlated`,
 `:varying_stratified`, `:varying_stratified_correlated`, `:horseshoe_coefs`,
 `:r2d2_coefs`, `:penalized_smooth`, `:t2_smooth`, `:hsgp_effect`,
-`:hsgp_periodic_effect`, `:hsgp_grouped_effect`, `:monotonic`,
-`:differenced_ar1` and `:ordered_logistic`. Their data come from
+`:hsgp_periodic_effect`, `:hsgp_grouped_effect`, `:car_icar`, `:car_bym2`,
+`:monotonic`, `:differenced_ar1` and `:ordered_logistic`. Their data come from
 `StatisticalPreparation` (`tps_basis`, `cr_basis`, `t2_basis`, `hsgp_basis`,
-`hsgp_periodic_basis`). An areal (ICAR/BYM2) field has no body yet; write its
-`ICAR` statements over `StatisticalPreparation.car_graph`.
+`hsgp_periodic_basis`).
+
+`r ~ rkppl_model(:car_icar)(area, from, to)` and `:car_bym2` are the areal
+field of BRM's `car(area; edges=(from, to), type=:icar | :bym2)` term over raw
+labels: each row's area in `area`, one neighbour pair per entry of `from` and
+`to`. They prepare the graph in the model with `StatisticalPreparation.car_graph`
+and return each row's effect: `sigma * phi[area]` (ICAR), or
+`sigma * (sqrt(rho / s_c) * phi + sqrt(1 - rho) * theta)[area]` (BYM2, with
+`s_c` the area's component scaling factor and `theta` standard-normal area
+noise). `phi ~ ICAR(node1, node2)` covers the areas with neighbours, with one
+soft sum-to-zero `sum(phi_c) ~ Normal(0, 0.001 * n_c)` per connected
+component; an island reads 0 under ICAR and `sigma * theta` under BYM2. Priors:
+`sigma ~ HalfNormal(1)`, `rho ~ Beta(0.5, 0.5)`. The graph's areas are the
+labels of `area`, `from` and `to`. Lowering them needs ReactiveKernelsPPL
+0.1.145. `jax_source` does not translate a model that calls them yet (their
+field sizes are read from the graph the model prepares); the same statements
+over `car_graph`'s fields bound as data give the same densities and translate,
+and they also take `car_graph`'s `nodes`.
 
 The backend overload captures its retained emitted declarations in the same
 module as their submodels, callable bindings and kernel definitions. It is

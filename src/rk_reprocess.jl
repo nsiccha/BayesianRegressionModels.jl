@@ -48,8 +48,13 @@ through [`rk_bound_plan`](@ref).
   `new_data` (`RKBRMI` of the rebound model); its coordinates need not match
   `rk`'s.
 - `resample_groups=[:g]`: group `g` takes its levels from `new_data` (new
-  subjects). Its effects are not the fit's, so supply them in `have`
-  (`have=(:unconstrained, :b_p_g, ports...)`); everything else stays frozen.
+  subjects); everything else stays frozen. The replay is a model of its own
+  rows: its coordinates hold the new levels' standardized draws in place of the
+  fit's, so a draw of the fit does not apply to its density or queries. To
+  evaluate a draw of the fit with the new levels' effects in `have`
+  (`have=(:unconstrained, :b_p_g, ports...)`), bind the design with
+  [`rk_design_binder`](@ref)`(rk; resample_groups)`, whose inputs keep the
+  fit's level set.
 - `held_out`: the response hold-outs of the replay, as in `RKBRMI`.
 - `resample_covariates=[:x], keep_observed=true`: forecast new rows of a fit
   with an `mi(x)` covariate. The design's observed `x` values are used as
@@ -665,8 +670,11 @@ The bound inputs of `rk`'s executable graph for its own data: pass them as
 `bound=` to `ReactiveKernels.prepare(rk.model.spec; have=(:unconstrained,
 keys(bound)...), want, bound)`. For [`reprocess`](@ref)'d backends these are
 the new data's inputs with the training preprocessing frozen. They are the
-columns of [`rk_bound_plan`](@ref)`(rk)`. Implemented by the ReactiveKernels
-package extension.
+columns of [`rk_bound_plan`](@ref)`(rk)`. On a `resample_groups` replay they
+bind the design's levels of the resampled groupings, so they pack the replay's
+own coordinates, not the fit's; the inputs of a cut at a draw of the fit come
+from [`rk_design_binder`](@ref). Implemented by the ReactiveKernels package
+extension.
 """
 function rk_bound_data end
 
