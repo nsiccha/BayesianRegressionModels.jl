@@ -42,6 +42,43 @@ instead of failing at run time.
   records no `trend_windows` and continues on the two-window test it ran with.
   `laplace=GaussianBlockLaplace()` is unchanged and refuses the keyword.
 
+## 0.2.263
+
+- Added: `adaptive_centering_problem(rk::RKBRMI, problem, ad_backend;
+  centeredness, ranef_order)` wraps `rk_logdensity_problem(rk; ad_backend)` in
+  WarmupHMC's adaptive partial centring of random effects, as the SBBRMI method
+  does for a compiled Stan problem. Every ordinary Gaussian random-effect block
+  with sampled scales (scalar, correlated, `||`, `|ID|`) gets one control per
+  level and term, `c = 0` being RK's standardized draw and `c = 1` the level's
+  total: a cell is centred on its predictor's population coefficient, and a
+  grouping nested in a coarser one also on that grouping's effect. The map,
+  Jacobian and gradients are exact; draws stay in the RK layout's frame.
+  `adaptive_centering_blocks(rk)` lists the blocks by RK layout position, and
+  `adaptive_centering_controls(adaptive, rk)` reports the cells. Student-t,
+  known-value, stratified and level-correlated blocks and bounded scales raise
+  on RKBRMI; multi-membership and R2D2-scaled blocks and HSGP, `car`, `cdar`
+  and `gmrf` coordinates keep the emitted frame. Before, an RKBRMI could only
+  be sampled non-centred under NUTS.
+
+## 0.2.262
+
+- `cdar(step; by = group)` without `cor` is now the walk with independent
+  levels, and so is `cor = I_g` with a data field holding `LinearAlgebra.I`.
+  Neither forms a `P × P` matrix: SBBRMI emits `_sb_cdar_iid` (Stan function
+  `independent_damped_walk`), which ships no `L`, `A_new` or `L_new` data and
+  multiplies by no factor, so the data and the work per evaluation are linear
+  in the number of levels, `O(P W)`. Before, `cor` was required and independent
+  levels needed a dense identity: for 1,700 levels, 2.9 M entries (23 MB) of
+  data, an `O(P³)` Cholesky factorization at build and `O(P² W)` work per
+  evaluation. The law, the coordinates (`sigma`, `rho`, `eta`), forecasts and
+  `resample_groups` redraws are those of a dense `cor = I`; a redraw of levels
+  the fit did not see reads no `cor`. RKBRMI, adaptive centring and
+  `brm_nlme_view` take the term the same way. A scaled identity `c * I` is
+  refused, since `sd(lp, cdar(step))` is the scale. Snag
+  `independent-per-e13d14f0`.
+- Fixed: preparing a `cdar` term looked each row's level up with a scan over
+  the levels, `O(N P)` for `N` rows; it is now a hash lookup, `O(N + P)`.
+
 ## 0.2.261
 
 - Fixed: two bindings of one program now give `brm_nlme_model` the same subject

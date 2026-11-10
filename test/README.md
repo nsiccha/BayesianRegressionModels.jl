@@ -1,5 +1,14 @@
 # Running the tests
 
+`rk_adaptive_centering.jl` checks `adaptive_centering_problem(rk, problem,
+backend)` on RKBRMI random effects: the blocks name the RK layout's draws, scales
+and correlation-factor coordinates; each cell is located on its population
+coefficient, and a nested grouping on its parent's effect; the wrapped density,
+Jacobian and native Reverse gradient match an independent map of the plain RK log
+density (with central differences) at zero, one and random controls, for `||`,
+correlated and nested blocks; and the blocks it does not build raise. About 4
+minutes warm; it accepts testset substring filters.
+
 `rk_data_expression_scalars.jl` checks a numeric scalar data field read by an RKBRMI
 data expression: offsets of many shapes, a coefficient's column, fitted transforms,
 an interaction operand, a random slope, a data-only assignment, a component's

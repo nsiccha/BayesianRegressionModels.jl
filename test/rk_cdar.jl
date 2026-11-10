@@ -11,7 +11,7 @@
 # that are not units, keeps the walk shared as a whole.
 #
 # Covered: RK = SB density and gradient at transported coordinates (`cor = I`,
-# a correlated `cor`, stated and known priors), the walk against an
+# no `cor` (independent levels), a correlated `cor`, stated and known priors), the walk against an
 # independent recurrence, printed-source replay, the NLME roles, families and
 # subject blocks, lockstep and unit-problem densities against the full RK
 # density, and per-unit Laplace and SVI on the nested model.
@@ -28,6 +28,14 @@ const CDAR_CACHE = joinpath(tempdir(), "brm-rk-cdar")
 
 include(joinpath(@__DIR__, "rk_cdar_fixture.jl"))
 
+# Independent levels without `cor=` (snag independent-per-e13d14f0): the
+# `walk_model` law (`C = I`) with no factor anywhere.
+iid_model(df=WALK_DF) = @brm df begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + x + (1 | region) + cdar(year; by=kreis)
+    y ~ Normal(mu, sigma)
+end
+
 instantiate(sb) = begin
     code = StanBlocks.stan_code(sb.model)
     mkpath(CDAR_CACHE)
@@ -35,7 +43,8 @@ instantiate(sb) = begin
 end
 
 @stestset "RKBRMI: the same law as SBBRMI at transported coordinates" begin
-    for model in (walk_model, correlated_model, across_model, known_model, region_model)
+    for model in (walk_model, iid_model, correlated_model, across_model, known_model,
+                  region_model)
         brmi = model()
         rk = check_rk_source_roundtrip(RKBRMI(brmi))
         problem = rk_logdensity_problem(rk; ad_backend=NLME_AD)
@@ -113,6 +122,15 @@ end
     m = brm_nlme_model(rk; ad_backend=NLME_AD, NESTED...)
     check_lockstep(m, Xoshiro(1))
     check_unit_problems(m, Xoshiro(2))
+end
+
+@stestset "NLME view: independent levels (no cor=) read as cor = I" begin
+    a = brm_nlme_view(RKBRMI(walk_model()); NESTED...)
+    b = brm_nlme_view(RKBRMI(iid_model()); NESTED...)
+    @test b.coordinates == a.coordinates
+    @test b.role == a.role
+    @test b.subject_coordinates == a.subject_coordinates
+    @test b.subject_families == a.subject_families
 end
 
 @stestset "NLME view: a cell reads its own group's innovations" begin

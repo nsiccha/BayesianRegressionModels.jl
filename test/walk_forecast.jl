@@ -397,4 +397,56 @@ end
     end
 end
 
+# Independent levels (no `cor=`, snag independent-per-e13d14f0) are the dense
+# `C = I` walk without its factors: the same coordinates, the same density, and on
+# a forecast that redraws fitted and unseen levels the same generated quantities
+# draw for draw, with no `cor` in the replay rows.
+const CDAR_IID_BUILDER = @brm begin
+    mu ~ 1 + cdar(year; by = kreis)
+    sd(:, cdar(year)) ~ LogNormal(-1, 0.5)
+    y ~ Normal(mu, 0.3)
+end
+
+@testset "cdar independent levels: forecast and redraw equal the dense C = I walk" begin
+    fit_rows = cdar_rows(2018:2021; missing_year=2019)
+    dense = SBBRMI(CDAR_BUILDER(fit_rows); mod=@__MODULE__)
+    iid = SBBRMI(CDAR_IID_BUILDER(Base.structdiff(fit_rows, NamedTuple{(:C,)})); mod=@__MODULE__)
+    @test !haskey(iid.data, :cdar_mu_year_L)
+    # levels "b" (fitted) and "d", "e" (unseen), one appended step
+    levels, years = ["b", "d", "e", "d"], [2019, 2019, 2021, 2022]
+    dense_fc = reprocess(dense, cdar_level_rows(levels, years, Matrix(1.0I, 5, 5));
+                         resample_groups=[:kreis])
+    iid_rows = (; year=years, kreis=levels, gem=string.(levels, 1))
+    iid_fc = reprocess(iid, iid_rows; resample_groups=[:kreis])
+    @test n_new(iid_fc, :cdar_mu_year_n_new_groups) == 3
+    @test n_new(iid_fc, :cdar_mu_year_n_new_steps) == 1
+    @test iid_fc.data[:cdar_mu_year_group_idx] == dense_fc.data[:cdar_mu_year_group_idx]
+    @test iid_fc.data[:cdar_mu_year_step_idx] == dense_fc.data[:cdar_mu_year_step_idx]
+    for key in (:cdar_mu_year_L, :cdar_mu_year_A_new, :cdar_mu_year_L_new)
+        @test !haskey(iid_fc.data, key)
+    end
+    @test occursin("independent_damped_walk", stan(iid_fc))
+    @test StanBlocks.stanc_check(stan(iid_fc); warn_pedantic=false).ok
+
+    if WF_RUNTIME
+        problems = map(instantiate, (dense, iid, dense_fc, iid_fc))
+        unc = map(p -> String.(BS.param_unc_names(p.model)), problems)
+        @test unc[2] == unc[1] && unc[3] == unc[1] && unc[4] == unc[1]
+        D = LogDensityProblems.dimension(problems[1])
+        for seed in 1:4
+            q = 0.5 .* randn(Xoshiro(seed), D)
+            lp, g = LogDensityProblems.logdensity_and_gradient(problems[1], q)
+            lp2, g2 = LogDensityProblems.logdensity_and_gradient(problems[2], q)
+            @test lp2 ≈ lp rtol=1e-12
+            @test g2 ≈ g rtol=1e-10
+            # one RNG stream, one draw order: the redrawn and forecast paths agree
+            cn, cv = constrained(problems[3], q; seed)
+            cn2, cv2 = constrained(problems[4], q; seed)
+            @test cn2 == cn
+            @test cv2 ≈ cv rtol=1e-12 atol=1e-12
+            @test length(pick(cn2, cv2, "cdar_mu_year_eta_lev")) == 3 * 5
+        end
+    end
+end
+
 println("walk_forecast.jl: all testsets ran")
