@@ -116,7 +116,8 @@ function write_run_dir(dir)
     last_line = first_line + findfirst(==("end"), lines[first_line+1:end])
     declaration = join(lines[first_line:last_line], "\n")
     datatext = sprint(JSON.print, Dict(string(k) => v for (k, v) in pairs(DATA)))
-    git(args...) = try readchomp(`git -C $(@__DIR__) $args`) catch; "unknown" end
+    root = dirname(@__DIR__)
+    git(args...) = try readchomp(`git -C $root $args`) catch; "unknown" end
     # Non-finite numbers are JSON `null`, as WarmupHMC writes its run records.
     jsonsafe(x::AbstractFloat) = isfinite(x) ? x : nothing
     jsonsafe(x::NamedTuple) = Dict(string(k) => jsonsafe(v) for (k, v) in pairs(x))
