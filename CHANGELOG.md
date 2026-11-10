@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.267
+
+- Added: `StatisticalPreparation.car_graph(area, from, to; nodes = nothing)`
+  returns the adjacency graph of an areal field as the `car(area; edges=(from,
+  to), nodes)` term prepares it: the areas' sorted labels, each row's area,
+  the ICAR edge positions on the areas with neighbours, the connected
+  components, each area's field position (`n_struct + 1` on an island) and
+  the exact BYM2 scaling factors. A hand-written `@rkppl` model binds these as
+  data and writes its own `ICAR` and BYM2 statements; that model translates
+  through `jax_source` and matches the native density and gradient (brm-use
+  `references/rkppl-bodies.md`).
+- The `rkppl_model(name)` docstring names every available body.
+
 ## 0.2.266
 
 - Added: a data-only assignment, a formula column and a model-scope

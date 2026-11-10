@@ -469,6 +469,52 @@ hsgp_periodic_rho_floor(harmonics::AbstractVector) =
 hsgp_periodic_rho_floor(harmonics::AbstractMatrix) =
     maximum(_hsgp_periodic_rho_lower(maximum(col)) for col in eachcol(harmonics))
 
+"""
+    car_graph(area, from, to; nodes = nothing) -> NamedTuple
+
+The adjacency graph of an areal (`car`) field, as BRM's `car(area; edges=(from, to),
+nodes)` term prepares it, for the `rkppl_model(:car_icar)` and `rkppl_model(:car_bym2)`
+bodies or explicit `ICAR` statements. `area` holds each row's area label, `from` and
+`to` one neighbour pair per entry (each undirected pair once), in the same labels
+(integer codes or strings); `nodes` optionally lists every area of the graph. The
+graph's areas are `nodes`, or else every label of `area`, `from` and `to`, sorted.
+
+Fields:
+
+- `nodes`: the areas' labels, sorted; `n_nodes` their number.
+- `area`: each row's position in `nodes`.
+- `n_struct`: the number of areas with a neighbour (the ICAR field's length), numbered
+  component by component, each connected component one contiguous segment.
+- `node1`, `node2`: each edge's two areas, as positions in that field.
+- `comp_start`, `comp_size`: each component's first position and size in the field;
+  `n_comp` their number.
+- `struct_pos`: each area's position in the field, `n_struct + 1` for an island (an
+  area without neighbours), so `vcat(phi, 0.0)[struct_pos]` reads 0 there.
+- `is_struct`: `1.0` for an area with neighbours, `0.0` for an island.
+- `inv_scale`: `1 / s_c` for an area of component `c` (`0.0` for an island), where the
+  BYM2 scaling factor `s_c` is the geometric mean of the diagonal of the generalized
+  inverse of the component's ICAR precision (Riebler et al. 2016); `scaling` holds the
+  `s_c`.
+
+Self-loops, repeated pairs, unequal edge vectors, mixed label kinds and a graph with
+no edges are refused, as by the `car` term.
+"""
+function car_graph(area::AbstractVector, from::AbstractVector, to::AbstractVector;
+        nodes = nothing)
+    labels(raw, what) = BRM._brm_car_labels(raw, what)
+    area_labels = labels(area, "area")
+    graph = BRM._brm_car_graph(area_labels, labels(from, "edge"), labels(to, "edge"),
+        nodes === nothing ? nothing : labels(nodes, "node"))
+    graph.n_edges > 0 || error("BRM statistical preparation: `car_graph` needs at " *
+        "least one edge")
+    positions = Int[searchsortedfirst(graph.nodes, label) for label in area_labels]
+    struct_pos = Int[iszero(k) ? graph.n_struct + 1 : k for k in graph.struct_idx]
+    is_struct = Float64[iszero(k) ? 0.0 : 1.0 for k in graph.struct_idx]
+    return (; graph.nodes, graph.n_nodes, area = positions, graph.n_struct, graph.node1,
+        graph.node2, graph.n_comp, graph.comp_start, graph.comp_size, struct_pos,
+        is_struct, graph.inv_scale, graph.scaling)
+end
+
 include("statistical_gp.jl")
 
 end # StatisticalPreparation
