@@ -18,7 +18,10 @@ const POPULATION = [
     ("b_mu__g_g.L[2]", "Intercept–slope correlation", "cor"),
 ]
 
-mdtable(header, rows) = Markdown.MD([Markdown.Table([header, rows...], fill(:l, length(header)))])
+function mdtable(header, rows)
+    cells = [Any[Any[cell] for cell in row] for row in [header, rows...]]
+    Markdown.MD([Markdown.Table(cells, fill(:l, length(header)))])
+end
 interval(r) = @sprintf("%.2f [%.2f, %.2f]", r.q50, r.q025, r.q975)
 
 function posterior_table()
