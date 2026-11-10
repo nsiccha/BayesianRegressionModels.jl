@@ -11,6 +11,9 @@
 # stage conditional on them; then the joint model. Every fit runs n_chains
 # adaptive WarmupHMC chains through the quorum sampler (brm-use, "Sampling an
 # SBBRMI"), keeps the first 3/4 that finish, and reports the chains left out.
+#
+# One directory of tables per fit (results/pk, results/pd, results/joint), each
+# with its own receipt: the shape DocsFits' summary will have.
 
 using BayesianRegressionModels, StanBlocks, BridgeStan, LogDensityProblems
 using WarmupHMC, Enzyme, Random, Statistics, MCMCDiagnosticTools
@@ -51,38 +54,51 @@ function channel(data, time_column, dv_column)
        times=reduce(vcat, times), observed=reduce(vcat, getproperty(data, dv_column)))
 end
 
-function fit_all(; n_draws=1000, n_chains=4, seed=20261110, n_ppc=400)
-    isdir(RESULTS) || mkpath(RESULTS)
-    # The receipt first: it names the commit and settings these results are the
-    # results of, and a defect in it fails before an hour of sampling.
-    write_receipt(joinpath(RESULTS, "receipt.tsv"),
-                  ["models" => "research/warfarin/reproduce.jl and joint_reproduce.jl",
+"""
+Fit one model into `results/<tag>/`: the receipt first (it names the commit and
+settings these results are the results of, and a defect in it fails before
+sampling), then the sampler report, the population table and the posterior
+predictive quantiles of each channel in `channels` (`response => channel`).
+Returns the fit, the descriptor and the constrained chains for anything the
+caller derives from them.
+"""
+function fit_into(tag, sb, quantities, channels; name, model_source, seed, n_draws, n_chains, n_ppc)
+    dir = joinpath(RESULTS, tag)
+    isdir(dir) || mkpath(dir)
+    write_receipt(joinpath(dir, "receipt.tsv"),
+                  ["model" => model_source,
                    "data" => "research/warfarin/data/warfarin_data.txt (32 subjects) through data.jl",
-                   "seed" => "$seed (PK), $(seed + 1) (PD), $(seed + 2) (joint); predictive draws on $n_ppc thinned draws"];
+                   "seed" => "$seed; predictive draws on $n_ppc thinned draws"];
                   n_chains, n_draws)
+    f = sample_quorum(sb, "warfarin_$tag"; n_chains, n_draws, seed)
+    d = brm_descriptor(sb; name)
+    names = constrained_names(f.problem)
+    C = [constrain_chain(f.problem, c, seed + k) for (k, c) in enumerate(f.chains)]
+    U = thin_draws(f.chains, n_ppc)
+    write_tsv(joinpath(dir, "fits.tsv"), FITS_HEADER, [fit_row(f)])
+    write_tsv(joinpath(dir, "population.tsv"), POPULATION_HEADER, population_rows(d, names, C, quantities))
+    write_tsv(joinpath(dir, "ppc.tsv"), PPC_HEADER,
+              reduce(vcat, [ppc_rows(d, f.problem, U, response; ch..., seed) for (response, ch) in channels]))
+    report_fits([(tag, f)])
+    return (; fit=f, descriptor=d, names, chains=C)
+end
+
+function fit_all(; n_draws=1000, n_chains=4, seed=20261110, n_ppc=400)
     data = warfarin_data()
     pk_channel = channel(data, :pk_time, :pk_dv)
     pd_channel = channel(data, :pd_time, :pd_dv)
-    fits = []
-    population = []
-    ppc = []
 
     # Stage 1: population PK.
-    sb_pk = SBBRMI(warfarin_pk_brmi(data); mod=@__MODULE__)
-    pk = sample_quorum(sb_pk, "warfarin_pk"; n_chains, n_draws, seed)
-    d_pk = brm_descriptor(sb_pk; name=:warfarin_pk)
-    names_pk = constrained_names(pk.problem)
-    C_pk = [constrain_chain(pk.problem, c, seed + k) for (k, c) in enumerate(pk.chains)]
-    push!(fits, ("two-stage PK", pk))
-    append!(population, population_rows("two-stage PK", d_pk, names_pk, C_pk, PK_QUANTITIES))
-    append!(ppc, ppc_rows("two-stage PK", d_pk, pk.problem, thin_draws(pk.chains, n_ppc), :pk_dv;
-                          pk_channel..., seed))
+    pk = fit_into("pk", SBBRMI(warfarin_pk_brmi(data); mod=@__MODULE__), PK_QUANTITIES,
+                  [:pk_dv => pk_channel];
+                  name=:warfarin_pk, model_source="research/warfarin/reproduce.jl (warfarin_pk_brmi)",
+                  seed, n_draws, n_chains, n_ppc)
 
     # Each subject's PK medians, the second stage's fixed inputs. The linear
     # predictors have one value per subject; log_cl0 and log_v0 carry the
     # weight effect, as the PD model expects.
-    C_all = reduce(vcat, C_pk)
-    per_subject(logical) = brm_output_draws(d_pk, C_all, names_pk; logical, role=:linear_predictor)
+    C_all = reduce(vcat, pk.chains)
+    per_subject(logical) = brm_output_draws(pk.descriptor, C_all, pk.names; logical, role=:linear_predictor)
     lag_logit = per_subject(:lag_logit)
     medians = (;
         pk_log_tlag = vec(median(-log1pexp.(-lag_logit); dims=1)),
@@ -97,33 +113,17 @@ function fit_all(; n_draws=1000, n_chains=4, seed=20261110, n_ppc=400)
 
     # Stage 2: turnover PD conditional on those medians.
     pd_data = warfarin_pd_data(data)
-    sb_pd = SBBRMI(warfarin_pd_brmi(pd_data); mod=@__MODULE__)
-    pd = sample_quorum(sb_pd, "warfarin_pd"; n_chains, n_draws, seed=seed + 1)
-    d_pd = brm_descriptor(sb_pd; name=:warfarin_pd)
-    names_pd = constrained_names(pd.problem)
-    C_pd = [constrain_chain(pd.problem, c, seed + 10 + k) for (k, c) in enumerate(pd.chains)]
-    push!(fits, ("two-stage PD", pd))
-    append!(population, population_rows("two-stage PD", d_pd, names_pd, C_pd, PD_QUANTITIES))
-    append!(ppc, ppc_rows("two-stage PD", d_pd, pd.problem, thin_draws(pd.chains, n_ppc), :pd_dv;
-                          pd_channel..., seed))
+    pd = fit_into("pd", SBBRMI(warfarin_pd_brmi(pd_data); mod=@__MODULE__), PD_QUANTITIES,
+                  [:pd_dv => pd_channel];
+                  name=:warfarin_pd, model_source="research/warfarin/reproduce.jl (warfarin_pd_brmi) on results/pk_subject_medians.tsv",
+                  seed=seed + 1, n_draws, n_chains, n_ppc)
 
     # The joint model: one posterior over both likelihoods.
-    sb_joint = SBBRMI(warfarin_joint_brmi(data); mod=@__MODULE__)
-    joint = sample_quorum(sb_joint, "warfarin_joint"; n_chains, n_draws, seed=seed + 2)
-    d_joint = brm_descriptor(sb_joint; name=:warfarin_joint)
-    names_joint = constrained_names(joint.problem)
-    C_joint = [constrain_chain(joint.problem, c, seed + 20 + k) for (k, c) in enumerate(joint.chains)]
-    push!(fits, ("joint", joint))
-    append!(population, population_rows("joint", d_joint, names_joint, C_joint, vcat(PK_QUANTITIES, PD_QUANTITIES)))
-    U_joint = thin_draws(joint.chains, n_ppc)
-    append!(ppc, ppc_rows("joint", d_joint, joint.problem, U_joint, :pk_dv; pk_channel..., seed))
-    append!(ppc, ppc_rows("joint", d_joint, joint.problem, U_joint, :pd_dv; pd_channel..., seed))
-
-    write_tsv(joinpath(RESULTS, "fits.tsv"), FITS_HEADER, [fit_row(label, f) for (label, f) in fits])
-    write_tsv(joinpath(RESULTS, "population.tsv"), POPULATION_HEADER, population)
-    write_tsv(joinpath(RESULTS, "ppc.tsv"), PPC_HEADER, ppc)
-    report_fits(fits)
-    return (; fits, population, ppc)
+    joint = fit_into("joint", SBBRMI(warfarin_joint_brmi(data); mod=@__MODULE__),
+                     vcat(PK_QUANTITIES, PD_QUANTITIES), [:pk_dv => pk_channel, :pd_dv => pd_channel];
+                     name=:warfarin_joint, model_source="research/warfarin/joint_reproduce.jl (warfarin_joint_brmi)",
+                     seed=seed + 2, n_draws, n_chains, n_ppc)
+    return (; pk, pd, joint)
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

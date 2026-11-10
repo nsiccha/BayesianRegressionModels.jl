@@ -1,0 +1,11 @@
+quantity	unit	description	median	q025	q975	rhat	ess_bulk	ess_tail
+tlag	h	population lag time	0.8811	0.7227	0.9554	1.005	622	1089
+ka	1/h	population absorption rate	1.093	0.7022	1.742	1.001	1410	1770
+CL	L/h	population clearance at 70 kg	0.1337	0.1213	0.1484	1.0	3587	2072
+V	L	population volume at 70 kg	8.052	7.602	8.528	1.004	2957	1935
+sd(logit tlag)		between-subject SD of the lag logit	0.6255	0.04198	1.413	1.014	246	263
+sd(log ka)		between-subject SD of log ka	0.9531	0.6524	1.376	1.004	1071	1402
+sd(log CL)		between-subject SD of log CL	0.2777	0.219	0.3652	1.002	3639	2041
+sd(log V)		between-subject SD of log V	0.1348	0.09097	0.1934	1.001	2069	1771
+sigma_pk	mg/L	additive PK noise scale	0.3403	0.2481	0.4544	1.001	1401	1376
+kappa_pk		PK overdispersion (times 25)	3.654	2.697	5.214	1.002	1586	1736
