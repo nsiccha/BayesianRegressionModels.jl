@@ -24,6 +24,7 @@ JSON = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 LogDensityProblems = "6fdf6af0-433a-55f7-b3ed-c6c6e0b8df7c"
 MCMCDiagnosticTools = "be115224-59cd-429b-ad48-344e309966f0"
+MutatingFunctions = "8a4c2d94-4b3b-4f9e-be63-a3c0cd816e3a"
 OptimizationBase = "bca83a33-5cc9-4baa-983d-23429ab6bcbb"
 LogExpFunctions = "2ab3a3ac-af41-5b50-aa03-7779005ae688"
 OutputSignatures = "86cfaae4-1704-4c69-ba62-d919d81ae5f8"
@@ -183,6 +184,11 @@ rev = "d3a322394c7a1df07e3b5e941acc2960f4daf656"
 url = "https://github.com/nsiccha/OutputSignatures.jl"
 # ReactiveKernels' own `[sources]` revision (RK compat 0.1.6).
 rev = "f971381f760e91986b3a728a719341e7e7761f55"
+
+[sources.MutatingFunctions]
+url = "https://github.com/nsiccha/MutatingFunctions.jl.git"
+# ReactiveKernelsPPL's own `[sources]` revision (RKPPL >= 0.1.133).
+rev = "02eb981b9770e767f47a7fda287fcbfb9531d587"
 
 [sources.ReactiveKernels]
 # RKPPL 0.1.89: read-only constrained parameter metadata for brm_model_view.
@@ -394,5 +400,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 29711427 (RK 0.1.120 / RKPPL 0.1.128) reads a dotted `@plate` cell latent's
 # block per cell, beside a computed location too, so its footprint and SVI
 # ownership are per unit, and keeps a rule's data structure `Const` in a wide
-# planned body.
-rev = "297114272297b93a9370d61947ea160d20ba428d"
+# planned body. ddc30859 (RK main, RK 0.1.130 / RKPPL 0.1.140) contains it and
+# lands RK's JAX lowering that test/rk_jax_models.jl requires.
+rev = "ddc3085967b41185a56284b50cfb14665ddd4ad4"

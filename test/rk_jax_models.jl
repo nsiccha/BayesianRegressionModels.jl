@@ -35,24 +35,15 @@ using Enzyme, ADTypes, LogDensityProblems
 
 include("jax_module_driver.jl")
 
-# Fixes of RK's JAX lowering this file requires once a pin carries them
-# (ReactiveKernels:JAX's review candidates; the test pin `29711427` = RK
-# 0.1.120 / RKPPL 0.1.128 and RK main `ba637e43` = RK 0.1.129 / RKPPL 0.1.133
-# carry neither):
-# - RK 0.1.130 translates the CDF-based laws (`censored`, `interval_censored`,
-#   `truncated` responses and truncated priors such as `dar`'s);
-# - RKPPL 0.1.134 jits with the prepared data traced as arguments (sizes are
-#   static) and states a data-dependent dimension as `m.dimension(prepared)`
-#   instead of a module constant, so the module text is size-generic.
-const RK_JAX_CDF = pkgversion(ReactiveKernels) >= v"0.1.130"
-# RK 0.1.130 also translates a derivative rule's primal, such as the bounded
-# transform (`rk_affine_logistic`) of `cdar`'s persistence.
-const RK_JAX_RULE_PRIMALS = pkgversion(ReactiveKernels) >= v"0.1.130"
-const RK_JAX_STATIC_SIZES = pkgversion(ReactiveKernelsPPL) >= v"0.1.134"
-# RKPPL 0.1.136 runs an observed `@scan` in a ragged plate cell (`AR1Normal`
-# per group) and returns `constrain` nested by scope, as native `constrain`
-# does (a `dar` scan's innovations included).
-const RK_JAX_GROUP_SCANS = pkgversion(ReactiveKernelsPPL) >= v"0.1.136"
+# The module contract tested here is RK's JAX lowering as it landed on RK main
+# (`ddc30859`, RK 0.1.130 / RKPPL 0.1.140; test/setup_env.jl): CDF-based laws
+# and derivative-rule primals translate, a module is generic in sizes
+# (`prepare_data(**raw)`, `m.dimension(prepared)`, `(unconstrained, **prepared)`,
+# integer sizes static under `jax.jit(f)(u, **prepared)`), an observed `@scan`
+# runs per group and `constrain` nests by scope, as native `constrain` does.
+pkgversion(ReactiveKernels) >= v"0.1.130" && pkgversion(ReactiveKernelsPPL) >= v"0.1.140" ||
+    error("test/rk_jax_models.jl needs ReactiveKernels 0.1.130 and ReactiveKernelsPPL " *
+        "0.1.140 or later (run test/setup_env.jl)")
 
 module JaxModelSet
 using BayesianRegressionModels, Distributions
@@ -222,14 +213,14 @@ const FUNCTIONS = (("log_density", :sampler), ("log_prior", :prior),
 
 # Compare dataset `k` of a Python run with the native binding `rk`.
 # The module's `constrain`, keyed `<scope>.<name>` as `flat_names` keys the
-# native values: nested by scope from RKPPL 0.1.136, flat before.
+# native values (nested by scope).
 flat_constrain(d::AbstractDict, prefix = "") = reduce(merge,
     (v isa AbstractDict ? flat_constrain(v, prefix * k * ".") : Dict(prefix * k => v) for (k, v) in d);
     init = Dict{String,Any}())
 
 # `constrain_gaps`: native constrained names the module's `constrain` does not
 # return yet (an RK lowering gap each, reported to ReactiveKernels:JAX).
-function check_parity(rk, run, k, us; values = (), jit_args = true, constrain_gaps = ())
+function check_parity(rk, run, k, us; values = (), constrain_gaps = ())
     reference = native_reference(rk, us; values)
     for (j, u) in enumerate(us)
         p, n = run.datasets[k]["points"][j], reference[j]
@@ -237,14 +228,14 @@ function check_parity(rk, run, k, us; values = (), jit_args = true, constrain_ga
         for (f, preset) in FUNCTIONS
             @test p[f]["eager"] ≈ n.densities[preset] rtol = 1e-12 atol = 1e-12
             @test p[f]["jit"] ≈ n.densities[preset] rtol = 1e-12 atol = 1e-12
+            # The prepared data traced as arguments: one executable for every
+            # dataset of these shapes.
+            @test p[f]["jit_args"]["ok"]
             if p[f]["jit_args"]["ok"]
                 @test p[f]["jit_args"]["value"] ≈ n.densities[preset] rtol = 1e-12 atol = 1e-12
             end
         end
-        # The prepared data traced as arguments: a layout whose offsets follow
-        # a level count slices `unconstrained` at a traced stop (RK lowering
-        # gap, reported to ReactiveKernels:JAX).
-        @test all(p[f]["jit_args"]["ok"] for (f, _) in FUNCTIONS) && p["grad_args"]["ok"] broken = !(jit_args || RK_JAX_STATIC_SIZES)
+        @test p["grad_args"]["ok"]
         if p["grad_args"]["ok"]
             @test vec(collect(p["grad_args"]["value"])) ≈ n.g rtol = 1e-10 atol = 1e-10
         end
@@ -262,14 +253,14 @@ function check_parity(rk, run, k, us; values = (), jit_args = true, constrain_ga
     end
 end
 
-function check_model(rk; values = (), jit_args = true, constrain_gaps = ())
+function check_model(rk; values = (), constrain_gaps = ())
     src = jax_source(rk.model, rk_bound_plan(rk); values)
     @test src isa JAXSource
     brm_jax_require_python() || return src
     us = points(rk)
     run = brm_jax_run(src, [brm_jax_inputs(rk, src)], [us])
     @test run.x64_after_import   # the module enables float64 itself
-    check_parity(rk, run, 1, us; values, jit_args, constrain_gaps)
+    check_parity(rk, run, 1, us; values, constrain_gaps)
     src
 end
 
@@ -289,82 +280,52 @@ end
     srcA = jax_source(rkA.model, rk_bound_plan(rkA))
     srcB = jax_source(rkB.model, rk_bound_plan(rkB))
     @test without_layout_constants(srcA) == without_layout_constants(srcB)
-    # Before RKPPL 0.1.134 `DIMENSION` and `PARAMETERS` hold the emitting
-    # binding's sizes, so the module text differs between the two; its
-    # functions do not.
-    @test srcA.text == srcB.text broken = !RK_JAX_STATIC_SIZES
+    @test srcA.text == srcB.text
     if brm_jax_require_python()
         usA, usB = points(rkA), points(rkB)
         run = brm_jax_run(srcA, [brm_jax_inputs(rkA, srcA), brm_jax_inputs(rkB, srcA)], [usA, usB])
         @test run.x64_after_import
-        check_parity(rkA, run, 1, usA; jit_args = false)
-        check_parity(rkB, run, 2, usB; jit_args = false)
+        check_parity(rkA, run, 1, usA)
+        check_parity(rkB, run, 2, usB)
     end
 end
 
 @testset "families, groupings, missing covariates and bounded priors" begin
     S = station_data()
-    check_model(RKBRMI(JMS.regression(regression_data(9, 3))); values = (:mu,), jit_args = false)
-    check_model(RKBRMI(JMS.counts(counts_data(12, 4))); jit_args = false)
-    check_model(RKBRMI(JMS.positive((; yp = exp.(S.y), S.x, S.g))); jit_args = false)
-    check_model(RKBRMI(JMS.missing_covariate((; S.y, S.rain, S.g))); jit_args = false)
+    check_model(RKBRMI(JMS.regression(regression_data(9, 3))); values = (:mu,))
+    check_model(RKBRMI(JMS.counts(counts_data(12, 4))))
+    check_model(RKBRMI(JMS.positive((; yp = exp.(S.y), S.x, S.g))))
+    check_model(RKBRMI(JMS.missing_covariate((; S.y, S.rain, S.g))))
     check_model(RKBRMI(JMS.bounded((; S.y, S.x))))
 end
 
 @testset "ragged per-subject series, an empty subject included" begin
-    check_model(RKBRMI(JMS.series(series_data([3, 2, 4, 1, 2]))); jit_args = false)
-    check_model(RKBRMI(JMS.series(series_data([3, 0, 2]))); jit_args = false)
+    check_model(RKBRMI(JMS.series(series_data([3, 2, 4, 1, 2]))))
+    check_model(RKBRMI(JMS.series(series_data([3, 0, 2]))))
 end
 
 @testset "replays: reprocess and a data-free replay of the fitted state" begin
     rk = RKBRMI(JMS.regression(regression_data(9, 3)))
     design = regression_data(5, 2; rng = Xoshiro(7))
-    check_model(reprocess(rk, design); jit_args = false)
-    check_model(RKBRMI(JMS.regression(design), brm_fitted_state(rk)); jit_args = false)
+    check_model(reprocess(rk, design))
+    check_model(RKBRMI(JMS.regression(design), brm_fitted_state(rk)))
 end
 
-# CDF-based laws: required from RK 0.1.130, `JAXEmissionError` ("`##captures#1`
-# is not defined" / "`prepared standardized` is not defined in module
-# `ReactiveKernelsDistributionKernels.DistributionKernelSources`") before it.
+# CDF-based laws, a `dar` walk's truncated persistence prior included.
 @testset "censored, interval-censored and truncated laws" begin
     S = station_data()
-    # `dar`'s scan innovations are a native constrained value the module's
-    # `constrain` does not return yet.
-    for (build, gaps) in ((() -> RKBRMI(JMS.detection_limit((; y = S.ycens, S.x, S.lod))), ()),
-            (() -> RKBRMI(JMS.rounded((; S.y_lo, S.y_hi, S.x))), ()),
-            (() -> RKBRMI(JMS.truncated_response((; y = abs.(S.y), S.x))), ()),
-            (() -> RKBRMI(JMS.differenced_walk((; S.y, day_grid = collect(1.0:9.0), day_idx = Int.(S.day)))),
-                RK_JAX_GROUP_SCANS ? () : ("dar_level_day_grid_level._ppl_scan_z_level",)))
-        rk = build()
-        if RK_JAX_CDF
-            check_model(rk; constrain_gaps = gaps)
-        else
-            @test_broken try
-                jax_source(rk.model, rk_bound_plan(rk)) isa JAXSource
-            catch e
-                e isa JAXEmissionError || rethrow()
-                false
-            end
-        end
+    for build in (() -> RKBRMI(JMS.detection_limit((; y = S.ycens, S.x, S.lod))),
+            () -> RKBRMI(JMS.rounded((; S.y_lo, S.y_hi, S.x))),
+            () -> RKBRMI(JMS.truncated_response((; y = abs.(S.y), S.x))),
+            () -> RKBRMI(JMS.differenced_walk((; S.y, day_grid = collect(1.0:9.0), day_idx = Int.(S.day)))))
+        check_model(build())
     end
 end
 
-# A per-group scan (`AR1Normal` residuals over `groups(g; order = day)`):
-# required from RKPPL 0.1.136; before it `jax_source` refuses it ("the
-# function `_observed_scan_cell_bound` has loops or branches").
+# A per-group scan (`AR1Normal` residuals over `groups(g; order = day)`).
 @testset "AR(1) residuals per group" begin
     S = station_data()
-    rk = RKBRMI(JMS.ar1_residuals((; S.y, S.x, S.g, S.day)))
-    if RK_JAX_GROUP_SCANS
-        check_model(rk; jit_args = false)
-    else
-        @test_broken try
-            jax_source(rk.model, rk_bound_plan(rk)) isa JAXSource
-        catch e
-            e isa JAXEmissionError || rethrow()
-            false
-        end
-    end
+    check_model(RKBRMI(JMS.ar1_residuals((; S.y, S.x, S.g, S.day))))
 end
 
 # Networks of 2, 6 and 12 stations with other prior scales and period. Their
@@ -374,36 +335,14 @@ end
 # scan with fit-role level inputs. So each network has its own module here.
 # Not built yet either: a station with no days, which needs the stations as
 # a level table read through positions (brm-use formulas, "Labels from a
-# level table"); the per-station AR(1) residual variant waits on the scan gap
-# above.
+# level table").
 @testset "odl_station_daily: networks of 2, 6 and 12 stations" begin
     datasets = (station_daily_data(6), station_daily_data(2; sigma_scale = 0.2, period = 300.0),
         station_daily_data(12; station_scale = 0.5))
     rks = [RKBRMI(JMS.station_daily(d)) for d in datasets]
     @test allequal(string(rk.model.program) for rk in rks) broken = true
-    for rk in rks
-        if RK_JAX_RULE_PRIMALS
-            check_model(rk; jit_args = false)
-        else
-            @test_broken try
-                jax_source(rk.model, rk_bound_plan(rk)) isa JAXSource
-            catch e
-                e isa JAXEmissionError || rethrow()
-                false
-            end
-        end
-    end
-    censored = RKBRMI(JMS.station_daily_censored(station_daily_data(6; lod = 0.1)))
-    if RK_JAX_CDF
-        check_model(censored; jit_args = false)
-    else
-        @test_broken try
-            jax_source(censored.model, rk_bound_plan(censored)) isa JAXSource
-        catch e
-            e isa JAXEmissionError || rethrow()
-            false
-        end
-    end
+    foreach(check_model, rks)
+    check_model(RKBRMI(JMS.station_daily_censored(station_daily_data(6; lod = 0.1))))
 end
 
 # Whether a module emits and runs in Python (prepare_data and log_density at
@@ -421,13 +360,15 @@ function runs_in_python(rk)
 end
 
 # The shared fields of ODL-shaped models (synthetic data). `hsgp(t)`
-# translates. These do not translate yet; each is an RK lowering gap reported
-# to ReactiveKernels:JAX on RK 0.1.130 / RKPPL 0.1.136 (`9cbe68ee`):
+# translates. These do not translate yet on RK main `ddc30859`; each is an RK
+# lowering gap reported to ReactiveKernels:JAX:
 # - levels correlated by an LKJ factor of data-valued size: "`keep` names
-#   `_ppl_last_Omega`, which is no data-only value of the program";
+#   `_ppl_last_Omega`, which is no data-only value of the program" (RK todo
+#   `1at3ntk`);
 # - `orthogonal_to = :linear`: `prepare_data` indexes a Python list as a
-#   matrix (`raw_basis[:, b - 1]`);
-# - multi-axis bases: "`checked_sdiv_int` has no JAX translation".
+#   matrix (`raw_basis[:, b - 1]`; RK todo `1at3ntk`);
+# - multi-axis bases: "`checked_sdiv_int` has no JAX translation" (fixed on
+#   RK:JAX's unlanded candidate `8243d297`).
 @testset "ODL-shaped shared fields: HSGP terms" begin
     rng = Xoshiro(6)
     n = 30
@@ -438,7 +379,7 @@ end
         s ~ Exponential(1)
         mu ~ 1 + hsgp(t)
         y ~ Normal(mu, s)
-    end); jit_args = false)
+    end))
     brm_jax_require_python() || return
     gaps = (
         RKBRMI(@brm (; y, t, region, K = 3, eta = 2.0) begin

@@ -385,10 +385,18 @@ const PINS = [
     # such a latent's unit takes the authored-prior route. It also carries the
     # guarded-fill fix 78b564bd (RK 0.1.109) that `nlme_completion_laws.jl` needs,
     # and the RKPPL threshold-count and Dirichlet-length fixes 9b90eeac and d916b305.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "297114272297b93a9370d61947ea160d20ba428d"),
+    # ddc30859 (RK main, RK 0.1.130 / RKPPL 0.1.140) contains 29711427 and lands
+    # ReactiveKernels:JAX's lowering (9cbe68ee): `jax_source` translates the CDF
+    # laws and rule primals, a module is generic in sizes with `prepare_data(**raw)`
+    # and `(unconstrained, **prepared)` signatures, and an observed `@scan` runs per
+    # group, which `test/rk_jax_models.jl` requires.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "ddc3085967b41185a56284b50cfb14665ddd4ad4"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
+    # ReactiveKernelsPPL's own `[sources]` revision of its unregistered
+    # MutatingFunctions dependency (RKPPL >= 0.1.133); move it with the RK pin.
+    ("MutatingFunctions", "https://github.com/nsiccha/MutatingFunctions.jl.git", "02eb981b9770e767f47a7fda287fcbfb9531d587"),  # main
     # d37cb0b4 (Enzyme 0.13.216 dogfood, libEnzyme build 4be29b19): contains
     # 93c452bd, Base concatenation of views, reshapes and transposes of Arrays
     # beside dense or Const arrays in Reverse and Forward (snag
