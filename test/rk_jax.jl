@@ -49,6 +49,26 @@ flat_pk(d) = @brm d begin
         y[obs[i]] ~ normal(loc[i], sigma)
     end
 end
+# Two columns read through each join: the second column of a join reads the
+# first one's partition (`brm_ragged_rows_shared`).
+flat_pk_two(d) = @brm d begin
+    sigma ~ Exponential(1)
+    log_CL ~ 1 + weight + (1 | p | subject)
+    log_V ~ 1 + (1 | p | subject)
+    log_F ~ 0 + log_dose
+    effect(log_CL, Intercept) ~ Normal(0, 1)
+    effect(log_V, Intercept) ~ Normal(0, 1)
+    effect(log_F, :) ~ Normal(0, 0.5)
+    sd(:, p) ~ Exponential(1)
+    doses = groups(dose_subject => subject)
+    obs = groups(obs_subject => subject)
+    @plate for i in eachindex(log_CL)
+        dose = sum(dose_amount[doses[i]] .* exp.(log_F[doses[i]]))
+        loc[i] = dose / exp(log_V[i]) .* exp.(-exp(log_CL[i]) .* obs_time[obs[i]]) .*
+            obs_scale[obs[i]]
+        y[obs[i]] ~ normal(loc[i], sigma)
+    end
+end
 flat_pk_ordered(d) = @brm d begin
     sigma ~ Exponential(1)
     log_CL ~ 1 + (1 | subject)
@@ -93,6 +113,8 @@ const FLAT_PK = (; subject=["s1", "s2", "s3", "s4"], weight=[61.0, 75.0, 68.0, 8
     obs_subject=["s1", "s3", "s2", "s1", "s4", "s2", "s3", "s4", "s1"],
     obs_time=[0.5, 0.5, 0.5, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0],
     y=[0.9, 0.6, 1.4, 0.7, 0.2, 0.8, 0.3, 0.1, 0.4])
+const FLAT_PK_TWO = merge(FLAT_PK, (; dose_amount=[100.0, 80.0, 120.0, 90.0, 60.0, 110.0],
+    obs_scale=[1.0, 0.8, 1.2, 0.9, 1.1, 1.0, 0.7, 1.3, 0.95]))
 # The ordered join reads each subject's first dose in `dose_rank` order, so
 # every subject has one here.
 const FLAT_PK_ORDERED = merge(FLAT_PK, (; dose_subject=[FLAT_PK.dose_subject; "s4"],
@@ -203,10 +225,13 @@ end
 # `sum(exp.(log_F[doses[i]]))` and observations make. The ordered join's merge
 # sort runs in `prepare_data` too.
 @testset "a grouped read's row partition is prepare_data host code" begin
-    for (model, data) in ((JM.flat_pk, FLAT_PK), (JM.flat_pk_ordered, FLAT_PK_ORDERED))
+    for (model, data) in ((JM.flat_pk, FLAT_PK), (JM.flat_pk_ordered, FLAT_PK_ORDERED),
+            (JM.flat_pk_two, FLAT_PK_TWO))
         rk = RKBRMI(model(data))
         src = check_module(rk; anchors=false)
         @test occursin("def prepare_data", src.text)
         @test occursin("_brm_partition_rows", src.text)
+        model === JM.flat_pk_two && @test occursin("brm_ragged_rows_shared",
+            sprint(Base.show_unquoted, BayesianRegressionModels._rk_emit_ast(rk.plan).main))
     end
 end
