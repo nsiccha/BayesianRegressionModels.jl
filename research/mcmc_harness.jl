@@ -89,45 +89,47 @@ end
 fmt(x) = round(x; sigdigits=4)
 
 "The population table rows of one fit: median, 95 % interval and diagnostics per quantity."
-function population_rows(model, d, names, C_chains, quantities)
+function population_rows(d, names, C_chains, quantities)
     map(quantities) do spec
         chains = quantity_draws(d, names, C_chains, spec)
         pooled = reduce(vcat, chains)
         diag = chain_diagnostics(chains)
-        (model, spec.name, spec.unit, spec.description,
+        (spec.name, spec.unit, spec.description,
          fmt(median(pooled)), fmt(quantile(pooled, 0.025)), fmt(quantile(pooled, 0.975)),
          round(diag.rhat; digits=3), round(Int, diag.ess_bulk), round(Int, diag.ess_tail))
     end
 end
-const POPULATION_HEADER = ["model", "quantity", "unit", "description", "median", "q025", "q975",
+# One directory of tables per fit (DocsFits' summary contract): the quantity
+# table has exactly these columns, and no model column; the page names the fit.
+const POPULATION_HEADER = ["quantity", "unit", "description", "median", "q025", "q975",
                            "rhat", "ess_bulk", "ess_tail"]
 
 """
 Posterior predictive quantiles of one response at every observation. `subjects`,
 `times` and `observed` are flat vectors in the response's observation order.
 """
-function ppc_rows(model, d, problem, U, response; subjects, times, observed, seed)
+function ppc_rows(d, problem, U, response; subjects, times, observed, seed)
     predicted = getproperty(brm_predictive_draws(d, U; problem, seed), response)   # draws × observations
     size(predicted, 2) == length(observed) ||
         error("$response: $(size(predicted, 2)) predicted columns for $(length(observed)) observations")
     map(1:length(observed)) do j
         column = predicted[:, j]
-        (model, String(response), subjects[j], times[j], observed[j],
+        (String(response), subjects[j], times[j], observed[j],
          fmt(quantile(column, 0.025)), fmt(quantile(column, 0.25)), fmt(median(column)),
          fmt(quantile(column, 0.75)), fmt(quantile(column, 0.975)))
     end
 end
-const PPC_HEADER = ["model", "response", "source_subject", "time", "observed",
+const PPC_HEADER = ["response", "source_subject", "time", "observed",
                     "q025", "q25", "q50", "q75", "q975"]
 
-"One row of the sampler report."
-function fit_row(label, f)
+"The one row of a fit's sampler report."
+function fit_row(f)
     draws = sum(size(c, 2) for c in f.chains)
-    (label, LogDensityProblems.dimension(f.problem), f.n_chains, length(f.chains),
+    (LogDensityProblems.dimension(f.problem), f.n_chains, length(f.chains),
      isempty(f.omitted) ? "none" : join(f.omitted, ","), draws,
      f.divergent, fmt(100 * f.divergent / draws), round(f.seconds; digits=1))
 end
-const FITS_HEADER = ["model", "dimension", "chains_requested", "chains_kept", "omitted_chains",
+const FITS_HEADER = ["dimension", "chains_requested", "chains_kept", "omitted_chains",
                      "draws", "divergent", "divergent_pct", "seconds"]
 
 # ---- tables ---------------------------------------------------------------------

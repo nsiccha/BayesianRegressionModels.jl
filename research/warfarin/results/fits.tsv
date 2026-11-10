@@ -1,4 +1,0 @@
-model	dimension	chains_requested	chains_kept	omitted_chains	draws	divergent	divergent_pct	seconds
-two-stage PK	138	4	3	1	3000	2	0.06667	118.3
-two-stage PD	104	4	3	2	3000	1	0.03333	155.5
-joint	242	4	3	1	3000	64	2.133	592.3

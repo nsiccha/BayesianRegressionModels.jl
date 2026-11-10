@@ -14,8 +14,9 @@ const BLUE = "#2a78d6"
 const ORANGE = "#eb6834"
 const INK = "#0b0b0b"
 
-function table(name)
-    lines = readlines(joinpath(RESULTS, name))
+"The rows of one table of one fit (results/<fit>/<name>), numbers parsed."
+function table(fit, name)
+    lines = readlines(joinpath(RESULTS, fit, name))
     header = Symbol.(split(lines[1], '\t'))
     cell(s) = something(tryparse(Int, s), tryparse(Float64, s), String(s))
     [NamedTuple{Tuple(header)}(Tuple(cell.(split(line, '\t')))) for line in lines[2:end]]
@@ -27,9 +28,9 @@ function save_figure(outdir, name, fig)
 end
 
 "One panel per subject: the posterior predictive median with its 50 % and 95 % bands, and the observations."
-function ppc(outdir, name; model, response, ylabel, title, subjects=nothing, size=(1500, 1100))
+function ppc(outdir, name; fit, response, ylabel, title, subjects=nothing, size=(1500, 1100))
     rows = [(; r..., panel="subject $(r.source_subject)")
-            for r in table("ppc.tsv") if r.model == model && r.response == response]
+            for r in table(fit, "ppc.tsv") if r.response == response]
     isnothing(subjects) || (rows = [r for r in rows if r.source_subject in subjects])
     # Facet on a string label in natural order: the ribbon layer facets on the
     # raw column values, so a `sorter` on the point layer would not merge with it.
@@ -47,10 +48,11 @@ end
 
 "Every population quantity: the two-stage estimate beside the joint one (median, 50 % and 95 % intervals)."
 function population(outdir)
-    rows = table("population.tsv")
-    stage(model) = model == "joint" ? "joint" : "two-stage"
+    rows = vcat([(; r..., stage="two-stage") for r in table("pk", "population.tsv")],
+                [(; r..., stage="two-stage") for r in table("pd", "population.tsv")],
+                [(; r..., stage="joint") for r in table("joint", "population.tsv")])
     quantities = unique(r.quantity for r in rows)
-    points = [(; quantity=r.quantity, stage=stage(r.model), median=r.median,
+    points = [(; quantity=r.quantity, stage=r.stage, median=r.median,
                  q025=r.q025, q975=r.q975) for r in rows]
     facet = :quantity => AlgebraOfGraphics.sorter(quantities) => ""
     x = :stage => AlgebraOfGraphics.sorter(["two-stage", "joint"]) => ""
@@ -72,14 +74,14 @@ end
 
 function main(outdir = joinpath(@__DIR__, "..", "..", "docs", "src", "assets", "warfarin"))
     mkpath(outdir)
-    ppc(outdir, "ppc-pk"; model="two-stage PK", response="pk_dv",
+    ppc(outdir, "ppc-pk"; fit="pk", response="pk_dv",
         ylabel="warfarin (mg/L)", title="Stage 1, population PK: posterior predictive bands and the observed concentrations")
-    ppc(outdir, "ppc-pd"; model="two-stage PD", response="pd_dv",
+    ppc(outdir, "ppc-pd"; fit="pd", response="pd_dv",
         ylabel="prothrombin complex activity (%)", title="Stage 2, turnover PD on the fixed PK medians: posterior predictive bands and the observations")
-    subjects = unique(r.source_subject for r in table("ppc.tsv"))[1:8]
-    ppc(outdir, "ppc-joint-pk"; model="joint", response="pk_dv", subjects,
+    subjects = unique(r.source_subject for r in table("joint", "ppc.tsv"))[1:8]
+    ppc(outdir, "ppc-joint-pk"; fit="joint", response="pk_dv", subjects,
         ylabel="warfarin (mg/L)", title="Joint model, PK channel, first eight subjects", size=(1500, 420))
-    ppc(outdir, "ppc-joint-pd"; model="joint", response="pd_dv", subjects,
+    ppc(outdir, "ppc-joint-pd"; fit="joint", response="pd_dv", subjects,
         ylabel="prothrombin complex activity (%)", title="Joint model, PD channel, first eight subjects", size=(1500, 420))
     population(outdir)
 end
