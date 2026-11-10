@@ -1251,7 +1251,7 @@ the test environment above.
 - RK plans the array cell's plate as matrix products (log group `:plate_batching`) and the per-row plate as a cell loop.
 - SBBRMI's compiled Stan density and gradient equal RK's.
 
-ReactiveKernels batches plates from 0.1.127 (RK `fa3deb83`). Below it the batched-plan check is `broken`; this environment's RK pin `88813eb3` (RK 0.1.132) requires it. Everything else passes on both. Each spelling rule in the file's header was found by a refusal. It runs in the test environment, about 3 minutes on one CPU.
+ReactiveKernels batches plates from 0.1.127 (RK `fa3deb83`). Below it the batched-plan check is `broken`; this environment's RK pin `51e6404f` (RK 0.1.138) requires it. Everything else passes on both. Each spelling rule in the file's header was found by a refusal. It runs in the test environment, about 3 minutes on one CPU.
 
 `rk_plate_invariant_output.jl` checks an RKBRMI `@plate` output whose cell reads
 no per-index value, `decay[g] = exp(log_a)`, over three cells (BRM snag
@@ -1263,7 +1263,7 @@ model-scope `fill` of the same values and central differences. `brm_nlme_model`
 gives each subject's likelihood and η gradient. A one-cell binding is the
 positive control. ReactiveKernelsPPL fixed the shape in 0.1.129 (RK `b6196f114`,
 ReactiveKernels snag `plate-output-of-c4a0ca87`), which this environment's RK pin
-`88813eb3` (RKPPL 0.1.141) carries. On older RKPPL the output is one number. There
+`51e6404f` (RKPPL 0.1.142) carries. On older RKPPL the output is one number. There
 the three-cell checks are `broken`: a later `decay[2]` raises a `BoundsError`,
 and `sum` and `length` return one cell's value. The one-cell count, total and
 likelihood pass on both. Its `decay` is `broken` there too, because one number is
@@ -2130,8 +2130,12 @@ julia --project=test test/rk_gp_multiaxis.jl
 compares each module's `log_density` and `jax.grad` with the native density
 and its central differences, through the pinned ReactiveKernels checkout's
 `test/jax_python.jl`; without it those comparisons are skipped. It needs an RK
-with `jax_source` and `prepare_data` (`888bdfd42` or later), which the
-standard pin carries:
+with `jax_source` and `prepare_data` (`888bdfd42` or later). Its grouped-read
+case (`groups(group => cells)` read in a cell, ordered or not) checks that the
+row partition is `prepare_data` host code and that the densities match: that
+needs RK 0.1.138 (`51e6404f`), whose host code writes a list element in place
+and translates only a decided arm, and whose reductions over a gather through
+a ragged row mask the padding. The standard pin carries both:
 
 ```sh
 python -m venv <jaxenv> && <jaxenv>/bin/pip install "jax[cpu]"
@@ -2156,7 +2160,7 @@ RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/rk
 ```
 
 The file requires ReactiveKernels' JAX lowering as it landed on RK main
-(RK 0.1.132 / RKPPL 0.1.140 or later; the test pin is `88813eb3`) and refuses
+(RK 0.1.132 / RKPPL 0.1.140 or later; the test pin is `51e6404f`) and refuses
 to run below it. The CDF-based laws, jit with the prepared data traced as
 arguments, size-generic modules, per-group AR(1) scans, nested `constrain` and
 the multi-axis and level-correlated HSGP terms are required checks. Its testset "every definition BRM emits is documented"

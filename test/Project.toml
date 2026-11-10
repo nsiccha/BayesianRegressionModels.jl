@@ -402,5 +402,8 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # ownership are per unit, and keeps a rule's data structure `Const` in a wide
 # planned body. ddc30859 (RK main, RK 0.1.130 / RKPPL 0.1.140) contains it and
 # lands RK's JAX lowering that test/rk_jax_models.jl requires; 88813eb3 (RK
-# 0.1.132 / RKPPL 0.1.141) adds the pin-6 translations it requires too.
-rev = "88813eb3daae68c56afb5190fb0cf0c8d5d1dcdf"
+# 0.1.132 / RKPPL 0.1.141) adds the pin-6 translations it requires too;
+# 51e6404f (RK 0.1.138 / RKPPL 0.1.142) contains 88813eb3 and translates a
+# ragged join's row partition in `prepare_data` with masked ragged gathers,
+# which test/rk_jax.jl's grouped-read case requires.
+rev = "51e6404fa91946693ebfcac9ae4f175da41f6b2a"

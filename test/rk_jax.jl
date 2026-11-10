@@ -196,26 +196,17 @@ end
 
 # A grouped read's row partition (`brm_ragged_rows`, `brm_ragged_rows_ordered`;
 # `src/ragged_rows.jl`) is `prepare_data` host code, translated from the same
-# source Julia runs (snag `jax-source-brm-r-f6503407`). Broken until
-# ReactiveKernels translates, on the host, a write into a list of arrays the
-# source built and only the taken arm of a type test (ReactiveKernels snag
-# `jax-host-nested-6a304948`), and masks a reduction over a gather through a
-# ragged index (ReactiveKernels snag `jax-ragged-index-b8420d16`), which the
-# cells' `sum(exp.(log_F[doses[i]]))` and observations make. Without the first,
-# RK translates the untaken dense-integer arm of the partition for string
-# labels and `jax_source` fails with `type TypeofBottom has no field
-# parameters`; any other failure is an error.
+# source Julia runs (snag `jax-source-brm-r-f6503407`). It needs ReactiveKernels
+# 0.1.138: host writes into a list of arrays the source built and only the
+# taken arm of a decided type test (RK 0.1.136), and reductions over a gather
+# through a ragged index masked (RK 0.1.138), which the cells'
+# `sum(exp.(log_F[doses[i]]))` and observations make. The ordered join's merge
+# sort runs in `prepare_data` too.
 @testset "a grouped read's row partition is prepare_data host code" begin
     for (model, data) in ((JM.flat_pk, FLAT_PK), (JM.flat_pk_ordered, FLAT_PK_ORDERED))
         rk = RKBRMI(model(data))
-        src = try
-            jax_source(rk.model, rk_bound_plan(rk))
-        catch e
-            e isa JAXEmissionError || occursin("TypeofBottom", sprint(showerror, e)) ||
-                rethrow()
-            nothing
-        end
-        @test_broken src isa JAXSource
-        src === nothing || check_module(rk; anchors=false)
+        src = check_module(rk; anchors=false)
+        @test occursin("def prepare_data", src.text)
+        @test occursin("_brm_partition_rows", src.text)
     end
 end
