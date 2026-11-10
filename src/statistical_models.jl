@@ -161,6 +161,16 @@ end
 Return a BRM-owned statistical submodel by name, or the captured RKPPL source
 of an existing RK backend. Load ReactiveKernels and ReactiveKernelsPPL first.
 
+Available names: `:varying_coefs`, `:varying_coefs_correlated`,
+`:varying_coefs_centered`, `:varying_coefs_centered_correlated`,
+`:varying_stratified`, `:varying_stratified_correlated`, `:horseshoe_coefs`,
+`:r2d2_coefs`, `:penalized_smooth`, `:t2_smooth`, `:hsgp_effect`,
+`:hsgp_periodic_effect`, `:hsgp_grouped_effect`, `:monotonic`,
+`:differenced_ar1` and `:ordered_logistic`. Their data come from
+`StatisticalPreparation` (`tps_basis`, `cr_basis`, `t2_basis`, `hsgp_basis`,
+`hsgp_periodic_basis`). An areal (ICAR/BYM2) field has no body yet; write its
+`ICAR` statements over `StatisticalPreparation.car_graph`.
+
 The backend overload captures its retained emitted declarations in the same
 module as their submodels, callable bindings and kernel definitions. It is
 cached once per emitted program and shared by replays that share that program.

@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.267
+## 0.2.269
 
 - Added: an RKBRMI fit with an `mi(x)` covariate forecasts new rows.
   `reprocess(rk, design; resample_covariates=[:x], keep_observed=true)`
@@ -33,6 +33,49 @@ instead of failing at run time.
   multi-axis and level-correlated HSGP terms, which RK 0.1.132 translates,
   and checks a forecast replay's module. `test/rk_mi_forecast.jl` checks
   the forecast natively.
+
+## 0.2.268
+
+- Fixed: `adaptive_centering_problem` is the wrapped density exactly at its
+  compiled centring (the default start) wherever that density is finite, also
+  where a random-effect block's scale leaves `Float64`'s range. A cell's log
+  scale was `log(tau * stick)` with `tau = exp(coordinate)`; below a log scale
+  of about -745 `tau` is `0.0`, its log `-Inf`, and `-Inf` times the zero
+  exponent `t - c` made the map, log density and gradient `NaN` where the model
+  is finite. Pathfinder's line searches reach such points from a random start,
+  so WarmupHMC's initialization ran differently through the wrapper than
+  through the model it wraps. A cell's log scale is now its coordinate (plus
+  the correlation factor's and a Student-t level's log) wherever the product is
+  not a normal number (a log scale below about -708, subnormal or zero, or
+  above 709), and unchanged, bit for bit, everywhere else. This
+  covers the ordinary, R2D2 and joint accessors, a nested cell's containing
+  location, the `K <= 2` reverse pass and the blockwise pass. On a downstream
+  model with six `||` margins, two `cdar` fields and plate cell latents (12
+  groups, dimension 560), the RKBRMI wrapper under `completion_warmup_mcmc`
+  (4 chains, quorum 3, seeds 301-304) missed its quorum before: through the
+  wrapper, the Pathfinder starts of chains 2 and 3 differed from the plain
+  density's and landed with log scales near -36 to -66, where chain 3 froze
+  and chain 2 kept 12 % divergent draws. Now its starts are the plain
+  density's, chains 1-3 complete with no divergent draw, and the largest R-hat
+  is 1.016 (minimum ESS 138) where the plain RK density's is 1.883 (ESS 4, the
+  intercept block). Chain 4's random start (seed 304) freezes the plain density
+  as well; a start from `brm_start` avoids it. Not covered yet: a
+  correlated block's later terms divide by an earlier term's `tau^c`, which is
+  `0^c` off the compiled frame once that `tau` underflows, and the
+  `ranef_order = :learned` maps (snag `rkbrmi-adaptive-326587b2`).
+
+## 0.2.267
+
+- Added: `StatisticalPreparation.car_graph(area, from, to; nodes = nothing)`
+  returns the adjacency graph of an areal field as the `car(area; edges=(from,
+  to), nodes)` term prepares it: the areas' sorted labels, each row's area,
+  the ICAR edge positions on the areas with neighbours, the connected
+  components, each area's field position (`n_struct + 1` on an island) and
+  the exact BYM2 scaling factors. A hand-written `@rkppl` model binds these as
+  data and writes its own `ICAR` and BYM2 statements; that model translates
+  through `jax_source` and matches the native density and gradient (brm-use
+  `references/rkppl-bodies.md`).
+- The `rkppl_model(name)` docstring names every available body.
 
 ## 0.2.266
 
