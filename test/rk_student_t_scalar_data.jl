@@ -62,8 +62,7 @@ function scalar_t_retyped(backend)
         parsed = scalar_t_parse_source(definition)
         # Explicit `@kernel` graphs and functions keep their own kind; a bare
         # function-shaped definition is an `@rkppl` submodel.
-        Core.eval(mod, BRM._rk_source_definition(definition).kind === :rkppl ?
-            Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0), parsed) : parsed)
+        Core.eval(mod, BRM._rk_definition_expression(parsed))
     end
     data = BRM._rk_source_data_columns(backend.plan, emitted)
     plan = bind_data(lower_rkppl(scalar_t_parse_source(emitted.main),

@@ -135,7 +135,8 @@ end
         y ~ Normal(mu,brm_monotonic_effect)
     end
     artifact = BRM.emit_rk_artifact(brmi; case_id="monotonic-name-collision")
-    names = [first(first(d.args).args) for d in artifact.defs if Meta.isexpr(d, :(=))]
+    names = [BRM._rk_source_definition(d).name for d in artifact.defs
+        if BRM._rk_source_definition(d).kind === :rkppl]
     # The authored parameter keeps its name; the component definition is renamed.
     @test :brm_monotonic_effect ∉ names
     @test any(n -> startswith(string(n), "brm_monotonic_effect"), names)

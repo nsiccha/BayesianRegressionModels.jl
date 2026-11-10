@@ -31,8 +31,7 @@ function bounded_public_replay(backend)
         parsed = Meta.parse(sprint(Base.show_unquoted, definition))
         # Explicit `@kernel` graphs and functions keep their own kind; a bare
         # function-shaped definition is an `@rkppl` submodel.
-        Core.eval(mod, BRM._rk_source_definition(definition).kind === :rkppl ?
-            Expr(:macrocall, Symbol("@rkppl"), LineNumberNode(0), parsed) : parsed)
+        Core.eval(mod, BRM._rk_definition_expression(parsed))
     end
     source = Meta.parse(sprint(Base.show_unquoted, emitted.main))
     data = BRM._rk_source_data_columns(backend.plan, emitted)

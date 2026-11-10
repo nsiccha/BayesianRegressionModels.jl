@@ -65,10 +65,11 @@ function log_hyper_printed_sampler(backend)
     for (name,value) in emitted.bindings
         Core.eval(namespace,Expr(:const,Expr(:(=),name,QuoteNode(value))))
     end
+    # An @rkppl submodel is written under its macro, BRM's docstring outside it.
     definitions=join(map(emitted.defs) do definition
-        prefix=BRM._rk_source_definition(definition).kind===:rkppl ? "@rkppl " : ""
-        prefix*sprint(Base.show_unquoted,definition)
-    end,"\n")
+        sprint(Base.show_unquoted,BRM._rk_definition_expression(definition))
+    end,"
+")
     Core.eval(namespace,Meta.parseall(definitions))
     body=Meta.parse(sprint(Base.show_unquoted,emitted.main))
     # Emitted assignments own prepared indices retained in the plan cache.
