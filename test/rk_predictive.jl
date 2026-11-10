@@ -87,7 +87,9 @@ end
     targets = predictive_targets(replay.model, plan)
     @test keys(targets) == (:y,)
     @test targets.y.kind === :cells
-    bound = rk_bound_data(replay)
+    # The inputs of a cut at a draw of the fit: the binder's, which keep the
+    # fit's level set of `subject` (snag `rk-replay-with-r-bf059724`).
+    bound = rk_design_binder(rk; resample_groups=[:subject])(design)
     ports = Tuple(k for k in keys(bound) if !haskey(targets, k))
     args = Tuple(bound[k] for k in ports)
     cut = ReactiveKernels.prepare(replay.model.spec;
@@ -114,10 +116,14 @@ end
             length.(design.t)
     end
 
-    # refused: a resampled replay's subject effects are not coordinates of the
-    # fit's draw, so the whole-model query (HAVE `:unconstrained` alone) has no
-    # value for them; its density is refused the same way (test/rk_reprocess.jl).
-    @test_throws "different program" prepare_predictive(replay.model, plan)
+    # The whole-model query over the replay's own binding reads that binding's
+    # coordinates (RKPPL never reads the build's layout), in which the two new
+    # subjects' standardized draws take the place of the fit's five: a draw of
+    # the fit does not apply to it.
+    own = ReactiveKernelsPPL.coordinate_names(ReactiveKernelsPPL.assign_layout(plan))
+    zs(names) = count(n -> startswith(String(n), "b_p_subject.z."), names)
+    @test zs(ReactiveKernelsPPL.coordinate_names(rk.model.layout)) == 5
+    @test zs(own) == 2
 end
 
 @testset "a replay of fitted subjects draws the whole model" begin

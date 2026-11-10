@@ -574,6 +574,7 @@ function BRM._rk_layout_coordinate_transforms(backend::BRM.RKBRMI)
 end
 BRM._rk_bound_coordinate_names(backend::BRM.RKBRMI) =
     coordinate_names(assign_layout(_rk_translated(backend)))
+BRM._rk_plan_coordinate_names(plan) = coordinate_names(assign_layout(plan))
 # Geometry arguments belong to this binding. A replay shares the executable
 # graph, but its bounds and totals may differ from the original layout's data.
 _rk_bound_layout(backend::BRM.RKBRMI) = assign_layout(_rk_translated(backend))

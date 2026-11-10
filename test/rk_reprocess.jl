@@ -458,18 +458,24 @@ end
     u = point(rk)
     conc = graph_value(rk, :conc, u)
     b = graph_value(rk, :b_p_subject, u)       # one row per training subject
-    # Subject s2's covariates and reads under a new label, with s2's effect.
-    replay = reprocess(rk, merge(rows_of(PK, [2]), (; subject=["new"]));
-        resample_groups=[:subject])
-    bound = rk_bound_data(replay)
-    query = ReactiveKernels.prepare(replay.model.spec;
-        have=(:unconstrained, :b_p_subject, keys(bound)...), want=(:conc,), bound)
-    s2 = findfirst(==("s2"), sort(PK.subject))
-    value = Base.invokelatest(query, u, b[s2:s2, :])
-    value = value isa Tuple ? only(value) : value
-    @test value ≈ pk_reads(conc, [2]) atol=1e-12 rtol=1e-12
-    # The new subjects' effects are not the fit's coordinates: no density.
-    @test_throws "different program" density(replay, u)
+    level(s) = findfirst(==(s), sort(PK.subject))
+    # Subjects' covariates and reads under new labels, with their fitted
+    # effects. The binder's inputs keep the fit's level set of `subject`, so a
+    # draw of the fit is read in the fit's layout whatever the number of new
+    # subjects (snag `rk-replay-with-r-bf059724`).
+    binder = rk_design_binder(rk; resample_groups=[:subject])
+    for (rows, labels) in (([2], ["new"]), ([4, 2], ["n1", "n2"]))
+        design = merge(rows_of(PK, rows), (; subject=labels))
+        bound = binder(design)
+        query = ReactiveKernels.prepare(rk.model.spec;
+            have=(:unconstrained, :b_p_subject, keys(bound)...), want=(:conc,), bound)
+        value = Base.invokelatest(query, u, b[level.(PK.subject[rows]), :])
+        value = value isa Tuple ? only(value) : value
+        @test value ≈ pk_reads(conc, rows) atol=1e-12 rtol=1e-12
+        # The replay is a model of its own rows: its coordinates hold the new
+        # subjects' draws, so a draw of the fit has no density there.
+        @test_throws "layout total" density(reprocess(rk, design; resample_groups=[:subject]), u)
+    end
 end
 
 @stestset "a grouping whose levels are not frozen is refused" begin
@@ -541,14 +547,14 @@ end
         @test graph_value(replay, :loc, u) == graph_value(reprocess(rk, design), :loc, u)
         check_no_density(replay, u)
     end
-    # New subjects without responses take caller-supplied effects.
+    # New subjects without responses take caller-supplied effects, at a draw of
+    # the fit through the binder's inputs.
     rk = RKBRMI(RM.pk(PK))
     u = point(rk)
     b = graph_value(rk, :b_p_subject, u)
-    replay = reprocess(rk, without(merge(rows_of(PK, [2]), (; subject=["new"])), :y);
-        resample_groups=[:subject])
-    bound = rk_bound_data(replay)
-    query = ReactiveKernels.prepare(replay.model.spec;
+    bound = rk_design_binder(rk; resample_groups=[:subject])(
+        without(merge(rows_of(PK, [2]), (; subject=["new"])), :y))
+    query = ReactiveKernels.prepare(rk.model.spec;
         have=(:unconstrained, :b_p_subject, keys(bound)...), want=(:conc,), bound)
     s2 = findfirst(==("s2"), sort(PK.subject))
     value = Base.invokelatest(query, u, b[s2:s2, :])
