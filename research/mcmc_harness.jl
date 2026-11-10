@@ -9,7 +9,7 @@
 # MCMCDiagnosticTools` and `using DifferentiationInterface: AutoEnzyme` in the
 # including script.
 
-using Dates: now, Dates
+using Dates: now, Dates, DateTime, Day, @dateformat_str
 
 # ---- sampling -----------------------------------------------------------------
 
@@ -147,22 +147,45 @@ Write `receipt.tsv`: what a results directory's numbers are the numbers of.
 `entries` are further `key => value` pairs (models, data, seeds, ...).
 """
 function write_receipt(path, entries; n_chains, n_draws)
+    # A docs fit is done once and its results are committed; it is rerun when
+    # its model, data or priors change, at most about once a month (user
+    # direction of 2026-11-10, brief cth4h2, feedback 2). The previous receipt's
+    # start time guards against a casual rerun; BRM_DOCS_FIT_FORCE=1 overrides.
+    if isfile(path) && get(ENV, "BRM_DOCS_FIT_FORCE", "0") != "1"
+        for line in readlines(path)
+            key, value = split(line, '\t'; limit=2)
+            key == "started" || continue
+            # "2026-11-10 21:58 CET" or "2026-11-10T21:58:00": the first 16 characters.
+            stamp = length(value) >= 16 ? replace(value[1:16], ' ' => 'T') : ""
+            started = tryparse(DateTime, stamp, dateformat"yyyy-mm-ddTHH:MM")
+            if !isnothing(started) && now() - started < Day(30)
+                error("$path records a fit started $(value); a docs fit is rerun when its model, " *
+                      "data or priors change, at most about once a month. Set BRM_DOCS_FIT_FORCE=1 " *
+                      "to rerun it now.")
+            end
+        end
+    end
     repo = dirname(@__DIR__)
     git(args...) = try
         strip(read(`git -C $repo $args`, String))
     catch
         "unavailable"
     end
+    version = try
+        string(something(pkgversion(BayesianRegressionModels), "unavailable"))
+    catch
+        "unavailable"
+    end
     rows = vcat(
-        ["commit" => git("rev-parse", "HEAD"),
-         "uncommitted_changes" => isempty(git("status", "--porcelain")) ? "none" : "yes",
-         "started" => string(round(now(), Dates.Minute)),
-         "host" => "a Linux fleet host, $(Threads.nthreads()) Julia threads",
-         "julia" => string(VERSION),
-         "BayesianRegressionModels" => (try string(pkgversion(BayesianRegressionModels)) catch; "unavailable" end),
-         "sampler" => "WarmupHMC completion_warmup_mcmc, adaptive_centering_problem over the BridgeStan problem, AutoEnzyme",
-         "chains" => "$n_chains per fit, quorum $(max(1, div(3n_chains, 4))), $n_draws draws each"],
-        [String(k) => string(v) for (k, v) in entries])
+        [("commit", git("rev-parse", "HEAD")),
+         ("uncommitted_changes", isempty(git("status", "--porcelain")) ? "none" : "yes"),
+         ("started", Dates.format(now(), "yyyy-mm-dd HH:MM") * " local time"),
+         ("host", "a Linux fleet host, $(Threads.nthreads()) Julia threads"),
+         ("julia", string(VERSION)),
+         ("BayesianRegressionModels", version),
+         ("sampler", "WarmupHMC completion_warmup_mcmc, adaptive_centering_problem over the BridgeStan problem, AutoEnzyme"),
+         ("chains", "$n_chains per fit, quorum $(max(1, div(3n_chains, 4))), $n_draws draws each")],
+        [(String(k), string(v)) for (k, v) in entries])
     write_tsv(path, ["key", "value"], rows)
 end
 
