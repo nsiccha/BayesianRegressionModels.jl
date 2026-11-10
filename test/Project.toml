@@ -405,5 +405,8 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 0.1.132 / RKPPL 0.1.141) adds the pin-6 translations it requires too;
 # 51e6404f (RK 0.1.138 / RKPPL 0.1.142) contains 88813eb3 and translates a
 # ragged join's row partition in `prepare_data` with masked ragged gathers,
-# which test/rk_jax.jl's grouped-read case requires.
-rev = "51e6404fa91946693ebfcac9ae4f175da41f6b2a"
+# which test/rk_jax.jl's grouped-read case requires; 1701fb2e (RK 0.1.143 /
+# RKPPL 0.1.145) contains 51e6404f and admits a density factor on a
+# parameter-derived vector definition, which test/rk_statistical_library.jl's
+# car bodies require.
+rev = "1701fb2e1dd30d01305506d7c081486ac6496fcf"

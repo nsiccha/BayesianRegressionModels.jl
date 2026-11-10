@@ -738,8 +738,10 @@ end
         binder, trained = rk_design_binder(free; resample_groups=groups),
             rk_design_binder(rk; resample_groups=groups)
         @test !any(name -> name in state.fit_inputs, keys(binder.fitted))
-        # A resampled grouping's levels are the design's, never frozen.
-        @test (:subject in groups) != haskey(binder.fitted, :subject_fit_levels)
+        # The fitted level set is the state's, also for a resampled grouping:
+        # it sizes the block's draws as in the fit, so a draw of the fit keeps
+        # its coordinates (snag `rk-replay-with-r-bf059724`).
+        @test binder.fitted.subject_fit_levels == state.fitted.values.subject_fit_levels
         # The second and third designs are of the first one's kind: bound into
         # its lowering without planning.
         for design in (rows(TRAIN, 3:9), rows(TRAIN, 11:17), rows(TRAIN, 13:16))
@@ -779,7 +781,10 @@ end
     free = RKBRMI(build(responses), state; resample_groups=groups)
     for fit in (rk, free), (base, next) in ((responses, more),
             (without(responses, :y), without(more, :y)))
-        planned(design) = rk_bound_data(reprocess(fit, design; resample_groups=groups))
+        # A binder's inputs hold the fit's level set of `subject` (snag
+        # `rk-replay-with-r-bf059724`); every other input is the replay's.
+        planned(design) = merge(rk_bound_data(reprocess(fit, design; resample_groups=groups)),
+            (; subject_fit_levels=rk_bound_data(rk).subject_fit_levels))
         binder = rk_design_binder(fit; resample_groups=groups)
         for design in (base, next)
             inputs = binder(design)

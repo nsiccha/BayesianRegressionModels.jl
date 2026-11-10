@@ -36,7 +36,7 @@ function library_check(name, body, columns)
     mod = Module(gensym(:BRMRetypedLibrary))
     Core.eval(mod, :(using ReactiveKernelsPPL))
     for helper in (:hsgp_rho_floors, :hsgp_periodic_rho_floor, :hsgp_sqrt_spd,
-            :hsgp_periodic_sqrt_spd, :hsgp_grouped_sqrt_spd)
+            :hsgp_periodic_sqrt_spd, :hsgp_grouped_sqrt_spd, :car_graph)
         Core.eval(mod, :(const $helper = $(getproperty(Prep, helper))))
     end
     definition = Meta.parse(sprint(Base.show_unquoted, getproperty(BRM._BRM_STATISTICAL_MODELS, name)))
@@ -179,4 +179,100 @@ end
         (q(plus) - q(minus)) / (2h)
     end
     @test g ≈ fd atol=2e-5 rtol=2e-5
+end
+
+# `rkppl_model(:car_icar)` / `(:car_bym2)` over raw labels, on the graph above
+# (component {a, b, c, d, h} with h rowless, component {e, f}, island g), against
+# an independent oracle of the car term's law (brm-use terms.md, "Areal spatial
+# effects"): the ICAR density over the label edges, one soft sum-to-zero
+# `Normal(0, 0.001 n_c)` per hand-listed component, the BYM2 scaling factor from
+# the dense pseudo-inverse of each component's Laplacian, and each row's effect
+# by its label. Only the label -> coordinate map is read from `car_graph`.
+@stestset "rkppl_model car_icar and car_bym2 bodies" begin
+    area = ["a", "b", "c", "d", "e", "f", "g", "a", "e"]
+    from, to = ["a", "b", "c", "a", "d", "e"], ["b", "c", "d", "c", "h", "f"]
+    y = collect(range(-0.3, 0.4; length=length(area)))
+    columns = (; area, from, to, y)
+    graph = Prep.car_graph(area, from, to)
+    nodes = sort(unique(vcat(area, from, to)))
+    components = (["a", "b", "c", "d", "h"], ["e", "f"])
+    node(label) = findfirst(==(label), nodes)
+    field(label) = graph.struct_pos[findfirst(==(label), graph.nodes)]
+    function scaling(members)
+        Q = zeros(length(members), length(members))
+        for (i, j) in zip(from, to)
+            i in members && j in members || continue
+            a, b = findfirst(==(i), members), findfirst(==(j), members)
+            Q[a, a] += 1; Q[b, b] += 1; Q[a, b] -= 1; Q[b, a] -= 1
+        end
+        exp(mean(log.(diag(pinv(Q)))))
+    end
+    scales = Dict(label => scaling(c) for c in components for label in c)
+    graph_data = (; y, area_pos=graph.area, node1=graph.node1, node2=graph.node2,
+        n_nodes=graph.n_nodes, n_struct=graph.n_struct, comp_start=graph.comp_start,
+        comp_size=graph.comp_size, struct_pos=graph.struct_pos, is_struct=graph.is_struct,
+        inv_scale=graph.inv_scale)
+    recipes = Dict(
+        :car_icar => :(begin
+            sigma ~ HalfNormal(1)
+            phi[1:n_struct] ~ ICAR(node1, node2)
+            cs = cumsum(vcat(0.0, phi))
+            phi_sums = cs[comp_start .+ comp_size] .- cs[comp_start]
+            phi_sums .~ Normal.(0, 0.001 .* comp_size)
+            effects = sigma .* vcat(phi, 0.0)[struct_pos]
+            y .~ Normal.(effects[area_pos], 1)
+        end),
+        :car_bym2 => :(begin
+            sigma ~ HalfNormal(1)
+            rho ~ Beta(0.5, 0.5)
+            theta[1:n_nodes] .~ Normal.(0, 1)
+            phi[1:n_struct] ~ ICAR(node1, node2)
+            cs = cumsum(vcat(0.0, phi))
+            phi_sums = cs[comp_start .+ comp_size] .- cs[comp_start]
+            phi_sums .~ Normal.(0, 0.001 .* comp_size)
+            field = vcat(phi, 0.0)[struct_pos]
+            effects = sigma .* (sqrt(rho) .* sqrt.(inv_scale) .* field .+
+                sqrt.(1 .- rho .* is_struct) .* theta)
+            y .~ Normal.(effects[area_pos], 1)
+        end))
+    for name in (:car_icar, :car_bym2)
+        @testset "$name" begin
+            body = :(begin r ~ owned(area, from, to); y .~ Normal.(r, 1) end)
+            bound, built, u = library_check(name, body, columns)
+            nt = constrain(built.layout, u).r
+            phi = nt.phi
+            @test length(phi) == 7
+            prior = logpdf(truncated(Normal(), 0, Inf), nt.sigma) -
+                0.5 * sum(abs2(phi[field(i)] - phi[field(j)]) for (i, j) in zip(from, to)) +
+                sum(logpdf(Normal(0, 0.001 * length(c)), sum(phi[field(l)] for l in c))
+                    for c in components)
+            effect = if name === :car_icar
+                label -> haskey(scales, label) ? nt.sigma * phi[field(label)] : 0.0
+            else
+                @test length(nt.theta) == length(nodes)
+                prior += logpdf(Beta(0.5, 0.5), nt.rho) + sum(logpdf.(Normal(), nt.theta))
+                label -> haskey(scales, label) ?
+                    nt.sigma * (sqrt(nt.rho / scales[label]) * phi[field(label)] +
+                        sqrt(1 - nt.rho) * nt.theta[node(label)]) :
+                    nt.sigma * nt.theta[node(label)]
+            end
+            @test Base.invokelatest(prepare_query(built, bound, :prior), u) ≈ prior rtol=1e-12
+            @test Base.invokelatest(prepare_query(built, bound, :likelihood), u) ≈
+                sum(logpdf.(Normal.(effect.(area), 1), y)) rtol=1e-12
+            # brm-use's data-bound recipe (references/rkppl-bodies.md): the same
+            # statements over `car_graph`'s fields bound as data, the form
+            # `jax_source` translates. Same coordinates, same densities.
+            recipe = recipes[name]
+            mod = Module(gensym(:BRMCarRecipe))
+            Core.eval(mod, :(using ReactiveKernelsPPL))
+            dbound = bind_data(lower_rkppl(recipe, keys(graph_data); mod, conditioned=(:y,)),
+                graph_data)
+            dbuilt = build_kernel(dbound)
+            @test dbuilt.layout.total == built.layout.total
+            for preset in (:prior, :likelihood)
+                @test Base.invokelatest(prepare_query(dbuilt, dbound, preset), u) ==
+                    Base.invokelatest(prepare_query(built, bound, preset), u)
+            end
+        end
+    end
 end

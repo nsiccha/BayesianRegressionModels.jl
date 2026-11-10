@@ -23,16 +23,27 @@
     rk_design_binder(rk::RKBRMI; resample_groups=(), held_out=<the fit's>) -> RKDesignBinder
 
 The graph inputs of new designs (prediction scenarios) for the fitted model
-`rk`, built once. `binder(design)` returns the same inputs as
-`rk_bound_data(reprocess(rk, design; resample_groups, held_out))`, as a
+`rk`, built once, at a draw of the fit. `binder(design)` returns the inputs
+`rk_bound_data(reprocess(rk, design; resample_groups, held_out))` holds, as a
 `NamedTuple`, without planning, emitting or lowering the program again: the
 first design of each kind (the same columns, column types, empty columns and
 missing values) is replayed in full, and every later one is checked and bound
 into that replay's lowered program.
 
+- `resample_groups=[:g]` (new levels of `g`): the inputs keep the fit's level
+  set of `g` (`g_fit_levels`), which sizes `g`'s standardized draws as in the
+  fit, while the rows read the design's own levels by position (`g_level`). So
+  `u` is a draw of the fit for any number of new levels, and the new levels'
+  effects come in HAVE (`have=(:unconstrained, :b_g, ...)`, one row per new
+  level in level order). This is where `binder(design)` differs from
+  `rk_bound_data(reprocess(...))`: that replay is a model of its own rows, whose
+  new levels' standardized draws are its own coordinates. A block whose draws
+  the design's own columns size (`gr(g, by = s)`, or a multi-membership block of
+  a data-free fit) is refused on a design that gives it other levels than the
+  fit's.
 - `binder.fitted` holds the inputs no design changes (the training columns
   behind fitted anchors, a `car(...)` term's fitted graph, `constant(...)`
-  values). Bind them once with
+  values, a resampled grouping's fitted level set). Bind them once with
   `ReactiveKernels.prepare(spec; have, want, bound=binder.fitted)` and pass the
   rest per design; values that read only them are then computed once.
 - A numeric scalar a design omits (a prior argument the fitted state carries)
@@ -65,6 +76,9 @@ struct RKDesignBinder{B<:RKBRMI}
     # The fit's data columns: what a design's kind is read from.
     columns::Vector{Symbol}
     fitted::NamedTuple
+    # The fit's level sets of the resampled groupings, which keep a draw of the
+    # fit in the fit's coordinates (`_rk_fit_coordinate_levels`).
+    levels::Any
     classes::Dict{Any,Any}
     lock::ReentrantLock
 end
@@ -114,8 +128,10 @@ function rk_design_binder(rk::RKBRMI; resample_groups=(),
         "$prefix: `resample_groups` names $(sort!(collect(unknown))), which " *
         "is not a data column of the fitted model")
     groups = Tuple(sort!(collect(groups)))
+    levels = _rk_fit_coordinate_levels(rk, groups)
     RKDesignBinder(rk, groups, Tuple(held_out), sort!(collect(training)),
-        _rk_design_fitted(rk, groups), Dict{Any,Any}(), ReentrantLock())
+        merge(_rk_design_fitted(rk, groups), levels.values), levels,
+        Dict{Any,Any}(), ReentrantLock())
 end
 
 # The data columns of the fit `rk` replays: its own, or on a data-free backend
@@ -127,7 +143,156 @@ _rk_fit_constant_names(rk::RKBRMI) = rk.fitted === nothing ?
     Set{Symbol}(c.name for c in last(_brm_resolve_constants(parent(rk)))) :
     Set{Symbol}(keys(_rk_fitted_state(rk).constants))
 
-(binder::RKDesignBinder)(design) = _rk_plan_columns(_rk_design_plan(binder, design))
+function (binder::RKDesignBinder)(design)
+    plan = _rk_design_plan(binder, design)
+    _rk_check_fit_coordinates(binder.levels, plan; prefix="RK design binder")
+    merge(_rk_plan_columns(plan), binder.levels.values)
+end
+
+# A draw of the fit on a design that resamples groupings. The design's binding
+# sizes each resampled block's standardized draws (`b_g.z`) by the design's
+# levels, and RKPPL unpacks `:unconstrained` with the binding's layout (a query
+# reads its binding's layout, never its build's). So a cut at a draw of the fit
+# needs the block sized by the fit's levels. That size is the block's level
+# set, a data-only definition `g_fit_levels = brm_fit_levels(g_fit)`, or
+# `b_mm_groups = vcat(g1, g2)` for multi-membership. Its value is the first
+# argument of the block's component, and every other read of it is a data-only
+# definition that the inputs already hold, such as the rows' positions
+# `g_level`. With the fit's value in its place, the block keeps the fit's
+# coordinates and the rows keep the design's level positions. The caller
+# supplies the new levels' effects (`b_g`) in HAVE, as with any number of new
+# levels. A `gr(g, by = s)` block reads its sizes from the raw grouping columns
+# themselves, and a data-free fit holds no multi-membership level set. Those
+# blocks are uncovered: a design whose levels give them other coordinates than
+# the fit's is refused.
+struct _RKFitCoordinateLevels
+    values::NamedTuple
+    sized::Set{Symbol}
+    uncovered::Vector{String}
+    fit_names::Vector{Symbol}
+end
+
+function _rk_fit_coordinate_levels(rk::RKBRMI, groups)
+    none = _RKFitCoordinateLevels((;), Set{Symbol}(), String[], Symbol[])
+    isempty(groups) && return none
+    statements = [_brm_undoc(s) for s in _rk_retained_program(rk).main.args
+        if !(s isa LineNumberNode)]
+    definitions = Dict{Symbol,Any}(s.args[1] => s.args[2] for s in statements
+        if Meta.isexpr(s, :(=), 2) && s.args[1] isa Symbol)
+    twins = _rk_plan_fit_inputs(rk.plan)
+    inputs = Set{Symbol}(keys(rk_bound_data(rk)))
+    values = Pair{Symbol,Any}[]
+    uncovered = String[]
+    for bucket in _rk_replay_buckets(rk.plan)
+        grouping = bucket.grouping
+        columns = Symbol[grouping.columns...]
+        grouping.by === nothing || push!(columns, grouping.by)
+        any(in(groups), columns) || continue
+        name = _rk_bucket_level_set(grouping, definitions, twins)
+        value = name === nothing || !_rk_sizes_only(statements, name, inputs) ? nothing :
+            _rk_fitted_level_set(rk, name, definitions[name], twins)
+        if value === nothing
+            push!(uncovered, string("the `", grouping.form, "(...)` block over ",
+                join(("`$c`" for c in columns), ", ")))
+        else
+            any(p -> first(p) === name, values) || push!(values, name => only(value))
+        end
+    end
+    isempty(values) && isempty(uncovered) && return none
+    levels = NamedTuple{Tuple(first.(values))}(Tuple(last.(values)))
+    sized = Set{Symbol}(_rk_record_root(s.args[2]) for s in statements
+        if Meta.isexpr(s, :call, 3) && s.args[1] === :~ && Meta.isexpr(s.args[3], :call) &&
+            length(s.args[3].args) >= 2 && s.args[3].args[2] in keys(levels))
+    fit_names = rk.fitted === nothing ? Vector{Symbol}(_rk_layout_coordinate_names(rk)) :
+        copy(_rk_fitted_state(rk).coordinates)
+    _RKFitCoordinateLevels(levels, sized, uncovered, fit_names)
+end
+
+# The data-only definition that sizes a block's standardized draws: a plain
+# grouping's fitted level set (`brm_fit_levels` of its fit-role input), or a
+# multi-membership block's joint labels (`vcat` of its columns).
+function _rk_bucket_level_set(grouping, definitions, twins)
+    if grouping.form === :plain && !_rk_joins_columns(grouping)
+        column = only(grouping.columns)
+        for (name, rhs) in definitions
+            Meta.isexpr(rhs, :call, 2) && rhs.args[1] === :brm_fit_levels &&
+                get(twins, rhs.args[2], nothing) === column && return name
+        end
+    elseif grouping.form === :mm
+        joint = Expr(:call, :vcat, grouping.columns...)
+        for (name, rhs) in definitions
+            isequal(rhs, joint) && return name
+        end
+    end
+    nothing
+end
+
+# Whether the level set `name` only sizes blocks: it is the first argument of
+# each component that reads it, and every other statement reading it is a
+# data-only definition the inputs hold (the rows' level positions), which a cut
+# takes as given rather than computing again from the level set.
+function _rk_sizes_only(statements, name, inputs)
+    reads(x) = name in _rk_source_symbols!(Set{Symbol}(), x)
+    for s in statements
+        if Meta.isexpr(s, :call, 3) && s.args[1] === :~
+            rhs = s.args[3]
+            reads(rhs) || continue
+            Meta.isexpr(rhs, :call) && length(rhs.args) >= 2 && rhs.args[2] === name &&
+                !reads(rhs.args[3:end]) || return false
+        elseif Meta.isexpr(s, :(=), 2) && s.args[1] isa Symbol
+            s.args[1] === name || !reads(s.args[2]) || s.args[1] in inputs || return false
+        elseif reads(s)
+            return false
+        end
+    end
+    true
+end
+
+# The fit's value of the level set `name`, as `(value,)`, or `nothing`. A
+# data-free fit holds it among its frozen values. A data-bound backend's own
+# binding holds it when every input its definition reads is the training
+# column; a backend that resampled them itself does not hold the fit's.
+function _rk_fitted_level_set(rk::RKBRMI, name, rhs, twins)
+    if rk.fitted !== nothing
+        frozen = _rk_fitted_state(rk).fitted.values
+        return haskey(frozen, name) ? (frozen[name],) : nothing
+    end
+    bound = rk_bound_data(rk)
+    haskey(bound, name) || return nothing
+    training = _rk_frozen_training(parent(rk))
+    for input in _rk_source_symbols!(Set{Symbol}(), rhs)
+        haskey(bound, input) || continue
+        column = get(twins, input, input)
+        haskey(training, column) && isequal(bound[input], training[column]) || return nothing
+    end
+    (bound[name],)
+end
+
+# A design's binding against the fit's coordinates: every coordinate the level
+# sets do not size must be the fit's, so a block they do not cover (a
+# `gr(g, by = s)` block) must have the fit's level counts on this design.
+function _rk_check_fit_coordinates(levels::_RKFitCoordinateLevels, plan; prefix)
+    isempty(levels.uncovered) && return nothing
+    outside(names) = [n for n in names if !(_rk_record_root(n) in levels.sized)]
+    design = outside(_rk_plan_coordinate_names(plan))
+    fitted = outside(levels.fit_names)
+    design == fitted && return nothing
+    counts(names) = foldl((d, n) -> (d[n] = get(d, n, 0) + 1; d), _rk_record_root.(names);
+        init=Dict{Symbol,Int}())
+    a, b = counts(design), counts(fitted)
+    roots = sort!([r for r in union(keys(a), keys(b)) if get(a, r, 0) != get(b, r, 0)]; by=string)
+    isempty(roots) && (roots = sort!(collect(keys(a)); by=string))
+    error("$prefix: this design gives $(join(("`$r`" for r in roots), ", ")) other " *
+        "coordinates than the fit ($(length(design)) on the design, $(length(fitted)) " *
+        "fitted). $(uppercasefirst(join(levels.uncovered, "; "))) sizes its draws by the design's own " *
+        "columns, which no fitted level set replaces, so a draw of the fit does not apply " *
+        "to this design. Predict it on a design with the fit's levels of those columns, or " *
+        "evaluate `reprocess(rk, design; resample_groups)`, whose coordinates are the " *
+        "design's own.")
+end
+
+# The coordinate names a bound plan packs (ReactiveKernels package extension).
+function _rk_plan_coordinate_names end
 
 # A design's RKPPL plan: bound into the lowered program of its kind, or the
 # planned replay's own binding for the first design of a kind and for a kind
