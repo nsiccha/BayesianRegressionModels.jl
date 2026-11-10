@@ -18,6 +18,14 @@
 # statement's partition after checking its own column's axes, as
 # `brm_ragged_rows` checks them.
 #
+# The partition, its checks and the ordered join's sort are written once
+# (`src/ragged_rows.jl`, snag `jax-source-brm-r-f6503407`): each is a
+# `@_brm_traceable` definition that BRM's RK extension also registers as RK
+# `@traceable` source, so `jax_source` translates the RK graph's partition
+# (`test/rk_jax.jl`). The graph helpers take the join's axis columns as one
+# tuple. The ordered join's merge sort orders as Base's stable sort by `isless`
+# does, NaN last, except that a -0.0 and a 0.0 tie.
+#
 # Run: julia --startup-file=no --project=test test/ragged_partition.jl
 using Test
 using BayesianRegressionModels
@@ -64,7 +72,7 @@ partition(ev, labels) = BRM._brm_kernel_ragged_partition(:x, :g, ev, labels)
     @test partition([3, 1], UInt16[1, 3]) == [[2], [1]]
     # Categorical labels, unwrapped by the graph's own entry point.
     raw = categorical(["b", "a", "b", "c"])
-    @test BRM.brm_ragged_rows([:x, :g, :c], raw, ["a", "b", "c"]) == [[2], [1, 3], [4]]
+    @test BRM.brm_ragged_rows([:x, :g, :c], raw, ["a", "b", "c"], ()) == [[2], [1, 3], [4]]
     # A zero-row axis, and cells with no rows.
     @test partition(Int[], [1, 2]) == [Int[], Int[]]
     @test partition([2, 2], [1, 2, 3]) == [Int[], [1, 2], Int[]]
@@ -103,7 +111,7 @@ outcome(f) = try f(); :ok catch e; sprint(showerror, e) end
         @test BRM._brm_labels_name_cells(ev, cells) ==
             all(!iszero, BRM._brm_label_positions(ev, cells))
     end
-    # brm_ragged_rows(names, groups, cells, axes...) against the binder's check,
+    # brm_ragged_rows(names, groups, cells, axes) against the binder's check,
     # on accepted joins and on each refusal.
     joins = [
         ([3, 1, 3, 2], [1, 2, 3], ([0.1, 0.2, 0.3, 0.4],)),          # accepted
@@ -118,7 +126,7 @@ outcome(f) = try f(); :ok catch e; sprint(showerror, e) end
     ]
     for (groups, cells, axes) in joins
         names = [:x, :g, :c, (:a for _ in axes)...]
-        built = outcome(() -> BRM.brm_ragged_rows(names, groups, cells, axes...))
+        built = outcome(() -> BRM.brm_ragged_rows(names, groups, cells, axes))
         @test built == outcome(() -> BRM._brm_check_ragged_rows(:x, :g, groups, :c, cells,
             names[4:end], axes))
         # The ordered join, with an order column of the right length, too short,
@@ -126,7 +134,7 @@ outcome(f) = try f(); :ok catch e; sprint(showerror, e) end
         length(groups) < 2 && continue
         for times in ([reverse(eachindex(groups))...], Int[9], [missing; ones(length(groups) - 1)])
             ordered = outcome(() -> BRM.brm_ragged_rows_ordered([:x, :g, :c, :t, names[4:end]...],
-                groups, cells, times, axes...))
+                groups, cells, times, axes))
             @test ordered == outcome(() -> BRM._brm_check_ragged_rows(:x, :g, groups, :c, cells,
                 names[4:end], axes; order=:t, times))
         end
@@ -152,40 +160,87 @@ outcome(f) = try f(); :ok catch e; sprint(showerror, e) end
         axis = (zeros(length(groups)),)
         check() = BRM._brm_check_ragged_rows(:x, :g, groups, :c, cells, [:a], axis;
             observed=true)
-        build() = BRM.brm_ragged_rows([:x, :g, :c, :a], groups, cells, axis...)
+        build() = BRM.brm_ragged_rows([:x, :g, :c, :a], groups, cells, axis)
         check(); build()
         @test @allocated(check()) < 8 * length(groups) < @allocated(build())
     end
 end
 
 shared_bytes(rows, names, groups, axis) =
-    @allocated BRM.brm_ragged_rows_shared(rows, names, groups, axis)
+    @allocated BRM.brm_ragged_rows_shared(rows, names, groups, (axis,))
 
 @testset "a partition allocates its cells, and a shared read only checks its axes" begin
     # One integer per row (the cells) plus per-cell and lookup overhead: no
     # per-row position buffer beside the cells.
     for (groups, cells) in ((fill(7, 24_000), [7]), (repeat(1:400; inner=60), collect(1:400)),
             (repeat(["n$(j)" for j in 1:400]; inner=60), ["n$(j)" for j in 1:400]))
-        build() = BRM.brm_ragged_rows([:x, :g, :c], groups, cells)
+        build() = BRM.brm_ragged_rows([:x, :g, :c], groups, cells, ())
         build()
         @test @allocated(build()) < 12 * length(groups)
     end
     # `brm_ragged_rows_shared` returns the partition it is given, unchanged,
     # and refuses a column off the join's axis with `brm_ragged_rows`'s message.
     groups, cells = [3, 1, 3, 2], [1, 2, 3]
-    rows = BRM.brm_ragged_rows([:x, :g, :c, :x], groups, cells, [0.1, 0.2, 0.3, 0.4])
+    rows = BRM.brm_ragged_rows([:x, :g, :c, :x], groups, cells, ([0.1, 0.2, 0.3, 0.4],))
     shared(axes...) = BRM.brm_ragged_rows_shared(rows, [:z, :g, (:a for _ in axes)...],
-        groups, axes...)
+        groups, axes)
     @test shared([1, 2, 3, 4]) === rows
     @test shared() === rows
     @test shared(zeros(4), ones(4)) === rows
     for axes in (([1, 2, 3],), (zeros(4), ones(5)))
         @test outcome(() -> shared(axes...)) == outcome(() -> BRM.brm_ragged_rows(
-            [:z, :g, :c, (:a for _ in axes)...], groups, cells, axes...))
+            [:z, :g, :c, (:a for _ in axes)...], groups, cells, axes))
     end
     @test occursin("`z` read through `g`: `z` has 3 entries (data vector `a`) but `g` has 4",
         outcome(() -> shared([1, 2, 3])))
     names, axis = [:z, :g, :a], zeros(4)
     shared_bytes(rows, names, groups, axis)
     @test shared_bytes(rows, names, groups, axis) == 0
+end
+
+@testset "the ordered join sorts as Base's stable sort by isless" begin
+    rng = Xoshiro(20261110)
+    for n in (0, 1, 2, 3, 7, 64, 257)
+        for times in (rand(rng, 1:5, n), rand(rng, n), [rand(rng, (1.5, NaN, 0.5, 2.0)) for _ in 1:n],
+                [rand(rng, ("b", "a", "c")) for _ in 1:n])
+            @test BRM._brm_stable_order(times) == sortperm(times; alg=Base.Sort.DEFAULT_STABLE)
+        end
+    end
+    # A -0.0 and a 0.0 tie (row order), where `isless` puts -0.0 first.
+    @test BRM._brm_stable_order([0.0, -0.0, 0.0]) == [1, 2, 3]
+    # Each cell's rows in ascending time, ties in row order, as before.
+    for _ in 1:20
+        cells = collect(1:6)
+        groups = rand(rng, 1:7, 40)
+        times = rand(rng, (0.5, 1.0, 2.0, NaN), 40)
+        reference = map(reference_partition(groups, cells)) do cell
+            sort(cell; by=r -> times[r], alg=Base.Sort.DEFAULT_STABLE)
+        end
+        @test BRM.brm_ragged_rows_ordered([:x, :g, :c, :t], groups, cells, times, ()) ==
+            reference
+        rows = BRM._brm_kernel_ragged_partition(:x, :g, groups, cells)
+        @test BRM._brm_kernel_order_rows!(rows, times, :t, :g, 40) == reference
+    end
+end
+
+@testset "each recorded partition definition can be registered for RK" begin
+    defs = BRM._BRM_TRACEABLE_DEFINITIONS
+    names = map(BRM._brm_traceable_name, defs)
+    @test allunique(names)
+    @test issubset([:brm_ragged_rows, :brm_ragged_rows_ordered, :brm_ragged_rows_shared,
+        :_brm_ragged_partition, :_brm_partition_rows], names)
+    for def in defs
+        untyped = BRM._brm_untyped_definition(def)
+        formals = untyped.args[1].args[2:end]
+        @test all(f -> f isa Symbol, formals)
+        @test length(formals) == length(BRM._brm_traceable_formals(def))
+        # The typed method Julia calls is the one defined here.
+        f = getfield(BRM, BRM._brm_traceable_name(def))
+        @test any(m -> m.module === BRM && length(m.sig.parameters) == length(formals) + 1,
+            methods(f))
+    end
+    @test all(n -> isdefined(BRM, n), BRM._brm_traceable_callees())
+    @test_throws ArgumentError BRM._brm_traceable_formals(:(f(; k = 1) = k))
+    @test_throws "needs a typed formal" BRM.var"@_brm_traceable"(LineNumberNode(0), BRM,
+        :(_brm_untyped_probe(x) = x))
 end
