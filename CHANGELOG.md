@@ -12,6 +12,26 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.271
+
+- Changed: an RKBRMI `cdar(step; by = group, cor = C)` walk is one program for
+  every dataset of its declaration, and costs `O(P W)` per evaluation (`P`
+  groups, `W` steps) instead of `O(P W²)`. The program computes the walk's
+  groups and steps from fit-role inputs (`brm_fit_levels(<column>_fit)`), so
+  `P` and `W` are inputs, not literals: networks of 2, 6 and 12 stations, or
+  other day grids, share one RKPPL program and one JAX module. The walk is one
+  recurrence per group, `d[1] = sigma e[1]`,
+  `d[w] = rho d[w - 1] + sigma sqrt(1 - rho^2) e[w]`, in the RK kernel
+  `brm_cdar_walk`, replacing the closed form `sigma * (L * eta) * T` with
+  its `W × W` decay matrix (and the bound `lag`, `mask` and `first` columns,
+  `W²` numbers each). Coordinates, densities and gradients are unchanged, and
+  a cell still reads only its own group's innovations (or the groups a
+  correlated `C` couples to it), so `brm_nlme_view` and per-unit Laplace and
+  SVI read the walk as before: each group's innovations are gathered at its
+  positions in the grid, bound as data (`brm_walk_rows`). Rows find their
+  group and step by binary search (`brm_walk_positions`). (Todo `0vwe5uy`; user principles `0ikeidi`, sizes are
+  runtime inputs, and `0v0xrxl`, never quadratic.)
+
 ## 0.2.270
 
 - Changed: an RKBRMI's ragged-join row partition — `brm_ragged_rows`,
