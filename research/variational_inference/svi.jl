@@ -7,7 +7,7 @@
 #
 #   Run:  julia --project=test research/variational_inference/svi.jl [sections] [cache-dir]
 #         sections: comma-separated subset of probe,fit,stream,combine (default: fit,stream,combine)
-#         cache-dir: where NUTS draws are kept between sections (default: a temporary directory)
+#         cache-dir: persistent fit cache (default: research/variational_inference/cache)
 #   Then: julia --project=test research/variational_inference/figures.jl
 #
 # Everything above `site_counts_model` is also evaluated by the docs build
@@ -65,29 +65,35 @@ end
 # ═══════════════════════════════════════════════════════════════════════════════
 
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme, WarmupHMC, MCMCDiagnosticTools
-using Serialization
+using Serialization, SHA, Dates
+using Treebars: with_progress, snapshot_progress
 using DifferentiationInterface: AutoEnzyme
 import LogDensityProblems
 
 const RESULTS = joinpath(@__DIR__, "results")
+const SOURCE_SHA256 = bytes2hex(sha256(read(@__FILE__)))
+const RUN_STARTED = string(now(UTC))
+const RUN_COMMIT = readchomp(`git -C $(@__DIR__) rev-parse HEAD`)
+const RUN_DIRTY = !isempty(readchomp(`git -C $(@__DIR__) status --porcelain`))
 
 # ── The two fits of the full data ─────────────────────────────────────────────
 
 # SVI: one call. The units are the sites; each iteration draws a batch of 32 of them.
-fit_svi(rk; seed=1) = brm_svi_fit(rk; batch_size=32, rng=Xoshiro(seed), ndraws=2000)
+fit_svi(rk; seed=1, progress=nothing) =
+    brm_svi_fit(rk; batch_size=32, rng=Xoshiro(seed), ndraws=2000, progress)
 
-# NUTS: four adaptive chains of WarmupHMC on the same log density, one after the
-# other, 1000 draws each after warm-up. Each chain starts near the origin of the
+# NUTS: four adaptive chains of WarmupHMC on the same log density, with a quorum
+# of three completed chains and at least 4000 draws each after warm-up.
+# Run Julia with one thread for these Enzyme gradients. Each chain starts near the origin of the
 # unconstrained coordinates (unit random-effect sds, no site effects), jittered per
 # chain, with a unit diagonal metric.
-function fit_nuts(rk; seed=10, chains=4, n_draws=1000)
+function fit_nuts(rk; seed=10, chains=4, n_draws=4000, progress=nothing)
     problem = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
     d = LogDensityProblems.dimension(problem)
-    map(1:chains) do c
-        rng = Xoshiro(seed + c)
-        init = (; position=0.1 .* randn(rng, d), squared_scale=ones(d))
-        adaptive_warmup_mcmc(rng, problem; init, n_draws)
-    end
+    rngs = [Xoshiro(seed + c) for c in 1:chains]
+    init = [(; position=0.1 .* randn(rng, d), squared_scale=ones(d)) for rng in rngs]
+    completion_warmup_mcmc(rngs, problem;
+        init, n_draws, min_completed=max(1, div(3chains, 4)), progress).results
 end
 
 # ── Summaries ─────────────────────────────────────────────────────────────────
@@ -100,11 +106,12 @@ function nuts_diagnostics(chains)
     samples = cat((permutedims(c.posterior_position[:, 1:n]) for c in chains)...; dims=3)
     samples = permutedims(samples, (1, 3, 2))           # draws × chains × parameters
     divergent = sum(c.n_divergent_samples for c in chains)
+    retained = sum(size(c.posterior_position, 2) for c in chains)
     (; max_rhat=maximum(MCMCDiagnosticTools.rhat(samples)),
        min_bulk_ess=minimum(MCMCDiagnosticTools.ess(samples; kind=:bulk)),
        min_tail_ess=minimum(MCMCDiagnosticTools.ess(samples; kind=:tail)),
-       divergent, retained=n * length(chains),
-       divergent_percent=100divergent / (n * length(chains)),
+       divergent, retained, chains=length(chains),
+       divergent_percent=100divergent / retained,
        gradient_evaluations=sum(c.sampling_evaluation_counter for c in chains))
 end
 
@@ -149,27 +156,117 @@ end
 fmt(x::AbstractFloat) = string(round(x; sigdigits=6))
 fmt(x) = string(x)
 
+# Cache data, never compiled models or AD workspaces. A figure or prose change
+# reuses the measured fits. Change RECIPE when changing a model or fit control;
+# changed data or a different recipe require a new cache directory explicitly.
+const RECIPE = "site-counts-v2-quorum"
+function cached(f, cache, name, input; progress=nothing)
+    path = joinpath(cache, name * ".jls")
+    io = IOBuffer()
+    serialize(io, (RECIPE, input))
+    digest = bytes2hex(sha256(take!(io)))
+    if isfile(path)
+        saved = deserialize(path)
+        saved.digest == digest || error("Cache input changed for $name; choose a new cache directory for an intentional refit.")
+        println("REUSE ", name)
+        return saved.result
+    end
+    result = with_progress(progress; description=name) do p
+        f(p)
+    end
+    provenance = (; recipe=RECIPE, created=string(now(UTC)), started=RUN_STARTED,
+                    commit=RUN_COMMIT, uncommitted_changes=RUN_DIRTY, host="a Linux fleet host", julia=string(VERSION),
+                    brm=string(pkgversion(BayesianRegressionModels)),
+                    warmuphmc=string(pkgversion(WarmupHMC)),
+                    source_sha256=SOURCE_SHA256)
+    serialize(path * ".tmp", (; digest, provenance, result))
+    mv(path * ".tmp", path)
+    println("SAVED ", name)
+    result
+end
+
+function write_receipt(cache; status)
+    rows = Pair{String,String}[
+        "recipe" => RECIPE,
+        "status" => status,
+        "summary generated (UTC)" => string(now(UTC)),
+        "summary source SHA256" => SOURCE_SHA256,
+        "commit" => RUN_COMMIT,
+        "uncommitted_changes" => string(RUN_DIRTY),
+        "started" => RUN_STARTED,
+        "host" => "a Linux fleet host",
+        "harness" => "BRM minibatch SVI and WarmupHMC completion sampler; " * RECIPE,
+        "Julia" => string(VERSION),
+        "BayesianRegressionModels" => string(pkgversion(BayesianRegressionModels)),
+        "WarmupHMC" => string(pkgversion(WarmupHMC)),
+        "Enzyme" => string(pkgversion(Enzyme)),
+        "threads" => string(Threads.nthreads()),
+        "data seed" => "1",
+        "full SVI seed / draws / batch size" => "1 / 2000 / 32",
+        "NUTS draws per chain / requested chains / quorum" => "4000 / 4 / 3",
+        "NUTS seeds" => "full: 11–14; window w: 201+10w through 204+10w",
+        "streaming / batch / slice SVI seeds" => "window w / 100+w / slice index",
+    ]
+    for name in sort(readdir(cache))
+        endswith(name, ".jls") || continue
+        name == "nuts_full.jls" && continue # superseded 1000-draw reference, kept locally
+        saved = deserialize(joinpath(cache, name))
+        push!(rows, "$name input SHA256" => saved.digest)
+        push!(rows, "$name fitted (UTC)" => saved.provenance.created)
+        push!(rows, "$name fit source SHA256" => saved.provenance.source_sha256)
+        result = saved.result
+        if hasproperty(result, :diag)
+            push!(rows, "$name seconds" => fmt(result.seconds))
+            push!(rows, "$name divergent" => string(result.diag.divergent))
+            push!(rows, "$name omitted chains" => string(4 - result.diag.chains))
+            push!(rows, "$name dimension" => string(size(result.draws, 1)))
+        elseif hasproperty(result, :seconds)
+            push!(rows, "$name seconds" => fmt(result.seconds))
+        end
+    end
+    write_table("receipt.tsv", ("field", "value"), [(k, v) for (k, v) in rows])
+end
+
+function svi_record(fit)
+    dg = fit.diagnostics
+    diagnostics = (; dg.iterations, dg.converged, dg.stages, dg.elbo,
+                     dg.elbo_windows_trimmed, dg.unit_gradient_calls, dg.seconds)
+    (; fit.draws, diagnostics, state=brm_svi_checkpoint(fit))
+end
+
+function cached_nuts(rk, data, cache, name; seed=10, n_draws=4000, progress=nothing)
+    cached(cache, name * "_draws_$n_draws", (data, seed, n_draws); progress) do p
+        seconds = @elapsed chains = fit_nuts(rk; seed, n_draws, progress=p)
+        diag = nuts_diagnostics(chains)
+        println("NUTS $name seconds=$seconds $diag")
+        (; draws=nuts_draws(chains), diag, seconds)
+    end
+end
+
 # ── Sections ──────────────────────────────────────────────────────────────────
 
 # Section `fit`: the full data, SVI against NUTS.
-function section_fit(; cache)
+function section_fit(; cache, progress=nothing)
     (; data, effects) = simulate_sites()
     rk = RKBRMI(site_counts_model(data))
     println("FIT sites=$(length(data.site)) observations=$(sum(length, data.y)) " *
             "coordinates=$(length(coordinate_names(rk.model.layout)))")
 
-    svi_seconds = @elapsed svi = fit_svi(rk)
+    saved_svi = cached(cache, "svi_full", data; progress) do p
+        seconds = @elapsed fit = fit_svi(rk; progress=p)
+        (; fit=svi_record(fit), seconds)
+    end
+    svi, svi_seconds = saved_svi.fit, saved_svi.seconds
     dg = svi.diagnostics
     println("SVI seconds=$svi_seconds iterations=$(dg.iterations) converged=$(dg.converged) " *
             "unit_gradient_calls=$(dg.unit_gradient_calls) stages=$(dg.stages)")
 
-    nuts_seconds = @elapsed chains = fit_nuts(rk)
-    diag = nuts_diagnostics(chains)
+    saved_nuts = cached_nuts(rk, data, cache, "nuts_full"; progress)
+    nuts_seconds, diag = saved_nuts.seconds, saved_nuts.diag
     println("NUTS seconds=$nuts_seconds $diag")
-    serialize(joinpath(cache, "nuts_full.jls"), (; draws=nuts_draws(chains), diag, seconds=nuts_seconds))
 
     svi_r = rk_restore_draws(rk, svi.draws)
-    nuts_r = rk_restore_draws(rk, nuts_draws(chains))
+    nuts_r = rk_restore_draws(rk, saved_nuts.draws)
     svi_pop, nuts_pop = population(svi_r), population(nuts_r)
 
     rows = []
@@ -180,15 +277,26 @@ function section_fit(; cache)
     write_table("population.tsv", ("parameter", "method", "median", "q025", "q25", "q75", "q975",
                                    "mean", "sd", "generating"), rows)
 
-    # Thinned draws of the population parameters for the marginal densities.
-    thin(v, n=500) = v[round.(Int, range(1, length(v); length=n))]
-    rows = []
-    for (key, label) in pairs(POPULATION_LABELS), (method, pop) in (("NUTS", nuts_pop), ("SVI", svi_pop))
-        for v in thin(pop[key])
-            push!(rows, (label, method, fmt(v)))
+    # One quantity table per fit, matching the shared docs-summary schema.
+    # Every retained chain has at least 4000 draws; equality of the total below
+    # proves they all have that length, so concatenated draws can be reshaped.
+    @assert diag.retained == 4000 * diag.chains
+    for (method, pop) in (("nuts", nuts_pop), ("svi", svi_pop))
+        rows = map(collect(pairs(POPULATION_LABELS))) do (key, description)
+            q = quantiles(pop[key])
+            if method == "nuts"
+                samples = reshape(pop[key], 4000, diag.chains, 1)
+                diagnostics = (only(MCMCDiagnosticTools.rhat(samples)),
+                    only(MCMCDiagnosticTools.ess(samples; kind=:bulk)),
+                    only(MCMCDiagnosticTools.ess(samples; kind=:tail)))
+            else
+                diagnostics = ("", "", "") # convergence diagnostics do not apply to variational draws
+            end
+            (string(key), "dimensionless", description, fmt(q.median), fmt(q.q025), fmt(q.q975), fmt.(diagnostics)...)
         end
+        write_table("population_$method.tsv",
+            ("quantity", "unit", "description", "median", "q025", "q975", "rhat", "ess_bulk", "ess_tail"), rows)
     end
-    write_table("population_draws.tsv", ("parameter", "method", "value"), rows)
 
     svi_e, nuts_e = site_effects(svi_r), site_effects(nuts_r)
     rows = []
@@ -219,12 +327,12 @@ function section_fit(; cache)
 
     write_table("fits.tsv", ("method", "seconds", "iterations", "unit_gradient_calls", "gradient_evaluations",
                              "draws", "max_rhat", "min_bulk_ess", "min_tail_ess", "divergent", "divergent_percent",
-                             "sites", "observations", "coordinates"),
+                             "sites", "observations", "coordinates", "chains"),
         [("SVI", fmt(svi_seconds), dg.iterations, dg.unit_gradient_calls, "", size(svi.draws, 2), "", "", "", "", "",
-          length(data.site), sum(length, data.y), length(coordinate_names(rk.model.layout))),
+          length(data.site), sum(length, data.y), length(coordinate_names(rk.model.layout)), ""),
          ("NUTS", fmt(nuts_seconds), "", "", diag.gradient_evaluations, diag.retained, fmt(diag.max_rhat),
           fmt(diag.min_bulk_ess), fmt(diag.min_tail_ess), diag.divergent, fmt(diag.divergent_percent),
-          length(data.site), sum(length, data.y), length(coordinate_names(rk.model.layout)))])
+          length(data.site), sum(length, data.y), length(coordinate_names(rk.model.layout)), diag.chains)])
 
     # The ELBO trace by window, with the stage each window belongs to.
     rows = []
@@ -236,13 +344,13 @@ function section_fit(; cache)
         push!(rows, (w, last_iteration, fmt(value), stage))
     end
     write_table("elbo.tsv", ("window", "iteration", "elbo_trimmed_mean", "stage"), rows)
-    (; rk, svi, chains)
+    nothing
 end
 
 # ── Streaming: the same sites, two more visits per window ─────────────────────
 
 # Window `w` holds visits `2w - 1` and `2w` of the sites present in it. Sites arrive
-# over time: 300 in the first window, 40 more in each of the next windows (400 in all).
+# over time: 300 in the first window, then 340, 380 and 400.
 function stream_windows(data; n_windows=4, first_sites=300, new_sites_per_window=40)
     visits = length(first(data.x))
     per_window = visits ÷ n_windows
@@ -263,12 +371,12 @@ end
 
 # The stream: calibrate on the first window, then continue through the others,
 # carrying only the checkpoint from one window to the next.
-function stream_fits(windows)
-    fit = brm_svi_fit(site_counts_model(windows[1]); batch_size=32, rng=Xoshiro(1))
-    fits = [fit]
+function stream_fits(windows; progress=nothing)
+    fit = brm_svi_fit(site_counts_model(windows[1]); batch_size=32, rng=Xoshiro(1), progress)
+    fits = Any[fit] # a continuation carries a BRMSVIState where the initial fit has nothing
     for w in 2:length(windows)
         state = brm_svi_checkpoint(fit)
-        fit = brm_svi_fit(state, site_counts_model(windows[w]); batch_size=32, rng=Xoshiro(w))
+        fit = brm_svi_fit(state, site_counts_model(windows[w]); batch_size=32, rng=Xoshiro(w), progress)
         push!(fits, fit)
     end
     fits
@@ -276,43 +384,47 @@ end
 
 checkpoint_bytes(state) = (io = IOBuffer(); serialize(io, state); position(io))
 
-function section_stream(; cache)
+function section_stream(; cache, progress=nothing)
     (; data) = simulate_sites()
     windows = stream_windows(data)
-    stream_seconds = @elapsed fits = stream_fits(windows)
-    println("STREAM total_seconds=$stream_seconds")
+    saved_stream = cached(cache, "stream_svi", windows; progress) do p
+        seconds = @elapsed fits = stream_fits(windows; progress=p)
+        (; fits=svi_record.(fits), seconds)
+    end
+    fits = saved_stream.fits
+    println("STREAM total_seconds=$(saved_stream.seconds)")
 
     rows = []
     cost_rows = []
+    diagnostic_rows = []
     for w in eachindex(windows)
         all_data = accumulated(windows, w)
         rk = RKBRMI(site_counts_model(all_data))
         fit = fits[w]
         dg = fit.diagnostics
-        bytes = checkpoint_bytes(brm_svi_checkpoint(fit))
+        bytes = checkpoint_bytes(fit.state)
         println("STREAM window=$w sites=$(length(windows[w].site)) new_observations=$(sum(length, windows[w].y)) " *
                 "accumulated=$(sum(length, all_data.y)) seconds=$(dg.seconds) iterations=$(dg.iterations) " *
                 "unit_gradient_calls=$(dg.unit_gradient_calls) converged=$(dg.converged) bytes=$bytes")
         # The streaming fit's draws are in the window's own coordinates, so they are
         # restored with the window's backend.
-        stream_pop = population(rk_restore_draws(fit.diagnostics.model.backend, fit.draws))
+        window_rk = RKBRMI(site_counts_model(windows[w]))
+        stream_pop = population(rk_restore_draws(window_rk, fit.draws))
 
         # Batch SVI on everything seen so far.
-        batch = fit_svi(rk; seed=100 + w)
+        batch = cached(cache, "batch_svi_window_$w", all_data; progress) do p
+            svi_record(fit_svi(rk; seed=100 + w, progress=p))
+        end
         batch_pop = population(rk_restore_draws(rk, batch.draws))
 
-        # NUTS on everything seen so far (the last window is the full data of `fit`).
-        path = joinpath(cache, w == length(windows) ? "nuts_full.jls" : "nuts_window_$w.jls")
-        if isfile(path)
-            saved = deserialize(path)
-            nuts, nuts_seconds = saved.draws, saved.seconds
-        else
-            nuts_seconds = @elapsed chains = fit_nuts(rk; seed=200 + 10w)
-            nuts = nuts_draws(chains)
-            diag = nuts_diagnostics(chains)
-            println("STREAM NUTS window=$w seconds=$nuts_seconds $diag")
-            serialize(path, (; draws=nuts, diag, seconds=nuts_seconds))
-        end
+        # Each window needs its own reference: late sites have no earlier visits
+        # in the stream, so even its final accumulated data differ from `fit`.
+        saved = cached_nuts(rk, all_data, cache, "nuts_window_$w"; seed=200 + 10w, progress)
+        nuts, nuts_seconds = saved.draws, saved.seconds
+        diag = saved.diag
+        push!(diagnostic_rows, (w, diag.chains, diag.retained, fmt(diag.max_rhat),
+            fmt(diag.min_bulk_ess), fmt(diag.min_tail_ess), diag.divergent,
+            fmt(diag.divergent_percent), dg.converged, batch.diagnostics.converged))
         nuts_pop = population(rk_restore_draws(rk, nuts))
 
         for (key, label) in pairs(POPULATION_LABELS), (method, pop) in
@@ -329,45 +441,53 @@ function section_stream(; cache)
     write_table("streaming_cost.tsv", ("window", "sites", "new_observations", "accumulated_observations",
                                        "streaming_seconds", "streaming_iterations", "streaming_unit_gradient_calls",
                                        "checkpoint_bytes", "batch_seconds", "batch_iterations", "nuts_seconds"), cost_rows)
+    write_table("streaming_diagnostics.tsv", ("window", "chains", "draws", "max_rhat",
+        "min_bulk_ess", "min_tail_ess", "divergent", "divergent_percent",
+        "streaming_converged", "batch_converged"), diagnostic_rows)
 end
 
 # ── A start from fits on slices of the sites ──────────────────────────────────
 
 # Fits of four slices of the sites, their checkpoints combined into a start for the
 # full fit. `full` is prepared once, so the combination and the fit share it.
-function combined_start_fit(data, slices)
-    slice_fits = [brm_svi_fit(site_counts_model(slice); batch_size=32, rng=Xoshiro(s))
+function combined_start_fit(data, slices; progress=nothing)
+    slice_fits = [brm_svi_fit(site_counts_model(slice); batch_size=32, rng=Xoshiro(s), progress)
                   for (s, slice) in enumerate(slices)]
     full = brm_nlme_model(RKBRMI(site_counts_model(data)); ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
     start = brm_svi_combine(full, brm_svi_checkpoint.(slice_fits))
-    started = brm_svi_fit(full; start, batch_size=32, rng=Xoshiro(1), ndraws=2000)
+    started = brm_svi_fit(full; start, batch_size=32, rng=Xoshiro(1), ndraws=2000, progress)
     (; full, start, started)
 end
 
-function section_combine(; cache)
+function section_combine(; cache, progress=nothing)
     (; data) = simulate_sites()
     slices = [(; site=data.site[r], x=data.x[r], y=data.y[r])
               for r in Iterators.partition(eachindex(data.site), 100)]
-    started_seconds = @elapsed (; full, start, started) = combined_start_fit(data, slices)
-    cold_seconds = @elapsed cold = brm_svi_fit(full; batch_size=32, rng=Xoshiro(1), ndraws=2000)
-
-    saved = deserialize(joinpath(cache, "nuts_full.jls"))
-    rk = full.backend
+    combined = cached(cache, "combined_start", data; progress) do p
+        seconds = @elapsed result = combined_start_fit(data, slices; progress=p)
+        (; fit=svi_record(result.started), receipt=result.start.receipt, seconds)
+    end
+    started, started_seconds = combined.fit, combined.seconds
+    # The cold fit is exactly the full-data fit already measured in `fit`.
+    cold_saved = deserialize(joinpath(cache, "svi_full.jls")).result
+    cold, cold_seconds = cold_saved.fit, cold_saved.seconds
+    rk = RKBRMI(site_counts_model(data))
+    saved = cached_nuts(rk, data, cache, "nuts_full"; progress)
     nuts_pop = population(rk_restore_draws(rk, saved.draws))
     rows = []
     for (name, fit, seconds) in (("cold start", cold, cold_seconds), ("start from four slices", started, started_seconds))
         dg = fit.diagnostics
         pop = population(rk_restore_draws(rk, fit.draws))
         errors = [abs(mean(pop[k]) - mean(nuts_pop[k])) / std(nuts_pop[k]) for k in keys(POPULATION_LABELS)]
-        push!(rows, (name, fmt(dg.seconds), dg.iterations, dg.stages.exploring, dg.unit_gradient_calls,
+        push!(rows, (name, fmt(dg.seconds), fmt(seconds), dg.iterations, dg.stages.exploring, dg.unit_gradient_calls,
                      fmt(last(dg.elbo_windows_trimmed)), fmt(maximum(errors))))
         println("COMBINE $name seconds=$seconds iterations=$(dg.iterations) stages=$(dg.stages) " *
                 "max_mean_error=$(maximum(errors))")
     end
-    r = start.receipt.globals
+    r = combined.receipt.globals
     println("COMBINE receipt informed=$(r.informed) clamped=$(r.clamped)")
     println("COMBINE wall seconds: started (slices + combination + fit)=$started_seconds cold=$cold_seconds")
-    write_table("combine.tsv", ("start", "seconds", "iterations", "exploring_iterations", "unit_gradient_calls",
+    write_table("combine.tsv", ("start", "seconds", "total_seconds", "iterations", "exploring_iterations", "unit_gradient_calls",
                                 "final_elbo_trimmed_mean", "max_population_mean_error_sds"), rows)
     write_table("combine_receipt.tsv", ("coordinate", "informed", "clamped", "spread"),
         [(string(r.coordinates[k]), r.informed[k], r.clamped[k], fmt(r.spread[k])) for k in eachindex(r.coordinates)])
@@ -375,7 +495,7 @@ end
 
 # ── A small run that prints the restored names and shapes ─────────────────────
 
-function section_probe(; cache)
+function section_probe(; cache, progress=nothing)
     (; data) = simulate_sites(; n_sites=12, visits=4)
     brmi = site_counts_model(data)
     sb = SBBRMI(brmi; mod=@__MODULE__)
@@ -426,13 +546,19 @@ const SECTIONS = Dict("probe" => section_probe, "fit" => section_fit, "stream" =
 
 function main(args=ARGS)
     sections = isempty(args) || startswith(first(args), "/") ? ["fit", "stream", "combine"] : split(first(args), ',')
-    cache = length(args) >= 2 ? args[2] : (length(args) == 1 && startswith(first(args), "/")) ? first(args) : mktempdir()
+    cache = length(args) >= 2 ? args[2] : (length(args) == 1 && startswith(first(args), "/")) ? first(args) : joinpath(@__DIR__, "cache")
     mkpath(cache)
     println("CACHE ", cache)
-    for name in sections
-        println("SECTION ", name)
-        SECTIONS[String(name)](; cache)
+    write_receipt(cache; status="building summaries")
+    with_progress(:state; description="Variational inference documentation") do progress
+        snapshot_progress(progress, get(ENV, "KB_PROGRESS_FILE", joinpath(cache, "progress.txt"))) do
+            for name in sections
+                println("SECTION ", name)
+                SECTIONS[String(name)](; cache, progress)
+            end
+        end
     end
+    write_receipt(cache; status="completed sections: " * join(sections, ", "))
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

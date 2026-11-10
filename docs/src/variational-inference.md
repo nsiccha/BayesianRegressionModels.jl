@@ -7,17 +7,10 @@ description: "Minibatch stochastic variational inference for hierarchical models
 
 # Variational inference
 
-`brm_svi_fit` fits a Gaussian approximation to the posterior of a hierarchical model
-from random batches of its units. It is for the models where NUTS over every unit is
-too slow, and for data that arrive in windows: the fit of one window continues into the
-next without touching the old observations again. This page fits one synthetic model
-both ways, with `brm_svi_fit` and with NUTS, and shows where the two agree and where the
-approximation is narrower than the posterior.
-
-Everything shown is built or measured from
-[`research/variational_inference/svi.jl`](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/variational_inference/svi.jl):
-the code blocks are read from it at build time, and every number and figure comes from
-the tables it writes.
+Fit a hierarchical count model with `brm_svi_fit`, compare its Gaussian approximation
+with NUTS, continue the fit as new observations arrive, and combine fits on slices
+into a starting point. This example shows where the approximation loses population
+uncertainty even when its site-effect estimates agree with NUTS.
 
 ## The model and the data
 
@@ -29,11 +22,14 @@ with one row per observation is needed.
 
 ```@eval
 using Markdown
-Markdown.MD([Markdown.Code("julia",
-    Main.BRMDocsComparisons.source_function("research/variational_inference/svi.jl", :simulate_sites))])
+Main.BRMDocsComparisons.source_code_region(
+    "research/variational_inference/svi.jl";
+    starting_at="# The values the data are simulated from.",
+    ending_before="site_counts_data(; kwargs...)",
+)
 ```
 
-The model is a `@brm` declaration with a `@plate` over the sites. The population part,
+The model has a `@plate` over sites. The population part,
 `a ~ 1 + (1 | s | site)` and `b ~ 1 + (1 | s | site)`, gives each site an intercept and
 a slope drawn from one correlated block `s`. The plate cell reads that site's two values
 and observes its counts.
@@ -67,23 +63,31 @@ end
 ## Fit the model on minibatches
 
 `brm_svi_fit` takes the model on the ReactiveKernels backend, `RKBRMI(brmi)`, with
-Enzyme loaded for the gradients. Its **units** are the groups of the model's plate:
-here one site with its visits. Every observation has to belong to exactly one unit,
+Enzyme loaded for the gradients. Its units are those identified by `brm_nlme_view`:
+here one site with its visits. In this model, every observation belongs to exactly one unit,
 which is what makes a batch of units an unbiased estimate of the whole likelihood.
 
 The approximation has two parts. The coordinates every unit reads, here the population
-intercepts, the two sds and the correlation, are the **globals**; their factor is a
+intercepts, the two sds and the correlation, are the globals; their factor is a
 diagonal Gaussian (`family=MeanFieldGlobal()`, the default) or a diagonal plus a
 low-rank part (`LowRankGlobal(r)`). Each unit's own coordinates, here a site's two
 standardized effects, get a full Gaussian of their own. The family has no dependence
 between a unit and the globals, or between two units.
 
-One iteration draws the globals once and a batch of 32 sites, evaluates each site's
-term at an antithetic pair of draws of its effects, steps the global factor by Adam
-and each selected site's factor by a natural-gradient step. Sites not in the batch do
-not move. The four NUTS chains run on the same log density, `rk_logdensity_problem`,
-through WarmupHMC's adaptive sampler, each from its own jittered start near the
-centre of the prior.
+One iteration draws the globals once and a batch of 32 sites. With the default
+`unit_curvature=:orthogonal`, each selected two-coordinate site is evaluated at two
+orthogonal antithetic pairs, giving four unit gradients. Adam updates the global
+factor and a natural-gradient step updates each selected site's factor. Sites not
+in the batch do not move. The NUTS reference uses `rk_logdensity_problem` through
+WarmupHMC's quorum sampler: four chains are requested, with at least three required
+to finish. Each starts from its own jittered point near the origin of the
+unconstrained coordinates.
+
+Quorum selection can favour faster chains; the retained-chain diagnostics cannot
+rule out that selection bias.
+
+These fitting calls run in the test environment and produce the cached results;
+the documentation build does not sample.
 
 ```@eval
 Main.BRMDocsComparisons.source_code_region(
@@ -109,14 +113,20 @@ Main.BRMDocsComparisons.source_code_region(
 ### How the fit stops
 
 The optimization runs in windows of about `N / B` iterations, at least 100, and
-stops on its own in three phases. **Exploring** steps the globals at a constant rate
+stops on its own in three phases. Exploring steps the globals at a constant rate
 until a window's 10 % trimmed ELBO mean has stopped rising, with no upward trend over
-the last windows. **Settling** continues at a smaller step that is a fraction of each
-global's own scale, until the same test passes again. **Polishing** decays the step
+the last windows. Settling steps by a fraction of each global's own scale, until
+the same test passes again or its window limit is reached. Polishing decays the step
 over 20 windows and returns the average of its iterates. `diagnostics.converged`
 reports that the rule fired, which is not a proof that a slow drift has settled.
 
-![The ELBO of the fit by window, coloured by stage](assets/variational-inference/elbo.png)
+```@eval
+let figures = Main.BRMDocsComparisons.example_module(:variational_inference_figures)
+    Base.include(figures, joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "research", "variational_inference", "figures.jl"))
+    Main.BRMDocsComparisons.figure(Base.invokelatest(figures.elbo);
+        caption="Trimmed ELBO means over optimization windows: blue exploring, orange settling, neutral ink polishing.")
+end
+```
 
 ```@eval
 include(joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "research", "variational_inference", "tables.jl"))
@@ -126,20 +136,22 @@ let svi = vi_row("fits.tsv", r -> r.method == "SVI"), nuts = vi_row("fits.tsv", 
     Markdown.parse("The fit ran $(svi.iterations) iterations in " *
         join(("$n windows $s" for (s, n) in stages), ", ", " and ") *
         ", evaluating $(svi.unit_gradient_calls) site gradients, in $(vi_seconds(svi.seconds)). " *
-        "The four NUTS chains took $(vi_seconds(nuts.seconds)) for $(nuts.draws) retained draws " *
+        "The $(nuts.chains) retained NUTS chains took $(vi_seconds(nuts.seconds)) for $(nuts.draws) draws " *
         "($(nuts.gradient_evaluations) gradient evaluations after warm-up): " *
-        "maximum R-hat $(vi_sig(nuts.max_rhat, 3)), minimum bulk ESS $(vi_int(nuts.min_bulk_ess)), " *
-        "minimum tail ESS $(vi_int(nuts.min_tail_ess)), $(nuts.divergent) divergent transitions. " *
+        "maximum R-hat $(vi_sig(nuts.max_rhat, 4)), minimum bulk ESS $(vi_int(nuts.min_bulk_ess)), " *
+        "minimum tail ESS $(vi_int(nuts.min_tail_ess)), $(nuts.divergent) divergent transitions " *
+        "($(vi_sig(nuts.divergent_percent)) % of retained draws). " *
         "Both ran on one CPU of a shared host; the times are what that run took, not a benchmark.")
 end
 ```
 
-### What the approximation gets right
+### Compare with NUTS
 
-The marginal posteriors of the five population parameters under NUTS and under the
-fitted approximation:
-
-![Marginal posteriors of the population parameters under NUTS and SVI](assets/variational-inference/population-marginals.png)
+```@eval
+Main.BRMDocsComparisons.figure(
+    Main.BRMDocsComparisons.example_module(:variational_inference_figures).marginals();
+    caption="Population medians with 50 % and 95 % intervals. Dashed lines mark generating values; SVI intervals are narrower than NUTS intervals.")
+```
 
 ```@eval
 include(joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "research", "variational_inference", "tables.jl"))
@@ -157,18 +169,16 @@ let rows = vi_table("population.tsv")
 end
 ```
 
-The medians agree to within a fraction of a posterior sd. The spread does not: the
-mean-field factor is narrower than the posterior, most for the two random-effect sds,
-whose posteriors are skewed and coupled with the site effects. This is the known
-behaviour of a factorized Gaussian approximation and nothing in `brm_svi_fit`
-corrects or reweights it. There is deliberately no importance-sampling check of the
-approximation. Where the width of the population posterior is the result, use
-`brm_two_stage_fit` or NUTS, below.
+The population medians are close, but every SVI marginal is narrower. The factorized
+Gaussian omits dependence between the globals and the site effects. Nothing in this
+fit corrects or reweights its draws. Use full MCMC on a feasible reference dataset
+to assess population uncertainty.
 
-The site effects fare better. Each point is one site's intercept or slope deviation,
-its posterior mean under SVI against its posterior mean under NUTS:
-
-![Site effects: SVI posterior mean against NUTS posterior mean](assets/variational-inference/site-effects.png)
+```@eval
+Main.BRMDocsComparisons.figure(
+    Main.BRMDocsComparisons.example_module(:variational_inference_figures).site_means();
+    caption="Each point is one site's intercept or slope deviation. Posterior means lie close to the equality line; the table also compares their uncertainty.")
+```
 
 ```@eval
 include(joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "research", "variational_inference", "tables.jl"))
@@ -197,8 +207,9 @@ Gaussians and never revisited, so a stream of windows is a sequential approximat
 that can depend on the order of the windows and need not equal a fit of everything at
 once.
 
-The stream here cuts the eight visits into four windows of two. Three hundred sites
-report in the first window and forty more arrive with each later window:
+The stream here cuts the eight visits into four windows of two. The windows contain
+300, 340, 380 and 400 sites. A site contributes observations only after it arrives;
+its earlier visits are absent from the accumulated reference data too:
 
 ```@eval
 Main.BRMDocsComparisons.source_code_region(
@@ -219,7 +230,11 @@ Main.BRMDocsComparisons.source_code_region(
 After each window, the streaming estimate of every population parameter is compared
 with two fits of all the data seen up to that window: NUTS and a batch `brm_svi_fit`.
 
-![Streaming estimates per window beside NUTS and batch SVI on the accumulated data](assets/variational-inference/streaming.png)
+```@eval
+Main.BRMDocsComparisons.figure(
+    Main.BRMDocsComparisons.example_module(:variational_inference_figures).streaming();
+    caption="Population medians with 50 % and 95 % intervals: blue NUTS, orange streaming SVI, neutral ink batch SVI. All methods use exactly the observations seen so far.")
+```
 
 ```@eval
 include(joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "research", "variational_inference", "tables.jl"))
@@ -259,24 +274,21 @@ Main.BRMDocsComparisons.source_code_region(
 ```@eval
 include(joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "research", "variational_inference", "tables.jl"))
 let rows = vi_table("combine.tsv")
-    vi_markdown_table(["start of the full fit", "optimization", "iterations", "of them exploring",
+    vi_markdown_table(["start of the full fit", "optimization", "total including slices", "iterations", "of them exploring",
                        "site gradients", "largest population mean error (NUTS sds)"],
-        [(r.start, vi_seconds(r.seconds), r.iterations, r.exploring_iterations, r.unit_gradient_calls,
+        [(r.start, vi_seconds(r.seconds), vi_seconds(r.total_seconds), r.iterations, r.exploring_iterations, r.unit_gradient_calls,
           vi_sig(r.max_population_mean_error_sds)) for r in rows])
 end
 ```
 
 ## Two-stage fits and Laplace
 
-Two other routes share the unit factorization and return draws in the same packed
-shape, so they can stand in for each other.
-
 [`brm_two_stage_fit`](@ref) estimates the population by SAEM (minibatches of units
 in the E-step) and then samples every unit's conditional posterior at those estimates
 with a sampler of your choice, usually WarmupHMC's `adaptive_warmup_mcmc` on the
-unit's own problem. Each unit's posterior is exact given the population values; the
-population's own uncertainty is not propagated, which matters with few units and not
-with many. It needs the NLMEEstimation extension.
+unit's own problem. This targets each unit's conditional posterior rather than a
+Gaussian approximation to it. Population uncertainty is not propagated. It needs
+the NLMEEstimation extension.
 
 [`brm_svi_fit`](@ref) with `laplace=GaussianBlockLaplace()` integrates a shared
 Gaussian block, such as a Hilbert-space Gaussian process the units read, jointly with
@@ -285,3 +297,26 @@ variational globals. It applies to affine Gaussian likelihoods and visits the wh
 window at each update instead of a batch. The per-unit Laplace route outside SVI,
 `brm_laplace_problem`, integrates every unit's effects out at their conditional modes
 and runs NUTS on the population coordinates alone.
+
+```@raw html
+<details><summary>Reproduce</summary>
+```
+
+The [research recipe](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/variational_inference)
+contains the synthetic data generator, fit commands, cache rules and figure source.
+Fits run once locally; the documentation build renders their summary tables and
+AlgebraOfVega specifications. It never samples.
+
+```@eval
+Main.BRMDocsComparisons.results_table("research/variational_inference/results/receipt.tsv";
+    columns=[:field => "receipt", :value => "value"],
+    select=r -> r.field in ("recipe", "commit", "uncommitted_changes", "started", "host",
+                            "Julia", "BayesianRegressionModels", "WarmupHMC", "Enzyme", "threads"))
+```
+
+The [complete receipt](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/variational_inference/results/receipt.tsv)
+also records settings, seeds, input keys and fit source hashes.
+
+```@raw html
+</details>
+```

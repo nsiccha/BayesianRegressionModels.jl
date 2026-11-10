@@ -78,3 +78,8 @@ research/**/*_pairs.png
 research/**/selection_losses.tsv
 research/**/ppc_intervals.tsv
 docs/**/*.csv.gz
+
+# Variational-inference docs: locally cached fits and generated build inputs.
+research/variational_inference/cache/
+research/variational_inference/results/population_draws.tsv
+docs/src/assets/variational-inference/

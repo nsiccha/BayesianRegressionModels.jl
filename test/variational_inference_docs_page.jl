@@ -48,18 +48,19 @@ end
         elseif occursin("source_code_region", block) || occursin("source_function", block)
             @test rendered isa Markdown.MD
             @test only(rendered.content) isa Markdown.Code
-        elseif occursin("vi_markdown_table", block)
+        elseif occursin("vi_markdown_table", block) || occursin("results_table", block)
             @test rendered isa Markdown.MD
             @test any(part -> part isa Markdown.Table, rendered.content)
         elseif occursin("Markdown.parse", block)
             @test rendered isa Markdown.MD
             @test any(part -> part isa Markdown.Paragraph, rendered.content)
+        elseif occursin("BRMDocsComparisons.figure", block)
+            @test rendered isa Markdown.MD
+            @test occursin("data-brm-vega", sprint(show, MIME"text/markdown"(), rendered))
         end
     end
-    # Every figure the page shows is committed.
-    for m in eachmatch(r"\]\((assets/variational-inference/[^)]+\.png)\)", source)
-        @test isfile(joinpath(@__DIR__, "..", "docs", "src", m.captures[1]))
-    end
+    @test count(b -> occursin("BRMDocsComparisons.figure", b), blocks) == 4
+    @test !occursin("assets/variational-inference/", source)
 end
 
 @testset "site counts model: finite RK density and gradient" begin
@@ -73,4 +74,25 @@ end
     lp, gradient = LogDensityProblems.logdensity_and_gradient(problem, q)
     @test isfinite(lp)
     @test all(isfinite, gradient)
+
+    # Late sites must not gain unobserved early visits in the MCMC reference.
+    data = Base.invokelatest(models.site_counts_data)
+    windows = Base.invokelatest(models.stream_windows, data)
+    seen = [Base.invokelatest(models.accumulated, windows, w) for w in 1:4]
+    @test [sum(length, d.y) for d in seen] == [600, 1280, 2040, 2840]
+    @test seen[end].y[end] == data.y[end][7:8]
+    @test seen[end].y[1] == data.y[1]
+end
+
+@testset "NUTS references support the documented comparisons" begin
+    include(joinpath(@__DIR__, "..", "research", "variational_inference", "tables.jl"))
+    references = [vi_row("fits.tsv", r -> r.method == "NUTS"); vi_table("streaming_diagnostics.tsv")]
+    for r in references
+        @test r.chains >= 3
+        @test r.max_rhat < 1.01
+        @test r.min_bulk_ess >= 400
+        @test r.min_tail_ess >= 400
+        @test r.divergent == 0
+        @test r.divergent_percent == 0
+    end
 end
