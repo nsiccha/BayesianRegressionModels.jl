@@ -100,7 +100,10 @@ function summarize(x::AbstractMatrix)   # draws × chains
     chains = reshape(x, size(x, 1), size(x, 2), 1)
     bulk = only(MCMCDiagnosticTools.ess(chains; kind = :bulk))
     tail = only(MCMCDiagnosticTools.ess(chains; kind = :tail))
-    (; mean = mean(x), sd = std(x), bulk_ess = bulk, tail_ess = tail,
+    # Tables report the median and the 95 % credible interval (`q025`, `q50`,
+    # `q975`); the mean and its MCSE carry the agreement check.
+    (; q025 = quantile(vec(x), 0.025), q50 = median(x), q975 = quantile(vec(x), 0.975),
+       mean = mean(x), sd = std(x), bulk_ess = bulk, tail_ess = tail,
        rhat = only(MCMCDiagnosticTools.rhat(chains)), mcse = std(x) / sqrt(bulk))
 end
 

@@ -49,6 +49,10 @@ const RK_JAX_CDF = pkgversion(ReactiveKernels) >= v"0.1.130"
 # transform (`rk_affine_logistic`) of `cdar`'s persistence.
 const RK_JAX_RULE_PRIMALS = pkgversion(ReactiveKernels) >= v"0.1.130"
 const RK_JAX_STATIC_SIZES = pkgversion(ReactiveKernelsPPL) >= v"0.1.134"
+# RKPPL 0.1.136 runs an observed `@scan` in a ragged plate cell (`AR1Normal`
+# per group) and returns `constrain` nested by scope, as native `constrain`
+# does (a `dar` scan's innovations included).
+const RK_JAX_GROUP_SCANS = pkgversion(ReactiveKernelsPPL) >= v"0.1.136"
 
 module JaxModelSet
 using BayesianRegressionModels, Distributions
@@ -217,6 +221,12 @@ const FUNCTIONS = (("log_density", :sampler), ("log_prior", :prior),
     ("log_likelihood", :likelihood), ("log_jacobian", :log_jacobian))
 
 # Compare dataset `k` of a Python run with the native binding `rk`.
+# The module's `constrain`, keyed `<scope>.<name>` as `flat_names` keys the
+# native values: nested by scope from RKPPL 0.1.136, flat before.
+flat_constrain(d::AbstractDict, prefix = "") = reduce(merge,
+    (v isa AbstractDict ? flat_constrain(v, prefix * k * ".") : Dict(prefix * k => v) for (k, v) in d);
+    init = Dict{String,Any}())
+
 # `constrain_gaps`: native constrained names the module's `constrain` does not
 # return yet (an RK lowering gap each, reported to ReactiveKernels:JAX).
 function check_parity(rk, run, k, us; values = (), jit_args = true, constrain_gaps = ())
@@ -239,14 +249,15 @@ function check_parity(rk, run, k, us; values = (), jit_args = true, constrain_ga
             @test vec(collect(p["grad_args"]["value"])) ≈ n.g rtol = 1e-10 atol = 1e-10
         end
         @test vec(collect(p["grad"])) ≈ n.g rtol = 1e-10 atol = 1e-10
+        cjit, ceager = flat_constrain(p["constrain_jit"]), flat_constrain(p["constrain_eager"])
         for (name, value) in flat_names(n.constrained)
-            @test haskey(p["constrain_jit"], name) broken = name in constrain_gaps
-            haskey(p["constrain_jit"], name) || continue
-            @test vec(collect(p["constrain_jit"][name])) ≈ vec(collect(Float64.(value))) rtol = 1e-12 atol = 1e-12
-            @test vec(collect(p["constrain_eager"][name])) ≈ vec(collect(Float64.(value))) rtol = 1e-12 atol = 1e-12
+            @test haskey(cjit, name) broken = name in constrain_gaps
+            haskey(cjit, name) || continue
+            @test vec(collect(cjit[name])) ≈ vec(collect(Float64.(value))) rtol = 1e-12 atol = 1e-12
+            @test vec(collect(ceager[name])) ≈ vec(collect(Float64.(value))) rtol = 1e-12 atol = 1e-12
         end
         for (v, value) in n.values
-            @test vec(collect(p["constrain_jit"][String(v)])) ≈ vec(collect(Float64.(value))) rtol = 1e-12 atol = 1e-12
+            @test vec(collect(cjit[String(v)])) ≈ vec(collect(Float64.(value))) rtol = 1e-12 atol = 1e-12
         end
     end
 end
@@ -323,7 +334,7 @@ end
             (() -> RKBRMI(JMS.rounded((; S.y_lo, S.y_hi, S.x))), ()),
             (() -> RKBRMI(JMS.truncated_response((; y = abs.(S.y), S.x))), ()),
             (() -> RKBRMI(JMS.differenced_walk((; S.y, day_grid = collect(1.0:9.0), day_idx = Int.(S.day)))),
-                ("dar_level_day_grid_level._ppl_scan_z_level",)))
+                RK_JAX_GROUP_SCANS ? () : ("dar_level_day_grid_level._ppl_scan_z_level",)))
         rk = build()
         if RK_JAX_CDF
             check_model(rk; constrain_gaps = gaps)
@@ -338,20 +349,22 @@ end
     end
 end
 
-# A per-group scan (`AR1Normal` residuals) emits natively; `jax_source` refuses
-# it, naming the recipe ("the function `_observed_scan_cell_bound` has loops or
-# branches"): RK lowering gap, ReactiveKernels:JAX todo `0o4ac2v`.
-@testset "constructs that do not translate yet" begin
+# A per-group scan (`AR1Normal` residuals over `groups(g; order = day)`):
+# required from RKPPL 0.1.136; before it `jax_source` refuses it ("the
+# function `_observed_scan_cell_bound` has loops or branches").
+@testset "AR(1) residuals per group" begin
     S = station_data()
     rk = RKBRMI(JMS.ar1_residuals((; S.y, S.x, S.g, S.day)))
-    @test rk isa RKBRMI
-    emitted = try
-        jax_source(rk.model, rk_bound_plan(rk)) isa JAXSource
-    catch e
-        e isa JAXEmissionError || rethrow()
-        false
+    if RK_JAX_GROUP_SCANS
+        check_model(rk; jit_args = false)
+    else
+        @test_broken try
+            jax_source(rk.model, rk_bound_plan(rk)) isa JAXSource
+        catch e
+            e isa JAXEmissionError || rethrow()
+            false
+        end
     end
-    @test emitted broken = true
 end
 
 # Networks of 2, 6 and 12 stations with other prior scales and period. Their
