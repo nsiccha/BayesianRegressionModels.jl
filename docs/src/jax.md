@@ -24,6 +24,7 @@ mod = Main.BRMDocsComparisons.example_module(:jax)
 Main.BRMDocsComparisons.evaluate_source_prelude(mod, "research/jax/reproduce.jl";
     before=:varying_slopes_model)
 Base.include(mod, joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "research/jax/presentation.jl"))
+Base.include(mod, joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "research/jax/figures.jl"))
 Main.BRMDocsComparisons.comparison(mod,
     Main.BRMDocsComparisons.source_function("research/jax/reproduce.jl", :varying_slopes_model),
     :varying_slopes_model; title="Correlated group intercepts and slopes", require_stan=true)
@@ -161,7 +162,11 @@ quorum selects chains by completion time, which can bias a posterior if
 runtime depends on the sampled region. The diagnostics below do not rule
 out that selection effect.
 
-![Posterior marginal densities from native WarmupHMC and NumPyro, with generating values marked by dotted vertical lines](assets/jax/posterior-marginals.png)
+```@eval
+Main.BRMDocsComparisons.figure(
+    Main.BRMDocsComparisons.example_module(:jax).JAXExampleFigures.population_figure();
+    caption="Population parameters from Julia and JAX: posterior medians, central 50% intervals (thick) and 95% intervals (thin). Each panel has its own horizontal scale.")
+```
 
 ```@eval
 Main.BRMDocsComparisons.example_module(:jax).JAXExampleResults.posterior_table()
@@ -178,10 +183,13 @@ standardized effects.
 Main.BRMDocsComparisons.example_module(:jax).JAXExampleResults.diagnostics_table()
 ```
 
-![Group intercept and slope deviations: posterior medians with 50% and 95% intervals from both samplers](assets/jax/group-effects.png)
+```@eval
+Main.BRMDocsComparisons.figure(
+    Main.BRMDocsComparisons.example_module(:jax).JAXExampleFigures.group_figure();
+    caption="Group intercept and slope deviations on the response scale. Both samplers give similar medians and central 50% and 95% intervals; groups retain their data labels.")
+```
 
-Each panel orders the groups by the native posterior median. These are
-deviations from the population intercept or slope, after transforming the
+These are deviations from the population intercept or slope, after transforming the
 standardized effects by their scales and correlation factor.
 
 ## New designs
@@ -225,11 +233,11 @@ python3 -m venv research/jax/.venv
 research/jax/.venv/bin/python -m pip install jax==0.12.0.1 numpyro==0.22.0 numpy==2.5.4
 julia --startup-file=no --project=test test/setup_env.jl
 RK_JAX_PYTHON="$PWD/research/jax/.venv/bin/python" julia --startup-file=no --threads=1 --project=test research/jax/reproduce.jl
-julia --project=research/adaptive_centering/plots research/jax/figures.jl
+julia --project=docs research/jax/figures.jl /path/to/figure-cache
 ```
 
-The plotting command uses the repository's AlgebraOfVega/CairoMakie
-environment after its dependencies have been installed. The driver writes
+The plotting command writes Vega-Lite specifications from the summary tables.
+The driver writes
 `model.py`, encoded inputs, parity checks,
 posterior summaries and plot data under `research/jax/`. The documentation
 reads those committed tables; rebuilding the site does not rerun MCMC.

@@ -250,15 +250,6 @@ function main(; chains = 4, n_draws = 1000, warmup = 1000, seed = 7,
              abs(a.mean - b.mean) / sqrt(a.mcse^2 + b.mcse^2))) for i in 1:d]
     write_tsv(joinpath(RESULTS, "unconstrained_z.tsv"), zrows)
 
-    # 7. Keep draws for the plotting package's density estimator. These six
-    # scope paths are the parameters of this particular generated module.
-    population = first.(POPULATION)
-    all(n -> n in names, population) || error("Inspect the module's changed parameter layout: ", names)
-    write_tsv(joinpath(RESULTS, "population_draws.tsv"),
-        [(; quantity=n, method, draw=j, chain=c, value=v[n][j,c])
-         for n in population for (method,v) in (("native",nv),("jax",pv))
-         for c in axes(v[n],2) for j in axes(v[n],1)])
-
     # Transform this model's standardized effects to deviations in response
     # units, using the scoped parameters documented in the emitted module.
     labels = sort(unique(data.g))
