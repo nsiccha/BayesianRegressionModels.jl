@@ -8,9 +8,10 @@ const _RK_KERNEL_MACRO = Expr(:., :ReactiveKernels, QuoteNode(Symbol("@kernel"))
 
 # Install one definition per distinct signature and body. Components with
 # identical configuration share a definition; a different configuration (or
-# a collision with an authored name) receives a fresh name.
+# a collision with an authored name) receives a fresh name. `doc`
+# (`@_rk_definition_doc`) documents a new definition.
 function _rk_ast_shared_definition!(definitions, taken, base, arguments, body;
-        kernel=false, head=:(=))
+        kernel=false, head=:(=), doc=nothing)
     arguments = collect(Any, arguments)
     for definition in definitions
         definition = _brm_undoc(definition)
@@ -26,7 +27,7 @@ function _rk_ast_shared_definition!(definitions, taken, base, arguments, body;
     callee = _rk_ast_fresh_name(string(base), taken)
     definition = Expr(head, Expr(:call, callee, arguments...), body)
     kernel && (definition = Expr(:macrocall, _RK_KERNEL_MACRO, LineNumberNode(0), definition))
-    push!(definitions, definition)
+    push!(definitions, _rk_documented_definition(definition, doc))
     callee
 end
 
@@ -65,6 +66,12 @@ function _rk_ast_component_prior_inputs(priors, occupied)
     end
     map(replace_reads, priors), inputs, values
 end
+
+# The sentence a component's docstring adds for those prior inputs.
+_rk_prior_inputs_doc(inputs) = isempty(inputs) ? "" : string(" ",
+    join(("`$input`" for input in inputs), ", "),
+    length(inputs) == 1 ? " is a value" : " are values",
+    " the authored priors read, passed in by the caller.")
 
 # Scalar population coefficient families admitted on RKPPL's design-matrix
 # route, with their positional argument roles.
@@ -116,8 +123,14 @@ function _rk_ast_population_component!(definitions, statements, taken, name, des
         end
         push!(body.args, Expr(:(=), :beta_pop, Expr(:vect, declarations...)))
         push!(body.args, Expr(:return, product))
+        doc = @_rk_definition_doc """
+            Population-level effects whose coefficients have different prior laws.
+
+            Draws one coefficient per column of the design matrix `X`, each with its
+            own prior (`beta_pop_1`, `beta_pop_2`, …), and returns the linear
+            predictor `X * beta_pop`."""
         callee = _rk_ast_shared_definition!(definitions, taken,
-            "brm_mixed_population_effects", (:X,), body)
+            "brm_mixed_population_effects", (:X,), body; doc)
         call = _rk_ast_component_call(name, callee, design)
         entry(call, true)
         push!(statements, call)
@@ -131,7 +144,17 @@ function _rk_ast_population_component!(definitions, statements, taken, name, des
         Expr(:return, product))
     base = family === :Normal ? "brm_population_effects" :
         string("brm_population_effects_", lowercase(string(family)))
-    callee = _rk_ast_shared_definition!(definitions, taken, base, (:X, :ncoef, roles...), body)
+    law = string(family, "(", join(roles, ", "), ")")
+    per_coefficient = isempty(roles) ? "" : string(" Each prior argument (",
+        join(("`$role`" for role in roles), ", "),
+        ") is one value for all coefficients or a vector with one per coefficient.")
+    doc = @_rk_definition_doc """
+        Population-level effects: one coefficient per column of the design matrix `X`.
+
+        Draws `beta_pop[1:ncoef] ~ $law` and returns the linear predictor
+        `X * beta_pop`. `ncoef` is the number of columns of `X`.$per_coefficient"""
+    callee = _rk_ast_shared_definition!(definitions, taken, base, (:X, :ncoef, roles...), body;
+        doc)
     arguments = [_rk_ast_population_argument([last(prior)[j] for prior in priors])
         for j in eachindex(roles)]
     call = _rk_ast_component_call(name, callee, design, length(columns), arguments...)
@@ -227,8 +250,14 @@ function _rk_ast_joint_population!(definitions, statements, taken, coordinates,
         Expr(:return, Expr(:call, :*, :X, :beta_pop)))
     base = family === :Normal ? "brm_joint_population_effects" :
         string("brm_joint_population_effects_", lowercase(string(family)))
+    doc = @_rk_definition_doc """
+        Population-level effects of several predictors that share one design matrix `X`.
+
+        Draws one coefficient per column of `X` and predictor,
+        `beta_pop[1:ncoef, 1:ntargets] ~ $(family)($(join(roles, ", ")))`, and returns the
+        linear predictors `X * beta_pop`, one column per predictor."""
     callee = _rk_ast_shared_definition!(definitions, taken, base,
-        (:X, :ncoef, :ntargets, roles...), body)
+        (:X, :ncoef, :ntargets, roles...), body; doc)
     joint = _rk_ast_fresh_name(join(("pop", labels...), "_"), taken)
     first_call = findfirst(s -> s === first(entries).call, statements)
     insert!(statements, first_call,
@@ -254,8 +283,14 @@ function _rk_ast_monotonic_component!(definitions, statements, taken, name, inde
     simplex = Expr(:call, :~, :simplex_incr, Expr(:call, :Dirichlet, :alpha))
     if prior === nothing
         body = _rk_ast_component_body(simplex, Expr(:return, contrast))
+        doc = @_rk_definition_doc """
+            A monotonic effect's contrast of the ordinal codes `c` (`mo(x)` without a coefficient).
+
+            Draws the increments `simplex_incr ~ Dirichlet(alpha)` and returns
+            `cumsum(vcat(0.0, simplex_incr))[c]`, which rises from 0 at the lowest level to 1
+            at the highest."""
         callee = _rk_ast_shared_definition!(definitions, taken,
-            "brm_monotonic_value", (:c, :alpha), body)
+            "brm_monotonic_value", (:c, :alpha), body; doc)
         push!(statements, _rk_ast_component_call(name, callee, index, _rk_ast_alpha(alpha)))
         return name
     end
@@ -269,7 +304,15 @@ function _rk_ast_monotonic_component!(definitions, statements, taken, name, inde
         Expr(:return, Expr(:call, :.*, :beta, contrast)))
     base = family === :Normal ? "brm_monotonic_effect" :
         string("brm_monotonic_effect_", lowercase(string(family)))
-    callee = _rk_ast_shared_definition!(definitions, taken, base, (:c, :alpha, roles...), body)
+    doc = @_rk_definition_doc """
+        A monotonic effect of the ordinal codes `c` (`mo(x)`).
+
+        Draws the increments `simplex_incr ~ Dirichlet(alpha)` and the coefficient
+        `beta ~ $(family)($(join(roles, ", ")))`, and returns
+        `beta .* cumsum(vcat(0.0, simplex_incr))[c]`: the effect rises monotonically from 0
+        at the lowest level to `beta` at the highest."""
+    callee = _rk_ast_shared_definition!(definitions, taken, base, (:c, :alpha, roles...), body;
+        doc)
     push!(statements, _rk_ast_component_call(name, callee, index,
         _rk_ast_alpha(alpha), args...))
     name
@@ -305,10 +348,18 @@ function _rk_ast_joint_monotonic_component!(definitions, taken, name, alphas, pr
             for i in eachindex(first(alphas)))...)
     suffix = shared ? "" : "_by_column"
     inputs = (alpha, nincr, ntargets)
+    increments = string("Draws each predictor's increments, the columns of `simplex_incr[1:nincr, 1:ntargets]`, ",
+        shared ? "from `Dirichlet(alpha)`" : "from the Dirichlet of its own concentration, a column of `alpha`")
     if all(isnothing, priors)
         body = _rk_ast_component_body(simplex, Expr(:return, table))
+        doc = @_rk_definition_doc """
+            The monotonic contrasts of one ordinal column in `ntargets` predictors, as one table.
+
+            $increments, and returns the levels-by-predictors table
+            `cumsum(vcat(zeros(1, ntargets), simplex_incr); dims = 1)`, which each predictor
+            reads at the codes."""
         callee = _rk_ast_shared_definition!(definitions, taken,
-            "brm_joint_monotonic_values" * suffix, (:alpha, :nincr, :ntargets), body)
+            "brm_joint_monotonic_values" * suffix, (:alpha, :nincr, :ntargets), body; doc)
         return _rk_ast_component_call(name, callee, inputs...), fill(nothing, ntargets)
     end
     any(isnothing, priors) && error("RK backend: internal: joint monotonic block " *
@@ -330,8 +381,14 @@ function _rk_ast_joint_monotonic_component!(definitions, taken, name, alphas, pr
             effect)
         base = (family === :Normal ? "brm_joint_monotonic_effects" :
             string("brm_joint_monotonic_effects_", lowercase(string(family)))) * suffix
+        doc = @_rk_definition_doc """
+            The monotonic effects of one ordinal column in `ntargets` predictors, as one table.
+
+            $increments, and one coefficient per predictor,
+            `beta[1:ntargets] ~ $(family)($(join(roles, ", ")))`. Returns the levels-by-predictors
+            table of cumulative increments scaled by `beta`, which each predictor reads at the codes."""
         callee = _rk_ast_shared_definition!(definitions, taken, base,
-            (:alpha, :nincr, :ntargets, roles...), body)
+            (:alpha, :nincr, :ntargets, roles...), body; doc)
         arguments = [_rk_ast_population_argument([last(prior)[j] for prior in priors])
             for j in eachindex(roles)]
         betas = [(Symbol(name, ".beta"), (t,)) for t in 1:ntargets]
@@ -344,8 +401,15 @@ function _rk_ast_joint_monotonic_component!(definitions, taken, name, alphas, pr
             for (coefficient, (family, args)) in zip(coefficients, priors))...,
         Expr(:(=), :beta, Expr(:vect, coefficients...)),
         effect)
+    doc = @_rk_definition_doc """
+        The monotonic effects of one ordinal column in `ntargets` predictors whose coefficients
+        have different prior laws, as one table.
+
+        $increments, and each predictor's coefficient from its own prior
+        (`beta_1`, `beta_2`, …). Returns the levels-by-predictors table of cumulative
+        increments scaled by `beta`, which each predictor reads at the codes."""
     callee = _rk_ast_shared_definition!(definitions, taken,
-        "brm_joint_monotonic_mixed_effects" * suffix, (:alpha, :nincr, :ntargets), body)
+        "brm_joint_monotonic_mixed_effects" * suffix, (:alpha, :nincr, :ntargets), body; doc)
     betas = [(Symbol(name, ".", coefficient), ()) for coefficient in coefficients]
     _rk_ast_component_call(name, callee, inputs...), betas
 end
@@ -411,7 +475,23 @@ function _rk_ast_group_component!(definitions, statements, taken, name, group, K
         nu === nothing ? "" : "student_t_",
         L_value === nothing ? "" : "known_cor_",
         K > 1 ? "correlated_group_effects" : "group_effects")
-    callee = _rk_ast_shared_definition!(definitions, taken, base, arguments, body)
+    scales = scale_value === nothing ?
+        (K > 1 ? "the scales `tau[1:K]` (drawn from their priors)" :
+            "the scale `tau[1]` (drawn from its prior)") :
+        "the scales `tau` (an input)"
+    correlation = K == 1 ? "" : L_value === nothing ?
+        ", the Cholesky factor of the margins' correlation `L ~ LKJCholesky(K, eta)`" :
+        ", the Cholesky factor `L` of a known correlation (an input)"
+    levels = K > 1 ? "`z * transpose(tau .* L)`" : "`z .* tau[1]`"
+    mixing = nu === nothing ? "" : string(" Each level also draws a Student-t mixing ",
+        "weight `w ~ InverseGamma(nu / 2, nu / 2)` and its row is scaled by `sqrt(w)`.")
+    doc = @_rk_definition_doc """
+        Group-level (varying) effects of grouping `g`$(K > 1 ? ", `K` correlated margins per level" : "").
+
+        Non-centered, from $scales$correlation and standardized effects
+        `z[1:length(levels(g)), 1:$(K > 1 ? "K" : "1")] ~ Normal(0, 1)`. Returns the
+        level-by-margin matrix $levels, one row per level of `g` in order.$mixing$(_rk_prior_inputs_doc(prior_inputs))"""
+    callee = _rk_ast_shared_definition!(definitions, taken, base, arguments, body; doc)
     values = Any[group]
     K > 1 && push!(values, K, eta)
     scale_value === nothing || push!(values, scale_value)
@@ -471,8 +551,14 @@ function _rk_ast_stratified_group_component!(definitions, statements, taken, nam
         Expr(:for, Expr(:(=), :i, Expr(:call, :eachindex, :g)), Expr(:block, cell))))
     push!(body.args, Expr(:return, :b))
     correlation = K > 1 ? (:eta,) : ()
+    doc = @_rk_definition_doc """
+        Group-level effects of grouping `g` whose scales$(K > 1 ? " and correlation" : "") differ by stratum `s`.
+
+        Draws one scale per stratum and margin$(K > 1 ? ", a Cholesky factor `L[k] ~ LKJCholesky($K, eta)` per stratum" : "")
+        and standardized effects `z[levels(g), 1:$K] ~ Normal(0, 1)`. Returns one row per
+        observation `i`, its level's effects scaled by its stratum's scales$(K > 1 ? " and factor" : "").$(_rk_prior_inputs_doc(prior_inputs))"""
     callee = _rk_ast_shared_definition!(definitions, taken,
-        "brm_stratified_group_effects", (:g, :s, correlation..., prior_inputs...), body)
+        "brm_stratified_group_effects", (:g, :s, correlation..., prior_inputs...), body; doc)
     push!(statements, _rk_ast_component_call(name, callee, group, stratum,
         (K > 1 ? (eta,) : ())..., prior_values...))
     name
@@ -516,8 +602,19 @@ function _rk_ast_hsgp_component!(definitions, statements, taken, name, inputs,
     # centering reads (src/nlme_svi_centering.jl).
     push!(body.args, Expr(:(=), :spectral_scale, scales))
     push!(body.args, Expr(:return, value))
+    periodic = occursin("periodic", base)
+    lengths = length(rho_priors) == 1 ? "the length scale `rho_iso`" :
+        "one length scale per axis, `rho = [$(join(("rho_$j" for j in eachindex(rho_priors)), ", "))]`"
+    floor = truncated ? ", each truncated below at the floor `rho_floor` the basis resolves" : ""
+    doc = @_rk_definition_doc """
+        A $(periodic ? "periodic " : "")Hilbert-space Gaussian-process (HSGP) effect.
+
+        Draws $lengths$floor, the marginal scale `sigma` and standardized basis
+        coefficients `beta_raw ~ Normal(0, 1)`. Each basis function is weighted by the
+        square root of the covariance's spectral density (`spectral_scale`), and the
+        effect at the rows is the basis times the weighted coefficients.$(_rk_prior_inputs_doc(prior_inputs))"""
     callee = _rk_ast_shared_definition!(definitions, taken, base,
-        (formals..., floor_argument..., prior_inputs...), body)
+        (formals..., floor_argument..., prior_inputs...), body; doc)
     push!(statements, _rk_ast_component_call(name, callee, last.(inputs)...,
         (truncated ? (floors,) : ())..., prior_values...))
     name

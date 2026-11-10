@@ -178,8 +178,15 @@ function _rk_ast_varying_draws!(definitions, taken, K, eta, rows;
             z=path(z), L=L === nothing ? nothing : path(L)))
     end
     base = K == 1 ? "brm_varying_draws" : "brm_correlated_draws"
+    source = scales === nothing ? "drawn from their priors" : "an R2D2 budget's share, an input"
+    doc = @_rk_definition_doc """
+        Group-level draws$(K > 1 ? " of `$K` correlated margins" : ""), non-centered.
+
+        From the scales `$sd` ($source)$(K > 1 ? ", the Cholesky factor `$L ~ LKJCholesky($K, eta)`" : "")
+        and standardized draws `$z ~ Normal(0, 1)`, returns $(K > 1 ? "`$z * transpose($sd .* $L)`" :
+            "`$z .* $sd[1]`"), one row per level."""
     _rk_ast_block_call!(definitions, taken, scales === nothing ? base : base * "_r2d2",
-        block, value)
+        block, value; doc)
 end
 
 # `gr(g, by=s)`: per-stratum scales and correlation factors, one row of draws
@@ -211,7 +218,14 @@ function _rk_ast_stratified_draws!(definitions, taken, K, eta, group, stratum)
     cell = Expr(:(=), Expr(:ref, b, i, index), value)
     push!(block.statements, Expr(:macrocall, Symbol("@plate"), LineNumberNode(0),
         Expr(:for, Expr(:(=), i, Expr(:call, :eachindex, g)), Expr(:block, cell))))
-    _rk_ast_block_call!(definitions, taken, "brm_stratified_draws", block, b)
+    doc = @_rk_definition_doc """
+        Group-level draws of grouping `$g` whose scales$(K > 1 ? " and correlation" : "") differ by stratum `$s` (`gr(g, by = s)`).
+
+        Draws one scale per stratum and margin, `$sd[levels($s), 1:$K]` (half-normal)$(K > 1 ?
+            ", a Cholesky factor `$L[k] ~ LKJCholesky($K, eta)` per stratum" : ""), and standardized
+        draws `$z[levels($g), 1:$K] ~ Normal(0, 1)`. Returns one row per observation `$i`: its
+        level's draws scaled by its stratum's scales$(K > 1 ? " and factor" : "")."""
+    _rk_ast_block_call!(definitions, taken, "brm_stratified_draws", block, b; doc)
 end
 
 # One positive scale law per margin of a bucket. Stan's ordinary unnamed
@@ -471,9 +485,16 @@ function _rk_ast_value_spline(definitions, term, taken)
             Expr(:ref, raw, Expr(:call, :axes, basis, 2)), _rk_ast_dotted(:Normal, 0, 1)))
         push!(parts, Expr(:call, :*, basis, Expr(:call, :.*, sd, raw)))
     end
+    doc = @_rk_definition_doc """
+        A penalized $(term.options.kind === :t2 ? "tensor-product (`t2`)" : "thin-plate") smooth.
+
+        The unpenalized part `$fixed_basis * $fixed` (flat prior) plus $(nblocks == 1 ?
+            "the penalized part `$(only(penalized)) * ($(only(scales)) .* raw1)`" :
+            "$nblocks penalized parts `Zj * (sdj .* rawj)`"), each with a half-normal
+        scale and standardized coefficients `~ Normal(0, 1)`. Returns the smooth at the rows."""
     push!(stmts, Expr(:call, :~, term.options.id, _rk_ast_block_call!(definitions, taken,
         term.options.kind === :t2 ? "brm_t2_smooth" : "brm_smooth", block,
-        Expr(:call, :.+, parts...))))
+        Expr(:call, :.+, parts...); doc)))
     stmts, term.options.kind === :t2 ?
         (; sd_rr=scales[1], sd_rn=scales[2], sd_nr=scales[3]) : (; sd=only(scales))
 end

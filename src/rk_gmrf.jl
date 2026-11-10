@@ -331,7 +331,18 @@ function _rk_ast_gmrf_block!(definitions, taken, law, block, prior, geometry, re
             Expr(:ref, field, access(Symbol(:index, j)))) for j in 1:3)...)
     end
     value = Expr(:call, :.*, sigma, read)
-    call = _rk_ast_block_call!(definitions, taken, "brm_gmrf", block, value)
+    reads_doc = multiresolution_functions !== nothing ?
+        "each row reads the field through its multiresolution basis weights" : footprint ?
+        "each row reads the field's state at its own index" :
+        "each row reads a weighted sum of three field states (its interpolation weights)"
+    doc = @_rk_definition_doc """
+        A Gaussian Markov random field (`gmrf`) over a space-time mesh.
+
+        Draws the marginal scale `$sigma`, the spatial length `$spatial_length` and the
+        temporal length `$temporal_length` from their priors, then the field
+        `$field ~ $law($spatial_length, $temporal_length, …)` on the mesh `$geometry`;
+        $reads_doc. Returns `$sigma` times those reads, one value per row."""
+    call = _rk_ast_block_call!(definitions, taken, "brm_gmrf", block, value; doc)
     (; call, sigma, spatial_length, temporal_length, field)
 end
 
@@ -602,12 +613,15 @@ function _rk_gmrf_multiresolution_reader!(definitions, taken, bindings)
     reader = _rk_ast_fresh_name("brm_gmrf_multiresolution_read", taken)
     coordinate = _rk_value_callee!(bindings, _brm_multiresolution_read_coordinate, taken)
     domain = _rk_value_callee!(bindings, _brm_multiresolution_basis_range, taken)
-    push!(definitions, :(ReactiveKernels.@kernel function $reader(field, weights, geometry, reads)
+    definition = :(ReactiveKernels.@kernel function $reader(field, weights, geometry, reads)
         values = plate(reads) do read
             sum((weights[j] * field[$coordinate(geometry, read, j)]
                 for j in $domain(geometry, read)); init=0.0)
         end
         return values
-    end))
+    end)
+    push!(definitions, _rk_documented_definition(definition, @_rk_definition_doc("""
+        A multiresolution `gmrf` field read at each row: the sum of the row's basis
+        weights times the field values they apply to.""")))
     reader
 end

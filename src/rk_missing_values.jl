@@ -406,10 +406,10 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
         completion.missing_rows; kernel=true)
     push!(statements, Expr(:(=), Expr(:tuple, completion.observed_component,
         completion.order), geometry))
-    if completion.nmissing == 0
-        push!(statements, Expr(:(=), completion.source, completion.observed_component))
-        return nothing
-    end
+    # A complete column emits the same program, its missing block over an
+    # empty row axis, so its missing count is data: a fit and a design
+    # without missing entries (a forecast) share one program, and a module
+    # emitted for one binds the other (user principle `0ikeidi`).
     completion.totals === nothing ||
         return _rk_emit_missing_totals!(definitions, statements, bindings, taken, completion)
     # One block, as StanBlocks' `_sb_mi_response`: the missing entries with
@@ -429,9 +429,15 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
     completed = _rk_block_local!(block, :completed)
     push!(block.statements, Expr(:(=), completed, _rk_ast_statistical_call!(definitions,
         taken, :brm_completed_covariate, observed, missing, order; kernel=true)))
+    doc = @_rk_definition_doc """
+        A partly missing covariate (`mi(x)`), completed.
+
+        Draws the missing entries `$missing` (one per missing row `$rows`) from the
+        covariate's law and returns the covariate on its original rows: the observed
+        value `$observed` at an observed row, the drawn entry at a missing row (`$order`)."""
     push!(statements, Expr(:call, :~, completion.source,
         _rk_ast_block_call!(definitions, taken, "brm_missing_covariate", block,
-            completed)))
+            completed; doc)))
     (entry,)
 end
 
@@ -493,8 +499,16 @@ function _rk_emit_missing_totals!(definitions, statements, bindings, taken, comp
     completed = _rk_block_local!(block, :completed)
     push!(block.statements, Expr(:(=), completed, _rk_ast_statistical_call!(definitions,
         taken, :brm_completed_covariate, observed, missing, order; kernel=true)))
+    doc = @_rk_definition_doc """
+        A partly missing covariate with known group totals (`mi(x)::shares(total, rows)`), completed.
+
+        Draws the free missing entries (rows `$free_rows`) from the covariate's law and the
+        grouped ones (rows `$grouped_rows`) as shares of each group's remaining total, and
+        returns the covariate on its original rows: the observed value `$observed` at an
+        observed row, a drawn entry at a missing row (`$order`)."""
     push!(statements, Expr(:call, :~, completion.source,
-        _rk_ast_block_call!(definitions, taken, "brm_missing_covariate", block, completed)))
+        _rk_ast_block_call!(definitions, taken, "brm_missing_covariate", block, completed;
+            doc)))
     (free_entry, (; sampled=shares_sampled, standardized=nothing))
 end
 
@@ -506,8 +520,11 @@ function _rk_emit_missing_shares!(definitions, statements, bindings, taken, comp
     grouped_data = _rk_mi_grouped_arguments!(block, completion)
     sampled, shares = _rk_emit_mi_grouped!(definitions, taken, block, grouped_part,
         grouped_rows, grouped_data)
+    doc = @_rk_definition_doc """
+        The missing entries of a covariate with known group totals (`mi(x)::shares(total, rows)`),
+        drawn as shares of each group's remaining total (rows `$grouped_rows`)."""
     push!(statements, Expr(:call, :~, completion.source,
-        _rk_ast_block_call!(definitions, taken, "brm_missing_shares", block, shares)))
+        _rk_ast_block_call!(definitions, taken, "brm_missing_shares", block, shares; doc)))
     ((; sampled, standardized=nothing),)
 end
 

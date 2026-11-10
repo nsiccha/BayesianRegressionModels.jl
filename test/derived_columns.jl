@@ -102,6 +102,34 @@ end
     rk_binds_raw(rk, rows(1:18), rows(7:24))
 end
 
+# Smooth Base math applies per element in a data-only assignment, as `log(x)`
+# does: a cyclic covariate from a period held as data (`sinpi`, `cospi`) and
+# the other trigonometric and power functions.
+@stestset "a cyclic covariate from Base trigonometric functions is a data-only assignment" begin
+    data = merge(flat, (; period=7.0))
+    derived = @brm data begin
+        sigma ~ Exponential(1)
+        cs = sinpi(2 * t / period)
+        cc = cospi(2 * t / period)
+        ts = tanh(x) + atan(x) + cbrt(x) + log2(abs2(x) + 1) + exp2(-abs(t))
+        mu ~ 1 + cs + cc + ts
+        y ~ Normal(mu, sigma)
+    end
+    host = @brm merge(data, (; cs=sinpi.(2 .* flat.t ./ 7.0), cc=cospi.(2 .* flat.t ./ 7.0),
+            ts=tanh.(flat.x) .+ atan.(flat.x) .+ cbrt.(flat.x) .+ log2.(abs2.(flat.x) .+ 1) .+
+                exp2.(-abs.(flat.t)))) begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + cs + cc + ts
+        y ~ Normal(mu, sigma)
+    end
+    sb_same_program(derived, host)
+    rk, _ = rk_same_density(derived, host)
+    rk_in_graph(rk, :cs, (:t, :period))
+    rk_in_graph(rk, :ts, (:x, :t))
+    rows(r) = (; t=flat.t[r], x=flat.x[r], g=flat.g[r], y=flat.y[r], period=7.0)
+    rk_binds_raw(rk, rows(1:18), rows(7:24))
+end
+
 @stestset "a fitted transform of a data-only assignment fits in the graph" begin
     derived = @brm flat begin
         sigma ~ Exponential(1)

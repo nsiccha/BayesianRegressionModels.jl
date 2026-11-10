@@ -292,12 +292,13 @@ function _rk_ast_coef_name(base::String, taken::Set{Symbol})
 end
 
 function _rk_ast_statistical_call!(definitions, taken, name, args...;
-        kernel=false, template=getproperty(_BRM_STATISTICAL_VALUES, name))
+        kernel=false, template=getproperty(_BRM_STATISTICAL_VALUES, name),
+        doc=get(_BRM_STATISTICAL_VALUE_DOCS, name, nothing))
     signature, body = template.args
     # Reuse a definition across distinct statistical blocks. A collision with
     # authored data, parameters or callable names only renames the definition.
     callee = _rk_ast_shared_definition!(definitions, taken, name,
-        signature.args[2:end], deepcopy(body); kernel, head=template.head)
+        signature.args[2:end], deepcopy(body); kernel, head=template.head, doc)
     Expr(:call, callee, args...)
 end
 
@@ -338,8 +339,14 @@ function _rk_ast_horseshoe_block!(definitions, taken, local_scale, tau, ratio)
     lambda, raw = _rk_block_local!(block, :lambda), _rk_block_local!(block, :raw)
     push!(block.statements, Expr(:call, :~, lambda, Expr(:call, :HalfCauchy, local_scale)),
         Expr(:call, :~, raw, Expr(:call, :Normal, 0, 1)))
+    doc = @_rk_definition_doc """
+        One horseshoe-shrunk coefficient.
+
+        Draws the local scale `$lambda ~ HalfCauchy($local_scale)` and a standardized draw
+        `$raw ~ Normal(0, 1)`, and returns `$raw * $lambda * $global_scale * $ratio`, where
+        `$global_scale` is the predictor's shared global scale."""
     _rk_ast_block_call!(definitions, taken, "brm_horseshoe", block,
-        Expr(:call, :*, raw, lambda, global_scale, ratio))
+        Expr(:call, :*, raw, lambda, global_scale, ratio); doc)
 end
 
 # A monotonic effect, as StanBlocks' `_sb_mo`: the increment simplex with its
@@ -353,7 +360,13 @@ function _rk_ast_monotonic_block!(definitions, taken, term)
         Expr(:call, :Dirichlet, Expr(:vect, term.options.alpha...))))
     contrast = _rk_ast_statistical_call!(definitions, taken,
         :brm_monotonic_contrast, c, increments)
-    _rk_ast_block_call!(definitions, taken, "brm_monotonic", block, contrast)
+    doc = @_rk_definition_doc """
+        A monotonic contrast of the ordinal codes `$c`.
+
+        Draws the increments `$increments ~ Dirichlet(alpha)` and returns
+        `cumsum(vcat(0.0, $increments))[$c]`, which rises from 0 at the lowest level to 1
+        at the highest."""
+    _rk_ast_block_call!(definitions, taken, "brm_monotonic", block, contrast; doc)
 end
 
 # A statistical block is one self-contained submodel, as in StanBlocks: it
@@ -395,8 +408,9 @@ function _rk_block_argument!(block::_RKBlockBody, base, value)
     argument
 end
 
-# Identical blocks share one definition.
-function _rk_ast_block_call!(definitions, taken, base, block::_RKBlockBody, value)
+# Identical blocks share one definition. `doc` (`@_rk_definition_doc`)
+# documents a new definition.
+function _rk_ast_block_call!(definitions, taken, base, block::_RKBlockBody, value; doc=nothing)
     body = Expr(:block, block.statements..., Expr(:return, value))
     for definition in definitions
         definition = _brm_undoc(definition)
@@ -407,7 +421,8 @@ function _rk_ast_block_call!(definitions, taken, base, block::_RKBlockBody, valu
         return Expr(:call, first(call.args), block.values...)
     end
     name = _rk_ast_fresh_name(string(base), taken)
-    push!(definitions, Expr(:(=), Expr(:call, name, block.arguments...), body))
+    push!(definitions, _rk_documented_definition(
+        Expr(:(=), Expr(:call, name, block.arguments...), body), doc))
     Expr(:call, name, block.values...)
 end
 
@@ -1131,9 +1146,11 @@ function _rk_ast_multinomial_response_stmt!(definitions, statements, taken,
     response.weights === nothing || (expression = Expr(:call, :.*, expression, response.weights))
     push!(statements, Expr(:(=), scores, expression))
     reader = _rk_ast_fresh_name("brm_logdensity_value", taken)
-    push!(definitions, :(function $reader(observed, logdensity)
+    push!(definitions, _rk_documented_definition(:(function $reader(observed, logdensity)
         return logdensity
-    end))
+    end), @_rk_definition_doc("""
+        The log density of an observation whose score is computed beforehand: returns
+        `logdensity` (a row's multinomial log probability) for the `LogDensity` law.""")))
     Expr(:call, :.~, response.response, _rk_ast_dotted(:LogDensity, reader, scores))
 end
 
@@ -1369,14 +1386,24 @@ function _rk_ast_gp_covariance!(definitions, taken, axes, sigma, rho, period, ji
     templates = StatisticalPreparation._GP_FORMULA_COVARIANCE_MODELS
     pair = _rk_ast_statistical_call!(definitions, taken,
         :brm_gp_pair_locations, :x; kernel=true,
-        template=templates.gp_pair_locations)
+        template=templates.gp_pair_locations, doc=@_rk_definition_doc("""
+            The location pairs of a GP covariance over the axis `x`: returns
+            `(left, right, row, col)`, the locations as a column and as a row and their
+            indices, which a covariance plate pairs elementwise."""))
     template = periodic ? templates.gp_periodic_cov :
         StatisticalPreparation._gp_exp_quad_cov_model(length(axes), iso; guarded=false)
     template = _rk_ast_gp_pair_calls(template, first(pair.args))
     args = periodic ? (only(axes), sigma, rho, period, jitter) : (axes..., sigma, rho, jitter)
+    doc = periodic ? @_rk_definition_doc("""
+            The periodic GP covariance matrix over the axis `x`:
+            `sigma^2 * exp(-2 * sin(pi * abs(xi - xj) / period)^2 / rho^2)`, plus `jitter` on the
+            diagonal.""") : @_rk_definition_doc("""
+            The exponentiated-quadratic GP covariance matrix over the axes: `sigma^2` times
+            `exp(-sum((xi - xj)^2 / (2 * rho^2)))` over the axes$(iso ? "" :
+                ", with one length scale `rho[j]` per axis"), plus `jitter` on the diagonal.""")
     _rk_ast_statistical_call!(definitions, taken,
         periodic ? :brm_gp_periodic_cov : :brm_gp_exp_quad_cov, args...;
-        kernel=true, template)
+        kernel=true, template, doc)
 end
 
 # An exact GP, as StanBlocks' `_sb_gp`/`_sb_gp_aniso`/`_sb_gp_periodic`: the length-scale
@@ -1408,8 +1435,17 @@ function _rk_ast_gp_block!(definitions, taken, term)
     covariance = _rk_ast_gp_covariance!(definitions, taken, axes, sigma, rho,
         options.cov === :periodic ? options.period : 0.0, options.jitter;
         periodic=options.cov === :periodic, iso=options.iso)
+    scales = options.iso ? "the length scale `$rho`" :
+        "a length scale per axis, `$rho[1:$(length(axes))]`,"
+    doc = @_rk_definition_doc """
+        An exact Gaussian process over the input axes $(join(("`$a`" for a in axes), ", ")).
+
+        Draws $scales the marginal scale `$sigma` and standardized innovations
+        `$z[eachindex($(first(axes)))] ~ Normal(0, 1)`, and returns the latent value at each
+        location, `brm_gp_latent(covariance, $z)`: the $(options.cov === :periodic ? "periodic" :
+            "exponentiated-quadratic") covariance's Cholesky factor times `$z`."""
     _rk_ast_block_call!(definitions, taken, "brm_gp", block,
-        Expr(:call, :brm_gp_latent, covariance, z)), (; length_scale=rho, sigma)
+        Expr(:call, :brm_gp_latent, covariance, z); doc), (; length_scale=rho, sigma)
 end
 
 function _rk_ast_gp_names(plan::_RKStructuralPlan)
@@ -1442,7 +1478,13 @@ function _rk_ast_ar_block!(definitions, taken, nsteps)
         Expr(:macrocall, Symbol("@scan"), LineNumberNode(0), Expr(:block,
             Expr(:call, :~, Expr(:ref, state, 1), Expr(:call, :Normal, 0.0, 1.0)), loop)),
         Expr(:(=), phi, Expr(:call, :tanh, phi_raw)))
-    _rk_ast_block_call!(definitions, taken, "brm_ar1", block, state)
+    doc = @_rk_definition_doc """
+        An AR(1) latent path over `$T` steps, non-centered.
+
+        Draws `$phi_raw ~ Normal(0, 1)` with persistence `$phi = tanh($phi_raw)`, then
+        `$state[1] ~ Normal(0, 1)` and `$state[$t] = $phi * $state[$t - 1] + $eps` with
+        `$eps ~ Normal(0, 1)`. Returns the path `$state`."""
+    _rk_ast_block_call!(definitions, taken, "brm_ar1", block, state; doc)
 end
 
 function _rk_ast_ar_names(plan::_RKStructuralPlan)
@@ -1482,7 +1524,15 @@ function _rk_ast_dar_block!(definitions, taken, term, nsteps)
             Expr(:(=), Expr(:ref, level, 1), 0.0),
             Expr(:(=), Expr(:ref, increment, 1), 0.0),
             Expr(:for, Expr(:(=), t, Expr(:call, :(:), 2, T)), body))))
-    _rk_ast_block_call!(definitions, taken, "brm_differenced_ar1", block, level),
+    doc = @_rk_definition_doc """
+        A differenced AR(1) level path over `$T` steps (`dar`).
+
+        Draws the persistence `$beta` and innovation scale `$sigma` from their priors.
+        The path starts at `$level[1] = $increment[1] = 0`; then
+        `$increment[$t] = $beta * $increment[$t - 1] + $sigma * $innovation` with
+        `$innovation ~ Normal(0, 1)`, and `$level[$t] = $level[$t - 1] + $increment[$t]`.
+        Returns the level path `$level`."""
+    _rk_ast_block_call!(definitions, taken, "brm_differenced_ar1", block, level; doc),
         (; ar=beta, sigma)
 end
 
@@ -1550,8 +1600,18 @@ function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing
                 Expr(:call, :.*, rho, is_struct))), theta))) :
         Expr(:call, :.*, sigma, field)
     push!(block.statements, Expr(:(=), effects, value))
+    structured = separation === nothing ?
+        "the ICAR field `$phi ~ ICAR(node1, node2)` over the areas' adjacency, with a soft sum-to-zero per connected component" :
+        "the ICAR field `$phi`, separated into independent parts"
+    doc = @_rk_definition_doc """
+        An areal (`car`) effect$(bym2 ? " in the BYM2 convolution" : ", intrinsic CAR (ICAR)").
+
+        Draws the scale `$sigma`$(bym2 ? ", the mixing weight `$rho`, unstructured effects `$theta ~ Normal(0, 1)`" : "")
+        and $structured. Islands read 0. Returns each row's area effect,
+        $(bym2 ? "`$sigma .* (sqrt.($rho .* inv_scale) .* $field .+ sqrt.(1 .- $rho .* is_struct) .* $theta)`" :
+            "`$sigma .* $field`") at the row's area `$rows`."""
     call = _rk_ast_block_call!(definitions, taken, bym2 ? "brm_car_bym2" : "brm_car_icar",
-        block, Expr(:ref, effects, rows))
+        block, Expr(:ref, effects, rows); doc)
     locals = bym2 ? (; sigma, rho, phi, theta, separated...) : (; sigma, phi, separated...)
     call, locals
 end
@@ -1767,7 +1827,19 @@ function _rk_ast_cdar_block!(definitions, taken, term, group_rows, step_rows)
         Expr(:(=), walk, Expr(:call, :.*, sigma, steps)),
         Expr(:(=), cell, Expr(:call, :.+, Expr(:call, :.*,
             Expr(:call, :.-, step_position, 1), P), group_position)))
-    call = _rk_ast_block_call!(definitions, taken, "brm_cdar", block, Expr(:ref, walk, cell))
+    correlated = factor_values === nothing ? "" :
+        ", correlated across groups by the sparse factor `$(innovations === eta ? "" : "L")`"
+    doc = @_rk_definition_doc """
+        Stationary AR(1) deviations per group (`cdar`): `$P` groups over `$W` steps.
+
+        Draws the marginal scale `$sigma`, the persistence `$rho` and standardized
+        innovations `$eta[1:$P, 1:$W] ~ Normal(0, 1)`$correlated. The walk
+        `d[:, 1] = $sigma * e[:, 1]`, `d[:, w] = $rho * d[:, w - 1] + $sigma * sqrt(1 - $rho^2) * e[:, w]`
+        (`e` the innovations) is computed in closed form from the step lags `$lag_values`,
+        their mask `$mask_values` and the first-step indicator `$first_step`. Returns each
+        row's value at its group `$group_position` and step `$step_position`."""
+    call = _rk_ast_block_call!(definitions, taken, "brm_cdar", block, Expr(:ref, walk, cell);
+        doc)
     call, (; sigma, rho, eta)
 end
 

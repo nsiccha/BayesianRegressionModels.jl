@@ -12,7 +12,7 @@ include(joinpath(@__DIR__, "rk_source_roundtrip.jl"))
 const BRM = BayesianRegressionModels
 const EXT = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
 
-block_definitions(emitted) = Dict(BRM._rk_source_definition(d).name => d
+block_definitions(emitted) = Dict(BRM._rk_source_definition(d).name => BRM._brm_undoc(d)
     for d in emitted.defs if BRM._rk_source_definition(d).kind === :rkppl)
 
 declared!(names, _) = names
@@ -180,7 +180,9 @@ declares(x) = x isa Expr && ((x.head === :call && first(x.args) in (:~, :.~)) ||
 
 # Submodel definitions are bare function-shaped definitions; explicit
 # `@kernel` graphs and ordinary functions are numerical code, not components.
-submodels(emitted) = [d for d in emitted.defs if Meta.isexpr(d, :(=))]
+# Each submodel definition without its docstring (BRM documents every definition
+# it emits; testset "every definition BRM emits is documented", rk_jax_models.jl).
+submodels(emitted) = [d for d in map(BRM._brm_undoc, emitted.defs) if Meta.isexpr(d, :(=))]
 submodel_name(d) = first(first(d.args).args)
 
 const DATA = (; x=[-1.0, -0.3, 0.4, 1.0, 0.2, -0.6], w=[0.2, -0.5, 0.6, 0.1, -0.2, 0.4],
@@ -262,8 +264,8 @@ end
     @test any(n -> startswith(string(n), "brm_population_effects"), collision)
     hsgp = emitted(6)
     @test names(6) == Set([:brm_hsgp_effect])
-    spectral = [d for d in hsgp.defs if Meta.isexpr(d, :macrocall) &&
-        occursin("brm_hsgp_spectral_graph", sprint(show, d))]
+    spectral = [d for d in hsgp.defs if
+        startswith(string(BRM._rk_source_definition(d).name), "brm_hsgp_spectral_graph")]
     @test length(spectral) == 1
 end
 
