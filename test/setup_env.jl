@@ -389,8 +389,11 @@ const PINS = [
     # ReactiveKernels:JAX's lowering (9cbe68ee): `jax_source` translates the CDF
     # laws and rule primals, a module is generic in sizes with `prepare_data(**raw)`
     # and `(unconstrained, **prepared)` signatures, and an observed `@scan` runs per
-    # group, which `test/rk_jax_models.jl` requires.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "ddc3085967b41185a56284b50cfb14665ddd4ad4"),
+    # group, which `test/rk_jax_models.jl` requires. 88813eb3 (RK main, RK 0.1.132
+    # / RKPPL 0.1.141) contains it and lands ReactiveKernels:JAX's pin 6
+    # (6c8a9297): mixtures, multi-axis `hsgp` (integer `div`), a correlated
+    # treatment dummy's host helper and `stack` of a host plate translate.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "88813eb3daae68c56afb5190fb0cf0c8d5d1dcdf"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

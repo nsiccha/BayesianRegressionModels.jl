@@ -36,13 +36,14 @@ using Enzyme, ADTypes, LogDensityProblems
 include("jax_module_driver.jl")
 
 # The module contract tested here is RK's JAX lowering as it landed on RK main
-# (`ddc30859`, RK 0.1.130 / RKPPL 0.1.140; test/setup_env.jl): CDF-based laws
-# and derivative-rule primals translate, a module is generic in sizes
-# (`prepare_data(**raw)`, `m.dimension(prepared)`, `(unconstrained, **prepared)`,
-# integer sizes static under `jax.jit(f)(u, **prepared)`), an observed `@scan`
-# runs per group and `constrain` nests by scope, as native `constrain` does.
-pkgversion(ReactiveKernels) >= v"0.1.130" && pkgversion(ReactiveKernelsPPL) >= v"0.1.140" ||
-    error("test/rk_jax_models.jl needs ReactiveKernels 0.1.130 and ReactiveKernelsPPL " *
+# (`ddc30859`, RK 0.1.130 / RKPPL 0.1.140): CDF-based laws and derivative-rule
+# primals translate, a module is generic in sizes (`prepare_data(**raw)`,
+# `m.dimension(prepared)`, `(unconstrained, **prepared)`, integer sizes static
+# under `jax.jit(f)(u, **prepared)`), an observed `@scan` runs per group and
+# `constrain` nests by scope, as native `constrain` does. RK 0.1.132 (`88813eb3`,
+# the test pin) also translates multi-axis and level-correlated HSGP terms.
+pkgversion(ReactiveKernels) >= v"0.1.132" && pkgversion(ReactiveKernelsPPL) >= v"0.1.140" ||
+    error("test/rk_jax_models.jl needs ReactiveKernels 0.1.132 and ReactiveKernelsPPL " *
         "0.1.140 or later (run test/setup_env.jl)")
 
 module JaxModelSet
@@ -187,7 +188,11 @@ function station_daily_data(S; rng = Xoshiro(S), lod = -Inf, period = 365.0, sig
        station_scale, lod = fill(lod, length(y)), I_station = Matrix{Float64}(I, S, S))
 end
 
-points(rk) = [0.3 .* randn(Xoshiro(100 + k), rk.model.layout.total) for k in 1:3]
+# A binding's own layout: a forecast replay shares the fit's graph but binds the
+# design's missing entries, so its coordinates differ from `rk.model.layout`'s.
+const RK_EXT = Base.get_extension(BayesianRegressionModels, :BayesianRegressionModelsReactiveKernelsExt)
+bound_layout(rk) = RK_EXT._rk_bound_layout(rk)
+points(rk) = [0.3 .* randn(Xoshiro(100 + k), bound_layout(rk).total) for k in 1:3]
 
 # Native references of one binding at `us`.
 function native_reference(rk, us; values = ())
@@ -198,7 +203,7 @@ function native_reference(rk, us; values = ())
     map(us) do u
         lp, g = LogDensityProblems.logdensity_and_gradient(problem, u)
         (; densities = Dict(p => Base.invokelatest(q, u) for (p, q) in queries), lp, g,
-           constrained = ReactiveKernelsPPL.constrain(built.layout, u),
+           constrained = ReactiveKernelsPPL.constrain(bound_layout(rk), u),
            values = Dict(v => Base.invokelatest(q, u) for (v, q) in value_queries))
     end
 end
@@ -378,30 +383,9 @@ end
     check_model(RKBRMI(JMS.station_daily_censored(station_daily_data(6; lod = 0.1))))
 end
 
-# Whether a module emits and runs in Python (prepare_data and log_density at
-# one point), for a construct tested as broken until RK translates it.
-function runs_in_python(rk)
-    try
-        src = jax_source(rk.model, rk_bound_plan(rk))
-        brm_jax_available() || return false
-        brm_jax_run(src, [brm_jax_inputs(rk, src)], [points(rk)[1:1]])
-        true
-    catch e
-        e isa Union{JAXEmissionError,ArgumentError,ErrorException} || rethrow()
-        false
-    end
-end
-
-# The shared fields of ODL-shaped models (synthetic data). `hsgp(t)`
-# translates. These do not translate yet on RK main `ddc30859`; each is an RK
-# lowering gap reported to ReactiveKernels:JAX:
-# - levels correlated by an LKJ factor of data-valued size: "`keep` names
-#   `_ppl_last_Omega`, which is no data-only value of the program" (RK todo
-#   `1at3ntk`);
-# - `orthogonal_to = :linear`: `prepare_data` indexes a Python list as a
-#   matrix (`raw_basis[:, b - 1]`; RK todo `1at3ntk`);
-# - multi-axis bases: "`checked_sdiv_int` has no JAX translation" (fixed on
-#   RK:JAX's unlanded candidate `8243d297`).
+# The shared fields of ODL-shaped models (synthetic data): an HSGP over time,
+# per region with correlated levels (an LKJ factor of data-valued size) or
+# orthogonal to the linear trend, and over two and three axes.
 @testset "ODL-shaped shared fields: HSGP terms" begin
     rng = Xoshiro(6)
     n = 30
@@ -413,31 +397,25 @@ end
         mu ~ 1 + hsgp(t)
         y ~ Normal(mu, s)
     end))
-    brm_jax_require_python() || return
-    gaps = (
-        RKBRMI(@brm (; y, t, region, K = 3, eta = 2.0) begin
-            s ~ Exponential(1)
-            Omega ~ LKJCholesky(K, eta)
-            mu ~ 1 + hsgp(t; by = region, cor = Omega)
-            y ~ Normal(mu, s)
-        end),
-        RKBRMI(@brm (; y, t, region, cb = 5, cc = 1.5) begin
-            s ~ Exponential(1)
-            mu ~ 1 + t + hsgp(t; k = cb, c = cc, by = region, orthogonal_to = :linear)
-            y ~ Normal(mu, s)
-        end),
-        RKBRMI(@brm (; y, e, nn) begin
-            s ~ Exponential(1)
-            mu ~ 1 + hsgp(e, nn)
-            y ~ Normal(mu, s)
-        end),
-        RKBRMI(@brm (; y, e, nn, t) begin
-            s ~ Exponential(1)
-            mu ~ 1 + hsgp(e, nn, t; iso = false)
-            y ~ Normal(mu, s)
-        end),
-    )
-    for rk in gaps
-        @test_broken runs_in_python(rk)
-    end
+    check_model(RKBRMI(@brm (; y, t, region, K = 3, eta = 2.0) begin
+        s ~ Exponential(1)
+        Omega ~ LKJCholesky(K, eta)
+        mu ~ 1 + hsgp(t; by = region, cor = Omega)
+        y ~ Normal(mu, s)
+    end))
+    check_model(RKBRMI(@brm (; y, t, region, cb = 5, cc = 1.5) begin
+        s ~ Exponential(1)
+        mu ~ 1 + t + hsgp(t; k = cb, c = cc, by = region, orthogonal_to = :linear)
+        y ~ Normal(mu, s)
+    end))
+    check_model(RKBRMI(@brm (; y, e, nn) begin
+        s ~ Exponential(1)
+        mu ~ 1 + hsgp(e, nn)
+        y ~ Normal(mu, s)
+    end))
+    check_model(RKBRMI(@brm (; y, e, nn, t) begin
+        s ~ Exponential(1)
+        mu ~ 1 + hsgp(e, nn, t; iso = false)
+        y ~ Normal(mu, s)
+    end))
 end
