@@ -1,0 +1,24 @@
+key	value
+rows	320
+groups	24
+dimension	54
+chains	4
+draws_per_chain	1000
+native_seconds	106.227377537
+native_completed_chains	3
+native_divergences	0
+python_sampling_seconds	15.246987581253052
+python_divergences	0
+python_first_log_density_seconds	0.3881654739379883
+python_version	3.14.4
+jax_version	0.12.0.1
+numpyro_version	0.22.0
+numpy_version	2.5.4
+julia_version	1.10.12
+BayesianRegressionModels	0.2.272
+ReactiveKernels	0.1.143
+ReactiveKernelsPPL	0.1.145
+WarmupHMC	0.2.11
+untranslated	g_fit_levels, g_level
+data_inputs	g, g_fit, g_fit_levels, g_level, x, y
+prepared_inputs	ppl_last_b_mu_g_g_z, ppl_axis1_b_mu_g_g_z, ppl_first_pop_mu_beta_pop, ppl_last_pop_mu_beta_pop, g_level, x, X_mu, y

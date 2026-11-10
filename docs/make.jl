@@ -87,6 +87,7 @@ makedocs(
             "RBesT MAP prior" => "rbest-centering.md",
         ],
         "Intermediate representation" => "intermediate-representation.md",
+        "A Python/JAX module" => "jax.md",
         "Scientific model descriptions" => "model-description.md",
         "Formulas and custom models: deck" => "feature-deck.md",
         "Gallery" => "gallery.md",
