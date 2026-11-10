@@ -5,6 +5,7 @@ using JSON
 using BayesianRegressionModels
 using Distributions
 using StanBlocks
+import AlgebraOfVega
 import ReactiveKernels, ReactiveKernelsPPL
 
 const BRM = BayesianRegressionModels
@@ -12,6 +13,29 @@ const EXAMPLE_MODULES = Dict{Symbol,Module}()
 const PANE_IDS = "brm|ir|stanblocks|stan"
 const PANE_LABELS = "BRM authoring|IR|StanBlocks model|Stan source"
 const REPOSITORY_ROOT = normpath(joinpath(@__DIR__, ".."))
+
+html_attribute(value) = replace(string(value), '&' => "&amp;", '"' => "&quot;",
+                                '<' => "&lt;", '>' => "&gt;", '\'' => "&#39;")
+
+"""
+    figure(spec; caption, alt=caption)
+
+Embed an AlgebraOfVega figure in a Documenter `@eval` block. The page carries
+the generated Vega-Lite JSON; the theme calls `vegaEmbed` after hydration and
+redraws on a light/dark switch. No rendered asset is written to the repository.
+"""
+function figure(spec; caption::AbstractString, alt::AbstractString=caption)
+    json = AlgebraOfVega.to_json(spec)
+    html = """
+    <figure class="brm-figure" v-pre>
+      <div class="brm-figure-plot" data-brm-vega="$(html_attribute(json))" aria-label="$(html_attribute(alt))">
+        <p role="status">Loading figure…</p>
+      </div>
+      <figcaption>$(html_attribute(caption))</figcaption>
+    </figure>
+    """
+    return Markdown.parse("```@raw html\n" * html * "\n```\n")
+end
 
 """Return one stable evaluation module for all executable blocks on a page."""
 example_module(name::Symbol) = get!(EXAMPLE_MODULES, name) do
