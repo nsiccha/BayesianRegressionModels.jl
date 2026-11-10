@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.262
+## 0.2.265
 
 - Added: a data-only assignment, a formula column and a model-scope
   expression apply the smooth Base functions `sin`, `cos`, `tan`, `sinpi`,
@@ -51,6 +51,73 @@ instead of failing at run time.
   `jax_source` modules in a real Python process against the native model.
   The test environment pins ReactiveKernels `main` `ddc30859` (RK 0.1.130 /
   RKPPL 0.1.140), which carries RK's JAX lowering.
+
+## 0.2.264
+
+- Changed: `brm_svi_fit`'s exploration ends only where the trimmed ELBO's
+  least-squares slope over the last `trend_windows` windows (new keyword,
+  default `4 patience + 1`, 41 at the defaults) is not above twice its standard
+  error, as well as where the two-window test has passed. The error is read from
+  the residuals about that line, each window one batch. Two windows `patience`
+  apart cannot see a rise below about twice their noise, and a global that meets
+  every unit on a ridge climbs that slowly: a non-centred step `m + s z_i` that
+  each unit's data pin only in sum lets the spread `s` fall only as fast as every
+  `z_i` grows. On such a toy (8 and 16 units of 100 rows, batch 4, 5 seeds each)
+  the two-window test ended exploration at the 40-window floor every time, with
+  `exp(m)` at 0.90 to 0.98 where 400 windows put it at 1.17 to 1.19. The trend
+  test explored 112 to 136 windows, its factor was 14.6 to 36.2 nats better on
+  shared draws and within 0.5 nats of the 400-window run's, at about 2.1 times
+  the iterations. A downstream model of that shape gave a step 0.95 against
+  NUTS's 1.19 under the two-window test and NUTS's value under this one (snag
+  `brm-svi-fit-rkbr-f41cb255`). On 400-unit synthetic models (batch 8, seeds
+  1-3, paired draws) the returned factor's ELBO rose by 5.0 to 7.8 nats with
+  correlated Gaussian random effects, 26.9 to 37.8 with a weakly read log-scale
+  field and -0.03 to +0.10 with Poisson random intercepts, at 1.05 to 2.0 times
+  the iterations; on an exactly Gaussian model with tight globals the gap to the
+  family's optimum fell from 61.6 to 56.3 nats (32 coefficients) and 56.0 to 54.9
+  (8). On stationary window noise the trend test delays the stop in about 1% of
+  runs. `trend_windows=0` restores the earlier rule. A
+  fit on a fixed seed explores identically until the earlier rule's stop and may
+  run longer from there. An optimizer checkpoint from BRM 0.2.263 or earlier
+  records no `trend_windows` and continues on the two-window test it ran with.
+  `laplace=GaussianBlockLaplace()` is unchanged and refuses the keyword.
+
+## 0.2.263
+
+- Added: `adaptive_centering_problem(rk::RKBRMI, problem, ad_backend;
+  centeredness, ranef_order)` wraps `rk_logdensity_problem(rk; ad_backend)` in
+  WarmupHMC's adaptive partial centring of random effects, as the SBBRMI method
+  does for a compiled Stan problem. Every ordinary Gaussian random-effect block
+  with sampled scales (scalar, correlated, `||`, `|ID|`) gets one control per
+  level and term, `c = 0` being RK's standardized draw and `c = 1` the level's
+  total: a cell is centred on its predictor's population coefficient, and a
+  grouping nested in a coarser one also on that grouping's effect. The map,
+  Jacobian and gradients are exact; draws stay in the RK layout's frame.
+  `adaptive_centering_blocks(rk)` lists the blocks by RK layout position, and
+  `adaptive_centering_controls(adaptive, rk)` reports the cells. Student-t,
+  known-value, stratified and level-correlated blocks and bounded scales raise
+  on RKBRMI; multi-membership and R2D2-scaled blocks and HSGP, `car`, `cdar`
+  and `gmrf` coordinates keep the emitted frame. Before, an RKBRMI could only
+  be sampled non-centred under NUTS.
+
+## 0.2.262
+
+- `cdar(step; by = group)` without `cor` is now the walk with independent
+  levels, and so is `cor = I_g` with a data field holding `LinearAlgebra.I`.
+  Neither forms a `P × P` matrix: SBBRMI emits `_sb_cdar_iid` (Stan function
+  `independent_damped_walk`), which ships no `L`, `A_new` or `L_new` data and
+  multiplies by no factor, so the data and the work per evaluation are linear
+  in the number of levels, `O(P W)`. Before, `cor` was required and independent
+  levels needed a dense identity: for 1,700 levels, 2.9 M entries (23 MB) of
+  data, an `O(P³)` Cholesky factorization at build and `O(P² W)` work per
+  evaluation. The law, the coordinates (`sigma`, `rho`, `eta`), forecasts and
+  `resample_groups` redraws are those of a dense `cor = I`; a redraw of levels
+  the fit did not see reads no `cor`. RKBRMI, adaptive centring and
+  `brm_nlme_view` take the term the same way. A scaled identity `c * I` is
+  refused, since `sd(lp, cdar(step))` is the scale. Snag
+  `independent-per-e13d14f0`.
+- Fixed: preparing a `cdar` term looked each row's level up with a scan over
+  the levels, `O(N P)` for `N` rows; it is now a hash lookup, `O(N + P)`.
 
 ## 0.2.261
 

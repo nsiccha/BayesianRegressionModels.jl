@@ -1146,7 +1146,10 @@ const _BRM_SVI_PHASES = (lower="Lower to ReactiveKernels", prepare="Prepare NLME
 # window (one pass over the subjects, at least 100 iterations) has risen, over
 # the last `patience` windows, by less than twice the standard error of that
 # rise, after at least `min_windows` (`_brm_svi_window`). Comparing across several windows rather than
-# neighbouring ones lets a slow drift show above the minibatch noise.
+# neighbouring ones lets a slow drift show above the minibatch noise. Since
+# BRM 0.2.264 the slope over the last `trend_windows` windows (default
+# `4 patience + 1`) must also not be significantly positive (`_brm_svi_rising`):
+# two windows alone miss a rise below about twice their noise.
 #
 # What that test finds stationary is the iterate at exploration's step, and
 # that can be far from the optimum. `lr_global` moves a global mean by an
@@ -1166,7 +1169,9 @@ const _BRM_SVI_PHASES = (lower="Lower to ReactiveKernels", prepare="Prepare NLME
 # The phase is not stored: settling began at the first window at which
 # exploration's test passed (`_brm_svi_explored`), which the run's windows
 # record, so a checkpoint's layout is unchanged. A run whose controls predate
-# `settle_windows` (a checkpoint of BRM 0.2.240 or 0.2.241) does not settle.
+# `settle_windows` (a checkpoint of BRM 0.2.240 or 0.2.241) does not settle, and
+# one whose controls predate `trend_windows` (BRM 0.2.263 and earlier) ends
+# exploration on the two-window test alone, so its phases read as they were run.
 #
 const _BRMSVIWindow = NamedTuple{(:mean, :center, :spread),NTuple{3,Float64}}
 
@@ -1244,19 +1249,62 @@ end
 # Whether the ELBO has failed to rise detectably from window `a` to window `b`.
 _brm_svi_stalled(a, b, W) = b.center - a.center < 2 * sqrt((a.spread + b.spread) / W)
 
+# Whether the ELBO still rises over the `L` windows ending at window `w` (all of them
+# when there are fewer): the least-squares slope of their centres exceeds twice its
+# standard error, read from the residuals about that line (each window one batch), so
+# the error includes the iterate's wander between windows. Fewer than 3 windows (or
+# `L < 3`, `0` being off) never rise.
+#
+# Exploration ends only where this is false too. Two windows `patience` apart cannot
+# see a rise below about twice their noise, and a global that meets every unit on a
+# ridge climbs that slowly: a non-centred step `m + s z_i` that each unit's data pin
+# only in sum, so the spread `s` can fall only as fast as every unit's `z_i` grows.
+# On a downstream model of that shape (8 and 16 units, batch 4) the two-window test
+# passed at windows 42 and 41 while the 21-window slope read t = 7.2 and 6.8. The
+# trimmed ELBO went on rising until about windows 157 and 208, by about 90 and 420
+# nats, and only there did the step's mean settle where 400 windows put it (NUTS's
+# median, on 8 units; snag brm-svi-fit-rkbr-f41cb255). Over 41 windows (`4 patience + 1`, the default
+# `trend_windows`) the test stopped at those windows; over 21 it stopped at 95 and
+# 70, still rising.
+function _brm_svi_rising(windows, w, L)
+    L = min(L, w)
+    L >= 3 || return false
+    c = [windows[k].center for k in w-L+1:w]
+    t = (1:L) .- (L + 1) / 2
+    stt = sum(abs2, t)
+    slope = sum(t .* c) / stt
+    residual = c .- Statistics.mean(c) .- slope .* t
+    se = sqrt(sum(abs2, residual) / (L - 2) / stt)
+    slope > 2 * se
+end
+
+# Controls written before the trend test existed (a resumed checkpoint) keep the
+# two-window test alone.
+_brm_svi_trend_windows(c) = get(c, :trend_windows, 0)
+
+# Whether exploration ends at window `w`: the ELBO has not risen detectably over its
+# last `patience` windows, and its trend over the last `trend_windows` is not upwards.
+_brm_svi_exploration_stalled(windows, w, c) =
+    _brm_svi_stalled(windows[w-c.patience], windows[w], c.window) &&
+    !_brm_svi_rising(windows, w, _brm_svi_trend_windows(c))
+
 # The optimizer controls of a run over `N` subjects, with the batch size and
 # window it actually uses. They are fixed for the run and its continuations.
 function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
         polish_lr, window, patience, min_windows, polish_windows, unit_sampling=:uniform,
         settle_windows=_BRM_SVI_SETTLE_WINDOWS, unit_curvature=:pair,
         structured_unit_step=unit_step, structured_rank_step=1.0, unit_positive_part=true,
-        sd_bound=_BRM_SVI_SD_BOUND)
+        sd_bound=_BRM_SVI_SD_BOUND, trend_windows=_brm_svi_default_trend_windows(patience))
     B = min(batch_size, N)
     (; batch_size=B, window=window === nothing ? max(cld(N, B), 100) : window,
        max_iterations, lr_global, unit_step, polish_lr, patience, min_windows,
        polish_windows, unit_sampling, settle_windows, unit_curvature, structured_unit_step,
-       structured_rank_step, unit_positive_part, sd_bound)
+       structured_rank_step, unit_positive_part, sd_bound, trend_windows)
 end
+
+# The windows exploration's trend test reads when the caller names none
+# (`_brm_svi_rising`): 41 at the default `patience` of 10.
+_brm_svi_default_trend_windows(patience) = 4patience + 1
 
 # A dense unit's step when the caller names none: the whole natural-gradient
 # step on the orthogonal design's full curvature (the trust regions still bound
@@ -1312,7 +1360,7 @@ _brm_svi_settle_windows(c) = get(c, :settle_windows, 0)
 function _brm_svi_explored(run, c)
     windows = run.windows
     for w in max(c.min_windows, c.patience + 1):length(windows)
-        _brm_svi_stalled(windows[w-c.patience], windows[w], c.window) && return w
+        _brm_svi_exploration_stalled(windows, w, c) && return w
     end
     0
 end
@@ -1401,7 +1449,7 @@ function _brm_svi_advance!(run, t, c)
             length(windows) - explored >= _brm_svi_settle_windows(c)) &&
             _brm_svi_start_polishing!(run, q, it)
     elseif length(windows) >= max(c.min_windows, c.patience + 1) &&
-            _brm_svi_stalled(windows[end-c.patience], windows[end], W)
+            _brm_svi_exploration_stalled(windows, length(windows), c)
         # Exploration ends: Adam restarts on the scale-preconditioned step.
         clipped = run.adam.clipped
         run.adam = _brm_svi_adam(q, c.polish_lr)
@@ -1829,10 +1877,13 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   applies to both families),
   `polish_lr` (Adam on the globals while settling and polishing, as a fraction
   of each global's current scale), `window`,
-  `patience`, `min_windows`, `settle_windows`, `polish_windows`, `global_scale`
-  and `unit_scale` (initial factor scales). The run explores at constant steps
-  until the trimmed ELBO has not risen detectably over `patience` windows (after
-  at least `min_windows`), settles at the constant scale-relative step until the
+  `patience`, `min_windows`, `trend_windows`, `settle_windows`, `polish_windows`,
+  `global_scale` and `unit_scale` (initial factor scales). The run explores at
+  constant steps until the trimmed ELBO has not risen detectably over `patience`
+  windows (after at least `min_windows`) and its least-squares slope over the last
+  `trend_windows` windows (default `4 patience + 1`; `0` turns this off, the rule of
+  BRM 0.2.263 and earlier) is not above twice its standard error, settles at the
+  constant scale-relative step until the
   same test passes on settling's own windows (for at most `settle_windows`
   windows; `0` skips settling, the schedule of BRM 0.2.241 and earlier), then
   polishes for `polish_windows` windows with decaying steps and returns the
@@ -1959,12 +2010,17 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         inits=nothing, global_scale=0.1, unit_scale=1.0, polish_lr=0.05, window=nothing,
         patience=10, min_windows=40, polish_windows=20,
         settle_windows=_BRM_SVI_SETTLE_WINDOWS, centering=nothing, sd_bound=_BRM_SVI_SD_BOUND,
-        kwargs...)
+        trend_windows=nothing, kwargs...)
     family = _brm_svi_family(previous, family)
     sd_bound = _brm_svi_check_sd_bound(sd_bound)
     settle_windows isa Integer && settle_windows >= 0 || throw(ArgumentError(
         "brm_svi_fit: settle_windows must be a nonnegative integer (0: polish straight " *
         "after exploration)"))
+    trend_windows === nothing || trend_windows isa Integer &&
+        (trend_windows == 0 || trend_windows >= 3) || throw(ArgumentError(
+        "brm_svi_fit: trend_windows must be nothing (4 patience + 1), 0 (off: the " *
+        "two-window test alone) or an integer of at least 3, got $(repr(trend_windows))"))
+    trend_windows = Int(something(trend_windows, _brm_svi_default_trend_windows(patience)))
     unit_curvature in (:orthogonal, :pair) || throw(ArgumentError(
         "brm_svi_fit: unit_curvature must be :orthogonal or :pair, got $(repr(unit_curvature))"))
     steps = _brm_svi_unit_steps(unit_step, unit_curvature)
@@ -1989,7 +2045,7 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         centering === nothing || ((t, q) = _brm_svi_with_centering(t, q, centering))
         c = _brm_svi_controls(length(t.units); batch_size, max_iterations, lr_global,
             steps..., polish_lr, window, patience, min_windows, polish_windows,
-            settle_windows=Int(settle_windows), unit_curvature, sd_bound,
+            settle_windows=Int(settle_windows), unit_curvature, sd_bound, trend_windows,
             unit_sampling=something(unit_sampling,
                 t.m.view.unit_partition === :connected ? :work : :uniform))
         t, _brm_svi_optimizer_state(t, previous, c, _brm_svi_run(rng, q, c, t))

@@ -204,6 +204,7 @@ export modeled_covariates
 using SHA: sha256
 include("description.jl")
 include("adaptive_centering.jl")
+include("rk_adaptive_centering.jl")
 include("posterior_diagnostics.jl")
 # Per-draw random-effect SDs, correlations and per-level effects, read from
 # the emitted carriers through the descriptor and the description metadata.
@@ -433,7 +434,7 @@ export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
        ranef_correlated_draws_completion,
        brm_col_variances, brm_r2d2_scale, brm_cat_variances,
        multi_membership_intercept, multi_membership_correlated,
-       _sb_mo, _sb_cat, _sb_cat_normal, _sb_cat_cells, _sb_cat_cells_normal, _sb_ar1, _sb_dar1, _sb_rw1, _sb_cdar, _sb_car_icar, _sb_car_bym2, _sb_s, _sb_t2, _sb_me,
+       _sb_mo, _sb_cat, _sb_cat_normal, _sb_cat_cells, _sb_cat_cells_normal, _sb_ar1, _sb_dar1, _sb_rw1, _sb_cdar, _sb_cdar_iid, _sb_car_icar, _sb_car_bym2, _sb_s, _sb_t2, _sb_me,
        _sb_interval_censored_predictor,
        _sb_gp, _sb_gp_aniso, _sb_hsgp, _sb_hsgp_aniso,
        _sb_hsgp_partial, _sb_hsgp_partial_aniso,

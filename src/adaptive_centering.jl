@@ -2087,7 +2087,8 @@ struct _CDARAdaptiveCenteringBlock
     rho::Int
     rho_lower::Float64
     rho_upper::Float64
-    # Frozen per-group marginal variances `C[p, p]` of `C = L * L'`.
+    # Frozen per-group marginal variances `C[p, p]` of `C = L * L'` (ones for
+    # independent levels, which have no `L`).
     cdiag::Vector{Float64}
 end
 
@@ -2176,10 +2177,19 @@ function _adaptive_cdar_centering_blocks(model, unc_names)
                 "BRM adaptive centering: cdar `$(entry.term)` innovations " *
                 "have no compiler declaration owner.",
             )
+            l_key = get(owner.keywords, :L, nothing)
             if owner.family isa Symbol
-                owner.family === :_sb_cdar || error(
+                owner.family in (:_sb_cdar, :_sb_cdar_iid) || error(
                     "BRM adaptive centering: cdar `$(entry.term)` resolved to " *
                     "unsupported emitted family `$(owner.family)`.",
+                )
+                # independent levels (`_sb_cdar_iid`) have no factor; correlated
+                # ones must expose theirs
+                (owner.family === :_sb_cdar_iid) == isnothing(l_key) || error(
+                    "BRM adaptive centering: cdar `$(entry.term)` family " *
+                    "`$(owner.family)` " * (isnothing(l_key) ?
+                        "does not expose its frozen correlation-factor `L` data binding." :
+                        "binds a correlation factor `L` it does not read."),
                 )
             end
             isempty(innovations.output.constraints) || error(
@@ -2203,13 +2213,12 @@ function _adaptive_cdar_centering_blocks(model, unc_names)
                 "BRM adaptive centering: cdar `$(entry.term)` must have one persistence coordinate.",
             )
 
-            l_key = get(owner.keywords, :L, nothing)
-            l_key isa Symbol || error(
+            isnothing(l_key) || l_key isa Symbol || error(
                 "BRM adaptive centering: cdar `$(entry.term)` declaration does " *
                 "not expose its frozen correlation-factor `L` data binding.",
             )
-            l_raw = get(plan.data, l_key, nothing)
-            l_raw isa AbstractMatrix{<:Real} || error(
+            l_raw = isnothing(l_key) ? nothing : get(plan.data, l_key, nothing)
+            isnothing(l_key) || l_raw isa AbstractMatrix{<:Real} || error(
                 "BRM adaptive centering: cdar `$(entry.term)` compiler data " *
                 "`$l_key` is not a real correlation-factor matrix.",
             )
@@ -2222,17 +2231,17 @@ function _adaptive_cdar_centering_blocks(model, unc_names)
                 "not expose integer group/step counts.",
             )
             P, W = Int(n_groups), Int(n_steps)
-            L = Matrix{Float64}(l_raw)
-            size(L) == (P, P) || error(
+            isnothing(l_raw) || size(l_raw) == (P, P) || error(
                 "BRM adaptive centering: cdar `$(entry.term)` owns a " *
-                "$(size(L)) factor for $P groups.",
+                "$(size(l_raw)) factor for $P groups.",
             )
             length(innovations.coordinates) == P * W || error(
                 "BRM adaptive centering: cdar `$(entry.term)` owns " *
                 "$(length(innovations.coordinates)) innovations for a " *
                 "$P×$W walk.",
             )
-            cdiag = vec(sum(abs2, L; dims=2))
+            # independent levels: `C = I`, a unit marginal variance per group
+            cdiag = isnothing(l_raw) ? ones(P) : vec(sum(abs2, Matrix{Float64}(l_raw); dims=2))
             all(c -> isfinite(c) && c > 0, cdiag) || error(
                 "BRM adaptive centering: cdar `$(entry.term)` frozen factor " *
                 "has a non-finite or non-positive marginal variance.",

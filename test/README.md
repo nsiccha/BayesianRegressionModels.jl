@@ -1,5 +1,14 @@
 # Running the tests
 
+`rk_adaptive_centering.jl` checks `adaptive_centering_problem(rk, problem,
+backend)` on RKBRMI random effects: the blocks name the RK layout's draws, scales
+and correlation-factor coordinates; each cell is located on its population
+coefficient, and a nested grouping on its parent's effect; the wrapped density,
+Jacobian and native Reverse gradient match an independent map of the plain RK log
+density (with central differences) at zero, one and random controls, for `||`,
+correlated and nested blocks; and the blocks it does not build raise. About 4
+minutes warm; it accepts testset substring filters.
+
 `rk_data_expression_scalars.jl` checks a numeric scalar data field read by an RKBRMI
 data expression: offsets of many shapes, a coefficient's column, fitted transforms,
 an interaction operand, a random slope, a data-only assignment, a component's
@@ -1445,6 +1454,18 @@ schedule. On an exactly Gaussian target with 32 tight globals every unit reads,
 where q* is known, settling brings the returned factor closer to q* and its global
 means within half an optimal sd (the earlier schedule: about one). About 6 minutes
 warm, most of it the exact Hessian; it accepts testset substring filters.
+
+`nlme_svi_trend.jl` checks exploration's trend test (BRM 0.2.264): on window
+statistics alone, a rise too slow for two windows `patience` apart is read by the
+slope over `trend_windows` windows, a stationary ELBO ends exploration where the
+two-window test does in all but about 1% of seeds, and controls without
+`trend_windows` keep the two-window test. On a non-centred step that every unit's
+data pin (8 units, batch 4), the two-window stop ends at the 40-window floor with
+the step's mean far off, and the trend stop explores on to within 1 nat of a
+400-window run, both identical to the bit until the earlier stop. A checkpoint
+continues on its own rule, and one whose controls predate `trend_windows` on the
+two-window test; the keyword is validated and `GaussianBlockLaplace` refuses it.
+It accepts testset substring filters.
 
 `nlme_svi_heavy_tails.jl` checks what one extreme ELBO draw does to minibatch
 SVI, whose estimate can have an infinite expectation with every draw finite.

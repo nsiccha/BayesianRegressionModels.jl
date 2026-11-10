@@ -756,9 +756,13 @@ _brmd_builtin_call(::typeof(ar),c)=BRMDescriptionFragment(
     prose=(_brmd_text(c,:autoregressive),),
     equations=("a_t=\\phi a_{t-1}+\\epsilon_t,\\quad\\phi=\\tanh(\\phi_{\\mathrm{"*_brmd_text(c,:math_raw)*
         "}}),\\quad\\epsilon_t\\sim\\mathcal N(0,1)",),covers=(c.id,))
-_brmd_builtin_call(::typeof(cdar),c)=BRMDescriptionFragment(
+# Without `cor` the levels are independent: no factor `L`.
+_brmd_builtin_call(::typeof(cdar),c)=haskey(c.keywords,:cor) ? BRMDescriptionFragment(
     prose=(_brmd_text(c,:damped_walk),),
-    equations=("\\delta_1=\\sigma Lz_1,\\quad\\delta_t=\\rho\\delta_{t-1}+\\sigma\\sqrt{1-\\rho^2}Lz_t,\\quad z_t\\sim\\mathcal N(0,I)",),covers=(c.id,))
+    equations=("\\delta_1=\\sigma Lz_1,\\quad\\delta_t=\\rho\\delta_{t-1}+\\sigma\\sqrt{1-\\rho^2}Lz_t,\\quad z_t\\sim\\mathcal N(0,I)",),covers=(c.id,)) :
+    BRMDescriptionFragment(
+    prose=(_brmd_text(c,:damped_walk_independent),),
+    equations=("\\delta_1=\\sigma z_1,\\quad\\delta_t=\\rho\\delta_{t-1}+\\sigma\\sqrt{1-\\rho^2}z_t,\\quad z_t\\sim\\mathcal N(0,I)",),covers=(c.id,))
 _brmd_builtin_call(::typeof(gmrf),c)=haskey(c.keywords,:multiresolution) ? BRMDescriptionFragment(
     prose=(_brmd_text(c,:space_time_gmrf_multiresolution),),
     equations=("f(s,t,c)=\\sigma\\sum_k b_{sk}(\\ell_s)z_k(t,c),\\quad\\sum_k b_{sk}^2=1",

@@ -3127,6 +3127,60 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
     )
 end
 
+"""
+    adaptive_centering_problem(rk::RKBRMI, problem, ad_backend;
+        unc_names=nothing, centeredness=nothing, ranef_order=:declared)
+
+Wrap `problem = rk_logdensity_problem(rk; ad_backend)` in the same WarmupHMC
+adaptive partial centring of random effects as the SBBRMI method: one
+11-way control (`c = 0:0.1:1`) per level × term cell of every ordinary
+random-effect block ([`adaptive_centering_blocks`](@ref)`(rk)`), scored online
+from the source-invariant innovation frame, with the exact triangular map,
+Jacobian and hyperparameter gradients. RKBRMI emits every block non-centred, so
+`c = 0` is its standardized draw `z`. A cell is centred on its predictor's
+sampled, unbounded population coefficient for that term (hierarchical
+centring), so `c = 1` is the level's total `beta + b[j]`; a grouping nested in
+a coarser scalar grouping of the same predictor is centred on that grouping's
+effect too. Every other coordinate (population coefficients, scales,
+correlation factors, HSGP/car/cdar/gmrf fields, cell latents, completions)
+passes through unchanged, and returned draws stay in the RK layout's frame.
+
+`unc_names` defaults to the RK layout's coordinate names. `centeredness`
+(a real in `[0, 1]`, one per cell, or `:midpoint`) sets the start;
+`ranef_order = :learned` selects the learned conditioning order of correlated
+blocks at restarting windows, as for SBBRMI. Read the cells with
+[`adaptive_centering_controls`](@ref)`(adaptive, rk)`. Blocks the RKBRMI
+wrapper does not cover raise (see [`adaptive_centering_blocks`](@ref)); a model
+without any ordinary random-effect block raises.
+"""
+function BRM.adaptive_centering_problem(model::BRM.RKBRMI, problem, ad_backend;
+        unc_names=nothing, centeredness=nothing, ranef_order=:declared)
+    names = String.(isnothing(unc_names) ? BRM._rk_layout_coordinate_names(model) :
+                    unc_names)
+    ranef_order in (:declared, :learned) ||
+        throw(ArgumentError("ranef_order must be :declared or :learned"))
+    centeredness isa Symbol && centeredness !== :midpoint && throw(ArgumentError(
+        "centeredness must be a real in [0, 1], one such value per cell, or " *
+        "`:midpoint`; got `:$centeredness`"))
+    blocks = BRM.AdaptiveCenteringBlock[b for b in BRM.adaptive_centering_blocks(model, names)]
+    isempty(blocks) && error("BRM adaptive centering on RKBRMI: this model has no " *
+        "ordinary random-effect block with sampler coordinates to adapt.")
+    locations = BRM._adaptive_ranef_locations(model, blocks, names)
+    _containers_first!(blocks, locations)
+    if ranef_order === :learned && any(b -> b.ranef.n_terms > 1, blocks)
+        _, ir = _adaptive_ordered_centering_reparametrizer(blocks,
+            BRM._HSGPAdaptiveCenteringBlock[]; locations)
+        return _ordered_centering_problem(ir, problem, ad_backend,
+            _start_controls(centeredness, ir.state, WarmupHMC.reparam_controls(ir)))
+    end
+    state, ir = _adaptive_centering_reparametrizer(blocks, locations)
+    _initial_centering!(state, ir,
+        _start_controls(centeredness, state, [last(p).source.c for p in ir.pairs]))
+    WarmupHMC.ReparametrizedProblem(
+        ir, problem, ad_backend; scoring_plan=_candidate_scoring_plan(state),
+    )
+end
+
 # ---- Controls report --------------------------------------------------------
 
 _centering_state(ir::WarmupHMC.IndexedReparametrization) =
@@ -3291,7 +3345,13 @@ end
 
 _control_margins(model::Union{BRM.GenerativePlan,BRM.SBBRMI}) =
     BRM._adaptive_block_margins(BRM.brm_descriptor(model))
+_control_margins(model::BRM.RKBRMI) = BRM._rk_adaptive_margins(model)
 _control_margins(_) = Dict{Symbol,Tuple}()
+
+# The unconstrained names a wrapper's positions carry: the RK layout's for an
+# RKBRMI, the compiled Stan model's otherwise.
+_control_names(model::BRM.RKBRMI, _) = String.(BRM._rk_layout_coordinate_names(model))
+_control_names(_, problem) = _problem_unc_names(problem)
 
 function BRM.adaptive_centering_controls(adaptive::WarmupHMC.ReparametrizedProblem,
                                          model; unc_names=nothing)
@@ -3299,7 +3359,7 @@ function BRM.adaptive_centering_controls(adaptive::WarmupHMC.ReparametrizedProbl
     state = _centering_state(ir)
     rows = NamedTuple[]
     isnothing(state) && return rows
-    names = isnothing(unc_names) ? _problem_unc_names(adaptive.problem) : unc_names
+    names = isnothing(unc_names) ? _control_names(model, adaptive.problem) : unc_names
     _control_rows!(rows, state, _centering_orders(ir), 0, _centering_values(ir), names,
                    _control_margins(model))
     rows

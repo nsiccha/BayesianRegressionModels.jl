@@ -435,6 +435,12 @@ end
 # off (plain 0.44-0.49) with 0.22-0.25 of NUTS's sd, the HSGP sd 0.54-0.69 off
 # (plain 0.79-0.84), the unit coordinates' rms error 0.10-0.13 (plain 0.17-0.18),
 # and the ELBO 1.7-2.1 nats above plain.
+# The length scale is weakly identified, and its mean wanders with where
+# exploration stops (seeds 5-7, 2026-11-10): the centered fit's error was
+# 0.19-0.31 NUTS sds after the 40 windows of the two-window stop
+# (`trend_windows=0`), 0.32-0.38 after the 46-47 of the trend stop (BRM 0.2.264),
+# 0.47-0.50 after 200 and 0.21-0.28 after 400, while the plain fit's was 0.53-0.76
+# throughout; so the bound below sits between the two at the default stop.
 @stestset "a grouped HSGP's centered fit against NUTS" begin
     rk = RKBRMI(svi_centering_curve_model(svi_centering_curve_data()))
     m = brm_nlme_model(rk; ad_backend=NLME_AD)
@@ -457,7 +463,7 @@ end
     ratio(f) = vec(std(f.draws; dims=2)) ./ σr
     elbo(f) = mean(f.diagnostics.elbo[end-99:end])
     locals = setdiff(eachindex(μr), fit.diagnostics.globals)
-    @test mean_error(fit)[rho] < 0.35 < mean_error(plain)[rho]
+    @test mean_error(fit)[rho] < 0.45 < mean_error(plain)[rho]
     @test ratio(fit)[rho] > 0.15
     @test mean_error(fit)[sd] < mean_error(plain)[sd]
     @test sqrt(mean(abs2, mean_error(fit)[locals])) < 0.15
