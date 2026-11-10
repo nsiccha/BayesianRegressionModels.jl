@@ -60,8 +60,8 @@ jobs:
         # BRM's nsiccha-org runtime dependencies must be developed explicitly:
         # Julia 1.10 ignores Project.toml's `[sources]`. Clone the public
         # sources and Pkg.develop the whole closure in one batch (see /ci §5).
-        # HTMXObjects is private and not needed by the docs build — see
-        # make.jl's conditional theme install.
+        # AlgebraOfVega renders the figures; its web dependencies use the
+        # same public source pins as the tested BRM environment.
         #
         # `devibe`, NOT `dev`. StanBlocks' active line moved to `devibe`
         # and `dev` is now a strict ancestor 303 commits behind it
@@ -71,18 +71,37 @@ jobs:
         # `UndefVarError: @stanonly not defined` — the first run on
         # nsiccha/BayesianRegressionModels.jl died exactly there
         # (run 30708357301).
+        #
+        # The pins come from BRM itself: the release sources in Project.toml
+        # (PowerScaling, ReparametrizableDistributions) and the test
+        # environment's ReactiveKernels pin with the two unregistered packages
+        # it needs (OutputSignatures, MutatingFunctions). The docs' JAX panes
+        # call ReactiveKernelsPPL.jax_source, so ReactiveKernels contributes
+        # three packages from one checkout.
         run: |
           git clone -b devibe https://github.com/nsiccha/StanBlocks.jl.git
           julia --project=docs -e '
             using Pkg, TOML
-            # Julia 1.10 ignores [sources]; read the BRM release pins here.
-            sources = TOML.parsefile("Project.toml")["sources"]
-            pinned = map(["PowerScaling"]) do name
-              source = sources[name]
+            # Julia 1.10 ignores [sources]; read the BRM pins here.
+            release = TOML.parsefile("Project.toml")["sources"]
+            testenv = TOML.parsefile("test/Project.toml")["sources"]
+            function checkout(name, source)
               path = joinpath(ENV["RUNNER_TEMP"], name * ".jl")
               run(`git clone --no-checkout $(source["url"]) $path`)
               run(`git -C $path checkout --detach $(source["rev"])`)
-              PackageSpec(path=path)
+              path
+            end
+            pinned = [PackageSpec(path=checkout(name, release[name]))
+                      for name in ["PowerScaling", "ReparametrizableDistributions"]]
+            for name in ["OutputSignatures", "MutatingFunctions", "AlgebraOfVega",
+                         "DynamicObjects", "HTMXObjects", "HTMX", "Treebars"]
+              push!(pinned, PackageSpec(path=checkout(name, testenv[name])))
+            end
+            rk = checkout("ReactiveKernels", testenv["ReactiveKernels"])
+            for path in [rk,
+                         joinpath(rk, "packages", "ReactiveKernelsDistributionKernels"),
+                         joinpath(rk, "packages", "ReactiveKernelsPPL")]
+              push!(pinned, PackageSpec(path=path))
             end
             Pkg.develop([
               PackageSpec(path=pwd()),
