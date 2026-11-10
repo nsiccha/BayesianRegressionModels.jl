@@ -54,6 +54,12 @@ function LogDensityProblems.logdensity_and_gradient(
         K = block.ranef.n_terms
         tau1 = exp(x[block.log_scales[1]])
         C11 = tau1 * one(T)
+        # `log(C)` where `C` is a normal number, its log-space sum where `tau`
+        # under- or overflows (`AC_EXT._log_cell_scale`); the pullback takes the
+        # matching branch, `d log(tau) / d x = 1` and
+        # `d log(stick) / d raw = -tanh(raw)`.
+        log_C11 = AC_EXT._log_cell_scale(C11, x, block, 1, zero(T))
+        exact1 = AC_EXT._normal_scale(C11)
         if K == 2
             raw_index = only(block.cholesky_free)
             scale2_index = block.log_scales[2]
@@ -67,6 +73,8 @@ function LogDensityProblems.logdensity_and_gradient(
             tau2 = exp(x[scale2_index])
             C21 = tau2 * L21
             C22 = tau2 * stick
+            log_C22 = AC_EXT._log_cell_scale(C22, x, block, 2, zero(T))
+            exact2 = AC_EXT._normal_scale(C22)
             tanh_pullback_factor = ENZYME_TANH_PULLBACK_FROM_PRIMAL ?
                 one(T) - corr * corr : cosh(raw) * cosh(raw)
         end
@@ -86,7 +94,7 @@ function LogDensityProblems.logdensity_and_gradient(
             if term == 1
                 location = zero(T)
                 own_location == 0 || (location = location + x[own_location])
-                log_scale = log(C11)
+                log_scale = log_C11
             else
                 first_pair = state.pair_lookup[bi][1, group]
                 first_location = state.pair_location[first_pair]
@@ -100,7 +108,7 @@ function LogDensityProblems.logdensity_and_gradient(
                 location = zero(T)
                 location += C21 * innovation
                 own_location == 0 || (location = location + x[own_location])
-                log_scale = log(C22)
+                log_scale = log_C22
             end
 
             delta = target - source
@@ -119,22 +127,31 @@ function LogDensityProblems.logdensity_and_gradient(
 
             own_location == 0 || (gradient[own_location] += dlocation)
             if term == 1
-                dC11 = dlog_scale / C11
-                dtau1 = dC11 * one(T)
-                gradient[block.log_scales[1]] += dtau1 * tau1
+                if exact1
+                    dC11 = dlog_scale / C11
+                    dtau1 = dC11 * one(T)
+                    gradient[block.log_scales[1]] += dtau1 * tau1
+                else
+                    gradient[block.log_scales[1]] += dlog_scale
+                end
             else
-                dC22 = dlog_scale / C22
-                dtau2 = dC22 * stick
-                dstick = dC22 * tau2
-                droot = dstick * one(T)
-                dvariance = droot / (root * 2)
-                dproduct = -dvariance
-                dcorr = dproduct * corr
-                dcorr += dproduct * corr
-                draw = ENZYME_TANH_PULLBACK_FROM_PRIMAL ?
-                    tanh_pullback_factor * dcorr : dcorr / tanh_pullback_factor
-                gradient[raw_index] += draw
-                gradient[scale2_index] += dtau2 * tau2
+                if exact2
+                    dC22 = dlog_scale / C22
+                    dtau2 = dC22 * stick
+                    dstick = dC22 * tau2
+                    droot = dstick * one(T)
+                    dvariance = droot / (root * 2)
+                    dproduct = -dvariance
+                    dcorr = dproduct * corr
+                    dcorr += dproduct * corr
+                    draw = ENZYME_TANH_PULLBACK_FROM_PRIMAL ?
+                        tanh_pullback_factor * dcorr : dcorr / tanh_pullback_factor
+                    gradient[raw_index] += draw
+                    gradient[scale2_index] += dtau2 * tau2
+                else
+                    gradient[raw_index] -= dlog_scale * corr
+                    gradient[scale2_index] += dlog_scale
+                end
 
                 effect_index = block.effects[1, group]
                 dproduct = dlocation
@@ -146,9 +163,13 @@ function LogDensityProblems.logdensity_and_gradient(
                 dcorr = dL21 * one(T)
                 draw = ENZYME_TANH_PULLBACK_FROM_PRIMAL ?
                     tanh_pullback_factor * dcorr : dcorr / tanh_pullback_factor
-                dscale1 = ((((dlocation * C21) * (numerator * -c)) *
+                # `d innovation / d log(tau1) = -c * innovation`; Enzyme's
+                # spelling where `C11` is a normal number, that form where
+                # `tau1` underflowed and `C11^(c - 1)` is not finite.
+                dscale1 = exact1 ? ((((dlocation * C21) * (numerator * -c)) *
                     C11^(c - one(c))) * tau1) /
-                    (denominator * denominator)
+                    (denominator * denominator) :
+                    (dlocation * C21) * (-c * innovation)
                 gradient[raw_index] += draw
                 gradient[block.log_scales[1]] += dscale1
                 gradient[scale2_index] += dtau2 * tau2
@@ -276,7 +297,7 @@ function _blockwise_objective(x, state::AC_EXT._BRMRanefCenteringState{N}, bi,
             # The pair's source-frame location (`AC_EXT._with_location`).
             loc = AC_EXT._with_location(m, x, state, lookup[j, g])
             j < K && (innovations = Base.setindex(innovations, (u - c * loc) / s^c, j))
-            log_scale = log(s)
+            log_scale = AC_EXT._log_cell_scale(s, x, block, j, zero(T))
             acc += seed[index] * (t * loc + (u - c * loc) * exp(log_scale * (t - c)))
             acc += log_scale * (t - c)
         end

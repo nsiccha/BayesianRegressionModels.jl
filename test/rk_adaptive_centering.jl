@@ -279,6 +279,82 @@ end
     check_exact(rk, adaptive, blocks, controls, loc)
 end
 
+# A block scale whose log lies below the normal range of `exp`, as Pathfinder's
+# line searches reach from a random start: `exp(-750.0) == 0.0` and
+# `exp(-720.0)` is subnormal, while the plain RK density can still be finite.
+# At the compiled centring (`c = 0`, the default start) the wrapper is that
+# density: map, value and gradient. Before BRM 0.2.265 a cell's log scale was
+# `log(tau * stick) = log(0.0) = -Inf`, and `-Inf` times the zero exponent
+# `t - c` made the map, and so the density, `NaN` there: the wrapped density's
+# Pathfinder start was not the plain density's (snag rkbrmi-adaptive-326587b2).
+# `value` is the log scale; the gradient is compared where the plain density's
+# is finite, and that is every coordinate unless `finite_gradient = false`.
+function check_compiled_frame(rk, underflow; value=-750.0, generic=true, off_frame=true,
+                              finite_gradient=true)
+    names = layout_names(rk)
+    problem = rk_logdensity_problem(rk; ad_backend=AD)
+    adaptive = adaptive_centering_problem(rk, problem, AD)
+    x = 0.3 .* randn(Xoshiro(11), length(names))
+    x[underflow] .= value
+    @test exp(value) < floatmin(Float64)
+    lp, g = LogDensityProblems.logdensity_and_gradient(problem, x)
+    # The positive control: the model density is finite at this point.
+    ok = isfinite.(g)
+    @test isfinite(lp) && (!finite_gradient || all(ok))
+    ljac, y = WarmupHMC.reparametrizer(adaptive)(copy(x))
+    @test ljac == 0 && y == x
+    lpw, gw = LogDensityProblems.logdensity_and_gradient(adaptive, x)
+    @test lpw == lp
+    @test gw[ok] == g[ok]
+    if generic   # WarmupHMC's own differentiation of the map, without BRM's pass
+        lpg, gg = invoke(LogDensityProblems.logdensity_and_gradient,
+            Tuple{WarmupHMC.ReparametrizedProblem,AbstractVector}, adaptive, x)
+        @test lpg == lp
+        @test gg[ok] ≈ g[ok] rtol=1e-12 atol=1e-12
+    end
+    # Off the compiled frame the scale's log is its coordinate, so the cell map
+    # stays finite: `c = 1/2` multiplies by `exp(-value / 2)`.
+    off_frame || return
+    half = adaptive_centering_problem(rk, problem, AD; centeredness=0.5)
+    ljac, y = WarmupHMC.reparametrizer(half)(copy(x))
+    @test isfinite(ljac) && all(isfinite, y)
+end
+
+@stestset "the compiled-frame start is the RK density where a scale underflows" begin
+    df = panel(; G=6, n=10, seed=12)
+    # `||`: scalar blocks, BRM's hand-written K <= 2 pullback.
+    rk = RKBRMI(uncorrelated(df))
+    blocks = adaptive_centering_blocks(rk)
+    check_compiled_frame(rk, [only(b.log_scales) for b in blocks])
+    # Correlated `K = 2`: both scales, through the same pullback. With the first
+    # scale underflowed, term 2's innovation divides by `tau1^c`: `0^c` off the
+    # compiled frame, and its derivative `0 * Inf` in WarmupHMC's generic pass, so
+    # those two are checked with the second scale only.
+    rk = RKBRMI(correlated(df))
+    b = only(adaptive_centering_blocks(rk))
+    check_compiled_frame(rk, b.log_scales; generic=false, off_frame=false)
+    check_compiled_frame(rk, [b.log_scales[2]])
+    # `K = 3`: the blockwise reverse pass, the last term's scale.
+    data = merge(df, (; t2=df.t .^ 2))
+    wide = @brm data begin
+        mu ~ 1 + t + t2 + (1 + t + t2 | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(:, g) ~ Exponential(30.0)
+        y ~ Normal(mu, se)
+    end
+    rk = RKBRMI(wide)
+    b = only(adaptive_centering_blocks(rk))
+    @test b.ranef.n_terms == 3
+    check_compiled_frame(rk, [b.log_scales[3]])
+    # A unit nested in a band: the band's effect enters the unit's location. This
+    # model's own density is not finite once the band's scale is `0.0`, and its
+    # gradient in that scale not once the scale is subnormal, so the check is at
+    # a subnormal scale and over the other coordinates of the gradient.
+    rk = RKBRMI(nested(nested_panel()))
+    band = only(b for b in adaptive_centering_blocks(rk) if b.ranef.group === :band)
+    check_compiled_frame(rk, [only(band.log_scales)]; value=-720.0, finite_gradient=false)
+end
+
 @stestset "blocks the RKBRMI wrapper does not build raise" begin
     df = panel()
     student = @brm df begin

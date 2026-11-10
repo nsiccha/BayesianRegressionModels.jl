@@ -214,7 +214,8 @@ end
         c = state.sources[a]
         t = block.target_c
         u = src[block.effects[1, state.pair_groups[a]]]
-        y = t * L + (u - c * L) * exp(log(s) * (t - c))
+        y = t * L + (u - c * L) *
+            exp(_log_cell_scale(s, x, block, 1, _log_pair_mixing_scale(x, state, a)) * (t - c))
         b = t == 0 ? s * y : y
         buffer = Base.setindex(buffer, b, e - lo + 1)
         acc += b
@@ -282,6 +283,50 @@ _block_cpc(x, block::BRM.AdaptiveCenteringBlock, p) = tanh(x[block.cholesky_free
 _block_cpc(x, block::BRM.R2D2AdaptiveCenteringBlock, p) =
     isempty(block.cholesky_cpc) ? tanh(x[block.cholesky_free[p]]) :
         convert(eltype(x), block.cholesky_cpc[p])
+
+# `log(tau[i])` read in log space: an ordinary block's scale coordinate is that
+# log itself, an R2D2 block's the table's log scale (`_block_tau` exponentiates
+# both).
+_block_log_tau(x, block::BRM.AdaptiveCenteringBlock, i) = x[block.log_scales[i]]
+_block_log_tau(x, block::BRM.R2D2AdaptiveCenteringBlock, i) =
+    BRM._adaptive_log_scale(x, block.table, i)
+
+# `log(sqrt(w[g]))`, the log of pair `p`'s mixing scale (`_pair_mixing_scale`).
+function _log_pair_mixing_scale(x, state, p)
+    j = state.pair_mixing[p]
+    j == 0 ? zero(eltype(x)) : x[j] / 2
+end
+
+# Whether a cell's scale `s` is a normal floating-point number, whose `log(s)`
+# and `1 / s` are finite and exact to rounding.
+@inline _normal_scale(s) = floatmin(Float64) <= s <= floatmax(Float64)
+
+# A cell's log scale `log(s)`, for `s = C[i, i] * r`: `_block_cholesky_entry`'s
+# diagonal times the level's mixing scale `r`, whose log is `log_r`. Wherever
+# `s` is a normal number it is `log(s)`, bit for bit as before (window
+# decisions depend on that operation order; see `_block_cholesky_entry`).
+# Where `tau = exp(.)` under- or overflows (a log scale below about -708 or
+# above 709, which Pathfinder's line searches reach), `s` is subnormal, `0` or
+# `Inf`: `log(0)` is `-Inf`, and times the exponent `t - c = 0` of a cell at its
+# compiled centring that is `NaN`, so the wrapper was no longer the model
+# density at `c = t` where that density is finite (snag
+# rkbrmi-adaptive-326587b2); a subnormal `s` has an inexact log and an infinite
+# `1 / s` in the reverse pass. The log is then summed term by term from the
+# scale's own log, finite wherever the coordinates are. The branch tests `s`
+# itself, never `log(s)`: Enzyme reverses an untaken `log(s)` as `0 / s`, `NaN`
+# at `s = 0`. Only a level whose correlation rounds to `±1` (`stick = 0`) stays
+# `-Inf`, where the model density is not finite either.
+@inline function _log_cell_scale(s, x, block, i, log_r)
+    _normal_scale(s) && return log(s)
+    T = eltype(x)
+    stick = one(T)
+    offset = (i - 1) * (i - 2) ÷ 2
+    for l in 1:i-1
+        z = _block_cpc(x, block, offset + l)
+        stick *= sqrt(one(T) - z * z)
+    end
+    _block_log_tau(x, block, i) + log(stick) + log_r
+end
 
 # The kind is a type parameter so Enzyme sees only the accessor branch it is
 # differentiating.  Every pair still has the same concrete
@@ -394,7 +439,7 @@ end
 function (arg::BRMAdaptiveCenteringArgument{:log_scale})(x)
     bi, k, _ = _pair_location(arg.state, arg.pair_number)
     block = arg.state.blocks[bi]
-    log(_block_cholesky_entry(x, block, k, k))
+    _log_cell_scale(_block_cholesky_entry(x, block, k, k), x, block, k, zero(eltype(x)))
 end
 
 struct BRMR2D2AdaptiveCenteringArgument{KIND,N} <: Function
@@ -417,8 +462,10 @@ end
 
 function (arg::BRMR2D2AdaptiveCenteringArgument{:log_scale})(x)
     bi, k, _ = _pair_location(arg.state, arg.pair_number)
-    log(_block_cholesky_entry(x, arg.state.blocks[bi], k, k) *
-        _pair_mixing_scale(x, arg.state, arg.pair_number))
+    block = arg.state.blocks[bi]
+    _log_cell_scale(_block_cholesky_entry(x, block, k, k) *
+                    _pair_mixing_scale(x, arg.state, arg.pair_number), x, block, k,
+                    _log_pair_mixing_scale(x, arg.state, arg.pair_number))
 end
 
 function _sync_sources!(state, ir)
@@ -1537,8 +1584,10 @@ function (arg::BRMJointAdaptiveCenteringArgument{:log_scale})(x)
     s = arg.state
     if p <= s.n_ranef + s.n_r2d2
         bi, k, _ = _pair_location(s.ranef, p)
-        log(_block_cholesky_entry(x, s.ranef.blocks[bi], k, k) *
-            _pair_mixing_scale(x, s.ranef, p))
+        block = s.ranef.blocks[bi]
+        _log_cell_scale(_block_cholesky_entry(x, block, k, k) *
+                        _pair_mixing_scale(x, s.ranef, p), x, block, k,
+                        _log_pair_mixing_scale(x, s.ranef, p))
     elseif p <= s.n_ranef + s.n_r2d2 + s.n_hsgp
         bi, basis = _hsgp_pair_location(s.hsgp, p - s.n_ranef - s.n_r2d2)
         BRM._adaptive_hsgp_log_scale(x, s.hsgp.blocks[bi], basis)
