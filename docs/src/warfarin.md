@@ -229,8 +229,16 @@ two in the PK fit and one in the PD fit, 64 of 3000 draws (2.1 %) in the joint
 model, whose 242 parameters couple each subject's seven latent quantities
 through the ODE. Every R-hat in the tables above is at most 1.014 and every
 bulk ESS at least 246 (the lag's between-subject SD, whose posterior reaches
-down to zero). The seconds are wall-clock on four threads of the build
-machine.
+down to zero). The seconds are wall-clock on four threads of the machine that
+ran the fit. The fit is not part of the docs build: it ran once, and the page
+reads its committed tables. The receipt says what they are the numbers of.
+
+```@eval
+Main.BRMDocsComparisons.results_table(
+    "research/warfarin/results/receipt.tsv";
+    columns=[:key => "", :value => ""],
+)
+```
 
 ## Provenance
 

@@ -53,6 +53,13 @@ end
 
 function fit_all(; n_draws=1000, n_chains=4, seed=20261110, n_ppc=400)
     isdir(RESULTS) || mkpath(RESULTS)
+    # The receipt first: it names the commit and settings these results are the
+    # results of, and a defect in it fails before an hour of sampling.
+    write_receipt(joinpath(RESULTS, "receipt.tsv"),
+                  ["models" => "research/warfarin/reproduce.jl and joint_reproduce.jl",
+                   "data" => "research/warfarin/data/warfarin_data.txt (32 subjects) through data.jl",
+                   "seed" => "$seed (PK), $(seed + 1) (PD), $(seed + 2) (joint); predictive draws on $n_ppc thinned draws"];
+                  n_chains, n_draws)
     data = warfarin_data()
     pk_channel = channel(data, :pk_time, :pk_dv)
     pd_channel = channel(data, :pd_time, :pd_dv)

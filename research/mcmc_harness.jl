@@ -9,6 +9,8 @@
 # MCMCDiagnosticTools` and `using DifferentiationInterface: AutoEnzyme` in the
 # including script.
 
+using Dates: now, Dates
+
 # ---- sampling -----------------------------------------------------------------
 
 "Run the quorum sampler on `sb`; return the BridgeStan problem and each kept chain's draws."
@@ -138,6 +140,30 @@ function write_tsv(path, header, rows)
         end
     end
     println("TABLE ", basename(path), " (", length(rows), " rows)")
+end
+
+"""
+Write `receipt.tsv`: what a results directory's numbers are the numbers of.
+`entries` are further `key => value` pairs (models, data, seeds, ...).
+"""
+function write_receipt(path, entries; n_chains, n_draws)
+    repo = dirname(@__DIR__)
+    git(args...) = try
+        strip(read(`git -C $repo $args`, String))
+    catch
+        "unavailable"
+    end
+    rows = vcat(
+        ["commit" => git("rev-parse", "HEAD"),
+         "uncommitted_changes" => isempty(git("status", "--porcelain")) ? "none" : "yes",
+         "started" => string(round(now(), Dates.Minute)),
+         "host" => "a Linux fleet host, $(Threads.nthreads()) Julia threads",
+         "julia" => string(VERSION),
+         "BayesianRegressionModels" => (try string(pkgversion(BayesianRegressionModels)) catch; "unavailable" end),
+         "sampler" => "WarmupHMC completion_warmup_mcmc, adaptive_centering_problem over the BridgeStan problem, AutoEnzyme",
+         "chains" => "$n_chains per fit, quorum $(max(1, div(3n_chains, 4))), $n_draws draws each"],
+        [String(k) => string(v) for (k, v) in entries])
+    write_tsv(path, ["key", "value"], rows)
 end
 
 function report_fits(fits)
