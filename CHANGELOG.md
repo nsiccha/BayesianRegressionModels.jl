@@ -29,8 +29,14 @@ instead of failing at run time.
   shared draws and within 0.5 nats of the 400-window run's, at about 2.1 times
   the iterations. A downstream model of that shape gave a step 0.95 against
   NUTS's 1.19 under the two-window test and NUTS's value under this one (snag
-  `brm-svi-fit-rkbr-f41cb255`). On stationary window noise the trend test delays
-  the stop in about 1% of runs. `trend_windows=0` restores the earlier rule. A
+  `brm-svi-fit-rkbr-f41cb255`). On 400-unit synthetic models (batch 8, seeds
+  1-3, paired draws) the returned factor's ELBO rose by 5.0 to 7.8 nats with
+  correlated Gaussian random effects, 26.9 to 37.8 with a weakly read log-scale
+  field and -0.03 to +0.10 with Poisson random intercepts, at 1.05 to 2.0 times
+  the iterations; on an exactly Gaussian model with tight globals the gap to the
+  family's optimum fell from 61.6 to 56.3 nats (32 coefficients) and 56.0 to 54.9
+  (8). On stationary window noise the trend test delays the stop in about 1% of
+  runs. `trend_windows=0` restores the earlier rule. A
   fit on a fixed seed explores identically until the earlier rule's stop and may
   run longer from there. An optimizer checkpoint from BRM 0.2.263 or earlier
   records no `trend_windows` and continues on the two-window test it ran with.
