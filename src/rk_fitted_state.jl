@@ -291,7 +291,9 @@ RKBRMI(brmi::BRMI, state::BRMFittedState; resample_groups=(), held_out=state.hel
 
 # The data columns of a model, as the replay data they rebind to.
 function _rk_brmi_data(brmi::BRMI)
-    columns = _rk_training_columns(brmi)
+    # Data preparation resolves prior addresses too. Match the training
+    # constructor before it sees optional addresses for absent model terms.
+    columns = _rk_training_columns(_brm_resolve_optional_priors(brmi))
     names = Tuple(sort!(collect(keys(columns))))
     NamedTuple{names}(Tuple(columns[name] for name in names))
 end
