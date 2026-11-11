@@ -36,8 +36,10 @@ function aerial_simulations()
     observed = data([merge(r, (; series="Synthetic observation")) for r in values]) *
         mapping(:year, :observed, col=:chain_label, color=:series => "") * visual(Scatter; markersize=9)
     (envelope + observed) * config(width=130, height=240,
-        config=(; legend=(; orient="top"), axisX=(; values=[1, 2, 3], format="d")),
-        scales=scales(Y=(; scale=log10),
+        config=(; legend=(; orient="top")),
+        encoding=(; x=(; axis=(; values=[1, 2, 3], format="d")),
+            y=(; axis=(; values=[10, 100, 1000, 10000], format=",d"))),
+        scales=scales(Y=(; scale=log10, nice=false),
             Color=(; categories=["Saved-state simulations", "Synthetic observation"], palette=[BLUE, ORANGE])))
 end
 
