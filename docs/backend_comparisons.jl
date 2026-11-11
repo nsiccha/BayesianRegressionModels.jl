@@ -129,7 +129,8 @@ function results_table(relative_path::AbstractString;
     for row in kept
         push!(cells, [getproperty(row, column) for (column, _) in columns])
     end
-    return Markdown.MD([Markdown.Table(cells, fill(:l, length(columns)))])
+    inline_cells = [[Any[String(cell)] for cell in row] for row in cells]
+    return Markdown.MD([Markdown.Table(inline_cells, fill(:l, length(columns)))])
 end
 
 """
@@ -153,7 +154,8 @@ function results_tables(labelled::Vector{<:Pair{<:AbstractString,<:AbstractStrin
         end
     end
     length(cells) > 1 || error("no rows in $(last.(labelled))")
-    return Markdown.MD([Markdown.Table(cells, fill(:l, length(cells[1])))])
+    inline_cells = [[Any[String(cell)] for cell in row] for row in cells]
+    return Markdown.MD([Markdown.Table(inline_cells, fill(:l, length(cells[1])))])
 end
 
 "The receipts of several fits side by side: one row per key, one column per fit."
@@ -173,7 +175,8 @@ function receipts_table(labelled::Vector{<:Pair{<:AbstractString,<:AbstractStrin
     for k in keys_in_order
         push!(cells, vcat([k], [value(pairs, k) for (_, pairs) in receipts]))
     end
-    return Markdown.MD([Markdown.Table(cells, fill(:l, length(cells[1])))])
+    inline_cells = [[Any[String(cell)] for cell in row] for row in cells]
+    return Markdown.MD([Markdown.Table(inline_cells, fill(:l, length(cells[1])))])
 end
 
 """Render a drift-proof repository source region as a documentation code block."""
