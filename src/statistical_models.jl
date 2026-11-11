@@ -381,6 +381,15 @@ brm_sorted_positions(values, sorted_levels) = begin
     return positions
 end
     ),
+    # Each row's group or step position in a `cdar` walk's fitted levels.
+    brm_walk_positions = :(
+brm_walk_positions(values, sorted_levels) = begin
+    positions = ReactiveKernels.plate(values) do value
+        BayesianRegressionModels._brm_walk_position(sorted_levels, value)
+    end
+    return positions
+end
+    ),
     # A generated column of positions, read as positions by a data-only call,
     # so a gather by it reads a model-level vector; no literal of its range.
     brm_positions = :(
@@ -575,6 +584,8 @@ const _BRM_STATISTICAL_VALUE_DOCS = (
         Each value's position (1-based) in `level_values`: the level codes of a grouping or factor."""),
     brm_sorted_positions = @_rk_definition_doc("""
         Each value's position among the sorted levels `sorted_levels`, by binary search (`car` node labels)."""),
+    brm_walk_positions = @_rk_definition_doc("""
+        Each value's position among a `cdar` walk's sorted fitted groups or steps `sorted_levels`, by binary search."""),
     brm_positions = @_rk_definition_doc("""
         A generated column of positions, as integers."""),
     brm_values = @_rk_definition_doc("""
