@@ -16,6 +16,8 @@ A mesh for scientific use needs a resolution and boundary buffer appropriate
 to the spatial range prior.
 
 ```julia
+using BayesianRegressionModels, Distributions
+
 small_field = (@brm begin
     Omega ~ LKJCholesky(2, 2.0)
     field ~ 0 + gmrf((east, north), time, channel;
