@@ -9,16 +9,16 @@ probe(d) = @slic d begin
     phi_a_sc ~ restricted(uniform(0.0, 1.0); lower=(seal_adult_floor(n_age) - 0.8) / 0.2)
     shape ~ uniform(0.0, 1.0)
     adult = 0.8 + 0.2 * phi_a_sc
-    pup_scale ~ restricted(uniform(0.0, 1.0); lower=seal_pup_floor(adult, shape, n_age))
+    pup_scale ~ restricted(uniform(0.0, 1.0); lower=seal_pup_floor(0.8 + 0.2 * phi_a_sc, shape, n_age))
     capacity = birth_rate_at_carrying_capacity(adult,
         mortality_rates(adult * pup_scale, adult, shape, n_age, 0.0, 0.0), n_age)
     intercept ~ normal(0.0, 1.0)
     maximum ~ uniform(0.0, 1.0)
     minimum_scale ~ restricted(uniform(0.0, 1.0);
-        lower=seal_birth_fraction_lower(capacity, intercept))
+        lower=seal_birth_fraction_lower(seal_support_capacity(phi_a_sc, pup_scale, shape, n_age), intercept))
     reference_fraction = minimum_scale + (1.0 - minimum_scale) * inv_logit(intercept)
     density_scaled ~ restricted(uniform(0.0, 1.0);
-        upper=seal_density_scaled_upper(capacity, maximum, minimum_scale, intercept))
+        upper=seal_density_scaled_upper(seal_support_capacity(phi_a_sc, pup_scale, shape, n_age), maximum, minimum_scale, intercept))
     margin = -log(maximum + (1.0 - maximum) * density_scaled) +
         log(maximum * reference_fraction / capacity)
     y ~ normal(margin, 1.0)
@@ -30,23 +30,24 @@ include(joinpath(@__DIR__, "..", "research", "seal", "grey_seal_ipm.jl"))
 function probe(d)
     names = ("seal_adult_floor", "seal_mortality_support_residual", "seal_pup_floor",
         "seal_birth_fraction_lower", "seal_density_scaled_upper",
-        "mortality_rates", "birth_rate_at_carrying_capacity")
-    definitions = [p.slug => (; definition=_grey_seal_part_expr(p.source), markers=:stanonly)
+        "mortality_rates", "birth_rate_at_carrying_capacity", "seal_support_capacity")
+    definitions = [p.slug => (; definition=_grey_seal_part_expr(p.source),
+        markers=occursin("markers: juliacompat", p.source) ? :juliacompat : :stanonly)
         for p in GREY_SEAL_IPM_PARTS if p.slug in names]
     body = quote
         phi_a_sc ~ restricted(uniform(0.0, 1.0); lower=(seal_adult_floor(n_age) - 0.8) / 0.2)
         shape ~ uniform(0.0, 1.0)
         adult = 0.8 + 0.2 * phi_a_sc
-        pup_scale ~ restricted(uniform(0.0, 1.0); lower=seal_pup_floor(adult, shape, n_age))
+        pup_scale ~ restricted(uniform(0.0, 1.0); lower=seal_pup_floor(0.8 + 0.2 * phi_a_sc, shape, n_age))
         capacity = birth_rate_at_carrying_capacity(adult,
             mortality_rates(adult * pup_scale, adult, shape, n_age, 0.0, 0.0), n_age)
         intercept ~ normal(0.0, 1.0)
         maximum ~ uniform(0.0, 1.0)
         minimum_scale ~ restricted(uniform(0.0, 1.0);
-            lower=seal_birth_fraction_lower(capacity, intercept))
+            lower=seal_birth_fraction_lower(seal_support_capacity(phi_a_sc, pup_scale, shape, n_age), intercept))
         reference_fraction = minimum_scale + (1.0 - minimum_scale) * inv_logit(intercept)
         density_scaled ~ restricted(uniform(0.0, 1.0);
-            upper=seal_density_scaled_upper(capacity, maximum, minimum_scale, intercept))
+            upper=seal_density_scaled_upper(seal_support_capacity(phi_a_sc, pup_scale, shape, n_age), maximum, minimum_scale, intercept))
         margin = -log(maximum + (1.0 - maximum) * density_scaled) +
             log(maximum * reference_fraction / capacity)
         y ~ normal(margin, 1.0)

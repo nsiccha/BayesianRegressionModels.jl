@@ -29,6 +29,44 @@ against an independent pregnancy-hazard calculation, boundary identities,
 finite differences and the full model's response to changing carrying
 capacity. `test/seal_brm.jl` and `test/seal_ipm.jl` check compiler behavior.
 
+## Joint support of the calibrated equation
+
+The calibration requires a positive pregnancy-loss rate at carrying capacity.
+Let `c` be the replacement birth rate, `m` the maximum baseline birth rate,
+`l` its minimum-to-maximum ratio, `z` the reference herring logit, and `u`
+the scaled density-dependence parameter. With
+`r = l + (1-l)*logistic(z)` and `q = m + (1-m)*u`, the required margin is
+`-log(q) + log(m*r/c) > 0`. This implies `c < r < 1`.
+
+The models now encode that existing joint support in their parameter bounds.
+For adult survival `a`, pup-to-adult survival ratio `h`, age count `A`, and
+survival shape `s`, the mortality rates are
+`mu_j = exp((1-w_j)*log(-log(a*h)) + w_j*log(-log(a)))`, with
+`w_j = (j/(A-1))^s`. Thus `c = 2*(1-a)*exp(sum(mu_j, j=0:A-2))`.
+These are interpolated mortality rates, not interpolated survival rates.
+
+The ordered bounds are:
+
+1. Adult survival exceeds both 0.8 and the root of
+   `2*(1-a) = a^(A-1)`. Below this root even `h=1` would give `c>=1`.
+2. The pup ratio exceeds the unique root at which `c=1`. The solver works
+   in `log(-log(a*h))`; its residual is smooth and strictly increasing.
+3. `l > max(0, (c-logistic(z))/(1-logistic(z)))` ensures `r>c`.
+4. `u < min(1, m*(r-c)/(c*(1-m)))` ensures the calibration margin is positive.
+
+Every feasible point of the original model satisfies these bounds, and every
+interior point satisfying them has a defined calibration. The sampled priors
+use `restricted`, retaining their original density kernels on this support.
+Normalizing each conditional restriction would change the joint prior.
+Stan supplies the coordinate Jacobians, including the implicit derivatives
+through the mortality root. Bounds refer directly to earlier sampled
+parameters because Stan declares parameters before transformed parameters.
+
+`test/seal_joint_support.jl` compares both authored helper sets with an
+independent calculation of the original density, a finite-difference
+coordinate Jacobian, and finite-difference gradients for 2, 3, 6 and 12 ages.
+This check is separate from fitting and does not establish convergence.
+
 ## Saved diagnostic run
 
 The run associated with `21c3e34ab807c812dbfd546252415ff43313a77a` used

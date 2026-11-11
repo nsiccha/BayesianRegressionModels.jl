@@ -51,10 +51,7 @@ const GREY_SEAL_IPM_SOURCE = raw"""
     # These are unnormalized restrictions, with Stan's bound Jacobians.
     phi_a_sc ~ restricted(uniform(0.0, 1.0); lower=(seal_adult_floor(n_age) - 0.8) / 0.2)
     survival_shape             ~ uniform(0.0, 1.0)
-    support_phi_a = 0.8 + 0.2 * phi_a_sc
-    phi_sc ~ restricted(uniform(0.0, 1.0); lower=seal_pup_floor(support_phi_a, survival_shape, n_age))
-    support_b_capacity = birth_rate_at_carrying_capacity(support_phi_a,
-        mortality_rates(phi_sc * support_phi_a, support_phi_a, survival_shape, n_age, 0.0, 0.0), n_age)
+    phi_sc ~ restricted(uniform(0.0, 1.0); lower=seal_pup_floor(0.8 + 0.2 * phi_a_sc, survival_shape, n_age))
     male_pup_survival_offset   ~ cauchy(0.0, 1.0)
     male_adult_survival_offset ~ cauchy(0.0, 1.0)
     carrying_capacity          ~ lognormal(11.3, 0.3)
@@ -62,9 +59,9 @@ const GREY_SEAL_IPM_SOURCE = raw"""
     herring_intercept_scaled   ~ normal(0.0, 1.0)
     herring_slope              ~ normal(0.0, 1.0)
     min_baseline_birth_rate_sc ~ restricted(uniform(0.0, 1.0);
-        lower=seal_birth_fraction_lower(support_b_capacity, herring_slope * herring_intercept_scaled))
+        lower=seal_birth_fraction_lower(seal_support_capacity(phi_a_sc, phi_sc, survival_shape, n_age), herring_slope * herring_intercept_scaled))
     density_dependence_scaled ~ restricted(uniform(0.0, 1.0);
-        upper=seal_density_scaled_upper(support_b_capacity, max_baseline_birth_rate,
+        upper=seal_density_scaled_upper(seal_support_capacity(phi_a_sc, phi_sc, survival_shape, n_age), max_baseline_birth_rate,
             min_baseline_birth_rate_sc, herring_slope * herring_intercept_scaled))
     herring_weight             ~ uniform(0.0, 1.0)
     hunting_selectivity_sweden  :: vector[n_demo] ~ normal(0.0, 1.0)
@@ -202,11 +199,19 @@ mortality_rates(phi_pup::real, phi_adult::real, c::real, n_age::int,
 end
 """; kind = :udf),
     _bundle_part("seal_adult_floor", "Adult Survival Support", raw"""
+# @slic markers: juliacompat
 seal_adult_floor(n_age::int)::real = begin
-    root = solve_newton_tol(x -> rep_vector(
-        log(2.0) + log_inv_logit(-x[1]) - (n_age - 1) * log_inv_logit(x[1]), 1),
-        rep_vector(log(4.0), 1), 1e-12, 1e-13, 100)
-    fmax(0.8, inv_logit(root[1]))
+    lo = 0.0
+    hi = 1.0
+    for iteration in 1:60
+        mid = (lo + hi) / 2.0
+        if log(2.0) + log1p(-mid) - (n_age - 1) * log(mid) > 0.0
+            lo = mid
+        else
+            hi = mid
+        end
+    end
+    fmax(0.8, (lo + hi) / 2.0)
 end
 """; kind = :udf),
     _bundle_part("seal_mortality_support_residual", "Mortality Support Equation", raw"""
@@ -258,6 +263,13 @@ update_birth_rate(b0::real, theta0::real, theta1::real, N_prev::real)::real =
     _bundle_part("birth_rate_at_carrying_capacity", "Birth Rate At Carrying Capacity", raw"""
 birth_rate_at_carrying_capacity(phi_a::real, mu_m::vector[n_demo], n_age::int)::real =
     2.0 * (1.0 - phi_a) / exp(sum(-mu_m[1:(n_age - 1)]))
+"""; kind = :udf),
+    _bundle_part("seal_support_capacity", "Capacity For Joint Support", raw"""
+seal_support_capacity(adult_scale::real, pup_scale::real, shape::real, n_age::int)::real = begin
+    adult = 0.8 + 0.2 * adult_scale
+    birth_rate_at_carrying_capacity(adult,
+        mortality_rates(pup_scale * adult, adult, shape, n_age, 0.0, 0.0), n_age)
+end
 """; kind = :udf),
     # tau_s is elapsed years since implantation. The reference Stan code's
     # tau_s=1/36 already includes (16/9)*(1.5/12)^2; this API accepts time.
@@ -668,9 +680,10 @@ end
     grey_seal_ipm_bundle([data])
 
 Assemble the grey-seal IPM via StanBlocks' `compile_slic_bundle`:
-each `@deffun` UDF card becomes a `@stanonly` definition (the
-six observation-family density cards additionally carry `@lhs @lpxf`, flagged by their
-`# @slic markers:` comment), and the two `aerial_stream` / `bycatch_stream` cards are
+each `@deffun` UDF card becomes a `@stanonly` definition, except the age-only
+support bound, which is also callable in Julia for descriptor construction.
+The six observation-family density cards additionally carry `@lhs @lpxf`,
+flagged by their `# @slic markers:` comment, and the two `aerial_stream` / `bycatch_stream` cards are
 anonymous Form-A observation submodels. Returns the bundle result — `.model` (traced),
 `.code` (generated Stan), `.descriptor`.
 """
@@ -680,7 +693,8 @@ function grey_seal_ipm_bundle(data = grey_seal_ipm_fixture())
     for p in GREY_SEAL_IPM_PARTS
         if p.kind == :udf
             markers = occursin("markers: stanonly, lhs, lpxf", p.source) ?
-                (:stanonly, :lhs, :lpxf) : :stanonly
+                (:stanonly, :lhs, :lpxf) :
+                occursin("markers: juliacompat", p.source) ? :juliacompat : :stanonly
             push!(udf_defs, p.slug => (; definition = _grey_seal_part_expr(p.source), markers))
         elseif p.kind == :anonymous
             name, body = _grey_seal_part_expr(p.source).args   # `name = begin … end`

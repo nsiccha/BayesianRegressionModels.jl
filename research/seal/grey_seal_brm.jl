@@ -42,6 +42,22 @@ using BayesianRegressionModels, StanBlocks, LogDensityProblems
 using Distributions: Uniform, Cauchy, LogNormal, Binomial, Multinomial
 import StanBlocks.stan: transpiles
 
+# This root depends only on the observed age count. Bisection supplies the
+# same deterministic bound to Julia descriptors and Stan; no AD is needed.
+StanBlocks.@deffun StanBlocks.@juliacompat seal_adult_floor(n_age::int)::real = begin
+    lo = 0.0
+    hi = 1.0
+    for iteration in 1:60
+        mid = (lo + hi) / 2.0
+        if log(2.0) + log1p(-mid) - (n_age - 1) * log(mid) > 0.0
+            lo = mid
+        else
+            hi = mid
+        end
+    end
+    fmax(0.8, (lo + hi) / 2.0)
+end
+
 StanBlocks.@deffun begin
 dH_dt(tau::real, H::vector[ny], n0::real, k::real,
       E_1::real, E_2::real, mu::real)::vector[ny] = begin
@@ -85,12 +101,6 @@ end
 # These bounds describe the existing joint support of the calibrated equation.
 # `restricted` below retains the original prior kernels; Stan supplies the
 # coordinate Jacobians. Normalizing each conditional bound would change the law.
-seal_adult_floor(n_age::int)::real = begin
-    root = solve_newton_tol(x -> rep_vector(
-        log(2.0) + log_inv_logit(-x[1]) - (n_age - 1) * log_inv_logit(x[1]), 1),
-        rep_vector(log(4.0), 1), 1e-12, 1e-13, 100)
-    fmax(0.8, inv_logit(root[1]))
-end
 seal_mortality_support_residual(root::vector[N], adult::real,
         shape::real, n_age::int)::vector[N] = begin
     a = -log(adult)
@@ -103,6 +113,7 @@ seal_mortality_support_residual(root::vector[N], adult::real,
     end
     rep_vector(log_sum_exp(terms) - log(limit), N)
 end
+
 seal_pup_floor(adult::real, shape::real, n_age::int)::real = begin
     a = -log(adult)
     limit = -log(2.0 * (1.0 - adult))
@@ -125,6 +136,11 @@ update_birth_rate(b0::real, theta0::real, theta1::real, N_prev::real)::real =
     b0 * exp(-theta0 * expm1(theta1 * N_prev))
 birth_rate_at_carrying_capacity(phi_a::real, mu_m::vector[n_demo], n_age::int)::real =
     2.0 * (1.0 - phi_a) / exp(sum(-mu_m[1:(n_age - 1)]))
+seal_support_capacity(adult_scale::real, pup_scale::real, shape::real, n_age::int)::real = begin
+    adult = 0.8 + 0.2 * adult_scale
+    birth_rate_at_carrying_capacity(adult,
+        mortality_rates(pup_scale * adult, adult, shape, n_age, 0.0, 0.0), n_age)
+end
 # tau_s is elapsed years since implantation, not the squared exposure in the
 # reference code (1/36 for samples collected 1.5 months after implantation).
 update_pregnancy_rate(baseline_birth_rate::real, theta0::real, theta1::real,
@@ -389,18 +405,15 @@ function grey_seal_brm_model(df = grey_seal_brm_fixture())
     @brm df begin
     phi_a_sc ~ restricted(Uniform(0.0, 1.0); lower=(seal_adult_floor(n_age) - 0.8) / 0.2)
     survival_shape ~ Uniform(0.0, 1.0)
-    support_phi_a = 0.8 + 0.2 * phi_a_sc
-    phi_sc ~ restricted(Uniform(0.0, 1.0); lower=seal_pup_floor(support_phi_a, survival_shape, n_age))
-    support_b_capacity = birth_rate_at_carrying_capacity(support_phi_a,
-        mortality_rates(phi_sc * support_phi_a, support_phi_a, survival_shape, n_age, 0.0, 0.0), n_age)
+    phi_sc ~ restricted(Uniform(0.0, 1.0); lower=seal_pup_floor(0.8 + 0.2 * phi_a_sc, survival_shape, n_age))
     male_pup_survival_offset ~ Cauchy(0.0, 1.0); male_adult_survival_offset ~ Cauchy(0.0, 1.0)
     carrying_capacity ~ LogNormal(11.3, 0.3)
     max_baseline_birth_rate ~ Uniform(0.0, 1.0)
     bbr_reference_logit ~ Normal(0.0, 1.0)
     min_baseline_birth_rate_sc ~ restricted(Uniform(0.0, 1.0);
-        lower=seal_birth_fraction_lower(support_b_capacity, bbr_reference_logit))
+        lower=seal_birth_fraction_lower(seal_support_capacity(phi_a_sc, phi_sc, survival_shape, n_age), bbr_reference_logit))
     density_dependence_scaled ~ restricted(Uniform(0.0, 1.0);
-        upper=seal_density_scaled_upper(support_b_capacity, max_baseline_birth_rate,
+        upper=seal_density_scaled_upper(seal_support_capacity(phi_a_sc, phi_sc, survival_shape, n_age), max_baseline_birth_rate,
             min_baseline_birth_rate_sc, bbr_reference_logit))
     hunting_effort_sd_sweden ~ Cauchy(0.0, 1.0; lower = 0.0); hunting_effort_sd_finland ~ Cauchy(0.0, 1.0; lower = 0.0)
     population_init_size ~ LogNormal(11.0, 1.0)
