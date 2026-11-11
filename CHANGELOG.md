@@ -12,6 +12,44 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.280
+
+- Changed: on RKBRMI, `mean` and `var` of `LogNormal(mu, sigma)` and of its
+  one-sided truncations `truncated(LogNormal(mu, sigma); lower=lo)` and
+  `truncated(LogNormal(mu, sigma); upper=hi)`, and `logcdf` and `logccdf` of
+  `LogNormal(mu, sigma)`, now call ReactiveKernels' own distribution arithmetic
+  (`ReactiveKernelsDistributionKernels`) instead of an opaque Distributions.jl
+  call. BRM recognizes the constructor and the statistic by identity, so
+  qualified names and aliases mean the same, and a caller-defined function of
+  the same name, a two-sided wrapper (including an explicit infinite second
+  bound) and array statistics keep their existing meaning. Values and Enzyme
+  Reverse gradients agree with the Distributions route to about 1e-10 on a
+  1024-row model; one-sided moments and tails are within 1e-13 relative of
+  512-bit references over the deep-tail grid of the bounded-moment fork. The
+  RK route no longer needs the nsiccha Distributions moment fork; SBBRMI (Stan)
+  and plain Julia still do. `mean(...)` of these laws now translates through
+  `jax_source`; `var(...)` does not yet (ReactiveKernels todos `0apz4d2`,
+  `02uc1p5`). Moments shared across a plate are computed once outside the row
+  loop, as they were before. In the retained 1024-row benchmark, both routes
+  allocate zero bytes for values and 80 bytes for gradients, with no per-row
+  temporaries. Native gradients take 0.90–1.03 times the opaque route's time
+  with shared parameters and 1.09–1.31 times with row-varying bounds; this is
+  not a uniform speedup.
+- Changed: on RKBRMI, the densities of missing-value completions and shares
+  (`_BRMShares`, grouped shares, lower-bounded laws and shares, and the
+  non-centred entry and group-share weights) take their base law from
+  ReactiveKernelsPPL's public `sampling_distribution_graph` for every family
+  it maps (Normal, LogNormal, Gamma, Exponential, Cauchy, Laplace, Logistic,
+  TDist, Gumbel, Weibull, InverseGamma, InverseGaussian, Rayleigh, Chi, Chisq,
+  FDist, BetaPrime), instead of a numerical Distributions callback. Authored
+  normalization, support, exact totals and Jacobians are unchanged; any other
+  law keeps its numerical adapter. Lower-bounded completion weights are now an
+  explicit plate over the free entries; support-bounded weights keep their
+  dotted call, which strict per-unit NLME partitions need.
+- RKBRMI now requires ReactiveKernels 0.1.161 and
+  ReactiveKernelsDistributionKernels 0.1.3 (a new weak dependency of the
+  ReactiveKernels extension).
+
 ## 0.2.279
 
 - Added `brm_smc_rescore` for initial and cumulative RKBRMI checkpoints,

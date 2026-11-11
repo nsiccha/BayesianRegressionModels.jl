@@ -421,7 +421,7 @@ function _rk_emit_missing_value!(definitions, statements, bindings, taken, compl
     observed = _rk_block_argument!(block, :observed, completion.observed_component)
     rows = _rk_block_argument!(block, :rows, completion.missing_rows)
     order = _rk_block_argument!(block, :order, completion.order)
-    entry, missing = _rk_emit_mi_free!(block, part, rows; draws=:z_mis, value=:y_mis)
+    entry, missing = _rk_emit_mi_free!(definitions, taken, block, part, rows; draws=:z_mis, value=:y_mis)
     # Completion is a whole covariate value on its original row axis. Keep
     # its gather in an explicit graph when downstream likelihoods have
     # different observation axes, rather than inferring a scalar recipe; an
@@ -491,7 +491,7 @@ function _rk_emit_missing_totals!(definitions, statements, bindings, taken, comp
     grouped_rows = _rk_block_argument!(block, :grouped_rows, t.grouped_rows)
     order = _rk_block_argument!(block, :order, completion.order)
     grouped_data = _rk_mi_grouped_arguments!(block, completion)
-    free_entry, free = _rk_emit_mi_free!(block, free_part, free_rows)
+    free_entry, free = _rk_emit_mi_free!(definitions, taken, block, free_part, free_rows)
     shares_sampled, shares = _rk_emit_mi_grouped!(definitions, taken, block, grouped_part,
         grouped_rows, grouped_data)
     missing = _rk_block_local!(block, :y_mis)
@@ -546,9 +546,11 @@ function _rk_mi_free_part(bindings, taken, completion, rows=completion.totals.fr
         return (; noncentered=true, bounded=true, arguments,
             placeholder=completion.free_weights,
             # A lower-bounded law's value is `lower + exp(z)` from its first argument.
+            # The weight's second parameter is the law's arity, so a graph
+            # adapter (`ext/rk_distribution_graphs.jl`) can state its signature.
             value=lower ? nothing : _rk_value_callee!(bindings, _BRMSupportEntryValue{F}(), taken),
             weight=_rk_value_callee!(bindings,
-                lower ? _BRMLowerEntryWeight{F}() : _BRMSupportEntryWeight{F}(), taken),
+                lower ? _BRMLowerEntryWeight{F,length(arguments)}() : _BRMSupportEntryWeight{F}(), taken),
             logweight=_rk_value_callee!(bindings, _BRMLogWeight, taken),
             reads=Expr(:tuple, arguments...))
     end
@@ -556,7 +558,20 @@ function _rk_mi_free_part(bindings, taken, completion, rows=completion.totals.fr
     (; noncentered=false, law, reads=law)
 end
 
-function _rk_emit_mi_free!(block, part, free_rows; draws=:z_free, value=:y_free)
+function _rk_entry_weights_template(n, weight)
+    args = [Symbol(:argument_, j) for j in 1:n]
+    name = Symbol(:brm_entry_weights_, n)
+    at = [:($a isa Real ? $a : $a[k]) for a in args]
+    :($name(z, x, $(args...)) = begin
+        indices = eachindex(z)
+        weights = ReactiveKernels.plate(indices) do k
+            $weight(z[k], x[k], $(at...))
+        end
+        return weights
+    end)
+end
+
+function _rk_emit_mi_free!(definitions, taken, block, part, free_rows; draws=:z_free, value=:y_free)
     if part.noncentered
         if part.bounded
             sampled = _rk_block_local!(block, draws)
@@ -570,7 +585,17 @@ function _rk_emit_mi_free!(block, part, free_rows; draws=:z_free, value=:y_free)
             if part.placeholder !== nothing
                 observed = _rk_block_argument!(block, :free_weights, part.placeholder)
                 weights = _rk_block_local!(block, Symbol(value, :_weights))
-                push!(block.statements, Expr(:(=), weights,
+                # A lower-bounded law's weight has a graph adapter
+                # (`ext/rk_distribution_graphs.jl`), which a dotted call would
+                # leave opaque, so it runs in an explicit plate. Any other
+                # law's weight stays a dotted call: the plate's `eachindex(z)`
+                # has no row form, which a strict per-unit partition (NLME)
+                # refuses.
+                n = length(part.arguments)
+                push!(block.statements, Expr(:(=), weights, part.value === nothing ?
+                    _rk_ast_statistical_call!(definitions, taken, Symbol(:brm_entry_weights_, n),
+                        sampled, free, part.arguments...; kernel=true,
+                        template=_rk_entry_weights_template(n, part.weight)) :
                     _rk_ast_dotted(part.weight, sampled, free, part.arguments...)))
                 push!(block.statements, Expr(:call, :.~, observed,
                     _rk_ast_dotted(part.logweight, weights)))
@@ -596,7 +621,7 @@ function _rk_mi_grouped_part(bindings, taken, completion)
     if completion.noncentered
         arguments = map(arg -> _rk_value_expr!(bindings, arg, taken), grouped.args)
         return (; noncentered=true, bounded=_brm_lower_family(F), ends=t.ends, residuals=t.residuals, arguments,
-            weights=_rk_value_callee!(bindings, _BRMGroupShareWeight{F}(), taken),
+            weights=_rk_value_callee!(bindings, _BRMGroupShareWeight{F,length(arguments)}(), taken),
             weight=_rk_value_callee!(bindings, _BRMLogWeight, taken),
             reads=Expr(:tuple, t.ends, t.residuals, arguments...))
     end
@@ -620,14 +645,14 @@ end
 # coordinates, its entries and the law's `n` arguments at them, one group per
 # plate iteration, each read through a shared index array (`group_coords[k]`,
 # `group_entries[k]`), so a cell reading a group's term reads that group's.
-function _rk_grouped_share_weights_template(n)
+function _rk_grouped_share_weights_template(n, weight)
     args = [Symbol(:argument_, j) for j in 1:n]
     name = Symbol(:brm_grouped_share_weights_, n)
     at = [:($a[group_entries[k]]) for a in args]
-    :($name(weight, z, x, $(args...), group_ids, group_entries, group_coords,
+    :($name(z, x, $(args...), group_ids, group_entries, group_coords,
             residuals) = begin
         weights = ReactiveKernels.plate(group_ids) do k
-            BayesianRegressionModels._brm_group_share_weight(weight, z[group_coords[k]],
+            $weight(z[group_coords[k]],
                 x[group_entries[k]], residuals[k], $(at...))
         end
         return weights
@@ -668,9 +693,9 @@ function _rk_emit_mi_grouped!(definitions, taken, block, part, grouped_rows, dat
         n = length(arguments)
         weights = _rk_block_local!(block, :group_weights)
         push!(block.statements, Expr(:(=), weights, _rk_ast_statistical_call!(definitions,
-            taken, Symbol(:brm_grouped_share_weights_, n), part.weights, sampled, shares,
+            taken, Symbol(:brm_grouped_share_weights_, n), sampled, shares,
             arguments..., group_ids, group_entries, group_coords, part.residuals; kernel=true,
-            template=_rk_grouped_share_weights_template(n))))
+            template=_rk_grouped_share_weights_template(n, part.weights))))
         push!(block.statements, Expr(:call, :.~, data.weights,
             Expr(:., part.weight, Expr(:tuple, weights))))
         return sampled, shares
