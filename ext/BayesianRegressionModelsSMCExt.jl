@@ -145,9 +145,8 @@ function BRM.brm_smc_checkpoint(fit::BRM.BRMSMCFit)
        previous_id=fit.previous_id, state=PPL.smc_checkpoint(fit.state))
 end
 
-function BRM.brm_smc_resume(template::BRM.RKBRMI, checkpoint;
-        data=nothing, previous_data=nothing, nthreads=nothing,
-        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+function checkpoint_targets(template::BRM.RKBRMI, checkpoint;
+        data, previous_data, ad_backend)
     checkpoint.format == 1 || throw(ArgumentError("unsupported BRM SMC checkpoint format"))
     check_identity(template, checkpoint.model_id, "training template")
     rk = data === nothing ? template : BRM.reprocess(template, data; freeze_constants=true)
@@ -164,9 +163,25 @@ function BRM.brm_smc_resume(template::BRM.RKBRMI, checkpoint;
     target = prepare(rk, ad_backend, checkpoint.model_id, checkpoint.binding_id)
     old_target = previous === nothing ? nothing :
         prepare(previous, ad_backend, checkpoint.model_id, checkpoint.previous_id)
-    state = PPL.resume_smc(target, checkpoint.state; previous=old_target, nthreads)
-    BRM.BRMSMCFit(template, rk, previous, state, ad_backend,
+    (; backend=rk, previous, target, old_target)
+end
+
+function BRM.brm_smc_resume(template::BRM.RKBRMI, checkpoint;
+        data=nothing, previous_data=nothing, nthreads=nothing,
+        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    c = checkpoint_targets(template, checkpoint; data, previous_data, ad_backend)
+    state = PPL.resume_smc(c.target, checkpoint.state; previous=c.old_target, nthreads)
+    BRM.BRMSMCFit(template, c.backend, c.previous, state, ad_backend,
         checkpoint.model_id, checkpoint.binding_id, checkpoint.previous_id)
+end
+
+function BRM.brm_smc_rescore(template::BRM.RKBRMI, checkpoint;
+        data=nothing, previous_data=nothing, rtol=1e-10,
+        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    c = checkpoint_targets(template, checkpoint; data, previous_data, ad_backend)
+    state = PPL.rescore_smc_checkpoint(c.target, checkpoint.state;
+        previous=c.old_target, rtol)
+    merge(checkpoint, (; state))
 end
 
 include("smc_streaming.jl")

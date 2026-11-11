@@ -245,8 +245,7 @@ function BRM.brm_smc_checkpoint(fit::BRM.BRMSMCWindowFit)
        state=PPL.smc_checkpoint(fit.state))
 end
 
-function BRM.brm_smc_resume(model::BRM.BRMI, checkpoint;
-        nthreads=nothing, ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+function checkpoint_targets(model::BRM.BRMI, checkpoint; ad_backend)
     checkpoint.format == 2 && checkpoint.kind === :window || throw(ArgumentError(
         "BRM SMC: a window declaration requires a window checkpoint"))
     previous = deepcopy(checkpoint.previous)
@@ -256,6 +255,20 @@ function BRM.brm_smc_resume(model::BRM.BRMI, checkpoint;
     rk, id, target = prepare_window(previous, model, ad_backend; coordinates)
     id == checkpoint.binding_id || throw(ArgumentError(
         "BRM SMC: the checkpoint's window data has changed"))
-    state = PPL.resume_smc(target, checkpoint.state; nthreads)
-    BRM.BRMSMCWindowFit(rk, previous, state, ad_backend, previous.model_id, id, coordinates)
+    (; backend=rk, previous, target, binding_id=id, coordinates)
+end
+
+function BRM.brm_smc_resume(model::BRM.BRMI, checkpoint;
+        nthreads=nothing, ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    c = checkpoint_targets(model, checkpoint; ad_backend)
+    state = PPL.resume_smc(c.target, checkpoint.state; nthreads)
+    BRM.BRMSMCWindowFit(c.backend, c.previous, state, ad_backend,
+        c.previous.model_id, c.binding_id, c.coordinates)
+end
+
+function BRM.brm_smc_rescore(model::BRM.BRMI, checkpoint;
+        rtol=1e-10, ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    c = checkpoint_targets(model, checkpoint; ad_backend)
+    state = PPL.rescore_smc_checkpoint(c.target, checkpoint.state; rtol)
+    merge(checkpoint, (; previous=c.previous, state))
 end
