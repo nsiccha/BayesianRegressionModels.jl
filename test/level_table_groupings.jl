@@ -94,8 +94,17 @@ function rk_same(gathered, copied)
     rg, rc
 end
 
-string_fields(rk) = Set(k for (k, v) in pairs(rk_bound_data(rk))
+# The label columns BRM binds from the data: the program's raw inputs, before
+# RK's data preparation. `rk_bound_data` also holds the values that preparation
+# computes from data-only definitions once per binding (`area = reg[pos_a]`,
+# `X_mu`, `unit_level`), so a gather can appear there although the data never
+# supplies it.
+string_fields(rk) = Set(k for (k, v) in
+    BRM._rk_source_data_columns(rk.plan, BRM._rk_retained_program(rk))
     if v isa AbstractVector{<:AbstractString})
+# The gathers the program defines itself.
+gathers(rk) = Set(first(s.args) for s in BRM._rk_retained_program(rk).main.args
+    if Meta.isexpr(s, :(=)) && Meta.isexpr(last(s.args), :ref))
 
 two_parts(data) = @brm data begin
     sigma ~ Exponential(1)
@@ -124,8 +133,10 @@ end
     sg = sb_same(two_parts(TABLE), two_parts_copied(COPIES))
     @test StanBlocks.stan.compiles(sg.model)
     rg, rc = rk_same(two_parts(TABLE), two_parts_copied(COPIES))
-    # RK computes the gathers in its graph: it binds the level table and the
-    # positions, never a per-part copy of a label.
+    # RK computes the gathers in its graph: the program defines them, and BRM
+    # binds the level table and the positions, never a per-part copy of a label.
+    @test (:area, :area_b, :unit, :unit_b) ⊆ gathers(rg)
+    @test isempty(intersect(gathers(rc), (:area, :area_b, :unit, :unit_b)))
     @test isempty(intersect(string_fields(rg), (:area, :area_b, :unit, :unit_b)))
     @test (:reg, :reg_unit) ⊆ string_fields(rg)
     @test (:area, :area_b, :unit, :unit_b) ⊆ string_fields(rc)

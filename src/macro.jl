@@ -3122,9 +3122,10 @@ struct BRMI{O<:NamedTuple}
 end
 BRMI(operations::NamedTuple) = BRMI(operations, ())
 BRMI(;kwargs...) = BRMI((;kwargs...))
-_brm_documentation(brmi::BRMI) =
-    (brmi.documentation..., _brm_component_documentation(brmi)...)
-_brm_with_documentation(brmi::BRMI, docs) = BRMI(brmi.operations, Tuple(docs))
+Base.@nospecializeinfer _brm_documentation(@nospecialize(brmi::BRMI)) =
+    (getfield(brmi, :documentation)..., _brm_component_documentation(brmi)...)
+Base.@nospecializeinfer _brm_with_documentation(@nospecialize(brmi::BRMI), @nospecialize(docs)) =
+    BRMI(getfield(brmi, :operations), Tuple(docs))
 
 # Planning reads a BRMI's operations as syntax. Their NamedTuple type spells
 # every formula name and expression tree, so `values`, `pairs`, `keys`,
@@ -3132,8 +3133,9 @@ _brm_with_documentation(brmi::BRMI, docs) = BRMI(brmi.operations, Tuple(docs))
 # compile again for every model of a corpus. These accessors use builtins and
 # the type as a value instead, so each compiles once for all models. Leaf
 # dispatch still sees every operation's own value.
-Base.@nospecializeinfer function _brm_operation_entries(@nospecialize(brmi::BRMI))
-    operations = getfield(brmi, :operations)
+Base.@nospecializeinfer _brm_operation_entries(@nospecialize(brmi::BRMI)) =
+    _brm_named_entries(getfield(brmi, :operations))
+Base.@nospecializeinfer function _brm_named_entries(@nospecialize(operations::NamedTuple))
     T = typeof(operations)
     entries = Vector{Pair{Symbol,Any}}(undef, nfields(operations))
     for index in eachindex(entries)
@@ -3427,10 +3429,12 @@ end
 # directly are deprecated in favour of `restricted` (decision 0q18o98).
 Base.@nospecializeinfer function _brm_restricted_operations(
         @nospecialize(operations::NamedTuple))
-    rewritten = map(_brm_restricted_operation, values(operations))
+    entries = _brm_named_entries(operations)
+    rewritten = Any[_brm_restricted_operation(last(entry)) for entry in entries]
     _brm_warn_prior_bound_keywords(operations)
-    all(map(===, rewritten, values(operations))) && return operations
-    NamedTuple{keys(operations)}(rewritten)
+    all(index -> rewritten[index] === last(entries[index]), eachindex(entries)) &&
+        return operations
+    NamedTuple{Tuple(first.(entries))}(Tuple(rewritten))
 end
 
 function _brm_restricted_operation(@nospecialize(value))
@@ -3482,7 +3486,8 @@ Base.@nospecializeinfer function _brm_warn_prior_bound_keywords(
     readers = Dict{Symbol,Vector{Symbol}}()
     read_elsewhere = Set{Symbol}()
     varying = Set{Symbol}()
-    for (key, value) in pairs(operations)
+    entries = _brm_named_entries(operations)
+    for (key, value) in entries
         names = Set{Symbol}()
         _brm_restricted_reads!(names, value isa NamedColumn ? parent(value) : value) &&
             push!(varying, key)
@@ -3500,7 +3505,7 @@ Base.@nospecializeinfer function _brm_warn_prior_bound_keywords(
             push!(frontier, reader)
         end
     end
-    for (key, value) in pairs(operations)
+    for (key, value) in entries
         value isa NamedColumn || continue
         op = parent(value)
         op isa ExprColumn && getf(op) === (~) || continue

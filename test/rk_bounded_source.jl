@@ -34,11 +34,16 @@ end
 end
 
 @testset "observed scalar bounds and attributed rejection" begin
-    for (lo, hi) in ((0.0, 1.5), (0.2, 2.0), (-Inf, Inf))
+    # Bounds read from data are program inputs, read by name (user principle
+    # `0ikeidi`, BRM 0.2.211): every pair is one program. Their values reach
+    # the density in rk_bounded_runtime.jl.
+    sources = map(((0.0, 1.5), (0.2, 2.0), (-Inf, Inf))) do (lo, hi)
         data = merge(bounded_data, (; lower_bound=lo, upper_bound=hi))
-        source = bounded_emission(bounded_data_builder, data)
-        @test occursin("scale ~ restricted(Normal(0.0, 1.0), $lo, $hi)", source)
+        bounded_emission(bounded_data_builder, data)
     end
+    @test allequal(sources)
+    @test occursin("scale ~ restricted(Normal(0.0, 1.0), lower_bound, upper_bound)",
+        first(sources))
     for (lo, hi) in ((0.5, 0.5), (1.0, 0.5), (NaN, 1.0),
             (Inf, Inf), (0.0, -Inf), ([0.0, 0.1], 1.0), (false, 1.0))
         data = merge(bounded_data, (; lower_bound=lo, upper_bound=hi))
