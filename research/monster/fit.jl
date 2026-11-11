@@ -34,9 +34,11 @@ const QUANTITY_DESCRIPTIONS = Dict(
     "KMI" => "Michaelis constant",
 )
 const QUANTITIES = vcat(
-    [(; name=q, unit="", description="population geometric mean, " * QUANTITY_DESCRIPTIONS[q],
+    # The table's prose says which rows are population geometric means and
+    # which geometric SDs; the description names the quantity only.
+    [(; name=q, unit="", description=QUANTITY_DESCRIPTIONS[q],
         kind=:intercept, logical=Symbol("log_" * q), transform=exp) for q in QUANTITY_NAMES],
-    [(; name="GSD " * q, unit="", description="population geometric SD, " * QUANTITY_DESCRIPTIONS[q],
+    [(; name="GSD " * q, unit="", description=QUANTITY_DESCRIPTIONS[q],
         kind=:sd, logical=Symbol(q), transform=exp) for q in QUANTITY_NAMES],
     [(; name="sigma_venous", unit="", description="lognormal noise scale, venous blood",
         kind=:scalar, logical=:log_sigma_venous, transform=exp),

@@ -27,7 +27,10 @@ function sample_quorum(sb, tag; n_chains, n_draws, seed, cache="brm-docs-fits",
     dir = joinpath(tempdir(), cache)
     isdir(dir) || mkpath(dir)
     problem = StanBlocks.stan_instantiate(sb.model; path=joinpath(dir, "$(tag)_$(hash(code)).stan"))
-    draws_file = joinpath(dir, "$(tag)_$(hash(code))_$(n_chains)x$(n_draws)_$(seed).jls")
+    # The file name carries every setting that changes the draws, so a reuse
+    # never returns draws sampled under other settings.
+    settings = hash((inits, adaptive_centering, (; sampler_kwargs...)))
+    draws_file = joinpath(dir, "$(tag)_$(hash(code))_$(n_chains)x$(n_draws)_$(seed)_$(settings).jls")
     if get(ENV, "BRM_DOCS_FIT_REUSE", "0") == "1" && isfile(draws_file)
         saved = Serialization.deserialize(draws_file)
         println("REUSED draws from ", draws_file)

@@ -34,7 +34,8 @@ function ppc_spec(; panel_width=150, panel_height=110)
            panel="$(r.source_subject), $(exposure) ppm")
     end
     isempty(rows) && error("results/ppc.tsv has no rows")
-    panels = unique(p.panel for p in sort(rows; by=p -> (p.source_subject, p.response)))
+    exposure(p) = parse(Int, last(split(p.response, '_')))
+    panels = unique(p.panel for p in sort(rows; by=p -> (p.source_subject, exposure(p))))
     # Short axis titles: Vega-Lite repeats them on every facet row and column.
     xlabel = "hours after exposure start"
     ylabel = "concentration"
@@ -49,7 +50,7 @@ function ppc_spec(; panel_width=150, panel_height=110)
                       Color=(; categories=["venous blood", "exhaled air"], palette=[BLUE, ORANGE])))
 end
 
-const CAPTION = "Posterior predictive median, 50 % and 95 % bands and the measurements, per person and exposure: venous blood in mg/L (blue) and exhaled air in ppm (orange), both axes logarithmic."
+const CAPTION = "Posterior predictive median, 50 % and 95 % bands and the measurements, per person and exposure: venous blood (blue) and exhaled air (orange), both in mg/L, both axes logarithmic."
 
 function main(outdir = mktempdir())
     path = joinpath(outdir, "ppc.png")

@@ -189,17 +189,31 @@ sample sizes. The flow fractions and the `Vwp`/`Vpp` split are normalized
 inside the plate, so their population means are identified only through the
 prior and are not themselves fractions.
 
-Read the R-hat column before the medians. The three chains agree on the
-quantities the data inform (the liver volume, the fat and liver partition
-coefficients, the noise scales, most geometric SDs: R-hat within 1.01 and
-bulk ESS in the thousands), and disagree on the ones they do not: the
-tissue/blood partition coefficients of the perfused tissues `Pwp` and
-`Ppp`, the ventilation–perfusion ratio `VPR`, the well-perfused flow
-fraction `Fwp` and its geometric SD have R-hat between 1.1 and 1.6 and a
-bulk ESS near 10. For those rows the interval is the spread of chains that
-have not mixed, not a posterior summary. Six people sampled at eight times
-do not pin down every physiological constant of a four-compartment model;
-that is the situation the model's informative priors were built for.
+```@eval
+using Markdown
+m = Main.BRMDocsComparisons.example_module(:monster)
+rows = m.table("population.tsv")
+unmixed = [r for r in rows if r.rhat > 1.1]
+mixed = count(r -> r.rhat <= 1.01, rows)
+n_obs = length(m.table("ppc.tsv"))
+parts = Any[
+    "Read the R-hat column before the medians. $(mixed) of the $(length(rows)) rows ",
+    "have R-hat at or below 1.01: the quantities the data inform, with a bulk ESS ",
+    "in the hundreds or thousands. $(length(unmixed)) rows have R-hat above 1.1 ",
+    "(R-hat, bulk ESS): ",
+]
+for (i, r) in enumerate(unmixed)
+    push!(parts, Markdown.Code(r.quantity))
+    push!(parts, " ($(r.rhat), $(r.ess_bulk))" * (i < length(unmixed) ? ", " : ""))
+end
+push!(parts,
+    ". For those rows the interval is the spread of chains that have not mixed, ",
+    "not a posterior summary; the rows between the two groups are in between. ",
+    "$(n_obs) measurements of six people do not pin down every physiological ",
+    "constant of a four-compartment model; that is the situation the model's ",
+    "informative priors were built for.")
+Markdown.MD(Markdown.Paragraph(parts))
+```
 
 ```@eval
 Main.BRMDocsComparisons.results_table(
@@ -326,7 +340,8 @@ julia -t 4 --startup-file=no --project=test research/monster/fit.jl
 
 The first command checks the generated program against the corrected source
 program at 25 random points and times one gradient of each. The second
-writes the tables under `research/monster/results/` (about an hour on four
-threads). The figure is an AlgebraOfVega specification in
+writes the tables under `research/monster/results/` (the committed run took
+8,746 s on a fleet host capped at two CPUs; the sampler report above records
+it). The figure is an AlgebraOfVega specification in
 `research/monster/figures.jl`, drawn from those tables when the docs are
 built; running that script writes a PNG preview to a scratch directory.
