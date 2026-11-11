@@ -59,3 +59,6 @@ paths are normalized and raw render logs are omitted from the public tree.
 
 Large generated inventory tables and compressed draw tables are also untracked;
 only the small summary tables used to render fitted examples are retained.
+Obsolete case-study page generators and the `research/automatic_total_docs`
+render fixture are removed, so research commands cannot recreate retired site
+pages or copy rendered PNGs back into the documentation.
