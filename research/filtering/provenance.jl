@@ -13,14 +13,15 @@ const FILTERING_SETTINGS = (
     learning_seed=402, learning_members=256, learning_particles=128, window_length=10,
     batch_seeds=(501, 502, 503), batch_pilot_seed=1500,
     mcmc_seeds=(601, 602, 603, 604), min_completed=3, n_draws=1000,
-    selective_seeds=(701, 702, 703), harness_version=1,
+    selective_seeds=(701, 702, 703), harness_version=2,
 )
 
 function filtering_receipt(data, directory)
-    # The authoring program is the input to the ReactiveKernels compiler used
-    # here; its data, all numerical settings and seed also enter the key.
+    # Include both authoring and inference programs, so a change to a bridge
+    # or selective-window dataset cannot silently reuse an older cache.
     key = DynamicObjects.canonical_hash((read(joinpath(@__DIR__, "model.jl"), String),
-        data, FILTERING_SETTINGS, FILTERING_SEED, 1))
+        read(joinpath(@__DIR__, "fit.jl"), String),
+        data, FILTERING_SETTINGS, FILTERING_SEED, 2))
     identity = joinpath(directory, "content-key.txt")
     isfile(identity) && strip(read(identity, String)) != key && error(
         "Filtering checkpoint content changed. Use a new checkpoint directory.")
@@ -35,7 +36,7 @@ function filtering_receipt(data, directory)
         (; quantity="started", value=strip(read(origin, String))),
         (; quantity="host", value="a Linux fleet host; $(Threads.nthreads()) Julia threads"),
         (; quantity="julia", value=string(VERSION)),
-        (; quantity="harness", value="SMC, state filtering and completion MCMC; version 1"),
+        (; quantity="harness", value="SMC, state filtering and completion MCMC; version 2"),
         (; quantity="settings", value=string(FILTERING_SETTINGS)),
         (; quantity="seed", value=string(FILTERING_SEED)),
     ]

@@ -3,7 +3,8 @@
 The public [filtering example](../../docs/src/filtering.md) uses one synthetic
 Poisson state-space model to compare cumulative SMC, Gaussian carried windows,
 ordinary state filtering, a learning filter, and a full-data MCMC reference.
-A second small model demonstrates selective coordinates when a unit is added.
+A second small model demonstrates selective coordinates when one existing unit
+receives new counts.
 
 ## Reproduction
 
@@ -73,8 +74,8 @@ can follow states while its fixed parameter cloud concentrates. Coverage of one
 simulated path is descriptive, not a calibration study.
 
 `summary.tsv` records active-coordinate counts and checks of checkpoint
-continuation. The growing-unit example samples the shared level and the new
-unit's rate while recovering old rates from their carried conditional law.
+continuation. The selective example samples the observed unit's log rate while
+recovering the shared level and other rate from their carried conditional law.
 The scan example need not become low-dimensional under automatic selection.
 
 ## Checkpoint handling
@@ -93,3 +94,7 @@ The receipt's `started` field records the experiment's first invocation;
 `commit`, source hashes and `seconds_this_invocation` describe the invocation
 that exports the tables, which can resume previously completed fits. Sampling
 completion and elapsed time are retained separately in `completion.tsv`.
+The saved main comparisons used harness version 1 and BRM 0.2.272, as their
+receipt records. Version 2 adds the separately verified existing-unit selection
+example and includes the inference program in the cache key; its main comparison
+settings are unchanged. Use a fresh checkpoint directory for version 2.

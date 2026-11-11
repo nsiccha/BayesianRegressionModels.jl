@@ -162,10 +162,9 @@ full_draw = brm_smc_recover(window_fit,
 
 Recovery preserves the compact particle and samples omitted coordinates
 conditionally. For posterior draws, select compact columns with their weights.
-Growing elementwise vector extents is supported; existing indices and fitted
-categorical levels must retain their meanings.
+Existing indices and fitted categorical levels must retain their meanings.
 
-### When a window introduces a new unit
+### When only one unit has new observations
 
 A smaller count model makes the selection visible. Each unit has its own
 log rate, with a shared level:
@@ -175,7 +174,7 @@ Main.BRMDocsComparisons.comparison(
     Main.BRMDocsComparisons.example_module(:filtering),
     Main.BRMDocsComparisons.source_function("research/filtering/model.jl", :growing_model),
     :growing_model;
-    title="A count model with a growing number of units",
+    title="Unit-specific counts with a shared level",
     require_stan=true,
 )
 ```
@@ -186,18 +185,18 @@ initial_data = (U=2, unit=[1, 2], y=[6, 14],
 initial = brm_smc_fit(growing_model(initial_data); rng=Xoshiro(701),
     particles=1024, options=SMCOptions(moves=3, max_tree_depth=7))
 carried = brm_smc_carry(initial; basis=:correlation)
-new_unit = (; initial_data..., U=3, unit=[3], y=[22])
-selected = brm_smc_update(carried, growing_model(new_unit);
+next_counts = (; initial_data..., unit=[2], y=[22])
+selected = brm_smc_update(carried, growing_model(next_counts);
     coordinates=:auto, rng=Xoshiro(702), particles=1024,
     options=SMCOptions(moves=3, max_tree_depth=7))
 brm_smc_coordinates(selected)
 ```
 
-The new likelihood reads `log_rate[3]`. Its fresh prior also needs `level`,
-so the compact cloud contains those two coordinates. The old rates remain
-in the carried conditional distribution. The target includes the old
-Gaussian marginal, the new rate's conditional prior and the new count's
-likelihood; it counts neither the old priors nor the old observations twice.
+The new likelihood reads only `log_rate[2]`, so only that coordinate is active.
+The shared level and the other unit's rate remain in the carried conditional
+distribution and can be recovered with `brm_smc_recover`. The target combines
+the carried Gaussian marginal with the new count's likelihood; it does not
+count the old priors or observations again.
 
 ## Filter the next observation
 

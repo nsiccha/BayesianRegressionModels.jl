@@ -98,19 +98,19 @@ function selective_example(progress)
     initial = brm_smc_fit(growing_model(initial_data); rng=Xoshiro(701),
         particles=1024, options=tuning_options(), progress)
     carried = brm_smc_carry(initial; basis=:correlation)
-    next_data = (; initial_data..., U=3, unit=[3], y=[22])
+    next_data = (; initial_data..., unit=[2], y=[22])
     window = brm_smc_update(carried, growing_model(next_data);
         coordinates=:auto, rng=Xoshiro(702), particles=1024,
         options=tuning_options(), progress)
     @assert window.state.temperature == 1
-    @assert size(window.state.positions, 1) == 2
+    @assert size(window.state.positions, 1) == 1
     recovered = brm_smc_recover(window, window.state.positions[:, 1]; rng=Xoshiro(703))
-    @assert length(recovered) == 4
-    [(; quantity="growing_active_coordinates", value=size(window.state.positions, 1)),
-        (; quantity="growing_full_coordinates", value=length(recovered))]
+    @assert length(recovered) == 3
+    [(; quantity="selective_active_coordinates", value=size(window.state.positions, 1)),
+        (; quantity="selective_full_coordinates", value=length(recovered))]
 end
 
-function main(checkpoint_dir, root; check_growing=true)
+function main(checkpoint_dir, root; check_selective=true)
     mkpath(checkpoint_dir)
     fixture = filtering_fixture()
     data, truth = fixture.data, fixture.truth
@@ -337,8 +337,8 @@ function main(checkpoint_dir, root; check_growing=true)
         (; quantity="warmuphmc_version", value=string(Base.pkgversion(WarmupHMC))),
         (; quantity="model_sha256", value=bytes2hex(sha256(read(joinpath(@__DIR__, "model.jl"))))),
         (; quantity="fit_sha256", value=bytes2hex(sha256(read(@__FILE__))))])
-    if check_growing
-        append!(summary, phase(root, "Selective growing coordinates") do p
+    if check_selective
+        append!(summary, phase(root, "Selective unit coordinates") do p
             cached(checkpoint_dir, "selective-example") do
                 selective_example(p)
             end
