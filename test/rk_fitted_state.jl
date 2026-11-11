@@ -297,6 +297,63 @@ function check_data_free(build, state, rk, design; resample_groups=(), want=:mu)
     free
 end
 
+@stestset "optional priors resolve before data-free replay" begin
+    # One prior block serves both a linear model and one with a Hilbert-space
+    # Gaussian-process term. Replay must resolve it before preparing data,
+    # just as the training constructor does (brm-use, "Optional prior addresses").
+    priors = @brm begin
+        optional(length_scale(:, hsgp(x))) ~ Uniform(0.5, 3.0)
+        optional(sd(:, hsgp(x))) ~ Exponential(2)
+        optional(effect(mu, x)) ~ Normal(0, 0.7)
+        optional(effect(missing_predictor, :)) ~ Normal(0, 1)
+        optional(sd(:, missing_block)) = 0.4
+    end
+    linear = @brm begin
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+        sigma ~ Exponential(1)
+    end
+    smooth = @brm begin
+        mu ~ 1 + x + hsgp(x; k=5)
+        y ~ Normal(mu, sigma)
+        sigma ~ Exponential(1)
+    end
+    for structure in (linear, smooth)
+        build = merge(structure, priors)
+        rk = RKBRMI(build(TRAIN))
+        state = brm_fitted_state(rk)
+        io = IOBuffer()
+        serialize(io, state)
+        state = deserialize(seekstart(io))
+        design = rows(TRAIN, 3:9)
+        free = check_data_free(build, state, rk, design)
+        @test occursin("optional(", string(brm_source(free)))
+        @test !occursin("optional(", string(parent(free)))
+        @test brm_fitted_state(free).program == state.program
+        replay = reprocess(rk, design)
+        for u in (zeros(length(state.coordinates)), fill(0.3, length(state.coordinates)))
+            @test isequal(graph_value(free, :mu, u), graph_value(replay, :mu, u))
+            @test density(free, u) == density(replay, u)
+        end
+        next_design = rows(TRAIN, 7:10)
+        next_free = reprocess(free, next_design)
+        next_replay = reprocess(rk, next_design)
+        @test isequal(graph_value(next_free, :mu, point(next_replay)),
+            graph_value(next_replay, :mu, point(next_replay)))
+        check_inputs(rk_design_binder(free)(next_design),
+            rk_design_binder(rk)(next_design), state, rk)
+        check_data_free(build, brm_fitted_state(free), rk, next_design)
+        check_data_free(build, state, rk, without(design, :y))
+    end
+    # Required addresses still diagnose a missing term; the marker alone
+    # authorizes dropping a prior (brm-use, "Optional prior addresses").
+    required = merge(linear, @brm begin
+        length_scale(:, hsgp(x)) ~ Uniform(0.5, 3.0)
+    end)
+    state = brm_fitted_state(RKBRMI(linear(TRAIN)))
+    @test_throws "matches no `hsgp(x)` term" RKBRMI(required(TRAIN), state)
+end
+
 @stestset "data-free replay preserves scalar prior inputs" begin
     build = brm(quote
         sigma ~ Exponential(prior_scale)
