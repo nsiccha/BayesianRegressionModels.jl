@@ -184,9 +184,16 @@ function summarize_station_field(data, draws, info; settings=FIELD_SETTINGS)
         "Minimum tail ESS" => round(Int, diag.min_tail_ess),
         "Divergences in all retained draws" => info.divergent,
         "Sampling time (s)" => round(Int, info.seconds))]
+    # Distance from each grid point to its nearest station.
+    sites = unique(zip(data.east, data.north))
+    nearest(r) = minimum(hypot(r.east - x, r.north - y) for (x, y) in sites)
+    near = [r.sd for r in grid if nearest(r) < 5]
+    far = [r.sd for r in grid if nearest(r) > 12]
     checks = [(; quantity=string(k),value=string(v)) for (k,v) in (
         "Grid root mean squared error" => round(sqrt(mean((r.q50-r.truth)^2 for r in grid)); digits=2),
         "Grid points inside pointwise 95% intervals (%)" => round(Int, 100mean(r.q025 <= r.truth <= r.q975 for r in grid)),
+        "Mean field SD, grid points within 5 km of a station" => round(mean(near); digits=2),
+        "Mean field SD, grid points over 12 km from every station" => round(mean(far); digits=2),
         "Draws used for mapping" => size(mapped_draws, 2))]
     (; field_grid=grid, observations, data=data_table, diagnostics=diagnostic_table,
        quantities, map_checks=checks)
