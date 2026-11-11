@@ -85,7 +85,7 @@ end
 @testset "seal full formula model: finite density and gradient at demographic start" begin
     sb = SealDensityFormula.SBBRMI(SealDensityFormula.grey_seal_brm_model())
     problem = StanBlocks.stan_instantiate(sb)
-    start = SealDensityFormula.brm_start(sb, problem.model, (;
+    inits = (;
         phi_a_sc=0.88, phi_sc=0.85, survival_shape=0.5,
         male_pup_survival_offset=0.0, male_adult_survival_offset=0.0,
         carrying_capacity=60000.0, density_dependence_scaled=0.4,
@@ -93,9 +93,21 @@ end
         population_init_size=3000.0,
         bbr_reference_logit=0.0,
         bbr_logit=(; herring_index_1=0.0, herring_index_2=0.0),
-    ))
+    )
+    start = SealDensityFormula.brm_start(sb, problem.model, inits)
     # Call BridgeStan directly so a domain/dimension failure retains its cause.
     lp, gradient = BridgeStan.log_density_gradient(problem.model, start)
     @test isfinite(lp)
     @test all(isfinite, gradient)
+    # The full model must use the calibrated slope, not merely define the
+    # correct helper. The old -log(K) wiring made its likelihood gradient zero
+    # at this abundance, leaving only K's LogNormal prior and its Jacobian.
+    larger_K = SealDensityFormula.brm_start(sb, problem.model,
+        merge(inits, (; carrying_capacity=120000.0)))
+    changed = findall(!iszero, larger_K - start)
+    @test length(changed) == 1
+    capacity_coordinate = only(changed)
+    @test larger_K[capacity_coordinate] - start[capacity_coordinate] ≈ log(2.0)
+    prior_gradient = -(log(60000.0) - 11.3) / 0.3^2
+    @test abs(gradient[capacity_coordinate] - prior_gradient) > 1e-4
 end
