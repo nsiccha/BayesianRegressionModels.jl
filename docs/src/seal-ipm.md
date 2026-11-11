@@ -72,6 +72,7 @@ Main.BRMDocsComparisons.evaluate_source_prelude(
     Main.BRMDocsComparisons.example_module(:seal_ipm),
     "research/seal/grey_seal_brm.jl";
     before=:grey_seal_brm_model,
+    starting_at="StanBlocks.@deffun seal_adult_floor",
 )
 Main.BRMDocsComparisons.source_code_region(
     "research/seal/grey_seal_brm.jl";
