@@ -1,4 +1,4 @@
-# Map a field through space and time
+# Spatial field reconstruction
 
 Fit a moving field from station measurements, read it at new locations, and
 separate uncertainty in the field from observation noise. The example uses a
@@ -121,9 +121,10 @@ Main.BRMDocsComparisons.figure(
 ```
 
 The posterior median places both features and follows their motion between
-times. At the peaks it is flatter than the generating surface: the field's
-prior has mean zero, and between stations the estimate shrinks toward it.
-Hover over a cell to read its coordinates and value.
+times. It is shallower than the generating surface in the negative feature at
+every time, and in the positive feature from time 3 on; the field's prior has
+mean zero, and the estimate shrinks toward it. Hover over a cell to read its
+coordinates and value.
 
 ```@eval
 Main.BRMDocsComparisons.figure(
@@ -157,10 +158,12 @@ Main.BRMDocsComparisons.results_table("research/space_time_fields/results/map_ch
     columns=[:quantity => "Grid check", :value => "Value"])
 ```
 
-Every grid point's 95% interval contains the generating value, so on this
-surface the intervals are wide rather than tight. One simulated field is not a
-calibration study: nearby cells share information, so repeat the simulation
-across datasets before making a coverage claim. In an application, held-out
+All but three grid points' 95% intervals contain the generating value, so on
+this surface the intervals are wide rather than tight. The three misses lie on
+the northern edge at time 6, where the generating value sits just above the
+upper bound. One simulated field is not a calibration study: nearby cells share
+information, so repeat the simulation across datasets before making a coverage
+claim. In an application, held-out
 stations or times check the fit between stations; residuals at the fitted rows
 do not.
 

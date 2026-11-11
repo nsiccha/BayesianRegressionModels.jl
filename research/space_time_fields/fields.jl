@@ -184,6 +184,15 @@ function summarize_station_field(data, draws, info; settings=FIELD_SETTINGS)
         "Minimum tail ESS" => round(Int, diag.min_tail_ess),
         "Divergences in all retained draws" => info.divergent,
         "Sampling time (s)" => round(Int, info.seconds))]
+    covered(r) = r.q025 <= r.truth <= r.q975
+    # Name each miss when there are few; count them per time otherwise.
+    function outside_text(grid)
+        misses = filter(!covered, grid)
+        isempty(misses) && return "none"
+        length(misses) > 6 && return join(("time $(Int(t)): $(count(r -> r.time == t, misses))"
+            for t in sort(unique(r.time for r in misses))), "; ")
+        join(("time $(Int(r.time)): ($(Int(r.east)), $(Int(r.north)))" for r in misses), "; ")
+    end
     # Distance from each grid point to its nearest station.
     sites = unique(zip(data.east, data.north))
     nearest(r) = minimum(hypot(r.east - x, r.north - y) for (x, y) in sites)
@@ -191,7 +200,9 @@ function summarize_station_field(data, draws, info; settings=FIELD_SETTINGS)
     far = [r.sd for r in grid if nearest(r) > 12]
     checks = [(; quantity=string(k),value=string(v)) for (k,v) in (
         "Grid root mean squared error" => round(sqrt(mean((r.q50-r.truth)^2 for r in grid)); digits=2),
-        "Grid points inside pointwise 95% intervals (%)" => round(Int, 100mean(r.q025 <= r.truth <= r.q975 for r in grid)),
+        "Grid points whose 95% interval contains the generating value" =>
+            "$(count(covered, grid)) of $(length(grid))",
+        "Grid points outside it (time: east, north in km)" => outside_text(grid),
         "Mean field SD, grid points within 5 km of a station" => round(mean(near); digits=2),
         "Mean field SD, grid points over 12 km from every station" => round(mean(far); digits=2),
         "Draws used for mapping" => size(mapped_draws, 2))]
