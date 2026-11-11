@@ -26,8 +26,9 @@ known values. Persistence is `rho`; innovation standard deviation is `tau`.
 
 ```@example filtering
 using BayesianRegressionModels, Distributions
-cd(Main.BRMDocsComparisons.REPOSITORY_ROOT) # hide
-include("research/filtering/model.jl")
+model_file = "research/filtering/model.jl"
+model_file = joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, model_file) # hide
+include(model_file)
 fixture = filtering_fixture()
 data = fixture.data
 training = filtering_window(data, 1, 20)
@@ -243,6 +244,7 @@ does not replenish them. Inspect `state.parameter_mass` for concentration as
 the stream grows.
 
 ```@eval
+using Markdown
 let rows = Main.BRMDocsComparisons.example_module(:filtering).filtering_table("filter_scores")
     final = last(rows)
     Markdown.parse("At the final day, the effective parameter-member count is $(round(final.parameter_ess; digits=1)). This describes this run, not a calibration study.")
@@ -314,6 +316,7 @@ Main.BRMDocsComparisons.figure(
 ```
 
 ```@eval
+using Markdown
 let rows = Main.BRMDocsComparisons.example_module(:filtering).filtering_table("marginals")
     sd(method, parameter) = only(r.sd for r in rows if r.method == method && r.parameter == parameter)
     carried = round(sd("Carried windows", "tau") / sd("MCMC", "tau"); digits=1)

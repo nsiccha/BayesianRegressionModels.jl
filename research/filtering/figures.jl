@@ -37,13 +37,9 @@ function marginal_comparison()
         for r in filtering_table("marginals")]
     facets = (; col=:parameter => sorter([names[p] for p in ["level", "rho", "tau"]]) => "", color=:family => "Target")
     order = :method => sorter(methods) => ""
-    outer = data(rows) * mapping(order, :q05, :q95; facets...) *
-        visual(Rangebars; direction=:x, linewidth=1.5, whiskerwidth=0)
-    inner = data(rows) * mapping(order, :q25, :q75; facets...) *
-        visual(Rangebars; direction=:x, linewidth=5, whiskerwidth=0)
-    median = data(rows) * mapping(:q50 => "Parameter value", order; facets...) *
-        visual(Scatter; markersize=7)
-    (outer + inner + median) * config(width=135, height=240,
+    intervals = data(rows) * mapping(:q50 => "Parameter value"; y=order, facets...) *
+        pointinterval(bands=[:q05 => :q95, :q25 => :q75], orientation=:horizontal)
+    intervals * config(width=135, height=240,
         facet=(; linkxaxes=:none),
         scales=scales(Color=(; categories=["Full history", "Gaussian boundary"], palette=[BLUE, ORANGE])),
         config=Dict("axis" => Dict("labelFontSize" => 12, "titleFontSize" => 13),
