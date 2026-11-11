@@ -47,7 +47,7 @@ keeps the prior declarations visible.
 ```@example syntax
 using BayesianRegressionModels
 model = Main.BRMDocsComparisons.example_module(:SyntaxGuide).model
-(inputs=brm_columns(model), priors=string(priors_of(model)))
+(inputs=data_columns(model), priors=string(priors_of(model)))
 ```
 
 | Familiar formula | BRM meaning |
@@ -65,7 +65,7 @@ Integer, string and categorical columns are factors; use floating-point values
 for a numeric trend. With an intercept, factors use treatment contrasts.
 Without one, the first eligible factor uses one coefficient per level.
 `factor(g; cmc=false)` keeps treatment coding; `factor(g; ref=k)` chooses a
-reference level. [The reference](terms-reference.md#Columns-and-formula-operators) gives
+reference level. [The reference](terms-reference.md#columns-and-formula-operators) gives
 the interaction and ordinal exceptions.
 
 ## Nonlinear models and plates

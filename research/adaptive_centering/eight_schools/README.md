@@ -35,7 +35,6 @@ statement and support match the
 Here, `sigma` contains the known standard errors of the reported estimates.
 
 ```julia
-Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 using BayesianRegressionModels, Distributions, StanBlocks
 
 function eight_schools_model()
@@ -48,11 +47,9 @@ function eight_schools_model()
              y=Float64[28, 8, -3, 7, -1, 1, 18, 12],
              sigma=Float64[15, 10, 16, 11, 9, 11, 10, 18]))
 end
-""", :eight_schools_model;
-    title="Eight schools with PosteriorDB priors", require_stan=true, total_groups=())
 ```
 
-The tabs show generated backends. The fits below use StanBlocks/BridgeStan
+The fits below use StanBlocks/BridgeStan
 and WarmupHMC. Independent comparisons with PosteriorDB's centered Stan
 program verify the density and all ten gradient components, including the
 coordinate Jacobian. The independent audit is retained with the source model.

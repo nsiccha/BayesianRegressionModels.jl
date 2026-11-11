@@ -121,7 +121,7 @@ These are historical single-chain runs with 10,000 retained draws per arm,
 not current runtime benchmarks or evidence of multichain convergence.
 
 ```@eval
-isdefined(Main, :BRMGuideFigures) || include(joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "docs", "guide_figures.jl"))
+isdefined(Main, :BRMGuideFigures) || Base.include(Main, joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "docs", "guide_figures.jl"))
 Main.BRMDocsComparisons.figure(Main.BRMGuideFigures.centering_efficiency();
     caption="Recorded eight-schools efficiency relative to fixed NCP. The denominator includes warmup and any pilot. Each arm retained one chain of 10,000 draws; the research receipt records versions, seeds and diagnostics.")
 ```

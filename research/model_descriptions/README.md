@@ -2,19 +2,17 @@
 
 ## Inspect roles and ranks
 
-[`brm_model_view`](@ref) returns a reusable HTMXObjects semantic tree with the
+`brm_model_view` returns a reusable HTMXObjects semantic tree with the
 declaration, data/parameter roles, value ranks and dimensions. Load HTMXObjects
 0.1.65 or later; no web demo app is needed:
 
 ```julia
-Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 model_view_demo = (@brm begin
     sigma ~ Exponential(1)
     beta ~ Normal(0, 1)
     mu = beta * x
     y ~ Normal(mu, sigma)
 end)((; x=[-1., 0., 1.], y=[0.1, 0.2, 0.3]))
-""", :model_view_demo; title="Regression model")
 ```
 
 Pass the bound model to the view:
@@ -45,15 +43,15 @@ bindings have docstrings; unrelated overloads of Base arithmetic operators are
 omitted.
 
 Authored declaration docstrings appear as formatted prose in the Documentation
-tab, using [`brm_documentation`](@ref). Each record includes its exact logical
+tab, using `brm_documentation`. Each record includes its exact logical
 path and a disclosure with the attached statement, source file and line. The
 same records supply the source text and the PDF; the view stores no separate
 copy of documentation metadata.
 Headings use readable paths such as `left › inner`; the exact tuple path remains
 in provenance, preserving the distinction between nested names and dotted names.
 
-For a bound model containing reusable [components](components.md), the Source
-tab includes the actual reachable definitions from [`brm_components`](@ref).
+For a bound model containing reusable [components](../../docs/src/model-syntax.md#reusable-components), the Source
+tab includes the actual reachable definitions from `brm_components`.
 Each shared definition gets one source tab, with all its call-instance paths;
 the model source also lists how each instance is called. Nested definitions
 are included recursively. Paths identify authored call sites, so repeated
@@ -137,8 +135,8 @@ does not install routes or generate files when a reader opens it.
 
 ## Describe a prepared model
 
-[`brm_description`](@ref) describes a selected, prepared StanBlocks model.
-Reuse its [`BRMDescriptor`](@ref); the description reads its parsed formula,
+`brm_description` describes a selected, prepared StanBlocks model.
+Reuse its `BRMDescriptor`; the description reads its parsed formula,
 prepared design, fitted preprocessing and generative declarations. It returns
 structured prose, LaTeX, notation, effective priors and explicit coverage.
 It does not fit, sample or instantiate an executable model.
@@ -147,7 +145,6 @@ This generic hierarchical model has a Gaussian observation distribution, a
 standardized covariate and a shared intercept/slope covariance block:
 
 ```julia
-Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 description_model = (@brm begin
     "Observation standard deviation."
     sigma ~ Exponential(2)
@@ -160,7 +157,6 @@ end)((;
     group=[1, 1, 2, 2, 3, 3],
     y=[0.4, 0.1, 1.1, 1.7, 2.4, 2.8],
 ))
-""", :description_model; title="Model to describe", require_stan=true, total_groups=())
 ```
 
 ```julia
@@ -182,11 +178,11 @@ logical path:
 brm_documentation(description_model; path=:mu)
 ```
 
-[`brm_documentation`](@ref) returns copied records containing the logical
+`brm_documentation` returns copied records containing the logical
 declaration path, Markdown, authored statement and source location. The
 records follow tuple expansion, prior/structure partition, merges and replay.
-[`brm_documentation_markdown`](@ref) emits the authored Markdown for HTML and
-PDF pipelines; [`brm_description_markdown`](@ref) includes it alongside the
+`brm_documentation_markdown` emits the authored Markdown for HTML and
+PDF pipelines; `brm_description_markdown` includes it alongside the
 generated scientific description. Authored prose does not change the
 description's coverage assessment or the model's numerical identity.
 
@@ -215,7 +211,7 @@ by its own equations, in model order.
 logical tuple `id`, `kind`, actual `callable`, `arguments`, `keywords`, `children`,
 `axes`, `outputs`, `priors`, `fitted_constants`, `bindings`, `notation` and
 `provenance`. Use `brm_description_components(result)` to traverse it.
-Arguments contain literals, [`BRMDescriptionReference`](@ref) values, tuples
+Arguments contain literals, `BRMDescriptionReference` values, tuples
 and recursive components. Keyword arguments are a named tuple. Collections
 and fitted values are read-only snapshots.
 Vectors use tuples; matrices and higher-dimensional arrays use
@@ -227,7 +223,7 @@ Ragged `segments` preserve the descriptor's inclusive grouping ends. Axes
 and fitted constants retain their declared source and fitted level/basis data.
 Conditioned, held-out and unconditioned observations remain distinct.
 
-`priors` contains [`BRMPriorDescription`](@ref) records with `id`, `distribution`,
+`priors` contains `BRMPriorDescription` records with `id`, `distribution`,
 `support`, `source`, `anchor` and `provenance`. The distribution retains its actual
 callable, arguments and keywords. Winning selector metadata comes from the
 producer's precedence resolver. Generated latent priors, scalar hyperpriors,
@@ -270,12 +266,12 @@ result = brm_description(d; labels, texts=DE)
 markdown = brm_description_markdown(result)   # German throughout
 ```
 
-[`description_texts`](@ref) returns the built-in `:en` (the default) or `:de`
+`description_texts` returns the built-in `:en` (the default) or `:de`
 texts. They cover everything BRM writes itself: the prose sentences, the
 meanings of the notation it introduces, the coverage-gap messages, the Markdown
 headings and table headers, and the descriptive words inside its LaTeX, such as
 `\operatorname{Exponential}_{\mathrm{rate}}` or `\text{(continuous)}`. The
-result records its texts, so [`brm_description_markdown`](@ref) needs no
+result records its texts, so `brm_description_markdown` needs no
 language argument and the page cannot mix languages. `model_id`, the component
 inventory and the equations' structure do not depend on the language.
 
@@ -294,7 +290,7 @@ letter, `\`, `_` or `^` are LaTeX groups, not placeholders. An unknown locale or
 text name, or a placeholder mismatch, throws an `ArgumentError`.
 
 A hook writes its own prose in the description's language by reading
-[`brm_description_texts`](@ref)`(context).locale`. A page that needs two
+`brm_description_texts``(context).locale`. A page that needs two
 languages calls `brm_description` once per language; it does not fit or sample.
 
 The example model's prose in German:
@@ -310,7 +306,7 @@ end
 ## Scientific extensions
 
 An unknown callable leaves a coverage gap. Add a reusable
-[`brm_describe_component`](@ref) method, or pass request-local hooks keyed by
+`brm_describe_component` method, or pass request-local hooks keyed by
 actual callable identity:
 
 ```julia
@@ -328,13 +324,13 @@ For this hook, the scientific callable's body is `response_curve(x) = x^2 + 0.6`
 Its actual model registration and units belong to the consumer. Equations are
 LaTeX without display delimiters. Notation records have `name`, `meaning` and
 optional `symbol`, `axis`, `unit`. Explicit symbols are trusted LaTeX; default
-identifiers are escaped by [`brm_description_symbol`](@ref) and
-[`brm_description_math`](@ref).
+identifiers are escaped by `brm_description_symbol` and
+`brm_description_math`.
 
-[`brm_description_binding`](@ref)`(context, :offset)` resolves a submodel's
+`brm_description_binding``(context, :offset)` resolves a submodel's
 authored internal parameter. Its record contains `name`, `role`, `value`,
 `prior_ids` and, in an included submodel, `path`. Render `value` with
-`brm_description_math`; use [`brm_description_prior`](@ref) on each exact prior
+`brm_description_math`; use `brm_description_prior` on each exact prior
 ID. Repeated nested names can be addressed by an authored tuple path.
 No generated prefix or declaration-order assumption is needed.
 Reference-valued keywords use the same math API, including identity aliases.
@@ -390,7 +386,7 @@ Actual higher-order callable arguments retain their identity and render through
 the same escaped math helper.
 Statically named records such as `(; lower, upper, weights=exp(offset))`
 retain public named field values. Use
-[`brm_description_record`](@ref)`(context, argument)` to resolve a record
+`brm_description_record``(context, argument)` to resolve a record
 argument through its authoritative local bindings. The returned NamedTuple
 contains literal values, parameter/data references and expression components;
 render individual fields with `brm_description_math`. Unresolved, cyclic or

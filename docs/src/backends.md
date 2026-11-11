@@ -46,13 +46,13 @@ using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 model = Main.BRMDocsComparisons.example_module(:BackendGuide).model
 sb = SBBRMI(model; total_groups=())
 rk = RKBRMI(model)
-(columns=brm_columns(model), priors=priors_of(model),
+(columns=data_columns(model), priors=priors_of(model),
     stan_characters=length(stan_code(sb)))
 ```
 
 [`rk_logdensity_problem`](@ref) provides the `LogDensityProblems` interface.
 Choose an AD backend when constructing it; the sampler then consumes that
-interface. [`stan_instantiate`](@ref) compiles the Stan density through
+interface. `stan_instantiate` compiles the Stan density through
 BridgeStan. Neither lowering call alone runs MCMC. The
 [adaptive-centering guide](adaptive-centering.md) explains coordinate choices.
 
@@ -65,7 +65,7 @@ change those constants and therefore change the meaning of a posterior draw.
 
 Use declared output paths when reading predictions or latent quantities.
 [`brm_outputs`](@ref) and [`brm_output`](@ref) expose a Stan descriptor's
-output inventory. RK's [`rk_draw_values`](@ref) and [`rk_draw_tree`](@ref)
+output inventory. RK's `rk_draw_values` and `rk_draw_tree`
 evaluate requested quantities from model-coordinate draws. A latent field,
 a linear predictor and a predictive response are different outputs; adding
 observation noise belongs to prediction.
@@ -90,7 +90,9 @@ Pass `labels` for scientific meanings, symbols and units; names alone do
 not establish them. `description_texts(:de)` selects German throughout the
 generated prose. Presentation metadata does not change model identity,
 data or inference caches. Custom description hooks and inventory fields
-are documented in the [API](api.md).
+are documented in the [API](api.md); the
+[description protocol](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/model_descriptions)
+retains the detailed extension and rendering contracts.
 
 With HTMXObjects loaded, [`brm_model_view`](@ref) displays source, roles,
 ranks and documentation as one semantic tree. An unbound builder shows

@@ -67,11 +67,10 @@ the source hyperpriors, not just algebraic prior identities.
 ### One BRM formula and its generated backends
 
 This executable example reads the full dataset and uses the same 20-frequency
-model as the sampling runs. The tabs expose its generated backends. All fits
+model as the sampling runs. All fits
 on this page use StanBlocks/BridgeStan.
 
 ```julia
-Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 using Statistics
 
 function adaptive_motorcycle_model()
@@ -93,8 +92,6 @@ function adaptive_motorcycle_model()
         y ~ Normal(mu, sigma)
     end)((; x, y))
 end
-""", :adaptive_motorcycle_model;
-    title="The full motorcycle model", require_stan=true)
 ```
 
 

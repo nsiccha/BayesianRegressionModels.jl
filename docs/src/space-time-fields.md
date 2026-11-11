@@ -122,19 +122,20 @@ the hyperparameter-dependent determinants.
 | `neighbors=m` | Local conditionals on distinct observed position–time states. Spatial and temporal covariance are approximated. Frozen replay keeps that support. |
 | `multiresolution=m` | Sparse normalized spatial basis with exact OU temporal covariance and marginal SD. Basis paths use their readers' time unions; frozen replay keeps positions and times. |
 
-For `neighbors`, [`brm_gmrf_predict`](@ref) can evaluate new points. Without
+For `neighbors`, `brm_gmrf_predict` can evaluate new points. Without
 an RNG it returns conditional means; pass an RNG to include conditional
 new-point variation. These draws have pointwise conditional laws and do
 not supply the joint covariance needed for uncertainty in spatial totals.
 Observation noise is added only when predicting measurements.
 
-The figure reads the same posterior summary as the worked spatial example.
-It compares the synthetic generating field with a pointwise posterior band.
+The figure isolates the OU temporal factor at one location and channel,
+computed directly as `exp(-gap / ell_t)`. It shows how a fixed prior
+correlation time changes dependence; it is not a posterior reconstruction.
 
 ```@eval
-isdefined(Main, :BRMGuideFigures) || include(joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "docs", "guide_figures.jl"))
-Main.BRMDocsComparisons.figure(Main.BRMGuideFigures.field_slice();
-    caption="An east–west slice of the synthetic station field. Blue: posterior median and 95% pointwise latent-field interval; orange: generating field. New-point conditional variation is included; measurement noise is excluded.")
+isdefined(Main, :BRMGuideFigures) || Base.include(Main, joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "docs", "guide_figures.jl"))
+Main.BRMDocsComparisons.figure(Main.BRMGuideFigures.temporal_correlation();
+    caption="Prior OU temporal correlation at one location and channel, with fixed correlation times 0.5 (blue) and 2 (orange). At a gap equal to its correlation time, each curve equals exp(-1). These curves are computed during the build, without fitting data.")
 ```
 
 All representations support full-model MCMC on RK and Stan. RK mesh fields
@@ -145,7 +146,9 @@ lets supported field states become SVI units; see the [SVI guide](svi.md).
 Embedded Laplace is an explicit mesh integration choice. Large operator
 solves use a fixed-probe determinant estimate, so even a Gaussian integral
 can be approximate. Check the solver and probe settings against the
-accuracy needed for the fit.
+accuracy needed for the fit. The
+[representation notes](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/field_representations)
+retain the precision derivations and synthetic benchmark protocols.
 
 Continue to the [spatial-fields example](spatial-fields.md) for the fitted
 model, diagnostics, maps and its Reproduce footer.

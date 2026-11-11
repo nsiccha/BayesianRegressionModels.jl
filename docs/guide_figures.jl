@@ -22,20 +22,14 @@ function centering_efficiency()
         scales=scales(Color=(palette=["#2a78d6", "#eb6834"], categories=["Fixed", "Adaptive"])))
 end
 
-function field_slice()
-    source = rows("research/space_time_fields/results/field_grid.tsv")
-    records = [NamedTuple{keys(r)}(Tuple(parse(Float64, v) for v in values(r))) for r in source]
-    norths = sort!(unique(r.north for r in records))
-    times = sort!(unique(r.time for r in records))
-    north = norths[cld(length(norths), 2)]
-    time = times[cld(length(times), 2)]
-    slice = sort!(filter(r -> r.north == north && r.time == time, records); by=r -> r.east)
-    length(slice) > 1 || error("The field summary has no east–west slice")
-    ribbon = data(slice) * mapping(:east, :q025, :q975) * visual(Band; color="#2a78d6", alpha=0.2)
-    posterior = data(slice) * mapping(:east => "East (km)", :q50 => "Latent field") * visual(Lines; color="#2a78d6")
-    truth = data(slice) * mapping(:east, :truth) * visual(Lines; color="#eb6834")
-    (ribbon + posterior + truth) * config(width=540, height=260,
-        title="North = $(north) km, time = $(time)")
+function temporal_correlation()
+    values = [(gap=gap, correlation=exp(-gap / ell), length="ell_t = $(ell)")
+        for ell in (0.5, 2.0) for gap in range(0, 6; length=121)]
+    data(values) * mapping(:gap => "Time gap", :correlation => "Prior temporal correlation";
+        color=:length => "OU correlation time") * visual(Lines) *
+        config(width=540, height=260,
+            scales=scales(Color=(palette=["#2a78d6", "#eb6834"],
+                categories=["ell_t = 0.5", "ell_t = 2.0"])))
 end
 
 end

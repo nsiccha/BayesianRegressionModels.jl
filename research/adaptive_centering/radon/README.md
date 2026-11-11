@@ -34,7 +34,6 @@ keep the county intercept and slope independent and let us specify each
 half-normal scale prior explicitly.
 
 ```julia
-Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 using BayesianRegressionModels, Distributions, StanBlocks, JSON, ZipFile
 
 function adaptive_radon_model()
@@ -66,11 +65,9 @@ function adaptive_radon_model()
         log_radon ~ Normal(mu, sigma_y)
     end)((; floor_measure, county_idx, log_radon))
 end
-""", :adaptive_radon_model;
-    title="The full radon model", require_stan=true, total_groups=())
 ```
 
-The tabs show the generated backends. Sampling uses StanBlocks/BridgeStan.
+Sampling uses StanBlocks/BridgeStan.
 An independent audit compares the normalized density and all 777 gradient
 components with the
 [reference Stan program](https://github.com/stan-dev/posteriordb/blob/5545a1dd07ae297c36edecbcd82aa49097b4c385/posterior_database/models/stan/radon_variable_intercept_slope_noncentered.stan)

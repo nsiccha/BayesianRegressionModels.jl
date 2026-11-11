@@ -16,7 +16,6 @@ A mesh for scientific use needs a resolution and boundary buffer appropriate
 to the spatial range prior.
 
 ```julia
-Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 small_field = (@brm begin
     Omega ~ LKJCholesky(2, 2.0)
     field ~ 0 + gmrf((east, north), time, channel;
@@ -34,11 +33,10 @@ end)((;
     xy=[0.0 0.0; 1.0 0.0; 1.0 1.0; 0.0 1.0; 0.5 0.5],
     triangles=[1 2 5; 2 3 5; 3 4 5; 4 1 5],
 ))
-""", :small_field; title="Matérn space × OU time × correlated channels", require_stan=true)
 ```
 
-The StanBlocks and Stan panes are generated from this declaration during the
-documentation build. Construct `SBBRMI(small_field)` to prepare the same model.
+Construct `SBBRMI(small_field)` to prepare the model. The current
+[fields guide](../../docs/src/space-time-fields.md) executes a small declaration.
 The field is a direct predictor contribution: its amplitude is the addressed
 `sd`, without a second population coefficient multiplying it. Add an
 intercept explicitly with `1 + gmrf(...)` when the model needs one.
@@ -270,7 +268,6 @@ through 100, written as a literal or held by a scalar data field or
 that differ only in the count build one Stan program and emit one RK program.
 
 ```julia
-Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 shared_ou_field = (@brm begin
     Omega ~ LKJCholesky(2, 2.0)
     field ~ 0 + gmrf((east, north), time, channel; multiresolution=3, cor=Omega)
@@ -283,7 +280,6 @@ end)((;
     time=[0.0, 0.3, 1.7, 72.0, 72.0], channel=["b", "a", "a", "b", "a"],
     y=[0.2, -0.1, 0.3, 0.1, 0.2],
 ))
-""", :shared_ou_field; title="A shared field on irregular read pairs", require_stan=true)
 ```
 
 Each position uses a normalized sparse spatial basis of independent,
@@ -419,7 +415,7 @@ unit's value and gradient, so about 14 times less than 16 unit calls. The toy
 has one Normal read per row, one unit per position, 6 times and `m = 30`.
 ¹ Measured on BRM 0.2.217 (ReactiveKernels 0.1.86, ReactiveKernelsPPL 0.1.100).
 The other rows were measured on BRM 0.2.241 (ReactiveKernels 0.1.104,
-ReactiveKernelsPPL 0.1.114), on gordito at load 15 to 18 of 16 cores, with
+ReactiveKernelsPPL 0.1.114), on a Linux fleet host at load 15 to 18 of 16 cores, with
 units owning nothing (`partitioned = :none`).
 | Whole-model value and gradient | 29 ms | 125 ms |
 

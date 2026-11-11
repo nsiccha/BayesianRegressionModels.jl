@@ -64,14 +64,10 @@ brms S2Z uses orthonormal contrast coordinates and integrates out population mea
 
 ## BRM model and sampling interface
 
-The authoring pane below reads the exact declarations used by the sampling harness. The backend panes are regenerated during the docs build. The measurements use the StanBlocks/BridgeStan backend and WHMC.
+The declaration below points to the sampling harness. The measurements use the StanBlocks/BridgeStan backend and WHMC.
 
-```julia
-Main.BRMDocsComparisons.comparison(@__MODULE__,
-    Main.BRMCenteringExamples.authoring(:pupil_hierarchical),
-    :pupil_hierarchical_brm_model;
-    title="Pupil means and hierarchical residual SD", require_stan=true)
-```
+The exact declaration and its data construction are retained in the
+[reproduction source](../../pupil_scale_totals/common.jl).
 
 ```julia
 using StanBlocks, BridgeStan, WarmupHMC, Enzyme, Random
@@ -115,7 +111,7 @@ Efficiencies are **minimum bulk ESS divided by the indicated gradient count, rel
 | BRM total online position · WHMC | 38,606 | 400× | 442× |
 | BRM total online gradient · WHMC | 39,224 | 338× | 376× |
 
-Figure: Total gradients and relative efficiencies for the same 66 scientific quantities.. Regenerate it with the study plotting script.
+Figure: Total gradients and relative efficiencies for the same 66 scientific quantities. Regenerate it with the study plotting script.
 
 Choosing the centering matters greatly. Fixed total CP and the two post-hoc choices have good sampling efficiency, but their adaptation/pilot costs reduce total efficiency. Online selection obtains useful geometry without first paying for the expensive NCP pilot. Ordinary brms CP still mixes the shared population intercept slowly, despite improved mixing of subject totals.
 
@@ -127,13 +123,13 @@ Both figures reuse **the same 2,000 draws across their three columns**. CP is th
 
 These are saved post-hoc position-loss draws. The rows select subjects 720 and 710's load slopes and subject 701's log residual SD. The partial column was checked against the actual stored sampler coordinates; maximum error is 7.2e-15. In particular, scaling the log residual-SD total by its group SD creates the strong curve in the bottom-middle panel.
 
-Figure: The same 2,000 post-hoc position draws shown in CP, NCP and ACP coordinates.. Regenerate it with the study plotting script.
+Figure: The same 2,000 post-hoc position draws shown in CP, NCP and ACP coordinates. Regenerate it with the study plotting script.
 
 ### brms S2Z
 
 These are saved S2Z-auto WHMC draws. Rows select subject 720's slope, subject 706's slope and subject 703's log residual-SD contrast. The J subject-labelled contrast values represent J−1 independent directions. The auto column includes the required weighted shift before scaling; it reproduces the actual Qz coordinates to 1.4e-12. S2Z panels show contrasts, while the figure above shows totals.
 
-Figure: The same 2,000 S2Z auto draws shown in centered, noncentered and auto coordinates.. Regenerate it with the study plotting script.
+Figure: The same 2,000 S2Z auto draws shown in centered, noncentered and auto coordinates. Regenerate it with the study plotting script.
 
 ## Recovery sensitivity, validation and limits
 
@@ -161,4 +157,4 @@ The study uses brms revision `73cf607889879cb2a55f50b88d8141d76ff43279`, BRM imp
 - [Single comparison table](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_scale_totals/results/comparison.tsv).
 - [Per-quantity ESS and MCSE](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_scale_totals/results/per_quantity_mcse.tsv).
 - [Recovery sensitivity](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_scale_totals/results/recovery_seed_sensitivity.tsv).
-- [Saved-fit hashes and reproduction instructions](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_scale_totals/README.md).
+- [Source provenance and reproduction instructions](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_scale_totals/README.md).

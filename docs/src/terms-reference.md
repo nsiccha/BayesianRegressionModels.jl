@@ -8,7 +8,7 @@ column is extracted from the emitted model density, including the likelihood.
 It is generated evidence of the declaration, not a second handwritten model.
 
 ```@eval
-include(joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "docs", "terms_reference.jl"))
+Base.include(Main, joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "docs", "terms_reference.jl"))
 nothing
 ```
 
@@ -48,8 +48,9 @@ Main.BRMTermsReference.table(:columns)
 | `gp(x; cov=:periodic, period, jitter=1e-9)` | Exact one-axis periodic covariance | `sd`, `length_scale` |
 | `hsgp(x; k=20, cov=:periodic, period)` | `k` harmonics, `2k` sine/cosine weights; excludes the constant | `sd`, `length_scale` |
 
-`s` and `t2` are Stan surfaces. Their explicit smoothing-SD priors accept
-`Exponential(scale)`; defaults are half-standard normals. They freeze the
+`s` and `t2` work on Stan and RK. Stan accepts explicit smoothing-SD
+priors `Exponential(scale)`; RK currently keeps the default half-standard
+normal scales and refuses overrides. They freeze the
 fitted basis, knots and decomposition during replay. `s` is not a B-spline
 `bs(...)` spelling and accepts neither `k` nor supplied knots.
 
@@ -87,7 +88,7 @@ strictest axis. With `k=1` this bound is unbounded. The periodic floor solves
 ``I_k(1/\rho^2)/I_1(1/\rho^2)=100^{-2}``.
 An explicit length prior replaces the default support. Use its supported
 truncation form with `length_scale_floor` when retaining that bound.
-[`hsgp_boundary_check`](@ref) reports posterior proximity to it. Increasing
+`hsgp_boundary_check` reports posterior proximity to it. Increasing
 `k` lowers the floor; widening the domain without increasing `k` raises it.
 A fitted curve alone cannot establish that length hyperparameters are resolved.
 
@@ -96,8 +97,10 @@ Stan HSGP hyper-predictors such as
 The analogous `log(sd(hsgp(x)))` predicts amplitudes. They support an
 intercept and the term's own grouping, isotropic lengths, log-scale
 intercept priors `Normal(0,1)` and half-normal group SDs. The length remains
-at least its approximation floor. Hyper-predicted scales do not combine
-with correlated group levels.
+at least its approximation floor. Constant level correlation `cor=Omega`
+can combine with predicted amplitudes and lengths. A frequency-dependent
+`multigroup(...)` correlation requires one shared length, so it accepts
+predicted amplitudes but refuses predicted lengths.
 
 Fixed `centeredness=c` controls physical basis weights through
 ``w=s^{1-c}u``, ``u\sim N(0,s^c)``. A scalar or one value per basis weight is
@@ -110,7 +113,8 @@ keyword has a narrower surface than the runtime
 
 | Term | Contract | Prior address |
 | --- | --- | --- |
-| `mo(c)`, `mo1(c)` | Ordered factor effect via simplex increments; the formula still owns its coefficient | `simplex(lp, mo(c))` |
+| `mo(c)` | Ordered factor effect via simplex increments, with a free coefficient | `simplex(lp, mo(c))` |
+| `mo1(c)` | The same simplex contrast with coefficient fixed to one | `simplex(lp, mo1(c))` |
 | `me(x, sd)` | Latent true covariate with known observation SD; the same latent covariate can feed fixed and random slopes | `latent(lp, me(x))` |
 | `interval_censored(x; upper=lloq, lower=0)` | Rows equal to `lloq` have bounded latent covariates; larger values remain observed | `latent(lp, interval_censored(x))` |
 
@@ -172,8 +176,9 @@ Main.BRMTermsReference.table(:trajectories)
 In contrast, `cor=Omega` accepts a known level-correlation matrix or a
 separately declared `Omega ~ LKJCholesky(K,eta)`. The same declaration can
 be shared with grouped HSGP weights. The dimension is the number of levels,
-and `eta` is finite and positive. Student-t/R2D2, `by`, S2Z, adaptive
-centering and group resampling do not combine with level correlation.
+and `eta` is finite and positive. For ordinary random-effect blocks,
+Student-t/R2D2, `by`, S2Z, adaptive centering and group resampling do not
+combine with level correlation.
 
 Multiple membership needs at least two group columns. Supplied weights must
 be finite, nonnegative and have positive row sums. It does not combine with
@@ -257,7 +262,7 @@ An undeclared vector-valued response is different. Typed LHS declarations
 such as `x::vector[n]` are not formula syntax.
 
 Stan accepts supported sampled arguments and bounds in scalar restricted
-and truncated priors. RK currently requires constant bounds. Legacy
+and truncated priors. RK accepts literal or observed scalar bounds, but refuses sampled bounds. Legacy
 `lower`/`upper` distribution keywords express a restricted kernel; use the
 explicit wrapper in new code. A normalizing mass that depends on a sampled
 hyperparameter cannot be discarded without changing the model.
@@ -286,11 +291,16 @@ For a random-effect block, margin SD is
 ``s_j\sqrt{\phi_jR^2/(1-R^2)}``. A more-specific margin selector can change
 its reference scale, not create a second block budget. `mean_R2`/`prec_R2`
 are aliases for Beta parameters and `concentration` aliases `alpha`.
-Do not mix direct SD priors into the same budget. These are Stan surfaces.
+Do not mix direct SD priors into the same budget. Shared block and joint
+R2D2 budgets are available on Stan and RK.
 The joint `include` form always includes random effects, excludes intercepts,
 orders random margins before selected predictors and rejects conflicting
 per-column priors. Without an explicit reference scale it introduces a
 half-normal scale, so its latent R² is not an identified observed-scale R².
+
+```@eval
+Main.BRMTermsReference.table(:shrinkage)
+```
 
 ## Response families
 
