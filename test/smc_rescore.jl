@@ -72,6 +72,9 @@ function drift(cp; large=false)
     merge(cp, (; state=merge(cp.state, (; source_scores, target_scores))))
 end
 
+# Untouched production checkpoints have no audit field; rescore adds it.
+without_audit(state) = Base.structdiff(state, (; rescored=nothing))
+
 @testset "Explicit checkpoint rescore: $kind" for kind in
         (:initial, :cumulative, :later_cumulative, :window, :compact_window,
          :laplace, :laplace_update, :later_laplace)
@@ -87,7 +90,7 @@ end
     @test F.equal(changed, before)
     @test corrected.state.source_scores == cp.state.source_scores
     @test corrected.state.target_scores == cp.state.target_scores
-    @test length(corrected.state.rescored) == length(cp.state.rescored) + 1
+    @test length(corrected.state.rescored) == length(get(cp.state, :rescored, ())) + 1
     audit = last(corrected.state.rescored)
     @test audit.changed > 0
     @test audit.max_abs > 0
@@ -95,14 +98,15 @@ end
     @test hasproperty(audit, :codegen)
     again = rescore(corrected; rtol=0)
     @test length(again.state.rescored) == length(corrected.state.rescored) + 1
+    @test F.equal(again.state.rescored[1:end-1], corrected.state.rescored)
     @test last(again.state.rescored).changed == 0
     @test last(again.state.rescored).rtol == 0
     # A rescore changes scores and audit history only, including through disk.
-    @test F.equal(merge(corrected.state, (; rescored=cp.state.rescored)), cp.state)
+    @test F.equal(without_audit(corrected.state), without_audit(cp.state))
     baseline = brm_smc_checkpoint(brm_smc_fit(resume(cp)))
     continued = brm_smc_checkpoint(brm_smc_fit(resume(F.roundtrip(corrected))))
     @test continued.state.temperature == 1
-    @test F.equal(merge(continued.state, (; rescored=baseline.state.rescored)), baseline.state)
+    @test F.equal(without_audit(continued.state), without_audit(baseline.state))
     @test F.equal(changed, before)
 end
 
