@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.281
+
+- Fixed: `RKBRMI(brmi, state)` resolves `optional(...)` priors before
+  preparing replay data, as the training constructor does. A fitted model
+  whose prior block includes an absent term now replays from its saved state;
+  priors for present terms still apply and unmarked missing addresses still
+  error. The fitted-state format and original model provenance are unchanged.
+
 ## 0.2.280
 
 - Changed: on RKBRMI, `mean` and `var` of `LogNormal(mu, sigma)` and of its
