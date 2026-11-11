@@ -360,7 +360,7 @@ Additional exports in this task group:
 
 Re-exported from Distributions. `truncated(distribution; lower, upper)`
 normalizes the density over the retained interval. See
-[bounds and vectors](terms-and-priors.md#bounds-and-vectors) for the difference
+[bounds and vectors](terms-and-priors.md#Bounds-and-vectors) for the difference
 from [`restricted`](@ref).
 | StatsFuns | `normcdf`, `norminvcdf` |
 

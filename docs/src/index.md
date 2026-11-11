@@ -13,9 +13,9 @@ julia --project=docs/start
 using Markdown
 mod = Main.BRMDocsComparisons.example_module(:start)
 view = Main.BRMDocsComparisons.comparison(mod,
-    "using BayesianRegressionModels\n\n" *
+    "using BayesianRegressionModels\n" *
     Main.BRMDocsComparisons.source_function("research/start/reproduce.jl", :intro_model) *
-    "\n\nmodel = intro_model()",
+    "\nmodel = intro_model()",
     :model; title="Gaussian regression", require_stan=true, jax=true)
 observed = Base.invokelatest(mod.column_data, mod.model, :y)
 subjects = Base.invokelatest(mod.column_data, mod.model, :subj)

@@ -7,7 +7,7 @@ positive scale, while `sigma ~ 1 + x` declares an unconstrained predictor.
 ## Support and parameters
 
 Choose support first, then a parameterization whose priors you can interpret.
-The [terms reference](terms-reference.md#response-families) lists every mapped
+The [terms reference](terms-reference.md#Response-families) lists every mapped
 constructor and the supported compositions.
 
 | Response | Family examples | Parameters | Common explicit link |

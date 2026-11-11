@@ -25,7 +25,12 @@ the generated Vega-Lite JSON; the theme calls AlgebraOfVega's browser runtime
 after hydration. It follows light/dark switches. No rendered asset is committed.
 """
 function figure(spec; caption::AbstractString, alt::AbstractString=caption)
-    json = AlgebraOfVega.to_json(spec)
+    # Vega labels the embedded view (role graphics-document) with the spec's
+    # top-level `description`; without one it writes "Vega visualization" over
+    # any label the page set. The alt text is that description.
+    parsed = JSON.parse(AlgebraOfVega.to_json(spec))
+    parsed["description"] = String(alt)
+    json = JSON.json(parsed)
     # @eval results are not expanded a second time by Documenter. Use a
     # dedicated data fence, like the model-pane marker, for the page runtime.
     payload = JSON.json((; spec=json, caption=String(caption), alt=String(alt)))

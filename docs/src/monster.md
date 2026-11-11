@@ -13,7 +13,7 @@ This page declares the model with `@brm` and StanBlocks. The declaration
 reproduces one program from the Stan implementation in
 [`nsiccha/monster`](https://github.com/nsiccha/monster) exactly, except for two
 bugs of that implementation, which are corrected here (see
-[below](#two-corrections-to-the-source-program)). It is meant as a single,
+[below](#Two-corrections-to-the-source-program)). It is meant as a single,
 clearly specified model/data pair.
 
 ## What exactly is reproduced
@@ -77,7 +77,7 @@ geometric mean plus a deviation whose standard deviation is the log of the
 population geometric standard deviation (GSD). The flow fractions and the
 `Vwp`/`Vpp` split are hierarchical before normalization, so their overall
 scale is identified only by the prior (see
-[other variants](#other-variants-in-the-source-repository)). The population geometric means have lognormal priors. Each log GSD `tau` has
+[other variants](#Other-variants-in-the-source-repository)). The population geometric means have lognormal priors. Each log GSD `tau` has
 `tau^2 ~ Scaled-Inv-χ²(nu, s^2)` with `nu = 4`. All prior locations and scales
 come from the source data file.
 
