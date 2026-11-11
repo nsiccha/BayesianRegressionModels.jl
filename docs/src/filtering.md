@@ -379,6 +379,26 @@ reproduce exactly. Only deserialize trusted
 files. Production checkpoints preserve completed tuning; interrupted pilots
 need their own `checkpoint_dir` and tuning-resume path.
 
+If moving a production checkpoint to another CPU changes endpoint scores only
+by roundoff, explicitly rescore it on the destination host before resuming
+(BRM 0.2.279, ReactiveKernelsPPL 0.1.156):
+
+```julia
+checkpoint = deserialize("smc-checkpoint.jls")
+rescored = brm_smc_rescore(rk, checkpoint; data=cumulative, rtol=1e-10)
+serialize("smc-checkpoint-rescored.jls", rescored)
+restored = brm_smc_resume(rk, rescored; data=cumulative)
+```
+
+Each score must differ by at most `rtol * max(abs(saved_score), 1)`.
+The returned checkpoint records the change in `rescored.state.rescored`;
+the input stays unchanged. Resume still requires exact scores. Rescore keeps
+all model, data, version and state checks and cannot migrate an older-version
+checkpoint. It uses the same reconstruction arguments as resume:
+`previous_data` for later cumulative updates, `model::BRMI` for a carried
+window (including compact coordinates), or a Laplace problem with `current`
+and, when needed, `previous`. Tuning-pilot checkpoints have no rescore adapter.
+
 ## A whole series as a likelihood
 
 A filter can also run *inside* a model likelihood. A plate cell then observes

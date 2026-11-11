@@ -108,6 +108,7 @@ brm_rk_point_to_stan
 brm_rk_to_stan
 brm_smc_carry
 brm_smc_checkpoint
+brm_smc_rescore
 brm_smc_compare
 brm_smc_coordinates
 brm_smc_fit
