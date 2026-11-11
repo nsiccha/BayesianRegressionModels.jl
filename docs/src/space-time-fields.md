@@ -149,3 +149,6 @@ can be approximate. Check the solver and probe settings against the
 accuracy needed for the fit. The
 [representation notes](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/field_representations)
 retain the precision derivations and synthetic benchmark protocols.
+
+For a continuous-time latent process fitted to discrete observations, continue
+to the [state-space example](state-space.md).

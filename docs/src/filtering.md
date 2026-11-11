@@ -385,7 +385,7 @@ out. Outer MCMC or variational inference fits the remaining parameters, and
 each density evaluation runs the filter over that unit's series. This differs
 from `brm_filter_step`, which advances an already fitted model online.
 
-The [continuous-time state-space examples](state-space-models.md) show the
+The [continuous-time state-space example](state-space.md) shows the
 model declarations and filter bodies for this approach, including Kalman and
 nonlinear approximations and checks of the approximation's accuracy.
 
