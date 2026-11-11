@@ -1,4 +1,4 @@
-# Terms, priors and families
+# [Terms, priors and families](@id Formula-terms)
 
 This reference gives the contracts behind the [model syntax](model-syntax.md),
 [priors](terms-and-priors.md), [response families](response-families.md) and
