@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.273
+## 0.2.275
 
 - Fixed: a fitted state (`brm_fitted_state`) exported by BRM 0.2.228 to 0.2.269
   replays again on this version (`RKBRMI(builder(design), state)`, and
@@ -37,6 +37,44 @@ instead of failing at run time.
   0.2.272) against this version's. An emission change that fails it either adds
   its rewrite, so earlier states keep replaying, or requires earlier states to
   be exported again and says so here.
+
+## 0.2.274
+
+- Fixed: on RKBRMI, the log density of a `gmrf` field is `-Inf` outside its
+  support instead of an error, for the `neighbors=` form and the `mesh=` form.
+  That covers a zero or infinite length (an `exp` overflow or underflow of the
+  unconstrained coordinate) and lengths so far beyond the read domain that the
+  field's conditioning systems (`neighbors=`) or its sparse factor (`mesh=`)
+  are numerically singular. Before, `rk_logdensity_problem` raised `DomainError`
+  at those long lengths ("gmrf conditional variance is not positive", or `log`
+  of a negative pivot) and answered `NaN` for a `mesh=` field at a zero or
+  infinite one. The error ended Pathfinder's line search during initialization,
+  which an `-Inf` answer makes back off: a `neighbors=8` field started at
+  `brm_start(rk, (;); base=:prior_median)`, whose zero field favours ever longer
+  lengths, failed every chain and now fits. A negative or NaN length is still an
+  error. Prediction (`brm_gmrf_predict`) and the `multiresolution=` form are
+  unchanged.
+
+## 0.2.273
+
+- Changed: an RKBRMI `cdar(step; by = group, cor = C)` walk is one program for
+  every dataset of its declaration, and costs `O(P W)` per evaluation (`P`
+  groups, `W` steps) instead of `O(P W²)`. The program computes the walk's
+  groups and steps from fit-role inputs (`brm_fit_levels(<column>_fit)`), so
+  `P` and `W` are inputs, not literals: networks of 2, 6 and 12 stations, or
+  other day grids, share one RKPPL program and one JAX module. The walk is one
+  recurrence per group, `d[1] = sigma e[1]`,
+  `d[w] = rho d[w - 1] + sigma sqrt(1 - rho^2) e[w]`, in the RK kernel
+  `brm_cdar_walk`, replacing the closed form `sigma * (L * eta) * T` with
+  its `W × W` decay matrix (and the bound `lag`, `mask` and `first` columns,
+  `W²` numbers each). Coordinates, densities and gradients are unchanged, and
+  a cell still reads only its own group's innovations (or the groups a
+  correlated `C` couples to it), so `brm_nlme_view` and per-unit Laplace and
+  SVI read the walk as before: each group's innovations are gathered at its
+  positions in the grid, bound as data (`brm_walk_rows`). Rows find their
+  group and step by binary search (`brm_walk_positions`). (Todo `0vwe5uy`;
+  user principles `0ikeidi`, sizes are runtime inputs, and `0v0xrxl`, never
+  quadratic.)
 
 ## 0.2.272
 

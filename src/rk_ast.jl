@@ -1769,77 +1769,96 @@ end
 
 # A grouped stationary AR(1) walk, as StanBlocks' `_sb_cdar`: the marginal SD
 # `sigma`, the persistence `rho` and standardized innovations `eta` (groups ×
-# steps). SB's recurrence `delta[:, 1] = sigma L eta[:, 1]`,
-# `delta[:, w] = rho delta[:, w-1] + sigma sqrt(1 - rho^2) L eta[:, w]` is
-# written in closed form, `delta = sigma (L eta) T` with
-# `T[v, w] = c_v rho^(w - v)` for `v <= w` (`c_1 = 1`, else `sqrt(1 - rho^2)`),
-# so the whole walk is one matrix product. Each row reads its own group and
-# step (their positions `group_rows`, `step_rows` in the fitted grid) at its
-# column-major cell.
-function _rk_ast_cdar_block!(definitions, taken, term, group_rows, step_rows)
+# steps), with SB's recurrence per group, `d[1] = sigma e[1]`,
+# `d[w] = rho d[w - 1] + sigma sqrt(1 - rho^2) e[w]` (`e` the group's row of
+# `L eta`). It costs O(P W) per evaluation (user direction `0v0xrxl`: never
+# quadratic). P and W are the lengths of the fitted groups and steps, which are
+# inputs, so every dataset of one declaration is one program (user principle
+# `0ikeidi`). Each row reads its group's walk at its step (their positions
+# `group_rows`, `step_rows` in the fitted levels).
+function _rk_ast_cdar_block!(definitions, taken, term, group_rows, step_rows,
+        group_levels, step_levels)
     options = term.options
     sigma_prior = _rk_ast_param_law(options.sigma_param)
     rho_prior = _rk_ast_param_law(options.rho_param)
     block = _rk_block_body(sigma_prior, rho_prior)
     group_position = _rk_block_argument!(block, :group, group_rows)
     step_position = _rk_block_argument!(block, :step, step_rows)
-    lag_values = _rk_block_argument!(block, :lag_values, options.lag)
-    mask_values = _rk_block_argument!(block, :mask_values, options.mask)
-    first_step = _rk_block_argument!(block, :first_step, options.first)
+    groups = _rk_block_argument!(block, :groups, group_levels)
+    steps = _rk_block_argument!(block, :steps, step_levels)
     factor_values = options.factor === nothing ? nothing :
         _rk_block_argument!(block, :factor_values, options.factor)
-    P = _rk_block_argument!(block, :P, options.n_groups)
-    W = _rk_block_argument!(block, :W, options.n_steps)
+    P, W = _rk_block_local!(block, :P), _rk_block_local!(block, :W)
     sigma, rho = _rk_block_local!(block, :sigma), _rk_block_local!(block, :rho)
-    eta, lag, mask = _rk_block_local!(block, :eta), _rk_block_local!(block, :lag),
-        _rk_block_local!(block, :mask)
-    scale, decay = _rk_block_local!(block, :scale), _rk_block_local!(block, :decay)
-    walk, cell = _rk_block_local!(block, :walk), _rk_block_local!(block, :cell)
+    eta, value = _rk_block_local!(block, :eta), _rk_block_local!(block, :value)
     push!(block.statements, _rk_ast_hyper_statement(sigma, sigma_prior),
         _rk_ast_hyper_statement(rho, rho_prior),
+        Expr(:(=), P, Expr(:call, :length, groups)),
+        Expr(:(=), W, Expr(:call, :length, steps)),
         Expr(:call, :.~, Expr(:ref, eta, Expr(:call, :(:), 1, P), Expr(:call, :(:), 1, W)),
-            _rk_ast_dotted(:Normal, 0, 1)),
-        Expr(:(=), lag, Expr(:call, :reshape, lag_values, W, W)),
-        Expr(:(=), mask, Expr(:call, :reshape, mask_values, W, W)),
-        Expr(:(=), scale, Expr(:call, :sqrt, Expr(:call, :-, 1.0, Expr(:call, :^, rho, 2)))),
-        Expr(:(=), decay, Expr(:call, :.*, mask, Expr(:call, :.^, rho, lag),
-            Expr(:call, :.+, scale, Expr(:call, :.*, Expr(:call, :-, 1.0, scale), first_step)))))
-    # Each product is a statement of its own: ReactiveKernels computes a
-    # product inside a dotted term (`sigma .* (eta * decay)`) whole in every
-    # cell, and with it every group's innovations; named, `eta * decay` runs at
-    # the rows a cell reads, its group's.
+            _rk_ast_dotted(:Normal, 0, 1)))
     innovations = eta
     if factor_values !== nothing
         L = _rk_block_local!(block, :L)
         # Sparse, so the factor declares which groups it couples: a cell reads
         # `eta` only at the columns its row stores (ReactiveKernels 0.1.77 / RKPPL 0.1.85), and a
         # `cor=` coupling groups only within a unit stays local to that unit. A
-        # dense factor's zeros remove no read. The factor is built here because
-        # bound columns hold vectors.
+        # dense factor's zeros remove no read. The product is a statement of its
+        # own, so it is computed at the rows a cell reads.
         push!(block.statements, Expr(:(=), L, Expr(:call,
             Expr(:., :BayesianRegressionModels, QuoteNode(:sparse)),
             Expr(:call, :reshape, factor_values, P, P))))
         innovations = _rk_block_local!(block, :correlated)
         push!(block.statements, Expr(:(=), innovations, Expr(:call, :*, L, eta)))
     end
-    steps = _rk_block_local!(block, :steps)
-    push!(block.statements, Expr(:(=), steps, Expr(:call, :*, innovations, decay)),
-        Expr(:(=), walk, Expr(:call, :.*, sigma, steps)),
-        Expr(:(=), cell, Expr(:call, :.+, Expr(:call, :.*,
-            Expr(:call, :.-, step_position, 1), P), group_position)))
+    # One recurrence per group over its own innovations, so a cell computes
+    # only its group's walk; each row then reads its group's walk at its step.
+    # RKPPL refuses an RK `plate`/`scan` `do` block in a submodel body, so the
+    # walk is a shared RK kernel the block calls.
+    walk_body = Base.remove_linenums!(quote
+        scale = sqrt(1.0 - rho^2)
+        # Group g's innovations sit at `rows[g] = [g, g + P, …]` of the
+        # column-major grid (bound data, `brm_walk_rows`); a cell gathers them
+        # there, so it reads only its own group's.
+        flat = vec(innovations)
+        walk = $(_rk_ast_graph_plate([:rows], [:r], Base.remove_linenums!(quote
+            e = flat[r]
+            path = ReactiveKernels.scan(e, 1:length(r); init = 0.0) do d, x, w
+                next = rho * d + sigma * ifelse(w == 1, 1.0, scale) * x
+                return (next, next)
+            end
+            path
+        end)))
+        values = $(_rk_ast_graph_plate([:group, :step], [:g, :s], :(walk[g][s])))
+        return values
+    end)
+    walk_doc = @_rk_definition_doc """
+        A grouped stationary AR(1) walk (`cdar`), one recurrence per group.
+
+        `innovations` holds one row per group and one column per step; `rows[g]` are
+        group `g`'s positions in it, column-major. Each group's walk is
+        `d[1] = sigma * e[1]`, `d[w] = rho * d[w - 1] + sigma * sqrt(1 - rho^2) * e[w]`
+        (`e` its row), in O(groups × steps). Returns each row's value at its group
+        position `group` and step position `step`."""
+    walker = _rk_ast_shared_definition!(definitions, taken, :brm_cdar_walk,
+        [:innovations, :sigma, :rho, :rows, :group, :step], walk_body; kernel=true,
+        doc=walk_doc)
+    rows = _rk_block_local!(block, :rows)
+    push!(block.statements, Expr(:(=), rows, Expr(:call, :brm_walk_rows, P, W)),
+        Expr(:(=), value, Expr(:call, walker, innovations, sigma, rho, rows,
+            group_position, step_position)))
     correlated = factor_values === nothing ? "" :
         ", correlated across groups by the sparse factor `$(innovations === eta ? "" : "L")`"
     doc = @_rk_definition_doc """
-        Stationary AR(1) deviations per group (`cdar`): `$P` groups over `$W` steps.
+        Stationary AR(1) deviations per group (`cdar`), one recurrence per group.
 
         Draws the marginal scale `$sigma`, the persistence `$rho` and standardized
-        innovations `$eta[1:$P, 1:$W] ~ Normal(0, 1)`$correlated. The walk
-        `d[:, 1] = $sigma * e[:, 1]`, `d[:, w] = $rho * d[:, w - 1] + $sigma * sqrt(1 - $rho^2) * e[:, w]`
-        (`e` the innovations) is computed in closed form from the step lags `$lag_values`,
-        their mask `$mask_values` and the first-step indicator `$first_step`. Returns each
-        row's value at its group `$group_position` and step `$step_position`."""
-    call = _rk_ast_block_call!(definitions, taken, "brm_cdar", block, Expr(:ref, walk, cell);
-        doc)
+        innovations `$eta[1:$P, 1:$W] ~ Normal(0, 1)`$correlated: one row per fitted group
+        `$groups`, one column per fitted step `$steps`. Each group's walk is
+        `d[1] = $sigma * e[1]`, `d[w] = $rho * d[w - 1] + $sigma * sqrt(1 - $rho^2) * e[w]`
+        (`e` its innovations), computed in O(groups × steps). Returns each row's value at
+        its group `$group_position` and step `$step_position`."""
+    call = _rk_ast_block_call!(definitions, taken, "brm_cdar", block, value; doc)
     call, (; sigma, rho, eta)
 end
 
@@ -2147,16 +2166,20 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                     term.options.type === :bym2 ?
                         (; sigma=locals.sigma, mixing=locals.rho) : (; sigma=locals.sigma))
             elseif kind === :cdar
-                # rows find their group and step by the fitted labels
-                rows = map((term.options.group => term.options.levels,
-                        term.options.source => term.options.steps)) do (column, labels)
+                # The walk's groups and steps are fitted values of fit-role
+                # inputs; rows find their positions in them by binary search.
+                columns = (term.options.group, term.options.source)
+                levels = map((term.options.group_fit, term.options.step_fit)) do fit
+                    _rk_ast_fitted_value!(stmts, taken, fitted, :brm_fit_levels,
+                        Expr(:call, :brm_fit_levels, fit))
+                end
+                rows = map(columns, levels) do column, labels
                     positions = _rk_ast_fresh_name(string(term.label, "_", column), taken)
                     push!(stmts, Expr(:(=), positions, _rk_ast_statistical_call!(defs,
-                        taken, :brm_prepared_indices, column, _rk_ast_level_values(labels);
-                        kernel=true)))
+                        taken, :brm_walk_positions, column, labels; kernel=true)))
                     positions
                 end
-                call, locals = _rk_ast_cdar_block!(defs, taken, term, rows...)
+                call, locals = _rk_ast_cdar_block!(defs, taken, term, rows..., levels...)
                 refactual[index] = term.options.value
                 push!(stmts, Expr(:call, :~, term.options.value, call))
                 _rk_coordinate_record!(coordinates, (; kind=:cdar,

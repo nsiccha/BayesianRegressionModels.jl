@@ -5226,11 +5226,11 @@ end
 
 # ---- grouped stationary AR(1) walks (cdar; mirrors `_sb_cdar`) ----
 #
-# A `:cdar` term carries the walk's fitted grid: its sorted group levels and
-# steps, which the program looks each row's group and step up in, and as
-# generated data columns the step lags `max(w - v, 0)` and the mask `w >= v` of
-# the `W × W` decay matrix, the first-step indicator and, unless the levels are
-# independent (no `cor`, or `cor = I`), the flattened Cholesky factor of `cor`.
+# A `:cdar` term carries the fit-role inputs of its group and step columns,
+# whose sorted levels the program computes (`brm_fit_levels`) and looks each
+# row's group and step up in, and, unless the levels are independent (no `cor`,
+# or `cor = I`), the flattened Cholesky factor of `cor` as a generated column.
+# The Julia-side levels and steps stay on the term for the coordinate record.
 # The priors follow the SB declarations: the marginal SD `sigma` keeps its
 # `lower=0` kernel
 # (`restricted(Normal(0, s), 0, Inf)`), the persistence `rho` its
@@ -5257,29 +5257,26 @@ function _rk_cdar_rho_prior(prior, target::Symbol, source::Symbol)
     (name, _rk_effect_spellings(prior, (a, b)), nothing)
 end
 
+# P and W are the lengths of the fitted levels, so every dataset of one
+# declaration is one program (user principle `0ikeidi`).
 function _rk_plan_cdar_term!(prepared::_BRMPreparedTerm{typeof(cdar)},
         target::Symbol, data::AbstractDict, columns::Dict{Symbol,AbstractVector},
-        taken::Set{Symbol})
+        taken::Set{Symbol}; derived::Vector{_RKDerivedSpec})
     state = prepared.state
     source, group = prepared.source
     for name in (source, group)
         columns[name] = get(columns, name, data[name])
     end
     stem = "cdar_$(target)_$(source)"
-    column(field, value) = begin
-        name = _rk_mint_generated!(taken, columns, string(stem, "_", field))
-        columns[name] = value
-        name
-    end
-    P, W = state.n_groups, state.n_steps
-    lags = [w - v for v in 1:W, w in 1:W]
-    grid = (; lag=column(:lag, Float64.(vec(max.(lags, 0)))),
-        mask=column(:mask, Float64.(vec(lags .>= 0))),
-        first=column(:first, Float64.((1:W) .== 1)))
     # independent levels (no `cor`, `cor = I`, or a dense identity) couple no
     # groups: the walk reads its innovations as they are
-    factor = isnothing(state.L) || state.L == LinearAlgebra.I ? nothing :
-        column(:L, vec(state.L))
+    factor = if isnothing(state.L) || state.L == LinearAlgebra.I
+        nothing
+    else
+        name = _rk_mint_generated!(taken, columns, string(stem, "_L"))
+        columns[name] = vec(state.L)
+        name
+    end
     value = _rk_mint_generated!(taken, columns, stem)
     sigma_param = _rk_term_parameter(state.sd_prior) do prior
         family, args, support = _rk_gp_hyper_prior(prior, "marginal scale", target, source;
@@ -5291,9 +5288,11 @@ function _rk_plan_cdar_term!(prepared::_BRMPreparedTerm{typeof(cdar)},
         _RKSampledParameter(:rho, _rk_cdar_rho_prior(prior, target, source)..., :rho)
     end
     _RKTermSpec(:cdar, Symbol[],
-        (; value, source, group, levels=state.groups, steps=state.steps, n_groups=P,
-         n_steps=W, grid..., factor, L=state.L,
-         inputs=Tuple(n for n in (grid.lag, grid.mask, grid.first, factor) if n !== nothing),
+        (; value, source, group, levels=state.groups, steps=state.steps,
+         n_groups=state.n_groups, n_steps=state.n_steps,
+         group_fit=_rk_fit_twin!(derived, columns, taken, data, group),
+         step_fit=_rk_fit_twin!(derived, columns, taken, data, source),
+         factor, L=state.L, inputs=Tuple(n for n in (factor,) if n !== nothing),
          sigma_param, rho_param),
         value, value)
 end
@@ -6513,7 +6512,8 @@ Base.@nospecializeinfer function _rk_plan_predictor(@nospecialize(brmi::BRMI), c
             push!(terms, _rk_plan_car_term!(
                 prepared, target, context.data, columns, taken))
         elseif prepared.callable === cdar
-            push!(terms, _rk_plan_cdar_term!(prepared, target, context.data, columns, taken))
+            push!(terms, _rk_plan_cdar_term!(prepared, target, context.data, columns, taken;
+                derived))
         elseif prepared.callable === gmrf
             push!(terms, _rk_plan_gmrf_term!(prepared, target, context.data, columns, taken; derived))
         else

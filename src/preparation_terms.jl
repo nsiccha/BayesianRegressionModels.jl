@@ -605,6 +605,27 @@ function _brm_sorted_position(levels::AbstractVector, value)
         "RK backend: `car` area $(repr(value)) is not an area of the fitted graph")
     k
 end
+# The position of `value` among a `cdar` walk's sorted fitted groups or steps
+# (read per row in-graph by `brm_walk_positions`).
+function _brm_walk_position(levels::AbstractVector, value)
+    k = searchsortedfirst(levels, value)
+    k <= length(levels) && isequal(levels[k], value) || error(
+        "RK backend: `cdar` value $(repr(value)) is not a fitted group or step of the walk")
+    k
+end
+# Each group's positions in a `cdar` walk's column-major groups × steps grid
+# (`g, g + P, …`). An RK program binds them as data, so the group plate of
+# `brm_cdar_walk` gathers each group's innovations at its own positions and a
+# cell reads only its group's. Host code for `jax_source`'s `prepare_data`.
+@_brm_traceable function brm_walk_rows(P::Integer, W::Integer)
+    rows = [Vector{Int}(undef, W) for g in 1:P]
+    for g in 1:P
+        for w in 1:W
+            rows[g][w] = g + P * (w - 1)
+        end
+    end
+    rows
+end
 
 function _brm_car_row_idx(nodes, area_labels; prefix="BRM term preparation")
     lookup = Dict(label => k for (k, label) in enumerate(nodes))
