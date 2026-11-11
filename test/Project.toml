@@ -418,4 +418,4 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # fresh prior may read a data-valued scale through BRM's named
 # `<vector>_prior_scale` (snag selective-fresh-96f7fe96), which
 # research/filtering's fresh-unit selective example needs.
-rev = "4fa3b589054003d187cef74befad503ae7b963e3"
+rev = "23fbef437c904240d944939966f869e4f8d850e8"

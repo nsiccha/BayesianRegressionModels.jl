@@ -12,6 +12,18 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.279
+
+- Added `brm_smc_rescore` for initial and cumulative RKBRMI checkpoints,
+  carried-window checkpoints, and prepared embedded-Laplace checkpoints.
+  It explicitly recomputes endpoint scores after moving between CPU code
+  generation targets, accepting only drift within the supplied `rtol`
+  (default `1e-10`). It returns a new checkpoint with an audit record;
+  `brm_smc_resume` retains exact score checks and all model/data guards.
+- The ReactiveKernelsPPL compat floor and test pin now include 0.1.156,
+  which provides `rescore_smc_checkpoint`. This does not migrate checkpoints
+  written with older package versions or rescore unfinished tuning pilots.
+
 ## 0.2.278
 
 - Changed: an RKBRMI `car(area; edges = (from, to), type = :icar | :bym2)`

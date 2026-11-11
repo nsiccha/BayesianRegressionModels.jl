@@ -184,6 +184,14 @@ saved worker cap without changing the resumed cloud. Its assertions hold at any
 thread count; run `julia -t 4 --project=test test/smc_worker_forwarding.jl` to
 also exercise concurrent pilots and workers.
 
+`smc_rescore.jl` checks explicit production-checkpoint rescoring for initial
+fits, first and later cumulative updates, ordinary and compact carried windows,
+and initial and updated Laplace problems. It perturbs saved endpoint scores by
+one or two ulps, requires strict resume to refuse them, and checks that rescore
+returns an unchanged-input copy whose continuation matches exact same-host
+replay. It also checks tolerance forwarding, audit history and data/model guards.
+Run `julia --project=test test/smc_rescore.jl` with RKPPL 0.1.156 or later.
+
 `smc_generated_law_recovery.jl` stops an adaptive pilot of a small `gmrf(...)`
 field model at initialization in one Julia process and resumes it in another,
 through `smc_generated_law_process.jl`. The field's law is bound in the

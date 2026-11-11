@@ -414,7 +414,7 @@ const PINS = [
     # data-valued scale through BRM's named `<vector>_prior_scale` (snag
     # selective-fresh-96f7fe96), which research/filtering's fresh-unit
     # selective example needs. RK's and RKPPL's own `[sources]` are unchanged.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "4fa3b589054003d187cef74befad503ae7b963e3"),
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "23fbef437c904240d944939966f869e4f8d850e8"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

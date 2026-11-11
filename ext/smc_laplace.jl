@@ -89,9 +89,8 @@ function smc_update_model(::BRM._BRMSMCLaplaceProblem, data)
         "over the complete cumulative data, built from frozen reprocess of the training backend"))
 end
 
-function BRM.brm_smc_resume(template::BRM._BRMSMCLaplaceProblem, checkpoint;
-        current=template, previous=nothing, nthreads=nothing,
-        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+function checkpoint_targets(template::BRM._BRMSMCLaplaceProblem, checkpoint;
+        current, previous, ad_backend)
     checkpoint.format == 1 || throw(ArgumentError("unsupported BRM SMC checkpoint format"))
     check_identity(template, checkpoint.model_id, "training Laplace target")
     rk = smc_update_model(template, current)
@@ -107,9 +106,25 @@ function BRM.brm_smc_resume(template::BRM._BRMSMCLaplaceProblem, checkpoint;
     target = prepare(rk, ad_backend, checkpoint.model_id, checkpoint.binding_id)
     old_target = old === nothing ? nothing :
         prepare(old, ad_backend, checkpoint.model_id, checkpoint.previous_id)
-    state = PPL.resume_smc(target, checkpoint.state; previous=old_target, nthreads)
-    BRM.BRMSMCFit(copy_laplace(template), rk, old, state, ad_backend,
+    (; backend=rk, previous=old, target, old_target)
+end
+
+function BRM.brm_smc_resume(template::BRM._BRMSMCLaplaceProblem, checkpoint;
+        current=template, previous=nothing, nthreads=nothing,
+        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    c = checkpoint_targets(template, checkpoint; current, previous, ad_backend)
+    state = PPL.resume_smc(c.target, checkpoint.state; previous=c.old_target, nthreads)
+    BRM.BRMSMCFit(copy_laplace(template), c.backend, c.previous, state, ad_backend,
         checkpoint.model_id, checkpoint.binding_id, checkpoint.previous_id)
+end
+
+function BRM.brm_smc_rescore(template::BRM._BRMSMCLaplaceProblem, checkpoint;
+        current=template, previous=nothing, rtol=1e-10,
+        ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    c = checkpoint_targets(template, checkpoint; current, previous, ad_backend)
+    state = PPL.rescore_smc_checkpoint(c.target, checkpoint.state;
+        previous=c.old_target, rtol)
+    merge(checkpoint, (; state))
 end
 
 """

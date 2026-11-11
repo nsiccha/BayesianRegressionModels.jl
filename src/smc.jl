@@ -259,6 +259,31 @@ function brm_smc_checkpoint end
 function brm_smc_resume end
 
 """
+    brm_smc_rescore(template::RKBRMI, checkpoint;
+        data=nothing, previous_data=nothing, rtol=1e-10,
+        ad_backend=AutoEnzyme(mode=Enzyme.Reverse))
+    brm_smc_rescore(model::BRMI, checkpoint;
+        rtol=1e-10, ad_backend=AutoEnzyme(mode=Enzyme.Reverse))
+    brm_smc_rescore(laplace_problem, checkpoint;
+        current=laplace_problem, previous=nothing, rtol=1e-10,
+        ad_backend=AutoEnzyme(mode=Enzyme.Reverse))
+
+Recompute a checkpoint's saved endpoint scores on the current host, explicitly
+accepting only floating-point drift within `rtol * max(abs(saved_score), 1)`
+per score. Requires ReactiveKernelsPPL 0.1.156. All version, model, data,
+coordinate and checkpoint-state checks still apply. The reconstruction
+arguments match `brm_smc_resume`, including cumulative updates,
+carried-reference windows and embedded Laplace problems.
+
+Returns a new checkpoint without changing the input. Each call appends a record
+to `checkpoint.state.rescored` with `changed`, `max_abs`, `max_rel`, `rtol` and
+`codegen`. Save this returned checkpoint, then pass it to `brm_smc_resume` on
+the same host. Resume itself remains exact; it never rescores automatically.
+This is not a version migration and does not rescore tuning-pilot checkpoints.
+"""
+function brm_smc_rescore end
+
+"""
     brm_smc_compare(fits::BRMSMCFit...)
     brm_smc_runs(model; seeds, particles=1000, reference=nothing,
         options=SMCOptions(), ad_backend=AutoEnzyme(mode=Enzyme.Reverse), progress=nothing)
