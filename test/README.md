@@ -1,5 +1,14 @@
 # Running the tests
 
+`seal_density_dependence.jl` checks both grey-seal model forms against Vanko
+et al. (2026): birth and pregnancy boundary identities, compiled gradients
+against an independently integrated loss hazard, and a finite full-model start.
+`seal_density_fit.jl` separately runs a short four-chain fitting check and
+re-evaluates retained draws for finite densities and gradients. Its short fit
+does not establish convergence or reproduce the paper's analysis.
+These checks use the test environment's StanBlocks pin `df3a71e9` (0.2.36),
+which fixes native row-vector extents in the model's allocation helper.
+
 `linear_predictor_entries.jl` checks that an entry of `linear_predictors(brmi)`
 is a predictor address: `popcoefnames`, `predictors`, `grouping_factors`,
 `dependencies` and `linear_predictor_op` give for the `(; name, link_lhs_fn)`

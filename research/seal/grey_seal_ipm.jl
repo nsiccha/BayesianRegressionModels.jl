@@ -1,7 +1,14 @@
-# Grey-seal integrated population model (IPM) — a VERBATIM port of the SlicTranspiler
-# spotlight example (github.com/nsiccha/SlicTranspiler, `src/grey_seal_ipm.jl`) onto
-# BRM's StanBlocks backend, per decision `2026-08-26T19-58-24-844-0yiqrzn` (option A:
-# port a real, canonical model, not a sketch).
+# Grey-seal integrated population model (IPM), implemented by Niko Siccha.
+# Scientific reference: Vanko et al. (2026), Ecological Modelling 519, 111666,
+# https://doi.org/10.1016/j.ecolmodel.2026.111666 (Appendix C, Eqs. 42, 48, 51, 53).
+# The density-dependence correction follows the paper and its archived v1.1
+# implementation, https://doi.org/10.5281/zenodo.20381625. K denotes equilibrium
+# abundance at average herring covariates (Eq. 51, as in the archived code).
+# The equations are also documented in n-kall/sealIPM at commit 41583415815008c6a52683e0789d78960834d7f5,
+# src/stan/functions/pregnancy_births.stanfunctions. We retain the paper's exact
+# demographic equilibrium calibration, rather than that repository's newer soft prior.
+# This is an illustrative implementation, not a reproduction of the fitted
+# paper: other priors and the small synthetic fixture differ from that analysis.
 #
 # The model is a Baltic grey-seal IPM: a YEAR-RECURSIVE, age/sex-structured state
 # process (Leslie aging matrix, size-structured mortality, density-dependent birth
@@ -13,11 +20,11 @@
 # (multinomial).
 #
 # It is authored as inert SLIC source — one parent `@slic` body (`GREY_SEAL_IPM_SOURCE`)
-# + 31 `@deffun` UDF cards + 2 anonymous observation-stream submodels
+# + `@deffun` helper cards + 2 anonymous observation-stream submodels
 # (`GREY_SEAL_IPM_PARTS`) — and assembled with StanBlocks' `compile_slic_bundle`. The
-# source below is copied VERBATIM from SlicTranspiler; only the fixture + builder are
-# BRM-side. It exceeds the `@brm` formula DSL (multi-stream state-space model), so —
-# like the CDC model — it lives at BRM's `@slic`/`@deffun` backend layer.
+# source originated in the author's SlicTranspiler example; the fixture + builder
+# are BRM-side. The companion `grey_seal_brm.jl` expresses the statistical parts
+# on the `@brm` formula surface, retaining this mechanistic recurrence.
 #
 # Verified: `compile_slic_bundle` + `stanc` clean (~52 KB of Stan) on the example data;
 # see `test/seal_ipm.jl`. Model artifact only (not sampled).
@@ -27,14 +34,14 @@ using StanBlocks
 using Distributions
 import StanBlocks: compile_slic_bundle
 
-# Shim mirroring SlicTranspiler's `_bundle_part` so the verbatim source loads here.
+# Shim mirroring SlicTranspiler's `_bundle_part` so the source cards load here.
 _bundle_part(slug, title, source; kind = :submodel, data = nothing) =
     (; slug, title, kind, source = strip(source), data)
 
-# ============================ VERBATIM SlicTranspiler source ============================
+# ============================ StanBlocks model source ============================
 # Structured grey-seal integrated population model.
 #
-# The main model, 31 Stan-only UDF cards, and two anonymous observation-stream
+# The main model, Stan-only helper cards, and two anonymous observation-stream
 # cards are kept as inert strings. The public worker parses and validates each
 # part before StanBlocks compiles the isolated workspace.
 
@@ -45,7 +52,8 @@ const GREY_SEAL_IPM_SOURCE = raw"""
     survival_shape             ~ uniform(0.0, 1.0)
     male_pup_survival_offset   ~ cauchy(0.0, 1.0)
     male_adult_survival_offset ~ cauchy(0.0, 1.0)
-    carrying_capacity          ~ lognormal(11.0, 1.0)
+    carrying_capacity          ~ lognormal(11.3, 0.3)
+    density_dependence_scaled  ~ uniform(0.0, 1.0)
     max_baseline_birth_rate    ~ uniform(0.0, 1.0)
     min_baseline_birth_rate_sc ~ uniform(0.0, 1.0)
     herring_intercept_scaled   ~ normal(0.0, 1.0)
@@ -74,7 +82,7 @@ const GREY_SEAL_IPM_SOURCE = raw"""
     epsilon_placental :: vector[n_state_years] ~ std_normal(; lower=0.0)
 
     # ---- transformed quantities feeding the scan ----
-    phi_a   = phi_a_sc
+    phi_a   = 0.8 + 0.2 * phi_a_sc
     phi_pup = phi_sc * phi_a
     mu_m    = mortality_rates(phi_pup, phi_a, survival_shape, n_age,
                               male_pup_survival_offset, male_adult_survival_offset)
@@ -84,9 +92,14 @@ const GREY_SEAL_IPM_SOURCE = raw"""
         max_baseline_birth_rate * min_baseline_birth_rate_sc, max_baseline_birth_rate,
         herring_intercept_scaled, herring_slope, herring_weight,
         herring_index_1, herring_index_2)
-    dd_scaled    = birth_rate_at_carrying_capacity(phi_a, mu_m, n_age)
-    dd_intercept = compute_density_dependence_intercept(max_baseline_birth_rate, dd_scaled)
-    dd_slope     = -log(carrying_capacity)
+    # Vanko et al. (2026), Appendix C, Eqs. (48), (50), (51): K is
+    # equilibrium abundance at zero (centred, average) herring covariates.
+    b_capacity   = birth_rate_at_carrying_capacity(phi_a, mu_m, n_age)
+    b_reference  = max_baseline_birth_rate * min_baseline_birth_rate_sc +
+        max_baseline_birth_rate * (1.0 - min_baseline_birth_rate_sc) *
+        inv_logit(herring_slope * herring_intercept_scaled)
+    dd_intercept = compute_density_dependence_intercept(max_baseline_birth_rate, density_dependence_scaled)
+    dd_slope     = compute_density_dependence_slope(carrying_capacity, b_capacity, b_reference, dd_intercept)
     pop_first    = initialize_population(population_init, population_init_size,
                                          population_burn_in, baseline_bbr[1], aging, S_diag, n_age)
     pi_s = report_placental_mean * exp(-epsilon_placental * report_placental_sd)
@@ -184,18 +197,24 @@ end
 compute_density_dependence_intercept(max_bbr::real, dd_scaled::real)::real =
     -log(max_bbr + (1.0 - max_bbr) * dd_scaled)
 """; kind = :udf),
+    _bundle_part("compute_density_dependence_slope", "Compute Density Dependence Slope", raw"""
+compute_density_dependence_slope(K::real, b_capacity::real, b_reference::real, theta0::real)::real =
+    log1p(-log(b_capacity / b_reference) / theta0) / K
+"""; kind = :udf),
     _bundle_part("update_birth_rate", "Update Birth Rate", raw"""
 update_birth_rate(b0::real, theta0::real, theta1::real, N_prev::real)::real =
-    b0 * exp(-theta0 * (exp(theta1 * N_prev) - 1.0))
+    b0 * exp(-theta0 * expm1(theta1 * N_prev))
 """; kind = :udf),
     _bundle_part("birth_rate_at_carrying_capacity", "Birth Rate At Carrying Capacity", raw"""
 birth_rate_at_carrying_capacity(phi_a::real, mu_m::vector[n_demo], n_age::int)::real =
     2.0 * (1.0 - phi_a) / exp(sum(-mu_m[1:(n_age - 1)]))
 """; kind = :udf),
+    # tau_s is elapsed years since implantation. The reference Stan code's
+    # tau_s=1/36 already includes (16/9)*(1.5/12)^2; this API accepts time.
     _bundle_part("update_pregnancy_rate", "Update Pregnancy Rate", raw"""
 update_pregnancy_rate(baseline_birth_rate::real, theta0::real, theta1::real,
                       N_tot::real, tau_s::real)::real =
-    baseline_birth_rate * exp(theta0 * (1.0 - tau_s * exp(theta1 * N_tot)))
+    baseline_birth_rate * exp(theta0 * (1.0 - (16.0 / 9.0) * tau_s * tau_s * exp(theta1 * N_tot)))
 """; kind = :udf),
     _bundle_part("compute_baseline_birth_rate", "Compute Baseline Birth Rate", raw"""
 compute_baseline_birth_rate(min_bbr::real, max_bbr::real,
@@ -288,7 +307,7 @@ run_state_process(n_state_years::int, n_age::int,
 
     for year in 1:n_state_years
         if year == 1
-            birth_rate[year]         = birth_rate_first
+            birth_rate[year]         = update_birth_rate(birth_rate_first, dd_intercept, dd_slope, pop_total_first)
             population_comp[:, year] = pop_first
             population_total[year]   = pop_total_first
         else
@@ -559,7 +578,7 @@ bycatch_stream = begin
 end
 """; kind = :anonymous),
 )
-# ========================== end verbatim SlicTranspiler source ==========================
+# ========================== end StanBlocks model source ==========================
 
 """
     grey_seal_ipm_fixture()
