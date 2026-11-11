@@ -26,6 +26,8 @@ Main.BRMDocsComparisons.evaluate_source_prelude(
     before=:warfarin_pk_brmi,
     starting_at="StanBlocks.@deffun begin",
 )
+Main.BRMDocsComparisons.example_module(:warfarin).include(
+    joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "research", "warfarin", "figures.jl"))
 nothing
 ```
 
@@ -93,12 +95,17 @@ Main.BRMDocsComparisons.results_table(
 )
 ```
 
-[![Posterior predictive bands and observed concentrations, one panel per subject](assets/warfarin/ppc-pk.png)](assets/warfarin/ppc-pk.png)
+```@eval
+m = Main.BRMDocsComparisons.example_module(:warfarin)
+Main.BRMDocsComparisons.figure(m.ppc_spec("pk", "pk_dv"; ylabel="warfarin (mg/L)");
+    caption="Stage 1, population PK: posterior predictive median with its 50 % and 95 % bands (blue) and the observed concentrations, one panel per subject.")
+```
 
 Each panel is one subject: the observed concentrations, and the median with
 the 50 % and 95 % bands of the posterior predictive distribution at the
 sampling times. The bands include the observation noise, so a well-fitted
-subject has about half its points inside the inner band.
+subject has about half its points inside the inner band. The figures on this
+page are drawn when the docs are built, from the committed tables.
 
 ## The handoff
 
@@ -147,7 +154,11 @@ Main.BRMDocsComparisons.results_table(
 )
 ```
 
-[![Posterior predictive bands and observed prothrombin complex activity, one panel per subject](assets/warfarin/ppc-pd.png)](assets/warfarin/ppc-pd.png)
+```@eval
+m = Main.BRMDocsComparisons.example_module(:warfarin)
+Main.BRMDocsComparisons.figure(m.ppc_spec("pd", "pd_dv"; ylabel="prothrombin complex activity (%)");
+    caption="Stage 2, turnover PD on the fixed PK medians: posterior predictive bands and the observed activity, one panel per subject.")
+```
 
 ## The joint model
 
@@ -182,13 +193,27 @@ Main.BRMDocsComparisons.results_table(
 )
 ```
 
-[![Joint model, PK channel, first eight subjects](assets/warfarin/ppc-joint-pk.png)](assets/warfarin/ppc-joint-pk.png)
+```@eval
+m = Main.BRMDocsComparisons.example_module(:warfarin)
+subjects = unique(r.source_subject for r in m.table("joint", "ppc.tsv"))[1:8]
+Main.BRMDocsComparisons.figure(m.ppc_spec("joint", "pk_dv"; ylabel="warfarin (mg/L)", subjects);
+    caption="Joint model, PK channel, first eight subjects: posterior predictive bands and the observed concentrations.")
+```
 
-[![Joint model, PD channel, first eight subjects](assets/warfarin/ppc-joint-pd.png)](assets/warfarin/ppc-joint-pd.png)
+```@eval
+m = Main.BRMDocsComparisons.example_module(:warfarin)
+subjects = unique(r.source_subject for r in m.table("joint", "ppc.tsv"))[1:8]
+Main.BRMDocsComparisons.figure(m.ppc_spec("joint", "pd_dv"; ylabel="prothrombin complex activity (%)", subjects);
+    caption="Joint model, PD channel, the same eight subjects: posterior predictive bands and the observed activity, from the same posterior.")
+```
 
 ### Two-stage against joint
 
-[![Population estimates of the two-stage fits and the joint model](assets/warfarin/population.png)](assets/warfarin/population.png)
+```@eval
+m = Main.BRMDocsComparisons.example_module(:warfarin)
+Main.BRMDocsComparisons.figure(m.population_spec();
+    caption="Population estimates of the two-stage fits (blue) and the joint model (orange): median and 95 % interval, one panel per quantity on its own scale.")
+```
 
 Each panel is one population quantity; the blue interval is the two-stage
 estimate, the orange one the joint model's. The two agree on this data. The
@@ -260,11 +285,13 @@ From the repository root, with the test environment bootstrapped
 
 ```sh
 julia -t 4 --startup-file=no --project=test research/warfarin/fit.jl
-julia --startup-file=no --project=research/adaptive_centering/plots research/warfarin/figures.jl
 ```
 
-The first command writes the tables under `research/warfarin/results/`, the
-second the figures under `docs/src/assets/warfarin/`. The lowering and `stanc`
+It writes one directory of tables per fit under `research/warfarin/results/`.
+The figures are AlgebraOfVega specifications in `research/warfarin/figures.jl`,
+drawn from those tables when the docs are built; `julia
+--project=research/adaptive_centering/plots research/warfarin/figures.jl`
+writes PNG previews of them to a scratch directory. The lowering and `stanc`
 checks of the three declarations run without a fit:
 
 ```sh

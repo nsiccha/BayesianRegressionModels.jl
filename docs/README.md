@@ -17,7 +17,7 @@ summaries come from deliberate, cached research runs. CI never samples.
 | Examples | `wastewater.md` | Infer transmission from wastewater with a renewal model. |
 | Examples | `renewal.md` | Combine infection renewal and reporting delays. |
 | Examples | `state-space.md` | Connect continuous latent dynamics with discrete observations. |
-| Examples | `monster.md` | Fit a whole-body pharmacokinetic model. |
+| Examples | `monster.md` | Declare a whole-body pharmacokinetic model and inspect its generated program. |
 | Examples | `jax.md` | Export a hierarchical regression and compare Julia and NumPyro fits. |
 | Examples | `variational-inference.md` | Fit streaming and batch variational approximations. |
 | Examples | `filtering.md` | Compare sequential posterior updates and full-data sampling. |
@@ -39,6 +39,11 @@ the shared documentation package is public. The transitional quantity schema is
 one fit per directory. It is compatible with the planned DocsFits summaries.
 
 ## Landing notes
+
+The Warfarin page draws its five figures at build time from the committed
+fit tables (`research/warfarin/figures.jl`). The Monster page ships without
+its fit section: the fit was still sampling at the landing cut-off, so its
+tables, figure and fit section follow in the parent lane's next landing.
 
 The fitted spatial-field example is deferred until its GMRF density and heatmap
 issues are resolved. The fields guide remains self-contained and illustrates
