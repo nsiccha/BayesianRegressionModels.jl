@@ -80,7 +80,7 @@ Main.BRMDocsComparisons.comparison(
 decay = @brm begin
     log(rate) ~ 1 + (1 | unit)
     rows = groups(observation_unit => unit)
-    @plate for i in eachindex(unit)
+    @plate for i in eachindex(rate)
         mean_y = amplitude * exp.(-rate[i] .* time[rows[i]])
         y[rows[i]] ~ Normal(mean_y, noise)
     end
@@ -96,7 +96,7 @@ model = decay((; unit=["a", "b"],
 """, :model; title="Two axes connected by a plate", require_stan=true)
 ```
 
-Inside the cell, `rate[i]` is a unit's value, `time[rows[i]]` its observations,
+The loop follows the unit-level `rate` vector. Inside the cell, `rate[i]` is a unit's value, `time[rows[i]]` its observations,
 and bare `amplitude` is shared. Cell code uses Julia broadcasting explicitly.
 A bare left-hand name is local; an indexed left-hand name exposes a model
 output. Observe the response slice directly: an assignment that aliases it
