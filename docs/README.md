@@ -20,7 +20,7 @@ summaries come from deliberate, cached research runs. CI never samples.
 | Examples | `state-space.md` | Connect continuous latent dynamics with discrete observations. |
 | Examples | `monster.md` | Fit a whole-body pharmacokinetic model. |
 | Examples | `jax.md` | Export a hierarchical regression and compare Julia and NumPyro fits. |
-| Examples | `svi.md` | Fit streaming and batch variational approximations. |
+| Examples | `variational-inference.md` | Fit streaming and batch variational approximations. |
 | Examples | `filtering.md` | Compare sequential posterior updates and full-data sampling. |
 | Examples | `spatial-fields.md` | Reconstruct a spatial field and show uncertainty at new locations. |
 | Reference | `api.md` | Find public functions and types by task. |

@@ -22,7 +22,7 @@ const DOCS_PAGES = [
         "Continuous-time states" => "state-space.md",
         "Whole-body pharmacokinetics" => "monster.md",
         "Python/JAX sampling" => "jax.md",
-        "Streaming variational inference" => "svi.md",
+        "Streaming variational inference" => "variational-inference.md",
         "Sequential filtering" => "filtering.md",
         "Spatial field reconstruction" => "spatial-fields.md",
     ],

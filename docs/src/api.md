@@ -52,6 +52,7 @@ BRMLaplacePlan
 BRMLaplaceProblem
 BRMNLMEConditionalProblem
 BRMNLMEJointMap
+BRMNLMEModel
 BRMNLMEUnitProblem
 BRMNLMEView
 BRMNLMEViewError
@@ -90,6 +91,7 @@ brm_filter_tune
 brm_fitted_state
 brm_laplace_mode
 brm_laplace_plan
+brm_laplace_problem
 brm_nlme_conditional_point
 brm_nlme_estimates
 brm_nlme_fit
@@ -116,8 +118,11 @@ brm_smc_tune
 brm_smc_update
 brm_stan_gradient_to_rk
 brm_stan_logdensity_to_rk
+brm_stan_point_to_rk
+brm_stan_to_rk
 brm_start
 brm_svi_centeredness
+brm_svi_checkpoint
 brm_svi_combine
 brm_svi_fit
 brm_svi_optimizer_checkpoint
@@ -135,7 +140,7 @@ Additional exports in this task group:
 
 | Origin | Names |
 |:--|:--|
-| BayesianRegressionModels | `BRMNLMEModel`, `LowRankGlobal`, `MeanFieldGlobal`, `RKDesignBinder`, `brm_filter_resume`, `brm_laplace_problem`, `brm_nlme_conditional_problem`, `brm_nlme_joint_map`, `brm_smc_resume`, `brm_smc_runs`, `brm_stan_point_to_rk`, `brm_stan_to_rk`, `brm_svi_checkpoint` |
+| BayesianRegressionModels | `LowRankGlobal`, `MeanFieldGlobal`, `RKDesignBinder`, `brm_filter_resume`, `brm_nlme_conditional_problem`, `brm_nlme_joint_map`, `brm_smc_resume`, `brm_smc_runs` |
 
 ## Draws and summaries
 
@@ -265,6 +270,7 @@ rk_bound_plan
 rk_design_binder
 rk_model
 rkppl_model
+stan_code
 stan_data
 stan_instantiate
 stan_model
@@ -278,7 +284,6 @@ Additional exports in this task group:
 | Origin | Names |
 |:--|:--|
 | BayesianRegressionModels | `BRMDescriptionCoverage`, `brm_description_prior_anchor`, `rk_translate_artifact` |
-| StanBlocks | `stan_code` |
 
 ## Response families
 
@@ -312,13 +317,14 @@ ZeroInflatedPoisson
 double_interval_censored
 interval_censored
 primary_censored
+truncated
 ```
 
 Additional exports in this task group:
 
 | Origin | Names |
 |:--|:--|
-| Distributions | `Arcsine`, `Bernoulli`, `BernoulliLogit`, `Beta`, `BetaBinomial`, `Binomial`, `Categorical`, `Cauchy`, `Chisq`, `Dirichlet`, `DirichletMultinomial`, `Erlang`, `Exponential`, `Frechet`, `Gamma`, `Gumbel`, `InverseGamma`, `InverseGaussian`, `LKJCholesky`, `Laplace`, `LocationScale`, `LogNormal`, `Logistic`, `MixtureModel`, `Multinomial`, `MvNormal`, `NegativeBinomial`, `Normal`, `NormalCanon`, `Pareto`, `Poisson`, `Rayleigh`, `SkewNormal`, `SkewedExponentialPower`, `TDist`, `Uniform`, `VonMises`, `Weibull`, `censored`, `logpdf`, `product_distribution`, `truncated` |
+| Distributions | `Arcsine`, `Bernoulli`, `BernoulliLogit`, `Beta`, `BetaBinomial`, `Binomial`, `Categorical`, `Cauchy`, `Chisq`, `Dirichlet`, `DirichletMultinomial`, `Erlang`, `Exponential`, `Frechet`, `Gamma`, `Gumbel`, `InverseGamma`, `InverseGaussian`, `LKJCholesky`, `Laplace`, `LocationScale`, `LogNormal`, `Logistic`, `MixtureModel`, `Multinomial`, `MvNormal`, `NegativeBinomial`, `Normal`, `NormalCanon`, `Pareto`, `Poisson`, `Rayleigh`, `SkewNormal`, `SkewedExponentialPower`, `TDist`, `Uniform`, `VonMises`, `Weibull`, `censored`, `logpdf`, `product_distribution` |
 | BayesianRegressionModels | `HurdlePoisson` |
 | LogExpFunctions | `log1mexp`, `log1pexp`, `logexpm1`, `logistic`, `logit`, `logsumexp` |
 | StatsFuns | `normcdf`, `norminvcdf` |
