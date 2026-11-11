@@ -159,11 +159,11 @@ function summarize_station_field(data, draws, info; settings=FIELD_SETTINGS)
         quantity_row("Observation noise SD", "response units",
             "Generated with $(data.noise_sd); " * prior_text(Exponential(data.noise_prior)), s.sigma),
         quantity_row("Field SD", "response units",
-            prior_text(Exponential(data.amplitude_scale)), s.amplitude),
+            uppercasefirst(prior_text(Exponential(data.amplitude_scale))), s.amplitude),
         quantity_row("Spatial length", "km",
-            prior_text(LogNormal(log(data.spatial_prior), data.length_prior_sd)), s.spatial),
+            uppercasefirst(prior_text(LogNormal(log(data.spatial_prior), data.length_prior_sd))), s.spatial),
         quantity_row("Temporal length", "time units",
-            prior_text(LogNormal(log(data.temporal_prior), data.length_prior_sd)), s.temporal)]
+            uppercasefirst(prior_text(LogNormal(log(data.temporal_prior), data.length_prior_sd))), s.temporal)]
     observations = [(; station=data.station[i], east=round(data.east[i]; digits=1),
         north=round(data.north[i]; digits=1), time=data.time[i], y=round(data.y[i]; digits=2),
         truth=round(data.truth[i]; digits=2)) for i in eachindex(data.y)]
