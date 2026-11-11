@@ -45,6 +45,12 @@ export function setupFigures() {
         showError(marker, error)
       }
     }
+    // Proportional scaling (style.css) needs a viewBox; add one where a renderer left it out.
+    for (const svg of document.querySelectorAll<SVGSVGElement>('.brm-figure-plot svg')) {
+      if (svg.getAttribute('viewBox')) continue
+      const width = svg.getAttribute('width'), height = svg.getAttribute('height')
+      if (width && height) svg.setAttribute('viewBox', `0 0 ${width} ${height}`)
+    }
     if (!window.AoV) return
     for (const element of document.querySelectorAll<HTMLElement>('[data-brm-vega]')) {
       const json = element.dataset.brmVega!
