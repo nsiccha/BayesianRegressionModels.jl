@@ -1,5 +1,11 @@
 # Air pollution: regional effects and automatic totals
 
+This is the archived study protocol and recorded comparison. It is research
+material, separate from the current [adaptive-centering guide](../../../docs/src/adaptive-centering.md).
+The [reproduction scripts and source provenance](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/air_total_effects)
+remain available; source model and data revisions are recorded there.
+Figures are regenerated from the scripts and are not committed here.
+
 !!! note "Exact totals are not the default"
     This study uses exact total coefficients (`total_groups`). SBBRMI's default is the standard parametrization, so the code passes `total_groups=:auto` explicitly. For groupings whose blocks the data identify strongly or unevenly, BRM also offers the sum-to-zero (S2Z) parametrization (`s2z_groups`, `s2z_rho`) with WarmupHMC adaptive centering.
 
@@ -49,7 +55,7 @@ The authoring panes below read the exact fitted declarations. The backend views 
 
 ### Regional intercepts
 
-```@eval
+```julia
 Main.BRMDocsComparisons.comparison(@__MODULE__,
     Main.BRMCenteringExamples.authoring(:air_intercept),
     :air_intercept_brm_model;
@@ -60,7 +66,7 @@ BRM integrates the population intercept and samples `alpha[j] = beta0 + a[j]`. T
 
 ### Independent regional intercepts and slopes
 
-```@eval
+```julia
 Main.BRMDocsComparisons.comparison(@__MODULE__,
     Main.BRMCenteringExamples.authoring(:air_independent),
     :air_independent_brm_model;
@@ -130,7 +136,7 @@ The common quantities are the population intercept and slope, group SD, residual
 | BRM total online position · WHMC | 16,286 | 107× | 128× |
 | BRM total online gradient · WHMC | 16,286 | 107× | 128× |
 
-[![Total gradient costs and relative scientific-QOI efficiencies.](assets/air-centering/cluster-intercept-efficiency.png)](assets/air-centering/cluster-intercept-efficiency.png)
+Figure: Total gradient costs and relative scientific-QOI efficiencies.. Regenerate it with the study plotting script.
 
 Both post-hoc losses select full centering for all six totals. They therefore produce the same fit as fixed CP, with the additional pilot cost. Both online losses also select CP and produce identical results to each other. S2Z CP + WHMC has the largest observed efficiency in this pilot; totals do not dominate this comparison.
 
@@ -155,7 +161,7 @@ The common quantities are the two population coefficients, two group SDs, residu
 | BRM total online position · WHMC | 53,202 | 14.3× | 17.5× |
 | BRM total online gradient · WHMC | 20,137 | 130× | 140× |
 
-[![Total gradient costs and relative scientific-QOI efficiencies.](assets/air-centering/cluster-independent-efficiency.png)](assets/air-centering/cluster-independent-efficiency.png)
+Figure: Total gradient costs and relative scientific-QOI efficiencies.. Regenerate it with the study plotting script.
 
 The post-hoc workflows pay for a 1,178,130-gradient NCP pilot, so good retained-sampling efficiency can coexist with low total efficiency. Fixed CP and online adaptation avoid that separate pilot. Online position and gradient select different configurations here.
 
@@ -165,15 +171,15 @@ Each figure reuses the **same 2,000 draws across its columns**, with CP as the v
 
 ### Regional intercepts
 
-[![The same 2,000 total-coefficient draws in CP, NCP and partial coordinates.](assets/air-centering/cluster-intercept-total_pairs.png)](assets/air-centering/cluster-intercept-total_pairs.png)
+Figure: The same 2,000 total-coefficient draws in CP, NCP and partial coordinates.. Regenerate it with the study plotting script.
 
-[![The same 2,000 S2Z-auto draws in centered, noncentered and auto contrast coordinates.](assets/air-centering/cluster-intercept-s2z_pairs.png)](assets/air-centering/cluster-intercept-s2z_pairs.png)
+Figure: The same 2,000 S2Z-auto draws in centered, noncentered and auto contrast coordinates.. Regenerate it with the study plotting script.
 
 ### Regional intercepts and slopes
 
-[![The same 2,000 total-coefficient draws in CP, NCP and partial coordinates.](assets/air-centering/cluster-independent-total_pairs.png)](assets/air-centering/cluster-independent-total_pairs.png)
+Figure: The same 2,000 total-coefficient draws in CP, NCP and partial coordinates.. Regenerate it with the study plotting script.
 
-[![The same 2,000 S2Z-auto draws in centered, noncentered and auto contrast coordinates.](assets/air-centering/cluster-independent-s2z_pairs.png)](assets/air-centering/cluster-independent-s2z_pairs.png)
+Figure: The same 2,000 S2Z-auto draws in centered, noncentered and auto contrast coordinates.. Regenerate it with the study plotting script.
 
 The first set shows total coefficients; the S2Z set shows zero-sum contrasts. These are coordinate views of saved posterior draws, not predictive intervals or separate posterior fits.
 

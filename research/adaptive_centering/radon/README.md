@@ -1,11 +1,10 @@
-````@raw html
----
-title: Adaptive radon centering
-description: "PosteriorDB radon with explicit hierarchical priors, county predictive checks, offline and online centering, and measured sampling costs."
----
-````
-
 # Adaptive radon centering
+
+This is the archived study protocol and recorded comparison. It is research
+material, separate from the current [adaptive-centering guide](../../../docs/src/adaptive-centering.md).
+The [reproduction scripts and source provenance](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/radon_centering)
+remain available; source model and data revisions are recorded there.
+Figures are regenerated from the scripts and are not committed here.
 
 Counties with many observations can benefit from different random-effect
 coordinates than counties with few. This example fits a county intercept and
@@ -34,7 +33,7 @@ The BRM formula uses two named random-effect blocks. Their separate identities
 keep the county intercept and slope independent and let us specify each
 half-normal scale prior explicitly.
 
-```@eval
+```julia
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 using BayesianRegressionModels, Distributions, StanBlocks, JSON, ZipFile
 
@@ -93,7 +92,7 @@ Every fit uses one chain and 10,000 retained draws, with ordinary WarmupHMC
 initialization and adaptation defaults. The same seed and model are used for
 the selected-partial and online fits.
 
-[![Observed log radon over individual predictive intervals, faceted by county](assets/centering-refresh-radon/ppc.png)](assets/centering-refresh-radon/ppc.png)
+Figure: Observed log radon over individual predictive intervals, faceted by county. Regenerate it with the study plotting script.
 
 Each vertical interval predicts one observation: the thin interval contains
 90% of replicated values and the thick interval 50%. Observed values are
@@ -181,7 +180,7 @@ WarmupHMC returns **model coordinates** in `posterior_position`; checkpoints
 retain sampler coordinates. Export checks their mapping, Jacobian-adjusted
 density and saved gradients before making figures or scientific summaries.
 
-[![Centering selected with both losses, post-hoc and online](assets/centering-refresh-radon/centeredness.png)](assets/centering-refresh-radon/centeredness.png)
+Figure: Centering selected with both losses, post-hoc and online. Regenerate it with the study plotting script.
 
 ## Sampling efficiency and full workflow cost
 
@@ -215,7 +214,7 @@ absolute ESS and both denominators, are in the linked result files.
 Sampling divergences: **NCP: 0; CP: 0; Post-hoc position: 0; Post-hoc gradient: 0; Online position: 0; Online gradient: 0**. These are one-chain comparisons, so neither
 the ranking nor a within-chain split R-hat establishes cross-chain convergence.
 
-[![Full gradient cost and the two relative sampling efficiencies](assets/centering-refresh-radon/efficiency.png)](assets/centering-refresh-radon/efficiency.png)
+Figure: Full gradient cost and the two relative sampling efficiencies. Regenerate it with the study plotting script.
 
 The population floor slope limits minimum ESS in every arm. A more favorable local effect geometry does not necessarily improve this global bottleneck. In this run, neither online loss beats NCP in total efficiency.
 
@@ -234,17 +233,17 @@ The post-hoc and online panels each show their two newly fitted loss variants
 in the coordinates actually used by the sampler. CP is the visual reference;
 NCP remains the efficiency baseline. Axes are independent across panels.
 
-[![County intercepts: CP and NCP pilot coordinates](assets/centering-refresh-radon/pairs-pilot-county-intercepts.png)](assets/centering-refresh-radon/pairs-pilot-county-intercepts.png)
+Figure: County intercepts: CP and NCP pilot coordinates. Regenerate it with the study plotting script.
 
-[![County intercepts: CP reference and both post-hoc losses](assets/centering-refresh-radon/pairs-posthoc-county-intercepts.png)](assets/centering-refresh-radon/pairs-posthoc-county-intercepts.png)
+Figure: County intercepts: CP reference and both post-hoc losses. Regenerate it with the study plotting script.
 
-[![County intercepts: CP reference and completed online losses](assets/centering-refresh-radon/pairs-online-county-intercepts.png)](assets/centering-refresh-radon/pairs-online-county-intercepts.png)
+Figure: County intercepts: CP reference and completed online losses. Regenerate it with the study plotting script.
 
-[![County slopes: CP and NCP pilot coordinates](assets/centering-refresh-radon/pairs-pilot-county-slopes.png)](assets/centering-refresh-radon/pairs-pilot-county-slopes.png)
+Figure: County slopes: CP and NCP pilot coordinates. Regenerate it with the study plotting script.
 
-[![County slopes: CP reference and both post-hoc losses](assets/centering-refresh-radon/pairs-posthoc-county-slopes.png)](assets/centering-refresh-radon/pairs-posthoc-county-slopes.png)
+Figure: County slopes: CP reference and both post-hoc losses. Regenerate it with the study plotting script.
 
-[![County slopes: CP reference and completed online losses](assets/centering-refresh-radon/pairs-online-county-slopes.png)](assets/centering-refresh-radon/pairs-online-county-slopes.png)
+Figure: County slopes: CP reference and completed online losses. Regenerate it with the study plotting script.
 
 ## Position and gradient in the displayed coordinates
 
@@ -254,13 +253,13 @@ the pilot's positions and gradients together. The fitted panels use gradients
 saved in their actual sampler frame; they do not attach an NCP gradient to a
 centered position.
 
-[![County intercepts: positions and gradients, posthoc](assets/centering-refresh-radon/gradients-posthoc-county-intercepts.png)](assets/centering-refresh-radon/gradients-posthoc-county-intercepts.png)
+Figure: County intercepts: positions and gradients, posthoc. Regenerate it with the study plotting script.
 
-[![County intercepts: positions and gradients, online](assets/centering-refresh-radon/gradients-online-county-intercepts.png)](assets/centering-refresh-radon/gradients-online-county-intercepts.png)
+Figure: County intercepts: positions and gradients, online. Regenerate it with the study plotting script.
 
-[![County slopes: positions and gradients, posthoc](assets/centering-refresh-radon/gradients-posthoc-county-slopes.png)](assets/centering-refresh-radon/gradients-posthoc-county-slopes.png)
+Figure: County slopes: positions and gradients, posthoc. Regenerate it with the study plotting script.
 
-[![County slopes: positions and gradients, online](assets/centering-refresh-radon/gradients-online-county-slopes.png)](assets/centering-refresh-radon/gradients-online-county-slopes.png)
+Figure: County slopes: positions and gradients, online. Regenerate it with the study plotting script.
 
 ## Reproduce and inspect
 

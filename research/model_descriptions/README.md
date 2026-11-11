@@ -6,7 +6,7 @@
 declaration, data/parameter roles, value ranks and dimensions. Load HTMXObjects
 0.1.65 or later; no web demo app is needed:
 
-```@eval
+```julia
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 model_view_demo = (@brm begin
     sigma ~ Exponential(1)
@@ -146,7 +146,7 @@ It does not fit, sample or instantiate an executable model.
 This generic hierarchical model has a Gaussian observation distribution, a
 standardized covariate and a shared intercept/slope covariance block:
 
-```@eval
+```julia
 Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
 description_model = (@brm begin
     "Observation standard deviation."
@@ -163,7 +163,7 @@ end)((;
 """, :description_model; title="Model to describe", require_stan=true, total_groups=())
 ```
 
-```@eval
+```julia
 let d = brm_descriptor(SBBRMI(description_model; total_groups=())),
     anchors = Dict((:population, :mu, :zscale_x) => "#the-description-result")
     result = brm_description(d; prior_anchors=anchors)
@@ -299,7 +299,7 @@ languages calls `brm_description` once per language; it does not fit or sample.
 
 The example model's prose in German:
 
-```@eval
+```julia
 let d = brm_descriptor(SBBRMI(description_model; total_groups=()))
     result = brm_description(d; texts=description_texts(:de))
     result.complete || error(join(result.diagnostics, "\n"))

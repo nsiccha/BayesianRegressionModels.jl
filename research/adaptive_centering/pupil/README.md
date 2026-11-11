@@ -1,5 +1,11 @@
 # Pupil: numeric scale predictor and automatic totals
 
+This is the archived study protocol and recorded comparison. It is research
+material, separate from the current [adaptive-centering guide](../../../docs/src/adaptive-centering.md).
+The [reproduction scripts and source provenance](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/pupil_builtin_totals)
+remain available; source model and data revisions are recorded there.
+Figures are regenerated from the scripts and are not committed here.
+
 !!! note "Exact totals are not the default"
     This study uses exact total coefficients (`total_groups`). SBBRMI's default is the standard parametrization, so the code passes `total_groups=:auto` explicitly. For groupings whose blocks the data identify strongly or unevenly, BRM also offers the sum-to-zero (S2Z) parametrization (`s2z_groups`, `s2z_rho`) with WarmupHMC adaptive centering.
 
@@ -41,7 +47,7 @@ Flat priors apply to these population slopes because that is the source model's 
 
 The authoring pane reads the actual declarations used for the fits. Its backend panes are generated during the documentation build. The measurements use StanBlocks/BridgeStan and WHMC.
 
-```@eval
+```julia
 Main.BRMDocsComparisons.comparison(@__MODULE__,
     Main.BRMCenteringExamples.authoring(:pupil_numeric),
     :pupil_numeric_brm_model;
@@ -129,7 +135,7 @@ Both efficiency columns are relative to **ordinary brms NCP + native Stan**. Sam
 | BRM total online position · WHMC | 34,526 | 235× | 318× |
 | BRM total online gradient · WHMC | 52,951 | 159× | 224× |
 
-[![Total gradient costs and relative efficiencies for 46 scientific quantities.](assets/pupil-builtin-centering/efficiency.png)](assets/pupil-builtin-centering/efficiency.png)
+Figure: Total gradient costs and relative efficiencies for 46 scientific quantities.. Regenerate it with the study plotting script.
 
 The post-hoc rows improve sampling efficiency but pay for a separate pilot. Online adaptation avoids that cost. The strong CP and S2Z-auto controls show that a comparison against ordinary NCP alone would give an incomplete picture.
 
@@ -141,11 +147,11 @@ The nine brms fits are reused from the verified comparison because their targets
 
 The total-coefficient figure shows the **same 2,000 post-hoc position draws** in CP, NCP and ACP coordinates. Rows choose distinct coordinates by minimum selected centeredness, closest to 0.5, and maximum. CP is the visualization baseline; the ACP values were checked against the saved source coordinates.
 
-[![Identical saved total-coefficient draws viewed in CP, NCP and partial coordinates.](assets/pupil-builtin-centering/total_pairs.png)](assets/pupil-builtin-centering/total_pairs.png)
+Figure: Identical saved total-coefficient draws viewed in CP, NCP and partial coordinates.. Regenerate it with the study plotting script.
 
 The S2Z figure reuses the unchanged auto-WHMC fit. It shows centered contrasts, standardized contrasts, and the branch's subject-labelled `Q*z` coordinates. Those J displayed values represent J−1 independent contrast directions. The auto transform includes its weighted centering correction.
 
-[![Identical S2Z-auto draws viewed in centered, noncentered and auto contrast coordinates.](assets/adaptive-pupil/s2z_pairs.png)](assets/adaptive-pupil/s2z_pairs.png)
+Figure: Identical S2Z-auto draws viewed in centered, noncentered and auto contrast coordinates.. Regenerate it with the study plotting script.
 
 brms S2Z auto uses the pinned branch's Pathfinder/Fisher selection, then holds its weights fixed. WHMC receives that same resolved target and weights. These weights differ from BRM's per-total centering controls and loss functions; S2Z auto here is not online WHMC adaptation.
 
