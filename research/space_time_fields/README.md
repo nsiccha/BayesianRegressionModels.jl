@@ -58,7 +58,7 @@ never reads that file.
 
 ## Summary tables
 
-Every table must be smaller than 100 KB; numeric output is rounded to six
+Every table must be smaller than 100 KB; numeric output is rounded to five
 significant digits. Draw arrays, checkpoints and generated images are not
 committed. The full precision draws are used for quantiles and diagnostics
 before rounding.

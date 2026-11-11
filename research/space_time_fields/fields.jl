@@ -86,7 +86,7 @@ end
 # Transitional small TSV summaries until DocsFits is published. These tables
 # already follow its summary contract; the page must never sample to obtain them.
 function write_table(path, rows)
-    cell(x::AbstractFloat) = string(round(x; sigdigits=6))
+    cell(x::AbstractFloat) = string(round(x; sigdigits=5))
     cell(x) = replace(string(x), '\t' => ' ', '\n' => ' ')
     open(path, "w") do io
         println(io, join(string.(keys(first(rows))), '\t'))
