@@ -20,7 +20,7 @@ online state estimates and parameter uncertainty with a full-data MCMC fit.
 ## Daily counts
 
 The synthetic data contain daily Poisson counts from units with separate
-log-rate offsets and a shared autoregressive latent process. The generator
+log-rate offsets and latent paths, with shared autoregressive parameters. The generator
 records the latent paths, so filtered intervals can be compared with their
 known values. Persistence is `rho`; innovation standard deviation is `tau`.
 
