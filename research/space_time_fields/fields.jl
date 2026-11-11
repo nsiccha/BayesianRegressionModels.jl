@@ -44,10 +44,10 @@ using StanBlocks
 
 const FIELD_HARNESS_VERSION = 2
 const FIELD_SEED = 37
-const FIELD_SETTINGS = (; n_chains=4, min_completed=3, n_draws=600,
+const FIELD_SETTINGS = (; n_chains=4, min_completed=3, n_draws=4000,
     map_draws_per_chain=100, grid_side=21, prediction_seed=721)
 
-function fit_station_field(data; n_draws=600, n_chains=4, min_completed=3,
+function fit_station_field(data; n_draws=4000, n_chains=4, min_completed=3,
         seed=37, progress=nothing, checkpoint_dir=nothing, resume=false)
     # One RK log density per chain, prior-median starts, a completion quorum.
     rk = RKBRMI(station_field_model(data))
