@@ -21,18 +21,15 @@ The 46 scientific quantities are the two population mean coefficients, two group
 - `reference/automatic_totals.stan` and `.json`: exact exported target and data; `export-audit.json` records zero density and gradient differences.
 - `results/per_quantity_mcse.tsv`: all scientific means, ESS and MCSE.
 - `results/recovery_seed_sensitivity.tsv`: ten conditional-recovery seeds.
-- `results/total_pairs*.tsv`: selected saved draws and CP/NCP/ACP transforms, including the source-frame audit.
-- `results/fits/manifest.json`: both archive hashes and all member hashes, independently read back; 35,946,225 compressed bytes.
-- `results/receipts/manifest.json`: exact process logs and environment.
-- [`../pupil_total_effects/`](../pupil_total_effects/): original native/S2Z targets, counter implementation and reused raw fits.
+- [`../pupil_total_effects/`](../pupil_total_effects/): original native/S2Z targets and counter implementation.
 
-The new-fit archive retains physical/source positions, gradients, checkpoints, selected controls and per-arm costs. The summary archive contains the 46 scientific arrays recomputed from the nine brms fits; `reused_brms_fits.tsv` maps these to the old fit paths. Nothing needs to be sampled to inspect the recorded comparison.
+The small comparison and diagnostic summaries can be inspected without sampling. Raw positions, gradients, checkpoints, pair tables, archive manifests and process logs are outside the public repository. Regenerate the native controls using the original study's protocol before running `reuse_brms.jl`; then the commands below regenerate the total fits and their comparison.
 
 ## Reproduce
 
 Use Julia 1.10.11 and the Project/Manifest in `results/receipts`, replacing local path dependencies with recorded revisions. New fits used BRM's built-in planner (`54cbe3f`, landed as `5f30e53`) plus `f38bea8`, and repaired WHMC `7aed40b18bd4cdabb75330f285d5c9b355575ab9`. Data: bcogsci `d90fc01e6f6fcdced7ee64c9d2ed607d212ec77c`; brms `73cf607889879cb2a55f50b88d8141d76ff43279`; native controls: CmdStan 2.39.0, CmdStanR 0.9.0.
 
-From the repository root, let `study_env` name that environment and `study_scratch` contain the archived run folders:
+From the repository root, let `study_env` name that environment and `study_scratch` contain the reproduced native-control run folders:
 
 ```sh
 julia --project="$study_env" research/pupil_builtin_totals/audit.jl "$study_scratch/pupil3-builtin-audit-v2"

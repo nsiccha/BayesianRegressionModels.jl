@@ -72,15 +72,13 @@ julia --project=research/adaptive_centering/plots research/centering_refresh/plo
 ```
 
 Substitute `eight` or `radon` for the other studies. The plot environment has its
-own Project and Manifest. Copy the resulting PNGs into
-`docs/src/assets/centering-refresh-CASE/`, then run `refresh_pages.py` to refresh
-the numerical table and surrounding narrative. That generator retains the
-audited model/example blocks from repository commit `b7fd3f5`.
+own Project and Manifest. Generated figures stay in the output directory;
+the documentation renders AlgebraOfVega specifications from small summaries.
 
-`results/receipt.json` records wrapper logs and exact exits, source hashes,
-package revisions, and the completed fit roster. `results/logs/` retains the
-full relevant fitting, audit, export and plotting logs. These execution times
-include process setup and are not presented as sampler timing comparisons.
+`results/receipt.json` records exact exits, source hashes, package revisions,
+and the completed fit roster. Full fitting and render logs are outside the
+public repository. Execution times include process setup and are not presented
+as sampler timing comparisons.
 
 ## Scientific and coordinate checks
 
