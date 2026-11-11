@@ -414,7 +414,10 @@ const PINS = [
     # data-valued scale through BRM's named `<vector>_prior_scale` (snag
     # selective-fresh-96f7fe96), which research/filtering's fresh-unit
     # selective example needs. RK's and RKPPL's own `[sources]` are unchanged.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "4fa3b589054003d187cef74befad503ae7b963e3"),
+    # 95e62eab (RK 0.1.163 / RKPPL 0.1.155) preserves the row form of a
+    # cell-local gather (snag cell-factor-ad-r-b4e2a0f4), which the nested
+    # `@plate` sparse Laplace in `nlme_laplace_sparse.jl` needs.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "95e62eabdac3f181b62f78b202763a84563707da"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
