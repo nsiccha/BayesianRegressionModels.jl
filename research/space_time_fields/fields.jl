@@ -39,16 +39,17 @@ end
 
 # Everything above this line also runs when Documenter displays the model.
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme, DifferentiationInterface
-using WarmupHMC, TreeArrays, Treebars, MCMCDiagnosticTools, DynamicObjects, Dates, Serialization
+using WarmupHMC, TreeArrays, Tables, Treebars, MCMCDiagnosticTools, DynamicObjects, Dates, Serialization
 using StanBlocks
 
-const FIELD_HARNESS_VERSION = 1
+const FIELD_HARNESS_VERSION = 2
 const FIELD_SEED = 37
 const FIELD_SETTINGS = (; n_chains=4, min_completed=3, n_draws=600,
     map_draws_per_chain=100, grid_side=21, prediction_seed=721)
 
 function fit_station_field(data; n_draws=600, n_chains=4, min_completed=3,
         seed=37, progress=nothing, checkpoint_dir=nothing, resume=false)
+    # One RK log density per chain, prior-median starts, a completion quorum.
     rk = RKBRMI(station_field_model(data))
     backend = AutoEnzyme(; mode=Enzyme.Reverse)
     problems = [rk_logdensity_problem(rk; ad_backend=backend) for _ in 1:n_chains]
@@ -68,6 +69,10 @@ function fit_station_field(data; n_draws=600, n_chains=4, min_completed=3,
        retained_chains=length(chains))
 end
 
+# Two significant digits of the 95% interval's width: the last digit shown is
+# one the posterior resolves.
+resolved(x, width) = round(x; digits=1 - floor(Int, log10(width)))
+
 function map_field(rk, draws; nside=21, seed=721)
     axis = collect(range(0.0, 100.0; length=nside))
     grid = [(; east=x, north=y, time=t) for t in (1.0, 3.0, 6.0) for y in axis for x in axis]
@@ -78,9 +83,13 @@ function map_field(rk, draws; nside=21, seed=721)
     bands = quantile(field, (; q025=0.025, q25=0.25, q50=0.5, q75=0.75, q975=0.975); dims=:draw)
     values = map(k -> collect(TreeActualArray(getproperty(bands, k))), (:q025, :q25, :q50, :q75, :q975))
     uncertainty = collect(TreeActualArray(std(field; dims=:draw)))
-    [(; grid[i]..., truth=true_field(east[i], north[i], time[i]),
-        q025=values[1][i], q25=values[2][i], q50=values[3][i],
-        q75=values[4][i], q975=values[5][i], sd=uncertainty[i]) for i in eachindex(grid)]
+    # Field values on the response scale, to the hundredth: the smallest
+    # pointwise posterior SD on this grid is several hundredths.
+    r2(x) = round(x; digits=2)
+    [(; grid[i]..., truth=r2(true_field(east[i], north[i], time[i])),
+        q025=r2(values[1][i]), q25=r2(values[2][i]), q50=r2(values[3][i]),
+        q75=r2(values[4][i]), q975=r2(values[5][i]), sd=round(uncertainty[i]; digits=3))
+     for i in eachindex(grid)]
 end
 
 # Transitional small TSV summaries until DocsFits is published. These tables
@@ -104,23 +113,49 @@ function diagnostics(draws)
     (; max_rhat=maximum(rhat), min_bulk_ess=minimum(bulk), min_tail_ess=minimum(tail))
 end
 
+"One scalar per draw and chain (draw × chain) for each named model quantity."
+function scalar_draws(rk, draws)
+    nd, nc = size(draws, 2), size(draws, 3)
+    sigma = reduce(hcat, [vec(collect(TreeActualArray(rk_draw_tree(rk, draws[:, :, c], (:sigma,)).sigma)))
+                          for c in 1:nc])
+    constrained = [ReactiveKernelsPPL.constrain(rk.model.layout, draws[:, j, c]) for j in 1:nd, c in 1:nc]
+    term = only(k for k in keys(first(constrained)) if startswith(String(k), "gmrf"))
+    field(name) = [getproperty(c[term], name) for c in constrained]
+    (; sigma, amplitude=field(:sigma), spatial=field(:spatial_length), temporal=field(:temporal_length))
+end
+
+"The DocsFits quantity row of one scalar: median, 95% interval, split R-hat, bulk and tail ESS."
+function quantity_row(quantity, unit, description, x::Matrix{Float64})
+    tree = TreeData([TreeData(x[:, c], :draw) for c in axes(x, 2)], :chain)
+    q = only(Tables.rows(TreeTable(quantile(tree, (; q025=0.025, q50=0.5, q975=0.975); dims=(:draw, :chain)))))
+    samples = reshape(x, size(x, 1), size(x, 2), 1)
+    bulk, rhat = MCMCDiagnosticTools.ess_rhat(samples)
+    tail = MCMCDiagnosticTools.ess(samples; kind=:tail)
+    width = q.q975 - q.q025
+    (; quantity, unit, description, median=resolved(q.q50, width), q025=resolved(q.q025, width),
+       q975=resolved(q.q975, width), rhat=round(only(rhat); digits=3),
+       ess_bulk=round(Int, only(bulk)), ess_tail=round(Int, only(tail)))
+end
+
 function summarize_station_field(data, draws, info; settings=FIELD_SETTINGS)
     rk = RKBRMI(station_field_model(data))
     n = size(draws, 2)
     keep = unique(round.(Int, range(1, n; length=min(n, settings.map_draws_per_chain))))
     mapped_draws = reshape(draws[:, keep, :], size(draws, 1), :)
     grid = map_field(rk, mapped_draws; nside=settings.grid_side, seed=settings.prediction_seed)
-    sigma = hcat([vec(collect(TreeActualArray(rk_draw_tree(rk, draws[:, :, c], (:sigma,)).sigma)))
-        for c in axes(draws, 3)]...)
-    noise_samples = reshape(sigma, size(sigma, 1), size(sigma, 2), 1)
-    bulk, rhat = MCMCDiagnosticTools.ess_rhat(noise_samples)
-    tail = MCMCDiagnosticTools.ess(noise_samples; kind=:tail)
-    q025, q50, q975 = quantile(vec(sigma), [0.025, 0.5, 0.975])
-    noise = [(; quantity="Observation noise SD", unit="response units",
-        description="Independent Gaussian measurement noise", median=q50, q025, q975,
-        rhat=only(rhat), ess_bulk=only(bulk), ess_tail=only(tail))]
-    observations = [(; station=data.station[i], east=data.east[i], north=data.north[i],
-        time=data.time[i], y=data.y[i], truth=data.truth[i]) for i in eachindex(data.y)]
+    s = scalar_draws(rk, draws)
+    quantities = [
+        quantity_row("Observation noise SD", "response units",
+            "Generated with 0.25; prior Exponential(0.5)", s.sigma),
+        quantity_row("Field SD", "response units",
+            "Marginal SD of the latent field; prior Exponential(1)", s.amplitude),
+        quantity_row("Spatial length", "km",
+            "Prior LogNormal(log 25, 0.5), median 25 km", s.spatial),
+        quantity_row("Temporal length", "time units",
+            "Prior LogNormal(log 4, 0.5), median 4", s.temporal)]
+    observations = [(; station=data.station[i], east=round(data.east[i]; digits=1),
+        north=round(data.north[i]; digits=1), time=data.time[i], y=round(data.y[i]; digits=2),
+        truth=round(data.truth[i]; digits=2)) for i in eachindex(data.y)]
     data_table = [(;quantity=string(k),value=string(v)) for (k,v) in (
         "Square side (km)" => 100, "Stations" => length(unique(data.station)),
         "Observation times" => join(Int.(sort(unique(data.time))), ", "),
@@ -133,16 +168,17 @@ function summarize_station_field(data, draws, info; settings=FIELD_SETTINGS)
         "Omitted chain indices" => (isempty(info.omitted_chains) ? "none" : join(info.omitted_chains, ", ")),
         "Retained draws before equal-length truncation" => info.retained_draws,
         "Draws per chain used in summaries" => info.stored_draws_per_chain,
-        "Maximum R-hat, all sampler coordinates" => round(diag.max_rhat; sigdigits=4),
-        "Minimum bulk ESS" => round(diag.min_bulk_ess; sigdigits=4),
-        "Minimum tail ESS" => round(diag.min_tail_ess; sigdigits=4),
-        "Divergences in all retained draws" => info.divergent)]
+        "Maximum R-hat, all sampler coordinates" => round(diag.max_rhat; digits=3),
+        "Minimum bulk ESS" => round(Int, diag.min_bulk_ess),
+        "Minimum tail ESS" => round(Int, diag.min_tail_ess),
+        "Divergences in all retained draws" => info.divergent,
+        "Sampling time (s)" => round(Int, info.seconds))]
     checks = [(; quantity=string(k),value=string(v)) for (k,v) in (
-        "Grid root mean squared error" => round(sqrt(mean((r.q50-r.truth)^2 for r in grid)); sigdigits=4),
-        "Grid points inside pointwise 95% intervals (%)" => round(100mean(r.q025 <= r.truth <= r.q975 for r in grid); sigdigits=4),
+        "Grid root mean squared error" => round(sqrt(mean((r.q50-r.truth)^2 for r in grid)); digits=2),
+        "Grid points inside pointwise 95% intervals (%)" => round(Int, 100mean(r.q025 <= r.truth <= r.q975 for r in grid)),
         "Draws used for mapping" => size(mapped_draws, 2))]
     (; field_grid=grid, observations, data=data_table, diagnostics=diagnostic_table,
-       noise, map_checks=checks)
+       quantities, map_checks=checks)
 end
 
 function run_receipt(key, settings; started=now())
@@ -151,13 +187,32 @@ function run_receipt(key, settings; started=now())
     rows = [(; key=string(k),value=string(v)) for (k,v) in (
         "key" => key, "commit" => git("rev-parse","HEAD"),
         "uncommitted_changes" => (isempty(git("status","--porcelain")) ? "none" : "yes"),
-        "started" => started, "host" => "a Linux fleet host, $(Threads.nthreads()) Julia threads",
+        "started" => Dates.format(started, "yyyy-mm-ddTHH:MM:SS"),
+        "host" => "a Linux fleet host, $(Threads.nthreads()) Julia threads",
         "julia" => VERSION, "harness" => "Station field RK/Enzyme/WarmupHMC v$(FIELD_HARNESS_VERSION)",
+        "sampler" => "WarmupHMC completion_warmup_mcmc on the RKBRMI log density, AutoEnzyme reverse mode",
         "settings" => settings, "seed" => FIELD_SEED)]
-    for package in (BayesianRegressionModels, WarmupHMC, ReactiveKernels, ReactiveKernelsPPL, Enzyme)
+    for package in (BayesianRegressionModels, WarmupHMC, ReactiveKernels, ReactiveKernelsPPL, Enzyme, TreeArrays)
         push!(rows, (;key=string(nameof(package)),value=string(pkgversion(package))))
     end
     rows
+end
+
+read_receipt(path) = Dict(String(k) => String(v)
+    for (k, v) in (split(line, '\t'; limit=2) for line in readlines(path)[2:end]))
+
+# A docs fit runs once and is rerun only when its model, data or settings
+# change, at most about once a month. A changed key within 30 days of the last
+# start needs BRM_DOCS_FIT_FORCE=1.
+function guard_rerun(receipt_path, key)
+    isfile(receipt_path) || return
+    previous = read_receipt(receipt_path)
+    get(previous, "key", "") == string(key) && return
+    started = tryparse(DateTime, first(get(previous, "started", ""), 19))
+    if !isnothing(started) && now() - started < Day(30) && get(ENV, "BRM_DOCS_FIT_FORCE", "0") != "1"
+        error("$receipt_path records a fit started $(previous["started"]) under another key; " *
+              "a docs fit is rerun at most about once a month. Set BRM_DOCS_FIT_FORCE=1 to rerun it now.")
+    end
 end
 
 function main()
@@ -170,32 +225,29 @@ function main()
     program = BayesianRegressionModels.stan_code(SBBRMI(station_field_model(data)))
     key = DynamicObjects.canonical_hash((program, data, settings, FIELD_SEED, FIELD_HARNESS_VERSION))
     receipt_path = joinpath(outdir, "receipt.tsv")
-    if isfile(receipt_path)
-        previous = Dict(k => v for (k,v) in (split(line, '\t'; limit=2) for line in readlines(receipt_path)[2:end]))
-        if get(previous,"key","") == string(key) && get(previous,"status","") == "complete"
-            for name in ("field_grid", "observations", "data", "diagnostics", "noise", "map_checks")
-                isfile(joinpath(outdir, name*".tsv")) || error("Cached fit lacks $name.tsv; restore its summaries")
-            end
-            println("CACHED ", key)
-            return
-        end
-    end
-    receipt = run_receipt(key, settings)
+    guard_rerun(receipt_path, key)
+    # Draws stay outside git, where they were computed; only the summaries are committed.
+    cache = joinpath(get(ENV, "BRM_DOCS_CACHE", joinpath(tempdir(), "brm-docs-examples")),
+                     "space_time_fields", string(key))
+    mkpath(cache)
+    local_draws = joinpath(cache, "draws.jls")
+    cached = isfile(local_draws) ? deserialize(local_draws) : nothing
+    receipt = isnothing(cached) ? run_receipt(key, settings) : cached.receipt
     write_table(receipt_path, [receipt; (;key="status",value="started")])
     progress = Treebars.initialize_progress!(:state; description="Space-time field example")
-    Treebars.snapshot_progress(progress, get(ENV, "KB_PROGRESS_FILE", joinpath(outdir, "fit.progress"))) do
+    Treebars.snapshot_progress(progress, get(ENV, "KB_PROGRESS_FILE", joinpath(cache, "fit.progress"))) do
         @progress progress begin
             @progress "Fit station observations"
-            local_draws = joinpath(outdir, "fit.jls") # git-ignored; never a docs input
-            cached = isfile(local_draws) ? deserialize(local_draws) : nothing
             if !isnothing(cached) && cached.key == key
-                sampled, info, receipt = cached.sampled, cached.info, cached.receipt
+                sampled, info = cached.sampled, cached.info
+                println("CACHED ", local_draws)
             else
                 sampled = fit_station_field(data; n_draws=settings.n_draws, n_chains=settings.n_chains,
                     min_completed=settings.min_completed, seed=FIELD_SEED, progress=__progress__,
                     checkpoint_dir=get(ENV,"FIELD_CHECKPOINT_DIR",nothing), resume=get(ENV,"FIELD_RESUME","0") == "1")
                 info = Base.structdiff(sampled, (;draws=nothing))
                 serialize(local_draws, (;key, sampled, info, receipt))
+                println("DRAWS_CACHE ", local_draws)
             end
             @progress "Summarize posterior field"
             tables = summarize_station_field(data, sampled.draws, info; settings)
@@ -215,9 +267,9 @@ end
 if abspath(PROGRAM_FILE) == @__FILE__
     try
         main()
-    catch error
-        if error isa WarmupHMC.CompletionQuorumError
-            for chain in error.outcome.completion.chains
+    catch err
+        if err isa WarmupHMC.CompletionQuorumError
+            for chain in err.outcome.completion.chains
                 println(stderr, "Chain ", chain.chain_index, ": ", chain.status)
                 isnothing(chain.error) && continue
                 showerror(stderr, chain.error.ex)

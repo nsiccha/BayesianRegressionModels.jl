@@ -1,9 +1,10 @@
 # Map a field through space and time
 
 Fit a moving field from station measurements, read it at new locations, and
-separate uncertainty in the field from observation noise. The example uses
-`gmrf`; the final sections show when an area graph (`car`) or a smooth basis
-(`hsgp`) is a better description of the data.
+separate uncertainty in the field from observation noise. The example uses a
+`gmrf` term with nearest-neighbor conditioning. The
+[space-time fields guide](space-time-fields.md) covers the other field terms
+and when each fits the data.
 
 ## Data and model
 
@@ -45,11 +46,19 @@ coefficient. Add `1 + gmrf(...)` when the model needs an intercept.
 
 ## Run and diagnose
 
-Run the [fit script](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/space_time_fields/fields.jl)
-once, then build the page from its summaries. WarmupHMC adapts independent
-chains on the RK density, each with its own gradient workspace and initial
-values from `brm_start(...; base=:prior_median)`. Sampling stays outside the
-documentation build; the Reproduce footer records the exact run.
+The [fit script](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/space_time_fields/fields.jl)
+samples the RK density with WarmupHMC. Each chain gets its own log-density
+problem, and so its own gradient workspace, and starts with the scalar
+hyperparameters at their prior medians:
+
+```@eval
+Main.BRMDocsComparisons.source_code_region(
+    "research/space_time_fields/fields.jl";
+    starting_at="    # One RK log density per chain", ending_before="    chains = [Matrix(")
+```
+
+The fit runs once, outside the documentation build; this page reads its
+summaries, and the Reproduce section records the run.
 
 ```@eval
 Main.BRMDocsComparisons.results_table("research/space_time_fields/results/diagnostics.tsv";
@@ -62,10 +71,17 @@ chains; these diagnostics do not rule out bias from selecting chains by runtime.
 Inspect divergences and chain agreement before interpreting the maps.
 
 ```@eval
-Main.BRMDocsComparisons.results_table("research/space_time_fields/results/noise.tsv";
+Main.BRMDocsComparisons.results_table("research/space_time_fields/results/quantities.tsv";
     columns=[:quantity => "Quantity", :unit => "Units", :median => "Median",
-             :q025 => "2.5%", :q975 => "97.5%", :rhat => "R-hat", :ess_bulk => "Bulk ESS", :ess_tail => "Tail ESS"])
+             :q025 => "2.5%", :q975 => "97.5%", :description => "Truth or prior",
+             :rhat => "R-hat", :ess_bulk => "Bulk ESS", :ess_tail => "Tail ESS"])
 ```
+
+The noise SD is the one scalar with a known generating value. The generating
+surface is not a Gaussian process, so the field SD and the two lengths have no
+true values; compare them with their priors instead. A posterior length close
+to its prior median, with an interval about as wide as the prior's, means the
+data say little about it.
 
 ## Read and map the field
 
@@ -74,8 +90,16 @@ Read fitted locations with `rk_draw_tree(rk, draws, (:field,)).field`, then
 reduce its named `:draw` axis with `quantile` or `std` from TreeArrays.
 Raw sampler coordinates are not field values.
 
-For new coordinates and times, use
-`brm_gmrf_predict(rk, draws, :field; east, north, time, rng)`.
+For new coordinates and times, `brm_gmrf_predict` returns one row per point
+and one column per draw. TreeArrays reduces the named draw axis to the map
+quantiles:
+
+```@eval
+Main.BRMDocsComparisons.source_code_region(
+    "research/space_time_fields/fields.jl";
+    starting_at="    # rng adds the conditional uncertainty", ending_before="    # Field values on the response scale")
+```
+
 Passing a random-number generator includes conditional variation at new
 locations. Without it, the result contains conditional means; their spread
 understates pointwise uncertainty away from observations.
@@ -156,26 +180,32 @@ fine spatial structure. Changing the representation, mesh, or basis budget
 also requires a new fit; replay evaluates the fitted model at new inputs.
 
 For areal counts, smooth channel surfaces, mesh priors and minibatch SVI, see
-[Spatial and space-time fields](space-time-fields.md). That guide explains
-when `car`, `hsgp`, or another `gmrf` representation matches the data.
+the [space-time fields guide](space-time-fields.md).
 
-<details>
-<summary>Reproduce</summary>
+## Reproduce
 
-The [research README](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/space_time_fields/README.md)
-records the model conventions, environment, summary files and validation.
-Sampling runs locally; the documentation build reads those summaries and emits
-Vega-Lite specifications with AlgebraOfVega.
+::: details Commands and fit receipt
+
+The repository's test environment supplies the pinned BRM, ReactiveKernels,
+WarmupHMC and TreeArrays dependencies. These shell commands are manual: the
+docs build executes the model declaration and the figure code but reads the
+completed fit's summaries.
 
 ```sh
 julia --startup-file=no --project=test test/setup_env.jl
 julia --startup-file=no --project=test research/space_time_fields/fields.jl
-julia --startup-file=no --project=docs docs/make.jl
 ```
+
+The receipt's key hashes the emitted program, the data, the settings, the seed
+and the harness version. The draws stay outside git, under `BRM_DOCS_CACHE`
+(by default a directory below the system temporary directory); a second run
+with the same key rebuilds the tables from them. A run under a new key within
+30 days of the last one needs `BRM_DOCS_FIT_FORCE=1`.
 
 ```@eval
 Main.BRMDocsComparisons.results_table("research/space_time_fields/results/receipt.tsv";
-    columns=[:key => "Run", :value => "Value"])
+    columns=[:key => "field", :value => "value"])
 ```
 
-</details>
+[Research notes and source](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/space_time_fields/README.md).
+:::

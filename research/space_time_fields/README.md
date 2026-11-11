@@ -12,14 +12,12 @@ From the repository root:
 ```sh
 julia --startup-file=no --project=test test/setup_env.jl
 julia --startup-file=no --project=test research/space_time_fields/fields.jl
-julia --startup-file=no --project=docs docs/make.jl
 ```
 
+Then build the site as `docs/README.md` describes.
+
 The test setup pins the model, sampler and differentiation dependencies.
-Use Julia 1.10, as the documentation CI does. On the managed fleet, wrap each
-Julia run in `kb-acquire-compute-token --here --why '...' -- kb-run-compact`.
-The docs environment and rendering helper are maintained with the site's
-shared build configuration.
+Use Julia 1.10, as the documentation CI does.
 
 `fields.jl` generates the station data, fits the model once, and writes small
 TSV summaries. `figures.jl` builds AlgebraOfVega specifications during the
@@ -28,8 +26,8 @@ A missing summary is a build failure, not an instruction to sample in CI.
 
 `receipt.tsv` is written before sampling and completed after all summaries
 have been written. It names the content key, source commit, working-tree
-status, start time, environment, seed, settings and sampler outcome. A completed
-matching content key is reused. The tuple hashed by
+status, start time, environment, seed, settings and sampler outcome. The tuple
+hashed by
 `DynamicObjects.canonical_hash` is `(program, data, settings, seed, harness_version)`,
 matching DocsFits 0.1; its hash can differ across Julia minor versions.
 The program is the generated Stan form of the same BRM declaration.
@@ -52,23 +50,29 @@ FIELD_CHECKPOINT_DIR=/path/to/local/checkpoints FIELD_RESUME=1 \
 
 Use a checkpoint directory only with the same program, data and settings.
 The fit script never commits or publishes its outputs automatically.
-It saves the sampled draws in the git-ignored `results/fit.jls` before making
-tables, so a failed summary step can be retried without resampling. The page
-never reads that file.
+
+The sampled draws are saved before any table is written, to
+`$BRM_DOCS_CACHE/space_time_fields/<key>/draws.jls` (`BRM_DOCS_CACHE` defaults
+to `brm-docs-examples` below the system temporary directory). A second run
+under the same key rebuilds the tables from them without sampling; the page
+never reads that file. A run under a different key within 30 days of the
+receipt's start time stops unless `BRM_DOCS_FIT_FORCE=1` is set: a docs fit
+is rerun when its model, data or settings change, at most about once a month.
 
 ## Summary tables
 
-Every table must be smaller than 100 KB; numeric output is rounded to five
-significant digits. Draw arrays, checkpoints and generated images are not
-committed. The full precision draws are used for quantiles and diagnostics
-before rounding.
+Every table must be smaller than 100 KB. Quantiles and diagnostics are
+computed from the full-precision draws, then rounded for display: field values
+to 0.01 response units, field SDs to 0.001, and each quantity to two
+significant digits of its 95% interval's width. Draw arrays, checkpoints and
+generated images are not committed.
 
 | File | Content |
 | --- | --- |
 | `data.tsv` | Generated counts, domain, times, neighbor setting and noise SD |
 | `field_grid.tsv` | `east,north,time,truth,q025,q25,q50,q75,q975,sd` |
 | `observations.tsv` | `station,east,north,time,y,truth` |
-| `noise.tsv` | `quantity,unit,description,median,q025,q975,rhat,ess_bulk,ess_tail` |
+| `quantities.tsv` | Noise SD, field SD and both lengths as `quantity,unit,description,median,q025,q975,rhat,ess_bulk,ess_tail` |
 | `diagnostics.tsv` | Chain counts, omissions, truncation, coordinate diagnostics and divergences |
 | `map_checks.tsv` | Grid RMSE, pointwise coverage and mapping draw count |
 | `receipt.tsv` | Content key and run provenance as `key,value` rows |
@@ -84,16 +88,16 @@ replicate measurements and independent Gaussian measurement noise are
 reproducible from the data seed in `station_data`.
 
 The fitted `neighbors=` GMRF uses position–time reads, a Matérn-1 spatial
-covariance and OU temporal dependence. The spatial length is the approximately
-0.14-correlation range (`kappa = sqrt(8) / length`); the temporal length is the
-exponential correlation time. Amplitude, both lengths and observation-noise
+covariance and OU temporal dependence. BRM's spatial length ℓ sets
+`kappa = sqrt(2) / ℓ`, so the spatial correlation falls to about 0.14 at a
+distance of 2ℓ; the temporal length is the exponential correlation time. Amplitude, both lengths and observation-noise
 SD are inferred. The source function `station_field_model` is the single model
 used by the fit and the build-generated BRM/IR/StanBlocks/Stan panes.
 
 WarmupHMC uses independent RK density/gradient workspaces, prior-median
 initialization and a completion quorum. The returned draw array contains equal
 prefixes of retained chains, with their original lengths and omitted indices
-in the receipt. Cross-chain diagnostics and the noise posterior use the equal
+in the receipt. Cross-chain diagnostics and the quantity table use the equal
 prefixes. The divergence count covers all draws in retained chains, including
 those beyond the prefixes. Runtime-based chain selection can introduce bias
 that retained-chain diagnostics cannot detect.
