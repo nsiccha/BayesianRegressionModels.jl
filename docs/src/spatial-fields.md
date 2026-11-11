@@ -77,11 +77,13 @@ Main.BRMDocsComparisons.results_table("research/space_time_fields/results/quanti
              :rhat => "R-hat", :ess_bulk => "Bulk ESS", :ess_tail => "Tail ESS"])
 ```
 
-The noise SD is the one scalar with a known generating value. The generating
-surface is not a Gaussian process, so the field SD and the two lengths have no
-true values; compare them with their priors instead. A posterior length close
-to its prior median, with an interval about as wide as the prior's, means the
-data say little about it.
+The noise SD's interval contains its generating value. The generating surface
+is not a Gaussian process, so the field SD and the two lengths have no true
+values; compare them with their priors. A long spatial length couples distant
+stations, and a long temporal length keeps the field similar across nearby
+times. The data move the temporal length above most of its prior range: each
+feature moves a few kilometers per time unit, less than its own width. The
+spatial length stays near its prior median, with a narrower interval.
 
 ## Read and map the field
 
@@ -142,42 +144,28 @@ The bands show uncertainty at individual locations. They are not simultaneous
 coverage bands for an entire curve, and predicting a future measurement would
 also require observation noise.
 
-## What this example checks
+## Checks against the generating surface
 
-The generating surface has two features with different signs and directions
-of motion. A fit can reproduce the station measurements while misrepresenting
-the field between stations; compare the maps, rather than using agreement at
-the observed rows as the only check. The truth is available here because the
-data are synthetic. In an application, held-out locations or times provide a
-more useful check of extrapolation than fitted residuals alone.
-
-The spatial and temporal lengths govern different kinds of borrowing. A long
-spatial length couples distant stations; a long temporal length keeps nearby
-times similar. Replication helps identify observation noise, but does not create
-new spatial locations. Compare the posterior lengths with their priors when
-stations are sparse or the observed time span is short.
-
-The maps summarize the latent field, not a complete future dataset. Their
-posterior standard deviation combines uncertainty about fitted states and
-hyperparameters with conditional variation at each new location. It excludes
-the extra variation from a new noisy measurement. The slice makes the
-pointwise intervals easier to read than the SD color scale alone.
+The truth is known here because the data are synthetic. On the map grid at the
+three observation times:
 
 ```@eval
 Main.BRMDocsComparisons.results_table("research/space_time_fields/results/map_checks.tsv";
     columns=[:quantity => "Grid check", :value => "Value"])
 ```
 
-These checks summarize this generating surface on this grid. Pointwise
-coverage across a single simulated field is not a calibration study: nearby
-cells share information and are not independent replications. Repeat the
-simulation across datasets before making a general coverage claim.
+Every grid point's 95% interval contains the generating value, so on this
+surface the intervals are wide rather than tight. One simulated field is not a
+calibration study: nearby cells share information, so repeat the simulation
+across datasets before making a coverage claim. In an application, held-out
+stations or times check the fit between stations; residuals at the fitted rows
+do not.
 
-The neighbor count controls a covariance approximation, not just display
-resolution. Increasing the map grid density does not improve that approximation.
-Refit with different neighbor settings when scientific conclusions depend on
-fine spatial structure. Changing the representation, mesh, or basis budget
-also requires a new fit; replay evaluates the fitted model at new inputs.
+The neighbor count sets a covariance approximation, not the map's resolution,
+and a denser map grid does not improve it. Refit with more neighbors when
+conclusions depend on fine spatial structure. A change of representation, mesh
+or basis also needs a new fit; replay only evaluates the fitted model at new
+inputs.
 
 For areal counts, smooth channel surfaces, mesh priors and minibatch SVI, see
 the [space-time fields guide](space-time-fields.md).
