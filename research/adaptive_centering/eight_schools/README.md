@@ -1,11 +1,10 @@
-````@raw html
----
-title: Eight schools and the choice of centering
-description: "PosteriorDB eight schools in BRM: manually centered and noncentered fits, adaptive alternatives, posterior checks and measured costs."
----
-````
-
 # Eight schools and the choice of centering
+
+This is the archived study protocol and recorded comparison. It is research
+material, separate from the current [adaptive-centering guide](../../../docs/src/adaptive-centering.md).
+The [reproduction scripts and source provenance](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/eight_schools_centering)
+remain available; source model and data revisions are recorded there.
+Figures are regenerated from the scripts and are not committed here.
 
 Eight schools report treatment-effect estimates with substantial uncertainty.
 A hierarchical model pools those estimates toward a common mean. When the
@@ -35,8 +34,7 @@ statement and support match the
 [reference Stan program](https://github.com/stan-dev/posteriordb/blob/5545a1dd07ae297c36edecbcd82aa49097b4c385/posterior_database/models/stan/eight_schools_noncentered.stan).
 Here, `sigma` contains the known standard errors of the reported estimates.
 
-```@eval
-Main.BRMDocsComparisons.comparison(@__MODULE__, raw"""
+```julia
 using BayesianRegressionModels, Distributions, StanBlocks
 
 function eight_schools_model()
@@ -49,11 +47,9 @@ function eight_schools_model()
              y=Float64[28, 8, -3, 7, -1, 1, 18, 12],
              sigma=Float64[15, 10, 16, 11, 9, 11, 10, 18]))
 end
-""", :eight_schools_model;
-    title="Eight schools with PosteriorDB priors", require_stan=true, total_groups=())
 ```
 
-The tabs show generated backends. The fits below use StanBlocks/BridgeStan
+The fits below use StanBlocks/BridgeStan
 and WarmupHMC. Independent comparisons with PosteriorDB's centered Stan
 program verify the density and all ten gradient components, including the
 coordinate Jacobian. The independent audit is retained with the source model.
@@ -120,13 +116,13 @@ checkpoint-to-model mapping is checked independently before summarizing fits.
 Thin intervals contain 90% of draws and thick intervals 50%. Each school is
 a category with its own interval. Treatment effects are $\theta_j=\mu+\tau z_j$.
 
-[![School treatment effects from NCP and CP fits](assets/centering-refresh-eight/posterior-effects.png)](assets/centering-refresh-eight/posterior-effects.png)
+Figure: School treatment effects from NCP and CP fits. Regenerate it with the study plotting script.
 
 The predictive check uses the NCP fit and includes the known standard error
 of each reported estimate. Red points are the observations in their original
 school order. There are no ribbons between categorical schools.
 
-[![Replicated-estimate intervals and observed school estimates](assets/centering-refresh-eight/ppc.png)](assets/centering-refresh-eight/ppc.png)
+Figure: Replicated-estimate intervals and observed school estimates. Regenerate it with the study plotting script.
 ## Select centering from a pilot
 
 An offline rule evaluates each school on a grid `c = 0:0.01:1`:
@@ -190,7 +186,7 @@ WarmupHMC returns **model coordinates** in `posterior_position`; checkpoints
 retain sampler coordinates. Export checks their mapping, Jacobian-adjusted
 density and saved gradients before making figures or scientific summaries.
 
-[![Centering selected with both losses, post-hoc and online](assets/centering-refresh-eight/centeredness.png)](assets/centering-refresh-eight/centeredness.png)
+Figure: Centering selected with both losses, post-hoc and online. Regenerate it with the study plotting script.
 
 Both criteria favor coordinates close to noncentering in this weakly informed hierarchy.
 
@@ -226,7 +222,7 @@ absolute ESS and both denominators, are in the linked result files.
 Sampling divergences: **NCP: 1; CP: 39; Post-hoc position: 0; Post-hoc gradient: 0; Online position: 2; Online gradient: 0**. These are one-chain comparisons, so neither
 the ranking nor a within-chain split R-hat establishes cross-chain convergence.
 
-[![Full gradient cost and the two relative sampling efficiencies](assets/centering-refresh-eight/efficiency.png)](assets/centering-refresh-eight/efficiency.png)
+Figure: Full gradient cost and the two relative sampling efficiencies. Regenerate it with the study plotting script.
 
 The position-loss post-hoc refit modestly improves sampling efficiency here, but its pilot makes total efficiency lower than NCP. Full centering has 39 divergences and poor efficiency; its intervals require that qualification.
 
@@ -238,11 +234,11 @@ The post-hoc and online panels each show their two newly fitted loss variants
 in the coordinates actually used by the sampler. CP is the visual reference;
 NCP remains the efficiency baseline. Axes are independent across panels.
 
-[![School effects: CP and NCP pilot coordinates](assets/centering-refresh-eight/pairs-pilot-school-effects.png)](assets/centering-refresh-eight/pairs-pilot-school-effects.png)
+Figure: School effects: CP and NCP pilot coordinates. Regenerate it with the study plotting script.
 
-[![School effects: CP reference and both post-hoc losses](assets/centering-refresh-eight/pairs-posthoc-school-effects.png)](assets/centering-refresh-eight/pairs-posthoc-school-effects.png)
+Figure: School effects: CP reference and both post-hoc losses. Regenerate it with the study plotting script.
 
-[![School effects: CP reference and completed online losses](assets/centering-refresh-eight/pairs-online-school-effects.png)](assets/centering-refresh-eight/pairs-online-school-effects.png)
+Figure: School effects: CP reference and completed online losses. Regenerate it with the study plotting script.
 
 ## Position and gradient in the displayed coordinates
 
@@ -252,9 +248,9 @@ the pilot's positions and gradients together. The fitted panels use gradients
 saved in their actual sampler frame; they do not attach an NCP gradient to a
 centered position.
 
-[![School effects: positions and gradients, posthoc](assets/centering-refresh-eight/gradients-posthoc-school-effects.png)](assets/centering-refresh-eight/gradients-posthoc-school-effects.png)
+Figure: School effects: positions and gradients, posthoc. Regenerate it with the study plotting script.
 
-[![School effects: positions and gradients, online](assets/centering-refresh-eight/gradients-online-school-effects.png)](assets/centering-refresh-eight/gradients-online-school-effects.png)
+Figure: School effects: positions and gradients, online. Regenerate it with the study plotting script.
 
 ## Reproduce and inspect
 

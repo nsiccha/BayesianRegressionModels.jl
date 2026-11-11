@@ -72,12 +72,14 @@ julia --project=research/adaptive_centering/plots research/centering_refresh/plo
 ```
 
 Substitute `eight` or `radon` for the other studies. The plot environment has its
-own Project and Manifest. Generated figures stay in the output directory;
-the documentation renders AlgebraOfVega specifications from small summaries.
+own Project and Manifest. Keep rendered figures and full draws in the chosen
+output directory. The guide renders its figure from the small committed
+`results/eight/efficiency.tsv` table through AlgebraOfVega; it does not copy
+PNGs into the site. The historical site-generation scripts are retired.
 
-`results/receipt.json` records exact exits, source hashes, package revisions,
-and the completed fit roster. Full fitting and render logs are outside the
-public repository. Execution times include process setup and are not presented
+`results/receipt.json` records exact exits, source hashes, package revisions
+and the completed fit roster. Full execution logs remain outside the public
+repository. These execution times include process setup and are not presented
 as sampler timing comparisons.
 
 ## Scientific and coordinate checks

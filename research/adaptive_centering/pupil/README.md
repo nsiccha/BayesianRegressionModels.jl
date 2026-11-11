@@ -1,5 +1,11 @@
 # Pupil: numeric scale predictor and automatic totals
 
+This is the archived study protocol and recorded comparison. It is research
+material, separate from the current [adaptive-centering guide](../../../docs/src/adaptive-centering.md).
+The [reproduction scripts and source provenance](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/pupil_builtin_totals)
+remain available; source model and data revisions are recorded there.
+Figures are regenerated from the scripts and are not committed here.
+
 !!! note "Exact totals are not the default"
     This study uses exact total coefficients (`total_groups`). SBBRMI's default is the standard parametrization, so the code passes `total_groups=:auto` explicitly. For groupings whose blocks the data identify strongly or unevenly, BRM also offers the sum-to-zero (S2Z) parametrization (`s2z_groups`, `s2z_rho`) with WarmupHMC adaptive centering.
 
@@ -19,7 +25,7 @@ The data contain 2,228 observations, 20 subjects with IDs 701–720, and numeric
 bf(p_size ~ load + (load || subj), sigma ~ subj)
 ```
 
-In these data `subj` is numeric. Thus the residual model is a regression of **log residual SD on subject ID**. The [second pupil study](pupil-scale-centering.md) instead assigns each subject a hierarchical residual SD.
+In these data `subj` is numeric. Thus the residual model is a regression of **log residual SD on subject ID**. The [second pupil study](../pupil_scale/README.md) instead assigns each subject a hierarchical residual SD.
 
 ```math
 y_n\sim N(\mu_n,\sigma_n^2),\qquad
@@ -39,14 +45,10 @@ Flat priors apply to these population slopes because that is the source model's 
 
 ## BRM implementation
 
-The authoring pane reads the actual declarations used for the fits. Its backend panes are generated during the documentation build. The measurements use StanBlocks/BridgeStan and WHMC.
+The declaration below points to the fitted source model. The measurements use StanBlocks/BridgeStan and WHMC.
 
-```@eval
-Main.BRMDocsComparisons.comparison(@__MODULE__,
-    Main.BRMCenteringExamples.authoring(:pupil_numeric),
-    :pupil_numeric_brm_model;
-    title="Pupil means with a numeric subject-ID scale predictor", require_stan=true)
-```
+The exact declaration and its data construction are retained in the
+[reproduction source](../../pupil_builtin_totals/common.jl).
 
 BRM recognizes that the population intercept and slope share their design with the subject effects. It replaces them with subject totals
 
@@ -129,7 +131,7 @@ Both efficiency columns are relative to **ordinary brms NCP + native Stan**. Sam
 | BRM total online position · WHMC | 34,526 | 235× | 318× |
 | BRM total online gradient · WHMC | 52,951 | 159× | 224× |
 
-[![Total gradient costs and relative efficiencies for 46 scientific quantities.](assets/pupil-builtin-centering/efficiency.png)](assets/pupil-builtin-centering/efficiency.png)
+Figure: Total gradient costs and relative efficiencies for 46 scientific quantities. Regenerate it with the study plotting script.
 
 The post-hoc rows improve sampling efficiency but pay for a separate pilot. Online adaptation avoids that cost. The strong CP and S2Z-auto controls show that a comparison against ordinary NCP alone would give an incomplete picture.
 
@@ -141,11 +143,11 @@ The nine brms fits are reused from the verified comparison because their targets
 
 The total-coefficient figure shows the **same 2,000 post-hoc position draws** in CP, NCP and ACP coordinates. Rows choose distinct coordinates by minimum selected centeredness, closest to 0.5, and maximum. CP is the visualization baseline; the ACP values were checked against the saved source coordinates.
 
-[![Identical saved total-coefficient draws viewed in CP, NCP and partial coordinates.](assets/pupil-builtin-centering/total_pairs.png)](assets/pupil-builtin-centering/total_pairs.png)
+Figure: Identical saved total-coefficient draws viewed in CP, NCP and partial coordinates. Regenerate it with the study plotting script.
 
 The S2Z figure reuses the unchanged auto-WHMC fit. It shows centered contrasts, standardized contrasts, and the branch's subject-labelled `Q*z` coordinates. Those J displayed values represent J−1 independent contrast directions. The auto transform includes its weighted centering correction.
 
-[![Identical S2Z-auto draws viewed in centered, noncentered and auto contrast coordinates.](assets/adaptive-pupil/s2z_pairs.png)](assets/adaptive-pupil/s2z_pairs.png)
+Figure: Identical S2Z-auto draws viewed in centered, noncentered and auto contrast coordinates. Regenerate it with the study plotting script.
 
 brms S2Z auto uses the pinned branch's Pathfinder/Fisher selection, then holds its weights fixed. WHMC receives that same resolved target and weights. These weights differ from BRM's per-total centering controls and loss functions; S2Z auto here is not online WHMC adaptation.
 
@@ -176,7 +178,7 @@ The automatic target passed 25 density, gradient, centering-coordinate and recov
 - [Complete comparison table](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_builtin_totals/results/comparison.tsv).
 - [Per-quantity ESS and MCSE](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_builtin_totals/results/per_quantity_mcse.tsv).
 - [Recovery sensitivity](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_builtin_totals/results/recovery_seed_sensitivity.tsv).
-- [brms model sources and original fit archives](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_total_effects/README.md).
-- [New generated target and fit manifest](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_builtin_totals/README.md).
+- [brms model sources and reproduction](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_total_effects/README.md).
+- [Generated target and reproduction instructions](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_builtin_totals/README.md).
 
-The data revision is `d90fc01e6f6fcdced7ee64c9d2ed607d212ec77c`; brms is pinned to PR #1919 revision `73cf607889879cb2a55f50b88d8141d76ff43279`. New total fits use BRM's built-in planner with the retained-flat-prior correction and WarmupHMC `7aed40b18bd4cdabb75330f285d5c9b355575ab9`, Julia 1.10.11. Native fits use CmdStan 2.39.0 and CmdStanR 0.9.0. The archive manifests retain the exact source and raw-draw provenance for reused and new fits.
+The data revision is `d90fc01e6f6fcdced7ee64c9d2ed607d212ec77c`; brms is pinned to PR #1919 revision `73cf607889879cb2a55f50b88d8141d76ff43279`. New total fits use BRM's built-in planner with the retained-flat-prior correction and WarmupHMC `7aed40b18bd4cdabb75330f285d5c9b355575ab9`, Julia 1.10.11. Native fits use CmdStan 2.39.0 and CmdStanR 0.9.0. The linked reproduction instructions record source revisions and the numerical drivers. Raw draws are regenerated outside the repository.

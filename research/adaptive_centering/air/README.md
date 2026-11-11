@@ -1,5 +1,11 @@
 # Air pollution: regional effects and automatic totals
 
+This is the archived study protocol and recorded comparison. It is research
+material, separate from the current [adaptive-centering guide](../../../docs/src/adaptive-centering.md).
+The [reproduction scripts and source provenance](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/air_total_effects)
+remain available; source model and data revisions are recorded there.
+Figures are regenerated from the scripts and are not committed here.
+
 !!! note "Exact totals are not the default"
     This study uses exact total coefficients (`total_groups`). SBBRMI's default is the standard parametrization, so the code passes `total_groups=:auto` explicitly. For groupings whose blocks the data identify strongly or unevenly, BRM also offers the sum-to-zero (S2Z) parametrization (`s2z_groups`, `s2z_rho`) with WarmupHMC adaptive centering.
 
@@ -45,27 +51,19 @@ The source captures also retain `cluster_log_region` and `super_region` specific
 
 ## BRM models
 
-The authoring panes below read the exact fitted declarations. The backend views are regenerated during the docs build. Sampling uses StanBlocks/BridgeStan and WHMC.
+The declarations below point to the fitted source models. Sampling uses StanBlocks/BridgeStan and WHMC.
 
 ### Regional intercepts
 
-```@eval
-Main.BRMDocsComparisons.comparison(@__MODULE__,
-    Main.BRMCenteringExamples.authoring(:air_intercept),
-    :air_intercept_brm_model;
-    title="AIR with regional intercepts", require_stan=true)
-```
+The exact declaration and its data construction are retained in the
+[reproduction source](../../air_total_effects/model.jl).
 
 BRM integrates the population intercept and samples `alpha[j] = beta0 + a[j]`. The likelihood is `alpha[j] + beta1*(x-xbar)`; the population slope remains explicit. For reporting, the regional intercept at raw `x=0` is `A[j] = alpha[j] - xbar*beta1`.
 
 ### Independent regional intercepts and slopes
 
-```@eval
-Main.BRMDocsComparisons.comparison(@__MODULE__,
-    Main.BRMCenteringExamples.authoring(:air_independent),
-    :air_independent_brm_model;
-    title="AIR with independent regional intercepts and slopes", require_stan=true)
-```
+The exact declaration and its data construction are retained in the
+[reproduction source](../../air_total_effects/model.jl).
 
 BRM integrates both population coefficients and samples
 
@@ -130,7 +128,7 @@ The common quantities are the population intercept and slope, group SD, residual
 | BRM total online position · WHMC | 16,286 | 107× | 128× |
 | BRM total online gradient · WHMC | 16,286 | 107× | 128× |
 
-[![Total gradient costs and relative scientific-QOI efficiencies.](assets/air-centering/cluster-intercept-efficiency.png)](assets/air-centering/cluster-intercept-efficiency.png)
+Figure: Total gradient costs and relative scientific-QOI efficiencies. Regenerate it with the study plotting script.
 
 Both post-hoc losses select full centering for all six totals. They therefore produce the same fit as fixed CP, with the additional pilot cost. Both online losses also select CP and produce identical results to each other. S2Z CP + WHMC has the largest observed efficiency in this pilot; totals do not dominate this comparison.
 
@@ -155,7 +153,7 @@ The common quantities are the two population coefficients, two group SDs, residu
 | BRM total online position · WHMC | 53,202 | 14.3× | 17.5× |
 | BRM total online gradient · WHMC | 20,137 | 130× | 140× |
 
-[![Total gradient costs and relative scientific-QOI efficiencies.](assets/air-centering/cluster-independent-efficiency.png)](assets/air-centering/cluster-independent-efficiency.png)
+Figure: Total gradient costs and relative scientific-QOI efficiencies. Regenerate it with the study plotting script.
 
 The post-hoc workflows pay for a 1,178,130-gradient NCP pilot, so good retained-sampling efficiency can coexist with low total efficiency. Fixed CP and online adaptation avoid that separate pilot. Online position and gradient select different configurations here.
 
@@ -165,15 +163,15 @@ Each figure reuses the **same 2,000 draws across its columns**, with CP as the v
 
 ### Regional intercepts
 
-[![The same 2,000 total-coefficient draws in CP, NCP and partial coordinates.](assets/air-centering/cluster-intercept-total_pairs.png)](assets/air-centering/cluster-intercept-total_pairs.png)
+Figure: The same 2,000 total-coefficient draws in CP, NCP and partial coordinates. Regenerate it with the study plotting script.
 
-[![The same 2,000 S2Z-auto draws in centered, noncentered and auto contrast coordinates.](assets/air-centering/cluster-intercept-s2z_pairs.png)](assets/air-centering/cluster-intercept-s2z_pairs.png)
+Figure: The same 2,000 S2Z-auto draws in centered, noncentered and auto contrast coordinates. Regenerate it with the study plotting script.
 
 ### Regional intercepts and slopes
 
-[![The same 2,000 total-coefficient draws in CP, NCP and partial coordinates.](assets/air-centering/cluster-independent-total_pairs.png)](assets/air-centering/cluster-independent-total_pairs.png)
+Figure: The same 2,000 total-coefficient draws in CP, NCP and partial coordinates. Regenerate it with the study plotting script.
 
-[![The same 2,000 S2Z-auto draws in centered, noncentered and auto contrast coordinates.](assets/air-centering/cluster-independent-s2z_pairs.png)](assets/air-centering/cluster-independent-s2z_pairs.png)
+Figure: The same 2,000 S2Z-auto draws in centered, noncentered and auto contrast coordinates. Regenerate it with the study plotting script.
 
 The first set shows total coefficients; the S2Z set shows zero-sum contrasts. These are coordinate views of saved posterior draws, not predictive intervals or separate posterior fits.
 
@@ -203,7 +201,6 @@ This study does not establish a replicated ranking across chains/seeds, behavior
 - [S2Z coordinate and generated-recovery audit](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/air_total_effects/s2z.jl).
 - [Saved-draw validation](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/air_total_effects/validate_saved.jl).
 - [Numerical proposal audit](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/air_total_effects/numerical_audit.jl).
-- [Full raw-fit archive manifest](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/air_total_effects/results/fits/manifest.json).
 - [Reproduction instructions](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/air_total_effects/README.md).
 - [cluster-intercept: comparison table](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/air_total_effects/results/cluster-intercept/comparison.tsv).
 - [cluster-intercept: per-quantity ESS and MCSE](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/air_total_effects/results/cluster-intercept/per_quantity_mcse.tsv).
@@ -240,4 +237,4 @@ This study does not establish a replicated ranking across chains/seeds, behavior
 - [Automatic independent: Stan](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/air_total_effects/reference/automatic_totals/independent/automatic_totals.stan).
 - [Automatic independent: data](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/air_total_effects/reference/automatic_totals/independent/automatic_totals.json).
 
-Data revision: `2afb605f81cf0bdadc6476df865e0337aaacf183`; brms PR #1919 revision: `73cf607889879cb2a55f50b88d8141d76ff43279`; repaired WHMC: `7aed40b18bd4cdabb75330f285d5c9b355575ab9`; Julia 1.10.11, CmdStan 2.39.0 and CmdStanR 0.9.0. BRM uses the built-in total planner with the retained-flat-prior correction. The source, raw fits, native CSVs, resolved weights and gradient counts are preserved in the linked manifests.
+Data revision: `2afb605f81cf0bdadc6476df865e0337aaacf183`; brms PR #1919 revision: `73cf607889879cb2a55f50b88d8141d76ff43279`; repaired WHMC: `7aed40b18bd4cdabb75330f285d5c9b355575ab9`; Julia 1.10.11, CmdStan 2.39.0 and CmdStanR 0.9.0. BRM uses the built-in total planner with the retained-flat-prior correction. The linked sources preserve the numerical drivers, public inputs and small summaries. Raw fits and native CSVs are regenerated outside the repository.

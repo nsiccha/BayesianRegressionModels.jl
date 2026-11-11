@@ -1,5 +1,11 @@
 # RBesT meta-analytic-predictive priors: sum-to-zero and automatic totals
 
+This is the archived study protocol and recorded comparison. It is research
+material, separate from the current [adaptive-centering guide](../../../docs/src/adaptive-centering.md).
+The [reproduction scripts and source provenance](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/rbest_centering)
+remain available; source model and data revisions are recorded there.
+Figures are regenerated from the scripts and are not committed here.
+
 !!! note "Exact totals are not the default"
     This study uses exact total coefficients (`total_groups`). SBBRMI's default is the standard parametrization, so the code passes `total_groups=:auto` explicitly. For groupings whose blocks the data identify strongly or unevenly, BRM also offers the sum-to-zero (S2Z) parametrization (`s2z_groups`, `s2z_rho`) with WarmupHMC adaptive centering.
 
@@ -45,25 +51,17 @@ BRM's exact totals do the same marginalization in different coordinates: the `H`
 
 ## BRM models
 
-The authoring panes below read the exact fitted declarations. The backend views are regenerated during the docs build. Sampling uses StanBlocks/BridgeStan and WHMC.
+The declarations below point to the fitted source models. Sampling uses StanBlocks/BridgeStan and WHMC.
 
 ### AS
 
-```@eval
-Main.BRMDocsComparisons.comparison(@__MODULE__,
-    Main.BRMCenteringExamples.authoring(:rbest_as),
-    :rbest_as_brm_model;
-    title="RBesT AS: binomial gMAP", require_stan=true)
-```
+The exact declaration and its data construction are retained in the
+[reproduction source](../../rbest_centering/model.jl).
 
 ### crohn
 
-```@eval
-Main.BRMDocsComparisons.comparison(@__MODULE__,
-    Main.BRMCenteringExamples.authoring(:rbest_crohn),
-    :rbest_crohn_brm_model;
-    title="RBesT crohn: Gaussian gMAP with known SE", require_stan=true)
-```
+The exact declaration and its data construction are retained in the
+[reproduction source](../../rbest_centering/model.jl).
 
 BRM's conventional `centered_groups` samples the trial deviation `ε_h` with its `N(0, τ)` prior and keeps `β` separate; that is the `c = 1` endpoint of the ordinary adaptive wrapper. RBesT's legacy centered form samples `θ_h` itself, which is the geometry of BRM's totals at `c = 1` with `β` integrated out. The two "CP" rows are therefore different parameterizations.
 
@@ -113,7 +111,7 @@ Both efficiency columns are relative to RBesT 1.11's default non-centered fit un
 | BRM total online position · WHMC | 69,353 | 0.226× | 0.269× | 79 |
 | BRM total online gradient · WHMC | 89,144 | 1.3× | 1.55× | 19 |
 
-[![Total gradient costs and relative scientific-QOI efficiencies.](assets/rbest-centering/AS-efficiency.png)](assets/rbest-centering/AS-efficiency.png)
+Figure: Total gradient costs and relative scientific-QOI efficiencies. Regenerate it with the study plotting script.
 
 ### crohn: 8 quantities
 
@@ -138,23 +136,23 @@ Both efficiency columns are relative to RBesT 1.11's default non-centered fit un
 | BRM total online position · WHMC | 69,343 | 3.59× | 4.28× | 38 |
 | BRM total online gradient · WHMC | 71,425 | 6.42× | 7.65× | 62 |
 
-[![Total gradient costs and relative scientific-QOI efficiencies.](assets/rbest-centering/crohn-efficiency.png)](assets/rbest-centering/crohn-efficiency.png)
+Figure: Total gradient costs and relative scientific-QOI efficiencies. Regenerate it with the study plotting script.
 
 ## Saved-draw geometry
 
-Each figure reuses the same 10,000 post-hoc-position draws across its columns, with CP as the visualization baseline; rows select the trials with minimum, middle and maximum inferred centeredness. The interactive previews in the KB brief show every fifth draw.
+Each figure reuses the same 10,000 post-hoc-position draws across its columns, with CP as the visualization baseline; rows select the trials with minimum, middle and maximum inferred centeredness.
 
 ### AS
 
-[![The same 10,000 total-coefficient draws in CP, NCP and partial coordinates.](assets/rbest-centering/AS-total_pairs.png)](assets/rbest-centering/AS-total_pairs.png)
+Figure: The same 10,000 total-coefficient draws in CP, NCP and partial coordinates. Regenerate it with the study plotting script.
 
-[![The same 10,000 conventional-block draws in CP, NCP and partial coordinates.](assets/rbest-centering/AS-ordinary_pairs.png)](assets/rbest-centering/AS-ordinary_pairs.png)
+Figure: The same 10,000 conventional-block draws in CP, NCP and partial coordinates. Regenerate it with the study plotting script.
 
 ### crohn
 
-[![The same 10,000 total-coefficient draws in CP, NCP and partial coordinates.](assets/rbest-centering/crohn-total_pairs.png)](assets/rbest-centering/crohn-total_pairs.png)
+Figure: The same 10,000 total-coefficient draws in CP, NCP and partial coordinates. Regenerate it with the study plotting script.
 
-[![The same 10,000 conventional-block draws in CP, NCP and partial coordinates.](assets/rbest-centering/crohn-ordinary_pairs.png)](assets/rbest-centering/crohn-ordinary_pairs.png)
+Figure: The same 10,000 conventional-block draws in CP, NCP and partial coordinates. Regenerate it with the study plotting script.
 
 ## Diagnostics, recovery and limits
 
@@ -176,7 +174,6 @@ Both BRM targets and both wrappers passed their density, gradient, transport and
 - [Native-arm diagnostics](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/rbest_centering/native_analysis.jl).
 - [Recovery sensitivity and MCSE checks](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/rbest_centering/complete.jl).
 - [Saved-draw pairs](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/rbest_centering/pairs.jl).
-- [Full raw-fit archive manifest](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/rbest_centering/results/fits/manifest.json).
 - [Primary-source model check and reproduction](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/rbest_centering/README.md).
 - [AS: comparison table](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/rbest_centering/results/AS/comparison.tsv).
 - [AS: per-quantity MCSE](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/rbest_centering/results/AS/per_quantity_mcse.tsv).
