@@ -23,7 +23,6 @@ const DOCS_PAGES = [
         "Python/JAX sampling" => "jax.md",
         "Streaming variational inference" => "variational-inference.md",
         "Sequential filtering" => "filtering.md",
-        "Spatial field reconstruction" => "spatial-fields.md",
     ],
     "Reference" => [
         "Public API" => "api.md",

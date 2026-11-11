@@ -21,7 +21,6 @@ summaries come from deliberate, cached research runs. CI never samples.
 | Examples | `jax.md` | Export a hierarchical regression and compare Julia and NumPyro fits. |
 | Examples | `variational-inference.md` | Fit streaming and batch variational approximations. |
 | Examples | `filtering.md` | Compare sequential posterior updates and full-data sampling. |
-| Examples | `spatial-fields.md` | Reconstruct a spatial field and show uncertainty at new locations. |
 | Reference | `api.md` | Find public functions and types by task. |
 | Reference | `terms-reference.md` | Look up formula terms and their arguments. |
 
@@ -40,6 +39,10 @@ the shared documentation package is public. The transitional quantity schema is
 one fit per directory. It is compatible with the planned DocsFits summaries.
 
 ## Landing notes
+
+The fitted spatial-field example is deferred until its GMRF density and heatmap
+issues are resolved. The fields guide remains self-contained and illustrates
+prior temporal covariance; it makes no posterior reconstruction claim.
 
 The grey-seal example is held out while its density-dependence formulation and
 source provenance are reviewed. It is absent from this site's navigation and

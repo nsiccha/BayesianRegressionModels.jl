@@ -149,6 +149,3 @@ can be approximate. Check the solver and probe settings against the
 accuracy needed for the fit. The
 [representation notes](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/field_representations)
 retain the precision derivations and synthetic benchmark protocols.
-
-Continue to the [spatial-fields example](spatial-fields.md) for the fitted
-model, diagnostics, maps and its Reproduce footer.
