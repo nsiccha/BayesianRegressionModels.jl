@@ -301,6 +301,7 @@ function main(; chains = 4, n_draws = 1000, warmup = 1000, seed = 7,
         mkpath(dir)
         selected = filter(r -> r.method == method, rows)
         labels = Dict(key => label for (key, label, _) in POPULATION)
+        labels["b_mu__g_g.L[4]"] = "group correlation Cholesky factor"
         population = [(; quantity=r.quantity,
             unit=r.quantity in ("sigma", "pop_mu.beta_pop[1]", "b_mu__g_g.tau[1]") ? "response" :
                  r.quantity in ("pop_mu.beta_pop[2]", "b_mu__g_g.tau[2]") ? "response/predictor unit" : "1",
