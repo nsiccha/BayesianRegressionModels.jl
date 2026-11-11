@@ -29,15 +29,14 @@
 #
 # All EIGHT observation streams are `@brm` family likelihoods reading `state.<field>`
 # indexed to each stream's observation years — on their own frames (multi-frame is
-# fine on the formula surface): aerial pup counts (`NegativeBinomial2`), Swedish/Finnish
+# fine on the formula surface): aerial counts (`NegativeBinomial2`), Swedish/Finnish
 # harvest bags (`Normal`, cv-scaled sd), Swedish/Finnish hunting age-composition and
 # bycatch composition and reproductive-signs composition (per-row `Multinomial`), and
 # pregnancy counts (`Binomial`).
 #
 # Compiler checks are in test/seal_brm.jl; numerical checks are in
 # test/seal_density_dependence.jl and the separate test/seal_density_fit.jl.
-# Illustrative dataset (3 age classes x 2 sexes x 3 state years), from the
-# author's SlicTranspiler `seal_ipm` fixture.
+# Author-written synthetic dataset: 3 age classes x 2 sexes x 3 state years.
 
 using BayesianRegressionModels, StanBlocks, LogDensityProblems
 using Distributions: Uniform, Cauchy, LogNormal, Binomial, Multinomial

@@ -14,7 +14,7 @@
 # process (Leslie aging matrix, size-structured mortality, density-dependent birth
 # rates, within-year hunting solved by an ODE, and multinomial fate allocation of
 # each cohort into survived / bycatch / hunted-SW / hunted-FI), observed through EIGHT
-# data streams: aerial pup counts (negative binomial), Swedish/Finnish harvest bags
+# data streams: aerial counts (negative binomial), Swedish/Finnish harvest bags
 # (normal), Swedish/Finnish hunting age-composition (multinomial), bycatch composition
 # (multinomial), pregnancy counts (binomial), and reproductive-signs composition
 # (multinomial).
@@ -22,8 +22,8 @@
 # It is authored as inert SLIC source — one parent `@slic` body (`GREY_SEAL_IPM_SOURCE`)
 # + `@deffun` helper cards + 2 anonymous observation-stream submodels
 # (`GREY_SEAL_IPM_PARTS`) — and assembled with StanBlocks' `compile_slic_bundle`. The
-# source originated in the author's SlicTranspiler example; the fixture + builder
-# are BRM-side. The companion `grey_seal_brm.jl` expresses the statistical parts
+# fixture and builder are the author's own implementation. The companion
+# `grey_seal_brm.jl` expresses the statistical parts
 # on the `@brm` formula surface, retaining this mechanistic recurrence.
 #
 # Verified: `compile_slic_bundle` + `stanc` clean (~52 KB of Stan) on the example data;
@@ -34,7 +34,7 @@ using StanBlocks
 using Distributions
 import StanBlocks: compile_slic_bundle
 
-# Shim mirroring SlicTranspiler's `_bundle_part` so the source cards load here.
+# Package the authored source cards for compile_slic_bundle.
 _bundle_part(slug, title, source; kind = :submodel, data = nothing) =
     (; slug, title, kind, source = strip(source), data)
 
@@ -583,9 +583,8 @@ end
 """
     grey_seal_ipm_fixture()
 
-The SlicTranspiler example dataset (3 age classes × 2 sexes × 3 state years) — small,
-so the ODE-and-multinomial model transpiles quickly. Verbatim from SlicTranspiler's
-`seal_ipm` DataBlock.
+Author-written synthetic data (3 age classes × 2 sexes × 3 state years),
+small enough to exercise the ODE-and-multinomial model without the paper's data.
 """
 grey_seal_ipm_fixture() = (;
     n_age = 3, n_state_years = 3, n_demo = 6, population_burn_in = 2,
@@ -618,8 +617,8 @@ end
 """
     grey_seal_ipm_bundle([data])
 
-Assemble the grey-seal IPM via StanBlocks' `compile_slic_bundle`, mirroring the
-SlicTranspiler worker: each `@deffun` UDF card becomes a `@stanonly` definition (the
+Assemble the grey-seal IPM via StanBlocks' `compile_slic_bundle`:
+each `@deffun` UDF card becomes a `@stanonly` definition (the
 six observation-family density cards additionally carry `@lhs @lpxf`, flagged by their
 `# @slic markers:` comment), and the two `aerial_stream` / `bycatch_stream` cards are
 anonymous Form-A observation submodels. Returns the bundle result — `.model` (traced),

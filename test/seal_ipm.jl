@@ -1,6 +1,6 @@
 # test/seal_ipm.jl — gate for the grey-seal IPM port in research/seal/grey_seal_ipm.jl
-# (originally ported from the author's SlicTranspiler example; density dependence
-# follows Vanko et al. 2026). Gates the MODEL ARTIFACT: compile_slic_bundle
+# (the author's implementation; density dependence follows Vanko et al. 2026).
+# Gates the MODEL ARTIFACT: compile_slic_bundle
 # assembles it and the emitted Stan is stanc-clean. Not sampled (heavy ODE model).
 
 using Test
