@@ -5,7 +5,7 @@ measurement channels. Choose a representation from the observation geometry
 and the predictions you need.
 
 | Data | Term | Representation |
-| --- | --- | --- |
+| :--- | :--- | :--- |
 | Areas with known neighbors | `car(area; edges=(from,to), type=:bym2)` | Graph field plus independent area effects |
 | Smooth continuous coordinates | `hsgp(east,north; k=(kx,ky))` | Fixed Hilbert basis with `kx*ky` weights |
 | Points evolving over time | `gmrf((east,north),time; mesh=...)` | Triangular-mesh Matérn field with OU evolution |
@@ -104,7 +104,7 @@ channels. `cor` may also name a known correlation matrix. Replace a supported
 term prior by `= value` to fix that quantity.
 
 | Quantity | Interpretation | Units |
-| --- | --- | --- |
+| :--- | :--- | :--- |
 | `sd` | Nominal continuum marginal SD | Predictor units |
 | Spatial `length_scale` | Matérn ν=1 length `ell_s`; practical range is `2ell_s` | Coordinate units |
 | Temporal `length_scale` | OU correlation time `ell_t`; a gap of `ell_t` has correlation `exp(-1)` | Time units |
@@ -117,7 +117,7 @@ the hyperparameter-dependent determinants.
 ## Representation and prediction
 
 | Representation | State and replay boundary |
-| --- | --- |
+| :--- | :--- |
 | Mesh | Vertices × fitted times × channels; three barycentric reads per observation. New coordinates may lie inside the mesh, but frozen replay requires fitted times and channels. |
 | `neighbors=m` | Local conditionals on distinct observed position–time states. Spatial and temporal covariance are approximated. Frozen replay keeps that support. |
 | `multiresolution=m` | Sparse normalized spatial basis with exact OU temporal covariance and marginal SD. Basis paths use their readers' time unions; frozen replay keeps positions and times. |

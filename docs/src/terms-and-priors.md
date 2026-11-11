@@ -11,7 +11,7 @@ quantity owned by a term or group block. Distribution arguments use Julia's
 conventions: `Exponential` and `Gamma` take a scale, not Stan's rate.
 
 | Target | Prior statement | Quantity |
-| --- | --- | --- |
+| :--- | :--- | :--- |
 | Authored parameter | `sigma ~ Exponential(1)` | A positive scalar |
 | Formula coefficient | `effect(mu, x) ~ Normal(0, 0.3)` | The coefficient multiplying `x` |
 | Term or group parameter | `sd(mu, subject) ~ Exponential(0.5)` | The subject-effect SD |
@@ -102,7 +102,7 @@ The mass changes with the Normal location. Dropping a truncation normalizer
 when that location is sampled would change its prior.
 
 | Declaration | Use |
-| --- | --- |
+| :--- | :--- |
 | `x[1:n] .~ Normal.(0, scales)` | Independent elements; scalar arguments broadcast, data vectors apply elementwise |
 | `x ~ MvNormal(mean, covariance)` | A joint Gaussian vector; `Diagonal(v)` contains variances |
 | `share ~ Dirichlet(K, a)` | A simplex with concentration `a` per component |

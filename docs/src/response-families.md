@@ -11,7 +11,7 @@ The [terms reference](terms-reference.md#response-families) lists every mapped
 constructor and the supported compositions.
 
 | Response | Family examples | Parameters | Common explicit link |
-| --- | --- | --- | --- |
+| :--- | :--- | :--- | :--- |
 | Real | `Normal(mu, sigma)`, `LocationScale(mu, sigma, TDist(nu))` | Location, scale; degrees of freedom | Identity for `mu`, log for scale |
 | Positive | `Gamma(shape, scale)`, `InverseGaussian(mu, lambda)` | Shape/scale or mean/concentration | Log |
 | Probability | `Beta(a, b)` | Two positive shapes | Log on shapes, or transform mean and precision |
@@ -107,7 +107,7 @@ lower endpoint, and the likelihood is the probability of the interval
 `(response, upper]`. These are different observations of the same base law.
 
 | Observation | Declaration | Predictive quantity |
-| --- | --- | --- |
+| :--- | :--- | :--- |
 | Selected positive values | `y ~ truncated(Normal(mu, sigma); lower=0)` | Truncated values |
 | Detection limit | `y ~ censored(Normal(mu, sigma); lower=lloq)` | Values with the same clamping |
 | Known interval | `y ~ interval_censored(Normal(mu, sigma); upper=hi)` | Uncoarsened values from the base law |

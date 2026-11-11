@@ -12,7 +12,7 @@ model. Each backend consumes these same operations and records the fitted
 preprocessing needed to evaluate new rows consistently.
 
 | Entry point | Result | Uses |
-| --- | --- | --- |
+| :--- | :--- | :--- |
 | `SBBRMI(model)` | StanBlocks representation and emitted Stan | BridgeStan density and gradients; Stan generated quantities |
 | `RKBRMI(model)` | ReactiveKernelsPPL program | Julia density and gradients; MCMC, variational inference, filters and JAX export |
 

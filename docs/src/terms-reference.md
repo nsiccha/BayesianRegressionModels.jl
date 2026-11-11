@@ -15,7 +15,7 @@ nothing
 ## Columns and formula operators
 
 | Form | Contract |
-| --- | --- |
+| :--- | :--- |
 | `1`, `0` | Explicit intercept or no intercept; there is no implicit intercept |
 | `x + z`, `x & z`, `x * z` | Add terms, interaction only, or main effects plus interaction |
 | `offset(x)` | Add a data or sampled expression with coefficient one; no population coefficient and no random-effect offset |
@@ -40,7 +40,7 @@ Main.BRMTermsReference.table(:columns)
 ## Smooths and Gaussian processes
 
 | Term | Representation and boundaries | Addressed quantities |
-| --- | --- | --- |
+| :--- | :--- | :--- |
 | `s(x)` | Rank-10 thin-plate spline; at least 10 distinct finite values; centered linear null space plus 8 whitened penalized columns; the intercept owns the constant | `sd(lp, s(x))` |
 | `t2(x,z; k=(5,5), basis=(:cr,:cr), full=false)` | Two cubic regression margins; each `k > 2`, with at least `k` distinct values; default has 3 null columns and `rr`, `rn`, `nr` penalty blocks | `sd(lp, t2(x,z), rr)` and the other penalty components |
 | `gp(x...; cov=:exp_quad, iso=true, jitter=1e-9)` | Exact noncentered latent GP; a direct predictor contribution | `sd`, `length_scale` |
@@ -112,7 +112,7 @@ keyword has a narrower surface than the runtime
 ## Latent covariates and ordered effects
 
 | Term | Contract | Prior address |
-| --- | --- | --- |
+| :--- | :--- | :--- |
 | `mo(c)` | Ordered factor effect via simplex increments, with a free coefficient | `simplex(lp, mo(c))` |
 | `mo1(c)` | The same simplex contrast with coefficient fixed to one | `simplex(lp, mo1(c))` |
 | `me(x, sd)` | Latent true covariate with known observation SD; the same latent covariate can feed fixed and random slopes | `latent(lp, me(x))` |
@@ -134,7 +134,7 @@ Main.BRMTermsReference.table(:latent)
 ## Trajectories and areal fields
 
 | Term | Process | Prior and replay contract |
-| --- | --- | --- |
+| :--- | :--- | :--- |
 | `ar(t; p=1)` | First-order autoregressive noise | Only order 1 is emitted; its transformed persistence has no addressed prior |
 | `dar(t; p=1)` | Integrated AR(1) increments, starting at zero | Persistence in `[0,1]`; increasing unique time orders the increments, independent of gap size |
 | `rw(t)` | `dar` with persistence fixed to zero | One shared state per distinct sorted time; append times for forecasts |
@@ -165,7 +165,7 @@ Main.BRMTermsReference.table(:trajectories)
 ## Group effects and coordinate choices
 
 | Form | Contract |
-| --- | --- |
+| :--- | :--- |
 | `(1 + x | p | g)` | Group intercept/slope block; the ID `p` can join margins from several predictors |
 | `(1 + x || g)` | Independent margins |
 | `gr(g; by=b)` | Separate group distributions by stratum |
@@ -192,7 +192,7 @@ Exact total coefficients and posterior-preserving sum-to-zero coordinates
 are preparation options, not different likelihoods:
 
 | Option | Applicability and interpretation |
-| --- | --- |
+| :--- | :--- |
 | `total_groups=()` | Conventional coordinates; the default |
 | `total_groups=:auto` or selected group/predictor pairs | Analytically integrate eligible population Normal, Student-t or Flat margins into group totals; partial selection is supported |
 | `s2z_groups=(...)`, `s2z_rho=...` | Integrate the group mean and represent J−1 contrasts, preserving the original posterior |
@@ -216,7 +216,7 @@ are archived under research.
 ## Prior selection and scalar/vector parameters
 
 | Prior target | Scope |
-| --- | --- |
+| :--- | :--- |
 | `parameter ~ Distribution(...)` | Authored scalar, vector or simplex |
 | `effect(lp, column) ~ Prior(...)` | Existing population coefficient; `Intercept` names the intercept |
 | `sd(lp, group) ~ Prior(...)` | Group margin SD; a shared ID addresses its block |
@@ -243,7 +243,7 @@ length prior applies to each axis. Raw standardized innovations remain
 standard normal; they are not configurable prior targets.
 
 | Declaration | Contract |
-| --- | --- |
+| :--- | :--- |
 | `x ~ restricted(D; lower,upper)` | Original density kernel on bounded support; no interval-mass normalizer |
 | `x ~ truncated(D; lower,upper)` | Conditional law with its interval-mass normalizer |
 | `x ~ Horseshoe(...)` | Scalar local/global shrinkage construction; not an implicit shared scale across independent declarations |
@@ -274,7 +274,7 @@ Main.BRMTermsReference.table(:parameters)
 ### R² shrinkage
 
 | Address | Variance allocation |
-| --- | --- |
+| :--- | :--- |
 | `effect(lp,:) ~ r2d2(R2=Beta(a,b), tau_bsv=..., alpha=1)` | Predictor's non-intercept coefficient budget and one random-intercept residual |
 | `sd(:,p) ~ r2d2(reference_scale=..., R2=Beta(a,b), alpha=1)` | Shared random-effect block budget |
 | `sd(lp,p) ~ r2d2(...)` without a block-wide declaration | Independent per-margin ICC construction |
@@ -309,7 +309,7 @@ Distributions.jl family is insufficient. These tables describe Stan coverage.
 The guides and API identify narrower RK prediction/composition surfaces.
 
 | Group | Constructors |
-| --- | --- |
+| :--- | :--- |
 | Continuous, direct | `Normal`, `NormalCanon`, `Cauchy`, `TDist`, `Logistic`, `Gumbel`, `Chisq`, `Exponential`, `Gamma`, `Erlang`, `Beta`, `Uniform`, `LogNormal`, `Laplace`, `Frechet`, `Rayleigh`, `SkewNormal`, `Pareto`, `Weibull`, `InverseGamma`, `InverseGaussian`, `VonMises` |
 | Continuous, restricted parameterization | Standard `Arcsine()`; `SkewedExponentialPower(mu,sigma,1,alpha)` with literal shape 1 |
 | Discrete, direct | `Bernoulli`, `BernoulliLogit`, `Binomial`, `BinomialLogit`, `BetaBinomial`, `Poisson`, `NegativeBinomial` |
@@ -354,7 +354,7 @@ Main.BRMTermsReference.table(:responses)
 ### Observation compositions
 
 | Composition | Supported contract |
-| --- | --- |
+| :--- | :--- |
 | `truncated(d; lower,upper)` | Conditional sampling law on the interval |
 | `censored(d; lower,upper)` | Clamp the base draw to the observation limits |
 | `interval_censored(d; upper)` | Probability of `(response,upper]`; prediction returns an uncoarsened base draw |

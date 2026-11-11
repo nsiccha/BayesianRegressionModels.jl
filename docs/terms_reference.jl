@@ -96,7 +96,7 @@ codecell(s) = "`" * replace(strip(s), "|" => "\\|", "\n" => "; ", "`" => "'") * 
 """Build each row and display the actual BRMI and emitted density statements."""
 function table(group)
     lines = ["| Surface | Bound BRMI | Emitted density statements |",
-        "| --- | --- | --- |"]
+        "| :--- | :--- | :--- |"]
     for (label, declaration) in EXAMPLES[group]
         model = brm(declaration; mod=@__MODULE__)(DATA)
         sb = SBBRMI(model; mod=@__MODULE__, total_groups=())
