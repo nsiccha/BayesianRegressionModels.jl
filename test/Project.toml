@@ -164,7 +164,7 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # d9396ae6 (0.2.31) collects tuple-valued plate cells as `array[outer...] tuple(...)`
 # and reads `cell.lo` as `cell[i].1` (b28164c, snag plate-cell-submo-4867bc5b), which
 # BRM's named returns from a component called inside a plate cell lower to.
-rev = "d9396ae6c66c7cb44d641989573b7008154de6c5"
+rev = "df3a71e9e5ea0636d5cfdd40a4098813027fc05a"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

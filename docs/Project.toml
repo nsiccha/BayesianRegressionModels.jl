@@ -14,6 +14,7 @@ ZipFile = "a5390f91-8eb1-5f08-bee0-b1d1ffed6cea"
 [compat]
 AlgebraOfVega = "0.2.30"
 JSON = "1"
+StanBlocks = "0.2.36"
 ZipFile = "0.10"
 
 [sources.BayesianRegressionModels]

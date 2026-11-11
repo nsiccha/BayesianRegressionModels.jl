@@ -1,0 +1,5 @@
+chain	saved_states	accepted_states	divergences	divergence_pct	status
+1	300	0	66	22.0	rejected
+2	300	0	71	23.7	rejected
+3	300	0	56	18.7	rejected
+4	300	0	58	19.3	rejected
