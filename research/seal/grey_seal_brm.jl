@@ -1,10 +1,17 @@
-# The FULL grey-seal IPM on the `@brm` FORMULA surface — a faithful port of the
-# verbatim SlicTranspiler research model (`grey_seal_ipm.jl`), hoisting every
-# regression / random-effect / covariate piece onto brms-style formulas while the
+# The grey-seal IPM on the `@brm` formula surface, implemented by Niko Siccha.
+# Scientific reference: Vanko et al. (2026), https://doi.org/10.1016/j.ecolmodel.2026.111666,
+# Appendix C, Eqs. 42, 48, 51, 53; archived code: https://doi.org/10.5281/zenodo.20381625.
+# The equations are also documented in n-kall/sealIPM at commit 41583415815008c6a52683e0789d78960834d7f5,
+# src/stan/functions/pregnancy_births.stanfunctions. We retain the paper's exact
+# demographic equilibrium calibration, rather than that repository's newer soft prior.
+# K is equilibrium abundance at average herring covariates. This is an illustrative
+# adaptation of `grey_seal_ipm.jl`, with a different herring regression and
+# random-effect priors, not a reproduction of the paper's fitted analysis. It hoists
+# regression, random effects and covariates onto brms-style formulas while the
 # mechanistic core stays a `@deffun` scan.
 #
 # What is a brms FORMULA here (hoisted from the @slic parent):
-#   - birth-rate covariate REGRESSION ... `bbr_logit ~ 1 + herring_index_1 + herring_index_2`
+#   - birth-rate covariate regression, with a shared zero-herring intercept,
 #     (compute_baseline_birth_rate's logistic-on-herring), bounded in the scan;
 #   - per-year process/effort RANDOM EFFECTS with ESTIMATED group SDs (the @slic
 #     `epsilon_*` fixed-unit innovations become proper REs): `eps_birth ~ 0 + (1|year)`,
@@ -14,10 +21,10 @@
 #   - per-cell transition process NOISE: `tnoise ~ 0 + (1|noise_cell)` (crossed cell RE).
 #
 # What stays a `@deffun` scan (the carried-state recurrence — correct home, as CDC's
-# renewal is): the VERBATIM `run_state_process` (Leslie aging, size-structured
+# renewal is): `run_state_process` (Leslie aging, size-structured
 # mortality, density-dependent births, a within-year hunting ODE `ode_rk45_tol` on
 # `dH_dt`, and a `multinomial_allocation` logistic-normal survived/bycatch/hunted split)
-# and its 12 verbatim UDFs. `seal_state` wraps the parent's transformed quantities +
+# and its helper functions. `seal_state` wraps the parent's transformed quantities +
 # the scan; it returns a NamedTuple of carriers CONSUMED VIA FIELD ACCESS.
 #
 # All EIGHT observation streams are `@brm` family likelihoods reading `state.<field>`
@@ -79,13 +86,17 @@ mortality_rates(phi_pup::real, phi_adult::real, c::real, n_age::int,
 end
 compute_density_dependence_intercept(max_bbr::real, dd_scaled::real)::real =
     -log(max_bbr + (1.0 - max_bbr) * dd_scaled)
+compute_density_dependence_slope(K::real, b_capacity::real, b_reference::real, theta0::real)::real =
+    log1p(-log(b_capacity / b_reference) / theta0) / K
 update_birth_rate(b0::real, theta0::real, theta1::real, N_prev::real)::real =
-    b0 * exp(-theta0 * (exp(theta1 * N_prev) - 1.0))
+    b0 * exp(-theta0 * expm1(theta1 * N_prev))
 birth_rate_at_carrying_capacity(phi_a::real, mu_m::vector[n_demo], n_age::int)::real =
     2.0 * (1.0 - phi_a) / exp(sum(-mu_m[1:(n_age - 1)]))
+# tau_s is elapsed years since implantation, not the squared exposure in the
+# reference code (1/36 for samples collected 1.5 months after implantation).
 update_pregnancy_rate(baseline_birth_rate::real, theta0::real, theta1::real,
                       N_tot::real, tau_s::real)::real =
-    baseline_birth_rate * exp(theta0 * (1.0 - tau_s * exp(theta1 * N_tot)))
+    baseline_birth_rate * exp(theta0 * (1.0 - (16.0 / 9.0) * tau_s * tau_s * exp(theta1 * N_tot)))
 compute_baseline_birth_rate(min_bbr::real, max_bbr::real,
                             h_int::real, h_slope::real, h_weight::real,
                             h1::vector[T], h2::vector[T2]) = begin
@@ -166,7 +177,7 @@ run_state_process(n_state_years::int, n_age::int,
 
     for year in 1:n_state_years
         if year == 1
-            birth_rate[year]         = birth_rate_first
+            birth_rate[year]         = update_birth_rate(birth_rate_first, dd_intercept, dd_slope, pop_total_first)
             population_comp[:, year] = pop_first
             population_total[year]   = pop_total_first
         else
@@ -247,9 +258,10 @@ run_state_process(n_state_years::int, n_age::int,
        hunted_sweden, hunted_finland, bycatch_expected,
        hunting_bag_total_sweden, hunting_bag_total_finland, reproductive_probs)
 end
-    # ---- wrapper: transformed quantities (verbatim from the @slic parent) + the scan.
+    # ---- wrapper: transformed quantities from the @slic parent + the scan.
     # Consumes the brms-formula-built LPs/REs (bbr_logit, eps_*, hs_*, tnoise) + scalars.
-    seal_state(bbr_logit::vector[Tb], eps_birth::vector[T], eps_sex::vector[T],
+    seal_state(bbr_logit::vector[Tb], bbr_reference_logit::real, density_dependence_scaled::real,
+               eps_birth::vector[T], eps_sex::vector[T],
                eps_h_sw::vector[T], eps_h_fi::vector[T], eps_ca::vector[T], eps_placental::vector[T],
                hs_sw::vector[nd], hs_fi::vector[nd], tnoise::vector[Tn],
                phi_a_sc::real, phi_sc::real, survival_shape::real,
@@ -261,16 +273,18 @@ end
                t_mate::real, t_hunt::real, burn_in::int, n_age::int,
                ode_init::vector[1], ode_times::vector[1]) = begin
         n_demo = nd
-        phi_a = phi_a_sc
+        phi_a = 0.8 + 0.2 * phi_a_sc
         phi_pup = phi_sc * phi_a
         mu_m = mortality_rates(phi_pup, phi_a, survival_shape, n_age, male_pup_offset, male_adult_offset)
         S_diag = exp(-mu_m)
         aging = create_aging_matrix(n_demo, n_age)
         min_bbr = min_bbr_sc * max_bbr
         baseline_bbr = min_bbr + (max_bbr - min_bbr) * inv_logit(bbr_logit)
-        dd_scaled = birth_rate_at_carrying_capacity(phi_a, mu_m, n_age)
-        dd_intercept = compute_density_dependence_intercept(max_bbr, dd_scaled)
-        dd_slope = -log(carrying_capacity)
+        # Vanko et al. (2026), Appendix C, Eqs. (48), (50), (51).
+        b_capacity = birth_rate_at_carrying_capacity(phi_a, mu_m, n_age)
+        b_reference = min_bbr + (max_bbr - min_bbr) * inv_logit(bbr_reference_logit)
+        dd_intercept = compute_density_dependence_intercept(max_bbr, density_dependence_scaled)
+        dd_slope = compute_density_dependence_slope(carrying_capacity, b_capacity, b_reference, dd_intercept)
         pop_first = initialize_population(population_init, pop_init_size, burn_in,
                                           baseline_bbr[1], aging, S_diag, n_age)
         pi_s = report_placental_mean * exp(-eps_placental * report_placental_sd)
@@ -342,7 +356,8 @@ function grey_seal_brm_model(df = grey_seal_brm_fixture())
     @brm df begin
     phi_a_sc ~ Uniform(0.0, 1.0); phi_sc ~ Uniform(0.0, 1.0); survival_shape ~ Uniform(0.0, 1.0)
     male_pup_survival_offset ~ Cauchy(0.0, 1.0); male_adult_survival_offset ~ Cauchy(0.0, 1.0)
-    carrying_capacity ~ LogNormal(11.0, 1.0)
+    carrying_capacity ~ LogNormal(11.3, 0.3)
+    density_dependence_scaled ~ Uniform(0.0, 1.0)
     max_baseline_birth_rate ~ Uniform(0.0, 1.0); min_baseline_birth_rate_sc ~ Uniform(0.0, 1.0)
     hunting_effort_sd_sweden ~ Cauchy(0.0, 1.0; lower = 0.0); hunting_effort_sd_finland ~ Cauchy(0.0, 1.0; lower = 0.0)
     population_init_size ~ LogNormal(11.0, 1.0)
@@ -351,14 +366,17 @@ function grey_seal_brm_model(df = grey_seal_brm_fixture())
     aerial_mu ~ Uniform(0.0, 1.0); phi_aerial ~ LogNormal(0.0, 1.0)
     harvest_bag_cv ~ LogNormal(0.0, 1.0; lower = 0.0)
     # brms formulas
-    bbr_logit ~ 1 + herring_index_1 + herring_index_2
+    # Expose the zero-herring intercept to the carrying-capacity equation.
+    bbr_reference_logit ~ Normal(0.0, 1.0)
+    bbr_logit ~ 0 + offset(bbr_reference_logit) + herring_index_1 + herring_index_2
     eps_birth ~ 0 + (1 | year); eps_sex ~ 0 + (1 | year)
     eps_h_sw ~ 0 + (1 | year); eps_h_fi ~ 0 + (1 | year)
     eps_ca ~ 0 + (1 | year); eps_placental ~ 0 + (1 | year)
     hs_sw ~ 0 + (1 | demo); hs_fi ~ 0 + (1 | demo)
     bycatch_bias ~ 0 + (1 | demo)
     tnoise ~ 0 + (1 | noise_cell)
-    state = seal_state(bbr_logit, eps_birth, eps_sex, eps_h_sw, eps_h_fi, eps_ca, eps_placental,
+    state = seal_state(bbr_logit, bbr_reference_logit, density_dependence_scaled,
+        eps_birth, eps_sex, eps_h_sw, eps_h_fi, eps_ca, eps_placental,
         hs_sw, hs_fi, tnoise, phi_a_sc, phi_sc, survival_shape,
         male_pup_survival_offset, male_adult_survival_offset, carrying_capacity,
         max_baseline_birth_rate, min_baseline_birth_rate_sc,
