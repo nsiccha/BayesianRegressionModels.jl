@@ -402,3 +402,12 @@ Public = true
 Private = false
 Filter = value -> any(name -> isdefined(BayesianRegressionModels, name) && value === getfield(BayesianRegressionModels, name), Main.BRM_DOCS_BACKEND_EXPORTS)
 ```
+
+The following internal definitions are linked from the exported docstrings.
+
+```@docs
+BayesianRegressionModels._adaptive_cdar_centering_blocks
+BayesianRegressionModels._adaptive_hsgp_centering_blocks
+BayesianRegressionModels._s2z_fisher_raw
+BayesianRegressionModels._s2z_rescale_rho
+```
