@@ -28,10 +28,10 @@ function density_response()
 end
 
 function aerial_simulations()
-    values = [(; r..., chain_label="Chain $(Int(r.chain))", series="Saved-state simulations")
+    values = [(; r..., chain_label="Chain $(Int(r.chain))", series="Posterior predictive")
         for r in rows("aerial_simulations.tsv")]
     envelope = data(values) * mapping(:year => "Fixture year",
-        :q50 => "Aerial count (log scale)", col=:chain_label => "Rejected chain", color=:series => "") *
+        :q50 => "Aerial count (log scale)", col=:chain_label => "Chain", color=:series => "") *
         lineribbon(bands=[:q025 => :q975, :q25 => :q75])
     observed = data([merge(r, (; series="Synthetic observation")) for r in values]) *
         mapping(:year, :observed, col=:chain_label, color=:series => "") * visual(Scatter; markersize=9)
@@ -40,7 +40,7 @@ function aerial_simulations()
         encoding=(; x=(; axis=(; values=[1, 2, 3], format="d")),
             y=(; axis=(; values=[10, 100, 1000, 10000], format=",d"))),
         scales=scales(Y=(; scale=log10, nice=false),
-            Color=(; categories=["Saved-state simulations", "Synthetic observation"], palette=[BLUE, ORANGE])))
+            Color=(; categories=["Posterior predictive", "Synthetic observation"], palette=[BLUE, ORANGE])))
 end
 
 end

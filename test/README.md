@@ -6,8 +6,11 @@ against an independently integrated loss hazard, and a finite full-model start.
 `seal_density_fit.jl` separately runs a short four-chain fitting check and
 re-evaluates retained draws for finite densities and gradients. Its short fit
 does not establish convergence or reproduce the paper's analysis.
-These checks use the test environment's StanBlocks pin `df3a71e9` (0.2.36),
-which fixes native row-vector extents in the model's allocation helper.
+`seal_joint_support.jl` checks both authored helper sets against the original
+joint density, finite-difference coordinate Jacobians and native gradients
+across four age counts. The test environment pins StanBlocks `dcabd24f`
+(0.2.40), which includes differentiable algebraic roots and native evaluation
+of the data-only support bound during descriptor construction.
 
 `rk_distribution_statistics.jl` checks native LogNormal moments and log tails:
 constructor/callable identity, one-sided bounds, values against 512-bit

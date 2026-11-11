@@ -1,20 +1,26 @@
 key	value
-status	rejected: exploratory simulations only; no accepted posterior fit
-sampled_commit	21c3e34ab807c812dbfd546252415ff43313a77a
+status	admitted: four chains; no omitted chain
+sampled_commit	52978e90b0c81db1de10613dc9994375a0eb3897
 data	synthetic; 3 ages x 2 sexes x 3 years
 seed	20261111
-saved_states	4 chains x 300; zero admitted
+saved_states	1500, 1500, 1500, 1500; all four chains admitted
 target_acceptance_rate	0.99
 divergence_admission_limit	0.10
-warmup_divergence_gate	0.10; two restarts per chain
-program_sha256	6fc6b75c76b55715c5b3fd490300a0903cddb6b338ec1b4d5292d75911c59154
+warmup_divergence_gate	0.10
+divergences	1 (0.01667%)
+max_rhat_all_coordinates	1.0089770353402774
+min_bulk_ess_all_coordinates	813.9874870452036
+min_tail_ess_all_coordinates	994.8032597341135
+program_sha256	618612bc2804c1dba70608439cb9b343bda7c1be1fd575d280b82b9d30b4a991
 data_sha256	86d29d54ae413e7cca4d75547582034b1edb7dc61bb1b6fb6747195094a0a6ef
-StanBlocks	0.2.36
+model_frame_draw_cache_sha256	bca29dd2d06f21c20fddcbeb844ffa041985a32f82ab4f5f929cd0bf3f455ea7
+completion_summary_sha256	fec1fe2123484deaba40c745e7681c65b39601f580bc70364d454d257fda8773
+StanBlocks	0.2.40
 WarmupHMC	0.2.11
 BridgeStan	2.9.0
 summary_julia	1.10.12
-summary_method	back_transform with exact target; no sampling; checkpoints unchanged
-checkpoint_chain_1	221626cb490ad82c1060b12014f15475cbd9f34e662c1f84a7a8b5720eed9425
-checkpoint_chain_2	c3e99db1f66a6c8ef9a858067cb88a585073c1101e5ffb425f5822c52cd472bc
-checkpoint_chain_3	3fbc0174059b6640df5119633732353f4fa8f8eb9b57981de64c5ccea84d69c5
-checkpoint_chain_4	773a492e23dda0b347dac6ecab812365c94424076b0317e4e836c5182268f036
+summary_method	saved model-frame draws; generated quantities seeds 20261112-20261115; no sampling; checkpoints unchanged
+checkpoint_chain_1	591a3b5ae986b211fd7aedeac0266d58144d18f2a87c7c5f1ef3f160a86237a0
+checkpoint_chain_2	4e22f0f721167cc3add7dbd6bf0b95c8241412ed057cc5fa25d7ec1367a631d2
+checkpoint_chain_3	3e8a7d56bbd04cecfb4f3c44640e2afd40811934834068feee30b0ea62ad024a
+checkpoint_chain_4	0c4fb7b47f44968cfbedb87f69e6c6f03e7a5ecf7f800256a8d4e58ba6606335
