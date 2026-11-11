@@ -27,7 +27,7 @@ function temporal_correlation()
         for ell in (0.5, 2.0) for gap in range(0, 6; length=121)]
     data(values) * mapping(:gap => "Time gap", :correlation => "Prior temporal correlation";
         color=:length => "OU correlation time") * visual(Lines) *
-        config(width=540, height=260,
+        config(width=500, height=260,
             scales=scales(Color=(palette=["#2a78d6", "#eb6834"],
                 categories=["ell_t = 0.5", "ell_t = 2.0"])))
 end

@@ -51,7 +51,7 @@ model = Main.BRMDocsComparisons.example_module(:SyntaxGuide).model
 ```
 
 | Familiar formula | BRM meaning |
-| --- | --- |
+| :--- | :--- |
 | `1 + x + z` | An intercept and two population effects |
 | `x * z` / `x & z` | Main effects plus interaction / interaction alone |
 | `(1 + x \| subject)` | Correlated subject intercepts and slopes |
