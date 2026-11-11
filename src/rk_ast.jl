@@ -1538,10 +1538,13 @@ end
 
 # An areal field, as StanBlocks' `_sb_car_icar` / `_sb_car_bym2`: the ICAR field
 # over the structured areas with one soft sum-to-zero per connected component,
-# alone or in the BYM2 convolution, returning each row's area effect. RKPPL
-# factors a scalar definition, so each component's sum is its own scalar
-# `Normal(0, 0.001 n_c)` factor, unrolled from the fitted graph's components
-# (a replay keeps the graph). Islands read the zero padding slot of `phi`.
+# alone or in the BYM2 convolution, returning each row's area effect. The
+# components' starts and sizes are data (the fitted graph's, which a replay
+# keeps), so the number of areas and the components are inputs and every graph
+# of one declaration is one program (principle `0ikeidi`): `phi` has
+# `sum(comp_size)` entries and the components' sums are one vector factor
+# `Normal.(0, 0.001 .* comp_size)` (RKPPL 0.1.145), as `rkppl_model(:car_bym2)`
+# spells it. Islands read the zero padding slot of `phi`.
 function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing,
         bindings=Pair{Symbol,Any}[])
     options = term.options
@@ -1556,7 +1559,10 @@ function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing
     end
     struct_pos = _rk_block_argument!(block, :struct_pos, options.struct_pos)
     rows = _rk_block_argument!(block, :area, positions)
-    separation === nothing && (S = _rk_block_argument!(block, :S, options.n_struct))
+    if separation === nothing
+        comp_start = _rk_block_argument!(block, :comp_start, options.comp_start)
+        comp_size = _rk_block_argument!(block, :comp_size, options.comp_size)
+    end
     if bym2
         inv_scale = _rk_block_argument!(block, :inv_scale, options.inv_scale)
         is_struct = _rk_block_argument!(block, :is_struct, options.is_struct)
@@ -1574,18 +1580,18 @@ function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing
                 _rk_ast_dotted(:Normal, 0, 1)))
     end
     if separation === nothing
-        cs = _rk_block_local!(block, :cs)
+        S, cs = _rk_block_local!(block, :S), _rk_block_local!(block, :cs)
+        totals = _rk_block_local!(block, :phi_sums)
         push!(block.statements,
+            Expr(:(=), S, Expr(:call, :sum, comp_size)),
             Expr(:call, :~, Expr(:ref, phi, Expr(:call, :(:), 1, S)),
                 Expr(:call, :ICAR, node1, node2)),
-            Expr(:(=), cs, Expr(:call, :cumsum, Expr(:call, :vcat, 0.0, phi))))
-        for (c, (start, size)) in enumerate(options.components)
-            total = _rk_block_local!(block, Symbol(:phi_sum_, c))
-            push!(block.statements,
-                Expr(:(=), total, Expr(:call, :-, Expr(:ref, cs, start + size),
-                    Expr(:ref, cs, start))),
-                Expr(:call, :~, total, Expr(:call, :Normal, 0.0, 0.001 * size)))
-        end
+            Expr(:(=), cs, Expr(:call, :cumsum, Expr(:call, :vcat, 0.0, phi))),
+            Expr(:(=), totals, Expr(:call, :.-,
+                Expr(:ref, cs, Expr(:call, :.+, comp_start, comp_size)),
+                Expr(:ref, cs, comp_start))),
+            Expr(:call, :.~, totals,
+                _rk_ast_dotted(:Normal, 0.0, Expr(:call, :.*, 0.001, comp_size))))
         separated = (;)
     else
         separated = _rk_ast_car_separated!(definitions, taken, bindings, block,

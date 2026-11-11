@@ -12,6 +12,27 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.274
+
+- Changed: an RKBRMI `car(area; edges = (from, to), type = :icar | :bym2)`
+  field is one program for every graph of its declaration. The number of
+  structured areas, each connected component's start and size, and the
+  components' soft sum-to-zero scales `0.001 n_c` were literals of the emitted
+  program, so a graph of another size (another station network) compiled its
+  own RKPPL program and JAX module. They are now bound graph columns
+  (`car_<lp>_<area>_comp_start`, `car_<lp>_<area>_comp_size`, beside
+  `node1`, `node2`, `struct_pos`, `inv_scale` and `is_struct`): the block
+  declares `phi[1:sum(comp_size)] ~ ICAR(node1, node2)` and the components'
+  sums are one vector factor `phi_sums .~ Normal.(0, 0.001 .* comp_size)`,
+  as `rkppl_model(:car_bym2)` spells it. Coordinates, densities and gradients
+  are unchanged. A frozen `reprocess` keeps the fitted graph as before. The
+  `car_units` separated lowering is unchanged. (Snag
+  `rkbrmi-car-term-878e3dbd`; user principle `0ikeidi`, sizes are runtime
+  inputs.)
+- The `ReactiveKernelsPPL` compat floor is now 0.1.145, the first release
+  that admits a density factor on a parameter-derived vector definition
+  (the components' sums).
+
 ## 0.2.273
 
 - Changed: an RKBRMI `cdar(step; by = group, cor = C)` walk is one program for

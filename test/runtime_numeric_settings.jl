@@ -294,6 +294,10 @@ function channel_field(form::Symbol; cor::Bool=false)
         y ~ Normal(field, 0.2)
     end); mod=@__MODULE__)
 end
+car_field(type) = brm(:(begin
+    mu ~ 1 + car(area; edges=(from, to), type=$(QuoteNode(type)))
+    y ~ Normal(mu, se)
+end); mod=@__MODULE__)
 periodic_cell_model(k, period) = brm(:(begin
     sigma ~ Exponential(1)
     base ~ 1 + (1 | subject)
@@ -1111,6 +1115,61 @@ const RK_BINDS_FIELD_EXTENT = pkgversion(ReactiveKernelsPPL) >= v"0.1.113"
             twin_value, twin_gradient = LogDensityProblems.logdensity_and_gradient(reverse_problem(known), u)
             @test value ≈ twin_value rtol=1e-12
             @test gradient ≈ twin_gradient rtol=1e-10
+        end
+    end
+end
+
+# ---- a car field's graph sizes (snag `rkbrmi-car-term-878e3dbd`) -------------
+
+# Path graphs of 5 and 3 areas (one component each), and 6 areas in two
+# components (3 and 2 areas) plus an island no edge names. The number of
+# structured areas, the components' starts and sizes and their soft
+# sum-to-zero scales `0.001 n_c` are bound graph data, so every graph of one
+# declaration emits and lowers to one program, as Stan reads them from its data.
+car_graph_data(area, from, to) = (; area, from, to,
+    y=0.1 .* sin.(1:length(area)), se=fill(0.5, length(area)))
+const CAR_GRAPHS = (
+    car_graph_data([1, 2, 3, 4, 5], [1, 2, 3, 4], [2, 3, 4, 5]),
+    car_graph_data([1, 2, 3], [1, 2], [2, 3]),
+    car_graph_data([1, 2, 3, 4, 5, 6], [1, 2, 4], [2, 3, 5]))
+
+@stestset "a car field's graph sizes are data" begin
+    for type in (:icar, :bym2)
+        @testset "$type" begin
+            builds = [RSM.car_field(type)(d) for d in CAR_GRAPHS]
+            models = map(RKBRMI, builds)
+            @test allequal(emitted_program(rk) for rk in models)
+            @test allequal(lowered_program(rk) for rk in models)
+            @test allequal(typeof(sampler_query(rk)) for rk in models)
+            @test allequal(stan_program(b) for b in builds)
+            sizes = [rk_bound_data(rk)[:car_mu_area_comp_size] for rk in models]
+            starts = [rk_bound_data(rk)[:car_mu_area_comp_start] for rk in models]
+            @test sizes == [[5], [3], [3, 2]] && starts == [[1], [1], [1, 4]]
+            # The bound sizes reach the density: on the two-component graph, the
+            # field's prior is the ICAR edges plus one Normal(0, 0.001 n_c) per
+            # component, at the constrained point of the RK coordinates.
+            rk = last(models)
+            u = rk_point(rk)
+            point = constrain(rk.model.layout, u)
+            phi = point[Symbol("car_mu_area")].phi
+            @test length(phi) == 5
+            prior = -0.5 * sum(abs2(phi[i] - phi[j]) for (i, j) in ((1, 2), (2, 3), (4, 5))) +
+                logpdf(Normal(0, 0.003), phi[1] + phi[2] + phi[3]) +
+                logpdf(Normal(0, 0.002), phi[4] + phi[5])
+            bound = rk_bound_plan(rk)
+            # every other prior factor is the same at another phi, so the difference
+            # of the RK prior at two points that differ only in phi is the field's
+            phi_coordinates = findall(name -> startswith(string(name), "car_mu_area.phi"),
+                collect(coordinate_names(rk.model.layout)))
+            @test length(phi_coordinates) == 5
+            v = copy(u)
+            v[phi_coordinates] .= 0.05 .* (1:5)
+            phi_v = constrain(rk.model.layout, v)[Symbol("car_mu_area")].phi
+            prior_v = -0.5 * sum(abs2(phi_v[i] - phi_v[j]) for (i, j) in ((1, 2), (2, 3), (4, 5))) +
+                logpdf(Normal(0, 0.003), phi_v[1] + phi_v[2] + phi_v[3]) +
+                logpdf(Normal(0, 0.002), phi_v[4] + phi_v[5])
+            query = Base.invokelatest(ReactiveKernelsPPL.prepare_query, rk.model, bound, :prior)
+            @test Base.invokelatest(query, u) - Base.invokelatest(query, v) ≈ prior - prior_v rtol=1e-10
         end
     end
 end

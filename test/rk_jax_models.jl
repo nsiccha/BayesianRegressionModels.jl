@@ -454,3 +454,48 @@ end
         y ~ Normal(mu, s)
     end))
 end
+
+# A `car(...)` field's graph sizes (the number of structured areas, each
+# component's start and size, the components' sum-to-zero scales) are bound
+# graph data (BRM 0.2.274; snag `rkbrmi-car-term-878e3dbd`), so graphs of other
+# sizes and component counts share one RKPPL program, and the first graph's
+# module evaluates all three. BYM2 runs on graphs without an island, where its
+# mixing weight's `jax.grad` is NaN (todo `0e5she0`).
+module JaxCarModels
+using BayesianRegressionModels, Distributions
+icar = @brm begin
+    mu ~ 1 + car(area; edges = (from, to), type = :icar)
+    y ~ Normal(mu, se)
+end
+bym2 = @brm begin
+    mu ~ 1 + car(area; edges = (from, to), type = :bym2)
+    y ~ Normal(mu, se)
+end
+end
+
+car_data(area, from, to) = (; area, from, to, y = 0.2 .* sin.(1:length(area)),
+    se = fill(0.5, length(area)))
+
+@testset "car fields: graphs of other sizes share one module" begin
+    path5 = car_data([1, 2, 3, 4, 5], [1, 2, 3, 4], [2, 3, 4, 5])
+    path3 = car_data([1, 2, 3], [1, 2], [2, 3])
+    two = car_data([1, 2, 3, 4, 5], [1, 2, 4], [2, 3, 5])           # components of 3 and 2
+    island = car_data([1, 2, 3, 4, 5, 6], [1, 2, 4], [2, 3, 5])     # and an island
+    for (model, graphs) in ((JaxCarModels.icar, (path5, path3, island)),
+            (JaxCarModels.bym2, (path5, path3, two)))
+        rks = [RKBRMI(model(d)) for d in graphs]
+        @test allequal(string(rk.model.program) for rk in rks)
+        src = jax_source(rks[1].model, rk_bound_plan(rks[1]))
+        @test src isa JAXSource
+        @test all(rk -> without_layout_constants(jax_source(rk.model, rk_bound_plan(rk))) ==
+            without_layout_constants(src), rks)
+        if brm_jax_require_python()
+            uss = map(points, rks)
+            run = brm_jax_run(src, [brm_jax_inputs(rk, src) for rk in rks], uss)
+            @test run.x64_after_import
+            for (k, rk) in enumerate(rks)
+                check_parity(rk, run, k, uss[k])
+            end
+        end
+    end
+end
