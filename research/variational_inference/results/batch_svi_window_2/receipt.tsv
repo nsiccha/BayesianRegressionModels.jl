@@ -1,0 +1,27 @@
+field	value
+key	88320bb4bd24ffb36d190bc80551cc844d692cf72250d487a481c4a18d191eab
+harness	BRM minibatch SVI and WarmupHMC completion sampler; site-counts-v2-quorum
+host	a Linux fleet host
+recipe	site-counts-v2-quorum
+created	2026-11-10T23:58:25.886
+started	2026-11-10T23:47:17.286
+commit	e8bef69f83b4a0babd1f00a66f322ab2cf02f8b5
+uncommitted_changes	true
+julia	1.10.12
+brm	0.2.272
+warmuphmc	0.2.11
+source_sha256	2aa8652c60ed8abd4d763af4a9c4f70986aa5f14aac7d8d8c03aa1604064e550
+settings	(batch_size = 32, ndraws = 2000)
+seed	102
+enzyme	0.13.218
+threads	1
+program_sha256	62adca1af7868b7ef5deb3bb304473b52185adf4516af802b59ddb3e181db140
+legacy_input_sha256	2d2c6db642987157bc00ab26550ac8398d64249d2cee225757df77694d5fd223
+key_migration	Content key added after measurement; unchanged synthetic model, settings and draws
+key_migrated	2026-11-11T00:30:23.652
+dimension	685
+iterations	7900
+converged	true
+stages	(exploring = 4800, settling = 1100, polishing = 2000, settled = true, settle_windows = 100)
+unit_gradient_calls	1011200
+seconds	8.57443863

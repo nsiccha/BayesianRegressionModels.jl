@@ -1,4 +1,4 @@
-# Run with --project=test; no sampling or figure generation.
+# Run with --project=test; no sampling or image rendering.
 #
 # The "Variational inference" docs page (docs/src/variational-inference.md) is built from
 # research/variational_inference/svi.jl. This file evaluates every build-time `@eval`
@@ -32,6 +32,8 @@ end
     @test count(b -> occursin("Main.BRMDocsComparisons.comparison(", b), blocks) == 1
     page_module = Module(gensym(:VariationalInferenceDocs))
     Core.eval(page_module, :(using Markdown))
+    # Documenter's evaluation sandbox defines include relative to that module.
+    Core.eval(page_module, :(include(path) = Base.include(@__MODULE__, path)))
     for block in blocks
         rendered = nothing
         for expression in Meta.parseall(block).args
@@ -82,6 +84,15 @@ end
     @test [sum(length, d.y) for d in seen] == [600, 1280, 2040, 2840]
     @test seen[end].y[end] == data.y[end][7:8]
     @test seen[end].y[1] == data.y[1]
+
+    # A cache must reject changed science but survive an editorial source change.
+    key = Base.invokelatest(models.cache_key, data, (; batch_size=32), 1)
+    @test key != Base.invokelatest(models.cache_key, data, (; batch_size=16), 1)
+    @test key != Base.invokelatest(models.cache_key, data, (; batch_size=32), 2)
+    @test key != Base.invokelatest(models.cache_key, seen[end], (; batch_size=32), 1)
+    program = Base.invokelatest(models.fit_program)
+    @test program == Base.invokelatest(models.fit_program, "# Editorial note\n" * read(VI_SOURCE, String))
+    @test key != Base.invokelatest(models.cache_key, data, (; batch_size=32), 1; program=program * "changed")
 end
 
 @testset "NUTS references support the documented comparisons" begin

@@ -27,23 +27,30 @@ julia --project=test research/variational_inference/figures.jl
 Run Julia with one thread for the Enzyme-backed NUTS reference. The cache directory
 keeps completed SVI fits, their data-only checkpoints, NUTS draws and diagnostics,
 and receipts with the source hash, package versions and run time. Re-running a
-section reads its cached fits and regenerates tables; it does not refit. Changed
-data or a changed `RECIPE` require an explicit new cache directory. The NUTS draw
-count is also in its cache key; changing it preserves the old reference. Keep this cache
-on the machine that computed it.
+section reads its cached fits and regenerates tables; it does not refit. The key
+hashes the scientific function definitions, data, settings, seeds, harness version,
+Julia version and fitting package versions. Comments, prose and summary writers
+are excluded. A changed key requires an explicit new cache directory; changing the
+NUTS draw count preserves the old reference under its old filename. Keep this
+cache on the machine that computed it.
 
 The streaming reference is fitted on each window's accumulated observations.
 Late sites have no observations before arrival, so the last window cannot reuse
 the full-data NUTS reference. `combine` reuses the full-data cold SVI and NUTS fits
 from `fit`. Each section can run separately with the same cache directory.
 
-Only small summary TSVs and `receipt.tsv` travel with this example. Raw draws,
+Only small summary TSVs and receipts travel with this example. Each fit has its
+own directory, receipt and `population.tsv` with the shared quantity schema.
+Streaming windows sit below `stream_svi/`. Cross-fit comparison tables live at the results root.
+Raw draws,
 checkpoints and rendered images are gitignored. `receipt.tsv` is written before
 the requested sections and refreshed on success; it records the recipe, settings,
 versions, input digests and fit source hashes. Documentation builds read summaries
 and never sample. These tables and the receipt form the eventual DocsFits summary;
 the page currently uses committed tables until the shared adapter is published.
+The first measured caches used a recipe-and-data key. Their receipts retain that
+legacy key and record the explicit migration to the content key; no fit was rerun
+or timing replaced during this migration.
 
-On a fleet host every fit takes a compute token; its
-Treebars snapshot is written to `KB_PROGRESS_FILE` when supplied, otherwise to
-`progress.txt` in the cache directory.
+The fit writes a Treebars progress snapshot to `progress.txt` in the cache
+directory, unless the run environment supplies a progress-file destination.

@@ -8,7 +8,6 @@
 # AlgebraOfVega's `vsave`, which renders through the vl-convert command-line tool.
 
 using AlgebraOfVega
-using AlgebraOfGraphics: sorter
 
 results(name) = joinpath(@__DIR__, "results", name)
 
@@ -39,7 +38,7 @@ function marginals(read_table=table)
     rows = read_table("population.tsv")
     truth = unique([(; parameter=r.parameter, generating=r.generating) for r in rows])
     order = sorter(PARAMETERS)
-    spec = data(rows) * mapping(:median => "parameter value", :method => "";
+    spec = data(rows) * mapping(:median => "value (dimensionless)", :method => "";
                                  color=:method => "method", layout=:parameter => order) *
                pointinterval(bands=[:q025 => :q975, :q25 => :q75]) +
            data(truth) * mapping(:generating; layout=:parameter => order) *
@@ -70,11 +69,11 @@ function streaming(read_table=table)
     rows = [(; r..., window=string("window ", r.window)) for r in read_table("streaming.tsv")]
     methods = ["NUTS", "streaming SVI"]
     spec = data(filter(r -> r.method != "batch SVI", rows)) *
-           mapping(:window => "data seen up to", :median => "posterior"; color=:method => "method",
+           mapping(:window => "data seen up to", :median => "value (dimensionless)"; color=:method => "method",
                                 layout=:parameter => sorter(PARAMETERS)) *
            pointinterval(bands=[:q025 => :q975, :q25 => :q75], orientation=:vertical) +
            data(filter(r -> r.method == "batch SVI", rows)) *
-           mapping(:window => "data seen up to", :median => "posterior";
+           mapping(:window => "data seen up to", :median => "value (dimensionless)";
                    layout=:parameter => sorter(PARAMETERS)) *
            pointinterval(bands=[:q025 => :q975, :q25 => :q75], orientation=:vertical) * visual(; color=:ink)
     spec = spec * config(width=240, height=180, facet=(; linkyaxes=:none),

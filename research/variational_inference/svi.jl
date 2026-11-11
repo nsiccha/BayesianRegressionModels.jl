@@ -143,7 +143,7 @@ const POPULATION_LABELS = (; a="intercept a", b="slope b", sd_a="sd of site inte
                              sd_b="sd of site slopes", cor_ab="correlation of intercepts and slopes")
 
 function write_table(name, header, rows)
-    mkpath(RESULTS)
+    mkpath(dirname(joinpath(RESULTS, name)))
     open(joinpath(RESULTS, name), "w") do io
         println(io, join(header, '\t'))
         for row in rows
@@ -156,15 +156,36 @@ end
 fmt(x::AbstractFloat) = string(round(x; sigdigits=6))
 fmt(x) = string(x)
 
-# Cache data, never compiled models or AD workspaces. A figure or prose change
-# reuses the measured fits. Change RECIPE when changing a model or fit control;
-# changed data or a different recipe require a new cache directory explicitly.
+# Cache data, never compiled models or AD workspaces. Hash the scientific
+# functions without comments or line numbers, plus data, settings and seeds.
+# Changes to figures, prose and summary writers therefore reuse measured fits.
 const RECIPE = "site-counts-v2-quorum"
-function cached(f, cache, name, input; progress=nothing)
-    path = joinpath(cache, name * ".jls")
+function fit_program(source=read(@__FILE__, String))
+    names = (:simulate_sites, :site_counts_model, :fit_svi, :fit_nuts,
+             :stream_windows, :accumulated, :stream_fits, :combined_start_fit)
+    definitions = filter(Meta.parseall(source).args) do ex
+        ex isa Expr && ex.head in (:function, :(=)) || return false
+        signature = ex.args[1]
+        signature isa Expr && signature.head == :call && first(signature.args) in names
+    end
+    length(definitions) == length(names) || error("Missing scientific function in cache key")
+    # remove_linenums! retains the location argument of a macro invocation.
+    # Normalize that too, so adding a comment above @brm cannot invalidate a fit.
+    normalize(ex) = ex isa LineNumberNode ? LineNumberNode(0) :
+        ex isa Expr ? Expr(ex.head, normalize.(ex.args)...) : ex
+    join(string.(Base.remove_linenums!.(normalize.(definitions))), "\n")
+end
+
+function cache_key(input, settings, seed; program=fit_program())
     io = IOBuffer()
-    serialize(io, (RECIPE, input))
-    digest = bytes2hex(sha256(take!(io)))
+    serialize(io, (RECIPE, program, input, settings, seed, VERSION,
+                   pkgversion(BayesianRegressionModels), pkgversion(WarmupHMC), pkgversion(Enzyme)))
+    bytes2hex(sha256(take!(io)))
+end
+
+function cached(f, cache, name, input; settings, seed, progress=nothing)
+    path = joinpath(cache, name * ".jls")
+    digest = cache_key(input, settings, seed)
     if isfile(path)
         saved = deserialize(path)
         saved.digest == digest || error("Cache input changed for $name; choose a new cache directory for an intentional refit.")
@@ -178,7 +199,9 @@ function cached(f, cache, name, input; progress=nothing)
                     commit=RUN_COMMIT, uncommitted_changes=RUN_DIRTY, host="a Linux fleet host", julia=string(VERSION),
                     brm=string(pkgversion(BayesianRegressionModels)),
                     warmuphmc=string(pkgversion(WarmupHMC)),
-                    source_sha256=SOURCE_SHA256)
+                    enzyme=string(pkgversion(Enzyme)), threads=Threads.nthreads(),
+                    source_sha256=SOURCE_SHA256, settings, seed,
+                    program_sha256=bytes2hex(sha256(fit_program())))
     serialize(path * ".tmp", (; digest, provenance, result))
     mv(path * ".tmp", path)
     println("SAVED ", name)
@@ -211,6 +234,19 @@ function write_receipt(cache; status)
         endswith(name, ".jls") || continue
         name == "nuts_full.jls" && continue # superseded 1000-draw reference, kept locally
         saved = deserialize(joinpath(cache, name))
+        fit_rows = Pair{String,String}[
+            "key" => saved.digest,
+            "harness" => "BRM minibatch SVI and WarmupHMC completion sampler; " * RECIPE,
+            "host" => "a Linux fleet host",
+        ]
+        for key in (:commit, :uncommitted_changes, :started)
+            hasproperty(saved.provenance, key) || push!(fit_rows,
+                string(key) => "not recorded by the initial harness")
+        end
+        for (key, value) in pairs(saved.provenance)
+            key == :host && continue
+            push!(fit_rows, string(key) => string(value))
+        end
         push!(rows, "$name input SHA256" => saved.digest)
         push!(rows, "$name fitted (UTC)" => saved.provenance.created)
         push!(rows, "$name fit source SHA256" => saved.provenance.source_sha256)
@@ -220,9 +256,35 @@ function write_receipt(cache; status)
             push!(rows, "$name divergent" => string(result.diag.divergent))
             push!(rows, "$name omitted chains" => string(4 - result.diag.chains))
             push!(rows, "$name dimension" => string(size(result.draws, 1)))
+            append!(fit_rows, ["seconds" => fmt(result.seconds),
+                "dimension" => string(size(result.draws, 1)),
+                "omitted_chains" => string(4 - result.diag.chains)])
+            append!(fit_rows, [string(k) => string(v) for (k, v) in pairs(result.diag)])
         elseif hasproperty(result, :seconds)
             push!(rows, "$name seconds" => fmt(result.seconds))
+            push!(fit_rows, "total_seconds" => fmt(result.seconds))
         end
+        fits = hasproperty(result, :fit) ? [result.fit] : hasproperty(result, :fits) ? result.fits :
+               hasproperty(result, :diagnostics) ? [result] : []
+        for (i, fit) in enumerate(fits)
+            prefix = length(fits) == 1 ? "" : "window_$i "
+            push!(fit_rows, prefix * "dimension" => string(size(fit.draws, 1)))
+            for key in (:iterations, :converged, :stages, :unit_gradient_calls, :seconds)
+                push!(fit_rows, prefix * string(key) => string(getproperty(fit.diagnostics, key)))
+            end
+            if length(fits) > 1
+                window_rows = ["key" => bytes2hex(sha256(saved.digest * "/window_$i")),
+                    "stream_key" => saved.digest, "window" => string(i),
+                    "host" => "a Linux fleet host", "harness" => "BRM sequential SVI; " * RECIPE,
+                    "dimension" => string(size(fit.draws, 1))]
+                append!(window_rows, [string(k) => string(v) for (k, v) in pairs(saved.provenance) if k != :host])
+                append!(window_rows, [string(k) => string(getproperty(fit.diagnostics, k))
+                    for k in (:iterations, :converged, :stages, :unit_gradient_calls, :seconds)])
+                write_table(joinpath(splitext(name)[1], "window_$i", "receipt.tsv"),
+                    ("field", "value"), window_rows)
+            end
+        end
+        write_table(joinpath(splitext(name)[1], "receipt.tsv"), ("field", "value"), fit_rows)
     end
     write_table("receipt.tsv", ("field", "value"), [(k, v) for (k, v) in rows])
 end
@@ -235,12 +297,32 @@ function svi_record(fit)
 end
 
 function cached_nuts(rk, data, cache, name; seed=10, n_draws=4000, progress=nothing)
-    cached(cache, name * "_draws_$n_draws", (data, seed, n_draws); progress) do p
+    cached(cache, name * "_draws_$n_draws", data;
+           settings=(; n_draws, chains=4, quorum=3, initialization="jittered origin, unit diagonal metric"), seed, progress) do p
         seconds = @elapsed chains = fit_nuts(rk; seed, n_draws, progress=p)
         diag = nuts_diagnostics(chains)
         println("NUTS $name seconds=$seconds $diag")
         (; draws=nuts_draws(chains), diag, seconds)
     end
+end
+
+function write_population(name, pop; diag=nothing)
+    rows = map(collect(pairs(POPULATION_LABELS))) do (key, description)
+        q = quantiles(pop[key])
+        if diag !== nothing
+            # Equal total proves that every completed chain has the requested length.
+            @assert diag.retained == 4000 * diag.chains
+            samples = reshape(pop[key], 4000, diag.chains, 1)
+            diagnostics = (only(MCMCDiagnosticTools.rhat(samples)),
+                only(MCMCDiagnosticTools.ess(samples; kind=:bulk)),
+                only(MCMCDiagnosticTools.ess(samples; kind=:tail)))
+        else
+            diagnostics = ("", "", "") # MCMC diagnostics do not apply to variational draws
+        end
+        (string(key), "dimensionless", description, fmt(q.median), fmt(q.q025), fmt(q.q975), fmt.(diagnostics)...)
+    end
+    write_table(joinpath(name, "population.tsv"),
+        ("quantity", "unit", "description", "median", "q025", "q975", "rhat", "ess_bulk", "ess_tail"), rows)
 end
 
 # ── Sections ──────────────────────────────────────────────────────────────────
@@ -252,7 +334,7 @@ function section_fit(; cache, progress=nothing)
     println("FIT sites=$(length(data.site)) observations=$(sum(length, data.y)) " *
             "coordinates=$(length(coordinate_names(rk.model.layout)))")
 
-    saved_svi = cached(cache, "svi_full", data; progress) do p
+    saved_svi = cached(cache, "svi_full", data; settings=(; batch_size=32, ndraws=2000), seed=1, progress) do p
         seconds = @elapsed fit = fit_svi(rk; progress=p)
         (; fit=svi_record(fit), seconds)
     end
@@ -277,26 +359,8 @@ function section_fit(; cache, progress=nothing)
     write_table("population.tsv", ("parameter", "method", "median", "q025", "q25", "q75", "q975",
                                    "mean", "sd", "generating"), rows)
 
-    # One quantity table per fit, matching the shared docs-summary schema.
-    # Every retained chain has at least 4000 draws; equality of the total below
-    # proves they all have that length, so concatenated draws can be reshaped.
-    @assert diag.retained == 4000 * diag.chains
-    for (method, pop) in (("nuts", nuts_pop), ("svi", svi_pop))
-        rows = map(collect(pairs(POPULATION_LABELS))) do (key, description)
-            q = quantiles(pop[key])
-            if method == "nuts"
-                samples = reshape(pop[key], 4000, diag.chains, 1)
-                diagnostics = (only(MCMCDiagnosticTools.rhat(samples)),
-                    only(MCMCDiagnosticTools.ess(samples; kind=:bulk)),
-                    only(MCMCDiagnosticTools.ess(samples; kind=:tail)))
-            else
-                diagnostics = ("", "", "") # convergence diagnostics do not apply to variational draws
-            end
-            (string(key), "dimensionless", description, fmt(q.median), fmt(q.q025), fmt(q.q975), fmt.(diagnostics)...)
-        end
-        write_table("population_$method.tsv",
-            ("quantity", "unit", "description", "median", "q025", "q975", "rhat", "ess_bulk", "ess_tail"), rows)
-    end
+    write_population("nuts_full_draws_4000", nuts_pop; diag)
+    write_population("svi_full", svi_pop)
 
     svi_e, nuts_e = site_effects(svi_r), site_effects(nuts_r)
     rows = []
@@ -387,7 +451,8 @@ checkpoint_bytes(state) = (io = IOBuffer(); serialize(io, state); position(io))
 function section_stream(; cache, progress=nothing)
     (; data) = simulate_sites()
     windows = stream_windows(data)
-    saved_stream = cached(cache, "stream_svi", windows; progress) do p
+    saved_stream = cached(cache, "stream_svi", windows;
+        settings=(; batch_size=32, ndraws=1000), seed=collect(eachindex(windows)), progress) do p
         seconds = @elapsed fits = stream_fits(windows; progress=p)
         (; fits=svi_record.(fits), seconds)
     end
@@ -412,7 +477,8 @@ function section_stream(; cache, progress=nothing)
         stream_pop = population(rk_restore_draws(window_rk, fit.draws))
 
         # Batch SVI on everything seen so far.
-        batch = cached(cache, "batch_svi_window_$w", all_data; progress) do p
+        batch = cached(cache, "batch_svi_window_$w", all_data;
+            settings=(; batch_size=32, ndraws=2000), seed=100+w, progress) do p
             svi_record(fit_svi(rk; seed=100 + w, progress=p))
         end
         batch_pop = population(rk_restore_draws(rk, batch.draws))
@@ -426,6 +492,9 @@ function section_stream(; cache, progress=nothing)
             fmt(diag.min_bulk_ess), fmt(diag.min_tail_ess), diag.divergent,
             fmt(diag.divergent_percent), dg.converged, batch.diagnostics.converged))
         nuts_pop = population(rk_restore_draws(rk, nuts))
+        write_population("nuts_window_$(w)_draws_4000", nuts_pop; diag)
+        write_population("batch_svi_window_$w", batch_pop)
+        write_population(joinpath("stream_svi", "window_$w"), stream_pop)
 
         for (key, label) in pairs(POPULATION_LABELS), (method, pop) in
                 (("NUTS", nuts_pop), ("streaming SVI", stream_pop), ("batch SVI", batch_pop))
@@ -463,17 +532,22 @@ function section_combine(; cache, progress=nothing)
     (; data) = simulate_sites()
     slices = [(; site=data.site[r], x=data.x[r], y=data.y[r])
               for r in Iterators.partition(eachindex(data.site), 100)]
-    combined = cached(cache, "combined_start", data; progress) do p
+    combined = cached(cache, "combined_start", (data, slices);
+        settings=(; batch_size=32, slice_draws=1000, ndraws=2000),
+        seed=(; slices=collect(eachindex(slices)), full=1), progress) do p
         seconds = @elapsed result = combined_start_fit(data, slices; progress=p)
         (; fit=svi_record(result.started), receipt=result.start.receipt, seconds)
     end
     started, started_seconds = combined.fit, combined.seconds
     # The cold fit is exactly the full-data fit already measured in `fit`.
-    cold_saved = deserialize(joinpath(cache, "svi_full.jls")).result
+    cold_saved = cached(cache, "svi_full", data; settings=(; batch_size=32, ndraws=2000), seed=1, progress) do p
+        error("Run the fit section first to create the cold-start reference")
+    end
     cold, cold_seconds = cold_saved.fit, cold_saved.seconds
     rk = RKBRMI(site_counts_model(data))
     saved = cached_nuts(rk, data, cache, "nuts_full"; progress)
     nuts_pop = population(rk_restore_draws(rk, saved.draws))
+    write_population("combined_start", population(rk_restore_draws(rk, started.draws)))
     rows = []
     for (name, fit, seconds) in (("cold start", cold, cold_seconds), ("start from four slices", started, started_seconds))
         dg = fit.diagnostics

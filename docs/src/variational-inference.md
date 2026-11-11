@@ -14,7 +14,7 @@ uncertainty even when its site-effect estimates agree with NUTS.
 
 ## The model and the data
 
-A monitoring network of sites is visited repeatedly. At each visit a count is recorded
+The synthetic data represent monitoring sites visited repeatedly. At each visit a count is recorded
 together with a covariate `x`, and the count rate of a site depends on `x` through the
 site's own intercept and slope. The two site effects are correlated. The data are a
 NamedTuple of nested vectors, one entry per site holding that site's visits; no table
@@ -247,21 +247,33 @@ let rows = vi_table("streaming_cost.tsv")
 end
 ```
 
-The work of a streaming update follows the window, not the history: each update
-minibatches only the units of its window, and the checkpoint grows with the number of
-distinct sites, not with the observations. The narrow global sds of the batch fit carry
-over to the stream; carrying the factors does not widen them.
+Each update minibatches only the units of its window; the checkpoint grows with the
+number of distinct sites. The narrow global sds carry over, and the sequential
+approximation also drifts away from the accumulated-data posterior.
+
+```@eval
+include(joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "research", "variational_inference", "tables.jl"))
+let rows = vi_table("streaming.tsv"), refs = vi_table("streaming_diagnostics.tsv")
+    w = maximum(r.window for r in rows)
+    stream = only(filter(r -> r.window == w && r.method == "streaming SVI" &&
+                              r.parameter == "correlation of intercepts and slopes", rows))
+    nuts = only(filter(r -> r.window == w && r.method == "NUTS" && r.parameter == stream.parameter, rows))
+    error = abs(stream.mean - nuts.mean) / nuts.sd
+    Markdown.parse("At the final window the correlation mean is $(vi_sig(error)) NUTS posterior sds " *
+        "from its NUTS estimate. Across the window references, maximum R-hat is " *
+        "$(vi_sig(maximum(r.max_rhat for r in refs), 4)), minimum bulk/tail ESS are " *
+        "$(vi_int(minimum(r.min_bulk_ess for r in refs)))/$(vi_int(minimum(r.min_tail_ess for r in refs))), " *
+        "and $(sum(r.divergent for r in refs)) retained transitions diverged.")
+end
+```
 
 ## Start from fits on slices of the data
 
-Where the units fall into slices that can be fitted independently, regions whose sites
-each lie in one region for example, `brm_svi_combine` turns the slices' checkpoints into a
-start for the full fit. The global factors multiply as Gaussian sites with the prior
-counted once, and each unit takes its slice's factor. The result is a start and not a
-prior: the full fit's target is the full model, and the start only decides where its
-optimizer begins. Slices that measure something else than the full data, such as the
-amplitude of a spatial field fitted inside one region, are named in `exclude` and start
-cold.
+`brm_svi_combine` turns checkpoints from disjoint slices of units into a start for
+the full fit. The global factors multiply as Gaussian sites with the prior counted
+once; each unit takes its slice's factor. The full model remains the target. Name
+parameters in `exclude` when their meaning changes between a slice and the full
+model; those parameters start cold.
 
 ```@eval
 Main.BRMDocsComparisons.source_code_region(
@@ -281,22 +293,19 @@ let rows = vi_table("combine.tsv")
 end
 ```
 
+The combined start shortens exploration here. Total times include preparation and
+compilation, depend on run order, and are not a speed benchmark.
+
 ## Two-stage fits and Laplace
 
-[`brm_two_stage_fit`](@ref) estimates the population by SAEM (minibatches of units
-in the E-step) and then samples every unit's conditional posterior at those estimates
-with a sampler of your choice, usually WarmupHMC's `adaptive_warmup_mcmc` on the
-unit's own problem. This targets each unit's conditional posterior rather than a
-Gaussian approximation to it. Population uncertainty is not propagated. It needs
-the NLMEEstimation extension.
+[`brm_two_stage_fit`](@ref), through the NLMEEstimation extension, estimates the
+population by SAEM and samples each unit's conditional posterior at those fixed
+estimates. It does not propagate population uncertainty.
 
 [`brm_svi_fit`](@ref) with `laplace=GaussianBlockLaplace()` integrates a shared
-Gaussian block, such as a Hilbert-space Gaussian process the units read, jointly with
-Gaussian population coefficients and unit effects, conditional on the remaining
-variational globals. It applies to affine Gaussian likelihoods and visits the whole
-window at each update instead of a batch. The per-unit Laplace route outside SVI,
-`brm_laplace_problem`, integrates every unit's effects out at their conditional modes
-and runs NUTS on the population coordinates alone.
+Gaussian block jointly with Gaussian population coefficients and unit effects,
+conditional on the remaining variational globals. It requires affine Gaussian
+likelihoods and visits the whole window at each update.
 
 ```@raw html
 <details><summary>Reproduce</summary>
