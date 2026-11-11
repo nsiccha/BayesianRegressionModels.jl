@@ -44,6 +44,14 @@ end
 function summarize_seal(checkpoints; results=joinpath(@__DIR__, "results"))
     mkpath(results)
     sb = SBBRMI(grey_seal_brm_model())
+    # These checkpoints store coordinates for one exact parameterization.
+    # A new set of bounds can preserve the joint law while changing every
+    # stored coordinate, so finite values alone are not a compatibility check.
+    receipt = readlines(joinpath(@__DIR__, "results", "receipt.tsv"))
+    recorded_program = split(only(filter(line -> startswith(line, "program_sha256\t"), receipt)), '\t')[2]
+    bytes2hex(sha256(stan_code(sb))) == recorded_program || error(
+        "The rejected checkpoints require the frozen model used for the saved tables. " *
+        "Run their reproduction from commit dd5f2ca8; do not interpret them with the new support coordinates.")
     problem = StanBlocks.stan_instantiate(sb)
     # Same target and centering structure as test/seal_density_fit.jl.
     target = adaptive_centering_problem(sb, problem, AutoEnzyme())

@@ -42,20 +42,12 @@ using BayesianRegressionModels, StanBlocks, LogDensityProblems
 using Distributions: Uniform, Cauchy, LogNormal, Binomial, Multinomial
 import StanBlocks.stan: transpiles
 
-# This root depends only on the observed age count. Bisection supplies the
-# same deterministic bound to Julia descriptors and Stan; no AD is needed.
+# The age-only bound is also needed by executable Julia descriptors.
 StanBlocks.@deffun StanBlocks.@juliacompat seal_adult_floor(n_age::int)::real = begin
-    lo = 0.0
-    hi = 1.0
-    for iteration in 1:60
-        mid = (lo + hi) / 2.0
-        if log(2.0) + log1p(-mid) - (n_age - 1) * log(mid) > 0.0
-            lo = mid
-        else
-            hi = mid
-        end
-    end
-    fmax(0.8, (lo + hi) / 2.0)
+    root = solve_newton_tol(x -> rep_vector(
+        log(2.0) + log_inv_logit(-x[1]) - (n_age - 1) * log_inv_logit(x[1]), 1),
+        rep_vector(log(4.0), 1), 1e-12, 1e-13, 100)
+    fmax(0.8, inv_logit(root[1]))
 end
 
 StanBlocks.@deffun begin

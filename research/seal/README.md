@@ -78,6 +78,11 @@ The native density and gradient are finite at all 1,200 saved states;
 that check does not establish adequate exploration.
 
 The `results/` tables are descriptive summaries of these rejected states.
+Reproduce that run's tables from a checkout of `dd5f2ca8`, which contains
+the original parameterization and its summarizer. The new support bounds
+change the stored coordinates even though they preserve the joint law;
+the current summarizer rejects a different program fingerprint before
+reading those checkpoints.
 `summarize.jl` restores their exact adaptive-centering target and uses
 `WarmupHMC.back_transform` before constraining them. It leaves checkpoints
 unchanged and records their hashes. Aerial simulations use the model's
