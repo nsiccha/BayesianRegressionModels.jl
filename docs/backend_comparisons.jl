@@ -147,6 +147,7 @@ function results_tables(labelled::Vector{<:Pair{<:AbstractString,<:AbstractStrin
     cells = [vcat([String(label)], [String(l) for (_, l) in columns])]
     for (name, relative_path) in labelled
         lines = readlines(normpath(joinpath(REPOSITORY_ROOT, relative_path)))
+        length(lines) > 1 || error("$relative_path: no result rows")
         header = Symbol.(split(lines[1], '\t'))
         for (column, _) in columns
             column in header || error("$relative_path has no column $column")
@@ -162,14 +163,17 @@ end
 
 "The receipts of several fits side by side: one row per key, one column per fit."
 function receipts_table(labelled::Vector{<:Pair{<:AbstractString,<:AbstractString}})
-    read_receipt(relative_path) = [String.(split(line, '\t'; limit=2)) for line in
-                                   readlines(normpath(joinpath(REPOSITORY_ROOT, relative_path)))[2:end]]
+    function read_receipt(relative_path)
+        lines = readlines(normpath(joinpath(REPOSITORY_ROOT, relative_path)))
+        length(lines) > 1 || error("$relative_path: empty receipt")
+        [String.(split(line, '\t'; limit=2)) for line in lines[2:end]]
+    end
     receipts = [name => read_receipt(path) for (name, path) in labelled]
     keys_in_order = String[]
     for (_, pairs) in receipts, (k, _) in pairs
         k in keys_in_order || push!(keys_in_order, k)
     end
-    value(pairs, k) = (i = findfirst(p -> p[1] == k, pairs); isnothing(i) ? "" : pairs[i][2])
+    value(pairs, k) = (i = findlast(p -> p[1] == k, pairs); isnothing(i) ? "" : pairs[i][2])
     cells = [vcat([""], [String(name) for (name, _) in labelled])]
     for k in keys_in_order
         push!(cells, vcat([k], [value(pairs, k) for (_, pairs) in receipts]))

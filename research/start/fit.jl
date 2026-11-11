@@ -28,7 +28,7 @@ function fit_intro(; n_draws=1000, n_chains=4, seed=20261111)
         ["key" => key, "harness_version" => harness_version,
          "settings" => JSON.json(settings), "seed" => seed,
          "StanBlocks" => pkgversion(StanBlocks), "WarmupHMC" => pkgversion(WarmupHMC),
-         "Enzyme" => pkgversion(Enzyme), "status" => "started"];
+         "Enzyme" => pkgversion(Enzyme)];
         n_chains, n_draws)
 
     fit = sample_quorum(sb, "start"; n_chains, n_draws, seed)
