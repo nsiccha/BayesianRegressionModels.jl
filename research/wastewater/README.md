@@ -1,80 +1,69 @@
-# Wastewater-based Rt inference — EpiSewer / `ww-inference-model` port
+# Wastewater renewal examples
 
-A faithful port of the semi-mechanistic renewal model behind
-[EpiSewer](https://github.com/adrian-lison/EpiSewer) (R / Julia) and the CDC
-[`ww-inference-model`](https://github.com/CDCgov/ww-inference-model), built on
-BRM's StanBlocks backend.
+The documentation page is `docs/src/wastewater.md`. It fits the CDC-inspired
+BRM declaration in `cdc_ww_inference.jl` to the public simulated data selected
+by `data.jl`; `fit.jl` writes chain diagnostics, natural-scale population
+summaries, the reference reproduction-number trajectory and wastewater
+posterior-predictive quantiles. Input provenance and the exported CDC commit
+are in `data/README.md`. These are synthetic observations, not public-health
+estimates for an actual location.
 
-Authorized by decisions `2026-08-26T10-40-17-350-1kyw2vk` and
-`2026-08-26T11-06-02-112-12s1pu8`. The deliverable is the **model** (it
-transpiles, `stanc`-checks, and yields a finite BridgeStan density/gradient) —
-not a fit; sampling was explicitly out of scope.
+## Structural port
 
-## The model (`renewal.jl`)
+The shared weekly reference log reproduction number is a differenced AR(1)
+process. Each covered subpopulation adds a stationary daily AR(1) deviation;
+the uncovered reference does not. A renewal recurrence, with infection
+feedback, produces incidence fractions from an exponentially seeded history.
+An inferred triangular shedding profile is normalized and convolved with
+incidence; sparse laboratory observations have their own scale, noise and
+row-specific detection limit. Independent count frames map the same infection
+matrix through population weights, delay PMFs, time-varying observation rates
+and weekday effects.
 
-Three EpiSewer modules, all in one `@slic` model broadcast over sites by `plate`:
+The source preserves CDC's causal order and several parameterizations,
+including seeding from first-observed incidence, but does not reproduce its
+exact hospitalization-rate mean reversion, R-interface hyperprior values or
+component switches. It is therefore a structural port, not a claim of
+posterior equivalence. CDC's authoritative source is
+[wwinference.stan](https://github.com/CDCgov/ww-inference-model/blob/3e92fea29a0b96212e1690dbdcaeb8abfe19cc4f/inst/stan/wwinference.stan).
+The data source is frozen to that revision independently of later changes
+to CDC's repository.
 
-| Module | Form | Where |
-|---|---|---|
-| **Infection** | renewal `I(t) = Rt(t)·Σ_s g(s)·I(t-s)`, `Rt` a log random walk | `ww_renewal` `@deffun` + plate cell |
-| **Shedding** | load `L(t) = Σ_s sh(s)·I(t-s+1)` (fecal shedding convolution) | `ww_shed` `@deffun` |
-| **Measurement** | `log C(t) ~ Normal(log L(t) + log_scale, sigma_obs)`; below-LOD censoring variant | plate cell obs |
+The documentation fit retains one measured catchment and the remainder of
+its state as a reference, one laboratory, one admissions stream, 35 observed
+days, 50 seeded days and seven forecast days. The generation and admission
+delay PMFs come from CDC's packaged data. Dilution is 757,000 mL per person
+per day, consistent with observations in genome copies per mL. The forecast
+is not used as calibration data. The displayed reproduction number is the
+unadjusted shared reference, not the catchment's feedback-adjusted value.
 
-- `wastewater_model([data])` — core, lognormal concentration likelihood.
-- `wastewater_censored_model([data])` — left-censors non-detects below `lloq`
-  via `censored(normal, …; lower = lloq)`.
-- `wastewater_fixture(; nsites, nt)` — a minimal multi-site dataset.
+## Earlier EpiSewer example
 
-Sites share `sigma_rw` / `sigma_obs` / `log_scale` / `logR0`; each site carries
-its own random-walk `Rt` and seeding.
+`renewal.jl` retains the smaller single-catchment/multiple-site example:
+renewal incidence, shedding convolution, and lognormal wastewater error,
+with an optional censoring likelihood. The generation and shedding PMFs are
+data captured by the plate, and the formula version uses an HSGP predictor
+for log reproduction number. The CDC example supersedes that page in the
+reader's path; the smaller model remains useful source for studying those
+three components alone.
 
-### Why the shape is what it is
+Earlier `test/wastewater_model.jl` and `test/cdc_ww_inference.jl` established
+transpilation, Stan syntax and finite runtime density/gradients. Those are
+execution checks, not fitted posteriors. The new documentation fit adds the
+sampling and diagnostic evidence in `results/receipt.tsv` and its tables.
+The old authoring limitation around shared data captured by a plate and the
+later addition of `dar` are history, not restrictions on current models.
 
-The mechanistic core is a **carried-state sequential scan** (`I[t]` depends on
-`I[t-1 … t-ng]`) — which `plate` deliberately does **not** express (its cells are
-independent). So the two convolutions live in `@deffun` Stan functions and are
-called loop-free from the `@slic`/plate body, exactly as SbPMX's `ode_rk45` PMX
-cells do. This is the key structural fact: the observation/hierarchy **shell** is
-ordinary BRM (multilevel + a family + censoring), and only the renewal/shedding
-**recurrence** needs the `@deffun` seam.
+## Reproduce
 
-The generation-interval PMF `g` and shedding PMF `sh` are passed as **data**
-(captured into the plate cell), so they are re-bindable without editing the
-model — no baked-in constants.
+```sh
+julia --startup-file=no --project=test test/setup_env.jl
+julia -t 4 --startup-file=no --project=test research/wastewater/fit.jl
+```
 
-`wastewater_brm_model` expresses the same model on the **`@brm` formula
-surface**: a smooth `hsgp` log-Rt, a per-site seeding ranef, and the
-renewal/shedding `@deffun`s in a `kernel(...)` cell. `g` and `sh` are referenced
-directly in the cell and captured as shared data — the kernel-cell data-vector
-capture that this port motivated (see below).
-
-## Verification
-
-`test/wastewater_model.jl` gates both variants on transpile + `stanc` + finite
-BridgeStan density/gradient (`julia --project=test test/wastewater_model.jl`),
-plus a data re-bind. Measured green on strato2: 10/10 assertions; core and
-censored each dim=91.
-
-## BRM enhancement this port drove
-
-Originally the `@brm` **kernel** cell could not see a shared, non-per-subject
-data vector (a generation-interval / delay PMF) — a free reference failed with
-`Could not find g in model, builtin, Main`. That is now fixed: a name referenced
-in a kernel do-block that is a real df column (and not a formula name) is
-registered as shared Stan data, so the kernel cell captures it the way a `plate`
-captures a `@slic` data kwarg. `wastewater_brm_model` uses exactly this — `g` /
-`sh` as data in the formula-level model. Gated by `test/kernel_capture.jl`.
-
-## Faithful-but-simplified
-
-Kept minimal for a first port; each is a straightforward extension, not a
-blocker:
-
-- **Flow normalization** — `log_scale` is one scalar; EpiSewer divides load by
-  measured flow (a per-timepoint covariate → a ragged per-site plate slice).
-- **Rt prior** — a Gaussian RW; EpiSewer also offers smoothing-spline / AR
-  variants (a different cell prior).
-- **Overdispersion** — lognormal measurement noise; a Gamma/observation-level
-  dispersion is a family swap.
-- **Multiple subpopulations per site** (CDC `ww-inference-model`) — a nested
-  grouping layer.
+Four chains request 1,000 retained draws each under WarmupHMC's completion
+quorum. The receipt is written before sampling, and the draws are cached
+outside git by program, data, settings, seed and sampling-harness content.
+A repeated invocation with the same key regenerates summaries from those
+draws. The page reads small TSVs and builds its Vega-Lite figure during
+Documenter evaluation; no sampling or raster figure generation runs in CI.

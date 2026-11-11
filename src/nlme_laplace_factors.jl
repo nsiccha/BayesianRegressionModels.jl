@@ -462,10 +462,6 @@ end
 # Z is a zero-valued copy of B's pattern. It requests the selected inverse entries
 # [x,p] = S B' and, with W's own pattern, [p,p] = B S B', including at zero curvature.
 #
-# p and q stay separate variables: their sizes differ by W's scale. A rotation of the
-# auxiliary block stores (q ± p) / √2 and recovers x from a difference of numbers of
-# W's size, which costs a plain solve a residual growing as W² (0.8% at the 2e7 of a
-# bounded ODL target; no accuracy at all above about 1e8).
 function _brm_spl_augmented_matrix(D::SparseMatrixCSC, B::SparseMatrixCSC,
         W::SparseMatrixCSC)
     n = size(D, 1); r = size(B, 1)

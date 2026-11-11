@@ -49,7 +49,7 @@ function auxiliary_native_units(likelihood,u,eta,priors)
 end
 
 @stestset "native auxiliary conditional units" begin
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     directory=joinpath(base,"native-auxiliary-units-v1")
     ispath(directory) && error("preserve native auxiliary unit evidence")
     input_path=joinpath(base,"unit-conditional-moments-v1/comparison.jls")

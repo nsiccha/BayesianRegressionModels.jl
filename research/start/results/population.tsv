@@ -1,0 +1,4 @@
+quantity	unit	description	median	q025	q975	rhat	ess_bulk	ess_tail
+Intercept	response	population intercept	0.1925	-0.3124	0.7111	1.0	3097	1829
+x	response/x	population slope	0.7277	0.4506	0.9822	1.001	2660	1642
+err	response	residual standard deviation	0.2946	0.1558	0.5578	1.0	1666	1914

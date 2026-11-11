@@ -104,7 +104,7 @@ function dense_carried_poisson_oracle(op,C,predictor,y,u)
 end
 
 @stestset "native correlated carry" begin
-    output = "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace/native-carry-v1"
+    output = joinpath(@__DIR__, "results", "native-carry-v1")
     ispath(output) && error("refusing to overwrite native carry control")
     mkpath(output)
     files = sort(filter(endswith(".jl"),readdir(@__DIR__;join=true)))

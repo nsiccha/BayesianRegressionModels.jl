@@ -10,6 +10,6 @@
   "exit_code": 0,
   "wrapper_seconds": 84,
   "wrapper_log": "kb-run-compact.HVXiyU",
-  "raw_fits": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-brms-baseline-v3",
+  "raw_fits": "<local path omitted>",
   "comparison_scope": "common 44 total-coefficient/hyperparameter coordinates; original 46 NCP minimum separate"
 }

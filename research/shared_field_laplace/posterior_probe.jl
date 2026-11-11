@@ -7,7 +7,7 @@ using WarmupHMC, MCMCDiagnosticTools, Serialization, Statistics
 
 @stestset "shared-field posterior comparison" begin
     directory = get(ENV,"KB_LAPLACE_REFERENCE_DIR",
-        "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace/posterior-v2-accept99")
+        joinpath(@__DIR__, "results", "posterior-v2-accept99"))
     mkpath(directory)
     signature = bytes2hex(sha256(vcat(read(@__FILE__),read(joinpath(@__DIR__,"operator_probe.jl")),
         read(joinpath(@__DIR__,"../../test/Manifest.toml")))))

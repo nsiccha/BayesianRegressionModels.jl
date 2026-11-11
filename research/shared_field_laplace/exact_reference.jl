@@ -98,7 +98,7 @@ end
 
 @stestset "exact Gaussian reference" begin
     snapshot = get(ENV,"KB_PROGRESS_FILE",
-        "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace/exact-reference.progress")
+        joinpath(@__DIR__, "results", "exact-reference.progress"))
     with_progress(:state;description="Validate exact Gaussian reference") do progress
         snapshot_progress(progress,snapshot) do
             fixture = with_progress(progress;description="Prepare native model and Enzyme") do _

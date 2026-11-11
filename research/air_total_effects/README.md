@@ -21,9 +21,9 @@ The intercept-only comparison uses 10 scientific quantities: two population coef
 
 ## Results and artifacts
 
-Both `results/cluster-intercept` and `results/cluster-independent` contain one 14-row scientific-QOI table, an efficiency figure, total CP/NCP/ACP pairs, S2Z CP/NCP/auto pairs, per-quantity MCSE, saved-frame audits and ten-seed recovery sensitivity. Each arm has one chain with 2,000 retained draws. Both efficiency columns are relative to ordinary brms NCP + native Stan within that model. Total cost includes required pilots; native and WHMC warmup policies differ.
+Both `results/cluster-intercept` and `results/cluster-independent` retain a 14-row scientific-QOI table and small diagnostic summaries. The commands below regenerate the efficiency figures, pair data, per-quantity MCSE, saved-frame audits and recovery sensitivity from the fits. Each arm has one chain with 2,000 retained draws. Both efficiency columns are relative to ordinary brms NCP + native Stan within that model. Total cost includes required pilots; native and WHMC warmup policies differ.
 
-`reference/native/<case>/<arm>` retains clean and counter-instrumented Stan, resolved data/auto weights, initialization and gradient-count receipts. `reference/automatic_totals` retains the exact BRM exports and zero-error density/gradient export audits. `results/fits/manifest.json` lists 14 raw archives (51,400,524 bytes), with SHA-256 for every archive and member, independently read back. These include native CSV/RDS output, all final checkpoints, positions, gradients and controls. `results/receipts/manifest.json` records process completion and the environment.
+`reference/native/<case>/<arm>` retains clean and counter-instrumented Stan, resolved data/auto weights, initialization and gradient-count receipts. `reference/automatic_totals` retains the BRM exports and density/gradient export audits. Raw archives, machine-local archive manifests, rendered figures and process logs are outside the public repository. Reproducing them requires the deliberate fits below.
 
 Regional intercepts favor S2Z CP + WHMC in this pilot; independent intercepts/slopes favor BRM total CP. Weak NCP controls have divergences and some mean discrepancies. The docs retain these diagnostics; this is not a replicated method ranking.
 
@@ -41,9 +41,8 @@ python3 research/air_total_effects/native_matrix.py "$cmdstan" "$study_scratch/a
 julia --project="$study_env" research/air_total_effects/complete.jl "$study_scratch" "$case" "research/air_total_effects/results/$case"
 python3 research/air_total_effects/assemble.py "$study_scratch" "research/air_total_effects/results/$case" "$case"
 julia --project="$study_env" research/air_total_effects/plot.jl "research/air_total_effects/results/$case" "$case"
-python3 research/air_total_effects/build_pages.py /tmp/air-brief.md
 ```
 
 `complete.jl` reuses completed fits, runs any missing S2Z WHMC arms, analyzes native draws, audits recovery and writes pair data. Use fresh output directories to refit. The native counter uses a zero-contribution C++ helper in the compiled model; the NUTS implementation is unchanged. It checks retained calls against leapfrogs plus one and records all precursor process counts.
 
-Both automatic targets passed 25 checks. The independent post-hoc Pathfinder search encountered two ill-conditioned conditional precisions: higher-precision checks confirm mathematical positive definiteness while double precision fails. `target.jl` rejects this recognized numerical proposal error, and `numerical_audit.jl` records the checks in `results/cluster-independent/numerical_rejections.json`. Every attempted gradient call remains charged. Other exceptions propagate. Failed first-attempt logs are retained separately from the completed workflow costs. The documentation build samples nothing.
+Both automatic targets passed 25 checks. The independent post-hoc Pathfinder search encountered two ill-conditioned conditional precisions: higher-precision checks confirm mathematical positive definiteness while double precision fails. `target.jl` rejects this recognized numerical proposal error, and `numerical_audit.jl` records the checks in `results/cluster-independent/numerical_rejections.json`. Every attempted gradient call remains charged. Other exceptions propagate. Failed first-attempt costs are separate from the completed workflow costs. The documentation build samples nothing.

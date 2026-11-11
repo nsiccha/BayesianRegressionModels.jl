@@ -4,7 +4,7 @@
 include("fixed_rate_fit.jl")
 
 @stestset "native fixed rate reproducibility" begin
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     saved=deserialize(joinpath(base,"native-fixed-rate-fit-v1/fit.jls"))
     previous=deserialize(joinpath(base,"native-fixed-rate-fit-v1/comparison.jls"))
     previous_draws=deserialize(joinpath(base,"native-fixed-rate-fit-v1/draws.jls"))

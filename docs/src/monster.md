@@ -13,7 +13,7 @@ This page declares the model with `@brm` and StanBlocks. The declaration
 reproduces one program from the Stan implementation in
 [`nsiccha/monster`](https://github.com/nsiccha/monster) exactly, except for two
 bugs of that implementation, which are corrected here (see
-[below](#two-corrections-to-the-source-program)). It is meant as a single,
+[below](#Two-corrections-to-the-source-program)). It is meant as a single,
 clearly specified model/data pair.
 
 ## What exactly is reproduced
@@ -50,7 +50,9 @@ with BridgeStan 2.9 (Stan 2.39).
 
 ## The model
 
-**Physiology.** Four tissue compartments hold the solvent: well-perfused
+### Physiology
+
+Four tissue compartments hold the solvent: well-perfused
 tissue (`wp`), poorly perfused tissue (`pp`), fat (`f`) and liver (`l`).
 Blood flow exchanges it between tissues and lungs. During the four-hour
 exposure, inhalation adds a source; Michaelis–Menten metabolism in the liver
@@ -68,22 +70,28 @@ removes it. Each person has fifteen positive quantities:
 Lean body mass, fat fraction and pulmonary flow were measured for each person
 and enter as data. Fat volume is derived from them.
 
-**Hierarchy.** On the log scale, each person's quantity is the population
+### Hierarchy
+
+On the log scale, each person's quantity is the population
 geometric mean plus a deviation whose standard deviation is the log of the
 population geometric standard deviation (GSD). The flow fractions and the
 `Vwp`/`Vpp` split are hierarchical before normalization, so their overall
 scale is identified only by the prior (see
-[other variants](#other-variants-in-the-source-repository)). The population geometric means have lognormal priors. Each log GSD `tau` has
+[other variants](#Other-variants-in-the-source-repository)). The population geometric means have lognormal priors. Each log GSD `tau` has
 `tau^2 ~ Scaled-Inv-χ²(nu, s^2)` with `nu = 4`. All prior locations and scales
 come from the source data file.
 
-**Measurements.** Venous concentrations and exhaled-air concentrations are
+### Measurements
+
+Venous concentrations and exhaled-air concentrations are
 lognormal around the predictions, with one scale each. Both scales have the
 improper prior `p(sigma) ∝ 1/sigma`. Venous blood was not sampled at 245 and
 270 minutes; those exhaled-air values are used and no venous value is
 invented.
 
-**What `nu` means.** It is the degrees of freedom of the prior on the squared
+### The degrees of freedom `nu`
+
+`nu` is the degrees of freedom of the prior on the squared
 log GSDs. Gelman, Bois and Jiang used `nu = 2`. The source repository reports
 that with `nu = 2` divergences could not be removed, and that `nu ≥ 3` fits
 cleanly. Its `cfg/nu=4` and `cfg/nu=8` data files differ only in this value
@@ -227,9 +235,14 @@ matter when comparing results:
   [MCSim example](https://www.gnu.org/software/mcsim/mcsim.html#perc_002emodel)
   rather than that of the papers.
 
-## Reproduce the comparison
+## Reproduce
+
+From the repository root, with the test environment bootstrapped
+(`julia --project=test test/setup_env.jl`):
 
 ```sh
-julia --project=<environment with BayesianRegressionModels, StanBlocks, BridgeStan, JSON> \
-    research/monster/compare_to_source.jl
+julia --startup-file=no --project=test research/monster/compare_to_source.jl
 ```
+
+It checks the generated program against the corrected source program at 25
+random points and times one gradient of each.

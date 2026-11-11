@@ -57,7 +57,7 @@ end
 # Retired-v1 rejection fixture only. Current kernel models declare named BRM
 # linear predictors and write the structural cell inline; this helper exists so
 # the tests below can prove that the old `model=` keyword is rejected. It is not
-# an example of current SbPMX/BRM authoring syntax.
+# an example of current BRM authoring syntax.
 StanBlocks.@deffun begin
     retired_kernel_model_fixture(ts::vector[nt], d::real)::vector[nt] = begin
         d * exp(-ts)

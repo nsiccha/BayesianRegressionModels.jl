@@ -64,11 +64,10 @@ checks printed-source replay, rebinding and value checks of a new design's
 weights, and the refused analytic, `mi()` and invalid-weight cases. It
 accepts testset substring filters.
 
-`epidist_docs_page.jl` evaluates every build-time block of the
-"Epidemiological delays" docs page (`docs/src/epidist.md`) in order, as
-Documenter does. It checks that the page's source markers resolve, its one backend
-comparison carries a Stan pane `stanc` accepts, and the two tables generated
-from `research/epidist/results/*/{parity,fits}.json` render. No sampling.
+`epidist_docs_page.jl` checks the delay model now retained in
+`research/epidist/`: its source markers resolve, and its native declaration
+produces a Stan pane that `stanc` accepts. The renewal page links the research
+README. No sampling.
 
 `censored_delays.jl` checks `primary_censored` and `double_interval_censored`
 (epidist's marginal delay model). The closed-form primary-censored CDF and
@@ -1252,7 +1251,7 @@ component per subject: its value matches a Laplace marginal computed from the
 whole model's density, and its gradient matches central differences. It runs in
 the test environment above.
 
-`rk_batched_field_cells.jl` checks a paired Fourier field with channel mixing written as array cells (BRM todo `07y7ghy`, from RK snag `plate-of-per-row-d1b4ed43`). The cell is `phase = frequency_t * (coordinates[s] ./ lengths)`, then products of shared coefficient matrices with `cos.(phase)` and `sin.(phase)`, then `correlation * raw`. It is checked against the same field written as ODLPlaus writes it, one `@deffun @juliacompat` call per row, on three counts:
+`rk_batched_field_cells.jl` checks a paired Fourier field with channel mixing written as array cells (BRM todo `07y7ghy`, from RK snag `plate-of-per-row-d1b4ed43`). The cell is `phase = frequency_t * (coordinates[s] ./ lengths)`, then products of shared coefficient matrices with `cos.(phase)` and `sin.(phase)`, then `correlation * raw`. It is checked against the same field written with one `@deffun @juliacompat` call per row, on three counts:
 
 - RK gives both the same coordinates, density and native Reverse gradient.
 - RK plans the array cell's plate as matrix products (log group `:plate_batching`) and the per-row plate as a cell loop.
@@ -1275,7 +1274,7 @@ the three-cell checks are `broken`: a later `decay[2]` raises a `BoundsError`,
 and `sum` and `length` return one cell's value. The one-cell count, total and
 likelihood pass on both. Its `decay` is `broken` there too, because one number is
 not a one-entry array. It accepts
-testset substring filters; about 5 minutes warm on gordito.
+testset substring filters; about 5 minutes warm on a Linux fleet host.
 
 `nlme_nested.jl` uses a public synthetic model with interleaved observations
 and 1, 2, and 3 nested units per subject. It checks explicit ownership,
@@ -2100,7 +2099,7 @@ julia --project=<scratch-env> -e 'using Pkg
 julia --startup-file=no --project=<scratch-env> test/rk_kernel_ode_cell.jl
 ```
 
-On BRM 0.2.64 with ReactiveKernels `3deb61ae` that passes 171/171 (gordito,
+On BRM 0.2.64 with ReactiveKernels `3deb61ae` that passes 171/171 (a Linux fleet host,
 2026-10-29); adding the solvers precompiles 56 packages in about 9 minutes.
 
 `kernel_ode_cell.jl` remains
@@ -2995,7 +2994,7 @@ the full pointwise model; it does not compare different marginal targets.
 and give independent targets when a strict subset is retained.
 
 The measurements in `research/sparse_laplace_factors/*_2026-11-02.tsv` use
-Julia 1.10.12 on gordito, one CPU per process, RK
+Julia 1.10.12 on a Linux fleet host, one CPU per process, RK
 `5e9d2d03818ba5c8ef7d6d068fef42101f902d0e` (0.1.52 / PPL 0.1.55), Enzyme
 `5325554cab66d13ab34c22ec502fd00759ffdcf7` and libEnzyme
 `782c9d95efd9895e380c451ea9975cde1c197219` (LLVM 15). Each point runs in a
@@ -3097,8 +3096,7 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
 
 - `julia --project=test test/nlme_svi_series_law.jl`: each station's series is
   one observation under a consumer-written law, an exact Kalman filter's log
-  likelihood bound as a leaf of a whole-event observation provider (snag
-  `odlplaus-margina-60bc212b`). The filter equals the dense Gaussian of the
+  likelihood bound as a leaf of a whole-event observation provider. The filter equals the dense Gaussian of the
   readings, the RK target's native Reverse gradient equals central differences,
   each pointwise term is its station's oracle, and `brm_svi_fit` with the
   stations as units (factors of three statics each) is compared with NUTS on

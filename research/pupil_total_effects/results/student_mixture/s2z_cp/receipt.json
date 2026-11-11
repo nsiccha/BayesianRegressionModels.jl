@@ -1,6 +1,6 @@
 {
-  "run_native": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-s2z-native-v1/s2z_cp",
-  "run_whmc": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil-s2z-whmc-v3/s2z_cp",
+  "run_native": "<local path omitted>",
+  "run_whmc": "<local path omitted>",
   "native_exit": 0,
   "whmc_exit": 0,
   "native_wrapper_log": "kb-run-compact.WqsDnP",

@@ -191,7 +191,7 @@ translations failed descriptor generation at
 `mcelreath/{chimpanzees_intercept,chimpanzees_slopes,moralizing_gods}` and
 `kruschke/{recall_conditions,recall_pooled}`. StanBlocks canonical
 `277f23334fab9f2f88b53cd10f38f5d6bb1118c2` resolves that snag. A focused
-Strato2 rerun of exactly those five probe ids now passes descriptor, stanc,
+a Linux fleet host rerun of exactly those five probe ids now passes descriptor, stanc,
 BridgeStan finite density/gradient, prediction/generated quantities, and
 pointwise log likelihood. The focused receipt retains the old SHA and failure
 signature in `binomial_logit_refresh.tsv`. That rerun also corrected a probe-data
@@ -260,15 +260,15 @@ BridgeStan instantiation, finite density/gradient, and WarmupHMC sampling: the
 kernel is dimension 15 with 50 draws and zero divergences; the plate is
 dimension 21 with 50 draws and zero divergences.
 
-## Current SbPMX semantic mount
+## Current semantic mount
 
-The coherent baseline is SbPMX `origin/main@a8fd3c0`, which contains every
-advertised semantic branch and is three commits beyond the recorded deployed
-release `88c4fbf`. Exact paths and blob ids are in `PROVENANCE.md`.
+The coherent baseline is the private predecessor package's main branch, which
+contains every advertised semantic branch; its provenance is recorded in the
+private archive (see `PROVENANCE.md`).
 
 The translation target is not old page syntax. It is the descriptor-driven
-pattern exercised by current `design/SbPMX.jl` and
-`compat/check-semantic-model-pipeline.jl`:
+pattern exercised by the predecessor's current design module and its
+semantic model pipeline check:
 
 - one `semantic_app` graph;
 - `@options` backed by `option_domain`/`option_records`;
@@ -299,7 +299,7 @@ treated as current receipts.
 
 The gallery source at `7b6a091ab6d240ec3fcfbd8f34248d2a78f3373b`
 and focused BinomialLogit artifact at
-`e8f1ab97df5435e0cf5d8b5605f1309ba5b28d7f` were served on Strato2 at
+`e8f1ab97df5435e0cf5d8b5605f1309ba5b28d7f` were served on a Linux fleet host at
 `http://127.0.0.1:8129/` (ports 8127--8128 were occupied by unrelated
 deployments and were not touched). Root checks returned HTTP 200 with exactly
 359 cards. The focused filters returned 154 confirmed-source cards, 171

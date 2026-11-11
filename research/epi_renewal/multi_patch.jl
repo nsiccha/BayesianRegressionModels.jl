@@ -30,7 +30,7 @@
 # Gate: @brm build -> SBBRMI -> stan_code -> stanc_check -> stan_instantiate ->
 # finite log-density + gradient.   Run: julia --project=test research/epi_renewal/multi_patch.jl
 #
-# VERIFIED (strato2, test env from test/setup_env.jl, StanBlocks pin 9a958f97):
+# VERIFIED (a Linux fleet host, test env from test/setup_env.jl, StanBlocks pin 9a958f97):
 #   patch_model  OK  dim=115  (55 trend innovations + 48 deviation innovations (6 patches × 8 weeks)
 #                + 6 seeds + init + sig + sig_d + rho + gamma + cluster), finite gradient; the dummy
 #                ranef is GQ-lowered and costs no sampler coordinate. The same dim and verdict held on

@@ -10,6 +10,6 @@ inside `@plate` cells. Both backends start from the same `BRMI` model.
 
 See the [documentation](https://nsiccha.github.io/BayesianRegressionModels.jl/dev/)
 for executable examples, backend contracts, fitting, and prediction. The
-[feature atlas](docs/src/feature-atlas.md) shows declarations alongside their
-generated representations. Development checks use the
+[Start page](docs/src/index.md) shows a fitted model alongside its generated
+representations. Development checks use the
 [test environment](test/README.md).

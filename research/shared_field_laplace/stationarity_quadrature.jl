@@ -58,7 +58,7 @@ function quadrature_stationarity(p,field,units,q,n;node=nothing)
 end
 
 @stestset "fixed quadrature stationarity" begin
-    base = "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base = joinpath(@__DIR__, "results")
     saved = deserialize(joinpath(base,"joint-fit-v1/fit.jls"))
     audit = deserialize(joinpath(base,"stationarity-v1/audit.jls"))
     @test saved.signature == audit.fit_signature == AUDIT_FIT_SIGNATURE

@@ -1,0 +1,35 @@
+key	value
+key	legacy/8e47ee5aa54edadc9d5337d5fcf0b92366fe5fb00c56d8ca88f573db754315fb/native
+key_contract	Legacy cache signature covers emitted Python and encoded inputs; sampler settings recorded separately; no immutable research-driver snapshot was saved.
+commit	5e123ba714554d6fcc8434eef388e8973354599a
+commit_scope	Package base reconstructed from reflog; research drivers were uncommitted.
+uncommitted_changes	yes; untracked research scripts; exact contemporaneous diff unavailable
+started	2026-11-10T22:41:56Z
+started_scope	whole Julia command; sampler absolute start unavailable
+host	a Linux fleet host
+julia	1.10.12
+harness	research/jax/reproduce.jl
+harness_version	uncommitted research driver; first captured in 99e4b1a16937d588f87b00c8a0eb630a2f660e15 after fitting
+sampler	WarmupHMC completion_warmup_mcmc on RK/Enzyme density
+settings	"{""chains"":4,""min_completed"":3,""n_draws"":1000,""monitor_ess"":true,""target_acceptance_rate"":0.8,""max_tree_depth"":10,""n_evaluations"":1000,""stepsize_adaptation_limit"":50,""nonlinear_adapt"":true,""completion_policy"":""finish_current_round""}"
+seed	data Xoshiro(2026); original chain RNGs Xoshiro(101), Xoshiro(102), Xoshiro(103), Xoshiro(104)
+seconds	106.227377537
+seconds_scope	includes initialization, compilation and adaptation; not a controlled speed comparison
+divergent	0
+omitted_chains	unavailable: one original slot omitted; compacted cache did not retain identities
+chains_requested	4
+chains_kept	3
+draws_per_chain	1000
+dimension	54
+native_warmup_iterations	adaptive; not recorded
+fit_command_exit	1 after both fits and parity; reporting failed on an MCSE keyword, corrected without refitting
+reporting_recovered	2026-11-10T22:48:04Z command start; --reuse-draws, no sampler rerun
+status	completed; provenance reconstructed from retained logs, caches and git reflog
+BayesianRegressionModels	0.2.272
+ReactiveKernels	0.1.143
+ReactiveKernelsPPL	0.1.145
+WarmupHMC	0.2.11
+python_version	3.14.4
+jax_version	0.12.0.1
+numpyro_version	0.22.0
+numpy_version	2.5.4

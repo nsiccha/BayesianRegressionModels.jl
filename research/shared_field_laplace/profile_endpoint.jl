@@ -42,7 +42,7 @@ function oracle_conditional_draws(rng,p,field,units,q,n)
 end
 
 @stestset "profile endpoint audit" begin
-    base = "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base = joinpath(@__DIR__, "results")
     candidate = deserialize(joinpath(base,"profile-optimization-v1/candidate.jls"))
     baseline = deserialize(joinpath(base,"stationarity-precision-v1/audit.jls"))
     reference = deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))

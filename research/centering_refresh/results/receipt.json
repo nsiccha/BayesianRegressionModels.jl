@@ -9,196 +9,196 @@
     "eight-ncp": {
       "exit": 0,
       "elapsed_seconds": 135,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.mICQy7",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/eight-ncp.log",
       "sha256": "bf278cfe5137a87c70c61fa36e8a429126b99744e831c3596eeaf3cf85bb872b"
     },
     "radon-ncp": {
       "exit": 0,
       "elapsed_seconds": 207,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.EdJsco",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/radon-ncp.log",
       "sha256": "bc4d0d1a53d0a507ae988d040eb3bb98a508638622e51733cd01c629cc7367b0"
     },
     "hsgp-ncp": {
       "exit": 0,
       "elapsed_seconds": 365,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.By9qr6",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/hsgp-ncp.log",
       "sha256": "f24e7130d0a61014f3d81644565b6a851bef931157264525da90af69f996779b"
     },
     "eight-other-five": {
       "exit": 0,
       "elapsed_seconds": 231,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.x2iYMB",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/eight-other-five.log",
       "sha256": "c3283a23b011433a6214221130226129372d3dc4c0b9adec47428f2899fe0358"
     },
     "radon-other-five": {
       "exit": 0,
       "elapsed_seconds": 873,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.t1sVat",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/radon-other-five.log",
       "sha256": "208a03acdb2b0017852238db504e44104c65de7310b6ee221411a9f959c0bb16"
     },
     "hsgp-first-batch-with-failure": {
       "exit": 1,
       "elapsed_seconds": 317,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.i1kdMT",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/hsgp-first-batch-with-failure.log",
       "sha256": "9d25b1be7ccc2760de7d69bf1c59c17e49e13d40bd1ee2718607205caab261cb"
     },
     "hsgp-cp": {
       "exit": 0,
       "elapsed_seconds": 257,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.D3H4NG",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/hsgp-cp.log",
       "sha256": "f695b857a7278999b6bf0330cc00ad1f6efbde7708ff53d4322ca107550b4a14"
     },
     "hsgp-final-online-gradient": {
       "exit": 0,
       "elapsed_seconds": 191,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.kfqRlm",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/hsgp-final-online-gradient.log",
       "sha256": "ed2d9dc7987d9e00765d1a67ec86be14fda35d9a284a7c1282d3a0e84e3cab89"
     },
     "eight-source-audit": {
       "exit": 0,
       "elapsed_seconds": 124,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.IG10M5",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/eight-source-audit.log",
       "sha256": "df7fdbe7589b69ebb00f8b3cec419d707787e18c8d006131185414ed0cc92f91"
     },
     "radon-source-audit": {
       "exit": 0,
       "elapsed_seconds": 80,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.Xmc7vo",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/radon-source-audit.log",
       "sha256": "4a6bf3903c21c80c5c333a60881f7eaff26ac92fce7aa0fba3ef27faef89293c"
     },
     "hsgp-source-audit": {
       "exit": 0,
       "elapsed_seconds": 82,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.cYuJHW",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/hsgp-source-audit.log",
       "sha256": "bf5f3b7e3ac830f87d25ea55f07569ac33f44f0b8b1ae9d53039e804a57687ee"
     },
     "eight-final-export": {
       "exit": 0,
       "elapsed_seconds": 96,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.oqU9gK",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/eight-final-export.log",
       "sha256": "2aa3cd4f2897d1b04c97b2e9df388e5206e20e93fa1fe4fb59bbc1f5439459f3"
     },
     "radon-final-export": {
       "exit": 0,
       "elapsed_seconds": 356,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.deBlA6",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/radon-final-export.log",
       "sha256": "52cb6de9acfd2f80906a4d4cd088e220fa81594c3e67ef855b072de52e88ebd3"
     },
     "hsgp-final-export": {
       "exit": 0,
       "elapsed_seconds": 120,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.hxhKYL",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/hsgp-final-export.log",
       "sha256": "a48d2d8920809cff3317b1c0a7b179d262f9cbcf61dfa02bcc4a1d06da0365d9"
     },
     "package-state-and-rejection-regressions": {
       "exit": 0,
       "elapsed_seconds": 32,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.yvKwFK",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/package-state-and-rejection-regressions.log",
       "sha256": "c36b6c099e241dfefe89af87c1eb510f6ea4c99004207202629a75fdf81f2342"
     },
     "package-reparametrization-and-invariant-scoring": {
       "exit": 0,
       "elapsed_seconds": 27,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.I2osG3",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/package-reparametrization-and-invariant-scoring.log",
       "sha256": "9798cf2b529cd1f684c1ac79266f55dac23d87b0cc31e4d8641d425555f0f677"
     },
     "captured-hsgp-rejection-audit": {
       "exit": 0,
       "elapsed_seconds": 88,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.GX1rDC",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/captured-hsgp-rejection-audit.log",
       "sha256": "fc0403b91aa4d177c1369a508e416edb7dc69689dff5e87e5062c85481e734c7"
     },
     "hsgp-original-boundary-audit": {
       "exit": 0,
       "elapsed_seconds": 101,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.lB9hw7",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/hsgp-original-boundary-audit.log",
       "sha256": "94ab5550e89ecdd0f0f3e9714de093fa2eb46847a0cd856e85aa3bc4291f7b9f"
     },
     "radon-boundary-audit": {
       "exit": 0,
       "elapsed_seconds": 117,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.vE9BuB",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/radon-boundary-audit.log",
       "sha256": "cd928d63e06962d0a51af6ffed1c2783fd9d176dc5bba68f71505b6521037631"
     },
     "raw-capsules-first-eighteen": {
       "exit": 0,
       "elapsed_seconds": 771,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.5g5hY0",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/raw-capsules-first-eighteen.log",
       "sha256": "ea96fe17b647c77408c0ce4e4fa9f4ea2640afcac7c17056ad9e783aefbc45fe"
     },
     "raw-capsules-final-addition": {
       "exit": 0,
       "elapsed_seconds": 5,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.L8POO2",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/raw-capsules-final-addition.log",
       "sha256": "edddeffc51a59f008fdf0a936683a1b00adb4c6e55611b3f5fce6e826ef9b03d"
     },
     "hsgp-final-plots": {
       "exit": 0,
       "elapsed_seconds": 80,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.oFBxzb",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/hsgp-final-plots.log",
       "sha256": "839f86d1545c88bb2cea7fc44272c2eeb407bff3c04e47798ea5f8f0d3bb6f1e"
     },
     "eight-final-plots": {
       "exit": 0,
       "elapsed_seconds": 66,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.wHwoXD",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/eight-final-plots.log",
       "sha256": "0eb799196553b7a8c3454f8a50722484000fedbb5a006d6291a300d0519c64c7"
     },
     "radon-final-plots": {
       "exit": 0,
       "elapsed_seconds": 61,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.n66UYu",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/radon-final-plots.log",
       "sha256": "2b4b759e43198430a55513ba6a1b0dc849a26e742fb75109760f001c3c18361f"
     },
     "full-documenter-and-vitepress-initial": {
       "exit": 0,
       "elapsed_seconds": 1840,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.5RTFt9",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/full-documenter-and-vitepress-initial.log",
       "sha256": "177152c82f6ca71791fdf763b42c5be4918fed1e42ee7a7c727e39e1e45cdd02"
     },
     "final-four-page-documenter": {
       "exit": 0,
       "elapsed_seconds": 112,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.CSVuv0",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/final-four-page-documenter.log",
       "sha256": "492927c3e9e4222dc5d257c7323d932eacfcce088ab7eec745d522351be63e5b"
     },
     "final-full-site-vitepress-with-math": {
       "exit": 0,
       "elapsed_seconds": 14,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.vtPzRt",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/final-full-site-vitepress-with-math.log",
       "sha256": "87a97a1f53eaefff5dfe540f877e0f460f958c7e737a15093f361344ba881305"
     },
     "final-desktop-mobile-browser": {
       "exit": 0,
       "elapsed_seconds": 11,
-      "original_log": "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/kb-run-compact.HXVJfk",
+      "original_log": "<local path omitted>",
       "retained_log": "logs/final-desktop-mobile-browser.log",
       "sha256": "9f1d0f3420bfc054fa0346424325f28e1c04ec2be5e45bf40535818ba8a12a17"
     }

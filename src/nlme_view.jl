@@ -2072,19 +2072,6 @@ function Base.getindex(p::_BRMNLMEPoint, j::Int)
     p.unit[j]
 end
 
-# A subject's conditional density is a sum of RK query cells, in groups that
-# share cell positions. Which observations share a group is the program's, not
-# the data's (`_brm_nlme_cell_groups`): the observations of one authored
-# `@plate for` cell, with the series its `@scan`s observe and the formula
-# observations of its output observed per subject (`_RKNestedObservation`),
-# share its iterations; every other observation is a group of its own. The
-# groups follow the program's pointwise order, the order of `attribution`. So
-# every binding of one program has the same groups in the same order, and so
-# the same partition keys, partition context and model type, and it reuses the
-# code another binding compiled (snag odl-s-ladder-brm-d114c22c: an observation
-# whose density count equalled the grouping's row count in one binding, and was
-# measured in another, used to join or leave the plate group, which went
-# first).
 #
 # A plate observation whose cells were read from the subjects' rows has one
 # cell per subject row: the subjects themselves (one grouping row per subject),

@@ -31,7 +31,7 @@ function joint_endpoint_point(p,mu,C,xi)
 end
 
 @stestset "joint latent endpoint audit" begin
-    base = "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base = joinpath(@__DIR__, "results")
     candidate = deserialize(joinpath(base,"joint-latent-fit-v1/candidate.jls"))
     reference = deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))
     baseline = deserialize(joinpath(base,"joint-latent-comparison-v1/comparison.jls"))

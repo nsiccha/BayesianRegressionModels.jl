@@ -1,6 +1,12 @@
 # Continuous-time state-space models in `@brm`
 
-Sources behind the docs page `docs/src/state-space-models.md`. The models are the
+## Documentation example: exact OU transitions
+
+`docs/src/state-space.md` uses `docs_model.jl`, a compact exact-transition Ornstein–Uhlenbeck model on 40 irregularly observed times. `fit.jl` samples its latent innovations with four WarmupHMC chains and writes the receipt, population diagnostics, latent-state bands and predictive intervals under `results/docs/`. These use named TreeArrays reductions. The longer multivariate ctsem reproductions, filter comparisons and replication studies below remain research material. The guide `docs/src/filtering.md` owns the filtering explanation; the example links it instead of repeating it.
+
+## Earlier continuous-time research
+
+Research models related to `docs/src/state-space.md`. The models are the
 demonstration models of [ctsem](https://github.com/cdriveraus/ctsem), Charles Driver's R
 package for hierarchical continuous-time dynamic modelling; all data are simulated.
 
@@ -13,7 +19,7 @@ package for hierarchical continuous-time dynamic modelling; all data are simulat
 | `ema_state_dependent_fit.jl` | WarmupHMC fit + recovery on a simulated 100 × 30 panel |
 | `ema_state_dependent_psis.jl` | is the filter precise enough? — the importance-sampling reliability workflow of Timonen, Siccha, Bales, Lähdesmäki & Vehtari (arXiv:2205.09059) applied to the filter |
 | `ema_state_dependent_replicate.jl` | refit on independently simulated panels: sampling variability vs. systematic error |
-| `ema_state_dependent_summaries.jl`, `figures.jl` | tables in `results/` and the figures of the docs page |
+| `ema_state_dependent_summaries.jl`, `figures.jl` | tables in `results/` and the figures of the earlier research studies |
 | `ema_brm.jl` | incremental build-up: how far the pure formula surface carries, and where the kernel cell takes over |
 | `kalman_marginalization.jl`, `ema_ekf.jl` | single-series building blocks: a dimension-generic Kalman `@lpxf` and a single-series EKF |
 

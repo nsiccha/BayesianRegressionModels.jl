@@ -1,0 +1,22 @@
+key	value
+commit	2148fd8b76f2ef10001081303720721423bc2f1f
+uncommitted_changes	yes
+started	2026-11-11 01:59 local time
+host	a Linux fleet host, 1 Julia threads
+julia	1.10.12
+BayesianRegressionModels	0.2.273
+sampler	WarmupHMC completion_warmup_mcmc, adaptive_centering_problem over the BridgeStan problem, AutoEnzyme
+chains	4 per fit, quorum 3, 1000 draws each
+key	16a6a41e619d9eebcd7495465ec688c37e7ac391fe521d59d854edd71fc0d018
+harness_version	27a8d666a2db2bc3569e19981e3ffa01f628d7704f70cd65e4a597f3fb20d0fb
+settings	{"n_draws":1000,"n_chains":4,"min_completed":3,"seed":20261111}
+seed	20261111
+StanBlocks	0.2.31
+WarmupHMC	0.2.11
+Enzyme	0.13.218
+seconds	65.576799819
+divergent	0
+omitted_chains	[4]
+dimension	7
+completed	2026-11-11T02:01:22.374
+status	completed

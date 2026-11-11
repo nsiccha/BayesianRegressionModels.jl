@@ -686,7 +686,7 @@ instead of failing at run time.
 - Tested: a unit's whole series under one consumer-written law, a filter's
   log likelihood bound as a leaf of a whole-event observation provider, is
   one observation of its unit under `brm_nlme_view` and `brm_svi_fit`
-  (`test/nlme_svi_series_law.jl`, snag `odlplaus-margina-60bc212b`).
+  (`test/nlme_svi_series_law.jl`).
 
 ## 0.2.249
 
@@ -1506,18 +1506,15 @@ More numbers are inputs of the program instead of text in it (user principle
 - The sparse Laplace marginal gradient is correct at a stiff observation on the
   factor route. Its augmented system lost accuracy as the square of the outer
   curvature, and the gradient keeps that residual on any population coordinate
-  aliased with an integrated effect: on a bounded ODL target with outer curvature
-  2e7, `odl_offset_Intercept` read 19214 for 395. The system now keeps its outer
+  aliased with an integrated effect. The system now keeps its outer
   inputs and their images as separate variables and refines each solve against
   the conditional precision itself. Marginal values, definiteness and selected
   covariances are unchanged. Conditional draws use the same solve.
 - The Laplace mode search's default Newton budget per continuation stage
   (`maxiter` of `brm_laplace_problem`, `brm_laplace_plan` and the NLME
   integrated families) rises from 50 to 200. Where a followed mode ceases to
-  exist between stages, the walk to the next mode can take more than 50 steps:
-  on the bounded ODL target a 38-effect component needed 56-59 at stage 4/10
-  and up to 122 at stage 5, with exact derivatives, so the default scored a
-  point that has a mode `-Inf`. A point that does not converge now costs up to
+  exist between stages, the walk to the next mode can take more than 50 steps
+  with exact derivatives, so the default scored a point that has a mode `-Inf`. A point that does not converge now costs up to
   four times as many steps before it is `-Inf`. Pass `maxiter=50` for the
   former budget.
 - Sparse Laplace supports model-scope helpers shared by ordinary or
@@ -3921,7 +3918,7 @@ More numbers are inputs of the program instead of text in it (user principle
   shared factor 36,970 entries instead of 453² = 205,209) and its separation
   is built in 0.17 s instead of 6.3 s. With three such fields on 43,728 rows
   a gradient takes 13.5 ms instead of 70–101 ms and the separation data
-  7.1 MiB instead of 365 MiB (gordito, one CPU). The
+  7.1 MiB instead of 365 MiB (a Linux fleet host, one CPU). The
   field and its density are unchanged; the unit draws parametrize each
   unit's interior through another orthogonal rotation, so a point saved from
   an earlier separated lowering does not carry over.
@@ -4156,7 +4153,7 @@ More numbers are inputs of the program instead of text in it (user principle
   0.1.6; registered Enzyme raises `IllegalTypeAnalysisException` there.
 - BRM's test environment runs the Enzyme `dogfood` line (`test/setup_env.jl`,
   user decision `0n0kgfh`) and ReactiveKernels 0.1.6, so it builds only on a
-  KB fleet host with the dogfood libEnzyme build (gordito). On it,
+  KB fleet host with the dogfood libEnzyme build (a Linux fleet host). On it,
   `test/rk_enzyme_threads.jl` (concurrent-GC gradients),
   `test/plate_index_into.jl` and `test/rk_structured_consumer.jl` pass.
 
@@ -4887,7 +4884,7 @@ More numbers are inputs of the program instead of text in it (user principle
   block claimed (its deviations from their mean and `theta = β + B μ`; every
   level must be given). On RKBRMI it covers the plain blocks it addresses.
   Unlisted levels keep their coordinates at `base` (standardized draws, or
-  effects in a centred block). Snag `odlplaus-ap-2-st-537291fd`.
+  effects in a centred block).
 ## 0.2.7
 
 - `structure_of(builder)` and `priors_of(builder)` split a data-free

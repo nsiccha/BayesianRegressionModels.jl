@@ -233,6 +233,41 @@ function enhanceComparison(root: HTMLElement) {
   selectPane(0)
 }
 
+// Pane ids a generated comparison may list, with their tab labels. Panes not
+// listed in GENERATED_DEFAULT_OFF start ticked in the side-by-side dialog.
+const GENERATED_PANE_LABELS: Record<string, string> = {
+  brm: 'BRM authoring',
+  ir: 'IR',
+  stanblocks: 'StanBlocks model',
+  stan: 'Stan source',
+  jax: 'JAX module',
+}
+const GENERATED_DEFAULT_OFF = ['stan', 'jax']
+const GENERATED_DEFAULT_PANES = 'brm|ir|stanblocks|stan'
+
+// The sentinel's first line is the title. An optional `panes:` line lists the
+// panes in order; `id:n` gives a pane n consecutive code blocks (default 1).
+function parseSentinel(sentinel: HTMLElement) {
+  // Read the fence's text itself; the rendered block also carries its
+  // language label and a copy button.
+  const code = sentinel.querySelector('code') ?? sentinel
+  const lines = (code.textContent || '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const title = lines[0] || 'BRM model comparison'
+  const spec = lines.find((line) => line.startsWith('panes:'))
+  const entries = (spec ? spec.slice('panes:'.length) : GENERATED_DEFAULT_PANES)
+    .split('|')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+  const panes = entries.map((entry) => {
+    const [id, count] = entry.split(':')
+    return { id, blocks: Math.max(1, Number(count) || 1) }
+  })
+  return { title, panes }
+}
+
 function materializeGeneratedComparisons(root: ParentNode) {
   const sentinels = Array.from(
     root.querySelectorAll<HTMLElement>('div.language-brm-comparison'),
@@ -242,28 +277,35 @@ function materializeGeneratedComparisons(root: ParentNode) {
   }
 
   sentinels.forEach((sentinel) => {
-    const panes: HTMLElement[] = []
+    const { title, panes: spec } = parseSentinel(sentinel)
+    const needed = spec.reduce((total, pane) => total + pane.blocks, 0)
+    const blocks: HTMLElement[] = []
     let cursor = sentinel.nextElementSibling
-    while (cursor && panes.length < 4) {
+    while (cursor && blocks.length < needed) {
       if (!(cursor instanceof HTMLElement) || !cursor.matches('div[class*="language-"]')) {
         break
       }
-      panes.push(cursor)
+      blocks.push(cursor)
       cursor = cursor.nextElementSibling
     }
-    if (panes.length !== 4) return
+    if (blocks.length !== needed) return
 
-    const title = sentinel.textContent?.trim() || 'BRM model comparison'
     const comparison = document.createElement('div')
     comparison.className = 'backend-comparison'
     comparison.dataset.backendComparison = ''
     comparison.dataset.comparisonTitle = title
-    comparison.dataset.paneIds = 'brm|ir|stanblocks|stan'
-    comparison.dataset.paneLabels =
-      'BRM authoring|IR|StanBlocks model|Stan source'
-    comparison.dataset.defaultOff = 'stan'
+    comparison.dataset.defaultOff = GENERATED_DEFAULT_OFF.join('|')
     sentinel.replaceWith(comparison)
-    panes.forEach((pane) => comparison.appendChild(pane))
+
+    let next = 0
+    spec.forEach(({ id, blocks: count }) => {
+      const pane = document.createElement('div')
+      pane.dataset.backendPane = id
+      pane.dataset.label = GENERATED_PANE_LABELS[id] || id
+      blocks.slice(next, next + count).forEach((block) => pane.appendChild(block))
+      next += count
+      comparison.appendChild(pane)
+    })
   })
 }
 

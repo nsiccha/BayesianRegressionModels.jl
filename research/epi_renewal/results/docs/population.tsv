@@ -1,0 +1,4 @@
+quantity	unit	description	median	q025	q975	rhat	ess_bulk	ess_tail
+initial infections	people/day	incidence at the seeded origin	53.1	46.74	59.87	1.001	2549	2036
+initial R		initial reproduction number	1.279	1.146	1.434	1.008	445	767
+cluster		negative-binomial overdispersion scale	0.115	0.08443	0.1528	1.002	2797	2012

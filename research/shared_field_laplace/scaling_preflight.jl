@@ -7,7 +7,7 @@ include("scaling_target.jl")
 @stestset "native scaling preflight" begin
     name=get(ENV,"SHARED_LAPLACE_SCALING_CASE","base")
     config=only(c for c in SCALING_CASES if c.name==name)
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     directory=joinpath(base,"native-scaling-preflight-v1",name)
     ispath(directory) && error("preserve existing scaling preflight: $name")
     mkpath(directory)
