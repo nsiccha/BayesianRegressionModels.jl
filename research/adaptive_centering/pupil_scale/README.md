@@ -155,6 +155,5 @@ The study uses brms revision `73cf607889879cb2a55f50b88d8141d76ff43279`, BRM imp
 - [Generated automatic Stan target](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_scale_totals/reference/automatic_totals/automatic_totals.stan).
 - [Exact automatic-target data](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_scale_totals/reference/automatic_totals/automatic_totals.json).
 - [Single comparison table](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_scale_totals/results/comparison.tsv).
-- [Per-quantity ESS and MCSE](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_scale_totals/results/per_quantity_mcse.tsv).
 - [Recovery sensitivity](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_scale_totals/results/recovery_seed_sensitivity.tsv).
 - [Source provenance and reproduction instructions](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/pupil_scale_totals/README.md).
