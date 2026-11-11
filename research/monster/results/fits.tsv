@@ -1,0 +1,2 @@
+dimension	chains_requested	chains_kept	omitted_chains	draws	divergent	divergent_pct	seconds
+122	4	3	2	3000	0	0.0	8745.5
