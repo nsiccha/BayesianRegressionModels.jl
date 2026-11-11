@@ -458,13 +458,72 @@ brm_gp_covariance(x, sigma, rho, period, jitter) = iszero(period) ?
 
 brm_gp_latent(covariance, z) = StatisticalPreparation.gp_chol_latent(covariance, z)
 
-brm_level_indices(labels, source) = _rk_value_level_indices(labels, source)
-# A grouping's fitted levels: reading them as a grouping column gives the same
-# levels back (`_rk_grouping_levels`), and a categorical column keeps its
-# level order. The emitted program reads them in place of the fit-role column.
-brm_fit_levels(source::CA.CategoricalArray) = CA.categorical(CA.levels(source);
+# A grouping's level coding: its fitted levels (`g_fit_levels =
+# brm_fit_levels(g_fit)`) and each row's position among them (`g_level =
+# brm_level_indices(g, g_fit_levels)`). Both are `@_brm_traceable`
+# definitions (`src/ragged_rows.jl` says what their bodies may use), so a
+# `jax_source` module computes them from the raw labels in its `prepare_data`,
+# from the same source Julia runs, instead of taking them from Julia (snag
+# `rkbrmi-grouping-589e4a34`).
+#
+# The fitted levels: the labels' distinct non-missing values sorted by
+# `isless`, as `CategoricalArrays.levels` gives them for a plain vector, so
+# reading them as a grouping column gives the same levels back
+# (`_rk_grouping_levels`). A categorical column keeps its declared level order
+# and its unobserved levels. That order is not in the labels a module reads,
+# so its arm is plain Julia (`_brm_categorical_fit_levels`), decided while
+# emitting: the module takes a categorical grouping's levels and positions as
+# inputs (`m.UNTRANSLATED`).
+@_brm_traceable function brm_fit_levels(source::AbstractVector)
+    if typeof(source) <: CA.CategoricalArray
+        levels = _brm_categorical_fit_levels(source)
+    else
+        levels = _brm_sorted_labels(source)
+    end
+    levels
+end
+_brm_categorical_fit_levels(source) = CA.categorical(CA.levels(source);
     levels=CA.levels(source), ordered=CA.isordered(source))
-brm_fit_levels(source::AbstractVector) = collect(CA.levels(source))
+@_brm_traceable function _brm_sorted_labels(source::AbstractVector)
+    # `collect`: a range's `unique` and `sort` are ranges, the levels a `Vector`.
+    labels = collect(unique(source))
+    if Missing <: eltype(source)
+        present = Vector{Base.nonmissingtype(eltype(source))}()
+        for k in 1:length(labels)
+            if !ismissing(labels[k])
+                push!(present, labels[k])
+            end
+        end
+        sorted = sort(present)
+    else
+        sorted = sort(labels)
+    end
+    sorted
+end
+# Each label's position among the levels of `source`: a grouping's fitted
+# levels, which `brm_fit_levels` gives back unchanged, or a multi-membership
+# block's members' labels (`vcat(g1, g2)`), whose levels it computes. One lookup
+# table per call, so the rows cost rows plus levels, not rows times levels. Its
+# keys compare with `isequal` (whose `hash` agrees with it).
+@_brm_traceable function brm_level_indices(labels::AbstractVector, source::AbstractVector)
+    levels = brm_fit_levels(source)
+    lookup = Dict{eltype(levels),Int}()
+    for k in 1:length(levels)
+        lookup[levels[k]] = k
+    end
+    indices = zeros(Int, length(labels))
+    for r in 1:length(labels)
+        position = get(lookup, labels[r], 0)
+        if position == 0
+            throw(ErrorException("RK backend: group label `$(labels[r])` is not one of \
+                the $(length(levels)) fitted levels. A replay keeps the fitted levels of \
+                every grouping it does not resample; name the grouping in \
+                `resample_groups` to take the new data's own levels."))
+        end
+        indices[r] = position
+    end
+    indices
+end
 # A shared `|ID|` block's fitted levels when its predictors group their rows by
 # different columns: the union of the columns' labels, in the order
 # `_brm_joint_levels` gives SBBRMI (the planner refused columns sharing none).
