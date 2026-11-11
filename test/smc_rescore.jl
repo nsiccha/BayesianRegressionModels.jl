@@ -23,7 +23,7 @@ function checkpoint_case(kind)
                 kwargs = (; data=next, previous_data=data)
             end
         end
-        return fit, cp -> brm_smc_resume(rk, cp; kwargs...),
+        return fit, (cp -> brm_smc_resume(rk, cp; kwargs...)),
             (cp; kw...) -> brm_smc_rescore(rk, cp; kwargs..., kw...)
     elseif kind in (:window, :compact_window)
         if kind === :window
@@ -38,7 +38,7 @@ function checkpoint_case(kind)
         end
         fit = brm_smc_update(carry, window; rng, particles=16, stages=0,
             options=OPTIONS, kwargs...)
-        return fit, cp -> brm_smc_resume(window, cp),
+        return fit, (cp -> brm_smc_resume(window, cp)),
             (cp; kw...) -> brm_smc_rescore(window, cp; kw...)
     elseif kind in (:laplace, :laplace_update, :later_laplace)
         (problem,), _ = F.targets(:laplace)
@@ -57,7 +57,7 @@ function checkpoint_case(kind)
                 kwargs = (; current=next, previous=current)
             end
         end
-        return fit, cp -> brm_smc_resume(problem, cp; kwargs...),
+        return fit, (cp -> brm_smc_resume(problem, cp; kwargs...)),
             (cp; kw...) -> brm_smc_rescore(problem, cp; kwargs..., kw...)
     end
     error("unknown checkpoint case: $kind")
