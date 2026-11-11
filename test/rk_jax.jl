@@ -15,6 +15,7 @@
 using Test
 using BayesianRegressionModels, Distributions
 using ReactiveKernels, ReactiveKernelsPPL
+import CategoricalArrays
 
 include(joinpath(pkgdir(ReactiveKernels), "test", "jax_python.jl"))
 
@@ -28,6 +29,16 @@ end
 counts(d) = @brm d begin
     log(lambda) ~ 1 + x + (1 | g)
     c ~ Poisson(lambda)
+end
+toy(d) = @brm d begin
+    mu ~ 1 + (1 | g)
+    sigma ~ Exponential(1)
+    y ~ Normal(mu, sigma)
+end
+member(d) = @brm d begin
+    mu ~ 1 + (1 | mm(g, g2))
+    sigma ~ Exponential(1)
+    y ~ Normal(mu, sigma)
 end
 # Grouped reads through `groups(group => cells)`: dose rows and long-format
 # observation rows joined to their subject by label (`test/rk_design_binder.jl`'s
@@ -161,6 +172,44 @@ end
     check_module(reprocess(rk, (; x=[1.0, 2.0, 3.0, 4.0], w=[0.1, -0.2, 0.3, 0.0],
         g=["a", "c", "c", "b"], y=[0.2, -0.1, 0.4, 0.0])); anchors=false)
     check_module(RKBRMI(JM.counts(TRAIN)); anchors=false)
+end
+
+# A grouping's level coding, its fitted levels (`g_fit_levels =
+# brm_fit_levels(g_fit)`) and each row's position among them (`g_level`), is
+# `prepare_data` host code translated from the source Julia runs, so a module
+# fed the raw labels alone runs without Julia (snag `rkbrmi-grouping-589e4a34`).
+# So are a multi-membership block's positions among its members' joint labels.
+# A categorical column's declared level order is not in the labels a module
+# reads: its levels and positions stay inputs.
+prepare_inputs(src) = Set(Symbol(first(i)) for i in jax_function(src, "prepare_data").inputs)
+untranslated(src) = something(match(r"^UNTRANSLATED = (.*)$"m, src.text), (; captures=[""])).captures[1]
+@testset "a grouping's level coding is prepare_data host code" begin
+    y = [0.1, -0.2, 0.3, 0.5, -0.1, 0.2]
+    for g in ([1, 1, 2, 3, 3, 3], ["a", "a", "b", "c", "c", "c"], [30, 10, 20, 10, 30, 5])
+        src = check_module(RKBRMI(JM.toy((; g, y))); anchors=false)
+        @test prepare_inputs(src) == Set([:g, :g_fit, :y])
+        @test untranslated(src) == "{}"
+    end
+    src = check_module(RKBRMI(JM.member((; g=["b", "a", "c", "a", "b", "b"],
+        g2=["d", "a", "a", "c", "b", "d"], y))); anchors=false)
+    @test prepare_inputs(src) == Set([:g, :g2, :y])
+    @test untranslated(src) == "{}"
+    g = CategoricalArrays.categorical(["b", "a", "c", "a", "b", "b"];
+        levels=["c", "b", "a", "z"])
+    src = check_module(RKBRMI(JM.toy((; g, y))); anchors=false)
+    @test issubset((:g_fit_levels, :g_level), prepare_inputs(src))
+    # A replay's labels outside the fitted levels: Julia and the module refuse
+    # them with one message.
+    rk = RKBRMI(JM.toy((; g=["a", "a", "b"], y=y[1:3])))
+    @test_throws "is not one of the 2 fitted levels" BayesianRegressionModels.brm_level_indices(
+        ["a", "q"], ["a", "b"])
+    if rk_jax_available()
+        src = jax_source(rk.model, rk_bound_plan(rk))
+        bad = merge(rk_bound_data(rk), (; g=["a", "q", "b"]))
+        @test_throws "is not one of the 2 fitted levels" rk_jax_evaluate(src, "log_density",
+            (point(rk), Tuple(bad[Symbol(first(i))]
+                for i in jax_function(src, "prepare_data").inputs)...); prepare=true)
+    end
 end
 
 const PK_DESIGN = (; subject=["s2", "s4"], weight=[72.0, 55.0], dose=[120.0, 100.0],

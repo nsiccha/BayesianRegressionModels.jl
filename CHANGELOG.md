@@ -12,6 +12,52 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.277
+
+- Fixed: `brm_svi_fit`'s exploration ended at the `min_windows` floor whenever
+  the two-window test passed while the trend's last `trend_windows` windows
+  still reached back to the first window, and that window sat far below the
+  rest. A start that climbs from far below is no line: its residual swamped the
+  slope's error, so the trend test could not read a rise however plain it was.
+  On a downstream model with a non-centred step `m + s z_i` at 32 units (batch
+  4, seed 1) the first window's trimmed ELBO sat about 46,000 nats below the
+  next 39, the slope over windows 1 to 40 read t = 1.9 (7.2 without the first
+  10), and exploration stopped at window 40 with the step at 0.84 against a
+  truth of 1.18, exactly where the two-window test alone stopped it (snag
+  `brm-svi-fit-stop-4840e476`). While the last `trend_windows` windows reach
+  back into the first `patience`, the slope is now read both through them and
+  without them, and exploration goes on while either rises. There exploration
+  now runs 207 windows and ends at 1.180, 162 nats higher on shared draws; at 8
+  and 16 units it stops at the same windows as before (157 and 208). A fit never
+  explores less than on 0.2.264 to 0.2.276: on stationary window noise the stop
+  moves later in about 2.5% of runs (1% before), by a few windows. An optimizer
+  checkpoint written by BRM 0.2.264 to 0.2.276 records no `trend_skip` and
+  continues on the line through the first windows alone, as it ran.
+
+## 0.2.276
+
+- Changed: the `jax_source(rk.model, rk_bound_plan(rk))` module of an RKBRMI
+  computes each grouping's level coding in its `prepare_data`, from the raw
+  labels: the fitted levels (`g_fit_levels = brm_fit_levels(g_fit)`) and each
+  row's position among them (`g_level = brm_level_indices(g, g_fit_levels)`).
+  `prepare_data` takes `g` and `g_fit` (and no longer `g_fit_levels` or
+  `g_level`), and `m.UNTRANSLATED` no longer lists them, so the module of a
+  model with `(1 | g)`, `(1 + x | g)`, several groupings or a multi-membership
+  block runs on new raw data without Julia. Before, both came from
+  `rk_bound_data(rk)`. Both functions are now one source for Julia and the
+  module (`@_brm_traceable`, as the ragged-join partition is since 0.2.270).
+  Native values are unchanged: the fitted levels are the labels' distinct
+  non-missing values sorted by `isless`, as `CategoricalArrays.levels` gives
+  them. A categorical grouping column keeps its declared level order and
+  unobserved levels, which its labels do not carry, so its levels and
+  positions stay module inputs; a data-free replay's fitted levels come from
+  its fitted state, as before. The module's `sort` and `unique` need
+  ReactiveKernels 0.1.144 or later (measured on 0.1.154). (Snag
+  `rkbrmi-grouping-589e4a34`.)
+- Changed: `brm_fit_levels` of labels that `isless` cannot order (`Any[1, "a"]`)
+  raises that `MethodError`, as SBBRMI's level fit does; it returned them
+  unsorted before.
+
 ## 0.2.275
 
 - Fixed: a fitted state (`brm_fitted_state`) exported by BRM 0.2.228 to 0.2.269

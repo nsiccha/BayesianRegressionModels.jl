@@ -70,6 +70,62 @@ end
     @test !BRM._brm_svi_rising(svi_trend_windows(collect(10.0:-1.0:1.0), 1.0), 10, 41)
 end
 
+# The windows of a start that climbs from far below: the first window 45,000 nats
+# under the rest and the next two 600 under, as a downstream fit at 32 units started
+# (snag brm-svi-fit-stop-4840e476).
+svi_start_climb(c) = (c = copy(c); c[1] -= 4.5e4; c[2:3] .-= 600; c)
+
+@stestset "the start's climb hides no trend" begin
+    W, P, L = 100, 10, 41
+    c = (; window=W, patience=P, min_windows=40, trend_windows=L, trend_skip=P)
+    through_start = Base.structdiff(c, NamedTuple{(:trend_skip,)})
+    two = merge(c, (; trend_windows=0))
+    explored(ws, c) = BRM._brm_svi_explored((; windows=ws), c)
+    # A rise of 0.4 nats per window under window noise of sd 2.5 that ends at window
+    # 200. Through the first window, the start's residual swamps the slope's error,
+    # so that line cannot see the rise and exploration ended where the two-window test
+    # alone ends it. Without the first `patience` windows the line sees it.
+    rng = Xoshiro(1)
+    ws = svi_trend_windows(svi_start_climb(-1000 .+ min.(0.4 .* (1:400), 80) .+
+        2.5 .* randn(rng, 400)), 2.5^2 * W)
+    @test BRM._brm_svi_stalled(ws[40-P], ws[40], W)
+    @test !BRM._brm_svi_rising(ws, 40, L)
+    @test BRM._brm_svi_rising(ws, 40, L, P + 1)
+    @test BRM._brm_svi_trending(ws, 40, c)
+    @test explored(ws, through_start) == explored(ws, two) == 40
+    @test 200 < explored(ws, c) <= 300
+    # After the same start on stationary noise, exploration runs past the two-window
+    # stop only by the test's chance level.
+    delays = map(1:200) do seed
+        rng = Xoshiro(seed)
+        ws = svi_trend_windows(svi_start_climb(-1000 .+ 2.5 .* randn(rng, 400)), 2.5^2 * W)
+        explored(ws, c) - explored(ws, two)
+    end
+    @test all(>=(0), delays)
+    @test median(delays) == 0
+    @test mean(delays .> 0) < 0.1
+    # Either line rising holds exploration, so it never ends earlier than the line
+    # through the start alone ended it: not after a start far below, nor after a
+    # smooth climb whose first windows are evidence of the rise, nor on noise.
+    starts = (svi_start_climb, c -> c .- 3000 .* exp.(-(1:length(c)) ./ 8), identity)
+    @test all(Iterators.product(starts, 1:50)) do (start, seed)
+        rng = Xoshiro(seed)
+        ws = svi_trend_windows(start(-1000 .+ min.(0.1 .* (1:400), 20) .+
+            2.5 .* randn(rng, 400)), 2.5^2 * W)
+        explored(ws, c) >= explored(ws, through_start)
+    end
+    # Fresh controls also read the line without the first `patience` windows; controls
+    # written before `trend_skip` existed read it through them alone, as they ran.
+    @test BRM._brm_svi_trend_skip(through_start) == 0
+    fresh = BRM._brm_svi_controls(8; batch_size=4, max_iterations=1, lr_global=0.01,
+        unit_step=0.1, polish_lr=0.05, window=nothing, patience=P, min_windows=40,
+        polish_windows=20)
+    @test fresh.trend_skip == P
+    # Too few windows from `first` on never rise.
+    @test !BRM._brm_svi_rising(svi_trend_windows(collect(1.0:12.0), 1.0), 12, L, 11)
+    @test BRM._brm_svi_rising(svi_trend_windows(collect(1.0:13.0), 1.0), 13, L, 11)
+end
+
 # The ridge: N units whose rows each pin a multiplicative step `exp(m + s z_i)`
 # (non-centred, `z_i ~ Normal(0, 1)`) beside a level and noise. The steps share
 # one value up to a spread of 0.02, so the posterior spread is small, but the fit
@@ -152,6 +208,7 @@ end
     part = brm_svi_fit(rk; rng=Xoshiro(1), SVI_RIDGE_OPT..., stop_after=3000)
     state = brm_svi_optimizer_checkpoint(part)
     @test state.controls.trend_windows == 41
+    @test state.controls.trend_skip == 10
     @test svi_same_result(brm_svi_resume(rk, state; subject_group=:unit, ndraws=200), full)
     # A checkpoint of BRM 0.2.263 or earlier records no `trend_windows`: it ends
     # exploration on the two-window test, as it would have.
