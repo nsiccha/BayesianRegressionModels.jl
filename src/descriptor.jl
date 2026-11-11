@@ -3931,7 +3931,7 @@ operations take the new dataframe positionally and return a new descriptor.
 For prior draws, build the descriptor with the response column omitted and
 sample the `:instantiate` problem (fixed_param); there is no separate prior
 operation.
-Unknown names fail closed via [`brm_operation`](@ref).
+Unknown names fail closed via `brm_operation`.
 """
 brm_execute(d::BRMDescriptor, name::Symbol, args...; kwargs...) =
     brm_operation(d, name).run(d, args...; kwargs...)

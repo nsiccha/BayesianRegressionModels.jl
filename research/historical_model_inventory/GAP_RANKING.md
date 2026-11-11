@@ -20,7 +20,7 @@ These are kept separate from new modeling semantics.
 - Exact rows: `mcelreath:chimpanzees_intercept`, `mcelreath:chimpanzees_slopes`, `mcelreath:moralizing_gods`, `kruschke:recall_conditions`, `kruschke:recall_pooled`.
 - Historical failure at StanBlocks `329a178...`: generated-quantity trace inference had no signature for `binomial_logit_rng(::array[] tokenof, ::int, ::vector)`. The density-side model was not the defect.
 - Reuse/scope/dependencies: common grouped-Binomial shape (`X=4`), narrow trace/signature repair (`E=5`), no semantic dependency (`D=5`).
-- Resolution: StanBlocks canonical `277f23334fab9f2f88b53cd10f38f5d6bb1118c2` resolves [[StanBlocks:snag.binomial-logit-r-2d7c76b2]] (`binomial-logit-r-2d7c76b2`). The focused Strato2 receipt runs exactly the five probe ids through descriptor, stanc, BridgeStan finite density/gradient, prediction/generated quantities, and pointwise likelihood; all five pass. `binomial_logit_refresh.tsv` retains the `329a178...` failure signature rather than overwriting its provenance.
+- Resolution: StanBlocks canonical `277f23334fab9f2f88b53cd10f38f5d6bb1118c2` resolves [[StanBlocks:snag.binomial-logit-r-2d7c76b2]] (`binomial-logit-r-2d7c76b2`). The focused a Linux fleet host receipt runs exactly the five probe ids through descriptor, stanc, BridgeStan finite density/gradient, prediction/generated quantities, and pointwise likelihood; all five pass. `binomial_logit_refresh.tsv` retains the `329a178...` failure signature rather than overwriting its provenance.
 
 ### A2. Remaining: transformed-column interaction lowering -- 17/25
 

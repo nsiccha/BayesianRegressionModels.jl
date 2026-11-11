@@ -30,7 +30,7 @@ function gaussian_endpoint_point(p,mu,C,xi)
 end
 
 @stestset "native Gaussian block endpoint" begin
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     saved=deserialize(joinpath(base,"native-gaussian-block-fit-v1/fit.jls"))
     native_comparison=deserialize(joinpath(base,"native-gaussian-block-fit-v1/comparison.jls"))
     reference=deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))

@@ -135,10 +135,9 @@ function ema_kernel_kalman_model(data = ema_kalman_fixture())
         m0  ~ 1             + (1 | subject)    # initial mood mean
 
         # per subject: integrate out THIS subject's entire latent path, exactly
-        pred ~ kernel(dt, workload, stressReport, moodReport,
-                      a11, cm, s0, m0) do dti, wli, ys, ym, la11, lcm, ls0, lm0
-            ys ~ kalman2(ym, wli, dti, la11, a12, a21, a22, lcm, wls, q1, q2, r1, r2, ls0, lm0, 10.0)
-            ys
+        @plate for i in eachindex(a11)
+            stressReport[i] ~ kalman2(moodReport[i], workload[i], dt[i], a11[i], a12, a21, a22, cm[i],
+                                      wls, q1, q2, r1, r2, s0[i], m0[i], 10.0)
         end
     end
 end

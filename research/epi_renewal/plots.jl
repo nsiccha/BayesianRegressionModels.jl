@@ -8,7 +8,7 @@
 # written when CairoMakie is loadable, for inspection only.
 #
 # Run in an environment that resolves AlgebraOfVega (it is unregistered), e.g. BRM's web-macro env:
-#   julia --project=/home/n/github/nsiccha/BayesianRegressionModels.jl/web-macro research/epi_renewal/plots.jl
+#   julia --project=web-macro research/epi_renewal/plots.jl
 
 using AlgebraOfVega, AlgebraOfGraphics, JSON, Statistics
 import AlgebraOfGraphics as AoG

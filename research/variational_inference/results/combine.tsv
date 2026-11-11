@@ -1,0 +1,3 @@
+start	seconds	total_seconds	iterations	exploring_iterations	unit_gradient_calls	final_elbo_trimmed_mean	max_population_mean_error_sds
+cold start	44.1718	193.861	7700	4600	985600	-7702.0	0.356926
+start from four slices	11.4031	74.2639	7100	4000	908800	-7695.04	0.283545

@@ -7,7 +7,7 @@ using Serialization, Statistics, MCMCDiagnosticTools
     (;rk) = shared_field_fixture(;groups=6,rows=12,temporal=4,spatial=2,
         prepare_model=false)
     names = brm_nlme_view(rk).coordinates
-    root = "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    root = joinpath(@__DIR__, "results")
     for label in ("posterior-v1","posterior-v2-accept99")
         directory = joinpath(root,label)
         signature = readchomp(joinpath(directory,"identity.txt"))

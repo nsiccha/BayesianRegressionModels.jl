@@ -124,8 +124,6 @@ julia --project=<env> research/rbest_centering/pairs.jl $case <scratch>/rbest-ma
 julia --project=<env> research/rbest_centering/complete.jl $case <scratch>/rbest-matrix-$case-v1 <scratch>/rbest-summary-$case-v1 research/rbest_centering/results/$case
 python3 research/rbest_centering/assemble.py <scratch> research/rbest_centering/results/$case $case
 julia --project=research/adaptive_centering/plots research/rbest_centering/plot.jl research/rbest_centering/results/$case $case
-python3 research/archive_total_study.py <scratch> research/rbest_centering/results/fits rbest-matrix-AS-v1 rbest-matrix-crohn-v1 rbest-native-{AS,crohn}-v1/<arm>...
-python3 research/rbest_centering/build_pages.py /tmp/rbest-brief.md
 ```
 
-`results/<case>/comparison.tsv` is the numerical truth for the page tables; `results/fits/manifest.json` lists the 14 raw archives with per-member SHA-256. `reference/native/<case>/{legacy,s2z}` holds the captured programs and data, `reference/native/<case>/<arm>` each arm's gradient counts and provenance, `reference/automatic_totals/<case>` BRM's generated Stan and the audit receipt.
+`results/<case>/comparison.tsv` supplies the numerical comparison. `reference/native/<case>/{legacy,s2z}` holds the captured programs and data, `reference/native/<case>/<arm>` each arm's gradient counts and provenance, and `reference/automatic_totals/<case>` BRM's generated Stan and the audit receipt. Raw archives, machine-local archive manifests and rendered figures are outside the public repository; the commands above regenerate the fitted results.

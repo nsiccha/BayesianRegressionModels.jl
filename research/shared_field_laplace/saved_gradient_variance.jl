@@ -34,7 +34,7 @@ function directional_ratio(A,B)
 end
 
 @testset "saved native Gaussian gradient variance" begin
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     path=joinpath(base,"native-gaussian-block-endpoint-v1/audit.jls")
     audit=deserialize(path)
     native=deserialize(joinpath(base,"native-gaussian-block-fit-v1/comparison.jls"))

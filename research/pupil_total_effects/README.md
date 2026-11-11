@@ -430,10 +430,10 @@ subject-labelled entries but only 19 independent directions per term.
 through AoV, with native specifications and static PNG exports. The existing
 total-coordinate CP/NCP/ACP grid is reused without refitting.
 
-`build_brief.py` builds the single-scope KB brief with three AoV envelopes.
 `share_sources.py` freezes the harness, exact generated Stan, resolved inputs
 and diagnostics in a byte-hashed source snapshot and adds directly inspectable
-KB file links. Neither script publishes a gist or runs posterior sampling.
+KB file links. It does not run posterior sampling. The retired site-page and
+brief generator has been removed; these research notes retain the analysis.
 
 ## Online adaptation repair and both centering losses
 

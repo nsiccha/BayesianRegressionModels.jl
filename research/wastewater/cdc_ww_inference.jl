@@ -500,14 +500,14 @@ function cdc_ww_brm_model(df = cdc_ww_brm_fixture())
         sd(:, initial) ~ Normal(0.0, 0.75)
         sd(:, growth) ~ Normal(0.0, 0.05)
 
-        # The kernel produces latent trajectories only. Observation frames are
-        # mapped onto this matrix after the cell has been collected.
-        I_mat ~ kernel(t_grid, is_reference, logit_I0, initial_growth) do ts, isref, lI0, growth_i
-            eps_d::vector[n_total] ~ std_normal()
+        # The plate produces latent trajectories only, one per subpopulation.
+        # Observation frames are mapped onto this matrix after the plate.
+        @plate for k in eachindex(logit_I0)
+            eps_d ~ Normal(zeros(n_total), 1.0)             # this subpopulation's daily innovations
             delta_k = ar1_dev(eps_d, phi_delta, sigma_delta)
-            logRt_k = log_ru + (1.0 - isref) * delta_k
-            renewal_from_first_observed(logRt_k, g, gamma,
-                                        inv_logit(lI0), growth_i, uot)
+            log_rt_k = log_ru .+ (1.0 - is_reference[k]) .* delta_k
+            I_mat[k] = renewal_from_first_observed(log_rt_k, g, gamma,
+                                                   logistic(logit_I0[k]), initial_growth[k], uot)
         end
 
         # Sparse wastewater records have independent time, subpopulation, lab
@@ -534,9 +534,9 @@ function cdc_ww_brm_model(df = cdc_ww_brm_fixture())
         count_rate_center ~ 1 + (1 | count_rate | count_stream)
         effect(count_rate_center, Intercept) ~ Normal(-4.6, 0.3)
         sd(:, count_rate) ~ Normal(0.0, 0.5)
-        count_rate_week ~ kernel(count_week_grid, count_rate_center) do weeks, center
-            eps_count::vector[n_weeks] ~ std_normal()
-            center + ar1_dev(eps_count, phi_count, sigma_count)
+        @plate for s in eachindex(count_rate_center)
+            eps_count ~ Normal(zeros(n_weeks), 1.0)         # this stream's weekly innovations
+            count_rate_week[s] = count_rate_center[s] .+ ar1_dev(eps_count, phi_count, sigma_count)
         end
         count_rate_daily = weekly_expand_columns(count_rate_week, week_idx)
         dow_share ~ Dirichlet(7, 5.0)

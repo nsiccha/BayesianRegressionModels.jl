@@ -83,7 +83,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/b5f98d47ae1e6eea.bin",
+        "path": "<local path omitted>",
         "bytes": 83992,
         "sha256": "f370c8e62c106a8587c861c19dfbf8407ba29dbc43cd0849d3ce1ea26bfbfbb3"
       }
@@ -97,7 +97,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/530f07a50a3a8ecf.bin",
+        "path": "<local path omitted>",
         "bytes": 4979201,
         "sha256": "77e625577813278c01042207ab2be6465f1445990fe7549a64bb4b7a32ae8057"
       }

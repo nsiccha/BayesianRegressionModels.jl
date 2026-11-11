@@ -604,24 +604,7 @@ end
 # diagonal scale exp(ρ_k), as Β's rows do, instead of a square root of the whole
 # covariance.
 #
-# Settling restarts Adam, and a fresh Adam's first steps are about ± its step
-# size in every coordinate it steps. Whitened by the covariance root, those
-# coordinates mix the rank part's directions, and the steps add up along each of
-# them: up to √D step sizes of q's own sd at once where the gradient's signs agree
-# with a column. On ODL's Bayern slice (1,094 globals, rank 8) the trimmed ELBO
-# fell from 51,500 at the end of exploration to 15,000-25,000 within a few
-# hundred polishing iterations (BRM 0.2.241, before settling, when polishing
-# restarted Adam), and Niedersachsen and Rheinland-Pfalz evaluated non-finite
-# draws there. In units of exp(ρ) it stayed at 48,400-50,100 from the same state.
-# The structured unit factors' Adam keeps the whitened step.
 #
-# Β's rows step `rank` times as far, so that they never move faster than in
-# exploration (`_brm_svi_rank_step_ratio`). Settling holds `polish_lr` for up to
-# `settle_windows` windows and polishing starts there, five times `lr_global` at
-# the defaults, and Β's gradient is the same noise in every phase: on ODL's
-# Thüringen slice the fit evaluated non-finite draws 154 iterations into
-# settling (191 into polishing with `settle_windows=0`), and with Β at
-# exploration's rate it settled and polished cleanly (as with Β frozen).
 function _brm_svi_polish_global_step!(opt, q, x, grad, lr; clip=Inf, rank=1.0)
     r = size(q.Β, 2)
     r == 0 && return _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip)
@@ -1153,20 +1136,6 @@ const _BRM_SVI_PHASES = (lower="Lower to ReactiveKernels", prepare="Prepare NLME
 # still reach back into the first `patience`, whose climb from the start is no line,
 # the slope is also read without them, and either reading rising holds exploration.
 #
-# What that test finds stationary is the iterate at exploration's step, and
-# that can be far from the optimum. `lr_global` moves a global mean by an
-# absolute amount, whatever its posterior sd: at 0.01 a coordinate with sd 7e-4
-# jitters by tens of sds, and the ELBO sits flat on that noise floor. On an
-# exactly Gaussian toy with 32 such globals exploration stopped 2,554 nats from
-# the family's optimum, and the first polishing windows took that to about 100
-# (snag svi-exploration-036fd59f; ODL's union stood in for 190,000 nats).
-# Settling therefore restarts Adam on scale-preconditioned global steps
-# (`polish_lr`, a fraction of the current scale) at a constant size, with no
-# averaging, until the same test stalls on its own windows (or for
-# `settle_windows` windows at most). Polishing then continues that step, decays
-# every step size as 1/√k over `polish_windows` windows, and returns the average
-# of q over those iterations (Polyak–Ruppert), which damps the noise a
-# stochastic step leaves, starting from an iterate that has stopped rising.
 #
 # The phase is not stored: settling began at the first window at which
 # exploration's test passed (`_brm_svi_explored`), which the run's windows

@@ -1,7 +1,7 @@
 # The examples' sampling call: WarmupHMC's quorum sampler over independent
 # adaptive chains. `quorum_fit(rng, lpdf; n_draws, kwargs...)` runs `n_chains`
 # chains of `lpdf` (WarmupHMC deep-copies it per chain), seeded from `rng`, and
-# stops once `div(3 * n_chains, 4)` of them hold their draws (Bruno's 75% rule:
+# stops once `div(3 * n_chains, 4)` of them hold their draws (a 75% completion quorum:
 # 16 chains -> 12, 4 -> 3). A chain still warming up then, such as one whose step
 # size collapsed in its first window, finishes its current window and is left
 # out instead of holding the run or entering the draws. WarmupHMC warns on every

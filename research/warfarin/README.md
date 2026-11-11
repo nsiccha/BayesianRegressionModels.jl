@@ -1,104 +1,65 @@
-# Exact public Warfarin PK/PD reproduction
+# Warfarin PK/PD
 
-`reproduce.jl` lowers the strongest public match for Sebastian Weber's
-Warfarin example into BRM and StanBlocks without approximating the statistical
-model. It contains a public two-subject data slice so the translation can be
-parsed, lowered, checked by `stanc`, and instantiated independently of R.
+Sebastian Weber's StanCon 2018 warfarin example in BRM, on its public data,
+behind `docs/src/warfarin.md`.
+
+| file | holds |
+| --- | --- |
+| `data/warfarin_data.txt`, `data/README.md` | the 32-subject data and their provenance |
+| `data.jl` | `warfarin_data()`: the data in the per-subject form the models take; `warfarin_pd_data()`: the same plus each subject's PK medians from `results/` |
+| `reproduce.jl` | Weber's two-stage models: the StanBlocks helpers (closed-form PK, turnover ODE, the `gamma2_overdisp` family), `warfarin_pk_brmi` and `warfarin_pd_brmi`, and their lowering, `stanc` and BridgeStan checks |
+| `joint_reproduce.jl` | `warfarin_joint_brmi`, one posterior over both channels (`JOINT.md`), with its checks |
+| `fit.jl` | the WarmupHMC fits of the three models; writes `results/` |
+| `figures.jl` | the figures of the docs page from `results/` |
+| `results/` | one directory per fit (`pk/`, `pd/`, `joint/`), each with `population.tsv` (estimates and diagnostics), `fits.tsv` (sampler report), `ppc.tsv` (posterior predictive quantiles per observation) and `receipt.tsv` (what the numbers are the numbers of); `pk_subject_medians.tsv` (the second stage's inputs) |
 
 ## What is reproduced
 
-The source is a two-stage population model:
+Weber's two Stan programs, statement by statement:
 
-1. A one-compartment oral PK model with first-order absorption and a bounded
-   lag time. Clearance and volume have fixed allometric weight effects. Four
-   independent subject effects modify lag, absorption, clearance, and volume.
-2. A turnover PD ODE, fitted after PK and conditioned on each subject's fixed
-   posterior-median PK log parameters (already transformed and including the
-   PK weight effects). Three independent PD subject effects modify baseline
-   response, inverse turnover rate, and EC50.
-3. Both stages use the source's `gamma2_overdisp` observation distribution,
-   whose variance is `sigma^2 + mu^2 / kappa`.
+1. a one-compartment oral PK model with first-order absorption and a lag of
+   at most one hour (`tlagMax = 1`), clearance and volume scaled by body weight
+   with the allometric exponents 0.75 and 1, four independent subject effects
+   (lag, absorption, clearance, volume), and his `gamma2_overdisp`
+   observation family, whose variance is `sigma^2 + mu^2 / kappa` with
+   `kappa` scaled by `5^2`;
+2. a turnover PD model solved with `ode_rk45_tol` (`t0 = -1e-4`, relative
+   tolerance `1e-5`, absolute tolerance `1e-3`, at most 500 steps),
+   conditional on each subject's PK posterior medians, with three independent
+   subject effects (baseline, inverse turnover rate, EC50) and the same
+   observation family, `kappa` scaled by `25^2`.
 
-The implementation preserves the original priors, `tlagMax = 1`, PK and PD
-overdispersion scalings (`5^2` and `25^2`), allometric exponents, and the PD
-solver settings (`rk45`, `t0=-1e-4`, relative tolerance `1e-5`, absolute
-tolerance `1e-3`, maximum 500 steps).
+All priors are his. One spelling differs: `log_inv_logit(x)` is written
+`-log1pexp(-x)`, the same function. The data follow his `munge.R`: the five
+zero concentrations at 0.5 h are dropped. His notebook prints no estimates,
+so the fits in `results/` have nothing published to be compared with.
 
-## Provenance boundary
+The joint model is not part of his example; `JOINT.md` states its contract.
 
-The brms issue says only that Weber was looking at “the PK/PD model for
-Warfarin”; it does not attach equations, code, data, or a citation. The model
-here is therefore the strongest identifiable public match, not a provably
-identical recovery from the issue alone: it is Weber's public StanCon 2018
-Warfarin PK/PD program, and the Stan forum later calls its attached generated
-model the “warfarin ODE example.”
+## Provenance
 
-Primary sources:
-
-- <https://github.com/paul-buerkner/brms/issues/1509#issuecomment-1598639613>
 - <https://github.com/stan-dev/stancon_talks/tree/master/2018-helsinki/Contributed-Talks/weber/stancon18-master>
-- <https://github.com/stan-dev/stancon_talks/blob/master/2018-helsinki/Contributed-Talks/weber/stancon18-master/warfarin_pk_tlagMax.stan>
-- <https://github.com/stan-dev/stancon_talks/blob/master/2018-helsinki/Contributed-Talks/weber/stancon18-master/warfarin_pd_tlagMax_2.stan>
-- <https://discourse.mc-stan.org/t/map-rect-threading/8802/3>
-- <https://discourse.mc-stan.org/t/parallel-dynamic-hmc-merits/10895/3>
+  (the data, `warfarin_pk_tlagMax.stan`, `warfarin_pd_tlagMax_2.stan`,
+  `munge.R`, `warfarin_pk.R`, `warfarin_pd.R`)
 
-The current public data file contains 32 subjects, 32 dose records, 253 retained
-PK observations, five time-0.5 zero PK observations discarded before fitting,
-and 232 PD observations. The accompanying `munge.R` comment says four PK rows
-were discarded, but the executable predicate and current data discard five;
-the reproduction follows the executable data transformation.
-
-## Capability audit and blockers
-
-No new StanBlocks primitive is required. Its typed UDFs, custom distribution
-triad, variadic `ode_rk45_tol`, and ragged `kernel(...)` lowering express the
-exact fit. This work adds the two BRM prior-lowering pieces the source exposed:
-bounded scalar parameters and independent half-normal group standard deviations.
-
-There is one confirmed StanBlocks authoring limitation (`plate-cell-rejec-87663e11`):
-a plate cell cannot hoist an intermediate `array[] vector` ODE trajectory. Both
-the direct `to_vector(ode_rk45_tol(...)[:, 1])` spelling and the typed-helper
-spelling used here stanc-check and preserve the same solver equation. General
-support for two-dimensional cell-local values would improve the diagnostic and
-remove the need for either inline selection or helper encapsulation; it is not
-a fit blocker.
-
-Two limitations remain outside the fitted log density:
-
-- Identity is not provable from the brms issue because its model specification
-  is absent. A private source or confirmation from the author is required to
-  turn the strong public match into an exact provenance claim.
-- The public Stan generated quantities emit both elementwise and patient-summed
-  log likelihood, plus conditional and new-population predictive draws. BRM's
-  descriptor can produce the exact fit and separate replay operations, but one
-  compiled model cannot currently expose all four arrays simultaneously.
-  `resample_groups` provides the new-subject-effects operation separately.
-
-There is no PK/PD residual-covariance blocker in the executable public model:
-PK and PD are separate scalar Gamma likelihoods fitted in separate stages. The
-unknown covariance sketched in the brms discussion belongs to its generic
-multi-response example, not to this published Warfarin program. BRM's
-`[y1, y2] ~ MvNormalCholesky([mu1, mu2], L_res)` / `LKJCovarianceFactor`
-surface resolves the fitted-model side if that joint variant is nevertheless
-desired. Its row-level pointwise log likelihood is the joint vector density;
-it deliberately does not invent per-outcome decompositions of a correlated
-likelihood. None of this affects the exact public reproduction.
+The brms issue that once motivated this directory
+(<https://github.com/paul-buerkner/brms/issues/1509#issuecomment-1598639613>)
+names a warfarin PK/PD model without equations, code or data; Weber's public
+program is the identifiable public match, not a provably identical model.
 
 ## Run
 
-From the repository root after bootstrapping `test/Project.toml`:
+From the repository root, with `test/Project.toml` bootstrapped
+(`julia --project=test test/setup_env.jl`):
 
 ```sh
-BRM_WARFARIN_RUNTIME=1 julia --startup-file=no --project=test \
-  research/warfarin/reproduce.jl
+julia -t 4 --startup-file=no --project=test research/warfarin/fit.jl        # the fits, results/
+julia --startup-file=no --project=research/adaptive_centering/plots research/warfarin/figures.jl
+BRM_WARFARIN_RUNTIME=0 julia --startup-file=no --project=test research/warfarin/reproduce.jl
+BRM_WARFARIN_JOINT_RUNTIME=0 julia --startup-file=no --project=test research/warfarin/joint_reproduce.jl
 ```
 
-Set `BRM_WARFARIN_RUNTIME=0` for lowering and `stanc` only.
-
-## Related joint model
-
-[`joint_reproduce.jl`](joint_reproduce.jl) combines the PK and PD likelihoods
-in one posterior and shares the latent subject-level PK quantities between
-them, so their uncertainty propagates into the turnover model. It is a new BRM
-model, not part of the exact public two-stage reproduction; its contract and
-the residual-covariance boundary are documented in [`JOINT.md`](JOINT.md).
+`fit.jl` takes the draw count and chain count as arguments (default 1000 and
+4). The last two commands check lowering and `stanc` without a fit; with the
+variable at `1` they also instantiate BridgeStan and check a finite density
+and gradient.

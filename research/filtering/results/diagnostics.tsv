@@ -1,0 +1,2 @@
+max_rhat	min_bulk_ess	min_tail_ess	divergences	divergence_percent	chains	draws
+1.00915	318.841	382.581	0	0.0	4	4000

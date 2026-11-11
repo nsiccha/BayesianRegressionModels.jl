@@ -72,15 +72,15 @@ julia --project=research/adaptive_centering/plots research/centering_refresh/plo
 ```
 
 Substitute `eight` or `radon` for the other studies. The plot environment has its
-own Project and Manifest. Copy the resulting PNGs into
-`docs/src/assets/centering-refresh-CASE/`, then run `refresh_pages.py` to refresh
-the numerical table and surrounding narrative. That generator retains the
-audited model/example blocks from repository commit `b7fd3f5`.
+own Project and Manifest. Keep rendered figures and full draws in the chosen
+output directory. The guide renders its figure from the small committed
+`results/eight/efficiency.tsv` table through AlgebraOfVega; it does not copy
+PNGs into the site. The historical site-generation scripts are retired.
 
-`results/receipt.json` records wrapper logs and exact exits, source hashes,
-package revisions, and the completed fit roster. `results/logs/` retains the
-full relevant fitting, audit, export and plotting logs. These execution times
-include process setup and are not presented as sampler timing comparisons.
+`results/receipt.json` records exact exits, source hashes, package revisions
+and the completed fit roster. Full execution logs remain outside the public
+repository. These execution times include process setup and are not presented
+as sampler timing comparisons.
 
 ## Scientific and coordinate checks
 
@@ -101,30 +101,6 @@ was run.
 
 ## Raw-fit retention
 
-`results/capsules.json` inventories 19 compressed archives: all 18 completed
-fits and the original HSGP online-gradient failure under `6b377cb`. Each archive
-contains the raw fit/checkpoint, generated Stan, run source, summaries and
-environment. Large archives are split into 20 MiB KB uploads. Every uploaded
-part was downloaded and checked against its SHA-256 hash before marking its
-record complete. Raw fitted draws are retained outside Git.
-
-For each record, download its `parts` in ascending `index` order from
-`http://localhost:4200/code?path=URL_ENCODED_PART_PATH&raw=1`, verify the individual
-hashes, concatenate, and verify the full archive hash before extracting into
-an empty directory. `archive_fits.py` contains the upload and verification code.
-The failed-arm key is `hsgp/online_gradient_failed_6b377cb`; its archive retains
-the original internal directory name `online_gradient`. Keep it separate from
-the completed final arm when extracting.
-
-The captured numerical failure is a separate small fixture listed in
-`results/transport_guard/capture.json`. After restoring its `transport-failure.jls`
-to `OUTPUT/online_gradient/`, run:
-
-```sh
-julia --project=test research/centering_refresh/audit_rejection.jl hsgp online_gradient OUTPUT
-```
-
-The HSGP online-gradient rerun used the same seed and completed 10,000 retained
-draws, with one rejected coordinate update and 12 sampling divergences. The
-remaining divergences in this broad-prior model are reported alongside the
-efficiency table; the numerical guard is not a general convergence guarantee.
+Raw draws and historical failure archives are retained outside the public
+repository. Public reproduction uses the models, public data and commands
+above. Machine-local archive pointers and generated render logs are omitted.
