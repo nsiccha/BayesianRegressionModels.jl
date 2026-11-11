@@ -211,7 +211,7 @@ selects a top-level declaration). Later declarations in `merge(::BRMI, ...)`
 replace earlier documentation at the same operation, including an undocumented
 replacement. Builder merges retain the authored statements and their docs.
 """
-function brm_documentation(model; path=nothing)
+Base.@nospecializeinfer function brm_documentation(@nospecialize(model); path=nothing)
     docs = _brm_documentation(model)
     selected = path isa Symbol ? (path,) : path
     Tuple(_brm_copy_documentation(d) for d in docs if selected === nothing || d.path == selected)

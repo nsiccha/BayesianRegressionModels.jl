@@ -92,7 +92,7 @@ end
 # A component returning named values is read one field at a time: the call
 # itself is not a value. Refuse a bare read and an unknown field before
 # either backend lowers the model.
-function _brm_check_component_reads(model::BRMI)
+Base.@nospecializeinfer function _brm_check_component_reads(@nospecialize(model::BRMI))
     entries = _brm_operation_entries(model)
     named = Dict{Symbol,BRMComponent}()
     for (target, column) in entries
