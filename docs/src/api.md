@@ -408,6 +408,7 @@ The following internal definitions are linked from the exported docstrings.
 ```@docs
 BayesianRegressionModels._adaptive_cdar_centering_blocks
 BayesianRegressionModels._adaptive_hsgp_centering_blocks
+BayesianRegressionModels._adaptive_hsgp_level_centering_blocks
 BayesianRegressionModels._s2z_fisher_raw
 BayesianRegressionModels._s2z_rescale_rho
 ```
