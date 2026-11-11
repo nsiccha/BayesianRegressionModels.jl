@@ -1,0 +1,10 @@
+quantity	value
+training_stages	41
+learning_retained_records	10
+window_40_active_coordinates	186
+window_60_active_coordinates	186
+particles	1024
+units	3
+days	60
+training_days	20
+batch_coordinates	186
