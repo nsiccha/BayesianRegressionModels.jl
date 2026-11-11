@@ -1,0 +1,8 @@
+[deps]
+BayesianRegressionModels = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
+PowerScaling = "ea5902b9-87b7-4ea4-9e46-f9c5bf9e0b31"
+ReparametrizableDistributions = "7d03e222-df96-4b80-bcdc-d089be88b5f2"
+StanBlocks = "2e771a56-c23a-4e0b-9282-20c2e37157e9"
+
+[compat]
+julia = "1.10"

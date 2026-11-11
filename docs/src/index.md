@@ -5,7 +5,8 @@ BayesianRegressionModels.jl describes hierarchical regression models with brms-s
 ```sh
 git clone -b ns/devibe https://github.com/nsiccha/BayesianRegressionModels.jl
 cd BayesianRegressionModels.jl
-julia --project=test test/setup_env.jl
+julia --project=docs/start docs/start/setup.jl
+julia --project=docs/start
 ```
 
 ```@eval
@@ -22,7 +23,7 @@ push!(view.content, Markdown.Code("text", "$(length(observed)) observations in $
 view
 ```
 
-The six synthetic observations have population effects for age and a numeric
+The setup uses public source pins with Julia 1.10 or later. The six synthetic observations have population effects for age and a numeric
 sex code, plus subject-specific intercepts and age slopes. The tabs show the
 same declaration as an intermediate representation, a StanBlocks model,
 Stan source and a JAX module. Python snippets need the separate environment
