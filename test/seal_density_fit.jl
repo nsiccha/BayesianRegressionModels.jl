@@ -22,8 +22,12 @@ include(joinpath(@__DIR__, "..", "research", "mcmc_harness.jl"))
     checkpoint_dir = get(ENV, "BRM_SEAL_FIT_CHECKPOINT_DIR", "")
     checkpoint_options = isempty(checkpoint_dir) ? (;) : (; checkpoint_dir)
     fit = try
-        sample_quorum(sb, "seal-density-correction"; n_chains=4, n_draws=100,
-            seed=20261111, inits, target_acceptance_rate=0.95,
+        # The short 100-draw, 0.95-target run exceeded the quorum's 10%
+        # divergence limit. Request more adaptation and a smaller step size;
+        # retain the quorum's admission limit and restart warm-up at 10% too.
+        sample_quorum(sb, "seal-density-correction"; n_chains=4, n_draws=300,
+            seed=20261111, inits, target_acceptance_rate=0.99,
+            max_divergent_fraction=0.1,
             cache="brm-seal-density-validation", checkpoint_options...)
     catch err
         if err isa WarmupHMC.CompletionQuorumError
@@ -34,7 +38,7 @@ include(joinpath(@__DIR__, "..", "research", "mcmc_harness.jl"))
         rethrow()
     end
     @test length(fit.chains) >= 3
-    @test all(c -> size(c, 2) >= 100, fit.chains)
+    @test all(c -> size(c, 2) >= 300, fit.chains)
     finite_draws = 0
     for chain in fit.chains, q in eachcol(chain)
         lp, gradient = BridgeStan.log_density_gradient(fit.problem.model, collect(q))
