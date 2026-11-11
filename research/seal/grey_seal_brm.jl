@@ -82,6 +82,41 @@ mortality_rates(phi_pup::real, phi_adult::real, c::real, n_age::int,
     end
     mu_m
 end
+# These bounds describe the existing joint support of the calibrated equation.
+# `restricted` below retains the original prior kernels; Stan supplies the
+# coordinate Jacobians. Normalizing each conditional bound would change the law.
+seal_adult_floor(n_age::int)::real = begin
+    root = solve_newton_tol(x -> rep_vector(
+        log(2.0) + log_inv_logit(-x[1]) - (n_age - 1) * log_inv_logit(x[1]), 1),
+        rep_vector(log(4.0), 1), 1e-12, 1e-13, 100)
+    fmax(0.8, inv_logit(root[1]))
+end
+seal_mortality_support_residual(root::vector[N], adult::real,
+        shape::real, n_age::int)::vector[N] = begin
+    a = -log(adult)
+    limit = -log(2.0 * (1.0 - adult))
+    terms::vector[n_age - 1]
+    terms[1] = root[1]
+    for j in 2:(n_age - 1)
+        w = ((j - 1.0) / (n_age - 1.0)) ^ shape
+        terms[j] = (1.0 - w) * root[1] + w * log(a)
+    end
+    rep_vector(log_sum_exp(terms) - log(limit), N)
+end
+seal_pup_floor(adult::real, shape::real, n_age::int)::real = begin
+    a = -log(adult)
+    limit = -log(2.0 * (1.0 - adult))
+    root = solve_newton_tol(x -> seal_mortality_support_residual(x, adult, shape, n_age),
+        rep_vector(log((a + limit) / 2.0), 1), 1e-12, 1e-13, 100)
+    exp(a - exp(root[1]))
+end
+seal_birth_fraction_lower(capacity::real, intercept::real)::real =
+    -capacity * expm1(fmin(0.0, intercept - logit(capacity)))
+seal_density_scaled_upper(capacity::real, maximum::real,
+        minimum_scale::real, intercept::real)::real = begin
+    fraction = minimum_scale + (1.0 - minimum_scale) * inv_logit(intercept)
+    fmin(1.0, maximum * (fraction - capacity) / (capacity * (1.0 - maximum)))
+end
 compute_density_dependence_intercept(max_bbr::real, dd_scaled::real)::real =
     -log(max_bbr + (1.0 - max_bbr) * dd_scaled)
 compute_density_dependence_slope(K::real, b_capacity::real, b_reference::real, theta0::real)::real =
@@ -352,11 +387,21 @@ the seam-by-seam mapping), returned as a `BRMI`; lower with
 """
 function grey_seal_brm_model(df = grey_seal_brm_fixture())
     @brm df begin
-    phi_a_sc ~ Uniform(0.0, 1.0); phi_sc ~ Uniform(0.0, 1.0); survival_shape ~ Uniform(0.0, 1.0)
+    phi_a_sc ~ restricted(Uniform(0.0, 1.0); lower=(seal_adult_floor(n_age) - 0.8) / 0.2)
+    survival_shape ~ Uniform(0.0, 1.0)
+    support_phi_a = 0.8 + 0.2 * phi_a_sc
+    phi_sc ~ restricted(Uniform(0.0, 1.0); lower=seal_pup_floor(support_phi_a, survival_shape, n_age))
+    support_b_capacity = birth_rate_at_carrying_capacity(support_phi_a,
+        mortality_rates(phi_sc * support_phi_a, support_phi_a, survival_shape, n_age, 0.0, 0.0), n_age)
     male_pup_survival_offset ~ Cauchy(0.0, 1.0); male_adult_survival_offset ~ Cauchy(0.0, 1.0)
     carrying_capacity ~ LogNormal(11.3, 0.3)
-    density_dependence_scaled ~ Uniform(0.0, 1.0)
-    max_baseline_birth_rate ~ Uniform(0.0, 1.0); min_baseline_birth_rate_sc ~ Uniform(0.0, 1.0)
+    max_baseline_birth_rate ~ Uniform(0.0, 1.0)
+    bbr_reference_logit ~ Normal(0.0, 1.0)
+    min_baseline_birth_rate_sc ~ restricted(Uniform(0.0, 1.0);
+        lower=seal_birth_fraction_lower(support_b_capacity, bbr_reference_logit))
+    density_dependence_scaled ~ restricted(Uniform(0.0, 1.0);
+        upper=seal_density_scaled_upper(support_b_capacity, max_baseline_birth_rate,
+            min_baseline_birth_rate_sc, bbr_reference_logit))
     hunting_effort_sd_sweden ~ Cauchy(0.0, 1.0; lower = 0.0); hunting_effort_sd_finland ~ Cauchy(0.0, 1.0; lower = 0.0)
     population_init_size ~ LogNormal(11.0, 1.0)
     report_ca_mean ~ Uniform(0.0, 1.0); report_placental_mean ~ Uniform(0.0, 1.0); prob_of_ca ~ Uniform(0.0, 1.0)
@@ -365,7 +410,6 @@ function grey_seal_brm_model(df = grey_seal_brm_fixture())
     harvest_bag_cv ~ LogNormal(0.0, 1.0; lower = 0.0)
     # brms formulas
     # Expose the zero-herring intercept to the carrying-capacity equation.
-    bbr_reference_logit ~ Normal(0.0, 1.0)
     bbr_logit ~ 0 + offset(bbr_reference_logit) + herring_index_1 + herring_index_2
     eps_birth ~ 0 + (1 | year); eps_sex ~ 0 + (1 | year)
     eps_h_sw ~ 0 + (1 | year); eps_h_fi ~ 0 + (1 | year)

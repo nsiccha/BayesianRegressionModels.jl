@@ -47,17 +47,25 @@ _bundle_part(slug, title, source; kind = :submodel, data = nothing) =
 
 const GREY_SEAL_IPM_SOURCE = raw"""
 # ---- STATE-PROCESS parameters (base — the scan needs them) ----
-    phi_a_sc                   ~ uniform(0.0, 1.0)
-    phi_sc                     ~ uniform(0.0, 1.0)
+    # Preserve the original joint prior on the calibrated equation's support.
+    # These are unnormalized restrictions, with Stan's bound Jacobians.
+    phi_a_sc ~ restricted(uniform(0.0, 1.0); lower=(seal_adult_floor(n_age) - 0.8) / 0.2)
     survival_shape             ~ uniform(0.0, 1.0)
+    support_phi_a = 0.8 + 0.2 * phi_a_sc
+    phi_sc ~ restricted(uniform(0.0, 1.0); lower=seal_pup_floor(support_phi_a, survival_shape, n_age))
+    support_b_capacity = birth_rate_at_carrying_capacity(support_phi_a,
+        mortality_rates(phi_sc * support_phi_a, support_phi_a, survival_shape, n_age, 0.0, 0.0), n_age)
     male_pup_survival_offset   ~ cauchy(0.0, 1.0)
     male_adult_survival_offset ~ cauchy(0.0, 1.0)
     carrying_capacity          ~ lognormal(11.3, 0.3)
-    density_dependence_scaled  ~ uniform(0.0, 1.0)
     max_baseline_birth_rate    ~ uniform(0.0, 1.0)
-    min_baseline_birth_rate_sc ~ uniform(0.0, 1.0)
     herring_intercept_scaled   ~ normal(0.0, 1.0)
     herring_slope              ~ normal(0.0, 1.0)
+    min_baseline_birth_rate_sc ~ restricted(uniform(0.0, 1.0);
+        lower=seal_birth_fraction_lower(support_b_capacity, herring_slope * herring_intercept_scaled))
+    density_dependence_scaled ~ restricted(uniform(0.0, 1.0);
+        upper=seal_density_scaled_upper(support_b_capacity, max_baseline_birth_rate,
+            min_baseline_birth_rate_sc, herring_slope * herring_intercept_scaled))
     herring_weight             ~ uniform(0.0, 1.0)
     hunting_selectivity_sweden  :: vector[n_demo] ~ normal(0.0, 1.0)
     hunting_selectivity_finland :: vector[n_demo] ~ normal(0.0, 1.0)
@@ -191,6 +199,48 @@ mortality_rates(phi_pup::real, phi_adult::real, c::real, n_age::int,
         mu_m[n_age + j] = exp(log(mu_pup_m) + w_male * (log(mu_ad_m) - log(mu_pup_m)))
     end
     mu_m
+end
+"""; kind = :udf),
+    _bundle_part("seal_adult_floor", "Adult Survival Support", raw"""
+seal_adult_floor(n_age::int)::real = begin
+    root = solve_newton_tol(x -> rep_vector(
+        log(2.0) + log_inv_logit(-x[1]) - (n_age - 1) * log_inv_logit(x[1]), 1),
+        rep_vector(log(4.0), 1), 1e-12, 1e-13, 100)
+    fmax(0.8, inv_logit(root[1]))
+end
+"""; kind = :udf),
+    _bundle_part("seal_mortality_support_residual", "Mortality Support Equation", raw"""
+seal_mortality_support_residual(root::vector[N], adult::real,
+        shape::real, n_age::int)::vector[N] = begin
+    a = -log(adult)
+    limit = -log(2.0 * (1.0 - adult))
+    terms::vector[n_age - 1]
+    terms[1] = root[1]
+    for j in 2:(n_age - 1)
+        w = ((j - 1.0) / (n_age - 1.0)) ^ shape
+        terms[j] = (1.0 - w) * root[1] + w * log(a)
+    end
+    rep_vector(log_sum_exp(terms) - log(limit), N)
+end
+"""; kind = :udf),
+    _bundle_part("seal_pup_floor", "Pup Survival Support", raw"""
+seal_pup_floor(adult::real, shape::real, n_age::int)::real = begin
+    a = -log(adult)
+    limit = -log(2.0 * (1.0 - adult))
+    root = solve_newton_tol(x -> seal_mortality_support_residual(x, adult, shape, n_age),
+        rep_vector(log((a + limit) / 2.0), 1), 1e-12, 1e-13, 100)
+    exp(a - exp(root[1]))
+end
+"""; kind = :udf),
+    _bundle_part("seal_birth_fraction_lower", "Birth Fraction Support", raw"""
+seal_birth_fraction_lower(capacity::real, intercept::real)::real =
+    -capacity * expm1(fmin(0.0, intercept - logit(capacity)))
+"""; kind = :udf),
+    _bundle_part("seal_density_scaled_upper", "Density Dependence Support", raw"""
+seal_density_scaled_upper(capacity::real, maximum::real,
+        minimum_scale::real, intercept::real)::real = begin
+    fraction = minimum_scale + (1.0 - minimum_scale) * inv_logit(intercept)
+    fmin(1.0, maximum * (fraction - capacity) / (capacity * (1.0 - maximum)))
 end
 """; kind = :udf),
     _bundle_part("compute_density_dependence_intercept", "Compute Density Dependence Intercept", raw"""
