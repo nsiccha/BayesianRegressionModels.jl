@@ -1913,10 +1913,15 @@ window.AoV = window.AoV || {
                 });
                 return c;
             });
+            // Painted by kind, as `_ribbonGroupLayers`: each group's i-th
+            // layer (its own, or a new group's copy) for every group, then
+            // the (i+1)-th.
+            var groups = self._rowGroups(rows, run.field), own = groups.map(function(g) {
+                return byGroup[JSON.stringify(g)] || self._ribbonGroupLayers(proto, run.field, [g]);
+            });
             var next = [];
-            self._rowGroups(rows, run.field).forEach(function(g) {
-                next = next.concat(byGroup[JSON.stringify(g)] ||
-                    self._ribbonGroupLayers(proto, run.field, [g]));
+            proto.forEach(function(_, i) {
+                own.forEach(function(gl) { next.push(gl[i]); });
             });
             // Parameters (the zoom/pan binding) of layers that are dropped —
             // the prototype layers, a group the rows no longer carry — move
@@ -1930,13 +1935,16 @@ window.AoV = window.AoV || {
         host.layer = result.concat(layers.slice(at));
         return out;
     },
-    // One colour group's layers (`proto`: bands, then line) for each of
-    // `groups`, each copy filtered to its group and tagged `_lr_group`.
+    // The colour groups' layers (`proto`: bands, then line) for `groups`,
+    // each copy filtered to its group and tagged `_lr_group`. They paint by
+    // kind, as the server emits them (`_ribbon_to_vl`): every group's copy
+    // of `proto[0]` (the outer band), then of `proto[1]`, …, so no group's
+    // band covers another group's median line.
     _ribbonGroupLayers: function(proto, field, groups) {
         var out = [];
-        groups.forEach(function(g) {
-            var expr = 'datum[' + JSON.stringify(field) + '] === ' + JSON.stringify(g);
-            proto.forEach(function(tl) {
+        proto.forEach(function(tl) {
+            groups.forEach(function(g) {
+                var expr = 'datum[' + JSON.stringify(field) + '] === ' + JSON.stringify(g);
                 var gl = JSON.parse(JSON.stringify(tl));
                 gl.transform = (gl.transform || []).concat([{filter: expr}]);
                 gl._lr_layer = true;
