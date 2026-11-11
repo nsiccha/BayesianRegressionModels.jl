@@ -10,16 +10,29 @@
 # including script.
 
 using Dates: now, Dates, DateTime, Day, @dateformat_str
+import Serialization
 
 # ---- sampling -----------------------------------------------------------------
 
-"Run the quorum sampler on `sb`; return the BridgeStan problem and each kept chain's draws."
+"""
+Run the quorum sampler on `sb`; return the BridgeStan problem and each kept
+chain's draws. The draws are serialized to the cache directory as soon as
+sampling ends, before anything is summarized, so a defect in the
+post-processing never costs the sampling: with `BRM_DOCS_FIT_REUSE=1` a
+later run of the script loads them instead of sampling again.
+"""
 function sample_quorum(sb, tag; n_chains, n_draws, seed, cache="brm-docs-fits",
                        inits=nothing, adaptive_centering=true, sampler_kwargs...)
     code = StanBlocks.stan_code(sb.model)
     dir = joinpath(tempdir(), cache)
     isdir(dir) || mkpath(dir)
     problem = StanBlocks.stan_instantiate(sb.model; path=joinpath(dir, "$(tag)_$(hash(code)).stan"))
+    draws_file = joinpath(dir, "$(tag)_$(hash(code))_$(n_chains)x$(n_draws)_$(seed).jls")
+    if get(ENV, "BRM_DOCS_FIT_REUSE", "0") == "1" && isfile(draws_file)
+        saved = Serialization.deserialize(draws_file)
+        println("REUSED draws from ", draws_file)
+        return (; problem, saved...)
+    end
     target = adaptive_centering ? adaptive_centering_problem(sb, problem, AutoEnzyme()) : problem
     rng = Xoshiro(seed)
     starts = isnothing(inits) ? (;) :
@@ -40,9 +53,12 @@ function sample_quorum(sb, tag; n_chains, n_draws, seed, cache="brm-docs-fits",
         rethrow()
     end
     chains = [convert(Matrix{Float64}, r.posterior_position) for r in out.results]  # dim × draws, model frame
-    (; problem, chains, seconds, n_chains,
-       divergent=sum(r.n_divergent_samples for r in out.results),
-       omitted=out.completion.omitted_chain_indices)
+    saved = (; chains, seconds, n_chains,
+               divergent=sum(r.n_divergent_samples for r in out.results),
+               omitted=out.completion.omitted_chain_indices)
+    Serialization.serialize(draws_file, saved)
+    println("SAVED draws to ", draws_file)
+    (; problem, saved...)
 end
 
 "Constrained draws of one chain with transformed parameters and generated quantities, draws × coordinates."
