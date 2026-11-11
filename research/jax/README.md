@@ -12,6 +12,12 @@ The two independent fits have different warmup algorithms and starts. A
 completion quorum selects the native chains by completion time; diagnostics
 do not exclude a resulting selection effect.
 
+Rerunning the native fit requires the pinned test environment's custom
+libEnzyme build. `test/setup_env.jl` currently locates that build through the
+fleet resolver, so that installer requires additional infrastructure beyond a
+fresh public checkout. The model, synthetic data and Python driver are public;
+the recorded native fit's missing provenance remains marked unavailable.
+
 ```sh
 python3 -m venv research/jax/.venv
 research/jax/.venv/bin/python -m pip install jax==0.12.0.1 numpyro==0.22.0 numpy==2.5.4
