@@ -14,16 +14,31 @@ using Dates: now, Dates, DateTime, Day, @dateformat_str
 # ---- sampling -----------------------------------------------------------------
 
 "Run the quorum sampler on `sb`; return the BridgeStan problem and each kept chain's draws."
-function sample_quorum(sb, tag; n_chains, n_draws, seed, cache="brm-docs-fits")
+function sample_quorum(sb, tag; n_chains, n_draws, seed, cache="brm-docs-fits",
+                       inits=nothing, adaptive_centering=true, sampler_kwargs...)
     code = StanBlocks.stan_code(sb.model)
     dir = joinpath(tempdir(), cache)
     isdir(dir) || mkpath(dir)
     problem = StanBlocks.stan_instantiate(sb.model; path=joinpath(dir, "$(tag)_$(hash(code)).stan"))
-    target = adaptive_centering_problem(sb, problem, AutoEnzyme())
+    target = adaptive_centering ? adaptive_centering_problem(sb, problem, AutoEnzyme()) : problem
     rng = Xoshiro(seed)
-    seconds = @elapsed out = completion_warmup_mcmc(
-        [Xoshiro(rand(rng, UInt64)) for _ in 1:n_chains], target;
-        min_completed=max(1, div(3n_chains, 4)), n_draws, monitor_ess=true)
+    starts = isnothing(inits) ? (;) :
+        (; init=fill(brm_start(sb, problem.model, inits; base=:prior_median), n_chains))
+    seconds = @elapsed out = try
+        completion_warmup_mcmc(
+            [Xoshiro(rand(rng, UInt64)) for _ in 1:n_chains], target;
+            min_completed=max(1, div(3n_chains, 4)), n_draws, monitor_ess=true,
+            starts..., sampler_kwargs...)
+    catch err
+        if err isa WarmupHMC.CompletionQuorumError
+            for chain in err.outcome.completion.chains
+                println(stderr, "CHAIN_FAILURE ", tag, " ", chain.chain_index, " ", chain.status)
+                isnothing(chain.error) || showerror(stderr, chain.error)
+                println(stderr)
+            end
+        end
+        rethrow()
+    end
     chains = [convert(Matrix{Float64}, r.posterior_position) for r in out.results]  # dim × draws, model frame
     (; problem, chains, seconds, n_chains,
        divergent=sum(r.n_divergent_samples for r in out.results),
@@ -148,7 +163,8 @@ end
 Write `receipt.tsv`: what a results directory's numbers are the numbers of.
 `entries` are further `key => value` pairs (models, data, seeds, ...).
 """
-function write_receipt(path, entries; n_chains, n_draws)
+function write_receipt(path, entries; n_chains, n_draws,
+                       sampler="WarmupHMC completion_warmup_mcmc, adaptive_centering_problem over the BridgeStan problem, AutoEnzyme")
     # A docs fit is done once and its results are committed; it is rerun when
     # its model, data or priors change, at most about once a month (user
     # direction of 2026-11-10, brief cth4h2, feedback 2). The previous receipt's
@@ -185,7 +201,7 @@ function write_receipt(path, entries; n_chains, n_draws)
          ("host", "a Linux fleet host, $(Threads.nthreads()) Julia threads"),
          ("julia", string(VERSION)),
          ("BayesianRegressionModels", version),
-         ("sampler", "WarmupHMC completion_warmup_mcmc, adaptive_centering_problem over the BridgeStan problem, AutoEnzyme"),
+         ("sampler", sampler),
          ("chains", "$n_chains per fit, quorum $(max(1, div(3n_chains, 4))), $n_draws draws each")],
         [(String(k), string(v)) for (k, v) in entries])
     write_tsv(path, ["key", "value"], rows)

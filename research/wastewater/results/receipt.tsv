@@ -1,0 +1,26 @@
+key	value
+commit	b22a2a360174d9f2cf5c135d1836bc5076390124
+uncommitted_changes	yes
+started	2026-11-11 00:23 local time
+host	a Linux fleet host, 4 Julia threads
+julia	1.10.12
+BayesianRegressionModels	0.2.270
+sampler	WarmupHMC completion_warmup_mcmc, adaptive_centering_problem over the BridgeStan problem, AutoEnzyme
+chains	4 per fit, quorum 3, 1000 draws each
+model	wastewater
+sources	CDCgov/ww-inference-model 3e92fea29a0b96212e1690dbdcaeb8abfe19cc4f; public simulated site 1 and state admissions; 2023-09-01 to 2023-10-05
+seed	20261111
+content_sha256	433c0b668a77a77b414dabec0c706ce86ff6341bb3ab2a478f0ea081cd79e53f
+harness_sha256	d8a510d69ccc7b671466acce09471ba544a121efed260fb0bb761ddb8ef1d5f5
+settings	(1000, 4, nothing, Base.Pairs(:target_acceptance_rate => 0.95))
+WarmupHMC	0.2.11
+StanBlocks	0.2.31
+TreeArrays	0.2.0
+BridgeStan	2.9.0
+seconds	517.376364277
+divergent	20
+omitted_chains	1
+dimension	248
+status	complete
+completed	2026-11-11T02:23:59
+summary	TreeArrays quantiles pooled over chain and draw; split R-hat, bulk and tail ESS
