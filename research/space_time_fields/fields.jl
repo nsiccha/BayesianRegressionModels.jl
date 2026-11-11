@@ -39,7 +39,7 @@ end
 
 # Everything above this line also runs when Documenter displays the model.
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme, DifferentiationInterface
-using WarmupHMC, TreeArrays, Tables, Treebars, MCMCDiagnosticTools, DynamicObjects, Dates, Serialization
+using WarmupHMC, TreeArrays, Tables, Treebars, MCMCDiagnosticTools, DynamicObjects, Dates, Serialization, Printf
 using StanBlocks
 
 const FIELD_HARNESS_VERSION = 2
@@ -71,7 +71,11 @@ end
 
 # Two significant digits of the 95% interval's width: the last digit shown is
 # one the posterior resolves.
-resolved(x, width) = round(x; digits=1 - floor(Int, log10(width)))
+function resolved(x, width)
+    digits = 1 - floor(Int, log10(width))
+    digits > 0 ? round(x; digits) : round(Int, round(x; digits))
+end
+three_decimals(x) = Printf.@sprintf("%.3f", x)
 
 function map_field(rk, draws; nside=21, seed=721)
     axis = collect(range(0.0, 100.0; length=nside))
@@ -133,7 +137,7 @@ function quantity_row(quantity, unit, description, x::Matrix{Float64})
     tail = MCMCDiagnosticTools.ess(samples; kind=:tail)
     width = q.q975 - q.q025
     (; quantity, unit, description, median=resolved(q.q50, width), q025=resolved(q.q025, width),
-       q975=resolved(q.q975, width), rhat=round(only(rhat); digits=3),
+       q975=resolved(q.q975, width), rhat=three_decimals(only(rhat)),
        ess_bulk=round(Int, only(bulk)), ess_tail=round(Int, only(tail)))
 end
 
@@ -168,7 +172,7 @@ function summarize_station_field(data, draws, info; settings=FIELD_SETTINGS)
         "Omitted chain indices" => (isempty(info.omitted_chains) ? "none" : join(info.omitted_chains, ", ")),
         "Retained draws before equal-length truncation" => info.retained_draws,
         "Draws per chain used in summaries" => info.stored_draws_per_chain,
-        "Maximum R-hat, all sampler coordinates" => round(diag.max_rhat; digits=3),
+        "Maximum R-hat, all sampler coordinates" => three_decimals(diag.max_rhat),
         "Minimum bulk ESS" => round(Int, diag.min_bulk_ess),
         "Minimum tail ESS" => round(Int, diag.min_tail_ess),
         "Divergences in all retained draws" => info.divergent,
