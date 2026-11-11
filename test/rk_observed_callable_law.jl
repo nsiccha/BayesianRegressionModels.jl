@@ -1,7 +1,7 @@
 include(joinpath(@__DIR__,"rk_consumer_support.jl"))
 
-# Public constructor reduction supplied by the Bordet consumer. The scientific
-# Stan family and its native scalar counterpart retain both inclusive atoms.
+# Public censored-Normal constructor reduction. The Stan family and its
+# native scalar counterpart retain both inclusive atoms.
 module PublicObservedCallableLaw
 using BayesianRegressionModels, StanBlocks, Distributions, ReactiveKernelsPPL
 import BayesianRegressionModels: _rk_callable_source!

@@ -1,274 +1,398 @@
-# API
+# Public API
 
-## Scientific descriptions
+```@meta
+CurrentModule = BayesianRegressionModels
+```
+
+## Declaring models
+
+Build a model from a declaration and bind its data. See [Model syntax](model-syntax.md).
 
 ```@docs
-brm_description
-brm_description_markdown
-BRMDocumentation
-brm_documentation
-brm_documentation_markdown
-brm_describe_component
-brm_description_components
-brm_description_math
-brm_description_symbol
-brm_description_binding
-brm_description_record
-brm_description_prior
-brm_description_prior_anchor
-brm_description_prior_references
-description_texts
-brm_description_texts
+@brm
+@getproperty
+@n
+@x
+AbstractColumn
+BRMBuilder
+BRMComponent
+BRMI
+Data
+DataColumn
+ExprColumn
+LikelihoodColumn
+MaybeData
+MissingColumn
+NamedColumn
+brm
+brm_components
+getargs
+getf
+getkwargs
+getop
+maybedata
+name
+```
+
+## Fitting
+
+Choose a backend, construct an inference problem and retain fitted state. See [Backends](backends.md) and [Adaptive centering](adaptive-centering.md).
+
+```@docs
+AbstractAdaptiveCenteringBlock
+AdaptiveCenteringBlock
+BRMCoordinatePair
+BRMCoordinateTransport
+BRMCoordinateTransportError
+BRMCutFamily
+BRMFilter
+BRMFilterSMC
+BRMFittedState
+BRMLaplacePlan
+BRMLaplaceProblem
+BRMNLMEConditionalProblem
+BRMNLMEJointMap
+BRMNLMEUnitProblem
+BRMNLMEView
+BRMNLMEViewError
+BRMSMCCarriedReference
+BRMSMCFit
+BRMSMCWindowFit
+BRMSVILaplaceState
+BRMSVINonfiniteError
+BRMSVIOptimizerState
+BRMSVIStart
+BRMSVIState
+BRMSparseLaplaceProblem
+BRMStructuredLaplaceProblem
+GaussianBlockLaplace
+LearnedCentering
+MatrixFreeLaplace
+R2D2AdaptiveCenteringBlock
+RKBRMI
+S2ZEffectBlock
+SBBRMI
+adaptive_centering_blocks
+adaptive_centering_controls
+adaptive_centering_problem
+brm_check_coordinate_transport
+brm_coordinate_transport
+brm_cut_family
+brm_cut_fit
+brm_cut_point
+brm_cut_propagate
+brm_execute
+brm_filter
+brm_filter_checkpoint
+brm_filter_step
+brm_filter_stream
+brm_filter_tune
+brm_fitted_state
+brm_laplace_mode
+brm_laplace_plan
+brm_nlme_conditional_point
+brm_nlme_estimates
+brm_nlme_fit
+brm_nlme_joint_start
+brm_nlme_joint_values
+brm_nlme_loglikelihood
+brm_nlme_loglikelihood_and_gradient
+brm_nlme_loglikelihoods
+brm_nlme_loglikelihoods_and_gradients
+brm_nlme_model
+brm_nlme_start
+brm_nlme_unit_eta
+brm_nlme_unit_problem
+brm_nlme_view
+brm_rk_point_to_stan
+brm_rk_to_stan
+brm_smc_carry
+brm_smc_checkpoint
+brm_smc_compare
+brm_smc_coordinates
+brm_smc_fit
+brm_smc_recover
+brm_smc_tune
+brm_smc_update
+brm_stan_gradient_to_rk
+brm_stan_logdensity_to_rk
+brm_start
+brm_svi_centeredness
+brm_svi_combine
+brm_svi_fit
+brm_svi_optimizer_checkpoint
+brm_svi_resume
+rk_logdensity_problem
+s2z_effect_blocks
+select_ranef_centeredness
+select_s2z_centeredness
+select_s2z_rho
+select_total_centeredness
+total_effect_blocks
+```
+
+Additional exports in this task group:
+
+| Origin | Names |
+|:--|:--|
+| BayesianRegressionModels | `BRMNLMEModel`, `LowRankGlobal`, `MeanFieldGlobal`, `RKDesignBinder`, `brm_filter_resume`, `brm_laplace_problem`, `brm_nlme_conditional_problem`, `brm_nlme_joint_map`, `brm_smc_resume`, `brm_smc_runs`, `brm_stan_point_to_rk`, `brm_stan_to_rk`, `brm_svi_checkpoint` |
+
+## Draws and summaries
+
+Read fitted coordinates, predict responses and summarize conditional quantities. See [Warfarin PK/PD](warfarin.md).
+
+```@docs
+BRMPowerscaleSensitivity
+brm_conditional_draws
+brm_conditional_tree
+brm_contrast_draws
+brm_laplace_draws
+brm_nlme_draws
+brm_output_draws
+brm_output_tree
+brm_powerscale_inputs
+brm_powerscale_sensitivity
+brm_prediction_grid
+brm_predictive_draws
+brm_predictive_tree
+brm_ranef_draws
+brm_ranef_tree
+brm_slope_draws
+brm_summarize_draws
+linear_predictor_args
+linear_predictor_op
+linear_predictors
+modeled_covariates
+parameter_draws
+population_draws
+population_model
+predictors
+prune_responses
+recover_population_draws
+recover_s2z_draws
+rk_draw_tree
+rk_draw_values
+rk_restore_draws
+term_draws
+transport_draws
+```
+
+Additional exports in this task group:
+
+| Origin | Names |
+|:--|:--|
+| BayesianRegressionModels | `brm_centerednessplot`, `brm_centering_lossplot`, `brm_comparisonsplot`, `brm_gradientplot`, `brm_pairplot`, `brm_posteriorplot`, `brm_ppcplot`, `brm_predictionsplot`, `brm_slopesplot` |
+
+## Descriptions and export
+
+Inspect declared structure and emit model descriptions or backend programs. See [Backends](backends.md).
+
+```@docs
 BRMDescription
-BRMDescriptionTexts
 BRMDescriptionComponent
+BRMDescriptionContext
 BRMDescriptionFragment
 BRMDescriptionReference
+BRMDescriptionTexts
+BRMDescriptor
+BRMDocumentation
+BRMHighlight
+BRMHighlightSpec
+BRMInput
+BRMOperation
+BRMOutput
 BRMPriorDescription
+BRMSubmodel
+GenerativeDeclaration
+GenerativePlan
+RanefBlock
+TotalEffectBlock
+brm_columns
+brm_describe_component
+brm_description
+brm_description_binding
+brm_description_components
+brm_description_markdown
+brm_description_math
+brm_description_prior
+brm_description_prior_references
+brm_description_record
+brm_description_symbol
+brm_description_texts
+brm_descriptor
+brm_distribution_type
+brm_documentation
+brm_documentation_markdown
+brm_highlight
+brm_ladder_fit
+brm_length_scale_floor
+brm_model_view
+brm_operation
+brm_output
+brm_output_coordinates
+brm_outputs
+brm_population_effect_coordinates
+brm_ranef_sd_coordinates
+brm_source
+brm_term_coordinates
+brm_transform_constants
+brm_two_stage_fit
+column_data
+compiles
+data_args
+data_columns
+dependencies
+description_texts
+effect_priors
+generative_plan
+grouping_factors
+hierarchical_outcomes
+outcomes
+popcoefnames
+primary_lp
+priors_of
+r2d2_priors
+ranef_blocks
+ranef_coordinates
+ranef_effect_priors
+ranefcoefnames
+reprocess
+required_brm_inputs
+restan_data
+rk_artifact_inputs
+rk_bound_data
+rk_bound_plan
+rk_design_binder
+rk_model
+rkppl_model
+stan_data
+stan_instantiate
+stan_model
+structure_of
+term_priors
+transpiles
 ```
 
-## Frontend macros
+Additional exports in this task group:
+
+| Origin | Names |
+|:--|:--|
+| BayesianRegressionModels | `BRMDescriptionCoverage`, `brm_description_prior_anchor`, `rk_translate_artifact` |
+| StanBlocks | `stan_code` |
+
+## Response families
+
+Construct response distributions and prior families. See [Response families](response-families.md).
 
 ```@docs
-BayesianRegressionModels.@brm
-BayesianRegressionModels.@n
-BayesianRegressionModels.@x
-BayesianRegressionModels.@getproperty
-BayesianRegressionModels._brm
-BayesianRegressionModels.brm
-BayesianRegressionModels.parse!
+AR1Normal
+BetaBinomial2
+BinomialLogit
+CategoricalLogit
+CircularVonMises
+CloglogLink
+Cumulative
+DoubleIntervalCensored
+Flat
+Horseshoe
+LKJCovarianceFactor
+LogitLink
+MvNormalCholesky
+NegativeBinomial2
+OrderedLogistic
+Ordinal
+OrdinalLink
+OrdinalStructure
+PrimaryCensored
+ProbitLink
+SkewDoubleExponential
+StoppingRatio
+TruncatedNormal
+ZeroInflatedPoisson
+double_interval_censored
+interval_censored
+primary_censored
 ```
 
-## Intermediate representation
+Additional exports in this task group:
+
+| Origin | Names |
+|:--|:--|
+| Distributions | `Arcsine`, `Bernoulli`, `BernoulliLogit`, `Beta`, `BetaBinomial`, `Binomial`, `Categorical`, `Cauchy`, `Chisq`, `Dirichlet`, `DirichletMultinomial`, `Erlang`, `Exponential`, `Frechet`, `Gamma`, `Gumbel`, `InverseGamma`, `InverseGaussian`, `LKJCholesky`, `Laplace`, `LocationScale`, `LogNormal`, `Logistic`, `MixtureModel`, `Multinomial`, `MvNormal`, `NegativeBinomial`, `Normal`, `NormalCanon`, `Pareto`, `Poisson`, `Rayleigh`, `SkewNormal`, `SkewedExponentialPower`, `TDist`, `Uniform`, `VonMises`, `Weibull`, `censored`, `logpdf`, `product_distribution`, `truncated` |
+| BayesianRegressionModels | `HurdlePoisson` |
+| LogExpFunctions | `log1mexp`, `log1pexp`, `logexpm1`, `logistic`, `logit`, `logsumexp` |
+| StatsFuns | `normcdf`, `norminvcdf` |
+
+## Terms and priors
+
+Declare structured effects, preprocessing and formula priors. See the [term catalogue](terms-reference.md).
 
 ```@docs
-BayesianRegressionModels.BRMI
-BayesianRegressionModels.AbstractColumn
-BayesianRegressionModels.MissingColumn
-BayesianRegressionModels.DataColumn
-BayesianRegressionModels.NamedColumn
-BayesianRegressionModels.ExprColumn
-BayesianRegressionModels.LikelihoodColumn
-BayesianRegressionModels.Data
-BayesianRegressionModels.MaybeData
-BayesianRegressionModels.maybedata
+assign
+center
+constant
+doublepipe
+effect
+factor
+gr
+groups
+kernel
+me
+mi
+mm
+mo
+mo1
+offset
+protect
+r2d2
+ragged
+restricted
+s
+standardize
+t2
+weighted
+zscale
 ```
 
-## Column-tree accessors
+Additional exports in this task group:
+
+| Origin | Names |
+|:--|:--|
+| StatsBase | `AbstractWeights`, `AnalyticWeights`, `FrequencyWeights`, `ProbabilityWeights`, `UnitWeights`, `Weights`, `aweights`, `fweights`, `pweights`, `uweights` |
+| StatsAPI | `weights` |
+
+## Fields
+
+Declare spatial and temporal fields, then recover or predict their values. See [Space-time fields](space-time-fields.md).
 
 ```@docs
-BayesianRegressionModels.name
-BayesianRegressionModels.getf
-BayesianRegressionModels.getargs
-BayesianRegressionModels.getkwargs
-BayesianRegressionModels.getop
+ar
+brm_gmrf_predict
+brm_multigroup_coherence
+brm_multigroup_field
+car
+cdar
+dar
+gmrf
+gp
+hsgp
+hsgp_boundary_check
+hsgp_coordinate_draws
+hsgp_population_curve
+hsgp_transform_draws
+multigroup
+rw
+select_hsgp_centeredness
 ```
 
-## Formula-term markers
+## Exported for backends (not a user API)
 
-```@docs
-BayesianRegressionModels.assign
-BayesianRegressionModels.effect
-BayesianRegressionModels.r2d2
-BayesianRegressionModels.doublepipe
-BayesianRegressionModels.weighted
-BayesianRegressionModels.gr
-BayesianRegressionModels.mm
-BayesianRegressionModels.gp
-BayesianRegressionModels.hsgp
-BayesianRegressionModels.offset
-BayesianRegressionModels.zscale
-BayesianRegressionModels.center
-BayesianRegressionModels.standardize
-BayesianRegressionModels.protect
-BayesianRegressionModels.factor
-BayesianRegressionModels.mi
-BayesianRegressionModels.me
-BayesianRegressionModels.s
-BayesianRegressionModels.t2
-BayesianRegressionModels.ar
-BayesianRegressionModels.dar
-BayesianRegressionModels.rw
-BayesianRegressionModels.cdar
-BayesianRegressionModels.mo
-BayesianRegressionModels.mo1
-BayesianRegressionModels.kernel
-BayesianRegressionModels.ragged
-BayesianRegressionModels.groups
-BayesianRegressionModels.AR1Normal
-```
+These names are exported so the StanBlocks and ReactiveKernels backends can
+reach them; they will be un-exported in a separate source change.
 
-`truncated` and `censored` are re-exported unchanged from Distributions.jl and
-documented there; only `interval_censored` below is BRM's own. See
-[Likelihoods](@ref) for how the three compose on a response.
-
-## Likelihood distributions / prior markers
-
-```@docs
-BayesianRegressionModels.OrderedLogistic
-BayesianRegressionModels.Ordinal
-BayesianRegressionModels.OrdinalStructure
-BayesianRegressionModels.Cumulative
-BayesianRegressionModels.StoppingRatio
-BayesianRegressionModels.OrdinalLink
-BayesianRegressionModels.LogitLink
-BayesianRegressionModels.ProbitLink
-BayesianRegressionModels.CloglogLink
-BayesianRegressionModels.CategoricalLogit
-BayesianRegressionModels.Horseshoe
-BayesianRegressionModels.ZeroInflatedPoisson
-BayesianRegressionModels.HurdlePoisson
-BayesianRegressionModels.NegativeBinomial2
-BayesianRegressionModels.BetaBinomial2
-BayesianRegressionModels.BinomialLogit
-BayesianRegressionModels.interval_censored
-BayesianRegressionModels.CircularVonMises
-BayesianRegressionModels.SkewDoubleExponential
-BayesianRegressionModels.LKJCovarianceFactor
-BayesianRegressionModels.MvNormalCholesky
-```
-
-`BetaBinomial` is re-exported unchanged from Distributions.jl and documented
-there; `BetaBinomial2` above is BRM's own mean/precision parameterization.
-
-Every other Distributions.jl family BRM lowers is re-exported unchanged too
-(`Normal`, `LogNormal`, `Uniform`, `Gamma`, `Beta`, `TDist`, `LocationScale`,
-`Dirichlet`, `MvNormal`, `Binomial`, …), so `using BayesianRegressionModels`
-alone binds the distributions a model writes, and importing Distributions.jl as
-well stays unambiguous. A Distributions.jl family outside that set has no
-StanBlocks lowering.
-
-The functions BRM spells as Stan builtins, and the links whose inverse is one
-of them, are re-exported unchanged as well: `logit`, `logistic`, `log1pexp`,
-`logexpm1`, `log1mexp` and `logsumexp` from LogExpFunctions.jl, and `normcdf`
-and `norminvcdf` from StatsFuns.jl. So `logit(mu) ~ 1 + x`, the probit link
-`norminvcdf(p) ~ 1 + x`, the softplus link `logexpm1(s) ~ 1 + x` and an
-argument such as `Binomial(n, logistic(eta))` need no further import, and
-importing LogExpFunctions.jl or StatsFuns.jl as well stays unambiguous. Any
-other function a block names, a link included, resolves in the model's module:
-import or define it there.
-
-## Backends
-
-```@docs
-BayesianRegressionModels.SBBRMI
-BayesianRegressionModels.RKBRMI
-BayesianRegressionModels.rk_logdensity_problem
-BayesianRegressionModels.GenerativeDeclaration
-BayesianRegressionModels.GenerativePlan
-BayesianRegressionModels.generative_plan
-BayesianRegressionModels.reprocess
-BayesianRegressionModels.rk_bound_data
-BayesianRegressionModels.rk_bound_plan
-BayesianRegressionModels.restan_data
-BayesianRegressionModels.population_draws
-BayesianRegressionModels.population_model
-BayesianRegressionModels.prune_responses
-BayesianRegressionModels.transport_draws
-BayesianRegressionModels.hsgp_population_curve
-BayesianRegressionModels.select_hsgp_centeredness
-BayesianRegressionModels.select_ranef_centeredness
-BayesianRegressionModels.RanefBlock
-BayesianRegressionModels.ranef_blocks
-BayesianRegressionModels.ranef_coordinates
-BayesianRegressionModels.Flat
-BayesianRegressionModels.TotalEffectBlock
-BayesianRegressionModels.total_effect_blocks
-BayesianRegressionModels.recover_population_draws
-BayesianRegressionModels.select_total_centeredness
-BayesianRegressionModels.S2ZEffectBlock
-BayesianRegressionModels.s2z_effect_blocks
-BayesianRegressionModels.recover_s2z_draws
-BayesianRegressionModels.select_s2z_rho
-BayesianRegressionModels.select_s2z_centeredness
-```
-
-### [`stan_code`](@id stan_code)
-
-`stan_code` is re-exported from StanBlocks.jl. BRM extends that binding with
-`stan_code(sb::SBBRMI)`, which returns the transpiled Stan source for `sb.model`.
-`stan_data`, `stan_model` and `stan_instantiate` also take an `SBBRMI`, and all
-four take a `GenerativePlan`, where they read `plan.model`.
-
-### Concurrent construction and ownership
-
-After loading the backend packages and defining custom distribution families,
-tasks can independently construct `SBBRMI(builder(data))` and
-`RKBRMI(builder(data))`. A formula builder and read-only input arrays may be
-shared; custom callables used during construction must support concurrent calls.
-Keep each build's backend and mutable preparation state private to its task,
-and use BRM's `stan_code(sb)`, `stan_data(sb)`, and `stan_model(sb)` entries
-when immediately consuming an `SBBRMI` inside the same compiled caller.
-
-SBBRMI requires StanBlocks' `ValueFamily` API. Its generated vector priors
-and mixtures carry density, pointwise, RNG and intrinsic-support definitions
-as values. Synchronized caches share these read-only families; model
-construction does not install Julia methods or module bindings for them.
-Use the StanBlocks revision recorded in `test/setup_env.jl` when preparing
-a downstream environment.
-
-`RKBRMI` follows the same ownership rules. Concurrent builds require the RK
-fix for generated model bindings, included in revision
-`cb9f9ab75c65df33c9c23e175f5fbdbb521c5fa4` and pinned in the test environment.
-Prepare a separate `rk_logdensity_problem` for each task; that interface also
-provides the world-age boundary for immediate first execution. Give each
-inference task its own sampler state, mutable density/AD workspace, and
-explicit RNG; keep input arrays unchanged while another task uses them.
-
-## Executable descriptors
-
-```@docs
-BayesianRegressionModels.BRMDescriptor
-BayesianRegressionModels.BRMInput
-BayesianRegressionModels.BRMOutput
-BayesianRegressionModels.BRMOperation
-BayesianRegressionModels.BRMHighlight
-BayesianRegressionModels.BRMHighlightSpec
-BayesianRegressionModels.brm_highlight
-BayesianRegressionModels.BRMSubmodel
-BayesianRegressionModels.brm_descriptor
-BayesianRegressionModels.brm_columns
-BayesianRegressionModels.brm_transform_constants
-BayesianRegressionModels.brm_output
-BayesianRegressionModels.brm_outputs
-BayesianRegressionModels.brm_output_coordinates
-BayesianRegressionModels.brm_operation
-BayesianRegressionModels.brm_execute
-BayesianRegressionModels.required_brm_inputs
-```
-
-## Introspection
-
-```@docs
-BayesianRegressionModels.brm_model_view
-BayesianRegressionModels.BRMComponent
-BayesianRegressionModels.brm_components
-BayesianRegressionModels.outcomes
-BayesianRegressionModels.linear_predictor_op
-BayesianRegressionModels.linear_predictors
-BayesianRegressionModels.predictors
-BayesianRegressionModels.grouping_factors
-BayesianRegressionModels.column_data
-BayesianRegressionModels.data_columns
-BayesianRegressionModels.dependencies
-BayesianRegressionModels.hierarchical_outcomes
-BayesianRegressionModels.linear_predictor_args
-BayesianRegressionModels.data_args
-BayesianRegressionModels.primary_lp
-BayesianRegressionModels.popcoefnames
-BayesianRegressionModels.effect_priors
-BayesianRegressionModels.term_priors
-BayesianRegressionModels.ranef_effect_priors
-BayesianRegressionModels.r2d2_priors
-BayesianRegressionModels.ranefcoefnames
-```
-
-## Extension API
-
-For downstream packages adding their own formula terms (e.g. via a gitignored
-`-ext.jl` extension):
-
-```@docs
-BayesianRegressionModels._sb_submodel_rhs!
-BayesianRegressionModels._sb_emit_vector_prior!
+```@autodocs
+Modules = [BayesianRegressionModels]
+Public = true
+Private = false
+Filter = value -> any(name -> isdefined(BayesianRegressionModels, name) && value === getfield(BayesianRegressionModels, name), Main.BRM_DOCS_BACKEND_EXPORTS)
 ```

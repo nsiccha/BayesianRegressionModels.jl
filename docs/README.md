@@ -53,3 +53,9 @@ synthetic inputs. The historical material remains in the private archive; this
 public repository no longer carries its pointer or dependent scripts.
 Research scripts use repository-relative output directories in place of local
 worktree and scratch paths. Public receipts describe the machine generically.
+
+Historical receipts retain their numeric results and source hashes; machine-local
+paths are normalized and raw render logs are omitted from the public tree.
+
+Large generated inventory tables and compressed draw tables are also untracked;
+only the small summary tables used to render fitted examples are retained.

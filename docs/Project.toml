@@ -12,6 +12,7 @@ StanBlocks = "2e771a56-c23a-4e0b-9282-20c2e37157e9"
 ZipFile = "a5390f91-8eb1-5f08-bee0-b1d1ffed6cea"
 
 [compat]
+AlgebraOfVega = "0.2.29"
 JSON = "1"
 ZipFile = "0.10"
 
