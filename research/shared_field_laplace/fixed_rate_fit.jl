@@ -72,7 +72,7 @@ function fixed_rate_fit!(rng,t,q;node)
 end
 
 @stestset "native fixed rate SVI" begin
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     reference=deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))
     previous=deserialize(joinpath(base,"native-path-derivative-fit-v1/comparison.jls"))
     reference.reference_ok && previous.identity.reference_signature==reference.signature ||

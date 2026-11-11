@@ -110,7 +110,7 @@ function known_reconstructed_moments(o,field,mean,covariance)
 end
 
 @stestset "Gaussian coupled control" begin
-    output = "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace/gaussian-coupled-v1"
+    output = joinpath(@__DIR__, "results", "gaussian-coupled-v1")
     ispath(output) && error("refusing to overwrite Gaussian control artifacts: $output")
     mkpath(output)
     files = sort(filter(endswith(".jl"),readdir(@__DIR__;join=true)))

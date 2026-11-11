@@ -4,7 +4,7 @@ using Serialization, LinearAlgebra, Statistics, SHA, Test
 import BayesianRegressionModels
 
 @testset "saved path derivative trajectory" begin
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     path=joinpath(base,"native-path-derivative-fit-v1/fit.jls")
     saved=deserialize(path)
     audit=deserialize(joinpath(base,"native-path-derivative-endpoint-v1/audit.jls"))

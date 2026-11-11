@@ -175,7 +175,7 @@ end
     wastewater_brm_model([data])
 
 The EpiSewer-style renewal model as a single `@brm` formula. `g` and `sh` are
-referenced directly in the kernel do-block and captured as shared data (no baked
+referenced directly in the `@plate` cell and captured as shared data (no baked
 `@deffun` constants). Returns a `BRMI`; lower with `SBBRMI(wastewater_brm_model())`.
 """
 function wastewater_brm_model(data = wastewater_brm_fixture())
@@ -184,11 +184,11 @@ function wastewater_brm_model(data = wastewater_brm_fixture())
         log_scale ~ Normal(0.0, 1.0)                 # load -> concentration scaling
         log_rt ~ 1 + hsgp(time_x; k = 10)            # smooth log-Rt over time
         log_I0 ~ 1 + (1 | site)                      # per-site seeding
-        conc ~ kernel(t_grid, dv, ragged(log_rt, time_site), log_I0) do ts, yy, logRt_i, lI0
-            infections = ww_renewal(logRt_i, g, exp(lI0))   # g captured as data
-            load = ww_shed(infections, sh)                   # sh captured as data
-            yy ~ normal(log(load) + log_scale, sigma_obs)
-            load
+        rows = groups(time_site => site)                   # each site's rows of the log-Rt frame
+        @plate for i in eachindex(log_I0)
+            infections = ww_renewal(log_rt[rows[i]], g, exp(log_I0[i]))   # g: shared data
+            conc[i] = ww_shed(infections, sh)                               # sh: shared data
+            dv[i] ~ Normal(log.(conc[i]) .+ log_scale, sigma_obs)
         end
     end
 end

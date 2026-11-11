@@ -52,7 +52,7 @@ capture that this port motivated (see below).
 
 `test/wastewater_model.jl` gates both variants on transpile + `stanc` + finite
 BridgeStan density/gradient (`julia --project=test test/wastewater_model.jl`),
-plus a data re-bind. Measured green on strato2: 10/10 assertions; core and
+plus a data re-bind. Measured green on a Linux fleet host: 10/10 assertions; core and
 censored each dim=91.
 
 ## BRM enhancement this port drove

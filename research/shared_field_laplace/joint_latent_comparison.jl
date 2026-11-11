@@ -22,7 +22,7 @@ function fixed_conditional_moments(p,r,g,M,V)
 end
 
 @stestset "fixed global joint latent comparison" begin
-    base = "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base = joinpath(@__DIR__, "results")
     candidate = deserialize(joinpath(base,"profile-optimization-v1/candidate.jls"))
     reference = deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))
     @test candidate.reference_signature == reference.signature && reference.reference_ok

@@ -227,7 +227,7 @@ end
 
 # Per-group controls on the unbalanced data. The groups-vs-contrasts divergence
 # ranking is machine-sensitive (author: groups 1,1,0 vs contrasts 15,12;
-# strato2: groups 10 vs contrasts 8), so this is a smoke test only: both fits
+# a Linux fleet host: groups 10 vs contrasts 8), so this is a smoke test only: both fits
 # stay under a loose 1% bound. The `:groups` path itself is deprecated,
 # pending further exploration/research.
 @testset "Per-group S2Z centering on unbalanced groups" begin

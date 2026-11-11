@@ -215,8 +215,8 @@ end
 with_filter(d; nsub=8, gh=3) = merge(d, (; nsub, gh))
 
 # Every subject is an independent series sharing all parameters. With no random-effect
-# grouping to derive it from, the kernel takes the subject count from the common length of
-# the pre-grouped (vector-of-vectors) columns.
+# grouping, the plate iterates the pre-grouped (vector-of-vectors) columns, one cell per
+# subject.
 function ema_state_dependent_model(data = with_filter(ema_state_dependent_fixture()))
     @brm data begin
         b0    ~ Normal(0.5, 0.5)               # stress recovery: softplus offset
@@ -238,10 +238,10 @@ function ema_state_dependent_model(data = with_filter(ema_state_dependent_fixtur
         t0sd1 ~ Exponential(1.0)               # initial covariance: stress sd
         t0sd2 ~ Exponential(1.0)               #                     mood sd
         t0z   ~ Normal(0.0, 0.5)               #                     fisher-z correlation
-        pred ~ kernel(dt, stressReport, moodReport, smoked) do dti, ys, ym, smk
-            ys ~ ema_sd(ym, smk, dti, b0, bm, a12, a21, a22, cintm, qd0, qd1, cz, sdm,
-                        l31, thr, r1, r2, s0, m0, t0sd1, t0sd2, t0z, nsub, gh)   # filter precision: DATA
-            ys
+        @plate for i in eachindex(dt)
+            stressReport[i] ~ ema_sd(moodReport[i], smoked[i], dt[i], b0, bm, a12, a21, a22, cintm,
+                                     qd0, qd1, cz, sdm, l31, thr, r1, r2, s0, m0, t0sd1, t0sd2, t0z,
+                                     nsub, gh)   # filter precision: DATA
         end
     end
 end

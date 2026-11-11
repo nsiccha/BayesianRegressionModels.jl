@@ -506,9 +506,9 @@ manual total target is included here.
 
 ### Online correction and added adaptation arms
 
-- [WarmupHMC patch](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/results/online_adaptation/warmuphmc-active-state.patch), [deterministic boundary audit](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/audit_online_boundary.jl).
-- [Online driver](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/online_transport_trial.jl), [post-hoc gradient driver](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/offline_gradient_trial.jl), [46-QOI comparison and recovery](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/compare_online_trials.jl).
-- [Complete 15-row table](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/results/online_adaptation/brief_matrix/qoi46.tsv), [new per-QOI results](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/results/online_adaptation/comparison/parameters.tsv), [source and run manifest](/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/research/pupil_total_effects/results/online_adaptation/receipt.json).
+- [WarmupHMC patch](research/pupil_total_effects/results/online_adaptation/warmuphmc-active-state.patch), [deterministic boundary audit](research/pupil_total_effects/audit_online_boundary.jl).
+- [Online driver](research/pupil_total_effects/online_transport_trial.jl), [post-hoc gradient driver](research/pupil_total_effects/offline_gradient_trial.jl), [46-QOI comparison and recovery](research/pupil_total_effects/compare_online_trials.jl).
+- [Complete 15-row table](research/pupil_total_effects/results/online_adaptation/brief_matrix/qoi46.tsv), [new per-QOI results](research/pupil_total_effects/results/online_adaptation/comparison/parameters.tsv), [source and run manifest](research/pupil_total_effects/results/online_adaptation/receipt.json).
 
 The most useful next comparison would repeat the promising CP/ACP/S2Z-auto
 arms with matched physical starting states and multiple chains, keeping this

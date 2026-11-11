@@ -1,14 +1,14 @@
 ````@raw html
 ---
 title: Continuous-time state-space models
-description: "Hierarchical continuous-time state-space models in BRM: latent states sampled, or integrated out per subject by a Kalman, extended Kalman or moment-matched filter inside a kernel cell; recovery, an importance-sampling check of the filter's precision, and replication."
+description: "Hierarchical continuous-time state-space models in BRM: latent states sampled, or integrated out per subject by a Kalman, extended Kalman or moment-matched filter inside a plate cell; recovery, an importance-sampling check of the filter's precision, and replication."
 ---
 ````
 
 # Continuous-time state-space models
 
 A panel of people answers a few questions on their phones, several times a day, at
-irregular times. Behind the answers are latent processes — stress, mood — that evolve
+irregular times. Behind the answers are latent processes, stress and mood, that evolve
 continuously, push on each other, and differ between people. This page builds that kind
 of model in BRM four ways, from *sample every latent state* to *integrate every latent
 state out*, fits it, and checks how much the numerical approximation inside the
@@ -49,12 +49,12 @@ Every model on this page divides the work the same way:
 
 | layer | holds | written as |
 | --- | --- | --- |
-| **formula surface** | the population model: covariates and (correlated) random effects on subject-level parameters | `b0 ~ 1 + age + treatment + (1 \| p \| subject)` |
-| **`kernel(...)` cell** | one subject: that subject's series and that subject's parameter values | `pred ~ kernel(dt, stressReport, …, b0, …) do … end` |
-| **`@deffun`** | the recurrence — a loop with carried state, emitted as a Stan function | an SDE path, or a filter |
+| formula surface | the population model: covariates and (correlated) random effects on subject-level parameters | `b0 ~ 1 + age + treatment + (1 \| p \| subject)` |
+| `@plate for` cell | one subject: that subject's series and that subject's parameter values | `@plate for i in eachindex(b0) … end`, reading `stressReport[i]`, `dt[i]`, `b0[i]` |
+| `@deffun` | the recurrence, a loop with carried state, emitted as a Stan function | an SDE path, or a filter |
 
-`kernel(...)` lowers to a loop over subjects whose body is the cell. What differs between
-the four models is only **what the cell does with the latent path**: sample it, or
+`@plate for` lowers to a loop over subjects whose body is the cell. What differs between
+the four models is only what the cell does with the latent path: sample it, or
 integrate it out. The population model on the formula surface is untouched by that choice.
 
 ## 1. Sampling the latent states
@@ -80,8 +80,8 @@ Main.BRMDocsComparisons.source_code_region(
 The model: stress recovers at a rate that depends on mood (a softplus keeps it
 negative), stress volatility depends on the workload input, the two shocks are
 correlated, workload pushes stress by an impulse at each observation, and three
-indicators — two continuous reports and a binary `smoked` — measure the states. Four
-subject-level parameters share **one** correlated random-effect block through the
+indicators, two continuous reports and a binary `smoked`, measure the states. Four
+subject-level parameters share one correlated random-effect block through the
 brms-style `(1 | p | subject)`.
 
 ```@eval
@@ -96,19 +96,19 @@ Main.BRMDocsComparisons.comparison(
 )
 ```
 
-On the 6-subject × 10-occasion fixture this model has **190** parameters, most of them
+On the 6-subject × 10-occasion fixture this model has 190 parameters, most of them
 innovations: its dimension grows with subjects × occasions × processes, and the
 innovations meet their scale parameters in the funnel geometry familiar from every
-non-marginalized hierarchical model. It is the most flexible form — any observation
-family, any nonlinearity — and the most expensive one.
+non-marginalized hierarchical model. It is the most flexible form, any observation
+family and any nonlinearity, and the most expensive one.
 
 ## 2. Integrating the states out exactly: a Kalman filter in the cell
 
 If the dynamics are linear and everything is Gaussian, the latent path can be integrated
-out in closed form. The filter becomes a **custom likelihood family**: a StanBlocks
-`@lpxf` triad — `_lpdf` (the log-likelihood), `_lpdfs` (its pointwise terms, for LOO and
-hold-out) and `_rng` (posterior-predictive draws) — that the cell calls once per subject
-as `ys ~ kalman2(...)`.
+out in closed form. The filter becomes a custom likelihood family: a StanBlocks
+`@lpxf` triad, `_lpdf` (the log-likelihood), `_lpdfs` (its pointwise terms, for LOO and
+hold-out) and `_rng` (posterior-predictive draws), that the cell calls once per subject
+as `stressReport[i] ~ kalman2(moodReport[i], ...)`.
 
 ```@eval
 Main.BRMDocsComparisons.evaluate_source_prelude(
@@ -136,9 +136,9 @@ Main.BRMDocsComparisons.comparison(
 )
 ```
 
-No latent state is a parameter any more: **38** dimensions on the 5-subject fixture, and
+No latent state is a parameter any more: 38 dimensions on the 5-subject fixture, and
 that number does not grow with the number of occasions. The formula surface is unchanged
-in kind — per-subject parameters are still ordinary linear predictors with covariates and
+in kind: per-subject parameters are still ordinary linear predictors with covariates and
 random effects; only the cell's likelihood was swapped.
 
 ## 3. The nonlinear, non-Gaussian model: an extended Kalman filter in the cell
@@ -176,8 +176,8 @@ Main.BRMDocsComparisons.comparison(
 )
 ```
 
-This is the same population model as in section 1 — the same covariates, the same
-correlated `(1 | p | subject)` block — at **59** dimensions instead of 190, and it stays
+This is the same population model as in section 1, the same covariates and the same
+correlated `(1 | p | subject)` block, at 59 dimensions instead of 190, and it stays
 at 59 however long the series get.
 
 ## 4. Dynamics that depend on the latent state
@@ -194,7 +194,7 @@ G_{11} = \exp(q_0 + q_1\,\text{mood}),\qquad
 
 So the process-noise covariance depends on the very states being integrated out. The
 filter's predict step comes in two orders: first-order (drift Jacobian and noise
-covariance evaluated at the filtered mean), or **moment-matched** — the Euler map and the
+covariance evaluated at the filtered mean), or moment-matched: the Euler map and the
 noise covariance averaged over the current state uncertainty with a Gauss–Hermite rule.
 
 ```@eval
@@ -212,7 +212,7 @@ Main.BRMDocsComparisons.source_code_region(
 ```
 
 All parameters are shared across subjects here, so there is no random-effect grouping;
-the kernel takes the subject count from the pre-grouped (vector-of-vectors) columns.
+the plate iterates `eachindex(dt)`, the pre-grouped (vector-of-vectors) columns.
 
 ```@eval
 Main.BRMDocsComparisons.comparison(
@@ -226,20 +226,20 @@ Main.BRMDocsComparisons.comparison(
 )
 ```
 
-**19** dimensions, whatever the panel size.
+19 dimensions, whatever the panel size.
 
 ### The filter's precision is data
 
-The last two arguments of `ema_sd` — `nsub`, the number of Euler substeps per observation
-interval, and `gh`, the predict order (`0` first-order, `3` or `5` a Gauss–Hermite rule) —
+The last two arguments of `ema_sd`, `nsub` (the number of Euler substeps per observation
+interval) and `gh` (the predict order: `0` first-order, `3` or `5` a Gauss–Hermite rule),
 are not literals in the model. They are scalar fields of the data, read inside the cell:
 
 ```julia
 with_filter(d; nsub=8, gh=3) = merge(d, (; nsub, gh))
 ```
 
-Every precision is therefore the **same compiled Stan model on the same parameter
-space**. That is what makes the precision check further down a loop over log-density
+Every precision is therefore the same compiled Stan model on the same parameter
+space. That is what makes the precision check further down a loop over log-density
 evaluations rather than a family of models.
 
 ## Reading a ctsem specification as a `@brm` model
@@ -248,13 +248,13 @@ evaluations rather than a family of models.
 | --- | --- |
 | `DRIFT`, `CINT` | the drift terms inside the `@deffun` recurrence |
 | `DIFFUSION`, `T0VAR`, `MANIFESTVAR` | sd / fisher-z cells: the variance is the cell squared, an off-diagonal cell is a correlation through `tanh` — declared as sds (`Exponential`) and unconstrained correlations (`Normal`, then `tanh`) |
-| `TDPREDEFFECT` (time-dependent predictors) | an **impulse** added to the state at each observation row, using that row's value |
+| `TDPREDEFFECT` (time-dependent predictors) | an impulse added to the state at each observation row, using that row's value |
 | `LAMBDA`, `MANIFESTMEANS` | loadings and intercepts in the measurement update |
 | binary indicators | Gauss–Hermite integration over the latent predictor inside the filter |
 | `T0MEANS` | initial state means, global or `~ 1 + (1 \| subject)` |
-| individual differences (`indvarying`, the population covariance) | random effects on the formula surface; **one** correlated block is the shared `(1 \| p \| subject)` |
+| individual differences (`indvarying`, the population covariance) | random effects on the formula surface; one correlated block is the shared `(1 \| p \| subject)` |
 | time-independent predictors (`TIpred` effects) | covariates on the formula surface: `b0 ~ 1 + age + treatment + …` |
-| integrating over the latent states | the cell's likelihood is the filter: `ys ~ ema_ekf(...)` |
+| integrating over the latent states | the cell's likelihood is the filter: `stressReport[i] ~ ema_ekf(...)` |
 
 ## Fitting: recovery on a simulated panel
 
@@ -285,8 +285,8 @@ situation that [Timonen, Siccha, Bales, Lähdesmäki & Vehtari](https://arxiv.or
 treat for ODE solvers, and their workflow carries over with the filter in the solver's
 place:
 
-1. sample the posterior with a **cheap** approximation ``M``;
-2. evaluate the same draws under a **precise** approximation ``M^*`` and Pareto-smooth the
+1. sample the posterior with a cheap approximation ``M``;
+2. evaluate the same draws under a precise approximation ``M^*`` and Pareto-smooth the
    importance ratios ``p_{M^*}(\theta \mid y) / p_M(\theta \mid y)``
    ([PSIS](https://arxiv.org/abs/1507.02646));
 3. a small Pareto ``\hat k`` certifies ``M`` for this posterior, and the reweighted draws
@@ -304,9 +304,9 @@ moment-matched predict):
 | 2, first-order | 98 s | 11.7 | 3.22 | 1 | 3.95 sd |
 | 8, first-order | 285 s | 1.92 | 0.84 | 34 | 0.54 sd |
 | 8, moment-matched | 1715 s | 2.75 | 0.81 | 22 | 0.64 sd |
-| **16, moment-matched** | 3009 s | 0.92 | **0.14** | **289** | 0.21 sd (own mean vs. reweighted) |
+| 16, moment-matched | 3009 s | 0.92 | 0.14 | 289 | 0.21 sd (own mean vs. reweighted) |
 
-- **The precision axis that matters is the substep count** — the analogue of the solver's
+- The precision axis that matters is the substep count, the analogue of the solver's
   step size. Moving from a 3- to a 5-node quadrature changes the log-density by less than
   ``10^{-6}``, and moment matching at 8 substeps is no closer to the reference than the
   first-order predict; halving the step cuts the spread of the log-ratios threefold, as
@@ -342,13 +342,13 @@ discretisation as the reason for that panel's low value: the certified posterior
 
 ## Notes for ctsem users
 
-- **Step mesh.** The filters here substep every observation interval (`nsub`), and the
+- Step mesh: the filters here substep every observation interval (`nsub`), and the
   generator integrates on a fine mesh. A filter that takes one step per observation
   interval (ctsem's does unless a maximum time step is set) evaluates state-dependent
   cells once per interval; data simulated on a finer mesh then come from a different
   process than the one that filter assumes, and a state-dependent parameter such as `cz`
   is the first to show it. When comparing fits across packages, match the meshes.
-- **Estimator.** The fits on this page are full posteriors by NUTS under weakly
+- Estimator: the fits on this page are full posteriors by NUTS under weakly
   informative priors, not maximum-likelihood fits with Hessian-based standard errors.
 
 ## Reproduce
@@ -373,7 +373,7 @@ julia --project=research/adaptive_centering/plots research/ema_ctsem/figures.jl
 ```
 
 `research/ema_ctsem/ema_brm.jl` builds the model of section 1 up incrementally, from the
-pure formula surface to the kernel cell. The measured tables behind the figures are in
+pure formula surface to the plate cell. The measured tables behind the figures are in
 `research/ema_ctsem/results/`.
 
 ## References

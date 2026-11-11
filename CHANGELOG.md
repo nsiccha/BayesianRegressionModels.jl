@@ -12,6 +12,27 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.273
+
+- Changed: an RKBRMI `cdar(step; by = group, cor = C)` walk is one program for
+  every dataset of its declaration, and costs `O(P W)` per evaluation (`P`
+  groups, `W` steps) instead of `O(P W²)`. The program computes the walk's
+  groups and steps from fit-role inputs (`brm_fit_levels(<column>_fit)`), so
+  `P` and `W` are inputs, not literals: networks of 2, 6 and 12 stations, or
+  other day grids, share one RKPPL program and one JAX module. The walk is one
+  recurrence per group, `d[1] = sigma e[1]`,
+  `d[w] = rho d[w - 1] + sigma sqrt(1 - rho^2) e[w]`, in the RK kernel
+  `brm_cdar_walk`, replacing the closed form `sigma * (L * eta) * T` with
+  its `W × W` decay matrix (and the bound `lag`, `mask` and `first` columns,
+  `W²` numbers each). Coordinates, densities and gradients are unchanged, and
+  a cell still reads only its own group's innovations (or the groups a
+  correlated `C` couples to it), so `brm_nlme_view` and per-unit Laplace and
+  SVI read the walk as before: each group's innovations are gathered at its
+  positions in the grid, bound as data (`brm_walk_rows`). Rows find their
+  group and step by binary search (`brm_walk_positions`). (Todo `0vwe5uy`;
+  user principles `0ikeidi`, sizes are runtime inputs, and `0v0xrxl`, never
+  quadratic.)
+
 ## 0.2.272
 
 - Fixed: `rk_design_binder(rk; resample_groups=[:g])` gives the inputs of a cut
@@ -3857,7 +3878,7 @@ More numbers are inputs of the program instead of text in it (user principle
   shared factor 36,970 entries instead of 453² = 205,209) and its separation
   is built in 0.17 s instead of 6.3 s. With three such fields on 43,728 rows
   a gradient takes 13.5 ms instead of 70–101 ms and the separation data
-  7.1 MiB instead of 365 MiB (gordito, one CPU). The
+  7.1 MiB instead of 365 MiB (a Linux fleet host, one CPU). The
   field and its density are unchanged; the unit draws parametrize each
   unit's interior through another orthogonal rotation, so a point saved from
   an earlier separated lowering does not carry over.
@@ -4092,7 +4113,7 @@ More numbers are inputs of the program instead of text in it (user principle
   0.1.6; registered Enzyme raises `IllegalTypeAnalysisException` there.
 - BRM's test environment runs the Enzyme `dogfood` line (`test/setup_env.jl`,
   user decision `0n0kgfh`) and ReactiveKernels 0.1.6, so it builds only on a
-  KB fleet host with the dogfood libEnzyme build (gordito). On it,
+  KB fleet host with the dogfood libEnzyme build (a Linux fleet host). On it,
   `test/rk_enzyme_threads.jl` (concurrent-GC gradients),
   `test/plate_index_into.jl` and `test/rk_structured_consumer.jl` pass.
 

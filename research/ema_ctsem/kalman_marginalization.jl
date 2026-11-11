@@ -20,7 +20,7 @@
 # (softplus drift + Bernoulli indicator) needs an Extended Kalman filter — see
 # ema_ekf.jl.
 #
-# VERIFIED (strato2, StanBlocks bec23bc3c523), T=30, stanc + BridgeStan finite
+# VERIFIED (a Linux fleet host, StanBlocks bec23bc3c523), T=30, stanc + BridgeStan finite
 # log-density + gradient:
 #   EMA 2 states  sampled (2·T innovations) : dim 68
 #                 marginalized (Kalman HOF)  : dim 8    <- states integrated out

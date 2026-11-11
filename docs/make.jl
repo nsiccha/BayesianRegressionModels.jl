@@ -1,38 +1,41 @@
 using Documenter, DocumenterVitepress, BayesianRegressionModels
 
 include("backend_comparisons.jl")
+include("backend_exports.jl")
 include("centering_examples.jl")
 
-const GENERATED_EXAMPLE_PAGES = [
-    joinpath(@__DIR__, "src", "index.md"),
-    joinpath(@__DIR__, "src", "formula-terms.md"),
-    joinpath(@__DIR__, "src", "components.md"),
-    joinpath(@__DIR__, "src", "space-time-fields.md"),
-    joinpath(@__DIR__, "src", "likelihoods.md"),
-    joinpath(@__DIR__, "src", "feature-atlas.md"),
-    joinpath(@__DIR__, "src", "warfarin.md"),
-    joinpath(@__DIR__, "src", "wastewater.md"),
-    joinpath(@__DIR__, "src", "wastewater-cdc.md"),
-    joinpath(@__DIR__, "src", "renewal.md"),
-    joinpath(@__DIR__, "src", "epidist.md"),
-    joinpath(@__DIR__, "src", "seal-brm.md"),
-    joinpath(@__DIR__, "src", "state-space-models.md"),
-    joinpath(@__DIR__, "src", "monster.md"),
-    joinpath(@__DIR__, "src", "adaptive-centering.md"),
-    joinpath(@__DIR__, "src", "eight-schools-centering.md"),
-    joinpath(@__DIR__, "src", "radon-centering.md"),
-    joinpath(@__DIR__, "src", "pupil-centering.md"),
-    joinpath(@__DIR__, "src", "pupil-scale-centering.md"),
-    joinpath(@__DIR__, "src", "air-centering.md"),
-    joinpath(@__DIR__, "src", "rbest-centering.md"),
-    joinpath(@__DIR__, "src", "intermediate-representation.md"),
+const DOCS_PAGES = [
+    "Start" => ["Overview" => "index.md"],
+    "Guides" => [
+        "Model syntax" => "model-syntax.md",
+        "Terms and priors" => "terms-and-priors.md",
+        "Response families" => "response-families.md",
+        "Space-time fields" => "space-time-fields.md",
+        "Backends" => "backends.md",
+        "Adaptive centering" => "adaptive-centering.md",
+    ],
+    "Examples" => [
+        "Warfarin PK/PD" => "warfarin.md",
+        "Wastewater renewal" => "wastewater.md",
+        "Renewal and reporting delays" => "renewal.md",
+        "Grey-seal population model" => "seal-ipm.md",
+        "Continuous-time states" => "state-space.md",
+        "Whole-body pharmacokinetics" => "monster.md",
+        "Python/JAX sampling" => "jax.md",
+        "Streaming variational inference" => "svi.md",
+        "Sequential filtering" => "filtering.md",
+        "Spatial field reconstruction" => "spatial-fields.md",
+    ],
+    "Reference" => [
+        "Public API" => "api.md",
+        "Formula terms" => "terms-reference.md",
+    ],
 ]
-const DOCS_MARKDOWN_PAGES = sort!(String[
-    joinpath(root, file)
-    for (root, _, files) in walkdir(joinpath(@__DIR__, "src"))
-    for file in files
-    if endswith(file, ".md")
-])
+const DOCS_MARKDOWN_PAGES = [joinpath(@__DIR__, "src", last(page))
+                            for (_, pages) in DOCS_PAGES for page in pages]
+const GENERATED_EXAMPLE_PAGES = filter(DOCS_MARKDOWN_PAGES) do path
+    occursin("Main.BRMDocsComparisons.comparison(", read(path, String))
+end
 BRMDocsComparisons.validate_generated_templates(GENERATED_EXAMPLE_PAGES)
 BRMDocsComparisons.validate_no_bypasses(DOCS_MARKDOWN_PAGES)
 
@@ -42,16 +45,6 @@ BRMDocsComparisons.validate_no_bypasses(DOCS_MARKDOWN_PAGES)
 # A legacy JuliaBayes workflow therefore cannot create a drifting second site.
 const DOCS_DEVBRANCH = "ns/devibe"
 
-# Note: BRM's docs must build without the private HTMXObjects.jl repo — the
-# CI cannot clone it without repository-specific credentials. So `htmxo-embed.ts`
-# is committed in-tree (see docs/src/.vitepress/theme/) rather than synced from
-# HTMXObjects via `HTMXObjects.vitepress_theme_install` at build time. Local
-# edits to the canonical upstream file should be hand-copied; see
-# /docs-vitepress §8.
-@static if Base.find_package("HTMXObjects") !== nothing
-    @eval import HTMXObjects
-    @eval HTMXObjects.vitepress_theme_install(joinpath(@__DIR__, "src", ".vitepress", "theme"))
-end
 
 makedocs(
     sitename = "BayesianRegressionModels.jl",
@@ -62,96 +55,30 @@ makedocs(
         devbranch = DOCS_DEVBRANCH,
         build_vitepress = false,
     ),
-    pages = [
-        "Home" => "index.md",
-        "Formula terms" => "formula-terms.md",
-        "Reusable components" => "components.md",
-        "Space-time fields" => "space-time-fields.md",
-        "Likelihoods" => "likelihoods.md",
-        "Feature atlas" => "feature-atlas.md",
-        "Warfarin PK/PD" => "warfarin.md",
-        "Wastewater Rt" => "wastewater.md",
-        "CDC ww-inference" => "wastewater-cdc.md",
-        "Epidemic renewal models" => "renewal.md",
-        "Epidemiological delays" => "epidist.md",
-        "Grey-seal IPM" => "seal-brm.md",
-        "State-space models" => "state-space-models.md",
-        "Monster PBPK model" => "monster.md",
-        "Adaptive centering" => [
-            "Motorcycle HSGP" => "adaptive-centering.md",
-            "Eight schools" => "eight-schools-centering.md",
-            "Radon" => "radon-centering.md",
-            "Pupil: numeric scale predictor" => "pupil-centering.md",
-            "Pupil: hierarchical residual SD" => "pupil-scale-centering.md",
-            "Air pollution" => "air-centering.md",
-            "RBesT MAP prior" => "rbest-centering.md",
-        ],
-        "Intermediate representation" => "intermediate-representation.md",
-        "Scientific model descriptions" => "model-description.md",
-        "Formulas and custom models: deck" => "feature-deck.md",
-        "Gallery" => "gallery.md",
-        "API" => "api.md",
-    ],
-    checkdocs = :none,
-    warnonly = true,
+    pages = DOCS_PAGES,
+    checkdocs = :exports,
+    warnonly = false,
 )
 
-BRMDocsComparisons.validate_required_stan_outputs(
-    joinpath(@__DIR__, "build", ".documenter", "warfarin.md"),
-    (:warfarin_pk_brmi, :warfarin_pd_brmi, :warfarin_joint_brmi),
+# Required panes must contain emitted Stan, never a backend-error placeholder.
+for (page, names) in (
+    ("index.md", (:intro_model,)),
+    ("warfarin.md", (:warfarin_pk_brmi, :warfarin_pd_brmi, :warfarin_joint_brmi)),
+    ("wastewater.md", (:cdc_ww_brm_model,)),
+    ("seal-ipm.md", (:grey_seal_brm_model,)),
+    ("monster.md", (:monster_brmi,)),
+    ("jax.md", (:varying_slopes_model,)),
 )
-
-BRMDocsComparisons.validate_required_stan_outputs(
-    joinpath(@__DIR__, "build", ".documenter", "wastewater.md"),
-    (:wastewater_brm_model,),
-)
-
-BRMDocsComparisons.validate_required_stan_outputs(
-    joinpath(@__DIR__, "build", ".documenter", "wastewater-cdc.md"),
-    (:cdc_ww_brm_model,),
-)
-
-BRMDocsComparisons.validate_required_stan_outputs(
-    joinpath(@__DIR__, "build", ".documenter", "seal-brm.md"),
-    (:grey_seal_brm_model,),
-)
-
-BRMDocsComparisons.validate_required_stan_outputs(
-    joinpath(@__DIR__, "build", ".documenter", "monster.md"),
-    (:monster_brmi,),
-)
-
-BRMDocsComparisons.validate_required_stan_outputs(
-    joinpath(@__DIR__, "build", ".documenter", "adaptive-centering.md"),
-    (:adaptive_motorcycle_model,),
-)
-
-BRMDocsComparisons.validate_required_stan_outputs(
-    joinpath(@__DIR__, "build", ".documenter", "eight-schools-centering.md"),
-    (:eight_schools_model,),
-)
-
-BRMDocsComparisons.validate_required_stan_outputs(
-    joinpath(@__DIR__, "build", ".documenter", "radon-centering.md"),
-    (:adaptive_radon_model,),
-)
-
-for (page, names) in (("pupil-centering.md", (:pupil_numeric_brm_model,)),
-                      ("pupil-scale-centering.md", (:pupil_hierarchical_brm_model,)),
-                      ("air-centering.md", (:air_intercept_brm_model,:air_independent_brm_model)),
-                      ("rbest-centering.md", (:rbest_as_brm_model,:rbest_crohn_brm_model)))
     BRMDocsComparisons.validate_required_stan_outputs(
         joinpath(@__DIR__, "build", ".documenter", page), names)
 end
 
-# Copy committed live-brm recordings into the VitePress build tree so
-# the gallery embed resolves the same URLs in production as in dev
-# (where vite proxies /live-brm to the running app on :8121).
-let src = joinpath(@__DIR__, "src", "public")
-    dst = joinpath(@__DIR__, "build", ".documenter", "public")
-    if isdir(src)
-        cp(src, dst; force=true)
-        @info "Copied public assets to $dst"
+# Keep local version metadata beside the generated downloads and vendor files.
+let source = joinpath(@__DIR__, "src", "public"),
+    destination = joinpath(@__DIR__, "build", ".documenter", "public")
+    mkpath(destination)
+    for name in readdir(source)
+        cp(joinpath(source, name), joinpath(destination, name); force=true)
     end
 end
 
@@ -164,7 +91,19 @@ let mod = Module(:MonsterDownloads)
         joinpath(@__DIR__, "build", ".documenter", "public", "downloads"))
 end
 
+# Publish the pinned plotting runtime as build output, never as tracked assets.
+let vendor = joinpath(@__DIR__, "build", ".documenter", "public", "vendor")
+    mkpath(dirname(vendor))
+    cp(BRMDocsComparisons.AlgebraOfVega.vega_vendor_dir(), vendor; force=true)
+end
+
 DocumenterVitepress.build_docs(joinpath(@__DIR__, "build"))
+
+# The version picker requests this at the repository root. Deployment writes
+# its real version list; a local preview uses the empty list from public/.
+let versions = joinpath(@__DIR__, "build", "versions.js")
+    isfile(versions) || cp(joinpath(@__DIR__, "src", "public", "versions.js"), versions)
+end
 
 let redirect = joinpath(@__DIR__, "build", "index.html")
     isfile(redirect) || write(redirect, """

@@ -1,4 +1,28 @@
-# Adaptive HSGP centering: source reproduction
+# Adaptive-centering research
+
+The public [guide](../../docs/src/adaptive-centering.md) teaches the coordinate
+choices. These protocols retain the detailed comparisons and their public
+data sources. Their scripts and summary tables keep stable paths so existing
+reproduction commands continue to work.
+
+| Study | Protocol | Scripts and source provenance |
+| --- | --- | --- |
+| Motorcycle HSGP | [Protocol](motorcycle/README.md) | This directory; source contract below |
+| Eight schools | [Protocol](eight_schools/README.md) | [PosteriorDB reproduction](../eight_schools_centering/README.md) |
+| Radon | [Protocol](radon/README.md) | [PosteriorDB reproduction](../radon_centering/README.md) |
+| Pupil, numeric scale | [Protocol](pupil/README.md) | [Public pupil data and models](../pupil_builtin_totals/README.md) |
+| Pupil, hierarchical scale | [Protocol](pupil_scale/README.md) | [Public pupil data and models](../pupil_scale_totals/README.md) |
+| Air pollution | [Protocol](air/README.md) | [Public AIR comparison](../air_total_effects/README.md) |
+| RBesT | [Protocol](rbest/README.md) | [Public RBesT models and datasets](../rbest_centering/README.md) |
+
+The guide's efficiency figure reads the
+[recorded refresh](../centering_refresh/README.md), including all gradient
+costs. These historical fits used one chain per arm; they are not a substitute
+for a current multichain convergence check. Render figures and retain full
+draws outside Git. The committed summaries and receipts contain no private
+machine paths; source revisions and numerical results are retained.
+
+## Motorcycle source reproduction
 
 This reproduces the two fits and scientific figures in
 [Generable's HSGP case study](https://www.generable.com/post/hsgp-reparam):
@@ -9,8 +33,8 @@ no centered sampling arm.
 An online adaptive-centering fit extends the comparison using the same model
 and sampling configuration. Full-run diagnostics, exact gradient costs,
 source audits and selected profiles are checked in under
-`results/source-faithful/`; their figures are in
-`docs/src/assets/adaptive-hsgp/`.
+`results/source-faithful/`; the plotting scripts regenerate their figures
+under the chosen output directory.
 
 ## Exact source contract
 

@@ -81,7 +81,7 @@ written as one: `StanBlocks.@deffun` turns the Julia-syntax definitions below
 into Stan functions that a model can call by name. Sizes such as `T` and `G` in
 the signatures are bound from the arguments. (The
 [wastewater page](wastewater.md) runs a similar recursion inside a
-`kernel(...)` cell, one independent site per cell; here the patches are coupled,
+`@plate for` cell, one independent site per cell; here the patches are coupled,
 so the function takes the whole predictor vector through a top-level
 assignment.)
 
@@ -123,7 +123,7 @@ report. Two things bias the delays it shows. Days are intervals, so an event
 "on day 3" happened somewhere within that day, and the report likewise
 (**double interval censoring**). And on the day of the analysis, a recent event
 is in the data only if its delay was short (**right truncation**), so during a
-growing epidemic — when most events are recent — the observed delays are far too
+growing epidemic, when most events are recent, the observed delays are far too
 short.
 
 The model states the delay as LogNormal and corrects for both: the family
@@ -231,7 +231,7 @@ recursion carries the uncertainty forward into the counts.
 
 A random walk forecasts "no change": the band fans out around the last
 estimated level. In this simulation the true `R(t)` started to fall a few days
-before day 42 — too late to show in the counts reported by then — and kept
+before day 42, too late to show in the counts reported by then, and kept
 falling, so the held-out counts end up at the lower edge of the predictive
 band.
 
@@ -373,7 +373,7 @@ test requires the same dimension and the same log density and gradient at
 arbitrary points for every model on this page, so the fits and figures above
 are this model's fits and figures.
 
-Each operator takes its kernel **first**, as a data vector or as a function. A
+Each operator takes its kernel first, as a data vector or as a function. A
 function can be written as a `do` block, and its body may read sampled
 parameters ([Formula terms](formula-terms.md)) — which a data vector cannot. So
 the reporting delay of step 1 no longer has to be a fixed input: here it is

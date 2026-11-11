@@ -1,10 +1,12 @@
 module BRMDocsComparisons
 
 using Markdown
+using JSON
 using BayesianRegressionModels
 using Distributions
 using StanBlocks
 import AlgebraOfVega
+import ReactiveKernels, ReactiveKernelsPPL
 
 const BRM = BayesianRegressionModels
 const EXAMPLE_MODULES = Dict{Symbol,Module}()
@@ -19,8 +21,8 @@ html_attribute(value) = replace(string(value), '&' => "&amp;", '"' => "&quot;",
     figure(spec; caption, alt=caption)
 
 Embed an AlgebraOfVega figure in a Documenter `@eval` block. The page carries
-the generated Vega-Lite JSON; the theme calls `vegaEmbed` after hydration and
-redraws on a light/dark switch. No rendered asset is written to the repository.
+the generated Vega-Lite JSON; the theme calls AlgebraOfVega's browser runtime
+after hydration. It follows light/dark switches. No rendered asset is committed.
 """
 function figure(spec; caption::AbstractString, alt::AbstractString=caption)
     json = AlgebraOfVega.to_json(spec)
@@ -37,7 +39,10 @@ end
 
 """Return one stable evaluation module for all executable blocks on a page."""
 example_module(name::Symbol) = get!(EXAMPLE_MODULES, name) do
-    Module(name)
+    m = Module(name)
+    # A bare module has no `include`; a repository script may include a sibling.
+    Core.eval(m, :(include(path) = Base.include($m, path)))
+    m
 end
 
 function evaluate_source(mod::Module, displayed::AbstractString)
@@ -108,6 +113,74 @@ function source_region(relative_path::AbstractString;
     return strip(SubString(source, start, stop), '\n')
 end
 
+"""
+Render rows of a tab-separated results file as a Markdown table, so a page
+states only numbers its scripts wrote. `columns` pairs each column with its
+heading; `select` keeps the rows it returns `true` for.
+"""
+function results_table(relative_path::AbstractString;
+                       columns::Vector{<:Pair{Symbol,<:AbstractString}},
+                       select=row -> true)
+    lines = readlines(normpath(joinpath(REPOSITORY_ROOT, relative_path)))
+    header = Symbol.(split(lines[1], '\t'))
+    rows = [NamedTuple{Tuple(header)}(Tuple(String.(split(line, '\t'))))
+            for line in lines[2:end]]
+    kept = Base.filter(select, rows)
+    isempty(kept) && error("$relative_path: no rows selected")
+    for (column, _) in columns
+        column in header || error("$relative_path has no column $column")
+    end
+    cells = [[String(label) for (_, label) in columns]]
+    for row in kept
+        push!(cells, [getproperty(row, column) for (column, _) in columns])
+    end
+    return Markdown.MD([Markdown.Table(cells, fill(:l, length(columns)))])
+end
+
+"""
+The rows of several fits' tables of the same shape in one table, each file's
+rows prefixed with its name under the column header `label`.
+"""
+function results_tables(labelled::Vector{<:Pair{<:AbstractString,<:AbstractString}};
+                        columns::Vector{<:Pair{Symbol,<:AbstractString}},
+                        label::AbstractString="fit")
+    cells = [vcat([String(label)], [String(l) for (_, l) in columns])]
+    for (name, relative_path) in labelled
+        lines = readlines(normpath(joinpath(REPOSITORY_ROOT, relative_path)))
+        length(lines) > 1 || error("$relative_path: no result rows")
+        header = Symbol.(split(lines[1], '\t'))
+        for (column, _) in columns
+            column in header || error("$relative_path has no column $column")
+        end
+        for line in lines[2:end]
+            row = NamedTuple{Tuple(header)}(Tuple(String.(split(line, '\t'))))
+            push!(cells, vcat([String(name)], [getproperty(row, column) for (column, _) in columns]))
+        end
+    end
+    length(cells) > 1 || error("no rows in $(last.(labelled))")
+    return Markdown.MD([Markdown.Table(cells, fill(:l, length(cells[1])))])
+end
+
+"The receipts of several fits side by side: one row per key, one column per fit."
+function receipts_table(labelled::Vector{<:Pair{<:AbstractString,<:AbstractString}})
+    function read_receipt(relative_path)
+        lines = readlines(normpath(joinpath(REPOSITORY_ROOT, relative_path)))
+        length(lines) > 1 || error("$relative_path: empty receipt")
+        [String.(split(line, '\t'; limit=2)) for line in lines[2:end]]
+    end
+    receipts = [name => read_receipt(path) for (name, path) in labelled]
+    keys_in_order = String[]
+    for (_, pairs) in receipts, (k, _) in pairs
+        k in keys_in_order || push!(keys_in_order, k)
+    end
+    value(pairs, k) = (i = findlast(p -> p[1] == k, pairs); isnothing(i) ? "" : pairs[i][2])
+    cells = [vcat([""], [String(name) for (name, _) in labelled])]
+    for k in keys_in_order
+        push!(cells, vcat([k], [value(pairs, k) for (_, pairs) in receipts]))
+    end
+    return Markdown.MD([Markdown.Table(cells, fill(:l, length(cells[1])))])
+end
+
 """Render a drift-proof repository source region as a documentation code block."""
 source_code_region(relative_path::AbstractString; language="julia", kwargs...) =
     Markdown.MD([Markdown.Code(language, source_region(relative_path; kwargs...))])
@@ -125,8 +198,9 @@ function evaluate_source_prelude(mod::Module, relative_path::AbstractString;
         source = SubString(source, first(only(matches)), lastindex(source))
     end
     Core.eval(mod, :(using BayesianRegressionModels, Distributions, StanBlocks))
+    # An absolute file name makes the script's `@__DIR__` its real directory.
     parsed = Meta.parseall(source;
-                           filename=relative_path)
+                           filename=normpath(joinpath(REPOSITORY_ROOT, relative_path)))
     expressions = parsed.head === :toplevel ? parsed.args : Any[parsed]
     for expression in expressions
         expression isa LineNumberNode && continue
@@ -156,13 +230,90 @@ function stan_emissions(brmi::BRM.BRMI, mod::Module;
     end
 end
 
+const JAX_JULIA_USAGE = """
+using ReactiveKernels, ReactiveKernelsPPL
+rk = RKBRMI(model)
+write("model.py", jax_source(rk.model, rk_bound_plan(rk)))
+inputs = rk_bound_data(rk)   # the data prepare_data reads, by name"""
+
+const JAX_PYTHON_USAGE = """
+import jax
+import model as m
+
+prepared = m.prepare_data(**{k: inputs[k] for k in m.DATA})
+lp = m.log_density(u, **prepared)               # u: unconstrained, length m.dimension(prepared)
+lp = jax.jit(m.log_density)(u, **prepared)      # one compiled function for every dataset of these shapes"""
+
+# The module's `UNTRANSLATED` entries, name => reason, or nothing when empty.
+# The module writes the dict as a JSON object.
+function jax_untranslated(text::AbstractString)
+    found = match(r"(?m)^UNTRANSLATED\s*=\s*(\{.*\})\s*$", text)
+    isnothing(found) && return nothing
+    entries = JSON.parse(found.captures[1])
+    isempty(entries) && return nothing
+    return sort!([String(k) => String(v) for (k, v) in entries]; by=first)
+end
+
+# Wrap a sentence into comment lines of at most `width` characters.
+function comment_lines(text::AbstractString; width=84)
+    lines = String[]
+    current = ""
+    for word in split(text)
+        candidate = isempty(current) ? word : current * " " * word
+        if length(candidate) > width && !isempty(current)
+            push!(lines, current)
+            current = word
+        else
+            current = candidate
+        end
+    end
+    isempty(current) || push!(lines, current)
+    return lines
+end
+
+function jax_untranslated_note(entries)
+    lines = ["", "# prepare_data takes these data-only values as inputs, from rk_bound_data(rk),",
+             "# because they have no Python translation (m.UNTRANSLATED):"]
+    for (name, reason) in entries
+        wrapped = comment_lines(reason; width=80)
+        push!(lines, "#   $name: $(wrapped[1])")
+        append!(lines, "#       " .* wrapped[2:end])
+    end
+    return join(lines, '\n')
+end
+
 """
-Evaluate one displayed BRM example and emit the fixed four-pane comparison.
-The IR, StanBlocks and Stan panes are always derived during this build.
+The JAX pane of a comparison: how to write the module, how Python calls it,
+and the module `jax_source` emits for this model's RKBRMI. A model that does
+not translate shows the `JAXEmissionError` (or other construction error).
+"""
+function jax_pane(brmi::BRM.BRMI)
+    module_text = try
+        rk = Base.invokelatest(BRM.RKBRMI, brmi)
+        plan = Base.invokelatest(BRM.rk_bound_plan, rk)
+        string(Base.invokelatest(ReactiveKernelsPPL.jax_source, rk.model, plan))
+    catch err
+        return [Markdown.Code("julia", JAX_JULIA_USAGE),
+                Markdown.Code("text", "This model has no JAX module yet.\n\n" *
+                                      sprint(showerror, err))]
+    end
+    untranslated = jax_untranslated(module_text)
+    usage = isnothing(untranslated) ? JAX_PYTHON_USAGE :
+        JAX_PYTHON_USAGE * "\n" * jax_untranslated_note(untranslated)
+    return [Markdown.Code("julia", JAX_JULIA_USAGE),
+            Markdown.Code("python", usage),
+            Markdown.Code("python", strip(module_text, '\n'))]
+end
+
+"""
+Evaluate one displayed BRM example and emit the build-generated comparison:
+BRM authoring, IR, StanBlocks model and Stan source, plus the JAX module of
+its RKBRMI with `jax=true`. Every pane but the first is derived during this
+build.
 """
 function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
                     title=replace(string(brmi_name), '_' => ' '),
-                    require_stan::Bool=false, total_groups=())
+                    require_stan::Bool=false, total_groups=(), jax::Bool=false)
     displayed = strip(code, '\n')
     Core.eval(mod, :(using BayesianRegressionModels, Distributions))
     evaluate_source(mod, displayed)
@@ -172,12 +323,17 @@ function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
         "docs comparison `$brmi_name` did not evaluate to or construct a BRMI")
     ir_source = strip(sprint(show, brmi), '\n')
     sb_source, stan_source = stan_emissions(brmi, mod; required=require_stan, total_groups)
+    jax_blocks = jax ? jax_pane(brmi) : Markdown.Code[]
+    sentinel = string(title)
+    isempty(jax_blocks) ||
+        (sentinel *= "\npanes: brm|ir|stanblocks|stan|jax:$(length(jax_blocks))")
     return Markdown.MD([
-        Markdown.Code("brm-comparison", string(title)),
+        Markdown.Code("brm-comparison", sentinel),
         Markdown.Code("julia", displayed),
         Markdown.Code("julia", ir_source),
         Markdown.Code("julia", sb_source),
         Markdown.Code("stan", stan_source),
+        jax_blocks...,
     ])
 end
 

@@ -10,7 +10,7 @@
 
 These are synthetic controls for the nonlinear embedded-Laplace implementation.
 They do not import an ODL model, graph or observation. Results below were measured
-on `gordito` on 2026-11-02 with one CPU per run. Host load varied; allocation
+on `a Linux fleet host` on 2026-11-02 with one CPU per run. Host load varied; allocation
 counts are cumulative allocations, not peak resident memory.
 
 ## Reproducers
@@ -88,7 +88,7 @@ This baseline does not establish performance at 561,792 coordinates.
 The retained run receipts are `algebra-inplace.log`,
 `scaling-40128-default.log`, `scaling-40128-inplace-2048.log` and
 `nonlinear-scaling-1000-standard.log` under
-`/home/niko/scratch/matrix-free-cond-148dea8d/` on the measurement host.
+`<local path omitted>` on the measurement host.
 
 ## Fixed preconditioner experiment
 
