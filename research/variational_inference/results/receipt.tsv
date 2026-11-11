@@ -1,0 +1,79 @@
+field	value
+recipe	site-counts-v2-quorum
+status	completed sections: fit, stream, combine
+summary generated (UTC)	2026-11-11T00:36:22.686
+summary source SHA256	81dc3b9bb256d5f6e36f6229fa5f14cd122f1a235dcc04b0f777a4e8589f2b92
+commit	dab3a94d0e0d0bae4d2a79d9486880072a593851
+uncommitted_changes	true
+started	2026-11-11T00:31:41.967
+host	a Linux fleet host
+harness	BRM minibatch SVI and WarmupHMC completion sampler; site-counts-v2-quorum
+Julia	1.10.12
+BayesianRegressionModels	0.2.272
+WarmupHMC	0.2.11
+Enzyme	0.13.218
+threads	1
+data seed	1
+full SVI seed / draws / batch size	1 / 2000 / 32
+NUTS draws per chain / requested chains / quorum	4000 / 4 / 3
+NUTS seeds	full: 11–14; window w: 201+10w through 204+10w
+streaming / batch / slice SVI seeds	window w / 100+w / slice index
+batch_svi_window_1.jls input SHA256	53f1b76f1b5feb13c9bb323aa23f9a3e67dd64dbabd6f819f6038274976d3345
+batch_svi_window_1.jls fitted (UTC)	2026-11-10T23:57:03.720
+batch_svi_window_1.jls fit source SHA256	2aa8652c60ed8abd4d763af4a9c4f70986aa5f14aac7d8d8c03aa1604064e550
+batch_svi_window_2.jls input SHA256	88320bb4bd24ffb36d190bc80551cc844d692cf72250d487a481c4a18d191eab
+batch_svi_window_2.jls fitted (UTC)	2026-11-10T23:58:25.886
+batch_svi_window_2.jls fit source SHA256	2aa8652c60ed8abd4d763af4a9c4f70986aa5f14aac7d8d8c03aa1604064e550
+batch_svi_window_3.jls input SHA256	ea037c21e5ee52a056b5288066ce11e0b34e1e72df63616f6309a27827ef70fa
+batch_svi_window_3.jls fitted (UTC)	2026-11-10T23:59:43.708
+batch_svi_window_3.jls fit source SHA256	2aa8652c60ed8abd4d763af4a9c4f70986aa5f14aac7d8d8c03aa1604064e550
+batch_svi_window_4.jls input SHA256	469e6288dd0f6b327977782ffec198f54dc1ef1d33e620bfd2f7bfa74fd3e520
+batch_svi_window_4.jls fitted (UTC)	2026-11-11T00:01:01.065
+batch_svi_window_4.jls fit source SHA256	2aa8652c60ed8abd4d763af4a9c4f70986aa5f14aac7d8d8c03aa1604064e550
+combined_start.jls input SHA256	b5c5ad52e730e38ca713e6e999849ed419363cf8e9f676a39c0f98ab6ce11ccc
+combined_start.jls fitted (UTC)	2026-11-11T00:04:17.167
+combined_start.jls fit source SHA256	2aa8652c60ed8abd4d763af4a9c4f70986aa5f14aac7d8d8c03aa1604064e550
+combined_start.jls seconds	74.2639
+nuts_full_draws_4000.jls input SHA256	a557f34c67bc3ca14414577f1a7c4f0f70d715ab2a7c44cea62599f097d5d5e8
+nuts_full_draws_4000.jls fitted (UTC)	2026-11-10T23:36:48.565
+nuts_full_draws_4000.jls fit source SHA256	c89bfb8a5ac3a7d6c43d81570c290662048e8b026016c8cbb2d48896bec18c64
+nuts_full_draws_4000.jls seconds	186.703
+nuts_full_draws_4000.jls divergent	0
+nuts_full_draws_4000.jls omitted chains	1
+nuts_full_draws_4000.jls dimension	805
+nuts_window_1_draws_4000.jls input SHA256	61a53ea18e74e9601bf4fe2c0b80974ff5f399c81be2d922328ef30a7d4ecd64
+nuts_window_1_draws_4000.jls fitted (UTC)	2026-11-10T23:58:13.921
+nuts_window_1_draws_4000.jls fit source SHA256	2aa8652c60ed8abd4d763af4a9c4f70986aa5f14aac7d8d8c03aa1604064e550
+nuts_window_1_draws_4000.jls seconds	61.4341
+nuts_window_1_draws_4000.jls divergent	0
+nuts_window_1_draws_4000.jls omitted chains	1
+nuts_window_1_draws_4000.jls dimension	605
+nuts_window_2_draws_4000.jls input SHA256	35d715d5afa9e9d903f66fadaac67e6fd4cc6a955c8994855ffd19588f445a47
+nuts_window_2_draws_4000.jls fitted (UTC)	2026-11-10T23:59:33.144
+nuts_window_2_draws_4000.jls fit source SHA256	2aa8652c60ed8abd4d763af4a9c4f70986aa5f14aac7d8d8c03aa1604064e550
+nuts_window_2_draws_4000.jls seconds	64.8836
+nuts_window_2_draws_4000.jls divergent	0
+nuts_window_2_draws_4000.jls omitted chains	1
+nuts_window_2_draws_4000.jls dimension	685
+nuts_window_3_draws_4000.jls input SHA256	8e48577fac5d4a65b4267e1ab70146cc54e66b3a2e03a6ff5153f71378160497
+nuts_window_3_draws_4000.jls fitted (UTC)	2026-11-11T00:00:50.079
+nuts_window_3_draws_4000.jls fit source SHA256	2aa8652c60ed8abd4d763af4a9c4f70986aa5f14aac7d8d8c03aa1604064e550
+nuts_window_3_draws_4000.jls seconds	60.5157
+nuts_window_3_draws_4000.jls divergent	0
+nuts_window_3_draws_4000.jls omitted chains	1
+nuts_window_3_draws_4000.jls dimension	765
+nuts_window_4_draws_4000.jls input SHA256	7feb141002049e4c082cbd158ec3425580d999d45f8166898ef3fb1c96e60faa
+nuts_window_4_draws_4000.jls fitted (UTC)	2026-11-11T00:03:00.335
+nuts_window_4_draws_4000.jls fit source SHA256	2aa8652c60ed8abd4d763af4a9c4f70986aa5f14aac7d8d8c03aa1604064e550
+nuts_window_4_draws_4000.jls seconds	114.547
+nuts_window_4_draws_4000.jls divergent	0
+nuts_window_4_draws_4000.jls omitted chains	1
+nuts_window_4_draws_4000.jls dimension	805
+stream_svi.jls input SHA256	a201083100b470a81b9d3af0a771c97e9979487c7cea8f22465a6ac5a91d8aa7
+stream_svi.jls fitted (UTC)	2026-11-10T23:56:53.554
+stream_svi.jls fit source SHA256	2aa8652c60ed8abd4d763af4a9c4f70986aa5f14aac7d8d8c03aa1604064e550
+stream_svi.jls seconds	244.601
+svi_full.jls input SHA256	77bc3b8e4dd1afc20f4c8b4825701a545a50c0eed6eff53add3530033dc09785
+svi_full.jls fitted (UTC)	2026-11-10T23:27:19.281
+svi_full.jls fit source SHA256	471ae42b37fc98e3eb651b791fe60cef53c2312d425f07a5059adb97c688dbdc
+svi_full.jls seconds	193.861

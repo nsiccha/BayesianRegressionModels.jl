@@ -87,3 +87,8 @@ research/**/results/**/*.rds.gz
 research/**/results/**/*.aov.json
 research/**/results/**/*.aov.json.gz
 research/shared_field_laplace/results/
+
+# Variational-inference fits and generated build inputs stay local.
+research/variational_inference/cache/
+research/variational_inference/results/population_draws.tsv
+docs/src/assets/variational-inference/

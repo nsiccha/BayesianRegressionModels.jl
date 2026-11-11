@@ -1,0 +1,3 @@
+method	seconds	iterations	unit_gradient_calls	gradient_evaluations	draws	max_rhat	min_bulk_ess	min_tail_ess	divergent	divergent_percent	sites	observations	coordinates	chains
+SVI	193.861	7700	985600		2000						400	3200	805	
+NUTS	186.703			249408	12000	1.00295	1558.03	3470.59	0	0.0	400	3200	805	3

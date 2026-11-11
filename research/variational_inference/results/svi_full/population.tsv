@@ -1,0 +1,6 @@
+quantity	unit	description	median	q025	q975	rhat	ess_bulk	ess_tail
+a	dimensionless	intercept a	1.02273	1.00425	1.04018			
+b	dimensionless	slope b	0.428177	0.411602	0.444679			
+sd_a	dimensionless	sd of site intercepts	0.493305	0.476808	0.509282			
+sd_b	dimensionless	sd of site slopes	0.260925	0.247947	0.273312			
+cor_ab	dimensionless	correlation of intercepts and slopes	0.314522	0.255532	0.367555			

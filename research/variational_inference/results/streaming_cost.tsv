@@ -1,0 +1,5 @@
+window	sites	new_observations	accumulated_observations	streaming_seconds	streaming_iterations	streaming_unit_gradient_calls	checkpoint_bytes	batch_seconds	batch_iterations	nuts_seconds
+1	300	600	600	41.7493	7400	947200	83326	6.09989	7600	61.4341
+2	340	680	1280	7.41524	7100	908800	92286	8.57444	7900	64.8836
+3	380	760	2040	7.15587	7100	908800	101246	6.937	7500	60.5157
+4	400	800	2840	6.42142	7100	908800	105726	6.90511	7500	114.547
