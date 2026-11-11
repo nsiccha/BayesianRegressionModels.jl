@@ -40,7 +40,7 @@ end
 # Everything above this line also runs when Documenter displays the model.
 using ReactiveKernels, ReactiveKernelsPPL, Enzyme, DifferentiationInterface
 using WarmupHMC, TreeArrays, Tables, Treebars, MCMCDiagnosticTools, DynamicObjects, Dates, Serialization, Printf
-using StanBlocks
+using StanBlocks, Distributions
 
 const FIELD_HARNESS_VERSION = 2
 const FIELD_SEED = 37
@@ -141,6 +141,13 @@ function quantity_row(quantity, unit, description, x::Matrix{Float64})
        ess_bulk=round(Int, only(bulk)), ess_tail=round(Int, only(tail)))
 end
 
+# The prior's median and central 95% range, to two significant digits.
+function prior_text(d)
+    two(x) = (y = round(x; sigdigits=2); isinteger(y) ? string(Int(y)) : string(y))
+    lo, mid, hi = quantile.(d, (0.025, 0.5, 0.975))
+    "prior median $(two(mid)), 95% $(two(lo))–$(two(hi))"
+end
+
 function summarize_station_field(data, draws, info; settings=FIELD_SETTINGS)
     rk = RKBRMI(station_field_model(data))
     n = size(draws, 2)
@@ -150,13 +157,13 @@ function summarize_station_field(data, draws, info; settings=FIELD_SETTINGS)
     s = scalar_draws(rk, draws)
     quantities = [
         quantity_row("Observation noise SD", "response units",
-            "Generated with 0.25; prior Exponential(0.5)", s.sigma),
+            "Generated with $(data.noise_sd); " * prior_text(Exponential(data.noise_prior)), s.sigma),
         quantity_row("Field SD", "response units",
-            "Marginal SD of the latent field; prior Exponential(1)", s.amplitude),
+            prior_text(Exponential(data.amplitude_scale)), s.amplitude),
         quantity_row("Spatial length", "km",
-            "Prior LogNormal(log 25, 0.5), median 25 km", s.spatial),
+            prior_text(LogNormal(log(data.spatial_prior), data.length_prior_sd)), s.spatial),
         quantity_row("Temporal length", "time units",
-            "Prior LogNormal(log 4, 0.5), median 4", s.temporal)]
+            prior_text(LogNormal(log(data.temporal_prior), data.length_prior_sd)), s.temporal)]
     observations = [(; station=data.station[i], east=round(data.east[i]; digits=1),
         north=round(data.north[i]; digits=1), time=data.time[i], y=round(data.y[i]; digits=2),
         truth=round(data.truth[i]; digits=2)) for i in eachindex(data.y)]
