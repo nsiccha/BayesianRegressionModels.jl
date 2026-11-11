@@ -21,6 +21,30 @@ export function setupFigures() {
 
   function scan() {
     queued = false
+    for (const marker of document.querySelectorAll<HTMLElement>('div.language-brm-figure')) {
+      try {
+        const payload = JSON.parse(marker.querySelector('pre code')?.textContent || '')
+        if (typeof payload.spec !== 'string' || typeof payload.caption !== 'string' ||
+            typeof payload.alt !== 'string') throw new Error('Invalid figure payload')
+        const figure = document.createElement('figure')
+        figure.className = 'brm-figure'
+        const plot = document.createElement('div')
+        plot.className = 'brm-figure-plot'
+        plot.dataset.brmVega = payload.spec
+        plot.setAttribute('aria-label', payload.alt)
+        const status = document.createElement('p')
+        status.setAttribute('role', 'status')
+        status.textContent = 'Loading figure…'
+        plot.appendChild(status)
+        const caption = document.createElement('figcaption')
+        caption.textContent = payload.caption
+        figure.append(plot, caption)
+        marker.replaceWith(figure)
+      } catch (error) {
+        marker.classList.remove('language-brm-figure')
+        showError(marker, error)
+      }
+    }
     if (!window.AoV) return
     for (const element of document.querySelectorAll<HTMLElement>('[data-brm-vega]')) {
       const json = element.dataset.brmVega!

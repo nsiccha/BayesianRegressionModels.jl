@@ -24,15 +24,10 @@ after hydration. It follows light/dark switches. No rendered asset is committed.
 """
 function figure(spec; caption::AbstractString, alt::AbstractString=caption)
     json = AlgebraOfVega.to_json(spec)
-    html = """
-    <figure class="brm-figure" v-pre>
-      <div class="brm-figure-plot" data-brm-vega="$(html_attribute(json))" aria-label="$(html_attribute(alt))">
-        <p role="status">Loading figure…</p>
-      </div>
-      <figcaption>$(html_attribute(caption))</figcaption>
-    </figure>
-    """
-    return Markdown.parse("```@raw html\n" * html * "\n```\n")
+    # @eval results are not expanded a second time by Documenter. Use a
+    # dedicated data fence, like the model-pane marker, for the page runtime.
+    payload = JSON.json((; spec=json, caption=String(caption), alt=String(alt)))
+    return Markdown.MD([Markdown.Code("brm-figure", payload)])
 end
 
 """Return one stable evaluation module for all executable blocks on a page."""
