@@ -1,4 +1,4 @@
-# Run with --project=test; no sampling or figure generation.
+# Run with --project=test; figures are lowered from summaries, without sampling.
 #
 # The "Epidemic renewal models" docs page (docs/src/renewal.md) is built from
 # research/epi_renewal/renewal.jl. This file evaluates every build-time `@eval`
@@ -27,7 +27,7 @@ end
 @testset "renewal docs page: build-time blocks evaluate in order" begin
     source = read(RENEWAL_PAGE, String)
     blocks = [m.captures[1] for m in eachmatch(r"(?ms)^```@eval[^\n]*\n(.*?)^```\s*$", source)]
-    @test count(b -> occursin("Main.BRMDocsComparisons.comparison(", b), blocks) == 5
+    @test count(b -> occursin("Main.BRMDocsComparisons.comparison(", b), blocks) == 1
     page_module = Module(gensym(:RenewalDocs))
     comparisons = 0
     for block in blocks
@@ -52,7 +52,7 @@ end
             @test any(part -> part isa Markdown.Table, rendered.content)
         end
     end
-    @test comparisons == 5
+    @test comparisons == 1
 end
 
 @testset "renewal models: finite BridgeStan density and gradient" begin

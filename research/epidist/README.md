@@ -27,7 +27,7 @@ default priors, which are read from its generated program.
 |---|---|
 | `epidist_reference.R` | Simulates epidist's "approximate inference" data (`simulate_gillespie(seed = 101)`, lognormal delay meanlog 1.8, sdlog 0.5, observation time 25, daily windows), prepares the marginal model, writes epidist's Stan program, Stan data and rows, and times epidist's own fit (brms + cmdstanr, 4 chains × 1000 + 1000, one core). |
 | `epidist_models.jl` | The stopgap likelihood in Julia and as StanBlocks `@deffun`s, the stopgap and native `@brm` declarations and the `@rkppl` program. |
-| `epidist_page.jl` | Source of the docs page "Epidemiological delays": epidist's rows and the native model. |
+| `epidist_page.jl` | Executable delay example linked from `docs/src/renewal.md`: epidist's rows and the native model. |
 | `epidist_parity.jl` | Density and gradient parity of all four targets at 200 points, density-plus-gradient timing, and (with `fit`) WarmupHMC fits of all four. |
 | `results/n200/`, `results/nall/` | The vignette's 200 cases (94 aggregated rows) and every observed case (2287 cases, 221 rows): epidist's program and data, `epidist_fit.json`, `parity.json`, `fits.json`, BRM's emitted Stan. `epidist_marginal.stan` is epidist's generated program verbatim; it embeds primarycensored 1.6.0's Stan functions (both packages MIT). |
 

@@ -64,11 +64,10 @@ checks printed-source replay, rebinding and value checks of a new design's
 weights, and the refused analytic, `mi()` and invalid-weight cases. It
 accepts testset substring filters.
 
-`epidist_docs_page.jl` evaluates every build-time block of the
-"Epidemiological delays" docs page (`docs/src/epidist.md`) in order, as
-Documenter does. It checks that the page's source markers resolve, its one backend
-comparison carries a Stan pane `stanc` accepts, and the two tables generated
-from `research/epidist/results/*/{parity,fits}.json` render. No sampling.
+`epidist_docs_page.jl` checks the delay model now retained in
+`research/epidist/`: its source markers resolve, and its native declaration
+produces a Stan pane that `stanc` accepts. The renewal page links the research
+README. No sampling.
 
 `censored_delays.jl` checks `primary_censored` and `double_interval_censored`
 (epidist's marginal delay model). The closed-form primary-censored CDF and
