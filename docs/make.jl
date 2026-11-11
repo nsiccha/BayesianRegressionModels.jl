@@ -67,6 +67,7 @@ for (page, names) in (
     ("monster.md", (:monster_brmi,)),
     ("jax.md", (:varying_slopes_model,)),
     ("variational-inference.md", (:site_counts_model,)),
+    ("filtering.md", (:filtering_model, :growing_model)),
 )
     BRMDocsComparisons.validate_required_stan_outputs(
         joinpath(@__DIR__, "build", ".documenter", page), names)
