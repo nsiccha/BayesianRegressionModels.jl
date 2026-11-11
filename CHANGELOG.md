@@ -12,6 +12,32 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.275
+
+- Fixed: a fitted state (`brm_fitted_state`) exported by BRM 0.2.228 to 0.2.269
+  replays again on this version (`RKBRMI(builder(design), state)`, and
+  `reprocess` / `rk_design_binder` on that backend) when its model reads columns
+  through a ragged join (`groups(g => cells)`). Since 0.2.270 the partition
+  passes the join's columns as one tuple, `brm_ragged_rows(names, group, cell,
+  (a,))`, and the replay compared the state's stored program with this
+  version's text verbatim, so every such state was refused with "the new data
+  changes the fitted RK program" although neither the data nor the model had
+  changed. A stored statement is now read in this version's form before the
+  comparison, one rewrite per emission change that alters only how a statement
+  reads (macro-call places since 0.2.228, the ragged tuple since 0.2.270). The
+  comparison itself stays exact: a state whose program changed otherwise, in
+  what it computes or by an emission change without a rewrite (a `gmrf` field
+  without `cor` exported before 0.2.230), is still refused.
+- Changed: that refusal, on a data-free replay, now says that the state may have
+  been exported by a version that emits the model differently, names this
+  version, and says to export the state again from the fit. `reprocess` on a
+  training fit keeps its message.
+- Tests: `test/rk_fitted_state_versions.jl` replays the fitted-state programs
+  that released versions exported (`test/fitted_state_programs/`, 0.2.264 and
+  0.2.272) against this version's. An emission change that fails it either adds
+  its rewrite, so earlier states keep replaying, or requires earlier states to
+  be exported again and says so here.
+
 ## 0.2.274
 
 - Fixed: on RKBRMI, the log density of a `gmrf` field is `-Inf` outside its
