@@ -331,7 +331,8 @@ def log_density(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
     ppl_prior_pop_mu_beta_pop = jnp.sum(ppl_pw_prior_pop_mu_beta_pop)
     prior = logpdf + ppl_prior_b_mu_g_g_tau + ppl_prior_b_mu_g_g_L + ppl_prior_b_mu_g_g_z + ppl_prior_pop_mu_beta_pop
     u_argument_2 = unconstrained[0]
-    log_jacobian = u_argument_2 + jnp.sum(ppl_ljcells_b_mu_g_g_tau) + ppl_lkj_logjac_b_mu_g_g_L
+    plate_fold = jnp.sum(ppl_ljcells_b_mu_g_g_tau)
+    log_jacobian = u_argument_2 + plate_fold + ppl_lkj_logjac_b_mu_g_g_L
     posterior = prior + ppl_lik_y_resp + log_jacobian
     def then_arm_2():
         return None
@@ -624,7 +625,8 @@ def log_jacobian(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
     let_value = loop_carry[2]
     ppl_lkj_logjac_b_mu_g_g_L = let_value
     u_argument = unconstrained[0]
-    log_jacobian_2 = u_argument + jnp.sum(ppl_ljcells_b_mu_g_g_tau) + ppl_lkj_logjac_b_mu_g_g_L
+    plate_fold = jnp.sum(ppl_ljcells_b_mu_g_g_tau)
+    log_jacobian_2 = u_argument + plate_fold + ppl_lkj_logjac_b_mu_g_g_L
     def then_arm():
         return None
     def else_arm():
