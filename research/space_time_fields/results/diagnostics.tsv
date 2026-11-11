@@ -1,0 +1,10 @@
+quantity	value
+Retained chains	3
+Omitted chain indices	4
+Retained draws before equal-length truncation	12000
+Draws per chain used in summaries	4000
+Maximum R-hat, all sampler coordinates	1.009
+Minimum bulk ESS	410
+Minimum tail ESS	979
+Divergences in all retained draws	0
+Sampling time (s)	167
