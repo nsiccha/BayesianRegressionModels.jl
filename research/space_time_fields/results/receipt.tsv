@@ -1,0 +1,26 @@
+key	value
+key	67d1f8d96a373e22321595f6d54ba546515bcf10
+commit	c29e4a7fb13a0546b3ee04218f9862ca2888cce7
+uncommitted_changes	none
+started	2026-11-11T07:16:25
+host	a Linux fleet host, 1 Julia threads
+julia	1.10.12
+harness	Station field RK/Enzyme/WarmupHMC v2
+sampler	WarmupHMC completion_warmup_mcmc on the RKBRMI log density, AutoEnzyme reverse mode
+settings	(n_chains = 4, min_completed = 3, n_draws = 4000, map_draws_per_chain = 100, grid_side = 21, prediction_seed = 721)
+seed	37
+BayesianRegressionModels	0.2.277
+WarmupHMC	0.2.11
+ReactiveKernels	0.1.152
+ReactiveKernelsPPL	0.1.150
+Enzyme	0.13.218
+TreeArrays	0.2.0
+seconds	167.472829911
+divergent	0
+omitted_chains	[4]
+dimension	76
+chain_lengths	[4000, 4000, 4000]
+retained_draws	12000
+stored_draws_per_chain	4000
+retained_chains	3
+status	complete

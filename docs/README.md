@@ -25,6 +25,7 @@ hosts avoid with a patched build. The docs project's public pins live in its
 | Examples | `jax.md` | Export a hierarchical regression and compare Julia and NumPyro fits. |
 | Examples | `variational-inference.md` | Fit streaming and batch variational approximations. |
 | Examples | `filtering.md` | Compare sequential posterior updates and full-data sampling. |
+| Examples | `spatial-fields.md` | Map a space-time field from station measurements. |
 | Reference | `api.md` | Find public functions and types by task. |
 | Reference | `terms-reference.md` | Look up formula terms and their arguments. |
 
@@ -48,10 +49,6 @@ The Warfarin page draws its five figures at build time from the committed
 fit tables (`research/warfarin/figures.jl`). The Monster page ships without
 its fit section: the fit was still sampling at the landing cut-off, so its
 tables, figure and fit section follow in the parent lane's next landing.
-
-The fitted spatial-field example is deferred until its GMRF density and heatmap
-issues are resolved. The fields guide remains self-contained and illustrates
-prior temporal covariance; it makes no posterior reconstruction claim.
 
 The grey-seal example is held out while its density-dependence formulation and
 source provenance are reviewed. It is absent from this site's navigation and
