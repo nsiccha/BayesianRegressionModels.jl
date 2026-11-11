@@ -23,12 +23,6 @@
 # take a structural coloring of their cells' supports for both sums instead
 # (src/nlme_laplace_coloring.jl).
 
-# The default Newton budget of one continuation stage. Where a unit's followed
-# mode ceases to exist between stages, the search walks to the next mode, and
-# that walk can be long: on the bounded ODL target (2 probes x 24 h, forced
-# trajectory/device plan) a 38-effect component needed 56-59 steps at stage
-# 4/10 and 68-122 at stage 5 under every step rule tried, with exact
-# derivatives, and every rule reached the same mode. 50 scored that point -Inf.
 const _BRM_LAP_MAXITER = 200
 
 """

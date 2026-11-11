@@ -502,10 +502,6 @@ end
     known = [p for p in description.priors if get(p.source, :kind, nothing) === :known]
     @test length(known) == 1
 
-    # A block whose every value is known is one family held at the identity:
-    # its standardized draws are η, its known `diag(sd) L` stays in the model,
-    # and it packs no scale or correlation coordinate (snag
-    # `odlplaus-margina-60bc212b`).
     for (builder, K) in ((known_builder, 2), (single_builder, 1))
         view = brm_nlme_view(RKBRMI(builder(DF)))
         family = only(view.families)

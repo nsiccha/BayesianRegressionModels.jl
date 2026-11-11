@@ -1,7 +1,3 @@
-# test/runtime_numeric_settings.jl — sizes and numeric settings are inputs of
-# the emitted programs, not numbers they spell (user principle
-# `ODLPlaus:precompile/decisions/2026-11-06T01-09-46-212-0ikeidi`; snag
-# `runtime-numeric-f1388e0e`).
 #
 # `gmrf(...; neighbors=m)`, `gmrf(...; multiresolution=m)` and
 # `hsgp(...; k, c)` take a literal or a scalar (per-axis) data field holding
@@ -377,8 +373,6 @@ end
                 RSM.hsgp_model(7, 1.8)(HDATA)),
             (RSM.tensor_model(:kk)(merge(HDATA, (; kk=[3, 4]))),
                 RSM.tensor_model((3, 4))(HDATA)),
-            # A random-effect block's correlation prior reads K and eta from the
-            # data (ODLPlaus co-report on this snag).
             (RSM.lkj_model(:K, :eta)(merge(LDATA, (; K=2, eta=1.7))),
                 RSM.lkj_model(2, 1.7)(LDATA)))
         @test stan_program(field) == stan_program(literal)

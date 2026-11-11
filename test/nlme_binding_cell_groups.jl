@@ -1,17 +1,3 @@
-# test/nlme_binding_cell_groups.jl — `brm_nlme_model`'s subject cell groups
-# are the program's, not the data's (snag odl-s-ladder-brm-d114c22c). Two
-# bindings of one program: paths (the subjects, one grouping row each), point
-# measurements on rows of their own that read the level of the path they were
-# taken on, and readings of the first paths, each reading its path's level
-# through an index (the shape of a downstream model whose later paths carry
-# point measurements only). In the first binding
-# every path has a reading and there are no point measurements, so the
-# readings have as many densities as the grouping has rows and are attributed
-# by those rows; in the second, one path has no reading, so the readings are
-# measured. The groups, their order, the partition's keys and the model's type
-# used to follow that (the readings joined the plate group, placed first);
-# now they are the same for both bindings, so the second reuses the code the
-# first compiled.
 #
 # Covered: one group per authored plate, in the program's pointwise order, for
 # both bindings; the same partition keys and model type; how each binding

@@ -63,3 +63,11 @@ small summary tables remain for fitted examples and research reference.
 Obsolete case-study page generators and the `research/automatic_total_docs`
 render fixture are removed, so research commands cannot recreate retired site
 pages or copy rendered PNGs back into the documentation.
+
+Private project references and private benchmark passages are removed from
+source comments and test notes. The paired-field and station-series test
+fixtures retain their synthetic data and model structure at the package
+owner's direction; they originated in the author's own private prototypes.
+Whether to replace that structure with independently written fixtures is a
+separate user decision. No client data or client-owned code was identified in
+those two fixtures.

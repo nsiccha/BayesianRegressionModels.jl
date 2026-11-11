@@ -463,8 +463,8 @@ const PINS = [
     # the ordinary AR/DAR and smooth readers in rk_values.jl segfaulted
     # on Julia 1.10 under 6053067f, as did the strict `mo1()` summand
     # partition gradient (RK monotonic-summan-c191e14a). It also keeps
-    # 842cbefe: without it, a forced bounded ODL plan's Forward over Reverse
-    # cell HVPs stop on "Mismatch codegen type" through a non-inlined
+    # 842cbefe repairs Forward over Reverse cell HVPs that stopped on
+    # "Mismatch codegen type" through a non-inlined
     # `Base.unalias` (julia-1-10-unali-c91b1f15).
     # d3189970 also contains 0fa85df3's 74abe90/7ac58eb: ordinary Reverse of a mixed
     # integer/Float64 select and of a guarded PHI joining scalar stack storage
