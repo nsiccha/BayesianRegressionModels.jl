@@ -120,19 +120,22 @@ Main.BRMDocsComparisons.figure(
     caption="Generating field and posterior median at each time. Dots mark stations; all panels share a color scale.")
 ```
 
-The maps compare the fitted surface with the generating function on the same
-grid. Changes between times represent the field's evolution, not different
-sets of stations. Hover over a cell to read its coordinates and value.
+The posterior median places both features and follows their motion between
+times. At the peaks it is flatter than the generating surface: the field's
+prior has mean zero, and between stations the estimate shrinks toward it.
+Hover over a cell to read its coordinates and value.
 
 ```@eval
 Main.BRMDocsComparisons.figure(
     Main.BRMDocsComparisons.example_module(:spatial_figures).uncertainty_maps();
-    caption="Posterior standard deviation of the latent field, on a shared scale starting at zero. Observation noise is excluded.")
+    caption="Posterior standard deviation of the latent field, on a shared scale starting at zero. Dots mark stations; observation noise is excluded.")
 ```
 
-Each new point has its conditional marginal law, but points are drawn
-independently given the fitted states. These draws support pointwise intervals;
-they do not supply the joint covariance needed for uncertainty in a spatial total.
+The SD is lowest at the stations and about twice as large between them; the
+checks below give both means. Each new point has its conditional marginal law,
+but points are drawn independently given the fitted states. These draws support
+pointwise intervals; they do not supply the joint covariance needed for
+uncertainty in a spatial total.
 
 ```@eval
 Main.BRMDocsComparisons.figure(
