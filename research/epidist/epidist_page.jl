@@ -1,4 +1,4 @@
-# Source of the docs page "Epidemiological delays" (docs/src/epidist.md).
+# Executable delay example linked from docs/src/renewal.md.
 #
 # The data are epidist's own: its "approximate inference" article's simulated
 # outbreak (lognormal delay, meanlog 1.8, sdlog 0.5, observed on day 25, 200

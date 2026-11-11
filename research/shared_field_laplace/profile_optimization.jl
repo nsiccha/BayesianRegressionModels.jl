@@ -159,7 +159,7 @@ function bounded_profile_bfgs(evaluate,x0,initial;node=nothing,checkpoint=nothin
 end
 
 @stestset "bounded profile optimization" begin
-    base = "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base = joinpath(@__DIR__, "results")
     saved = deserialize(joinpath(base,"joint-fit-v1/fit.jls"))
     reference = deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))
     @test saved.signature==AUDIT_FIT_SIGNATURE && reference.reference_ok

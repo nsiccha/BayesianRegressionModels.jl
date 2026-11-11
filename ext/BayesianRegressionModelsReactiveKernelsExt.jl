@@ -10,12 +10,15 @@ const BRM = BayesianRegressionModels
 include("rk_statistical_gp.jl")
 include("rk_gmrf.jl")
 
-# BRM's ragged-join row partition (`src/ragged_rows.jl`) as ReactiveKernels
-# `@traceable` source, so `jax_source` translates an RK program's partition
-# into the module's `prepare_data`. Every `@_brm_traceable` definition is
-# defined once more here with untyped formals: BRM's typed method stays the
-# one Julia calls, and RK reads this method's recorded source. The bodies call
-# each other by name, so those names are imported first.
+# BRM's ragged-join row partition (`src/ragged_rows.jl`) and a grouping's level
+# coding (`brm_fit_levels`, `brm_level_indices`) as ReactiveKernels
+# `@traceable` source, so `jax_source` translates them into the module's
+# `prepare_data`. Every `@_brm_traceable` definition is defined once more here
+# with untyped formals: BRM's typed method stays the one Julia calls, and RK
+# reads this method's recorded source. The bodies call each other by name, so
+# those names are imported first, and `CA` (CategoricalArrays), whose
+# `CategoricalArray` a type test names.
+import BayesianRegressionModels: CA
 for name in BRM._brm_traceable_callees()
     @eval import BayesianRegressionModels: $name
 end

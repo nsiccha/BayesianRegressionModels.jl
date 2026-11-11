@@ -1004,7 +1004,7 @@ end
 end
 
 # General panel-cell coverage belongs here. PK-specific models from the
-# historical corpus are downstream RKPPLBench inputs (preserved in Git).
+# historical corpus are downstream package inputs (preserved in Git).
 _kernel_vector_cols = (;
     t=[[0.5, 1.0, 2.0, 4.0] for _ in 1:3],
     intercept=[0.2, -0.3, 0.7], slope=[0.1, -0.2, 0.05],

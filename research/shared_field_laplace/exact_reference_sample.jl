@@ -16,7 +16,7 @@ reference_mixing_ok(d) = isfinite(d.rhat) && d.rhat < 1.01 &&
 
 @stestset "Gaussian marginal sampling" begin
     directory = get(ENV,"KB_LAPLACE_REFERENCE_DIR",
-        "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace/exact-reference-v1")
+        joinpath(@__DIR__, "results", "exact-reference-v1"))
     mkpath(directory)
     signature = bytes2hex(sha256(reduce(vcat,read.([
         @__FILE__,joinpath(@__DIR__,"exact_reference.jl"),

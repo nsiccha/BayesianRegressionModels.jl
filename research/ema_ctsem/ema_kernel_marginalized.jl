@@ -164,12 +164,10 @@ function ema_kernel_ekf_model(data = ema_ekf_fixture())
         wls ~ 1 +                   (1 | p | subject)   # workload -> stress impulse (wl_stress)
 
         # per subject: integrate out THIS subject's entire latent path with the EKF
-        pred ~ kernel(dt, workload, stressReport, moodReport, smoked,
-                      b0, q0, cm, wls) do dti, wli, ys, ym, smk, lb0, lq0, lcm, lwls
-            ys ~ ema_ekf(ym, smk, wli, dti,
-                         lb0, bm, a12, a21, a22, lcm, lwls, lq0, qw, diffm, diff21, l31, thr,
-                         mm_s, mm_m, r1, r2, s0, m0, t0sd1, t0sd2, t0z, 4)
-            ys
+        @plate for i in eachindex(b0)
+            stressReport[i] ~ ema_ekf(moodReport[i], smoked[i], workload[i], dt[i],
+                                      b0[i], bm, a12, a21, a22, cm[i], wls[i], q0[i], qw, diffm, diff21,
+                                      l31, thr, mm_s, mm_m, r1, r2, s0, m0, t0sd1, t0sd2, t0z, 4)
         end
     end
 end

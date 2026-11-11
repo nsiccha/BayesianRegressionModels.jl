@@ -1,0 +1,4 @@
+group	coordinates	mean_error_median	mean_error_max	sd_ratio_q05	sd_ratio_median	sd_ratio_q95
+population parameters	5	0.067634	0.356926	0.337034	0.390779	0.447172
+site intercepts	400	0.0189091	0.0966198	0.958345	0.987352	1.01882
+site slopes	400	0.0157907	0.0721451	0.962849	0.994956	1.02659

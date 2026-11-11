@@ -1,11 +1,5 @@
 # Should a spatial slow field use random Fourier features or a gmrf, under minibatch SVI?
 #
-# A toy of the shape of a stand-in fit: one field read per site with no time axis, at
-# 64 or 184 synthetic sites, a quarter of them held out. The truth is drawn from the
-# Matérn ν = 1 mesh prior, the adopted target's law, and everything is scored on the
-# held-out sites' latent values with hyperparameters learned from each family's own
-# ELBO (flat on log θ, within a factor 30 of the truth). Normal rows, so every optimum
-# is closed form and there is no optimizer noise. No ODL data or model content.
 #
 #     julia --startup-file=no research/svi_field_units/tuesday_shape.jl
 #

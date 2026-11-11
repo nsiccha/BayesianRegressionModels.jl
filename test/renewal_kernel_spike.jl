@@ -8,7 +8,7 @@
 # a latent trajectory defined by a CARRIED-STATE sequential scan — which StanBlocks'
 # `plate` deliberately does NOT express (independent cells only). The user's steer
 # (brief `2026-08-26T10-39-56-553-l85sx9`): the scan belongs in a `@deffun` submodel,
-# exactly like the ode_rk45-in-@deffun kernel cells SbPMX already ships. This fixture
+# exactly like the ode_rk45-in-@deffun kernel cells a downstream package already ships. This fixture
 # proves that end to end.
 #
 # Three forms, each gated on stanc + finite BridgeStan density/gradient:

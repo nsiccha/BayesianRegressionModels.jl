@@ -254,7 +254,7 @@ end
 
 # General kernel oracles on the SB side use the same public linear panel
 # fixtures as RK parity. Historical PK implementations remain in Git and
-# belong to downstream RKPPLBench. SB cells use undotted SLIC arithmetic.
+# belong to a downstream package. SB cells use undotted SLIC arithmetic.
 # Convention: value at constrained sigma=1.0 (u=[0.0])
 # equals the oracle; the unconstrained gradient equals the constrained
 # oracle gradient + 1 (exp-Jacobian).

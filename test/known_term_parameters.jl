@@ -54,8 +54,6 @@ end
 
 # ---- the models -------------------------------------------------------------
 
-# The reporter's shape (ODLPlaus): a 2-D isotropic field read through an
-# assignment, its length scale held known.
 field_known = @brm begin
     m ~ Normal(0.0, 1.0)
     sigma ~ Exponential(1.0)

@@ -67,11 +67,6 @@ end
     @test K[1,1] == K[3,3] == 0
 end
 
-# The marginal gradient cancels explicit against implicit terms on a population
-# coordinate aliased with an integrated effect, so its absolute error is the
-# absolute residual of h v = s. A stiff observation must not cost that accuracy.
-# Reported on a bounded ODL target whose outer curvature reaches 2e7 (snag
-# sparse-laplace-c-b7cc5e58): a residual of 0.8% moved a gradient of 395 to 19214.
 @stestset "a stiff outer block keeps the augmented solve and covariances accurate" begin
     rng = Xoshiro(11)
     n, r = 30, 13

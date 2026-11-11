@@ -1,9 +1,9 @@
-# Figures of the documentation page "Epidemic renewal models" (docs/src/renewal.md), drawn from the
+# Earlier renewal research figures, drawn from the
 # summaries that renewal.jl writes to results/renewal/*.json (quantile rows q025 q10 q25 q50 q75 q90 q975
 # next to the simulation truth).
 #
 # Every figure is an AlgebraOfVega spec (AlgebraOfGraphics' algebra, pre-aggregated bands), lowered to
-# Vega-Lite and rendered to docs/src/assets/renewal/<name>.png with the `vl-convert` command-line tool.
+# Vega-Lite and rendered to results/figures/<name>.png with the `vl-convert` command-line tool.
 #
 #   Run:  julia --project=<env with AlgebraOfVega> research/epi_renewal/renewal_figures.jl [name ...]
 #         (VL_CONVERT=/path/to/vl-convert overrides the renderer)
@@ -11,7 +11,7 @@
 using AlgebraOfVega, AlgebraOfGraphics, JSON
 
 const RESULTS = joinpath(@__DIR__, "results", "renewal")
-const ASSETS = normpath(joinpath(@__DIR__, "..", "..", "docs", "src", "assets", "renewal"))
+const ASSETS = joinpath(@__DIR__, "results", "figures")
 const VL_CONVERT = get(ENV, "VL_CONVERT", "vl-convert")
 const QUANTILES = (:q025, :q10, :q25, :q50, :q75, :q90, :q975)
 const BANDS = [:q025 => :q975, :q10 => :q90, :q25 => :q75]        # 95 / 80 / 50 % central intervals

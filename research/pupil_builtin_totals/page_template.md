@@ -16,7 +16,7 @@ The data contain 2,228 observations, 20 subjects with IDs 701–720, and numeric
 bf(p_size ~ load + (load || subj), sigma ~ subj)
 ```
 
-In these data `subj` is numeric. Thus the residual model is a regression of **log residual SD on subject ID**. The [second pupil study](pupil-scale-centering.md) instead assigns each subject a hierarchical residual SD.
+In these data `subj` is numeric. Thus the residual model is a regression of **log residual SD on subject ID**. The [second pupil study](../pupil_scale_totals/README.md) instead assigns each subject a hierarchical residual SD.
 
 ```math
 y_n\sim N(\mu_n,\sigma_n^2),\qquad

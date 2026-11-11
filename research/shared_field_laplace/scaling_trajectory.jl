@@ -1,11 +1,11 @@
 # Fixed short trajectories exercise changing q; they do not establish a
 # converged large-model posterior. No retries or changed numerical budgets.
 const TRAJECTORY_RESEARCH=isfile(joinpath(@__DIR__,"scaling_target.jl")) ? (@__DIR__) :
-    "/home/niko/.local/state/kb-agents-worktrees/BayesianRegressionModels-scaling-laplace/research/shared_field_laplace"
+    @__DIR__
 include(joinpath(TRAJECTORY_RESEARCH,"scaling_target.jl"))
 
 @stestset "native scaling trajectories" begin
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     directory=joinpath(base,"native-scaling-trajectory-v1")
     ispath(directory) && error("preserve scaling trajectory artifacts")
     names=("rows16","field16","units16","rows16_field16")

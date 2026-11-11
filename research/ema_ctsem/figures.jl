@@ -1,8 +1,8 @@
-# Figures of docs/src/state-space-models.md, drawn from the small tables in results/.
+# Research figures of the multivariate state-space studies, drawn from results/.
 #
 # Run (the repository's plotting environment: AlgebraOfVega + CairoMakie):
 #   julia --project=research/adaptive_centering/plots research/ema_ctsem/figures.jl [outdir]
-# `outdir` defaults to docs/src/assets/state-space-models.
+# `outdir` defaults to research/ema_ctsem/results/figures.
 
 using AlgebraOfVega, CairoMakie
 import AlgebraOfGraphics
@@ -86,7 +86,7 @@ function replication(outdir)
     save_figure(outdir, "replication", fig)
 end
 
-function main(outdir=normpath(joinpath(@__DIR__, "..", "..", "docs", "src", "assets", "state-space-models")))
+function main(outdir=joinpath(@__DIR__, "results", "figures"))
     mkpath(outdir)
     recovery(outdir); state_dependence(outdir); filter_precision(outdir); replication(outdir)
 end

@@ -578,8 +578,12 @@ function _BRMVecchiaWork(f::_BRMGMRFFootprint)
 end
 
 # The conditional weights `work.b`, the Cholesky factor of the conditioning
-# correlation in `work.A` and the conditional variance of pattern `p`.
-function _brm_vecchia_solve!(work, f::_BRMGMRFFootprint, p, kappa, temporal_length, want_slopes)
+# correlation in `work.A` and the conditional variance of pattern `p`. Lengths so
+# long that the conditioning correlations round to one leave the system numerically
+# singular: a strict solve throws there, and a density's (`strict=false`) returns
+# `nothing`, where the density answers -Inf (`_brm_vecchia_logdensity`).
+function _brm_vecchia_solve!(work, f::_BRMGMRFFootprint, p, kappa, temporal_length, want_slopes;
+        strict::Bool=true)
     geometry = f.geometry_ptr[p]
     nu = f.geometry_ptr[p + 1] - geometry
     space, dspace, timecor, dtime = work.space, work.dspace, work.time, work.dtime
@@ -628,9 +632,12 @@ function _brm_vecchia_solve!(work, f::_BRMGMRFFootprint, p, kappa, temporal_leng
         for k in 1:(j - 1)
             d -= A[j, k]^2
         end
-        d > 0 && isfinite(d) || throw(DomainError(d,
-            "gmrf conditional correlation is not positive definite (spatial length " *
-            "$(sqrt(2) / kappa), temporal length $temporal_length)"))
+        if !(d > 0 && isfinite(d))
+            strict || return nothing
+            throw(DomainError(d,
+                "gmrf conditional correlation is not positive definite (spatial length " *
+                "$(sqrt(2) / kappa), temporal length $temporal_length)"))
+        end
         d = sqrt(d)
         A[j, j] = d
         for i in (j + 1):m
@@ -650,9 +657,12 @@ function _brm_vecchia_solve!(work, f::_BRMGMRFFootprint, p, kappa, temporal_leng
         b[i] = value / A[i, i]
         variance -= b[i]^2
     end
-    variance > 0 && isfinite(variance) || throw(DomainError(variance,
-        "gmrf conditional variance is not positive (spatial length " *
-        "$(sqrt(2) / kappa), temporal length $temporal_length)"))
+    if !(variance > 0 && isfinite(variance))
+        strict || return nothing
+        throw(DomainError(variance,
+            "gmrf conditional variance is not positive (spatial length " *
+            "$(sqrt(2) / kappa), temporal length $temporal_length)"))
+    end
     @inbounds for i in m:-1:1
         value = b[i]
         for k in (i + 1):m
@@ -699,22 +709,39 @@ function _brm_vecchia_whiten(field, L, f::_BRMGMRFFootprint)
     z
 end
 
+# Whether the density can be evaluated at these lengths. The lengths' support is
+# (0, ∞): a length the positive transform overflows to `Inf` or underflows to zero
+# lies outside it, where the density is -Inf. A negative or NaN length is an error.
+function _brm_vecchia_lengths_inside(spatial_length, temporal_length)
+    spatial_length >= 0 || _brm_gmrf_positive(spatial_length, "spatial length scale")
+    temporal_length >= 0 || _brm_gmrf_positive(temporal_length, "temporal length scale")
+    0 < spatial_length < Inf && 0 < temporal_length < Inf
+end
+
+# The answer outside the support: -Inf with a finite gradient, which no caller reads
+# (WarmupHMC's density contract: skill `warmuphmc-use`, "Outside the support").
+_brm_vecchia_outside(field, C) = (; value=-Inf, field=zeros(length(field)),
+    spatial_length=0.0, temporal_length=0.0, L=zeros(C, C))
+
 """
     _brm_vecchia_logdensity(field, spatial_length, temporal_length, L, footprint)
 
 The normalized joint log density of the standardized field. `field` holds
-`nchannels` coordinates per state, channel first.
+`nchannels` coordinates per state, channel first. It is `-Inf` outside the
+support: at a zero or infinite length, and where a conditioning system is
+numerically singular (lengths so long that its correlations round to one), so an
+optimizer or sampler backs off from such a proposal instead of failing.
 """
 function _brm_vecchia_logdensity(field, spatial_length, temporal_length, L, f::_BRMGMRFFootprint)
-    _brm_gmrf_positive(spatial_length, "spatial length scale")
-    _brm_gmrf_positive(temporal_length, "temporal length scale")
+    _brm_vecchia_lengths_inside(spatial_length, temporal_length) || return -Inf
     C, n = f.nchannels, length(f.position)
     z = _brm_vecchia_whiten(field, L, f)
     work = _BRMVecchiaWork(f)
     kappa = sqrt(2.0) / spatial_length
     value = 0.0
     for p in 1:(length(f.pattern_ptr) - 1)
-        solved = _brm_vecchia_solve!(work, f, p, kappa, temporal_length, false)
+        solved = _brm_vecchia_solve!(work, f, p, kappa, temporal_length, false; strict=false)
+        solved === nothing && return -Inf
         m, F = solved.m, solved.variance
         b = work.b
         q = 0.0
@@ -796,12 +823,12 @@ end
 The log density and its reverse derivative with respect to the field, both
 lengths and the channel factor, computed per pattern from the rows' sufficient
 statistics: one conditional solve and one contraction for each distinct
-geometry, one linear pass over the states.
+geometry, one linear pass over the states. Outside the support (see
+`_brm_vecchia_logdensity`) the value is `-Inf` and the derivatives are zero.
 """
 function _brm_vecchia_gradient(field, spatial_length, temporal_length, L, f::_BRMGMRFFootprint)
-    _brm_gmrf_positive(spatial_length, "spatial length scale")
-    _brm_gmrf_positive(temporal_length, "temporal length scale")
     C, n = f.nchannels, length(f.position)
+    _brm_vecchia_lengths_inside(spatial_length, temporal_length) || return _brm_vecchia_outside(field, C)
     z = _brm_vecchia_whiten(field, L, f)
     gz = zeros(C, n)
     work = _BRMVecchiaWork(f)
@@ -811,7 +838,8 @@ function _brm_vecchia_gradient(field, spatial_length, temporal_length, L, f::_BR
     dkappa_total = 0.0
     dtemporal = 0.0
     for p in 1:(length(f.pattern_ptr) - 1)
-        solved = _brm_vecchia_solve!(work, f, p, kappa, temporal_length, true)
+        solved = _brm_vecchia_solve!(work, f, p, kappa, temporal_length, true; strict=false)
+        solved === nothing && return _brm_vecchia_outside(field, C)
         m, F = solved.m, solved.variance
         states = view(f.pattern_states, f.pattern_ptr[p]:(f.pattern_ptr[p + 1] - 1))
         q = _brm_vecchia_states_gradient!(gz, z, f, states, C, m, F, work.b, work.v)

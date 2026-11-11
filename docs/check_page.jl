@@ -7,7 +7,7 @@
 # catches what breaks a page in CI: a bypassing `@brm` fence, a source marker that no
 # longer matches the research file, a model that no longer lowers.
 #
-#     julia --project=test docs/check_page.jl docs/src/state-space-models.md [more pages]
+#     julia --project=test docs/check_page.jl docs/src/state-space.md [more pages]
 #
 # It does not check Documenter cross-references, VitePress dead links or rendering.
 

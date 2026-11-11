@@ -65,7 +65,7 @@ function joint_global_objective(p,mu0,C0,points,x;gradient=true)
 end
 
 @stestset "bounded joint latent fit" begin
-    base = "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base = joinpath(@__DIR__, "results")
     saved = deserialize(joinpath(base,"profile-optimization-v1/candidate.jls"))
     reference = deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))
     @test reference.reference_ok && saved.reference_signature == reference.signature

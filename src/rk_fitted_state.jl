@@ -37,7 +37,11 @@ what [`brm_fitted_state`](@ref) returns. It holds
   argument must equal its fitted value, literal or read by name in the program;
 - `declaration`: the authored model (`show(brm_source(rk))`), which a replay's
   model must repeat;
-- `program`: the fit's emitted program, which a replay must reproduce;
+- `program`: the fit's emitted program, which a replay must reproduce. A
+  statement an earlier BRM wrote in another form of the same program (macro
+  calls with their places, a ragged join's columns as trailing arguments) is
+  read in this BRM's form (`_rk_stored_statement`), so the state replays
+  unless its program changed otherwise;
 - `coordinates`: the names of the fit's unconstrained coordinates;
 - `columns`: the element type of each data column of the fit (a scalar's type);
 - `responses`: the responses the fit conditions on;
@@ -250,8 +254,8 @@ function _rk_fitted_replay_plan(template::BRMI, new_data, state::BRMFittedState;
             fitted_constants=(name, _source) -> get(state.constants, name, nothing))
     end
     emitted = _rk_emit_ast(plan; documentation=brm_documentation(template))
-    _rk_check_replay_program(map(_rk_unlocated_statement, state.program),
-        _rk_replay_statements(emitted, plan); prefix)
+    _rk_check_replay_program(map(_rk_stored_statement, state.program),
+        _rk_replay_statements(emitted, plan); prefix, exported=true)
     _rk_check_replay_priors(emitted, plan, state.scalars, new_data; prefix)
     _rk_check_replay_terms(plan; prefix)
     _rk_check_replay_groupings(plan, groups; prefix)

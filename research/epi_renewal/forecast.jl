@@ -13,7 +13,7 @@
 # Gate + fit + check: Y[43:56] and cases_gen[43:56] 90% intervals against the held-out truth.
 #   Run: julia --project=test research/epi_renewal/forecast.jl [n_draws]
 #
-# VERIFIED (strato2, StanBlocks pin 9a958f97, δ=0.8, 1000 draws): gate dim 59; 21s, 260 divergences,
+# VERIFIED (a Linux fleet host, StanBlocks pin 9a958f97, δ=0.8, 1000 draws): gate dim 59; 21s, 260 divergences,
 #   min ESS 24, R̂ 1.087 (the single-patch kernel geometry, worse on 42 days — see recover.jl);
 #   init, log_I0, cluster inside 90% intervals, sig below (0.021 [0.002, 0.043] vs 0.05);
 #   Y: fitted days 98% coverage (rel. width 0.14), forecast days 57% (rel. width 0.95);

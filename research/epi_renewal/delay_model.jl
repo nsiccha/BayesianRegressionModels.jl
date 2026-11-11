@@ -19,7 +19,7 @@
 # is the `delay=` fixture argument of the renewal simulations, exactly as the PR does.
 #   Run: julia --project=test research/epi_renewal/delay_model.jl [n_draws]
 #
-# VERIFIED (strato2, StanBlocks pin 9a958f97): closed form == quadrature to 2.4e-8 / 6.0e-8 / 1.3e-8
+# VERIFIED (a Linux fleet host, StanBlocks pin 9a958f97): closed form == quadrature to 2.4e-8 / 6.0e-8 / 1.3e-8
 #   on three (mu, sigma, D); linelist 250 events → 80 strata, naive mean 3.23 d vs true 5.08 d (the
 #   PR's truncation bias); delay_brm_expanded gate dim 2, finite gradient; NUTS 1000 draws in 17s,
 #   0 divergences, min ESS 359, R̂ 1.002; mu 1.548 [1.463, 1.636], sigma 0.493 [0.442, 0.555]

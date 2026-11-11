@@ -98,10 +98,6 @@ is_factor(group) = group isa BRM._BRMSumCellGroup
     end
 end
 
-# The compact route's Cholesky of h never sees the factor route's augmented system,
-# so it is an independent reference. Reported on a bounded ODL target, where a
-# residual of 0.8% in that system moved a gradient of 395 to 19214 (snag
-# sparse-laplace-c-b7cc5e58); on this fixture it gave -50401 for -2.16.
 @stestset "a stiff cell's factor route keeps the marginal gradient" begin
     rk, integrate = route_stiff()
     p = brm_laplace_problem(rk; integrate, ad_backend=NLME_AD)

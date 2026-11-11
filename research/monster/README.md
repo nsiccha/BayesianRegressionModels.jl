@@ -31,7 +31,7 @@ alveolar fix, −0.8 for 0.873). Predictions move by at most 1.1 noise SD, at th
 with BridgeStan. At 25 random unconstrained points it checks that their
 normalized log densities (with Jacobians) differ by one constant, and that their
 gradients agree under the affine map between the two parameterizations. Result on
-BridgeStan 2.9.0 / Stan 2.39 (gordito, 2026-10-08):
+BridgeStan 2.9.0 / Stan 2.39 (a Linux fleet host, 2026-10-08):
 
 - constant offset `-27.791920602356015`, equal to the analytic Jacobian
   constant `sum(log(log(eM_eS))) - 15 log(2)`; spread across points `9.4e-12`;

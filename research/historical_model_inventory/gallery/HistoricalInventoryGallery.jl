@@ -9,7 +9,7 @@ export InventoryRow, HistoricalInventory, HistoricalInventoryGalleryApp,
        row_card, semantic_inventory, filtered_rows
 
 const DEFAULT_MATRIX_PATH = normpath(joinpath(@__DIR__, "..", "model_matrix.tsv"))
-const SBPMX_REFERENCE = "SbPMX origin/main@a8fd3c02e1e2305683a56c91384701bfeba6b528"
+const PREDECESSOR_REFERENCE = "private predecessor package, main branch (provenance in the private archive)"
 
 """One source row, kept losslessly as the strings recorded in `model_matrix.tsv`."""
 struct InventoryRow
@@ -212,7 +212,7 @@ function semantic_inventory(rows::AbstractVector{InventoryRow}, total::Integer)
             matching_rows=length(rows),
             total_rows=total,
             matrix="model_matrix.tsv (runtime)",
-            semantic_reference=SBPMX_REFERENCE,
+            semantic_reference=PREDECESSOR_REFERENCE,
             descriptor_adapter="experimental",
         ),
         SemanticGroup(Any[row_card(row) for row in rows]);

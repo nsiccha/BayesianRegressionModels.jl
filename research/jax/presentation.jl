@@ -3,6 +3,15 @@ module JAXExampleResults
 using Markdown, Printf
 
 function table(name)
+    if name == "posterior"
+        return vcat([[
+            merge(row, only(r for r in table("$method/intervals") if r.quantity == row.quantity),
+                  (; method)) for row in table("$method/population")
+        ] for method in ("native", "jax")]...)
+    elseif name == "group_effects"
+        return vcat([[merge(row, (; method)) for row in table("$method/group_effects")]
+                     for method in ("native", "jax")]...)
+    end
     lines = readlines(joinpath(@__DIR__, "results", name * ".tsv"))
     header = Tuple(Symbol.(split(first(lines), '\t')))
     cell(s) = something(tryparse(Float64, s), String(s))

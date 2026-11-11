@@ -84,7 +84,7 @@ studentt_builder = @brm begin
     y ~ Normal(mu, sigma)
 end
 
-# A BRMixr-shaped per-subject `@plate` cell reading predictors of a block with
+# A per-subject `@plate` cell reading predictors of a block with
 # one known SD (synthetic one-compartment-like decay).
 const PK = (; subject=collect(1:5), time=[[0.5, 1.0, 2.0] for _ in 1:5],
             dv=[round.(abs.(randn(3)) .+ 0.5; digits=3) for _ in 1:5])
@@ -502,10 +502,6 @@ end
     known = [p for p in description.priors if get(p.source, :kind, nothing) === :known]
     @test length(known) == 1
 
-    # A block whose every value is known is one family held at the identity:
-    # its standardized draws are η, its known `diag(sd) L` stays in the model,
-    # and it packs no scale or correlation coordinate (snag
-    # `odlplaus-margina-60bc212b`).
     for (builder, K) in ((known_builder, 2), (single_builder, 1))
         view = brm_nlme_view(RKBRMI(builder(DF)))
         family = only(view.families)

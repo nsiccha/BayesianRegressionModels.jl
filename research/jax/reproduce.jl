@@ -17,7 +17,7 @@
 # the model, which need only BayesianRegressionModels, Distributions and Random)
 # through `Main.BRMDocsComparisons.evaluate_source_prelude(...; before=:varying_slopes_model)`
 # and shows the model through `source_function(...)`. Everything below the model
-# runs only as a script, so the docs environment never needs ReactiveKernels.
+# runs only as a script; the docs build never samples.
 using BayesianRegressionModels, Distributions
 using Random, LinearAlgebra
 
@@ -70,7 +70,7 @@ end
 using ReactiveKernels, ReactiveKernelsPPL
 using Enzyme, ADTypes, LogDensityProblems
 using WarmupHMC, MCMCDiagnosticTools
-using JSON, Statistics, SHA, TreeArrays, Treebars
+using JSON, Statistics, SHA, TreeArrays, Treebars, Dates
 include("presentation.jl")
 using .JAXExampleResults: POPULATION
 
@@ -151,6 +151,42 @@ function write_tsv(path, rows)
     println("TABLE ", relpath(path, HERE))
 end
 
+# Record provenance before sampling; completed telemetry is appended by the caller.
+function fit_receipt(method, signature, settings, seed; telemetry=nothing)
+    dir = joinpath(RESULTS, method)
+    mkpath(dir)
+    path = joinpath(dir, "receipt.tsv")
+    driver = method == "native" ? @__FILE__ : joinpath(HERE, "sample_numpyro.py")
+    version = bytes2hex(sha256(read(driver)))
+    key = bytes2hex(sha256(signature * JSON.json(settings) * string(seed) * version))
+    if isnothing(telemetry)
+        if isfile(path) && get(ENV, "BRM_DOCS_FIT_FORCE", "0") != "1"
+            error("A cached $method fit exists. Rerun deliberately only when the model, data or settings change, " *
+                  "at most about monthly; BRM_DOCS_FIT_FORCE=1 authorizes replacement.")
+        end
+        git(args...) = strip(read(`git -C $(dirname(HERE)) $args`, String))
+        values = ["key"=>key, "commit"=>git("rev-parse", "HEAD"),
+            "uncommitted_changes"=>(isempty(git("status", "--porcelain")) ? "none" : "yes"),
+            "started"=>string(Dates.now(Dates.UTC)), "started_scope"=>"before sampling",
+            "host"=>"a Linux fleet host", "julia"=>string(VERSION),
+            "harness"=>relpath(driver, dirname(dirname(HERE))), "harness_version"=>version,
+            "settings"=>JSON.json(settings), "seed"=>string(seed),
+            "BayesianRegressionModels"=>string(pkgversion(BayesianRegressionModels)),
+            "ReactiveKernels"=>string(pkgversion(ReactiveKernels)),
+            "ReactiveKernelsPPL"=>string(pkgversion(ReactiveKernelsPPL)),
+            "WarmupHMC"=>string(pkgversion(WarmupHMC))]
+        write_tsv(path, [(; key=k, value=v) for (k,v) in values])
+    else
+        open(path, "a") do io
+            for (k,v) in pairs(telemetry)
+                println(io, k, '\t', v)
+            end
+            println(io, "completed\t", Dates.now(Dates.UTC))
+        end
+    end
+    return (; key)
+end
+
 function main(; chains = 4, n_draws = 1000, warmup = 1000, seed = 7,
               reuse_draws = false, progress = nothing)
     isfile(PYTHON) || error("RK_JAX_PYTHON names no Python with jax and numpyro: ", repr(PYTHON))
@@ -176,6 +212,8 @@ function main(; chains = 4, n_draws = 1000, warmup = 1000, seed = 7,
     cache = joinpath(RESULTS, "native.json")
     if !reuse_draws
         Threads.nthreads() == 1 || error("Run this RK/Enzyme example with --threads=1; concurrent gradients are unsupported.")
+        native_settings = (; chains, min_completed=div(3chains, 4), n_draws, monitor_ess=true)
+        fit_receipt("native", signature, native_settings, collect(101:100+chains))
         native_seconds = @elapsed fit = completion_warmup_mcmc([Xoshiro(100 + c) for c in 1:chains], problem;
             min_completed = div(3chains, 4), n_draws, monitor_ess = true, progress)
         native = cat((r.posterior_position[:, end-n_draws+1:end] for r in fit.results)...; dims = 3)
@@ -183,8 +221,13 @@ function main(; chains = 4, n_draws = 1000, warmup = 1000, seed = 7,
         native_divergences = sum(r.n_divergent_samples for r in fit.results)
         saved = (; signature, shape=size(native), draws=vec(native), seconds=native_seconds,
             divergences=native_divergences, completed=fit.completion.n_completed,
+            omitted_chain_indices=fit.completion.omitted_chain_indices,
             chains_requested=chains, seed=100, samples=n_draws)
         open(io -> JSON.print(io, saved), cache, "w")
+        fit_receipt("native", signature, native_settings, collect(101:100+chains);
+            telemetry=(; seconds=native_seconds, divergent=native_divergences,
+                omitted_chains=join(fit.completion.omitted_chain_indices, ","), dimension=d,
+                chains_kept=fit.completion.n_completed, draws_per_chain=n_draws))
     end
     saved = JSON.parsefile(cache)
     saved["signature"] == signature || error("Saved native draws belong to another module or dataset.")
@@ -203,12 +246,22 @@ function main(; chains = 4, n_draws = 1000, warmup = 1000, seed = 7,
 
     # 4. Python: parity values and NumPyro NUTS (research/jax/sample_numpyro.py).
     python_out = joinpath(RESULTS, "python.json")
-    if !reuse_draws || !isfile(python_out)
+    fit_python = !reuse_draws || !isfile(python_out)
+    if fit_python
+        python_settings = (; chains, warmup, samples=n_draws, target_accept=0.8)
+        fit_receipt("jax", signature, python_settings, seed)
         run(`$PYTHON $(joinpath(HERE, "sample_numpyro.py")) $(joinpath(HERE, "model.py"))
         $(joinpath(RESULTS, "inputs.json")) $(joinpath(RESULTS, "points.json")) $python_out
         --chains $chains --warmup $warmup --samples $n_draws --seed $seed`)
     end
     py = JSON.parsefile(python_out)
+    if fit_python
+        fit_receipt("jax", signature, (; chains, warmup, samples=n_draws, target_accept=0.8), seed;
+            telemetry=(; seconds=py["elapsed_seconds"], divergent=py["divergences"],
+                omitted_chains="none", dimension=d, chains_kept=chains, draws_per_chain=n_draws,
+                python=py["versions"]["python"], jax=py["versions"]["jax"],
+                numpyro=py["versions"]["numpyro"], numpy=py["versions"]["numpy"]))
+    end
     py["signature"] == signature || error("Saved Python draws belong to another module or dataset.")
     settings = py["settings"]
     all(settings[k] == v for (k,v) in (("chains",chains), ("warmup",warmup),
@@ -243,21 +296,27 @@ function main(; chains = 4, n_draws = 1000, warmup = 1000, seed = 7,
             push!(rows, (; quantity = n, method, s..., z))
         end
     end
-    write_tsv(joinpath(RESULTS, "posterior.tsv"), rows)
+    for method in ("native", "jax")
+        dir = joinpath(RESULTS, method)
+        mkpath(dir)
+        selected = filter(r -> r.method == method, rows)
+        labels = Dict(key => label for (key, label, _) in POPULATION)
+        labels["b_mu__g_g.L[4]"] = "group correlation Cholesky factor"
+        population = [(; quantity=r.quantity,
+            unit=r.quantity in ("sigma", "pop_mu.beta_pop[1]", "b_mu__g_g.tau[1]") ? "response" :
+                 r.quantity in ("pop_mu.beta_pop[2]", "b_mu__g_g.tau[2]") ? "response/predictor unit" : "1",
+            description=get(labels, r.quantity, "standardized group effect"),
+            median=r.q50, r.q025, r.q975, r.rhat, r.ess_bulk, r.ess_tail) for r in selected]
+        intervals = [(; r.quantity, r.q05, r.q25, r.q50, r.q75, r.q95,
+                       r.mean, r.sd, r.mcse, r.z) for r in selected]
+        write_tsv(joinpath(dir, "population.tsv"), population)
+        write_tsv(joinpath(dir, "intervals.tsv"), intervals)
+    end
     # Unconstrained coordinates: the distributional check of test/rk_jax_inference.jl.
     zrows = [(; coordinate = i,
         z = (a = summarize(native[i, :, :]); b = summarize(python[i, :, :]);
              abs(a.mean - b.mean) / sqrt(a.mcse^2 + b.mcse^2))) for i in 1:d]
     write_tsv(joinpath(RESULTS, "unconstrained_z.tsv"), zrows)
-
-    # 7. Keep draws for the plotting package's density estimator. These six
-    # scope paths are the parameters of this particular generated module.
-    population = first.(POPULATION)
-    all(n -> n in names, population) || error("Inspect the module's changed parameter layout: ", names)
-    write_tsv(joinpath(RESULTS, "population_draws.tsv"),
-        [(; quantity=n, method, draw=j, chain=c, value=v[n][j,c])
-         for n in population for (method,v) in (("native",nv),("jax",pv))
-         for c in axes(v[n],2) for j in axes(v[n],1)])
 
     # Transform this model's standardized effects to deviations in response
     # units, using the scoped parameters documented in the emitted module.
@@ -277,7 +336,10 @@ function main(; chains = 4, n_draws = 1000, warmup = 1000, seed = 7,
                 summarize(view(effects, :, :, k, margin))...))
         end
     end
-    write_tsv(joinpath(RESULTS, "group_effects.tsv"), groups)
+    for method in ("native", "jax")
+        selected = [Base.structdiff(r, (; method)) for r in groups if r.method == method]
+        write_tsv(joinpath(RESULTS, method, "group_effects.tsv"), selected)
+    end
 
     # 8. Run record.
     record = [(; key = "rows", value = length(data.y)), (; key = "groups", value = length(unique(data.g))),
@@ -297,6 +359,11 @@ function main(; chains = 4, n_draws = 1000, warmup = 1000, seed = 7,
         (; key = "data_inputs", value = join(py["data_names"], ", ")),
         (; key = "prepared_inputs", value = join(py["prepared_names"], ", "))]
     write_tsv(joinpath(RESULTS, "run.tsv"), record)
+    return (native=(; seconds=native_seconds, divergent=native_divergences,
+                    omitted_chains=get(saved, "omitted_chain_indices", "unavailable in this cache"),
+                    dimension=d, chains_kept=saved["completed"], draws_per_chain=n_draws),
+            jax=(; seconds=py["elapsed_seconds"], divergent=py["divergences"],
+                 omitted_chains=Int[], dimension=d, chains_kept=chains, draws_per_chain=n_draws))
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

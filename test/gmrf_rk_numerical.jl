@@ -85,3 +85,41 @@ end
         end
     end
 end
+
+@testset "Outside the support the RK GMRF density is -Inf, never an error" begin
+    # A line search proposes lengths far beyond the mesh (snag gmrf-neighbors-d-952fd2fb):
+    # B's mass term rounds away against its stiffness term and the factor loses a pivot.
+    times = [0.0, 0.3, 1.7]
+    geometry = BRM.brm_gmrf_geometry(GMRF_XY, GMRF_TRIANGLES, times, 2)
+    field = 0.03 .* sin.(1:geometry.ncoordinates)
+    L = [1.0 0.0; 0.45 sqrt(1 - 0.45^2)]
+    query = prepare(EXT._gmrf_density_graph)
+    differentiated = prepare_ad(query, DI.AutoEnzyme(; mode=Enzyme.Reverse),
+        field, 0.7, 1.4, L, geometry; active=(:field, :spatial_length, :temporal_length, :L))
+    for (spatial, temporal) in ((1e10, 1.4), (8.9e64, 1.4), (Inf, 1.4), (0.0, 1.4),
+            (0.7, Inf), (0.7, 0.0))
+        @test query(field, spatial, temporal, L, geometry) == -Inf
+        value, derivatives = ad_value_and_gradient(differentiated, field, spatial, temporal, L, geometry)
+        @test value == -Inf
+        @test length(derivatives[1]) == length(field)
+    end
+    # Long lengths the factor still resolves keep their exact density. The Float64
+    # oracle above inverts a near-singular Q there (off by 444 at 1e3, PosDefException
+    # from 1e4), so these compare with the joint precision in 512-bit arithmetic.
+    function big_oracle(z, spatial, temporal)
+        setprecision(BigFloat, 512) do
+            mesh = BRM._brm_gmrf_mesh(GMRF_XY, GMRF_TRIANGLES)
+            kappa2 = 2 / big(spatial)^2
+            M = big.(mesh.mass)
+            K = big.(Matrix(mesh.stiffness)) + kappa2 * Diagonal(M)
+            Q = K * Diagonal(1 ./ M) * K / (4 * big(pi) * kappa2)
+            Ct = [exp(-abs(big(a) - big(b)) / big(temporal)) for a in times, b in times]
+            P = kron(inv(Ct), kron(inv(big.(L) * big.(L)'), Q))
+            x = big.(z)
+            Float64((logdet(P) - dot(x, P * x) - length(x) * log(2 * big(pi))) / 2)
+        end
+    end
+    for (spatial, temporal) in ((1e3, 1.4), (1e7, 1.4), (0.7, 1e6), (0.7, 1e12))
+        @test query(field, spatial, temporal, L, geometry) ≈ big_oracle(field, spatial, temporal) rtol=1e-10
+    end
+end
