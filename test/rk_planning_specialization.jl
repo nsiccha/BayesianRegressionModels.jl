@@ -78,8 +78,10 @@ function define_member(index; curve_function=:shifted_curve)
 end
 
 # The model's own values are constructed with its own types; nothing else may
-# carry them. Methods owned by this test file are the harness, not BRM.
-const INHERENT_CONSTRUCTOR = r"^\"Tuple\{Type\{(NamedTuple\{|BayesianRegressionModels\.(BRMI|RKBRMI)\{)"
+# carry them. A constructor called with keywords (`RKBRMI(brmi, plan, model;
+# program, bound, source)`) compiles as `Core.kwcall` on the same type. Methods
+# owned by this test file are the harness, not BRM.
+const INHERENT_CONSTRUCTOR = r"^\"Tuple\{(typeof\(Core\.kwcall\), NamedTuple\{\([:\w, ]*\), .*?\}, )?Type\{(NamedTuple\{|BayesianRegressionModels\.(BRMI|RKBRMI)\{)"
 const HARNESS = r"^\"Tuple\{(typeof\(Main\.|Main\.var\")"
 
 Base.@nospecializeinfer function compiled_during(@nospecialize(f))

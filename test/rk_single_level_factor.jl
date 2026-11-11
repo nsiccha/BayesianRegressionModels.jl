@@ -92,13 +92,16 @@ rk_source(brmi) = sprint(Base.show_unquoted,
 @stestset "single-level factor keeps the ordinary K-1 emission" begin
     for build in (SLF.summand, SLF.observed, SLF.beside)
         one, two = rk_source(build(SLF.BASE)), rk_source(build(SLF.TWO))
-        # Only the level list and the coefficient count differ from K=2.
-        @test one == replace(two, "[\"a\", \"b\"]" => "[\"a\"]",
-            "[1, 2]" => "[1]", "[1:1]" => "[1:0]")
-        @test occursin("[1:0] .~ Normal.(0.0, 1.0)", one)
+        # The levels and the coefficient count are inputs (user principle
+        # `0ikeidi`), so one level and two are one program: the K-1
+        # coefficients are sized by data, which binds 0 for one level.
+        @test one == two
+        @test occursin(r"\[1:\w+_n\] \.~ Normal\.\(0\.0, 1\.0\)", one)
         @test occursin("(vcat(0.0, ", one)
     end
     backend = RKBRMI(SLF.summand(SLF.BASE))
+    @test rk_bound_data(backend).src_n == 0
+    @test rk_bound_data(RKBRMI(SLF.summand(SLF.TWO))).src_n == 1
     @test !any(name -> startswith(string(name), "shift"),
         coordinate_names(backend.model.layout))
 end
