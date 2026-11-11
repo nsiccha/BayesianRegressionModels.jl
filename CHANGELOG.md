@@ -12,6 +12,30 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.274
+
+- Changed: the `jax_source(rk.model, rk_bound_plan(rk))` module of an RKBRMI
+  computes each grouping's level coding in its `prepare_data`, from the raw
+  labels: the fitted levels (`g_fit_levels = brm_fit_levels(g_fit)`) and each
+  row's position among them (`g_level = brm_level_indices(g, g_fit_levels)`).
+  `prepare_data` takes `g` and `g_fit` (and no longer `g_fit_levels` or
+  `g_level`), and `m.UNTRANSLATED` no longer lists them, so the module of a
+  model with `(1 | g)`, `(1 + x | g)`, several groupings or a multi-membership
+  block runs on new raw data without Julia. Before, both came from
+  `rk_bound_data(rk)`. Both functions are now one source for Julia and the
+  module (`@_brm_traceable`, as the ragged-join partition is since 0.2.270).
+  Native values are unchanged: the fitted levels are the labels' distinct
+  non-missing values sorted by `isless`, as `CategoricalArrays.levels` gives
+  them. A categorical grouping column keeps its declared level order and
+  unobserved levels, which its labels do not carry, so its levels and
+  positions stay module inputs; a data-free replay's fitted levels come from
+  its fitted state, as before. The module's `sort` and `unique` need
+  ReactiveKernels 0.1.144 or later (measured on 0.1.154). (Snag
+  `rkbrmi-grouping-589e4a34`.)
+- Changed: `brm_fit_levels` of labels that `isless` cannot order (`Any[1, "a"]`)
+  raises that `MethodError`, as SBBRMI's level fit does; it returned them
+  unsorted before.
+
 ## 0.2.273
 
 - Changed: an RKBRMI `cdar(step; by = group, cor = C)` walk is one program for
