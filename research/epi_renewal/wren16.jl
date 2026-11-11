@@ -18,7 +18,7 @@
 #   delay model     doubly-interval-censored, per-stratum right-truncated LogNormal on a linelist
 #   forecast        the single-patch model observed through day 42 only; the prior tail is the forecast
 #
-# Run (test env, ~12 min on strato2):  julia --project=test research/epi_renewal/wren16.jl [n_draws]
+# Run (test env, ~12 min on a Linux fleet host):  julia --project=test research/epi_renewal/wren16.jl [n_draws]
 # Writes research/epi_renewal/results/*.json (quantile summaries + receipt) for plots.jl.
 
 using BayesianRegressionModels, StanBlocks, LogDensityProblems, BridgeStan, WarmupHMC
