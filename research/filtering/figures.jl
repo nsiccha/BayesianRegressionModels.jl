@@ -20,7 +20,7 @@ function filtered_states()
         visual(Band; color=BLUE, alpha=0.16)
     band50 = data(rows) * mapping(:day, :q25, :q75; facets...) *
         visual(Band; color=BLUE, alpha=0.32)
-    median = data(rows) * mapping(:day => "Day", :q50 => "Latent log-rate deviation"; facets...) *
+    median = data(rows) * mapping(:day => "Day", :q50 => "Latent state"; facets...) *
         visual(Lines; color=BLUE, linewidth=2)
     truth = data(rows) * mapping(:day, :truth; facets...) *
         visual(Lines; color=ORANGE, linestyle=:dash, linewidth=1.5)
