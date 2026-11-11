@@ -21,7 +21,7 @@ hosts avoid with a patched build. The docs project's public pins live in its
 | Examples | `wastewater.md` | Infer transmission from wastewater with a renewal model. |
 | Examples | `renewal.md` | Combine infection renewal and reporting delays. |
 | Examples | `state-space.md` | Connect continuous latent dynamics with discrete observations. |
-| Examples | `seal-ipm.md` | Connect eight observation streams to a population process and inspect an explicitly rejected exploratory run. |
+| Examples | `seal-ipm.md` | Connect eight observation streams to a population process and inspect a fitted synthetic example with convergence diagnostics. |
 | Examples | `monster.md` | Fit a whole-body pharmacokinetic model and inspect convergence and predictive checks. |
 | Examples | `jax.md` | Export a hierarchical regression and compare Julia and NumPyro fits. |
 | Examples | `variational-inference.md` | Fit streaming and batch variational approximations. |
@@ -58,10 +58,11 @@ divergences; eight population parameters have R-hat above 1.1. The page states
 that limitation alongside the predictive checks.
 
 The grey-seal example follows the corrected density-dependence equations of
-Vanko et al. (2026). It includes a deterministic response curve and exploratory
-aerial-count simulations from saved, rejected chains. All four chains exceeded
-the unchanged 10% divergence limit; the page states that their ranges are not
-reliable posterior uncertainty. No sampling runs during the build.
+Vanko et al. (2026). It includes a deterministic response curve and posterior predictive aerial
+counts from four admitted chains. The 6,000-draw run has one divergence;
+maximum R-hat is 1.009 and minimum bulk/tail ESS is 814/995. The page keeps
+these diagnostics visible and identifies the data as synthetic. The earlier
+rejected tables remain archived. No sampling runs during the build.
 
 The rework removes the feature atlas, slide deck and live gallery, with their
 compiled deck files and the deck renderer that depended on the retired atlas.

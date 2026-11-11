@@ -1,5 +1,5 @@
 quantity	unit	rhat	ess_bulk	ess_tail
-Female adult survival	fraction/year	1.044	93	278
-Initial population	seals	1.038	120	234
-Carrying capacity	seals	1.004	812	799
-Aerial fraction	fraction	1.046	109	169
+Female adult survival	fraction/year	1.002	1737	2215
+Initial population	seals	1.009	1047	1780
+Carrying capacity	seals	1.0	8204	4488
+Aerial fraction	fraction	1.008	814	1003

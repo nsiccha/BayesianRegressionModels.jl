@@ -41,13 +41,13 @@ function density_response_table(results)
     write_tsv(joinpath(results, "density_response.tsv"), ["capacity", "population", "birth_rate"], rows)
 end
 
-function summarize_seal(checkpoints; results=joinpath(@__DIR__, "results"))
+function summarize_seal(checkpoints; results=joinpath(@__DIR__, "rejected-results"))
     mkpath(results)
     sb = SBBRMI(grey_seal_brm_model())
     # These checkpoints store coordinates for one exact parameterization.
     # A new set of bounds can preserve the joint law while changing every
     # stored coordinate, so finite values alone are not a compatibility check.
-    receipt = readlines(joinpath(@__DIR__, "results", "receipt.tsv"))
+    receipt = readlines(joinpath(@__DIR__, "rejected-results", "receipt.tsv"))
     recorded_program = split(only(filter(line -> startswith(line, "program_sha256\t"), receipt)), '\t')[2]
     bytes2hex(sha256(stan_code(sb))) == recorded_program || error(
         "The rejected checkpoints require the frozen model used for the saved tables. " *

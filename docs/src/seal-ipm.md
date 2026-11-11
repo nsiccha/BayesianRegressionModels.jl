@@ -7,14 +7,11 @@ The example uses synthetic data: three years, three age classes and two sexes.
 It illustrates the model's construction, not the size or condition of today's
 Baltic grey-seal population.
 
-::: warning Exploratory fit: all four chains rejected
-
-The saved run has 18.7–23.7% divergent transitions per chain. None passed the
-sampler's unchanged 10% admission limit. Its simulations below illustrate the
-model and the failed run; their bands are not reliable posterior uncertainty.
-They do not establish convergence or support population-management conclusions.
-
-:::
+The fitted example retains all four chains and 6,000 draws. One transition
+is divergent (0.017%); across all 123 sampling coordinates, maximum R-hat is
+1.009 and minimum bulk/tail effective sample sizes are 814/995. These are
+Monte Carlo diagnostics for the synthetic fixture, not evidence about a
+real seal population. The settings and remaining divergence are reported below.
 
 ## Density-dependent reproduction
 
@@ -31,7 +28,7 @@ Thus ``b(0)=b_0`` and ``b(K)=b_K``. Holding the demographic parameters fixed,
 a larger ``K`` shifts the decline to larger population sizes. These curves use
 the model's compiled birth-rate helpers at fixed illustrative values
 ``b_0=0.7``, ``b_K=0.2``, maximum birth rate 0.9 and scaled density parameter
-0.4. They are a deterministic comparison, independent of the failed fit.
+0.4. They are a deterministic comparison, independent of the fitted results.
 
 ```@eval
 if !isdefined(Main, :SealFigures)
@@ -47,6 +44,14 @@ and the paper's [archived code, v1.1](https://doi.org/10.5281/zenodo.20381625).
 Niko Siccha wrote this BRM implementation. Its herring regression, several
 priors and random effects, and the small synthetic fixture differ from the
 published analysis; this page is not a replication of that study.
+
+The calibration also requires
+``\theta_0+\log(b_0/b_K)>0``. Ordered parameter bounds enforce this joint
+support, including the mortality-dependent replacement rate. They retain the
+original prior density kernels; normalizing each conditional restriction
+would change the prior. The earlier parameterization allowed Hamiltonian
+trajectories to cross this boundary and produced 251 divergences in 1,200
+saved states. The current fit uses the same admission thresholds.
 
 ## State process
 
@@ -66,7 +71,7 @@ all observation streams:
 Main.BRMDocsComparisons.evaluate_source_prelude(
     Main.BRMDocsComparisons.example_module(:seal_ipm),
     "research/seal/grey_seal_brm.jl";
-    before=:grey_seal_brm_model, starting_at="StanBlocks.@deffun begin",
+    before=:grey_seal_brm_model,
 )
 Main.BRMDocsComparisons.source_code_region(
     "research/seal/grey_seal_brm.jl";
@@ -104,10 +109,11 @@ latent effects. Female adult survival is displayed on its natural scale,
 
 ## Saved run and diagnostics
 
-Four WarmupHMC chains each saved 300 post-warmup states. The run used target
-acceptance 0.99, a 10% warmup divergence gate and two restarts per chain.
-The completion sampler required three admissible chains; it obtained zero.
-Saved states remain available for diagnosis even when a chain is rejected.
+Four WarmupHMC chains each retained 1,500 post-warmup draws, using seed
+20261111, target acceptance 0.99 and a 10% warmup divergence gate. The
+completion sampler required three admissible chains under its unchanged
+10% divergence limit; all four finished and were admitted. No chain was
+omitted. One transition in chain 3 diverged.
 
 ```@eval
 Main.BRMDocsComparisons.results_table("research/seal/results/chains.tsv";
@@ -116,10 +122,12 @@ Main.BRMDocsComparisons.results_table("research/seal/results/chains.tsv";
              :divergence_pct => "% divergent", :status => "Status"])
 ```
 
-Every saved state has a finite density and gradient. That is a numerical
-check, not evidence of adequate exploration. Split R-hat and effective
-sample sizes below describe the rejected chains, with adult survival
-transformed before the calculation. They do not override the divergences.
+Every retained draw has a finite density and gradient. Across all 123
+sampling coordinates, maximum split R-hat is 1.00898, minimum bulk ESS is
+813.99 and minimum tail ESS is 994.80. The table reports selected model
+quantities on their natural scales, including transformed adult survival.
+These checks support using the fit for this worked example; they do not
+establish that the model or its illustrative priors describe real data.
 
 ```@eval
 Main.BRMDocsComparisons.results_table("research/seal/results/diagnostics.tsv";
@@ -127,25 +135,24 @@ Main.BRMDocsComparisons.results_table("research/seal/results/diagnostics.tsv";
              :ess_bulk => "Bulk ESS", :ess_tail => "Tail ESS"])
 ```
 
-## Exploratory aerial-count simulations
+## Posterior predictive aerial counts
 
 Each panel uses only its named chain. The blue line and bands summarize
-new aerial counts simulated from its saved states; orange points are the
+new aerial counts simulated from its retained draws; orange points are the
 three synthetic observations. The logarithmic count axis keeps the medians
 visible alongside the wide simulation ranges. The count scale includes the observation
 fraction and negative-binomial variation, so it is not a population-size
-trajectory. Chains are shown separately to avoid concealing disagreement
-in a pooled summary.
+trajectory. Separate panels make agreement between the chains visible.
 
 ```@eval
 Main.BRMDocsComparisons.figure(Main.SealFigures.aerial_simulations();
-    caption="Exploratory simulations from rejected chains. Blue: median and central 50%/95% ranges of simulated aerial counts; orange points: synthetic observations. These descriptive ranges are not reliable posterior predictive intervals, even where they cover the observations.")
+    caption="Posterior predictive aerial counts by admitted chain. Blue: median and central 50%/95% predictive intervals; orange points: synthetic observations. All four chains are retained; one of 6,000 transitions diverged. These are predictions for the synthetic fixture, not estimates for the Baltic population.")
 ```
 
-A broad simulated range can cover the data despite poor sampling. This
-figure therefore explains the observation model and exposes the saved run;
-it does not validate a fit. Density-response curves above remain useful
-without a successful fit because their inputs are fixed explicitly.
+The predictive intervals combine parameter uncertainty and negative-binomial
+observation variation. Their breadth reflects the limited synthetic data as
+well as the observation model. Coverage of these three observations alone
+does not validate the scientific model.
 
 ## Reproduce
 
@@ -153,16 +160,17 @@ without a successful fit because their inputs are fixed explicitly.
 
 The committed files are small summary tables. Raw checkpoints stay outside
 git; the docs build reads the tables and generates interactive figures
-without sampling. `summarize.jl` reads checkpoints without changing them,
-maps their working coordinates back through the exact adaptive-centering
-target, and simulates observations with fixed seeds. It records the
-emitted program, data and checkpoint hashes.
+without sampling. `summarize_accepted.jl` checks the saved source and program
+hashes, chain admission and checkpoint reconstruction against the saved
+model-frame draws. It leaves checkpoints unchanged and simulates observations
+with fixed seeds. The receipt records the program, data and draw hashes.
 
-With the original strict-run checkpoint directory available:
+With the admitted run's checkpoint directory available, create a new output
+directory:
 
 ```sh
 julia --startup-file=no --project=test test/setup_env.jl
-julia --startup-file=no --project=test research/seal/summarize.jl CHECKPOINT_DIRECTORY
+julia --startup-file=no --project=test research/seal/summarize_accepted.jl CHECKPOINT_DIRECTORY NEW_RESULTS_DIRECTORY
 ```
 
 A fresh checkout can reproduce the numerical equation checks without
@@ -172,12 +180,21 @@ those checkpoints:
 julia --startup-file=no --project=test test/seal_density_dependence.jl
 ```
 
-The separate manual sampling check is `test/seal_density_fit.jl`. It retains
-the original admission limits and fails when the quorum is not met; setting
-`BRM_SEAL_FIT_CHECKPOINT_DIR` preserves its diagnostic states. Run it only
-when deliberately revisiting the fit, not for routine documentation edits.
-The test environment pins StanBlocks 0.2.36, including the row-vector repair
-needed by this model; the docs environment requires at least that version.
+To deliberately reproduce the longer fit, use a fresh checkpoint directory:
+
+```sh
+julia --threads=4 --startup-file=no --project=test research/seal/fit.jl NEW_CHECKPOINT_DIRECTORY
+```
+
+The shorter manual sampling check remains `test/seal_density_fit.jl`. Neither
+command runs during routine documentation builds. Both preserve the original
+admission limits and fail if the quorum is not met. The test environment pins
+StanBlocks 0.2.40, including native evaluation of algebraic support bounds;
+the docs environment requires at least that version.
+
+The earlier rejected run remains in `research/seal/rejected-results/` with
+its original receipt. Its checkpoints require the frozen model at `dd5f2ca8`;
+they must not be interpreted using the new parameter coordinates.
 
 ```@eval
 Main.BRMDocsComparisons.results_table("research/seal/results/receipt.tsv";

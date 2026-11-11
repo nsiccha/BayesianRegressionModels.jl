@@ -67,40 +67,49 @@ independent calculation of the original density, a finite-difference
 coordinate Jacobian, and finite-difference gradients for 2, 3, 6 and 12 ages.
 This check is separate from fitting and does not establish convergence.
 
-## Saved diagnostic run
+## Saved fitted example
 
-The run associated with `21c3e34ab807c812dbfd546252415ff43313a77a` used
-four chains, 300 saved states each, seed 20261111, target acceptance 0.99
-and a 10% divergence gate. Each chain exhausted two warmup restarts.
-Divergences were 66, 71, 56 and 58 per 300 states. Zero chains passed the
-unchanged 10% admission limit, so there is no accepted posterior fit.
-The native density and gradient are finite at all 1,200 saved states;
-that check does not establish adequate exploration.
+The current `results/` tables use the support-repaired model at
+`52978e90b0c81db1de10613dc9994375a0eb3897`. Four chains retained 1,500 draws
+each with seed 20261111 and target acceptance 0.99. All four passed the
+unchanged 10% divergence admission limit and three-of-four quorum. One of
+6,000 transitions diverged (0.01667%); per-chain counts are 0, 0, 1, 0.
+All retained draws have finite density and gradients. Across 123 sampling
+coordinates, maximum R-hat is 1.00898 and minimum bulk/tail ESS is 813.99/994.80.
+These diagnostics support the synthetic worked example; this is not a fit
+of the paper's data or a population-management estimate.
 
-The `results/` tables are descriptive summaries of these rejected states.
-Reproduce that run's tables from a checkout of `dd5f2ca8`, which contains
-the original parameterization and its summarizer. The new support bounds
-change the stored coordinates even though they preserve the joint law;
-the current summarizer rejects a different program fingerprint before
-reading those checkpoints.
-`summarize.jl` restores their exact adaptive-centering target and uses
-`WarmupHMC.back_transform` before constraining them. It leaves checkpoints
-unchanged and records their hashes. Aerial simulations use the model's
-generated predictive draws with seeds 20261112 through 20261115; the
-50% and 95% ranges are empirical simulation ranges, not reliable posterior
-predictive intervals. Adult survival uses `0.8 + 0.2 * phi_a_sc`.
+`summarize_accepted.jl` checks source/program/data hashes, chain admission,
+and equality between the saved model-frame draws and the checkpoint draws
+restored with `WarmupHMC.back_transform`. It leaves checkpoints unchanged.
+Aerial posterior predictive draws use seeds 20261112 through 20261115;
+central 50% and 95% intervals include observation variation. Adult survival
+uses `0.8 + 0.2 * phi_a_sc`.
 
 ```sh
 julia --startup-file=no --project=test test/setup_env.jl
-julia --startup-file=no --project=test research/seal/summarize.jl CHECKPOINT_DIRECTORY
-julia --startup-file=no --project=test test/seal_density_dependence.jl
+# Deliberate new sampling only; refuses an existing checkpoint directory:
+julia --threads=4 --startup-file=no --project=test research/seal/fit.jl NEW_CHECKPOINT_DIRECTORY
+# Reuse the saved admitted run; never samples and refuses existing output:
+julia --startup-file=no --project=test research/seal/summarize_accepted.jl CHECKPOINT_DIRECTORY NEW_RESULTS_DIRECTORY
 ```
 
-`CHECKPOINT_DIRECTORY` is the saved strict run, not a path committed to the
-repository. The docs build reads only small tables and constructs figures
-through `docs/backend_comparisons.jl`; it never samples. Raw checkpoints
-and rendered images stay outside git.
+The checkpoint directory contains the saved model-frame draws and provenance
+files produced by `fit.jl`; it is not committed. The docs build reads only
+small tables and constructs figures through `docs/backend_comparisons.jl`;
+it never samples. Raw checkpoints and rendered images stay outside git.
+The shorter `test/seal_density_fit.jl` remains a deliberate 300-draw sampling
+check with the same admission thresholds. Routine page edits reuse results.
 
-For a deliberate new diagnostic fit, set `BRM_SEAL_FIT_CHECKPOINT_DIR` and
-run `test/seal_density_fit.jl`. It raises if the quorum fails. Routine page
-edits must reuse the existing results rather than repeat sampling.
+## Preserved rejected run
+
+`rejected-results/` preserves the tables for the earlier model at
+`21c3e34ab807c812dbfd546252415ff43313a77a`: four chains of 300 states with
+66, 71, 56 and 58 divergences. Zero chains passed the same 10% admission
+limit. Those tables describe rejected states, not reliable posterior intervals.
+
+Reproduce the old tables from frozen commit `dd5f2ca8`, with its original
+parameterization and summarizer. The support repair preserves the joint law
+but changes stored coordinates. The retained `summarize.jl` checks the old
+program fingerprint before reading those checkpoints and rejects the current
+model. Never pass old checkpoints to the new accepted-fit summarizer.
