@@ -1275,7 +1275,7 @@ the three-cell checks are `broken`: a later `decay[2]` raises a `BoundsError`,
 and `sum` and `length` return one cell's value. The one-cell count, total and
 likelihood pass on both. Its `decay` is `broken` there too, because one number is
 not a one-entry array. It accepts
-testset substring filters; about 5 minutes warm on gordito.
+testset substring filters; about 5 minutes warm on a Linux fleet host.
 
 `nlme_nested.jl` uses a public synthetic model with interleaved observations
 and 1, 2, and 3 nested units per subject. It checks explicit ownership,
@@ -2091,7 +2091,7 @@ julia --project=<scratch-env> -e 'using Pkg
 julia --startup-file=no --project=<scratch-env> test/rk_kernel_ode_cell.jl
 ```
 
-On BRM 0.2.64 with ReactiveKernels `3deb61ae` that passes 171/171 (gordito,
+On BRM 0.2.64 with ReactiveKernels `3deb61ae` that passes 171/171 (a Linux fleet host,
 2026-10-29); adding the solvers precompiles 56 packages in about 9 minutes.
 
 `kernel_ode_cell.jl` remains
@@ -2986,7 +2986,7 @@ the full pointwise model; it does not compare different marginal targets.
 and give independent targets when a strict subset is retained.
 
 The measurements in `research/sparse_laplace_factors/*_2026-11-02.tsv` use
-Julia 1.10.12 on gordito, one CPU per process, RK
+Julia 1.10.12 on a Linux fleet host, one CPU per process, RK
 `5e9d2d03818ba5c8ef7d6d068fef42101f902d0e` (0.1.52 / PPL 0.1.55), Enzyme
 `5325554cab66d13ab34c22ec502fd00759ffdcf7` and libEnzyme
 `782c9d95efd9895e380c451ea9975cde1c197219` (LLVM 15). Each point runs in a

@@ -3878,7 +3878,7 @@ More numbers are inputs of the program instead of text in it (user principle
   shared factor 36,970 entries instead of 453² = 205,209) and its separation
   is built in 0.17 s instead of 6.3 s. With three such fields on 43,728 rows
   a gradient takes 13.5 ms instead of 70–101 ms and the separation data
-  7.1 MiB instead of 365 MiB (gordito, one CPU). The
+  7.1 MiB instead of 365 MiB (a Linux fleet host, one CPU). The
   field and its density are unchanged; the unit draws parametrize each
   unit's interior through another orthogonal rotation, so a point saved from
   an earlier separated lowering does not carry over.
@@ -4113,7 +4113,7 @@ More numbers are inputs of the program instead of text in it (user principle
   0.1.6; registered Enzyme raises `IllegalTypeAnalysisException` there.
 - BRM's test environment runs the Enzyme `dogfood` line (`test/setup_env.jl`,
   user decision `0n0kgfh`) and ReactiveKernels 0.1.6, so it builds only on a
-  KB fleet host with the dogfood libEnzyme build (gordito). On it,
+  KB fleet host with the dogfood libEnzyme build (a Linux fleet host). On it,
   `test/rk_enzyme_threads.jl` (concurrent-GC gradients),
   `test/plate_index_into.jl` and `test/rk_structured_consumer.jl` pass.
 
