@@ -2,7 +2,7 @@ using Test, Markdown, BayesianRegressionModels, Distributions
 import StanBlocks
 Base.include(@__MODULE__, joinpath(@__DIR__, "..", "docs", "backend_comparisons.jl"))
 
-@testset "four-pane comparisons emit one model through StanBlocks" begin
+@testset "shared comparisons emit StanBlocks, RKPPL and JAX from one model" begin
     sources = (
         """
         data = (; x=[-1.0, 0.0, 1.0], y=[0.2, 0.4, 0.7])
@@ -34,19 +34,18 @@ Base.include(@__MODULE__, joinpath(@__DIR__, "..", "docs", "backend_comparisons.
     for (i, source) in pairs(sources)
         mod = BRMDocsComparisons.example_module(Symbol(:refactoring_comparison_, i))
         panes = BRMDocsComparisons.comparison(mod, source, :model; require_stan=true)
-        @test length(panes.content) == 5
+        @test length(panes.content) == 8
         @test getfield.(panes.content, :language) ==
-              ["brm-comparison", "julia", "julia", "julia", "stan"]
+              ["brm-comparison", "julia", "julia", "julia", "stan", "julia", "python", "python"]
+        @test endswith(panes.content[1].code, "panes: brm|stanblocks|rkppl|stan|jax:3")
         @test panes.content[2].code == strip(source, '\n')
-        ir_source = panes.content[3].code
-        # The IR pane prints the parsed statements, not the bound data columns.
-        @test !occursin("data (eltype", ir_source)
-        @test occursin("~", ir_source)
-        # Resolved call heads print as written, never module-qualified: the
-        # docs build's `Main` does not import `Distributions`, and Julia
-        # qualifies bindings invisible from the display context.
-        @test !occursin("Distributions.", ir_source)
+        rkppl_source = panes.content[4].code
+        @test occursin("~", rkppl_source)
+        @test occursin("y", rkppl_source)
+        @test !occursin("#=", rkppl_source)
         @test StanBlocks.stanc_check(panes.content[5].code).ok
+        @test occursin("def prepare_data", panes.content[8].code)
+        @test occursin("def log_density", panes.content[8].code)
     end
 end
 

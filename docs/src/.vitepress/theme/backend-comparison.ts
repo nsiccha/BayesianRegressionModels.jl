@@ -237,13 +237,13 @@ function enhanceComparison(root: HTMLElement) {
 // listed in GENERATED_DEFAULT_OFF start ticked in the side-by-side dialog.
 const GENERATED_PANE_LABELS: Record<string, string> = {
   brm: 'BRM authoring',
-  ir: 'IR',
   stanblocks: 'StanBlocks model',
+  rkppl: 'RKPPL model',
   stan: 'Stan source',
   jax: 'JAX module',
 }
 const GENERATED_DEFAULT_OFF = ['stan', 'jax']
-const GENERATED_DEFAULT_PANES = 'brm|ir|stanblocks|stan'
+const GENERATED_DEFAULT_PANES = 'brm|stanblocks|rkppl|stan|jax'
 
 // The sentinel's first line is the title. An optional `panes:` line lists the
 // panes in order; `id:n` gives a pane n consecutive code blocks (default 1).
