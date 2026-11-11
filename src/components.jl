@@ -196,7 +196,7 @@ function _brm_component_own_documentation(component::BRMComponent)
         doc.statement, doc.file, doc.line) for doc in _brm_source_documentation(brm_source(component)))
     (header..., _brm_documentation(component.builder)...)
 end
-function _brm_component_documentation(model)
+Base.@nospecializeinfer function _brm_component_documentation(@nospecialize(model))
     Tuple(BRMDocumentation((call.path..., doc.path...), first(call.path),
         doc.markdown, doc.statement, doc.file, doc.line)
         for call in brm_components(model) if !isempty(call.path)
@@ -205,6 +205,8 @@ end
 _brm_documentation(component::BRMComponent) =
     (_brm_component_own_documentation(component)..., _brm_component_documentation(component)...)
 
+# Discovery reads the model as syntax (`_brm_operation_entries`), so it compiles
+# once for every model rather than once per BRMI type.
 """
     brm_components(model::BRMI)
     brm_components(builder::BRMBuilder, data)
@@ -219,7 +221,8 @@ Repeated calls have separate paths and share their definition identity.
 For a component definition itself, the first record has path `()` and no call.
 No backend compilation or manually maintained source registry is required.
 """
-brm_components(model::BRMI) = map(_brm_public_component_record, _brm_component_records(model))
+Base.@nospecializeinfer brm_components(@nospecialize(model::BRMI)) =
+    map(_brm_public_component_record, _brm_component_records(model))
 brm_components(builder::BRMBuilder, data) = brm_components(builder(data))
 brm_components(component::BRMComponent) =
     map(_brm_public_component_record, _brm_component_records(component))
@@ -228,7 +231,7 @@ brm_components(component::BRMComponent) =
 # `instance` (the call's own declarations bound to its arguments) and whether
 # it runs once per plate iteration (`plate`). Read-only inspection such as the
 # model view lists those declarations from here instead of rebuilding them.
-function _brm_component_records(model::BRMI)
+Base.@nospecializeinfer function _brm_component_records(@nospecialize(model::BRMI))
     records = NamedTuple[]
     _brm_component_calls!(records, model, ())
     Tuple(records)
@@ -256,7 +259,8 @@ function _brm_component_call!(records, target, component, call, path, plate)
     _brm_component_calls!(records, instance, address, plate)
 end
 
-function _brm_component_calls!(records, model, path, plate=false)
+Base.@nospecializeinfer function _brm_component_calls!(records, @nospecialize(model), path,
+        plate=false)
     for (target, column) in _brm_operation_entries(model)
         operation = column isa NamedColumn ? parent(column) : column
         operation isa ExprColumn{typeof(~)} || continue

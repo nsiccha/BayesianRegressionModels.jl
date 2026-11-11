@@ -34,9 +34,11 @@ const QUANTITY_DESCRIPTIONS = Dict(
     "KMI" => "Michaelis constant",
 )
 const QUANTITIES = vcat(
-    [(; name=q, unit="", description="population geometric mean, " * QUANTITY_DESCRIPTIONS[q],
+    # The table's prose says which rows are population geometric means and
+    # which geometric SDs; the description names the quantity only.
+    [(; name=q, unit="", description=QUANTITY_DESCRIPTIONS[q],
         kind=:intercept, logical=Symbol("log_" * q), transform=exp) for q in QUANTITY_NAMES],
-    [(; name="GSD " * q, unit="", description="population geometric SD, " * QUANTITY_DESCRIPTIONS[q],
+    [(; name="GSD " * q, unit="", description=QUANTITY_DESCRIPTIONS[q],
         kind=:sd, logical=Symbol(q), transform=exp) for q in QUANTITY_NAMES],
     [(; name="sigma_venous", unit="", description="lognormal noise scale, venous blood",
         kind=:scalar, logical=:log_sigma_venous, transform=exp),
@@ -44,15 +46,25 @@ const QUANTITIES = vcat(
         kind=:scalar, logical=:log_sigma_exhaled, transform=exp)],
 )
 
-"The flat observation vectors of one measurement channel, times in hours."
+"""
+The flat observation vectors of one measurement channel, times in hours. An
+index column addresses the concatenated prediction vector of one person,
+venous predictions at every time followed by exhaled-air predictions at every
+time (`exhaled_index(t) = length(t) .+ (1:length(t))` in reproduce.jl), so an
+exhaled index `j` samples the time `t[j - length(t)]`.
+"""
 function channel(data, response)
     experiment = endswith(String(response), "72") ? "72" : "144"
     times = getproperty(data, Symbol("times_" * experiment))
     index = getproperty(data, Symbol(String(response) * "_index"))
     observed = getproperty(data, response)
+    sampled(t, k) = [t[j > length(t) ? j - length(t) : j] for j in k]
+    flat_times = reduce(vcat, [sampled(t, k) for (t, k) in zip(times, index)]) ./ 60
+    flat_observed = reduce(vcat, observed)
+    length(flat_times) == length(flat_observed) ||
+        error("$response: $(length(flat_times)) sampled times for $(length(flat_observed)) observations")
     (; subjects=reduce(vcat, [fill(s, length(o)) for (s, o) in zip(data.subject, observed)]),
-       times=reduce(vcat, [t[k] for (t, k) in zip(times, index)]) ./ 60,
-       observed=reduce(vcat, observed))
+       times=flat_times, observed=flat_observed)
 end
 
 function fit_all(; n_draws=1000, n_chains=4, seed=20261110, n_ppc=400)
