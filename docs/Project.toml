@@ -12,25 +12,32 @@ StanBlocks = "2e771a56-c23a-4e0b-9282-20c2e37157e9"
 ZipFile = "a5390f91-8eb1-5f08-bee0-b1d1ffed6cea"
 
 [compat]
-AlgebraOfVega = "0.2.29"
+AlgebraOfVega = "0.2.30"
 JSON = "1"
 ZipFile = "0.10"
 
 [sources.BayesianRegressionModels]
 path = ".."
 
-[sources.AlgebraOfVega]
-url = "https://github.com/nsiccha/AlgebraOfVega.jl"
-rev = "f96a064557589494d2a1b6ae75c16449758009fb"
+# Public commits the docs build develops for the figure runtime and its web
+# dependencies. They are not a `[sources]` table: Pkg 1.11 and later honour
+# `[sources]`, and a url pin there conflicts with the workflow developing the
+# same package from its public clone (`.github/workflows/Docs.yml` reads this
+# table and clones each pin). Julia 1.10 ignored `[sources]`, which is why the
+# pins used to live there.
 
-[sources.HTMXObjects]
+[docs_pins.AlgebraOfVega]
+url = "https://github.com/nsiccha/AlgebraOfVega.jl"
+rev = "705ab3721512148df609428c25cb25a5ecebf38b"
+
+[docs_pins.HTMXObjects]
 url = "https://github.com/nsiccha/HTMXObjects.jl"
 rev = "0dce4099357c224236ca9b9a2f7d2dfd0e3334b7"
 
-[sources.DynamicObjects]
+[docs_pins.DynamicObjects]
 url = "https://github.com/nsiccha/DynamicObjects.jl"
 rev = "fc41273bce8b3aaf736bb0b23c36c97e773a1c7c"
 
-[sources.Treebars]
+[docs_pins.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"
 rev = "e03f2c7be5579fafce38d8759b531a6e22996ba5"

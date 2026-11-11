@@ -3,6 +3,10 @@
 The site is built from the current package with Documenter and VitePress. Model
 views and AlgebraOfVega specifications execute during the build; posterior
 summaries come from deliberate, cached research runs. CI never samples.
+The hosted build runs Julia 1.11: every official 1.10.x miscompiles the prior
+constructor binding of the RK backend (JuliaLang/julia#52644), which the fleet
+hosts avoid with a patched build. The docs project's public pins live in its
+`[docs_pins]` table, read by the workflow, because Pkg 1.11 honours `[sources]`.
 
 | Part | Page | Purpose |
 |:--|:--|:--|
@@ -17,10 +21,11 @@ summaries come from deliberate, cached research runs. CI never samples.
 | Examples | `wastewater.md` | Infer transmission from wastewater with a renewal model. |
 | Examples | `renewal.md` | Combine infection renewal and reporting delays. |
 | Examples | `state-space.md` | Connect continuous latent dynamics with discrete observations. |
-| Examples | `monster.md` | Declare a whole-body pharmacokinetic model and inspect its generated program. |
+| Examples | `monster.md` | Fit a whole-body pharmacokinetic model and inspect convergence and predictive checks. |
 | Examples | `jax.md` | Export a hierarchical regression and compare Julia and NumPyro fits. |
 | Examples | `variational-inference.md` | Fit streaming and batch variational approximations. |
 | Examples | `filtering.md` | Compare sequential posterior updates and full-data sampling. |
+| Examples | `spatial-fields.md` | Map a space-time field from station measurements. |
 | Reference | `api.md` | Find public functions and types by task. |
 | Reference | `terms-reference.md` | Look up formula terms and their arguments. |
 
@@ -33,25 +38,23 @@ The figure runtime is copied from the pinned AlgebraOfVega package to the build
 output. No compiled JavaScript, Vega runtime or rendered plot is committed.
 Light and dark desktop renders are part of documentation review.
 
-The candidate uses the existing `BRMDocsComparisons` table and figure hooks until
-the shared documentation package is public. The transitional quantity schema is
-`quantity, unit, description, median, q025, q975, rhat, ess_bulk, ess_tail`, with
-one fit per directory. It is compatible with the planned DocsFits summaries.
+The table and figure helpers live in `docs/backend_comparisons.jl`. Quantity
+tables use `quantity, unit, description, median, q025, q975, rhat, ess_bulk,
+ess_tail`, with one fit per directory.
 
 ## Landing notes
 
 The Warfarin page draws its five figures at build time from the committed
-fit tables (`research/warfarin/figures.jl`). The Monster page ships without
-its fit section: the fit was still sampling at the landing cut-off, so its
-tables, figure and fit section follow in the parent lane's next landing.
+fit tables (`research/warfarin/figures.jl`). The Monster page also includes
+its cached fit, convergence diagnostics and posterior predictive figure
+(`research/monster/figures.jl`). Its run kept three of four chains, with no
+divergences; eight population parameters have R-hat above 1.1. The page states
+that limitation alongside the predictive checks.
 
-The fitted spatial-field example is deferred until its GMRF density and heatmap
-issues are resolved. The fields guide remains self-contained and illustrates
-prior temporal covariance; it makes no posterior reconstruction claim.
-
-The grey-seal example is held out while its density-dependence formulation and
-source provenance are reviewed. It is absent from this site's navigation and
-build; no new fit or interpretation of that model is published here.
+The grey-seal example is held out pending a density-dependence correction and
+a successful fit. Its provenance is settled: the author wrote the implementation
+of the published grey-seal IPM. Correcting the research files' source note remains
+part of restoring the page. It is absent from this site's navigation and build.
 
 The rework removes the feature atlas, slide deck and live gallery, with their
 compiled deck files and the deck renderer that depended on the retired atlas.
@@ -75,19 +78,5 @@ Obsolete case-study page generators and the `research/automatic_total_docs`
 render fixture are removed, so research commands cannot recreate retired site
 pages or copy rendered PNGs back into the documentation.
 
-Private project references and private benchmark passages are removed from
-source comments, test notes and the changelog; the private predecessor
-package's branch, commit and blob provenance under
-`research/historical_model_inventory` is replaced by a pointer to the private
-archive, and a host nickname in `web-macro/src/app_data.jl` by a generic one.
-What remains, by decision or by design: the grey-seal model under
-`research/seal` names its private source repository (the user's open decision
-on keeping or dropping it); the test environment prefers a fleet mirror
-directory under the home directory before cloning from GitHub
-(`test/setup_env.jl`, `test/dependency_floors_test.jl`, `test/README.md`);
-and the two deployed-app manifests above. The paired-field and station-series test
-fixtures retain their synthetic data and model structure at the package
-owner's direction; they originated in the author's own private prototypes.
-Whether to replace that structure with independently written fixtures is a
-separate user decision. No client data or client-owned code was identified in
-those two fixtures.
+The paired-field and station-series test fixtures retain the author's own
+model structures and synthetic data at the package owner's direction.

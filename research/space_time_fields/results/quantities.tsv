@@ -1,0 +1,5 @@
+quantity	unit	description	median	q025	q975	rhat	ess_bulk	ess_tail
+Observation noise SD	response units	Generated with 0.25; prior median 0.35, 95% 0.013–1.8	0.244	0.212	0.282	1.000	9564	8727
+Field SD	response units	Prior median 0.69, 95% 0.025–3.7	0.55	0.42	0.78	1.009	410	979
+Spatial length	km	Prior median 25, 95% 9.4–67	31	20	51	1.005	710	1811
+Temporal length	time units	Prior median 4, 95% 1.5–11	12	6	23	1.000	4191	5801

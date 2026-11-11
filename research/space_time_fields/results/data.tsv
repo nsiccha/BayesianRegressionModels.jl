@@ -1,0 +1,8 @@
+quantity	value
+Square side (km)	100
+Stations	24
+Observation times	1, 3, 6
+Observations	144
+Position–time states	72
+Neighbors	8
+Generating noise SD	0.25

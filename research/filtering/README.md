@@ -3,8 +3,8 @@
 The public [filtering example](../../docs/src/filtering.md) uses one synthetic
 Poisson state-space model to compare cumulative SMC, Gaussian carried windows,
 ordinary state filtering, a learning filter, and a full-data MCMC reference.
-A second small model demonstrates selective coordinates when one existing unit
-receives new counts.
+A second small model demonstrates selective coordinates when a unit the first
+fit never saw receives its first count.
 
 ## Reproduction
 
@@ -75,10 +75,12 @@ simulated path is descriptive, not a calibration study.
 
 `summary.tsv` records active-coordinate counts for the scan example. The
 program also checks checkpoint continuation. The separately verified selective
-example samples the observed unit's log rate while recovering the shared level
-and other rate from their carried conditional law; its coordinate counts are
-added when running harness version 2. The scan example need not become
-low-dimensional under automatic selection.
+example adds a third unit: it samples the new unit's fresh log rate and the
+shared level its prior reads, and recovers the first two rates from their
+carried conditional law. It needs ReactiveKernels 0.1.156 and
+ReactiveKernelsPPL 0.1.154 (the test environment's pin `4fa3b589`); its
+coordinate counts are added when running harness version 2. The scan example
+need not become low-dimensional under automatic selection.
 
 ## Checkpoint handling
 
@@ -97,6 +99,6 @@ The receipt's `started` field records the experiment's first invocation;
 that exports the tables, which can resume previously completed fits. Sampling
 completion and elapsed time are retained separately in `completion.tsv`.
 The saved main comparisons used harness version 1 and BRM 0.2.272, as their
-receipt records. Version 2 adds the separately verified existing-unit selection
+receipt records. Version 2 adds the separately verified fresh-unit selection
 example and includes the inference program in the cache key; its main comparison
 settings are unchanged. Use a fresh checkpoint directory for version 2.

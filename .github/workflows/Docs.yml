@@ -40,7 +40,14 @@ jobs:
         run: git config --global url."https://x-access-token:${{ secrets.PAT_TOKEN }}@github.com/".insteadOf "https://github.com/"
       - uses: julia-actions/setup-julia@v2
         with:
-          version: '1.10'
+          # 1.11, not the 1.10 LTS: every official 1.10.x carries the union-split
+          # inlining miscompile JuliaLang/julia#52644 (fixed in 1.11), which makes
+          # `nameof` return a type variable's name under a `Type{<:Distribution}`
+          # guard once a few extra `nameof` methods are loaded. BRM then binds a
+          # prior constructor as `T` and ReactiveKernelsPPL refuses the program, so
+          # the pages that construct an RKBRMI fail. The fleet hosts run a patched
+          # 1.10.12; hosted runners only have official builds.
+          version: '1.11'
       - uses: julia-actions/cache@v2
       - uses: actions/setup-node@v4
         with:
@@ -58,8 +65,9 @@ jobs:
           # and precompiles the packages it actually consumes.
           JULIA_PKG_PRECOMPILE_AUTO: "0"
         # BRM's nsiccha-org runtime dependencies must be developed explicitly:
-        # Julia 1.10 ignores Project.toml's `[sources]`. Clone the public
-        # sources and Pkg.develop the whole closure in one batch (see /ci §5).
+        # the closure is unregistered, and only the top-level project's
+        # `[sources]` would be honoured. Clone the public sources and
+        # Pkg.develop the whole closure in one batch (see /ci §5).
         # AlgebraOfVega renders the figures; its web dependencies use the
         # same public source pins as the tested BRM environment.
         #
@@ -82,10 +90,13 @@ jobs:
           git clone -b devibe https://github.com/nsiccha/StanBlocks.jl.git
           julia --project=docs -e '
             using Pkg, TOML
-            # Julia 1.10 ignores [sources]; read the BRM pins here.
+            # The pins live in the three Project files; the docs ones are a
+            # plain table, not `[sources]`, so Pkg 1.11 does not also try to
+            # fetch them (a url source conflicts with developing the same
+            # package by path).
             release = TOML.parsefile("Project.toml")["sources"]
             testenv = TOML.parsefile("test/Project.toml")["sources"]
-            docenv = TOML.parsefile("docs/Project.toml")["sources"]
+            docenv = TOML.parsefile("docs/Project.toml")["docs_pins"]
             function checkout(name, source)
               path = joinpath(ENV["RUNNER_TEMP"], name * ".jl")
               run(`git clone --no-checkout $(source["url"]) $path`)

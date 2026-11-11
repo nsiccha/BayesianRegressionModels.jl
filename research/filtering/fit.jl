@@ -98,14 +98,14 @@ function selective_example(progress)
     initial = brm_smc_fit(growing_model(initial_data); rng=Xoshiro(701),
         particles=1024, options=tuning_options(), progress)
     carried = brm_smc_carry(initial; basis=:correlation)
-    next_data = (; initial_data..., unit=[2], y=[22])
+    next_data = (; initial_data..., U=3, unit=[3], y=[9])
     window = brm_smc_update(carried, growing_model(next_data);
         coordinates=:auto, rng=Xoshiro(702), particles=1024,
         options=tuning_options(), progress)
     @assert window.state.temperature == 1
-    @assert size(window.state.positions, 1) == 1
+    @assert size(window.state.positions, 1) == 2
     recovered = brm_smc_recover(window, window.state.positions[:, 1]; rng=Xoshiro(703))
-    @assert length(recovered) == 3
+    @assert length(recovered) == 4
     [(; quantity="selective_active_coordinates", value=size(window.state.positions, 1)),
         (; quantity="selective_full_coordinates", value=length(recovered))]
 end

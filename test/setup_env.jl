@@ -409,8 +409,15 @@ const PINS = [
     # definition read by its fields from an untranslatable helper as a
     # `prepare_data` input (RK 0.1.151, snag jax-source-refus-8c6ed1ec), which
     # the car bodies' module needs, and a data-dependent `throw` becomes a
-    # masked runtime check (RK 0.1.149).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "298eaff0967c446936fbb212e8b92322e6a2876c"),
+    # masked runtime check (RK 0.1.149). 4fa3b589 (RK main, RK 0.1.156 /
+    # RKPPL 0.1.154) contains it: a selective window's fresh prior may read a
+    # data-valued scale through BRM's named `<vector>_prior_scale` (snag
+    # selective-fresh-96f7fe96), which research/filtering's fresh-unit
+    # selective example needs. RK's and RKPPL's own `[sources]` are unchanged.
+    # 95e62eab (RK 0.1.163 / RKPPL 0.1.155) preserves the row form of a
+    # cell-local gather (snag cell-factor-ad-r-b4e2a0f4), which the nested
+    # `@plate` sparse Laplace in `nlme_laplace_sparse.jl` needs.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "95e62eabdac3f181b62f78b202763a84563707da"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
