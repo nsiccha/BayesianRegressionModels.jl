@@ -26,4 +26,4 @@ function setup_start()
     return nothing
 end
 
-abspath(PROGRAM_FILE) == @__FILE__ && setup_start()
+abspath(PROGRAM_FILE) == (@__FILE__) && setup_start()

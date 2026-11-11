@@ -72,4 +72,4 @@ function fit_intro(; n_draws=1000, n_chains=4, seed=20261111)
     return telemetry
 end
 
-abspath(PROGRAM_FILE) == @__FILE__ && fit_intro()
+abspath(PROGRAM_FILE) == (@__FILE__) && fit_intro()
