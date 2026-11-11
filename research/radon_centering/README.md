@@ -115,6 +115,10 @@ ineligible for completion.
 
 ## Outputs and interpretation
 
+The fitting and export commands produce the files below. The public repository
+retains small diagnostic summaries; draw-level tables, the full PPC table and
+rendered figures must be regenerated in an output directory.
+
 - `provenance.toml` and `packages.tsv`: exact source/data/model hashes, code,
   dependency commits, sampler settings, timing/counter scope.
 - `source_density_gradient_audit.tsv`: six full-vector density and gradient
@@ -134,7 +138,7 @@ ineligible for completion.
   `density_jacobian_gradient_invariants.tsv`: all 10,000 draws for pair
   geometry, exactly 1,000 evenly selected saved draws per displayed gradient
   facet, and transformed density/Jacobian/gradient/roundtrip checks.
-- `ppc_curves.tsv` (committed as `results/ppc_intervals.tsv`): native BRM
+- `ppc_curves.tsv`: native BRM
   predictive-replay quantiles for all 12,573 observations and 10,000 pilot draws.
 - `figures/figure_manifest.tsv`: hashes binding every PNG to its AlgebraOfVega
   specification.
