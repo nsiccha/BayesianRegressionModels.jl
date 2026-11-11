@@ -20,8 +20,9 @@ function fit_intro(; n_draws=1000, n_chains=4, seed=20261111)
     if isfile(receipt)
         recorded = Dict{String,String}(Tuple(split(line, '\t'; limit=2))
                                       for line in readlines(receipt)[2:end])
-        get(recorded, "key", "") == key && isfile(joinpath(RESULTS, "population.tsv")) &&
-            isfile(joinpath(RESULTS, "ppc.tsv")) && return (; key, cached=true)
+        get(recorded, "key", "") == key && haskey(recorded, "completed") &&
+            all(name -> isfile(joinpath(RESULTS, name)),
+                ("population.tsv", "ppc.tsv", "fits.tsv")) && return (; key, cached=true)
     end
     write_receipt(receipt,
         ["key" => key, "harness_version" => harness_version,
@@ -43,8 +44,9 @@ function fit_intro(; n_draws=1000, n_chains=4, seed=20261111)
         chains = [c[:, coordinate] for c in constrained]
         pooled = reduce(vcat, chains)
         diag = chain_diagnostics(chains)
-        push!(rows, (quantity, unit, description, median(pooled), quantile(pooled, 0.025),
-                     quantile(pooled, 0.975), diag.rhat, diag.ess_bulk, diag.ess_tail))
+        push!(rows, (quantity, unit, description, fmt(median(pooled)), fmt(quantile(pooled, 0.025)),
+                     fmt(quantile(pooled, 0.975)), round(diag.rhat; digits=3),
+                     round(Int, diag.ess_bulk), round(Int, diag.ess_tail)))
     end
     err = (; name="err", unit="response", description="residual standard deviation",
              kind=:scalar, logical=:err, transform=identity)
@@ -64,6 +66,7 @@ function fit_intro(; n_draws=1000, n_chains=4, seed=20261111)
             println(io, k, '\t', v)
         end
         println(io, "completed\t", now())
+        println(io, "status\tcompleted")
     end
     report_fits([("start", fit)])
     return telemetry

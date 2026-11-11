@@ -221,6 +221,7 @@ function main(; chains = 4, n_draws = 1000, warmup = 1000, seed = 7,
         native_divergences = sum(r.n_divergent_samples for r in fit.results)
         saved = (; signature, shape=size(native), draws=vec(native), seconds=native_seconds,
             divergences=native_divergences, completed=fit.completion.n_completed,
+            omitted_chain_indices=fit.completion.omitted_chain_indices,
             chains_requested=chains, seed=100, samples=n_draws)
         open(io -> JSON.print(io, saved), cache, "w")
         fit_receipt("native", signature, native_settings, collect(101:100+chains);
@@ -245,7 +246,8 @@ function main(; chains = 4, n_draws = 1000, warmup = 1000, seed = 7,
 
     # 4. Python: parity values and NumPyro NUTS (research/jax/sample_numpyro.py).
     python_out = joinpath(RESULTS, "python.json")
-    if !reuse_draws || !isfile(python_out)
+    fit_python = !reuse_draws || !isfile(python_out)
+    if fit_python
         python_settings = (; chains, warmup, samples=n_draws, target_accept=0.8)
         fit_receipt("jax", signature, python_settings, seed)
         run(`$PYTHON $(joinpath(HERE, "sample_numpyro.py")) $(joinpath(HERE, "model.py"))
@@ -253,7 +255,7 @@ function main(; chains = 4, n_draws = 1000, warmup = 1000, seed = 7,
         --chains $chains --warmup $warmup --samples $n_draws --seed $seed`)
     end
     py = JSON.parsefile(python_out)
-    if !reuse_draws
+    if fit_python
         fit_receipt("jax", signature, (; chains, warmup, samples=n_draws, target_accept=0.8), seed;
             telemetry=(; seconds=py["elapsed_seconds"], divergent=py["divergences"],
                 omitted_chains="none", dimension=d, chains_kept=chains, draws_per_chain=n_draws,
@@ -356,6 +358,11 @@ function main(; chains = 4, n_draws = 1000, warmup = 1000, seed = 7,
         (; key = "data_inputs", value = join(py["data_names"], ", ")),
         (; key = "prepared_inputs", value = join(py["prepared_names"], ", "))]
     write_tsv(joinpath(RESULTS, "run.tsv"), record)
+    return (native=(; seconds=native_seconds, divergent=native_divergences,
+                    omitted_chains=get(saved, "omitted_chain_indices", "unavailable in this cache"),
+                    dimension=d, chains_kept=saved["completed"], draws_per_chain=n_draws),
+            jax=(; seconds=py["elapsed_seconds"], divergent=py["divergences"],
+                 omitted_chains=Int[], dimension=d, chains_kept=chains, draws_per_chain=n_draws))
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__
