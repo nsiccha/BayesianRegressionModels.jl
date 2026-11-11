@@ -77,22 +77,63 @@ simulated path is descriptive, not a calibration study.
 program also checks checkpoint continuation. The separately verified selective
 example adds a third unit: it samples the new unit's fresh log rate and the
 shared level its prior reads, and recovers the first two rates from their
-carried conditional law. It needs ReactiveKernels 0.1.156 and
-ReactiveKernelsPPL 0.1.154 (the test environment's pin `4fa3b589`); its
-coordinate counts are added when running harness version 2. The scan example
-need not become low-dimensional under automatic selection.
+carried conditional law. It needs at least ReactiveKernels 0.1.156 and
+ReactiveKernelsPPL 0.1.154; the current test pin `23fbef437` also includes the
+checkpoint rescore API described below. Its coordinate counts are added when
+running harness version 2. The scan example need not become low-dimensional
+under automatic selection.
 
 ## Checkpoint handling
 
 Intermediate objects are cached atomically in the supplied directory. Keep the
 original model, data and package versions with them. Exact continuation also
 checks reproduced endpoint densities bit for bit; a different CPU or numerical
-environment may fail that check even with the same package versions. Keep the
-original execution environment for exact resume. Use a fresh directory when
-changing any model, input, setting or seed. Deserialization is only for trusted
-files. A completed production schedule is saved; interrupting a tuning pilot
-requires its separate tuning checkpoint mechanism. The public page's checkpoint
-example is exercised by the experiment before the full fits continue.
+environment may fail that check even with the same package versions. Use a fresh
+directory when changing any model, input, setting or seed. Deserialization is
+only for trusted files. A completed production schedule is saved; interrupting
+a tuning pilot requires its separate tuning checkpoint mechanism. `fit.jl`
+exercises exact checkpoint continuation before completing the remaining fits.
+
+### Moving a production checkpoint
+
+With BRM 0.2.279 and ReactiveKernelsPPL 0.1.156 (ReactiveKernels pin
+`23fbef437`), `brm_smc_rescore` explicitly accepts bounded endpoint-score
+roundoff on the destination host. Reconstruct the original training model,
+retain the same Julia and package versions, and supply the same cumulative
+data as for resume:
+
+```julia
+checkpoint = deserialize("smc-checkpoint.jls")
+rk = RKBRMI(filtering_model(training))
+rescored = brm_smc_rescore(rk, checkpoint; data=cumulative, rtol=1e-10)
+last(rescored.state.rescored)  # changed, max_abs, max_rel, rtol, codegen
+serialize("smc-checkpoint-rescored.jls", rescored)
+restored = brm_smc_resume(rk, rescored; data=cumulative)
+```
+
+Each score must satisfy `abs(new - saved) <= rtol * max(abs(saved), 1)`.
+The returned copy owns the updated scores and appended audit record; the input
+is unchanged. Resume remains exact and never rescores implicitly. Model, data,
+version, layout and state checks still apply. For later cumulative updates,
+pass `previous_data` to both calls. For a carried window, rebuild its `BRMI`
+model using the current window and pass that instead of the training `RKBRMI`
+and cumulative-data keywords; this also handles compact coordinates.
+Interrupted tuning pilots use their separate resume mechanism and have no
+rescore adapter.
+
+This does not upgrade old checkpoints. The archived main comparison uses
+ReactiveKernelsPPL 0.1.145: keep its original package versions and execution
+environment to resume it. The committed summary tables remain usable by the
+current docs build. `fit.jl` never silently rescores its cache; a new run with
+the current environment needs a fresh checkpoint directory.
+
+The focused adapter regression checks roundoff acceptance, exact resume,
+unchanged input, audit records and refusal of changed data without rerunning
+the main comparison:
+
+```sh
+julia --project=test test/smc_rescore.jl
+```
 
 The receipt's `started` field records the experiment's first invocation;
 `commit`, source hashes and `seconds_this_invocation` describe the invocation

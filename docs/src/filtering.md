@@ -386,6 +386,7 @@ by roundoff, explicitly rescore it on the destination host before resuming
 ```julia
 checkpoint = deserialize("smc-checkpoint.jls")
 rescored = brm_smc_rescore(rk, checkpoint; data=cumulative, rtol=1e-10)
+last(rescored.state.rescored)  # changed, max_abs, max_rel, rtol, codegen
 serialize("smc-checkpoint-rescored.jls", rescored)
 restored = brm_smc_resume(rk, rescored; data=cumulative)
 ```
@@ -417,6 +418,9 @@ nonlinear approximations and checks of the approximation's accuracy.
 
 The [research notes and scripts](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/filtering)
 record settings, seeds, checkpoint handling and the numerical comparison.
+The saved main comparison uses ReactiveKernelsPPL 0.1.145. Its checkpoints
+require their original environment; rescore does not migrate them. To run the
+example with the current pinned versions, choose a fresh checkpoint directory.
 
 ```sh
 julia --project=test test/setup_env.jl
