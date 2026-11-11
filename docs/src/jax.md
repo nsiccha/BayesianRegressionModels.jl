@@ -60,8 +60,9 @@ Markdown.MD([Markdown.Code("julia", code),
     Markdown.Paragraph(["The export contains $(ncodeunits(mod.source.text)) bytes of Python source."])])
 ```
 
-The resulting [model.py](downloads/jax/model.py)
-contains these entry points:
+```@raw html
+<p>The resulting <a href="downloads/jax/model.py" target="_self" download><code>model.py</code></a> contains these entry points:</p>
+```
 
 | Entry point | Result |
 |:--|:--|
