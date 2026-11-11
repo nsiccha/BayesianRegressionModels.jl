@@ -251,7 +251,7 @@ uuid = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 
 [[deps.BayesianRegressionModels]]
 deps = ["CategoricalArrays", "Distributions", "ElasticArrays", "InverseFunctions", "LinearAlgebra", "LogDensityProblems", "LogExpFunctions", "MutatingFunctions", "OrderedCollections", "OutputSignatures", "Random", "RuntimeGeneratedFunctions", "SpecialFunctions", "StanBlocks", "Statistics", "StatsBase"]
-path = "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/pupil4-study"
+path = "<local path omitted>"
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 version = "0.2.1"
 
@@ -1108,7 +1108,7 @@ version = "2025.12.2"
 
 [[deps.MutatingFunctions]]
 deps = ["LinearAlgebra", "Random", "Statistics"]
-path = "/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/mutatingfunctions-4fc41b1c7b77"
+path = "test/.bootstrap/mutatingfunctions-4fc41b1c7b77"
 uuid = "8a4c2d94-4b3b-4f9e-be63-a3c0cd816e3a"
 version = "0.1.0"
 
@@ -1245,7 +1245,7 @@ uuid = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
 version = "1.8.2"
 
 [[deps.OutputSignatures]]
-path = "/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/outputsignatures-121de3194f02"
+path = "test/.bootstrap/outputsignatures-121de3194f02"
 uuid = "86cfaae4-1704-4c69-ba62-d919d81ae5f8"
 version = "0.1.0"
 weakdeps = ["LinearAlgebra", "Statistics"]
@@ -1688,7 +1688,7 @@ version = "0.1.7"
 
 [[deps.StanBlocks]]
 deps = ["BridgeStan", "JSON", "LogDensityProblems", "Markdown", "OrderedCollections", "StanLogDensityProblems", "Statistics", "Tables"]
-path = "/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/stanblocks-bec23bc3c523"
+path = "test/.bootstrap/stanblocks-bec23bc3c523"
 uuid = "2e771a56-c23a-4e0b-9282-20c2e37157e9"
 version = "0.2.1"
 
@@ -1909,7 +1909,7 @@ version = "0.1.17"
 
 [[deps.TreeArrays]]
 deps = ["Statistics", "Tables"]
-path = "/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/treearrays-c317cc003fc4"
+path = "test/.bootstrap/treearrays-c317cc003fc4"
 uuid = "5daaa025-ac78-4e9a-8805-78946e672e43"
 version = "0.1.0"
 
@@ -1921,7 +1921,7 @@ version = "0.1.0"
 
 [[deps.Treebars]]
 deps = ["Dates", "OrderedCollections"]
-path = "/home/n/.local/state/kb-agents-worktrees/BayesianRegressionModels-docs-adaptive-centering/test/.bootstrap/treebars-c02aa16ab1b0"
+path = "test/.bootstrap/treebars-c02aa16ab1b0"
 uuid = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 version = "0.1.0"
 
@@ -1963,7 +1963,7 @@ uuid = "4ec0a83e-493e-50e2-b9ac-8f72acf5a8f5"
 
 [[deps.WarmupHMC]]
 deps = ["CRC32c", "Dates", "DifferentiationInterface", "Distributions", "DynamicHMC", "ElasticArrays", "FillArrays", "InverseFunctions", "LinearAlgebra", "LogDensityProblems", "LogExpFunctions", "MCMCDiagnosticTools", "Mmap", "OnlineStatsBase", "Pathfinder", "Random", "Serialization", "Statistics", "TSVD", "Treebars"]
-path = "/home/n/scratch/kb-agent-tmp/BayesianRegressionModels-docs-adaptive-centering/warmuphmc-finite-transport-fix"
+path = "<local path omitted>"
 uuid = "60658175-6863-4866-a322-ab51a11c0cfe"
 version = "0.2.1"
 

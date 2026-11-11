@@ -21,8 +21,8 @@ html_attribute(value) = replace(string(value), '&' => "&amp;", '"' => "&quot;",
     figure(spec; caption, alt=caption)
 
 Embed an AlgebraOfVega figure in a Documenter `@eval` block. The page carries
-the generated Vega-Lite JSON; the theme calls `vegaEmbed` after hydration and
-redraws on a light/dark switch. No rendered asset is written to the repository.
+the generated Vega-Lite JSON; the theme calls AlgebraOfVega's browser runtime
+after hydration. It follows light/dark switches. No rendered asset is committed.
 """
 function figure(spec; caption::AbstractString, alt::AbstractString=caption)
     json = AlgebraOfVega.to_json(spec)
@@ -135,6 +135,46 @@ function results_table(relative_path::AbstractString;
         push!(cells, [getproperty(row, column) for (column, _) in columns])
     end
     return Markdown.MD([Markdown.Table(cells, fill(:l, length(columns)))])
+end
+
+"""
+The rows of several fits' tables of the same shape in one table, each file's
+rows prefixed with its name under the column header `label`.
+"""
+function results_tables(labelled::Vector{<:Pair{<:AbstractString,<:AbstractString}};
+                        columns::Vector{<:Pair{Symbol,<:AbstractString}},
+                        label::AbstractString="fit")
+    cells = [vcat([String(label)], [String(l) for (_, l) in columns])]
+    for (name, relative_path) in labelled
+        lines = readlines(normpath(joinpath(REPOSITORY_ROOT, relative_path)))
+        header = Symbol.(split(lines[1], '\t'))
+        for (column, _) in columns
+            column in header || error("$relative_path has no column $column")
+        end
+        for line in lines[2:end]
+            row = NamedTuple{Tuple(header)}(Tuple(String.(split(line, '\t'))))
+            push!(cells, vcat([String(name)], [getproperty(row, column) for (column, _) in columns]))
+        end
+    end
+    length(cells) > 1 || error("no rows in $(last.(labelled))")
+    return Markdown.MD([Markdown.Table(cells, fill(:l, length(cells[1])))])
+end
+
+"The receipts of several fits side by side: one row per key, one column per fit."
+function receipts_table(labelled::Vector{<:Pair{<:AbstractString,<:AbstractString}})
+    read_receipt(relative_path) = [String.(split(line, '\t'; limit=2)) for line in
+                                   readlines(normpath(joinpath(REPOSITORY_ROOT, relative_path)))[2:end]]
+    receipts = [name => read_receipt(path) for (name, path) in labelled]
+    keys_in_order = String[]
+    for (_, pairs) in receipts, (k, _) in pairs
+        k in keys_in_order || push!(keys_in_order, k)
+    end
+    value(pairs, k) = (i = findfirst(p -> p[1] == k, pairs); isnothing(i) ? "" : pairs[i][2])
+    cells = [vcat([""], [String(name) for (name, _) in labelled])]
+    for k in keys_in_order
+        push!(cells, vcat([k], [value(pairs, k) for (_, pairs) in receipts]))
+    end
+    return Markdown.MD([Markdown.Table(cells, fill(:l, length(cells[1])))])
 end
 
 """Render a drift-proof repository source region as a documentation code block."""

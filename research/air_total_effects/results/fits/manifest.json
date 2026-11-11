@@ -203,7 +203,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/eb085b370871fd08.bin",
+        "path": "<local path omitted>",
         "bytes": 12635971,
         "sha256": "9b1df40d8d64428f06b207611ef38af65e777df6feda3434f3a3bc417d8194f0"
       }
@@ -329,7 +329,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/36431e06c39fe134.bin",
+        "path": "<local path omitted>",
         "bytes": 4473854,
         "sha256": "825d9a1f08ec130a30e8b06954e45f3ebc9f6d46b7cfa20b6a677544f8be2b41"
       }
@@ -440,7 +440,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/764b1186b3cbe0b5.bin",
+        "path": "<local path omitted>",
         "bytes": 1760902,
         "sha256": "f4d8723907778a2b0896b090902377c5905e218951e62bc367efb998b57e460f"
       }
@@ -526,7 +526,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/682273fad71e44ba.bin",
+        "path": "<local path omitted>",
         "bytes": 2181649,
         "sha256": "72fe4057d285b37f269f7f62fddff6b22d14dbb3bdae837655b239aa4f9a72d9"
       }
@@ -612,7 +612,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/07e75096827497a0.bin",
+        "path": "<local path omitted>",
         "bytes": 3242464,
         "sha256": "49af53e301b62a6495bdfe90c957f8138e5dd9fc03c636bbbcb257239334e1d0"
       }
@@ -698,7 +698,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/40a2e2beeb6607dd.bin",
+        "path": "<local path omitted>",
         "bytes": 3243119,
         "sha256": "b0d1b437748f00a84564cbdc343726943e83b64d01eb1a4d55c0ab746c2bfd99"
       }
@@ -804,7 +804,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/c74cd251d0e20c19.bin",
+        "path": "<local path omitted>",
         "bytes": 4022032,
         "sha256": "eda68991c30ddba96da12c445a40f88ea1095b97370b944709f9d0f8262ae384"
       }
@@ -1015,7 +1015,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/7b3c19dcbe1d15a3.bin",
+        "path": "<local path omitted>",
         "bytes": 7697032,
         "sha256": "890750abc567d5bf71b6619bd75fd54ff893b817b58ecbe75f44f1c2293ea16c"
       }
@@ -1141,7 +1141,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/e4ac53d142483a56.bin",
+        "path": "<local path omitted>",
         "bytes": 2724318,
         "sha256": "48f295e3f8e38ac8cbc6d54073f8231089442f99d2707ac99794351051838226"
       }
@@ -1252,7 +1252,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/ba8143d8efb9b6cd.bin",
+        "path": "<local path omitted>",
         "bytes": 1046189,
         "sha256": "6b6747731cf7ec0a85fe0948c0d2afe1cec1e54195d3f1c73a55b0267abd4f40"
       }
@@ -1338,7 +1338,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/9523cd1389f48078.bin",
+        "path": "<local path omitted>",
         "bytes": 1429885,
         "sha256": "2db41a44f28e089e800bc281f2ad5b7a2cabaf55a8b7cd53ff1ea5f2d2cd960e"
       }
@@ -1424,7 +1424,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/d3754dac5ad8082a.bin",
+        "path": "<local path omitted>",
         "bytes": 2150186,
         "sha256": "e01ea57b993e69daacee0a19c2bccb1bf9ae813000e9a1ffc57bc7502297108f"
       }
@@ -1510,7 +1510,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/00d660f785082633.bin",
+        "path": "<local path omitted>",
         "bytes": 2157098,
         "sha256": "ab43268012a20a6647fce60e3f4369ccb1ffa6ee2d168efe863c81bc6d82d559"
       }
@@ -1616,7 +1616,7 @@
     "parts": [
       {
         "index": 0,
-        "path": "/home/niko/.local/state/kb-agents/uploads/90822b7a14db21d7.bin",
+        "path": "<local path omitted>",
         "bytes": 2635825,
         "sha256": "1d0c57723575fa92ffbf53f78343979c4b1ce2833d5f853a25b66996d69f9de5"
       }

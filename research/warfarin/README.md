@@ -11,7 +11,7 @@ behind `docs/src/warfarin.md`.
 | `joint_reproduce.jl` | `warfarin_joint_brmi`, one posterior over both channels (`JOINT.md`), with its checks |
 | `fit.jl` | the WarmupHMC fits of the three models; writes `results/` |
 | `figures.jl` | the figures of the docs page from `results/` |
-| `results/` | `population.tsv` (estimates and diagnostics), `fits.tsv` (sampler report), `ppc.tsv` (posterior predictive quantiles per observation), `pk_subject_medians.tsv` (the second stage's inputs) |
+| `results/` | one directory per fit (`pk/`, `pd/`, `joint/`), each with `population.tsv` (estimates and diagnostics), `fits.tsv` (sampler report), `ppc.tsv` (posterior predictive quantiles per observation) and `receipt.tsv` (what the numbers are the numbers of); `pk_subject_medians.tsv` (the second stage's inputs) |
 
 ## What is reproduced
 

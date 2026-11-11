@@ -85,6 +85,7 @@ jobs:
             # Julia 1.10 ignores [sources]; read the BRM pins here.
             release = TOML.parsefile("Project.toml")["sources"]
             testenv = TOML.parsefile("test/Project.toml")["sources"]
+            docenv = TOML.parsefile("docs/Project.toml")["sources"]
             function checkout(name, source)
               path = joinpath(ENV["RUNNER_TEMP"], name * ".jl")
               run(`git clone --no-checkout $(source["url"]) $path`)
@@ -95,7 +96,7 @@ jobs:
                       for name in ["PowerScaling", "ReparametrizableDistributions"]]
             for name in ["OutputSignatures", "MutatingFunctions", "AlgebraOfVega",
                          "DynamicObjects", "HTMXObjects", "HTMX", "Treebars"]
-              push!(pinned, PackageSpec(path=checkout(name, testenv[name])))
+              push!(pinned, PackageSpec(path=checkout(name, get(docenv, name, testenv[name]))))
             end
             rk = checkout("ReactiveKernels", testenv["ReactiveKernels"])
             for path in [rk,

@@ -39,7 +39,7 @@ function public_cost_expanded(previous,n)
 end
 
 @testset "public Laplace SVI retained-state cost" begin
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     acceptance_file=joinpath(base,"public-laplace-fit-v1/result.jls")
     checkpoint_file=joinpath(base,"public-laplace-fit-v1/checkpoint.jls")
     accepted=deserialize(acceptance_file)

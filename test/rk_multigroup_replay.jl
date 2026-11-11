@@ -162,7 +162,14 @@ end
         ufit = point(fit)
         u = [ufit[findfirst(==(n),rknames(fit))] for n in rknames(free)]
         effects = build === reporter ? zeros(2,1) : nothing
-        @test value(replay,ufit;effects) ≈ value(free,u;effects) atol=2e-12
+        # Both replays are models of the window's rows, at their own coordinates.
+        @test value(replay,u;effects) ≈ value(free,u;effects) atol=2e-12
+        # The binder's inputs read a draw of the fit in the fit's layout, the
+        # window's probe effects in HAVE (snag `rk-replay-with-r-bf059724`).
+        binder = rk_design_binder(fit;resample_groups=(:probe,))
+        @test value(fit,ufit;bound=binder(window),effects) ≈ value(free,u;effects) atol=2e-12
+        @test value(fit,ufit;bound=rk_design_binder(free;resample_groups=(:probe,))(window),
+            effects) ≈ value(free,u;effects) atol=2e-12
         @test all(isfinite,value(free,u))
         single = merge(window,(;time=[1.3],probe=["new"],sx=[.25],sy=[.25],y=[0.]))
         singleton = RKBRMI(build(single),state;resample_groups=(:probe,))

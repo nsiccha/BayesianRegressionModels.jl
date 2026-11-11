@@ -400,8 +400,12 @@ const PINS = [
     # row's lengths, so reductions mask its padding (RK 0.1.138, snag
     # jax-ragged-index-b8420d16). `test/rk_jax.jl`'s grouped-read case, whose
     # row partition (`src/ragged_rows.jl`) is `prepare_data` host code, needs
-    # both.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "51e6404fa91946693ebfcac9ae4f175da41f6b2a"),
+    # both. 1701fb2e (RK main, RK 0.1.143 / RKPPL 0.1.145) contains it and
+    # admits a density factor on a parameter-derived vector definition
+    # (`d .~ Normal.(0, s)`, snag rkppl-vector-val-c101b992), which the
+    # `rkppl_model(:car_icar)` / `(:car_bym2)` bodies' per-component soft
+    # sum-to-zero needs (`test/rk_statistical_library.jl`).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "1701fb2e1dd30d01305506d7c081486ac6496fcf"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

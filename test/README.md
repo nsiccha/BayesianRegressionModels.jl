@@ -353,6 +353,13 @@ and compiled Stan/native density and gradient agreement with an independent orac
 windows, including data-free state serialization, shared weight identities,
 new and returning labels, reordered levels, cached binder validation, frozen
 prior preprocessing, and dense tensor-field values and native gradients.
+`rk_resample_binder.jl` checks a draw of the fit on designs that resample
+groupings through `rk_design_binder` (snag `rk-replay-with-r-bf059724`): fewer,
+as many and more new levels than the fit, a correlated block shared by two
+predictors, a multi-membership block and a data-free fit, against the fit's own
+values and closed forms at a draw whose coordinates all differ, and the refusal
+of a `gr(g, by = s)` design with other level counts. Run it with
+`julia --project=test test/rk_resample_binder.jl`; it needs no Enzyme.
 `rk_grouped_anisotropic_hsgp.jl` checks per-axis length scales of grouped
 HSGPs: independent, sampled, known and multigroup correlations, default and
 explicit floor bounds, fixed scales, term starts, shared readers and frozen
@@ -1251,7 +1258,7 @@ the test environment above.
 - RK plans the array cell's plate as matrix products (log group `:plate_batching`) and the per-row plate as a cell loop.
 - SBBRMI's compiled Stan density and gradient equal RK's.
 
-ReactiveKernels batches plates from 0.1.127 (RK `fa3deb83`). Below it the batched-plan check is `broken`; this environment's RK pin `51e6404f` (RK 0.1.138) requires it. Everything else passes on both. Each spelling rule in the file's header was found by a refusal. It runs in the test environment, about 3 minutes on one CPU.
+ReactiveKernels batches plates from 0.1.127 (RK `fa3deb83`). Below it the batched-plan check is `broken`; this environment's RK pin `1701fb2e` (RK 0.1.143) requires it. Everything else passes on both. Each spelling rule in the file's header was found by a refusal. It runs in the test environment, about 3 minutes on one CPU.
 
 `rk_plate_invariant_output.jl` checks an RKBRMI `@plate` output whose cell reads
 no per-index value, `decay[g] = exp(log_a)`, over three cells (BRM snag
@@ -1263,7 +1270,7 @@ model-scope `fill` of the same values and central differences. `brm_nlme_model`
 gives each subject's likelihood and η gradient. A one-cell binding is the
 positive control. ReactiveKernelsPPL fixed the shape in 0.1.129 (RK `b6196f114`,
 ReactiveKernels snag `plate-output-of-c4a0ca87`), which this environment's RK pin
-`51e6404f` (RKPPL 0.1.142) carries. On older RKPPL the output is one number. There
+`1701fb2e` (RKPPL 0.1.145) carries. On older RKPPL the output is one number. There
 the three-cell checks are `broken`: a later `decay[2]` raises a `BoundsError`,
 and `sum` and `length` return one cell's value. The one-cell count, total and
 likelihood pass on both. Its `decay` is `broken` there too, because one number is
@@ -2160,7 +2167,7 @@ RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/rk
 ```
 
 The file requires ReactiveKernels' JAX lowering as it landed on RK main
-(RK 0.1.132 / RKPPL 0.1.140 or later; the test pin is `51e6404f`) and refuses
+(RK 0.1.132 / RKPPL 0.1.140 or later; the test pin is `1701fb2e`) and refuses
 to run below it. The CDF-based laws, jit with the prepared data traced as
 arguments, size-generic modules, per-group AR(1) scans, nested `constrain` and
 the multi-axis and level-correlated HSGP terms are required checks. Its testset "every definition BRM emits is documented"
@@ -2525,7 +2532,14 @@ approximation (`inclusive-normal-eff38407`, StanBlocks issue #59); this
 source/graph bridge does not repair or relax that scientific comparison.
 
 `rk_plain.jl` and `rk_statistical_library.jl` exercise BRM-owned statistical
-declarations through ordinary RKPPL lowering. `rk_statistical_source.jl`
+declarations through ordinary RKPPL lowering. `rk_statistical_library.jl` also
+checks the `rkppl_model(:car_icar)` / `(:car_bym2)` bodies on a graph with two
+components, an island and an area without rows against an independent oracle
+of the car term's law (the BYM2 scaling from each component Laplacian's dense
+pseudo-inverse), and checks that the data-bound recipe brm-use documents gives
+the same densities. The bodies need RKPPL 0.1.145 (the test pin `1701fb2e`).
+Run its car testsets alone with `julia --project=test
+test/rk_statistical_library.jl car`. `rk_statistical_source.jl`
 compares emitted reusable block algebra with the former ordinary inline
 source: every statistical submodel allocates its own parameters and returns
 its computed value. Scoped names such as `b_g.tau.1` map bijectively

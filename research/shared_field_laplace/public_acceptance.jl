@@ -35,7 +35,7 @@ end
 
 @testset "public conditional Gaussian SVI acceptance" begin
     mode=only(ARGS);mode in ("fit","reproduce","integrated") || error("use fit, reproduce or integrated")
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     reference=deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))
     reference.reference_ok || error("reference gate is not green")
     directory=joinpath(base,"public-laplace-"*mode*"-v1")

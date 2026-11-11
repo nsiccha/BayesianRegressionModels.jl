@@ -12,6 +12,87 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.273
+
+- Changed: an RKBRMI `cdar(step; by = group, cor = C)` walk is one program for
+  every dataset of its declaration, and costs `O(P W)` per evaluation (`P`
+  groups, `W` steps) instead of `O(P W²)`. The program computes the walk's
+  groups and steps from fit-role inputs (`brm_fit_levels(<column>_fit)`), so
+  `P` and `W` are inputs, not literals: networks of 2, 6 and 12 stations, or
+  other day grids, share one RKPPL program and one JAX module. The walk is one
+  recurrence per group, `d[1] = sigma e[1]`,
+  `d[w] = rho d[w - 1] + sigma sqrt(1 - rho^2) e[w]`, in the RK kernel
+  `brm_cdar_walk`, replacing the closed form `sigma * (L * eta) * T` with
+  its `W × W` decay matrix (and the bound `lag`, `mask` and `first` columns,
+  `W²` numbers each). Coordinates, densities and gradients are unchanged, and
+  a cell still reads only its own group's innovations (or the groups a
+  correlated `C` couples to it), so `brm_nlme_view` and per-unit Laplace and
+  SVI read the walk as before: each group's innovations are gathered at its
+  positions in the grid, bound as data (`brm_walk_rows`). Rows find their
+  group and step by binary search (`brm_walk_positions`). (Todo `0vwe5uy`;
+  user principles `0ikeidi`, sizes are runtime inputs, and `0v0xrxl`, never
+  quadratic.)
+
+## 0.2.272
+
+- Fixed: `rk_design_binder(rk; resample_groups=[:g])` gives the inputs of a cut
+  at a draw `u` of the fit again, for any number of new levels of `g`.
+  Since ReactiveKernelsPPL 0.1.108 a query unpacks `u` with its binding's
+  layout. The design's binding sized `g`'s standardized draws by the design's
+  levels, so every coordinate after the block was read at a shifted position,
+  with no error: with 2 new subjects on a 12-subject fit, the intercept came
+  from a subject's standardized draw. `binder(design)` and `binder.fitted` now
+  hold the fit's level set of `g` (`g_fit_levels`, or a multi-membership
+  block's `b_mm_..._groups`), which sizes the block as in the fit, while the
+  rows read the design's own levels by position (`g_level`). The new levels'
+  effects come in HAVE as before. A data-free fit takes the level set from its
+  fitted state.
+- Changed: `binder(design)` with `resample_groups` no longer equals
+  `rk_bound_data(reprocess(rk, design; resample_groups))`. That replay is a model
+  of its own rows, whose coordinates hold the new levels' standardized draws,
+  which SVI windows and slices (`RKBRMI(builder(slice), state;
+  resample_groups)`) fit. A draw of the fit does not apply to it: its density
+  refuses one by length, and RKPPL's whole-model queries over `rk_bound_plan`
+  read the replay's own coordinates. **Breaking:** a caller that evaluated a fit
+  draw with `rk_bound_data(reprocess(rk, d; resample_groups))` (brm-use's
+  earlier recipe) takes its inputs from `rk_design_binder(rk; resample_groups)(d)`
+  instead. The earlier recipe has misread the draw since RKPPL 0.1.108.
+- Refused: on a binder design that gives a `gr(g, by = s)` block, or a data-free
+  fit's multi-membership block, other levels than the fit's. Those blocks size
+  their draws by the design's own columns, which no fitted level set replaces,
+  so a draw of the fit does not apply. With the fit's level counts they bind as
+  before.
+- Tests: `test/rk_resample_binder.jl` checks fewer, as many and more new levels
+  than the fit, a correlated block shared by two predictors, a multi-membership
+  block, a data-free fit and the `gr` refusal, against the fit's own values and
+  closed forms at a draw whose coordinates all differ. The resampled-replay
+  checks in `rk_reprocess.jl`, `rk_predictive.jl` and `rk_multigroup_replay.jl`
+  read the binder's inputs. `rk_design_binder.jl` and `rk_fitted_state.jl` compare
+  a resampling binder's inputs with the replay's plus the fit's level set, and
+  `rk_design_binder.jl` checks the binder's value at a draw of the fit against
+  the replay's value at that draw carried onto its own coordinates by name.
+
+## 0.2.271
+
+- Added: `rkppl_model(:car_icar)` and `rkppl_model(:car_bym2)`, the areal field
+  of the `car(area; edges=(from, to), type=:icar | :bym2)` term as BRM-owned
+  `@rkppl` bodies over raw labels, `r ~ body(area, from, to)`. Each prepares
+  its graph in the model with `StatisticalPreparation.car_graph`, gives
+  `phi ~ ICAR(node1, node2)` one soft sum-to-zero `Normal(0, 0.001 n_c)` per
+  connected component (one vector density factor, so the body does not depend
+  on the graph), reads 0 on an island under ICAR and `sigma * theta` under
+  BYM2, and returns each row's effect. Priors: `sigma ~ HalfNormal(1)`,
+  `rho ~ Beta(0.5, 0.5)`. The BYM2 body spells the structured scale
+  `sqrt(rho) .* sqrt.(inv_scale)`, finite in its derivative on an island.
+  Lowering them needs ReactiveKernelsPPL 0.1.145, which admits a density
+  factor on a parameter-derived vector definition; on older RKPPL they are
+  refused when lowered and the other bodies are unaffected. `jax_source`
+  does not translate a model calling them yet (ReactiveKernels snag
+  `jax-source-refus-8c6ed1ec`); the same statements over `car_graph`'s
+  fields bound as data give the same densities and translate. The test
+  environment pins RK main `1701fb2e` (RK 0.1.143 / RKPPL 0.1.145).
+  (Todo `067oh9l`, from snag `rkppl-model-cata-3a839597`.)
+
 ## 0.2.270
 
 - Changed: an RKBRMI's ragged-join row partition — `brm_ragged_rows`,

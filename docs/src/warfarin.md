@@ -86,11 +86,10 @@ tail effective sample sizes.
 
 ```@eval
 Main.BRMDocsComparisons.results_table(
-    "research/warfarin/results/population.tsv";
+    "research/warfarin/results/pk/population.tsv";
     columns=[:quantity => "quantity", :unit => "unit", :description => "",
              :median => "median", :q025 => "2.5 %", :q975 => "97.5 %",
              :rhat => "R-hat", :ess_bulk => "bulk ESS", :ess_tail => "tail ESS"],
-    select=row -> row.model == "two-stage PK",
 )
 ```
 
@@ -141,11 +140,10 @@ The solver settings are Weber's: start at `t = -1e-4`, relative tolerance
 
 ```@eval
 Main.BRMDocsComparisons.results_table(
-    "research/warfarin/results/population.tsv";
+    "research/warfarin/results/pd/population.tsv";
     columns=[:quantity => "quantity", :unit => "unit", :description => "",
              :median => "median", :q025 => "2.5 %", :q975 => "97.5 %",
              :rhat => "R-hat", :ess_bulk => "bulk ESS", :ess_tail => "tail ESS"],
-    select=row -> row.model == "two-stage PD",
 )
 ```
 
@@ -177,11 +175,10 @@ Main.BRMDocsComparisons.comparison(
 
 ```@eval
 Main.BRMDocsComparisons.results_table(
-    "research/warfarin/results/population.tsv";
+    "research/warfarin/results/joint/population.tsv";
     columns=[:quantity => "quantity", :unit => "unit", :description => "",
              :median => "median", :q025 => "2.5 %", :q975 => "97.5 %",
              :rhat => "R-hat", :ess_bulk => "bulk ESS", :ess_tail => "tail ESS"],
-    select=row -> row.model == "joint",
 )
 ```
 
@@ -212,13 +209,16 @@ the latent PK values.
 ## Sampling
 
 ```@eval
-Main.BRMDocsComparisons.results_table(
-    "research/warfarin/results/fits.tsv";
-    columns=[:model => "model", :dimension => "parameters",
+Main.BRMDocsComparisons.results_tables(
+    ["two-stage PK" => "research/warfarin/results/pk/fits.tsv",
+     "two-stage PD" => "research/warfarin/results/pd/fits.tsv",
+     "joint" => "research/warfarin/results/joint/fits.tsv"];
+    columns=[:dimension => "parameters",
              :chains_requested => "chains run", :chains_kept => "chains kept",
              :omitted_chains => "omitted", :draws => "draws",
              :divergent => "divergent", :divergent_pct => "divergent %",
              :seconds => "seconds"],
+    label="model",
 )
 ```
 
@@ -230,13 +230,15 @@ model, whose 242 parameters couple each subject's seven latent quantities
 through the ODE. Every R-hat in the tables above is at most 1.014 and every
 bulk ESS at least 246 (the lag's between-subject SD, whose posterior reaches
 down to zero). The seconds are wall-clock on four threads of the machine that
-ran the fit. The fit is not part of the docs build: it ran once, and the page
-reads its committed tables. The receipt says what they are the numbers of.
+ran the fit. The fits are not part of the docs build: each ran once, into its
+own directory under `research/warfarin/results/`, and the page reads the
+committed tables. The receipts say what they are the numbers of.
 
 ```@eval
-Main.BRMDocsComparisons.results_table(
-    "research/warfarin/results/receipt.tsv";
-    columns=[:key => "", :value => ""],
+Main.BRMDocsComparisons.receipts_table(
+    ["two-stage PK" => "research/warfarin/results/pk/receipt.tsv",
+     "two-stage PD" => "research/warfarin/results/pd/receipt.tsv",
+     "joint" => "research/warfarin/results/joint/receipt.tsv"],
 )
 ```
 

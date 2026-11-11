@@ -8,7 +8,7 @@ const PATH_ENDPOINT_PAIRS=32768
 const PATH_ENDPOINT_SEED=1970
 
 @stestset "native path derivative endpoint" begin
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     saved=deserialize(joinpath(base,"native-path-derivative-fit-v1/fit.jls"))
     native_comparison=deserialize(joinpath(base,"native-path-derivative-fit-v1/comparison.jls"))
     reference=deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))

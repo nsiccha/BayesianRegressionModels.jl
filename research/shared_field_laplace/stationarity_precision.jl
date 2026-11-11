@@ -10,7 +10,7 @@ const PRECISION_SEED = 1955
 const PRECISION_BATCHES = 16
 
 @stestset "independent precision audit" begin
-    base = "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base = joinpath(@__DIR__, "results")
     saved = deserialize(joinpath(base,"joint-fit-v1/fit.jls"))
     pilot = deserialize(joinpath(base,"stationarity-v1/audit.jls"))
     @test saved.signature == pilot.fit_signature == AUDIT_FIT_SIGNATURE

@@ -1,0 +1,6 @@
+__pycache__/
+.venv/
+fit.progress
+results/native.json
+results/python.json
+results/population_draws.tsv

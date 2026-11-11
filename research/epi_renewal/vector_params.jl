@@ -14,7 +14,7 @@
 # log-density + gradient; then NUTS recovery against the same fixed truth as recover.jl.
 #   Run: julia --project=test research/epi_renewal/vector_params.jl [n_draws] [all|vector|exposed]
 #
-# VERIFIED (strato2, StanBlocks pin 9a958f97, BRM c54cd0c, 1000 draws, δ=0.9):
+# VERIFIED (a Linux fleet host, StanBlocks pin 9a958f97, BRM c54cd0c, 1000 draws, δ=0.9):
 #   single_rw       gate dim 59 (same as single_kernel_rw); 44s, 4 divergences, min ESS 248, R̂ 1.018;
 #                   init, sig, log_I0, cluster inside 90% intervals; R path 42/56 (75%). Parameter names
 #                   are the formula names (`eps`, `log_R`), no plate suffix, no dummy-ranef coordinates.

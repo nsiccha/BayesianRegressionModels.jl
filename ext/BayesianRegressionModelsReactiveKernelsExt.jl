@@ -400,7 +400,7 @@ function _rk_statistical_model_module()
         helpers = (:tps_basis, :cr_basis, :t2_basis, :hsgp_basis, :hsgp_periodic_basis,
             :hsgp_matern_sqrt_spd, :hsgp_sqrt_spd, :hsgp_grouped_sqrt_spd,
             :hsgp_periodic_sqrt_spd, :hsgp_periodic_grouped_sqrt_spd,
-            :hsgp_rho_floors, :hsgp_periodic_rho_floor)
+            :hsgp_rho_floors, :hsgp_periodic_rho_floor, :car_graph)
         bindings = Pair{Symbol,Any}[name => getproperty(prep, name) for name in helpers]
         mod = _rk_emit_module(BRM._RKEmittedProgram(collect(values(BRM._BRM_STATISTICAL_MODELS)),
             Expr(:block), bindings))
@@ -574,6 +574,7 @@ function BRM._rk_layout_coordinate_transforms(backend::BRM.RKBRMI)
 end
 BRM._rk_bound_coordinate_names(backend::BRM.RKBRMI) =
     coordinate_names(assign_layout(_rk_translated(backend)))
+BRM._rk_plan_coordinate_names(plan) = coordinate_names(assign_layout(plan))
 # Geometry arguments belong to this binding. A replay shares the executable
 # graph, but its bounds and totals may differ from the original layout's data.
 _rk_bound_layout(backend::BRM.RKBRMI) = assign_layout(_rk_translated(backend))
