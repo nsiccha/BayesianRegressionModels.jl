@@ -631,6 +631,41 @@ end
 _rk_unlocated_statement(statement::AbstractString) =
     replace(statement, r"#= (?:line \d+|[^\n]*?:\d+) =#" => "#= line 0 =#")
 
+# A statement a fitted state stored, as this BRM writes it. Each emission change
+# that only rewrote how a statement reads, not what the program computes, adds
+# its rewrite here, so a state exported before the change still replays (snag
+# `simulator-bundle-fa889214`): macro calls without their places (0.2.228) and a
+# ragged join's columns as one tuple (0.2.270). A change of what the program
+# computes adds none, and the replay refuses a state exported before it by its
+# first differing statement. `test/rk_fitted_state_versions.jl` holds the
+# programs released versions exported.
+_rk_stored_statement(statement::AbstractString) =
+    _rk_tupled_ragged_axes(_rk_unlocated_statement(statement))
+
+# A ragged join's partition statement as BRM wrote it before 0.2.270, the
+# columns read through the join as trailing arguments
+# (`brm_ragged_rows(names, group, cell, a, b)`), with them as one tuple
+# (`…, cell, (a, b))`), as `_rk_emit_kernel_partition!` writes it. Before the
+# columns come the names, group and cell (and an ordered join's order), or a
+# shared read's earlier rows, names and group. Any other statement, and one
+# already in this form, is returned as it is.
+const _RK_RAGGED_LEADING_ARGUMENTS = (brm_ragged_rows=3, brm_ragged_rows_ordered=4,
+    brm_ragged_rows_shared=3)
+function _rk_tupled_ragged_axes(statement::AbstractString)
+    m = match(r"^statement: (\w+ = brm_ragged_rows\w*\(.*\))$"s, statement)
+    m === nothing && return statement
+    ex = Meta.parse(m[1]; raise=false)
+    Meta.isexpr(ex, :(=), 2) && ex.args[1] isa Symbol && Meta.isexpr(ex.args[2], :call) ||
+        return statement
+    head, arguments = ex.args[2].args[1], ex.args[2].args[2:end]
+    leading = get(_RK_RAGGED_LEADING_ARGUMENTS, head, nothing)
+    (leading === nothing || length(arguments) < leading) && return statement
+    length(arguments) == leading + 1 && Meta.isexpr(last(arguments), :tuple) && return statement
+    tupled = Expr(:call, head, arguments[1:leading]...,
+        Expr(:tuple, arguments[leading+1:end]...))
+    "statement: " * sprint(Base.show_unquoted, Expr(:(=), ex.args[1], tupled))
+end
+
 # The program's text no longer holds its generated inputs (a literal `lkj_eta`, a
 # known correlation factor, a factor's fitted levels), so a frozen replay
 # compares them beside it.
@@ -651,14 +686,24 @@ function _rk_identity_statements(rk)
             for name in sort!(collect(intersect(reads, keys(scalars))))])
 end
 
-function _rk_check_replay_program(fitted::Vector{String}, replay::Vector{String}; prefix)
+# `exported`: `fitted` is a fitted state's stored program, which a BRM that
+# emits the model differently also explains.
+function _rk_check_replay_program(fitted::Vector{String}, replay::Vector{String}; prefix,
+        exported=false)
     fitted == replay && return nothing
     k = something(findfirst(i -> i > length(replay) || fitted[i] != replay[i],
         eachindex(fitted)), length(fitted) + 1)
-    error("$prefix: the new data changes the fitted RK program, so its " *
-        "preprocessing cannot be frozen. First difference:\n" *
+    difference = "First difference:\n" *
         "  fitted: $(get(fitted, k, "(end of program)"))\n" *
-        "  replay: $(get(replay, k, "(end of program)"))\n" *
+        "  replay: $(get(replay, k, "(end of program)"))\n"
+    exported && error("$prefix: the new data changes the fitted RK program, or the " *
+        "fitted state was exported by a BayesianRegressionModels version that emits " *
+        "this model differently from this one ($(pkgversion(@__MODULE__))), so its " *
+        "preprocessing cannot be frozen. " * difference *
+        "Check that the new data keeps the fitted levels and column types. If it " *
+        "does, export the state again from the fit with this version (`brm_fitted_state`).")
+    error("$prefix: the new data changes the fitted RK program, so its " *
+        "preprocessing cannot be frozen. " * difference *
         "Check that the new data keeps the fitted levels and column types, or " *
         "rebuild with `freeze_constants=false`.")
 end

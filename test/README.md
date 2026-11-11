@@ -1712,11 +1712,20 @@ gradient against a central difference of the returned value.
 backend: the exact Gaussian on a fully read grid with irregular gaps, the exact
 time factor on synchronized reads at any neighbour count, separable channels, shared solves, gap
 linkage, reverse derivatives against finite differences, the same footprint under
-any row order on a tied lattice, and refusals.
+any row order on a tied lattice, and refusals. Outside the support (a zero or
+infinite length, or lengths whose conditioning systems are numerically singular,
+including the line-search proposal of snag `gmrf-neighbors-d-952fd2fb`) the density
+and its derivative are `-Inf` with zero gradients, prediction's strict solve still
+raises, and long lengths the system resolves stay finite.
 `gmrf_vecchia_rk.jl` checks the term on RKBRMI: density and native reverse rule,
+the `-Inf` answer of `rk_logdensity_problem` outside the support,
 sampled channel factor, state plates under `locality = :error`, a strict
 partition, replay from a fitted state, the same coordinates and density under
-another row order, and refusals. `gmrf_vecchia_stan.jl` checks
+another row order, and refusals. `gmrf_rk_numerical.jl` checks the `mesh=` density
+graph and its native Reverse gradient against a dense covariance, its sparse LDL,
+and `-Inf` where the factor loses a pivot or a length is zero or infinite, with
+long lengths it resolves exact against a 512-bit precision oracle; the other
+`gmrf_rk_*` density files include it. `gmrf_vecchia_stan.jl` checks
 valid Stan, the shared helper, RK/Stan parity through coordinate transport, replay
 and descriptions.
 

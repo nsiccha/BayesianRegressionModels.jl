@@ -80,6 +80,20 @@ end
     value, gradient = LDP.logdensity_and_gradient(problem, u)
     @test value ≈ expected atol=1e-8
     @test gradient[position(".sigma")] != 0
+    # Outside the support (snag gmrf-neighbors-d-952fd2fb) the density is -Inf, never an
+    # error: lengths whose conditioning systems are numerically singular, and a length
+    # `exp` overflows. The gradient keeps its length; WarmupHMC never reads it there
+    # (an overflowed length's chain rule gives 0 * Inf = NaN entries).
+    for (suffix, at, finite) in ((".spatial_length", log(8.9e64), true),
+            (".temporal_length", log(1e300), true), (".spatial_length", 800.0, false))
+        far = copy(u)
+        far[position(suffix)] = at
+        @test LDP.logdensity(problem, far) == -Inf
+        far_value, far_gradient = LDP.logdensity_and_gradient(problem, far)
+        @test far_value == -Inf
+        @test length(far_gradient) == length(u)
+        finite && @test all(isfinite, far_gradient)
+    end
 end
 
 @testset "Preparation builds each footprint once and keeps fields apart" begin
