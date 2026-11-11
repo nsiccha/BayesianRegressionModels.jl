@@ -604,24 +604,7 @@ end
 # diagonal scale exp(ρ_k), as Β's rows do, instead of a square root of the whole
 # covariance.
 #
-# Settling restarts Adam, and a fresh Adam's first steps are about ± its step
-# size in every coordinate it steps. Whitened by the covariance root, those
-# coordinates mix the rank part's directions, and the steps add up along each of
-# them: up to √D step sizes of q's own sd at once where the gradient's signs agree
-# with a column. On ODL's Bayern slice (1,094 globals, rank 8) the trimmed ELBO
-# fell from 51,500 at the end of exploration to 15,000-25,000 within a few
-# hundred polishing iterations (BRM 0.2.241, before settling, when polishing
-# restarted Adam), and Niedersachsen and Rheinland-Pfalz evaluated non-finite
-# draws there. In units of exp(ρ) it stayed at 48,400-50,100 from the same state.
-# The structured unit factors' Adam keeps the whitened step.
 #
-# Β's rows step `rank` times as far, so that they never move faster than in
-# exploration (`_brm_svi_rank_step_ratio`). Settling holds `polish_lr` for up to
-# `settle_windows` windows and polishing starts there, five times `lr_global` at
-# the defaults, and Β's gradient is the same noise in every phase: on ODL's
-# Thüringen slice the fit evaluated non-finite draws 154 iterations into
-# settling (191 into polishing with `settle_windows=0`), and with Β at
-# exploration's rate it settled and polished cleanly (as with Β frozen).
 function _brm_svi_polish_global_step!(opt, q, x, grad, lr; clip=Inf, rank=1.0)
     r = size(q.Β, 2)
     r == 0 && return _brm_svi_whitened_global_step!(opt, q, x, grad, lr; clip)
@@ -1149,29 +1132,19 @@ const _BRM_SVI_PHASES = (lower="Lower to ReactiveKernels", prepare="Prepare NLME
 # neighbouring ones lets a slow drift show above the minibatch noise. Since
 # BRM 0.2.264 the slope over the last `trend_windows` windows (default
 # `4 patience + 1`) must also not be significantly positive (`_brm_svi_rising`):
-# two windows alone miss a rise below about twice their noise.
+# two windows alone miss a rise below about twice their noise. While those windows
+# still reach back into the first `patience`, whose climb from the start is no line,
+# the slope is also read without them, and either reading rising holds exploration.
 #
-# What that test finds stationary is the iterate at exploration's step, and
-# that can be far from the optimum. `lr_global` moves a global mean by an
-# absolute amount, whatever its posterior sd: at 0.01 a coordinate with sd 7e-4
-# jitters by tens of sds, and the ELBO sits flat on that noise floor. On an
-# exactly Gaussian toy with 32 such globals exploration stopped 2,554 nats from
-# the family's optimum, and the first polishing windows took that to about 100
-# (snag svi-exploration-036fd59f; ODL's union stood in for 190,000 nats).
-# Settling therefore restarts Adam on scale-preconditioned global steps
-# (`polish_lr`, a fraction of the current scale) at a constant size, with no
-# averaging, until the same test stalls on its own windows (or for
-# `settle_windows` windows at most). Polishing then continues that step, decays
-# every step size as 1/√k over `polish_windows` windows, and returns the average
-# of q over those iterations (Polyak–Ruppert), which damps the noise a
-# stochastic step leaves, starting from an iterate that has stopped rising.
 #
 # The phase is not stored: settling began at the first window at which
 # exploration's test passed (`_brm_svi_explored`), which the run's windows
 # record, so a checkpoint's layout is unchanged. A run whose controls predate
 # `settle_windows` (a checkpoint of BRM 0.2.240 or 0.2.241) does not settle, and
 # one whose controls predate `trend_windows` (BRM 0.2.263 and earlier) ends
-# exploration on the two-window test alone, so its phases read as they were run.
+# exploration on the two-window test alone, and one whose controls predate
+# `trend_skip` reads the trend's line through the first windows alone, so its phases
+# read as they were run.
 #
 const _BRMSVIWindow = NamedTuple{(:mean, :center, :spread),NTuple{3,Float64}}
 
@@ -1266,8 +1239,10 @@ _brm_svi_stalled(a, b, W) = b.center - a.center < 2 * sqrt((a.spread + b.spread)
 # median, on 8 units; snag brm-svi-fit-rkbr-f41cb255). Over 41 windows (`4 patience + 1`, the default
 # `trend_windows`) the test stopped at those windows; over 21 it stopped at 95 and
 # 70, still rising.
-function _brm_svi_rising(windows, w, L)
-    L = min(L, w)
+#
+# With `first`, the line reads no window before it.
+function _brm_svi_rising(windows, w, L, first=1)
+    L = min(L, w - first + 1)
     L >= 3 || return false
     c = [windows[k].center for k in w-L+1:w]
     t = (1:L) .- (L + 1) / 2
@@ -1278,15 +1253,40 @@ function _brm_svi_rising(windows, w, L)
     slope > 2 * se
 end
 
+# Whether the ELBO's trend still rises at window `w`: the line over the last
+# `trend_windows` windows rises, or the same line without the first `trend_skip`
+# windows of the run (by default `patience`) does. The two differ only while the last
+# `trend_windows` windows still reach back into those first ones.
+#
+# The first windows climb from the start, which a line does not describe: a window
+# far below the rest is a residual so large that the error swamps any slope, so the
+# line through it cannot read a rise, and exploration ended at the `min_windows` floor
+# whatever the trend. On the downstream model above at 32 units the first window's
+# trimmed ELBO sat 46,000 nats below the next 39, the slope over windows 1 to 40 read
+# t = 1.9 while over 11 to 40 it read 7.2, and the fit stopped at window 40 with
+# the step's mean on the ridge, exactly where the two-window test alone left it (snag
+# brm-svi-fit-stop-4840e476). Leaving them out alone is not enough either: a start
+# whose climb is smooth is evidence of the rise, and on such a start the line
+# without it stopped at window 40 where the line with it held to 46. So exploration
+# goes on while either line rises, and never ends earlier than the line through the
+# first windows alone ended it.
+function _brm_svi_trending(windows, w, c)
+    L, skip = _brm_svi_trend_windows(c), _brm_svi_trend_skip(c)
+    _brm_svi_rising(windows, w, L) || (skip > 0 && _brm_svi_rising(windows, w, L, skip + 1))
+end
+
 # Controls written before the trend test existed (a resumed checkpoint) keep the
 # two-window test alone.
 _brm_svi_trend_windows(c) = get(c, :trend_windows, 0)
+# Controls written before `trend_skip` existed read the line through the first
+# windows alone, as they ran.
+_brm_svi_trend_skip(c) = get(c, :trend_skip, 0)
 
 # Whether exploration ends at window `w`: the ELBO has not risen detectably over its
-# last `patience` windows, and its trend over the last `trend_windows` is not upwards.
+# last `patience` windows, and its trend is not upwards (`_brm_svi_trending`).
 _brm_svi_exploration_stalled(windows, w, c) =
     _brm_svi_stalled(windows[w-c.patience], windows[w], c.window) &&
-    !_brm_svi_rising(windows, w, _brm_svi_trend_windows(c))
+    !_brm_svi_trending(windows, w, c)
 
 # The optimizer controls of a run over `N` subjects, with the batch size and
 # window it actually uses. They are fixed for the run and its continuations.
@@ -1299,7 +1299,8 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
     (; batch_size=B, window=window === nothing ? max(cld(N, B), 100) : window,
        max_iterations, lr_global, unit_step, polish_lr, patience, min_windows,
        polish_windows, unit_sampling, settle_windows, unit_curvature, structured_unit_step,
-       structured_rank_step, unit_positive_part, sd_bound, trend_windows)
+       structured_rank_step, unit_positive_part, sd_bound, trend_windows,
+       trend_skip=patience)
 end
 
 # The windows exploration's trend test reads when the caller names none
@@ -1882,7 +1883,8 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   constant steps until the trimmed ELBO has not risen detectably over `patience`
   windows (after at least `min_windows`) and its least-squares slope over the last
   `trend_windows` windows (default `4 patience + 1`; `0` turns this off, the rule of
-  BRM 0.2.263 and earlier) is not above twice its standard error, settles at the
+  BRM 0.2.263 and earlier) is not above twice its standard error (read both with and
+  without the first `patience` windows, which climb from the start), settles at the
   constant scale-relative step until the
   same test passes on settling's own windows (for at most `settle_windows`
   windows; `0` skips settling, the schedule of BRM 0.2.241 and earlier), then

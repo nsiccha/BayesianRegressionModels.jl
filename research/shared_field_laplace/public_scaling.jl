@@ -44,7 +44,7 @@ end
         julia=string(VERSION),julia_threads=Threads.nthreads(),blas_threads=BLAS.get_num_threads(),
         method=GaussianBlockLaplace(),repetitions=5,trajectory_updates=64,
         point_shifts=([0.,0.,0.],[.2,-.4,.1]))
-    directory=joinpath("/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace",
+    directory=joinpath(joinpath(@__DIR__, "results"),
         "public-scaling-v1",name)
     ispath(directory) && error("preserve existing public scaling evidence: $name")
     mkpath(directory);serialize(joinpath(directory,"identity.jls"),identity)

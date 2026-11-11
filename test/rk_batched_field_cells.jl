@@ -2,15 +2,6 @@
 #
 # RUN: julia --project=test test/rk_batched_field_cells.jl [testset-filter...]
 #
-# ODLPlaus's field components call a StanBlocks `@deffun @juliacompat` per row,
-# `value[s] = paired_channel_state(frequency, lengths, amplitude, correlation,
-# coefficients[block[s],:], coordinates[s])`. On RKBRMI that call is an opaque leaf,
-# so the plate runs cell by cell. Written as array statements in the cell, over
-# matrices every cell shares, the same field is one source for both backends:
-# SBBRMI compiles it to Stan, and ReactiveKernels from 0.1.127 (RK `fa3deb83`,
-# "Plates of products run as matrix products" in RK's `docs/src/compiler.md`)
-# runs the plate as matrix products over tiles of its cells. BRM todo `07y7ghy`,
-# from RK snag `plate-of-per-row-d1b4ed43`.
 #
 # Rules the cell spelling below follows, each found by a refusal or a mismatch:
 # - The products are in the cell. Model-scope arithmetic is elementwise, so
@@ -36,9 +27,6 @@ module BatchedFieldCells
 using BayesianRegressionModels, StanBlocks, Distributions
 using StanBlocks: @juliacompat, rep_vector
 
-# The per-row reference: ODLPlaus `src/joint_field_components.jl` (kb-approved
-# `0ef0de54`), coefficient k + C(2j-2) for the cosine of feature j and channel k,
-# k + C(2j-1) for its sine.
 StanBlocks.@deffun @juliacompat row_channel_state(frequency::matrix[D,F], lengths,
         amplitude, correlation::matrix[C,C], coefficients, coordinate)::vector[C] = begin
     raw = rep_vector(0.0, C)

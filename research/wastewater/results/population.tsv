@@ -1,0 +1,5 @@
+quantity	unit	description	median	q025	q975	rhat	ess_bulk	ess_tail
+initial reference R		unadjusted reference reproduction number at the seeded origin	1.133	0.6734	1.929	1.084	49	60
+feedback		infection feedback coefficient	0.01827	0.006996	0.04819	1.001	7304	2304
+subpopulation SD	log R	daily AR innovation scale	0.09803	0.005665	0.3958	1.003	324	380
+shedding peak	days	time of peak shedding after infection	3.981	2.401	6.439	1.001	1380	1634

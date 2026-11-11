@@ -2,15 +2,6 @@
 #
 # RUN: julia --project=test test/rk_plate_invariant_output.jl [testset-filter...]
 #
-# In `@plate for g in eachindex(path); decay[g] = exp(log_a); end` the cell reads a
-# population scalar and nothing per index. As in the Julia loop, `decay` holds one
-# value per index, so a later plate's `decay[g]`, `sum(decay)` and `length(decay)`
-# see every entry. ReactiveKernelsPPL before 0.1.129 collected such an output as one
-# number (ReactiveKernels snag `plate-output-of-c4a0ca87`, fixed in RK `b6196f114`):
-# a later plate's `decay[2]` raised `BoundsError: attempt to access Float64 at index
-# [2]`, and `sum`/`length` returned one entry's value with no error. BRM emits the
-# plate as written (BRM snag `retained-pointwi-fa27bc37`, ODLPlaus v10's
-# `washout_decay[g] = exp(washout_log_decay)`).
 #
 # Every case but the one-cell control has three cells: one cell cannot tell a
 # number from a one-entry array. These are toy data; the likelihoods are checked

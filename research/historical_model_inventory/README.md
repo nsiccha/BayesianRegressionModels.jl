@@ -82,8 +82,8 @@ source checkout.
   capability counts for each of the 19 historical sources.
 - `all_source_rows_matrix.tsv`: the same schema including the one hidden
   non-Bayesian baseline row.
-- `PROVENANCE.md`: exact historical/current/SbPMX branch, commit, path, and blob
-  provenance.
+- `PROVENANCE.md`: exact historical/current branch, commit, path, and blob
+  provenance; the private predecessor package's provenance stays in the private archive.
 - `GAP_RANKING.md`: row-keyed leverage ranking, separated into quick defects,
   BRM adapters over existing substrate, true substrate work, and metadata work.
 - `gallery/`: executable single-graph `semantic_app` gallery using `@options`
@@ -98,8 +98,11 @@ source checkout.
 - Family inference is reported beside, never in place of, exact metadata.
 - Kernel/plate controls establish route capability only; they are not fanned
   onto historical rows without an exact row-specific implementation.
-- The current SbPMX pattern is descriptor-driven, but the BRM-to-HTMXObjects
+- The current predecessor pattern is descriptor-driven, but the BRM-to-HTMXObjects
   mount adapter is not shipped. Mount projections here are experimental.
 - `semantic-rewrite` means the current surface exists but a row-specific
   historical constant, prior, or declaration choice is still required; it is
   never displayed as an executed row.
+
+Generated inventory TSVs larger than 100 KB are local outputs and are not tracked.
+Run the inventory producers before using the research gallery.

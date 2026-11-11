@@ -116,7 +116,7 @@ function gaussian_block_control(p,block,q,h,mean_query,data,rng)
 end
 
 @stestset "fixed hyperparameter Gaussian block" begin
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     candidate=deserialize(joinpath(base,"joint-latent-fit-v1/candidate.jls"))
     reference=deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))
     endpoint=deserialize(joinpath(base,"joint-latent-endpoint-v1/audit.jls"))

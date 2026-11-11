@@ -127,11 +127,6 @@ ar1_residuals = @brm begin
         y[p] ~ AR1Normal(mu[p], sigma, tanh(phi); time = day[p])
     end
 end
-# ODLProject's `odl_station_daily` fixture (synthetic): a network level, an
-# annual cycle from a period held as data (data-only `sinpi`/`cospi`
-# assignments), correlated station levels and trends, latent per-station
-# AR(1) deviations (`cdar`) and Normal noise; a variant left-censored at a
-# detection limit; one with AR(1) residuals per station instead.
 station_daily = @brm begin
     "Residual scale of the log daily mean."
     sigma ~ Exponential(sigma_scale)
@@ -398,7 +393,7 @@ end
 # evaluates all three networks. Not built yet: a station with no days, which
 # needs the stations as a level table read through positions (brm-use
 # formulas, "Labels from a level table").
-@testset "odl_station_daily: networks of 2, 6 and 12 stations" begin
+@testset "Station daily series: networks of 2, 6 and 12 stations" begin
     datasets = (station_daily_data(6), station_daily_data(2; sigma_scale = 0.2, period = 300.0),
         station_daily_data(12; station_scale = 0.5))
     rks = [RKBRMI(JMS.station_daily(d)) for d in datasets]
@@ -418,10 +413,7 @@ end
     check_model(RKBRMI(JMS.station_daily_censored(station_daily_data(6; lod = 0.1))))
 end
 
-# The shared fields of ODL-shaped models (synthetic data): an HSGP over time,
-# per region with correlated levels (an LKJ factor of data-valued size) or
-# orthogonal to the linear trend, and over two and three axes.
-@testset "ODL-shaped shared fields: HSGP terms" begin
+@testset "Shared fields: HSGP terms" begin
     rng = Xoshiro(6)
     n = 30
     e, nn, t = randn(rng, n), randn(rng, n), collect(range(0, 3; length = n))
@@ -457,7 +449,7 @@ end
 
 # A `car(...)` field's graph sizes (the number of structured areas, each
 # component's start and size, the components' sum-to-zero scales) are bound
-# graph data (BRM 0.2.274; snag `rkbrmi-car-term-878e3dbd`), so graphs of other
+# graph data (BRM 0.2.278; snag `rkbrmi-car-term-878e3dbd`), so graphs of other
 # sizes and component counts share one RKPPL program, and the first graph's
 # module evaluates all three. BYM2 runs on graphs without an island, where its
 # mixing weight's `jax.grad` is NaN (todo `0e5she0`).

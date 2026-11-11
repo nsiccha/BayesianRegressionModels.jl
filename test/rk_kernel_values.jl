@@ -497,7 +497,7 @@ end
 # Every value the program reads from a cell is written by the one plate BRM
 # emits for it, so each subject's cell should run once per density and per
 # value and gradient. The retired per-output reader kernels ran it once per
-# reader, three times here (co-report RKPPLBench:flag:emission-hunt on snag
+# reader, three times here (co-reported on snag
 # rk-emission-lift-0a8bc777). The shared-cell lowering from RK snag
 # rkppl-plate-for-5f5a19db evaluates all outputs together.
 @stestset "a multi-output cell is one plate evaluated per subject" begin

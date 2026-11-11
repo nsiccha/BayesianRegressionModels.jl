@@ -52,18 +52,15 @@ JuliaLocalPreferences.toml
 # Confidential client-project extensions (local-only, never commit): each
 # `<prefix>-ext.jl` registers a dataset + allowlist for its `<prefix>-*` examples.
 web-macro/src/*-ext.jl
-# Confidential client-project example data (local-only, never commit). These
-# match the local example filenames directly; see the pending naming decision.
-web-macro/examples/bruno-*.jl
-web-macro/examples/bordet-*.jl
+# Prefixed local-extension examples stay untracked. Public demonstrations are
+# added deliberately; the tracked public examples remain tracked.
+web-macro/examples/*-*.jl
 
 # Large fit-artifact archives and serialized draws — never commit these
 # (snag brm-binaries-in-93881f23). Raw-fit tarballs are produced by
 # research/archive_total_study.py et al. into a results/ tree; keep them in
 # the producing run's scratch / artifact store, not in git history: they are
 # incompressible, so every version pays full packfile weight in every clone.
-# The in-tree manifest.json files remain the hash authority for archives
-# published before the untracking commit (see research/ARCHIVED_FITS.md).
 # Docs example inputs stay vendored (docs/examples/*.jl read them from the
 # checkout); only NEW compressed archives are blocked there.
 research/**/*.tar.gz
@@ -78,3 +75,20 @@ research/**/*_pairs.png
 research/**/selection_losses.tsv
 research/**/ppc_intervals.tsv
 docs/**/*.csv.gz
+
+# Generated JAX module (rebuilt for docs downloads)
+research/jax/model.py
+
+# Research outputs: regenerate locally; documentation consumes small summaries.
+research/**/results/**/*.png
+research/**/results/**/*.svg
+research/**/results/**/*.jls.gz
+research/**/results/**/*.rds.gz
+research/**/results/**/*.aov.json
+research/**/results/**/*.aov.json.gz
+research/shared_field_laplace/results/
+
+# Variational-inference fits and generated build inputs stay local.
+research/variational_inference/cache/
+research/variational_inference/results/population_draws.tsv
+docs/src/assets/variational-inference/

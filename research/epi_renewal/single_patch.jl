@@ -34,7 +34,7 @@
 # stan_instantiate -> LogDensityProblems.logdensity_and_gradient finite.
 # Run: julia --project=test research/epi_renewal/single_patch.jl
 #
-# VERIFIED (strato2, test env from test/setup_env.jl, StanBlocks pin 9a958f97; the same verdicts held on
+# VERIFIED (a Linux fleet host, test env from test/setup_env.jl, StanBlocks pin 9a958f97; the same verdicts held on
 # the earlier pin bec23bc3 with the top-level `.mem` observation, and on canonical 8b4ec2f6):
 #   probe   top-level vector parameter in @brm:
 #           `eps::vector[5] ~ std_normal()`   REJECTED — parser: "Don't know how to handle xassignable(eps::vector[5])"

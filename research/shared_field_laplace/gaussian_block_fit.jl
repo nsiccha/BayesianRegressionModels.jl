@@ -44,7 +44,7 @@ function native_gaussian_block_control(t,u)
 end
 
 @stestset "native Gaussian block SVI" begin
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     reference=deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))
     reference.reference_ok || error("reference diagnostic gate failed")
     directory=joinpath(base,"native-gaussian-block-fit-v1")

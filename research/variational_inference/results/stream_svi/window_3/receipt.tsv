@@ -1,0 +1,29 @@
+field	value
+key	d330179e7610b78a8d0cb43fe3e1dcad4826f488a962d6c48fd518d80c8caada
+stream_key	a201083100b470a81b9d3af0a771c97e9979487c7cea8f22465a6ac5a91d8aa7
+window	3
+host	a Linux fleet host
+harness	BRM sequential SVI; site-counts-v2-quorum
+dimension	765
+recipe	site-counts-v2-quorum
+created	2026-11-10T23:56:53.554
+started	2026-11-10T23:47:17.286
+commit	e8bef69f83b4a0babd1f00a66f322ab2cf02f8b5
+uncommitted_changes	true
+julia	1.10.12
+brm	0.2.272
+warmuphmc	0.2.11
+source_sha256	2aa8652c60ed8abd4d763af4a9c4f70986aa5f14aac7d8d8c03aa1604064e550
+settings	(batch_size = 32, ndraws = 1000)
+seed	[1, 2, 3, 4]
+enzyme	0.13.218
+threads	1
+program_sha256	62adca1af7868b7ef5deb3bb304473b52185adf4516af802b59ddb3e181db140
+legacy_input_sha256	e8073db852a84a25e8178c4c697a31296cfa3b472d2d1f2d82dcae2c3af5576d
+key_migration	Content key added after measurement; unchanged synthetic model, settings and draws
+key_migrated	2026-11-11T00:30:20.363
+iterations	7100
+converged	true
+stages	(exploring = 4000, settling = 1100, polishing = 2000, settled = true, settle_windows = 100)
+unit_gradient_calls	908800
+seconds	7.155868794

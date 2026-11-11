@@ -1,0 +1,7 @@
+quantity	value
+julia_version	1.10.12
+brm_version	0.2.272
+rkppl_version	0.1.145
+warmuphmc_version	0.2.11
+model_sha256	4dcdf5551d8356cb03e2e446e6978c9f8af5898570eed3763c6a7d4f56cc1224
+fit_sha256	45caed38c8c94787b4705c00648c6ea1080c4fc1bdcf0af5b4d2b89bc2940103

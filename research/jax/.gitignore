@@ -3,3 +3,4 @@ __pycache__/
 fit.progress
 results/native.json
 results/python.json
+results/population_draws.tsv

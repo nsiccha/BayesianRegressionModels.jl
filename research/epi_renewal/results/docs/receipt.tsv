@@ -1,0 +1,26 @@
+key	value
+commit	d278222e2babaf9c64a3c1ed8ead78dcf57c27b2
+uncommitted_changes	yes
+started	2026-11-11 01:14 local time
+host	a Linux fleet host, 4 Julia threads
+julia	1.10.12
+BayesianRegressionModels	0.2.270
+sampler	WarmupHMC completion_warmup_mcmc over BridgeStan; model already uses explicit innovations
+chains	4 per fit, quorum 3, 1000 draws each
+model	renewal
+sources	research/epi_renewal/renewal.jl; simulate_single(seed=132); 56 days
+seed	20261112
+content_sha256	de6339b051af47e9dfb6a2369e0bd78468aab41d35dea9f5a6bf7671b55ad61c
+harness_sha256	d3052cea6c5a6ef32afd4bd2d206779996c59789b9e94c95cd6e0fa03e835a15
+settings	(1000, 4, nothing, Base.Pairs{Symbol, Real, Tuple{Symbol, Symbol}, @NamedTuple{target_acceptance_rate::Float64, adaptive_centering::Bool}}(:target_acceptance_rate => 0.99, :adaptive_centering => false))
+WarmupHMC	0.2.11
+StanBlocks	0.2.31
+TreeArrays	0.2.0
+BridgeStan	2.9.0
+seconds	147.820258601
+divergent	0
+omitted_chains	2
+dimension	59
+status	complete
+completed	2026-11-11T02:25:49
+summary	TreeArrays quantiles pooled over chain and draw; split R-hat, bulk and tail ESS

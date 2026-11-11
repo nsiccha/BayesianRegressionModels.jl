@@ -90,17 +90,17 @@ function ema_sampled_model(data = ema_sampled_fixture())
         wls ~ 1 +                   (1 | p | subject)
         s0 ~ 1 + (1 | subject)
         m0 ~ 1 + (1 | subject)
-        stress ~ kernel(dt_grid, workload, stressReport, moodReport, smoked,
-                        b0, q0, cm, wls, s0, m0) do dt, wl, sR, mR, smk, lb0, lq0, lcm, lwls, ls0, lm0
-            zs::vector[dims(dt)[1]] ~ std_normal()                  # the innovations ARE parameters
-            zm::vector[dims(dt)[1]] ~ std_normal()
-            path = ema_path(dt, wl, lb0, bm, a12, a21, a22, lcm, lwls, lq0, qw, diffm, diff21, ls0, lm0, zs, zm)
-            st = path[1:dims(dt)[1]]
-            mo = path[(dims(dt)[1] + 1):(2 * dims(dt)[1])]
-            sR ~ normal(mm_s .+ st, sigma_s)
-            mR ~ normal(mm_m .+ mo, sigma_m)
-            smk ~ bernoulli_logit(l31 .* st .+ smoke_threshold)
-            st
+        @plate for i in eachindex(b0)
+            n = length(dt_grid[i])
+            zs ~ Normal(zeros(n), 1.0)                              # the innovations ARE parameters
+            zm ~ Normal(zeros(n), 1.0)
+            path = ema_path(dt_grid[i], workload[i], b0[i], bm, a12, a21, a22, cm[i], wls[i], q0[i],
+                            qw, diffm, diff21, s0[i], m0[i], zs, zm)
+            stress[i] = path[1:n]
+            mood = path[(n + 1):(2 * n)]
+            stressReport[i] ~ Normal(mm_s .+ stress[i], sigma_s)
+            moodReport[i] ~ Normal(mm_m .+ mood, sigma_m)
+            smoked[i] ~ BernoulliLogit(l31 .* stress[i] .+ smoke_threshold)
         end
     end
 end

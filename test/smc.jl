@@ -19,8 +19,6 @@ grouped_model(d) = @brm d begin
     y ~ Normal(mu, 1)
 end
 
-# A synthetic deterministic recurrence, exercising history dependence without
-# importing or reproducing any private ODL model.
 function accumulated_input(x, gain)
     carry = 0.0
     map(x) do value
