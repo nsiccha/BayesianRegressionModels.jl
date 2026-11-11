@@ -418,4 +418,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # fresh prior may read a data-valued scale through BRM's named
 # `<vector>_prior_scale` (snag selective-fresh-96f7fe96), which
 # research/filtering's fresh-unit selective example needs.
-rev = "4fa3b589054003d187cef74befad503ae7b963e3"
+# 95e62eab (RK 0.1.163 / RKPPL 0.1.155) preserves cell-local gather row forms,
+# which the nested @plate sparse Laplace needs (snag cell-factor-ad-r-b4e2a0f4).
+rev = "95e62eabdac3f181b62f78b202763a84563707da"
