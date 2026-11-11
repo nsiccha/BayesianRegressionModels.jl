@@ -323,6 +323,15 @@ end
     "a `shares(total)` cell latent has $n entries in this cell; its law has an " *
     "argument of length $m"))
 
+# Density graphs validate only extents here; active law arguments remain
+# visible as elementwise reads in the graph's plate.
+function _brm_density_indices(n::Integer, lengths::Integer...)
+    for m in lengths
+        m == n || _brm_shares_length_error(m, n)
+    end
+    Base.OneTo(n)
+end
+
 # ---- A completion with group totals: `mi(x)::shares(total, rows) ~ Law(…)` ---
 #
 # At model scope, with a binding `rows = groups(g => labels)` (or the call
@@ -649,8 +658,12 @@ _brm_share_value(y::AbstractVector, slot::Integer, total::Real) =
 # arguments at its entries (or numbers). `Vararg{Any,N}` specializes on the
 # law's arguments: an unspecialized varargs tuple holding an active vector
 # needs Enzyme's runtime activity in the NLME paths' forward-over-reverse η
-# Hessians.
-struct _BRMGroupShareWeight{F} end
+# Hessians. `A` is the law's arity (`-1` when the caller does not state it),
+# so a graph adapter (`ext/rk_distribution_graphs.jl`) can state the
+# signature; the per-group plate (`_rk_grouped_share_weights_template`) calls
+# the bound instance as a constant callee.
+struct _BRMGroupShareWeight{F,A} end
+_BRMGroupShareWeight{F}() where {F} = _BRMGroupShareWeight{F,-1}()
 function (::_BRMGroupShareWeight{F})(z, x, total, args::Vararg{Any,N}) where {F,N}
     _brm_shares_check_lengths(args, x)
     weight = -log(total)
@@ -662,11 +675,6 @@ function (::_BRMGroupShareWeight{F})(z, x, total, args::Vararg{Any,N}) where {F,
     end
     weight
 end
-
-# Calls `weight` (a `_BRMGroupShareWeight`) through a global function, so the
-# per-group plate's body calls a constant callee (`_rk_grouped_share_weights_template`).
-_brm_group_share_weight(weight, z, x, total, args::Vararg{Any,N}) where {N} =
-    weight(z, x, total, args...)
 
 # The per-entry and per-group indices of grouped entries whose groups end at
 # `ends` (inclusive, among the entries), the `K - 1` coordinates of a group of

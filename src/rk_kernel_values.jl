@@ -1260,6 +1260,15 @@ end
 # such a position.
 function _rk_kernel_bind_calls(value, scope, bindings, taken; index=false)
     value isa Expr || return value
+    if Meta.isexpr(value, :call)
+        call = _rk_statistic_call_parts(value, scope)
+        if call !== nothing
+            statistic = _rk_distribution_statistic!(
+                x -> _rk_kernel_bind_calls(x, scope, bindings, taken; index),
+                bindings, call.callable, call.args, call.kwargs, taken, scope)
+            statistic === nothing || return statistic
+        end
+    end
     integer = value.head === :ref || (value.head === :call && first(value.args) === :(:))
     args = Any[_rk_kernel_bind_calls(arg, scope, bindings, taken;
         index=index || (integer && i > 1)) for (i, arg) in enumerate(value.args)]

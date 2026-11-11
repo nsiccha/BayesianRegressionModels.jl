@@ -9,6 +9,24 @@ does not establish convergence or reproduce the paper's analysis.
 These checks use the test environment's StanBlocks pin `df3a71e9` (0.2.36),
 which fixes native row-vector extents in the model's allocation helper.
 
+`rk_distribution_statistics.jl` checks native LogNormal moments and log tails:
+constructor/callable identity, one-sided bounds, values against 512-bit
+references, ordinary Enzyme Reverse gradients and printed-source replay.
+`rk_distribution_graphs.jl` checks completion-law normalization, support,
+mapped-family coverage and gradients. Run either with `julia --project=test
+test/<file>.jl`; both accept testset substring filters. The test pin includes
+RK 0.1.161's allocation fix for one-sided variance.
+
+The moment benchmark writes timings, allocations and public emitted source
+to an output directory. Run both shared and row-varying bounds, then audit
+the shared case's placement before the observation loop:
+
+```sh
+julia --project=test research/distribution_graphs/hoisting.jl /tmp/brm-moments-shared
+julia --project=test research/distribution_graphs/hoisting.jl /tmp/brm-moments-varying --varying-bound
+julia --project=test research/distribution_graphs/audit_hoisting.jl /tmp/brm-moments-shared
+```
+
 `linear_predictor_entries.jl` checks that an entry of `linear_predictors(brmi)`
 is a predictor address: `popcoefnames`, `predictors`, `grouping_factors`,
 `dependencies` and `linear_predictor_op` give for the `(; name, link_lhs_fn)`
@@ -1274,7 +1292,7 @@ the test environment above.
 - RK plans the array cell's plate as matrix products (log group `:plate_batching`) and the per-row plate as a cell loop.
 - SBBRMI's compiled Stan density and gradient equal RK's.
 
-ReactiveKernels batches plates from 0.1.127 (RK `fa3deb83`). Below it the batched-plan check is `broken`; this environment's RK pin `4fa3b589` (RK 0.1.156) requires it. Everything else passes on both. Each spelling rule in the file's header was found by a refusal. It runs in the test environment, about 3 minutes on one CPU.
+ReactiveKernels batches plates from 0.1.127 (RK `fa3deb83`). Below it the batched-plan check is `broken`; this environment's RK pin `23fbef437` (RK 0.1.164) requires it. Everything else passes on both. Each spelling rule in the file's header was found by a refusal. It runs in the test environment, about 3 minutes on one CPU.
 
 `rk_plate_invariant_output.jl` checks an RKBRMI `@plate` output whose cell reads
 no per-index value, `decay[g] = exp(log_a)`, over three cells (BRM snag
@@ -1286,7 +1304,7 @@ model-scope `fill` of the same values and central differences. `brm_nlme_model`
 gives each subject's likelihood and η gradient. A one-cell binding is the
 positive control. ReactiveKernelsPPL fixed the shape in 0.1.129 (RK `b6196f114`,
 ReactiveKernels snag `plate-output-of-c4a0ca87`), which this environment's RK pin
-`4fa3b589` (RKPPL 0.1.154) carries. On older RKPPL the output is one number. There
+`23fbef437` (RKPPL 0.1.156) carries. On older RKPPL the output is one number. There
 the three-cell checks are `broken`: a later `decay[2]` raises a `BoundsError`,
 and `sum` and `length` return one cell's value. The one-cell count, total and
 likelihood pass on both. Its `decay` is `broken` there too, because one number is
@@ -2192,7 +2210,7 @@ RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/rk
 ```
 
 The file requires ReactiveKernels' JAX lowering as it landed on RK main
-(RK 0.1.132 / RKPPL 0.1.140 or later; the test pin is `4fa3b589`) and refuses
+(RK 0.1.132 / RKPPL 0.1.140 or later; the test pin is `23fbef437`) and refuses
 to run below it. The CDF-based laws, jit with the prepared data traced as
 arguments, size-generic modules, per-group AR(1) scans, nested `constrain` and
 the multi-axis and level-correlated HSGP terms are required checks. Its testset "every definition BRM emits is documented"
@@ -2562,7 +2580,7 @@ checks the `rkppl_model(:car_icar)` / `(:car_bym2)` bodies on a graph with two
 components, an island and an area without rows against an independent oracle
 of the car term's law (the BYM2 scaling from each component Laplacian's dense
 pseudo-inverse), and checks that the data-bound recipe brm-use documents gives
-the same densities. The bodies need RKPPL 0.1.145 (the test pin is `4fa3b589`).
+the same densities. The bodies need RKPPL 0.1.145 (the test pin is `23fbef437`).
 Run its car testsets alone with `julia --project=test
 test/rk_statistical_library.jl car`. `rk_statistical_source.jl`
 compares emitted reusable block algebra with the former ordinary inline
