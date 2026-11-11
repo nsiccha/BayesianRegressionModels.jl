@@ -1,9 +1,8 @@
 # test/seal_brm.jl — gate for the FULL grey-seal IPM on the @brm formula surface
 # (research/seal/grey_seal_brm.jl). Gates the MODEL ARTIFACT at the same level as the
-# @slic reference `test/seal_ipm.jl`: transpile + `stanc` + `compiles`. Like the
-# reference it is NOT sampled — the mechanistic scan's simplex constraints make a naive
-# init degenerate for both the @slic and @brm forms (verified: the @slic reference is
-# also non-finite at the origin), so the deliverable is the model, not a fit.
+# @slic reference `test/seal_ipm.jl`: transpile + `stanc` + `compiles`.
+# Numerical and sampling checks live in seal_density_dependence.jl and
+# seal_density_fit.jl; compilation alone does not establish a valid fit.
 #
 # Demonstrates the full hoist: brms-formula LPs (herring→birth regression, per-year /
 # per-demo / per-noise random effects with estimated group SDs) feeding the

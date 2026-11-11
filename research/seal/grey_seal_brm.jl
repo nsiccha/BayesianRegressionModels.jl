@@ -34,11 +34,10 @@
 # bycatch composition and reproductive-signs composition (per-row `Multinomial`), and
 # pregnancy counts (`Binomial`).
 #
-# Verified (test/seal_brm.jl): transpile + `stanc` + `compiles`, matching the `@slic`
-# reference's verification level (`grey_seal_ipm.jl`). Like the reference it is NOT
-# sampled — the mechanistic scan's simplex constraints make a naive init degenerate for
-# both forms; the deliverable is the model. Illustrative dataset (3 age classes x 2
-# sexes x 3 state years), verbatim from the SlicTranspiler `seal_ipm` fixture.
+# Compiler checks are in test/seal_brm.jl; numerical checks are in
+# test/seal_density_dependence.jl and the separate test/seal_density_fit.jl.
+# Illustrative dataset (3 age classes x 2 sexes x 3 state years), from the
+# author's SlicTranspiler `seal_ipm` fixture.
 
 using BayesianRegressionModels, StanBlocks, LogDensityProblems
 using Distributions: Uniform, Cauchy, LogNormal, Binomial, Multinomial
