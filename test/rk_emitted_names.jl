@@ -69,8 +69,11 @@ main_statements(brmi) = filter(s -> !(s isa LineNumberNode), emitted_main(brmi).
     @test :(b_mm__g1__g2_groups_g2_level = brm_level_indices(g2, $groups)) in stmts
     # `mo(rank)` in three predictors is one joint block, `mo_rank`: a simplex
     # column and a coefficient per predictor, one small level table. Each
-    # predictor gathers its own column under its own name.
-    @test occursin("mo_rank ~ brm_joint_monotonic_effects([1.0, 1.0], 2, 3, 0.0, 1.0)", main)
+    # predictor gathers its own column under its own name. The concentration,
+    # the increment count and the level table are inputs (user principle
+    # `0ikeidi`, `00966bf7`); their values are checked on the bound data below.
+    @test occursin("mo_rank ~ brm_joint_monotonic_effects(mo_rank_alpha, mo_rank_nincr, 3, 0.0, 1.0)", main)
+    @test occursin(r"rank_idx = brm_prepared_indices\(rank, mo_rank_levels\w*\)", main)
     @test :(mo_c_rank = mo_rank[rank_idx, 1]) in stmts
     @test :(mo_d_rank = mo_rank[rank_idx, 2]) in stmts
     @test :(mo_e_rank = mo_rank[rank_idx, 3]) in stmts
@@ -84,6 +87,9 @@ main_statements(brmi) = filter(s -> !(s isa LineNumberNode), emitted_main(brmi).
 
     # Coordinates follow the component names.
     backend, problem = consumer_problem(brmi)
+    bound = rk_bound_data(backend)
+    @test bound.mo_rank_alpha == [1.0, 1.0]
+    @test bound.mo_rank_nincr == 2
     names = coordinate_names(backend.model.layout)
     for name in ("pop_Intercept_x1_x2.beta_pop.1.1", "pop_Intercept_x1_x2.beta_pop.3.2",
             "pop_x2.beta_pop.1.2", "pop_c.beta_pop.1",
@@ -109,8 +115,9 @@ end
     main = string(emitted_main(brmi))
     # The two `mo(rank)` effects are one block; a linked predictor's column
     # carries its link, as `pop_log_sigma` does. The single `mo1(rank)` keeps
-    # its own component and SBBRMI's carrier name.
-    @test occursin("mo_rank ~ brm_joint_monotonic_effects([1.0, 1.0], 2, 2, 0.0, 1.0)", main)
+    # its own component and SBBRMI's carrier name. Concentrations and the
+    # increment count are inputs read by name (`00966bf7`).
+    @test occursin("mo_rank ~ brm_joint_monotonic_effects(mo_rank_alpha, mo_rank_nincr, 2, 0.0, 1.0)", main)
     @test :(mo_mu_rank = mo_rank[rank_idx, 1]) in stmts
     @test :(mo_log_sigma_rank = mo_rank[rank_idx, 2]) in stmts
     @test occursin("mo1_rank ~ brm_monotonic_value(rank_idx", main)
