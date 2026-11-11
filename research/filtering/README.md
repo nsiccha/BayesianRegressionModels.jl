@@ -73,10 +73,12 @@ predictive scores and effective parameter-member counts. Ordinary filtering
 can follow states while its fixed parameter cloud concentrates. Coverage of one
 simulated path is descriptive, not a calibration study.
 
-`summary.tsv` records active-coordinate counts and checks of checkpoint
-continuation. The selective example samples the observed unit's log rate while
-recovering the shared level and other rate from their carried conditional law.
-The scan example need not become low-dimensional under automatic selection.
+`summary.tsv` records active-coordinate counts for the scan example. The
+program also checks checkpoint continuation. The separately verified selective
+example samples the observed unit's log rate while recovering the shared level
+and other rate from their carried conditional law; its coordinate counts are
+added when running harness version 2. The scan example need not become
+low-dimensional under automatic selection.
 
 ## Checkpoint handling
 
