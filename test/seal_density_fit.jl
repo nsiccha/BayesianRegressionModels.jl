@@ -17,9 +17,22 @@ include(joinpath(@__DIR__, "..", "research", "mcmc_harness.jl"))
         population_init_size=3000.0, bbr_reference_logit=0.0,
         bbr_logit=(; herring_index_1=0.0, herring_index_2=0.0),
         aerial_mu=0.3, phi_aerial=50.0, harvest_bag_cv=0.15)
-    fit = sample_quorum(sb, "seal-density-correction"; n_chains=4, n_draws=100,
-        seed=20261111, inits, target_acceptance_rate=0.95,
-        cache="brm-seal-density-validation")
+    # An explicit directory preserves every chain's state when diagnosing a
+    # failed quorum. Ordinary test runs need no checkpoint directory.
+    checkpoint_dir = get(ENV, "BRM_SEAL_FIT_CHECKPOINT_DIR", "")
+    checkpoint_options = isempty(checkpoint_dir) ? (;) : (; checkpoint_dir)
+    fit = try
+        sample_quorum(sb, "seal-density-correction"; n_chains=4, n_draws=100,
+            seed=20261111, inits, target_acceptance_rate=0.95,
+            cache="brm-seal-density-validation", checkpoint_options...)
+    catch err
+        if err isa WarmupHMC.CompletionQuorumError
+            for chain in err.outcome.completion.chains
+                println("SEAL_CHAIN ", Base.structdiff(chain, (; error=nothing)))
+            end
+        end
+        rethrow()
+    end
     @test length(fit.chains) >= 3
     @test all(c -> size(c, 2) >= 100, fit.chains)
     finite_draws = 0
