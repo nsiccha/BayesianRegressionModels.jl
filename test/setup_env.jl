@@ -404,8 +404,13 @@ const PINS = [
     # admits a density factor on a parameter-derived vector definition
     # (`d .~ Normal.(0, s)`, snag rkppl-vector-val-c101b992), which the
     # `rkppl_model(:car_icar)` / `(:car_bym2)` bodies' per-component soft
-    # sum-to-zero needs (`test/rk_statistical_library.jl`).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "1701fb2e1dd30d01305506d7c081486ac6496fcf"),
+    # sum-to-zero needs (`test/rk_statistical_library.jl`). 298eaff0 (RK main,
+    # RK 0.1.152 / RKPPL 0.1.150) contains it: `jax_source` takes a data-only
+    # definition read by its fields from an untranslatable helper as a
+    # `prepare_data` input (RK 0.1.151, snag jax-source-refus-8c6ed1ec), which
+    # the car bodies' module needs, and a data-dependent `throw` becomes a
+    # masked runtime check (RK 0.1.149).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "298eaff0967c446936fbb212e8b92322e6a2876c"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
