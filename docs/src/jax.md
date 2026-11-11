@@ -42,6 +42,7 @@ Markdown.parse("The dataset has " * string(Int(run["rows"])) * " observations in
 ## Module export
 
 ```@eval
+using Markdown
 mod = Main.BRMDocsComparisons.example_module(:jax)
 code = """
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
@@ -211,6 +212,7 @@ standardized effects by their scales and correlation factor.
 Use `reprocess` to keep fitted preprocessing when changing the design:
 
 ```@eval
+using Markdown
 mod = Main.BRMDocsComparisons.example_module(:jax)
 code = """
 training = varying_slopes_data().data
