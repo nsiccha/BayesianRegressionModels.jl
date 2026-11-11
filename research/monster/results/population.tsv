@@ -1,0 +1,33 @@
+quantity	unit	description	median	q025	q975	rhat	ess_bulk	ess_tail
+VPR		population geometric mean, ventilation-perfusion ratio	2.289	1.498	3.989	1.388	13	70
+Fwp		population geometric mean, blood flow fraction, well-perfused tissue (unnormalized)	0.4569	0.2822	0.6655	1.132	30	75
+Fpp		population geometric mean, blood flow fraction, poorly perfused tissue (unnormalized)	0.1792	0.1316	0.2559	1.016	480	247
+Ff		population geometric mean, blood flow fraction, fat (unnormalized)	0.07484	0.05552	0.1026	1.04	141	997
+Fl		population geometric mean, blood flow fraction, liver (unnormalized)	0.257	0.2111	0.3141	1.096	40	402
+Vwp		population geometric mean, lean-mass fraction, well-perfused tissue (unnormalized)	0.2462	0.17	0.367	1.162	24	150
+Vpp		population geometric mean, lean-mass fraction, poorly perfused tissue (unnormalized)	0.6324	0.4194	0.9454	1.153	25	94
+Vl		population geometric mean, lean-mass fraction, liver	0.03239	0.02704	0.03901	1.004	7134	2001
+Pba		population geometric mean, blood/air partition coefficient	17.44	14.07	21.0	1.108	35	204
+Pwp		population geometric mean, tissue/blood partition coefficient, well-perfused tissue	1.982	0.9182	6.509	1.607	10	77
+Ppp		population geometric mean, tissue/blood partition coefficient, poorly perfused tissue	2.353	0.5287	3.292	1.61	10	55
+Pf		population geometric mean, tissue/blood partition coefficient, fat	75.88	54.52	112.5	1.013	633	963
+Pl		population geometric mean, tissue/blood partition coefficient, liver	3.352	1.747	6.484	1.009	1187	1265
+VMI		population geometric mean, maximal metabolic rate	0.008277	0.001852	0.07199	1.079	61	221
+KMI		population geometric mean, Michaelis constant	3.493	0.4528	72.07	1.017	223	256
+GSD VPR		population geometric SD, ventilation-perfusion ratio	1.294	1.163	1.821	1.05	94	546
+GSD Fwp		population geometric SD, blood flow fraction, well-perfused tissue (unnormalized)	1.262	1.117	16.21	1.578	10	61
+GSD Fpp		population geometric SD, blood flow fraction, poorly perfused tissue (unnormalized)	1.203	1.11	1.503	1.036	128	390
+GSD Ff		population geometric SD, blood flow fraction, fat (unnormalized)	1.21	1.114	1.468	1.001	2751	2025
+GSD Fl		population geometric SD, blood flow fraction, liver (unnormalized)	1.109	1.059	1.322	1.003	3062	1669
+GSD Vwp		population geometric SD, lean-mass fraction, well-perfused tissue (unnormalized)	1.227	1.116	1.763	1.002	2757	1697
+GSD Vpp		population geometric SD, lean-mass fraction, poorly perfused tissue (unnormalized)	1.223	1.115	1.798	1.005	2576	1682
+GSD Vl		population geometric SD, lean-mass fraction, liver	1.109	1.059	1.297	1.001	3888	1720
+GSD Pba		population geometric SD, blood/air partition coefficient	1.216	1.138	1.403	1.002	4915	1976
+GSD Pwp		population geometric SD, tissue/blood partition coefficient, well-perfused tissue	1.325	1.171	2.273	1.018	327	1432
+GSD Ppp		population geometric SD, tissue/blood partition coefficient, poorly perfused tissue	1.282	1.164	1.662	1.029	212	391
+GSD Pf		population geometric SD, tissue/blood partition coefficient, fat	1.419	1.245	1.879	1.008	2037	2178
+GSD Pl		population geometric SD, tissue/blood partition coefficient, liver	1.311	1.168	1.852	1.002	2982	2112
+GSD VMI		population geometric SD, maximal metabolic rate	1.814	1.463	2.958	1.003	3185	2223
+GSD KMI		population geometric SD, Michaelis constant	1.509	1.269	2.542	1.0	2722	1875
+sigma_venous		lognormal noise scale, venous blood	0.1462	0.1207	0.1794	1.001	1823	1796
+sigma_exhaled		lognormal noise scale, exhaled air	0.1656	0.1401	0.1977	1.032	135	1598

@@ -1,0 +1,12 @@
+key	value
+commit	e1012addf55645a65241659b974da0ab73223be9
+uncommitted_changes	none
+started	2026-11-11 03:11 local time
+host	a Linux fleet host, 4 Julia threads
+julia	1.10.12
+BayesianRegressionModels	0.2.273
+sampler	WarmupHMC completion_warmup_mcmc, adaptive_centering_problem over the BridgeStan problem, AutoEnzyme
+chains	4 per fit, quorum 3, 1000 draws each
+model	research/monster/reproduce.jl (the corrected nsiccha/monster program)
+data	monster_data() in reproduce.jl: six persons, two exposures, nu = 4, 128 substeps
+seed	20261110; predictive draws on 400 thinned draws

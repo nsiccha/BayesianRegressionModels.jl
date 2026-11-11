@@ -116,6 +116,8 @@ Main.BRMDocsComparisons.evaluate_source_prelude(
     "research/monster/reproduce.jl";
     before=:monster_brmi,
 )
+Main.BRMDocsComparisons.example_module(:monster).include(
+    joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "research", "monster", "figures.jl"))
 nothing
 ```
 
@@ -173,6 +175,83 @@ Main.BRMDocsComparisons.comparison(
     :monster_brmi;
     title="Monster PBPK model",
     require_stan=true,
+)
+```
+
+## The fit
+
+Four chains of WarmupHMC's quorum sampler, 1000 draws each, on the generated
+program (`research/monster/fit.jl`); the run keeps the first three chains
+that finish. The table gives the population geometric mean and geometric
+standard deviation of each of the fifteen quantities, and the two noise
+scales: posterior median, 95 % interval, split R-hat, bulk and tail effective
+sample sizes. The flow fractions and the `Vwp`/`Vpp` split are normalized
+inside the plate, so their population means are identified only through the
+prior and are not themselves fractions.
+
+Read the R-hat column before the medians. The three chains agree on the
+quantities the data inform (the liver volume, the fat and liver partition
+coefficients, the noise scales, most geometric SDs: R-hat within 1.01 and
+bulk ESS in the thousands), and disagree on the ones they do not: the
+tissue/blood partition coefficients of the perfused tissues `Pwp` and
+`Ppp`, the ventilation–perfusion ratio `VPR`, the well-perfused flow
+fraction `Fwp` and its geometric SD have R-hat between 1.1 and 1.6 and a
+bulk ESS near 10. For those rows the interval is the spread of chains that
+have not mixed, not a posterior summary. Six people sampled at eight times
+do not pin down every physiological constant of a four-compartment model;
+that is the situation the model's informative priors were built for.
+
+```@eval
+Main.BRMDocsComparisons.results_table(
+    "research/monster/results/population.tsv";
+    columns=[:quantity => "quantity", :description => "",
+             :median => "median", :q025 => "2.5 %", :q975 => "97.5 %",
+             :rhat => "R-hat", :ess_bulk => "bulk ESS", :ess_tail => "tail ESS"],
+)
+```
+
+```@eval
+m = Main.BRMDocsComparisons.example_module(:monster)
+Main.BRMDocsComparisons.figure(m.ppc_spec(); caption=m.CAPTION)
+```
+
+```@eval
+using Markdown
+m = Main.BRMDocsComparisons.example_module(:monster)
+rows = m.table("ppc.tsv")
+inside(lo, hi) = count(r -> getproperty(r, lo) <= r.observed <= getproperty(r, hi), rows)
+Markdown.MD(Markdown.Paragraph([
+    "Each panel is one person at one exposure. The bands are the posterior ",
+    "predictive median with its 50 % and 95 % intervals at the sampling times, ",
+    "in venous blood (blue) and exhaled air (orange); the points are the ",
+    "measurements. Both axes are logarithmic: the samples span a week and the ",
+    "concentrations three orders of magnitude. The predictions are identified ",
+    "where the parameters are not: $(inside(:q25, :q75)) of the $(length(rows)) ",
+    "measurements lie inside the 50 % band and $(inside(:q025, :q975)) inside ",
+    "the 95 % band, over the pooled draws of the three chains.",
+]))
+```
+
+```@eval
+Main.BRMDocsComparisons.results_table(
+    "research/monster/results/fits.tsv";
+    columns=[:dimension => "parameters", :chains_requested => "chains run",
+             :chains_kept => "chains kept", :omitted_chains => "omitted",
+             :draws => "draws", :divergent => "divergent",
+             :divergent_pct => "divergent %", :seconds => "seconds"],
+)
+```
+
+The run kept the first three chains to finish and left the fourth out; no
+transition diverged. The seconds are wall-clock on a fleet host that capped
+the run at two CPUs. The fit is not part of the docs build: it ran once, and
+the page reads its committed tables. The receipt says what they are the
+numbers of.
+
+```@eval
+Main.BRMDocsComparisons.results_table(
+    "research/monster/results/receipt.tsv";
+    columns=[:key => "", :value => ""],
 )
 ```
 
@@ -242,7 +321,12 @@ From the repository root, with the test environment bootstrapped
 
 ```sh
 julia --startup-file=no --project=test research/monster/compare_to_source.jl
+julia -t 4 --startup-file=no --project=test research/monster/fit.jl
 ```
 
-It checks the generated program against the corrected source program at 25
-random points and times one gradient of each.
+The first command checks the generated program against the corrected source
+program at 25 random points and times one gradient of each. The second
+writes the tables under `research/monster/results/` (about an hour on four
+threads). The figure is an AlgebraOfVega specification in
+`research/monster/figures.jl`, drawn from those tables when the docs are
+built; running that script writes a PNG preview to a scratch directory.
