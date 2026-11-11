@@ -84,7 +84,7 @@ studentt_builder = @brm begin
     y ~ Normal(mu, sigma)
 end
 
-# A BRMixr-shaped per-subject `@plate` cell reading predictors of a block with
+# A per-subject `@plate` cell reading predictors of a block with
 # one known SD (synthetic one-compartment-like decay).
 const PK = (; subject=collect(1:5), time=[[0.5, 1.0, 2.0] for _ in 1:5],
             dv=[round.(abs.(randn(3)) .+ 0.5; digits=3) for _ in 1:5])

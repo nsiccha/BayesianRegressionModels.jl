@@ -98,30 +98,12 @@ Each row records the searched surfaces, exact revisions and path anchors,
 retrieval status/time, positive evidence, dataset corroboration, and negative
 evidence. No renderer default or response name was accepted as family evidence.
 
-## SbPMX semantic HTMXO baseline
+## Semantic HTMXO baseline
 
-The selected design baseline is `origin/main` at
-`a8fd3c02e1e2305683a56c91384701bfeba6b528`, observed from the remote on
-2026-07-28. It is the newest coherent contract, not just the newest timestamp:
-
-- `kb-design/SbPMX-inferrable` at `7fcd50cefc0fe4f4f85ad5bda2b038cd5ad957ee`
-  is the merge base and is 79 commits behind main (0 ahead).
-- Recorded deployed release
-  `88c4fbff71228dfa9fca22504b87f016b76fa361` is three commits behind main
-  (0 ahead).
-- Main adds `81255eb` (code/target artifacts and disclosure), `10a819c`
-  (routes return semantic nodes), and merge `a8fd3c0`.
-- Other advertised semantic branches (`postprocessing`, `structure`,
-  `synthetic-simulation`, and `v2`) are also contained in main.
-
-Exact reviewed files and main-tree blob ids:
-
-| path | blob |
-|---|---|
-| `design/ASKS.md` | `463d245aa4f9220611fd17092fb78c05b6bb3f06` |
-| `design/SbPMX.jl` | `5889e49aa69386bfcc79515541d626017fe2a674` |
-| `design/mock_runtime.jl` | `372f88a9b9f634909c161be858c54119a05bbe7c` |
-| `compat/check-semantic-model-pipeline.jl` | `011d5ae50aa07118fdbdcaab186fb2fceae7ed1b` |
+The selected design baseline is the main branch of a private predecessor
+package, observed from its remote on 2026-07-28; it contains every advertised
+semantic branch. Its branch, commit, path and blob provenance is recorded in
+the private archive, not in this public repository.
 
 The contract uses `semantic_app`, semantic output nodes/cards, `@options`,
 `option_domain`/`option_records`, descriptor operations, and ordinary GET
@@ -134,10 +116,10 @@ BRM's `brm_descriptor`/`brm_execute` graph is authoritative for executable
 ordinary and kernel models. The adapter from `BRMDescriptor.operations` and
 columns to an HTMXObjects `semantic_app` mount is not shipped. Consequently
 every mount recommendation in `model_matrix.tsv` is explicitly experimental;
-it proposes the current SbPMX semantic pattern rather than claiming an existing
+it proposes the predecessor's current semantic pattern rather than claiming an existing
 authoritative application graph.
 
-HTMXObjects semantic lock for the recorded SbPMX release:
+HTMXObjects semantic lock for the recorded predecessor release:
 `3a75633a5d9e50da844b1d553b037560ae1312f2`.
 
 ## Served gallery receipt

@@ -1,7 +1,7 @@
 # Statistical model bodies adopted from RKPPL library.jl at
 # e005f231c1feb93e4eb1c636f238ccb02fc1cb9e; input SHA256:
 # fa87d6cb5ede8b258a413ed61dbb5afd298cf6bf51e105159353ff466c0c8f0c.
-# PK-specific bodies belong to downstream RKPPLBench.
+# PK-specific bodies belong to a downstream package.
 # The RK extension installs these compiler-independent syntax trees as
 # ordinary @rkppl submodels. Shared preparation serves BRM's backends.
 const _BRM_STATISTICAL_MODELS = (

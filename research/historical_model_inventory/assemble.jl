@@ -48,7 +48,7 @@ end
 
 function projection_contract(route, status)
     if route == "ordinary_brm" && status == "ready"
-        return "authoritative brm_descriptor/brm_execute; experimental SbPMX semantic_app mount adapter"
+        return "authoritative brm_descriptor/brm_execute; experimental semantic_app mount adapter"
     elseif route == "brm_kernel"
         return "authoritative kernel-capable BRMDescriptor substrate; row-specific experimental semantic_app adapter required"
     elseif route == "stanblocks_plate"
@@ -220,8 +220,8 @@ for historical_row in historical
             inferred_cap["runtime_error"] : inferred_cap["static_error"],
         "descriptor_mount_contract" => projection_contract(
             inferred["semantic_route"], inferred["translation_status"]),
-        "sbpmx_semantic_pattern" => "@options + option_domain/option_records + semantic_card under semantic_app",
-        "sbpmx_pattern_provenance" => "SbPMX origin/main@a8fd3c02e1e2305683a56c91384701bfeba6b528:design/{ASKS.md,SbPMX.jl,mock_runtime.jl},compat/check-semantic-model-pipeline.jl",
+        "semantic_pattern" => "@options + option_domain/option_records + semantic_card under semantic_app",
+        "pattern_provenance" => "private predecessor package, main branch (provenance in the private archive)",
     ))
 end
 

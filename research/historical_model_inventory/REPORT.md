@@ -260,15 +260,15 @@ BridgeStan instantiation, finite density/gradient, and WarmupHMC sampling: the
 kernel is dimension 15 with 50 draws and zero divergences; the plate is
 dimension 21 with 50 draws and zero divergences.
 
-## Current SbPMX semantic mount
+## Current semantic mount
 
-The coherent baseline is SbPMX `origin/main@a8fd3c0`, which contains every
-advertised semantic branch and is three commits beyond the recorded deployed
-release `88c4fbf`. Exact paths and blob ids are in `PROVENANCE.md`.
+The coherent baseline is the private predecessor package's main branch, which
+contains every advertised semantic branch; its provenance is recorded in the
+private archive (see `PROVENANCE.md`).
 
 The translation target is not old page syntax. It is the descriptor-driven
-pattern exercised by current `design/SbPMX.jl` and
-`compat/check-semantic-model-pipeline.jl`:
+pattern exercised by the predecessor's current design module and its
+semantic model pipeline check:
 
 - one `semantic_app` graph;
 - `@options` backed by `option_domain`/`option_records`;

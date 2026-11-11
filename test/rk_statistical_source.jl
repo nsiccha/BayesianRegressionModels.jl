@@ -1,6 +1,6 @@
 # Statistical blocks are self-contained submodels, as in StanBlocks: each
 # `lhs ~ block(...)` allocates its parameters with their priors and returns
-# its post-processed value (USER guiding principles, RKPPLBench review
+# its post-processed value (USER guiding principles, downstream review
 # `1nhjhdl`). A block must mean exactly its hand-inlined flat program: the
 # same priors, density, gradient and coordinates, with `lhs.local` for the
 # inlined `lhs_local`.

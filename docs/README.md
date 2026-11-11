@@ -76,7 +76,16 @@ render fixture are removed, so research commands cannot recreate retired site
 pages or copy rendered PNGs back into the documentation.
 
 Private project references and private benchmark passages are removed from
-source comments, test notes and the changelog. The paired-field and station-series test
+source comments, test notes and the changelog; the private predecessor
+package's branch, commit and blob provenance under
+`research/historical_model_inventory` is replaced by a pointer to the private
+archive, and a host nickname in `web-macro/src/app_data.jl` by a generic one.
+What remains, by decision or by design: the grey-seal model under
+`research/seal` names its private source repository (the user's open decision
+on keeping or dropping it); the test environment prefers a fleet mirror
+directory under the home directory before cloning from GitHub
+(`test/setup_env.jl`, `test/dependency_floors_test.jl`, `test/README.md`);
+and the two deployed-app manifests above. The paired-field and station-series test
 fixtures retain their synthetic data and model structure at the package
 owner's direction; they originated in the author's own private prototypes.
 Whether to replace that structure with independently written fixtures is a
