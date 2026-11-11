@@ -81,6 +81,12 @@
   margin: 0.75rem 0 0;
 }
 
+.backend-comparison .language-text pre,
+.backend-comparison .language-text code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .backend-comparison__dialog {
   width: min(98vw, 1800px);
   max-width: none;

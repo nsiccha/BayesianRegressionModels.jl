@@ -16,7 +16,7 @@ view = Main.BRMDocsComparisons.comparison(mod,
     "using BayesianRegressionModels\n" *
     Main.BRMDocsComparisons.source_function("research/start/reproduce.jl", :intro_model) *
     "\nmodel = intro_model()",
-    :model; title="Gaussian regression", require_stan=true, jax=true)
+    :model; title="Gaussian regression", require_stan=true)
 observed = Base.invokelatest(mod.column_data, mod.model, :y)
 subjects = Base.invokelatest(mod.column_data, mod.model, :subj)
 push!(view.content, Markdown.Code("text", "$(length(observed)) observations in $(length(unique(subjects))) subjects; response: y"))
@@ -25,9 +25,10 @@ view
 
 Use Julia 1.10 for this example. The six synthetic observations have a population
 slope for `x` and subject-specific intercepts. The positive scale priors are
-explicit; the population intercept and slope default to standard normals. The tabs show the
-same declaration as an intermediate representation, a StanBlocks model,
-Stan source and a JAX module. Python snippets need the separate environment
+explicit; the population intercept and slope default to standard normals. The
+tabs show the same declaration as a StanBlocks model, an RKPPL model, Stan source
+and a JAX module. Compare opens with BRM, StanBlocks and RKPPL side by side.
+Python snippets need the separate environment
 described in the [JAX example](jax.md); the page build executes the Julia model
 and export steps.
 

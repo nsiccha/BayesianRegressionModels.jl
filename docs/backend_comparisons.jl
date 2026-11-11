@@ -10,8 +10,6 @@ import ReactiveKernels, ReactiveKernelsPPL
 
 const BRM = BayesianRegressionModels
 const EXAMPLE_MODULES = Dict{Symbol,Module}()
-const PANE_IDS = "brm|ir|stanblocks|stan"
-const PANE_LABELS = "BRM authoring|IR|StanBlocks model|Stan source"
 const REPOSITORY_ROOT = normpath(joinpath(@__DIR__, ".."))
 
 html_attribute(value) = replace(string(value), '&' => "&amp;", '"' => "&quot;",
@@ -287,14 +285,14 @@ end
 
 """
 The JAX pane of a comparison: how to write the module, how Python calls it,
-and the module `jax_source` emits for this model's RKBRMI. A model that does
-not translate shows the `JAXEmissionError` (or other construction error).
+and the module `jax_source` emits from the same artifact as the RKPPL pane.
+A model that does not translate shows the construction or emission error.
 """
-function jax_pane(brmi::BRM.BRMI)
+function jax_pane(artifact)
     module_text = try
-        rk = Base.invokelatest(BRM.RKBRMI, brmi)
-        plan = Base.invokelatest(BRM.rk_bound_plan, rk)
-        string(Base.invokelatest(ReactiveKernelsPPL.jax_source, rk.model, plan))
+        plan = Base.invokelatest(BRM.rk_translate_artifact, artifact)
+        model = Base.invokelatest(ReactiveKernelsPPL.build_kernel, plan)
+        string(Base.invokelatest(ReactiveKernelsPPL.jax_source, model, plan))
     catch err
         return [Markdown.Code("julia", JAX_JULIA_USAGE),
                 Markdown.Code("text", "This model has no JAX module yet.\n\n" *
@@ -308,15 +306,54 @@ function jax_pane(brmi::BRM.BRMI)
             Markdown.Code("python", strip(module_text, '\n'))]
 end
 
+function remove_macro_locations!(expression)
+    expression isa Expr || return expression
+    if expression.head === :macrocall && length(expression.args) >= 2
+        expression.args[2] = nothing
+    end
+    foreach(remove_macro_locations!, expression.args)
+    return expression
+end
+
+function rkppl_source(expression)
+    shown = remove_macro_locations!(Base.remove_linenums!(deepcopy(expression)))
+    # Julia prints an emitted @doc as a raw macro call. Use ordinary docstring
+    # syntax, retaining its text and the complete definition it documents.
+    if Meta.isexpr(shown, :macrocall, 4) &&
+       shown.args[1] in (GlobalRef(Core, Symbol("@doc")), Symbol("@doc")) &&
+       shown.args[3] isa String
+        doc = Base.escape_string(shown.args[3], ('"', '$'); keep=('\n',))
+        return "\"\"\"\n" * doc * "\n\"\"\"\n" * sprint(Base.show_unquoted, shown.args[4])
+    end
+    return sprint(Base.show_unquoted, shown)
+end
+
+"""Emit the complete RKPPL definitions and model block, plus its JAX export."""
+function rk_emissions(brmi::BRM.BRMI, case_id::AbstractString)
+    artifact = try
+        Base.invokelatest(BRM.emit_rk_artifact, brmi; case_id)
+    catch err
+        reason = exception_text("RKPPL", err)
+        return Markdown.Code("text", reason),
+            [Markdown.Code("text", "JAX export unavailable because RKPPL source emission failed.\n\n" *
+                                   sprint(showerror, err))]
+    end
+    # Preserve the artifact and its bindings for JAX lowering. Only the display
+    # copy loses source-location comments; all definitions and statements remain.
+    source = join(rkppl_source.([artifact.defs; artifact.ast]), "\n\n")
+    return Markdown.Code("julia", source), jax_pane(artifact)
+end
+
 """
 Evaluate one displayed BRM example and emit the build-generated comparison:
-BRM authoring, IR, StanBlocks model and Stan source, plus the JAX module of
-its RKBRMI with `jax=true`. Every pane but the first is derived during this
-build.
+BRM authoring, StanBlocks model, RKPPL model, Stan source and JAX module.
+Every comparison has the same five panes. A backend that cannot emit a model
+shows its diagnostic in that pane. Every pane but the first is derived during
+this build.
 """
 function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
                     title=replace(string(brmi_name), '_' => ' '),
-                    require_stan::Bool=false, total_groups=(), jax::Bool=false)
+                    require_stan::Bool=false, total_groups=())
     displayed = strip(code, '\n')
     Core.eval(mod, :(using BayesianRegressionModels, Distributions))
     evaluate_source(mod, displayed)
@@ -324,17 +361,14 @@ function comparison(mod::Module, code::AbstractString, brmi_name::Symbol;
     brmi = candidate isa Function ? Base.invokelatest(candidate) : candidate
     brmi isa BRM.BRMI || error(
         "docs comparison `$brmi_name` did not evaluate to or construct a BRMI")
-    ir_source = strip(sprint(show, brmi), '\n')
     sb_source, stan_source = stan_emissions(brmi, mod; required=require_stan, total_groups)
-    jax_blocks = jax ? jax_pane(brmi) : Markdown.Code[]
-    sentinel = string(title)
-    isempty(jax_blocks) ||
-        (sentinel *= "\npanes: brm|ir|stanblocks|stan|jax:$(length(jax_blocks))")
+    rk_block, jax_blocks = rk_emissions(brmi, string(brmi_name))
+    sentinel = string(title, "\npanes: brm|stanblocks|rkppl|stan|jax:", length(jax_blocks))
     return Markdown.MD([
         Markdown.Code("brm-comparison", sentinel),
         Markdown.Code("julia", displayed),
-        Markdown.Code("julia", ir_source),
         Markdown.Code("julia", sb_source),
+        rk_block,
         Markdown.Code("stan", stan_source),
         jax_blocks...,
     ])
@@ -422,7 +456,7 @@ function validate_generated_templates(paths)
             "$(basename(path)) contains no build-generated comparison")
         occursin("data-backend-comparison", source) && error(
             "$(basename(path)) hand-authors the comparison wrapper; " *
-            "BRMDocsComparisons.comparison owns the fixed four panes")
+            "BRMDocsComparisons.comparison owns the shared backend panes")
         occursin(r"(?m)^```stan\s*$", source) && error(
             "$(basename(path)) contains hand-authored Stan; generated examples " *
             "must call BRMDocsComparisons.comparison")
@@ -436,7 +470,7 @@ function validate_no_bypasses(paths)
     for path in paths
         source = read(path, String)
         occursin("BRMDocsComparisons.source_excerpt", source) && error(
-            "$path bypasses the build-generated four-pane comparison")
+            "$path bypasses the build-generated backend comparison")
         for block in eachmatch(r"(?ms)^```([^\n]*)\n(.*?)^```\s*$", source)
             info, code = block.captures
             fence_parts = split(strip(info))
@@ -445,7 +479,7 @@ function validate_no_bypasses(paths)
             occursin("@brm", code) || continue
             occursin("Main.BRMDocsComparisons.comparison(", code) && continue
             error("$path contains a standalone executable `@brm` example " *
-                  "in a `$language` fence; use the generated four-pane " *
+                  "in a `$language` fence; use the generated backend " *
                   "comparison")
         end
     end

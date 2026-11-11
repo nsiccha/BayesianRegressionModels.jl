@@ -34,12 +34,13 @@ model = (@brm begin
     sigma ~ Exponential(0.3)
 end)((; x=[-1., 0., 1., -1., 0., 1.],
     subject=["a", "a", "a", "b", "b", "b"], y=[-0.5, 0.2, 0.8, -0.2, 0.4, 1.1]))
-""", :model; title="One declaration, two backends and a JAX export", require_stan=true, jax=true)
+""", :model; title="One declaration, two backends and a JAX export", require_stan=true)
 ```
 
-Read the IR pane when a result surprises you. A wrong response, data column
-or prior selector there reaches every backend. The generated panes come
-from this bound object during the documentation build.
+Compare opens with the BRM declaration, StanBlocks model and RKPPL model.
+Stan source and the JAX module are available from the same tabs on every page.
+The generated panes come from the bound model during the documentation build;
+an unsupported backend shows its diagnostic in its tab.
 
 ```@example backend_inspection
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
