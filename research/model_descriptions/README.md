@@ -7,6 +7,8 @@ declaration, data/parameter roles, value ranks and dimensions. Load HTMXObjects
 0.1.65 or later; no web demo app is needed:
 
 ```julia
+using BayesianRegressionModels, Distributions
+
 model_view_demo = (@brm begin
     sigma ~ Exponential(1)
     beta ~ Normal(0, 1)

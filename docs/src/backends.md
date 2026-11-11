@@ -117,7 +117,7 @@ source = jax_source(rk.model, rk_bound_plan(rk))
 inputs = rk_bound_data(rk)
 path = joinpath(mktempdir(), "model.py")
 write(path, source)
-@assert occursin("def log_density", source)
+@assert occursin("def log_density", read(path, String))
 (source_bytes=filesize(path), input_names=sort!(collect(keys(inputs)); by=string))
 ```
 
