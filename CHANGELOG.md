@@ -12,6 +12,28 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.274
+
+- Fixed: `brm_svi_fit`'s exploration ended at the `min_windows` floor whenever
+  the two-window test passed while the trend's last `trend_windows` windows
+  still reached back to the first window, and that window sat far below the
+  rest. A start that climbs from far below is no line: its residual swamped the
+  slope's error, so the trend test could not read a rise however plain it was.
+  On a downstream model with a non-centred step `m + s z_i` at 32 units (batch
+  4, seed 1) the first window's trimmed ELBO sat about 46,000 nats below the
+  next 39, the slope over windows 1 to 40 read t = 1.9 (7.2 without the first
+  10), and exploration stopped at window 40 with the step at 0.84 against a
+  truth of 1.18, exactly where the two-window test alone stopped it (snag
+  `brm-svi-fit-stop-4840e476`). While the last `trend_windows` windows reach
+  back into the first `patience`, the slope is now read both through them and
+  without them, and exploration goes on while either rises. There exploration
+  now runs 207 windows and ends at 1.180, 162 nats higher on shared draws; at 8
+  and 16 units it stops at the same windows as before (157 and 208). A fit never
+  explores less than on 0.2.264 to 0.2.273: on stationary window noise the stop
+  moves later in about 2.5% of runs (1% before), by a few windows. An optimizer
+  checkpoint written by BRM 0.2.264 to 0.2.273 records no `trend_skip` and
+  continues on the line through the first windows alone, as it ran.
+
 ## 0.2.273
 
 - Changed: an RKBRMI `cdar(step; by = group, cor = C)` walk is one program for
