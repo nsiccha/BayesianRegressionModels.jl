@@ -16,7 +16,6 @@ summaries come from deliberate, cached research runs. CI never samples.
 | Examples | `warfarin.md` | Fit sequential and joint pharmacokinetic/pharmacodynamic models. |
 | Examples | `wastewater.md` | Infer transmission from wastewater with a renewal model. |
 | Examples | `renewal.md` | Combine infection renewal and reporting delays. |
-| Examples | `seal-ipm.md` | Combine demographic observations in an integrated population model. |
 | Examples | `state-space.md` | Connect continuous latent dynamics with discrete observations. |
 | Examples | `monster.md` | Fit a whole-body pharmacokinetic model. |
 | Examples | `jax.md` | Export a hierarchical regression and compare Julia and NumPyro fits. |
@@ -41,6 +40,10 @@ the shared documentation package is public. The transitional quantity schema is
 one fit per directory. It is compatible with the planned DocsFits summaries.
 
 ## Landing notes
+
+The grey-seal example is held out while its density-dependence formulation and
+source provenance are reviewed. It is absent from this site's navigation and
+build; no new fit or interpretation of that model is published here.
 
 The rework removes the feature atlas, slide deck and live gallery, with their
 compiled deck files and the deck renderer that depended on the retired atlas.
