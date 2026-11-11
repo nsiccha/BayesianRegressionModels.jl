@@ -43,7 +43,8 @@ one fit per directory. It is compatible with the planned DocsFits summaries.
 ## Landing notes
 
 The rework removes the feature atlas, slide deck and live gallery, with their
-compiled deck files. Their subjects are taught in the task guides and worked
+compiled deck files and the deck renderer that depended on the retired atlas.
+Their subjects are taught in the task guides and worked
 examples. Rendered plot files and serialized posterior draws are removed from
 the documentation and research trees; scripts retain the regeneration path.
 
