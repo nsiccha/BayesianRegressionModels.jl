@@ -63,7 +63,9 @@ makedocs(
 for (page, names) in (
     ("index.md", (:intro_model,)),
     ("warfarin.md", (:warfarin_pk_brmi, :warfarin_pd_brmi, :warfarin_joint_brmi)),
-    ("wastewater.md", (:cdc_ww_brm_model,)),
+    ("wastewater.md", (:wastewater_public_model,)),
+    ("renewal.md", (:renewal_single_model,)),
+    ("state-space.md", (:state_space_model,)),
     ("monster.md", (:monster_brmi,)),
     ("jax.md", (:varying_slopes_model,)),
     ("variational-inference.md", (:site_counts_model,)),
