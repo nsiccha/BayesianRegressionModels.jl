@@ -43,7 +43,10 @@ julia --project=docs research/jax/figures.jl /path/to/figure-cache
 ```
 
 Exporting a module does not establish complete Python-side data preparation:
-inspect `UNTRANSLATED`. This model still exports group-level lookup inputs.
+inspect `UNTRANSLATED`. The recorded run (BRM 0.2.272) lists the group-level
+lookups `g_fit_levels, g_level` there (`results/run.tsv`). From BRM 0.2.276
+with ReactiveKernels 0.1.144 or later, `prepare_data` computes them from the
+raw `g` and `g_fit`, so this model's module takes raw data only.
 The current backend does not emit periodic HSGP bases, dense `gp` covariance
 plates, `gmrf`, or every collected plate output. `JAXEmissionError` names an
 unsupported construct. The executable coverage record is
