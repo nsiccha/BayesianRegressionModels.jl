@@ -58,7 +58,11 @@ end
             @test any(part -> part isa Markdown.Paragraph, rendered.content)
         elseif occursin("BRMDocsComparisons.figure", block)
             @test rendered isa Markdown.MD
-            @test occursin("data-brm-vega", sprint(show, MIME"text/markdown"(), rendered))
+            marker = only(rendered.content)
+            @test marker isa Markdown.Code && marker.language == "brm-figure"
+            payload = BRMDocsComparisons.JSON.parse(marker.code)
+            @test !isempty(payload["caption"]) && !isempty(payload["alt"]) &&
+                  haskey(BRMDocsComparisons.JSON.parse(payload["spec"]), "\$schema")
         end
     end
     @test count(b -> occursin("BRMDocsComparisons.figure", b), blocks) == 4

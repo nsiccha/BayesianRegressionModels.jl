@@ -23,7 +23,7 @@ function vi_sig(x, digits=2)
 end
 vi_int(x) = string(round(Int, x))
 vi_seconds(x) = x < 100 ? string(vi_int(x), " s") : string(vi_sig(x / 60, 2), " min")
-vi_interval(r) = string("[", vi_sig(r.q025), ", ", vi_sig(r.q975), "]")
+vi_interval(r) = string("[", vi_sig(r.q025, 3), ", ", vi_sig(r.q975, 3), "]")
 
 function vi_markdown_table(header, rows)
     lines = ["| " * join(header, " | ") * " |", "|" * join(fill(":--", length(header)), "|") * "|"]

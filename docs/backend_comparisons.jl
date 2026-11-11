@@ -1,6 +1,7 @@
 module BRMDocsComparisons
 
 using Markdown
+using JSON
 using BayesianRegressionModels
 using Distributions
 using StanBlocks

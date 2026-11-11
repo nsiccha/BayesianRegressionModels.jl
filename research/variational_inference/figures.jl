@@ -38,7 +38,7 @@ function marginals(read_table=table)
     rows = read_table("population.tsv")
     truth = unique([(; parameter=r.parameter, generating=r.generating) for r in rows])
     order = sorter(PARAMETERS)
-    spec = data(rows) * mapping(:median => "value (dimensionless)", :method => "";
+    spec = data(rows) * mapping(:median => "value (dimensionless)"; y=:method => "",
                                  color=:method => "method", layout=:parameter => order) *
                pointinterval(bands=[:q025 => :q975, :q25 => :q75]) +
            data(truth) * mapping(:generating; layout=:parameter => order) *
@@ -76,7 +76,7 @@ function streaming(read_table=table)
            mapping(:window => "data seen up to", :median => "value (dimensionless)";
                    layout=:parameter => sorter(PARAMETERS)) *
            pointinterval(bands=[:q025 => :q975, :q25 => :q75], orientation=:vertical) * visual(; color=:ink)
-    spec = spec * config(width=240, height=180, facet=(; linkyaxes=:none),
+    spec = spec * config(width=220, height=180, facet=(; linkyaxes=:none),
                          scales=scales(Layout=(; palette=wrapped(cols=2)), Color=(; categories=methods)),
                          title="Population estimates as sites and visits arrive")
     spec * config(scales=method_scale(methods))

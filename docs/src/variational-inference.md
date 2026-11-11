@@ -161,8 +161,8 @@ let rows = vi_table("population.tsv")
     body = map(order) do p
         nuts = only(filter(r -> r.parameter == p && r.method == "NUTS", rows))
         svi = only(filter(r -> r.parameter == p && r.method == "SVI", rows))
-        (p, vi_sig(nuts.generating), "$(vi_sig(nuts.median)) $(vi_interval(nuts))",
-         "$(vi_sig(svi.median)) $(vi_interval(svi))", vi_sig(svi.sd / nuts.sd))
+        (p, vi_sig(nuts.generating), "$(vi_sig(nuts.median, 3)) $(vi_interval(nuts))",
+         "$(vi_sig(svi.median, 3)) $(vi_interval(svi))", vi_sig(svi.sd / nuts.sd))
     end
     vi_markdown_table(["parameter", "generating value", "NUTS: median [95 % interval]",
                        "SVI: median [95 % interval]", "sd ratio SVI / NUTS"], body)
