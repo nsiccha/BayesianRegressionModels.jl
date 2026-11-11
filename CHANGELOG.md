@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.274
+
+- Fixed: on RKBRMI, the log density of a `gmrf` field is `-Inf` outside its
+  support instead of an error, for the `neighbors=` form and the `mesh=` form.
+  That covers a zero or infinite length (an `exp` overflow or underflow of the
+  unconstrained coordinate) and lengths so far beyond the read domain that the
+  field's conditioning systems (`neighbors=`) or its sparse factor (`mesh=`)
+  are numerically singular. Before, `rk_logdensity_problem` raised `DomainError`
+  at those long lengths ("gmrf conditional variance is not positive", or `log`
+  of a negative pivot) and answered `NaN` for a `mesh=` field at a zero or
+  infinite one. The error ended Pathfinder's line search during initialization,
+  which an `-Inf` answer makes back off: a `neighbors=8` field started at
+  `brm_start(rk, (;); base=:prior_median)`, whose zero field favours ever longer
+  lengths, failed every chain and now fits. A negative or NaN length is still an
+  error. Prediction (`brm_gmrf_predict`) and the `multiresolution=` form are
+  unchanged.
+
 ## 0.2.273
 
 - Changed: an RKBRMI `cdar(step; by = group, cor = C)` walk is one program for

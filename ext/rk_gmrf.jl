@@ -32,7 +32,14 @@ ReactiveKernels.@kernel function _gmrf_density_graph(field, spatial_length,
     C = geometry.nchannels
     T = length(geometry.times)
     factor = _gmrf_factor_graph(1.0 / spatial_length, spatial_length / 2.0, geometry)
-    logdet_space = 2.0 * sum(log.(factor[geometry.lptr[1:N]])) -
+    # Outside the support the density is -Inf, never an error (WarmupHMC's density
+    # contract): lengths so long that B's mass term rounds away against its
+    # stiffness term lose a pivot, and a zero or infinite length has none finite.
+    pivot_logs = plate(1:N) do i
+        d = factor[geometry.lptr[i]]
+        return (d > 0.0) & (d < Inf) ? log(d) : -Inf
+    end
+    logdet_space = 2.0 * sum(pivot_logs) -
         sum(log.(geometry.mass)) - N * log(2.0 * pi)
     channel_logs = plate(1:C) do c
         return log(L[c, c])
@@ -67,7 +74,9 @@ ReactiveKernels.@kernel function _gmrf_density_graph(field, spatial_length,
         end
         return sum(vertices) + N * C * log(variance) / 2.0
     end
-    return normalizer - sum(transitions)
+    inside = (spatial_length > 0.0) & (spatial_length < Inf) &
+        (temporal_length > 0.0) & (temporal_length < Inf)
+    return inside ? normalizer - sum(transitions) : -Inf
 end
 
 ReactiveKernels.@kernel function _gmrf_coordinates(u, shape, spatial_length,
