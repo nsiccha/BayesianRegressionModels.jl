@@ -8,9 +8,9 @@ re-evaluates retained draws for finite densities and gradients. Its short fit
 does not establish convergence or reproduce the paper's analysis.
 `seal_joint_support.jl` checks both authored helper sets against the original
 joint density, finite-difference coordinate Jacobians and native gradients
-across four age counts. The test environment pins StanBlocks `214af93d`
-(0.2.38), which includes the native row-vector fix and differentiable
-algebraic roots used in the joint support bounds.
+across four age counts. The test environment pins StanBlocks `dcabd24f`
+(0.2.40), which includes differentiable algebraic roots and native evaluation
+of the data-only support bound during descriptor construction.
 
 `rk_distribution_statistics.jl` checks native LogNormal moments and log tails:
 constructor/callable identity, one-sided bounds, values against 512-bit

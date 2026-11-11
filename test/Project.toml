@@ -165,7 +165,8 @@ url = "https://github.com/nsiccha/StanBlocks.jl"
 # and reads `cell.lo` as `cell[i].1` (b28164c, snag plate-cell-submo-4867bc5b), which
 # BRM's named returns from a component called inside a plate cell lower to.
 # 214af93d (0.2.38) adds differentiable algebraic roots for the seal support bounds.
-rev = "214af93d63854ca4d479693662762c08843bb63b"
+# dcabd24f (0.2.40) evaluates data-only algebraic bounds in native descriptors.
+rev = "dcabd24fdd43dcb79560a9be21357bb8ec374e4f"
 
 [sources.Treebars]
 url = "https://github.com/nsiccha/Treebars.jl"

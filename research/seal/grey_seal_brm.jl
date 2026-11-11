@@ -42,8 +42,8 @@ using BayesianRegressionModels, StanBlocks, LogDensityProblems
 using Distributions: Uniform, Cauchy, LogNormal, Binomial, Multinomial
 import StanBlocks.stan: transpiles
 
-# The age-only bound is also needed by executable Julia descriptors.
-StanBlocks.@deffun StanBlocks.@juliacompat seal_adult_floor(n_age::int)::real = begin
+# Descriptors evaluate this data-only bound through native Stan.
+StanBlocks.@deffun seal_adult_floor(n_age::int)::real = begin
     root = solve_newton_tol(x -> rep_vector(
         log(2.0) + log_inv_logit(-x[1]) - (n_age - 1) * log_inv_logit(x[1]), 1),
         rep_vector(log(4.0), 1), 1e-12, 1e-13, 100)

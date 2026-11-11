@@ -199,7 +199,6 @@ mortality_rates(phi_pup::real, phi_adult::real, c::real, n_age::int,
 end
 """; kind = :udf),
     _bundle_part("seal_adult_floor", "Adult Survival Support", raw"""
-# @slic markers: juliacompat
 seal_adult_floor(n_age::int)::real = begin
     root = solve_newton_tol(x -> rep_vector(
         log(2.0) + log_inv_logit(-x[1]) - (n_age - 1) * log_inv_logit(x[1]), 1),
@@ -673,10 +672,9 @@ end
     grey_seal_ipm_bundle([data])
 
 Assemble the grey-seal IPM via StanBlocks' `compile_slic_bundle`:
-each `@deffun` UDF card becomes a `@stanonly` definition, except the age-only
-support bound, which is also callable in Julia for descriptor construction.
-The six observation-family density cards additionally carry `@lhs @lpxf`,
-flagged by their `# @slic markers:` comment, and the two `aerial_stream` / `bycatch_stream` cards are
+each `@deffun` UDF card becomes a `@stanonly` definition (the
+six observation-family density cards additionally carry `@lhs @lpxf`, flagged by their
+`# @slic markers:` comment), and the two `aerial_stream` / `bycatch_stream` cards are
 anonymous Form-A observation submodels. Returns the bundle result — `.model` (traced),
 `.code` (generated Stan), `.descriptor`.
 """
@@ -686,8 +684,7 @@ function grey_seal_ipm_bundle(data = grey_seal_ipm_fixture())
     for p in GREY_SEAL_IPM_PARTS
         if p.kind == :udf
             markers = occursin("markers: stanonly, lhs, lpxf", p.source) ?
-                (:stanonly, :lhs, :lpxf) :
-                occursin("markers: juliacompat", p.source) ? :juliacompat : :stanonly
+                (:stanonly, :lhs, :lpxf) : :stanonly
             push!(udf_defs, p.slug => (; definition = _grey_seal_part_expr(p.source), markers))
         elseif p.kind == :anonymous
             name, body = _grey_seal_part_expr(p.source).args   # `name = begin … end`

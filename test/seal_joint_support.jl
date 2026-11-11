@@ -32,7 +32,7 @@ function probe(d)
         "seal_birth_fraction_lower", "seal_density_scaled_upper",
         "mortality_rates", "birth_rate_at_carrying_capacity", "seal_support_capacity")
     definitions = [p.slug => (; definition=_grey_seal_part_expr(p.source),
-        markers=occursin("markers: juliacompat", p.source) ? :juliacompat : :stanonly)
+        markers=:stanonly)
         for p in GREY_SEAL_IPM_PARTS if p.slug in names]
     body = quote
         phi_a_sc ~ restricted(uniform(0.0, 1.0); lower=(seal_adult_floor(n_age) - 0.8) / 0.2)
