@@ -25,8 +25,11 @@ _brm_lower_base(::Type{<:_BRMLowerLaw{F}}) where {F} = F
 
 # As with grouped shares, put a standard normal on the unconstrained
 # coordinate and observe the exact density remainder. This changes only the
-# prior/likelihood split: x = lo + exp(z), with log-Jacobian z.
-struct _BRMLowerEntryWeight{F} end
+# prior/likelihood split: x = lo + exp(z), with log-Jacobian z. `A` is the
+# law's arity (`-1` when not stated), so a graph adapter
+# (`ext/rk_distribution_graphs.jl`) can state the signature.
+struct _BRMLowerEntryWeight{F,A} end
+_BRMLowerEntryWeight{F}() where {F} = _BRMLowerEntryWeight{F,-1}()
 function (::_BRMLowerEntryWeight{F})(z, x, args...) where {F}
     logpdf(F(args...), x) + z + (z * z + log(2pi)) / 2
 end
@@ -182,6 +185,15 @@ end
 function _brm_lower_shares_valid(total, lo, n)
     slack = total - _brm_lower_sum(lo, n)
     isfinite(slack) && (n == 1 ? slack >= 0 : slack > 0)
+end
+function _brm_lower_grouped_valid(ends, residuals, lo)
+    start = 1
+    for (k, stop) in enumerate(ends)
+        _brm_lower_shares_valid(residuals[k], _brm_lower_slice(lo, start:stop),
+            stop-start+1) || return false
+        start = stop + 1
+    end
+    true
 end
 function _brm_shares_values(y::AbstractVector, total::Real, lo)
     n = length(y) + 1
