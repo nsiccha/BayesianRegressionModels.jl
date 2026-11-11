@@ -14,7 +14,7 @@
 # prior on R (via `Z` = log R) is what the PR states (log R_1 ~ N(log 1.3, 0.1), walk sd ~ N+(0, 0.05)).
 #   Run: julia --project=test research/epi_renewal/prior_predictive.jl [n_draws]
 #
-# VERIFIED (strato2, StanBlocks pin 9a958f97, 1000 prior draws): held_out=:all removes the in-cell
+# VERIFIED (a Linux fleet host, StanBlocks pin 9a958f97, 1000 prior draws): held_out=:all removes the in-cell
 #   observation from the model block in both programs; prior NUTS 0 divergences (min ESS 701 / 658).
 #   single: prior log R_1 5/50/95% = 0.087 / 0.260 / 0.425 (PR: N(log 1.3 = 0.262, 0.1)); prior
 #   predictive cases day 1 [15, 91], day 56 [11, 122561] — the no-depletion tail; simulated truth

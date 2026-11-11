@@ -1,5 +1,5 @@
 From 7aed40b18bd4cdabb75330f285d5c9b355575ab9 Mon Sep 17 00:00:00 2001
-From: KB Remote Agent <kb-agent@strato2.invalid>
+From: KB Remote Agent <kb-agent@a Linux fleet host.invalid>
 Date: Tue, 15 Sep 2026 16:04:10 +0000
 Subject: [PATCH] Reject nonfinite centering transports before updating the
  metric

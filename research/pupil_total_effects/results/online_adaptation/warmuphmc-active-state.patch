@@ -1,5 +1,5 @@
 From d9eeaac2c092b80aba3ef5d608261faea9b81265 Mon Sep 17 00:00:00 2001
-From: KB Remote Agent <kb-agent@strato2.invalid>
+From: KB Remote Agent <kb-agent@a Linux fleet host.invalid>
 Date: Tue, 15 Sep 2026 14:55:00 +0000
 Subject: [PATCH] Preserve the active physical state when adapting centering
 

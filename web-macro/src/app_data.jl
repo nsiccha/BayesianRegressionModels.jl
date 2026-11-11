@@ -11,7 +11,7 @@
     # stack, no OOM, just process gone), plus a global lock that
     # serializes ALL compiles across paths (gallery-opening N cards
     # spawns N parallel `make` jobs at -O3-scale memory peaks, which
-    # OOM-killed the 3.8 GB strato box). Holding the global lock around
+    # OOM-killed a 3.8 GB host). Holding the global lock around
     # `compile_model` caps the box at one compile in flight; StanModel
     # construction is left outside the lock (cheap dlopen).
     @struct stan_locks = begin
@@ -72,7 +72,7 @@
             # `O=0` overrides Stan's default `-O3` (set in
             # stan_math/make/compiler_flags as `O ?= 3`). Templated Stan
             # headers blow up g++'s memory at -O3 -- ~2 GB peak per
-            # invocation, which OOM-kills julia on the 3.8 GB strato box.
+            # invocation, which OOM-kills julia on a 3.8 GB host.
             # -O0 cuts that ~3x at the cost of slower model run-time
             # (acceptable for a pipeline-explorer demo). The hash includes
             # make_args so old -O3 .so caches are not reused.

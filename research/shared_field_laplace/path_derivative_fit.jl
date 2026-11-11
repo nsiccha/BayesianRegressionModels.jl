@@ -94,7 +94,7 @@ end
         @test metric<2e-12
     end
     all(<(2e-12),values(algebra)) || error("path derivative algebra failed; no native fit")
-    base="/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base=joinpath(@__DIR__, "results")
     reference=deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))
     previous=deserialize(joinpath(base,"native-gaussian-block-fit-v1/comparison.jls"))
     reference.reference_ok && previous.identity.reference_signature==reference.signature ||

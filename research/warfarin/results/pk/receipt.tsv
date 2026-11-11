@@ -1,0 +1,10 @@
+key	value
+model	research/warfarin/reproduce.jl (warfarin_pk_brmi) as of f5d24b50
+data	research/warfarin/data/warfarin_data.txt (32 subjects) through data.jl as of f5d24b50
+script	research/warfarin/fit.jl; its code now lives in research/mcmc_harness.jl and fit.jl as of 99b48e65, moved without changes
+started	2026-11-10 21:58 CET
+host	a Linux fleet host, 4 Julia threads, OpenBLAS at 1 thread
+julia	1.10.12
+sampler	WarmupHMC completion_warmup_mcmc, adaptive_centering_problem over the BridgeStan problem, AutoEnzyme
+chains	4 per fit, quorum 3, 1000 draws each
+seed	20261110; predictive draws on 400 thinned draws

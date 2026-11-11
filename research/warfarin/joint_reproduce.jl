@@ -15,7 +15,7 @@ occur at different times and have different units, so a rowwise residual
 covariance would require an additional alignment and measurement model rather
 than merely joining the two public likelihoods.
 """
-function warfarin_joint_brmi(data = warfarin_fixture())
+function warfarin_joint_brmi(data = warfarin_data())
     return @brm data begin
         sigma_pk ~ Normal(0.0, 2.0; lower=0.0)
         kappa_pk ~ Gamma(0.2, 5.0)
@@ -47,48 +47,36 @@ function warfarin_joint_brmi(data = warfarin_fixture())
         sd(:, kout_bsv) ~ Normal(0.0, 0.5)
         sd(:, ec50_bsv) ~ Normal(0.0, 0.5)
 
-        pk_pred ~ kernel(
-            pk_time, dose, pk_dv,
-            lag_logit, log_ka, log_cl0, log_v0,
-        ) do times, dose_i, observed,
-             lag_i, lka_i, lcl_i, lv_i
-            log_tlag_i = log_inv_logit(lag_i)
-            prediction = exp(warfarin_pk_logconcentration(
-                times, log(dose_i), lka_i, lcl_i, lv_i, log_tlag_i,
-            )) + 1e-5
+        # The PK cell: one subject's concentration course from its own latent
+        # lag, absorption, clearance and volume.
+        @plate for i in eachindex(lag_logit)
+            log_tlag = -log1pexp(-lag_logit[i])    # log(tlag), tlag = logistic(lag_logit) < tlagMax = 1
+            pk_pred[i] = exp.(warfarin_pk_logconcentration(
+                pk_time[i], log(dose[i]), log_ka[i], log_cl0[i], log_v0[i], log_tlag,
+            )) .+ 1e-5
             pk_pointwise_loglik = warfarin_gamma2_overdisp_lpdfs(
-                observed, prediction, sigma_pk, kappa_pk * 25.0,
+                pk_dv[i], pk_pred[i], sigma_pk, kappa_pk * 25.0,
             )
-            observed ~ warfarin_gamma2_overdisp(
-                prediction, sigma_pk, kappa_pk * 25.0,
-            )
-            prediction
+            pk_dv[i] ~ warfarin_gamma2_overdisp(pk_pred[i], sigma_pk, kappa_pk * 25.0)
         end
 
-        pd_pred ~ kernel(
-            pd_time, dose, pd_dv,
-            lag_logit, log_ka, log_cl0, log_v0,
-            log_r0, log_inv_kout, log_ec50,
-        ) do times, dose_i, observed,
-             lag_i, lka_i, lcl_i, lv_i,
-             lr0_i, linvkout_i, lec50_i
-            log_tlag_i = log_inv_logit(lag_i)
-            prediction = warfarin_turnover_prediction(
-                times, log(dose_i), lka_i, lcl_i, lv_i,
-                log_tlag_i, lr0_i, linvkout_i, lec50_i,
+        # The PD cell reads the same latent PK quantities, so the PD data update
+        # them too; no fixed medians are handed over.
+        @plate for i in eachindex(lag_logit)
+            log_tlag = -log1pexp(-lag_logit[i])
+            pd_pred[i] = warfarin_turnover_prediction(
+                pd_time[i], log(dose[i]), log_ka[i], log_cl0[i], log_v0[i],
+                log_tlag, log_r0[i], log_inv_kout[i], log_ec50[i],
             )
             pd_pointwise_loglik = warfarin_gamma2_overdisp_lpdfs(
-                observed, prediction, sigma_pd, kappa_pd * 625.0,
+                pd_dv[i], pd_pred[i], sigma_pd, kappa_pd * 625.0,
             )
-            observed ~ warfarin_gamma2_overdisp(
-                prediction, sigma_pd, kappa_pd * 625.0,
-            )
-            prediction
+            pd_dv[i] ~ warfarin_gamma2_overdisp(pd_pred[i], sigma_pd, kappa_pd * 625.0)
         end
     end
 end
 
-warfarin_joint_sbbrmi(data = warfarin_fixture()) =
+warfarin_joint_sbbrmi(data = warfarin_data()) =
     SBBRMI(warfarin_joint_brmi(data); mod=@__MODULE__)
 
 if abspath(PROGRAM_FILE) == @__FILE__
@@ -99,8 +87,8 @@ if abspath(PROGRAM_FILE) == @__FILE__
         @test StanBlocks.stanc_check(code; warn_pedantic=false).ok
         @test occursin("warfarin_gamma2_overdisp_lpdf", code)
         @test occursin("ode_rk45_tol", code)
-        @test occursin(r"pk_pred_log_tlag_i.*lag_logit", code)
-        @test occursin(r"pd_pred_log_tlag_i.*lag_logit", code)
+        @test occursin(r"pk_pred_log_tlag\[.*lag_logit", code)
+        @test occursin(r"pd_pred_log_tlag\[.*lag_logit", code)
         @test occursin("pk_pred_pk_pointwise_loglik", code)
         @test occursin("pd_pred_pd_pointwise_loglik", code)
         @test length(collect(eachmatch(
@@ -126,26 +114,26 @@ if abspath(PROGRAM_FILE) == @__FILE__
             predictive = brm_execute(
                 descriptor, :predict; problem, draws=q, seed=20260821,
             )
-            @test length(predictive.pk_dv_gen) == sum(length, warfarin_fixture().pk_dv)
-            @test length(predictive.pd_dv_gen) == sum(length, warfarin_fixture().pd_dv)
+            @test length(predictive.pk_dv_gen) == sum(length, warfarin_data().pk_dv)
+            @test length(predictive.pd_dv_gen) == sum(length, warfarin_data().pd_dv)
             aggregate_loglik = brm_execute(
                 descriptor, :pointwise_loglik;
                 problem, draws=q, seed=20260821,
             )
             @test length(aggregate_loglik.pk_dv_likelihood) ==
-                  length(warfarin_fixture().pk_dv)
+                  length(warfarin_data().pk_dv)
             @test length(aggregate_loglik.pd_dv_likelihood) ==
-                  length(warfarin_fixture().pd_dv)
+                  length(warfarin_data().pd_dv)
 
             names = StanBlocks.BridgeStan.param_names(
                 problem.model; include_tp=true, include_gq=true,
             )
             @test length(brm_output_coordinates(
                 descriptor, :pk_pointwise_loglik, names,
-            )) == sum(length, warfarin_fixture().pk_dv)
+            )) == sum(length, warfarin_data().pk_dv)
             @test length(brm_output_coordinates(
                 descriptor, :pd_pointwise_loglik, names,
-            )) == sum(length, warfarin_fixture().pd_dv)
+            )) == sum(length, warfarin_data().pd_dv)
         end
     end
 end

@@ -1,8 +1,3 @@
-# test/nlme_known_blocks_fit.jl — NLMEEstimation on a model whose subject
-# block holds every value known (`sd(...) = value`, `cor(:, ID) = R`): the
-# block is one covariance family held at the identity (`fixed_omega`), its
-# standardized draws are η, and the model maps them to the effects with the
-# known `diag(sd) L` (snag `odlplaus-margina-60bc212b`).
 #
 # The linear Gaussian model gives exact oracles: each subject's conditional
 # log likelihood is a Normal density, and the empirical Bayes mode of η is a

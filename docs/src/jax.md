@@ -24,6 +24,7 @@ mod = Main.BRMDocsComparisons.example_module(:jax)
 Main.BRMDocsComparisons.evaluate_source_prelude(mod, "research/jax/reproduce.jl";
     before=:varying_slopes_model)
 Base.include(mod, joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "research/jax/presentation.jl"))
+Base.include(mod, joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "research/jax/figures.jl"))
 Main.BRMDocsComparisons.comparison(mod,
     Main.BRMDocsComparisons.source_function("research/jax/reproduce.jl", :varying_slopes_model),
     :varying_slopes_model; title="Correlated group intercepts and slopes", require_stan=true)
@@ -40,18 +41,28 @@ Markdown.parse("The dataset has " * string(Int(run["rows"])) * " observations in
 
 ## Module export
 
-```julia
+```@eval
+using Markdown
+mod = Main.BRMDocsComparisons.example_module(:jax)
+code = """
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 
 model = varying_slopes_model()
 rk = RKBRMI(model)
 source = jax_source(rk.model, rk_bound_plan(rk); values=(:mu,))
-write("model.py", source)
 inputs = rk_bound_data(rk)
+"""
+Main.BRMDocsComparisons.evaluate_source(mod, code)
+folder = joinpath(pwd(), "downloads", "jax")
+mkpath(folder)
+write(joinpath(folder, "model.py"), mod.source.text)
+Markdown.MD([Markdown.Code("julia", code),
+    Markdown.Paragraph(["The export contains $(ncodeunits(mod.source.text)) bytes of Python source."])])
 ```
 
-The resulting [model.py](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/jax/model.py)
-contains these entry points:
+```@raw html
+<p>The resulting <a href="downloads/jax/model.py" target="_self" download><code>model.py</code></a> contains these entry points:</p>
+```
 
 | Entry point | Result |
 |:--|:--|
@@ -75,6 +86,9 @@ variables. Parameter sizes that depend on the data are resolved by
 Pass exactly the columns listed by `model.DATA`, by name. The native binding
 returned by `rk_bound_data(rk)` can contain extra intermediate values; those
 are not keyword arguments of `prepare_data`.
+
+The Python environment is separate from the documentation build. The reproduction
+script executes this workflow; the tables below read its cached results.
 
 ```python
 import jax
@@ -137,6 +151,9 @@ sampling uncertainty and convergence diagnostics.
 accepts the negative log density as its `potential_fn`. This uses the
 exported density directly, including its coordinate Jacobian.
 
+Sampling runs only in the reproduction environment and is cached, so this block
+is not rerun during the documentation build.
+
 ```python
 import numpy as np
 from numpyro.infer import MCMC, NUTS
@@ -161,7 +178,11 @@ quorum selects chains by completion time, which can bias a posterior if
 runtime depends on the sampled region. The diagnostics below do not rule
 out that selection effect.
 
-![Posterior marginal densities from native WarmupHMC and NumPyro, with generating values marked by dotted vertical lines](assets/jax/posterior-marginals.png)
+```@eval
+Main.BRMDocsComparisons.figure(
+    Main.BRMDocsComparisons.example_module(:jax).JAXExampleFigures.population_figure();
+    caption="Population parameters from Julia and JAX: posterior medians, central 50% intervals (thick) and 95% intervals (thin). Each panel has its own horizontal scale.")
+```
 
 ```@eval
 Main.BRMDocsComparisons.example_module(:jax).JAXExampleResults.posterior_table()
@@ -178,20 +199,32 @@ standardized effects.
 Main.BRMDocsComparisons.example_module(:jax).JAXExampleResults.diagnostics_table()
 ```
 
-![Group intercept and slope deviations: posterior medians with 50% and 95% intervals from both samplers](assets/jax/group-effects.png)
+```@eval
+Main.BRMDocsComparisons.figure(
+    Main.BRMDocsComparisons.example_module(:jax).JAXExampleFigures.group_figure();
+    caption="Group intercept and slope deviations on the response scale. Both samplers give similar medians and central 50% and 95% intervals; groups retain their data labels.")
+```
 
-Each panel orders the groups by the native posterior median. These are
-deviations from the population intercept or slope, after transforming the
+These are deviations from the population intercept or slope, after transforming the
 standardized effects by their scales and correlation factor.
 
 ## New designs
 
 Use `reprocess` to keep fitted preprocessing when changing the design:
 
-```julia
+```@eval
+using Markdown
+mod = Main.BRMDocsComparisons.example_module(:jax)
+code = """
+training = varying_slopes_data().data
+new_data = merge(training, (; x=training.x .+ 0.5))
 replay = reprocess(rk, new_data)
-write("replay.py", jax_source(replay.model, rk_bound_plan(replay); values=(:mu,)))
+replay_source = jax_source(replay.model, rk_bound_plan(replay); values=(:mu,))
 replay_inputs = rk_bound_data(replay)
+"""
+Main.BRMDocsComparisons.evaluate_source(mod, code)
+Markdown.MD([Markdown.Code("julia", code),
+    Markdown.Paragraph(["The replay binds $(length(mod.replay_inputs[:x])) predictor values."])])
 ```
 
 A saved fitted state can also reconstruct a replay without the training
@@ -201,42 +234,26 @@ A replay that omits a response needed by `log_density` is refused with a
 `ContractValidationError`; retaining that response and requesting `values`
 is different from exporting a response-free predictive program.
 
-## Translation coverage
-
-Successful export does not mean that every preparation step is available
-in Python: check `UNTRANSLATED` as well. `JAXEmissionError` names a construct
-that cannot be emitted. The current limitations include periodic HSGP
-bases, the dense `gp` covariance plate, `gmrf`, and some collected plate
-outputs requested through `values`. These boundaries depend on the BRM
-and ReactiveKernels versions.
-
-The package's `test/rk_jax_models.jl` exercises exported modules in a real
-Python process, comparing densities, gradients, constrained values and
-data-dependent dimensions. `test/rk_jax_inference.jl` adds an independent
-posterior comparison. They are the executable coverage record.
-
-## Reproduction
-
-From the repository root, create the Python environment and run the
-committed Julia driver:
-
-```sh
-python3 -m venv research/jax/.venv
-research/jax/.venv/bin/python -m pip install jax==0.12.0.1 numpyro==0.22.0 numpy==2.5.4
-julia --startup-file=no --project=test test/setup_env.jl
-RK_JAX_PYTHON="$PWD/research/jax/.venv/bin/python" julia --startup-file=no --threads=1 --project=test research/jax/reproduce.jl
-julia --project=research/adaptive_centering/plots research/jax/figures.jl
+```@raw html
+<details><summary>Reproduce</summary>
 ```
 
-The plotting command uses the repository's AlgebraOfVega/CairoMakie
-environment after its dependencies have been installed. The driver writes
-`model.py`, encoded inputs, parity checks,
-posterior summaries and plot data under `research/jax/`. The documentation
-reads those committed tables; rebuilding the site does not rerun MCMC.
-After a completed fit, `--reuse-draws` regenerates the summaries from the
-local `native.json` and `python.json` caches. It checks that the exported
-module, inputs and sampling settings match the saved run.
+The [reproduction notes](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/jax/README.md)
+cover the synthetic data, environment, cached fits, export limitations and
+value/gradient checks. Rebuilding this page exports the model and renders
+figures from the stored summaries; it does not repeat sampling.
+
+```sh
+julia --startup-file=no --project=test test/setup_env.jl
+RK_JAX_PYTHON=/path/to/python julia --startup-file=no --threads=1 --project=test research/jax/reproduce.jl
+```
 
 ```@eval
-Main.BRMDocsComparisons.example_module(:jax).JAXExampleResults.version_table()
+Main.BRMDocsComparisons.receipts_table([
+    "WarmupHMC" => "research/jax/results/native/receipt.tsv",
+    "NumPyro" => "research/jax/results/jax/receipt.tsv"])
+```
+
+```@raw html
+</details>
 ```

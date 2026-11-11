@@ -196,6 +196,40 @@ end
     @test physical_order(ux, uy) == physical_order(ux[q], uy[q])
 end
 
+@testset "Outside the support the density is -Inf, never an error" begin
+    # An optimizer's line search proposed these lengths from a prior-median start
+    # (snag gmrf-neighbors-d-952fd2fb): the conditioning correlations round to one.
+    rng = Xoshiro(20261110)
+    xy = [(x + 5rand(rng), y + 5rand(rng)) for y in range(10, 85; length=4) for x in range(10, 85; length=6)]
+    rows = [(x, y, t) for (x, y) in xy for t in (1.0, 3.0, 6.0) for _ in 1:2]
+    f = BRM._brm_vecchia_footprint(getindex.(rows, 1), getindex.(rows, 2), getindex.(rows, 3), 1;
+        neighbors=8)
+    x = randn(rng, f.ncoordinates)
+    outside(s, t) = (BRM._brm_vecchia_logdensity(x, s, t, ones(1, 1), f),
+        BRM._brm_vecchia_gradient(x, s, t, ones(1, 1), f))
+    for (s, t) in ((8.877173681259308e64, 8.260477390538313e19), (8.9e64, 4.0), (25.0, 1e300),
+            (Inf, 4.0), (25.0, Inf), (0.0, 4.0), (25.0, 0.0))
+        value, gradient = outside(s, t)
+        @test value == -Inf
+        @test gradient.value == -Inf
+        @test length(gradient.field) == f.ncoordinates && all(iszero, gradient.field)
+        @test gradient.spatial_length == 0 && gradient.temporal_length == 0 && all(iszero, gradient.L)
+    end
+    # Prediction's strict solve still refuses the singular system.
+    @test_throws DomainError BRM._brm_vecchia_factors(f, 8.877173681259308e64, 8.260477390538313e19)
+    # A negative or NaN length is no transform's output: still an error.
+    for (s, t) in ((-1.0, 4.0), (25.0, -1.0), (NaN, 4.0), (25.0, NaN))
+        @test_throws DomainError BRM._brm_vecchia_logdensity(x, s, t, ones(1, 1), f)
+        @test_throws DomainError BRM._brm_vecchia_gradient(x, s, t, ones(1, 1), f)
+    end
+    # Long lengths the system still resolves keep their finite density and derivative.
+    for (s, t) in ((1e3, 4.0), (1e5, 4.0), (25.0, 1e6))
+        value, gradient = outside(s, t)
+        @test isfinite(value) && gradient.value ≈ value
+        @test all(isfinite, gradient.field) && isfinite(gradient.spatial_length)
+    end
+end
+
 @testset "Unsupported inputs are refused with their reason" begin
     @test_throws ArgumentError BRM._brm_vecchia_footprint(Float64[], Float64[], Float64[], 1; neighbors=2)
     @test_throws ArgumentError BRM._brm_vecchia_footprint([1.0], [1.0], [1.0], 1; neighbors=0)

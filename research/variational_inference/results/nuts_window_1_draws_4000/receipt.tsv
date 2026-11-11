@@ -1,0 +1,32 @@
+field	value
+key	61a53ea18e74e9601bf4fe2c0b80974ff5f399c81be2d922328ef30a7d4ecd64
+harness	BRM minibatch SVI and WarmupHMC completion sampler; site-counts-v2-quorum
+host	a Linux fleet host
+recipe	site-counts-v2-quorum
+created	2026-11-10T23:58:13.921
+started	2026-11-10T23:47:17.286
+commit	e8bef69f83b4a0babd1f00a66f322ab2cf02f8b5
+uncommitted_changes	true
+julia	1.10.12
+brm	0.2.272
+warmuphmc	0.2.11
+source_sha256	2aa8652c60ed8abd4d763af4a9c4f70986aa5f14aac7d8d8c03aa1604064e550
+settings	(n_draws = 4000, chains = 4, quorum = 3, initialization = "jittered origin, unit diagonal metric")
+seed	210
+enzyme	0.13.218
+threads	1
+program_sha256	62adca1af7868b7ef5deb3bb304473b52185adf4516af802b59ddb3e181db140
+legacy_input_sha256	45e6957f9866efd6aa3b5652aaa8557e00fd9aa04391cb6cee7ec6bd15567d78
+key_migration	Content key added after measurement; unchanged synthetic model, settings and draws
+key_migrated	2026-11-11T00:30:21.244
+seconds	61.4341
+dimension	605
+omitted_chains	1
+max_rhat	1.0029967358003198
+min_bulk_ess	888.0475441313532
+min_tail_ess	1083.4457042310783
+divergent	0
+retained	12000
+chains	3
+divergent_percent	0.0
+gradient_evaluations	180000

@@ -163,7 +163,7 @@ end
         svi_tight_gap(ex, b.diagnostics.q, b.diagnostics)
     @info "tight globals" settle=ga old=gb stages=a.diagnostics.stages
     @test a.diagnostics.stages.settled
-    # Measured on gordito, Julia 1.10.12: 61.6 against 111.3 nats; global means
+    # Measured on a Linux fleet host, Julia 1.10.12: 61.6 against 111.3 nats; global means
     # 0.24 against 0.92 optimal sds rms.
     @test ga.gap < 0.75 * gb.gap
     @test ga.mean_rms_z < 0.5 < gb.mean_rms_z

@@ -19,11 +19,6 @@
 # quantity is reported, not asserted. Sampler health is reported with the
 # warmuphmc-use §0 set (R-hat, bulk/tail ESS, divergences).
 #
-# Run (about 10 minutes on one CPU):
-#   RK_JAX_PYTHON=<python with jax and numpyro> BRM_JAX_REQUIRE=1 julia --project=test test/rk_jax_inference.jl
-# `BRM_JAX_RUN_DIR=<dir>` writes the fixture, versions and results as
-# ODLProject's run directory (`manifest.json`, `parity.json`, `fit.json`,
-# `predictive.json`).
 using Test, Random, Statistics, LinearAlgebra
 using BayesianRegressionModels, Distributions
 using ReactiveKernels, ReactiveKernelsPPL
@@ -110,8 +105,6 @@ end
 const DATA = station_network()
 const RESULTS = Dict{String,Any}()
 
-# ODLProject's result contract v0: one directory per run with manifest,
-# parity, fit and predictive JSON files.
 function write_run_dir(dir)
     mkpath(dir)
     lines = readlines(@__FILE__)

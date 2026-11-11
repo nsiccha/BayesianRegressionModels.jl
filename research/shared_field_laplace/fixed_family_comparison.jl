@@ -44,7 +44,7 @@ function fixed_native_cubature_value(p,state,r,g)
 end
 
 @stestset "fixed family actual target" begin
-    base = "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base = joinpath(@__DIR__, "results")
     surrogate = deserialize(joinpath(base,"dependence-surrogate-v1/controls.jls"))
     trained = deserialize(joinpath(base,"profile-optimization-v1/candidate.jls"))
     reference = deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))

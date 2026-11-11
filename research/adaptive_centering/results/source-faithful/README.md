@@ -28,7 +28,7 @@ discarded epochs, but exclude Pathfinder/setup gradient calls. Sampling counts
 include only transitions appended to the final retained sample.
 
 The sampler calls ran sequentially, pinned to CPU 3 with one Julia and BLAS
-thread, on the shared strato2 host. Elapsed times include initialization,
+thread, on the shared a Linux fleet host host. Elapsed times include initialization,
 first-use Julia/AD compilation and checkpoint I/O, but exclude preceding Stan
 compilation, post-fit extraction, plotting and offline selection. These are
 observed call times, not warmed or replicated performance benchmarks.

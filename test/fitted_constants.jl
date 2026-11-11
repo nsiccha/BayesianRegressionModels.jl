@@ -1,7 +1,6 @@
 # test/fitted_constants.jl — `name = constant(expr)`: a scalar calibrated on
-# the data when the model is built and frozen at that value on replay (snag
-# `bruno-fit-time-d-dba90310`, user design decision `00kjor3`), or an array of
-# such numbers (snag `brm-constant-exp-86604df5`).
+# the data when the model is built and frozen at that value on replay, or an
+# array of such numbers.
 #
 # A constant is evaluated once on whole columns and is then an ordinary data
 # field: Stan data on SBBRMI, a bound value in the RKBRMI graph. Replay keeps

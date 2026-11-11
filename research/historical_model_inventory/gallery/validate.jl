@@ -185,7 +185,7 @@ using .HistoricalInventoryGallery
         @test !occursin("hx-get=\"/\"", initial_body)
 
         prefixed = drive("/"; headers=vcat(browser_headers, [
-            "X-Forwarded-Prefix" => "/p/HistoricalBRM",
+            "X-Forwarded-Prefix" => "/p/inventory",
         ]))
         prefixed_body = String(prefixed.body)
         @test prefixed.status == 200
@@ -193,7 +193,7 @@ using .HistoricalInventoryGallery
             "<article class=\"htmxo-semantic-card-body\"", prefixed_body)) == 359
         @test !occursin("data-htmxo-operation-load", prefixed_body)
         @test !occursin("hx-trigger=\"load\"", prefixed_body)
-        @test !occursin("hx-get=\"/p/HistoricalBRM/\"", prefixed_body)
+        @test !occursin("hx-get=\"/p/inventory/\"", prefixed_body)
 
         full = drive("/"; headers=vcat(browser_headers, ["HX-Request" => "true"]))
         full_body = String(full.body)
@@ -210,7 +210,7 @@ using .HistoricalInventoryGallery
             "&translation_route=all&validation_tier=all";
             headers=vcat(browser_headers, [
                 "HX-Request" => "true",
-                "X-Forwarded-Prefix" => "/p/HistoricalBRM",
+                "X-Forwarded-Prefix" => "/p/inventory",
             ]),
         )
         fidelity_body = String(fidelity.body)

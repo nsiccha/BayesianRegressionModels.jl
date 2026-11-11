@@ -14,7 +14,7 @@
 #   (`threads = false`) across seeds. Bit identity between the two is not
 #   expected: BRM's batched and one-unit routes can differ in the last bits,
 #   and NLMEEstimation 0.2.8 makes the routes equal only when they agree bit
-#   for bit (Bruno decision `0a7ftco`).
+#   for bit (the reproducibility contract).
 #
 # NLMEEstimation is not in test/Project.toml: run this file in the
 # NLMEEstimation scratch environment described in test/README.md, with real

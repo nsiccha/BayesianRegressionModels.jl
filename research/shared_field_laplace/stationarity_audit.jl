@@ -120,7 +120,7 @@ function paired_summary(x)
 end
 
 @stestset "saved SVI stationarity" begin
-    base = "/home/niko/scratch/kb-agent-tmp/BayesianRegressionModels-scaling-laplace"
+    base = joinpath(@__DIR__, "results")
     fitdir = joinpath(base,"joint-fit-v1")
     reference = deserialize(joinpath(base,"exact-reference-v1/reference-summary.jls"))
     saved = deserialize(joinpath(fitdir,"fit.jls"))

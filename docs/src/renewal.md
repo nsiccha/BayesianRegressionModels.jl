@@ -1,491 +1,185 @@
-````@raw html
----
-title: Epidemic renewal models
-description: "A renewal-equation model of daily case counts on the @brm formula surface: the reproduction number as a formula line, the renewal recursion as Stan functions, six coupled patches, a forecast, and a reporting-delay model, all checked against simulated truth."
----
-````
+# Epidemic renewal and reporting delays
 
-# Epidemic renewal models
+This example uses 56 simulated days of epidemic counts, generated with seed
+132. The generating reproduction number starts at 1.3 and follows a daily
+log random walk. A gamma generation interval links past infections to new
+infections; a lognormal reporting delay separates infection from observation.
+Daily reports follow a negative-binomial distribution. Simulation makes the
+expected report trajectory available for comparison, while the fit receives
+only the counts, observation days and fixed delay distributions. There are
+no patient records in this example.
 
-A renewal model explains daily case counts through a latent infection process:
-today's infections are the recent infections, weighted by how infectious a case
-is some days after its own infection, times the reproduction number `R(t)`. The
-statistical question is the path of `R(t)`; everything between that path and the
-counts is a fixed mechanical map.
+## Model
 
-This page writes such a model with `@brm`, in three steps of growing size:
-
-1. a **reporting-delay model** fitted to a linelist, which is where the
-   reporting-delay distribution of the other two models comes from;
-2. **one population**, where `log R(t)` is a random walk, plus a forecast and a
-   prior predictive check obtained from the same declaration;
-3. **six coupled patches**, where infections spread between patches, the patches
-   share one `R` trend and deviate from it in a spatially correlated way.
-
-Two things are worth seeing here. The statistical parts are **formula lines** — a
-reader who knows `y ~ 1 + x + (1 | g)` can read `log_R ~ 1 + rw(time)`. The
-mechanical part stays what it is, a **function**: the renewal recursion is
-written once as Stan functions with `StanBlocks.@deffun` and called from the
-model by name.
-
-All data are simulated from known parameter values, so every figure below shows
-the truth next to the estimate. The page is built from one checked-in script,
-[`research/epi_renewal/renewal.jl`](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/epi_renewal/renewal.jl):
-the code blocks are read from it at build time, and the figures are drawn from
-the summaries it writes.
-
-Formula interfaces for the reproduction number are established practice in R —
-[`epidemia`](https://github.com/ImperialCollegeLondon/epidemia) models `R` with a
-regression formula that accepts random-walk terms, and
-[`EpiNow2`](https://github.com/epiforecasts/EpiNow2) and
-[`epinowcast`](https://github.com/epinowcast/epinowcast) expose comparable
-building blocks. What differs here is the division of labour: the package knows
-nothing about epidemics, the terms `rw` and `cdar` are general-purpose
-([Formula terms](formula-terms.md)), and the epidemic mechanics are user code.
-
-## The process
-
-Let ``w_s`` be the generation-interval distribution (the probability that a
-transmission happens ``s = 1, \dots, 13`` days after the infector's own
-infection) and ``\pi_d`` the reporting-delay distribution (the probability that
-an infection is reported ``d = 0, \dots, 14`` days later). Both are fixed and
-enter the model as data. With infections ``I_t``, expected reported cases
-``Y_t`` and observed counts ``y_t``:
+The renewal equation separates transmission from observation. Infectiousness
+is a weighted sum of previous incidence, and the reproduction number scales
+that sum to give today's infections. Reports are a second convolution:
 
 ```math
-I_t = R_t \sum_{s=1}^{13} w_s\, I_{t-s}, \qquad
-Y_t = \sum_{d=0}^{14} \pi_d\, I_{t-d}, \qquad
-y_t \sim \operatorname{NegBin}\!\left(\text{mean } Y_t,\ \text{variance } Y_t + c^2 Y_t^2\right).
+I_t=R_t\sum_{s\geq1}g_s I_{t-s},\qquad
+m_t=\sum_{d\geq0}h_d I_{t-d},\qquad
+Y_t\sim\operatorname{NegBinomial}_2(m_t,\kappa^{-2}).
 ```
 
-The recursion needs infections before day 1. They are an exponential history
-``I_s = I_0\, e^{r (s - 1)}`` for ``s \le 0``, whose growth rate ``r`` is the one
-implied by the first reproduction number through the Euler–Lotka equation
-``\sum_s w_s e^{-r s} = 1 / R_1`` (two Newton steps from ``r = 0``). So the
-infection process has one free scale, ``\log I_0``.
-
-The reproduction number is a random walk on the log scale,
-
-```math
-\log R_t = \beta_0 + \sigma \sum_{u=2}^{t} z_u, \qquad z_u \sim \mathcal N(0, 1),
-```
-
-which on the formula surface is the line `log_R ~ 1 + rw(time)`: the intercept
-is ``\log R_1`` and `rw(time)` is the walk.
-
-## The mechanics, as Stan functions
-
-The recursion carries state from one day to the next, and with several patches
-every patch's next day depends on all patches' past. That is a loop, so it is
-written as one: `StanBlocks.@deffun` turns the Julia-syntax definitions below
-into Stan functions that a model can call by name. Sizes such as `T` and `G` in
-the signatures are bound from the arguments. (The
-[wastewater page](wastewater.md) runs a similar recursion inside a
-`kernel(...)` cell, one independent site per cell; here the patches are coupled,
-so the function takes the whole predictor vector through a top-level
-assignment.)
+The generation-interval weights `g` start at lag one; reporting-delay weights
+`h` include lag zero. The distinction matters: same-day reports are possible,
+but an infection does not generate itself. The expected-case function carries
+the infection history through both convolutions. Before day one, the model
+uses an exponential history whose initial growth rate satisfies the
+discretized Euler–Lotka equation for the initial reproduction number.
 
 ```@eval
+Main.BRMDocsComparisons.evaluate_source_prelude(
+    Main.BRMDocsComparisons.example_module(:renewal),
+    "research/epi_renewal/renewal.jl"; before=:renewal_single_model,
+)
 Main.BRMDocsComparisons.source_code_region(
     "research/epi_renewal/renewal.jl";
-    starting_at="    # ── renewal recursion: one population ──",
-    ending_before="    # ── observation family",
+    starting_at="    expected_cases(log_R", ending_before="    @lhs @lpxf nb_cases_lpmf",
 )
 ```
 
-The observation family is declared the same way. `@lhs @lpxf` makes
-`cases ~ nb_cases(Y, cluster, observed)` a valid likelihood statement; the
-`_lpmfs` variant returns the pointwise log likelihood and `_rng` the posterior
-predictive draw, and the generated model uses both. A row with `observed == 0`
-is not scored, but the generator still draws it — that draw is the forecast for
-that row.
+BRM's `rw(time)` term supplies the daily innovations. The intercept prior
+sets the first log reproduction number; the term's SD prior sets the scale
+of changes from one day to the next. `log_I0` determines the initial infection
+scale. `cluster` is a positive overdispersion scale: the observation variance
+is `m + cluster² m²`. These quantities are inferred jointly, so uncertainty
+in initial incidence propagates through the entire reporting trajectory.
 
 ```@eval
-Main.BRMDocsComparisons.source_code_region(
-    "research/epi_renewal/renewal.jl";
-    starting_at="    # ── observation family",
-    ending_before="    # ── renewal recursion: coupled patches ──",
+Main.BRMDocsComparisons.comparison(
+    Main.BRMDocsComparisons.example_module(:renewal),
+    Main.BRMDocsComparisons.source_function("research/epi_renewal/renewal.jl", :renewal_single_model),
+    :renewal_single_model; title="Renewal with delayed reports", require_stan=true,
 )
 ```
 
+The `observed` mask in the custom count family distinguishes observed from
+unobserved days. This fit observes all 56 days. Setting later entries to
+zero removes those likelihood contributions while retaining the latent
+process and predictive outputs for those days. It does not set their counts
+to zero or treat missing reports as evidence of no infections. A forecast
+must therefore be constructed by changing the mask, not by appending zero
+counts to the fitted observation vector.
+
+## Delay distributions
+
+A continuous delay is not rounded independently of the primary event time.
+An infection occurs somewhere within its calendar day. The data preparation
+integrates over a uniform within-day offset before assigning probability to
+successive report days, then normalizes over the chosen support. The
+probability vectors enter the model as data, so another generation interval
+or reporting-delay distribution changes the fit without changing the model
+body. This example conditions on those distributions; their uncertainty is
+not included in the posterior bands.
+
+A line list would require a separate delay likelihood. If both event dates
+are recorded as intervals and recent events are missing long delays, BRM's
+`double_interval_censored` family integrates the primary event window and
+conditions on the observation cutoff. The [epidist research example](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/research/epidist)
+contains that model and its comparison with epidist. Estimating delays from
+such a list is a different inferential step from fitting counts with fixed
+delay weights; the research notes describe how the two relate.
+
+## Fit and diagnostics
+
+Four independent WarmupHMC chains start from different random seeds, each
+requesting 1,000 retained draws. The completion sampler requires three chains
+to finish and then lets the remaining chain finish its current warmup round.
+The table records how many chains contributed, which were omitted, the total
+retained draws, divergences and sampling time. These are results of the
+cached run; rebuilding this page reads its tables without sampling again.
+
 ```@eval
-let mod = Main.BRMDocsComparisons.example_module(:renewal)
-    Main.BRMDocsComparisons.evaluate_source_prelude(
-        mod, "research/epi_renewal/renewal.jl"; before=:reporting_delay_model)
+Main.BRMDocsComparisons.results_table(
+    "research/epi_renewal/results/docs/fits.tsv";
+    columns=[:chains_requested => "started", :chains_kept => "retained",
+             :omitted_chains => "omitted", :draws => "draws",
+             :divergent => "divergences", :divergent_pct => "%", :seconds => "seconds"],
+)
+```
+
+Population summaries use the retained chains on the quantities' natural
+scales. The intervals contain the central 95 % of their pooled draws.
+Split R-hat compares chains; bulk and tail effective sample sizes describe
+the information in the centre and tails. A small divergence count alone is
+insufficient evidence that the chains agree. The completion rule can also
+select chains by speed, so the omitted-chain record belongs with the result.
+
+```@eval
+Main.BRMDocsComparisons.results_table(
+    "research/epi_renewal/results/docs/population.tsv";
+    columns=[:quantity => "quantity", :unit => "unit", :median => "median",
+             :q025 => "2.5 %", :q975 => "97.5 %", :rhat => "R-hat",
+             :ess_bulk => "bulk ESS", :ess_tail => "tail ESS"],
+)
+```
+
+## Expected reports
+
+The retained three-chain run has no divergences. R-hat is 1.001–1.008 for
+the reported population quantities, with bulk ESS at least 445. Their 95 %
+intervals contain the generating initial reproduction number of 1.3,
+initial incidence of 50 infections per day and overdispersion scale of 0.1.
+This checks recovery in this simulated series, conditional on the fixed
+generation and reporting delays.
+
+```@eval
+if !isdefined(Main, :BRMExampleFigures)
+    Base.include(Main, joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "docs", "example_figures.jl"))
 end
 nothing
 ```
-
-## Step 1: the reporting delay, from a linelist
-
-A linelist records, for each case, the day of the event and the day of the
-report. Two things bias the delays it shows. Days are intervals, so an event
-"on day 3" happened somewhere within that day, and the report likewise
-(**double interval censoring**). And on the day of the analysis, a recent event
-is in the data only if its delay was short (**right truncation**), so during a
-growing epidemic — when most events are recent — the observed delays are far too
-short.
-
-The model states the delay as LogNormal and corrects for both: the family
-`censored_delay(mu, sigma, window)` scores each delay ``d`` with
-``P(d \le P + T < d + 1 \mid P + T < \text{window})``, where ``P`` is uniform
-within the event day, ``T`` is the LogNormal delay, and `window` is the number
-of days between the event and the analysis.
-
 ```@eval
-Main.BRMDocsComparisons.source_code_region(
-    "research/epi_renewal/renewal.jl";
-    starting_at="    # ── reporting delay: doubly interval-censored",
-    ending_before="# 4. The data each model reads",
+Main.BRMDocsComparisons.figure(
+    Main.BRMExampleFigures.trajectory("research/epi_renewal/results/docs/trajectory.tsv";
+        xlabel="Day", ylabel="Expected reports per day", observed=true);
+    caption="Expected daily reports: posterior median with 50 % and 95 % credible bands in blue; observed counts in orange.",
 )
 ```
 
-Every declaration on this page is rendered in the standard comparison panes:
-the `@brm` source, its intermediate representation, the StanBlocks model it
-lowers to, and the generated Stan program. These examples use the StanBlocks
-backend, including `@deffun` functions and `@lpxf` families.
+The bands describe the expected reporting intensity `Y` in the declaration.
+They exclude negative-binomial observation noise, so there is no requirement
+that 95 % of the orange counts lie within the outer band. The separate
+`ppc.tsv` table contains predictive intervals that include this noise.
+Reporting delays spread the effect of a change in transmission over later
+days; the plot should be read as a trajectory of reports, not of infection
+onset. The random-walk prior regularizes changes that the delayed counts
+cannot identify individually.
 
-```@eval
-Main.BRMDocsComparisons.comparison(
-    Main.BRMDocsComparisons.example_module(:renewal),
-    Main.BRMDocsComparisons.source_function(
-        "research/epi_renewal/renewal.jl", :reporting_delay_model,
-    ),
-    :reporting_delay_model;
-    title="Reporting delay from a right-truncated linelist",
-    require_stan=true,
-)
-```
+## Reproduce
 
-The simulated linelist holds 250 events from a growing epidemic, seen on day 21;
-the true delay is LogNormal(1.5, 0.5). The points are the delays as they appear
-in the linelist: events of the last days before the analysis can only be in the
-data with a delay of zero or one day, so short delays are heavily
-over-represented and the mean observed delay is 3.7 days against a true 5.5.
-The dashed line is the truth, and the bands are the posterior of the daily delay
-distribution (50 %, 80 % and 95 %), which undoes the truncation.
+::: details Commands and fit receipt
 
-[![Reporting-delay distribution: posterior bands against the truth and the linelist frequencies](assets/renewal/delay.png)](assets/renewal/delay.png)
-
-## Step 2: one population
-
-One row per day. The data carry the counts, the two fixed distributions
-`gen_pmf` and `delay_pmf`, and the `observed` mask.
-
-```@eval
-Main.BRMDocsComparisons.comparison(
-    Main.BRMDocsComparisons.example_module(:renewal),
-    Main.BRMDocsComparisons.source_function(
-        "research/epi_renewal/renewal.jl", :renewal_single_model,
-    ),
-    :renewal_single_model;
-    title="Renewal model of one population",
-    require_stan=true,
-)
-```
-
-Reading the declaration top to bottom:
-
-- `log_I0` and `cluster` are scalar parameters with a prior each.
-- `log_R ~ 1 + rw(time)` is a predictor like any other. Its parts are addressed
-  the usual way: `effect(log_R, Intercept)` is ``\log R_1`` and
-  `sd(:, rw(time))` is the walk's daily scale ``\sigma``.
-- `Y = expected_cases(...)` is a top-level assignment: the whole predictor
-  vector goes into the Stan function, and `Y` becomes a named quantity of the
-  model.
-- `cases ~ nb_cases(Y, cluster, observed)` is the likelihood.
-
-Fifty-six days of counts recover the level and the trend of `R(t)`. The
-posterior is a smooth path: the counts cannot resolve the day-to-day steps of
-the true walk, and the walk's scale is only weakly identified (see the table at
-the end), so single-day excursions of the truth leave the 95 % band. The last
-days are the least certain, because their infections have mostly not been
-reported yet.
-
-[![Reproduction number of one population: posterior bands and the true path](assets/renewal/single_R.png)](assets/renewal/single_R.png)
-
-The posterior predictive bands of the daily counts (`cases_gen` in the generated
-model) against the reported counts and the true expectation, on a logarithmic
-axis:
-
-[![Daily cases of one population: posterior predictive bands, reported counts and the true expectation](assets/renewal/single_cases.png)](assets/renewal/single_cases.png)
-
-### A prior predictive check from the same declaration
-
-Building the same model with the response column omitted from the data drops
-every likelihood contribution, so sampling it (fixed_param) draws from the
-prior, and the forward-simulated `cases` becomes the prior predictive
-distribution. By day 56 the prior's 95 % band runs from a handful of daily
-cases to more than a million; the counts are what pins `R(t)` down.
-
-[![Reproduction number: prior bands against posterior bands](assets/renewal/prior_R.png)](assets/renewal/prior_R.png)
-
-[![Prior predictive daily cases against the reported counts](assets/renewal/prior_cases.png)](assets/renewal/prior_cases.png)
-
-### A forecast is a mask
-
-Setting `observed` to zero from day 43 on turns the last two weeks into a
-forecast. Nothing else changes: the walk `rw(time)` still spans all 56 days, the
-innovations of the unobserved days are informed by the prior only, and the
-recursion carries the uncertainty forward into the counts.
-
-A random walk forecasts "no change": the band fans out around the last
-estimated level. In this simulation the true `R(t)` started to fall a few days
-before day 42 — too late to show in the counts reported by then — and kept
-falling, so the held-out counts end up at the lower edge of the predictive
-band.
-
-[![Forecast of the reproduction number beyond day 42](assets/renewal/forecast_R.png)](assets/renewal/forecast_R.png)
-
-[![Forecast of daily cases beyond day 42 against the held-out counts](assets/renewal/forecast_cases.png)](assets/renewal/forecast_cases.png)
-
-## Step 3: six coupled patches
-
-Six patches of different population sizes sit on a 100 km square. The outbreak
-starts in the smallest one; the others are seeded with a small fraction of a
-case and catch the epidemic through mixing.
-
-[![Locations and population sizes of the six patches](assets/renewal/patches_map.png)](assets/renewal/patches_map.png)
-
-Infection pressure on patch ``g`` is a mixture over all patches ``h``, with
-gravity weights that grow with both population sizes ``N`` and fall with
-distance ``d``,
-
-```math
-I_{g,t} = R_{g,t} \sum_{h} K_{gh} \sum_{s} w_s\, I_{h,t-s}, \qquad
-K_{gh} \propto \begin{cases} 1 & g = h \\[2pt]
-\dfrac{(N_g / \bar N)(N_h / \bar N)}{d_{gh}^{\gamma}} & g \ne h \end{cases}
-\quad\text{(rows sum to one)},
-```
-
-and every patch has its own reproduction number: a shared trend plus a weekly
-deviation,
-
-```math
-\log R_{g,t} = \beta_0 + W_t + \delta_{g, w(t)}, \qquad
-\delta_{\cdot,w} = \rho\, \delta_{\cdot,w-1} + \sigma_\delta \sqrt{1 - \rho^2}\; L\, \eta_w, \qquad
-L L^\top = C,\quad C_{gh} = e^{-d_{gh} / 30}.
-```
-
-``W_t`` is the same random walk as before. The deviations are damped (``\rho``)
-and their innovations are correlated between patches: neighbouring patches
-deviate together.
-
-The mechanics gain a mixing step; the rest is the single-population recursion
-per patch.
-
-```@eval
-Main.BRMDocsComparisons.source_code_region(
-    "research/epi_renewal/renewal.jl";
-    starting_at="    # ── renewal recursion: coupled patches ──",
-    ending_before="    # ── reporting delay: doubly interval-censored",
-)
-```
-
-The data are one row per (day, patch), 336 rows, ordered by patch and then by
-day. `C` is a matrix-valued field; `pop`, `dist_flat` and the two distributions
-are shared vectors.
-
-```@eval
-Main.BRMDocsComparisons.comparison(
-    Main.BRMDocsComparisons.example_module(:renewal),
-    Main.BRMDocsComparisons.source_function(
-        "research/epi_renewal/renewal.jl", :renewal_patch_model,
-    ),
-    :renewal_patch_model;
-    title="Renewal model of six coupled patches",
-    require_stan=true,
-)
-```
-
-Three formula lines carry the statistical structure:
-
-- `log_R ~ 1 + rw(time) + cdar(week; by=patch, cor=C)` — on a long frame,
-  `rw(time)` is one walk over the distinct days, shared by all rows of a day,
-  and `cdar(week; by=patch, cor=C)` gives every patch a damped weekly path whose
-  innovations are correlated through `C`. `sd(:, cdar(week))` addresses
-  ``\sigma_\delta`` and `ar(:, cdar(week))` addresses ``\rho``.
-- `log_I0 ~ 0 + offset(seed_mean) + factor(patch)` — a predictor without an
-  intercept codes its first categorical term by **cell means**
-  ([Home](index.md)): one coefficient per patch, no reference level. With the
-  prior mean as an offset, the line says
-  ``\log I_{0,g} = m_g + \delta_g,\ \delta_g \sim \mathcal N(0, 0.5)``.
-- `gamma` is an ordinary scalar parameter; the mixing matrix is computed from
-  it inside the Stan function.
-
-Per-patch reproduction numbers, 56 days of counts in six patches:
-
-[![Reproduction numbers of the six patches: posterior bands and true paths](assets/renewal/patch_R.png)](assets/renewal/patch_R.png)
-
-Daily counts per patch, on a logarithmic axis. The five patches that start
-without cases are fitted through the zeros of the early weeks:
-
-[![Daily cases of the six patches: posterior predictive bands, reported counts and the true expectation](assets/renewal/patch_cases.png)](assets/renewal/patch_cases.png)
-
-The seeds, as the cell means estimate them: posterior median with 50 % and 95 %
-intervals, the prior mean (grey dot) and the truth (black dot). For the five
-patches without early cases the counts say little about the seed beyond "very
-small", so the posterior stays close to the prior; the origin's seed is pinned
-down by its counts:
-
-[![Seeds of the six patches: prior mean, posterior interval and truth](assets/renewal/patch_seeds.png)](assets/renewal/patch_seeds.png)
-
-## The same models through a package
-
-Everything mechanical above is user code, which is the point — but it is also
-forty lines of Stan functions that the next renewal model would copy. The
-repository carries them once more as a small example package,
-[`examples/EpiRenewal`](https://github.com/nsiccha/BayesianRegressionModels.jl/tree/ns/devibe/examples/EpiRenewal),
-that sits on top of BayesianRegressionModels the way `epidemia` sits on
-`rstanarm`: the package owns the renewal recursion, the mixing and the delay,
-and the model keeps one line per mechanical step.
-
-```@eval
-let mod = Main.BRMDocsComparisons.example_module(:renewal_package)
-    Core.eval(mod, :(using BayesianRegressionModels, Distributions, StanBlocks))
-    Base.include(mod, joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT,
-                               "examples", "EpiRenewal", "src", "EpiRenewal.jl"))
-    Core.eval(mod, :(using .EpiRenewal))
-    # the simulated data of the sections above
-    Core.eval(mod, :(const page = $(Main.BRMDocsComparisons.example_module(:renewal))))
-end
-nothing
-```
-
-The six-patch model, with `using EpiRenewal`:
-
-```@eval
-Main.BRMDocsComparisons.comparison(
-    Main.BRMDocsComparisons.example_module(:renewal_package),
-    Main.BRMDocsComparisons.source_function(
-        "examples/EpiRenewal/models.jl", :epirenewal_patch_model,
-    ),
-    :epirenewal_patch_model;
-    title="Six coupled patches with EpiRenewal's operators",
-    require_stan=true,
-)
-```
-
-`seeded_history`, `renewal` and `delay` are ordinary Stan functions that the
-package declares with `@deffun`; `past`, `I` and `Y` are named quantities of the
-model. This is the same posterior as the hand-written version: the package's
-test requires the same dimension and the same log density and gradient at
-arbitrary points for every model on this page, so the fits and figures above
-are this model's fits and figures.
-
-Each operator takes its kernel **first**, as a data vector or as a function. A
-function can be written as a `do` block, and its body may read sampled
-parameters ([Formula terms](formula-terms.md)) — which a data vector cannot. So
-the reporting delay of step 1 no longer has to be a fixed input: here it is
-estimated inside the renewal model, from the counts.
-
-```@eval
-Main.BRMDocsComparisons.comparison(
-    Main.BRMDocsComparisons.example_module(:renewal_package),
-    Main.BRMDocsComparisons.source_function(
-        "examples/EpiRenewal/models.jl", :epirenewal_estimated_delay_model,
-    ),
-    :epirenewal_estimated_delay_model;
-    title="Reporting delay estimated inside the renewal model",
-    require_stan=true,
-)
-```
-
-The operators read plain vectors, so they rely on the frame's layout — one row
-per (patch, day), ordered by patch and then by day, every patch covering the
-same days. The package's `epi_frame(rows; time, by)` sorts a table into that
-order and refuses one that cannot satisfy it.
-
-## Parameters and sampler diagnostics
-
-Posterior medians and 95 % intervals next to the values the data were simulated
-from. The table is generated from the summaries of the fits shown above.
-
-```@eval
-using JSON, Markdown
-let root = Main.BRMDocsComparisons.REPOSITORY_ROOT
-    rows = JSON.parsefile(joinpath(root, "research", "epi_renewal", "results", "renewal", "scalars.json"))
-    fmt(x) = string(round(x; sigdigits=3))
-    lines = ["| Model | Parameter | Truth | Median | 95 % interval | Truth inside |", "|:--|:--|--:|--:|:--|:--|"]
-    for r in rows
-        inside = r["q025"] <= r["truth"] <= r["q975"] ? "yes" : "no"
-        push!(lines, "| $(r["model"]) | `$(r["name"])` | $(fmt(r["truth"])) | $(fmt(r["q50"])) | [$(fmt(r["q025"])), $(fmt(r["q975"]))] | $inside |")
-    end
-    Markdown.parse(join(lines, "\n"))
-end
-```
-
-How often the truth lies inside the pointwise 95 % band, per figure:
-
-```@eval
-using JSON, Markdown
-let root = Main.BRMDocsComparisons.REPOSITORY_ROOT
-    rows(name) = JSON.parsefile(joinpath(root, "research", "epi_renewal", "results", "renewal", name))
-    inside(rs) = "$(count(r -> r["q025"] <= r["truth"] <= r["q975"], rs)) of $(length(rs))"
-    forecast = rows("forecast_R.json")
-    lines = ["| Quantity | Truth inside the 95 % band |", "|:--|:--|",
-             "| `R(t)`, one population, 56 days | $(inside(rows("single_R.json"))) |",
-             "| `R(t)`, fitted on days 1–42: fitted days | $(inside(filter(r -> r["phase"] == "fitted", forecast))) |",
-             "| `R(t)`, fitted on days 1–42: held-out days | $(inside(filter(r -> r["phase"] != "fitted", forecast))) |",
-             "| `R(g, t)`, six patches, 336 patch-days | $(inside(rows("patch_R.json"))) |",
-             "| seeds, six patches | $(inside(rows("patch_seeds.json"))) |"]
-    Markdown.parse(join(lines, "\n"))
-end
-```
-
-Each model was sampled with one chain of NUTS
-([WarmupHMC.jl](https://github.com/nsiccha/WarmupHMC.jl)) on the log density
-that BridgeStan compiles from the generated Stan program. The one-population
-posterior couples the walk scale with 55 innovations that the counts determine
-tightly, which calls for a small step size; those two fits therefore run at a
-target acceptance of 0.995. The settings and diagnostics of every fit:
-
-```@eval
-using JSON, Markdown
-let root = Main.BRMDocsComparisons.REPOSITORY_ROOT
-    rows = JSON.parsefile(joinpath(root, "research", "epi_renewal", "results", "renewal", "fits.json"))
-    lines = ["| Model | Parameters | Draws | Target acceptance | Divergences | Min. ESS | Max. R-hat | Seconds |", "|:--|--:|--:|--:|--:|--:|--:|--:|"]
-    for r in rows
-        push!(lines, "| $(r["model"]) | $(r["dim"]) | $(r["draws"]) | $(r["target_acceptance_rate"]) | $(r["divergences"]) | $(round(Int, r["min_ess"])) | $(round(r["max_rhat"]; digits=3)) | $(round(Int, r["seconds"])) |")
-    end
-    Markdown.parse(join(lines, "\n"))
-end
-```
-
-The route from a declaration to draws is short. `mod=@__MODULE__` tells the
-backend where the `@deffun` functions live:
-
-```@eval
-Main.BRMDocsComparisons.source_code_region(
-    "research/epi_renewal/renewal.jl";
-    starting_at="function build(brmi; held_out=())",
-    ending_before="stem(n) = ",
-)
-```
-
-## Scope
-
-- The generation-interval and reporting-delay distributions are fixed inputs of
-  the fitted renewal models. Step 1 estimates a delay distribution, but its
-  uncertainty is not propagated into steps 2 and 3. The model that estimates the
-  delay inside the renewal model is shown and checked (finite density and
-  gradient, and the same expected cases as the fixed-delay model at the true
-  delay parameters), not fitted here.
-- The correlation matrix `C` of `cdar` is data, not a sampled covariance; its
-  length scale (30 km) is fixed.
-- The data are simulated from the model family that is fitted, so the figures
-  show that the declarations recover their own parameters — not how the model
-  behaves under misspecification, reporting artefacts or day-of-week effects.
-- The models use the StanBlocks backend.
-
-## Run it
-
-After bootstrapping the repository's test environment, the first command fits
-all models and writes the summaries; the second draws the figures and needs an
-environment that provides AlgebraOfVega.jl and the `vl-convert` command-line
-tool.
+The repository's test environment supplies the pinned BRM, StanBlocks,
+BridgeStan, WarmupHMC and TreeArrays dependencies. These shell commands are
+manual: the docs build executes the model declarations and figures but reads
+the completed fit's summaries. Run the fit deliberately when its model,
+data or settings change; routine documentation edits reuse the cache.
 
 ```sh
-julia --startup-file=no --project=test research/epi_renewal/renewal.jl
-julia --startup-file=no --project=<plot env> research/epi_renewal/renewal_figures.jl
+julia --startup-file=no --project=test test/setup_env.jl
+julia -t 4 --startup-file=no --project=test research/epi_renewal/fit.jl
 ```
+
+The script writes its receipt before sampling and saves the draws outside the
+repository. Its key includes the emitted program, data, settings, seed and
+sampling harness. TreeArrays reduces the named chain and draw axes to small
+summary tables. A second invocation with the same key rebuilds those tables
+from the saved draws. The receipt identifies the program behind these numbers.
+
+On a fresh checkout the draws may be absent. An existing receipt guards
+against repeating a recent fit; set `BRM_DOCS_FIT_FORCE=1` for a deliberate
+rerun. `BRM_DOCS_CACHE` selects a persistent draw-cache directory; its default
+is under the system temporary directory. Only the small summary tables belong
+in git.
+
+```@eval
+Main.BRMDocsComparisons.results_table(
+    "research/epi_renewal/results/docs/receipt.tsv";
+    columns=[:key => "field", :value => "value"],
+)
+```
+
+[Research notes and source](https://github.com/nsiccha/BayesianRegressionModels.jl/blob/ns/devibe/research/epi_renewal/README.md).
+:::

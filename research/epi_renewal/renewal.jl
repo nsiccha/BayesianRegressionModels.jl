@@ -2,9 +2,9 @@
 #
 # This file is the executable source of the documentation page "Epidemic renewal models"
 # (docs/src/renewal.md): the page shows the Stan functions and the model declarations below
-# verbatim, and its figures are drawn from the summaries that `main()` writes. It is
-# self-contained: it simulates the data, declares the Stan functions and the models, fits them
-# and writes the summaries.
+# verbatim; fit.jl supplies the page's four-chain posterior summaries. This file also
+# retains the broader research suite: it simulates data, declares the Stan functions
+# and models, and its manual main() fits the earlier research comparisons.
 #
 #   reporting delay   doubly interval-censored, right-truncated LogNormal delay on a linelist
 #   one population    log R_t is a random walk; renewal recursion; reporting-delay convolution;
