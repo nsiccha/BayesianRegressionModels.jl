@@ -1,6 +1,7 @@
 quantity	value
 Grid root mean squared error	0.13
-Grid points inside pointwise 95% intervals (%)	100
+Grid points whose 95% interval contains the generating value	1320 of 1323
+Grid points outside it (time: east, north in km)	time 6: (45, 85); time 6: (55, 85); time 6: (55, 90)
 Mean field SD, grid points within 5 km of a station	0.17
 Mean field SD, grid points over 12 km from every station	0.32
 Draws used for mapping	300
