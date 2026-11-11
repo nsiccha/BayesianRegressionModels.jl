@@ -47,6 +47,7 @@ const DOCS_DEVBRANCH = "ns/devibe"
 
 makedocs(
     sitename = "BayesianRegressionModels.jl",
+    repo = Documenter.Remotes.GitHub("nsiccha", "BayesianRegressionModels.jl"),
     modules  = [BayesianRegressionModels],
     format   = DocumenterVitepress.MarkdownVitepress(
         repo = "github.com/nsiccha/BayesianRegressionModels.jl",
@@ -88,6 +89,14 @@ let mod = Module(:MonsterDownloads)
     Base.include(mod, joinpath(@__DIR__, "..", "research", "monster", "reproduce.jl"))
     Base.invokelatest(getfield(mod, :write_monster_stan_files),
         joinpath(@__DIR__, "build", ".documenter", "public", "downloads"))
+end
+
+# Documenter validates the JAX module in its build directory before VitePress
+# publishes the same generated file at the site's download URL.
+let source = joinpath(@__DIR__, "build", ".documenter", "downloads", "jax"),
+    destination = joinpath(@__DIR__, "build", ".documenter", "public", "downloads", "jax")
+    mkpath(dirname(destination))
+    cp(source, destination; force=true)
 end
 
 # Publish the pinned plotting runtime as build output, never as tracked assets.

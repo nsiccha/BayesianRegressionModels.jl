@@ -53,7 +53,7 @@ source = jax_source(rk.model, rk_bound_plan(rk); values=(:mu,))
 inputs = rk_bound_data(rk)
 """
 Main.BRMDocsComparisons.evaluate_source(mod, code)
-folder = joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "docs", "build", ".documenter", "public", "downloads", "jax")
+folder = joinpath(pwd(), "downloads", "jax")
 mkpath(folder)
 write(joinpath(folder, "model.py"), mod.source.text)
 Markdown.MD([Markdown.Code("julia", code),
