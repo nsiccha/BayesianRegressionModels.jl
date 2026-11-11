@@ -42,6 +42,11 @@ The table and figure helpers live in `docs/backend_comparisons.jl`. Quantity
 tables use `quantity, unit, description, median, q025, q975, rhat, ess_bulk,
 ess_tail`, with one fit per directory.
 
+Every model comparison has the same five tabs: BRM authoring, StanBlocks model,
+RKPPL model, Stan source and JAX module. The comparison dialog initially selects
+BRM, StanBlocks and RKPPL. The build emits each backend view from the displayed
+model; unavailable backends keep their tab and show the emission diagnostic.
+
 ## Landing notes
 
 The Warfarin page draws its five figures at build time from the committed
