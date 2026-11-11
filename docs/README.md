@@ -20,7 +20,7 @@ summaries come from deliberate, cached research runs. CI never samples.
 | Examples | `state-space.md` | Connect continuous latent dynamics with discrete observations. |
 | Examples | `monster.md` | Fit a whole-body pharmacokinetic model. |
 | Examples | `jax.md` | Export a hierarchical regression and compare Julia and NumPyro fits. |
-| Examples | `svi.md` | Fit streaming and batch variational approximations. |
+| Examples | `variational-inference.md` | Fit streaming and batch variational approximations. |
 | Examples | `filtering.md` | Compare sequential posterior updates and full-data sampling. |
 | Examples | `spatial-fields.md` | Reconstruct a spatial field and show uncertainty at new locations. |
 | Reference | `api.md` | Find public functions and types by task. |
@@ -43,7 +43,8 @@ one fit per directory. It is compatible with the planned DocsFits summaries.
 ## Landing notes
 
 The rework removes the feature atlas, slide deck and live gallery, with their
-compiled deck files. Their subjects are taught in the task guides and worked
+compiled deck files and the deck renderer that depended on the retired atlas.
+Their subjects are taught in the task guides and worked
 examples. Rendered plot files and serialized posterior draws are removed from
 the documentation and research trees; scripts retain the regeneration path.
 
@@ -58,4 +59,15 @@ Historical receipts retain their numeric results and source hashes; machine-loca
 paths are normalized and raw render logs are omitted from the public tree.
 
 Large generated inventory tables and compressed draw tables are also untracked;
-only the small summary tables used to render fitted examples are retained.
+small summary tables remain for fitted examples and research reference.
+Obsolete case-study page generators and the `research/automatic_total_docs`
+render fixture are removed, so research commands cannot recreate retired site
+pages or copy rendered PNGs back into the documentation.
+
+Private project references and private benchmark passages are removed from
+source comments and test notes. The paired-field and station-series test
+fixtures retain their synthetic data and model structure at the package
+owner's direction; they originated in the author's own private prototypes.
+Whether to replace that structure with independently written fixtures is a
+separate user decision. No client data or client-owned code was identified in
+those two fixtures.

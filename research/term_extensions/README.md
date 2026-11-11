@@ -192,4 +192,3 @@ math, `brm_descriptor`, and
 `reprocess` / `restan_data` on fitted group levels. Replaying a group level
 the fit never saw stays refused by the shared ranef floor — the fitted model
 has no coordinate for it, on any backend, for core grouped terms alike.
-

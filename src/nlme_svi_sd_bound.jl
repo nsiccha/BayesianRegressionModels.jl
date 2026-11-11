@@ -1,53 +1,12 @@
-# ── How wide the global factor may get: a bound from each global's own prior ──
-#
-# A STOPGAP (user, decision 1vm7om5: "mark this as a stopgap"). It holds q's width
-# where the optimizer cannot; it does not make the optimizer see the prior through
-# the noise, which is the cause, and it can hold q narrower than a posterior wider
-# than twice its prior's Gaussian width (a heavy-tailed prior under prior-data
-# conflict, a periodic or multimodal likelihood). Every fit that ends with a global
-# at its bound warns and names it, and `sd_bound=nothing` turns the bound off. A
-# noise-limited Adam step that would remove the cause stopped the runaway on ODL
-# but held strongly informed globals that start too wide, and its fits ended
-# millions of nats below the bound's (snag lowrank-svi-scal-4c45adff, decision
-# 1vm7om5); the cause stays open as BayesianRegressionModels todo 1w79j69.
-#
-# Adam's step has the same size whatever its coordinate's gradient noise, so a
-# coordinate whose per-draw gradient is mostly noise moves by about a step size
-# per iteration whichever way the noise points, and its prior's pull, which the
-# noise dwarfs, barely shows in the step. Its mean, its scale ρ and its rank row
-# Β then drift until the noise's own size stops them, and the iterate's spread
-# around the optimum grows with that size (as lr σ_g / 2 in units of the
-# curvature, for a gradient rms σ_g). Where the target's gradient grows with the
-# draw itself, as a log length's does through a random-feature phase
-# frequency·x·exp(-log ℓ), a wider factor reaches draws with larger gradients
-# and the noise grows with the factor: the loop has no bound. On ODL's
-# Niedersachsen slice (82 stations, `LowRankGlobal(8)`, 40,000 iterations of
-# exploration) one field log length under a N(-1.386, 0.5) prior went from sd
-# 0.1 to marginal sd 378 (exp(ρ) 246, row |Β| 287) with a gradient rms of 1e28
-# on its scale, against 1 to 40 on every other global, until a draw reached
-# log ℓ < -709 and the density overflowed (snag lowrank-svi-scal-4c45adff). Its
-# prior's pull at that width is about 1e5 nats of ELBO.
-#
-# Only the prior gives that coordinate a scale the noise cannot move. A global
-# whose prior reads no other coordinate therefore has its marginal sd under q,
-# √(exp(2ρ_k) + |Β_k|²), held at most `sd_bound` (a control of the fit, by default
-# `_BRM_SVI_SD_BOUND`) times the sd of the Gaussian closest to its prior
-# (`_brm_svi_prior_projection`, the factor a fit on no data would reach). A posterior wider than its prior needs a
-# likelihood whose expected curvature is negative there, so an optimum seldom
-# reaches the bound; a factor that does has been carried there by its noise. A
-# global whose prior reads others (a centered field state, which reads its
-# neighbours and its field's lengths, and those lengths) has no fixed scale and
-# no bound. Neither has a flat prior's. Every global starts at `global_scale`, so
-# one whose prior sd is below half of it is at its bound from the first step,
-# where Adam took hundreds of iterations to shrink it: on the slice above a
-# global with prior sd 1e-6 still had sd 0.008, and the largest gradient rms of
-# all, after 2,000 iterations.
+# Bound each global factor's marginal SD by a multiple of its own prior SD.
+# This optimizer safeguard is a stopgap, not a posterior-accuracy guarantee:
+# prior-data conflict or a multimodal likelihood can require a wider posterior.
+# Fits that reach the bound warn and name the coordinate; `sd_bound=nothing`
+# disables it. The marginal factor SD is sqrt(exp(2rho) + sum(abs2, rank_row)).
+# Globals whose priors depend on other coordinates, and flat priors, have no bound.
 const _BRM_SVI_SD_BOUND = 2.0
 
-# The fit's `sd_bound` control, `nothing` when the bound is off. Controls written
-# before it existed (an older checkpoint) hold the default: a resumed run's factor
-# that already drifted is held from its first step, as the reporter's
-# Schleswig-Holstein checkpoint needed.
+# Older checkpoints retain the default bound; `nothing` disables it.
 _brm_svi_sd_bound_factor(c) = get(c, :sd_bound, _BRM_SVI_SD_BOUND)
 function _brm_svi_check_sd_bound(sd_bound; caller="brm_svi_fit")
     sd_bound === nothing || sd_bound isa Real && isfinite(sd_bound) && sd_bound > 0 ||

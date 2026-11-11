@@ -22,7 +22,7 @@ const DOCS_PAGES = [
         "Continuous-time states" => "state-space.md",
         "Whole-body pharmacokinetics" => "monster.md",
         "Python/JAX sampling" => "jax.md",
-        "Streaming variational inference" => "svi.md",
+        "Streaming variational inference" => "variational-inference.md",
         "Sequential filtering" => "filtering.md",
         "Spatial field reconstruction" => "spatial-fields.md",
     ],
@@ -73,6 +73,15 @@ for (page, names) in (
         joinpath(@__DIR__, "build", ".documenter", page), names)
 end
 
+# Keep local version metadata beside the generated downloads and vendor files.
+let source = joinpath(@__DIR__, "src", "public"),
+    destination = joinpath(@__DIR__, "build", ".documenter", "public")
+    mkpath(destination)
+    for name in readdir(source)
+        cp(joinpath(source, name), joinpath(destination, name); force=true)
+    end
+end
+
 # The Monster page links its generated Stan program and data for download;
 # write both from the same reproduction source the page renders.
 let mod = Module(:MonsterDownloads)
@@ -89,6 +98,12 @@ let vendor = joinpath(@__DIR__, "build", ".documenter", "public", "vendor")
 end
 
 DocumenterVitepress.build_docs(joinpath(@__DIR__, "build"))
+
+# The version picker requests this at the repository root. Deployment writes
+# its real version list; a local preview uses the empty list from public/.
+let versions = joinpath(@__DIR__, "build", "versions.js")
+    isfile(versions) || cp(joinpath(@__DIR__, "src", "public", "versions.js"), versions)
+end
 
 let redirect = joinpath(@__DIR__, "build", "index.html")
     isfile(redirect) || write(redirect, """

@@ -3,11 +3,6 @@ include(joinpath(@__DIR__, "nlme_svi_producer_audit.jl"))
 using ReactiveKernelsPPL: density_factors, select_factors, factor_coordinates,
     parameter_metadata
 
-# Two independent scientific axes, as in the bounded ODL soil hierarchy.
-# Soil cells have no trajectory parent. Connected SVI gives their shared-only
-# likelihood a unit of its own after the two trajectories' (`cell_units`
-# default `:components`); `:first_unit` assigns it to unit 1. Either way its
-# covariance may be unit-owned, whole.
 function svi_atomic_partition_model(data)
     @brm data begin
         mu ~ 1 + (1 | trajectory | subject)

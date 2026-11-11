@@ -399,12 +399,7 @@ production code does not suppress the warning or substitute solver controls.
 
 ## Stiff outer blocks: the rotation is gone (2026-11-06)
 
-This section supersedes the 45-degree rotation described above. The rotation was
-adopted for its two-copy B pattern, and stiffness accuracy was not among the
-measured gates. On a bounded ODL target with outer curvature 1.9e7 it left a
-residual of 0.83% in `h v = s`, which moved `odl_offset_Intercept`'s gradient from
-395 to 19214: that coordinate is aliased with an integrated effect, so its explicit
-and implicit terms cancel down to exactly this residual.
+This section supersedes the 45-degree rotation described above.
 
 The rotated variables are (q ± p) / sqrt(2) with p = B x and q = W p, so x is recovered
 from a difference of numbers of W's size and the residual grows as W². Residuals of

@@ -135,7 +135,37 @@ Additional exports in this task group:
 
 | Origin | Names |
 |:--|:--|
-| BayesianRegressionModels | `BRMNLMEModel`, `LowRankGlobal`, `MeanFieldGlobal`, `RKDesignBinder`, `brm_filter_resume`, `brm_laplace_problem`, `brm_nlme_conditional_problem`, `brm_nlme_joint_map`, `brm_smc_resume`, `brm_smc_runs`, `brm_stan_point_to_rk`, `brm_stan_to_rk`, `brm_svi_checkpoint` |
+| BayesianRegressionModels | `LowRankGlobal`, `MeanFieldGlobal`, `RKDesignBinder`, `brm_filter_resume`, `brm_nlme_conditional_problem`, `brm_nlme_joint_map`, `brm_smc_resume`, `brm_smc_runs` |
+
+### [`BRMNLMEModel`](@id BRMNLMEModel)
+
+Prepared population model returned by [`brm_nlme_model`](@ref). It retains the
+RK backend, unit partition and conditional likelihood workspaces used by NLME
+and variational fitting.
+
+### [`brm_laplace_problem`](@id brm_laplace_problem)
+
+Construct the marginal population target described by [`BRMLaplaceProblem`](@ref).
+The type's docstring lists the constructor keywords and approximation contract.
+
+### [`brm_svi_checkpoint`](@id brm_svi_checkpoint)
+
+Extract the data-only streaming state described by [`BRMSVIState`](@ref).
+It carries a fitted approximation into a new window. Use
+[`brm_svi_optimizer_checkpoint`](@ref) to resume interrupted optimization on the
+same model and data.
+
+### [`brm_stan_to_rk`](@id brm_stan_to_rk)
+
+Apply the reverse coordinate permutation in [`brm_rk_to_stan`](@ref)'s shared
+contract. Transports with simplex or centered blocks need the point-specific
+operation below.
+
+### [`brm_stan_point_to_rk`](@id brm_stan_point_to_rk)
+
+Transform a Stan unconstrained point into RK coordinates, including the
+transport's nonlinear blocks. Its contract is documented with the inverse,
+[`brm_rk_point_to_stan`](@ref).
 
 ## Draws and summaries
 
@@ -278,7 +308,11 @@ Additional exports in this task group:
 | Origin | Names |
 |:--|:--|
 | BayesianRegressionModels | `BRMDescriptionCoverage`, `brm_description_prior_anchor`, `rk_translate_artifact` |
-| StanBlocks | `stan_code` |
+
+### [`stan_code`](@id stan_code)
+
+Re-exported from StanBlocks. `stan_code(sb::SBBRMI)` returns the emitted Stan
+program for the bound model; [`stan_data`](@ref) returns its corresponding data.
 
 ## Response families
 
@@ -318,9 +352,16 @@ Additional exports in this task group:
 
 | Origin | Names |
 |:--|:--|
-| Distributions | `Arcsine`, `Bernoulli`, `BernoulliLogit`, `Beta`, `BetaBinomial`, `Binomial`, `Categorical`, `Cauchy`, `Chisq`, `Dirichlet`, `DirichletMultinomial`, `Erlang`, `Exponential`, `Frechet`, `Gamma`, `Gumbel`, `InverseGamma`, `InverseGaussian`, `LKJCholesky`, `Laplace`, `LocationScale`, `LogNormal`, `Logistic`, `MixtureModel`, `Multinomial`, `MvNormal`, `NegativeBinomial`, `Normal`, `NormalCanon`, `Pareto`, `Poisson`, `Rayleigh`, `SkewNormal`, `SkewedExponentialPower`, `TDist`, `Uniform`, `VonMises`, `Weibull`, `censored`, `logpdf`, `product_distribution`, `truncated` |
+| Distributions | `Arcsine`, `Bernoulli`, `BernoulliLogit`, `Beta`, `BetaBinomial`, `Binomial`, `Categorical`, `Cauchy`, `Chisq`, `Dirichlet`, `DirichletMultinomial`, `Erlang`, `Exponential`, `Frechet`, `Gamma`, `Gumbel`, `InverseGamma`, `InverseGaussian`, `LKJCholesky`, `Laplace`, `LocationScale`, `LogNormal`, `Logistic`, `MixtureModel`, `Multinomial`, `MvNormal`, `NegativeBinomial`, `Normal`, `NormalCanon`, `Pareto`, `Poisson`, `Rayleigh`, `SkewNormal`, `SkewedExponentialPower`, `TDist`, `Uniform`, `VonMises`, `Weibull`, `censored`, `logpdf`, `product_distribution` |
 | BayesianRegressionModels | `HurdlePoisson` |
 | LogExpFunctions | `log1mexp`, `log1pexp`, `logexpm1`, `logistic`, `logit`, `logsumexp` |
+
+### [`truncated`](@id truncated)
+
+Re-exported from Distributions. `truncated(distribution; lower, upper)`
+normalizes the density over the retained interval. See
+[bounds and vectors](terms-and-priors.md#bounds-and-vectors) for the difference
+from [`restricted`](@ref).
 | StatsFuns | `normcdf`, `norminvcdf` |
 
 ## Terms and priors
@@ -395,4 +436,14 @@ Modules = [BayesianRegressionModels]
 Public = true
 Private = false
 Filter = value -> any(name -> isdefined(BayesianRegressionModels, name) && value === getfield(BayesianRegressionModels, name), Main.BRM_DOCS_BACKEND_EXPORTS)
+```
+
+The following internal definitions are linked from the exported docstrings.
+
+```@docs
+BayesianRegressionModels._adaptive_cdar_centering_blocks
+BayesianRegressionModels._adaptive_hsgp_centering_blocks
+BayesianRegressionModels._adaptive_hsgp_level_centering_blocks
+BayesianRegressionModels._s2z_fisher_raw
+BayesianRegressionModels._s2z_rescale_rho
 ```

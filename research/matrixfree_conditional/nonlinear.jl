@@ -1,7 +1,3 @@
-# Full BRM Poisson/ICAR target on a synthetic three-dimensional lattice.
-# This is a nonlinear conditional target, not the reporter's ODL model or
-# the separately developed native space-time GMRF term.
-# RUN: julia --project=test research/matrixfree_conditional/nonlinear.jl NX NY NT [exact] [fd] [auto]
 using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL, Enzyme
 using DifferentiationInterface: AutoEnzyme
 using LogDensityProblems, LinearAlgebra, Random, Printf

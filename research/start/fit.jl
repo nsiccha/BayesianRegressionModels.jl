@@ -10,7 +10,8 @@ const RESULTS = joinpath(@__DIR__, "results")
 
 function fit_intro(; n_draws=1000, n_chains=4, seed=20261111)
     mkpath(RESULTS)
-    sb = SBBRMI(intro_model(); mod=@__MODULE__)
+    model = intro_model()
+    sb = SBBRMI(model; mod=@__MODULE__)
     settings = (; n_draws, n_chains, min_completed=3, seed)
     harness_version = bytes2hex(sha256(read(joinpath(@__DIR__, "../mcmc_harness.jl"))))
     program = stan_code(sb)
@@ -28,7 +29,7 @@ function fit_intro(; n_draws=1000, n_chains=4, seed=20261111)
         ["key" => key, "harness_version" => harness_version,
          "settings" => JSON.json(settings), "seed" => seed,
          "StanBlocks" => pkgversion(StanBlocks), "WarmupHMC" => pkgversion(WarmupHMC),
-         "Enzyme" => pkgversion(Enzyme), "status" => "started"];
+         "Enzyme" => pkgversion(Enzyme)];
         n_chains, n_draws)
 
     fit = sample_quorum(sb, "start"; n_chains, n_draws, seed)
@@ -36,8 +37,7 @@ function fit_intro(; n_draws=1000, n_chains=4, seed=20261111)
     names = constrained_names(fit.problem)
     constrained = [constrain_chain(fit.problem, c, seed+k) for (k,c) in enumerate(fit.chains)]
     quantities = [("Intercept", "response", "population intercept", :Intercept),
-                  ("age", "response/year", "population age slope", :age),
-                  ("sex", "response/code", "coefficient of the numeric sex code", :sex)]
+                  ("x", "response/x", "population slope", :x)]
     rows = []
     for (quantity, unit, description, coefficient) in quantities
         coordinate = only(brm_population_effect_coordinates(descriptor, :loc, names; coefficient).coordinates)
@@ -54,8 +54,8 @@ function fit_intro(; n_draws=1000, n_chains=4, seed=20261111)
     write_tsv(joinpath(RESULTS, "population.tsv"),
         POPULATION_HEADER, rows)
     predictive = ppc_rows(descriptor, fit.problem, thin_draws(fit.chains, 400), :y;
-        subjects=[1,1,2,2,3,3], times=[21,38,55,29,47,61],
-        observed=[0.2,1.1,-0.4,0.7,1.4,1.0], seed)
+        subjects=column_data(model, :subj), times=column_data(model, :x),
+        observed=column_data(model, :y), seed)
     write_tsv(joinpath(RESULTS, "ppc.tsv"), PPC_HEADER, predictive)
     write_tsv(joinpath(RESULTS, "fits.tsv"), FITS_HEADER, [fit_row(fit)])
     telemetry = (; key, seconds=fit.seconds, divergent=fit.divergent,
@@ -72,4 +72,4 @@ function fit_intro(; n_draws=1000, n_chains=4, seed=20261111)
     return telemetry
 end
 
-abspath(PROGRAM_FILE) == @__FILE__ && fit_intro()
+abspath(PROGRAM_FILE) == (@__FILE__) && fit_intro()

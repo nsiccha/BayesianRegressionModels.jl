@@ -1,6 +1,3 @@
-# A unit's whole series under one consumer-written law, fitted by minibatch
-# SVI with the units as SVI units, and a unit under a known population law
-# (snag `odlplaus-margina-60bc212b`).
 #
 # The law is a filter's log likelihood run along a station's hours: an
 # ordinary Julia function the consumer writes, bound as a leaf of the

@@ -417,17 +417,6 @@ end
 _brm_svi_margin_key(block, predictor, coefficient) =
     (block.group, block.id, block.predictor, predictor, coefficient)
 
-# The population coefficients each random-effect margin absorbs,
-# `margin key => [(packed position, design per unit)]`. A coefficient adds into
-# the units' block margin the NLME view mu-references it into (the view's own
-# references for a flat view, found the same way over its block margins when
-# its units hold different families). Otherwise it adds into the first margin
-# of a shared grouping's block whose design column is the coefficient's own
-# (`(odl_offset, …) ~ 1 + (1 | ID | device)`: the intercept), with design 1.
-# Each coefficient adds into one block, so a total never moves twice. With
-# nested groupings a total adds several levels' draws, so none are kept there.
-# Only a coefficient whose packed coordinate is its value (identity
-# transform) is kept, so that a coordinate's change is the coefficient's change.
 function _brm_svi_location_references(m::BRMNLMEModel)
     view, rk = m.view, m.backend
     references = Dict{Any,Vector{Tuple{Int,Vector{Float64}}}}()
@@ -480,17 +469,6 @@ function _brm_svi_location_change(instance, references, i, after, before)
     δ
 end
 
-# Unit i's density at the globals `g` and its draws `z`, the draws' prior included; -Inf
-# where it has no finite value. Carrying keeps a unit's totals under the combined
-# coefficients, which is right while a draw can express that: under a log link, slices
-# whose scales differ 40-fold read -1,367 carried and -189,452 copied. It is wrong where
-# a draw cannot: ODL pins its device blocks' scales at 1e-6, so a location change of 0.001
-# would need a draw of 1,000, and the units' median |z| went from 0.24 to 10 and the
-# start's density to -Inf, which copying them left at -2e5 and an ELBO above a cold fit's
-# by 7 orders of magnitude. No threshold on the draws tells these apart, and the
-# density does, per unit, at two evaluations each. Carrying stands unless it costs more
-# than d/2 for its d draws, which is what a draw from the unit's own factor reads below
-# the factor's mode.
 function _brm_svi_unit_density(t, i, g, z)
     value = try
         _brm_svi_unit_term!(zeros(length(g)), zeros(length(z)), t, i, g, z)
@@ -586,23 +564,7 @@ end
 #
 #     S_s = Σ_s[R, R]⁻¹ − P₀[R],    h_s = Σ_s[R, R]⁻¹ m_s[R] − P₀[R] m₀[R].
 #
-# Three things separate that from the plain product of these sites, which reads
-# noise and contradiction as information. On ODL's 16 Länder it put 629 of 1,090 means
-# over 3 prior sds out, field coefficients no Land informs up to 25 sds out and a length
-# 51, and the fit from there died at its first draw. Coordinate by coordinate it stayed
-# near the priors but held a rate's scale at 1.67 ± 0.009 where the Länder range from
-# −4.06 to 2.28, and that fit died at iteration 13 (snag svi-combine-join-6aabb60b).
 #
-# Which coordinates. Data can only narrow a prior, Σ_s ≼ P₀⁻¹, and a coordinate at
-# τ = Σ_s[k, k] P₀[k, k] = 1 has no row in S_s at all. An uninformed coordinate's τ
-# scatters around 1 under SVI (ODL: 0.85 to 1.16 from the 1st to the 99th percentile,
-# 46% above 1), so there a rank row is noise, and a coupling read from it pulls with
-# the full precision of whatever it couples to. A coordinate joins a slice's joint
-# site if the slice narrows it beyond that scatter, or if the rank part carries it
-# (a ridge's narrow-prior side: a slice pinning a + b, a's prior 10 times b's, leaves
-# b at τ = 0.99 with all its variance along the ridge). Elsewhere it has a marginal
-# site where τ < 1, and none where τ ≥ 1, as in the coordinate-by-coordinate product.
-# Taking the sub-block of Σ_s marginalizes the other coordinates out of the slice.
 #
 # Which directions. A direction wider than the prior has no site. "Wider" is the
 # generalized eigenproblem of (P₀, Σ_s⁻¹), so with Σ_s = L Lᵀ and Lᵀ P₀ L = Y K Yᵀ the
@@ -611,16 +573,6 @@ end
 # a rescaling of the coordinates, needs no case for a flat prior, and does not let a
 # prior sd of 1e-6 decide the directions, as an eigenbasis of S itself does.
 #
-# How far to trust them. Slices can contradict each other by thousands of their own
-# sds (ODL: 4,953 on one correlation coordinate). The product then resolves that
-# through whatever small cross-covariance it finds: a slice's correlation of 0.2
-# between a coordinate j and one it pins, l, and a gap of 70 slice sds on l, moves j by
-# 14 of its sds. And it sits where the narrowest slices put it, as narrow as they are.
-# So the slices are read as random effects, as in a random-effects meta-analysis:
-# each one's own x_s ~ N(x, T), T diagonal, which adds T to a site's variance,
-# S' = W (I + Wᵀ T W)⁻¹ Wᵀ, h' = W (I + Wᵀ T W)⁻¹ d (about m₀), the plain site at T = 0.
-# The coordinate then sits among the slices, and no narrower than a cold fit starts,
-# for the fit to settle.
 #
 # T_k is the Paule-Mandel estimate over the marginal sites of the slices that pin k by
 # themselves, where Cochran's Q says they contradict, more than SVI's narrow sds explain.

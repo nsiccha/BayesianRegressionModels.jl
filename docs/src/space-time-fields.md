@@ -142,7 +142,7 @@ All representations support full-model MCMC on RK and Stan. RK mesh fields
 may live in independent plate cells; the cell predictor must be `0 + gmrf`,
 and shared channel correlation belongs outside the cell. Neighbor fields
 do not use that plate or embedded-Laplace surface. `field_states=:units`
-lets supported field states become SVI units; see the [SVI guide](svi.md).
+lets supported field states become SVI units; see the [SVI example](variational-inference.md).
 Embedded Laplace is an explicit mesh integration choice. Large operator
 solves use a fixed-probe determinant estimate, so even a Gaussian integral
 can be approximate. Check the solver and probe settings against the

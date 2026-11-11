@@ -9,7 +9,7 @@
 
 
 These are synthetic controls for the nonlinear embedded-Laplace implementation.
-They do not import an ODL model, graph or observation. Results below were measured
+Results below were measured
 on `a Linux fleet host` on 2026-11-02 with one CPU per run. Host load varied; allocation
 counts are cumulative allocations, not peak resident memory.
 

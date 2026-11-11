@@ -1252,7 +1252,7 @@ component per subject: its value matches a Laplace marginal computed from the
 whole model's density, and its gradient matches central differences. It runs in
 the test environment above.
 
-`rk_batched_field_cells.jl` checks a paired Fourier field with channel mixing written as array cells (BRM todo `07y7ghy`, from RK snag `plate-of-per-row-d1b4ed43`). The cell is `phase = frequency_t * (coordinates[s] ./ lengths)`, then products of shared coefficient matrices with `cos.(phase)` and `sin.(phase)`, then `correlation * raw`. It is checked against the same field written as ODLPlaus writes it, one `@deffun @juliacompat` call per row, on three counts:
+`rk_batched_field_cells.jl` checks a paired Fourier field with channel mixing written as array cells (BRM todo `07y7ghy`, from RK snag `plate-of-per-row-d1b4ed43`). The cell is `phase = frequency_t * (coordinates[s] ./ lengths)`, then products of shared coefficient matrices with `cos.(phase)` and `sin.(phase)`, then `correlation * raw`. It is checked against the same field written with one `@deffun @juliacompat` call per row, on three counts:
 
 - RK gives both the same coordinates, density and native Reverse gradient.
 - RK plans the array cell's plate as matrix products (log group `:plate_batching`) and the per-row plate as a cell loop.
@@ -3088,8 +3088,7 @@ large, and raising `max_cell_width` permits genuinely dense local blocks.
 
 - `julia --project=test test/nlme_svi_series_law.jl`: each station's series is
   one observation under a consumer-written law, an exact Kalman filter's log
-  likelihood bound as a leaf of a whole-event observation provider (snag
-  `odlplaus-margina-60bc212b`). The filter equals the dense Gaussian of the
+  likelihood bound as a leaf of a whole-event observation provider. The filter equals the dense Gaussian of the
   readings, the RK target's native Reverse gradient equals central differences,
   each pointwise term is its station's oracle, and `brm_svi_fit` with the
   stations as units (factors of three statics each) is compared with NUTS on
