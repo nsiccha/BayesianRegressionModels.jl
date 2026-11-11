@@ -3,6 +3,10 @@
 The site is built from the current package with Documenter and VitePress. Model
 views and AlgebraOfVega specifications execute during the build; posterior
 summaries come from deliberate, cached research runs. CI never samples.
+The hosted build runs Julia 1.11: every official 1.10.x miscompiles the prior
+constructor binding of the RK backend (JuliaLang/julia#52644), which the fleet
+hosts avoid with a patched build. The docs project's public pins live in its
+`[docs_pins]` table, read by the workflow, because Pkg 1.11 honours `[sources]`.
 
 | Part | Page | Purpose |
 |:--|:--|:--|

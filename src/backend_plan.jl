@@ -222,7 +222,7 @@ unchanged.
 Base.@nospecializeinfer function _brm_resolve_constants(@nospecialize(brmi::BRMI);
         fitted=(_name, _source) -> nothing, prefix::AbstractString="BRM")
     resolved = Any[]
-    for (key, op) in pairs(brmi.operations)
+    for (key, op) in _brm_operation_entries(brmi)
         op isa NamedColumn && _brm_is_constant_declaration(parent(op)) || continue
         node = last(getargs(parent(op), 2))
         source = _brm_constant_source(node)

@@ -5146,7 +5146,8 @@ end
 #
 # A `:car` term carries the fitted graph as generated data columns (edge ends
 # over the structured areas, each area's `phi` position or an island's padding
-# slot, its BYM2 weight), its connected components as literal segments, and the
+# slot, the start and size of each connected component's `phi` segment, its
+# BYM2 weight), so every graph of one declaration is one program, and the
 # area labels, which the program maps to graph positions in-graph, so a frozen
 # replay of new rows reuses the graph unchanged. The block's scale (and BYM2 mixing
 # share) priors follow the SB defaults: `sigma ~ restricted(Normal(0, 1), 0, Inf)`
@@ -5199,8 +5200,10 @@ function _rk_plan_car_term!(prepared::_BRMPreparedTerm{typeof(car)},
         # an island reads the padding slot `n_struct + 1`, which holds zero
         struct_pos=column(:struct_pos,
             [k == 0 ? state.n_struct + 1 : k for k in state.struct_idx]),
-        # component c is `phi[comp_start[c] .+ (0:comp_size[c]-1)]`
-        components=Tuple(zip(state.comp_start, state.comp_size)),
+        # component c is `phi[comp_start[c] .+ (0:comp_size[c]-1)]`; the program
+        # reads both as data, so the graph's sizes are inputs (principle `0ikeidi`)
+        comp_start=column(:comp_start, collect(Int, state.comp_start)),
+        comp_size=column(:comp_size, collect(Int, state.comp_size)),
         inv_scale=column(:inv_scale, state.inv_scale),
         is_struct=column(:is_struct, Float64.(state.struct_idx .> 0)))
     value = _rk_mint_generated!(taken, columns, stem)
@@ -5218,8 +5221,10 @@ function _rk_plan_car_term!(prepared::_BRMPreparedTerm{typeof(car)},
         nothing
     _RKTermSpec(:car, Symbol[],
         (; value, area, source, type=state.type, n_struct=state.n_struct, nodes=state.nodes,
+         components=Tuple(zip(state.comp_start, state.comp_size)),
          graph..., inputs=(graph.node_labels, graph.node1, graph.node2, graph.struct_pos,
-                           graph.inv_scale, graph.is_struct),
+                           graph.comp_start, graph.comp_size, graph.inv_scale,
+                           graph.is_struct),
          sigma_param, rho_param),
         value, value)
 end

@@ -367,11 +367,15 @@ end
     u = zeros(length(names))
     u[only(findall(==(Symbol("pop_rate.beta_pop.1")), names))] = -0.4
     u[only(findall(==(Symbol("pop_rate.beta_pop.2")), names))] = 0.7
+    # A design's inputs at a draw of the fit come from the design binder: the
+    # fit's level set sizes the subject block, so `u` is read in the fit's
+    # layout (decision `1ofewg8`). A fresh artifact of the design is a model of
+    # its own rows, whose block the design's levels size.
+    binder = rk_design_binder(retained; resample_groups=[:subject])
     for scored in (in_cell_data(["b", "c", "a"], [5, 2, 1], ["c", "a", "b", "a", "c", "b"]),
             in_cell_data(["c", "a"], [6, 3], ["a", "c", "a", "a", "c"]))
         saved = deepcopy(scored)
-        columns = BRM.rk_translate_artifact(BRM.emit_rk_artifact(
-            PublicShapeReuse.in_cell(scored); case_id="authored-value")).columns
+        columns = binder(scored)
         ports = Tuple(keys(columns))
         # The group block holds one row per level, in level order.
         levels = sort(unique(scored.subject))

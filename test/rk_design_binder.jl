@@ -508,9 +508,10 @@ end
         runtime=subject_effects)
     @test length(binder.classes) == 1
     # The resampled grouping's fitted level set is fitted too (snag
-    # `rk-replay-with-r-bf059724`).
+    # `rk-replay-with-r-bf059724`), and so are `mo(diet)`'s levels and simplex
+    # concentration, which are inputs since `00966bf7`.
     @test keys(binder.fitted) == (:hsgp_base_time_modes_fit, :hsgp_base_time_settings_fit,
-        :weight_fit, :subject_fit_levels)
+        :mo_diet_alpha, :mo_diet_levels, :weight_fit, :subject_fit_levels)
     check_binder(rk, [pk_data(rng, 2, 3; labels=["n1", "n2"]),
         pk_data(rng, 3, 2; labels=["n1", "n2", "n3"])];
         resample_groups=[:subject], want=:conc, runtime=subject_effects)
@@ -783,8 +784,9 @@ end
     designs = [(; area=areas(n)[rows]) for (n, rows) in ((14, 2:5), (14, 4:12), (7, [7, 1]))]
     binder = check_binder(rk, designs; want=:mu)
     @test !occursin("replayed in full", sprint(show, binder))
-    graph = (:car_mu_area_inv_scale, :car_mu_area_is_struct, :car_mu_area_node1,
-        :car_mu_area_node2, :car_mu_area_nodes, :car_mu_area_struct_pos)
+    graph = (:car_mu_area_comp_size, :car_mu_area_comp_start, :car_mu_area_inv_scale,
+        :car_mu_area_is_struct, :car_mu_area_node1, :car_mu_area_node2, :car_mu_area_nodes,
+        :car_mu_area_struct_pos)
     @test keys(binder.fitted) == graph
     # Designs that also list edges keep the fitted graph, as a replay does.
     check_binder(rk, [(; d..., edges...) for d in designs]; want=:mu)
