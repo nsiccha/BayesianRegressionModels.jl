@@ -1,8 +1,9 @@
 # Start example
 
-The landing-page example is a Gaussian regression with population age and
-numeric sex effects, correlated subject intercepts and age slopes, and an
-exponential prior on the residual standard deviation. Its six observations
+The landing-page example is a Gaussian regression with one population slope
+and subject-specific intercepts. Population coefficients have standard-normal
+priors; the subject and residual standard deviations have `LogNormal(-1, 0.35)`
+priors. Its six observations
 are synthetic and illustrate the interface rather than a scientific inference.
 
 The Start page's `docs/start/setup.jl` installs a public environment for model
