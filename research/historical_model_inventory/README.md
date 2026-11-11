@@ -103,3 +103,6 @@ source checkout.
 - `semantic-rewrite` means the current surface exists but a row-specific
   historical constant, prior, or declaration choice is still required; it is
   never displayed as an executed row.
+
+Generated inventory TSVs larger than 100 KB are local outputs and are not tracked.
+Run the inventory producers before using the research gallery.

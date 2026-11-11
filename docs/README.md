@@ -56,3 +56,6 @@ worktree and scratch paths. Public receipts describe the machine generically.
 
 Historical receipts retain their numeric results and source hashes; machine-local
 paths are normalized and raw render logs are omitted from the public tree.
+
+Large generated inventory tables and compressed draw tables are also untracked;
+only the small summary tables used to render fitted examples are retained.
