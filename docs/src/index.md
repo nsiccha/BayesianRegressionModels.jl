@@ -9,12 +9,17 @@ julia --project=test test/setup_env.jl
 ```
 
 ```@eval
+using Markdown
 mod = Main.BRMDocsComparisons.example_module(:start)
-Main.BRMDocsComparisons.comparison(mod,
+view = Main.BRMDocsComparisons.comparison(mod,
     "using BayesianRegressionModels\n\n" *
     Main.BRMDocsComparisons.source_function("research/start/reproduce.jl", :intro_model) *
     "\n\nmodel = intro_model()",
     :model; title="Gaussian regression", require_stan=true, jax=true)
+observed = Base.invokelatest(mod.column_data, mod.model, :y)
+subjects = Base.invokelatest(mod.column_data, mod.model, :subj)
+push!(view.content, Markdown.Code("text", "$(length(observed)) observations in $(length(unique(subjects))) subjects; response: y"))
+view
 ```
 
 The six synthetic observations have population effects for age and a numeric
