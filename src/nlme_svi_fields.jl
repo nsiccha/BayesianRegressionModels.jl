@@ -188,7 +188,7 @@ end
 
 # A step's reading of the world outside its batch: the laws at `g`, the global states, and
 # one draw of every unit a batch's conditionals read. Serial, before any task.
-function _brm_svi_field_prepare!(rng, t::NamedTuple, q, g, batch)
+function _brm_svi_field_prepare!(rng, t::NamedTuple, q, g, batch, ε=nothing, η=nothing)
     state = get(t, :fields, nothing)
     state === nothing && return nothing
     _brm_svi_field_laws!(state, g)
@@ -198,7 +198,11 @@ function _brm_svi_field_prepare!(rng, t::NamedTuple, q, g, batch)
     readers = reduce(vcat, (state.blanket[i + 1] for i in batch); init=copy(state.blanket[1]))
     for u in sort!(unique!(readers))
         u = Int(u)
-        state.others[t.units[u]] .= _brm_svi_draw_unit(q, u, _brm_svi_unit_noise(rng, q.U[u]))
+        # Under linear coupling, at the unit's mean for this draw of the globals.
+        coupling = ε === nothing ? nothing : _brm_svi_coupling(q)
+        ζ = coupling === nothing ? nothing : _brm_svi_coupling_noise(coupling, u, ε, η)
+        state.others[t.units[u]] .= _brm_svi_coupled_mean(coupling, q, u, ζ) .+
+            _brm_svi_unit_offset(q, u, _brm_svi_unit_noise(rng, q.U[u]))
     end
     nothing
 end

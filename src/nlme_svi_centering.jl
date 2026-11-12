@@ -584,6 +584,26 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
             reason="a field's unit-owned states have conditional scales computed inside " *
                 "its kernel, not read as graph values"))
     end
+    # `@plate` cell latents and the sampled locals of a component called in a cell: the
+    # plan reads no location or scale for them, so they keep their packed coordinates
+    # (linear coupling still conditions a unit's on the globals, src/nlme_svi_coupling.jl).
+    for record in _brm_nlme_records(m.backend.plan)
+        record.kind in (:cell_latent, :cell_component) || continue
+        owned = [p for (p, name) in enumerate(view.coordinates)
+            if _brm_nlme_owned(name, record.declaration)]
+        what = record.kind === :cell_latent ? "an authored `@plate` cell latent" :
+            "a sampled local of a component called in a `@plate` cell"
+        local_entries = [p for p in owned if owner[p] > 0]
+        isempty(local_entries) || push!(uncentered, (; kind=record.kind,
+            record.declaration, record.name, level=nothing,
+            coordinates=view.coordinates[local_entries],
+            reason="$what: learned centering reads no location or scale for it"))
+        shared = [p for p in owned if p in globals]
+        isempty(shared) || push!(uncentered, (; kind=record.kind,
+            record.declaration, record.name, level=nothing,
+            coordinates=view.coordinates[shared],
+            reason="$what whose coordinates are global, not a unit's"))
+    end
     names = Tuple(ports)
     read = isempty(names) ? nothing : _rk_value_reader(m.backend, names)
     pullback = isempty(names) ? nothing : _rk_value_pullback(m.backend, names, copy(m.unit))
