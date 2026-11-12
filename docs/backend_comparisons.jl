@@ -234,14 +234,15 @@ end
 const JAX_JULIA_USAGE = """
 using ReactiveKernels, ReactiveKernelsPPL
 rk = RKBRMI(model)
-write("model.py", jax_source(rk.model, rk_bound_plan(rk)))
-inputs = rk_bound_data(rk)   # the data prepare_data reads, by name"""
+source = jax_source(rk.model, rk_bound_plan(rk))
+write("model.py", source)
+inputs = rk_bound_data(rk, source)   # exactly the inputs prepare_data reads"""
 
 const JAX_PYTHON_USAGE = """
 import jax
 import model as m
 
-prepared = m.prepare_data(**{k: inputs[k] for k in m.DATA})
+prepared = m.prepare_data(**inputs)
 lp = m.log_density(u, **prepared)               # u: unconstrained, length m.dimension(prepared)
 lp = jax.jit(m.log_density)(u, **prepared)      # one compiled function for every dataset of these shapes"""
 
@@ -273,7 +274,7 @@ function comment_lines(text::AbstractString; width=84)
 end
 
 function jax_untranslated_note(entries)
-    lines = ["", "# prepare_data takes these data-only values as inputs, from rk_bound_data(rk),",
+    lines = ["", "# prepare_data takes these data-only values from rk_bound_data(rk, source),",
              "# because they have no Python translation (m.UNTRANSLATED):"]
     for (name, reason) in entries
         wrapped = comment_lines(reason; width=80)
