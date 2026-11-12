@@ -1,5 +1,14 @@
 # Running the tests
 
+`rk_jax_inputs.jl` checks `rk_bound_data(rk, source)` on macro and runtime-source
+models: scalar constants read by a ragged plate, ordinary scalar inputs, array
+constants, untranslated data-only definitions, and frozen/fresh/data-free
+replays. It checks exact module input names, read-only data, reuse of computed
+values, native binding/checkpoint identity stability, and native/JAX densities
+and gradients against independent formulas. Set `RK_JAX_PYTHON` to a Python with
+JAX for the numerical module checks. `rk_jax.jl` covers the broader module
+contract, and `jax_module_driver.jl` uses the same public accessor.
+
 `seal_density_dependence.jl` checks both grey-seal model forms against Vanko
 et al. (2026): birth and pregnancy boundary identities, compiled gradients
 against an independently integrated loss hazard, and a finite full-model start.

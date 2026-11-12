@@ -197,24 +197,8 @@ function brm_jax_run(src, datasets, points)
         datasets=_jax_decode(raw["datasets"]), dir)
 end
 
-# The raw columns `prepare_data` takes, by the names the module lists
-# (`m.DATA`): a data-free replay binds more than it takes. A scalar data value
-# and the observed value of a conditioned declaration are taken by their
-# authored names, while the binding holds them as `_rkppl_value_<name>` and
-# `_rkppl_conditioned_<name>` (rkppl-use §14 `jax_source`; RKPPL's
-# `test_jax_source.jl` reads its inputs the same way).
-function brm_jax_inputs(rk, src)
-    bound = rk_bound_data(rk)
-    names = [Symbol(first(i)) for i in only(f for f in src.functions if f.name == "prepare_data").inputs]
-    function value(n)
-        for k in (n, Symbol("_rkppl_value_", n), Symbol("_rkppl_conditioned_", n))
-            haskey(bound, k) && return bound[k]
-        end
-        error("prepare_data takes `", n, "`, which rk_bound_data(rk) holds neither as `", n,
-            "` nor as its bound value `_rkppl_value_", n, "` or `_rkppl_conditioned_", n, "`")
-    end
-    NamedTuple{Tuple(names)}(Tuple(value(n) for n in names))
-end
+# The public module-input accessor supplies exactly `m.DATA` by name.
+brm_jax_inputs(rk, src) = rk_bound_data(rk, src)
 
 const _BRM_JAX_NUTS_DRIVER = raw"""
 import importlib.util, json, math, platform, sys, time

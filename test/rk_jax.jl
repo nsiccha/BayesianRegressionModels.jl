@@ -136,7 +136,7 @@ jax_function(src, name) = only(f for f in src.functions if f.name == name)
 
 # The module's `prepare_data` takes the bound columns it lists, by name.
 function raw_inputs(rk, src)
-    bound = rk_bound_data(rk)
+    bound = rk_bound_data(rk, src)
     Tuple(bound[Symbol(first(input))] for input in jax_function(src, "prepare_data").inputs)
 end
 
@@ -145,11 +145,10 @@ function check_module(rk; anchors)
     @test src isa JAXSource
     @test issubset(("prepare_data", "log_density", "log_prior", "log_likelihood",
         "log_jacobian", "constrain"), [f.name for f in src.functions])
-    # `prepare_data` takes `rk_bound_data(rk)`'s columns by the names it
-    # lists. A data-free replay binds more (its omitted fit-role columns),
-    # which `prepare_data` does not take.
+    # Module inputs have exactly the names prepare_data lists. The native
+    # binding can also hold intermediate values and omitted fit-role columns.
     inputs = Set(Symbol(first(input)) for input in jax_function(src, "prepare_data").inputs)
-    @test issubset(inputs, keys(rk_bound_data(rk)))
+    @test inputs == Set(keys(rk_bound_data(rk, src)))
     # A fitted anchor computed in the program is translated host code, its
     # guards included.
     @test occursin("requires at least one training value", src.text) == anchors
@@ -168,9 +167,12 @@ end
 
 @testset "bound anchors and level codes: the fit and a replay" begin
     rk = RKBRMI(JM.grouped(TRAIN))
-    check_module(rk; anchors=false)
+    # Fit-role rows reach prepare_data, which computes zscale/center anchors
+    # and their training-data guards. A data-free replay below supplies the
+    # fitted values instead.
+    check_module(rk; anchors=true)
     check_module(reprocess(rk, (; x=[1.0, 2.0, 3.0, 4.0], w=[0.1, -0.2, 0.3, 0.0],
-        g=["a", "c", "c", "b"], y=[0.2, -0.1, 0.4, 0.0])); anchors=false)
+        g=["a", "c", "c", "b"], y=[0.2, -0.1, 0.4, 0.0])); anchors=true)
     check_module(RKBRMI(JM.counts(TRAIN)); anchors=false)
 end
 
@@ -205,7 +207,7 @@ untranslated(src) = something(match(r"^UNTRANSLATED = (.*)$"m, src.text), (; cap
         ["a", "q"], ["a", "b"])
     if rk_jax_available()
         src = jax_source(rk.model, rk_bound_plan(rk))
-        bad = merge(rk_bound_data(rk), (; g=["a", "q", "b"]))
+        bad = merge(rk_bound_data(rk, src), (; g=["a", "q", "b"]))
         @test_throws "is not one of the 2 fitted levels" rk_jax_evaluate(src, "log_density",
             (point(rk), Tuple(bad[Symbol(first(i))]
                 for i in jax_function(src, "prepare_data").inputs)...); prepare=true)
@@ -254,8 +256,8 @@ end
 end
 
 # `RKBRMI(build(design), brm_fitted_state(rk))` binds the fitted values, not
-# the training rows: they are `prepare_data` inputs, which `rk_bound_data`
-# holds under the names `src.functions` lists.
+# the training rows: they are `prepare_data` inputs, which
+# `rk_bound_data(rk, src)` holds under the names `src.functions` lists.
 @testset "a data-free replay passes its fitted values to prepare_data" begin
     rk = RKBRMI(JM.grouped(TRAIN))
     design = (; x=[1.0, 2.0, 3.0, 4.0], w=[0.1, -0.2, 0.3, 0.0],

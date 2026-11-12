@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.283
+
+- Added: `rk_bound_data(rk, source)` collects exactly the `prepare_data`
+  inputs of an emitted `JAXSource`, under their authored names. Scalar data
+  and constants used in a plate could previously be available only under
+  internal native names, so looking up the module's input names in
+  `rk_bound_data(rk)` failed. The new method obtains missing values through
+  RKPPL's public `frozen_values`, preserving frozen and fresh replay behavior.
+  The one-argument native binding and its checkpoint identities are unchanged.
+  JAX callers should pass their emitted source to the new method.
+
 ## 0.2.282
 
 - **Breaking:** fresh `brm_svi_fit` calls learn partial centering by default,

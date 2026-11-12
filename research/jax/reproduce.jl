@@ -91,9 +91,7 @@ jsonable(x::AbstractString) = String(x)
 
 # The raw columns `prepare_data` takes, by the names the module lists.
 function module_inputs(rk, src)
-    bound = rk_bound_data(rk)
-    names = [Symbol(first(i)) for i in only(f for f in src.functions if f.name == "prepare_data").inputs]
-    Dict(string(n) => jsonable(bound[n]) for n in names)
+    Dict(string(name) => jsonable(value) for (name, value) in pairs(rk_bound_data(rk, src)))
 end
 
 flat_names(nt::NamedTuple, prefix = "") = reduce(vcat,

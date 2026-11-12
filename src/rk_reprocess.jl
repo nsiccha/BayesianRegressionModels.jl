@@ -720,6 +720,20 @@ bind the design's levels of the resampled groupings, so they pack the replay's
 own coordinates, not the fit's; the inputs of a cut at a draw of the fit come
 from [`rk_design_binder`](@ref). Implemented by the ReactiveKernels package
 extension.
+
+    rk_bound_data(rk::RKBRMI, source::ReactiveKernels.JAXSource) -> NamedTuple
+
+The inputs of the Python/JAX module emitted by
+`jax_source(rk.model, rk_bound_plan(rk))`, under exactly the names its
+`prepare_data` takes. Pass the returned fields to `prepare_data` by name.
+This includes scalar data and constants under their authored names, even when
+the native graph binds them under internal names, and the values of data-only
+definitions the module cannot translate. Values come from the current binding,
+so a frozen replay keeps its fitted preprocessing and a fresh replay refits it.
+Inputs and returned values must be treated as read-only.
+
+The one-argument method returns the native graph's inputs; use this two-argument
+method to collect inputs for the emitted module.
 """
 function rk_bound_data end
 
