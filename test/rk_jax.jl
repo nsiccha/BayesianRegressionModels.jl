@@ -167,9 +167,12 @@ end
 
 @testset "bound anchors and level codes: the fit and a replay" begin
     rk = RKBRMI(JM.grouped(TRAIN))
-    check_module(rk; anchors=false)
+    # Fit-role rows reach prepare_data, which computes zscale/center anchors
+    # and their training-data guards. A data-free replay below supplies the
+    # fitted values instead.
+    check_module(rk; anchors=true)
     check_module(reprocess(rk, (; x=[1.0, 2.0, 3.0, 4.0], w=[0.1, -0.2, 0.3, 0.0],
-        g=["a", "c", "c", "b"], y=[0.2, -0.1, 0.4, 0.0])); anchors=false)
+        g=["a", "c", "c", "b"], y=[0.2, -0.1, 0.4, 0.0])); anchors=true)
     check_module(RKBRMI(JM.counts(TRAIN)); anchors=false)
 end
 
