@@ -519,21 +519,15 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     floors = nothing
     if periodic
         # The periodic basis is prepared data; its effect reads the matrix and
-        # harmonic frequencies. Destructuring drops an unread trailing floor.
+        # harmonic frequencies, computed by an explicit RK graph.
         PHI = _rk_ast_fresh_name(string(options.id, "_PHI"), taken)
         omega2 = _rk_ast_fresh_name(string(options.id, "_omega2"), taken)
-        floor_read && (floors = _rk_ast_fresh_name(string(options.id, "_rho_floor"), taken))
-        targets = floors === nothing ? (PHI, omega2) : (PHI, omega2, floors)
-        # An anchored or masked basis passes its anchor and bound mask
-        # (decision 1fk9b29).
-        # Its basis count, period and anchor are the `modes` and `settings`
-        # inputs, not numbers of the program (user principle `0ikeidi`).
-        anchor, mask = get(options, :anchor, nothing), _rk_hsgp_mask(term)
-        push!(stmts, Expr(:(=), Expr(:tuple, targets...), Expr(:call,
-            :brm_hsgp_periodic_basis, only(term.columns), Expr(:ref, options.modes, 1),
-            Expr(:ref, options.settings, 1),
-            (anchor === nothing ? () : (Expr(:ref, options.settings, 2),))...,
-            (mask === nothing ? () : (mask,))...)))
+        basis = _rk_ast_hsgp_periodic_basis_graph!(definitions, term, taken)
+        push!(stmts, Expr(:(=), Expr(:tuple, PHI, omega2), Expr(:call,
+            basis, only(term.columns), _rk_hsgp_mask_actuals(term)...,
+            options.modes, options.settings)))
+        floor_read && (floors = _rk_ast_hsgp_periodic_floor!(
+            definitions, stmts, term, taken, bindings))
         inputs = Pair{Symbol,Any}[:PHI => PHI, :omega2 => omega2]
         extent = :(axes(PHI, 2))
     else
@@ -568,11 +562,8 @@ function _rk_ast_value_hsgp(definitions, term, taken, bindings)
     sigma_prior = _rk_ast_positive_prior(options.sigma_prior, bindings, taken)
     rho = axes == 1 ? :rho_iso : :rho
     # The weights' spectral scales are a value of the component (`spectral_scale`).
-    scales, value = periodic ?
-        (:(brm_hsgp_periodic_sqrt_spd(omega2, sigma, $rho)),
-         :(PHI * (spectral_scale .* beta_raw))) :
-        _rk_ast_hsgp_value_graph!(definitions, term, taken, [a => a for a in first.(inputs)],
-            :sigma, rho, :beta_raw, :spectral_scale)
+    scales, value = _rk_ast_hsgp_value_graph!(definitions, term, taken,
+        [a => a for a in first.(inputs)], :sigma, rho, :beta_raw, :spectral_scale, bindings)
     _rk_ast_hsgp_component!(definitions, stmts, taken, options.id, inputs, floors,
         rho_priors, sigma_prior, value, extent; scales, truncated=options.rho_truncated,
         base=periodic ? "brm_periodic_hsgp_effect" : "brm_hsgp_effect")
@@ -983,12 +974,13 @@ Base.@nospecializeinfer function _rk_value_leveled_responses(@nospecialize(obser
     records
 end
 
-# An `OrderedLogistic` response's level count on a frozen replay is the fit's,
-# so a design's outcomes, or an omitted response, bind to the fitted program.
-# Otherwise, and for the responses whose levels the graph codes, the response's
-# own.
+# A leveled response's levels on a frozen replay are the fit's: an
+# `OrderedLogistic` level count, so a design's outcomes, or an omitted response,
+# bind to the fitted program; an `Ordinal` or `CategoricalLogit` level table, so
+# the rows are coded against the training levels as the emitted level table
+# (`_rk_response_level_table!`) codes them. Otherwise the response's own.
 function _rk_value_response_training(key::Symbol, rhs, raw)
-    getf(rhs) === OrderedLogistic && _brm_frozen_replay() !== nothing || return nothing
+    _brm_frozen_replay() === nothing && return nothing
     _brm_fitted(values -> _brm_prepare_response(key, rhs, values).fit,
         :response_levels, key, raw)
 end
@@ -1179,8 +1171,12 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         _rk_value_codes_levels(entry) || continue
         raw = _rk_ast_fresh_name(string(key, "_raw"), taken)
         value_columns[raw] = entry.raw
+        # `OrderedLogistic` codes against 1:K, not the labels' own levels.
+        levels = entry.head === OrderedLogistic ?
+            _rk_ast_level_values(entry.prepared.fit.levels) :
+            _rk_response_level_table!(derived, value_columns, taken, key, entry.raw)
         push!(derived, _RKDerivedSpec(key, Expr(:_rk_data_preparation,
-            :brm_prepared_indices, raw, _rk_ast_level_values(entry.prepared.fit.levels)), key))
+            :brm_prepared_indices, raw, levels), key))
     end
     regression = _RKStructuralPlan(_RKLikelihoodSpec[], components.predictors,
         components.priors, parameters, _RKAssignmentSpec[], derived, columns,

@@ -7486,10 +7486,11 @@ end
 
 # An absent replay response has no values to gate; it stays unbound.
 _rk_gate_response_values!(family::Symbol, values::_BRMAbsentResponse, response::Symbol,
-    interval::Union{Nothing,Tuple{Float64,Float64}} = nothing) = values
+    interval::Union{Nothing,Tuple{Float64,Float64}} = nothing; n_levels=nothing) = values
 function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
         response::Symbol,
-        interval::Union{Nothing,Tuple{Float64,Float64}} = nothing)
+        interval::Union{Nothing,Tuple{Float64,Float64}} = nothing;
+        n_levels::Union{Nothing,Int}=nothing)
     prefix = "RK backend"
     any(ismissing, values) && error(
         "$prefix: response `$response` has missing values; wrap it in " *
@@ -7569,15 +7570,21 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
             "$prefix: response `$response` must hold non-negative values")
     elseif family === :categorical_logit || family === :ordinal ||
             family === :categorical
-        # Recoded 1..K by construction (`_rk_leveled_levels`); assert the
-        # thin-layer bind rule (integer 1..K, exact coverage, no gaps).
+        # Recoded against the fitted levels (`_rk_leveled_levels`): 1..K,
+        # with K the fit's level count. RKPPL's bind rule demands every
+        # level, so a design that skips one (a replay's held-out rows, a
+        # declared but unobserved level) is refused here by name until it
+        # relaxes (ReactiveKernels snag `rkppl-leveled-re-328038d0`).
         (eltype(values) <: Integer && eltype(values) !== Bool) || error(
             "$prefix: response `$response` must hold integers 1..K " *
             "(recoded levels)")
-        K = isempty(values) ? 0 : maximum(values)
-        all(x -> x >= 1, values) && sort(unique(values)) == collect(1:K) ||
-            error("$prefix: response `$response` must cover every level " *
-                  "1..$K exactly (recoded levels have no gaps)")
+        K = something(n_levels, isempty(values) ? 0 : maximum(values))
+        all(x -> 1 <= x <= K, values) && length(unique(values)) == K ||
+            error("$prefix: response `$response` must hold every one of its " *
+                  "$K fitted levels (recoded 1..$K, no gaps): ReactiveKernelsPPL " *
+                  "refuses a leveled response that skips a level, so a design " *
+                  "holding only some classes, or a declared level with no rows, " *
+                  "cannot bind yet (ReactiveKernels snag `rkppl-leveled-re-328038d0`)")
     elseif family === :ordered_logit
         # Raw-integer coding (SB compat); contiguity is planned in
         # `_rk_ordered_levels` — re-assert the eltype half of the bind rule.
@@ -7896,16 +7903,34 @@ const _RK_LEVELED_FAMILIES =
         :multinomial, :categorical])
 
 # Recoded 1..K levels for a leveled vector response (SB's
-# `_brm_response_levels`: sort(unique) order, reference = level 1).
+# `_brm_response_levels`: sort(unique) order, reference = level 1). The levels
+# are the fit's (`_brm_fitted_levels`): on a replay the rows are coded against
+# the training levels, and a label the fit never saw is refused by name, as
+# the emitted level table (`_rk_response_level_table!`) codes them.
 function _rk_leveled_levels(response::Symbol, raw::AbstractVector)
     prefix = "RK backend"
     raw isa AbstractVector || error(
         "$prefix: response `$response` must be an observed vector")
-    prepared = _brm_response_levels(response, raw; prefix)
+    prepared = _brm_response_levels(response, raw;
+        training=(; levels=_brm_fitted_levels(response, raw)), prefix)
     K = prepared.fit.n_levels
     K >= 1 || error(
         "$prefix: response `$response` has no observed levels")
     (prepared.response, K, prepared.fit.levels)
+end
+
+# A coded response's level table is a fitted value of the graph, as a
+# grouping's levels are: the levels of a fit-role copy of the response,
+# `y_fit_levels = brm_fit_levels(y_fit)`, which `brm_prepared_indices` codes the
+# rows against. So one program serves every label set of the response (user
+# principle 0ikeidi: data values are runtime inputs; 0pde95i: computed in the
+# graph), a frozen replay codes its rows against the training levels, and a
+# data-free replay binds the exported fitted levels (`brm_fitted_state`).
+function _rk_response_level_table!(derived::Vector{_RKDerivedSpec},
+        columns::AbstractDict{Symbol}, taken::Set{Symbol}, key::Symbol,
+        raw::AbstractVector)
+    fit = _rk_fit_input!(derived, columns, taken, key, _brm_fit_input_source(key, raw))
+    Expr(:_rk_data_preparation, :brm_fit_levels, fit)
 end
 
 # OrderedLogistic keeps SB's raw-integer coding (K = max(y)): no recode,
@@ -9180,12 +9205,13 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
                 predictor_specs) :
             _rk_unleveled(entry, predictor)
         if family in (:categorical_logit, :ordinal, :categorical)
-            _, _, levels = _rk_leveled_levels(entry.key, entry.raw_response)
             raw = _rk_mint_generated!(taken, columns, string(entry.key, "_raw"))
             columns[raw] = entry.raw_response
+            levels = _rk_response_level_table!(derived, columns, taken,
+                entry.key, entry.raw_response)
             push!(derived, _RKDerivedSpec(entry.key,
-                Expr(:_rk_data_preparation, :brm_prepared_indices, raw,
-                    _rk_ast_level_values(levels)), entry.key))
+                Expr(:_rk_data_preparation, :brm_prepared_indices, raw, levels),
+                entry.key))
         end
         # Mixture v1 admits no response-level weights (no driving case)
         # and no `gp` mixture predictors (the AST plate ranges over one
@@ -9332,7 +9358,8 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
                 only(unique!(map(c -> c.family, mixture_components))) :
                 family
             gated = _rk_gate_response_values!(gate_family,
-                leveled.response_values, entry.key, interval)
+                leveled.response_values, entry.key, interval;
+                n_levels=leveled.n_levels)
             columns[entry.key] = gated
         end
         push!(response_specs, _RKLikelihoodSpec(family, link, entry.key,

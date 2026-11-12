@@ -33,6 +33,10 @@ _rk_ast_data_preparation!(defs, taken, ::Val{:brm_flatten_response}, cells) =
     Expr(:call, :brm_flatten_cells, cells)
 _rk_ast_data_preparation!(defs, taken, ::Val{:brm_gather_response}, raw, groups) =
     Expr(:ref, raw, Expr(:call, :brm_flatten_cells, groups))
+# A coded response's fitted levels (`_rk_response_level_table!`), the traceable
+# function a grouping's levels use.
+_rk_ast_data_preparation!(defs, taken, ::Val{:brm_fit_levels}, fit) =
+    Expr(:call, :brm_fit_levels, fit)
 
 # A fitted value (an anchor, a level set) that a program computes only from
 # its fit-role inputs (`_rk_fit_twin!`) is its own named data-only definition,

@@ -256,7 +256,7 @@ svi_window_nlme() = brm_nlme_model(SVI_WINDOW_RK;
 
     # Coupled (the default): a unit's factor follows the boundaries it reads. The
     # boundaries stay at least as wide as the independent family's optimum (median
-    # 1.02 of it, seed 101, BRM 0.2.283), and their means stay at the exact ones
+    # 1.02 of it, seed 101, BRM 0.2.286), and their means stay at the exact ones
     # within their own sds.
     coupled = brm_svi_fit(m; SVI_WINDOW_OPT..., rng=Xoshiro(101), ndraws=10)
     cb = svi_boundaries(SVI_WINDOW_EXACT, coupled.diagnostics.q, coupled.diagnostics.globals)

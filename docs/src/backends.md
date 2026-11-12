@@ -115,14 +115,15 @@ using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 model = Main.BRMDocsComparisons.example_module(:BackendGuide).model
 rk = RKBRMI(model)
 source = jax_source(rk.model, rk_bound_plan(rk))
-inputs = rk_bound_data(rk)
+inputs = rk_bound_data(rk, source)
 path = joinpath(mktempdir(), "model.py")
 write(path, source)
 @assert occursin("def log_density", read(path, String))
 (source_bytes=filesize(path), input_names=sort!(collect(keys(inputs)); by=string))
 ```
 
-In Python, call the module's `prepare_data` with its declared `DATA` inputs,
+The accessor returns exactly the module's `DATA` inputs, including scalar
+constants by their authored names. In Python, call `prepare_data(**inputs)`,
 then `log_density` with an unconstrained position. JAX can differentiate and
 compile that density. A Julia callable needs a supported translation;
 inspect the generated `UNTRANSLATED` report before using an export. Compare

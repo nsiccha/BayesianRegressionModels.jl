@@ -500,6 +500,20 @@ end
 BRM.rk_bound_plan(backend::BRM.RKBRMI) = _rk_translated(backend)
 
 BRM.rk_bound_data(backend::BRM.RKBRMI) = _rk_bound_inputs(BRM.rk_bound_plan(backend))
+
+function BRM.rk_bound_data(backend::BRM.RKBRMI, source::ReactiveKernels.JAXSource)
+    prepare = only(f for f in source.functions if f.name == "prepare_data")
+    names = Tuple(Symbol(first(input)) for input in prepare.inputs)
+    plan = BRM.rk_bound_plan(backend)
+    bound = _rk_bound_inputs(plan)
+    # JAX names scalar data by their authored names; the native binding can
+    # hold only their internal ports. Request exactly the missing module
+    # inputs through RKPPL, which also reuses folded data-only definitions.
+    missing = Tuple(name for name in names if !haskey(bound, name))
+    values = isempty(missing) ? bound : merge(bound, frozen_values(plan, missing).values)
+    NamedTuple{names}(Tuple(values[name] for name in names))
+end
+
 # A binding's inputs: its columns, and the frozen values RK preparation takes as
 # HAVE values in place of the definitions it folds (not in `columns`).
 function _rk_bound_inputs(bound)

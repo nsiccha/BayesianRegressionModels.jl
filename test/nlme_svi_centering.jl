@@ -456,7 +456,7 @@ end
     rho, sd = findfirst(==("hsgp_t.rho"), names), findfirst(==("hsgp_t.sigma"), names)
     options = (; batch_size=4, ndraws=2000)
     # Plain: independent factors. With the default linear coupling and no centering
-    # (seed 5, BRM 0.2.283) the length scale was 0.20 NUTS sds off and the HSGP sd
+    # (seed 5, BRM 0.2.286) the length scale was 0.20 NUTS sds off and the HSGP sd
     # 0.49, against the centered fit's 0.38 and 0.71: this check compares centering
     # with the independent factorization.
     plain = brm_svi_fit(m; options..., rng=Xoshiro(5), centering=nothing, coupling=nothing)

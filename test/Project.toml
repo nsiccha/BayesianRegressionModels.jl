@@ -73,7 +73,7 @@ SequentialMonteCarlo = "0.7"
 StanBlocks = "0.2.31"
 StatsBase = "0.34"
 Treebars = "0.1.5"
-WarmupHMC = "0.2.11"
+WarmupHMC = "0.2.18"
 julia = "1.10"
 
 [sources.TreeArrays]
@@ -178,7 +178,8 @@ rev = "44c37e60e22bab9e8a0d3ab88bd47b575dec6bb0"
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
 # 0.2.11: public covariance projection used by selective SMC carries.
-rev = "8e1d45a78b38e3e9d82ee75312e0eb7e5203d327"
+# 0.2.18 satisfies ReactiveKernelsPPL 0.1.162's SMC extension floor.
+rev = "c4d6885edefe8aa33acf02d3e571d224662825b4"
 
 [sources.SequentialMonteCarlo]
 url = "https://github.com/awllee/SequentialMonteCarlo.jl.git"
@@ -425,4 +426,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # 23fbef437 (RK 0.1.164 / RKPPL 0.1.156) also adds explicit SMC checkpoint rescore.
 # It includes RK 0.1.153's native LogNormal Reverse inference fix and
 # RK 0.1.161's allocation-free one-sided variance scan and plate folds.
-rev = "23fbef437c904240d944939966f869e4f8d850e8"
+# 1c40ad337 (RK 0.1.198 / RKPPL 0.1.162) includes positional kernel calls,
+# captured group-label predicates and callable arguments in JAX host helpers.
+rev = "1c40ad337ec7487466971213266ff0861906da00"

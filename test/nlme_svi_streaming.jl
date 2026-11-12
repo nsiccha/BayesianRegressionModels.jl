@@ -163,7 +163,7 @@ end
 # to (src/nlme_svi_coupling.jl), so the next window's prior keeps the global/unit
 # dependence. The panel above, all windows' draws against four-chain NUTS on every
 # window's rows, without centering so that the subjects' effects are coupled.
-# Measured (seeds below, BRM 0.2.283): the intercept's sd 0.71 of NUTS's streamed
+# Measured (seeds below, BRM 0.2.286): the intercept's sd 0.71 of NUTS's streamed
 # coupled, 0.70 for a coupled batch fit, 0.13 streamed and batch without coupling;
 # the group sd's log scale 0.38 streamed coupled, 0.50 batch coupled, 0.26 streamed
 # without coupling.
