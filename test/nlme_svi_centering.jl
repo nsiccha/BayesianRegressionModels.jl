@@ -635,8 +635,10 @@ end
     combined = brm_svi_combine(union_rk, [later])
     @test length(combined.units) == 4
     @test combined.receipt.centering.slices == [true]
-    # The absent unit keeps its physical mean and variance from the frame in
-    # which it was last fitted, even though the stream's global scale moved.
+    # The absent unit's site uses the frame in which it was last fitted,
+    # even though the stream's global scale moved. Combination removes that
+    # frame's prior and applies the combined population prior once: check
+    # the resulting physical moments with independent scalar Gaussian algebra.
     packed = brm_svi_fit(union_rk; start=combined, centering=nothing,
         max_iterations=0, ndraws=0)
     target = BRM_._brm_svi_target(packed.diagnostics.model)
@@ -646,9 +648,16 @@ end
     now = only(BRM_._brm_svi_centering_maps(centered, factors)[i])
     old = later.units["b"]
     was = only(old.centering_maps)
-    expected_mean = was.natural.factor * (was.C \ (old.M - was.b)) + was.natural.location
-    actual_mean = now.natural.factor * combined.units["b"].M + now.natural.location
-    expected_variance = (only(was.natural.factor) / only(was.C))^2 / only(old.Λ)
+    @test !("b" in combined.receipt.units.uncarried)
+    old_mean = only(was.natural.factor * (was.C \ (old.M - was.b)) + was.natural.location)
+    old_variance = (only(was.natural.factor) / only(was.C))^2 / only(old.Λ)
+    old_prior_variance = only(was.natural.factor)^2
+    new_prior_variance = only(now.natural.factor)^2
+    expected_variance = inv(inv(old_variance) - inv(old_prior_variance) + inv(new_prior_variance))
+    expected_mean = expected_variance * (old_mean / old_variance -
+        only(was.natural.location) / old_prior_variance +
+        only(now.natural.location) / new_prior_variance)
+    actual_mean = only(now.natural.factor * combined.units["b"].M + now.natural.location)
     actual_variance = only(now.natural.factor)^2 / only(combined.units["b"].Λ)
     @test actual_mean ≈ expected_mean
     @test actual_variance ≈ expected_variance
