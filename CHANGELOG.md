@@ -12,6 +12,40 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.285
+
+- Added: `effect(y, term) ~ law` on a concise
+  `y ~ CategoricalLogit(@brm(formula))` response sets `term`'s coefficient in
+  every non-reference class, on both backends; `effect(y, Intercept)` and
+  `effect(y, :)` work the same way. A law that reads data reads it as data, so
+  one program serves every value of a data-valued scale. A per-class address
+  of a generated class predictor beside it is refused by name.
+- Changed: on RKBRMI the level table of a `CategoricalLogit`, `Ordinal` or
+  `Categorical` response is the fitted value `y_fit_levels =
+  brm_fit_levels(y_fit)` of a fit-role copy of the response, not a literal
+  `Base.vect(...)` of its labels. Models that differ only in the labels of
+  the response emit one program. A frozen `reprocess` and a data-free replay
+  (`brm_fitted_state`) code the design's rows against the fit's levels and
+  refuse a label the fit never saw ("not a training level"); before, a frozen
+  replay took the design's own levels. The class count is still a program
+  shape (one predictor per non-reference class).
+- Changed: a replay keeps a leveled response's fitted class count. A design
+  that holds only some of the fitted classes, or a `CategoricalVector`
+  response with a declared level no row holds, is refused by name, because
+  ReactiveKernelsPPL binds a leveled response only when it holds every level
+  (ReactiveKernels snag `rkppl-leveled-re-328038d0`). Before, such a replay
+  was planned with the design's own level count and refused by arity.
+- An emitted JAX module computes that level table from the `y_fit` input in
+  `prepare_data` and codes `y_raw` against it there, where it inlined the
+  labels before. For a `CategoricalVector` response the module now takes the
+  levels as an input (`UNTRANSLATED`), as it does for a categorical grouping;
+  `rk_bound_data` supplies them.
+- **Breaking:** the emitted program of an RKBRMI model with such a response
+  changes. Re-export fitted states of these models with this version.
+  Existing SVI/SMC optimizer checkpoints and streaming states are refused by
+  the program-identity check; finish those runs on their original version or
+  restart them.
+
 ## 0.2.284
 
 - Changed: RKBRMI models with `hsgp(x; cov=:periodic, period=P)`, including

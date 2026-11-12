@@ -974,12 +974,13 @@ Base.@nospecializeinfer function _rk_value_leveled_responses(@nospecialize(obser
     records
 end
 
-# An `OrderedLogistic` response's level count on a frozen replay is the fit's,
-# so a design's outcomes, or an omitted response, bind to the fitted program.
-# Otherwise, and for the responses whose levels the graph codes, the response's
-# own.
+# A leveled response's levels on a frozen replay are the fit's: an
+# `OrderedLogistic` level count, so a design's outcomes, or an omitted response,
+# bind to the fitted program; an `Ordinal` or `CategoricalLogit` level table, so
+# the rows are coded against the training levels as the emitted level table
+# (`_rk_response_level_table!`) codes them. Otherwise the response's own.
 function _rk_value_response_training(key::Symbol, rhs, raw)
-    getf(rhs) === OrderedLogistic && _brm_frozen_replay() !== nothing || return nothing
+    _brm_frozen_replay() === nothing && return nothing
     _brm_fitted(values -> _brm_prepare_response(key, rhs, values).fit,
         :response_levels, key, raw)
 end
@@ -1170,8 +1171,12 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         _rk_value_codes_levels(entry) || continue
         raw = _rk_ast_fresh_name(string(key, "_raw"), taken)
         value_columns[raw] = entry.raw
+        # `OrderedLogistic` codes against 1:K, not the labels' own levels.
+        levels = entry.head === OrderedLogistic ?
+            _rk_ast_level_values(entry.prepared.fit.levels) :
+            _rk_response_level_table!(derived, value_columns, taken, key, entry.raw)
         push!(derived, _RKDerivedSpec(key, Expr(:_rk_data_preparation,
-            :brm_prepared_indices, raw, _rk_ast_level_values(entry.prepared.fit.levels)), key))
+            :brm_prepared_indices, raw, levels), key))
     end
     regression = _RKStructuralPlan(_RKLikelihoodSpec[], components.predictors,
         components.priors, parameters, _RKAssignmentSpec[], derived, columns,

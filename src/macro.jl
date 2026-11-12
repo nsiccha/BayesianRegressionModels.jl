@@ -3384,6 +3384,67 @@ function _nested_rewrite_categorical!(target, lhs, rhs, pending, occupied)
     ExprColumn(getf(rhs), refs...)
 end
 
+# The class predictors a concise `y ~ CategoricalLogit(@brm(formula))` expanded
+# into, in class order, or `nothing` for any other statement.
+function _nested_categorical_classes(@nospecialize(value), @nospecialize(new_value))
+    value isa NamedColumn && new_value isa NamedColumn || return nothing
+    _nested_contains(value) || return nothing
+    op = parent(new_value)
+    op isa ExprColumn && getf(op) === (~) || return nothing
+    rhs = last(getargs(op, 2))
+    isdefined(@__MODULE__, :CategoricalLogit) && rhs isa ExprColumn &&
+        getf(rhs) === CategoricalLogit || return nothing
+    Symbol[name(arg) for arg in getargs(rhs)]
+end
+
+# `effect(y, term) ~ law` on a concise categorical response `y` sets `term`'s
+# coefficient in every non-reference class: it becomes one
+# `effect(<class predictor>, term) ~ law` per generated class predictor, the
+# address each predictor already answers to on both backends. The law is the
+# same object for every class, so a law that reads data reads it as data.
+function _nested_class_priors(expanded::Vector{Pair{Symbol,Any}},
+                              classes::Dict{Symbol,Vector{Symbol}})
+    taken = Set{Symbol}(first.(expanded))
+    rewritten = Pair{Symbol,Any}[]
+    for (key, value) in expanded
+        address = _nested_class_prior_address(value, classes)
+        if address === nothing
+            push!(rewritten, key => value)
+            continue
+        end
+        op = parent(value)
+        lhs, law = getargs(op, 2)
+        target, coefficient = address
+        for class in classes[target]
+            class_address = Any[class, coefficient]
+            class_key = _brm_prior_statement_key(class_address)
+            class_key in taken && error(
+                "@brm: `effect($target, $coefficient)` sets that coefficient in " *
+                "every class of the concise `CategoricalLogit` response " *
+                "`$target`, and `$class`'s own `effect($class, $coefficient)` " *
+                "prior duplicates it. Keep only `effect($target, $coefficient)`.")
+            push!(taken, class_key)
+            class_lhs = ExprColumn(effect, class_address...; getkwargs(lhs)...)
+            push!(rewritten, class_key =>
+                NamedColumn(class_key, ExprColumn(~, class_lhs, law)))
+        end
+    end
+    rewritten
+end
+
+function _nested_class_prior_address(@nospecialize(value),
+                                     classes::Dict{Symbol,Vector{Symbol}})
+    value isa NamedColumn || return nothing
+    op = parent(value)
+    op isa ExprColumn && getf(op) === (~) || return nothing
+    lhs = first(getargs(op, 2))
+    lhs isa ExprColumn && getf(lhs) === effect || return nothing
+    address = getargs(lhs)
+    length(address) == 2 && address[1] isa Symbol && haskey(classes, address[1]) ||
+        return nothing
+    (address[1], address[2])
+end
+
 function _nested_rewrite_likelihood!(target, lhs, rhs::ExprColumn,
                                      pending, occupied)
     if isdefined(@__MODULE__, :CategoricalLogit) && getf(rhs) === CategoricalLogit
@@ -3550,12 +3611,16 @@ Base.@nospecializeinfer function _expand_nested_predictor_formulas(
     any(entry -> _nested_contains(last(entry)), entries) || return brmi
     occupied = Set{Symbol}(first.(entries))
     expanded = Pair{Symbol,Any}[]
+    classes = Dict{Symbol,Vector{Symbol}}()
     for (key, value) in entries
         pending = Pair{Symbol,Any}[]
         new_value = _expand_nested_top!(key, value, pending, occupied)
+        class_predictors = _nested_categorical_classes(value, new_value)
+        class_predictors === nothing || (classes[key] = class_predictors)
         append!(expanded, pending)
         push!(expanded, key => new_value)
     end
+    isempty(classes) || (expanded = _nested_class_priors(expanded, classes))
     names = Tuple(first.(expanded))
     values_ = Tuple(last.(expanded))
     BRMI(NamedTuple{names}(values_))

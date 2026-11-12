@@ -2695,7 +2695,16 @@ with identity-resolved native entries and live keywords, retaining both kinds
 of definitions in the ordinary source reference and complete printed replay.
 `rk_leveled.jl` adds independent
 categorical-reference and multinomial row-density, Jacobian and ordinary
-reverse-gradient oracles. `rk_values.jl` checks whole
+reverse-gradient oracles. `rk_categorical_levels.jl` checks that a
+`CategoricalLogit` or `Ordinal` response's labels are data (one emitted and
+lowered program across label sets of one element type, on the formula and
+authored-location routes), that frozen and data-free replays code rows against
+the fit's levels and refuse an unseen label, that a replay keeps the fitted
+class count (a design holding only some classes is refused by name until
+ReactiveKernels snag `rkppl-leveled-re-328038d0` relaxes RKPPL's bind rule),
+that a JAX module codes the response in `prepare_data`, and that
+`effect(y, term)` on a concise `CategoricalLogit(@brm(...))` response sets the
+term in every class on both backends. `rk_values.jl` checks whole
 predictor arrays, callable readers and distinct predictor/observation axes.
 `rk_source_roundtrip.jl` supplies the shared complete-program replay check:
 definitions and model source are printed, reparsed and built afresh, then
