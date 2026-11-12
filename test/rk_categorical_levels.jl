@@ -12,7 +12,8 @@
 #     against an independent formula and central differences;
 #   * a frozen `reprocess` and a data-free replay (`brm_fitted_state`) code a
 #     design's rows against the fit's levels and refuse a label the fit never
-#     saw;
+#     saw; a design holding only some classes keeps the fitted class count,
+#     and a row's one-class held-out probabilities sum to one;
 #   * `effect(y, term) ~ law` on a concise `CategoricalLogit(@brm(...))`
 #     response sets `term`'s coefficient in every non-reference class on both
 #     backends, reading a data-valued law argument as data.
@@ -165,17 +166,45 @@ end
     end
     fit = RKBRMI(plain(labelled([1, 2, 3])))
     @test fit.model.layout.total == 6
-    # ReactiveKernelsPPL binds a leveled response only when it holds every
-    # level (ReactiveKernels snag `rkppl-leveled-re-328038d0`), so a design
-    # holding only some classes is refused by name, naming the fitted count.
+    # A design holding only some of the fitted classes binds (RKPPL 0.1.168,
+    # ReactiveKernels snag `rkppl-leveled-re-328038d0`) and is scored as a
+    # three-class model, on a frozen and on a data-free replay.
+    state = brm_fitted_state(fit)
     for c in ([1, 2, 1, 2, 1, 2, 1, 2], fill(2, 8), [1, 3, 3, 1, 1, 3, 1, 3])
-        @test_throws "must hold every one of its 3 fitted levels" reprocess(fit,
-            (; x1, x2, y=c, coef_scale=1.5))
+        design = (; x1, x2, y=c, coef_scale=1.5)
+        replay = reprocess(fit, design)
+        @test emitted_program(replay) == emitted_program(fit)
+        check_density(replay, u -> explicit_oracle(u; c))
+        check_density(RKBRMI(plain(design), state), u -> explicit_oracle(u; c))
     end
+    # Held-out class probabilities: set every row to class k and read the
+    # pointwise likelihood. A row's K one-class probabilities sum to one and
+    # match the softmax of its class logits.
+    u = collect(range(-0.3, 0.4; length=fit.model.layout.total))
+    rows = map(1:3) do k
+        replay = reprocess(fit, (; x1, x2, y=fill(k, 8), coef_scale=1.5))
+        pointwise = ReactiveKernelsPPL.prepare_query(replay.model,
+            rk_bound_plan(replay), :pointwise)
+        collect(Base.invokelatest(pointwise, u).y)
+    end
+    probabilities = reduce(hcat, map(r -> exp.(r), rows))
+    @test size(probabilities) == (8, 3)
+    @test all(sum(probabilities; dims=2) .≈ 1)
+    logits = hcat(zeros(8), u[1] .+ u[2] .* x1 .+ u[3] .* x2,
+        u[4] .+ u[5] .* x1 .+ u[6] .* x2)
+    @test probabilities ≈ exp.(logits) ./ sum(exp.(logits); dims=2) atol=1e-12
+    # A code outside the fitted classes is still refused, by the fitted count.
+    @test_throws "must hold codes in 1..3" BRM._rk_gate_response_values!(
+        :categorical_logit, [1, 4, 2], :y; n_levels=3)
+    # Without a stated class count every level 1..K must appear.
+    @test_throws "must hold every one of its 3 levels" BRM._rk_gate_response_values!(
+        :categorical_logit, [1, 3, 3], :y)
+    # A declared level with no rows is a class of the model: three classes,
+    # rows coded against the declared order.
     declared = CA.categorical(["a", "c", "a", "c", "a", "c", "c", "a"];
         levels=["a", "b", "c"])
-    @test_throws "must hold every one of its 3 fitted levels" RKBRMI(
-        explicit((; x1, x2, y=declared, coef_scale=1.5)))
+    rk = RKBRMI(explicit((; x1, x2, y=declared, coef_scale=1.5)))
+    check_density(rk, u -> explicit_oracle(u; c=[1, 3, 1, 3, 1, 3, 3, 1]))
 end
 
 @stestset "a JAX module codes the response in prepare_data" begin
