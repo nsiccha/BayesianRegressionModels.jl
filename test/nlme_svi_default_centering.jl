@@ -61,8 +61,7 @@ end
 function population_summary(draws)
     tree = ndims(draws) == 1 ? TreeData(draws, :draw) : TreeData(draws, :draw, :chain)
     dims = ndims(draws) == 1 ? :draw : (:draw, :chain)
-    (; mean=only(TreeActualArray(mean(tree; dims))),
-       sd=only(TreeActualArray(std(tree; dims))))
+    (; mean=parent(mean(tree; dims)), sd=parent(std(tree; dims)))
 end
 
 function check_default_population(label, counts)
@@ -75,6 +74,8 @@ function check_default_population(label, counts)
         init = brm_start(rk; chains=4, rng=Xoshiro(3))
         reference = completion_warmup_mcmc([Xoshiro(10 + c) for c in 1:4], problems;
             min_completed=4, n_draws=1000, blas_threads=1, init)
+        @test reference.completion.n_completed == 4
+        @test reference.completion.n_omitted == 0
         chains = hcat([Matrix{Float64}(r.posterior_position)[idx, :]
             for r in reference.results]...)
         diagnostic = ess_rhat(reshape(chains, size(chains)..., 1))
