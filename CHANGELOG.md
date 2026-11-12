@@ -12,6 +12,26 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.284
+
+- Changed: RKBRMI models with `hsgp(x; cov=:periodic, period=P)`, including
+  `anchor=` and `rows=`, emit the Fourier basis, length-scale-floor bisection
+  and Bessel spectral weights as explicit ReactiveKernels graphs. Harmonic
+  count, period, anchor and row count remain inputs to one program. The native
+  model, priors and coordinate order are unchanged.
+- The ReactiveKernels compat floor and test pin are 0.1.198, which includes
+  positional kernels, captured group-label predicates and callable arguments
+  in JAX data-preparation helpers. The bundled RKPPL 0.1.162 requires the
+  test environment's WarmupHMC pin to move to 0.2.18.
+- The emitted JAX module prepares the periodic basis and floor from its data
+  inputs. Its eager and jitted densities and gradients match native Enzyme,
+  including when prepared data are passed as JIT arguments and for a single
+  harmonic.
+- **Breaking:** the emitted periodic-HSGP program changes. Re-export fitted
+  states of these models with this version. Existing SVI/SMC optimizer
+  checkpoints and streaming states are refused by the program-identity
+  check; finish those runs on their original version or restart them.
+
 ## 0.2.283
 
 - Added: `rk_bound_data(rk, source)` collects exactly the `prepare_data`
