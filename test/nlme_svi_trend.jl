@@ -174,7 +174,9 @@ function svi_ridge_elbos(rk, fits; ndraws=400, rng=Xoshiro(7))
     trim.(vals)
 end
 
-const SVI_RIDGE_OPT = (; subject_group=:unit, batch_size=4, ndraws=200)
+# These regressions isolate the earlier ELBO-only stopping rules. The default
+# iterate gate has separate stationary, drift and checkpoint tests.
+const SVI_RIDGE_OPT = (; subject_group=:unit, batch_size=4, ndraws=200, stationarity=false)
 
 @stestset "exploration runs on while a ridge still climbs" begin
     rk = RKBRMI(svi_ridge_model(svi_ridge_data(Xoshiro(101), 8)))

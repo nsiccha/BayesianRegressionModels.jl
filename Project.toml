@@ -4,6 +4,7 @@ authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
 version = "0.2.282"
 
 [deps]
+MCMCDiagnosticTools = "be115224-59cd-429b-ad48-344e309966f0"
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
 Bessels = "0e736298-9ec6-45e8-9647-e4fc86a2fe38"
 KLU = "ef3ab10e-7fda-4108-b977-705223b18434"
@@ -69,6 +70,7 @@ BayesianRegressionModelsWarmupHMCEnzymeExt = ["WarmupHMC", "Enzyme"]
 BayesianRegressionModelsWarmupHMCExt = "WarmupHMC"
 
 [compat]
+MCMCDiagnosticTools = "0.3.19"
 DataStructures = "0.18, 0.19"
 HTMXObjects = "0.1.65"
 Markdown = "1"
