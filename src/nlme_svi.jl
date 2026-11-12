@@ -1790,16 +1790,17 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
 - `coupling` — fresh fits and streaming updates default to
   [`LinearCoupling`](@ref): every unit's factor is conditional on the globals,
   its mean linear in the global factor's standard-normal draw at the globals
-  the unit's term reads, learned with the fit. It keeps the dependence between a
-  population value and units the data pin only together, whatever the model's
-  authoring (`@plate` cell latents included), which independent factors lose:
-  their population intervals then shrink to the noise over all rows.
-  `diagnostics.coupling` reports each unit's coupled globals (positions in
-  `diagnostics.globals`), its coupling matrix and its conditional and marginal
-  sds. The unit factors in `diagnostics.q` are the conditionals at the global
-  mean, which streaming carries, factor-level starts and `brm_svi_combine` read.
-  Pass `coupling=nothing` for independent global and unit factors. Optimizer
-  resume keeps the saved policy.
+  the unit's term reads, learned with the fit, on the unit coordinates learned
+  centering does not centre (`@plate` cell latents among them). It keeps the
+  dependence between a population value and units the data pin only together,
+  which independent factors lose: their population intervals then shrink to the
+  noise over all rows. `diagnostics.coupling` reports each unit's coupled rows and
+  globals (positions in its block and in `diagnostics.globals`), its coupling
+  matrix and its conditional and marginal sds. The unit factors in
+  `diagnostics.q` are the conditionals at the global mean, which factor-level
+  starts and `brm_svi_combine` read; a streaming checkpoint carries each unit's
+  prior conditional on its coupled globals. Pass `coupling=nothing` for
+  independent global and unit factors. Optimizer resume keeps the saved policy.
 - `unit_dense_limit` — units with at most this many coordinates use a dense
   Gaussian and natural-gradient updates (default 64, allowed 0:256).
 - `unit_curvature` — how a dense unit's step estimates its curvature.

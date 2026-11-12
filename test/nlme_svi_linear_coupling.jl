@@ -26,7 +26,7 @@ end
     Vstar = randn(rng, d, k)
     U = cholesky(Symmetric(Λ)).L
     q = (; M=[zeros(d)], Λ=[Matrix(Λ)], U=[Matrix(U)])
-    coupling = (; step=0.5, columns=[collect(1:k)], V=[zeros(d, k)])
+    coupling = (; step=0.5, columns=[collect(1:k)], rows=[collect(1:d)], V=[zeros(d, k)])
     for _ in 1:4000
         ζ = randn(rng, k)
         ∇̄ = -Λ * ((coupling.V[1] - Vstar) * ζ)
@@ -36,7 +36,7 @@ end
     # The trust region: a gradient far from the fixed point moves the mean at a
     # typical ζ by at most one sd of the factor.
     V0 = zeros(d, k)
-    c = (; step=1.0, columns=[collect(1:k)], V=[copy(V0)])
+    c = (; step=1.0, columns=[collect(1:k)], rows=[collect(1:d)], V=[copy(V0)])
     ζ = randn(rng, k)
     BRM._brm_svi_coupling_step!(c, q, 1, 1e6 .* ones(d), ζ, 1.0)
     @test sqrt(tr(c.V[1]' * Λ * c.V[1])) <= 1 + 1e-9

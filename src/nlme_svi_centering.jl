@@ -764,7 +764,7 @@ function _brm_svi_centered_unit_term!(gg, gu, centering::_BRMSVICenteringPlan, f
     value = if prior isa _BRMSVIStreamingPrior && prior.carried[i]
         _brm_svi_unit_partition!(gg, gu, t, i, g, y, plan) +
             _brm_svi_transported_prior!(gu, adjoint, centering, frame, prior.units, i, g, y,
-                prior.controls[i]) +
+                prior.controls[i]; gg, carried=prior.coupling[i]) +
             _brm_svi_field_term!(gg, gu, t, i, y, work)
     else
         _brm_svi_unit_local!(gg, gu, t, i, g, y, plan, work)
@@ -955,7 +955,7 @@ end
 # location adjoints into `adjoint`. Only the last window's frame is
 # carried: each window's factors are its next window's whole prior.
 function _brm_svi_transported_prior!(gy, adjoint, plan::_BRMSVICenteringPlan, frame,
-        units, i, g, y, x_old)
+        units, i, g, y, x_old; gg=nothing, carried=nothing)
     n = plan.ncells[i]
     c = zeros(n)
     for inst in plan.instances[i], (k, p) in enumerate(inst.positions)
@@ -967,8 +967,11 @@ function _brm_svi_transported_prior!(gy, adjoint, plan::_BRMSVICenteringPlan, fr
     for inst in plan.instances[i]
         logjac += _brm_svi_centering_inverse!(u, μ, ℓ, y, inst, c, frame, g, plan.base)
     end
-    δ = u - units.M[i]
+    # A coupled checkpoint's mean on its coupled (packed-frame) rows follows the
+    # globals (src/nlme_svi_coupling.jl).
+    δ = _brm_svi_carried_shift!(u - units.M[i], carried, g)
     ū = -(units.Λ[i] * δ)
+    carried === nothing || _brm_svi_carried_gradient!(gg, carried, ū)
     value = dot(δ, ū) / 2 + _brm_svi_unit_logdet_root(units.U[i]) - length(u) * log(2π) / 2 +
         logjac
     # u = y off the cells; each cell's u reads its own y and, in a block, the

@@ -5,6 +5,8 @@ using ADTypes: AutoEnzyme
 import Enzyme
 include("testset_filter.jl")
 include("nlme_svi_owned_fixture.jl")
+# `svi_same_q`: q compared field by field, the centering Adams by their moments.
+include("nlme_svi_fixture.jl")
 const BRM = BayesianRegressionModels
 const OWNED_AD = AutoEnzyme(; mode=Enzyme.Reverse)
 
@@ -93,12 +95,12 @@ end
     part = brm_svi_fit(m; rng=Xoshiro(41), stop_after=2, options...)
     resumed = brm_svi_resume(m, brm_svi_optimizer_checkpoint(part); ndraws=4, threads=1)
     @test resumed.draws == full.draws
-    @test resumed.diagnostics.q == full.diagnostics.q
+    @test svi_same_q(resumed.diagnostics.q, full.diagnostics.q)
     if Threads.nthreads() > 1
         threaded = brm_svi_fit(m; rng=Xoshiro(41),
             merge(options, (; threads=2))...)
         @test threaded.draws == full.draws
-        @test threaded.diagnostics.q == full.diagnostics.q
+        @test svi_same_q(threaded.diagnostics.q, full.diagnostics.q)
     end
     mktempdir() do directory
         input, output = joinpath(directory, "input.jls"), joinpath(directory, "output.jls")
@@ -107,7 +109,7 @@ end
         run(`$(Base.julia_cmd()) --startup-file=no --project=$(@__DIR__) $script $input $output`)
         fresh = deserialize(output)
         @test fresh.draws == full.draws
-        @test fresh.q == full.diagnostics.q
+        @test svi_same_q(fresh.q, full.diagnostics.q)
     end
 end
 

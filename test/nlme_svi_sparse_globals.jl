@@ -211,7 +211,11 @@ svi_window_nlme() = brm_nlme_model(SVI_WINDOW_RK;
 
 @stestset "boundaries read by two window units reach the family's optimum" begin
     m = svi_window_nlme()
-    fit = brm_svi_fit(m; SVI_WINDOW_OPT..., rng=Xoshiro(101), ndraws=10)
+    # `SVI_WINDOW_EXACT` is the optimum of independent global and unit factors (the
+    # Hessian's blocks as precisions). The default linear coupling is a richer
+    # family whose boundaries are wider (checked below), so this check fits the
+    # independent family.
+    fit = brm_svi_fit(m; SVI_WINDOW_OPT..., rng=Xoshiro(101), ndraws=10, coupling=nothing)
     d = fit.diagnostics
     b = svi_boundaries(SVI_WINDOW_EXACT, d.q, d.globals)
     @test length(b.positions) == 62
@@ -249,6 +253,18 @@ svi_window_nlme() = brm_nlme_model(SVI_WINDOW_RK;
     # largest sd ratio was 5.1 under 0.2.241's schedule and 2.5 with settling.
     @test maximum(old.r) > 1.4 > maximum(b.r)
     @test sqrt(mean(abs2, old.z)) > sqrt(mean(abs2, b.z))
+
+    # Coupled (the default): a unit's factor follows the boundaries it reads. The
+    # boundaries stay at least as wide as the independent family's optimum (median
+    # 1.02 of it, seed 101, BRM 0.2.283), and their means stay at the exact ones
+    # within their own sds.
+    coupled = brm_svi_fit(m; SVI_WINDOW_OPT..., rng=Xoshiro(101), ndraws=10)
+    cb = svi_boundaries(SVI_WINDOW_EXACT, coupled.diagnostics.q, coupled.diagnostics.globals)
+    @info "coupled" mean_err_rms_own=sqrt(mean(abs2, cb.z ./ cb.r)) sd_median=median(cb.r)
+    @test sort(coupled.diagnostics.sparse_globals.coordinates) ==
+        sort(coupled.diagnostics.globals[cb.positions])
+    @test median(cb.r) > 0.9
+    @test sqrt(mean(abs2, cb.z ./ cb.r)) < 1.0
 end
 
 @stestset "a run with sites continues exactly from a checkpoint" begin
