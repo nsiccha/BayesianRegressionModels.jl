@@ -30,6 +30,12 @@ end
     @test ww.ar1_dev([0.4, -0.5, 1.0], 0.6, 0.2) ≈ [0.1, -0.04, 0.176]
     @test ww.viral_shedding_trajectory(2.0, 4.0, 6.0, 6) ≈
         [100.0, 10000.0, 1000.0, 100.0, 10.0, 1.0] ./ 11211.0
+    # The load floor makes viral_peak=0 a kink. For t_peak=1, duration=2
+    # and six days, the first normalized weight has these one-sided slopes.
+    h = 1e-7
+    first_weight(v) = first(ww.viral_shedding_trajectory(1.0, v, 2.0, 6))
+    @test (first_weight(h) - first_weight(0.0)) / h ≈ log(10.0) * 5 / 36 rtol=1e-6
+    @test (first_weight(0.0) - first_weight(-h)) / h ≈ log(10.0) * 5 / 12 rtol=1e-6
     # One-day generation interval and zero feedback: each day doubles.
     @test ww.renewal_feedback(fill(log(2.0), 5), [1.0], 0.0, 0.01, 0.0, 1) ≈
         [0.01, 0.02, 0.04, 0.08, 0.16]
@@ -73,7 +79,9 @@ artifact = BayesianRegressionModels.emit_rk_artifact(brmi; case_id="docs-wastewa
 plan = BayesianRegressionModels.rk_translate_artifact(artifact)
 built = build_kernel(plan)
 rk = RKBRMI(brmi, artifact.plan, built)
-us = [zeros(built.layout.total), 0.05 .* randn(Xoshiro(146), built.layout.total),
+# Zero sets viral_peak=0, where the clamped shedding curve has no derivative.
+# Central differences must stay on smooth points of the unchanged model.
+us = [fill(0.1, built.layout.total), 0.05 .* randn(Xoshiro(146), built.layout.total),
     0.1 .* randn(Xoshiro(147), built.layout.total)]
 native = []
 
@@ -83,8 +91,9 @@ native = []
     @test stan == stan_code(SBBRMI(StanOnlyWastewater.wastewater_public_model(data);
         mod=StanOnlyWastewater))
     problem = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
-    for u in us
+    for (point, u) in enumerate(us)
         value, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
+        @info "Wastewater native point" point value finite_gradient=all(isfinite, gradient)
         @test isfinite(value)
         @test all(isfinite, gradient)
         for seed in (148, 149)
