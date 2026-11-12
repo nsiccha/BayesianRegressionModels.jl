@@ -39,7 +39,7 @@ Main.BRMDocsComparisons.evaluate_source_prelude(
 )
 Main.BRMDocsComparisons.source_code_region(
     "research/ema_ctsem/docs_model.jl";
-    starting_at="StanBlocks.@deffun begin", ending_before="\"A public synthetic series",
+    starting_at="StanBlocks.@deffun @juliacompat begin", ending_before="\"A public synthetic series",
 )
 ```
 
