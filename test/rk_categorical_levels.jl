@@ -168,14 +168,28 @@ end
     @test fit.model.layout.total == 6
     # A design holding only some of the fitted classes binds (RKPPL 0.1.168,
     # ReactiveKernels snag `rkppl-leveled-re-328038d0`) and is scored as a
-    # three-class model, on a frozen and on a data-free replay.
-    state = brm_fitted_state(fit)
+    # three-class model, on a frozen replay and, with named class predictors,
+    # on a data-free one.
+    named_fit = RKBRMI(explicit(labelled([1, 2, 3])))
+    named_state = brm_fitted_state(named_fit)
     for c in ([1, 2, 1, 2, 1, 2, 1, 2], fill(2, 8), [1, 3, 3, 1, 1, 3, 1, 3])
         design = (; x1, x2, y=c, coef_scale=1.5)
         replay = reprocess(fit, design)
         @test emitted_program(replay) == emitted_program(fit)
         check_density(replay, u -> explicit_oracle(u; c))
-        check_density(RKBRMI(plain(design), state), u -> explicit_oracle(u; c))
+        check_density(reprocess(named_fit, design), u -> explicit_oracle(u; c))
+        check_density(RKBRMI(explicit(design), named_state),
+            u -> explicit_oracle(u; c))
+    end
+    # The concise form takes its class count from the data its builder sees,
+    # so `plain(design)` on a design missing a class declares another model,
+    # which a data-free replay refuses, until that count is a runtime size
+    # (BRM todo 1uqf8t9).
+    state = brm_fitted_state(fit)
+    @test_broken try
+        RKBRMI(plain((; x1, x2, y=fill(2, 8), coef_scale=1.5)), state) isa RKBRMI
+    catch
+        false
     end
     # Held-out class probabilities: set every row to class k and read the
     # pointwise likelihood. A row's K one-class probabilities sum to one and

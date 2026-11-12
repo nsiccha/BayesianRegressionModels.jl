@@ -2702,7 +2702,8 @@ authored-location routes), that frozen and data-free replays code rows against
 the fit's levels and refuse an unseen label, that a replay keeps the fitted
 class count (a design holding only some classes, or a declared level with no
 rows, is scored as the fitted model, and a row's one-class held-out
-probabilities sum to one), that a JAX module codes the response in `prepare_data`, and that
+probabilities sum to one; a concise form's data-free replay of such a design
+is `@test_broken` until its class count is a runtime size), that a JAX module codes the response in `prepare_data`, and that
 `effect(y, term)` on a concise `CategoricalLogit(@brm(...))` response sets the
 term in every class on both backends. `rk_values.jl` checks whole
 predictor arrays, callable readers and distinct predictor/observation axes.
