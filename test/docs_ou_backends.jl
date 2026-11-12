@@ -10,6 +10,12 @@ module DocsOU
 include(joinpath(@__DIR__, "..", "research", "ema_ctsem", "docs_model.jl"))
 end
 
+module StanOnlyOU
+const source_path = joinpath(@__DIR__, "..", "research", "ema_ctsem", "docs_model.jl")
+include_string(@__MODULE__, replace(read(source_path, String),
+    "StanBlocks.@deffun @juliacompat" => "StanBlocks.@deffun"), source_path)
+end
+
 # Independent exact-transition oracle: stationary initialization, then the
 # conditional mean and variance over each observed interval.
 function ou_reference(dt, z, mu, rate, stationary_sd)
@@ -49,6 +55,7 @@ contexts = []
 @testset "docs OU: exact transition on Stan and native" begin
     @test Base.get_extension(BayesianRegressionModels,
         :BayesianRegressionModelsReactiveKernelsExt) !== nothing
+    @test Base.get_extension(StanBlocks, :StanBlocksReactiveKernelsExt) !== nothing
     @test DocsOU.ou_path(zeros(4), ones(4), 0.0, 1.0, 1.0) == ones(4)
     @test DocsOU.ou_path([0.0], [-0.5], 0.3, 0.7, 0.4) ≈ [0.1]
 
@@ -63,6 +70,7 @@ contexts = []
         problem = rk_logdensity_problem(rk; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
         stan = stan_code(SBBRMI(brmi; mod=DocsOU))
         @test StanBlocks.stanc_check(stan; warn_pedantic=false).ok
+        @test stan == stan_code(SBBRMI(StanOnlyOU.state_space_model(data); mod=StanOnlyOU))
         us = [zeros(built.layout.total),
             0.2 .* randn(Xoshiro(144), built.layout.total),
             0.4 .* randn(Xoshiro(145), built.layout.total)]
@@ -82,16 +90,23 @@ contexts = []
 end
 
 @testset "docs OU: retained-artifact JAX parity" begin
-    for (; data, saved, rk, built, plan, us, native) in contexts
+    for (; n, data, saved, rk, built, plan, us, native) in contexts
         src = jax_source(built, plan; values=(:state,))
         if brm_jax_require_python()
             run = brm_jax_run(src, [brm_jax_inputs(rk, src)], [us])
+            @info "OU JAX acceptance" n versions=JSON.json(run.versions) artifacts=run.dir
             @test run.x64_after_import
             @test isempty(run.module_constants["UNTRANSLATED"])
             for (p, expected) in zip(run.datasets[1]["points"], native)
                 @test p["log_density"]["eager"] ≈ expected.value rtol=1e-12 atol=1e-12
                 @test p["log_density"]["jit"] ≈ expected.value rtol=1e-12 atol=1e-12
                 @test vec(p["grad"]) ≈ expected.gradient rtol=1e-10 atol=1e-10
+                @test vec(p["grad_eager"]) ≈ expected.gradient rtol=1e-10 atol=1e-10
+                @test vec(p["constrain_eager"]["state"]) ≈ expected.state rtol=1e-12 atol=1e-12
+                @test p["grad_args"]["ok"]
+                @test vec(p["grad_args"]["value"]) ≈ expected.gradient rtol=1e-10 atol=1e-10
+                @test p["log_density"]["jit_args"]["ok"]
+                @test p["log_density"]["jit_args"]["value"] ≈ expected.value rtol=1e-12 atol=1e-12
                 @test vec(p["constrain_jit"]["state"]) ≈ expected.state rtol=1e-12 atol=1e-12
             end
         end

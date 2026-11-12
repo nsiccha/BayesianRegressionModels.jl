@@ -132,6 +132,7 @@ for data, points in zip(DATASETS, POINTS):
             p[f] = {"eager": enc(getattr(m, f)(u, **prepared)), "jit": enc(jit[f](u)),
                     "jit_args": attempt(lambda: jit_args[f](u, **prepared))}
         p["grad"] = enc(grad(u))
+        p["grad_eager"] = enc(jax.grad(m.log_density)(u, **prepared))
         p["grad_args"] = attempt(lambda: grad_args(u, **prepared))
         p["constrain_eager"] = enc(m.constrain(u, **prepared))
         p["constrain_jit"] = enc(jit["constrain"](u))
