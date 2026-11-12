@@ -2276,6 +2276,15 @@ RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/do
 RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/docs_wastewater_backends.jl
 ```
 
+`docs_model_pages.jl` evaluates the docs pages built from these two files
+(`docs/src/state-space.md` and `docs/src/wastewater.md`). It runs, in page
+order and as Documenter does, every `@eval` block that reads the page's research
+source. Those pages find the declaration and the helper prelude by text markers
+such as `StanBlocks.@deffun @juliacompat begin`, so a changed marker fails here
+and not only in the Docs workflow. It also checks the Stan pane with `stanc`.
+On ReactiveKernels 0.1.180 or later it checks that the JAX pane holds the
+emitted module rather than the emission error.
+
 ## Chunking heavy suites
 
 `rk_retained_transport.jl` attaches `RKBRMI(brmi, artifact.plan, built)` to

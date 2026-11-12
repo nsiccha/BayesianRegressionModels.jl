@@ -38,7 +38,7 @@ code the model calls, read from its source during the build:
 Main.BRMDocsComparisons.evaluate_source_prelude(
     Main.BRMDocsComparisons.example_module(:wastewater),
     "research/wastewater/cdc_ww_inference.jl";
-    before=:cdc_ww_brm_model, starting_at="StanBlocks.@deffun begin",
+    before=:cdc_ww_brm_model, starting_at="StanBlocks.@deffun @juliacompat begin",
 )
 Base.include(Main.BRMDocsComparisons.example_module(:wastewater),
     joinpath(Main.BRMDocsComparisons.REPOSITORY_ROOT, "research/wastewater/data.jl"))
