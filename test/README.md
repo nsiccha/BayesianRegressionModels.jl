@@ -2237,6 +2237,45 @@ versions and results as a run directory (`manifest.json`, `parity.json`,
 RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/rk_jax_inference.jl
 ```
 
+`docs_ou_backends.jl` and `docs_wastewater_backends.jl` run two published
+documentation models through their retained artifacts, with their data and
+priors unchanged and no fit: the irregularly observed Ornstein–Uhlenbeck
+process of `research/ema_ctsem/docs_model.jl`, and the public wastewater model
+of `research/wastewater/cdc_ww_inference.jl` with `data.jl`. Their numerical
+helpers are `StanBlocks.@deffun @juliacompat` blocks, so one definition is both
+the Stan function and an ordinary Julia method. Each file also loads a copy of
+the source without `@juliacompat`. It checks that the emitted Stan is
+byte-identical to that copy's and that `stanc` accepts it.
+
+- OU, at 6 and 40 observations: the helper equals an independent
+  exact-transition oracle. At three points, the native density equals the
+  oracle's density (priors, likelihood and Jacobian), and its Enzyme Reverse
+  gradient equals the oracle's central differences. The JAX module matches
+  the native value, gradient and constrained `state` in every form:
+  `log_density` eager, under `jit`, and under `jit` with the data traced as
+  arguments, plus `jax.grad` in both forms.
+- Wastewater: each helper's Julia semantics, on small hand-computed cases
+  and on Julia's per-cell column collections. It also checks both one-sided
+  slopes at the shedding curve's `viral_peak = 0` kink, where the derivative
+  does not exist, so the test points avoid it. At three points the native
+  density is finite, and its Enzyme Reverse gradient agrees with central
+  differences along two random directions. The JAX module matches the native
+  value and gradient in every form.
+
+Both were verified together on ReactiveKernels 0.1.180 (`76708e00`,
+ReactiveKernelsPPL 0.1.160), StanBlocks 0.2.42 (`d8257e16`), Enzyme 0.13.220
+(`b86741c8`, libEnzyme `4990aa11`), Julia 1.10.12 and JAX 0.12.0.1. The JAX
+modules need that ReactiveKernels: the wastewater module still failed on 0.1.179.
+The pins in `test/Project.toml` are older (ReactiveKernels 0.1.164, StanBlocks
+0.2.40), so on them the JAX parity testsets fail. The wastewater's native
+gradient was verified only on that Enzyme line, because registered Enzyme
+0.13.219 lacks its `make_zero(Core.Binding)` repair.
+
+```sh
+RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/docs_ou_backends.jl
+RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/docs_wastewater_backends.jl
+```
+
 ## Chunking heavy suites
 
 `rk_retained_transport.jl` attaches `RKBRMI(brmi, artifact.plan, built)` to

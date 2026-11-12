@@ -132,6 +132,7 @@ for data, points in zip(DATASETS, POINTS):
             p[f] = {"eager": enc(getattr(m, f)(u, **prepared)), "jit": enc(jit[f](u)),
                     "jit_args": attempt(lambda: jit_args[f](u, **prepared))}
         p["grad"] = enc(grad(u))
+        p["grad_eager"] = enc(jax.grad(m.log_density)(u, **prepared))
         p["grad_args"] = attempt(lambda: grad_args(u, **prepared))
         p["constrain_eager"] = enc(m.constrain(u, **prepared))
         p["constrain_jit"] = enc(jit["constrain"](u))
@@ -197,11 +198,22 @@ function brm_jax_run(src, datasets, points)
 end
 
 # The raw columns `prepare_data` takes, by the names the module lists
-# (`m.DATA`): a data-free replay binds more than it takes.
+# (`m.DATA`): a data-free replay binds more than it takes. A scalar data value
+# and the observed value of a conditioned declaration are taken by their
+# authored names, while the binding holds them as `_rkppl_value_<name>` and
+# `_rkppl_conditioned_<name>` (rkppl-use §14 `jax_source`; RKPPL's
+# `test_jax_source.jl` reads its inputs the same way).
 function brm_jax_inputs(rk, src)
     bound = rk_bound_data(rk)
     names = [Symbol(first(i)) for i in only(f for f in src.functions if f.name == "prepare_data").inputs]
-    NamedTuple{Tuple(names)}(Tuple(bound[n] for n in names))
+    function value(n)
+        for k in (n, Symbol("_rkppl_value_", n), Symbol("_rkppl_conditioned_", n))
+            haskey(bound, k) && return bound[k]
+        end
+        error("prepare_data takes `", n, "`, which rk_bound_data(rk) holds neither as `", n,
+            "` nor as its bound value `_rkppl_value_", n, "` or `_rkppl_conditioned_", n, "`")
+    end
+    NamedTuple{Tuple(names)}(Tuple(value(n) for n in names))
 end
 
 const _BRM_JAX_NUTS_DRIVER = raw"""

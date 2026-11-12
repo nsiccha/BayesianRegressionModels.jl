@@ -44,7 +44,7 @@ using BayesianRegressionModels
 using StanBlocks
 using Distributions: Beta, Dirichlet, LogNormal
 
-StanBlocks.@deffun begin
+StanBlocks.@deffun @juliacompat begin
     # CDC's global process: an AR(1) on first differences followed by cumulative
     # summation. `eps` has one fewer element than the returned weekly trajectory.
     dar_logru(logru1::real, eps::vector[ni], beta::real, sigma::real,
@@ -224,6 +224,23 @@ StanBlocks.@deffun begin
     ihr_scale(lat::vector[nt], logit_p::vector[nt], log_dow::vector[nt],
               npop::real)::vector[nt] = npop * (exp(log_dow) .* inv_logit(logit_p) .* lat)
 end
+
+# Julia plate outputs hold one vector per cell; Stan stores these fixed-width
+# vectors as matrix columns. Keep the numerical definitions above shared.
+wsum(columns::AbstractVector{<:AbstractVector{<:Real}}, weights) =
+    wsum(reduce(hcat, columns), weights)
+weekly_expand_columns(columns::AbstractVector{<:AbstractVector{<:Real}}, week_idx) =
+    weekly_expand_columns(reduce(hcat, columns), week_idx)
+ww_expected_log(columns::AbstractVector{<:AbstractVector{<:Real}}, sh,
+                sample_time, sample_subpop, sample_lab, log_lab_mod, log10_g, mwpd) =
+    ww_expected_log(reduce(hcat, columns), sh, sample_time, sample_subpop,
+                    sample_lab, log_lab_mod, log10_g, mwpd)
+count_interval_mean(columns::AbstractVector{<:AbstractVector{<:Real}},
+                    subpop_weights, delay, logit_rate, interval_start,
+                    interval_stop, stream_idx, dow, dow_effect, population) =
+    count_interval_mean(reduce(hcat, columns), subpop_weights, delay, logit_rate,
+                        interval_start, interval_stop, stream_idx, dow,
+                        dow_effect, population)
 
 """
     cdc_ww_inference_fixture(; K = 3, nt = 84, n_weeks = 12, n_seed = 15)

@@ -2,7 +2,8 @@
 # This is the executable model of docs/src/state-space.md.
 using BayesianRegressionModels, StanBlocks, Distributions, Random
 
-StanBlocks.@deffun begin
+# One transition body serves Stan and the native/JAX consumers of this model.
+StanBlocks.@deffun @juliacompat begin
     ou_path(dt::vector[n], z::vector[n], mu::real, rate::real, stationary_sd::real)::vector[n] = begin
         x::vector[n]
         x[1] = mu + stationary_sd * z[1]
