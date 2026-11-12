@@ -65,6 +65,7 @@ include("nlme_svi_workspace.jl")
 include("nlme_svi_units.jl")
 include("nlme_svi_sites.jl")
 include("nlme_svi_centering.jl")
+include("nlme_svi_coupling.jl")
 
 # ── The minibatch target ─────────────────────────────────────────────────────
 
@@ -828,9 +829,9 @@ end
 # draw's adjoints, each weighted 1/d where a pair's are weighted 1
 # (`_brm_svi_centering_batch_gradient`).
 function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
-        centering=nothing, frame=nothing)
+        centering=nothing, frame=nothing, zmean=q.M[i])
     d = size(E, 1)
-    U, m = LowerTriangular(q.U[i]), q.M[i]
+    U, m = LowerTriangular(q.U[i]), zmean
     gg₊, gg₋ = _brm_svi_global_buffers(work, D)
     gz₊, gz₋ = zeros(d), zeros(d)
     value, gz, gg, W = 0.0, zeros(d), zeros(length(touched)), zeros(d, d)
@@ -1012,16 +1013,22 @@ end
 # come from `rng` here, in batch order, before any unit is evaluated, each unit's
 # result stays in its own slot and is summed in batch order, and a unit's step
 # reads and writes only that unit's factor.
-_brm_svi_field_prepare!(rng, t, q, g, batch) = nothing
+_brm_svi_field_prepare!(rng, t, q, g, batch, ε=nothing, η=nothing) = nothing
 
 function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
         sites=nothing, site_scale=1.0, rank_step=1.0, curvature=:pair, site_step=β,
-        structured_step=β, structured_rank=1.0, positive_part=true, sd_bound=nothing)
+        structured_step=β, structured_rank=1.0, positive_part=true, sd_bound=nothing,
+        coupling_scale=1.0)
     D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
-    _brm_svi_field_prepare!(rng, t, q, g, batch)
+    # Linear coupling: each batch unit's mean at this draw of the globals
+    # (src/nlme_svi_coupling.jl).
+    coupling = _brm_svi_coupling(q)
+    ζs = coupling === nothing ? nothing :
+        [_brm_svi_coupling_noise(coupling, i, ε, η) for i in batch]
+    _brm_svi_field_prepare!(rng, t, q, g, batch, ε, η)
     P, gP = _brm_svi_global_term(t, g)
     draws = [_brm_svi_unit_draws(rng, q, i, curvature) for i in batch]
     terms = Vector{@NamedTuple{value::Float64,gg::Vector{Float64},gz::Vector{Float64},
@@ -1038,9 +1045,10 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         plan, work = t.plans[worker], t.work[worker]
         i, εi = batch[k], draws[k]
         touched = _brm_svi_unit_touched(t, i)
+        zmean = _brm_svi_coupled_mean(coupling, q, i, ζs === nothing ? nothing : ζs[k])
         if εi isa AbstractMatrix
             r = _brm_svi_unit_design_terms(t, q, i, g, εi, plan, work, touched, D;
-                centering, frame)
+                centering, frame, zmean)
             problems[k] = r.problem
             terms[k] = (; r.value, r.gg, r.gz, gd=Float64[])
             curvatures[k] = r.S
@@ -1049,8 +1057,8 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         end
         gg₊, gg₋ = _brm_svi_global_buffers(work, D)
         gz₊, gz₋ = zeros(length(t.units[i])), zeros(length(t.units[i]))
-        m, δ = q.M[i], _brm_svi_unit_offset(q, i, εi)
-        z₊, z₋ = m .+ δ, m .- δ
+        δ = _brm_svi_unit_offset(q, i, εi)
+        z₊, z₋ = zmean .+ δ, zmean .- δ
         if centering === nothing
             v₊ = _brm_svi_unit_local!(gg₊, gz₊, t, i, g, z₊, plan, work)
             v₋ = _brm_svi_unit_local!(gg₋, gz₋, t, i, g, z₋, plan, work)
@@ -1107,6 +1115,9 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     _brm_svi_set_global!(q, x)
     _brm_svi_bound_sd!(q, _brm_svi_sd_prior_of(t), sd_bound)
     _brm_svi_each_unit(t.plans, length(batch)) do _, k
+        # The coupling steps with the factor it was drawn from, before that moves.
+        coupling === nothing || _brm_svi_coupling_step!(coupling, q, batch[k], terms[k].gz,
+            ζs[k], coupling_scale * coupling.step)
         S = curvatures[k]
         S === nothing ?
             _brm_svi_unit_step!(q, batch[k], terms[k].gz, terms[k].gd, draws[k],
@@ -1417,7 +1428,7 @@ function _brm_svi_advance!(run, t, c)
             structured_step=scale * _brm_svi_structured_unit_step(c),
             structured_rank=_brm_svi_structured_rank_step(c),
             rank_step=polishing || settling ? _brm_svi_rank_step_ratio(c) : 1.0,
-            sd_bound=_brm_svi_sd_bound_factor(c))
+            sd_bound=_brm_svi_sd_bound_factor(c), coupling_scale=scale)
     catch e
         e isa BRMSVINonfiniteError || rethrow()
         throw(BRMSVINonfiniteError(it, e.terms))
@@ -1569,7 +1580,8 @@ function _brm_svi_snapshot_run(run::_BRMSVIRun, t, c, draws)
        q_kind=run.average === nothing ? :raw_iterate : :polished_average,
        averaged_iterations=run.average === nothing ? 0 : run.iteration - run.polish_start,
        q=(; μ=copy(q.μ), ρ=copy(q.ρ), Β=copy(q.Β), M=copy.(q.M),
-          Λ=_brm_svi_plain_units(q.Λ), U=_brm_svi_plain_units(q.U)),
+          Λ=_brm_svi_plain_units(q.Λ), U=_brm_svi_plain_units(q.U),
+          coupling=_brm_svi_coupling_plain(q)),
        elbo_windows=first.(run.windows),
        elbo_windows_trimmed=[w.center for w in run.windows],
        clipped_steps=run.adam.clipped,
@@ -1618,6 +1630,7 @@ function _brm_svi_average_units!(average, q, through, indices, iteration)
         a, x = average.M[i], q.M[i]
         @. a += weight * (x - a)
         _brm_svi_unit_average!(average.Λ[i], q.Λ[i], weight)
+        _brm_svi_coupling_average!(average, q, i, weight)
         through[i] = iteration
     end
     average
@@ -1632,18 +1645,23 @@ function _brm_svi_factor!(q)
     q
 end
 
-# `n` draws from q as packed RK points, one per column. Under learned centering
-# each unit's draw of its learned coordinates is mapped back to the packed ones
-# at that column's globals.
+# `n` draws from q as packed RK points, one per column. Under linear coupling each
+# unit's mean is the one at that column's draw of the globals; under learned
+# centering each unit's draw of its learned coordinates is mapped back to the
+# packed ones at that column's globals.
 function _brm_svi_draws(rng, t, q, n)
     U = repeat(t.m.unit, 1, n)
     centering = _brm_svi_centering(t)
+    coupling = _brm_svi_coupling(q)
     for j in 1:n
-        g = _brm_svi_draw_global(q, randn(rng, length(q.μ)), randn(rng, size(q.Β, 2)))
+        ε, η = randn(rng, length(q.μ)), randn(rng, size(q.Β, 2))
+        g = _brm_svi_draw_global(q, ε, η)
         U[t.globals, j] .= g
         frame = centering === nothing ? nothing : _brm_svi_centering_frame(centering, t, g)
         for (i, block) in enumerate(t.units)
-            u = _brm_svi_draw_unit(q, i, _brm_svi_unit_noise(rng, q.U[i]))
+            ζ = coupling === nothing ? nothing : _brm_svi_coupling_noise(coupling, i, ε, η)
+            u = _brm_svi_coupled_mean(coupling, q, i, ζ) .+
+                _brm_svi_unit_offset(q, i, _brm_svi_unit_noise(rng, q.U[i]))
             U[block, j] .= centering === nothing ? u :
                 _brm_svi_centered_coordinates(centering, frame, q, i, g, u)
         end
@@ -1764,11 +1782,25 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   learning each supported unit cell's coordinates and variational factor.
   This includes unit-owned Gaussian random effects, Gaussian vector elements
   and grouped HSGP weights. `diagnostics.centering` reports the cells and
-  eligibility exclusions; authored `@plate` cell latents are outside this
-  mechanism and its report. Pass `centering=nothing` for the plain independent
-  factorization. Streaming updates and optimizer resume inherit the saved
+  eligibility exclusions, authored `@plate` cell latents among them (the plan
+  reads no location or scale for them). Pass `centering=nothing` for packed
+  unit coordinates. Streaming updates and optimizer resume inherit the saved
   policy, including an older plain fit's. A factor-level start is a fresh fit;
   its unit Gaussians are transported into the newly selected coordinates.
+- `coupling` — fresh fits and streaming updates default to
+  [`LinearCoupling`](@ref): every unit's factor is conditional on the globals,
+  its mean linear in the global factor's standard-normal draw at the globals
+  the unit's term reads, learned with the fit, on the unit coordinates learned
+  centering does not centre (`@plate` cell latents among them). It keeps the
+  dependence between a population value and units the data pin only together,
+  which independent factors lose: their population intervals then shrink to the
+  noise over all rows. `diagnostics.coupling` reports each unit's coupled rows and
+  globals (positions in its block and in `diagnostics.globals`), its coupling
+  matrix and its conditional and marginal sds. The unit factors in
+  `diagnostics.q` are the conditionals at the global mean, which factor-level
+  starts and `brm_svi_combine` read; a streaming checkpoint carries each unit's
+  prior conditional on its coupled globals. Pass `coupling=nothing` for
+  independent global and unit factors. Optimizer resume keeps the saved policy.
 - `unit_dense_limit` — units with at most this many coordinates use a dense
   Gaussian and natural-gradient updates (default 64, allowed 0:256).
 - `unit_curvature` — how a dense unit's step estimates its curvature.
@@ -2013,6 +2045,10 @@ function _brm_svi_initial_fit(save, x; laplace=nothing, kwargs...)
     get(kwargs, :centering, nothing) === nothing || throw(ArgumentError(
         "brm_svi_fit: learned centering moves the minibatch engine's unit factors; " *
         "laplace=GaussianBlockLaplace() integrates them instead, so pass only one of them"))
+    get(kwargs, :coupling, nothing) === nothing || throw(ArgumentError(
+        "brm_svi_fit: linear coupling conditions the minibatch engine's unit factors on " *
+        "the globals; laplace=GaussianBlockLaplace() integrates them instead, so pass " *
+        "only one of them"))
     _brm_svi_laplace_dispatch(save, x, nothing, laplace; kwargs...)
 end
 
@@ -2022,8 +2058,8 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         lr_global=0.01, unit_step=nothing, unit_curvature=:orthogonal, start=nothing,
         inits=nothing, global_scale=0.1, unit_scale=1.0, polish_lr=0.05, window=nothing,
         patience=10, min_windows=40, polish_windows=20,
-        settle_windows=_BRM_SVI_SETTLE_WINDOWS, centering=missing, sd_bound=_BRM_SVI_SD_BOUND,
-        trend_windows=nothing, kwargs...)
+        settle_windows=_BRM_SVI_SETTLE_WINDOWS, centering=missing, coupling=missing,
+        sd_bound=_BRM_SVI_SD_BOUND, trend_windows=nothing, kwargs...)
     family = _brm_svi_family(previous, family)
     sd_bound = _brm_svi_check_sd_bound(sd_bound)
     settle_windows isa Integer && settle_windows >= 0 || throw(ArgumentError(
@@ -2038,6 +2074,7 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         "brm_svi_fit: unit_curvature must be :orthogonal or :pair, got $(repr(unit_curvature))"))
     steps = _brm_svi_unit_steps(unit_step, unit_curvature)
     centering = _brm_svi_resolve_centering(previous, centering)
+    coupling = _brm_svi_resolve_coupling(coupling)
     _brm_svi_unit_options(unit_dense_limit, unit_rank)
     unit_sampling in (nothing, :uniform, :work) || throw(ArgumentError(
         "brm_svi_fit: unit_sampling must be :uniform or :work"))
@@ -2051,6 +2088,7 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         t, q = _brm_svi_initialize(t, previous, family; start, inits, global_scale, unit_scale,
             unit_dense_limit, unit_rank)
         centering === nothing || ((t, q) = _brm_svi_with_centering(t, q, centering))
+        coupling === nothing || ((t, q) = _brm_svi_with_coupling(t, q, coupling))
         c = _brm_svi_controls(length(t.units); batch_size, max_iterations, lr_global,
             steps..., polish_lr, window, patience, min_windows, polish_windows,
             settle_windows=Int(settle_windows), unit_curvature, sd_bound, trend_windows,
@@ -2203,7 +2241,8 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                     streaming=_brm_svi_carried_state(previous, t, q, centering_maps), optimizer=state,
                     centering_maps,
                     centering=centering === nothing ? nothing :
-                        _brm_svi_centering_report(centering, q, _brm_svi_unit_levels(t))))
+                        _brm_svi_centering_report(centering, q, _brm_svi_unit_levels(t)),
+                    coupling=_brm_svi_coupling_report(q)))
             finally
                 # A refused checkpoint leaves the target as it found it; an exception
                 # while optimizing may have left an AD workspace mid-evaluation.

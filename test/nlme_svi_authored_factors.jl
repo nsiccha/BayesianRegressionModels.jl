@@ -265,9 +265,15 @@ function check_svi_owned_target(t; constrained=false)
     # comparing tiny noise to an untouched zero mean with relative tolerance
     # alone would fail without testing the packed mapping.
     q = fit.diagnostics.q
+    # A unit's draw adds its coupling, V ζ, with ζ the global draw's standard
+    # normals (src/nlme_svi_coupling.jl), which no global scale removes: the
+    # oracle holds it at zero too.
+    collapsed = hasproperty(q, :coupling) ?
+        (; coupling=merge(q.coupling, (; V=zero.(q.coupling.V)))) : NamedTuple()
     centered = merge(q, (; ρ=fill(-Inf, length(q.ρ)), Β=zero(q.Β),
         M=[Float64.(block) for block in t.units],
-        U=[Matrix{Float64}(I, length(b), length(b)) .* 1e100 for b in t.units]))
+        U=[Matrix{Float64}(I, length(b), length(b)) .* 1e100 for b in t.units],
+        collapsed...))
     draws = BRM._brm_svi_draws(Xoshiro(3), t, centered, 1)
     @test draws[t.globals, 1] == q.μ
     @test all(i -> draws[t.units[i], 1] == centered.M[i], eachindex(t.units))

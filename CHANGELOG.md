@@ -12,6 +12,30 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.286
+
+- **Breaking:** fresh `brm_svi_fit` calls and streaming updates condition every
+  unit's variational factor on the globals by default (`LinearCoupling()`, new
+  export): on the unit coordinates learned centering does not centre, a unit's
+  mean is linear in the global factor's standard-normal draw,
+  `z_i = M_i + V_i ζ + U_i⁻ᵀ ε_i`, with `V_i` learned with the fit. A
+  population value the data pin only together with the units (a population
+  step mean beside per-unit `@plate` cell latent steps) keeps its posterior
+  spread instead of the noise-level width independent factors give it. Pass
+  `coupling=nothing` for independent global and unit factors.
+  `diagnostics.coupling` reports each unit's coupled rows and globals, `V` and
+  its conditional and marginal sds; `diagnostics.q`'s unit factors are the
+  conditionals at the global mean, which factor starts and `brm_svi_combine`
+  read. A streaming checkpoint saves each coupled unit's regression on its
+  coupled globals, and the next window's prior for that unit is conditional on
+  them. Optimizer resume keeps the saved policy. Not with
+  `laplace=GaussianBlockLaplace()`.
+- `diagnostics.centering.uncentered` lists `@plate` cell latents and the
+  sampled locals of components called in cells, with the reason.
+- `brm_nlme_view`'s refusal of a cell latent whose law argument is computed per
+  cell from a sampled value names that condition (also `m .+ loc[i]`, a sampled
+  scalar combined with the cell's data), not only a per-cell model value.
+
 ## 0.2.285
 
 - Added: `effect(y, term) ~ law` on a concise
