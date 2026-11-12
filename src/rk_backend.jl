@@ -7486,10 +7486,11 @@ end
 
 # An absent replay response has no values to gate; it stays unbound.
 _rk_gate_response_values!(family::Symbol, values::_BRMAbsentResponse, response::Symbol,
-    interval::Union{Nothing,Tuple{Float64,Float64}} = nothing) = values
+    interval::Union{Nothing,Tuple{Float64,Float64}} = nothing; n_levels=nothing) = values
 function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
         response::Symbol,
-        interval::Union{Nothing,Tuple{Float64,Float64}} = nothing)
+        interval::Union{Nothing,Tuple{Float64,Float64}} = nothing;
+        n_levels::Union{Nothing,Int}=nothing)
     prefix = "RK backend"
     any(ismissing, values) && error(
         "$prefix: response `$response` has missing values; wrap it in " *
@@ -7569,15 +7570,21 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
             "$prefix: response `$response` must hold non-negative values")
     elseif family === :categorical_logit || family === :ordinal ||
             family === :categorical
-        # Recoded 1..K by construction (`_rk_leveled_levels`); assert the
-        # thin-layer bind rule (integer 1..K, exact coverage, no gaps).
+        # Recoded against the fitted levels (`_rk_leveled_levels`): 1..K,
+        # with K the fit's level count. RKPPL's bind rule demands every
+        # level, so a design that skips one (a replay's held-out rows, a
+        # declared but unobserved level) is refused here by name until it
+        # relaxes (ReactiveKernels snag `rkppl-leveled-re-328038d0`).
         (eltype(values) <: Integer && eltype(values) !== Bool) || error(
             "$prefix: response `$response` must hold integers 1..K " *
             "(recoded levels)")
-        K = isempty(values) ? 0 : maximum(values)
-        all(x -> x >= 1, values) && sort(unique(values)) == collect(1:K) ||
-            error("$prefix: response `$response` must cover every level " *
-                  "1..$K exactly (recoded levels have no gaps)")
+        K = something(n_levels, isempty(values) ? 0 : maximum(values))
+        all(x -> 1 <= x <= K, values) && length(unique(values)) == K ||
+            error("$prefix: response `$response` must hold every one of its " *
+                  "$K fitted levels (recoded 1..$K, no gaps): ReactiveKernelsPPL " *
+                  "refuses a leveled response that skips a level, so a design " *
+                  "holding only some classes, or a declared level with no rows, " *
+                  "cannot bind yet (ReactiveKernels snag `rkppl-leveled-re-328038d0`)")
     elseif family === :ordered_logit
         # Raw-integer coding (SB compat); contiguity is planned in
         # `_rk_ordered_levels` — re-assert the eltype half of the bind rule.
@@ -9351,7 +9358,8 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
                 only(unique!(map(c -> c.family, mixture_components))) :
                 family
             gated = _rk_gate_response_values!(gate_family,
-                leveled.response_values, entry.key, interval)
+                leveled.response_values, entry.key, interval;
+                n_levels=leveled.n_levels)
             columns[entry.key] = gated
         end
         push!(response_specs, _RKLikelihoodSpec(family, link, entry.key,

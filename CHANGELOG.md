@@ -29,9 +29,16 @@ instead of failing at run time.
   refuse a label the fit never saw ("not a training level"); before, a frozen
   replay took the design's own levels. The class count is still a program
   shape (one predictor per non-reference class).
+- Changed: a replay keeps a leveled response's fitted class count. A design
+  that holds only some of the fitted classes, or a `CategoricalVector`
+  response with a declared level no row holds, is refused by name, because
+  ReactiveKernelsPPL binds a leveled response only when it holds every level
+  (ReactiveKernels snag `rkppl-leveled-re-328038d0`). Before, such a replay
+  was planned with the design's own level count and refused by arity.
 - An emitted JAX module computes that level table from the `y_fit` input in
-  `prepare_data`. For a `CategoricalVector` response it takes the levels as an
-  input (`UNTRANSLATED`), as it already does for a categorical grouping;
+  `prepare_data` and codes `y_raw` against it there, where it inlined the
+  labels before. For a `CategoricalVector` response the module now takes the
+  levels as an input (`UNTRANSLATED`), as it does for a categorical grouping;
   `rk_bound_data` supplies them.
 - **Breaking:** the emitted program of an RKBRMI model with such a response
   changes. Re-export fitted states of these models with this version.

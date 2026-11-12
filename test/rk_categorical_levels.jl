@@ -156,6 +156,41 @@ end
     check_density(fresh, oracle)
 end
 
+@stestset "a replay design keeps the fitted class count" begin
+    # A replay keeps the fit's three classes: its rows are coded against them,
+    # not against the design's own levels (before 0.2.285 a design holding two
+    # classes was planned as a two-class model and refused by arity).
+    plain = @brm begin
+        y ~ CategoricalLogit(@brm(1 + x1 + x2))
+    end
+    fit = RKBRMI(plain(labelled([1, 2, 3])))
+    @test fit.model.layout.total == 6
+    # ReactiveKernelsPPL binds a leveled response only when it holds every
+    # level (ReactiveKernels snag `rkppl-leveled-re-328038d0`), so a design
+    # holding only some classes is refused by name, naming the fitted count.
+    for c in ([1, 2, 1, 2, 1, 2, 1, 2], fill(2, 8), [1, 3, 3, 1, 1, 3, 1, 3])
+        @test_throws "must hold every one of its 3 fitted levels" reprocess(fit,
+            (; x1, x2, y=c, coef_scale=1.5))
+    end
+    declared = CA.categorical(["a", "c", "a", "c", "a", "c", "c", "a"];
+        levels=["a", "b", "c"])
+    @test_throws "must hold every one of its 3 fitted levels" RKBRMI(
+        explicit((; x1, x2, y=declared, coef_scale=1.5)))
+end
+
+@stestset "a JAX module codes the response in prepare_data" begin
+    plain = @brm begin
+        y ~ CategoricalLogit(@brm(1 + x1 + x2))
+    end
+    for levels in ([2, 5, 9], ["a", "b", "c"])
+        rk = RKBRMI(plain(labelled(levels)))
+        text = ReactiveKernelsPPL.jax_source(rk.model, rk_bound_plan(rk)).text
+        @test occursin("UNTRANSLATED = {}", text)
+        @test occursin("_brm_fit_levels_np(y_fit)", text)
+        @test occursin(r"_indices_np\(y_raw, y_fit_levels\)", text)
+    end
+end
+
 @stestset "effect(y, term) sets a concise categorical coefficient in every class" begin
     data = labelled([1, 2, 3])
     resolved = string(concise(data))
