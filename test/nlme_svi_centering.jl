@@ -455,7 +455,7 @@ end
     names = string.(coordinate_names(rk.model.layout))
     rho, sd = findfirst(==("hsgp_t.rho"), names), findfirst(==("hsgp_t.sigma"), names)
     options = (; batch_size=4, ndraws=2000)
-    plain = brm_svi_fit(m; options..., rng=Xoshiro(5))
+    plain = brm_svi_fit(m; options..., rng=Xoshiro(5), centering=nothing)
     fit = brm_svi_fit(m; options..., rng=Xoshiro(5), centering=LearnedCentering())
     c = [cell.c for cell in fit.diagnostics.centering.cells if cell.kind === :hsgp]
     @test length(c) == 5 * 12
@@ -490,7 +490,7 @@ end
     end)
     μr, σr = vec(mean(reference; dims=2)), vec(std(reference; dims=2))
     options = (; batch_size=5, ndraws=2000)
-    plain = brm_svi_fit(m; options..., rng=Xoshiro(5))
+    plain = brm_svi_fit(m; options..., rng=Xoshiro(5), centering=nothing)
     fit = brm_svi_fit(m; options..., rng=Xoshiro(5), centering=LearnedCentering())
     report = fit.diagnostics.centering
     @test length(report.cells) == length(nobs)
@@ -514,7 +514,7 @@ end
 @stestset "a centered fit resumes bit for bit" begin
     rng = Xoshiro(6)
     m = brm_nlme_model(RKBRMI(svi_gauss_model(svi_gauss_data(rng, 10))); ad_backend=NLME_AD)
-    options = (; batch_size=4, max_iterations=300, ndraws=20, centering=LearnedCentering())
+    options = (; batch_size=4, max_iterations=300, ndraws=20)
     whole = brm_svi_fit(m; rng=Xoshiro(7), options...)
     part = brm_svi_fit(m; rng=Xoshiro(7), options..., stop_after=120)
     @test !part.diagnostics.finished
@@ -525,20 +525,39 @@ end
     @test_throws ArgumentError brm_svi_fit(m; centering=:learned)
     @test_throws ArgumentError brm_svi_fit(m; centering=LearnedCentering(),
         laplace=GaussianBlockLaplace())
-    # A slice combination multiplies unit factors over the packed draws; a centered
-    # fit's are over its learned coordinates, so it is refused, as a slice and as a start.
-    @test_throws "is a learned-centering fit" brm_svi_combine(m, [whole])
-    @test_throws "is a learned-centering fit" brm_svi_combine(m, [brm_svi_checkpoint(whole)])
-    @test_throws "is a learned-centering fit" brm_svi_fit(m; start=whole, max_iterations=0,
-        ndraws=0)
-    plain = brm_svi_fit(m; rng=Xoshiro(7), batch_size=4, max_iterations=50, ndraws=0)
+    explicit = brm_svi_fit(m; rng=Xoshiro(7), options..., centering=LearnedCentering())
+    @test whole.draws == explicit.draws
+    @test whole.diagnostics.q.centering.x == explicit.diagnostics.q.centering.x
+    # Both a fit and its serialized checkpoint project to the same conditional
+    # Gaussian start. The source is unchanged and the default learns afresh.
+    state = brm_svi_checkpoint(whole)
+    legacy_fit = merge(whole, (; diagnostics=Base.structdiff(whole.diagnostics,
+        NamedTuple{(:centering_maps,)})))
+    @test brm_svi_checkpoint(legacy_fit).units == state.units
+    io = IOBuffer(); serialize(io, state)
+    start = brm_svi_combine(m, [whole])
+    restored = brm_svi_combine(m, [deserialize(seekstart(io))])
+    @test start.globals == restored.globals
+    @test start.units == restored.units
+    @test start.receipt.centering.projection == :conditional_at_saved_global_mean
+    @test start.receipt.centering.slices == [true]
+    started = brm_svi_fit(m; start=whole, max_iterations=0, ndraws=0)
+    @test started.diagnostics.centering !== nothing
+    @test state.units == brm_svi_checkpoint(whole).units
+    plain = brm_svi_fit(m; rng=Xoshiro(7), batch_size=4, max_iterations=50, ndraws=0,
+        centering=nothing)
     @test brm_svi_combine(m, [plain]) isa BRMSVIStart
+    plain_part = brm_svi_fit(m; rng=Xoshiro(7), batch_size=4, max_iterations=50,
+        stop_after=20, ndraws=0, centering=nothing)
+    plain_resumed = brm_svi_resume(m, brm_svi_optimizer_checkpoint(plain_part); ndraws=0)
+    @test plain_resumed.diagnostics.centering === nothing
+    @test svi_same_q(plain_resumed.diagnostics.q, plain.diagnostics.q)
 end
 
 @stestset "a centered window carries its controls and transports its prior" begin
     data = svi_stream_data(Xoshiro(31), ["a", "b", "c"], 6)
     initial = brm_svi_fit(svi_stream_model(data); rng=Xoshiro(32), max_iterations=300,
-        ndraws=0, batch_size=2, centering=LearnedCentering())
+        ndraws=0, batch_size=2)
     saved = brm_svi_checkpoint(initial)
     @test saved.layout.centering == (; start=0.5, step=0.05)
     @test all(u -> count(!isnan, u.centering) == 1, values(saved.units))
@@ -600,4 +619,37 @@ end
     carried = brm_svi_checkpoint(update)
     @test carried.units["b"].centering == state.units["b"].centering
     @test carried.units["b"].M == state.units["b"].M
+    @test carried.units["b"].centering_maps == state.units["b"].centering_maps
+    moved = brm_svi_fit(carried, svi_stream_model(next); rng=Xoshiro(36),
+        max_iterations=20, ndraws=0)
+    later = brm_svi_checkpoint(moved)
+    @test later.units["b"].centering_maps == state.units["b"].centering_maps
+    @test later.q.μ != state.q.μ
+    returned = brm_svi_fit(later, svi_stream_model(data); max_iterations=0, ndraws=0)
+    @test brm_svi_checkpoint(returned).units["b"].centering == state.units["b"].centering
+    @test brm_svi_checkpoint(returned).units["b"].M == state.units["b"].M
+    absent_rows = data.subject .== "b"
+    union_data = map((x, y) -> vcat(x, y[absent_rows]), next, data)
+    union_rk = RKBRMI(svi_stream_model(union_data), state.preprocessing;
+        resample_groups=(:subject,))
+    combined = brm_svi_combine(union_rk, [later])
+    @test length(combined.units) == 4
+    @test combined.receipt.centering.slices == [true]
+    # The absent unit keeps its physical mean and variance from the frame in
+    # which it was last fitted, even though the stream's global scale moved.
+    packed = brm_svi_fit(union_rk; start=combined, centering=nothing,
+        max_iterations=0, ndraws=0)
+    target = BRM_._brm_svi_target(packed.diagnostics.model)
+    centered, factors = BRM_._brm_svi_with_centering(target,
+        deepcopy(packed.diagnostics.q), LearnedCentering())
+    i = only(findall(==("b"), BRM_._brm_svi_unit_levels(target)))
+    now = only(BRM_._brm_svi_centering_maps(centered, factors)[i])
+    old = later.units["b"]
+    was = only(old.centering_maps)
+    expected_mean = was.natural.factor * (was.C \ (old.M - was.b)) + was.natural.location
+    actual_mean = now.natural.factor * combined.units["b"].M + now.natural.location
+    expected_variance = (only(was.natural.factor) / only(was.C))^2 / only(old.Λ)
+    actual_variance = only(now.natural.factor)^2 / only(combined.units["b"].Λ)
+    @test actual_mean ≈ expected_mean
+    @test actual_variance ≈ expected_variance
 end

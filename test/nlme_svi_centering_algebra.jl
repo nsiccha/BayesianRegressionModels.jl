@@ -137,3 +137,93 @@ end
     @test LearnedCentering().start == 0.5
     @test BRM._brm_svi_control(BRM._brm_svi_control_logit(0.3)) ≈ 0.3
 end
+
+@testset "learned centering: affine factor transport and conditional checkpoint" begin
+    rng, f = Xoshiro(32), fixture()
+    g, c = randn(rng, 2), rand(rng, f.ncells)
+    maps = [BRM._brm_svi_centering_affine(inst, c, f.frame, g, f.base) for inst in f.inst]
+    C, b = Matrix{Float64}(I, f.d, f.d), zeros(f.d)
+    for map in maps
+        C[map.positions, map.positions] .= map.C
+        b[map.positions] .= map.b
+    end
+    μ = randn(rng, f.d)
+    Z = randn(rng, f.d, f.d)
+    Σ = Z * Z' + I
+    Λ = inv(Σ)
+    q = (; M=[copy(μ)], Λ=[copy(Λ)], U=[Matrix(cholesky(Symmetric(Λ)).L)])
+    BRM._brm_svi_unit_affine!(q, 1, maps)
+    @test forward(f, g, only(q.M), c, f.frame)[1] ≈ μ
+    @test only(q.M) ≈ C * μ + b
+    @test inv(only(q.Λ)) ≈ C * Σ * C'
+    @test only(q.U) * only(q.U)' ≈ only(q.Λ)
+    saved = (; semantic=collect(Any, 1:f.d), M=copy(only(q.M)), Λ=copy(only(q.Λ)),
+        centering=zeros(f.d), centering_maps=maps)
+    before = deepcopy(saved)
+    packed = BRM._brm_svi_source_unit("test", saved, "slice 1")
+    @test packed.M ≈ μ
+    @test packed.Λ ≈ Λ
+    @test saved == before
+    @test length(packed.natural) == 2
+    old = Base.structdiff(saved, NamedTuple{(:centering_maps,)})
+    @test_throws "no saved affine maps" BRM._brm_svi_source_unit("test", old, "slice 1")
+
+    # Structured factors preserve transformed rank covariance and residual
+    # marginal variances. Correlated residual noise is a stated projection.
+    ρ, B = randn(rng, f.d), randn(rng, f.d, 2)
+    factor = BRM._BRMSVILowRankUnit(copy(ρ), copy(B))
+    structured = (; M=[copy(μ)], Λ=[BRM._BRMSVIUnitPrecision(factor)],
+        U=[BRM._BRMSVIUnitRoot(factor)])
+    BRM._brm_svi_unit_affine!(structured, 1, maps)
+    @test only(structured.M) ≈ C * μ + b
+    @test factor.Β ≈ C * B
+    exact = C * (Diagonal(exp.(2 .* ρ)) + B * B') * C'
+    projected = Diagonal(exp.(2 .* factor.ρ)) + factor.Β * factor.Β'
+    @test diag(projected) ≈ diag(exact)
+    @test !isapprox(projected, exact)
+end
+
+@testset "learned centering: omission and legacy policies" begin
+    @test BRM._brm_svi_resolve_centering(nothing, missing) isa LearnedCentering
+    @test BRM._brm_svi_resolve_centering(nothing, nothing) === nothing
+    for keyword in (missing, nothing)
+        @test BRM._brm_svi_resolve_centering((; layout=(;)), keyword) === nothing
+        inherited = BRM._brm_svi_resolve_centering(
+            (; layout=(; centering=(; start=0.2, step=0.03))), keyword)
+        @test inherited.start == 0.2
+        @test inherited.step == 0.03
+    end
+end
+
+@testset "Gaussian population width: weak, strong and unbalanced groups" begin
+    # Independent exact reference after integrating unit deviations of SD 1:
+    # Var(a | y) = (prior_sd^-2 + sum(1 / (1 + sigma^2 / n_i)))^-1.
+    # Here the optimal VIP controls are n_i / (sigma^2 + n_i), which remove
+    # every global-unit precision cross term. Evaluate the production map,
+    # rather than substituting that cancellation into the target.
+    for (counts, sigma) in ((fill(1, 32), 5.0), (fill(50, 32), 1.0),
+            (repeat([1, 50], 16), 1.0))
+        prior_sd = 5.0
+        controls = counts ./ (sigma^2 .+ counts)
+        frame = (; A=[ones(1, 1)], values=())
+        inst = BRM._BRMSVICenteringBlock(1, [1], 1:1, [[(1, 1.0)]])
+        function logtarget(a, cs)
+            value = -a^2 / (2prior_sd^2)
+            for (n, c) in zip(counts, cs)
+                y = zeros(1)
+                BRM._brm_svi_unit_centering!(y, zeros(1), [inst], 1, [c],
+                    frame, [a], Float64[])
+                value -= (only(y)^2 + n * (a + only(y))^2 / sigma^2) / 2
+            end
+            value
+        end
+        sd(cs) = inv(sqrt(-(logtarget(1.0, cs) + logtarget(-1.0, cs) -
+            2logtarget(0.0, cs))))
+        exact = inv(sqrt(inv(prior_sd^2) + sum(inv(1 + sigma^2 / n) for n in counts)))
+        @test sd(controls) ≈ exact rtol=1e-12
+        @test sd(zeros(length(counts))) < exact
+        if all(==(50), counts)
+            @test sd(zeros(length(counts))) / exact < 0.15
+        end
+    end
+end

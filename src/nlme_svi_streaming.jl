@@ -93,7 +93,7 @@ end
 # `keys` is what the streaming carry matches; `semantic` names every
 # random-effect draw by its level label, as `brm_svi_combine` matches slices.
 function _brm_svi_save_units!(units, m, q, blocks=m.view.subject_coordinates;
-        levels=m.view.levels)
+        levels=m.view.levels, centering_maps=nothing)
     scientific = _brm_svi_scientific_keys(m)
     semantic = _brm_svi_coordinate_keys(m)
     for (i, label) in enumerate(levels)
@@ -103,7 +103,8 @@ function _brm_svi_save_units!(units, m, q, blocks=m.view.subject_coordinates;
         # A centered fit's unit factor is over its learned coordinates: its
         # controls, one logit per coordinate, define that frame.
         units[label] = hasproperty(q, :centering) ? merge(saved,
-            (; centering=_brm_svi_coordinate_controls(q, i, length(q.M[i])))) : saved
+            (; centering=_brm_svi_coordinate_controls(q, i, length(q.M[i])),
+               centering_maps=deepcopy(centering_maps[i]))) : saved
     end
     units
 end
@@ -125,7 +126,20 @@ function brm_svi_checkpoint(fit)
     fixed = Dict(m.view.coordinates[i] => m.unit[i] for i in eachindex(m.unit)
         if !(i in estimated))
     levels = hasproperty(d, :unit_levels) ? d.unit_levels : m.view.levels
-    units = _brm_svi_save_units!(Dict{Any,NamedTuple}(), m, d.q, blocks; levels)
+    maps = if hasproperty(d.q, :centering)
+        if hasproperty(d, :centering_maps)
+            d.centering_maps
+        else
+            # A fit made before affine maps were recorded can be checkpointed
+            # again while its bound model is still available.
+            t = (; m, units=blocks, globals=d.globals, ownership=(; owner=d.owner))
+            _brm_svi_centering_maps(_brm_svi_centered_target(t, d.q), d.q)
+        end
+    else
+        nothing
+    end
+    units = _brm_svi_save_units!(Dict{Any,NamedTuple}(), m, d.q, blocks;
+        levels, centering_maps=maps)
     options = d.separator === nothing ? (; separator=:none) : _brm_svi_policy_options(d.separator)
     layout = (; options, global_keys=_brm_svi_global_keys(m, d.globals),
         _brm_svi_centering_layout(d.q)...)
@@ -165,13 +179,14 @@ function _brm_svi_previous_ownership!(estimated, seeds, promoted, m, previous::B
     absent
 end
 
-function _brm_svi_carried_state(previous::BRMSVIState, t, q)
+function _brm_svi_carried_state(previous::BRMSVIState, t, q,
+        centering_maps=_brm_svi_centering_maps(t, q))
     m = t.m
     BRMSVIState(3, deepcopy(previous.preprocessing), previous.source_id,
         copy(previous.globals), _brm_svi_global_record(m, q, t.globals, t.ownership.factors;
             previous=previous.q),
         _brm_svi_save_units!(deepcopy(previous.units), m, q, t.units;
-            levels=_brm_svi_unit_levels(t)), previous.group,
+            levels=_brm_svi_unit_levels(t), centering_maps), previous.group,
         previous.nested, previous.shared, copy(previous.fixed),
         previous.unit_partition, (; options=_brm_svi_separator_options(t),
             global_keys=_brm_svi_global_keys(m, t.globals), _brm_svi_centering_layout(q)...),

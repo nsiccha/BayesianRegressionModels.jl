@@ -12,6 +12,31 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.282
+
+- **Breaking:** fresh `brm_svi_fit` calls learn partial centering by default,
+  over every cell supported by `LearnedCentering()` (unit-owned Gaussian
+  random effects, Gaussian vector elements and grouped HSGP weights). Pass
+  `centering=nothing` to retain the plain factorization. Unsupported cells
+  stay in their packed coordinates; `diagnostics.centering.uncentered` lists
+  eligibility exclusions, not authored `@plate` cell latents. Streaming updates and optimizer resume
+  keep the saved policy, including plain checkpoints from earlier releases.
+  `laplace=GaussianBlockLaplace()` keeps its separate integration path.
+- Fixed: `brm_svi_combine` and factor-level `start=` accept centered fits and
+  checkpoints. Each unit saves a small affine map at its last fitted global
+  mean; combination uses it to project the unit Gaussian to packed coordinates
+  before the existing slice carry. This is a conditional Gaussian start,
+  not the full marginal over global uncertainty; `receipt.centering` names
+  the projection and centered slices. An older centered checkpoint without
+  maps must be checkpointed again from its original live fresh fit, or updated
+  with a window covering the units with missing maps, before combination;
+  streaming and optimizer resume still accept it. Dense unit factors retain covariance
+  through correlated maps. Structured centering initialization retains the transformed
+  rank part and residual marginal variances, projecting residual correlations.
+- Clarified: `converged` reports optimizer completion, not calibrated
+  uncertainty. Previously measured SVI/NUTS SD ratios of 0.25–0.85 were examples,
+  not bounds; the plain population factor can be substantially narrower.
+
 ## 0.2.281
 
 - Fixed: `RKBRMI(brmi, state)` resolves `optional(...)` priors before

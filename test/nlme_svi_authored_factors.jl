@@ -247,7 +247,8 @@ function check_svi_owned_target(t; constrained=false)
         @test value ≈ expected atol=2e-10 rtol=2e-12
         @test gradient ≈ expected_gradient atol=2e-9 rtol=2e-10
     end
-    fit = brm_svi_fit(m; rng=Xoshiro(16), batch_size=2, max_iterations=2,
+    # The factor and draw oracle below is in the packed coordinates.
+    fit = brm_svi_fit(m; centering=nothing, rng=Xoshiro(16), batch_size=2, max_iterations=2,
         ndraws=5, threads=1)
     @test fit.diagnostics.units == t.units
     @test fit.diagnostics.owner == t.ownership.owner
@@ -255,7 +256,8 @@ function check_svi_owned_target(t; constrained=false)
     @test all(isfinite, fit.draws)
     # Explicit starts cover the newly local coordinates too.
     initial_point = [0.05i for i in eachindex(m.unit)]
-    initial = brm_svi_fit(m; start=initial_point, max_iterations=0, ndraws=0, threads=1)
+    initial = brm_svi_fit(m; centering=nothing, start=initial_point,
+        max_iterations=0, ndraws=0, threads=1)
     @test initial.diagnostics.q.μ == initial_point[t.globals]
     @test initial.diagnostics.q.M == [initial_point[block] for block in t.units]
     # Distinct nonzero means identify every original coordinate, including

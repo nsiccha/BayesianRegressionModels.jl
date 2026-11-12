@@ -4,7 +4,8 @@ using LinearAlgebra, Serialization
 
 @stestset "streaming SVI matches unit identities and replaces priors" begin
     data = svi_stream_data(Xoshiro(31), ["a", "b", "c"], 3)
-    initial = brm_svi_fit(svi_stream_model(data); rng=Xoshiro(32), SVI_STREAM_QUICK...)
+    initial = brm_svi_fit(svi_stream_model(data); rng=Xoshiro(32), SVI_STREAM_QUICK...,
+        centering=nothing)
     # Set a recognizable, nonstandard carried density. This checks the exact
     # streaming target, not just the optimizer's response to a warm start.
     q = initial.diagnostics.q
@@ -20,6 +21,7 @@ using LinearAlgebra, Serialization
     next_data = svi_stream_data(Xoshiro(33), ["c", "a", "new"], 2)
     update = brm_svi_fit(state, svi_stream_model(next_data);
         rng=Xoshiro(34), SVI_STREAM_QUICK...)
+    @test update.diagnostics.centering === nothing
     m = update.diagnostics.model
     carried = brm_svi_checkpoint(update)
     @test svi_stream_same_factors(state, before)
@@ -102,7 +104,8 @@ end
 @stestset "streaming SVI panel factors and constant window work" begin
     labels = ["s$i" for i in 1:8]
     windows = [svi_stream_data(Xoshiro(70 + i), labels, 12) for i in 1:6]
-    controls = (; max_iterations=4000, window=50, min_windows=20, patience=8,
+    # This oracle compares packed unit means and precisions across windows.
+    controls = (; centering=nothing, max_iterations=4000, window=50, min_windows=20, patience=8,
         polish_windows=15, batch_size=8, ndraws=0)
     first_fit = brm_svi_fit(svi_stream_model(first(windows)); rng=Xoshiro(80), controls...)
     state = brm_svi_checkpoint(first_fit)
@@ -136,7 +139,7 @@ end
     # an accurate reference: a bounded exact-expectation control put its
     # largest mean error at 0.964 after 2050 iterations, versus 0.014 after
     # 25000. Give the batch reference a longer exploration and polish.
-    batch = brm_svi_fit(svi_stream_model(all_data); rng=Xoshiro(90), batch_size=8,
+    batch = brm_svi_fit(svi_stream_model(all_data); centering=nothing, rng=Xoshiro(90), batch_size=8,
         ndraws=0, max_iterations=30000, window=100, min_windows=200,
         patience=20, polish_windows=50)
     batch_state = brm_svi_checkpoint(batch)

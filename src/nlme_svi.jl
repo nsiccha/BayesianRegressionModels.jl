@@ -1760,6 +1760,15 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   flat-row response grouped by the subjects.
 - `family` — the global factor: `MeanFieldGlobal()` (diagonal) or
   `LowRankGlobal(r)` (diagonal plus rank `r`).
+- `centering` — fresh fits default to [`LearnedCentering`](@ref), jointly
+  learning each supported unit cell's coordinates and variational factor.
+  This includes unit-owned Gaussian random effects, Gaussian vector elements
+  and grouped HSGP weights. `diagnostics.centering` reports the cells and
+  eligibility exclusions; authored `@plate` cell latents are outside this
+  mechanism and its report. Pass `centering=nothing` for the plain independent
+  factorization. Streaming updates and optimizer resume inherit the saved
+  policy, including an older plain fit's. A factor-level start is a fresh fit;
+  its unit Gaussians are transported into the newly selected coordinates.
 - `unit_dense_limit` — units with at most this many coordinates use a dense
   Gaussian and natural-gradient updates (default 64, allowed 0:256).
 - `unit_curvature` — how a dense unit's step estimates its curvature.
@@ -1959,7 +1968,8 @@ weight, `N / B` for uniform sampling, so that one extreme draw does not stop tha
 coordinate's optimization), `sd_bound` (`factor`, `nothing` when off, and per
 global `coordinates` and `bound`, `Inf` where it has none, `at_bound`, the
 globals whose marginal sd in the last iterate is at it, and `stopgap = true`),
-`converged`,
+`converged` (the optimizer completed its stopping and polishing rules, not a
+certificate of posterior accuracy),
 `finished` (converged or `max_iterations` reached; `false` after `stop_after`),
 `iterations`, `stages` (the iterations spent `exploring`, `settling` and
 `polishing`, and `settled`: whether settling ended on its test rather than at
@@ -1972,9 +1982,10 @@ probabilities, work, visits and draw counts (`sampling`), the actual
 d coordinates under `unit_curvature = :orthogonal`), the prepared `model`, and the run's `optimizer` state
 ([`brm_svi_optimizer_checkpoint`](@ref) copies it). The draws come from a copy
 of the optimizer's random stream: they do not advance `rng`, and a continued
-run is unaffected by them. The approximation is variational: posterior means
-are close, and the spread of the population, scale and correlation coordinates
-is too narrow.
+run is unaffected by them. Learned centering can recover population spread
+lost by the plain factorization; neither the factor family nor optimizer
+completion guarantees accurate means or calibrated intervals. Compare important
+population uncertainty with a feasible full-MCMC or exact reference.
 
 The prepared `model` keeps its minibatch target and worker samplers for its next
 fit or continuation in this process, so passing `diagnostics.model` (or the
@@ -2011,7 +2022,7 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         lr_global=0.01, unit_step=nothing, unit_curvature=:orthogonal, start=nothing,
         inits=nothing, global_scale=0.1, unit_scale=1.0, polish_lr=0.05, window=nothing,
         patience=10, min_windows=40, polish_windows=20,
-        settle_windows=_BRM_SVI_SETTLE_WINDOWS, centering=nothing, sd_bound=_BRM_SVI_SD_BOUND,
+        settle_windows=_BRM_SVI_SETTLE_WINDOWS, centering=missing, sd_bound=_BRM_SVI_SD_BOUND,
         trend_windows=nothing, kwargs...)
     family = _brm_svi_family(previous, family)
     sd_bound = _brm_svi_check_sd_bound(sd_bound)
@@ -2026,12 +2037,7 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
     unit_curvature in (:orthogonal, :pair) || throw(ArgumentError(
         "brm_svi_fit: unit_curvature must be :orthogonal or :pair, got $(repr(unit_curvature))"))
     steps = _brm_svi_unit_steps(unit_step, unit_curvature)
-    centering === nothing || centering isa LearnedCentering || throw(ArgumentError(
-        "brm_svi_fit: centering must be LearnedCentering() or nothing, got $(repr(centering))"))
-    previous === nothing || centering === nothing || throw(ArgumentError(
-        "brm_svi_fit: a streaming update carries the previous fit's centering; omit centering"))
-    previous isa BRMSVIState && hasproperty(previous.layout, :centering) &&
-        (centering = LearnedCentering(; previous.layout.centering...))
+    centering = _brm_svi_resolve_centering(previous, centering)
     _brm_svi_unit_options(unit_dense_limit, unit_rank)
     unit_sampling in (nothing, :uniform, :work) || throw(ArgumentError(
         "brm_svi_fit: unit_sampling must be :uniform or :work"))
@@ -2172,6 +2178,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                 optimizing = false
                 q = _brm_svi_result_q(run)
                 centering = _brm_svi_centering(t)
+                centering_maps = _brm_svi_centering_maps(t, q)
                 bound = _brm_svi_sd_bound_report(t, run.q, _brm_svi_sd_bound_factor(c))
                 _brm_svi_warn_sd_bound(bound; caller)
                 (; draws, coordinates=copy(m.view.coordinates), diagnostics=(;
@@ -2193,7 +2200,8 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                     sampling=run.sampling, unit_gradient_calls=run.unit_gradient_calls,
                     sparse_globals=_brm_svi_sites_diagnostics(run.sites, t),
                     start=get(t, :start_receipt, nothing),
-                    streaming=_brm_svi_carried_state(previous, t, q), optimizer=state,
+                    streaming=_brm_svi_carried_state(previous, t, q, centering_maps), optimizer=state,
+                    centering_maps,
                     centering=centering === nothing ? nothing :
                         _brm_svi_centering_report(centering, q, _brm_svi_unit_levels(t))))
             finally
@@ -2217,4 +2225,4 @@ function _brm_svi_initialize(t, ::Nothing, family; start, inits, global_scale, u
     end
     t, q
 end
-_brm_svi_carried_state(::Nothing, m, q) = nothing
+_brm_svi_carried_state(::Nothing, m, q, maps=nothing) = nothing

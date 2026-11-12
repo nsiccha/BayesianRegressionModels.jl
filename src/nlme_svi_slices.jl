@@ -130,13 +130,6 @@ struct _BRMSVISource
 end
 
 function _brm_svi_source(caller, state::BRMSVIState, which)
-    # A learned-centering fit's unit factors are over its learned coordinates
-    # (src/nlme_svi_centering.jl), whose map to the packed draws moves with the
-    # globals, so they are no Gaussian site of those draws.
-    hasproperty(state.layout, :centering) && throw(ArgumentError(
-        "$caller: $which is a learned-centering fit (centering=LearnedCentering()), whose " *
-        "unit factors are over its learned coordinates, not the packed draws a " *
-        "combination multiplies; fit the slices without centering"))
     q = state.q
     hasproperty(q, :keys) && hasproperty(q, :informed) &&
         all(u -> hasproperty(u, :semantic), values(state.units)) || throw(ArgumentError(
@@ -144,10 +137,34 @@ function _brm_svi_source(caller, state::BRMSVIState, which)
         "semantic identity of its unit coordinates (a BRM without brm_svi_combine wrote " *
         "it); take brm_svi_checkpoint of the fit again"))
     var = exp.(2 .* q.ρ) .+ vec(sum(abs2, q.Β; dims=2))
-    units = Dict{Any,NamedTuple}(label => (; keys=collect(Any, u.semantic), M=u.M,
-        Λ=_brm_svi_saved_precision(u)) for (label, u) in state.units)
+    units = Dict{Any,NamedTuple}(label => _brm_svi_source_unit(caller, u, which)
+        for (label, u) in state.units)
     _BRMSVISource(collect(Any, q.keys), copy(q.μ), var, exp.(q.ρ), Matrix{Float64}(q.Β),
         collect(q.informed), units)
+end
+
+# A centered factor is Gaussian only conditional on its globals. Its checkpoint
+# records the affine map at the mean of the globals when the unit was last
+# fitted (also for absent streaming units). This conditional projection is for
+# initialization only; it is not a marginal approximation or a streaming prior.
+function _brm_svi_source_unit(caller, u, which)
+    M, Λ = copy(u.M), _brm_svi_saved_precision(u)
+    maps = get(u, :centering_maps, ())
+    hasproperty(u, :centering) && !hasproperty(u, :centering_maps) &&
+        throw(ArgumentError("$caller: $which's centered checkpoint has no saved affine " *
+            "maps; checkpoint its original live fresh fit again, or stream a new " *
+            "window covering the units with missing maps. Streaming and optimizer " *
+            "resume still accept the old checkpoint"))
+    natural = Dict{Any,NamedTuple}()
+    for map in maps
+        P, C = map.positions, map.C
+        M[P] .= C \ (M[P] - map.b)
+        Λ[:, P] .= Λ[:, P] * C
+        Λ[P, :] .= C' * Λ[P, :]
+        map.natural === nothing || (natural[u.semantic[first(P)]] =
+            (; keys=u.semantic[P], map.natural...))
+    end
+    (; keys=collect(Any, u.semantic), M, Λ=Matrix(Symmetric((Λ + Λ') / 2)), natural)
 end
 
 # A saved unit factor's precision as a dense matrix: a dense unit's own, or the
@@ -464,7 +481,8 @@ function _brm_svi_location_change(instance, references, i, after, before)
     δ = zeros(length(instance.positions))
     for (k, (predictor, coefficient)) in enumerate(instance.record.margins),
             (j, design) in get(references, _brm_svi_margin_key(block, predictor, coefficient), ())
-        δ[k] += (i == 0 ? 1.0 : design[i]) * (after[j] - before[j])
+        δ[k] += (i == 0 ? 1.0 : design[i]) *
+            (after[j] - (before === nothing ? 0.0 : before[j]))
     end
     δ
 end
@@ -1089,10 +1107,23 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
             any(iszero, P) && continue
             s = origin[first(P)]
             s != 0 && all(==(s), origin[P]) || continue
-            slice = values_of(s)
-            A_s = _brm_svi_draw_factor(slice.values, inst)
             A_c = _brm_svi_draw_factor(combined, inst)
-            δ = _brm_svi_location_change(inst, references, i, combined_point, slice.point)
+            source_unit = get(sources[s].units, label, nothing)
+            natural = source_unit === nothing ? nothing :
+                get(source_unit.natural, ukeys[first(P)], nothing)
+            A_s, δ = if natural === nothing
+                slice = values_of(s)
+                (_brm_svi_draw_factor(slice.values, inst),
+                    _brm_svi_location_change(inst, references, i, combined_point, slice.point))
+            else
+                # An absent streaming unit may have been last fitted before
+                # its state's globals changed. Its saved physical frame, not
+                # the state's newest global mean, anchors this carry.
+                perm = [only(findall(isequal(key), natural.keys)) for key in ukeys[P]]
+                location = _brm_svi_location_change(inst, references, i,
+                    combined_point, nothing)
+                (natural.factor[perm, perm], location - natural.location[perm])
+            end
             T[P, P] .= A_s \ A_c
             d[P] .= A_s \ δ
             carry[P] .= true
@@ -1121,7 +1152,9 @@ function _brm_svi_combine(t, states; caller="brm_svi_combine", rng=Random.Xoshir
             prior_mean=prior.mean, prior_sd=[p > 0 ? 1 / sqrt(p) : Inf for p in prior.precision]),
         units=(; copied, partial, cold, carried=carried_units, dropped, mapped, uncarried),
         prior=(; pairs=prior.pairs, iterations=prior.iterations, flat=names[prior.flat]),
-        slice_rank=[size(source.Β, 2) for source in sources])
+        slice_rank=[size(source.Β, 2) for source in sources],
+        centering=(; projection=:conditional_at_saved_global_mean,
+            slices=[hasproperty(state.layout, :centering) for state in states]))
     BRMSVIStart(2, _brm_svi_source_id(m.backend), deepcopy(brm_fitted_state(m.backend)),
         m.view.group, Tuple(keys(m.view.nested_groups)), m.view.shared_groups,
         (; keys=gkeys[kept], μ=μ[kept], σ=σ[kept],
@@ -1263,6 +1296,19 @@ vector must mean the same entry in every slice (one frame for a field's basis,
 for example). A unit's packed-name coordinate matches only that unit's factor
 in a slice, since an entry of a vector indexed by the units sits at another
 position in another binding; where the names differ it keeps the default.
+
+Centered fits and checkpoints are accepted. Their unit factors are Gaussian
+conditional on the globals: each is mapped to packed coordinates at the global
+mean when that unit was last fitted, using its saved affine maps, before the
+usual slice carry. `receipt.centering` records
+`projection=:conditional_at_saved_global_mean` and which slices were centered.
+This start does not retain the dependence of a unit's packed coordinates on
+global uncertainty. Dense factors preserve all conditional covariance. As with
+plain factor starts, a structured unit starts from marginal SDs with zero rank
+loadings. Its centering transform preserves residual marginal variances,
+projecting residual correlations. An older centered checkpoint without affine
+maps can still stream or resume. To combine it, checkpoint its original live
+fresh fit again, or stream a new window covering the units with missing maps.
 
 - **Global coordinates** combine as a product of Gaussian sites in
   unconstrained coordinates, `P = P₀ + Σ_s (P_s − P₀)` and `P m = P₀ m₀ +
