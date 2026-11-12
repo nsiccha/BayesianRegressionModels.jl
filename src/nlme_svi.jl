@@ -1297,12 +1297,18 @@ _brm_svi_exploration_stalled(windows, w, c) =
 # window it actually uses. They are fixed for the run and its continuations.
 function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
         polish_lr, window, patience, min_windows, polish_windows, unit_sampling=:uniform,
-        settle_windows=_BRM_SVI_SETTLE_WINDOWS, unit_curvature=:pair,
+        settle_windows=nothing, unit_curvature=:pair,
         structured_unit_step=unit_step, structured_rank_step=1.0, unit_positive_part=true,
         sd_bound=_BRM_SVI_SD_BOUND, trend_windows=_brm_svi_default_trend_windows(patience),
         stationarity=true)
     B = min(batch_size, N)
-    (; batch_size=B, window=window === nothing ? max(cld(N, B), 100) : window,
+    W = window === nothing ? max(cld(N, B), 100) : window
+    # A default iterate-gated run may need more than 100 windows, especially
+    # when each unit is only visited once per window. max_iterations still caps
+    # the entire run; explicit settling limits and old checkpoints keep theirs.
+    settle_windows = Int(something(settle_windows,
+        stationarity ? cld(max_iterations, W) : _BRM_SVI_SETTLE_WINDOWS))
+    (; batch_size=B, window=W,
        max_iterations, lr_global, unit_step, polish_lr, patience, min_windows,
        polish_windows, unit_sampling, settle_windows, unit_curvature, structured_unit_step,
        structured_rank_step, unit_positive_part, sd_bound, trend_windows,
@@ -1354,7 +1360,7 @@ _brm_svi_unit_steps(unit_step, unit_curvature) = (;
 _brm_svi_structured_unit_step(c) = get(c, :structured_unit_step, c.unit_step)
 _brm_svi_structured_rank_step(c) = get(c, :structured_rank_step, 1.0)
 
-# At most this many windows of settling by default.
+# Default settling limit for the legacy ELBO-only policy.
 const _BRM_SVI_SETTLE_WINDOWS = 100
 
 _brm_svi_finished(run, c) = run.converged || run.iteration >= c.max_iterations ||
@@ -1364,7 +1370,7 @@ _brm_svi_polishing(run) = run.polish_start > 0
 # Controls written before settling existed (a resumed checkpoint) never settle.
 _brm_svi_settle_windows(c) = get(c, :settle_windows, 0)
 
-# The window at which exploration's tests passed, or 0 while exploring.
+# The window at which exploration changed step, or 0 while exploring.
 # Legacy checkpoints reconstruct this from their ELBO windows alone.
 function _brm_svi_explored(run, c)
     _brm_svi_stationarity_enabled(c) && return _brm_svi_stationarity_state(run).explored
@@ -1466,9 +1472,13 @@ function _brm_svi_advance!(run, t, c)
             length(windows) - explored >= _brm_svi_settle_windows(c)) &&
             _brm_svi_start_polishing!(run, q, it)
     elseif length(windows) >= max(c.min_windows, c.patience + 1) &&
-            _brm_svi_exploration_stalled(windows, length(windows), c) &&
-            _brm_svi_stationary!(run, c)
-        # Exploration ends: Adam restarts on the scale-preconditioned step.
+            _brm_svi_exploration_stalled(windows, length(windows), c)
+        stationary = _brm_svi_stationary!(run, c)
+        # Reducing the step is allowed while moments still move: tight global
+        # scales can adapt very slowly under exploration's absolute mean step.
+        # Stationarity gates averaging, not this opportunity to improve the step.
+        # With no settling phase, exploration must pass before averaging starts.
+        !stationary && _brm_svi_settle_windows(c) == 0 && return :window
         _brm_svi_stationarity_explored!(run, c)
         clipped = run.adam.clipped
         run.adam = _brm_svi_adam(q, c.polish_lr)
@@ -1915,22 +1925,29 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   `trend_windows` windows (default `4 patience + 1`; `0` turns this off, the rule of
   BRM 0.2.263 and earlier when `stationarity=false`) is not above twice its standard error (read both with and
   without the first `patience` windows, which climb from the start), settles at the
-  constant scale-relative step until the two-window test passes on settling's own windows (for at most `settle_windows`
-  windows; `0` skips settling, the schedule of BRM 0.2.241 and earlier), then
+  constant scale-relative step until the two-window test and the iterate check
+  below pass on settling's own history, then
   polishes for `polish_windows` windows with decaying steps and returns the
   average of the polished iterates.
-- `stationarity=true` also requires stable parameter iterates before exploration
-  and settling end on their tests. It checks every global and unit mean and marginal
-  log sd, plus learned centering controls. Each block needs at least 100 actual
-  updates, rank-normalized/folded split-Rhat at most 1.1 and bulk effective sample
-  size at least 50 in one of five recent windows. These are diagnostics of the
+- `stationarity=true` requires stable parameter iterates before accepting the
+  start of averaging. Exploration may reduce its step on an ELBO plateau while
+  moments still move; this is a step change, not a convergence certificate.
+  The check reads every global and unit mean and marginal
+  log sd, plus learned centering controls. Each block needs at least 200 actual
+  updates and rank-normalized/folded split-Rhat at most 1.1 in one of up to five
+  recent windows. Bulk effective sample size is reported separately; it does
+  not gate the phase change. These are diagnostics of the
   optimizer iterates, not posterior draws. Histories retain at most 512 samples
   per moment by doubling their thinning interval; unit clocks advance only when
   selected. Storage is linear in the number of moments, up to 8 KiB per
   mean/scale coordinate, plus centering histories. Checks become less frequent
   as a phase grows and use bounded coordinate chunks. Histories restart at
-  settling. Reaching its cap still starts polishing, but returns `converged=false`
-  unless its tests passed; `settle_windows=0` explicitly skips this second check.
+  settling. `settle_windows=nothing` (default) lets settling use the remaining
+  `max_iterations` budget; with `stationarity=false` it retains the old cap of
+  100 windows. An explicit nonnegative `settle_windows` caps the phase. Reaching
+  that cap still starts polishing, but returns `converged=false` unless its
+  tests passed. `settle_windows=0` skips settling and requires the iterate check
+  to pass during exploration before averaging starts.
   `stationarity=false` uses the ELBO-only rule, as does a resumed checkpoint
   written before this control existed. Stability does not establish global
   optimality or posterior accuracy, and can miss drift below its resolution.
@@ -2011,7 +2028,8 @@ settling cap; `false` after `stop_after`),
 `iterations`, `stages` (the iterations spent `exploring`, `settling` and
 `polishing`, and `settled`: whether settling ended on its test rather than at
 `settle_windows`), `stationarity` (whether enabled, thresholds, number of checks,
-the accepted `exploration` check, the most recent `current` check, and `settled`;
+the `exploration` check at its step change, the most recent `current` check,
+and `settled`; the exploration report can fail when settling follows;
 checks report worst Rhat, minimum ESS and each block's sample count and update
 clock). Under the ELBO-only rule, `converged` can still accompany `settled=false`.
 The variational parameters `q`, the packed positions of the
@@ -2062,14 +2080,15 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         lr_global=0.01, unit_step=nothing, unit_curvature=:orthogonal, start=nothing,
         inits=nothing, global_scale=0.1, unit_scale=1.0, polish_lr=0.05, window=nothing,
         patience=10, min_windows=40, polish_windows=20,
-        settle_windows=_BRM_SVI_SETTLE_WINDOWS, centering=missing, sd_bound=_BRM_SVI_SD_BOUND,
+        settle_windows=nothing, centering=missing, sd_bound=_BRM_SVI_SD_BOUND,
         trend_windows=nothing, stationarity=true, kwargs...)
     stationarity isa Bool || throw(ArgumentError("brm_svi_fit: stationarity must be a Bool"))
     family = _brm_svi_family(previous, family)
     sd_bound = _brm_svi_check_sd_bound(sd_bound)
-    settle_windows isa Integer && settle_windows >= 0 || throw(ArgumentError(
-        "brm_svi_fit: settle_windows must be a nonnegative integer (0: polish straight " *
-        "after exploration)"))
+    settle_windows === nothing || settle_windows isa Integer && settle_windows >= 0 ||
+        throw(ArgumentError("brm_svi_fit: settle_windows must be nothing (the remaining " *
+        "iteration budget, or 100 windows with stationarity=false) or a nonnegative " *
+        "integer (0: polish straight after exploration)"))
     trend_windows === nothing || trend_windows isa Integer &&
         (trend_windows == 0 || trend_windows >= 3) || throw(ArgumentError(
         "brm_svi_fit: trend_windows must be nothing (4 patience + 1), 0 (off: the " *
@@ -2094,7 +2113,7 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         centering === nothing || ((t, q) = _brm_svi_with_centering(t, q, centering))
         c = _brm_svi_controls(length(t.units); batch_size, max_iterations, lr_global,
             steps..., polish_lr, window, patience, min_windows, polish_windows,
-            settle_windows=Int(settle_windows), unit_curvature, sd_bound, trend_windows, stationarity,
+            settle_windows, unit_curvature, sd_bound, trend_windows, stationarity,
             unit_sampling=something(unit_sampling,
                 t.m.view.unit_partition === :connected ? :work : :uniform))
         t, _brm_svi_optimizer_state(t, previous, c, _brm_svi_run(rng, q, c, t))

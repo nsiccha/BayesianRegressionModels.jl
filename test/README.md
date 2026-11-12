@@ -1522,7 +1522,15 @@ where q* is known, settling brings the returned factor closer to q* and its glob
 means within half an optimal sd (the earlier schedule: about one). About 6 minutes
 warm, most of it the exact Hessian; it accepts testset substring filters.
 
-`nlme_svi_trend.jl` checks exploration's trend test (BRM 0.2.264): on window
+`nlme_svi_stationarity.jl` checks the bounded parameter-iterate guard: stationary
+autocorrelated series, 1,000-coordinate multiplicity, slow drift, an unvisited
+unit, exact thinning clocks, serialization, and marginal scales without a dense
+low-rank covariance. `nlme_svi_stationarity_fit.jl` checks complete default fits,
+exact continuation through all phases and in a fresh process, old-checkpoint
+policy, and nonconvergence after a settling cap. Both accept testset filters.
+
+`nlme_svi_trend.jl` isolates the previous ELBO-only rule with `stationarity=false`
+and `centering=nothing`. It checks exploration's trend test (BRM 0.2.264): on window
 statistics alone, a rise too slow for two windows `patience` apart is read by the
 slope over `trend_windows` windows, a stationary ELBO ends exploration where the
 two-window test does in all but about 1% of seeds, and controls without

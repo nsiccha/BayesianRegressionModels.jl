@@ -18,7 +18,7 @@ import Treebars
 # (four windows), so the legacy ELBO-only run converges in a few hundred
 # iterations. Default stationarity checkpoints have their own longer-run tests.
 const SVI_OPT = (; batch_size=4, window=20, min_windows=6, patience=3,
-    polish_windows=4, max_iterations=3000, stationarity=false)
+    polish_windows=4, max_iterations=3000, stationarity=false, centering=nothing)
 
 svi_bytes(x) = (io = IOBuffer(); serialize(io, x); position(io))
 

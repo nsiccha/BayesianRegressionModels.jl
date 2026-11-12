@@ -13,6 +13,18 @@ function svi_iterate_history(xs)
     h
 end
 
+@stestset "stationarity settling uses the run budget unless explicitly capped" begin
+    options = (; batch_size=4, max_iterations=100_000, lr_global=0.01,
+        unit_step=1.0, polish_lr=0.05, window=nothing, patience=10,
+        min_windows=40, polish_windows=20)
+    guarded = BRM._brm_svi_controls(1000; options...)
+    @test guarded.window == 250
+    @test guarded.settle_windows == 400
+    @test BRM._brm_svi_controls(1000; options..., stationarity=false).settle_windows == 100
+    @test BRM._brm_svi_controls(1000; options..., settle_windows=3).settle_windows == 3
+    @test BRM._brm_svi_controls(1000; options..., settle_windows=0).settle_windows == 0
+end
+
 @stestset "stationarity history is bounded and has an exact update clock" begin
     h = svi_iterate_history(reshape(collect(1.0:10000), 1, :))
     @test h.updates == 10000
@@ -31,8 +43,8 @@ end
 end
 
 @stestset "stationarity diagnostics handle constants, missing history, and bad moments" begin
-    @test !BRM._brm_svi_stationarity_check(svi_iterate_history(zeros(2, 99))).passed
-    @test BRM._brm_svi_stationarity_check(svi_iterate_history(zeros(2, 100))).passed
+    @test !BRM._brm_svi_stationarity_check(svi_iterate_history(zeros(2, 199))).passed
+    @test BRM._brm_svi_stationarity_check(svi_iterate_history(zeros(2, 200))).passed
     @test !BRM._brm_svi_stationarity_check(svi_iterate_history(fill(Inf, 1, 200))).passed
     @test !BRM._brm_svi_stationarity_check(svi_iterate_history(fill(NaN, 1, 200))).passed
     @test BRM._brm_svi_stationarity_check(BRM._BRMSVIIterates(0)).passed
@@ -50,7 +62,7 @@ end
     # Treat entire independent realizations as trials, not correlated time points.
     # The familywise maximum must be usable even at thousands of coordinates.
     for (d, n, rho) in ((1, 4096, 0.95), (32, 16384, 0.95), (1000, 512, 0.0))
-        passed = map(1:20) do seed
+        passed = map(vcat(1:20, 101:150)) do seed
             x = svi_stationary_ar(Xoshiro(seed), d, n, rho)
             BRM._brm_svi_stationarity_check(svi_iterate_history(x)).passed
         end
@@ -61,7 +73,7 @@ end
     x = randn(Xoshiro(11), 1000, 512)
     x[end, :] .+= 0.05 .* (1:512)
     @test !BRM._brm_svi_stationarity_check(svi_iterate_history(x)).passed
-    for seed in 1:20
+    for seed in vcat(1:20, 101:150)
         x = svi_stationary_ar(Xoshiro(seed), 3, 4096, 0.9)
         x[2, :] .+= 0.003 .* (1:4096)
         @test !BRM._brm_svi_stationarity_check(svi_iterate_history(x)).passed
@@ -98,6 +110,10 @@ end
     h.next_check = 512
     @test BRM._brm_svi_stationary!(run, c)
     @test h.report.passed
+    # Mutating a delivered snapshot's diagnostic vector cannot reach the run.
+    report = BRM._brm_svi_stationarity_report(run)
+    report.current.units[1] = merge(report.current.units[1], (; passed=false))
+    @test h.report.units[1].passed
     # New observations are required before another check can pass.
     @test !BRM._brm_svi_stationary!(run, c)
 end

@@ -1,16 +1,19 @@
 # Iterate diagnostics, not diagnostics of draws from the fitted approximation.
 # Dhaka et al. (2020), arxiv:2009.00666; Welandawe et al. (2024), JMLR 25(219),
-# section 5: search recent windows for split-Rhat <= 1.1 and require enough ESS.
-# Reuse MCMCDiagnosticTools' rank-normalized/folded split-Rhat and bulk ESS.
+# section 5.1: search recent windows for split-Rhat <= 1.1.
+# Reuse MCMCDiagnosticTools' rank-normalized/folded split-Rhat. Report bulk ESS
+# separately: the paper's ESS floor belongs to precision of the subsequent
+# iterate average (section 5.2), not the stationarity transition itself.
 #
 # Each block has its own update clock. A unit that was not selected contributes
 # no observation: repeated copies of an unvisited unit cannot establish stability.
 # Dyadic thinning keeps at most 512 observations per moment while extending the
 # time span. This is bounded-memory storage, not a change to the optimizer stream.
 const _BRM_SVI_STATIONARITY_CAPACITY = 512
-const _BRM_SVI_STATIONARITY_MIN = 100
+# At least 100 observations in each half of the split. Shorter candidate
+# windows can mistake a slow autocorrelated drift for a stationary segment.
+const _BRM_SVI_STATIONARITY_MIN = 200
 const _BRM_SVI_STATIONARITY_RHAT = 1.1
-const _BRM_SVI_STATIONARITY_ESS = 50.0
 
 mutable struct _BRMSVIIterates
     values::Matrix{Float64}
@@ -136,7 +139,7 @@ function _brm_svi_stationarity_check(h::_BRMSVIIterates)
     best = nothing
     for n in unique(round.(Int, range(_BRM_SVI_STATIONARITY_MIN, h.count; length=5)))
         stats = _brm_svi_iterate_diagnostics(view(h.values, :, h.count-n+1:h.count))
-        passed = stats.rhat <= _BRM_SVI_STATIONARITY_RHAT && stats.ess >= _BRM_SVI_STATIONARITY_ESS
+        passed = stats.rhat <= _BRM_SVI_STATIONARITY_RHAT
         report = (; passed, reason=passed ? :stationary : :not_stationary,
             rhat=isfinite(stats.rhat) ? stats.rhat : nothing, ess=stats.ess,
             samples=n, updates=h.updates, stride=h.stride)
@@ -186,7 +189,7 @@ function _brm_svi_stationarity_report(run)
     h = _brm_svi_stationarity_state(run)
     h === nothing && return (; enabled=false)
     deepcopy((; enabled=true, rhat_limit=_BRM_SVI_STATIONARITY_RHAT,
-       ess_floor=_BRM_SVI_STATIONARITY_ESS, capacity=_BRM_SVI_STATIONARITY_CAPACITY,
+       capacity=_BRM_SVI_STATIONARITY_CAPACITY,
        checks=h.checks, exploration=h.exploration, current=h.report, settled=h.settled))
 end
 

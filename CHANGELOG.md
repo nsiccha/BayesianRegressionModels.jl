@@ -12,6 +12,26 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.283
+
+- **Breaking:** minibatch `brm_svi_fit` now requires stable global and unit
+  means and marginal scales, and learned centering controls, alongside its
+  ELBO checks before accepting the start of iterate averaging. Exploration can
+  switch to its scale-adjusted settling step while moments still move. The bounded
+  histories use each unit's actual update clock and split-Rhat; bulk ESS is
+  reported separately.
+  `diagnostics.stationarity` and snapshots report the checks. Passing is an
+  optimization diagnostic, not a guarantee of global optimality or posterior
+  accuracy. Pass `stationarity=false` for the previous ELBO-only rule.
+- Changed: when settling reaches its cap without passing, completed polishing
+  returns `finished=true`, `converged=false` and snapshot status `:settle_limit`.
+  Default `settle_windows=nothing` lets the guard use the remaining iteration
+  budget; explicit limits are honored, and the ELBO-only policy retains its
+  old 100-window default. `settle_windows=0` skips settling and applies the
+  iterate check before leaving exploration. Old optimizer
+  checkpoints retain their stopping policy and exact continuation; new ones
+  preserve bounded iterate histories across interruption and serialization.
+
 ## 0.2.282
 
 - **Breaking:** fresh `brm_svi_fit` calls learn partial centering by default,

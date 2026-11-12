@@ -7,7 +7,8 @@ using Serialization, Statistics
 svi_stationarity_roundtrip(x) = (io = IOBuffer(); serialize(io, x); seekstart(io); deserialize(io))
 
 @stestset "default iterate stopping completes and resumes exactly in every phase" begin
-    m = brm_nlme_model(RKBRMI(svi_gauss_model(svi_gauss_data(Xoshiro(801), 8; nobs=12)));
+    data = svi_gauss_data(Xoshiro(801), 8; nobs=12)
+    m = brm_nlme_model(RKBRMI(svi_gauss_model(data));
         ad_backend=NLME_AD)
     options = (; batch_size=4, max_iterations=50_000, ndraws=30)
     full = brm_svi_fit(m; rng=Xoshiro(802), options...)
@@ -15,7 +16,8 @@ svi_stationarity_roundtrip(x) = (io = IOBuffer(); serialize(io, x); seekstart(io
     @info "stationarity fit" iterations=d.iterations stages=d.stages guard=d.stationarity
     @test d.converged && d.finished
     @test d.stationarity.enabled && d.stationarity.settled
-    @test d.stationarity.exploration.passed && d.stationarity.current.passed
+    @test d.stationarity.current.passed
+    @test d.stationarity.exploration.iteration == d.stages.exploring
     @test !hasproperty(d.sampling, :stationarity)
     if d.converged
         E, P = d.stages.exploring, d.optimizer.run.polish_start
@@ -36,9 +38,20 @@ svi_stationarity_roundtrip(x) = (io = IOBuffer(); serialize(io, x); seekstart(io
         @test isequal(result.diagnostics.stationarity, d.stationarity)
         @test svi_same_result(brm_svi_resume(m, result; ndraws=30), full)
         @test original.run.iteration == 113
+        # The existing fresh-process driver rebuilds this same synthetic model.
+        mktempdir() do dir
+            path, input, output = joinpath.(dir, ("state.jls", "input.jls", "output.jls"))
+            serialize(path, state)
+            serialize(input, (; mode=:finish, data, path, ndraws=30))
+            script = joinpath(@__DIR__, "nlme_svi_optimizer_process.jl")
+            run(`$(Base.julia_cmd()) --startup-file=no --project=$(dirname(Base.active_project())) $script $input $output`)
+            fresh = deserialize(output)
+            @test fresh.draws == full.draws
+            @test svi_same_state(fresh.state, d.optimizer)
+        end
     end
 
-    # One settling window cannot provide 100 actual updates to every unit.
+    # One settling window cannot provide 200 actual updates to every unit.
     # Finishing the requested polishing still returns useful draws, but does
     # not certify convergence or restart optimization on a resumed checkpoint.
     statuses = Symbol[]
