@@ -71,14 +71,8 @@ jobs:
         # AlgebraOfVega renders the figures; its web dependencies use the
         # same public source pins as the tested BRM environment.
         #
-        # `devibe`, NOT `dev`. StanBlocks' active line moved to `devibe`
-        # and `dev` is now a strict ancestor 303 commits behind it
-        # (`git rev-list --left-right --count origin/dev...origin/devibe`
-        # → `0 303`). BRM's HEAD uses macros that only exist on `devibe`,
-        # so `-b dev` fails at `using BayesianRegressionModels` with e.g.
-        # `UndefVarError: @stanonly not defined` — the first run on
-        # nsiccha/BayesianRegressionModels.jl died exactly there
-        # (run 30708357301).
+        # StanBlocks uses the tested pin too: its moving branch can require
+        # a newer ReactiveKernels than the matching test environment provides.
         #
         # The pins come from BRM itself: the release sources in Project.toml
         # (PowerScaling, ReparametrizableDistributions) and the test
@@ -87,7 +81,6 @@ jobs:
         # call ReactiveKernelsPPL.jax_source, so ReactiveKernels contributes
         # three packages from one checkout.
         run: |
-          git clone -b devibe https://github.com/nsiccha/StanBlocks.jl.git
           julia --project=docs -e '
             using Pkg, TOML
             # The pins live in the three Project files; the docs ones are a
@@ -105,7 +98,7 @@ jobs:
             end
             pinned = [PackageSpec(path=checkout(name, release[name]))
                       for name in ["PowerScaling", "ReparametrizableDistributions"]]
-            for name in ["OutputSignatures", "MutatingFunctions", "AlgebraOfVega",
+            for name in ["StanBlocks", "OutputSignatures", "MutatingFunctions", "AlgebraOfVega",
                          "DynamicObjects", "HTMXObjects", "HTMX", "Treebars"]
               push!(pinned, PackageSpec(path=checkout(name, get(docenv, name, testenv[name]))))
             end
@@ -117,7 +110,6 @@ jobs:
             end
             Pkg.develop([
               PackageSpec(path=pwd()),
-              PackageSpec(path="StanBlocks.jl"),
               pinned...,
             ])
             Pkg.instantiate()
