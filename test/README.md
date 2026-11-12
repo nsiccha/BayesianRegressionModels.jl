@@ -1501,6 +1501,16 @@ fit is compared with NUTS too. Starts (prior medians, a packed point,
 `inits`) and their refusals are covered as well. It runs in the test
 environment above.
 
+`nlme_svi_default_centering.jl` checks the fresh learned-centering default
+against four-chain NUTS on public random-intercept toys with weak, strong and
+unbalanced groups, and checks centered slice combinations and factor starts.
+`nlme_svi_centering_algebra.jl` checks map derivatives, dense covariance transport,
+the structured residual projection and the exact fixed-scale Gaussian population
+width. `nlme_svi_centering.jl` covers eligible cells, grouped HSGP accuracy,
+default/explicit parity, optimizer continuation and centered streaming with new,
+absent and returning units. These files use the test environment above; the two
+native-model files accept testset substring filters.
+
 `nlme_svi_settling.jl` checks the settling stage between exploration and
 polishing (BRM 0.2.242). Settling starts at the window where exploration's test
 passed, both schedules explore identically to the bit until then, it ends on its

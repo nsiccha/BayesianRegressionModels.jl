@@ -42,14 +42,17 @@ using ReparametrizableDistributions: PartiallyCentered, reparam
 """
     LearnedCentering(; start=0.5, step=0.05)
 
-Learned partial centering for [`brm_svi_fit`](@ref): one centering control
+The default on a fresh [`brm_svi_fit`](@ref): learned partial centering with one control
 `c ∈ (0, 1)` per eligible cell, optimized jointly with the variational factors
 by the ELBO (the VIP of Gorinova, Moore and Hoffman, 2020). `c = 0` is the
 non-centred coordinate and `c = 1` the centred one: a random effect located at
 its population predictor and, in a correlated block, at its conditional mean
 given the block's earlier margins; an authored Gaussian vector element at its
-law's mean. Every control starts at `start`; `step` is the Adam step size of
+law's mean. Controls start at `start` (grouped HSGP weights at `min(start, 0.1)`);
+`step` is the Adam step size of
 the controls' logits, taken whenever their unit is in the batch.
+Pass `centering=nothing` for the plain factorization. Streaming and optimizer
+continuation retain the saved policy.
 """
 struct LearnedCentering
     start::Float64
@@ -61,6 +64,22 @@ struct LearnedCentering
             "LearnedCentering: step must be finite and positive, got $step"))
         new(Float64(start), Float64(step))
     end
+end
+
+# Omission selects learned coordinates on a fresh fit. A streaming update keeps
+# its saved policy, including old states without a centering field. Explicit
+# nothing remains the original independent factorization on a fresh fit.
+function _brm_svi_resolve_centering(previous, centering)
+    if previous === nothing
+        ismissing(centering) && return LearnedCentering()
+        centering === nothing || centering isa LearnedCentering || throw(ArgumentError(
+            "brm_svi_fit: centering must be LearnedCentering() or nothing, got $(repr(centering))"))
+        return centering
+    end
+    ismissing(centering) || centering === nothing || throw(ArgumentError(
+        "brm_svi_fit: a streaming update carries the previous fit's centering; omit centering"))
+    hasproperty(previous.layout, :centering) ?
+        LearnedCentering(; previous.layout.centering...) : nothing
 end
 
 # The logistic of a control's unconstrained value, and its inverse.
@@ -820,45 +839,90 @@ end
 
 # Learned centering on a target and its fresh factors: the plan, the controls at
 # their start, and each unit's factor moved into its learned coordinates at the
-# starting globals (mean through T⁻¹, scales by each cell's exp((c - c0) ℓ)).
+# starting globals.
+# At fixed globals the learned map is affine, u = C y + b. Keep one small
+# triangular block per correlated effect and diagonal maps for vector cells;
+# never construct a Jacobian over all units or globals. The natural factor and
+# location also anchor a saved random effect's physical value during slice carry.
+function _brm_svi_centering_affine(inst::_BRMSVICenteringBlock, c, frame, g, base)
+    A = frame.A[inst.family]
+    controls = c[inst.cells]
+    location = [_brm_svi_location(inst, k, g, base) for k in eachindex(inst.positions)]
+    diagonal = exp.(controls .* log.(diag(A)))
+    C = if isdiag(A)
+        Diagonal(diagonal)
+    else
+        result = zeros(size(A))
+        for k in axes(A, 1)
+            result[k, k] = diagonal[k]
+            for j in 1:(k - 1)
+                result[k, j] = controls[k] * A[k, j]
+            end
+        end
+        LowerTriangular(result)
+    end
+    (; positions=copy(inst.positions), C, b=controls .* location,
+       natural=(; factor=isdiag(A) ? Diagonal(diag(A)) : copy(A), location))
+end
+
+function _brm_svi_centering_affine(inst::_BRMSVICenteringVector, c, frame, g, base)
+    mean, scale = frame.values[inst.mean], frame.values[inst.scale]
+    controls = c[inst.cells]
+    location = [_brm_svi_element(mean, j) for j in inst.elements]
+    diagonal = [exp((controls[k] - 1) * log(_brm_svi_element(scale, j)))
+        for (k, j) in enumerate(inst.elements)]
+    (; positions=copy(inst.positions), C=Diagonal(diagonal),
+       b=(controls .- diagonal) .* location, natural=nothing)
+end
+
+function _brm_svi_centering_maps(t, q)
+    plan = _brm_svi_centering(t)
+    plan === nothing && return nothing
+    frame = _brm_svi_centering_frame(plan, t, q.μ)
+    [[_brm_svi_centering_affine(inst, _brm_svi_unit_controls(q, i), frame, q.μ, plan.base)
+        for inst in instances] for (i, instances) in enumerate(plan.instances)]
+end
+
+# Transport an existing unit Gaussian into its new learned frame. Dense units
+# retain all covariance, including the triangular map of a correlated block.
+# A structured unit retains the transformed rank part and the marginal variance
+# of the transformed diagonal noise; off-diagonal noise is projected away.
+function _brm_svi_unit_affine!(q, i, maps)
+    Λ = q.Λ[i]
+    for map in maps
+        P, C = map.positions, map.C
+        q.M[i][P] .= C * q.M[i][P] + map.b
+        if Λ isa _BRMSVIUnitPrecision
+            f = Λ.factor
+            variance = exp.(2 .* f.ρ[P])
+            f.ρ[P] .= log.(C isa Diagonal ? abs2.(diag(C)) .* variance : abs2.(C) * variance) ./ 2
+            f.Β[P, :] .= C * f.Β[P, :]
+        else
+            Λ[:, P] .= Λ[:, P] / C
+            Λ[P, :] .= C' \ Λ[P, :]
+        end
+    end
+    if !(Λ isa _BRMSVIUnitPrecision) && !isempty(maps)
+        Λ .= (Λ + Λ') / 2
+        q.U[i] .= cholesky(Symmetric(Λ)).L
+    end
+    q
+end
+
 function _brm_svi_with_centering(t, q, centering::LearnedCentering)
     plan = _brm_svi_centering_plan(t, centering)
     prior = hasproperty(t, :prior) && t.prior isa _BRMSVIStreamingPrior ? t.prior : nothing
     carried = prior === nothing ? nothing : prior.controls
     q = merge(q, (; centering=_brm_svi_centering_controls(plan; carried)))
-    frame = _brm_svi_centering_frame(plan, t, q.μ)
+    t = merge(t, (; centering=plan))
+    maps = _brm_svi_centering_maps(t, q)
     for i in eachindex(t.units)
         plan.ncells[i] == 0 && continue
         # A carried unit's factor is already in its previous controls' frame.
         prior !== nothing && prior.carried[i] && continue
-        c = _brm_svi_unit_controls(q, i)
-        y = copy(q.M[i])
-        _, _, ℓ = _brm_svi_unit_centering!(similar(y), y, plan.instances[i], plan.ncells[i],
-            c, frame, q.μ, plan.base)
-        q.M[i] .= _brm_svi_learned_coordinates(plan, frame, q, i, q.μ, y)
-        scale = ones(length(y))
-        for inst in plan.instances[i], (n, p) in enumerate(inst.positions)
-            cell = inst.cells[n]
-            c0 = inst isa _BRMSVICenteringBlock ? 0.0 : 1.0
-            scale[p] = exp((c[cell] - c0) * ℓ[cell])
-        end
-        _brm_svi_unit_rescale!(q, i, scale)
+        _brm_svi_unit_affine!(q, i, maps[i])
     end
-    merge(t, (; centering=plan)), q
-end
-
-# Unit i's factor with its coordinates scaled by `s`: Σ ↦ D Σ D for D = diag(s).
-function _brm_svi_unit_rescale!(q, i, s)
-    Λ, U = q.Λ[i], q.U[i]
-    if Λ isa _BRMSVIUnitPrecision
-        f = Λ.factor
-        f.ρ .+= log.(s)
-        f.Β .*= s
-    else
-        Λ .= Diagonal(1 ./ s) * Λ * Diagonal(1 ./ s)
-        U .= Diagonal(1 ./ s) * U
-    end
-    q
+    t, q
 end
 
 # ── Streaming: a carried unit's prior in its previous controls' frame ────────

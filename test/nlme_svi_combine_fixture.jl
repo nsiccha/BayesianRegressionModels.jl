@@ -28,7 +28,9 @@ function svi_slice_scaled_model(data)
 end
 
 const SVI_SLICE_GROUPS = (; subject_group=:subject, shared_groups=(:class,))
-const SVI_SLICE_QUICK = (; max_iterations=0, ndraws=0, SVI_SLICE_GROUPS...)
+# The combination algebra below has packed-coordinate factors as its oracle.
+# Automatic centering has its own transport and end-to-end regressions.
+const SVI_SLICE_QUICK = (; max_iterations=0, ndraws=0, centering=nothing, SVI_SLICE_GROUPS...)
 
 # `regions` maps a region to its subjects; each subject has `n` rows whose
 # classes cycle through `classes[region]`.

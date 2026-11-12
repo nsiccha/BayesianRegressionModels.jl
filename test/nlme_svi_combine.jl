@@ -4,9 +4,12 @@ include(joinpath(@__DIR__, "nlme_svi_owned_fixture.jl"))
 using LinearAlgebra, Serialization, Statistics
 
 const SLICE_AD = AutoEnzyme(; mode=Enzyme.Reverse)
+# These oracles are expressed in packed coordinates; keep their plain factors.
+# Centered/default composition is covered by nlme_svi_default_centering.jl.
+slice_plain_fit(args...; kwargs...) = brm_svi_fit(args...; centering=nothing, kwargs...)
 slice_model(data) = brm_nlme_model(RKBRMI(svi_slice_model(data)); ad_backend=SLICE_AD,
     SVI_SLICE_GROUPS...)
-slice_quick(x; seed=1) = brm_svi_fit(x; rng=Xoshiro(seed), SVI_SLICE_QUICK...)
+slice_quick(x; seed=1) = slice_plain_fit(x; rng=Xoshiro(seed), SVI_SLICE_QUICK...)
 
 # The expected product for one key: the slices' informed marginals over the
 # projected prior (`m0`, `sd0`), as in the formula, computed independently.
@@ -134,7 +137,7 @@ end
         @test only(start.units[label].Λ) ≈ Λ
     end
     # The fit starts there: globals by key, units by label, rank part zero.
-    fit = brm_svi_fit(full; start, max_iterations=0, ndraws=0, family=LowRankGlobal(2))
+    fit = slice_plain_fit(full; start, max_iterations=0, ndraws=0, family=LowRankGlobal(2))
     d = fit.diagnostics
     @test d.start.applied == (; globals=7, units=9)
     order = [findfirst(isequal(key), start.globals.keys) for key in gkeys]
@@ -147,16 +150,16 @@ end
         @test d.q.U[i] ≈ cholesky(Symmetric(start.units[label].Λ)).L
     end
     # The shorthand combines inline with the same defaults.
-    inline = brm_svi_fit(full; start=fits, max_iterations=0, ndraws=0).diagnostics.q
-    public = brm_svi_fit(full; start=brm_svi_combine(full, states), max_iterations=0, ndraws=0).diagnostics.q
+    inline = slice_plain_fit(full; start=fits, max_iterations=0, ndraws=0).diagnostics.q
+    public = slice_plain_fit(full; start=brm_svi_combine(full, states), max_iterations=0, ndraws=0).diagnostics.q
     @test inline.μ == public.μ == d.q.μ && inline.M == public.M
     # A start is data-only: it serializes and starts a fit in place of the original.
     io = IOBuffer()
     serialize(io, start)
     loaded = deserialize(seekstart(io))
-    @test brm_svi_fit(full; start=loaded, max_iterations=0, ndraws=0).diagnostics.q.μ == d.q.μ
+    @test slice_plain_fit(full; start=loaded, max_iterations=0, ndraws=0).diagnostics.q.μ == d.q.μ
     # Another start leaves the receipt empty.
-    @test brm_svi_fit(full; max_iterations=0, ndraws=0).diagnostics.start === nothing
+    @test slice_plain_fit(full; max_iterations=0, ndraws=0).diagnostics.start === nothing
 end
 
 @stestset "slice combination: cold units and uninformed coordinates keep the default" begin
@@ -166,7 +169,7 @@ end
     start = brm_svi_combine(full, fits)
     @test Set(start.receipt.units.cold) == Set(["e1", "e2", "e3", "e4"])
     @test start.receipt.globals.informed == [2, 2, 2, 1, 2, 1, 0]   # k4 is east's only
-    fit = brm_svi_fit(full; start, max_iterations=0, ndraws=0, global_scale=0.3, unit_scale=2.0)
+    fit = slice_plain_fit(full; start, max_iterations=0, ndraws=0, global_scale=0.3, unit_scale=2.0)
     d = fit.diagnostics
     @test d.start.applied == (; globals=6, units=5)
     @test d.q.ρ[end] == log(0.3)
@@ -237,7 +240,7 @@ end
     # `z[c]` entries are unit-owned and named by position. The second slice
     # numbers its coefficients from 1, so its `z.1` is s4's, not s1's.
     full = brm_nlme_model(RKBRMI(svi_owned_model(svi_owned_data(1:6))); ad_backend=SLICE_AD)
-    quick(data, seed) = brm_svi_fit(svi_owned_model(data); rng=Xoshiro(seed),
+    quick(data, seed) = slice_plain_fit(svi_owned_model(data); rng=Xoshiro(seed),
         max_iterations=0, ndraws=0)
     first_slice = quick(svi_owned_data(1:3), 1)
     local_slice = quick(merge(svi_owned_data(4:6), (; c1=[1, 3, 5], c2=[2, 4, 6], ncoeff=6)), 2)
@@ -330,9 +333,9 @@ end
         Dict{Any,NamedTuple}(k => (; v.keys, v.M, v.Λ, v.U) for (k, v) in st.units),
         st.group, st.nested, st.shared, st.fixed, st.unit_partition, st.updates)
     @test_throws "a BRM without brm_svi_combine wrote it" brm_svi_combine(full, [old])
-    @test_throws "factor-level start" brm_svi_fit(full; laplace=GaussianBlockLaplace(),
+    @test_throws "factor-level start" slice_plain_fit(full; laplace=GaussianBlockLaplace(),
         start=[north])
-    @test_throws "not both" brm_svi_fit(full; start=[north], inits=(; a=0.0),
+    @test_throws "not both" slice_plain_fit(full; start=[north], inits=(; a=0.0),
         max_iterations=0, ndraws=0)
 end
 
@@ -358,7 +361,7 @@ end
 @stestset "slice combination: a low-rank slice's sites are joint" begin
     data = svi_slice_data(Xoshiro(55), SVI_SLICE_REGIONS, SVI_SLICE_CLASSES, 4)
     full = slice_model(data)
-    fit = brm_svi_fit(svi_slice_model(svi_slice_region(data, "east")); rng=Xoshiro(2),
+    fit = slice_plain_fit(svi_slice_model(svi_slice_region(data, "east")); rng=Xoshiro(2),
         family=LowRankGlobal(1), SVI_SLICE_QUICK...)
     q = fit.diagnostics.q
     # Narrower than the prior everywhere, so all of them are in the joint site.
@@ -391,9 +394,9 @@ end
     # takes the direction in which P is widest relative to it.
     globals = BRM._brm_svi_globals(full)
     rows = [findfirst(isequal(key), gkeys) for key in gkeys[joined]]
-    meanfield = brm_svi_fit(full; start, max_iterations=0, ndraws=0).diagnostics.q
+    meanfield = slice_plain_fit(full; start, max_iterations=0, ndraws=0).diagnostics.q
     @test meanfield.ρ[rows] ≈ log.(1 ./ sqrt.(diag(P)))
-    lowrank = brm_svi_fit(full; start, max_iterations=0, ndraws=0,
+    lowrank = slice_plain_fit(full; start, max_iterations=0, ndraws=0,
         family=LowRankGlobal(1)).diagnostics.q
     d = 1 ./ sqrt.(diag(P))
     E = eigen(Symmetric(d .* P .* d'))
@@ -592,7 +595,7 @@ end
     data = svi_slice_ridge_data(Xoshiro(7))
     groups = (; subject_group=:subject)
     full = brm_nlme_model(RKBRMI(svi_slice_ridge_model(data)); ad_backend=SLICE_AD, groups...)
-    states = [brm_svi_checkpoint(brm_svi_fit(svi_slice_ridge_model(svi_slice_rows(data, data.region .== r));
+    states = [brm_svi_checkpoint(slice_plain_fit(svi_slice_ridge_model(svi_slice_rows(data, data.region .== r));
         rng=Xoshiro(10 + k), family=MeanFieldGlobal(), max_iterations=0, ndraws=0, batch_size=4, groups...))
         for (k, r) in enumerate(("plus", "minus"))]
     at = findfirst(==("a"), String.(first(states).globals))
@@ -615,7 +618,7 @@ end
     @test start.globals.σ[g] ≈ 0.1
     @test r.spread[k] > 50
     # A fit from it takes those.
-    q = brm_svi_fit(full; start, max_iterations=0, ndraws=0).diagnostics.q
+    q = slice_plain_fit(full; start, max_iterations=0, ndraws=0).diagnostics.q
     @test exp(q.ρ[k]) ≈ start.globals.σ[g]
 end
 
@@ -668,7 +671,7 @@ end
     data = svi_slice_ridge_data(Xoshiro(7))
     groups = (; subject_group=:subject)
     full = brm_nlme_model(RKBRMI(svi_slice_ridge_model(data)); ad_backend=SLICE_AD, groups...)
-    states = [brm_svi_checkpoint(brm_svi_fit(svi_slice_ridge_model(svi_slice_rows(data, data.region .== r));
+    states = [brm_svi_checkpoint(slice_plain_fit(svi_slice_ridge_model(svi_slice_rows(data, data.region .== r));
         rng=Xoshiro(10 + k), family=LowRankGlobal(1), max_iterations=0, ndraws=0, batch_size=4, groups...))
         for (k, r) in enumerate(("plus", "minus"))]
     ab = [findfirst(==(c), String.(first(states).globals)) for c in ("a", "b")]
@@ -722,7 +725,7 @@ end
     # here a few hundredths along a ridge whose sd is near 0.8, so the ridge needs a
     # longer exploration than the default 40 windows: at the default the slices'
     # ridge sds read 0.18-0.24 and the joint start lands 0.3-0.76 sds off.
-    slices = [brm_svi_fit(svi_slice_ridge_model(svi_slice_rows(data, data.region .== r));
+    slices = [slice_plain_fit(svi_slice_ridge_model(svi_slice_rows(data, data.region .== r));
         rng=Xoshiro(10 + k), family=LowRankGlobal(2), min_windows=200, opts..., groups...)
         for (k, r) in enumerate(("plus", "minus"))]
     # Each slice is a ridge: "plus" pins a + b, "minus" pins a - b.
@@ -740,7 +743,7 @@ end
     joint, diagonal = brm_svi_combine(full, slices), brm_svi_combine(full, fold.(slices))
     @test joint.receipt.globals.joint === :joint && joint.receipt.slice_rank == [2, 2]
     @test diagonal.receipt.globals.joint === :diagonal && isempty(diagonal.globals.correlated)
-    reference = brm_svi_fit(full; rng=Xoshiro(99), family=LowRankGlobal(2), opts...).diagnostics
+    reference = slice_plain_fit(full; rng=Xoshiro(99), family=LowRankGlobal(2), opts...).diagnostics
     gkeys = BRM._brm_svi_coordinate_keys(full)[reference.globals]
     sd = sqrt.(diag(BRM._brm_svi_global_covariance(reference.q)))
     distance(start) = abs.(start.globals.μ[[findfirst(isequal(key), start.globals.keys)
@@ -750,7 +753,7 @@ end
     # 19.3, 13.2).
     @test all(distance(joint)[1:2] .< 0.5)
     @test all(distance(diagonal)[1:2] .> 5)
-    first_window(start, family) = brm_svi_fit(full; rng=Xoshiro(80), start, family,
+    first_window(start, family) = slice_plain_fit(full; rng=Xoshiro(80), start, family,
         max_iterations=50, window=50, opts...).diagnostics.elbo_windows_trimmed[1]
     for family in (MeanFieldGlobal(), LowRankGlobal(2))
         cold, warm, diag_warm = first_window(nothing, family), first_window(joint, family),
@@ -760,7 +763,7 @@ end
     end
     # A fit from the start is itself a slice of its data, so the combination
     # nests (sub-slices -> slice -> whole): alone, it returns the start's means.
-    again = brm_svi_combine(full, [brm_svi_fit(full; start=joint, family=LowRankGlobal(2),
+    again = brm_svi_combine(full, [slice_plain_fit(full; start=joint, family=LowRankGlobal(2),
         max_iterations=0, ndraws=0)])
     @test again.receipt.globals.joint === :joint
     @test again.globals.keys == joint.globals.keys && again.globals.μ ≈ joint.globals.μ
@@ -771,11 +774,11 @@ end
     regions = first.(SVI_SLICE_REGIONS)
     full = slice_model(data)
     opts = (; batch_size=4, ndraws=0)
-    slices = [brm_svi_fit(svi_slice_model(svi_slice_region(data, r)); rng=Xoshiro(70 + k),
+    slices = [slice_plain_fit(svi_slice_model(svi_slice_region(data, r)); rng=Xoshiro(70 + k),
         opts..., SVI_SLICE_GROUPS...) for (k, r) in enumerate(regions)]
     start = brm_svi_combine(full, slices)
-    cold = brm_svi_fit(full; rng=Xoshiro(80), opts...)
-    warm = brm_svi_fit(full; rng=Xoshiro(80), start, opts...)
+    cold = slice_plain_fit(full; rng=Xoshiro(80), opts...)
+    warm = slice_plain_fit(full; rng=Xoshiro(80), start, opts...)
     q = cold.diagnostics.q
     gkeys = BRM._brm_svi_coordinate_keys(full)[cold.diagnostics.globals]
     order = [findfirst(isequal(key), start.globals.keys) for key in gkeys]
@@ -863,7 +866,7 @@ end
     full = brm_nlme_model(RKBRMI(svi_slice_slope_model(data)); ad_backend=SLICE_AD,
         subject_group=:subject)
     @test length(full.view.mu_references) == 2        # intercept and slope
-    fits = [brm_svi_fit(svi_slice_slope_model(svi_slice_region(data, r)); rng=Xoshiro(s),
+    fits = [slice_plain_fit(svi_slice_slope_model(svi_slice_region(data, r)); rng=Xoshiro(s),
         max_iterations=0, ndraws=0, subject_group=:subject) for (s, r) in enumerate(regions)]
     for (s, fit) in enumerate(fits)
         q = fit.diagnostics.q
@@ -898,7 +901,7 @@ end
         subject_group=:subject)
     rk, view = full.backend, full.view
     @test view.ragged && isempty(view.mu_references)
-    fits = [brm_svi_fit(svi_slice_stratified_model(svi_slice_region(data, r)); rng=Xoshiro(s),
+    fits = [slice_plain_fit(svi_slice_stratified_model(svi_slice_region(data, r)); rng=Xoshiro(s),
         max_iterations=0, ndraws=0, subject_group=:subject) for (s, r) in enumerate(regions)]
     for (s, fit) in enumerate(fits)
         q = fit.diagnostics.q
@@ -935,7 +938,7 @@ end
     # effect over that scale, tightly.
     effect(s) = (startswith(s, "c") ? 0.03 : 1.2) * sin(3 * sum(Int, codeunits(s)))
     slices = map(("calm" => 0.03, "wild" => 1.2)) do (r, τ)
-        fit = brm_svi_fit(svi_slice_rate_model(svi_slice_rows(data, data.region .== r));
+        fit = slice_plain_fit(svi_slice_rate_model(svi_slice_rows(data, data.region .== r));
             rng=Xoshiro(1), max_iterations=0, ndraws=0, groups...)
         d = fit.diagnostics
         names = string.(d.model.view.coordinates[d.globals])
@@ -966,7 +969,7 @@ end
         startswith(label, "w") &&
             @test abs(b_c + τ_c * only(copied.units[label].M) - 1 - effect(label)) > 0.5
     end
-    first_window(start) = brm_svi_fit(full; rng=Xoshiro(81), start, max_iterations=50,
+    first_window(start) = slice_plain_fit(full; rng=Xoshiro(81), start, max_iterations=50,
         window=50, batch_size=3, ndraws=0).diagnostics.elbo_windows_trimmed[1]
     cold, carried, copied_elbo = first_window(nothing), first_window(start), first_window(copied)
     @info "first-window trimmed ELBO" cold carried copied = copied_elbo
@@ -980,7 +983,7 @@ end
     groups = (; subject_group=:subject, shared_groups=(:device,))
     full = brm_nlme_model(RKBRMI(svi_slice_device_model(data)); ad_backend=SLICE_AD, groups...)
     device_key(key) = hasproperty(key, :level) && startswith(string(key.level), "d")
-    fits = [brm_svi_fit(svi_slice_device_model(svi_slice_region(data, r)); rng=Xoshiro(s),
+    fits = [slice_plain_fit(svi_slice_device_model(svi_slice_region(data, r)); rng=Xoshiro(s),
         max_iterations=0, ndraws=0, groups...) for (s, r) in enumerate(regions)]
     for (s, fit) in enumerate(fits)
         q = fit.diagnostics.q
@@ -1045,7 +1048,7 @@ end
     data = svi_slice_data(Xoshiro(60), SVI_SLICE_REGIONS, SVI_SLICE_CLASSES, 4)
     regions = first.(SVI_SLICE_REGIONS)
     full = slice_model(data)
-    fits = [brm_svi_fit(svi_slice_model(svi_slice_region(data, r)); rng=Xoshiro(s),
+    fits = [slice_plain_fit(svi_slice_model(svi_slice_region(data, r)); rng=Xoshiro(s),
         family=LowRankGlobal(1), SVI_SLICE_QUICK...) for (s, r) in enumerate(regions)]
     # Recognizable factors, narrower than the prior, each with a rank part, so the
     # globals' sites are joint.
@@ -1086,10 +1089,10 @@ end
     slice_same_start(start, brm_svi_combine(full, slice_uninformed(states, [gkeys[a]])))
     @test slice_uninformed(states, [gkeys[a]])[1].q.informed != states[1].q.informed
     # The fit starts it at the default: the prior-median point and `global_scale`.
-    d = brm_svi_fit(full; start, max_iterations=0, ndraws=0, global_scale=0.3).diagnostics
+    d = slice_plain_fit(full; start, max_iterations=0, ndraws=0, global_scale=0.3).diagnostics
     @test d.q.μ[a] == point[globals[a]] && d.q.ρ[a] == log(0.3)
     @test d.start.applied.globals ==
-        brm_svi_fit(full; start=base, max_iterations=0, ndraws=0).diagnostics.start.applied.globals - 1
+        slice_plain_fit(full; start=base, max_iterations=0, ndraws=0).diagnostics.start.applied.globals - 1
 
     # The units' scale, by String: the units' draws are carried to its default,
     # keeping each unit's effect.
