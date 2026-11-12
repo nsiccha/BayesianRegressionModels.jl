@@ -101,7 +101,8 @@ const PINS = [
     # Treebars 0.1.5: nested progress used by recoverable adaptive SMC pilots.
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "44c37e60e22bab9e8a0d3ab88bd47b575dec6bb0"),
     # 0.2.11: public covariance projection used by selective SMC carries.
-    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "8e1d45a78b38e3e9d82ee75312e0eb7e5203d327"),
+    # 0.2.18 satisfies ReactiveKernelsPPL 0.1.162's SMC extension floor.
+    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "c4d6885edefe8aa33acf02d3e571d224662825b4"),
     ("SequentialMonteCarlo", "https://github.com/awllee/SequentialMonteCarlo.jl.git", "d3a322394c7a1df07e3b5e941acc2960f4daf656"),
     # Current plain-function/array PPL surface, with data-only declaration inputs
     # retained before predictor inlining (computed membership axes; 606d76d0),
@@ -422,7 +423,9 @@ const PINS = [
     # 23fbef437 (RK 0.1.164 / RKPPL 0.1.156) also adds explicit SMC checkpoint rescore.
     # It includes RK 0.1.153's native LogNormal Reverse inference fix and
     # RK 0.1.161's allocation-free one-sided variance scan and plate folds.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "23fbef437c904240d944939966f869e4f8d850e8"),
+    # 1c40ad337 (RK 0.1.198 / RKPPL 0.1.162) includes positional kernel calls,
+    # captured group-label predicates and callable arguments in JAX host helpers.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "1c40ad337ec7487466971213266ff0861906da00"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
