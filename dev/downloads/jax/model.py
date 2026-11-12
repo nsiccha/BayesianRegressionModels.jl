@@ -157,11 +157,11 @@ def log_density(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
     def cell(ppl_cell_b_mu_g_g_tau):
         constrain_2 = jnp.exp(ppl_cell_b_mu_g_g_tau)
         return constrain_2
-    b_mu_g_g_tau = jax.vmap(cell, in_axes=(0,))(plate_argument)
+    b_mu_g_g_tau = (jnp.zeros(plate_argument.shape[:1], dtype=jnp.float64) if 0 in plate_argument.shape[:1] else jax.vmap(cell, in_axes=(0,))(plate_argument))
     plate_argument_2 = unconstrained[1:3]
     def cell_2(ppl_cell_b_mu_g_g_tau):
         return ppl_cell_b_mu_g_g_tau
-    ppl_ljcells_b_mu_g_g_tau = jax.vmap(cell_2, in_axes=(0,))(plate_argument_2)
+    ppl_ljcells_b_mu_g_g_tau = (jnp.zeros(plate_argument_2.shape[:1], dtype=jnp.float64) if 0 in plate_argument_2.shape[:1] else jax.vmap(cell_2, in_axes=(0,))(plate_argument_2))
     ppl_lkj_raw_b_mu_g_g_L = unconstrained[3:4]
     ppl_lkj_partials_b_mu_g_g_L = jnp.tanh(ppl_lkj_raw_b_mu_g_g_L)
     out = jnp.ones((2,), dtype=jnp.float64)
@@ -258,7 +258,7 @@ def log_density(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
             return -jnp.inf
         ppl_density = jax.lax.cond(sigma > 0, then_arm, else_arm_3)
         return ppl_density
-    ppl_pw_y_resp = jax.vmap(cell_3, in_axes=(0, 0, None))(y, ppl_offset_mu, constrain)
+    ppl_pw_y_resp = (jnp.zeros(y.shape[:1], dtype=jnp.float64) if 0 in y.shape[:1] and ppl_offset_mu.shape[:1] == y.shape[:1] else jax.vmap(cell_3, in_axes=(0, 0, None))(y, ppl_offset_mu, constrain))
     ppl_lik_y_resp = jnp.sum(ppl_pw_y_resp)
     def then_arm():
         return -jnp.inf
@@ -274,7 +274,7 @@ def log_density(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
             return -log_scale - b_mu_g_g_tau_2 / scale_binding_2
         logpdf_2 = jax.lax.cond(b_mu_g_g_tau_2 < 0, then_arm_2, else_arm_2)
         return logpdf_2
-    ppl_pw_prior_b_mu_g_g_tau = jax.vmap(cell_4, in_axes=(0,))(b_mu_g_g_tau)
+    ppl_pw_prior_b_mu_g_g_tau = (jnp.zeros(b_mu_g_g_tau.shape[:1], dtype=jnp.float64) if 0 in b_mu_g_g_tau.shape[:1] else jax.vmap(cell_4, in_axes=(0,))(b_mu_g_g_tau))
     ppl_prior_b_mu_g_g_tau = jnp.sum(ppl_pw_prior_b_mu_g_g_tau)
     total_2 = -0.6931471805599453
     def loop_body_4(i_4, carry_4):
@@ -310,7 +310,7 @@ def log_density(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
             return log_scale
         logpdf_2 = standard_logpdf - jax.lax.cond(value_3, then_arm_5, else_arm_5)
         return logpdf_2
-    ppl_pw_prior_b_mu_g_g_z = jax.vmap(cell_5, in_axes=(0,))(ppl_arrflat_b_mu_g_g_z)
+    ppl_pw_prior_b_mu_g_g_z = (jnp.zeros(ppl_arrflat_b_mu_g_g_z.shape[:1], dtype=jnp.float64) if 0 in ppl_arrflat_b_mu_g_g_z.shape[:1] else jax.vmap(cell_5, in_axes=(0,))(ppl_arrflat_b_mu_g_g_z))
     ppl_prior_b_mu_g_g_z = jnp.sum(ppl_pw_prior_b_mu_g_g_z)
     def cell_6(pop_mu_beta_pop_2, scale):
         location_binding = 0.0
@@ -327,7 +327,7 @@ def log_density(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
             return log_scale
         logpdf_2 = standard_logpdf - jax.lax.cond(jnp.logical_and(scale == 0, pop_mu_beta_pop_2 != location_binding), then_arm_3, else_arm_3)
         return logpdf_2
-    ppl_pw_prior_pop_mu_beta_pop = jax.vmap(cell_6, in_axes=(0, 0))(pop_mu_beta_pop, ppl_parg_pop_mu_beta_pop_2)
+    ppl_pw_prior_pop_mu_beta_pop = (jnp.zeros(pop_mu_beta_pop.shape[:1], dtype=jnp.float64) if 0 in pop_mu_beta_pop.shape[:1] and ppl_parg_pop_mu_beta_pop_2.shape[:1] == pop_mu_beta_pop.shape[:1] else jax.vmap(cell_6, in_axes=(0, 0))(pop_mu_beta_pop, ppl_parg_pop_mu_beta_pop_2))
     ppl_prior_pop_mu_beta_pop = jnp.sum(ppl_pw_prior_pop_mu_beta_pop)
     prior = logpdf + ppl_prior_b_mu_g_g_tau + ppl_prior_b_mu_g_g_L + ppl_prior_b_mu_g_g_z + ppl_prior_pop_mu_beta_pop
     u_argument_2 = unconstrained[0]
@@ -367,7 +367,7 @@ def log_prior(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
     def cell(ppl_cell_b_mu_g_g_tau):
         constrain_2 = jnp.exp(ppl_cell_b_mu_g_g_tau)
         return constrain_2
-    b_mu_g_g_tau = jax.vmap(cell, in_axes=(0,))(plate_argument)
+    b_mu_g_g_tau = (jnp.zeros(plate_argument.shape[:1], dtype=jnp.float64) if 0 in plate_argument.shape[:1] else jax.vmap(cell, in_axes=(0,))(plate_argument))
     ppl_lkj_raw_b_mu_g_g_L = unconstrained[3:4]
     ppl_lkj_partials_b_mu_g_g_L = jnp.tanh(ppl_lkj_raw_b_mu_g_g_L)
     out = jnp.ones((2,), dtype=jnp.float64)
@@ -409,7 +409,7 @@ def log_prior(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
             return -log_scale - b_mu_g_g_tau_2 / scale_binding_2
         logpdf_2 = jax.lax.cond(b_mu_g_g_tau_2 < 0, then_arm_2, else_arm_2)
         return logpdf_2
-    ppl_pw_prior_b_mu_g_g_tau = jax.vmap(cell_2, in_axes=(0,))(b_mu_g_g_tau)
+    ppl_pw_prior_b_mu_g_g_tau = (jnp.zeros(b_mu_g_g_tau.shape[:1], dtype=jnp.float64) if 0 in b_mu_g_g_tau.shape[:1] else jax.vmap(cell_2, in_axes=(0,))(b_mu_g_g_tau))
     ppl_prior_b_mu_g_g_tau = jnp.sum(ppl_pw_prior_b_mu_g_g_tau)
     total = -0.6931471805599453
     def loop_body_2(i_2, carry_2):
@@ -445,7 +445,7 @@ def log_prior(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
             return log_scale
         logpdf_2 = standard_logpdf - jax.lax.cond(value_2, then_arm_5, else_arm_5)
         return logpdf_2
-    ppl_pw_prior_b_mu_g_g_z = jax.vmap(cell_3, in_axes=(0,))(ppl_arrflat_b_mu_g_g_z)
+    ppl_pw_prior_b_mu_g_g_z = (jnp.zeros(ppl_arrflat_b_mu_g_g_z.shape[:1], dtype=jnp.float64) if 0 in ppl_arrflat_b_mu_g_g_z.shape[:1] else jax.vmap(cell_3, in_axes=(0,))(ppl_arrflat_b_mu_g_g_z))
     ppl_prior_b_mu_g_g_z = jnp.sum(ppl_pw_prior_b_mu_g_g_z)
     def cell_4(pop_mu_beta_pop_2, scale):
         location_binding = 0.0
@@ -462,7 +462,7 @@ def log_prior(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
             return log_scale
         logpdf_2 = standard_logpdf - jax.lax.cond(jnp.logical_and(scale == 0, pop_mu_beta_pop_2 != location_binding), then_arm_3, else_arm_3)
         return logpdf_2
-    ppl_pw_prior_pop_mu_beta_pop = jax.vmap(cell_4, in_axes=(0, 0))(pop_mu_beta_pop, ppl_parg_pop_mu_beta_pop_2)
+    ppl_pw_prior_pop_mu_beta_pop = (jnp.zeros(pop_mu_beta_pop.shape[:1], dtype=jnp.float64) if 0 in pop_mu_beta_pop.shape[:1] and ppl_parg_pop_mu_beta_pop_2.shape[:1] == pop_mu_beta_pop.shape[:1] else jax.vmap(cell_4, in_axes=(0, 0))(pop_mu_beta_pop, ppl_parg_pop_mu_beta_pop_2))
     ppl_prior_pop_mu_beta_pop = jnp.sum(ppl_pw_prior_pop_mu_beta_pop)
     prior = logpdf + ppl_prior_b_mu_g_g_tau + ppl_prior_b_mu_g_g_L + ppl_prior_b_mu_g_g_z + ppl_prior_pop_mu_beta_pop
     def then_arm_2():
@@ -495,7 +495,7 @@ def log_likelihood(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array
     def cell(ppl_cell_b_mu_g_g_tau):
         constrain_2 = jnp.exp(ppl_cell_b_mu_g_g_tau)
         return constrain_2
-    b_mu_g_g_tau = jax.vmap(cell, in_axes=(0,))(plate_argument)
+    b_mu_g_g_tau = (jnp.zeros(plate_argument.shape[:1], dtype=jnp.float64) if 0 in plate_argument.shape[:1] else jax.vmap(cell, in_axes=(0,))(plate_argument))
     ppl_lkj_raw_b_mu_g_g_L = unconstrained[3:4]
     ppl_lkj_partials_b_mu_g_g_L = jnp.tanh(ppl_lkj_raw_b_mu_g_g_L)
     out = jnp.ones((2,), dtype=jnp.float64)
@@ -574,7 +574,7 @@ def log_likelihood(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array
             return -jnp.inf
         ppl_density = jax.lax.cond(sigma > 0, then_arm, else_arm_3)
         return ppl_density
-    ppl_pw_y_resp = jax.vmap(cell_2, in_axes=(0, 0, None))(y, ppl_offset_mu, constrain)
+    ppl_pw_y_resp = (jnp.zeros(y.shape[:1], dtype=jnp.float64) if 0 in y.shape[:1] and ppl_offset_mu.shape[:1] == y.shape[:1] else jax.vmap(cell_2, in_axes=(0, 0, None))(y, ppl_offset_mu, constrain))
     ppl_lik_y_resp = jnp.sum(ppl_pw_y_resp)
     def then_arm():
         return None
@@ -603,7 +603,7 @@ def log_jacobian(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
     plate_argument = unconstrained[1:3]
     def cell(ppl_cell_b_mu_g_g_tau):
         return ppl_cell_b_mu_g_g_tau
-    ppl_ljcells_b_mu_g_g_tau = jax.vmap(cell, in_axes=(0,))(plate_argument)
+    ppl_ljcells_b_mu_g_g_tau = (jnp.zeros(plate_argument.shape[:1], dtype=jnp.float64) if 0 in plate_argument.shape[:1] else jax.vmap(cell, in_axes=(0,))(plate_argument))
     ppl_lkj_raw_b_mu_g_g_L = unconstrained[3:4]
     ppl_lkj_partials_b_mu_g_g_L = jnp.tanh(ppl_lkj_raw_b_mu_g_g_L)
     total = 0.0
@@ -665,7 +665,7 @@ def constrain(unconstrained: ArrayLike, **prepared: ArrayLike) -> dict:
     def cell(ppl_cell_b_mu_g_g_tau):
         constrain_3 = jnp.exp(ppl_cell_b_mu_g_g_tau)
         return constrain_3
-    b_mu_g_g_tau = jax.vmap(cell, in_axes=(0,))(plate_argument)
+    b_mu_g_g_tau = (jnp.zeros(plate_argument.shape[:1], dtype=jnp.float64) if 0 in plate_argument.shape[:1] else jax.vmap(cell, in_axes=(0,))(plate_argument))
     ppl_lkj_raw_b_mu_g_g_L = unconstrained[3:4]
     ppl_lkj_partials_b_mu_g_g_L = jnp.tanh(ppl_lkj_raw_b_mu_g_g_L)
     out = jnp.ones((2,), dtype=jnp.float64)
