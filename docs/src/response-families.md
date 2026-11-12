@@ -78,7 +78,11 @@ end)((; x=[-1., 0., 1., 2.], count=[0, 1, 0, 4],
 A nested formula gives `CategoricalLogit` one predictor per non-reference
 level. Plain vectors use sorted unique levels; a categorical vector uses its
 declared level order. The first level has logit zero. Fitted levels remain
-fixed during replay.
+fixed during replay. `effect(choice, x) ~ Normal(0, s)` addresses the nested
+formula's coefficients through the response: it sets `x`'s coefficient in every
+non-reference level. On the ReactiveKernels backend the level labels are data,
+so responses that differ only in their labels share one program; the number of
+levels still sets the number of predictors.
 
 An ordinal model supplies its location through thresholds, so its common
 predictor has no intercept. `Cumulative()` has ordered thresholds;
