@@ -7896,16 +7896,34 @@ const _RK_LEVELED_FAMILIES =
         :multinomial, :categorical])
 
 # Recoded 1..K levels for a leveled vector response (SB's
-# `_brm_response_levels`: sort(unique) order, reference = level 1).
+# `_brm_response_levels`: sort(unique) order, reference = level 1). The levels
+# are the fit's (`_brm_fitted_levels`): on a replay the rows are coded against
+# the training levels, and a label the fit never saw is refused by name, as
+# the emitted level table (`_rk_response_level_table!`) codes them.
 function _rk_leveled_levels(response::Symbol, raw::AbstractVector)
     prefix = "RK backend"
     raw isa AbstractVector || error(
         "$prefix: response `$response` must be an observed vector")
-    prepared = _brm_response_levels(response, raw; prefix)
+    prepared = _brm_response_levels(response, raw;
+        training=(; levels=_brm_fitted_levels(response, raw)), prefix)
     K = prepared.fit.n_levels
     K >= 1 || error(
         "$prefix: response `$response` has no observed levels")
     (prepared.response, K, prepared.fit.levels)
+end
+
+# A coded response's level table is a fitted value of the graph, as a
+# grouping's levels are: the levels of a fit-role copy of the response,
+# `y_fit_levels = brm_fit_levels(y_fit)`, which `brm_prepared_indices` codes the
+# rows against. So one program serves every label set of the response (user
+# principle 0ikeidi: data values are runtime inputs; 0pde95i: computed in the
+# graph), a frozen replay codes its rows against the training levels, and a
+# data-free replay binds the exported fitted levels (`brm_fitted_state`).
+function _rk_response_level_table!(derived::Vector{_RKDerivedSpec},
+        columns::AbstractDict{Symbol}, taken::Set{Symbol}, key::Symbol,
+        raw::AbstractVector)
+    fit = _rk_fit_input!(derived, columns, taken, key, _brm_fit_input_source(key, raw))
+    Expr(:_rk_data_preparation, :brm_fit_levels, fit)
 end
 
 # OrderedLogistic keeps SB's raw-integer coding (K = max(y)): no recode,
@@ -9180,12 +9198,13 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
                 predictor_specs) :
             _rk_unleveled(entry, predictor)
         if family in (:categorical_logit, :ordinal, :categorical)
-            _, _, levels = _rk_leveled_levels(entry.key, entry.raw_response)
             raw = _rk_mint_generated!(taken, columns, string(entry.key, "_raw"))
             columns[raw] = entry.raw_response
+            levels = _rk_response_level_table!(derived, columns, taken,
+                entry.key, entry.raw_response)
             push!(derived, _RKDerivedSpec(entry.key,
-                Expr(:_rk_data_preparation, :brm_prepared_indices, raw,
-                    _rk_ast_level_values(levels)), entry.key))
+                Expr(:_rk_data_preparation, :brm_prepared_indices, raw, levels),
+                entry.key))
         end
         # Mixture v1 admits no response-level weights (no driving case)
         # and no `gp` mixture predictors (the AST plate ranges over one
