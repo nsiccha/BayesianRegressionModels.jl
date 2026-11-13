@@ -35,6 +35,7 @@ import CategoricalArrays as CA
 import StatsFuns
 using StatsFuns: normcdf, norminvcdf
 include("likelihood_distributions.jl")
+include("hidden_markov.jl")
 include("censored_delays.jl")
 include("preparation_basis.jl")
 include("preparation_hsgp.jl")
@@ -106,6 +107,7 @@ include("sb_gmrf.jl")
 include("sb_gmrf_multiresolution.jl")
 include("sb_marginal_ranef.jl")
 include("sb_cell_julia.jl")
+include("sb_hidden_markov.jl")
 include("sb_cell_formulas.jl")
 include("sb_distribution_statistics.jl")
 include("sb_plate_outputs.jl")
@@ -257,6 +259,8 @@ export me, mi, s, t2, ar, dar, rw, cdar, car, gmrf, mo, mo1, hsgp, multigroup, O
 export TruncatedNormal, kernel, ragged
 # A plate's grouping by a data column, and per-group AR(1) residuals in its cells.
 export groups, AR1Normal
+# A sequence observed through a hidden Markov state, in a `@plate` cell.
+export HiddenMarkov
 export brm_multinomial, brm_multinomial_lpmf, brm_multinomial_lpmfs, brm_multinomial_rng
 # Julia-native response-family composition. `truncated` and `censored` are the
 # exact Distributions.jl functions; `interval_censored` is BRM's formula marker

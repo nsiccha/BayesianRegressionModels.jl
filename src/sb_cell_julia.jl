@@ -211,6 +211,12 @@ end
 function _sb_cell_statements(statements, scope)
     out = Any[]
     for statement in statements
+        # A hidden Markov observation is its emission locals and the
+        # forward-algorithm family (sb_hidden_markov.jl).
+        if _sb_is_cell_hidden_markov(statement, scope)
+            append!(out, _sb_cell_hidden_markov(statement, scope))
+            continue
+        end
         # A latent in total coordinates is two statements (cell_total_coordinates.jl).
         total = _sb_cell_total_coordinates(statement, scope)
         total === nothing ? push!(out, _sb_cell_statement(statement, scope)) :

@@ -10,6 +10,7 @@ const BRM = BayesianRegressionModels
 
 include("rk_distribution_statistics.jl")
 include("rk_distribution_graphs.jl")
+include("rk_hidden_markov.jl")
 include("rk_statistical_gp.jl")
 include("rk_gmrf.jl")
 
