@@ -31,7 +31,8 @@ instead of failing at run time.
   does, which costs less there than nesting. Densities and gradients are
   unchanged. Before RKPPL 0.1.174, `Categorical` is one Distributions `logpdf`
   call per cell, which RK cannot evaluate once per state, so those models gain
-  less.
+  only 1.3–1.4 times (RKPPL 0.1.168: switching 132 → 98 µs, hierarchical
+  3,384 → 2,394 µs).
 
 ## 0.2.290
 
