@@ -56,9 +56,9 @@ end
     function expected_step(slope)
         total = 0.0
         for g in -8:h:8
-            c.V[1] .= 0
+            c.V[1] .= slope
             BRM._brm_svi_coupling_step!(c, q, 1, [a*g^3 - slope*g], [g], β)
-            total += only(c.V[1]) / β * pdf(Normal(), g) * h
+            total += (only(c.V[1]) - slope) / β * pdf(Normal(), g) * h
         end
         total
     end
