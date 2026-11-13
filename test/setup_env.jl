@@ -430,7 +430,10 @@ const PINS = [
     # d670c97b8 (RK 0.1.223 / RKPPL 0.1.172) reads categorical logits row by row,
     # K from the data (`CategoricalLogit.(eachrow(E))`, a concise class block), and
     # no longer exports `adaptive_centering_problem`, which is BRM's.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d670c97b8c2976ae8c1e2a71850e355903a766d3"),
+    # 93e326d2 (RK 0.1.224 / RKPPL 0.1.174 / DistributionKernels 0.1.10)
+    # maps Categorical, Poisson, Binomial and Bernoulli to native density
+    # objects, including HiddenMarkov's per-state emission graphs.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "93e326d27247e00060cdaa88f9f1171eec8a99e5"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

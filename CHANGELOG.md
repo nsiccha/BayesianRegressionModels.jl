@@ -12,6 +12,14 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.294
+
+- RKBRMI `HiddenMarkov` emissions from `Categorical`, `Poisson`, `Binomial`
+  and `Bernoulli` compose RK's native density graphs. The emission plate
+  retains its per-state law reuse and ordinary Enzyme reverse gradients.
+  Requires ReactiveKernelsPPL 0.1.174 and DistributionKernels 0.1.10; the
+  test environment pins RK `93e326d2` with those mappings.
+
 ## 0.2.293
 
 - A `@plate` cell latent with no entry in any cell (`z ~ Normal(loc[i], 1)`
