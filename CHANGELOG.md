@@ -28,7 +28,10 @@ instead of failing at run time.
   Default `settle_windows=nothing` lets the guard use the remaining iteration
   budget; explicit limits are honored, and the ELBO-only policy retains its
   old 100-window default. `settle_windows=0` skips settling and applies the
-  iterate check before leaving exploration. Old optimizer
+  iterate check before leaving exploration. Once settling has begun, the final
+  polishing steps are reserved inside `max_iterations` even if the guard has
+  not passed; this returns an average with `converged=false` and
+  `:max_iterations`, rather than a noisy last iterate. Old optimizer
   checkpoints retain their stopping policy and exact continuation; new ones
   preserve bounded iterate histories across interruption and serialization.
 

@@ -1527,7 +1527,9 @@ autocorrelated series, 1,000-coordinate multiplicity, slow drift, an unvisited
 unit, exact thinning clocks, serialization, and marginal scales without a dense
 low-rank covariance. `nlme_svi_stationarity_fit.jl` checks complete default fits,
 exact continuation through all phases and in a fresh process, old-checkpoint
-policy, and nonconvergence after a settling cap. Both accept testset filters.
+policy, and nonconvergence after a settling cap or budget-triggered averaging,
+including continuation across that transition and a partial final window.
+Both accept testset filters.
 
 `nlme_svi_trend.jl` isolates the previous ELBO-only rule with `stationarity=false`
 and `centering=nothing`. It checks exploration's trend test (BRM 0.2.264): on window

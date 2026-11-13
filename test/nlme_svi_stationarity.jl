@@ -23,6 +23,12 @@ end
     @test BRM._brm_svi_controls(1000; options..., stationarity=false).settle_windows == 100
     @test BRM._brm_svi_controls(1000; options..., settle_windows=3).settle_windows == 3
     @test BRM._brm_svi_controls(1000; options..., settle_windows=0).settle_windows == 0
+    @test BRM._brm_svi_budget_polish_due(95_000, guarded)
+    @test !BRM._brm_svi_budget_polish_due(94_750, guarded)
+    old = Base.structdiff(guarded, NamedTuple{(:budget_polish,)})
+    @test !BRM._brm_svi_budget_polish_due(100_000, old)
+    @test !BRM._brm_svi_budget_polish_due(100_000,
+        BRM._brm_svi_controls(1000; options..., stationarity=false))
 end
 
 @stestset "stationarity history is bounded and has an exact update clock" begin

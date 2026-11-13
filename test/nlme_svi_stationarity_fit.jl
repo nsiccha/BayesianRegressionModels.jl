@@ -62,6 +62,30 @@ svi_stationarity_roundtrip(x) = (io = IOBuffer(); serialize(io, x); seekstart(io
     @test last(statuses) == :settle_limit
     @test svi_same_result(brm_svi_resume(m, capped; ndraws=30), capped)
 
+    # The overall budget also reserves final averaging after settling starts.
+    # A non-round limit consumes its last partial window, without certifying
+    # stationarity or changing the stream when resumed across the transition.
+    budget_options = merge(options, (; max_iterations=d.stages.exploring + 2403))
+    empty!(statuses)
+    budget = brm_svi_fit(m; rng=Xoshiro(802), budget_options...,
+        snapshot=s -> push!(statuses, s.status))
+    bd = budget.diagnostics
+    @test bd.finished && !bd.converged && !bd.stages.settled
+    @test bd.iterations == budget_options.max_iterations
+    @test bd.stages.polishing == 2003
+    @test last(statuses) == :max_iterations
+    @test bd.optimizer.run.average !== nothing
+    @test svi_same_result(brm_svi_resume(m, budget; ndraws=30), budget)
+    part = brm_svi_fit(m; rng=Xoshiro(802), budget_options...,
+        stop_after=bd.optimizer.run.polish_start - 17)
+    state = svi_stationarity_roundtrip(brm_svi_optimizer_checkpoint(part))
+    part = brm_svi_resume(m, state; stop_after=30, ndraws=3)
+    @test part.diagnostics.stages.polishing == 13
+    state = svi_stationarity_roundtrip(brm_svi_optimizer_checkpoint(part))
+    resumed = brm_svi_resume(m, state; ndraws=30)
+    @test svi_same_result(resumed, budget)
+    @test svi_same_state(brm_svi_optimizer_checkpoint(resumed), bd.optimizer)
+
     # A pre-guard checkpoint has neither the control nor the extra history.
     # It must retain its own stopping rule after this package is upgraded.
     legacy_options = (; batch_size=4, window=20, min_windows=6, patience=3,

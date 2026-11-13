@@ -1312,7 +1312,7 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
        max_iterations, lr_global, unit_step, polish_lr, patience, min_windows,
        polish_windows, unit_sampling, settle_windows, unit_curvature, structured_unit_step,
        structured_rank_step, unit_positive_part, sd_bound, trend_windows,
-       trend_skip=patience, stationarity)
+       trend_skip=patience, stationarity, budget_polish=stationarity)
 end
 
 # The windows exploration's trend test reads when the caller names none
@@ -1365,10 +1365,21 @@ const _BRM_SVI_SETTLE_WINDOWS = 100
 
 _brm_svi_finished(run, c) = run.converged || run.iteration >= c.max_iterations ||
     (_brm_svi_stationarity_enabled(c) && _brm_svi_polishing(run) &&
-        run.iteration - run.polish_start >= c.polish_windows * c.window)
+        run.iteration - run.polish_start >= _brm_svi_polish_iterations(run, c))
 _brm_svi_polishing(run) = run.polish_start > 0
 # Controls written before settling existed (a resumed checkpoint) never settle.
 _brm_svi_settle_windows(c) = get(c, :settle_windows, 0)
+
+# Reserve averaging inside the overall budget once settling has begun. The
+# fallback returns a stabilized approximation, not a convergence certificate.
+# Absence in a checkpoint preserves its original transition policy.
+_brm_svi_budget_polish_due(it, c) = get(c, :budget_polish, false) && it < c.max_iterations &&
+    it ÷ c.window >= c.max_iterations ÷ c.window - c.polish_windows
+_brm_svi_budget_polishing(run, c) = _brm_svi_polishing(run) &&
+    _brm_svi_budget_polish_due(run.polish_start, c) &&
+    !_brm_svi_stationarity_state(run).settled
+_brm_svi_polish_iterations(run, c) = _brm_svi_budget_polishing(run, c) ?
+    c.max_iterations - run.polish_start : c.polish_windows * c.window
 
 # The window at which exploration changed step, or 0 while exploring.
 # Legacy checkpoints reconstruct this from their ELBO windows alone.
@@ -1453,7 +1464,7 @@ function _brm_svi_advance!(run, t, c)
         for name in (:μ, :ρ, :Β)
             _brm_svi_average!(getfield(run.average, name), getfield(q, name), k)
         end
-        polished = k >= c.polish_windows * W
+        polished = k >= _brm_svi_polish_iterations(run, c)
     end
     it % W == 0 && push!(run.windows, _brm_svi_window(view(run.trace, it-W+1:it)))
     if polished
@@ -1468,7 +1479,7 @@ function _brm_svi_advance!(run, t, c)
         # Polishing continues settling's step and its Adam moments.
         settled = _brm_svi_settled(windows, explored, c) && _brm_svi_stationary!(run, c)
         _brm_svi_stationarity_enabled(c) && (_brm_svi_stationarity_state(run).settled = settled)
-        (settled ||
+        (settled || _brm_svi_budget_polish_due(it, c) ||
             length(windows) - explored >= _brm_svi_settle_windows(c)) &&
             _brm_svi_start_polishing!(run, q, it)
     elseif length(windows) >= max(c.min_windows, c.patience + 1) &&
@@ -1476,7 +1487,8 @@ function _brm_svi_advance!(run, t, c)
         stationary = _brm_svi_stationary!(run, c)
         # Reducing the step is allowed while moments still move: tight global
         # scales can adapt very slowly under exploration's absolute mean step.
-        # Stationarity gates averaging, not this opportunity to improve the step.
+        # Stationarity is required for convergence; a cap can start averaging
+        # without certifying it. It does not gate this step-size improvement.
         # With no settling phase, exploration must pass before averaging starts.
         !stationary && _brm_svi_settle_windows(c) == 0 && return :window
         _brm_svi_stationarity_explored!(run, c)
@@ -1499,7 +1511,7 @@ _brm_svi_progress_message(run, c) = string(_brm_svi_phase_text(run, c),
 
 _brm_svi_phase_text(run, c) =
     _brm_svi_polishing(run) && run.polish_start < run.iteration ?
-        "polishing $(run.iteration - run.polish_start)/$(c.polish_windows * c.window)" :
+        "polishing $(run.iteration - run.polish_start)/$(_brm_svi_polish_iterations(run, c))" :
     _brm_svi_settling(run, c) ?
         "settling, window $(length(run.windows) - _brm_svi_explored(run, c))" :
         "exploring, window $(length(run.windows))"
@@ -1543,8 +1555,9 @@ end
 
 _brm_svi_end_status(run, c) = !_brm_svi_finished(run, c) ? :stopped :
     run.converged ? :converged :
+    _brm_svi_budget_polishing(run, c) ? :max_iterations :
     (_brm_svi_stationarity_enabled(c) && _brm_svi_polishing(run) &&
-        run.iteration - run.polish_start >= c.polish_windows * c.window) ? :settle_limit : :max_iterations
+        run.iteration - run.polish_start >= _brm_svi_polish_iterations(run, c)) ? :settle_limit : :max_iterations
 
 # ── Snapshots of a running fit ───────────────────────────────────────────────
 
@@ -1946,7 +1959,13 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   `max_iterations` budget; with `stationarity=false` it retains the old cap of
   100 windows. An explicit nonnegative `settle_windows` caps the phase. Reaching
   that cap still starts polishing, but returns `converged=false` unless its
-  tests passed. `settle_windows=0` skips settling and requires the iterate check
+  tests passed. Once settling has begun, the overall iteration budget also
+  reserves the final `polish_windows` for averaging, with `converged=false` and
+  status `:max_iterations` if the tests have not passed. This stays inside
+  `max_iterations`; a short remaining budget uses only its remaining updates,
+  and a non-round limit includes its last partial window. No budget fallback
+  ends exploration before its tests pass.
+  `settle_windows=0` skips settling and requires the iterate check
   to pass during exploration before averaging starts.
   `stationarity=false` uses the ELBO-only rule, as does a resumed checkpoint
   written before this control existed. Stability does not establish global
