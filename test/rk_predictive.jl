@@ -31,6 +31,22 @@ grouped(d) = @brm d begin
     mu ~ 1 + zscale(x) + (1 | g)
     y ~ Normal(mu, sigma)
 end
+scalar_cell(d) = @brm d begin
+    mu ~ 1 + (1 | g | subject)
+    sd(:, g) ~ Exponential(1)
+    @plate for i in eachindex(mu)
+        flag[i] ~ BernoulliLogit(mu[i] + 0.0 * dose[i])
+    end
+end
+mixed_cell(d) = @brm d begin
+    mu ~ 1 + (1 | g | subject)
+    sd(:, g) ~ Exponential(1)
+    sigma ~ Exponential(1)
+    @plate for i in eachindex(mu)
+        y[i] ~ Normal(mu[i] .+ 0.0 .* t[i], sigma)
+        flag[i] ~ BernoulliLogit(mu[i])
+    end
+end
 end
 const PM = PredictiveModels
 
@@ -151,4 +167,35 @@ end
     @test mean.(laws.y) ≈ graph_value(replay, :mu, u) atol=1e-12 rtol=1e-12
     @test all(≈(constrain(replay.model.layout, u).sigma), std.(laws.y))
     @test size(pred(u, Xoshiro(4)).y) == (4,)
+end
+
+@testset "omitted scalar cell responses follow the replay's subjects" begin
+    training = (; subject=["a", "b", "c"], dose=[1.0, 2.0, 3.0],
+        t=[[0.0, 1.0] for _ in 1:3], y=[[0.1, 0.2] for _ in 1:3], flag=[0, 1, 0])
+    for (builder, mixed) in ((PM.scalar_cell, false), (PM.mixed_cell, true))
+        fit = RKBRMI(builder(training))
+        @testset "mixed=$mixed subjects=$n" for n in (1, 2, 5)
+            design = (; subject=["new$i" for i in 1:n], dose=collect(1.0:n),
+                t=[collect(0.0:i) for i in 1:n])
+            supplied = merge(design, (; flag=zeros(Int, n), y=zero.(design.t)))
+            replay = reprocess(fit, design; resample_groups=[:subject])
+            control = reprocess(fit, supplied; resample_groups=[:subject])
+            plan = rk_bound_plan(replay)
+            targets = predictive_targets(replay.model, plan)
+            @test replay.model === fit.model
+            @test targets.flag == (kind=:array, dims=(n,), eltype=Int)
+            # Each replay's own coordinates include its new subjects' effects.
+            layout = ReactiveKernelsPPL.assign_layout(plan)
+            u = collect(range(-0.6, 0.8; length=layout.total))
+            pred = prepare_predictive(replay.model, plan)
+            laws = predictive_laws(pred, u)
+            @test size(laws.flag) == (n,)
+            @test mean.(laws.flag) ≈ 1.0 ./ (1.0 .+ exp.(-graph_value(replay, :mu, u)))
+            draws = pred(u, Xoshiro(19))
+            expected = prepare_predictive(control.model, rk_bound_plan(control))(u, Xoshiro(19))
+            @test draws == expected
+            @test size(draws.flag) == (n,)
+            mixed && @test length.(draws.y) == length.(design.t)
+        end
+    end
 end
