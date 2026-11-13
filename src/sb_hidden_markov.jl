@@ -114,6 +114,35 @@ StanBlocks.@deffun begin
         x[hmm_m == 1 ? 1 : hmm_k, hmm_n == 1 ? 1 : hmm_t]
 end
 
+# Entry (k, t) of a broadcast emission argument, with the broadcast fused:
+# a dotted call or operator is applied to its arguments' entries, the
+# transpose of a vector is read along the step axis, and any other value is
+# read by `brm_hmm_at`. `mu .+ beta .* transpose(x)` is `mu[k] + beta * x[t]`,
+# so no states × steps matrix is formed (Stan does not broadcast a vector
+# against a row vector).
+_sb_hmm_dotted_operator(head) = head isa Symbol && (name = string(head);
+    length(name) > 1 && startswith(name, ".") && Base.isoperator(Symbol(name[2:end])))
+function _sb_hmm_entry(x, k, t, scope)
+    x isa Real && return x
+    if Meta.isexpr(x, :call) && _sb_hmm_dotted_operator(first(x.args))
+        operator = Symbol(string(first(x.args))[2:end])
+        return Expr(:call, operator, (_sb_hmm_entry(a, k, t, scope) for a in x.args[2:end])...)
+    elseif _brm_is_broadcast_call(x)
+        head = first(x.args)
+        callable = _sb_cell_binding(scope, head)
+        name = callable === nothing ? nothing : _sb_julia_stan_name(callable)
+        return Expr(:call, something(name, head),
+            (_sb_hmm_entry(a, k, t, scope) for a in x.args[2].args)...)
+    elseif (Meta.isexpr(x, :call, 2) && x.args[1] in (:transpose, :permutedims)) ||
+            Meta.isexpr(x, Symbol("'"), 1)
+        inner = last(x.args)
+        return _sb_hmm_entry(inner, t, k, scope)
+    end
+    Expr(:call, brm_hmm_at, x, k, t)
+end
+_sb_hmm_fused(x) = x isa Expr && (_brm_is_broadcast_call(x) ||
+    Meta.isexpr(x, :call) && _sb_hmm_dotted_operator(first(x.args)))
+
 # The Stan spelling of state k's (step t's) emission law: its StanBlocks
 # family name and arguments, each read per state by its mode.
 function _sb_hmm_state_law(emission::_BRMHMMEmission, state, k, t, captures)
@@ -123,7 +152,7 @@ function _sb_hmm_state_law(emission::_BRMHMMEmission, state, k, t, captures)
         push!(arguments,
             mode === :row ? Expr(Symbol("'"), Expr(:ref, capture, k, :(:))) :
             mode === :col ? Expr(:ref, capture, :(:), k) :
-            mode === :each ? Expr(:call, brm_hmm_at, capture, k, t) : capture)
+            mode === :each ? _sb_hmm_entry(capture, k, t, nothing) : capture)
     end
     call = _sb_stan_distribution_call(F, Tuple(arguments), NamedTuple())
     discrete = F <: Distributions.DiscreteUnivariateDistribution
@@ -151,6 +180,10 @@ function _sb_cell_hidden_markov(x::Expr, scope)
     statements = Any[]
     captures = map(enumerate(emission.arguments)) do (state, arguments)
         map(enumerate(arguments)) do (j, argument)
+            # A broadcast read per state and step is fused into the law
+            # (`_sb_hmm_entry`); its leaves are hoisted like any argument.
+            emission.modes[state][j] === :each && _sb_hmm_fused(argument) &&
+                return _sb_hmm_hoist_leaves!(statements, argument, scope, state, j)
             value = _sb_cell_value(argument, scope)
             value isa Union{Symbol,Real} && return value
             name = Symbol(:brm_hmm_emission_, state, :_, j)
@@ -176,6 +209,28 @@ function _sb_cell_hidden_markov(x::Expr, scope)
     push!(statements, Expr(:call, :~, response, Expr(:call, family, initial, transition,
         Expr(:->, Expr(:tuple, y, k, t), density), Expr(:->, Expr(:tuple, k, t), draw))))
     statements
+end
+
+# A fused broadcast with every non-name leaf bound to a cell local, its
+# Julia callables spelled for Stan.
+function _sb_hmm_hoist_leaves!(statements, x, scope, state, j, counter=Ref(0))
+    leaf(a) = _sb_hmm_hoist_leaves!(statements, a, scope, state, j, counter)
+    if Meta.isexpr(x, :call) && _sb_hmm_dotted_operator(first(x.args))
+        return Expr(:call, first(x.args), map(leaf, x.args[2:end])...)
+    elseif _brm_is_broadcast_call(x)
+        head = first(x.args)
+        callable = _sb_cell_binding(scope, head)
+        name = callable === nothing ? nothing : _sb_julia_stan_name(callable)
+        return Expr(:., something(name, head), Expr(:tuple, map(leaf, x.args[2].args)...))
+    elseif (Meta.isexpr(x, :call, 2) && x.args[1] in (:transpose, :permutedims)) ||
+            Meta.isexpr(x, Symbol("'"), 1)
+        return Expr(:call, :transpose, leaf(last(x.args)))
+    end
+    value = _sb_cell_value(x, scope)
+    value isa Union{Symbol,Real} && return value
+    name = Symbol(:brm_hmm_emission_, state, :_, j, :_, counter[] += 1)
+    push!(statements, Expr(:(=), name, value))
+    name
 end
 
 _sb_is_cell_hidden_markov(x, scope) = Meta.isexpr(x, :call, 3) && x.args[1] === :~ &&

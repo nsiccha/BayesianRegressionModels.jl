@@ -72,6 +72,10 @@ _sb_julia_stan_call(::Type{Diagonal}, args) =
     length(args) == 1 ? Expr(:call, :diag_matrix, args...) : nothing
 _sb_julia_stan_call(::typeof(diagm), args) =
     length(args) == 1 ? Expr(:call, :diag_matrix, args...) : nothing
+# A matrix's transpose (`permutedims(Θ)` turns a column-stochastic matrix into
+# the row-stochastic one a hidden Markov chain takes).
+_sb_julia_stan_call(::typeof(permutedims), args) =
+    length(args) == 1 ? Expr(:call, :transpose, args...) : nothing
 
 _sb_cell_combinator(head) =
     head in (:censored, :truncated, :interval_censored, :weighted)
