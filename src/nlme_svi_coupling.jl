@@ -43,9 +43,10 @@
 # Scaling by 2k keeps a typical step comparable without that weighting. The
 # baseline b_i is the unit gradient at the current global and unit means,
 # independent of this visit's ζ, so E[b_i ζ_iᵀ] = 0. On a quadratic conditional
-# it removes the unit mean's error exactly, leaving -Λ_i (V_i - V_i*) ζ_i.
-# Thus V_i* is the fixed point at any number of globals, the expected unclipped
-# step moves V_i a fraction β / 2k_i of the way to it per visit, and its noise
+# of precision H_i it removes the mean's error exactly, leaving
+# -H_i (V_i - V_i*) ζ_i. Thus V_i* is the fixed point at any number of globals.
+# When Λ_i = H_i, the expected unclipped step moves V_i a fraction β / 2k_i
+# of the way to it per visit, and its noise
 # vanishes with V_i - V_i*, even while the unit mean remains far from its mode.
 # A step that would move the
 # unit's conditional mean at a typical ζ by more than one sd of its factor is
