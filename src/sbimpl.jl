@@ -5813,7 +5813,7 @@ function _sb_plan_vector_prior(@nospecialize(brmi), target)
     lhs, rhs = getargs(op, 2)
     lhs isa NamedColumn && parent(lhs) isa MissingColumn && rhs isa ExprColumn || return false
     f = getf(rhs)
-    f === _brm_vector_prior || (f isa Type && f <: MvNormal)
+    f === _brm_vector_prior || f isa _BRMMatrixMarker || (f isa Type && f <: MvNormal)
 end
 # A formula predictor term that an extension emitted as a SLIC submodel call,
 # such as `effect ~ saturating(dose)` lowered by a `_sb_submodel_rhs!` hook to
@@ -9061,6 +9061,11 @@ function _sb_dirichlet_alpha(target, args, kwargs)
         collect(Float64, a)
     elseif length(args) == 2
         K, a = args
+        # A dimension or concentration from the data (`Dirichlet(K, 1)` with
+        # `K` a data field) is its value, read when the model is built.
+        data_value(x) = x isa AbstractColumn && (v = _brm_data_value(x); v isa Real) ? v : x
+        K, a = data_value(K), data_value(a)
+        K isa Real && !(K isa Integer) && isinteger(K) && (K = Int(K))
         (K isa Integer && a isa Real) || error(
             "sbimpl: symmetric `$target ~ Dirichlet(K, a)` needs an integer ",
             "dimension and a real concentration, got ($(typeof(K)), $(typeof(a))).",
@@ -9196,6 +9201,96 @@ function _sb_emit_vector_prior!(stmts, data, target, ::typeof(_brm_vector_prior)
     push!(stmts, _sb_restricted_prior!(statement))
     true
 end
+# A declared matrix (snag `hidden-markov-ob-6b35403a`):
+#
+#   W[1:m, 1:n] .~ Normal.(0.0, s)          -> W::matrix[W_m, W_n] ~ normal(0.0, s)
+#   eachrow(G[1:m, 1:n]) .~ Dirichlet(n, a)  -> G_rows::simplex[G_m, G_n] ~ dirichlet(G_rows_alpha)
+#                                               G = brm_rows_matrix(G_rows)
+#   eachcol(G[1:m, 1:n]) .~ Dirichlet(m, a)  -> G_cols::simplex[G_n, G_m] ~ dirichlet(G_cols_alpha)
+#                                               G = brm_cols_matrix(G_cols)
+#
+# The extents are evaluated from literals and data when the model is built and
+# shipped as data `<G>_m`, `<G>_n`. An elementwise law goes through the scalar
+# prior seam, so bounds and wrappers keep their scalar meaning, and StanBlocks
+# observes a matrix elementwise. Simplex slices are Stan's array of simplexes
+# under the Dirichlet seam, read as one matrix.
+StanBlocks.@deffun begin
+    "The matrix whose rows are the vectors `rows`."
+    brm_rows_matrix(rows::vector[brm_m, brm_n])::matrix[brm_m, brm_n] = begin
+        brm_result::matrix[brm_m, brm_n]
+        for brm_i in 1:brm_m
+            brm_result[brm_i, :] = rows[brm_i]'
+        end
+        return brm_result
+    end
+    "The matrix whose columns are the vectors `cols`."
+    brm_cols_matrix(cols::vector[brm_n, brm_m])::matrix[brm_m, brm_n] = begin
+        brm_result::matrix[brm_m, brm_n]
+        for brm_j in 1:brm_n
+            brm_result[:, brm_j] = cols[brm_j]
+        end
+        return brm_result
+    end
+end
+
+function _sb_matrix_extent_keys!(data, target, op)
+    m, n = _brm_declared_matrix_size(target, op; prefix="sbimpl")
+    keys = (Symbol(target, :_m), Symbol(target, :_n))
+    for key in keys
+        haskey(data, key) && error(
+            "sbimpl: the declared matrix `$target` reserves data key `$key`, but that ",
+            "name is already used. Rename the parameter.")
+    end
+    data[keys[1]] = m
+    data[keys[2]] = n
+    (; m, n, keys)
+end
+
+function _sb_emit_vector_prior!(stmts, data, target, ::typeof(_brm_matrix_prior), op)
+    law = last(getargs(op, 3))
+    extents = _sb_matrix_extent_keys!(data, target, op)
+    law isa ExprColumn || error(
+        "sbimpl: `$target[1:m, 1:n] .~ ...` needs a scalar distribution, got `$law`.")
+    element = _sb_vector_prior_element(data, target, law, extents.m * extents.n, Ref(0))
+    f = getf(element)
+    scalar = Any[]
+    _sb_emit_prior!(scalar, target, f, element) ||
+        _sb_emit_custom_family_prior!(scalar, target, f, element) || error(
+            "sbimpl: `$target[1:m, 1:n] .~ ...`: the element law `$f` has no Stan translation.")
+    statement = only(scalar)
+    statement.args[2] = Expr(:(::), target, Expr(:ref, :matrix, extents.keys...))
+    push!(stmts, _sb_restricted_prior!(statement))
+    true
+end
+
+function _sb_emit_vector_prior!(stmts, data, target,
+        marker::Union{typeof(_brm_matrix_rows_prior),typeof(_brm_matrix_cols_prior)}, op)
+    law = last(getargs(op, 3))
+    rows = marker === _brm_matrix_rows_prior
+    extents = _sb_matrix_extent_keys!(data, target, op)
+    slices = Symbol(target, rows ? :_rows : :_cols)
+    haskey(data, slices) && error(
+        "sbimpl: the declared matrix `$target` names its $(rows ? "rows" : "columns") ",
+        "`$slices`, but that name is already used. Rename the parameter.")
+    scalar = Any[]
+    _sb_emit_vector_prior!(scalar, data, slices, getf(law), law) || error(
+        "sbimpl: `$(rows ? "eachrow" : "eachcol")($target[1:m, 1:n]) .~ ...`: the slice ",
+        "law `$(getf(law))` has no Stan translation.")
+    count, length = rows ? (extents.m, extents.n) : (extents.n, extents.m)
+    alpha = get(data, Symbol(slices, :_alpha), nothing)
+    alpha === nothing || Base.length(alpha) == length || error(
+        "sbimpl: `$(rows ? "eachrow" : "eachcol")($target[1:$(extents.m), 1:$(extents.n)]) ",
+        ".~ Dirichlet(...)`: each $(rows ? "row" : "column") has $length entries, but the ",
+        "Dirichlet concentration has $(Base.length(alpha))")
+    statement = only(scalar)
+    statement.args[2] = Expr(:(::), slices,
+        Expr(:ref, :simplex, (rows ? extents.keys : reverse(extents.keys))...))
+    push!(stmts, statement)
+    push!(stmts, Expr(:(=), target,
+        Expr(:call, rows ? brm_rows_matrix : brm_cols_matrix, slices)))
+    true
+end
+
 function _sb_vector_prior_element(data, target, law::ExprColumn, n, counter)
     arg(x) = _sb_vector_prior_arg(data, target, x, n, counter)
     ExprColumn(getf(law), map(arg, getargs(law))...; map(arg, getkwargs(law))...)

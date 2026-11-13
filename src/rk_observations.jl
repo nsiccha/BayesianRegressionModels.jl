@@ -234,6 +234,9 @@ function _rk_emitted_observation_name(lhs::Expr)
     # response column; it must root the complete fitted joint likelihood.
     lhs.head in (:ref, :vect) && !isempty(lhs.args) &&
         return _rk_emitted_observation_name(first(lhs.args))
+    # A matrix declared by its slices, `eachrow(G[1:m, 1:n]) .~ law`.
+    Meta.isexpr(lhs, :call, 2) && lhs.args[1] in (:eachrow, :eachcol) &&
+        return _rk_emitted_observation_name(lhs.args[2])
     nothing
 end
 _rk_emitted_observation_name(_) = nothing
