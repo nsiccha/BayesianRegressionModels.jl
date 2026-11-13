@@ -86,7 +86,7 @@ function check_sb_hmm(stan, data, theta, prior, laws; response=:obs, support=not
     for u in points(n)
         point = stan_point(stan, u)
         θ = theta(stan_reader(point))
-        expected = [logpdf(d, y) for (d, y) in zip(laws(θ), sequences)]
+        expected = [path_logpdf(d, y) for (d, y) in zip(laws(θ), sequences)]
         @test BridgeStan.log_density(stan.model, u; propto=false, jacobian=false) ≈
             prior(θ) + sum(expected) atol=1e-10 rtol=1e-12
         @test [point["$(response)_likelihood.$s"] for s in eachindex(sequences)] ≈
@@ -107,11 +107,12 @@ function check_rk_hmm(rk, data, theta, laws; response=:obs)
     ad = AutoEnzyme(; mode=Enzyme.Reverse)
     check_rk_source_roundtrip(rk; ad_backend=ad)
     problem = rk_logdensity_problem(rk; ad_backend=ad)
+    @test !occursin("_brm_hmm_numerical_logpdf", string(code_expr(problem.query.kernel)))
     query = BRM._rk_pointwise_query(rk)
     for u in points(LogDensityProblems.dimension(problem))
         θ = theta(rk_reader(rk, u))
         pointwise = getproperty(BRM._rk_pointwise_values(query, u), response)
-        @test pointwise ≈ [logpdf(d, y) for (d, y) in zip(laws(θ), sequences)] atol=1e-10 rtol=1e-12
+        @test pointwise ≈ [path_logpdf(d, y) for (d, y) in zip(laws(θ), sequences)] atol=1e-10 rtol=1e-12
         _, gradient = LogDensityProblems.logdensity_and_gradient(problem, u)
         @test gradient ≈ central_difference(v -> LogDensityProblems.logdensity(problem, v), u) atol=1e-6 rtol=1e-6
     end
@@ -120,6 +121,7 @@ end
 # Density and gradient parity of two backends whose coordinates share names.
 function check_hmm_parity(brmi, name)
     backend, problem = consumer_problem(brmi)
+    @test !occursin("_brm_hmm_numerical_logpdf", string(code_expr(problem.query.kernel)))
     stan = consumer_stan(brmi, name)
     names = ReactiveKernelsPPL.coordinate_names(backend.model.layout)
     mapping = [n => string(n) for n in names]
@@ -375,7 +377,7 @@ end
     end
 end
 
-@stestset "discrete emissions from a mapped and an unmapped family" begin
+@stestset "native Poisson emissions" begin
     rng = Xoshiro(5)
     data = (; c=[rand(rng, 0:6, T) for T in (6, 3)], init0=[0.5, 0.5], G0=[0.9 0.1; 0.3 0.7], K=2)
     model = @brm begin
@@ -390,6 +392,45 @@ end
         λ = rk_reader(backend, u)(:lambda, 2)
         d = HiddenMarkov(data.init0, data.G0, Poisson.(λ))
         @test BRM._rk_pointwise_values(query, u).c ≈ [path_logpdf(d, y) for y in data.c] atol=1e-10
+    end
+    oracle(u) = sum(logpdf.(Normal(), u)) + sum(
+        path_logpdf(HiddenMarkov(data.init0, data.G0, Poisson.(exp.(u))), y) for y in data.c)
+    problem = rk_logdensity_problem(backend; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    for u in points(2)
+        check_consumer_point(problem, u, oracle)
+    end
+end
+
+@stestset "native Binomial and Bernoulli emissions in one sequence" begin
+    data = (; c=[[0, 1, 0, 1, 1], [1, 0, 1]], n=4,
+        init0=[0.6, 0.4], G0=[0.8 0.2; 0.3 0.7])
+    model = @brm begin
+        @plate for s in eachindex(c)
+            c[s] ~ HiddenMarkov(init0, G0, [Binomial(n, p), Bernoulli(q)])
+        end
+        p ~ Beta(2, 3)
+        q ~ Beta(3, 2)
+    end
+    backend, stan = check_hmm_parity(model(data), "hmm_binomial_bernoulli")
+    theta(get) = (; p=get(:p), q=get(:q))
+    prior(θ) = logpdf(Beta(2, 3), θ.p) + logpdf(Beta(3, 2), θ.q)
+    laws(θ) = fill(HiddenMarkov(data.init0, data.G0,
+        [Binomial(data.n, θ.p), Bernoulli(θ.q)]), length(data.c))
+    check_sb_hmm(stan, data, theta, prior, laws; response=:c, support=0:data.n)
+    names = coordinate_names(backend.model.layout)
+    oracle(u) = begin
+        p = uniform_value(u[coordinate(names, :p)], 0., 1.)
+        q = uniform_value(u[coordinate(names, :q)], 0., 1.)
+        prior((; p, q)) + sum(path_logpdf(d, y) for (d, y) in zip(laws((; p, q)), data.c)) +
+            sum(uniform_logjac(x, 0., 1.) for x in u)
+    end
+    problem = rk_logdensity_problem(backend; ad_backend=AutoEnzyme(; mode=Enzyme.Reverse))
+    query = BRM._rk_pointwise_query(backend)
+    for u in points(2)
+        check_consumer_point(problem, u, oracle)
+        θ = theta(rk_reader(backend, u))
+        @test BRM._rk_pointwise_values(query, u).c ≈
+            [path_logpdf(d, y) for (d, y) in zip(laws(θ), data.c)] atol=1e-10
     end
 end
 
@@ -422,6 +463,26 @@ function hmm_density_body(emission)
     law = BRM._brm_hmm_law(BRM._brm_hmm_emission(emission, name -> getfield(@__MODULE__, name)), false)
     F, M, B = law.parameters
     RK_EXT._rk_hmm_density_body(fieldtypes(F), M, B)
+end
+
+@stestset "native discrete emission objects compose in the HMM plate" begin
+    fallback = GlobalRef(RK_EXT, :_brm_hmm_numerical_logpdf)
+    for (family, args, emission) in (
+            (Categorical, (:p,), :(Categorical.(eachcol(Phi)))),
+            (Poisson, (:rate,), :(Poisson.(lambda))),
+            (Binomial, (:n, :p), :(Binomial.(Ref(n), p))),
+            (Bernoulli, (:p,), :(Bernoulli.(p))))
+        # These mappings return method-bearing objects, so BRM's existing
+        # `.logpdf(value)` composition consumes the native density graph.
+        @test ReactiveKernelsPPL.sampling_distribution_graph(family, args) isa Expr
+        _, body = hmm_density_body(emission)
+        @test !reads(body, fallback)
+        @test !isempty(hmm_plates(body))
+    end
+    # Positive control: an unmapped family still takes the numerical route.
+    @test ReactiveKernelsPPL.sampling_distribution_graph(Geometric, (:p,)) === nothing
+    _, body = hmm_density_body(:(Geometric.(p)))
+    @test reads(body, fallback)
 end
 
 @stestset "RK builds each state's emission law once per sequence" begin
