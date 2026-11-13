@@ -31,6 +31,9 @@ function _brm_start_term_targets(brmi::BRMI, term_inits)
         spelling = _brm_term_prior_spelling(merge(spec, (; predictor)))
         prior = get(something(_brm_term_override(get(priors, predictor, Dict()), term),
             Dict()), key, nothing)
+        prior !== nothing && _brm_is_derived_term_value(prior.spec.expression) && error(
+            "brm_start: `$spelling` is set to `$(prior.spec.expression)`, a value " *
+            "computed from model values, not a parameter; start the parameters it reads")
         if prior !== nothing && _brm_is_known_term_value(prior.spec.expression)
             known = prior.spec.expression.value
             value = _brm_known_term_shape(getf(term), term, slot, spec.value, spelling;

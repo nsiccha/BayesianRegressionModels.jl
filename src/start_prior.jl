@@ -175,7 +175,8 @@ function _brm_start_prior_term_targets(inventory, explicit, value)
         prior = _brm_start_term_prior(r.prepared, slot)
         # ICAR has no mixing parameter.
         prior === nothing && continue
-        prior isa _BRMKnownTermValue && continue
+        # A known or derived parameter is no coordinate to start.
+        _brm_is_assigned_term_value(prior) && continue
         spec = (; class=slot.class, term=_brm_prepared_term_key(r.term),
             predictor=r.predictor, component=slot.component)
         spelling = _brm_term_prior_spelling(spec)

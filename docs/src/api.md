@@ -67,6 +67,7 @@ BRMSparseLaplaceProblem
 BRMStructuredLaplaceProblem
 GaussianBlockLaplace
 LearnedCentering
+LinearCoupling
 MatrixFreeLaplace
 R2D2AdaptiveCenteringBlock
 RKBRMI
