@@ -14,6 +14,14 @@ instead of failing at run time.
 
 ## 0.2.296
 
+- Fresh `brm_svi_fit` runs establish independent factors during exploration
+  before learning `LinearCoupling` in settling and polishing. A mean-point
+  unit-gradient baseline reduces spurious dependence from unsettled unit
+  means. Together these changes prevent the default coupling's collapse on
+  the public 32-unit event/Kalman regression within its original iteration
+  budget; reaching the budget still does not certify convergence. Optimizer
+  checkpoints keep their saved activation and baseline policies. Diagnostics
+  include auxiliary baseline attempts in `unit_gradient_calls`.
 - `LinearCoupling` scales its natural-gradient estimate by the number of
   coupled globals, rather than the norm of the same random draw used to
   estimate the gradient. The former draw-dependent normalization changed

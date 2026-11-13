@@ -66,8 +66,10 @@ end
         @test svi_same_state(saved, states[P+7])
         @test saved.controls.unit_sampling === method
         # 2d evaluations per visit of a dense unit of d coordinates (the default
-        # orthogonal design), 2 per visit of any other.
+        # orthogonal design), 2 per visit of any other, plus one mean-point
+        # gradient for each unit with nonempty coupling.
         calls = [U isa Matrix ? 2max(size(U, 1), 1) : 2 for U in full_state.run.q.U]
+        calls .+= [!isempty(V) for V in full_state.run.q.coupling.V]
         @test full_state.run.unit_gradient_calls == sum(full_state.run.sampling.visits .* calls)
         @test sum(full_state.run.sampling.draws) == controls.batch_size * full_state.run.iteration
         if method === :work
