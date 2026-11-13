@@ -108,6 +108,36 @@ end
     @test isfinite(LogDensityProblems.logdensity(ℓ, u))
 end
 
+@stestset "a cell latent with no entry in any cell starts from the data" begin
+    # Optional steps per unit, which no unit may have: the latent then has no
+    # coordinate, and the start is that of the model without it (snag
+    # brm-start-rkbrmi-7ae680c8: "declaration `z_step` owns no packed coordinate").
+    stepped(data) = @brm data begin
+        level ~ 1 + (1 | unit)
+        effect(level, Intercept) ~ Normal(0.0, 10.0)
+        sd(level, unit) ~ Exponential(1.0)
+        step_mean ~ Normal(0.0, 1.0)
+        rows = groups(row_unit => unit)
+        @plate for i in eachindex(level)
+            z_step ~ Normal(step_zero[i], 1)
+            y[rows[i]] ~ Normal(level[i] + sum(step_mean .+ z_step), 1.0)
+        end
+    end
+    rng = Xoshiro(1)
+    row_unit = repeat(1:3; inner=10)
+    y = 5.0 .+ randn(rng, length(row_unit))
+    for steps in ([0, 1, 2], [0, 0, 0])
+        rk = RKBRMI(stepped((; unit=1:3, row_unit, y, step_zero=[zeros(k) for k in steps])))
+        us = brm_start(rk; chains=2, rng=Xoshiro(2))
+        names = BRM._rk_layout_coordinate_names(rk)
+        @test count(n -> startswith(String(n), "z_step."), names) == sum(steps)
+        @test all(u -> length(u) == length(names), us)
+        ℓ = rk_logdensity_problem(rk; ad_backend=NLME_AD)
+        @test all(u -> isfinite(LogDensityProblems.logdensity(ℓ, u)), us)
+        @test us[1] != us[2]
+    end
+end
+
 @stestset "a grouping crossed with the units starts as a shared latent" begin
     # `@plate` observations and a block over `class`, whose levels occur in
     # several subjects: the atlas's shape. `shared_groups` passes through.

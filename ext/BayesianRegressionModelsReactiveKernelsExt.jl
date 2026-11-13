@@ -578,9 +578,19 @@ end
 BRM._rk_layout_coordinate_names(backend::BRM.RKBRMI) =
     coordinate_names(backend.model.layout)
 # The declarations the layout holds at zero length, which name no coordinate:
-# a single-level treatment-coded factor's coefficient block, for one.
-BRM._rk_layout_empty_declarations(backend::BRM.RKBRMI) =
-    Set{Symbol}(entry.name for entry in backend.model.layout.entries if entry.size == 0)
+# a single-level treatment-coded factor's coefficient block, for one. A
+# parameter is held under its entry's name, and named, in its coordinates and
+# in BRM's coordinate records, by its authored path, which can differ: a `@plate`
+# cell latent `z` is the entry `_rkppl_latent_z` with coordinates `z.<cell>…`,
+# and every cell empty leaves it no coordinate (snag brm-start-rkbrmi-7ae680c8).
+function BRM._rk_layout_empty_declarations(backend::BRM.RKBRMI)
+    layout = backend.model.layout
+    empty = Set{Symbol}(entry.name for entry in layout.entries if entry.size == 0)
+    for parameter in parameter_metadata(layout)
+        parameter.ncoordinates == 0 && push!(empty, Symbol(join(parameter.path, ".")))
+    end
+    empty
+end
 # Each packed coordinate's layout transform, in coordinate order.
 function BRM._rk_layout_coordinate_transforms(backend::BRM.RKBRMI)
     layout = backend.model.layout
