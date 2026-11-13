@@ -1088,8 +1088,9 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
          (:structured, :phi, true), (:unstructured, :theta, true)) :
         ((:sd, :sigma, false), (:structured, :phi, true))
     for (parameter, local_name, elementwise) in roles
-        # A role held at a known value is a constant on both backends.
-        isnothing(_brm_term_known_value(d.plan.parent, record.predictor,
+        # A role held at a known value, or set to a value computed from model
+        # values, is no coordinate on either backend.
+        isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,
             entry.value, parameter)) || continue
         stan_names = _brm_transport_elements(
             _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
@@ -1201,8 +1202,9 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     base = (; kind=:cdar, predictor=record.predictor, term=entry.term)
     P = length(record.levels)
     for (parameter, local_name) in ((:sd, :sigma), (:ar, :rho), (:innovations, :eta))
-        # A role held at a known value is a constant on both backends.
-        isnothing(_brm_term_known_value(d.plan.parent, record.predictor,
+        # A role held at a known value, or set to a value computed from model
+        # values, is no coordinate on either backend.
+        isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,
             entry.value, parameter)) || continue
         stan_names = _brm_transport_elements(
             _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
@@ -1256,7 +1258,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
             "brm_coordinate_transport: GMRF $(base) has different fitted state axes")
     for (parameter, local_name) in ((:sd, :sigma), (:spatial_length, :spatial_length),
             (:temporal_length, :temporal_length), (:field, :field))
-        isnothing(_brm_term_known_value(d.plan.parent, record.predictor,
+        isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,
             entry.value, parameter)) || continue
         names = _brm_transport_elements(
             _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
@@ -1305,7 +1307,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     channel_index = Dict(c => i for (i, c) in enumerate(state.channels))
     for (parameter, local_name) in ((:sd, :sigma), (:spatial_length, :spatial_length),
             (:temporal_length, :temporal_length), (:field, :field))
-        isnothing(_brm_term_known_value(d.plan.parent, record.predictor,
+        isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,
             entry.value, parameter)) || continue
         names = _brm_transport_elements(
             _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
@@ -1428,9 +1430,9 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
         _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,
         (; base..., parameter))
     scale = record.declaration
-    # A length scale or amplitude held at a known value is a constant on both
-    # backends, so it has no coordinate to pair.
-    known(parameter) = !isnothing(_brm_term_known_value(d.plan.parent,
+    # A length scale or amplitude held at a known value, or set to a value
+    # computed from model values, has no coordinate to pair on either backend.
+    known(parameter) = !isnothing(_brm_term_assigned_value(d.plan.parent,
         record.predictor, entry.value, parameter))
     if !known(:length_scale)
         rho = role_names(:length_scale)
@@ -2808,7 +2810,7 @@ function _brm_transport_pairs!(pairs, correlations, simplexes, centered,
     channel_index = Dict(c => i for (i, c) in enumerate(state.channels))
     for (parameter, local_name) in ((:sd, :sigma), (:spatial_length, :spatial_length),
             (:temporal_length, :temporal_length), (:field, :field))
-        isnothing(_brm_term_known_value(d.plan.parent, record.predictor,
+        isnothing(_brm_term_assigned_value(d.plan.parent, record.predictor,
             entry.value, parameter)) || continue
         names = _brm_transport_elements(
             _brm_term_parameter_output(d, record.predictor, entry, parameter), stan,

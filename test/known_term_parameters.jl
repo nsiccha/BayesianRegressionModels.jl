@@ -290,11 +290,18 @@ end
         ar(:, dar(t)) = 1.5
         y ~ Normal(mu, 1.0)
     end)
-    # refused: a sampled quantity is not a known value.
-    @test_throws "needs a known value" build(@brm begin
+    # A sampled quantity is not a known value: the length scale is then that
+    # parameter (snag gp-raw-scale-hyp-2a375503; test/derived_term_parameters.jl).
+    # A distribution is not a value at all.
+    @test stanc_ok(build(@brm begin
         tau ~ Exponential(1.0)
         mu ~ 1 + hsgp(x; k = 3)
         length_scale(:, hsgp(x)) = tau
+        y ~ Normal(mu, 1.0)
+    end))
+    @test_throws "A distribution is not a value" build(@brm begin
+        mu ~ 1 + hsgp(x; k = 3)
+        length_scale(:, hsgp(x)) = LogNormal(0.0, 1.0)
         y ~ Normal(mu, 1.0)
     end)
     # refused: a known length scale and a hyper-predictor of the same length

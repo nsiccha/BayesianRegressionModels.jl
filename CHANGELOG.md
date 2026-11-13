@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.287
+
+- `=` on a term's own parameter address may read declared parameters and
+  other model values: `sd(lp, hsgp(x)) = sqrt(log1pexp(sf))` with
+  `sf ~ Normal(0, 1)` sets the amplitude to that value, computed where the term
+  would have sampled it, and `sf` carries the prior. So a hyperprior whose
+  induced law is no named family is the prior of the raw parameter it
+  transforms. It works on the `sd`, `length_scale`, `ar` and `mixing`
+  addresses of `hsgp` (isotropic, anisotropic, periodic and grouped with
+  shared scales), `gp`, `dar`, `cdar` and `car` terms on SBBRMI and RKBRMI,
+  and on `rw` on SBBRMI. One scalar expression sets an anisotropic term's every
+  length scale. Such a value has no posterior coordinate:
+  `brm_term_coordinates`, `hsgp_coordinate_draws`, `hsgp_boundary_check`,
+  `hsgp_population_curve`, an
+  HSGP's adaptive centering and `brm_start`'s `term_inits=` refuse it by name,
+  and `brm_coordinate_transport` pairs the parameters it reads. A
+  `length_scale = <sampled name>` that used to be refused as "needs a known
+  value" now builds.
+
 ## 0.2.286
 
 - **Breaking:** fresh `brm_svi_fit` calls and streaming updates condition every

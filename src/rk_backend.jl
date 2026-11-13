@@ -5082,6 +5082,8 @@ const _RK_GP_HYPER_ADMITTED = "LogNormal, InverseGamma, Gamma, Exponential, " *
 # constant (`_rk_ast_hyper_statement`).
 _rk_term_parameter(sampled, prior) = sampled(prior)
 _rk_term_parameter(_sampled, known::_BRMKnownTermValue) = known
+# Set to an expression over model values: the block assigns it (`_rk_ast_param_law`).
+_rk_term_parameter(_sampled, derived::_BRMDerivedTermValue) = derived
 
 # A literal-only term prior takes a numeric data scalar at its number, for its
 # support checks, as a population prior does: `sd(:, gp(x)) ~ Exponential(scale)`.
@@ -5416,9 +5418,9 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     # argument, so the declaration needs no separate truncation (decision 1fk9b29).
     rho_floor_named = _brm_has_floor_marker(state.rho_prior)
     for (hyper, prior) in ((:length_scale, state.rho_prior), (:sd, state.sigma_prior))
-        prior isa _BRMKnownTermValue && any(p -> p.hyper === hyper, hyper_plans) && error(
-            "$prefix: predictor `$target` holds the `hsgp(...)` $hyper at the " *
-            "known value $prior, but a `log($hyper(...)) ~ <formula>` " *
+        _brm_is_assigned_term_value(prior) && any(p -> p.hyper === hyper, hyper_plans) && error(
+            "$prefix: predictor `$target` sets the `hsgp(...)` $hyper to " *
+            "$prior, but a `log($hyper(...)) ~ <formula>` " *
             "hyper-predictor predicts it; keep one of the two statements")
     end
     rho_floor_named && any(p -> p.hyper === :length_scale, hyper_plans) && error(

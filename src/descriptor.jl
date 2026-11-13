@@ -3004,6 +3004,24 @@ The value `=` on its address holds one parameter role of a formula term at
 or the term has no such role.
 """
 function _brm_term_known_value(brmi::BRMI, logical::Symbol, term, parameter::Symbol)
+    assigned = _brm_term_assigned_value(brmi, logical, term, parameter)
+    _brm_is_known_term_value(assigned) ? assigned.value : nothing
+end
+
+"""
+The expression `=` on its address sets one parameter role of a formula term
+to when it reads model values (`sd(lp, hsgp(x)) = sqrt(log1pexp(s))`), as a
+`_BRMDerivedTermValue`, or `nothing`.
+"""
+function _brm_term_derived_value(brmi::BRMI, logical::Symbol, term, parameter::Symbol)
+    assigned = _brm_term_assigned_value(brmi, logical, term, parameter)
+    _brm_is_derived_term_value(assigned) ? assigned : nothing
+end
+
+# The known or derived value `=` on its address sets one parameter role of a
+# formula term to, or `nothing` when the role is sampled or absent: either way
+# the role is no coordinate of either backend.
+function _brm_term_assigned_value(brmi::BRMI, logical::Symbol, term, parameter::Symbol)
     class = get(_BRM_TERM_ROLE_CLASS, parameter, nothing)
     isnothing(class) && return nothing
     term isa ExprColumn || return nothing
@@ -3016,7 +3034,7 @@ function _brm_term_known_value(brmi::BRMI, logical::Symbol, term, parameter::Sym
         get(_brm_resolve_term_priors(brmi), logical, Dict()), term)
     entry = isnothing(per_term) ? nothing : get(per_term, only(slots).name, nothing)
     isnothing(entry) && return nothing
-    _brm_is_known_term_value(entry.spec.expression) ? entry.spec.expression.value : nothing
+    _brm_is_assigned_term_value(entry.spec.expression) ? entry.spec.expression : nothing
 end
 
 # The declaration-owned output that carries one parameter role of a formula
@@ -3029,6 +3047,12 @@ function _brm_term_parameter_output(d::BRMDescriptor, logical::Symbol, entry,
         "brm_descriptor: term `$term` on logical predictor `$logical` holds its " *
         "`$parameter` at the known value $known (`$parameter(...) = value`); it " *
         "is not a parameter and has no posterior coordinate.")
+    derived = _brm_term_derived_value(d.plan.parent, logical, entry.value, parameter)
+    isnothing(derived) || error(
+        "brm_descriptor: term `$term` on logical predictor `$logical` sets its " *
+        "`$parameter` to `$derived`, a value computed from model values; it is " *
+        "not a parameter and has no posterior coordinate. Read the parameters " *
+        "it is computed from.")
     value_output = _brm_term_owner_output(d, logical, entry)
     owner = value_output.declaration
 

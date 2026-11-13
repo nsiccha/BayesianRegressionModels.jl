@@ -1281,15 +1281,68 @@ function _rk_ast_ranef_names!(
     draws, effects
 end
 
-# A term hyperparameter's law in its block: the sampled parameter's prior, or
-# the value its address holds it at (`length_scale(lp, gp(x)) = value`).
-_rk_ast_param_law(parameter::_RKSampledParameter) = last(_rk_ast_sampled(parameter).args)
-_rk_ast_param_law(known::_BRMKnownTermValue) = known.value
+# A term hyperparameter's law in its block: the sampled parameter's prior, the
+# value its address holds it at (`length_scale(lp, gp(x)) = value`), or the
+# expression over model values its address sets it to
+# (`sd(lp, gp(x)) = sqrt(log1pexp(s))`).
+_rk_ast_param_law(parameter::_RKSampledParameter, _bindings=nothing, _taken=nothing) =
+    last(_rk_ast_sampled(parameter).args)
+_rk_ast_param_law(known::_BRMKnownTermValue, _bindings=nothing, _taken=nothing) = known.value
+_rk_ast_param_law(derived::_BRMDerivedTermValue, bindings, taken) =
+    _rk_ast_derived_law(_rk_value_expr!(bindings, _brm_prepare_expr(derived.expression), taken))
+
+# A derived hyperparameter's law is its value expression under a head of its
+# own: walkers see the model values it reads, and its block statement assigns
+# it rather than drawing it.
+_rk_ast_derived_law(value) = Expr(:brm_derived_term_value, value)
+_rk_ast_is_derived_law(law) = Meta.isexpr(law, :brm_derived_term_value, 1)
 
 # A term hyperparameter's block statement: `name ~ law`, or `name = value` for a
-# known value, which is a constant of the block rather than a parameter.
+# known value, which is a constant of the block rather than a parameter, and
+# for a derived one, a value of the block.
 _rk_ast_hyper_statement(name, law::Real) = Expr(:(=), name, law)
-_rk_ast_hyper_statement(name, law) = Expr(:call, :~, name, law)
+_rk_ast_hyper_statement(name, law) = _rk_ast_is_derived_law(law) ?
+    Expr(:(=), name, only(law.args)) : Expr(:call, :~, name, law)
+
+# The operands of an emitted value expression, without call heads: a call's
+# or keyword's head, and a dotted call's callee (`exp.(a)`, `Expr(:., :exp,
+# Expr(:tuple, :a))`), are emitted callable bindings, not values it reads.
+function _rk_ast_value_operands(value::Expr)
+    value.head in (:call, :kw) && return (2, value.args[2:end])
+    Meta.isexpr(value, :., 2) && Meta.isexpr(value.args[2], :tuple) &&
+        return (2, value.args[2:2])
+    (1, value.args)
+end
+# `value` with each operand passed through `f`, call heads unchanged.
+function _rk_ast_map_operands(f, value::Expr)
+    first_operand, _ = _rk_ast_value_operands(value)
+    Expr(value.head, value.args[1:first_operand-1]...,
+        map(f, value.args[first_operand:end])...)
+end
+
+# The model values a derived law reads enter its block as arguments, so a
+# block local of the same name cannot capture them (as `_rk_ast_component_prior_inputs`
+# does for a component).
+function _rk_block_derived_inputs!(block, laws...)
+    replacements = Dict{Symbol,Symbol}()
+    function collect!(value)
+        if value isa Symbol
+            haskey(replacements, value) ||
+                (replacements[value] = _rk_block_argument!(block, :prior_input, value))
+        elseif value isa Expr
+            foreach(collect!, last(_rk_ast_value_operands(value)))
+        end
+    end
+    function rename(value)
+        value isa Symbol && return get(replacements, value, value)
+        value isa Expr ? _rk_ast_map_operands(rename, value) : value
+    end
+    map(laws) do law
+        _rk_ast_is_derived_law(law) || return law
+        collect!(only(law.args))
+        _rk_ast_derived_law(rename(only(law.args)))
+    end
+end
 
 function _rk_ast_sampled(parameter::_RKSampledParameter)
     name = parameter.name
@@ -1410,13 +1463,14 @@ end
 # and marginal-scale priors with standardized innovations, returning the
 # Cholesky-scaled latent draw at each location. The covariance arguments are
 # (axes..., sigma, rho, period, jitter); `period` is 0 for exp_quad.
-function _rk_ast_gp_block!(definitions, taken, term)
+function _rk_ast_gp_block!(definitions, taken, term; bindings=Pair{Symbol,Any}[])
     options = term.options
-    rho_prior = _rk_ast_param_law(options.rho_param)
-    sigma_prior = _rk_ast_param_law(options.sigma_param)
+    rho_prior = _rk_ast_param_law(options.rho_param, bindings, taken)
+    sigma_prior = _rk_ast_param_law(options.sigma_param, bindings, taken)
     block = _rk_block_body(rho_prior, sigma_prior)
     axes = [_rk_block_argument!(block, length(term.columns) == 1 ? :x : Symbol(:x_, j), column)
         for (j, column) in enumerate(term.columns)]
+    rho_prior, sigma_prior = _rk_block_derived_inputs!(block, rho_prior, sigma_prior)
     rho, sigma = _rk_block_local!(block, :rho), _rk_block_local!(block, :sigma)
     axis, z = _rk_block_local!(block, :axis), _rk_block_local!(block, :z)
     rho_statement = if options.iso
@@ -1424,6 +1478,9 @@ function _rk_ast_gp_block!(definitions, taken, term)
     elseif options.rho_param isa _BRMKnownTermValue
         values = rho_prior isa Real ? fill(rho_prior, length(axes)) : rho_prior
         Expr(:(=), rho, Expr(:vect, values...))
+    elseif options.rho_param isa _BRMDerivedTermValue
+        # One expression sets every axis's length scale.
+        Expr(:(=), rho, Expr(:vect, fill(only(rho_prior.args), length(axes))...))
     else
         Expr(:call, :.~, Expr(:ref, rho, Expr(:call, :(:), 1, length(axes))),
             _rk_ast_broadcast_law(rho_prior))
@@ -1501,12 +1558,13 @@ end
 # A differenced AR(1) path, as StanBlocks' `_sb_dar1`: persistence and scale
 # priors with the zero-started recurrence over standardized innovations,
 # returning the level path.
-function _rk_ast_dar_block!(definitions, taken, term, nsteps)
+function _rk_ast_dar_block!(definitions, taken, term, nsteps; bindings=Pair{Symbol,Any}[])
     options = term.options
-    beta_prior = _rk_ast_param_law(options.beta_param)
-    sigma_prior = _rk_ast_param_law(options.sigma_param)
+    beta_prior = _rk_ast_param_law(options.beta_param, bindings, taken)
+    sigma_prior = _rk_ast_param_law(options.sigma_param, bindings, taken)
     block = _rk_block_body(beta_prior, sigma_prior)
     T = _rk_block_argument!(block, :T, nsteps)
+    beta_prior, sigma_prior = _rk_block_derived_inputs!(block, beta_prior, sigma_prior)
     beta, sigma = _rk_block_local!(block, :beta), _rk_block_local!(block, :sigma)
     level, increment = _rk_block_local!(block, :level), _rk_block_local!(block, :increment)
     innovation, t = _rk_block_local!(block, :innovation), _rk_block_local!(block, :t)
@@ -1550,9 +1608,10 @@ function _rk_ast_car_block!(definitions, taken, term, positions; indices=nothing
     options = term.options
     bym2 = options.type === :bym2
     separation = get(options, :separation, nothing)
-    sigma_prior = _rk_ast_param_law(options.sigma_param)
-    rho_prior = bym2 ? _rk_ast_param_law(options.rho_param) : nothing
+    sigma_prior = _rk_ast_param_law(options.sigma_param, bindings, taken)
+    rho_prior = bym2 ? _rk_ast_param_law(options.rho_param, bindings, taken) : nothing
     block = bym2 ? _rk_block_body(sigma_prior, rho_prior) : _rk_block_body(sigma_prior)
+    sigma_prior, rho_prior = _rk_block_derived_inputs!(block, sigma_prior, rho_prior)
     if separation === nothing
         node1 = _rk_block_argument!(block, :node1, options.node1)
         node2 = _rk_block_argument!(block, :node2, options.node2)
@@ -1783,11 +1842,12 @@ end
 # `0ikeidi`). Each row reads its group's walk at its step (their positions
 # `group_rows`, `step_rows` in the fitted levels).
 function _rk_ast_cdar_block!(definitions, taken, term, group_rows, step_rows,
-        group_levels, step_levels)
+        group_levels, step_levels; bindings=Pair{Symbol,Any}[])
     options = term.options
-    sigma_prior = _rk_ast_param_law(options.sigma_param)
-    rho_prior = _rk_ast_param_law(options.rho_param)
+    sigma_prior = _rk_ast_param_law(options.sigma_param, bindings, taken)
+    rho_prior = _rk_ast_param_law(options.rho_param, bindings, taken)
     block = _rk_block_body(sigma_prior, rho_prior)
+    sigma_prior, rho_prior = _rk_block_derived_inputs!(block, sigma_prior, rho_prior)
     group_position = _rk_block_argument!(block, :group, group_rows)
     step_position = _rk_block_argument!(block, :step, step_rows)
     groups = _rk_block_argument!(block, :groups, group_levels)
@@ -2150,7 +2210,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             elseif kind === :dar
                 refactual[index] = _rk_ast_fresh_name(string(term.label, "_level"), taken)
                 call, locals = _rk_ast_dar_block!(defs,
-                    taken, term, length(plan.columns[term.options.source]))
+                    taken, term, length(plan.columns[term.options.source]); bindings)
                 push!(stmts, Expr(:call, :~, refactual[index], call))
                 _rk_start_term_record!(coordinates, predictor.name, term, refactual[index], locals)
             elseif kind === :car
@@ -2185,7 +2245,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                         taken, :brm_walk_positions, column, labels; kernel=true)))
                     positions
                 end
-                call, locals = _rk_ast_cdar_block!(defs, taken, term, rows..., levels...)
+                call, locals = _rk_ast_cdar_block!(defs, taken, term, rows..., levels...;
+                    bindings)
                 refactual[index] = term.options.value
                 push!(stmts, Expr(:call, :~, term.options.value, call))
                 _rk_coordinate_record!(coordinates, (; kind=:cdar,
@@ -2361,7 +2422,7 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
             isempty(term.columns) && error(
                 "RK backend: internal: gp predictor `$(predictor.name)` " *
                 "feeds no response")
-            call, locals = _rk_ast_gp_block!(defs, taken, term)
+            call, locals = _rk_ast_gp_block!(defs, taken, term; bindings)
             push!(stmts, Expr(:call, :~, term.options.f, call))
             _rk_start_term_record!(coordinates, predictor.name, term, term.options.f, locals)
         end
