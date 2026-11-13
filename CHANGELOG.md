@@ -12,6 +12,17 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.293
+
+- A `@plate` cell latent with no entry in any cell (`z ~ Normal(loc[i], 1)`
+  with every `loc[i]` empty, such as optional per-unit steps that no unit
+  has) owns no coordinate on RKBRMI, as a zero-length declaration does since
+  0.2.157. `brm_nlme_view`, `brm_nlme_model`, `brm_start(rk)` and SVI's
+  split into unit terms read it as the same model without the latent. Before,
+  they raised ``internal: declaration `z` owns no packed coordinate``, because
+  the layout holds a cell latent under RKPPL's entry name
+  (`_rkppl_latent_z`) while BRM reads it by its authored name.
+
 ## 0.2.292
 
 - Changed: a concise `y ~ CategoricalLogit(@brm(formula))` whose formula is an

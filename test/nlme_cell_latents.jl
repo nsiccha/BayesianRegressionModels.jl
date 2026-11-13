@@ -96,6 +96,18 @@ deviation_latent_model(data) = @brm data begin
     end
 end
 
+# A latent with its cell's data length that may have no entry: an optional step
+# per window, read through its sum.
+optional_step_model(data) = @brm data begin
+    sigma ~ Exponential(1)
+    step ~ Normal(0.0, 1.0)
+    mu ~ 1 + (1 | win)
+    @plate for i in eachindex(mu)
+        x ~ Normal(loc[i], 1.0)
+        y[i] ~ Normal(mu[i] .+ sum(step .+ x), sigma)
+    end
+end
+
 # A cell latent's coordinates are `x.<cell>` (one draw) or `x.<cell>.<entry>`.
 cell_coordinates(view, prefix, c) = [j for (j, n) in enumerate(view.coordinates)
     if String(n) == string(prefix, ".", c) || startswith(String(n), string(prefix, ".", c, "."))]
@@ -156,6 +168,36 @@ end
     @test count(==(:shared_latent), view.role) == sum(length, data.loc) + length(data.win)
     # The random intercepts stay the units' draws.
     @test all(length.(view.subject_coordinates) .== 1)
+end
+
+# RKPPL keeps a cell latent `x` as the layout entry `_rkppl_latent_x` and names
+# its coordinates `x.<cell>…`. With no entry in any cell it is a zero-length
+# entry and the declaration `x` owns no coordinate, which the view read as an
+# inventory defect ("internal: declaration `x` owns no packed coordinate") until
+# the layout's empty declarations carried authored names too (snag
+# brm-start-rkbrmi-7ae680c8).
+@stestset "a cell latent with no entry in any cell owns no coordinate" begin
+    none = merge(CELL_LATENT_DATA, (; loc=[Float64[] for _ in CELL_LATENT_DATA.win]))
+    some = merge(CELL_LATENT_DATA, (; loc=[Float64[], [0.1], Float64[], [0.2, -0.3]]))
+    backend = RKBRMI(optional_step_model(none))
+    @test :x in BRM._rk_layout_empty_declarations(backend)
+    view = brm_nlme_view(backend)
+    @test !any(n -> startswith(String(n), "x."), view.coordinates)
+    @test count(==(:shared_latent), view.role) == 0
+    # The same partition as data with some entries, less those entries.
+    twin = brm_nlme_view(RKBRMI(optional_step_model(some)))
+    @test :x ∉ BRM._rk_layout_empty_declarations(RKBRMI(optional_step_model(some)))
+    @test count(==(:shared_latent), twin.role) == sum(length, some.loc)
+    @test filter(n -> !startswith(String(n), "x."), twin.coordinates) == view.coordinates
+    @test view.block_margins == twin.block_margins
+    @test length.(view.subject_coordinates) == length.(twin.subject_coordinates)
+    # Its units' conditionals and the SVI split are those of any other model.
+    m = brm_nlme_model(backend; ad_backend=NLME_AD)
+    rng = Xoshiro(3)
+    θ, σ = 0.3 .* randn(rng, length(m.theta)), 0.2 .* randn(rng, length(m.sigma))
+    H = 0.4 .* randn(rng, 1, length(m.view.levels))
+    @test all(isfinite, brm_nlme_loglikelihoods(m, θ, σ, H))
+    check_cell_split(BRM._brm_svi_target(m))
 end
 
 @stestset "each unit's conditional likelihood reads its own cell's latents" begin
