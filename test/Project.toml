@@ -73,7 +73,7 @@ SequentialMonteCarlo = "0.7"
 StanBlocks = "0.2.31"
 StatsBase = "0.34"
 Treebars = "0.1.5"
-WarmupHMC = "0.2.19"
+WarmupHMC = "0.2.21"
 julia = "1.10"
 
 [sources.TreeArrays]
@@ -179,7 +179,7 @@ rev = "44c37e60e22bab9e8a0d3ab88bd47b575dec6bb0"
 url = "https://github.com/nsiccha/WarmupHMC.jl"
 # 0.2.11: public covariance projection used by selective SMC carries.
 # 0.2.19 satisfies ReactiveKernelsPPL 0.1.168's SMC extension floor.
-rev = "d785d947f8d875d56160ef948a241a903d83b7c0"
+rev = "6da3299e09e14547ceb922461c71e4d833e21658"
 
 [sources.SequentialMonteCarlo]
 url = "https://github.com/awllee/SequentialMonteCarlo.jl.git"
@@ -435,4 +435,4 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # no longer exports `adaptive_centering_problem`, which is BRM's.
 # RK 0.1.224 / RKPPL 0.1.174 / DistributionKernels 0.1.10: native
 # Categorical, Poisson, Binomial and Bernoulli emission density objects.
-rev = "93e326d27247e00060cdaa88f9f1171eec8a99e5"
+rev = "87f5bc58439e04fc4f997879e752b38a87c218cb"

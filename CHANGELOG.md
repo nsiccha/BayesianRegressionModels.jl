@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.295
+
+- RKBRMI predictive replays size an omitted scalar response in a `@plate`
+  from the new design's subjects, including cells that also emit vector
+  responses. Requires ReactiveKernelsPPL 0.1.176; the test environment pins
+  RK `87f5bc58`, which retains plate extents through scalar helpers without
+  executing cells for shape inference. The test environment also pins
+  WarmupHMC 0.2.21 to satisfy RKPPL's companion dependency floor.
+
 ## 0.2.294
 
 - RKBRMI `HiddenMarkov` emissions from `Categorical`, `Poisson`, `Binomial`

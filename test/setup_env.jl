@@ -102,7 +102,7 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "44c37e60e22bab9e8a0d3ab88bd47b575dec6bb0"),
     # 0.2.11: public covariance projection used by selective SMC carries.
     # 0.2.19 satisfies ReactiveKernelsPPL 0.1.168's SMC extension floor.
-    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "d785d947f8d875d56160ef948a241a903d83b7c0"),
+    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "6da3299e09e14547ceb922461c71e4d833e21658"),
     ("SequentialMonteCarlo", "https://github.com/awllee/SequentialMonteCarlo.jl.git", "d3a322394c7a1df07e3b5e941acc2960f4daf656"),
     # Current plain-function/array PPL surface, with data-only declaration inputs
     # retained before predictor inlining (computed membership axes; 606d76d0),
@@ -433,7 +433,7 @@ const PINS = [
     # 93e326d2 (RK 0.1.224 / RKPPL 0.1.174 / DistributionKernels 0.1.10)
     # maps Categorical, Poisson, Binomial and Bernoulli to native density
     # objects, including HiddenMarkov's per-state emission graphs.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "93e326d27247e00060cdaa88f9f1171eec8a99e5"),
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "87f5bc58439e04fc4f997879e752b38a87c218cb"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
