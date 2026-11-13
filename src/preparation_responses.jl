@@ -109,6 +109,10 @@ function _brm_prepare_response(::Type{<:CategoricalLogit}, target, rhs, raw;
                                 training=nothing)
     prepared = _brm_response_levels(target, raw; training)
     n_args = length(getargs(rhs))
+    # A class block has a coefficient column per non-reference class, however
+    # many the level table holds.
+    _brm_class_block_ref(rhs) === nothing || return (; distribution=rhs,
+        response=prepared.response, parameters=(), fit=prepared.fit)
     prepared.fit.n_levels == n_args + 1 || error(
         "BRM: `CategoricalLogit($target)` has $(prepared.fit.n_levels) fitted " *
         "outcome levels but $n_args non-reference predictors")

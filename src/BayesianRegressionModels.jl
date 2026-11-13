@@ -417,6 +417,7 @@ export _sb_term_group_block, _sb_emit_group_block_term!
 # models with `StanBlocks.SlicModel(body, data, mod)` where `mod` is the
 # caller's namespace can still resolve the BRM built-in submodel names.
 export popefs, _popefs_normal, _popefs_coefs, _popefs_normal_coefs,
+       _popefs_classes, _popefs_classes_normal,
        cdirichlet, c0dirichlet, c01dirichlet,
        ranef_intercept, ranef_intercept_draws, ranef_slope,
        ranef_correlated, ranef_correlated_by,

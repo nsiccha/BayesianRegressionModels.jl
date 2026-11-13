@@ -59,6 +59,11 @@ end
 
 _classify_arg(a) = (; role=:expression, expr=a)
 
+# A class block (`_brm_class_logits`) is read row by row as the class logits
+# themselves, so its predictor enters on the linear scale.
+_classify_arg(a::ExprColumn{typeof(_brm_class_logits)}) =
+    (; role=:linear_predictor, link_fn=identity, link_lp=name(only(getargs(a))))
+
 # Two-level dispatch helpers used by every introspection walker. Each returns
 # either the narrowed value (the NamedColumn / the inner ExprColumn) or
 # `nothing`, so callers compose with `isnothing(...)` rather than carrying

@@ -12,6 +12,32 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.289
+
+- Changed: a concise `y ~ CategoricalLogit(@brm(formula))` whose formula is an
+  intercept and continuous data columns (summed, or interacted with `&`) is
+  one predictor with a coefficient column per non-reference class, and its
+  class count K is the response's level count when the data are bound, not a
+  property of the declaration. Data with 3 and with 4 classes build one RK
+  program, one lowered program and one Stan program. On RKBRMI the
+  coefficients are `beta_pop[1:P, 1:K-1]` and the response reads their logits
+  row by row (`CategoricalLogit.(eachrow(...))`); on SBBRMI they are a
+  `matrix[P, K-1]` sampled flat (`pop_<lp>_beta_flat`, column-major, labelled
+  `x[level]` by the descriptor) and K−1 is the Stan data `<y>_nonreference`. A
+  data-free replay through `brm_fitted_state` of a design missing a fitted
+  class now scores the fitted model, as a `reprocess` already did.
+  `effect(y, term) ~ law` still sets `term` in every class. The generated
+  predictor is one name, `y_nested_arg1`, printed
+  `y ~ CategoricalLogit(eachrow(y_nested_arg1))`, where it was one
+  `y_nested_arg1_class<k>` per class. A formula with any other term (factor
+  columns, group-level effects, smooths, Gaussian processes, transforms) keeps
+  one predictor per class. On SBBRMI a class block takes Normal coefficient
+  priors.
+- Requires ReactiveKernelsPPL 0.1.172 (new floor): 0.1.170's row form
+  `CategoricalLogit.(eachrow(E))`, and 0.1.172 no longer exports its own
+  `adaptive_centering_problem`, so BRM's export is the only unqualified one
+  again when both packages are loaded.
+
 ## 0.2.288
 
 - Changed: on RKBRMI a `CategoricalLogit`, `Ordinal` or `Categorical`

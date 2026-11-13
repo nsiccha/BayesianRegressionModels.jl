@@ -70,6 +70,71 @@ _popefs_generic_coefs = StanBlocks.@slic begin
     return beta_pop
 end
 
+# Class-block population effects (a concise `CategoricalLogit(@brm(formula))`,
+# `_brm_class_logits`): one coefficient per design column and non-reference
+# class, `matrix[n_covariates, n_classes]`, returned as `X * beta_pop`, one
+# linear predictor column per class. `n_classes` is Stan data (the response's
+# level count minus one), so one Stan program serves every class count. The
+# coefficients are sampled flat, column-major (`beta_flat[j + (t - 1) * P]` is
+# column `j`'s coefficient in class `t + 1`), as `ranef_correlated`'s `z_flat`.
+_popefs_classes = StanBlocks.@slic begin
+    n_covariates = dims(X)[2]
+    beta_flat ~ std_normal(; n=n_covariates * n_classes)
+    beta_pop = to_matrix(beta_flat, n_covariates, n_classes)
+    return X * beta_pop
+end
+
+# The same block with a Normal law per design column, shared by its classes.
+_popefs_classes_normal = StanBlocks.@slic begin
+    n_covariates = dims(X)[2]
+    beta_flat ~ normal(to_vector(rep_matrix(beta_loc, n_classes)),
+                       to_vector(rep_matrix(beta_scale, n_classes));
+                       n=n_covariates * n_classes)
+    beta_pop = to_matrix(beta_flat, n_covariates, n_classes)
+    return X * beta_pop
+end
+
+# The Stan data name of a class block's class count, `<response>_nonreference`
+# (the response's level count minus one), bound on first use; returns it with
+# the non-reference levels, in class order.
+_sb_class_count_name(response::Symbol) = Symbol(response, :_nonreference)
+function _sb_class_count!(data, response::Symbol)
+    name = _sb_class_count_name(response)
+    haskey(data, name) && error(
+        "sbimpl: response `$response`: the data column `$name` collides with the " *
+        "class count of its concise `CategoricalLogit(@brm(...))`; rename it")
+    raw = get(data, response, nothing)
+    raw isa AbstractVector || error(
+        "sbimpl: `CategoricalLogit` expects an observed outcome vector for " *
+        "`$response`, got $(typeof(raw))")
+    fit = _brm_response_levels(response, raw; prefix="sbimpl").fit
+    fit.n_levels >= 2 || error(
+        "sbimpl: `CategoricalLogit($response)` has $(fit.n_levels) outcome level; a " *
+        "categorical response needs at least two levels")
+    data[name] = fit.n_levels - 1
+    (; name, levels=fit.levels[2:end])
+end
+
+# A class block's submodel call: the default standard-normal coefficients, or
+# one Normal law per design column, shared by its classes.
+function _sb_class_population_call(X_name::Symbol, n_classes::Symbol, overrides,
+                                   response::Symbol)
+    (isnothing(overrides) || all(isnothing, overrides)) &&
+        return :(_popefs_classes(; X=$X_name, n_classes=$n_classes))
+    all(_sb_is_normal_effect_prior, overrides) || error(
+        "sbimpl: response `$response`: on SBBRMI the coefficients of a concise " *
+        "`CategoricalLogit(@brm(...))` take Normal priors; " *
+        "$(join(unique(sprint(_show_call_head, getf(p)) for p in overrides
+            if !isnothing(p) && !_sb_is_normal_effect_prior(p)), ", ")) is not built")
+    loc, scale = Any[0.0 for _ in overrides], Any[1.0 for _ in overrides]
+    for i in eachindex(overrides)
+        isnothing(overrides[i]) && continue
+        loc[i], scale[i] = _sb_effect_normal_args(overrides[i])
+    end
+    :(_popefs_classes_normal(; X=$X_name, n_classes=$n_classes,
+        beta_loc=$(Expr(:vect, loc...)), beta_scale=$(Expr(:vect, scale...))))
+end
+
 function _sb_insert_indexed_priors(base::StanBlocks.SlicModel,
                                    target::Symbol, stmts)
     body = deepcopy(base.model)
@@ -108,6 +173,9 @@ const _SB_MIXTURE_MEMBERSHIPS_KEY = :__brm_mixture_memberships__
 # or methods. One reentrant lock also permits nested family construction.
 const _SB_GEN_LOCK = ReentrantLock()
 const _SB_HS_PLANS_KEY = :__brm_hs_plans__
+# The class-block predictors (`_brm_class_blocks`), each mapped to its
+# `CategoricalLogit` response, for the population emitter.
+const _SB_CLASS_BLOCKS_KEY = :__brm_class_blocks__
 const _sb_lower_conditioning_rng = StanBlocks.lower_conditioning_rng
 const _sb_upper_conditioning_rng = StanBlocks.upper_conditioning_rng
 const _sb_conditioning_rng = StanBlocks.conditioning_rng
@@ -4844,6 +4912,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     hs_overrides = _sb_horseshoe_overrides(brmi, effect_overrides, r2d2_overrides;
                                            frozen_preproc=_frozen_preproc)
     data[_SB_HS_PLANS_KEY] = hs_overrides
+    data[_SB_CLASS_BLOCKS_KEY] = _brm_class_blocks(brmi)
     total_plans = _sb_plan_totals(brmi,prepared,effect_overrides,id_buckets,
         ranef_effect_overrides,total_groups; cv_groups,centered_groups,r2d2_overrides,ranef_r2d2_overrides,
         s2z_groups=s2z_selected)
@@ -5013,6 +5082,7 @@ Base.@nospecializeinfer function SBBRMI(@nospecialize(brmi::BRMI);
     pop!(data, _SB_TOTAL_PLANS_KEY)
     pop!(data, _SB_S2Z_PLANS_KEY)
     pop!(data, _SB_HS_PLANS_KEY)
+    pop!(data, _SB_CLASS_BLOCKS_KEY, nothing)
     pop!(data, _SB_HYPER_PLANS_KEY, ())
     pop!(data, _SB_THRESHOLD_LOCATED_KEY)
     pop!(data, _SB_FRESH_COVARIATES_KEY, nothing)
@@ -6942,8 +7012,12 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
             "Preserve the fitted level set/order or rebuild the model with one " *
             "linear predictor per non-reference class.")
         new_data[key] = _sb_apply_levels(levels, v)
-        new_preproc[key] = PreprocEntry(
-            :categorical_outcome, (; levels, n_levels=expected_n_levels),
+        # A class block's class count is Stan data too.
+        count = get(e.const_, :count, nothing)
+        isnothing(count) || (new_data[count] = expected_n_levels - 1)
+        new_preproc[key] = PreprocEntry(:categorical_outcome,
+            isnothing(count) ? (; levels, n_levels=expected_n_levels) :
+                (; levels, n_levels=expected_n_levels, count),
             e.raw_ref, true)
     elseif e.kind === :ordinal_outcome
         v = _sb_df_column(df, e.raw_ref)
@@ -9972,8 +10046,29 @@ function _sb_linear_predictor!(stmts, data, target::Symbol, rhs;
             else
                 (;kind=:ordinary)
             end
-            _sb_record_binding!(data,pop_name,:population_effect,brmi_key;design_columns,prior_scheme=scheme)
-            if !isnothing(joint_spec) && joint_spec.n_shares > 0
+            # A class block's coefficients are one matrix with a column per
+            # non-reference class of its `CategoricalLogit` response.
+            class_blocks = get(data, _SB_CLASS_BLOCKS_KEY, nothing)
+            class_response = isnothing(class_blocks) ? nothing :
+                get(class_blocks, brmi_key, nothing)
+            classes = if isnothing(class_response)
+                (;)
+            else
+                scheme.kind === :ordinary || error(
+                    "sbimpl: response `$class_response`: a concise " *
+                    "`CategoricalLogit(@brm(...))` class block takes one ordinary " *
+                    "prior per coefficient (`effect($class_response, term) ~ law`); " *
+                    "R2D2, Horseshoe and shared budgets over its coefficients are not built")
+                count = _sb_class_count!(data, class_response)
+                (; classes=(; response=class_response, count=count.name,
+                    levels=count.levels))
+            end
+            _sb_record_binding!(data,pop_name,:population_effect,brmi_key;design_columns,
+                prior_scheme=scheme,classes...)
+            if !isnothing(class_response)
+                push!(stmts, Expr(:call, :~, pop_name, _sb_class_population_call(
+                    X_name, classes.classes.count, overrides, class_response)))
+            elseif !isnothing(joint_spec) && joint_spec.n_shares > 0
                 # Joint block-wide budget: the same `_popefs_normal` emission
                 # as the whole-predictor form, indexing the block's ONE global
                 # simplex and scaled by this predictor's margin reference.
@@ -17154,6 +17249,28 @@ function _sb_lik_family!(stmts, target, ::Type{<:CategoricalLogit},
     prepared_response = _brm_response_levels(target, raw; prefix="sbimpl")
     levels = prepared_response.fit.levels
     n_levels = prepared_response.fit.n_levels
+    block = length(args) == 1 && only(args) isa ExprColumn{typeof(_brm_class_logits)} ?
+        only(getargs(only(args))) : nothing
+    if !isnothing(block)
+        # A class block: one linear predictor column per non-reference class,
+        # its count the Stan data `<target>_nonreference`.
+        count = _sb_class_count_name(target)
+        get(data, count, nothing) == n_levels - 1 || error(
+            "sbimpl: internal: `CategoricalLogit($target)`'s class block was " *
+            "sized for $(get(data, count, nothing)) non-reference classes, but " *
+            "the response has $n_levels levels")
+        data[target] = prepared_response.response
+        _sb_record_preproc!(data, target, PreprocEntry(
+            :categorical_outcome, (; levels, n_levels, count), target, true))
+        logits_name = Symbol(target, :_categorical_logits)
+        zero_reference = :(rep_vector(0., num_elements($target)))
+        # Stan's `append_col(vector, matrix)`: the zero reference, then the
+        # block's `matrix[N, K - 1]`.
+        row_logits = Expr(:call, :append_col, zero_reference, _sb_scalar_expr(block, data))
+        push!(stmts, Expr(:(=), logits_name, Expr(:call, :adjoint, row_logits)))
+        push!(stmts, :($target ~ categorical_logit($logits_name)))
+        return
+    end
     # No `n_levels >= 2` guard: one uniform emission (see the arity note above).
     expected_n_levels = length(args) + 1
     n_levels == expected_n_levels || error(

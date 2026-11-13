@@ -275,7 +275,15 @@ struct _RKLikelihoodSpec
     # interval `(lo, hi)` (validated `2pi` pair); exact `VonMises`
     # and every other family leave it `nothing`.
     interval::Union{Nothing,Tuple{Float64,Float64}}
+    # Categorical-logit class rows: `predictor` is a class-block predictor,
+    # one column per non-reference class (a concise
+    # `CategoricalLogit(@brm(formula))`), observed as
+    # `CategoricalLogit.(eachrow(predictor))`, so the class count is the bound
+    # level table's, not the program's. Every other response leaves it `false`.
+    class_rows::Bool
 end
+# Every construction site but the class-block response leaves `class_rows` off.
+_RKLikelihoodSpec(fields::Vararg{Any,27}) = _RKLikelihoodSpec(fields..., false)
 
 struct _RKTermSpec
     kind::Symbol # :intercept | :continuous | :factor | :offset |
@@ -1588,6 +1596,9 @@ function _rk_classify_response(rhs::ExprColumn, candidates::Vector{Symbol},
             "$prefix: response `$response` `CategoricalLogit` arguments " *
             "must be its resolved non-reference predictors " *
             "($(join(preds, ", ")))")
+        # A class block's marker wraps its one predictor.
+        _brm_class_block_ref(rhs) === nothing ||
+            (args = map(arg -> only(getargs(arg)), args))
         for (arg, owned) in zip(args, preds)
             _rk_is_predictor_ref(arg, owned) || error(
                 "$prefix: response `$response` `CategoricalLogit` argument " *
@@ -7846,6 +7857,14 @@ function _rk_categorical_refs(program, rhs::ExprColumn, response::Symbol)
     prefix = "RK backend"
     declared = Set{Symbol}(node.name for node in program.operations
         if node.role === :predictor)
+    # A class-block predictor holds every non-reference class's logit.
+    block = _brm_class_block_ref(rhs)
+    if block !== nothing
+        block in declared || error(
+            "RK backend: internal: response `$response` reads the class-block " *
+            "predictor `$block`, which is not a declared linear predictor")
+        return Symbol[block]
+    end
     names = Symbol[]
     for arg in getargs(rhs)
         arg isa NamedColumn && name(arg) in declared || error(
@@ -8224,6 +8243,18 @@ function _rk_plan_leveled!(entry, family::Symbol,
     key, rhs, raw = entry.key, entry.rhs, entry.raw_response
     if family === :categorical_logit
         recoded, K, levels = _rk_leveled_levels(key, raw)
+        # A class block's one predictor has a column per non-reference class,
+        # however many the level table holds.
+        if _brm_class_block_ref(rhs) !== nothing
+            K >= 2 || error(
+                "$prefix: `CategoricalLogit($key)` has $K outcome level; a " *
+                "categorical response needs at least two levels")
+            return (; predictor, n_levels=K, thresholds=nothing,
+                extra_predictors=Symbol[], count_columns=Symbol[],
+                ordinal_structure=nothing, discrimination=nothing,
+                threshold_columns=Symbol[], threshold_coefs=nothing,
+                response_values=recoded, cross_columns=Symbol[], class_rows=true)
+        end
         n_nonref = 1 + length(extra)
         K == 1 + n_nonref || error(
             "$prefix: `CategoricalLogit($key)` observed $K outcome levels " *
@@ -9375,7 +9406,8 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
             leveled.ordinal_structure, leveled.discrimination,
             leveled.threshold_columns, leveled.threshold_coefs, Symbol[],
             nothing, mixture_components, mixture_weights, nu,
-            nu_predictor, zero_inflation, mi_jobs, interval))
+            nu_predictor, zero_inflation, mi_jobs, interval,
+            get(leveled, :class_rows, false)))
     end
     # Measurement-error observations ride synthetic responses (SB's
     # `x_obs ~ Normal(x_true, sd)` likelihood per `me` term).
