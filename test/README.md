@@ -417,6 +417,11 @@ hyperparameters, standalone parameter axes, replay, and extent validation.
 Downstream plates read complete vectors from earlier cells, including outputs
 followed by another assignment in their cell.
 Compiled Stan and native reverse gradients are compared with independent densities.
+`matrix_parameters.jl` checks declared matrices, `W[1:m, 1:n] .~ Family.(...)`
+and `eachrow`/`eachcol(G[1:m, 1:n]) .~ Dirichlet(...)`: printing, equal
+compiled-Stan and native densities and gradients for an elementwise matrix,
+simplex slices against their Dirichlet densities on both backends, data
+extents, a data-sized `Dirichlet(K, a)`, refusals, and plan roles.
 `hypot.jl` checks stable elementwise formula norms on RK and Stan: scalar and
 vector operands, full densities and native gradients, replay, predictor terms,
 offsets, and overflow/underflow controls. It uses the StanBlocks 0.2.12 pin
@@ -888,6 +893,17 @@ given it. It checks:
 - a covariance bound to a cell local against the inline spelling;
 - the unit-level spelling against district sums precomputed as data;
 - the RKBRMI density and native Enzyme gradient against the same Stan program.
+
+`hidden_markov.jl` checks `y[s] ~ HiddenMarkov(initial, transition, emissions)`
+in a plate cell. The Julia law is checked against the sum over every state path
+(per-step emissions and transitions, log weights, mixed families). The four
+models of the learnbayes.se HMM notebook (switching, softmax emissions, several
+sequences, hierarchical) at K = 3 are checked on both backends against that law:
+SBBRMI's density without Jacobian, per-sequence pointwise values, gradients and
+forward draws; RKBRMI's per-sequence pointwise values, native Enzyme gradients
+and printed replay. Emission spellings (broadcast, comprehension, listed laws,
+log weights, per-step emissions, Poisson) also check compiled-Stan and native
+density and gradient parity.
 
 `fixed_ranef_scales.jl` checks random-effect scales and correlations held at
 known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
