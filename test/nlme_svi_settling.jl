@@ -15,7 +15,8 @@ import LogDensityProblems
 
 # Isolate the legacy ELBO-only phase schedule in these short runs.
 const SVI_SETTLE_OPT = (; batch_size=4, window=20, min_windows=6, patience=3,
-    polish_windows=4, max_iterations=3000, stationarity=false, centering=nothing)
+    polish_windows=4, max_iterations=3000, stationarity=false, centering=nothing,
+    coupling=nothing)
 
 svi_settle_gauss() = brm_nlme_model(RKBRMI(svi_gauss_model(svi_gauss_data(Xoshiro(101), 12)));
     ad_backend=NLME_AD)
@@ -156,8 +157,8 @@ end
     ex = svi_tight_exact(rk)
     @test ex.gradient < 1e-2
     m = brm_nlme_model(rk; ad_backend=NLME_AD, subject_group=:subject)
-    # The exact block-factorized Gaussian oracle uses the plain coordinates.
-    opt = (; batch_size=8, threads=1, ndraws=0, centering=nothing)
+    # The exact block-factorized Gaussian oracle uses independent plain factors.
+    opt = (; batch_size=8, threads=1, ndraws=0, centering=nothing, coupling=nothing)
     function observe(s)
         r = s.stationarity.current
         if hasproperty(r, :units)

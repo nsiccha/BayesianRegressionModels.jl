@@ -1,6 +1,6 @@
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 include(joinpath(@__DIR__, "nlme_svi_streaming_fixture.jl"))
-using LinearAlgebra, Serialization
+using LinearAlgebra, Serialization, WarmupHMC
 
 @stestset "streaming SVI matches unit identities and replaces priors" begin
     data = svi_stream_data(Xoshiro(31), ["a", "b", "c"], 3)
@@ -104,9 +104,10 @@ end
 @stestset "streaming SVI panel factors and constant window work" begin
     labels = ["s$i" for i in 1:8]
     windows = [svi_stream_data(Xoshiro(70 + i), labels, 12) for i in 1:6]
-    # This oracle compares packed unit means and precisions across windows.
-    controls = (; centering=nothing, max_iterations=4000, window=50, min_windows=20, patience=8,
-        polish_windows=15, batch_size=8, ndraws=0)
+    # This oracle compares packed unit means and precisions across windows, of the
+    # independent factorization (the carried coupling is checked against NUTS below).
+    controls = (; centering=nothing, coupling=nothing, max_iterations=4000, window=50,
+        min_windows=20, patience=8, polish_windows=15, batch_size=8, ndraws=0)
     first_fit = brm_svi_fit(svi_stream_model(first(windows)); rng=Xoshiro(80), controls...)
     state = brm_svi_checkpoint(first_fit)
     times, work, sizes = Float64[], Int[], Int[]
@@ -139,8 +140,8 @@ end
     # an accurate reference: a bounded exact-expectation control put its
     # largest mean error at 0.964 after 2050 iterations, versus 0.014 after
     # 25000. Give the batch reference a longer exploration and polish.
-    batch = brm_svi_fit(svi_stream_model(all_data); centering=nothing, rng=Xoshiro(90), batch_size=8,
-        ndraws=0, max_iterations=30000, window=100, min_windows=200,
+    batch = brm_svi_fit(svi_stream_model(all_data); centering=nothing, coupling=nothing,
+        rng=Xoshiro(90), batch_size=8, ndraws=0, max_iterations=30000, window=100, min_windows=200,
         patience=20, polish_windows=50)
     batch_state = brm_svi_checkpoint(batch)
     global_error = maximum(abs, state.q.μ - batch_state.q.μ)
@@ -156,4 +157,53 @@ end
     @test all(0.8 .< unit_sd_ratios .< 1.2)
     @test work == fill(3200, 5)
     @test maximum(sizes) == minimum(sizes)
+end
+
+# A coupled window's units carry their regression on the globals they were coupled
+# to (src/nlme_svi_coupling.jl), so the next window's prior keeps the global/unit
+# dependence. The panel above, all windows' draws against four-chain NUTS on every
+# window's rows, without centering so that the subjects' effects are coupled.
+# Measured (seeds below, BRM 0.2.286): the intercept's sd 0.71 of NUTS's streamed
+# coupled, 0.70 for a coupled batch fit, 0.13 streamed and batch without coupling;
+# the group sd's log scale 0.38 streamed coupled, 0.50 batch coupled, 0.26 streamed
+# without coupling.
+@stestset "streaming SVI carries the coupling: streamed intervals against NUTS" begin
+    labels = ["s$i" for i in 1:8]
+    windows = [svi_stream_data(Xoshiro(70 + i), labels, 12) for i in 1:6]
+    all_data = (; subject=reduce(vcat, [w.subject for w in windows]),
+        x=reduce(vcat, [w.x for w in windows]), y=reduce(vcat, [w.y for w in windows]))
+    rk = RKBRMI(svi_stream_model(all_data))
+    problems = [rk_logdensity_problem(rk; ad_backend=NLME_AD) for _ in 1:4]
+    init = brm_start(rk; chains=4, rng=Xoshiro(3))
+    reference = completion_warmup_mcmc([Xoshiro(10 + c) for c in 1:4], problems;
+        min_completed=4, n_draws=1000, blas_threads=1, init)
+    @test reference.completion.n_completed == 4
+    R = reduce(hcat, [Matrix{Float64}(r.posterior_position) for r in reference.results])
+    function streamed(coupling)
+        controls = (; centering=nothing, coupling, max_iterations=4000, window=50,
+            min_windows=20, patience=8, polish_windows=15, batch_size=8, ndraws=4000)
+        state = brm_svi_checkpoint(brm_svi_fit(svi_stream_model(first(windows));
+            rng=Xoshiro(80), controls...))
+        fit = nothing
+        for i in 2:length(windows)
+            fit = brm_svi_fit(state, svi_stream_model(windows[i]); rng=Xoshiro(80 + i),
+                controls...)
+            state = brm_svi_checkpoint(fit)
+        end
+        fit, state
+    end
+    coupled, coupled_state = streamed(LinearCoupling())
+    independent, independent_state = streamed(nothing)
+    @test all(u -> hasproperty(u, :coupling), values(coupled_state.units))
+    @test !any(u -> hasproperty(u, :coupling), values(independent_state.units))
+    globals = coupled.diagnostics.globals
+    intercept = findfirst(==(:a), coupled.coordinates[globals])
+    ratio(f) = [std(f.draws[j, :]) / std(R[j, :]) for j in globals]
+    offset(f) = [abs(mean(f.draws[j, :]) - mean(R[j, :])) / std(R[j, :]) for j in globals]
+    rc, ri = ratio(coupled), ratio(independent)
+    println("SVI_STREAM_COUPLING globals=$(coupled.coordinates[globals]) coupled_sd_ratio=$rc " *
+        "independent_sd_ratio=$ri coupled_mean_error=$(offset(coupled))")
+    @test all(rc .> ri)
+    @test rc[intercept] > 0.5 > 2ri[intercept]
+    @test all(offset(coupled) .< 1)
 end

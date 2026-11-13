@@ -455,7 +455,11 @@ end
     names = string.(coordinate_names(rk.model.layout))
     rho, sd = findfirst(==("hsgp_t.rho"), names), findfirst(==("hsgp_t.sigma"), names)
     options = (; batch_size=4, ndraws=2000)
-    plain = brm_svi_fit(m; options..., rng=Xoshiro(5), centering=nothing)
+    # Plain: independent factors. With the default linear coupling and no centering
+    # (seed 5, BRM 0.2.286) the length scale was 0.20 NUTS sds off and the HSGP sd
+    # 0.49, against the centered fit's 0.38 and 0.71: this check compares centering
+    # with the independent factorization.
+    plain = brm_svi_fit(m; options..., rng=Xoshiro(5), centering=nothing, coupling=nothing)
     fit = brm_svi_fit(m; options..., rng=Xoshiro(5), centering=LearnedCentering())
     c = [cell.c for cell in fit.diagnostics.centering.cells if cell.kind === :hsgp]
     @test length(c) == 5 * 12
@@ -490,7 +494,8 @@ end
     end)
     μr, σr = vec(mean(reference; dims=2)), vec(std(reference; dims=2))
     options = (; batch_size=5, ndraws=2000)
-    plain = brm_svi_fit(m; options..., rng=Xoshiro(5), centering=nothing)
+    # Plain: the independent factorization, the comparison this check is about.
+    plain = brm_svi_fit(m; options..., rng=Xoshiro(5), centering=nothing, coupling=nothing)
     fit = brm_svi_fit(m; options..., rng=Xoshiro(5), centering=LearnedCentering())
     report = fit.diagnostics.centering
     @test length(report.cells) == length(nobs)

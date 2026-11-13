@@ -519,6 +519,88 @@ _rk_ast_hsgp_substitute(value::Expr, values) =
     Expr(value.head, (_rk_ast_hsgp_substitute(a, values) for a in value.args)...)
 _rk_ast_hsgp_substitute(value, values) = value
 
+# Periodic bases have no fitted interval. Keep the Fourier columns in the
+# same order as `_brm_apply_hsgp_periodic`: cosines, then sines, without the
+# constant harmonic. All sizes, periods and anchors remain graph inputs.
+function _rk_ast_hsgp_periodic_basis_graph!(definitions, term, taken)
+    body = quote
+        harmonics = Float64.(1:modes[1])
+        omega2 = vcat(harmonics, harmonics)
+        w0 = 2pi / settings[1]
+        frequencies = w0 .* harmonics
+        angles = Float64.(axis) .* transpose(frequencies)
+        basis = hcat(cos.(angles), sin.(angles))
+    end
+    value = :basis
+    if get(term.options, :anchor, nothing) !== nothing
+        push!(body.args, :(anchor_angles = frequencies .* settings[2]),
+            :(anchor_basis = vcat(cos.(anchor_angles), sin.(anchor_angles))),
+            :(anchored = basis .- transpose(anchor_basis)))
+        value = :anchored
+    end
+    if _rk_hsgp_mask(term) !== nothing
+        push!(body.args, :(PHI = ifelse.(mask .!= 0, $value, 0.0)))
+    else
+        push!(body.args, :(PHI = $value))
+    end
+    push!(body.args, :(return (PHI, omega2)))
+    doc = @_rk_definition_doc """
+        The periodic HSGP Fourier basis: cosine columns followed by sine columns,
+        with no constant harmonic. Returns the basis and each column's harmonic
+        index. The period and optional anchor are supplied in `settings`."""
+    _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_periodic_basis_graph",
+        [:axis, _rk_hsgp_mask_formals(term)..., :modes, :settings], body; kernel=true, doc)
+end
+
+# The existing periodic validity-floor bisection as a data-only scan. Keep
+# its arithmetic and iteration count identical to `_brm_hsgp_periodic_rho_lower`.
+function _rk_ast_hsgp_periodic_floor!(definitions, statements, term, taken, bindings)
+    bessel = _rk_value_callee!(bindings, SpecialFunctions.besselix, taken)
+    body = quote
+        K = modes[1]
+        target = $(_BRM_HSGP_WEIGHT_THRESHOLD^-2)
+        low_ratio = $bessel(K, 1e-12) / $bessel(1, 1e-12) - target
+        high_ratio = $bessel(K, 1e7) / $bessel(1, 1e7) - target
+        valid = K <= 1 || (low_ratio < 0 && high_ratio > 0)
+        checked_K = valid ? K : error("hsgp: internal periodic validity-floor bracket failed")
+        bounds = ReactiveKernels.scan(1:200; init=(log(1e-12), log(1e7))) do bracket, step
+            lo = bracket[1]
+            hi = bracket[2]
+            mid = (lo + hi) / 2
+            a = exp(mid)
+            below = $bessel(checked_K, a) / $bessel(1, a) - target < 0
+            next_lo = below ? mid : lo
+            next_hi = below ? hi : mid
+            ((next_lo, next_hi), (next_lo + next_hi) / 2)
+        end
+        floor = checked_K > 1 ? 1 / sqrt(exp(bounds[end])) : 0.0
+        return floor
+    end
+    doc = @_rk_definition_doc """
+        The periodic length-scale floor: the scale where the last harmonic's
+        spectral amplitude is 1/100 of the first. A single harmonic has floor zero."""
+    entry = _rk_ast_shared_definition!(definitions, taken, "brm_hsgp_periodic_floor_graph",
+        [:modes], body; kernel=true, doc)
+    name = _rk_ast_fresh_name(string(term.options.id, "_rho_floor"), taken)
+    push!(statements, :($name = $entry($(term.options.modes))))
+    name
+end
+
+function _rk_ast_hsgp_weight_cell(::Val{:periodic}, options, D, bindings, taken)
+    bessel = _rk_value_callee!(bindings, SpecialFunctions.besselix, taken)
+    :(exp(log(sigma) + (log(2) + log($bessel(omega2[b], inv(rho^2)))) / 2))
+end
+
+function _rk_ast_hsgp_weight_cell(::Val{:exp_quad}, options, D, bindings, taken)
+    frequency(j) = D == 1 ? :(omega2[b]) : :(omega2[b, $j])
+    exponent_parts = options.iso ? [:(rho^2 * $(frequency(j))) for j in 1:D] :
+        [:(rho[$j]^2 * $(frequency(j))) for j in 1:D]
+    exponent = D == 1 ? only(exponent_parts) : Expr(:call, :+, exponent_parts...)
+    scale = options.iso ? :(sigma * (rho * sqrt(2pi))^($D / 2)) :
+        Expr(:call, :*, :sigma, [:(sqrt(rho[$j] * sqrt(2pi))) for j in 1:D]...)
+    :($scale * exp(-0.25 * $exponent))
+end
+
 # The spectral-weighted basis product, in two graphs: the per-weight spectral
 # scales, which the caller binds to the local `scales` names so that they are
 # a value of the program (learned SVI centering reads an HSGP weight's scale
@@ -528,7 +610,7 @@ _rk_ast_hsgp_substitute(value, values) = value
 # graphs compose its basis; a periodic term passes its prepared `PHI` and
 # `omega2`. The scales are a vector over the modes, or levels × modes when a
 # hyper-predictor scales `sd` or `length_scale` by level.
-function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho, z, scales;
+function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho, z, scales, bindings;
         group_index=nothing, multigroup=nothing)
     options = term.options
     D = length(term.columns)
@@ -536,13 +618,8 @@ function _rk_ast_hsgp_value_graph!(definitions, term, taken, inputs, sigma, rho,
     sigma_by_group = any(p -> p.hyper === :sd, options.hyper_plans)
     by_group = group_index !== nothing && (sigma_by_group || rho_by_group)
     # A one-dimensional basis has one frequency per mode, not a one-column matrix.
-    frequency(j) = D == 1 ? :(omega2[b]) : :(omega2[b, $j])
-    exponent_parts = options.iso ? [:(rho^2 * $(frequency(j))) for j in 1:D] :
-        [:(rho[$j]^2 * $(frequency(j))) for j in 1:D]
-    exponent = D == 1 ? only(exponent_parts) : Expr(:call, :+, exponent_parts...)
-    scale = options.iso ? :(sigma * (rho * sqrt(2pi))^($D / 2)) :
-        Expr(:call, :*, :sigma, [:(sqrt(rho[$j] * sqrt(2pi))) for j in 1:D]...)
-    weight_cell = :($scale * exp(-0.25 * $exponent))
+    weight_cell = _rk_ast_hsgp_weight_cell(Val(get(options, :cov, :exp_quad)),
+        options, D, bindings, taken)
     # Mode cells close over `omega2` and the scales, read under their names.
     weight_plate(sigma_value, rho_value) = _rk_ast_graph_plate([:(axes(omega2, 1))], [:b],
         _rk_ast_hsgp_substitute(weight_cell, Dict(:sigma => sigma_value, :rho => rho_value)))

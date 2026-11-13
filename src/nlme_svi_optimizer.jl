@@ -241,7 +241,7 @@ function _brm_svi_consistent(run::_BRMSVIRun, t, c)
     all(f -> length(f.μ) == D && length(f.ρ) == D && size(f.Β, 1) == D &&
             length(f.M) == length(f.Λ) == length(f.U) == length(f.unit_opt) == N &&
             all(i -> length(f.M[i]) == size(f.Λ[i], 1) == size(f.U[i], 1) ==
-                length(t.units[i]), 1:N), factors) &&
+                length(t.units[i]), 1:N) && _brm_svi_coupling_consistent(f, t), factors) &&
         length(run.adam.m) == length(run.adam.v) == length(_brm_svi_global_vector(q)) &&
         length(run.trace) == run.iteration && 0 <= run.polish_start <= run.iteration &&
         (run.average === nothing) == (run.polish_start == 0) &&

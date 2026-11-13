@@ -1,5 +1,14 @@
 # Running the tests
 
+`rk_jax_inputs.jl` checks `rk_bound_data(rk, source)` on macro and runtime-source
+models: scalar constants read by a ragged plate, ordinary scalar inputs, array
+constants, untranslated data-only definitions, and frozen/fresh/data-free
+replays. It checks exact module input names, read-only data, reuse of computed
+values, native binding/checkpoint identity stability, and native/JAX densities
+and gradients against independent formulas. Set `RK_JAX_PYTHON` to a Python with
+JAX for the numerical module checks. `rk_jax.jl` covers the broader module
+contract, and `jax_module_driver.jl` uses the same public accessor.
+
 `seal_density_dependence.jl` checks both grey-seal model forms against Vanko
 et al. (2026): birth and pregnancy boundary identities, compiled gradients
 against an independently integrated loss hazard, and a finite full-model start.
@@ -1141,6 +1150,18 @@ and a `Normal` above 6 sd. Every draw lies in its window and follows the exact
 truncated law (pmf and mean from Distributions). It needs StanBlocks 0.2.6 or
 later, whose `truncated` draws invert the base CDF on the window.
 
+`rk_periodic_hsgp_graph.jl` checks the periodic HSGP basis, anchors, row masks
+and length-scale floor against the former native helper: exact bases and
+floor/mean agreement within floating-point rounding. It requires RK 0.1.198
+for callable arguments in JAX data-preparation helpers. With `RK_JAX_PYTHON`
+and `BRM_JAX_REQUIRE=1`, it runs the emitted module in Python and compares
+eager and jitted densities and gradients with native Enzyme, including JIT
+calls with the prepared data passed as arguments. Each module must have an
+empty `UNTRANSLATED` map. One module evaluates several row counts, harmonic
+counts, periods and anchors; the single-harmonic case is checked separately. It accepts
+testset filters `plain`, `anchored`, `masked` and `single harmonic`, for example
+`julia --project=test test/rk_periodic_hsgp_graph.jl anchored`.
+
 `adaptive_multiaxis_hsgp_centering.jl` checks online adaptive centering of
 two-axis squared-exponential HSGPs: isotropic (one length scale every axis
 reads) and `iso=false`, ungrouped and grouped, beside a shared random-effect
@@ -1295,7 +1316,7 @@ the test environment above.
 - RK plans the array cell's plate as matrix products (log group `:plate_batching`) and the per-row plate as a cell loop.
 - SBBRMI's compiled Stan density and gradient equal RK's.
 
-ReactiveKernels batches plates from 0.1.127 (RK `fa3deb83`). Below it the batched-plan check is `broken`; this environment's RK pin `23fbef437` (RK 0.1.164) requires it. Everything else passes on both. Each spelling rule in the file's header was found by a refusal. It runs in the test environment, about 3 minutes on one CPU.
+ReactiveKernels batches plates from 0.1.127 (RK `fa3deb83`). Below it the batched-plan check is `broken`; this environment's RK pin `1c40ad337` (RK 0.1.198) requires it. Everything else passes on both. Each spelling rule in the file's header was found by a refusal. It runs in the test environment, about 3 minutes on one CPU.
 
 `rk_plate_invariant_output.jl` checks an RKBRMI `@plate` output whose cell reads
 no per-index value, `decay[g] = exp(log_a)`, over three cells (BRM snag
@@ -1307,7 +1328,7 @@ model-scope `fill` of the same values and central differences. `brm_nlme_model`
 gives each subject's likelihood and η gradient. A one-cell binding is the
 positive control. ReactiveKernelsPPL fixed the shape in 0.1.129 (RK `b6196f114`,
 ReactiveKernels snag `plate-output-of-c4a0ca87`), which this environment's RK pin
-`23fbef437` (RKPPL 0.1.156) carries. On older RKPPL the output is one number. There
+`1c40ad337` (RKPPL 0.1.162) carries. On older RKPPL the output is one number. There
 the three-cell checks are `broken`: a later `decay[2]` raises a `BoundsError`,
 and `sum` and `length` return one cell's value. The one-cell count, total and
 likelihood pass on both. Its `decay` is `broken` there too, because one number is
@@ -1529,6 +1550,8 @@ low-rank covariance. `nlme_svi_stationarity_fit.jl` checks complete default fits
 exact continuation through all phases and in a fresh process, old-checkpoint
 policy, and nonconvergence after a settling cap or budget-triggered averaging,
 including continuation across that transition and a partial final window.
+The diagnostics also reject moving coupling coefficients at constant marginal
+widths, and checkpoint tests exercise nonempty global-unit coupling histories.
 Both accept testset filters.
 
 `nlme_svi_trend.jl` isolates the previous ELBO-only rule with `stationarity=false`
@@ -2233,7 +2256,7 @@ RK_JAX_PYTHON=<jaxenv>/bin/python BRM_JAX_REQUIRE=1 julia --project=test test/rk
 ```
 
 The file requires ReactiveKernels' JAX lowering as it landed on RK main
-(RK 0.1.132 / RKPPL 0.1.140 or later; the test pin is `23fbef437`) and refuses
+(RK 0.1.132 / RKPPL 0.1.140 or later; the test pin is `1c40ad337`) and refuses
 to run below it. The CDF-based laws, jit with the prepared data traced as
 arguments, size-generic modules, per-group AR(1) scans, nested `constrain` and
 the multi-axis and level-correlated HSGP terms are required checks. Its testset "every definition BRM emits is documented"
@@ -2286,8 +2309,8 @@ Both were verified together on ReactiveKernels 0.1.180 (`76708e00`,
 ReactiveKernelsPPL 0.1.160), StanBlocks 0.2.42 (`d8257e16`), Enzyme 0.13.220
 (`b86741c8`, libEnzyme `4990aa11`), Julia 1.10.12 and JAX 0.12.0.1. The JAX
 modules need that ReactiveKernels: the wastewater module still failed on 0.1.179.
-The pins in `test/Project.toml` are older (ReactiveKernels 0.1.164, StanBlocks
-0.2.40), so on them the JAX parity testsets fail. The wastewater's native
+The test environment's RK 0.1.198 pin includes the required emitter fixes;
+its StanBlocks pin remains 0.2.40, below the verified tuple above. The wastewater's native
 gradient was verified only on that Enzyme line, because registered Enzyme
 0.13.219 lacks its `make_zero(Core.Binding)` repair.
 
@@ -2651,7 +2674,7 @@ checks the `rkppl_model(:car_icar)` / `(:car_bym2)` bodies on a graph with two
 components, an island and an area without rows against an independent oracle
 of the car term's law (the BYM2 scaling from each component Laplacian's dense
 pseudo-inverse), and checks that the data-bound recipe brm-use documents gives
-the same densities. The bodies need RKPPL 0.1.145 (the test pin is `23fbef437`).
+the same densities. The bodies need RKPPL 0.1.145 (the test pin is `1c40ad337`).
 Run its car testsets alone with `julia --project=test
 test/rk_statistical_library.jl car`. `rk_statistical_source.jl`
 compares emitted reusable block algebra with the former ordinary inline
@@ -2684,7 +2707,16 @@ with identity-resolved native entries and live keywords, retaining both kinds
 of definitions in the ordinary source reference and complete printed replay.
 `rk_leveled.jl` adds independent
 categorical-reference and multinomial row-density, Jacobian and ordinary
-reverse-gradient oracles. `rk_values.jl` checks whole
+reverse-gradient oracles. `rk_categorical_levels.jl` checks that a
+`CategoricalLogit` or `Ordinal` response's labels are data (one emitted and
+lowered program across label sets of one element type, on the formula and
+authored-location routes), that frozen and data-free replays code rows against
+the fit's levels and refuse an unseen label, that a replay keeps the fitted
+class count (a design holding only some classes is refused by name until
+ReactiveKernels snag `rkppl-leveled-re-328038d0` relaxes RKPPL's bind rule),
+that a JAX module codes the response in `prepare_data`, and that
+`effect(y, term)` on a concise `CategoricalLogit(@brm(...))` response sets the
+term in every class on both backends. `rk_values.jl` checks whole
 predictor arrays, callable readers and distinct predictor/observation axes.
 `rk_source_roundtrip.jl` supplies the shared complete-program replay check:
 definitions and model source are printed, reparsed and built afresh, then

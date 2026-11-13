@@ -13,7 +13,17 @@ svi_same_q(a, b) = all(n -> isequal(getfield(a, n), getfield(b, n)),
     (:family, :μ, :ρ, :Β, :M, :Λ, :U)) &&
     all(zip(a.unit_opt, b.unit_opt)) do (x, y)
         x === nothing ? y === nothing : y !== nothing && svi_same_adam(x, y)
-    end
+    end && svi_same_centering(a, b) &&
+    hasproperty(a, :coupling) == hasproperty(b, :coupling) &&
+    (!hasproperty(a, :coupling) || isequal(a.coupling, b.coupling))
+# Learned centering's controls and their per-unit Adams (mutable, so compared by
+# field: `isequal` on two deserialized copies of one Adam is `===`).
+svi_same_centering(a, b) = hasproperty(a, :centering) == hasproperty(b, :centering) &&
+    (!hasproperty(a, :centering) ||
+        all(n -> isequal(getfield(a.centering, n), getfield(b.centering, n)),
+            (:start, :step, :x, :positions)) &&
+        length(a.centering.opt) == length(b.centering.opt) &&
+        all(svi_same_adam.(a.centering.opt, b.centering.opt)))
 svi_same_run(a, b) = svi_same_adam(a.adam, b.adam) && svi_same_q(a.q, b.q) &&
     (a.average === nothing ? b.average === nothing :
         b.average !== nothing && svi_same_q(a.average, b.average)) &&

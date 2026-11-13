@@ -69,9 +69,13 @@ Base.isequal(a::_BRMSVIStationarity, b::_BRMSVIStationarity) =
     all(n -> isequal(getfield(a, n), getfield(b, n)), fieldnames(_BRMSVIStationarity))
 
 _brm_svi_centering_dimension(q, i) = hasproperty(q, :centering) ? length(q.centering.x[i]) : 0
+_brm_svi_coupling_dimension(q, i) =
+    _brm_svi_coupling(q) === nothing ? 0 : length(q.coupling.V[i])
+_brm_svi_unit_history_dimension(q, i) = 2length(q.M[i]) +
+    _brm_svi_centering_dimension(q, i) + _brm_svi_coupling_dimension(q, i)
 function _brm_svi_stationarity_state(q, c)
     _BRMSVIStationarity(_BRMSVIIterates(2length(q.μ)),
-        [_BRMSVIIterates(2length(q.M[i]) + _brm_svi_centering_dimension(q, i))
+        [_BRMSVIIterates(_brm_svi_unit_history_dimension(q, i))
             for i in eachindex(q.M)],
         0, false, c.window * max(c.min_windows, c.patience + 1), 0,
         _brm_svi_stationarity_empty(), nothing)
@@ -99,8 +103,19 @@ function _brm_svi_record_unit!(h, q, i)
     d = length(q.M[i])
     slot[1:d] .= q.M[i]
     slot[d+1:2d] .= _brm_svi_marginal_logsd(q.Λ[i])
+    nc = _brm_svi_centering_dimension(q, i)
     if hasproperty(q, :centering)
-        slot[2d+1:end] .= _brm_svi_unit_controls(q, i)
+        slot[2d+1:2d+nc] .= _brm_svi_unit_controls(q, i)
+    end
+    coupling = _brm_svi_coupling(q)
+    if coupling !== nothing
+        V = coupling.V[i]
+        for (k, j) in enumerate(coupling.rows[i])
+            slot[d+j] = log(hypot(exp(slot[d+j]), norm(view(V, k, :))))
+        end
+        # Stable marginal widths can conceal a moving global-unit dependence.
+        # Keep the represented coupling coefficients too, on this unit's clock.
+        slot[2d+nc+1:end] .= vec(V)
     end
 end
 
@@ -204,6 +219,6 @@ function _brm_svi_stationarity_consistent(run, c)
         0 <= x.count <= size(x.values, 2) <= _BRM_SVI_STATIONARITY_CAPACITY &&
         x.stride >= 1 && ispow2(x.stride) && x.count <= x.updates ÷ x.stride
     valid(h.globals, 2length(q.μ)) && length(h.units) == length(q.M) &&
-        all(i -> valid(h.units[i], 2length(q.M[i]) + _brm_svi_centering_dimension(q, i)), eachindex(q.M)) &&
+        all(i -> valid(h.units[i], _brm_svi_unit_history_dimension(q, i)), eachindex(q.M)) &&
         0 <= h.explored <= length(run.windows)
 end

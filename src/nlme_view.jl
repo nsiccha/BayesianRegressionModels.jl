@@ -776,15 +776,18 @@ function _brm_nlme_unit_reading_priors(backend::RKBRMI, view)
         # computes per cell cannot be evaluated one cell at a time, and the
         # factors' reads are unknown (ReactiveKernels todo 1olsblw; RKPPL
         # 0.1.126 localized the cell's read of the latent, not its law).
-        _brm_nlme_error("brm_nlme_view: the law of the `@plate` cell latent " *
-            join(("`$name`" for name in latents), ", ") * " reads a value the " *
-            "model computes per cell (such as a formula predictor `m[i]`), and " *
-            "ReactiveKernels cannot yet evaluate that law one cell at a time " *
+        _brm_nlme_error("brm_nlme_view: an argument of the law of the `@plate` cell " *
+            "latent " * join(("`$name`" for name in latents), ", ") * " is computed " *
+            "per cell from a sampled value (such as `m .+ loc[i]`, a sampled scalar " *
+            "combined with the cell's data, or a formula predictor `m[i]`), and " *
+            "ReactiveKernels cannot yet evaluate such an argument one cell at a time " *
             "(ReactiveKernels todo 1olsblw), so no NLME route can " *
-            "tell whether its prior reads the units' draws. For a location law, " *
-            "keep only data and sampled scalars in the law and add the rest where " *
-            "the cell reads the latent (`d ~ Normal(loc[i], s)`, then " *
-            "`x = m[i] .+ d`): the same model. ReactiveKernels reported: " *
+            "tell whether its prior reads the units' draws. Until then each argument " *
+            "of the law can be the cell's data (`loc[i]`), a number or a sampled " *
+            "scalar on its own (`s`). For a location law, the same model reads the " *
+            "location where the cell reads the latent (`d ~ Normal(loc[i], s)`, then " *
+            "`x = m .+ d`); `brm_svi_fit`'s default linear coupling then keeps the " *
+            "dependence between `d` and `m`. ReactiveKernels reported: " *
             sprint(showerror, error))
     end
 end

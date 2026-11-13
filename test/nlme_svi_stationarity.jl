@@ -123,3 +123,34 @@ end
     # New observations are required before another check can pass.
     @test !BRM._brm_svi_stationary!(run, c)
 end
+
+@stestset "stationarity detects changing coupling at constant marginal widths" begin
+    c = (; stationarity=true, window=1, min_windows=1, patience=1)
+    V = [1.0 0.0; 0.0 2.0]
+    q = (; μ=zeros(2), ρ=zeros(2), Β=zeros(2, 0), M=[zeros(2)],
+        Λ=[diagm([4.0, 9.0])], centering=(; x=[[0.1, 0.2]]),
+        coupling=(; rows=[[1, 2]], V=[V]))
+    h = BRM._brm_svi_stationarity_state(q, c).units[1]
+    for _ in 1:512
+        BRM._brm_svi_record_unit!(h, q, 1)
+    end
+    @test BRM._brm_svi_stationarity_check(h).passed
+    @test size(h.values) == (10, 512)
+    @test h.values[3:4, 1] ≈ log.([1/4 + 1, 1/9 + 4]) ./ 2
+    @test h.values[5:6, 1] == BRM._brm_svi_unit_controls(q, 1)
+    @test h.values[7:10, 1] == vec(V)
+
+    moving = BRM._brm_svi_stationarity_state(q, c).units[1]
+    for θ in range(0.0, pi/2; length=512)
+        V .= [cos(θ) sin(θ); -2sin(θ) 2cos(θ)]
+        BRM._brm_svi_record_unit!(moving, q, 1)
+    end
+    @test moving.values[3:4, :] ≈ repeat(h.values[3:4, 1:1], 1, 512)
+    @test !BRM._brm_svi_stationarity_check(moving).passed
+
+    uncoupled = merge(q, (; coupling=(; rows=[Int[]], V=[zeros(0, 2)])))
+    empty = BRM._brm_svi_stationarity_state(uncoupled, c).units[1]
+    BRM._brm_svi_record_unit!(empty, uncoupled, 1)
+    @test empty.values[3:4, 1] ≈ log.([1/4, 1/9]) ./ 2
+    @test size(empty.values, 1) == 6
+end

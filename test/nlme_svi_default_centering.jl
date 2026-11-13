@@ -94,7 +94,7 @@ function check_default_population(label, counts)
         @test 0.6 < ratio < 1.4
         if label == "strong"
             plain = brm_svi_fit(rk; subject_group=:g, batch_size=8, rng=Xoshiro(2),
-                ndraws=4000, centering=nothing)
+                ndraws=4000, centering=nothing, coupling=nothing)
             ps = population_summary(plain.draws[idx, :])
             println("DEFAULT_CENTERING plain_sd_ratio=$(ps.sd / nuts.sd) " *
                 "plain_sd=$(ps.sd) converged=$(plain.diagnostics.converged)")

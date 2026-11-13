@@ -101,3 +101,22 @@ svi_stationarity_roundtrip(x) = (io = IOBuffer(); serialize(io, x); seekstart(io
     @test !hasproperty(old.run.sampling, :stationarity)
     @test_throws "stationarity must be a Bool" brm_svi_fit(m; stationarity=1)
 end
+
+@stestset "coupled iterate histories resume exactly with nonempty coupling" begin
+    data = svi_gauss_data(Xoshiro(804), 8; nobs=12)
+    m = brm_nlme_model(RKBRMI(svi_gauss_model(data)); ad_backend=NLME_AD)
+    options = (; centering=nothing, batch_size=4, max_iterations=800,
+        ndraws=20, window=20, min_windows=2, patience=1, trend_windows=0,
+        settle_windows=1, polish_windows=4)
+    full = brm_svi_fit(m; rng=Xoshiro(805), options...)
+    @test any(!isempty, full.diagnostics.q.coupling.V)
+    part = brm_svi_fit(m; rng=Xoshiro(805), options..., stop_after=73)
+    state = svi_stationarity_roundtrip(brm_svi_optimizer_checkpoint(part))
+    @test any(h -> size(h.values, 1) > 2length(state.run.q.M[1]),
+        state.run.sampling.stationarity.units)
+    resumed = brm_svi_resume(m, state; ndraws=20)
+    @test svi_same_result(resumed, full)
+    @test svi_same_state(brm_svi_optimizer_checkpoint(resumed),
+        brm_svi_optimizer_checkpoint(full))
+    @test isequal(resumed.diagnostics.stationarity, full.diagnostics.stationarity)
+end

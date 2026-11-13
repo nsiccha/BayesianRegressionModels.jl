@@ -105,6 +105,10 @@ function _brm_svi_save_units!(units, m, q, blocks=m.view.subject_coordinates;
         units[label] = hasproperty(q, :centering) ? merge(saved,
             (; centering=_brm_svi_coordinate_controls(q, i, length(q.M[i])),
                centering_maps=deepcopy(centering_maps[i]))) : saved
+        # A coupled unit's prior in the next window is conditional on the globals
+        # (src/nlme_svi_coupling.jl).
+        coupled = _brm_svi_saved_coupling(q, i)
+        coupled === nothing || (units[label] = merge(units[label], (; coupling=coupled)))
     end
     units
 end
@@ -210,8 +214,12 @@ function _brm_svi_fill_absent_draws!(rng, draws, t, previous::BRMSVIState)
         end
         isempty(source) && continue
         centering = _brm_svi_centering(t)
+        carried = get(unit, :coupling, nothing)
         for draw in axes(draws, 2)
             z = _brm_svi_saved_unit_draw(rng, unit)
+            # At this draw's globals, as the carried prior's mean is.
+            carried === nothing || (view(z, carried.rows) .+=
+                carried.W * (draws[t.globals[carried.columns], draw] .- carried.center))
             centering === nothing || _brm_svi_absent_draw!(z, centering,
                 _brm_svi_centering_frame(centering, t, draws[t.globals, draw]), unit,
                 source, destination)
@@ -327,6 +335,9 @@ struct _BRMSVIStreamingPrior{G,H,Q,P}
     # A centered checkpoint's per-coordinate control logits of each carried
     # unit (`nothing` for a new unit or an uncentered checkpoint).
     controls::Vector{Union{Nothing,Vector{Float64}}}
+    # A coupled checkpoint's regression of each carried unit's coupled rows on its
+    # coupled globals (`nothing` for a new unit or an uncoupled checkpoint).
+    coupling::Vector{Union{Nothing,NamedTuple}}
 end
 
 function _brm_svi_initialize(t, previous::BRMSVIState, family;
@@ -343,6 +354,7 @@ function _brm_svi_initialize(t, previous::BRMSVIState, family;
     end
     carried = falses(length(t.units))
     controls = Vector{Union{Nothing,Vector{Float64}}}(nothing, length(t.units))
+    couplings = Vector{Union{Nothing,NamedTuple}}(nothing, length(t.units))
     scientific = _brm_svi_scientific_keys(t.m)
     for (i, label) in enumerate(_brm_svi_unit_levels(t))
         keys = _brm_svi_owned_unit_keys(t.m, t.units, i; scientific)
@@ -356,10 +368,12 @@ function _brm_svi_initialize(t, previous::BRMSVIState, family;
         perm = [index[k] for k in keys]
         _brm_svi_restore_unit!(q, i, old, perm)
         hasproperty(old, :centering) && (controls[i] = old.centering[perm])
+        couplings[i] = _brm_svi_restored_coupling(old, perm)
     end
     prior = _BRMSVIStreamingPrior(_brm_svi_global_factor(q),
-        _brm_svi_global_geometry(q), deepcopy((; q.M, q.Λ, q.U)), carried, t.prior, controls)
-    merge(t, (; prior)), q
+        _brm_svi_global_geometry(q), deepcopy((; q.M, q.Λ, q.U)), carried, t.prior, controls,
+        couplings)
+    merge(_brm_svi_carried_touched(t, couplings), (; prior)), q
 end
 
 function _brm_svi_global_term(prior::_BRMSVIStreamingPrior, t, g)
@@ -371,9 +385,11 @@ end
 
 function _brm_svi_unit_prior!(gg, gz, prior::_BRMSVIStreamingPrior, t, i, g, z)
     prior.carried[i] || return _brm_svi_unit_prior!(gg, gz, prior.authored, t, i, g, z)
-    δ = z - prior.units.M[i]
+    carried = prior.coupling[i]
+    δ = _brm_svi_carried_shift!(z - prior.units.M[i], carried, g)
     gradient = -(prior.units.Λ[i] * δ)
     gz .+= gradient
+    _brm_svi_carried_gradient!(gg, carried, gradient)
     dot(δ, gradient) / 2 + _brm_svi_unit_logdet_root(prior.units.U[i]) - length(z) * log(2π) / 2
 end
 
@@ -394,8 +410,10 @@ The target is `q_previous(globals, units) * p(new_data | globals, units)`.
 Both the optimizer start and the prior use the previous factors. The history
 is carried through a Gaussian family, never re-evaluated. This sequential
 approximation can depend on window order and is not a cumulative-data refit.
-The family drops global/unit and between-unit dependence; increasing the
-global rank alone does not preserve those dependencies.
+Under linear coupling (the default) a carried unit's prior is its factor
+conditional on the globals it was coupled to, so the global/unit dependence it
+learned is carried; between-unit dependence is dropped, and an uncoupled
+checkpoint carries independent unit factors.
 Do not supply overlapping windows: their likelihood would be counted again.
 
 Units are matched by label and semantic coordinate identity. New labels get

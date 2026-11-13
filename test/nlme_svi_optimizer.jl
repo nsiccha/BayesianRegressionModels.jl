@@ -470,7 +470,7 @@ end
         resumed = deserialize(output)
         d = full.diagnostics
         @test resumed.draws == full.draws
-        @test isequal(resumed.q, d.q)
+        @test svi_same_q(resumed.q, d.q)
         @test resumed.elbo == d.elbo && resumed.elbo_windows == d.elbo_windows
         @test resumed.iterations == d.iterations && resumed.converged
         @test resumed.unit_gradient_calls == d.unit_gradient_calls

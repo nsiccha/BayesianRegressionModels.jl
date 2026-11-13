@@ -50,7 +50,7 @@ using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL
 model = varying_slopes_model()
 rk = RKBRMI(model)
 source = jax_source(rk.model, rk_bound_plan(rk); values=(:mu,))
-inputs = rk_bound_data(rk)
+inputs = rk_bound_data(rk, source)
 """
 Main.BRMDocsComparisons.evaluate_source(mod, code)
 folder = joinpath(pwd(), "downloads", "jax")
@@ -83,9 +83,10 @@ variables. Parameter sizes that depend on the data are resolved by
 
 ## Data preparation
 
-Pass exactly the columns listed by `model.DATA`, by name. The native binding
-returned by `rk_bound_data(rk)` can contain extra intermediate values; those
-are not keyword arguments of `prepare_data`.
+`rk_bound_data(rk, source)` returns exactly the columns listed by `model.DATA`,
+by name, including scalar constants and untranslated data-only definitions.
+The one-argument `rk_bound_data(rk)` is the native graph binding: it can contain
+extra intermediates and use internal names for scalar inputs.
 
 The Python environment is separate from the documentation build. The reproduction
 script executes this workflow; the tables below read its cached results.
@@ -97,7 +98,7 @@ import jax.numpy as jnp
 import model as m
 
 # inputs: the Julia binding transferred to Python arrays and label lists
-prepared = m.prepare_data(**{name: inputs[name] for name in m.DATA})
+prepared = m.prepare_data(**inputs)
 u = jnp.zeros(m.dimension(prepared), dtype=jnp.float64)
 log_density = jax.jit(m.log_density)
 value = log_density(u, **prepared)
@@ -220,7 +221,7 @@ training = varying_slopes_data().data
 new_data = merge(training, (; x=training.x .+ 0.5))
 replay = reprocess(rk, new_data)
 replay_source = jax_source(replay.model, rk_bound_plan(replay); values=(:mu,))
-replay_inputs = rk_bound_data(replay)
+replay_inputs = rk_bound_data(replay, replay_source)
 """
 Main.BRMDocsComparisons.evaluate_source(mod, code)
 Markdown.MD([Markdown.Code("julia", code),
@@ -229,7 +230,8 @@ Markdown.MD([Markdown.Code("julia", code),
 
 A saved fitted state can also reconstruct a replay without the training
 rows: `RKBRMI(builder(new_data), brm_fitted_state(rk))`, where `builder` is
-the original data-free BRM builder. Apply the same `DATA` filter in Python.
+the original data-free BRM builder. Collect its inputs with
+`rk_bound_data(replay, replay_source)` and pass them to `prepare_data` by name.
 A replay that omits a response needed by `log_density` is refused with a
 `ContractValidationError`; retaining that response and requesting `values`
 is different from exporting a response-free predictive program.

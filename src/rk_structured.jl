@@ -145,7 +145,7 @@ function _rk_ast_hsgp_grouped(definitions, term, inputs, floors, extent, taken, 
     spectral = _rk_block_local!(block, :spectral_scale)
     value = _rk_block_local!(block, :value)
     scales_call, value_call = _rk_ast_hsgp_value_graph!(definitions, term, taken, arguments,
-        sigma, rho, weights_value, spectral; group_index, multigroup)
+        sigma, rho, weights_value, spectral, bindings; group_index, multigroup)
     push!(block.statements, Expr(:(=), spectral, scales_call), Expr(:(=), value, value_call))
     doc = @_rk_definition_doc """
         An HSGP term$(G > 1 ? " with $G groups" : "") whose length scale and marginal scale may vary by group.

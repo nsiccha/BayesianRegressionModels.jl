@@ -12,11 +12,11 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.283
+## 0.2.287
 
 - **Breaking:** minibatch `brm_svi_fit` now requires stable global and unit
-  means and marginal scales, and learned centering controls, alongside its
-  ELBO checks before accepting the start of iterate averaging. Exploration can
+  means and marginal scales, learned centering controls and linear coupling
+  coefficients, alongside its ELBO checks before certifying convergence. Exploration can
   switch to its scale-adjusted settling step while moments still move. The bounded
   histories use each unit's actual update clock and split-Rhat; bulk ESS is
   reported separately.
@@ -34,6 +34,95 @@ instead of failing at run time.
   `:max_iterations`, rather than a noisy last iterate. Old optimizer
   checkpoints retain their stopping policy and exact continuation; new ones
   preserve bounded iterate histories across interruption and serialization.
+
+## 0.2.286
+
+- **Breaking:** fresh `brm_svi_fit` calls and streaming updates condition every
+  unit's variational factor on the globals by default (`LinearCoupling()`, new
+  export): on the unit coordinates learned centering does not centre, a unit's
+  mean is linear in the global factor's standard-normal draw,
+  `z_i = M_i + V_i ζ + U_i⁻ᵀ ε_i`, with `V_i` learned with the fit. A
+  population value the data pin only together with the units (a population
+  step mean beside per-unit `@plate` cell latent steps) keeps its posterior
+  spread instead of the noise-level width independent factors give it. Pass
+  `coupling=nothing` for independent global and unit factors.
+  `diagnostics.coupling` reports each unit's coupled rows and globals, `V` and
+  its conditional and marginal sds; `diagnostics.q`'s unit factors are the
+  conditionals at the global mean, which factor starts and `brm_svi_combine`
+  read. A streaming checkpoint saves each coupled unit's regression on its
+  coupled globals, and the next window's prior for that unit is conditional on
+  them. Optimizer resume keeps the saved policy. Not with
+  `laplace=GaussianBlockLaplace()`.
+- `diagnostics.centering.uncentered` lists `@plate` cell latents and the
+  sampled locals of components called in cells, with the reason.
+- `brm_nlme_view`'s refusal of a cell latent whose law argument is computed per
+  cell from a sampled value names that condition (also `m .+ loc[i]`, a sampled
+  scalar combined with the cell's data), not only a per-cell model value.
+
+## 0.2.285
+
+- Added: `effect(y, term) ~ law` on a concise
+  `y ~ CategoricalLogit(@brm(formula))` response sets `term`'s coefficient in
+  every non-reference class, on both backends; `effect(y, Intercept)` and
+  `effect(y, :)` work the same way. A law that reads data reads it as data, so
+  one program serves every value of a data-valued scale. A per-class address
+  of a generated class predictor beside it is refused by name.
+- Changed: on RKBRMI the level table of a `CategoricalLogit`, `Ordinal` or
+  `Categorical` response is the fitted value `y_fit_levels =
+  brm_fit_levels(y_fit)` of a fit-role copy of the response, not a literal
+  `Base.vect(...)` of its labels. Models that differ only in the labels of
+  the response emit one program. A frozen `reprocess` and a data-free replay
+  (`brm_fitted_state`) code the design's rows against the fit's levels and
+  refuse a label the fit never saw ("not a training level"); before, a frozen
+  replay took the design's own levels. The class count is still a program
+  shape (one predictor per non-reference class).
+- Changed: a replay keeps a leveled response's fitted class count. A design
+  that holds only some of the fitted classes, or a `CategoricalVector`
+  response with a declared level no row holds, is refused by name, because
+  ReactiveKernelsPPL binds a leveled response only when it holds every level
+  (ReactiveKernels snag `rkppl-leveled-re-328038d0`). Before, such a replay
+  was planned with the design's own level count and refused by arity.
+- An emitted JAX module computes that level table from the `y_fit` input in
+  `prepare_data` and codes `y_raw` against it there, where it inlined the
+  labels before. For a `CategoricalVector` response the module now takes the
+  levels as an input (`UNTRANSLATED`), as it does for a categorical grouping;
+  `rk_bound_data` supplies them.
+- **Breaking:** the emitted program of an RKBRMI model with such a response
+  changes. Re-export fitted states of these models with this version.
+  Existing SVI/SMC optimizer checkpoints and streaming states are refused by
+  the program-identity check; finish those runs on their original version or
+  restart them.
+
+## 0.2.284
+
+- Changed: RKBRMI models with `hsgp(x; cov=:periodic, period=P)`, including
+  `anchor=` and `rows=`, emit the Fourier basis, length-scale-floor bisection
+  and Bessel spectral weights as explicit ReactiveKernels graphs. Harmonic
+  count, period, anchor and row count remain inputs to one program. The native
+  model, priors and coordinate order are unchanged.
+- The ReactiveKernels compat floor and test pin are 0.1.198, which includes
+  positional kernels, captured group-label predicates and callable arguments
+  in JAX data-preparation helpers. The bundled RKPPL 0.1.162 requires the
+  test environment's WarmupHMC pin to move to 0.2.18.
+- The emitted JAX module prepares the periodic basis and floor from its data
+  inputs. Its eager and jitted densities and gradients match native Enzyme,
+  including when prepared data are passed as JIT arguments and for a single
+  harmonic.
+- **Breaking:** the emitted periodic-HSGP program changes. Re-export fitted
+  states of these models with this version. Existing SVI/SMC optimizer
+  checkpoints and streaming states are refused by the program-identity
+  check; finish those runs on their original version or restart them.
+
+## 0.2.283
+
+- Added: `rk_bound_data(rk, source)` collects exactly the `prepare_data`
+  inputs of an emitted `JAXSource`, under their authored names. Scalar data
+  and constants used in a plate could previously be available only under
+  internal native names, so looking up the module's input names in
+  `rk_bound_data(rk)` failed. The new method obtains missing values through
+  RKPPL's public `frozen_values`, preserving frozen and fresh replay behavior.
+  The one-argument native binding and its checkpoint identities are unchanged.
+  JAX callers should pass their emitted source to the new method.
 
 ## 0.2.282
 
