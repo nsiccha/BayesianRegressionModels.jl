@@ -24,7 +24,7 @@ continuing the same optimization with [`brm_svi_resume`](@ref), in this or
 another process. For the minibatch engine it holds the raw variational factors
 (also while polishing, next to the running average the result reports), the
 global Adam moments and step count, the random stream, the iteration, the
-ELBO trace and window statistics of the stopping rule and the polishing
+ELBO trace, window statistics and bounded parameter-iterate histories of the stopping rule, and the polishing
 state, the weighted sampler, per-unit visits, cached entropy, lazy-average
 counters and structured-unit Adam moments. For `laplace=GaussianBlockLaplace()` it holds the global factor, Adam,
 the ELBO so far, the averaging window of global iterates, the random stream
@@ -36,7 +36,7 @@ non-centered, the subject groupings and coordinate ownership, and the fixed
 shared values). It holds no observations,
 compiled model or AD workspace. Its size is that of the variational factors
 (twice while polishing; plus the averaging window for GaussianBlockLaplace)
-plus one ELBO value per iteration so far; a run keeps no history of
+plus at most 512 observations per monitored moment and one ELBO value per iteration so far; a run keeps no history of
 checkpoints.
 
 `brm_svi_optimizer_checkpoint(fit)` copies the state from the result of a
@@ -77,6 +77,7 @@ function Base.show(io::IO, s::BRMSVIOptimizerState)
     run isa _BRMSVILaplaceRun && return print(io, "BRMSVIOptimizerState(",
         "GaussianBlockLaplace, iteration ", run.iteration, " of ", c.max_iterations, window, ")")
     phase = run.converged ? "converged" :
+        _brm_svi_end_status(run, c) === :settle_limit ? "settling limit reached" :
         run.iteration >= c.max_iterations ? "reached max_iterations" :
         _brm_svi_phase_text(run, c)
     print(io, "BRMSVIOptimizerState(iteration ", run.iteration, " of at most ",
@@ -251,7 +252,8 @@ function _brm_svi_consistent(run::_BRMSVIRun, t, c)
         run.sampling.method == c.unit_sampling &&
         run.unit_gradient_calls ==
             sum(i -> run.sampling.visits[i] * _brm_svi_unit_calls(q, i, c), 1:N; init=0) &&
-        sum(run.sampling.draws) == c.batch_size * run.iteration
+        sum(run.sampling.draws) == c.batch_size * run.iteration &&
+        _brm_svi_stationarity_consistent(run, c)
 end
 
 # The resumed run on `t`: the streaming prior from the checkpoint's carry, the
