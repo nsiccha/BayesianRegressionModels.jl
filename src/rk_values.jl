@@ -94,6 +94,10 @@ _rk_ast_positive_prior(prior::_BRMKnownScale, _bindings, _taken; default=:HalfNo
     prior.value
 _rk_ast_positive_prior(prior::_BRMKnownTermValue{<:Real}, _bindings, _taken;
                        default=:HalfNormal) = prior.value
+# A scale or length scale set to an expression over model values
+# (`sd(lp, hsgp(x)) = sqrt(log1pexp(s))`) is that value.
+_rk_ast_positive_prior(prior::_BRMDerivedTermValue, bindings, taken; default=:HalfNormal) =
+    _rk_ast_param_law(prior, bindings, taken)
 function _rk_ast_positive_prior(prior, bindings, taken; default=:HalfNormal)
     prior === nothing && return default === :LogNormal ?
         Expr(:call, :LogNormal, 0, 1) :
