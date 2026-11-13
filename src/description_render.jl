@@ -261,6 +261,8 @@ _brmd_law(::Type{<:BernoulliLogit}) = :bernoulli_logit
 _brmd_law(::Type{<:Binomial}) = :binomial
 _brmd_law(::Type{<:BinomialLogit}) = :binomial_logit
 _brmd_law(::Type{<:Poisson}) = :poisson
+# `Categorical` is Distributions' `DiscreteNonParametric` over `1:K`; name it as written.
+_brmd_law(::Type{<:Categorical}) = :categorical
 _brmd_law(::Type{<:NegativeBinomial}) = :negative_binomial
 _brmd_law(::Type{<:NegativeBinomial2}) = :negative_binomial_mean
 # A known value (`sd(...) = v`, `cor(:, ID) = R`) is the point mass at it.
@@ -312,6 +314,7 @@ _brmd_law_math(_c,::Val{:point_mass},a) = "\\operatorname{Dirac}\\left(" * only(
 # segments are data, named rather than spelled out.
 _brmd_law_math(c,::Val{:icar},_a) = "\\operatorname{ICAR}(\\text{"*_brmd_text(c,:math_icar_edges)*
     "};\\ \\text{"*_brmd_text(c,:math_icar_sum_to_zero)*"})"
+_brmd_law_math(_c,::Val{:categorical},a) = "\\operatorname{Categorical}(" * join(a,",") * ")"
 _brmd_law_math(_c,::Val{:uniform},a) = "\\operatorname{Uniform}(" * (isempty(a) ? "0,1" : join(a,",")) * ")"
 _brmd_law_math(_c,::Val{:student_t_standard},a) = "t_{"*only(a)*"}(0,1)"
 _brmd_law_math(_c,::Val{:student_t_location_scale},a) = "t_{"*a[1]*"}("*join(a[2:3],",")*")"
@@ -484,6 +487,29 @@ _brmd_builtin_call(::StanBlocks.ValueFamily,c)=isempty(_brmd_coordinates(c)) ? n
 # itself a described component, shared by every coordinate.
 _brmd_builtin_call(::typeof(_brm_vector_prior),c)=BRMDescriptionFragment(
     prose=(_brmd_text(c,:vector_prior),),covers=(c.id,))
+# A declared matrix (`W[1:m, 1:n] .~ ...`, `eachrow(G[1:m, 1:n]) .~ ...`):
+# one element or slice law, itself a described component, shared by every
+# entry, row or column.
+_brmd_builtin_call(::typeof(_brm_matrix_prior),c)=BRMDescriptionFragment(
+    prose=(_brmd_text(c,:matrix_prior),),covers=(c.id,))
+_brmd_builtin_call(::typeof(_brm_matrix_rows_prior),c)=BRMDescriptionFragment(
+    prose=(_brmd_text(c,:matrix_rows_prior),),covers=(c.id,))
+_brmd_builtin_call(::typeof(_brm_matrix_cols_prior),c)=BRMDescriptionFragment(
+    prose=(_brmd_text(c,:matrix_cols_prior),),covers=(c.id,))
+for f in (eachrow,eachcol)
+    @eval _brmd_builtin_call(::$(typeof(f)),c)=BRMDescriptionFragment(
+        prose=(_brmd_text(c,:matrix_slices),),covers=(c.id,))
+end
+_brmd_builtin_call(::typeof(permutedims),c)=BRMDescriptionFragment(
+    prose=(_brmd_text(c,:transposition),),covers=(c.id,))
+_brmd_call_math(::typeof(permutedims),args,_kwargs,_c) =
+    "\\left("*only(args)*"\\right)^{\\mathsf T}"
+_brmd_builtin_call(::Type{<:Ref},c)=BRMDescriptionFragment(covers=(c.id,))
+# `HiddenMarkov(initial, transition, emissions)`: the forward algorithm over
+# the state paths (hidden_markov.jl).
+_brmd_builtin_call(::Type{<:HiddenMarkov},c)=BRMDescriptionFragment(
+    prose=(_brmd_text(c,get(c.keywords,:log_weights,false) === true ?
+        :hidden_markov_log_weights : :hidden_markov),),covers=(c.id,))
 # `vcat` is SLIC's block-wise prior family, decomposing the same way, or,
 # outside distribution position, value concatenation (`_brmd_distribution`).
 _brmd_builtin_call(::typeof(vcat),c)=!isempty(_brmd_coordinates(c)) ? _brmd_coordinatewise_fragment(c) :

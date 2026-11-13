@@ -15,9 +15,10 @@ using LinearAlgebra, Random, Serialization
 import Treebars
 
 # A short exploration (at least six windows of 20 iterations) and polishing
-# (four windows), so a run converges in a few hundred iterations.
+# (four windows), so the legacy ELBO-only run converges in a few hundred
+# iterations. Default stationarity checkpoints have their own longer-run tests.
 const SVI_OPT = (; batch_size=4, window=20, min_windows=6, patience=3,
-    polish_windows=4, max_iterations=3000)
+    polish_windows=4, max_iterations=3000, stationarity=false, centering=nothing)
 
 svi_bytes(x) = (io = IOBuffer(); serialize(io, x); position(io))
 
@@ -139,7 +140,7 @@ end
     carry = brm_svi_checkpoint(initial)
     data = svi_stream_data(Xoshiro(303), ["b", "c", "new"], 4)
     controls = (; batch_size=2, window=10, min_windows=4, patience=2,
-        polish_windows=3, max_iterations=1000)
+        polish_windows=3, max_iterations=1000, stationarity=false)
     full = brm_svi_fit(carry, svi_stream_model(data); rng=Xoshiro(304), controls...,
         ndraws=20)
     @test full.diagnostics.converged

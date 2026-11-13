@@ -232,9 +232,13 @@ _rk_level_factor_input!(inputs, lc::_BRMMultigroupCorrelation) =
     _rk_level_factor_input!(inputs, lc.base)
 
 _rk_extent_bindings(_plan) = ()
-_rk_extent_bindings(plan::_RKStructuralPlan) =
+_rk_extent_bindings(plan::_RKStructuralPlan) = Iterators.flatten((
     (parameter.extent => parameter.size for parameter in plan.vector_parameters
-        if parameter.extent !== nothing)
+        if parameter.extent !== nothing),
+    # A declared matrix's data-computed extents.
+    (extent.spelling => extent.value for parameter in plan.vector_parameters
+        if parameter.spelled isa NamedTuple && haskey(parameter.spelled, :extents)
+        for extent in parameter.spelled.extents if extent.spelling isa Symbol)))
 
 _rk_bind_source_column!(columns, name, value, plan) = (columns[name] = value; columns)
 # An absent response (a `reprocess` design without it) is never bound: RKPPL
@@ -1401,6 +1405,17 @@ function _rk_ast_vector_parameter(parameter::_RKVectorParameter)
         return Expr(:call, :~, Expr(:ref, parameter.name,
             Expr(:call, :(:), 1, something(parameter.extent, parameter.size))),
             Expr(:call, :MvNormal, parameter.args...))
+    end
+    if parameter.family in (:matrix_elementwise, :matrix_rows_dirichlet,
+            :matrix_cols_dirichlet)
+        rows, cols = parameter.spelled.extents
+        array = Expr(:ref, parameter.name, Expr(:call, :(:), 1, rows.spelling),
+            Expr(:call, :(:), 1, cols.spelling))
+        parameter.family === :matrix_elementwise && return Expr(:call, :.~, array,
+            _rk_ast_broadcast_law(last(_rk_ast_sampled(only(parameter.args)).args)))
+        slices = parameter.family === :matrix_rows_dirichlet ? :eachrow : :eachcol
+        return Expr(:call, :.~, Expr(:call, slices, array),
+            Expr(:call, :Dirichlet, parameter.spelled.dirichlet...))
     end
     parameter.family === :simplex_dirichlet || return nothing
     alpha = only(parameter.args)

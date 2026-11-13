@@ -2217,9 +2217,73 @@ elements, each with the scalar prior `law`. Never called.
 """
 function _brm_vector_prior end
 
+# A declared matrix (snag `hidden-markov-ob-6b35403a`) extends the same
+# spelling to two axes, as RKPPL declares arrays (rkppl-use §3):
+#
+#   W[1:m, 1:n] .~ Family.(args...)           -> W ~ _brm_matrix_prior(m, n, Family(args...))
+#   eachrow(G[1:m, 1:n]) .~ Dirichlet(n, a)   -> G ~ _brm_matrix_rows_prior(m, n, Dirichlet(n, a))
+#   eachcol(G[1:m, 1:n]) .~ Dirichlet(m, a)   -> G ~ _brm_matrix_cols_prior(m, n, Dirichlet(m, a))
+#
+# Each element of `W` is drawn from the scalar law; each row (column) of `G`
+# from the vector law, which Julia's `eachrow` (`eachcol`) broadcast means.
+"""
+    _brm_matrix_prior(m, n, law)
+
+Internal marker for a declared matrix parameter, `name[1:m, 1:n] .~ law`:
+`m × n` elements, each with the scalar prior `law`. Never called.
+"""
+function _brm_matrix_prior end
+"""
+    _brm_matrix_rows_prior(m, n, law)
+
+Internal marker for a declared matrix whose rows are drawn from a vector law,
+`eachrow(name[1:m, 1:n]) .~ law`. Never called.
+"""
+function _brm_matrix_rows_prior end
+"""
+    _brm_matrix_cols_prior(m, n, law)
+
+Internal marker for a declared matrix whose columns are drawn from a vector
+law, `eachcol(name[1:m, 1:n]) .~ law`. Never called.
+"""
+function _brm_matrix_cols_prior end
+const _BRMMatrixMarker = Union{typeof(_brm_matrix_prior),
+    typeof(_brm_matrix_rows_prior), typeof(_brm_matrix_cols_prior)}
+
+# The extent `n` of a declared axis written `1:n`.
+function _brm_declared_extent(range, spelled)
+    isxcall(range, :(:)) && length(range.args) == 3 && range.args[2] == 1 || error(
+        "@brm: `$spelled`: a declared index range must be `1:n`, with `n` an " *
+        "integer, a scalar data field or an expression over data")
+    range.args[3]
+end
+
+function _brm_matrix_declaration(x::Expr)
+    lhs = x.args[2]
+    spelled = sprint(Base.show_unquoted, x)
+    sliced = isxcall(lhs, :eachrow) || isxcall(lhs, :eachcol)
+    array = sliced ? (length(lhs.args) == 2 ? lhs.args[2] : nothing) : lhs
+    Meta.isexpr(array, :ref, 3) && array.args[1] isa Symbol || error(
+        "@brm: `$spelled`: a matrix parameter is declared `name[1:m, 1:n] .~ " *
+        "Family.(args...)`, or with a vector law per row or column, " *
+        "`eachrow(name[1:m, 1:n]) .~ Dirichlet(n, a)`")
+    m, n = (_brm_declared_extent(range, spelled) for range in array.args[2:3])
+    if sliced
+        law = x.args[3]
+        Meta.isexpr(law, :call) && !_brm_is_broadcast_call(law) || error(
+            "@brm: `$spelled`: each $(lhs.args[1] === :eachrow ? "row" : "column") " *
+            "is drawn from one vector law, such as `Dirichlet(n, 1)`; write it undotted")
+        marker = lhs.args[1] === :eachrow ? _brm_matrix_rows_prior : _brm_matrix_cols_prior
+        return Expr(:call, :~, array.args[1], Expr(:call, marker, m, n, law))
+    end
+    Expr(:call, :~, array.args[1], Expr(:call, _brm_matrix_prior, m, n, _brm_element_law(x)))
+end
+
 function _brm_vector_declaration(x::Expr)
     lhs = x.args[2]
     spelled = sprint(Base.show_unquoted, x)
+    (Meta.isexpr(lhs, :ref, 3) || isxcall(lhs, :eachrow) || isxcall(lhs, :eachcol)) &&
+        return _brm_matrix_declaration(x)
     Meta.isexpr(lhs, :ref, 2) && lhs.args[1] isa Symbol || error(
         "@brm: `$spelled`: a vector parameter is declared " *
         "`name[1:n] .~ Family.(args...)`")
@@ -3714,6 +3778,22 @@ _show_top(io::IO, key, op::ExprColumn{<:Union{typeof(~),typeof(assign)}}) = begi
         _brm_show_operand(io, len, 0)
         print(io, "] .~ ")
         _brm_show_dotted(io, law)
+        return
+    end
+    # A declared matrix prints as written: `W[1:m, 1:n] .~ Normal.(...)` or
+    # `eachrow(G[1:m, 1:n]) .~ Dirichlet(n, 1)`.
+    if getf(op) === (~) && last(args) isa ExprColumn{<:_BRMMatrixMarker}
+        marker = getf(last(args))
+        m, n, law = getargs(last(args))
+        sliced = marker !== _brm_matrix_prior
+        sliced && print(io, marker === _brm_matrix_rows_prior ? "eachrow(" : "eachcol(")
+        _show_bare(io, first(args))
+        print(io, "[1:")
+        _brm_show_operand(io, m, 0)
+        print(io, ", 1:")
+        _brm_show_operand(io, n, 0)
+        print(io, sliced ? "]) .~ " : "] .~ ")
+        sliced ? _show_bare(io, law) : _brm_show_dotted(io, law)
         return
     end
     # An elementwise coefficient prior prints as written: `effect(w, g) .~ Normal.(...)`.

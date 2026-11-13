@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.289
+## 0.2.291
 
 - Changed: a concise `y ~ CategoricalLogit(@brm(formula))` whose formula is an
   intercept and continuous data columns (summed, or interacted with `&`) is
@@ -37,6 +37,56 @@ instead of failing at run time.
   `CategoricalLogit.(eachrow(E))`, and 0.1.172 no longer exports its own
   `adaptive_centering_problem`, so BRM's export is the only unqualified one
   again when both packages are loaded.
+
+## 0.2.290
+
+- `y[s] ~ HiddenMarkov(initial, transition, emissions)` in a `@plate` cell
+  observes the cell's sequence through a hidden state that moves as a Markov
+  chain over K states (new export `HiddenMarkov`, HiddenMarkovModels.jl's
+  argument order). `initial` is the first state's law, `transition[i, j]`
+  the probability of a move from `i` to `j` (rows sum to one), and
+  `emissions` one law per state: a broadcast `Normal.(mu, sigma)` or
+  `Categorical.(eachrow(Phi))` (`eachrow`, `eachcol`, `Ref` and listed
+  `[p1, p2]` arguments), a vector of laws whose families may differ, or a
+  comprehension `[Normal(mu[k], s) for k in 1:K]`; a broadcast argument with
+  a step axis (`Normal.(mu .+ beta .* transpose(x[s]), sigma)`) gives laws
+  that change with the step. `log_weights = true` takes `initial` and
+  `transition` on the log scale. The density sums over every state path
+  (forward algorithm): SBBRMI through BRM's `brm_hidden_markov` StanBlocks
+  family, with one pointwise value and one forward-simulated sequence per
+  cell; RKBRMI through a native graph over RK's `hmm_logdensity`. K comes
+  from the data. As a Julia law, `logpdf(HiddenMarkov(...), y)` is the
+  same sum.
+- Declared matrix parameters on both backends: `W[1:m, 1:n] .~ Family.(args...)`
+  draws each entry from a scalar law; `eachrow(G[1:m, 1:n]) .~ Dirichlet(n, a)`
+  and `eachcol(G[1:m, 1:n]) .~ Dirichlet(m, a)` declare a matrix whose rows
+  (columns) are simplexes, such as a transition matrix. Extents are literals
+  or computed from data and stay runtime inputs. SBBRMI declares simplex
+  slices as an array of simplexes `G_rows` and reads the matrix `G`.
+- `Dirichlet(K, a)` takes `K` from a data field on both backends (it needed a
+  literal), and SBBRMI spells `permutedims(M)` as Stan's `transpose`.
+## 0.2.289
+
+- **Breaking:** minibatch `brm_svi_fit` now requires stable global and unit
+  means and marginal scales, learned centering controls and linear coupling
+  coefficients, alongside its ELBO checks before certifying convergence. Exploration can
+  switch to its scale-adjusted settling step while moments still move. The bounded
+  histories use each unit's actual update clock and split-Rhat; bulk ESS is
+  reported separately.
+  `diagnostics.stationarity` and snapshots report the checks. Passing is an
+  optimization diagnostic, not a guarantee of global optimality or posterior
+  accuracy. Pass `stationarity=false` for the previous ELBO-only rule.
+- Changed: when settling reaches its cap without passing, completed polishing
+  returns `finished=true`, `converged=false` and snapshot status `:settle_limit`.
+  Default `settle_windows=nothing` lets the guard use the remaining iteration
+  budget; explicit limits are honored, and the ELBO-only policy retains its
+  old 100-window default. `settle_windows=0` skips settling and applies the
+  iterate check before leaving exploration. Once settling has begun, the final
+  polishing steps are reserved inside `max_iterations` even if the guard has
+  not passed; this returns an average with `converged=false` and
+  `:max_iterations`, rather than a noisy last iterate. Old optimizer
+  checkpoints retain their stopping policy and exact continuation; new ones
+  preserve bounded iterate histories across interruption and serialization.
 
 ## 0.2.288
 

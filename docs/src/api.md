@@ -330,6 +330,7 @@ CloglogLink
 Cumulative
 DoubleIntervalCensored
 Flat
+HiddenMarkov
 Horseshoe
 LKJCovarianceFactor
 LogitLink

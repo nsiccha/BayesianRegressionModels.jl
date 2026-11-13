@@ -16,9 +16,9 @@ Threads.nthreads() >= 4 || error(
 
 const BRM = BayesianRegressionModels
 
-# Exploration of at least six windows of 20 iterations, then four of polishing.
+# The legacy schedule keeps these every-iteration trajectories short.
 const SVI_THREADS = (; batch_size=6, window=20, min_windows=6, patience=3,
-    polish_windows=4, max_iterations=3000)
+    polish_windows=4, max_iterations=3000, stationarity=false, centering=nothing)
 
 function svi_trajectory(m; kwargs...)
     states = BRMSVIOptimizerState[]

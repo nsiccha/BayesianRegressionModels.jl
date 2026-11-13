@@ -12,9 +12,10 @@ using LinearAlgebra, Random, Serialization
 import Treebars
 
 # A short exploration (at least six windows of 20 iterations) and polishing
-# (four windows), so a run converges in a few hundred iterations.
+# (four windows), using the legacy rule so the every-iteration snapshots stay
+# small. Default iterate histories have separate exact continuation tests.
 const SVI_RUN = (; batch_size=4, window=20, min_windows=6, patience=3,
-    polish_windows=4, max_iterations=3000)
+    polish_windows=4, max_iterations=3000, stationarity=false, centering=nothing)
 
 svi_prepared(data) = brm_nlme_model(RKBRMI(svi_gauss_model(data)); ad_backend=NLME_AD)
 svi_held(m) = m.svi_target.prepared
