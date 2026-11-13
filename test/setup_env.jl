@@ -433,7 +433,9 @@ const PINS = [
     # 93e326d2 (RK 0.1.224 / RKPPL 0.1.174 / DistributionKernels 0.1.10)
     # maps Categorical, Poisson, Binomial and Bernoulli to native density
     # objects, including HiddenMarkov's per-state emission graphs.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "87f5bc58439e04fc4f997879e752b38a87c218cb"),
+    # 0a9ca6bb (RK 0.1.231) preserves each tuple plate field's ragged lengths,
+    # so retained vector outputs flatten into JAX constrain values.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "0a9ca6bb5ad50b6efd1049c3fc1dd6609e068e77"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
