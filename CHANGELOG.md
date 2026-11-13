@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.288
+
+- Changed: on RKBRMI a `CategoricalLogit`, `Ordinal` or `Categorical`
+  response binds rows holding any of its fitted classes `1..K`, not only all
+  of them. A `reprocess` of a design holding only some classes is scored as
+  the fitted K-class model, so setting every held-out row to class k and
+  reading the pointwise likelihood gives that class's held-out probabilities.
+  A data-free replay through `brm_fitted_state` does the same when the class
+  predictors are named (`CategoricalLogit(eta2, eta3)`). A concise
+  `CategoricalLogit(@brm(...))` takes its class count from the data its
+  builder sees, so its data-free replay on such a design is still refused as
+  another model. A `CategoricalVector` response with a declared level no row
+  holds fits as a model of all its declared levels. A code outside `1..K` is
+  still refused, naming K. Requires ReactiveKernelsPPL 0.1.168 (new floor),
+  whose own floor needs WarmupHMC 0.2.19.
+
 ## 0.2.287
 
 - `=` on a term's own parameter address may read declared parameters and
