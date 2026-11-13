@@ -31,22 +31,23 @@
 #     ∂ELBO/∂V_i = E[∇_{z_i} log p ζ_iᵀ].
 #
 # Its natural gradient, with Fisher Λ_i ⊗ I, is Λ_i⁻¹ E[∇ log p ζᵀ]. One visit
-# sees one ζ, so V takes a regularized normalized least-mean-squares step
+# sees one ζ, so V takes a dimension-scaled stochastic natural-gradient step
 #
-#     V_i += β Λ_i⁻¹ ∇̄ ζ_iᵀ / (‖ζ_i‖² + k_i),     k_i = dim(ζ_i),
+#     V_i += β Λ_i⁻¹ ∇̄ ζ_iᵀ / (2k_i),     k_i = dim(ζ_i),
 #
 # with ∇̄ the unit's gradient averaged over its antithetic draws (its pair, or
-# its orthogonal design). On a target quadratic in (g, z_i) that gradient is
+# its orthogonal design). The denominator is deterministic: dividing by a norm
+# of this same ζ weights the ELBO gradient by its own draw and changes its fixed
+# point on nonlinear targets. For example, z|g ~ Normal(a*g^3, 1), g ~ Normal(0, 1)
+# has optimal linear slope 3a, but division by (g^2 + 1) gives about 1.904a.
+# Scaling by 2k keeps a typical step comparable without that weighting.
+# On a target quadratic in (g, z_i) the gradient is
 # -Λ_i (V_i - V_i*) ζ_i plus a part independent of this visit's ζ_i: the error
 # the unit's mean took up at its previous visit, (V_i - V_i*) ζ_prev, since a
 # whole natural-gradient step puts M_i + V_i ζ_prev at that draw's conditional
-# mode. So V_i* is the fixed point at any number of globals, the step moves V_i
-# about a fraction β / 2k_i of the way to it per visit, and its noise vanishes
-# with V_i - V_i*. Dividing by ‖ζ_i‖² alone (the plain normalized step) turns that
-# carried error into a ratio of normals, ζ_prev / ζ, whose variance is infinite
-# for one coupled global: on the known-scale random intercept in
-# test/nlme_svi_linear_coupling.jl, whose marginal sd is a small difference of
-# large precisions, it ended at 0.89 of the exact sd. A step that would move the
+# mode. So V_i* is the fixed point at any number of globals, the expected step
+# moves V_i a fraction β / 2k_i of the way to it per visit, and its noise vanishes
+# with V_i - V_i*. A step that would move the
 # unit's conditional mean at a typical ζ by more than one sd of its factor is
 # shortened, as the mean's step is (`_BRM_SVI_UNIT_MEAN_TRUST`).
 #
@@ -74,7 +75,7 @@ global factor's draw, `z_i = M_i + V_i ζ + U_i⁻ᵀ ε_i` for ζ the global dr
 standard normals at the globals the unit's term reads (and the global factor's
 rank part), on the unit's coordinates that learned centering does not centre
 (`@plate` cell latents among them; a centred cell follows the globals through its
-own map). `V_i` is learned with the fit by a normalized natural-gradient step
+own map). `V_i` is learned with the fit by a scaled natural-gradient step
 of size `step` (about `step / 2k` of the way to its fixed point per visit, for
 `k` coupled globals) whenever the unit is in the batch, from zero, so a coupling that
 the data do not need stays near zero. It keeps the dependence between a
@@ -190,9 +191,9 @@ function _brm_svi_coupling_step!(coupling, q, i, ∇̄, ζ, β)
     a = _brm_svi_coupling_direction(q, i, rows, ∇̄)
     all(isfinite, a) || throw(ArgumentError(
         "brm_svi: non-finite unit gradient in its coupling step"))
-    den = n2 + length(ζ)
+    den = 2length(ζ)
     # At a fresh ζ' the conditional mean moves by ΔV ζ', whose rms in the
-    # factor's sds is β ‖∇̄_R‖ / ‖ζ‖ in the direction's metric.
+    # factor's sds is β sqrt(∇̄_R' a) ‖ζ‖ / den.
     reach = sqrt(max(dot(view(∇̄, rows), a), 0.0)) * sqrt(n2) / den
     reach > 0 || return q
     β = min(β, _BRM_SVI_UNIT_MEAN_TRUST / reach)

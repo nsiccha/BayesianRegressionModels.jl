@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.296
+
+- `LinearCoupling` scales its natural-gradient estimate by the number of
+  coupled globals, rather than the norm of the same random draw used to
+  estimate the gradient. The former draw-dependent normalization changed
+  the optimum on nonlinear conditional targets, despite preserving exact
+  Gaussian fixed points. The conditional-mean trust bound still limits
+  large steps.
+
 ## 0.2.295
 
 - RKBRMI predictive replays size an omitted scalar response in a `@plate`
