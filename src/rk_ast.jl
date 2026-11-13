@@ -933,6 +933,10 @@ function _rk_ast_response_dist(response::_RKLikelihoodSpec,
         # order); sigma rides the scalar-only scale slot. No fused
         # head: one spelling either way.
         _rk_ast_dotted(:LogNormal, predictor, leaf[:scale])
+    elseif response.family === :categorical_logit && response.class_rows
+        # A class block: row i holds observation i's K−1 non-reference logits,
+        # class 1 the zero reference; K is the bound level table's.
+        _rk_ast_dotted(:CategoricalLogit, Expr(:call, :eachrow, predictor))
     elseif response.family === :categorical_logit
         # Reference-coded: K−1 non-reference etas, class 1 the implicit
         # zero reference (class order follows predictor order).
@@ -979,6 +983,8 @@ end
 # counts). A mismatch is an internal error.
 function _rk_ast_response_levels(response::_RKLikelihoodSpec)
     family = response.family
+    # A class block carries its class count in its bound level table.
+    response.class_rows && return response.n_levels
     implied = family === :categorical_logit ?
         length(response.extra_predictors) + 2 :
         length(response.count_columns) + 1
@@ -1990,6 +1996,49 @@ end
 # declaration this emitter can address across backends
 # (`_rk_coordinate_record!`, read by src/coordinate_transport.jl). Emission is
 # otherwise unchanged; an unrecorded declaration is refused by the transport.
+# A class-block predictor's value (`_brm_class_logits`): its intercept and
+# continuous columns form one design matrix whose coefficients are
+# `beta_pop[1:ncoef, 1:nclass]` (`_rk_ast_class_population_component!`), with
+# `nclass = length(levels) - 1` read from the response's fitted level table.
+function _rk_ast_class_block_predictor!(defs, stmts, taken, coordinates, predictor, lhs,
+        response::_RKLikelihoodSpec, priors, fitted, fit_sources)
+    prefix = "RK backend"
+    key = response.response
+    columns, laws, coefficients = Any[], Tuple{Symbol,Tuple}[], NamedTuple[]
+    for term in predictor.terms
+        term.kind in (:intercept, :continuous) || error(
+            "$prefix: internal: the class block of response `$key` holds a " *
+            "`$(term.kind)` term; a class block holds an intercept and data columns")
+        prior = get(priors, (predictor.name, term.addressee), nothing)
+        prior === nothing && error(
+            "RK backend: internal: no population prior for `$(predictor.name)` " *
+            "addressee `$(term.addressee)`")
+        _rk_ast_population_family(prior) || error(
+            "$prefix: response `$key`: the class coefficients of " *
+            "`$(term.addressee)` have the prior `$(first(prior))`; a concise " *
+            "`CategoricalLogit(@brm(...))` takes " *
+            "$(join(keys(_RK_POPULATION_FAMILIES), ", ")) coefficient laws")
+        push!(columns, term.kind === :intercept ?
+            Expr(:call, :ones, Expr(:call, :length, key)) : only(term.columns))
+        push!(laws, prior)
+        push!(coefficients, (; predictor=predictor.name, coefficient=term.addressee,
+            response=key, nclass=response.n_levels - 1))
+    end
+    fit = get(fit_sources, key, nothing)
+    fit === nothing && error(
+        "$prefix: internal: response `$key` has no fit-role level input")
+    levels = _rk_ast_fitted_value!(stmts, taken, fitted, :brm_fit_levels,
+        Expr(:call, :brm_fit_levels, fit))
+    nclass = _rk_ast_fresh_name(string(key, "_nonreference"), taken)
+    push!(stmts, Expr(:(=), nclass, Expr(:call, :-, Expr(:call, :length, levels), 1)))
+    target = _rk_ast_linked_target(predictor)
+    name = _rk_ast_class_population_component!(defs, stmts, taken, coordinates,
+        _rk_ast_fresh_name(string("pop_", target), taken), string("X_", target),
+        columns, laws, coefficients, nclass)
+    push!(stmts, Expr(:(=), lhs, name))
+    name
+end
+
 function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
         values::Bool=false, reserved=(), coordinates=nothing,
         lone_intercepts=Dict{Symbol,Any}(), documentation=())
@@ -2136,9 +2185,22 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
     owned_vectors = Set{Symbol}()
     designs = Dict{Symbol,Any}()
     monotonic_joint = _rk_ast_monotonic_groups(plan, vector_priors, hs_priors, taken)
+    class_blocks = Dict(r.predictor => r for r in plan.responses if r.class_rows)
     for predictor in plan.predictors
         lhs = get(rename, predictor.name, predictor.name)
         r2d2 = get(r2d2s, predictor.name, nothing)
+        class_response = get(class_blocks, predictor.name, nothing)
+        if class_response !== nothing
+            (r2d2 !== nothing || predictor.name in hs_predictors ||
+                any(key -> first(key) === predictor.name, keys(joint_priors))) && error(
+                "RK backend: response `$(class_response.response)`: a concise " *
+                "`CategoricalLogit(@brm(...))` class block takes one ordinary prior " *
+                "per coefficient (`effect($(class_response.response), term) ~ law`); " *
+                "R2D2, Horseshoe and shared budgets over its coefficients are not built")
+            _rk_ast_class_block_predictor!(defs, stmts, taken, coordinates, predictor,
+                lhs, class_response, priors, fitted, fit_sources)
+            continue
+        end
         hs_tau = nothing
         hs_scale = 1.0
         if predictor.name in hs_predictors

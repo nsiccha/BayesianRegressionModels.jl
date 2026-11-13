@@ -47,22 +47,38 @@ end
 
 @testset "explicit nested @brm normalization" begin
     brmi = concise_builder(df)
-    lp_names = (:y_cat_nested_arg1_class2, :y_cat_nested_arg1_class3)
+    # Population terms only: one class-block predictor with a coefficient
+    # column per non-reference class, however many classes the data hold.
+    lp_names = (:y_cat_nested_arg1,)
 
     @test keys(brmi.operations) == (:x, :prog, lp_names..., :y_cat)
     @test [x.name for x in linear_predictors(brmi)] == collect(lp_names)
+    @test BRM._brm_class_blocks(brmi) == Dict(:y_cat_nested_arg1 => :y_cat)
     @test popcoefnames(brmi, lp_names[1]) == [:Intercept, :x, :prog]
-    @test popcoefnames(brmi, lp_names[2]) == [:Intercept, :x, :prog]
     @test predictors(brmi, lp_names[1]) ==
           (; intercept=true, continuous=[:x, :prog], categorical=Symbol[],
              re_terms=NamedTuple[])
-    @test dependencies(brmi, lp_names[2]) ==
+    @test dependencies(brmi, lp_names[1]) ==
           (; data=[:x, :prog], intermediates=Symbol[])
 
     outcome = only(outcomes(brmi))
     @test outcome.response === :y_cat
     @test outcome.family === CategoricalLogit
     @test [x.link_lp for x in linear_predictor_args(outcome)] == collect(lp_names)
+    @test [x.link_fn for x in linear_predictor_args(outcome)] == [identity]
+    @test occursin("y_cat ~ CategoricalLogit(eachrow(y_cat_nested_arg1))",
+                   string(brmi))
+    # Another class count is the same declaration.
+    four = concise_builder(merge(df, (; y_cat=[20, 10, 30, 40, 30, 10])))
+    @test keys(four.operations) == keys(brmi.operations)
+
+    # A factor column keeps one scalar predictor per class.
+    factor_builder = @brm begin
+        y_cat ~ CategoricalLogit(@brm(1 + x + g))
+    end
+    factored = factor_builder(merge(df, (; g=[1, 2, 1, 2, 1, 2])))
+    @test [x.name for x in linear_predictors(factored)] ==
+          [:y_cat_nested_arg1_class2, :y_cat_nested_arg1_class3]
 
     # Row order does not affect generated names or plain-vector level order.
     reverse_df = (; (k => reverse(v) for (k, v) in pairs(df))...)
@@ -176,8 +192,20 @@ end
     @test StanBlocks.stanc_check(concise_code; warn_pedantic=false).ok
     @test occursin("y_cat ~ categorical_logit(y_cat_categorical_logits);",
                    concise_code)
-    @test occursin("y_cat_nested_arg1_class2", concise_code)
-    @test occursin("y_cat_nested_arg1_class3", concise_code)
+    @test occursin("pop_y_cat_nested_arg1_beta_flat", concise_code)
+    @test !occursin("y_cat_nested_arg1_class2", concise_code)
+    @test concise_sb.data[:y_cat_nonreference] == 2
+    # The descriptor labels the flat coefficients by design column and class
+    # level, column-major (class 20, then class 30; 10 is the reference).
+    flat = only(o for o in brm_descriptor(concise_sb).outputs
+                if o.name === :pop_y_cat_nested_arg1_beta_flat)
+    @test flat.labels == Symbol.(["Intercept[20]", "x[20]", "prog[20]",
+                                  "Intercept[30]", "x[30]", "prog[30]"])
+    # Four classes: the same Stan program, a larger coefficient block.
+    four_df = merge(df, (; y_cat=[20, 10, 30, 40, 30, 10]))
+    four_sb = SBBRMI(concise_builder(four_df); mod=@__MODULE__)
+    @test BRM.stan_code(four_sb) == concise_code
+    @test four_sb.data[:y_cat_nonreference] == 3
     @test concise_sb.data[:y_cat] == [2, 1, 3, 2, 3, 1]
     @test concise_sb.preproc[:y_cat].const_.levels == [10, 20, 30]
 
@@ -205,6 +233,26 @@ end
         @test isfinite(lp)
         @test length(gradient) == dimension
         @test all(isfinite, gradient)
+        # The class block's density: column-major coefficients, a column per
+        # non-reference class, standard-normal priors. Differences cancel the
+        # normalizing constants Stan drops.
+        codes = concise_sb.data[:y_cat]
+        function oracle(u)
+            eta = hcat(ones(6), df.x, df.prog) * reshape(u, 3, 2)
+            sum(eachindex(codes)) do i
+                logits = vcat(0.0, eta[i, :])
+                logits[codes[i]] - log(sum(exp.(logits)))
+            end - sum(abs2, u) / 2
+        end
+        u = collect(range(-0.3, 0.4; length=dimension))
+        lp_u, gradient_u = LogDensityProblems.logdensity_and_gradient(problem, u)
+        @test lp_u - lp ≈ oracle(u) - oracle(q) atol=1e-8
+        h = 1e-5
+        @test gradient_u ≈ map(eachindex(u)) do j
+            plus, minus = copy(u), copy(u)
+            plus[j] += h; minus[j] -= h
+            (oracle(plus) - oracle(minus)) / (2h)
+        end atol=1e-6
     else
         @info "Skipping concise categorical BridgeStan gate (BRM_CATEGORICAL_RUNTIME=0)"
     end

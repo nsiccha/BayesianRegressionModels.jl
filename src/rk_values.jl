@@ -648,6 +648,9 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
         # A categorical response owns fitted level coding and a whole simplex;
         # it is not a scalar response merely because it has no formula location.
         head === Categorical && continue
+        # A class block's marker reads its predictor's rows; the formula route
+        # emits that predictor's coefficient block (`_brm_class_logits`).
+        _brm_class_block_ref(family) === nothing || continue
         # The joint family consumes one mean per outcome and a whole factor.
         # Its constructor is a function, but it must use joint row lowering,
         # rather than scalar broadcasting through the caller-owned value route.

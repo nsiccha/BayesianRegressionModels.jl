@@ -267,6 +267,10 @@ function _brm_rk_start_prior_records!(add, records, values; scalars)
     for r in records
         if r.kind === :population
             add(r.declaration, get(r, :index, ()), r.prior, "effect($(r.predictor), $(r.coefficient))")
+        elseif r.kind === :class_population
+            # One coefficient of a class block, for one non-reference class.
+            add(r.declaration, r.index, r.prior,
+                "effect($(r.response), $(r.coefficient)) in class $(r.class)")
         elseif r.kind === :population_block
             for (i, label) in enumerate(r.labels)
                 add(r.declaration, (i,), _brm_nlme_block_law(r.prior, i), "effect($(r.predictor), $label)")

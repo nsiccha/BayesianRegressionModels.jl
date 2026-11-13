@@ -393,6 +393,60 @@ end
     end
 end
 
+# ---- the RK emission plate builds each state's law once ---------------------------
+#
+# A law whose arguments are read whole per state (`eachcol(Phi)`, `eachrow(Phi)`,
+# `Ref(x)`, a listed law) reads the state and not the step. RKBRMI then builds its
+# column as a plate over the steps whose cell evaluates the law, so RK evaluates
+# the law once per state, not once per (step, state) cell: a column slice and its
+# simplex check per cell cost the categorical notebook models 2–3× (snag
+# `rkbrmi-hiddenmar-7ebba16b`). A broadcast argument read per entry
+# (`Normal.(mu, sigma)`) reads the step, so its law is built per cell anyway; it
+# keeps one plate cell per (step, state), which costs less than nesting. The
+# densities and gradients are checked above; this pins the shapes.
+
+const RK_EXT = Base.get_extension(BRM, :BayesianRegressionModelsReactiveKernelsExt)
+
+# Every `plate(range) do var … end` in `ex`, outermost first.
+function hmm_plates(ex, found=[])
+    if Meta.isexpr(ex, :do)
+        call, lambda = ex.args
+        push!(found, (; range=call.args[2], var=only(lambda.args[1].args), body=lambda.args[2]))
+    end
+    ex isa Expr && foreach(a -> hmm_plates(a, found), ex.args)
+    found
+end
+reads(ex, x) = ex == x || (ex isa Expr && any(a -> reads(a, x), ex.args))
+
+function hmm_density_body(emission)
+    law = BRM._brm_hmm_law(BRM._brm_hmm_emission(emission, name -> getfield(@__MODULE__, name)), false)
+    F, M, B = law.parameters
+    RK_EXT._rk_hmm_density_body(fieldtypes(F), M, B)
+end
+
+@stestset "RK builds each state's emission law once per sequence" begin
+    # A broadcast: a plate over the states around a plate over the steps.
+    inputs, body = hmm_density_body(:(Categorical.(eachcol(Phi))))
+    @test inputs == (:value, :initial, :transition, :argument_1)
+    states, steps = hmm_plates(body)
+    @test (states.range, states.var) == (:(1:hmm_states), :hmm_k)
+    @test (steps.range, steps.var) == (:(1:hmm_steps), :hmm_t)
+    @test reads(steps.body, :(argument_1[:, hmm_k])) && reads(steps.body, :(value[hmm_t]))
+    @test !reads(body, :hmm_cell)
+    # A state's row, and a law per state written out: one step plate per law, no
+    # branch on the state.
+    _, rows = hmm_density_body(:(Categorical.(eachrow(Phi))))
+    @test reads(last(hmm_plates(rows)).body, :(argument_1[hmm_k, :]))
+    _, listed = hmm_density_body(:([LogNormal(m, sigma), Gamma(2.0, theta)]))
+    plates = hmm_plates(listed)
+    @test length(plates) == 2 && all(p -> (p.range, p.var) == (:(1:hmm_steps), :hmm_t), plates)
+    @test !reads(listed, :hmm_k)
+    # An argument read per entry: one plate cell per (step, state).
+    _, entries = hmm_density_body(:(Normal.(mu, sigma)))
+    cells = only(hmm_plates(entries))
+    @test (cells.range, cells.var) == (:(1:(hmm_steps * hmm_states)), :hmm_cell)
+end
+
 # ---- what is refused, and how it is shown ----------------------------------------
 
 @stestset "malformed HiddenMarkov observations are refused by name" begin

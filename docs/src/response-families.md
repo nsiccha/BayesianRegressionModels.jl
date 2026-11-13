@@ -75,14 +75,19 @@ end)((; x=[-1., 0., 1., 2.], count=[0, 1, 0, 4],
 
 ## Categories and thresholds
 
-A nested formula gives `CategoricalLogit` one predictor per non-reference
-level. Plain vectors use sorted unique levels; a categorical vector uses its
-declared level order. The first level has logit zero. Fitted levels remain
-fixed during replay. `effect(choice, x) ~ Normal(0, s)` addresses the nested
-formula's coefficients through the response: it sets `x`'s coefficient in every
-non-reference level. On the ReactiveKernels backend the level labels are data,
-so responses that differ only in their labels share one program; the number of
-levels still sets the number of predictors.
+A nested formula gives `CategoricalLogit` its own coefficients for each
+non-reference level. Plain vectors use sorted unique levels; a categorical
+vector uses its declared level order. The first level has logit zero. Fitted
+levels remain fixed during replay. `effect(choice, x) ~ Normal(0, s)` addresses
+the nested formula's coefficients through the response: it sets `x`'s
+coefficient in every non-reference level. When the formula is an intercept and
+continuous data columns, as below, it is one predictor with a coefficient
+column per non-reference level, and the number of levels is data: 3 and 4
+levels build one program on both backends. Any other term, such as a factor
+column or group-level effects, gives one predictor per non-reference level, and
+there the number of levels sets the number of predictors. On the
+ReactiveKernels backend the level labels are data, so responses that differ
+only in their labels share one program.
 
 An ordinal model supplies its location through thresholds, so its common
 predictor has no intercept. `Cumulative()` has ordered thresholds;

@@ -16,7 +16,12 @@
 #     and a row's one-class held-out probabilities sum to one;
 #   * `effect(y, term) ~ law` on a concise `CategoricalLogit(@brm(...))`
 #     response sets `term`'s coefficient in every non-reference class on both
-#     backends, reading a data-valued law argument as data.
+#     backends, reading a data-valued law argument as data;
+#   * the concise form over population terms is one class block whose class
+#     count is the bound level table's (BRM todo 1uqf8t9): models that differ
+#     only in their class count emit one RK program, one lowered program and
+#     one Stan program, and a data-free replay of a design missing a class is
+#     the fitted model.
 #
 # Run: julia --startup-file=no --project=test test/rk_categorical_levels.jl
 
@@ -181,16 +186,14 @@ end
         check_density(RKBRMI(explicit(design), named_state),
             u -> explicit_oracle(u; c))
     end
-    # The concise form takes its class count from the data its builder sees,
-    # so `plain(design)` on a design missing a class declares another model,
-    # which a data-free replay refuses, until that count is a runtime size
-    # (BRM todo 1uqf8t9).
+    # The concise form's class count is the bound level table's, not its
+    # builder's data's, so `plain(design)` on a design missing a class declares
+    # the fitted model and its data-free replay scores it.
     state = brm_fitted_state(fit)
-    @test_broken try
-        RKBRMI(plain((; x1, x2, y=fill(2, 8), coef_scale=1.5)), state) isa RKBRMI
-    catch
-        false
-    end
+    missing_class = (; x1, x2, y=fill(2, 8), coef_scale=1.5)
+    @test emitted_program(RKBRMI(plain(missing_class), state)) == emitted_program(fit)
+    check_density(RKBRMI(plain(missing_class), state),
+        u -> explicit_oracle(u; c=fill(2, 8)))
     # Held-out class probabilities: set every row to class k and read the
     # pointwise likelihood. A row's K one-class probabilities sum to one and
     # match the softmax of its class logits.
@@ -236,10 +239,10 @@ end
 
 @stestset "effect(y, term) sets a concise categorical coefficient in every class" begin
     data = labelled([1, 2, 3])
+    # One address on the class block's one predictor reaches every class.
     resolved = string(concise(data))
-    for class in (:y_nested_arg1_class2, :y_nested_arg1_class3)
-        @test occursin("effect($class, x1) ~ Normal(0, coef_scale)", resolved)
-    end
+    @test occursin("effect(y_nested_arg1, x1) ~ Normal(0, coef_scale)", resolved)
+    @test occursin("y ~ CategoricalLogit(eachrow(y_nested_arg1))", resolved)
     @test !occursin("effect(y, x1)", resolved)
     named = @brm begin
         eta2 ~ 1 + x1 + x2
@@ -259,16 +262,13 @@ end
     other = RKBRMI(concise(merge(data, (; coef_scale=0.4))))
     @test emitted_program(other) == emitted_program(a)
     @test lowered_program(other) == lowered_program(a)
-    # The class count is still a program shape (one predictor per class).
-    four = RKBRMI(concise(merge(data, (; y=[1, 2, 3, 4, 1, 2, 3, 4]))))
-    @test emitted_program(four) != emitted_program(a)
     # SBBRMI reads the same addresses.
     code = stan_code(SBBRMI(concise(data); mod=@__MODULE__))
     @test count("coef_scale", code) >= 2
-    # A per-class address beside the response address is refused by name.
+    # A second address on the class block's predictor is refused by name.
     duplicate = @brm begin
         effect(y, x1) ~ Normal(0, coef_scale)
-        effect(y_nested_arg1_class2, x1) ~ Normal(0, 1)
+        effect(y_nested_arg1, x1) ~ Normal(0, 1)
         y ~ CategoricalLogit(@brm(1 + x1 + x2))
     end
     @test_throws "Keep only `effect(y, x1)`" duplicate(data)
@@ -281,4 +281,39 @@ end
         y ~ CategoricalLogit(eta2, eta3)
     end
     @test_throws Exception RKBRMI(plain(data))
+end
+
+@stestset "the class count is a runtime size" begin
+    # Three and four classes: one emitted program, one lowered program and one
+    # Stan program; only the bound level table and the coefficient count differ.
+    data = labelled([1, 2, 3])
+    four_data = merge(data, (; y=[1, 2, 3, 4, 1, 2, 3, 4]))
+    three, four = RKBRMI(concise(data)), RKBRMI(concise(four_data))
+    @test emitted_program(four) == emitted_program(three)
+    @test lowered_program(four) == lowered_program(three)
+    @test kernel_text(four) == kernel_text(three)
+    @test (three.model.layout.total, four.model.layout.total) == (6, 9)
+    main = join(string.(emitted_program(three)), "\n")
+    @test occursin("CategoricalLogit.(eachrow(", main)
+    @test occursin("y_nonreference = length(y_fit_levels) - 1", main)
+    @test stan_code(SBBRMI(concise(four_data); mod=@__MODULE__)) ==
+        stan_code(SBBRMI(concise(data); mod=@__MODULE__))
+    # Four classes score as the categorical-logit model with a coefficient
+    # column per non-reference class (column-major coordinates).
+    function oracle4(u)
+        B = reshape(u, 3, 3)
+        eta = hcat(ones(8), x1, x2) * B
+        sum(eachindex(four_data.y)) do i
+            logits = vcat(0.0, eta[i, :])
+            logits[four_data.y[i]] - log(sum(exp.(logits)))
+        end + sum(logpdf.(Normal(), u[[1, 3, 4, 6, 7, 9]])) +
+            sum(logpdf.(Normal(0, 1.5), u[[2, 5, 8]]))
+    end
+    check_density(four, oracle4)
+    # A formula with a factor column keeps one predictor per class.
+    with_factor = @brm begin
+        y ~ CategoricalLogit(@brm(1 + x1 + g))
+    end
+    expanded = with_factor(merge(data, (; g=[1, 2, 1, 2, 1, 2, 1, 2])))
+    @test haskey(expanded.operations, :y_nested_arg1_class2)
 end

@@ -2315,6 +2315,21 @@ arguments read at the coefficient's position. Never called.
 """
 function _brm_elementwise end
 
+# A concise `y ~ CategoricalLogit(@brm(formula))` over population terms is one
+# predictor with a column per non-reference class of `y`: `eta ~ formula` with
+# coefficients `beta[1:P, 1:K-1]`, read row by row as
+# `y ~ CategoricalLogit(_brm_class_logits(eta))`. The class count K is the
+# response's level count when the backend binds the data, so one declaration
+# serves every K. It prints as RKPPL spells it, `CategoricalLogit(eachrow(eta))`.
+"""
+    _brm_class_logits(eta)
+
+Internal marker for a class-block predictor: `eta` holds one linear predictor
+column per non-reference class of the `CategoricalLogit` response that reads
+it. Never called.
+"""
+function _brm_class_logits end
+
 function _brm_elementwise_law(x::Expr)
     address = _is_optional_prior_lhs(x.args[2]) ? x.args[2].args[2] : x.args[2]
     address.args[1] === :effect || error(
@@ -3429,6 +3444,15 @@ function _nested_rewrite_categorical!(target, lhs, rhs, pending, occupied)
               "marker: `CategoricalLogit(@brm(formula))`. Do not mix marked " *
               "and explicit class predictors.")
 
+    formula = parent(only(args))
+    if _nested_class_block_formula(formula)
+        # One predictor for every class: the class count is the response's
+        # level count at binding, not a property of this declaration.
+        ref = _nested_predictor!(pending, occupied, target,
+                                 (_nested_path_token(:arg, 1),), formula)
+        return ExprColumn(getf(rhs), ExprColumn(_brm_class_logits, ref))
+    end
+
     raw = _nested_observed_values(lhs)
     raw isa AbstractVector || error(
         "@brm: `CategoricalLogit(@brm(...))` needs an observed outcome vector " *
@@ -3439,7 +3463,6 @@ function _nested_rewrite_categorical!(target, lhs, rhs, pending, occupied)
         "@brm: `CategoricalLogit(@brm(...))` needs at least two observed " *
         "outcome levels (got $(length(levels))).")
 
-    formula = parent(only(args))
     refs = ntuple(length(levels) - 1) do j
         class_token = _nested_path_token(:class, j + 1)
         _nested_predictor!(pending, occupied, target,
@@ -3448,8 +3471,24 @@ function _nested_rewrite_categorical!(target, lhs, rhs, pending, occupied)
     ExprColumn(getf(rhs), refs...)
 end
 
+# Whether a concise categorical formula is one class block: an intercept
+# (`1`/`0`) and continuous data columns, summed or interacted. Their
+# coefficients form one `P x (K-1)` matrix. A formula with any other term
+# (factor columns, group-level effects, smooths, Gaussian processes,
+# transforms) keeps one scalar predictor per class, so its class count is
+# still a program shape.
+_nested_class_block_formula(@nospecialize(_)) = false
+_nested_class_block_formula(::Number) = true
+_nested_class_block_formula(x::NamedColumn) = parent(x) isa DataColumn &&
+    _nested_class_block_column(eltype(parent(parent(x))))
+_nested_class_block_column(::Type{T}) where {T} = T <: Real && !(T <: Integer)
+_nested_class_block_formula(x::ExprColumn) =
+    getf(x) in (+, &) && isempty(getkwargs(x)) &&
+    all(_nested_class_block_formula, getargs(x))
+
 # The class predictors a concise `y ~ CategoricalLogit(@brm(formula))` expanded
-# into, in class order, or `nothing` for any other statement.
+# into, in class order (the one class-block predictor of a population-only
+# formula), or `nothing` for any other statement.
 function _nested_categorical_classes(@nospecialize(value), @nospecialize(new_value))
     value isa NamedColumn && new_value isa NamedColumn || return nothing
     _nested_contains(value) || return nothing
@@ -3458,6 +3497,8 @@ function _nested_categorical_classes(@nospecialize(value), @nospecialize(new_val
     rhs = last(getargs(op, 2))
     isdefined(@__MODULE__, :CategoricalLogit) && rhs isa ExprColumn &&
         getf(rhs) === CategoricalLogit || return nothing
+    block = _brm_class_block_ref(rhs)
+    block === nothing || return Symbol[block]
     Symbol[name(arg) for arg in getargs(rhs)]
 end
 
@@ -3863,6 +3904,43 @@ Base.Broadcast.broadcastable(x::Union{NamedColumn,ExprColumn}) = error(
     "` while the model is built. A formula call already applies per row: write ",
     "`log(x)`, not `log.(x)`. A value computed once from whole columns, such as ",
     "a mean, is declared `name = constant(mean(log.(x)))`.")
+
+# A class block's marker prints as RKPPL spells the row form: `eachrow(eta)`.
+Base.show(io::IO, x::ExprColumn{typeof(_brm_class_logits)}) = begin
+    print(io, "eachrow(")
+    _brm_show_operand(io, only(getargs(x)), 0)
+    print(io, ")")
+end
+
+# The class-block predictor a response reads, or `nothing`.
+_brm_class_block_ref(@nospecialize(_)) = nothing
+function _brm_class_block_ref(rhs::ExprColumn)
+    isdefined(@__MODULE__, :CategoricalLogit) && getf(rhs) === CategoricalLogit ||
+        return nothing
+    args = getargs(rhs)
+    length(args) == 1 && only(args) isa ExprColumn{typeof(_brm_class_logits)} ||
+        return nothing
+    ref = only(getargs(only(args)))
+    ref isa NamedColumn ? name(ref) : nothing
+end
+
+"""
+    _brm_class_blocks(brmi) -> Dict{Symbol,Symbol}
+
+The class-block predictors of `brmi`, each mapped to the `CategoricalLogit`
+response that reads it (`_brm_class_logits`).
+"""
+Base.@nospecializeinfer function _brm_class_blocks(@nospecialize(brmi::BRMI))
+    blocks = Dict{Symbol,Symbol}()
+    for (key, value) in pairs(brmi.operations)
+        value isa NamedColumn || continue
+        op = parent(value)
+        op isa ExprColumn && getf(op) === (~) || continue
+        predictor = _brm_class_block_ref(last(getargs(op, 2)))
+        predictor === nothing || (blocks[predictor] = key)
+    end
+    blocks
+end
 
 # A constant prints as it was written; its bound inputs are an implementation
 # detail of `constant(expr)`.

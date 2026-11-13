@@ -581,7 +581,8 @@ _brm_declaration_role(d::GenerativeDeclaration, bindings=nothing) = begin
     # `_popefs_coefs` / `_popefs_normal_coefs` are the `normal_id_glm` fusion's
     # coefficient-returning siblings (sbimpl.jl) — same block, same
     # `beta_pop`, so the same role and the same `popcoefnames` labels.
-    f in (:popefs, :_popefs_normal, :_popefs_coefs, :_popefs_normal_coefs) &&
+    f in (:popefs, :_popefs_normal, :_popefs_coefs, :_popefs_normal_coefs,
+          :_popefs_classes, :_popefs_classes_normal) &&
         return :population_effect
     startswith(String(f), "ranef") && return :random_effect
     f === :plate && return :group_block
@@ -1256,6 +1257,16 @@ function _brm_population_labels(bindings, brmi, block::Symbol, lp::Symbol)
     isnothing(columns) ? _brm_labels(brmi, lp) : Symbol[c.label for c in columns]
 end
 
+# A class block's (`_popefs_classes`) coefficients are its flat carrier
+# `pop_<lp>_beta_flat`, column-major: each design column's label once per
+# non-reference class, `x[3]` for column `x` in the class of level 3.
+_brm_population_classes(bindings, block::Symbol) =
+    let binding = get(bindings, block, nothing)
+        isnothing(binding) || !hasproperty(binding, :classes) ? nothing : binding.classes
+    end
+_brm_class_labels(labels, classes) =
+    Symbol[Symbol(label, "[", level, "]") for level in classes.levels for label in labels]
+
 function _brm_label_population!(outputs, brmi, pop_lp, bindings)
     for (block, lp) in pop_lp
         # The coefficient vector is the block INTERNAL (`pop_<lp>_beta_pop`, whose
@@ -1264,12 +1275,16 @@ function _brm_label_population!(outputs, brmi, pop_lp, bindings)
         # `name !== block` is load-bearing for a prior program: there the block
         # result assignment is ALSO emitted as a generated quantity under the
         # same target, so filtering by target alone would match two GQ carriers.
+        classes = _brm_population_classes(bindings, block)
+        carrier = isnothing(classes) ? (o -> o.name !== block) :
+            (o -> o.name === Symbol(block, :_beta_flat))
         idx = _brm_carrier_indices(outputs,
                   o -> o.role === :population_effect && !isnothing(o.declaration) &&
-                       o.declaration.target === block && o.name !== block)
+                       o.declaration.target === block && carrier(o))
         length(idx) == 1 || continue
         labels = _brm_population_labels(bindings, brmi, block, lp)
         isnothing(labels) && continue
+        isnothing(classes) || (labels = _brm_class_labels(labels, classes))
         o = outputs[idx[1]]
         outputs[idx[1]] = BRMOutput(o.name, o.kind, o.type, o.size, o.constraints,
                                     o.generative, o.source, o.role, o.declaration,

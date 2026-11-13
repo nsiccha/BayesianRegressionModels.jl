@@ -159,6 +159,96 @@ function _rk_ast_population_component!(definitions, statements, taken, name, des
     name
 end
 
+"""Class-block population effects: one coefficient per design column and non-reference class.
+
+A concise `y ~ CategoricalLogit(@brm(formula))` over population terms is one
+predictor with a column per non-reference class (`_brm_class_logits`). Its
+component draws `beta_pop[1:ncoef, 1:nclass]` and returns `X * beta_pop`, the
+response's `CategoricalLogit.(eachrow(...))` logits. `nclass` is a value of the
+response's fitted level table, `length(levels) - 1`, so one program serves every
+class count. `columns` are the design columns and `priors` their laws, one
+`(family, args)` per column; every class of a column shares its law. Coefficients
+whose laws have different families are one row declaration each,
+`beta_pop_<j>[1:nclass]`. Returns the component's name."""
+function _rk_ast_class_population_component!(definitions, statements, taken, coordinates,
+        name, design, columns, priors, coefficients, nclass)
+    design = _rk_ast_fresh_name(design, taken)
+    push!(statements, Expr(:(=), design, Expr(:call, :hcat, columns...)))
+    product = Expr(:call, :*, :X, :beta_pop)
+    families = unique(first.(priors))
+    if length(families) > 1
+        declarations = [Symbol(:beta_pop_, j) for j in eachindex(priors)]
+        laws, prior_inputs, prior_values = _rk_ast_component_prior_inputs(
+            [Expr(:call, family, args...) for (family, args) in priors],
+            (:X, :nclass, :beta_pop, declarations...))
+        body = Expr(:block)
+        for (declaration, law) in zip(declarations, laws)
+            push!(body.args, Expr(:call, :.~,
+                Expr(:ref, declaration, Expr(:call, :(:), 1, :nclass)),
+                _rk_ast_dotted(law.args[1], law.args[2:end]...)))
+        end
+        push!(body.args, Expr(:(=), :beta_pop,
+            Expr(:call, :permutedims, Expr(:call, :hcat, declarations...))))
+        push!(body.args, Expr(:return, product))
+        doc = @_rk_definition_doc """
+            Class-block population effects whose coefficients have different prior laws.
+
+            Draws, for each column `j` of the design matrix `X`, one coefficient per
+            non-reference class, `beta_pop_<j>[1:nclass]`, with that column's own prior,
+            and returns `X * beta_pop`: one linear predictor column per class.$(
+            _rk_prior_inputs_doc(prior_inputs))"""
+        callee = _rk_ast_shared_definition!(definitions, taken,
+            "brm_mixed_class_population_effects", (:X, :nclass, prior_inputs...), body; doc)
+        push!(statements, _rk_ast_component_call(name, callee, design, nclass,
+            prior_values...))
+        for (j, c) in enumerate(coefficients), t in 1:c.nclass
+            _rk_coordinate_record!(coordinates, (; kind=:class_population,
+                declaration=Symbol(name, ".beta_pop_", j), index=(t,),
+                predictor=c.predictor, coefficient=c.coefficient, class=t + 1,
+                response=c.response, prior=Expr(:call, priors[j][1], priors[j][2]...)))
+        end
+        return name
+    end
+    family = only(families)
+    roles = getproperty(_RK_POPULATION_FAMILIES, family)
+    arguments = [_rk_ast_population_argument([last(prior)[r] for prior in priors])
+        for r in eachindex(roles)]
+    # A per-column argument has every class of its column: RKPPL takes one
+    # argument value per array element, or one shared value.
+    laws = map(roles, arguments) do role, argument
+        Meta.isexpr(argument, :vect) ? Expr(:call, :repeat, role, 1, :nclass) : role
+    end
+    body = _rk_ast_component_body(
+        Expr(:call, :.~, Expr(:ref, :beta_pop, Expr(:call, :(:), 1, :ncoef),
+                Expr(:call, :(:), 1, :nclass)),
+            _rk_ast_dotted(family, laws...)),
+        Expr(:return, product))
+    base = family === :Normal ? "brm_class_population_effects" :
+        string("brm_class_population_effects_", lowercase(string(family)))
+    law = string(family, "(", join(roles, ", "), ")")
+    per_coefficient = isempty(roles) ? "" : string(" Each prior argument (",
+        join(("`$role`" for role in roles), ", "),
+        ") is one value for all coefficients or a vector with one per design column, ",
+        "shared by that column's classes.")
+    doc = @_rk_definition_doc """
+        Class-block population effects: one coefficient per design column and non-reference class.
+
+        Draws `beta_pop[1:ncoef, 1:nclass] ~ $law` and returns `X * beta_pop`, one
+        linear predictor column per non-reference class. `ncoef` is the number of
+        columns of `X`.$per_coefficient"""
+    callee = _rk_ast_shared_definition!(definitions, taken, base,
+        (:X, :ncoef, :nclass, roles...), body; doc)
+    push!(statements, _rk_ast_component_call(name, callee, design, length(columns),
+        nclass, arguments...))
+    for (j, c) in enumerate(coefficients), t in 1:c.nclass
+        _rk_coordinate_record!(coordinates, (; kind=:class_population,
+            declaration=Symbol(name, ".beta_pop"), index=(j, t),
+            predictor=c.predictor, coefficient=c.coefficient, class=t + 1,
+            response=c.response, prior=Expr(:call, priors[j][1], priors[j][2]...)))
+    end
+    name
+end
+
 # A population component's coefficient records: `<name>.beta_pop` indexed by
 # column, or one `<name>.beta_pop_<j>` declaration per column for mixed families.
 # Each carries the law its column was given.

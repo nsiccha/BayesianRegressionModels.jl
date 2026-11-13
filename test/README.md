@@ -903,7 +903,10 @@ SBBRMI's density without Jacobian, per-sequence pointwise values, gradients and
 forward draws; RKBRMI's per-sequence pointwise values, native Enzyme gradients
 and printed replay. Emission spellings (broadcast, comprehension, listed laws,
 log weights, per-step emissions, Poisson) also check compiled-Stan and native
-density and gradient parity.
+density and gradient parity. A last set pins the shape of RKBRMI's log-emission
+matrix: a law read whole per state (`eachcol`, `eachrow`, a listed law) is a
+plate over the steps per state, so RK builds it once per state; a law read per
+entry (`Normal.(mu, sigma)`) keeps one plate cell per (step, state).
 
 `fixed_ranef_scales.jl` checks random-effect scales and correlations held at
 known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:
@@ -2730,10 +2733,15 @@ authored-location routes), that frozen and data-free replays code rows against
 the fit's levels and refuse an unseen label, that a replay keeps the fitted
 class count (a design holding only some classes, or a declared level with no
 rows, is scored as the fitted model, and a row's one-class held-out
-probabilities sum to one; a concise form's data-free replay of such a design
-is `@test_broken` until its class count is a runtime size), that a JAX module codes the response in `prepare_data`, and that
-`effect(y, term)` on a concise `CategoricalLogit(@brm(...))` response sets the
-term in every class on both backends. `rk_values.jl` checks whole
+probabilities sum to one), that a JAX module codes the response in
+`prepare_data`, that `effect(y, term)` on a concise `CategoricalLogit(@brm(...))`
+response sets the term in every class on both backends, and that the concise
+form over population terms is one class block whose class count is bound data:
+3 and 4 classes emit one RK, lowered and Stan program, four classes match an
+independent density, and a data-free replay of a design missing a class is the
+fitted model. `categorical_concise.jl` checks the class block's introspection,
+its Stan program across class counts, its descriptor labels and its BridgeStan
+density and gradient against an independent formula. `rk_values.jl` checks whole
 predictor arrays, callable readers and distinct predictor/observation axes.
 `rk_source_roundtrip.jl` supplies the shared complete-program replay check:
 definitions and model source are printed, reparsed and built afresh, then
