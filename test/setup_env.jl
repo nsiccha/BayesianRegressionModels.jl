@@ -427,7 +427,10 @@ const PINS = [
     # captured group-label predicates and callable arguments in JAX host helpers.
     # 9f975f528 (RK 0.1.212 / RKPPL 0.1.168) binds a categorical response holding
     # only some of its stated classes (a replay's held-out class scoring).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "9f975f528e36ce0f88409a7f3753742278dec672"),
+    # d670c97b8 (RK 0.1.223 / RKPPL 0.1.172) reads categorical logits row by row,
+    # K from the data (`CategoricalLogit.(eachrow(E))`, a concise class block), and
+    # no longer exports `adaptive_centering_problem`, which is BRM's.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d670c97b8c2976ae8c1e2a71850e355903a766d3"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
