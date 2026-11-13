@@ -10728,6 +10728,7 @@ function _sb_hyper_configured(term_overrides, t, rho_plan, sigma_plan)
         isnothing(cfg) && continue
         push!(stmts, _sb_known_cfg(cfg) ?
             Expr(:(=), _sb_hyper_names(hyper).sampled, _sb_known_input(cfg.slot)) :
+            _sb_derived_cfg(cfg) ? _sb_derived_assignment(_sb_hyper_names(hyper).sampled, cfg) :
             _sb_hyper_intercept_stmt(hyper, plan, cfg,
                 isnothing(plan) ? "" : plan.spelling))
     end
@@ -10833,11 +10834,13 @@ end
 
 function _sb_term_entry_config(slot::Val, entry, hyper_intercept::Bool)
     spelling = _sb_term_prior_spelling(entry)
-    if _brm_is_known_term_value(entry.spec.expression)
+    if _brm_is_assigned_term_value(entry.spec.expression)
         hyper_intercept && error(
-            "sbimpl: `$spelling = $(entry.spec.expression)` holds the parameter " *
-            "at a known value, but a `log(...) ~ <formula>` hyper-predictor " *
+            "sbimpl: `$spelling = $(entry.spec.expression)` sets the parameter " *
+            "to a value, but a `log(...) ~ <formula>` hyper-predictor " *
             "predicts it; keep one of the two statements")
+        _brm_is_derived_term_value(entry.spec.expression) && return (;
+            derived=entry.spec.expression.expression, spelling, slot=_sb_slot_name(slot))
         return (; known=entry.spec.expression.value, spelling, slot=_sb_slot_name(slot))
     end
     hyper_intercept ? _sb_hyper_intercept_scale_prior(entry) :
@@ -10849,6 +10852,27 @@ _sb_slot_name(::Val{slot}) where {slot} = slot
 # Whether a resolved term-slot configuration holds a known value rather than a
 # prior.
 _sb_known_cfg(cfg) = hasproperty(cfg, :known)
+# Whether it sets the parameter to an expression over model values.
+_sb_derived_cfg(cfg) = hasproperty(cfg, :derived)
+
+# `name = <expression>` for a parameter set to model values
+# (`sd(lp, hsgp(x)) = sqrt(log1pexp(s))`). The submodel reads every model
+# value through its own prior input (`_sb_term_model_call`), as a prior's
+# hyperparameters do. An anisotropic term's `rho :: vector[n_axes]` takes the
+# one expression at every axis.
+function _sb_derived_assignment(lhs, cfg)
+    value = _sb_bind_prior_references(_sb_effect_prior_arg(cfg.derived),
+        _sb_prior_references(cfg.derived))
+    Meta.isexpr(lhs, :(::), 2) && Meta.isexpr(lhs.args[2], :ref) &&
+        lhs.args[2].args[1] === :vector || return Expr(:(=), _sb_decl_name(lhs), value)
+    Expr(:(=), lhs, Expr(:call, :rep_vector, value, lhs.args[2].args[2]))
+end
+
+# A term whose emission has no seam for a derived parameter refuses it by name.
+_sb_refuse_derived(cfg, what) = !isnothing(cfg) && _sb_derived_cfg(cfg) && error(
+    "sbimpl: `$(cfg.spelling) = $(cfg.derived)` sets $what to an expression over " *
+    "model values, which SBBRMI does not lower for this term yet; give it a " *
+    "prior (`~`) or a known value")
 
 # A known value reaches its term submodel as an input, `brm_known_<slot>`,
 # bound to the term's own static datum `<term>_known_<slot>`
@@ -10888,6 +10912,7 @@ function _sb_configured_term_submodel(base, slots...)
     for (lhs, cfg) in slots
         isnothing(cfg) && continue
         push!(stmts, _sb_known_cfg(cfg) ? _sb_known_assignment(lhs, cfg.slot) :
+            _sb_derived_cfg(cfg) ? _sb_derived_assignment(lhs, cfg) :
             _sb_gp_prior_stmt(lhs, cfg))
     end
     Base.merge(base, stmts...)
@@ -10972,6 +10997,7 @@ function _sb_term_sd_submodel(term_overrides, t; mod::Module=@__MODULE__,
         return (; model=getf(t) === s ? _sb_s_generic : _sb_t2_generic,
                 kwargs=NamedTuple())
     cfgs = [_sb_term_cfg(term_overrides, t, slot) for slot in slots]
+    foreach(cfg -> _sb_refuse_derived(cfg, "a smoothing scale"), cfgs)
     base = getf(t) === s ? _sb_s_generic : _sb_t2_generic
     known = findall(cfg -> !isnothing(cfg) && _sb_known_cfg(cfg), cfgs)
     isempty(known) || return _sb_known_term_sd_submodel(base, cfgs, known;
@@ -15562,7 +15588,7 @@ end
 # preprocessing record is unchanged.
 function _sb_hsgp_floor_check(term_overrides, t, floor, geometry, remedy)
     cfg = _sb_term_cfg(term_overrides, t, :length_scale)
-    (isnothing(cfg) || _sb_known_cfg(cfg)) && return (;)
+    (isnothing(cfg) || _sb_known_cfg(cfg) || _sb_derived_cfg(cfg)) && return (;)
     upper = _brm_floor_prior_upper(cfg.prior)
     isnothing(upper) && return (;)
     statement = "$(cfg.spelling) ~ $(cfg.prior)"

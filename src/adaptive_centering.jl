@@ -1321,6 +1321,11 @@ end
 
 function _adaptive_hsgp_hyper_coordinates(descriptor, logical, unc_names, entry,
                                           owner, parameter, what)
+    derived = _brm_term_derived_value(descriptor.plan.parent, logical, entry.value, parameter)
+    isnothing(derived) || error(
+        "BRM adaptive centering: HSGP `$(entry.term)` sets its $what to `$derived`, " *
+        "a value computed from model values; adaptive centering reads a sampled " *
+        "or known $what only.")
     known = _brm_term_known_value(descriptor.plan.parent, logical, entry.value, parameter)
     if !isnothing(known)
         values = collect(Float64, known isa Real ? (known,) : known)

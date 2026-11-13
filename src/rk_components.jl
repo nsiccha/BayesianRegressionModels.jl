@@ -46,8 +46,7 @@ function _rk_ast_component_prior_inputs(priors, occupied)
     function collect_reads(value)
         value isa Symbol && push!(reads, value)
         value isa Expr || return
-        args = value.head in (:call, :kw) ? value.args[2:end] : value.args
-        foreach(collect_reads, args)
+        foreach(collect_reads, last(_rk_ast_value_operands(value)))
     end
     foreach(collect_reads, priors)
     values = sort!(collect(reads); by=string)
@@ -59,10 +58,7 @@ function _rk_ast_component_prior_inputs(priors, occupied)
     replacements = Dict(zip(values, inputs))
     function replace_reads(value)
         value isa Symbol && return get(replacements, value, value)
-        value isa Expr || return value
-        value.head in (:call, :kw) && return Expr(value.head, first(value.args),
-            map(replace_reads, value.args[2:end])...)
-        Expr(value.head, map(replace_reads, value.args)...)
+        value isa Expr ? _rk_ast_map_operands(replace_reads, value) : value
     end
     map(replace_reads, priors), inputs, values
 end

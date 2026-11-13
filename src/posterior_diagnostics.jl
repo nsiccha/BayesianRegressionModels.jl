@@ -78,6 +78,11 @@ function _brm_term_hyper_draws(d, draws, names, predictor, entry, parameter;
         values = collect(Float64, known isa Real ? (known,) : known)
         return repeat(permutedims(values), size(draws, 1))
     end
+    derived = _brm_term_derived_value(d.plan.parent, predictor, entry.value, parameter)
+    isnothing(derived) || error(
+        "BRM: term `$(entry.term)` on `$predictor` sets its $what to `$derived`, " *
+        "a value computed from model values, which this reader does not evaluate " *
+        "per draw; it reads a sampled or known $what.")
     resolved = brm_term_coordinates(d, predictor, names; term=entry.term, parameter)
     isnothing(owner) || _adaptive_same_hsgp_owner(resolved, owner, what)
     Matrix(@view draws[:, resolved.coordinates])

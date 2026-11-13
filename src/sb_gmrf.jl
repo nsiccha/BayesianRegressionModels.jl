@@ -506,6 +506,7 @@ function _sb_predictor_term!(stmts, data, ::typeof(gmrf), term;
     prior_keys = (:sigma_prior, :spatial_prior, :temporal_prior)
     priors = map(prior_keys, (:sigma, :spatial_length, :temporal_length)) do key, slot
         cfg = _sb_term_cfg(term_overrides, term, slot)
+        _sb_refuse_derived(cfg, "a `gmrf` parameter")
         isnothing(cfg) ? getproperty(prepared.state, key) :
             _sb_known_cfg(cfg) ? _BRMKnownTermValue(cfg.known) : cfg.prior
     end
