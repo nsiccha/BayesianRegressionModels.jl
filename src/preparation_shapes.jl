@@ -44,6 +44,31 @@ function _brm_distribution_shape(::typeof(_brm_vector_prior), args)
      isnothing(shape) ? Distributions.Continuous : last(shape))
 end
 
+# A declared matrix, `name[1:m, 1:n] .~ law` or `eachrow(name[1:m, 1:n]) .~
+# law`, is a parameter whose value is the whole `m × n` matrix.
+_brm_prior_constructor(::_BRMMatrixMarker) = true
+function _brm_distribution_shape(::typeof(_brm_matrix_prior), args)
+    shape = _brm_distribution_shape(last(args))
+    isnothing(shape) || first(shape) === Distributions.Univariate || error(
+        "@brm: a declared matrix `name[1:m, 1:n] .~ law` needs a scalar law; got " *
+        "`$(last(args))`. A law per row or column is `eachrow(name[1:m, 1:n]) .~ law`.")
+    (Distributions.Matrixvariate,
+     isnothing(shape) ? Distributions.Continuous : last(shape))
+end
+function _brm_distribution_shape(marker::Union{typeof(_brm_matrix_rows_prior),
+        typeof(_brm_matrix_cols_prior)}, args)
+    law = last(args)
+    law isa ExprColumn && getf(law) isa Type && getf(law) <: Dirichlet || error(
+        "@brm: `$(marker === _brm_matrix_rows_prior ? "eachrow" : "eachcol")(name[1:m, 1:n]) " *
+        ".~ law` draws each slice from `Dirichlet(...)`, a simplex; got `$law`")
+    (Distributions.Matrixvariate, Distributions.Continuous)
+end
+
+# The declared extents `(m, n)` of a matrix marker, from literals and data.
+_brm_declared_matrix_size(target, op; prefix="BRM preparation") =
+    Tuple(_brm_declared_vector_length(target, _brm_data_value(extent); prefix)
+          for extent in getargs(op)[1:2])
+
 # Evaluate a formula argument in Julia when it is data-only (literals, data columns, and
 # calls over them); `nothing` when it involves a model quantity (a sampled declaration, a
 # linear predictor, an assignment), which a backend then emits as an expression instead.

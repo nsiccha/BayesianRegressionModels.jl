@@ -122,6 +122,19 @@ function _rk_kernel_binding(scope, head)
     value
 end
 
+# `y ~ HiddenMarkov(initial, transition, emissions)` in a cell observes
+# `_BRMHiddenMarkovLaw{…}(initial, transition, arguments...)` (hidden_markov.jl);
+# `nothing` for any other law.
+function _rk_kernel_hidden_markov(scope, law, kernel)
+    Meta.isexpr(law, :call) || return nothing
+    _rk_kernel_observation_callee(scope, law, kernel) === HiddenMarkov || return nothing
+    spec = _brm_hmm_call(law, head -> _rk_kernel_binding(scope, head);
+        context="RK backend: kernel `$kernel`")
+    (; law=_brm_hmm_law(spec.emission, spec.log_weights),
+       values=(spec.initial, spec.transition,
+           Iterators.flatten(spec.emission.arguments)...))
+end
+
 # In-cell distribution combinators take a family token as their first
 # positional (`weighted(normal, w, mu, sigma)`), never a data argument.
 _rk_kernel_weighted(callable) = callable === weighted || callable === StanBlocks.stan.weighted
@@ -525,8 +538,12 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             end
             distribution, weight = _rk_kernel_observation_weight(scope, distribution, name)
             distribution, modifier = _rk_kernel_observation_law(scope, distribution, name)
-            callable = _rk_kernel_observation_family(scope, distribution, name)
-            values = Tuple(distribution.args[2:end])
+            # A hidden Markov sequence observes its internal law, whose
+            # arguments are the weights and the emission arguments.
+            hidden = _rk_kernel_hidden_markov(scope, distribution, name)
+            callable = hidden === nothing ?
+                _rk_kernel_observation_family(scope, distribution, name) : hidden.law
+            values = hidden === nothing ? Tuple(distribution.args[2:end]) : hidden.values
             any(value -> Meta.isexpr(value, :parameters), values) && error(
                 "RK backend: kernel `$name` observation constructor keywords need explicit argument lowering")
             argument_names = Tuple(Symbol(name, :_argument_, source, :_, i)

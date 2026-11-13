@@ -72,6 +72,10 @@ _sb_julia_stan_call(::Type{Diagonal}, args) =
     length(args) == 1 ? Expr(:call, :diag_matrix, args...) : nothing
 _sb_julia_stan_call(::typeof(diagm), args) =
     length(args) == 1 ? Expr(:call, :diag_matrix, args...) : nothing
+# A matrix's transpose (`permutedims(Θ)` turns a column-stochastic matrix into
+# the row-stochastic one a hidden Markov chain takes).
+_sb_julia_stan_call(::typeof(permutedims), args) =
+    length(args) == 1 ? Expr(:call, :transpose, args...) : nothing
 
 _sb_cell_combinator(head) =
     head in (:censored, :truncated, :interval_censored, :weighted)
@@ -211,6 +215,12 @@ end
 function _sb_cell_statements(statements, scope)
     out = Any[]
     for statement in statements
+        # A hidden Markov observation is its emission locals and the
+        # forward-algorithm family (sb_hidden_markov.jl).
+        if _sb_is_cell_hidden_markov(statement, scope)
+            append!(out, _sb_cell_hidden_markov(statement, scope))
+            continue
+        end
         # A latent in total coordinates is two statements (cell_total_coordinates.jl).
         total = _sb_cell_total_coordinates(statement, scope)
         total === nothing ? push!(out, _sb_cell_statement(statement, scope)) :

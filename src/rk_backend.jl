@@ -6764,7 +6764,8 @@ function _rk_plan_parameters!(prepared, data::AbstractDict,
     specs
 end
 _rk_vector_prior_callable(f) =
-    f === Dirichlet || f === _brm_vector_prior || (f isa Type && f <: MvNormal)
+    f === Dirichlet || f === _brm_vector_prior || f isa _BRMMatrixMarker ||
+    (f isa Type && f <: MvNormal)
 
 # One scalar sampled parameter `name ~ prior`. With `elements = n` it is the
 # element law of a declared vector `name[1:n] .~ prior` instead: a data-vector
@@ -7034,6 +7035,11 @@ function _rk_dirichlet_alpha(args, name::Symbol,
         return alpha
     elseif length(args) == 2
         dimension, concentration = args
+        # A dimension from the data (`Dirichlet(K, 1)`, `K` a data field).
+        dimension isa _BRMPreparedRef && _rk_data_scalar(dimension.name, data) &&
+            (dimension = data[dimension.name])
+        dimension isa Real && !(dimension isa Integer) && isinteger(dimension) &&
+            (dimension = Int(dimension))
         dimension isa Integer && dimension >= 1 || error(
             "$prefix: parameter `$name` symmetric `Dirichlet(K, a)` needs " *
             "a positive integer dimension")
@@ -7171,9 +7177,13 @@ function _rk_plan_vector_parameters!(prepared, data::AbstractDict,
                 "$prefix: parameter `$name` `Dirichlet` takes no keywords")
             alpha = _rk_dirichlet_alpha(prior.args, name, consts, data)
             concentration = last(prior.args)
-            spelled = length(prior.args) == 2 && concentration isa _BRMPreparedRef &&
-                _rk_data_scalar(concentration.name, data) ?
-                Expr(:call, :fill, concentration.name, first(prior.args)) :
+            dimension = first(prior.args)
+            spelled = length(prior.args) == 2 && (concentration isa _BRMPreparedRef &&
+                    _rk_data_scalar(concentration.name, data) ||
+                    dimension isa _BRMPreparedRef) ?
+                Expr(:call, :fill, concentration isa _BRMPreparedRef ? concentration.name :
+                    Float64(concentration),
+                    dimension isa _BRMPreparedRef ? dimension.name : dimension) :
                 length(prior.args) == 1 && concentration isa _BRMPreparedRef ?
                 _rk_prior_array_name(concentration.name) : nothing
             push!(specs, _RKVectorParameter(name, :simplex_dirichlet,
@@ -7193,9 +7203,66 @@ function _rk_plan_vector_parameters!(prepared, data::AbstractDict,
         elseif prior.callable isa Type && prior.callable <: MvNormal
             push!(specs, _rk_mvnormal_parameter(name, prior, prepared, data,
                 consts, aliases, parameters, assign_names))
+        elseif prior.callable isa _BRMMatrixMarker
+            push!(specs, _rk_matrix_parameter(name, prior, data, consts, aliases,
+                parameters, assign_names, taken))
         end
     end
     specs
+end
+
+# A declared matrix (snag `hidden-markov-ob-6b35403a`), RKPPL's two-axis
+# declaration (rkppl-use §3): `W[1:m, 1:n] .~ Family.(args...)` elementwise, or
+# `eachrow(G[1:m, 1:n]) .~ Dirichlet(...)` / `eachcol(...)` per slice. A literal
+# extent is written as itself; one computed from data is a validated integer
+# input of the program (`spelled.extents`), as for a declared vector.
+function _rk_matrix_parameter(name, prior, data, consts, aliases, parameters,
+        assign_names, taken)
+    prefix = "RK backend"
+    m_arg, n_arg, law = prior.args
+    extent(arg, axis) = begin
+        value = _rk_vector_prior_length(name, arg, data, consts)
+        refs = _brm_prepared_references(arg)
+        spelling = !isempty(refs) && all(ref -> haskey(data, ref), refs) ?
+            _rk_ast_fresh_name(string(name, "_", axis), taken) : value
+        spelling isa Symbol && push!(taken, spelling)
+        (; spelling, value)
+    end
+    rows, cols = extent(m_arg, "rows"), extent(n_arg, "cols")
+    law isa _BRMPreparedExpr || error(
+        "$prefix: the declared matrix `$name` needs a distribution call")
+    if prior.callable === _brm_matrix_prior
+        element = _rk_sampled_parameter(name, law, data, consts, aliases,
+            parameters, assign_names; elements=rows.value * cols.value)
+        return _RKVectorParameter(name, :matrix_elementwise, (element,),
+            rows.value * cols.value, name, nothing, (; extents=(rows, cols)))
+    end
+    byrow = prior.callable === _brm_matrix_rows_prior
+    law.callable === Dirichlet && isempty(law.kwargs) || error(
+        "$prefix: `$(byrow ? "eachrow" : "eachcol")($name[1:m, 1:n]) .~ ...` draws each " *
+        "slice from `Dirichlet(...)`")
+    alpha = _rk_dirichlet_alpha(law.args, name, consts, data)
+    slice = byrow ? cols : rows
+    length(alpha) == slice.value || error(
+        "$prefix: `$(byrow ? "eachrow" : "eachcol")($name[1:$(rows.value), " *
+        "1:$(cols.value)]) .~ Dirichlet(...)`: each $(byrow ? "row" : "column") has " *
+        "$(slice.value) entries, but the concentration has $(length(alpha))")
+    concentration = last(law.args)
+    dirichlet = if length(law.args) == 2
+        level = concentration isa _BRMPreparedRef && _rk_data_scalar(concentration.name, data) ?
+            concentration.name : first(alpha)
+        # RKPPL's slice `Dirichlet(K, a)` takes a literal K; a data-sized
+        # slice spells its concentration vector.
+        slice.spelling isa Symbol ? (Expr(:call, :fill, level, slice.spelling),) :
+            (slice.spelling, level)
+    elseif concentration isa _BRMPreparedRef
+        (_rk_prior_array_name(concentration.name),)
+    else
+        (Expr(:vect, alpha...),)
+    end
+    _RKVectorParameter(name, byrow ? :matrix_rows_dirichlet : :matrix_cols_dirichlet,
+        (alpha,), rows.value * cols.value, name, nothing,
+        (; extents=(rows, cols), dirichlet))
 end
 
 function _rk_vector_prior_length(name, len, data, consts)

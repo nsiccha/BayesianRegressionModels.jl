@@ -12,6 +12,33 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.290
+
+- `y[s] ~ HiddenMarkov(initial, transition, emissions)` in a `@plate` cell
+  observes the cell's sequence through a hidden state that moves as a Markov
+  chain over K states (new export `HiddenMarkov`, HiddenMarkovModels.jl's
+  argument order). `initial` is the first state's law, `transition[i, j]`
+  the probability of a move from `i` to `j` (rows sum to one), and
+  `emissions` one law per state: a broadcast `Normal.(mu, sigma)` or
+  `Categorical.(eachrow(Phi))` (`eachrow`, `eachcol`, `Ref` and listed
+  `[p1, p2]` arguments), a vector of laws whose families may differ, or a
+  comprehension `[Normal(mu[k], s) for k in 1:K]`; a broadcast argument with
+  a step axis (`Normal.(mu .+ beta .* transpose(x[s]), sigma)`) gives laws
+  that change with the step. `log_weights = true` takes `initial` and
+  `transition` on the log scale. The density sums over every state path
+  (forward algorithm): SBBRMI through BRM's `brm_hidden_markov` StanBlocks
+  family, with one pointwise value and one forward-simulated sequence per
+  cell; RKBRMI through a native graph over RK's `hmm_logdensity`. K comes
+  from the data. As a Julia law, `logpdf(HiddenMarkov(...), y)` is the
+  same sum.
+- Declared matrix parameters on both backends: `W[1:m, 1:n] .~ Family.(args...)`
+  draws each entry from a scalar law; `eachrow(G[1:m, 1:n]) .~ Dirichlet(n, a)`
+  and `eachcol(G[1:m, 1:n]) .~ Dirichlet(m, a)` declare a matrix whose rows
+  (columns) are simplexes, such as a transition matrix. Extents are literals
+  or computed from data and stay runtime inputs. SBBRMI declares simplex
+  slices as an array of simplexes `G_rows` and reads the matrix `G`.
+- `Dirichlet(K, a)` takes `K` from a data field on both backends (it needed a
+  literal), and SBBRMI spells `permutedims(M)` as Stan's `transpose`.
 ## 0.2.289
 
 - **Breaking:** minibatch `brm_svi_fit` now requires stable global and unit
