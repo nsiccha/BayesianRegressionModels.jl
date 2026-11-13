@@ -903,7 +903,10 @@ SBBRMI's density without Jacobian, per-sequence pointwise values, gradients and
 forward draws; RKBRMI's per-sequence pointwise values, native Enzyme gradients
 and printed replay. Emission spellings (broadcast, comprehension, listed laws,
 log weights, per-step emissions, Poisson) also check compiled-Stan and native
-density and gradient parity.
+density and gradient parity. A last set pins the shape of RKBRMI's log-emission
+matrix: a law read whole per state (`eachcol`, `eachrow`, a listed law) is a
+plate over the steps per state, so RK builds it once per state; a law read per
+entry (`Normal.(mu, sigma)`) keeps one plate cell per (step, state).
 
 `fixed_ranef_scales.jl` checks random-effect scales and correlations held at
 known values, `sd(lp, ID) = value` and `cor(:, ID) = R`. It covers:

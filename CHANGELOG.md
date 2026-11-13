@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.291
+## 0.2.292
 
 - Changed: a concise `y ~ CategoricalLogit(@brm(formula))` whose formula is an
   intercept and continuous data columns (summed, or interacted with `&`) is
@@ -37,6 +37,28 @@ instead of failing at run time.
   `CategoricalLogit.(eachrow(E))`, and 0.1.172 no longer exports its own
   `adaptive_centering_problem`, so BRM's export is the only unqualified one
   again when both packages are loaded.
+
+## 0.2.291
+
+- Faster: RKBRMI builds a `HiddenMarkov` state's emission law once per
+  sequence, not once per (step, state), when the law's arguments are read whole
+  per state (`Categorical.(eachcol(Phi))`, `eachrow`, `Ref`, a listed law). The
+  log-emission matrix is now a plate over the steps per state whose cell
+  evaluates that state's law, so the law (for `Categorical`, a column slice and
+  its simplex check) is a plate-invariant value RK evaluates once per state.
+  On the learnbayes.se notebook's categorical models (K = 2, value and Enzyme
+  reverse gradient, RKPPL 0.1.174) this is 2.3–2.6 times as fast and costs what
+  a hand-written RKPPL program over `hmm_logdensity` costs: switching 85 → 37
+  µs (hand-written 34), softmax emissions 84 → 32 µs (37), hierarchical with 96
+  sequences 2,255 → 980 µs (a hand-written program of the same cell algebra
+  955). Listed laws take one step plate each, with no per-cell branch on the
+  state. A law with an argument read per entry (`Normal.(mu, sigma)`) still
+  takes one plate cell per (step, state), as RK's own `normal_hmm_logdensity`
+  does, which costs less there than nesting. Densities and gradients are
+  unchanged. Before RKPPL 0.1.174, `Categorical` is one Distributions `logpdf`
+  call per cell, which RK cannot evaluate once per state, so those models gain
+  only 1.3–1.4 times (RKPPL 0.1.168: switching 132 → 98 µs, hierarchical
+  3,384 → 2,394 µs).
 
 ## 0.2.290
 
