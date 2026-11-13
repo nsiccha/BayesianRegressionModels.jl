@@ -270,6 +270,11 @@ function _rk_ast_gmrf!(definitions, statements, taken, bindings, term)
     end
     push!(statements, Expr(:(=), support, fit))
     push!(statements, Expr(:(=), rows, Expr(:call, reader, support, term.columns...)))
+    for p in options.priors
+        _brm_is_derived_term_value(p) && error(
+            "RK backend: a `gmrf` parameter set to `$p`, an expression over model " *
+            "values, is not lowered yet; give it a prior (`~`) or a known value")
+    end
     prior = map(p -> _rk_ast_positive_prior(p, bindings, taken; default=:LogNormal), options.priors)
     block = _rk_block_body(prior...)
     geometry = _rk_block_argument!(block, :geometry, _rk_ast_property(support, :geometry))

@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.287
+## 0.2.290
 
 - `y[s] ~ HiddenMarkov(initial, transition, emissions)` in a `@plate` cell
   observes the cell's sequence through a hidden state that moves as a Markov
@@ -39,6 +39,63 @@ instead of failing at run time.
   slices as an array of simplexes `G_rows` and reads the matrix `G`.
 - `Dirichlet(K, a)` takes `K` from a data field on both backends (it needed a
   literal), and SBBRMI spells `permutedims(M)` as Stan's `transpose`.
+## 0.2.289
+
+- **Breaking:** minibatch `brm_svi_fit` now requires stable global and unit
+  means and marginal scales, learned centering controls and linear coupling
+  coefficients, alongside its ELBO checks before certifying convergence. Exploration can
+  switch to its scale-adjusted settling step while moments still move. The bounded
+  histories use each unit's actual update clock and split-Rhat; bulk ESS is
+  reported separately.
+  `diagnostics.stationarity` and snapshots report the checks. Passing is an
+  optimization diagnostic, not a guarantee of global optimality or posterior
+  accuracy. Pass `stationarity=false` for the previous ELBO-only rule.
+- Changed: when settling reaches its cap without passing, completed polishing
+  returns `finished=true`, `converged=false` and snapshot status `:settle_limit`.
+  Default `settle_windows=nothing` lets the guard use the remaining iteration
+  budget; explicit limits are honored, and the ELBO-only policy retains its
+  old 100-window default. `settle_windows=0` skips settling and applies the
+  iterate check before leaving exploration. Once settling has begun, the final
+  polishing steps are reserved inside `max_iterations` even if the guard has
+  not passed; this returns an average with `converged=false` and
+  `:max_iterations`, rather than a noisy last iterate. Old optimizer
+  checkpoints retain their stopping policy and exact continuation; new ones
+  preserve bounded iterate histories across interruption and serialization.
+
+## 0.2.288
+
+- Changed: on RKBRMI a `CategoricalLogit`, `Ordinal` or `Categorical`
+  response binds rows holding any of its fitted classes `1..K`, not only all
+  of them. A `reprocess` of a design holding only some classes is scored as
+  the fitted K-class model, so setting every held-out row to class k and
+  reading the pointwise likelihood gives that class's held-out probabilities.
+  A data-free replay through `brm_fitted_state` does the same when the class
+  predictors are named (`CategoricalLogit(eta2, eta3)`). A concise
+  `CategoricalLogit(@brm(...))` takes its class count from the data its
+  builder sees, so its data-free replay on such a design is still refused as
+  another model. A `CategoricalVector` response with a declared level no row
+  holds fits as a model of all its declared levels. A code outside `1..K` is
+  still refused, naming K. Requires ReactiveKernelsPPL 0.1.168 (new floor),
+  whose own floor needs WarmupHMC 0.2.19.
+
+## 0.2.287
+
+- `=` on a term's own parameter address may read declared parameters and
+  other model values: `sd(lp, hsgp(x)) = sqrt(log1pexp(sf))` with
+  `sf ~ Normal(0, 1)` sets the amplitude to that value, computed where the term
+  would have sampled it, and `sf` carries the prior. So a hyperprior whose
+  induced law is no named family is the prior of the raw parameter it
+  transforms. It works on the `sd`, `length_scale`, `ar` and `mixing`
+  addresses of `hsgp` (isotropic, anisotropic, periodic and grouped with
+  shared scales), `gp`, `dar`, `cdar` and `car` terms on SBBRMI and RKBRMI,
+  and on `rw` on SBBRMI. One scalar expression sets an anisotropic term's every
+  length scale. Such a value has no posterior coordinate:
+  `brm_term_coordinates`, `hsgp_coordinate_draws`, `hsgp_boundary_check`,
+  `hsgp_population_curve`, an
+  HSGP's adaptive centering and `brm_start`'s `term_inits=` refuse it by name,
+  and `brm_coordinate_transport` pairs the parameters it reads. A
+  `length_scale = <sampled name>` that used to be refused as "needs a known
+  value" now builds.
 
 ## 0.2.286
 

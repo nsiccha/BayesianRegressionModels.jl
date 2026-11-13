@@ -27,6 +27,7 @@ using Bessels: besselk, besselk0, besselk1
 import SparseArrays, SelectedInversion, KLU, MUMPS
 import KrylovKit, PowerScaling
 import Krylov
+import MCMCDiagnosticTools
 import LimitedLDLFactorizations
 using StatsBase: AbstractWeights, AnalyticWeights, FrequencyWeights,
                  ProbabilityWeights, UnitWeights, Weights,

@@ -13,9 +13,10 @@ include(joinpath(@__DIR__, "nlme_svi_fixture.jl"))
 using LinearAlgebra, Random, Statistics
 import LogDensityProblems
 
-# A short exploration (at least six windows of 20 iterations) and polishing.
+# Isolate the legacy ELBO-only phase schedule in these short runs.
 const SVI_SETTLE_OPT = (; batch_size=4, window=20, min_windows=6, patience=3,
-    polish_windows=4, max_iterations=3000)
+    polish_windows=4, max_iterations=3000, stationarity=false, centering=nothing,
+    coupling=nothing)
 
 svi_settle_gauss() = brm_nlme_model(RKBRMI(svi_gauss_model(svi_gauss_data(Xoshiro(101), 12)));
     ad_backend=NLME_AD)
@@ -156,13 +157,26 @@ end
     ex = svi_tight_exact(rk)
     @test ex.gradient < 1e-2
     m = brm_nlme_model(rk; ad_backend=NLME_AD, subject_group=:subject)
-    opt = (; batch_size=8, threads=1, ndraws=0)
-    a = brm_svi_fit(m; opt..., rng=Xoshiro(101))
-    b = brm_svi_fit(m; opt..., rng=Xoshiro(101), settle_windows=0)
-    ga, gb = svi_tight_gap(ex, a.diagnostics.q, a.diagnostics),
-        svi_tight_gap(ex, b.diagnostics.q, b.diagnostics)
-    @info "tight globals" settle=ga old=gb stages=a.diagnostics.stages
+    # The exact block-factorized Gaussian oracle uses independent plain factors.
+    opt = (; batch_size=8, threads=1, ndraws=0, centering=nothing, coupling=nothing)
+    function observe(s)
+        r = s.stationarity.current
+        if hasproperty(r, :units)
+            @info "tight globals stationarity" iteration=s.iteration phase=s.phase status=s.status globals=r.globals failed_units=count(u -> !u.passed, r.units) rhat=r.rhat ess=r.ess
+        end
+    end
+    a = brm_svi_fit(m; opt..., rng=Xoshiro(101), snapshot=observe, snapshot_every=10000)
+    # Compare with both earlier schedules on the same target and seed: the
+    # pre-settling schedule and the ELBO-only settling that the guard replaces.
+    b = brm_svi_fit(m; opt..., rng=Xoshiro(101), settle_windows=0, stationarity=false)
+    c = brm_svi_fit(m; opt..., rng=Xoshiro(101), stationarity=false)
+    ga, gb, gc = map(f -> svi_tight_gap(ex, f.diagnostics.q, f.diagnostics), (a, b, c))
+    @info "tight globals" settle=ga no_settling=gb elbo_only=gc stages=a.diagnostics.stages
+    @test a.diagnostics.converged
     @test a.diagnostics.stages.settled
+    @test !a.diagnostics.stationarity.exploration.passed
+    @test a.diagnostics.stationarity.current.passed
+    @test ga.gap <= gc.gap
     # Measured on a Linux fleet host, Julia 1.10.12: 61.6 against 111.3 nats; global means
     # 0.24 against 0.92 optimal sds rms.
     @test ga.gap < 0.75 * gb.gap

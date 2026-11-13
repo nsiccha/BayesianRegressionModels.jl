@@ -1559,7 +1559,19 @@ where q* is known, settling brings the returned factor closer to q* and its glob
 means within half an optimal sd (the earlier schedule: about one). About 6 minutes
 warm, most of it the exact Hessian; it accepts testset substring filters.
 
-`nlme_svi_trend.jl` checks exploration's trend test (BRM 0.2.264): on window
+`nlme_svi_stationarity.jl` checks the bounded parameter-iterate guard: stationary
+autocorrelated series, 1,000-coordinate multiplicity, slow drift, an unvisited
+unit, exact thinning clocks, serialization, and marginal scales without a dense
+low-rank covariance. `nlme_svi_stationarity_fit.jl` checks complete default fits,
+exact continuation through all phases and in a fresh process, old-checkpoint
+policy, and nonconvergence after a settling cap or budget-triggered averaging,
+including continuation across that transition and a partial final window.
+The diagnostics also reject moving coupling coefficients at constant marginal
+widths, and checkpoint tests exercise nonempty global-unit coupling histories.
+Both accept testset filters.
+
+`nlme_svi_trend.jl` isolates the previous ELBO-only rule with `stationarity=false`
+and `centering=nothing`. It checks exploration's trend test (BRM 0.2.264): on window
 statistics alone, a rise too slow for two windows `patience` apart is read by the
 slope over `trend_windows` windows, a stationary ELBO ends exploration where the
 two-window test does in all but about 1% of seeds, and controls without
@@ -2716,9 +2728,10 @@ reverse-gradient oracles. `rk_categorical_levels.jl` checks that a
 lowered program across label sets of one element type, on the formula and
 authored-location routes), that frozen and data-free replays code rows against
 the fit's levels and refuse an unseen label, that a replay keeps the fitted
-class count (a design holding only some classes is refused by name until
-ReactiveKernels snag `rkppl-leveled-re-328038d0` relaxes RKPPL's bind rule),
-that a JAX module codes the response in `prepare_data`, and that
+class count (a design holding only some classes, or a declared level with no
+rows, is scored as the fitted model, and a row's one-class held-out
+probabilities sum to one; a concise form's data-free replay of such a design
+is `@test_broken` until its class count is a runtime size), that a JAX module codes the response in `prepare_data`, and that
 `effect(y, term)` on a concise `CategoricalLogit(@brm(...))` response sets the
 term in every class on both backends. `rk_values.jl` checks whole
 predictor arrays, callable readers and distinct predictor/observation axes.

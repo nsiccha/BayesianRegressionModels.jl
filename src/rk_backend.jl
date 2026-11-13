@@ -5082,6 +5082,8 @@ const _RK_GP_HYPER_ADMITTED = "LogNormal, InverseGamma, Gamma, Exponential, " *
 # constant (`_rk_ast_hyper_statement`).
 _rk_term_parameter(sampled, prior) = sampled(prior)
 _rk_term_parameter(_sampled, known::_BRMKnownTermValue) = known
+# Set to an expression over model values: the block assigns it (`_rk_ast_param_law`).
+_rk_term_parameter(_sampled, derived::_BRMDerivedTermValue) = derived
 
 # A literal-only term prior takes a numeric data scalar at its number, for its
 # support checks, as a population prior does: `sd(:, gp(x)) ~ Exponential(scale)`.
@@ -5416,9 +5418,9 @@ function _rk_plan_hsgp_term!(prepared::_BRMPreparedTerm{typeof(hsgp)},
     # argument, so the declaration needs no separate truncation (decision 1fk9b29).
     rho_floor_named = _brm_has_floor_marker(state.rho_prior)
     for (hyper, prior) in ((:length_scale, state.rho_prior), (:sd, state.sigma_prior))
-        prior isa _BRMKnownTermValue && any(p -> p.hyper === hyper, hyper_plans) && error(
-            "$prefix: predictor `$target` holds the `hsgp(...)` $hyper at the " *
-            "known value $prior, but a `log($hyper(...)) ~ <formula>` " *
+        _brm_is_assigned_term_value(prior) && any(p -> p.hyper === hyper, hyper_plans) && error(
+            "$prefix: predictor `$target` sets the `hsgp(...)` $hyper to " *
+            "$prior, but a `log($hyper(...)) ~ <formula>` " *
             "hyper-predictor predicts it; keep one of the two statements")
     end
     rho_floor_named && any(p -> p.hyper === :length_scale, hyper_plans) && error(
@@ -7638,20 +7640,24 @@ function _rk_gate_response_values!(family::Symbol, values::AbstractVector,
     elseif family === :categorical_logit || family === :ordinal ||
             family === :categorical
         # Recoded against the fitted levels (`_rk_leveled_levels`): 1..K,
-        # with K the fit's level count. RKPPL's bind rule demands every
-        # level, so a design that skips one (a replay's held-out rows, a
-        # declared but unobserved level) is refused here by name until it
-        # relaxes (ReactiveKernels snag `rkppl-leveled-re-328038d0`).
+        # with K the fit's level count. The program states K (K − 1 class
+        # locations plus the reference, or the simplex length), so the rows
+        # may hold any subset of 1..K (RKPPL 0.1.168): a replay's held-out
+        # rows set to one class, a declared level with no rows. Without a
+        # stated K, K is the largest code and every level must appear.
         (eltype(values) <: Integer && eltype(values) !== Bool) || error(
             "$prefix: response `$response` must hold integers 1..K " *
             "(recoded levels)")
-        K = something(n_levels, isempty(values) ? 0 : maximum(values))
-        all(x -> 1 <= x <= K, values) && length(unique(values)) == K ||
-            error("$prefix: response `$response` must hold every one of its " *
-                  "$K fitted levels (recoded 1..$K, no gaps): ReactiveKernelsPPL " *
-                  "refuses a leveled response that skips a level, so a design " *
-                  "holding only some classes, or a declared level with no rows, " *
-                  "cannot bind yet (ReactiveKernels snag `rkppl-leveled-re-328038d0`)")
+        if n_levels === nothing
+            K = isempty(values) ? 0 : maximum(values)
+            all(x -> 1 <= x <= K, values) && length(unique(values)) == K ||
+                error("$prefix: response `$response` must hold every one of " *
+                      "its $K levels (recoded 1..$K, no gaps)")
+        else
+            all(x -> 1 <= x <= n_levels, values) ||
+                error("$prefix: response `$response` must hold codes in " *
+                      "1..$n_levels, its $n_levels fitted levels")
+        end
     elseif family === :ordered_logit
         # Raw-integer coding (SB compat); contiguity is planned in
         # `_rk_ordered_levels` — re-assert the eltype half of the bind rule.

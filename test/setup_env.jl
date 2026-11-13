@@ -101,8 +101,8 @@ const PINS = [
     # Treebars 0.1.5: nested progress used by recoverable adaptive SMC pilots.
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "44c37e60e22bab9e8a0d3ab88bd47b575dec6bb0"),
     # 0.2.11: public covariance projection used by selective SMC carries.
-    # 0.2.18 satisfies ReactiveKernelsPPL 0.1.162's SMC extension floor.
-    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "c4d6885edefe8aa33acf02d3e571d224662825b4"),
+    # 0.2.19 satisfies ReactiveKernelsPPL 0.1.168's SMC extension floor.
+    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "d785d947f8d875d56160ef948a241a903d83b7c0"),
     ("SequentialMonteCarlo", "https://github.com/awllee/SequentialMonteCarlo.jl.git", "d3a322394c7a1df07e3b5e941acc2960f4daf656"),
     # Current plain-function/array PPL surface, with data-only declaration inputs
     # retained before predictor inlining (computed membership axes; 606d76d0),
@@ -425,7 +425,9 @@ const PINS = [
     # RK 0.1.161's allocation-free one-sided variance scan and plate folds.
     # 1c40ad337 (RK 0.1.198 / RKPPL 0.1.162) includes positional kernel calls,
     # captured group-label predicates and callable arguments in JAX host helpers.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "1c40ad337ec7487466971213266ff0861906da00"),
+    # 9f975f528 (RK 0.1.212 / RKPPL 0.1.168) binds a categorical response holding
+    # only some of its stated classes (a replay's held-out class scoring).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "9f975f528e36ce0f88409a7f3753742278dec672"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

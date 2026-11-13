@@ -236,6 +236,37 @@ Base.show(io::IO, known::_BRMKnownTermValue) = print(io, known.value)
 
 _brm_is_known_term_value(prior) = prior isa _BRMKnownTermValue
 
+# ---- a term parameter computed from model values ----------------------------
+#
+# `sd(lp, hsgp(x)) = sqrt(log1pexp(s))` with `s ~ Normal(0, 1)`: `=` on a
+# term-parameter address whose right-hand side reads a declared parameter or
+# another model value sets that parameter to the value, as a model-scope
+# assignment does. It is no coordinate of its own; the coordinates are the
+# parameters it reads. Like a known value it replaces the parameter's whole
+# default declaration, so an HSGP's validity floor does not bind it.
+"""
+    _BRMDerivedTermValue(expression)
+
+A term's own parameter set by `=` on its address to `expression`, a formula
+expression that reads at least one model value (a declared parameter, a
+model-scope assignment). Each backend computes it where the term's parameter
+would be sampled: one scalar, for an isotropic `gp`/`hsgp` length scale or a
+scale.
+"""
+struct _BRMDerivedTermValue{T}
+    expression::T
+end
+Base.show(io::IO, derived::_BRMDerivedTermValue) = print(io, derived.expression)
+
+_brm_is_derived_term_value(prior) = prior isa _BRMDerivedTermValue
+# The model values it reads are dependencies of the predictor owning the term
+# (`_brm_with_prior_dependencies`), so they are declared before the term.
+_brm_operation_references!(refs, derived::_BRMDerivedTermValue) =
+    _brm_operation_references!(refs, derived.expression)
+# Whether `=` on the address sets the parameter: a known value or a derived one.
+_brm_is_assigned_term_value(prior) =
+    _brm_is_known_term_value(prior) || _brm_is_derived_term_value(prior)
+
 # The number of length scales a `gp`/`hsgp` term samples: one when isotropic
 # (a periodic term always is), else one per axis.
 function _brm_gp_length_scale_count(term::ExprColumn)
@@ -284,14 +315,31 @@ function _brm_known_term_spec(spec, term, slot, spelling; prefix)
     spec.family === _brm_known || return spec
     raw = only(getargs(spec.expression))
     value = _brm_known_value(raw)
+    isnothing(value) && raw isa AbstractVector && any(_brm_reads_model_value, raw) && error(
+        "$prefix: `$spelling = $raw` sets the parameter to expressions over model " *
+        "values, which takes one scalar expression; per-axis expressions of an " *
+        "anisotropic term are not supported. Write one expression for every axis, " *
+        "or hold the axes at known values (`$spelling = [v1, v2]`).")
+    isnothing(value) && _brm_reads_model_value(raw) && !_brm_prior_expression(raw) &&
+        return _brm_derived_term_spec(spec, raw, term, slot, spelling; prefix)
     isnothing(value) && error(
-        "$prefix: `$spelling = $raw` needs a known value: a numeric formula " *
-        "constant, a data field, or arithmetic over them. A sampled quantity " *
-        "or a distribution is not a known value; write `$spelling ~ <prior>` " *
-        "to estimate it.")
+        "$prefix: `$spelling = $raw` needs a value: a numeric formula constant, " *
+        "a data field, arithmetic over them, or an expression over declared " *
+        "parameters and other model values. A distribution is not a value; " *
+        "write `$spelling ~ <prior>` to estimate the parameter.")
     value = _brm_known_term_shape(getf(term), term, slot, value, spelling; prefix)
     _brm_check_known_support(Val(slot.support), value, spelling; prefix)
     merge(spec, (; expression=_BRMKnownTermValue(value), arguments=(value,),
+                 keywords=(;)))
+end
+
+# A resolved statement whose value reads model values: one scalar expression,
+# which sets an anisotropic term's every length scale, as one known number does.
+function _brm_derived_term_spec(spec, raw, term, slot, spelling; prefix)
+    _brm_has_floor_marker(raw) && error(
+        "$prefix: `$spelling = $raw` reads `$(_BRM_LENGTH_SCALE_FLOOR)`, which only " *
+        "a `length_scale(...) ~ <prior>` statement may name")
+    merge(spec, (; expression=_BRMDerivedTermValue(raw), arguments=(raw,),
                  keywords=(;)))
 end
 

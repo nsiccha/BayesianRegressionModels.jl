@@ -7,11 +7,34 @@ using Serialization
 
 Threads.nthreads() >= 2 || error("weighted resume checks require --threads=2")
 
+@testset "iterate histories count weighted visits and survive worker changes" begin
+    data = svi_gauss_data(Xoshiro(981), 12)
+    m = brm_nlme_model(RKBRMI(svi_gauss_model(data)); ad_backend=NLME_AD)
+    # Stay in exploration, but cross several history-thinning boundaries.
+    options = (; batch_size=4, window=20, min_windows=100, max_iterations=1600,
+        unit_sampling=:work, ndraws=3, centering=nothing)
+    full = brm_svi_fit(m; rng=Xoshiro(982), options..., threads=1)
+    parallel = brm_svi_fit(m; rng=Xoshiro(982), options..., threads=2)
+    @test svi_same_result(full, parallel)
+    a, b = brm_svi_optimizer_checkpoint(full), brm_svi_optimizer_checkpoint(parallel)
+    @test svi_same_state(a, b)
+    h = a.run.sampling.stationarity
+    @test h.globals.updates == 1600 && h.globals.stride > 1
+    @test [u.updates for u in h.units] == a.run.sampling.visits
+    @test sum(a.run.sampling.draws) > sum(a.run.sampling.visits)
+    part = brm_svi_fit(m; rng=Xoshiro(982), options..., stop_after=137, threads=2)
+    io = IOBuffer(); serialize(io, brm_svi_optimizer_checkpoint(part)); seekstart(io)
+    resumed = brm_svi_resume(m, deserialize(io); ndraws=3, threads=1)
+    @test svi_same_result(resumed, full)
+    @test svi_same_state(brm_svi_optimizer_checkpoint(resumed), a)
+end
+
 @testset "weighted structured trajectories and same-target continuation" begin
     data = svi_gauss_data(Xoshiro(971), 12)
     m = brm_nlme_model(RKBRMI(svi_gauss_model(data)); ad_backend=NLME_AD)
     controls = (; batch_size=4, window=10, min_windows=3, patience=1,
-        polish_windows=3, max_iterations=1000, ndraws=12)
+        polish_windows=3, max_iterations=1000, ndraws=12, stationarity=false,
+        centering=nothing)
     fresh = nothing
     for method in (:uniform, :work), dense_limit in (0, 64)
         states = BRMSVIOptimizerState[]
