@@ -8,14 +8,15 @@ Model documentation:
 - `sigma`: Residual scale of the response.
 - `y`: Measured response.
 - `b_mu__g_g`: Group-level (varying) effects of grouping `g`, `K` correlated margins per level.
-  
+
   Non-centered, from the scales `tau[1:K]` (drawn from their priors), the Cholesky factor of the margins' correlation `L ~ LKJCholesky(K, eta)` and standardized effects
   `z[1:length(levels(g)), 1:K] ~ Normal(0, 1)`. Returns the
   level-by-margin matrix `z * transpose(tau .* L)`, one row per level of `g` in order.
 - `pop_mu`: Population-level effects: one coefficient per column of the design matrix `X`.
-  
+
   Draws `beta_pop[1:ncoef] ~ Normal(loc, scale)` and returns the linear predictor
-  `X * beta_pop`. `ncoef` is the number of columns of `X`. Each prior argument (`loc`, `scale`) is one value for all coefficients or a vector with one per coefficient."""
+  `X * beta_pop`. `ncoef` is the number of columns of `X`. Each prior argument (`loc`, `scale`) is one value for all coefficients or a vector with one per coefficient.
+"""
 import numpy as np
 import scipy.special as ssp
 from typing import Any
@@ -108,6 +109,175 @@ class StaticInt(int):
 jax.tree_util.register_pytree_node(StaticInt, lambda s: ((), int(s)), lambda v, _: StaticInt(v))
 
 
+def brm_population_effects(X: ArrayLike, beta_pop: ArrayLike, *, outputs: tuple[str, ...]) -> dict:
+    """Population-level effects: one coefficient per column of the design matrix `X`.
+
+    Draws `beta_pop[1:ncoef] ~ Normal(loc, scale)` and returns the linear predictor
+    `X * beta_pop`. `ncoef` is the number of columns of `X`. Each prior argument (`loc`, `scale`) is one value for all coefficients or a vector with one per coefficient.
+    """
+    results = {}
+    if any(name in outputs for name in ("value",)):
+        value = X @ beta_pop
+    if any(name in outputs for name in ("ppl_prior_beta_pop", "ppl_pw_prior_beta_pop")):
+        ppl_parg_beta_pop_2 = jnp.asarray([2.0, 1.0], dtype=jnp.float64)
+        def ppl_pw_prior_beta_pop_cell(beta_pop_2, scale):
+            log_scale = jnp.log(scale)
+            standardized = (beta_pop_2 - 0.0) / jnp.where(jnp.logical_and(scale == 0, beta_pop_2 == 0.0), 1.0, scale)
+            standard_logpdf = -0.5 * np.log(2 * np.pi) - 0.5 * standardized ** 2
+            logpdf = standard_logpdf - jnp.where(jnp.logical_and(scale == 0, beta_pop_2 != 0.0), 0.0, log_scale)
+            return logpdf
+        ppl_pw_prior_beta_pop = (jnp.zeros(beta_pop.shape[:1], dtype=jnp.float64) if 0 in beta_pop.shape[:1] and ppl_parg_beta_pop_2.shape[:1] == beta_pop.shape[:1] else jax.vmap(ppl_pw_prior_beta_pop_cell, in_axes=(0, 0))(beta_pop, ppl_parg_beta_pop_2))
+    if any(name in outputs for name in ("ppl_prior_beta_pop",)):
+        ppl_prior_beta_pop = jnp.sum(ppl_pw_prior_beta_pop)
+    if "ppl_prior_beta_pop" in outputs:
+        results["ppl_prior_beta_pop"] = ppl_prior_beta_pop
+    if "ppl_pw_prior_beta_pop" in outputs:
+        results["ppl_pw_prior_beta_pop"] = ppl_pw_prior_beta_pop
+    if "value" in outputs:
+        results["value"] = value
+    return results
+
+
+def brm_correlated_group_effects_density(
+    ppl_last_z: ArrayLike,
+    tau: ArrayLike,
+    unconstrained: ArrayLike,
+    *,
+    outputs: tuple[str, ...],
+) -> dict:
+    """Group-level (varying) effects of grouping `g`, `K` correlated margins per level.
+
+    Non-centered, from the scales `tau[1:K]` (drawn from their priors), the Cholesky factor of the margins' correlation `L ~ LKJCholesky(K, eta)` and standardized effects
+    `z[1:length(levels(g)), 1:K] ~ Normal(0, 1)`. Returns the
+    level-by-margin matrix `z * transpose(tau .* L)`, one row per level of `g` in order.
+    """
+    results = {}
+    if any(name in outputs for name in ("ppl_lkj_diagonal_L", "ppl_lkj_partials_L", "ppl_lkj_raw_L", "ppl_prior_L")):
+        ppl_lkj_raw_L = unconstrained[3:4]
+    if any(name in outputs for name in ("ppl_lkj_diagonal_L", "ppl_lkj_partials_L", "ppl_prior_L")):
+        ppl_lkj_partials_L = jnp.tanh(ppl_lkj_raw_L)
+    if any(name in outputs for name in ("ppl_lkj_diagonal_L", "ppl_prior_L")):
+        out = jnp.ones((2,), dtype=jnp.float64)
+        tuple_ = (1, 2, 1.0)
+        i = tuple_[0]
+        j = tuple_[1]
+        d = tuple_[2]
+        def loop_body(p, carry):
+            (d_2, i_2, j_2, out_2) = carry
+            d_3 = d_2 * jnp.sqrt(1 - ppl_lkj_partials_L[p - 1] ** 2)
+            def then_arm():
+                i_3 = i_2 + 1
+                return (None, jnp.asarray(d_3, dtype=jnp.float64), jnp.asarray(i_3, dtype=jnp.int64), jnp.asarray(j_2, dtype=jnp.int64), out_2)
+            def else_arm():
+                out_3 = out_2.at[j_2 - 1].set(d_3)
+                tuple__2 = (1, j_2 + 1, 1.0)
+                i_4 = tuple__2[0]
+                j_3 = tuple__2[1]
+                d_4 = tuple__2[2]
+                return (None, jnp.asarray(d_4, dtype=jnp.float64), jnp.asarray(i_4, dtype=jnp.int64), jnp.asarray(j_3, dtype=jnp.int64), out_3)
+            branch = jax.lax.cond(i_2 + 1 < j_2, then_arm, else_arm)
+            return (branch[1], branch[2], branch[3], branch[4])
+        loop_carry = jax.lax.fori_loop(1, 2, loop_body, (jnp.asarray(d, dtype=jnp.float64), jnp.asarray(i, dtype=jnp.int64), jnp.asarray(j, dtype=jnp.int64), out))
+        ppl_lkj_diagonal_L = loop_carry[3]
+    if any(name in outputs for name in ("ppl_arrflat_z", "ppl_prior_z", "ppl_pw_prior_z")):
+        ppl_arrflat_z = unconstrained[4:ppl_last_z]
+    if any(name in outputs for name in ("ppl_prior_tau", "ppl_pw_prior_tau")):
+        def ppl_pw_prior_tau_cell(tau_2):
+            log_scale = np.log(1.0)
+            logpdf = jax.lax.cond(tau_2 < 0, lambda: -jnp.inf, lambda: -log_scale - tau_2 / 1.0)
+            return logpdf
+        ppl_pw_prior_tau = (jnp.zeros(tau.shape[:1], dtype=jnp.float64) if 0 in tau.shape[:1] else jax.vmap(ppl_pw_prior_tau_cell, in_axes=(0,))(tau))
+    if any(name in outputs for name in ("ppl_prior_tau",)):
+        ppl_prior_tau = jnp.sum(ppl_pw_prior_tau)
+    if any(name in outputs for name in ("ppl_prior_L",)):
+        total = -0.6931471805599453
+        def loop_body_2(i_2, carry_2):
+            (total_2,) = carry_2
+            total_3 = total_2 + (2 - i_2) * jnp.log(ppl_lkj_diagonal_L[i_2 - 1])
+            return (total_3,)
+        loop_carry_2 = jax.lax.fori_loop(2, 3, loop_body_2, (jnp.asarray(total, dtype=jnp.float64),))
+        ppl_prior_L = loop_carry_2[0]
+    if any(name in outputs for name in ("ppl_prior_z", "ppl_pw_prior_z")):
+        def ppl_pw_prior_z_cell(z):
+            log_scale = np.log(1.0)
+            standardized = (z - 0.0) / jnp.where((z == 0.0 if 1.0 == 0 else False), 1.0, 1.0)
+            standard_logpdf = -0.5 * np.log(2 * np.pi) - 0.5 * standardized ** 2
+            logpdf = standard_logpdf - jnp.where((z != 0.0 if 1.0 == 0 else False), 0.0, log_scale)
+            return logpdf
+        ppl_pw_prior_z = (jnp.zeros(ppl_arrflat_z.shape[:1], dtype=jnp.float64) if 0 in ppl_arrflat_z.shape[:1] else jax.vmap(ppl_pw_prior_z_cell, in_axes=(0,))(ppl_arrflat_z))
+    if any(name in outputs for name in ("ppl_prior_z",)):
+        ppl_prior_z = jnp.sum(ppl_pw_prior_z)
+    if "ppl_arrflat_z" in outputs:
+        results["ppl_arrflat_z"] = ppl_arrflat_z
+    if "ppl_lkj_diagonal_L" in outputs:
+        results["ppl_lkj_diagonal_L"] = ppl_lkj_diagonal_L
+    if "ppl_lkj_partials_L" in outputs:
+        results["ppl_lkj_partials_L"] = ppl_lkj_partials_L
+    if "ppl_lkj_raw_L" in outputs:
+        results["ppl_lkj_raw_L"] = ppl_lkj_raw_L
+    if "ppl_prior_L" in outputs:
+        results["ppl_prior_L"] = ppl_prior_L
+    if "ppl_prior_tau" in outputs:
+        results["ppl_prior_tau"] = ppl_prior_tau
+    if "ppl_prior_z" in outputs:
+        results["ppl_prior_z"] = ppl_prior_z
+    if "ppl_pw_prior_tau" in outputs:
+        results["ppl_pw_prior_tau"] = ppl_pw_prior_tau
+    if "ppl_pw_prior_z" in outputs:
+        results["ppl_pw_prior_z"] = ppl_pw_prior_z
+    return results
+
+
+def _ppl_lkj_lower(z: ArrayLike, diagonal: ArrayLike, K: ArrayLike, P: ArrayLike) -> jax.Array:
+    """Compute `_ppl_lkj_lower` from its authored source."""
+    out = jnp.zeros((K, K), dtype=jnp.float64)
+    out_2 = out.at[0, 0].set(1.0)
+    tuple_ = (1, 2, 1.0)
+    i = tuple_[0]
+    j = tuple_[1]
+    w = tuple_[2]
+    def loop_body(p, carry):
+        (i_2, j_2, out_3, w_2) = carry
+        out_4 = out_3.at[j_2 - 1, i_2 - 1].set(z[p - 1] * w_2)
+        w_3 = w_2 * jnp.sqrt(1 - z[p - 1] ** 2)
+        def then_arm():
+            i_3 = i_2 + 1
+            return (None, jnp.asarray(i_3, dtype=jnp.int64), jnp.asarray(j_2, dtype=jnp.int64), out_4, jnp.asarray(w_3, dtype=jnp.float64))
+        def else_arm():
+            out_5 = out_4.at[j_2 - 1, j_2 - 1].set(diagonal[j_2 - 1])
+            tuple__2 = (1, j_2 + 1, 1.0)
+            i_4 = tuple__2[0]
+            j_3 = tuple__2[1]
+            w_4 = tuple__2[2]
+            return (None, jnp.asarray(i_4, dtype=jnp.int64), jnp.asarray(j_3, dtype=jnp.int64), out_5, jnp.asarray(w_4, dtype=jnp.float64))
+        branch = jax.lax.cond(i_2 + 1 < j_2, then_arm, else_arm)
+        return (branch[1], branch[2], branch[3], branch[4])
+    carry_init = (jnp.asarray(i, dtype=jnp.int64), jnp.asarray(j, dtype=jnp.int64), out_2, jnp.asarray(w, dtype=jnp.float64))
+    loop_carry = jax.lax.fori_loop(1, P + 1, loop_body, carry_init) if 1 <= P else carry_init
+    return loop_carry[2]
+
+
+def brm_correlated_group_effects(
+    L: ArrayLike,
+    tau: ArrayLike,
+    z: ArrayLike,
+    *,
+    outputs: tuple[str, ...],
+) -> dict:
+    """Group-level (varying) effects of grouping `g`, `K` correlated margins per level.
+
+    Non-centered, from the scales `tau[1:K]` (drawn from their priors), the Cholesky factor of the margins' correlation `L ~ LKJCholesky(K, eta)` and standardized effects
+    `z[1:length(levels(g)), 1:K] ~ Normal(0, 1)`. Returns the
+    level-by-margin matrix `z * transpose(tau .* L)`, one row per level of `g` in order.
+    """
+    results = {}
+    if any(name in outputs for name in ("value",)):
+        value = z @ jnp.transpose(tau[..., None] * L)
+    if "value" in outputs:
+        results["value"] = value
+    return results
+
+
 def prepare_data(g: Any, g_fit: Any, x: ArrayLike, y: ArrayLike) -> dict:
     """The functions' data inputs, computed from the raw data once per dataset.
 
@@ -130,510 +300,158 @@ def prepare_data(g: Any, g_fit: Any, x: ArrayLike, y: ArrayLike) -> dict:
     return {"ppl_last_b_mu_g_g_z": StaticInt(ppl_last_b_mu_g_g_z), "ppl_axis1_b_mu_g_g_z": StaticInt(ppl_axis1_b_mu_g_g_z), "ppl_first_pop_mu_beta_pop": StaticInt(ppl_first_pop_mu_beta_pop), "ppl_last_pop_mu_beta_pop": StaticInt(ppl_last_pop_mu_beta_pop), "g_level": np.asarray(g_level, dtype=np.int64), "x": np.asarray(x, dtype=np.float64), "X_mu": np.asarray(X_mu, dtype=np.float64), "y": np.asarray(y, dtype=np.float64)}
 
 
+def model(_entry: str, unconstrained: ArrayLike, **prepared: ArrayLike) -> Any:
+    """Shared model computation. The generated entry wrappers select a static output."""
+    ppl_last_b_mu_g_g_z = prepared["ppl_last_b_mu_g_g_z"]
+    ppl_axis1_b_mu_g_g_z = prepared["ppl_axis1_b_mu_g_g_z"]
+    ppl_first_pop_mu_beta_pop = prepared["ppl_first_pop_mu_beta_pop"]
+    ppl_last_pop_mu_beta_pop = prepared["ppl_last_pop_mu_beta_pop"]
+    g_level = prepared["g_level"]
+    x = prepared["x"]
+    X_mu = prepared["X_mu"]
+    y = prepared["y"]
+    unconstrained = jnp.asarray(unconstrained)
+    g_level = jnp.asarray(g_level)
+    x = jnp.asarray(x)
+    X_mu = jnp.asarray(X_mu)
+    y = jnp.asarray(y)
+    if _entry in ("log_density", "log_prior", "log_likelihood", "constrain"):
+        u_argument = unconstrained[0]
+        constrain_2 = jnp.exp(u_argument)
+        plate_argument = unconstrained[1:3]
+        def b_mu_g_g_tau_cell(ppl_cell_b_mu_g_g_tau):
+            constrain_3 = jnp.exp(ppl_cell_b_mu_g_g_tau)
+            return constrain_3
+        b_mu_g_g_tau = (jnp.zeros(plate_argument.shape[:1], dtype=jnp.float64) if 0 in plate_argument.shape[:1] else jax.vmap(b_mu_g_g_tau_cell, in_axes=(0,))(plate_argument))
+    if _entry in ("log_density", "log_jacobian"):
+        plate_argument_2 = unconstrained[1:3]
+        def ppl_ljcells_b_mu_g_g_tau_cell(ppl_cell_b_mu_g_g_tau):
+            return ppl_cell_b_mu_g_g_tau
+        ppl_ljcells_b_mu_g_g_tau = (jnp.zeros(plate_argument_2.shape[:1], dtype=jnp.float64) if 0 in plate_argument_2.shape[:1] else jax.vmap(ppl_ljcells_b_mu_g_g_tau_cell, in_axes=(0,))(plate_argument_2))
+    if _entry in ("log_density", "log_prior", "log_likelihood", "constrain"):
+        pop_mu_beta_pop = unconstrained[ppl_first_pop_mu_beta_pop - 1:ppl_last_pop_mu_beta_pop]
+        pop_mu = brm_population_effects(
+            X=(X_mu if _entry in ("log_density", "log_likelihood", "constrain") else None),
+            beta_pop=(pop_mu_beta_pop if _entry in ("log_density", "log_prior", "log_likelihood", "constrain") else None),
+            outputs=tuple(
+                name for name, needed in (
+                    ("ppl_prior_beta_pop", ("log_density", "log_prior")),
+                    ("ppl_pw_prior_beta_pop", ("log_density", "log_prior")),
+                    ("value", ("log_density", "log_likelihood", "constrain")),
+                )
+                if _entry in needed
+            ),
+        )
+    if _entry in ("log_density", "log_prior"):
+        ppl_prior_sigma_log_scale = np.log(1.0)
+        logpdf = jax.lax.cond(constrain_2 < 0, lambda: -jnp.inf, lambda: -ppl_prior_sigma_log_scale - constrain_2 / 1.0)
+    if _entry in ("log_density", "log_jacobian"):
+        u_argument_2 = unconstrained[0]
+        plate_fold = jnp.sum(ppl_ljcells_b_mu_g_g_tau)
+    b_mu_g_g = brm_correlated_group_effects_density(
+        ppl_last_z=(ppl_last_b_mu_g_g_z if _entry in ("log_density", "log_prior", "log_likelihood", "constrain") else None),
+        tau=(b_mu_g_g_tau if _entry in ("log_density", "log_prior") else None),
+        unconstrained=unconstrained,
+        outputs=tuple(
+            name for name, needed in (
+                ("ppl_arrflat_z", ("log_density", "log_prior", "log_likelihood", "constrain")),
+                ("ppl_lkj_diagonal_L", ("log_density", "log_prior", "log_likelihood", "constrain")),
+                ("ppl_lkj_partials_L", ("log_density", "log_prior", "log_likelihood", "log_jacobian", "constrain")),
+                ("ppl_lkj_raw_L", ("log_density", "log_prior", "log_likelihood", "log_jacobian", "constrain")),
+                ("ppl_prior_L", ("log_density", "log_prior")),
+                ("ppl_prior_tau", ("log_density", "log_prior")),
+                ("ppl_prior_z", ("log_density", "log_prior")),
+                ("ppl_pw_prior_tau", ("log_density", "log_prior")),
+                ("ppl_pw_prior_z", ("log_density", "log_prior")),
+            )
+            if _entry in needed
+        ),
+    )
+    if _entry in ("log_density", "log_likelihood", "constrain"):
+        ppl_lkj_lower = _ppl_lkj_lower(b_mu_g_g["ppl_lkj_partials_L"], b_mu_g_g["ppl_lkj_diagonal_L"], 2, 1)
+        b_mu_g_g_L = ppl_lkj_lower
+    if _entry in ("log_density", "log_jacobian"):
+        total = 0.0
+        tuple_ = (1, 2)
+        i = tuple_[0]
+        j = tuple_[1]
+        def loop_body(p, carry):
+            (i_2, j_2, total_2) = carry
+            total_3 = total_2 + (j_2 - i_2 + 1) / 2 * jnp.log(1 - b_mu_g_g["ppl_lkj_partials_L"][p - 1] ** 2)
+            tuple__2 = jax.lax.cond(i_2 + 1 < j_2, lambda: (i_2 + 1, j_2), lambda: (1, j_2 + 1))
+            i_3 = tuple__2[0]
+            j_3 = tuple__2[1]
+            return (i_3, j_3, total_3)
+        loop_carry = jax.lax.fori_loop(1, 2, loop_body, (jnp.asarray(i, dtype=jnp.int64), jnp.asarray(j, dtype=jnp.int64), jnp.asarray(total, dtype=jnp.float64)))
+        ppl_lkj_logjac_b_mu_g_g_L = loop_carry[2]
+    if _entry in ("log_density", "log_likelihood", "constrain"):
+        b_mu_g_g_z = jnp.reshape(b_mu_g_g["ppl_arrflat_z"], (ppl_axis1_b_mu_g_g_z, 2), order="F")
+    if _entry in ("log_density", "log_prior"):
+        prior = logpdf + b_mu_g_g["ppl_prior_tau"] + b_mu_g_g["ppl_prior_L"] + b_mu_g_g["ppl_prior_z"] + pop_mu["ppl_prior_beta_pop"]
+    if _entry in ("log_density", "log_jacobian"):
+        log_jacobian_2 = u_argument_2 + plate_fold + ppl_lkj_logjac_b_mu_g_g_L
+    if _entry in ("log_density", "log_likelihood", "constrain"):
+        b_mu_g_g_2 = brm_correlated_group_effects(
+            L=(b_mu_g_g_L if _entry in ("log_density", "log_likelihood", "constrain") else None),
+            tau=(b_mu_g_g_tau if _entry in ("log_density", "log_likelihood", "constrain") else None),
+            z=(b_mu_g_g_z if _entry in ("log_density", "log_likelihood", "constrain") else None),
+            outputs=tuple(
+                name for name, needed in (
+                    ("value", ("log_density", "log_likelihood", "constrain")),
+                )
+                if _entry in needed
+            ),
+        )
+        ranef_mu_mu_g_g = b_mu_g_g_2["value"][g_level - 1, 0] + b_mu_g_g_2["value"][g_level - 1, 1] * x
+        ppl_offset_mu = pop_mu["value"] + ranef_mu_mu_g_g
+    if _entry in ("log_density", "log_likelihood"):
+        def ppl_pw_y_resp_cell(y_2, mu, sigma):
+            def then_arm():
+                log_scale = jnp.log(sigma)
+                standardized = (y_2 - mu) / jnp.where(jnp.logical_and(sigma == 0, y_2 == mu), 1.0, sigma)
+                standard_logpdf = -0.5 * np.log(2 * np.pi) - 0.5 * standardized ** 2
+                return standard_logpdf - jnp.where(jnp.logical_and(sigma == 0, y_2 != mu), 0.0, log_scale)
+            ppl_density = jax.lax.cond(sigma > 0, then_arm, lambda: -jnp.inf)
+            return ppl_density
+        ppl_pw_y_resp = (jnp.zeros(y.shape[:1], dtype=jnp.float64) if 0 in y.shape[:1] and ppl_offset_mu.shape[:1] == y.shape[:1] else jax.vmap(ppl_pw_y_resp_cell, in_axes=(0, 0, None))(y, ppl_offset_mu, constrain_2))
+        ppl_lik_y_resp = jnp.sum(ppl_pw_y_resp)
+    if _entry in ("log_density",):
+        posterior = prior + ppl_lik_y_resp + log_jacobian_2
+    if not (unconstrained.size == ppl_last_pop_mu_beta_pop):
+        raise ValueError("[layout] packed length ≠ layout total: a packed point holds the coordinates of the binding whose layout packed it")
+    if _entry == "log_density":
+        return jnp.asarray(posterior, dtype=jnp.float64)
+    if _entry == "log_prior":
+        return jnp.asarray(prior, dtype=jnp.float64)
+    if _entry == "log_likelihood":
+        return jnp.asarray(ppl_lik_y_resp, dtype=jnp.float64)
+    if _entry == "log_jacobian":
+        return jnp.asarray(log_jacobian_2, dtype=jnp.float64)
+    if _entry == "constrain":
+        return {"sigma": jnp.asarray(constrain_2, dtype=jnp.float64), "b_mu__g_g": {"tau": jnp.asarray(b_mu_g_g_tau), "L": jnp.asarray(b_mu_g_g_L), "z": jnp.asarray(b_mu_g_g_z)}, "pop_mu": {"beta_pop": jnp.asarray(pop_mu_beta_pop)}, "mu": jnp.asarray(ppl_offset_mu)}
+
+
 def log_density(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
     """The log density a sampler targets at `unconstrained`, the packed unconstrained parameters (length `dimension(prepared)`), for the data `prepare_data` returned: `f(u, **prepared)`.
 
     The sum of `log_prior`, `log_likelihood` and `log_jacobian`.
     """
-    ppl_last_b_mu_g_g_z = prepared["ppl_last_b_mu_g_g_z"]
-    ppl_axis1_b_mu_g_g_z = prepared["ppl_axis1_b_mu_g_g_z"]
-    ppl_first_pop_mu_beta_pop = prepared["ppl_first_pop_mu_beta_pop"]
-    ppl_last_pop_mu_beta_pop = prepared["ppl_last_pop_mu_beta_pop"]
-    g_level = prepared["g_level"]
-    x = prepared["x"]
-    X_mu = prepared["X_mu"]
-    y = prepared["y"]
-    unconstrained = jnp.asarray(unconstrained)
-    g_level = jnp.asarray(g_level)
-    x = jnp.asarray(x)
-    X_mu = jnp.asarray(X_mu)
-    y = jnp.asarray(y)
-    scale_binding = 1.0
-    ppl_prior_sigma_log_scale = np.log(scale_binding)
-    ppl_parg_pop_mu_beta_pop_2 = jnp.asarray([2.0, 1.0], dtype=jnp.float64)
-    u_argument = unconstrained[0]
-    constrain = jnp.exp(u_argument)
-    plate_argument = unconstrained[1:3]
-    def cell(ppl_cell_b_mu_g_g_tau):
-        constrain_2 = jnp.exp(ppl_cell_b_mu_g_g_tau)
-        return constrain_2
-    b_mu_g_g_tau = (jnp.zeros(plate_argument.shape[:1], dtype=jnp.float64) if 0 in plate_argument.shape[:1] else jax.vmap(cell, in_axes=(0,))(plate_argument))
-    plate_argument_2 = unconstrained[1:3]
-    def cell_2(ppl_cell_b_mu_g_g_tau):
-        return ppl_cell_b_mu_g_g_tau
-    ppl_ljcells_b_mu_g_g_tau = (jnp.zeros(plate_argument_2.shape[:1], dtype=jnp.float64) if 0 in plate_argument_2.shape[:1] else jax.vmap(cell_2, in_axes=(0,))(plate_argument_2))
-    ppl_lkj_raw_b_mu_g_g_L = unconstrained[3:4]
-    ppl_lkj_partials_b_mu_g_g_L = jnp.tanh(ppl_lkj_raw_b_mu_g_g_L)
-    out = jnp.ones((2,), dtype=jnp.float64)
-    tuple_ = (1, 2, 1.0)
-    i = tuple_[0]
-    j = tuple_[1]
-    d = tuple_[2]
-    def loop_body(p, carry):
-        (d_2, i_2, j_2, out_2) = carry
-        d_3 = d_2 * jnp.sqrt(1 - ppl_lkj_partials_b_mu_g_g_L[p - 1] ** 2)
-        def then_arm():
-            i_3 = i_2 + 1
-            return (None, jnp.asarray(d_3, dtype=jnp.float64), jnp.asarray(i_3, dtype=jnp.int64), jnp.asarray(j_2, dtype=jnp.int64), out_2)
-        def else_arm():
-            out_3 = out_2.at[j_2 - 1].set(d_3)
-            tuple__2 = (1, j_2 + 1, 1.0)
-            i_4 = tuple__2[0]
-            j_3 = tuple__2[1]
-            d_4 = tuple__2[2]
-            return (None, jnp.asarray(d_4, dtype=jnp.float64), jnp.asarray(i_4, dtype=jnp.int64), jnp.asarray(j_3, dtype=jnp.int64), out_3)
-        branch = jax.lax.cond(i_2 + 1 < j_2, then_arm, else_arm)
-        return (branch[1], branch[2], branch[3], branch[4])
-    loop_carry = jax.lax.fori_loop(1, 2, loop_body, (jnp.asarray(d, dtype=jnp.float64), jnp.asarray(i, dtype=jnp.int64), jnp.asarray(j, dtype=jnp.int64), out))
-    let_value = loop_carry[3]
-    ppl_lkj_diagonal_b_mu_g_g_L = let_value
-    out_2 = jnp.zeros((2, 2), dtype=jnp.float64)
-    out_3 = out_2.at[0, 0].set(1.0)
-    tuple__2 = (1, 2, 1.0)
-    i_2 = tuple__2[0]
-    j_2 = tuple__2[1]
-    w = tuple__2[2]
-    def loop_body_2(p_2, carry_2):
-        (i_3, j_3, out_4, w_2) = carry_2
-        out_5 = out_4.at[j_3 - 1, i_3 - 1].set(ppl_lkj_partials_b_mu_g_g_L[p_2 - 1] * w_2)
-        w_3 = w_2 * jnp.sqrt(1 - ppl_lkj_partials_b_mu_g_g_L[p_2 - 1] ** 2)
-        def then_arm():
-            i_4 = i_3 + 1
-            return (None, jnp.asarray(i_4, dtype=jnp.int64), jnp.asarray(j_3, dtype=jnp.int64), out_5, jnp.asarray(w_3, dtype=jnp.float64))
-        def else_arm():
-            out_6 = out_5.at[j_3 - 1, j_3 - 1].set(ppl_lkj_diagonal_b_mu_g_g_L[j_3 - 1])
-            tuple__3 = (1, j_3 + 1, 1.0)
-            i_5 = tuple__3[0]
-            j_4 = tuple__3[1]
-            w_4 = tuple__3[2]
-            return (None, jnp.asarray(i_5, dtype=jnp.int64), jnp.asarray(j_4, dtype=jnp.int64), out_6, jnp.asarray(w_4, dtype=jnp.float64))
-        branch = jax.lax.cond(i_3 + 1 < j_3, then_arm, else_arm)
-        return (branch[1], branch[2], branch[3], branch[4])
-    loop_carry_2 = jax.lax.fori_loop(1, 2, loop_body_2, (jnp.asarray(i_2, dtype=jnp.int64), jnp.asarray(j_2, dtype=jnp.int64), out_3, jnp.asarray(w, dtype=jnp.float64)))
-    value = loop_carry_2[2]
-    b_mu_g_g_L = value
-    total = 0.0
-    tuple__3 = (1, 2)
-    i_3 = tuple__3[0]
-    j_3 = tuple__3[1]
-    def loop_body_3(p_3, carry_3):
-        (i_4, j_4, total_2) = carry_3
-        total_3 = total_2 + (j_4 - i_4 + 1) / 2 * jnp.log(1 - ppl_lkj_partials_b_mu_g_g_L[p_3 - 1] ** 2)
-        def then_arm():
-            return (i_4 + 1, j_4)
-        def else_arm():
-            return (1, j_4 + 1)
-        tuple__4 = jax.lax.cond(i_4 + 1 < j_4, then_arm, else_arm)
-        i_5 = tuple__4[0]
-        j_5 = tuple__4[1]
-        return (i_5, j_5, total_3)
-    loop_carry_3 = jax.lax.fori_loop(1, 2, loop_body_3, (jnp.asarray(i_3, dtype=jnp.int64), jnp.asarray(j_3, dtype=jnp.int64), jnp.asarray(total, dtype=jnp.float64)))
-    let_value_2 = loop_carry_3[2]
-    ppl_lkj_logjac_b_mu_g_g_L = let_value_2
-    ppl_arrflat_b_mu_g_g_z = unconstrained[4:ppl_last_b_mu_g_g_z]
-    b_mu_g_g_z = jnp.reshape(ppl_arrflat_b_mu_g_g_z, (ppl_axis1_b_mu_g_g_z, 2), order="F")
-    pop_mu_beta_pop = unconstrained[ppl_first_pop_mu_beta_pop - 1:ppl_last_pop_mu_beta_pop]
-    b_mu_g_g = b_mu_g_g_z @ jnp.transpose(b_mu_g_g_tau[..., None] * b_mu_g_g_L)
-    ranef_mu_mu_g_g = b_mu_g_g[g_level - 1, 0] + b_mu_g_g[g_level - 1, 1] * x
-    pop_mu = X_mu @ pop_mu_beta_pop
-    ppl_offset_mu = pop_mu + ranef_mu_mu_g_g
-    def cell_3(y_2, mu, sigma):
-        def then_arm():
-            log_scale = jnp.log(sigma)
-            def then_arm_2():
-                return 1.0
-            def else_arm():
-                return sigma
-            value_2 = (y_2 - mu) / jax.lax.cond(jnp.logical_and(sigma == 0, y_2 == mu), then_arm_2, else_arm)
-            standardized = value_2
-            value_3 = -0.5 * np.log(2 * np.pi) - 0.5 * standardized ** 2
-            standard_logpdf = value_3
-            def then_arm_3():
-                return 0.0
-            def else_arm_2():
-                return log_scale
-            value_4 = standard_logpdf - jax.lax.cond(jnp.logical_and(sigma == 0, y_2 != mu), then_arm_3, else_arm_2)
-            return value_4
-        def else_arm_3():
-            return -jnp.inf
-        ppl_density = jax.lax.cond(sigma > 0, then_arm, else_arm_3)
-        return ppl_density
-    ppl_pw_y_resp = (jnp.zeros(y.shape[:1], dtype=jnp.float64) if 0 in y.shape[:1] and ppl_offset_mu.shape[:1] == y.shape[:1] else jax.vmap(cell_3, in_axes=(0, 0, None))(y, ppl_offset_mu, constrain))
-    ppl_lik_y_resp = jnp.sum(ppl_pw_y_resp)
-    def then_arm():
-        return -jnp.inf
-    def else_arm():
-        return -ppl_prior_sigma_log_scale - constrain / scale_binding
-    logpdf = jax.lax.cond(constrain < 0, then_arm, else_arm)
-    def cell_4(b_mu_g_g_tau_2):
-        scale_binding_2 = 1.0
-        log_scale = np.log(scale_binding_2)
-        def then_arm_2():
-            return -jnp.inf
-        def else_arm_2():
-            return -log_scale - b_mu_g_g_tau_2 / scale_binding_2
-        logpdf_2 = jax.lax.cond(b_mu_g_g_tau_2 < 0, then_arm_2, else_arm_2)
-        return logpdf_2
-    ppl_pw_prior_b_mu_g_g_tau = (jnp.zeros(b_mu_g_g_tau.shape[:1], dtype=jnp.float64) if 0 in b_mu_g_g_tau.shape[:1] else jax.vmap(cell_4, in_axes=(0,))(b_mu_g_g_tau))
-    ppl_prior_b_mu_g_g_tau = jnp.sum(ppl_pw_prior_b_mu_g_g_tau)
-    total_2 = -0.6931471805599453
-    def loop_body_4(i_4, carry_4):
-        (total_3,) = carry_4
-        total_4 = total_3 + (2 - i_4) * jnp.log(ppl_lkj_diagonal_b_mu_g_g_L[i_4 - 1])
-        return (total_4,)
-    loop_carry_4 = jax.lax.fori_loop(2, 3, loop_body_4, (jnp.asarray(total_2, dtype=jnp.float64),))
-    let_value_3 = loop_carry_4[0]
-    ppl_prior_b_mu_g_g_L = let_value_3
-    def cell_5(b_mu_g_g_z_2):
-        location_binding = 0.0
-        scale_binding_2 = 1.0
-        log_scale = np.log(scale_binding_2)
-        def then_arm_2():
-            return b_mu_g_g_z_2 == location_binding
-        def else_arm_2():
-            return False
-        value_2 = (then_arm_2() if scale_binding_2 == 0 else else_arm_2())
-        def then_arm_3():
-            return 1.0
-        def else_arm_3():
-            return scale_binding_2
-        standardized = (b_mu_g_g_z_2 - location_binding) / jax.lax.cond(value_2, then_arm_3, else_arm_3)
-        standard_logpdf = -0.5 * np.log(2 * np.pi) - 0.5 * standardized ** 2
-        def then_arm_4():
-            return b_mu_g_g_z_2 != location_binding
-        def else_arm_4():
-            return False
-        value_3 = (then_arm_4() if scale_binding_2 == 0 else else_arm_4())
-        def then_arm_5():
-            return 0.0
-        def else_arm_5():
-            return log_scale
-        logpdf_2 = standard_logpdf - jax.lax.cond(value_3, then_arm_5, else_arm_5)
-        return logpdf_2
-    ppl_pw_prior_b_mu_g_g_z = (jnp.zeros(ppl_arrflat_b_mu_g_g_z.shape[:1], dtype=jnp.float64) if 0 in ppl_arrflat_b_mu_g_g_z.shape[:1] else jax.vmap(cell_5, in_axes=(0,))(ppl_arrflat_b_mu_g_g_z))
-    ppl_prior_b_mu_g_g_z = jnp.sum(ppl_pw_prior_b_mu_g_g_z)
-    def cell_6(pop_mu_beta_pop_2, scale):
-        location_binding = 0.0
-        log_scale = jnp.log(scale)
-        def then_arm_2():
-            return 1.0
-        def else_arm_2():
-            return scale
-        standardized = (pop_mu_beta_pop_2 - location_binding) / jax.lax.cond(jnp.logical_and(scale == 0, pop_mu_beta_pop_2 == location_binding), then_arm_2, else_arm_2)
-        standard_logpdf = -0.5 * np.log(2 * np.pi) - 0.5 * standardized ** 2
-        def then_arm_3():
-            return 0.0
-        def else_arm_3():
-            return log_scale
-        logpdf_2 = standard_logpdf - jax.lax.cond(jnp.logical_and(scale == 0, pop_mu_beta_pop_2 != location_binding), then_arm_3, else_arm_3)
-        return logpdf_2
-    ppl_pw_prior_pop_mu_beta_pop = (jnp.zeros(pop_mu_beta_pop.shape[:1], dtype=jnp.float64) if 0 in pop_mu_beta_pop.shape[:1] and ppl_parg_pop_mu_beta_pop_2.shape[:1] == pop_mu_beta_pop.shape[:1] else jax.vmap(cell_6, in_axes=(0, 0))(pop_mu_beta_pop, ppl_parg_pop_mu_beta_pop_2))
-    ppl_prior_pop_mu_beta_pop = jnp.sum(ppl_pw_prior_pop_mu_beta_pop)
-    prior = logpdf + ppl_prior_b_mu_g_g_tau + ppl_prior_b_mu_g_g_L + ppl_prior_b_mu_g_g_z + ppl_prior_pop_mu_beta_pop
-    u_argument_2 = unconstrained[0]
-    plate_fold = jnp.sum(ppl_ljcells_b_mu_g_g_tau)
-    log_jacobian = u_argument_2 + plate_fold + ppl_lkj_logjac_b_mu_g_g_L
-    posterior = prior + ppl_lik_y_resp + log_jacobian
-    def then_arm_2():
-        return None
-    def else_arm_2():
-        raise ValueError("[layout] packed length ≠ layout total: a packed point holds the coordinates of the binding whose layout packed it")
-        return None
-    value_2 = (then_arm_2() if unconstrained.size == ppl_last_pop_mu_beta_pop else else_arm_2())
-    return jnp.asarray(posterior, dtype=jnp.float64)
+    return model("log_density", unconstrained, **prepared)
 
 
 def log_prior(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
     """The log prior density of the constrained parameters at `unconstrained`, the packed unconstrained parameters (length `dimension(prepared)`), for the data `prepare_data` returned: `f(u, **prepared)`."""
-    ppl_last_b_mu_g_g_z = prepared["ppl_last_b_mu_g_g_z"]
-    ppl_axis1_b_mu_g_g_z = prepared["ppl_axis1_b_mu_g_g_z"]
-    ppl_first_pop_mu_beta_pop = prepared["ppl_first_pop_mu_beta_pop"]
-    ppl_last_pop_mu_beta_pop = prepared["ppl_last_pop_mu_beta_pop"]
-    g_level = prepared["g_level"]
-    x = prepared["x"]
-    X_mu = prepared["X_mu"]
-    y = prepared["y"]
-    unconstrained = jnp.asarray(unconstrained)
-    g_level = jnp.asarray(g_level)
-    x = jnp.asarray(x)
-    X_mu = jnp.asarray(X_mu)
-    y = jnp.asarray(y)
-    scale_binding = 1.0
-    ppl_prior_sigma_log_scale = np.log(scale_binding)
-    ppl_parg_pop_mu_beta_pop_2 = jnp.asarray([2.0, 1.0], dtype=jnp.float64)
-    u_argument = unconstrained[0]
-    constrain = jnp.exp(u_argument)
-    plate_argument = unconstrained[1:3]
-    def cell(ppl_cell_b_mu_g_g_tau):
-        constrain_2 = jnp.exp(ppl_cell_b_mu_g_g_tau)
-        return constrain_2
-    b_mu_g_g_tau = (jnp.zeros(plate_argument.shape[:1], dtype=jnp.float64) if 0 in plate_argument.shape[:1] else jax.vmap(cell, in_axes=(0,))(plate_argument))
-    ppl_lkj_raw_b_mu_g_g_L = unconstrained[3:4]
-    ppl_lkj_partials_b_mu_g_g_L = jnp.tanh(ppl_lkj_raw_b_mu_g_g_L)
-    out = jnp.ones((2,), dtype=jnp.float64)
-    tuple_ = (1, 2, 1.0)
-    i = tuple_[0]
-    j = tuple_[1]
-    d = tuple_[2]
-    def loop_body(p, carry):
-        (d_2, i_2, j_2, out_2) = carry
-        d_3 = d_2 * jnp.sqrt(1 - ppl_lkj_partials_b_mu_g_g_L[p - 1] ** 2)
-        def then_arm():
-            i_3 = i_2 + 1
-            return (None, jnp.asarray(d_3, dtype=jnp.float64), jnp.asarray(i_3, dtype=jnp.int64), jnp.asarray(j_2, dtype=jnp.int64), out_2)
-        def else_arm():
-            out_3 = out_2.at[j_2 - 1].set(d_3)
-            tuple__2 = (1, j_2 + 1, 1.0)
-            i_4 = tuple__2[0]
-            j_3 = tuple__2[1]
-            d_4 = tuple__2[2]
-            return (None, jnp.asarray(d_4, dtype=jnp.float64), jnp.asarray(i_4, dtype=jnp.int64), jnp.asarray(j_3, dtype=jnp.int64), out_3)
-        branch = jax.lax.cond(i_2 + 1 < j_2, then_arm, else_arm)
-        return (branch[1], branch[2], branch[3], branch[4])
-    loop_carry = jax.lax.fori_loop(1, 2, loop_body, (jnp.asarray(d, dtype=jnp.float64), jnp.asarray(i, dtype=jnp.int64), jnp.asarray(j, dtype=jnp.int64), out))
-    let_value = loop_carry[3]
-    ppl_lkj_diagonal_b_mu_g_g_L = let_value
-    ppl_arrflat_b_mu_g_g_z = unconstrained[4:ppl_last_b_mu_g_g_z]
-    pop_mu_beta_pop = unconstrained[ppl_first_pop_mu_beta_pop - 1:ppl_last_pop_mu_beta_pop]
-    def then_arm():
-        return -jnp.inf
-    def else_arm():
-        return -ppl_prior_sigma_log_scale - constrain / scale_binding
-    logpdf = jax.lax.cond(constrain < 0, then_arm, else_arm)
-    def cell_2(b_mu_g_g_tau_2):
-        scale_binding_2 = 1.0
-        log_scale = np.log(scale_binding_2)
-        def then_arm_2():
-            return -jnp.inf
-        def else_arm_2():
-            return -log_scale - b_mu_g_g_tau_2 / scale_binding_2
-        logpdf_2 = jax.lax.cond(b_mu_g_g_tau_2 < 0, then_arm_2, else_arm_2)
-        return logpdf_2
-    ppl_pw_prior_b_mu_g_g_tau = (jnp.zeros(b_mu_g_g_tau.shape[:1], dtype=jnp.float64) if 0 in b_mu_g_g_tau.shape[:1] else jax.vmap(cell_2, in_axes=(0,))(b_mu_g_g_tau))
-    ppl_prior_b_mu_g_g_tau = jnp.sum(ppl_pw_prior_b_mu_g_g_tau)
-    total = -0.6931471805599453
-    def loop_body_2(i_2, carry_2):
-        (total_2,) = carry_2
-        total_3 = total_2 + (2 - i_2) * jnp.log(ppl_lkj_diagonal_b_mu_g_g_L[i_2 - 1])
-        return (total_3,)
-    loop_carry_2 = jax.lax.fori_loop(2, 3, loop_body_2, (jnp.asarray(total, dtype=jnp.float64),))
-    let_value_2 = loop_carry_2[0]
-    ppl_prior_b_mu_g_g_L = let_value_2
-    def cell_3(b_mu_g_g_z):
-        location_binding = 0.0
-        scale_binding_2 = 1.0
-        log_scale = np.log(scale_binding_2)
-        def then_arm_2():
-            return b_mu_g_g_z == location_binding
-        def else_arm_2():
-            return False
-        value = (then_arm_2() if scale_binding_2 == 0 else else_arm_2())
-        def then_arm_3():
-            return 1.0
-        def else_arm_3():
-            return scale_binding_2
-        standardized = (b_mu_g_g_z - location_binding) / jax.lax.cond(value, then_arm_3, else_arm_3)
-        standard_logpdf = -0.5 * np.log(2 * np.pi) - 0.5 * standardized ** 2
-        def then_arm_4():
-            return b_mu_g_g_z != location_binding
-        def else_arm_4():
-            return False
-        value_2 = (then_arm_4() if scale_binding_2 == 0 else else_arm_4())
-        def then_arm_5():
-            return 0.0
-        def else_arm_5():
-            return log_scale
-        logpdf_2 = standard_logpdf - jax.lax.cond(value_2, then_arm_5, else_arm_5)
-        return logpdf_2
-    ppl_pw_prior_b_mu_g_g_z = (jnp.zeros(ppl_arrflat_b_mu_g_g_z.shape[:1], dtype=jnp.float64) if 0 in ppl_arrflat_b_mu_g_g_z.shape[:1] else jax.vmap(cell_3, in_axes=(0,))(ppl_arrflat_b_mu_g_g_z))
-    ppl_prior_b_mu_g_g_z = jnp.sum(ppl_pw_prior_b_mu_g_g_z)
-    def cell_4(pop_mu_beta_pop_2, scale):
-        location_binding = 0.0
-        log_scale = jnp.log(scale)
-        def then_arm_2():
-            return 1.0
-        def else_arm_2():
-            return scale
-        standardized = (pop_mu_beta_pop_2 - location_binding) / jax.lax.cond(jnp.logical_and(scale == 0, pop_mu_beta_pop_2 == location_binding), then_arm_2, else_arm_2)
-        standard_logpdf = -0.5 * np.log(2 * np.pi) - 0.5 * standardized ** 2
-        def then_arm_3():
-            return 0.0
-        def else_arm_3():
-            return log_scale
-        logpdf_2 = standard_logpdf - jax.lax.cond(jnp.logical_and(scale == 0, pop_mu_beta_pop_2 != location_binding), then_arm_3, else_arm_3)
-        return logpdf_2
-    ppl_pw_prior_pop_mu_beta_pop = (jnp.zeros(pop_mu_beta_pop.shape[:1], dtype=jnp.float64) if 0 in pop_mu_beta_pop.shape[:1] and ppl_parg_pop_mu_beta_pop_2.shape[:1] == pop_mu_beta_pop.shape[:1] else jax.vmap(cell_4, in_axes=(0, 0))(pop_mu_beta_pop, ppl_parg_pop_mu_beta_pop_2))
-    ppl_prior_pop_mu_beta_pop = jnp.sum(ppl_pw_prior_pop_mu_beta_pop)
-    prior = logpdf + ppl_prior_b_mu_g_g_tau + ppl_prior_b_mu_g_g_L + ppl_prior_b_mu_g_g_z + ppl_prior_pop_mu_beta_pop
-    def then_arm_2():
-        return None
-    def else_arm_2():
-        raise ValueError("[layout] packed length ≠ layout total: a packed point holds the coordinates of the binding whose layout packed it")
-        return None
-    value = (then_arm_2() if unconstrained.size == ppl_last_pop_mu_beta_pop else else_arm_2())
-    return jnp.asarray(prior, dtype=jnp.float64)
+    return model("log_prior", unconstrained, **prepared)
 
 
 def log_likelihood(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
     """The log likelihood of the observations at `unconstrained`, the packed unconstrained parameters (length `dimension(prepared)`), for the data `prepare_data` returned: `f(u, **prepared)`."""
-    ppl_last_b_mu_g_g_z = prepared["ppl_last_b_mu_g_g_z"]
-    ppl_axis1_b_mu_g_g_z = prepared["ppl_axis1_b_mu_g_g_z"]
-    ppl_first_pop_mu_beta_pop = prepared["ppl_first_pop_mu_beta_pop"]
-    ppl_last_pop_mu_beta_pop = prepared["ppl_last_pop_mu_beta_pop"]
-    g_level = prepared["g_level"]
-    x = prepared["x"]
-    X_mu = prepared["X_mu"]
-    y = prepared["y"]
-    unconstrained = jnp.asarray(unconstrained)
-    g_level = jnp.asarray(g_level)
-    x = jnp.asarray(x)
-    X_mu = jnp.asarray(X_mu)
-    y = jnp.asarray(y)
-    u_argument = unconstrained[0]
-    constrain = jnp.exp(u_argument)
-    plate_argument = unconstrained[1:3]
-    def cell(ppl_cell_b_mu_g_g_tau):
-        constrain_2 = jnp.exp(ppl_cell_b_mu_g_g_tau)
-        return constrain_2
-    b_mu_g_g_tau = (jnp.zeros(plate_argument.shape[:1], dtype=jnp.float64) if 0 in plate_argument.shape[:1] else jax.vmap(cell, in_axes=(0,))(plate_argument))
-    ppl_lkj_raw_b_mu_g_g_L = unconstrained[3:4]
-    ppl_lkj_partials_b_mu_g_g_L = jnp.tanh(ppl_lkj_raw_b_mu_g_g_L)
-    out = jnp.ones((2,), dtype=jnp.float64)
-    tuple_ = (1, 2, 1.0)
-    i = tuple_[0]
-    j = tuple_[1]
-    d = tuple_[2]
-    def loop_body(p, carry):
-        (d_2, i_2, j_2, out_2) = carry
-        d_3 = d_2 * jnp.sqrt(1 - ppl_lkj_partials_b_mu_g_g_L[p - 1] ** 2)
-        def then_arm():
-            i_3 = i_2 + 1
-            return (None, jnp.asarray(d_3, dtype=jnp.float64), jnp.asarray(i_3, dtype=jnp.int64), jnp.asarray(j_2, dtype=jnp.int64), out_2)
-        def else_arm():
-            out_3 = out_2.at[j_2 - 1].set(d_3)
-            tuple__2 = (1, j_2 + 1, 1.0)
-            i_4 = tuple__2[0]
-            j_3 = tuple__2[1]
-            d_4 = tuple__2[2]
-            return (None, jnp.asarray(d_4, dtype=jnp.float64), jnp.asarray(i_4, dtype=jnp.int64), jnp.asarray(j_3, dtype=jnp.int64), out_3)
-        branch = jax.lax.cond(i_2 + 1 < j_2, then_arm, else_arm)
-        return (branch[1], branch[2], branch[3], branch[4])
-    loop_carry = jax.lax.fori_loop(1, 2, loop_body, (jnp.asarray(d, dtype=jnp.float64), jnp.asarray(i, dtype=jnp.int64), jnp.asarray(j, dtype=jnp.int64), out))
-    let_value = loop_carry[3]
-    ppl_lkj_diagonal_b_mu_g_g_L = let_value
-    out_2 = jnp.zeros((2, 2), dtype=jnp.float64)
-    out_3 = out_2.at[0, 0].set(1.0)
-    tuple__2 = (1, 2, 1.0)
-    i_2 = tuple__2[0]
-    j_2 = tuple__2[1]
-    w = tuple__2[2]
-    def loop_body_2(p_2, carry_2):
-        (i_3, j_3, out_4, w_2) = carry_2
-        out_5 = out_4.at[j_3 - 1, i_3 - 1].set(ppl_lkj_partials_b_mu_g_g_L[p_2 - 1] * w_2)
-        w_3 = w_2 * jnp.sqrt(1 - ppl_lkj_partials_b_mu_g_g_L[p_2 - 1] ** 2)
-        def then_arm():
-            i_4 = i_3 + 1
-            return (None, jnp.asarray(i_4, dtype=jnp.int64), jnp.asarray(j_3, dtype=jnp.int64), out_5, jnp.asarray(w_3, dtype=jnp.float64))
-        def else_arm():
-            out_6 = out_5.at[j_3 - 1, j_3 - 1].set(ppl_lkj_diagonal_b_mu_g_g_L[j_3 - 1])
-            tuple__3 = (1, j_3 + 1, 1.0)
-            i_5 = tuple__3[0]
-            j_4 = tuple__3[1]
-            w_4 = tuple__3[2]
-            return (None, jnp.asarray(i_5, dtype=jnp.int64), jnp.asarray(j_4, dtype=jnp.int64), out_6, jnp.asarray(w_4, dtype=jnp.float64))
-        branch = jax.lax.cond(i_3 + 1 < j_3, then_arm, else_arm)
-        return (branch[1], branch[2], branch[3], branch[4])
-    loop_carry_2 = jax.lax.fori_loop(1, 2, loop_body_2, (jnp.asarray(i_2, dtype=jnp.int64), jnp.asarray(j_2, dtype=jnp.int64), out_3, jnp.asarray(w, dtype=jnp.float64)))
-    value = loop_carry_2[2]
-    b_mu_g_g_L = value
-    ppl_arrflat_b_mu_g_g_z = unconstrained[4:ppl_last_b_mu_g_g_z]
-    b_mu_g_g_z = jnp.reshape(ppl_arrflat_b_mu_g_g_z, (ppl_axis1_b_mu_g_g_z, 2), order="F")
-    pop_mu_beta_pop = unconstrained[ppl_first_pop_mu_beta_pop - 1:ppl_last_pop_mu_beta_pop]
-    b_mu_g_g = b_mu_g_g_z @ jnp.transpose(b_mu_g_g_tau[..., None] * b_mu_g_g_L)
-    ranef_mu_mu_g_g = b_mu_g_g[g_level - 1, 0] + b_mu_g_g[g_level - 1, 1] * x
-    pop_mu = X_mu @ pop_mu_beta_pop
-    ppl_offset_mu = pop_mu + ranef_mu_mu_g_g
-    def cell_2(y_2, mu, sigma):
-        def then_arm():
-            log_scale = jnp.log(sigma)
-            def then_arm_2():
-                return 1.0
-            def else_arm():
-                return sigma
-            value_2 = (y_2 - mu) / jax.lax.cond(jnp.logical_and(sigma == 0, y_2 == mu), then_arm_2, else_arm)
-            standardized = value_2
-            value_3 = -0.5 * np.log(2 * np.pi) - 0.5 * standardized ** 2
-            standard_logpdf = value_3
-            def then_arm_3():
-                return 0.0
-            def else_arm_2():
-                return log_scale
-            value_4 = standard_logpdf - jax.lax.cond(jnp.logical_and(sigma == 0, y_2 != mu), then_arm_3, else_arm_2)
-            return value_4
-        def else_arm_3():
-            return -jnp.inf
-        ppl_density = jax.lax.cond(sigma > 0, then_arm, else_arm_3)
-        return ppl_density
-    ppl_pw_y_resp = (jnp.zeros(y.shape[:1], dtype=jnp.float64) if 0 in y.shape[:1] and ppl_offset_mu.shape[:1] == y.shape[:1] else jax.vmap(cell_2, in_axes=(0, 0, None))(y, ppl_offset_mu, constrain))
-    ppl_lik_y_resp = jnp.sum(ppl_pw_y_resp)
-    def then_arm():
-        return None
-    def else_arm():
-        raise ValueError("[layout] packed length ≠ layout total: a packed point holds the coordinates of the binding whose layout packed it")
-        return None
-    value_2 = (then_arm() if unconstrained.size == ppl_last_pop_mu_beta_pop else else_arm())
-    return jnp.asarray(ppl_lik_y_resp, dtype=jnp.float64)
+    return model("log_likelihood", unconstrained, **prepared)
 
 
 def log_jacobian(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
     """The log Jacobian of the constraining transforms at `unconstrained`, the packed unconstrained parameters (length `dimension(prepared)`), for the data `prepare_data` returned: `f(u, **prepared)`."""
-    ppl_last_b_mu_g_g_z = prepared["ppl_last_b_mu_g_g_z"]
-    ppl_axis1_b_mu_g_g_z = prepared["ppl_axis1_b_mu_g_g_z"]
-    ppl_first_pop_mu_beta_pop = prepared["ppl_first_pop_mu_beta_pop"]
-    ppl_last_pop_mu_beta_pop = prepared["ppl_last_pop_mu_beta_pop"]
-    g_level = prepared["g_level"]
-    x = prepared["x"]
-    X_mu = prepared["X_mu"]
-    y = prepared["y"]
-    unconstrained = jnp.asarray(unconstrained)
-    g_level = jnp.asarray(g_level)
-    x = jnp.asarray(x)
-    X_mu = jnp.asarray(X_mu)
-    y = jnp.asarray(y)
-    plate_argument = unconstrained[1:3]
-    def cell(ppl_cell_b_mu_g_g_tau):
-        return ppl_cell_b_mu_g_g_tau
-    ppl_ljcells_b_mu_g_g_tau = (jnp.zeros(plate_argument.shape[:1], dtype=jnp.float64) if 0 in plate_argument.shape[:1] else jax.vmap(cell, in_axes=(0,))(plate_argument))
-    ppl_lkj_raw_b_mu_g_g_L = unconstrained[3:4]
-    ppl_lkj_partials_b_mu_g_g_L = jnp.tanh(ppl_lkj_raw_b_mu_g_g_L)
-    total = 0.0
-    tuple_ = (1, 2)
-    i = tuple_[0]
-    j = tuple_[1]
-    def loop_body(p, carry):
-        (i_2, j_2, total_2) = carry
-        total_3 = total_2 + (j_2 - i_2 + 1) / 2 * jnp.log(1 - ppl_lkj_partials_b_mu_g_g_L[p - 1] ** 2)
-        def then_arm():
-            return (i_2 + 1, j_2)
-        def else_arm():
-            return (1, j_2 + 1)
-        tuple__2 = jax.lax.cond(i_2 + 1 < j_2, then_arm, else_arm)
-        i_3 = tuple__2[0]
-        j_3 = tuple__2[1]
-        return (i_3, j_3, total_3)
-    loop_carry = jax.lax.fori_loop(1, 2, loop_body, (jnp.asarray(i, dtype=jnp.int64), jnp.asarray(j, dtype=jnp.int64), jnp.asarray(total, dtype=jnp.float64)))
-    let_value = loop_carry[2]
-    ppl_lkj_logjac_b_mu_g_g_L = let_value
-    u_argument = unconstrained[0]
-    plate_fold = jnp.sum(ppl_ljcells_b_mu_g_g_tau)
-    log_jacobian_2 = u_argument + plate_fold + ppl_lkj_logjac_b_mu_g_g_L
-    def then_arm():
-        return None
-    def else_arm():
-        raise ValueError("[layout] packed length ≠ layout total: a packed point holds the coordinates of the binding whose layout packed it")
-        return None
-    value = (then_arm() if unconstrained.size == ppl_last_pop_mu_beta_pop else else_arm())
-    return jnp.asarray(log_jacobian_2, dtype=jnp.float64)
+    return model("log_jacobian", unconstrained, **prepared)
 
 
 def constrain(unconstrained: ArrayLike, **prepared: ArrayLike) -> dict:
@@ -646,90 +464,7 @@ def constrain(unconstrained: ArrayLike, **prepared: ArrayLike) -> dict:
     - `pop_mu.beta_pop`
     - `mu`: Expected response: a population line, and each group's own intercept and slope, correlated.
     """
-    ppl_last_b_mu_g_g_z = prepared["ppl_last_b_mu_g_g_z"]
-    ppl_axis1_b_mu_g_g_z = prepared["ppl_axis1_b_mu_g_g_z"]
-    ppl_first_pop_mu_beta_pop = prepared["ppl_first_pop_mu_beta_pop"]
-    ppl_last_pop_mu_beta_pop = prepared["ppl_last_pop_mu_beta_pop"]
-    g_level = prepared["g_level"]
-    x = prepared["x"]
-    X_mu = prepared["X_mu"]
-    y = prepared["y"]
-    unconstrained = jnp.asarray(unconstrained)
-    g_level = jnp.asarray(g_level)
-    x = jnp.asarray(x)
-    X_mu = jnp.asarray(X_mu)
-    y = jnp.asarray(y)
-    u_argument = unconstrained[0]
-    constrain_2 = jnp.exp(u_argument)
-    plate_argument = unconstrained[1:3]
-    def cell(ppl_cell_b_mu_g_g_tau):
-        constrain_3 = jnp.exp(ppl_cell_b_mu_g_g_tau)
-        return constrain_3
-    b_mu_g_g_tau = (jnp.zeros(plate_argument.shape[:1], dtype=jnp.float64) if 0 in plate_argument.shape[:1] else jax.vmap(cell, in_axes=(0,))(plate_argument))
-    ppl_lkj_raw_b_mu_g_g_L = unconstrained[3:4]
-    ppl_lkj_partials_b_mu_g_g_L = jnp.tanh(ppl_lkj_raw_b_mu_g_g_L)
-    out = jnp.ones((2,), dtype=jnp.float64)
-    tuple_ = (1, 2, 1.0)
-    i = tuple_[0]
-    j = tuple_[1]
-    d = tuple_[2]
-    def loop_body(p, carry):
-        (d_2, i_2, j_2, out_2) = carry
-        d_3 = d_2 * jnp.sqrt(1 - ppl_lkj_partials_b_mu_g_g_L[p - 1] ** 2)
-        def then_arm():
-            i_3 = i_2 + 1
-            return (None, jnp.asarray(d_3, dtype=jnp.float64), jnp.asarray(i_3, dtype=jnp.int64), jnp.asarray(j_2, dtype=jnp.int64), out_2)
-        def else_arm():
-            out_3 = out_2.at[j_2 - 1].set(d_3)
-            tuple__2 = (1, j_2 + 1, 1.0)
-            i_4 = tuple__2[0]
-            j_3 = tuple__2[1]
-            d_4 = tuple__2[2]
-            return (None, jnp.asarray(d_4, dtype=jnp.float64), jnp.asarray(i_4, dtype=jnp.int64), jnp.asarray(j_3, dtype=jnp.int64), out_3)
-        branch = jax.lax.cond(i_2 + 1 < j_2, then_arm, else_arm)
-        return (branch[1], branch[2], branch[3], branch[4])
-    loop_carry = jax.lax.fori_loop(1, 2, loop_body, (jnp.asarray(d, dtype=jnp.float64), jnp.asarray(i, dtype=jnp.int64), jnp.asarray(j, dtype=jnp.int64), out))
-    let_value = loop_carry[3]
-    ppl_lkj_diagonal_b_mu_g_g_L = let_value
-    out_2 = jnp.zeros((2, 2), dtype=jnp.float64)
-    out_3 = out_2.at[0, 0].set(1.0)
-    tuple__2 = (1, 2, 1.0)
-    i_2 = tuple__2[0]
-    j_2 = tuple__2[1]
-    w = tuple__2[2]
-    def loop_body_2(p_2, carry_2):
-        (i_3, j_3, out_4, w_2) = carry_2
-        out_5 = out_4.at[j_3 - 1, i_3 - 1].set(ppl_lkj_partials_b_mu_g_g_L[p_2 - 1] * w_2)
-        w_3 = w_2 * jnp.sqrt(1 - ppl_lkj_partials_b_mu_g_g_L[p_2 - 1] ** 2)
-        def then_arm():
-            i_4 = i_3 + 1
-            return (None, jnp.asarray(i_4, dtype=jnp.int64), jnp.asarray(j_3, dtype=jnp.int64), out_5, jnp.asarray(w_3, dtype=jnp.float64))
-        def else_arm():
-            out_6 = out_5.at[j_3 - 1, j_3 - 1].set(ppl_lkj_diagonal_b_mu_g_g_L[j_3 - 1])
-            tuple__3 = (1, j_3 + 1, 1.0)
-            i_5 = tuple__3[0]
-            j_4 = tuple__3[1]
-            w_4 = tuple__3[2]
-            return (None, jnp.asarray(i_5, dtype=jnp.int64), jnp.asarray(j_4, dtype=jnp.int64), out_6, jnp.asarray(w_4, dtype=jnp.float64))
-        branch = jax.lax.cond(i_3 + 1 < j_3, then_arm, else_arm)
-        return (branch[1], branch[2], branch[3], branch[4])
-    loop_carry_2 = jax.lax.fori_loop(1, 2, loop_body_2, (jnp.asarray(i_2, dtype=jnp.int64), jnp.asarray(j_2, dtype=jnp.int64), out_3, jnp.asarray(w, dtype=jnp.float64)))
-    value = loop_carry_2[2]
-    b_mu_g_g_L = value
-    ppl_arrflat_b_mu_g_g_z = unconstrained[4:ppl_last_b_mu_g_g_z]
-    b_mu_g_g_z = jnp.reshape(ppl_arrflat_b_mu_g_g_z, (ppl_axis1_b_mu_g_g_z, 2), order="F")
-    pop_mu_beta_pop = unconstrained[ppl_first_pop_mu_beta_pop - 1:ppl_last_pop_mu_beta_pop]
-    b_mu_g_g = b_mu_g_g_z @ jnp.transpose(b_mu_g_g_tau[..., None] * b_mu_g_g_L)
-    ranef_mu_mu_g_g = b_mu_g_g[g_level - 1, 0] + b_mu_g_g[g_level - 1, 1] * x
-    pop_mu = X_mu @ pop_mu_beta_pop
-    ppl_offset_mu = pop_mu + ranef_mu_mu_g_g
-    def then_arm():
-        return None
-    def else_arm():
-        raise ValueError("[layout] packed length ≠ layout total: a packed point holds the coordinates of the binding whose layout packed it")
-        return None
-    value_2 = (then_arm() if unconstrained.size == ppl_last_pop_mu_beta_pop else else_arm())
-    return {"sigma": jnp.asarray(constrain_2, dtype=jnp.float64), "b_mu__g_g": {"tau": jnp.asarray(b_mu_g_g_tau), "L": jnp.asarray(b_mu_g_g_L), "z": jnp.asarray(b_mu_g_g_z)}, "pop_mu": {"beta_pop": jnp.asarray(pop_mu_beta_pop)}, "mu": jnp.asarray(ppl_offset_mu)}
+    return model("constrain", unconstrained, **prepared)
 
 
 def dimension(prepared: dict) -> int:
