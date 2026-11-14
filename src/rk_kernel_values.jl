@@ -251,13 +251,35 @@ function _rk_kernel_observation_distribution(observation, names=observation.argu
     arguments = map(name -> _BRMPreparedRef(name, :whole), names)
     # The original Stan scalar family is emitted through RKPPL's exact
     # StudentT(nu, location, scale) spelling, retaining its argument order.
-    if observation.callable === StanBlocks.student_t
+    # Julia's `LocationScale(location, scale, TDist(nu))` keeps its own order
+    # (`_rk_kernel_student_t_values`) and reaches the same law.
+    student_t = observation.callable === StanBlocks.student_t
+    if student_t || observation.callable === LocationScale
         length(arguments) == 3 || error("RK backend: student_t needs nu, location and scale")
-        nu, location, scale = arguments
+        nu, location, scale = student_t ? arguments :
+            (arguments[3], arguments[1], arguments[2])
         return _BRMPreparedExpr(LocationScale,
             (location, scale, _BRMPreparedExpr(TDist, (nu,), (;))), (;))
     end
     _BRMPreparedExpr(observation.callable, arguments, (;))
+end
+
+# Julia's Student-t observation, `LocationScale(location, scale, TDist(nu))`, as
+# the three values a cell computes: the location, the scale and the degrees of
+# freedom, each a scalar or one per entry. The `TDist` is the law, not a value
+# of the cell, exactly as the top-level response lowers it
+# (`_rk_ast_value_distribution`), so the cell never stores a distribution.
+function _rk_kernel_student_t_values(scope, values, kernel)
+    spelled = "write `LocationScale(location, scale, TDist(nu))`"
+    length(values) == 3 || error("RK backend: kernel `$kernel` in-cell `LocationScale` " *
+        "needs a location, a scale and a base law; $spelled")
+    location, scale, base = values
+    Meta.isexpr(base, :call) && length(base.args) == 2 &&
+        !Meta.isexpr(base.args[2], :parameters) &&
+        _rk_kernel_binding(scope, first(base.args)) === TDist || error(
+        "RK backend: kernel `$kernel` in-cell `LocationScale` observes Student-t only, " *
+        "as a top-level response does: its base law `$base` must be `TDist(nu)`; $spelled")
+    (location, scale, base.args[2])
 end
 
 function _rk_kernel_observation_modifier(observation, distribution, bound_names)
@@ -546,6 +568,8 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             values = hidden === nothing ? Tuple(distribution.args[2:end]) : hidden.values
             any(value -> Meta.isexpr(value, :parameters), values) && error(
                 "RK backend: kernel `$name` observation constructor keywords need explicit argument lowering")
+            callable === LocationScale &&
+                (values = _rk_kernel_student_t_values(scope, values, name))
             argument_names = Tuple(Symbol(name, :_argument_, source, :_, i)
                 for i in eachindex(values))
             weight_name = weight === nothing ? nothing : Symbol(name, :_weight_, source)

@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.306
+## 0.2.307
 
 - **Breaking:** BRM requires WarmupHMC 0.3 (`[compat] WarmupHMC = "0.3"`, was
   `"0.2.11"`). From WarmupHMC 0.3.0 a reparametrization accessor reads every
@@ -31,6 +31,22 @@ instead of failing at run time.
   the accessors read no control, so a snapshot of the pairs is the old map.
   BRM 0.2.298's rebinding of the pairs to a private copy of the controls is
   gone, and the accessors keep the state they were built with.
+
+## 0.2.306
+
+- A plate cell observes Julia's Student-t,
+  `y[s] ~ LocationScale(location, scale, TDist(nu))`, on both backends, as a
+  top-level response does: location, scale and degrees of freedom may each be
+  a scalar or one value per entry, and the cell's response may be one array
+  per cell or one value per cell. Before, RKBRMI refused every such cell with
+  `RK backend: a LocationScale response must wrap TDist(nu)` (the cell stored
+  `TDist(nu)` as a computed value instead of reading it as the law), and
+  SBBRMI failed in StanBlocks with ``Found `LocationScale` … of type
+  UnionAll`` (the cell's Stan spelling skipped `LocationScale`, for which
+  Julia answers `LocationScale <: Distribution` false). SBBRMI now spells it
+  `student_t(nu, location, scale)`, as at the top level. On RKBRMI, a cell
+  `LocationScale` over a base other than `TDist(nu)` is refused, as at the
+  top level, and the refusal names the supported spelling.
 
 ## 0.2.305
 
