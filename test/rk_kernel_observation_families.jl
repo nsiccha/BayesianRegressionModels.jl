@@ -175,6 +175,104 @@ end
     @test isequal(data,saved)
 end
 
+# Julia's Student-t in a plate cell, `LocationScale(location, scale, TDist(nu))`:
+# the spelling a top-level response takes, so a cell observes it too (brm-use
+# kernel.md, "Cell bodies are Julia"; snag student-t-locati-6466e87a).
+module PublicCellStudentT
+using BayesianRegressionModels
+shared(data) = @brm data begin
+    nu ~ LogNormal(2, 0.5); sigma ~ Exponential(1); mu ~ Normal(0, 5)
+    @plate for s in eachindex(y)
+        y[s] ~ LocationScale(mu, sigma, TDist(nu))
+    end
+end
+# Location, scale and degrees of freedom one per entry.
+per_entry(data) = @brm data begin
+    nu ~ LogNormal(2, 0.5); sigma ~ Exponential(1); mu ~ Normal(0, 5)
+    @plate for s in eachindex(y)
+        loc = mu .+ x[s]
+        scale = sigma .* (1 .+ abs.(x[s]))
+        y[s] ~ LocationScale(loc, scale, TDist(nu .* w[s]))
+    end
+end
+# One response value per cell.
+scalar_cells(data) = @brm data begin
+    nu ~ LogNormal(2, 0.5); sigma ~ Exponential(1); mu ~ Normal(0, 5)
+    @plate for s in eachindex(y)
+        y[s] ~ LocationScale(mu + x[s], sigma, TDist(nu))
+    end
+end
+other_base(data) = @brm data begin
+    sigma ~ Exponential(1); mu ~ Normal(0, 5)
+    @plate for s in eachindex(y)
+        y[s] ~ LocationScale(mu, sigma, Normal(0, 1))
+    end
+end
+end
+
+const CELL_T = (; x=[[0.2, -0.5, 1.1], Float64[], [0.7, 0.0]],
+    w=[[1.0, 0.5, 2.0], Float64[], [1.5, 0.8]],
+    y=[[0.1, 0.4, -1.3], Float64[], [-0.2, 2.5]])
+
+function cell_t_oracle(names, data, law)
+    index = Dict(n => coordinate(names, n) for n in (:nu, :sigma, :mu))
+    u -> begin
+        nu, sigma, mu = exp(u[index[:nu]]), exp(u[index[:sigma]]), u[index[:mu]]
+        logpdf(LogNormal(2, 0.5), nu) + u[index[:nu]] +
+            logpdf(Exponential(1), sigma) + u[index[:sigma]] + logpdf(Normal(0, 5), mu) +
+            sum((logpdf(law(nu, sigma, mu, entry...), last(entry))
+                for entry in data); init=0.0)
+    end
+end
+
+@stestset "plate cell observes LocationScale(location, scale, TDist(nu))" begin
+    cases = (
+        (PublicCellStudentT.shared, CELL_T,
+            [(y,) for ys in CELL_T.y for y in ys],
+            (nu, sigma, mu, y) -> LocationScale(mu, sigma, TDist(nu))),
+        (PublicCellStudentT.per_entry, CELL_T,
+            [(x, w, y) for (xs, ws, ys) in zip(CELL_T.x, CELL_T.w, CELL_T.y)
+                for (x, w, y) in zip(xs, ws, ys)],
+            (nu, sigma, mu, x, w, y) ->
+                LocationScale(mu + x, sigma * (1 + abs(x)), TDist(nu * w))),
+        (PublicCellStudentT.scalar_cells, (; x=[0.2, -0.5, 1.1], y=[0.1, 0.4, -1.3]),
+            [(x, y) for (x, y) in zip([0.2, -0.5, 1.1], [0.1, 0.4, -1.3])],
+            (nu, sigma, mu, x, y) -> LocationScale(mu + x, sigma, TDist(nu))))
+    for (k, (build, data, entries, law)) in enumerate(cases)
+        saved = deepcopy(data)
+        brmi = build(data)
+        backend, problem = consumer_problem(brmi)
+        names = coordinate_names(backend.model.layout)
+        @test sort(names) == [:mu, :nu, :sigma]
+        oracle = cell_t_oracle(names, entries, law)
+        # SBBRMI spells the same cell `student_t(nu, location, scale)`.
+        stan = consumer_stan(brmi, "cell-student-t-$k"; mod=PublicCellStudentT)
+        for u in ([0.0, 0.0, 0.0], [0.17, -0.21, 0.3], [-0.4, 0.2, -0.2])
+            check_consumer_point(problem, u, oracle)
+            check_consumer_stan(problem, stan, [:nu=>"nu", :sigma=>"sigma", :mu=>"mu"],
+                backend, u)
+        end
+        # The law is RKPPL's StudentT; the cell never stores a `TDist` value.
+        main = sprint(Base.show_unquoted, BRM._rk_emit_ast(backend.plan).main)
+        @test occursin("StudentT.(", main)
+        @test !occursin("TDist", main)
+        @test isequal(data, saved)
+    end
+end
+
+@stestset "plate cell LocationScale with a base other than TDist(nu) names the spelling" begin
+    # As a top-level response (`_rk_ast_value_distribution`), RK observes
+    # `LocationScale` as Student-t only; the refusal says what to write.
+    message = try
+        RKBRMI(PublicCellStudentT.other_base(CELL_T)); nothing
+    catch err
+        sprint(showerror, err)
+    end
+    @test message !== nothing
+    @test occursin("must be `TDist(nu)`", message)
+    @test occursin("LocationScale(location, scale, TDist(nu))", message)
+end
+
 @stestset "integer observed cell law retains original discrete response rows" begin
     data = (;x=[[0.2,0.5],Float64[],[0.7]],y=[[0,1],Int[],[1]])
     saved = deepcopy(data)
