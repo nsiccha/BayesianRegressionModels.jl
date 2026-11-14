@@ -478,7 +478,7 @@ end
 
 function BRM.rk_logdensity_problem(backend::BRM.RKBRMI;
         ad_backend,
-        u0=zeros(Float64, backend.model.layout.total))
+        u0=BRM._rk_preparation_point(backend))
     translated = _rk_translated(backend)
     query = prepare_sampler(backend.model, translated, u0; backend=ad_backend)
     RKLogDensityProblem(query)
@@ -772,16 +772,17 @@ BRM._rk_nlme_raw_cell_footprint(query, point, row) =
 # (`brm_nlme_loglikelihoods_and_gradients`) and the per-unit Laplace read it, so a
 # model that SVI, SAEM's per-subject route or the unit problems fit never compiles
 # it: on a 33-unit, 890-coordinate model its preparation was 75 s of the model's
-# cold preparation, 70 s of it compilation.
-BRM._rk_retained_pointwise_sampler(backend::BRM.RKBRMI; ad_backend,
-        u0=zeros(Float64, backend.model.layout.total)) =
+# cold preparation, 70 s of it compilation. Without `u0` it is prepared at
+# `BRM._rk_preparation_point`, computed then too.
+BRM._rk_retained_pointwise_sampler(backend::BRM.RKBRMI; ad_backend, u0=nothing) =
     (; backend, ad_backend, u0, cached=Ref{Any}(nothing), lock=ReentrantLock())
 
 function _rk_retained_pointwise_prepared(state)
     lock(state.lock) do
         state.cached[] === nothing || return state.cached[]
+        u0 = something(state.u0, BRM._rk_preparation_point(state.backend))
         state.cached[] = prepare_sampler(state.backend.model,
-            _rk_translated(state.backend), state.u0; backend=state.ad_backend,
+            _rk_translated(state.backend), u0; backend=state.ad_backend,
             retain=(:pointwise,))
     end
 end
@@ -888,8 +889,8 @@ BRM._rk_cut_bind(lowering, pins::NamedTuple) = bind_data(lowering.lowered,
     merge(Dict{Symbol,Any}(lowering.columns), Dict{Symbol,Any}(pairs(pins))))
 BRM._rk_build_plan(plan) = build_kernel(plan)
 BRM._rk_built_coordinate_names(built) = collect(Symbol, coordinate_names(built.layout))
-BRM._rk_cut_target(built, plan; ad_backend) = RKLogDensityProblem(
-    prepare_sampler(built, plan, zeros(Float64, built.layout.total); backend=ad_backend))
+BRM._rk_cut_target(built, plan; ad_backend, u0) = RKLogDensityProblem(
+    prepare_sampler(built, plan, u0; backend=ad_backend))
 
 # A backend's summed observation log density at an unconstrained point.
 function BRM._rk_likelihood_reader(rk::BRM.RKBRMI)

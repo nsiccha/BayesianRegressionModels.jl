@@ -81,34 +81,42 @@ function _brm_start_law(x::ExprColumn, value, floor=nothing)
 end
 _brm_start_law(x::Expr, value, floor=nothing) = _brm_prior_law(x, value)
 
-function _brm_start_evaluate_law(prior, value, spelling, floor=nothing)
+# With `lenient` (the RK preparation point, `_rk_preparation_point`) these two
+# answer `nothing` where `brm_start` refuses, and the coordinate keeps its base.
+function _brm_start_evaluate_law(prior, value, spelling, floor=nothing; lenient=false)
     try
         _brm_start_law(prior, value, floor)
     catch err
+        lenient && return nothing
         error("brm_start: cannot resolve the prior of `$spelling`: " *
             sprint(showerror, err) * "; supply an explicit initializer or a numeric base")
     end
 end
 
-function _brm_start_median(law, spelling; lower=-Inf, upper=Inf)
-    law isa UnivariateDistribution || error(
-        "brm_start: no univariate prior median for `$spelling`; supply an explicit initializer or a numeric base")
-    bounded = isfinite(lower) || isfinite(upper) ? truncated(law, lower, upper) : law
+function _brm_start_median(law, spelling; lower=-Inf, upper=Inf, lenient=false)
+    refuse(reason) = lenient ? nothing :
+        error("brm_start: $reason; supply an explicit initializer or a numeric base")
+    law isa UnivariateDistribution ||
+        return refuse("no univariate prior median for `$spelling`")
+    bounded = try
+        isfinite(lower) || isfinite(upper) ? truncated(law, lower, upper) : law
+    catch
+        lenient ? (return nothing) : rethrow()
+    end
     x = try
         Float64(median(bounded))
     catch err
-        error("brm_start: cannot compute the prior median of `$spelling`: " *
-            sprint(showerror, err) * "; supply an explicit initializer or a numeric base")
+        return refuse("cannot compute the prior median of `$spelling`: " * sprint(showerror, err))
     end
-    isfinite(x) && lower < x < upper && insupport(bounded, x) || error(
-        "brm_start: `$spelling` has no finite interior prior median; supply an explicit initializer or a numeric base")
+    isfinite(x) && lower < x < upper && insupport(bounded, x) ||
+        return refuse("`$spelling` has no finite interior prior median")
     x
 end
 
 # Ordinary scalar dependencies read explicit values first, then their own
 # median, then deterministic assignments/data. No random draw is a fallback.
 function _brm_start_prior_values(brmi, inits; constants=(;), inputs=Dict(),
-        component_value=key -> nothing)
+        component_value=key -> nothing, lenient=false)
     # A constant is a declaration marker, not a callable distribution argument.
     # Restore the backend's fitted values before traversing ordinary priors.
     brmi, _ = _brm_resolve_constants(brmi; prefix="brm_start",
@@ -135,14 +143,15 @@ function _brm_start_prior_values(brmi, inits; constants=(;), inputs=Dict(),
         component = op.role === :predictor && rhs isa ExprColumn && getf(rhs) isa BRMComponent
         (component || op.role in (:parameter, :assignment)) || return nothing
         push!(pending, key)
-        result = component ? component_value(key) : _brm_start_evaluate_law(rhs, value, key)
+        result = component ? component_value(key) :
+            _brm_start_evaluate_law(rhs, value, key; lenient)
         if op.role === :parameter
-            result = _brm_start_median(result, key)
+            result = _brm_start_median(result, key; lenient)
         end
         delete!(pending, key)
         cache[key] = result
     end
-    (; context, program, value)
+    (; context, program, value, lenient)
 end
 
 function _brm_start_term_prior(prepared, slot)
@@ -165,7 +174,7 @@ function _brm_start_hyper_prior(plan, context)
     spec === nothing ? _brmd_default_normal() : spec.expression
 end
 
-function _brm_start_prior_term_targets(inventory, explicit, value)
+function _brm_start_prior_term_targets(inventory, explicit, value; lenient=false)
     targets = NamedTuple[]
     for r in inventory, slot in _brm_term_prior_slots(getf(r.term))
         slot.support === :simplex && continue # retain the valid neutral simplex
@@ -192,9 +201,10 @@ function _brm_start_prior_term_targets(inventory, explicit, value)
         end
         xs = map(eachindex(lowers)) do j
             fj = floor isa Real ? floor : floor[j]
-            law = _brm_start_evaluate_law(prior, value, spelling, fj)
-            _brm_start_median(law, spelling; lower=lowers[j], upper=uppers[j])
+            law = _brm_start_evaluate_law(prior, value, spelling, fj; lenient)
+            _brm_start_median(law, spelling; lower=lowers[j], upper=uppers[j], lenient)
         end
+        any(isnothing, xs) && continue # lenient: the term keeps its base values
         start = length(xs) == 1 ? only(xs) : xs
         push!(targets, (; kind=:term, predictor=r.predictor, term=r.term, slot, spelling, value=start))
     end
@@ -228,17 +238,19 @@ end
 
 # Writes of scalar/broadcast laws on RK's emitted declarations. Read laws from
 # the same records the existing NLME median start consumes.
-function _brm_rk_start_prior_writes(rk, records, values, explicit, inits, term_targets; env=nothing)
+function _brm_rk_start_prior_writes(rk, records, values, explicit, inits, term_targets;
+        env=nothing, lenient=false)
     chosen = Set((d, i) for (d, i, _) in explicit)
     covered(d, i) = (d, ()) in chosen || (d, i) in chosen
     writes = Tuple{Symbol,Tuple,Any}[]
     fitted = _rk_fitted_state(rk)
     env === nothing && (env = _brm_start_prior_values(parent(rk), inits;
-        constants=fitted === nothing ? (;) : fitted.constants))
+        constants=fitted === nothing ? (;) : fitted.constants, lenient))
     function add(d, i, prior, spelling; lower=-Inf, upper=Inf)
         covered(d, i) && return
-        x = _brm_start_median(_brm_start_evaluate_law(prior, env.value, spelling), spelling; lower, upper)
-        push!(writes, (d, i, x))
+        law = _brm_start_evaluate_law(prior, env.value, spelling; lenient)
+        x = _brm_start_median(law, spelling; lower, upper, lenient)
+        x === nothing || push!(writes, (d, i, x))
     end
     _brm_rk_start_prior_records!(add, records, values; scalars=true)
     for p in _sb_collect_hyper_plans(parent(rk))
@@ -254,7 +266,7 @@ function _brm_rk_start_prior_writes(rk, records, values, explicit, inits, term_t
         end
     end
     inventory = [r for r in records if r.kind === :term_start]
-    targets = _brm_start_prior_term_targets(inventory, term_targets, env.value)
+    targets = _brm_start_prior_term_targets(inventory, term_targets, env.value; lenient)
     _brm_rk_start_terms!(writes, targets, records, values)
     writes
 end

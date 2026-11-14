@@ -119,7 +119,9 @@ function brm_cut_family(joint::RKBRMI, upstream::RKBRMI, U::AbstractMatrix;
     names == joint_names[free] || error(
         "$prefix: internal: the pinned program's coordinates $(names) are not the " *
         "joint model's free coordinates $(joint_names[free])")
-    targets = [_rk_cut_target(built, plan; ad_backend) for plan in plans]
+    # Prepared at the joint model's preparation point (`_rk_preparation_point`).
+    u0 = _rk_preparation_point(joint)[free]
+    targets = [_rk_cut_target(built, plan; ad_backend, u0) for plan in plans]
     joint_sources = _brm_cut_joint_sources(joint_names, up_names, names; prefix)
     BRMCutFamily(targets, names, U, up_names, _brm_cut_starts(start, names, U),
         _brm_cut_features(U), joint_names, joint_sources)
@@ -132,13 +134,14 @@ function brm_cut_family(inputs, downstream::RKBRMI, data, upstream::RKBRMI,
     U = _brm_cut_draws(U, up_names; prefix)
     names = _rk_layout_coordinate_names(downstream)
     binder = rk_design_binder(downstream)
+    u0 = _rk_preparation_point(downstream)
     targets = map(axes(U, 2)) do k
         stage2 = inputs(U[:, k])
         stage2 isa NamedTuple || throw(ArgumentError(
             "$prefix: `inputs` must return the stage-2 columns as a NamedTuple; " *
             "got $(typeof(stage2)) for upstream draw $k"))
         plan = _rk_design_plan(binder, merge(data, stage2))
-        _rk_cut_target(downstream.model, plan; ad_backend)
+        _rk_cut_target(downstream.model, plan; ad_backend, u0)
     end
     joint_names, joint_sources = joint === nothing ? (nothing, nothing) :
         (collect(Symbol, _rk_layout_coordinate_names(joint)),

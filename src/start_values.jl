@@ -442,9 +442,31 @@ end
 # unconstrained point of named constrained values.
 function _rk_unconstrained_point end
 
-function brm_start(rk::RKBRMI, inits::NamedTuple;
+brm_start(rk::RKBRMI, inits::NamedTuple;
         base=zeros(Float64, length(_rk_layout_coordinate_names(rk))), term_inits=(),
-        component_inits=())
+        component_inits=()) = _brm_rk_start(rk, inits; base, term_inits, component_inits)
+
+"""
+    _rk_preparation_point(rk::RKBRMI) -> Vector{Float64}
+
+The packed point at which BRM prepares an RK density when its caller gives
+none: `rk_logdensity_problem`'s default `u0`, and the NLME pointwise sampler,
+cut-posterior and SMC targets. Preparing a native gradient runs the model once
+there (RKPPL's non-allocating `prepare_sampler`), so it must be a point of the
+model. The zero point is not one for a model whose ODE is unstable at unit rates
+(snag `construct-rk-log-1c0faf16`). It is `brm_start(rk, (;); base =
+:prior_median)`, except that a coordinate whose prior has no finite median
+keeps its zero-point value instead of being refused. The prepared density does
+not depend on it.
+"""
+_rk_preparation_point(rk::RKBRMI) =
+    _brm_rk_start(rk, (;); base=:prior_median, lenient=true)
+
+# `lenient` (the preparation point only): a prior without a finite median, or
+# whose law cannot be resolved, leaves its coordinate at `base`.
+function _brm_rk_start(rk::RKBRMI, inits::NamedTuple;
+        base=zeros(Float64, length(_rk_layout_coordinate_names(rk))), term_inits=(),
+        component_inits=(), lenient=false)
     u0 = _brm_start_base_vector(base, length(_rk_layout_coordinate_names(rk)), "RK layout")
     _brm_rk_start_unconditioned(rk.plan, inits, term_inits, component_inits)
     records = [_brm_rk_start_record(rk, r) for r in _rk_coordinate_records(rk.plan; term_starts=true)]
@@ -459,9 +481,10 @@ function brm_start(rk::RKBRMI, inits::NamedTuple;
     term_targets = _brm_start_term_targets(parent(rk), term_inits)
     _brm_rk_start_terms!(writes, term_targets, records, values)
     env = _brm_rk_start_components!(writes, effects, rk, records, values, inits,
-        component_inits, base)
+        component_inits, base; lenient)
     if _brm_start_prior_requested(base)
-        prior_writes = _brm_rk_start_prior_writes(rk, records, values, writes, inits, term_targets; env)
+        prior_writes = _brm_rk_start_prior_writes(rk, records, values, writes, inits,
+            term_targets; env, lenient)
         append!(writes, prior_writes)
     end
     _brm_rk_start_point(rk, values, writes, effects)

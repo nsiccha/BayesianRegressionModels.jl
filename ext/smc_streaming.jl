@@ -157,7 +157,7 @@ function prepare_window(carried::BRM.BRMSMCCarriedReference, model::BRM.BRMI, ad
     id = binding_identity(rk)
     selection = coordinates === nothing ? (;) : (; coordinates)
     target = PPL.prepare_smc_window(rk.model, BRM.rk_bound_plan(rk),
-        zeros(Float64, rk.model.layout.total); previous=carried.posterior,
+        BRM._rk_preparation_point(rk); previous=carried.posterior,
         backend=ad_backend, model_id=carried.model_id, binding_id=id, selection...)
     rk, id, target
 end
