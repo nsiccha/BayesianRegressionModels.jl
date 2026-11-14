@@ -12,6 +12,38 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.300
+
+- `brm_svi_fit`'s cost per iteration no longer grows with the number of units
+  when the units' `@plate` cells declare latents. A target over a model's units
+  (`unit_partition = :subjects`, the default) evaluated each unit on the NLME
+  model's observation partition. That partition declares to ReactiveKernelsPPL
+  the NLME view's owners, and the view leaves cell latents shared, while SVI
+  gives each to the unit whose cells read it. RKPPL computes shared values once
+  into a prefix that each unit's call reuses while the coordinates it reads
+  stay put. A unit's draws move its own latents on every call, so every call
+  recomputed that prefix over all units' latents, copied it and pulled its
+  gradient back. When SVI's ownership gives units coordinates the view leaves
+  shared, the target now prepares its own partition with that ownership
+  declared, as a connected target already did. Values, gradients and fits are
+  unchanged. On the public event toy of `test/nlme_svi_events_fixture.jl` (365
+  days per unit, batch 4, `coupling = nothing`, ReactiveKernels 0.1.239):
+  - one unit's partition gradient, timed in one process: 84.5 against 82.4 µs
+    at 64 units, 98.7 against 62.4 µs at 1,024;
+  - per iteration over 2,000 iterations, the three sizes run side by side:
+    11.7 / 12.1 / 14.0 ms at 64 / 256 / 1,024 units before, 13.1 / 12.4 /
+    12.2 ms after. At 64 units that is within this host's spread between runs
+    (9.3 to 12.3 ms before, 11.5 to 13.1 after);
+  - the first fit on a model prepares the extra partition once: 16 s at 64
+    units, 21 s at 1,024.
+- The steeper growth reported on BRM 0.2.286 with ReactiveKernels 0.1.223 (22
+  to 94 ms per iteration from 64 to 1,024 units on that toy) came from
+  ReactiveKernels up to 0.1.228. Every partition gradient call there re-ran the
+  row calculations that size a cell's `@scan` outputs, over every row.
+  ReactiveKernels 0.1.229 removed that (`1a737a3c7`), and BRM's floor of
+  0.1.231 already requires it. An environment that pins an older
+  ReactiveKernels with an older BRM still pays it.
+
 ## 0.2.299
 
 - Default `brm_svi_fit` exploration no longer ends while a global still drifts
