@@ -115,7 +115,7 @@ end
 
 _brm_svi_coupling(q) = hasproperty(q, :coupling) ? q.coupling : nothing
 
-# Older optimizer checkpoints retain their gradient estimator and call count.
+# Older optimizer checkpoints retain their baseline policy and call count.
 _brm_svi_coupling_baseline(c) = get(c, :coupling_baseline, false)
 _brm_svi_coupling_baseline_calls(q, i, c) =
     _brm_svi_coupling_baseline(c) && _brm_svi_coupling(q) !== nothing &&

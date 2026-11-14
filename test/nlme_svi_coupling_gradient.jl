@@ -96,7 +96,7 @@ end
     end
 end
 
-@testset "old controls retain the previous estimator and gradient count" begin
+@testset "old controls retain the baseline policy and gradient count" begin
     for enabled in (false, true)
         t, q, opt = CG.setup()
         c = enabled ? (; coupling_baseline=true) : (;)

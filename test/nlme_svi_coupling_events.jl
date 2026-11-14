@@ -147,7 +147,8 @@ end
         " independent_converged=", independent.diagnostics.converged)
     # Truth is gain ratio 1.18 and phi 0.6. Immediate coupling previously sent
     # the gain ratio far below 1 or phi toward 1; the independent fit recovered
-    # the intended region but substantially understated global uncertainty.
+    # the intended region with a much narrower interval. This regression does
+    # not establish interval calibration for the event model.
     @test 1.13 < c.ratio[2] < 1.23
     @test 0.4 < c.phi[2] < 0.85
     @test abs(c.ratio[2] - p.ratio[2]) < 0.03
