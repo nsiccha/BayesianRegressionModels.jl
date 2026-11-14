@@ -187,6 +187,8 @@ mutable struct BRMSparseLaplaceProblem{K}
     # `nothing` for groupings named directly
     plan::Any
     algebra::Any
+    # the last mode search and its population point (`_brm_laplace_last!`)
+    last::Any
 end
 
 Base.show(io::IO, p::BRMSparseLaplaceProblem) = print(io,
@@ -198,13 +200,15 @@ Base.show(io::IO, p::BRMSparseLaplaceProblem) = print(io,
     ")")
 
 # A copy (one per chain) gets its own factor: CHOLMOD's is a C object that a
-# plain deepcopy would share with the original, whose finalizer frees it.
+# plain deepcopy would share with the original, whose finalizer frees it. So
+# it starts without the last search too, whose state holds that factor.
 function Base.deepcopy_internal(p::BRMSparseLaplaceProblem, stackdict::IdDict)
     haskey(stackdict, p) && return stackdict[p]
     fields = map(fieldnames(typeof(p))) do f
         # A seeded backend (plan materialization) is shared by the RKBRMI
         # method (src/rk_backend.jl), on this field and through the kernels.
-        f === :factor ? Ref{Any}(nothing) : Base.deepcopy_internal(getfield(p, f), stackdict)
+        f === :factor ? Ref{Any}(nothing) : f === :last ? nothing :
+            Base.deepcopy_internal(getfield(p, f), stackdict)
     end
     stackdict[p] = typeof(p)(fields...)
 end
@@ -407,7 +411,7 @@ function _brm_sparse_laplace_problem(backend::RKBRMI, integrate; ad_backend, tol
         Float64[], Int[], Vector{Int}[], Int[], Int[], Int[], Vector{Int}[], Any[], omega,
         false,
         u0[population], zeros(nψ), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
-        Float64(tol), Int(maxiter), 0, 0, 0, 0, 0, 0, nothing, nothing, nothing)
+        Float64(tol), Int(maxiter), 0, 0, 0, 0, 0, 0, nothing, nothing, nothing, nothing)
     p.gaussian = _brm_spl_gaussian_prior(p, records, u0)
     _brm_spl_gaussian_parameters!(p, u0)
     p.gmrf = _brm_spl_gmrf_prior(p, records, u0)
@@ -1604,7 +1608,11 @@ _brm_spl_search(nc, stages) = (; stages=collect(stages), steps=zeros(Int, nc),
 # ceases to exist. Then h at the modes and its factor. `p.search` records the
 # evaluation's steps per component; `p.folds` counts evaluations in which a
 # component's followed mode needed a shifted step after the first stage.
-function _brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
+# At the last search's point, that search's state (`_brm_laplace_last!`).
+_brm_spl_mode!(p::BRMSparseLaplaceProblem, φ::AbstractVector) =
+    _brm_laplace_last!(_brm_spl_search!, p, φ)
+
+function _brm_spl_search!(p::BRMSparseLaplaceProblem, φ::AbstractVector)
     p.algebra === nothing || empty!(p.algebra.diagnostics)
     pop = _brm_spl_population(p, φ)
     if !(all(isfinite, pop.A) && all(isfinite, pop.C))

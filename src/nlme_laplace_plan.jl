@@ -599,6 +599,8 @@ function _brm_sparse_laplace_problem_from_plan(backend::RKBRMI, r; ad_backend, t
         restricted && _brm_spl_restrict!(p, declarations)
         p.tol = Float64(tol)
         p.maxiter = Int(maxiter)
+        # The prepared problem's searches ran on its own selection and budget.
+        p.last = nothing
         fill!(p.u, 0.0)
         p.nonfinite = p.unconverged = p.nonfinite_gradient = p.blockwise = p.sweeps = p.folds = 0
         # A full copy already owns the same fixed probes and reference. Only

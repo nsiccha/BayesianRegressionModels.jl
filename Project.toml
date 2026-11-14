@@ -1,7 +1,7 @@
 name = "BayesianRegressionModels"
 uuid = "cdd3e328-398d-47a6-a87b-6047aaf4b4bc"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.2.299"
+version = "0.2.300"
 
 [deps]
 MCMCDiagnosticTools = "be115224-59cd-429b-ad48-344e309966f0"
