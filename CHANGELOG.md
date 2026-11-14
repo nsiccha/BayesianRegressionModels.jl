@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.306
+
+- An RK density is prepared at the prior medians unless its caller names a
+  point. `rk_logdensity_problem(rk; ad_backend)` defaults `u0` to
+  `brm_start(rk, (;); base = :prior_median)`, except that a coordinate whose
+  prior has no finite median keeps its zero-point value instead of being
+  refused. Preparing the native gradient runs the model once at that point, so
+  the zero point, the earlier default, failed on a model that cannot be
+  evaluated there: on an ODE PK/PD model, `native DP5 failed: Unstable` before
+  any caller point was evaluated (snag `construct-rk-log-1c0faf16`). Pass
+  `u0 = <a packed point>` to choose the point yourself. Densities and gradients
+  do not depend on it. BRM's own preparations without a caller point use the
+  same point: the NLME model's pointwise sampler (`brm_nlme_model`), the
+  cut-posterior targets (`brm_cut_family`), the SMC targets and windows, and
+  the SVI Gaussian-block Laplace's whole-model target.
+
 ## 0.2.305
 
 - `brm_predictive_draws` and `brm_predictive_tree` draw from a prior program

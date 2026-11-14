@@ -735,9 +735,16 @@ function _brm_rk_model end
 
 A `LogDensityProblems`-compatible density over the backend's packed
 unconstrained coordinates (order 1: value + gradient). `ad_backend` is a
-`DifferentiationInterface` AD type (e.g. reverse-mode `AutoEnzyme`);
-`u0` is a length-consistent exemplar (default: zeros). Implemented only by
-the `BayesianRegressionModelsReactiveKernelsExt` package extension.
+`DifferentiationInterface` AD type (e.g. reverse-mode `AutoEnzyme`).
+
+`u0` is the packed point at which the gradient is prepared. Preparation runs
+the model once there, so it must be a point where the model evaluates; the
+returned density does not depend on it. The default is the prior medians,
+`brm_start(backend, (;); base = :prior_median)`, except that a coordinate whose
+prior has no finite median keeps the zero point's value instead of being
+refused: the zero point, the earlier default, is not a point of every model (an
+ODE unstable at unit rates). Implemented only by the
+`BayesianRegressionModelsReactiveKernelsExt` package extension.
 """
 function rk_logdensity_problem end
 

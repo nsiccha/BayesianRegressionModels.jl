@@ -121,7 +121,7 @@ _brm_component_start_value(path, value) = throw(ArgumentError(
 # Lazy call contexts allow prior arguments to read an enclosing explicit start,
 # another scalar's median, or another component's returned value. Each scope
 # has its own cache: repeated definitions never share parameter values.
-function _brm_component_start_envs(source, inits, scopes, starts; constants=(;))
+function _brm_component_start_envs(source, inits, scopes, starts; constants=(;), lenient=false)
     environments = Dict{Tuple,Any}()
     function environment(path)
         get!(environments, path) do
@@ -141,7 +141,7 @@ function _brm_component_start_envs(source, inits, scopes, starts; constants=(;))
                 environment(child).value(scopes[child].definition.result)
             end
             _brm_start_prior_values(local_source, local_inits;
-                constants=fitted, inputs, component_value)
+                constants=fitted, inputs, component_value, lenient)
         end
     end
     environment
@@ -165,13 +165,13 @@ end
 _brm_rk_scope_owner(scope) = (; plan=scope.plan)
 
 function _brm_rk_start_components!(writes, effects, rk, records, values, inits,
-        component_inits, base)
+        component_inits, base; lenient=false)
     isempty(component_inits) && !_brm_start_prior_requested(base) && return nothing
     scopes = _brm_rk_start_scopes!(Dict{Tuple,Any}(), parent(rk), records)
     starts = _brm_component_start_inits(scopes, component_inits)
     fitted = _rk_fitted_state(rk)
     environment = _brm_component_start_envs(parent(rk), inits, scopes, starts;
-        constants=fitted === nothing ? (;) : fitted.constants)
+        constants=fitted === nothing ? (;) : fitted.constants, lenient)
     scoped = Dict(path => [_brm_rk_start_record(_brm_rk_scope_owner(scope),
             _brm_rk_scoped_record(path, r)) for r in scope.records]
         for (path, scope) in scopes)
@@ -209,16 +209,18 @@ function _brm_rk_start_components!(writes, effects, rk, records, values, inits,
         for (name, record) in parameters
             record.kind === :scalar && !haskey(explicit, name) || continue
             spelling = _brm_component_start_name(path, name)
-            law = _brm_start_evaluate_law(record.prior, env.value, spelling)
-            push!(writes, (spelling, (), _brm_start_median(law, spelling)))
+            law = _brm_start_evaluate_law(record.prior, env.value, spelling; lenient)
+            x = _brm_start_median(law, spelling; lenient)
+            x === nothing || push!(writes, (spelling, (), x))
         end
         # The call's population coefficients and `|ID|` scales, as at top level.
         chosen = Set((d, i) for (d, i, _) in writes)
         function add(d, i, prior, spelling; lower=-Inf, upper=Inf)
             ((d, ()) in chosen || (d, i) in chosen) && return
             local_spelling = "$spelling in component $(repr(path))"
-            law = _brm_start_evaluate_law(prior, env.value, local_spelling)
-            push!(writes, (d, i, _brm_start_median(law, local_spelling; lower, upper)))
+            law = _brm_start_evaluate_law(prior, env.value, local_spelling; lenient)
+            x = _brm_start_median(law, local_spelling; lower, upper, lenient)
+            x === nothing || push!(writes, (d, i, x))
         end
         _brm_rk_start_prior_records!(add, scoped[path], values; scalars=false)
     end

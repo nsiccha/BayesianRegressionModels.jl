@@ -33,8 +33,7 @@ function BRM._brm_validate_smc_fit(fit::BRM.BRMSMCFit)
 end
 
 function prepare(rk::BRM.RKBRMI, ad_backend, model_id, binding_id)
-    PPL.prepare_smc(rk.model, BRM.rk_bound_plan(rk),
-        zeros(Float64, rk.model.layout.total);
+    PPL.prepare_smc(rk.model, BRM.rk_bound_plan(rk), BRM._rk_preparation_point(rk);
         backend=ad_backend, model_id, binding_id)
 end
 
