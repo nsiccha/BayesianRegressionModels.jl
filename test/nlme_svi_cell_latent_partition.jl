@@ -26,7 +26,7 @@ const BRM = BayesianRegressionModels
     # The view leaves the cell latents shared; SVI gives each to the unit whose cells read it.
     @test all(j -> m.view.subject[j] == 0, latents)
     @test all(j -> t.ownership.owner[j] > 0, latents)
-    # The model's own partition, as the target used before 0.2.299.
+    # The model's own partition, as the target used before 0.2.300.
     model_plan = BRM._brm_nlme_partition_plan(m.cell_gradient, m.unit, t.globals, m.view)
     point = m.unit .+ 0.1 .* sin.(eachindex(m.unit))
     for i in eachindex(t.units)
