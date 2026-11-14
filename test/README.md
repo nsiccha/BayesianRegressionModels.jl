@@ -619,6 +619,17 @@ bound scenarios compare normalized densities and gradients against independent
 CDF, CCDF and density calculations. Run it with
 `julia --project=. test/infinite_censoring_bounds.jl` or the test environment.
 
+`rk_infinite_censoring_bounds.jl` is its RKBRMI counterpart on the formula
+(structural) route: per-row `-Inf` lower and `Inf` upper bound entries on
+censored, two-sided, truncated, interval-censored and Student-t (sampled scale
+and degrees of freedom) responses. Each case checks the value against an
+independent Distributions.jl oracle, the native Enzyme Reverse gradient against
+its central differences, the same model with ±1e300 stand-ins for every
+infinity, and SBBRMI's compiled Stan density and gradient. It also checks that
+NaN, the opposite side's infinity, a bound column also read as a covariate and
+a column read as both a lower and an upper bound stay refused. Run it with the
+test environment; its `@stestset` blocks accept substring filters.
+
 `kernel_ragged_broadcast.jl` checks Stan source emission and stanc acceptance
 for modeled secondary-axis arguments in plain and nested dotted calls. It
 covers interleaved rows, shared random effects, empty groups, raw-data controls

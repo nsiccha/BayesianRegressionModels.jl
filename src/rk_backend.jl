@@ -8433,10 +8433,71 @@ function _rk_design_rows(columns, mi_packed, statistical_inputs)
         "data to evaluate the model at")
 end
 
+# The names a structural plan component reads: the fields of a plan struct, its
+# expressions and containers. Numeric and string data, callables and other
+# packages' values name nothing.
+_rk_plan_reads!(names::Set{Symbol}, @nospecialize(x)) =
+    _rk_plan_struct_reads!(names, x)
+_rk_plan_reads!(names::Set{Symbol}, x::Symbol) = push!(names, x)
+_rk_plan_reads!(names::Set{Symbol}, x::Expr) =
+    (foreach(arg -> _rk_plan_reads!(names, arg), x.args); names)
+_rk_plan_reads!(names::Set{Symbol}, x::_BRMPreparedRef) = push!(names, x.name)
+_rk_plan_reads!(names::Set{Symbol}, x::_BRMPreparedExpr) =
+    (_rk_plan_reads!(names, x.args); _rk_plan_reads!(names, x.kwargs))
+_rk_plan_reads!(names::Set{Symbol}, x::Pair) =
+    (_rk_plan_reads!(names, first(x)); _rk_plan_reads!(names, last(x)))
+function _rk_plan_reads!(names::Set{Symbol},
+        @nospecialize(x::Union{AbstractArray,Tuple,NamedTuple,AbstractSet,AbstractDict}))
+    eltype(x) <: Union{Number,AbstractString} && return names
+    foreach(value -> _rk_plan_reads!(names, value), x)
+    names
+end
+function _rk_plan_struct_reads!(names::Set{Symbol}, @nospecialize(x))
+    T = typeof(x)
+    parentmodule(T) === (@__MODULE__) && startswith(string(nameof(T)), "_RK") ||
+        return names
+    for field in fieldnames(T)
+        isdefined(x, field) && _rk_plan_reads!(names, getfield(x, field))
+    end
+    names
+end
+
+# A response bound read from a data column may hold that side's infinity on a
+# row without the bound: `-Inf` below, `Inf` above, including an interval's
+# upper end (the right-censored event). RKPPL binds those values and drops that
+# side of the row's evidence lazily, in the value and in the gradient
+# (ReactiveKernelsPPL 0.1.134, rkppl-use §9), as SBBRMI and the value route
+# accept. A column read anywhere else in the plan, or as both a lower and an
+# upper bound, keeps the finite rule: an infinity there is no absent bound.
+# Returns each bound column's side, its infinity, and whether it is shared.
+function _rk_bound_columns(response_specs::AbstractVector, readers::Set{Symbol})
+    bounds = Dict{Symbol,@NamedTuple{side::String,open::Float64,shared::Bool}}()
+    for spec in response_specs
+        evidence = spec.evidence
+        for (bound, side, open) in ((evidence.lower, "lower", -Inf),
+                (evidence.upper, "upper", Inf))
+            bound isa Symbol || continue
+            previous = get(bounds, bound, nothing)
+            clash = previous !== nothing && previous.side != side
+            bounds[bound] = (; side=clash ? "both" : side, open,
+                shared=clash || (previous !== nothing && previous.shared))
+        end
+    end
+    isempty(bounds) && return bounds
+    for spec in response_specs, field in fieldnames(typeof(spec))
+        field === :evidence || _rk_plan_reads!(readers, getfield(spec, field))
+    end
+    for key in collect(keys(bounds))
+        key in readers && (bounds[key] = (; bounds[key]..., shared=true))
+    end
+    bounds
+end
+
 function _rk_gate_crossed_columns!(columns::Dict{Symbol,AbstractVector},
         n_obs::Int, mi_packed::Set{Symbol}=Set{Symbol}();
         statistical_inputs::Set{Symbol}=Set{Symbol}(),
-        masked_axes::Set{Symbol}=Set{Symbol}())
+        masked_axes::Set{Symbol}=Set{Symbol}(),
+        bound_columns::AbstractDict=Dict{Symbol,Any}())
     prefix = "RK backend"
     for key in sort!(collect(keys(columns)))
         values = columns[key]
@@ -8458,8 +8519,23 @@ function _rk_gate_crossed_columns!(columns::Dict{Symbol,AbstractVector},
             "$prefix: column `$key` has missing values; v1 models " *
             "missingness for `mi()` responses only")
         eltype(values) <: Real || continue
-        all(isfinite, values) || error(
-            "$prefix: column `$key` must be finite")
+        bound = get(bound_columns, key, nothing)
+        if bound === nothing
+            all(isfinite, values) || error(
+                "$prefix: column `$key` must be finite")
+        elseif bound.shared
+            use = bound.side == "both" ? "as both a lower and an upper bound" :
+                "as a response's $(bound.side) bound and elsewhere"
+            all(isfinite, values) || error(
+                "$prefix: column `$key` must be finite: the model reads it " *
+                "$use, so an infinite entry cannot mark a row without that " *
+                "bound; give the bound its own column")
+        else
+            all(v -> isfinite(v) || v == bound.open, values) || error(
+                "$prefix: column `$key` is a response's $(bound.side) bound: " *
+                "each entry must be finite, or `$(bound.open)` on a row " *
+                "without that bound")
+        end
     end
     nothing
 end
@@ -9545,7 +9621,17 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
     masked_axes = Set{Symbol}(spec.expression.args[2] for spec in derived
         if spec.expression.head === :_rk_data_preparation &&
             first(spec.expression.args) === :brm_hsgp_masked_axis)
-    _rk_gate_crossed_columns!(columns, n_obs, mi_packed; statistical_inputs, masked_axes)
+    # Every name the plan reads outside response evidence: a bound column
+    # among them keeps the finite rule (`_rk_bound_columns`).
+    readers = union(mi_packed, statistical_inputs, masked_axes)
+    for component in (predictor_specs, prior_specs, parameters, assignments,
+            derived, ranef_buckets, vector_specs, implicit_vectors,
+            components.vectors, r2d2_specs, hs_specs)
+        _rk_plan_reads!(readers, component)
+    end
+    bound_columns = _rk_bound_columns(response_specs, readers)
+    _rk_gate_crossed_columns!(columns, n_obs, mi_packed; statistical_inputs,
+        masked_axes, bound_columns)
     _rk_gate_trials_values!(response_specs, columns, n_obs)
     _rk_gate_multinomial_trials!(response_specs, columns, n_obs)
     _rk_gate_evidence_values!(response_specs, columns, n_obs)
