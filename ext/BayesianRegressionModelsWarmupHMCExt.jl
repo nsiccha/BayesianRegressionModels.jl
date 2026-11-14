@@ -47,10 +47,11 @@ end
 # (`BRM._AdaptiveRanefLocations`, snag brm-zone-8-adapt-1b407672) adds, in CSR
 # form, the factor levels' coordinates (`pair_factors`) and its containing pairs
 # (`pair_containers`, coarsest first). A containing pair always comes earlier in
-# pair order, so WarmupHMC's inverse, which rebuilds the source pair by pair,
-# has rebuilt it before it is read. `pair_container_mask[e]` marks which of the
+# pair order: WarmupHMC lets an accessor read only earlier pairs, at their model
+# values (`warmuphmc-use` §5c). `pair_container_mask[e]` marks which of the
 # earlier entries of the same list are themselves containers of entry `e`'s
-# pair. `originals[bi]` is the block `locations` names for `blocks[bi]` (the
+# pair (`_contained_source_location` rebuilds a container's compiled value
+# from its own containers). `originals[bi]` is the block `locations` names for `blocks[bi]` (the
 # joint wrapper maps derived copies of the ordinary blocks).
 function _ranef_pair_layout(blocks, locations=nothing, originals=blocks)
     pair_blocks = Int[]
@@ -158,39 +159,75 @@ function _check_locations_read_only(state, rewritten)
     end
 end
 
-# Pair `p`'s source-frame location: the conditional mean `m` plus, for a pair
-# centred on a population coefficient, that coefficient's value. It is read
-# from the state's flat `pair_location`, and a pair centred on 0 keeps `m`
-# itself, so its arithmetic is unchanged bit for bit. The coefficient is never
-# rewritten by the map. `@inline`: an outlined call taking the state inside a
-# differentiated loop is the Julia 1.10 GC hazard `_block_location` describes.
-@inline function _with_location(m, x, state, p)
-    _with_location(m, x, x, state, p)
-end
+# Whether pair `p`'s location reads factor levels or containing cells.
+@inline _reads_containers(state, p) =
+    state.extended && (state.pair_factor_start[p] < state.pair_factor_start[p + 1] ||
+                       state.pair_container_start[p] < state.pair_container_start[p + 1])
 
-# `src` holds the source frame of the pairs a location reads from containing
-# cells (snag brm-zone-8-adapt-1b407672): `x` itself, except in the learned-order
-# inverse, which rebuilds the source in another vector. Coefficients are read
-# from `x` (no cell rewrites them).
-@inline function _with_location(m, x, src, state, p)
+# Pair `p`'s location as its accessor returns it: the conditional mean `m` plus,
+# for a pair centred on a population coefficient, that coefficient's value, plus
+# (`_contained_location`) the factor levels and containing cells its level sits
+# in. It is read from the state's flat `pair_location`, and a pair centred on 0
+# keeps `m` itself, so its arithmetic is unchanged bit for bit. No cell rewrites
+# the coefficient. `@inline`: an outlined call taking the state inside a
+# differentiated loop is the Julia 1.10 GC hazard `_block_location` describes.
+#
+# WarmupHMC >= 0.3.0 calls an accessor with every EARLIER pair's coordinate at
+# its model (`target`) value (`warmuphmc-use` §5c, "Nested hierarchies"), so a
+# containing cell's effect is read off its compiled coordinate directly. BRM's
+# own source-frame computations (the scoring frames, the blockwise gradient, the
+# learned-order map) see the source instead and use `_source_location`.
+@inline function _with_location(m, x, state, p)
     j = state.pair_location[p]
     loc = j == 0 ? m : m + x[j]
-    (state.extended && (state.pair_factor_start[p] < state.pair_factor_start[p + 1] ||
-                        state.pair_container_start[p] < state.pair_container_start[p + 1])) ||
-        return loc
-    loc + _contained_location(x, src, state, p)
+    _reads_containers(state, p) || return loc
+    loc + _contained_location(x, state, p)
 end
 
-# The rest of pair `p`'s total: the coordinates of the factor levels its level
-# sits in, plus the effect of each containing cell `a`, coarsest first. A
-# containing cell is a scalar (`K = 1`) cell, so its compiled coordinate is
-# WarmupHMC's pair map `t*L + (u - c*L) * exp(log(s)*(t - c))` of its own source
-# `u` and location `L` (its factor levels plus the effects of its own
-# containers, read from the buffer), and its effect is `s` times that when the
-# block is compiled non-centred (`t = 0`), that itself when centred (`t = 1`).
-# Flat loads and an `NTuple` buffer only, `@inline`: the Julia 1.10 GC rule
-# `_block_location` states.
-@inline function _contained_location(x, src, state, p)
+# The rest of pair `p`'s total at a model-frame `x`: the coordinates of the
+# factor levels its level sits in, plus the effect of each containing cell `a`.
+# A containing cell is a scalar (`K = 1`) cell, so its effect is its compiled
+# coordinate times its scale `s` when the block is compiled non-centred
+# (`t = 0`), and the coordinate itself when centred (`t = 1`). Flat loads only,
+# `@inline`: the Julia 1.10 GC rule `_block_location` states.
+@inline function _contained_location(x, state, p)
+    T = eltype(x)
+    acc = zero(T)
+    for f in state.pair_factor_start[p]:state.pair_factor_start[p + 1] - 1
+        acc += x[state.pair_factors[f]]
+    end
+    for e in state.pair_container_start[p]:state.pair_container_start[p + 1] - 1
+        a = state.pair_containers[e]
+        block = state.blocks[state.pair_blocks[a]]
+        y = x[block.effects[1, state.pair_groups[a]]]
+        acc += block.target_c == 0 ?
+            (_block_cholesky_entry(x, block, 1, 1) * _pair_mixing_scale(x, state, a)) * y : y
+    end
+    acc
+end
+
+# Pair `p`'s location at a SOURCE-frame `x`, for BRM's own computations that see
+# the sampler's coordinates: the scoring frames (`_centering_frame`), the
+# blockwise gradient (WarmupHMCEnzymeExt) and the learned-order map. `src` holds
+# the source of the containing cells (snag brm-zone-8-adapt-1b407672): `x`
+# itself, except in the learned-order inverse, which rebuilds the source in
+# another vector. Coefficients are read from `x` (no cell rewrites them).
+@inline _source_location(m, x, state, p) = _source_location(m, x, x, state, p)
+
+@inline function _source_location(m, x, src, state, p)
+    j = state.pair_location[p]
+    loc = j == 0 ? m : m + x[j]
+    _reads_containers(state, p) || return loc
+    loc + _contained_source_location(x, src, state, p)
+end
+
+# `_contained_location` at a source-frame `x`: each containing cell `a`'s
+# compiled coordinate is first rebuilt as WarmupHMC's pair map
+# `t*L + (u - c*L) * exp(log(s)*(t - c))` of its own source `u` and location `L`
+# (its factor levels plus the effects of its own containers, read from the
+# buffer), with its control `c` from `state.sources`. Flat loads and an `NTuple`
+# buffer only, `@inline`: the Julia 1.10 GC rule `_block_location` states.
+@inline function _contained_source_location(x, src, state, p)
     T = promote_type(eltype(x), eltype(src))
     acc = zero(T)
     for f in state.pair_factor_start[p]:state.pair_factor_start[p + 1] - 1
@@ -380,35 +417,52 @@ end
 
 # One arbitrary-K location accessor, differentiated by the ordinary Enzyme path.
 #
-# `u[k] = c[k] * sum(C[k,l] * z[l] for l < k) + C[k,k]^c[k] * z[k]` is triangular,
-# so recovering `z` is a forward substitution: row `i` needs the `i-1`
-# innovations below it.  That O(k) state is irreducible — the whole `K x K` `L`
-# and `C` rebuild per pair is gone, replaced by the same inline stick walk as
-# `_block_cholesky_entry`.  The innovations live in an `NTuple{N}` sized by the
-# state's capacity `N`, not a heap vector: on Julia 1.10, Enzyme's reverse pass
-# over a function that allocates a small work vector and reads it back is a
-# use-after-free once another thread runs GC — `getindex` segfaults or the GC
-# aborts with "probable corruption" (measured on Enzyme 0.13.210-0.13.216; Julia
-# 1.12 and single-threaded runs are clean).  Concurrent completion/multi-chain
-# workers hit exactly that.  `N` belongs to the state, so every pair keeps one
-# concrete element type whatever the block widths.  The buffer cannot be cached
-# on the state, because accessors run under `Enzyme.Const`.  Recursion is
-# deliberately avoided: a recursive scalar callable here corrupted Julia's GC
-# after ~1,750 sustained gradients (fixed by ade46ac/bd9ca2d/b5f4a86).
+# Margin `k`'s location is its conditional mean `sum(C[k,l] * z[l] for l < k)`
+# given the block's earlier innovations `z`, plus a population coefficient for a
+# pair centred on one (`_with_location`). WarmupHMC >= 0.3.0 hands the accessor
+# the earlier margins at their model values `v[l] = t * loc[l] + C[l,l]^t * z[l]`
+# (`warmuphmc-use` §5c, "Nested hierarchies"), so no source control enters it.
+# A block compiled non-centred (`t = 0`) stores the innovations themselves, and
+# the location needs only row `k` of `C`. A block compiled centred stores the
+# effects, and recovering `z` is a forward substitution: row `i` needs the
+# `i-1` innovations below it. The whole `K x K` `L` and `C` are never built;
+# rows are the same inline stick walk as `_block_cholesky_entry`.
 #
-# A pair centred on a population coefficient (`pair_location`) adds it to its
-# source-frame location: margin `i`'s innovation is `(u - c * (m + beta)) /
-# s^c`, and the returned location is `m + beta` (`_with_location`). The model
-# coordinate is unchanged; only blocks compiled non-centred carry a location,
-# where WarmupHMC's pair map `(x - c * loc) / s^c` then samples the level's
-# total at `c = 1`.
+# The innovations live in an `NTuple{N}` sized by the state's capacity `N`, not
+# a heap vector: on Julia 1.10, Enzyme's reverse pass over a function that
+# allocates a small work vector and reads it back is a use-after-free once
+# another thread runs GC — `getindex` segfaults or the GC aborts with "probable
+# corruption" (measured on Enzyme 0.13.210-0.13.216; Julia 1.12 and
+# single-threaded runs are clean). Concurrent completion/multi-chain workers hit
+# exactly that. `N` belongs to the state, so every pair keeps one concrete
+# element type whatever the block widths. The buffer cannot be cached on the
+# state, because accessors run under `Enzyme.Const`. Recursion is deliberately
+# avoided: a recursive scalar callable here corrupted Julia's GC after ~1,750
+# sustained gradients (fixed by ade46ac/bd9ca2d/b5f4a86).
+#
+# Only blocks compiled non-centred carry a population location, where
+# WarmupHMC's pair map `(x - c * loc) / s^c` then samples the level's total at
+# `c = 1`.
 function _block_location(x, state::_BRMRanefCenteringState{N}, pair_number) where {N}
     bi, k, g = _pair_location(state, pair_number)
     T = eltype(x)
     k == 1 && return _with_location(zero(T), x, state, pair_number)
     block = state.blocks[bi]
-    lookup = state.pair_lookup[bi]
     r = _pair_mixing_scale(x, state, pair_number)
+    t = block.target_c
+    if t == 0
+        tau = _block_tau(x, block, k) * r
+        stick = one(T)
+        offset = (k - 1) * (k - 2) ÷ 2
+        m = zero(T)
+        for l in 1:k-1
+            z = _block_cpc(x, block, offset + l)
+            m += (tau * (stick * z)) * x[block.effects[l, g]]
+            stick *= sqrt(one(T) - z * z)
+        end
+        return _with_location(m, x, state, pair_number)
+    end
+    lookup = state.pair_lookup[bi]
     innovations = ntuple(_ -> zero(T), Val(N))
     m = zero(T)
     for i in 1:k
@@ -422,11 +476,10 @@ function _block_location(x, state::_BRMRanefCenteringState{N}, pair_number) wher
             stick *= sqrt(one(T) - z * z)
         end
         if i < k
-            c = state.sources[lookup[i, g]]
-            u = x[block.effects[i, g]]
+            v = x[block.effects[i, g]]
             s = tau * stick
             innovations = Base.setindex(innovations,
-                (u - c * _with_location(m, x, state, lookup[i, g])) / s^c, i)
+                (v - t * _with_location(m, x, state, lookup[i, g])) / s^t, i)
         end
     end
     _with_location(m, x, state, pair_number)
@@ -541,9 +594,9 @@ function _centering_frame(state::_BRMRanefCenteringState{N}, position, gradient,
                 s = C[j, j]
                 u = position[block.effects[k, g]]
                 # The source-frame location, a population coefficient included
-                # (`_with_location`); it does not depend on the innovations, so
+                # (`_source_location`); it does not depend on the innovations, so
                 # `A` and the invariant gradient are unchanged by it.
-                loc = _with_location(m, position, state, p)
+                loc = _source_location(m, position, state, p)
                 z[j] = (u - c * loc) / s^c
                 A[j, j] = s^c
                 location[p] = loc
@@ -868,37 +921,29 @@ BRMHSGPLevelCenteringState(blocks) =
     BRM._adaptive_hsgp_floor(value)
 end
 
-# Pair `p`'s source-frame location: `sum(C_b[k, l] * z[l] for l < k)`, with
-# the column's earlier innovations recovered from their source coordinates in
-# `u` (their source controls in `sources`) exactly as `_block_location`
-# recovers a group's earlier margins. Every other coordinate is read from `x`;
-# the joint wrapper passes the source vector as both, and the learned-order
-# inverse passes the source being rebuilt as `u`.
-@inline function _level_location(x, u, state::BRMHSGPLevelCenteringState{N}, p) where {N}
+# Pair `p`'s location: `sum(C_b[k, l] * z[l] for l < k)`, the conditional mean
+# given the column's earlier levels. Grouped HSGP weights are emitted
+# standardized (`t = 0`, `_joint_targets`), so an earlier level's model value
+# is its innovation `z[l]` itself, read from `v`; the location needs only row
+# `k` of `C_b`. Scales and correlations are read from `x` (no cell rewrites
+# them). WarmupHMC >= 0.3.0 calls the accessor with the earlier levels at their
+# model values, so the joint wrapper passes its argument as both; the
+# learned-order map passes where it holds the model values
+# (`_ordered_level_map!`).
+@inline function _level_location(x, v, state::BRMHSGPLevelCenteringState, p)
     T = eltype(x)
     k = state.pair_level[p]
     term = state.terms[state.pair_blocks[p]]
     (k == 1 || !term.correlated) && return zero(T)
-    b = state.pair_basis[p]
     first = p - k
-    innovations = ntuple(_ -> zero(T), Val(N))
+    tau = exp(_level_log_scale(x, state, term, state.pair_basis[p], p))
     m = zero(T)
-    for i in 1:k
-        q = first + i
-        tau = exp(_level_log_scale(x, state, term, b, q))
-        m = zero(T)
-        stick = one(T)
-        offset = (i - 1) * (i - 2) ÷ 2
-        for l in 1:i-1
-            z = _level_cpc(x, state, term, offset + l)
-            m += (tau * (stick * z)) * innovations[l]
-            stick *= sqrt(one(T) - z * z)
-        end
-        if i < k
-            c = state.sources[q]
-            s = tau * stick
-            innovations = _tset(innovations, (u[state.pair_index[q]] - c * m) / s^c, i)
-        end
+    stick = one(T)
+    offset = (k - 1) * (k - 2) ÷ 2
+    for l in 1:k-1
+        z = _level_cpc(x, state, term, offset + l)
+        m += (tau * (stick * z)) * v[state.pair_index[first + l]]
+        stick *= sqrt(one(T) - z * z)
     end
     m
 end
@@ -2088,9 +2133,9 @@ function _ordered_group_forward!(y, x, state, block, lookup, g, C, Cp, perms, q,
         end
         s = Cp[_tri(j, j)]
         # The source-frame location adds a population coefficient for a pair
-        # centred on one (`_with_location`; only blocks compiled at `t = 0`
+        # centred on one (`_source_location`; only blocks compiled at `t = 0`
         # carry one, so `t * m` keeps the model-frame mean).
-        loc = _with_location(m, x, state, lookup[a, g])
+        loc = _source_location(m, x, state, lookup[a, g])
         w = _tset(w, (u[a] - c * loc) / s^c, j)
         if declared
             # WarmupHMC's per-pair spelling (`warmuphmc-use` §5c), so the
@@ -2144,7 +2189,7 @@ function _ordered_group_inverse!(y, x, state, block, lookup, g, C, Cp, perms, q,
         if declared
             c = state.sources[lookup[k, g]]
             log_scale = log(s)
-            y[block.effects[k, g]] = c * _with_location(m, x, y, state, lookup[k, g]) +
+            y[block.effects[k, g]] = c * _source_location(m, x, y, state, lookup[k, g]) +
                 (v[k] - t * m) * exp(log_scale * (c - t))
             ljac += log_scale * (c - t)
         else
@@ -2163,7 +2208,7 @@ function _ordered_group_inverse!(y, x, state, block, lookup, g, C, Cp, perms, q,
         end
         s = Cp[_tri(j, j)]
         w = _tset(w, (b[a] - m) / s, j)
-        y[block.effects[a, g]] = c * _with_location(m, x, y, state, lookup[a, g]) + s^c * w[j]
+        y[block.effects[a, g]] = c * _source_location(m, x, y, state, lookup[a, g]) + s^c * w[j]
         ljac += (c - 1) * log(s)
     end
     ljac
@@ -2267,18 +2312,18 @@ end
 
 # HSGP level cells inside the learned-order wrapper; `targets[offset + p]` is
 # level pair `p`'s compiled frame. A level's location reads the earlier levels
-# of its column in the source frame. Source -> compiled reads them from `x`,
-# walking the pairs backwards so that `y === x` still holds them unwritten;
-# compiled -> source reads them from the source being rebuilt in `y`, walking
-# forwards (WarmupHMC's inverse order). Scales and correlations read
-# coordinates no cell rewrites, from `x`.
+# of its column at their compiled values, as WarmupHMC's accessors do
+# (`_level_location`), walking the pairs in order: source -> compiled reads them
+# from `y`, where they were just written (also when `y === x`), compiled ->
+# source from its input `x`. Scales and correlations read coordinates no cell
+# rewrites, from `x`.
 function _ordered_level_map!(y, x, state::BRMHSGPLevelCenteringState, targets, offset,
                              direction)
     ljac = zero(eltype(x))
-    n = length(state.sources)
-    for p in (direction > 0 ? (n:-1:1) : (1:n))
+    compiled = direction > 0 ? y : x
+    for p in eachindex(state.sources)
         ljac += _cell_map!(y, x, state.pair_index[p],
-            _level_location(x, direction > 0 ? x : y, state, p),
+            _level_location(x, compiled, state, p),
             _level_pair_log_scale(x, state, p), targets[offset + p], state.sources[p],
             direction)
     end
@@ -3042,58 +3087,21 @@ the wrapped density and Jacobian still represent the original BRM prior exactly.
 # 711 KB and 0.46 ms per leaf, against 17 KB and 0.18 ms; snag
 # adaptive-car-cen-fe6ee5a4).
 #
-# Its `synchronize!` also gives the map's accessors controls of their own
-# (`_bind_own_controls!`); the frames keep reading `state`.
+# Its `synchronize!` writes the committed controls into `state`, which the
+# frames read. The accessors read no control (WarmupHMC >= 0.3.0 hands them
+# earlier cells at their model values), so a snapshot of the pairs keeps the map
+# it was taken from: BRM 0.2.298's rebinding of the pairs to a copy of the
+# controls (snag read-brm-s-ordin-8860f258) is gone.
 _candidate_scoring_plan(state) = WarmupHMC.CandidateScoringPlan(
     (ir_, position, gradient) -> _prepare_frame(state, ir_, position, gradient),
     _score_candidate;
-    synchronize! = ir_ -> (_sync_sources!(state, ir_); _bind_own_controls!(state, ir_)),
+    synchronize! = ir_ -> _sync_sources!(state, ir_),
 )
 
-# Snag read-brm-s-ordin-8860f258. A location accessor re-applies earlier cells'
-# maps with their controls: a correlated block's earlier margins
-# (`_block_location`), a nested cell's containers (`_contained_location`), a
-# correlated HSGP level's earlier columns (`_level_location`). So the map
-# depends on those controls, not on `ir.pairs` alone. At a window boundary
-# WarmupHMC snapshots the old map as `IndexedReparametrization(copy(ir.pairs))`,
-# commits the new controls, synchronizes, and only then transports the retained
-# pool and the active point through that snapshot. Accessors reading the plan's
-# `state` would evaluate the old map with the new controls and move every such
-# cell to another model point. So whenever a synchronization changes a control,
-# the pairs are rebound to a copy of `state` (`_own_controls`) that no later
-# synchronization writes, and a snapshot keeps the map it was taken from. A
-# rollback restores the old pairs with their own copy. Nothing here runs under
-# AD: the accessors and their pullbacks only see a different state object of the
-# same type.
-_own_controls(s::S) where {S} =
-    S((f === :sources ? copy(getfield(s, f)) : getfield(s, f) for f in fieldnames(S))...)
-_own_controls(s::BRMJointAdaptiveCenteringState{N}) where {N} =
-    BRMJointAdaptiveCenteringState{N}(
-        _own_controls(s.ranef), _own_controls(s.hsgp), _own_controls(s.level),
-        _own_controls(s.scalar), _own_controls(s.car), _own_controls(s.cdar),
-        s.n_ranef, s.n_r2d2, s.n_hsgp, s.n_level, s.n_scalar, s.n_car)
-
-_state_controls(s) = s.sources
-_state_controls(s::BRMJointAdaptiveCenteringState) =
-    (s.ranef.sources, s.hsgp.sources, s.level.sources, s.scalar.sources,
-     s.car.sources, s.cdar.sources)
-
-_with_state(arg::A, state) where {A} = A(state, arg.pair_number)
-
-function _bind_own_controls!(state, ir)
-    isempty(ir.pairs) && return ir
-    bound = _centering_state(ir)
-    bound !== state && _state_controls(bound) == _state_controls(state) && return ir
-    own = _own_controls(state)
-    ir.pairs .= [idx => WarmupHMC.Reparametrization(value.target, value.source,
-                                                    (_with_state(a, own) for a in value.args)...)
-                 for (idx, value) in ir.pairs]
-    ir
-end
-
 # Containing blocks first (snag brm-zone-8-adapt-1b407672): a cell centred on a
-# containing cell's effect reads that cell's source, which WarmupHMC's inverse
-# rebuilds pair by pair, so the containing pairs must come earlier. A block
+# containing cell's effect reads that cell's model value, which WarmupHMC hands
+# an accessor only for EARLIER pairs, so the containing pairs must come earlier
+# (and the learned-order inverse rebuilds them first). A block
 # sits after every block it is centred on: it has strictly more containing
 # blocks than any of them (containment is transitive). The sort is stable, so a
 # model without containing cells keeps its pair order.

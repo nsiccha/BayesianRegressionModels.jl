@@ -12,6 +12,26 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.307
+
+- **Breaking:** BRM requires WarmupHMC 0.3 (`[compat] WarmupHMC = "0.3"`, was
+  `"0.2.11"`). From WarmupHMC 0.3.0 a reparametrization accessor reads every
+  earlier pair's coordinate at its model value, no longer at its sampler value.
+  `adaptive_centering_problem`'s location accessors now read them that way: a
+  correlated block's later margins, a cell centred on a containing grouping's
+  effect, and a correlated grouped HSGP's later levels read the earlier cells'
+  compiled coordinates directly and no longer re-apply those cells' maps with
+  controls kept in shared state. The map, its Jacobian, the draws and the
+  controls report are unchanged up to rounding; on WarmupHMC 0.2 these
+  accessors would apply the earlier maps twice, hence the compat bound. An
+  environment that also loads ReactiveKernelsPPL needs a ReactiveKernelsPPL
+  whose compat admits WarmupHMC 0.3. To upgrade, move WarmupHMC to 0.3
+  (`68a6cc24` or later on its `dev` branch).
+- The window-end transport keeps every cell's model point by construction:
+  the accessors read no control, so a snapshot of the pairs is the old map.
+  BRM 0.2.298's rebinding of the pairs to a private copy of the controls is
+  gone, and the accessors keep the state they were built with.
+
 ## 0.2.306
 
 - A plate cell observes Julia's Student-t,
