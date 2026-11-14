@@ -340,7 +340,7 @@ def log_density(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
         raise ValueError("[layout] packed length ≠ layout total: a packed point holds the coordinates of the binding whose layout packed it")
         return None
     value_2 = (then_arm_2() if unconstrained.size == ppl_last_pop_mu_beta_pop else else_arm_2())
-    return posterior
+    return jnp.asarray(posterior, dtype=jnp.float64)
 
 
 def log_prior(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
@@ -471,7 +471,7 @@ def log_prior(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
         raise ValueError("[layout] packed length ≠ layout total: a packed point holds the coordinates of the binding whose layout packed it")
         return None
     value = (then_arm_2() if unconstrained.size == ppl_last_pop_mu_beta_pop else else_arm_2())
-    return prior
+    return jnp.asarray(prior, dtype=jnp.float64)
 
 
 def log_likelihood(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
@@ -582,7 +582,7 @@ def log_likelihood(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array
         raise ValueError("[layout] packed length ≠ layout total: a packed point holds the coordinates of the binding whose layout packed it")
         return None
     value_2 = (then_arm() if unconstrained.size == ppl_last_pop_mu_beta_pop else else_arm())
-    return ppl_lik_y_resp
+    return jnp.asarray(ppl_lik_y_resp, dtype=jnp.float64)
 
 
 def log_jacobian(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
@@ -633,7 +633,7 @@ def log_jacobian(unconstrained: ArrayLike, **prepared: ArrayLike) -> jax.Array:
         raise ValueError("[layout] packed length ≠ layout total: a packed point holds the coordinates of the binding whose layout packed it")
         return None
     value = (then_arm() if unconstrained.size == ppl_last_pop_mu_beta_pop else else_arm())
-    return log_jacobian_2
+    return jnp.asarray(log_jacobian_2, dtype=jnp.float64)
 
 
 def constrain(unconstrained: ArrayLike, **prepared: ArrayLike) -> dict:
@@ -729,7 +729,7 @@ def constrain(unconstrained: ArrayLike, **prepared: ArrayLike) -> dict:
         raise ValueError("[layout] packed length ≠ layout total: a packed point holds the coordinates of the binding whose layout packed it")
         return None
     value_2 = (then_arm() if unconstrained.size == ppl_last_pop_mu_beta_pop else else_arm())
-    return {"sigma": constrain_2, "b_mu__g_g": {"tau": b_mu_g_g_tau, "L": b_mu_g_g_L, "z": b_mu_g_g_z}, "pop_mu": {"beta_pop": pop_mu_beta_pop}, "mu": ppl_offset_mu}
+    return {"sigma": jnp.asarray(constrain_2, dtype=jnp.float64), "b_mu__g_g": {"tau": jnp.asarray(b_mu_g_g_tau), "L": jnp.asarray(b_mu_g_g_L), "z": jnp.asarray(b_mu_g_g_z)}, "pop_mu": {"beta_pop": jnp.asarray(pop_mu_beta_pop)}, "mu": jnp.asarray(ppl_offset_mu)}
 
 
 def dimension(prepared: dict) -> int:
