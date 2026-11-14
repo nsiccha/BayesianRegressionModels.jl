@@ -86,6 +86,63 @@ end
     end
 end
 
+# The drift gate of exploration's ELBO stop (src/nlme_svi_stationarity.jl, snag
+# brm-svi-fit-unco-182711a4): `x` is the global history, D means then D log sds.
+function svi_drift_gate(x; iteration=49_999, c=svi_drift_controls())
+    D = size(x, 1) ÷ 2
+    q = (; μ=zeros(D), ρ=zeros(D), Β=zeros(D, 0), M=[[0.0]], Λ=[ones(1, 1)])
+    h = BRM._brm_svi_stationarity_state(q, c)
+    h.globals = svi_iterate_history(x)
+    run = (; iteration, windows=collect(1:iteration÷100), sampling=(; stationarity=h))
+    BRM._brm_svi_exploration_drift(run, c), run
+end
+svi_drift_controls(; kw...) = merge((; stationarity=true, exploration_drift=true,
+    window=100, min_windows=1, patience=1, settle_windows=10, max_iterations=100_000), kw)
+
+@stestset "the drift gate holds exploration only while a global drifts steadily" begin
+    # Stationary iterates, autocorrelated or many, almost never hold exploration
+    # (0 of 70 realizations each, measured). A wander whose correlation time is a
+    # fifth of the whole history (rho 0.99 at 512 samples) held 35 of 70: at that
+    # length no window can tell it from a drift, and the averaging check's 1.1 fails
+    # it too. The half-budget cap bounds what such a hold costs.
+    for (d, n, rho) in ((2, 4096, 0.95), (64, 16384, 0.95), (2000, 512, 0.0))
+        held = map(vcat(1:20, 101:150)) do seed
+            first(svi_drift_gate(svi_stationary_ar(Xoshiro(seed), d, n, rho))).held
+        end
+        @info "drift gate calibration" d n rho holds=sum(held) trials=length(held)
+        @test mean(held) <= 0.05
+    end
+    # A steady drift of one log sd, 25 noise sds over the history, holds it and is
+    # named; the half-budget cap releases it.
+    x = svi_stationary_ar(Xoshiro(7), 6, 512, 0.5)
+    x[5, :] .+= 0.05 .* (1:512)
+    drift, run = svi_drift_gate(x)
+    @test drift.held && !drift.capped
+    @test drift.rhat > BRM._BRM_SVI_DRIFT_RHAT
+    @test first(drift.moving).index == 2 && first(drift.moving).moment === :log_sd
+    capped, _ = svi_drift_gate(x; iteration=50_000)
+    @test !capped.held && capped.capped
+    # Each held window is counted on the current report.
+    BRM._brm_svi_note_drift!(run, drift)
+    BRM._brm_svi_note_drift!(run, drift)
+    BRM._brm_svi_note_drift!(run, merge(drift, (; held=false)))
+    @test run.sampling.stationarity.report.drift.held_windows == 2
+    @test !run.sampling.stationarity.report.drift.held
+    # Off: without the control (checkpoints written before it), without the iterate
+    # check, and with no settling phase, where exploration waits for that check.
+    for c in (Base.structdiff(svi_drift_controls(), NamedTuple{(:exploration_drift,)}),
+            svi_drift_controls(; stationarity=false), svi_drift_controls(; settle_windows=0))
+        @test first(svi_drift_gate(x; c)) === nothing
+    end
+    # Too short a history never holds exploration.
+    @test !first(svi_drift_gate(x[:, 1:150])).held
+    options = (; batch_size=4, max_iterations=100_000, lr_global=0.01,
+        unit_step=1.0, polish_lr=0.05, window=nothing, patience=10,
+        min_windows=40, polish_windows=20)
+    @test BRM._brm_svi_controls(8; options...).exploration_drift
+    @test !BRM._brm_svi_controls(8; options..., stationarity=false).exploration_drift
+end
+
 @stestset "stationarity reads marginal scales without dense low-rank covariance" begin
     rng = Xoshiro(4)
     q = (; μ=[0.2, -0.3], ρ=[-0.5, 400.0], Β=reshape([0.1, 0.0], 2, 1))
