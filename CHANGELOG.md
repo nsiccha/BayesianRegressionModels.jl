@@ -12,6 +12,23 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.304
+
+- `reprocess(rk::RKBRMI, design)` and `rk_design_binder(rk)(design)` accept a
+  design that omits the response of a bounded likelihood (`censored`,
+  `truncated`, `interval_censored`) on RKBRMI's value route: a response whose
+  location is an `=` assignment (`mu = level[series_row] + slope[series_row] *
+  t`), or a formula location whose scale is an expression (`sigma * noise`).
+  The same holds for an `interval_censored` response with a formula location.
+  Planning compared the omitted response with its bounds and refused the
+  design with "`new_data` omits response `y`, which this model reads while
+  planning the replay", so a prediction design needed a placeholder `y`. Both
+  checks now skip an omitted response, as the formula route's `censored` and
+  `truncated` responses and `@plate` cells already did. The program is
+  unchanged, and every value that does not read `y` equals the placeholder
+  replay's. The design's bound columns stay required, and ReactiveKernelsPPL
+  still refuses a bound column of the wrong length or with NaN entries.
+
 ## 0.2.303
 
 - A Laplace problem (`brm_laplace_problem`: whole-model, row-structured and

@@ -643,6 +643,21 @@ function _rk_validate_nested_bounds(observation, response, data)
     nothing
 end
 
+# A flat bounded response on the value route (an `=` location, or one a kernel
+# observes) is checked against its data bounds with the same response/row
+# attribution as structural observations. An absent replay response has no
+# values to compare with its bounds, as on the nested route above.
+_rk_validate_flat_bounds(modifier, response, ::_BRMAbsentResponse, data) = nothing
+function _rk_validate_flat_bounds(modifier, response, values, data)
+    bounds = (modifier.lower, modifier.upper)
+    all(b -> b === nothing || b isa Real || (b isa NamedColumn && parent(b) isa DataColumn),
+        bounds) || return
+    materialize = modifier.kind === :interval_censored ?
+        _brm_materialize_interval_response : _brm_materialize_bounded_response
+    materialize(modifier, response, values, data; prefix="RK backend")
+    nothing
+end
+
 _rk_nested_law_cells!(cells, callable, distribution, context) =
     all(argument -> _rk_nested_cells!(cells, argument, context), distribution.args)
 # Student-t reads its degrees of freedom through `TDist(nu)`.

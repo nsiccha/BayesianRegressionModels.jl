@@ -166,6 +166,52 @@ censored_below(d) = @brm d begin
     mu ~ 1 + zscale(x)
     y ~ censored(Normal(mu, 1); lower=lo)
 end
+# Bounded responses on the value route: an `=` location (here gathered from a
+# table of its own rows), or a formula location whose scale is an expression.
+censored_assigned(d) = @brm d begin
+    sigma ~ Exponential(1)
+    b ~ Normal(0, 1)
+    mu = b * x
+    y ~ censored(Normal(mu, sigma); lower=lo)
+end
+truncated_assigned(d) = @brm d begin
+    sigma ~ Exponential(1)
+    b ~ Normal(0, 1)
+    mu = b * x
+    y ~ truncated(Normal(mu, sigma); lower=lo)
+end
+interval_assigned(d) = @brm d begin
+    sigma ~ Exponential(1)
+    b ~ Normal(0, 1)
+    mu = b * x
+    y ~ interval_censored(Normal(mu, sigma); upper=hi)
+end
+censored_gathered_t(d) = @brm d begin
+    level ~ 1 + (1 | grp)
+    b ~ Normal(0, 1)
+    mu = level[r] + b * x
+    log(noise) ~ 0 + (1 | gs)
+    sigma ~ Exponential(1)
+    nu ~ Gamma(2, 10)
+    y ~ censored(LocationScale(mu, sigma * noise, TDist(nu)); lower=lo)
+end
+censored_formula_scaled(d) = @brm d begin
+    mu ~ 1 + x
+    log(noise) ~ 0 + (1 | gs)
+    sigma ~ Exponential(1)
+    y ~ censored(Normal(mu, sigma * noise); lower=lo)
+end
+# The same bounded likelihoods on the formula route.
+truncated_formula(d) = @brm d begin
+    mu ~ 1 + x
+    sigma ~ Exponential(1)
+    y ~ truncated(Normal(mu, sigma); lower=lo)
+end
+interval_formula(d) = @brm d begin
+    mu ~ 1 + x
+    sigma ~ Exponential(1)
+    y ~ interval_censored(Normal(mu, sigma); upper=hi)
+end
 # Responses whose planning reads their values: an ordered outcome (its level
 # count), with a formula and with an authored location, and a weighted
 # likelihood (its weights' rows).
@@ -290,6 +336,10 @@ rows_of(data, rows) = map(v -> v isa AbstractVector ? v[rows] : v, data)
 # An ordered outcome with three levels and frequency weights.
 const LEVELED = merge(TRAIN, (; k=[1, 2, 3][mod1.(1:N, 3)], n=[1, 2, 1, 3][mod1.(1:N, 4)]))
 without(data, name) = NamedTuple{filter(!=(name), keys(data))}(data)
+# Rows with an interval's upper ends, and a four-row table that row `i` reads
+# as its row `r[i]`.
+const BOUNDED = merge(TRAIN, (; hi=TRAIN.y .+ 1.0))
+bounded_rows(rows; grp=["p", "q", "u", "v"]) = merge(rows_of(BOUNDED, rows), (; grp))
 
 const PK = (; subject=["s1", "s2", "s3", "s4", "s5"],
     weight=[60.0, 72.0, 81.0, 55.0, 90.0], dose=[100.0, 120.0, 80.0, 100.0, 150.0],
@@ -560,6 +610,48 @@ end
     value = Base.invokelatest(query, u, b[s2:s2, :])
     value = value isa Tuple ? only(value) : value
     @test value ≈ pk_reads(graph_value(rk, :conc, u), [2]) atol=1e-12 rtol=1e-12
+    # Bounded responses: on the value route, planning used to compare the
+    # omitted response with its bounds (snag `rk-replay-needs-7743e9a6`).
+    for (build, route) in ((RM.censored_assigned, BRM._RKValuePlan),
+            (RM.truncated_assigned, BRM._RKValuePlan), (RM.interval_assigned, BRM._RKValuePlan),
+            (RM.censored_gathered_t, BRM._RKValuePlan),
+            (RM.censored_formula_scaled, BRM._RKValuePlan),
+            (RM.truncated_formula, BRM._RKStructuralPlan),
+            (RM.interval_formula, BRM._RKStructuralPlan))
+        rk = RKBRMI(build(bounded_rows(1:N)))
+        @test rk.plan isa route
+        u = point(rk)
+        for rows in (2:5, [7])
+            design = bounded_rows(rows)
+            replay = reprocess(rk, without(design, :y))
+            @test replay.model === rk.model
+            @test graph_value(replay, :mu, u) == graph_value(reprocess(rk, design), :mu, u)
+            check_no_density(replay, u)
+        end
+    end
+    # New table rows at a draw of the fit: the binder's inputs without `y` give
+    # the values the inputs with `y` give.
+    rk = RKBRMI(RM.censored_gathered_t(bounded_rows(1:N)))
+    u = point(rk)
+    design = bounded_rows([2, 3]; grp=["new1", "new2", "new3", "new4"])
+    values = map((without(design, :y), design)) do d
+        bound = rk_design_binder(rk; resample_groups=[:grp])(d)
+        query = ReactiveKernels.prepare(rk.model.spec;
+            have=(:unconstrained, :b_grp, keys(bound)...), want=(:level, :mu), bound)
+        Base.invokelatest(query, u, reshape([0.3, -0.2, 0.1, 0.4], 4, 1))
+    end
+    @test first(values) == last(values)
+    # A fit's response is still checked against its bounds on both routes.
+    @test_throws "outside its bounds" RKBRMI(RM.censored_assigned(
+        merge(bounded_rows(1:N), (; y=fill(-1.0, N)))))
+    @test_throws "requires response < upper" RKBRMI(RM.interval_formula(
+        merge(bounded_rows(1:N), (; hi=BOUNDED.y .- 1.0))))
+    # A response-less design's bound column is still checked, by RKPPL.
+    rk = RKBRMI(RM.censored_assigned(TRAIN))
+    for lo in ([-0.5, -0.5], fill(NaN, 4))
+        @test_throws ReactiveKernelsPPL.ContractValidationError graph_value(
+            reprocess(rk, merge(without(rows_of(TRAIN, 2:5), :y), (; lo))), :mu, point(rk))
+    end
     # Other data stay required.
     @test_throws "has no column `x`" reprocess(RKBRMI(RM.zscaled(TRAIN)),
         without(without(rows_of(TRAIN, 2:5), :y), :x))
