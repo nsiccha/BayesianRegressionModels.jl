@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.305
+
+- `brm_predictive_draws` and `brm_predictive_tree` draw from a prior program
+  (the response column omitted, zero sampler dimensions):
+  `brm_predictive_draws(d, zeros(n, 0); problem, seed)` returns `n`
+  prior-predictive draws of each omitted response. Before, every such program
+  refused with `BRM prediction has ambiguous logical response names`: the
+  program emits the forward-simulated `y` and its `y_gen` twin, both labelled
+  `:posterior_predictive`, and the readers keyed the bare `y` by its name
+  beside the twin's response `y`. The readers now take exactly the outputs the
+  `:predict` operation returns, one per response, and refuse a response it
+  does not return instead of dropping it. A program with an omitted response
+  beside a fitted one (`y` bound, `z` omitted) draws both. `brm_conditional_draws`
+  with `target = :predictive` selects its response through the same rule.
+
 ## 0.2.304
 
 - `reprocess(rk::RKBRMI, design)` and `rk_design_binder(rk)(design)` accept a

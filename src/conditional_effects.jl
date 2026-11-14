@@ -645,16 +645,9 @@ function brm_conditional_draws(d::BRMDescriptor, unc_draws::AbstractMatrix,
     n_grid = _brm_check_conditional_grid(grid)
     if target === :predictive
         d2 = brm_execute(d, :reprocess, grid)
-        # Fail fast on response selection, before any compile: mirror the
-        # key rule `brm_predictive_draws` applies below (keep in lockstep
-        # with posterior_diagnostics.jl).
-        outs = brm_outputs(d2; role=:posterior_predictive)
-        isempty(outs) && error(
-            "This BRM descriptor has no predictive outputs")
-        keys_available = Tuple(
-            isnothing(o.logical) ? o.name : o.logical for o in outs)
-        length(unique(keys_available)) == length(keys_available) || error(
-            "BRM prediction has ambiguous logical response names")
+        # Fail fast on response selection, before any compile, through the
+        # same rule `brm_predictive_draws` applies below.
+        keys_available = Tuple(last(_brm_predictive_responses(d2)))
         selected = if response === :auto
             length(keys_available) == 1 || error(
                 "BRM prediction: `response=:auto` needs exactly one " *

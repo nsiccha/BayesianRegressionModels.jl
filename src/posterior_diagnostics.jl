@@ -34,6 +34,37 @@ function brm_output_draws(d::BRMDescriptor, draws::AbstractMatrix, names;
     Matrix(@view draws[:, indices])
 end
 
+# The predictive carriers `:predict` returns, one per logical response, and
+# their keys. An omitted response's program forward-simulates the bare response
+# AND emits its `<response>_gen` alias twin (one draw, two names). Both are
+# observation-owned generated quantities, so both carry
+# `role=:posterior_predictive`; the descriptor resolves the response to the
+# twin, and `:predict` returns only the twin. The bare carrier is therefore not
+# a response of its own here: keying it by its name `y` beside the twin's
+# logical `y` refused every prior program (snag prior-predictive-356a4e3b). A
+# response the descriptor names but `:predict` does not return is refused
+# rather than dropped. `brm_conditional_draws` selects its response through
+# this same rule before compiling.
+function _brm_predictive_responses(d::BRMDescriptor)
+    outputs = brm_outputs(d; role=:posterior_predictive)
+    isempty(outputs) && error("This BRM descriptor has no predictive outputs")
+    returned = Set{Symbol}(brm_operation(d, :predict).outputs)
+    kept = [o for o in outputs if o.name in returned]
+    response_keys = Symbol[isnothing(o.logical) ? o.name : o.logical for o in kept]
+    length(unique(response_keys)) == length(response_keys) || error(
+        "BRM prediction has ambiguous logical response names")
+    undrawn = unique(Symbol[o.logical for o in outputs
+                            if !(o.name in returned) && !isnothing(o.logical) &&
+                               !(o.logical in response_keys)])
+    isempty(undrawn) || error(
+        "BRM prediction: the `:predict` operation returns no draw for " *
+        "response(s) $(Tuple(undrawn)); it returns $(Tuple(sort!(collect(returned)))).")
+    isempty(kept) && error(
+        "BRM prediction: the `:predict` operation returns none of this " *
+        "descriptor's predictive outputs $(Tuple(o.name for o in outputs)).")
+    kept, response_keys
+end
+
 """
     brm_predictive_draws(descriptor, unconstrained_draws; problem, seed)
 
@@ -42,15 +73,15 @@ return one draws × response-elements matrix per logical response. Input rows
 are draws. This simulates new response values conditional on fitted parameter
 draws; it does not fit a model. `seed` is passed to the first draw, with successive
 integer seeds for subsequent draws. Multiple responses share each execution.
+
+On a prior program (the response column omitted, zero sampler dimensions) each
+draw is a row of a zero-column matrix: `brm_predictive_draws(d, zeros(n, 0);
+problem, seed)` returns `n` prior-predictive draws of every omitted response.
 """
 function brm_predictive_draws(d::BRMDescriptor, draws::AbstractMatrix;
                               problem, seed::Integer)
     size(draws, 1) > 0 || error("BRM prediction requires at least one draw")
-    outputs = brm_outputs(d; role=:posterior_predictive)
-    isempty(outputs) && error("This BRM descriptor has no predictive outputs")
-    logical = [isnothing(o.logical) ? o.name : o.logical for o in outputs]
-    length(unique(logical)) == length(logical) || error(
-        "BRM prediction has ambiguous logical response names")
+    outputs, logical = _brm_predictive_responses(d)
     values = [brm_execute(d, :predict; problem, draws=collect(q),
                          seed=Base.checked_add(seed, i - 1))
               for (i, q) in enumerate(eachrow(draws))]
