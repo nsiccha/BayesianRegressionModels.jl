@@ -66,6 +66,11 @@ end
     @test spell(:(y ~ Exponential(theta))) == :(y ~ exponential(1.0 ./ theta))
     @test spell(:(y ~ censored(Normal(mu, s); lower = lo))) ==
         :(y ~ censored(normal(mu, s); lower = lo))
+    # Julia's Student-t composes as a top-level likelihood does; Julia answers
+    # `LocationScale <: Distribution` false (snag student-t-locati-6466e87a).
+    @test spell(:(y ~ LocationScale(mu, s, TDist(nu)))) == :(y ~ student_t(nu, mu, s))
+    @test spell(:(y ~ LocationScale(mu .+ x, s, TDist(nu)))) ==
+        :(y ~ student_t(nu, mu .+ x, s))
     @test spell(:(y ~ weighted(Normal(logistic.(mu), s), w))) ==
         :(y ~ weighted(normal(inv_logit.(mu), s), w))
     for ex in (:(y ~ normal(mu, sigma)), :(y ~ weighted(normal, w, mu, sigma)),
