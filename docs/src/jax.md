@@ -81,6 +81,26 @@ variables. Parameter sizes that depend on the data are resolved by
 `dimension(prepared)` and `parameters(prepared)`; `DIMENSION` and
 `PARAMETERS` constants are available only for a fixed-size layout.
 
+### Retained plate values
+
+To export a vector calculated in each plate cell, retain it with an indexed
+assignment and select its authored name. For example, author
+`mean_cell[i] = mu[i] .* exp.(-t[i] ./ onset)` in the cell, then use
+`y[i] ~ Normal(mean_cell[i], sigma)` for its response. Here `t[i]` holds that
+patient's visit times. The likelihood and exported value use the same mean:
+
+```julia
+source = jax_source(rk.model, rk_bound_plan(rk); values=(:mean_cell,))
+inputs = rk_bound_data(rk, source)
+```
+
+With ReactiveKernels 0.1.231 or later, `constrain(u, **prepared)["mean_cell"]`
+returns the visit vectors concatenated in patient order, preserving the visit
+order within each patient. Its length is `sum(length, data.t)`; the known visit
+counts delimit the patients. The mean is evaluated from the model's expression
+at each draw. A bare `mean_cell = ...` inside the plate is scratch and cannot
+be selected through `values`.
+
 ## Data preparation
 
 `rk_bound_data(rk, source)` returns exactly the columns listed by `model.DATA`,
