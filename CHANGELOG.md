@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.301
+## 0.2.302
 
 - A formula call whose head is bound to a value that cannot be called is
   refused when the model is built, by `@brm` and `brm(source; mod)` alike. A
@@ -40,6 +40,24 @@ instead of failing at run time.
   before, and a value spliced into a `brm` source with `$` is not checked.
   **Breaking** only for a block that built a model whose call head could not
   be called: such a model failed in every backend. `test/shadowed_call_head.jl`.
+
+## 0.2.301
+
+- `RKBRMI` accepts an infinite entry in a per-row response bound column on a
+  formula response, as `SBBRMI` and the RK value route already did: `-Inf` in a
+  `lower` column and `Inf` in an `upper` column (also an `interval_censored`
+  upper end) mark a row without that bound. Before, a formula response such as
+  `mu ~ 1 + x; y ~ censored(Normal(mu, 1); lower = lo)` with `lo = [0.1, -Inf]`
+  raised `RK backend: column `lo` must be finite`, while declarations that
+  route through value assignments built. ReactiveKernelsPPL (0.1.134 and
+  later) drops that side of the row's evidence in both the value and the
+  gradient. NaN and the opposite side's infinity are still refused, now with a
+  message naming the bound. A column the model also reads elsewhere (a
+  covariate, say), or reads as both a lower and an upper bound, must stay
+  finite, because an infinity there is not an absent bound.
+  `test/rk_infinite_censoring_bounds.jl` checks censored, two-sided,
+  truncated, interval-censored and Student-t responses against independent
+  oracles and SBBRMI's Stan density (snag `rkbrmi-censored-995e238d`).
 
 ## 0.2.300
 

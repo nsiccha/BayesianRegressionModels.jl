@@ -8,7 +8,7 @@
 # `brm(source; mod)`). A script variable named like a wrapper or a family
 # (`censored = value .< limit`, marking rows below a detection limit) is such
 # a global and shadows the binding `using BayesianRegressionModels` brings in.
-# Before BRM 0.2.301 the builder carried the variable's value as the node's
+# Before BRM 0.2.302 the builder carried the variable's value as the node's
 # callable, and each backend refused it with a message about its own lowering:
 # RKBRMI `response `y` distribution keywords are unsupported`, SBBRMI
 # `distribution `Bool[1, 0, 0]` needs a Stan translation for constructor
