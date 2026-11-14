@@ -2557,6 +2557,20 @@ function _rk_bound_values(bound, columns::Dict{Symbol,AbstractVector},
     columns[bound]
 end
 
+# An interval response is each row's lower endpoint: finite, and below its
+# upper end. An absent replay response has no endpoints to compare.
+_rk_gate_interval_endpoints(response::Symbol, ::_BRMAbsentResponse, upper) = nothing
+function _rk_gate_interval_endpoints(response::Symbol, values, upper)
+    prefix = "RK backend"
+    all(isfinite, values) || error(
+        "$prefix: response `$response` interval evidence " *
+        "requires finite response values")
+    all(values .< upper) || error(
+        "$prefix: response `$response` interval evidence " *
+        "requires response < upper every row")
+    nothing
+end
+
 function _rk_gate_evidence_values!(specs::AbstractVector,
         columns::Dict{Symbol,AbstractVector}, n_obs::Int)
     prefix = "RK backend"
@@ -2566,13 +2580,7 @@ function _rk_gate_evidence_values!(specs::AbstractVector,
         lower = _rk_bound_values(evidence.lower, columns, n_obs)
         upper = _rk_bound_values(evidence.upper, columns, n_obs)
         if evidence.kind === :interval_censored
-            response = columns[spec.response]
-            all(isfinite, response) || error(
-                "$prefix: response `$(spec.response)` interval evidence " *
-                "requires finite response values")
-            all(response .< upper) || error(
-                "$prefix: response `$(spec.response)` interval evidence " *
-                "requires response < upper every row")
+            _rk_gate_interval_endpoints(spec.response, columns[spec.response], upper)
         else
             (isnothing(lower) || isnothing(upper)) && continue
             all(lower .< upper) || error(

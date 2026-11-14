@@ -1157,17 +1157,8 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
             return _RKNestedObservation(o, cells)
         end
         modifier = _rk_kernel_response_modifier!(value_columns, taken, derived, o, layout)
-        if modifier !== nothing
-            bounds = (modifier.lower, modifier.upper)
-            if all(b -> b === nothing || b isa Real ||
-                    (b isa NamedColumn && parent(b) isa DataColumn), bounds)
-                # The same response/row attribution as structural observations.
-                materialize = modifier.kind === :interval_censored ?
-                    _brm_materialize_interval_response : _brm_materialize_bounded_response
-                materialize(modifier, o.name,
-                    layout.values, context.data; prefix="RK backend")
-            end
-        end
+        modifier === nothing ||
+            _rk_validate_flat_bounds(modifier, o.name, layout.values, context.data)
         _rk_prepare_kernel_observed_values!(value_columns, taken, derived,
             o.name, layout, o.response; port=_rk_kernel_input_port(kernels, o.name))
         _BRMPreparedObservation(o.name, o.lhs, o.distribution, o.response,

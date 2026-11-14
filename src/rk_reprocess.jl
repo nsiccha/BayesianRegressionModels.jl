@@ -75,8 +75,11 @@ through [`rk_bound_plan`](@ref).
 are kept) and responses: responses are bound without values,
 so authored values (`want=(:mu,)`, `@plate` cell outputs) evaluate on the new
 rows, while the density and other queries that read an omitted response are
-refused, naming it. A model whose planning reads the response values (for
-example an `mi(y)` response or a bounded likelihood) needs them.
+refused, naming it. Bounded likelihoods (`censored`, `truncated`,
+`interval_censored`) plan without their response; their bound columns stay
+required. A model whose planning reads the response values (for example an
+`mi(y)` response, or an `Ordinal`, `CategoricalLogit` or `Categorical`
+response, whose levels the graph codes) needs them.
 
 A supplied numeric scalar a prior reads must equal the fitted value, or the
 replay is refused: a design cannot change a fitted prior. That covers every
