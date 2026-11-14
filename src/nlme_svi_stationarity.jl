@@ -220,9 +220,10 @@ end
 # every window (a line's split-Rhat), while an iterate that only wanders under
 # exploration's constant step reads near 1: the exact Gaussian fixture of
 # test/nlme_svi_settling.jl read 1.12 to 1.31 there. The gate reads no unit
-# histories, consumes no random numbers, and keeps no state of its own, so a
-# checkpoint resumes it exactly. It never holds exploration past half of
-# `max_iterations`, so settling and averaging keep at least the other half.
+# histories and consumes no random numbers; its last reading lives on the
+# stationarity report, so a checkpoint resumes it exactly. It never holds
+# exploration past half of `max_iterations`, so settling and averaging keep at
+# least the other half.
 const _BRM_SVI_DRIFT_RHAT = 1.5
 
 _brm_svi_drift_enabled(c) = _brm_svi_stationarity_enabled(c) &&
@@ -265,6 +266,14 @@ end
 function _brm_svi_exploration_drift(run, c)
     _brm_svi_drift_enabled(c) || return nothing
     h = _brm_svi_stationarity_state(run)
+    # A reading costs a rank-normalized split-Rhat over every global's history, so
+    # a held reading is re-read only every tenth of the windows run so far, as the
+    # averaging check spaces its checks. The reading rides the current report, which
+    # a checkpoint carries.
+    previous = get(h.report, :drift, nothing)
+    w = length(run.windows)
+    previous !== nothing && previous.held && run.iteration < _brm_svi_drift_cap(c) &&
+        w - previous.window < max(1, previous.window ÷ 10) && return previous
     r = _brm_svi_stationarity_check(h.globals; limit=_BRM_SVI_DRIFT_RHAT)
     drifting = r.reason === :not_stationary
     capped = drifting && run.iteration >= _brm_svi_drift_cap(c)

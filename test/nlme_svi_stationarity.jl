@@ -128,6 +128,13 @@ svi_drift_controls(; kw...) = merge((; stationarity=true, exploration_drift=true
     BRM._brm_svi_note_drift!(run, merge(drift, (; held=false)))
     @test run.sampling.stationarity.report.drift.held_windows == 2
     @test !run.sampling.stationarity.report.drift.held
+    # A held reading is re-read only every tenth of the windows run so far.
+    held, run = svi_drift_gate(x; iteration=20_000)
+    BRM._brm_svi_note_drift!(run, held)
+    at(w) = BRM._brm_svi_exploration_drift(merge(run, (; iteration=100w,
+        windows=collect(1:w))), svi_drift_controls())
+    @test at(219).window == 200 && at(219).held
+    @test at(220).window == 220
     # Off: without the control (checkpoints written before it), without the iterate
     # check, and with no settling phase, where exploration waits for that check.
     for c in (Base.structdiff(svi_drift_controls(), NamedTuple{(:exploration_drift,)}),
