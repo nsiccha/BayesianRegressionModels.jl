@@ -245,6 +245,38 @@ end
     end
 end
 
+# Requirement (snag brm-start-costs-a9c22ffe): an optimizer asks for the value and
+# the gradient at one point in separate calls, and Pathfinder's L-BFGS in
+# `brm_start` had each repeat the whole mode search (131 of 441 marginal
+# evaluations on the reporter's model). A repeat returns the last search, which
+# is what a new problem returns there; another point, and a copy, search anew.
+@stestset "a repeated point reuses the last mode search" begin
+    data = (; g=LAPLACE_G, x=LAPLACE_X, y=LAPLACE_Y)
+    rk = RKBRMI(laplace_intercept_model(data))
+    mode!(q::BRMLaplaceProblem, φ) = BRM._brm_laplace_mode!(q, φ)
+    mode!(q::BRMStructuredLaplaceProblem, φ) = BRM._brm_slap_mode!(q, φ)
+    mode!(q::BRMSparseLaplaceProblem, φ) = BRM._brm_spl_mode!(q, φ)
+    for options in ((; structured=true), (; structured=false), (; integrate=:g))
+        p = brm_laplace_problem(rk; ad_backend=NLME_AD, options...)
+        φ = 0.3 .* randn(Xoshiro(7), length(p.population))
+        value = LogDensityProblems.logdensity(p, φ)
+        state = mode!(p, φ)
+        @test mode!(p, copy(φ)) === state
+        # a copy: an engine may return its own gradient buffer
+        value_gradient = copy.(LogDensityProblems.logdensity_and_gradient(p, φ))
+        @test mode!(p, φ) === state
+        @test value_gradient[1] == value
+        fresh = brm_laplace_problem(rk; ad_backend=NLME_AD, options...)
+        @test LogDensityProblems.logdensity_and_gradient(fresh, φ) == value_gradient
+        @test mode!(p, φ .+ 0.1) !== state
+        @test LogDensityProblems.logdensity_and_gradient(p, φ) == value_gradient
+        @test mode!(p, φ) !== state
+        copied = deepcopy(p)
+        @test copied.last === nothing
+        @test LogDensityProblems.logdensity_and_gradient(copied, φ) == value_gradient
+    end
+end
+
 # Fourth-order central differences of `f` at `φ`.
 laplace_fd(f, φ; h=1e-3) = map(eachindex(φ)) do j
     e = (1:length(φ)) .== j

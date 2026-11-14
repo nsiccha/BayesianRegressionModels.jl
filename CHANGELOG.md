@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.303
+
+- A Laplace problem (`brm_laplace_problem`: whole-model, row-structured and
+  sparse) now keeps its last mode search with the population point it was made
+  at, and a call at that same point reuses it instead of searching again. An
+  optimizer asks for the value and then the gradient at one point in separate
+  calls: on a two-unit Kalman-filter model `brm_start`'s Pathfinder evaluated
+  441 marginals at 310 distinct points. Values, gradients and starts are
+  unchanged; `nonfinite`, `unconverged` and `folds` count a repeated point
+  once. A `deepcopy` (one per chain) starts without it.
+- The whole-model Laplace (`BRMLaplaceProblem`) reuses the units' Hessian
+  blocks at each continuation stage boundary, where the last stage stopped
+  without a step, instead of assembling them again at the same point: about a
+  fifth of its Hessian assemblies. Values are unchanged.
+
 ## 0.2.302
 
 - A formula call whose head is bound to a value that cannot be called is

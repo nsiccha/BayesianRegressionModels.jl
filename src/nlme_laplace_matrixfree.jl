@@ -72,6 +72,8 @@ export MatrixFreeLaplace
 function _brm_spl_algebra!(p, solver, options::MatrixFreeLaplace)
     solver in (:auto, :exact, :matrixfree) || throw(ArgumentError(
         "brm_laplace_problem: solver must be :auto, :exact or :matrixfree"))
+    # A search under the previous algebra is not this problem's any more.
+    p.last = nothing
     large = [solver === :matrixfree || length(I) > options.exact_limit for I in p.components]
     if solver === :exact || !any(large)
         p.algebra = nothing

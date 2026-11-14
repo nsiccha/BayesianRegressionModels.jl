@@ -25,6 +25,35 @@
 
 const _BRM_LAP_MAXITER = 200
 
+# An optimizer often asks for the value and then the gradient at one point, or
+# the other way round, in separate calls (Pathfinder's L-BFGS does, through
+# Optimization and NLSolversBase), and each call would repeat the whole mode
+# search. Each Laplace problem keeps its last mode search with the exact
+# population point it was made at (`p.last`), and a call at that same point
+# reuses it. A search depends on the point alone, never on earlier evaluations,
+# so this returns what a new search would. The record is dropped before every
+# new search, so a search that raises cannot leave an earlier point's state
+# behind it in workspaces the two share (the sparse factor), and wherever a
+# problem's numerical setup changes (`_brm_spl_algebra!`, a plan's target).
+function _brm_laplace_last!(search!, p, φ::AbstractVector)
+    last = p.last
+    last !== nothing && isequal(last.φ, φ) && return last.state
+    p.last = nothing
+    state = search!(p, φ)
+    p.last = (; φ=collect(Float64, φ), state)
+    state
+end
+
+# A copy (one per chain) runs its own searches: it starts without the last one,
+# so its first evaluation exercises its own workspaces.
+function _brm_laplace_deepcopy(p, stackdict::IdDict)
+    haskey(stackdict, p) && return stackdict[p]
+    fields = map(fieldnames(typeof(p))) do f
+        f === :last ? nothing : Base.deepcopy_internal(getfield(p, f), stackdict)
+    end
+    stackdict[p] = typeof(p)(fields...)
+end
+
 """
     BRMLaplaceProblem
     brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
@@ -80,6 +109,10 @@ global maximum.
 
 A problem holds the last result and prepared AD workspaces as mutable state: use one per chain
 (`deepcopy` gives a copy its own prepared AD workspaces).
+A call at the same population point as the last mode search (bit for bit), such as
+an optimizer's value and then gradient at one point, reuses that search instead of
+repeating it, and returns what a new search would; the counters above count it once.
+A copy starts without it.
 
 When every likelihood term's parameters depend on its unit's random effects
 only through linear predictors (Poisson-log, Bernoulli/binomial-logit,
@@ -174,7 +207,12 @@ mutable struct BRMLaplaceProblem{M<:BRMNLMEModel,B}
     # a structural coloring of the units' η Hessian, or `nothing` for one
     # direction per within-unit position (src/nlme_laplace_coloring.jl)
     coloring::Union{Nothing,_BRMLaplaceColoring}
+    # the last mode search and its population point (`_brm_laplace_last!`)
+    last::Any
 end
+
+Base.deepcopy_internal(p::BRMLaplaceProblem, stackdict::IdDict) =
+    _brm_laplace_deepcopy(p, stackdict)
 
 Base.show(io::IO, p::BRMLaplaceProblem) = print(io, "BRMLaplaceProblem(",
     length(p.population), " population coordinates, ",
@@ -227,7 +265,7 @@ function brm_laplace_problem(backend::RKBRMI; ad_backend, subject_group=nothing,
     population = findall(!=(:subject_effect), m.view.role)
     BRMLaplaceProblem(m, ad_backend, population, m.view.coordinates[population],
         Ref{Any}(nothing), copy(m.unit), Ref{Any}(nothing), Float64(tol), Int(maxiter),
-        0, 0, 0, _brm_laplace_coloring(m.view))
+        0, 0, 0, _brm_laplace_coloring(m.view), nothing)
 end
 
 # Implemented by `BayesianRegressionModelsReactiveKernelsEnzymeExt`: a prepared
@@ -344,9 +382,13 @@ modes. The modes reached are the ones connected to the prior's mode.
 `state` holds the packed point `u`
 at the modes, the sampler density's `value` and `gradient` there, each unit's
 Hessian block, the Cholesky factor of its negation, and the number of Newton
-steps taken.
+steps taken. A call at the point of the last search returns that search's
+`state` (`_brm_laplace_last!`); callers only read it.
 """
-function _brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector)
+_brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector) =
+    _brm_laplace_last!(_brm_laplace_search!, p, φ)
+
+function _brm_laplace_search!(p::BRMLaplaceProblem, φ::AbstractVector)
     m = p.model
     blocks = m.view.subject_coordinates
     length(φ) == length(p.population) || throw(DimensionMismatch(
@@ -371,9 +413,15 @@ function _brm_laplace_mode!(p::BRMLaplaceProblem, φ::AbstractVector)
         previous = fill(Inf, length(blocks))
         converged = false
         for iteration in 1:p.maxiter
-            hessians = _brm_laplace_hessian_blocks(p, u)
-            all(_brm_laplace_finite, hessians) ||
-                return _brm_laplace_nonfinite!(p, u, total)
+            # The blocks are the model density's own Hessian, which the stage
+            # weight `s` enters only through the step below. A stage starts at
+            # the point where the last one stopped, without a step, so the blocks
+            # assembled there for its stopping test are reused.
+            if iteration > 1 || hessians === nothing
+                hessians = _brm_laplace_hessian_blocks(p, u)
+                all(_brm_laplace_finite, hessians) ||
+                    return _brm_laplace_nonfinite!(p, u, total)
+            end
             steps = Vector{Vector{Float64}}(undef, length(blocks))
             exact = falses(length(blocks))
             decrements = zeros(length(blocks))

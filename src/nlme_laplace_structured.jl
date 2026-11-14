@@ -207,7 +207,12 @@ mutable struct BRMStructuredLaplaceProblem{K}
     # evaluations in which a unit's followed mode needed a modified Newton step
     # after the continuation's first stage (`_brm_slap_unit_mode`)
     folds::Int
+    # the last mode search and its population point (`_brm_laplace_last!`)
+    last::Any
 end
+
+Base.deepcopy_internal(p::BRMStructuredLaplaceProblem, stackdict::IdDict) =
+    _brm_laplace_deepcopy(p, stackdict)
 
 Base.show(io::IO, p::BRMStructuredLaplaceProblem) = print(io,
     "BRMStructuredLaplaceProblem(", length(p.population), " population coordinates, ",
@@ -328,7 +333,7 @@ function _brm_structured_laplace_problem(backend::RKBRMI, view::BRMNLMEView; ad_
         t.link, t.fixed, zeros(d, length(t.port)), Int[], Int[], Float64[], omega, false,
         u0[population],
         zeros(length(t.port)), Int[], Int[], Float64[], copy(u0), Ref{Any}(nothing),
-        Float64(tol), Int(maxiter), 0, 0, 0)
+        Float64(tol), Int(maxiter), 0, 0, 0, nothing)
     _brm_slap_design!(p, u0)
     _brm_slap_population_design!(p, u0)
     _brm_slap_verify!(p, u0, t.response, t.row)
@@ -734,8 +739,12 @@ function _brm_slap_unit_mode(p::BRMStructuredLaplaceProblem, A, M::SMatrix{D,D,F
 end
 
 # Every unit's mode at population point φ, from zero effects, and the
-# Cholesky factor of each unit's −H there.
-function _brm_slap_mode!(p::BRMStructuredLaplaceProblem, φ::AbstractVector)
+# Cholesky factor of each unit's −H there; at the last search's point, that
+# search's state (`_brm_laplace_last!`).
+_brm_slap_mode!(p::BRMStructuredLaplaceProblem, φ::AbstractVector) =
+    _brm_laplace_last!(_brm_slap_search!, p, φ)
+
+function _brm_slap_search!(p::BRMStructuredLaplaceProblem, φ::AbstractVector)
     length(φ) == length(p.population) || throw(DimensionMismatch(
         "the population point has length $(length(φ)), the problem has " *
         "$(length(p.population)) population coordinates"))
