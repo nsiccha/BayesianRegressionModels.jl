@@ -83,6 +83,12 @@ end
         @test occursin("Vector · 3", rendered)
         @test occursin("free coordinates", lowercase(rendered))
     end
+    # A per-view `id` scopes an RK view too (snag repeated-brm-mod-aa76a08c).
+    scoped = repr("text/html", HTMXObjects.h.div(brm_model_view(rk; id="rk-one"),
+        brm_model_view(rk; id="rk-two")))
+    @test occursin("id=\"rk-one\"", scoped) && occursin("id=\"rk-two\"", scoped)
+    scoped_ids = [m[1] for m in eachmatch(r"\sid=\"([^\"]+)\"", scoped)]
+    @test allunique(scoped_ids)
     @test rk.bound.value === before_bound
     @test model === brm_source(rk)
     @test BRM._brm_view_rk_parameters(deepcopy(rk)) !== nothing

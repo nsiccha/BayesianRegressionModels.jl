@@ -272,6 +272,71 @@ end
     @test ModelViewFixture.calls[] == 0
 end
 
+# Element ids of rendered HTML, and the ids the tabs' ARIA attributes refer to
+# (`aria-labelledby` may list several, separated by spaces).
+_view_html_ids(html) = [m[1] for m in eachmatch(r"\sid=\"([^\"]+)\"", html)]
+_view_html_id_refs(html) = reduce(vcat,
+    [split(m[2]) for m in eachmatch(r"\s(aria-controls|aria-labelledby)=\"([^\"]+)\"", html)];
+    init=SubString{String}[])
+_view_duplicates(ids) = [id for id in unique(ids) if count(==(id), ids) > 1]
+
+# Snag repeated-brm-mod-aa76a08c: one page showed the same bound model in two
+# cards, and every tab, tab-panel and tab-set id repeated, so ARIA references
+# named the first copy. HTMXObjects derives a default tab-set id from what the
+# tabs show, so identical views always share it; `id=` is the per-view scope.
+@testset "repeated model views on one page take distinct ids" begin
+    model = ModelViewFixture.repeated_components(ModelViewFixture.data)
+    page(views...) = repr("text/html", HTMXObjects.h.div(views...))
+    # Control: the detector sees the reported duplicates in two default views.
+    reported = _view_duplicates(_view_html_ids(page(brm_model_view(model), brm_model_view(model))))
+    @test !isempty(reported)
+
+    # The same two views, differing only in `id`.
+    html = page(brm_model_view(model; id="card-one-model"), brm_model_view(model; id="card-two-model"))
+    ids = _view_html_ids(html)
+    @test isempty(_view_duplicates(ids))
+    @test isempty(intersect(reported, ids))
+    # The details tab set and the Source tab's nested definition tabs.
+    for id in ("card-one-model", "card-one-model-source", "card-two-model", "card-two-model-source")
+        @test count(==(id), ids) == 1
+    end
+    # Every id the scope replaces lies within it.
+    unscoped = Set(_view_html_ids(repr("text/html", brm_model_view(model))))
+    scoped = setdiff(_view_html_ids(repr("text/html", brm_model_view(model; id="card-one-model"))), unscoped)
+    @test "card-one-model-source" in scoped
+    @test all(id -> startswith(id, "card-one-model"), scoped)
+    # The tabs' ARIA references each name exactly one element.
+    refs = _view_html_id_refs(html)
+    @test !isempty(refs)
+    @test all(ref -> count(==(ref), ids) == 1, refs)
+    # Each tab bar's accessible name carries its view's title.
+    titled = repr("text/html", brm_model_view(model; title="Card one"))
+    @test occursin("aria-label=\"Card one details\"", titled)
+    @test occursin("aria-label=\"Card one source\"", titled)
+
+    # Every input kind takes the same scope.
+    for (input, scope) in ((ModelViewFixture.builder, "builder-view"),
+            (ModelViewFixture.nested, "component-view"), (model, "bound-view"))
+        two = page(brm_model_view(input; id=scope), brm_model_view(input; id=scope * "-2"))
+        @test isempty(_view_duplicates(_view_html_ids(two)))
+        @test count(==(scope), _view_html_ids(two)) == 1
+        # Ids affect only HTML: the textual projections are unchanged.
+        @test repr("text/plain", brm_model_view(input; id=scope)) ==
+            repr("text/plain", brm_model_view(input))
+        @test repr("text/markdown", brm_model_view(input; id=scope)) ==
+            repr("text/markdown", brm_model_view(input))
+    end
+
+    # An HTML id is non-empty and has no whitespace (HTML Living Standard, the id
+    # attribute); the nested ids extend it, so a malformed one is refused.
+    for bad in ("", "card one", "card\tone", :card_one)
+        @test_throws ArgumentError brm_model_view(model; id=bad)
+        @test_throws ArgumentError brm_model_view(ModelViewFixture.builder; id=bad)
+        @test_throws ArgumentError brm_model_view(ModelViewFixture.nested; id=bad)
+    end
+    @test ModelViewFixture.calls[] == 0
+end
+
 @testset "bound model view lists component-local declarations under exact call paths" begin
     data = (; x=[-1., 0., 1.], y=[0.1, 0.2, 0.3])
     model = ModelViewFixture.named_parent(data)
@@ -381,6 +446,10 @@ end
         "Prepared regression", ("Source", "Roles and ranks", "Documentation"))
     @test occursin("Vector · 3", text)
     @test occursin("Carrier details", text)
+    # A per-view `id` scopes a descriptor view too (snag repeated-brm-mod-aa76a08c).
+    two = repr("text/html", HTMXObjects.h.div(brm_model_view(d; id="fit-a"), brm_model_view(d; id="fit-b")))
+    @test isempty(_view_duplicates(_view_html_ids(two)))
+    @test count(==("fit-a"), _view_html_ids(two)) == 1
     @test d.formula == string(d.plan.parent)
     @test data.x == [-1., 0., 1.]
     if haskey(ENV, "BRM_MODEL_VIEW_HTML")
