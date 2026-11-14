@@ -437,7 +437,9 @@ const PINS = [
     # objects, including HiddenMarkov's per-state emission graphs.
     # 0a9ca6bb (RK 0.1.231) preserves each tuple plate field's ragged lengths,
     # so retained vector outputs flatten into JAX constrain values.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "0a9ca6bb5ad50b6efd1049c3fc1dd6609e068e77"),
+    # d7a5033ae (RK 0.1.246 / RKPPL 0.1.187 / DistributionKernels 0.1.11): RKPPL
+    # admits WarmupHMC 0.3 (`af0807c69`), which BRM's centering accessors need.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d7a5033aea6edc226611b1055c008135cdefda3d"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
