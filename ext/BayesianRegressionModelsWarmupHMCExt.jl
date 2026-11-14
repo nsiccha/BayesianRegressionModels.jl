@@ -3041,11 +3041,55 @@ the wrapped density and Jacobian still represent the original BRM prior exactly.
 # every (cell, candidate) of every leaf through dynamic dispatch (411 car cells:
 # 711 KB and 0.46 ms per leaf, against 17 KB and 0.18 ms; snag
 # adaptive-car-cen-fe6ee5a4).
+#
+# Its `synchronize!` also gives the map's accessors controls of their own
+# (`_bind_own_controls!`); the frames keep reading `state`.
 _candidate_scoring_plan(state) = WarmupHMC.CandidateScoringPlan(
     (ir_, position, gradient) -> _prepare_frame(state, ir_, position, gradient),
     _score_candidate;
-    synchronize! = ir_ -> _sync_sources!(state, ir_),
+    synchronize! = ir_ -> (_sync_sources!(state, ir_); _bind_own_controls!(state, ir_)),
 )
+
+# Snag read-brm-s-ordin-8860f258. A location accessor re-applies earlier cells'
+# maps with their controls: a correlated block's earlier margins
+# (`_block_location`), a nested cell's containers (`_contained_location`), a
+# correlated HSGP level's earlier columns (`_level_location`). So the map
+# depends on those controls, not on `ir.pairs` alone. At a window boundary
+# WarmupHMC snapshots the old map as `IndexedReparametrization(copy(ir.pairs))`,
+# commits the new controls, synchronizes, and only then transports the retained
+# pool and the active point through that snapshot. Accessors reading the plan's
+# `state` would evaluate the old map with the new controls and move every such
+# cell to another model point. So whenever a synchronization changes a control,
+# the pairs are rebound to a copy of `state` (`_own_controls`) that no later
+# synchronization writes, and a snapshot keeps the map it was taken from. A
+# rollback restores the old pairs with their own copy. Nothing here runs under
+# AD: the accessors and their pullbacks only see a different state object of the
+# same type.
+_own_controls(s::S) where {S} =
+    S((f === :sources ? copy(getfield(s, f)) : getfield(s, f) for f in fieldnames(S))...)
+_own_controls(s::BRMJointAdaptiveCenteringState{N}) where {N} =
+    BRMJointAdaptiveCenteringState{N}(
+        _own_controls(s.ranef), _own_controls(s.hsgp), _own_controls(s.level),
+        _own_controls(s.scalar), _own_controls(s.car), _own_controls(s.cdar),
+        s.n_ranef, s.n_r2d2, s.n_hsgp, s.n_level, s.n_scalar, s.n_car)
+
+_state_controls(s) = s.sources
+_state_controls(s::BRMJointAdaptiveCenteringState) =
+    (s.ranef.sources, s.hsgp.sources, s.level.sources, s.scalar.sources,
+     s.car.sources, s.cdar.sources)
+
+_with_state(arg::A, state) where {A} = A(state, arg.pair_number)
+
+function _bind_own_controls!(state, ir)
+    isempty(ir.pairs) && return ir
+    bound = _centering_state(ir)
+    bound !== state && _state_controls(bound) == _state_controls(state) && return ir
+    own = _own_controls(state)
+    ir.pairs .= [idx => WarmupHMC.Reparametrization(value.target, value.source,
+                                                    (_with_state(a, own) for a in value.args)...)
+                 for (idx, value) in ir.pairs]
+    ir
+end
 
 # Containing blocks first (snag brm-zone-8-adapt-1b407672): a cell centred on a
 # containing cell's effect reads that cell's source, which WarmupHMC's inverse

@@ -235,19 +235,23 @@ end
          for ((idx, _), c) in zip(wrapped_ir.pairs, restored)],
     )
     @test [value.source.c for (_, value) in wrapped_ir.pairs] == restored
-    @test wrapped_state.sources == restored
+    # Restoring synchronizes the accessors. Synchronization rebinds them to their
+    # own copy of the controls instead of writing the state they held, so a
+    # snapshot of the old pairs keeps the old map (snag read-brm-s-ordin-8860f258):
+    # read the state from the pairs again.
+    @test AC_EXT._centering_state(wrapped_ir).sources == restored
 
     copied = deepcopy(wrapped)
     copied_ir = WarmupHMC.reparametrizer(copied)
-    copied_state = copied_ir.pairs[1][2].args[1].state
-    @test copied_state !== wrapped_state
+    copied_state = AC_EXT._centering_state(copied_ir)
+    @test copied_state !== AC_EXT._centering_state(wrapped_ir)
     copied_state.sources .= -1.0
     WarmupHMC.restore_reparam_sources!(
         copied,
         [idx => WarmupHMC.PartiallyCentered(0.0) for (idx, _) in copied_ir.pairs],
     )
-    @test copied_state.sources == zeros(length(restored))
-    @test wrapped_state.sources == restored
+    @test AC_EXT._centering_state(copied_ir).sources == zeros(length(restored))
+    @test AC_EXT._centering_state(wrapped_ir).sources == restored
 end
 
 @testset "BridgeStan scalar random intercept adapts through the public wrapper" begin
@@ -459,7 +463,10 @@ end
          for ((idx, _), c) in zip(wir.pairs, restored)],
     )
     @test [value.source.c for (_, value) in wir.pairs] == restored
-    @test vcat(wstate.ranef.sources, wstate.hsgp.sources) == restored
+    # Read from the pairs again: synchronization rebinds the accessors to their own
+    # controls (snag read-brm-s-ordin-8860f258).
+    live = AC_EXT._centering_state(wir)
+    @test vcat(live.ranef.sources, live.hsgp.sources) == restored
 
     # The joint accessors are new differentiated code: stress them past the
     # historical GC-corruption threshold like the family accessors.
