@@ -758,10 +758,10 @@ function _brm_svi_unit_design(rng, d)
     Matrix(F.Q) .* (sqrt(d) .* [r < 0 ? -1.0 : 1.0 for r in diag(F.R)]')
 end
 
-# Unit gradient evaluations per visit of unit i under the run's controls.
+# Unit-gradient attempts per visit, including the auxiliary baseline when used.
 _brm_svi_unit_calls(q, i, c) =
-    _brm_svi_unit_curvature_mode(c) === :orthogonal && _brm_svi_dense_unit(q, i) ?
-        2length(q.M[i]) : 2
+    (_brm_svi_unit_curvature_mode(c) === :orthogonal && _brm_svi_dense_unit(q, i) ?
+        2length(q.M[i]) : 2) + _brm_svi_coupling_baseline_calls(q, i, c)
 # Controls written before `unit_curvature` existed (a checkpoint of BRM 0.2.242
 # or earlier) keep the single pair.
 _brm_svi_unit_curvature_mode(c) = get(c, :unit_curvature, :pair)
@@ -1020,7 +1020,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
         sites=nothing, site_scale=1.0, rank_step=1.0, curvature=:pair, site_step=β,
         structured_step=β, structured_rank=1.0, positive_part=true, sd_bound=nothing,
-        coupling_scale=1.0)
+        coupling_scale=1.0, coupling_baseline=true)
     D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
@@ -1042,9 +1042,19 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     centering = _brm_svi_centering(t)
     frame = centering === nothing ? nothing : _brm_svi_centering_frame(centering, t, g)
     centered = Vector{Any}(nothing, length(batch))
+    use_baseline = coupling_baseline && coupling !== nothing &&
+        any(i -> !isempty(coupling.V[i]), batch)
+    baselines = use_baseline ? [zeros(length(t.units[i])) for i in batch] : nothing
+    baseline_target = use_baseline ? _brm_svi_coupling_baseline_target(t) : nothing
+    baseline_frame = use_baseline ?
+        _brm_svi_coupling_baseline_frame(centering, baseline_target, q) : nothing
     _brm_svi_each_unit(eachindex(t.plans), length(batch)) do worker, k
         plan, work = t.plans[worker], t.work[worker]
         i, εi = batch[k], draws[k]
+        if use_baseline && !isempty(coupling.V[i])
+            _brm_svi_coupling_baseline!(baselines[k], baseline_target, q, i,
+                centering, baseline_frame, plan, work)
+        end
         touched = _brm_svi_unit_touched(t, i)
         zmean = _brm_svi_coupled_mean(coupling, q, i, ζs === nothing ? nothing : ζs[k])
         if εi isa AbstractMatrix
@@ -1117,8 +1127,11 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     _brm_svi_bound_sd!(q, _brm_svi_sd_prior_of(t), sd_bound)
     _brm_svi_each_unit(t.plans, length(batch)) do _, k
         # The coupling steps with the factor it was drawn from, before that moves.
-        coupling === nothing || _brm_svi_coupling_step!(coupling, q, batch[k], terms[k].gz,
-            ζs[k], coupling_scale * coupling.step)
+        if coupling !== nothing
+            gradient = use_baseline ? terms[k].gz .- baselines[k] : terms[k].gz
+            _brm_svi_coupling_step!(coupling, q, batch[k], gradient,
+                ζs[k], coupling_scale * coupling.step)
+        end
         S = curvatures[k]
         S === nothing ?
             _brm_svi_unit_step!(q, batch[k], terms[k].gz, terms[k].gd, draws[k],
@@ -1311,7 +1324,7 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
         settle_windows=nothing, unit_curvature=:pair,
         structured_unit_step=unit_step, structured_rank_step=1.0, unit_positive_part=true,
         sd_bound=_BRM_SVI_SD_BOUND, trend_windows=_brm_svi_default_trend_windows(patience),
-        stationarity=true)
+        stationarity=true, coupling_baseline=true, coupling_warmup=true)
     B = min(batch_size, N)
     W = window === nothing ? max(cld(N, B), 100) : window
     # A default iterate-gated run may need more than 100 windows, especially
@@ -1323,7 +1336,8 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
        max_iterations, lr_global, unit_step, polish_lr, patience, min_windows,
        polish_windows, unit_sampling, settle_windows, unit_curvature, structured_unit_step,
        structured_rank_step, unit_positive_part, sd_bound, trend_windows,
-       trend_skip=patience, stationarity, budget_polish=stationarity)
+       trend_skip=patience, stationarity, budget_polish=stationarity,
+       coupling_baseline, coupling_warmup)
 end
 
 # The windows exploration's trend test reads when the caller names none
@@ -1436,6 +1450,9 @@ function _brm_svi_advance!(run, t, c)
     polishing = _brm_svi_polishing(run)
     settling = !polishing && _brm_svi_settling(run, c)
     scale = polishing ? 1 / sqrt(1 + (it - run.polish_start) / W) : 1.0
+    # Establish the independent factors before learning their dependence. Older
+    # checkpoints lack this control and retain their immediate coupling updates.
+    coupling_scale = get(c, :coupling_warmup, false) && !(polishing || settling) ? 0.0 : scale
     q = run.q
     batch = _brm_svi_batch(run.rng, run.sampler, c.batch_size)
     polishing && _brm_svi_average_units!(run.average, q, run.averaged_through,
@@ -1455,7 +1472,8 @@ function _brm_svi_advance!(run, t, c)
             structured_step=scale * _brm_svi_structured_unit_step(c),
             structured_rank=_brm_svi_structured_rank_step(c),
             rank_step=polishing || settling ? _brm_svi_rank_step_ratio(c) : 1.0,
-            sd_bound=_brm_svi_sd_bound_factor(c), coupling_scale=scale)
+            sd_bound=_brm_svi_sd_bound_factor(c), coupling_scale,
+            coupling_baseline=_brm_svi_coupling_baseline(c))
     catch e
         e isa BRMSVINonfiniteError || rethrow()
         throw(BRMSVINonfiniteError(it, e.terms))
@@ -1835,7 +1853,10 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   [`LinearCoupling`](@ref): every unit's factor is conditional on the globals,
   its mean linear in the global factor's standard-normal draw at the globals
   the unit's term reads, learned with the fit, on the unit coordinates learned
-  centering does not centre (`@plate` cell latents among them). It keeps the
+  centering does not centre (`@plate` cell latents among them). Fresh runs hold
+  the coupling at zero during exploration and learn it in settling and
+  polishing, using a mean-point gradient baseline to reduce update noise.
+  It keeps the
   dependence between a population value and units the data pin only together,
   which independent factors lose: their population intervals then shrink to the
   noise over all rows. `diagnostics.coupling` reports each unit's coupled rows and
@@ -2087,9 +2108,12 @@ clock). Under the ELBO-only rule, `converged` can still accompany `settled=false
 The variational parameters `q`, the packed positions of the
 global coordinates (`globals`), `seconds` of optimization in this call,
 `threads` (the tasks this call used), `target` (below), the units' sampling
-probabilities, work, visits and draw counts (`sampling`), the actual
-`unit_gradient_calls` (2 per visit of a unit, 2d per visit of a dense unit of
-d coordinates under `unit_curvature = :orthogonal`), the prepared `model`, and the run's `optimizer` state
+probabilities, work, visits and draw counts (`sampling`), and
+`unit_gradient_calls` (2 attempts per visit of a unit, 2d per visit of a dense
+unit of d coordinates under `unit_curvature = :orthogonal`, plus one auxiliary
+mean-point gradient attempt for a unit with coupling). An unusable auxiliary
+point uses a zero baseline and still counts as an attempt. Diagnostics also
+hold the prepared `model` and the run's `optimizer` state
 ([`brm_svi_optimizer_checkpoint`](@ref) copies it). The draws come from a copy
 of the optimizer's random stream: they do not advance `rng`, and a continued
 run is unaffected by them. Learned centering can recover population spread

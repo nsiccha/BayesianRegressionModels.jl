@@ -31,24 +31,32 @@
 #     ∂ELBO/∂V_i = E[∇_{z_i} log p ζ_iᵀ].
 #
 # Its natural gradient, with Fisher Λ_i ⊗ I, is Λ_i⁻¹ E[∇ log p ζᵀ]. One visit
-# sees one ζ, so V takes a regularized normalized least-mean-squares step
+# sees one ζ, so V takes a dimension-scaled stochastic natural-gradient step
 #
-#     V_i += β Λ_i⁻¹ ∇̄ ζ_iᵀ / (‖ζ_i‖² + k_i),     k_i = dim(ζ_i),
+#     V_i += β Λ_i⁻¹ (∇̄ - b_i) ζ_iᵀ / (2k_i),     k_i = dim(ζ_i),
 #
 # with ∇̄ the unit's gradient averaged over its antithetic draws (its pair, or
-# its orthogonal design). On a target quadratic in (g, z_i) that gradient is
-# -Λ_i (V_i - V_i*) ζ_i plus a part independent of this visit's ζ_i: the error
-# the unit's mean took up at its previous visit, (V_i - V_i*) ζ_prev, since a
-# whole natural-gradient step puts M_i + V_i ζ_prev at that draw's conditional
-# mode. So V_i* is the fixed point at any number of globals, the step moves V_i
-# about a fraction β / 2k_i of the way to it per visit, and its noise vanishes
-# with V_i - V_i*. Dividing by ‖ζ_i‖² alone (the plain normalized step) turns that
-# carried error into a ratio of normals, ζ_prev / ζ, whose variance is infinite
-# for one coupled global: on the known-scale random intercept in
-# test/nlme_svi_linear_coupling.jl, whose marginal sd is a small difference of
-# large precisions, it ended at 0.89 of the exact sd. A step that would move the
+# its orthogonal design). The denominator is deterministic: dividing by a norm
+# of this same ζ weights the ELBO gradient by its own draw and changes its fixed
+# point on nonlinear targets. For example, z|g ~ Normal(a*g^3, 1), g ~ Normal(0, 1)
+# has optimal linear slope 3a, but division by (g^2 + 1) gives about 1.904a.
+# Scaling by 2k keeps a typical step comparable without that weighting. The
+# baseline b_i is the unit gradient at the current global and unit means,
+# independent of this visit's ζ, so E[b_i ζ_iᵀ] = 0. On a quadratic conditional
+# of precision H_i it removes the mean's error exactly, leaving
+# -H_i (V_i - V_i*) ζ_i. Thus V_i* is the fixed point at any number of globals.
+# When Λ_i = H_i, the expected unclipped step moves V_i a fraction β / 2k_i
+# of the way to it per visit, and its noise
+# vanishes with V_i - V_i*, even while the unit mean remains far from its mode.
+# A step that would move the
 # unit's conditional mean at a typical ζ by more than one sd of its factor is
 # shortened, as the mean's step is (`_BRM_SVI_UNIT_MEAN_TRUST`).
+#
+# Fresh runs hold V_i at zero during exploration, establishing the independent
+# factors before learning their dependence in settling and polishing. On the
+# event/Kalman regression, coupling from the start sent the globals toward a
+# poor region even with the baseline; independent exploration avoids that path.
+# The run records both policies so older optimizer checkpoints keep theirs.
 #
 # The coupling is linear: first order in the globals. Where the data pin units
 # so tightly that a population value's posterior sd is a small difference of large
@@ -74,15 +82,19 @@ global factor's draw, `z_i = M_i + V_i ζ + U_i⁻ᵀ ε_i` for ζ the global dr
 standard normals at the globals the unit's term reads (and the global factor's
 rank part), on the unit's coordinates that learned centering does not centre
 (`@plate` cell latents among them; a centred cell follows the globals through its
-own map). `V_i` is learned with the fit by a normalized natural-gradient step
-of size `step` (about `step / 2k` of the way to its fixed point per visit, for
-`k` coupled globals) whenever the unit is in the batch, from zero, so a coupling that
-the data do not need stays near zero. It keeps the dependence between a
+own map). Fresh fits hold `V_i` at zero during exploration, then learn it when
+the unit is in the batch during settling and polishing. Its scaled
+natural-gradient step has size `step` (about `step / 2k` of the way to its
+quadratic fixed point per visit, for `k` coupling noise components), with a
+mean-point gradient baseline that removes noise from unsettled unit means.
+It keeps the dependence between a
 population value and the units that the data pin only together, whatever the
 model's authoring, which independent factors lose. The global factor's and the
 units' entropies are unchanged by it. A streaming checkpoint carries each unit's
 prior conditional on the globals it was coupled to. Pass `coupling=nothing` for
-independent global and unit factors. Optimizer continuation keeps the saved policy.
+independent global and unit factors. Optimizer continuation keeps the saved
+activation and baseline policies; checkpoints predating these controls retain
+immediate updates without the baseline.
 """
 struct LinearCoupling
     step::Float64
@@ -102,6 +114,58 @@ function _brm_svi_resolve_coupling(coupling)
 end
 
 _brm_svi_coupling(q) = hasproperty(q, :coupling) ? q.coupling : nothing
+
+# Older optimizer checkpoints retain their baseline policy and call count.
+_brm_svi_coupling_baseline(c) = get(c, :coupling_baseline, false)
+_brm_svi_coupling_baseline_calls(q, i, c) =
+    _brm_svi_coupling_baseline(c) && _brm_svi_coupling(q) !== nothing &&
+        !isempty(q.coupling.V[i]) ? 1 : 0
+
+# The field term reads neighboring units drawn conditional on this iteration's
+# global noise. It cannot be part of a baseline independent of that noise. The
+# observation and ordinary prior terms at the variational mean still can.
+_brm_svi_coupling_baseline_target(t) = t
+_brm_svi_coupling_baseline_target(t::NamedTuple) = merge(t, (; fields=nothing))
+
+function _brm_svi_coupling_baseline_frame(centering, t, q)
+    centering === nothing && return nothing
+    try
+        _brm_svi_centering_frame(centering, t, q.μ)
+    catch e
+        (e isa DomainError || e isa OverflowError) || rethrow()
+        missing
+    end
+end
+
+# E[b ζ'] = 0 for a baseline b fixed before this global draw. Removing the
+# mean-point gradient prevents an unsettled unit mean from creating arbitrary
+# global-unit dependence. The auxiliary point need not be in the density's
+# domain: a zero baseline is also valid. Actual draw evaluations retain their
+# ordinary non-finite checks and errors.
+function _brm_svi_coupling_baseline!(b, t, q, i, centering, frame, plan, work)
+    fill!(b, 0.0)
+    frame === missing && return b
+    gg, _ = _brm_svi_global_buffers(work, length(t.globals))
+    try
+        value = if centering === nothing
+            _brm_svi_unit_local!(gg, b, t, i, q.μ, q.M[i], plan, work)
+        else
+            first(_brm_svi_centered_unit_term!(gg, b, centering, frame, t, q, i,
+                q.μ, q.M[i], plan, work))
+        end
+        isfinite(value) && all(isfinite, b) || fill!(b, 0.0)
+    catch e
+        (e isa DomainError || e isa OverflowError) || rethrow()
+        fill!(b, 0.0)
+    finally
+        # Reuse the worker's sparse global buffer without changing the visit's
+        # actual gradients, including when the auxiliary point is unusable.
+        for p in _brm_svi_unit_touched(t, i)
+            gg[p] = 0.0
+        end
+    end
+    b
+end
 
 # The globals (positions in `t.globals`) unit i's factor is coupled to: those its
 # term reads, and those its learned-centering locations read.
@@ -190,9 +254,9 @@ function _brm_svi_coupling_step!(coupling, q, i, ∇̄, ζ, β)
     a = _brm_svi_coupling_direction(q, i, rows, ∇̄)
     all(isfinite, a) || throw(ArgumentError(
         "brm_svi: non-finite unit gradient in its coupling step"))
-    den = n2 + length(ζ)
+    den = 2length(ζ)
     # At a fresh ζ' the conditional mean moves by ΔV ζ', whose rms in the
-    # factor's sds is β ‖∇̄_R‖ / ‖ζ‖ in the direction's metric.
+    # factor's sds is β sqrt(∇̄_R' a) ‖ζ‖ / den.
     reach = sqrt(max(dot(view(∇̄, rows), a), 0.0)) * sqrt(n2) / den
     reach > 0 || return q
     β = min(β, _BRM_SVI_UNIT_MEAN_TRUST / reach)

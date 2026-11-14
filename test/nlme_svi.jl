@@ -133,8 +133,10 @@ end
         @test sampling.method == method
         @test sum(sampling.draws) == 18
         # 2d evaluations per visit of a dense unit of d coordinates (the default
-        # orthogonal design), 2 per visit of any other.
+        # orthogonal design), 2 per visit of any other, plus one mean-point
+        # gradient for each unit with nonempty coupling.
         calls = [U isa Matrix ? 2max(size(U, 1), 1) : 2 for U in fit.diagnostics.q.U]
+        calls .+= [!isempty(V) for V in fit.diagnostics.q.coupling.V]
         @test fit.diagnostics.unit_gradient_calls == sum(sampling.visits .* calls)
         @test all(sampling.probabilities .> 0)
         @test all(isfinite, fit.draws)

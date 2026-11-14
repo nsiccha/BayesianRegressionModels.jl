@@ -5,7 +5,7 @@
 #   `steps = step_mean .+ step_spread .* z`), against independently sampled NUTS;
 # - a Gaussian random intercept with known scales, where the coupled family holds
 #   the exact posterior, against its closed-form population sd;
-# - the coupling step on an exact quadratic target, against its fixed point.
+# - the coupling step against exact quadratic and nonlinear conditional optima.
 # RUN: julia --project=test test/nlme_svi_linear_coupling.jl [filter...]
 include(joinpath(@__DIR__, "nlme_fixtures.jl"))
 using Random, Statistics, LinearAlgebra, WarmupHMC, TreeArrays, MCMCDiagnosticTools
@@ -18,7 +18,7 @@ end
 @stestset "linear coupling: the step's fixed point on a quadratic target" begin
     # One unit of d coordinates, k coupled globals, an exact Gaussian conditional:
     # ∇ log p at z = M + V ζ is -Λ (V - V*) ζ when M and Λ match the target. Each
-    # normalized step moves V a fraction β/k of the way in expectation.
+    # unclipped step moves V a fraction β/(2k) of the way in expectation.
     rng = Xoshiro(7)
     d, k = 3, 4
     A = randn(rng, d, d)
@@ -40,6 +40,31 @@ end
     ζ = randn(rng, k)
     BRM._brm_svi_coupling_step!(c, q, 1, 1e6 .* ones(d), ζ, 1.0)
     @test sqrt(tr(c.V[1]' * Λ * c.V[1])) <= 1 + 1e-9
+end
+
+# A nonlinear conditional whose best linear variational mean is known exactly:
+# g ~ Normal(0, 1), p(z|g) = Normal(a*g^3, 1), q(z|g) = Normal(V*g, 1).
+# Its ELBO is constant - E[(a*g^3 - V*g)^2]/2, so V* = 3a. Averaging the
+# conditional +/- unit draws leaves the exact mean gradient a*g^3 - V*g.
+# Integrate the actual optimizer step to check its fixed point, with a small
+# step so the trust bound is inactive. Normalizing by this same draw's norm
+# biases the optimum even though it preserves every quadratic target's optimum.
+@stestset "linear coupling: nonlinear conditional preserves the ELBO optimum" begin
+    q = (; M=[zeros(1)], Λ=[ones(1, 1)], U=[ones(1, 1)])
+    c = (; step=0.5, columns=[[1]], rows=[[1]], V=[zeros(1, 1)])
+    a, β, h = 0.01, 0.001, 0.004
+    function expected_step(slope)
+        total = 0.0
+        for g in -8:h:8
+            c.V[1] .= slope
+            BRM._brm_svi_coupling_step!(c, q, 1, [a*g^3 - slope*g], [g], β)
+            total += (only(c.V[1]) - slope) / β * pdf(Normal(), g) * h
+        end
+        total
+    end
+    @test abs(expected_step(3a)) < 1e-9
+    @test expected_step(0.0) > 0
+    @test expected_step(6a) < 0
 end
 
 # A Gaussian random intercept with known group sd and noise sd: the posterior is

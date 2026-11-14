@@ -72,6 +72,30 @@ states = findall(n -> occursin(".field.", n), names)
     check_whole_model(t, rk, m)
 end
 
+@testset "the coupling baseline is independent of neighboring field draws" begin
+    m = brm_nlme_model(rk; ad_backend=FIELD_AD, subject_group=:site, unit_partition=:connected)
+    t = BRM._brm_svi_target(m; field_states=:units, separator=:none)
+    q = BRM._brm_svi_params(t, m.unit[t.globals], MeanFieldGlobal();
+        global_scale=0.1, unit_scale=1.0)
+    i = findfirst(i -> !isempty(t.fields.blanket[i + 1]), eachindex(t.units))
+    neighbor = first(t.fields.blanket[i + 1])
+    baseline_target = BRM._brm_svi_coupling_baseline_target(t)
+    values = map((-0.1, 0.3)) do offset
+        u = copy(m.unit)
+        u[t.units[neighbor]] .+= offset
+        BRM._brm_svi_field_joint!(t, u)
+        b = zeros(length(q.M[i]))
+        BRM._brm_svi_coupling_baseline!(b, baseline_target, q, i, nothing, nothing,
+            first(t.plans), first(t.work))
+        gg, gz = zeros(length(q.μ)), zeros(length(q.M[i]))
+        BRM._brm_svi_unit_term!(gg, gz, t, i, q.μ, q.M[i])
+        (; baseline=copy(b), full_gradient=gz)
+    end
+    @test values[1].baseline == values[2].baseline
+    # Positive control: the field contribution really does depend on those draws.
+    @test norm(values[1].full_gradient - values[2].full_gradient) > 1e-6
+end
+
 @testset "a state read by two units stays global" begin
     two = station_data(; stations=4, seed=3)
     # Move s2's reads onto s1's position: a state both read at the same time is shared.
