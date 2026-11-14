@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.308
+
+- `brm_model_view(model; id)` names the view's elements, so one page can show
+  several views, including two of the same model, without repeating an id. The
+  view's tab set takes `id` and the Source tab's nested definition tabs take
+  `<id>-source`, so the tabs' `aria-controls` and `aria-labelledby` and a
+  `#<id>` link reach exactly that view. Every input kind takes it (`BRMBuilder`,
+  `BRMComponent`, `BRMI`, `BRMDescriptor`, `RKBRMI`). Before, the view passed no
+  id, so each tab set took HTMXObjects' default, which is derived from what its
+  tabs show: two cards showing one model, even under different titles, shared
+  every tab-set, tab and panel id. Omitting `id` keeps that default. An empty
+  `id`, one with whitespace or a non-string one is refused with an
+  `ArgumentError`. The nested definition tab bar's accessible name now carries
+  the view's title (`"<title> source"`, was `"Model and component source"`),
+  like the details tab bar's `"<title> details"`.
+
 ## 0.2.307
 
 - **Breaking:** BRM requires WarmupHMC 0.3 (`[compat] WarmupHMC = "0.3"`, was

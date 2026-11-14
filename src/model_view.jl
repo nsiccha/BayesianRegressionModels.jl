@@ -1,11 +1,18 @@
 """
-    brm_model_view(model; title="Model")
+    brm_model_view(model; title="Model", id=nothing)
 
 An inspectable model declaration, with data/parameter roles and value ranks.
 Load `HTMXObjects` to enable this view. It returns an HTMXObjects semantic
 tree, usable as a route result or inside another page, with HTML, Markdown
 and plain-text projections. Authored declaration docstrings and their source
 provenance come from [`brm_documentation`](@ref).
+
+`id` names this view's elements: its tab set takes `id` and the Source tab's
+nested definition tabs take `<id>-source`, so ARIA references and `#id` links
+reach exactly this view. Pass a distinct `id` to each view when one page shows
+several. Without it, each tab set takes HTMXObjects' default id, which is
+derived from what its tabs show, so views of the same model share their ids.
+An `id` must be a non-empty string without whitespace.
 
 Pass a `BRMI`, a data-free `BRMBuilder` or `BRMComponent`, a prepared `RKBRMI`,
 or an existing `BRMDescriptor`. Reachable component source comes from

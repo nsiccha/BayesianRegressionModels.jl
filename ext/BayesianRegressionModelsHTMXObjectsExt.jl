@@ -15,6 +15,28 @@ _role(::Val{:component}) = "Derived · component result"
 _role(::Val{:prior_modifier}) = "Prior specification"
 _role(::Val{R}) where R = _role(R)
 
+# Every element id in a view derives from its `id`: the details tab set takes it
+# as is and the Source tab's nested definition tabs take `<id>-source`. Without
+# one, HTMXObjects derives each tab set's default id from its tab labels and
+# panel contents, so two views of one model share every id (aria-controls then
+# names the first copy). `id=nothing` keeps that default rather than passing it.
+_tabset_id(::Nothing) = (;)
+_tabset_id(id::AbstractString) = (; id)
+_child_id(::Nothing, _) = nothing
+_child_id(id::AbstractString, suffix) = string(id, "-", suffix)
+_view_id(::Nothing) = nothing
+# An HTML id is non-empty and contains no whitespace (HTML Living Standard,
+# "the id attribute"); every derived id extends this one.
+function _view_id(id::AbstractString)
+    if isempty(id) || any(isspace, id)
+        throw(ArgumentError("brm_model_view: `id` must be a non-empty HTML id " *
+            "without whitespace, got $(repr(id))"))
+    end
+    String(id)
+end
+_view_id(id) = throw(ArgumentError(
+    "brm_model_view: `id` must be a string or `nothing`, got a $(typeof(id))"))
+
 _rank(::Nothing) = "Unknown"
 _rank(n::Integer) = string(n)
 _shape(::Nothing, ::Nothing) = "Not inferred"
@@ -105,7 +127,7 @@ function _component_definitions(records)
     definitions
 end
 
-function _source_panel(source, components; root_definition=nothing)
+function _source_panel(source, components; title, id=nothing, root_definition=nothing)
     isempty(components) && return SemanticCode(:julia, source)
     definitions = _component_definitions(components)
     names = [string(record.scope, ".", nameof(record.definition)) for record in definitions]
@@ -132,12 +154,13 @@ function _source_panel(source, components; root_definition=nothing)
     HTMXObjects.h.div(
         SemanticProse("Each component definition is shown once, with its call-instance paths. " *
             "Paths identify authored call sites; plate iterations share that site."),
-        tabset(panels...; url_param=nothing, label="Model and component source"))
+        tabset(panels...; url_param=nothing, label=string(title, " source"),
+            _tabset_id(_child_id(id, "source"))...))
 end
 
-function _declaration(facts; title, note, extra=(), data_title="Data")
+function _declaration(facts; title, id, note, extra=(), data_title="Data")
     panels = Pair{String,Any}[
-        "Source" => _source_panel(facts.source, facts.components),
+        "Source" => _source_panel(facts.source, facts.components; title, id),
         "Roles and ranks" => HTMXObjects.h.div(
             _inventory(data_title, facts.inputs; empty="No bound data inputs."),
             _inventory("Model quantities", facts.quantities), extra...),
@@ -146,11 +169,12 @@ function _declaration(facts; title, note, extra=(), data_title="Data")
     isnothing(documentation) || push!(panels, "Documentation" => documentation)
     SemanticSection(title,
         SemanticProse(note),
-        tabset(panels...; url_param=nothing, label=string(title, " details")))
+        tabset(panels...; url_param=nothing, label=string(title, " details"),
+            _tabset_id(id)...))
 end
 
-function BRM.brm_model_view(model::BRM.BRMI; title="Model")
-    _declaration(BRM._brm_view_facts(model); title,
+function BRM.brm_model_view(model::BRM.BRMI; title="Model", id=nothing)
+    _declaration(BRM._brm_view_facts(model); title, id=_view_id(id),
         note="Roles come from the bound declaration. Rank is the number of value axes: " *
              "0 scalar, 1 vector, 2 matrix. Unknown means inspection has no value-shape " *
              "metadata; it does not mean scalar. Supplied backend metadata can resolve " *
@@ -158,7 +182,8 @@ function BRM.brm_model_view(model::BRM.BRMI; title="Model")
              "the supplied descriptor records their shape; inspection never evaluates them.")
 end
 
-function BRM.brm_model_view(builder::BRM.BRMBuilder; title="Model")
+function BRM.brm_model_view(builder::BRM.BRMBuilder; title="Model", id=nothing)
+    id = _view_id(id)
     inputs = [BRM._brm_view_record(name, :input;
         detail="Potential data input; observation/parameter role depends on binding.")
         for name in BRM.brm_columns(builder)]
@@ -172,10 +197,12 @@ function BRM.brm_model_view(builder::BRM.BRMBuilder; title="Model")
     SemanticSection(title,
         SemanticProse("Unbound declaration. Bind data to determine observed versus latent " *
             "quantities; supply a prepared backend for inferred parameter dimensions."),
-        tabset(panels...; url_param=nothing, label=string(title, " details")))
+        tabset(panels...; url_param=nothing, label=string(title, " details"),
+            _tabset_id(id)...))
 end
 
-function BRM.brm_model_view(component::BRM.BRMComponent; title="Model component")
+function BRM.brm_model_view(component::BRM.BRMComponent; title="Model component", id=nothing)
+    id = _view_id(id)
     inputs = [(; input=string(name),
         passing=name in component.keywords ? "Keyword" : "Positional",
         requirement=haskey(component.defaults, name) ? "Optional" : "Required",
@@ -183,7 +210,7 @@ function BRM.brm_model_view(component::BRM.BRMComponent; title="Model component"
         for name in BRM.brm_columns(component)]
     panels = Pair{String,Any}[
         "Source" => _source_panel(string(component), BRM.brm_components(component);
-            root_definition=component),
+            title, id, root_definition=component),
         "Component inputs" => SemanticSection("Component inputs",
             SemanticProse("Default expressions are shown without evaluation. " *
                 "An omitted optional input uses its authored default at the call site."),
@@ -194,7 +221,8 @@ function BRM.brm_model_view(component::BRM.BRMComponent; title="Model component"
     SemanticSection(title,
         SemanticProse("Reusable component definition. Each call owns its local declarations " *
             "and reads the explicit inputs below. Inspection does not bind data or prepare a backend."),
-        tabset(panels...; url_param=nothing, label=string(title, " details")))
+        tabset(panels...; url_param=nothing, label=string(title, " details"),
+            _tabset_id(id)...))
 end
 
 _logical_role(output) = !(output.role in (:posterior_predictive, :pointwise_loglik, :membership))
@@ -212,7 +240,8 @@ function _descriptor_candidates(d, logical, row)
     filter(_logical_role, BRM._brm_submodel_carriers(d, only(entries), row.name))
 end
 
-function BRM.brm_model_view(d::BRM.BRMDescriptor; title="Model")
+function BRM.brm_model_view(d::BRM.BRMDescriptor; title="Model", id=nothing)
+    id = _view_id(id)
     facts = BRM._brm_view_facts(d.plan.parent)
     logical = Dict{Symbol,Vector{BRM.BRMOutput}}()
     for output in d.outputs
@@ -243,7 +272,7 @@ function BRM.brm_model_view(d::BRM.BRMDescriptor; title="Model")
             labels=isnothing(o.labels) ? "None" : join(o.labels, ", "),
             segment_ends=isnothing(o.segments) ? "None" : join(o.segments, ", ")))
         for o in d.outputs]
-    _declaration(facts; title,
+    _declaration(facts; title, id,
         note="Prepared Stan descriptor. Carrier ranks and dimensions below describe constrained " *
              "values, not the number of free parameters. Logical quantities and their " *
              "generated carriers are listed separately.",
@@ -252,11 +281,12 @@ function BRM.brm_model_view(d::BRM.BRMDescriptor; title="Model")
             SemanticDisclosure("Carrier details", details...)))
 end
 
-function BRM.brm_model_view(rk::BRM.RKBRMI; title="Model")
+function BRM.brm_model_view(rk::BRM.RKBRMI; title="Model", id=nothing)
+    id = _view_id(id)
     parameters = BRM._brm_view_rk_parameters(rk)
     facts = BRM._brm_view_facts(BRM.brm_source(rk))
     if isnothing(parameters)
-        return _declaration(facts; title, data_title="Declaration data",
+        return _declaration(facts; title, id, data_title="Declaration data",
             note="This RK replay shares an earlier build. The source and data below belong " *
                  "to the original declaration. Current parameter dimensions are unresolved: " *
                  "the retained layout describes a different binding. Viewing does not bind " *
@@ -285,7 +315,7 @@ function BRM.brm_model_view(rk::BRM.RKBRMI; title="Model")
             shape=_shape(shape, length(shape)))
             for (i, shape) in enumerate(p.element_shapes)]))
         for p in parameters if !isnothing(p.element_shapes)]
-    _declaration(facts; title, data_title="Declaration data",
+    _declaration(facts; title, id, data_title="Declaration data",
         note="Prepared RK model. Parameter ranks describe constrained values; free coordinates " *
              "are counted separately. Backend parameter paths include generated coefficient " *
              "carriers and cell latents; they are separate from the declaration's quantities. " *
