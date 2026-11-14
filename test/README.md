@@ -7,7 +7,9 @@ replays. It checks exact module input names, read-only data, reuse of computed
 values, native binding/checkpoint identity stability, and native/JAX densities
 and gradients against independent formulas. Set `RK_JAX_PYTHON` to a Python with
 JAX for the numerical module checks. `rk_jax.jl` covers the broader module
-contract, and `jax_module_driver.jl` uses the same public accessor.
+contract, including retained plate vectors from one module on fitted and
+replay data with different subject/visit counts, and `jax_module_driver.jl`
+uses the same public accessor. The retained-vector check requires RK 0.1.231.
 
 `seal_density_dependence.jl` checks both grey-seal model forms against Vanko
 et al. (2026): birth and pregnancy boundary identities, compiled gradients

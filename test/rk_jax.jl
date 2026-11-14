@@ -226,30 +226,36 @@ end
 
 # A `@plate` cell's collected value (`conc`, one vector per subject, read
 # from the sampled `log_CL`) in `values`, which `constrain` returns flat.
-# Not built yet (capability gap): the emitted plate iterates
-# `eachindex(dose)` and its cells read `t[i]`, so RK's JAX flatten finds no
-# prepared ragged input carrying the cells' lengths ("flattening a ragged
-# value whose lengths are not those of a prepared ragged input"; RK
-# `356142a62`). Todo `2026-10-24T11-58-45-172-1e0pxzp`.
+# RK 0.1.231 preserves the lengths from `t[i]` even when the emitted plate
+# iterates another vector. Reuse one module across a fitted model and a replay
+# with different subject/visit counts (snag jax-source-value-c55e9b6f).
 @testset "a plate cell's collected value in `values`" begin
     rk = RKBRMI(JM.pk(PK))
-    src = try
-        jax_source(rk.model, rk_bound_plan(rk); values=(:conc,))
-    catch e
-        e isa JAXEmissionError || rethrow()
-        nothing
-    end
-    @test_broken src isa JAXSource
-    if src === nothing
-        # nothing to evaluate until the module emits
-    elseif rk_jax_available()
-        u = point(rk)
-        bound = rk_bound_data(rk)
-        conc = ReactiveKernels.prepare(rk.model.spec;
-            have=(:unconstrained, keys(bound)...), want=(:conc,), bound)
-        native = first(Base.invokelatest(conc, u))
-        r = rk_jax_evaluate(src, "constrain", (u, raw_inputs(rk, src)...); prepare=true)
-        @test r.value["conc"] ≈ reduce(vcat, native) rtol=1e-12
+    src = jax_source(rk.model, rk_bound_plan(rk); values=(:conc,))
+    @test src isa JAXSource
+    if rk_jax_available()
+        for (binding, data) in ((rk, PK), (reprocess(rk, PK_DESIGN), PK_DESIGN))
+            plan = rk_bound_plan(binding)
+            conc = prepare_query(binding.model, plan, (:conc,))
+            log_cl = prepare_query(binding.model, plan, (:log_CL,))
+            density = prepare_query(binding.model, plan, :sampler)
+            for shift in (0.0, 0.2, -0.3)
+                u = point(binding) .+ shift
+                cl = Base.invokelatest(log_cl, u)
+                expected = [data.dose[i] * exp(-exp(cl[i]) * t)
+                    for i in eachindex(data.dose) for t in data.t[i]]
+                native = Base.invokelatest(conc, u)
+                @test native ≈ expected rtol=1e-12
+                r = rk_jax_evaluate(src, "constrain", (u, raw_inputs(binding, src)...);
+                    prepare=:arguments)
+                @test r.value["conc"] ≈ native rtol=1e-12
+                @test length(r.value["conc"]) == sum(length, data.t)
+                r = rk_jax_evaluate(src, "log_density", (u, raw_inputs(binding, src)...);
+                    grad=true, prepare=:arguments)
+                @test r.value ≈ Base.invokelatest(density, u) rtol=1e-12
+                @test r.grad ≈ rk_fd_gradient(v -> Base.invokelatest(density, v), u) rtol=1e-6 atol=1e-6
+            end
+        end
     else
         @test_skip "RK_JAX_PYTHON names no Python with jax"
     end

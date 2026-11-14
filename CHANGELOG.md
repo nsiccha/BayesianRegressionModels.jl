@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.296
+
+- RKBRMI's JAX module can return retained vector outputs from a `@plate`
+  through `jax_source(...; values=(:name,))`, including when the visit lengths
+  come from a different input than the plate iterator. Author `name[i] = ...`
+  in the cell; `constrain` returns the vectors concatenated in cell order.
+  Bare local assignments remain scratch. Requires ReactiveKernels 0.1.231;
+  the test environment pins its published repair `0a9ca6bb`.
+
 ## 0.2.295
 
 - RKBRMI predictive replays size an omitted scalar response in a `@plate`

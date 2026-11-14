@@ -435,4 +435,5 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # no longer exports `adaptive_centering_problem`, which is BRM's.
 # RK 0.1.224 / RKPPL 0.1.174 / DistributionKernels 0.1.10: native
 # Categorical, Poisson, Binomial and Bernoulli emission density objects.
-rev = "87f5bc58439e04fc4f997879e752b38a87c218cb"
+# RK 0.1.231: retain per-field ragged lengths when exporting plate values.
+rev = "0a9ca6bb5ad50b6efd1049c3fc1dd6609e068e77"
