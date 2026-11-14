@@ -54,9 +54,15 @@ end
 # order, not merely agree to a tolerance.  WarmupHMC selects a discrete winner
 # after every window, so a one-ulp accessor drift can redirect the rest of an
 # otherwise deterministic run.
+#
+# From WarmupHMC 0.3.0 an accessor receives the earlier margins at their MODEL
+# values `v[l] = t * m[l] + C[l,l]^t * z[l]` (`warmuphmc-use` §5c), so the
+# innovations are recovered with the block's compiled `t`, never a source
+# control: `z[l] = (v[l] - t * m[l]) / C[l,l]^t`.
 function materialized_block_location(x, state, pair_number)
     bi, k, g = AC_EXT._pair_location(state, pair_number)
     block = state.blocks[bi]
+    t = block.target_c
     C = BayesianRegressionModels._adaptive_block_cholesky(x, block)
     z = Vector{eltype(C)}(undef, k)
     m = zero(eltype(C))
@@ -66,9 +72,7 @@ function materialized_block_location(x, state, pair_number)
             m += C[i, l] * z[l]
         end
         if i < k
-            p = state.pair_lookup[bi][i, g]
-            c = state.sources[p]
-            z[i] = (x[block.effects[i, g]] - c * m) / C[i, i]^c
+            z[i] = (x[block.effects[i, g]] - t * m) / C[i, i]^t
         end
     end
     m
@@ -322,9 +326,9 @@ end
             # `≈`, and do not restore a gradient-vs-gradient comparison here — equal
             # primals from equal operation orders is strictly stronger than equal
             # derivatives, and reverse-mode accuracy is gated separately in
-            # `adaptive_centering_bridgestan.jl` (exact for K<=2, ADAPTIVE_GRADIENT_
-            # ATOL for K>=3).  An AD-vs-AD check here would only add a weaker
-            # duplicate: this loop runs K in 1:4, where Enzyme reassociates.
+            # `adaptive_centering_bridgestan.jl` (ADAPTIVE_GRADIENT_ATOL at every
+            # K).  An AD-vs-AD check here would only add a weaker duplicate: this
+            # loop runs K in 1:4, where Enzyme reassociates.
         end
     end
 end

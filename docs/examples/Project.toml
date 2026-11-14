@@ -25,7 +25,7 @@ BridgeStan = "2.9"
 Enzyme = "0.13"
 PSIS = "0.9"
 PowerScaling = "0.1.0"
-WarmupHMC = "0.2"
+WarmupHMC = "0.3"
 julia = "1.10"
 
 [sources.BayesianRegressionModels]
@@ -40,9 +40,9 @@ rev = "c9504e9911da428cec94389f98f9757455321ab7"
 url = "https://github.com/nsiccha/StanBlocks.jl"
 
 [sources.Treebars]
-rev = "c02aa16ab1b08e4f5283597fe678a88e69555cd1"
+rev = "44c37e60e22bab9e8a0d3ab88bd47b575dec6bb0"
 url = "https://github.com/nsiccha/Treebars.jl"
 
 [sources.WarmupHMC]
-rev = "0194dce08e986ff17fd5a788bb315c6431b7858e"
+rev = "68a6cc24e9ab0dee76ca5f8ab3b27c2052be8aec"
 url = "https://github.com/nsiccha/WarmupHMC.jl"
