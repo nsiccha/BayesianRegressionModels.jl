@@ -2741,8 +2741,47 @@ function _brm_formula_call_head(x::Expr)
         "mean exactly the plain ones, because formula arithmetic applies per row.")
     plain
 end
+# A formula call's head resolves as any Julia call's does: a local of the
+# block first, then a global of the module the block is written in (`mod` for
+# `brm(source; mod)`). A module variable named like a wrapper or a family
+# (`censored = value .< limit` in a script) is such a global: it shadows the
+# binding `using BayesianRegressionModels` brings in, and the node would carry
+# the variable's value as its callable into a backend, which can only report
+# that it does not lower that "distribution". A written head (a name or
+# `A.b`) is therefore checked where the formula is built: a value with no call
+# method is refused with the name, where it is bound and what it holds
+# (snag `rkbrmi-shadowed-035220a8`). A spliced value is left as it is.
+_brm_formula_callee_expr(head) = head
+_brm_formula_callee_expr(head::Symbol) = Expr(:call, _brm_formula_callee,
+    QuoteNode(head), head, Expr(:macrocall, Symbol("@__MODULE__"), LineNumberNode(0)))
+_brm_formula_callee_expr(head::Expr) =
+    Meta.isexpr(head, :., 2) && last(head.args) isa QuoteNode ?
+        Expr(:call, _brm_formula_callee, QuoteNode(head), head, nothing) : head
+
+_brm_formula_callee(_name, f::Union{Function,Type}, _mod) = f
+function _brm_formula_callee(name, @nospecialize(f), mod)
+    isempty(methods(f)) || return f
+    error(_brm_formula_callee_message(name, f, mod))
+end
+
+function _brm_formula_callee_message(name, @nospecialize(f), mod)
+    shown = sprint(Base.show_unquoted, name)
+    global_binding = name isa Symbol && mod isa Module && isdefined(mod, name) &&
+        getglobal(mod, name) === f
+    bound = global_binding ? "module `$mod` binds `$shown` to a $(summary(f))" :
+        "`$shown` holds a $(summary(f)) where the block reads it"
+    brm = @__MODULE__
+    own = name isa Symbol && name !== nameof(brm) && isdefined(brm, name) ?
+        getglobal(brm, name) : nothing
+    remedy = own isa Union{Function,Type} ?
+        " This binding shadows `$brm.$shown`, the $(own isa Type ? "type" : "function") " *
+        "the formula means: rename the variable, or write the call as `$brm.$shown(...)`." :
+        " Rename the variable, or bind `$shown` to the function or type the formula calls."
+    "@brm: the formula calls `$shown(...)`, but $bound, which cannot be called.$remedy"
+end
 _x(x::Expr) = if x.head == :call
-    Expr(:call, ExprColumn, _x(_brm_formula_call_head(x)), _x.(x.args[2:end])...) |> fixcall
+    Expr(:call, ExprColumn, _brm_formula_callee_expr(_x(_brm_formula_call_head(x))),
+         _x.(x.args[2:end])...) |> fixcall
 elseif _is_nested_brm(x)
     Expr(:call, NestedPredictorFormula, _x(_nested_brm_payload(x)))
 elseif x.head ==  :||

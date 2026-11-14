@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.300
+## 0.2.303
 
 - A Laplace problem (`brm_laplace_problem`: whole-model, row-structured and
   sparse) now keeps its last mode search with the population point it was made
@@ -26,6 +26,85 @@ instead of failing at run time.
   blocks at each continuation stage boundary, where the last stage stopped
   without a step, instead of assembling them again at the same point: about a
   fifth of its Hessian assemblies. Values are unchanged.
+
+## 0.2.302
+
+- A formula call whose head is bound to a value that cannot be called is
+  refused when the model is built, by `@brm` and `brm(source; mod)` alike. A
+  call's head resolves where the block is written, a local first and then a
+  global of the module, so a script variable named like a wrapper or a family
+  (`censored = value .< limit`) shadows the binding `using
+  BayesianRegressionModels` brings in. The builder used to carry the
+  variable's value as the call's function, and each backend then refused it
+  with a message about its own lowering: RKBRMI `response `y` distribution
+  keywords are unsupported`, SBBRMI `distribution `Bool[1, 0, 0]` needs a Stan
+  translation for constructor keywords (:lower,)`. The message now names the
+  call, where its head is bound and what it holds and, when BRM binds the same
+  name, says that the variable shadows it and to rename the variable or write
+  the call qualified:
+
+  ```
+  @brm: the formula calls `censored(...)`, but module `Main.Shadowed` binds
+  `censored` to a 3-element Vector{Bool}, which cannot be called. This
+  binding shadows `BayesianRegressionModels.censored`, the function the
+  formula means: rename the variable, or write the call as
+  `BayesianRegressionModels.censored(...)`.
+  ```
+
+  A head that is a function, a type or a value with a call method builds as
+  before, and a value spliced into a `brm` source with `$` is not checked.
+  **Breaking** only for a block that built a model whose call head could not
+  be called: such a model failed in every backend. `test/shadowed_call_head.jl`.
+
+## 0.2.301
+
+- `RKBRMI` accepts an infinite entry in a per-row response bound column on a
+  formula response, as `SBBRMI` and the RK value route already did: `-Inf` in a
+  `lower` column and `Inf` in an `upper` column (also an `interval_censored`
+  upper end) mark a row without that bound. Before, a formula response such as
+  `mu ~ 1 + x; y ~ censored(Normal(mu, 1); lower = lo)` with `lo = [0.1, -Inf]`
+  raised `RK backend: column `lo` must be finite`, while declarations that
+  route through value assignments built. ReactiveKernelsPPL (0.1.134 and
+  later) drops that side of the row's evidence in both the value and the
+  gradient. NaN and the opposite side's infinity are still refused, now with a
+  message naming the bound. A column the model also reads elsewhere (a
+  covariate, say), or reads as both a lower and an upper bound, must stay
+  finite, because an infinity there is not an absent bound.
+  `test/rk_infinite_censoring_bounds.jl` checks censored, two-sided,
+  truncated, interval-censored and Student-t responses against independent
+  oracles and SBBRMI's Stan density (snag `rkbrmi-censored-995e238d`).
+
+## 0.2.300
+
+- `brm_svi_fit`'s cost per iteration no longer grows with the number of units
+  when the units' `@plate` cells declare latents. A target over a model's units
+  (`unit_partition = :subjects`, the default) evaluated each unit on the NLME
+  model's observation partition. That partition declares to ReactiveKernelsPPL
+  the NLME view's owners, and the view leaves cell latents shared, while SVI
+  gives each to the unit whose cells read it. RKPPL computes shared values once
+  into a prefix that each unit's call reuses while the coordinates it reads
+  stay put. A unit's draws move its own latents on every call, so every call
+  recomputed that prefix over all units' latents, copied it and pulled its
+  gradient back. When SVI's ownership gives units coordinates the view leaves
+  shared, the target now prepares its own partition with that ownership
+  declared, as a connected target already did. Values, gradients and fits are
+  unchanged. On the public event toy of `test/nlme_svi_events_fixture.jl` (365
+  days per unit, batch 4, `coupling = nothing`, ReactiveKernels 0.1.239):
+  - one unit's partition gradient, timed in one process: 84.5 against 82.4 µs
+    at 64 units, 98.7 against 62.4 µs at 1,024;
+  - per iteration over 2,000 iterations, the three sizes run side by side:
+    11.7 / 12.1 / 14.0 ms at 64 / 256 / 1,024 units before, 13.1 / 12.4 /
+    12.2 ms after. At 64 units that is within this host's spread between runs
+    (9.3 to 12.3 ms before, 11.5 to 13.1 after);
+  - the first fit on a model prepares the extra partition once: 16 s at 64
+    units, 21 s at 1,024.
+- The steeper growth reported on BRM 0.2.286 with ReactiveKernels 0.1.223 (22
+  to 94 ms per iteration from 64 to 1,024 units on that toy) came from
+  ReactiveKernels up to 0.1.228. Every partition gradient call there re-ran the
+  row calculations that size a cell's `@scan` outputs, over every row.
+  ReactiveKernels 0.1.229 removed that (`1a737a3c7`), and BRM's floor of
+  0.1.231 already requires it. An environment that pins an older
+  ReactiveKernels with an older BRM still pays it.
 
 ## 0.2.299
 

@@ -147,3 +147,28 @@ function _brm_svi_ownership(m; global_coordinates=nothing, previous=nothing, fie
     end
     (; owner, globals, units, factors, promoted, absent)
 end
+
+# The observation partition a target over the view's units evaluates its units on.
+# The model's own partition declares to RKPPL the view's owners, which leave
+# shared what this ownership gives a unit besides its effects: `@plate` cell
+# latents, the sampled locals of a component called in a cell, unit-owned field
+# states. RKPPL computes shared values once into a prefix that every unit's call
+# reuses while the coordinates it reads stay put. A unit's draws move its own
+# coordinates on every call, so with them shared the prefix never stayed valid:
+# each unit call recomputed it, copied it and pulled its gradient back, at a cost
+# that grows with every unit's coordinates. On the event toy of
+# test/nlme_svi_events_fixture.jl, 86.8 of the 86.8 prefix reads of an iteration
+# recomputed it. Declaring this ownership keeps those coordinates out of the
+# prefix, as the connected target's partition does (`_brm_svi_partition`,
+# src/nlme_svi_regroup.jl): 2.4 of 86.8 recompute it, once per new draw of the
+# globals and where consecutive units read different globals. A model whose
+# units own only their effects keeps the model's partition.
+function _brm_svi_view_partition(m, ownership)
+    any(j -> ownership.owner[j] > 0 && m.view.subject[j] == 0, eachindex(ownership.owner)) ||
+        return m.cell_gradient, m.view
+    view = (; subject=ownership.owner, coordinates=m.view.coordinates,
+        subject_coordinates=ownership.units, unit_partition=m.view.unit_partition,
+        factor_supports=m.view.factor_supports)
+    partitioned = _rk_nlme_partitioned(m.backend, ownership.owner)
+    _brm_nlme_partition_queries(m.backend, m.cell_query, view, m.unit, partitioned), view
+end

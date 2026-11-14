@@ -619,6 +619,17 @@ bound scenarios compare normalized densities and gradients against independent
 CDF, CCDF and density calculations. Run it with
 `julia --project=. test/infinite_censoring_bounds.jl` or the test environment.
 
+`rk_infinite_censoring_bounds.jl` is its RKBRMI counterpart on the formula
+(structural) route: per-row `-Inf` lower and `Inf` upper bound entries on
+censored, two-sided, truncated, interval-censored and Student-t (sampled scale
+and degrees of freedom) responses. Each case checks the value against an
+independent Distributions.jl oracle, the native Enzyme Reverse gradient against
+its central differences, the same model with ±1e300 stand-ins for every
+infinity, and SBBRMI's compiled Stan density and gradient. It also checks that
+NaN, the opposite side's infinity, a bound column also read as a covariate and
+a column read as both a lower and an upper bound stay refused. Run it with the
+test environment; its `@stestset` blocks accept substring filters.
+
 `kernel_ragged_broadcast.jl` checks Stan source emission and stanc acceptance
 for modeled secondary-axis arguments in plain and nested dotted calls. It
 covers interleaved rows, shared random effects, empty groups, raw-data controls
@@ -1018,6 +1029,16 @@ without string templating:
   definitions and mutation are refused;
 - fragments a package defines compose in another package's precompile workload,
   where the evaluating route fails with "closed module".
+
+`shadowed_call_head.jl` checks that a formula call whose head is bound to a
+value that cannot be called is refused when the model is built, through `@brm`
+and `brm(source; mod)` with the same message: a module variable named like the
+`censored` wrapper or the `Normal` family, a local of the code around `@brm`,
+and a qualified `M.name` head. The message names the call, where the head is
+bound and what it holds, and, when BRM binds the name, the shadowed binding and
+the rename and qualify remedies. As controls, the unshadowed module and the
+qualified `BayesianRegressionModels.censored(...)` call build the same Stan
+program, and a callable struct passes. It needs no Stan compiler.
 
 `kernel_population_lp.jl` checks per-subject linear predictors without a random
 effect (a typical value plus covariates) read as `x[i]`, beside a random-effect

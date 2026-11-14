@@ -120,7 +120,7 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
     # One strict partition sampler per worker; sparse selection metadata shares
     # globals and retains only each unit's local permutation and merge slots.
     partition, partition_view = connected ? _brm_svi_partition(m, ownership) :
-        (m.cell_gradient, m.view)
+        _brm_svi_view_partition(m, ownership)
     plan = _brm_nlme_partition_plan(partition, m.unit, globals, partition_view; units)
     places = _brm_svi_footprint_places(plan.footprints, globals, units, length(m.unit))
     fields = isempty(inventory) ? nothing : _brm_svi_unit_fields(m, ownership, inventory, globals, units)
