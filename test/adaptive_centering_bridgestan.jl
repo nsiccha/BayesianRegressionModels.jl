@@ -56,9 +56,14 @@ end
 #     materializing `L` and `C`, but it preserves that graph's multiplication
 #     association exactly, so no primal value moves.
 #
-#   * the GRADIENT is bit-exact only for K<=2, which is the hand-rolled Enzyme
-#     reverse pass this change does not touch.  At K>=3 it agrees to ~1 ulp.
-#     The materialized reference accumulates every `dC[i,j]` into an adjoint
+#   * the GRADIENT agrees to ~1 ulp at every K.  For K<=2 the hand-rolled
+#     reverse pass (BayesianRegressionModelsWarmupHMCEnzymeExt) differentiates
+#     the map as a function of the source, while WarmupHMC >= 0.3.0's generic
+#     path, which the materialized reference takes, differentiates it through
+#     the model point (`warmuphmc-use` §5c): the same terms in another order.
+#     It was bit-exact while accessors read sampler values (WarmupHMC 0.2), and
+#     already drifted by 1 ulp under the dogfood Enzyme (todo 192j9xu).  At K>=3
+#     the materialized reference accumulates every `dC[i,j]` into an adjoint
 #     MATRIX and only then reduces it into `dtau`/`dL` in one fixed pass; an
 #     accessor that never builds `C` has no such buffer to defer into, so
 #     Enzyme associates the same terms in a different order.  Float addition is
@@ -119,11 +124,7 @@ const ADAPTIVE_GRADIENT_ATOL = 1e-10
         actual = LogDensityProblems.logdensity_and_gradient(wrapped, x)
         expected = LogDensityProblems.logdensity_and_gradient(reference, x)
         @test isequal(actual[1], expected[1])
-        if K <= 2
-            @test isequal(actual[2], expected[2])
-        else
-            @test actual[2] ≈ expected[2] atol=ADAPTIVE_GRADIENT_ATOL rtol=ADAPTIVE_GRADIENT_ATOL
-        end
+        @test actual[2] ≈ expected[2] atol=ADAPTIVE_GRADIENT_ATOL rtol=ADAPTIVE_GRADIENT_ATOL
 
         allocated = @allocated LogDensityProblems.logdensity_and_gradient(wrapped, x)
         reference_allocated =
@@ -134,7 +135,7 @@ const ADAPTIVE_GRADIENT_ATOL = 1e-10
     end
 end
 
-@testset "two-term BridgeStan target is bit-exact" begin
+@testset "two-term BridgeStan target: exact density, gradient to rounding" begin
     sb = SBBRMI(slope_builder(df); total_groups=(), mod=@__MODULE__)
     problem = StanBlocks.stan_instantiate(sb.model)
     unc_names = StanBlocks.BridgeStan.param_unc_names(problem.model)
@@ -159,7 +160,9 @@ end
 
     actual = LogDensityProblems.logdensity_and_gradient(wrapped, x)
     expected = LogDensityProblems.logdensity_and_gradient(materialized, x)
-    @test isequal(actual, expected)
+    @test isequal(actual[1], expected[1])
+    @test actual[2] ≈ expected[2] atol=ADAPTIVE_GRADIENT_ATOL rtol=ADAPTIVE_GRADIENT_ATOL
+    @test isequal(ir(x), materialized_ir(x))
 end
 
 @testset "BridgeStan target differentiates through the mixed correlated frame" begin
@@ -235,11 +238,11 @@ end
          for ((idx, _), c) in zip(wrapped_ir.pairs, restored)],
     )
     @test [value.source.c for (_, value) in wrapped_ir.pairs] == restored
-    # Restoring synchronizes the accessors. Synchronization rebinds them to their
-    # own copy of the controls instead of writing the state they held, so a
-    # snapshot of the old pairs keeps the old map (snag read-brm-s-ordin-8860f258):
-    # read the state from the pairs again.
-    @test AC_EXT._centering_state(wrapped_ir).sources == restored
+    # Restoring synchronizes the state the frames read. The accessors read no
+    # control (WarmupHMC 0.3.0 hands them earlier cells at their model values),
+    # so the pairs keep the one state they were built with.
+    @test AC_EXT._centering_state(wrapped_ir) === wrapped_state
+    @test wrapped_state.sources == restored
 
     copied = deepcopy(wrapped)
     copied_ir = WarmupHMC.reparametrizer(copied)
@@ -463,10 +466,8 @@ end
          for ((idx, _), c) in zip(wir.pairs, restored)],
     )
     @test [value.source.c for (_, value) in wir.pairs] == restored
-    # Read from the pairs again: synchronization rebinds the accessors to their own
-    # controls (snag read-brm-s-ordin-8860f258).
-    live = AC_EXT._centering_state(wir)
-    @test vcat(live.ranef.sources, live.hsgp.sources) == restored
+    @test AC_EXT._centering_state(wir) === wstate
+    @test vcat(wstate.ranef.sources, wstate.hsgp.sources) == restored
 
     # The joint accessors are new differentiated code: stress them past the
     # historical GC-corruption threshold like the family accessors.

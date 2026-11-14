@@ -19,9 +19,14 @@ const SmallIndexedReparametrization = WarmupHMC.IndexedReparametrization{
     Vector{Pair{Int,SmallReparametrization}},
 }
 
-# This pullback deliberately mirrors Enzyme's own floating-point graph because
-# WarmupHMC makes discrete centering decisions from these gradients. Enzyme
-# 0.13.200 changed tanh's derivative from `seed / cosh(x)^2` to
+# This pullback differentiates the map as a function of the source `x`: term 2's
+# location reads term 1's innovation `(u - c * m) / C11^c` from its source. It
+# keeps the operation order of Enzyme's graph of WarmupHMC's per-pair map as it
+# was while accessors read sampler values. From WarmupHMC 0.3.0 the generic path
+# differentiates through the model point instead (term 1's compiled value, then
+# its own map), the same derivative summed in another order: the two agree to
+# rounding, a few entries one ulp apart, as the block-level pass below does.
+# Enzyme 0.13.200 changed tanh's derivative from `seed / cosh(x)^2` to
 # `(1 - tanh(x)^2) * seed`; the two are algebraically equal but not bit-equal.
 const ENZYME_TANH_PULLBACK_FROM_PRIMAL = pkgversion(Enzyme) >= v"0.13.200"
 
@@ -98,7 +103,7 @@ function LogDensityProblems.logdensity_and_gradient(
             else
                 first_pair = state.pair_lookup[bi][1, group]
                 first_location = state.pair_location[first_pair]
-                c = state.sources[first_pair]
+                c = problem.reparametrizer.pairs[first_pair].second.source.c
                 u = x[block.effects[1, group]]
                 m = zero(T)
                 first_location == 0 || (m = m + x[first_location])
@@ -221,8 +226,9 @@ function LogDensityProblems.logdensity_and_gradient(
     },
     x::AbstractVector,
 ) where {N,P,B}
-    _blockwise_logdensity_and_gradient(problem,
-        first(problem.reparametrizer.pairs).second.args[1].state, x)
+    state = first(problem.reparametrizer.pairs).second.args[1].state
+    _refresh_sources!(state.sources, state, problem.reparametrizer)
+    _blockwise_logdensity_and_gradient(problem, state, x)
 end
 
 function LogDensityProblems.logdensity_and_gradient(
@@ -235,10 +241,27 @@ function LogDensityProblems.logdensity_and_gradient(
     if state.n_hsgp + state.n_level + state.n_scalar + state.n_car +
             length(state.cdar.sources) == 0 &&
             !any(AC_EXT._block_mixed, state.ranef.blocks)
+        # Every pair is a random-effect pair here.
+        _refresh_sources!(state.ranef.sources, state, problem.reparametrizer)
         return _blockwise_logdensity_and_gradient(problem, state.ranef, x)
     end
     invoke(LogDensityProblems.logdensity_and_gradient,
         Tuple{WarmupHMC.ReparametrizedProblem,AbstractVector}, problem, x)
+end
+
+# The blockwise objective reads each pair's control from the state's flat
+# `sources` (a read of the pairs inside the differentiated loop would be the
+# Julia 1.10 GC hazard `_block_location` describes). The map itself takes the
+# controls from the pairs, and nothing guarantees a `synchronize!` after every
+# change of the pairs (a rejected centering update restores the old ones), so
+# the state is brought in line with the pairs first: `sources[i]` is the
+# control `_sync_sources!(state, ir)` wrote for pair `i`. Reads only, unless they
+# differ.
+function _refresh_sources!(sources, state, ir)
+    for (i, (_, value)) in enumerate(ir.pairs)
+        sources[i] == value.source.c || return AC_EXT._sync_sources!(state, ir)
+    end
+    ir
 end
 
 function _blockwise_logdensity_and_gradient(problem, state, x)
@@ -258,10 +281,11 @@ function _blockwise_logdensity_and_gradient(problem, state, x)
 end
 
 # `sum(seed[i] * y[i]) + log|J|` over the plan's pairs, `y` the map of each pair
-# in WarmupHMC's per-pair spelling (`warmuphmc-use` §5c) with the location and
-# log-scale `_block_location` and the log-scale accessor compute. Only flat
-# arrays and an `NTuple{N}` of innovations are read inside the loops, the
-# Julia 1.10 rule `_block_location` states.
+# in WarmupHMC's per-pair spelling (`warmuphmc-use` §5c) as a function of the
+# SOURCE `x`: an earlier margin's innovation is recovered from its source,
+# `(u - c * loc) / s^c`, the number `_block_location` reads off its model value.
+# Only flat arrays and an `NTuple{N}` of innovations are read inside the loops,
+# the Julia 1.10 rule `_block_location` states.
 function _blockwise_objective(x, state, seed)
     acc = zero(eltype(x))
     for bi in eachindex(state.blocks)
@@ -294,8 +318,8 @@ function _blockwise_objective(x, state::AC_EXT._BRMRanefCenteringState{N}, bi,
             c = state.sources[lookup[j, g]]
             index = block.effects[j, g]
             u = x[index]
-            # The pair's source-frame location (`AC_EXT._with_location`).
-            loc = AC_EXT._with_location(m, x, state, lookup[j, g])
+            # The pair's source-frame location (`AC_EXT._source_location`).
+            loc = AC_EXT._source_location(m, x, state, lookup[j, g])
             j < K && (innovations = Base.setindex(innovations, (u - c * loc) / s^c, j))
             log_scale = AC_EXT._log_cell_scale(s, x, block, j, zero(T))
             acc += seed[index] * (t * loc + (u - c * loc) * exp(log_scale * (t - c)))

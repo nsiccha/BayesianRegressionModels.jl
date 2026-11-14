@@ -1,16 +1,20 @@
 # test/adaptive_centering_window_transport.jl — the window-end transport keeps
 # every cell's model point (snag read-brm-s-ordin-8860f258).
 #
-# A location accessor re-applies earlier cells' maps with their controls: a
-# correlated block's earlier margins, a nested cell's containing grouping. At a
+# A location reads earlier cells: a correlated block's earlier margins, a nested
+# cell's containing grouping, a correlated grouped HSGP's earlier levels. At a
 # restarting window WarmupHMC snapshots the old map as
 # `IndexedReparametrization(copy(ir.pairs))`, commits the new controls, runs the
 # scoring plan's `synchronize!`, and only then transports the retained pool and
 # the active point through the snapshot. The snapshot must therefore still be
-# the old map after the synchronization. Before the fix its accessors read the
-# plan's state, so a cell whose OWN control did not change moved to another
-# model point whenever an earlier cell's control did (0.31 on a K = 3 block,
-# 0.35 on a nested grouping).
+# the old map after the synchronization. In BRM 0.2.297 the accessors re-applied
+# the earlier cells' maps with controls read from the plan's state, so a cell
+# whose OWN control did not change moved to another model point whenever an
+# earlier cell's control did (0.31 on a K = 3 block, 0.35 on a nested grouping);
+# 0.2.298 rebound the pairs to their own copy of the controls. From WarmupHMC
+# 0.3.0 an accessor reads earlier cells at their model values and BRM's read no
+# control at all, so the pairs keep the one state they were built with
+# (todo 08c6jet).
 #
 # The oracles do not use the wrapper's accessors after the change: the old
 # map's values are taken BEFORE the controls move, and the end-to-end check
@@ -43,6 +47,7 @@ controls_of(ir) = [value.source.c for (_, value) in ir.pairs]
 # control does not change.
 function check_window_boundary(rp, x, new, stay)
     ir = WarmupHMC.reparametrizer(rp)
+    bound = AC_EXT._centering_state(ir)
     old_ljac, old_y = ir(x)
     snapshot = WarmupHMC.IndexedReparametrization(copy(ir.pairs))
     ir.pairs .= with_controls(ir.pairs, new)
@@ -63,9 +68,7 @@ function check_window_boundary(rp, x, new, stay)
     WarmupHMC._restore_reparametrization!(ir, snapshot)
     WarmupHMC._synchronize_scoring!(rp)
     @test ir(x) == (old_ljac, old_y)
-    # A synchronization that changes no control keeps the accessors.
-    bound = AC_EXT._centering_state(ir)
-    WarmupHMC._synchronize_scoring!(rp)
+    # No synchronization rebinds the accessors.
     @test AC_EXT._centering_state(ir) === bound
 end
 
@@ -95,8 +98,8 @@ LogDensityProblems.logdensity(::FlatTarget, y) = -sum(abs2, y) / 2
     AC_EXT._sync_sources!(state, ir)
     rp = WarmupHMC.ReparametrizedProblem(ir, FlatTarget(length(names)), AutoEnzyme();
                                          scoring_plan=AC_EXT._candidate_scoring_plan(state))
-    # The map's accessors own their controls: no synchronization writes them.
-    @test AC_EXT._centering_state(ir) !== state
+    # The accessors keep the state they were built with.
+    @test AC_EXT._centering_state(ir) === state
     x = randn(Xoshiro(20261114), length(names))
     x[block.log_scales] .= log.([0.8, 1.3, 0.6])
     terms = [state.pair_terms[p] for p in eachindex(ir.pairs)]

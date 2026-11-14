@@ -102,7 +102,9 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "44c37e60e22bab9e8a0d3ab88bd47b575dec6bb0"),
     # 0.2.11: public covariance projection used by selective SMC carries.
     # 0.2.19 satisfies ReactiveKernelsPPL 0.1.168's SMC extension floor.
-    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "6da3299e09e14547ceb922461c71e4d833e21658"),
+    # 0.3.0: accessors read earlier pairs at their model values, which BRM's
+    # centering accessors require (todo 08c6jet).
+    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "68a6cc24e9ab0dee76ca5f8ab3b27c2052be8aec"),
     ("SequentialMonteCarlo", "https://github.com/awllee/SequentialMonteCarlo.jl.git", "d3a322394c7a1df07e3b5e941acc2960f4daf656"),
     # Current plain-function/array PPL surface, with data-only declaration inputs
     # retained before predictor inlining (computed membership axes; 606d76d0),
