@@ -11,7 +11,9 @@ provenance come from [`brm_documentation`](@ref).
 nested definition tabs take `<id>-source`, so ARIA references and `#id` links
 reach exactly this view. Pass a distinct `id` to each view when one page shows
 several. Without it, each tab set takes HTMXObjects' default id, which is
-derived from what its tabs show, so views of the same model share their ids.
+derived from what its tabs show and, from HTMXObjects 0.1.118, from its tab
+bar's name, which carries `title`. Two views of one model under one title then
+share their ids; with an older HTMXObjects, views under different titles do too.
 An `id` must be a non-empty string without whitespace.
 
 Pass a `BRMI`, a data-free `BRMBuilder` or `BRMComponent`, a prepared `RKBRMI`,
