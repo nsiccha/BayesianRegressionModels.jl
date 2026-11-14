@@ -8,6 +8,7 @@ using Test
 using Logging: Warn
 using BayesianRegressionModels
 using StanBlocks
+using TreeArrays  # loads brm_predictive_tree
 using Distributions: Exponential, LKJCholesky, Normal
 
 joint_builder = @brm begin
@@ -700,4 +701,69 @@ end
     joint_code = BayesianRegressionModels.stan_code(joint_prior)
     @test occursin("total_mu", joint_code) && occursin("total_eta", joint_code)
     @test !occursin("r_mu", joint_code) && !occursin("r_eta", joint_code)
+end
+
+# An omitted response forward-simulates the bare `y` AND emits its `y_gen`
+# alias twin (one draw, two names). Both are generated quantities owned by the
+# observation, so both carry `role=:posterior_predictive`; the descriptor
+# resolves `y` to the twin, and `:predict` returns only the twin. The
+# predictive readers draw exactly what `:predict` returns, one entry per
+# response, so prior-predictive draws are `brm_predictive_draws(d, zeros(n, 0);
+# problem, seed)` on the dimension-zero program (snag prior-predictive-356a4e3b:
+# before BRM 0.2.305 the bare carrier collided with the twin as "ambiguous
+# logical response names").
+@testset "omitted response: predictive draws read the twin :predict returns" begin
+    prior_descriptor(builder, df) = @test_logs (:warn, r"unconditioned \(prior\) program") match_mode=:any brm_descriptor(
+        builder, df; mod=@__MODULE__)
+
+    single = @brm begin
+        sigma ~ Exponential(1)
+        mu ~ 1 + x
+        y ~ Normal(mu, sigma)
+    end
+    x = [-1.0, 0.0, 1.0, 2.0, 3.0]
+    d = prior_descriptor(single, (; x))
+    # The shape that collided: two predictive carriers, one logical response.
+    @test Set(o.name for o in brm_outputs(d; role=:posterior_predictive)) == Set((:y, :y_gen))
+    @test brm_operation(d, :predict).outputs == (:y_gen,)
+    problem = brm_execute(d, :instantiate)
+    @test StanBlocks.LogDensityProblems.dimension(problem) == 0
+    pp = brm_predictive_draws(d, zeros(6, 0); problem, seed=11)
+    @test keys(pp) == (:y,)
+    @test size(pp.y) == (6, length(x))
+    @test all(isfinite, pp.y)
+    @test pp.y == brm_predictive_draws(d, zeros(6, 0); problem, seed=11).y
+    @test pp.y != brm_predictive_draws(d, zeros(6, 0); problem, seed=12).y
+    tree = brm_predictive_tree(d, zeros(6, 0); problem, seed=11)
+    @test parent(tree.y) == pp.y
+
+    # A censored response with an independent retained bound: draws clamp at
+    # it (brm-use, held-out-and-prior-draws), so the draw at a finite bound is
+    # never below it and some sit exactly on it.
+    censored_model = @brm begin
+        sigma ~ Exponential(1)
+        nu ~ Gamma(2.0, 10.0)
+        mu ~ 1 + x
+        y ~ censored(LocationScale(mu, sigma, TDist(nu)); lower = ylow)
+    end
+    ylow = [-Inf, 0.5, -Inf, 1.0, 0.0]
+    dc = prior_descriptor(censored_model, (; x, ylow))
+    problem_c = brm_execute(dc, :instantiate)
+    @test StanBlocks.LogDensityProblems.dimension(problem_c) == 0
+    yc = brm_predictive_draws(dc, zeros(200, 0); problem=problem_c, seed=5).y
+    @test size(yc) == (200, length(x))
+    known = findall(isfinite, ylow)
+    @test all(yc[:, known] .>= permutedims(ylow[known]))
+    @test any(yc[:, known] .== permutedims(ylow[known]))
+
+    # Mixed bound/unbound: `y` fits and `z` forward-simulates beside it, so
+    # `:predict` returns `y_gen` and `z_gen`, and the bare `z` stays out.
+    dm = @test_logs (:warn, r"bind\(s\) no data column") match_mode=:any brm_descriptor(
+        joint_builder, (; x=joint_df.x, y=joint_df.y); mod=@__MODULE__)
+    problem_m = brm_execute(dm, :instantiate)
+    dim_m = StanBlocks.LogDensityProblems.dimension(problem_m)
+    @test dim_m > 0
+    pm = brm_predictive_draws(dm, zeros(3, dim_m); problem=problem_m, seed=3)
+    @test Set(keys(pm)) == Set((:y, :z))
+    @test size(pm.y) == size(pm.z) == (3, length(joint_df.x))
 end
