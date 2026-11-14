@@ -2841,6 +2841,22 @@ finite differences, and that `c = 1` samples the level weights themselves. It
 also checks the learned-order wrapper, the controls report, the multigroup
 refusal and a short `adaptive_warmup_mcmc` run on the two-axis shape.
 
+`adaptive_centering_window_transport.jl` checks that WarmupHMC's window-end
+transport keeps every cell's model point when an earlier cell's control
+changes (snag `read-brm-s-ordin-8860f258`). Those are a correlated block's
+later margins, a nested grouping's cells, the joint wrapper's Student-t
+margins and a correlated grouped HSGP's later levels. It replays the boundary in WarmupHMC's order (snapshot of the old
+pairs, new controls, the plan's `synchronize!`, transport) and also runs
+WarmupHMC's own `find_reparametrization!` on the nested model, against a
+`deepcopy` of the old map. Per shape it checks:
+
+- the snapshot still computes the old map, bit for bit;
+- the transported point has the old model point;
+- a cell whose own control did not change keeps its coordinate;
+- the scoring frames read the new controls;
+- a rollback restores the old map;
+- a synchronization that changes no control keeps the accessors.
+
 `adaptive_bounded_scales.jl` checks that online adaptive centering reads
 `Uniform(a, b)`-bounded HSGP length scales and SDs, and cdar SDs and
 persistences, through Stan's own `lb`/`lub` transform. It also reads the
