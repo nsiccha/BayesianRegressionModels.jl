@@ -205,6 +205,30 @@ const SVI_RIDGE_OPT = (; subject_group=:unit, batch_size=4, ndraws=200,
     @test abs(ea - el) < 1
 end
 
+# The default iterate check's drift gate (src/nlme_svi_stationarity.jl, snag
+# brm-svi-fit-unco-182711a4) holds exploration where the ELBO test ends it on the
+# climb: here the two-window test alone (`trend_windows = 0`), which on this ridge
+# passes at the 40-window floor with the step's spread still falling.
+@stestset "the drift gate explores a ridge's descent past the ELBO stop" begin
+    rk = RKBRMI(svi_ridge_model(svi_ridge_data(Xoshiro(101), 8)))
+    opt = (; subject_group=:unit, batch_size=4, ndraws=200, centering=nothing,
+        trend_windows=0, max_iterations=40_000)
+    W = 100
+    elbo_only = brm_svi_fit(rk; rng=Xoshiro(1), opt..., stationarity=false)
+    gated = brm_svi_fit(rk; rng=Xoshiro(1), opt...)
+    long = brm_svi_fit(rk; rng=Xoshiro(1), SVI_RIDGE_OPT..., min_windows=400)
+    drift = gated.diagnostics.stationarity.exploration.drift
+    @info "drift gate on the ridge" elbo_only=elbo_only.diagnostics.stages gated=gated.diagnostics.stages drift
+    @test elbo_only.diagnostics.stages.exploring == 40W
+    @test drift.held_windows > 0 && !drift.held
+    # Held windows are those where the ELBO test passed; it may also fail in between.
+    @test gated.diagnostics.stages.exploring >= (40 + drift.held_windows) * W
+    @test gated.diagnostics.stages.exploring <= opt.max_iterations ÷ 2
+    gm(f) = median(exp.(rk_restore_draws(rk, f.draws).gain_mean))
+    @test gm(elbo_only) < 1.0
+    @test abs(gm(gated) - gm(long)) < 0.02
+end
+
 @stestset "a checkpoint continues on its own rule; an older one on two windows" begin
     rk = RKBRMI(svi_ridge_model(svi_ridge_data(Xoshiro(101), 8)))
     full = brm_svi_fit(rk; rng=Xoshiro(1), SVI_RIDGE_OPT...)

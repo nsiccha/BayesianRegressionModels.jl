@@ -146,7 +146,7 @@ function _brm_svi_iterate_diagnostics(values)
     (; rhat, ess)
 end
 
-function _brm_svi_stationarity_check(h::_BRMSVIIterates)
+function _brm_svi_stationarity_check(h::_BRMSVIIterates; limit=_BRM_SVI_STATIONARITY_RHAT)
     size(h.values, 1) == 0 && return merge(_brm_svi_stationarity_empty(),
         (; passed=true, reason=:empty))
     h.count >= _BRM_SVI_STATIONARITY_MIN || return merge(_brm_svi_stationarity_empty(),
@@ -154,7 +154,7 @@ function _brm_svi_stationarity_check(h::_BRMSVIIterates)
     best = nothing
     for n in unique(round.(Int, range(_BRM_SVI_STATIONARITY_MIN, h.count; length=5)))
         stats = _brm_svi_iterate_diagnostics(view(h.values, :, h.count-n+1:h.count))
-        passed = stats.rhat <= _BRM_SVI_STATIONARITY_RHAT
+        passed = stats.rhat <= limit
         report = (; passed, reason=passed ? :stationary : :not_stationary,
             rhat=isfinite(stats.rhat) ? stats.rhat : nothing, ess=stats.ess,
             samples=n, updates=h.updates, stride=h.stride)
@@ -198,6 +198,128 @@ function _brm_svi_stationarity_explored!(run, c)
     h.units = [_BRMSVIIterates(size(u.values, 1)) for u in h.units]
     h.report = _brm_svi_stationarity_empty()
     h.next_check = run.iteration + c.window * (c.patience + 1)
+end
+
+# ── Exploration's drift gate ─────────────────────────────────────────────────
+#
+# Exploration's ELBO test cannot see a slow climb once many units share a batch,
+# and settling's step, which moves each global mean in units of its own q sd,
+# cannot finish one. A non-centred per-unit step `m + s z_i` that every unit's
+# data pin is such a climb: `s` falls only as fast as every `z_i` grows. On a
+# public toy of that shape at 256 units (batch 4) the ELBO test ended exploration
+# at 23,000 iterations with log `s` at -1.40 of its plateau's -4.7, and settling
+# then moved it by about 1e-6 per iteration, to a gain ratio of 0.963 against the
+# generating 1.18 after 100,000 iterations (snag brm-svi-fit-unco-182711a4).
+# Exploration's own step covers that descent at about the same rate per
+# iteration at 32 and 256 units.
+#
+# So when the ELBO test would end exploration, it ends only once the globals'
+# recent iterates are no longer dominated by a steady drift: some recent window
+# of the global history reads split-Rhat at most `_BRM_SVI_DRIFT_RHAT`, searched
+# as the averaging check searches for 1.1. A steady drift reads about 2.1 on
+# every window (a line's split-Rhat), while an iterate that only wanders under
+# exploration's constant step reads near 1: the exact Gaussian fixture of
+# test/nlme_svi_settling.jl read 1.12 to 1.31 there. The gate reads no unit
+# histories and consumes no random numbers; its last reading lives on the
+# stationarity report, so a checkpoint resumes it exactly. It never holds
+# exploration past half of `max_iterations`, so settling and averaging keep at
+# least the other half.
+const _BRM_SVI_DRIFT_RHAT = 1.5
+
+_brm_svi_drift_enabled(c) = _brm_svi_stationarity_enabled(c) &&
+    get(c, :exploration_drift, false) && _brm_svi_settle_windows(c) > 0
+_brm_svi_drift_cap(c) = c.max_iterations ÷ 2
+
+# Each row's rank-normalized split-Rhat (1 for a constant row, Inf for a non-finite
+# one), computed in the same bounded chunks as `_brm_svi_iterate_diagnostics`.
+function _brm_svi_iterate_rhats(values)
+    n, d = size(values, 2), size(values, 1)
+    rhat = ones(d)
+    for first in 1:256:d
+        rows = first:min(first + 255, d)
+        bad = filter(j -> !all(isfinite, view(values, j, :)), rows)
+        rhat[bad] .= Inf
+        active = filter(j -> !(j in bad) && !allequal(view(values, j, :)), rows)
+        isempty(active) && continue
+        x = permutedims(values[active, :])
+        stats = MCMCDiagnosticTools.ess_rhat(reshape(x, n, 1, length(active)); kind=:rank)
+        rhat[active] .= ifelse.(isfinite.(stats.rhat), stats.rhat, Inf)
+    end
+    rhat
+end
+
+# The globals whose recent iterates move most: the `top` rows of the global history
+# with the largest split-Rhat over its last `_BRM_SVI_STATIONARITY_MIN` samples, as
+# (global index, :mean or :log_sd, Rhat). The history keeps D means, then D log sds.
+function _brm_svi_moving_globals(h::_BRMSVIIterates; top=3, limit=_BRM_SVI_STATIONARITY_RHAT)
+    D = size(h.values, 1) ÷ 2
+    (D == 0 || h.count < _BRM_SVI_STATIONARITY_MIN) && return NamedTuple[]
+    r = _brm_svi_iterate_rhats(view(h.values, :, h.count-_BRM_SVI_STATIONARITY_MIN+1:h.count))
+    order = filter(k -> r[k] > limit, sortperm(r; rev=true))
+    [(; index=k <= D ? k : k - D, moment=k <= D ? :mean : :log_sd, rhat=r[k])
+        for k in order[1:min(top, length(order))]]
+end
+
+# Whether exploration must go on although its ELBO test passed (above), or
+# `nothing` when the gate is off: old checkpoints' controls, `stationarity=false`,
+# and `settle_windows=0`, where exploration already waits for the averaging check.
+function _brm_svi_exploration_drift(run, c)
+    _brm_svi_drift_enabled(c) || return nothing
+    h = _brm_svi_stationarity_state(run)
+    # A reading costs a rank-normalized split-Rhat over every global's history, so
+    # a held reading is re-read only every tenth of the windows run so far, as the
+    # averaging check spaces its checks. The reading rides the current report, which
+    # a checkpoint carries.
+    previous = get(h.report, :drift, nothing)
+    w = length(run.windows)
+    previous !== nothing && previous.held && run.iteration < _brm_svi_drift_cap(c) &&
+        w - previous.window < max(1, previous.window ÷ 10) && return previous
+    r = _brm_svi_stationarity_check(h.globals; limit=_BRM_SVI_DRIFT_RHAT)
+    drifting = r.reason === :not_stationary
+    capped = drifting && run.iteration >= _brm_svi_drift_cap(c)
+    (; held=drifting && !capped, capped, rhat=r.rhat, rhat_limit=_BRM_SVI_DRIFT_RHAT,
+       samples=r.samples, iteration=run.iteration, window=length(run.windows),
+       moving=drifting ? _brm_svi_moving_globals(h.globals; limit=_BRM_SVI_DRIFT_RHAT) :
+           NamedTuple[])
+end
+
+# Keep the gate's last reading on the current report, counting the windows it held
+# exploration; `_brm_svi_stationarity_explored!` carries it into `exploration`.
+function _brm_svi_note_drift!(run, drift, previous=get(_brm_svi_stationarity_state(run).report,
+        :drift, nothing))
+    h = _brm_svi_stationarity_state(run)
+    held_windows = (previous === nothing ? 0 : previous.held_windows) + drift.held
+    h.report = merge(h.report, (; drift=merge(drift, (; held_windows))))
+    nothing
+end
+
+# The warning of a fit that ended without converging: its end status, the iterate
+# check's reading and the globals it reads as still moving, named.
+function _brm_svi_unconverged_message(run, c, names; caller)
+    status = _brm_svi_end_status(run, c)
+    h = _brm_svi_stationarity_state(run)
+    detail = if _brm_svi_stationarity_enabled(c) && h isa _BRMSVIStationarity
+        rhat = get(h.report, :rhat, nothing)
+        moving = _brm_svi_moving_globals(h.globals)
+        string("its parameter-iterate check did not pass",
+            rhat === nothing ? "" : " (split-Rhat $(round(rhat; sigdigits=3)), limit " *
+                "$(_BRM_SVI_STATIONARITY_RHAT))",
+            isempty(moving) ? "" : "; globals still moving: " * join(
+                ["$(names[g.index]) ($(g.moment === :mean ? "mean" : "log sd"), Rhat " *
+                    "$(round(g.rhat; sigdigits=3)))" for g in moving], ", "))
+    else
+        "its ELBO had not stopped rising"
+    end
+    string("$caller: stopped ($status) after $(run.iteration) iterations without ",
+        "converging: ", detail, ". The factor and its draws are those of an unconverged ",
+        "fit; see `fit.diagnostics.stationarity` and `fit.diagnostics.stages`, and raise ",
+        "`max_iterations`")
+end
+
+function _brm_svi_warn_unconverged(run, c, names; caller)
+    _brm_svi_finished(run, c) && !run.converged || return nothing
+    @warn _brm_svi_unconverged_message(run, c, names; caller)
+    nothing
 end
 
 function _brm_svi_stationarity_report(run)

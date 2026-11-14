@@ -1324,7 +1324,8 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
         settle_windows=nothing, unit_curvature=:pair,
         structured_unit_step=unit_step, structured_rank_step=1.0, unit_positive_part=true,
         sd_bound=_BRM_SVI_SD_BOUND, trend_windows=_brm_svi_default_trend_windows(patience),
-        stationarity=true, coupling_baseline=true, coupling_warmup=true)
+        stationarity=true, coupling_baseline=true, coupling_warmup=true,
+        exploration_drift=stationarity)
     B = min(batch_size, N)
     W = window === nothing ? max(cld(N, B), 100) : window
     # A default iterate-gated run may need more than 100 windows, especially
@@ -1337,7 +1338,7 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
        polish_windows, unit_sampling, settle_windows, unit_curvature, structured_unit_step,
        structured_rank_step, unit_positive_part, sd_bound, trend_windows,
        trend_skip=patience, stationarity, budget_polish=stationarity,
-       coupling_baseline, coupling_warmup)
+       coupling_baseline, coupling_warmup, exploration_drift)
 end
 
 # The windows exploration's trend test reads when the caller names none
@@ -1513,7 +1514,19 @@ function _brm_svi_advance!(run, t, c)
             _brm_svi_start_polishing!(run, q, it)
     elseif length(windows) >= max(c.min_windows, c.patience + 1) &&
             _brm_svi_exploration_stalled(windows, length(windows), c)
+        # The ELBO test cannot see a global that still drifts steadily, and
+        # settling's scale-relative step cannot finish its move: exploration goes on
+        # while the drift gate reads one, up to half the budget
+        # (src/nlme_svi_stationarity.jl).
+        drift = _brm_svi_exploration_drift(run, c)
+        previous_drift = drift === nothing ? nothing :
+            get(_brm_svi_stationarity_state(run).report, :drift, nothing)
+        if drift !== nothing && drift.held
+            _brm_svi_note_drift!(run, drift, previous_drift)
+            return :window
+        end
         stationary = _brm_svi_stationary!(run, c)
+        drift === nothing || _brm_svi_note_drift!(run, drift, previous_drift)
         # Reducing the step is allowed while moments still move: tight global
         # scales can adapt very slowly under exploration's absolute mean step.
         # Stationarity is required for convergence; a cap can start averaging
@@ -1998,6 +2011,15 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
 - `stationarity=true` requires stable parameter iterates before certifying
   convergence. Exploration may reduce its step on an ELBO plateau while
   moments still move; this is a step change, not a convergence certificate.
+  It does not reduce it while a global still drifts steadily: when the ELBO
+  test passes, exploration goes on unless some recent window of the globals'
+  mean and marginal log sd iterates reads split-Rhat at most 1.5 (a steady
+  drift reads about 2), because settling's scale-relative step cannot finish
+  such a move. This drift gate never holds exploration past half of
+  `max_iterations`; `diagnostics.stationarity.exploration.drift` reports its
+  last reading, the windows it held and whether the half-budget cap ended it.
+  It is off with `settle_windows=0` and in checkpoints written before it existed.
+  A fit that ends without converging warns, naming the globals still moving.
   The check reads every global and unit mean and marginal
   log sd, plus learned centering controls and linear coupling coefficients.
   Unit marginal scales include the coupling's variance. Each block needs at least 200 actual
@@ -2018,7 +2040,8 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   status `:max_iterations` if the tests have not passed. This stays inside
   `max_iterations`; a short remaining budget uses only its remaining updates,
   and a non-round limit includes its last partial window. No budget fallback
-  ends exploration before its tests pass.
+  ends exploration before its ELBO tests pass; the drift gate's half-budget cap
+  only releases one that already passed them.
   `settle_windows=0` skips settling and requires the iterate check
   to pass during exploration before averaging starts.
   `stationarity=false` uses the ELBO-only rule, as does a resumed checkpoint
@@ -2101,7 +2124,8 @@ settling cap; `false` after `stop_after`),
 `iterations`, `stages` (the iterations spent `exploring`, `settling` and
 `polishing`, and `settled`: whether settling ended on its test rather than at
 `settle_windows`), `stationarity` (whether enabled, thresholds, number of checks,
-the `exploration` check at its step change, the most recent `current` check,
+the `exploration` check at its step change with the drift gate's `drift`
+reading, the most recent `current` check,
 and `settled`; the exploration report can fail when settling follows;
 checks report worst Rhat, minimum ESS and each block's sample count and update
 clock). Under the ELBO-only rule, `converged` can still accompany `settled=false`.
@@ -2323,6 +2347,7 @@ function _brm_svi_drive(init, save, x, previous; caller, description, ndraws=100
                 centering_maps = _brm_svi_centering_maps(t, q)
                 bound = _brm_svi_sd_bound_report(t, run.q, _brm_svi_sd_bound_factor(c))
                 _brm_svi_warn_sd_bound(bound; caller)
+                _brm_svi_warn_unconverged(run, c, string.(m.view.coordinates[t.globals]); caller)
                 (; draws, coordinates=copy(m.view.coordinates), diagnostics=(;
                     threads=length(t.plans), target=(; reuse..., seconds=target_seconds),
                     elbo=run.trace, elbo_windows=first.(run.windows),

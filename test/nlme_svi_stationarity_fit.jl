@@ -55,7 +55,8 @@ svi_stationarity_roundtrip(x) = (io = IOBuffer(); serialize(io, x); seekstart(io
     # Finishing the requested polishing still returns useful draws, but does
     # not certify convergence or restart optimization on a resumed checkpoint.
     statuses = Symbol[]
-    capped = brm_svi_fit(m; rng=Xoshiro(802), options..., settle_windows=1,
+    capped = @test_logs (:warn, r"brm_svi_fit: stopped \(settle_limit\) after \d+ iterations without converging: its parameter-iterate check did not pass") match_mode=:any brm_svi_fit(
+        m; rng=Xoshiro(802), options..., settle_windows=1,
         snapshot=s -> push!(statuses, s.status))
     @test capped.diagnostics.finished && !capped.diagnostics.converged
     @test !capped.diagnostics.stages.settled

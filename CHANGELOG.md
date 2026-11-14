@@ -12,6 +12,24 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.299
+
+- Default `brm_svi_fit` exploration no longer ends while a global still drifts
+  steadily. When the ELBO test passes, exploration goes on unless some recent
+  window of the globals' mean and marginal log sd iterates reads split-Rhat at
+  most 1.5 (a steady drift reads about 2), up to half of `max_iterations`.
+  Settling's scale-relative step cannot finish such a move: on a public
+  256-unit toy with a data-pinned non-centred per-unit step (batch 4) the ELBO
+  test ended exploration with the step's log spread at -1.40 of -4.7, and the
+  fit returned a gain ratio of 0.963 against the generating 1.18. Holding
+  exploration completes the descent. `diagnostics.stationarity.exploration.drift`
+  reports the gate's last reading, the windows it held and whether its cap ended
+  it. The gate is off with `stationarity=false` or `settle_windows=0`, and in
+  optimizer checkpoints written before it existed, which keep their switch.
+- A `brm_svi_fit` or `brm_svi_resume` that ends without converging (status
+  `:max_iterations` or `:settle_limit`) now warns, naming the globals whose
+  iterates still move.
+
 ## 0.2.298
 
 - Adaptive centering's window-end transport now keeps every cell's model
