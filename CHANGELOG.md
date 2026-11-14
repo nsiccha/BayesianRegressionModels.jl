@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.306
+## 0.2.308
 
 - `brm_model_view(model; id)` names the view's elements, so one page can show
   several views, including two of the same model, without repeating an id. The
@@ -27,6 +27,42 @@ instead of failing at run time.
   `ArgumentError`. The nested definition tab bar's accessible name now carries
   the view's title (`"<title> source"`, was `"Model and component source"`),
   like the details tab bar's `"<title> details"`.
+
+## 0.2.307
+
+- **Breaking:** BRM requires WarmupHMC 0.3 (`[compat] WarmupHMC = "0.3"`, was
+  `"0.2.11"`). From WarmupHMC 0.3.0 a reparametrization accessor reads every
+  earlier pair's coordinate at its model value, no longer at its sampler value.
+  `adaptive_centering_problem`'s location accessors now read them that way: a
+  correlated block's later margins, a cell centred on a containing grouping's
+  effect, and a correlated grouped HSGP's later levels read the earlier cells'
+  compiled coordinates directly and no longer re-apply those cells' maps with
+  controls kept in shared state. The map, its Jacobian, the draws and the
+  controls report are unchanged up to rounding; on WarmupHMC 0.2 these
+  accessors would apply the earlier maps twice, hence the compat bound. An
+  environment that also loads ReactiveKernelsPPL needs a ReactiveKernelsPPL
+  whose compat admits WarmupHMC 0.3. To upgrade, move WarmupHMC to 0.3
+  (`68a6cc24` or later on its `dev` branch).
+- The window-end transport keeps every cell's model point by construction:
+  the accessors read no control, so a snapshot of the pairs is the old map.
+  BRM 0.2.298's rebinding of the pairs to a private copy of the controls is
+  gone, and the accessors keep the state they were built with.
+
+## 0.2.306
+
+- A plate cell observes Julia's Student-t,
+  `y[s] ~ LocationScale(location, scale, TDist(nu))`, on both backends, as a
+  top-level response does: location, scale and degrees of freedom may each be
+  a scalar or one value per entry, and the cell's response may be one array
+  per cell or one value per cell. Before, RKBRMI refused every such cell with
+  `RK backend: a LocationScale response must wrap TDist(nu)` (the cell stored
+  `TDist(nu)` as a computed value instead of reading it as the law), and
+  SBBRMI failed in StanBlocks with ``Found `LocationScale` … of type
+  UnionAll`` (the cell's Stan spelling skipped `LocationScale`, for which
+  Julia answers `LocationScale <: Distribution` false). SBBRMI now spells it
+  `student_t(nu, location, scale)`, as at the top level. On RKBRMI, a cell
+  `LocationScale` over a base other than `TDist(nu)` is refused, as at the
+  top level, and the refusal names the supported spelling.
 
 ## 0.2.305
 

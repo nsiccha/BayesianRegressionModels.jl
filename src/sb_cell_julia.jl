@@ -138,6 +138,7 @@ function _sb_cell_family(x, scope)
     head = first(x.args)
     callable = _sb_cell_binding(scope, head)
     callable isa BRMComponent && return _sb_component_cell_call(callable, x, scope)
+    callable === LocationScale && return _sb_cell_location_scale(x, scope)
     args = Any[_sb_cell_argument(a, scope) for a in x.args[2:end]]
     if callable isa Type && callable <: Distribution
         positional = Tuple(filter(!_sb_cell_keyword_argument, args))
@@ -149,6 +150,32 @@ function _sb_cell_family(x, scope)
         family === nothing || (args[family] = _sb_cell_family(x.args[1 + family], scope))
     end
     Expr(:call, head, args...)
+end
+
+# `LocationScale(location, scale, base)` observes its base law shifted and
+# scaled through the top-level likelihood's composition (`_sb_affine_call`), so
+# `TDist(nu)` is Stan's `student_t(nu, location, scale)`. It needs its own
+# branch: Julia answers `LocationScale <: Distribution` false, because its type
+# parameters have dependent bounds.
+function _sb_cell_location_scale(x, scope)
+    usage = "write `LocationScale(location, scale, TDist(nu))`"
+    raw = x.args[2:end]
+    length(raw) == 3 && !any(_sb_cell_keyword_argument, raw) || error(
+        "sbimpl: an in-cell `LocationScale` takes a location, a scale and a base law; $usage")
+    location, scale, base = raw
+    constructor = Meta.isexpr(base, :call) ? _sb_cell_binding(scope, first(base.args)) : nothing
+    constructor isa Type && constructor <: Distribution &&
+        _brm_distribution_shape(constructor, ()) ==
+            (Distributions.Univariate, Distributions.Continuous) || error(
+        "sbimpl: an in-cell `LocationScale` base `$base` must be a continuous univariate " *
+        "distribution call; $usage")
+    base_args = Any[_sb_cell_argument(a, scope) for a in base.args[2:end]]
+    keywords = foldl(_sb_cell_keywords!, filter(_sb_cell_keyword_argument, base_args);
+        init=Pair{Symbol,Any}[])
+    call = _sb_stan_distribution_call(constructor,
+        Tuple(filter(!_sb_cell_keyword_argument, base_args)), NamedTuple(keywords))
+    _sb_affine_call(constructor, _sb_cell_value(location, scope),
+        _sb_cell_value(scale, scope), Tuple(call.args[2:end]), first(call.args))
 end
 
 # A Distributions constructor in a cell observation: the top-level table, except

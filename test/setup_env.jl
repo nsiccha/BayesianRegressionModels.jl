@@ -102,7 +102,9 @@ const PINS = [
     ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "44c37e60e22bab9e8a0d3ab88bd47b575dec6bb0"),
     # 0.2.11: public covariance projection used by selective SMC carries.
     # 0.2.19 satisfies ReactiveKernelsPPL 0.1.168's SMC extension floor.
-    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "6da3299e09e14547ceb922461c71e4d833e21658"),
+    # 0.3.0: accessors read earlier pairs at their model values, which BRM's
+    # centering accessors require (todo 08c6jet).
+    ("WarmupHMC",         "https://github.com/nsiccha/WarmupHMC.jl.git",         "68a6cc24e9ab0dee76ca5f8ab3b27c2052be8aec"),
     ("SequentialMonteCarlo", "https://github.com/awllee/SequentialMonteCarlo.jl.git", "d3a322394c7a1df07e3b5e941acc2960f4daf656"),
     # Current plain-function/array PPL surface, with data-only declaration inputs
     # retained before predictor inlining (computed membership axes; 606d76d0),
@@ -435,7 +437,9 @@ const PINS = [
     # objects, including HiddenMarkov's per-state emission graphs.
     # 0a9ca6bb (RK 0.1.231) preserves each tuple plate field's ragged lengths,
     # so retained vector outputs flatten into JAX constrain values.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "0a9ca6bb5ad50b6efd1049c3fc1dd6609e068e77"),
+    # d7a5033ae (RK 0.1.246 / RKPPL 0.1.187 / DistributionKernels 0.1.11): RKPPL
+    # admits WarmupHMC 0.3 (`af0807c69`), which BRM's centering accessors need.
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d7a5033aea6edc226611b1055c008135cdefda3d"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
