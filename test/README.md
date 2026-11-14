@@ -1019,6 +1019,16 @@ without string templating:
 - fragments a package defines compose in another package's precompile workload,
   where the evaluating route fails with "closed module".
 
+`shadowed_call_head.jl` checks that a formula call whose head is bound to a
+value that cannot be called is refused when the model is built, through `@brm`
+and `brm(source; mod)` with the same message: a module variable named like the
+`censored` wrapper or the `Normal` family, a local of the code around `@brm`,
+and a qualified `M.name` head. The message names the call, where the head is
+bound and what it holds, and, when BRM binds the name, the shadowed binding and
+the rename and qualify remedies. As controls, the unshadowed module and the
+qualified `BayesianRegressionModels.censored(...)` call build the same Stan
+program, and a callable struct passes. It needs no Stan compiler.
+
 `kernel_population_lp.jl` checks per-subject linear predictors without a random
 effect (a typical value plus covariates) read as `x[i]`, beside a random-effect
 predictor and in a no-random-effects panel, against an independent density
