@@ -23,7 +23,11 @@ instead of failing at run time.
   controls, so these cells moved to other model points whenever an earlier
   cell's control changed. Measured: up to 0.31 on a three-term block, 0.35 on
   a nested grouping. The map's accessors now keep their own copy of the
-  controls, so the snapshot stays the old map. Only warm-up was affected:
+  controls, so the snapshot stays the old map. Internally, a synchronization
+  that changes a control now replaces the accessors' state object
+  (`ir.pairs[k][2].args[1].state`) instead of writing it in place. Code that
+  reaches into the wrapper must read the state from the pairs again rather
+  than keep an earlier reference. Only warm-up was affected:
   draws after warm-up were exact before and are unchanged. This covers the
   default `ranef_order = :declared` wrappers, RKBRMI included. The
   `:learned`, exact-totals and S2Z wrappers already copied their controls in
