@@ -12,6 +12,35 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.302
+
+- A formula call whose head is bound to a value that cannot be called is
+  refused when the model is built, by `@brm` and `brm(source; mod)` alike. A
+  call's head resolves where the block is written, a local first and then a
+  global of the module, so a script variable named like a wrapper or a family
+  (`censored = value .< limit`) shadows the binding `using
+  BayesianRegressionModels` brings in. The builder used to carry the
+  variable's value as the call's function, and each backend then refused it
+  with a message about its own lowering: RKBRMI `response `y` distribution
+  keywords are unsupported`, SBBRMI `distribution `Bool[1, 0, 0]` needs a Stan
+  translation for constructor keywords (:lower,)`. The message now names the
+  call, where its head is bound and what it holds and, when BRM binds the same
+  name, says that the variable shadows it and to rename the variable or write
+  the call qualified:
+
+  ```
+  @brm: the formula calls `censored(...)`, but module `Main.Shadowed` binds
+  `censored` to a 3-element Vector{Bool}, which cannot be called. This
+  binding shadows `BayesianRegressionModels.censored`, the function the
+  formula means: rename the variable, or write the call as
+  `BayesianRegressionModels.censored(...)`.
+  ```
+
+  A head that is a function, a type or a value with a call method builds as
+  before, and a value spliced into a `brm` source with `$` is not checked.
+  **Breaking** only for a block that built a model whose call head could not
+  be called: such a model failed in every backend. `test/shadowed_call_head.jl`.
+
 ## 0.2.301
 
 - `RKBRMI` accepts an infinite entry in a per-row response bound column on a
