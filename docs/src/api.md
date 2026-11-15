@@ -74,6 +74,7 @@ RKBRMI
 S2ZEffectBlock
 SBBRMI
 adaptive_centering_blocks
+adaptive_centering_cells
 adaptive_centering_controls
 adaptive_centering_problem
 brm_check_coordinate_transport

@@ -12,6 +12,24 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.312
+
+- `adaptive_centering_cells(model[, unc_names]) -> (; blocks, cells)` describes
+  the random-effect cells `adaptive_centering_problem` adapts as plain data
+  (numbers, symbols, strings, `nothing`, vectors and named tuples), in the
+  wrapper's cell order: per cell its compiled coordinate, the same level's
+  earlier terms, and its location (population coefficient, `factor(f)` level
+  coordinates, containing cells); per block its target frame, each term's log
+  scale as atoms, its correlation factor's free coordinates or known partial
+  correlations, and a Student-t level's mixing coordinate. Its docstring states
+  the map those rows define, so a caller outside BRM can rebuild the wrapper's
+  exact map, Jacobian and density without BRM internals (snag
+  `public-rkbrmi-ad-4eeb6b28`, for ReactiveKernelMethods' JAX emission). It
+  takes an `RKBRMI` (default `unc_names`: its layout) or an `SBBRMI` /
+  `GenerativePlan` (BridgeStan's `param_unc_names`); an SBBRMI whose wrapper
+  also adapts HSGP, `car`, `cdar`, exact-total or S2Z cells raises, naming
+  them. The wrapper and these rows share one containers-first ordering rule.
+
 ## 0.2.311
 
 - `adaptive_centering_problem(rk::RKBRMI, problem, backend)` and

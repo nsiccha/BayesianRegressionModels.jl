@@ -3098,21 +3098,10 @@ _candidate_scoring_plan(state) = WarmupHMC.CandidateScoringPlan(
     synchronize! = ir_ -> _sync_sources!(state, ir_),
 )
 
-# Containing blocks first (snag brm-zone-8-adapt-1b407672): a cell centred on a
-# containing cell's effect reads that cell's model value, which WarmupHMC hands
-# an accessor only for EARLIER pairs, so the containing pairs must come earlier
-# (and the learned-order inverse rebuilds them first). A block
-# sits after every block it is centred on: it has strictly more containing
-# blocks than any of them (containment is transitive). The sort is stable, so a
-# model without containing cells keeps its pair order.
-function _containers_first!(blocks, locations)
-    count_containers(block) = begin
-        l = get(locations, block, nothing)
-        l isa BRM._AdaptiveRanefLocations && !isnothing(l.containers) ?
-            length(unique(objectid(first(c)) for cs in l.containers for c in cs)) : 0
-    end
-    sort!(blocks; by=count_containers, alg=Base.Sort.MergeSort)
-end
+# Containing blocks first (snag brm-zone-8-adapt-1b407672): the rule lives in
+# `src/adaptive_centering_cells.jl`, so the pair order here and the public
+# `adaptive_centering_cells` rows come from one definition.
+_containers_first!(blocks, locations) = BRM._adaptive_containers_first!(blocks, locations)
 
 function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=nothing,
                                        centeredness=nothing, s2z_rule=:cells,
