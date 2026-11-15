@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.323
+
+- `brm_svi_fit(...; unit_reoptimize = k)` (default 0, off): each dense batch
+  unit takes `k` whole natural-gradient steps at the iteration's draw of the
+  globals before the global gradient is formed (structured stochastic VI), so a
+  ridge between a global and every unit (an intercept beside per-unit effects the
+  data pin only in `a + u[g]`) no longer holds the global means back (todo
+  `122p9l3`, design decision `093fulx`). On an exactly Gaussian intercept toy of
+  1,000 units (`research/svi_reoptimize/intercept_ridge.jl`, 20,000 iterations),
+  the intercept's mean went from 10.3 exact posterior sds off (its sd 0.14 of the
+  exact one) to 0.08 (sd ratio 0.94). Each step costs the unit's evaluations
+  again, counted in `unit_gradient_calls`. It needs `unit_curvature = :orthogonal`;
+  the Laplace route (`laplace = GaussianBlockLaplace()`) refuses it.
+
 ## 0.2.322
 
 - `brm_svi_fit`'s learned centering (`LearnedCentering()`, the default) no

@@ -758,10 +758,51 @@ function _brm_svi_unit_design(rng, d)
     Matrix(F.Q) .* (sqrt(d) .* [r < 0 ? -1.0 : 1.0 for r in diag(F.R)]')
 end
 
-# Unit-gradient attempts per visit, including the auxiliary baseline when used.
+# Unit-gradient attempts per visit, including the auxiliary baseline and the
+# re-optimization steps (`unit_reoptimize`, below) when used.
 _brm_svi_unit_calls(q, i, c) =
     (_brm_svi_unit_curvature_mode(c) === :orthogonal && _brm_svi_dense_unit(q, i) ?
-        2length(q.M[i]) : 2) + _brm_svi_coupling_baseline_calls(q, i, c)
+        2length(q.M[i]) * (1 + _brm_svi_unit_reoptimize(c)) : 2) +
+    _brm_svi_coupling_baseline_calls(q, i, c)
+
+# ── Re-optimizing each batch unit at the drawn globals (`unit_reoptimize`) ────
+#
+# Where the data pin only a combination of a global and the units (an intercept
+# beside per-unit effects pinned in `a + u_i` alone), the global gradient is
+# taken with every batch unit at its current factor, which lags each global move:
+# the step is pulled back along the ridge, and the global means crawl (todo
+# 122p9l3: 199-1,161 nats from q* on an exactly Gaussian toy under every
+# schedule). With `unit_reoptimize = k`, each batch unit on the orthogonal design
+# first takes `k` whole natural-gradient steps (`_brm_svi_unit_step_full!`, step 1,
+# the trust regions still bound it) at the iteration's draw of the globals, before
+# the terms the global gradient reads are formed. Its factor is then near its
+# conditional optimum given that draw, so the global gradient is the profile
+# gradient along the ridge (structured stochastic VI, Hoffman and Blei 2015). On a
+# unit Gaussian given the globals one step reaches the optimum. Under linear
+# coupling the step moves `M_i`, so the coupled mean `M_i + V_i ζ_i` moves with it,
+# and `V_i` keeps learning from the re-optimized means. Units on the single pair
+# or structured units are not re-optimized. The default 0 is the step as before.
+_brm_svi_unit_reoptimize(c) = get(c, :unit_reoptimize, 0)
+
+function _brm_svi_reoptimize_units!(t, q, batch, g, designs, coupling, ζs, centering,
+                                    frame, positive_part)
+    D = length(t.globals)
+    _brm_svi_each_unit(eachindex(t.plans), length(batch)) do worker, k
+        designs[k] === nothing && return
+        plan, work = t.plans[worker], t.work[worker]
+        i = batch[k]
+        touched = _brm_svi_unit_touched(t, i)
+        for E in designs[k]
+            zmean = _brm_svi_coupled_mean(coupling, q, i, ζs === nothing ? nothing : ζs[k])
+            r = _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
+                centering, frame, zmean)
+            # A non-finite evaluation stops this unit's re-optimization; the
+            # iteration's own terms report it (`_brm_svi_check_finite`).
+            r.problem === nothing && all(isfinite, r.S) && all(isfinite, r.gz) || break
+            _brm_svi_unit_step_full!(q, i, r.gz, r.S, 1.0; positive=positive_part)
+        end
+    end
+end
 # Controls written before `unit_curvature` existed (a checkpoint of BRM 0.2.242
 # or earlier) keep the single pair.
 _brm_svi_unit_curvature_mode(c) = get(c, :unit_curvature, :pair)
@@ -1025,7 +1066,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         whiten=false, weights=fill(length(t.units) / length(batch), length(batch)),
         sites=nothing, site_scale=1.0, rank_step=1.0, curvature=:pair, site_step=β,
         structured_step=β, structured_rank=1.0, positive_part=true, sd_bound=nothing,
-        coupling_scale=1.0, coupling_baseline=true)
+        coupling_scale=1.0, coupling_baseline=true, reoptimize=0)
     D = length(t.globals)
     ε, η = randn(rng, D), randn(rng, size(q.Β, 2))
     g = _brm_svi_draw_global(q, ε, η)
@@ -1046,6 +1087,14 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
     # and the unit terms read y = T(u) (src/nlme_svi_centering.jl).
     centering = _brm_svi_centering(t)
     frame = centering === nothing ? nothing : _brm_svi_centering_frame(centering, t, g)
+    if reoptimize > 0
+        # Drawn serially, from the run's stream, before the threaded unit loop.
+        designs = [curvature === :orthogonal && _brm_svi_dense_unit(q, i) ?
+            [_brm_svi_unit_design(rng, length(q.M[i])) for _ in 1:reoptimize] : nothing
+            for i in batch]
+        _brm_svi_reoptimize_units!(t, q, batch, g, designs, coupling, ζs, centering,
+                                   frame, positive_part)
+    end
     centered = Vector{Any}(nothing, length(batch))
     use_baseline = coupling_baseline && coupling !== nothing &&
         any(i -> !isempty(coupling.V[i]), batch)
@@ -1332,7 +1381,7 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
         structured_unit_step=unit_step, structured_rank_step=1.0, unit_positive_part=true,
         sd_bound=_BRM_SVI_SD_BOUND, trend_windows=_brm_svi_default_trend_windows(patience),
         stationarity=true, coupling_baseline=true, coupling_warmup=true,
-        exploration_drift=stationarity)
+        exploration_drift=stationarity, unit_reoptimize=0)
     B = min(batch_size, N)
     W = window === nothing ? max(cld(N, B), 100) : window
     # A default iterate-gated run may need more than 100 windows, especially
@@ -1345,7 +1394,7 @@ function _brm_svi_controls(N; batch_size, max_iterations, lr_global, unit_step,
        polish_windows, unit_sampling, settle_windows, unit_curvature, structured_unit_step,
        structured_rank_step, unit_positive_part, sd_bound, trend_windows,
        trend_skip=patience, stationarity, budget_polish=stationarity,
-       coupling_baseline, coupling_warmup, exploration_drift)
+       coupling_baseline, coupling_warmup, exploration_drift, unit_reoptimize)
 end
 
 # The windows exploration's trend test reads when the caller names none
@@ -1481,7 +1530,8 @@ function _brm_svi_advance!(run, t, c)
             structured_rank=_brm_svi_structured_rank_step(c),
             rank_step=polishing || settling ? _brm_svi_rank_step_ratio(c) : 1.0,
             sd_bound=_brm_svi_sd_bound_factor(c), coupling_scale,
-            coupling_baseline=_brm_svi_coupling_baseline(c))
+            coupling_baseline=_brm_svi_coupling_baseline(c),
+            reoptimize=_brm_svi_unit_reoptimize(c))
     catch e
         e isa BRMSVINonfiniteError || rethrow()
         throw(BRMSVINonfiniteError(it, e.terms))
@@ -1913,6 +1963,18 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
   A streaming update preserves existing units' families and ranks; these
   controls apply to new units. The factor restriction changes the
   approximation, not the model density.
+- `unit_reoptimize` — `k`, default 0 (off). Each batch unit on the orthogonal
+  design first takes `k` whole natural-gradient steps at the iteration's draw of
+  the globals, before the gradient the globals step on is formed, so that
+  gradient reads every batch unit near its conditional optimum given that draw
+  (structured stochastic VI, Hoffman and Blei 2015). It is for a ridge between a
+  global and every unit, where the data pin only a combination such as an
+  intercept plus each unit's effect: with the units' factors lagging each global
+  move, the global means crawl along the ridge under every schedule, and
+  re-optimized units follow them. On a unit Gaussian given the globals one step
+  reaches the optimum. Each step costs the unit's 2d evaluations again (counted
+  in `unit_gradient_calls`). It needs `unit_curvature = :orthogonal`; units on
+  the single pair and structured units are not re-optimized.
 - `separator` — defaults to `:auto` in explicitly connected mode and `:none`
   otherwise. Automatic promotion uses bounded structural trials if a unit
   exceeds `max_unit_coordinates=4096` or `max_unit_work=1_000_000`, with at
@@ -2192,8 +2254,15 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         inits=nothing, global_scale=0.1, unit_scale=1.0, polish_lr=0.05, window=nothing,
         patience=10, min_windows=40, polish_windows=20,
         settle_windows=nothing, centering=missing, coupling=missing,
-        sd_bound=_BRM_SVI_SD_BOUND, trend_windows=nothing, stationarity=true, kwargs...)
+        sd_bound=_BRM_SVI_SD_BOUND, trend_windows=nothing, stationarity=true,
+        unit_reoptimize=0, kwargs...)
     stationarity isa Bool || throw(ArgumentError("brm_svi_fit: stationarity must be a Bool"))
+    unit_reoptimize isa Integer && unit_reoptimize >= 0 || throw(ArgumentError(
+        "brm_svi_fit: unit_reoptimize must be a nonnegative integer (0: off), got " *
+        repr(unit_reoptimize)))
+    unit_reoptimize > 0 && unit_curvature !== :orthogonal && throw(ArgumentError(
+        "brm_svi_fit: unit_reoptimize re-optimizes units on the orthogonal design; " *
+        "it needs unit_curvature = :orthogonal"))
     family = _brm_svi_family(previous, family)
     sd_bound = _brm_svi_check_sd_bound(sd_bound)
     settle_windows === nothing || settle_windows isa Integer && settle_windows >= 0 ||
@@ -2227,6 +2296,7 @@ function _brm_svi_fit(save, x, previous; rng=Random.default_rng(), batch_size=32
         c = _brm_svi_controls(length(t.units); batch_size, max_iterations, lr_global,
             steps..., polish_lr, window, patience, min_windows, polish_windows,
             settle_windows, unit_curvature, sd_bound, trend_windows, stationarity,
+            unit_reoptimize=Int(unit_reoptimize),
             unit_sampling=something(unit_sampling,
                 t.m.view.unit_partition === :connected ? :work : :uniform))
         t, _brm_svi_optimizer_state(t, previous, c, _brm_svi_run(rng, q, c, t))
