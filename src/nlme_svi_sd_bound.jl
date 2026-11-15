@@ -19,14 +19,19 @@ end
 # where it has none: the bound is `sd_bound` times it. It depends on the model's
 # prior only and uses its own random stream, so a fit's draws and a resumed fit
 # are unchanged by it.
-function _brm_svi_sd_prior(t; rng=Random.Xoshiro(0x5370726561640001), pairs=16)
+_brm_svi_sd_prior(t; kwargs...) = _brm_svi_own_prior_projection(t; kwargs...).sd
+
+# The same projection's mean and sd: `sd_prior` and `prior_mean` of a target. A
+# `BRMSVINonfiniteError` measures how far each global of a failing point is from
+# its prior in these sds (`_brm_svi_prior_outliers`).
+function _brm_svi_own_prior_projection(t; rng=Random.Xoshiro(0x5370726561640001), pairs=16)
     D = length(t.globals)
-    D == 0 && return Float64[]
-    bound = _brm_svi_with_bound_term(t) do term
+    D == 0 && return (; mean=Float64[], sd=Float64[])
+    mean, bound = _brm_svi_with_bound_term(t) do term
         projection = _brm_svi_prior_projection(t; rng, nonfinite=:flat, term)
         τ = [p > 0 ? 1 / sqrt(p) : Inf for p in projection.precision]
         own = _brm_svi_own_prior(t, projection.mean, τ; rng, pairs, term)
-        [own[k] && isfinite(τ[k]) ? τ[k] : Inf for k in 1:D]
+        copy(projection.mean), [own[k] && isfinite(τ[k]) ? τ[k] : Inf for k in 1:D]
     end
     # Unit-owned states' conditionals sit in the units' terms, not in the global
     # term, so there a field's lengths and correlation factor would look as if
@@ -41,7 +46,7 @@ function _brm_svi_sd_prior(t; rng=Random.Xoshiro(0x5370726561640001), pairs=16)
             end
         end
     end
-    bound
+    (; mean, sd=bound)
 end
 
 # `f(term)` with `term(t, g)` the global term at `g`. With unit-owned field states
@@ -96,9 +101,10 @@ function _brm_svi_own_prior(t, m, τ; rng, pairs, term=_brm_svi_global_term)
 end
 _brm_svi_same_value(a, b) = abs(a - b) <= 1e-9 * max(1.0, abs(a), abs(b))
 
-# The target's `sd_prior`, `nothing` for a target without one: the analytic test
-# targets are structs, which have neither the field nor `get`.
+# The target's `sd_prior` and `prior_mean`, `nothing` for a target without them: the
+# analytic test targets are structs, which have neither the field nor `get`.
 _brm_svi_sd_prior_of(t) = hasproperty(t, :sd_prior) ? getproperty(t, :sd_prior) : nothing
+_brm_svi_prior_mean_of(t) = hasproperty(t, :prior_mean) ? getproperty(t, :prior_mean) : nothing
 
 # q's global factor with every bounded global's marginal sd within `factor` times
 # its `sd` (`_brm_svi_sd_prior`): exp(ρ_k) and the row Β_k shrink by one factor, so
