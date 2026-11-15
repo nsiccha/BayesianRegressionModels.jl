@@ -12,6 +12,24 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.323
+
+- `brm_descriptor(rk::RKBRMI; name)` returns a `BRMRKDescriptor`: the content
+  identity and input inventory of the program an `RKBRMI` runs, read from the
+  backend itself (its `held_out`, `completions` and `car_units`), with no Stan
+  program. A model whose law has no Stan form, such as a whole-vector
+  `_rk_observation_source!` family without an `@lpxf` twin, is now described
+  too; `brm_descriptor` on its builder or `SBBRMI` still fails at transpile.
+  `id` (`"rk:<sha256>"`) hashes the emitted program and its callables, so it is
+  the same for other data values of the same model. `inputs` are `BRMInput`
+  records, one per `rk_bound_data(rk)` field, with the dataframe `column` each
+  one is (a plate cell's port of a response included) and, for a value BRM
+  generates or the program computes from its data, its kind in `transform`
+  (`:levels`, `:level_count`, `:prior_constant`, `:known_correlation`,
+  `:computed`). `columns`, `formula`, `held_out` and the emitted `program`
+  complete it; `brm_columns` and `required_brm_inputs` take it. Snag
+  `rkbrmi-has-no-de-65a4d1fc`, design decision `0c2ol3s`.
+
 ## 0.2.322
 
 - `brm_svi_fit`'s learned centering (`LearnedCentering()`, the default) no

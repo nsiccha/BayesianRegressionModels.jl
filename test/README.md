@@ -1,5 +1,17 @@
 # Running the tests
 
+`rk_descriptor.jl` checks `brm_descriptor(rk::RKBRMI)`. A whole-series law
+registered only through `_rk_observation_source!` (no `@lpxf` twin) makes the
+Stan descriptor fail at transpile, while the RK descriptor of the same model
+reads the backend's program: an id equal across builds, names and data values
+of the same shape, and inputs equal to `rk_bound_data(rk)` with their columns.
+On a model with a Stan form it agrees with the Stan descriptor on `columns` and
+`formula` and reports the factor's generated level table and count. A held-out
+response, a non-centered `mi` completion and another formula each change the
+id, a held-out response is no input, and a frozen `reprocess` replay keeps the
+fit's id. Run it with `julia --startup-file=no --project=test
+test/rk_descriptor.jl`.
+
 `rk_jax_inputs.jl` checks `rk_bound_data(rk, source)` on macro and runtime-source
 models: scalar constants read by a ragged plate, ordinary scalar inputs, array
 constants, untranslated data-only definitions, and frozen/fresh/data-free
