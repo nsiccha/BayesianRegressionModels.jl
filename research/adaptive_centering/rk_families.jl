@@ -10,7 +10,7 @@
 #
 #     julia --project=test research/adaptive_centering/rk_families.jl [family...]
 #
-# Families: student_t, known, bounded, stratified, factor, mm, r2d2. Each runs 4 chains
+# Families: student_t, known, bounded, stratified, factor, mm, r2d2, car_bym2, cdar. Each runs 4 chains
 # through WarmupHMC's quorum sampler (`min_completed = 3`), 400 draws, for each
 # seed, plain and wrapped, and prints max R-hat, min bulk ESS over every
 # coordinate (RK layout frame), divergences and wall time.
@@ -38,7 +38,53 @@ function panel(; G=12, n=30, seed=1)
        gm=labels, h=string.("g", lpad.(mod1.(g .+ 1, G), 2, '0')))
 end
 
+# A data-rich areal panel: a 6 x 6 grid of areas (rook neighbours), 30 rows
+# per area with noise sd 0.3 around a BYM2-like field, so each area's total is
+# pinned by its data.
+function car_panel(; seed=3, n=30)
+    rng = Xoshiro(seed)
+    side = 6
+    id(i, j) = (i - 1) * side + j
+    from, to = Int[], Int[]
+    for i in 1:side, j in 1:side
+        i < side && (push!(from, id(i, j)); push!(to, id(i + 1, j)))
+        j < side && (push!(from, id(i, j)); push!(to, id(i, j + 1)))
+    end
+    smooth = [sin(i / 2) + cos(j / 3) for i in 1:side for j in 1:side]
+    effect = 2.0 .* smooth .+ 0.5 .* randn(rng, side^2)
+    area = repeat(1:side^2; inner=n)
+    y = 10 .+ effect[area] .+ 0.3 .* randn(rng, length(area))
+    labels = string.("a", lpad.(1:side^2, 2, '0'))
+    (; y, area=labels[area], from=labels[from], to=labels[to])
+end
+
+# A data-rich grouped walk: 6 groups x 20 weekly steps, 15 rows per step with
+# noise sd 0.2, so each step's walk value is pinned by its data.
+function walk_panel(; seed=4, P=6, W=20, n=15)
+    rng = Xoshiro(seed)
+    level = zeros(P, W)
+    for p in 1:P, w in 1:W
+        level[p, w] = (w == 1 ? 0.0 : 0.8 * level[p, w - 1]) + 0.5 * randn(rng)
+    end
+    group = repeat(1:P; inner=W * n)
+    step = repeat(repeat(1:W; inner=n), P)
+    y = 5 .+ [level[g, w] for (g, w) in zip(group, step)] .+ 0.2 .* randn(rng, length(group))
+    (; y, patch=string.("p", group), week=step, C=Matrix(1.0I, P, P))
+end
+
+const FAMILY_DATA = Dict(:car_bym2 => car_panel, :cdar => walk_panel)
+
 const FAMILIES = Dict(
+    # BYM2 areal field on a data-rich grid: theta cells centred on area totals.
+    :car_bym2 => df -> @brm(df, begin
+        mu ~ 1 + car(area; edges=(from, to), type=:bym2)
+        y ~ Normal(mu, 0.3)
+    end),
+    # A grouped AR(1) walk whose steps the data pin.
+    :cdar => df -> @brm(df, begin
+        mu ~ 1 + cdar(week; by=patch, cor=C)
+        y ~ Normal(mu, 0.2)
+    end),
     # Student-t intercepts: each level's factor is `sqrt(w[g]) * tau`.
     :student_t => df -> @brm(df, begin
         mu ~ 1 + t + (1 | g)
@@ -112,37 +158,43 @@ function fit(lpdf; seed, n_chains=4, n_draws=400, init=missing)
             init=init === missing ? missing : [copy(init) for _ in 1:n_chains])
     catch e
         occursin("quorum unmet", sprint(showerror, e)) || rethrow()
-        return (; rhat=NaN, ess=NaN, divergent=-1,
+        return (; rhat=NaN, worst=0, ess=NaN, divergent=-1,
                 omitted=first(split(sprint(showerror, e), '\n')), seconds=NaN)
     end
     draws = [r.posterior_position for r in out.results]
     # draws × chains × parameters
     A = permutedims(cat((permutedims(d) for d in draws)...; dims=3), (1, 3, 2))
-    (; rhat=maximum(MCMCDiagnosticTools.rhat(A)),
+    rhats = MCMCDiagnosticTools.rhat(A)
+    (; rhat=maximum(rhats), worst=argmax(rhats),
        ess=minimum(MCMCDiagnosticTools.ess(A)),
        divergent=sum(r.n_divergent_samples for r in out.results),
        omitted=out.completion.omitted_chain_indices, seconds=t)
 end
 
 function main(families)
-    df = panel()
     for family in families
+        df = get(FAMILY_DATA, family, panel)()
         rk = RKBRMI(FAMILIES[family](df))
         problem = rk_logdensity_problem(rk; ad_backend=AD)
-        blocks = adaptive_centering_blocks(rk)
-        println("== $family: $(length(blocks)) block(s), ",
-                sum(b -> b.ranef.n_terms * b.ranef.n_groups, blocks), " cells, ",
+        # Field families adapt their car / cdar cells only under `fields = true`.
+        kw = family in (:car_bym2, :cdar) ? (; fields=true) : (;)
+        cells = length(adaptive_centering_controls(
+            adaptive_centering_problem(rk, problem, AD; kw...), rk))
+        println("== $family: $cells cells, ",
                 LogDensityProblems.dimension(problem), " coordinates")
         init = family in DATA_STARTS ? data_start(rk, df) : missing
-        for seed in (101, 202)
+        names = String.(BRM._rk_layout_coordinate_names(rk))
+        seeds = parse.(Int, split(get(ENV, "RK_FAMILY_SEEDS", "101,202"), ','))
+        for seed in seeds
             plain = fit(problem; seed, init)
-            adaptive = fit(adaptive_centering_problem(rk, problem, AD); seed, init)
+            adaptive = fit(adaptive_centering_problem(rk, problem, AD; kw...); seed, init)
             for (label, r) in (("plain", plain), ("adaptive", adaptive))
                 println(rpad("  seed $seed $label", 24),
                     "max R-hat ", round(r.rhat; digits=3),
                     "  min bulk ESS ", round(r.ess; digits=1),
                     "  divergent ", r.divergent,
                     "  omitted ", r.omitted,
+                    "  worst ", r.worst == 0 ? "-" : names[r.worst],
                     "  ", round(r.seconds; digits=1), " s")
             end
         end

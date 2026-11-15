@@ -12,6 +12,22 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.316
+
+- `adaptive_centering_problem(rk::RKBRMI, problem, backend; fields=true)` also
+  adapts the cells of areal `car` fields and `cdar` walks, as the SBBRMI wrapper
+  does: a BYM2 area's `theta` centred on the area's total, an ICAR area's `phi`,
+  and each walk innovation at its marginal spread. They come after the
+  random-effect cells, `car` then `cdar`. `fields` defaults to `false`, so they
+  still pass through by default. On data-rich synthetic fields (a 6 x 6 BYM2
+  grid, a 6-group 20-step walk) adapting them mixed worse than the plain RK
+  density in 5 of 6 seeds each (`research/adaptive_centering/rk_families.jl`).
+  A model with nothing else to adapt raises and names `fields = true`.
+- `adaptive_centering_cells` describes `car` and `cdar` cells
+  (`family = :car` / `:cdar`, each with its `scale` and `location` inputs), on
+  an SBBRMI always and on an RKBRMI under `fields = true`. An SBBRMI with such
+  cells no longer raises there. Every block row now names its `family`.
+
 ## 0.2.315
 
 - `brm_columns(builder::BRMBuilder)` no longer lists a `@plate` cell latent,
