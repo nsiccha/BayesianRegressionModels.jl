@@ -377,6 +377,33 @@ StanBlocks.
 function interval_censored end
 
 """
+    coarsened(Ordinal(structure, link, eta; ...); upper)
+
+Formula marker for coarsened ordinal evidence: a record that says only that
+the category lies in an inclusive range of the response's ordered levels.
+The observed response column holds the lowest category the record allows,
+and `upper` names a column holding the highest:
+
+```julia
+y_min ~ coarsened(Ordinal(Cumulative(), ProbitLink(), eta); upper=y_max)
+```
+
+Each row contributes `log P(y_min ≤ Y ≤ y_max)`, the summed probability of its
+categories; equal labels are an exact category. Both columns hold labels of
+one ordered level set, which the response column defines as for `Ordinal`: a
+`CategoricalVector` keeps its declared levels, so `levels = 0:4` keeps an
+unobserved `4`, and a plain vector uses `sort(unique(y_min))`. Every `upper`
+label must be one of those levels and must not precede its row's lower label.
+Thresholds, `discrimination=` and `per_threshold=` are the base `Ordinal`'s.
+Predictions draw single categories from the uncoarsened `Ordinal` law.
+
+Unlike `interval_censored`, whose response column is an *open* lower endpoint
+`(y, upper]`, both endpoints here are inclusive category labels. `SBBRMI` and
+`RKBRMI` (native density, gradients and `jax_source`) implement it.
+"""
+function coarsened end
+
+"""
     gr(group; by=strata)
 
 brms-style stratified grouping marker. `(1 | gr(subj, by=diagnosis))`
@@ -3742,7 +3769,7 @@ Base.@nospecializeinfer function _brm_warn_prior_bound_keywords(
         op isa ExprColumn && getf(op) === (~) || continue
         lhs, rhs = getargs(op, 2)
         rhs isa ExprColumn && any(in((:lower, :upper)), keys(getkwargs(rhs))) || continue
-        getf(rhs) in (truncated, censored, interval_censored, restricted) && continue
+        getf(rhs) in (truncated, censored, interval_censored, coarsened, restricted) && continue
         prior = (lhs isa ExprColumn && isnothing(_nested_observed_values(lhs))) ||
             (lhs isa NamedColumn &&
             !(parent(lhs) isa DataColumn) && !(key in varying) && key in read_elsewhere)

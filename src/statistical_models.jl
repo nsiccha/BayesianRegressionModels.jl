@@ -370,6 +370,16 @@ brm_prepared_indices(values, level_values) = begin
     return indices
 end
     ),
+    # `coarsened` ordinal evidence's lower codes for RKPPL's open-below
+    # interval `(code - 1, upper]`: each label's position minus one.
+    brm_prepared_indices_below = :(
+brm_prepared_indices_below(values, level_values) = begin
+    indices = ReactiveKernels.plate(values) do value
+        Int(findfirst(isequal(value), level_values)) - 1
+    end
+    return indices
+end
+    ),
     # Each value's position among sorted levels (a `car` graph's node labels),
     # by binary search: `O(n log m)`, where `brm_prepared_indices` compares
     # every value with every level.
@@ -582,6 +592,9 @@ const _BRM_STATISTICAL_VALUE_DOCS = (
         The indicator column of one factor level: `1.0` where `values` equals `level`, else `0.0`."""),
     brm_prepared_indices = @_rk_definition_doc("""
         Each value's position (1-based) in `level_values`: the level codes of a grouping or factor."""),
+    brm_prepared_indices_below = @_rk_definition_doc("""
+        Each value's position (1-based) in `level_values`, minus one: the open lower end of a
+        `coarsened` ordinal row's category range."""),
     brm_sorted_positions = @_rk_definition_doc("""
         Each value's position among the sorted levels `sorted_levels`, by binary search (`car` node labels)."""),
     brm_walk_positions = @_rk_definition_doc("""
