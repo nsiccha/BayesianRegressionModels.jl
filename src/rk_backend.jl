@@ -160,7 +160,10 @@ struct _RKDerivedSpec
 end
 
 struct _RKResponseEvidence
-    kind::Symbol # :none | :truncated | :censored | :interval_censored
+    # :none | :truncated | :censored | :interval_censored | :coarsened (an
+    # Ordinal's inclusive category range; `upper` names its coded upper end and
+    # the response its open lower end, emitted as RKPPL `interval_censored`)
+    kind::Symbol
     lower::Union{Nothing,Float64,Symbol}
     upper::Union{Nothing,Float64,Symbol}
 end
@@ -2583,7 +2586,8 @@ function _rk_gate_evidence_values!(specs::AbstractVector,
     prefix = "RK backend"
     for spec in specs
         evidence = spec.evidence
-        evidence.kind === :none && continue
+        # Coarsened endpoints are coded in the graph and checked when planned.
+        evidence.kind in (:none, :coarsened) && continue
         lower = _rk_bound_values(evidence.lower, columns, n_obs)
         upper = _rk_bound_values(evidence.upper, columns, n_obs)
         if evidence.kind === :interval_censored
@@ -7804,7 +7808,7 @@ Base.@nospecializeinfer function _rk_peel_observation(@nospecialize(brmi::BRMI),
     end
     modifier = _brm_response_modifier_plan(rhs; prefix)
     if !isnothing(modifier)
-        modifier.kind in (:truncated, :censored, :interval_censored) || error(
+        modifier.kind in (:truncated, :censored, :interval_censored, :coarsened) || error(
             "$prefix: response `$(observation.key)` modifier " *
             "`$(modifier.kind)` is out of slice 1")
         rhs = modifier.base
@@ -8038,6 +8042,37 @@ function _rk_response_level_table!(derived::Vector{_RKDerivedSpec},
         raw::AbstractVector)
     fit = _rk_fit_input!(derived, columns, taken, key, _brm_fit_input_source(key, raw))
     Expr(:_rk_data_preparation, :brm_fit_levels, fit)
+end
+
+# `y_min ~ coarsened(Ordinal(...); upper = y_max)`: an observed row's range
+# of categories. An omitted response (a replay design) has none.
+_rk_is_coarsened(entry) = entry.modifier !== nothing &&
+    entry.modifier.kind === :coarsened &&
+    !(entry.raw_response isa _BRMAbsentResponse)
+
+# Both ends of a coarsened row are coded in the graph against the response's
+# level table: the response as its level position minus one, the open lower
+# end of RKPPL's `interval_censored` event `(lower, upper]`, and the upper
+# labels as their positions. Returns the coded upper column's name. The codes
+# are checked here, against the same fitted levels, so a label outside them or
+# an upper category before its lower one is refused by row.
+function _rk_plan_coarsened!(derived::Vector{_RKDerivedSpec},
+        columns::AbstractDict{Symbol}, taken::Set{Symbol}, entry, raw::Symbol,
+        levels, data::AbstractDict)
+    upper_labels = _brm_coarsened_upper_labels(entry.modifier.upper, data)
+    _brm_coarsened_codes(entry.key,
+        _brm_fitted_levels(entry.key, entry.raw_response),
+        entry.raw_response, upper_labels; prefix="RK backend")
+    push!(derived, _RKDerivedSpec(entry.key,
+        Expr(:_rk_data_preparation, :brm_prepared_indices_below, raw, levels),
+        entry.key))
+    upper_raw = _rk_mint_generated!(taken, columns, string(entry.key, "_upper_raw"))
+    columns[upper_raw] = upper_labels
+    upper = _rk_mint_generated!(taken, columns, string(entry.key, "_upper"))
+    push!(derived, _RKDerivedSpec(upper,
+        Expr(:_rk_data_preparation, :brm_prepared_indices, upper_raw, levels),
+        entry.key))
+    upper
 end
 
 # OrderedLogistic keeps SB's raw-integer coding (K = max(y)): no recode,
@@ -8489,6 +8524,7 @@ function _rk_bound_columns(response_specs::AbstractVector, readers::Set{Symbol})
     bounds = Dict{Symbol,@NamedTuple{side::String,open::Float64,shared::Bool}}()
     for spec in response_specs
         evidence = spec.evidence
+        evidence.kind === :coarsened && continue
         for (bound, side, open) in ((evidence.lower, "lower", -Inf),
                 (evidence.upper, "upper", Inf))
             bound isa Symbol || continue
@@ -9399,14 +9435,23 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
                 implicit_vectors, vector_by_name, context.data,
                 predictor_specs) :
             _rk_unleveled(entry, predictor)
+        coarsened_upper = nothing
         if family in (:categorical_logit, :ordinal, :categorical)
             raw = _rk_mint_generated!(taken, columns, string(entry.key, "_raw"))
             columns[raw] = entry.raw_response
             levels = _rk_response_level_table!(derived, columns, taken,
                 entry.key, entry.raw_response)
-            push!(derived, _RKDerivedSpec(entry.key,
-                Expr(:_rk_data_preparation, :brm_prepared_indices, raw, levels),
-                entry.key))
+            if _rk_is_coarsened(entry)
+                family === :ordinal || error(
+                    "$prefix: response `$(entry.key)` `coarsened` evidence " *
+                    "needs an `Ordinal` base")
+                coarsened_upper = _rk_plan_coarsened!(derived, columns, taken,
+                    entry, raw, levels, context.data)
+            else
+                push!(derived, _RKDerivedSpec(entry.key,
+                    Expr(:_rk_data_preparation, :brm_prepared_indices, raw, levels),
+                    entry.key))
+            end
         end
         # Mixture v1 admits no response-level weights (no driving case)
         # and no `gp` mixture predictors (the AST plate ranges over one
@@ -9495,10 +9540,11 @@ Base.@nospecializeinfer function _brm_rk_unselected_plan(@nospecialize(brmi::BRM
             columns[source] = entry.weight_plan.column
             source
         end
-        evidence = _rk_plan_evidence(entry.modifier,
+        evidence = coarsened_upper === nothing ? _rk_plan_evidence(entry.modifier,
             _rk_evidence_family(family, mixture_components),
             context.data, entry.key, columns, consts, aliases, parameter_names,
-            assignment_names)
+            assignment_names) :
+            _RKResponseEvidence(:coarsened, nothing, coarsened_upper)
         if family === :mvnormal_cholesky
             # Joint responses cross one raw column per outcome (not the
             # packed row vectors) and carry the factor stem explicitly.

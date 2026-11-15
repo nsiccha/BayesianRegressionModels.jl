@@ -1695,12 +1695,15 @@ StanBlocks.@deffun begin
             end
         end
     end
+    # The probit upper tail is the lower tail at -z: Stan's `normal_lccdf`
+    # returns -inf beyond about 8.25 standard deviations, while `normal_lcdf`
+    # follows the tail asymptotically.
     @stanonly brm_ordinal_logccdf(z::real, link::int)::real = begin
         if link == 1
             log_inv_logit(-z)
         else
             if link == 2
-                normal_lccdf(z, 0., 1.)
+                normal_lcdf(-z, 0., 1.)
             else
                 -exp(z)
             end
@@ -1749,10 +1752,20 @@ StanBlocks.@deffun begin
                                 else
                                     z_hi = discrimination * (thresholds[y] - eta)
                                     z_lo = discrimination * (thresholds[y - 1] - eta)
-                                    log_diff_exp(
-                                        brm_ordinal_logcdf(z_hi, link),
-                                        brm_ordinal_logcdf(z_lo, link),
-                                    )
+                                    # Subtract the smaller tails, so a category
+                                    # far below eta keeps its mass.
+                                    lower_tail = brm_ordinal_logcdf(z_lo, link)
+                                    if lower_tail > -0.6931471805599453
+                                        log_diff_exp(
+                                            brm_ordinal_logccdf(z_lo, link),
+                                            brm_ordinal_logccdf(z_hi, link),
+                                        )
+                                    else
+                                        log_diff_exp(
+                                            brm_ordinal_logcdf(z_hi, link),
+                                            lower_tail,
+                                        )
+                                    end
                                 end
                             end
                         end
@@ -1915,6 +1928,201 @@ StanBlocks.@deffun begin
         brm_ordinal_rng(
             int[n], rep_vector(eta, n), thresholds,
             rep_vector(discrimination, n), structure, link, threshold_effect,
+        )
+    end
+
+    # `y_min ~ coarsened(Ordinal(...); upper = y_max)`: the inclusive category
+    # range `lo..hi` (1-based codes), `log P(lo <= Y <= hi)` in log space on the
+    # smaller tail. Its predictive draw is the uncoarsened `brm_ordinal_rng`.
+    @stanonly @lpxf brm_ordinal_range_lpmf(lo::int, hi::int, eta::real,
+                           thresholds::vector[k], discrimination::real,
+                           structure::int, link::int,
+                           threshold_effect::vector[k])::real = begin
+        K = k + 1
+        if discrimination <= 0.
+            negative_infinity()
+        else
+            if lo < 1
+                negative_infinity()
+            else
+                if hi > K
+                    negative_infinity()
+                else
+                    if lo > hi
+                        negative_infinity()
+                    else
+                        if structure == 1
+                            if lo == 1
+                                if hi == K
+                                    0.
+                                else
+                                    brm_ordinal_logcdf(
+                                        discrimination * (thresholds[hi] - eta), link)
+                                end
+                            else
+                                z_range_lo = discrimination * (thresholds[lo - 1] - eta)
+                                if hi == K
+                                    brm_ordinal_logccdf(z_range_lo, link)
+                                else
+                                    z_range_hi = discrimination * (thresholds[hi] - eta)
+                                    range_lower_tail = brm_ordinal_logcdf(z_range_lo, link)
+                                    if range_lower_tail > -0.6931471805599453
+                                        log_diff_exp(
+                                            brm_ordinal_logccdf(z_range_lo, link),
+                                            brm_ordinal_logccdf(z_range_hi, link),
+                                        )
+                                    else
+                                        log_diff_exp(
+                                            brm_ordinal_logcdf(z_range_hi, link),
+                                            range_lower_tail,
+                                        )
+                                    end
+                                end
+                            end
+                        else
+                            reached = 0.
+                            for j in 1:(lo - 1)
+                                reached += brm_ordinal_logccdf(
+                                    discrimination *
+                                    (thresholds[j] - eta - threshold_effect[j]), link)
+                            end
+                            if hi == K
+                                reached
+                            else
+                                continued = 0.
+                                for j in lo:hi
+                                    continued += brm_ordinal_logccdf(
+                                        discrimination *
+                                        (thresholds[j] - eta - threshold_effect[j]), link)
+                                end
+                                reached + log1m_exp(continued)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    @stanonly brm_ordinal_range_lpmf(lo::int[n], hi::int[n], eta::vector[n],
+                     thresholds::vector[k], discrimination::vector[n],
+                     structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        rv = 0.
+        for i in 1:n
+            rv += brm_ordinal_range_lpmf(
+                lo[i], hi[i], eta[i], thresholds, discrimination[i], structure,
+                link, to_vector(threshold_effect[i, :]),
+            )
+        end
+        rv
+    end
+    @stanonly brm_ordinal_range_lpmf(lo::int[n], hi::int[n], eta::vector[n],
+                     thresholds::vector[k], discrimination::real,
+                     structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        brm_ordinal_range_lpmf(
+            lo, hi, eta, thresholds, rep_vector(discrimination, n), structure,
+            link, threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_range_lpmf(lo::int[n], hi::int[n], eta::real,
+                     thresholds::vector[k], discrimination::vector[n],
+                     structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        brm_ordinal_range_lpmf(
+            lo, hi, rep_vector(eta, n), thresholds, discrimination, structure,
+            link, threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_range_lpmf(lo::int[n], hi::int[n], eta::real,
+                     thresholds::vector[k], discrimination::real,
+                     structure::int, link::int,
+                     threshold_effect::matrix[n,k])::real = begin
+        brm_ordinal_range_lpmf(
+            lo, hi, rep_vector(eta, n), thresholds, rep_vector(discrimination, n),
+            structure, link, threshold_effect,
+        )
+    end
+
+    @stanonly brm_ordinal_range_lpmfs(args...) = begin
+        brm_ordinal_range_lpmf(args...)
+    end
+    @stanonly brm_ordinal_range_lpmfs(lo::int[n], hi::int[n], eta::vector[n],
+                      thresholds::vector[k], discrimination::vector[n],
+                      structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        rv::vector[n]
+        for i in 1:n
+            rv[i] = brm_ordinal_range_lpmf(
+                lo[i], hi[i], eta[i], thresholds, discrimination[i], structure,
+                link, to_vector(threshold_effect[i, :]),
+            )
+        end
+        rv
+    end
+    @stanonly brm_ordinal_range_lpmfs(lo::int[n], hi::int[n], eta::vector[n],
+                      thresholds::vector[k], discrimination::real,
+                      structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        brm_ordinal_range_lpmfs(
+            lo, hi, eta, thresholds, rep_vector(discrimination, n), structure,
+            link, threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_range_lpmfs(lo::int[n], hi::int[n], eta::real,
+                      thresholds::vector[k], discrimination::vector[n],
+                      structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        brm_ordinal_range_lpmfs(
+            lo, hi, rep_vector(eta, n), thresholds, discrimination, structure,
+            link, threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_range_lpmfs(lo::int[n], hi::int[n], eta::real,
+                      thresholds::vector[k], discrimination::real,
+                      structure::int, link::int,
+                      threshold_effect::matrix[n,k])::vector[n] = begin
+        brm_ordinal_range_lpmfs(
+            lo, hi, rep_vector(eta, n), thresholds, rep_vector(discrimination, n),
+            structure, link, threshold_effect,
+        )
+    end
+
+    @stanonly brm_ordinal_range_rng(int[n], hi::int[n], eta::vector[n],
+                    thresholds::vector[k], discrimination::vector[n],
+                    structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        brm_ordinal_rng(
+            int[n], eta, thresholds, discrimination, structure, link,
+            threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_range_rng(int[n], hi::int[n], eta::vector[n],
+                    thresholds::vector[k], discrimination::real,
+                    structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        brm_ordinal_rng(
+            int[n], eta, thresholds, discrimination, structure, link,
+            threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_range_rng(int[n], hi::int[n], eta::real,
+                    thresholds::vector[k], discrimination::vector[n],
+                    structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        brm_ordinal_rng(
+            int[n], eta, thresholds, discrimination, structure, link,
+            threshold_effect,
+        )
+    end
+    @stanonly brm_ordinal_range_rng(int[n], hi::int[n], eta::real,
+                    thresholds::vector[k], discrimination::real,
+                    structure::int, link::int,
+                    threshold_effect::matrix[n,k])::int[n] = begin
+        brm_ordinal_rng(
+            int[n], eta, thresholds, discrimination, structure, link,
+            threshold_effect,
         )
     end
 end
@@ -7185,6 +7393,21 @@ function _sb_reprocess_entry!(new_data, new_preproc, handled, key::Symbol, e::Pr
         new_data[key] = _sb_apply_levels(levels, v)
         new_preproc[key] = PreprocEntry(
             :ordinal_outcome, (; levels, n_levels=expected_n_levels),
+            e.raw_ref, true)
+    elseif e.kind === :coarsened_upper
+        # The upper labels of `coarsened` evidence, coded against the levels of
+        # its response column (`e.const_.lower`), never against their own.
+        lower = _sb_df_column(df, e.const_.lower)
+        levels = freeze ? e.const_.levels : _sb_fit_levels(lower)
+        length(levels) == e.const_.n_levels || error(
+            "sbimpl: reprocess: coarsened ordinal outcome `$(e.const_.lower)` has " *
+            "$(length(levels)) levels, but the fitted `Ordinal` model has " *
+            "$(e.const_.n_levels). Preserve the fitted ordered level set or rebuild the model.")
+        _, hi = _brm_coarsened_codes(e.const_.lower, levels, lower,
+            _sb_df_column(df, e.raw_ref); prefix="sbimpl: reprocess")
+        new_data[key] = hi
+        new_preproc[key] = PreprocEntry(:coarsened_upper,
+            (; levels, n_levels=e.const_.n_levels, lower=e.const_.lower),
             e.raw_ref, true)
     elseif e.kind === :ordinal_threshold_predictor
         v = _sb_df_column(df, e.raw_ref)
@@ -17241,17 +17464,7 @@ end
 # unchanged for compatibility).
 function _sb_lik_family!(stmts, target, ::Type{<:Ordinal},
                          args::Tuple{Any,Any,Any}, kwargs::NamedTuple, data)
-    structure_raw, link_raw, eta_raw = args
-    structure = _sb_ordinal_structure_code(structure_raw)
-    link = _sb_ordinal_link_code(link_raw)
-    _sb_ordinal_has_fixed_intercept(eta_raw) && error(
-        "sbimpl: `Ordinal($target)` cannot include a fixed intercept in `eta`; " *
-        "the estimated thresholds already supply the location. Use `eta ~ 0 + ...`.")
-
-    raw = get(data, target, nothing)
-    raw isa AbstractVector || error(
-        "sbimpl: `Ordinal` expects an observed outcome vector for `$target`, " *
-        "got $(typeof(raw))")
+    raw = _sb_ordinal_observed(target, data)
     prepared_response = _brm_response_levels(target, raw; prefix="sbimpl")
     levels = prepared_response.fit.levels
     n_levels = prepared_response.fit.n_levels
@@ -17262,6 +17475,60 @@ function _sb_lik_family!(stmts, target, ::Type{<:Ordinal},
     data[target] = prepared_response.response
     _sb_record_preproc!(data, target, PreprocEntry(
         :ordinal_outcome, (; levels, n_levels), target, true))
+    law = _sb_ordinal_law!(stmts, target, args, kwargs, data, n_levels, length(raw))
+    _sb_lik_stan_exprs!(stmts, target, :brm_ordinal, law)
+end
+
+function _sb_ordinal_observed(target, data)
+    raw = get(data, target, nothing)
+    raw isa AbstractVector || error(
+        "sbimpl: `Ordinal` expects an observed outcome vector for `$target`, " *
+        "got $(typeof(raw))")
+    raw
+end
+
+# `y_min ~ coarsened(Ordinal(...); upper = y_max)`: both columns are coded
+# against the response's levels; the Stan family `brm_ordinal_range` reads the
+# lower code as the variate and the upper code as its first argument.
+function _sb_lik_family!(stmts, target, ::typeof(coarsened), args, kwargs::NamedTuple, data)
+    plan = _brm_response_modifier_plan(coarsened, args, kwargs; prefix="sbimpl")
+    base = plan.base
+    base_args = getargs(base)
+    length(base_args) == 3 || error(
+        "sbimpl: `Ordinal($target)` expects exactly three positional arguments " *
+        "`(structure, link, eta)`, got $(length(base_args))")
+    lower = _sb_ordinal_observed(target, data)
+    upper = _brm_coarsened_upper_labels(plan.upper, data)
+    prepared_response = _brm_response_levels(target, lower; prefix="sbimpl")
+    levels = prepared_response.fit.levels
+    n_levels = prepared_response.fit.n_levels
+    lo, hi = _brm_coarsened_codes(target, levels, lower, upper; prefix="sbimpl")
+    upper_key = Symbol(target, :_upper_level)
+    haskey(data, upper_key) && error(
+        "sbimpl: `coarsened` response `$target` codes its upper column as data " *
+        "`$upper_key`, which the data already holds; rename that column")
+    data[target] = lo
+    data[upper_key] = hi
+    _sb_record_preproc!(data, target, PreprocEntry(
+        :ordinal_outcome, (; levels, n_levels), target, true))
+    _sb_record_preproc!(data, upper_key, PreprocEntry(
+        :coarsened_upper, (; levels, n_levels, lower=target), name(plan.upper), true))
+    law = _sb_ordinal_law!(stmts, target, Tuple(base_args), getkwargs(base), data,
+                           n_levels, length(lower))
+    _sb_lik_stan_exprs!(stmts, target, :brm_ordinal_range, (upper_key, law...))
+end
+
+# An `Ordinal` law's Stan arguments after its response is coded: thresholds,
+# threshold effects, location and discrimination, shared by an exact response
+# and a coarsened one.
+function _sb_ordinal_law!(stmts, target, args::Tuple{Any,Any,Any},
+                          kwargs::NamedTuple, data, n_levels::Int, n_obs::Int)
+    structure_raw, link_raw, eta_raw = args
+    structure = _sb_ordinal_structure_code(structure_raw)
+    link = _sb_ordinal_link_code(link_raw)
+    _sb_ordinal_has_fixed_intercept(eta_raw) && error(
+        "sbimpl: `Ordinal($target)` cannot include a fixed intercept in `eta`; " *
+        "the estimated thresholds already supply the location. Use `eta ~ 0 + ...`.")
 
     cut_name = Symbol(target, :_thresholds)
     n_cut = _sb_threshold_count!(data, cut_name, n_levels - 1)
@@ -17273,7 +17540,7 @@ function _sb_lik_family!(stmts, target, ::Type{<:Ordinal},
 
     per_threshold_raw = get(kwargs, :per_threshold, ())
     per_threshold = _sb_ordinal_threshold_predictors!(
-        data, target, per_threshold_raw, length(raw))
+        data, target, per_threshold_raw, n_obs)
     structure == 1 && !isempty(per_threshold) && error(
         "sbimpl: `per_threshold` is currently supported for " *
         "`StoppingRatio()` only; unrestricted cumulative category-specific " *
@@ -17301,8 +17568,7 @@ function _sb_lik_family!(stmts, target, ::Type{<:Ordinal},
     eta = _sb_scalar_expr(eta_raw, data)
     discrimination = _sb_ordinal_discrimination_expr(
         get(kwargs, :discrimination, 1.0), data)
-    _sb_lik_stan_exprs!(stmts, target, :brm_ordinal,
-        (eta, cut_name, discrimination, structure, link, effect_name))
+    (eta, cut_name, discrimination, structure, link, effect_name)
 end
 # Explicit thresholds: `y ~ Ordinal(structure, link, eta, thresholds[,
 # discrimination])`. The model states the thresholds (a declared vector with its

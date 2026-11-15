@@ -3234,7 +3234,7 @@ end
 
 """
     adaptive_centering_problem(rk::RKBRMI, problem, ad_backend;
-        unc_names=nothing, centeredness=nothing, ranef_order=:declared)
+        unc_names=nothing, centeredness=nothing, ranef_order=:declared, fields=false)
 
 Wrap `problem = rk_logdensity_problem(rk; ad_backend)` in the same WarmupHMC
 adaptive partial centring of random effects as the SBBRMI method: one
@@ -3257,6 +3257,15 @@ unchanged, and returned draws stay in the RK layout's frame. Blocks whose
 scales are not plain sampled `exp` coordinates take SBBRMI's joint
 (derived-scale) wrapper, as they do there.
 
+`fields = true` also adapts the cells of areal `car` fields and `cdar` walks,
+as the SBBRMI wrapper does (after the random-effect cells, `car` then `cdar`):
+a BYM2 area's `theta` centred on the area's total, an ICAR area's `phi`, each
+walk innovation at its marginal spread. It is off by default: on data-rich
+synthetic fields (a 6 x 6 BYM2 grid, a 6-group 20-step walk) it mixed worse
+than the plain RK density in 5 of 6 seeds each, the stiff direction being the
+field's `rho` or the intercept, which these cells do not move
+(`research/adaptive_centering/rk_families.jl`, families `car_bym2`, `cdar`).
+
 `unc_names` defaults to the RK layout's coordinate names. `centeredness`
 (a real in `[0, 1]`, one per cell, or `:midpoint`) sets the start;
 `ranef_order = :learned` selects the learned conditioning order of correlated
@@ -3266,7 +3275,7 @@ wrapper does not cover raise (see [`adaptive_centering_blocks`](@ref)); a model
 without any random-effect block raises.
 """
 function BRM.adaptive_centering_problem(model::BRM.RKBRMI, problem, ad_backend;
-        unc_names=nothing, centeredness=nothing, ranef_order=:declared)
+        unc_names=nothing, centeredness=nothing, ranef_order=:declared, fields=false)
     names = String.(isnothing(unc_names) ? BRM._rk_layout_coordinate_names(model) :
                     unc_names)
     ranef_order in (:declared, :learned) ||
@@ -3275,8 +3284,17 @@ function BRM.adaptive_centering_problem(model::BRM.RKBRMI, problem, ad_backend;
         "centeredness must be a real in [0, 1], one such value per cell, or " *
         "`:midpoint`; got `:$centeredness`"))
     blocks = BRM.adaptive_centering_blocks(model, names)
-    isempty(blocks) && error("BRM adaptive centering on RKBRMI: this model has no " *
-        "random-effect block with sampler coordinates to adapt.")
+    fields isa Bool || throw(ArgumentError("fields must be true or false"))
+    car_blocks = fields ? BRM._rk_adaptive_car_blocks(model, names) : _NO_CAR_BLOCKS
+    cdar_blocks = fields ? BRM._rk_adaptive_cdar_blocks(model, names) : _NO_CDAR_BLOCKS
+    if isempty(blocks) && isempty(car_blocks) && isempty(cdar_blocks)
+        held = !fields && !(isempty(BRM._rk_adaptive_car_blocks(model, names)) &&
+                            isempty(BRM._rk_adaptive_cdar_blocks(model, names)))
+        error("BRM adaptive centering on RKBRMI: this model has no random-effect " *
+              "block with sampler coordinates to adapt" * (held ?
+              "; its `car` fields or `cdar` walks adapt only with `fields = true` " *
+              "(off by default: see the docstring)." : "."))
+    end
     locations = BRM._adaptive_ranef_locations(model, blocks, names)
     ordinary = BRM.AdaptiveCenteringBlock[
         b for b in blocks if b isa BRM.AdaptiveCenteringBlock]
@@ -3285,8 +3303,8 @@ function BRM.adaptive_centering_problem(model::BRM.RKBRMI, problem, ad_backend;
     _containers_first!(ordinary, locations)
     _containers_first!(r2d2_blocks, locations)
     _cells_centering_problem(problem, ad_backend, ordinary, r2d2_blocks,
-        BRM._HSGPAdaptiveCenteringBlock[], _NO_LEVEL_BLOCKS, _NO_CDAR_BLOCKS,
-        _NO_CAR_BLOCKS, locations, _NO_SCALAR_CELLS; centeredness, ranef_order)
+        BRM._HSGPAdaptiveCenteringBlock[], _NO_LEVEL_BLOCKS, cdar_blocks,
+        car_blocks, locations, _NO_SCALAR_CELLS; centeredness, ranef_order)
 end
 
 # ---- Controls report --------------------------------------------------------

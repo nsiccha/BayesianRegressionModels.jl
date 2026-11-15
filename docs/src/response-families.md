@@ -109,6 +109,14 @@ end)((; x=[-1., -0.5, 0., 0.5, 1., 1.5],
 """, :model; title="Unordered and ordered categories", require_stan=true)
 ```
 
+A rating known only up to a range of categories, such as "marked to severe"
+on a `0:4` scale, is coarsened evidence:
+`y_min ~ coarsened(Ordinal(Cumulative(), ProbitLink(), eta); upper=y_max)`.
+Each row's response holds its lowest allowed category and `upper` its highest,
+both inclusive, so equal labels are an exact rating, and the row contributes
+the summed probability of its categories. Declare the levels on a
+`CategoricalVector` to keep a level that no row observed.
+
 ## Observation mechanisms
 
 Truncation conditions on being inside a sampling interval. Censoring records

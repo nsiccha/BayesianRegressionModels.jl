@@ -16,6 +16,8 @@ _brm_distribution_shape(::typeof(censored), args) =
     _brm_distribution_shape(first(args))
 _brm_distribution_shape(::typeof(weighted), args) =
     _brm_distribution_shape(first(args))
+_brm_distribution_shape(::typeof(coarsened), args) =
+    isempty(args) ? nothing : _brm_distribution_shape(first(args))
 
 # `interval_censored` also names a predictor term over a data column. Only
 # its distribution-call form is a sampled declaration when the LHS is absent.

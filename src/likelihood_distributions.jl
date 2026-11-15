@@ -146,34 +146,47 @@ function Distributions.probs(d::Ordinal{<:StoppingRatio})
     rv
 end
 
-function Distributions.logpdf(d::Ordinal{<:Cumulative}, k::Real)
+Distributions.logpdf(d::Ordinal, k::Real) =
+    isinteger(k) ? _ordinal_range_logmass(d, k, k) :
+        oftype(d.discrimination, -Inf)
+
+"""
+    _ordinal_range_logmass(d::Ordinal, lo, hi)
+
+`log P(lo ≤ Y ≤ hi)` for categories `lo..hi` (inclusive, `1 ≤ lo ≤ hi ≤ K`),
+the likelihood of `coarsened` evidence; `lo == hi` is `logpdf`. Computed in
+log space on the smaller tail, so it stays finite wherever the mass is a
+representable positive number, including far from every threshold.
+"""
+function _ordinal_range_logmass(d::Ordinal{<:Cumulative}, lo::Real, hi::Real)
     K = length(d.thresholds) + 1
-    (!isinteger(k) || k < 1 || k > K) &&
-        return oftype(d.discrimination, -Inf)
-    K == 1 && return zero(partype(d))
-    i = Int(k)
-    z(j) = d.discrimination * (d.thresholds[j] - d.eta)
-    i == 1 && return _ordinal_link_logcdf(d.link, z(1))
-    i == K && return _ordinal_link_logccdf(d.link, z(K - 1))
-    logsubexp(
-        _ordinal_link_logcdf(d.link, z(i)),
-        _ordinal_link_logcdf(d.link, z(i - 1)),
-    )
+    (1 <= lo <= hi <= K) || return oftype(d.discrimination, -Inf)
+    i, j = Int(lo), Int(hi)
+    (i == 1 && j == K) && return zero(partype(d))
+    z(m) = d.discrimination * (d.thresholds[m] - d.eta)
+    i == 1 && return _ordinal_link_logcdf(d.link, z(j))
+    j == K && return _ordinal_link_logccdf(d.link, z(i - 1))
+    # F(z_hi) - F(z_lo) = CCDF(z_lo) - CCDF(z_hi): subtract the smaller tails.
+    lower_tail = _ordinal_link_logcdf(d.link, z(i - 1))
+    lower_tail > -log(2) ?
+        logsubexp(_ordinal_link_logccdf(d.link, z(i - 1)),
+                  _ordinal_link_logccdf(d.link, z(j))) :
+        logsubexp(_ordinal_link_logcdf(d.link, z(j)), lower_tail)
 end
 
-function Distributions.logpdf(d::Ordinal{<:StoppingRatio}, k::Real)
+function _ordinal_range_logmass(d::Ordinal{<:StoppingRatio}, lo::Real, hi::Real)
     K = length(d.thresholds) + 1
-    (!isinteger(k) || k < 1 || k > K) &&
-        return oftype(d.discrimination, -Inf)
-    i = Int(k)
-    rv = zero(partype(d))
-    for j in 1:min(i, K - 1)
-        z = d.discrimination *
-            (d.thresholds[j] - _ordinal_stage_eta(d.eta, j))
-        rv += j == i ? _ordinal_link_logcdf(d.link, z) :
-                       _ordinal_link_logccdf(d.link, z)
-    end
-    rv
+    (1 <= lo <= hi <= K) || return oftype(d.discrimination, -Inf)
+    i, j = Int(lo), Int(hi)
+    stage_logccdf(m) = _ordinal_link_logccdf(d.link,
+        d.discrimination * (d.thresholds[m] - _ordinal_stage_eta(d.eta, m)))
+    # P(Y ≥ lo) continues through the stages before `lo`.
+    reached = sum(stage_logccdf, 1:i-1; init=zero(partype(d)))
+    j == K && return reached
+    # ... and stops at one of the stages lo..hi.
+    i == j && return reached + _ordinal_link_logcdf(d.link,
+        d.discrimination * (d.thresholds[i] - _ordinal_stage_eta(d.eta, i)))
+    reached + log1mexp(sum(stage_logccdf, i:j))
 end
 
 Random.rand(rng::Random.AbstractRNG, d::Ordinal) =
