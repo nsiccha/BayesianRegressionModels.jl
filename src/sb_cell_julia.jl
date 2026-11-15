@@ -139,6 +139,7 @@ function _sb_cell_family(x, scope)
     callable = _sb_cell_binding(scope, head)
     callable isa BRMComponent && return _sb_component_cell_call(callable, x, scope)
     callable === LocationScale && return _sb_cell_location_scale(x, scope)
+    callable === Ordinal && return _sb_cell_ordinal(x, scope)
     args = Any[_sb_cell_argument(a, scope) for a in x.args[2:end]]
     if callable isa Type && callable <: Distribution
         positional = Tuple(filter(!_sb_cell_keyword_argument, args))
@@ -176,6 +177,46 @@ function _sb_cell_location_scale(x, scope)
         Tuple(filter(!_sb_cell_keyword_argument, base_args)), NamedTuple(keywords))
     _sb_affine_call(constructor, _sb_cell_value(location, scope),
         _sb_cell_value(scale, scope), Tuple(call.args[2:end]), first(call.args))
+end
+
+# `Ordinal(structure, link, eta, thresholds[, discrimination])` in a cell: the
+# executable distribution, with thresholds the cell gives (an examiner's own
+# ordered vector, say). The structure and link are tags, resolved by the
+# callable the cell's module binds, and become the integer codes BRM's Stan
+# ordinal functions take; the other arguments are cell values. Discrimination is
+# the fifth argument or `discrimination=`, one by default.
+function _sb_cell_ordinal(x, scope)
+    usage = "write `Ordinal(Cumulative() | StoppingRatio(), LogitLink() | " *
+        "ProbitLink() | CloglogLink(), eta, thresholds[, discrimination])`"
+    raw = x.args[2:end]
+    positional = filter(!_sb_cell_keyword_argument, raw)
+    keywords = foldl(_sb_cell_keywords!, filter(_sb_cell_keyword_argument, raw);
+        init=Pair{Symbol,Any}[])
+    length(positional) in (4, 5) || error(
+        "sbimpl: an in-cell `Ordinal` observation takes its thresholds explicitly " *
+        "(the cell has no fitted level table to allocate them from); $usage")
+    for (key, _) in keywords
+        key === :discrimination || error(
+            "sbimpl: an in-cell `Ordinal` takes only the `discrimination` keyword, got `$key`")
+    end
+    length(positional) == 5 && !isempty(keywords) && error(
+        "sbimpl: an in-cell `Ordinal` got its discrimination twice, as the fifth " *
+        "argument and as `discrimination=`")
+    structure = _sb_cell_ordinal_tag(positional[1], scope, OrdinalStructure, usage)
+    link = _sb_cell_ordinal_tag(positional[2], scope, OrdinalLink, usage)
+    discrimination = length(positional) == 5 ? positional[5] :
+        isempty(keywords) ? 1.0 : last(only(keywords))
+    Expr(:call, brm_ordinal_explicit, _sb_cell_value(positional[3], scope),
+        _sb_cell_value(positional[4], scope), _sb_cell_value(discrimination, scope),
+        _sb_ordinal_structure_code(structure), _sb_ordinal_link_code(link))
+end
+
+function _sb_cell_ordinal_tag(arg, scope, expected, usage)
+    tag = Meta.isexpr(arg, :call) && length(arg.args) == 1 ?
+        _sb_cell_binding(scope, first(arg.args)) : nothing
+    tag isa Type && tag <: expected || error(
+        "sbimpl: an in-cell `Ordinal` needs a `$expected` tag call, got `$arg`; $usage")
+    _brm_ordinal_tag(tag, expected; prefix="sbimpl")
 end
 
 # A Distributions constructor in a cell observation: the top-level table, except

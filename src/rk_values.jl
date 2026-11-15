@@ -658,6 +658,9 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
                 return true
             end
         end
+        # An `Ordinal` with explicit thresholds reads a vector the model gives;
+        # the formula route only allocates its implicit thresholds.
+        head === Ordinal && length(getargs(family)) in (4, 5) && return true
         # A categorical response owns fitted level coding and a whole simplex;
         # it is not a scalar response merely because it has no formula location.
         head === Categorical && continue
@@ -791,7 +794,10 @@ function _rk_ast_value_distribution(::Type{OrderedLogistic}, distribution, bindi
 end
 
 # RKPPL's explicit ordinal: tags by name, shared thresholds, positional
-# discrimination and one threshold-effect row per observation.
+# discrimination and one threshold-effect row per observation. The record is
+# BRM's prepared one (implicit thresholds), an `Ordinal` the model gave its
+# thresholds (`_brm_prepare_explicit_ordinal`), or a cell's
+# (`_rk_kernel_observation_distribution`); all carry `discrimination=`.
 function _rk_ast_value_distribution!(statements, ::Type{Ordinal}, observation,
         distribution, bindings, taken; coordinates=nothing, definitions=nothing)
     length(distribution.args) == 4 ||

@@ -341,6 +341,12 @@ link tags. Threshold/stage priors are elementwise `Normal(0,1)`; the common
 predictor must omit its intercept. Discrimination is positive, defaults to
 one and needs scale identification when predicted (`cmc=false` retains a
 reference). `per_threshold` supports numeric data terms for StoppingRatio.
+Thresholds may instead be given by the model, as
+`Ordinal(structure, link, eta, thresholds[, discrimination])` at model scope or
+in a `@plate` cell (one vector per group, for example each rater's own
+partially pooled thresholds). The response then holds the category codes
+`1:(length(thresholds) + 1)`, and a cumulative vector that is not strictly
+increasing has log density `-Inf`.
 
 `LKJCovarianceFactor(K; scale_prior=Exponential(1),shape=1)` combines K scales
 with an LKJ Cholesky correlation factor. Joint observations need complete,
