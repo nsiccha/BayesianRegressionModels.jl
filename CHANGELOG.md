@@ -51,7 +51,6 @@ instead of failing at run time.
   `gr(g; cor=...)` blocks still raise; multi-membership and R2D2-scaled blocks,
   HSGP weights and `car`/`cdar`/`gmrf` fields still pass through.
 
-
 ## 0.2.310
 
 - A point where a kernel cell's ODE solve fails is outside the model's support
