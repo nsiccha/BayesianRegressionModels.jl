@@ -19,6 +19,7 @@ constructor and the supported compositions.
 | Count | `Poisson(lambda)`, `NegativeBinomial2(mu, phi)` | Rate or mean/precision | Log |
 | Unordered category | `CategoricalLogit(eta2, eta3, ...)` | Log odds against the first level | Identity on each log odds |
 | Ordered category | `Ordinal(Cumulative(), ProbitLink(), eta)` | Predictor and inferred thresholds | Link supplied by the tag |
+| Ordered category, thresholds given | `Ordinal(Cumulative(), ProbitLink(), eta, cuts)` | Predictor and the model's threshold vector (per group in a `@plate` cell) | Response holds codes `1:(length(cuts) + 1)` |
 | Direction | `CircularVonMises(mu, kappa)` | Direction and concentration | Identity for direction, log for concentration |
 | Joint real vector | `MvNormalCholesky([mu1, mu2], L)` | Mean vector, covariance factor | Identity for means |
 
@@ -107,6 +108,14 @@ end)((; x=[-1., -0.5, 0., 0.5, 1., 1.5],
     choice=["a", "b", "c", "a", "c", "b"], rating=[1, 1, 2, 2, 3, 3]))
 """, :model; title="Unordered and ordered categories", require_stan=true)
 ```
+
+A rating known only up to a range of categories, such as "marked to severe"
+on a `0:4` scale, is coarsened evidence:
+`y_min ~ coarsened(Ordinal(Cumulative(), ProbitLink(), eta); upper=y_max)`.
+Each row's response holds its lowest allowed category and `upper` its highest,
+both inclusive, so equal labels are an exact rating, and the row contributes
+the summed probability of its categories. Declare the levels on a
+`CategoricalVector` to keep a level that no row observed.
 
 ## Observation mechanisms
 

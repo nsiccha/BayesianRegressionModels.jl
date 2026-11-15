@@ -143,6 +143,7 @@ _rk_kernel_bounded_kind(callable) =
     callable in (censored, StanBlocks.stan.censored) ? :censored :
     callable in (truncated, StanBlocks.stan.truncated) ? :truncated :
     callable in (interval_censored, StanBlocks.stan.interval_censored) ? :interval_censored :
+    callable === coarsened ? :coarsened :
     nothing
 
 function _rk_kernel_observation_family(scope, expression, kernel)
@@ -167,6 +168,7 @@ function _rk_kernel_observation_law(scope, expression, kernel)
     callable = _rk_kernel_observation_callee(scope, expression, kernel)
     kind = _rk_kernel_bounded_kind(callable)
     kind === nothing && return expression, nothing
+    kind === :coarsened && return _rk_kernel_coarsened_law(scope, expression, kernel)
     args = expression.args[2:end]
     parameters = filter(arg -> Meta.isexpr(arg, :parameters), args)
     length(parameters) <= 1 || error(
@@ -205,6 +207,40 @@ function _rk_kernel_observation_law(scope, expression, kernel)
         "observed value is the interval's lower endpoint"))
     base, (; kind, lower, upper)
 end
+
+# `y_min[rows[e]] ~ coarsened(Ordinal(structure, link, eta, thresholds[, d]);
+# upper = y_max[rows[e]])` in a cell (snag ordinal-explicit-149b4a5f): the
+# in-cell explicit-threshold `Ordinal` (`_rk_kernel_ordinal_values`) observed
+# through RKPPL's `interval_censored` event `(lower, upper]`. Both columns hold
+# category codes 1:(length(thresholds) + 1), as the in-cell `Ordinal`'s
+# response does; the response binds as its code minus one
+# (`_rk_coarsened_cell_below`), and `upper` is a cell value like any bound.
+function _rk_kernel_coarsened_law(scope, expression, kernel)
+    usage = "write `coarsened(Ordinal(structure, link, eta, thresholds[, " *
+        "discrimination]); upper = y_max[...])`"
+    keyword(arg) = Meta.isexpr(arg, (:parameters, :kw))
+    args = expression.args[2:end]
+    keywords = Any[k for arg in filter(keyword, args)
+        for k in (Meta.isexpr(arg, :parameters) ? arg.args : (arg,))]
+    positional = filter(!keyword, args)
+    length(positional) == 1 && length(keywords) == 1 &&
+        Meta.isexpr(only(keywords), :kw, 2) && first(only(keywords).args) === :upper ||
+        error("RK backend: kernel `$kernel` in-cell `coarsened` takes one " *
+              "`Ordinal(...)` base and exactly the `upper` keyword; $usage")
+    base = only(positional)
+    Meta.isexpr(base, :call) &&
+        _rk_kernel_observation_callee(scope, base, kernel) === Ordinal || error(
+        "RK backend: kernel `$kernel` in-cell `coarsened` observes an `Ordinal(...)` " *
+        "base, got `$base`; $usage")
+    base, (; kind=:coarsened, lower=nothing, upper=last(only(keywords).args))
+end
+
+# The response of in-cell coarsened evidence as RKPPL's open lower end: each
+# category code minus one, per cell.
+_rk_coarsened_cell_below(response::_BRMAbsentResponse) = response
+_rk_coarsened_cell_below(response::AbstractVector{<:AbstractVector}) =
+    [_rk_coarsened_cell_below(cell) for cell in response]
+_rk_coarsened_cell_below(response::AbstractVector) = response .- 1
 
 # SLIC's observation weighting `weighted(family, weight, args...)` is a power
 # likelihood: each row's `family(args...)` log density is scaled by its
@@ -261,7 +297,55 @@ function _rk_kernel_observation_distribution(observation, names=observation.argu
         return _BRMPreparedExpr(LocationScale,
             (location, scale, _BRMPreparedExpr(TDist, (nu,), (;))), (;))
     end
+    # A cell's `Ordinal` is the explicit-threshold record a formula response
+    # prepares (`_brm_prepare_explicit_ordinal`): its tags, then the eta and
+    # thresholds the cell computes, and its discrimination.
+    tags = get(observation, :ordinal, nothing)
+    if tags !== nothing
+        eta, thresholds, discrimination = arguments
+        return _BRMPreparedExpr(Ordinal, (tags..., eta, thresholds), (; discrimination))
+    end
     _BRMPreparedExpr(observation.callable, arguments, (;))
+end
+
+# `Ordinal(structure, link, eta, thresholds[, discrimination])` in a cell, as
+# the cell values it reads: the eta, the thresholds and the discrimination (the
+# fifth argument or `discrimination=`, one by default). The structure and link
+# are the law's tags, resolved by the callable the cell's module binds, exactly
+# as `TDist` is the law of an in-cell `LocationScale`.
+function _rk_kernel_ordinal_values(scope, values, kernel)
+    usage = "write `Ordinal(Cumulative() | StoppingRatio(), LogitLink() | " *
+        "ProbitLink() | CloglogLink(), eta, thresholds[, discrimination])`"
+    keyword(v) = Meta.isexpr(v, :parameters) || Meta.isexpr(v, :kw)
+    positional = filter(!keyword, collect(values))
+    keywords = Pair{Symbol,Any}[]
+    for v in filter(keyword, collect(values))
+        for k in (Meta.isexpr(v, :parameters) ? v.args : (v,))
+            Meta.isexpr(k, :kw, 2) && k.args[1] === :discrimination || error(
+                "RK backend: kernel `$kernel` in-cell `Ordinal` takes only the " *
+                "`discrimination` keyword, got `$k`")
+            push!(keywords, :discrimination => k.args[2])
+        end
+    end
+    length(positional) in (4, 5) || error(
+        "RK backend: kernel `$kernel` in-cell `Ordinal` observation takes its " *
+        "thresholds explicitly (the cell has no fitted level table to allocate them " *
+        "from); $usage")
+    length(positional) + length(keywords) <= 5 || error(
+        "RK backend: kernel `$kernel` in-cell `Ordinal` got its discrimination twice, " *
+        "as the fifth argument and as `discrimination=`")
+    tag(arg, expected) = begin
+        bound = Meta.isexpr(arg, :call) && length(arg.args) == 1 ?
+            _rk_kernel_binding(scope, first(arg.args)) : nothing
+        bound isa Type && bound <: expected || error(
+            "RK backend: kernel `$kernel` in-cell `Ordinal` needs a `$expected` tag " *
+            "call, got `$arg`; $usage")
+        _brm_ordinal_tag(bound, expected; prefix="RK backend")
+    end
+    discrimination = length(positional) == 5 ? positional[5] :
+        isempty(keywords) ? 1.0 : last(only(keywords))
+    (; values=(positional[3], positional[4], discrimination),
+       tags=(tag(positional[1], OrdinalStructure), tag(positional[2], OrdinalLink)))
 end
 
 # Julia's Student-t observation, `LocationScale(location, scale, TDist(nu))`, as
@@ -291,6 +375,9 @@ function _rk_kernel_observation_modifier(observation, distribution, bound_names)
     _BRMResponseModifierPlan(observation.modifier.kind, distribution,
         bound(:lower), bound(:upper))
 end
+
+_rk_kernel_coarsened(observation) = observation.modifier !== nothing &&
+    observation.modifier.kind === :coarsened
 
 # A bounded in-cell observation is checked against its data when the model is
 # built, as a formula response is: every entry of the response within its
@@ -325,6 +412,15 @@ function _rk_validate_cell_bounds(kernel, observation, response, data)
     end
     lower, upper = bound(:lower), bound(:upper)
     (lower === missing || upper === missing) && return
+    if observation.modifier.kind === :coarsened
+        # Both ends are category codes; each row's upper code must not be
+        # below its lower one (`_brm_coarsened_explicit_codes`).
+        lo = brm_flatten_cells(response)
+        hi = upper isa Real ? fill(upper, length(lo)) : parent(parent(upper))
+        _brm_coarsened_explicit_codes(observation.source, lo, hi,
+            only(entry.expression for entry in observation.bounds); prefix="RK backend")
+        return
+    end
     spec = _BRMResponseModifierPlan(observation.modifier.kind, nothing, lower, upper)
     validate = spec.kind === :interval_censored ? _brm_materialize_interval_response :
         _brm_materialize_bounded_response
@@ -566,6 +662,10 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             callable = hidden === nothing ?
                 _rk_kernel_observation_family(scope, distribution, name) : hidden.law
             values = hidden === nothing ? Tuple(distribution.args[2:end]) : hidden.values
+            # An `Ordinal`'s structure and link are tags, not cell values.
+            ordinal = callable === Ordinal ?
+                _rk_kernel_ordinal_values(scope, values, name) : nothing
+            ordinal === nothing || (values = ordinal.values)
             any(value -> Meta.isexpr(value, :parameters), values) && error(
                 "RK backend: kernel `$name` observation constructor keywords need explicit argument lowering")
             callable === LocationScale &&
@@ -585,7 +685,8 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                 get(columns, input.source, nothing) isa AbstractVector{<:AbstractArray})
             push!(observations, (; source, param=lhs, callable,
                 arguments=values, argument_names, weight, weight_name, nested,
-                modifier, bounds, input))
+                modifier, bounds, input,
+                ordinal=ordinal === nothing ? nothing : ordinal.tags))
             push!(observed, statement)
             continue
         end
@@ -655,6 +756,9 @@ _rk_validate_nested_bounds(observation, ::_BRMAbsentResponse, data) = nothing
 function _rk_validate_nested_bounds(observation, response, data)
     modifier = observation.modifier
     modifier === nothing && return
+    modifier.kind === :coarsened && error(
+        "RK backend: response `$(observation.name)` holds one array per subject; " *
+        "`coarsened` evidence takes a flat response")
     bounds = (modifier.lower, modifier.upper)
     all(b -> b === nothing || b isa Real || (b isa NamedColumn && parent(b) isa DataColumn),
         bounds) || return
@@ -673,6 +777,8 @@ end
 # values to compare with its bounds, as on the nested route above.
 _rk_validate_flat_bounds(modifier, response, ::_BRMAbsentResponse, data) = nothing
 function _rk_validate_flat_bounds(modifier, response, values, data)
+    # Coarsened labels are checked against the fitted levels when planned.
+    modifier.kind === :coarsened && return nothing
     bounds = (modifier.lower, modifier.upper)
     all(b -> b === nothing || b isa Real || (b isa NamedColumn && parent(b) isa DataColumn),
         bounds) || return
@@ -1223,6 +1329,8 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
     _rk_plan_cell_gmrf!(kernels, plan, program.context.data, taken)
     for kernel in kernels, observation in kernel.observations
         raw = program.context.data[observation.source]
+        get(observation, :ordinal, nothing) === nothing ||
+            (raw = _brm_ordinal_codes(observation.source, raw; prefix="RK backend"))
         distribution = _rk_kernel_observation_distribution(observation)
         weight = observation.weight === nothing ? nothing :
             _BRMPreparedRef(observation.weight_name, :whole)
@@ -1233,6 +1341,8 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
                 _brm_gather_cells(raw, kernel.columns[observation.input.rows]) :
                 _rk_cell_response_values(raw, observation.callable)
             _rk_validate_cell_bounds(kernel, observation, response, program.context.data)
+            _rk_kernel_coarsened(observation) &&
+                (response = _rk_coarsened_cell_below(response))
             plan.columns[observation.source] = response
             routes = [_rk_kernel_cell_argument(kernel, name, argument) for (name, argument)
                 in zip(observation.argument_names, observation.arguments)]
@@ -1254,6 +1364,10 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
                 if route.route in (:input, :plate))))
             continue
         end
+        # A flat response's bounds are not read per entry here; coarsened
+        # evidence's ranges are checked where the cell reads them per cell.
+        _rk_kernel_coarsened(observation) &&
+            (raw = _rk_coarsened_cell_below(raw))
         layout = raw isa AbstractVector{<:AbstractVector} ?
             (; values=brm_flatten_cells(raw), rows=nothing, lengths=length.(raw)) :
             (; values=raw, rows=nothing, lengths=nothing)

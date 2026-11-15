@@ -637,7 +637,7 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
         # an authored array reader; no population intercept is synthesized.
         family = rhs
         while family isa ExprColumn && getf(family) in
-                (weighted, censored, truncated, interval_censored) && !isempty(getargs(family))
+                (weighted, censored, truncated, interval_censored, coarsened) && !isempty(getargs(family))
             family = first(getargs(family))
         end
         head = family isa ExprColumn ? getf(family) : nothing
@@ -658,6 +658,9 @@ Base.@nospecializeinfer function _rk_needs_value_plan(@nospecialize(program), @n
                 return true
             end
         end
+        # An `Ordinal` with explicit thresholds reads a vector the model gives;
+        # the formula route only allocates its implicit thresholds.
+        head === Ordinal && length(getargs(family)) in (4, 5) && return true
         # A categorical response owns fitted level coding and a whole simplex;
         # it is not a scalar response merely because it has no formula location.
         head === Categorical && continue
@@ -791,7 +794,10 @@ function _rk_ast_value_distribution(::Type{OrderedLogistic}, distribution, bindi
 end
 
 # RKPPL's explicit ordinal: tags by name, shared thresholds, positional
-# discrimination and one threshold-effect row per observation.
+# discrimination and one threshold-effect row per observation. The record is
+# BRM's prepared one (implicit thresholds), an `Ordinal` the model gave its
+# thresholds (`_brm_prepare_explicit_ordinal`), or a cell's
+# (`_rk_kernel_observation_distribution`); all carry `discrimination=`.
 function _rk_ast_value_distribution!(statements, ::Type{Ordinal}, observation,
         distribution, bindings, taken; coordinates=nothing, definitions=nothing)
     length(distribution.args) == 4 ||
@@ -983,15 +989,58 @@ Base.@nospecializeinfer function _rk_value_leveled_responses(@nospecialize(obser
     records = Dict{Symbol,Any}()
     for observation in observations
         rhs, lhs = observation.rhs, observation.lhs
+        # `coarsened(Ordinal(...); upper)` codes its response as its base does.
+        range_plan = rhs isa ExprColumn && getf(rhs) === coarsened ?
+            _brm_response_modifier_plan(rhs; prefix="RK backend") : nothing
+        range_plan === nothing || (rhs = range_plan.base)
         rhs isa ExprColumn && getf(rhs) in _RK_VALUE_LEVELED_HEADS || continue
         lhs isa NamedColumn && parent(lhs) isa DataColumn || continue
         raw = get(data, name(lhs), nothing)
         raw isa AbstractVector && !(raw isa AbstractVector{<:AbstractVector}) || continue
-        records[observation.key] = (; raw, head=getf(rhs),
-            prepared=_brm_prepare_response(observation.key, rhs, raw;
-                training=_rk_value_response_training(observation.key, rhs, raw)))
+        prepared = _brm_prepare_response(observation.key, rhs, raw;
+            training=_rk_value_response_training(observation.key, rhs, raw))
+        explicit = getf(rhs) === Ordinal && prepared.fit === nothing
+        upper = range_plan === nothing || raw isa _BRMAbsentResponse ? nothing :
+            explicit ?
+            _rk_value_coarsened_explicit_upper(observation.key, range_plan, prepared,
+                raw, data) :
+            _rk_value_coarsened_upper(observation.key, range_plan, prepared, raw, data)
+        records[observation.key] = (; raw, head=getf(rhs), prepared, upper, explicit)
     end
     records
+end
+
+# Coarsened evidence over an explicit-threshold `Ordinal` (snag
+# ordinal-explicit-149b4a5f): both ends are category codes, the explicit form's
+# response values, so they bind as data, with no level table. RKPPL's
+# `interval_censored` event `(lower, upper]` reads the response as the lower
+# code minus one and `upper` as the upper code.
+function _rk_value_coarsened_explicit_upper(key::Symbol, plan, prepared, raw, data)
+    upper_name = name(plan.upper)
+    lo, hi = _brm_coarsened_explicit_codes(key, raw,
+        _brm_coarsened_upper_labels(plan.upper, data), upper_name; prefix="RK backend")
+    coded = Symbol(key, :_upper_level)
+    haskey(data, coded) && error(
+        "RK backend: `coarsened` response `$key` binds its upper codes as " *
+        "`$coded`, which the data already holds; rename that column")
+    (; codes=hi, below=lo .- 1, coded, modifier=_BRMResponseModifierPlan(:coarsened,
+        prepared.distribution, nothing, NamedColumn(coded, DataColumn(hi))))
+end
+
+# A coarsened response's upper labels, checked against the response's fitted
+# levels, and the name of their in-graph codes (`brm_prepared_indices`): the
+# upper end of RKPPL's `interval_censored` event, whose open lower end is the
+# coded response minus one (`brm_prepared_indices_below`).
+function _rk_value_coarsened_upper(key::Symbol, plan, prepared, raw, data)
+    labels = _brm_coarsened_upper_labels(plan.upper, data)
+    _, codes = _brm_coarsened_codes(key, prepared.fit.levels, raw, labels;
+        prefix="RK backend")
+    coded = Symbol(key, :_upper_level)
+    haskey(data, coded) && error(
+        "RK backend: `coarsened` response `$key` codes its upper column as " *
+        "`$coded`, which the data already holds; rename that column")
+    (; labels, coded, modifier=_BRMResponseModifierPlan(:coarsened,
+        prepared.distribution, nothing, NamedColumn(coded, DataColumn(codes))))
 end
 
 # A leveled response's levels on a frozen replay are the fit's: an
@@ -1009,10 +1058,18 @@ end
 # the formula-predictor route. `OrderedLogistic` keeps SB's raw 1:K codes: an
 # integer response binds as the data hold it, any other is coded in emitted
 # source against the levels 1:K.
-_rk_value_codes_levels(entry) = entry.head !== OrderedLogistic ||
-    !(eltype(entry.raw) <: Integer) || eltype(entry.raw) === Bool
-_rk_value_response(entry) = _rk_value_codes_levels(entry) ?
-    entry.prepared.response : entry.raw
+#
+# An `Ordinal` with explicit thresholds has no level table: its response is the
+# category codes 1:(length(thresholds) + 1) themselves (`_brm_ordinal_codes`),
+# so they bind as the data hold them. Coding them against the observed levels
+# would renumber them whenever a lower category is unobserved.
+_rk_value_codes_levels(entry) = !entry.explicit && (entry.head !== OrderedLogistic ||
+    !(eltype(entry.raw) <: Integer) || eltype(entry.raw) === Bool)
+function _rk_value_response(entry)
+    entry.explicit && return entry.upper === nothing ?
+        entry.prepared.response : entry.upper.below
+    _rk_value_codes_levels(entry) ? entry.prepared.response : entry.raw
+end
 
 # Per-threshold coefficients form a terms × stages matrix that only their
 # threshold-effect design reads; the response emitter declares that matrix.
@@ -1062,7 +1119,7 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     for observation in observations
         family = observation.rhs
         while family isa ExprColumn && getf(family) in
-                (weighted, censored, truncated, interval_censored) && !isempty(getargs(family))
+                (weighted, censored, truncated, interval_censored, coarsened) && !isempty(getargs(family))
             family = first(getargs(family))
         end
         family isa ExprColumn && getf(family) === MixtureModel || continue
@@ -1078,8 +1135,9 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         for parameter in entry.prepared.parameters]
     prepared = _brm_prepare_model(brmi; program, additional_parameters=implicit,
         observation_overrides=Dict(key => (; distribution=entry.prepared.distribution,
-            response=_rk_value_response(entry), modifier=nothing, weight=nothing,
-            missing_response=nothing) for (key, entry) in leveled))
+            response=_rk_value_response(entry),
+            modifier=entry.upper === nothing ? nothing : entry.upper.modifier,
+            weight=nothing, missing_response=nothing) for (key, entry) in leveled))
     implicit_names = Set{Symbol}(first.(implicit))
     clashes = intersect(implicit_names,
         union(Set(op.name for op in program.operations), keys(context.data)))
@@ -1179,6 +1237,15 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     end
     for key in sort!(collect(keys(leveled)))
         entry = leveled[key]
+        if entry.explicit && entry.upper !== nothing
+            # Explicit thresholds: the upper codes are data as they stand.
+            upper = entry.upper
+            upper.coded in taken && error(
+                "RK backend: `coarsened` response `$key` binds its upper codes as " *
+                "`$(upper.coded)`, which the model already names; rename it")
+            push!(taken, upper.coded)
+            value_columns[upper.coded] = upper.codes
+        end
         _rk_value_codes_levels(entry) || continue
         raw = _rk_ast_fresh_name(string(key, "_raw"), taken)
         value_columns[raw] = entry.raw
@@ -1186,8 +1253,19 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
         levels = entry.head === OrderedLogistic ?
             _rk_ast_level_values(entry.prepared.fit.levels) :
             _rk_response_level_table!(derived, value_columns, taken, key, entry.raw)
+        upper = entry.upper
         push!(derived, _RKDerivedSpec(key, Expr(:_rk_data_preparation,
-            :brm_prepared_indices, raw, levels), key))
+            upper === nothing ? :brm_prepared_indices : :brm_prepared_indices_below,
+            raw, levels), key))
+        upper === nothing && continue
+        upper_raw = _rk_ast_fresh_name(string(key, "_upper_raw"), taken)
+        value_columns[upper_raw] = upper.labels
+        upper.coded in taken && error(
+            "RK backend: `coarsened` response `$key` codes its upper column as " *
+            "`$(upper.coded)`, which the model already names; rename it")
+        push!(taken, upper.coded)
+        push!(derived, _RKDerivedSpec(upper.coded, Expr(:_rk_data_preparation,
+            :brm_prepared_indices, upper_raw, levels), key))
     end
     regression = _RKStructuralPlan(_RKLikelihoodSpec[], components.predictors,
         components.priors, parameters, _RKAssignmentSpec[], derived, columns,

@@ -33,7 +33,7 @@
 # could then learn nothing (its gradient is exactly zero at ℓ = μ = 0), while the
 # cell would cost a chain term per draw and keep linear coupling off the
 # coordinate (src/nlme_svi_coupling.jl). It is listed uncentred instead. States
-# saved before BRM 0.2.314 centred such vectors; their saved policy
+# saved before BRM 0.2.322 centred such vectors; their saved policy
 # (`constant_laws`, true when absent) keeps doing so, so their controls and
 # carried frames stay valid.
 #
@@ -72,7 +72,7 @@ struct LearnedCentering
     step::Float64
     # Whether an authored Gaussian vector whose law reads no estimated coordinate
     # is a cell: false for every fresh fit, true only for a state saved before
-    # BRM 0.2.314 (`_brm_svi_saved_centering`).
+    # BRM 0.2.322 (`_brm_svi_saved_centering`).
     constant_laws::Bool
     function LearnedCentering(; start::Real=0.5, step::Real=0.05)
         0 < start < 1 || throw(ArgumentError(
@@ -85,7 +85,7 @@ struct LearnedCentering
         new(c.start, c.step, constant_laws)
 end
 
-# A saved centering policy: `(; start, step)` and, from BRM 0.2.314, `constant_laws`.
+# A saved centering policy: `(; start, step)` and, from BRM 0.2.322, `constant_laws`.
 # A state saved before it centred constant-law vectors and keeps doing so.
 _brm_svi_saved_centering(saved) = LearnedCentering(LearnedCentering(; saved.start, saved.step),
     Bool(get(saved, :constant_laws, true)))

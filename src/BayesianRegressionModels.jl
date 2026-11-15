@@ -266,8 +266,9 @@ export HiddenMarkov
 export brm_multinomial, brm_multinomial_lpmf, brm_multinomial_lpmfs, brm_multinomial_rng
 # Julia-native response-family composition. `truncated` and `censored` are the
 # exact Distributions.jl functions; `interval_censored` is BRM's formula marker
-# for row-wise interval evidence on either a response or a predictor.
-export truncated, censored, interval_censored
+# for row-wise interval evidence on either a response or a predictor;
+# `coarsened` is its inclusive category-range counterpart for `Ordinal`.
+export truncated, censored, interval_censored, coarsened
 # Delays with a censored primary event, truncation and a censored secondary
 # event (epidist's marginal model); the CensoredDistributions.jl spellings.
 export primary_censored, double_interval_censored, PrimaryCensored, DoubleIntervalCensored
@@ -324,6 +325,8 @@ export BernoulliLogit, BinomialLogit
 # zero-inflated-Poisson and von-Mises UDF triads.
 export brm_ordinal, brm_ordinal_lpmf, brm_ordinal_lpmfs, brm_ordinal_rng,
        brm_ordinal_logcdf, brm_ordinal_logccdf, brm_ordinal_cdf,
+       brm_ordinal_range, brm_ordinal_range_lpmf, brm_ordinal_range_lpmfs,
+       brm_ordinal_range_rng,
        multi_std_normal, multi_std_normal_lpdf, ranef_b_matrix,
        brm_ranef_sd, brm_ranef_sd_lpdf
 export Data, MaybeData, maybedata

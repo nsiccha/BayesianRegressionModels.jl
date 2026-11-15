@@ -148,9 +148,52 @@ _brm_ordered_outcome_levels(target, ::_BRMAbsentResponse, training) = training.n
 _brm_ordered_outcomes(raw) = Int.(raw)
 _brm_ordered_outcomes(raw::_BRMAbsentResponse) = raw
 
+# The responses an `Ordinal` with explicit thresholds observes: the category
+# codes 1:K, K = length(thresholds) + 1, as the executable distribution's
+# support (and RKPPL's) reads them. The thresholds fix K, so there is no level
+# table to fit: every category they define stays, observed or not. Integral
+# floats are codes too; an omitted replay response has none to check.
+function _brm_ordinal_codes(target, raw::AbstractVector; prefix="BRM")
+    raw isa _BRMAbsentResponse && return raw
+    # One array of codes per cell, as a cell observing its whole slice holds them.
+    eltype(raw) <: AbstractVector &&
+        return [_brm_ordinal_codes(target, cell; prefix) for cell in raw]
+    bad = findfirst(y -> !(y isa Real && isfinite(y) && isinteger(y) && y >= 1), raw)
+    bad === nothing || error(
+        "$prefix: `Ordinal($target)` with explicit thresholds observes the category " *
+        "codes 1:(length(thresholds) + 1), got $(repr(raw[bad])) at row $bad; for " *
+        "labels such as 0:4 pass their codes (`levelcode.(y)` of a CategoricalVector, " *
+        "or `y .+ 1`)")
+    Int.(raw)
+end
+
+# `Ordinal(structure, link, eta, thresholds[, discrimination])`: the model gives
+# the thresholds, so the record is the authored law with its tags resolved and
+# its discrimination as the keyword both emitters read.
+function _brm_prepare_explicit_ordinal(target, rhs, raw)
+    args = getargs(rhs)
+    structure = _brm_ordinal_tag(args[1], OrdinalStructure)
+    link = _brm_ordinal_tag(args[2], OrdinalLink)
+    kwargs = getkwargs(rhs)
+    for key in keys(kwargs)
+        key === :discrimination || error(
+            "BRM: `Ordinal($target)` with explicit thresholds takes only the " *
+            "`discrimination` keyword, got `$key`" * (key === :per_threshold ?
+                "; write threshold effects into the thresholds you pass" : ""))
+    end
+    length(args) == 5 && haskey(kwargs, :discrimination) && error(
+        "BRM: `Ordinal($target)` got its discrimination twice, as the fifth " *
+        "argument and as `discrimination=`")
+    discrimination = _brm_ordinal_discrimination(
+        length(args) == 5 ? args[5] : get(kwargs, :discrimination, 1.0))
+    distribution = ExprColumn(Ordinal, structure, link, args[3], args[4]; discrimination)
+    (; distribution, response=_brm_ordinal_codes(target, raw), parameters=(), fit=nothing)
+end
+
 function _brm_prepare_response(::Type{<:Ordinal}, target, rhs, raw;
                                 training=nothing)
     args = getargs(rhs)
+    length(args) in (4, 5) && return _brm_prepare_explicit_ordinal(target, rhs, raw)
     length(args) == 3 || return (
         ; distribution=rhs, response=raw, parameters=(), fit=nothing)
     structure = _brm_ordinal_tag(args[1], OrdinalStructure)

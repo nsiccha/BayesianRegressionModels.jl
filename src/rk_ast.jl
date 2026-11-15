@@ -975,6 +975,8 @@ function _rk_ast_response_modifier(base, kind, lower, upper)
     kind === :none && return base
     kind in (:truncated, :censored) && return _rk_ast_dotted(kind, base, lower, upper)
     kind === :interval_censored && return _rk_ast_dotted(kind, base, upper)
+    # A coarsened Ordinal row: the response is its range's open lower end.
+    kind === :coarsened && return _rk_ast_dotted(:interval_censored, base, upper)
     error("RK backend: unsupported response evidence `$kind`")
 end
 
@@ -1103,7 +1105,7 @@ function _rk_ast_response_stmt(response::_RKLikelihoodSpec,
         upper = response.evidence.upper
         leaf[:lower] = lower === nothing ? -Inf : lower
         leaf[:upper] = upper === nothing ? Inf : upper
-    elseif kind === :interval_censored
+    elseif kind === :interval_censored || kind === :coarsened
         leaf[:upper] = response.evidence.upper
     end
     if family === :categorical_logit

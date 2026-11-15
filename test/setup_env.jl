@@ -442,7 +442,15 @@ const PINS = [
     # c373b090f (RK 0.1.251 / RKPPL 0.1.195) contains it: a failed ODE solve
     # throws `ReactiveKernels.ODESolveFailure`, which RKPPL's sampler targets
     # answer with -Inf (test/rk_ode_solve_failure.jl).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "c373b090f9e16bfb8e5201f4c5dbe01b8015b7bb"),
+    # 4950e55bd (RK 0.1.261 / RKPPL 0.1.198 / DistributionKernels 0.1.12) keeps
+    # ordinal interval, censored and truncated evidence finite in both tails,
+    # with a JAX gradient for stopping-ratio evidence (RK snag
+    # rkppl-ordinal-in-553ce5b3; test/ordinal_interval_evidence.jl).
+    # 912fbdba8 (RK 0.1.262 / RKPPL 0.1.201) admits any vector the model
+    # computes as `Ordinal` thresholds, a cell local per group included, and
+    # translates `Statistics.mean` to JAX (RK snag rkppl-sampled-pe-bc377786;
+    # test/ordinal_group_thresholds.jl).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "912fbdba843e16869938316e1ba8907f12383861"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

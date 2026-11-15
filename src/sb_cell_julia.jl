@@ -29,9 +29,12 @@
 # `_sb_julia_stan_call` table.
 
 # The value `head` names in `scope`, or `nothing` when nothing binds it there.
+# A name BRM exports that `scope` does not bind, because it only `import`s BRM
+# or because two packages it `using`s export the name, is BRM's binding, as in
+# a formula (`_brm_scoped_name`).
 _sb_cell_binding(scope, head) = nothing
 _sb_cell_binding(scope::Module, head::Symbol) =
-    isdefined(scope, head) ? getfield(scope, head) : nothing
+    isdefined(scope, head) ? getfield(scope, head) : _brm_export_binding(head)
 _sb_cell_binding(scope, head::GlobalRef) =
     isdefined(head.mod, head.name) ? getfield(head.mod, head.name) : nothing
 function _sb_cell_binding(scope::Module, head::Expr)
@@ -139,6 +142,8 @@ function _sb_cell_family(x, scope)
     callable = _sb_cell_binding(scope, head)
     callable isa BRMComponent && return _sb_component_cell_call(callable, x, scope)
     callable === LocationScale && return _sb_cell_location_scale(x, scope)
+    callable === Ordinal && return _sb_cell_ordinal(x, scope)
+    callable === coarsened && return _sb_cell_coarsened(x, scope)
     args = Any[_sb_cell_argument(a, scope) for a in x.args[2:end]]
     if callable isa Type && callable <: Distribution
         positional = Tuple(filter(!_sb_cell_keyword_argument, args))
@@ -176,6 +181,72 @@ function _sb_cell_location_scale(x, scope)
         Tuple(filter(!_sb_cell_keyword_argument, base_args)), NamedTuple(keywords))
     _sb_affine_call(constructor, _sb_cell_value(location, scope),
         _sb_cell_value(scale, scope), Tuple(call.args[2:end]), first(call.args))
+end
+
+# `Ordinal(structure, link, eta, thresholds[, discrimination])` in a cell: the
+# executable distribution, with thresholds the cell gives (an examiner's own
+# ordered vector, say). The structure and link are tags, resolved by the
+# callable the cell's module binds, and become the integer codes BRM's Stan
+# ordinal functions take; the other arguments are cell values. Discrimination is
+# the fifth argument or `discrimination=`, one by default.
+function _sb_cell_ordinal(x, scope)
+    usage = "write `Ordinal(Cumulative() | StoppingRatio(), LogitLink() | " *
+        "ProbitLink() | CloglogLink(), eta, thresholds[, discrimination])`"
+    raw = x.args[2:end]
+    positional = filter(!_sb_cell_keyword_argument, raw)
+    keywords = foldl(_sb_cell_keywords!, filter(_sb_cell_keyword_argument, raw);
+        init=Pair{Symbol,Any}[])
+    length(positional) in (4, 5) || error(
+        "sbimpl: an in-cell `Ordinal` observation takes its thresholds explicitly " *
+        "(the cell has no fitted level table to allocate them from); $usage")
+    for (key, _) in keywords
+        key === :discrimination || error(
+            "sbimpl: an in-cell `Ordinal` takes only the `discrimination` keyword, got `$key`")
+    end
+    length(positional) == 5 && !isempty(keywords) && error(
+        "sbimpl: an in-cell `Ordinal` got its discrimination twice, as the fifth " *
+        "argument and as `discrimination=`")
+    structure = _sb_cell_ordinal_tag(positional[1], scope, OrdinalStructure, usage)
+    link = _sb_cell_ordinal_tag(positional[2], scope, OrdinalLink, usage)
+    discrimination = length(positional) == 5 ? positional[5] :
+        isempty(keywords) ? 1.0 : last(only(keywords))
+    Expr(:call, brm_ordinal_explicit, _sb_cell_value(positional[3], scope),
+        _sb_cell_value(positional[4], scope), _sb_cell_value(discrimination, scope),
+        _sb_ordinal_structure_code(structure), _sb_ordinal_link_code(link))
+end
+
+# `y_min[rows[e]] ~ coarsened(Ordinal(structure, link, eta, thresholds[, d]);
+# upper = y_max[rows[e]])` in a cell: each entry is evidence that its category
+# lies in the inclusive code range `y_min..y_max` under the thresholds the cell
+# gives (snag ordinal-explicit-149b4a5f). Both ends are codes
+# 1:(length(thresholds) + 1), as the in-cell `Ordinal`'s response is; the
+# Stan program's data check refuses a code outside them or an upper code below
+# its lower one, as it does for the in-cell `Ordinal`.
+function _sb_cell_coarsened(x, scope)
+    usage = "write `coarsened(Ordinal(structure, link, eta, thresholds[, " *
+        "discrimination]); upper = y_max[...])`"
+    raw = x.args[2:end]
+    positional = filter(!_sb_cell_keyword_argument, raw)
+    keywords = foldl(_sb_cell_keywords!, filter(_sb_cell_keyword_argument, raw);
+        init=Pair{Symbol,Any}[])
+    length(positional) == 1 && length(keywords) == 1 && first(only(keywords)) === :upper ||
+        error("sbimpl: an in-cell `coarsened` takes one `Ordinal(...)` base and " *
+              "exactly the `upper` keyword; $usage")
+    base = only(positional)
+    Meta.isexpr(base, :call) && _sb_cell_binding(scope, first(base.args)) === Ordinal ||
+        error("sbimpl: an in-cell `coarsened` observes an `Ordinal(...)` base, got " *
+              "`$base`; $usage")
+    law = _sb_cell_ordinal(base, scope)
+    Expr(:call, brm_ordinal_explicit_range,
+        _sb_cell_value(last(only(keywords)), scope), law.args[2:end]...)
+end
+
+function _sb_cell_ordinal_tag(arg, scope, expected, usage)
+    tag = Meta.isexpr(arg, :call) && length(arg.args) == 1 ?
+        _sb_cell_binding(scope, first(arg.args)) : nothing
+    tag isa Type && tag <: expected || error(
+        "sbimpl: an in-cell `Ordinal` needs a `$expected` tag call, got `$arg`; $usage")
+    _brm_ordinal_tag(tag, expected; prefix="sbimpl")
 end
 
 # A Distributions constructor in a cell observation: the top-level table, except

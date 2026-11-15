@@ -254,7 +254,7 @@ svi_window_nlme() = brm_nlme_model(SVI_WINDOW_RK;
     @test maximum(old.r) > 1.4 > maximum(b.r)
     @test sqrt(mean(abs2, old.z)) > sqrt(mean(abs2, b.z))
 
-    # Coupled (the default). From BRM 0.2.314 each window's `e .~ Normal(0, 1)`
+    # Coupled (the default). From BRM 0.2.322 each window's `e .~ Normal(0, 1)`
     # innovations are coupled rows (no longer learned-centering cells), and a fresh
     # coupling leaves the unit's sparse globals, its two boundaries, out of its
     # columns: a boundary's site estimates its readers' curvature along the
