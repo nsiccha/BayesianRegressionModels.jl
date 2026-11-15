@@ -13,7 +13,10 @@
 # order, which `adaptive_centering_controls` reports.
 #
 # Covered: on RKBRMI, scalar `||` blocks, a correlated K = 2 block, K = 3, a unit
-# nested in a band (containing cells) and a cdar walk passing through; on
+# nested in a band (containing cells), a cdar walk passing through, and the
+# derived-scale blocks of BRM 0.2.311 (Student-t, known scales and correlation,
+# bounded scales, stratified blocks, factor-level locations, and a Student-t
+# unit nested in an ordinary band through the joint wrapper); on
 # SBBRMI, factor levels and crossed containing groupings, a Student-t block
 # nested in an ordinary one beside a centred block with known SDs and
 # correlation (the joint derived-scale wrapper), and an R2D2 block whose scales
@@ -305,6 +308,99 @@ end
     end)
     @test length(plan.cells) == 12
     @test !any(c -> occursin(".eta.", c.name), plan.cells)
+end
+
+@stestset "RKBRMI: Student-t blocks carry their levels' mixing coordinates" begin
+    df = panel(; seed=13)
+    _, plan, names = rk_parity(@brm df begin
+        mu ~ 1 + t + (1 + t | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(:, g) ~ Exponential(30.0)
+        ranef(:, g) ~ TDist(4.0)
+        y ~ Normal(mu, se)
+    end)
+    b = only(plan.blocks)
+    @test [names[j] for j in b.mixing] == ["$(b.binding).w.$g" for g in 1:12]
+    @test names[only(b.correlation.free)] == "$(b.binding).L.1"
+end
+
+@stestset "RKBRMI: known scales and a known correlation" begin
+    df = panel(; seed=16)
+    _, partly, _ = rk_parity(@brm df begin
+        mu ~ 1 + t + (1 + t | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(mu, g, Intercept) ~ Exponential(30.0)
+        sd(mu, g, t) = 0.5
+        y ~ Normal(mu, se)
+    end)
+    s = only(partly.blocks).log_scales
+    @test s[2].constant == log(0.5) && isempty(s[2].linear) && length(s[1].linear) == 1
+    _, known, _ = rk_parity(@brm df begin
+        mu ~ 1 + t + (1 + t | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(:, g) ~ Exponential(30.0)
+        cor(:, g) = [1 0.3; 0.3 1]
+        y ~ Normal(mu, se)
+    end)
+    c = only(known.blocks).correlation
+    @test isempty(c.free) && only(c.cpc) ≈ 0.3
+end
+
+@stestset "RKBRMI: bounded scales are bounded atoms" begin
+    df = panel(; seed=18)
+    _, plan, _ = rk_parity(@brm df begin
+        mu ~ 1 + t + (1 + t || g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(mu, g, Intercept) ~ Uniform(0.0, 100.0)
+        sd(mu, g, t) ~ truncated(Normal(0.0, 5.0); lower=0.1)
+        y ~ Normal(mu, se)
+    end)
+    atoms = [only(only(b.log_scales).bounded) for b in plan.blocks]
+    @test sort([(a.lower, a.upper) for a in atoms]) == [(0.0, 100.0), (0.1, Inf)]
+end
+
+@stestset "RKBRMI: a stratified block is one block per stratum" begin
+    df = panel(; seed=20)
+    stratum_of(v) = "s" * string(cld(parse(Int, String(v)[2:end]), 4))
+    data = merge(df, (; b=categorical(stratum_of.(df.g))))
+    _, plan, _ = rk_parity(@brm data begin
+        mu ~ 1 + t + (1 + t | gr(g, by=b))
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(mu, g, Intercept) ~ Exponential(30.0)
+        sd(mu, g, t) ~ Exponential(2.0)
+        y ~ Normal(mu, se)
+    end)
+    @test length(plan.blocks) == 3 && all(b -> b.by === :b && b.n_levels == 4, plan.blocks)
+end
+
+@stestset "RKBRMI: an intercept cell reads its factor level's coefficient" begin
+    df = panel(; seed=22)
+    level_of(v) = "f" * string(mod1(parse(Int, String(v)[2:end]), 3))
+    data = merge(df, (; f=categorical(level_of.(df.g))))
+    _, plan, _ = rk_parity(@brm data begin
+        mu ~ 1 + t + factor(f) + (1 | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(:, g) ~ Exponential(30.0)
+        y ~ Normal(mu, se)
+    end)
+    @test any(c -> !isempty(c.location.factors), plan.cells)
+    @test all(c -> length(c.location.factors) <= 1 && c.location.coefficient != 0,
+              plan.cells)
+end
+
+@stestset "RKBRMI: a Student-t unit nested in an ordinary band (joint wrapper)" begin
+    df = nested_panel()
+    _, plan, _ = rk_parity(@brm df begin
+        mu ~ 1 + (1 | band) + (1 | unit)
+        effect(mu, Intercept) ~ Normal(50, 20)
+        ranef(:, unit) ~ TDist(4.0)
+        sigma ~ Exponential(1.0)
+        y ~ Normal(mu, sigma)
+    end)
+    @test [b.group for b in plan.blocks] == [:band, :unit]   # ordinary blocks first
+    @test isempty(plan.blocks[1].mixing) && length(plan.blocks[2].mixing) == 12
+    @test all(c -> c.group === :band ||
+                   plan.cells[only(c.location.containers)].group === :band, plan.cells)
 end
 
 # ---- SBBRMI -----------------------------------------------------------------
