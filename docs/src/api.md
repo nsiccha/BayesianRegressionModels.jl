@@ -235,6 +235,7 @@ BRMInput
 BRMOperation
 BRMOutput
 BRMPriorDescription
+BRMRKDescriptor
 BRMSubmodel
 GenerativeDeclaration
 GenerativePlan

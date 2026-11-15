@@ -13,7 +13,7 @@ _RKValuePlan(regression, assignments, observations, columns) =
     _RKValuePlan(regression, assignments, observations, columns, ())
 _rk_extent_bindings(plan::_RKValuePlan) = _rk_extent_bindings(plan.regression)
 _rk_input_bindings(plan::_RKValuePlan) = _rk_input_bindings(plan.regression)
-_rk_generated_inputs(plan::_RKValuePlan) = _rk_generated_inputs(plan.regression)
+_rk_generated_input_entries(plan::_RKValuePlan) = _rk_generated_input_entries(plan.regression)
 
 _rk_value_invlogit(x) = logistic(x)
 brm_invprobit(x) = 0.5erfc(-x / sqrt(2))
