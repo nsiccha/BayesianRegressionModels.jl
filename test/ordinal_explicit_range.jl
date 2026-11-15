@@ -17,6 +17,7 @@
 #
 # Run: BRM_JAX_REQUIRE=1 julia --startup-file=no --project=test test/ordinal_explicit_range.jl [filter...]
 #      (RK_JAX_PYTHON names a Python with jax for the JAX module parity.)
+#      The stopping-ratio cell's JAX gradient needs ReactiveKernels 0.1.263.
 using Test, Random, LinearAlgebra
 using BayesianRegressionModels, Distributions, LogDensityProblems
 using StanBlocks
@@ -357,25 +358,11 @@ end
         @test lp ≈ stages_oracle(reshape(rk_named(rk, u, :t), 4, N_EX)) rtol = 1e-10
         @test g ≈ central_differences(problem, u) rtol = 1e-5 atol = 1e-6
     end
-    # A stopping-ratio RANGE over thresholds computed in a cell: RKPPL's JAX
-    # module loops its survival to the vector's run-time length, a
-    # `lax.while_loop` `jax.grad` cannot reverse (ReactiveKernels snag
-    # `jax-source-of-an-6bfaf24a`). The exact form over the same thresholds,
-    # and a range over a declared vector (above), have their `jax.grad`.
-    @testset "the JAX module (needs RK snag jax-source-of-an-6bfaf24a)" begin
-        src = jax_source(rk.model, rk_bound_plan(rk))
-        @test src isa JAXSource
-        if brm_jax_require_python()
-            ran = try
-                brm_jax_run(src, [brm_jax_inputs(rk, src)], [us])
-                true
-            catch e
-                @test occursin("Reverse-mode differentiation does not work for lax.while_loop",
-                    sprint(showerror, e))
-                false
-            end
-            @test_broken ran
-        end
+    # A stopping-ratio range over thresholds computed in a cell: its survival
+    # loop runs to the vector's padded length, a `fori_loop` `jax.grad`
+    # reverses from RK 0.1.263 (ReactiveKernels snag `jax-source-of-an-6bfaf24a`).
+    @testset "the JAX module" begin
+        check_jax(rk, problem, us)
     end
 end
 

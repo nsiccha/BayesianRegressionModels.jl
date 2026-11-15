@@ -12,6 +12,15 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.324
+
+- RKBRMI: the `jax_source` module of a stopping-ratio
+  `coarsened(Ordinal(StoppingRatio(), …, thresholds); upper)` range whose
+  thresholds a `@plate` cell computes now has a `jax.grad`; native values and
+  gradients were already exact. The compat floor is ReactiveKernels 0.1.263
+  (RK snag `jax-source-of-an-6bfaf24a`), and the test environment pins
+  ReactiveKernels `95d9b7a5a`. Follow-up of snag `ordinal-explicit-149b4a5f`.
+
 ## 0.2.323
 
 - `brm_descriptor(rk::RKBRMI; name)` returns a `BRMRKDescriptor`: the content
