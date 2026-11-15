@@ -219,10 +219,9 @@ end
     adaptive_centering_cells(model, unc_names) -> (; blocks, cells)
 
 The cells [`adaptive_centering_problem`](@ref) adapts for `model` (an
-[`RKBRMI`](@ref), `SBBRMI` or `GenerativePlan`): its random-effect cells and,
-from BRM 0.2.314, its areal `car` field cells and `cdar` walk cells (an
-RKBRMI's under `fields = true`, as its wrapper adapts them), described as plain
-data:
+[`RKBRMI`](@ref), `SBBRMI` or `GenerativePlan`): its random-effect cells and
+its areal `car` field cells and `cdar` walk cells (an RKBRMI's under
+`fields = true`, as its wrapper adapts them), described as plain data:
 numbers, symbols, strings, `nothing`, vectors and named tuples. Indices are
 positions of the unconstrained vector `unc_names` names: for an `RKBRMI`, by
 default, `rk_logdensity_problem(rk)`'s layout; for an `SBBRMI`, BridgeStan's
