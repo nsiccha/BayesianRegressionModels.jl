@@ -8,7 +8,6 @@ import LogDensityProblems: dimension, logdensity, logdensity_and_gradient
 using LinearAlgebra: cholesky, Symmetric, diagind
 using Statistics: mean
 using LogExpFunctions: logit, logistic
-using BayesianRegressionModels: Cumulative, StoppingRatio, LogitLink, ProbitLink
 include(joinpath(@__DIR__, "testset_filter.jl"))
 const BRM = BayesianRegressionModels
 include(joinpath(@__DIR__, "rk_source_roundtrip.jl"))

@@ -2,7 +2,6 @@
 # Run: julia --project=test test/rk_plain.jl [testset substring ...]
 using Test, BayesianRegressionModels, Distributions
 using ReactiveKernels, ReactiveKernelsPPL
-import BayesianRegressionModels: ProbitLink, LogitLink, Cumulative, StoppingRatio, Ordinal
 using Enzyme, LogDensityProblems, LinearAlgebra
 using DifferentiationInterface: AutoEnzyme
 include(joinpath(@__DIR__, "testset_filter.jl"))
