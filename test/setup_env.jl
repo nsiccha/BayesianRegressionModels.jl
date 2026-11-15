@@ -439,7 +439,10 @@ const PINS = [
     # so retained vector outputs flatten into JAX constrain values.
     # d7a5033ae (RK 0.1.246 / RKPPL 0.1.187 / DistributionKernels 0.1.11): RKPPL
     # admits WarmupHMC 0.3 (`af0807c69`), which BRM's centering accessors need.
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "d7a5033aea6edc226611b1055c008135cdefda3d"),
+    # c373b090f (RK 0.1.251 / RKPPL 0.1.195) contains it: a failed ODE solve
+    # throws `ReactiveKernels.ODESolveFailure`, which RKPPL's sampler targets
+    # answer with -Inf (test/rk_ode_solve_failure.jl).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "c373b090f9e16bfb8e5201f4c5dbe01b8015b7bb"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main

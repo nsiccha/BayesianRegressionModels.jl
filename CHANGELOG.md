@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.310
+
+- A point where a kernel cell's ODE solve fails is outside the model's support
+  on RKBRMI, as it is on SBBRMI, where Stan rejects it. `rk_logdensity_problem`
+  answers `-Inf` there from both `logdensity` and `logdensity_and_gradient`
+  (the gradient is filled with `NaN`), so WarmupHMC scores the point as a
+  divergence and Pathfinder's line search backs off it. The cut-posterior
+  targets (`brm_cut_family`) behave the same way. Before, the failure raised
+  `native DP5 failed: Unstable` out of the sampler (snag
+  `brm-ode-target-p-485c5e70`). Only ReactiveKernels' typed solver failure
+  (`ReactiveKernels.NumericalFailure`, thrown as `ODESolveFailure` when the
+  solver cannot integrate from valid inputs) is rejected; every other
+  exception still propagates. Requires ReactiveKernels 0.1.251 and
+  ReactiveKernelsPPL 0.1.195, which are the new `[compat]` floors.
+
 ## 0.2.309
 
 - An RK density is prepared at the prior medians unless its caller names a
