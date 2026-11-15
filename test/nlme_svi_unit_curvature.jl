@@ -5,6 +5,9 @@
 #     julia --project=test test/nlme_svi_unit_curvature.jl
 module SVIUnitCurvature
 using Random, LinearAlgebra, Statistics
+# The stationarity checks the included SVI source runs (src/nlme_svi_stationarity.jl,
+# since BRM 0.2.298's drift gate) read MCMCDiagnosticTools' split-Rhat.
+import MCMCDiagnosticTools
 struct BRMI end
 struct RKBRMI end
 struct BRMNLMEModel end
