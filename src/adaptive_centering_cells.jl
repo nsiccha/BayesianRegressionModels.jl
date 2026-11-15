@@ -53,8 +53,8 @@ _adaptive_cell_level(x) = x isa Tuple ? map(_adaptive_cell_level, x) :
 const _AdaptiveCellLinear = NamedTuple{(:weight, :coordinate),Tuple{Float64,Int}}
 const _AdaptiveCellUnit = NamedTuple{(:log_weight, :log1m_weight, :coordinate),
                                      Tuple{Float64,Float64,Int}}
-const _AdaptiveCellSimplex = NamedTuple{(:weight, :coordinates, :entry),
-                                        Tuple{Float64,Vector{Int},Int}}
+const _AdaptiveCellSimplex = NamedTuple{(:weight, :coordinates, :entry, :transform),
+                                        Tuple{Float64,Vector{Int},Int,Symbol}}
 const _AdaptiveCellBounded = NamedTuple{(:weight, :coordinate, :lower, :upper),
                                         Tuple{Float64,Int,Float64,Float64}}
 
@@ -65,7 +65,9 @@ _adaptive_cell_log_scale(s::_AdaptiveLogScale) = (;
     unit = _AdaptiveCellUnit[(; log_weight=a, log1m_weight=b, coordinate=i)
                              for (a, b, i) in s.unit],
     simplex = _AdaptiveCellSimplex[(; weight=a.weight, coordinates=copy(a.coordinates),
-                                     entry=a.entry) for a in s.simplex],
+                                     entry=a.entry,
+                                     transform=a.stick ? :stick_breaking : :stan)
+                                   for a in s.simplex],
     bounded = _AdaptiveCellBounded[(; weight=w, coordinate=i, lower, upper)
                                    for (w, i, lower, upper) in s.bounded])
 
@@ -208,7 +210,12 @@ term `k`, level `g`, control `c`, target `t`):
 - `log τ_i = constant + Σ weight * x[coordinate]` (linear atoms)
   `+ Σ (log_weight * log σ(x[i]) + log1m_weight * log(1 - σ(x[i])))` (unit;
   `σ` the logistic) `+ Σ weight * log(simplex_constrain(x[coordinates])[entry])`
-  (Stan's simplex transform) `+ Σ weight * log(lower + (upper - lower) * σ(x[i]))`
+  (simplex; `transform` names the simplex transform: `:stan`, Stan's isometric
+  log-ratio and softmax, for an SBBRMI; `:stick_breaking`, ReactiveKernelsPPL's,
+  for an RKBRMI's R2D2 shares, whose `N` coordinates `u` give break fractions
+  `z_i = σ(u_i + log(N + 1 - i))`, entry `j ≤ N` the value
+  `z_j * Π_{i<j} (1 - z_i)` and entry `N + 1` the remaining stick)
+  `+ Σ weight * log(lower + (upper - lower) * σ(x[i]))`
   (bounded; `log(exp(x[i]) + lower)` when `upper` is infinite);
 - `L` is Stan's `cholesky_factor_corr` of the canonical partial correlations
   `tanh(x[free[j]])` (or `cpc[j]`), row `i` holding `j = (i-1)(i-2)/2 + 1, …`;

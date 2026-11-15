@@ -87,11 +87,15 @@ function _rk_ast_r2d2m2_population!(definitions, statements, taken, predictors, 
 end
 
 # Budget names follow SBBRMI's `<draws>_r2d2_<group>_R2` / `_phi` spelling;
-# `tau` names the derived scale vector the group component receives.
+# `tau` names the derived scale vector the group component receives. Returns
+# each margin's scale as adaptive centring reads it: `(; reference, r2, phi,
+# entry, n)` for `reference * sqrt(phi[entry] * r2 / (1 - r2))` over an
+# `n`-entry share simplex, or `(; free)` for a margin's own sampled scale.
 function _rk_ast_ranef_r2d2!(definitions, statements, bucket, tau, bindings, taken,
         predictors, population_priors; stem_base=tau)
     decomposition = bucket.decomposition
     scales = Any[nothing for _ in bucket.margins]
+    specs = Any[nothing for _ in bucket.margins]
     for (index, group) in enumerate(decomposition.groups)
         stem = string(stem_base, "_r2d2_", index)
         r2 = _rk_ast_fresh_name(string(stem, "_R2"), taken)
@@ -115,6 +119,7 @@ function _rk_ast_ranef_r2d2!(definitions, statements, bucket, tau, bindings, tak
             push!(statements, Expr(:(=), scale,
                 _rk_ast_r2d2m2_scale!(definitions, taken, reference, phi, r2, local_index)))
             scales[margin] = scale
+            specs[margin] = (; reference, r2, phi, entry=local_index, n)
         end
         decomposition.joint === nothing ||
             _rk_ast_r2d2m2_population!(definitions, statements, taken, predictors,
@@ -128,6 +133,8 @@ function _rk_ast_ranef_r2d2!(definitions, statements, bucket, tau, bindings, tak
         push!(statements, Expr(:call, :~, free,
             _rk_ast_positive_prior(nothing, bindings, taken)))
         scales[margin] = free
+        specs[margin] = (; free)
     end
     push!(statements, Expr(:(=), tau, Expr(:vect, scales...)))
+    Tuple(specs)
 end

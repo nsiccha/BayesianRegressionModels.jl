@@ -72,17 +72,26 @@ function _rk_drop_unfitted_records!(records::AbstractVector, outputs, kept)
     nothing
 end
 
+# Records only adaptive centring reads (`src/rk_adaptive_centering.jl`): a
+# multi-membership block and an R2D2-scaled block. Every other reader of the
+# inventory (transport, NLME, starts) never sees them unless it asks with
+# `adaptive = true`, so their coverage is unchanged by these records.
+const _RK_ADAPTIVE_RECORD_KINDS = (:mm_ranef, :r2d2_ranef)
+_rk_strip_adaptive_records!(records) =
+    filter!(r -> !(r.kind in _RK_ADAPTIVE_RECORD_KINDS), records)
+
 _rk_coordinate_records(plan::Union{_RKStructuralPlan,_RKValuePlan,_RKHeldOutPlan};
-        term_starts=false) =
+        term_starts=false, adaptive=false) =
     let records = Any[]
         _rk_emit_ast(plan; coordinates=records)
         term_starts || filter!(r -> r.kind !== :term_start, records)
+        adaptive || _rk_strip_adaptive_records!(records)
         records
     end
 # An unconditioned program fits no declaration: each one is drawn in generated
 # quantities, so its inventory is empty, as the fitted pass leaves it for a
 # declaration no response reads (`_rk_drop_unfitted_records!`).
-_rk_coordinate_records(::_RKUnconditionedPlan; term_starts=false) = Any[]
+_rk_coordinate_records(::_RKUnconditionedPlan; term_starts=false, adaptive=false) = Any[]
 _rk_coordinate_records(plan) = _brm_transport_error(:unsupported_coverage,
     "brm_coordinate_transport: an RK plan of kind `$(nameof(typeof(plan)))` has " *
     "no cross-backend coordinate inventory")

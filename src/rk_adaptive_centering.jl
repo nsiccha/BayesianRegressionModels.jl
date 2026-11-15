@@ -19,10 +19,37 @@ function _rk_adaptive_binding(record)
     Symbol(endswith(z, ".z") ? z[1:end-2] : z)
 end
 
-# The RK random-effect records adaptive centring reads, in emission order.
+# The RK random-effect records adaptive centring reads, in emission order:
+# ordinary and stratified blocks, and the adaptive-only records of
+# multi-membership (`:mm_ranef`) and R2D2-scaled (`:r2d2_ranef`) blocks.
 _rk_adaptive_records(rk::RKBRMI) =
-    [r for r in _rk_coordinate_records(rk.plan)
-     if r.kind === :ranef || r.kind === :stratified_ranef]
+    [r for r in _rk_coordinate_records(rk.plan; adaptive=true)
+     if r.kind in (:ranef, :stratified_ranef, :mm_ranef, :r2d2_ranef)]
+
+# A record's grouping levels, the rows of its draws `z`: a multi-membership
+# block's are the joint levels of its member columns (`levels(vcat(...))`).
+_rk_adaptive_multi(record) =
+    record.kind === :mm_ranef || get(record, :form, :plain) === :mm
+_rk_adaptive_levels(rk::RKBRMI, record) = _rk_adaptive_multi(record) ?
+    _rk_grouping_levels(vcat((rk.plan.columns[c] for c in record.group)...)) :
+    _rk_ranef_record_levels(rk, record)
+
+# A block's levels and the layout positions of its standardized draws
+# `<z>.<g>.<k>` (`K x G`), or `nothing` for a block with no sampler coordinate
+# (no observed likelihood reaches it). The layout must hold exactly `G` rows.
+function _rk_adaptive_effects(rk::RKBRMI, record, pos)
+    K = length(record.margins)
+    levels = _rk_adaptive_levels(rk, record)
+    G = length(levels)
+    z = String(record.z)
+    z_names = [string(z, ".", g, ".", k) for k in 1:K, g in 1:G]
+    all(n -> !haskey(pos, n), z_names) && return nothing
+    haskey(pos, string(z, ".", G + 1, ".1")) && error(
+        "BRM adaptive centering on RKBRMI: block `$(_rk_adaptive_binding(record))` ",
+        "has more rows of draws in the RK layout than its $G grouping levels.")
+    levels, reshape(_rk_adaptive_positions(pos, vec(z_names), record,
+        "standardized-draw"), K, G)
+end
 
 _rk_adaptive_refuse(record, why) = error(
     "BRM adaptive centering on RKBRMI: random-effect block over ",
@@ -98,15 +125,15 @@ function adaptive_centering_blocks(rk::RKBRMI,
             append!(out, _rk_adaptive_stratified_blocks(rk, record, pos, bounds))
             continue
         end
-        K = length(record.margins)
-        levels = _rk_ranef_record_levels(rk, record)
-        G = length(levels)
-        z = String(record.z)
-        z_names = [string(z, ".", g, ".", k) for k in 1:K, g in 1:G]
-        # A block no observed likelihood reaches has no sampler coordinate.
-        all(n -> !haskey(pos, n), z_names) && continue
-        effects = reshape(_rk_adaptive_positions(pos, vec(z_names), record,
-            "standardized-draw"), K, G)
+        found = _rk_adaptive_effects(rk, record, pos)
+        isnothing(found) && continue
+        levels, effects = found
+        K, G = size(effects)
+        if record.kind === :r2d2_ranef
+            push!(out, _rk_adaptive_r2d2_block(rk, record, levels, effects, pos,
+                transforms, bounds, names))
+            continue
+        end
         # A known-value block names its sampled scales only (`nothing` at a
         # known margin) and records the known values (`known_scales`, and a
         # known correlation's matrix `known_cor`, which samples no factor).
@@ -159,6 +186,72 @@ function adaptive_centering_blocks(rk::RKBRMI,
     out
 end
 
+# An R2D2-scaled block (`sd(...) ~ r2d2(...)`, `:r2d2_ranef`) in derived-scale
+# form, as `_adaptive_r2d2_block` reads the SBBRMI emission. Margin `k`'s scale
+# is `reference * sqrt(phi[entry] * R2 / (1 - R2))` (`brm_r2d2m2_scale`, unit
+# variance), so its log is linear in log-atoms of RK coordinates:
+# `log(reference)` (a constant, a data scalar, or a sampled positive scale's
+# coordinate), `(log R2 - log(1 - R2)) / 2` (`R2` sampled on `(0, 1)`) and
+# `log(phi[entry]) / 2` (RK's stick-breaking simplex). A margin a partial ICC
+# statement leaves unaddressed samples its own scale (`free`).
+function _rk_adaptive_r2d2_block(rk::RKBRMI, record, levels, effects, pos, transforms,
+                                 bounds, names)
+    K, G = size(effects)
+    binding = _rk_adaptive_binding(record)
+    coordinate(name, role) = only(_rk_adaptive_positions(pos, [String(name)], record, role))
+    function scale_atom!(linear, bounded, i)
+        b = bounds[i]
+        isnothing(b) && _rk_adaptive_refuse(record, "derives its scale from " *
+            "`$(names[i])`, which RK samples under the transform " *
+            "`$(repr(transforms[i]))`, not as a positive scale.")
+        b == (0.0, Inf) ? push!(linear, (1.0, i)) : push!(bounded, (1.0, i, b...))
+    end
+    scales = map(record.r2d2) do spec
+        linear = Tuple{Float64,Int}[]
+        unit = Tuple{Float64,Float64,Int}[]
+        simplex = _AdaptiveSimplexLog[]
+        bounded = Tuple{Float64,Int,Float64,Float64}[]
+        constant = 0.0
+        if haskey(spec, :free)
+            scale_atom!(linear, bounded, coordinate(spec.free, "scale"))
+        else
+            reference = spec.reference
+            if reference isa Real
+                reference > 0 || _rk_adaptive_refuse(record,
+                    "has the reference scale $(reference), which is not positive.")
+                constant += log(Float64(reference))
+            elseif reference isa Symbol && haskey(pos, String(reference))
+                scale_atom!(linear, bounded, pos[String(reference)])
+            elseif reference isa Symbol &&
+                    get(rk.plan.columns, reference, nothing) isa Real
+                constant += log(Float64(rk.plan.columns[reference]))
+            else
+                _rk_adaptive_refuse(record, "has the reference scale " *
+                    "`$(reference)`, which is not a positive constant, a data " *
+                    "scalar or a sampled positive scale.")
+            end
+            r2 = coordinate(spec.r2, "R2")
+            bounds[r2] == (0.0, 1.0) || _rk_adaptive_refuse(record, "samples its " *
+                "`R2` under the RK transform `$(repr(transforms[r2]))`, not on (0, 1).")
+            push!(unit, (0.5, -0.5, r2))
+            if spec.n > 1
+                phi = [coordinate(Symbol(spec.phi, ".", i), "share") for i in 1:spec.n - 1]
+                all(i -> transforms[i] === :simplex, phi) || _rk_adaptive_refuse(record,
+                    "samples its shares `$(spec.phi)` under a transform other than " *
+                    "RK's simplex.")
+                push!(simplex, _AdaptiveSimplexLog(0.5, phi, spec.entry, true))
+            end
+        end
+        _AdaptiveLogScale(constant, linear, unit, simplex, bounded)
+    end
+    cholesky_free = isnothing(record.L) ? Int[] :
+        _rk_adaptive_positions(pos,
+            [string(record.L, ".", m) for m in 1:(K * (K - 1)) ÷ 2], record, "Cholesky")
+    ranef = RanefBlock(binding, K == 1 ? :ranef_intercept_r2d2 : :ranef_correlated_r2d2,
+        record.group, record.id, nothing, levels, K, G, record.z, true, false)
+    R2D2AdaptiveCenteringBlock(ranef, 0.0, effects, cholesky_free, collect(scales))
+end
+
 # A stratified `gr(g, by=b)` block as one block per stratum of `b`, in RK's
 # stratum order (`levels(b)`), as `_adaptive_stratified_blocks` does on SBBRMI.
 # Stratum `s` samples its own scales (`tau.<s>.<k>`, or `tau_<k>.<s>` when the
@@ -166,14 +259,10 @@ end
 # `z.<g>.<k>` read them, so it is exactly an ordinary block over those groups.
 # A group must lie in one stratum on every row (`_brm_level_strata`).
 function _rk_adaptive_stratified_blocks(rk::RKBRMI, record, pos, bounds)
-    K = length(record.margins)
-    levels = _rk_ranef_record_levels(rk, record)
-    G = length(levels)
-    z = String(record.z)
-    z_names = [string(z, ".", g, ".", k) for k in 1:K, g in 1:G]
-    all(n -> !haskey(pos, n), z_names) && return AbstractAdaptiveCenteringBlock[]
-    effects = reshape(_rk_adaptive_positions(pos, vec(z_names), record,
-        "standardized-draw"), K, G)
+    found = _rk_adaptive_effects(rk, record, pos)
+    isnothing(found) && return AbstractAdaptiveCenteringBlock[]
+    levels, effects = found
+    K = size(effects, 1)
     columns = rk.plan.columns
     strata = _rk_grouping_levels(columns[record.by])
     # Each level's stratum (0 for a level without rows, which stays unmapped).
@@ -386,7 +475,9 @@ function _adaptive_ranef_locations(rk::RKBRMI, blocks, unc_names)
         locs = zeros(Int, K)
         factors = nothing
         containers = nothing
-        if length(labels) == K
+        # As on SBBRMI, a multi-membership block (its group a tuple of member
+        # columns) stays centred on 0: its rows average several levels.
+        if block.ranef.group isa Symbol && length(labels) == K
             for k in 1:K
                 predictor, coefficient = labels[k].predictor, labels[k].coefficient
                 outer = _adaptive_containers(block, predictor, coefficient, blocks,
