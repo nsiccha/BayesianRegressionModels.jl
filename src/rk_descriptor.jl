@@ -39,16 +39,22 @@ RK program:
   of its own, with `derived = true`.
 - `constraints` is `(;)` and `inlined` is `false`.
 - `observed`: the program conditions on the input. `held_out` is `false`.
-- `column`: the dataframe column the input is, or `nothing` for a value BRM
-  generates.
+- `column`: the dataframe column the input is or copies, or `nothing` for a
+  value BRM generates or the program computes.
 - `transform`: `nothing` for a dataframe column: the RK graph does the
   preprocessing (`zscale`, group indices, …) itself, so the program reads the
   raw column. A plate cell's port of a response's nested values (`<cell>_input_y`)
-  is that response's column too. An input BRM generates names what it holds:
-  `:levels` (a fitted level table), `:level_count`, `:prior_constant` or
+  is that response's column too. A fit-role input (`<column>_fit`) is `:fit`:
+  a copy of `column` that the program fits its preprocessing from (a grouping's
+  levels, a `center`/`zscale` mean and SD), so a replay keeps the fit's
+  preprocessing. It holds the column's own values on a first build and the
+  training column on a frozen `reprocess` replay. An input BRM generates names
+  what it holds: `:levels` (the level table of a factor or `mo()` term, fitted
+  when BRM plans the model), `:level_count`, `:prior_constant` or
   `:known_correlation`. A value the program computes from its data (a design
-  matrix, group indices), which RK preparation evaluates once and binds in place
-  of its definition, is `:computed`; on a frozen replay that is the fit's value.
+  matrix, a grouping's level table `<g>_fit_levels`, each row's level
+  `<g>_level`), which RK preparation evaluates once and binds in place of its
+  definition, is `:computed`; on a frozen replay that is the fit's value.
 
 No Stan program is built, so the Stan-only readers (`brm_output`,
 `brm_operation`, the coordinate resolvers) have no method for it. The RK
@@ -122,12 +128,29 @@ function _brm_rk_descriptor_inputs(rk, emitted)
     # matrix, group indices) and binds their values in their place; the
     # program's own inputs do not name them.
     source = Set{Symbol}(keys(_rk_source_data_columns(plan, emitted)))
-    column(name) = haskey(generated, name) || name in extents ? nothing :
-        name in data ? name : get(ports, name, nothing)
+    # A fit-role input (`_rk_fit_twin!`) is a bound copy of the column the
+    # program fits its preprocessing from; it names the column it copies.
+    fits = _rk_plan_fit_inputs(plan)
+    function column(name)
+        (haskey(generated, name) || name in extents) && return nothing
+        copied = _brm_rk_fit_column(fits, name)
+        copied in data ? copied : get(ports, copied, nothing)
+    end
     Tuple(_brm_rk_input(name, value; observed=name in observed,
             generated=get(generated, name, nothing), derived=name in extents,
-            column=column(name), computed=!(name in source))
+            column=column(name), fit=haskey(fits, name), computed=!(name in source))
         for (name, value) in pairs(bound))
+end
+
+# The value a fit-role input copies, followed through a copy of a copy (a
+# component's input of its caller's fit-role input); `name` itself otherwise.
+function _brm_rk_fit_column(fits, name::Symbol)
+    seen = Set{Symbol}()
+    while haskey(fits, name) && !(name in seen)
+        push!(seen, name)
+        name = fits[name]
+    end
+    name
 end
 
 # A plate cell reads a response's nested values through a port of its own
@@ -140,8 +163,9 @@ _brm_rk_port_columns(plan::_RKValuePlan) = Dict{Symbol,Symbol}(
     for input in assignment.inputs
     if input.kind === :element && input.column isa Symbol && input.source !== input.column)
 
-function _brm_rk_input(name, value; observed, generated, derived, column, computed)
-    transform = !isnothing(generated) ? generated.kind : computed ? :computed : nothing
+function _brm_rk_input(name, value; observed, generated, derived, column, fit, computed)
+    transform = !isnothing(generated) ? generated.kind : fit ? :fit :
+        computed ? :computed : nothing
     BRMInput(name, _brm_rk_input_type(value), _brm_rk_input_size(value), (;),
         observed, false, derived, false, column, transform)
 end

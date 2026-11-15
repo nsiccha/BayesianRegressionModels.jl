@@ -777,7 +777,7 @@ const SVI_DELAY_OPTIONS = (; batch_size=4, window=20, patience=3, min_windows=5,
         coupling=nothing)
     n = a * W
     @test isapprox(fit.diagnostics.elbo[1:n], plain.diagnostics.elbo[1:n]; rtol=1e-9)
-    # `delay=false` centres from the first iteration, as BRM 0.2.282-0.2.324 did.
+    # `delay=false` centres from the first iteration, as BRM 0.2.282-0.2.327 did.
     now = brm_svi_fit(m; SVI_DELAY_OPTIONS..., rng=Xoshiro(7), coupling=nothing,
         centering=LearnedCentering(; delay=false))
     @test now.diagnostics.centering.activation_window == 0
