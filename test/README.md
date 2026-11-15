@@ -9,8 +9,13 @@ On a model with a Stan form it agrees with the Stan descriptor on `columns` and
 `formula` and reports the factor's generated level table and count. A held-out
 response, a non-centered `mi` completion and another formula each change the
 id, a held-out response is no input, and a frozen `reprocess` replay keeps the
-fit's id. Run it with `julia --startup-file=no --project=test
-test/rk_descriptor.jl`.
+fit's id. On a grouped model with String labels and a `center(x)` term, every
+input has a column or a transform: the fit-role inputs copy `site` and `x`
+(`transform = :fit`, the training columns on a frozen replay), and the
+grouping's level table and row levels are `:computed`. A function component
+that groups by its input names the caller's columns for its fit-role inputs.
+Run it with
+`julia --startup-file=no --project=test test/rk_descriptor.jl`.
 
 `rk_jax_inputs.jl` checks `rk_bound_data(rk, source)` on macro and runtime-source
 models: scalar constants read by a ragged plate, ordinary scalar inputs, array

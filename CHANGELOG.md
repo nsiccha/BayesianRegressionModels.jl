@@ -12,6 +12,20 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.325
+
+- `brm_descriptor(rk::RKBRMI)` classifies a fit-role input (snag
+  `brm-descriptor-r-809e9042`). A grouping or a `center`/`zscale`/`standardize`
+  term fits its preprocessing from a bound copy of its column (`site_fit` for
+  `(1 | site)`): the column's values on a first build, the training column on a
+  frozen `reprocess` replay. Its `BRMInput` had `column = nothing` and
+  `transform = nothing`; it now has `column` = the column it copies and the new
+  `transform = :fit`. So every input of an RK descriptor has a `column` or a
+  `transform`. A grouping's level table (`<g>_fit_levels`) and row levels
+  (`<g>_level`) stay `:computed`: they are program definitions RK preparation
+  evaluates, while `:levels` names a factor's or `mo()` term's level table BRM
+  binds as an input.
+
 ## 0.2.324
 
 - `BRMSVINonfiniteError` says where a failing point left the model's finite

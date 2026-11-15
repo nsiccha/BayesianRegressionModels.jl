@@ -185,6 +185,83 @@ mi_data = (; x=Union{Missing,Float64}[0.3, missing, -0.5, 1.2, missing, 0.1],
     @test centred.columns == noncentred.columns
 end
 
+# A grouping and a centred covariate fit their preprocessing from fit-role
+# inputs: bound copies of the `site` and `x` columns (snag
+# `brm-descriptor-r-809e9042`, where `site_fit` had neither a column nor a
+# transform). String labels, as the reporter's model has.
+grouped_model(data) = @brm data begin
+    sigma ~ Exponential(1)
+    mu ~ 1 + center(x) + (1 | site)
+    y ~ Normal(mu, sigma)
+end
+grouped_data = (; x=[-1.0, 0.5, 2.0, 0.25, 1.0, -0.3, 0.8, -0.6],
+    site=["b", "a", "c", "a", "b", "c", "a", "b"],
+    y=[0.2, 1.1, -0.4, 0.8, 1.6, 0.3, 0.9, -0.1])
+# Other rows of the same sites, another mean of `x`.
+grouped_other = (; x=[3.0, 2.5, 4.0, 1.5],
+    site=["c", "b", "a", "a"], y=[1.0, 0.4, 0.9, -0.2])
+fit_inputs(d) = [i for i in d.inputs if i.transform === :fit]
+
+@stestset "a fit-role input names the column it copies" begin
+    rk = RKBRMI(grouped_model(grouped_data))
+    d = brm_descriptor(rk)
+    @test classified(d)
+    fits = fit_inputs(d)
+    @test Set(i.column for i in fits) == Set([:site, :x])
+    bound = rk_bound_data(rk)
+    for i in fits
+        @test i.name !== i.column && !i.observed && !i.derived
+        # On a first build it holds the column's own values.
+        @test bound[i.name] == getfield(grouped_data, i.column)
+    end
+    @test input(d, :site).column === :site && input(d, :site).transform === nothing
+    # The grouping's level table and each row's level are definitions the
+    # program computes from the fit-role input, not a level table BRM binds.
+    @test input(d, :site_fit_levels).transform === :computed
+    @test input(d, :site_level).transform === :computed
+    @test !any(i -> i.transform === :levels, d.inputs)
+    # On a frozen replay it holds the training column, not the replay's rows,
+    # which is why it is no plain column read.
+    replay = reprocess(rk, grouped_other)
+    r = brm_descriptor(replay)
+    @test r.id == d.id
+    @test classified(r)
+    rebound = rk_bound_data(replay)
+    for i in fit_inputs(r)
+        @test rebound[i.name] == getfield(grouped_data, i.column)
+        @test rebound[i.column] == getfield(grouped_other, i.column)
+    end
+    @test Set(i.column for i in fit_inputs(r)) == Set([:site, :x])
+end
+
+# A component that groups by its input: its fit-role inputs are hoisted into
+# the caller's graph and name the caller's columns.
+@brm function unit_field(unit, scale)
+    value ~ 1 + (1 | unit)
+    effect(value, Intercept) ~ Normal(0, 1)
+    sd(value, unit) ~ Exponential(scale)
+    return value
+end
+component_model(data) = @brm data begin
+    left ~ unit_field(unit_l, scale)
+    right ~ unit_field(unit_r, 0.5)
+    y_l ~ Normal(left, 0.7)
+    y_r ~ Normal(right, 0.7)
+    scale ~ Exponential(1)
+end
+component_data = (; unit_l=["a", "a", "b", "c"], unit_r=["p", "q", "q"],
+    y_l=[2.3, 2.4, 2.2, 2.5], y_r=[2.1, 1.9, 2.6])
+
+@stestset "a component's fit-role inputs name the caller's columns" begin
+    rk = RKBRMI(component_model(component_data))
+    d = brm_descriptor(rk)
+    @test classified(d)
+    fits = fit_inputs(d)
+    @test sort!([i.column for i in fits]) == [:unit_l, :unit_r]
+    bound = rk_bound_data(rk)
+    @test all(i -> bound[i.name] == getfield(component_data, i.column), fits)
+end
+
 @stestset "a frozen replay runs the fit's program on the new data" begin
     rk = RKBRMI(plain_model(plain_data))
     d = brm_descriptor(rk)
