@@ -8,9 +8,12 @@
 # same constrained point. Every prior here is on an unbounded support, so the
 # unconstrained point is the constrained one and no Jacobian enters.
 #
-# RKBRMI's per-group (cell-computed) thresholds need RKPPL to accept a sampled
-# cell vector as `Ordinal` thresholds (ReactiveKernels snag
-# `rkppl-sampled-pe-bc377786`); that case is `@test_broken` until it lands.
+# The reporter's model, with tau_gap, an examiner shift of eta and a
+# discrimination, adds a bounded scale and BRM's default priors; its oracle
+# writes them out with their log-scale Jacobian.
+#
+# RKBRMI's per-group (cell-computed) thresholds need ReactiveKernelsPPL 0.1.201
+# (ReactiveKernels snag `rkppl-sampled-pe-bc377786`).
 #
 # Run: julia --project=test test/ordinal_group_thresholds.jl
 #      (RK_JAX_PYTHON names a Python with jax for the JAX module parity.)
@@ -67,6 +70,44 @@ function pooled_oracle(m, log_gap, U)   # U: 3 × N_EX, one column per examiner
     lp
 end
 
+# The reporter's whole model (brm-use, "Thresholds the model gives").
+const FULL = quote
+    m ~ Normal(0.0, 1.5)
+    log_gap[1:3] .~ Normal.(0.0, 1.0)
+    tau_gap ~ Exponential(1.0)
+    eta ~ 0 + x + (1 | examiner)
+    log_disc ~ Normal(0.0, 0.3)
+    rows = groups(examiner => exids)
+    @plate for e in eachindex(exids)
+        u ~ Normal(zero_gap[e], tau_gap)
+        s = cumsum(vcat(0.0, exp.(log_gap .+ u)))
+        cuts = m .+ s .- mean(s)
+        y[rows[e]] ~ Ordinal(Cumulative(), ProbitLink(), eta[rows[e]], cuts,
+            exp(log_disc))
+    end
+end
+
+# At unconstrained values: `tau_gap` enters through its logarithm (Jacobian
+# `log(tau_gap)`). BRM's default priors are standard normal on the coefficient
+# of `x`, on the log scale of the examiner effects and on their non-centred
+# deviations `xi` (effect `exp(log_scale) * xi`).
+function full_oracle(m, log_gap, log_tau_gap, beta, log_scale, xi, log_disc, U)
+    tau_gap = exp(log_tau_gap)
+    lp = logpdf(Normal(0, 1.5), m) + sum(logpdf.(Normal(0, 1), log_gap)) +
+         logpdf(Exponential(1.0), tau_gap) + log_tau_gap +
+         logpdf(Normal(0, 1), beta) + logpdf(Normal(0, 1), log_scale) +
+         sum(logpdf.(Normal(0, 1), xi)) + logpdf(Normal(0, 0.3), log_disc) +
+         sum(logpdf.(Normal(0, tau_gap), U))
+    for i in eachindex(DATA.y)
+        e = DATA.examiner[i]
+        eta = beta * DATA.x[i] + exp(log_scale) * xi[e]
+        d = Ordinal(Cumulative(), ProbitLink(), eta, pooled_cuts(m, log_gap, U[:, e]);
+            discrimination = exp(log_disc))
+        lp += logpdf(d, DATA.y[i])
+    end
+    lp
+end
+
 const STAGES = quote
     rows = groups(examiner => exids)
     @plate for e in eachindex(exids)
@@ -81,6 +122,27 @@ function stages_oracle(T)   # T: 4 × N_EX
     for i in eachindex(DATA.y)
         d = Ordinal(StoppingRatio(), CloglogLink(), DATA.eta_data[i], T[:, DATA.examiner[i]];
             discrimination = 0.7)
+        lp += logpdf(d, DATA.y[i])
+    end
+    lp
+end
+
+# A cell latent read whole as one examiner's cumulative cutpoints: nothing
+# orders it, so a point where one examiner's vector is not strictly increasing
+# has log density -Inf.
+const RAW_CELL = quote
+    rows = groups(examiner => exids)
+    @plate for e in eachindex(exids)
+        t ~ Normal(zero_stage[e], 1.0)
+        y[rows[e]] ~ Ordinal(Cumulative(), LogitLink(), eta_data[rows[e]], t)
+    end
+end
+
+function raw_cell_oracle(T)   # T: 4 × N_EX
+    all(e -> issorted(T[:, e]; lt = <=), 1:N_EX) || return -Inf
+    lp = sum(logpdf.(Normal(0, 1), T))
+    for i in eachindex(DATA.y)
+        d = Ordinal(Cumulative(), LogitLink(), DATA.eta_data[i], T[:, DATA.examiner[i]])
         lp += logpdf(d, DATA.y[i])
     end
     lp
@@ -137,17 +199,30 @@ end
 stan_scalar(p, q, name) = only(v for (n, v) in
     zip(p.names, BridgeStan.param_constrain(p.problem.model, q)) if n == name)
 
-# The unconstrained RKBRMI point holding the given named values. Every prior
-# here is unbounded, so a coordinate is its value; restoring each unit vector
-# says which named entry a coordinate is.
-function rk_point(rk, dim, named::NamedTuple)
+# The restored values of an RKBRMI point by flat name: `b.z` for a nested
+# field, and a cell latent's per-group blocks concatenated in group order.
+rk_named(rk, u) = _rk_flat(rk_restore_draws(rk, reshape(u, :, 1)), "")
+_rk_flat(x::NamedTuple, prefix) = mapfoldl(merge, keys(x); init = Dict{String,Vector{Float64}}()) do k
+    _rk_flat(getproperty(x, k), string(prefix, k, "."))
+end
+_rk_flat(x::AbstractVector{<:AbstractArray}, prefix) = Dict(String(chop(prefix)) => reduce(vcat, vec.(x)))
+_rk_flat(x::AbstractArray, prefix) = Dict(String(chop(prefix)) => vec(Float64.(x)))
+
+# The RKBRMI point holding the given UNCONSTRAINED values, by flat name (a
+# bounded value as its unconstrained coordinate, `log(tau)` for a scale):
+# moving one coordinate from zero says which named entry it is.
+function rk_point(rk, dim, named)
+    base = rk_named(rk, zeros(dim))
     u = zeros(dim)
     for j in 1:dim
-        restored = rk_restore_draws(rk, reshape(Float64.(1:dim .== j), :, 1))
-        for (key, value) in pairs(named)
-            i = findfirst(!iszero, vec(getproperty(restored, key)))
-            i === nothing || (u[j] = value isa AbstractVector ? value[i] : value)
-        end
+        moved = rk_named(rk, Float64.(1:dim .== j))
+        hits = [(string(key), findfirst(moved[string(key)] .!= base[string(key)]))
+                for (key, _) in pairs(named)]
+        filter!(h -> h[2] !== nothing, hits)
+        length(hits) == 1 || error("coordinate $j moves $(first.(hits)), not one named entry")
+        key, i = only(hits)
+        value = named[Symbol(key)]
+        u[j] = value isa AbstractVector ? value[i] : value
     end
     u
 end
@@ -308,17 +383,103 @@ end
     end
 end
 
-@testset "RKBRMI: one examiner's thresholds per cell (needs RKPPL snag rkppl-sampled-pe-bc377786)" begin
-    built = try
-        rk = RKBRMI(model(POOLED))
-        rk_logdensity_problem(rk; ad_backend = AutoEnzyme(; mode = Enzyme.Reverse))
-        true
-    catch e
-        # Today RKPPL refuses a cell-computed threshold vector.
-        @test occursin("must be a one-axis vector declared in the model", sprint(showerror, e))
-        false
+# RKBRMI at SBBRMI's points, placed by name: the density against the oracle and
+# against SBBRMI at the same point, the native Enzyme Reverse gradient against
+# central differences, and the JAX module's density and `jax.grad`.
+# `named_and_oracle(p, q)` reads SBBRMI's point `q` and returns the RKBRMI
+# names' unconstrained values and the oracle's density.
+function check_rk_cells(named_and_oracle, source, tag; npoints = 3, scale = 0.4)
+    brmi = model(source)
+    p = stan_problem(brmi, tag)
+    rk = RKBRMI(brmi)
+    problem = rk_logdensity_problem(rk; ad_backend = AutoEnzyme(; mode = Enzyme.Reverse))
+    dim = LogDensityProblems.dimension(problem)
+    @test dim == length(p.names)
+    us = Vector{Float64}[]
+    for q in points(dim, npoints; scale)
+        named, expected = named_and_oracle(p, q)
+        u = rk_point(rk, dim, named)
+        lp, g = LogDensityProblems.logdensity_and_gradient(problem, u)
+        @test isfinite(expected)
+        @test lp ≈ expected rtol = 1e-10
+        @test lp ≈ stan_lp(p, q) rtol = 1e-10
+        h = 1e-6
+        fd = [(LogDensityProblems.logdensity(problem, u .+ h .* (1:dim .== j)) -
+               LogDensityProblems.logdensity(problem, u .- h .* (1:dim .== j))) / 2h for j in 1:dim]
+        @test all(isfinite, g)
+        @test g ≈ fd rtol = 1e-5 atol = 1e-6
+        push!(us, u)
     end
-    @test_broken built
+    @testset "the JAX module of the RKBRMI" begin
+        src = jax_source(rk.model, rk_bound_plan(rk))
+        @test src isa JAXSource
+        if brm_jax_require_python()
+            run = brm_jax_run(src, [brm_jax_inputs(rk, src)], [us])
+            for (j, u) in enumerate(us)
+                lp, g = LogDensityProblems.logdensity_and_gradient(problem, u)
+                res = run.datasets[1]["points"][j]
+                @test res["log_density"]["eager"] ≈ lp rtol = 1e-12
+                @test res["log_density"]["jit"] ≈ lp rtol = 1e-12
+                @test vec(collect(res["grad"])) ≈ g rtol = 1e-10 atol = 1e-10
+            end
+        end
+    end
+    (; p, rk, problem)
+end
+
+@testset "RKBRMI: one examiner's thresholds per cell" begin
+    @testset "centred, partially pooled cumulative probit" begin
+        check_rk_cells(POOLED, "pooled"; npoints = 4) do p, q
+            m, log_gap = stan_scalar(p, q, "m"), stan_vector(p, q, "log_gap")
+            U = reshape(stan_vector(p, q, "u"), 3, N_EX)
+            (; m, log_gap, u = vec(U)), pooled_oracle(m, log_gap, U)
+        end
+    end
+    @testset "per-examiner stopping-ratio thresholds and a discrimination keyword" begin
+        check_rk_cells(STAGES, "stages") do p, q
+            T = reshape(stan_vector(p, q, "t"), 4, N_EX)
+            (; t = vec(T)), stages_oracle(T)
+        end
+    end
+    @testset "the reporter's whole model: strictness, discrimination, pooled gaps" begin
+        check_rk_cells(FULL, "full"; scale = 0.3) do p, q
+            m, log_gap = stan_scalar(p, q, "m"), stan_vector(p, q, "log_gap")
+            log_tau_gap = log(stan_scalar(p, q, "tau_gap"))
+            beta = stan_scalar(p, q, "pop_eta_beta_pop.1")
+            log_scale = stan_scalar(p, q, "r_eta_examiner_log_scale")
+            xi = stan_vector(p, q, "r_eta_examiner_xi")
+            log_disc = stan_scalar(p, q, "log_disc")
+            U = reshape(stan_vector(p, q, "u"), 3, N_EX)
+            named = (; m, log_gap, tau_gap = log_tau_gap, log_disc, u = vec(U),
+                var"pop_eta.beta_pop" = beta, var"b_examiner.tau" = log_scale,
+                var"b_examiner.z" = xi)
+            named, full_oracle(m, log_gap, log_tau_gap, beta, log_scale, xi, log_disc, U)
+        end
+    end
+    @testset "a cell latent as cumulative cutpoints: -Inf where one is not increasing" begin
+        brmi = model(RAW_CELL)
+        p = stan_problem(brmi, "raw cell")
+        @test length(p.names) == 4N_EX
+        rk = RKBRMI(brmi)
+        problem = rk_logdensity_problem(rk; ad_backend = AutoEnzyme(; mode = Enzyme.Reverse))
+        ordered = [-1.2 -0.9 -1.5; -0.3 0.1 -0.4; 0.5 0.6 0.2; 1.4 1.1 0.9]
+        tie = copy(ordered); tie[3, 2] = tie[2, 2]          # examiner 2: a tie
+        swapped = copy(ordered); swapped[[1, 4], 3] = swapped[[4, 1], 3]
+        for (T, finite) in ((ordered, true), (ordered .+ 0.3, true), (tie, false), (swapped, false))
+            u = rk_point(rk, 4N_EX, (; t = vec(T)))
+            lp, g = LogDensityProblems.logdensity_and_gradient(problem, u)
+            @test stan_vector(p, vec(T), "t") == vec(T)   # SBBRMI's point is vec(T)
+            if finite
+                @test lp ≈ raw_cell_oracle(T) rtol = 1e-10
+                @test lp ≈ stan_lp(p, vec(T)) rtol = 1e-10
+                @test all(isfinite, g)
+            else
+                @test raw_cell_oracle(T) == -Inf
+                @test lp == -Inf
+                @test stan_lp(p, vec(T)) == -Inf
+            end
+        end
+    end
 end
 
 @testset "refusals name the explicit-threshold contract" begin
@@ -348,22 +509,7 @@ end
 end
 
 @testset "the reporter's model builds whole: strictness, discrimination, pooled gaps" begin
-    full = quote
-        m ~ Normal(0.0, 1.5)
-        log_gap[1:3] .~ Normal.(0.0, 1.0)
-        tau_gap ~ Exponential(1.0)
-        eta ~ 0 + x + (1 | examiner)
-        log_disc ~ Normal(0.0, 0.3)
-        rows = groups(examiner => exids)
-        @plate for e in eachindex(exids)
-            u ~ Normal(zero_gap[e], tau_gap)
-            s = cumsum(vcat(0.0, exp.(log_gap .+ u)))
-            cuts = m .+ s .- mean(s)
-            y[rows[e]] ~ Ordinal(Cumulative(), ProbitLink(), eta[rows[e]], cuts,
-                exp(log_disc))
-        end
-    end
-    p = stan_problem(model(full), "full")
+    p = stan_problem(model(FULL), "full")
     lps = [stan_lp(p, q) for q in points(length(p.names), 3; scale = 0.2)]
     @test all(isfinite, lps)
 end

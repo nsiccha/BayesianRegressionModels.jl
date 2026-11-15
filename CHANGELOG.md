@@ -12,6 +12,19 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.320
+
+- RKBRMI builds an `Ordinal(structure, link, eta, thresholds[, discrimination])`
+  whose thresholds a `@plate` cell computes, one vector per group, such as each
+  examiner's ordered thresholds partially pooled around population gaps and
+  centred. It evaluates natively, with Enzyme Reverse gradients and in its
+  `jax_source` module, for cumulative and stopping-ratio structures; a
+  cumulative vector that is not strictly increasing gives `-Inf`, as on
+  SBBRMI. The compat floors are ReactiveKernels 0.1.262 and ReactiveKernelsPPL
+  0.1.201 (RK snag `rkppl-sampled-pe-bc377786`), and the test environment pins
+  ReactiveKernels `912fbdba8`. Follow-up `15mg0cw` of snag
+  `ordinal-varying-36cc2a82`.
+
 ## 0.2.319
 
 - RKBRMI `coarsened(Ordinal(...); upper)` ranges keep a finite, precise log
