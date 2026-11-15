@@ -210,6 +210,7 @@ using SHA: sha256
 include("description.jl")
 include("adaptive_centering.jl")
 include("rk_adaptive_centering.jl")
+include("adaptive_centering_cells.jl")
 include("posterior_diagnostics.jl")
 # Per-draw random-effect SDs, correlations and per-level effects, read from
 # the emitted carriers through the descriptor and the description metadata.
@@ -390,6 +391,7 @@ export RanefBlock, ranef_blocks, ranef_coordinates,
 export AbstractAdaptiveCenteringBlock, AdaptiveCenteringBlock,
        R2D2AdaptiveCenteringBlock, adaptive_centering_blocks,
        adaptive_centering_problem, adaptive_centering_controls,
+       adaptive_centering_cells,
        select_hsgp_centeredness,
        select_ranef_centeredness
 export brm_output_draws, brm_predictive_draws, hsgp_coordinate_draws, hsgp_transform_draws, hsgp_boundary_check
