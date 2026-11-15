@@ -201,6 +201,57 @@ end
     check_rk_coarsened(coarse, exact; value_route=true)
 end
 
+# Far from every threshold (RKPPL 0.1.198, RK snag `rkppl-ordinal-in-553ce5b3`):
+# the location coefficient at ±40 and ±300 puts rows sixty to four hundred
+# standard deviations from the thresholds. The exact model's masses keep their
+# precision there (rkppl-use §4), so the range oracle stays the log-sum of them.
+function check_rk_coarsened_tails(coarse, exact)
+    backend = RKBRMI(coarse(design()))
+    references = [RKBRMI(exact(design(fill(level, N), fill(level, N)))) for level in LEVELS]
+    names = layout_names(backend)
+    # The location predictor's coefficient (`beta` itself contains "eta").
+    slope = findall(n -> occursin("pop_eta", string(n)), names)
+    @test length(slope) == 1
+    for b in (40.0, -40.0, 300.0, -300.0)
+        u = zeros(length(names))
+        u[only(slope)] = b
+        exact_rows = [rk_query(r, :pointwise, u).y_min for r in references]
+        expected = [logsumexp(exact_rows[k][i] for k in code(LO[i]):code(HI[i])) for i in 1:N]
+        observed = rk_query(backend, :pointwise, u).y_min
+        @test all(isfinite, expected)
+        @test observed ≈ expected rtol=1e-10
+        check_rk_gradient(backend, u)
+    end
+end
+
+@stestset "RKBRMI coarsened ordinal far in the tails" begin
+    for (coarse, exact) in (
+            (@brm(begin
+                eta ~ 0 + x
+                y_min ~ coarsened(Ordinal(Cumulative(), ProbitLink(), eta); upper=y_max)
+            end), @brm(begin
+                eta ~ 0 + x
+                y_min ~ Ordinal(Cumulative(), ProbitLink(), eta)
+            end)),
+            (@brm(begin
+                eta ~ 0 + x
+                y_min ~ coarsened(Ordinal(Cumulative(), CloglogLink(), eta); upper=y_max)
+            end), @brm(begin
+                eta ~ 0 + x
+                y_min ~ Ordinal(Cumulative(), CloglogLink(), eta)
+            end)),
+            (@brm(begin
+                eta ~ 0 + x
+                y_min ~ coarsened(Ordinal(StoppingRatio(), ProbitLink(), eta;
+                                          per_threshold=(z,)); upper=y_max)
+            end), @brm(begin
+                eta ~ 0 + x
+                y_min ~ Ordinal(StoppingRatio(), ProbitLink(), eta; per_threshold=(z,))
+            end)))
+        check_rk_coarsened_tails(coarse, exact)
+    end
+end
+
 # ---- SBBRMI ----------------------------------------------------------------
 
 const RUN_BRIDGESTAN = get(ENV, "BRM_ORDINAL_RUNTIME", "1") != "0"
@@ -295,13 +346,19 @@ end
 
 include(joinpath(@__DIR__, "jax_module_driver.jl"))
 
+# A stopping-ratio range's `jax.grad` needs RKPPL 0.1.198 (its stage loop was a
+# `lax.while_loop`, which JAX cannot reverse).
 @stestset "RKBRMI coarsened ordinal JAX module" begin
-    builder = @brm begin
+  for builder in (@brm(begin
         eta ~ 0 + x
         log(disc) ~ 0 + g
         y_min ~ coarsened(Ordinal(Cumulative(), ProbitLink(), eta;
                                   discrimination=disc); upper=y_max)
-    end
+    end), @brm(begin
+        eta ~ 0 + x
+        y_min ~ coarsened(Ordinal(StoppingRatio(), CloglogLink(), eta;
+                                  per_threshold=(z,)); upper=y_max)
+    end))
     rk = RKBRMI(builder(design()))
     src = jax_source(rk.model, rk_bound_plan(rk))
     @test src isa JAXSource
@@ -320,4 +377,5 @@ include(joinpath(@__DIR__, "jax_module_driver.jl"))
             @test vec(collect(point["grad"])) ≈ g rtol=1e-10 atol=1e-10
         end
     end
+  end
 end
