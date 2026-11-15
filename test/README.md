@@ -2228,6 +2228,13 @@ On BRM 0.2.64 with ReactiveKernels `3deb61ae` that passes 171/171 (a Linux fleet
 `kernel_ode_cell.jl` remains
 the Stan-only gate for the closure-style `kernel(...) do` spelling.
 
+`rk_ode_solve_failure.jl` needs the same environment, without
+`OrdinaryDiffEqBDF`. Its cell integrates dy/dt = k y², which blows up at
+t = 1 / k. At a point past that time, `rk_logdensity_problem` answers `-Inf`
+and a `NaN` gradient, and the next good point evaluates bit-identically.
+BridgeStan rejects the same point. A `DomainError` raised in the cell still
+propagates.
+
 ## Native GP and dual HSGP adoption
 
 `rk_gp_covariance.jl` checks BRM-owned squared-exponential and periodic
