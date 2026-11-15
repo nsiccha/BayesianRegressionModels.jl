@@ -2751,9 +2751,27 @@ end
 # `A.b`) is therefore checked where the formula is built: a value with no call
 # method is refused with the name, where it is bound and what it holds
 # (snag `rkbrmi-shadowed-035220a8`). A spliced value is left as it is.
+#
+# A head the block's scope does not bind at all, though BRM exports it, means
+# BRM's binding: the formula is written in BRM's vocabulary. Julia leaves such
+# a name undefined in a module that loads two packages exporting it, as
+# `ReactiveKernelsPPL` and GLM.jl both export a different `ProbitLink` ("both
+# … export "ProbitLink"; uses of it in module Main must be qualified"), and in
+# a module that only `import`s BRM. A local of the block or a global of the
+# module still wins, so a shadowing variable is still refused above (snag
+# `brm-ordinal-link-ca8cd39c`). `@isdefined` is false for an ambiguous name,
+# and the walk of `brm(source; mod)` reads the same expression.
 _brm_formula_callee_expr(head) = head
 _brm_formula_callee_expr(head::Symbol) = Expr(:call, _brm_formula_callee,
-    QuoteNode(head), head, Expr(:macrocall, Symbol("@__MODULE__"), LineNumberNode(0)))
+    QuoteNode(head), _brm_scoped_name(head),
+    Expr(:macrocall, Symbol("@__MODULE__"), LineNumberNode(0)))
+_brm_scoped_name(name::Symbol) = _brm_exports(name) ?
+    Expr(:if, Expr(:isdefined, name), name, GlobalRef(@__MODULE__, name)) : name
+_brm_exports(name::Symbol) =
+    Base.isexported(@__MODULE__, name) && isdefined(@__MODULE__, name)
+# BRM's binding of an exported `name`, or `nothing`.
+_brm_export_binding(name::Symbol) =
+    _brm_exports(name) ? getglobal(@__MODULE__, name) : nothing
 _brm_formula_callee_expr(head::Expr) =
     Meta.isexpr(head, :., 2) && last(head.args) isa QuoteNode ?
         Expr(:call, _brm_formula_callee, QuoteNode(head), head, nothing) : head

@@ -12,6 +12,25 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.314
+
+- A name BRM exports means BRM's binding inside a `@brm` block, or a
+  `brm(source; mod)` source, when the block's module has no binding for it:
+  a formula call head (`Ordinal(Cumulative(), ProbitLink(), eta)`) and a name
+  a `@plate` cell reads. Julia gives a module no binding for a name that two
+  packages it `using`s both export. `ReactiveKernelsPPL` exports `LogitLink`,
+  `ProbitLink` and `CloglogLink` (values of its `LinkFunction` enum), and
+  GLM.jl exports link types of the same names, so with brm-use's RK setup,
+  `using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL`, an
+  ordinal model failed with `UndefVarError: ProbitLink not defined`, or for an
+  in-cell observation `RK backend: ProbitLink names nothing in module Main`
+  (snag `brm-ordinal-link-ca8cd39c`). The same holds in a module that only
+  `import`s BRM. A local of the block or a global of the module still takes
+  precedence, and a name BRM does not export stays undefined. Plain Julia
+  outside a block (`Ordinal(Cumulative(), ProbitLink(), eta, cuts)`) resolves
+  as Julia does, so a name two loaded packages export is undefined there
+  (ReactiveKernels snag `rkppl-exports-lo-be4414db` tracks RKPPL's export).
+
 ## 0.2.313
 
 - `adaptive_centering_problem(rk::RKBRMI, problem, backend)` and
