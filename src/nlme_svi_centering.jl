@@ -51,7 +51,7 @@
 using ReparametrizableDistributions: PartiallyCentered, reparam
 
 """
-    LearnedCentering(; start=0.5, step=0.05)
+    LearnedCentering(; start=0.5, step=0.05, delay=true)
 
 The default on a fresh [`brm_svi_fit`](@ref): learned partial centering with one control
 `c ∈ (0, 1)` per eligible cell, optimized jointly with the variational factors
@@ -64,8 +64,16 @@ constant law, such as `Normal(0, 1)`, leaves nothing to learn and is coupled
 instead). Controls start at `start` (grouped HSGP weights at `min(start, 0.1)`);
 `step` is the Adam step size of
 the controls' logits, taken whenever their unit is in the batch.
-Pass `centering=nothing` for the plain factorization. Streaming and optimizer
-continuation retain the saved policy.
+
+With `delay=true` (the default) a fresh fit explores with its cells in their packed
+coordinates first, the plain factorization, until exploration's ELBO test first reads
+flat (the trend test that ends exploration; its drift gate aside). Then each cell's
+control starts at `start`, each unit's factor is carried
+into its learned coordinates at the global factor's mean, and exploration goes on,
+its stopping test reading only the windows since. Grouped HSGP weights are not
+deferred: their controls learn from the first iteration. `delay=false` learns every
+control from the first iteration. Pass `centering=nothing` for the plain factorization.
+Streaming and optimizer continuation retain the saved policy.
 """
 struct LearnedCentering
     start::Float64
@@ -74,20 +82,33 @@ struct LearnedCentering
     # is a cell: false for every fresh fit, true only for a state saved before
     # BRM 0.2.322 (`_brm_svi_saved_centering`).
     constant_laws::Bool
-    function LearnedCentering(; start::Real=0.5, step::Real=0.05)
+    # Whether a fresh fit explores plain first and centres once exploration's
+    # stopping test passes (`_brm_svi_activate_centering!`). Exploration's opening
+    # transient can carry a block's sd far above its posterior (units' values move
+    # before their other effects fit); a cell centred there can be trapped, because
+    # at fixed u its value's coefficient on its location, 1 - c s^(1 - c), is
+    # negative for s > e. On a 32-unit AR(1) panel whose sd(phi, unit) is truly near
+    # 0, a transient sd of 6.7 sent phi_Intercept to -7.8 and the sd to 48, the ELBO
+    # about 600 nats below the plain fit's, and a draw put atanh(phi) past 19, where
+    # tanh rounds to 1 (snag brm-svi-fit-stop-517ddc65); the plain fit recovered.
+    delay::Bool
+    function LearnedCentering(; start::Real=0.5, step::Real=0.05, delay::Bool=true)
         0 < start < 1 || throw(ArgumentError(
             "LearnedCentering: start must lie strictly between 0 and 1, got $start"))
         isfinite(step) && step > 0 || throw(ArgumentError(
             "LearnedCentering: step must be finite and positive, got $step"))
-        new(Float64(start), Float64(step), false)
+        new(Float64(start), Float64(step), false, delay)
     end
     LearnedCentering(c::LearnedCentering, constant_laws::Bool) =
-        new(c.start, c.step, constant_laws)
+        new(c.start, c.step, constant_laws, c.delay)
 end
 
 # A saved centering policy: `(; start, step)` and, from BRM 0.2.322, `constant_laws`.
-# A state saved before it centred constant-law vectors and keeps doing so.
-_brm_svi_saved_centering(saved) = LearnedCentering(LearnedCentering(; saved.start, saved.step),
+# A state saved before it centred constant-law vectors and keeps doing so. A saved
+# state carries its own controls, so its policy never delays: a carried unit keeps
+# its frame and a new one starts at `start`.
+_brm_svi_saved_centering(saved) = LearnedCentering(
+    LearnedCentering(; saved.start, saved.step, delay=false),
     Bool(get(saved, :constant_laws, true)))
 
 # Omission selects learned coordinates on a fresh fit. A streaming update keeps
@@ -778,17 +799,52 @@ _brm_svi_cell_start(plan::_BRMSVICenteringPlan, cell) =
 # The controls of a target's cells: their logits, one Adam per unit and each
 # cell's position in its unit's block. A carried unit's cells start from its
 # previous logits, one per coordinate (`NaN` where none was learned).
-function _brm_svi_centering_controls(plan::_BRMSVICenteringPlan; carried=nothing)
+function _brm_svi_centering_controls(plan::_BRMSVICenteringPlan; carried=nothing, defer=false)
     positions = [_brm_svi_cell_positions(plan, i) for i in eachindex(plan.ncells)]
+    defer = defer && any(cells -> any(_brm_svi_deferred_cell, cells), plan.cells)
     x = map(eachindex(positions)) do i
+        defer && return _brm_svi_deferred_logits(plan, i)
         old = carried === nothing ? nothing : carried[i]
         [old === nothing || isnan(old[p]) ?
             _brm_svi_control_logit(_brm_svi_cell_start(plan, plan.cells[i][k])) : old[p]
             for (k, p) in enumerate(positions[i])]
     end
     (; plan.start, plan.step, plan.constant_laws, x,
-       opt=[_BRMSVIAdam(n, plan.step) for n in plan.ncells], positions)
+       opt=[_BRMSVIAdam(n, plan.step) for n in plan.ncells], positions,
+       active=[defer ? -1 : 0])
 end
+
+# Which cells a deferred fit holds in their packed frame until it activates: all
+# but a grouped HSGP's weights, whose controls start at `min(start, 0.1)` for a
+# related collapse (`_BRM_SVI_SPECTRAL_START`) and, measured on the grouped-HSGP
+# toy against NUTS, lost their ELBO gain over the plain fit when deferred too (1.7
+# to 2.1 nats above plain from the first iteration, 3.7 below when deferred). At
+# c = 0.1 a cell's coefficient on its location turns negative only above a
+# scale of about 13.
+_brm_svi_deferred_cell(cell) = cell.kind !== :hsgp
+
+# Unit i's logits on a deferred fit: each deferred cell at its packed frame, -Inf
+# for a block's standardized draws (c = 0) and +Inf for an authored vector's values
+# (c = 1), where the learned map is the identity with zero location and scale
+# adjoints and `c (1 - c)` makes the control's gradient, hence its Adam step,
+# exactly zero; every other cell at its start. Until `_brm_svi_activate_centering!`
+# the deferred cells are the plain fit's.
+function _brm_svi_deferred_logits(plan::_BRMSVICenteringPlan, i)
+    x = [_brm_svi_control_logit(_brm_svi_cell_start(plan, cell)) for cell in plan.cells[i]]
+    for inst in plan.instances[i], cell in inst.cells
+        _brm_svi_deferred_cell(plan.cells[i][cell]) || continue
+        x[cell] = _brm_svi_packed_centering(inst) == 0 ? -Inf : Inf
+    end
+    x
+end
+
+# The window at which a deferred fit switched its centering on: -1 while it still
+# explores in the packed frame, 0 for centering learned from the first iteration
+# (and every state saved before the delay existed), otherwise the window whose end
+# activated it.
+_brm_svi_centering_activation(q) =
+    hasproperty(q, :centering) && hasproperty(q.centering, :active) ? first(q.centering.active) : 0
+_brm_svi_centering_deferred(q) = _brm_svi_centering_activation(q) < 0
 
 # Unit i's logits as one value per coordinate of its block, `NaN` off the cells.
 function _brm_svi_coordinate_controls(q, i, d)
@@ -866,7 +922,9 @@ function _brm_svi_centering_report(plan::_BRMSVICenteringPlan, q, levels)
         push!(rows, (; unit=levels[i], _brm_svi_report_row(cell)...,
             c=_brm_svi_control(q.centering.x[i][k])))
     end
-    (; cells=rows, uncentered=map(_brm_svi_report_row, plan.uncentered), start=plan.start)
+    a = _brm_svi_centering_activation(q)
+    (; cells=rows, uncentered=map(_brm_svi_report_row, plan.uncentered), start=plan.start,
+       activation_window=a < 0 ? nothing : a)
 end
 
 # The batch's scale and location adjoints, each unit's antithetic pair weighted
@@ -1011,7 +1069,10 @@ function _brm_svi_with_centering(t, q, centering::LearnedCentering)
     plan = _brm_svi_centering_plan(t, centering)
     prior = hasproperty(t, :prior) && t.prior isa _BRMSVIStreamingPrior ? t.prior : nothing
     carried = prior === nothing ? nothing : prior.controls
-    q = merge(q, (; centering=_brm_svi_centering_controls(plan; carried)))
+    # A deferred fit's maps are the identity: its factors stay in the packed frame
+    # until it activates (`_brm_svi_activate_centering!`).
+    defer = centering.delay && carried === nothing
+    q = merge(q, (; centering=_brm_svi_centering_controls(plan; carried, defer)))
     t = merge(t, (; centering=plan))
     maps = _brm_svi_centering_maps(t, q)
     for i in eachindex(t.units)
@@ -1021,6 +1082,39 @@ function _brm_svi_with_centering(t, q, centering::LearnedCentering)
         _brm_svi_unit_affine!(q, i, maps[i])
     end
     t, q
+end
+
+# A deferred fit's centering, switched on at the end of window `window`: every
+# deferred cell's control moves from its packed frame to its start, the instances
+# holding them are carried into the learned coordinates at the global factor's mean
+# (the transport a fresh centered fit starts with, so the density q puts on the
+# packed coordinates is unchanged), and the unit's controls' Adam restarts, as does a
+# structured unit's own, its moments being in the old frame. Cells that were never
+# deferred keep their frame and controls. The caller resets what reads the factors'
+# frame: the units' entropies and iterate histories (`_brm_svi_centering_activated!`).
+function _brm_svi_activate_centering!(q, t, window)
+    plan = _brm_svi_centering(t)
+    moved = [falses(length(plan.instances[i])) for i in eachindex(plan.ncells)]
+    for i in eachindex(plan.ncells)
+        x = q.centering.x[i]
+        for (n, inst) in enumerate(plan.instances[i])
+            moved[i][n] = any(cell -> isinf(x[cell]), inst.cells)
+        end
+        any(moved[i]) || continue
+        for (k, cell) in enumerate(plan.cells[i])
+            isinf(x[k]) && (x[k] = _brm_svi_control_logit(_brm_svi_cell_start(plan, cell)))
+        end
+        q.centering.opt[i] = _BRMSVIAdam(plan.ncells[i], plan.step)
+    end
+    maps = _brm_svi_centering_maps(t, q)
+    for i in eachindex(t.units)
+        any(moved[i]) || continue
+        _brm_svi_unit_affine!(q, i, maps[i][moved[i]])
+        q.unit_opt[i] === nothing ||
+            (q.unit_opt[i] = _BRMSVIAdam(length(q.unit_opt[i].m), q.unit_opt[i].lr))
+    end
+    q.centering.active[1] = window
+    q
 end
 
 # ── Streaming: a carried unit's prior in its previous controls' frame ────────
