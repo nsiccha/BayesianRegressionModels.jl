@@ -12,6 +12,16 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.319
+
+- RKBRMI `coarsened(Ordinal(...); upper)` ranges keep a finite, precise log
+  mass and gradient far from every threshold (tested to 400 standard
+  deviations), and the `jax_source` module of a stopping-ratio range has a
+  `jax.grad`. The compat floors are ReactiveKernelsPPL 0.1.198 and
+  ReactiveKernelsDistributionKernels 0.1.12 (RK snag `rkppl-ordinal-in-553ce5b3`),
+  and the test environment pins ReactiveKernels `4950e55bd`. Snag
+  `ordinal-interval-0a6d9172` follow-up `1so3vmg`.
+
 ## 0.2.318
 
 - `Ordinal(structure, link, eta, thresholds[, discrimination])` with
