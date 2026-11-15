@@ -55,6 +55,31 @@ function _brm_svi_unit_term!(gg, gz, t::PoisonableUnits, i, g, z, plan, work)
     t.poisoned && (gz[end] = NaN)
     -sum(abs2, z .- 1) / 2
 end
+
+# Unit normals whose term is NaN once the unit's second coordinate leaves
+# (`lower`, `threshold`), and a global term that is NaN above 2: a failure carried
+# by one coordinate, which a swap probe can name. `sd_prior` and `prior_mean` are the
+# global prior's Gaussian projection, as a model target keeps them.
+struct ThresholdUnits
+    globals::Vector{Int}
+    units::Vector{Vector{Int}}
+    plan::NamedTuple
+    plans::Vector{NamedTuple}
+    work::Vector{Nothing}
+    m::NamedTuple
+    threshold::Float64
+    lower::Float64
+    sd_prior::Vector{Float64}
+    prior_mean::Vector{Float64}
+end
+
+_brm_svi_global_term(::ThresholdUnits, g) = g[1] > 2 ? (NaN, [NaN]) : (-sum(abs2, g) / 2, -g)
+function _brm_svi_unit_term!(gg, gz, t::ThresholdUnits, i, g, z, plan, work)
+    fill!(gg, 0.0)
+    gz .= 1 .- z
+    (z[2] > t.threshold || z[2] < t.lower) && return NaN
+    -sum(abs2, z .- 1) / 2
+end
 end
 
 using Test, Random, LinearAlgebra
@@ -144,6 +169,79 @@ const S = SVIArithmetic
         @test any(q.M[i] != before.M[i] for i in 1:2)
         @test dense_limit > 0 || any(o !== nothing && o.t == 1 for o in q.unit_opt)
     end
+end
+
+# What a non-finite error says about where the failure is (snag
+# brm-svi-fit-stop-517ddc65): a data-free ridge had taken an intercept ten prior
+# sds out, while the error's `largest` named a well-placed level of 80. `furthest`
+# measures the globals from their priors, and `probe` names the coordinate whose
+# value alone repairs or breaks the evaluation.
+@testset "a non-finite error names the globals far from their priors and the coordinate that fails" begin
+    names = ["g", "a1", "a2", "a3", "b1", "b2", "b3"]
+    plan = (; footprints=[[1, 2, 3, 4], [1, 5, 6, 7]])
+    target(threshold, lower=-Inf) = S.ThresholdUnits([1], [[2, 3, 4], [5, 6, 7]], plan, [plan],
+        [nothing], (; view=(; coordinates=names), unit=fill(-1.0, 7)), threshold, lower,
+        [0.5], [0.0])
+    for dense_limit in (64, 0), curvature in (:pair, :orthogonal)
+        dense_limit == 0 && curvature === :orthogonal && continue
+        q = S._brm_svi_params(target(Inf), [0.7], S.MeanFieldGlobal();
+            global_scale=0.2, unit_scale=1.0, unit_dense_limit=dense_limit, unit_rank=1)
+        # The units' second coordinates fail above their factor's mean: exactly one
+        # draw of every pair (the mean is the same for both units).
+        @test q.M[1][2] == q.M[2][2]
+        t = target(q.M[1][2])
+        controls = S._brm_svi_controls(2; batch_size=2, max_iterations=10,
+            lr_global=0.01, unit_step=0.1, polish_lr=0.05, window=100, patience=10,
+            min_windows=40, polish_windows=20, unit_curvature=curvature)
+        run = S._brm_svi_run(Xoshiro(5), q, controls, t)
+        e = try S._brm_svi_advance!(run, t, controls); nothing catch err err end
+        @test e isa S.BRMSVINonfiniteError
+        for p in e.terms
+            own = t.units[p.unit]
+            plus_fails = p.points.plus[own[2]] > t.threshold
+            @test plus_fails != (p.points.minus[own[2]] > t.threshold)
+            @test p.probe.reference === (plus_fails ? :minus : :plus)
+            @test p.probe.repairs == p.probe.breaks == [names[own[2]]]
+            failing = plus_fails ? p.points.plus : p.points.minus
+            @test only(p.furthest) == (; coordinate="g", value=failing[1],
+                prior_sds=abs(failing[1]) / 0.5)
+        end
+        message = sprint(showerror, e)
+        @test occursin("furthest from their priors: g = ", message)
+        @test occursin(r"one-coordinate swaps against the finite (plus|minus) draw: resetting (a2|b2) repairs it, (a2|b2) alone breaks the reference", message)
+    end
+
+    # Both draws failing: the probe swaps against the pair's mean, which is finite.
+    q = S._brm_svi_params(target(Inf), [0.7], S.MeanFieldGlobal();
+        global_scale=0.2, unit_scale=1.0, unit_dense_limit=64, unit_rank=1)
+    t = target(q.M[1][2] + 0.5, q.M[1][2] - 0.5)
+    m = S._brm_svi_term_point(t, [0.7], t.units[1], q.M[1])
+    finite = x -> S._brm_svi_unit_finite(t, 1, x, t.plan, nothing, [1])
+    @test finite(m)
+    up, down = copy(q.M[1]), copy(q.M[1])
+    up[2] += 1.0; down[2] -= 1.0; up[1] += 0.3; down[1] -= 0.3
+    p = S._brm_svi_nonfinite_unit(t, 1, [0.7], (up, down), (NaN, NaN),
+        (zeros(1), zeros(1)), (zeros(3), zeros(3)), [1]; finite)
+    @test p.probe.reference === :mean
+    @test p.probe.repairs == p.probe.breaks == ["a2"]
+    # A failing reference gives no probe.
+    @test S._brm_svi_swap_probe(t, finite, :mean, p.points.plus, p.points.plus, t.units[1]) === nothing
+    # An evaluation that throws counts as not finite.
+    @test !S._brm_svi_probe_finite(x -> throw(DomainError(x)), m)
+
+    # The global term: its draw against the global factor's mean.
+    e = try S._brm_svi_check_finite(t, [2.5], NaN, [NaN], [nothing]; center=[0.7]); nothing catch err err end
+    p = only(e.terms)
+    @test p.furthest == [(; coordinate="g", value=2.5, prior_sds=5.0)]
+    @test p.probe == (; reference=:mean, repairs=["g"], breaks=["g"])
+    @test occursin("g = 2.5 (5.0 prior sds)", sprint(showerror, e))
+    # Without a center (or without a projection) the fields are empty, as before.
+    e = try S._brm_svi_check_finite(target(Inf), [2.5], NaN, [NaN], [nothing]); nothing catch err err end
+    @test only(e.terms).probe === nothing
+    t0 = S.PoisonableUnits([1], [[2, 3, 4], [5, 6, 7]], plan, [plan], [nothing],
+        (; view=(; coordinates=names), unit=fill(-1.0, 7)), true)
+    e = try S._brm_svi_check_finite(t0, [2.5], NaN, [NaN], [nothing]); nothing catch err err end
+    @test isempty(only(e.terms).furthest)
 end
 
 @testset "production SVI weighted iteration" begin

@@ -12,6 +12,28 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.324
+
+- `BRMSVINonfiniteError` says where a failing point left the model's finite
+  region (snag `brm-svi-fit-stop-517ddc65`). Each term gains:
+  - `furthest`: the failing point's globals furthest from their own priors, at
+    most three, each `(; coordinate, value, prior_sds)`, in sds of the prior's
+    Gaussian projection (the sd the SVI sd bound multiplies; a fit's target now
+    keeps that projection's `prior_mean` beside `sd_prior`);
+  - `probe`: one-coordinate swaps between the failing point and a finite
+    reference (the pair's other draw, or the pair's mean; for the global term,
+    the global factor's mean), `(; reference, repairs, breaks)`, naming the
+    coordinates whose reference value alone repairs the point and those whose
+    failing value alone breaks the reference. `nothing` when the reference
+    fails too.
+
+  The message prints both. `largest` is unchanged, but magnitude alone misled:
+  on a reporter's AR(1) panel the message named `level_Intercept = 80.16`, a
+  level at its prior mean, while the cause was `phi_Intercept` about ten prior
+  sds out with `sd(phi, unit)` at 157, which put a draw of
+  `atanh(phi) = 20.8` where `tanh` rounds to 1. Fits, draws and checkpoints are
+  unchanged: the swaps run only after a term has failed.
+
 ## 0.2.323
 
 - `brm_descriptor(rk::RKBRMI; name)` returns a `BRMRKDescriptor`: the content
