@@ -141,6 +141,9 @@ include("s2z_select.jl")
 # derived operations, so a consumer mounts a declaration without keeping any
 # parallel registry of its own.
 include("descriptor.jl")
+# The same identity and input inventory for the program an RKBRMI runs, which
+# builds no Stan program (a law with no Stan form is described too).
+include("rk_descriptor.jl")
 include("transform_constants.jl")
 
 # Post-fit prediction modes — population-level ("no random effects") and
@@ -334,7 +337,7 @@ export AbstractColumn, MissingColumn, DataColumn, NamedColumn,
        ExprColumn, LikelihoodColumn
 export BRMI, BRMBuilder, brm, SBBRMI, RKBRMI, GenerativeDeclaration, GenerativePlan,
        brm_distribution_type, rk_logdensity_problem, rk_restore_draws
-export BRMDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight,
+export BRMDescriptor, BRMRKDescriptor, BRMInput, BRMOutput, BRMOperation, BRMHighlight,
        BRMHighlightSpec, BRMSubmodel, brm_highlight
 export brm_model_view
 export BRMDescription, BRMDescriptionComponent, BRMDescriptionContext,

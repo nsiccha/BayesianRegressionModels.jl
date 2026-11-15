@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.323
+## 0.2.326
 
 - `brm_svi_fit(...; unit_reoptimize = k)` (default 0, off): each dense batch
   unit takes `k` whole natural-gradient steps at the iteration's draw of the
@@ -25,6 +25,55 @@ instead of failing at run time.
   exact one) to 0.08 (sd ratio 0.94). Each step costs the unit's evaluations
   again, counted in `unit_gradient_calls`. It needs `unit_curvature = :orthogonal`;
   the Laplace route (`laplace = GaussianBlockLaplace()`) refuses it.
+
+## 0.2.325
+
+- RKBRMI: the `jax_source` module of a stopping-ratio
+  `coarsened(Ordinal(StoppingRatio(), …, thresholds); upper)` range whose
+  thresholds a `@plate` cell computes now has a `jax.grad`; native values and
+  gradients were already exact. The compat floor is ReactiveKernels 0.1.263
+  (RK snag `jax-source-of-an-6bfaf24a`), and the test environment pins
+  ReactiveKernels `95d9b7a5a`. Follow-up of snag `ordinal-explicit-149b4a5f`.
+
+## 0.2.324
+
+- `BRMSVINonfiniteError` says where a failing point left the model's finite
+  region (snag `brm-svi-fit-stop-517ddc65`). Each term gains:
+  - `furthest`: the failing point's globals furthest from their own priors, at
+    most three, each `(; coordinate, value, prior_sds)`, in sds of the prior's
+    Gaussian projection (the sd the SVI sd bound multiplies; a fit's target now
+    keeps that projection's `prior_mean` beside `sd_prior`);
+  - `probe`: one-coordinate swaps between the failing point and a finite
+    reference (the pair's other draw, or the pair's mean; for the global term,
+    the global factor's mean), `(; reference, repairs, breaks)`, naming the
+    coordinates whose reference value alone repairs the point and those whose
+    failing value alone breaks the reference. `nothing` when the reference
+    fails too.
+
+  The message prints both. `largest` is unchanged, but magnitude alone misled:
+  on a reporter's AR(1) panel the message named `level_Intercept = 80.16`, a
+  level at its prior mean, while the cause was `phi_Intercept` about ten prior
+  sds out with `sd(phi, unit)` at 157, which put a draw of
+  `atanh(phi) = 20.8` where `tanh` rounds to 1. Fits, draws and checkpoints are
+  unchanged: the swaps run only after a term has failed.
+
+## 0.2.323
+
+- `brm_descriptor(rk::RKBRMI; name)` returns a `BRMRKDescriptor`: the content
+  identity and input inventory of the program an `RKBRMI` runs, read from the
+  backend itself (its `held_out`, `completions` and `car_units`), with no Stan
+  program. A model whose law has no Stan form, such as a whole-vector
+  `_rk_observation_source!` family without an `@lpxf` twin, is now described
+  too; `brm_descriptor` on its builder or `SBBRMI` still fails at transpile.
+  `id` (`"rk:<sha256>"`) hashes the emitted program and its callables, so it is
+  the same for other data values of the same model. `inputs` are `BRMInput`
+  records, one per `rk_bound_data(rk)` field, with the dataframe `column` each
+  one is (a plate cell's port of a response included) and, for a value BRM
+  generates or the program computes from its data, its kind in `transform`
+  (`:levels`, `:level_count`, `:prior_constant`, `:known_correlation`,
+  `:computed`). `columns`, `formula`, `held_out` and the emitted `program`
+  complete it; `brm_columns` and `required_brm_inputs` take it. Snag
+  `rkbrmi-has-no-de-65a4d1fc`, design decision `0c2ol3s`.
 
 ## 0.2.322
 

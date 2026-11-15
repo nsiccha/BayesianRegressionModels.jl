@@ -194,42 +194,53 @@ end
 # levels and count.
 _rk_input_bindings(_plan) = Dict{Symbol,Any}()
 _rk_input_bindings(plan::_RKStructuralPlan) = plan.inputs
-_rk_generated_inputs(_plan) = Dict{Symbol,Any}()
-function _rk_generated_inputs(plan::_RKStructuralPlan)
-    inputs = Dict{Symbol,Any}(name => entry.value for (name, entry) in plan.prior_reads)
+# Each generated input with the kind of value it holds: `:prior_constant` (a
+# number a prior reads, `lkj_eta`, a known scale, a monotonic term's Dirichlet
+# concentration), `:known_correlation` (the Cholesky factor of a known
+# correlation), `:levels` (a factor's or monotonic term's fitted level table) or
+# `:level_count`. `brm_descriptor(::RKBRMI)` reports the kind; everything else
+# reads the values (`_rk_generated_inputs`).
+const _RKGeneratedInput = @NamedTuple{kind::Symbol, value::Any}
+_rk_generated_input_entries(_plan) = Dict{Symbol,_RKGeneratedInput}()
+function _rk_generated_input_entries(plan::_RKStructuralPlan)
+    inputs = Dict{Symbol,_RKGeneratedInput}(name => (; kind=:prior_constant, value=entry.value)
+        for (name, entry) in plan.prior_reads)
+    generate!(name, kind, value) = (inputs[name] = (; kind, value); nothing)
     for bucket in plan.ranef_buckets
         bucket.eta_input isa Symbol && !haskey(plan.inputs, bucket.eta_input) &&
-            (inputs[bucket.eta_input] = bucket.lkj_eta)
-        bucket.known_input === nothing || (inputs[bucket.known_input] =
+            generate!(bucket.eta_input, :prior_constant, bucket.lkj_eta)
+        bucket.known_input === nothing || generate!(bucket.known_input, :known_correlation,
             Matrix{Float64}(cholesky(Symmetric(bucket.known_cor)).L))
         for prior in bucket.sd_priors
             prior isa _BRMKnownScale && prior.input !== nothing &&
-                (inputs[prior.input] = prior.value)
+                generate!(prior.input, :prior_constant, prior.value)
         end
     end
     for predictor in plan.predictors, term in predictor.terms
-        foreach(value -> _rk_level_factor_input!(inputs, value), values(term.options))
+        foreach(value -> _rk_level_factor_input!(generate!, value), values(term.options))
         if term.kind in (:monotonic, :monotonic_summand)
-            inputs[term.options.level_input] = term.options.levels
-            inputs[term.options.alpha_input] = term.options.alpha
-            inputs[term.options.nincr_input] = length(term.options.alpha)
+            generate!(term.options.level_input, :levels, term.options.levels)
+            generate!(term.options.alpha_input, :prior_constant, term.options.alpha)
+            generate!(term.options.nincr_input, :level_count, length(term.options.alpha))
         end
         term.kind === :factor && haskey(term.options, :level_input) || continue
-        inputs[term.options.level_input] = collect(term.options.index_levels)
-        inputs[term.options.extent_input] = length(term.options.labels)
+        generate!(term.options.level_input, :levels, collect(term.options.index_levels))
+        generate!(term.options.extent_input, :level_count, length(term.options.labels))
     end
-    foreach(bucket -> _rk_level_factor_input!(inputs, bucket.level_cor), plan.ranef_buckets)
+    foreach(bucket -> _rk_level_factor_input!(generate!, bucket.level_cor), plan.ranef_buckets)
     inputs
 end
+_rk_generated_inputs(plan) = Dict{Symbol,Any}(name => entry.value
+    for (name, entry) in _rk_generated_input_entries(plan))
 # A known level correlation's factor, wherever a term holds it.
 _rk_level_factor_name(lc) = Symbol("L_levelcor_", lc.name)
-_rk_level_factor_input!(_inputs, _value) = nothing
-function _rk_level_factor_input!(inputs, lc::_BRMLevelCorrelation)
-    lc.kind === :data && (inputs[_rk_level_factor_name(lc)] = lc.factor)
+_rk_level_factor_input!(_generate!, _value) = nothing
+function _rk_level_factor_input!(generate!, lc::_BRMLevelCorrelation)
+    lc.kind === :data && generate!(_rk_level_factor_name(lc), :known_correlation, lc.factor)
     nothing
 end
-_rk_level_factor_input!(inputs, lc::_BRMMultigroupCorrelation) =
-    _rk_level_factor_input!(inputs, lc.base)
+_rk_level_factor_input!(generate!, lc::_BRMMultigroupCorrelation) =
+    _rk_level_factor_input!(generate!, lc.base)
 
 _rk_extent_bindings(_plan) = ()
 _rk_extent_bindings(plan::_RKStructuralPlan) = Iterators.flatten((
