@@ -525,3 +525,111 @@ function _rk_adaptive_nested_bindings(rows, margins)
     end
     nested
 end
+
+# ---- Areal `car` fields and `cdar` walks -----------------------------------
+#
+# RK emits both as SBBRMI does, so their cells are SBBRMI's block types over RK
+# positions and the extension's car and cdar maps apply unchanged. A BYM2 field
+# is `sigma .* (sqrt.(rho .* inv_scale) .* phi_full .+ sqrt.(1 .- rho .* is_struct)
+# .* theta)` (`_rk_ast_car_block!`), the SBBRMI emission with `inv_scale = 1 / s_c`,
+# and an ICAR field `sigma .* phi_full`; a `cdar` walk reads its standard-normal
+# innovations `eta[p, w]`, stored column-major.
+
+# The plan term of a `car` or `cdar` component declaration.
+function _rk_adaptive_term(rk::RKBRMI, kind, declaration)
+    for predictor in rk.plan.predictors, term in predictor.terms
+        term.kind === kind && term.options.value === declaration && return term
+    end
+    error("BRM adaptive centering on RKBRMI: internal: no `$kind` term declares ",
+          "`$declaration`.")
+end
+
+# One scalar coordinate of a component and its constrained bounds, which must
+# be a positive scale's (`lower >= 0`) or, for `unit`, inside `[0, 1]`.
+function _rk_adaptive_hyper(pos, bounds, names, declaration, ref, what; unit=false)
+    name = string(declaration, ".", ref)
+    i = get(pos, name, 0)
+    i == 0 && error("BRM adaptive centering on RKBRMI: `$declaration` has no ",
+                    "$what coordinate `$name` in the RK layout.")
+    b = bounds[i]
+    ok = !isnothing(b) && (!unit || (0 <= b[1] && b[2] <= 1))
+    ok || error(
+        "BRM adaptive centering on RKBRMI: `$declaration`'s $what `$name` is not ",
+        "sampled on ", unit ? "a subinterval of [0, 1]" : "a positive scale",
+        " by the RK layout.")
+    i, b...
+end
+
+function _rk_adaptive_car_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_names(rk))
+    names = String.(unc_names)
+    pos = Dict{String,Int}(n => i for (i, n) in enumerate(names))
+    bounds = _rk_adaptive_scale_bounds(rk, _rk_layout_coordinate_transforms(rk))
+    population = _rk_adaptive_population(rk, pos)
+    out = _CARAdaptiveCenteringBlock[]
+    for r in _rk_coordinate_records(rk.plan)
+        r.kind === :car || continue
+        r.separation === nothing || error(
+            "BRM adaptive centering on RKBRMI: car field `$(r.declaration)` is ",
+            "separated into independent parts (`car_units`); its cells are not ",
+            "built on RKBRMI yet. Sample it without adaptive centering, or ",
+            "without `car_units`.")
+        o = _rk_adaptive_term(rk, :car, r.declaration).options
+        bym2 = r.type === :bym2
+        S = o.n_struct
+        struct_pos = rk.plan.columns[o.struct_pos]
+        struct_idx = Int[p <= S ? p : 0 for p in struct_pos]
+        phi_names = [string(r.declaration, ".", r.locals.phi, ".", j) for j in 1:S]
+        # A field no observed likelihood reaches has no sampler coordinate.
+        all(n -> !haskey(pos, n), phi_names) && continue
+        structured = [get(pos, n, 0) for n in phi_names]
+        any(iszero, structured) && error(
+            "BRM adaptive centering on RKBRMI: car field `$(r.declaration)` lacks ",
+            "structured coordinates in the RK layout.")
+        area_of = zeros(Int, S)
+        for (k, j) in enumerate(struct_idx)
+            j > 0 && (area_of[j] = k)
+        end
+        unstructured = bym2 ?
+            [pos[string(r.declaration, ".", r.locals.theta, ".", k)] for k in eachindex(struct_pos)] :
+            Int[]
+        log_inv_scale = bym2 ? log.(Float64.(rk.plan.columns[o.inv_scale][area_of])) :
+            zeros(S)
+        sigma = _rk_adaptive_hyper(pos, bounds, names, r.declaration, r.locals.sigma,
+                                   "marginal SD")
+        rho = bym2 ? _rk_adaptive_hyper(pos, bounds, names, r.declaration, r.locals.rho,
+                                        "mixing share"; unit=true) : (0, 0.0, 1.0)
+        push!(out, _CARAdaptiveCenteringBlock(r.predictor, r.declaration, bym2,
+            structured, unstructured, struct_idx, area_of, log_inv_scale,
+            sigma..., rho...,
+            bym2 ? get(population, (r.predictor, :Intercept), 0) : 0,
+            collect(Any, o.nodes)))
+    end
+    out
+end
+
+function _rk_adaptive_cdar_blocks(rk::RKBRMI, unc_names=_rk_layout_coordinate_names(rk))
+    names = String.(unc_names)
+    pos = Dict{String,Int}(n => i for (i, n) in enumerate(names))
+    bounds = _rk_adaptive_scale_bounds(rk, _rk_layout_coordinate_transforms(rk))
+    out = _CDARAdaptiveCenteringBlock[]
+    for r in _rk_coordinate_records(rk.plan)
+        r.kind === :cdar || continue
+        P, W = length(r.levels), length(r.steps)
+        eta_names = [string(r.declaration, ".", r.locals.eta, ".", p, ".", w)
+                     for p in 1:P, w in 1:W]
+        all(n -> !haskey(pos, n), eta_names) && continue
+        effects = [get(pos, n, 0) for n in vec(eta_names)]
+        any(iszero, effects) && error(
+            "BRM adaptive centering on RKBRMI: cdar walk `$(r.declaration)` lacks ",
+            "innovation coordinates in the RK layout.")
+        sigma = _rk_adaptive_hyper(pos, bounds, names, r.declaration, r.locals.sigma,
+                                   "marginal SD")
+        rho = _rk_adaptive_hyper(pos, bounds, names, r.declaration, r.locals.rho,
+                                 "persistence"; unit=true)
+        L = r.cor_factor
+        cdiag = L === nothing ? ones(P) : [sum(abs2, view(L, p, :)) for p in 1:P]
+        push!(out, _CDARAdaptiveCenteringBlock(r.predictor, r.declaration, P, W, effects,
+            sigma..., rho..., cdiag))
+    end
+    out
+end

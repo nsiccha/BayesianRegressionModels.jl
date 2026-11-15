@@ -13,7 +13,7 @@
 # order, which `adaptive_centering_controls` reports.
 #
 # Covered: on RKBRMI, scalar `||` blocks, a correlated K = 2 block, K = 3, a unit
-# nested in a band (containing cells), a cdar walk passing through, and the
+# nested in a band (containing cells), a cdar walk and car fields (0.2.314), and the
 # derived-scale blocks of BRM 0.2.311 (Student-t, known scales and correlation,
 # bounded scales, stratified blocks, factor-level locations, and a Student-t
 # unit nested in an ordinary band through the joint wrapper), and those of
@@ -22,8 +22,8 @@
 # SBBRMI, factor levels and crossed containing groupings, a Student-t block
 # nested in an ordinary one beside a centred block with known SDs and
 # correlation (the joint derived-scale wrapper), and an R2D2 block whose scales
-# are unit and simplex atoms. An SBBRMI wrapper that also adapts S2Z contrasts
-# raises.
+# are unit and simplex atoms, and car cells beside a random-effect block and a
+# cdar walk (0.2.314). An SBBRMI wrapper that also adapts S2Z contrasts raises.
 #
 #     julia --project=test test/adaptive_centering_cells.jl [testset filter...]
 using Test, BayesianRegressionModels, Distributions, Random, LinearAlgebra
@@ -110,6 +110,28 @@ function block_factor(b, x, g)
     r .* (Diagonal(tau) * L)
 end
 
+# A hyperparameter's constrained value from its row `(; coordinate, lower, upper)`.
+constrain(h, x) = isfinite(h.upper) ? h.lower + (h.upper - h.lower) * logistic(x[h.coordinate]) :
+    h.lower + exp(x[h.coordinate])
+
+# A `car` or `cdar` cell's location and log scale, from its row alone.
+function scalar_cell(c, x)
+    T = eltype(x)
+    sigma = constrain(c.scale.sigma, x)
+    if c.family === :car
+        rho = c.scale.rho.coordinate == 0 ? zero(T) : constrain(c.scale.rho, x)
+        log_s = log(sigma) + (c.scale.share ? log1p(-rho) / 2 : zero(T))
+        loc = c.location.intercept == 0 ? zero(T) : x[c.location.intercept]
+        c.location.phi == 0 ||
+            (loc += sigma * sqrt(rho * exp(c.location.log_inv_scale)) * x[c.location.phi])
+        return loc, log_s
+    end
+    rho = constrain(c.scale.rho, x)
+    w = c.scale.step
+    v = 1 - rho^2 <= 1e-12 ? T(w) : (1 - rho^(2w)) / (1 - rho^2)
+    zero(T), log(sigma) + log(c.scale.cdiag) / 2 + log(v) / 2
+end
+
 # Source `x` -> compiled `y` and the log-Jacobian, cell by cell in row order.
 function public_map(x, plan, controls)
     T = eltype(x)
@@ -118,6 +140,14 @@ function public_map(x, plan, controls)
     s = zeros(T, length(plan.cells))
     loc = zeros(T, length(plan.cells))
     for c in plan.cells
+        if c.family !== :ranef   # a scalar cell with target 0
+            L, log_s = scalar_cell(c, x)
+            cc = controls[c.cell]
+            y[c.effect] = (x[c.effect] - cc * L) * exp(-cc * log_s)
+            ljac -= cc * log_s
+            s[c.cell], loc[c.cell] = exp(log_s), L
+            continue
+        end
         b = plan.blocks[c.block]
         C = block_factor(b, x, c.level_index)
         t, k, cc = b.target, c.term, controls[c.cell]
@@ -161,34 +191,43 @@ function check_rows(plan, rows, names)
     @test plain(plan)
     @test [c.cell for c in plan.cells] == 1:length(plan.cells)
     @test [b.block for b in plan.blocks] == 1:length(plan.blocks)
-    ranef = [r for r in rows if r.family === :ranef]
-    @test length(ranef) == length(plan.cells) == length(rows)
-    @test [r.index for r in ranef] == [c.effect for c in plan.cells]
-    @test [r.name for r in ranef] == [c.name for c in plan.cells] ==
+    @test length(rows) == length(plan.cells)
+    @test [r.family for r in rows] == [c.family for c in plan.cells]
+    @test [r.index for r in rows] == [c.effect for c in plan.cells]
+    @test [r.name for r in rows] == [c.name for c in plan.cells] ==
           [names[c.effect] for c in plan.cells]
-    @test [r.binding for r in ranef] == [c.binding for c in plan.cells]
-    @test [r.term for r in ranef] == [c.term for c in plan.cells]
-    @test [r.margin for r in ranef] == [c.margin for c in plan.cells]
-    @test [r.target for r in ranef] == [plan.blocks[c.block].target for c in plan.cells]
-    @test [r.location for r in ranef] == [location_label(plan, c, names) for c in plan.cells]
-    for c in plan.cells
+    @test [r.binding for r in rows] == [c.binding for c in plan.cells]
+    @test [r.term for r in rows] == [c.term for c in plan.cells]
+    @test [r.target for r in rows] == [plan.blocks[c.block].target for c in plan.cells]
+    @test all(plan.blocks[c.block].family === c.family for c in plan.cells)
+    ranef = [r for r in rows if r.family === :ranef]
+    rcells = [c for c in plan.cells if c.family === :ranef]
+    @test [r.margin for r in ranef] == [c.margin for c in rcells]
+    @test [r.location for r in ranef] == [location_label(plan, c, names) for c in rcells]
+    @test [string(r.level) for r in rows if r.family === :car] ==
+          [string(c.level) for c in plan.cells if c.family === :car]
+    for c in rcells
         @test all(<(c.cell), c.location.containers)
         @test all(<(c.cell), c.conditioning)
         @test length(c.conditioning) == c.term - 1
     end
 end
 
-function check_parity(model, problem, names; trials=2, rng=Xoshiro(7), fd=true)
-    plan = adaptive_centering_cells(model, names)
+# `fields` is the RKBRMI wrapper's keyword (its car and cdar cells); `nothing`
+# passes none, as for an SBBRMI.
+function check_parity(model, problem, names; trials=2, rng=Xoshiro(7), fd=true,
+                      fields=nothing)
+    kw = isnothing(fields) ? (;) : (; fields)
+    plan = adaptive_centering_cells(model, names; kw...)
     n = length(plan.cells)
     check_rows(plan, adaptive_centering_controls(
-        adaptive_centering_problem(model, problem, AD; unc_names=names), model;
+        adaptive_centering_problem(model, problem, AD; unc_names=names, kw...), model;
         unc_names=names), names)
     d = length(names)
     for controls in (rand(rng, [0.0, 0.3, 0.7, 1.0], n),
                      [rand(rng, 0:0.1:1) for _ in 1:n])[1:trials]
         adaptive = adaptive_centering_problem(model, problem, AD; unc_names=names,
-                                              centeredness=controls)
+                                              centeredness=controls, kw...)
         x = 0.3 .* randn(rng, d)
         ljac, y = WarmupHMC.reparametrizer(adaptive)(copy(x))
         pljac, py = public_map(x, plan, controls)
@@ -235,14 +274,14 @@ function nested_panel(; seed=2)
        unit=categorical(string.("u", lpad.(unit, 2, '0'))))
 end
 
-function rk_parity(brmi)
+function rk_parity(brmi; fields=false)
     rk = RKBRMI(brmi)
     problem = rk_logdensity_problem(rk; ad_backend=AD)
     # The RK layout's coordinate names (brm-use, "RK readers").
     names = String.(ReactiveKernelsPPL.coordinate_names(rk.model.layout))
     # The default `unc_names` of the RKBRMI method is that layout.
-    default = adaptive_centering_cells(rk)
-    plan = check_parity(rk, problem, names)
+    default = adaptive_centering_cells(rk; fields)
+    plan = check_parity(rk, problem, names; fields)
     @test default == plan
     rk, plan, names
 end
@@ -310,17 +349,56 @@ end
     end
 end
 
-@stestset "RKBRMI: a cdar walk beside the block passes through" begin
+@stestset "RKBRMI: a cdar walk beside the block (fields: its innovations)" begin
     df = panel(; G=6, n=10, seed=9)
-    data = merge(df, (; step=repeat(1:10, 6), I_g=Matrix(1.0I, 6, 6)))
-    rk, plan, names = rk_parity(@brm data begin
-        mu ~ 1 + t + (1 + t || g) + cdar(step; by = g, cor = I_g)
+    C = [0.5^abs(i - j) for i in 1:6, j in 1:6]
+    data = merge(df, (; step=repeat(1:10, 6), C_g=C))
+    brmi = @brm data begin
+        mu ~ 1 + t + (1 + t || g) + cdar(step; by = g, cor = C_g)
         effect(mu, Intercept) ~ Normal(100, 50)
         sd(:, g) ~ Exponential(30.0)
         y ~ Normal(mu, se)
-    end)
-    @test length(plan.cells) == 12
-    @test !any(c -> occursin(".eta.", c.name), plan.cells)
+    end
+    # By default the walk passes through.
+    _, plan, _ = rk_parity(brmi)
+    @test length(plan.cells) == 12 && all(c -> c.family === :ranef, plan.cells)
+    rk, plan, names = rk_parity(brmi; fields=true)
+    ranef = [c for c in plan.cells if c.family === :ranef]
+    walk = [c for c in plan.cells if c.family === :cdar]
+    @test length(ranef) == 12 && length(walk) == 60
+    @test all(c -> occursin(".eta.", c.name), walk)
+    @test maximum(c.cell for c in ranef) < minimum(c.cell for c in walk)
+    @test [c.scale.step for c in walk[1:7]] == [1, 1, 1, 1, 1, 1, 2]
+    @test all(c -> c.scale.cdiag ≈ 1.0, walk)
+    @test only(b for b in plan.blocks if b.family === :cdar).n_groups == 6
+end
+
+# Areas "a".."h": component {a, b, c, d, h} (a–b, b–c, c–d, a–c, d–h),
+# component {e, f}, the island "g" (with rows) and "h" (no rows).
+const CAR_EDGES = (["a", "b", "c", "a", "d", "e"], ["b", "c", "d", "c", "h", "f"])
+car_data() = (; area=["a", "b", "c", "d", "e", "f", "g", "a", "e"],
+    y=[0.3, -0.2, 0.5, 1.1, -0.7, 0.0, 0.4, -0.1, 0.9],
+    from=CAR_EDGES[1], to=CAR_EDGES[2])
+
+@stestset "RKBRMI: car fields (fields), one cell per area" begin
+    data = car_data()
+    rk, plan, names = rk_parity(@brm(data, begin
+        mu ~ 1 + car(area; edges=(from, to), type=:bym2)
+        y ~ Normal(mu, 1.0)
+    end); fields=true)
+    cells = [c for c in plan.cells if c.family === :car]
+    @test length(cells) == 8 && all(c -> c.term == 2, cells)
+    @test [c.level for c in cells] == ["a", "b", "c", "d", "e", "f", "g", "h"]
+    # The island "g" has no spatial component and no `rho` share in its scale.
+    g = only(c for c in cells if c.level == "g")
+    @test g.location.phi == 0 && !g.scale.share
+    @test all(c -> c.location.intercept != 0, cells)
+    _, plan, _ = rk_parity(@brm(data, begin
+        mu ~ 1 + car(area; edges=(from, to), type=:icar)
+        y ~ Normal(mu, 1.0)
+    end); fields=true)
+    cells = [c for c in plan.cells if c.family === :car]
+    @test length(cells) == 7 && all(c -> c.term == 1 && c.location.intercept == 0, cells)
 end
 
 @stestset "RKBRMI: Student-t blocks carry their levels' mixing coordinates" begin
@@ -523,6 +601,28 @@ end
     b = only(plan.blocks)
     @test all(s -> !isempty(s.unit) && !isempty(s.simplex), b.log_scales)
     @test all(s -> all(a -> a.transform === :stan, s.simplex), b.log_scales)
+end
+
+@stestset "SBBRMI: car cells beside a random-effect block, and a cdar walk" begin
+    data = merge(car_data(), (; grp=["u", "v", "u", "v", "u", "v", "u", "v", "u"],
+                                x=[0.1, -0.4, 0.8, 0.3, -1.0, 0.5, 0.2, -0.3, 0.6]))
+    model = SBBRMI(@brm(data, begin
+        mu ~ 1 + x + (1 + x | grp) + car(area; edges=(from, to), type=:bym2)
+        y ~ Normal(mu, 1.0)
+    end); mod=@__MODULE__, total_groups=())
+    plan, names = sb_parity(model)
+    @test count(c -> c.family === :ranef, plan.cells) == 4
+    @test count(c -> c.family === :car, plan.cells) == 8
+    walk = (; week=[1, 2, 1, 2, 1, 2, 1, 2, 1], patch=["p", "p", "q", "q", "p", "q", "p", "q", "p"],
+              y=data.y, C=[1.0 0.3; 0.3 1.0])
+    model = SBBRMI(@brm(walk, begin
+        mu ~ 1 + cdar(week; by=patch, cor=C)
+        y ~ Normal(mu, 1.0)
+    end); mod=@__MODULE__, total_groups=())
+    plan, names = sb_parity(model)
+    cells = [c for c in plan.cells if c.family === :cdar]
+    @test length(cells) == length(plan.cells) == 4
+    @test all(c -> c.scale.cdiag ≈ 1.0, cells)
 end
 
 @stestset "SBBRMI: a wrapper that also adapts S2Z contrasts raises" begin
