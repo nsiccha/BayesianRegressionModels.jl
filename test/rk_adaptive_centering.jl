@@ -86,21 +86,28 @@ function cpc_cholesky(w, K)
     L
 end
 
+# A block's level-`g` factor `C = diag(tau) L` from its own sampled
+# coordinates: `tau = exp(x[log_scales])` and Stan's free-value factor.
+function ordinary_factor(x, b, g)
+    K = b.ranef.n_terms
+    L = K == 1 ? ones(eltype(x), 1, 1) : cpc_cholesky(x[b.cholesky_free], K)
+    Diagonal(exp.(x[b.log_scales])) * L
+end
+
 # The independent source -> RK map of a set of blocks: per block (in the
 # wrapper's pair order), per group, per term, `z_k = (u_k - c_k (m_k + loc_k)) /
-# s_k^c_k` with `C = diag(tau) L`, `m_k = sum_{j<k} C[k, j] z_j`, `s_k = C[k, k]`,
-# and `ljac = -sum c_k log s_k`. `loc(x, y, block, k, g)` is the cell's location,
-# which may read the model coordinates `y` of blocks mapped before it.
-function oracle_map(x, blocks, controls, loc)
+# s_k^c_k` with `C = factor(x, block, g)` (`diag(tau) L` by default),
+# `m_k = sum_{j<k} C[k, j] z_j`, `s_k = C[k, k]`, and `ljac = -sum c_k log s_k`.
+# `loc(x, y, block, k, g)` is the cell's location, which may read the model
+# coordinates `y` of blocks mapped before it.
+function oracle_map(x, blocks, controls, loc; factor=ordinary_factor)
     y = copy(x)
     ljac = zero(eltype(x))
     p = 0
     for b in blocks
         K, G = b.ranef.n_terms, b.ranef.n_groups
-        tau = exp.(x[b.log_scales])
-        L = K == 1 ? ones(eltype(x), 1, 1) : cpc_cholesky(x[b.cholesky_free], K)
-        C = Diagonal(tau) * L
         for g in 1:G
+            C = factor(x, b, g)
             z = zeros(eltype(x), K)
             for k in 1:K
                 p += 1
@@ -116,22 +123,26 @@ function oracle_map(x, blocks, controls, loc)
     ljac, y
 end
 
-function check_exact(rk, adaptive, blocks, controls, loc; rng=Xoshiro(7))
+function check_exact(rk, adaptive, blocks, controls, loc; rng=Xoshiro(7),
+                     factor=ordinary_factor, x=nothing)
     problem = adaptive.problem
     names = layout_names(rk)
     n = length(names)
-    x = 0.3 .* randn(rng, n)
-    # Keep the population coefficients near the data so the density is finite.
-    for b in blocks, k in 1:b.ranef.n_terms, g in 1:b.ranef.n_groups
-        x[b.effects[k, g]] += 0.5 * randn(rng)
+    if isnothing(x)
+        x = 0.3 .* randn(rng, n)
+        # Keep the population coefficients near the data so the density is finite.
+        for b in blocks, k in 1:b.ranef.n_terms, g in 1:b.ranef.n_groups
+            x[b.effects[k, g]] += 0.5 * randn(rng)
+        end
     end
+    @test isfinite(LogDensityProblems.logdensity(problem, x))
     ljac, y = WarmupHMC.reparametrizer(adaptive)(copy(x))
-    oljac, oy = oracle_map(x, blocks, controls, loc)
+    oljac, oy = oracle_map(x, blocks, controls, loc; factor)
     @test y ≈ oy rtol=1e-12 atol=1e-12
     @test ljac ≈ oljac rtol=1e-12 atol=1e-12
     rewritten = Set(Iterators.flatten(vec(b.effects) for b in blocks))
     @test all(y[j] == x[j] for j in 1:n if !(j in rewritten))
-    wrapped = x -> (r = oracle_map(x, blocks, controls, loc);
+    wrapped = x -> (r = oracle_map(x, blocks, controls, loc; factor);
                     r[1] + LogDensityProblems.logdensity(problem, r[2]))
     value, gradient = LogDensityProblems.logdensity_and_gradient(adaptive, x)
     @test value ≈ wrapped(x) rtol=1e-10
@@ -355,26 +366,232 @@ end
     check_compiled_frame(rk, [only(band.log_scales)]; value=-720.0, finite_gradient=false)
 end
 
-@stestset "blocks the RKBRMI wrapper does not build raise" begin
-    df = panel()
+# The level-`g` factor of a block read from RK's own constrained values of the
+# block's draws declaration: `tau` (or `tau_<k>`, or a stratum's row), `L`
+# (or a stratum's slice) and a Student-t level's weight `w[g]`. `known` holds a
+# known scale's value by term, `known_cor` a known correlation matrix.
+function constrained_factor(rk; known=Dict{Int,Float64}(), known_cor=nothing,
+                            stratum=nothing)
+    function factor(x, b, g)
+        nt = getproperty(BRM._rk_constrained_values(rk, x), b.ranef.binding)
+        K = b.ranef.n_terms
+        s = isnothing(stratum) ? nothing : stratum(b)
+        tau = map(1:K) do k
+            haskey(known, k) && return known[k]
+            hasproperty(nt, :tau) ? (isnothing(s) ? nt.tau[k] : nt.tau[s, k]) :
+                (v = getproperty(nt, Symbol(:tau_, k)); isnothing(s) ? only(v) : v[s])
+        end
+        L = K == 1 ? ones(1, 1) :
+            !isnothing(known_cor) ? Matrix(cholesky(Symmetric(known_cor)).L) :
+            isnothing(s) ? nt.L : nt.L[:, :, s]
+        w = hasproperty(nt, :w) ? sqrt(nt.w[g]) : 1.0
+        w * Diagonal(tau) * L
+    end
+end
+
+@stestset "Student-t blocks: each level's factor carries its mixing weight" begin
+    df = panel(; seed=13)
     student = @brm df begin
-        mu ~ 1 + t + (1 | g)
+        mu ~ 1 + t + (1 + t | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(:, g) ~ Exponential(30.0)
         ranef(:, g) ~ TDist(4.0)
         y ~ Normal(mu, se)
     end
-    @test_throws r"Student-t" adaptive_centering_blocks(RKBRMI(student))
-    known = @brm df begin
-        mu ~ 1 + t + (1 + t || g)
+    rk = RKBRMI(student)
+    names = layout_names(rk)
+    b = only(adaptive_centering_blocks(rk))
+    @test b isa R2D2AdaptiveCenteringBlock && b.ranef.n_terms == 2
+    draws = String(b.ranef.binding)
+    @test [names[j] for j in b.mixing] == ["$draws.w.$g" for g in 1:12]
+    @test names[only(b.cholesky_free)] == "$draws.L.1"
+    locations = BRM._adaptive_ranef_locations(rk, [b], names)
+    problem = rk_logdensity_problem(rk; ad_backend=AD)
+    loc(x, y, b, k, g) = x[locations[b].coefficient[k]]
+    factor = constrained_factor(rk)
+    for controls in (zeros(24), ones(24), rand(Xoshiro(14), 24))
+        adaptive = adaptive_centering_problem(rk, problem, AD; centeredness=controls)
+        check_exact(rk, adaptive, [b], controls, loc; factor)
+    end
+    rows = adaptive_centering_controls(adaptive_centering_problem(rk, problem, AD), rk)
+    @test length(rows) == 24 && all(r -> r.family === :ranef && r.c == 0.0, rows)
+    # The learned order builds over the Student-t block too.
+    learned = adaptive_centering_problem(rk, problem, AD; ranef_order=:learned)
+    @test length(adaptive_centering_controls(learned, rk)) == 24
+    # A scalar Student-t block.
+    scalar = @brm df begin
+        mu ~ 1 + t + (1 | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        ranef(:, g) ~ TDist(4.0)
+        y ~ Normal(mu, se)
+    end
+    rk = RKBRMI(scalar)
+    b = only(adaptive_centering_blocks(rk))
+    @test length(b.mixing) == 12
+    locations = BRM._adaptive_ranef_locations(rk, [b], layout_names(rk))
+    problem = rk_logdensity_problem(rk; ad_backend=AD)
+    loc1(x, y, b, k, g) = x[locations[b].coefficient[k]]
+    controls = rand(Xoshiro(15), 12)
+    check_exact(rk, adaptive_centering_problem(rk, problem, AD; centeredness=controls),
+                [b], controls, loc1; factor=constrained_factor(rk))
+end
+
+@stestset "known values: constant scales and a known correlation" begin
+    df = panel(; seed=16)
+    # A sampled intercept SD beside a known slope SD in one correlated block.
+    partly = @brm df begin
+        mu ~ 1 + t + (1 + t | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(mu, g, Intercept) ~ Exponential(30.0)
         sd(mu, g, t) = 0.5
         y ~ Normal(mu, se)
     end
-    @test_throws r"known value" adaptive_centering_blocks(RKBRMI(known))
+    # A known correlation beside sampled SDs.
+    correlation = @brm df begin
+        mu ~ 1 + t + (1 + t | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(:, g) ~ Exponential(30.0)
+        cor(:, g) = [1 0.3; 0.3 1]
+        y ~ Normal(mu, se)
+    end
+    for (brmi, known, known_cor) in ((partly, Dict(2 => 0.5), nothing),
+                                     (correlation, Dict{Int,Float64}(), [1 0.3; 0.3 1]))
+        rk = RKBRMI(brmi)
+        names = layout_names(rk)
+        b = only(adaptive_centering_blocks(rk))
+        @test b isa R2D2AdaptiveCenteringBlock && isempty(b.mixing)
+        @test isempty(b.cholesky_free) == !isnothing(known_cor)
+        isnothing(known_cor) ||
+            @test b.cholesky_known ≈ cholesky(Symmetric(known_cor)).L
+        for (k, v) in known
+            @test b.scales[k].constant == log(v) && isempty(b.scales[k].linear)
+        end
+        locations = BRM._adaptive_ranef_locations(rk, [b], names)
+        problem = rk_logdensity_problem(rk; ad_backend=AD)
+        loc(x, y, b, k, g) = x[locations[b].coefficient[k]]
+        factor = constrained_factor(rk; known, known_cor)
+        for controls in (ones(24), rand(Xoshiro(17), 24))
+            adaptive = adaptive_centering_problem(rk, problem, AD; centeredness=controls)
+            check_exact(rk, adaptive, [b], controls, loc; factor)
+        end
+    end
+end
+
+@stestset "bounded scales: the log of RK's constrained value" begin
+    df = panel(; seed=18)
+    bounded = @brm df begin
+        mu ~ 1 + t + (1 + t || g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(mu, g, Intercept) ~ Uniform(0.0, 100.0)
+        sd(mu, g, t) ~ truncated(Normal(0.0, 5.0); lower=0.1)
+        y ~ Normal(mu, se)
+    end
+    rk = RKBRMI(bounded)
+    names = layout_names(rk)
+    transforms = BRM._rk_layout_coordinate_transforms(rk)
+    blocks = adaptive_centering_blocks(rk)
+    @test length(blocks) == 2 && all(b -> b isa R2D2AdaptiveCenteringBlock, blocks)
+    # Each scale is one bounded atom on its own coordinate, with RK's bounds.
+    atoms = [only(only(b.scales).bounded) for b in blocks]
+    @test sort([(a[3], a[4]) for a in atoms]) == [(0.0, 100.0), (0.1, Inf)]
+    @test Set(transforms[a[2]] for a in atoms) == Set([:interval, :floored])
+    locations = BRM._adaptive_ranef_locations(rk, blocks, names)
+    problem = rk_logdensity_problem(rk; ad_backend=AD)
+    loc(x, y, b, k, g) = x[locations[b].coefficient[k]]
+    factor = constrained_factor(rk)
+    for controls in (ones(24), rand(Xoshiro(19), 24))
+        adaptive = adaptive_centering_problem(rk, problem, AD; centeredness=controls)
+        check_exact(rk, adaptive, blocks, controls, loc; factor)
+    end
+end
+
+@stestset "stratified gr(g, by=b): one block per stratum" begin
+    df = panel(; seed=20)
+    stratum_of(v) = "s" * string(cld(parse(Int, String(v)[2:end]), 4))
+    data = merge(df, (; b=categorical(stratum_of.(df.g))))
+    stratified = @brm data begin
+        mu ~ 1 + t + (1 + t | gr(g, by=b))
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(mu, g, Intercept) ~ Exponential(30.0)
+        sd(mu, g, t) ~ Exponential(2.0)
+        y ~ Normal(mu, se)
+    end
+    rk = RKBRMI(stratified)
+    names = layout_names(rk)
+    blocks = adaptive_centering_blocks(rk)
+    @test length(blocks) == 3
+    @test all(b -> b isa AdaptiveCenteringBlock && b.ranef.n_groups == 4 &&
+                   b.ranef.by === :b, blocks)
+    @test [stratum_of.(b.ranef.levels) for b in blocks] ==
+        [fill("s$s", 4) for s in 1:3]
+    for (s, b) in enumerate(blocks)
+        draws = String(b.ranef.binding)
+        @test [names[j] for j in b.log_scales] == ["$draws.tau_$k.$s" for k in 1:2]
+        @test names[only(b.cholesky_free)] == "$draws.L.1.$s"
+    end
+    locations = BRM._adaptive_ranef_locations(rk, blocks, names)
+    problem = rk_logdensity_problem(rk; ad_backend=AD)
+    loc(x, y, b, k, g) = x[locations[b].coefficient[k]]
+    @test all(b -> all(!iszero, locations[b].coefficient), blocks)
+    factor = constrained_factor(rk; stratum=b -> findfirst(x -> x === b, blocks))
+    for controls in (ones(24), rand(Xoshiro(21), 24))
+        adaptive = adaptive_centering_problem(rk, problem, AD; centeredness=controls)
+        check_exact(rk, adaptive, blocks, controls, loc; factor)
+    end
+end
+
+@stestset "factor levels: an intercept cell is centred on its level's coefficient" begin
+    df = panel(; seed=22)
+    level_of(v) = "f" * string(mod1(parse(Int, String(v)[2:end]), 3))
+    data = merge(df, (; f=categorical(level_of.(df.g))))
+    model = @brm data begin
+        mu ~ 1 + t + factor(f) + (1 | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(:, g) ~ Exponential(30.0)
+        y ~ Normal(mu, se)
+    end
+    rk = RKBRMI(model)
+    names = layout_names(rk)
+    b = only(adaptive_centering_blocks(rk))
+    locations = BRM._adaptive_ranef_locations(rk, [b], names)
+    intercept = only(locations[b].coefficient)
+    record = only(r for r in BRM._rk_coordinate_records(rk.plan)
+                  if r.kind === :population_block)
+    coefficient = Dict(string(l) => position(names, "$(record.declaration).$i")
+                       for (i, l) in enumerate(record.level_values))
+    for (g, level) in enumerate(b.ranef.levels)
+        expected = haskey(coefficient, level_of(level)) ?
+            [coefficient[level_of(level)]] : Int[]
+        @test locations[b].factors[1, g] == expected
+    end
+    @test any(!isempty, locations[b].factors)
+    problem = rk_logdensity_problem(rk; ad_backend=AD)
+    loc(x, y, b, k, g) = x[intercept] + sum(x[locations[b].factors[1, g]]; init=0.0)
+    for controls in (ones(12), rand(Xoshiro(23), 12))
+        adaptive = adaptive_centering_problem(rk, problem, AD; centeredness=controls)
+        check_exact(rk, adaptive, [b], controls, loc)
+        rows = adaptive_centering_controls(adaptive, rk)
+        @test all(r -> occursin(names[intercept], r.location), rows)
+    end
+end
+
+@stestset "blocks the RKBRMI wrapper does not build raise" begin
+    df = panel()
     none = @brm df begin
         mu ~ 1 + t
         y ~ Normal(mu, se)
     end
     rk = RKBRMI(none)
     @test isempty(adaptive_centering_blocks(rk))
-    @test_throws r"no ordinary random-effect block" adaptive_centering_problem(rk,
+    @test_throws r"no random-effect block" adaptive_centering_problem(rk,
         rk_logdensity_problem(rk; ad_backend=AD), AD)
+    # Correlated levels share one factor across levels: refused on both backends.
+    data = (; t=collect(range(0.0, 10.0; length=36)), g=repeat(1:4, 9),
+              y=randn(Xoshiro(24), 36))
+    levels = @brm data begin
+        Omega ~ LKJCholesky(4, 2.0)
+        mu ~ 1 + t + (0 + t | gr(g; cor=Omega))
+        y ~ Normal(mu, 1.0)
+    end
+    @test_throws r"correlates the levels" adaptive_centering_blocks(RKBRMI(levels))
 end

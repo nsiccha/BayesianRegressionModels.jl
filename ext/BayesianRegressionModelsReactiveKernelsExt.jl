@@ -623,6 +623,23 @@ function BRM._rk_layout_coordinate_floors(backend::BRM.RKBRMI)
     end
     floors
 end
+# Each packed coordinate's constrained bounds `(lower, upper)` under a bounded
+# transform (`:interval`, `:floored`, `:upper`, `:bounded`), as two vectors;
+# `NaN` where the transform states none or the bound is not one number.
+function BRM._rk_layout_coordinate_bounds(backend::BRM.RKBRMI)
+    layout = _rk_bound_layout(backend)
+    lower, upper = fill(NaN, layout.total), fill(NaN, layout.total)
+    at(b, k) = b isa AbstractArray{<:Real} ? Float64(b[k]) :
+        b isa Real ? Float64(b) : NaN
+    for entry in layout.entries
+        entry.transform in (:interval, :floored, :upper, :bounded) || continue
+        for k in 1:entry.size
+            lower[entry.offset + k - 1] = at(entry.lo, k)
+            upper[entry.offset + k - 1] = at(entry.hi, k)
+        end
+    end
+    lower, upper
+end
 BRM._rk_constrained_values(backend::BRM.RKBRMI, u::AbstractVector) =
     constrain(_rk_bound_layout(backend), u)
 BRM._rk_unconstrained_point(backend::BRM.RKBRMI, values::NamedTuple) =

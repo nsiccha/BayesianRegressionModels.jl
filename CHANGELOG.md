@@ -12,6 +12,27 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.311
+
+- `adaptive_centering_problem(rk::RKBRMI, problem, backend)` and
+  `adaptive_centering_blocks(rk)` cover more random-effect blocks, with the
+  map, Jacobian and locations of the SBBRMI wrapper (todo `0nsdowt`). Before,
+  each of these raised:
+  - Student-t blocks (`ranef(:, g) ~ TDist(nu)`): level `g`'s factor carries
+    its mixing weight, `sqrt(w[g]) * diag(tau) * L`, read from `<draws>.w.<g>`.
+  - Known values (`sd(lp, g[, coefficient]) = value`, `cor(:, g) = R`): a known
+    scale is a constant, a known correlation a constant factor.
+  - Bounded scales (`Uniform(a, b)`, `truncated(...; lower, upper)`): the log of
+    RK's constrained value of the scale's coordinate.
+  - Stratified `gr(g, by=b)` blocks: one block per stratum of `b`.
+
+  These blocks are `R2D2AdaptiveCenteringBlock`s (stratum blocks with plain
+  scales stay `AdaptiveCenteringBlock`s) and take the SBBRMI method's joint
+  wrapper. An intercept cell is now also centred on the coefficient of each
+  `factor(f)` level holding its level, as on SBBRMI. Level-correlated
+  `gr(g; cor=...)` blocks still raise; multi-membership and R2D2-scaled blocks,
+  HSGP weights and `car`/`cdar`/`gmrf` fields still pass through.
+
 ## 0.2.310
 
 - A point where a kernel cell's ODE solve fails is outside the model's support

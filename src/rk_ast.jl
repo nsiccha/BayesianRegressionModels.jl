@@ -2390,7 +2390,8 @@ function _rk_emit_ast(plan::_RKStructuralPlan, fused_heads::Bool=true;
                 ordinary && haskey(term.options, :level_values) &&
                     _rk_coordinate_record!(coordinates, (; kind=:population_block,
                         declaration=coef, predictor=predictor.name,
-                        coefficient=term.addressee, labels=term.options.labels,
+                        coefficient=term.addressee, column=col,
+                        labels=term.options.labels,
                         level_values=term.options.level_values,
                         coding=term.options.coding,
                         prior=Expr(:call, override[1], override[2]...)))
