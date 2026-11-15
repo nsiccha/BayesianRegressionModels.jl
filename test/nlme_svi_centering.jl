@@ -158,10 +158,11 @@ end
         rows = BRM_._brm_svi_coupling_rows(merge(t, (; centering=plan)), i)
         @test sort(String.(names[t.units[i][rows]])) == ["w.$(2i)"]
     end
-    row = only(r for r in plan.uncentered if r.kind === :vector)
-    @test row.declaration === :w
-    @test sort(String.(row.coordinates)) == sort(["w.$(2i)" for i in 1:6])
-    @test occursin("read no estimated coordinate", row.reason)
+    # One row per unit, as for a law that reads a unit coordinate.
+    rows = [r for r in plan.uncentered if r.kind === :vector]
+    @test all(r -> r.declaration === :w, rows)
+    @test sort(String.(reduce(vcat, [r.coordinates for r in rows]))) == sort(["w.$(2i)" for i in 1:6])
+    @test all(r -> occursin("read no estimated coordinate", r.reason), rows)
     check_centered_terms(m; kinds=(:ranef, :vector))
 
     # A state saved before the rule carries no `constant_laws`: it keeps centring `w`.
