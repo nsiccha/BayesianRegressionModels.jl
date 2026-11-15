@@ -90,15 +90,15 @@ rev = "8f7d382df700d3780ed31d093bc4983d3734a6c6"
 
 [sources.DynamicObjects]
 url = "https://github.com/nsiccha/DynamicObjects.jl"
-rev = "c84047be45cd2bba8a1d02660af9408d4cdf58f4"
+rev = "66772c9b3eced58a2d49ccee49af01d1f50ab47f"
 
 [sources.HTMXObjects]
 url = "https://github.com/nsiccha/HTMXObjects.jl"
-rev = "ee46e8d6bd381c8b066f3b26afa7ea3336e23146"
+rev = "fadb947a30617bfcb22d999fe1943507faffd6a6"
 
 [sources.HTMX]
 url = "https://github.com/nsiccha/HTMX.jl"
-rev = "0b8dc2f94e879bf31237bd28e751cf2ebc8d95f6"
+rev = "c4e04937549881e7591bb1425fa5fe58c8ef1a02"
 
 [sources.AlgebraOfVega]
 url = "https://github.com/nsiccha/AlgebraOfVega.jl"

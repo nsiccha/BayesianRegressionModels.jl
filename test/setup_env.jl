@@ -63,9 +63,9 @@ const TESTENV = @__DIR__
 const PINS = [
     ("ReparametrizableDistributions", "https://github.com/nsiccha/ReparametrizableDistributions.jl.git", "8f7d382df700d3780ed31d093bc4983d3734a6c6"),  # 0.3.0: WarmupHMC dependency; BRM no longer depends on this directly
     ("PowerScaling", "https://github.com/nsiccha/PowerScaling.jl.git", "8d27c83f6928781a39c99c31fd3d528b50ef2dad"),  # 0.1.0: generic power-scaling sensitivity on PSIS.jl
-    ("HTMX", "https://github.com/nsiccha/HTMX.jl.git", "0b8dc2f94e879bf31237bd28e751cf2ebc8d95f6"),
-    ("HTMXObjects", "https://github.com/nsiccha/HTMXObjects.jl.git", "ee46e8d6bd381c8b066f3b26afa7ea3336e23146"), # 0.1.65: readable plain-text views; includes 0.1.62 documentation projection
-    ("DynamicObjects", "https://github.com/nsiccha/DynamicObjects.jl.git", "c84047be45cd2bba8a1d02660af9408d4cdf58f4"),
+    ("HTMX", "https://github.com/nsiccha/HTMX.jl.git", "c4e04937549881e7591bb1425fa5fe58c8ef1a02"), # 1.3.1: HTMXObjects 0.1.135 requires HTMX 1.3
+    ("HTMXObjects", "https://github.com/nsiccha/HTMXObjects.jl.git", "fadb947a30617bfcb22d999fe1943507faffd6a6"), # 0.1.135: prose headings nest under their section; includes 0.1.65 plain-text views and 0.1.62 documentation projection
+    ("DynamicObjects", "https://github.com/nsiccha/DynamicObjects.jl.git", "66772c9b3eced58a2d49ccee49af01d1f50ab47f"), # 0.5.21: HTMXObjects 0.1.135 requires DynamicObjects 0.5.19
     ("TreeArrays", "https://github.com/nsiccha/TreeArrays.jl.git", "53cfd1b17ee4d1b726dcecfe151458ae41bd20a8"),
     ("AlgebraOfVega", "https://github.com/nsiccha/AlgebraOfVega.jl.git", "73695d5d563074bfd9ab1f98debf2ebe38d7bd00"),
     # Fleet-only pivoted KLU selected inversion; registered 0.2.2 lacks it.

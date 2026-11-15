@@ -12,6 +12,21 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.328
+
+- Model views place a callable's documentation in the report's outline (snag
+  `brm-model-view-c-623a1e28`). The "Callable documentation" disclosures embed
+  docstrings whose own headings start at `#`, such as
+  `Distributions.censored`'s `# Usage` and `# Implementation`. Under nested
+  `SemanticSection`s those headings stayed at level 1, so `pdf_report` failed
+  PDF/UA-1 ("skipped from heading level 1 to 4"). With HTMXObjects 0.1.135 a
+  docstring's headings open one level below the disclosure that holds them, a
+  level the docstring skips is closed up, and nothing goes deeper than
+  `######`, in Markdown and HTML. The `[compat]` floor is now
+  `HTMXObjects = "0.1.135"`, and the test pins move to HTMXObjects 0.1.135,
+  HTMX 1.3.1 and DynamicObjects 0.5.21, which it requires. The docstrings
+  themselves are unchanged.
+
 ## 0.2.327
 
 - `brm_descriptor(rk::RKBRMI)` classifies a fit-role input (snag

@@ -147,8 +147,11 @@ row-length and scalar-cell checks. It accepts testset substring filters.
 `model_view_documentation.jl` checks authored Julia documentation in builder and
 bound-model views, plus callable docs after binding: references become formatted labels,
 ordinary URLs remain linked, doctest contents survive, and source/doc records
-remain unchanged. The bootstrap selects HTMXObjects 0.1.65, which also renders
-tabbed views as readable plain text without internal node representations.
+remain unchanged. A callable docstring with its own outline, inside nested
+sections, keeps consecutive heading levels in Markdown and HTML. The bootstrap
+selects HTMXObjects 0.1.135, which nests prose headings under their section and
+renders tabbed views as readable plain text without internal node
+representations.
 
 `heterogeneous_mixtures.jl` checks native mixtures of different full-real
 scalar families and custom component graphs against independent normalized
