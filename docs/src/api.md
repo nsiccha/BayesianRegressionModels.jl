@@ -347,6 +347,7 @@ SkewDoubleExponential
 StoppingRatio
 TruncatedNormal
 ZeroInflatedPoisson
+coarsened
 double_interval_censored
 interval_censored
 primary_censored

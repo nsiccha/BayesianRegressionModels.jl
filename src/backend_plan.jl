@@ -1004,6 +1004,22 @@ function _brm_response_modifier_plan(wrapper, args, kwargs::NamedTuple;
            wrapper === censored || wrapper === :censored ? :censored :
            wrapper === interval_censored || wrapper === :interval_censored ?
                :interval_censored : nothing
+    if isnothing(kind) && (wrapper === coarsened || wrapper === :coarsened)
+        length(args) == 1 || error(
+            "$prefix: `coarsened` expects one base `Ordinal(...)` argument")
+        keys(kwargs) == (:upper,) || error(
+            "$prefix: `coarsened` requires exactly the `upper` keyword; the " *
+            "response column holds each row's lowest category")
+        base = only(args)
+        base isa ExprColumn && getf(base) === Ordinal || error(
+            "$prefix: `coarsened` supports an `Ordinal(structure, link, eta)` " *
+            "base; got `$(base isa ExprColumn ? nameof(getf(base)) : typeof(base))`")
+        upper = _brm_normalize_response_bound(kwargs.upper)
+        upper isa NamedColumn && parent(upper) isa DataColumn || error(
+            "$prefix: `coarsened` `upper` must name an observed data column of " *
+            "category labels")
+        return _BRMResponseModifierPlan(:coarsened, base, nothing, upper)
+    end
     isnothing(kind) && return nothing
 
     if kind === :interval_censored
@@ -1101,6 +1117,42 @@ function _brm_materialize_bounded_response(
             "$prefix: `$(spec.kind)` response `$target` contains values outside its bounds at row $i")
     end
     _BRMResponseModifierPlan(spec.kind, spec.base, lower, upper)
+end
+
+# `coarsened(Ordinal(...); upper)`: the observed labels of a row's upper
+# category, read from the data the backend plans with.
+function _brm_coarsened_upper_labels(upper::NamedColumn, data::AbstractDict)
+    raw = get(data, name(upper), parent(parent(upper)))
+    raw isa AbstractVector || error(
+        "BRM: `coarsened` upper column `$(name(upper))` must be a vector of labels")
+    raw
+end
+
+# Both endpoints of coarsened ordinal evidence as 1-based codes into the
+# response's fitted `levels`: every upper label must be one of them (a
+# `CategoricalVector` declares levels a plain vector never observed), and no
+# row's upper category may precede its lower one.
+function _brm_coarsened_codes(target::Symbol, levels, lower::AbstractVector,
+                              upper::AbstractVector; prefix="BRM")
+    length(upper) == length(lower) || error(
+        "$prefix: `coarsened` response `$target` has $(length(lower)) rows but " *
+        "its `upper` column has $(length(upper))")
+    lo = _brm_apply_fitted_levels(levels, lower; prefix)
+    values = upper isa CA.CategoricalVector ? CA.unwrap.(upper) : upper
+    lookup = Dict(level => index for (index, level) in enumerate(levels))
+    hi = Vector{Int}(undef, length(values))
+    for (row, label) in enumerate(values)
+        haskey(lookup, label) || error(
+            "$prefix: `coarsened` response `$target` row $row: upper label " *
+            "`$label` is not one of the response's levels $(collect(levels)). " *
+            "Declare the full ordered level set on the response, for example " *
+            "`categorical(y_min; levels=0:4, ordered=true)`")
+        hi[row] = lookup[label]
+        lo[row] <= hi[row] || error(
+            "$prefix: `coarsened` response `$target` row $row: upper category " *
+            "`$label` precedes the lower category `$(levels[lo[row]])`")
+    end
+    (lo, hi)
 end
 
 function _brm_materialize_interval_response(

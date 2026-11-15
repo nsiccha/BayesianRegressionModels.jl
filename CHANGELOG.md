@@ -12,6 +12,36 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.313
+
+- `coarsened(Ordinal(...); upper)`: coarsened ordinal evidence, a row that
+  says only that the category lies in an inclusive range of the response's
+  ordered levels. `y_min ~ coarsened(Ordinal(Cumulative(), ProbitLink(), eta);
+  upper = y_max)` contributes `log P(y_min ≤ Y ≤ y_max)`; equal labels are an
+  exact category, so exact and range rows share one statement, one threshold
+  vector and one level table. The response column defines the levels as for
+  `Ordinal` (a `CategoricalVector` keeps declared, unobserved levels); every
+  `upper` label must be one of them and must not precede its row's lower label,
+  or the backend is refused naming the row. Every `Ordinal` structure, link,
+  `discrimination=` (modelled too) and `per_threshold=` composes inside it.
+  SBBRMI emits the Stan family `brm_ordinal_range` (pointwise log likelihood;
+  predictive draws are single categories of the uncoarsened law); RKBRMI, on
+  the formula and the authored-location route, codes both label columns in the
+  graph and observes RKPPL's `interval_censored.(Ordinal.(…), upper)`, with
+  native gradients and `jax_source`. RKPPL's ordinal evidence underflows in
+  extreme probit tails (ReactiveKernels snag `rkppl-ordinal-in-553ce5b3`), so
+  RKBRMI ranges far beyond every threshold wait on that fix (snag
+  `ordinal-interval-0a6d9172`, design decision `1cxobqy`).
+- The executable `Ordinal`'s `logpdf`, and SBBRMI's cumulative probit and
+  cloglog `brm_ordinal_lpmf`, keep an interior category whose thresholds both
+  lie far below `eta`: its mass is now the difference of the upper tails.
+  Before, both cdfs rounded to one and the log mass was `-Inf` (for example
+  probit, `eta` sixty standard deviations above the thresholds). SBBRMI's
+  probit upper tail (`brm_ordinal_logccdf`) is now `normal_lcdf(-z)`: Stan's
+  `normal_lccdf` is `-inf` beyond about 8.25 standard deviations, which also
+  made a cumulative probit top category and a stopping-ratio probit stage
+  `-Inf` there.
+
 ## 0.2.312
 
 - `adaptive_centering_cells(model[, unc_names]) -> (; blocks, cells)` describes

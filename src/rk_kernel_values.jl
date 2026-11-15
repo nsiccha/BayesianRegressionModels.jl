@@ -655,6 +655,9 @@ _rk_validate_nested_bounds(observation, ::_BRMAbsentResponse, data) = nothing
 function _rk_validate_nested_bounds(observation, response, data)
     modifier = observation.modifier
     modifier === nothing && return
+    modifier.kind === :coarsened && error(
+        "RK backend: response `$(observation.name)` holds one array per subject; " *
+        "`coarsened` evidence takes a flat response")
     bounds = (modifier.lower, modifier.upper)
     all(b -> b === nothing || b isa Real || (b isa NamedColumn && parent(b) isa DataColumn),
         bounds) || return
@@ -673,6 +676,8 @@ end
 # values to compare with its bounds, as on the nested route above.
 _rk_validate_flat_bounds(modifier, response, ::_BRMAbsentResponse, data) = nothing
 function _rk_validate_flat_bounds(modifier, response, values, data)
+    # Coarsened labels are checked against the fitted levels when planned.
+    modifier.kind === :coarsened && return nothing
     bounds = (modifier.lower, modifier.upper)
     all(b -> b === nothing || b isa Real || (b isa NamedColumn && parent(b) isa DataColumn),
         bounds) || return
