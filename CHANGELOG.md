@@ -23,9 +23,10 @@ instead of failing at run time.
   docstring's headings open one level below the disclosure that holds them, a
   level the docstring skips is closed up, and nothing goes deeper than
   `######`, in Markdown and HTML. The `[compat]` floor is now
-  `HTMXObjects = "0.1.135"`, and the test pins move to HTMXObjects 0.1.135,
-  HTMX 1.3.1 and DynamicObjects 0.5.21, which it requires. The docstrings
-  themselves are unchanged.
+  `HTMXObjects = "0.1.135"`. The test pins move to HTMXObjects 0.1.135, HTMX
+  1.3.1 and DynamicObjects 0.5.21, which it requires, and to Treebars 0.1.7,
+  which DynamicObjects 0.5.21 requires. The docstrings themselves are
+  unchanged.
 
 ## 0.2.327
 

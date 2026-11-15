@@ -235,7 +235,7 @@ and configuration validation, and exact fresh-process replay from both a
 serialized partial and the latest disk checkpoint. It covers initial,
 cumulative-update, selective carried-window and prepared sparse-Laplace targets
 using small synthetic models. Run `test/setup_env.jl` first for the pinned RKPPL recovery contract and
-Treebars 0.1.5, then `julia --project=test test/smc_tuning_lifecycle.jl`.
+Treebars 0.1.7 (0.1.5 or later), then `julia --project=test test/smc_tuning_lifecycle.jl`.
 
 `smc_worker_forwarding.jl` checks that BRM forwards ReactiveKernelsPPL 0.1.100's
 worker controls on the same four targets: `grid_start=:independent` reaches every

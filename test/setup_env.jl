@@ -99,7 +99,8 @@ const PINS = [
     # Cooperative interruption used by BRM's progress hooks.
     # Treebars 0.1.5 satisfies the pinned ReactiveKernelsPPL extension floor.
     # Treebars 0.1.5: nested progress used by recoverable adaptive SMC pilots.
-    ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "44c37e60e22bab9e8a0d3ab88bd47b575dec6bb0"),
+    # Treebars 0.1.7: DynamicObjects 0.5.21 (required by HTMXObjects 0.1.135) requires Treebars 0.1.6.
+    ("Treebars",          "https://github.com/nsiccha/Treebars.jl.git",          "b11cf224c1d7f29bca67346829a3779c7801bdce"),
     # 0.2.11: public covariance projection used by selective SMC carries.
     # 0.2.19 satisfies ReactiveKernelsPPL 0.1.168's SMC extension floor.
     # 0.3.0: accessors read earlier pairs at their model values, which BRM's

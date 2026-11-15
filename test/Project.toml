@@ -173,7 +173,8 @@ url = "https://github.com/nsiccha/Treebars.jl"
 # Includes cooperative interruption used by BRM's progress hooks.
 # Treebars 0.1.5 also satisfies the pinned ReactiveKernelsPPL extension floor.
 # 0.1.5: nested progress used by recoverable adaptive SMC pilots.
-rev = "44c37e60e22bab9e8a0d3ab88bd47b575dec6bb0"
+# 0.1.7: DynamicObjects 0.5.21 (required by HTMXObjects 0.1.135) requires Treebars 0.1.6.
+rev = "b11cf224c1d7f29bca67346829a3779c7801bdce"
 
 [sources.WarmupHMC]
 url = "https://github.com/nsiccha/WarmupHMC.jl"
