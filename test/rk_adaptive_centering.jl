@@ -575,6 +575,112 @@ end
     end
 end
 
+@stestset "multi-membership blocks: one cell per joint level, centred on 0" begin
+    df = panel(; seed=25)
+    # A second membership column over the same levels, shifted by one group.
+    # RK's multi-membership groupings read plain (not categorical) columns.
+    shift(v) = "g" * lpad(mod1(parse(Int, String(v)[2:end]) + 1, 12), 2, '0')
+    data = merge(df, (; g=String.(string.(df.g)), h=shift.(string.(df.g)),
+                        x=0.5 .* df.t))
+    for K in (1, 2)
+        brmi = K == 1 ? (@brm data begin
+                mu ~ 1 + t + (1 | mm(g, h))
+                effect(mu, Intercept) ~ Normal(100, 50)
+                y ~ Normal(mu, se)
+            end) : (@brm data begin
+                mu ~ 1 + t + x + (1 + x | mm(g, h))
+                effect(mu, Intercept) ~ Normal(100, 50)
+                y ~ Normal(mu, se)
+            end)
+        rk = RKBRMI(brmi)
+        names = layout_names(rk)
+        b = only(adaptive_centering_blocks(rk))
+        @test b isa AdaptiveCenteringBlock && b.ranef.n_terms == K
+        @test b.ranef.group == (:g, :h) && b.ranef.n_groups == 12
+        draws = String(b.ranef.binding)
+        @test [names[b.effects[k, 5]] for k in 1:K] == ["$draws.z.5.$k" for k in 1:K]
+        # No record of an mm block reaches the other inventory readers.
+        @test !any(r -> r.kind === :mm_ranef, BRM._rk_coordinate_records(rk.plan))
+        locations = BRM._adaptive_ranef_locations(rk, [b], names)
+        @test all(iszero, locations[b].coefficient)
+        problem = rk_logdensity_problem(rk; ad_backend=AD)
+        loc(x, y, b, k, g) = 0.0
+        controls = rand(Xoshiro(26 + K), 12K)
+        check_exact(rk, adaptive_centering_problem(rk, problem, AD; centeredness=controls),
+                    [b], controls, loc; factor=constrained_factor(rk))
+    end
+end
+
+# The level factor of an R2D2-scaled block from RK's constrained values of the
+# budget it reads: margin `k`'s scale `reference * sqrt(phi[entry] * R2 / (1 -
+# R2))`, or its own sampled scale, with the names its record gives.
+function r2d2_factor(rk)
+    record = only(r for r in BRM._rk_coordinate_records(rk.plan; adaptive=true)
+                  if r.kind === :r2d2_ranef)
+    function factor(x, b, g)
+        cv = BRM._rk_constrained_values(rk, x)
+        value(name) = getproperty(cv, name)
+        tau = map(record.r2d2) do spec
+            haskey(spec, :free) && return value(spec.free)
+            ref = spec.reference isa Real ? spec.reference : value(spec.reference)
+            r2 = value(spec.r2)
+            ref * sqrt(value(spec.phi)[spec.entry] * r2 / (1 - r2))
+        end
+        K = b.ranef.n_terms
+        L = K == 1 ? ones(1, 1) : getproperty(cv, b.ranef.binding).L
+        Diagonal(collect(tau)) * L
+    end
+end
+
+@stestset "R2D2-scaled blocks: the scale is derived from R2, the shares and the reference" begin
+    df = panel(; seed=27)
+    data = merge(df, (; x=0.5 .* df.t))
+    sampled = @brm data begin
+        sigma ~ Exponential(1.0)
+        mu ~ 1 + x + (1 + x | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(:, g) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1, reference_scale=sigma)
+        y ~ Normal(mu, se)
+    end
+    constant = @brm data begin
+        mu ~ 1 + x + (1 + x | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(:, g) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1, reference_scale=30.0)
+        y ~ Normal(mu, se)
+    end
+    # A partial ICC statement: the slope margin samples its own scale.
+    partial = @brm data begin
+        sigma ~ Exponential(1.0)
+        mu ~ 1 + x + (1 + x | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(mu, g, Intercept) ~ r2d2(reference_scale=sigma)
+        y ~ Normal(mu, se)
+    end
+    for (label, brmi) in (("sampled reference", sampled), ("constant reference", constant),
+                          ("partial ICC", partial))
+        rk = RKBRMI(brmi)
+        names = layout_names(rk)
+        b = only(adaptive_centering_blocks(rk))
+        @test b isa R2D2AdaptiveCenteringBlock && b.ranef.n_terms == 2
+        @test b.ranef.family in BRM._ADAPTIVE_R2D2_FAMILIES
+        @test !any(r -> r.kind === :r2d2_ranef, BRM._rk_coordinate_records(rk.plan))
+        # Every R2D2 margin reads one stick-breaking share.
+        @test all(s -> all(a -> a.stick, s.simplex), b.scales)
+        locations = BRM._adaptive_ranef_locations(rk, [b], names)
+        problem = rk_logdensity_problem(rk; ad_backend=AD)
+        loc(x, y, b, k, g) = locations[b].coefficient[k] == 0 ? 0.0 :
+            x[locations[b].coefficient[k]]
+        for controls in (ones(24), rand(Xoshiro(28), 24))
+            adaptive = adaptive_centering_problem(rk, problem, AD; centeredness=controls)
+            check_exact(rk, adaptive, [b], controls, loc; factor=r2d2_factor(rk))
+        end
+        # `:midpoint` leaves R2D2 cells at the compiled frame, as on SBBRMI.
+        rows = adaptive_centering_controls(
+            adaptive_centering_problem(rk, problem, AD; centeredness=:midpoint), rk)
+        @test all(r -> r.c == 0.0, rows)
+    end
+end
+
 @stestset "blocks the RKBRMI wrapper does not build raise" begin
     df = panel()
     none = @brm df begin

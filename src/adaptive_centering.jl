@@ -217,6 +217,10 @@ Base.show(io::IO, b::AdaptiveCenteringBlock) = print(
 #             + sum(a * log(inv_logit(x[i])) + b * log1m(inv_logit(x[i])))  # unit-interval parameter
 #             + sum(w * log(simplex(x[coords])[j]))            # Dirichlet share
 #
+# A Dirichlet share is Stan's simplex (isometric log-ratio and softmax, Stan
+# 2.37+) on SBBRMI, and ReactiveKernelsPPL's stick-breaking simplex on RKBRMI
+# (`stick`); the atom names which.
+#
 # `_AdaptiveLogScale` is the inspectable form. The generic Enzyme path reads
 # the block's `_AdaptiveLogScaleTable` instead: the same atoms, flattened into
 # term-indexed arrays, so a differentiated row loop loads only numbers. On Julia
@@ -228,10 +232,15 @@ Base.show(io::IO, b::AdaptiveCenteringBlock) = print(
 
 struct _AdaptiveSimplexLog
     weight::Float64
-    # The simplex's `n - 1` unconstrained coordinates, in Stan order.
+    # The simplex's `n - 1` unconstrained coordinates, in its transform's order.
     coordinates::Vector{Int}
     entry::Int
+    # `false`: Stan's isometric log-ratio simplex; `true`: ReactiveKernelsPPL's
+    # stick-breaking simplex (`_adaptive_log_stick`).
+    stick::Bool
 end
+_AdaptiveSimplexLog(weight, coordinates, entry) =
+    _AdaptiveSimplexLog(weight, coordinates, entry, false)
 
 struct _AdaptiveLogScale
     constant::Float64
@@ -262,6 +271,7 @@ struct _AdaptiveLogScaleTable
     simplex::Vector{Int}
     simplex_weight::Vector{Float64}
     simplex_entry::Vector{Int}
+    simplex_stick::Vector{Bool}
     simplex_coordinates::Vector{Int}
     simplex_coordinate::Vector{Int}
     bounded::Vector{Int}
@@ -273,7 +283,7 @@ end
 
 function _AdaptiveLogScaleTable(scales::AbstractVector{_AdaptiveLogScale})
     t = _AdaptiveLogScaleTable(Float64[], [1], Float64[], Int[], [1], Float64[],
-        Float64[], Int[], [1], Float64[], Int[], [1], Int[],
+        Float64[], Int[], [1], Float64[], Int[], Bool[], [1], Int[],
         [1], Float64[], Int[], Float64[], Float64[])
     for s in scales
         push!(t.constant, s.constant)
@@ -287,6 +297,7 @@ function _AdaptiveLogScaleTable(scales::AbstractVector{_AdaptiveLogScale})
         push!(t.unit, length(t.unit_index) + 1)
         for atom in s.simplex
             push!(t.simplex_weight, atom.weight); push!(t.simplex_entry, atom.entry)
+            push!(t.simplex_stick, atom.stick)
             append!(t.simplex_coordinate, atom.coordinates)
             push!(t.simplex_coordinates, length(t.simplex_coordinate) + 1)
         end
@@ -447,6 +458,25 @@ function _adaptive_log_simplex(x::AbstractVector, coordinate, offset, N, entry)
     _adaptive_simplex_ilr(x, coordinate, offset, N, entry) - (m + log(total))
 end
 
+# `log(simplex_constrain(u)[entry])` for ReactiveKernelsPPL's stick-breaking
+# simplex of `K = N + 1` entries over `u[i] = x[coordinate[offset + i]]`: break
+# fractions `z[i] = logistic(u[i] + log(K - i))`, entry `j < K` is
+# `z[j] * prod(1 - z[i] for i < j)` and entry `K` the remaining stick. So its
+# log is `-sum(softplus(u[i] + log(K - i)) for i < j)`, minus
+# `softplus(-(u[j] + log(K - j)))` for `j < K`. Scalar loop, no work vector.
+function _adaptive_log_stick(x::AbstractVector, coordinate, offset, N, entry)
+    T = eltype(x)
+    K = N + 1
+    1 <= entry <= K || throw(BoundsError(1:K, entry))
+    acc = zero(T)
+    for i in 1:entry - 1
+        acc -= _adaptive_softplus(x[coordinate[offset + i]] + log(T(K - i)))
+    end
+    entry <= N &&
+        (acc -= _adaptive_softplus(-(x[coordinate[offset + entry]] + log(T(K - entry)))))
+    acc
+end
+
 # Term `k`'s log-scale, atom by atom in `_AdaptiveLogScale` order.
 function _adaptive_log_scale(x::AbstractVector, t::_AdaptiveLogScaleTable, k::Int)
     acc = convert(eltype(x), t.constant[k])
@@ -461,8 +491,10 @@ function _adaptive_log_scale(x::AbstractVector, t::_AdaptiveLogScaleTable, k::In
     end
     for q in t.simplex[k]:t.simplex[k + 1] - 1
         first = t.simplex_coordinates[q]
-        acc += t.simplex_weight[q] * _adaptive_log_simplex(x, t.simplex_coordinate,
-            first - 1, t.simplex_coordinates[q + 1] - first, t.simplex_entry[q])
+        n = t.simplex_coordinates[q + 1] - first
+        acc += t.simplex_weight[q] * (t.simplex_stick[q] ?
+            _adaptive_log_stick(x, t.simplex_coordinate, first - 1, n, t.simplex_entry[q]) :
+            _adaptive_log_simplex(x, t.simplex_coordinate, first - 1, n, t.simplex_entry[q]))
     end
     for q in t.bounded[k]:t.bounded[k + 1] - 1
         acc += t.bounded_weight[q] * _adaptive_log_constrain(

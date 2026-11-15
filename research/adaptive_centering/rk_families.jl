@@ -10,7 +10,7 @@
 #
 #     julia --project=test research/adaptive_centering/rk_families.jl [family...]
 #
-# Families: student_t, known, bounded, stratified, factor. Each runs 4 chains
+# Families: student_t, known, bounded, stratified, factor, mm, r2d2. Each runs 4 chains
 # through WarmupHMC's quorum sampler (`min_completed = 3`), 400 draws, for each
 # seed, plain and wrapped, and prints max R-hat, min bulk ESS over every
 # coordinate (RK layout frame), divergences and wall time.
@@ -30,9 +30,12 @@ function panel(; G=12, n=30, seed=1)
     se = 0.3 .+ 0.3 .* rand(rng, G * n)
     y = level[g] .+ (1.0 .+ slope[g]) .* t .+ se .* randn(rng, G * n)
     labels = string.("g", lpad.(g, 2, '0'))
+    # `h`: a second membership column, the next group (RK's multi-membership
+    # groupings read plain columns).
     (; y, t, se, g=categorical(labels),
        b=categorical(string.("s", cld.(g, 4))),
-       f=categorical(string.("f", mod1.(g, 3))))
+       f=categorical(string.("f", mod1.(g, 3))),
+       gm=labels, h=string.("g", lpad.(mod1.(g .+ 1, G), 2, '0')))
 end
 
 const FAMILIES = Dict(
@@ -66,6 +69,20 @@ const FAMILIES = Dict(
         sd(mu, g) ~ Exponential(30.0)
         y ~ Normal(mu, se)
     end),
+    # Multi-membership intercepts: each row averages its own and the next
+    # group's effect. As on SBBRMI, these cells stay centred on 0.
+    :mm => df -> @brm(df, begin
+        mu ~ 1 + t + (1 | mm(gm, h))
+        effect(mu, Intercept) ~ Normal(100, 50)
+        y ~ Normal(mu, se)
+    end),
+    # An R2D2-scaled intercept SD with a constant reference scale.
+    :r2d2 => df -> @brm(df, begin
+        mu ~ 1 + t + (1 | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(:, g) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1, reference_scale=30.0)
+        y ~ Normal(mu, se)
+    end),
     # A factor constant within each group: the ridge also runs through its level.
     :factor => df -> @brm(df, begin
         mu ~ 1 + t + factor(f) + (1 | g)
@@ -77,12 +94,22 @@ const FAMILIES = Dict(
 
 # A run whose chains miss the completion quorum (too many stopped as stuck) is a
 # result, not an error: it is reported as such.
-function fit(lpdf; seed, n_chains=4, n_draws=400)
+# Families whose random starts WarmupHMC's initialization cannot leave: the
+# R2D2 panel fails Pathfinder for the plain density and the wrapper alike (9
+# retries per chain), so both start at the intercept's data mean, everything
+# else 0 (in the compiled frame, which is the wrapper's default start too).
+const DATA_STARTS = Set([:r2d2])
+data_start(rk, df) = (x = zeros(length(BRM._rk_layout_coordinate_names(rk)));
+    x[findfirst(==("pop_mu.beta_pop.1"), String.(BRM._rk_layout_coordinate_names(rk)))] =
+        mean(df.y); x)
+
+function fit(lpdf; seed, n_chains=4, n_draws=400, init=missing)
     rngs = [Xoshiro(seed + i) for i in 1:n_chains]
     out = nothing
     t = @elapsed try
         out = WarmupHMC.completion_warmup_mcmc(rngs, lpdf;
-            min_completed=div(3 * n_chains, 4), n_draws)
+            min_completed=div(3 * n_chains, 4), n_draws,
+            init=init === missing ? missing : [copy(init) for _ in 1:n_chains])
     catch e
         occursin("quorum unmet", sprint(showerror, e)) || rethrow()
         return (; rhat=NaN, ess=NaN, divergent=-1,
@@ -106,9 +133,10 @@ function main(families)
         println("== $family: $(length(blocks)) block(s), ",
                 sum(b -> b.ranef.n_terms * b.ranef.n_groups, blocks), " cells, ",
                 LogDensityProblems.dimension(problem), " coordinates")
+        init = family in DATA_STARTS ? data_start(rk, df) : missing
         for seed in (101, 202)
-            plain = fit(problem; seed)
-            adaptive = fit(adaptive_centering_problem(rk, problem, AD); seed)
+            plain = fit(problem; seed, init)
+            adaptive = fit(adaptive_centering_problem(rk, problem, AD); seed, init)
             for (label, r) in (("plain", plain), ("adaptive", adaptive))
                 println(rpad("  seed $seed $label", 24),
                     "max R-hat ", round(r.rhat; digits=3),
@@ -122,5 +150,5 @@ function main(families)
     end
 end
 
-main(isempty(ARGS) ? [:student_t, :known, :bounded, :stratified, :factor] :
+main(isempty(ARGS) ? [:student_t, :known, :bounded, :stratified, :factor, :mm, :r2d2] :
      Symbol.(ARGS))

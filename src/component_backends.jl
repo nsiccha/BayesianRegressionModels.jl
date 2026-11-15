@@ -310,6 +310,7 @@ function _rk_submodel_rhs!(definitions, statements, data, bindings,
     coordinates = Any[]
     emitted = _rk_emit_ast(plan; cell_sources=cells, coordinates,
         documentation=brm_documentation(instance))
+    _rk_strip_adaptive_records!(coordinates)
     cell_output = _brm_component_cell_output(component, instance)
     if cell_output !== nothing
         # Keep the raw cells in the returned binding. Its public local plate
