@@ -31,6 +31,21 @@ instead of failing at run time.
   such vectors, so their controls and carried frames stay valid; a fresh fit
   or a factor-level start from them uses the new rule. **Breaking (results):**
   a fresh default fit of a model with such a vector differs from 0.2.313's.
+- A fresh `LinearCoupling` leaves a unit's sparse globals (the globals a few
+  units read, stepped on their readers' sites) out of the globals it couples
+  the unit to; the unit stays coupled to the globals stepped on the minibatch
+  estimate. A site estimates its readers' curvature along that global's own
+  draw, so a reader coupled to the same draw made the site learn the marginal
+  curvature and pull the mean back too weakly. With the rule above, the window
+  toy of `test/nlme_svi_sparse_globals.jl` (64 windows whose `e .~ Normal(0, 1)`
+  innovations are now coupled, boundaries read by two windows each, batch 2)
+  drifted its boundaries' means 60 to 220 conditional sds off through settling
+  and hit its iteration cap; with the guard it converges, means 0.48 of their
+  own sds off (0.58 with `coupling = nothing`). The cost is width: a sparse
+  global keeps about its sd given its readers, where the exact marginal sd of
+  those boundaries is 2.16 times that, which the coupled fit reaches at batch
+  32 (no sparse global): 2.13. Before, only a fit that coupled a sparse
+  global's reader (`centering = nothing` on such a model) reached this.
 - Learned centering's chain terms (the gradient through each cell's location
   and scale) cost one map per unit and iteration instead of one per draw: a
   unit's draws now sum their per-cell adjoints before the batch maps them to
@@ -38,8 +53,10 @@ instead of failing at run time.
   unit of `d` coordinates brings `2d` draws, and the per-draw terms of 64
   vector cells took most of the iteration: on the toy above the default fit
   took 128.7 ms per iteration against 30.9 with `centering = nothing`, and
-  40.8 against 34.0 with both changes (one CPU, host load about 45). Results
-  change only in floating-point rounding.
+  40.8 against 34.0 with these changes (one CPU, host load about 45, compiled
+  before timing). Where the vector cells are genuine (the same toy with
+  `e .~ Normal(0, se)`, 63 cells per unit), 119.5 against 24.1 became 44.2
+  against 31.3. Results change only in floating-point rounding.
 - Every row of `diagnostics.centering.cells` and `.uncentered` carries `kind`,
   `block`, `declaration` and `level`, `nothing` where a row has none (a
   vector's rows have no block, a random effect's no declaration). Before, a
