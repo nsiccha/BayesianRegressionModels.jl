@@ -14,6 +14,8 @@ reproduction commands continue to work.
 | Pupil, hierarchical scale | [Protocol](pupil_scale/README.md) | [Public pupil data and models](../pupil_scale_totals/README.md) |
 | Air pollution | [Protocol](air/README.md) | [Public AIR comparison](../air_total_effects/README.md) |
 | RBesT | [Protocol](rbest/README.md) | [Public RBesT models and datasets](../rbest_centering/README.md) |
+| RKBRMI wrapper, synthetic panel (`1 + t + c1 + c2`) | Script header | [`rk_panel.jl`](rk_panel.jl) |
+| RKBRMI wrapper, block families | Script header | [`rk_families.jl`](rk_families.jl) |
 
 The guide's efficiency figure reads the
 [recorded refresh](../centering_refresh/README.md), including all gradient
