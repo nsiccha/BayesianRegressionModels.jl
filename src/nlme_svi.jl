@@ -139,8 +139,10 @@ function _brm_svi_target(m::BRMNLMEModel; global_coordinates=nothing, previous=n
        touched=_brm_svi_field_touched!(_brm_svi_touched_globals(places, prior), fields), prior,
        fields, z_constant=-nz * log(2π) / 2, prior_point=copy(m.unit))
     # From the model's own prior, before a streaming fit puts its carried factor
-    # there: what the sd bound, a stopgap, multiplies (src/nlme_svi_sd_bound.jl).
-    merge(t, (; sd_prior=_brm_svi_sd_prior(t)))
+    # there: what the sd bound, a stopgap, multiplies (src/nlme_svi_sd_bound.jl),
+    # and the mean a non-finite evaluation's globals are measured from.
+    projection = _brm_svi_own_prior_projection(t)
+    merge(t, (; sd_prior=projection.sd, prior_mean=projection.mean))
 end
 
 # `t` with `n` partition plans, one per task that evaluates units. `t.plan` is
@@ -856,7 +858,8 @@ function _brm_svi_unit_design_terms(t, q, i, g, E, plan, work, touched, D;
             push!(adjoints, a₊, a₋)
         end
         problem = _brm_svi_nonfinite_unit(t, i, g, (z₊, z₋), (v₊, v₋),
-            (gg₊, gg₋), (gz₊, gz₋), touched; packed=_brm_svi_packed_draw(centering, frame, q, i, g))
+            (gg₊, gg₋), (gz₊, gz₋), touched; packed=_brm_svi_packed_draw(centering, frame, q, i, g),
+            finite=x -> _brm_svi_unit_finite(t, i, x, plan, work, touched))
         for (entry, p) in enumerate(touched)
             gg[entry] += (gg₊[p] + gg₋[p]) / d
             gg₊[p] = gg₋[p] = 0.0
@@ -903,7 +906,22 @@ non-finite term in batch order, each a named tuple with:
   own model;
 - `largest`: the term's coordinate of largest magnitude across `points`, among
   the globals and the unit's own, as `(; coordinate, value)` (`nothing` for a term
-  with no coordinates).
+  with no coordinates). Magnitude alone says little: a level well placed at 80
+  outranks an intercept ten prior sds out;
+- `furthest`: the globals of the failing point furthest from their own priors, at
+  most three, furthest first, each `(; coordinate, value, prior_sds)`: the
+  distance from the mean of the prior's Gaussian projection in its sds, the sd
+  the SVI sd bound multiplies. A global whose prior reads other coordinates is not
+  measured;
+- `probe`: which coordinates carry the failure, found by swapping one coordinate
+  at a time between the failing point and a finite reference, `(; reference,
+  repairs, breaks)`. `reference` is the pair's other draw (`:plus` or `:minus`)
+  when that one is finite, otherwise `:mean`, the pair's mean (a unit) or the
+  global factor's mean (the global term); `repairs` names the coordinates whose
+  reference value alone makes the failing point finite, `breaks` those whose
+  failing value alone makes the reference fail. A unit's swaps evaluate the
+  model's own unit term at packed points. `nothing` when the reference is not
+  finite either.
 
 The run in memory is not a checkpoint after this error, because its random
 stream has advanced. Continue from the last checkpoint `save` received. A
@@ -927,6 +945,17 @@ function Base.showerror(io::IO, e::BRMSVINonfiniteError)
             length(p.coordinates), " coordinate(s): ", join(p.coordinates, ", "))
         p.largest === nothing ||
             print(io, "; largest coordinate: ", p.largest.coordinate, " = ", p.largest.value)
+        furthest = get(p, :furthest, NamedTuple[])
+        isempty(furthest) || print(io, "; furthest from their priors: ", join((string(
+            r.coordinate, " = ", round(r.value; sigdigits=4), " (",
+            round(r.prior_sds; digits=1), " prior sds)") for r in furthest), ", "))
+        probe = get(p, :probe, nothing)
+        probe === nothing || print(io, "; one-coordinate swaps against the ",
+            probe.reference === :mean ? "mean" : "finite $(probe.reference) draw", ": ",
+            isempty(probe.repairs) ? "none alone repairs it" :
+                "resetting " * join(probe.repairs, ", ") * " repairs it",
+            ", ", isempty(probe.breaks) ? "none alone breaks the reference" :
+                join(probe.breaks, ", ") * " alone breaks the reference")
     end
     print(io, "\nEach term's `points` holds the packed point(s) it was evaluated at, to ",
         "replay in the model. The run in memory is not a checkpoint after this error. ",
@@ -957,44 +986,119 @@ _brm_svi_packed_draw(::Nothing, frame, q, i, g) = identity
 _brm_svi_packed_draw(centering, frame, q, i, g) =
     z -> _brm_svi_centered_coordinates(centering, frame, q, i, g, z)
 
+# The globals of `point` (packed) furthest from their own priors, in sds of the
+# prior's Gaussian projection (the target's `sd_prior` and `prior_mean`, which the
+# sd bound reads too): at most `n`, furthest first, each `(; coordinate, value,
+# prior_sds)`. A global whose prior reads other coordinates (sd `Inf`) is not
+# measured; a target without the projection gives none. A coordinate's magnitude
+# (`largest`) says little: a well-placed level of 80 is larger than an intercept
+# ten prior sds out.
+function _brm_svi_prior_outliers(t, point; n=3)
+    sd, center = _brm_svi_sd_prior_of(t), _brm_svi_prior_mean_of(t)
+    (sd === nothing || center === nothing) && return NamedTuple[]
+    rows = [(; coordinate=t.m.view.coordinates[t.globals[k]], value=point[t.globals[k]],
+              prior_sds=abs(point[t.globals[k]] - center[k]) / sd[k])
+            for k in eachindex(t.globals) if isfinite(sd[k]) && sd[k] > 0]
+    sort!(rows; by=r -> r.prior_sds, rev=true)
+    rows[1:min(n, length(rows))]
+end
+
+# Which coordinates of a failing point `bad` carry the failure, by swapping one
+# coordinate at a time (among `positions`, where the two differ) against a
+# reference point `ref` that `finite` accepts: `repairs` names those whose value
+# from `ref` alone makes `bad` finite, `breaks` those whose value from `bad` alone
+# makes `ref` fail. `nothing` when `ref` itself is not finite. An evaluation that
+# throws counts as not finite.
+function _brm_svi_swap_probe(t, finite, reference, bad, ref, positions)
+    _brm_svi_probe_finite(finite, ref) || return nothing
+    repairs, breaks = Int[], Int[]
+    for p in positions
+        bad[p] == ref[p] && continue
+        x = copy(bad)
+        x[p] = ref[p]
+        _brm_svi_probe_finite(finite, x) && push!(repairs, p)
+        x = copy(ref)
+        x[p] = bad[p]
+        _brm_svi_probe_finite(finite, x) || push!(breaks, p)
+    end
+    (; reference, repairs=t.m.view.coordinates[repairs], breaks=t.m.view.coordinates[breaks])
+end
+function _brm_svi_probe_finite(finite, x)
+    try
+        finite(x)
+    catch e
+        e isa InterruptException && rethrow()
+        false
+    end
+end
+
+# Whether unit i's own term (`_brm_svi_unit_local!`, the model's unit term in packed
+# coordinates) has a finite value and gradient at the packed point `x`, gradient
+# read at the unit's coordinates and its `touched` globals.
+function _brm_svi_unit_finite(t, i, x, plan, work, touched)
+    gg, gz = zeros(length(t.globals)), zeros(length(t.units[i]))
+    v = _brm_svi_unit_local!(gg, gz, t, i, x[t.globals], x[t.units[i]], plan, work)
+    isfinite(v) && all(isfinite, gz) && all(p -> isfinite(gg[p]), touched)
+end
+
 # Unit i's terms at the antithetic pair `zs`: `nothing` when every value and
 # gradient is finite, else what was not. Gradient entries map to `t.globals`
 # (`ggs`, read only at `touched`) and `t.units[i]` (`gzs`). `packed` maps a draw of
 # the unit's factor to its packed coordinates (learned centering's factors are over
-# other ones).
+# other ones). `finite(x)` evaluates the unit's term at a packed point for the swap
+# probe, against the pair's finite draw or, when both fail, the pair's mean.
 function _brm_svi_nonfinite_unit(t, i, g, zs, values, ggs, gzs, touched=eachindex(t.globals);
-        packed=identity)
-    finite(gg) = all(p -> isfinite(gg[p]), touched)
-    all(isfinite, values) && all(finite, ggs) &&
-        all(x -> all(isfinite, x), gzs) && return nothing
+        packed=identity, finite=nothing)
+    finite_gg(gg) = all(p -> isfinite(gg[p]), touched)
+    side_ok = map((v, gg, gz) -> isfinite(v) && finite_gg(gg) && all(isfinite, gz),
+        Tuple(values), Tuple(ggs), Tuple(gzs))
+    all(side_ok) && return nothing
     quantities, bad = Symbol[], Int[]
     for (side, v, gg, gz) in zip((:plus, :minus), values, ggs, gzs)
         isfinite(v) || push!(quantities, Symbol(:value_, side))
-        finite(gg) || (push!(quantities, Symbol(:global_gradient_, side));
+        finite_gg(gg) || (push!(quantities, Symbol(:global_gradient_, side));
             append!(bad, t.globals[filter(p -> !isfinite(gg[p]), collect(touched))]))
         all(isfinite, gz) || (push!(quantities, Symbol(:unit_gradient_, side));
             append!(bad, t.units[i][findall(!isfinite, gz)]))
     end
     points = NamedTuple{(:plus, :minus)}(map(z -> _brm_svi_term_point(t, g, t.units[i], packed(z)), zs))
+    failing = side_ok[1] ? points.minus : points.plus
+    probe = if finite === nothing
+        nothing
+    elseif any(side_ok)
+        _brm_svi_swap_probe(t, finite, side_ok[1] ? :plus : :minus, failing,
+            side_ok[1] ? points.plus : points.minus, t.units[i])
+    else
+        middle = _brm_svi_term_point(t, g, t.units[i], packed((zs[1] .+ zs[2]) ./ 2))
+        _brm_svi_swap_probe(t, finite, :mean, failing, middle, t.units[i])
+    end
     (; term=:unit, unit=i, quantities,
        coordinates=t.m.view.coordinates[sort!(unique!(bad))],
        draw_finite=all(isfinite, g) && all(z -> all(isfinite, z), zs), points,
-       largest=_brm_svi_term_largest(t, points, vcat(t.globals, t.units[i])))
+       largest=_brm_svi_term_largest(t, points, vcat(t.globals, t.units[i])),
+       furthest=_brm_svi_prior_outliers(t, failing), probe)
 end
 
 # Throws `BRMSVINonfiniteError` (iteration 0, which the caller fills in) when
 # the global term `P`, `gP` at `g` or a unit's terms (`problems`) are not finite.
-function _brm_svi_check_finite(t, g, P, gP, problems)
+# `center`, the global factor's mean, is the global term's swap-probe reference.
+function _brm_svi_check_finite(t, g, P, gP, problems; center=nothing)
     found = NamedTuple[]
     if !(isfinite(P) && all(isfinite, gP))
         quantities = Symbol[]
         isfinite(P) || push!(quantities, :value)
         all(isfinite, gP) || push!(quantities, :global_gradient)
         points = (; draw=_brm_svi_term_point(t, g))
+        probe = center === nothing ? nothing :
+            _brm_svi_swap_probe(t, x -> begin
+                    v, gv = _brm_svi_global_term(t, x[t.globals])
+                    isfinite(v) && all(isfinite, gv)
+                end, :mean, points.draw, _brm_svi_term_point(t, center), t.globals)
         push!(found, (; term=:global, unit=0, quantities,
             coordinates=t.m.view.coordinates[t.globals[findall(!isfinite, gP)]],
             draw_finite=all(isfinite, g), points,
-            largest=_brm_svi_term_largest(t, points, t.globals)))
+            largest=_brm_svi_term_largest(t, points, t.globals),
+            furthest=_brm_svi_prior_outliers(t, points.draw), probe))
     end
     for p in problems
         p === nothing || push!(found, p)
@@ -1081,7 +1185,8 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
             centered[k] = (; gc=(gc₊ .+ gc₋) ./ 2, adjoints=(a₊, a₋))
         end
         problems[k] = _brm_svi_nonfinite_unit(t, i, g, (z₊, z₋), (v₊, v₋),
-            (gg₊, gg₋), (gz₊, gz₋), touched; packed=_brm_svi_packed_draw(centering, frame, q, i, g))
+            (gg₊, gg₋), (gz₊, gz₋), touched; packed=_brm_svi_packed_draw(centering, frame, q, i, g),
+            finite=x -> _brm_svi_unit_finite(t, i, x, plan, work, touched))
         gg = [gg₊[p] + gg₋[p] for p in touched]
         # The buffers are the worker's, zero again for its next unit.
         for p in touched
@@ -1090,7 +1195,7 @@ function _brm_svi_iteration!(rng, t, q, global_opt, batch, lr_global, β;
         terms[k] = (; value=(v₊ + v₋) / 2, gg, gz=(gz₊ .+ gz₋) ./ 2, gd=(gz₊ .- gz₋) ./ 2)
     end
     # Before anything changes q or the optimizer.
-    _brm_svi_check_finite(t, g, P, gP, problems)
+    _brm_svi_check_finite(t, g, P, gP, problems; center=q.μ)
 
     # A sparse global takes its readers from their sites (src/nlme_svi_sites.jl),
     # not from N / B times this batch's.

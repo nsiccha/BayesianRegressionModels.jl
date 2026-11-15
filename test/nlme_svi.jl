@@ -200,6 +200,18 @@ end
     @test abs(p.largest.value) > 9000
     @test p.largest.coordinate in m.view.coordinates[t.units[3]]
     @test occursin("largest coordinate: $(p.largest.coordinate)", sprint(showerror, e))
+    # `furthest` measures the failing point's globals from the target's own prior
+    # projection (the sd the sd bound multiplies), furthest first; `probe` is
+    # nothing here, since the pair's mean (all 1e4) fails as well as both draws.
+    @test length(t.prior_mean) == length(t.sd_prior) == length(t.globals)
+    @test !isempty(p.furthest) && issorted(p.furthest; by=r -> r.prior_sds, rev=true)
+    for r in p.furthest
+        k = findfirst(==(r.coordinate), m.view.coordinates[t.globals])
+        @test r.value == plus[t.globals[k]]
+        @test r.prior_sds ≈ abs(r.value - t.prior_mean[k]) / t.sd_prior[k]
+    end
+    @test p.probe === nothing
+    @test occursin("furthest from their priors: $(first(p.furthest).coordinate)", sprint(showerror, e))
     # The run-level loop stamps the failing iteration.
     c = BRM._brm_svi_controls(length(t.units); batch_size=length(t.units),
         max_iterations=10, lr_global=0.01, unit_step=0.1, polish_lr=0.05,
