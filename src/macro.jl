@@ -619,7 +619,9 @@ predictor. So for a model that declares every parameter it reads
 (`sigma ~ …`), the result equals `brm_columns(brm_descriptor(builder, df))`,
 except that a column only a `constant(...)` reads is listed here but not in
 the descriptor's replay schema, because replay keeps the fitted constant. A
-name read but declared nowhere is listed as a column.
+name read but declared nowhere is listed as a column. A `@plate` cell's own
+names, its `=` locals and the latents it declares with `~` on a bare name
+(`z ~ Normal(m[i], s)`, `T::shares(total[i]) ~ …`), are never columns.
 """
 brm_columns(b::BRMBuilder) = b.columns
 
@@ -683,11 +685,17 @@ function _brm_inventory_statement!(inventory, lhs, rhs, legacy_kernel_doblock, r
     inventory
 end
 
+# The names a cell binds itself: its formals, its `=` locals, the latents it
+# declares (`z ~ Law(…)` on a bare name; a typed `T::shares(total) ~ …` is a
+# bare name by now) and its `@scan` state. An observation's target is always a
+# formal (`@plate for` slices `y[i]` into the input `y`), so a bare `~` target
+# that is not one is a cell latent or a component cell's value, never data.
 function _brm_cell_bound_names!(acc, lambda::Expr)
     _brm_bound_symbols!(acc, lambda.args[1])
     body = lambda.args[2]
     for stmt in (Meta.isexpr(body, :block) ? body.args : Any[body])
         Meta.isexpr(stmt, :(=), 2) && _brm_bound_symbols!(acc, stmt.args[1])
+        isxcall(stmt, :~) && length(stmt.args) == 3 && _brm_bound_symbols!(acc, stmt.args[2])
     end
     _brm_scan_bound_names!(acc, body)
     acc
