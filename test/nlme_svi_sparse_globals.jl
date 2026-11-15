@@ -254,15 +254,26 @@ svi_window_nlme() = brm_nlme_model(SVI_WINDOW_RK;
     @test maximum(old.r) > 1.4 > maximum(b.r)
     @test sqrt(mean(abs2, old.z)) > sqrt(mean(abs2, b.z))
 
-    # Coupled (the default): a unit's factor follows the boundaries it reads. The
-    # boundaries stay at least as wide as the independent family's optimum (median
-    # 1.02 of it, seed 101, BRM 0.2.286), and their means stay at the exact ones
-    # within their own sds.
+    # Coupled (the default). From BRM 0.2.322 each window's `e .~ Normal(0, 1)`
+    # innovations are coupled rows (no longer learned-centering cells), and a fresh
+    # coupling leaves the unit's sparse globals, its two boundaries, out of its
+    # columns: a boundary's site estimates its readers' curvature along the
+    # boundary's own draw, and a reader coupled to that draw made the site learn the
+    # marginal curvature. Coupled to the boundaries, this fit's boundary means
+    # drifted 60 to 220 conditional sds off through settling and it hit the
+    # iteration cap; with the boundaries on their sites they stay at the exact means
+    # within their own sds, and at least as wide as the independent family's optimum.
     coupled = brm_svi_fit(m; SVI_WINDOW_OPT..., rng=Xoshiro(101), ndraws=10)
     cb = svi_boundaries(SVI_WINDOW_EXACT, coupled.diagnostics.q, coupled.diagnostics.globals)
     @info "coupled" mean_err_rms_own=sqrt(mean(abs2, cb.z ./ cb.r)) sd_median=median(cb.r)
     @test sort(coupled.diagnostics.sparse_globals.coordinates) ==
         sort(coupled.diagnostics.globals[cb.positions])
+    units = coupled.diagnostics.coupling.units
+    # Each window's 7 innovations; a station's first and last window also own the
+    # end boundary only they read (`Normal(0, 30)`, so a coupled row as well).
+    @test sort(unique(length(u.rows) for u in units)) == [7, 8]
+    @test count(u -> length(u.rows) == 8, units) == 4
+    @test !any(u -> any(in(cb.positions), u.columns), units) # no boundary column
     @test median(cb.r) > 0.9
     @test sqrt(mean(abs2, cb.z ./ cb.r)) < 1.0
 end

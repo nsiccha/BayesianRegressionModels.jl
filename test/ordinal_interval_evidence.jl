@@ -93,7 +93,7 @@ end
         mu ~ 1 + x
         y_min ~ coarsened(Normal(mu, 1.0); upper=y_max)
     end
-    @test_throws "`coarsened` supports an `Ordinal(structure, link, eta)` base" SBBRMI(
+    @test_throws "`coarsened` supports an `Ordinal(structure, link, eta)` or `Ordinal(structure, link, eta, thresholds[, discrimination])` base" SBBRMI(
         normal((; x=randn(4), y_min=randn(4), y_max=randn(4))); mod=@__MODULE__)
 end
 

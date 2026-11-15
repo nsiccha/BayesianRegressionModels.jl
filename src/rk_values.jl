@@ -999,11 +999,32 @@ Base.@nospecializeinfer function _rk_value_leveled_responses(@nospecialize(obser
         raw isa AbstractVector && !(raw isa AbstractVector{<:AbstractVector}) || continue
         prepared = _brm_prepare_response(observation.key, rhs, raw;
             training=_rk_value_response_training(observation.key, rhs, raw))
+        explicit = getf(rhs) === Ordinal && prepared.fit === nothing
         upper = range_plan === nothing || raw isa _BRMAbsentResponse ? nothing :
+            explicit ?
+            _rk_value_coarsened_explicit_upper(observation.key, range_plan, prepared,
+                raw, data) :
             _rk_value_coarsened_upper(observation.key, range_plan, prepared, raw, data)
-        records[observation.key] = (; raw, head=getf(rhs), prepared, upper)
+        records[observation.key] = (; raw, head=getf(rhs), prepared, upper, explicit)
     end
     records
+end
+
+# Coarsened evidence over an explicit-threshold `Ordinal` (snag
+# ordinal-explicit-149b4a5f): both ends are category codes, the explicit form's
+# response values, so they bind as data, with no level table. RKPPL's
+# `interval_censored` event `(lower, upper]` reads the response as the lower
+# code minus one and `upper` as the upper code.
+function _rk_value_coarsened_explicit_upper(key::Symbol, plan, prepared, raw, data)
+    upper_name = name(plan.upper)
+    lo, hi = _brm_coarsened_explicit_codes(key, raw,
+        _brm_coarsened_upper_labels(plan.upper, data), upper_name; prefix="RK backend")
+    coded = Symbol(key, :_upper_level)
+    haskey(data, coded) && error(
+        "RK backend: `coarsened` response `$key` binds its upper codes as " *
+        "`$coded`, which the data already holds; rename that column")
+    (; codes=hi, below=lo .- 1, coded, modifier=_BRMResponseModifierPlan(:coarsened,
+        prepared.distribution, nothing, NamedColumn(coded, DataColumn(hi))))
 end
 
 # A coarsened response's upper labels, checked against the response's fitted
@@ -1037,10 +1058,18 @@ end
 # the formula-predictor route. `OrderedLogistic` keeps SB's raw 1:K codes: an
 # integer response binds as the data hold it, any other is coded in emitted
 # source against the levels 1:K.
-_rk_value_codes_levels(entry) = entry.head !== OrderedLogistic ||
-    !(eltype(entry.raw) <: Integer) || eltype(entry.raw) === Bool
-_rk_value_response(entry) = _rk_value_codes_levels(entry) ?
-    entry.prepared.response : entry.raw
+#
+# An `Ordinal` with explicit thresholds has no level table: its response is the
+# category codes 1:(length(thresholds) + 1) themselves (`_brm_ordinal_codes`),
+# so they bind as the data hold them. Coding them against the observed levels
+# would renumber them whenever a lower category is unobserved.
+_rk_value_codes_levels(entry) = !entry.explicit && (entry.head !== OrderedLogistic ||
+    !(eltype(entry.raw) <: Integer) || eltype(entry.raw) === Bool)
+function _rk_value_response(entry)
+    entry.explicit && return entry.upper === nothing ?
+        entry.prepared.response : entry.upper.below
+    _rk_value_codes_levels(entry) ? entry.prepared.response : entry.raw
+end
 
 # Per-threshold coefficients form a terms × stages matrix that only their
 # threshold-effect design reads; the response emitter declares that matrix.
@@ -1208,6 +1237,15 @@ Base.@nospecializeinfer function _brm_rk_value_plan(@nospecialize(brmi::BRMI),
     end
     for key in sort!(collect(keys(leveled)))
         entry = leveled[key]
+        if entry.explicit && entry.upper !== nothing
+            # Explicit thresholds: the upper codes are data as they stand.
+            upper = entry.upper
+            upper.coded in taken && error(
+                "RK backend: `coarsened` response `$key` binds its upper codes as " *
+                "`$(upper.coded)`, which the model already names; rename it")
+            push!(taken, upper.coded)
+            value_columns[upper.coded] = upper.codes
+        end
         _rk_value_codes_levels(entry) || continue
         raw = _rk_ast_fresh_name(string(key, "_raw"), taken)
         value_columns[raw] = entry.raw
