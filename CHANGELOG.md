@@ -12,6 +12,36 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.318
+
+- `Ordinal(structure, link, eta, thresholds[, discrimination])` with
+  thresholds the model gives is now a response inside `@brm`, in a `@plate`
+  cell and at model scope (snag `ordinal-varying-36cc2a82`, design decision
+  `1e7y0ls`). A cell can compute one threshold vector per group, such as each
+  examiner's ordered thresholds partially pooled around population gaps and
+  centred so they do not duplicate an examiner shift of `eta`; at model scope
+  the thresholds are a declared vector with its own prior, or data.
+  - The response holds the category codes `1:(length(thresholds) + 1)`: the
+    thresholds fix the categories, so one nobody used stays in the model. A
+    value that is not a code is refused when the backend is built (in an
+    SBBRMI cell, by the Stan program's data check when it first evaluates).
+  - A cumulative threshold vector that is not strictly increasing gives the
+    point log density `-Inf` on both backends; stopping-ratio thresholds need
+    not be ordered. Discrimination is the fifth argument or `discrimination=`.
+  - `per_threshold=` stays an option of BRM's implicit thresholds; with
+    explicit thresholds, write the effects into the vector you pass.
+  - SBBRMI: cells and model scope, with pointwise log likelihood, predictive
+    draws and an omitted response (prior draws), through the new Stan triad
+    `brm_ordinal_explicit`. A draw from cumulative thresholds that are not
+    strictly increasing (a prior that does not order them) is refused. RKBRMI: model-scope thresholds and a cell reading a
+    declared model vector, natively and in the JAX module. A threshold vector
+    computed in the cell waits on ReactiveKernels snag
+    `rkppl-sampled-pe-bc377786` and is refused at lowering until then.
+  - Before, SBBRMI refused an in-cell `Ordinal` with "derives outcome structure
+    from observed response values … (response omitted from the data)" although
+    the response was bound, and both backends refused four arguments at model
+    scope.
+
 ## 0.2.317
 
 - `coarsened(Ordinal(...); upper)`: coarsened ordinal evidence, a row that

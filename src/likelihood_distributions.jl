@@ -38,10 +38,15 @@ intercepts and need not be ordered; `eta` may be either one shared scalar or a
 vector with one value per non-terminal stage. The support is
 `1:(length(thresholds) + 1)`.
 
-Inside `@brm`, omit `thresholds`: for example,
-`y ~ Ordinal(Cumulative(), ProbitLink(), eta)`. BRM prepares the fitted outcome
-levels and threshold parameters. Formula-only keywords `discrimination=` and
-`per_threshold=` are documented in the likelihood guide.
+Inside `@brm`, omit `thresholds` to have BRM allocate them, for example
+`y ~ Ordinal(Cumulative(), ProbitLink(), eta)`: BRM prepares the fitted outcome
+levels and threshold parameters, and the formula-only keywords
+`discrimination=` and `per_threshold=` are documented in the likelihood guide.
+Or give the thresholds yourself, at model scope or in a `@plate` cell, as this
+four- or five-argument call: `y[rows[e]] ~ Ordinal(Cumulative(), ProbitLink(),
+eta[rows[e]], cuts)` with `cuts` one examiner's own vector. The response then
+holds the category codes `1:(length(thresholds) + 1)`, and a cumulative
+vector that is not strictly increasing gives the point log density `-Inf`.
 """
 struct Ordinal{S<:OrdinalStructure,L<:OrdinalLink,T<:Real,E} <:
        Distributions.DiscreteUnivariateDistribution

@@ -19,6 +19,7 @@ constructor and the supported compositions.
 | Count | `Poisson(lambda)`, `NegativeBinomial2(mu, phi)` | Rate or mean/precision | Log |
 | Unordered category | `CategoricalLogit(eta2, eta3, ...)` | Log odds against the first level | Identity on each log odds |
 | Ordered category | `Ordinal(Cumulative(), ProbitLink(), eta)` | Predictor and inferred thresholds | Link supplied by the tag |
+| Ordered category, thresholds given | `Ordinal(Cumulative(), ProbitLink(), eta, cuts)` | Predictor and the model's threshold vector (per group in a `@plate` cell) | Response holds codes `1:(length(cuts) + 1)` |
 | Direction | `CircularVonMises(mu, kappa)` | Direction and concentration | Identity for direction, log for concentration |
 | Joint real vector | `MvNormalCholesky([mu1, mu2], L)` | Mean vector, covariance factor | Identity for means |
 

@@ -261,7 +261,55 @@ function _rk_kernel_observation_distribution(observation, names=observation.argu
         return _BRMPreparedExpr(LocationScale,
             (location, scale, _BRMPreparedExpr(TDist, (nu,), (;))), (;))
     end
+    # A cell's `Ordinal` is the explicit-threshold record a formula response
+    # prepares (`_brm_prepare_explicit_ordinal`): its tags, then the eta and
+    # thresholds the cell computes, and its discrimination.
+    tags = get(observation, :ordinal, nothing)
+    if tags !== nothing
+        eta, thresholds, discrimination = arguments
+        return _BRMPreparedExpr(Ordinal, (tags..., eta, thresholds), (; discrimination))
+    end
     _BRMPreparedExpr(observation.callable, arguments, (;))
+end
+
+# `Ordinal(structure, link, eta, thresholds[, discrimination])` in a cell, as
+# the cell values it reads: the eta, the thresholds and the discrimination (the
+# fifth argument or `discrimination=`, one by default). The structure and link
+# are the law's tags, resolved by the callable the cell's module binds, exactly
+# as `TDist` is the law of an in-cell `LocationScale`.
+function _rk_kernel_ordinal_values(scope, values, kernel)
+    usage = "write `Ordinal(Cumulative() | StoppingRatio(), LogitLink() | " *
+        "ProbitLink() | CloglogLink(), eta, thresholds[, discrimination])`"
+    keyword(v) = Meta.isexpr(v, :parameters) || Meta.isexpr(v, :kw)
+    positional = filter(!keyword, collect(values))
+    keywords = Pair{Symbol,Any}[]
+    for v in filter(keyword, collect(values))
+        for k in (Meta.isexpr(v, :parameters) ? v.args : (v,))
+            Meta.isexpr(k, :kw, 2) && k.args[1] === :discrimination || error(
+                "RK backend: kernel `$kernel` in-cell `Ordinal` takes only the " *
+                "`discrimination` keyword, got `$k`")
+            push!(keywords, :discrimination => k.args[2])
+        end
+    end
+    length(positional) in (4, 5) || error(
+        "RK backend: kernel `$kernel` in-cell `Ordinal` observation takes its " *
+        "thresholds explicitly (the cell has no fitted level table to allocate them " *
+        "from); $usage")
+    length(positional) + length(keywords) <= 5 || error(
+        "RK backend: kernel `$kernel` in-cell `Ordinal` got its discrimination twice, " *
+        "as the fifth argument and as `discrimination=`")
+    tag(arg, expected) = begin
+        bound = Meta.isexpr(arg, :call) && length(arg.args) == 1 ?
+            _rk_kernel_binding(scope, first(arg.args)) : nothing
+        bound isa Type && bound <: expected || error(
+            "RK backend: kernel `$kernel` in-cell `Ordinal` needs a `$expected` tag " *
+            "call, got `$arg`; $usage")
+        _brm_ordinal_tag(bound, expected; prefix="RK backend")
+    end
+    discrimination = length(positional) == 5 ? positional[5] :
+        isempty(keywords) ? 1.0 : last(only(keywords))
+    (; values=(positional[3], positional[4], discrimination),
+       tags=(tag(positional[1], OrdinalStructure), tag(positional[2], OrdinalLink)))
 end
 
 # Julia's Student-t observation, `LocationScale(location, scale, TDist(nu))`, as
@@ -566,6 +614,10 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
             callable = hidden === nothing ?
                 _rk_kernel_observation_family(scope, distribution, name) : hidden.law
             values = hidden === nothing ? Tuple(distribution.args[2:end]) : hidden.values
+            # An `Ordinal`'s structure and link are tags, not cell values.
+            ordinal = callable === Ordinal ?
+                _rk_kernel_ordinal_values(scope, values, name) : nothing
+            ordinal === nothing || (values = ordinal.values)
             any(value -> Meta.isexpr(value, :parameters), values) && error(
                 "RK backend: kernel `$name` observation constructor keywords need explicit argument lowering")
             callable === LocationScale &&
@@ -585,7 +637,8 @@ Base.@nospecializeinfer function _rk_prepare_kernel_value(@nospecialize(brmi::BR
                 get(columns, input.source, nothing) isa AbstractVector{<:AbstractArray})
             push!(observations, (; source, param=lhs, callable,
                 arguments=values, argument_names, weight, weight_name, nested,
-                modifier, bounds, input))
+                modifier, bounds, input,
+                ordinal=ordinal === nothing ? nothing : ordinal.tags))
             push!(observed, statement)
             continue
         end
@@ -1228,6 +1281,8 @@ Base.@nospecializeinfer function _brm_rk_composed_kernel_plan(@nospecialize(brmi
     _rk_plan_cell_gmrf!(kernels, plan, program.context.data, taken)
     for kernel in kernels, observation in kernel.observations
         raw = program.context.data[observation.source]
+        get(observation, :ordinal, nothing) === nothing ||
+            (raw = _brm_ordinal_codes(observation.source, raw; prefix="RK backend"))
         distribution = _rk_kernel_observation_distribution(observation)
         weight = observation.weight === nothing ? nothing :
             _BRMPreparedRef(observation.weight_name, :whole)
