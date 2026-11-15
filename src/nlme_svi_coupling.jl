@@ -204,6 +204,34 @@ function _brm_svi_with_coupling(t, q, coupling::LinearCoupling)
     t, merge(q, (; coupling=(; coupling.step, columns, rows, V)))
 end
 
+# A sparse global steps on its readers' sites (src/nlme_svi_sites.jl), and a site's
+# curvature is Stein's estimate along that global's own draw ε, the reader's
+# factor held fixed. A reader coupled to the same ε moves with it, so its site
+# measures the curvature along the coupled path, the marginal one, which pulls the
+# global's mean back too weakly. On the window toy of
+# test/nlme_svi_sparse_globals.jl (boundaries read by two windows each, the
+# windows' `e .~ Normal(0, 1)` innovations coupled, batch 2 so N/B = 32) the
+# boundaries' means drifted 60 to 220 conditional sds off through settling and
+# the fit hit its iteration cap; the same coupled fit with no sparse global
+# (batch 32) reached the exact means (0.03 of their own sds) and the boundaries'
+# exact marginal sd (2.13 against 2.16 times the conditional). So a fresh
+# coupling leaves a unit's sparse globals out of its columns: they keep their
+# sites, and the unit stays coupled to the globals stepped on the minibatch
+# estimate. Called before the first iteration, while every V_i is still zero.
+_brm_svi_uncouple_sparse!(coupling, sites) = coupling    # no coupling or no sparse global
+function _brm_svi_uncouple_sparse!(coupling::NamedTuple, sites::_BRMSVISites)
+    for i in eachindex(coupling.columns)
+        all(iszero, coupling.V[i]) || error("brm_svi_fit: internal: a sparse global " *
+            "left a unit's coupling after its first step")
+        keep = [k for (k, p) in enumerate(coupling.columns[i]) if sites.slot[p] == 0]
+        length(keep) == length(coupling.columns[i]) && continue
+        r = size(coupling.V[i], 2) - length(coupling.columns[i])
+        coupling.columns[i] = coupling.columns[i][keep]
+        coupling.V[i] = zeros(size(coupling.V[i], 1), length(keep) + r)
+    end
+    coupling
+end
+
 # Unit i's ζ at the global draw's standard normals (ε, η).
 _brm_svi_coupling_noise(coupling, i, ε, η) = vcat(ε[coupling.columns[i]], η)
 

@@ -26,6 +26,17 @@
 # Gaussian vectors read their law's mean and scale per element,
 # `<x>_prior_mean` and `<x>_prior_scale`, which RK names for them.
 #
+# A vector whose law reads no estimated coordinate (`e[1:n] .~ Normal(0, 1)`,
+# `x[1:n] .~ Normal(0, 30)`) is not a cell. Its μ and ℓ are constants, so u is a
+# fixed affine function of y whatever c is: the identity for Normal(0, 1), a fixed
+# rescale otherwise, which every unit factor family already spans. The control
+# could then learn nothing (its gradient is exactly zero at ℓ = μ = 0), while the
+# cell would cost a chain term per draw and keep linear coupling off the
+# coordinate (src/nlme_svi_coupling.jl). It is listed uncentred instead. States
+# saved before BRM 0.2.322 centred such vectors; their saved policy
+# (`constant_laws`, true when absent) keeps doing so, so their controls and
+# carried frames stay valid.
+#
 # SVI fits q over u and the controls jointly by the ELBO of
 #
 #     F_c(g, u) = F(g, y(u; g, c)) + Σ (c0 - c) ℓ(g),
@@ -48,7 +59,9 @@ by the ELBO (the VIP of Gorinova, Moore and Hoffman, 2020). `c = 0` is the
 non-centred coordinate and `c = 1` the centred one: a random effect located at
 its population predictor and, in a correlated block, at its conditional mean
 given the block's earlier margins; an authored Gaussian vector element at its
-law's mean. Controls start at `start` (grouped HSGP weights at `min(start, 0.1)`);
+law's mean, when that law's mean or scale reads an estimated coordinate (a
+constant law, such as `Normal(0, 1)`, leaves nothing to learn and is coupled
+instead). Controls start at `start` (grouped HSGP weights at `min(start, 0.1)`);
 `step` is the Adam step size of
 the controls' logits, taken whenever their unit is in the batch.
 Pass `centering=nothing` for the plain factorization. Streaming and optimizer
@@ -57,14 +70,25 @@ continuation retain the saved policy.
 struct LearnedCentering
     start::Float64
     step::Float64
+    # Whether an authored Gaussian vector whose law reads no estimated coordinate
+    # is a cell: false for every fresh fit, true only for a state saved before
+    # BRM 0.2.322 (`_brm_svi_saved_centering`).
+    constant_laws::Bool
     function LearnedCentering(; start::Real=0.5, step::Real=0.05)
         0 < start < 1 || throw(ArgumentError(
             "LearnedCentering: start must lie strictly between 0 and 1, got $start"))
         isfinite(step) && step > 0 || throw(ArgumentError(
             "LearnedCentering: step must be finite and positive, got $step"))
-        new(Float64(start), Float64(step))
+        new(Float64(start), Float64(step), false)
     end
+    LearnedCentering(c::LearnedCentering, constant_laws::Bool) =
+        new(c.start, c.step, constant_laws)
 end
+
+# A saved centering policy: `(; start, step)` and, from BRM 0.2.322, `constant_laws`.
+# A state saved before it centred constant-law vectors and keeps doing so.
+_brm_svi_saved_centering(saved) = LearnedCentering(LearnedCentering(; saved.start, saved.step),
+    Bool(get(saved, :constant_laws, true)))
 
 # Omission selects learned coordinates on a fresh fit. A streaming update keeps
 # its saved policy, including old states without a centering field. Explicit
@@ -79,7 +103,7 @@ function _brm_svi_resolve_centering(previous, centering)
     ismissing(centering) || centering === nothing || throw(ArgumentError(
         "brm_svi_fit: a streaming update carries the previous fit's centering; omit centering"))
     hasproperty(previous.layout, :centering) ?
-        LearnedCentering(; previous.layout.centering...) : nothing
+        _brm_svi_saved_centering(previous.layout.centering) : nothing
 end
 
 # The logistic of a control's unconstrained value, and its inverse.
@@ -210,17 +234,61 @@ _brm_svi_packed_centering(::_BRMSVICenteringBlock) = 0.0
 _brm_svi_packed_centering(::_BRMSVICenteringVector) = 1.0
 
 # The adjoints a unit's reverse sweep leaves for the batch: one per family's
-# natural factor, sparse (port, element, value) terms of the vector laws' mean
-# and scale ports (element 0 for a scalar port), and (global, value) terms of
-# the locations' population coefficients. The batch adds them to the global
-# gradient, so a unit never writes a global outside its own touched set.
-struct _BRMSVICenteringAdjoint
+# natural factor, and one per cell of the unit (indexed as its controls) of the
+# cell's location and, for a vector cell, of its law's scale. `instances` are the
+# unit's, which say what each cell's location and scale read: a block cell's
+# population coefficients (`location`), a vector cell's law mean and scale ports
+# at its element. The batch adds them to the global gradient, so a unit never
+# writes a global outside its own touched set. They are dense in the unit's cells,
+# so a unit's draws add into one (`_brm_svi_adjoint_add!`) and the batch maps each
+# cell once per unit, not once per draw: with per-draw terms, the bookkeeping of a
+# unit owning 64 vector cells took about three quarters of the iteration on snag
+# learned-centerin-1fc668a4's window toy (orthogonal design, 132 draws per unit).
+struct _BRMSVICenteringAdjoint{I}
     A::Vector{Matrix{Float64}}
-    ports::Vector{Tuple{Int,Int,Float64}}
-    globals::Vector{Tuple{Int,Float64}}
+    location::Vector{Float64}
+    scale::Vector{Float64}
+    instances::I
 end
-_BRMSVICenteringAdjoint(frame) = _BRMSVICenteringAdjoint([zeros(size(A)) for A in frame.A],
-    Tuple{Int,Int,Float64}[], Tuple{Int,Float64}[])
+_BRMSVICenteringAdjoint(frame, instances, ncells::Int) = _BRMSVICenteringAdjoint(
+    [zeros(size(A)) for A in frame.A], zeros(ncells), zeros(ncells), instances)
+
+# `a += b`, for two adjoints of one unit.
+function _brm_svi_adjoint_add!(a::_BRMSVICenteringAdjoint, b::_BRMSVICenteringAdjoint)
+    for (x, y) in zip(a.A, b.A)
+        x .+= y
+    end
+    a.location .+= b.location
+    a.scale .+= b.scale
+    a
+end
+
+# Adds `w` times a unit's adjoint to the batch's: the natural factors' into `Ā`, the
+# vector ports' into their cotangents `cot` (one per port, shaped as its value) and
+# the block locations' into the globals' gradient `locations`.
+function _brm_svi_adjoint_terms!(Ā, cot, locations, a::_BRMSVICenteringAdjoint, w::Float64)
+    for (x, y) in zip(Ā, a.A)
+        x .+= w .* y
+    end
+    for inst in a.instances
+        _brm_svi_cell_terms!(cot, locations, inst, a, w)
+    end
+    nothing
+end
+function _brm_svi_cell_terms!(cot, locations, inst::_BRMSVICenteringBlock, a, w)
+    for (m, cell) in enumerate(inst.cells), (k, wk) in inst.location[m]
+        k > 0 && (locations[k] += w * wk * a.location[cell])
+    end
+end
+function _brm_svi_cell_terms!(cot, locations, inst::_BRMSVICenteringVector, a, w)
+    for (n, cell) in enumerate(inst.cells)
+        j = inst.elements[n]
+        _brm_svi_port_add!(cot, inst.mean, j, w * a.location[cell])
+        _brm_svi_port_add!(cot, inst.scale, j, w * a.scale[cell])
+    end
+end
+# A port's cotangent: a number for a scalar law argument (element 0), else its element.
+_brm_svi_port_add!(cot, p, j, v) = cot[p] isa Number ? (cot[p] += v) : (cot[p][j] += v)
 
 # The reverse sweep of `_brm_svi_centering_forward!` plus its log-Jacobian. On
 # entry `gy` holds ∂F/∂y over the unit's block; on return it holds ∂F_c/∂u. Adds
@@ -267,6 +335,7 @@ end
 struct _BRMSVICenteringPlan{R,P}
     start::Float64
     step::Float64
+    constant_laws::Bool
     ports::Tuple{Vararg{Symbol}}
     families::Vector{NamedTuple}
     instances::Vector{Vector{_BRMSVICenteringInstance}}
@@ -338,7 +407,8 @@ end
 # (`BRMNLMEView.mu_references`); each level of a block over a `shared_groups`
 # grouping whose draws one unit owns, located at the coefficients its margins
 # absorb (`_brm_svi_location_references`); and each authored Gaussian vector
-# element a unit owns whose law reads no unit coordinate.
+# element a unit owns whose law reads a global but no unit coordinate (any law
+# that reads no unit coordinate under a saved `constant_laws` policy).
 function _brm_svi_centering_plan(t, centering::LearnedCentering)
     m = t.m
     view = m.view
@@ -525,11 +595,23 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
         end
         isempty(owned) && isempty(missing_elements) && continue
         law = (record.gaussian.mean, record.gaussian.scale)
+        reads = _rk_spl_value_reads(m.backend, law, m.unit)
+        # A law that reads no estimated coordinate: the map is a fixed affine one
+        # (see the header), so the elements stay in their packed coordinates.
+        if !centering.constant_laws && !any(p -> owner[p] > 0 || haskey(global_index, p), reads)
+            for i in sort!(collect(keys(owned)))
+                push!(uncentered, (; kind=:vector, record.declaration, level=nothing,
+                    coordinates=view.coordinates[first.(owned[i])],
+                    reason="its law's mean and scale read no estimated coordinate, so " *
+                        "centring would only rescale it by a fixed factor; linear " *
+                        "coupling conditions it on the globals instead"))
+            end
+            continue
+        end
         for (p, j) in missing_elements
             absent[p] = (port!(law[1]), port!(law[2]), j)
         end
         isempty(owned) && continue
-        reads = _rk_spl_value_reads(m.backend, law, m.unit)
         if any(p -> owner[p] > 0, reads)
             for i in sort!(collect(keys(owned)))
                 list = owned[i]
@@ -607,7 +689,8 @@ function _brm_svi_centering_plan(t, centering::LearnedCentering)
     names = Tuple(ports)
     read = isempty(names) ? nothing : _rk_value_reader(m.backend, names)
     pullback = isempty(names) ? nothing : _rk_value_pullback(m.backend, names, copy(m.unit))
-    _BRMSVICenteringPlan(centering.start, centering.step, names, families, instances, ncells, cells,
+    _BRMSVICenteringPlan(centering.start, centering.step, centering.constant_laws, names,
+        families, instances, ncells, cells,
         uncentered, absent, absent_blocks, absent_instances, read, pullback, copy(m.unit))
 end
 
@@ -635,11 +718,11 @@ end
 
 # The gradient over the globals of the batch's summed scale and location
 # adjoints (each unit's weighted as its term is): A = diag(s) L puts
-# s̄[m] = Σ_k Ā[m, k] L[m, k] and L̄ = diag(s) Ā on the family's ports, and one RK
-# pullback takes every port's cotangent to the packed coordinates.
-function _brm_svi_centering_gradient(plan::_BRMSVICenteringPlan, t, frame, Ā, terms)
+# s̄[m] = Σ_k Ā[m, k] L[m, k] and L̄ = diag(s) Ā on the family's ports, which join
+# the vector ports' cotangents `cot`, and one RK pullback takes every port's
+# cotangent to the packed coordinates.
+function _brm_svi_centering_gradient(plan::_BRMSVICenteringPlan, t, frame, Ā, cot)
     plan.pullback === nothing && return zeros(length(t.globals))
-    cot = Any[x isa Number ? 0.0 : zeros(Float64, size(x)) for x in frame.values]
     slot(name) = findfirst(==(name), plan.ports)
     for (ϕ, f) in enumerate(plan.families)
         record, stratum = f.record, f.stratum
@@ -665,9 +748,6 @@ function _brm_svi_centering_gradient(plan::_BRMSVICenteringPlan, t, frame, Ā, t
             p = slot(record.L)
             stratum === nothing ? (cot[p] .+= L̄) : (view(cot[p], :, :, stratum) .+= L̄)
         end
-    end
-    for (p, j, v) in terms
-        cot[p] isa Number ? (cot[p] += v) : (cot[p][j] += v)
     end
     plan.pullback(frame.point, Tuple(cot))[t.globals]
 end
@@ -706,8 +786,8 @@ function _brm_svi_centering_controls(plan::_BRMSVICenteringPlan; carried=nothing
             _brm_svi_control_logit(_brm_svi_cell_start(plan, plan.cells[i][k])) : old[p]
             for (k, p) in enumerate(positions[i])]
     end
-    (; plan.start, plan.step, x, opt=[_BRMSVIAdam(n, plan.step) for n in plan.ncells],
-       positions)
+    (; plan.start, plan.step, plan.constant_laws, x,
+       opt=[_BRMSVIAdam(n, plan.step) for n in plan.ncells], positions)
 end
 
 # Unit i's logits as one value per coordinate of its block, `NaN` off the cells.
@@ -719,8 +799,7 @@ end
 
 # A resumed target's plan, which its checkpoint's controls must fit cell for cell.
 function _brm_svi_centered_target(t, q)
-    plan = _brm_svi_centering_plan(t, LearnedCentering(; q.centering.start,
-        q.centering.step))
+    plan = _brm_svi_centering_plan(t, _brm_svi_saved_centering(q.centering))
     length.(q.centering.x) == plan.ncells || throw(ArgumentError(
         "brm_svi_resume: the checkpoint's centering controls do not fit this target's cells"))
     merge(t, (; centering=plan))
@@ -759,7 +838,7 @@ function _brm_svi_centered_unit_term!(gg, gu, centering::_BRMSVICenteringPlan, f
     logjac, μ, ℓ = _brm_svi_unit_centering!(y, u, centering.instances[i],
         centering.ncells[i], c, frame, g, centering.base)
     gc = zeros(centering.ncells[i])
-    adjoint = _BRMSVICenteringAdjoint(frame)
+    adjoint = _BRMSVICenteringAdjoint(frame, centering.instances[i], centering.ncells[i])
     prior = t.prior
     value = if prior isa _BRMSVIStreamingPrior && prior.carried[i]
         _brm_svi_unit_partition!(gg, gu, t, i, g, y, plan) +
@@ -774,13 +853,20 @@ function _brm_svi_centered_unit_term!(gg, gu, centering::_BRMSVICenteringPlan, f
     value + logjac, gc, adjoint
 end
 
+# Every report row leads with `kind`, `block`, `declaration` and `level`, `nothing`
+# where a row has none (a vector's rows have no block, a random effect's no
+# declaration), so code reading the report can key every row the same way.
+_brm_svi_report_row(row) = merge((; row.kind, block=get(row, :block, nothing),
+    declaration=get(row, :declaration, nothing), level=get(row, :level, nothing)), row)
+
 # Each cell's learned control, one row per cell in unit order.
 function _brm_svi_centering_report(plan::_BRMSVICenteringPlan, q, levels)
     rows = NamedTuple[]
     for i in eachindex(plan.cells), (k, cell) in enumerate(plan.cells[i])
-        push!(rows, (; unit=levels[i], cell..., c=_brm_svi_control(q.centering.x[i][k])))
+        push!(rows, (; unit=levels[i], _brm_svi_report_row(cell)...,
+            c=_brm_svi_control(q.centering.x[i][k])))
     end
-    (; cells=rows, uncentered=plan.uncentered, start=plan.start)
+    (; cells=rows, uncentered=map(_brm_svi_report_row, plan.uncentered), start=plan.start)
 end
 
 # The batch's scale and location adjoints, each unit's antithetic pair weighted
@@ -788,25 +874,17 @@ end
 function _brm_svi_centering_batch_gradient(plan::_BRMSVICenteringPlan, t, frame, centered,
         weights)
     Ā = [zeros(size(A)) for A in frame.A]
-    terms = Tuple{Int,Int,Float64}[]
+    cot = Any[x isa Number ? 0.0 : zeros(Float64, size(x)) for x in frame.values]
     locations = zeros(length(t.globals))
     for (k, unit) in enumerate(centered)
         # A unit evaluated on an orthogonal design (`unit_curvature = :orthogonal`)
-        # brings 2d draws, each weighted 1/d of a pair's draw.
-        w = weights[k] / 2 * (hasproperty(unit, :weight) ? unit.weight : 1.0)
+        # brings its 2d draws' adjoints summed, each draw weighted 1/d of a pair's.
+        w = Float64(weights[k] / 2 * (hasproperty(unit, :weight) ? unit.weight : 1.0))
         for a in unit.adjoints
-            for (ϕ, x) in enumerate(a.A)
-                Ā[ϕ] .+= w .* x
-            end
-            for (p, j, v) in a.ports
-                push!(terms, (p, j, w * v))
-            end
-            for (p, v) in a.globals
-                locations[p] += w * v
-            end
+            _brm_svi_adjoint_terms!(Ā, cot, locations, a, w)
         end
     end
-    _brm_svi_centering_gradient(plan, t, frame, Ā, terms) .+ locations
+    _brm_svi_centering_gradient(plan, t, frame, Ā, cot) .+ locations
 end
 
 # A sparse global's site stands for its reader's whole term (src/nlme_svi_sites.jl),
@@ -991,9 +1069,7 @@ end
 function _brm_svi_location_adjoint!(gy, adjoint, inst::_BRMSVICenteringBlock, m, μ̄, ℓ̄,
         y, ℓ, frame)
     A, Ā = frame.A[inst.family], adjoint.A[inst.family]
-    for (k, w) in inst.location[m]
-        k > 0 && push!(adjoint.globals, (k, w * μ̄))
-    end
+    adjoint.location[inst.cells[m]] += μ̄
     for k in 1:(m - 1)
         Ā[m, k] += μ̄ * y[inst.positions[k]]
         gy[inst.positions[k]] += μ̄ * A[m, k]
@@ -1003,8 +1079,9 @@ function _brm_svi_location_adjoint!(gy, adjoint, inst::_BRMSVICenteringBlock, m,
 end
 function _brm_svi_location_adjoint!(gy, adjoint, inst::_BRMSVICenteringVector, n, μ̄, ℓ̄,
         y, ℓ, frame)
-    j = inst.elements[n]
-    push!(adjoint.ports, (inst.mean, j, μ̄), (inst.scale, j, ℓ̄ / exp(ℓ[inst.cells[n]])))
+    cell = inst.cells[n]
+    adjoint.location[cell] += μ̄
+    adjoint.scale[cell] += ℓ̄ / exp(ℓ[cell])
     nothing
 end
 
