@@ -13,7 +13,7 @@
 # order, which `adaptive_centering_controls` reports.
 #
 # Covered: on RKBRMI, scalar `||` blocks, a correlated K = 2 block, K = 3, a unit
-# nested in a band (containing cells), a cdar walk and car fields (0.2.314), and the
+# nested in a band (containing cells), a cdar walk and car fields (0.2.316), and the
 # derived-scale blocks of BRM 0.2.311 (Student-t, known scales and correlation,
 # bounded scales, stratified blocks, factor-level locations, and a Student-t
 # unit nested in an ordinary band through the joint wrapper), and those of
@@ -23,7 +23,7 @@
 # nested in an ordinary one beside a centred block with known SDs and
 # correlation (the joint derived-scale wrapper), and an R2D2 block whose scales
 # are unit and simplex atoms, and car cells beside a random-effect block and a
-# cdar walk (0.2.314). An SBBRMI wrapper that also adapts S2Z contrasts raises.
+# cdar walk (0.2.316). An SBBRMI wrapper that also adapts S2Z contrasts raises.
 #
 #     julia --project=test test/adaptive_centering_cells.jl [testset filter...]
 using Test, BayesianRegressionModels, Distributions, Random, LinearAlgebra
