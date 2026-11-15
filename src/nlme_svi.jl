@@ -1524,11 +1524,19 @@ _brm_svi_polish_iterations(run, c) = _brm_svi_budget_polishing(run, c) ?
 function _brm_svi_explored(run, c)
     _brm_svi_stationarity_enabled(c) && return _brm_svi_stationarity_state(run).explored
     windows = run.windows
-    for w in max(c.min_windows, c.patience + 1):length(windows)
-        _brm_svi_exploration_stalled(windows, w, c) && return w
+    a = max(_brm_svi_centering_activation(run.q), 0)
+    for w in a + max(c.min_windows, c.patience + 1):length(windows)
+        _brm_svi_exploration_stalled(_brm_svi_windows_after(windows, a, w), w - a, c) && return w
     end
     0
 end
+
+# The windows exploration's stopping test reads at window `w`: those after window
+# `a`, where a deferred fit switched its centering on (`_brm_svi_activate_centering!`;
+# 0 otherwise), so the test starts afresh there, its trend skipping their first
+# `patience` as at a run's start.
+_brm_svi_windows_after(windows, a, w=length(windows)) = a == 0 && w == length(windows) ?
+    windows : view(windows, a+1:w)
 _brm_svi_settling(run, c) = !_brm_svi_polishing(run) && _brm_svi_explored(run, c) > 0
 
 # Whether a settling run that has completed its windows up to `length(windows)`
@@ -1615,6 +1623,7 @@ function _brm_svi_advance!(run, t, c)
     end
     it % W == 0 || return :iteration
     windows = run.windows
+    explore = _brm_svi_windows_after(windows, max(_brm_svi_centering_activation(q), 0))
     polishing && return :window
     if settling
         explored = _brm_svi_explored(run, c)
@@ -1624,8 +1633,17 @@ function _brm_svi_advance!(run, t, c)
         (settled || _brm_svi_budget_polish_due(it, c) ||
             length(windows) - explored >= _brm_svi_settle_windows(c)) &&
             _brm_svi_start_polishing!(run, q, it)
-    elseif length(windows) >= max(c.min_windows, c.patience + 1) &&
-            _brm_svi_exploration_stalled(windows, length(windows), c)
+    elseif length(explore) >= max(c.min_windows, c.patience + 1) &&
+            _brm_svi_exploration_stalled(explore, length(explore), c)
+        # A deferred fit's ELBO has stopped climbing: its opening transient has
+        # passed, so it centres now and explores on (`LearnedCentering`'s `delay`,
+        # src/nlme_svi_centering.jl). The drift gate below governs where exploration
+        # ends, not this: a global's slow drift is no transient.
+        if _brm_svi_centering_deferred(q)
+            _brm_svi_activate_centering!(q, t, length(windows))
+            _brm_svi_centering_activated!(run, c)
+            return :window
+        end
         # The ELBO test cannot see a global that still drifts steadily, and
         # settling's scale-relative step cannot finish its move: exploration goes on
         # while the drift gate reads one, up to half the budget
@@ -1652,6 +1670,18 @@ function _brm_svi_advance!(run, t, c)
         _brm_svi_settle_windows(c) > 0 || _brm_svi_start_polishing!(run, q, it)
     end
     :window
+end
+
+# What reads the units' frame after `_brm_svi_activate_centering!`: their entropies
+# (the ELBO trace stays continuous, since the transport keeps q's density over the
+# packed coordinates) and the units' iterate histories.
+function _brm_svi_centering_activated!(run, c)
+    for i in eachindex(run.unit_entropy)
+        run.unit_entropy[i] = _brm_svi_unit_entropy(run.q, i)
+    end
+    run.entropy_sum = sum(run.unit_entropy; init=0.0)
+    _brm_svi_stationarity_restart_units!(run, c)
+    run
 end
 
 function _brm_svi_start_polishing!(run, q, it)
@@ -1968,7 +1998,12 @@ The minibatch controls and per-subject factors below describe `laplace=nothing`.
 - `centering` — fresh fits default to [`LearnedCentering`](@ref), jointly
   learning each supported unit cell's coordinates and variational factor.
   This includes unit-owned Gaussian random effects, Gaussian vector elements
-  and grouped HSGP weights. `diagnostics.centering` reports the cells and
+  and grouped HSGP weights. By default (`LearnedCentering(; delay=true)`) a fresh
+  fit explores with its cells, grouped HSGP weights excepted, in their packed
+  coordinates first and centres them once exploration's ELBO test first reads flat,
+  then explores on; `diagnostics.centering.activation_window` names that window
+  (`0` for `delay=false` or a fit with nothing to defer, `nothing` if it never came).
+  `diagnostics.centering` reports the cells and
   eligibility exclusions, authored `@plate` cell latents among them (the plan
   reads no location or scale for them). Pass `centering=nothing` for packed
   unit coordinates. Streaming updates and optimizer resume inherit the saved

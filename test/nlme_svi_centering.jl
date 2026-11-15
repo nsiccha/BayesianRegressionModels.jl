@@ -304,8 +304,10 @@ end
     # The fit's report: four device cells, the shared device uncentred.
     m = brm_nlme_model(RKBRMI(svi_centering_device_model(data)); ad_backend=NLME_AD,
         SVI_CENTERING_DEVICES...)
+    # Centred from the first iteration: 200 iterations end before a deferred fit's
+    # exploration test first passes.
     fit = brm_svi_fit(m; batch_size=2, max_iterations=200, ndraws=10, rng=Xoshiro(42),
-        centering=LearnedCentering())
+        centering=LearnedCentering(; delay=false))
     report = fit.diagnostics.centering
     @test sort([c.level for c in report.cells if c.block.group === :device]) ==
         ["ds1", "ds2", "ds3", "ds4"]
@@ -320,7 +322,7 @@ end
 @stestset "an absent unit's centred shared level maps through its controls" begin
     first_window = svi_centering_device_data(Xoshiro(43), ["a", "b", "c"])
     initial = brm_svi_fit(svi_centering_device_model(first_window); rng=Xoshiro(44),
-        max_iterations=300, ndraws=0, batch_size=2, centering=LearnedCentering(),
+        max_iterations=300, ndraws=0, batch_size=2, centering=LearnedCentering(; delay=false),
         SVI_CENTERING_DEVICES...)
     state = brm_svi_checkpoint(initial)
     unit = state.units["b"]
@@ -476,7 +478,9 @@ end
         fd = (BRM_._brm_svi_spectral_floor(s + h) - BRM_._brm_svi_spectral_floor(s - h)) / 2h
         @test BRM_._brm_svi_spectral_slope(s) ≈ fd rtol = 1e-5
     end
-    # A centered fit learns a control per weight.
+    # A centered fit learns a control per weight, from the first iteration also under
+    # the default delay, which leaves HSGP weights out (400 iterations end before a
+    # deferred fit's exploration test first passes).
     m = brm_nlme_model(RKBRMI(flat_hsgp(GH_FLAT)); ad_backend=NLME_AD)
     fit = brm_svi_fit(m; batch_size=2, max_iterations=400, ndraws=20, rng=Xoshiro(9),
         centering=LearnedCentering())
@@ -640,8 +644,9 @@ end
 
 @stestset "a centered window carries its controls and transports its prior" begin
     data = svi_stream_data(Xoshiro(31), ["a", "b", "c"], 6)
+    # Centred from the first iteration, so the window's controls are learned ones.
     initial = brm_svi_fit(svi_stream_model(data); rng=Xoshiro(32), max_iterations=300,
-        ndraws=0, batch_size=2)
+        ndraws=0, batch_size=2, centering=LearnedCentering(; delay=false))
     saved = brm_svi_checkpoint(initial)
     @test saved.layout.centering == (; start=0.5, step=0.05, constant_laws=false)
     @test all(u -> count(!isnan, u.centering) == 1, values(saved.units))
@@ -745,4 +750,99 @@ end
     actual_variance = only(now.natural.factor)^2 / only(combined.units["b"].Λ)
     @test actual_mean ≈ expected_mean
     @test actual_variance ≈ expected_variance
+end
+
+# `LearnedCentering(; delay=true)`, the default (snag brm-svi-fit-stop-517ddc65): a
+# fresh fit explores in the packed frame, the plain factorization, until its
+# exploration test passes, then centres and explores on. The toy's model is in the
+# snag; these check the mechanics on a small Poisson random intercept.
+svi_delay_model() = brm_nlme_model(RKBRMI(svi_centering_pois_model(
+    svi_centering_pois_data(Xoshiro(2), [2, 3, 30, 4, 25, 1, 12, 6]))); ad_backend=NLME_AD)
+const SVI_DELAY_OPTIONS = (; batch_size=4, window=20, patience=3, min_windows=5,
+    max_iterations=1500, ndraws=0)
+
+@stestset "a deferred fit explores plain, then centres and explores again" begin
+    m = svi_delay_model()
+    fit = brm_svi_fit(m; SVI_DELAY_OPTIONS..., rng=Xoshiro(7), coupling=nothing)
+    a = fit.diagnostics.centering.activation_window
+    @test a isa Int && a > 0
+    # Exploration's test reads the windows since activation: at least the first
+    # test's window count of them.
+    W, need = 20, max(5, 3 + 1)
+    @test fit.diagnostics.stages.exploring >= (a + need) * W
+    @test all(0 .< [cell.c for cell in fit.diagnostics.centering.cells] .< 1)
+    # Until it centres, the deferred fit is the plain one: the same draws of the
+    # same factors, its map the identity.
+    plain = brm_svi_fit(m; SVI_DELAY_OPTIONS..., rng=Xoshiro(7), centering=nothing,
+        coupling=nothing)
+    n = a * W
+    @test isapprox(fit.diagnostics.elbo[1:n], plain.diagnostics.elbo[1:n]; rtol=1e-9)
+    # `delay=false` centres from the first iteration, as BRM 0.2.282-0.2.324 did.
+    now = brm_svi_fit(m; SVI_DELAY_OPTIONS..., rng=Xoshiro(7), coupling=nothing,
+        centering=LearnedCentering(; delay=false))
+    @test now.diagnostics.centering.activation_window == 0
+    @test !isapprox(now.diagnostics.elbo[1:n], plain.diagnostics.elbo[1:n]; rtol=1e-6)
+    @test LearnedCentering().delay && !LearnedCentering(; delay=false).delay
+end
+
+@stestset "activation carries each unit's factor into its learned coordinates" begin
+    m = svi_delay_model()
+    t0 = BRM_._brm_svi_target(m)
+    q0 = BRM_._brm_svi_params(t0, m.unit[t0.globals], MeanFieldGlobal();
+        global_scale=0.1, unit_scale=1.0)
+    t, q = BRM_._brm_svi_with_centering(t0, deepcopy(q0), LearnedCentering())
+    plan = t.centering
+    @test q.centering.active == [-1]
+    @test BRM_._brm_svi_centering_deferred(q)
+    # Deferred: every cell at its packed frame (a block's standardized draw, c = 0),
+    # the factors untouched, the map the identity.
+    @test all(x -> all(==(-Inf), x), q.centering.x)
+    @test q.M == q0.M
+    frame = BRM_._brm_svi_centering_frame(plan, t, q.μ)
+    rng = Xoshiro(3)
+    for i in eachindex(q.M)
+        q.M[i] .= randn(rng, length(q.M[i]))
+        L = LowerTriangular(Matrix(I, length(q.M[i]), length(q.M[i])) + 0.3 .* tril(randn(rng, length(q.M[i]), length(q.M[i])), -1))
+        q.U[i] .= L
+        q.Λ[i] .= L * L'
+        u = randn(rng, length(q.M[i]))
+        @test BRM_._brm_svi_centered_coordinates(plan, frame, q, i, q.μ, u) == u
+    end
+    old = deepcopy(q)
+    BRM_._brm_svi_activate_centering!(q, t, 7)
+    @test q.centering.active == [7]
+    @test !BRM_._brm_svi_centering_deferred(q)
+    @test all(x -> all(≈(BRM_._brm_svi_control_logit(0.5)), x), q.centering.x)
+    # The transport keeps q's density over the packed coordinates: the new mean maps
+    # back to the old one, and the covariance of the packed draws is unchanged.
+    for i in eachindex(q.M)
+        @test BRM_._brm_svi_centered_coordinates(plan, frame, q, i, q.μ, q.M[i]) ≈ old.M[i]
+        J = reduce(hcat, [BRM_._brm_svi_centered_coordinates(plan, frame, q, i, q.μ,
+            q.M[i] .+ e) .- old.M[i] for e in eachcol(Matrix(1.0I, length(q.M[i]), length(q.M[i])))])
+        @test J * inv(Symmetric(Matrix(q.Λ[i]))) * J' ≈ inv(Symmetric(Matrix(old.Λ[i]))) rtol=1e-8
+    end
+    # `delay=false` and a state saved before the delay existed are centred from the start.
+    _, qn = BRM_._brm_svi_with_centering(t0, deepcopy(q0), LearnedCentering(; delay=false))
+    @test qn.centering.active == [0]
+    @test all(x -> all(≈(BRM_._brm_svi_control_logit(0.5)), x), qn.centering.x)
+    @test BRM_._brm_svi_centering_activation((; centering=(; x=[[0.0]]))) == 0
+    @test BRM_._brm_svi_centering_activation((; μ=[0.0])) == 0
+    # A saved state's policy never defers: its units keep their own frames.
+    @test !BRM_._brm_svi_saved_centering((; start=0.5, step=0.05)).delay
+end
+
+@stestset "a deferred fit resumes bit for bit across its activation" begin
+    m = svi_delay_model()
+    whole = brm_svi_fit(m; SVI_DELAY_OPTIONS..., rng=Xoshiro(7))
+    a = whole.diagnostics.centering.activation_window
+    @test a isa Int && a > 0
+    # Stop before the activation and after it.
+    for stop in (a * 20 - 30, a * 20 + 30)
+        part = brm_svi_fit(m; SVI_DELAY_OPTIONS..., rng=Xoshiro(7), stop_after=stop)
+        @test !part.diagnostics.finished
+        resumed = brm_svi_resume(m, brm_svi_optimizer_checkpoint(part); ndraws=0)
+        @test svi_same_q(resumed.diagnostics.q, whole.diagnostics.q)
+        @test resumed.diagnostics.centering.activation_window == a
+        @test resumed.diagnostics.elbo == whole.diagnostics.elbo
+    end
 end
