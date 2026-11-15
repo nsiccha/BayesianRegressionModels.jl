@@ -29,9 +29,11 @@ instead of failing at run time.
   the formula and the authored-location route, codes both label columns in the
   graph and observes RKPPL's `interval_censored.(Ordinal.(…), upper)`, with
   native gradients and `jax_source`. RKPPL's ordinal evidence underflows in
-  extreme probit tails (ReactiveKernels snag `rkppl-ordinal-in-553ce5b3`), so
-  RKBRMI ranges far beyond every threshold wait on that fix (snag
-  `ordinal-interval-0a6d9172`, design decision `1cxobqy`).
+  extreme probit tails, and its stopping-ratio evidence has no `jax.grad`
+  (ReactiveKernels snag `rkppl-ordinal-in-553ce5b3`, RKPPL 0.1.197), so RKBRMI
+  ranges far beyond every threshold, and the JAX gradient of a stopping-ratio
+  range, wait on that fix (snag `ordinal-interval-0a6d9172`, design decision
+  `1cxobqy`).
 - The executable `Ordinal`'s `logpdf`, and SBBRMI's cumulative probit and
   cloglog `brm_ordinal_lpmf`, keep an interior category whose thresholds both
   lie far below `eta`: its mass is now the difference of the upper tails.
