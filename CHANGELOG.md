@@ -12,6 +12,33 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
+## 0.2.321
+
+- `coarsened(Ordinal(structure, link, eta, thresholds[, discrimination]);
+  upper)`: range evidence over thresholds the model gives, at model scope and
+  in a `@plate` cell, on SBBRMI and on RKBRMI natively and in `jax_source`
+  (snag `ordinal-explicit-149b4a5f`). A cell can compute each examiner's own
+  thresholds, as for the exact `Ordinal`, and observe "rated 2 to 3" records
+  beside exact ones under them.
+  - Both columns hold the category codes `1:(length(thresholds) + 1)`, as the
+    explicit form's response does; equal codes are an exact observation, and a
+    category nobody used stays in the model. A row whose upper code is below
+    its lower one is refused, naming the row: at build at model scope and in an
+    RKBRMI cell, by the Stan program's data check in an SBBRMI cell (which also
+    checks every code against the thresholds' length).
+  - SBBRMI: new Stan family `brm_ordinal_explicit_range` (likelihood,
+    pointwise log likelihood, predictive draws of single categories from the
+    uncoarsened law). RKBRMI: RKPPL's `interval_censored` of the explicit
+    `Ordinal`, with the response bound as its code minus one.
+- RKBRMI: an `Ordinal` response with explicit thresholds at model scope binds
+  its category codes as they stand. Before, the codes were renumbered by the
+  observed levels, so a dataset that never observed the lowest category was
+  scored one category too low.
+- The compat floors are ReactiveKernels 0.1.262 and ReactiveKernelsPPL 0.1.201
+  (RK snag `rkppl-sampled-pe-bc377786`: a vector computed in a cell as
+  `Ordinal` thresholds), and the test environment pins ReactiveKernels
+  `912fbdba8`.
+
 ## 0.2.320
 
 - RKBRMI builds an `Ordinal(structure, link, eta, thresholds[, discrimination])`

@@ -143,6 +143,7 @@ function _sb_cell_family(x, scope)
     callable isa BRMComponent && return _sb_component_cell_call(callable, x, scope)
     callable === LocationScale && return _sb_cell_location_scale(x, scope)
     callable === Ordinal && return _sb_cell_ordinal(x, scope)
+    callable === coarsened && return _sb_cell_coarsened(x, scope)
     args = Any[_sb_cell_argument(a, scope) for a in x.args[2:end]]
     if callable isa Type && callable <: Distribution
         positional = Tuple(filter(!_sb_cell_keyword_argument, args))
@@ -212,6 +213,32 @@ function _sb_cell_ordinal(x, scope)
     Expr(:call, brm_ordinal_explicit, _sb_cell_value(positional[3], scope),
         _sb_cell_value(positional[4], scope), _sb_cell_value(discrimination, scope),
         _sb_ordinal_structure_code(structure), _sb_ordinal_link_code(link))
+end
+
+# `y_min[rows[e]] ~ coarsened(Ordinal(structure, link, eta, thresholds[, d]);
+# upper = y_max[rows[e]])` in a cell: each entry is evidence that its category
+# lies in the inclusive code range `y_min..y_max` under the thresholds the cell
+# gives (snag ordinal-explicit-149b4a5f). Both ends are codes
+# 1:(length(thresholds) + 1), as the in-cell `Ordinal`'s response is; the
+# Stan program's data check refuses a code outside them or an upper code below
+# its lower one, as it does for the in-cell `Ordinal`.
+function _sb_cell_coarsened(x, scope)
+    usage = "write `coarsened(Ordinal(structure, link, eta, thresholds[, " *
+        "discrimination]); upper = y_max[...])`"
+    raw = x.args[2:end]
+    positional = filter(!_sb_cell_keyword_argument, raw)
+    keywords = foldl(_sb_cell_keywords!, filter(_sb_cell_keyword_argument, raw);
+        init=Pair{Symbol,Any}[])
+    length(positional) == 1 && length(keywords) == 1 && first(only(keywords)) === :upper ||
+        error("sbimpl: an in-cell `coarsened` takes one `Ordinal(...)` base and " *
+              "exactly the `upper` keyword; $usage")
+    base = only(positional)
+    Meta.isexpr(base, :call) && _sb_cell_binding(scope, first(base.args)) === Ordinal ||
+        error("sbimpl: an in-cell `coarsened` observes an `Ordinal(...)` base, got " *
+              "`$base`; $usage")
+    law = _sb_cell_ordinal(base, scope)
+    Expr(:call, brm_ordinal_explicit_range,
+        _sb_cell_value(last(only(keywords)), scope), law.args[2:end]...)
 end
 
 function _sb_cell_ordinal_tag(arg, scope, expected, usage)
