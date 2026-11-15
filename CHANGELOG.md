@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.325
+## 0.2.327
 
 - `brm_descriptor(rk::RKBRMI)` classifies a fit-role input (snag
   `brm-descriptor-r-809e9042`). A grouping or a `center`/`zscale`/`standardize`
@@ -25,6 +25,29 @@ instead of failing at run time.
   (`<g>_level`) stay `:computed`: they are program definitions RK preparation
   evaluates, while `:levels` names a factor's or `mo()` term's level table BRM
   binds as an input.
+
+## 0.2.326
+
+- `brm_svi_fit(...; unit_reoptimize = k)` (default 0, off): each dense batch
+  unit takes `k` whole natural-gradient steps at the iteration's draw of the
+  globals before the global gradient is formed (structured stochastic VI), so a
+  ridge between a global and every unit (an intercept beside per-unit effects the
+  data pin only in `a + u[g]`) no longer holds the global means back (todo
+  `122p9l3`, design decision `093fulx`). On an exactly Gaussian intercept toy of
+  1,000 units (`research/svi_reoptimize/intercept_ridge.jl`, 20,000 iterations),
+  the intercept's mean went from 10.3 exact posterior sds off (its sd 0.14 of the
+  exact one) to 0.08 (sd ratio 0.94). Each step costs the unit's evaluations
+  again, counted in `unit_gradient_calls`. It needs `unit_curvature = :orthogonal`;
+  the Laplace route (`laplace = GaussianBlockLaplace()`) refuses it.
+
+## 0.2.325
+
+- RKBRMI: the `jax_source` module of a stopping-ratio
+  `coarsened(Ordinal(StoppingRatio(), …, thresholds); upper)` range whose
+  thresholds a `@plate` cell computes now has a `jax.grad`; native values and
+  gradients were already exact. The compat floor is ReactiveKernels 0.1.263
+  (RK snag `jax-source-of-an-6bfaf24a`), and the test environment pins
+  ReactiveKernels `95d9b7a5a`. Follow-up of snag `ordinal-explicit-149b4a5f`.
 
 ## 0.2.324
 

@@ -443,4 +443,6 @@ url = "https://github.com/nsiccha/ReactiveKernels.jl"
 # which RKPPL's sampler targets answer with -Inf.
 # RK 0.1.262 / RKPPL 0.1.201: a computed vector, a cell local per group
 # included, as Ordinal thresholds; Statistics.mean in JAX.
-rev = "912fbdba843e16869938316e1ba8907f12383861"
+# RK 0.1.263 / RKPPL 0.1.203: jax.grad of stopping-ratio ordinal evidence over
+# cell-computed thresholds (a counted loop to a padded length is a fori_loop).
+rev = "95d9b7a5ae130249cc0620aa80b1b0fe96f79734"

@@ -450,7 +450,12 @@ const PINS = [
     # computes as `Ordinal` thresholds, a cell local per group included, and
     # translates `Statistics.mean` to JAX (RK snag rkppl-sampled-pe-bc377786;
     # test/ordinal_group_thresholds.jl).
-    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "912fbdba843e16869938316e1ba8907f12383861"),
+    # 95d9b7a5a (RK 0.1.263 / RKPPL 0.1.203) gives the JAX module of
+    # stopping-ratio ordinal evidence over cell-computed thresholds a
+    # `jax.grad`: a counted `while` to a padded row length becomes a
+    # `fori_loop` (RK snag jax-source-of-an-6bfaf24a;
+    # test/ordinal_explicit_range.jl).
+    ("ReactiveKernels",   "https://github.com/nsiccha/ReactiveKernels.jl.git",   "95d9b7a5ae130249cc0620aa80b1b0fe96f79734"),
     # ReactiveKernels' own `[sources]` revision of its unregistered
     # OutputSignatures dependency (RK compat 0.1.6); move it with the RK pin.
     ("OutputSignatures",  "https://github.com/nsiccha/OutputSignatures.jl.git",  "f971381f760e91986b3a728a719341e7e7761f55"),  # main
