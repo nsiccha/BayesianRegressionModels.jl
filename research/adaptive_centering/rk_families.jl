@@ -2,10 +2,11 @@
 # 0nsdowt): for each block family the RKBRMI wrapper newly covers, the plain RK
 # density against `adaptive_centering_problem(rk, ...)` on a synthetic panel
 # whose group levels the data pin, so the level ridge `level_g = location +
-# scale * z_g` is the stiff direction. The panel is the one
-# `test/rk_adaptive_centering.jl` and the 0.2.263 measurement use: `G` groups of
-# `n` rows, each a mean with a known standard error of 0.3-0.6 around levels of
-# 60-130.
+# scale * z_g` is the stiff direction. The panel is
+# `test/rk_adaptive_centering.jl`'s: `G` groups of `n` rows, each a mean with a
+# known standard error of 0.3-0.6 around levels of 60-130, one slope on `t`. The
+# 0.2.263 measurement of the wrapper, `rk_panel.jl`, draws another panel of that
+# shape with slopes on `t`, `c1` and `c2`.
 #
 #     julia --project=test research/adaptive_centering/rk_families.jl [family...]
 #
