@@ -3187,10 +3187,25 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
         ad_backend, names, centeredness, ordinary, hsgp_blocks, r2d2_blocks, car_blocks,
         ranef_order === :learned && any(b -> b.ranef.n_terms > 1, blocks); locations,
         level_blocks)
+    _cells_centering_problem(problem, ad_backend, ordinary, r2d2_blocks, hsgp_blocks,
+        level_blocks, cdar_blocks, car_blocks, locations,
+        scalar ? _scalar_centering_cells(model, names) : _NO_SCALAR_CELLS;
+        centeredness, ranef_order)
+end
+
+# The wrapper over a model's resolved cells, without exact totals: the learned-
+# order wrapper when a correlated block asks for it, otherwise the per-pair
+# wrapper of the cell families present (the joint one when they mix). Shared by
+# the SBBRMI and RKBRMI methods, so both choose the same wrapper for the same
+# cells. `ordinary` and `r2d2_blocks` are in pair order (`_containers_first!`).
+function _cells_centering_problem(problem, ad_backend, ordinary, r2d2_blocks,
+        hsgp_blocks, level_blocks, cdar_blocks, car_blocks, locations, scalar_cells;
+        centeredness, ranef_order)
+    scalar = scalar_cells !== _NO_SCALAR_CELLS
+    blocks = vcat(BRM.AbstractAdaptiveCenteringBlock[], ordinary, r2d2_blocks)
     if ranef_order === :learned && any(b -> b.ranef.n_terms > 1, blocks)
         _, ir = _adaptive_ordered_centering_reparametrizer(ordinary, hsgp_blocks,
-            r2d2_blocks, scalar ? _scalar_centering_cells(model, names) : _NO_SCALAR_CELLS,
-            car_blocks; locations, level_blocks, cdar_blocks)
+            r2d2_blocks, scalar_cells, car_blocks; locations, level_blocks, cdar_blocks)
         return _ordered_centering_problem(ir, problem, ad_backend,
             _start_controls(centeredness, ir.state, WarmupHMC.reparam_controls(ir)))
     end
@@ -3203,7 +3218,7 @@ function BRM.adaptive_centering_problem(model, problem, ad_backend; unc_names=no
                 _NO_SCALAR_CELLS, car_blocks; locations, level_blocks, cdar_blocks)
     elseif scalar
         _adaptive_joint_centering_reparametrizer(ordinary, hsgp_blocks, r2d2_blocks,
-            _scalar_centering_cells(model, names), car_blocks; locations, level_blocks)
+            scalar_cells, car_blocks; locations, level_blocks)
     elseif !isempty(r2d2_blocks)
         _adaptive_joint_centering_reparametrizer(ordinary, hsgp_blocks, r2d2_blocks,
             _NO_SCALAR_CELLS, car_blocks; locations, level_blocks)
@@ -3234,17 +3249,24 @@ end
 
 Wrap `problem = rk_logdensity_problem(rk; ad_backend)` in the same WarmupHMC
 adaptive partial centring of random effects as the SBBRMI method: one
-11-way control (`c = 0:0.1:1`) per level × term cell of every ordinary
-random-effect block ([`adaptive_centering_blocks`](@ref)`(rk)`), scored online
-from the source-invariant innovation frame, with the exact triangular map,
-Jacobian and hyperparameter gradients. RKBRMI emits every block non-centred, so
-`c = 0` is its standardized draw `z`. A cell is centred on its predictor's
-sampled, unbounded population coefficient for that term (hierarchical
-centring), so `c = 1` is the level's total `beta + b[j]`; a grouping nested in
-a coarser scalar grouping of the same predictor is centred on that grouping's
-effect too. Every other coordinate (population coefficients, scales,
-correlation factors, HSGP/car/cdar/gmrf fields, cell latents, completions)
-passes through unchanged, and returned draws stay in the RK layout's frame.
+11-way control (`c = 0:0.1:1`) per level × term cell of every random-effect
+block [`adaptive_centering_blocks`](@ref)`(rk)` returns (Gaussian or
+Student-t; sampled, bounded or known scales; one block per stratum of a
+stratified `gr(g, by=b)` block), scored online from the source-invariant
+innovation frame, with the exact triangular map, Jacobian and hyperparameter
+gradients. RKBRMI emits every block non-centred, so `c = 0` is its
+standardized draw `z` and `c = 1` the level's effect, a Student-t level's
+`sqrt(w[g]) * diag(tau) * L * z`. A cell is centred on its predictor's sampled,
+unbounded population coefficient for that term (hierarchical centring), so
+`c = 1` is the level's total `beta + b[j]`; an intercept cell is also centred
+on the coefficient of each categorical population term's level holding its
+level (`factor(f)` constant within the grouping), and a grouping nested in a
+coarser scalar grouping of the same predictor on that grouping's effect. Every
+other coordinate (population coefficients, scales, mixing weights, correlation
+factors, HSGP/car/cdar/gmrf fields, cell latents, completions) passes through
+unchanged, and returned draws stay in the RK layout's frame. Blocks whose
+scales are not plain sampled `exp` coordinates take SBBRMI's joint
+(derived-scale) wrapper, as they do there.
 
 `unc_names` defaults to the RK layout's coordinate names. `centeredness`
 (a real in `[0, 1]`, one per cell, or `:midpoint`) sets the start;
@@ -3252,7 +3274,7 @@ passes through unchanged, and returned draws stay in the RK layout's frame.
 blocks at restarting windows, as for SBBRMI. Read the cells with
 [`adaptive_centering_controls`](@ref)`(adaptive, rk)`. Blocks the RKBRMI
 wrapper does not cover raise (see [`adaptive_centering_blocks`](@ref)); a model
-without any ordinary random-effect block raises.
+without any random-effect block raises.
 """
 function BRM.adaptive_centering_problem(model::BRM.RKBRMI, problem, ad_backend;
         unc_names=nothing, centeredness=nothing, ranef_order=:declared)
@@ -3263,23 +3285,19 @@ function BRM.adaptive_centering_problem(model::BRM.RKBRMI, problem, ad_backend;
     centeredness isa Symbol && centeredness !== :midpoint && throw(ArgumentError(
         "centeredness must be a real in [0, 1], one such value per cell, or " *
         "`:midpoint`; got `:$centeredness`"))
-    blocks = BRM.AdaptiveCenteringBlock[b for b in BRM.adaptive_centering_blocks(model, names)]
+    blocks = BRM.adaptive_centering_blocks(model, names)
     isempty(blocks) && error("BRM adaptive centering on RKBRMI: this model has no " *
-        "ordinary random-effect block with sampler coordinates to adapt.")
+        "random-effect block with sampler coordinates to adapt.")
     locations = BRM._adaptive_ranef_locations(model, blocks, names)
-    _containers_first!(blocks, locations)
-    if ranef_order === :learned && any(b -> b.ranef.n_terms > 1, blocks)
-        _, ir = _adaptive_ordered_centering_reparametrizer(blocks,
-            BRM._HSGPAdaptiveCenteringBlock[]; locations)
-        return _ordered_centering_problem(ir, problem, ad_backend,
-            _start_controls(centeredness, ir.state, WarmupHMC.reparam_controls(ir)))
-    end
-    state, ir = _adaptive_centering_reparametrizer(blocks, locations)
-    _initial_centering!(state, ir,
-        _start_controls(centeredness, state, [last(p).source.c for p in ir.pairs]))
-    WarmupHMC.ReparametrizedProblem(
-        ir, problem, ad_backend; scoring_plan=_candidate_scoring_plan(state),
-    )
+    ordinary = BRM.AdaptiveCenteringBlock[
+        b for b in blocks if b isa BRM.AdaptiveCenteringBlock]
+    r2d2_blocks = BRM.R2D2AdaptiveCenteringBlock[
+        b for b in blocks if b isa BRM.R2D2AdaptiveCenteringBlock]
+    _containers_first!(ordinary, locations)
+    _containers_first!(r2d2_blocks, locations)
+    _cells_centering_problem(problem, ad_backend, ordinary, r2d2_blocks,
+        BRM._HSGPAdaptiveCenteringBlock[], _NO_LEVEL_BLOCKS, _NO_CDAR_BLOCKS,
+        _NO_CAR_BLOCKS, locations, _NO_SCALAR_CELLS; centeredness, ranef_order)
 end
 
 # ---- Controls report --------------------------------------------------------
