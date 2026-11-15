@@ -53,8 +53,8 @@ _adaptive_cell_level(x) = x isa Tuple ? map(_adaptive_cell_level, x) :
 const _AdaptiveCellLinear = NamedTuple{(:weight, :coordinate),Tuple{Float64,Int}}
 const _AdaptiveCellUnit = NamedTuple{(:log_weight, :log1m_weight, :coordinate),
                                      Tuple{Float64,Float64,Int}}
-const _AdaptiveCellSimplex = NamedTuple{(:weight, :coordinates, :entry),
-                                        Tuple{Float64,Vector{Int},Int}}
+const _AdaptiveCellSimplex = NamedTuple{(:weight, :coordinates, :entry, :transform),
+                                        Tuple{Float64,Vector{Int},Int,Symbol}}
 const _AdaptiveCellBounded = NamedTuple{(:weight, :coordinate, :lower, :upper),
                                         Tuple{Float64,Int,Float64,Float64}}
 
@@ -65,7 +65,9 @@ _adaptive_cell_log_scale(s::_AdaptiveLogScale) = (;
     unit = _AdaptiveCellUnit[(; log_weight=a, log1m_weight=b, coordinate=i)
                              for (a, b, i) in s.unit],
     simplex = _AdaptiveCellSimplex[(; weight=a.weight, coordinates=copy(a.coordinates),
-                                     entry=a.entry) for a in s.simplex],
+                                     entry=a.entry,
+                                     transform=a.stick ? :stick_breaking : :stan)
+                                   for a in s.simplex],
     bounded = _AdaptiveCellBounded[(; weight=w, coordinate=i, lower, upper)
                                    for (w, i, lower, upper) in s.bounded])
 
@@ -91,15 +93,26 @@ function _adaptive_cells_other_families(model, names)
         push!(out, "HSGP basis weights")
     isempty(_adaptive_hsgp_level_centering_blocks(model, names)) ||
         push!(out, "grouped HSGP level cells")
-    isempty(_adaptive_car_centering_blocks(model, names)) || push!(out, "car field cells")
-    isempty(_adaptive_cdar_centering_blocks(model, names)) || push!(out, "cdar walk cells")
     isempty(_total_blocks_by_placement(model).sampled) ||
         push!(out, "exact total coefficients")
     isempty(s2z_effect_blocks(model)) || push!(out, "S2Z contrasts")
     out
 end
 
-function _adaptive_centering_cells(model, names::Vector{String})
+# A model's `car` fields and `cdar` walks, as the wrapper builds them: an
+# SBBRMI's always, an RKBRMI's under `fields = true` (its default passes them
+# through).
+_adaptive_cell_car_blocks(rk::RKBRMI, names, fields) =
+    fields ? _rk_adaptive_car_blocks(rk, names) : _CARAdaptiveCenteringBlock[]
+_adaptive_cell_car_blocks(model, names, _) = _adaptive_car_centering_blocks(model, names)
+_adaptive_cell_cdar_blocks(rk::RKBRMI, names, fields) =
+    fields ? _rk_adaptive_cdar_blocks(rk, names) : _CDARAdaptiveCenteringBlock[]
+_adaptive_cell_cdar_blocks(model, names, _) = _adaptive_cdar_centering_blocks(model, names)
+
+# A hyperparameter coordinate and its declared bounds (`_adaptive_constrain`).
+_adaptive_cell_hyper(coordinate, lower, upper) = (; coordinate, lower, upper)
+
+function _adaptive_centering_cells(model, names::Vector{String}; fields=false)
     ordered, locations = _adaptive_cell_blocks(model, names)
     margins = _adaptive_cell_margins(model)
     lookup = IdDict{Any,Matrix{Int}}()
@@ -117,7 +130,8 @@ function _adaptive_centering_cells(model, names::Vector{String})
         K, G = r.n_terms, r.n_groups
         labels = get(margins, r.binding, ())
         margin = [length(labels) == K ? labels[k] : nothing for k in 1:K]
-        push!(blocks, (; block=bi, binding=r.binding, group=r.group, id=r.id, by=r.by,
+        push!(blocks, (; block=bi, family=:ranef, binding=r.binding, group=r.group,
+            id=r.id, by=r.by,
             levels=[_adaptive_cell_level(l) for l in r.levels], n_terms=K, n_levels=G,
             margins=margin, target=b.target_c, log_scales=_adaptive_cell_log_scales(b),
             correlation=(; free=copy(b.cholesky_free), cpc=_adaptive_cell_cpc(b)),
@@ -158,15 +172,56 @@ function _adaptive_centering_cells(model, names::Vector{String})
                 location=(; coefficient, factors, containers)))
         end
     end
+    # The joint wrapper's later families, in its pair order: `car` cells, then
+    # `cdar` cells (`_joint_centering_state`). Both are compiled non-centred.
+    for b in _adaptive_cell_car_blocks(model, names, fields)
+        bi = length(blocks) + 1
+        push!(blocks, (; block=bi, family=:car, binding=b.logical, term=b.term,
+            type=b.bym2 ? :bym2 : :icar, areas=[_adaptive_cell_level(a) for a in b.areas],
+            target=0.0))
+        for k in 1:_adaptive_car_n_cells(b)
+            c = _adaptive_car_cell(b, k)
+            area = _adaptive_car_area(b, k)
+            push!(cells, (; cell=length(cells) + 1, family=:car, block=bi,
+                binding=b.logical, margin=(; predictor=b.logical, coefficient=b.term),
+                level=_adaptive_cell_level(b.areas[area]),
+                level_index=area, term=b.bym2 ? 2 : 1, effect=c.index,
+                name=names[c.index],
+                scale=(; sigma=_adaptive_cell_hyper(c.sigma, c.sigma_lower, c.sigma_upper),
+                         rho=_adaptive_cell_hyper(c.rho, c.rho_lower, c.rho_upper),
+                         share=c.share),
+                location=(; intercept=c.intercept, phi=c.phi,
+                            log_inv_scale=c.log_inv_scale)))
+        end
+    end
+    for b in _adaptive_cell_cdar_blocks(model, names, fields)
+        bi = length(blocks) + 1
+        push!(blocks, (; block=bi, family=:cdar, binding=b.logical, term=b.term,
+            n_groups=b.n_groups, n_steps=b.n_steps, target=0.0))
+        for pair in eachindex(b.effects)
+            group = mod(pair - 1, b.n_groups) + 1
+            step = div(pair - 1, b.n_groups) + 1
+            push!(cells, (; cell=length(cells) + 1, family=:cdar, block=bi,
+                binding=b.logical, margin=(; predictor=b.logical, coefficient=b.term),
+                level=nothing, level_index=group, term=pair,
+                effect=b.effects[pair], name=names[b.effects[pair]],
+                scale=(; sigma=_adaptive_cell_hyper(b.sigma, b.sigma_lower, b.sigma_upper),
+                         rho=_adaptive_cell_hyper(b.rho, b.rho_lower, b.rho_upper),
+                         cdiag=b.cdiag[group], step),
+                location=(;)))
+        end
+    end
     (; blocks=identity.(blocks), cells=identity.(cells))
 end
 
 """
-    adaptive_centering_cells(rk::RKBRMI, unc_names=<the RK layout names>) -> (; blocks, cells)
+    adaptive_centering_cells(rk::RKBRMI, unc_names=<the RK layout names>; fields=false) -> (; blocks, cells)
     adaptive_centering_cells(model, unc_names) -> (; blocks, cells)
 
-The random-effect cells [`adaptive_centering_problem`](@ref) adapts for `model`
-(an [`RKBRMI`](@ref), `SBBRMI` or `GenerativePlan`), described as plain data:
+The cells [`adaptive_centering_problem`](@ref) adapts for `model` (an
+[`RKBRMI`](@ref), `SBBRMI` or `GenerativePlan`): its random-effect cells and
+its areal `car` field cells and `cdar` walk cells (an RKBRMI's under
+`fields = true`, as its wrapper adapts them), described as plain data:
 numbers, symbols, strings, `nothing`, vectors and named tuples. Indices are
 positions of the unconstrained vector `unc_names` names: for an `RKBRMI`, by
 default, `rk_logdensity_problem(rk)`'s layout; for an `SBBRMI`, BridgeStan's
@@ -175,8 +230,10 @@ so a caller outside BRM can rebuild it without BRM internals. Reading them
 needs no WarmupHMC and builds no wrapper.
 
 `cells[p]`, in the wrapper's cell order (the order of `centeredness`,
-[`adaptive_centering_controls`](@ref) and checkpoints: ordinary blocks, then
-derived-scale blocks, each containing blocks first, then level, then term):
+[`adaptive_centering_controls`](@ref) and checkpoints: random-effect cells of
+ordinary blocks, then of derived-scale blocks, each containing blocks first,
+then level, then term; then `car` cells; then `cdar` cells). A random-effect
+cell (`family = :ranef`) has:
 
 - `cell` (`== p`), `family` (`:ranef`), `block` (its row in `blocks`),
   `binding`, `group`, `level` (the level's label) and `level_index`, `term` (its
@@ -189,7 +246,22 @@ derived-scale blocks, each containing blocks first, then level, then term):
   `factor(f)` levels holding its level; `containers`, the cells of the coarser
   groupings holding its level, coarsest first, every one earlier than `p`.
 
-`blocks[b]`: `block`, `binding`, `group`, `id`, `by`, `levels`, `n_terms`,
+A `car` cell (`family = :car`, one per area; an `:icar` field's cells in its
+emitted `phi` order, a `:bym2` field's in sorted area order) has `cell`,
+`family`, `block`, `binding` (the predictor), `margin` (`(; predictor,
+coefficient)`, the coefficient being the term), `level` (the area's label) and
+`level_index`, `term` (1 for an `:icar` area's `phi`, 2 for a `:bym2` area's
+`theta`), `effect`, `name`, `scale = (; sigma, rho, share)` (`sigma` and `rho`
+each `(; coordinate, lower, upper)`; `rho.coordinate == 0` for `:icar`) and
+`location = (; intercept, phi, log_inv_scale)`.
+
+A `cdar` cell (`family = :cdar`, one per group × step innovation, group
+fastest) has `cell`, `family`, `block`, `binding`, `margin`, `level` (`nothing`),
+`level_index` (the group), `term` (the innovation's position), `effect`,
+`name`, `scale = (; sigma, rho, cdiag, step)` and `location = (;)`.
+
+`blocks[b]` of a random-effect block: `block`, `family` (`:ranef`), `binding`,
+`group`, `id`, `by`, `levels`, `n_terms`,
 `n_levels`, `margins` (per term), `target` (the compiled frame's control: 0 for
 a block emitted non-centred, every RKBRMI block; 1 for an SBBRMI block in
 `centered_groups`), `log_scales[k]` (term `k`'s log scale as atoms `(; constant,
@@ -198,6 +270,9 @@ linear, unit, simplex, bounded)`; an ordinary block's is the single linear atom
 coordinates of Stan's `cholesky_factor_corr` free values, or the constant
 canonical partial correlations of a known correlation; both empty for one term)
 and `mixing` (per level, the coordinate of a Student-t level's `log w`, or empty).
+A `car` block: `block`, `family` (`:car`), `binding` (the predictor), `term`,
+`type` (`:icar` or `:bym2`), `areas`, `target` (0). A `cdar` block: `block`,
+`family` (`:cdar`), `binding`, `term`, `n_groups`, `n_steps`, `target` (0).
 
 # The map
 
@@ -208,7 +283,12 @@ term `k`, level `g`, control `c`, target `t`):
 - `log τ_i = constant + Σ weight * x[coordinate]` (linear atoms)
   `+ Σ (log_weight * log σ(x[i]) + log1m_weight * log(1 - σ(x[i])))` (unit;
   `σ` the logistic) `+ Σ weight * log(simplex_constrain(x[coordinates])[entry])`
-  (Stan's simplex transform) `+ Σ weight * log(lower + (upper - lower) * σ(x[i]))`
+  (simplex; `transform` names the simplex transform: `:stan`, Stan's isometric
+  log-ratio and softmax, for an SBBRMI; `:stick_breaking`, ReactiveKernelsPPL's,
+  for an RKBRMI's R2D2 shares, whose `N` coordinates `u` give break fractions
+  `z_i = σ(u_i + log(N + 1 - i))`, entry `j ≤ N` the value
+  `z_j * Π_{i<j} (1 - z_i)` and entry `N + 1` the remaining stick)
+  `+ Σ weight * log(lower + (upper - lower) * σ(x[i]))`
   (bounded; `log(exp(x[i]) + lower)` when `upper` is infinite);
 - `L` is Stan's `cholesky_factor_corr` of the canonical partial correlations
   `tanh(x[free[j]])` (or `cpc[j]`), row `i` holding `j = (i-1)(i-2)/2 + 1, …`;
@@ -222,21 +302,37 @@ term `k`, level `g`, control `c`, target `t`):
 - the compiled value `y = t * loc + (x[effect] - c * loc) * s^(t - c)`, and the
   log-Jacobian adds `(t - c) * log s`.
 
+A `car` or `cdar` cell is a scalar cell with target 0: with its location `loc`
+and scale `s`, `y = (x[effect] - c * loc) * s^(-c)` and the log-Jacobian adds
+`-c * log s`. Write `σ = constrain(x[sigma.coordinate])` and
+`ρ = constrain(x[rho.coordinate])`, where `constrain(v) = lower + exp(v)` for an
+infinite `upper` and `lower + (upper - lower) * σ(v)` otherwise:
+
+- `car`: `log s = log σ + share * log(1 - ρ) / 2`, and `loc` is
+  `x[intercept]` (0 when `intercept == 0`) plus, when `phi != 0`,
+  `σ * sqrt(ρ * exp(log_inv_scale)) * x[phi]`;
+- `cdar`: `loc = 0` and `log s = log σ + log(cdiag) / 2 + log(v) / 2` with the
+  walk's spread `v = (1 - ρ^(2 step)) / (1 - ρ^2)`, or `v = step` where
+  `1 - ρ^2 <= 1e-12`.
+
+These cells read only coordinates no cell rewrites.
+
 Where `s` leaves Float64's normal range BRM sums `log s` as `log τ_k`, the logs
 of the stick factors of row `k` and `log r_g`, which is finite wherever the
 coordinates are. `ranef_order = :learned` permutes, at restarting windows, the
 order of a correlated block's terms within a level; these rows describe the
 declared order, the default.
 
-An `SBBRMI` whose wrapper also adapts HSGP, `car`, `cdar`, exact-total or S2Z
-cells raises, naming them: their cells have their own scale and location forms
-and are not described here yet. Blocks the wrapper does not build raise as in
+An `SBBRMI` whose wrapper also adapts HSGP, exact-total or S2Z cells raises,
+naming them: their cells have their own scale and location forms and are not
+described here yet. Blocks the wrapper does not build raise as in
 [`adaptive_centering_blocks`](@ref).
 """
 function adaptive_centering_cells end
 
-adaptive_centering_cells(rk::RKBRMI, unc_names=_rk_layout_coordinate_names(rk)) =
-    _adaptive_centering_cells(rk, String.(unc_names))
+adaptive_centering_cells(rk::RKBRMI, unc_names=_rk_layout_coordinate_names(rk);
+                         fields=false) =
+    _adaptive_centering_cells(rk, String.(unc_names); fields)
 
 function adaptive_centering_cells(model, unc_names)
     names = String.(unc_names)
@@ -244,6 +340,6 @@ function adaptive_centering_cells(model, unc_names)
     isempty(other) || error(
         "adaptive_centering_cells: this model's adaptive centring also adapts ",
         join(other, ", "), ", whose cells are not described by these rows yet; ",
-        "only random-effect cells are.")
+        "random-effect, car and cdar cells are.")
     _adaptive_centering_cells(model, names)
 end

@@ -29,9 +29,12 @@
 # `_sb_julia_stan_call` table.
 
 # The value `head` names in `scope`, or `nothing` when nothing binds it there.
+# A name BRM exports that `scope` does not bind, because it only `import`s BRM
+# or because two packages it `using`s export the name, is BRM's binding, as in
+# a formula (`_brm_scoped_name`).
 _sb_cell_binding(scope, head) = nothing
 _sb_cell_binding(scope::Module, head::Symbol) =
-    isdefined(scope, head) ? getfield(scope, head) : nothing
+    isdefined(scope, head) ? getfield(scope, head) : _brm_export_binding(head)
 _sb_cell_binding(scope, head::GlobalRef) =
     isdefined(head.mod, head.name) ? getfield(head.mod, head.name) : nothing
 function _sb_cell_binding(scope::Module, head::Expr)

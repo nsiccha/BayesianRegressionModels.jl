@@ -370,6 +370,55 @@ end
               brm_columns(brm_descriptor(observed, cell_data; mod=@__MODULE__))
     end
 
+    # A `~` on a bare cell name declares a cell latent, a local of the cell
+    # like its `=` names: no column, whether its own cell reads it, a ragged
+    # cell sums it, it has a given total, or nothing reads it (snag
+    # brm-columns-buil-80d22ab1).
+    latent_data = (; y=[0.1, 0.5, -0.2], mu0=zeros(3), one=1.0)
+    ragged_data = (; g=[1, 2, 3], row_g=[1, 1, 2, 3, 3, 3],
+        y=[0.1, -0.2, 0.3, 0.5, -0.1, 0.2], zero_i=[zeros(2), zeros(1), zeros(3)])
+    shares_data = (; mu=[[10.0, 20.0, 5.0], [7.0, 3.0], [4.0]], obs=[[1, 2], [1], [1]],
+        y=[[11.0, 19.0], [6.5], [4.2]], total=[36.0, 10.5, 4.1])
+    latent_cases = [
+        "read by its cell" => ((:mu0, :one, :y), latent_data, @brm begin
+            sigma ~ Exponential(1)
+            @plate for i in eachindex(y)
+                z ~ Normal(mu0[i], one)
+                y[i] ~ Normal(z, sigma)
+            end
+        end),
+        "summed by a ragged cell" => ((:g, :row_g, :y, :zero_i), ragged_data, @brm begin
+            mu ~ 1 + (1 | g)
+            sigma ~ Exponential(1)
+            rows = groups(row_g => g)
+            @plate for i in eachindex(mu)
+                z ~ Normal(zero_i[i], 1)
+                y[rows[i]] ~ Normal(mu[i] .+ sum(z), sigma)
+            end
+        end),
+        "with a given total" => ((:mu, :obs, :total, :y), shares_data, @brm begin
+            sigma ~ Exponential(1.0)
+            @plate for i in eachindex(total)
+                T::shares(total[i]) ~ LogNormal(log.(mu[i]), 0.5)
+                y[i] ~ Normal(T[obs[i]], sigma)
+            end
+        end),
+        "read by nothing" => ((:mu0, :y), latent_data, @brm begin
+            sigma ~ Exponential(1)
+            @plate for i in eachindex(y)
+                w ~ Normal(0, 1)
+                y[i] ~ Normal(mu0[i], sigma)
+            end
+        end),
+    ]
+    for (label, (columns, data, builder)) in latent_cases
+        @testset "cell latent $label" begin
+            @test brm_columns(builder) == columns
+            @test brm_columns(builder) ==
+                  brm_columns(brm_descriptor(builder, data; mod=@__MODULE__))
+        end
+    end
+
     # Fragments compose into one builder exactly as one block written in the
     # fragments' order; the grouping and the cell may sit in different fragments.
     predictor = @brm begin mu ~ 1 + x end

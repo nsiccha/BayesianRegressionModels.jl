@@ -12,7 +12,7 @@ as the floor, for example `[compat] BayesianRegressionModels = "0.2.2"`. An
 environment that pins an older BRM commit is then refused when it resolves
 instead of failing at run time.
 
-## 0.2.313
+## 0.2.317
 
 - `coarsened(Ordinal(...); upper)`: coarsened ordinal evidence, a row that
   says only that the category lies in an inclusive range of the response's
@@ -43,6 +43,68 @@ instead of failing at run time.
   `normal_lccdf` is `-inf` beyond about 8.25 standard deviations, which also
   made a cumulative probit top category and a stopping-ratio probit stage
   `-Inf` there.
+
+## 0.2.316
+
+- `adaptive_centering_problem(rk::RKBRMI, problem, backend; fields=true)` also
+  adapts the cells of areal `car` fields and `cdar` walks, as the SBBRMI wrapper
+  does: a BYM2 area's `theta` centred on the area's total, an ICAR area's `phi`,
+  and each walk innovation at its marginal spread. They come after the
+  random-effect cells, `car` then `cdar`. `fields` defaults to `false`, so they
+  still pass through by default. On data-rich synthetic fields (a 6 x 6 BYM2
+  grid, a 6-group 20-step walk) adapting them mixed worse than the plain RK
+  density in 5 of 6 seeds each (`research/adaptive_centering/rk_families.jl`).
+  A model with nothing else to adapt raises and names `fields = true`.
+- `adaptive_centering_cells` describes `car` and `cdar` cells
+  (`family = :car` / `:cdar`, each with its `scale` and `location` inputs), on
+  an SBBRMI always and on an RKBRMI under `fields = true`. An SBBRMI with such
+  cells no longer raises there. Every block row now names its `family`.
+
+## 0.2.315
+
+- `brm_columns(builder::BRMBuilder)` no longer lists a `@plate` cell latent,
+  `z ~ Law(…)` or `T::shares(total) ~ …` on a bare cell name, as a data
+  column. A cell latent is a local of its cell, like the cell's `=` names, so
+  the builder's inventory now equals `brm_columns(brm_descriptor(builder, df))`
+  for such models, and a consumer that reads exactly the builder's columns from
+  its data (BayesianRegressionReports' `run_data`) no longer asks for a column
+  the model never reads (snag `brm-columns-buil-80d22ab1`). Building and the
+  emitted programs are unchanged.
+
+## 0.2.314
+
+- A name BRM exports means BRM's binding inside a `@brm` block, or a
+  `brm(source; mod)` source, when the block's module has no binding for it:
+  a formula call head (`Ordinal(Cumulative(), ProbitLink(), eta)`) and a name
+  a `@plate` cell reads. Julia gives a module no binding for a name that two
+  packages it `using`s both export. `ReactiveKernelsPPL` exports `LogitLink`,
+  `ProbitLink` and `CloglogLink` (values of its `LinkFunction` enum), and
+  GLM.jl exports link types of the same names, so with brm-use's RK setup,
+  `using BayesianRegressionModels, ReactiveKernels, ReactiveKernelsPPL`, an
+  ordinal model failed with `UndefVarError: ProbitLink not defined`, or for an
+  in-cell observation `RK backend: ProbitLink names nothing in module Main`
+  (snag `brm-ordinal-link-ca8cd39c`). The same holds in a module that only
+  `import`s BRM. A local of the block or a global of the module still takes
+  precedence, and a name BRM does not export stays undefined. Plain Julia
+  outside a block (`Ordinal(Cumulative(), ProbitLink(), eta, cuts)`) resolves
+  as Julia does, so a name two loaded packages export is undefined there
+  (ReactiveKernels snag `rkppl-exports-lo-be4414db` tracks RKPPL's export).
+
+## 0.2.313
+
+- `adaptive_centering_problem(rk::RKBRMI, problem, backend)` and
+  `adaptive_centering_blocks(rk)` cover two more block families (todo
+  `0nsdowt`); both passed through unadapted before:
+  - multi-membership blocks (`(1 | mm(a, b))`, slopes included): one cell per
+    joint level of the member columns, centred on 0 as on SBBRMI;
+  - R2D2-scaled blocks (`sd(...) ~ r2d2(...)`): an `R2D2AdaptiveCenteringBlock`
+    whose margin `k` has log scale `log(reference) + (log R2 - log(1 - R2)) / 2 +
+    log(phi[j]) / 2`, read from RK's `R2`, its shares and the reference (a
+    constant, a data scalar or a sampled positive scale); a margin outside a
+    partial ICC statement reads its own sampled scale.
+- `adaptive_centering_cells` describes those blocks too. A simplex scale atom
+  now names its transform: `transform = :stan` (an SBBRMI's R2D2 shares, as
+  before) or `:stick_breaking` (an RKBRMI's, ReactiveKernelsPPL's simplex).
 
 ## 0.2.312
 

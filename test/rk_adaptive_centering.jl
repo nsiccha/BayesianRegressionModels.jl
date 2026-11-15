@@ -266,7 +266,7 @@ end
     end
 end
 
-@stestset "a cdar walk beside the block passes through" begin
+@stestset "a cdar walk beside the block: passes through, or cells after the block's under fields" begin
     df = panel(; G=6, n=10, seed=9)
     data = merge(df, (; step=repeat(1:10, 6), I_g=Matrix(1.0I, 6, 6)))
     brmi = @brm data begin
@@ -279,15 +279,135 @@ end
     names = layout_names(rk)
     blocks = adaptive_centering_blocks(rk)
     @test length(blocks) == 2
-    @test any(n -> occursin(".eta.", n), names)
-    margins = BRM._rk_adaptive_margins(rk)
     locations = BRM._adaptive_ranef_locations(rk, blocks, names)
     problem = rk_logdensity_problem(rk; ad_backend=AD)
     loc(x, y, b, k, g) = x[only(locations[b].coefficient)]
+    # By default the walk passes through: every walk coordinate is outside the
+    # rewritten set.
     controls = rand(Xoshiro(10), 12)
     adaptive = adaptive_centering_problem(rk, problem, AD; centeredness=controls)
-    # Every walk coordinate is outside the rewritten set and passes through.
+    @test all(r -> r.family === :ranef, adaptive_centering_controls(adaptive, rk))
     check_exact(rk, adaptive, blocks, controls, loc)
+    # `fields = true`: the walk's innovations are cells after the block's.
+    adaptive = adaptive_centering_problem(rk, problem, AD; fields=true)
+    rows = adaptive_centering_controls(adaptive, rk)
+    @test [r.family for r in rows] == vcat(fill(:ranef, 12), fill(:cdar, 60))
+    @test all(r -> occursin(".eta.", r.name), rows[13:end])
+    # With the walk's cells at the compiled frame (`c = 0`), the block's cells
+    # map exactly as without the walk; the walk's own map is checked below.
+    controls = vcat(rand(Xoshiro(10), 12), zeros(60))
+    check_exact(rk, adaptive_centering_problem(rk, problem, AD; centeredness=controls,
+                                               fields=true), blocks, controls, loc)
+end
+
+# The scalar cells of `car` fields and `cdar` walks (`fields = true`), against an independent map
+# from RK's own constrained values: each cell `y = (x - c * loc) * s^(-c)`, the
+# log-Jacobian `-c * log s`. `cells` holds `(effect, loc, log_s)` functions of
+# the source point, in the wrapper's order.
+function scalar_oracle(x, cells, controls)
+    y, ljac = copy(x), zero(eltype(x))
+    for ((effect, loc, log_s), c) in zip(cells, controls)
+        y[effect] = (x[effect] - c * loc(x)) * exp(-c * log_s(x))
+        ljac -= c * log_s(x)
+    end
+    ljac, y
+end
+
+function check_scalar_cells(rk, cells; seeds=(31, 32))
+    problem = rk_logdensity_problem(rk; ad_backend=AD)
+    n, d = length(cells), length(layout_names(rk))
+    for seed in seeds
+        controls = rand(Xoshiro(seed), n)
+        adaptive = adaptive_centering_problem(rk, problem, AD; centeredness=controls,
+                                              fields=true)
+        @test length(adaptive_centering_controls(adaptive, rk)) == n
+        x = 0.3 .* randn(Xoshiro(seed + 100), d)
+        ljac, y = WarmupHMC.reparametrizer(adaptive)(copy(x))
+        oljac, oy = scalar_oracle(x, cells, controls)
+        @test y ≈ oy rtol=1e-12 atol=1e-12
+        @test ljac ≈ oljac rtol=1e-12 atol=1e-12
+        wrapped(v) = (r = scalar_oracle(v, cells, controls);
+                      r[1] + LogDensityProblems.logdensity(problem, r[2]))
+        value, gradient = LogDensityProblems.logdensity_and_gradient(adaptive, x)
+        @test value ≈ wrapped(x) rtol=1e-10
+        fd = map(1:d) do j
+            p, m = copy(x), copy(x)
+            p[j] += 1e-6; m[j] -= 1e-6
+            (wrapped(p) - wrapped(m)) / 2e-6
+        end
+        @test gradient ≈ fd rtol=1e-5 atol=1e-5
+    end
+end
+
+# Areas "a".."h": component {a, b, c, d, h}, component {e, f}, the island "g"
+# (with rows) and "h" (no rows).
+const CAR_EDGES = (["a", "b", "c", "a", "d", "e"], ["b", "c", "d", "c", "h", "f"])
+car_data() = (; area=["a", "b", "c", "d", "e", "f", "g", "a", "e"],
+    y=[0.3, -0.2, 0.5, 1.1, -0.7, 0.0, 0.4, -0.1, 0.9],
+    from=CAR_EDGES[1], to=CAR_EDGES[2])
+
+@stestset "car fields: BYM2 theta cells on the area total, ICAR phi cells" begin
+    data = car_data()
+    for type in (:bym2, :icar)
+        brmi = type === :bym2 ? (@brm data begin
+            mu ~ 1 + car(area; edges=(from, to), type=:bym2)
+            y ~ Normal(mu, 1.0)
+        end) : (@brm data begin
+            mu ~ 1 + car(area; edges=(from, to), type=:icar)
+            y ~ Normal(mu, 1.0)
+        end)
+        rk = RKBRMI(brmi)
+        names = layout_names(rk)
+        record = only(r for r in BRM._rk_coordinate_records(rk.plan) if r.kind === :car)
+        term = only(t for p in rk.plan.predictors for t in p.terms if t.kind === :car)
+        decl = String(record.declaration)
+        S = term.options.n_struct
+        struct_pos = rk.plan.columns[term.options.struct_pos]
+        inv_scale = rk.plan.columns[term.options.inv_scale]
+        field(x) = getproperty(BRM._rk_constrained_values(rk, x), record.declaration)
+        intercept = position(names, "mu_Intercept")
+        cells = if type === :bym2
+            # Area k (sorted labels): theta, scale sigma * sqrt(1 - rho) (sigma for
+            # an island), centred on the intercept plus its spatial component.
+            map(eachindex(struct_pos)) do k
+                j = struct_pos[k] <= S ? struct_pos[k] : 0
+                effect = position(names, "$decl.theta.$k")
+                loc(x) = x[intercept] + (j == 0 ? 0.0 :
+                    field(x).sigma * sqrt(field(x).rho * inv_scale[k]) *
+                    x[position(names, "$decl.phi.$j")])
+                log_s(x) = log(field(x).sigma) + (j == 0 ? 0.0 : log1p(-field(x).rho) / 2)
+                (effect, loc, log_s)
+            end
+        else
+            [(position(names, "$decl.phi.$j"), x -> 0.0, x -> log(field(x).sigma))
+             for j in 1:S]
+        end
+        @test length(cells) == (type === :bym2 ? 8 : 7)
+        check_scalar_cells(rk, cells)
+        # Without `fields`, a model with only a field has nothing to adapt.
+        @test_throws r"no random-effect block" adaptive_centering_problem(rk,
+            rk_logdensity_problem(rk; ad_backend=AD), AD)
+    end
+end
+
+@stestset "a cdar walk alone: innovation scales are the walk's marginal spread" begin
+    data = (; week=repeat(1:5, 4), patch=repeat(["p", "q", "r", "s"], inner=5),
+              y=sin.(1:20) ./ 2, C=[1.0 0.3 0.0 0.0; 0.3 1.0 0.2 0.0;
+                                    0.0 0.2 1.0 0.1; 0.0 0.0 0.1 1.0])
+    rk = RKBRMI(@brm data begin
+        mu ~ 1 + cdar(week; by=patch, cor=C)
+        y ~ Normal(mu, 1.0)
+    end)
+    names = layout_names(rk)
+    record = only(r for r in BRM._rk_coordinate_records(rk.plan) if r.kind === :cdar)
+    decl = String(record.declaration)
+    walk(x) = getproperty(BRM._rk_constrained_values(rk, x), record.declaration)
+    Cdiag = diag(record.cor_factor * record.cor_factor')
+    cells = [(position(names, "$decl.eta.$p.$w"), x -> 0.0,
+              x -> (r = walk(x).rho; log(walk(x).sigma) + log(Cdiag[p]) / 2 +
+                    log((1 - r^(2w)) / (1 - r^2)) / 2))
+             for w in 1:5 for p in 1:4]
+    check_scalar_cells(rk, cells)
 end
 
 # A block scale whose log lies below the normal range of `exp`, as Pathfinder's
@@ -572,6 +692,112 @@ end
         check_exact(rk, adaptive, [b], controls, loc)
         rows = adaptive_centering_controls(adaptive, rk)
         @test all(r -> occursin(names[intercept], r.location), rows)
+    end
+end
+
+@stestset "multi-membership blocks: one cell per joint level, centred on 0" begin
+    df = panel(; seed=25)
+    # A second membership column over the same levels, shifted by one group.
+    # RK's multi-membership groupings read plain (not categorical) columns.
+    shift(v) = "g" * lpad(mod1(parse(Int, String(v)[2:end]) + 1, 12), 2, '0')
+    data = merge(df, (; g=String.(string.(df.g)), h=shift.(string.(df.g)),
+                        x=0.5 .* df.t))
+    for K in (1, 2)
+        brmi = K == 1 ? (@brm data begin
+                mu ~ 1 + t + (1 | mm(g, h))
+                effect(mu, Intercept) ~ Normal(100, 50)
+                y ~ Normal(mu, se)
+            end) : (@brm data begin
+                mu ~ 1 + t + x + (1 + x | mm(g, h))
+                effect(mu, Intercept) ~ Normal(100, 50)
+                y ~ Normal(mu, se)
+            end)
+        rk = RKBRMI(brmi)
+        names = layout_names(rk)
+        b = only(adaptive_centering_blocks(rk))
+        @test b isa AdaptiveCenteringBlock && b.ranef.n_terms == K
+        @test b.ranef.group == (:g, :h) && b.ranef.n_groups == 12
+        draws = String(b.ranef.binding)
+        @test [names[b.effects[k, 5]] for k in 1:K] == ["$draws.z.5.$k" for k in 1:K]
+        # No record of an mm block reaches the other inventory readers.
+        @test !any(r -> r.kind === :mm_ranef, BRM._rk_coordinate_records(rk.plan))
+        locations = BRM._adaptive_ranef_locations(rk, [b], names)
+        @test all(iszero, locations[b].coefficient)
+        problem = rk_logdensity_problem(rk; ad_backend=AD)
+        loc(x, y, b, k, g) = 0.0
+        controls = rand(Xoshiro(26 + K), 12K)
+        check_exact(rk, adaptive_centering_problem(rk, problem, AD; centeredness=controls),
+                    [b], controls, loc; factor=constrained_factor(rk))
+    end
+end
+
+# The level factor of an R2D2-scaled block from RK's constrained values of the
+# budget it reads: margin `k`'s scale `reference * sqrt(phi[entry] * R2 / (1 -
+# R2))`, or its own sampled scale, with the names its record gives.
+function r2d2_factor(rk)
+    record = only(r for r in BRM._rk_coordinate_records(rk.plan; adaptive=true)
+                  if r.kind === :r2d2_ranef)
+    function factor(x, b, g)
+        cv = BRM._rk_constrained_values(rk, x)
+        value(name) = getproperty(cv, name)
+        tau = map(record.r2d2) do spec
+            haskey(spec, :free) && return value(spec.free)
+            ref = spec.reference isa Real ? spec.reference : value(spec.reference)
+            r2 = value(spec.r2)
+            ref * sqrt(value(spec.phi)[spec.entry] * r2 / (1 - r2))
+        end
+        K = b.ranef.n_terms
+        L = K == 1 ? ones(1, 1) : getproperty(cv, b.ranef.binding).L
+        Diagonal(collect(tau)) * L
+    end
+end
+
+@stestset "R2D2-scaled blocks: the scale is derived from R2, the shares and the reference" begin
+    df = panel(; seed=27)
+    data = merge(df, (; x=0.5 .* df.t))
+    sampled = @brm data begin
+        sigma ~ Exponential(1.0)
+        mu ~ 1 + x + (1 + x | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(:, g) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1, reference_scale=sigma)
+        y ~ Normal(mu, se)
+    end
+    constant = @brm data begin
+        mu ~ 1 + x + (1 + x | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(:, g) ~ r2d2(mean_R2=0.5, prec_R2=2, concentration=1, reference_scale=30.0)
+        y ~ Normal(mu, se)
+    end
+    # A partial ICC statement: the slope margin samples its own scale.
+    partial = @brm data begin
+        sigma ~ Exponential(1.0)
+        mu ~ 1 + x + (1 + x | g)
+        effect(mu, Intercept) ~ Normal(100, 50)
+        sd(mu, g, Intercept) ~ r2d2(reference_scale=sigma)
+        y ~ Normal(mu, se)
+    end
+    for (label, brmi) in (("sampled reference", sampled), ("constant reference", constant),
+                          ("partial ICC", partial))
+        rk = RKBRMI(brmi)
+        names = layout_names(rk)
+        b = only(adaptive_centering_blocks(rk))
+        @test b isa R2D2AdaptiveCenteringBlock && b.ranef.n_terms == 2
+        @test b.ranef.family in BRM._ADAPTIVE_R2D2_FAMILIES
+        @test !any(r -> r.kind === :r2d2_ranef, BRM._rk_coordinate_records(rk.plan))
+        # Every R2D2 margin reads one stick-breaking share.
+        @test all(s -> all(a -> a.stick, s.simplex), b.scales)
+        locations = BRM._adaptive_ranef_locations(rk, [b], names)
+        problem = rk_logdensity_problem(rk; ad_backend=AD)
+        loc(x, y, b, k, g) = locations[b].coefficient[k] == 0 ? 0.0 :
+            x[locations[b].coefficient[k]]
+        for controls in (ones(24), rand(Xoshiro(28), 24))
+            adaptive = adaptive_centering_problem(rk, problem, AD; centeredness=controls)
+            check_exact(rk, adaptive, [b], controls, loc; factor=r2d2_factor(rk))
+        end
+        # `:midpoint` leaves R2D2 cells at the compiled frame, as on SBBRMI.
+        rows = adaptive_centering_controls(
+            adaptive_centering_problem(rk, problem, AD; centeredness=:midpoint), rk)
+        @test all(r -> r.c == 0.0, rows)
     end
 end
 
